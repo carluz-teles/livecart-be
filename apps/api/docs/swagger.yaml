@@ -1,0 +1,433 @@
+basePath: /
+definitions:
+  apps_api_internal_product.CreateProductRequest:
+    properties:
+      external_id:
+        type: string
+      external_source:
+        enum:
+        - bling
+        - tiny
+        - shopify
+        - manual
+        type: string
+      image_url:
+        type: string
+      keyword:
+        type: string
+      name:
+        maxLength: 200
+        minLength: 1
+        type: string
+      price:
+        type: string
+      sizes:
+        items:
+          type: string
+        type: array
+      stock:
+        minimum: 0
+        type: integer
+    required:
+    - external_source
+    - name
+    type: object
+  apps_api_internal_product.CreateProductResponse:
+    properties:
+      created_at:
+        type: string
+      id:
+        type: string
+      keyword:
+        type: string
+      name:
+        type: string
+    type: object
+  apps_api_internal_product.ProductResponse:
+    properties:
+      active:
+        type: boolean
+      created_at:
+        type: string
+      external_id:
+        type: string
+      external_source:
+        type: string
+      id:
+        type: string
+      image_url:
+        type: string
+      keyword:
+        type: string
+      name:
+        type: string
+      price:
+        type: string
+      sizes:
+        items:
+          type: string
+        type: array
+      stock:
+        type: integer
+      updated_at:
+        type: string
+    type: object
+  apps_api_internal_product.UpdateProductRequest:
+    properties:
+      active:
+        type: boolean
+      image_url:
+        type: string
+      name:
+        maxLength: 200
+        minLength: 1
+        type: string
+      price:
+        type: string
+      sizes:
+        items:
+          type: string
+        type: array
+      stock:
+        minimum: 0
+        type: integer
+    required:
+    - name
+    type: object
+  apps_api_internal_store.CreateStoreRequest:
+    properties:
+      name:
+        maxLength: 100
+        minLength: 2
+        type: string
+      slug:
+        maxLength: 50
+        minLength: 2
+        type: string
+    required:
+    - name
+    - slug
+    type: object
+  apps_api_internal_store.CreateStoreResponse:
+    properties:
+      created_at:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      slug:
+        type: string
+    type: object
+  apps_api_internal_store.StoreResponse:
+    properties:
+      active:
+        type: boolean
+      created_at:
+        type: string
+      email_address:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      slug:
+        type: string
+      sms_number:
+        type: string
+      whatsapp_number:
+        type: string
+    type: object
+  apps_api_internal_store.UpdateStoreRequest:
+    properties:
+      email_address:
+        type: string
+      name:
+        maxLength: 100
+        minLength: 2
+        type: string
+      sms_number:
+        type: string
+      whatsapp_number:
+        type: string
+    required:
+    - name
+    type: object
+  livecart_apps_api_lib_httpx.Envelope:
+    properties:
+      data: {}
+      error:
+        type: string
+    type: object
+  livecart_apps_api_lib_httpx.ValidationEnvelope:
+    properties:
+      error:
+        type: string
+      fields:
+        additionalProperties:
+          type: string
+        type: object
+    type: object
+host: localhost:3001
+info:
+  contact:
+    email: support@livecart.com
+    name: LiveCart Support
+  description: API REST for LiveCart SaaS — live commerce order detection, cart consolidation,
+    and integrations.
+  license:
+    name: Proprietary
+  termsOfService: https://livecart.com/terms
+  title: LiveCart API
+  version: "1.0"
+paths:
+  /api/v1/products:
+    get:
+      description: Returns all products for the current store
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/apps_api_internal_product.ProductResponse'
+                  type: array
+              type: object
+      security:
+      - BearerAuth: []
+      summary: List products
+      tags:
+      - products
+    post:
+      consumes:
+      - application/json
+      description: Creates a product for the current store. Keyword is auto-generated
+        if not provided.
+      parameters:
+      - description: Product creation payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/apps_api_internal_product.CreateProductRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_product.CreateProductResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Create a new product
+      tags:
+      - products
+  /api/v1/products/{id}:
+    get:
+      description: Returns a single product by its UUID
+      parameters:
+      - description: Product UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_product.ProductResponse'
+              type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+      security:
+      - BearerAuth: []
+      summary: Get product by ID
+      tags:
+      - products
+    put:
+      consumes:
+      - application/json
+      description: Updates an existing product by its UUID
+      parameters:
+      - description: Product UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Product update payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/apps_api_internal_product.UpdateProductRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_product.ProductResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Update a product
+      tags:
+      - products
+  /api/v1/stores:
+    post:
+      consumes:
+      - application/json
+      description: Creates a new store with the given name and slug
+      parameters:
+      - description: Store creation payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/apps_api_internal_store.CreateStoreRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_store.CreateStoreResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Create a new store
+      tags:
+      - stores
+  /api/v1/stores/me:
+    get:
+      description: Returns the store associated with the authenticated user
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_store.StoreResponse'
+              type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+      security:
+      - BearerAuth: []
+      summary: Get current store
+      tags:
+      - stores
+    put:
+      consumes:
+      - application/json
+      description: Updates the store associated with the authenticated user
+      parameters:
+      - description: Store update payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/apps_api_internal_store.UpdateStoreRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_store.StoreResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Update current store
+      tags:
+      - stores
+securityDefinitions:
+  BearerAuth:
+    description: 'Enter your bearer token in the format: Bearer <token>'
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

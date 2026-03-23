@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS subscriptions;
+DROP TABLE IF EXISTS integration_logs;
+DROP TABLE IF EXISTS cart_items;
+DROP TABLE IF EXISTS detected_orders;
+DROP TABLE IF EXISTS carts;
+DROP TABLE IF EXISTS live_sessions;
+DROP TABLE IF EXISTS integrations;
+DROP TABLE IF EXISTS products;
+DROP TABLE IF EXISTS store_users;
+DROP TABLE IF EXISTS stores;
