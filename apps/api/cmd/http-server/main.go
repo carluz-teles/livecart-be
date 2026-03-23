@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"regexp"
 	"syscall"
 
 	"github.com/go-playground/validator/v10"
@@ -19,12 +20,19 @@ import (
 	_ "livecart/apps/api/docs"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/lib/clerk"
+	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/database"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
 
+	"livecart/apps/api/internal/customer"
+	"livecart/apps/api/internal/dashboard"
+	"livecart/apps/api/internal/live"
+	"livecart/apps/api/internal/order"
 	"livecart/apps/api/internal/product"
 	"livecart/apps/api/internal/store"
+	"livecart/apps/api/internal/user"
 )
 
 // @title           LiveCart API
@@ -45,6 +53,12 @@ import (
 // @name Authorization
 // @description Enter your bearer token in the format: Bearer <token>
 func main() {
+	// Load environment variables from .env file
+	if err := config.Load(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -55,13 +69,12 @@ func main() {
 	}
 	defer log.Sync()
 
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		log.Fatal("DATABASE_URL is required")
-	}
+	databaseURL := config.DatabaseURL.Required()
+	clerkFrontendAPI := config.ClerkFrontendAPI.Required()
+	port := config.Port.StringOr("3001")
 
 	// Run migrations in dev
-	if os.Getenv("APP_ENV") != "production" {
+	if !config.IsProduction() {
 		if err := database.RunMigrations(databaseURL, "apps/api/db/migrations"); err != nil {
 			log.Sugar().Fatalf("running migrations: %v", err)
 		}
@@ -76,13 +89,10 @@ func main() {
 
 	queries := sqlc.New(pool)
 	validate := validator.New()
+	registerCustomValidators(validate)
+	clerkClient := clerk.NewClient(clerkFrontendAPI)
 
-	app := newApp(log, pool, queries, validate)
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "3001"
-	}
+	app := newApp(log, pool, queries, validate, clerkClient)
 
 	go func() {
 		if err := app.Listen(":" + port); err != nil {
@@ -90,7 +100,7 @@ func main() {
 		}
 	}()
 
-	log.Sugar().Infof("server listening on :%s", port)
+	log.Sugar().Infof("server listening on :%s (env: %s)", port, config.Environment())
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -103,7 +113,17 @@ func main() {
 	}
 }
 
-func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate *validator.Validate) *fiber.App {
+// slugRegex matches valid URL slugs: lowercase letters, numbers, and hyphens
+// Cannot start or end with a hyphen
+var slugRegex = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+
+func registerCustomValidators(validate *validator.Validate) {
+	validate.RegisterValidation("slug", func(fl validator.FieldLevel) bool {
+		return slugRegex.MatchString(fl.Field().String())
+	})
+}
+
+func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate *validator.Validate, clerkClient *clerk.Client) *fiber.App {
 	app := fiber.New(fiber.Config{
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			return httpx.HandleServiceError(c, err)
@@ -122,21 +142,57 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		return c.JSON(fiber.Map{"status": "ok"})
 	})
 
-	// Protected routes
+	// User repository and service (shared between webhook and API handlers)
+	userRepo := user.NewRepository(queries)
+	userSvc := user.NewService(userRepo)
+
+	// Webhook routes (unauthenticated, use webhook signature)
+	webhookHandler := user.NewWebhookHandler(userSvc)
+	webhookHandler.RegisterRoutes(app)
+
+	// Protected routes (user-scoped)
 	api := app.Group("/api/v1")
-	api.Use(httpx.AuthMiddleware(os.Getenv("CLERK_SECRET_KEY")))
+	api.Use(httpx.AuthMiddleware(clerkClient))
 	api.Use(httpx.SubscriptionMiddleware())
 
-	// Register domain handlers
+	// User routes (not store-scoped)
+	userHandler := user.NewHandler(userSvc, validate)
+	userHandler.RegisterRoutes(api)
+
+	// Store routes (user's own store management)
 	storeRepo := store.NewRepository(queries)
 	storeSvc := store.NewService(storeRepo)
 	storeHandler := store.NewHandler(storeSvc, validate)
 	storeHandler.RegisterRoutes(api)
 
-	productRepo := product.NewRepository(queries)
+	// Store-scoped routes (require store access validation)
+	storeScoped := api.Group("/stores/:storeId")
+	storeScoped.Use(httpx.StoreAccessMiddleware(userRepo))
+
+	productRepo := product.NewRepository(queries, pool)
 	productSvc := product.NewService(productRepo)
 	productHandler := product.NewHandler(productSvc, validate)
-	productHandler.RegisterRoutes(api)
+	productHandler.RegisterRoutes(storeScoped)
+
+	liveRepo := live.NewRepository(queries, pool)
+	liveSvc := live.NewService(liveRepo)
+	liveHandler := live.NewHandler(liveSvc, validate)
+	liveHandler.RegisterRoutes(storeScoped)
+
+	orderRepo := order.NewRepository(pool)
+	orderSvc := order.NewService(orderRepo)
+	orderHandler := order.NewHandler(orderSvc, validate)
+	orderHandler.RegisterRoutes(storeScoped)
+
+	customerRepo := customer.NewRepository(pool)
+	customerSvc := customer.NewService(customerRepo)
+	customerHandler := customer.NewHandler(customerSvc, validate)
+	customerHandler.RegisterRoutes(storeScoped)
+
+	dashboardRepo := dashboard.NewRepository(pool)
+	dashboardSvc := dashboard.NewService(dashboardRepo)
+	dashboardHandler := dashboard.NewHandler(dashboardSvc)
+	dashboardHandler.RegisterRoutes(storeScoped)
 
 	return app
 }

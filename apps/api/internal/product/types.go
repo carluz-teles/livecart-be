@@ -1,17 +1,45 @@
 package product
 
-import "time"
+import (
+	"time"
 
-// Handler layer
+	"livecart/apps/api/lib/query"
+)
+
+// Handler layer - Filters
+type ProductFilters struct {
+	Status         []string `query:"status"`         // active, inactive
+	ExternalSource []string `query:"externalSource"` // manual, bling, tiny, shopify
+	PriceMin       *int64   `query:"priceMin"`       // min price in cents
+	PriceMax       *int64   `query:"priceMax"`       // max price in cents
+	StockMin       *int     `query:"stockMin"`       // min stock
+	StockMax       *int     `query:"stockMax"`       // max stock
+	HasLowStock    *bool    `query:"hasLowStock"`    // stock <= 5
+}
+
+// ListProductsRequest represents the query parameters for listing products
+type ListProductsRequest struct {
+	Search     string           `query:"search"`
+	Pagination query.Pagination `query:"pagination"`
+	Sorting    query.Sorting    `query:"sorting"`
+	Filters    ProductFilters   `query:"filters"`
+}
+
+// ListProductsResponse represents the paginated response for listing products
+type ListProductsResponse struct {
+	Data       []ProductResponse        `json:"data"`
+	Pagination query.PaginationResponse `json:"pagination"`
+}
+
+// Handler layer - Create/Update
 type CreateProductRequest struct {
-	Name           string   `json:"name" validate:"required,min=1,max=200"`
-	ExternalID     string   `json:"external_id"`
-	ExternalSource string   `json:"external_source" validate:"required,oneof=bling tiny shopify manual"`
-	Keyword        string   `json:"keyword"`
-	Price          string   `json:"price"`
-	ImageURL       string   `json:"image_url"`
-	Sizes          []string `json:"sizes"`
-	Stock          int      `json:"stock" validate:"min=0"`
+	Name           string `json:"name" validate:"required,min=1,max=200"`
+	ExternalID     string `json:"external_id"`
+	ExternalSource string `json:"external_source" validate:"required,oneof=bling tiny shopify manual"`
+	Keyword        string `json:"keyword"`
+	Price          int64  `json:"price"` // price in cents
+	ImageURL       string `json:"image_url"`
+	Stock          int    `json:"stock" validate:"min=0"`
 }
 
 type CreateProductResponse struct {
@@ -22,12 +50,11 @@ type CreateProductResponse struct {
 }
 
 type UpdateProductRequest struct {
-	Name     string   `json:"name" validate:"required,min=1,max=200"`
-	Price    string   `json:"price"`
-	ImageURL string   `json:"image_url"`
-	Sizes    []string `json:"sizes"`
-	Stock    int      `json:"stock" validate:"min=0"`
-	Active   bool     `json:"active"`
+	Name     string `json:"name" validate:"required,min=1,max=200"`
+	Price    int64  `json:"price"` // price in cents
+	ImageURL string `json:"image_url"`
+	Stock    int    `json:"stock" validate:"min=0"`
+	Active   bool   `json:"active"`
 }
 
 type ProductResponse struct {
@@ -36,9 +63,8 @@ type ProductResponse struct {
 	ExternalID     string    `json:"external_id"`
 	ExternalSource string    `json:"external_source"`
 	Keyword        string    `json:"keyword"`
-	Price          string    `json:"price"`
+	Price          int64     `json:"price"` // price in cents
 	ImageURL       string    `json:"image_url"`
-	Sizes          []string  `json:"sizes"`
 	Stock          int       `json:"stock"`
 	Active         bool      `json:"active"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -46,15 +72,28 @@ type ProductResponse struct {
 }
 
 // Service layer
+type ListProductsInput struct {
+	StoreID    string
+	Search     string
+	Pagination query.Pagination
+	Sorting    query.Sorting
+	Filters    ProductFilters
+}
+
+type ListProductsOutput struct {
+	Products   []ProductOutput
+	Total      int
+	Pagination query.Pagination
+}
+
 type CreateProductInput struct {
 	StoreID        string
 	Name           string
 	ExternalID     string
 	ExternalSource string
 	Keyword        string
-	Price          string
+	Price          int64 // price in cents
 	ImageURL       string
-	Sizes          []string
 	Stock          int
 }
 
@@ -69,9 +108,8 @@ type UpdateProductInput struct {
 	StoreID  string
 	ID       string
 	Name     string
-	Price    string
+	Price    int64 // price in cents
 	ImageURL string
-	Sizes    []string
 	Stock    int
 	Active   bool
 }
@@ -82,9 +120,8 @@ type ProductOutput struct {
 	ExternalID     string
 	ExternalSource string
 	Keyword        string
-	Price          string
+	Price          int64 // price in cents
 	ImageURL       string
-	Sizes          []string
 	Stock          int
 	Active         bool
 	CreatedAt      time.Time
@@ -92,15 +129,27 @@ type ProductOutput struct {
 }
 
 // Repository layer
+type ListProductsParams struct {
+	StoreID    string
+	Search     string
+	Pagination query.Pagination
+	Sorting    query.Sorting
+	Filters    ProductFilters
+}
+
+type ListProductsResult struct {
+	Products []ProductRow
+	Total    int
+}
+
 type CreateProductParams struct {
 	StoreID        string
 	Name           string
 	ExternalID     string
 	ExternalSource string
 	Keyword        string
-	Price          string
+	Price          int64 // price in cents
 	ImageURL       string
-	Sizes          []string
 	Stock          int
 }
 
@@ -108,9 +157,8 @@ type UpdateProductParams struct {
 	ID       string
 	StoreID  string
 	Name     string
-	Price    string
+	Price    int64 // price in cents
 	ImageURL string
-	Sizes    []string
 	Stock    int
 	Active   bool
 }
@@ -127,11 +175,25 @@ type ProductRow struct {
 	ExternalID     string
 	ExternalSource string
 	Keyword        string
-	Price          string
+	Price          int64 // price in cents
 	ImageURL       string
-	Sizes          []string
 	Stock          int
 	Active         bool
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+}
+
+// Stats types
+type ProductStatsResponse struct {
+	TotalProducts int   `json:"total_products"`
+	ActiveCount   int   `json:"active_count"`
+	LowStockCount int   `json:"low_stock_count"` // stock <= 5
+	StockValue    int64 `json:"stock_value"`     // sum of price * stock in cents
+}
+
+type ProductStatsOutput struct {
+	TotalProducts int
+	ActiveCount   int
+	LowStockCount int
+	StockValue    int64
 }

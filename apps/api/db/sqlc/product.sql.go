@@ -12,21 +12,20 @@ import (
 )
 
 const createProduct = `-- name: CreateProduct :one
-INSERT INTO products (store_id, name, external_id, external_source, keyword, price, image_url, sizes, stock)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, sizes, stock, active, created_at, updated_at
+INSERT INTO products (store_id, name, external_id, external_source, keyword, price, image_url, stock)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at
 `
 
 type CreateProductParams struct {
-	StoreID        pgtype.UUID    `json:"store_id"`
-	Name           string         `json:"name"`
-	ExternalID     pgtype.Text    `json:"external_id"`
-	ExternalSource string         `json:"external_source"`
-	Keyword        string         `json:"keyword"`
-	Price          pgtype.Numeric `json:"price"`
-	ImageUrl       pgtype.Text    `json:"image_url"`
-	Sizes          []string       `json:"sizes"`
-	Stock          pgtype.Int4    `json:"stock"`
+	StoreID        pgtype.UUID `json:"store_id"`
+	Name           string      `json:"name"`
+	ExternalID     pgtype.Text `json:"external_id"`
+	ExternalSource string      `json:"external_source"`
+	Keyword        string      `json:"keyword"`
+	Price          pgtype.Int8 `json:"price"`
+	ImageUrl       pgtype.Text `json:"image_url"`
+	Stock          pgtype.Int4 `json:"stock"`
 }
 
 func (q *Queries) CreateProduct(ctx context.Context, arg CreateProductParams) (Product, error) {
@@ -38,7 +37,6 @@ func (q *Queries) CreateProduct(ctx context.Context, arg CreateProductParams) (P
 		arg.Keyword,
 		arg.Price,
 		arg.ImageUrl,
-		arg.Sizes,
 		arg.Stock,
 	)
 	var i Product
@@ -51,7 +49,6 @@ func (q *Queries) CreateProduct(ctx context.Context, arg CreateProductParams) (P
 		&i.Keyword,
 		&i.Price,
 		&i.ImageUrl,
-		&i.Sizes,
 		&i.Stock,
 		&i.Active,
 		&i.CreatedAt,
@@ -74,7 +71,7 @@ func (q *Queries) GetMaxKeyword(ctx context.Context, storeID pgtype.UUID) (inter
 }
 
 const getProductByID = `-- name: GetProductByID :one
-SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, sizes, stock, active, created_at, updated_at FROM products WHERE id = $1 AND store_id = $2
+SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at FROM products WHERE id = $1 AND store_id = $2
 `
 
 type GetProductByIDParams struct {
@@ -94,7 +91,6 @@ func (q *Queries) GetProductByID(ctx context.Context, arg GetProductByIDParams) 
 		&i.Keyword,
 		&i.Price,
 		&i.ImageUrl,
-		&i.Sizes,
 		&i.Stock,
 		&i.Active,
 		&i.CreatedAt,
@@ -104,7 +100,7 @@ func (q *Queries) GetProductByID(ctx context.Context, arg GetProductByIDParams) 
 }
 
 const getProductByKeyword = `-- name: GetProductByKeyword :one
-SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, sizes, stock, active, created_at, updated_at FROM products WHERE store_id = $1 AND keyword = $2 AND active = true
+SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at FROM products WHERE store_id = $1 AND keyword = $2 AND active = true
 `
 
 type GetProductByKeywordParams struct {
@@ -124,7 +120,6 @@ func (q *Queries) GetProductByKeyword(ctx context.Context, arg GetProductByKeywo
 		&i.Keyword,
 		&i.Price,
 		&i.ImageUrl,
-		&i.Sizes,
 		&i.Stock,
 		&i.Active,
 		&i.CreatedAt,
@@ -134,7 +129,7 @@ func (q *Queries) GetProductByKeyword(ctx context.Context, arg GetProductByKeywo
 }
 
 const listProductsByStore = `-- name: ListProductsByStore :many
-SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, sizes, stock, active, created_at, updated_at FROM products WHERE store_id = $1 ORDER BY created_at DESC
+SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at FROM products WHERE store_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListProductsByStore(ctx context.Context, storeID pgtype.UUID) ([]Product, error) {
@@ -155,7 +150,6 @@ func (q *Queries) ListProductsByStore(ctx context.Context, storeID pgtype.UUID) 
 			&i.Keyword,
 			&i.Price,
 			&i.ImageUrl,
-			&i.Sizes,
 			&i.Stock,
 			&i.Active,
 			&i.CreatedAt,
@@ -173,20 +167,19 @@ func (q *Queries) ListProductsByStore(ctx context.Context, storeID pgtype.UUID) 
 
 const updateProduct = `-- name: UpdateProduct :one
 UPDATE products
-SET name = $3, price = $4, image_url = $5, sizes = $6, stock = $7, active = $8, updated_at = now()
+SET name = $3, price = $4, image_url = $5, stock = $6, active = $7, updated_at = now()
 WHERE id = $1 AND store_id = $2
-RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, sizes, stock, active, created_at, updated_at
+RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at
 `
 
 type UpdateProductParams struct {
-	ID       pgtype.UUID    `json:"id"`
-	StoreID  pgtype.UUID    `json:"store_id"`
-	Name     string         `json:"name"`
-	Price    pgtype.Numeric `json:"price"`
-	ImageUrl pgtype.Text    `json:"image_url"`
-	Sizes    []string       `json:"sizes"`
-	Stock    pgtype.Int4    `json:"stock"`
-	Active   pgtype.Bool    `json:"active"`
+	ID       pgtype.UUID `json:"id"`
+	StoreID  pgtype.UUID `json:"store_id"`
+	Name     string      `json:"name"`
+	Price    pgtype.Int8 `json:"price"`
+	ImageUrl pgtype.Text `json:"image_url"`
+	Stock    pgtype.Int4 `json:"stock"`
+	Active   pgtype.Bool `json:"active"`
 }
 
 func (q *Queries) UpdateProduct(ctx context.Context, arg UpdateProductParams) (Product, error) {
@@ -196,7 +189,6 @@ func (q *Queries) UpdateProduct(ctx context.Context, arg UpdateProductParams) (P
 		arg.Name,
 		arg.Price,
 		arg.ImageUrl,
-		arg.Sizes,
 		arg.Stock,
 		arg.Active,
 	)
@@ -210,7 +202,6 @@ func (q *Queries) UpdateProduct(ctx context.Context, arg UpdateProductParams) (P
 		&i.Keyword,
 		&i.Price,
 		&i.ImageUrl,
-		&i.Sizes,
 		&i.Stock,
 		&i.Active,
 		&i.CreatedAt,

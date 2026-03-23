@@ -29,19 +29,27 @@ func (q *Queries) CancelDetectedOrder(ctx context.Context, arg CancelDetectedOrd
 }
 
 const createLiveSession = `-- name: CreateLiveSession :one
-INSERT INTO live_sessions (store_id, platform, platform_live_id)
-VALUES ($1, $2, $3)
-RETURNING id, store_id, platform, platform_live_id, status, started_at, ended_at, total_comments, total_orders
+INSERT INTO live_sessions (store_id, title, platform, platform_live_id, status)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, store_id, platform, platform_live_id, status, started_at, ended_at, total_comments, total_orders, title, created_at, updated_at
 `
 
 type CreateLiveSessionParams struct {
 	StoreID        pgtype.UUID `json:"store_id"`
+	Title          pgtype.Text `json:"title"`
 	Platform       string      `json:"platform"`
 	PlatformLiveID string      `json:"platform_live_id"`
+	Status         string      `json:"status"`
 }
 
 func (q *Queries) CreateLiveSession(ctx context.Context, arg CreateLiveSessionParams) (LiveSession, error) {
-	row := q.db.QueryRow(ctx, createLiveSession, arg.StoreID, arg.Platform, arg.PlatformLiveID)
+	row := q.db.QueryRow(ctx, createLiveSession,
+		arg.StoreID,
+		arg.Title,
+		arg.Platform,
+		arg.PlatformLiveID,
+		arg.Status,
+	)
 	var i LiveSession
 	err := row.Scan(
 		&i.ID,
@@ -53,25 +61,27 @@ func (q *Queries) CreateLiveSession(ctx context.Context, arg CreateLiveSessionPa
 		&i.EndedAt,
 		&i.TotalComments,
 		&i.TotalOrders,
+		&i.Title,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
 
 const endLiveSession = `-- name: EndLiveSession :one
 UPDATE live_sessions
-SET status = 'ended', ended_at = now(), total_comments = $2, total_orders = $3
-WHERE id = $1
-RETURNING id, store_id, platform, platform_live_id, status, started_at, ended_at, total_comments, total_orders
+SET status = 'ended', ended_at = now(), updated_at = now()
+WHERE id = $1 AND store_id = $2
+RETURNING id, store_id, platform, platform_live_id, status, started_at, ended_at, total_comments, total_orders, title, created_at, updated_at
 `
 
 type EndLiveSessionParams struct {
-	ID            pgtype.UUID `json:"id"`
-	TotalComments pgtype.Int4 `json:"total_comments"`
-	TotalOrders   pgtype.Int4 `json:"total_orders"`
+	ID      pgtype.UUID `json:"id"`
+	StoreID pgtype.UUID `json:"store_id"`
 }
 
 func (q *Queries) EndLiveSession(ctx context.Context, arg EndLiveSessionParams) (LiveSession, error) {
-	row := q.db.QueryRow(ctx, endLiveSession, arg.ID, arg.TotalComments, arg.TotalOrders)
+	row := q.db.QueryRow(ctx, endLiveSession, arg.ID, arg.StoreID)
 	var i LiveSession
 	err := row.Scan(
 		&i.ID,
@@ -83,12 +93,15 @@ func (q *Queries) EndLiveSession(ctx context.Context, arg EndLiveSessionParams) 
 		&i.EndedAt,
 		&i.TotalComments,
 		&i.TotalOrders,
+		&i.Title,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
 
 const getActiveLiveSession = `-- name: GetActiveLiveSession :one
-SELECT id, store_id, platform, platform_live_id, status, started_at, ended_at, total_comments, total_orders FROM live_sessions
+SELECT id, store_id, platform, platform_live_id, status, started_at, ended_at, total_comments, total_orders, title, created_at, updated_at FROM live_sessions
 WHERE store_id = $1 AND platform_live_id = $2 AND status = 'active'
 `
 
@@ -110,16 +123,24 @@ func (q *Queries) GetActiveLiveSession(ctx context.Context, arg GetActiveLiveSes
 		&i.EndedAt,
 		&i.TotalComments,
 		&i.TotalOrders,
+		&i.Title,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
 
 const getLiveSessionByID = `-- name: GetLiveSessionByID :one
-SELECT id, store_id, platform, platform_live_id, status, started_at, ended_at, total_comments, total_orders FROM live_sessions WHERE id = $1
+SELECT id, store_id, platform, platform_live_id, status, started_at, ended_at, total_comments, total_orders, title, created_at, updated_at FROM live_sessions WHERE id = $1 AND store_id = $2
 `
 
-func (q *Queries) GetLiveSessionByID(ctx context.Context, id pgtype.UUID) (LiveSession, error) {
-	row := q.db.QueryRow(ctx, getLiveSessionByID, id)
+type GetLiveSessionByIDParams struct {
+	ID      pgtype.UUID `json:"id"`
+	StoreID pgtype.UUID `json:"store_id"`
+}
+
+func (q *Queries) GetLiveSessionByID(ctx context.Context, arg GetLiveSessionByIDParams) (LiveSession, error) {
+	row := q.db.QueryRow(ctx, getLiveSessionByID, arg.ID, arg.StoreID)
 	var i LiveSession
 	err := row.Scan(
 		&i.ID,
@@ -131,6 +152,9 @@ func (q *Queries) GetLiveSessionByID(ctx context.Context, id pgtype.UUID) (LiveS
 		&i.EndedAt,
 		&i.TotalComments,
 		&i.TotalOrders,
+		&i.Title,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -173,7 +197,7 @@ func (q *Queries) ListDetectedOrdersBySession(ctx context.Context, sessionID pgt
 }
 
 const listDetectedOrdersByUser = `-- name: ListDetectedOrdersByUser :many
-SELECT d.id, d.session_id, d.cart_id, d.platform_user_id, d.platform_handle, d.comment_text, d.product_id, d.quantity, d.cancelled, d.detected_at, p.name AS product_name, p.price AS product_price, p.sizes AS product_sizes
+SELECT d.id, d.session_id, d.cart_id, d.platform_user_id, d.platform_handle, d.comment_text, d.product_id, d.quantity, d.cancelled, d.detected_at, p.name AS product_name, p.price AS product_price
 FROM detected_orders d
 JOIN products p ON p.id = d.product_id
 WHERE d.session_id = $1 AND d.platform_user_id = $2 AND d.cancelled = false
@@ -196,8 +220,7 @@ type ListDetectedOrdersByUserRow struct {
 	Cancelled      pgtype.Bool        `json:"cancelled"`
 	DetectedAt     pgtype.Timestamptz `json:"detected_at"`
 	ProductName    string             `json:"product_name"`
-	ProductPrice   pgtype.Numeric     `json:"product_price"`
-	ProductSizes   []string           `json:"product_sizes"`
+	ProductPrice   pgtype.Int8        `json:"product_price"`
 }
 
 func (q *Queries) ListDetectedOrdersByUser(ctx context.Context, arg ListDetectedOrdersByUserParams) ([]ListDetectedOrdersByUserRow, error) {
@@ -222,7 +245,6 @@ func (q *Queries) ListDetectedOrdersByUser(ctx context.Context, arg ListDetected
 			&i.DetectedAt,
 			&i.ProductName,
 			&i.ProductPrice,
-			&i.ProductSizes,
 		); err != nil {
 			return nil, err
 		}
@@ -266,7 +288,7 @@ func (q *Queries) ListDistinctUsersBySession(ctx context.Context, sessionID pgty
 }
 
 const listLiveSessionsByStore = `-- name: ListLiveSessionsByStore :many
-SELECT id, store_id, platform, platform_live_id, status, started_at, ended_at, total_comments, total_orders FROM live_sessions WHERE store_id = $1 ORDER BY started_at DESC
+SELECT id, store_id, platform, platform_live_id, status, started_at, ended_at, total_comments, total_orders, title, created_at, updated_at FROM live_sessions WHERE store_id = $1 ORDER BY started_at DESC
 `
 
 func (q *Queries) ListLiveSessionsByStore(ctx context.Context, storeID pgtype.UUID) ([]LiveSession, error) {
@@ -288,6 +310,9 @@ func (q *Queries) ListLiveSessionsByStore(ctx context.Context, storeID pgtype.UU
 			&i.EndedAt,
 			&i.TotalComments,
 			&i.TotalOrders,
+			&i.Title,
+			&i.CreatedAt,
+			&i.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -297,6 +322,38 @@ func (q *Queries) ListLiveSessionsByStore(ctx context.Context, storeID pgtype.UU
 		return nil, err
 	}
 	return items, nil
+}
+
+const startLiveSession = `-- name: StartLiveSession :one
+UPDATE live_sessions
+SET status = 'live', started_at = now(), updated_at = now()
+WHERE id = $1 AND store_id = $2
+RETURNING id, store_id, platform, platform_live_id, status, started_at, ended_at, total_comments, total_orders, title, created_at, updated_at
+`
+
+type StartLiveSessionParams struct {
+	ID      pgtype.UUID `json:"id"`
+	StoreID pgtype.UUID `json:"store_id"`
+}
+
+func (q *Queries) StartLiveSession(ctx context.Context, arg StartLiveSessionParams) (LiveSession, error) {
+	row := q.db.QueryRow(ctx, startLiveSession, arg.ID, arg.StoreID)
+	var i LiveSession
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.Platform,
+		&i.PlatformLiveID,
+		&i.Status,
+		&i.StartedAt,
+		&i.EndedAt,
+		&i.TotalComments,
+		&i.TotalOrders,
+		&i.Title,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const updateDetectedOrderCartID = `-- name: UpdateDetectedOrderCartID :exec
@@ -313,6 +370,47 @@ type UpdateDetectedOrderCartIDParams struct {
 func (q *Queries) UpdateDetectedOrderCartID(ctx context.Context, arg UpdateDetectedOrderCartIDParams) error {
 	_, err := q.db.Exec(ctx, updateDetectedOrderCartID, arg.SessionID, arg.CartID, arg.PlatformUserID)
 	return err
+}
+
+const updateLiveSession = `-- name: UpdateLiveSession :one
+UPDATE live_sessions
+SET title = $3, platform = $4, platform_live_id = $5, updated_at = now()
+WHERE id = $1 AND store_id = $2
+RETURNING id, store_id, platform, platform_live_id, status, started_at, ended_at, total_comments, total_orders, title, created_at, updated_at
+`
+
+type UpdateLiveSessionParams struct {
+	ID             pgtype.UUID `json:"id"`
+	StoreID        pgtype.UUID `json:"store_id"`
+	Title          pgtype.Text `json:"title"`
+	Platform       string      `json:"platform"`
+	PlatformLiveID string      `json:"platform_live_id"`
+}
+
+func (q *Queries) UpdateLiveSession(ctx context.Context, arg UpdateLiveSessionParams) (LiveSession, error) {
+	row := q.db.QueryRow(ctx, updateLiveSession,
+		arg.ID,
+		arg.StoreID,
+		arg.Title,
+		arg.Platform,
+		arg.PlatformLiveID,
+	)
+	var i LiveSession
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.Platform,
+		&i.PlatformLiveID,
+		&i.Status,
+		&i.StartedAt,
+		&i.EndedAt,
+		&i.TotalComments,
+		&i.TotalOrders,
+		&i.Title,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const upsertDetectedOrder = `-- name: UpsertDetectedOrder :one

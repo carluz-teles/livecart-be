@@ -1,10 +1,13 @@
 package product
 
 import (
+	"strconv"
+
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/query"
 )
 
 type Handler struct {
@@ -19,6 +22,7 @@ func NewHandler(service *Service, validate *validator.Validate) *Handler {
 func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g := router.Group("/products")
 	g.Get("/", h.List)
+	g.Get("/stats", h.GetStats)
 	g.Post("/", h.Create)
 	g.Get("/:id", h.GetByID)
 	g.Put("/:id", h.Update)
@@ -56,7 +60,6 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		Keyword:        req.Keyword,
 		Price:          req.Price,
 		ImageURL:       req.ImageURL,
-		Sizes:          req.Sizes,
 		Stock:          req.Stock,
 	})
 	if err != nil {
@@ -95,26 +98,106 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 
 // List godoc
 // @Summary      List products
-// @Description  Returns all products for the current store
+// @Description  Returns products with filtering, pagination, and sorting
 // @Tags         products
 // @Produce      json
-// @Success      200 {object} httpx.Envelope{data=[]ProductResponse}
+// @Param        search query string false "Search by name or keyword"
+// @Param        page query int false "Page number" default(1)
+// @Param        limit query int false "Items per page" default(20)
+// @Param        sortBy query string false "Sort field" default(created_at)
+// @Param        sortOrder query string false "Sort order (asc, desc)" default(desc)
+// @Param        status query []string false "Filter by status (active, inactive)"
+// @Param        externalSource query []string false "Filter by source (manual, bling, tiny, shopify)"
+// @Param        priceMin query int false "Minimum price in cents"
+// @Param        priceMax query int false "Maximum price in cents"
+// @Param        stockMin query int false "Minimum stock"
+// @Param        stockMax query int false "Maximum stock"
+// @Param        hasLowStock query bool false "Filter low stock (<=5)"
+// @Success      200 {object} httpx.Envelope{data=ListProductsResponse}
 // @Router       /api/v1/products [get]
 // @Security     BearerAuth
 func (h *Handler) List(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
 
-	outputs, err := h.service.List(c.Context(), storeID)
+	// Parse query parameters
+	input := ListProductsInput{
+		StoreID: storeID,
+		Search:  c.Query("search"),
+		Pagination: query.Pagination{
+			Page:  c.QueryInt("page", query.DefaultPage),
+			Limit: c.QueryInt("limit", query.DefaultLimit),
+		},
+		Sorting: query.Sorting{
+			SortBy:    c.Query("sortBy", "created_at"),
+			SortOrder: c.Query("sortOrder", "desc"),
+		},
+		Filters: parseProductFilters(c),
+	}
+
+	output, err := h.service.List(c.Context(), input)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	responses := make([]ProductResponse, len(outputs))
-	for i, o := range outputs {
+	responses := make([]ProductResponse, len(output.Products))
+	for i, o := range output.Products {
 		responses[i] = toProductResponse(o)
 	}
 
-	return httpx.OK(c, responses)
+	return httpx.OK(c, ListProductsResponse{
+		Data:       responses,
+		Pagination: query.NewPaginationResponse(output.Pagination, output.Total),
+	})
+}
+
+func parseProductFilters(c *fiber.Ctx) ProductFilters {
+	var filters ProductFilters
+
+	// Parse status filter (multi-value)
+	statusBytes := c.Context().QueryArgs().PeekMulti("status")
+	if len(statusBytes) > 0 {
+		filters.Status = make([]string, len(statusBytes))
+		for i, s := range statusBytes {
+			filters.Status[i] = string(s)
+		}
+	}
+
+	// Parse external source filter (multi-value)
+	sourceBytes := c.Context().QueryArgs().PeekMulti("externalSource")
+	if len(sourceBytes) > 0 {
+		filters.ExternalSource = make([]string, len(sourceBytes))
+		for i, s := range sourceBytes {
+			filters.ExternalSource[i] = string(s)
+		}
+	}
+
+	// Parse numeric filters
+	if priceMin := c.Query("priceMin"); priceMin != "" {
+		if v, err := strconv.ParseInt(priceMin, 10, 64); err == nil {
+			filters.PriceMin = &v
+		}
+	}
+	if priceMax := c.Query("priceMax"); priceMax != "" {
+		if v, err := strconv.ParseInt(priceMax, 10, 64); err == nil {
+			filters.PriceMax = &v
+		}
+	}
+	if stockMin := c.Query("stockMin"); stockMin != "" {
+		if v, err := strconv.Atoi(stockMin); err == nil {
+			filters.StockMin = &v
+		}
+	}
+	if stockMax := c.Query("stockMax"); stockMax != "" {
+		if v, err := strconv.Atoi(stockMax); err == nil {
+			filters.StockMax = &v
+		}
+	}
+	if hasLowStock := c.Query("hasLowStock"); hasLowStock == "true" {
+		v := true
+		filters.HasLowStock = &v
+	}
+
+	return filters
 }
 
 // Update godoc
@@ -149,7 +232,6 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 		Name:     req.Name,
 		Price:    req.Price,
 		ImageURL: req.ImageURL,
-		Sizes:    req.Sizes,
 		Stock:    req.Stock,
 		Active:   req.Active,
 	})
@@ -158,6 +240,30 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, toProductResponse(output))
+}
+
+// GetStats godoc
+// @Summary      Get product statistics
+// @Description  Returns aggregated statistics for all products in the store
+// @Tags         products
+// @Produce      json
+// @Success      200 {object} httpx.Envelope{data=ProductStatsResponse}
+// @Router       /api/v1/products/stats [get]
+// @Security     BearerAuth
+func (h *Handler) GetStats(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	output, err := h.service.GetStats(c.Context(), storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, ProductStatsResponse{
+		TotalProducts: output.TotalProducts,
+		ActiveCount:   output.ActiveCount,
+		LowStockCount: output.LowStockCount,
+		StockValue:    output.StockValue,
+	})
 }
 
 func toProductResponse(o ProductOutput) ProductResponse {
@@ -169,7 +275,6 @@ func toProductResponse(o ProductOutput) ProductResponse {
 		Keyword:        o.Keyword,
 		Price:          o.Price,
 		ImageURL:       o.ImageURL,
-		Sizes:          o.Sizes,
 		Stock:          o.Stock,
 		Active:         o.Active,
 		CreatedAt:      o.CreatedAt,

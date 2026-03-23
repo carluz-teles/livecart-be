@@ -31,8 +31,8 @@ RETURNING *;
 SELECT * FROM carts WHERE session_id = $1 ORDER BY created_at;
 
 -- name: CreateCartItem :one
-INSERT INTO cart_items (cart_id, product_id, size, quantity, unit_price)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price)
+VALUES ($1, $2, $3, $4)
 RETURNING *;
 
 -- name: ListCartItems :many

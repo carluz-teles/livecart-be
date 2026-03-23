@@ -41,7 +41,7 @@ func (q *Queries) CreateStore(ctx context.Context, arg CreateStoreParams) (Store
 const createStoreUser = `-- name: CreateStoreUser :one
 INSERT INTO store_users (store_id, email, role, password_hash)
 VALUES ($1, $2, $3, $4)
-RETURNING id, store_id, email, role, password_hash, created_at
+RETURNING id, store_id, email, role, password_hash, created_at, clerk_user_id, name, avatar_url, updated_at
 `
 
 type CreateStoreUserParams struct {
@@ -66,6 +66,10 @@ func (q *Queries) CreateStoreUser(ctx context.Context, arg CreateStoreUserParams
 		&i.Role,
 		&i.PasswordHash,
 		&i.CreatedAt,
+		&i.ClerkUserID,
+		&i.Name,
+		&i.AvatarUrl,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -111,7 +115,7 @@ func (q *Queries) GetStoreBySlug(ctx context.Context, slug string) (Store, error
 }
 
 const listStoreUsers = `-- name: ListStoreUsers :many
-SELECT id, store_id, email, role, password_hash, created_at FROM store_users WHERE store_id = $1 ORDER BY created_at
+SELECT id, store_id, email, role, password_hash, created_at, clerk_user_id, name, avatar_url, updated_at FROM store_users WHERE store_id = $1 ORDER BY created_at
 `
 
 func (q *Queries) ListStoreUsers(ctx context.Context, storeID pgtype.UUID) ([]StoreUser, error) {
@@ -130,6 +134,10 @@ func (q *Queries) ListStoreUsers(ctx context.Context, storeID pgtype.UUID) ([]St
 			&i.Role,
 			&i.PasswordHash,
 			&i.CreatedAt,
+			&i.ClerkUserID,
+			&i.Name,
+			&i.AvatarUrl,
+			&i.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}

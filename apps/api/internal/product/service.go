@@ -55,7 +55,6 @@ func (s *Service) Create(ctx context.Context, input CreateProductInput) (CreateP
 		Keyword:        keyword,
 		Price:          input.Price,
 		ImageURL:       input.ImageURL,
-		Sizes:          input.Sizes,
 		Stock:          input.Stock,
 	})
 	if err != nil {
@@ -78,17 +77,32 @@ func (s *Service) GetByID(ctx context.Context, id, storeID string) (ProductOutpu
 	return toProductOutput(*row), nil
 }
 
-func (s *Service) List(ctx context.Context, storeID string) ([]ProductOutput, error) {
-	rows, err := s.repo.ListByStore(ctx, storeID)
+func (s *Service) List(ctx context.Context, input ListProductsInput) (ListProductsOutput, error) {
+	// Normalize pagination and sorting
+	input.Pagination.Normalize()
+	input.Sorting.Normalize("created_at")
+
+	result, err := s.repo.List(ctx, ListProductsParams{
+		StoreID:    input.StoreID,
+		Search:     input.Search,
+		Pagination: input.Pagination,
+		Sorting:    input.Sorting,
+		Filters:    input.Filters,
+	})
 	if err != nil {
-		return nil, err
+		return ListProductsOutput{}, err
 	}
 
-	result := make([]ProductOutput, len(rows))
-	for i, row := range rows {
-		result[i] = toProductOutput(row)
+	products := make([]ProductOutput, len(result.Products))
+	for i, row := range result.Products {
+		products[i] = toProductOutput(row)
 	}
-	return result, nil
+
+	return ListProductsOutput{
+		Products:   products,
+		Total:      result.Total,
+		Pagination: input.Pagination,
+	}, nil
 }
 
 func (s *Service) Update(ctx context.Context, input UpdateProductInput) (ProductOutput, error) {
@@ -98,7 +112,6 @@ func (s *Service) Update(ctx context.Context, input UpdateProductInput) (Product
 		Name:     input.Name,
 		Price:    input.Price,
 		ImageURL: input.ImageURL,
-		Sizes:    input.Sizes,
 		Stock:    input.Stock,
 		Active:   input.Active,
 	})
@@ -118,7 +131,6 @@ func toProductOutput(row ProductRow) ProductOutput {
 		Keyword:        row.Keyword,
 		Price:          row.Price,
 		ImageURL:       row.ImageURL,
-		Sizes:          row.Sizes,
 		Stock:          row.Stock,
 		Active:         row.Active,
 		CreatedAt:      row.CreatedAt,
@@ -132,6 +144,10 @@ func isValidKeyword(kw string) bool {
 		return false
 	}
 	return n >= 1000 && n <= 9999
+}
+
+func (s *Service) GetStats(ctx context.Context, storeID string) (ProductStatsOutput, error) {
+	return s.repo.GetStats(ctx, storeID)
 }
 
 func nextKeyword(current string) (string, error) {

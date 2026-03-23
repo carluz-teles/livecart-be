@@ -1,19 +1,31 @@
 -- name: CreateLiveSession :one
-INSERT INTO live_sessions (store_id, platform, platform_live_id)
-VALUES ($1, $2, $3)
+INSERT INTO live_sessions (store_id, title, platform, platform_live_id, status)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
 -- name: GetLiveSessionByID :one
-SELECT * FROM live_sessions WHERE id = $1;
+SELECT * FROM live_sessions WHERE id = $1 AND store_id = $2;
 
 -- name: GetActiveLiveSession :one
 SELECT * FROM live_sessions
 WHERE store_id = $1 AND platform_live_id = $2 AND status = 'active';
 
+-- name: StartLiveSession :one
+UPDATE live_sessions
+SET status = 'live', started_at = now(), updated_at = now()
+WHERE id = $1 AND store_id = $2
+RETURNING *;
+
 -- name: EndLiveSession :one
 UPDATE live_sessions
-SET status = 'ended', ended_at = now(), total_comments = $2, total_orders = $3
-WHERE id = $1
+SET status = 'ended', ended_at = now(), updated_at = now()
+WHERE id = $1 AND store_id = $2
+RETURNING *;
+
+-- name: UpdateLiveSession :one
+UPDATE live_sessions
+SET title = $3, platform = $4, platform_live_id = $5, updated_at = now()
+WHERE id = $1 AND store_id = $2
 RETURNING *;
 
 -- name: ListLiveSessionsByStore :many
@@ -42,7 +54,7 @@ FROM detected_orders
 WHERE session_id = $1 AND cancelled = false;
 
 -- name: ListDetectedOrdersByUser :many
-SELECT d.*, p.name AS product_name, p.price AS product_price, p.sizes AS product_sizes
+SELECT d.*, p.name AS product_name, p.price AS product_price
 FROM detected_orders d
 JOIN products p ON p.id = d.product_id
 WHERE d.session_id = $1 AND d.platform_user_id = $2 AND d.cancelled = false;

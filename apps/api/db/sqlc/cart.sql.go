@@ -56,24 +56,22 @@ func (q *Queries) CreateCart(ctx context.Context, arg CreateCartParams) (Cart, e
 }
 
 const createCartItem = `-- name: CreateCartItem :one
-INSERT INTO cart_items (cart_id, product_id, size, quantity, unit_price)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, cart_id, product_id, size, quantity, unit_price
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price)
+VALUES ($1, $2, $3, $4)
+RETURNING id, cart_id, product_id, quantity, unit_price
 `
 
 type CreateCartItemParams struct {
-	CartID    pgtype.UUID    `json:"cart_id"`
-	ProductID pgtype.UUID    `json:"product_id"`
-	Size      pgtype.Text    `json:"size"`
-	Quantity  pgtype.Int4    `json:"quantity"`
-	UnitPrice pgtype.Numeric `json:"unit_price"`
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	Quantity  pgtype.Int4 `json:"quantity"`
+	UnitPrice pgtype.Int8 `json:"unit_price"`
 }
 
 func (q *Queries) CreateCartItem(ctx context.Context, arg CreateCartItemParams) (CartItem, error) {
 	row := q.db.QueryRow(ctx, createCartItem,
 		arg.CartID,
 		arg.ProductID,
-		arg.Size,
 		arg.Quantity,
 		arg.UnitPrice,
 	)
@@ -82,7 +80,6 @@ func (q *Queries) CreateCartItem(ctx context.Context, arg CreateCartItemParams) 
 		&i.ID,
 		&i.CartID,
 		&i.ProductID,
-		&i.Size,
 		&i.Quantity,
 		&i.UnitPrice,
 	)
@@ -179,21 +176,20 @@ func (q *Queries) GetCartByToken(ctx context.Context, token string) (Cart, error
 }
 
 const listCartItems = `-- name: ListCartItems :many
-SELECT ci.id, ci.cart_id, ci.product_id, ci.size, ci.quantity, ci.unit_price, p.name AS product_name, p.image_url AS product_image_url
+SELECT ci.id, ci.cart_id, ci.product_id, ci.quantity, ci.unit_price, p.name AS product_name, p.image_url AS product_image_url
 FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1
 `
 
 type ListCartItemsRow struct {
-	ID              pgtype.UUID    `json:"id"`
-	CartID          pgtype.UUID    `json:"cart_id"`
-	ProductID       pgtype.UUID    `json:"product_id"`
-	Size            pgtype.Text    `json:"size"`
-	Quantity        pgtype.Int4    `json:"quantity"`
-	UnitPrice       pgtype.Numeric `json:"unit_price"`
-	ProductName     string         `json:"product_name"`
-	ProductImageUrl pgtype.Text    `json:"product_image_url"`
+	ID              pgtype.UUID `json:"id"`
+	CartID          pgtype.UUID `json:"cart_id"`
+	ProductID       pgtype.UUID `json:"product_id"`
+	Quantity        pgtype.Int4 `json:"quantity"`
+	UnitPrice       pgtype.Int8 `json:"unit_price"`
+	ProductName     string      `json:"product_name"`
+	ProductImageUrl pgtype.Text `json:"product_image_url"`
 }
 
 func (q *Queries) ListCartItems(ctx context.Context, cartID pgtype.UUID) ([]ListCartItemsRow, error) {
@@ -209,7 +205,6 @@ func (q *Queries) ListCartItems(ctx context.Context, cartID pgtype.UUID) ([]List
 			&i.ID,
 			&i.CartID,
 			&i.ProductID,
-			&i.Size,
 			&i.Quantity,
 			&i.UnitPrice,
 			&i.ProductName,

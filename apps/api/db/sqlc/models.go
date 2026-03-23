@@ -28,12 +28,11 @@ type Cart struct {
 }
 
 type CartItem struct {
-	ID        pgtype.UUID    `json:"id"`
-	CartID    pgtype.UUID    `json:"cart_id"`
-	ProductID pgtype.UUID    `json:"product_id"`
-	Size      pgtype.Text    `json:"size"`
-	Quantity  pgtype.Int4    `json:"quantity"`
-	UnitPrice pgtype.Numeric `json:"unit_price"`
+	ID        pgtype.UUID `json:"id"`
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	Quantity  pgtype.Int4 `json:"quantity"`
+	UnitPrice pgtype.Int8 `json:"unit_price"`
 }
 
 type DetectedOrder struct {
@@ -86,6 +85,9 @@ type LiveSession struct {
 	EndedAt        pgtype.Timestamptz `json:"ended_at"`
 	TotalComments  pgtype.Int4        `json:"total_comments"`
 	TotalOrders    pgtype.Int4        `json:"total_orders"`
+	Title          pgtype.Text        `json:"title"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
 type Product struct {
@@ -95,9 +97,8 @@ type Product struct {
 	ExternalID     pgtype.Text        `json:"external_id"`
 	ExternalSource string             `json:"external_source"`
 	Keyword        string             `json:"keyword"`
-	Price          pgtype.Numeric     `json:"price"`
+	Price          pgtype.Int8        `json:"price"`
 	ImageUrl       pgtype.Text        `json:"image_url"`
-	Sizes          []string           `json:"sizes"`
 	Stock          pgtype.Int4        `json:"stock"`
 	Active         pgtype.Bool        `json:"active"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
@@ -122,6 +123,10 @@ type StoreUser struct {
 	Role         string             `json:"role"`
 	PasswordHash pgtype.Text        `json:"password_hash"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	ClerkUserID  pgtype.Text        `json:"clerk_user_id"`
+	Name         pgtype.Text        `json:"name"`
+	AvatarUrl    pgtype.Text        `json:"avatar_url"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }
 
 type Subscription struct {
