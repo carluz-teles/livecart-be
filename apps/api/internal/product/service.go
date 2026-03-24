@@ -6,7 +6,9 @@ import (
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/product/domain"
 	"livecart/apps/api/lib/httpx"
+	vo "livecart/apps/api/lib/valueobject"
 )
 
 type Service struct {
@@ -29,10 +31,7 @@ func (s *Service) Create(ctx context.Context, input CreateProductInput) (CreateP
 	}
 
 	// Check uniqueness
-	existing, err := s.repo.GetByKeyword(ctx, GetByKeywordParams{
-		StoreID: input.StoreID,
-		Keyword: keyword.String(),
-	})
+	existing, err := s.repo.GetByKeyword(ctx, input.StoreID, keyword)
 	if err != nil && !httpx.IsNotFound(err) {
 		return CreateProductOutput{}, fmt.Errorf("checking keyword uniqueness: %w", err)
 	}
@@ -40,34 +39,40 @@ func (s *Service) Create(ctx context.Context, input CreateProductInput) (CreateP
 		return CreateProductOutput{}, httpx.ErrConflict("keyword already in use")
 	}
 
-	row, err := s.repo.Create(ctx, CreateProductParams{
-		StoreID:        input.StoreID,
-		Name:           input.Name,
-		ExternalID:     input.ExternalID,
-		ExternalSource: input.ExternalSource,
-		Keyword:        keyword.String(),
-		Price:          input.Price,
-		ImageURL:       input.ImageURL,
-		Stock:          input.Stock,
-	})
+	// Create product via domain factory
+	product, err := domain.NewProduct(
+		input.StoreID,
+		input.Name,
+		input.ExternalID,
+		input.ExternalSource,
+		keyword,
+		input.Price,
+		input.ImageURL,
+		input.Stock,
+	)
 	if err != nil {
 		return CreateProductOutput{}, fmt.Errorf("creating product: %w", err)
 	}
 
+	// Save to repository
+	if err := s.repo.Save(ctx, product); err != nil {
+		return CreateProductOutput{}, err
+	}
+
 	return CreateProductOutput{
-		ID:        row.ID,
-		Name:      row.Name,
-		Keyword:   row.Keyword,
-		CreatedAt: row.CreatedAt,
+		ID:        product.ID().String(),
+		Name:      product.Name(),
+		Keyword:   product.Keyword().String(),
+		CreatedAt: product.CreatedAt(),
 	}, nil
 }
 
 // resolveKeyword validates or auto-generates a keyword for a product.
-func (s *Service) resolveKeyword(ctx context.Context, storeID, inputKeyword string) (Keyword, error) {
+func (s *Service) resolveKeyword(ctx context.Context, storeID vo.StoreID, inputKeyword string) (domain.Keyword, error) {
 	if inputKeyword != "" {
-		kw, err := NewKeyword(inputKeyword)
+		kw, err := domain.NewKeyword(inputKeyword)
 		if err != nil {
-			return Keyword{}, httpx.ErrUnprocessable(fmt.Sprintf("invalid keyword: %s", err.Error()))
+			return domain.Keyword{}, httpx.ErrUnprocessable(fmt.Sprintf("invalid keyword: %s", err.Error()))
 		}
 		return kw, nil
 	}
@@ -75,23 +80,23 @@ func (s *Service) resolveKeyword(ctx context.Context, storeID, inputKeyword stri
 	// Auto-generate keyword
 	maxKw, err := s.repo.GetMaxKeyword(ctx, storeID)
 	if err != nil {
-		return Keyword{}, fmt.Errorf("getting max keyword: %w", err)
+		return domain.Keyword{}, fmt.Errorf("getting max keyword: %w", err)
 	}
 
-	kw, err := NextKeyword(maxKw)
+	kw, err := domain.NextKeyword(maxKw)
 	if err != nil {
-		return Keyword{}, httpx.ErrUnprocessable("keyword range exhausted (max 9999)")
+		return domain.Keyword{}, httpx.ErrUnprocessable("keyword range exhausted (max 9999)")
 	}
 
 	return kw, nil
 }
 
-func (s *Service) GetByID(ctx context.Context, id, storeID string) (ProductOutput, error) {
-	row, err := s.repo.GetByID(ctx, id, storeID)
+func (s *Service) GetByID(ctx context.Context, id vo.ProductID, storeID vo.StoreID) (ProductOutput, error) {
+	product, err := s.repo.GetByID(ctx, id, storeID)
 	if err != nil {
 		return ProductOutput{}, err
 	}
-	return toProductOutput(*row), nil
+	return toProductOutput(product), nil
 }
 
 func (s *Service) List(ctx context.Context, input ListProductsInput) (ListProductsOutput, error) {
@@ -111,8 +116,8 @@ func (s *Service) List(ctx context.Context, input ListProductsInput) (ListProduc
 	}
 
 	products := make([]ProductOutput, len(result.Products))
-	for i, row := range result.Products {
-		products[i] = toProductOutput(row)
+	for i, product := range result.Products {
+		products[i] = toProductOutput(product)
 	}
 
 	return ListProductsOutput{
@@ -123,42 +128,45 @@ func (s *Service) List(ctx context.Context, input ListProductsInput) (ListProduc
 }
 
 func (s *Service) Update(ctx context.Context, input UpdateProductInput) (ProductOutput, error) {
-	row, err := s.repo.Update(ctx, UpdateProductParams{
-		ID:       input.ID,
-		StoreID:  input.StoreID,
-		Name:     input.Name,
-		Price:    input.Price,
-		ImageURL: input.ImageURL,
-		Stock:    input.Stock,
-		Active:   input.Active,
-	})
+	// Get existing product
+	product, err := s.repo.GetByID(ctx, input.ID, input.StoreID)
 	if err != nil {
 		return ProductOutput{}, err
 	}
 
-	return toProductOutput(row), nil
+	// Use domain method to update
+	if err := product.UpdateDetails(input.Name, input.Price, input.ImageURL, input.Stock, input.Active); err != nil {
+		return ProductOutput{}, httpx.ErrUnprocessable(err.Error())
+	}
+
+	// Save changes
+	if err := s.repo.Update(ctx, product); err != nil {
+		return ProductOutput{}, err
+	}
+
+	return toProductOutput(product), nil
 }
 
-func (s *Service) Delete(ctx context.Context, id, storeID string) error {
+func (s *Service) Delete(ctx context.Context, id vo.ProductID, storeID vo.StoreID) error {
 	return s.repo.Delete(ctx, id, storeID)
 }
 
-func toProductOutput(row ProductRow) ProductOutput {
-	return ProductOutput{
-		ID:             row.ID,
-		Name:           row.Name,
-		ExternalID:     row.ExternalID,
-		ExternalSource: row.ExternalSource,
-		Keyword:        row.Keyword,
-		Price:          row.Price,
-		ImageURL:       row.ImageURL,
-		Stock:          row.Stock,
-		Active:         row.Active,
-		CreatedAt:      row.CreatedAt,
-		UpdatedAt:      row.UpdatedAt,
-	}
+func (s *Service) GetStats(ctx context.Context, storeID vo.StoreID) (ProductStatsOutput, error) {
+	return s.repo.GetStats(ctx, storeID)
 }
 
-func (s *Service) GetStats(ctx context.Context, storeID string) (ProductStatsOutput, error) {
-	return s.repo.GetStats(ctx, storeID)
+func toProductOutput(product *domain.Product) ProductOutput {
+	return ProductOutput{
+		ID:             product.ID().String(),
+		Name:           product.Name(),
+		ExternalID:     product.ExternalID(),
+		ExternalSource: product.ExternalSource().String(),
+		Keyword:        product.Keyword().String(),
+		Price:          product.Price().Cents(),
+		ImageURL:       product.ImageURL(),
+		Stock:          product.Stock(),
+		Active:         product.Active(),
+		CreatedAt:      product.CreatedAt(),
+		UpdatedAt:      product.UpdatedAt(),
+	}
 }

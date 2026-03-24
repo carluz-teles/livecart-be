@@ -54,6 +54,12 @@ func (m Money) IsZero() bool {
 	return m.cents == 0
 }
 
+// IsNegative returns true if the money is negative.
+// Note: Money values should never be negative (constructor prevents it).
+func (m Money) IsNegative() bool {
+	return m.cents < 0
+}
+
 // Equals compares two money values for equality.
 func (m Money) Equals(other Money) bool {
 	return m.cents == other.cents

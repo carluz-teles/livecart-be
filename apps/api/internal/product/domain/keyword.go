@@ -1,6 +1,7 @@
-package product
+package domain
 
 import (
+	"database/sql/driver"
 	"fmt"
 	"strconv"
 )
@@ -96,8 +97,35 @@ func (k Keyword) Equals(other Keyword) bool {
 	return k.value == other.value
 }
 
-// IsValid checks if a string would be a valid keyword.
+// IsValidKeyword checks if a string would be a valid keyword.
 func IsValidKeyword(value string) bool {
 	_, err := NewKeyword(value)
 	return err == nil
+}
+
+// Value implements driver.Valuer for database serialization.
+func (k Keyword) Value() (driver.Value, error) {
+	if k.IsZero() {
+		return nil, nil
+	}
+	return k.value, nil
+}
+
+// Scan implements sql.Scanner for database deserialization.
+func (k *Keyword) Scan(src any) error {
+	if src == nil {
+		k.value = ""
+		return nil
+	}
+
+	switch v := src.(type) {
+	case string:
+		k.value = v
+		return nil
+	case []byte:
+		k.value = string(v)
+		return nil
+	default:
+		return fmt.Errorf("cannot scan %T into Keyword", src)
+	}
 }

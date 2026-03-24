@@ -511,7 +511,234 @@ Ao criar um novo módulo, verificar:
 
 ---
 
-## 13. Comandos Úteis
+## 13. Domain-Driven Design (DDD)
+
+### 13.1 Estrutura de Domínio
+
+Cada módulo com lógica de negócio complexa tem uma pasta `domain/`:
+
+```
+internal/
+└── {module}/
+    ├── domain/
+    │   ├── {entity}.go        # Entidade principal com regras de negócio
+    │   ├── {value_object}.go  # Value Objects específicos do domínio
+    │   └── status.go          # VOs de status/enum
+    ├── handler.go
+    ├── service.go
+    ├── repository.go
+    └── types.go
+```
+
+### 13.2 Value Objects Gerais (`lib/valueobject/`)
+
+Value Objects compartilhados entre módulos ficam em `lib/valueobject/`:
+
+```go
+// lib/valueobject/email.go
+type Email struct { value string }
+func NewEmail(raw string) (Email, error)
+func (e Email) String() string
+func (e Email) Equals(other Email) bool
+
+// lib/valueobject/id.go
+type StoreID struct { ID }
+type MemberID struct { ID }
+type ProductID struct { ID }
+type OrderID struct { ID }
+
+// lib/valueobject/role.go
+type Role struct { value string }
+func (r Role) IsOwner() bool
+func (r Role) CanManageMembers() bool
+
+// lib/valueobject/money.go
+type Money struct { cents int64 }
+func (m Money) Add(other Money) Money
+func (m Money) Multiply(qty int) Money
+```
+
+### 13.3 Value Objects de Domínio
+
+VOs específicos de um domínio ficam em `{module}/domain/`:
+
+```go
+// internal/product/domain/keyword.go
+type Keyword struct { value string }
+func NewKeyword(value string) (Keyword, error)
+func NextKeyword(current string) (Keyword, error)
+
+// internal/product/domain/external_source.go
+type ExternalSource struct { value string }
+var ExternalSourceManual = ExternalSource{value: "manual"}
+var ExternalSourceTiny = ExternalSource{value: "tiny"}
+
+// internal/invitation/domain/token.go
+type InvitationToken struct { value string }
+func GenerateToken() (InvitationToken, error)
+
+// internal/invitation/domain/status.go
+type InvitationStatus struct { value string }
+var StatusPending = InvitationStatus{value: "pending"}
+var StatusAccepted = InvitationStatus{value: "accepted"}
+```
+
+### 13.4 Entidades de Domínio
+
+Entidades encapsulam regras de negócio e estado:
+
+```go
+// internal/member/domain/member.go
+type Member struct {
+    id        vo.MemberID
+    storeID   vo.StoreID
+    email     vo.Email
+    role      vo.Role
+    status    MemberStatus
+    // ... campos privados
+}
+
+// Factory function para criar nova entidade
+func NewMember(storeID vo.StoreID, email vo.Email, role vo.Role) (*Member, error)
+
+// Reconstruct para carregar do banco (sem validação)
+func Reconstruct(id vo.MemberID, ...) *Member
+
+// Getters imutáveis
+func (m *Member) ID() vo.MemberID { return m.id }
+func (m *Member) Role() vo.Role { return m.role }
+
+// Regras de negócio
+func (m *Member) CanBeRemovedBy(actor *Member) error {
+    if m.IsOwner() {
+        return ErrCannotRemoveOwner
+    }
+    if m.id.Equals(actor.id) {
+        return ErrCannotRemoveSelf
+    }
+    if !actor.CanManageMembers() {
+        return ErrInsufficientPermission
+    }
+    return nil
+}
+
+// Mudanças de estado
+func (m *Member) ChangeRole(newRole vo.Role) error {
+    if m.IsOwner() {
+        return ErrCannotChangeOwnerRole
+    }
+    m.role = newRole
+    m.updatedAt = time.Now()
+    return nil
+}
+```
+
+### 13.5 Repository Retorna Entidades
+
+O repository converte rows do banco em entidades de domínio:
+
+```go
+func (r *Repository) GetByID(ctx context.Context, id vo.MemberID) (*domain.Member, error) {
+    row, err := r.q.GetMember(ctx, id.ToPgUUID())
+    if err != nil {
+        if errors.Is(err, pgx.ErrNoRows) {
+            return nil, httpx.ErrNotFound("member not found")
+        }
+        return nil, err
+    }
+    return toDomainMember(row)
+}
+
+func toDomainMember(row sqlc.StoreUser) (*domain.Member, error) {
+    id, _ := vo.NewMemberID(row.ID.String())
+    storeID, _ := vo.NewStoreID(row.StoreID.String())
+    email, _ := vo.NewEmail(row.Email)
+    role, _ := vo.NewRole(row.Role)
+    status, _ := domain.NewMemberStatus(row.Status)
+
+    return domain.Reconstruct(id, storeID, email, role, status, ...), nil
+}
+```
+
+### 13.6 Service Usa Métodos de Domínio
+
+O service orquestra e usa os métodos da entidade:
+
+```go
+func (s *Service) Remove(ctx context.Context, input RemoveMemberInput) error {
+    // Busca entidades
+    member, err := s.repo.GetByID(ctx, input.MemberID)
+    if err != nil {
+        return err
+    }
+
+    actor, err := s.repo.GetByID(ctx, input.ActorID)
+    if err != nil {
+        return err
+    }
+
+    // Usa método de domínio para validação
+    if err := member.CanBeRemovedBy(actor); err != nil {
+        return httpx.ErrForbidden(err.Error())
+    }
+
+    // Persiste
+    return s.repo.Remove(ctx, member.ID())
+}
+```
+
+### 13.7 Handler Converte para Value Objects
+
+O handler converte strings em VOs antes de chamar o service:
+
+```go
+func (h *Handler) Remove(c *fiber.Ctx) error {
+    storeIDStr := httpx.GetStoreID(c)
+    memberIDStr := c.Params("memberId")
+    actorIDStr := httpx.GetStoreUserID(c)
+
+    // Converte para VOs
+    storeID, err := vo.NewStoreID(storeIDStr)
+    if err != nil {
+        return httpx.BadRequest(c, "invalid store ID")
+    }
+
+    memberID, err := vo.NewMemberID(memberIDStr)
+    if err != nil {
+        return httpx.BadRequest(c, "invalid member ID")
+    }
+
+    actorID, err := vo.NewMemberID(actorIDStr)
+    if err != nil {
+        return httpx.BadRequest(c, "invalid actor ID")
+    }
+
+    err = h.svc.Remove(c.Context(), RemoveMemberInput{
+        StoreID:  storeID,
+        MemberID: memberID,
+        ActorID:  actorID,
+    })
+    if err != nil {
+        return httpx.HandleServiceError(c, err)
+    }
+
+    return httpx.NoContent(c)
+}
+```
+
+### 13.8 Quando Usar DDD
+
+Use DDD completo quando:
+- O módulo tem regras de negócio complexas
+- Há validações que dependem do estado da entidade
+- Existem invariantes que precisam ser mantidas
+- O domínio precisa de VOs específicos
+
+Para módulos simples (CRUD básico), pode-se criar apenas os VOs de domínio sem migrar completamente o repository/service.
+
+---
+
+## 14. Comandos Úteis
 
 ```bash
 # Gerar código SQLC

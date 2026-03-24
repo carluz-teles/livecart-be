@@ -1,23 +1,14 @@
 package invitation
 
-import "time"
+import (
+	"time"
 
-// Roles
-const (
-	RoleOwner  = "owner"
-	RoleAdmin  = "admin"
-	RoleMember = "member"
+	vo "livecart/apps/api/lib/valueobject"
 )
 
-// Invitation statuses
-const (
-	StatusPending  = "pending"
-	StatusAccepted = "accepted"
-	StatusExpired  = "expired"
-	StatusRevoked  = "revoked"
-)
-
+// ============================================
 // Handler layer - Request/Response types
+// ============================================
 
 type CreateInvitationRequest struct {
 	Email string `json:"email" validate:"required,email"`
@@ -55,23 +46,29 @@ type AcceptInvitationRequest struct {
 	Token string `json:"token" validate:"required"`
 }
 
-// Service layer
+// ============================================
+// Service layer - Input/Output types
+// ============================================
 
 type CreateInvitationInput struct {
-	StoreID     string
-	InviterID   string // store_user.id of the person inviting
-	Email       string
-	Role        string
+	StoreID   vo.StoreID
+	InviterID vo.MemberID
+	Email     vo.Email
+	Role      vo.Role
 }
 
-type CreateInvitationOutput struct {
-	ID        string
-	Email     string
-	Role      string
-	Token     string
-	Status    string
-	ExpiresAt time.Time
-	CreatedAt time.Time
+type ResendInvitationInput struct {
+	StoreID      vo.StoreID
+	InvitationID vo.InvitationID
+	InviterID    vo.MemberID
+}
+
+type AcceptInvitationInput struct {
+	Token       string
+	ClerkUserID string
+	Email       vo.Email
+	Name        string
+	AvatarURL   string
 }
 
 type InvitationOutput struct {
@@ -100,35 +97,9 @@ type InvitationDetailsOutput struct {
 	CreatedAt   time.Time
 }
 
-type AcceptInvitationInput struct {
-	Token       string
-	ClerkUserID string
-	Email       string
-	Name        string
-	AvatarURL   string
-}
-
 type AcceptInvitationOutput struct {
 	StoreID   string
 	StoreName string
 	StoreSlug string
 	Role      string
-}
-
-// Repository layer
-
-type InvitationRow struct {
-	ID          string
-	StoreID     string
-	Email       string
-	Role        string
-	Token       string
-	InvitedBy   string
-	Status      string
-	InviterName *string
-	StoreName   string
-	StoreSlug   string
-	ExpiresAt   time.Time
-	AcceptedAt  *time.Time
-	CreatedAt   time.Time
 }

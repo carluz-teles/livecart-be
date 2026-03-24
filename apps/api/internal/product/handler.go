@@ -6,8 +6,10 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
+	"livecart/apps/api/internal/product/domain"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/query"
+	vo "livecart/apps/api/lib/valueobject"
 )
 
 type Handler struct {
@@ -52,15 +54,31 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		return httpx.ValidationError(c, err)
 	}
 
-	storeID := c.Locals("store_id").(string)
+	storeIDStr := httpx.GetStoreID(c)
+
+	// Convert to value objects
+	storeID, err := vo.NewStoreID(storeIDStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid store ID")
+	}
+
+	externalSource, err := domain.NewExternalSource(req.ExternalSource)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid external source")
+	}
+
+	price, err := vo.NewMoney(req.Price)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid price")
+	}
 
 	output, err := h.service.Create(c.Context(), CreateProductInput{
 		StoreID:        storeID,
 		Name:           req.Name,
 		ExternalID:     req.ExternalID,
-		ExternalSource: req.ExternalSource,
+		ExternalSource: externalSource,
 		Keyword:        req.Keyword,
-		Price:          req.Price,
+		Price:          price,
 		ImageURL:       req.ImageURL,
 		Stock:          req.Stock,
 	})
@@ -88,8 +106,18 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/products/{id} [get]
 // @Security     BearerAuth
 func (h *Handler) GetByID(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	id := c.Params("id")
+	storeIDStr := httpx.GetStoreID(c)
+	idStr := c.Params("id")
+
+	storeID, err := vo.NewStoreID(storeIDStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid store ID")
+	}
+
+	id, err := vo.NewProductID(idStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid product ID")
+	}
 
 	output, err := h.service.GetByID(c.Context(), id, storeID)
 	if err != nil {
@@ -121,7 +149,12 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/products [get]
 // @Security     BearerAuth
 func (h *Handler) List(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
+	storeIDStr := httpx.GetStoreID(c)
+
+	storeID, err := vo.NewStoreID(storeIDStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid store ID")
+	}
 
 	// Parse query parameters
 	input := ListProductsInput{
@@ -220,8 +253,8 @@ func parseProductFilters(c *fiber.Ctx) ProductFilters {
 // @Router       /api/v1/stores/{storeId}/products/{id} [put]
 // @Security     BearerAuth
 func (h *Handler) Update(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	id := c.Params("id")
+	storeIDStr := httpx.GetStoreID(c)
+	idStr := c.Params("id")
 
 	var req UpdateProductRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -231,11 +264,26 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 		return httpx.ValidationError(c, err)
 	}
 
+	storeID, err := vo.NewStoreID(storeIDStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid store ID")
+	}
+
+	id, err := vo.NewProductID(idStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid product ID")
+	}
+
+	price, err := vo.NewMoney(req.Price)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid price")
+	}
+
 	output, err := h.service.Update(c.Context(), UpdateProductInput{
 		StoreID:  storeID,
 		ID:       id,
 		Name:     req.Name,
-		Price:    req.Price,
+		Price:    price,
 		ImageURL: req.ImageURL,
 		Stock:    req.Stock,
 		Active:   req.Active,
@@ -258,14 +306,24 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/products/{id} [delete]
 // @Security     BearerAuth
 func (h *Handler) Delete(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	id := c.Params("id")
+	storeIDStr := httpx.GetStoreID(c)
+	idStr := c.Params("id")
+
+	storeID, err := vo.NewStoreID(storeIDStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid store ID")
+	}
+
+	id, err := vo.NewProductID(idStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid product ID")
+	}
 
 	if err := h.service.Delete(c.Context(), id, storeID); err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	return httpx.Deleted(c, id)
+	return httpx.Deleted(c, idStr)
 }
 
 // GetStats godoc
@@ -278,7 +336,12 @@ func (h *Handler) Delete(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/products/stats [get]
 // @Security     BearerAuth
 func (h *Handler) GetStats(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
+	storeIDStr := httpx.GetStoreID(c)
+
+	storeID, err := vo.NewStoreID(storeIDStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid store ID")
+	}
 
 	output, err := h.service.GetStats(c.Context(), storeID)
 	if err != nil {

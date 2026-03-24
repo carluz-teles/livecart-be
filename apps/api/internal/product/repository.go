@@ -11,7 +11,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/product/domain"
 	"livecart/apps/api/lib/httpx"
+	vo "livecart/apps/api/lib/valueobject"
 )
 
 type Repository struct {
@@ -23,42 +25,27 @@ func NewRepository(q *sqlc.Queries, pool *pgxpool.Pool) *Repository {
 	return &Repository{q: q, pool: pool}
 }
 
-func (r *Repository) Create(ctx context.Context, params CreateProductParams) (ProductRow, error) {
-	storeUID, err := parseUUID(params.StoreID)
-	if err != nil {
-		return ProductRow{}, err
-	}
-
-	row, err := r.q.CreateProduct(ctx, sqlc.CreateProductParams{
-		StoreID:        storeUID,
-		Name:           params.Name,
-		ExternalID:     pgtype.Text{String: params.ExternalID, Valid: params.ExternalID != ""},
-		ExternalSource: params.ExternalSource,
-		Keyword:        params.Keyword,
-		Price:          pgtype.Int8{Int64: params.Price, Valid: true},
-		ImageUrl:       pgtype.Text{String: params.ImageURL, Valid: params.ImageURL != ""},
-		Stock:          pgtype.Int4{Int32: int32(params.Stock), Valid: true},
+func (r *Repository) Save(ctx context.Context, product *domain.Product) error {
+	_, err := r.q.CreateProduct(ctx, sqlc.CreateProductParams{
+		StoreID:        product.StoreID().ToPgUUID(),
+		Name:           product.Name(),
+		ExternalID:     pgtype.Text{String: product.ExternalID(), Valid: product.ExternalID() != ""},
+		ExternalSource: product.ExternalSource().String(),
+		Keyword:        product.Keyword().String(),
+		Price:          pgtype.Int8{Int64: product.Price().Cents(), Valid: true},
+		ImageUrl:       pgtype.Text{String: product.ImageURL(), Valid: product.ImageURL() != ""},
+		Stock:          pgtype.Int4{Int32: int32(product.Stock()), Valid: true},
 	})
 	if err != nil {
-		return ProductRow{}, fmt.Errorf("inserting product: %w", err)
+		return fmt.Errorf("inserting product: %w", err)
 	}
-
-	return toProductRow(row), nil
+	return nil
 }
 
-func (r *Repository) GetByID(ctx context.Context, id, storeID string) (*ProductRow, error) {
-	uid, err := parseUUID(id)
-	if err != nil {
-		return nil, err
-	}
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return nil, err
-	}
-
+func (r *Repository) GetByID(ctx context.Context, id vo.ProductID, storeID vo.StoreID) (*domain.Product, error) {
 	row, err := r.q.GetProductByID(ctx, sqlc.GetProductByIDParams{
-		ID:      uid,
-		StoreID: storeUID,
+		ID:      id.ToPgUUID(),
+		StoreID: storeID.ToPgUUID(),
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -67,19 +54,13 @@ func (r *Repository) GetByID(ctx context.Context, id, storeID string) (*ProductR
 		return nil, fmt.Errorf("getting product: %w", err)
 	}
 
-	out := toProductRow(row)
-	return &out, nil
+	return toDomainProduct(row)
 }
 
-func (r *Repository) GetByKeyword(ctx context.Context, params GetByKeywordParams) (*ProductRow, error) {
-	storeUID, err := parseUUID(params.StoreID)
-	if err != nil {
-		return nil, err
-	}
-
+func (r *Repository) GetByKeyword(ctx context.Context, storeID vo.StoreID, keyword domain.Keyword) (*domain.Product, error) {
 	row, err := r.q.GetProductByKeyword(ctx, sqlc.GetProductByKeywordParams{
-		StoreID: storeUID,
-		Keyword: params.Keyword,
+		StoreID: storeID.ToPgUUID(),
+		Keyword: keyword.String(),
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -88,24 +69,22 @@ func (r *Repository) GetByKeyword(ctx context.Context, params GetByKeywordParams
 		return nil, fmt.Errorf("getting product by keyword: %w", err)
 	}
 
-	out := toProductRow(row)
-	return &out, nil
+	return toDomainProduct(row)
 }
 
-func (r *Repository) ListByStore(ctx context.Context, storeID string) ([]ProductRow, error) {
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return nil, err
-	}
-
-	rows, err := r.q.ListProductsByStore(ctx, storeUID)
+func (r *Repository) ListByStore(ctx context.Context, storeID vo.StoreID) ([]*domain.Product, error) {
+	rows, err := r.q.ListProductsByStore(ctx, storeID.ToPgUUID())
 	if err != nil {
 		return nil, fmt.Errorf("listing products: %w", err)
 	}
 
-	result := make([]ProductRow, len(rows))
+	result := make([]*domain.Product, len(rows))
 	for i, row := range rows {
-		result[i] = toProductRow(row)
+		product, err := toDomainProduct(row)
+		if err != nil {
+			return nil, fmt.Errorf("converting product row: %w", err)
+		}
+		result[i] = product
 	}
 	return result, nil
 }
@@ -114,7 +93,7 @@ func (r *Repository) ListByStore(ctx context.Context, storeID string) ([]Product
 func (r *Repository) List(ctx context.Context, params ListProductsParams) (ListProductsResult, error) {
 	// Build WHERE conditions
 	conditions := []string{"store_id = $1"}
-	args := []interface{}{params.StoreID}
+	args := []interface{}{params.StoreID.String()}
 	argIdx := 2
 
 	// Search filter (name or keyword)
@@ -220,7 +199,7 @@ func (r *Repository) List(ctx context.Context, params ListProductsParams) (ListP
 	}
 	defer rows.Close()
 
-	products := make([]ProductRow, 0)
+	products := make([]*domain.Product, 0)
 	for rows.Next() {
 		var row sqlc.Product
 		if err := rows.Scan(
@@ -239,7 +218,11 @@ func (r *Repository) List(ctx context.Context, params ListProductsParams) (ListP
 		); err != nil {
 			return ListProductsResult{}, fmt.Errorf("scanning product: %w", err)
 		}
-		products = append(products, toProductRow(row))
+		product, err := toDomainProduct(row)
+		if err != nil {
+			return ListProductsResult{}, fmt.Errorf("converting product row: %w", err)
+		}
+		products = append(products, product)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -252,42 +235,28 @@ func (r *Repository) List(ctx context.Context, params ListProductsParams) (ListP
 	}, nil
 }
 
-func (r *Repository) Update(ctx context.Context, params UpdateProductParams) (ProductRow, error) {
-	uid, err := parseUUID(params.ID)
-	if err != nil {
-		return ProductRow{}, err
-	}
-	storeUID, err := parseUUID(params.StoreID)
-	if err != nil {
-		return ProductRow{}, err
-	}
-
-	row, err := r.q.UpdateProduct(ctx, sqlc.UpdateProductParams{
-		ID:       uid,
-		StoreID:  storeUID,
-		Name:     params.Name,
-		Price:    pgtype.Int8{Int64: params.Price, Valid: true},
-		ImageUrl: pgtype.Text{String: params.ImageURL, Valid: params.ImageURL != ""},
-		Stock:    pgtype.Int4{Int32: int32(params.Stock), Valid: true},
-		Active:   pgtype.Bool{Bool: params.Active, Valid: true},
+func (r *Repository) Update(ctx context.Context, product *domain.Product) error {
+	_, err := r.q.UpdateProduct(ctx, sqlc.UpdateProductParams{
+		ID:       product.ID().ToPgUUID(),
+		StoreID:  product.StoreID().ToPgUUID(),
+		Name:     product.Name(),
+		Price:    pgtype.Int8{Int64: product.Price().Cents(), Valid: true},
+		ImageUrl: pgtype.Text{String: product.ImageURL(), Valid: product.ImageURL() != ""},
+		Stock:    pgtype.Int4{Int32: int32(product.Stock()), Valid: true},
+		Active:   pgtype.Bool{Bool: product.Active(), Valid: true},
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return ProductRow{}, httpx.ErrNotFound("product not found")
+			return httpx.ErrNotFound("product not found")
 		}
-		return ProductRow{}, fmt.Errorf("updating product: %w", err)
+		return fmt.Errorf("updating product: %w", err)
 	}
 
-	return toProductRow(row), nil
+	return nil
 }
 
-func (r *Repository) GetMaxKeyword(ctx context.Context, storeID string) (string, error) {
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return "", err
-	}
-
-	maxKw, err := r.q.GetMaxKeyword(ctx, storeUID)
+func (r *Repository) GetMaxKeyword(ctx context.Context, storeID vo.StoreID) (string, error) {
+	maxKw, err := r.q.GetMaxKeyword(ctx, storeID.ToPgUUID())
 	if err != nil {
 		return "", fmt.Errorf("getting max keyword: %w", err)
 	}
@@ -299,47 +268,8 @@ func (r *Repository) GetMaxKeyword(ctx context.Context, storeID string) (string,
 	return "0999", nil
 }
 
-func toProductRow(row sqlc.Product) ProductRow {
-	var price int64
-	if row.Price.Valid {
-		price = row.Price.Int64
-	}
-	var imageURL string
-	if row.ImageUrl.Valid {
-		imageURL = row.ImageUrl.String
-	}
-	var externalID string
-	if row.ExternalID.Valid {
-		externalID = row.ExternalID.String
-	}
-
-	return ProductRow{
-		ID:             row.ID.String(),
-		StoreID:        row.StoreID.String(),
-		Name:           row.Name,
-		ExternalID:     externalID,
-		ExternalSource: row.ExternalSource,
-		Keyword:        row.Keyword,
-		Price:          price,
-		ImageURL:       imageURL,
-		Stock:          int(row.Stock.Int32),
-		Active:         row.Active.Bool,
-		CreatedAt:      row.CreatedAt.Time,
-		UpdatedAt:      row.UpdatedAt.Time,
-	}
-}
-
-func (r *Repository) Delete(ctx context.Context, id, storeID string) error {
-	uid, err := parseUUID(id)
-	if err != nil {
-		return err
-	}
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return err
-	}
-
-	result, err := r.pool.Exec(ctx, "DELETE FROM products WHERE id = $1 AND store_id = $2", uid, storeUID)
+func (r *Repository) Delete(ctx context.Context, id vo.ProductID, storeID vo.StoreID) error {
+	result, err := r.pool.Exec(ctx, "DELETE FROM products WHERE id = $1 AND store_id = $2", id.ToPgUUID(), storeID.ToPgUUID())
 	if err != nil {
 		return fmt.Errorf("deleting product: %w", err)
 	}
@@ -351,12 +281,7 @@ func (r *Repository) Delete(ctx context.Context, id, storeID string) error {
 	return nil
 }
 
-func (r *Repository) GetStats(ctx context.Context, storeID string) (ProductStatsOutput, error) {
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return ProductStatsOutput{}, err
-	}
-
+func (r *Repository) GetStats(ctx context.Context, storeID vo.StoreID) (ProductStatsOutput, error) {
 	query := `
 		SELECT
 			COUNT(*) as total_products,
@@ -368,7 +293,7 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (ProductStats
 	`
 
 	var stats ProductStatsOutput
-	err = r.pool.QueryRow(ctx, query, storeUID).Scan(
+	err := r.pool.QueryRow(ctx, query, storeID.ToPgUUID()).Scan(
 		&stats.TotalProducts,
 		&stats.ActiveCount,
 		&stats.LowStockCount,
@@ -381,10 +306,60 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (ProductStats
 	return stats, nil
 }
 
-func parseUUID(s string) (pgtype.UUID, error) {
-	var uid pgtype.UUID
-	if err := uid.Scan(s); err != nil {
-		return uid, httpx.ErrUnprocessable("invalid uuid")
+func toDomainProduct(row sqlc.Product) (*domain.Product, error) {
+	id, err := vo.NewProductID(row.ID.String())
+	if err != nil {
+		return nil, err
 	}
-	return uid, nil
+
+	storeID, err := vo.NewStoreID(row.StoreID.String())
+	if err != nil {
+		return nil, err
+	}
+
+	externalSource, err := domain.NewExternalSource(row.ExternalSource)
+	if err != nil {
+		return nil, err
+	}
+
+	var keyword domain.Keyword
+	if row.Keyword != "" {
+		keyword, err = domain.NewKeyword(row.Keyword)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var price vo.Money
+	if row.Price.Valid {
+		price, err = vo.NewMoney(row.Price.Int64)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var imageURL string
+	if row.ImageUrl.Valid {
+		imageURL = row.ImageUrl.String
+	}
+
+	var externalID string
+	if row.ExternalID.Valid {
+		externalID = row.ExternalID.String
+	}
+
+	return domain.Reconstruct(
+		id,
+		storeID,
+		row.Name,
+		externalID,
+		externalSource,
+		keyword,
+		price,
+		imageURL,
+		int(row.Stock.Int32),
+		row.Active.Bool,
+		row.CreatedAt.Time,
+		row.UpdatedAt.Time,
+	), nil
 }

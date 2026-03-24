@@ -5,6 +5,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 
 	"livecart/apps/api/lib/httpx"
+	vo "livecart/apps/api/lib/valueobject"
 )
 
 type Handler struct {
@@ -47,8 +48,8 @@ func (h *Handler) RegisterPublicRoutes(router fiber.Router) {
 // @Router       /api/v1/stores/{storeId}/invitations [post]
 // @Security     BearerAuth
 func (h *Handler) Create(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	userID := c.Locals("store_user_id").(string) // The store_user.id of the current user
+	storeIDStr := httpx.GetStoreID(c)
+	memberIDStr := httpx.GetStoreUserID(c)
 
 	var req CreateInvitationRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -58,11 +59,32 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		return httpx.ValidationError(c, err)
 	}
 
+	// Convert to value objects
+	storeID, err := vo.NewStoreID(storeIDStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid store ID")
+	}
+
+	email, err := vo.NewEmail(req.Email)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid email format")
+	}
+
+	role, err := vo.NewRole(req.Role)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid role")
+	}
+
+	inviterID, err := vo.NewMemberID(memberIDStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid inviter ID")
+	}
+
 	output, err := h.service.Create(c.Context(), CreateInvitationInput{
 		StoreID:   storeID,
-		InviterID: userID,
-		Email:     req.Email,
-		Role:      req.Role,
+		InviterID: inviterID,
+		Email:     email,
+		Role:      role,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -88,7 +110,12 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/invitations [get]
 // @Security     BearerAuth
 func (h *Handler) List(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
+	storeIDStr := httpx.GetStoreID(c)
+
+	storeID, err := vo.NewStoreID(storeIDStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid store ID")
+	}
 
 	invitations, err := h.service.List(c.Context(), storeID)
 	if err != nil {
@@ -123,10 +150,20 @@ func (h *Handler) List(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/invitations/{id} [delete]
 // @Security     BearerAuth
 func (h *Handler) Revoke(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
+	storeIDStr := httpx.GetStoreID(c)
 	id := c.Params("id")
 
-	if err := h.service.Revoke(c.Context(), storeID, id); err != nil {
+	storeID, err := vo.NewStoreID(storeIDStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid store ID")
+	}
+
+	invitationID, err := vo.NewInvitationID(id)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid invitation ID")
+	}
+
+	if err := h.service.Revoke(c.Context(), storeID, invitationID); err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
@@ -146,11 +183,30 @@ func (h *Handler) Revoke(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/invitations/{id}/resend [post]
 // @Security     BearerAuth
 func (h *Handler) Resend(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	userID := c.Locals("store_user_id").(string)
+	storeIDStr := httpx.GetStoreID(c)
+	memberIDStr := httpx.GetStoreUserID(c)
 	id := c.Params("id")
 
-	output, err := h.service.Resend(c.Context(), storeID, id, userID)
+	storeID, err := vo.NewStoreID(storeIDStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid store ID")
+	}
+
+	invitationID, err := vo.NewInvitationID(id)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid invitation ID")
+	}
+
+	inviterID, err := vo.NewMemberID(memberIDStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid inviter ID")
+	}
+
+	output, err := h.service.Resend(c.Context(), ResendInvitationInput{
+		StoreID:      storeID,
+		InvitationID: invitationID,
+		InviterID:    inviterID,
+	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
@@ -225,13 +281,18 @@ func (h *Handler) Accept(c *fiber.Ctx) error {
 	}
 
 	claims := httpx.GetClaims(c)
-	email := ""
+	emailStr := ""
 	name := ""
 	avatarURL := ""
 	if claims != nil {
-		email = claims.Email
+		emailStr = claims.Email
 		name = claims.FullName()
 		avatarURL = claims.ImageURL
+	}
+
+	email, err := vo.NewEmail(emailStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid email in claims")
 	}
 
 	output, err := h.service.Accept(c.Context(), AcceptInvitationInput{
