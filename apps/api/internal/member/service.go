@@ -4,6 +4,10 @@ import (
 	"context"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/internal/member/domain"
+	"livecart/apps/api/lib/httpx"
+	vo "livecart/apps/api/lib/valueobject"
 )
 
 type Service struct {
@@ -19,30 +23,45 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 }
 
 func (s *Service) List(ctx context.Context, storeID string) ([]MemberOutput, error) {
-	rows, err := s.repo.List(ctx, storeID)
+	members, err := s.repo.List(ctx, storeID)
 	if err != nil {
 		return nil, err
 	}
 
-	members := make([]MemberOutput, len(rows))
-	for i, row := range rows {
-		members[i] = MemberOutput{
-			ID:        row.ID,
-			Email:     row.Email,
-			Name:      row.Name,
-			AvatarURL: row.AvatarURL,
-			Role:      row.Role,
-			Status:    row.Status,
-			JoinedAt:  row.JoinedAt,
-			InvitedAt: row.InvitedAt,
-		}
+	outputs := make([]MemberOutput, len(members))
+	for i, m := range members {
+		outputs[i] = toMemberOutput(m)
 	}
 
-	return members, nil
+	return outputs, nil
 }
 
 func (s *Service) UpdateRole(ctx context.Context, input UpdateMemberRoleInput) (*MemberOutput, error) {
-	row, err := s.repo.UpdateRole(ctx, input.StoreID, input.MemberID, input.Role)
+	// Get the member to update
+	member, err := s.repo.GetByID(ctx, input.StoreID, input.MemberID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the actor (who is making the change)
+	actor, err := s.repo.GetByID(ctx, input.StoreID, input.ActorID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse the new role
+	newRole, err := vo.NewRole(input.Role)
+	if err != nil {
+		return nil, httpx.ErrUnprocessable("invalid role")
+	}
+
+	// Use domain logic to validate
+	if err := member.CanChangeRoleTo(newRole, actor); err != nil {
+		return nil, httpx.ErrForbidden(err.Error())
+	}
+
+	// Persist the change
+	updated, err := s.repo.UpdateRole(ctx, input.StoreID, input.MemberID, input.Role)
 	if err != nil {
 		return nil, err
 	}
@@ -51,61 +70,55 @@ func (s *Service) UpdateRole(ctx context.Context, input UpdateMemberRoleInput) (
 		zap.String("store_id", input.StoreID),
 		zap.String("member_id", input.MemberID),
 		zap.String("new_role", input.Role),
+		zap.String("updated_by", input.ActorID),
 	)
 
-	return &MemberOutput{
-		ID:        row.ID,
-		Email:     row.Email,
-		Name:      row.Name,
-		AvatarURL: row.AvatarURL,
-		Role:      row.Role,
-		Status:    row.Status,
-		JoinedAt:  row.JoinedAt,
-		InvitedAt: row.InvitedAt,
-	}, nil
+	output := toMemberOutput(updated)
+	return &output, nil
 }
 
-func (s *Service) Remove(ctx context.Context, storeID, memberID, requestingUserID string) error {
-	// Prevent self-removal
-	if memberID == requestingUserID {
-		return &SelfRemovalError{}
-	}
-
-	// Get member to check if they're the owner
-	member, err := s.repo.GetByID(ctx, storeID, memberID)
+func (s *Service) Remove(ctx context.Context, input RemoveMemberInput) error {
+	// Get the member to remove
+	member, err := s.repo.GetByID(ctx, input.StoreID, input.MemberID)
 	if err != nil {
 		return err
 	}
 
-	// Cannot remove the owner
-	if member.Role == RoleOwner {
-		return &CannotRemoveOwnerError{}
+	// Get the actor (who is removing)
+	actor, err := s.repo.GetByID(ctx, input.StoreID, input.ActorID)
+	if err != nil {
+		return err
 	}
 
-	err = s.repo.Remove(ctx, storeID, memberID)
-	if err != nil {
+	// Use domain logic to validate
+	if err := member.CanBeRemovedBy(actor); err != nil {
+		return httpx.ErrForbidden(err.Error())
+	}
+
+	// Persist the removal
+	if err := s.repo.Remove(ctx, input.StoreID, input.MemberID); err != nil {
 		return err
 	}
 
 	s.logger.Info("member removed from store",
-		zap.String("store_id", storeID),
-		zap.String("member_id", memberID),
-		zap.String("removed_by", requestingUserID),
+		zap.String("store_id", input.StoreID),
+		zap.String("member_id", input.MemberID),
+		zap.String("removed_by", input.ActorID),
 	)
 
 	return nil
 }
 
-// Custom errors
-
-type SelfRemovalError struct{}
-
-func (e *SelfRemovalError) Error() string {
-	return "cannot remove yourself from the store"
-}
-
-type CannotRemoveOwnerError struct{}
-
-func (e *CannotRemoveOwnerError) Error() string {
-	return "cannot remove the store owner"
+// toMemberOutput converts a domain Member to a MemberOutput DTO.
+func toMemberOutput(m *domain.Member) MemberOutput {
+	return MemberOutput{
+		ID:        m.ID().String(),
+		Email:     m.Email().String(),
+		Name:      m.Name(),
+		AvatarURL: m.AvatarURL(),
+		Role:      m.Role().String(),
+		Status:    m.Status().String(),
+		JoinedAt:  m.JoinedAt(),
+		InvitedAt: m.InvitedAt(),
+	}
 }

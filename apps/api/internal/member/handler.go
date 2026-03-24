@@ -1,8 +1,6 @@
 package member
 
 import (
-	"errors"
-
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
@@ -21,8 +19,8 @@ func NewHandler(svc *Service, validate *validator.Validate) *Handler {
 func (h *Handler) RegisterRoutes(r fiber.Router) {
 	members := r.Group("/members")
 	members.Get("/", h.List)
-	members.Patch("/:memberId/role", httpx.RequireRole(RoleOwner, RoleAdmin), h.UpdateRole)
-	members.Delete("/:memberId", httpx.RequireRole(RoleOwner, RoleAdmin), h.Remove)
+	members.Patch("/:memberId/role", httpx.RequireRole("owner", "admin"), h.UpdateRole)
+	members.Delete("/:memberId", httpx.RequireRole("owner", "admin"), h.Remove)
 }
 
 // List godoc
@@ -81,6 +79,7 @@ func (h *Handler) List(c *fiber.Ctx) error {
 func (h *Handler) UpdateRole(c *fiber.Ctx) error {
 	storeID := httpx.GetStoreID(c)
 	memberID := c.Params("memberId")
+	actorID := httpx.GetStoreUserID(c) // Who is making the change
 
 	var req UpdateMemberRoleRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -94,6 +93,7 @@ func (h *Handler) UpdateRole(c *fiber.Ctx) error {
 	member, err := h.svc.UpdateRole(c.Context(), UpdateMemberRoleInput{
 		StoreID:  storeID,
 		MemberID: memberID,
+		ActorID:  actorID,
 		Role:     req.Role,
 	})
 	if err != nil {
@@ -130,18 +130,14 @@ func (h *Handler) UpdateRole(c *fiber.Ctx) error {
 func (h *Handler) Remove(c *fiber.Ctx) error {
 	storeID := httpx.GetStoreID(c)
 	memberID := c.Params("memberId")
-	requestingUserID := httpx.GetStoreUserID(c)
+	actorID := httpx.GetStoreUserID(c) // Who is removing
 
-	err := h.svc.Remove(c.Context(), storeID, memberID, requestingUserID)
+	err := h.svc.Remove(c.Context(), RemoveMemberInput{
+		StoreID:  storeID,
+		MemberID: memberID,
+		ActorID:  actorID,
+	})
 	if err != nil {
-		var selfRemovalErr *SelfRemovalError
-		var ownerErr *CannotRemoveOwnerError
-		if errors.As(err, &selfRemovalErr) {
-			return httpx.HandleServiceError(c, httpx.ErrForbidden(err.Error()))
-		}
-		if errors.As(err, &ownerErr) {
-			return httpx.HandleServiceError(c, httpx.ErrForbidden(err.Error()))
-		}
 		return httpx.HandleServiceError(c, err)
 	}
 

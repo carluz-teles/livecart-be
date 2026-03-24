@@ -10,7 +10,9 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/member/domain"
 	"livecart/apps/api/lib/httpx"
+	vo "livecart/apps/api/lib/valueobject"
 )
 
 type Repository struct {
@@ -21,7 +23,7 @@ func NewRepository(q *sqlc.Queries) *Repository {
 	return &Repository{q: q}
 }
 
-func (r *Repository) List(ctx context.Context, storeID string) ([]MemberRow, error) {
+func (r *Repository) List(ctx context.Context, storeID string) ([]*domain.Member, error) {
 	storeUID, err := parseUUID(storeID)
 	if err != nil {
 		return nil, err
@@ -32,37 +34,38 @@ func (r *Repository) List(ctx context.Context, storeID string) ([]MemberRow, err
 		return nil, fmt.Errorf("listing store members: %w", err)
 	}
 
-	result := make([]MemberRow, len(rows))
+	members := make([]*domain.Member, len(rows))
 	for i, row := range rows {
-		var name, avatarURL *string
-		if row.Name.Valid {
-			name = &row.Name.String
-		}
-		if row.AvatarUrl.Valid {
-			avatarURL = &row.AvatarUrl.String
-		}
-		var invitedAt *time.Time
-		if row.InvitedAt.Valid {
-			invitedAt = &row.InvitedAt.Time
-		}
-
-		result[i] = MemberRow{
-			ID:        row.ID.String(),
-			StoreID:   row.StoreID.String(),
-			Email:     row.Email,
-			Name:      name,
-			AvatarURL: avatarURL,
-			Role:      row.Role,
-			Status:    row.Status,
-			JoinedAt:  row.CreatedAt.Time,
-			InvitedAt: invitedAt,
+		members[i], err = r.toDomainMember(row)
+		if err != nil {
+			return nil, fmt.Errorf("converting member row: %w", err)
 		}
 	}
 
-	return result, nil
+	return members, nil
 }
 
-func (r *Repository) UpdateRole(ctx context.Context, storeID, memberID, role string) (*MemberRow, error) {
+func (r *Repository) GetByID(ctx context.Context, storeID, memberID string) (*domain.Member, error) {
+	members, err := r.List(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	memberUID, err := vo.NewMemberID(memberID)
+	if err != nil {
+		return nil, httpx.ErrUnprocessable("invalid member id")
+	}
+
+	for _, m := range members {
+		if m.ID().Equals(memberUID) {
+			return m, nil
+		}
+	}
+
+	return nil, httpx.ErrNotFound("member not found")
+}
+
+func (r *Repository) UpdateRole(ctx context.Context, storeID, memberID, role string) (*domain.Member, error) {
 	storeUID, err := parseUUID(storeID)
 	if err != nil {
 		return nil, err
@@ -84,24 +87,7 @@ func (r *Repository) UpdateRole(ctx context.Context, storeID, memberID, role str
 		return nil, fmt.Errorf("updating member role: %w", err)
 	}
 
-	var name, avatarURL *string
-	if row.Name.Valid {
-		name = &row.Name.String
-	}
-	if row.AvatarUrl.Valid {
-		avatarURL = &row.AvatarUrl.String
-	}
-
-	return &MemberRow{
-		ID:        row.ID.String(),
-		StoreID:   row.StoreID.String(),
-		Email:     row.Email,
-		Name:      name,
-		AvatarURL: avatarURL,
-		Role:      row.Role,
-		Status:    row.Status,
-		JoinedAt:  row.CreatedAt.Time,
-	}, nil
+	return r.toDomainMemberFromUpdate(row)
 }
 
 func (r *Repository) Remove(ctx context.Context, storeID, memberID string) error {
@@ -125,19 +111,107 @@ func (r *Repository) Remove(ctx context.Context, storeID, memberID string) error
 	return nil
 }
 
-func (r *Repository) GetByID(ctx context.Context, storeID, memberID string) (*MemberRow, error) {
-	members, err := r.List(ctx, storeID)
+// toDomainMember converts a SQLC row to a domain Member.
+func (r *Repository) toDomainMember(row sqlc.GetStoreMembersRow) (*domain.Member, error) {
+	id, err := vo.NewMemberID(row.ID.String())
 	if err != nil {
 		return nil, err
 	}
 
-	for _, m := range members {
-		if m.ID == memberID {
-			return &m, nil
-		}
+	storeID, err := vo.NewStoreID(row.StoreID.String())
+	if err != nil {
+		return nil, err
 	}
 
-	return nil, httpx.ErrNotFound("member not found")
+	email, err := vo.NewEmail(row.Email)
+	if err != nil {
+		return nil, err
+	}
+
+	role, err := vo.NewRole(row.Role)
+	if err != nil {
+		return nil, err
+	}
+
+	status, err := domain.NewMemberStatus(row.Status)
+	if err != nil {
+		return nil, err
+	}
+
+	var name, avatarURL *string
+	if row.Name.Valid {
+		name = &row.Name.String
+	}
+	if row.AvatarUrl.Valid {
+		avatarURL = &row.AvatarUrl.String
+	}
+
+	var invitedAt *time.Time
+	if row.InvitedAt.Valid {
+		invitedAt = &row.InvitedAt.Time
+	}
+
+	return domain.Reconstruct(
+		id,
+		storeID,
+		email,
+		name,
+		avatarURL,
+		role,
+		status,
+		nil, // invitedBy not available in this query
+		row.CreatedAt.Time,
+		invitedAt,
+	), nil
+}
+
+// toDomainMemberFromUpdate converts an UpdateUserRole row to a domain Member.
+func (r *Repository) toDomainMemberFromUpdate(row sqlc.UpdateUserRoleRow) (*domain.Member, error) {
+	id, err := vo.NewMemberID(row.ID.String())
+	if err != nil {
+		return nil, err
+	}
+
+	storeID, err := vo.NewStoreID(row.StoreID.String())
+	if err != nil {
+		return nil, err
+	}
+
+	email, err := vo.NewEmail(row.Email)
+	if err != nil {
+		return nil, err
+	}
+
+	role, err := vo.NewRole(row.Role)
+	if err != nil {
+		return nil, err
+	}
+
+	status, err := domain.NewMemberStatus(row.Status)
+	if err != nil {
+		return nil, err
+	}
+
+	var name, avatarURL *string
+	if row.Name.Valid {
+		name = &row.Name.String
+	}
+	if row.AvatarUrl.Valid {
+		avatarURL = &row.AvatarUrl.String
+	}
+
+	return domain.Reconstruct(
+		id,
+		storeID,
+		email,
+		name,
+		avatarURL,
+		role,
+		status,
+		nil,
+		row.CreatedAt.Time,
+		nil,
+	), nil
 }
 
 func parseUUID(s string) (pgtype.UUID, error) {

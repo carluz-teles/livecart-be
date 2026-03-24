@@ -2,14 +2,9 @@ package member
 
 import "time"
 
-// Roles
-const (
-	RoleOwner  = "owner"
-	RoleAdmin  = "admin"
-	RoleMember = "member"
-)
-
+// ============================================
 // Handler layer - Request/Response types
+// ============================================
 
 type MemberResponse struct {
 	ID        string     `json:"id"`
@@ -30,7 +25,9 @@ type UpdateMemberRoleRequest struct {
 	Role string `json:"role" validate:"required,oneof=admin member"`
 }
 
-// Service layer
+// ============================================
+// Service layer - Input/Output types
+// ============================================
 
 type MemberOutput struct {
 	ID        string
@@ -46,19 +43,12 @@ type MemberOutput struct {
 type UpdateMemberRoleInput struct {
 	StoreID  string
 	MemberID string
+	ActorID  string // The store_user.id of who is making the change
 	Role     string
 }
 
-// Repository layer
-
-type MemberRow struct {
-	ID        string
-	StoreID   string
-	Email     string
-	Name      *string
-	AvatarURL *string
-	Role      string
-	Status    string
-	JoinedAt  time.Time
-	InvitedAt *time.Time
+type RemoveMemberInput struct {
+	StoreID  string
+	MemberID string
+	ActorID  string // The store_user.id of who is removing
 }
