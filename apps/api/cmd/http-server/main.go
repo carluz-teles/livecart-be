@@ -34,7 +34,9 @@ import (
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/integration/providers/erp"
 	"livecart/apps/api/internal/integration/providers/payment"
+	"livecart/apps/api/internal/invitation"
 	"livecart/apps/api/internal/live"
+	"livecart/apps/api/internal/member"
 	"livecart/apps/api/internal/order"
 	"livecart/apps/api/internal/product"
 	"livecart/apps/api/internal/store"
@@ -311,6 +313,23 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		integrationHandler := integration.NewHandler(integrationSvc, validate)
 		integrationHandler.RegisterRoutes(storeScoped)
 	}
+
+	// Invitation routes
+	invitationRepo := invitation.NewRepository(queries)
+	invitationSvc := invitation.NewService(invitationRepo, log)
+	invitationHandler := invitation.NewHandler(invitationSvc, validate)
+
+	// Public invitation routes (viewing invitation by token, accepting)
+	invitationHandler.RegisterPublicRoutes(api)
+
+	// Store-scoped invitation routes (create, list, revoke)
+	invitationHandler.RegisterRoutes(storeScoped)
+
+	// Member routes (store-scoped)
+	memberRepo := member.NewRepository(queries)
+	memberSvc := member.NewService(memberRepo, log)
+	memberHandler := member.NewHandler(memberSvc, validate)
+	memberHandler.RegisterRoutes(storeScoped)
 
 	return app
 }

@@ -128,6 +128,19 @@ type Store struct {
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 }
 
+type StoreInvitation struct {
+	ID         pgtype.UUID        `json:"id"`
+	StoreID    pgtype.UUID        `json:"store_id"`
+	Email      string             `json:"email"`
+	Role       string             `json:"role"`
+	Token      string             `json:"token"`
+	InvitedBy  pgtype.UUID        `json:"invited_by"`
+	Status     string             `json:"status"`
+	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
+	AcceptedAt pgtype.Timestamptz `json:"accepted_at"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
 type StoreUser struct {
 	ID           pgtype.UUID        `json:"id"`
 	StoreID      pgtype.UUID        `json:"store_id"`
@@ -139,6 +152,9 @@ type StoreUser struct {
 	Name         pgtype.Text        `json:"name"`
 	AvatarUrl    pgtype.Text        `json:"avatar_url"`
 	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	Status       string             `json:"status"`
+	InvitedBy    pgtype.UUID        `json:"invited_by"`
+	InvitedAt    pgtype.Timestamptz `json:"invited_at"`
 }
 
 type Subscription struct {

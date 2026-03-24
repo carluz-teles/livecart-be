@@ -19,6 +19,7 @@ func NewHandler(service *Service, validate *validator.Validate) *Handler {
 func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g := router.Group("/users")
 	g.Get("/me", h.GetMe)
+	g.Get("/me/stores", h.GetMyStores)
 	g.Post("/sync", h.SyncUser)
 }
 
@@ -50,11 +51,48 @@ func (h *Handler) GetMe(c *fiber.Ctx) error {
 		Name:      output.Name,
 		AvatarURL: output.AvatarURL,
 		Role:      output.Role,
+		Status:    output.Status,
 		StoreName: output.StoreName,
 		StoreSlug: output.StoreSlug,
 		CreatedAt: output.CreatedAt,
 		UpdatedAt: output.UpdatedAt,
 	})
+}
+
+// GetMyStores godoc
+// @Summary      Get all stores for current user
+// @Description  Returns all stores the authenticated user belongs to
+// @Tags         users
+// @Produce      json
+// @Success      200 {object} httpx.Envelope{data=GetUserStoresResponse}
+// @Failure      401 {object} httpx.Envelope
+// @Router       /api/v1/users/me/stores [get]
+// @Security     BearerAuth
+func (h *Handler) GetMyStores(c *fiber.Ctx) error {
+	clerkUserID := httpx.GetUserID(c)
+	if clerkUserID == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(httpx.Envelope{Error: "unauthorized"})
+	}
+
+	stores, err := h.service.GetUserStores(c.Context(), clerkUserID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	responses := make([]UserStoreResponse, len(stores))
+	for i, s := range stores {
+		responses[i] = UserStoreResponse{
+			ID:        s.ID,
+			StoreID:   s.StoreID,
+			Role:      s.Role,
+			Status:    s.Status,
+			StoreName: s.StoreName,
+			StoreSlug: s.StoreSlug,
+			CreatedAt: s.CreatedAt,
+		}
+	}
+
+	return httpx.OK(c, GetUserStoresResponse{Stores: responses})
 }
 
 // SyncUser godoc
@@ -114,6 +152,7 @@ func (h *Handler) SyncUser(c *fiber.Ctx) error {
 		Name:      output.Name,
 		AvatarURL: output.AvatarURL,
 		Role:      output.Role,
+		Status:    output.Status,
 		StoreName: output.StoreName,
 		StoreSlug: output.StoreSlug,
 		CreatedAt: output.CreatedAt,

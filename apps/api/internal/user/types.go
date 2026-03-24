@@ -11,6 +11,7 @@ type GetMeResponse struct {
 	Name      *string   `json:"name"`
 	AvatarURL *string   `json:"avatarUrl"`
 	Role      string    `json:"role"`
+	Status    string    `json:"status"`
 	StoreName string    `json:"storeName"`
 	StoreSlug string    `json:"storeSlug"`
 	CreatedAt time.Time `json:"createdAt"`
@@ -20,6 +21,20 @@ type GetMeResponse struct {
 type SyncUserRequest struct {
 	StoreName string `json:"storeName" validate:"required,min=2,max=100"`
 	StoreSlug string `json:"storeSlug" validate:"required,min=2,max=50,slug"`
+}
+
+type GetUserStoresResponse struct {
+	Stores []UserStoreResponse `json:"stores"`
+}
+
+type UserStoreResponse struct {
+	ID        string    `json:"id"`
+	StoreID   string    `json:"storeId"`
+	Role      string    `json:"role"`
+	Status    string    `json:"status"`
+	StoreName string    `json:"storeName"`
+	StoreSlug string    `json:"storeSlug"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // Service layer
@@ -40,6 +55,7 @@ type SyncUserOutput struct {
 	Name      *string
 	AvatarURL *string
 	Role      string
+	Status    string
 	StoreName string
 	StoreSlug string
 	CreatedAt time.Time
@@ -54,6 +70,7 @@ type UserOutput struct {
 	Name      *string
 	AvatarURL *string
 	Role      string
+	Status    string
 	StoreName string
 	StoreSlug string
 	CreatedAt time.Time
@@ -62,9 +79,20 @@ type UserOutput struct {
 
 type UpdateUserInput struct {
 	ClerkUserID string
+	StoreID     string
 	Email       string
 	Name        string
 	AvatarURL   string
+}
+
+type UserStoreOutput struct {
+	ID        string
+	StoreID   string
+	Role      string
+	Status    string
+	StoreName string
+	StoreSlug string
+	CreatedAt time.Time
 }
 
 // Repository layer
@@ -80,6 +108,7 @@ type CreateUserWithStoreParams struct {
 
 type UpdateUserParams struct {
 	ClerkUserID string
+	StoreID     string
 	Email       string
 	Name        string
 	AvatarURL   string
@@ -92,6 +121,7 @@ type UserRow struct {
 	Name      *string
 	AvatarURL *string
 	Role      string
+	Status    string
 	StoreName string
 	StoreSlug string
 	CreatedAt time.Time

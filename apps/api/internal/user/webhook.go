@@ -95,17 +95,13 @@ func (h *WebhookHandler) handleUserUpdated(c *fiber.Ctx, data json.RawMessage) e
 		name = strings.TrimSpace(userData.FirstName + " " + userData.LastName)
 	}
 
-	_, err := h.service.UpdateUser(c.Context(), UpdateUserInput{
+	err := h.service.UpdateUserAllStores(c.Context(), UpdateUserInput{
 		ClerkUserID: userData.ID,
 		Email:       email,
 		Name:        name,
 		AvatarURL:   userData.ImageURL,
 	})
 	if err != nil {
-		// If user not found, that's OK - they may not have synced yet
-		if httpx.IsNotFound(err) {
-			return httpx.OK(c, fiber.Map{"message": "user not synced yet"})
-		}
 		return httpx.HandleServiceError(c, err)
 	}
 

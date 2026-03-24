@@ -31,6 +31,11 @@ func (s *Service) GetByClerkID(ctx context.Context, clerkUserID string) (*UserOu
 	return toUserOutput(row), nil
 }
 
+// GetUserStores returns all stores a user belongs to
+func (s *Service) GetUserStores(ctx context.Context, clerkUserID string) ([]UserStoreOutput, error) {
+	return s.repo.GetUserStores(ctx, clerkUserID)
+}
+
 // SyncUser creates a new user with store if not exists, or returns existing user
 // This is the main entry point for user synchronization on first access
 func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserOutput, error) {
@@ -45,6 +50,7 @@ func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserO
 			Name:      existing.Name,
 			AvatarURL: existing.AvatarURL,
 			Role:      existing.Role,
+			Status:    existing.Status,
 			StoreName: existing.StoreName,
 			StoreSlug: existing.StoreSlug,
 			CreatedAt: existing.CreatedAt,
@@ -78,6 +84,7 @@ func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserO
 		Name:      row.Name,
 		AvatarURL: row.AvatarURL,
 		Role:      row.Role,
+		Status:    row.Status,
 		StoreName: row.StoreName,
 		StoreSlug: row.StoreSlug,
 		CreatedAt: row.CreatedAt,
@@ -86,10 +93,11 @@ func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserO
 	}, nil
 }
 
-// UpdateUser updates user profile information (typically called from Clerk webhook)
+// UpdateUser updates user profile for a specific store
 func (s *Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*UserOutput, error) {
 	row, err := s.repo.Update(ctx, UpdateUserParams{
 		ClerkUserID: input.ClerkUserID,
+		StoreID:     input.StoreID,
 		Email:       input.Email,
 		Name:        input.Name,
 		AvatarURL:   input.AvatarURL,
@@ -99,6 +107,16 @@ func (s *Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*UserO
 	}
 
 	return toUserOutput(row), nil
+}
+
+// UpdateUserAllStores updates user profile across all stores (for Clerk webhook)
+func (s *Service) UpdateUserAllStores(ctx context.Context, input UpdateUserInput) error {
+	return s.repo.UpdateAllStores(ctx, UpdateUserParams{
+		ClerkUserID: input.ClerkUserID,
+		Email:       input.Email,
+		Name:        input.Name,
+		AvatarURL:   input.AvatarURL,
+	})
 }
 
 // DeleteUser removes a user by their Clerk ID (typically called from Clerk webhook)
@@ -114,6 +132,7 @@ func toUserOutput(row *UserRow) *UserOutput {
 		Name:      row.Name,
 		AvatarURL: row.AvatarURL,
 		Role:      row.Role,
+		Status:    row.Status,
 		StoreName: row.StoreName,
 		StoreSlug: row.StoreSlug,
 		CreatedAt: row.CreatedAt,

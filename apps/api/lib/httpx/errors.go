@@ -9,10 +9,12 @@ type ServiceError struct {
 
 func (e *ServiceError) Error() string { return e.Message }
 
+func ErrBadRequest(msg string) error    { return &ServiceError{Code: 400, Message: msg} }
 func ErrNotFound(msg string) error      { return &ServiceError{Code: 404, Message: msg} }
-func ErrConflict(msg string) error      { return &ServiceError{Code: 409, Message: msg} }
-func ErrUnprocessable(msg string) error { return &ServiceError{Code: 422, Message: msg} }
 func ErrForbidden(msg string) error     { return &ServiceError{Code: 403, Message: msg} }
+func ErrConflict(msg string) error      { return &ServiceError{Code: 409, Message: msg} }
+func ErrGone(msg string) error          { return &ServiceError{Code: 410, Message: msg} }
+func ErrUnprocessable(msg string) error { return &ServiceError{Code: 422, Message: msg} }
 
 func IsNotFound(err error) bool {
 	var se *ServiceError

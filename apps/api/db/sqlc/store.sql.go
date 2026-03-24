@@ -41,7 +41,7 @@ func (q *Queries) CreateStore(ctx context.Context, arg CreateStoreParams) (Store
 const createStoreUser = `-- name: CreateStoreUser :one
 INSERT INTO store_users (store_id, email, role, password_hash)
 VALUES ($1, $2, $3, $4)
-RETURNING id, store_id, email, role, password_hash, created_at, clerk_user_id, name, avatar_url, updated_at
+RETURNING id, store_id, email, role, password_hash, created_at, clerk_user_id, name, avatar_url, updated_at, status, invited_by, invited_at
 `
 
 type CreateStoreUserParams struct {
@@ -70,6 +70,9 @@ func (q *Queries) CreateStoreUser(ctx context.Context, arg CreateStoreUserParams
 		&i.Name,
 		&i.AvatarUrl,
 		&i.UpdatedAt,
+		&i.Status,
+		&i.InvitedBy,
+		&i.InvitedAt,
 	)
 	return i, err
 }
@@ -115,7 +118,7 @@ func (q *Queries) GetStoreBySlug(ctx context.Context, slug string) (Store, error
 }
 
 const listStoreUsers = `-- name: ListStoreUsers :many
-SELECT id, store_id, email, role, password_hash, created_at, clerk_user_id, name, avatar_url, updated_at FROM store_users WHERE store_id = $1 ORDER BY created_at
+SELECT id, store_id, email, role, password_hash, created_at, clerk_user_id, name, avatar_url, updated_at, status, invited_by, invited_at FROM store_users WHERE store_id = $1 ORDER BY created_at
 `
 
 func (q *Queries) ListStoreUsers(ctx context.Context, storeID pgtype.UUID) ([]StoreUser, error) {
@@ -138,6 +141,9 @@ func (q *Queries) ListStoreUsers(ctx context.Context, storeID pgtype.UUID) ([]St
 			&i.Name,
 			&i.AvatarUrl,
 			&i.UpdatedAt,
+			&i.Status,
+			&i.InvitedBy,
+			&i.InvitedAt,
 		); err != nil {
 			return nil, err
 		}

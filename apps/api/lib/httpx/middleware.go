@@ -95,6 +95,8 @@ func SubscriptionMiddleware() fiber.Handler {
 // StoreAccessValidator validates if a user has access to a store
 type StoreAccessValidator interface {
 	ValidateStoreAccess(ctx context.Context, clerkUserID, storeID string) (bool, error)
+	// GetStoreAccessInfo returns storeUserID, role, error
+	GetStoreAccessInfo(ctx context.Context, clerkUserID, storeID string) (storeUserID string, role string, err error)
 }
 
 // StoreAccessMiddleware validates that the authenticated user has access to the store in the URL
@@ -110,18 +112,54 @@ func StoreAccessMiddleware(validator StoreAccessValidator) fiber.Handler {
 			return c.Status(fiber.StatusUnauthorized).JSON(Envelope{Error: "unauthorized"})
 		}
 
-		hasAccess, err := validator.ValidateStoreAccess(c.Context(), userID, storeID)
+		storeUserID, role, err := validator.GetStoreAccessInfo(c.Context(), userID, storeID)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(Envelope{Error: "failed to validate store access"})
 		}
 
-		if !hasAccess {
+		if storeUserID == "" {
 			return c.Status(fiber.StatusForbidden).JSON(Envelope{Error: "you don't have access to this store"})
 		}
 
-		// Set store_id in context for handlers
+		// Set store info in context for handlers
 		c.Locals("store_id", storeID)
+		c.Locals("store_user_id", storeUserID)
+		c.Locals("store_role", role)
 		return c.Next()
+	}
+}
+
+// GetStoreUserID returns the store_user.id from context
+func GetStoreUserID(c *fiber.Ctx) string {
+	if v := c.Locals("store_user_id"); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+// GetStoreRole returns the user's role in the store from context
+func GetStoreRole(c *fiber.Ctx) string {
+	if v := c.Locals("store_role"); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+// RequireRole middleware checks if the user has one of the required roles
+func RequireRole(roles ...string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		userRole := GetStoreRole(c)
+		if userRole == "" {
+			return c.Status(fiber.StatusForbidden).JSON(Envelope{Error: "no role assigned"})
+		}
+
+		for _, role := range roles {
+			if userRole == role {
+				return c.Next()
+			}
+		}
+
+		return c.Status(fiber.StatusForbidden).JSON(Envelope{Error: "insufficient permissions"})
 	}
 }
 
