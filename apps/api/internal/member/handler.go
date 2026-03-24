@@ -42,7 +42,7 @@ func (h *Handler) List(c *fiber.Ctx) error {
 
 	members, err := h.svc.List(c.Context(), storeID)
 	if err != nil {
-		return err
+		return httpx.HandleServiceError(c, err)
 	}
 
 	resp := make([]MemberResponse, len(members))
@@ -59,7 +59,7 @@ func (h *Handler) List(c *fiber.Ctx) error {
 		}
 	}
 
-	return c.JSON(httpx.Envelope{Data: ListMembersResponse{Data: resp}})
+	return httpx.OK(c, ListMembersResponse{Data: resp})
 }
 
 // UpdateRole godoc
@@ -84,11 +84,11 @@ func (h *Handler) UpdateRole(c *fiber.Ctx) error {
 
 	var req UpdateMemberRoleRequest
 	if err := c.BodyParser(&req); err != nil {
-		return httpx.ErrBadRequest("invalid request body")
+		return httpx.BadRequest(c, "invalid request body")
 	}
 
 	if err := h.validate.Struct(req); err != nil {
-		return httpx.ErrUnprocessable(err.Error())
+		return httpx.ValidationError(c, err)
 	}
 
 	member, err := h.svc.UpdateRole(c.Context(), UpdateMemberRoleInput{
@@ -99,12 +99,12 @@ func (h *Handler) UpdateRole(c *fiber.Ctx) error {
 	if err != nil {
 		var invalidRoleErr *InvalidRoleError
 		if errors.As(err, &invalidRoleErr) {
-			return httpx.ErrUnprocessable(err.Error())
+			return httpx.HandleServiceError(c, httpx.ErrUnprocessable(err.Error()))
 		}
-		return err
+		return httpx.HandleServiceError(c, err)
 	}
 
-	return c.JSON(httpx.Envelope{Data: MemberResponse{
+	return httpx.OK(c, MemberResponse{
 		ID:        member.ID,
 		Email:     member.Email,
 		Name:      member.Name,
@@ -113,7 +113,7 @@ func (h *Handler) UpdateRole(c *fiber.Ctx) error {
 		Status:    member.Status,
 		JoinedAt:  member.JoinedAt,
 		InvitedAt: member.InvitedAt,
-	}})
+	})
 }
 
 // Remove godoc
@@ -141,13 +141,13 @@ func (h *Handler) Remove(c *fiber.Ctx) error {
 		var selfRemovalErr *SelfRemovalError
 		var ownerErr *CannotRemoveOwnerError
 		if errors.As(err, &selfRemovalErr) {
-			return httpx.ErrForbidden(err.Error())
+			return httpx.HandleServiceError(c, httpx.ErrForbidden(err.Error()))
 		}
 		if errors.As(err, &ownerErr) {
-			return httpx.ErrForbidden(err.Error())
+			return httpx.HandleServiceError(c, httpx.ErrForbidden(err.Error()))
 		}
-		return err
+		return httpx.HandleServiceError(c, err)
 	}
 
-	return c.SendStatus(fiber.StatusNoContent)
+	return httpx.NoContent(c)
 }

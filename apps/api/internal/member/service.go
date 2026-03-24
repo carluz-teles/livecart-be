@@ -7,12 +7,15 @@ import (
 )
 
 type Service struct {
-	repo *Repository
-	log  *zap.Logger
+	repo   *Repository
+	logger *zap.Logger
 }
 
-func NewService(repo *Repository, log *zap.Logger) *Service {
-	return &Service{repo: repo, log: log}
+func NewService(repo *Repository, logger *zap.Logger) *Service {
+	return &Service{
+		repo:   repo,
+		logger: logger.Named("member"),
+	}
 }
 
 func (s *Service) List(ctx context.Context, storeID string) ([]MemberOutput, error) {
@@ -49,6 +52,12 @@ func (s *Service) UpdateRole(ctx context.Context, input UpdateMemberRoleInput) (
 		return nil, err
 	}
 
+	s.logger.Info("member role updated",
+		zap.String("store_id", input.StoreID),
+		zap.String("member_id", input.MemberID),
+		zap.String("new_role", input.Role),
+	)
+
 	return &MemberOutput{
 		ID:        row.ID,
 		Email:     row.Email,
@@ -78,7 +87,18 @@ func (s *Service) Remove(ctx context.Context, storeID, memberID, requestingUserI
 		return &CannotRemoveOwnerError{}
 	}
 
-	return s.repo.Remove(ctx, storeID, memberID)
+	err = s.repo.Remove(ctx, storeID, memberID)
+	if err != nil {
+		return err
+	}
+
+	s.logger.Info("member removed from store",
+		zap.String("store_id", storeID),
+		zap.String("member_id", memberID),
+		zap.String("removed_by", requestingUserID),
+	)
+
+	return nil
 }
 
 // Custom errors
