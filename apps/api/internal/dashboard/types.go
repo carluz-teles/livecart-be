@@ -2,10 +2,10 @@ package dashboard
 
 // Handler layer - Response types
 type DashboardStatsResponse struct {
-	TotalRevenue   int64 `json:"total_revenue"`
-	TotalOrders    int   `json:"total_orders"`
-	ActiveProducts int   `json:"active_products"`
-	TotalLives     int   `json:"total_lives"`
+	TotalRevenue   int64 `json:"totalRevenue"`
+	TotalOrders    int   `json:"totalOrders"`
+	ActiveProducts int   `json:"activeProducts"`
+	TotalLives     int   `json:"totalLives"`
 }
 
 type MonthlyRevenueResponse struct {
@@ -14,7 +14,7 @@ type MonthlyRevenueResponse struct {
 
 type MonthlyRevenueItem struct {
 	Month    string `json:"month"`
-	MonthNum int    `json:"month_num"`
+	MonthNum int    `json:"monthNum"`
 	Revenue  int64  `json:"revenue"`
 }
 
@@ -26,8 +26,8 @@ type TopProductItem struct {
 	ID           string `json:"id"`
 	Name         string `json:"name"`
 	Keyword      string `json:"keyword"`
-	TotalSold    int    `json:"total_sold"`
-	TotalRevenue int64  `json:"total_revenue"`
+	TotalSold    int    `json:"totalSold"`
+	TotalRevenue int64  `json:"totalRevenue"`
 }
 
 // Service layer

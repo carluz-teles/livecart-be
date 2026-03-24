@@ -19,10 +19,10 @@ type CustomerFilters struct {
 type CustomerResponse struct {
 	ID           string     `json:"id"`
 	Handle       string     `json:"handle"`
-	TotalOrders  int        `json:"total_orders"`
-	TotalSpent   int64      `json:"total_spent"`
-	LastOrderAt  *time.Time `json:"last_order_at"`
-	FirstOrderAt *time.Time `json:"first_order_at"`
+	TotalOrders  int        `json:"totalOrders"`
+	TotalSpent   int64      `json:"totalSpent"`
+	LastOrderAt  *time.Time `json:"lastOrderAt"`
+	FirstOrderAt *time.Time `json:"firstOrderAt"`
 }
 
 type ListCustomersResponse struct {
@@ -31,9 +31,9 @@ type ListCustomersResponse struct {
 }
 
 type CustomerStatsResponse struct {
-	TotalCustomers      int   `json:"total_customers"`
-	ActiveCustomers     int   `json:"active_customers"`
-	AvgSpentPerCustomer int64 `json:"avg_spent_per_customer"`
+	TotalCustomers      int   `json:"totalCustomers"`
+	ActiveCustomers     int   `json:"activeCustomers"`
+	AvgSpentPerCustomer int64 `json:"avgSpentPerCustomer"`
 }
 
 // Service layer

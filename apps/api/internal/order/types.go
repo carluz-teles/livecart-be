@@ -18,36 +18,36 @@ type OrderFilters struct {
 // Handler layer - Request/Response types
 type UpdateOrderRequest struct {
 	Status        *string `json:"status" validate:"omitempty,oneof=pending checkout completed expired"`
-	PaymentStatus *string `json:"payment_status" validate:"omitempty,oneof=pending paid failed refunded"`
+	PaymentStatus *string `json:"paymentStatus" validate:"omitempty,oneof=pending paid failed refunded"`
 }
 
 type OrderItemResponse struct {
 	ID           string  `json:"id"`
-	ProductID    string  `json:"product_id"`
-	ProductName  string  `json:"product_name"`
-	ProductImage *string `json:"product_image"`
+	ProductID    string  `json:"productId"`
+	ProductName  string  `json:"productName"`
+	ProductImage *string `json:"productImage"`
 	Keyword      string  `json:"keyword"`
 	Size         *string `json:"size"`
 	Quantity     int     `json:"quantity"`
-	UnitPrice    int64   `json:"unit_price"`
-	TotalPrice   int64   `json:"total_price"`
+	UnitPrice    int64   `json:"unitPrice"`
+	TotalPrice   int64   `json:"totalPrice"`
 }
 
 type OrderResponse struct {
 	ID             string              `json:"id"`
-	LiveSessionID  string              `json:"live_session_id"`
-	LiveTitle      string              `json:"live_title"`
-	LivePlatform   string              `json:"live_platform"`
-	CustomerHandle string              `json:"customer_handle"`
-	CustomerID     string              `json:"customer_id"`
+	LiveSessionID  string              `json:"liveSessionId"`
+	LiveTitle      string              `json:"liveTitle"`
+	LivePlatform   string              `json:"livePlatform"`
+	CustomerHandle string              `json:"customerHandle"`
+	CustomerID     string              `json:"customerId"`
 	Status         string              `json:"status"`
-	PaymentStatus  string              `json:"payment_status"`
+	PaymentStatus  string              `json:"paymentStatus"`
 	Items          []OrderItemResponse `json:"items"`
-	TotalItems     int                 `json:"total_items"`
-	TotalAmount    int64               `json:"total_amount"`
-	PaidAt         *time.Time          `json:"paid_at"`
-	CreatedAt      time.Time           `json:"created_at"`
-	ExpiresAt      *time.Time          `json:"expires_at"`
+	TotalItems     int                 `json:"totalItems"`
+	TotalAmount    int64               `json:"totalAmount"`
+	PaidAt         *time.Time          `json:"paidAt"`
+	CreatedAt      time.Time           `json:"createdAt"`
+	ExpiresAt      *time.Time          `json:"expiresAt"`
 }
 
 type ListOrdersResponse struct {
@@ -56,10 +56,10 @@ type ListOrdersResponse struct {
 }
 
 type OrderStatsResponse struct {
-	TotalOrders   int   `json:"total_orders"`
-	PendingOrders int   `json:"pending_orders"`
-	TotalRevenue  int64 `json:"total_revenue"`
-	AvgTicket     int64 `json:"avg_ticket"`
+	TotalOrders   int   `json:"totalOrders"`
+	PendingOrders int   `json:"pendingOrders"`
+	TotalRevenue  int64 `json:"totalRevenue"`
+	AvgTicket     int64 `json:"avgTicket"`
 }
 
 // Service layer

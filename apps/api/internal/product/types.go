@@ -34,11 +34,11 @@ type ListProductsResponse struct {
 // Handler layer - Create/Update
 type CreateProductRequest struct {
 	Name           string `json:"name" validate:"required,min=1,max=200"`
-	ExternalID     string `json:"external_id"`
-	ExternalSource string `json:"external_source" validate:"required,oneof=bling tiny shopify manual"`
+	ExternalID     string `json:"externalId"`
+	ExternalSource string `json:"externalSource" validate:"required,oneof=bling tiny shopify manual"`
 	Keyword        string `json:"keyword"`
 	Price          int64  `json:"price"` // price in cents
-	ImageURL       string `json:"image_url"`
+	ImageURL       string `json:"imageUrl"`
 	Stock          int    `json:"stock" validate:"min=0"`
 }
 
@@ -46,13 +46,13 @@ type CreateProductResponse struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	Keyword   string    `json:"keyword"`
-	CreatedAt time.Time `json:"created_at"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 type UpdateProductRequest struct {
 	Name     string `json:"name" validate:"required,min=1,max=200"`
 	Price    int64  `json:"price"` // price in cents
-	ImageURL string `json:"image_url"`
+	ImageURL string `json:"imageUrl"`
 	Stock    int    `json:"stock" validate:"min=0"`
 	Active   bool   `json:"active"`
 }
@@ -60,15 +60,15 @@ type UpdateProductRequest struct {
 type ProductResponse struct {
 	ID             string    `json:"id"`
 	Name           string    `json:"name"`
-	ExternalID     string    `json:"external_id"`
-	ExternalSource string    `json:"external_source"`
+	ExternalID     string    `json:"externalId"`
+	ExternalSource string    `json:"externalSource"`
 	Keyword        string    `json:"keyword"`
 	Price          int64     `json:"price"` // price in cents
-	ImageURL       string    `json:"image_url"`
+	ImageURL       string    `json:"imageUrl"`
 	Stock          int       `json:"stock"`
 	Active         bool      `json:"active"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // Service layer
@@ -185,10 +185,10 @@ type ProductRow struct {
 
 // Stats types
 type ProductStatsResponse struct {
-	TotalProducts int   `json:"total_products"`
-	ActiveCount   int   `json:"active_count"`
-	LowStockCount int   `json:"low_stock_count"` // stock <= 5
-	StockValue    int64 `json:"stock_value"`     // sum of price * stock in cents
+	TotalProducts int   `json:"totalProducts"`
+	ActiveCount   int   `json:"activeCount"`
+	LowStockCount int   `json:"lowStockCount"` // stock <= 5
+	StockValue    int64 `json:"stockValue"`    // sum of price * stock in cents
 }
 
 type ProductStatsOutput struct {

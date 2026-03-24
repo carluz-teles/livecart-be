@@ -6,20 +6,20 @@ import "time"
 
 type GetMeResponse struct {
 	ID        string    `json:"id"`
-	StoreID   string    `json:"store_id"`
+	StoreID   string    `json:"storeId"`
 	Email     string    `json:"email"`
 	Name      *string   `json:"name"`
-	AvatarURL *string   `json:"avatar_url"`
+	AvatarURL *string   `json:"avatarUrl"`
 	Role      string    `json:"role"`
-	StoreName string    `json:"store_name"`
-	StoreSlug string    `json:"store_slug"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	StoreName string    `json:"storeName"`
+	StoreSlug string    `json:"storeSlug"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 type SyncUserRequest struct {
-	StoreName string `json:"store_name" validate:"required,min=2,max=100"`
-	StoreSlug string `json:"store_slug" validate:"required,min=2,max=50,slug"`
+	StoreName string `json:"storeName" validate:"required,min=2,max=100"`
+	StoreSlug string `json:"storeSlug" validate:"required,min=2,max=50,slug"`
 }
 
 // Service layer

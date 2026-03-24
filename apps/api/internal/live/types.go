@@ -18,7 +18,7 @@ type LiveFilters struct {
 type CreateLiveRequest struct {
 	Title          string `json:"title" validate:"required,min=1,max=200"`
 	Platform       string `json:"platform" validate:"required,oneof=instagram tiktok youtube facebook"`
-	PlatformLiveID string `json:"platform_live_id" validate:"required"`
+	PlatformLiveID string `json:"platformLiveId" validate:"required"`
 }
 
 type CreateLiveResponse struct {
@@ -26,27 +26,27 @@ type CreateLiveResponse struct {
 	Title     string    `json:"title"`
 	Platform  string    `json:"platform"`
 	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 type UpdateLiveRequest struct {
 	Title          string `json:"title" validate:"required,min=1,max=200"`
 	Platform       string `json:"platform" validate:"required,oneof=instagram tiktok youtube facebook"`
-	PlatformLiveID string `json:"platform_live_id" validate:"required"`
+	PlatformLiveID string `json:"platformLiveId" validate:"required"`
 }
 
 type LiveResponse struct {
 	ID             string     `json:"id"`
 	Title          string     `json:"title"`
 	Platform       string     `json:"platform"`
-	PlatformLiveID string     `json:"platform_live_id"`
+	PlatformLiveID string     `json:"platformLiveId"`
 	Status         string     `json:"status"`
-	StartedAt      *time.Time `json:"started_at"`
-	EndedAt        *time.Time `json:"ended_at"`
-	TotalComments  int        `json:"total_comments"`
-	TotalOrders    int        `json:"total_orders"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	StartedAt      *time.Time `json:"startedAt"`
+	EndedAt        *time.Time `json:"endedAt"`
+	TotalComments  int        `json:"totalComments"`
+	TotalOrders    int        `json:"totalOrders"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
 }
 
 type ListLivesResponse struct {
@@ -55,9 +55,9 @@ type ListLivesResponse struct {
 }
 
 type LiveStatsResponse struct {
-	TotalLives  int `json:"total_lives"`
-	ActiveLives int `json:"active_lives"`
-	TotalOrders int `json:"total_orders"`
+	TotalLives  int `json:"totalLives"`
+	ActiveLives int `json:"activeLives"`
+	TotalOrders int `json:"totalOrders"`
 }
 
 // Service layer
