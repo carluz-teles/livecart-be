@@ -6,6 +6,7 @@ import (
 
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/query"
 )
 
 // Handler handles HTTP requests for integrations.
@@ -24,30 +25,24 @@ func NewHandler(service *Service, validate *validator.Validate) *Handler {
 
 // RegisterRoutes registers the integration routes.
 func (h *Handler) RegisterRoutes(router fiber.Router) {
-	integrations := router.Group("/integrations")
+	g := router.Group("/integrations")
 
 	// CRUD
-	integrations.Post("", h.Create)
-	integrations.Get("", h.List)
-	integrations.Get("/:integrationId", h.GetByID)
-	integrations.Delete("/:integrationId", h.Delete)
+	g.Get("/", h.List)
+	g.Post("/", h.Create)
+	g.Get("/:id", h.GetByID)
+	g.Delete("/:id", h.Delete)
 
 	// Test connection
-	integrations.Post("/:integrationId/test", h.TestConnection)
+	g.Post("/:id/test", h.TestConnection)
 
 	// OAuth connect
-	integrations.Get("/oauth/:provider/connect", h.OAuthConnect)
+	g.Get("/oauth/:provider/connect", h.OAuthConnect)
 
 	// Payment operations (Mercado Pago)
-	integrations.Post("/:integrationId/checkout", h.CreateCheckout)
-	integrations.Get("/:integrationId/payments/:paymentId", h.GetPaymentStatus)
-	integrations.Post("/:integrationId/payments/:paymentId/refund", h.RefundPayment)
-
-	// TODO: ERP operations (Tiny) - implement when needed
-	// integrations.Get("/:integrationId/products", h.ListProducts)
-	// integrations.Get("/:integrationId/products/:productId", h.GetProduct)
-	// integrations.Put("/:integrationId/products/:productId/sync", h.SyncProduct)
-	// integrations.Post("/:integrationId/orders", h.CreateOrder)
+	g.Post("/:id/checkout", h.CreateCheckout)
+	g.Get("/:id/payments/:paymentId", h.GetPaymentStatus)
+	g.Post("/:id/payments/:paymentId/refund", h.RefundPayment)
 }
 
 // =============================================================================
@@ -66,11 +61,9 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Failure 400 {object} httpx.Envelope
 // @Failure 422 {object} httpx.ValidationEnvelope
 // @Router /api/v1/stores/{storeId}/integrations [post]
+// @Security BearerAuth
 func (h *Handler) Create(c *fiber.Ctx) error {
-	storeID := httpx.GetStoreID(c)
-	if storeID == "" {
-		return httpx.BadRequest(c, "store_id not found in context")
-	}
+	storeID := c.Locals("store_id").(string)
 
 	var req CreateIntegrationRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -104,22 +97,36 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 // @Tags integrations
 // @Produce json
 // @Param storeId path string true "Store ID"
-// @Success 200 {object} httpx.Envelope{data=IntegrationListResponse}
+// @Param page query int false "Page number" default(1)
+// @Param limit query int false "Items per page" default(20)
+// @Success 200 {object} httpx.Envelope{data=ListIntegrationsResponse}
 // @Router /api/v1/stores/{storeId}/integrations [get]
+// @Security BearerAuth
 func (h *Handler) List(c *fiber.Ctx) error {
-	storeID := httpx.GetStoreID(c)
+	storeID := c.Locals("store_id").(string)
 
-	outputs, err := h.service.List(c.Context(), storeID)
+	input := ListIntegrationsInput{
+		StoreID: storeID,
+		Pagination: query.Pagination{
+			Page:  c.QueryInt("page", query.DefaultPage),
+			Limit: c.QueryInt("limit", query.DefaultLimit),
+		},
+	}
+
+	output, err := h.service.List(c.Context(), input)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	integrations := make([]IntegrationResponse, len(outputs))
-	for i, output := range outputs {
-		integrations[i] = *toIntegrationResponse(&output)
+	integrations := make([]IntegrationResponse, len(output.Integrations))
+	for i, o := range output.Integrations {
+		integrations[i] = *toIntegrationResponse(&o)
 	}
 
-	return httpx.OK(c, IntegrationListResponse{Integrations: integrations})
+	return httpx.OK(c, ListIntegrationsResponse{
+		Data:       integrations,
+		Pagination: query.NewPaginationResponse(output.Pagination, output.Total),
+	})
 }
 
 // GetByID retrieves an integration by ID.
@@ -128,15 +135,16 @@ func (h *Handler) List(c *fiber.Ctx) error {
 // @Tags integrations
 // @Produce json
 // @Param storeId path string true "Store ID"
-// @Param integrationId path string true "Integration ID"
+// @Param id path string true "Integration ID"
 // @Success 200 {object} httpx.Envelope{data=IntegrationResponse}
 // @Failure 404 {object} httpx.Envelope
-// @Router /api/v1/stores/{storeId}/integrations/{integrationId} [get]
+// @Router /api/v1/stores/{storeId}/integrations/{id} [get]
+// @Security BearerAuth
 func (h *Handler) GetByID(c *fiber.Ctx) error {
-	storeID := httpx.GetStoreID(c)
-	integrationID := c.Params("integrationId")
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
 
-	output, err := h.service.GetByID(c.Context(), integrationID, storeID)
+	output, err := h.service.GetByID(c.Context(), id, storeID)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
@@ -149,19 +157,20 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 // @Description Deletes an integration
 // @Tags integrations
 // @Param storeId path string true "Store ID"
-// @Param integrationId path string true "Integration ID"
+// @Param id path string true "Integration ID"
 // @Success 200 {object} httpx.Envelope{data=httpx.DeletedResponse}
 // @Failure 404 {object} httpx.Envelope
-// @Router /api/v1/stores/{storeId}/integrations/{integrationId} [delete]
+// @Router /api/v1/stores/{storeId}/integrations/{id} [delete]
+// @Security BearerAuth
 func (h *Handler) Delete(c *fiber.Ctx) error {
-	storeID := httpx.GetStoreID(c)
-	integrationID := c.Params("integrationId")
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
 
-	if err := h.service.Delete(c.Context(), integrationID, storeID); err != nil {
+	if err := h.service.Delete(c.Context(), id, storeID); err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	return httpx.Deleted(c, integrationID)
+	return httpx.Deleted(c, id)
 }
 
 // TestConnection tests the connection to the integration provider.
@@ -170,17 +179,18 @@ func (h *Handler) Delete(c *fiber.Ctx) error {
 // @Tags integrations
 // @Produce json
 // @Param storeId path string true "Store ID"
-// @Param integrationId path string true "Integration ID"
+// @Param id path string true "Integration ID"
 // @Success 200 {object} httpx.Envelope{data=TestConnectionResponse}
 // @Failure 404 {object} httpx.Envelope
-// @Router /api/v1/stores/{storeId}/integrations/{integrationId}/test [post]
+// @Router /api/v1/stores/{storeId}/integrations/{id}/test [post]
+// @Security BearerAuth
 func (h *Handler) TestConnection(c *fiber.Ctx) error {
-	storeID := httpx.GetStoreID(c)
-	integrationID := c.Params("integrationId")
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
 
 	output, err := h.service.TestConnection(c.Context(), TestConnectionInput{
 		StoreID:       storeID,
-		IntegrationID: integrationID,
+		IntegrationID: id,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -206,16 +216,17 @@ func (h *Handler) TestConnection(c *fiber.Ctx) error {
 // @Accept json
 // @Produce json
 // @Param storeId path string true "Store ID"
-// @Param integrationId path string true "Integration ID"
+// @Param id path string true "Integration ID"
 // @Param X-Idempotency-Key header string false "Idempotency key"
 // @Param body body CreateCheckoutRequest true "Checkout data"
 // @Success 201 {object} httpx.Envelope{data=CheckoutResponse}
 // @Failure 400 {object} httpx.Envelope
 // @Failure 422 {object} httpx.ValidationEnvelope
-// @Router /api/v1/stores/{storeId}/integrations/{integrationId}/checkout [post]
+// @Router /api/v1/stores/{storeId}/integrations/{id}/checkout [post]
+// @Security BearerAuth
 func (h *Handler) CreateCheckout(c *fiber.Ctx) error {
-	storeID := httpx.GetStoreID(c)
-	integrationID := c.Params("integrationId")
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
 	idempotencyKey := c.Get("X-Idempotency-Key")
 
 	var req CreateCheckoutRequest
@@ -224,7 +235,7 @@ func (h *Handler) CreateCheckout(c *fiber.Ctx) error {
 	}
 
 	// Override integration ID from path
-	req.IntegrationID = integrationID
+	req.IntegrationID = id
 
 	if err := h.validate.Struct(req); err != nil {
 		return httpx.ValidationError(c, err)
@@ -232,7 +243,7 @@ func (h *Handler) CreateCheckout(c *fiber.Ctx) error {
 
 	output, err := h.service.CreateCheckout(c.Context(), CreateCheckoutInput{
 		StoreID:        storeID,
-		IntegrationID:  integrationID,
+		IntegrationID:  id,
 		IdempotencyKey: idempotencyKey,
 		CartID:         req.CartID,
 		Items:          req.Items,
@@ -260,19 +271,20 @@ func (h *Handler) CreateCheckout(c *fiber.Ctx) error {
 // @Tags integrations
 // @Produce json
 // @Param storeId path string true "Store ID"
-// @Param integrationId path string true "Integration ID"
+// @Param id path string true "Integration ID"
 // @Param paymentId path string true "Payment ID"
 // @Success 200 {object} httpx.Envelope{data=PaymentStatusResponse}
 // @Failure 404 {object} httpx.Envelope
-// @Router /api/v1/stores/{storeId}/integrations/{integrationId}/payments/{paymentId} [get]
+// @Router /api/v1/stores/{storeId}/integrations/{id}/payments/{paymentId} [get]
+// @Security BearerAuth
 func (h *Handler) GetPaymentStatus(c *fiber.Ctx) error {
-	storeID := httpx.GetStoreID(c)
-	integrationID := c.Params("integrationId")
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
 	paymentID := c.Params("paymentId")
 
 	output, err := h.service.GetPaymentStatus(c.Context(), GetPaymentStatusInput{
 		StoreID:       storeID,
-		IntegrationID: integrationID,
+		IntegrationID: id,
 		PaymentID:     paymentID,
 	})
 	if err != nil {
@@ -297,15 +309,16 @@ func (h *Handler) GetPaymentStatus(c *fiber.Ctx) error {
 // @Accept json
 // @Produce json
 // @Param storeId path string true "Store ID"
-// @Param integrationId path string true "Integration ID"
+// @Param id path string true "Integration ID"
 // @Param paymentId path string true "Payment ID"
 // @Param body body RefundRequest true "Refund data"
 // @Success 200 {object} httpx.Envelope{data=RefundResponse}
 // @Failure 400 {object} httpx.Envelope
-// @Router /api/v1/stores/{storeId}/integrations/{integrationId}/payments/{paymentId}/refund [post]
+// @Router /api/v1/stores/{storeId}/integrations/{id}/payments/{paymentId}/refund [post]
+// @Security BearerAuth
 func (h *Handler) RefundPayment(c *fiber.Ctx) error {
-	storeID := httpx.GetStoreID(c)
-	integrationID := c.Params("integrationId")
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
 	paymentID := c.Params("paymentId")
 
 	var req RefundRequest
@@ -315,7 +328,7 @@ func (h *Handler) RefundPayment(c *fiber.Ctx) error {
 
 	output, err := h.service.RefundPayment(c.Context(), RefundPaymentInput{
 		StoreID:       storeID,
-		IntegrationID: integrationID,
+		IntegrationID: id,
 		PaymentID:     paymentID,
 		Amount:        req.Amount,
 	})
@@ -345,8 +358,9 @@ func (h *Handler) RefundPayment(c *fiber.Ctx) error {
 // @Success 200 {object} httpx.Envelope{data=OAuthConnectResponse}
 // @Failure 400 {object} httpx.Envelope
 // @Router /api/v1/stores/{storeId}/integrations/oauth/{provider}/connect [get]
+// @Security BearerAuth
 func (h *Handler) OAuthConnect(c *fiber.Ctx) error {
-	storeID := httpx.GetStoreID(c)
+	storeID := c.Locals("store_id").(string)
 	provider := c.Params("provider")
 
 	output, err := h.service.GetOAuthURL(c.Context(), GetOAuthURLInput{

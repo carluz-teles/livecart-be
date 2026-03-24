@@ -1,17 +1,19 @@
 package dashboard
 
 import (
+	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
 	"livecart/apps/api/lib/httpx"
 )
 
 type Handler struct {
-	service *Service
+	service  *Service
+	validate *validator.Validate
 }
 
-func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
+func NewHandler(service *Service, validate *validator.Validate) *Handler {
+	return &Handler{service: service, validate: validate}
 }
 
 func (h *Handler) RegisterRoutes(router fiber.Router) {

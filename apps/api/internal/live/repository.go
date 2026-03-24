@@ -264,6 +264,28 @@ func (r *Repository) End(ctx context.Context, id, storeID string) (LiveRow, erro
 	return toLiveRow(row), nil
 }
 
+func (r *Repository) Delete(ctx context.Context, id, storeID string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+
+	result, err := r.pool.Exec(ctx, "DELETE FROM live_sessions WHERE id = $1 AND store_id = $2", uid, storeUID)
+	if err != nil {
+		return fmt.Errorf("deleting live session: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return httpx.ErrNotFound("live session not found")
+	}
+
+	return nil
+}
+
 func (r *Repository) GetStats(ctx context.Context, storeID string) (LiveStatsOutput, error) {
 	storeUID, err := parseUUID(storeID)
 	if err != nil {

@@ -24,6 +24,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Post("/", h.Create)
 	g.Get("/:id", h.GetByID)
 	g.Put("/:id", h.Update)
+	g.Delete("/:id", h.Delete)
 	g.Post("/:id/start", h.Start)
 	g.Post("/:id/end", h.End)
 }
@@ -141,6 +142,27 @@ func (h *Handler) List(c *fiber.Ctx) error {
 		Data:       responses,
 		Pagination: query.NewPaginationResponse(output.Pagination, output.Total),
 	})
+}
+
+// Delete godoc
+// @Summary      Delete a live session
+// @Description  Deletes a live session by its UUID
+// @Tags         lives
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live session UUID"
+// @Success      200 {object} httpx.Envelope{data=httpx.DeletedResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id} [delete]
+// @Security     BearerAuth
+func (h *Handler) Delete(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
+
+	if err := h.service.Delete(c.Context(), id, storeID); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Deleted(c, id)
 }
 
 // Update godoc

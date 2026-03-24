@@ -12,6 +12,7 @@ import (
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/idempotency"
+	"livecart/apps/api/lib/query"
 )
 
 // Repository handles database operations for integrations.
@@ -116,24 +117,42 @@ func (r *Repository) GetByIDOnly(ctx context.Context, id string) (*IntegrationRo
 	return r.toIntegrationRow(row), nil
 }
 
-// ListByStore lists all integrations for a store.
-func (r *Repository) ListByStore(ctx context.Context, storeID string) ([]IntegrationRow, error) {
+// ListByStore lists all integrations for a store with pagination.
+func (r *Repository) ListByStore(ctx context.Context, storeID string, pagination query.Pagination) ([]IntegrationRow, int, error) {
 	sID, err := parseUUID(storeID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+
+	// Get total count
+	var total int
+	err = r.pool.QueryRow(ctx, `SELECT COUNT(*) FROM integrations WHERE store_id = $1`, sID).Scan(&total)
+	if err != nil {
+		return nil, 0, fmt.Errorf("counting integrations: %w", err)
 	}
 
 	rows, err := r.queries.ListIntegrationsByStore(ctx, sID)
 	if err != nil {
-		return nil, fmt.Errorf("listing integrations: %w", err)
+		return nil, 0, fmt.Errorf("listing integrations: %w", err)
 	}
 
-	result := make([]IntegrationRow, len(rows))
-	for i, row := range rows {
+	// Apply pagination in memory (integrations are few per store)
+	start := pagination.Offset()
+	end := start + pagination.Limit
+	if start > len(rows) {
+		start = len(rows)
+	}
+	if end > len(rows) {
+		end = len(rows)
+	}
+
+	paginatedRows := rows[start:end]
+	result := make([]IntegrationRow, len(paginatedRows))
+	for i, row := range paginatedRows {
 		result[i] = *r.toIntegrationRow(row)
 	}
 
-	return result, nil
+	return result, total, nil
 }
 
 // ListByType lists active integrations by type for a store.

@@ -329,6 +329,28 @@ func toProductRow(row sqlc.Product) ProductRow {
 	}
 }
 
+func (r *Repository) Delete(ctx context.Context, id, storeID string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+
+	result, err := r.pool.Exec(ctx, "DELETE FROM products WHERE id = $1 AND store_id = $2", uid, storeUID)
+	if err != nil {
+		return fmt.Errorf("deleting product: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return httpx.ErrNotFound("product not found")
+	}
+
+	return nil
+}
+
 func (r *Repository) GetStats(ctx context.Context, storeID string) (ProductStatsOutput, error) {
 	storeUID, err := parseUUID(storeID)
 	if err != nil {

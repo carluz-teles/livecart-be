@@ -139,6 +139,10 @@ func (s *Service) Update(ctx context.Context, input UpdateProductInput) (Product
 	return toProductOutput(row), nil
 }
 
+func (s *Service) Delete(ctx context.Context, id, storeID string) error {
+	return s.repo.Delete(ctx, id, storeID)
+}
+
 func toProductOutput(row ProductRow) ProductOutput {
 	return ProductOutput{
 		ID:             row.ID,

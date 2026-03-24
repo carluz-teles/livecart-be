@@ -26,6 +26,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Post("/", h.Create)
 	g.Get("/:id", h.GetByID)
 	g.Put("/:id", h.Update)
+	g.Delete("/:id", h.Delete)
 }
 
 // Create godoc
@@ -244,6 +245,27 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, toProductResponse(output))
+}
+
+// Delete godoc
+// @Summary      Delete a product
+// @Description  Deletes a product by its UUID
+// @Tags         products
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Product UUID"
+// @Success      200 {object} httpx.Envelope{data=httpx.DeletedResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/products/{id} [delete]
+// @Security     BearerAuth
+func (h *Handler) Delete(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
+
+	if err := h.service.Delete(c.Context(), id, storeID); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Deleted(c, id)
 }
 
 // GetStats godoc

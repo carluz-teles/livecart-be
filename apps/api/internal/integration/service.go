@@ -90,8 +90,10 @@ func (s *Service) GetByID(ctx context.Context, id, storeID string) (*CreateInteg
 }
 
 // List lists all integrations for a store.
-func (s *Service) List(ctx context.Context, storeID string) ([]CreateIntegrationOutput, error) {
-	rows, err := s.repo.ListByStore(ctx, storeID)
+func (s *Service) List(ctx context.Context, input ListIntegrationsInput) (*ListIntegrationsOutput, error) {
+	input.Pagination.Normalize()
+
+	rows, total, err := s.repo.ListByStore(ctx, input.StoreID, input.Pagination)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +102,12 @@ func (s *Service) List(ctx context.Context, storeID string) ([]CreateIntegration
 	for i, row := range rows {
 		result[i] = *s.toCreateOutput(&row)
 	}
-	return result, nil
+
+	return &ListIntegrationsOutput{
+		Integrations: result,
+		Pagination:   input.Pagination,
+		Total:        total,
+	}, nil
 }
 
 // Delete deletes an integration.

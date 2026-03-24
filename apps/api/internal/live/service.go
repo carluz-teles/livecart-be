@@ -105,6 +105,10 @@ func (s *Service) End(ctx context.Context, id, storeID string) (LiveOutput, erro
 	return toLiveOutput(row), nil
 }
 
+func (s *Service) Delete(ctx context.Context, id, storeID string) error {
+	return s.repo.Delete(ctx, id, storeID)
+}
+
 func (s *Service) GetStats(ctx context.Context, storeID string) (LiveStatsOutput, error) {
 	return s.repo.GetStats(ctx, storeID)
 }

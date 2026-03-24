@@ -303,7 +303,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	dashboardRepo := dashboard.NewRepository(pool)
 	dashboardSvc := dashboard.NewService(dashboardRepo, log)
-	dashboardHandler := dashboard.NewHandler(dashboardSvc)
+	dashboardHandler := dashboard.NewHandler(dashboardSvc, validate)
 	dashboardHandler.RegisterRoutes(storeScoped)
 
 	// Integration routes (store-scoped)

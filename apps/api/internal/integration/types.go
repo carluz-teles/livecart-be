@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/query"
 )
 
 // =============================================================================
@@ -37,9 +38,10 @@ type IntegrationResponse struct {
 	CreatedAt    time.Time      `json:"createdAt"`
 }
 
-// IntegrationListResponse is the HTTP response for listing integrations.
-type IntegrationListResponse struct {
-	Integrations []IntegrationResponse `json:"integrations"`
+// ListIntegrationsResponse is the HTTP response for listing integrations.
+type ListIntegrationsResponse struct {
+	Data       []IntegrationResponse  `json:"data"`
+	Pagination query.PaginationResponse `json:"pagination"`
 }
 
 // CreateCheckoutRequest is the HTTP request for creating a payment checkout.
@@ -106,6 +108,19 @@ type TestConnectionResponse struct {
 // =============================================================================
 // INPUT/OUTPUT TYPES (Service Layer)
 // =============================================================================
+
+// ListIntegrationsInput is the service input for listing integrations.
+type ListIntegrationsInput struct {
+	StoreID    string
+	Pagination query.Pagination
+}
+
+// ListIntegrationsOutput is the service output for listing integrations.
+type ListIntegrationsOutput struct {
+	Integrations []CreateIntegrationOutput
+	Pagination   query.Pagination
+	Total        int
+}
 
 // CreateIntegrationInput is the service input for creating an integration.
 type CreateIntegrationInput struct {
