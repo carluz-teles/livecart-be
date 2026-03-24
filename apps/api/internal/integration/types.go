@@ -1,0 +1,300 @@
+package integration
+
+import (
+	"time"
+
+	"livecart/apps/api/internal/integration/providers"
+)
+
+// =============================================================================
+// REQUEST/RESPONSE TYPES (HTTP Layer)
+// =============================================================================
+
+// CreateIntegrationRequest is the HTTP request body for creating an integration.
+type CreateIntegrationRequest struct {
+	Type        string         `json:"type" validate:"required,oneof=payment erp"`
+	Provider    string         `json:"provider" validate:"required,oneof=mercado_pago tiny"`
+	Credentials map[string]any `json:"credentials" validate:"required"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+}
+
+// UpdateIntegrationRequest is the HTTP request body for updating an integration.
+type UpdateIntegrationRequest struct {
+	Credentials map[string]any `json:"credentials,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	Status      string         `json:"status,omitempty" validate:"omitempty,oneof=active error disconnected"`
+}
+
+// IntegrationResponse is the HTTP response for an integration.
+type IntegrationResponse struct {
+	ID           string         `json:"id"`
+	StoreID      string         `json:"store_id"`
+	Type         string         `json:"type"`
+	Provider     string         `json:"provider"`
+	Status       string         `json:"status"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+	LastSyncedAt *time.Time     `json:"last_synced_at,omitempty"`
+	CreatedAt    time.Time      `json:"created_at"`
+}
+
+// IntegrationListResponse is the HTTP response for listing integrations.
+type IntegrationListResponse struct {
+	Integrations []IntegrationResponse `json:"integrations"`
+}
+
+// CreateCheckoutRequest is the HTTP request for creating a payment checkout.
+type CreateCheckoutRequest struct {
+	IntegrationID string                    `json:"integration_id" validate:"required,uuid"`
+	CartID        string                    `json:"cart_id" validate:"required"`
+	Items         []providers.CheckoutItem  `json:"items" validate:"required,min=1,dive"`
+	Customer      providers.CheckoutCustomer `json:"customer" validate:"required"`
+	TotalAmount   int64                      `json:"total_amount" validate:"required,gt=0"`
+	Currency      string                     `json:"currency" validate:"required,len=3"`
+	SuccessURL    string                     `json:"success_url" validate:"required,url"`
+	FailureURL    string                     `json:"failure_url" validate:"required,url"`
+	Metadata      map[string]any             `json:"metadata,omitempty"`
+}
+
+// CheckoutResponse is the HTTP response for a checkout.
+type CheckoutResponse struct {
+	CheckoutID  string     `json:"checkout_id"`
+	CheckoutURL string     `json:"checkout_url"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+}
+
+// PaymentStatusResponse is the HTTP response for payment status.
+type PaymentStatusResponse struct {
+	PaymentID     string         `json:"payment_id"`
+	Status        string         `json:"status"`
+	Amount        int64          `json:"amount"`
+	PaidAt        *time.Time     `json:"paid_at,omitempty"`
+	RefundedAt    *time.Time     `json:"refunded_at,omitempty"`
+	FailureReason string         `json:"failure_reason,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+}
+
+// RefundRequest is the HTTP request for refunding a payment.
+type RefundRequest struct {
+	IntegrationID string `json:"integration_id" validate:"required,uuid"`
+	PaymentID     string `json:"payment_id" validate:"required"`
+	Amount        *int64 `json:"amount,omitempty"` // nil = full refund
+}
+
+// RefundResponse is the HTTP response for a refund.
+type RefundResponse struct {
+	RefundID  string    `json:"refund_id"`
+	Status    string    `json:"status"`
+	Amount    int64     `json:"amount"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// OAuthConnectResponse is the HTTP response for initiating OAuth.
+type OAuthConnectResponse struct {
+	AuthURL string `json:"auth_url"`
+	State   string `json:"state"`
+}
+
+// TestConnectionResponse is the HTTP response for testing a connection.
+type TestConnectionResponse struct {
+	Success     bool           `json:"success"`
+	Message     string         `json:"message"`
+	LatencyMs   int64          `json:"latency_ms"`
+	AccountInfo map[string]any `json:"account_info,omitempty"`
+	TestedAt    time.Time      `json:"tested_at"`
+}
+
+// =============================================================================
+// INPUT/OUTPUT TYPES (Service Layer)
+// =============================================================================
+
+// CreateIntegrationInput is the service input for creating an integration.
+type CreateIntegrationInput struct {
+	StoreID     string
+	Type        string
+	Provider    string
+	Credentials *providers.Credentials
+	Metadata    map[string]any
+}
+
+// CreateIntegrationOutput is the service output for creating an integration.
+type CreateIntegrationOutput struct {
+	ID           string
+	StoreID      string
+	Type         string
+	Provider     string
+	Status       string
+	Metadata     map[string]any
+	LastSyncedAt *time.Time
+	CreatedAt    time.Time
+}
+
+// CreateCheckoutInput is the service input for creating a checkout.
+type CreateCheckoutInput struct {
+	StoreID        string
+	IntegrationID  string
+	IdempotencyKey string
+	CartID         string
+	Items          []providers.CheckoutItem
+	Customer       providers.CheckoutCustomer
+	TotalAmount    int64
+	Currency       string
+	NotifyURL      string
+	SuccessURL     string
+	FailureURL     string
+	Metadata       map[string]any
+}
+
+// CreateCheckoutOutput is the service output for creating a checkout.
+type CreateCheckoutOutput struct {
+	CheckoutID  string
+	CheckoutURL string
+	ExpiresAt   *time.Time
+}
+
+// GetPaymentStatusInput is the service input for getting payment status.
+type GetPaymentStatusInput struct {
+	StoreID       string
+	IntegrationID string
+	PaymentID     string
+}
+
+// GetPaymentStatusOutput is the service output for getting payment status.
+type GetPaymentStatusOutput struct {
+	PaymentID     string
+	Status        string
+	Amount        int64
+	PaidAt        *time.Time
+	RefundedAt    *time.Time
+	FailureReason string
+	Metadata      map[string]any
+}
+
+// RefundPaymentInput is the service input for refunding a payment.
+type RefundPaymentInput struct {
+	StoreID       string
+	IntegrationID string
+	PaymentID     string
+	Amount        *int64
+}
+
+// RefundPaymentOutput is the service output for refunding a payment.
+type RefundPaymentOutput struct {
+	RefundID  string
+	Status    string
+	Amount    int64
+	CreatedAt time.Time
+}
+
+// GetOAuthURLInput is the service input for getting OAuth URL.
+type GetOAuthURLInput struct {
+	StoreID  string
+	Provider string
+}
+
+// GetOAuthURLOutput is the service output for getting OAuth URL.
+type GetOAuthURLOutput struct {
+	AuthURL string
+	State   string
+}
+
+// OAuthCallbackInput is the input for handling OAuth callback.
+type OAuthCallbackInput struct {
+	Provider string
+	Code     string
+	State    string
+}
+
+// OAuthCallbackOutput is the output for handling OAuth callback.
+type OAuthCallbackOutput struct {
+	IntegrationID string
+	StoreID       string
+	Provider      string
+	Status        string
+}
+
+// TestConnectionInput is the service input for testing a connection.
+type TestConnectionInput struct {
+	StoreID       string
+	IntegrationID string
+}
+
+// TestConnectionOutput is the service output for testing a connection.
+type TestConnectionOutput struct {
+	Success     bool
+	Message     string
+	Latency     time.Duration
+	AccountInfo map[string]any
+	TestedAt    time.Time
+}
+
+// =============================================================================
+// REPOSITORY TYPES (Data Layer)
+// =============================================================================
+
+// IntegrationRow represents a row from the integrations table.
+type IntegrationRow struct {
+	ID             string
+	StoreID        string
+	Type           string
+	Provider       string
+	Status         string
+	Credentials    []byte // Encrypted
+	TokenExpiresAt *time.Time
+	Metadata       map[string]any
+	LastSyncedAt   *time.Time
+	CreatedAt      time.Time
+}
+
+// CreateIntegrationParams contains parameters for creating an integration.
+type CreateIntegrationParams struct {
+	StoreID        string
+	Type           string
+	Provider       string
+	Status         string
+	Credentials    []byte
+	TokenExpiresAt *time.Time
+	Metadata       map[string]any
+}
+
+// UpdateIntegrationParams contains parameters for updating an integration.
+type UpdateIntegrationParams struct {
+	ID             string
+	Credentials    []byte
+	TokenExpiresAt *time.Time
+	Status         string
+}
+
+// =============================================================================
+// WEBHOOK TYPES
+// =============================================================================
+
+// StoreWebhookInput is the input for storing a webhook event.
+type StoreWebhookInput struct {
+	IntegrationID  string
+	Provider       string
+	EventType      string
+	EventID        string
+	Payload        []byte
+	SignatureValid bool
+}
+
+// ProcessPaymentInput is the input for processing a payment notification.
+type ProcessPaymentInput struct {
+	IntegrationID string
+	PaymentID     string
+}
+
+// WebhookEventRow represents a row from the webhook_events table.
+type WebhookEventRow struct {
+	ID            string
+	IntegrationID string
+	Provider      string
+	EventType     string
+	EventID       string
+	Payload       []byte
+	SignatureValid *bool
+	Processed     bool
+	ProcessedAt   *time.Time
+	ErrorMessage  string
+	CreatedAt     time.Time
+}

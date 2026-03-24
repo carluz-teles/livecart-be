@@ -21,6 +21,13 @@ const (
 	AWSAccessKeyID     Key = "AWS_ACCESS_KEY_ID"
 	AWSSecretAccessKey Key = "AWS_SECRET_ACCESS_KEY"
 	SQSQueueURL        Key = "SQS_QUEUE_URL"
+
+	// Integration Layer
+	EncryptionKey        Key = "ENCRYPTION_KEY"          // Base64-encoded 32-byte key for AES-GCM
+	WebhookBaseURL       Key = "WEBHOOK_BASE_URL"        // Base URL for webhook callbacks (e.g., https://api.livecart.com)
+	FrontendURL          Key = "FRONTEND_URL"            // Frontend URL for redirects (e.g., https://livecart.com)
+	MercadoPagoAppID     Key = "MERCADO_PAGO_APP_ID"     // Mercado Pago OAuth App ID
+	MercadoPagoAppSecret Key = "MERCADO_PAGO_APP_SECRET" // Mercado Pago OAuth App Secret
 )
 
 // Environment values

@@ -49,7 +49,6 @@ SELECT
     ci.id,
     ci.cart_id,
     ci.product_id,
-    ci.size,
     ci.quantity,
     ci.unit_price,
     p.name as product_name,

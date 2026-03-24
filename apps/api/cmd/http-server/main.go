@@ -22,12 +22,18 @@ import (
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/lib/clerk"
 	"livecart/apps/api/lib/config"
+	"livecart/apps/api/lib/crypto"
 	"livecart/apps/api/lib/database"
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/idempotency"
 	"livecart/apps/api/lib/logger"
 
 	"livecart/apps/api/internal/customer"
 	"livecart/apps/api/internal/dashboard"
+	"livecart/apps/api/internal/integration"
+	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/internal/integration/providers/erp"
+	"livecart/apps/api/internal/integration/providers/payment"
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/internal/order"
 	"livecart/apps/api/internal/product"
@@ -146,9 +152,112 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	userRepo := user.NewRepository(queries)
 	userSvc := user.NewService(userRepo)
 
+	// Integration Layer setup
+	var integrationSvc *integration.Service
+	var integrationWebhookHandler *integration.WebhookHandler
+
+	if config.EncryptionKey.IsSet() {
+		encryptor, err := crypto.NewEncryptor(config.EncryptionKey.String())
+		if err != nil {
+			log.Sugar().Warnf("integration layer disabled: %v", err)
+		} else {
+			// Create provider factory with constructors
+			providerFactory := providers.NewFactory(providers.FactoryConfig{
+				Logger:               log,
+				MercadoPagoAppID:     config.MercadoPagoAppID.String(),
+				MercadoPagoAppSecret: config.MercadoPagoAppSecret.String(),
+				MercadoPagoConstructor: func(cfg providers.MercadoPagoConfig) (providers.PaymentProvider, error) {
+					return payment.NewMercadoPago(payment.MercadoPagoConfig{
+						IntegrationID: cfg.IntegrationID,
+						StoreID:       cfg.StoreID,
+						Credentials:   cfg.Credentials,
+						AppID:         cfg.AppID,
+						AppSecret:     cfg.AppSecret,
+						Logger:        cfg.Logger,
+						LogFunc:       cfg.LogFunc,
+					})
+				},
+				TinyConstructor: func(cfg providers.TinyConfig) (providers.ERPProvider, error) {
+					return erp.NewTiny(erp.TinyConfig{
+						IntegrationID: cfg.IntegrationID,
+						StoreID:       cfg.StoreID,
+						Credentials:   cfg.Credentials,
+						ClientID:      cfg.ClientID,
+						ClientSecret:  cfg.ClientSecret,
+						Logger:        cfg.Logger,
+						LogFunc:       cfg.LogFunc,
+					})
+				},
+			})
+
+			// Create repositories
+			integrationRepo := integration.NewRepository(queries, pool)
+			idempotencyRepo := integration.NewIdempotencyRepository(queries)
+			idempotencySvc := idempotency.NewService(idempotencyRepo)
+
+			// Create service
+			integrationSvc = integration.NewService(
+				integrationRepo,
+				providerFactory,
+				encryptor,
+				idempotencySvc,
+				log,
+			)
+
+			// Set log function for providers
+			providerFactory = providers.NewFactory(providers.FactoryConfig{
+				Logger:               log,
+				LogFunc:              integrationSvc.LogIntegrationOperation,
+				MercadoPagoAppID:     config.MercadoPagoAppID.String(),
+				MercadoPagoAppSecret: config.MercadoPagoAppSecret.String(),
+				MercadoPagoConstructor: func(cfg providers.MercadoPagoConfig) (providers.PaymentProvider, error) {
+					return payment.NewMercadoPago(payment.MercadoPagoConfig{
+						IntegrationID: cfg.IntegrationID,
+						StoreID:       cfg.StoreID,
+						Credentials:   cfg.Credentials,
+						AppID:         cfg.AppID,
+						AppSecret:     cfg.AppSecret,
+						Logger:        cfg.Logger,
+						LogFunc:       cfg.LogFunc,
+					})
+				},
+				TinyConstructor: func(cfg providers.TinyConfig) (providers.ERPProvider, error) {
+					return erp.NewTiny(erp.TinyConfig{
+						IntegrationID: cfg.IntegrationID,
+						StoreID:       cfg.StoreID,
+						Credentials:   cfg.Credentials,
+						ClientID:      cfg.ClientID,
+						ClientSecret:  cfg.ClientSecret,
+						Logger:        cfg.Logger,
+						LogFunc:       cfg.LogFunc,
+					})
+				},
+			})
+
+			// Recreate service with logging-enabled factory
+			integrationSvc = integration.NewService(
+				integrationRepo,
+				providerFactory,
+				encryptor,
+				idempotencySvc,
+				log,
+			)
+
+			// Create webhook handler
+			integrationWebhookHandler = integration.NewWebhookHandler(integrationSvc, log)
+
+			log.Info("integration layer initialized")
+		}
+	}
+
 	// Webhook routes (unauthenticated, use webhook signature)
 	webhookHandler := user.NewWebhookHandler(userSvc)
 	webhookHandler.RegisterRoutes(app)
+
+	// Integration webhook routes (if enabled)
+	if integrationWebhookHandler != nil {
+		integrationWebhookHandler.RegisterRoutes(app)
+	}
 
 	// Protected routes (user-scoped)
 	api := app.Group("/api/v1")
@@ -193,6 +302,12 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	dashboardSvc := dashboard.NewService(dashboardRepo)
 	dashboardHandler := dashboard.NewHandler(dashboardSvc)
 	dashboardHandler.RegisterRoutes(storeScoped)
+
+	// Integration routes (store-scoped)
+	if integrationSvc != nil {
+		integrationHandler := integration.NewHandler(integrationSvc, validate)
+		integrationHandler.RegisterRoutes(storeScoped)
+	}
 
 	return app
 }

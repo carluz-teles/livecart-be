@@ -48,18 +48,30 @@ type DetectedOrder struct {
 	DetectedAt     pgtype.Timestamptz `json:"detected_at"`
 }
 
+type IdempotencyKey struct {
+	ID              pgtype.UUID        `json:"id"`
+	IdempotencyKey  string             `json:"idempotency_key"`
+	StoreID         pgtype.UUID        `json:"store_id"`
+	IntegrationID   pgtype.UUID        `json:"integration_id"`
+	Operation       string             `json:"operation"`
+	RequestHash     pgtype.Text        `json:"request_hash"`
+	ResponsePayload []byte             `json:"response_payload"`
+	Status          string             `json:"status"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+}
+
 type Integration struct {
 	ID             pgtype.UUID        `json:"id"`
 	StoreID        pgtype.UUID        `json:"store_id"`
 	Type           string             `json:"type"`
 	Provider       string             `json:"provider"`
 	Status         string             `json:"status"`
-	AccessToken    pgtype.Text        `json:"access_token"`
-	RefreshToken   pgtype.Text        `json:"refresh_token"`
 	TokenExpiresAt pgtype.Timestamptz `json:"token_expires_at"`
-	ExtraConfig    []byte             `json:"extra_config"`
 	LastSyncedAt   pgtype.Timestamptz `json:"last_synced_at"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	Credentials    []byte             `json:"credentials"`
+	Metadata       []byte             `json:"metadata"`
 }
 
 type IntegrationLog struct {
@@ -139,4 +151,18 @@ type Subscription struct {
 	CurrentPeriodEnd       pgtype.Timestamptz `json:"current_period_end"`
 	CancelledAt            pgtype.Timestamptz `json:"cancelled_at"`
 	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+}
+
+type WebhookEvent struct {
+	ID             pgtype.UUID        `json:"id"`
+	IntegrationID  pgtype.UUID        `json:"integration_id"`
+	Provider       string             `json:"provider"`
+	EventType      string             `json:"event_type"`
+	EventID        pgtype.Text        `json:"event_id"`
+	Payload        []byte             `json:"payload"`
+	SignatureValid pgtype.Bool        `json:"signature_valid"`
+	Processed      bool               `json:"processed"`
+	ProcessedAt    pgtype.Timestamptz `json:"processed_at"`
+	ErrorMessage   pgtype.Text        `json:"error_message"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 }

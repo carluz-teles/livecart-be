@@ -1,0 +1,419 @@
+package integration
+
+import (
+	"github.com/go-playground/validator/v10"
+	"github.com/gofiber/fiber/v2"
+
+	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/httpx"
+)
+
+// Handler handles HTTP requests for integrations.
+type Handler struct {
+	service  *Service
+	validate *validator.Validate
+}
+
+// NewHandler creates a new integration handler.
+func NewHandler(service *Service, validate *validator.Validate) *Handler {
+	return &Handler{
+		service:  service,
+		validate: validate,
+	}
+}
+
+// RegisterRoutes registers the integration routes.
+func (h *Handler) RegisterRoutes(router fiber.Router) {
+	integrations := router.Group("/integrations")
+
+	// CRUD
+	integrations.Post("", h.Create)
+	integrations.Get("", h.List)
+	integrations.Get("/:integrationId", h.GetByID)
+	integrations.Delete("/:integrationId", h.Delete)
+
+	// Test connection
+	integrations.Post("/:integrationId/test", h.TestConnection)
+
+	// OAuth connect
+	integrations.Get("/oauth/:provider/connect", h.OAuthConnect)
+
+	// Payment operations (Mercado Pago)
+	integrations.Post("/:integrationId/checkout", h.CreateCheckout)
+	integrations.Get("/:integrationId/payments/:paymentId", h.GetPaymentStatus)
+	integrations.Post("/:integrationId/payments/:paymentId/refund", h.RefundPayment)
+
+	// TODO: ERP operations (Tiny) - implement when needed
+	// integrations.Get("/:integrationId/products", h.ListProducts)
+	// integrations.Get("/:integrationId/products/:productId", h.GetProduct)
+	// integrations.Put("/:integrationId/products/:productId/sync", h.SyncProduct)
+	// integrations.Post("/:integrationId/orders", h.CreateOrder)
+}
+
+// =============================================================================
+// CRUD HANDLERS
+// =============================================================================
+
+// Create creates a new integration.
+// @Summary Create integration
+// @Description Creates a new external service integration
+// @Tags integrations
+// @Accept json
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param body body CreateIntegrationRequest true "Integration data"
+// @Success 201 {object} httpx.Envelope{data=IntegrationResponse}
+// @Failure 400 {object} httpx.Envelope
+// @Failure 422 {object} httpx.ValidationEnvelope
+// @Router /api/v1/stores/{storeId}/integrations [post]
+func (h *Handler) Create(c *fiber.Ctx) error {
+	storeID := httpx.GetStoreID(c)
+	if storeID == "" {
+		return httpx.BadRequest(c, "store_id not found in context")
+	}
+
+	var req CreateIntegrationRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	// Convert credentials map to Credentials struct
+	creds := mapToCredentials(req.Credentials)
+
+	output, err := h.service.Create(c.Context(), CreateIntegrationInput{
+		StoreID:     storeID,
+		Type:        req.Type,
+		Provider:    req.Provider,
+		Credentials: creds,
+		Metadata:    req.Metadata,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Created(c, toIntegrationResponse(output))
+}
+
+// List lists all integrations for a store.
+// @Summary List integrations
+// @Description Lists all integrations for the current store
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Success 200 {object} httpx.Envelope{data=IntegrationListResponse}
+// @Router /api/v1/stores/{storeId}/integrations [get]
+func (h *Handler) List(c *fiber.Ctx) error {
+	storeID := httpx.GetStoreID(c)
+
+	outputs, err := h.service.List(c.Context(), storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	integrations := make([]IntegrationResponse, len(outputs))
+	for i, output := range outputs {
+		integrations[i] = *toIntegrationResponse(&output)
+	}
+
+	return httpx.OK(c, IntegrationListResponse{Integrations: integrations})
+}
+
+// GetByID retrieves an integration by ID.
+// @Summary Get integration
+// @Description Retrieves an integration by ID
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param integrationId path string true "Integration ID"
+// @Success 200 {object} httpx.Envelope{data=IntegrationResponse}
+// @Failure 404 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/{integrationId} [get]
+func (h *Handler) GetByID(c *fiber.Ctx) error {
+	storeID := httpx.GetStoreID(c)
+	integrationID := c.Params("integrationId")
+
+	output, err := h.service.GetByID(c.Context(), integrationID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, toIntegrationResponse(output))
+}
+
+// Delete deletes an integration.
+// @Summary Delete integration
+// @Description Deletes an integration
+// @Tags integrations
+// @Param storeId path string true "Store ID"
+// @Param integrationId path string true "Integration ID"
+// @Success 204
+// @Failure 404 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/{integrationId} [delete]
+func (h *Handler) Delete(c *fiber.Ctx) error {
+	storeID := httpx.GetStoreID(c)
+	integrationID := c.Params("integrationId")
+
+	if err := h.service.Delete(c.Context(), integrationID, storeID); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.NoContent(c)
+}
+
+// TestConnection tests the connection to the integration provider.
+// @Summary Test integration connection
+// @Description Tests if the integration credentials are valid and the provider is reachable
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param integrationId path string true "Integration ID"
+// @Success 200 {object} httpx.Envelope{data=TestConnectionResponse}
+// @Failure 404 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/{integrationId}/test [post]
+func (h *Handler) TestConnection(c *fiber.Ctx) error {
+	storeID := httpx.GetStoreID(c)
+	integrationID := c.Params("integrationId")
+
+	output, err := h.service.TestConnection(c.Context(), TestConnectionInput{
+		StoreID:       storeID,
+		IntegrationID: integrationID,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, TestConnectionResponse{
+		Success:     output.Success,
+		Message:     output.Message,
+		LatencyMs:   output.Latency.Milliseconds(),
+		AccountInfo: output.AccountInfo,
+		TestedAt:    output.TestedAt,
+	})
+}
+
+// =============================================================================
+// PAYMENT HANDLERS
+// =============================================================================
+
+// CreateCheckout creates a payment checkout session.
+// @Summary Create checkout
+// @Description Creates a payment checkout session
+// @Tags integrations
+// @Accept json
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param integrationId path string true "Integration ID"
+// @Param X-Idempotency-Key header string false "Idempotency key"
+// @Param body body CreateCheckoutRequest true "Checkout data"
+// @Success 201 {object} httpx.Envelope{data=CheckoutResponse}
+// @Failure 400 {object} httpx.Envelope
+// @Failure 422 {object} httpx.ValidationEnvelope
+// @Router /api/v1/stores/{storeId}/integrations/{integrationId}/checkout [post]
+func (h *Handler) CreateCheckout(c *fiber.Ctx) error {
+	storeID := httpx.GetStoreID(c)
+	integrationID := c.Params("integrationId")
+	idempotencyKey := c.Get("X-Idempotency-Key")
+
+	var req CreateCheckoutRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+
+	// Override integration ID from path
+	req.IntegrationID = integrationID
+
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	output, err := h.service.CreateCheckout(c.Context(), CreateCheckoutInput{
+		StoreID:        storeID,
+		IntegrationID:  integrationID,
+		IdempotencyKey: idempotencyKey,
+		CartID:         req.CartID,
+		Items:          req.Items,
+		Customer:       req.Customer,
+		TotalAmount:    req.TotalAmount,
+		Currency:       req.Currency,
+		SuccessURL:     req.SuccessURL,
+		FailureURL:     req.FailureURL,
+		Metadata:       req.Metadata,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Created(c, CheckoutResponse{
+		CheckoutID:  output.CheckoutID,
+		CheckoutURL: output.CheckoutURL,
+		ExpiresAt:   output.ExpiresAt,
+	})
+}
+
+// GetPaymentStatus retrieves the status of a payment.
+// @Summary Get payment status
+// @Description Retrieves the current status of a payment
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param integrationId path string true "Integration ID"
+// @Param paymentId path string true "Payment ID"
+// @Success 200 {object} httpx.Envelope{data=PaymentStatusResponse}
+// @Failure 404 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/{integrationId}/payments/{paymentId} [get]
+func (h *Handler) GetPaymentStatus(c *fiber.Ctx) error {
+	storeID := httpx.GetStoreID(c)
+	integrationID := c.Params("integrationId")
+	paymentID := c.Params("paymentId")
+
+	output, err := h.service.GetPaymentStatus(c.Context(), GetPaymentStatusInput{
+		StoreID:       storeID,
+		IntegrationID: integrationID,
+		PaymentID:     paymentID,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, PaymentStatusResponse{
+		PaymentID:     output.PaymentID,
+		Status:        output.Status,
+		Amount:        output.Amount,
+		PaidAt:        output.PaidAt,
+		RefundedAt:    output.RefundedAt,
+		FailureReason: output.FailureReason,
+		Metadata:      output.Metadata,
+	})
+}
+
+// RefundPayment initiates a refund for a payment.
+// @Summary Refund payment
+// @Description Initiates a refund for a payment
+// @Tags integrations
+// @Accept json
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param integrationId path string true "Integration ID"
+// @Param paymentId path string true "Payment ID"
+// @Param body body RefundRequest true "Refund data"
+// @Success 200 {object} httpx.Envelope{data=RefundResponse}
+// @Failure 400 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/{integrationId}/payments/{paymentId}/refund [post]
+func (h *Handler) RefundPayment(c *fiber.Ctx) error {
+	storeID := httpx.GetStoreID(c)
+	integrationID := c.Params("integrationId")
+	paymentID := c.Params("paymentId")
+
+	var req RefundRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+
+	output, err := h.service.RefundPayment(c.Context(), RefundPaymentInput{
+		StoreID:       storeID,
+		IntegrationID: integrationID,
+		PaymentID:     paymentID,
+		Amount:        req.Amount,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, RefundResponse{
+		RefundID:  output.RefundID,
+		Status:    output.Status,
+		Amount:    output.Amount,
+		CreatedAt: output.CreatedAt,
+	})
+}
+
+// =============================================================================
+// OAUTH HANDLERS
+// =============================================================================
+
+// OAuthConnect initiates the OAuth flow for a provider.
+// @Summary Start OAuth connection
+// @Description Returns the OAuth authorization URL for the provider
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param provider path string true "Provider name (mercado_pago, tiny)"
+// @Success 200 {object} httpx.Envelope{data=OAuthConnectResponse}
+// @Failure 400 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/oauth/{provider}/connect [get]
+func (h *Handler) OAuthConnect(c *fiber.Ctx) error {
+	storeID := httpx.GetStoreID(c)
+	provider := c.Params("provider")
+
+	output, err := h.service.GetOAuthURL(c.Context(), GetOAuthURLInput{
+		StoreID:  storeID,
+		Provider: provider,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, OAuthConnectResponse{
+		AuthURL: output.AuthURL,
+		State:   output.State,
+	})
+}
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+func mapToCredentials(m map[string]any) *providers.Credentials {
+	if m == nil {
+		return nil
+	}
+
+	creds := &providers.Credentials{
+		Extra: make(map[string]any),
+	}
+
+	if v, ok := m["access_token"].(string); ok {
+		creds.AccessToken = v
+	}
+	if v, ok := m["refresh_token"].(string); ok {
+		creds.RefreshToken = v
+	}
+	if v, ok := m["token_type"].(string); ok {
+		creds.TokenType = v
+	}
+	if v, ok := m["api_key"].(string); ok {
+		creds.APIKey = v
+	}
+	if v, ok := m["api_secret"].(string); ok {
+		creds.APISecret = v
+	}
+
+	// Copy remaining fields to Extra
+	for k, v := range m {
+		switch k {
+		case "access_token", "refresh_token", "token_type", "api_key", "api_secret", "expires_at":
+			continue
+		default:
+			creds.Extra[k] = v
+		}
+	}
+
+	return creds
+}
+
+func toIntegrationResponse(output *CreateIntegrationOutput) *IntegrationResponse {
+	return &IntegrationResponse{
+		ID:           output.ID,
+		StoreID:      output.StoreID,
+		Type:         output.Type,
+		Provider:     output.Provider,
+		Status:       output.Status,
+		Metadata:     output.Metadata,
+		LastSyncedAt: output.LastSyncedAt,
+		CreatedAt:    output.CreatedAt,
+	}
+}

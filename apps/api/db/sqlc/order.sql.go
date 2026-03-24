@@ -11,38 +11,252 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const getOrderDetail = `-- name: GetOrderDetail :one
-SELECT c.id, c.session_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, ls.platform, ls.platform_live_id, ls.store_id
+const getOrderByID = `-- name: GetOrderByID :one
+SELECT
+    c.id,
+    c.session_id,
+    c.platform_user_id,
+    c.platform_handle,
+    c.token,
+    c.status,
+    c.payment_status,
+    c.paid_at,
+    c.created_at,
+    c.expires_at,
+    ls.title as live_title,
+    ls.platform as live_platform,
+    ls.store_id
 FROM carts c
 JOIN live_sessions ls ON ls.id = c.session_id
 WHERE c.id = $1
 `
 
-type GetOrderDetailRow struct {
-	ID                   pgtype.UUID        `json:"id"`
-	SessionID            pgtype.UUID        `json:"session_id"`
-	PlatformUserID       string             `json:"platform_user_id"`
-	PlatformHandle       string             `json:"platform_handle"`
-	Token                string             `json:"token"`
-	Status               string             `json:"status"`
-	CheckoutUrl          pgtype.Text        `json:"checkout_url"`
-	PaymentIntegrationID pgtype.UUID        `json:"payment_integration_id"`
-	ExternalOrderID      pgtype.Text        `json:"external_order_id"`
-	PaymentStatus        pgtype.Text        `json:"payment_status"`
-	PaidAt               pgtype.Timestamptz `json:"paid_at"`
-	NotifyStatus         pgtype.Text        `json:"notify_status"`
-	NotifyError          pgtype.Text        `json:"notify_error"`
-	NotifiedAt           pgtype.Timestamptz `json:"notified_at"`
-	CreatedAt            pgtype.Timestamptz `json:"created_at"`
-	ExpiresAt            pgtype.Timestamptz `json:"expires_at"`
-	Platform             string             `json:"platform"`
-	PlatformLiveID       string             `json:"platform_live_id"`
-	StoreID              pgtype.UUID        `json:"store_id"`
+type GetOrderByIDRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	SessionID      pgtype.UUID        `json:"session_id"`
+	PlatformUserID string             `json:"platform_user_id"`
+	PlatformHandle string             `json:"platform_handle"`
+	Token          string             `json:"token"`
+	Status         string             `json:"status"`
+	PaymentStatus  pgtype.Text        `json:"payment_status"`
+	PaidAt         pgtype.Timestamptz `json:"paid_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	LiveTitle      pgtype.Text        `json:"live_title"`
+	LivePlatform   string             `json:"live_platform"`
+	StoreID        pgtype.UUID        `json:"store_id"`
 }
 
-func (q *Queries) GetOrderDetail(ctx context.Context, id pgtype.UUID) (GetOrderDetailRow, error) {
-	row := q.db.QueryRow(ctx, getOrderDetail, id)
-	var i GetOrderDetailRow
+func (q *Queries) GetOrderByID(ctx context.Context, id pgtype.UUID) (GetOrderByIDRow, error) {
+	row := q.db.QueryRow(ctx, getOrderByID, id)
+	var i GetOrderByIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.PlatformUserID,
+		&i.PlatformHandle,
+		&i.Token,
+		&i.Status,
+		&i.PaymentStatus,
+		&i.PaidAt,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.LiveTitle,
+		&i.LivePlatform,
+		&i.StoreID,
+	)
+	return i, err
+}
+
+const getOrderItems = `-- name: GetOrderItems :many
+SELECT
+    ci.id,
+    ci.cart_id,
+    ci.product_id,
+    ci.quantity,
+    ci.unit_price,
+    p.name as product_name,
+    p.image_url as product_image,
+    p.keyword as product_keyword
+FROM cart_items ci
+JOIN products p ON p.id = ci.product_id
+WHERE ci.cart_id = $1
+`
+
+type GetOrderItemsRow struct {
+	ID             pgtype.UUID `json:"id"`
+	CartID         pgtype.UUID `json:"cart_id"`
+	ProductID      pgtype.UUID `json:"product_id"`
+	Quantity       pgtype.Int4 `json:"quantity"`
+	UnitPrice      pgtype.Int8 `json:"unit_price"`
+	ProductName    string      `json:"product_name"`
+	ProductImage   pgtype.Text `json:"product_image"`
+	ProductKeyword string      `json:"product_keyword"`
+}
+
+func (q *Queries) GetOrderItems(ctx context.Context, cartID pgtype.UUID) ([]GetOrderItemsRow, error) {
+	rows, err := q.db.Query(ctx, getOrderItems, cartID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetOrderItemsRow{}
+	for rows.Next() {
+		var i GetOrderItemsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.CartID,
+			&i.ProductID,
+			&i.Quantity,
+			&i.UnitPrice,
+			&i.ProductName,
+			&i.ProductImage,
+			&i.ProductKeyword,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getOrderStats = `-- name: GetOrderStats :one
+SELECT
+    COUNT(*)::INT as total_orders,
+    COUNT(*) FILTER (WHERE c.status = 'pending')::INT as pending_orders,
+    COALESCE(SUM(
+        (SELECT SUM(ci.quantity * ci.unit_price) FROM cart_items ci WHERE ci.cart_id = c.id)
+    ), 0)::BIGINT as total_revenue,
+    COALESCE(
+        CASE
+            WHEN COUNT(*) > 0 THEN
+                SUM((SELECT SUM(ci.quantity * ci.unit_price) FROM cart_items ci WHERE ci.cart_id = c.id)) / COUNT(*)
+            ELSE 0
+        END,
+        0
+    )::BIGINT as avg_ticket
+FROM carts c
+JOIN live_sessions ls ON ls.id = c.session_id
+WHERE ls.store_id = $1
+`
+
+type GetOrderStatsRow struct {
+	TotalOrders   int32 `json:"total_orders"`
+	PendingOrders int32 `json:"pending_orders"`
+	TotalRevenue  int64 `json:"total_revenue"`
+	AvgTicket     int64 `json:"avg_ticket"`
+}
+
+func (q *Queries) GetOrderStats(ctx context.Context, storeID pgtype.UUID) (GetOrderStatsRow, error) {
+	row := q.db.QueryRow(ctx, getOrderStats, storeID)
+	var i GetOrderStatsRow
+	err := row.Scan(
+		&i.TotalOrders,
+		&i.PendingOrders,
+		&i.TotalRevenue,
+		&i.AvgTicket,
+	)
+	return i, err
+}
+
+const listOrders = `-- name: ListOrders :many
+SELECT
+    c.id,
+    c.session_id,
+    c.platform_user_id,
+    c.platform_handle,
+    c.token,
+    c.status,
+    c.payment_status,
+    c.paid_at,
+    c.created_at,
+    c.expires_at,
+    ls.title as live_title,
+    ls.platform as live_platform,
+    COALESCE(
+        (SELECT SUM(ci.quantity * ci.unit_price)::BIGINT FROM cart_items ci WHERE ci.cart_id = c.id),
+        0
+    ) as total_amount,
+    COALESCE(
+        (SELECT SUM(ci.quantity)::INT FROM cart_items ci WHERE ci.cart_id = c.id),
+        0
+    ) as total_items
+FROM carts c
+JOIN live_sessions ls ON ls.id = c.session_id
+WHERE ls.store_id = $1
+ORDER BY c.created_at DESC
+`
+
+type ListOrdersRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	SessionID      pgtype.UUID        `json:"session_id"`
+	PlatformUserID string             `json:"platform_user_id"`
+	PlatformHandle string             `json:"platform_handle"`
+	Token          string             `json:"token"`
+	Status         string             `json:"status"`
+	PaymentStatus  pgtype.Text        `json:"payment_status"`
+	PaidAt         pgtype.Timestamptz `json:"paid_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	LiveTitle      pgtype.Text        `json:"live_title"`
+	LivePlatform   string             `json:"live_platform"`
+	TotalAmount    interface{}        `json:"total_amount"`
+	TotalItems     interface{}        `json:"total_items"`
+}
+
+func (q *Queries) ListOrders(ctx context.Context, storeID pgtype.UUID) ([]ListOrdersRow, error) {
+	rows, err := q.db.Query(ctx, listOrders, storeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOrdersRow{}
+	for rows.Next() {
+		var i ListOrdersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.PlatformUserID,
+			&i.PlatformHandle,
+			&i.Token,
+			&i.Status,
+			&i.PaymentStatus,
+			&i.PaidAt,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.LiveTitle,
+			&i.LivePlatform,
+			&i.TotalAmount,
+			&i.TotalItems,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updateOrderPaymentStatus = `-- name: UpdateOrderPaymentStatus :one
+UPDATE carts
+SET payment_status = $2, paid_at = CASE WHEN $2 = 'paid' THEN now() ELSE paid_at END
+WHERE id = $1
+RETURNING id, session_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at
+`
+
+type UpdateOrderPaymentStatusParams struct {
+	ID            pgtype.UUID `json:"id"`
+	PaymentStatus pgtype.Text `json:"payment_status"`
+}
+
+func (q *Queries) UpdateOrderPaymentStatus(ctx context.Context, arg UpdateOrderPaymentStatusParams) (Cart, error) {
+	row := q.db.QueryRow(ctx, updateOrderPaymentStatus, arg.ID, arg.PaymentStatus)
+	var i Cart
 	err := row.Scan(
 		&i.ID,
 		&i.SessionID,
@@ -60,77 +274,42 @@ func (q *Queries) GetOrderDetail(ctx context.Context, id pgtype.UUID) (GetOrderD
 		&i.NotifiedAt,
 		&i.CreatedAt,
 		&i.ExpiresAt,
-		&i.Platform,
-		&i.PlatformLiveID,
-		&i.StoreID,
 	)
 	return i, err
 }
 
-const listOrdersByStore = `-- name: ListOrdersByStore :many
-SELECT c.id, c.session_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, ls.platform, ls.platform_live_id
-FROM carts c
-JOIN live_sessions ls ON ls.id = c.session_id
-WHERE ls.store_id = $1
-ORDER BY c.created_at DESC
+const updateOrderStatus = `-- name: UpdateOrderStatus :one
+UPDATE carts
+SET status = $2
+WHERE id = $1
+RETURNING id, session_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at
 `
 
-type ListOrdersByStoreRow struct {
-	ID                   pgtype.UUID        `json:"id"`
-	SessionID            pgtype.UUID        `json:"session_id"`
-	PlatformUserID       string             `json:"platform_user_id"`
-	PlatformHandle       string             `json:"platform_handle"`
-	Token                string             `json:"token"`
-	Status               string             `json:"status"`
-	CheckoutUrl          pgtype.Text        `json:"checkout_url"`
-	PaymentIntegrationID pgtype.UUID        `json:"payment_integration_id"`
-	ExternalOrderID      pgtype.Text        `json:"external_order_id"`
-	PaymentStatus        pgtype.Text        `json:"payment_status"`
-	PaidAt               pgtype.Timestamptz `json:"paid_at"`
-	NotifyStatus         pgtype.Text        `json:"notify_status"`
-	NotifyError          pgtype.Text        `json:"notify_error"`
-	NotifiedAt           pgtype.Timestamptz `json:"notified_at"`
-	CreatedAt            pgtype.Timestamptz `json:"created_at"`
-	ExpiresAt            pgtype.Timestamptz `json:"expires_at"`
-	Platform             string             `json:"platform"`
-	PlatformLiveID       string             `json:"platform_live_id"`
+type UpdateOrderStatusParams struct {
+	ID     pgtype.UUID `json:"id"`
+	Status string      `json:"status"`
 }
 
-func (q *Queries) ListOrdersByStore(ctx context.Context, storeID pgtype.UUID) ([]ListOrdersByStoreRow, error) {
-	rows, err := q.db.Query(ctx, listOrdersByStore, storeID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListOrdersByStoreRow{}
-	for rows.Next() {
-		var i ListOrdersByStoreRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.SessionID,
-			&i.PlatformUserID,
-			&i.PlatformHandle,
-			&i.Token,
-			&i.Status,
-			&i.CheckoutUrl,
-			&i.PaymentIntegrationID,
-			&i.ExternalOrderID,
-			&i.PaymentStatus,
-			&i.PaidAt,
-			&i.NotifyStatus,
-			&i.NotifyError,
-			&i.NotifiedAt,
-			&i.CreatedAt,
-			&i.ExpiresAt,
-			&i.Platform,
-			&i.PlatformLiveID,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
+func (q *Queries) UpdateOrderStatus(ctx context.Context, arg UpdateOrderStatusParams) (Cart, error) {
+	row := q.db.QueryRow(ctx, updateOrderStatus, arg.ID, arg.Status)
+	var i Cart
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.PlatformUserID,
+		&i.PlatformHandle,
+		&i.Token,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.PaymentIntegrationID,
+		&i.ExternalOrderID,
+		&i.PaymentStatus,
+		&i.PaidAt,
+		&i.NotifyStatus,
+		&i.NotifyError,
+		&i.NotifiedAt,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
 }

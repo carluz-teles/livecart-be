@@ -7,6 +7,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
 	"livecart/apps/api/lib/clerk"
+	"livecart/apps/api/lib/config"
 )
 
 func RequestLogger(log *zap.Logger) fiber.Handler {
@@ -32,6 +33,13 @@ func AuthMiddleware(clerkClient *clerk.Client) fiber.Handler {
 		}
 
 		token := strings.TrimPrefix(auth, "Bearer ")
+
+		// Dev bypass: use X-Dev-User-ID header in development
+		if !config.IsProduction() && c.Get("X-Dev-User-ID") != "" {
+			c.Locals("user_id", c.Get("X-Dev-User-ID"))
+			c.Locals("email", "dev@test.com")
+			return c.Next()
+		}
 
 		// Validate Clerk JWT
 		claims, err := clerkClient.ValidateToken(c.Context(), token)

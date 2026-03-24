@@ -11,10 +11,62 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countIntegrationLogs = `-- name: CountIntegrationLogs :one
+SELECT COUNT(*) FROM integration_logs WHERE integration_id = $1
+`
+
+func (q *Queries) CountIntegrationLogs(ctx context.Context, integrationID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countIntegrationLogs, integrationID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const createIdempotencyKey = `-- name: CreateIdempotencyKey :one
+INSERT INTO idempotency_keys (idempotency_key, store_id, integration_id, operation, request_hash, status)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, idempotency_key, store_id, integration_id, operation, request_hash, response_payload, status, created_at, expires_at
+`
+
+type CreateIdempotencyKeyParams struct {
+	IdempotencyKey string      `json:"idempotency_key"`
+	StoreID        pgtype.UUID `json:"store_id"`
+	IntegrationID  pgtype.UUID `json:"integration_id"`
+	Operation      string      `json:"operation"`
+	RequestHash    pgtype.Text `json:"request_hash"`
+	Status         string      `json:"status"`
+}
+
+func (q *Queries) CreateIdempotencyKey(ctx context.Context, arg CreateIdempotencyKeyParams) (IdempotencyKey, error) {
+	row := q.db.QueryRow(ctx, createIdempotencyKey,
+		arg.IdempotencyKey,
+		arg.StoreID,
+		arg.IntegrationID,
+		arg.Operation,
+		arg.RequestHash,
+		arg.Status,
+	)
+	var i IdempotencyKey
+	err := row.Scan(
+		&i.ID,
+		&i.IdempotencyKey,
+		&i.StoreID,
+		&i.IntegrationID,
+		&i.Operation,
+		&i.RequestHash,
+		&i.ResponsePayload,
+		&i.Status,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
 const createIntegration = `-- name: CreateIntegration :one
-INSERT INTO integrations (store_id, type, provider, status, access_token, refresh_token, token_expires_at, extra_config)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, store_id, type, provider, status, access_token, refresh_token, token_expires_at, extra_config, last_synced_at, created_at
+
+INSERT INTO integrations (store_id, type, provider, status, credentials, token_expires_at, metadata)
+VALUES ($1, $2, $3, $4, $5, $6, COALESCE(NULLIF($7::text, '')::jsonb, '{}'::jsonb))
+RETURNING id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata
 `
 
 type CreateIntegrationParams struct {
@@ -22,22 +74,23 @@ type CreateIntegrationParams struct {
 	Type           string             `json:"type"`
 	Provider       string             `json:"provider"`
 	Status         string             `json:"status"`
-	AccessToken    pgtype.Text        `json:"access_token"`
-	RefreshToken   pgtype.Text        `json:"refresh_token"`
+	Credentials    []byte             `json:"credentials"`
 	TokenExpiresAt pgtype.Timestamptz `json:"token_expires_at"`
-	ExtraConfig    []byte             `json:"extra_config"`
+	Column7        string             `json:"column_7"`
 }
 
+// =============================================================================
+// INTEGRATIONS
+// =============================================================================
 func (q *Queries) CreateIntegration(ctx context.Context, arg CreateIntegrationParams) (Integration, error) {
 	row := q.db.QueryRow(ctx, createIntegration,
 		arg.StoreID,
 		arg.Type,
 		arg.Provider,
 		arg.Status,
-		arg.AccessToken,
-		arg.RefreshToken,
+		arg.Credentials,
 		arg.TokenExpiresAt,
-		arg.ExtraConfig,
+		arg.Column7,
 	)
 	var i Integration
 	err := row.Scan(
@@ -46,33 +99,36 @@ func (q *Queries) CreateIntegration(ctx context.Context, arg CreateIntegrationPa
 		&i.Type,
 		&i.Provider,
 		&i.Status,
-		&i.AccessToken,
-		&i.RefreshToken,
 		&i.TokenExpiresAt,
-		&i.ExtraConfig,
 		&i.LastSyncedAt,
 		&i.CreatedAt,
+		&i.Credentials,
+		&i.Metadata,
 	)
 	return i, err
 }
 
 const createIntegrationLog = `-- name: CreateIntegrationLog :one
+
 INSERT INTO integration_logs (integration_id, entity_type, entity_id, direction, status, request_payload, response_payload, error_message)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
 RETURNING id, integration_id, entity_type, entity_id, direction, status, request_payload, response_payload, error_message, created_at
 `
 
 type CreateIntegrationLogParams struct {
-	IntegrationID   pgtype.UUID `json:"integration_id"`
-	EntityType      pgtype.Text `json:"entity_type"`
-	EntityID        pgtype.UUID `json:"entity_id"`
-	Direction       pgtype.Text `json:"direction"`
-	Status          pgtype.Text `json:"status"`
-	RequestPayload  []byte      `json:"request_payload"`
-	ResponsePayload []byte      `json:"response_payload"`
-	ErrorMessage    pgtype.Text `json:"error_message"`
+	IntegrationID pgtype.UUID `json:"integration_id"`
+	EntityType    pgtype.Text `json:"entity_type"`
+	EntityID      pgtype.UUID `json:"entity_id"`
+	Direction     pgtype.Text `json:"direction"`
+	Status        pgtype.Text `json:"status"`
+	Column6       []byte      `json:"column_6"`
+	Column7       []byte      `json:"column_7"`
+	ErrorMessage  pgtype.Text `json:"error_message"`
 }
 
+// =============================================================================
+// INTEGRATION LOGS
+// =============================================================================
 func (q *Queries) CreateIntegrationLog(ctx context.Context, arg CreateIntegrationLogParams) (IntegrationLog, error) {
 	row := q.db.QueryRow(ctx, createIntegrationLog,
 		arg.IntegrationID,
@@ -80,8 +136,8 @@ func (q *Queries) CreateIntegrationLog(ctx context.Context, arg CreateIntegratio
 		arg.EntityID,
 		arg.Direction,
 		arg.Status,
-		arg.RequestPayload,
-		arg.ResponsePayload,
+		arg.Column6,
+		arg.Column7,
 		arg.ErrorMessage,
 	)
 	var i IntegrationLog
@@ -139,13 +195,115 @@ func (q *Queries) CreateSubscription(ctx context.Context, arg CreateSubscription
 	return i, err
 }
 
+const createWebhookEvent = `-- name: CreateWebhookEvent :one
+
+INSERT INTO webhook_events (integration_id, provider, event_type, event_id, payload, signature_valid)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, integration_id, provider, event_type, event_id, payload, signature_valid, processed, processed_at, error_message, created_at
+`
+
+type CreateWebhookEventParams struct {
+	IntegrationID  pgtype.UUID `json:"integration_id"`
+	Provider       string      `json:"provider"`
+	EventType      string      `json:"event_type"`
+	EventID        pgtype.Text `json:"event_id"`
+	Payload        []byte      `json:"payload"`
+	SignatureValid pgtype.Bool `json:"signature_valid"`
+}
+
+// =============================================================================
+// WEBHOOK EVENTS
+// =============================================================================
+func (q *Queries) CreateWebhookEvent(ctx context.Context, arg CreateWebhookEventParams) (WebhookEvent, error) {
+	row := q.db.QueryRow(ctx, createWebhookEvent,
+		arg.IntegrationID,
+		arg.Provider,
+		arg.EventType,
+		arg.EventID,
+		arg.Payload,
+		arg.SignatureValid,
+	)
+	var i WebhookEvent
+	err := row.Scan(
+		&i.ID,
+		&i.IntegrationID,
+		&i.Provider,
+		&i.EventType,
+		&i.EventID,
+		&i.Payload,
+		&i.SignatureValid,
+		&i.Processed,
+		&i.ProcessedAt,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const deleteExpiredIdempotencyKeys = `-- name: DeleteExpiredIdempotencyKeys :exec
+DELETE FROM idempotency_keys WHERE expires_at < now()
+`
+
+func (q *Queries) DeleteExpiredIdempotencyKeys(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, deleteExpiredIdempotencyKeys)
+	return err
+}
+
+const deleteIntegration = `-- name: DeleteIntegration :exec
+DELETE FROM integrations WHERE id = $1 AND store_id = $2
+`
+
+type DeleteIntegrationParams struct {
+	ID      pgtype.UUID `json:"id"`
+	StoreID pgtype.UUID `json:"store_id"`
+}
+
+func (q *Queries) DeleteIntegration(ctx context.Context, arg DeleteIntegrationParams) error {
+	_, err := q.db.Exec(ctx, deleteIntegration, arg.ID, arg.StoreID)
+	return err
+}
+
+const getActiveIntegrationByProvider = `-- name: GetActiveIntegrationByProvider :one
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata FROM integrations
+WHERE store_id = $1 AND type = $2 AND provider = $3 AND status = 'active'
+LIMIT 1
+`
+
+type GetActiveIntegrationByProviderParams struct {
+	StoreID  pgtype.UUID `json:"store_id"`
+	Type     string      `json:"type"`
+	Provider string      `json:"provider"`
+}
+
+func (q *Queries) GetActiveIntegrationByProvider(ctx context.Context, arg GetActiveIntegrationByProviderParams) (Integration, error) {
+	row := q.db.QueryRow(ctx, getActiveIntegrationByProvider, arg.StoreID, arg.Type, arg.Provider)
+	var i Integration
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.Type,
+		&i.Provider,
+		&i.Status,
+		&i.TokenExpiresAt,
+		&i.LastSyncedAt,
+		&i.CreatedAt,
+		&i.Credentials,
+		&i.Metadata,
+	)
+	return i, err
+}
+
 const getActiveSubscription = `-- name: GetActiveSubscription :one
+
 SELECT id, store_id, integration_id, external_subscription_id, status, current_period_start, current_period_end, cancelled_at, created_at FROM subscriptions
 WHERE store_id = $1 AND status IN ('active', 'trialing')
 ORDER BY created_at DESC
 LIMIT 1
 `
 
+// =============================================================================
+// SUBSCRIPTIONS
+// =============================================================================
 func (q *Queries) GetActiveSubscription(ctx context.Context, storeID pgtype.UUID) (Subscription, error) {
 	row := q.db.QueryRow(ctx, getActiveSubscription, storeID)
 	var i Subscription
@@ -163,8 +321,71 @@ func (q *Queries) GetActiveSubscription(ctx context.Context, storeID pgtype.UUID
 	return i, err
 }
 
+const getIdempotencyByHash = `-- name: GetIdempotencyByHash :one
+SELECT id, idempotency_key, store_id, integration_id, operation, request_hash, response_payload, status, created_at, expires_at FROM idempotency_keys
+WHERE store_id = $1 AND request_hash = $2 AND created_at > $3 AND status = 'completed'
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+type GetIdempotencyByHashParams struct {
+	StoreID     pgtype.UUID        `json:"store_id"`
+	RequestHash pgtype.Text        `json:"request_hash"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) GetIdempotencyByHash(ctx context.Context, arg GetIdempotencyByHashParams) (IdempotencyKey, error) {
+	row := q.db.QueryRow(ctx, getIdempotencyByHash, arg.StoreID, arg.RequestHash, arg.CreatedAt)
+	var i IdempotencyKey
+	err := row.Scan(
+		&i.ID,
+		&i.IdempotencyKey,
+		&i.StoreID,
+		&i.IntegrationID,
+		&i.Operation,
+		&i.RequestHash,
+		&i.ResponsePayload,
+		&i.Status,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
+const getIdempotencyByKey = `-- name: GetIdempotencyByKey :one
+
+SELECT id, idempotency_key, store_id, integration_id, operation, request_hash, response_payload, status, created_at, expires_at FROM idempotency_keys
+WHERE store_id = $1 AND idempotency_key = $2 AND expires_at > now()
+`
+
+type GetIdempotencyByKeyParams struct {
+	StoreID        pgtype.UUID `json:"store_id"`
+	IdempotencyKey string      `json:"idempotency_key"`
+}
+
+// =============================================================================
+// IDEMPOTENCY KEYS
+// =============================================================================
+func (q *Queries) GetIdempotencyByKey(ctx context.Context, arg GetIdempotencyByKeyParams) (IdempotencyKey, error) {
+	row := q.db.QueryRow(ctx, getIdempotencyByKey, arg.StoreID, arg.IdempotencyKey)
+	var i IdempotencyKey
+	err := row.Scan(
+		&i.ID,
+		&i.IdempotencyKey,
+		&i.StoreID,
+		&i.IntegrationID,
+		&i.Operation,
+		&i.RequestHash,
+		&i.ResponsePayload,
+		&i.Status,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
 const getIntegrationByID = `-- name: GetIntegrationByID :one
-SELECT id, store_id, type, provider, status, access_token, refresh_token, token_expires_at, extra_config, last_synced_at, created_at FROM integrations WHERE id = $1 AND store_id = $2
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata FROM integrations WHERE id = $1 AND store_id = $2
 `
 
 type GetIntegrationByIDParams struct {
@@ -181,28 +402,21 @@ func (q *Queries) GetIntegrationByID(ctx context.Context, arg GetIntegrationByID
 		&i.Type,
 		&i.Provider,
 		&i.Status,
-		&i.AccessToken,
-		&i.RefreshToken,
 		&i.TokenExpiresAt,
-		&i.ExtraConfig,
 		&i.LastSyncedAt,
 		&i.CreatedAt,
+		&i.Credentials,
+		&i.Metadata,
 	)
 	return i, err
 }
 
-const getPlatformIntegration = `-- name: GetPlatformIntegration :one
-SELECT id, store_id, type, provider, status, access_token, refresh_token, token_expires_at, extra_config, last_synced_at, created_at FROM integrations
-WHERE store_id = $1 AND type = 'platform' AND provider = $2 AND status = 'active'
+const getIntegrationByIDOnly = `-- name: GetIntegrationByIDOnly :one
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata FROM integrations WHERE id = $1
 `
 
-type GetPlatformIntegrationParams struct {
-	StoreID  pgtype.UUID `json:"store_id"`
-	Provider string      `json:"provider"`
-}
-
-func (q *Queries) GetPlatformIntegration(ctx context.Context, arg GetPlatformIntegrationParams) (Integration, error) {
-	row := q.db.QueryRow(ctx, getPlatformIntegration, arg.StoreID, arg.Provider)
+func (q *Queries) GetIntegrationByIDOnly(ctx context.Context, id pgtype.UUID) (Integration, error) {
+	row := q.db.QueryRow(ctx, getIntegrationByIDOnly, id)
 	var i Integration
 	err := row.Scan(
 		&i.ID,
@@ -210,18 +424,121 @@ func (q *Queries) GetPlatformIntegration(ctx context.Context, arg GetPlatformInt
 		&i.Type,
 		&i.Provider,
 		&i.Status,
-		&i.AccessToken,
-		&i.RefreshToken,
 		&i.TokenExpiresAt,
-		&i.ExtraConfig,
 		&i.LastSyncedAt,
+		&i.CreatedAt,
+		&i.Credentials,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const getIntegrationByProvider = `-- name: GetIntegrationByProvider :one
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata FROM integrations
+WHERE store_id = $1 AND type = $2 AND provider = $3 AND status IN ('active', 'pending_auth')
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+type GetIntegrationByProviderParams struct {
+	StoreID  pgtype.UUID `json:"store_id"`
+	Type     string      `json:"type"`
+	Provider string      `json:"provider"`
+}
+
+func (q *Queries) GetIntegrationByProvider(ctx context.Context, arg GetIntegrationByProviderParams) (Integration, error) {
+	row := q.db.QueryRow(ctx, getIntegrationByProvider, arg.StoreID, arg.Type, arg.Provider)
+	var i Integration
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.Type,
+		&i.Provider,
+		&i.Status,
+		&i.TokenExpiresAt,
+		&i.LastSyncedAt,
+		&i.CreatedAt,
+		&i.Credentials,
+		&i.Metadata,
+	)
+	return i, err
+}
+
+const getWebhookEventByEventID = `-- name: GetWebhookEventByEventID :one
+SELECT id, integration_id, provider, event_type, event_id, payload, signature_valid, processed, processed_at, error_message, created_at FROM webhook_events
+WHERE integration_id = $1 AND event_id = $2
+`
+
+type GetWebhookEventByEventIDParams struct {
+	IntegrationID pgtype.UUID `json:"integration_id"`
+	EventID       pgtype.Text `json:"event_id"`
+}
+
+func (q *Queries) GetWebhookEventByEventID(ctx context.Context, arg GetWebhookEventByEventIDParams) (WebhookEvent, error) {
+	row := q.db.QueryRow(ctx, getWebhookEventByEventID, arg.IntegrationID, arg.EventID)
+	var i WebhookEvent
+	err := row.Scan(
+		&i.ID,
+		&i.IntegrationID,
+		&i.Provider,
+		&i.EventType,
+		&i.EventID,
+		&i.Payload,
+		&i.SignatureValid,
+		&i.Processed,
+		&i.ProcessedAt,
+		&i.ErrorMessage,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
+const listIntegrationLogs = `-- name: ListIntegrationLogs :many
+SELECT id, integration_id, entity_type, entity_id, direction, status, request_payload, response_payload, error_message, created_at FROM integration_logs
+WHERE integration_id = $1
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3
+`
+
+type ListIntegrationLogsParams struct {
+	IntegrationID pgtype.UUID `json:"integration_id"`
+	Limit         int32       `json:"limit"`
+	Offset        int32       `json:"offset"`
+}
+
+func (q *Queries) ListIntegrationLogs(ctx context.Context, arg ListIntegrationLogsParams) ([]IntegrationLog, error) {
+	rows, err := q.db.Query(ctx, listIntegrationLogs, arg.IntegrationID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []IntegrationLog{}
+	for rows.Next() {
+		var i IntegrationLog
+		if err := rows.Scan(
+			&i.ID,
+			&i.IntegrationID,
+			&i.EntityType,
+			&i.EntityID,
+			&i.Direction,
+			&i.Status,
+			&i.RequestPayload,
+			&i.ResponsePayload,
+			&i.ErrorMessage,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listIntegrationsByStore = `-- name: ListIntegrationsByStore :many
-SELECT id, store_id, type, provider, status, access_token, refresh_token, token_expires_at, extra_config, last_synced_at, created_at FROM integrations WHERE store_id = $1 ORDER BY created_at
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata FROM integrations WHERE store_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListIntegrationsByStore(ctx context.Context, storeID pgtype.UUID) ([]Integration, error) {
@@ -239,11 +556,96 @@ func (q *Queries) ListIntegrationsByStore(ctx context.Context, storeID pgtype.UU
 			&i.Type,
 			&i.Provider,
 			&i.Status,
-			&i.AccessToken,
-			&i.RefreshToken,
 			&i.TokenExpiresAt,
-			&i.ExtraConfig,
 			&i.LastSyncedAt,
+			&i.CreatedAt,
+			&i.Credentials,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listIntegrationsByType = `-- name: ListIntegrationsByType :many
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata FROM integrations
+WHERE store_id = $1 AND type = $2 AND status = 'active'
+ORDER BY created_at DESC
+`
+
+type ListIntegrationsByTypeParams struct {
+	StoreID pgtype.UUID `json:"store_id"`
+	Type    string      `json:"type"`
+}
+
+func (q *Queries) ListIntegrationsByType(ctx context.Context, arg ListIntegrationsByTypeParams) ([]Integration, error) {
+	rows, err := q.db.Query(ctx, listIntegrationsByType, arg.StoreID, arg.Type)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Integration{}
+	for rows.Next() {
+		var i Integration
+		if err := rows.Scan(
+			&i.ID,
+			&i.StoreID,
+			&i.Type,
+			&i.Provider,
+			&i.Status,
+			&i.TokenExpiresAt,
+			&i.LastSyncedAt,
+			&i.CreatedAt,
+			&i.Credentials,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnprocessedWebhooks = `-- name: ListUnprocessedWebhooks :many
+SELECT id, integration_id, provider, event_type, event_id, payload, signature_valid, processed, processed_at, error_message, created_at FROM webhook_events
+WHERE integration_id = $1 AND processed = false
+ORDER BY created_at ASC
+LIMIT $2
+`
+
+type ListUnprocessedWebhooksParams struct {
+	IntegrationID pgtype.UUID `json:"integration_id"`
+	Limit         int32       `json:"limit"`
+}
+
+func (q *Queries) ListUnprocessedWebhooks(ctx context.Context, arg ListUnprocessedWebhooksParams) ([]WebhookEvent, error) {
+	rows, err := q.db.Query(ctx, listUnprocessedWebhooks, arg.IntegrationID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WebhookEvent{}
+	for rows.Next() {
+		var i WebhookEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.IntegrationID,
+			&i.Provider,
+			&i.EventType,
+			&i.EventID,
+			&i.Payload,
+			&i.SignatureValid,
+			&i.Processed,
+			&i.ProcessedAt,
+			&i.ErrorMessage,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -256,40 +658,157 @@ func (q *Queries) ListIntegrationsByStore(ctx context.Context, storeID pgtype.UU
 	return items, nil
 }
 
-const updateIntegrationTokens = `-- name: UpdateIntegrationTokens :one
-UPDATE integrations
-SET access_token = $2, refresh_token = $3, token_expires_at = $4, status = 'active', last_synced_at = now()
-WHERE id = $1
-RETURNING id, store_id, type, provider, status, access_token, refresh_token, token_expires_at, extra_config, last_synced_at, created_at
+const listWebhookEvents = `-- name: ListWebhookEvents :many
+SELECT id, integration_id, provider, event_type, event_id, payload, signature_valid, processed, processed_at, error_message, created_at FROM webhook_events
+WHERE integration_id = $1
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3
 `
 
-type UpdateIntegrationTokensParams struct {
+type ListWebhookEventsParams struct {
+	IntegrationID pgtype.UUID `json:"integration_id"`
+	Limit         int32       `json:"limit"`
+	Offset        int32       `json:"offset"`
+}
+
+func (q *Queries) ListWebhookEvents(ctx context.Context, arg ListWebhookEventsParams) ([]WebhookEvent, error) {
+	rows, err := q.db.Query(ctx, listWebhookEvents, arg.IntegrationID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WebhookEvent{}
+	for rows.Next() {
+		var i WebhookEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.IntegrationID,
+			&i.Provider,
+			&i.EventType,
+			&i.EventID,
+			&i.Payload,
+			&i.SignatureValid,
+			&i.Processed,
+			&i.ProcessedAt,
+			&i.ErrorMessage,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markWebhookFailed = `-- name: MarkWebhookFailed :exec
+UPDATE webhook_events
+SET processed = true, processed_at = now(), error_message = $2
+WHERE id = $1
+`
+
+type MarkWebhookFailedParams struct {
+	ID           pgtype.UUID `json:"id"`
+	ErrorMessage pgtype.Text `json:"error_message"`
+}
+
+func (q *Queries) MarkWebhookFailed(ctx context.Context, arg MarkWebhookFailedParams) error {
+	_, err := q.db.Exec(ctx, markWebhookFailed, arg.ID, arg.ErrorMessage)
+	return err
+}
+
+const markWebhookProcessed = `-- name: MarkWebhookProcessed :exec
+UPDATE webhook_events
+SET processed = true, processed_at = now()
+WHERE id = $1
+`
+
+func (q *Queries) MarkWebhookProcessed(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, markWebhookProcessed, id)
+	return err
+}
+
+const updateIdempotencyKey = `-- name: UpdateIdempotencyKey :exec
+UPDATE idempotency_keys
+SET response_payload = $2, status = $3
+WHERE id = $1
+`
+
+type UpdateIdempotencyKeyParams struct {
+	ID              pgtype.UUID `json:"id"`
+	ResponsePayload []byte      `json:"response_payload"`
+	Status          string      `json:"status"`
+}
+
+func (q *Queries) UpdateIdempotencyKey(ctx context.Context, arg UpdateIdempotencyKeyParams) error {
+	_, err := q.db.Exec(ctx, updateIdempotencyKey, arg.ID, arg.ResponsePayload, arg.Status)
+	return err
+}
+
+const updateIntegrationCredentials = `-- name: UpdateIntegrationCredentials :exec
+UPDATE integrations
+SET credentials = $2, token_expires_at = $3, status = 'active', last_synced_at = now()
+WHERE id = $1
+`
+
+type UpdateIntegrationCredentialsParams struct {
 	ID             pgtype.UUID        `json:"id"`
-	AccessToken    pgtype.Text        `json:"access_token"`
-	RefreshToken   pgtype.Text        `json:"refresh_token"`
+	Credentials    []byte             `json:"credentials"`
 	TokenExpiresAt pgtype.Timestamptz `json:"token_expires_at"`
 }
 
-func (q *Queries) UpdateIntegrationTokens(ctx context.Context, arg UpdateIntegrationTokensParams) (Integration, error) {
-	row := q.db.QueryRow(ctx, updateIntegrationTokens,
-		arg.ID,
-		arg.AccessToken,
-		arg.RefreshToken,
-		arg.TokenExpiresAt,
-	)
-	var i Integration
-	err := row.Scan(
-		&i.ID,
-		&i.StoreID,
-		&i.Type,
-		&i.Provider,
-		&i.Status,
-		&i.AccessToken,
-		&i.RefreshToken,
-		&i.TokenExpiresAt,
-		&i.ExtraConfig,
-		&i.LastSyncedAt,
-		&i.CreatedAt,
-	)
-	return i, err
+func (q *Queries) UpdateIntegrationCredentials(ctx context.Context, arg UpdateIntegrationCredentialsParams) error {
+	_, err := q.db.Exec(ctx, updateIntegrationCredentials, arg.ID, arg.Credentials, arg.TokenExpiresAt)
+	return err
+}
+
+const updateIntegrationMetadata = `-- name: UpdateIntegrationMetadata :exec
+UPDATE integrations
+SET metadata = $2
+WHERE id = $1
+`
+
+type UpdateIntegrationMetadataParams struct {
+	ID       pgtype.UUID `json:"id"`
+	Metadata []byte      `json:"metadata"`
+}
+
+func (q *Queries) UpdateIntegrationMetadata(ctx context.Context, arg UpdateIntegrationMetadataParams) error {
+	_, err := q.db.Exec(ctx, updateIntegrationMetadata, arg.ID, arg.Metadata)
+	return err
+}
+
+const updateIntegrationStatus = `-- name: UpdateIntegrationStatus :exec
+UPDATE integrations
+SET status = $2, last_synced_at = now()
+WHERE id = $1
+`
+
+type UpdateIntegrationStatusParams struct {
+	ID     pgtype.UUID `json:"id"`
+	Status string      `json:"status"`
+}
+
+func (q *Queries) UpdateIntegrationStatus(ctx context.Context, arg UpdateIntegrationStatusParams) error {
+	_, err := q.db.Exec(ctx, updateIntegrationStatus, arg.ID, arg.Status)
+	return err
+}
+
+const updateSubscriptionStatus = `-- name: UpdateSubscriptionStatus :exec
+UPDATE subscriptions
+SET status = $2, cancelled_at = $3
+WHERE id = $1
+`
+
+type UpdateSubscriptionStatusParams struct {
+	ID          pgtype.UUID        `json:"id"`
+	Status      string             `json:"status"`
+	CancelledAt pgtype.Timestamptz `json:"cancelled_at"`
+}
+
+func (q *Queries) UpdateSubscriptionStatus(ctx context.Context, arg UpdateSubscriptionStatusParams) error {
+	_, err := q.db.Exec(ctx, updateSubscriptionStatus, arg.ID, arg.Status, arg.CancelledAt)
+	return err
 }
