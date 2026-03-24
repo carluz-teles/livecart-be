@@ -14,12 +14,23 @@ func RequestLogger(log *zap.Logger) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		err := c.Next()
 
-		log.Info("request",
+		// Build log fields - add user_id and store_id if available
+		fields := []zap.Field{
 			zap.String("method", c.Method()),
 			zap.String("path", c.Path()),
 			zap.Int("status", c.Response().StatusCode()),
 			zap.String("trace_id", c.Get("X-Request-ID")),
-		)
+		}
+
+		if userID := GetUserID(c); userID != "" {
+			fields = append(fields, zap.String("user_id", userID))
+		}
+
+		if storeID := GetStoreID(c); storeID != "" {
+			fields = append(fields, zap.String("store_id", storeID))
+		}
+
+		log.Info("request", fields...)
 
 		return err
 	}

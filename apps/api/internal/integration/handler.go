@@ -150,7 +150,7 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 // @Tags integrations
 // @Param storeId path string true "Store ID"
 // @Param integrationId path string true "Integration ID"
-// @Success 204
+// @Success 200 {object} httpx.Envelope{data=httpx.DeletedResponse}
 // @Failure 404 {object} httpx.Envelope
 // @Router /api/v1/stores/{storeId}/integrations/{integrationId} [delete]
 func (h *Handler) Delete(c *fiber.Ctx) error {
@@ -161,7 +161,7 @@ func (h *Handler) Delete(c *fiber.Ctx) error {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	return httpx.NoContent(c)
+	return httpx.Deleted(c, integrationID)
 }
 
 // TestConnection tests the connection to the integration provider.

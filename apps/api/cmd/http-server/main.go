@@ -75,6 +75,9 @@ func main() {
 	}
 	defer log.Sync()
 
+	// Set logger for httpx error handling
+	httpx.SetLogger(log)
+
 	databaseURL := config.DatabaseURL.Required()
 	clerkFrontendAPI := config.ClerkFrontendAPI.Required()
 	port := config.Port.StringOr("3001")

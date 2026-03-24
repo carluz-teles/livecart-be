@@ -5,7 +5,15 @@ import (
 
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
+	"go.uber.org/zap"
 )
+
+var logger *zap.Logger
+
+// SetLogger sets the package-level logger for error logging.
+func SetLogger(l *zap.Logger) {
+	logger = l
+}
 
 // Envelope is the standard API response wrapper.
 type Envelope struct {
@@ -29,6 +37,15 @@ func Created(c *fiber.Ctx, data any) error {
 
 func NoContent(c *fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// DeletedResponse is the response for successful DELETE operations.
+type DeletedResponse struct {
+	ID string `json:"id"`
+}
+
+func Deleted(c *fiber.Ctx, id string) error {
+	return c.Status(fiber.StatusOK).JSON(Envelope{Data: DeletedResponse{ID: id}})
 }
 
 func BadRequest(c *fiber.Ctx, msg string) error {
@@ -55,7 +72,25 @@ func ValidationError(c *fiber.Ctx, err error) error {
 func HandleServiceError(c *fiber.Ctx, err error) error {
 	var se *ServiceError
 	if errors.As(err, &se) {
+		// Log client errors (4xx) at warn level, they're expected
+		if logger != nil && se.Code >= 400 && se.Code < 500 {
+			logger.Warn("service error",
+				zap.Int("status", se.Code),
+				zap.String("message", se.Message),
+				zap.String("path", c.Path()),
+				zap.String("method", c.Method()),
+			)
+		}
 		return c.Status(se.Code).JSON(Envelope{Error: se.Message})
+	}
+
+	// Log unexpected errors (5xx) at error level
+	if logger != nil {
+		logger.Error("internal error",
+			zap.Error(err),
+			zap.String("path", c.Path()),
+			zap.String("method", c.Method()),
+		)
 	}
 	return c.Status(fiber.StatusInternalServerError).JSON(Envelope{Error: "internal server error"})
 }
