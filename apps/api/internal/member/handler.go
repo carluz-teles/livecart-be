@@ -97,10 +97,6 @@ func (h *Handler) UpdateRole(c *fiber.Ctx) error {
 		Role:     req.Role,
 	})
 	if err != nil {
-		var invalidRoleErr *InvalidRoleError
-		if errors.As(err, &invalidRoleErr) {
-			return httpx.HandleServiceError(c, httpx.ErrUnprocessable(err.Error()))
-		}
 		return httpx.HandleServiceError(c, err)
 	}
 

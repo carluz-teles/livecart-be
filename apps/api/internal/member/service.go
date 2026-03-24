@@ -42,11 +42,6 @@ func (s *Service) List(ctx context.Context, storeID string) ([]MemberOutput, err
 }
 
 func (s *Service) UpdateRole(ctx context.Context, input UpdateMemberRoleInput) (*MemberOutput, error) {
-	// Validate role
-	if input.Role != RoleAdmin && input.Role != RoleMember {
-		return nil, &InvalidRoleError{Role: input.Role}
-	}
-
 	row, err := s.repo.UpdateRole(ctx, input.StoreID, input.MemberID, input.Role)
 	if err != nil {
 		return nil, err
@@ -102,14 +97,6 @@ func (s *Service) Remove(ctx context.Context, storeID, memberID, requestingUserI
 }
 
 // Custom errors
-
-type InvalidRoleError struct {
-	Role string
-}
-
-func (e *InvalidRoleError) Error() string {
-	return "invalid role: " + e.Role
-}
 
 type SelfRemovalError struct{}
 

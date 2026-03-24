@@ -33,11 +33,6 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 
 // Create creates a new invitation for a user to join a store
 func (s *Service) Create(ctx context.Context, input CreateInvitationInput) (*CreateInvitationOutput, error) {
-	// Validate role
-	if input.Role != RoleAdmin && input.Role != RoleMember {
-		return nil, httpx.ErrUnprocessable("role must be 'admin' or 'member'")
-	}
-
 	// Check if invitation already exists
 	existing, err := s.repo.GetByEmail(ctx, input.StoreID, input.Email)
 	if err == nil && existing.Status == StatusPending {
