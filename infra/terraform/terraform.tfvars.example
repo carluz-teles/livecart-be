@@ -1,0 +1,26 @@
+# ==============================================================================
+# Terraform Variables Example
+# ==============================================================================
+# Copy this file to terraform.tfvars and fill in your values
+# NEVER commit terraform.tfvars to version control!
+
+# AWS Configuration
+aws_region  = "us-east-1"
+environment = "staging"
+
+# Database Credentials
+db_username = "livecart_admin"
+db_password = "your-secure-password-here"
+
+# Clerk Authentication
+clerk_secret_key      = "sk_test_xxxxx"
+clerk_frontend_api    = "full-squirrel-3.clerk.accounts.dev"
+clerk_publishable_key = "pk_test_xxxxx"
+clerk_webhook_secret  = "whsec_xxxxx"  # Optional - get from Clerk Dashboard → Webhooks
+
+# ECS Configuration (optional - defaults are set)
+# backend_cpu     = 256
+# backend_memory  = 512
+# frontend_cpu    = 256
+# frontend_memory = 512
+# desired_count   = 1

@@ -33,7 +33,7 @@ services:
         condition: service_healthy
 
   localstack:
-    image: localstack/localstack:latest
+    image: localstack/localstack:3.8
     ports:
       - "4566:4566"
     environment:
