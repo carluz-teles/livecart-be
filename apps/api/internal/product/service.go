@@ -3,7 +3,6 @@ package product
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	"livecart/apps/api/lib/httpx"
 )
@@ -17,28 +16,16 @@ func NewService(repo *Repository) *Service {
 }
 
 func (s *Service) Create(ctx context.Context, input CreateProductInput) (CreateProductOutput, error) {
-	keyword := input.Keyword
-
-	// Auto-generate keyword if not provided
-	if keyword == "" {
-		maxKw, err := s.repo.GetMaxKeyword(ctx, input.StoreID)
-		if err != nil {
-			return CreateProductOutput{}, fmt.Errorf("getting max keyword: %w", err)
-		}
-		next, err := nextKeyword(maxKw)
-		if err != nil {
-			return CreateProductOutput{}, httpx.ErrUnprocessable("keyword range exhausted (max 9999)")
-		}
-		keyword = next
-	} else {
-		if !isValidKeyword(keyword) {
-			return CreateProductOutput{}, httpx.ErrUnprocessable("keyword must be between 1000 and 9999")
-		}
+	// Resolve keyword: validate if provided, or auto-generate
+	keyword, err := s.resolveKeyword(ctx, input.StoreID, input.Keyword)
+	if err != nil {
+		return CreateProductOutput{}, err
 	}
 
+	// Check uniqueness
 	existing, err := s.repo.GetByKeyword(ctx, GetByKeywordParams{
 		StoreID: input.StoreID,
-		Keyword: keyword,
+		Keyword: keyword.String(),
 	})
 	if err != nil && !httpx.IsNotFound(err) {
 		return CreateProductOutput{}, fmt.Errorf("checking keyword uniqueness: %w", err)
@@ -52,7 +39,7 @@ func (s *Service) Create(ctx context.Context, input CreateProductInput) (CreateP
 		Name:           input.Name,
 		ExternalID:     input.ExternalID,
 		ExternalSource: input.ExternalSource,
-		Keyword:        keyword,
+		Keyword:        keyword.String(),
 		Price:          input.Price,
 		ImageURL:       input.ImageURL,
 		Stock:          input.Stock,
@@ -67,6 +54,30 @@ func (s *Service) Create(ctx context.Context, input CreateProductInput) (CreateP
 		Keyword:   row.Keyword,
 		CreatedAt: row.CreatedAt,
 	}, nil
+}
+
+// resolveKeyword validates or auto-generates a keyword for a product.
+func (s *Service) resolveKeyword(ctx context.Context, storeID, inputKeyword string) (Keyword, error) {
+	if inputKeyword != "" {
+		kw, err := NewKeyword(inputKeyword)
+		if err != nil {
+			return Keyword{}, httpx.ErrUnprocessable(fmt.Sprintf("invalid keyword: %s", err.Error()))
+		}
+		return kw, nil
+	}
+
+	// Auto-generate keyword
+	maxKw, err := s.repo.GetMaxKeyword(ctx, storeID)
+	if err != nil {
+		return Keyword{}, fmt.Errorf("getting max keyword: %w", err)
+	}
+
+	kw, err := NextKeyword(maxKw)
+	if err != nil {
+		return Keyword{}, httpx.ErrUnprocessable("keyword range exhausted (max 9999)")
+	}
+
+	return kw, nil
 }
 
 func (s *Service) GetByID(ctx context.Context, id, storeID string) (ProductOutput, error) {
@@ -138,29 +149,6 @@ func toProductOutput(row ProductRow) ProductOutput {
 	}
 }
 
-func isValidKeyword(kw string) bool {
-	n, err := strconv.Atoi(kw)
-	if err != nil {
-		return false
-	}
-	return n >= 1000 && n <= 9999
-}
-
 func (s *Service) GetStats(ctx context.Context, storeID string) (ProductStatsOutput, error) {
 	return s.repo.GetStats(ctx, storeID)
-}
-
-func nextKeyword(current string) (string, error) {
-	n, err := strconv.Atoi(current)
-	if err != nil {
-		return "", fmt.Errorf("parsing keyword: %w", err)
-	}
-	next := n + 1
-	if next < 1000 {
-		next = 1000
-	}
-	if next > 9999 {
-		return "", fmt.Errorf("keyword range exhausted")
-	}
-	return fmt.Sprintf("%04d", next), nil
 }

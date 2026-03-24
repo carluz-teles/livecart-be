@@ -28,13 +28,13 @@ type UpdateIntegrationRequest struct {
 // IntegrationResponse is the HTTP response for an integration.
 type IntegrationResponse struct {
 	ID           string         `json:"id"`
-	StoreID      string         `json:"store_id"`
+	StoreID      string         `json:"storeId"`
 	Type         string         `json:"type"`
 	Provider     string         `json:"provider"`
 	Status       string         `json:"status"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
-	LastSyncedAt *time.Time     `json:"last_synced_at,omitempty"`
-	CreatedAt    time.Time      `json:"created_at"`
+	LastSyncedAt *time.Time     `json:"lastSyncedAt,omitempty"`
+	CreatedAt    time.Time      `json:"createdAt"`
 }
 
 // IntegrationListResponse is the HTTP response for listing integrations.
@@ -44,53 +44,53 @@ type IntegrationListResponse struct {
 
 // CreateCheckoutRequest is the HTTP request for creating a payment checkout.
 type CreateCheckoutRequest struct {
-	IntegrationID string                    `json:"integration_id" validate:"required,uuid"`
-	CartID        string                    `json:"cart_id" validate:"required"`
+	IntegrationID string                    `json:"integrationId" validate:"required,uuid"`
+	CartID        string                    `json:"cartId" validate:"required"`
 	Items         []providers.CheckoutItem  `json:"items" validate:"required,min=1,dive"`
 	Customer      providers.CheckoutCustomer `json:"customer" validate:"required"`
-	TotalAmount   int64                      `json:"total_amount" validate:"required,gt=0"`
+	TotalAmount   int64                      `json:"totalAmount" validate:"required,gt=0"`
 	Currency      string                     `json:"currency" validate:"required,len=3"`
-	SuccessURL    string                     `json:"success_url" validate:"required,url"`
-	FailureURL    string                     `json:"failure_url" validate:"required,url"`
+	SuccessURL    string                     `json:"successUrl" validate:"required,url"`
+	FailureURL    string                     `json:"failureUrl" validate:"required,url"`
 	Metadata      map[string]any             `json:"metadata,omitempty"`
 }
 
 // CheckoutResponse is the HTTP response for a checkout.
 type CheckoutResponse struct {
-	CheckoutID  string     `json:"checkout_id"`
-	CheckoutURL string     `json:"checkout_url"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	CheckoutID  string     `json:"checkoutId"`
+	CheckoutURL string     `json:"checkoutUrl"`
+	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
 }
 
 // PaymentStatusResponse is the HTTP response for payment status.
 type PaymentStatusResponse struct {
-	PaymentID     string         `json:"payment_id"`
+	PaymentID     string         `json:"paymentId"`
 	Status        string         `json:"status"`
 	Amount        int64          `json:"amount"`
-	PaidAt        *time.Time     `json:"paid_at,omitempty"`
-	RefundedAt    *time.Time     `json:"refunded_at,omitempty"`
-	FailureReason string         `json:"failure_reason,omitempty"`
+	PaidAt        *time.Time     `json:"paidAt,omitempty"`
+	RefundedAt    *time.Time     `json:"refundedAt,omitempty"`
+	FailureReason string         `json:"failureReason,omitempty"`
 	Metadata      map[string]any `json:"metadata,omitempty"`
 }
 
 // RefundRequest is the HTTP request for refunding a payment.
 type RefundRequest struct {
-	IntegrationID string `json:"integration_id" validate:"required,uuid"`
-	PaymentID     string `json:"payment_id" validate:"required"`
+	IntegrationID string `json:"integrationId" validate:"required,uuid"`
+	PaymentID     string `json:"paymentId" validate:"required"`
 	Amount        *int64 `json:"amount,omitempty"` // nil = full refund
 }
 
 // RefundResponse is the HTTP response for a refund.
 type RefundResponse struct {
-	RefundID  string    `json:"refund_id"`
+	RefundID  string    `json:"refundId"`
 	Status    string    `json:"status"`
 	Amount    int64     `json:"amount"`
-	CreatedAt time.Time `json:"created_at"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // OAuthConnectResponse is the HTTP response for initiating OAuth.
 type OAuthConnectResponse struct {
-	AuthURL string `json:"auth_url"`
+	AuthURL string `json:"authUrl"`
 	State   string `json:"state"`
 }
 
@@ -98,9 +98,9 @@ type OAuthConnectResponse struct {
 type TestConnectionResponse struct {
 	Success     bool           `json:"success"`
 	Message     string         `json:"message"`
-	LatencyMs   int64          `json:"latency_ms"`
-	AccountInfo map[string]any `json:"account_info,omitempty"`
-	TestedAt    time.Time      `json:"tested_at"`
+	LatencyMs   int64          `json:"latencyMs"`
+	AccountInfo map[string]any `json:"accountInfo,omitempty"`
+	TestedAt    time.Time      `json:"testedAt"`
 }
 
 // =============================================================================
