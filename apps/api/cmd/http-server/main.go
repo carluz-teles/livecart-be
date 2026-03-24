@@ -153,7 +153,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	// User repository and service (shared between webhook and API handlers)
 	userRepo := user.NewRepository(queries)
-	userSvc := user.NewService(userRepo)
+	userSvc := user.NewService(userRepo, log)
 
 	// Integration Layer setup
 	var integrationSvc *integration.Service
@@ -273,7 +273,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	// Store routes (user's own store management)
 	storeRepo := store.NewRepository(queries)
-	storeSvc := store.NewService(storeRepo)
+	storeSvc := store.NewService(storeRepo, log)
 	storeHandler := store.NewHandler(storeSvc, validate)
 	storeHandler.RegisterRoutes(api)
 
@@ -282,27 +282,27 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	storeScoped.Use(httpx.StoreAccessMiddleware(userRepo))
 
 	productRepo := product.NewRepository(queries, pool)
-	productSvc := product.NewService(productRepo)
+	productSvc := product.NewService(productRepo, log)
 	productHandler := product.NewHandler(productSvc, validate)
 	productHandler.RegisterRoutes(storeScoped)
 
 	liveRepo := live.NewRepository(queries, pool)
-	liveSvc := live.NewService(liveRepo)
+	liveSvc := live.NewService(liveRepo, log)
 	liveHandler := live.NewHandler(liveSvc, validate)
 	liveHandler.RegisterRoutes(storeScoped)
 
 	orderRepo := order.NewRepository(pool)
-	orderSvc := order.NewService(orderRepo)
+	orderSvc := order.NewService(orderRepo, log)
 	orderHandler := order.NewHandler(orderSvc, validate)
 	orderHandler.RegisterRoutes(storeScoped)
 
 	customerRepo := customer.NewRepository(pool)
-	customerSvc := customer.NewService(customerRepo)
+	customerSvc := customer.NewService(customerRepo, log)
 	customerHandler := customer.NewHandler(customerSvc, validate)
 	customerHandler.RegisterRoutes(storeScoped)
 
 	dashboardRepo := dashboard.NewRepository(pool)
-	dashboardSvc := dashboard.NewService(dashboardRepo)
+	dashboardSvc := dashboard.NewService(dashboardRepo, log)
 	dashboardHandler := dashboard.NewHandler(dashboardSvc)
 	dashboardHandler.RegisterRoutes(storeScoped)
 

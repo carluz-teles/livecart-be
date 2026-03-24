@@ -2,14 +2,20 @@ package dashboard
 
 import (
 	"context"
+
+	"go.uber.org/zap"
 )
 
 type Service struct {
-	repo *Repository
+	repo   *Repository
+	logger *zap.Logger
 }
 
-func NewService(repo *Repository) *Service {
-	return &Service{repo: repo}
+func NewService(repo *Repository, logger *zap.Logger) *Service {
+	return &Service{
+		repo:   repo,
+		logger: logger.Named("dashboard"),
+	}
 }
 
 func (s *Service) GetStats(ctx context.Context, storeID string) (*DashboardStatsOutput, error) {

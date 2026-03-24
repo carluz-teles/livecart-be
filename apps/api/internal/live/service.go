@@ -2,14 +2,20 @@ package live
 
 import (
 	"context"
+
+	"go.uber.org/zap"
 )
 
 type Service struct {
-	repo *Repository
+	repo   *Repository
+	logger *zap.Logger
 }
 
-func NewService(repo *Repository) *Service {
-	return &Service{repo: repo}
+func NewService(repo *Repository, logger *zap.Logger) *Service {
+	return &Service{
+		repo:   repo,
+		logger: logger.Named("live"),
+	}
 }
 
 func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLiveOutput, error) {

@@ -4,15 +4,21 @@ import (
 	"context"
 	"fmt"
 
+	"go.uber.org/zap"
+
 	"livecart/apps/api/lib/httpx"
 )
 
 type Service struct {
-	repo *Repository
+	repo   *Repository
+	logger *zap.Logger
 }
 
-func NewService(repo *Repository) *Service {
-	return &Service{repo: repo}
+func NewService(repo *Repository, logger *zap.Logger) *Service {
+	return &Service{
+		repo:   repo,
+		logger: logger.Named("order"),
+	}
 }
 
 func (s *Service) List(ctx context.Context, input ListOrdersInput) (ListOrdersOutput, error) {

@@ -12,14 +12,14 @@ type CreateStoreResponse struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	Slug      string    `json:"slug"`
-	CreatedAt time.Time `json:"created_at"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 type UpdateStoreRequest struct {
 	Name           string `json:"name" validate:"required,min=2,max=100"`
-	WhatsappNumber string `json:"whatsapp_number"`
-	EmailAddress   string `json:"email_address"`
-	SMSNumber      string `json:"sms_number"`
+	WhatsappNumber string `json:"whatsappNumber"`
+	EmailAddress   string `json:"emailAddress"`
+	SMSNumber      string `json:"smsNumber"`
 }
 
 type StoreResponse struct {
@@ -27,10 +27,10 @@ type StoreResponse struct {
 	Name           string    `json:"name"`
 	Slug           string    `json:"slug"`
 	Active         bool      `json:"active"`
-	WhatsappNumber *string   `json:"whatsapp_number"`
-	EmailAddress   *string   `json:"email_address"`
-	SMSNumber      *string   `json:"sms_number"`
-	CreatedAt      time.Time `json:"created_at"`
+	WhatsappNumber *string   `json:"whatsappNumber"`
+	EmailAddress   *string   `json:"emailAddress"`
+	SMSNumber      *string   `json:"smsNumber"`
+	CreatedAt      time.Time `json:"createdAt"`
 }
 
 // Service layer
