@@ -34,11 +34,12 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Tags         lives
 // @Accept       json
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Param        request body CreateLiveRequest true "Live session creation payload"
 // @Success      201 {object} httpx.Envelope{data=CreateLiveResponse}
 // @Failure      400 {object} httpx.Envelope
 // @Failure      422 {object} httpx.ValidationEnvelope
-// @Router       /api/v1/lives [post]
+// @Router       /api/v1/stores/{storeId}/lives [post]
 // @Security     BearerAuth
 func (h *Handler) Create(c *fiber.Ctx) error {
 	var req CreateLiveRequest
@@ -75,10 +76,11 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 // @Description  Returns a single live session by its UUID
 // @Tags         lives
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Live session UUID"
 // @Success      200 {object} httpx.Envelope{data=LiveResponse}
 // @Failure      404 {object} httpx.Envelope
-// @Router       /api/v1/lives/{id} [get]
+// @Router       /api/v1/stores/{storeId}/lives/{id} [get]
 // @Security     BearerAuth
 func (h *Handler) GetByID(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
@@ -97,6 +99,7 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 // @Description  Returns live sessions with filtering, pagination, and sorting
 // @Tags         lives
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Param        search query string false "Search by title"
 // @Param        page query int false "Page number" default(1)
 // @Param        limit query int false "Items per page" default(20)
@@ -105,7 +108,7 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 // @Param        status query []string false "Filter by status"
 // @Param        platform query []string false "Filter by platform"
 // @Success      200 {object} httpx.Envelope{data=ListLivesResponse}
-// @Router       /api/v1/lives [get]
+// @Router       /api/v1/stores/{storeId}/lives [get]
 // @Security     BearerAuth
 func (h *Handler) List(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
@@ -146,13 +149,14 @@ func (h *Handler) List(c *fiber.Ctx) error {
 // @Tags         lives
 // @Accept       json
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Live session UUID"
 // @Param        request body UpdateLiveRequest true "Live session update payload"
 // @Success      200 {object} httpx.Envelope{data=LiveResponse}
 // @Failure      400 {object} httpx.Envelope
 // @Failure      404 {object} httpx.Envelope
 // @Failure      422 {object} httpx.ValidationEnvelope
-// @Router       /api/v1/lives/{id} [put]
+// @Router       /api/v1/stores/{storeId}/lives/{id} [put]
 // @Security     BearerAuth
 func (h *Handler) Update(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
@@ -185,10 +189,11 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 // @Description  Starts a scheduled live session
 // @Tags         lives
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Live session UUID"
 // @Success      200 {object} httpx.Envelope{data=LiveResponse}
 // @Failure      404 {object} httpx.Envelope
-// @Router       /api/v1/lives/{id}/start [post]
+// @Router       /api/v1/stores/{storeId}/lives/{id}/start [post]
 // @Security     BearerAuth
 func (h *Handler) Start(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
@@ -207,10 +212,11 @@ func (h *Handler) Start(c *fiber.Ctx) error {
 // @Description  Ends an active live session
 // @Tags         lives
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Live session UUID"
 // @Success      200 {object} httpx.Envelope{data=LiveResponse}
 // @Failure      404 {object} httpx.Envelope
-// @Router       /api/v1/lives/{id}/end [post]
+// @Router       /api/v1/stores/{storeId}/lives/{id}/end [post]
 // @Security     BearerAuth
 func (h *Handler) End(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
@@ -229,8 +235,9 @@ func (h *Handler) End(c *fiber.Ctx) error {
 // @Description  Returns aggregated statistics for all live sessions in the store
 // @Tags         lives
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Success      200 {object} httpx.Envelope{data=LiveStatsResponse}
-// @Router       /api/v1/lives/stats [get]
+// @Router       /api/v1/stores/{storeId}/lives/stats [get]
 // @Security     BearerAuth
 func (h *Handler) GetStats(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)

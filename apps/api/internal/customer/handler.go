@@ -29,6 +29,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Description  Returns customers with filtering, pagination, and sorting
 // @Tags         customers
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Param        search query string false "Search by handle"
 // @Param        page query int false "Page number" default(1)
 // @Param        limit query int false "Items per page" default(20)
@@ -38,7 +39,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Param        orderCountMin query int false "Minimum order count"
 // @Param        orderCountMax query int false "Maximum order count"
 // @Success      200 {object} httpx.Envelope{data=ListCustomersResponse}
-// @Router       /api/v1/customers [get]
+// @Router       /api/v1/stores/{storeId}/customers [get]
 // @Security     BearerAuth
 func (h *Handler) List(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
@@ -78,10 +79,11 @@ func (h *Handler) List(c *fiber.Ctx) error {
 // @Description  Returns a single customer by their platform user ID
 // @Tags         customers
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Customer platform user ID"
 // @Success      200 {object} httpx.Envelope{data=CustomerResponse}
 // @Failure      404 {object} httpx.Envelope
-// @Router       /api/v1/customers/{id} [get]
+// @Router       /api/v1/stores/{storeId}/customers/{id} [get]
 // @Security     BearerAuth
 func (h *Handler) GetByID(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
@@ -100,8 +102,9 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 // @Description  Returns aggregated statistics for all customers in the store
 // @Tags         customers
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Success      200 {object} httpx.Envelope{data=CustomerStatsResponse}
-// @Router       /api/v1/customers/stats [get]
+// @Router       /api/v1/stores/{storeId}/customers/stats [get]
 // @Security     BearerAuth
 func (h *Handler) GetStats(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)

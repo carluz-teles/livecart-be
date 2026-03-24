@@ -30,6 +30,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Description  Returns orders with filtering, pagination, and sorting
 // @Tags         orders
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Param        search query string false "Search by customer handle or order ID"
 // @Param        page query int false "Page number" default(1)
 // @Param        limit query int false "Items per page" default(20)
@@ -39,7 +40,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Param        paymentStatus query []string false "Filter by payment status"
 // @Param        liveSessionId query string false "Filter by live session ID"
 // @Success      200 {object} httpx.Envelope{data=ListOrdersResponse}
-// @Router       /api/v1/orders [get]
+// @Router       /api/v1/stores/{storeId}/orders [get]
 // @Security     BearerAuth
 func (h *Handler) List(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
@@ -79,10 +80,11 @@ func (h *Handler) List(c *fiber.Ctx) error {
 // @Description  Returns a single order by its UUID with items
 // @Tags         orders
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Order UUID"
 // @Success      200 {object} httpx.Envelope{data=OrderResponse}
 // @Failure      404 {object} httpx.Envelope
-// @Router       /api/v1/orders/{id} [get]
+// @Router       /api/v1/stores/{storeId}/orders/{id} [get]
 // @Security     BearerAuth
 func (h *Handler) GetByID(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
@@ -102,13 +104,14 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 // @Tags         orders
 // @Accept       json
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Order UUID"
 // @Param        request body UpdateOrderRequest true "Order update payload"
 // @Success      200 {object} httpx.Envelope{data=OrderResponse}
 // @Failure      400 {object} httpx.Envelope
 // @Failure      404 {object} httpx.Envelope
 // @Failure      422 {object} httpx.ValidationEnvelope
-// @Router       /api/v1/orders/{id} [patch]
+// @Router       /api/v1/stores/{storeId}/orders/{id} [patch]
 // @Security     BearerAuth
 func (h *Handler) Update(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
@@ -140,8 +143,9 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 // @Description  Returns aggregated statistics for all orders in the store
 // @Tags         orders
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Success      200 {object} httpx.Envelope{data=OrderStatsResponse}
-// @Router       /api/v1/orders/stats [get]
+// @Router       /api/v1/stores/{storeId}/orders/stats [get]
 // @Security     BearerAuth
 func (h *Handler) GetStats(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)

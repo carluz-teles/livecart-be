@@ -1,5 +1,272 @@
 basePath: /
 definitions:
+  apps_api_internal_customer.CustomerResponse:
+    properties:
+      first_order_at:
+        type: string
+      handle:
+        type: string
+      id:
+        type: string
+      last_order_at:
+        type: string
+      total_orders:
+        type: integer
+      total_spent:
+        type: integer
+    type: object
+  apps_api_internal_customer.CustomerStatsResponse:
+    properties:
+      active_customers:
+        type: integer
+      avg_spent_per_customer:
+        type: integer
+      total_customers:
+        type: integer
+    type: object
+  apps_api_internal_customer.ListCustomersResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/apps_api_internal_customer.CustomerResponse'
+        type: array
+      pagination:
+        $ref: '#/definitions/livecart_apps_api_lib_query.PaginationResponse'
+    type: object
+  apps_api_internal_dashboard.DashboardStatsResponse:
+    properties:
+      active_products:
+        type: integer
+      total_lives:
+        type: integer
+      total_orders:
+        type: integer
+      total_revenue:
+        type: integer
+    type: object
+  apps_api_internal_dashboard.MonthlyRevenueItem:
+    properties:
+      month:
+        type: string
+      month_num:
+        type: integer
+      revenue:
+        type: integer
+    type: object
+  apps_api_internal_dashboard.MonthlyRevenueResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/apps_api_internal_dashboard.MonthlyRevenueItem'
+        type: array
+    type: object
+  apps_api_internal_dashboard.TopProductItem:
+    properties:
+      id:
+        type: string
+      keyword:
+        type: string
+      name:
+        type: string
+      total_revenue:
+        type: integer
+      total_sold:
+        type: integer
+    type: object
+  apps_api_internal_dashboard.TopProductsResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/apps_api_internal_dashboard.TopProductItem'
+        type: array
+    type: object
+  apps_api_internal_live.CreateLiveRequest:
+    properties:
+      platform:
+        enum:
+        - instagram
+        - tiktok
+        - youtube
+        - facebook
+        type: string
+      platform_live_id:
+        type: string
+      title:
+        maxLength: 200
+        minLength: 1
+        type: string
+    required:
+    - platform
+    - platform_live_id
+    - title
+    type: object
+  apps_api_internal_live.CreateLiveResponse:
+    properties:
+      created_at:
+        type: string
+      id:
+        type: string
+      platform:
+        type: string
+      status:
+        type: string
+      title:
+        type: string
+    type: object
+  apps_api_internal_live.ListLivesResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/apps_api_internal_live.LiveResponse'
+        type: array
+      pagination:
+        $ref: '#/definitions/livecart_apps_api_lib_query.PaginationResponse'
+    type: object
+  apps_api_internal_live.LiveResponse:
+    properties:
+      created_at:
+        type: string
+      ended_at:
+        type: string
+      id:
+        type: string
+      platform:
+        type: string
+      platform_live_id:
+        type: string
+      started_at:
+        type: string
+      status:
+        type: string
+      title:
+        type: string
+      total_comments:
+        type: integer
+      total_orders:
+        type: integer
+      updated_at:
+        type: string
+    type: object
+  apps_api_internal_live.LiveStatsResponse:
+    properties:
+      active_lives:
+        type: integer
+      total_lives:
+        type: integer
+      total_orders:
+        type: integer
+    type: object
+  apps_api_internal_live.UpdateLiveRequest:
+    properties:
+      platform:
+        enum:
+        - instagram
+        - tiktok
+        - youtube
+        - facebook
+        type: string
+      platform_live_id:
+        type: string
+      title:
+        maxLength: 200
+        minLength: 1
+        type: string
+    required:
+    - platform
+    - platform_live_id
+    - title
+    type: object
+  apps_api_internal_order.ListOrdersResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/apps_api_internal_order.OrderResponse'
+        type: array
+      pagination:
+        $ref: '#/definitions/livecart_apps_api_lib_query.PaginationResponse'
+    type: object
+  apps_api_internal_order.OrderItemResponse:
+    properties:
+      id:
+        type: string
+      keyword:
+        type: string
+      product_id:
+        type: string
+      product_image:
+        type: string
+      product_name:
+        type: string
+      quantity:
+        type: integer
+      size:
+        type: string
+      total_price:
+        type: integer
+      unit_price:
+        type: integer
+    type: object
+  apps_api_internal_order.OrderResponse:
+    properties:
+      created_at:
+        type: string
+      customer_handle:
+        type: string
+      customer_id:
+        type: string
+      expires_at:
+        type: string
+      id:
+        type: string
+      items:
+        items:
+          $ref: '#/definitions/apps_api_internal_order.OrderItemResponse'
+        type: array
+      live_platform:
+        type: string
+      live_session_id:
+        type: string
+      live_title:
+        type: string
+      paid_at:
+        type: string
+      payment_status:
+        type: string
+      status:
+        type: string
+      total_amount:
+        type: integer
+      total_items:
+        type: integer
+    type: object
+  apps_api_internal_order.OrderStatsResponse:
+    properties:
+      avg_ticket:
+        type: integer
+      pending_orders:
+        type: integer
+      total_orders:
+        type: integer
+      total_revenue:
+        type: integer
+    type: object
+  apps_api_internal_order.UpdateOrderRequest:
+    properties:
+      payment_status:
+        enum:
+        - pending
+        - paid
+        - failed
+        - refunded
+        type: string
+      status:
+        enum:
+        - pending
+        - checkout
+        - completed
+        - expired
+        type: string
+    type: object
   apps_api_internal_product.CreateProductRequest:
     properties:
       external_id:
@@ -20,11 +287,8 @@ definitions:
         minLength: 1
         type: string
       price:
-        type: string
-      sizes:
-        items:
-          type: string
-        type: array
+        description: price in cents
+        type: integer
       stock:
         minimum: 0
         type: integer
@@ -42,6 +306,15 @@ definitions:
         type: string
       name:
         type: string
+    type: object
+  apps_api_internal_product.ListProductsResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/apps_api_internal_product.ProductResponse'
+        type: array
+      pagination:
+        $ref: '#/definitions/livecart_apps_api_lib_query.PaginationResponse'
     type: object
   apps_api_internal_product.ProductResponse:
     properties:
@@ -62,15 +335,25 @@ definitions:
       name:
         type: string
       price:
-        type: string
-      sizes:
-        items:
-          type: string
-        type: array
+        description: price in cents
+        type: integer
       stock:
         type: integer
       updated_at:
         type: string
+    type: object
+  apps_api_internal_product.ProductStatsResponse:
+    properties:
+      active_count:
+        type: integer
+      low_stock_count:
+        description: stock <= 5
+        type: integer
+      stock_value:
+        description: sum of price * stock in cents
+        type: integer
+      total_products:
+        type: integer
     type: object
   apps_api_internal_product.UpdateProductRequest:
     properties:
@@ -83,11 +366,8 @@ definitions:
         minLength: 1
         type: string
       price:
-        type: string
-      sizes:
-        items:
-          type: string
-        type: array
+        description: price in cents
+        type: integer
       stock:
         minimum: 0
         type: integer
@@ -153,6 +433,43 @@ definitions:
     required:
     - name
     type: object
+  apps_api_internal_user.GetMeResponse:
+    properties:
+      avatar_url:
+        type: string
+      created_at:
+        type: string
+      email:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      role:
+        type: string
+      store_id:
+        type: string
+      store_name:
+        type: string
+      store_slug:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  apps_api_internal_user.SyncUserRequest:
+    properties:
+      store_name:
+        maxLength: 100
+        minLength: 2
+        type: string
+      store_slug:
+        maxLength: 50
+        minLength: 2
+        type: string
+    required:
+    - store_name
+    - store_slug
+    type: object
   livecart_apps_api_lib_httpx.Envelope:
     properties:
       data: {}
@@ -168,6 +485,17 @@ definitions:
           type: string
         type: object
     type: object
+  livecart_apps_api_lib_query.PaginationResponse:
+    properties:
+      limit:
+        type: integer
+      page:
+        type: integer
+      total:
+        type: integer
+      totalPages:
+        type: integer
+    type: object
 host: localhost:3001
 info:
   contact:
@@ -181,144 +509,6 @@ info:
   title: LiveCart API
   version: "1.0"
 paths:
-  /api/v1/products:
-    get:
-      description: Returns all products for the current store
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            allOf:
-            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
-            - properties:
-                data:
-                  items:
-                    $ref: '#/definitions/apps_api_internal_product.ProductResponse'
-                  type: array
-              type: object
-      security:
-      - BearerAuth: []
-      summary: List products
-      tags:
-      - products
-    post:
-      consumes:
-      - application/json
-      description: Creates a product for the current store. Keyword is auto-generated
-        if not provided.
-      parameters:
-      - description: Product creation payload
-        in: body
-        name: request
-        required: true
-        schema:
-          $ref: '#/definitions/apps_api_internal_product.CreateProductRequest'
-      produces:
-      - application/json
-      responses:
-        "201":
-          description: Created
-          schema:
-            allOf:
-            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
-            - properties:
-                data:
-                  $ref: '#/definitions/apps_api_internal_product.CreateProductResponse'
-              type: object
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
-        "409":
-          description: Conflict
-          schema:
-            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
-        "422":
-          description: Unprocessable Entity
-          schema:
-            $ref: '#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope'
-      security:
-      - BearerAuth: []
-      summary: Create a new product
-      tags:
-      - products
-  /api/v1/products/{id}:
-    get:
-      description: Returns a single product by its UUID
-      parameters:
-      - description: Product UUID
-        in: path
-        name: id
-        required: true
-        type: string
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            allOf:
-            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
-            - properties:
-                data:
-                  $ref: '#/definitions/apps_api_internal_product.ProductResponse'
-              type: object
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
-      security:
-      - BearerAuth: []
-      summary: Get product by ID
-      tags:
-      - products
-    put:
-      consumes:
-      - application/json
-      description: Updates an existing product by its UUID
-      parameters:
-      - description: Product UUID
-        in: path
-        name: id
-        required: true
-        type: string
-      - description: Product update payload
-        in: body
-        name: request
-        required: true
-        schema:
-          $ref: '#/definitions/apps_api_internal_product.UpdateProductRequest'
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            allOf:
-            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
-            - properties:
-                data:
-                  $ref: '#/definitions/apps_api_internal_product.ProductResponse'
-              type: object
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
-        "422":
-          description: Unprocessable Entity
-          schema:
-            $ref: '#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope'
-      security:
-      - BearerAuth: []
-      summary: Update a product
-      tags:
-      - products
   /api/v1/stores:
     post:
       consumes:
@@ -360,6 +550,913 @@ paths:
       summary: Create a new store
       tags:
       - stores
+  /api/v1/stores/{storeId}/customers:
+    get:
+      description: Returns customers with filtering, pagination, and sorting
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Search by handle
+        in: query
+        name: search
+        type: string
+      - default: 1
+        description: Page number
+        in: query
+        name: page
+        type: integer
+      - default: 20
+        description: Items per page
+        in: query
+        name: limit
+        type: integer
+      - default: last_order_at
+        description: Sort field
+        in: query
+        name: sortBy
+        type: string
+      - default: desc
+        description: Sort order (asc, desc)
+        in: query
+        name: sortOrder
+        type: string
+      - description: Filter customers with orders
+        in: query
+        name: hasOrders
+        type: boolean
+      - description: Minimum order count
+        in: query
+        name: orderCountMin
+        type: integer
+      - description: Maximum order count
+        in: query
+        name: orderCountMax
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_customer.ListCustomersResponse'
+              type: object
+      security:
+      - BearerAuth: []
+      summary: List customers
+      tags:
+      - customers
+  /api/v1/stores/{storeId}/customers/{id}:
+    get:
+      description: Returns a single customer by their platform user ID
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Customer platform user ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_customer.CustomerResponse'
+              type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+      security:
+      - BearerAuth: []
+      summary: Get customer by ID
+      tags:
+      - customers
+  /api/v1/stores/{storeId}/customers/stats:
+    get:
+      description: Returns aggregated statistics for all customers in the store
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_customer.CustomerStatsResponse'
+              type: object
+      security:
+      - BearerAuth: []
+      summary: Get customer statistics
+      tags:
+      - customers
+  /api/v1/stores/{storeId}/dashboard/chart:
+    get:
+      description: Returns monthly revenue data for the current year
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_dashboard.MonthlyRevenueResponse'
+              type: object
+      security:
+      - BearerAuth: []
+      summary: Get monthly revenue chart data
+      tags:
+      - dashboard
+  /api/v1/stores/{storeId}/dashboard/stats:
+    get:
+      description: Returns main dashboard metrics (revenue, orders, products, lives)
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_dashboard.DashboardStatsResponse'
+              type: object
+      security:
+      - BearerAuth: []
+      summary: Get dashboard statistics
+      tags:
+      - dashboard
+  /api/v1/stores/{storeId}/dashboard/top-products:
+    get:
+      description: Returns the top 5 best selling products
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_dashboard.TopProductsResponse'
+              type: object
+      security:
+      - BearerAuth: []
+      summary: Get top selling products
+      tags:
+      - dashboard
+  /api/v1/stores/{storeId}/lives:
+    get:
+      description: Returns live sessions with filtering, pagination, and sorting
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Search by title
+        in: query
+        name: search
+        type: string
+      - default: 1
+        description: Page number
+        in: query
+        name: page
+        type: integer
+      - default: 20
+        description: Items per page
+        in: query
+        name: limit
+        type: integer
+      - default: created_at
+        description: Sort field
+        in: query
+        name: sortBy
+        type: string
+      - default: desc
+        description: Sort order (asc, desc)
+        in: query
+        name: sortOrder
+        type: string
+      - collectionFormat: csv
+        description: Filter by status
+        in: query
+        items:
+          type: string
+        name: status
+        type: array
+      - collectionFormat: csv
+        description: Filter by platform
+        in: query
+        items:
+          type: string
+        name: platform
+        type: array
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_live.ListLivesResponse'
+              type: object
+      security:
+      - BearerAuth: []
+      summary: List live sessions
+      tags:
+      - lives
+    post:
+      consumes:
+      - application/json
+      description: Creates a live session for the current store
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Live session creation payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/apps_api_internal_live.CreateLiveRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_live.CreateLiveResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Create a new live session
+      tags:
+      - lives
+  /api/v1/stores/{storeId}/lives/{id}:
+    get:
+      description: Returns a single live session by its UUID
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Live session UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_live.LiveResponse'
+              type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+      security:
+      - BearerAuth: []
+      summary: Get live session by ID
+      tags:
+      - lives
+    put:
+      consumes:
+      - application/json
+      description: Updates an existing live session by its UUID
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Live session UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Live session update payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/apps_api_internal_live.UpdateLiveRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_live.LiveResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Update a live session
+      tags:
+      - lives
+  /api/v1/stores/{storeId}/lives/{id}/end:
+    post:
+      description: Ends an active live session
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Live session UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_live.LiveResponse'
+              type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+      security:
+      - BearerAuth: []
+      summary: End a live session
+      tags:
+      - lives
+  /api/v1/stores/{storeId}/lives/{id}/start:
+    post:
+      description: Starts a scheduled live session
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Live session UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_live.LiveResponse'
+              type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+      security:
+      - BearerAuth: []
+      summary: Start a live session
+      tags:
+      - lives
+  /api/v1/stores/{storeId}/lives/stats:
+    get:
+      description: Returns aggregated statistics for all live sessions in the store
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_live.LiveStatsResponse'
+              type: object
+      security:
+      - BearerAuth: []
+      summary: Get live statistics
+      tags:
+      - lives
+  /api/v1/stores/{storeId}/orders:
+    get:
+      description: Returns orders with filtering, pagination, and sorting
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Search by customer handle or order ID
+        in: query
+        name: search
+        type: string
+      - default: 1
+        description: Page number
+        in: query
+        name: page
+        type: integer
+      - default: 20
+        description: Items per page
+        in: query
+        name: limit
+        type: integer
+      - default: created_at
+        description: Sort field
+        in: query
+        name: sortBy
+        type: string
+      - default: desc
+        description: Sort order (asc, desc)
+        in: query
+        name: sortOrder
+        type: string
+      - collectionFormat: csv
+        description: Filter by status
+        in: query
+        items:
+          type: string
+        name: status
+        type: array
+      - collectionFormat: csv
+        description: Filter by payment status
+        in: query
+        items:
+          type: string
+        name: paymentStatus
+        type: array
+      - description: Filter by live session ID
+        in: query
+        name: liveSessionId
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_order.ListOrdersResponse'
+              type: object
+      security:
+      - BearerAuth: []
+      summary: List orders
+      tags:
+      - orders
+  /api/v1/stores/{storeId}/orders/{id}:
+    get:
+      description: Returns a single order by its UUID with items
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Order UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_order.OrderResponse'
+              type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+      security:
+      - BearerAuth: []
+      summary: Get order by ID
+      tags:
+      - orders
+    patch:
+      consumes:
+      - application/json
+      description: Updates order status and/or payment status
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Order UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Order update payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/apps_api_internal_order.UpdateOrderRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_order.OrderResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Update an order
+      tags:
+      - orders
+  /api/v1/stores/{storeId}/orders/stats:
+    get:
+      description: Returns aggregated statistics for all orders in the store
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_order.OrderStatsResponse'
+              type: object
+      security:
+      - BearerAuth: []
+      summary: Get order statistics
+      tags:
+      - orders
+  /api/v1/stores/{storeId}/products:
+    get:
+      description: Returns products with filtering, pagination, and sorting
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Search by name or keyword
+        in: query
+        name: search
+        type: string
+      - default: 1
+        description: Page number
+        in: query
+        name: page
+        type: integer
+      - default: 20
+        description: Items per page
+        in: query
+        name: limit
+        type: integer
+      - default: created_at
+        description: Sort field
+        in: query
+        name: sortBy
+        type: string
+      - default: desc
+        description: Sort order (asc, desc)
+        in: query
+        name: sortOrder
+        type: string
+      - collectionFormat: csv
+        description: Filter by status (active, inactive)
+        in: query
+        items:
+          type: string
+        name: status
+        type: array
+      - collectionFormat: csv
+        description: Filter by source (manual, bling, tiny, shopify)
+        in: query
+        items:
+          type: string
+        name: externalSource
+        type: array
+      - description: Minimum price in cents
+        in: query
+        name: priceMin
+        type: integer
+      - description: Maximum price in cents
+        in: query
+        name: priceMax
+        type: integer
+      - description: Minimum stock
+        in: query
+        name: stockMin
+        type: integer
+      - description: Maximum stock
+        in: query
+        name: stockMax
+        type: integer
+      - description: Filter low stock (<=5)
+        in: query
+        name: hasLowStock
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_product.ListProductsResponse'
+              type: object
+      security:
+      - BearerAuth: []
+      summary: List products
+      tags:
+      - products
+    post:
+      consumes:
+      - application/json
+      description: Creates a product for the current store. Keyword is auto-generated
+        if not provided.
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Product creation payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/apps_api_internal_product.CreateProductRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_product.CreateProductResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Create a new product
+      tags:
+      - products
+  /api/v1/stores/{storeId}/products/{id}:
+    get:
+      description: Returns a single product by its UUID
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Product UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_product.ProductResponse'
+              type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+      security:
+      - BearerAuth: []
+      summary: Get product by ID
+      tags:
+      - products
+    put:
+      consumes:
+      - application/json
+      description: Updates an existing product by its UUID
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Product UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Product update payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/apps_api_internal_product.UpdateProductRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_product.ProductResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Update a product
+      tags:
+      - products
+  /api/v1/stores/{storeId}/products/stats:
+    get:
+      description: Returns aggregated statistics for all products in the store
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_product.ProductStatsResponse'
+              type: object
+      security:
+      - BearerAuth: []
+      summary: Get product statistics
+      tags:
+      - products
   /api/v1/stores/me:
     get:
       description: Returns the store associated with the authenticated user
@@ -424,6 +1521,108 @@ paths:
       summary: Update current store
       tags:
       - stores
+  /api/v1/users/me:
+    get:
+      description: Returns the authenticated user's profile including store information
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_user.GetMeResponse'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+      security:
+      - BearerAuth: []
+      summary: Get current user
+      tags:
+      - users
+  /api/v1/users/sync:
+    post:
+      consumes:
+      - application/json
+      description: Creates a new user and store if not exists, or returns existing
+        user. Call this after first sign-in.
+      parameters:
+      - description: Store information for new users
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/apps_api_internal_user.SyncUserRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_user.GetMeResponse'
+              type: object
+        "201":
+          description: Created
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_user.GetMeResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Sync user on first access
+      tags:
+      - users
+  /api/webhooks/clerk:
+    post:
+      consumes:
+      - application/json
+      description: Receives and processes Clerk webhook events for user sync
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+      summary: Handle Clerk webhook events
+      tags:
+      - webhooks
 securityDefinitions:
   BearerAuth:
     description: 'Enter your bearer token in the format: Bearer <token>'

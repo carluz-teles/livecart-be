@@ -16,239 +16,6 @@
     "host": "localhost:3001",
     "basePath": "/",
     "paths": {
-        "/api/v1/products": {
-            "get": {
-                "security": [
-                    {
-                        "BearerAuth": []
-                    }
-                ],
-                "description": "Returns all products for the current store",
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "products"
-                ],
-                "summary": "List products",
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "allOf": [
-                                {
-                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "data": {
-                                            "type": "array",
-                                            "items": {
-                                                "$ref": "#/definitions/apps_api_internal_product.ProductResponse"
-                                            }
-                                        }
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                }
-            },
-            "post": {
-                "security": [
-                    {
-                        "BearerAuth": []
-                    }
-                ],
-                "description": "Creates a product for the current store. Keyword is auto-generated if not provided.",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "products"
-                ],
-                "summary": "Create a new product",
-                "parameters": [
-                    {
-                        "description": "Product creation payload",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/apps_api_internal_product.CreateProductRequest"
-                        }
-                    }
-                ],
-                "responses": {
-                    "201": {
-                        "description": "Created",
-                        "schema": {
-                            "allOf": [
-                                {
-                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "data": {
-                                            "$ref": "#/definitions/apps_api_internal_product.CreateProductResponse"
-                                        }
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
-                        }
-                    },
-                    "409": {
-                        "description": "Conflict",
-                        "schema": {
-                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
-                        }
-                    },
-                    "422": {
-                        "description": "Unprocessable Entity",
-                        "schema": {
-                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope"
-                        }
-                    }
-                }
-            }
-        },
-        "/api/v1/products/{id}": {
-            "get": {
-                "security": [
-                    {
-                        "BearerAuth": []
-                    }
-                ],
-                "description": "Returns a single product by its UUID",
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "products"
-                ],
-                "summary": "Get product by ID",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Product UUID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "allOf": [
-                                {
-                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "data": {
-                                            "$ref": "#/definitions/apps_api_internal_product.ProductResponse"
-                                        }
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
-                        }
-                    }
-                }
-            },
-            "put": {
-                "security": [
-                    {
-                        "BearerAuth": []
-                    }
-                ],
-                "description": "Updates an existing product by its UUID",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "products"
-                ],
-                "summary": "Update a product",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Product UUID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "description": "Product update payload",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/apps_api_internal_product.UpdateProductRequest"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "allOf": [
-                                {
-                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "data": {
-                                            "$ref": "#/definitions/apps_api_internal_product.ProductResponse"
-                                        }
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
-                        }
-                    },
-                    "422": {
-                        "description": "Unprocessable Entity",
-                        "schema": {
-                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope"
-                        }
-                    }
-                }
-            }
-        },
         "/api/v1/stores": {
             "post": {
                 "security": [
@@ -427,9 +194,2075 @@
                     }
                 }
             }
+        },
+        "/api/v1/stores/{storeId}/customers": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns customers with filtering, pagination, and sorting",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "customers"
+                ],
+                "summary": "List customers",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Search by handle",
+                        "name": "search",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 1,
+                        "description": "Page number",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "Items per page",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "default": "last_order_at",
+                        "description": "Sort field",
+                        "name": "sortBy",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "default": "desc",
+                        "description": "Sort order (asc, desc)",
+                        "name": "sortOrder",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Filter customers with orders",
+                        "name": "hasOrders",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Minimum order count",
+                        "name": "orderCountMin",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Maximum order count",
+                        "name": "orderCountMax",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_customer.ListCustomersResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/customers/stats": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns aggregated statistics for all customers in the store",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "customers"
+                ],
+                "summary": "Get customer statistics",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_customer.CustomerStatsResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/customers/{id}": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns a single customer by their platform user ID",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "customers"
+                ],
+                "summary": "Get customer by ID",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Customer platform user ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_customer.CustomerResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/dashboard/chart": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns monthly revenue data for the current year",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "dashboard"
+                ],
+                "summary": "Get monthly revenue chart data",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_dashboard.MonthlyRevenueResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/dashboard/stats": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns main dashboard metrics (revenue, orders, products, lives)",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "dashboard"
+                ],
+                "summary": "Get dashboard statistics",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_dashboard.DashboardStatsResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/dashboard/top-products": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns the top 5 best selling products",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "dashboard"
+                ],
+                "summary": "Get top selling products",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_dashboard.TopProductsResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/lives": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns live sessions with filtering, pagination, and sorting",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "lives"
+                ],
+                "summary": "List live sessions",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Search by title",
+                        "name": "search",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 1,
+                        "description": "Page number",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "Items per page",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "default": "created_at",
+                        "description": "Sort field",
+                        "name": "sortBy",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "default": "desc",
+                        "description": "Sort order (asc, desc)",
+                        "name": "sortOrder",
+                        "in": "query"
+                    },
+                    {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "collectionFormat": "csv",
+                        "description": "Filter by status",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "collectionFormat": "csv",
+                        "description": "Filter by platform",
+                        "name": "platform",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_live.ListLivesResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Creates a live session for the current store",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "lives"
+                ],
+                "summary": "Create a new live session",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Live session creation payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/apps_api_internal_live.CreateLiveRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_live.CreateLiveResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/lives/stats": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns aggregated statistics for all live sessions in the store",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "lives"
+                ],
+                "summary": "Get live statistics",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_live.LiveStatsResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/lives/{id}": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns a single live session by its UUID",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "lives"
+                ],
+                "summary": "Get live session by ID",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Live session UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_live.LiveResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Updates an existing live session by its UUID",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "lives"
+                ],
+                "summary": "Update a live session",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Live session UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Live session update payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/apps_api_internal_live.UpdateLiveRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_live.LiveResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/lives/{id}/end": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Ends an active live session",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "lives"
+                ],
+                "summary": "End a live session",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Live session UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_live.LiveResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/lives/{id}/start": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Starts a scheduled live session",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "lives"
+                ],
+                "summary": "Start a live session",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Live session UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_live.LiveResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/orders": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns orders with filtering, pagination, and sorting",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "orders"
+                ],
+                "summary": "List orders",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Search by customer handle or order ID",
+                        "name": "search",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 1,
+                        "description": "Page number",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "Items per page",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "default": "created_at",
+                        "description": "Sort field",
+                        "name": "sortBy",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "default": "desc",
+                        "description": "Sort order (asc, desc)",
+                        "name": "sortOrder",
+                        "in": "query"
+                    },
+                    {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "collectionFormat": "csv",
+                        "description": "Filter by status",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "collectionFormat": "csv",
+                        "description": "Filter by payment status",
+                        "name": "paymentStatus",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Filter by live session ID",
+                        "name": "liveSessionId",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_order.ListOrdersResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/orders/stats": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns aggregated statistics for all orders in the store",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "orders"
+                ],
+                "summary": "Get order statistics",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_order.OrderStatsResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/orders/{id}": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns a single order by its UUID with items",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "orders"
+                ],
+                "summary": "Get order by ID",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Order UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_order.OrderResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    }
+                }
+            },
+            "patch": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Updates order status and/or payment status",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "orders"
+                ],
+                "summary": "Update an order",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Order UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Order update payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/apps_api_internal_order.UpdateOrderRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_order.OrderResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/products": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns products with filtering, pagination, and sorting",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "products"
+                ],
+                "summary": "List products",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Search by name or keyword",
+                        "name": "search",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 1,
+                        "description": "Page number",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "Items per page",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "default": "created_at",
+                        "description": "Sort field",
+                        "name": "sortBy",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "default": "desc",
+                        "description": "Sort order (asc, desc)",
+                        "name": "sortOrder",
+                        "in": "query"
+                    },
+                    {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "collectionFormat": "csv",
+                        "description": "Filter by status (active, inactive)",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "collectionFormat": "csv",
+                        "description": "Filter by source (manual, bling, tiny, shopify)",
+                        "name": "externalSource",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Minimum price in cents",
+                        "name": "priceMin",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Maximum price in cents",
+                        "name": "priceMax",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Minimum stock",
+                        "name": "stockMin",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Maximum stock",
+                        "name": "stockMax",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Filter low stock (\u003c=5)",
+                        "name": "hasLowStock",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_product.ListProductsResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Creates a product for the current store. Keyword is auto-generated if not provided.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "products"
+                ],
+                "summary": "Create a new product",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Product creation payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/apps_api_internal_product.CreateProductRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_product.CreateProductResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/products/stats": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns aggregated statistics for all products in the store",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "products"
+                ],
+                "summary": "Get product statistics",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_product.ProductStatsResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/products/{id}": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns a single product by its UUID",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "products"
+                ],
+                "summary": "Get product by ID",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Product UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_product.ProductResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Updates an existing product by its UUID",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "products"
+                ],
+                "summary": "Update a product",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Product UUID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Product update payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/apps_api_internal_product.UpdateProductRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_product.ProductResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/users/me": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns the authenticated user's profile including store information",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "Get current user",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_user.GetMeResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/users/sync": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Creates a new user and store if not exists, or returns existing user. Call this after first sign-in.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "Sync user on first access",
+                "parameters": [
+                    {
+                        "description": "Store information for new users",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/apps_api_internal_user.SyncUserRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_user.GetMeResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_user.GetMeResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/webhooks/clerk": {
+            "post": {
+                "description": "Receives and processes Clerk webhook events for user sync",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "webhooks"
+                ],
+                "summary": "Handle Clerk webhook events",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
+        "apps_api_internal_customer.CustomerResponse": {
+            "type": "object",
+            "properties": {
+                "first_order_at": {
+                    "type": "string"
+                },
+                "handle": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "last_order_at": {
+                    "type": "string"
+                },
+                "total_orders": {
+                    "type": "integer"
+                },
+                "total_spent": {
+                    "type": "integer"
+                }
+            }
+        },
+        "apps_api_internal_customer.CustomerStatsResponse": {
+            "type": "object",
+            "properties": {
+                "active_customers": {
+                    "type": "integer"
+                },
+                "avg_spent_per_customer": {
+                    "type": "integer"
+                },
+                "total_customers": {
+                    "type": "integer"
+                }
+            }
+        },
+        "apps_api_internal_customer.ListCustomersResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/apps_api_internal_customer.CustomerResponse"
+                    }
+                },
+                "pagination": {
+                    "$ref": "#/definitions/livecart_apps_api_lib_query.PaginationResponse"
+                }
+            }
+        },
+        "apps_api_internal_dashboard.DashboardStatsResponse": {
+            "type": "object",
+            "properties": {
+                "active_products": {
+                    "type": "integer"
+                },
+                "total_lives": {
+                    "type": "integer"
+                },
+                "total_orders": {
+                    "type": "integer"
+                },
+                "total_revenue": {
+                    "type": "integer"
+                }
+            }
+        },
+        "apps_api_internal_dashboard.MonthlyRevenueItem": {
+            "type": "object",
+            "properties": {
+                "month": {
+                    "type": "string"
+                },
+                "month_num": {
+                    "type": "integer"
+                },
+                "revenue": {
+                    "type": "integer"
+                }
+            }
+        },
+        "apps_api_internal_dashboard.MonthlyRevenueResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/apps_api_internal_dashboard.MonthlyRevenueItem"
+                    }
+                }
+            }
+        },
+        "apps_api_internal_dashboard.TopProductItem": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "keyword": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "total_revenue": {
+                    "type": "integer"
+                },
+                "total_sold": {
+                    "type": "integer"
+                }
+            }
+        },
+        "apps_api_internal_dashboard.TopProductsResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/apps_api_internal_dashboard.TopProductItem"
+                    }
+                }
+            }
+        },
+        "apps_api_internal_live.CreateLiveRequest": {
+            "type": "object",
+            "required": [
+                "platform",
+                "platform_live_id",
+                "title"
+            ],
+            "properties": {
+                "platform": {
+                    "type": "string",
+                    "enum": [
+                        "instagram",
+                        "tiktok",
+                        "youtube",
+                        "facebook"
+                    ]
+                },
+                "platform_live_id": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "minLength": 1
+                }
+            }
+        },
+        "apps_api_internal_live.CreateLiveResponse": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "platform": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": "string"
+                }
+            }
+        },
+        "apps_api_internal_live.ListLivesResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/apps_api_internal_live.LiveResponse"
+                    }
+                },
+                "pagination": {
+                    "$ref": "#/definitions/livecart_apps_api_lib_query.PaginationResponse"
+                }
+            }
+        },
+        "apps_api_internal_live.LiveResponse": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "ended_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "platform": {
+                    "type": "string"
+                },
+                "platform_live_id": {
+                    "type": "string"
+                },
+                "started_at": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": "string"
+                },
+                "total_comments": {
+                    "type": "integer"
+                },
+                "total_orders": {
+                    "type": "integer"
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "apps_api_internal_live.LiveStatsResponse": {
+            "type": "object",
+            "properties": {
+                "active_lives": {
+                    "type": "integer"
+                },
+                "total_lives": {
+                    "type": "integer"
+                },
+                "total_orders": {
+                    "type": "integer"
+                }
+            }
+        },
+        "apps_api_internal_live.UpdateLiveRequest": {
+            "type": "object",
+            "required": [
+                "platform",
+                "platform_live_id",
+                "title"
+            ],
+            "properties": {
+                "platform": {
+                    "type": "string",
+                    "enum": [
+                        "instagram",
+                        "tiktok",
+                        "youtube",
+                        "facebook"
+                    ]
+                },
+                "platform_live_id": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "minLength": 1
+                }
+            }
+        },
+        "apps_api_internal_order.ListOrdersResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/apps_api_internal_order.OrderResponse"
+                    }
+                },
+                "pagination": {
+                    "$ref": "#/definitions/livecart_apps_api_lib_query.PaginationResponse"
+                }
+            }
+        },
+        "apps_api_internal_order.OrderItemResponse": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "keyword": {
+                    "type": "string"
+                },
+                "product_id": {
+                    "type": "string"
+                },
+                "product_image": {
+                    "type": "string"
+                },
+                "product_name": {
+                    "type": "string"
+                },
+                "quantity": {
+                    "type": "integer"
+                },
+                "size": {
+                    "type": "string"
+                },
+                "total_price": {
+                    "type": "integer"
+                },
+                "unit_price": {
+                    "type": "integer"
+                }
+            }
+        },
+        "apps_api_internal_order.OrderResponse": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "customer_handle": {
+                    "type": "string"
+                },
+                "customer_id": {
+                    "type": "string"
+                },
+                "expires_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/apps_api_internal_order.OrderItemResponse"
+                    }
+                },
+                "live_platform": {
+                    "type": "string"
+                },
+                "live_session_id": {
+                    "type": "string"
+                },
+                "live_title": {
+                    "type": "string"
+                },
+                "paid_at": {
+                    "type": "string"
+                },
+                "payment_status": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "total_amount": {
+                    "type": "integer"
+                },
+                "total_items": {
+                    "type": "integer"
+                }
+            }
+        },
+        "apps_api_internal_order.OrderStatsResponse": {
+            "type": "object",
+            "properties": {
+                "avg_ticket": {
+                    "type": "integer"
+                },
+                "pending_orders": {
+                    "type": "integer"
+                },
+                "total_orders": {
+                    "type": "integer"
+                },
+                "total_revenue": {
+                    "type": "integer"
+                }
+            }
+        },
+        "apps_api_internal_order.UpdateOrderRequest": {
+            "type": "object",
+            "properties": {
+                "payment_status": {
+                    "type": "string",
+                    "enum": [
+                        "pending",
+                        "paid",
+                        "failed",
+                        "refunded"
+                    ]
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "pending",
+                        "checkout",
+                        "completed",
+                        "expired"
+                    ]
+                }
+            }
+        },
         "apps_api_internal_product.CreateProductRequest": {
             "type": "object",
             "required": [
@@ -461,13 +2294,8 @@
                     "minLength": 1
                 },
                 "price": {
-                    "type": "string"
-                },
-                "sizes": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
+                    "description": "price in cents",
+                    "type": "integer"
                 },
                 "stock": {
                     "type": "integer",
@@ -489,6 +2317,20 @@
                 },
                 "name": {
                     "type": "string"
+                }
+            }
+        },
+        "apps_api_internal_product.ListProductsResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/apps_api_internal_product.ProductResponse"
+                    }
+                },
+                "pagination": {
+                    "$ref": "#/definitions/livecart_apps_api_lib_query.PaginationResponse"
                 }
             }
         },
@@ -520,19 +2362,33 @@
                     "type": "string"
                 },
                 "price": {
-                    "type": "string"
-                },
-                "sizes": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
+                    "description": "price in cents",
+                    "type": "integer"
                 },
                 "stock": {
                     "type": "integer"
                 },
                 "updated_at": {
                     "type": "string"
+                }
+            }
+        },
+        "apps_api_internal_product.ProductStatsResponse": {
+            "type": "object",
+            "properties": {
+                "active_count": {
+                    "type": "integer"
+                },
+                "low_stock_count": {
+                    "description": "stock \u003c= 5",
+                    "type": "integer"
+                },
+                "stock_value": {
+                    "description": "sum of price * stock in cents",
+                    "type": "integer"
+                },
+                "total_products": {
+                    "type": "integer"
                 }
             }
         },
@@ -554,13 +2410,8 @@
                     "minLength": 1
                 },
                 "price": {
-                    "type": "string"
-                },
-                "sizes": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
+                    "description": "price in cents",
+                    "type": "integer"
                 },
                 "stock": {
                     "type": "integer",
@@ -655,6 +2506,60 @@
                 }
             }
         },
+        "apps_api_internal_user.GetMeResponse": {
+            "type": "object",
+            "properties": {
+                "avatar_url": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "email": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "role": {
+                    "type": "string"
+                },
+                "store_id": {
+                    "type": "string"
+                },
+                "store_name": {
+                    "type": "string"
+                },
+                "store_slug": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "apps_api_internal_user.SyncUserRequest": {
+            "type": "object",
+            "required": [
+                "store_name",
+                "store_slug"
+            ],
+            "properties": {
+                "store_name": {
+                    "type": "string",
+                    "maxLength": 100,
+                    "minLength": 2
+                },
+                "store_slug": {
+                    "type": "string",
+                    "maxLength": 50,
+                    "minLength": 2
+                }
+            }
+        },
         "livecart_apps_api_lib_httpx.Envelope": {
             "type": "object",
             "properties": {
@@ -675,6 +2580,23 @@
                     "additionalProperties": {
                         "type": "string"
                     }
+                }
+            }
+        },
+        "livecart_apps_api_lib_query.PaginationResponse": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer"
+                },
+                "page": {
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
+                },
+                "totalPages": {
+                    "type": "integer"
                 }
             }
         }

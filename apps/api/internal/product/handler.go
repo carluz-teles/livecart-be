@@ -34,12 +34,13 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Tags         products
 // @Accept       json
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Param        request body CreateProductRequest true "Product creation payload"
 // @Success      201 {object} httpx.Envelope{data=CreateProductResponse}
 // @Failure      400 {object} httpx.Envelope
 // @Failure      409 {object} httpx.Envelope
 // @Failure      422 {object} httpx.ValidationEnvelope
-// @Router       /api/v1/products [post]
+// @Router       /api/v1/stores/{storeId}/products [post]
 // @Security     BearerAuth
 func (h *Handler) Create(c *fiber.Ctx) error {
 	var req CreateProductRequest
@@ -79,10 +80,11 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 // @Description  Returns a single product by its UUID
 // @Tags         products
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Product UUID"
 // @Success      200 {object} httpx.Envelope{data=ProductResponse}
 // @Failure      404 {object} httpx.Envelope
-// @Router       /api/v1/products/{id} [get]
+// @Router       /api/v1/stores/{storeId}/products/{id} [get]
 // @Security     BearerAuth
 func (h *Handler) GetByID(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
@@ -101,6 +103,7 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 // @Description  Returns products with filtering, pagination, and sorting
 // @Tags         products
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Param        search query string false "Search by name or keyword"
 // @Param        page query int false "Page number" default(1)
 // @Param        limit query int false "Items per page" default(20)
@@ -114,7 +117,7 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 // @Param        stockMax query int false "Maximum stock"
 // @Param        hasLowStock query bool false "Filter low stock (<=5)"
 // @Success      200 {object} httpx.Envelope{data=ListProductsResponse}
-// @Router       /api/v1/products [get]
+// @Router       /api/v1/stores/{storeId}/products [get]
 // @Security     BearerAuth
 func (h *Handler) List(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
@@ -206,13 +209,14 @@ func parseProductFilters(c *fiber.Ctx) ProductFilters {
 // @Tags         products
 // @Accept       json
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Product UUID"
 // @Param        request body UpdateProductRequest true "Product update payload"
 // @Success      200 {object} httpx.Envelope{data=ProductResponse}
 // @Failure      400 {object} httpx.Envelope
 // @Failure      404 {object} httpx.Envelope
 // @Failure      422 {object} httpx.ValidationEnvelope
-// @Router       /api/v1/products/{id} [put]
+// @Router       /api/v1/stores/{storeId}/products/{id} [put]
 // @Security     BearerAuth
 func (h *Handler) Update(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
@@ -247,8 +251,9 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 // @Description  Returns aggregated statistics for all products in the store
 // @Tags         products
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Success      200 {object} httpx.Envelope{data=ProductStatsResponse}
-// @Router       /api/v1/products/stats [get]
+// @Router       /api/v1/stores/{storeId}/products/stats [get]
 // @Security     BearerAuth
 func (h *Handler) GetStats(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)

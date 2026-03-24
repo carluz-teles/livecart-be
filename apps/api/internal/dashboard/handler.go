@@ -26,8 +26,9 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Description  Returns main dashboard metrics (revenue, orders, products, lives)
 // @Tags         dashboard
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Success      200 {object} httpx.Envelope{data=DashboardStatsResponse}
-// @Router       /api/v1/dashboard/stats [get]
+// @Router       /api/v1/stores/{storeId}/dashboard/stats [get]
 // @Security     BearerAuth
 func (h *Handler) GetStats(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
@@ -50,8 +51,9 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 // @Description  Returns monthly revenue data for the current year
 // @Tags         dashboard
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Success      200 {object} httpx.Envelope{data=MonthlyRevenueResponse}
-// @Router       /api/v1/dashboard/chart [get]
+// @Router       /api/v1/stores/{storeId}/dashboard/chart [get]
 // @Security     BearerAuth
 func (h *Handler) GetMonthlyRevenue(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
@@ -78,8 +80,9 @@ func (h *Handler) GetMonthlyRevenue(c *fiber.Ctx) error {
 // @Description  Returns the top 5 best selling products
 // @Tags         dashboard
 // @Produce      json
+// @Param        storeId path string true "Store UUID"
 // @Success      200 {object} httpx.Envelope{data=TopProductsResponse}
-// @Router       /api/v1/dashboard/top-products [get]
+// @Router       /api/v1/stores/{storeId}/dashboard/top-products [get]
 // @Security     BearerAuth
 func (h *Handler) GetTopProducts(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
