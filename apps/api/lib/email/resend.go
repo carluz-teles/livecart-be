@@ -13,7 +13,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// Client handles email sending via SendGrid
+// Client handles email sending via Resend
 type Client struct {
 	apiKey    string
 	fromEmail string
@@ -22,12 +22,12 @@ type Client struct {
 	client    *http.Client
 }
 
-// NewClient creates a new SendGrid email client
+// NewClient creates a new Resend email client
 func NewClient(logger *zap.Logger) *Client {
 	return &Client{
-		apiKey:    os.Getenv("SENDGRID_API_KEY"),
-		fromEmail: getEnvOrDefault("SENDGRID_FROM_EMAIL", "noreply@livecart.com"),
-		fromName:  getEnvOrDefault("SENDGRID_FROM_NAME", "LiveCart"),
+		apiKey:    os.Getenv("RESEND_API_KEY"),
+		fromEmail: getEnvOrDefault("RESEND_FROM_EMAIL", "noreply@livecart.com"),
+		fromName:  getEnvOrDefault("RESEND_FROM_NAME", "LiveCart"),
 		logger:    logger.Named("email"),
 		client: &http.Client{
 			Timeout: 10 * time.Second,
@@ -42,7 +42,7 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
-// IsConfigured checks if SendGrid is properly configured
+// IsConfigured checks if Resend is properly configured
 func (c *Client) IsConfigured() bool {
 	return c.apiKey != ""
 }
@@ -61,7 +61,7 @@ type InvitationEmailInput struct {
 // SendInvitation sends an invitation email
 func (c *Client) SendInvitation(ctx context.Context, input InvitationEmailInput) error {
 	if !c.IsConfigured() {
-		c.logger.Warn("SendGrid not configured, skipping email",
+		c.logger.Warn("Resend not configured, skipping email",
 			zap.String("to", input.ToEmail),
 			zap.String("store", input.StoreName),
 		)
@@ -94,25 +94,26 @@ type SendEmailInput struct {
 	TextContent string
 }
 
-// send sends an email via SendGrid API
+// send sends an email via Resend API
 func (c *Client) send(ctx context.Context, input SendEmailInput) error {
+	// Build the "from" field
+	from := c.fromEmail
+	if c.fromName != "" {
+		from = fmt.Sprintf("%s <%s>", c.fromName, c.fromEmail)
+	}
+
+	// Build the "to" field
+	to := input.ToEmail
+	if input.ToName != "" {
+		to = fmt.Sprintf("%s <%s>", input.ToName, input.ToEmail)
+	}
+
 	payload := map[string]interface{}{
-		"personalizations": []map[string]interface{}{
-			{
-				"to": []map[string]string{
-					{"email": input.ToEmail, "name": input.ToName},
-				},
-			},
-		},
-		"from": map[string]string{
-			"email": c.fromEmail,
-			"name":  c.fromName,
-		},
+		"from":    from,
+		"to":      []string{to},
 		"subject": input.Subject,
-		"content": []map[string]string{
-			{"type": "text/plain", "value": input.TextContent},
-			{"type": "text/html", "value": input.HTMLContent},
-		},
+		"html":    input.HTMLContent,
+		"text":    input.TextContent,
 	}
 
 	jsonPayload, err := json.Marshal(payload)
@@ -120,7 +121,7 @@ func (c *Client) send(ctx context.Context, input SendEmailInput) error {
 		return fmt.Errorf("marshaling email payload: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.sendgrid.com/v3/mail/send", bytes.NewBuffer(jsonPayload))
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.resend.com/emails", bytes.NewBuffer(jsonPayload))
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
@@ -137,11 +138,11 @@ func (c *Client) send(ctx context.Context, input SendEmailInput) error {
 	if resp.StatusCode >= 400 {
 		var errorBody map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&errorBody)
-		c.logger.Error("SendGrid API error",
+		c.logger.Error("Resend API error",
 			zap.Int("status", resp.StatusCode),
 			zap.Any("error", errorBody),
 		)
-		return fmt.Errorf("sendgrid returned status %d", resp.StatusCode)
+		return fmt.Errorf("resend returned status %d", resp.StatusCode)
 	}
 
 	c.logger.Info("email sent successfully",
