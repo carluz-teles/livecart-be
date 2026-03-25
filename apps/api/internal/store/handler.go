@@ -28,23 +28,28 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 func (h *Handler) RegisterStoreScopedRoutes(router fiber.Router) {
 	router.Put("", h.UpdateByID)
 	router.Put("/cart-settings", h.UpdateCartSettingsByID)
-	router.Post("/complete-onboarding", h.CompleteOnboarding)
 }
 
 // Create godoc
 // @Summary      Create a new store
-// @Description  Creates a new store with the given name and slug
+// @Description  Creates a new store with Clerk organization and owner membership
 // @Tags         stores
 // @Accept       json
 // @Produce      json
 // @Param        request body CreateStoreRequest true "Store creation payload"
 // @Success      201 {object} httpx.Envelope{data=CreateStoreResponse}
 // @Failure      400 {object} httpx.Envelope
+// @Failure      401 {object} httpx.Envelope
 // @Failure      409 {object} httpx.Envelope
 // @Failure      422 {object} httpx.ValidationEnvelope
 // @Router       /api/v1/stores [post]
 // @Security     BearerAuth
 func (h *Handler) Create(c *fiber.Ctx) error {
+	clerkUserID := httpx.GetUserID(c)
+	if clerkUserID == "" {
+		return httpx.Unauthorized(c, "unauthorized")
+	}
+
 	var req CreateStoreRequest
 	if err := c.BodyParser(&req); err != nil {
 		return httpx.BadRequest(c, "invalid request body")
@@ -53,19 +58,35 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		return httpx.ValidationError(c, err)
 	}
 
+	// Get user info from claims
+	claims := httpx.GetClaims(c)
+	email := ""
+	name := ""
+	avatarURL := ""
+	if claims != nil {
+		email = claims.Email
+		name = claims.FullName()
+		avatarURL = claims.ImageURL
+	}
+
 	output, err := h.service.Create(c.Context(), CreateStoreInput{
-		Name: req.Name,
-		Slug: req.Slug,
+		Name:        req.Name,
+		Slug:        req.Slug,
+		ClerkUserID: clerkUserID,
+		Email:       email,
+		UserName:    name,
+		AvatarURL:   avatarURL,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
 	return httpx.Created(c, CreateStoreResponse{
-		ID:        output.ID,
-		Name:      output.Name,
-		Slug:      output.Slug,
-		CreatedAt: output.CreatedAt,
+		ID:         output.ID,
+		Name:       output.Name,
+		Slug:       output.Slug,
+		ClerkOrgID: output.ClerkOrgID,
+		CreatedAt:  output.CreatedAt,
 	})
 }
 
@@ -79,12 +100,12 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/me [get]
 // @Security     BearerAuth
 func (h *Handler) GetCurrent(c *fiber.Ctx) error {
-	storeID := httpx.GetStoreID(c)
-	if storeID == "" {
-		return httpx.Forbidden(c, "no store associated with this user")
+	clerkUserID := httpx.GetUserID(c)
+	if clerkUserID == "" {
+		return httpx.Unauthorized(c, "unauthorized")
 	}
 
-	output, err := h.service.GetByID(c.Context(), storeID)
+	output, err := h.service.GetByClerkUserID(c.Context(), clerkUserID)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
@@ -262,31 +283,6 @@ func (h *Handler) UpdateCartSettingsByID(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, toStoreResponse(output))
-}
-
-// CompleteOnboarding godoc
-// @Summary      Complete store onboarding
-// @Description  Marks the store's onboarding as complete
-// @Tags         stores
-// @Produce      json
-// @Param        storeId path string true "Store UUID"
-// @Success      200 {object} httpx.Envelope{data=map[string]bool}
-// @Failure      403 {object} httpx.Envelope
-// @Failure      404 {object} httpx.Envelope
-// @Router       /api/v1/stores/{storeId}/complete-onboarding [post]
-// @Security     BearerAuth
-func (h *Handler) CompleteOnboarding(c *fiber.Ctx) error {
-	storeID := httpx.GetStoreID(c)
-	if storeID == "" {
-		return httpx.Forbidden(c, "no store access")
-	}
-
-	err := h.service.CompleteOnboarding(c.Context(), storeID)
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	return httpx.OK(c, map[string]bool{"success": true})
 }
 
 func toStoreResponse(output StoreOutput) StoreResponse {

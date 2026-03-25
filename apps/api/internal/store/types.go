@@ -25,10 +25,11 @@ type CreateStoreRequest struct {
 }
 
 type CreateStoreResponse struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Slug      string    `json:"slug"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Slug       string    `json:"slug"`
+	ClerkOrgID string    `json:"clerkOrgId"`
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
 type UpdateStoreRequest struct {
@@ -64,15 +65,21 @@ type StoreResponse struct {
 // ============================================
 
 type CreateStoreInput struct {
-	Name string
-	Slug string
+	Name        string
+	Slug        string
+	ClerkUserID string
+	Email       string
+	UserName    string
+	AvatarURL   string
 }
 
 type CreateStoreOutput struct {
-	ID        string
-	Name      string
-	Slug      string
-	CreatedAt time.Time
+	ID           string
+	Name         string
+	Slug         string
+	ClerkOrgID   string
+	MembershipID string
+	CreatedAt    time.Time
 }
 
 type UpdateStoreInput struct {
@@ -110,8 +117,9 @@ type StoreOutput struct {
 // ============================================
 
 type CreateStoreParams struct {
-	Name string
-	Slug string
+	Name       string
+	Slug       string
+	ClerkOrgID string
 }
 
 type UpdateStoreParams struct {
@@ -137,6 +145,7 @@ type StoreRow struct {
 	Name           string
 	Slug           string
 	Active         bool
+	ClerkOrgID     string
 	WhatsappNumber *string
 	EmailAddress   *string
 	SMSNumber      *string

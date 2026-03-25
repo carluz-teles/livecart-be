@@ -102,6 +102,23 @@ type LiveSession struct {
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
+type Membership struct {
+	ID             pgtype.UUID        `json:"id"`
+	StoreID        pgtype.UUID        `json:"store_id"`
+	Email          string             `json:"email"`
+	Role           string             `json:"role"`
+	PasswordHash   pgtype.Text        `json:"password_hash"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ClerkUserID    pgtype.Text        `json:"clerk_user_id"`
+	Name           pgtype.Text        `json:"name"`
+	AvatarUrl      pgtype.Text        `json:"avatar_url"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	Status         string             `json:"status"`
+	InvitedBy      pgtype.UUID        `json:"invited_by"`
+	InvitedAt      pgtype.Timestamptz `json:"invited_at"`
+	LastAccessedAt pgtype.Timestamptz `json:"last_accessed_at"`
+}
+
 type Product struct {
 	ID             pgtype.UUID        `json:"id"`
 	StoreID        pgtype.UUID        `json:"store_id"`
@@ -139,7 +156,7 @@ type Store struct {
 	// Notify customer before cart expires
 	CartNotifyBeforeExpiration bool               `json:"cart_notify_before_expiration"`
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
-	OnboardingComplete         bool               `json:"onboarding_complete"`
+	ClerkOrgID                 pgtype.Text        `json:"clerk_org_id"`
 }
 
 type StoreInvitation struct {
@@ -153,22 +170,6 @@ type StoreInvitation struct {
 	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
 	AcceptedAt pgtype.Timestamptz `json:"accepted_at"`
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
-}
-
-type StoreUser struct {
-	ID           pgtype.UUID        `json:"id"`
-	StoreID      pgtype.UUID        `json:"store_id"`
-	Email        string             `json:"email"`
-	Role         string             `json:"role"`
-	PasswordHash pgtype.Text        `json:"password_hash"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
-	ClerkUserID  pgtype.Text        `json:"clerk_user_id"`
-	Name         pgtype.Text        `json:"name"`
-	AvatarUrl    pgtype.Text        `json:"avatar_url"`
-	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
-	Status       string             `json:"status"`
-	InvitedBy    pgtype.UUID        `json:"invited_by"`
-	InvitedAt    pgtype.Timestamptz `json:"invited_at"`
 }
 
 type Subscription struct {

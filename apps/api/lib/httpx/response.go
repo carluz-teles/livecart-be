@@ -52,6 +52,10 @@ func BadRequest(c *fiber.Ctx, msg string) error {
 	return c.Status(fiber.StatusBadRequest).JSON(Envelope{Error: msg})
 }
 
+func Unauthorized(c *fiber.Ctx, msg string) error {
+	return c.Status(fiber.StatusUnauthorized).JSON(Envelope{Error: msg})
+}
+
 func Forbidden(c *fiber.Ctx, msg string) error {
 	return c.Status(fiber.StatusForbidden).JSON(Envelope{Error: msg})
 }

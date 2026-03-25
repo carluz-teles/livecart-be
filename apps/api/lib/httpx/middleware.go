@@ -68,6 +68,13 @@ func AuthMiddleware(clerkClient *clerk.Client) fiber.Handler {
 			c.Locals("store_id", storeID)
 		}
 
+		// Extract org claims from JWT (Clerk Organizations)
+		if claims.OrgID != "" {
+			c.Locals("org_id", claims.OrgID)
+			c.Locals("org_role", claims.OrgRole)
+			c.Locals("org_slug", claims.OrgSlug)
+		}
+
 		return c.Next()
 	}
 }
@@ -81,6 +88,36 @@ func RequireStore() fiber.Handler {
 			return c.Status(fiber.StatusForbidden).JSON(Envelope{Error: "no store associated with this user"})
 		}
 		return c.Next()
+	}
+}
+
+// RequireOrg middleware ensures the user has an active organization in their JWT
+func RequireOrg() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		orgID := c.Locals("org_id")
+		if orgID == nil || orgID == "" {
+			return c.Status(fiber.StatusForbidden).JSON(Envelope{Error: "no organization selected"})
+		}
+		return c.Next()
+	}
+}
+
+// RequireOrgRole middleware checks if the user has one of the allowed roles in the organization
+// Roles should be in Clerk format: "org:admin", "org:member"
+func RequireOrgRole(allowedRoles ...string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		role := GetOrgRole(c)
+		if role == "" {
+			return c.Status(fiber.StatusForbidden).JSON(Envelope{Error: "no organization role"})
+		}
+
+		for _, allowed := range allowedRoles {
+			if role == allowed {
+				return c.Next()
+			}
+		}
+
+		return c.Status(fiber.StatusForbidden).JSON(Envelope{Error: "insufficient permissions"})
 	}
 }
 
@@ -190,4 +227,34 @@ func GetClaims(c *fiber.Ctx) *clerk.Claims {
 		return v.(*clerk.Claims)
 	}
 	return nil
+}
+
+// GetOrgID returns the Clerk organization ID from context
+func GetOrgID(c *fiber.Ctx) string {
+	if v := c.Locals("org_id"); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+// GetOrgRole returns the user's role in the organization from context
+// Returns "org:admin" or "org:member"
+func GetOrgRole(c *fiber.Ctx) string {
+	if v := c.Locals("org_role"); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+// GetOrgSlug returns the organization slug from context
+func GetOrgSlug(c *fiber.Ctx) string {
+	if v := c.Locals("org_slug"); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+// IsOrgAdmin checks if the user has admin role in the organization
+func IsOrgAdmin(c *fiber.Ctx) bool {
+	return GetOrgRole(c) == "org:admin"
 }

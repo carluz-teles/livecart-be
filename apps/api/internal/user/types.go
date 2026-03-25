@@ -2,8 +2,45 @@ package user
 
 import "time"
 
+// ============================================
 // Handler layer - Request/Response types
+// ============================================
 
+// SyncUserRequest - optional body for sync
+type SyncUserRequest struct {
+	// No required fields - sync uses JWT claims
+}
+
+// SyncUserResponse - returns all memberships and state
+type SyncUserResponse struct {
+	ClerkUserID          string               `json:"clerkUserId"`
+	Memberships          []MembershipResponse `json:"memberships"`
+	LastAccessedStoreID  *string              `json:"lastAccessedStoreId"`
+	State                string               `json:"state"` // "no_store" | "ready"
+}
+
+// MembershipResponse represents a user's membership to a store
+type MembershipResponse struct {
+	ID             string    `json:"id"`
+	StoreID        string    `json:"storeId"`
+	StoreName      string    `json:"storeName"`
+	StoreSlug      string    `json:"storeSlug"`
+	ClerkOrgID     string    `json:"clerkOrgId"`
+	Role           string    `json:"role"`
+	Status         string    `json:"status"`
+	Email          string    `json:"email"`
+	Name           *string   `json:"name"`
+	AvatarURL      *string   `json:"avatarUrl"`
+	LastAccessedAt *time.Time `json:"lastAccessedAt"`
+	CreatedAt      time.Time `json:"createdAt"`
+}
+
+// SelectStoreRequest - for changing active store
+type SelectStoreRequest struct {
+	StoreID string `json:"storeId" validate:"required,uuid"`
+}
+
+// GetMeResponse - current user info for a specific store context
 type GetMeResponse struct {
 	ID        string    `json:"id"`
 	StoreID   string    `json:"storeId"`
@@ -18,69 +55,49 @@ type GetMeResponse struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
-type SyncUserRequest struct {
-	StoreName string `json:"storeName" validate:"omitempty,min=2,max=100"`
-	StoreSlug string `json:"storeSlug" validate:"omitempty,min=2,max=50,slug"`
-}
-
-type SyncUserResponse struct {
-	ID                 string    `json:"id"`
-	StoreID            string    `json:"storeId"`
-	Email              string    `json:"email"`
-	Name               *string   `json:"name"`
-	AvatarURL          *string   `json:"avatarUrl"`
-	Role               string    `json:"role"`
-	Status             string    `json:"status"`
-	StoreName          string    `json:"storeName"`
-	StoreSlug          string    `json:"storeSlug"`
-	OnboardingComplete bool      `json:"onboardingComplete"`
-	State              string    `json:"state"`
-	CreatedAt          time.Time `json:"createdAt"`
-	UpdatedAt          time.Time `json:"updatedAt"`
-}
-
+// GetUserStoresResponse - list of stores user belongs to
 type GetUserStoresResponse struct {
-	Stores []UserStoreResponse `json:"stores"`
+	Stores []MembershipResponse `json:"stores"`
 }
 
-type UserStoreResponse struct {
-	ID        string    `json:"id"`
-	StoreID   string    `json:"storeId"`
-	Role      string    `json:"role"`
-	Status    string    `json:"status"`
-	StoreName string    `json:"storeName"`
-	StoreSlug string    `json:"storeSlug"`
-	CreatedAt time.Time `json:"createdAt"`
-}
+// ============================================
+// Service layer types
+// ============================================
 
-// Service layer
-
+// SyncUserInput - input for sync service
 type SyncUserInput struct {
 	ClerkUserID string
 	Email       string
 	Name        string
 	AvatarURL   string
-	StoreName   string
-	StoreSlug   string
 }
 
+// SyncUserOutput - output from sync service
 type SyncUserOutput struct {
-	ID                 string
-	StoreID            string
-	Email              string
-	Name               *string
-	AvatarURL          *string
-	Role               string
-	Status             string
-	StoreName          string
-	StoreSlug          string
-	OnboardingComplete bool
-	State              string // "needs_onboarding" | "ready"
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	IsNew              bool
+	ClerkUserID         string
+	Memberships         []MembershipOutput
+	LastAccessedStoreID *string
+	State               string // "no_store" | "ready"
 }
 
+// MembershipOutput - membership data from service
+type MembershipOutput struct {
+	ID             string
+	StoreID        string
+	StoreName      string
+	StoreSlug      string
+	ClerkOrgID     string
+	Role           string
+	Status         string
+	Email          string
+	Name           *string
+	AvatarURL      *string
+	LastAccessedAt *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// UserOutput - user info for a specific store context
 type UserOutput struct {
 	ID        string
 	StoreID   string
@@ -95,6 +112,7 @@ type UserOutput struct {
 	UpdatedAt time.Time
 }
 
+// UpdateUserInput - input for updating user
 type UpdateUserInput struct {
 	ClerkUserID string
 	StoreID     string
@@ -103,46 +121,35 @@ type UpdateUserInput struct {
 	AvatarURL   string
 }
 
-type UserStoreOutput struct {
-	ID        string
-	StoreID   string
-	Role      string
-	Status    string
-	StoreName string
-	StoreSlug string
-	CreatedAt time.Time
+// ============================================
+// Repository layer types
+// ============================================
+
+// MembershipRow - row from memberships table with store info
+type MembershipRow struct {
+	ID             string
+	StoreID        string
+	ClerkUserID    string
+	Email          string
+	Name           *string
+	AvatarURL      *string
+	Role           string
+	Status         string
+	StoreName      string
+	StoreSlug      string
+	ClerkOrgID     string
+	LastAccessedAt *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
-// Repository layer
-
-type CreateUserWithStoreParams struct {
-	ClerkUserID string
-	Email       string
-	Name        string
-	AvatarURL   string
-	StoreName   string
-	StoreSlug   string
-}
-
-type UpdateUserParams struct {
-	ClerkUserID string
+// CreateMembershipParams - params for creating membership
+type CreateMembershipParams struct {
 	StoreID     string
+	ClerkUserID string
 	Email       string
 	Name        string
 	AvatarURL   string
-}
-
-type UserRow struct {
-	ID                 string
-	StoreID            string
-	Email              string
-	Name               *string
-	AvatarURL          *string
-	Role               string
-	Status             string
-	StoreName          string
-	StoreSlug          string
-	OnboardingComplete bool
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	Role        string
+	InvitedBy   *string
 }

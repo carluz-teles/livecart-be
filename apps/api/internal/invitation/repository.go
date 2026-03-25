@@ -131,7 +131,7 @@ func (r *Repository) Delete(ctx context.Context, storeID vo.StoreID, id vo.Invit
 }
 
 func (r *Repository) AddUserToStore(ctx context.Context, storeID vo.StoreID, clerkUserID string, email vo.Email, name, avatarURL string, role vo.Role, invitedBy vo.MemberID) error {
-	_, err := r.q.AddUserToStore(ctx, sqlc.AddUserToStoreParams{
+	_, err := r.q.CreateMembership(ctx, sqlc.CreateMembershipParams{
 		StoreID:     storeID.ToPgUUID(),
 		ClerkUserID: pgtype.Text{String: clerkUserID, Valid: true},
 		Email:       email.String(),
@@ -139,6 +139,7 @@ func (r *Repository) AddUserToStore(ctx context.Context, storeID vo.StoreID, cle
 		AvatarUrl:   pgtype.Text{String: avatarURL, Valid: avatarURL != ""},
 		Role:        role.String(),
 		InvitedBy:   invitedBy.ToPgUUID(),
+		InvitedAt:   pgtype.Timestamptz{Time: time.Now(), Valid: true},
 	})
 	if err != nil {
 		return fmt.Errorf("adding user to store: %w", err)

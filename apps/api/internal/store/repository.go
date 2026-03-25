@@ -21,9 +21,10 @@ func NewRepository(q *sqlc.Queries) *Repository {
 }
 
 func (r *Repository) Create(ctx context.Context, params CreateStoreParams) (StoreRow, error) {
-	row, err := r.q.CreateStore(ctx, sqlc.CreateStoreParams{
-		Name: params.Name,
-		Slug: params.Slug,
+	row, err := r.q.CreateStoreWithClerkOrg(ctx, sqlc.CreateStoreWithClerkOrgParams{
+		Name:       params.Name,
+		Slug:       params.Slug,
+		ClerkOrgID: pgtype.Text{String: params.ClerkOrgID, Valid: params.ClerkOrgID != ""},
 	})
 	if err != nil {
 		return StoreRow{}, fmt.Errorf("inserting store: %w", err)
@@ -123,11 +124,17 @@ func toStoreRow(row sqlc.Store) StoreRow {
 		sms = &row.SmsNumber.String
 	}
 
+	var clerkOrgID string
+	if row.ClerkOrgID.Valid {
+		clerkOrgID = row.ClerkOrgID.String
+	}
+
 	return StoreRow{
 		ID:             row.ID.String(),
 		Name:           row.Name,
 		Slug:           row.Slug,
 		Active:         row.Active.Bool,
+		ClerkOrgID:     clerkOrgID,
 		WhatsappNumber: whatsapp,
 		EmailAddress:   email,
 		SMSNumber:      sms,
@@ -144,18 +151,17 @@ func toStoreRow(row sqlc.Store) StoreRow {
 	}
 }
 
-func (r *Repository) CompleteOnboarding(ctx context.Context, storeID string) error {
-	uid, err := parseUUID(storeID)
+func (r *Repository) GetByClerkUserID(ctx context.Context, clerkUserID string) (*StoreRow, error) {
+	row, err := r.q.GetStoreByClerkUserID(ctx, pgtype.Text{String: clerkUserID, Valid: true})
 	if err != nil {
-		return err
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.ErrNotFound("store not found")
+		}
+		return nil, fmt.Errorf("getting store by clerk user id: %w", err)
 	}
 
-	err = r.q.CompleteOnboarding(ctx, uid)
-	if err != nil {
-		return fmt.Errorf("completing onboarding: %w", err)
-	}
-
-	return nil
+	out := toStoreRow(row)
+	return &out, nil
 }
 
 func parseUUID(s string) (pgtype.UUID, error) {

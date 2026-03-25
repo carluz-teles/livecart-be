@@ -32,6 +32,10 @@ type Claims struct {
 	LastName  string                 `json:"last_name,omitempty"`
 	ImageURL  string                 `json:"image_url,omitempty"`
 	Metadata  map[string]interface{} `json:"public_metadata,omitempty"`
+	// Organization claims (when user has active org)
+	OrgID   string `json:"org_id,omitempty"`
+	OrgRole string `json:"org_role,omitempty"` // "org:admin" or "org:member"
+	OrgSlug string `json:"org_slug,omitempty"`
 }
 
 // FullName returns the user's full name

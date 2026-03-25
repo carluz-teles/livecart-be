@@ -18,44 +18,71 @@ func NewHandler(service *Service, validate *validator.Validate) *Handler {
 
 func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g := router.Group("/users")
-	g.Get("/me", h.GetMe)
-	g.Get("/me/stores", h.GetMyStores)
 	g.Post("/sync", h.SyncUser)
+	g.Get("/me/stores", h.GetMyStores)
+	g.Post("/me/select-store", h.SelectStore)
 }
 
-// GetMe godoc
-// @Summary      Get current user
-// @Description  Returns the authenticated user's profile including store information
+// SyncUser godoc
+// @Summary      Sync user on login
+// @Description  Returns all memberships for the authenticated user. Does NOT create stores automatically.
 // @Tags         users
+// @Accept       json
 // @Produce      json
-// @Success      200 {object} httpx.Envelope{data=GetMeResponse}
+// @Success      200 {object} httpx.Envelope{data=SyncUserResponse}
 // @Failure      401 {object} httpx.Envelope
-// @Failure      404 {object} httpx.Envelope
-// @Router       /api/v1/users/me [get]
+// @Router       /api/v1/users/sync [post]
 // @Security     BearerAuth
-func (h *Handler) GetMe(c *fiber.Ctx) error {
+func (h *Handler) SyncUser(c *fiber.Ctx) error {
 	clerkUserID := httpx.GetUserID(c)
 	if clerkUserID == "" {
 		return c.Status(fiber.StatusUnauthorized).JSON(httpx.Envelope{Error: "unauthorized"})
 	}
 
-	output, err := h.service.GetByClerkID(c.Context(), clerkUserID)
+	claims := httpx.GetClaims(c)
+	email := ""
+	name := ""
+	avatarURL := ""
+	if claims != nil {
+		email = claims.Email
+		name = claims.FullName()
+		avatarURL = claims.ImageURL
+	}
+
+	output, err := h.service.SyncUser(c.Context(), SyncUserInput{
+		ClerkUserID: clerkUserID,
+		Email:       email,
+		Name:        name,
+		AvatarURL:   avatarURL,
+	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	return httpx.OK(c, GetMeResponse{
-		ID:        output.ID,
-		StoreID:   output.StoreID,
-		Email:     output.Email,
-		Name:      output.Name,
-		AvatarURL: output.AvatarURL,
-		Role:      output.Role,
-		Status:    output.Status,
-		StoreName: output.StoreName,
-		StoreSlug: output.StoreSlug,
-		CreatedAt: output.CreatedAt,
-		UpdatedAt: output.UpdatedAt,
+	// Convert service output to response
+	memberships := make([]MembershipResponse, len(output.Memberships))
+	for i, m := range output.Memberships {
+		memberships[i] = MembershipResponse{
+			ID:             m.ID,
+			StoreID:        m.StoreID,
+			StoreName:      m.StoreName,
+			StoreSlug:      m.StoreSlug,
+			ClerkOrgID:     m.ClerkOrgID,
+			Role:           m.Role,
+			Status:         m.Status,
+			Email:          m.Email,
+			Name:           m.Name,
+			AvatarURL:      m.AvatarURL,
+			LastAccessedAt: m.LastAccessedAt,
+			CreatedAt:      m.CreatedAt,
+		}
+	}
+
+	return httpx.OK(c, SyncUserResponse{
+		ClerkUserID:         output.ClerkUserID,
+		Memberships:         memberships,
+		LastAccessedStoreID: output.LastAccessedStoreID,
+		State:               output.State,
 	})
 }
 
@@ -79,93 +106,100 @@ func (h *Handler) GetMyStores(c *fiber.Ctx) error {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	responses := make([]UserStoreResponse, len(stores))
-	for i, s := range stores {
-		responses[i] = UserStoreResponse{
-			ID:        s.ID,
-			StoreID:   s.StoreID,
-			Role:      s.Role,
-			Status:    s.Status,
-			StoreName: s.StoreName,
-			StoreSlug: s.StoreSlug,
-			CreatedAt: s.CreatedAt,
+	responses := make([]MembershipResponse, len(stores))
+	for i, m := range stores {
+		responses[i] = MembershipResponse{
+			ID:             m.ID,
+			StoreID:        m.StoreID,
+			StoreName:      m.StoreName,
+			StoreSlug:      m.StoreSlug,
+			ClerkOrgID:     m.ClerkOrgID,
+			Role:           m.Role,
+			Status:         m.Status,
+			Email:          m.Email,
+			Name:           m.Name,
+			AvatarURL:      m.AvatarURL,
+			LastAccessedAt: m.LastAccessedAt,
+			CreatedAt:      m.CreatedAt,
 		}
 	}
 
 	return httpx.OK(c, GetUserStoresResponse{Stores: responses})
 }
 
-// SyncUser godoc
-// @Summary      Sync user on first access
-// @Description  Creates a new user and store if not exists, or returns existing user. Call this after first sign-in.
+// SelectStore godoc
+// @Summary      Select active store
+// @Description  Updates the last accessed store for the user
 // @Tags         users
 // @Accept       json
 // @Produce      json
-// @Param        request body SyncUserRequest false "Optional store information for new users"
-// @Success      200 {object} httpx.Envelope{data=SyncUserResponse}
-// @Success      201 {object} httpx.Envelope{data=SyncUserResponse}
+// @Param        request body SelectStoreRequest true "Store to select"
+// @Success      200 {object} httpx.Envelope
 // @Failure      400 {object} httpx.Envelope
 // @Failure      401 {object} httpx.Envelope
 // @Failure      422 {object} httpx.ValidationEnvelope
-// @Router       /api/v1/users/sync [post]
+// @Router       /api/v1/users/me/select-store [post]
 // @Security     BearerAuth
-func (h *Handler) SyncUser(c *fiber.Ctx) error {
+func (h *Handler) SelectStore(c *fiber.Ctx) error {
 	clerkUserID := httpx.GetUserID(c)
 	if clerkUserID == "" {
 		return c.Status(fiber.StatusUnauthorized).JSON(httpx.Envelope{Error: "unauthorized"})
 	}
 
-	// Body is optional - parse if present
-	var req SyncUserRequest
-	if len(c.Body()) > 0 {
-		if err := c.BodyParser(&req); err != nil {
-			return httpx.BadRequest(c, "invalid request body")
-		}
-		if err := h.validate.Struct(req); err != nil {
-			return httpx.ValidationError(c, err)
-		}
+	var req SelectStoreRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
 	}
 
-	claims := httpx.GetClaims(c)
-	email := ""
-	name := ""
-	avatarURL := ""
-	if claims != nil {
-		email = claims.Email
-		name = claims.FullName()
-		avatarURL = claims.ImageURL
-	}
-
-	output, err := h.service.SyncUser(c.Context(), SyncUserInput{
-		ClerkUserID: clerkUserID,
-		Email:       email,
-		Name:        name,
-		AvatarURL:   avatarURL,
-		StoreName:   req.StoreName,
-		StoreSlug:   req.StoreSlug,
-	})
+	err := h.service.SelectStore(c.Context(), clerkUserID, req.StoreID)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	response := SyncUserResponse{
-		ID:                 output.ID,
-		StoreID:            output.StoreID,
-		Email:              output.Email,
-		Name:               output.Name,
-		AvatarURL:          output.AvatarURL,
-		Role:               output.Role,
-		Status:             output.Status,
-		StoreName:          output.StoreName,
-		StoreSlug:          output.StoreSlug,
-		OnboardingComplete: output.OnboardingComplete,
-		State:              output.State,
-		CreatedAt:          output.CreatedAt,
-		UpdatedAt:          output.UpdatedAt,
+	return httpx.OK(c, nil)
+}
+
+// GetMe godoc
+// @Summary      Get current user in store context
+// @Description  Returns the authenticated user's membership info for the current store
+// @Tags         users
+// @Produce      json
+// @Success      200 {object} httpx.Envelope{data=GetMeResponse}
+// @Failure      401 {object} httpx.Envelope
+// @Failure      403 {object} httpx.Envelope
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/me [get]
+// @Security     BearerAuth
+func (h *Handler) GetMe(c *fiber.Ctx) error {
+	clerkUserID := httpx.GetUserID(c)
+	if clerkUserID == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(httpx.Envelope{Error: "unauthorized"})
 	}
 
-	if output.IsNew {
-		return httpx.Created(c, response)
+	storeID := httpx.GetStoreID(c)
+	if storeID == "" {
+		return c.Status(fiber.StatusForbidden).JSON(httpx.Envelope{Error: "no store context"})
 	}
-	return httpx.OK(c, response)
+
+	m, err := h.service.GetMembership(c.Context(), clerkUserID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, GetMeResponse{
+		ID:        m.ID,
+		StoreID:   m.StoreID,
+		Email:     m.Email,
+		Name:      m.Name,
+		AvatarURL: m.AvatarURL,
+		Role:      m.Role,
+		Status:    m.Status,
+		StoreName: m.StoreName,
+		StoreSlug: m.StoreSlug,
+		CreatedAt: m.CreatedAt,
+		UpdatedAt: m.UpdatedAt,
+	})
 }

@@ -2,167 +2,210 @@ package user
 
 import (
 	"context"
-	"fmt"
-	"strings"
 
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/clerk"
 )
 
 type Service struct {
-	repo   *Repository
-	logger *zap.Logger
+	repo     *Repository
+	clerkSDK *clerk.SDK
+	logger   *zap.Logger
 }
 
-func NewService(repo *Repository, logger *zap.Logger) *Service {
+func NewService(repo *Repository, clerkSDK *clerk.SDK, logger *zap.Logger) *Service {
 	return &Service{
-		repo:   repo,
-		logger: logger.Named("user"),
+		repo:     repo,
+		clerkSDK: clerkSDK,
+		logger:   logger.Named("user"),
 	}
 }
 
-// GetByClerkID returns a user by their Clerk ID
-func (s *Service) GetByClerkID(ctx context.Context, clerkUserID string) (*UserOutput, error) {
-	row, err := s.repo.GetByClerkID(ctx, clerkUserID)
+// SyncUser returns all memberships for a clerk user
+// Does NOT create store automatically - user must go through onboarding
+func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserOutput, error) {
+	// Get all memberships for this clerk user
+	memberships, err := s.repo.GetMembershipsByClerkID(ctx, input.ClerkUserID)
 	if err != nil {
 		return nil, err
 	}
 
-	return toUserOutput(row), nil
-}
-
-// GetUserStores returns all stores a user belongs to
-func (s *Service) GetUserStores(ctx context.Context, clerkUserID string) ([]UserStoreOutput, error) {
-	return s.repo.GetUserStores(ctx, clerkUserID)
-}
-
-// SyncUser creates a new user with store if not exists, or returns existing user
-// This is the main entry point for user synchronization on first access
-func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserOutput, error) {
-	// Try to get existing user
-	existing, err := s.repo.GetByClerkID(ctx, input.ClerkUserID)
-	if err == nil {
-		// User exists - determine state based on onboarding_complete
-		state := "ready"
-		if !existing.OnboardingComplete {
-			state = "needs_onboarding"
+	// Convert to output format
+	membershipOutputs := make([]MembershipOutput, len(memberships))
+	for i, m := range memberships {
+		membershipOutputs[i] = MembershipOutput{
+			ID:             m.ID,
+			StoreID:        m.StoreID,
+			StoreName:      m.StoreName,
+			StoreSlug:      m.StoreSlug,
+			ClerkOrgID:     m.ClerkOrgID,
+			Role:           m.Role,
+			Status:         m.Status,
+			Email:          m.Email,
+			Name:           m.Name,
+			AvatarURL:      m.AvatarURL,
+			LastAccessedAt: m.LastAccessedAt,
+			CreatedAt:      m.CreatedAt,
+			UpdatedAt:      m.UpdatedAt,
 		}
-
-		return &SyncUserOutput{
-			ID:                 existing.ID,
-			StoreID:            existing.StoreID,
-			Email:              existing.Email,
-			Name:               existing.Name,
-			AvatarURL:          existing.AvatarURL,
-			Role:               existing.Role,
-			Status:             existing.Status,
-			StoreName:          existing.StoreName,
-			StoreSlug:          existing.StoreSlug,
-			OnboardingComplete: existing.OnboardingComplete,
-			State:              state,
-			CreatedAt:          existing.CreatedAt,
-			UpdatedAt:          existing.UpdatedAt,
-			IsNew:              false,
-		}, nil
 	}
 
-	// If error is not "not found", return it
-	if !httpx.IsNotFound(err) {
-		return nil, fmt.Errorf("checking existing user: %w", err)
-	}
+	// Determine state and last accessed store
+	state := "no_store"
+	var lastAccessedStoreID *string
 
-	// Generate placeholder store name/slug if not provided
-	storeName := input.StoreName
-	storeSlug := input.StoreSlug
-	if storeName == "" {
-		storeName = "Minha Loja"
-		storeSlug = generatePlaceholderSlug()
-	}
-
-	// User doesn't exist, create new user with store
-	row, err := s.repo.CreateWithStore(ctx, CreateUserWithStoreParams{
-		ClerkUserID: input.ClerkUserID,
-		Email:       input.Email,
-		Name:        input.Name,
-		AvatarURL:   input.AvatarURL,
-		StoreName:   storeName,
-		StoreSlug:   storeSlug,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("creating user with store: %w", err)
+	if len(memberships) > 0 {
+		state = "ready"
+		// First membership is ordered by last_accessed_at DESC, so it's the most recent
+		lastAccessedStoreID = &memberships[0].StoreID
 	}
 
 	return &SyncUserOutput{
-		ID:                 row.ID,
-		StoreID:            row.StoreID,
-		Email:              row.Email,
-		Name:               row.Name,
-		AvatarURL:          row.AvatarURL,
-		Role:               row.Role,
-		Status:             row.Status,
-		StoreName:          row.StoreName,
-		StoreSlug:          row.StoreSlug,
-		OnboardingComplete: row.OnboardingComplete,
-		State:              "needs_onboarding", // New users always need onboarding
-		CreatedAt:          row.CreatedAt,
-		UpdatedAt:          row.UpdatedAt,
-		IsNew:              true,
+		ClerkUserID:         input.ClerkUserID,
+		Memberships:         membershipOutputs,
+		LastAccessedStoreID: lastAccessedStoreID,
+		State:               state,
 	}, nil
 }
 
-// generatePlaceholderSlug generates a unique slug for new stores
-func generatePlaceholderSlug() string {
-	id := uuid.New().String()
-	// Take first 8 chars of UUID for a short slug
-	short := strings.ReplaceAll(id[:8], "-", "")
-	return "loja-" + short
-}
-
-// UpdateUser updates user profile for a specific store
-func (s *Service) UpdateUser(ctx context.Context, input UpdateUserInput) (*UserOutput, error) {
-	row, err := s.repo.Update(ctx, UpdateUserParams{
-		ClerkUserID: input.ClerkUserID,
-		StoreID:     input.StoreID,
-		Email:       input.Email,
-		Name:        input.Name,
-		AvatarURL:   input.AvatarURL,
-	})
+// GetMembership returns a specific membership for a clerk user and store
+func (s *Service) GetMembership(ctx context.Context, clerkUserID, storeID string) (*MembershipOutput, error) {
+	m, err := s.repo.GetMembershipByClerkIDAndStore(ctx, clerkUserID, storeID)
 	if err != nil {
 		return nil, err
 	}
 
-	return toUserOutput(row), nil
+	return &MembershipOutput{
+		ID:             m.ID,
+		StoreID:        m.StoreID,
+		StoreName:      m.StoreName,
+		StoreSlug:      m.StoreSlug,
+		ClerkOrgID:     m.ClerkOrgID,
+		Role:           m.Role,
+		Status:         m.Status,
+		Email:          m.Email,
+		Name:           m.Name,
+		AvatarURL:      m.AvatarURL,
+		LastAccessedAt: m.LastAccessedAt,
+		CreatedAt:      m.CreatedAt,
+		UpdatedAt:      m.UpdatedAt,
+	}, nil
 }
 
-// UpdateUserAllStores updates user profile across all stores (for Clerk webhook)
-func (s *Service) UpdateUserAllStores(ctx context.Context, input UpdateUserInput) error {
-	return s.repo.UpdateAllStores(ctx, UpdateUserParams{
-		ClerkUserID: input.ClerkUserID,
-		Email:       input.Email,
-		Name:        input.Name,
-		AvatarURL:   input.AvatarURL,
-	})
+// SelectStore updates the last accessed store for a user
+func (s *Service) SelectStore(ctx context.Context, clerkUserID, storeID string) error {
+	return s.repo.UpdateMembershipLastAccessed(ctx, clerkUserID, storeID)
 }
 
-// DeleteUser removes a user by their Clerk ID (typically called from Clerk webhook)
-func (s *Service) DeleteUser(ctx context.Context, clerkUserID string) error {
-	return s.repo.DeleteByClerkID(ctx, clerkUserID)
-}
-
-func toUserOutput(row *UserRow) *UserOutput {
-	return &UserOutput{
-		ID:        row.ID,
-		StoreID:   row.StoreID,
-		Email:     row.Email,
-		Name:      row.Name,
-		AvatarURL: row.AvatarURL,
-		Role:      row.Role,
-		Status:    row.Status,
-		StoreName: row.StoreName,
-		StoreSlug: row.StoreSlug,
-		CreatedAt: row.CreatedAt,
-		UpdatedAt: row.UpdatedAt,
+// GetUserStores returns all memberships (stores) for a clerk user
+func (s *Service) GetUserStores(ctx context.Context, clerkUserID string) ([]MembershipOutput, error) {
+	memberships, err := s.repo.GetMembershipsByClerkID(ctx, clerkUserID)
+	if err != nil {
+		return nil, err
 	}
+
+	outputs := make([]MembershipOutput, len(memberships))
+	for i, m := range memberships {
+		outputs[i] = MembershipOutput{
+			ID:             m.ID,
+			StoreID:        m.StoreID,
+			StoreName:      m.StoreName,
+			StoreSlug:      m.StoreSlug,
+			ClerkOrgID:     m.ClerkOrgID,
+			Role:           m.Role,
+			Status:         m.Status,
+			Email:          m.Email,
+			Name:           m.Name,
+			AvatarURL:      m.AvatarURL,
+			LastAccessedAt: m.LastAccessedAt,
+			CreatedAt:      m.CreatedAt,
+			UpdatedAt:      m.UpdatedAt,
+		}
+	}
+
+	return outputs, nil
+}
+
+// UpdateUserAllStores updates user info across all memberships (for Clerk webhook)
+func (s *Service) UpdateUserAllStores(ctx context.Context, clerkUserID, email, name, avatarURL string) error {
+	return s.repo.UpdateMembershipAllStores(ctx, clerkUserID, email, name, avatarURL)
+}
+
+// DeleteUser removes all memberships for a clerk user (typically called from Clerk webhook)
+func (s *Service) DeleteUser(ctx context.Context, clerkUserID string) error {
+	return s.repo.DeleteMembershipsByClerkID(ctx, clerkUserID)
+}
+
+// CreateOwnerMembership creates an owner membership for a new store
+func (s *Service) CreateOwnerMembership(ctx context.Context, storeID, clerkUserID, email, name, avatarURL string) (*MembershipOutput, error) {
+	m, err := s.repo.CreateOwnerMembership(ctx, storeID, clerkUserID, email, name, avatarURL)
+	if err != nil {
+		return nil, err
+	}
+
+	return &MembershipOutput{
+		ID:        m.ID,
+		StoreID:   m.StoreID,
+		Role:      m.Role,
+		Status:    m.Status,
+		Email:     m.Email,
+		Name:      m.Name,
+		AvatarURL: m.AvatarURL,
+		CreatedAt: m.CreatedAt,
+		UpdatedAt: m.UpdatedAt,
+	}, nil
+}
+
+// GetActiveStoreID returns the last accessed store ID for a user
+// Returns empty string if user has no memberships
+func (s *Service) GetActiveStoreID(ctx context.Context, clerkUserID string) (string, error) {
+	memberships, err := s.repo.GetMembershipsByClerkID(ctx, clerkUserID)
+	if err != nil {
+		return "", err
+	}
+	if len(memberships) == 0 {
+		return "", nil
+	}
+	// First membership is the most recently accessed
+	return memberships[0].StoreID, nil
+}
+
+// CreateMembership creates a new membership (for accepting invitations)
+func (s *Service) CreateMembership(ctx context.Context, params CreateMembershipParams) (*MembershipOutput, error) {
+	m, err := s.repo.CreateMembership(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+
+	return &MembershipOutput{
+		ID:        m.ID,
+		StoreID:   m.StoreID,
+		Role:      m.Role,
+		Status:    m.Status,
+		Email:     m.Email,
+		Name:      m.Name,
+		AvatarURL: m.AvatarURL,
+		CreatedAt: m.CreatedAt,
+		UpdatedAt: m.UpdatedAt,
+	}, nil
+}
+
+// MembershipCreatorAdapter implements store.MembershipCreator interface
+type MembershipCreatorAdapter struct {
+	service *Service
+}
+
+// NewMembershipCreatorAdapter creates a new adapter for the store service to use
+func NewMembershipCreatorAdapter(service *Service) *MembershipCreatorAdapter {
+	return &MembershipCreatorAdapter{service: service}
+}
+
+// CreateOwnerMembership implements store.MembershipCreator
+func (a *MembershipCreatorAdapter) CreateOwnerMembership(ctx context.Context, storeID, clerkUserID, email, name, avatarURL string) (string, error) {
+	m, err := a.service.CreateOwnerMembership(ctx, storeID, clerkUserID, email, name, avatarURL)
+	if err != nil {
+		return "", err
+	}
+	return m.ID, nil
 }

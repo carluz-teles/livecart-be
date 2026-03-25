@@ -95,12 +95,7 @@ func (h *WebhookHandler) handleUserUpdated(c *fiber.Ctx, data json.RawMessage) e
 		name = strings.TrimSpace(userData.FirstName + " " + userData.LastName)
 	}
 
-	err := h.service.UpdateUserAllStores(c.Context(), UpdateUserInput{
-		ClerkUserID: userData.ID,
-		Email:       email,
-		Name:        name,
-		AvatarURL:   userData.ImageURL,
-	})
+	err := h.service.UpdateUserAllStores(c.Context(), userData.ID, email, name, userData.ImageURL)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}

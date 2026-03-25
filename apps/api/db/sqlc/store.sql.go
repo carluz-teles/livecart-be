@@ -11,21 +11,10 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const completeOnboarding = `-- name: CompleteOnboarding :exec
-UPDATE stores
-SET onboarding_complete = true, updated_at = now()
-WHERE id = $1
-`
-
-func (q *Queries) CompleteOnboarding(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, completeOnboarding, id)
-	return err
-}
-
 const createStore = `-- name: CreateStore :one
 INSERT INTO stores (name, slug)
 VALUES ($1, $2)
-RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, onboarding_complete
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, clerk_org_id
 `
 
 type CreateStoreParams struct {
@@ -52,52 +41,120 @@ func (q *Queries) CreateStore(ctx context.Context, arg CreateStoreParams) (Store
 		&i.CartMaxQuantityPerItem,
 		&i.CartNotifyBeforeExpiration,
 		&i.UpdatedAt,
-		&i.OnboardingComplete,
+		&i.ClerkOrgID,
 	)
 	return i, err
 }
 
-const createStoreUser = `-- name: CreateStoreUser :one
-INSERT INTO store_users (store_id, email, role, password_hash)
-VALUES ($1, $2, $3, $4)
-RETURNING id, store_id, email, role, password_hash, created_at, clerk_user_id, name, avatar_url, updated_at, status, invited_by, invited_at
+const createStoreWithClerkOrg = `-- name: CreateStoreWithClerkOrg :one
+INSERT INTO stores (name, slug, clerk_org_id)
+VALUES ($1, $2, $3)
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, clerk_org_id
 `
 
-type CreateStoreUserParams struct {
-	StoreID      pgtype.UUID `json:"store_id"`
-	Email        string      `json:"email"`
-	Role         string      `json:"role"`
-	PasswordHash pgtype.Text `json:"password_hash"`
+type CreateStoreWithClerkOrgParams struct {
+	Name       string      `json:"name"`
+	Slug       string      `json:"slug"`
+	ClerkOrgID pgtype.Text `json:"clerk_org_id"`
 }
 
-func (q *Queries) CreateStoreUser(ctx context.Context, arg CreateStoreUserParams) (StoreUser, error) {
-	row := q.db.QueryRow(ctx, createStoreUser,
-		arg.StoreID,
-		arg.Email,
-		arg.Role,
-		arg.PasswordHash,
-	)
-	var i StoreUser
+func (q *Queries) CreateStoreWithClerkOrg(ctx context.Context, arg CreateStoreWithClerkOrgParams) (Store, error) {
+	row := q.db.QueryRow(ctx, createStoreWithClerkOrg, arg.Name, arg.Slug, arg.ClerkOrgID)
+	var i Store
 	err := row.Scan(
 		&i.ID,
-		&i.StoreID,
-		&i.Email,
-		&i.Role,
-		&i.PasswordHash,
-		&i.CreatedAt,
-		&i.ClerkUserID,
 		&i.Name,
-		&i.AvatarUrl,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.CartNotifyBeforeExpiration,
 		&i.UpdatedAt,
-		&i.Status,
-		&i.InvitedBy,
-		&i.InvitedAt,
+		&i.ClerkOrgID,
+	)
+	return i, err
+}
+
+const deleteStore = `-- name: DeleteStore :exec
+DELETE FROM stores WHERE id = $1
+`
+
+func (q *Queries) DeleteStore(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteStore, id)
+	return err
+}
+
+const getStoreByClerkOrgID = `-- name: GetStoreByClerkOrgID :one
+SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, clerk_org_id FROM stores WHERE clerk_org_id = $1
+`
+
+func (q *Queries) GetStoreByClerkOrgID(ctx context.Context, clerkOrgID pgtype.Text) (Store, error) {
+	row := q.db.QueryRow(ctx, getStoreByClerkOrgID, clerkOrgID)
+	var i Store
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.CartNotifyBeforeExpiration,
+		&i.UpdatedAt,
+		&i.ClerkOrgID,
+	)
+	return i, err
+}
+
+const getStoreByClerkUserID = `-- name: GetStoreByClerkUserID :one
+SELECT s.id, s.name, s.slug, s.active, s.whatsapp_number, s.email_address, s.sms_number, s.created_at, s.cart_enabled, s.cart_expiration_minutes, s.cart_reserve_stock, s.cart_max_items, s.cart_max_quantity_per_item, s.cart_notify_before_expiration, s.updated_at, s.clerk_org_id
+FROM stores s
+JOIN memberships m ON s.id = m.store_id
+WHERE m.clerk_user_id = $1 AND m.status = 'active'
+ORDER BY m.last_accessed_at DESC NULLS LAST, m.created_at ASC
+LIMIT 1
+`
+
+// Get first store for a clerk user (for backwards compatibility)
+func (q *Queries) GetStoreByClerkUserID(ctx context.Context, clerkUserID pgtype.Text) (Store, error) {
+	row := q.db.QueryRow(ctx, getStoreByClerkUserID, clerkUserID)
+	var i Store
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.CartNotifyBeforeExpiration,
+		&i.UpdatedAt,
+		&i.ClerkOrgID,
 	)
 	return i, err
 }
 
 const getStoreByID = `-- name: GetStoreByID :one
-SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, onboarding_complete FROM stores WHERE id = $1
+SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, clerk_org_id FROM stores WHERE id = $1
 `
 
 func (q *Queries) GetStoreByID(ctx context.Context, id pgtype.UUID) (Store, error) {
@@ -119,13 +176,46 @@ func (q *Queries) GetStoreByID(ctx context.Context, id pgtype.UUID) (Store, erro
 		&i.CartMaxQuantityPerItem,
 		&i.CartNotifyBeforeExpiration,
 		&i.UpdatedAt,
-		&i.OnboardingComplete,
+		&i.ClerkOrgID,
+	)
+	return i, err
+}
+
+const getStoreByOwnerClerkUserID = `-- name: GetStoreByOwnerClerkUserID :one
+SELECT s.id, s.name, s.slug, s.active, s.whatsapp_number, s.email_address, s.sms_number, s.created_at, s.cart_enabled, s.cart_expiration_minutes, s.cart_reserve_stock, s.cart_max_items, s.cart_max_quantity_per_item, s.cart_notify_before_expiration, s.updated_at, s.clerk_org_id
+FROM stores s
+JOIN memberships m ON s.id = m.store_id
+WHERE m.clerk_user_id = $1 AND m.role = 'owner'
+LIMIT 1
+`
+
+// Get store where clerk user is owner
+func (q *Queries) GetStoreByOwnerClerkUserID(ctx context.Context, clerkUserID pgtype.Text) (Store, error) {
+	row := q.db.QueryRow(ctx, getStoreByOwnerClerkUserID, clerkUserID)
+	var i Store
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.CartNotifyBeforeExpiration,
+		&i.UpdatedAt,
+		&i.ClerkOrgID,
 	)
 	return i, err
 }
 
 const getStoreBySlug = `-- name: GetStoreBySlug :one
-SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, onboarding_complete FROM stores WHERE slug = $1
+SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, clerk_org_id FROM stores WHERE slug = $1
 `
 
 func (q *Queries) GetStoreBySlug(ctx context.Context, slug string) (Store, error) {
@@ -147,24 +237,24 @@ func (q *Queries) GetStoreBySlug(ctx context.Context, slug string) (Store, error
 		&i.CartMaxQuantityPerItem,
 		&i.CartNotifyBeforeExpiration,
 		&i.UpdatedAt,
-		&i.OnboardingComplete,
+		&i.ClerkOrgID,
 	)
 	return i, err
 }
 
-const listStoreUsers = `-- name: ListStoreUsers :many
-SELECT id, store_id, email, role, password_hash, created_at, clerk_user_id, name, avatar_url, updated_at, status, invited_by, invited_at FROM store_users WHERE store_id = $1 ORDER BY created_at
+const listStoreMembers = `-- name: ListStoreMembers :many
+SELECT id, store_id, email, role, password_hash, created_at, clerk_user_id, name, avatar_url, updated_at, status, invited_by, invited_at, last_accessed_at FROM memberships WHERE store_id = $1 ORDER BY created_at
 `
 
-func (q *Queries) ListStoreUsers(ctx context.Context, storeID pgtype.UUID) ([]StoreUser, error) {
-	rows, err := q.db.Query(ctx, listStoreUsers, storeID)
+func (q *Queries) ListStoreMembers(ctx context.Context, storeID pgtype.UUID) ([]Membership, error) {
+	rows, err := q.db.Query(ctx, listStoreMembers, storeID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []StoreUser{}
+	items := []Membership{}
 	for rows.Next() {
-		var i StoreUser
+		var i Membership
 		if err := rows.Scan(
 			&i.ID,
 			&i.StoreID,
@@ -179,6 +269,7 @@ func (q *Queries) ListStoreUsers(ctx context.Context, storeID pgtype.UUID) ([]St
 			&i.Status,
 			&i.InvitedBy,
 			&i.InvitedAt,
+			&i.LastAccessedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -199,7 +290,7 @@ SET
   sms_number = $5,
   updated_at = now()
 WHERE id = $1
-RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, onboarding_complete
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, clerk_org_id
 `
 
 type UpdateStoreParams struct {
@@ -235,7 +326,7 @@ func (q *Queries) UpdateStore(ctx context.Context, arg UpdateStoreParams) (Store
 		&i.CartMaxQuantityPerItem,
 		&i.CartNotifyBeforeExpiration,
 		&i.UpdatedAt,
-		&i.OnboardingComplete,
+		&i.ClerkOrgID,
 	)
 	return i, err
 }
@@ -251,7 +342,7 @@ SET
   cart_notify_before_expiration = $7,
   updated_at = now()
 WHERE id = $1
-RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, onboarding_complete
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, clerk_org_id
 `
 
 type UpdateStoreCartSettingsParams struct {
@@ -291,7 +382,43 @@ func (q *Queries) UpdateStoreCartSettings(ctx context.Context, arg UpdateStoreCa
 		&i.CartMaxQuantityPerItem,
 		&i.CartNotifyBeforeExpiration,
 		&i.UpdatedAt,
-		&i.OnboardingComplete,
+		&i.ClerkOrgID,
+	)
+	return i, err
+}
+
+const updateStoreClerkOrgID = `-- name: UpdateStoreClerkOrgID :one
+UPDATE stores
+SET clerk_org_id = $2, updated_at = now()
+WHERE id = $1
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, clerk_org_id
+`
+
+type UpdateStoreClerkOrgIDParams struct {
+	ID         pgtype.UUID `json:"id"`
+	ClerkOrgID pgtype.Text `json:"clerk_org_id"`
+}
+
+func (q *Queries) UpdateStoreClerkOrgID(ctx context.Context, arg UpdateStoreClerkOrgIDParams) (Store, error) {
+	row := q.db.QueryRow(ctx, updateStoreClerkOrgID, arg.ID, arg.ClerkOrgID)
+	var i Store
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.CartNotifyBeforeExpiration,
+		&i.UpdatedAt,
+		&i.ClerkOrgID,
 	)
 	return i, err
 }

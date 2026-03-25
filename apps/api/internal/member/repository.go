@@ -75,7 +75,7 @@ func (r *Repository) UpdateRole(ctx context.Context, storeID, memberID, role str
 		return nil, err
 	}
 
-	row, err := r.q.UpdateUserRole(ctx, sqlc.UpdateUserRoleParams{
+	row, err := r.q.UpdateMembershipRole(ctx, sqlc.UpdateMembershipRoleParams{
 		StoreID: storeUID,
 		ID:      memberUID,
 		Role:    role,
@@ -100,7 +100,7 @@ func (r *Repository) Remove(ctx context.Context, storeID, memberID string) error
 		return err
 	}
 
-	err = r.q.RemoveUserFromStore(ctx, sqlc.RemoveUserFromStoreParams{
+	err = r.q.DeleteMembership(ctx, sqlc.DeleteMembershipParams{
 		StoreID: storeUID,
 		ID:      memberUID,
 	})
@@ -165,8 +165,8 @@ func (r *Repository) toDomainMember(row sqlc.GetStoreMembersRow) (*domain.Member
 	), nil
 }
 
-// toDomainMemberFromUpdate converts an UpdateUserRole row to a domain Member.
-func (r *Repository) toDomainMemberFromUpdate(row sqlc.UpdateUserRoleRow) (*domain.Member, error) {
+// toDomainMemberFromUpdate converts an UpdateMembershipRole row to a domain Member.
+func (r *Repository) toDomainMemberFromUpdate(row sqlc.UpdateMembershipRoleRow) (*domain.Member, error) {
 	id, err := vo.NewMemberID(row.ID.String())
 	if err != nil {
 		return nil, err
