@@ -21,9 +21,104 @@ func NewRepository(q *sqlc.Queries) *Repository {
 	return &Repository{q: q}
 }
 
-// GetMembershipsByClerkID returns all memberships for a clerk user
-func (r *Repository) GetMembershipsByClerkID(ctx context.Context, clerkUserID string) ([]MembershipRow, error) {
-	rows, err := r.q.GetMembershipsByClerkID(ctx, pgtype.Text{String: clerkUserID, Valid: true})
+// ============================================
+// User operations
+// ============================================
+
+// UpsertUser creates or updates a user in the users table
+func (r *Repository) UpsertUser(ctx context.Context, clerkID, email, name, avatarURL string) (*UserRow, error) {
+	row, err := r.q.UpsertUser(ctx, sqlc.UpsertUserParams{
+		ClerkID:   clerkID,
+		Email:     email,
+		Name:      pgtype.Text{String: name, Valid: name != ""},
+		AvatarUrl: pgtype.Text{String: avatarURL, Valid: avatarURL != ""},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("upserting user: %w", err)
+	}
+
+	return toUserRow(row), nil
+}
+
+// GetUserByClerkID returns a user by their Clerk ID
+func (r *Repository) GetUserByClerkID(ctx context.Context, clerkID string) (*UserRow, error) {
+	row, err := r.q.GetUserByClerkID(ctx, clerkID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.ErrNotFound("user not found")
+		}
+		return nil, fmt.Errorf("getting user: %w", err)
+	}
+
+	return toUserRow(row), nil
+}
+
+// GetUserByEmail returns a user by their email
+func (r *Repository) GetUserByEmail(ctx context.Context, email string) (*UserRow, error) {
+	row, err := r.q.GetUserByEmail(ctx, email)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.ErrNotFound("user not found")
+		}
+		return nil, fmt.Errorf("getting user: %w", err)
+	}
+
+	return toUserRow(row), nil
+}
+
+// GetUserByID returns a user by their UUID
+func (r *Repository) GetUserByID(ctx context.Context, userID string) (*UserRow, error) {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := r.q.GetUserByID(ctx, uid)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.ErrNotFound("user not found")
+		}
+		return nil, fmt.Errorf("getting user: %w", err)
+	}
+
+	return toUserRow(row), nil
+}
+
+// UpdateUser updates a user's info
+func (r *Repository) UpdateUser(ctx context.Context, clerkID, email, name, avatarURL string) (*UserRow, error) {
+	row, err := r.q.UpdateUser(ctx, sqlc.UpdateUserParams{
+		ClerkID:   clerkID,
+		Email:     email,
+		Name:      pgtype.Text{String: name, Valid: name != ""},
+		AvatarUrl: pgtype.Text{String: avatarURL, Valid: avatarURL != ""},
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.ErrNotFound("user not found")
+		}
+		return nil, fmt.Errorf("updating user: %w", err)
+	}
+
+	return toUserRow(row), nil
+}
+
+// DeleteUser deletes a user by their Clerk ID (cascades to memberships)
+func (r *Repository) DeleteUser(ctx context.Context, clerkID string) error {
+	return r.q.DeleteUser(ctx, clerkID)
+}
+
+// ============================================
+// Membership operations
+// ============================================
+
+// GetMembershipsByUserID returns all memberships for a user
+func (r *Repository) GetMembershipsByUserID(ctx context.Context, userID string) ([]MembershipRow, error) {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := r.q.GetMembershipsByUserID(ctx, uid)
 	if err != nil {
 		return nil, fmt.Errorf("getting memberships: %w", err)
 	}
@@ -35,16 +130,20 @@ func (r *Repository) GetMembershipsByClerkID(ctx context.Context, clerkUserID st
 	return memberships, nil
 }
 
-// GetMembershipByClerkIDAndStore returns a specific membership
-func (r *Repository) GetMembershipByClerkIDAndStore(ctx context.Context, clerkUserID, storeID string) (*MembershipRow, error) {
-	uid, err := parseUUID(storeID)
+// GetMembershipByUserIDAndStore returns a specific membership
+func (r *Repository) GetMembershipByUserIDAndStore(ctx context.Context, userID, storeID string) (*MembershipRow, error) {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return nil, err
+	}
+	sid, err := parseUUID(storeID)
 	if err != nil {
 		return nil, err
 	}
 
-	row, err := r.q.GetMembershipByClerkIDAndStore(ctx, sqlc.GetMembershipByClerkIDAndStoreParams{
-		ClerkUserID: pgtype.Text{String: clerkUserID, Valid: true},
-		StoreID:     uid,
+	row, err := r.q.GetMembershipByUserIDAndStore(ctx, sqlc.GetMembershipByUserIDAndStoreParams{
+		UserID:  uid,
+		StoreID: sid,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -63,6 +162,10 @@ func (r *Repository) CreateMembership(ctx context.Context, params CreateMembersh
 	if err != nil {
 		return nil, err
 	}
+	userUID, err := parseUUID(params.UserID)
+	if err != nil {
+		return nil, err
+	}
 
 	var invitedBy pgtype.UUID
 	var invitedAt pgtype.Timestamptz
@@ -76,34 +179,24 @@ func (r *Repository) CreateMembership(ctx context.Context, params CreateMembersh
 	}
 
 	row, err := r.q.CreateMembership(ctx, sqlc.CreateMembershipParams{
-		StoreID:     storeUID,
-		ClerkUserID: pgtype.Text{String: params.ClerkUserID, Valid: true},
-		Email:       params.Email,
-		Name:        pgtype.Text{String: params.Name, Valid: params.Name != ""},
-		AvatarUrl:   pgtype.Text{String: params.AvatarURL, Valid: params.AvatarURL != ""},
-		Role:        params.Role,
-		InvitedBy:   invitedBy,
-		InvitedAt:   invitedAt,
+		StoreID:   storeUID,
+		UserID:    userUID,
+		Role:      params.Role,
+		InvitedBy: invitedBy,
+		InvitedAt: invitedAt,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating membership: %w", err)
 	}
 
 	out := MembershipRow{
-		ID:          row.ID.String(),
-		StoreID:     row.StoreID.String(),
-		ClerkUserID: row.ClerkUserID.String,
-		Email:       row.Email,
-		Role:        row.Role,
-		Status:      row.Status,
-		CreatedAt:   row.CreatedAt.Time,
-		UpdatedAt:   row.UpdatedAt.Time,
-	}
-	if row.Name.Valid {
-		out.Name = &row.Name.String
-	}
-	if row.AvatarUrl.Valid {
-		out.AvatarURL = &row.AvatarUrl.String
+		ID:        row.ID.String(),
+		StoreID:   row.StoreID.String(),
+		UserID:    row.UserID.String(),
+		Role:      row.Role,
+		Status:    row.Status,
+		CreatedAt: row.CreatedAt.Time,
+		UpdatedAt: row.UpdatedAt.Time,
 	}
 	if row.LastAccessedAt.Valid {
 		out.LastAccessedAt = &row.LastAccessedAt.Time
@@ -112,91 +205,32 @@ func (r *Repository) CreateMembership(ctx context.Context, params CreateMembersh
 }
 
 // CreateOwnerMembership creates an owner membership for a new store
-func (r *Repository) CreateOwnerMembership(ctx context.Context, storeID, clerkUserID, email, name, avatarURL string) (*MembershipRow, error) {
+func (r *Repository) CreateOwnerMembership(ctx context.Context, storeID, userID string) (*MembershipRow, error) {
 	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	userUID, err := parseUUID(userID)
 	if err != nil {
 		return nil, err
 	}
 
 	row, err := r.q.CreateOwnerMembership(ctx, sqlc.CreateOwnerMembershipParams{
-		StoreID:     storeUID,
-		ClerkUserID: pgtype.Text{String: clerkUserID, Valid: true},
-		Email:       email,
-		Name:        pgtype.Text{String: name, Valid: name != ""},
-		AvatarUrl:   pgtype.Text{String: avatarURL, Valid: avatarURL != ""},
+		StoreID: storeUID,
+		UserID:  userUID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating owner membership: %w", err)
 	}
 
 	out := MembershipRow{
-		ID:          row.ID.String(),
-		StoreID:     row.StoreID.String(),
-		ClerkUserID: row.ClerkUserID.String,
-		Email:       row.Email,
-		Role:        row.Role,
-		Status:      row.Status,
-		CreatedAt:   row.CreatedAt.Time,
-		UpdatedAt:   row.UpdatedAt.Time,
-	}
-	if row.Name.Valid {
-		out.Name = &row.Name.String
-	}
-	if row.AvatarUrl.Valid {
-		out.AvatarURL = &row.AvatarUrl.String
-	}
-	return &out, nil
-}
-
-// UpdateMembershipLastAccessed updates the last accessed timestamp
-func (r *Repository) UpdateMembershipLastAccessed(ctx context.Context, clerkUserID, storeID string) error {
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return err
-	}
-
-	return r.q.UpdateMembershipLastAccessed(ctx, sqlc.UpdateMembershipLastAccessedParams{
-		ClerkUserID: pgtype.Text{String: clerkUserID, Valid: true},
-		StoreID:     storeUID,
-	})
-}
-
-// UpdateMembership updates user info for a specific membership
-func (r *Repository) UpdateMembership(ctx context.Context, clerkUserID, storeID, email, name, avatarURL string) (*MembershipRow, error) {
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return nil, err
-	}
-
-	row, err := r.q.UpdateMembership(ctx, sqlc.UpdateMembershipParams{
-		ClerkUserID: pgtype.Text{String: clerkUserID, Valid: true},
-		StoreID:     storeUID,
-		Email:       email,
-		Name:        pgtype.Text{String: name, Valid: name != ""},
-		AvatarUrl:   pgtype.Text{String: avatarURL, Valid: avatarURL != ""},
-	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.ErrNotFound("membership not found")
-		}
-		return nil, fmt.Errorf("updating membership: %w", err)
-	}
-
-	out := MembershipRow{
-		ID:          row.ID.String(),
-		StoreID:     row.StoreID.String(),
-		ClerkUserID: row.ClerkUserID.String,
-		Email:       row.Email,
-		Role:        row.Role,
-		Status:      row.Status,
-		CreatedAt:   row.CreatedAt.Time,
-		UpdatedAt:   row.UpdatedAt.Time,
-	}
-	if row.Name.Valid {
-		out.Name = &row.Name.String
-	}
-	if row.AvatarUrl.Valid {
-		out.AvatarURL = &row.AvatarUrl.String
+		ID:        row.ID.String(),
+		StoreID:   row.StoreID.String(),
+		UserID:    row.UserID.String(),
+		Role:      row.Role,
+		Status:    row.Status,
+		CreatedAt: row.CreatedAt.Time,
+		UpdatedAt: row.UpdatedAt.Time,
 	}
 	if row.LastAccessedAt.Valid {
 		out.LastAccessedAt = &row.LastAccessedAt.Time
@@ -204,64 +238,85 @@ func (r *Repository) UpdateMembership(ctx context.Context, clerkUserID, storeID,
 	return &out, nil
 }
 
-// UpdateMembershipAllStores updates user info across all memberships (for Clerk webhook)
-func (r *Repository) UpdateMembershipAllStores(ctx context.Context, clerkUserID, email, name, avatarURL string) error {
-	return r.q.UpdateMembershipAllStores(ctx, sqlc.UpdateMembershipAllStoresParams{
-		ClerkUserID: pgtype.Text{String: clerkUserID, Valid: true},
-		Email:       email,
-		Name:        pgtype.Text{String: name, Valid: name != ""},
-		AvatarUrl:   pgtype.Text{String: avatarURL, Valid: avatarURL != ""},
+// UpdateMembershipLastAccessed updates the last accessed timestamp
+func (r *Repository) UpdateMembershipLastAccessed(ctx context.Context, userID, storeID string) error {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return err
+	}
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+
+	return r.q.UpdateMembershipLastAccessed(ctx, sqlc.UpdateMembershipLastAccessedParams{
+		UserID:  uid,
+		StoreID: sid,
 	})
 }
 
-// DeleteMembershipsByClerkID deletes all memberships for a clerk user
-func (r *Repository) DeleteMembershipsByClerkID(ctx context.Context, clerkUserID string) error {
-	return r.q.DeleteMembershipsByClerkID(ctx, pgtype.Text{String: clerkUserID, Valid: true})
+// DeleteMembership removes a membership
+func (r *Repository) DeleteMembership(ctx context.Context, storeID, membershipID string) error {
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+	mid, err := parseUUID(membershipID)
+	if err != nil {
+		return err
+	}
+
+	return r.q.DeleteMembership(ctx, sqlc.DeleteMembershipParams{
+		StoreID: sid,
+		ID:      mid,
+	})
 }
+
+// ============================================
+// Access validation
+// ============================================
 
 // ValidateStoreAccess implements httpx.StoreAccessValidator
 func (r *Repository) ValidateStoreAccess(ctx context.Context, clerkUserID, storeID string) (bool, error) {
-	membershipID, _, err := r.GetStoreAccessInfo(ctx, clerkUserID, storeID)
+	membershipID, _, _, err := r.GetStoreAccessInfo(ctx, clerkUserID, storeID)
 	if err != nil {
 		return false, err
 	}
 	return membershipID != "", nil
 }
 
-// GetStoreAccessInfo returns the user's membership info for a specific store
-func (r *Repository) GetStoreAccessInfo(ctx context.Context, clerkUserID, storeID string) (membershipID string, role string, err error) {
+// GetStoreAccessInfo returns the user's membership info for a specific store using Clerk ID
+func (r *Repository) GetStoreAccessInfo(ctx context.Context, clerkUserID, storeID string) (membershipID string, role string, userID string, err error) {
 	storeUID, err := parseUUID(storeID)
 	if err != nil {
-		return "", "", nil // Invalid UUID means no access
+		return "", "", "", nil // Invalid UUID means no access
 	}
 
-	row, err := r.q.ValidateStoreAccess(ctx, sqlc.ValidateStoreAccessParams{
-		ClerkUserID: pgtype.Text{String: clerkUserID, Valid: true},
-		StoreID:     storeUID,
+	row, err := r.q.ValidateStoreAccessByClerkID(ctx, sqlc.ValidateStoreAccessByClerkIDParams{
+		ClerkID: clerkUserID,
+		StoreID: storeUID,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", "", nil
+			return "", "", "", nil
 		}
-		return "", "", fmt.Errorf("validating store access: %w", err)
+		return "", "", "", fmt.Errorf("validating store access: %w", err)
 	}
 
-	return row.ID.String(), row.Role, nil
+	return row.ID.String(), row.Role, row.UserID.String(), nil
 }
 
-// Helper to convert sqlc row to MembershipRow (from list query)
-func toMembershipRowFromList(row sqlc.GetMembershipsByClerkIDRow) MembershipRow {
-	out := MembershipRow{
-		ID:          row.ID.String(),
-		StoreID:     row.StoreID.String(),
-		ClerkUserID: row.ClerkUserID.String,
-		Email:       row.Email,
-		Role:        row.Role,
-		Status:      row.Status,
-		StoreName:   row.StoreName,
-		StoreSlug:   row.StoreSlug,
-		CreatedAt:   row.CreatedAt.Time,
-		UpdatedAt:   row.UpdatedAt.Time,
+// ============================================
+// Helpers
+// ============================================
+
+func toUserRow(row sqlc.User) *UserRow {
+	out := &UserRow{
+		ID:        row.ID.String(),
+		ClerkID:   row.ClerkID,
+		Email:     row.Email,
+		CreatedAt: row.CreatedAt.Time,
+		UpdatedAt: row.UpdatedAt.Time,
 	}
 	if row.Name.Valid {
 		out.Name = &row.Name.String
@@ -269,8 +324,28 @@ func toMembershipRowFromList(row sqlc.GetMembershipsByClerkIDRow) MembershipRow 
 	if row.AvatarUrl.Valid {
 		out.AvatarURL = &row.AvatarUrl.String
 	}
-	if row.ClerkOrgID.Valid {
-		out.ClerkOrgID = row.ClerkOrgID.String
+	return out
+}
+
+// Helper to convert sqlc row to MembershipRow (from list query)
+func toMembershipRowFromList(row sqlc.GetMembershipsByUserIDRow) MembershipRow {
+	out := MembershipRow{
+		ID:        row.ID.String(),
+		StoreID:   row.StoreID.String(),
+		UserID:    row.UserID.String(),
+		Email:     row.Email,
+		Role:      row.Role,
+		Status:    row.Status,
+		StoreName: row.StoreName,
+		StoreSlug: row.StoreSlug,
+		CreatedAt: row.CreatedAt.Time,
+		UpdatedAt: row.UpdatedAt.Time,
+	}
+	if row.Name.Valid {
+		out.Name = &row.Name.String
+	}
+	if row.AvatarUrl.Valid {
+		out.AvatarURL = &row.AvatarUrl.String
 	}
 	if row.LastAccessedAt.Valid {
 		out.LastAccessedAt = &row.LastAccessedAt.Time
@@ -279,27 +354,24 @@ func toMembershipRowFromList(row sqlc.GetMembershipsByClerkIDRow) MembershipRow 
 }
 
 // Helper to convert sqlc row to MembershipRow (from single query)
-func toMembershipRowFromSingle(row sqlc.GetMembershipByClerkIDAndStoreRow) MembershipRow {
+func toMembershipRowFromSingle(row sqlc.GetMembershipByUserIDAndStoreRow) MembershipRow {
 	out := MembershipRow{
-		ID:          row.ID.String(),
-		StoreID:     row.StoreID.String(),
-		ClerkUserID: row.ClerkUserID.String,
-		Email:       row.Email,
-		Role:        row.Role,
-		Status:      row.Status,
-		StoreName:   row.StoreName,
-		StoreSlug:   row.StoreSlug,
-		CreatedAt:   row.CreatedAt.Time,
-		UpdatedAt:   row.UpdatedAt.Time,
+		ID:        row.ID.String(),
+		StoreID:   row.StoreID.String(),
+		UserID:    row.UserID.String(),
+		Email:     row.Email,
+		Role:      row.Role,
+		Status:    row.Status,
+		StoreName: row.StoreName,
+		StoreSlug: row.StoreSlug,
+		CreatedAt: row.CreatedAt.Time,
+		UpdatedAt: row.UpdatedAt.Time,
 	}
 	if row.Name.Valid {
 		out.Name = &row.Name.String
 	}
 	if row.AvatarUrl.Valid {
 		out.AvatarURL = &row.AvatarUrl.String
-	}
-	if row.ClerkOrgID.Valid {
-		out.ClerkOrgID = row.ClerkOrgID.String
 	}
 	if row.LastAccessedAt.Valid {
 		out.LastAccessedAt = &row.LastAccessedAt.Time

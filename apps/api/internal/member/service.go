@@ -2,106 +2,28 @@ package member
 
 import (
 	"context"
-	"fmt"
-	"time"
 
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/member/domain"
-	"livecart/apps/api/internal/store"
-	"livecart/apps/api/lib/clerk"
 	"livecart/apps/api/lib/httpx"
 	vo "livecart/apps/api/lib/valueobject"
 )
 
 type Service struct {
-	repo      *Repository
-	storeRepo *store.Repository
-	clerkSDK  *clerk.SDK
-	logger    *zap.Logger
+	repo   *Repository
+	logger *zap.Logger
 }
 
-func NewService(repo *Repository, storeRepo *store.Repository, clerkSDK *clerk.SDK, logger *zap.Logger) *Service {
+func NewService(repo *Repository, logger *zap.Logger) *Service {
 	return &Service{
-		repo:      repo,
-		storeRepo: storeRepo,
-		clerkSDK:  clerkSDK,
-		logger:    logger.Named("member"),
+		repo:   repo,
+		logger: logger.Named("member"),
 	}
 }
 
-// List returns all members of a store
-// If store has clerk_org_id, fetches from Clerk; otherwise from local database
+// List returns all members of a store from local database
 func (s *Service) List(ctx context.Context, storeID string) ([]MemberOutput, error) {
-	// Get store to check for clerk_org_id
-	storeData, err := s.storeRepo.GetByID(ctx, storeID)
-	if err != nil {
-		return nil, fmt.Errorf("getting store: %w", err)
-	}
-
-	// If store has clerk_org_id and we have Clerk SDK, use Clerk
-	if storeData.ClerkOrgID != "" && s.clerkSDK != nil {
-		memberList, err := s.clerkSDK.ListMembers(ctx, storeData.ClerkOrgID)
-		if err != nil {
-			s.logger.Error("failed to list clerk members, falling back to local",
-				zap.Error(err),
-				zap.String("org_id", storeData.ClerkOrgID),
-			)
-			// Fallback to local
-			return s.listLocal(ctx, storeID)
-		}
-
-		outputs := make([]MemberOutput, len(memberList.OrganizationMemberships))
-		for i, m := range memberList.OrganizationMemberships {
-			// Convert Clerk role to local role
-			role := "member"
-			if m.Role == "org:admin" {
-				role = "admin"
-			}
-
-			// Get user name from public data
-			name := ""
-			if m.PublicUserData != nil {
-				if m.PublicUserData.FirstName != nil {
-					name = *m.PublicUserData.FirstName
-				}
-				if m.PublicUserData.LastName != nil {
-					if name != "" {
-						name += " "
-					}
-					name += *m.PublicUserData.LastName
-				}
-			}
-
-			// Get avatar and email
-			avatarURL := ""
-			email := ""
-			if m.PublicUserData != nil {
-				if m.PublicUserData.ImageURL != nil {
-					avatarURL = *m.PublicUserData.ImageURL
-				}
-				email = m.PublicUserData.Identifier // Identifier is the email
-			}
-
-			outputs[i] = MemberOutput{
-				ID:        m.ID,
-				Email:     email,
-				Name:      &name,
-				AvatarURL: &avatarURL,
-				Role:      role,
-				Status:    "active",
-				JoinedAt:  time.Unix(m.CreatedAt, 0),
-			}
-		}
-		return outputs, nil
-	}
-
-	// Fallback to local database
-	return s.listLocal(ctx, storeID)
-}
-
-// listLocal lists members from local database
-func (s *Service) listLocal(ctx context.Context, storeID string) ([]MemberOutput, error) {
 	members, err := s.repo.List(ctx, storeID)
 	if err != nil {
 		return nil, err
@@ -116,44 +38,6 @@ func (s *Service) listLocal(ctx context.Context, storeID string) ([]MemberOutput
 }
 
 func (s *Service) UpdateRole(ctx context.Context, input UpdateMemberRoleInput) (*MemberOutput, error) {
-	// Get store to check for clerk_org_id
-	storeData, err := s.storeRepo.GetByID(ctx, input.StoreID)
-	if err != nil {
-		return nil, fmt.Errorf("getting store: %w", err)
-	}
-
-	// Convert role to Clerk format
-	clerkRole := "org:member"
-	if input.Role == "admin" {
-		clerkRole = "org:admin"
-	}
-
-	// If store has clerk_org_id and we have Clerk SDK, use Clerk
-	if storeData.ClerkOrgID != "" && s.clerkSDK != nil {
-		// Note: input.MemberID is the Clerk user ID when using Clerk
-		_, err := s.clerkSDK.UpdateMemberRole(ctx, storeData.ClerkOrgID, input.MemberID, clerkRole)
-		if err != nil {
-			s.logger.Error("failed to update clerk member role, trying local",
-				zap.Error(err),
-				zap.String("org_id", storeData.ClerkOrgID),
-				zap.String("member_id", input.MemberID),
-			)
-			// Try local as fallback
-		} else {
-			s.logger.Info("member role updated via Clerk",
-				zap.String("clerk_org_id", storeData.ClerkOrgID),
-				zap.String("member_id", input.MemberID),
-				zap.String("new_role", clerkRole),
-			)
-			// Return a basic output
-			return &MemberOutput{
-				ID:   input.MemberID,
-				Role: input.Role,
-			}, nil
-		}
-	}
-
-	// Local database flow
 	// Get the member to update
 	member, err := s.repo.GetByID(ctx, input.StoreID, input.MemberID)
 	if err != nil {
@@ -183,7 +67,7 @@ func (s *Service) UpdateRole(ctx context.Context, input UpdateMemberRoleInput) (
 		return nil, err
 	}
 
-	s.logger.Info("member role updated (local)",
+	s.logger.Info("member role updated",
 		zap.String("store_id", input.StoreID),
 		zap.String("member_id", input.MemberID),
 		zap.String("new_role", input.Role),
@@ -195,33 +79,6 @@ func (s *Service) UpdateRole(ctx context.Context, input UpdateMemberRoleInput) (
 }
 
 func (s *Service) Remove(ctx context.Context, input RemoveMemberInput) error {
-	// Get store to check for clerk_org_id
-	storeData, err := s.storeRepo.GetByID(ctx, input.StoreID)
-	if err != nil {
-		return fmt.Errorf("getting store: %w", err)
-	}
-
-	// If store has clerk_org_id and we have Clerk SDK, use Clerk
-	if storeData.ClerkOrgID != "" && s.clerkSDK != nil {
-		// Note: input.MemberID is the Clerk user ID when using Clerk
-		_, err := s.clerkSDK.RemoveMember(ctx, storeData.ClerkOrgID, input.MemberID)
-		if err != nil {
-			s.logger.Error("failed to remove clerk member, trying local",
-				zap.Error(err),
-				zap.String("org_id", storeData.ClerkOrgID),
-				zap.String("member_id", input.MemberID),
-			)
-			// Try local as fallback
-		} else {
-			s.logger.Info("member removed via Clerk",
-				zap.String("clerk_org_id", storeData.ClerkOrgID),
-				zap.String("member_id", input.MemberID),
-			)
-			return nil
-		}
-	}
-
-	// Local database flow
 	// Get the member to remove
 	member, err := s.repo.GetByID(ctx, input.StoreID, input.MemberID)
 	if err != nil {
@@ -244,7 +101,7 @@ func (s *Service) Remove(ctx context.Context, input RemoveMemberInput) error {
 		return err
 	}
 
-	s.logger.Info("member removed from store (local)",
+	s.logger.Info("member removed from store",
 		zap.String("store_id", input.StoreID),
 		zap.String("member_id", input.MemberID),
 		zap.String("removed_by", input.ActorID),
@@ -257,6 +114,7 @@ func (s *Service) Remove(ctx context.Context, input RemoveMemberInput) error {
 func toMemberOutput(m *domain.Member) MemberOutput {
 	return MemberOutput{
 		ID:        m.ID().String(),
+		UserID:    m.UserID(),
 		Email:     m.Email().String(),
 		Name:      m.Name(),
 		AvatarURL: m.AvatarURL(),
@@ -265,4 +123,26 @@ func toMemberOutput(m *domain.Member) MemberOutput {
 		JoinedAt:  m.JoinedAt(),
 		InvitedAt: m.InvitedAt(),
 	}
+}
+
+// MemberLookupAdapter implements invitation.MemberLookup interface
+type MemberLookupAdapter struct {
+	repo *Repository
+}
+
+// NewMemberLookupAdapter creates a new adapter for member lookup
+func NewMemberLookupAdapter(repo *Repository) *MemberLookupAdapter {
+	return &MemberLookupAdapter{repo: repo}
+}
+
+// GetMemberNameByID implements invitation.MemberLookup
+func (a *MemberLookupAdapter) GetMemberNameByID(ctx context.Context, storeID, memberID string) (string, error) {
+	member, err := a.repo.GetByID(ctx, storeID, memberID)
+	if err != nil {
+		return "", err
+	}
+	if member.Name() != nil {
+		return *member.Name(), nil
+	}
+	return member.Email().String(), nil // Fallback to email if no name
 }

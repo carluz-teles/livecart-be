@@ -46,23 +46,29 @@ func (r *Repository) List(ctx context.Context, storeID string) ([]*domain.Member
 }
 
 func (r *Repository) GetByID(ctx context.Context, storeID, memberID string) (*domain.Member, error) {
-	members, err := r.List(ctx, storeID)
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	memberUID, err := parseUUID(memberID)
 	if err != nil {
 		return nil, err
 	}
 
-	memberUID, err := vo.NewMemberID(memberID)
+	row, err := r.q.GetMembershipByID(ctx, memberUID)
 	if err != nil {
-		return nil, httpx.ErrUnprocessable("invalid member id")
-	}
-
-	for _, m := range members {
-		if m.ID().Equals(memberUID) {
-			return m, nil
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.ErrNotFound("member not found")
 		}
+		return nil, fmt.Errorf("getting member: %w", err)
 	}
 
-	return nil, httpx.ErrNotFound("member not found")
+	// Verify the member belongs to the store
+	if row.StoreID != storeUID {
+		return nil, httpx.ErrNotFound("member not found")
+	}
+
+	return r.toDomainMemberFromGetByID(row)
 }
 
 func (r *Repository) UpdateRole(ctx context.Context, storeID, memberID, role string) (*domain.Member, error) {
@@ -123,6 +129,8 @@ func (r *Repository) toDomainMember(row sqlc.GetStoreMembersRow) (*domain.Member
 		return nil, err
 	}
 
+	userID := row.UserID.String()
+
 	email, err := vo.NewEmail(row.Email)
 	if err != nil {
 		return nil, err
@@ -151,16 +159,22 @@ func (r *Repository) toDomainMember(row sqlc.GetStoreMembersRow) (*domain.Member
 		invitedAt = &row.InvitedAt.Time
 	}
 
+	var joinedAt *time.Time
+	if row.CreatedAt.Valid {
+		joinedAt = &row.CreatedAt.Time
+	}
+
 	return domain.Reconstruct(
 		id,
 		storeID,
+		userID,
 		email,
 		name,
 		avatarURL,
 		role,
 		status,
 		nil, // invitedBy not available in this query
-		row.CreatedAt.Time,
+		joinedAt,
 		invitedAt,
 	), nil
 }
@@ -176,6 +190,55 @@ func (r *Repository) toDomainMemberFromUpdate(row sqlc.UpdateMembershipRoleRow) 
 	if err != nil {
 		return nil, err
 	}
+
+	userID := row.UserID.String()
+
+	// We don't have email in the update response, use empty for now
+	email, _ := vo.NewEmail("unknown@placeholder.com")
+
+	role, err := vo.NewRole(row.Role)
+	if err != nil {
+		return nil, err
+	}
+
+	status, err := domain.NewMemberStatus(row.Status)
+	if err != nil {
+		return nil, err
+	}
+
+	var joinedAt *time.Time
+	if row.CreatedAt.Valid {
+		joinedAt = &row.CreatedAt.Time
+	}
+
+	return domain.Reconstruct(
+		id,
+		storeID,
+		userID,
+		email,
+		nil,
+		nil,
+		role,
+		status,
+		nil,
+		joinedAt,
+		nil,
+	), nil
+}
+
+// toDomainMemberFromGetByID converts a GetMembershipByID row to a domain Member.
+func (r *Repository) toDomainMemberFromGetByID(row sqlc.GetMembershipByIDRow) (*domain.Member, error) {
+	id, err := vo.NewMemberID(row.ID.String())
+	if err != nil {
+		return nil, err
+	}
+
+	storeID, err := vo.NewStoreID(row.StoreID.String())
+	if err != nil {
+		return nil, err
+	}
+
+	userID := row.UserID.String()
 
 	email, err := vo.NewEmail(row.Email)
 	if err != nil {
@@ -200,17 +263,28 @@ func (r *Repository) toDomainMemberFromUpdate(row sqlc.UpdateMembershipRoleRow) 
 		avatarURL = &row.AvatarUrl.String
 	}
 
+	var invitedAt *time.Time
+	if row.InvitedAt.Valid {
+		invitedAt = &row.InvitedAt.Time
+	}
+
+	var joinedAt *time.Time
+	if row.CreatedAt.Valid {
+		joinedAt = &row.CreatedAt.Time
+	}
+
 	return domain.Reconstruct(
 		id,
 		storeID,
+		userID,
 		email,
 		name,
 		avatarURL,
 		role,
 		status,
-		nil,
-		row.CreatedAt.Time,
-		nil,
+		nil, // invitedBy - not needed for this use case
+		joinedAt,
+		invitedAt,
 	), nil
 }
 

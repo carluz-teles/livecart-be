@@ -103,31 +103,27 @@ func (q *Queries) CreateInvitation(ctx context.Context, arg CreateInvitationPara
 }
 
 const createMembership = `-- name: CreateMembership :one
-INSERT INTO memberships (store_id, clerk_user_id, email, name, avatar_url, role, status, invited_by, invited_at)
-VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8)
-RETURNING id, store_id, clerk_user_id, email, name, avatar_url, role, status, last_accessed_at, created_at, updated_at
+INSERT INTO memberships (store_id, user_id, role, status, invited_by, invited_at)
+VALUES ($1, $2, $3, 'active', $4, $5)
+RETURNING id, store_id, user_id, role, status, invited_by, invited_at, last_accessed_at, created_at, updated_at
 `
 
 type CreateMembershipParams struct {
-	StoreID     pgtype.UUID        `json:"store_id"`
-	ClerkUserID pgtype.Text        `json:"clerk_user_id"`
-	Email       string             `json:"email"`
-	Name        pgtype.Text        `json:"name"`
-	AvatarUrl   pgtype.Text        `json:"avatar_url"`
-	Role        string             `json:"role"`
-	InvitedBy   pgtype.UUID        `json:"invited_by"`
-	InvitedAt   pgtype.Timestamptz `json:"invited_at"`
+	StoreID   pgtype.UUID        `json:"store_id"`
+	UserID    pgtype.UUID        `json:"user_id"`
+	Role      string             `json:"role"`
+	InvitedBy pgtype.UUID        `json:"invited_by"`
+	InvitedAt pgtype.Timestamptz `json:"invited_at"`
 }
 
 type CreateMembershipRow struct {
 	ID             pgtype.UUID        `json:"id"`
 	StoreID        pgtype.UUID        `json:"store_id"`
-	ClerkUserID    pgtype.Text        `json:"clerk_user_id"`
-	Email          string             `json:"email"`
-	Name           pgtype.Text        `json:"name"`
-	AvatarUrl      pgtype.Text        `json:"avatar_url"`
+	UserID         pgtype.UUID        `json:"user_id"`
 	Role           string             `json:"role"`
 	Status         string             `json:"status"`
+	InvitedBy      pgtype.UUID        `json:"invited_by"`
+	InvitedAt      pgtype.Timestamptz `json:"invited_at"`
 	LastAccessedAt pgtype.Timestamptz `json:"last_accessed_at"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
@@ -137,10 +133,7 @@ type CreateMembershipRow struct {
 func (q *Queries) CreateMembership(ctx context.Context, arg CreateMembershipParams) (CreateMembershipRow, error) {
 	row := q.db.QueryRow(ctx, createMembership,
 		arg.StoreID,
-		arg.ClerkUserID,
-		arg.Email,
-		arg.Name,
-		arg.AvatarUrl,
+		arg.UserID,
 		arg.Role,
 		arg.InvitedBy,
 		arg.InvitedAt,
@@ -149,12 +142,11 @@ func (q *Queries) CreateMembership(ctx context.Context, arg CreateMembershipPara
 	err := row.Scan(
 		&i.ID,
 		&i.StoreID,
-		&i.ClerkUserID,
-		&i.Email,
-		&i.Name,
-		&i.AvatarUrl,
+		&i.UserID,
 		&i.Role,
 		&i.Status,
+		&i.InvitedBy,
+		&i.InvitedAt,
 		&i.LastAccessedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -163,26 +155,20 @@ func (q *Queries) CreateMembership(ctx context.Context, arg CreateMembershipPara
 }
 
 const createOwnerMembership = `-- name: CreateOwnerMembership :one
-INSERT INTO memberships (store_id, clerk_user_id, email, name, avatar_url, role, status)
-VALUES ($1, $2, $3, $4, $5, 'owner', 'active')
-RETURNING id, store_id, clerk_user_id, email, name, avatar_url, role, status, last_accessed_at, created_at, updated_at
+INSERT INTO memberships (store_id, user_id, role, status)
+VALUES ($1, $2, 'owner', 'active')
+RETURNING id, store_id, user_id, role, status, last_accessed_at, created_at, updated_at
 `
 
 type CreateOwnerMembershipParams struct {
-	StoreID     pgtype.UUID `json:"store_id"`
-	ClerkUserID pgtype.Text `json:"clerk_user_id"`
-	Email       string      `json:"email"`
-	Name        pgtype.Text `json:"name"`
-	AvatarUrl   pgtype.Text `json:"avatar_url"`
+	StoreID pgtype.UUID `json:"store_id"`
+	UserID  pgtype.UUID `json:"user_id"`
 }
 
 type CreateOwnerMembershipRow struct {
 	ID             pgtype.UUID        `json:"id"`
 	StoreID        pgtype.UUID        `json:"store_id"`
-	ClerkUserID    pgtype.Text        `json:"clerk_user_id"`
-	Email          string             `json:"email"`
-	Name           pgtype.Text        `json:"name"`
-	AvatarUrl      pgtype.Text        `json:"avatar_url"`
+	UserID         pgtype.UUID        `json:"user_id"`
 	Role           string             `json:"role"`
 	Status         string             `json:"status"`
 	LastAccessedAt pgtype.Timestamptz `json:"last_accessed_at"`
@@ -192,24 +178,53 @@ type CreateOwnerMembershipRow struct {
 
 // Create owner membership when creating a new store
 func (q *Queries) CreateOwnerMembership(ctx context.Context, arg CreateOwnerMembershipParams) (CreateOwnerMembershipRow, error) {
-	row := q.db.QueryRow(ctx, createOwnerMembership,
-		arg.StoreID,
-		arg.ClerkUserID,
-		arg.Email,
-		arg.Name,
-		arg.AvatarUrl,
-	)
+	row := q.db.QueryRow(ctx, createOwnerMembership, arg.StoreID, arg.UserID)
 	var i CreateOwnerMembershipRow
 	err := row.Scan(
 		&i.ID,
 		&i.StoreID,
-		&i.ClerkUserID,
-		&i.Email,
-		&i.Name,
-		&i.AvatarUrl,
+		&i.UserID,
 		&i.Role,
 		&i.Status,
 		&i.LastAccessedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createUser = `-- name: CreateUser :one
+
+INSERT INTO users (clerk_id, email, name, avatar_url)
+VALUES ($1, $2, $3, $4)
+RETURNING id, clerk_id, email, name, avatar_url, created_at, updated_at
+`
+
+type CreateUserParams struct {
+	ClerkID   string      `json:"clerk_id"`
+	Email     string      `json:"email"`
+	Name      pgtype.Text `json:"name"`
+	AvatarUrl pgtype.Text `json:"avatar_url"`
+}
+
+// ============================================
+// USER QUERIES (new users table)
+// ============================================
+// Create a new user (from Clerk webhook or sync fallback)
+func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, error) {
+	row := q.db.QueryRow(ctx, createUser,
+		arg.ClerkID,
+		arg.Email,
+		arg.Name,
+		arg.AvatarUrl,
+	)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.ClerkID,
+		&i.Email,
+		&i.Name,
+		&i.AvatarUrl,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -244,13 +259,13 @@ func (q *Queries) DeleteMembership(ctx context.Context, arg DeleteMembershipPara
 	return err
 }
 
-const deleteMembershipsByClerkID = `-- name: DeleteMembershipsByClerkID :exec
-DELETE FROM memberships WHERE clerk_user_id = $1
+const deleteUser = `-- name: DeleteUser :exec
+DELETE FROM users WHERE clerk_id = $1
 `
 
-// Delete all memberships for a clerk user (when Clerk user is deleted)
-func (q *Queries) DeleteMembershipsByClerkID(ctx context.Context, clerkUserID pgtype.Text) error {
-	_, err := q.db.Exec(ctx, deleteMembershipsByClerkID, clerkUserID)
+// Delete a user (cascades to memberships)
+func (q *Queries) DeleteUser(ctx context.Context, clerkID string) error {
+	_, err := q.db.Exec(ctx, deleteUser, clerkID)
 	return err
 }
 
@@ -305,6 +320,65 @@ func (q *Queries) GetInvitationByEmail(ctx context.Context, arg GetInvitationByE
 	return i, err
 }
 
+const getInvitationByID = `-- name: GetInvitationByID :one
+SELECT
+  si.id,
+  si.store_id,
+  si.email,
+  si.role,
+  si.token,
+  si.invited_by,
+  si.status,
+  si.expires_at,
+  si.accepted_at,
+  si.created_at,
+  s.name as store_name,
+  s.slug as store_slug
+FROM store_invitations si
+JOIN stores s ON s.id = si.store_id
+WHERE si.store_id = $1 AND si.id = $2
+`
+
+type GetInvitationByIDParams struct {
+	StoreID pgtype.UUID `json:"store_id"`
+	ID      pgtype.UUID `json:"id"`
+}
+
+type GetInvitationByIDRow struct {
+	ID         pgtype.UUID        `json:"id"`
+	StoreID    pgtype.UUID        `json:"store_id"`
+	Email      string             `json:"email"`
+	Role       string             `json:"role"`
+	Token      string             `json:"token"`
+	InvitedBy  pgtype.UUID        `json:"invited_by"`
+	Status     string             `json:"status"`
+	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
+	AcceptedAt pgtype.Timestamptz `json:"accepted_at"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	StoreName  string             `json:"store_name"`
+	StoreSlug  string             `json:"store_slug"`
+}
+
+func (q *Queries) GetInvitationByID(ctx context.Context, arg GetInvitationByIDParams) (GetInvitationByIDRow, error) {
+	row := q.db.QueryRow(ctx, getInvitationByID, arg.StoreID, arg.ID)
+	var i GetInvitationByIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.Email,
+		&i.Role,
+		&i.Token,
+		&i.InvitedBy,
+		&i.Status,
+		&i.ExpiresAt,
+		&i.AcceptedAt,
+		&i.CreatedAt,
+		&i.StoreName,
+		&i.StoreSlug,
+	)
+	return i, err
+}
+
 const getInvitationByToken = `-- name: GetInvitationByToken :one
 SELECT
   si.id,
@@ -319,10 +393,11 @@ SELECT
   si.created_at,
   s.name as store_name,
   s.slug as store_slug,
-  inviter.name as inviter_name
+  inviter_user.name as inviter_name
 FROM store_invitations si
 JOIN stores s ON s.id = si.store_id
 JOIN memberships inviter ON inviter.id = si.invited_by
+JOIN users inviter_user ON inviter_user.id = inviter.user_id
 WHERE si.token = $1
 `
 
@@ -363,136 +438,197 @@ func (q *Queries) GetInvitationByToken(ctx context.Context, token string) (GetIn
 	return i, err
 }
 
-const getMembershipByClerkIDAndStore = `-- name: GetMembershipByClerkIDAndStore :one
+const getMembershipByID = `-- name: GetMembershipByID :one
 SELECT
   m.id,
   m.store_id,
-  m.clerk_user_id,
-  m.email,
-  m.name,
-  m.avatar_url,
+  m.user_id,
+  m.role,
+  m.status,
+  m.invited_by,
+  m.invited_at,
+  m.last_accessed_at,
+  m.created_at,
+  m.updated_at,
+  u.clerk_id,
+  u.email,
+  u.name,
+  u.avatar_url
+FROM memberships m
+JOIN users u ON u.id = m.user_id
+WHERE m.id = $1
+`
+
+type GetMembershipByIDRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	StoreID        pgtype.UUID        `json:"store_id"`
+	UserID         pgtype.UUID        `json:"user_id"`
+	Role           string             `json:"role"`
+	Status         string             `json:"status"`
+	InvitedBy      pgtype.UUID        `json:"invited_by"`
+	InvitedAt      pgtype.Timestamptz `json:"invited_at"`
+	LastAccessedAt pgtype.Timestamptz `json:"last_accessed_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ClerkID        string             `json:"clerk_id"`
+	Email          string             `json:"email"`
+	Name           pgtype.Text        `json:"name"`
+	AvatarUrl      pgtype.Text        `json:"avatar_url"`
+}
+
+// Get membership by ID with user info
+func (q *Queries) GetMembershipByID(ctx context.Context, id pgtype.UUID) (GetMembershipByIDRow, error) {
+	row := q.db.QueryRow(ctx, getMembershipByID, id)
+	var i GetMembershipByIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.UserID,
+		&i.Role,
+		&i.Status,
+		&i.InvitedBy,
+		&i.InvitedAt,
+		&i.LastAccessedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ClerkID,
+		&i.Email,
+		&i.Name,
+		&i.AvatarUrl,
+	)
+	return i, err
+}
+
+const getMembershipByUserIDAndStore = `-- name: GetMembershipByUserIDAndStore :one
+SELECT
+  m.id,
+  m.store_id,
+  m.user_id,
   m.role,
   m.status,
   m.last_accessed_at,
   m.created_at,
   m.updated_at,
+  u.email,
+  u.name,
+  u.avatar_url,
   s.name as store_name,
-  s.slug as store_slug,
-  s.clerk_org_id
+  s.slug as store_slug
 FROM memberships m
+JOIN users u ON u.id = m.user_id
 JOIN stores s ON s.id = m.store_id
-WHERE m.clerk_user_id = $1 AND m.store_id = $2
+WHERE m.user_id = $1 AND m.store_id = $2
 `
 
-type GetMembershipByClerkIDAndStoreParams struct {
-	ClerkUserID pgtype.Text `json:"clerk_user_id"`
-	StoreID     pgtype.UUID `json:"store_id"`
+type GetMembershipByUserIDAndStoreParams struct {
+	UserID  pgtype.UUID `json:"user_id"`
+	StoreID pgtype.UUID `json:"store_id"`
 }
 
-type GetMembershipByClerkIDAndStoreRow struct {
+type GetMembershipByUserIDAndStoreRow struct {
 	ID             pgtype.UUID        `json:"id"`
 	StoreID        pgtype.UUID        `json:"store_id"`
-	ClerkUserID    pgtype.Text        `json:"clerk_user_id"`
-	Email          string             `json:"email"`
-	Name           pgtype.Text        `json:"name"`
-	AvatarUrl      pgtype.Text        `json:"avatar_url"`
+	UserID         pgtype.UUID        `json:"user_id"`
 	Role           string             `json:"role"`
 	Status         string             `json:"status"`
 	LastAccessedAt pgtype.Timestamptz `json:"last_accessed_at"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	Email          string             `json:"email"`
+	Name           pgtype.Text        `json:"name"`
+	AvatarUrl      pgtype.Text        `json:"avatar_url"`
 	StoreName      string             `json:"store_name"`
 	StoreSlug      string             `json:"store_slug"`
-	ClerkOrgID     pgtype.Text        `json:"clerk_org_id"`
 }
 
 // Get membership for a specific store
-func (q *Queries) GetMembershipByClerkIDAndStore(ctx context.Context, arg GetMembershipByClerkIDAndStoreParams) (GetMembershipByClerkIDAndStoreRow, error) {
-	row := q.db.QueryRow(ctx, getMembershipByClerkIDAndStore, arg.ClerkUserID, arg.StoreID)
-	var i GetMembershipByClerkIDAndStoreRow
+func (q *Queries) GetMembershipByUserIDAndStore(ctx context.Context, arg GetMembershipByUserIDAndStoreParams) (GetMembershipByUserIDAndStoreRow, error) {
+	row := q.db.QueryRow(ctx, getMembershipByUserIDAndStore, arg.UserID, arg.StoreID)
+	var i GetMembershipByUserIDAndStoreRow
 	err := row.Scan(
 		&i.ID,
 		&i.StoreID,
-		&i.ClerkUserID,
-		&i.Email,
-		&i.Name,
-		&i.AvatarUrl,
+		&i.UserID,
 		&i.Role,
 		&i.Status,
 		&i.LastAccessedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Email,
+		&i.Name,
+		&i.AvatarUrl,
 		&i.StoreName,
 		&i.StoreSlug,
-		&i.ClerkOrgID,
 	)
 	return i, err
 }
 
-const getMembershipsByClerkID = `-- name: GetMembershipsByClerkID :many
+const getMembershipsByUserID = `-- name: GetMembershipsByUserID :many
+
 SELECT
   m.id,
   m.store_id,
-  m.clerk_user_id,
-  m.email,
-  m.name,
-  m.avatar_url,
+  m.user_id,
   m.role,
   m.status,
   m.last_accessed_at,
   m.created_at,
   m.updated_at,
+  u.email,
+  u.name,
+  u.avatar_url,
   s.name as store_name,
-  s.slug as store_slug,
-  s.clerk_org_id
+  s.slug as store_slug
 FROM memberships m
+JOIN users u ON u.id = m.user_id
 JOIN stores s ON s.id = m.store_id
-WHERE m.clerk_user_id = $1 AND m.status = 'active'
+WHERE m.user_id = $1 AND m.status = 'active'
 ORDER BY m.last_accessed_at DESC NULLS LAST, m.created_at ASC
 `
 
-type GetMembershipsByClerkIDRow struct {
+type GetMembershipsByUserIDRow struct {
 	ID             pgtype.UUID        `json:"id"`
 	StoreID        pgtype.UUID        `json:"store_id"`
-	ClerkUserID    pgtype.Text        `json:"clerk_user_id"`
-	Email          string             `json:"email"`
-	Name           pgtype.Text        `json:"name"`
-	AvatarUrl      pgtype.Text        `json:"avatar_url"`
+	UserID         pgtype.UUID        `json:"user_id"`
 	Role           string             `json:"role"`
 	Status         string             `json:"status"`
 	LastAccessedAt pgtype.Timestamptz `json:"last_accessed_at"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	Email          string             `json:"email"`
+	Name           pgtype.Text        `json:"name"`
+	AvatarUrl      pgtype.Text        `json:"avatar_url"`
 	StoreName      string             `json:"store_name"`
 	StoreSlug      string             `json:"store_slug"`
-	ClerkOrgID     pgtype.Text        `json:"clerk_org_id"`
 }
 
-// List all memberships (stores) for a clerk user
-func (q *Queries) GetMembershipsByClerkID(ctx context.Context, clerkUserID pgtype.Text) ([]GetMembershipsByClerkIDRow, error) {
-	rows, err := q.db.Query(ctx, getMembershipsByClerkID, clerkUserID)
+// ============================================
+// MEMBERSHIP QUERIES
+// ============================================
+// List all memberships (stores) for a user
+func (q *Queries) GetMembershipsByUserID(ctx context.Context, userID pgtype.UUID) ([]GetMembershipsByUserIDRow, error) {
+	rows, err := q.db.Query(ctx, getMembershipsByUserID, userID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []GetMembershipsByClerkIDRow{}
+	items := []GetMembershipsByUserIDRow{}
 	for rows.Next() {
-		var i GetMembershipsByClerkIDRow
+		var i GetMembershipsByUserIDRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.StoreID,
-			&i.ClerkUserID,
-			&i.Email,
-			&i.Name,
-			&i.AvatarUrl,
+			&i.UserID,
 			&i.Role,
 			&i.Status,
 			&i.LastAccessedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Email,
+			&i.Name,
+			&i.AvatarUrl,
 			&i.StoreName,
 			&i.StoreSlug,
-			&i.ClerkOrgID,
 		); err != nil {
 			return nil, err
 		}
@@ -508,17 +644,19 @@ const getStoreMembers = `-- name: GetStoreMembers :many
 SELECT
   m.id,
   m.store_id,
-  m.clerk_user_id,
-  m.email,
-  m.name,
-  m.avatar_url,
+  m.user_id,
   m.role,
   m.status,
   m.invited_by,
   m.invited_at,
   m.created_at,
-  m.updated_at
+  m.updated_at,
+  u.clerk_id,
+  u.email,
+  u.name,
+  u.avatar_url
 FROM memberships m
+JOIN users u ON u.id = m.user_id
 WHERE m.store_id = $1
 ORDER BY
   CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
@@ -526,21 +664,22 @@ ORDER BY
 `
 
 type GetStoreMembersRow struct {
-	ID          pgtype.UUID        `json:"id"`
-	StoreID     pgtype.UUID        `json:"store_id"`
-	ClerkUserID pgtype.Text        `json:"clerk_user_id"`
-	Email       string             `json:"email"`
-	Name        pgtype.Text        `json:"name"`
-	AvatarUrl   pgtype.Text        `json:"avatar_url"`
-	Role        string             `json:"role"`
-	Status      string             `json:"status"`
-	InvitedBy   pgtype.UUID        `json:"invited_by"`
-	InvitedAt   pgtype.Timestamptz `json:"invited_at"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	ID        pgtype.UUID        `json:"id"`
+	StoreID   pgtype.UUID        `json:"store_id"`
+	UserID    pgtype.UUID        `json:"user_id"`
+	Role      string             `json:"role"`
+	Status    string             `json:"status"`
+	InvitedBy pgtype.UUID        `json:"invited_by"`
+	InvitedAt pgtype.Timestamptz `json:"invited_at"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+	ClerkID   string             `json:"clerk_id"`
+	Email     string             `json:"email"`
+	Name      pgtype.Text        `json:"name"`
+	AvatarUrl pgtype.Text        `json:"avatar_url"`
 }
 
-// List all members of a store
+// List all members of a store with user info
 func (q *Queries) GetStoreMembers(ctx context.Context, storeID pgtype.UUID) ([]GetStoreMembersRow, error) {
 	rows, err := q.db.Query(ctx, getStoreMembers, storeID)
 	if err != nil {
@@ -553,16 +692,17 @@ func (q *Queries) GetStoreMembers(ctx context.Context, storeID pgtype.UUID) ([]G
 		if err := rows.Scan(
 			&i.ID,
 			&i.StoreID,
-			&i.ClerkUserID,
-			&i.Email,
-			&i.Name,
-			&i.AvatarUrl,
+			&i.UserID,
 			&i.Role,
 			&i.Status,
 			&i.InvitedBy,
 			&i.InvitedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ClerkID,
+			&i.Email,
+			&i.Name,
+			&i.AvatarUrl,
 		); err != nil {
 			return nil, err
 		}
@@ -572,6 +712,72 @@ func (q *Queries) GetStoreMembers(ctx context.Context, storeID pgtype.UUID) ([]G
 		return nil, err
 	}
 	return items, nil
+}
+
+const getUserByClerkID = `-- name: GetUserByClerkID :one
+SELECT id, clerk_id, email, name, avatar_url, created_at, updated_at
+FROM users
+WHERE clerk_id = $1
+`
+
+// Get user by Clerk ID
+func (q *Queries) GetUserByClerkID(ctx context.Context, clerkID string) (User, error) {
+	row := q.db.QueryRow(ctx, getUserByClerkID, clerkID)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.ClerkID,
+		&i.Email,
+		&i.Name,
+		&i.AvatarUrl,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getUserByEmail = `-- name: GetUserByEmail :one
+SELECT id, clerk_id, email, name, avatar_url, created_at, updated_at
+FROM users
+WHERE email = $1
+`
+
+// Get user by email
+func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
+	row := q.db.QueryRow(ctx, getUserByEmail, email)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.ClerkID,
+		&i.Email,
+		&i.Name,
+		&i.AvatarUrl,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getUserByID = `-- name: GetUserByID :one
+SELECT id, clerk_id, email, name, avatar_url, created_at, updated_at
+FROM users
+WHERE id = $1
+`
+
+// Get user by ID
+func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (User, error) {
+	row := q.db.QueryRow(ctx, getUserByID, id)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.ClerkID,
+		&i.Email,
+		&i.Name,
+		&i.AvatarUrl,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const listStoreInvitations = `-- name: ListStoreInvitations :many
@@ -586,9 +792,10 @@ SELECT
   si.expires_at,
   si.accepted_at,
   si.created_at,
-  inviter.name as inviter_name
+  inviter_user.name as inviter_name
 FROM store_invitations si
 JOIN memberships inviter ON inviter.id = si.invited_by
+JOIN users inviter_user ON inviter_user.id = inviter.user_id
 WHERE si.store_id = $1
 ORDER BY si.created_at DESC
 `
@@ -655,106 +862,20 @@ func (q *Queries) RevokeInvitation(ctx context.Context, arg RevokeInvitationPara
 	return err
 }
 
-const updateMembership = `-- name: UpdateMembership :one
-UPDATE memberships
-SET
-  email = $3,
-  name = $4,
-  avatar_url = $5,
-  updated_at = now()
-WHERE clerk_user_id = $1 AND store_id = $2
-RETURNING id, store_id, clerk_user_id, email, name, avatar_url, role, status, last_accessed_at, created_at, updated_at
-`
-
-type UpdateMembershipParams struct {
-	ClerkUserID pgtype.Text `json:"clerk_user_id"`
-	StoreID     pgtype.UUID `json:"store_id"`
-	Email       string      `json:"email"`
-	Name        pgtype.Text `json:"name"`
-	AvatarUrl   pgtype.Text `json:"avatar_url"`
-}
-
-type UpdateMembershipRow struct {
-	ID             pgtype.UUID        `json:"id"`
-	StoreID        pgtype.UUID        `json:"store_id"`
-	ClerkUserID    pgtype.Text        `json:"clerk_user_id"`
-	Email          string             `json:"email"`
-	Name           pgtype.Text        `json:"name"`
-	AvatarUrl      pgtype.Text        `json:"avatar_url"`
-	Role           string             `json:"role"`
-	Status         string             `json:"status"`
-	LastAccessedAt pgtype.Timestamptz `json:"last_accessed_at"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
-}
-
-func (q *Queries) UpdateMembership(ctx context.Context, arg UpdateMembershipParams) (UpdateMembershipRow, error) {
-	row := q.db.QueryRow(ctx, updateMembership,
-		arg.ClerkUserID,
-		arg.StoreID,
-		arg.Email,
-		arg.Name,
-		arg.AvatarUrl,
-	)
-	var i UpdateMembershipRow
-	err := row.Scan(
-		&i.ID,
-		&i.StoreID,
-		&i.ClerkUserID,
-		&i.Email,
-		&i.Name,
-		&i.AvatarUrl,
-		&i.Role,
-		&i.Status,
-		&i.LastAccessedAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
-const updateMembershipAllStores = `-- name: UpdateMembershipAllStores :exec
-UPDATE memberships
-SET
-  email = $2,
-  name = $3,
-  avatar_url = $4,
-  updated_at = now()
-WHERE clerk_user_id = $1
-`
-
-type UpdateMembershipAllStoresParams struct {
-	ClerkUserID pgtype.Text `json:"clerk_user_id"`
-	Email       string      `json:"email"`
-	Name        pgtype.Text `json:"name"`
-	AvatarUrl   pgtype.Text `json:"avatar_url"`
-}
-
-// Update user info across all memberships (for Clerk webhook)
-func (q *Queries) UpdateMembershipAllStores(ctx context.Context, arg UpdateMembershipAllStoresParams) error {
-	_, err := q.db.Exec(ctx, updateMembershipAllStores,
-		arg.ClerkUserID,
-		arg.Email,
-		arg.Name,
-		arg.AvatarUrl,
-	)
-	return err
-}
-
 const updateMembershipLastAccessed = `-- name: UpdateMembershipLastAccessed :exec
 UPDATE memberships
 SET last_accessed_at = now()
-WHERE clerk_user_id = $1 AND store_id = $2
+WHERE user_id = $1 AND store_id = $2
 `
 
 type UpdateMembershipLastAccessedParams struct {
-	ClerkUserID pgtype.Text `json:"clerk_user_id"`
-	StoreID     pgtype.UUID `json:"store_id"`
+	UserID  pgtype.UUID `json:"user_id"`
+	StoreID pgtype.UUID `json:"store_id"`
 }
 
 // Update last accessed timestamp for a membership
 func (q *Queries) UpdateMembershipLastAccessed(ctx context.Context, arg UpdateMembershipLastAccessedParams) error {
-	_, err := q.db.Exec(ctx, updateMembershipLastAccessed, arg.ClerkUserID, arg.StoreID)
+	_, err := q.db.Exec(ctx, updateMembershipLastAccessed, arg.UserID, arg.StoreID)
 	return err
 }
 
@@ -762,7 +883,7 @@ const updateMembershipRole = `-- name: UpdateMembershipRole :one
 UPDATE memberships
 SET role = $3, updated_at = now()
 WHERE store_id = $1 AND id = $2
-RETURNING id, store_id, clerk_user_id, email, name, avatar_url, role, status, last_accessed_at, created_at, updated_at
+RETURNING id, store_id, user_id, role, status, last_accessed_at, created_at, updated_at
 `
 
 type UpdateMembershipRoleParams struct {
@@ -774,10 +895,7 @@ type UpdateMembershipRoleParams struct {
 type UpdateMembershipRoleRow struct {
 	ID             pgtype.UUID        `json:"id"`
 	StoreID        pgtype.UUID        `json:"store_id"`
-	ClerkUserID    pgtype.Text        `json:"clerk_user_id"`
-	Email          string             `json:"email"`
-	Name           pgtype.Text        `json:"name"`
-	AvatarUrl      pgtype.Text        `json:"avatar_url"`
+	UserID         pgtype.UUID        `json:"user_id"`
 	Role           string             `json:"role"`
 	Status         string             `json:"status"`
 	LastAccessedAt pgtype.Timestamptz `json:"last_accessed_at"`
@@ -791,13 +909,89 @@ func (q *Queries) UpdateMembershipRole(ctx context.Context, arg UpdateMembership
 	err := row.Scan(
 		&i.ID,
 		&i.StoreID,
-		&i.ClerkUserID,
-		&i.Email,
-		&i.Name,
-		&i.AvatarUrl,
+		&i.UserID,
 		&i.Role,
 		&i.Status,
 		&i.LastAccessedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateUser = `-- name: UpdateUser :one
+UPDATE users
+SET
+  email = $2,
+  name = $3,
+  avatar_url = $4,
+  updated_at = now()
+WHERE clerk_id = $1
+RETURNING id, clerk_id, email, name, avatar_url, created_at, updated_at
+`
+
+type UpdateUserParams struct {
+	ClerkID   string      `json:"clerk_id"`
+	Email     string      `json:"email"`
+	Name      pgtype.Text `json:"name"`
+	AvatarUrl pgtype.Text `json:"avatar_url"`
+}
+
+// Update user info (from Clerk webhook)
+func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (User, error) {
+	row := q.db.QueryRow(ctx, updateUser,
+		arg.ClerkID,
+		arg.Email,
+		arg.Name,
+		arg.AvatarUrl,
+	)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.ClerkID,
+		&i.Email,
+		&i.Name,
+		&i.AvatarUrl,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertUser = `-- name: UpsertUser :one
+INSERT INTO users (clerk_id, email, name, avatar_url)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (clerk_id) DO UPDATE SET
+  email = CASE WHEN $2 = '' THEN users.email ELSE $2 END,
+  name = CASE WHEN $3 IS NULL THEN users.name ELSE $3 END,
+  avatar_url = CASE WHEN $4 IS NULL THEN users.avatar_url ELSE $4 END,
+  updated_at = now()
+RETURNING id, clerk_id, email, name, avatar_url, created_at, updated_at
+`
+
+type UpsertUserParams struct {
+	ClerkID   string      `json:"clerk_id"`
+	Email     string      `json:"email"`
+	Name      pgtype.Text `json:"name"`
+	AvatarUrl pgtype.Text `json:"avatar_url"`
+}
+
+// Create or update user (for sync endpoint fallback)
+// Only updates email/name/avatar if the new value is not empty
+func (q *Queries) UpsertUser(ctx context.Context, arg UpsertUserParams) (User, error) {
+	row := q.db.QueryRow(ctx, upsertUser,
+		arg.ClerkID,
+		arg.Email,
+		arg.Name,
+		arg.AvatarUrl,
+	)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.ClerkID,
+		&i.Email,
+		&i.Name,
+		&i.AvatarUrl,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -809,12 +1003,12 @@ SELECT
   m.id,
   m.role
 FROM memberships m
-WHERE m.clerk_user_id = $1 AND m.store_id = $2 AND m.status = 'active'
+WHERE m.user_id = $1 AND m.store_id = $2 AND m.status = 'active'
 `
 
 type ValidateStoreAccessParams struct {
-	ClerkUserID pgtype.Text `json:"clerk_user_id"`
-	StoreID     pgtype.UUID `json:"store_id"`
+	UserID  pgtype.UUID `json:"user_id"`
+	StoreID pgtype.UUID `json:"store_id"`
 }
 
 type ValidateStoreAccessRow struct {
@@ -824,8 +1018,37 @@ type ValidateStoreAccessRow struct {
 
 // Check if user has access to a store and return their membership info
 func (q *Queries) ValidateStoreAccess(ctx context.Context, arg ValidateStoreAccessParams) (ValidateStoreAccessRow, error) {
-	row := q.db.QueryRow(ctx, validateStoreAccess, arg.ClerkUserID, arg.StoreID)
+	row := q.db.QueryRow(ctx, validateStoreAccess, arg.UserID, arg.StoreID)
 	var i ValidateStoreAccessRow
 	err := row.Scan(&i.ID, &i.Role)
+	return i, err
+}
+
+const validateStoreAccessByClerkID = `-- name: ValidateStoreAccessByClerkID :one
+SELECT
+  m.id,
+  m.role,
+  u.id as user_id
+FROM memberships m
+JOIN users u ON u.id = m.user_id
+WHERE u.clerk_id = $1 AND m.store_id = $2 AND m.status = 'active'
+`
+
+type ValidateStoreAccessByClerkIDParams struct {
+	ClerkID string      `json:"clerk_id"`
+	StoreID pgtype.UUID `json:"store_id"`
+}
+
+type ValidateStoreAccessByClerkIDRow struct {
+	ID     pgtype.UUID `json:"id"`
+	Role   string      `json:"role"`
+	UserID pgtype.UUID `json:"user_id"`
+}
+
+// Check if user has access to a store using Clerk ID (for middleware)
+func (q *Queries) ValidateStoreAccessByClerkID(ctx context.Context, arg ValidateStoreAccessByClerkIDParams) (ValidateStoreAccessByClerkIDRow, error) {
+	row := q.db.QueryRow(ctx, validateStoreAccessByClerkID, arg.ClerkID, arg.StoreID)
+	var i ValidateStoreAccessByClerkIDRow
+	err := row.Scan(&i.ID, &i.Role, &i.UserID)
 	return i, err
 }

@@ -11,28 +11,31 @@ type SyncUserRequest struct {
 	// No required fields - sync uses JWT claims
 }
 
-// SyncUserResponse - returns all memberships and state
+// SyncUserResponse - returns user info and all memberships
 type SyncUserResponse struct {
-	ClerkUserID          string               `json:"clerkUserId"`
-	Memberships          []MembershipResponse `json:"memberships"`
-	LastAccessedStoreID  *string              `json:"lastAccessedStoreId"`
-	State                string               `json:"state"` // "no_store" | "ready"
+	UserID              string               `json:"userId"`
+	ClerkUserID         string               `json:"clerkUserId"`
+	Email               string               `json:"email"`
+	Name                *string              `json:"name"`
+	AvatarURL           *string              `json:"avatarUrl"`
+	Memberships         []MembershipResponse `json:"memberships"`
+	LastAccessedStoreID *string              `json:"lastAccessedStoreId"`
+	State               string               `json:"state"` // "no_store" | "ready"
 }
 
 // MembershipResponse represents a user's membership to a store
 type MembershipResponse struct {
-	ID             string    `json:"id"`
-	StoreID        string    `json:"storeId"`
-	StoreName      string    `json:"storeName"`
-	StoreSlug      string    `json:"storeSlug"`
-	ClerkOrgID     string    `json:"clerkOrgId"`
-	Role           string    `json:"role"`
-	Status         string    `json:"status"`
-	Email          string    `json:"email"`
-	Name           *string   `json:"name"`
-	AvatarURL      *string   `json:"avatarUrl"`
+	ID             string     `json:"id"`
+	StoreID        string     `json:"storeId"`
+	StoreName      string     `json:"storeName"`
+	StoreSlug      string     `json:"storeSlug"`
+	Role           string     `json:"role"`
+	Status         string     `json:"status"`
+	Email          string     `json:"email"`
+	Name           *string    `json:"name"`
+	AvatarURL      *string    `json:"avatarUrl"`
 	LastAccessedAt *time.Time `json:"lastAccessedAt"`
-	CreatedAt      time.Time `json:"createdAt"`
+	CreatedAt      time.Time  `json:"createdAt"`
 }
 
 // SelectStoreRequest - for changing active store
@@ -43,6 +46,7 @@ type SelectStoreRequest struct {
 // GetMeResponse - current user info for a specific store context
 type GetMeResponse struct {
 	ID        string    `json:"id"`
+	UserID    string    `json:"userId"`
 	StoreID   string    `json:"storeId"`
 	Email     string    `json:"email"`
 	Name      *string   `json:"name"`
@@ -74,7 +78,11 @@ type SyncUserInput struct {
 
 // SyncUserOutput - output from sync service
 type SyncUserOutput struct {
+	UserID              string
 	ClerkUserID         string
+	Email               string
+	Name                *string
+	AvatarURL           *string
 	Memberships         []MembershipOutput
 	LastAccessedStoreID *string
 	State               string // "no_store" | "ready"
@@ -84,9 +92,9 @@ type SyncUserOutput struct {
 type MembershipOutput struct {
 	ID             string
 	StoreID        string
+	UserID         string
 	StoreName      string
 	StoreSlug      string
-	ClerkOrgID     string
 	Role           string
 	Status         string
 	Email          string
@@ -100,6 +108,7 @@ type MembershipOutput struct {
 // UserOutput - user info for a specific store context
 type UserOutput struct {
 	ID        string
+	UserID    string
 	StoreID   string
 	Email     string
 	Name      *string
@@ -112,10 +121,20 @@ type UserOutput struct {
 	UpdatedAt time.Time
 }
 
+// UserInfo - basic user info from users table
+type UserInfo struct {
+	ID        string
+	ClerkID   string
+	Email     string
+	Name      *string
+	AvatarURL *string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 // UpdateUserInput - input for updating user
 type UpdateUserInput struct {
 	ClerkUserID string
-	StoreID     string
 	Email       string
 	Name        string
 	AvatarURL   string
@@ -125,11 +144,22 @@ type UpdateUserInput struct {
 // Repository layer types
 // ============================================
 
-// MembershipRow - row from memberships table with store info
+// UserRow - row from users table
+type UserRow struct {
+	ID        string
+	ClerkID   string
+	Email     string
+	Name      *string
+	AvatarURL *string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// MembershipRow - row from memberships table with store and user info
 type MembershipRow struct {
 	ID             string
 	StoreID        string
-	ClerkUserID    string
+	UserID         string
 	Email          string
 	Name           *string
 	AvatarURL      *string
@@ -137,7 +167,6 @@ type MembershipRow struct {
 	Status         string
 	StoreName      string
 	StoreSlug      string
-	ClerkOrgID     string
 	LastAccessedAt *time.Time
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
@@ -145,11 +174,8 @@ type MembershipRow struct {
 
 // CreateMembershipParams - params for creating membership
 type CreateMembershipParams struct {
-	StoreID     string
-	ClerkUserID string
-	Email       string
-	Name        string
-	AvatarURL   string
-	Role        string
-	InvitedBy   *string
+	StoreID   string
+	UserID    string
+	Role      string
+	InvitedBy *string
 }

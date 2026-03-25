@@ -20,13 +20,14 @@ var (
 type Member struct {
 	id        vo.MemberID
 	storeID   vo.StoreID
+	userID    string // Internal user UUID
 	email     vo.Email
 	name      *string
 	avatarURL *string
 	role      vo.Role
 	status    MemberStatus
 	invitedBy *vo.MemberID
-	joinedAt  time.Time
+	joinedAt  *time.Time
 	invitedAt *time.Time
 }
 
@@ -34,14 +35,16 @@ type Member struct {
 func NewMember(
 	id vo.MemberID,
 	storeID vo.StoreID,
+	userID string,
 	email vo.Email,
 	role vo.Role,
 	status MemberStatus,
-	joinedAt time.Time,
+	joinedAt *time.Time,
 ) *Member {
 	return &Member{
 		id:       id,
 		storeID:  storeID,
+		userID:   userID,
 		email:    email,
 		role:     role,
 		status:   status,
@@ -53,18 +56,20 @@ func NewMember(
 func Reconstruct(
 	id vo.MemberID,
 	storeID vo.StoreID,
+	userID string,
 	email vo.Email,
 	name *string,
 	avatarURL *string,
 	role vo.Role,
 	status MemberStatus,
 	invitedBy *vo.MemberID,
-	joinedAt time.Time,
+	joinedAt *time.Time,
 	invitedAt *time.Time,
 ) *Member {
 	return &Member{
 		id:        id,
 		storeID:   storeID,
+		userID:    userID,
 		email:     email,
 		name:      name,
 		avatarURL: avatarURL,
@@ -80,16 +85,17 @@ func Reconstruct(
 // Getters (immutable access)
 // ============================================
 
-func (m *Member) ID() vo.MemberID       { return m.id }
-func (m *Member) StoreID() vo.StoreID   { return m.storeID }
-func (m *Member) Email() vo.Email       { return m.email }
-func (m *Member) Name() *string         { return m.name }
-func (m *Member) AvatarURL() *string    { return m.avatarURL }
-func (m *Member) Role() vo.Role         { return m.role }
-func (m *Member) Status() MemberStatus  { return m.status }
+func (m *Member) ID() vo.MemberID        { return m.id }
+func (m *Member) StoreID() vo.StoreID    { return m.storeID }
+func (m *Member) UserID() string         { return m.userID }
+func (m *Member) Email() vo.Email        { return m.email }
+func (m *Member) Name() *string          { return m.name }
+func (m *Member) AvatarURL() *string     { return m.avatarURL }
+func (m *Member) Role() vo.Role          { return m.role }
+func (m *Member) Status() MemberStatus   { return m.status }
 func (m *Member) InvitedBy() *vo.MemberID { return m.invitedBy }
-func (m *Member) JoinedAt() time.Time   { return m.joinedAt }
-func (m *Member) InvitedAt() *time.Time { return m.invitedAt }
+func (m *Member) JoinedAt() *time.Time   { return m.joinedAt }
+func (m *Member) InvitedAt() *time.Time  { return m.invitedAt }
 
 // ============================================
 // Business Rules

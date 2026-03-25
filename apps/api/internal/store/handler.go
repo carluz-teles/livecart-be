@@ -32,7 +32,7 @@ func (h *Handler) RegisterStoreScopedRoutes(router fiber.Router) {
 
 // Create godoc
 // @Summary      Create a new store
-// @Description  Creates a new store with Clerk organization and owner membership
+// @Description  Creates a new store with owner membership
 // @Tags         stores
 // @Accept       json
 // @Produce      json
@@ -58,35 +58,20 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		return httpx.ValidationError(c, err)
 	}
 
-	// Get user info from claims
-	claims := httpx.GetClaims(c)
-	email := ""
-	name := ""
-	avatarURL := ""
-	if claims != nil {
-		email = claims.Email
-		name = claims.FullName()
-		avatarURL = claims.ImageURL
-	}
-
 	output, err := h.service.Create(c.Context(), CreateStoreInput{
 		Name:        req.Name,
 		Slug:        req.Slug,
 		ClerkUserID: clerkUserID,
-		Email:       email,
-		UserName:    name,
-		AvatarURL:   avatarURL,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
 	return httpx.Created(c, CreateStoreResponse{
-		ID:         output.ID,
-		Name:       output.Name,
-		Slug:       output.Slug,
-		ClerkOrgID: output.ClerkOrgID,
-		CreatedAt:  output.CreatedAt,
+		ID:        output.ID,
+		Name:      output.Name,
+		Slug:      output.Slug,
+		CreatedAt: output.CreatedAt,
 	})
 }
 

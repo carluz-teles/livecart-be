@@ -3,107 +3,71 @@ package invitation
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/invitation/domain"
-	"livecart/apps/api/internal/store"
-	"livecart/apps/api/lib/clerk"
 	"livecart/apps/api/lib/config"
+	"livecart/apps/api/lib/email"
 	"livecart/apps/api/lib/httpx"
 	vo "livecart/apps/api/lib/valueobject"
 )
 
+// UserLookup interface to look up users
+type UserLookup interface {
+	GetUserByEmail(ctx context.Context, email string) (userID string, err error)
+	GetUserIDByClerkID(ctx context.Context, clerkUserID string) (userID string, err error)
+}
+
+// StoreLookup interface to look up store info
+type StoreLookup interface {
+	GetStoreNameByID(ctx context.Context, storeID string) (storeName string, err error)
+}
+
+// MemberLookup interface to look up member info
+type MemberLookup interface {
+	GetMemberNameByID(ctx context.Context, storeID, memberID string) (name string, err error)
+}
+
 type Service struct {
-	repo      *Repository
-	storeRepo *store.Repository
-	clerkSDK  *clerk.SDK
-	logger    *zap.Logger
+	repo         *Repository
+	emailer      *email.Client
+	userLookup   UserLookup
+	storeLookup  StoreLookup
+	memberLookup MemberLookup
+	logger       *zap.Logger
 }
 
-func NewService(repo *Repository, storeRepo *store.Repository, clerkSDK *clerk.SDK, logger *zap.Logger) *Service {
+func NewService(repo *Repository, emailer *email.Client, userLookup UserLookup, storeLookup StoreLookup, memberLookup MemberLookup, logger *zap.Logger) *Service {
 	return &Service{
-		repo:      repo,
-		storeRepo: storeRepo,
-		clerkSDK:  clerkSDK,
-		logger:    logger.Named("invitation"),
+		repo:         repo,
+		emailer:      emailer,
+		userLookup:   userLookup,
+		storeLookup:  storeLookup,
+		memberLookup: memberLookup,
+		logger:       logger.Named("invitation"),
 	}
 }
 
-// Create creates a new invitation for a user to join a store
-// If Clerk SDK is available and store has clerk_org_id, uses Clerk (emails sent automatically)
-// Otherwise falls back to local database (backward compatibility)
+// Create creates a new invitation and sends email via SendGrid
 func (s *Service) Create(ctx context.Context, input CreateInvitationInput) (*InvitationOutput, error) {
-	// Get store to check for clerk_org_id
-	storeData, err := s.storeRepo.GetByID(ctx, input.StoreID.String())
-	if err != nil {
-		return nil, fmt.Errorf("getting store: %w", err)
-	}
-
-	// If store has clerk_org_id and we have Clerk SDK, use Clerk
-	if storeData.ClerkOrgID != "" && s.clerkSDK != nil {
-		return s.createViaClerk(ctx, input, storeData.ClerkOrgID)
-	}
-
-	// Fallback to local database
-	return s.createLocal(ctx, input)
-}
-
-// createViaClerk creates invitation using Clerk SDK (email sent automatically)
-func (s *Service) createViaClerk(ctx context.Context, input CreateInvitationInput, clerkOrgID string) (*InvitationOutput, error) {
-	// Convert role to Clerk format
-	clerkRole := "org:member"
-	if input.Role.String() == "admin" {
-		clerkRole = "org:admin"
-	}
-
-	// Build redirect URL for accept page
-	redirectURL := fmt.Sprintf("%s/accept-invite", config.FrontendURL.StringOr("http://localhost:3000"))
-
-	// Create invitation via Clerk SDK (email sent automatically!)
-	inv, err := s.clerkSDK.InviteMember(ctx,
-		clerkOrgID,
-		input.Email.String(),
-		clerkRole,
-		"", // inviterUserID - we don't have the Clerk user ID here
-		redirectURL,
-	)
-	if err != nil {
-		s.logger.Error("failed to create clerk invitation",
-			zap.Error(err),
-			zap.String("org_id", clerkOrgID),
-			zap.String("email", input.Email.String()),
-		)
-		// Fallback to local if Clerk fails
-		return s.createLocal(ctx, input)
-	}
-
-	s.logger.Info("invitation created via Clerk",
-		zap.String("clerk_org_id", clerkOrgID),
-		zap.String("email", input.Email.String()),
-		zap.String("role", clerkRole),
-		zap.String("invitation_id", inv.ID),
-	)
-
-	return &InvitationOutput{
-		ID:        inv.ID,
-		StoreID:   input.StoreID.String(),
-		Email:     inv.EmailAddress,
-		Role:      input.Role.String(),
-		Token:     "", // Clerk manages tokens
-		Status:    inv.Status,
-		ExpiresAt: time.Now().Add(7 * 24 * time.Hour), // Default Clerk expiration
-		CreatedAt: time.Unix(inv.CreatedAt, 0),
-	}, nil
-}
-
-// createLocal creates invitation in local database (legacy flow)
-func (s *Service) createLocal(ctx context.Context, input CreateInvitationInput) (*InvitationOutput, error) {
 	// Check if invitation already exists
 	existing, err := s.repo.GetByEmail(ctx, input.StoreID, input.Email)
 	if err == nil && existing.IsPending() {
 		return nil, httpx.ErrConflict("invitation already exists for this email")
+	}
+
+	// Look up store name and inviter name for email template
+	storeName, err := s.storeLookup.GetStoreNameByID(ctx, input.StoreID.String())
+	if err != nil {
+		s.logger.Warn("could not look up store name", zap.Error(err))
+		storeName = "Store" // Fallback
+	}
+
+	inviterName, err := s.memberLookup.GetMemberNameByID(ctx, input.StoreID.String(), input.InviterID.String())
+	if err != nil {
+		s.logger.Warn("could not look up inviter name", zap.Error(err))
+		inviterName = "A team member" // Fallback
 	}
 
 	// Create new invitation via domain factory
@@ -117,7 +81,27 @@ func (s *Service) createLocal(ctx context.Context, input CreateInvitationInput) 
 		return nil, err
 	}
 
-	s.logger.Info("invitation created (local)",
+	// Send invitation email via SendGrid
+	acceptURL := fmt.Sprintf("%s/accept-invite?token=%s", config.FrontendURL.StringOr("http://localhost:3000"), inv.Token().String())
+
+	err = s.emailer.SendInvitation(ctx, email.InvitationEmailInput{
+		ToEmail:     input.Email.String(),
+		ToName:      "", // We don't have the invitee's name yet
+		StoreName:   storeName,
+		InviterName: inviterName,
+		Role:        input.Role.String(),
+		AcceptURL:   acceptURL,
+		ExpiresAt:   inv.ExpiresAt(),
+	})
+	if err != nil {
+		s.logger.Error("failed to send invitation email",
+			zap.Error(err),
+			zap.String("email", input.Email.String()),
+		)
+		// Don't fail the operation, invitation is created
+	}
+
+	s.logger.Info("invitation created",
 		zap.String("store_id", input.StoreID.String()),
 		zap.String("email", input.Email.String()),
 		zap.String("role", input.Role.String()),
@@ -149,51 +133,7 @@ func (s *Service) GetByToken(ctx context.Context, token string) (*InvitationDeta
 }
 
 // List returns all invitations for a store
-// If store has clerk_org_id, fetches from Clerk; otherwise from local database
 func (s *Service) List(ctx context.Context, storeID vo.StoreID) ([]InvitationOutput, error) {
-	// Get store to check for clerk_org_id
-	storeData, err := s.storeRepo.GetByID(ctx, storeID.String())
-	if err != nil {
-		return nil, fmt.Errorf("getting store: %w", err)
-	}
-
-	// If store has clerk_org_id and we have Clerk SDK, use Clerk
-	if storeData.ClerkOrgID != "" && s.clerkSDK != nil {
-		invList, err := s.clerkSDK.ListInvitations(ctx, storeData.ClerkOrgID)
-		if err != nil {
-			s.logger.Error("failed to list clerk invitations, falling back to local",
-				zap.Error(err),
-				zap.String("org_id", storeData.ClerkOrgID),
-			)
-			// Fallback to local
-			return s.listLocal(ctx, storeID)
-		}
-
-		result := make([]InvitationOutput, len(invList.OrganizationInvitations))
-		for i, inv := range invList.OrganizationInvitations {
-			role := "member"
-			if inv.Role == "org:admin" {
-				role = "admin"
-			}
-			result[i] = InvitationOutput{
-				ID:        inv.ID,
-				StoreID:   storeID.String(),
-				Email:     inv.EmailAddress,
-				Role:      role,
-				Status:    inv.Status,
-				ExpiresAt: time.Now().Add(7 * 24 * time.Hour), // Clerk default
-				CreatedAt: time.Unix(inv.CreatedAt, 0),
-			}
-		}
-		return result, nil
-	}
-
-	// Fallback to local database
-	return s.listLocal(ctx, storeID)
-}
-
-// listLocal lists invitations from local database
-func (s *Service) listLocal(ctx context.Context, storeID vo.StoreID) ([]InvitationOutput, error) {
 	invitations, err := s.repo.ListByStore(ctx, storeID)
 	if err != nil {
 		return nil, err
@@ -229,8 +169,15 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*Acc
 		}
 	}
 
-	// Add user to store
-	err = s.repo.AddUserToStore(ctx, inv.StoreID(), input.ClerkUserID, input.Email, input.Name, input.AvatarURL, inv.Role(), inv.InvitedBy())
+	// Look up internal user ID from Clerk user ID
+	userID, err := s.userLookup.GetUserIDByClerkID(ctx, input.ClerkUserID)
+	if err != nil {
+		s.logger.Error("failed to look up user", zap.Error(err), zap.String("clerk_user_id", input.ClerkUserID))
+		return nil, httpx.ErrUnprocessable("user not found - please sync your account first")
+	}
+
+	// Add user to store membership
+	err = s.repo.AddUserToStore(ctx, inv.StoreID(), userID, inv.Role(), inv.InvitedBy())
 	if err != nil {
 		return nil, err
 	}
@@ -261,40 +208,13 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*Acc
 }
 
 // Revoke revokes a pending invitation
-// If store has clerk_org_id, revokes via Clerk; otherwise via local database
 func (s *Service) Revoke(ctx context.Context, storeID vo.StoreID, invitationID vo.InvitationID) error {
-	// Get store to check for clerk_org_id
-	storeData, err := s.storeRepo.GetByID(ctx, storeID.String())
-	if err != nil {
-		return fmt.Errorf("getting store: %w", err)
-	}
-
-	// If store has clerk_org_id and we have Clerk SDK, use Clerk
-	if storeData.ClerkOrgID != "" && s.clerkSDK != nil {
-		_, err := s.clerkSDK.RevokeInvitation(ctx, storeData.ClerkOrgID, invitationID.String())
-		if err != nil {
-			s.logger.Error("failed to revoke clerk invitation, trying local",
-				zap.Error(err),
-				zap.String("org_id", storeData.ClerkOrgID),
-				zap.String("invitation_id", invitationID.String()),
-			)
-			// Try local as fallback (might be an old invitation)
-		} else {
-			s.logger.Info("invitation revoked via Clerk",
-				zap.String("clerk_org_id", storeData.ClerkOrgID),
-				zap.String("invitation_id", invitationID.String()),
-			)
-			return nil
-		}
-	}
-
-	// Revoke from local database
-	err = s.repo.Revoke(ctx, storeID, invitationID)
+	err := s.repo.Revoke(ctx, storeID, invitationID)
 	if err != nil {
 		return err
 	}
 
-	s.logger.Info("invitation revoked (local)",
+	s.logger.Info("invitation revoked",
 		zap.String("store_id", storeID.String()),
 		zap.String("invitation_id", invitationID.String()),
 	)

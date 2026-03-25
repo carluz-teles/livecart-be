@@ -21,10 +21,9 @@ func NewRepository(q *sqlc.Queries) *Repository {
 }
 
 func (r *Repository) Create(ctx context.Context, params CreateStoreParams) (StoreRow, error) {
-	row, err := r.q.CreateStoreWithClerkOrg(ctx, sqlc.CreateStoreWithClerkOrgParams{
-		Name:       params.Name,
-		Slug:       params.Slug,
-		ClerkOrgID: pgtype.Text{String: params.ClerkOrgID, Valid: params.ClerkOrgID != ""},
+	row, err := r.q.CreateStore(ctx, sqlc.CreateStoreParams{
+		Name: params.Name,
+		Slug: params.Slug,
 	})
 	if err != nil {
 		return StoreRow{}, fmt.Errorf("inserting store: %w", err)
@@ -94,12 +93,12 @@ func (r *Repository) UpdateCartSettings(ctx context.Context, params UpdateCartSe
 	}
 
 	row, err := r.q.UpdateStoreCartSettings(ctx, sqlc.UpdateStoreCartSettingsParams{
-		ID:                        uid,
-		CartEnabled:               params.Enabled,
-		CartExpirationMinutes:     int32(params.ExpirationMinutes),
-		CartReserveStock:          params.ReserveStock,
-		CartMaxItems:              int32(params.MaxItems),
-		CartMaxQuantityPerItem:    int32(params.MaxQuantityPerItem),
+		ID:                         uid,
+		CartEnabled:                params.Enabled,
+		CartExpirationMinutes:      int32(params.ExpirationMinutes),
+		CartReserveStock:           params.ReserveStock,
+		CartMaxItems:               int32(params.MaxItems),
+		CartMaxQuantityPerItem:     int32(params.MaxQuantityPerItem),
 		CartNotifyBeforeExpiration: params.NotifyBeforeExpiration,
 	})
 	if err != nil {
@@ -110,6 +109,24 @@ func (r *Repository) UpdateCartSettings(ctx context.Context, params UpdateCartSe
 	}
 
 	return toStoreRow(row), nil
+}
+
+func (r *Repository) GetByUserID(ctx context.Context, userID string) (*StoreRow, error) {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := r.q.GetStoreByUserID(ctx, uid)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.ErrNotFound("store not found")
+		}
+		return nil, fmt.Errorf("getting store by user id: %w", err)
+	}
+
+	out := toStoreRow(row)
+	return &out, nil
 }
 
 func toStoreRow(row sqlc.Store) StoreRow {
@@ -124,17 +141,11 @@ func toStoreRow(row sqlc.Store) StoreRow {
 		sms = &row.SmsNumber.String
 	}
 
-	var clerkOrgID string
-	if row.ClerkOrgID.Valid {
-		clerkOrgID = row.ClerkOrgID.String
-	}
-
 	return StoreRow{
 		ID:             row.ID.String(),
 		Name:           row.Name,
 		Slug:           row.Slug,
 		Active:         row.Active.Bool,
-		ClerkOrgID:     clerkOrgID,
 		WhatsappNumber: whatsapp,
 		EmailAddress:   email,
 		SMSNumber:      sms,
@@ -149,19 +160,6 @@ func toStoreRow(row sqlc.Store) StoreRow {
 		CreatedAt: row.CreatedAt.Time,
 		UpdatedAt: row.UpdatedAt.Time,
 	}
-}
-
-func (r *Repository) GetByClerkUserID(ctx context.Context, clerkUserID string) (*StoreRow, error) {
-	row, err := r.q.GetStoreByClerkUserID(ctx, pgtype.Text{String: clerkUserID, Valid: true})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.ErrNotFound("store not found")
-		}
-		return nil, fmt.Errorf("getting store by clerk user id: %w", err)
-	}
-
-	out := toStoreRow(row)
-	return &out, nil
 }
 
 func parseUUID(s string) (pgtype.UUID, error) {

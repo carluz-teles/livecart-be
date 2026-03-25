@@ -65,10 +65,8 @@ type ResendInvitationInput struct {
 
 type AcceptInvitationInput struct {
 	Token       string
-	ClerkUserID string
+	ClerkUserID string // Clerk user ID from JWT
 	Email       vo.Email
-	Name        string
-	AvatarURL   string
 }
 
 type InvitationOutput struct {
@@ -102,4 +100,10 @@ type AcceptInvitationOutput struct {
 	StoreName string
 	StoreSlug string
 	Role      string
+}
+
+type UserInfo struct {
+	Email     string
+	Name      string
+	AvatarURL string
 }

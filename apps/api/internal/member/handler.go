@@ -47,6 +47,7 @@ func (h *Handler) List(c *fiber.Ctx) error {
 	for i, m := range members {
 		resp[i] = MemberResponse{
 			ID:        m.ID,
+			UserID:    m.UserID,
 			Email:     m.Email,
 			Name:      m.Name,
 			AvatarURL: m.AvatarURL,
@@ -102,6 +103,7 @@ func (h *Handler) UpdateRole(c *fiber.Ctx) error {
 
 	return httpx.OK(c, MemberResponse{
 		ID:        member.ID,
+		UserID:    member.UserID,
 		Email:     member.Email,
 		Name:      member.Name,
 		AvatarURL: member.AvatarURL,

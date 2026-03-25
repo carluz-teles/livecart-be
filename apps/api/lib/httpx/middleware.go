@@ -63,18 +63,6 @@ func AuthMiddleware(clerkClient *clerk.Client) fiber.Handler {
 		c.Locals("email", claims.Email)
 		c.Locals("claims", claims)
 
-		// Extract store_id from public metadata if available
-		if storeID, ok := claims.Metadata["store_id"].(string); ok && storeID != "" {
-			c.Locals("store_id", storeID)
-		}
-
-		// Extract org claims from JWT (Clerk Organizations)
-		if claims.OrgID != "" {
-			c.Locals("org_id", claims.OrgID)
-			c.Locals("org_role", claims.OrgRole)
-			c.Locals("org_slug", claims.OrgSlug)
-		}
-
 		return c.Next()
 	}
 }
@@ -91,36 +79,6 @@ func RequireStore() fiber.Handler {
 	}
 }
 
-// RequireOrg middleware ensures the user has an active organization in their JWT
-func RequireOrg() fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		orgID := c.Locals("org_id")
-		if orgID == nil || orgID == "" {
-			return c.Status(fiber.StatusForbidden).JSON(Envelope{Error: "no organization selected"})
-		}
-		return c.Next()
-	}
-}
-
-// RequireOrgRole middleware checks if the user has one of the allowed roles in the organization
-// Roles should be in Clerk format: "org:admin", "org:member"
-func RequireOrgRole(allowedRoles ...string) fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		role := GetOrgRole(c)
-		if role == "" {
-			return c.Status(fiber.StatusForbidden).JSON(Envelope{Error: "no organization role"})
-		}
-
-		for _, allowed := range allowedRoles {
-			if role == allowed {
-				return c.Next()
-			}
-		}
-
-		return c.Status(fiber.StatusForbidden).JSON(Envelope{Error: "insufficient permissions"})
-	}
-}
-
 func SubscriptionMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		// TODO: check subscription status from DB
@@ -132,8 +90,8 @@ func SubscriptionMiddleware() fiber.Handler {
 // StoreAccessValidator validates if a user has access to a store
 type StoreAccessValidator interface {
 	ValidateStoreAccess(ctx context.Context, clerkUserID, storeID string) (bool, error)
-	// GetStoreAccessInfo returns storeUserID, role, error
-	GetStoreAccessInfo(ctx context.Context, clerkUserID, storeID string) (storeUserID string, role string, err error)
+	// GetStoreAccessInfo returns membershipID, role, userID (internal UUID), error
+	GetStoreAccessInfo(ctx context.Context, clerkUserID, storeID string) (membershipID string, role string, userID string, err error)
 }
 
 // StoreAccessMiddleware validates that the authenticated user has access to the store in the URL
@@ -144,31 +102,40 @@ func StoreAccessMiddleware(validator StoreAccessValidator) fiber.Handler {
 			return c.Status(fiber.StatusBadRequest).JSON(Envelope{Error: "store_id is required"})
 		}
 
-		userID := GetUserID(c)
-		if userID == "" {
+		clerkUserID := GetUserID(c) // This is Clerk user ID from JWT
+		if clerkUserID == "" {
 			return c.Status(fiber.StatusUnauthorized).JSON(Envelope{Error: "unauthorized"})
 		}
 
-		storeUserID, role, err := validator.GetStoreAccessInfo(c.Context(), userID, storeID)
+		membershipID, role, internalUserID, err := validator.GetStoreAccessInfo(c.Context(), clerkUserID, storeID)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(Envelope{Error: "failed to validate store access"})
 		}
 
-		if storeUserID == "" {
+		if membershipID == "" {
 			return c.Status(fiber.StatusForbidden).JSON(Envelope{Error: "you don't have access to this store"})
 		}
 
 		// Set store info in context for handlers
 		c.Locals("store_id", storeID)
-		c.Locals("store_user_id", storeUserID)
-		c.Locals("store_role", role)
+		c.Locals("store_user_id", membershipID)     // Membership ID for this store
+		c.Locals("store_role", role)                 // Role in this store
+		c.Locals("internal_user_id", internalUserID) // Internal user UUID
 		return c.Next()
 	}
 }
 
-// GetStoreUserID returns the store_user.id from context
+// GetStoreUserID returns the membership ID from context
 func GetStoreUserID(c *fiber.Ctx) string {
 	if v := c.Locals("store_user_id"); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+// GetInternalUserID returns the internal user UUID from context
+func GetInternalUserID(c *fiber.Ctx) string {
+	if v := c.Locals("internal_user_id"); v != nil {
 		return v.(string)
 	}
 	return ""
@@ -227,34 +194,4 @@ func GetClaims(c *fiber.Ctx) *clerk.Claims {
 		return v.(*clerk.Claims)
 	}
 	return nil
-}
-
-// GetOrgID returns the Clerk organization ID from context
-func GetOrgID(c *fiber.Ctx) string {
-	if v := c.Locals("org_id"); v != nil {
-		return v.(string)
-	}
-	return ""
-}
-
-// GetOrgRole returns the user's role in the organization from context
-// Returns "org:admin" or "org:member"
-func GetOrgRole(c *fiber.Ctx) string {
-	if v := c.Locals("org_role"); v != nil {
-		return v.(string)
-	}
-	return ""
-}
-
-// GetOrgSlug returns the organization slug from context
-func GetOrgSlug(c *fiber.Ctx) string {
-	if v := c.Locals("org_slug"); v != nil {
-		return v.(string)
-	}
-	return ""
-}
-
-// IsOrgAdmin checks if the user has admin role in the organization
-func IsOrgAdmin(c *fiber.Ctx) bool {
-	return GetOrgRole(c) == "org:admin"
 }

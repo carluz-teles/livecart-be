@@ -21,6 +21,7 @@ var (
 	ErrMissingClaims    = errors.New("missing required claims")
 	ErrJWKSFetch        = errors.New("failed to fetch JWKS")
 	ErrKeyNotFound      = errors.New("signing key not found")
+	ErrUserFetch        = errors.New("failed to fetch user from Clerk")
 )
 
 // Claims represents the JWT claims from Clerk
@@ -67,9 +68,23 @@ type JWKS struct {
 	Keys []JWK `json:"keys"`
 }
 
-// Client handles Clerk JWT validation
+// ClerkUser represents user data from Clerk API
+type ClerkUser struct {
+	ID             string `json:"id"`
+	PrimaryEmailID string `json:"primary_email_address_id"`
+	FirstName      string `json:"first_name"`
+	LastName       string `json:"last_name"`
+	ImageURL       string `json:"image_url"`
+	EmailAddresses []struct {
+		ID           string `json:"id"`
+		EmailAddress string `json:"email_address"`
+	} `json:"email_addresses"`
+}
+
+// Client handles Clerk JWT validation and API calls
 type Client struct {
 	jwksURL    string
+	secretKey  string
 	httpClient *http.Client
 	jwks       *JWKS
 	jwksMu     sync.RWMutex
@@ -79,18 +94,25 @@ type Client struct {
 
 // NewClient creates a new Clerk client
 // frontendAPI should be your Clerk Frontend API domain (e.g., "clerk.your-domain.com")
-func NewClient(frontendAPI string) *Client {
+// secretKey is optional - only needed if you want to use Clerk API (FetchUser)
+func NewClient(frontendAPI string, secretKey ...string) *Client {
 	// Remove protocol if provided
 	frontendAPI = strings.TrimPrefix(frontendAPI, "https://")
 	frontendAPI = strings.TrimPrefix(frontendAPI, "http://")
 
-	return &Client{
+	c := &Client{
 		jwksURL: fmt.Sprintf("https://%s/.well-known/jwks.json", frontendAPI),
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
 		cacheTTL: 1 * time.Hour,
 	}
+
+	if len(secretKey) > 0 {
+		c.secretKey = secretKey[0]
+	}
+
+	return c
 }
 
 // fetchJWKS fetches the JWKS from Clerk
@@ -232,4 +254,66 @@ func jwkToRSAPublicKey(jwk *JWK) (interface{}, error) {
 		N: new(big.Int).SetBytes(nBytes),
 		E: e,
 	}, nil
+}
+
+// FetchUser fetches user details from Clerk API
+// Requires secretKey to be set in NewClient
+func (c *Client) FetchUser(ctx context.Context, userID string) (*ClerkUser, error) {
+	if c.secretKey == "" {
+		return nil, fmt.Errorf("%w: secret key not configured", ErrUserFetch)
+	}
+
+	url := fmt.Sprintf("https://api.clerk.com/v1/users/%s", userID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUserFetch, err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.secretKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUserFetch, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%w: status %d", ErrUserFetch, resp.StatusCode)
+	}
+
+	var user ClerkUser
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUserFetch, err)
+	}
+
+	return &user, nil
+}
+
+// GetPrimaryEmail extracts the primary email from ClerkUser
+func (u *ClerkUser) GetPrimaryEmail() string {
+	for _, email := range u.EmailAddresses {
+		if email.ID == u.PrimaryEmailID {
+			return email.EmailAddress
+		}
+	}
+	// Fallback to first email if primary not found
+	if len(u.EmailAddresses) > 0 {
+		return u.EmailAddresses[0].EmailAddress
+	}
+	return ""
+}
+
+// FullName returns the user's full name
+func (u *ClerkUser) FullName() string {
+	if u.FirstName == "" && u.LastName == "" {
+		return ""
+	}
+	if u.FirstName == "" {
+		return u.LastName
+	}
+	if u.LastName == "" {
+		return u.FirstName
+	}
+	return u.FirstName + " " + u.LastName
 }

@@ -130,21 +130,31 @@ func (r *Repository) Delete(ctx context.Context, storeID vo.StoreID, id vo.Invit
 	return nil
 }
 
-func (r *Repository) AddUserToStore(ctx context.Context, storeID vo.StoreID, clerkUserID string, email vo.Email, name, avatarURL string, role vo.Role, invitedBy vo.MemberID) error {
-	_, err := r.q.CreateMembership(ctx, sqlc.CreateMembershipParams{
-		StoreID:     storeID.ToPgUUID(),
-		ClerkUserID: pgtype.Text{String: clerkUserID, Valid: true},
-		Email:       email.String(),
-		Name:        pgtype.Text{String: name, Valid: name != ""},
-		AvatarUrl:   pgtype.Text{String: avatarURL, Valid: avatarURL != ""},
-		Role:        role.String(),
-		InvitedBy:   invitedBy.ToPgUUID(),
-		InvitedAt:   pgtype.Timestamptz{Time: time.Now(), Valid: true},
+func (r *Repository) AddUserToStore(ctx context.Context, storeID vo.StoreID, userID string, role vo.Role, invitedBy vo.MemberID) error {
+	userUID, err := parseUUID(userID)
+	if err != nil {
+		return err
+	}
+
+	_, err = r.q.CreateMembership(ctx, sqlc.CreateMembershipParams{
+		StoreID:   storeID.ToPgUUID(),
+		UserID:    userUID,
+		Role:      role.String(),
+		InvitedBy: invitedBy.ToPgUUID(),
+		InvitedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
 	})
 	if err != nil {
 		return fmt.Errorf("adding user to store: %w", err)
 	}
 	return nil
+}
+
+func parseUUID(s string) (pgtype.UUID, error) {
+	var uid pgtype.UUID
+	if err := uid.Scan(s); err != nil {
+		return uid, httpx.ErrUnprocessable("invalid uuid")
+	}
+	return uid, nil
 }
 
 // toDomainInvitationFull converts GetInvitationByToken row to domain Invitation.

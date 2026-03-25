@@ -4,29 +4,37 @@ import (
 	"context"
 
 	"go.uber.org/zap"
-
-	"livecart/apps/api/lib/clerk"
 )
 
 type Service struct {
-	repo     *Repository
-	clerkSDK *clerk.SDK
-	logger   *zap.Logger
+	repo   *Repository
+	logger *zap.Logger
 }
 
-func NewService(repo *Repository, clerkSDK *clerk.SDK, logger *zap.Logger) *Service {
+func NewService(repo *Repository, logger *zap.Logger) *Service {
 	return &Service{
-		repo:     repo,
-		clerkSDK: clerkSDK,
-		logger:   logger.Named("user"),
+		repo:   repo,
+		logger: logger.Named("user"),
 	}
 }
 
-// SyncUser returns all memberships for a clerk user
-// Does NOT create store automatically - user must go through onboarding
+// SyncUser creates/updates user and returns all memberships
+// This is the main sync endpoint called on every login
 func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserOutput, error) {
-	// Get all memberships for this clerk user
-	memberships, err := s.repo.GetMembershipsByClerkID(ctx, input.ClerkUserID)
+	// Upsert user in users table (creates if doesn't exist, updates if exists)
+	user, err := s.repo.UpsertUser(ctx, input.ClerkUserID, input.Email, input.Name, input.AvatarURL)
+	if err != nil {
+		return nil, err
+	}
+
+	s.logger.Debug("user synced",
+		zap.String("user_id", user.ID),
+		zap.String("clerk_id", user.ClerkID),
+		zap.String("email", user.Email),
+	)
+
+	// Get all memberships for this user
+	memberships, err := s.repo.GetMembershipsByUserID(ctx, user.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -37,9 +45,9 @@ func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserO
 		membershipOutputs[i] = MembershipOutput{
 			ID:             m.ID,
 			StoreID:        m.StoreID,
+			UserID:         m.UserID,
 			StoreName:      m.StoreName,
 			StoreSlug:      m.StoreSlug,
-			ClerkOrgID:     m.ClerkOrgID,
 			Role:           m.Role,
 			Status:         m.Status,
 			Email:          m.Email,
@@ -62,16 +70,56 @@ func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserO
 	}
 
 	return &SyncUserOutput{
-		ClerkUserID:         input.ClerkUserID,
+		UserID:              user.ID,
+		ClerkUserID:         user.ClerkID,
+		Email:               user.Email,
+		Name:                user.Name,
+		AvatarURL:           user.AvatarURL,
 		Memberships:         membershipOutputs,
 		LastAccessedStoreID: lastAccessedStoreID,
 		State:               state,
 	}, nil
 }
 
-// GetMembership returns a specific membership for a clerk user and store
-func (s *Service) GetMembership(ctx context.Context, clerkUserID, storeID string) (*MembershipOutput, error) {
-	m, err := s.repo.GetMembershipByClerkIDAndStore(ctx, clerkUserID, storeID)
+// GetUserByClerkID returns a user by their Clerk ID
+func (s *Service) GetUserByClerkID(ctx context.Context, clerkID string) (*UserInfo, error) {
+	user, err := s.repo.GetUserByClerkID(ctx, clerkID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &UserInfo{
+		ID:        user.ID,
+		ClerkID:   user.ClerkID,
+		Email:     user.Email,
+		Name:      user.Name,
+		AvatarURL: user.AvatarURL,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+	}, nil
+}
+
+// GetUserByEmail returns a user by their email
+func (s *Service) GetUserByEmail(ctx context.Context, email string) (*UserInfo, error) {
+	user, err := s.repo.GetUserByEmail(ctx, email)
+	if err != nil {
+		return nil, err
+	}
+
+	return &UserInfo{
+		ID:        user.ID,
+		ClerkID:   user.ClerkID,
+		Email:     user.Email,
+		Name:      user.Name,
+		AvatarURL: user.AvatarURL,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+	}, nil
+}
+
+// GetMembership returns a specific membership for a user and store
+func (s *Service) GetMembership(ctx context.Context, userID, storeID string) (*MembershipOutput, error) {
+	m, err := s.repo.GetMembershipByUserIDAndStore(ctx, userID, storeID)
 	if err != nil {
 		return nil, err
 	}
@@ -79,9 +127,9 @@ func (s *Service) GetMembership(ctx context.Context, clerkUserID, storeID string
 	return &MembershipOutput{
 		ID:             m.ID,
 		StoreID:        m.StoreID,
+		UserID:         m.UserID,
 		StoreName:      m.StoreName,
 		StoreSlug:      m.StoreSlug,
-		ClerkOrgID:     m.ClerkOrgID,
 		Role:           m.Role,
 		Status:         m.Status,
 		Email:          m.Email,
@@ -94,13 +142,13 @@ func (s *Service) GetMembership(ctx context.Context, clerkUserID, storeID string
 }
 
 // SelectStore updates the last accessed store for a user
-func (s *Service) SelectStore(ctx context.Context, clerkUserID, storeID string) error {
-	return s.repo.UpdateMembershipLastAccessed(ctx, clerkUserID, storeID)
+func (s *Service) SelectStore(ctx context.Context, userID, storeID string) error {
+	return s.repo.UpdateMembershipLastAccessed(ctx, userID, storeID)
 }
 
-// GetUserStores returns all memberships (stores) for a clerk user
-func (s *Service) GetUserStores(ctx context.Context, clerkUserID string) ([]MembershipOutput, error) {
-	memberships, err := s.repo.GetMembershipsByClerkID(ctx, clerkUserID)
+// GetUserStores returns all memberships (stores) for a user
+func (s *Service) GetUserStores(ctx context.Context, userID string) ([]MembershipOutput, error) {
+	memberships, err := s.repo.GetMembershipsByUserID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -110,9 +158,9 @@ func (s *Service) GetUserStores(ctx context.Context, clerkUserID string) ([]Memb
 		outputs[i] = MembershipOutput{
 			ID:             m.ID,
 			StoreID:        m.StoreID,
+			UserID:         m.UserID,
 			StoreName:      m.StoreName,
 			StoreSlug:      m.StoreSlug,
-			ClerkOrgID:     m.ClerkOrgID,
 			Role:           m.Role,
 			Status:         m.Status,
 			Email:          m.Email,
@@ -127,19 +175,20 @@ func (s *Service) GetUserStores(ctx context.Context, clerkUserID string) ([]Memb
 	return outputs, nil
 }
 
-// UpdateUserAllStores updates user info across all memberships (for Clerk webhook)
-func (s *Service) UpdateUserAllStores(ctx context.Context, clerkUserID, email, name, avatarURL string) error {
-	return s.repo.UpdateMembershipAllStores(ctx, clerkUserID, email, name, avatarURL)
+// UpdateUser updates user info in the users table (for Clerk webhook)
+func (s *Service) UpdateUser(ctx context.Context, clerkID, email, name, avatarURL string) error {
+	_, err := s.repo.UpdateUser(ctx, clerkID, email, name, avatarURL)
+	return err
 }
 
-// DeleteUser removes all memberships for a clerk user (typically called from Clerk webhook)
-func (s *Service) DeleteUser(ctx context.Context, clerkUserID string) error {
-	return s.repo.DeleteMembershipsByClerkID(ctx, clerkUserID)
+// DeleteUser removes a user and all their memberships (typically called from Clerk webhook)
+func (s *Service) DeleteUser(ctx context.Context, clerkID string) error {
+	return s.repo.DeleteUser(ctx, clerkID)
 }
 
 // CreateOwnerMembership creates an owner membership for a new store
-func (s *Service) CreateOwnerMembership(ctx context.Context, storeID, clerkUserID, email, name, avatarURL string) (*MembershipOutput, error) {
-	m, err := s.repo.CreateOwnerMembership(ctx, storeID, clerkUserID, email, name, avatarURL)
+func (s *Service) CreateOwnerMembership(ctx context.Context, storeID, userID string) (*MembershipOutput, error) {
+	m, err := s.repo.CreateOwnerMembership(ctx, storeID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -147,11 +196,9 @@ func (s *Service) CreateOwnerMembership(ctx context.Context, storeID, clerkUserI
 	return &MembershipOutput{
 		ID:        m.ID,
 		StoreID:   m.StoreID,
+		UserID:    m.UserID,
 		Role:      m.Role,
 		Status:    m.Status,
-		Email:     m.Email,
-		Name:      m.Name,
-		AvatarURL: m.AvatarURL,
 		CreatedAt: m.CreatedAt,
 		UpdatedAt: m.UpdatedAt,
 	}, nil
@@ -159,8 +206,8 @@ func (s *Service) CreateOwnerMembership(ctx context.Context, storeID, clerkUserI
 
 // GetActiveStoreID returns the last accessed store ID for a user
 // Returns empty string if user has no memberships
-func (s *Service) GetActiveStoreID(ctx context.Context, clerkUserID string) (string, error) {
-	memberships, err := s.repo.GetMembershipsByClerkID(ctx, clerkUserID)
+func (s *Service) GetActiveStoreID(ctx context.Context, userID string) (string, error) {
+	memberships, err := s.repo.GetMembershipsByUserID(ctx, userID)
 	if err != nil {
 		return "", err
 	}
@@ -181,14 +228,21 @@ func (s *Service) CreateMembership(ctx context.Context, params CreateMembershipP
 	return &MembershipOutput{
 		ID:        m.ID,
 		StoreID:   m.StoreID,
+		UserID:    m.UserID,
 		Role:      m.Role,
 		Status:    m.Status,
-		Email:     m.Email,
-		Name:      m.Name,
-		AvatarURL: m.AvatarURL,
 		CreatedAt: m.CreatedAt,
 		UpdatedAt: m.UpdatedAt,
 	}, nil
+}
+
+// GetUserIDByClerkID is a helper to get user's internal UUID from Clerk ID
+func (s *Service) GetUserIDByClerkID(ctx context.Context, clerkID string) (string, error) {
+	user, err := s.repo.GetUserByClerkID(ctx, clerkID)
+	if err != nil {
+		return "", err
+	}
+	return user.ID, nil
 }
 
 // MembershipCreatorAdapter implements store.MembershipCreator interface
@@ -202,10 +256,34 @@ func NewMembershipCreatorAdapter(service *Service) *MembershipCreatorAdapter {
 }
 
 // CreateOwnerMembership implements store.MembershipCreator
-func (a *MembershipCreatorAdapter) CreateOwnerMembership(ctx context.Context, storeID, clerkUserID, email, name, avatarURL string) (string, error) {
-	m, err := a.service.CreateOwnerMembership(ctx, storeID, clerkUserID, email, name, avatarURL)
+func (a *MembershipCreatorAdapter) CreateOwnerMembership(ctx context.Context, storeID, userID string) (string, error) {
+	m, err := a.service.CreateOwnerMembership(ctx, storeID, userID)
 	if err != nil {
 		return "", err
 	}
 	return m.ID, nil
+}
+
+// UserLookupAdapter implements store.UserLookup and invitation.UserLookup interfaces
+type UserLookupAdapter struct {
+	service *Service
+}
+
+// NewUserLookupAdapter creates a new adapter for user lookup
+func NewUserLookupAdapter(service *Service) *UserLookupAdapter {
+	return &UserLookupAdapter{service: service}
+}
+
+// GetUserIDByClerkID implements store.UserLookup and invitation.UserLookup
+func (a *UserLookupAdapter) GetUserIDByClerkID(ctx context.Context, clerkUserID string) (string, error) {
+	return a.service.GetUserIDByClerkID(ctx, clerkUserID)
+}
+
+// GetUserByEmail implements invitation.UserLookup
+func (a *UserLookupAdapter) GetUserByEmail(ctx context.Context, email string) (string, error) {
+	user, err := a.service.GetUserByEmail(ctx, email)
+	if err != nil {
+		return "", err
+	}
+	return user.ID, nil
 }

@@ -1,113 +1,150 @@
--- name: GetMembershipsByClerkID :many
--- List all memberships (stores) for a clerk user
-SELECT
-  m.id,
-  m.store_id,
-  m.clerk_user_id,
-  m.email,
-  m.name,
-  m.avatar_url,
-  m.role,
-  m.status,
-  m.last_accessed_at,
-  m.created_at,
-  m.updated_at,
-  s.name as store_name,
-  s.slug as store_slug,
-  s.clerk_org_id
-FROM memberships m
-JOIN stores s ON s.id = m.store_id
-WHERE m.clerk_user_id = $1 AND m.status = 'active'
-ORDER BY m.last_accessed_at DESC NULLS LAST, m.created_at ASC;
+-- ============================================
+-- USER QUERIES (new users table)
+-- ============================================
 
--- name: GetMembershipByClerkIDAndStore :one
--- Get membership for a specific store
-SELECT
-  m.id,
-  m.store_id,
-  m.clerk_user_id,
-  m.email,
-  m.name,
-  m.avatar_url,
-  m.role,
-  m.status,
-  m.last_accessed_at,
-  m.created_at,
-  m.updated_at,
-  s.name as store_name,
-  s.slug as store_slug,
-  s.clerk_org_id
-FROM memberships m
-JOIN stores s ON s.id = m.store_id
-WHERE m.clerk_user_id = $1 AND m.store_id = $2;
+-- name: CreateUser :one
+-- Create a new user (from Clerk webhook or sync fallback)
+INSERT INTO users (clerk_id, email, name, avatar_url)
+VALUES ($1, $2, $3, $4)
+RETURNING id, clerk_id, email, name, avatar_url, created_at, updated_at;
 
--- name: CreateMembership :one
--- Create a membership (user joins a store)
-INSERT INTO memberships (store_id, clerk_user_id, email, name, avatar_url, role, status, invited_by, invited_at)
-VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8)
-RETURNING id, store_id, clerk_user_id, email, name, avatar_url, role, status, last_accessed_at, created_at, updated_at;
+-- name: GetUserByClerkID :one
+-- Get user by Clerk ID
+SELECT id, clerk_id, email, name, avatar_url, created_at, updated_at
+FROM users
+WHERE clerk_id = $1;
 
--- name: CreateOwnerMembership :one
--- Create owner membership when creating a new store
-INSERT INTO memberships (store_id, clerk_user_id, email, name, avatar_url, role, status)
-VALUES ($1, $2, $3, $4, $5, 'owner', 'active')
-RETURNING id, store_id, clerk_user_id, email, name, avatar_url, role, status, last_accessed_at, created_at, updated_at;
+-- name: GetUserByEmail :one
+-- Get user by email
+SELECT id, clerk_id, email, name, avatar_url, created_at, updated_at
+FROM users
+WHERE email = $1;
 
--- name: UpdateMembershipLastAccessed :exec
--- Update last accessed timestamp for a membership
-UPDATE memberships
-SET last_accessed_at = now()
-WHERE clerk_user_id = $1 AND store_id = $2;
+-- name: GetUserByID :one
+-- Get user by ID
+SELECT id, clerk_id, email, name, avatar_url, created_at, updated_at
+FROM users
+WHERE id = $1;
 
--- name: UpdateMembership :one
-UPDATE memberships
-SET
-  email = $3,
-  name = $4,
-  avatar_url = $5,
-  updated_at = now()
-WHERE clerk_user_id = $1 AND store_id = $2
-RETURNING id, store_id, clerk_user_id, email, name, avatar_url, role, status, last_accessed_at, created_at, updated_at;
-
--- name: UpdateMembershipRole :one
-UPDATE memberships
-SET role = $3, updated_at = now()
-WHERE store_id = $1 AND id = $2
-RETURNING id, store_id, clerk_user_id, email, name, avatar_url, role, status, last_accessed_at, created_at, updated_at;
-
--- name: DeleteMembership :exec
-DELETE FROM memberships WHERE store_id = $1 AND id = $2;
-
--- name: UpdateMembershipAllStores :exec
--- Update user info across all memberships (for Clerk webhook)
-UPDATE memberships
+-- name: UpdateUser :one
+-- Update user info (from Clerk webhook)
+UPDATE users
 SET
   email = $2,
   name = $3,
   avatar_url = $4,
   updated_at = now()
-WHERE clerk_user_id = $1;
+WHERE clerk_id = $1
+RETURNING id, clerk_id, email, name, avatar_url, created_at, updated_at;
 
--- name: DeleteMembershipsByClerkID :exec
--- Delete all memberships for a clerk user (when Clerk user is deleted)
-DELETE FROM memberships WHERE clerk_user_id = $1;
+-- name: DeleteUser :exec
+-- Delete a user (cascades to memberships)
+DELETE FROM users WHERE clerk_id = $1;
 
--- name: GetStoreMembers :many
--- List all members of a store
+-- name: UpsertUser :one
+-- Create or update user (for sync endpoint fallback)
+-- Only updates email/name/avatar if the new value is not empty
+INSERT INTO users (clerk_id, email, name, avatar_url)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (clerk_id) DO UPDATE SET
+  email = CASE WHEN $2 = '' THEN users.email ELSE $2 END,
+  name = CASE WHEN $3 IS NULL THEN users.name ELSE $3 END,
+  avatar_url = CASE WHEN $4 IS NULL THEN users.avatar_url ELSE $4 END,
+  updated_at = now()
+RETURNING id, clerk_id, email, name, avatar_url, created_at, updated_at;
+
+-- ============================================
+-- MEMBERSHIP QUERIES
+-- ============================================
+
+-- name: GetMembershipsByUserID :many
+-- List all memberships (stores) for a user
 SELECT
   m.id,
   m.store_id,
-  m.clerk_user_id,
-  m.email,
-  m.name,
-  m.avatar_url,
+  m.user_id,
+  m.role,
+  m.status,
+  m.last_accessed_at,
+  m.created_at,
+  m.updated_at,
+  u.email,
+  u.name,
+  u.avatar_url,
+  s.name as store_name,
+  s.slug as store_slug
+FROM memberships m
+JOIN users u ON u.id = m.user_id
+JOIN stores s ON s.id = m.store_id
+WHERE m.user_id = $1 AND m.status = 'active'
+ORDER BY m.last_accessed_at DESC NULLS LAST, m.created_at ASC;
+
+-- name: GetMembershipByUserIDAndStore :one
+-- Get membership for a specific store
+SELECT
+  m.id,
+  m.store_id,
+  m.user_id,
+  m.role,
+  m.status,
+  m.last_accessed_at,
+  m.created_at,
+  m.updated_at,
+  u.email,
+  u.name,
+  u.avatar_url,
+  s.name as store_name,
+  s.slug as store_slug
+FROM memberships m
+JOIN users u ON u.id = m.user_id
+JOIN stores s ON s.id = m.store_id
+WHERE m.user_id = $1 AND m.store_id = $2;
+
+-- name: CreateMembership :one
+-- Create a membership (user joins a store)
+INSERT INTO memberships (store_id, user_id, role, status, invited_by, invited_at)
+VALUES ($1, $2, $3, 'active', $4, $5)
+RETURNING id, store_id, user_id, role, status, invited_by, invited_at, last_accessed_at, created_at, updated_at;
+
+-- name: CreateOwnerMembership :one
+-- Create owner membership when creating a new store
+INSERT INTO memberships (store_id, user_id, role, status)
+VALUES ($1, $2, 'owner', 'active')
+RETURNING id, store_id, user_id, role, status, last_accessed_at, created_at, updated_at;
+
+-- name: UpdateMembershipLastAccessed :exec
+-- Update last accessed timestamp for a membership
+UPDATE memberships
+SET last_accessed_at = now()
+WHERE user_id = $1 AND store_id = $2;
+
+-- name: UpdateMembershipRole :one
+UPDATE memberships
+SET role = $3, updated_at = now()
+WHERE store_id = $1 AND id = $2
+RETURNING id, store_id, user_id, role, status, last_accessed_at, created_at, updated_at;
+
+-- name: DeleteMembership :exec
+DELETE FROM memberships WHERE store_id = $1 AND id = $2;
+
+-- name: GetStoreMembers :many
+-- List all members of a store with user info
+SELECT
+  m.id,
+  m.store_id,
+  m.user_id,
   m.role,
   m.status,
   m.invited_by,
   m.invited_at,
   m.created_at,
-  m.updated_at
+  m.updated_at,
+  u.clerk_id,
+  u.email,
+  u.name,
+  u.avatar_url
 FROM memberships m
+JOIN users u ON u.id = m.user_id
 WHERE m.store_id = $1
 ORDER BY
   CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
@@ -122,7 +159,38 @@ SELECT
   m.id,
   m.role
 FROM memberships m
-WHERE m.clerk_user_id = $1 AND m.store_id = $2 AND m.status = 'active';
+WHERE m.user_id = $1 AND m.store_id = $2 AND m.status = 'active';
+
+-- name: ValidateStoreAccessByClerkID :one
+-- Check if user has access to a store using Clerk ID (for middleware)
+SELECT
+  m.id,
+  m.role,
+  u.id as user_id
+FROM memberships m
+JOIN users u ON u.id = m.user_id
+WHERE u.clerk_id = $1 AND m.store_id = $2 AND m.status = 'active';
+
+-- name: GetMembershipByID :one
+-- Get membership by ID with user info
+SELECT
+  m.id,
+  m.store_id,
+  m.user_id,
+  m.role,
+  m.status,
+  m.invited_by,
+  m.invited_at,
+  m.last_accessed_at,
+  m.created_at,
+  m.updated_at,
+  u.clerk_id,
+  u.email,
+  u.name,
+  u.avatar_url
+FROM memberships m
+JOIN users u ON u.id = m.user_id
+WHERE m.id = $1;
 
 -- ============================================
 -- INVITATION QUERIES
@@ -132,6 +200,24 @@ WHERE m.clerk_user_id = $1 AND m.store_id = $2 AND m.status = 'active';
 INSERT INTO store_invitations (store_id, email, role, token, invited_by, expires_at)
 VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id, store_id, email, role, token, invited_by, status, expires_at, created_at;
+
+-- name: GetInvitationByID :one
+SELECT
+  si.id,
+  si.store_id,
+  si.email,
+  si.role,
+  si.token,
+  si.invited_by,
+  si.status,
+  si.expires_at,
+  si.accepted_at,
+  si.created_at,
+  s.name as store_name,
+  s.slug as store_slug
+FROM store_invitations si
+JOIN stores s ON s.id = si.store_id
+WHERE si.store_id = $1 AND si.id = $2;
 
 -- name: GetInvitationByToken :one
 SELECT
@@ -147,10 +233,11 @@ SELECT
   si.created_at,
   s.name as store_name,
   s.slug as store_slug,
-  inviter.name as inviter_name
+  inviter_user.name as inviter_name
 FROM store_invitations si
 JOIN stores s ON s.id = si.store_id
 JOIN memberships inviter ON inviter.id = si.invited_by
+JOIN users inviter_user ON inviter_user.id = inviter.user_id
 WHERE si.token = $1;
 
 -- name: GetInvitationByEmail :one
@@ -180,9 +267,10 @@ SELECT
   si.expires_at,
   si.accepted_at,
   si.created_at,
-  inviter.name as inviter_name
+  inviter_user.name as inviter_name
 FROM store_invitations si
 JOIN memberships inviter ON inviter.id = si.invited_by
+JOIN users inviter_user ON inviter_user.id = inviter.user_id
 WHERE si.store_id = $1
 ORDER BY si.created_at DESC;
 

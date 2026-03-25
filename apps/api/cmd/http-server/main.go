@@ -24,6 +24,7 @@ import (
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/crypto"
 	"livecart/apps/api/lib/database"
+	"livecart/apps/api/lib/email"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/idempotency"
 	"livecart/apps/api/lib/logger"
@@ -102,9 +103,11 @@ func main() {
 	validate := validator.New()
 	registerCustomValidators(validate)
 	clerkClient := clerk.NewClient(clerkFrontendAPI)
-	clerkSDK := clerk.NewSDK() // For Clerk Organizations API
 
-	app := newApp(log, pool, queries, validate, clerkClient, clerkSDK)
+	// Email client for sending invitation emails (reads from env vars)
+	emailClient := email.NewClient(log)
+
+	app := newApp(log, pool, queries, validate, clerkClient, emailClient)
 
 	go func() {
 		if err := app.Listen(":" + port); err != nil {
@@ -135,7 +138,7 @@ func registerCustomValidators(validate *validator.Validate) {
 	})
 }
 
-func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate *validator.Validate, clerkClient *clerk.Client, clerkSDK *clerk.SDK) *fiber.App {
+func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate *validator.Validate, clerkClient *clerk.Client, emailClient *email.Client) *fiber.App {
 	app := fiber.New(fiber.Config{
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			return httpx.HandleServiceError(c, err)
@@ -156,7 +159,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	// User repository and service (shared between webhook and API handlers)
 	userRepo := user.NewRepository(queries)
-	userSvc := user.NewService(userRepo, clerkSDK, log)
+	userSvc := user.NewService(userRepo, log)
 
 	// Integration Layer setup
 	var integrationSvc *integration.Service
@@ -277,7 +280,8 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// Store routes (user's own store management)
 	storeRepo := store.NewRepository(queries)
 	membershipCreator := user.NewMembershipCreatorAdapter(userSvc)
-	storeSvc := store.NewService(storeRepo, clerkSDK, membershipCreator, log)
+	userLookup := user.NewUserLookupAdapter(userSvc)
+	storeSvc := store.NewService(storeRepo, membershipCreator, userLookup, log)
 	storeHandler := store.NewHandler(storeSvc, validate)
 	storeHandler.RegisterRoutes(api)
 
@@ -319,22 +323,28 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		integrationHandler.RegisterRoutes(storeScoped)
 	}
 
+	// Member routes (store-scoped)
+	memberRepo := member.NewRepository(queries)
+	memberSvc := member.NewService(memberRepo, log)
+	memberHandler := member.NewHandler(memberSvc, validate)
+	memberHandler.RegisterRoutes(storeScoped)
+
 	// Invitation routes
 	invitationRepo := invitation.NewRepository(queries)
-	invitationSvc := invitation.NewService(invitationRepo, storeRepo, clerkSDK, log)
+	storeLookup := store.NewStoreLookupAdapter(storeSvc)
+	memberLookup := member.NewMemberLookupAdapter(memberRepo)
+	invitationSvc := invitation.NewService(invitationRepo, emailClient, userLookup, storeLookup, memberLookup, log)
 	invitationHandler := invitation.NewHandler(invitationSvc, validate)
 
-	// Public invitation routes (viewing invitation by token, accepting)
-	invitationHandler.RegisterPublicRoutes(api)
+	// Public invitation routes (viewing invitation by token)
+	// Using /api/public prefix to avoid auth middleware on /api/v1
+	app.Get("/api/public/invitations/token/:token", invitationHandler.GetByToken)
+
+	// Accept invitation route (requires auth but not store-scoped)
+	invitationHandler.RegisterAcceptRoute(api)
 
 	// Store-scoped invitation routes (create, list, revoke)
 	invitationHandler.RegisterRoutes(storeScoped)
-
-	// Member routes (store-scoped)
-	memberRepo := member.NewRepository(queries)
-	memberSvc := member.NewService(memberRepo, storeRepo, clerkSDK, log)
-	memberHandler := member.NewHandler(memberSvc, validate)
-	memberHandler.RegisterRoutes(storeScoped)
 
 	return app
 }

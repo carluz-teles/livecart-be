@@ -6,34 +6,45 @@ import (
 
 	"go.uber.org/zap"
 
-	"livecart/apps/api/lib/clerk"
 	"livecart/apps/api/lib/httpx"
 )
 
 // MembershipCreator interface to avoid circular dependency with user package
 type MembershipCreator interface {
-	CreateOwnerMembership(ctx context.Context, storeID, clerkUserID, email, name, avatarURL string) (membershipID string, err error)
+	CreateOwnerMembership(ctx context.Context, storeID, userID string) (membershipID string, err error)
+}
+
+// UserLookup interface to look up users by Clerk ID
+type UserLookup interface {
+	GetUserIDByClerkID(ctx context.Context, clerkUserID string) (userID string, err error)
 }
 
 type Service struct {
 	repo              *Repository
-	clerkSDK          *clerk.SDK
 	membershipCreator MembershipCreator
+	userLookup        UserLookup
 	logger            *zap.Logger
 }
 
-func NewService(repo *Repository, clerkSDK *clerk.SDK, membershipCreator MembershipCreator, logger *zap.Logger) *Service {
+func NewService(repo *Repository, membershipCreator MembershipCreator, userLookup UserLookup, logger *zap.Logger) *Service {
 	return &Service{
 		repo:              repo,
-		clerkSDK:          clerkSDK,
 		membershipCreator: membershipCreator,
+		userLookup:        userLookup,
 		logger:            logger.Named("store"),
 	}
 }
 
-// Create creates a new store with Clerk organization and owner membership
+// Create creates a new store and owner membership
 func (s *Service) Create(ctx context.Context, input CreateStoreInput) (CreateStoreOutput, error) {
-	// 1. Check slug uniqueness
+	// 1. Look up internal user ID from Clerk user ID
+	userID, err := s.userLookup.GetUserIDByClerkID(ctx, input.ClerkUserID)
+	if err != nil {
+		s.logger.Error("failed to look up user", zap.Error(err), zap.String("clerk_user_id", input.ClerkUserID))
+		return CreateStoreOutput{}, httpx.ErrUnprocessable("user not found - please sync your account first")
+	}
+
+	// 2. Check slug uniqueness
 	existing, err := s.repo.GetBySlug(ctx, input.Slug)
 	if err != nil && !httpx.IsNotFound(err) {
 		return CreateStoreOutput{}, fmt.Errorf("checking slug uniqueness: %w", err)
@@ -42,51 +53,33 @@ func (s *Service) Create(ctx context.Context, input CreateStoreInput) (CreateSto
 		return CreateStoreOutput{}, httpx.ErrConflict("slug already in use")
 	}
 
-	// 2. Create Clerk organization
-	clerkOrg, err := s.clerkSDK.CreateOrganization(ctx, input.Name, input.Slug, input.ClerkUserID)
-	if err != nil {
-		s.logger.Error("failed to create clerk organization", zap.Error(err), zap.String("slug", input.Slug))
-		return CreateStoreOutput{}, fmt.Errorf("creating clerk organization: %w", err)
-	}
-
-	// 3. Create store with clerk_org_id
+	// 3. Create store
 	storeRow, err := s.repo.Create(ctx, CreateStoreParams{
-		Name:       input.Name,
-		Slug:       input.Slug,
-		ClerkOrgID: clerkOrg.ID,
+		Name: input.Name,
+		Slug: input.Slug,
 	})
 	if err != nil {
-		// TODO: Consider rolling back Clerk org creation
-		s.logger.Error("failed to create store", zap.Error(err), zap.String("clerk_org_id", clerkOrg.ID))
+		s.logger.Error("failed to create store", zap.Error(err), zap.String("slug", input.Slug))
 		return CreateStoreOutput{}, fmt.Errorf("creating store: %w", err)
 	}
 
 	// 4. Create owner membership
-	membershipID, err := s.membershipCreator.CreateOwnerMembership(
-		ctx,
-		storeRow.ID,
-		input.ClerkUserID,
-		input.Email,
-		input.UserName,
-		input.AvatarURL,
-	)
+	membershipID, err := s.membershipCreator.CreateOwnerMembership(ctx, storeRow.ID, userID)
 	if err != nil {
-		// TODO: Consider rolling back store creation
 		s.logger.Error("failed to create owner membership", zap.Error(err), zap.String("store_id", storeRow.ID))
 		return CreateStoreOutput{}, fmt.Errorf("creating owner membership: %w", err)
 	}
 
 	s.logger.Info("store created successfully",
 		zap.String("store_id", storeRow.ID),
-		zap.String("clerk_org_id", clerkOrg.ID),
 		zap.String("membership_id", membershipID),
+		zap.String("user_id", userID),
 	)
 
 	return CreateStoreOutput{
 		ID:           storeRow.ID,
 		Name:         storeRow.Name,
 		Slug:         storeRow.Slug,
-		ClerkOrgID:   clerkOrg.ID,
 		MembershipID: membershipID,
 		CreatedAt:    storeRow.CreatedAt,
 	}, nil
@@ -134,7 +127,13 @@ func (s *Service) UpdateCartSettings(ctx context.Context, input UpdateCartSettin
 }
 
 func (s *Service) GetByClerkUserID(ctx context.Context, clerkUserID string) (StoreOutput, error) {
-	row, err := s.repo.GetByClerkUserID(ctx, clerkUserID)
+	// Look up internal user ID
+	userID, err := s.userLookup.GetUserIDByClerkID(ctx, clerkUserID)
+	if err != nil {
+		return StoreOutput{}, httpx.ErrNotFound("user not found")
+	}
+
+	row, err := s.repo.GetByUserID(ctx, userID)
 	if err != nil {
 		return StoreOutput{}, err
 	}
@@ -154,4 +153,23 @@ func toStoreOutput(row StoreRow) StoreOutput {
 		CartSettings:   row.CartSettings,
 		CreatedAt:      row.CreatedAt,
 	}
+}
+
+// StoreLookupAdapter implements invitation.StoreLookup interface
+type StoreLookupAdapter struct {
+	service *Service
+}
+
+// NewStoreLookupAdapter creates a new adapter for store lookup
+func NewStoreLookupAdapter(service *Service) *StoreLookupAdapter {
+	return &StoreLookupAdapter{service: service}
+}
+
+// GetStoreNameByID implements invitation.StoreLookup
+func (a *StoreLookupAdapter) GetStoreNameByID(ctx context.Context, storeID string) (string, error) {
+	store, err := a.service.GetByID(ctx, storeID)
+	if err != nil {
+		return "", err
+	}
+	return store.Name, nil
 }

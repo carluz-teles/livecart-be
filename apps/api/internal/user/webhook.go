@@ -73,6 +73,8 @@ func (h *WebhookHandler) HandleClerkWebhook(c *fiber.Ctx) error {
 	}
 
 	switch payload.Type {
+	case "user.created":
+		return h.handleUserCreated(c, payload.Data)
 	case "user.updated":
 		return h.handleUserUpdated(c, payload.Data)
 	case "user.deleted":
@@ -81,6 +83,27 @@ func (h *WebhookHandler) HandleClerkWebhook(c *fiber.Ctx) error {
 		// Ignore other events
 		return httpx.OK(c, fiber.Map{"message": "event ignored"})
 	}
+}
+
+func (h *WebhookHandler) handleUserCreated(c *fiber.Ctx, data json.RawMessage) error {
+	var userData ClerkUserData
+	if err := json.Unmarshal(data, &userData); err != nil {
+		return httpx.BadRequest(c, "invalid user data")
+	}
+
+	email := getPrimaryEmail(userData)
+	name := ""
+	if userData.FirstName != "" || userData.LastName != "" {
+		name = strings.TrimSpace(userData.FirstName + " " + userData.LastName)
+	}
+
+	// Upsert user - will create if doesn't exist
+	_, err := h.service.repo.UpsertUser(c.Context(), userData.ID, email, name, userData.ImageURL)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, fiber.Map{"message": "user created"})
 }
 
 func (h *WebhookHandler) handleUserUpdated(c *fiber.Ctx, data json.RawMessage) error {
@@ -95,8 +118,17 @@ func (h *WebhookHandler) handleUserUpdated(c *fiber.Ctx, data json.RawMessage) e
 		name = strings.TrimSpace(userData.FirstName + " " + userData.LastName)
 	}
 
-	err := h.service.UpdateUserAllStores(c.Context(), userData.ID, email, name, userData.ImageURL)
+	// Update user in users table
+	err := h.service.UpdateUser(c.Context(), userData.ID, email, name, userData.ImageURL)
 	if err != nil {
+		// If user not found, create it (webhook ordering issue)
+		if httpx.IsNotFound(err) {
+			_, createErr := h.service.repo.UpsertUser(c.Context(), userData.ID, email, name, userData.ImageURL)
+			if createErr != nil {
+				return httpx.HandleServiceError(c, createErr)
+			}
+			return httpx.OK(c, fiber.Map{"message": "user created (from update)"})
+		}
 		return httpx.HandleServiceError(c, err)
 	}
 

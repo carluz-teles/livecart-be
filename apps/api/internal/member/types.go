@@ -8,12 +8,13 @@ import "time"
 
 type MemberResponse struct {
 	ID        string     `json:"id"`
+	UserID    string     `json:"userId"`
 	Email     string     `json:"email"`
 	Name      *string    `json:"name"`
 	AvatarURL *string    `json:"avatarUrl"`
 	Role      string     `json:"role"`
 	Status    string     `json:"status"`
-	JoinedAt  time.Time  `json:"joinedAt"`
+	JoinedAt  *time.Time `json:"joinedAt,omitempty"`
 	InvitedAt *time.Time `json:"invitedAt,omitempty"`
 }
 
@@ -31,12 +32,13 @@ type UpdateMemberRoleRequest struct {
 
 type MemberOutput struct {
 	ID        string
+	UserID    string
 	Email     string
 	Name      *string
 	AvatarURL *string
 	Role      string
 	Status    string
-	JoinedAt  time.Time
+	JoinedAt  *time.Time
 	InvitedAt *time.Time
 }
 

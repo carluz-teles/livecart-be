@@ -25,7 +25,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 
 // SyncUser godoc
 // @Summary      Sync user on login
-// @Description  Returns all memberships for the authenticated user. Does NOT create stores automatically.
+// @Description  Creates/updates user and returns all memberships for the authenticated user. Does NOT create stores automatically.
 // @Tags         users
 // @Accept       json
 // @Produce      json
@@ -67,7 +67,6 @@ func (h *Handler) SyncUser(c *fiber.Ctx) error {
 			StoreID:        m.StoreID,
 			StoreName:      m.StoreName,
 			StoreSlug:      m.StoreSlug,
-			ClerkOrgID:     m.ClerkOrgID,
 			Role:           m.Role,
 			Status:         m.Status,
 			Email:          m.Email,
@@ -79,7 +78,11 @@ func (h *Handler) SyncUser(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, SyncUserResponse{
+		UserID:              output.UserID,
 		ClerkUserID:         output.ClerkUserID,
+		Email:               output.Email,
+		Name:                output.Name,
+		AvatarURL:           output.AvatarURL,
 		Memberships:         memberships,
 		LastAccessedStoreID: output.LastAccessedStoreID,
 		State:               output.State,
@@ -101,7 +104,17 @@ func (h *Handler) GetMyStores(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(httpx.Envelope{Error: "unauthorized"})
 	}
 
-	stores, err := h.service.GetUserStores(c.Context(), clerkUserID)
+	// Get user ID from clerk ID
+	userID, err := h.service.GetUserIDByClerkID(c.Context(), clerkUserID)
+	if err != nil {
+		// If user not found, return empty list
+		if httpx.IsNotFound(err) {
+			return httpx.OK(c, GetUserStoresResponse{Stores: []MembershipResponse{}})
+		}
+		return httpx.HandleServiceError(c, err)
+	}
+
+	stores, err := h.service.GetUserStores(c.Context(), userID)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
@@ -113,7 +126,6 @@ func (h *Handler) GetMyStores(c *fiber.Ctx) error {
 			StoreID:        m.StoreID,
 			StoreName:      m.StoreName,
 			StoreSlug:      m.StoreSlug,
-			ClerkOrgID:     m.ClerkOrgID,
 			Role:           m.Role,
 			Status:         m.Status,
 			Email:          m.Email,
@@ -154,7 +166,13 @@ func (h *Handler) SelectStore(c *fiber.Ctx) error {
 		return httpx.ValidationError(c, err)
 	}
 
-	err := h.service.SelectStore(c.Context(), clerkUserID, req.StoreID)
+	// Get user ID from clerk ID
+	userID, err := h.service.GetUserIDByClerkID(c.Context(), clerkUserID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	err = h.service.SelectStore(c.Context(), userID, req.StoreID)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
@@ -184,13 +202,20 @@ func (h *Handler) GetMe(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusForbidden).JSON(httpx.Envelope{Error: "no store context"})
 	}
 
-	m, err := h.service.GetMembership(c.Context(), clerkUserID, storeID)
+	// Get user ID from clerk ID
+	userID, err := h.service.GetUserIDByClerkID(c.Context(), clerkUserID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	m, err := h.service.GetMembership(c.Context(), userID, storeID)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
 	return httpx.OK(c, GetMeResponse{
 		ID:        m.ID,
+		UserID:    m.UserID,
 		StoreID:   m.StoreID,
 		Email:     m.Email,
 		Name:      m.Name,

@@ -26,10 +26,15 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Delete("/:id", h.Revoke)
 }
 
-// RegisterPublicRoutes registers public invitation routes (no auth required for viewing)
+// RegisterPublicRoutes registers public invitation routes (no auth required)
 func (h *Handler) RegisterPublicRoutes(router fiber.Router) {
 	g := router.Group("/invitations")
 	g.Get("/token/:token", h.GetByToken)
+}
+
+// RegisterAcceptRoute registers the accept invitation route (requires auth)
+func (h *Handler) RegisterAcceptRoute(router fiber.Router) {
+	g := router.Group("/invitations")
 	g.Post("/accept", h.Accept)
 }
 
@@ -280,27 +285,26 @@ func (h *Handler) Accept(c *fiber.Ctx) error {
 		return httpx.ValidationError(c, err)
 	}
 
+	// Get email from claims
 	claims := httpx.GetClaims(c)
 	emailStr := ""
-	name := ""
-	avatarURL := ""
 	if claims != nil {
 		emailStr = claims.Email
-		name = claims.FullName()
-		avatarURL = claims.ImageURL
+	}
+
+	if emailStr == "" {
+		return httpx.BadRequest(c, "email not found in token claims")
 	}
 
 	email, err := vo.NewEmail(emailStr)
 	if err != nil {
-		return httpx.BadRequest(c, "invalid email in claims")
+		return httpx.BadRequest(c, "invalid email: "+emailStr)
 	}
 
 	output, err := h.service.Accept(c.Context(), AcceptInvitationInput{
 		Token:       req.Token,
 		ClerkUserID: clerkUserID,
 		Email:       email,
-		Name:        name,
-		AvatarURL:   avatarURL,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)

@@ -105,18 +105,14 @@ type LiveSession struct {
 type Membership struct {
 	ID             pgtype.UUID        `json:"id"`
 	StoreID        pgtype.UUID        `json:"store_id"`
-	Email          string             `json:"email"`
 	Role           string             `json:"role"`
-	PasswordHash   pgtype.Text        `json:"password_hash"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	ClerkUserID    pgtype.Text        `json:"clerk_user_id"`
-	Name           pgtype.Text        `json:"name"`
-	AvatarUrl      pgtype.Text        `json:"avatar_url"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 	Status         string             `json:"status"`
 	InvitedBy      pgtype.UUID        `json:"invited_by"`
 	InvitedAt      pgtype.Timestamptz `json:"invited_at"`
 	LastAccessedAt pgtype.Timestamptz `json:"last_accessed_at"`
+	UserID         pgtype.UUID        `json:"user_id"`
 }
 
 type Product struct {
@@ -156,7 +152,6 @@ type Store struct {
 	// Notify customer before cart expires
 	CartNotifyBeforeExpiration bool               `json:"cart_notify_before_expiration"`
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
-	ClerkOrgID                 pgtype.Text        `json:"clerk_org_id"`
 }
 
 type StoreInvitation struct {
@@ -182,6 +177,16 @@ type Subscription struct {
 	CurrentPeriodEnd       pgtype.Timestamptz `json:"current_period_end"`
 	CancelledAt            pgtype.Timestamptz `json:"cancelled_at"`
 	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+}
+
+type User struct {
+	ID        pgtype.UUID        `json:"id"`
+	ClerkID   string             `json:"clerk_id"`
+	Email     string             `json:"email"`
+	Name      pgtype.Text        `json:"name"`
+	AvatarUrl pgtype.Text        `json:"avatar_url"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
 }
 
 type WebhookEvent struct {
