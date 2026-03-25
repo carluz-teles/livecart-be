@@ -101,9 +101,9 @@ func (h *Handler) GetMyStores(c *fiber.Ctx) error {
 // @Tags         users
 // @Accept       json
 // @Produce      json
-// @Param        request body SyncUserRequest true "Store information for new users"
-// @Success      200 {object} httpx.Envelope{data=GetMeResponse}
-// @Success      201 {object} httpx.Envelope{data=GetMeResponse}
+// @Param        request body SyncUserRequest false "Optional store information for new users"
+// @Success      200 {object} httpx.Envelope{data=SyncUserResponse}
+// @Success      201 {object} httpx.Envelope{data=SyncUserResponse}
 // @Failure      400 {object} httpx.Envelope
 // @Failure      401 {object} httpx.Envelope
 // @Failure      422 {object} httpx.ValidationEnvelope
@@ -115,12 +115,15 @@ func (h *Handler) SyncUser(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(httpx.Envelope{Error: "unauthorized"})
 	}
 
+	// Body is optional - parse if present
 	var req SyncUserRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
+	if len(c.Body()) > 0 {
+		if err := c.BodyParser(&req); err != nil {
+			return httpx.BadRequest(c, "invalid request body")
+		}
+		if err := h.validate.Struct(req); err != nil {
+			return httpx.ValidationError(c, err)
+		}
 	}
 
 	claims := httpx.GetClaims(c)
@@ -145,18 +148,20 @@ func (h *Handler) SyncUser(c *fiber.Ctx) error {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	response := GetMeResponse{
-		ID:        output.ID,
-		StoreID:   output.StoreID,
-		Email:     output.Email,
-		Name:      output.Name,
-		AvatarURL: output.AvatarURL,
-		Role:      output.Role,
-		Status:    output.Status,
-		StoreName: output.StoreName,
-		StoreSlug: output.StoreSlug,
-		CreatedAt: output.CreatedAt,
-		UpdatedAt: output.UpdatedAt,
+	response := SyncUserResponse{
+		ID:                 output.ID,
+		StoreID:            output.StoreID,
+		Email:              output.Email,
+		Name:               output.Name,
+		AvatarURL:          output.AvatarURL,
+		Role:               output.Role,
+		Status:             output.Status,
+		StoreName:          output.StoreName,
+		StoreSlug:          output.StoreSlug,
+		OnboardingComplete: output.OnboardingComplete,
+		State:              output.State,
+		CreatedAt:          output.CreatedAt,
+		UpdatedAt:          output.UpdatedAt,
 	}
 
 	if output.IsNew {

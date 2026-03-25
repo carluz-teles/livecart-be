@@ -126,6 +126,20 @@ type Store struct {
 	EmailAddress   pgtype.Text        `json:"email_address"`
 	SmsNumber      pgtype.Text        `json:"sms_number"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	// Whether the cart system is enabled for this store
+	CartEnabled bool `json:"cart_enabled"`
+	// Minutes before cart expires (0 = no expiration)
+	CartExpirationMinutes int32 `json:"cart_expiration_minutes"`
+	// Reserve stock when item is added to cart
+	CartReserveStock bool `json:"cart_reserve_stock"`
+	// Max different items per cart (0 = unlimited)
+	CartMaxItems int32 `json:"cart_max_items"`
+	// Max quantity of same item (0 = unlimited)
+	CartMaxQuantityPerItem int32 `json:"cart_max_quantity_per_item"`
+	// Notify customer before cart expires
+	CartNotifyBeforeExpiration bool               `json:"cart_notify_before_expiration"`
+	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
+	OnboardingComplete         bool               `json:"onboarding_complete"`
 }
 
 type StoreInvitation struct {

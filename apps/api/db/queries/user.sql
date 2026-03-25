@@ -12,7 +12,8 @@ SELECT
   su.created_at,
   su.updated_at,
   s.name as store_name,
-  s.slug as store_slug
+  s.slug as store_slug,
+  s.onboarding_complete
 FROM store_users su
 JOIN stores s ON s.id = su.store_id
 WHERE su.clerk_user_id = $1 AND su.status = 'active'
@@ -60,9 +61,9 @@ ORDER BY su.created_at ASC;
 
 -- name: CreateUserWithStore :one
 WITH new_store AS (
-  INSERT INTO stores (name, slug)
-  VALUES ($1, $2)
-  RETURNING id, name, slug
+  INSERT INTO stores (name, slug, onboarding_complete)
+  VALUES ($1, $2, false)
+  RETURNING id, name, slug, onboarding_complete
 ),
 new_user AS (
   INSERT INTO store_users (store_id, clerk_user_id, email, name, avatar_url, role, status)
@@ -82,7 +83,8 @@ SELECT
   new_user.created_at,
   new_user.updated_at,
   new_store.name as store_name,
-  new_store.slug as store_slug
+  new_store.slug as store_slug,
+  new_store.onboarding_complete
 FROM new_user, new_store;
 
 -- name: AddUserToStore :one

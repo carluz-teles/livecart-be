@@ -646,6 +646,21 @@ definitions:
     required:
     - name
     type: object
+  apps_api_internal_store.CartSettingsDTO:
+    properties:
+      enabled:
+        type: boolean
+      expirationMinutes:
+        type: integer
+      maxItems:
+        type: integer
+      maxQuantityPerItem:
+        type: integer
+      notifyBeforeExpiration:
+        type: boolean
+      reserveStock:
+        type: boolean
+    type: object
   apps_api_internal_store.CreateStoreRequest:
     properties:
       name:
@@ -675,6 +690,8 @@ definitions:
     properties:
       active:
         type: boolean
+      cartSettings:
+        $ref: '#/definitions/apps_api_internal_store.CartSettingsDTO'
       createdAt:
         type: string
       emailAddress:
@@ -689,6 +706,24 @@ definitions:
         type: string
       whatsappNumber:
         type: string
+    type: object
+  apps_api_internal_store.UpdateCartSettingsRequest:
+    properties:
+      enabled:
+        type: boolean
+      expirationMinutes:
+        minimum: 0
+        type: integer
+      maxItems:
+        minimum: 0
+        type: integer
+      maxQuantityPerItem:
+        minimum: 0
+        type: integer
+      notifyBeforeExpiration:
+        type: boolean
+      reserveStock:
+        type: boolean
     type: object
   apps_api_internal_store.UpdateStoreRequest:
     properties:
@@ -747,9 +782,35 @@ definitions:
         maxLength: 50
         minLength: 2
         type: string
-    required:
-    - storeName
-    - storeSlug
+    type: object
+  apps_api_internal_user.SyncUserResponse:
+    properties:
+      avatarUrl:
+        type: string
+      createdAt:
+        type: string
+      email:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      onboardingComplete:
+        type: boolean
+      role:
+        type: string
+      state:
+        type: string
+      status:
+        type: string
+      storeId:
+        type: string
+      storeName:
+        type: string
+      storeSlug:
+        type: string
+      updatedAt:
+        type: string
     type: object
   apps_api_internal_user.UserStoreResponse:
     properties:
@@ -956,6 +1017,93 @@ paths:
       security:
       - BearerAuth: []
       summary: Create a new store
+      tags:
+      - stores
+  /api/v1/stores/{storeId}/cart-settings:
+    put:
+      consumes:
+      - application/json
+      description: Updates the cart settings for a specific store (requires store
+        access)
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      - description: Cart settings payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/apps_api_internal_store.UpdateCartSettingsRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_store.StoreResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Update cart settings for a store
+      tags:
+      - stores
+  /api/v1/stores/{storeId}/complete-onboarding:
+    post:
+      description: Marks the store's onboarding as complete
+      parameters:
+      - description: Store UUID
+        in: path
+        name: storeId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  additionalProperties:
+                    type: boolean
+                  type: object
+              type: object
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+      security:
+      - BearerAuth: []
+      summary: Complete store onboarding
       tags:
       - stores
   /api/v1/stores/{storeId}/customers:
@@ -2623,6 +2771,47 @@ paths:
       summary: Update current store
       tags:
       - stores
+  /api/v1/stores/me/cart-settings:
+    put:
+      consumes:
+      - application/json
+      description: Updates the cart settings for the authenticated user's store
+      parameters:
+      - description: Cart settings payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/apps_api_internal_store.UpdateCartSettingsRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/apps_api_internal_store.StoreResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Update cart settings
+      tags:
+      - stores
   /api/v1/users/me:
     get:
       description: Returns the authenticated user's profile including store information
@@ -2682,10 +2871,9 @@ paths:
       description: Creates a new user and store if not exists, or returns existing
         user. Call this after first sign-in.
       parameters:
-      - description: Store information for new users
+      - description: Optional store information for new users
         in: body
         name: request
-        required: true
         schema:
           $ref: '#/definitions/apps_api_internal_user.SyncUserRequest'
       produces:
@@ -2698,7 +2886,7 @@ paths:
             - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
             - properties:
                 data:
-                  $ref: '#/definitions/apps_api_internal_user.GetMeResponse'
+                  $ref: '#/definitions/apps_api_internal_user.SyncUserResponse'
               type: object
         "201":
           description: Created
@@ -2707,7 +2895,7 @@ paths:
             - $ref: '#/definitions/livecart_apps_api_lib_httpx.Envelope'
             - properties:
                 data:
-                  $ref: '#/definitions/apps_api_internal_user.GetMeResponse'
+                  $ref: '#/definitions/apps_api_internal_user.SyncUserResponse'
               type: object
         "400":
           description: Bad Request

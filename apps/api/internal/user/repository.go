@@ -155,17 +155,18 @@ func toUserRow(row sqlc.GetUserByClerkIDRow) *UserRow {
 	}
 
 	return &UserRow{
-		ID:        row.ID.String(),
-		StoreID:   row.StoreID.String(),
-		Email:     row.Email,
-		Name:      name,
-		AvatarURL: avatarURL,
-		Role:      row.Role,
-		Status:    row.Status,
-		StoreName: row.StoreName,
-		StoreSlug: row.StoreSlug,
-		CreatedAt: row.CreatedAt.Time,
-		UpdatedAt: row.UpdatedAt.Time,
+		ID:                 row.ID.String(),
+		StoreID:            row.StoreID.String(),
+		Email:              row.Email,
+		Name:               name,
+		AvatarURL:          avatarURL,
+		Role:               row.Role,
+		Status:             row.Status,
+		StoreName:          row.StoreName,
+		StoreSlug:          row.StoreSlug,
+		OnboardingComplete: row.OnboardingComplete,
+		CreatedAt:          row.CreatedAt.Time,
+		UpdatedAt:          row.UpdatedAt.Time,
 	}
 }
 
@@ -179,17 +180,18 @@ func toCreateUserRow(row sqlc.CreateUserWithStoreRow) *UserRow {
 	}
 
 	return &UserRow{
-		ID:        row.ID.String(),
-		StoreID:   row.StoreID.String(),
-		Email:     row.Email,
-		Name:      name,
-		AvatarURL: avatarURL,
-		Role:      row.Role,
-		Status:    row.Status,
-		StoreName: row.StoreName,
-		StoreSlug: row.StoreSlug,
-		CreatedAt: row.CreatedAt.Time,
-		UpdatedAt: row.UpdatedAt.Time,
+		ID:                 row.ID.String(),
+		StoreID:            row.StoreID.String(),
+		Email:              row.Email,
+		Name:               name,
+		AvatarURL:          avatarURL,
+		Role:               row.Role,
+		Status:             row.Status,
+		StoreName:          row.StoreName,
+		StoreSlug:          row.StoreSlug,
+		OnboardingComplete: row.OnboardingComplete,
+		CreatedAt:          row.CreatedAt.Time,
+		UpdatedAt:          row.UpdatedAt.Time,
 	}
 }
 

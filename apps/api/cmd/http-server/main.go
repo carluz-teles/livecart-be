@@ -283,6 +283,9 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	storeScoped := api.Group("/stores/:storeId")
 	storeScoped.Use(httpx.StoreAccessMiddleware(userRepo))
 
+	// Store cart settings (store-scoped)
+	storeHandler.RegisterStoreScopedRoutes(storeScoped)
+
 	productRepo := product.NewRepository(queries, pool)
 	productSvc := product.NewService(productRepo, log)
 	productHandler := product.NewHandler(productSvc, validate)

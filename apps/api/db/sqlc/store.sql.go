@@ -11,10 +11,21 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const completeOnboarding = `-- name: CompleteOnboarding :exec
+UPDATE stores
+SET onboarding_complete = true, updated_at = now()
+WHERE id = $1
+`
+
+func (q *Queries) CompleteOnboarding(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, completeOnboarding, id)
+	return err
+}
+
 const createStore = `-- name: CreateStore :one
 INSERT INTO stores (name, slug)
 VALUES ($1, $2)
-RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, onboarding_complete
 `
 
 type CreateStoreParams struct {
@@ -34,6 +45,14 @@ func (q *Queries) CreateStore(ctx context.Context, arg CreateStoreParams) (Store
 		&i.EmailAddress,
 		&i.SmsNumber,
 		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.CartNotifyBeforeExpiration,
+		&i.UpdatedAt,
+		&i.OnboardingComplete,
 	)
 	return i, err
 }
@@ -78,7 +97,7 @@ func (q *Queries) CreateStoreUser(ctx context.Context, arg CreateStoreUserParams
 }
 
 const getStoreByID = `-- name: GetStoreByID :one
-SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at FROM stores WHERE id = $1
+SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, onboarding_complete FROM stores WHERE id = $1
 `
 
 func (q *Queries) GetStoreByID(ctx context.Context, id pgtype.UUID) (Store, error) {
@@ -93,12 +112,20 @@ func (q *Queries) GetStoreByID(ctx context.Context, id pgtype.UUID) (Store, erro
 		&i.EmailAddress,
 		&i.SmsNumber,
 		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.CartNotifyBeforeExpiration,
+		&i.UpdatedAt,
+		&i.OnboardingComplete,
 	)
 	return i, err
 }
 
 const getStoreBySlug = `-- name: GetStoreBySlug :one
-SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at FROM stores WHERE slug = $1
+SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, onboarding_complete FROM stores WHERE slug = $1
 `
 
 func (q *Queries) GetStoreBySlug(ctx context.Context, slug string) (Store, error) {
@@ -113,6 +140,14 @@ func (q *Queries) GetStoreBySlug(ctx context.Context, slug string) (Store, error
 		&i.EmailAddress,
 		&i.SmsNumber,
 		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.CartNotifyBeforeExpiration,
+		&i.UpdatedAt,
+		&i.OnboardingComplete,
 	)
 	return i, err
 }
@@ -157,9 +192,14 @@ func (q *Queries) ListStoreUsers(ctx context.Context, storeID pgtype.UUID) ([]St
 
 const updateStore = `-- name: UpdateStore :one
 UPDATE stores
-SET name = $2, whatsapp_number = $3, email_address = $4, sms_number = $5
+SET
+  name = $2,
+  whatsapp_number = $3,
+  email_address = $4,
+  sms_number = $5,
+  updated_at = now()
 WHERE id = $1
-RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, onboarding_complete
 `
 
 type UpdateStoreParams struct {
@@ -188,6 +228,70 @@ func (q *Queries) UpdateStore(ctx context.Context, arg UpdateStoreParams) (Store
 		&i.EmailAddress,
 		&i.SmsNumber,
 		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.CartNotifyBeforeExpiration,
+		&i.UpdatedAt,
+		&i.OnboardingComplete,
+	)
+	return i, err
+}
+
+const updateStoreCartSettings = `-- name: UpdateStoreCartSettings :one
+UPDATE stores
+SET
+  cart_enabled = $2,
+  cart_expiration_minutes = $3,
+  cart_reserve_stock = $4,
+  cart_max_items = $5,
+  cart_max_quantity_per_item = $6,
+  cart_notify_before_expiration = $7,
+  updated_at = now()
+WHERE id = $1
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, onboarding_complete
+`
+
+type UpdateStoreCartSettingsParams struct {
+	ID                         pgtype.UUID `json:"id"`
+	CartEnabled                bool        `json:"cart_enabled"`
+	CartExpirationMinutes      int32       `json:"cart_expiration_minutes"`
+	CartReserveStock           bool        `json:"cart_reserve_stock"`
+	CartMaxItems               int32       `json:"cart_max_items"`
+	CartMaxQuantityPerItem     int32       `json:"cart_max_quantity_per_item"`
+	CartNotifyBeforeExpiration bool        `json:"cart_notify_before_expiration"`
+}
+
+func (q *Queries) UpdateStoreCartSettings(ctx context.Context, arg UpdateStoreCartSettingsParams) (Store, error) {
+	row := q.db.QueryRow(ctx, updateStoreCartSettings,
+		arg.ID,
+		arg.CartEnabled,
+		arg.CartExpirationMinutes,
+		arg.CartReserveStock,
+		arg.CartMaxItems,
+		arg.CartMaxQuantityPerItem,
+		arg.CartNotifyBeforeExpiration,
+	)
+	var i Store
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.CartNotifyBeforeExpiration,
+		&i.UpdatedAt,
+		&i.OnboardingComplete,
 	)
 	return i, err
 }

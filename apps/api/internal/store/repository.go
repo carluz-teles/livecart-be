@@ -86,6 +86,31 @@ func (r *Repository) Update(ctx context.Context, params UpdateStoreParams) (Stor
 	return toStoreRow(row), nil
 }
 
+func (r *Repository) UpdateCartSettings(ctx context.Context, params UpdateCartSettingsParams) (StoreRow, error) {
+	uid, err := parseUUID(params.ID)
+	if err != nil {
+		return StoreRow{}, err
+	}
+
+	row, err := r.q.UpdateStoreCartSettings(ctx, sqlc.UpdateStoreCartSettingsParams{
+		ID:                        uid,
+		CartEnabled:               params.Enabled,
+		CartExpirationMinutes:     int32(params.ExpirationMinutes),
+		CartReserveStock:          params.ReserveStock,
+		CartMaxItems:              int32(params.MaxItems),
+		CartMaxQuantityPerItem:    int32(params.MaxQuantityPerItem),
+		CartNotifyBeforeExpiration: params.NotifyBeforeExpiration,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return StoreRow{}, httpx.ErrNotFound("store not found")
+		}
+		return StoreRow{}, fmt.Errorf("updating cart settings: %w", err)
+	}
+
+	return toStoreRow(row), nil
+}
+
 func toStoreRow(row sqlc.Store) StoreRow {
 	var whatsapp, email, sms *string
 	if row.WhatsappNumber.Valid {
@@ -106,8 +131,31 @@ func toStoreRow(row sqlc.Store) StoreRow {
 		WhatsappNumber: whatsapp,
 		EmailAddress:   email,
 		SMSNumber:      sms,
-		CreatedAt:      row.CreatedAt.Time,
+		CartSettings: CartSettingsDTO{
+			Enabled:                row.CartEnabled,
+			ExpirationMinutes:      int(row.CartExpirationMinutes),
+			ReserveStock:           row.CartReserveStock,
+			MaxItems:               int(row.CartMaxItems),
+			MaxQuantityPerItem:     int(row.CartMaxQuantityPerItem),
+			NotifyBeforeExpiration: row.CartNotifyBeforeExpiration,
+		},
+		CreatedAt: row.CreatedAt.Time,
+		UpdatedAt: row.UpdatedAt.Time,
 	}
+}
+
+func (r *Repository) CompleteOnboarding(ctx context.Context, storeID string) error {
+	uid, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+
+	err = r.q.CompleteOnboarding(ctx, uid)
+	if err != nil {
+		return fmt.Errorf("completing onboarding: %w", err)
+	}
+
+	return nil
 }
 
 func parseUUID(s string) (pgtype.UUID, error) {

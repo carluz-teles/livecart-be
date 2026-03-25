@@ -70,6 +70,27 @@ func (s *Service) Update(ctx context.Context, input UpdateStoreInput) (StoreOutp
 	return toStoreOutput(row), nil
 }
 
+func (s *Service) UpdateCartSettings(ctx context.Context, input UpdateCartSettingsInput) (StoreOutput, error) {
+	row, err := s.repo.UpdateCartSettings(ctx, UpdateCartSettingsParams{
+		ID:                     input.StoreID,
+		Enabled:                input.Enabled,
+		ExpirationMinutes:      input.ExpirationMinutes,
+		ReserveStock:           input.ReserveStock,
+		MaxItems:               input.MaxItems,
+		MaxQuantityPerItem:     input.MaxQuantityPerItem,
+		NotifyBeforeExpiration: input.NotifyBeforeExpiration,
+	})
+	if err != nil {
+		return StoreOutput{}, err
+	}
+
+	return toStoreOutput(row), nil
+}
+
+func (s *Service) CompleteOnboarding(ctx context.Context, storeID string) error {
+	return s.repo.CompleteOnboarding(ctx, storeID)
+}
+
 func toStoreOutput(row StoreRow) StoreOutput {
 	return StoreOutput{
 		ID:             row.ID,
@@ -79,6 +100,7 @@ func toStoreOutput(row StoreRow) StoreOutput {
 		WhatsappNumber: row.WhatsappNumber,
 		EmailAddress:   row.EmailAddress,
 		SMSNumber:      row.SMSNumber,
+		CartSettings:   row.CartSettings,
 		CreatedAt:      row.CreatedAt,
 	}
 }

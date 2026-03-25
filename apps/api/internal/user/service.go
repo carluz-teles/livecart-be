@@ -3,7 +3,9 @@ package user
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"livecart/apps/api/lib/httpx"
@@ -42,20 +44,27 @@ func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserO
 	// Try to get existing user
 	existing, err := s.repo.GetByClerkID(ctx, input.ClerkUserID)
 	if err == nil {
-		// User exists, return it
+		// User exists - determine state based on onboarding_complete
+		state := "ready"
+		if !existing.OnboardingComplete {
+			state = "needs_onboarding"
+		}
+
 		return &SyncUserOutput{
-			ID:        existing.ID,
-			StoreID:   existing.StoreID,
-			Email:     existing.Email,
-			Name:      existing.Name,
-			AvatarURL: existing.AvatarURL,
-			Role:      existing.Role,
-			Status:    existing.Status,
-			StoreName: existing.StoreName,
-			StoreSlug: existing.StoreSlug,
-			CreatedAt: existing.CreatedAt,
-			UpdatedAt: existing.UpdatedAt,
-			IsNew:     false,
+			ID:                 existing.ID,
+			StoreID:            existing.StoreID,
+			Email:              existing.Email,
+			Name:               existing.Name,
+			AvatarURL:          existing.AvatarURL,
+			Role:               existing.Role,
+			Status:             existing.Status,
+			StoreName:          existing.StoreName,
+			StoreSlug:          existing.StoreSlug,
+			OnboardingComplete: existing.OnboardingComplete,
+			State:              state,
+			CreatedAt:          existing.CreatedAt,
+			UpdatedAt:          existing.UpdatedAt,
+			IsNew:              false,
 		}, nil
 	}
 
@@ -64,33 +73,51 @@ func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserO
 		return nil, fmt.Errorf("checking existing user: %w", err)
 	}
 
+	// Generate placeholder store name/slug if not provided
+	storeName := input.StoreName
+	storeSlug := input.StoreSlug
+	if storeName == "" {
+		storeName = "Minha Loja"
+		storeSlug = generatePlaceholderSlug()
+	}
+
 	// User doesn't exist, create new user with store
 	row, err := s.repo.CreateWithStore(ctx, CreateUserWithStoreParams{
 		ClerkUserID: input.ClerkUserID,
 		Email:       input.Email,
 		Name:        input.Name,
 		AvatarURL:   input.AvatarURL,
-		StoreName:   input.StoreName,
-		StoreSlug:   input.StoreSlug,
+		StoreName:   storeName,
+		StoreSlug:   storeSlug,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating user with store: %w", err)
 	}
 
 	return &SyncUserOutput{
-		ID:        row.ID,
-		StoreID:   row.StoreID,
-		Email:     row.Email,
-		Name:      row.Name,
-		AvatarURL: row.AvatarURL,
-		Role:      row.Role,
-		Status:    row.Status,
-		StoreName: row.StoreName,
-		StoreSlug: row.StoreSlug,
-		CreatedAt: row.CreatedAt,
-		UpdatedAt: row.UpdatedAt,
-		IsNew:     true,
+		ID:                 row.ID,
+		StoreID:            row.StoreID,
+		Email:              row.Email,
+		Name:               row.Name,
+		AvatarURL:          row.AvatarURL,
+		Role:               row.Role,
+		Status:             row.Status,
+		StoreName:          row.StoreName,
+		StoreSlug:          row.StoreSlug,
+		OnboardingComplete: row.OnboardingComplete,
+		State:              "needs_onboarding", // New users always need onboarding
+		CreatedAt:          row.CreatedAt,
+		UpdatedAt:          row.UpdatedAt,
+		IsNew:              true,
 	}, nil
+}
+
+// generatePlaceholderSlug generates a unique slug for new stores
+func generatePlaceholderSlug() string {
+	id := uuid.New().String()
+	// Take first 8 chars of UUID for a short slug
+	short := strings.ReplaceAll(id[:8], "-", "")
+	return "loja-" + short
 }
 
 // UpdateUser updates user profile for a specific store

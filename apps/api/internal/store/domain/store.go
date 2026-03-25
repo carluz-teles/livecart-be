@@ -23,6 +23,7 @@ type Store struct {
 	whatsappNumber *string
 	emailAddress   *string
 	smsNumber      *string
+	cartSettings   CartSettings
 	createdAt      time.Time
 	updatedAt      time.Time
 }
@@ -41,12 +42,13 @@ func NewStore(name string, slug Slug) (*Store, error) {
 
 	now := time.Now()
 	return &Store{
-		id:        vo.GenerateStoreID(),
-		name:      name,
-		slug:      slug,
-		active:    true, // new stores are active by default
-		createdAt: now,
-		updatedAt: now,
+		id:           vo.GenerateStoreID(),
+		name:         name,
+		slug:         slug,
+		active:       true, // new stores are active by default
+		cartSettings: DefaultCartSettings(),
+		createdAt:    now,
+		updatedAt:    now,
 	}, nil
 }
 
@@ -59,6 +61,7 @@ func Reconstruct(
 	whatsappNumber *string,
 	emailAddress *string,
 	smsNumber *string,
+	cartSettings CartSettings,
 	createdAt time.Time,
 	updatedAt time.Time,
 ) *Store {
@@ -70,6 +73,7 @@ func Reconstruct(
 		whatsappNumber: whatsappNumber,
 		emailAddress:   emailAddress,
 		smsNumber:      smsNumber,
+		cartSettings:   cartSettings,
 		createdAt:      createdAt,
 		updatedAt:      updatedAt,
 	}
@@ -79,15 +83,16 @@ func Reconstruct(
 // Getters (immutable access)
 // ============================================
 
-func (s *Store) ID() vo.StoreID       { return s.id }
-func (s *Store) Name() string         { return s.name }
-func (s *Store) Slug() Slug           { return s.slug }
-func (s *Store) Active() bool         { return s.active }
+func (s *Store) ID() vo.StoreID          { return s.id }
+func (s *Store) Name() string            { return s.name }
+func (s *Store) Slug() Slug              { return s.slug }
+func (s *Store) Active() bool            { return s.active }
 func (s *Store) WhatsappNumber() *string { return s.whatsappNumber }
 func (s *Store) EmailAddress() *string   { return s.emailAddress }
 func (s *Store) SMSNumber() *string      { return s.smsNumber }
-func (s *Store) CreatedAt() time.Time { return s.createdAt }
-func (s *Store) UpdatedAt() time.Time { return s.updatedAt }
+func (s *Store) CartSettings() CartSettings { return s.cartSettings }
+func (s *Store) CreatedAt() time.Time    { return s.createdAt }
+func (s *Store) UpdatedAt() time.Time    { return s.updatedAt }
 
 // ============================================
 // Business Rules
@@ -147,5 +152,11 @@ func (s *Store) Activate() {
 // Deactivate deactivates the store.
 func (s *Store) Deactivate() {
 	s.active = false
+	s.updatedAt = time.Now()
+}
+
+// UpdateCartSettings updates the store's cart configuration.
+func (s *Store) UpdateCartSettings(settings CartSettings) {
+	s.cartSettings = settings
 	s.updatedAt = time.Now()
 }

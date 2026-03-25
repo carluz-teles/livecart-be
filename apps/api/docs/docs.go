@@ -329,6 +329,218 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/v1/stores/me/cart-settings": {
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Updates the cart settings for the authenticated user's store",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "stores"
+                ],
+                "summary": "Update cart settings",
+                "parameters": [
+                    {
+                        "description": "Cart settings payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/apps_api_internal_store.UpdateCartSettingsRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_store.StoreResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/cart-settings": {
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Updates the cart settings for a specific store (requires store access)",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "stores"
+                ],
+                "summary": "Update cart settings for a store",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Cart settings payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/apps_api_internal_store.UpdateCartSettingsRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/apps_api_internal_store.StoreResponse"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.ValidationEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/stores/{storeId}/complete-onboarding": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Marks the store's onboarding as complete",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "stores"
+                ],
+                "summary": "Complete store onboarding",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Store UUID",
+                        "name": "storeId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "type": "object",
+                                            "additionalProperties": {
+                                                "type": "boolean"
+                                            }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/livecart_apps_api_lib_httpx.Envelope"
+                        }
+                    }
+                }
+            }
+        },
         "/api/v1/stores/{storeId}/customers": {
             "get": {
                 "security": [
@@ -3086,10 +3298,9 @@ const docTemplate = `{
                 "summary": "Sync user on first access",
                 "parameters": [
                     {
-                        "description": "Store information for new users",
+                        "description": "Optional store information for new users",
                         "name": "request",
                         "in": "body",
-                        "required": true,
                         "schema": {
                             "$ref": "#/definitions/apps_api_internal_user.SyncUserRequest"
                         }
@@ -3107,7 +3318,7 @@ const docTemplate = `{
                                     "type": "object",
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/definitions/apps_api_internal_user.GetMeResponse"
+                                            "$ref": "#/definitions/apps_api_internal_user.SyncUserResponse"
                                         }
                                     }
                                 }
@@ -3125,7 +3336,7 @@ const docTemplate = `{
                                     "type": "object",
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/definitions/apps_api_internal_user.GetMeResponse"
+                                            "$ref": "#/definitions/apps_api_internal_user.SyncUserResponse"
                                         }
                                     }
                                 }
@@ -4288,6 +4499,29 @@ const docTemplate = `{
                 }
             }
         },
+        "apps_api_internal_store.CartSettingsDTO": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "expirationMinutes": {
+                    "type": "integer"
+                },
+                "maxItems": {
+                    "type": "integer"
+                },
+                "maxQuantityPerItem": {
+                    "type": "integer"
+                },
+                "notifyBeforeExpiration": {
+                    "type": "boolean"
+                },
+                "reserveStock": {
+                    "type": "boolean"
+                }
+            }
+        },
         "apps_api_internal_store.CreateStoreRequest": {
             "type": "object",
             "required": [
@@ -4330,6 +4564,9 @@ const docTemplate = `{
                 "active": {
                     "type": "boolean"
                 },
+                "cartSettings": {
+                    "$ref": "#/definitions/apps_api_internal_store.CartSettingsDTO"
+                },
                 "createdAt": {
                     "type": "string"
                 },
@@ -4350,6 +4587,32 @@ const docTemplate = `{
                 },
                 "whatsappNumber": {
                     "type": "string"
+                }
+            }
+        },
+        "apps_api_internal_store.UpdateCartSettingsRequest": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "expirationMinutes": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "maxItems": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "maxQuantityPerItem": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "notifyBeforeExpiration": {
+                    "type": "boolean"
+                },
+                "reserveStock": {
+                    "type": "boolean"
                 }
             }
         },
@@ -4426,10 +4689,6 @@ const docTemplate = `{
         },
         "apps_api_internal_user.SyncUserRequest": {
             "type": "object",
-            "required": [
-                "storeName",
-                "storeSlug"
-            ],
             "properties": {
                 "storeName": {
                     "type": "string",
@@ -4440,6 +4699,50 @@ const docTemplate = `{
                     "type": "string",
                     "maxLength": 50,
                     "minLength": 2
+                }
+            }
+        },
+        "apps_api_internal_user.SyncUserResponse": {
+            "type": "object",
+            "properties": {
+                "avatarUrl": {
+                    "type": "string"
+                },
+                "createdAt": {
+                    "type": "string"
+                },
+                "email": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "onboardingComplete": {
+                    "type": "boolean"
+                },
+                "role": {
+                    "type": "string"
+                },
+                "state": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "storeId": {
+                    "type": "string"
+                },
+                "storeName": {
+                    "type": "string"
+                },
+                "storeSlug": {
+                    "type": "string"
+                },
+                "updatedAt": {
+                    "type": "string"
                 }
             }
         },

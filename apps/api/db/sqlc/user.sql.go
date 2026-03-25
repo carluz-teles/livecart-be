@@ -160,9 +160,9 @@ func (q *Queries) CreateInvitation(ctx context.Context, arg CreateInvitationPara
 
 const createUserWithStore = `-- name: CreateUserWithStore :one
 WITH new_store AS (
-  INSERT INTO stores (name, slug)
-  VALUES ($1, $2)
-  RETURNING id, name, slug
+  INSERT INTO stores (name, slug, onboarding_complete)
+  VALUES ($1, $2, false)
+  RETURNING id, name, slug, onboarding_complete
 ),
 new_user AS (
   INSERT INTO store_users (store_id, clerk_user_id, email, name, avatar_url, role, status)
@@ -182,7 +182,8 @@ SELECT
   new_user.created_at,
   new_user.updated_at,
   new_store.name as store_name,
-  new_store.slug as store_slug
+  new_store.slug as store_slug,
+  new_store.onboarding_complete
 FROM new_user, new_store
 `
 
@@ -196,18 +197,19 @@ type CreateUserWithStoreParams struct {
 }
 
 type CreateUserWithStoreRow struct {
-	ID          pgtype.UUID        `json:"id"`
-	StoreID     pgtype.UUID        `json:"store_id"`
-	ClerkUserID pgtype.Text        `json:"clerk_user_id"`
-	Email       string             `json:"email"`
-	Name        pgtype.Text        `json:"name"`
-	AvatarUrl   pgtype.Text        `json:"avatar_url"`
-	Role        string             `json:"role"`
-	Status      string             `json:"status"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
-	StoreName   string             `json:"store_name"`
-	StoreSlug   string             `json:"store_slug"`
+	ID                 pgtype.UUID        `json:"id"`
+	StoreID            pgtype.UUID        `json:"store_id"`
+	ClerkUserID        pgtype.Text        `json:"clerk_user_id"`
+	Email              string             `json:"email"`
+	Name               pgtype.Text        `json:"name"`
+	AvatarUrl          pgtype.Text        `json:"avatar_url"`
+	Role               string             `json:"role"`
+	Status             string             `json:"status"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	StoreName          string             `json:"store_name"`
+	StoreSlug          string             `json:"store_slug"`
+	OnboardingComplete bool               `json:"onboarding_complete"`
 }
 
 func (q *Queries) CreateUserWithStore(ctx context.Context, arg CreateUserWithStoreParams) (CreateUserWithStoreRow, error) {
@@ -233,6 +235,7 @@ func (q *Queries) CreateUserWithStore(ctx context.Context, arg CreateUserWithSto
 		&i.UpdatedAt,
 		&i.StoreName,
 		&i.StoreSlug,
+		&i.OnboardingComplete,
 	)
 	return i, err
 }
@@ -453,7 +456,8 @@ SELECT
   su.created_at,
   su.updated_at,
   s.name as store_name,
-  s.slug as store_slug
+  s.slug as store_slug,
+  s.onboarding_complete
 FROM store_users su
 JOIN stores s ON s.id = su.store_id
 WHERE su.clerk_user_id = $1 AND su.status = 'active'
@@ -462,18 +466,19 @@ LIMIT 1
 `
 
 type GetUserByClerkIDRow struct {
-	ID          pgtype.UUID        `json:"id"`
-	StoreID     pgtype.UUID        `json:"store_id"`
-	ClerkUserID pgtype.Text        `json:"clerk_user_id"`
-	Email       string             `json:"email"`
-	Name        pgtype.Text        `json:"name"`
-	AvatarUrl   pgtype.Text        `json:"avatar_url"`
-	Role        string             `json:"role"`
-	Status      string             `json:"status"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
-	StoreName   string             `json:"store_name"`
-	StoreSlug   string             `json:"store_slug"`
+	ID                 pgtype.UUID        `json:"id"`
+	StoreID            pgtype.UUID        `json:"store_id"`
+	ClerkUserID        pgtype.Text        `json:"clerk_user_id"`
+	Email              string             `json:"email"`
+	Name               pgtype.Text        `json:"name"`
+	AvatarUrl          pgtype.Text        `json:"avatar_url"`
+	Role               string             `json:"role"`
+	Status             string             `json:"status"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	StoreName          string             `json:"store_name"`
+	StoreSlug          string             `json:"store_slug"`
+	OnboardingComplete bool               `json:"onboarding_complete"`
 }
 
 // Get user's default/first store (for backwards compatibility)
@@ -493,6 +498,7 @@ func (q *Queries) GetUserByClerkID(ctx context.Context, clerkUserID pgtype.Text)
 		&i.UpdatedAt,
 		&i.StoreName,
 		&i.StoreSlug,
+		&i.OnboardingComplete,
 	)
 	return i, err
 }

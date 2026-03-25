@@ -19,8 +19,24 @@ type GetMeResponse struct {
 }
 
 type SyncUserRequest struct {
-	StoreName string `json:"storeName" validate:"required,min=2,max=100"`
-	StoreSlug string `json:"storeSlug" validate:"required,min=2,max=50,slug"`
+	StoreName string `json:"storeName" validate:"omitempty,min=2,max=100"`
+	StoreSlug string `json:"storeSlug" validate:"omitempty,min=2,max=50,slug"`
+}
+
+type SyncUserResponse struct {
+	ID                 string    `json:"id"`
+	StoreID            string    `json:"storeId"`
+	Email              string    `json:"email"`
+	Name               *string   `json:"name"`
+	AvatarURL          *string   `json:"avatarUrl"`
+	Role               string    `json:"role"`
+	Status             string    `json:"status"`
+	StoreName          string    `json:"storeName"`
+	StoreSlug          string    `json:"storeSlug"`
+	OnboardingComplete bool      `json:"onboardingComplete"`
+	State              string    `json:"state"`
+	CreatedAt          time.Time `json:"createdAt"`
+	UpdatedAt          time.Time `json:"updatedAt"`
 }
 
 type GetUserStoresResponse struct {
@@ -49,18 +65,20 @@ type SyncUserInput struct {
 }
 
 type SyncUserOutput struct {
-	ID        string
-	StoreID   string
-	Email     string
-	Name      *string
-	AvatarURL *string
-	Role      string
-	Status    string
-	StoreName string
-	StoreSlug string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	IsNew     bool
+	ID                 string
+	StoreID            string
+	Email              string
+	Name               *string
+	AvatarURL          *string
+	Role               string
+	Status             string
+	StoreName          string
+	StoreSlug          string
+	OnboardingComplete bool
+	State              string // "needs_onboarding" | "ready"
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	IsNew              bool
 }
 
 type UserOutput struct {
@@ -115,15 +133,16 @@ type UpdateUserParams struct {
 }
 
 type UserRow struct {
-	ID        string
-	StoreID   string
-	Email     string
-	Name      *string
-	AvatarURL *string
-	Role      string
-	Status    string
-	StoreName string
-	StoreSlug string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID                 string
+	StoreID            string
+	Email              string
+	Name               *string
+	AvatarURL          *string
+	Role               string
+	Status             string
+	StoreName          string
+	StoreSlug          string
+	OnboardingComplete bool
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
