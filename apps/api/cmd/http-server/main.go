@@ -333,7 +333,8 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	invitationRepo := invitation.NewRepository(queries)
 	storeLookup := store.NewStoreLookupAdapter(storeSvc)
 	memberLookup := member.NewMemberLookupAdapter(memberRepo)
-	invitationSvc := invitation.NewService(invitationRepo, emailClient, userLookup, storeLookup, memberLookup, log)
+	membershipLookup := member.NewMembershipLookupAdapter(memberRepo)
+	invitationSvc := invitation.NewService(invitationRepo, emailClient, userLookup, storeLookup, memberLookup, membershipLookup, log)
 	invitationHandler := invitation.NewHandler(invitationSvc, validate)
 
 	// Public invitation routes (viewing invitation by token)

@@ -177,11 +177,9 @@ SELECT s.id, s.name, s.slug, s.active, s.whatsapp_number, s.email_address, s.sms
 FROM stores s
 JOIN memberships m ON s.id = m.store_id
 WHERE m.user_id = $1 AND m.status = 'active'
-ORDER BY m.last_accessed_at DESC NULLS LAST, m.created_at ASC
-LIMIT 1
 `
 
-// Get first store for a user (for backwards compatibility)
+// Get the single store for a user (1 user = 1 store)
 func (q *Queries) GetStoreByUserID(ctx context.Context, userID pgtype.UUID) (Store, error) {
 	row := q.db.QueryRow(ctx, getStoreByUserID, userID)
 	var i Store
@@ -214,7 +212,7 @@ func (q *Queries) GetStoreByUserID(ctx context.Context, userID pgtype.UUID) (Sto
 }
 
 const listStoreMembers = `-- name: ListStoreMembers :many
-SELECT id, store_id, role, created_at, updated_at, status, invited_by, invited_at, last_accessed_at, user_id FROM memberships WHERE store_id = $1 ORDER BY created_at
+SELECT id, store_id, role, created_at, updated_at, status, invited_by, invited_at, user_id FROM memberships WHERE store_id = $1 ORDER BY created_at
 `
 
 func (q *Queries) ListStoreMembers(ctx context.Context, storeID pgtype.UUID) ([]Membership, error) {
@@ -235,7 +233,6 @@ func (q *Queries) ListStoreMembers(ctx context.Context, storeID pgtype.UUID) ([]
 			&i.Status,
 			&i.InvitedBy,
 			&i.InvitedAt,
-			&i.LastAccessedAt,
 			&i.UserID,
 		); err != nil {
 			return nil, err

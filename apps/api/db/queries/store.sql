@@ -45,13 +45,11 @@ RETURNING *;
 SELECT * FROM memberships WHERE store_id = $1 ORDER BY created_at;
 
 -- name: GetStoreByUserID :one
--- Get first store for a user (for backwards compatibility)
+-- Get the single store for a user (1 user = 1 store)
 SELECT s.*
 FROM stores s
 JOIN memberships m ON s.id = m.store_id
-WHERE m.user_id = $1 AND m.status = 'active'
-ORDER BY m.last_accessed_at DESC NULLS LAST, m.created_at ASC
-LIMIT 1;
+WHERE m.user_id = $1 AND m.status = 'active';
 
 -- name: GetStoreByOwnerUserID :one
 -- Get store where user is owner

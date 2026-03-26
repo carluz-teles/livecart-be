@@ -54,18 +54,17 @@ ON CONFLICT (clerk_id) DO UPDATE SET
 RETURNING id, clerk_id, email, name, avatar_url, created_at, updated_at;
 
 -- ============================================
--- MEMBERSHIP QUERIES
+-- MEMBERSHIP QUERIES (Single store per user)
 -- ============================================
 
--- name: GetMembershipsByUserID :many
--- List all memberships (stores) for a user
+-- name: GetMembershipByUserID :one
+-- Get the single membership for a user (1 user = 1 store)
 SELECT
   m.id,
   m.store_id,
   m.user_id,
   m.role,
   m.status,
-  m.last_accessed_at,
   m.created_at,
   m.updated_at,
   u.email,
@@ -76,53 +75,25 @@ SELECT
 FROM memberships m
 JOIN users u ON u.id = m.user_id
 JOIN stores s ON s.id = m.store_id
-WHERE m.user_id = $1 AND m.status = 'active'
-ORDER BY m.last_accessed_at DESC NULLS LAST, m.created_at ASC;
-
--- name: GetMembershipByUserIDAndStore :one
--- Get membership for a specific store
-SELECT
-  m.id,
-  m.store_id,
-  m.user_id,
-  m.role,
-  m.status,
-  m.last_accessed_at,
-  m.created_at,
-  m.updated_at,
-  u.email,
-  u.name,
-  u.avatar_url,
-  s.name as store_name,
-  s.slug as store_slug
-FROM memberships m
-JOIN users u ON u.id = m.user_id
-JOIN stores s ON s.id = m.store_id
-WHERE m.user_id = $1 AND m.store_id = $2;
+WHERE m.user_id = $1 AND m.status = 'active';
 
 -- name: CreateMembership :one
 -- Create a membership (user joins a store)
 INSERT INTO memberships (store_id, user_id, role, status, invited_by, invited_at)
 VALUES ($1, $2, $3, 'active', $4, $5)
-RETURNING id, store_id, user_id, role, status, invited_by, invited_at, last_accessed_at, created_at, updated_at;
+RETURNING id, store_id, user_id, role, status, invited_by, invited_at, created_at, updated_at;
 
 -- name: CreateOwnerMembership :one
 -- Create owner membership when creating a new store
 INSERT INTO memberships (store_id, user_id, role, status)
 VALUES ($1, $2, 'owner', 'active')
-RETURNING id, store_id, user_id, role, status, last_accessed_at, created_at, updated_at;
-
--- name: UpdateMembershipLastAccessed :exec
--- Update last accessed timestamp for a membership
-UPDATE memberships
-SET last_accessed_at = now()
-WHERE user_id = $1 AND store_id = $2;
+RETURNING id, store_id, user_id, role, status, created_at, updated_at;
 
 -- name: UpdateMembershipRole :one
 UPDATE memberships
 SET role = $3, updated_at = now()
 WHERE store_id = $1 AND id = $2
-RETURNING id, store_id, user_id, role, status, last_accessed_at, created_at, updated_at;
+RETURNING id, store_id, user_id, role, status, created_at, updated_at;
 
 -- name: DeleteMembership :exec
 DELETE FROM memberships WHERE store_id = $1 AND id = $2;
@@ -181,7 +152,6 @@ SELECT
   m.status,
   m.invited_by,
   m.invited_at,
-  m.last_accessed_at,
   m.created_at,
   m.updated_at,
   u.clerk_id,
@@ -191,6 +161,10 @@ SELECT
 FROM memberships m
 JOIN users u ON u.id = m.user_id
 WHERE m.id = $1;
+
+-- name: DeleteMembershipByUserID :exec
+-- Delete membership by user ID (for when member accepts invite to new store)
+DELETE FROM memberships WHERE user_id = $1;
 
 -- ============================================
 -- INVITATION QUERIES

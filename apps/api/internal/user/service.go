@@ -18,7 +18,7 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 	}
 }
 
-// SyncUser creates/updates user and returns all memberships
+// SyncUser creates/updates user and returns the single membership (1 user = 1 store)
 // This is the main sync endpoint called on every login
 func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserOutput, error) {
 	// Upsert user in users table (creates if doesn't exist, updates if exists)
@@ -33,51 +33,42 @@ func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserO
 		zap.String("email", user.Email),
 	)
 
-	// Get all memberships for this user
-	memberships, err := s.repo.GetMembershipsByUserID(ctx, user.ID)
+	// Get single membership for this user (1 user = 1 store)
+	membership, err := s.repo.GetMembershipByUserID(ctx, user.ID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Convert to output format
-	membershipOutputs := make([]MembershipOutput, len(memberships))
-	for i, m := range memberships {
-		membershipOutputs[i] = MembershipOutput{
-			ID:             m.ID,
-			StoreID:        m.StoreID,
-			UserID:         m.UserID,
-			StoreName:      m.StoreName,
-			StoreSlug:      m.StoreSlug,
-			Role:           m.Role,
-			Status:         m.Status,
-			Email:          m.Email,
-			Name:           m.Name,
-			AvatarURL:      m.AvatarURL,
-			LastAccessedAt: m.LastAccessedAt,
-			CreatedAt:      m.CreatedAt,
-			UpdatedAt:      m.UpdatedAt,
+	// Determine state
+	state := "no_store"
+	var membershipOutput *MembershipOutput
+
+	if membership != nil {
+		state = "ready"
+		membershipOutput = &MembershipOutput{
+			ID:        membership.ID,
+			StoreID:   membership.StoreID,
+			UserID:    membership.UserID,
+			StoreName: membership.StoreName,
+			StoreSlug: membership.StoreSlug,
+			Role:      membership.Role,
+			Status:    membership.Status,
+			Email:     membership.Email,
+			Name:      membership.Name,
+			AvatarURL: membership.AvatarURL,
+			CreatedAt: membership.CreatedAt,
+			UpdatedAt: membership.UpdatedAt,
 		}
 	}
 
-	// Determine state and last accessed store
-	state := "no_store"
-	var lastAccessedStoreID *string
-
-	if len(memberships) > 0 {
-		state = "ready"
-		// First membership is ordered by last_accessed_at DESC, so it's the most recent
-		lastAccessedStoreID = &memberships[0].StoreID
-	}
-
 	return &SyncUserOutput{
-		UserID:              user.ID,
-		ClerkUserID:         user.ClerkID,
-		Email:               user.Email,
-		Name:                user.Name,
-		AvatarURL:           user.AvatarURL,
-		Memberships:         membershipOutputs,
-		LastAccessedStoreID: lastAccessedStoreID,
-		State:               state,
+		UserID:      user.ID,
+		ClerkUserID: user.ClerkID,
+		Email:       user.Email,
+		Name:        user.Name,
+		AvatarURL:   user.AvatarURL,
+		Membership:  membershipOutput,
+		State:       state,
 	}, nil
 }
 
@@ -117,62 +108,30 @@ func (s *Service) GetUserByEmail(ctx context.Context, email string) (*UserInfo, 
 	}, nil
 }
 
-// GetMembership returns a specific membership for a user and store
-func (s *Service) GetMembership(ctx context.Context, userID, storeID string) (*MembershipOutput, error) {
-	m, err := s.repo.GetMembershipByUserIDAndStore(ctx, userID, storeID)
+// GetMembership returns the single membership for a user (1 user = 1 store)
+func (s *Service) GetMembership(ctx context.Context, userID string) (*MembershipOutput, error) {
+	m, err := s.repo.GetMembershipByUserID(ctx, userID)
 	if err != nil {
 		return nil, err
+	}
+	if m == nil {
+		return nil, nil
 	}
 
 	return &MembershipOutput{
-		ID:             m.ID,
-		StoreID:        m.StoreID,
-		UserID:         m.UserID,
-		StoreName:      m.StoreName,
-		StoreSlug:      m.StoreSlug,
-		Role:           m.Role,
-		Status:         m.Status,
-		Email:          m.Email,
-		Name:           m.Name,
-		AvatarURL:      m.AvatarURL,
-		LastAccessedAt: m.LastAccessedAt,
-		CreatedAt:      m.CreatedAt,
-		UpdatedAt:      m.UpdatedAt,
+		ID:        m.ID,
+		StoreID:   m.StoreID,
+		UserID:    m.UserID,
+		StoreName: m.StoreName,
+		StoreSlug: m.StoreSlug,
+		Role:      m.Role,
+		Status:    m.Status,
+		Email:     m.Email,
+		Name:      m.Name,
+		AvatarURL: m.AvatarURL,
+		CreatedAt: m.CreatedAt,
+		UpdatedAt: m.UpdatedAt,
 	}, nil
-}
-
-// SelectStore updates the last accessed store for a user
-func (s *Service) SelectStore(ctx context.Context, userID, storeID string) error {
-	return s.repo.UpdateMembershipLastAccessed(ctx, userID, storeID)
-}
-
-// GetUserStores returns all memberships (stores) for a user
-func (s *Service) GetUserStores(ctx context.Context, userID string) ([]MembershipOutput, error) {
-	memberships, err := s.repo.GetMembershipsByUserID(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-
-	outputs := make([]MembershipOutput, len(memberships))
-	for i, m := range memberships {
-		outputs[i] = MembershipOutput{
-			ID:             m.ID,
-			StoreID:        m.StoreID,
-			UserID:         m.UserID,
-			StoreName:      m.StoreName,
-			StoreSlug:      m.StoreSlug,
-			Role:           m.Role,
-			Status:         m.Status,
-			Email:          m.Email,
-			Name:           m.Name,
-			AvatarURL:      m.AvatarURL,
-			LastAccessedAt: m.LastAccessedAt,
-			CreatedAt:      m.CreatedAt,
-			UpdatedAt:      m.UpdatedAt,
-		}
-	}
-
-	return outputs, nil
 }
 
 // UpdateUser updates user info in the users table (for Clerk webhook)
@@ -204,18 +163,17 @@ func (s *Service) CreateOwnerMembership(ctx context.Context, storeID, userID str
 	}, nil
 }
 
-// GetActiveStoreID returns the last accessed store ID for a user
-// Returns empty string if user has no memberships
+// GetActiveStoreID returns the store ID for a user (single store model)
+// Returns empty string if user has no membership
 func (s *Service) GetActiveStoreID(ctx context.Context, userID string) (string, error) {
-	memberships, err := s.repo.GetMembershipsByUserID(ctx, userID)
+	membership, err := s.repo.GetMembershipByUserID(ctx, userID)
 	if err != nil {
 		return "", err
 	}
-	if len(memberships) == 0 {
+	if membership == nil {
 		return "", nil
 	}
-	// First membership is the most recently accessed
-	return memberships[0].StoreID, nil
+	return membership.StoreID, nil
 }
 
 // CreateMembership creates a new membership (for accepting invitations)
@@ -234,6 +192,15 @@ func (s *Service) CreateMembership(ctx context.Context, params CreateMembershipP
 		CreatedAt: m.CreatedAt,
 		UpdatedAt: m.UpdatedAt,
 	}, nil
+}
+
+// HasMembership checks if user already has a membership (for single store validation)
+func (s *Service) HasMembership(ctx context.Context, userID string) (bool, error) {
+	membership, err := s.repo.GetMembershipByUserID(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	return membership != nil, nil
 }
 
 // GetUserIDByClerkID is a helper to get user's internal UUID from Clerk ID
@@ -262,6 +229,11 @@ func (a *MembershipCreatorAdapter) CreateOwnerMembership(ctx context.Context, st
 		return "", err
 	}
 	return m.ID, nil
+}
+
+// HasMembership implements store.MembershipCreator - checks if user already has a store
+func (a *MembershipCreatorAdapter) HasMembership(ctx context.Context, userID string) (bool, error) {
+	return a.service.HasMembership(ctx, userID)
 }
 
 // UserLookupAdapter implements store.UserLookup and invitation.UserLookup interfaces

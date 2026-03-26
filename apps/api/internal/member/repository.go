@@ -117,6 +117,65 @@ func (r *Repository) Remove(ctx context.Context, storeID, memberID string) error
 	return nil
 }
 
+// MembershipInfo represents a user's current membership info
+// Implements invitation.MembershipData interface
+type MembershipInfo struct {
+	ID        string
+	StoreID   string
+	StoreName string
+	Role      string
+}
+
+// GetID implements invitation.MembershipData
+func (m *MembershipInfo) GetID() string { return m.ID }
+
+// GetStoreID implements invitation.MembershipData
+func (m *MembershipInfo) GetStoreID() string { return m.StoreID }
+
+// GetStoreName implements invitation.MembershipData
+func (m *MembershipInfo) GetStoreName() string { return m.StoreName }
+
+// GetRole implements invitation.MembershipData
+func (m *MembershipInfo) GetRole() string { return m.Role }
+
+// GetMembershipByUserID returns the user's single membership (if any)
+func (r *Repository) GetMembershipByUserID(ctx context.Context, userID string) (*MembershipInfo, error) {
+	userUID, err := parseUUID(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := r.q.GetMembershipByUserID(ctx, userUID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil // No membership found
+		}
+		return nil, fmt.Errorf("getting membership by user id: %w", err)
+	}
+
+	return &MembershipInfo{
+		ID:        row.ID.String(),
+		StoreID:   row.StoreID.String(),
+		StoreName: row.StoreName,
+		Role:      row.Role,
+	}, nil
+}
+
+// DeleteMembershipByUserID removes the user's membership (for accepting invite to new store)
+func (r *Repository) DeleteMembershipByUserID(ctx context.Context, userID string) error {
+	userUID, err := parseUUID(userID)
+	if err != nil {
+		return err
+	}
+
+	err = r.q.DeleteMembershipByUserID(ctx, userUID)
+	if err != nil {
+		return fmt.Errorf("deleting membership by user id: %w", err)
+	}
+
+	return nil
+}
+
 // toDomainMember converts a SQLC row to a domain Member.
 func (r *Repository) toDomainMember(row sqlc.GetStoreMembersRow) (*domain.Member, error) {
 	id, err := vo.NewMemberID(row.ID.String())

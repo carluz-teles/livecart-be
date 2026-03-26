@@ -12,6 +12,8 @@ import (
 // MembershipCreator interface to avoid circular dependency with user package
 type MembershipCreator interface {
 	CreateOwnerMembership(ctx context.Context, storeID, userID string) (membershipID string, err error)
+	// HasMembership checks if user already has a membership (1 user = 1 store)
+	HasMembership(ctx context.Context, userID string) (bool, error)
 }
 
 // UserLookup interface to look up users by Clerk ID
@@ -44,7 +46,17 @@ func (s *Service) Create(ctx context.Context, input CreateStoreInput) (CreateSto
 		return CreateStoreOutput{}, httpx.ErrUnprocessable("user not found - please sync your account first")
 	}
 
-	// 2. Check slug uniqueness
+	// 2. Check if user already has a store (1 user = 1 store rule)
+	hasMembership, err := s.membershipCreator.HasMembership(ctx, userID)
+	if err != nil {
+		s.logger.Error("failed to check existing membership", zap.Error(err), zap.String("user_id", userID))
+		return CreateStoreOutput{}, fmt.Errorf("checking existing membership: %w", err)
+	}
+	if hasMembership {
+		return CreateStoreOutput{}, httpx.ErrConflict("you already have a store - delete your current store first to create a new one")
+	}
+
+	// 3. Check slug uniqueness
 	existing, err := s.repo.GetBySlug(ctx, input.Slug)
 	if err != nil && !httpx.IsNotFound(err) {
 		return CreateStoreOutput{}, fmt.Errorf("checking slug uniqueness: %w", err)
@@ -53,7 +65,7 @@ func (s *Service) Create(ctx context.Context, input CreateStoreInput) (CreateSto
 		return CreateStoreOutput{}, httpx.ErrConflict("slug already in use")
 	}
 
-	// 3. Create store
+	// 4. Create store
 	storeRow, err := s.repo.Create(ctx, CreateStoreParams{
 		Name: input.Name,
 		Slug: input.Slug,
@@ -63,7 +75,7 @@ func (s *Service) Create(ctx context.Context, input CreateStoreInput) (CreateSto
 		return CreateStoreOutput{}, fmt.Errorf("creating store: %w", err)
 	}
 
-	// 4. Create owner membership
+	// 5. Create owner membership
 	membershipID, err := s.membershipCreator.CreateOwnerMembership(ctx, storeRow.ID, userID)
 	if err != nil {
 		s.logger.Error("failed to create owner membership", zap.Error(err), zap.String("store_id", storeRow.ID))

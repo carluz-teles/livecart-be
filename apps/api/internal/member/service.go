@@ -10,6 +10,9 @@ import (
 	vo "livecart/apps/api/lib/valueobject"
 )
 
+// Ensure MembershipLookupAdapter implements httpx.MembershipLookup
+var _ httpx.MembershipLookup = (*MembershipLookupAdapter)(nil)
+
 type Service struct {
 	repo   *Repository
 	logger *zap.Logger
@@ -145,4 +148,33 @@ func (a *MemberLookupAdapter) GetMemberNameByID(ctx context.Context, storeID, me
 		return *member.Name(), nil
 	}
 	return member.Email().String(), nil // Fallback to email if no name
+}
+
+// MembershipLookupAdapter implements invitation.MembershipLookup interface
+// This adapter is used to check if a user already has a membership (1 user = 1 store)
+type MembershipLookupAdapter struct {
+	repo *Repository
+}
+
+// NewMembershipLookupAdapter creates a new adapter for membership lookup
+func NewMembershipLookupAdapter(repo *Repository) *MembershipLookupAdapter {
+	return &MembershipLookupAdapter{repo: repo}
+}
+
+// GetMembershipByUserID implements httpx.MembershipLookup
+// Returns nil if user has no membership
+func (a *MembershipLookupAdapter) GetMembershipByUserID(ctx context.Context, userID string) (httpx.MembershipData, error) {
+	info, err := a.repo.GetMembershipByUserID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if info == nil {
+		return nil, nil
+	}
+	return info, nil
+}
+
+// DeleteMembershipByUserID implements httpx.MembershipLookup
+func (a *MembershipLookupAdapter) DeleteMembershipByUserID(ctx context.Context, userID string) error {
+	return a.repo.DeleteMembershipByUserID(ctx, userID)
 }

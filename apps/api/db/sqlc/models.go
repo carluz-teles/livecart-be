@@ -103,16 +103,15 @@ type LiveSession struct {
 }
 
 type Membership struct {
-	ID             pgtype.UUID        `json:"id"`
-	StoreID        pgtype.UUID        `json:"store_id"`
-	Role           string             `json:"role"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
-	Status         string             `json:"status"`
-	InvitedBy      pgtype.UUID        `json:"invited_by"`
-	InvitedAt      pgtype.Timestamptz `json:"invited_at"`
-	LastAccessedAt pgtype.Timestamptz `json:"last_accessed_at"`
-	UserID         pgtype.UUID        `json:"user_id"`
+	ID        pgtype.UUID        `json:"id"`
+	StoreID   pgtype.UUID        `json:"store_id"`
+	Role      string             `json:"role"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+	Status    string             `json:"status"`
+	InvitedBy pgtype.UUID        `json:"invited_by"`
+	InvitedAt pgtype.Timestamptz `json:"invited_at"`
+	UserID    pgtype.UUID        `json:"user_id"`
 }
 
 type Product struct {

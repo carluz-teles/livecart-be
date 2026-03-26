@@ -19,6 +19,7 @@ type UserLookup interface {
 	GetUserIDByClerkID(ctx context.Context, clerkUserID string) (userID string, err error)
 }
 
+
 // StoreLookup interface to look up store info
 type StoreLookup interface {
 	GetStoreNameByID(ctx context.Context, storeID string) (storeName string, err error)
@@ -30,22 +31,24 @@ type MemberLookup interface {
 }
 
 type Service struct {
-	repo         *Repository
-	emailer      *email.Client
-	userLookup   UserLookup
-	storeLookup  StoreLookup
-	memberLookup MemberLookup
-	logger       *zap.Logger
+	repo             *Repository
+	emailer          *email.Client
+	userLookup       UserLookup
+	storeLookup      StoreLookup
+	memberLookup     MemberLookup
+	membershipLookup httpx.MembershipLookup
+	logger           *zap.Logger
 }
 
-func NewService(repo *Repository, emailer *email.Client, userLookup UserLookup, storeLookup StoreLookup, memberLookup MemberLookup, logger *zap.Logger) *Service {
+func NewService(repo *Repository, emailer *email.Client, userLookup UserLookup, storeLookup StoreLookup, memberLookup MemberLookup, membershipLookup httpx.MembershipLookup, logger *zap.Logger) *Service {
 	return &Service{
-		repo:         repo,
-		emailer:      emailer,
-		userLookup:   userLookup,
-		storeLookup:  storeLookup,
-		memberLookup: memberLookup,
-		logger:       logger.Named("invitation"),
+		repo:             repo,
+		emailer:          emailer,
+		userLookup:       userLookup,
+		storeLookup:      storeLookup,
+		memberLookup:     memberLookup,
+		membershipLookup: membershipLookup,
+		logger:           logger.Named("invitation"),
 	}
 }
 
@@ -174,6 +177,36 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*Acc
 	if err != nil {
 		s.logger.Error("failed to look up user", zap.Error(err), zap.String("clerk_user_id", input.ClerkUserID))
 		return nil, httpx.ErrUnprocessable("user not found - please sync your account first")
+	}
+
+	// NEW: Check if user already has a membership (1 user = 1 store rule)
+	existingMembership, err := s.membershipLookup.GetMembershipByUserID(ctx, userID)
+	if err != nil {
+		s.logger.Debug("error checking existing membership", zap.Error(err), zap.String("user_id", userID))
+		// Continue - no existing membership found
+	}
+
+	if existingMembership != nil {
+		// If user is owner of their current store, block acceptance
+		if existingMembership.GetRole() == "owner" {
+			s.logger.Warn("owner tried to accept invite",
+				zap.String("user_id", userID),
+				zap.String("current_store", existingMembership.GetStoreName()),
+			)
+			return nil, httpx.ErrConflict("you are the owner of another store - delete your store first to accept this invitation")
+		}
+
+		// User is a member, remove from previous store
+		s.logger.Info("removing user from previous store to join new one",
+			zap.String("user_id", userID),
+			zap.String("old_store", existingMembership.GetStoreName()),
+			zap.String("new_store", inv.StoreName()),
+		)
+
+		if err := s.membershipLookup.DeleteMembershipByUserID(ctx, userID); err != nil {
+			s.logger.Error("failed to remove user from previous store", zap.Error(err))
+			return nil, httpx.ErrInternal("failed to leave previous store")
+		}
 	}
 
 	// Add user to store membership

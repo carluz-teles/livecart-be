@@ -108,46 +108,20 @@ func (r *Repository) DeleteUser(ctx context.Context, clerkID string) error {
 }
 
 // ============================================
-// Membership operations
+// Membership operations (Single store per user)
 // ============================================
 
-// GetMembershipsByUserID returns all memberships for a user
-func (r *Repository) GetMembershipsByUserID(ctx context.Context, userID string) ([]MembershipRow, error) {
+// GetMembershipByUserID returns the single membership for a user (1 user = 1 store)
+func (r *Repository) GetMembershipByUserID(ctx context.Context, userID string) (*MembershipRow, error) {
 	uid, err := parseUUID(userID)
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := r.q.GetMembershipsByUserID(ctx, uid)
-	if err != nil {
-		return nil, fmt.Errorf("getting memberships: %w", err)
-	}
-
-	memberships := make([]MembershipRow, len(rows))
-	for i, row := range rows {
-		memberships[i] = toMembershipRowFromList(row)
-	}
-	return memberships, nil
-}
-
-// GetMembershipByUserIDAndStore returns a specific membership
-func (r *Repository) GetMembershipByUserIDAndStore(ctx context.Context, userID, storeID string) (*MembershipRow, error) {
-	uid, err := parseUUID(userID)
-	if err != nil {
-		return nil, err
-	}
-	sid, err := parseUUID(storeID)
-	if err != nil {
-		return nil, err
-	}
-
-	row, err := r.q.GetMembershipByUserIDAndStore(ctx, sqlc.GetMembershipByUserIDAndStoreParams{
-		UserID:  uid,
-		StoreID: sid,
-	})
+	row, err := r.q.GetMembershipByUserID(ctx, uid)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.ErrNotFound("membership not found")
+			return nil, nil // No membership found
 		}
 		return nil, fmt.Errorf("getting membership: %w", err)
 	}
@@ -198,9 +172,6 @@ func (r *Repository) CreateMembership(ctx context.Context, params CreateMembersh
 		CreatedAt: row.CreatedAt.Time,
 		UpdatedAt: row.UpdatedAt.Time,
 	}
-	if row.LastAccessedAt.Valid {
-		out.LastAccessedAt = &row.LastAccessedAt.Time
-	}
 	return &out, nil
 }
 
@@ -232,27 +203,7 @@ func (r *Repository) CreateOwnerMembership(ctx context.Context, storeID, userID 
 		CreatedAt: row.CreatedAt.Time,
 		UpdatedAt: row.UpdatedAt.Time,
 	}
-	if row.LastAccessedAt.Valid {
-		out.LastAccessedAt = &row.LastAccessedAt.Time
-	}
 	return &out, nil
-}
-
-// UpdateMembershipLastAccessed updates the last accessed timestamp
-func (r *Repository) UpdateMembershipLastAccessed(ctx context.Context, userID, storeID string) error {
-	uid, err := parseUUID(userID)
-	if err != nil {
-		return err
-	}
-	sid, err := parseUUID(storeID)
-	if err != nil {
-		return err
-	}
-
-	return r.q.UpdateMembershipLastAccessed(ctx, sqlc.UpdateMembershipLastAccessedParams{
-		UserID:  uid,
-		StoreID: sid,
-	})
 }
 
 // DeleteMembership removes a membership
@@ -327,8 +278,8 @@ func toUserRow(row sqlc.User) *UserRow {
 	return out
 }
 
-// Helper to convert sqlc row to MembershipRow (from list query)
-func toMembershipRowFromList(row sqlc.GetMembershipsByUserIDRow) MembershipRow {
+// Helper to convert sqlc row to MembershipRow (single membership per user)
+func toMembershipRowFromSingle(row sqlc.GetMembershipByUserIDRow) MembershipRow {
 	out := MembershipRow{
 		ID:        row.ID.String(),
 		StoreID:   row.StoreID.String(),
@@ -346,35 +297,6 @@ func toMembershipRowFromList(row sqlc.GetMembershipsByUserIDRow) MembershipRow {
 	}
 	if row.AvatarUrl.Valid {
 		out.AvatarURL = &row.AvatarUrl.String
-	}
-	if row.LastAccessedAt.Valid {
-		out.LastAccessedAt = &row.LastAccessedAt.Time
-	}
-	return out
-}
-
-// Helper to convert sqlc row to MembershipRow (from single query)
-func toMembershipRowFromSingle(row sqlc.GetMembershipByUserIDAndStoreRow) MembershipRow {
-	out := MembershipRow{
-		ID:        row.ID.String(),
-		StoreID:   row.StoreID.String(),
-		UserID:    row.UserID.String(),
-		Email:     row.Email,
-		Role:      row.Role,
-		Status:    row.Status,
-		StoreName: row.StoreName,
-		StoreSlug: row.StoreSlug,
-		CreatedAt: row.CreatedAt.Time,
-		UpdatedAt: row.UpdatedAt.Time,
-	}
-	if row.Name.Valid {
-		out.Name = &row.Name.String
-	}
-	if row.AvatarUrl.Valid {
-		out.AvatarURL = &row.AvatarUrl.String
-	}
-	if row.LastAccessedAt.Valid {
-		out.LastAccessedAt = &row.LastAccessedAt.Time
 	}
 	return out
 }
