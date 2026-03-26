@@ -16,6 +16,18 @@ type CartSettingsDTO struct {
 }
 
 // ============================================
+// Address Types
+// ============================================
+
+type AddressDTO struct {
+	Street  string `json:"street"`
+	City    string `json:"city"`
+	State   string `json:"state"`
+	Zip     string `json:"zip"`
+	Country string `json:"country"`
+}
+
+// ============================================
 // Handler layer
 // ============================================
 
@@ -32,10 +44,14 @@ type CreateStoreResponse struct {
 }
 
 type UpdateStoreRequest struct {
-	Name           string `json:"name" validate:"required,min=2,max=100"`
-	WhatsappNumber string `json:"whatsappNumber"`
-	EmailAddress   string `json:"emailAddress"`
-	SMSNumber      string `json:"smsNumber"`
+	Name           string     `json:"name" validate:"required,min=2,max=100"`
+	WhatsappNumber string     `json:"whatsappNumber"`
+	EmailAddress   string     `json:"emailAddress"`
+	SMSNumber      string     `json:"smsNumber"`
+	Description    string     `json:"description"`
+	Website        string     `json:"website"`
+	LogoURL        string     `json:"logoUrl"`
+	Address        AddressDTO `json:"address"`
 }
 
 type UpdateCartSettingsRequest struct {
@@ -55,6 +71,10 @@ type StoreResponse struct {
 	WhatsappNumber *string         `json:"whatsappNumber"`
 	EmailAddress   *string         `json:"emailAddress"`
 	SMSNumber      *string         `json:"smsNumber"`
+	Description    *string         `json:"description"`
+	Website        *string         `json:"website"`
+	LogoURL        *string         `json:"logoUrl"`
+	Address        *AddressDTO     `json:"address"`
 	CartSettings   CartSettingsDTO `json:"cartSettings"`
 	CreatedAt      time.Time       `json:"createdAt"`
 }
@@ -83,6 +103,10 @@ type UpdateStoreInput struct {
 	WhatsappNumber string
 	EmailAddress   string
 	SMSNumber      string
+	Description    string
+	Website        string
+	LogoURL        string
+	Address        AddressDTO
 }
 
 type UpdateCartSettingsInput struct {
@@ -103,6 +127,10 @@ type StoreOutput struct {
 	WhatsappNumber *string
 	EmailAddress   *string
 	SMSNumber      *string
+	Description    *string
+	Website        *string
+	LogoURL        *string
+	Address        *AddressDTO
 	CartSettings   CartSettingsDTO
 	CreatedAt      time.Time
 }
@@ -122,6 +150,14 @@ type UpdateStoreParams struct {
 	WhatsappNumber string
 	EmailAddress   string
 	SMSNumber      string
+	Description    string
+	Website        string
+	LogoURL        string
+	AddressStreet  string
+	AddressCity    string
+	AddressState   string
+	AddressZip     string
+	AddressCountry string
 }
 
 type UpdateCartSettingsParams struct {
@@ -142,6 +178,14 @@ type StoreRow struct {
 	WhatsappNumber *string
 	EmailAddress   *string
 	SMSNumber      *string
+	Description    *string
+	Website        *string
+	LogoURL        *string
+	AddressStreet  *string
+	AddressCity    *string
+	AddressState   *string
+	AddressZip     *string
+	AddressCountry *string
 	CartSettings   CartSettingsDTO
 	CreatedAt      time.Time
 	UpdatedAt      time.Time

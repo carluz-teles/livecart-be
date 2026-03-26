@@ -152,6 +152,22 @@ type Store struct {
 	// Notify customer before cart expires
 	CartNotifyBeforeExpiration bool               `json:"cart_notify_before_expiration"`
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
+	// Store description/bio for public display
+	Description pgtype.Text `json:"description"`
+	// Store external website URL
+	Website pgtype.Text `json:"website"`
+	// Store logo image URL
+	LogoUrl pgtype.Text `json:"logo_url"`
+	// Store street address
+	AddressStreet pgtype.Text `json:"address_street"`
+	// Store city
+	AddressCity pgtype.Text `json:"address_city"`
+	// Store state/province
+	AddressState pgtype.Text `json:"address_state"`
+	// Store postal/ZIP code
+	AddressZip pgtype.Text `json:"address_zip"`
+	// Store country
+	AddressCountry pgtype.Text `json:"address_country"`
 }
 
 type StoreInvitation struct {

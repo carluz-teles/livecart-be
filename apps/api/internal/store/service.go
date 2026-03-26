@@ -101,6 +101,14 @@ func (s *Service) Update(ctx context.Context, input UpdateStoreInput) (StoreOutp
 		WhatsappNumber: input.WhatsappNumber,
 		EmailAddress:   input.EmailAddress,
 		SMSNumber:      input.SMSNumber,
+		Description:    input.Description,
+		Website:        input.Website,
+		LogoURL:        input.LogoURL,
+		AddressStreet:  input.Address.Street,
+		AddressCity:    input.Address.City,
+		AddressState:   input.Address.State,
+		AddressZip:     input.Address.Zip,
+		AddressCountry: input.Address.Country,
 	})
 	if err != nil {
 		return StoreOutput{}, err
@@ -142,6 +150,17 @@ func (s *Service) GetByClerkUserID(ctx context.Context, clerkUserID string) (Sto
 }
 
 func toStoreOutput(row StoreRow) StoreOutput {
+	var address *AddressDTO
+	if row.AddressStreet != nil || row.AddressCity != nil || row.AddressState != nil || row.AddressZip != nil || row.AddressCountry != nil {
+		address = &AddressDTO{
+			Street:  deref(row.AddressStreet),
+			City:    deref(row.AddressCity),
+			State:   deref(row.AddressState),
+			Zip:     deref(row.AddressZip),
+			Country: deref(row.AddressCountry),
+		}
+	}
+
 	return StoreOutput{
 		ID:             row.ID,
 		Name:           row.Name,
@@ -150,9 +169,20 @@ func toStoreOutput(row StoreRow) StoreOutput {
 		WhatsappNumber: row.WhatsappNumber,
 		EmailAddress:   row.EmailAddress,
 		SMSNumber:      row.SMSNumber,
+		Description:    row.Description,
+		Website:        row.Website,
+		LogoURL:        row.LogoURL,
+		Address:        address,
 		CartSettings:   row.CartSettings,
 		CreatedAt:      row.CreatedAt,
 	}
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // StoreLookupAdapter implements invitation.StoreLookup interface

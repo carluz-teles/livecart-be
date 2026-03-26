@@ -131,6 +131,10 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 		WhatsappNumber: req.WhatsappNumber,
 		EmailAddress:   req.EmailAddress,
 		SMSNumber:      req.SMSNumber,
+		Description:    req.Description,
+		Website:        req.Website,
+		LogoURL:        req.LogoURL,
+		Address:        req.Address,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -217,6 +221,10 @@ func (h *Handler) UpdateByID(c *fiber.Ctx) error {
 		WhatsappNumber: req.WhatsappNumber,
 		EmailAddress:   req.EmailAddress,
 		SMSNumber:      req.SMSNumber,
+		Description:    req.Description,
+		Website:        req.Website,
+		LogoURL:        req.LogoURL,
+		Address:        req.Address,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -279,6 +287,10 @@ func toStoreResponse(output StoreOutput) StoreResponse {
 		WhatsappNumber: output.WhatsappNumber,
 		EmailAddress:   output.EmailAddress,
 		SMSNumber:      output.SMSNumber,
+		Description:    output.Description,
+		Website:        output.Website,
+		LogoURL:        output.LogoURL,
+		Address:        output.Address,
 		CartSettings:   output.CartSettings,
 		CreatedAt:      output.CreatedAt,
 	}

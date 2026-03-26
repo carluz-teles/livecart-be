@@ -16,6 +16,14 @@ SET
   whatsapp_number = $3,
   email_address = $4,
   sms_number = $5,
+  description = $6,
+  website = $7,
+  logo_url = $8,
+  address_street = $9,
+  address_city = $10,
+  address_state = $11,
+  address_zip = $12,
+  address_country = $13,
   updated_at = now()
 WHERE id = $1
 RETURNING *;

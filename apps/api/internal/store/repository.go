@@ -75,6 +75,14 @@ func (r *Repository) Update(ctx context.Context, params UpdateStoreParams) (Stor
 		WhatsappNumber: pgtype.Text{String: params.WhatsappNumber, Valid: params.WhatsappNumber != ""},
 		EmailAddress:   pgtype.Text{String: params.EmailAddress, Valid: params.EmailAddress != ""},
 		SmsNumber:      pgtype.Text{String: params.SMSNumber, Valid: params.SMSNumber != ""},
+		Description:    pgtype.Text{String: params.Description, Valid: params.Description != ""},
+		Website:        pgtype.Text{String: params.Website, Valid: params.Website != ""},
+		LogoUrl:        pgtype.Text{String: params.LogoURL, Valid: params.LogoURL != ""},
+		AddressStreet:  pgtype.Text{String: params.AddressStreet, Valid: params.AddressStreet != ""},
+		AddressCity:    pgtype.Text{String: params.AddressCity, Valid: params.AddressCity != ""},
+		AddressState:   pgtype.Text{String: params.AddressState, Valid: params.AddressState != ""},
+		AddressZip:     pgtype.Text{String: params.AddressZip, Valid: params.AddressZip != ""},
+		AddressCountry: pgtype.Text{String: params.AddressCountry, Valid: params.AddressCountry != ""},
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -141,6 +149,34 @@ func toStoreRow(row sqlc.Store) StoreRow {
 		sms = &row.SmsNumber.String
 	}
 
+	var description, website, logoURL *string
+	if row.Description.Valid {
+		description = &row.Description.String
+	}
+	if row.Website.Valid {
+		website = &row.Website.String
+	}
+	if row.LogoUrl.Valid {
+		logoURL = &row.LogoUrl.String
+	}
+
+	var addressStreet, addressCity, addressState, addressZip, addressCountry *string
+	if row.AddressStreet.Valid {
+		addressStreet = &row.AddressStreet.String
+	}
+	if row.AddressCity.Valid {
+		addressCity = &row.AddressCity.String
+	}
+	if row.AddressState.Valid {
+		addressState = &row.AddressState.String
+	}
+	if row.AddressZip.Valid {
+		addressZip = &row.AddressZip.String
+	}
+	if row.AddressCountry.Valid {
+		addressCountry = &row.AddressCountry.String
+	}
+
 	return StoreRow{
 		ID:             row.ID.String(),
 		Name:           row.Name,
@@ -149,6 +185,14 @@ func toStoreRow(row sqlc.Store) StoreRow {
 		WhatsappNumber: whatsapp,
 		EmailAddress:   email,
 		SMSNumber:      sms,
+		Description:    description,
+		Website:        website,
+		LogoURL:        logoURL,
+		AddressStreet:  addressStreet,
+		AddressCity:    addressCity,
+		AddressState:   addressState,
+		AddressZip:     addressZip,
+		AddressCountry: addressCountry,
 		CartSettings: CartSettingsDTO{
 			Enabled:                row.CartEnabled,
 			ExpirationMinutes:      int(row.CartExpirationMinutes),
