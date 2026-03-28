@@ -28,6 +28,7 @@ import (
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/idempotency"
 	"livecart/apps/api/lib/logger"
+	"livecart/apps/api/lib/ratelimit"
 
 	"livecart/apps/api/internal/customer"
 	"livecart/apps/api/internal/dashboard"
@@ -170,11 +171,15 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		if err != nil {
 			log.Sugar().Warnf("integration layer disabled: %v", err)
 		} else {
+			// Create rate limit manager for integration providers
+			rateLimitManager := ratelimit.NewManager(log)
+
 			// Create provider factory with constructors
 			providerFactory := providers.NewFactory(providers.FactoryConfig{
 				Logger:               log,
 				MercadoPagoAppID:     config.MercadoPagoAppID.String(),
 				MercadoPagoAppSecret: config.MercadoPagoAppSecret.String(),
+				RateLimitManager:     rateLimitManager,
 				MercadoPagoConstructor: func(cfg providers.MercadoPagoConfig) (providers.PaymentProvider, error) {
 					return payment.NewMercadoPago(payment.MercadoPagoConfig{
 						IntegrationID: cfg.IntegrationID,
@@ -184,6 +189,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						AppSecret:     cfg.AppSecret,
 						Logger:        cfg.Logger,
 						LogFunc:       cfg.LogFunc,
+						RateLimiter:   cfg.RateLimiter,
 					})
 				},
 				TinyConstructor: func(cfg providers.TinyConfig) (providers.ERPProvider, error) {
@@ -195,6 +201,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						ClientSecret:  cfg.ClientSecret,
 						Logger:        cfg.Logger,
 						LogFunc:       cfg.LogFunc,
+						RateLimiter:   cfg.RateLimiter,
 					})
 				},
 			})
@@ -219,6 +226,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				LogFunc:              integrationSvc.LogIntegrationOperation,
 				MercadoPagoAppID:     config.MercadoPagoAppID.String(),
 				MercadoPagoAppSecret: config.MercadoPagoAppSecret.String(),
+				RateLimitManager:     rateLimitManager,
 				MercadoPagoConstructor: func(cfg providers.MercadoPagoConfig) (providers.PaymentProvider, error) {
 					return payment.NewMercadoPago(payment.MercadoPagoConfig{
 						IntegrationID: cfg.IntegrationID,
@@ -228,6 +236,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						AppSecret:     cfg.AppSecret,
 						Logger:        cfg.Logger,
 						LogFunc:       cfg.LogFunc,
+						RateLimiter:   cfg.RateLimiter,
 					})
 				},
 				TinyConstructor: func(cfg providers.TinyConfig) (providers.ERPProvider, error) {
@@ -239,6 +248,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						ClientSecret:  cfg.ClientSecret,
 						Logger:        cfg.Logger,
 						LogFunc:       cfg.LogFunc,
+						RateLimiter:   cfg.RateLimiter,
 					})
 				},
 			})

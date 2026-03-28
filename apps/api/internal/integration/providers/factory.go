@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/ratelimit"
 )
 
 // Factory creates provider instances based on configuration.
@@ -14,6 +16,9 @@ type Factory struct {
 	// OAuth app credentials for providers that need them
 	mercadoPagoAppID     string
 	mercadoPagoAppSecret string
+
+	// Rate limit manager
+	rateLimitManager *ratelimit.Manager
 
 	// Provider constructors (injected to avoid import cycles)
 	mercadoPagoConstructor MercadoPagoConstructor
@@ -26,6 +31,7 @@ type FactoryConfig struct {
 	LogFunc              LogFunc
 	MercadoPagoAppID     string
 	MercadoPagoAppSecret string
+	RateLimitManager     *ratelimit.Manager
 
 	// Constructors - these should be injected from the payment/erp packages
 	MercadoPagoConstructor MercadoPagoConstructor
@@ -39,6 +45,7 @@ func NewFactory(cfg FactoryConfig) *Factory {
 		logFunc:                cfg.LogFunc,
 		mercadoPagoAppID:       cfg.MercadoPagoAppID,
 		mercadoPagoAppSecret:   cfg.MercadoPagoAppSecret,
+		rateLimitManager:       cfg.RateLimitManager,
 		mercadoPagoConstructor: cfg.MercadoPagoConstructor,
 		tinyConstructor:        cfg.TinyConstructor,
 	}
@@ -83,6 +90,11 @@ func (f *Factory) CreateERPProvider(cfg ProviderConfig) (ERPProvider, error) {
 }
 
 func (f *Factory) createPaymentProvider(cfg ProviderConfig) (PaymentProvider, error) {
+	var limiter ratelimit.RateLimiter
+	if f.rateLimitManager != nil {
+		limiter = f.rateLimitManager.GetOrCreate(cfg.IntegrationID)
+	}
+
 	switch cfg.Name {
 	case ProviderMercadoPago:
 		if f.mercadoPagoConstructor == nil {
@@ -96,6 +108,7 @@ func (f *Factory) createPaymentProvider(cfg ProviderConfig) (PaymentProvider, er
 			AppSecret:     f.mercadoPagoAppSecret,
 			Logger:        f.logger,
 			LogFunc:       f.logFunc,
+			RateLimiter:   limiter,
 		})
 	default:
 		return nil, fmt.Errorf("unknown payment provider: %s", cfg.Name)
@@ -103,6 +116,11 @@ func (f *Factory) createPaymentProvider(cfg ProviderConfig) (PaymentProvider, er
 }
 
 func (f *Factory) createERPProvider(cfg ProviderConfig) (ERPProvider, error) {
+	var limiter ratelimit.RateLimiter
+	if f.rateLimitManager != nil {
+		limiter = f.rateLimitManager.GetOrCreate(cfg.IntegrationID)
+	}
+
 	switch cfg.Name {
 	case ProviderTiny:
 		if f.tinyConstructor == nil {
@@ -126,6 +144,7 @@ func (f *Factory) createERPProvider(cfg ProviderConfig) (ERPProvider, error) {
 			ClientSecret:  clientSecret,
 			Logger:        f.logger,
 			LogFunc:       f.logFunc,
+			RateLimiter:   limiter,
 		})
 	default:
 		return nil, fmt.Errorf("unknown ERP provider: %s", cfg.Name)
@@ -151,6 +170,7 @@ type MercadoPagoConfig struct {
 	AppSecret     string
 	Logger        *zap.Logger
 	LogFunc       LogFunc
+	RateLimiter   ratelimit.RateLimiter
 }
 
 // TinyConfig contains configuration for Tiny ERP provider.
@@ -162,4 +182,5 @@ type TinyConfig struct {
 	ClientSecret  string
 	Logger        *zap.Logger
 	LogFunc       LogFunc
+	RateLimiter   ratelimit.RateLimiter
 }

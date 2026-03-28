@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/ratelimit"
 )
 
 const (
@@ -34,6 +35,7 @@ type MercadoPagoConfig struct {
 	AppSecret     string
 	Logger        *zap.Logger
 	LogFunc       providers.LogFunc
+	RateLimiter   ratelimit.RateLimiter
 }
 
 // NewMercadoPago creates a new Mercado Pago provider.
@@ -52,6 +54,7 @@ func NewMercadoPago(cfg MercadoPagoConfig) (*MercadoPago, error) {
 			Logger:        cfg.Logger,
 			LogFunc:       cfg.LogFunc,
 			Timeout:       30 * time.Second,
+			RateLimiter:   cfg.RateLimiter,
 		}),
 		credentials: cfg.Credentials,
 		appID:       cfg.AppID,

@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/ratelimit"
 )
 
 // BaseProvider provides common functionality for all providers.
@@ -19,6 +22,7 @@ type BaseProvider struct {
 	Logger        *zap.Logger
 	HTTPClient    *http.Client
 	LogFunc       LogFunc
+	RateLimiter   ratelimit.RateLimiter
 }
 
 // LogFunc is a function that logs integration operations.
@@ -43,6 +47,7 @@ type BaseProviderConfig struct {
 	Logger        *zap.Logger
 	LogFunc       LogFunc
 	Timeout       time.Duration
+	RateLimiter   ratelimit.RateLimiter
 }
 
 // NewBaseProvider creates a new BaseProvider with the given configuration.
@@ -57,14 +62,22 @@ func NewBaseProvider(cfg BaseProviderConfig) *BaseProvider {
 		StoreID:       cfg.StoreID,
 		Logger:        cfg.Logger,
 		LogFunc:       cfg.LogFunc,
+		RateLimiter:   cfg.RateLimiter,
 		HTTPClient: &http.Client{
 			Timeout: timeout,
 		},
 	}
 }
 
-// DoRequest performs an HTTP request with logging.
+// DoRequest performs an HTTP request with logging and rate limiting.
 func (b *BaseProvider) DoRequest(ctx context.Context, method, url string, body any, headers map[string]string) (*http.Response, []byte, error) {
+	// Throttle request based on API rate limit headers
+	if b.RateLimiter != nil {
+		if err := b.RateLimiter.Wait(ctx); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	var reqBody []byte
 	var err error
 
@@ -130,6 +143,15 @@ func (b *BaseProvider) DoRequest(ctx context.Context, method, url string, body a
 		ErrorMessage:    errorMsg,
 	})
 
+	// Update rate limiter with real API data from response headers
+	if b.RateLimiter != nil {
+		if remaining := resp.Header.Get("X-RateLimit-Remaining"); remaining != "" {
+			rem, _ := strconv.Atoi(remaining)
+			reset, _ := strconv.Atoi(resp.Header.Get("X-RateLimit-Reset"))
+			b.RateLimiter.UpdateFromHeaders(rem, reset)
+		}
+	}
+
 	return resp, respBody, nil
 }
 
@@ -161,6 +183,36 @@ func (b *BaseProvider) DoRequestWithRetry(ctx context.Context, maxRetries int, m
 		resp, respBody, err := b.DoRequest(ctx, method, url, body, headers)
 		if err != nil {
 			lastErr = err
+			continue
+		}
+
+		// Retry on 429 Too Many Requests — wait for the reset period
+		if resp.StatusCode == http.StatusTooManyRequests {
+			retryAfter := 60 // default 60s if no header
+			if ra := resp.Header.Get("X-RateLimit-Reset"); ra != "" {
+				if parsed, err := strconv.Atoi(ra); err == nil && parsed > 0 {
+					retryAfter = parsed
+				}
+			} else if ra := resp.Header.Get("Retry-After"); ra != "" {
+				if parsed, err := strconv.Atoi(ra); err == nil && parsed > 0 {
+					retryAfter = parsed
+				}
+			}
+
+			b.Logger.Warn("rate limited by API (429), waiting for reset",
+				zap.String("integration_id", b.IntegrationID),
+				zap.Int("retry_after_seconds", retryAfter),
+			)
+
+			select {
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			case <-time.After(time.Duration(retryAfter) * time.Second):
+			}
+
+			lastResp = resp
+			lastBody = respBody
+			lastErr = &ratelimit.ErrRateLimited{RetryAfter: time.Duration(retryAfter) * time.Second}
 			continue
 		}
 
