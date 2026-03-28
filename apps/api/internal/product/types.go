@@ -162,6 +162,18 @@ type ProductStatsOutput struct {
 	StockValue    int64
 }
 
+// SyncFromERPInput represents service input for syncing a product from an ERP.
+type SyncFromERPInput struct {
+	StoreID        vo.StoreID
+	ExternalID     string
+	ExternalSource domain.ExternalSource
+	Name           string
+	Price          vo.Money
+	ImageURL       string
+	Stock          int
+	Active         bool
+}
+
 // ============================================
 // Repository layer - Params types
 // ============================================

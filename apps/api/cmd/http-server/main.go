@@ -307,6 +307,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	productHandler := product.NewHandler(productSvc, validate)
 	productHandler.RegisterRoutes(storeScoped)
 
+	// Wire product syncer for ERP webhooks
+	if integrationSvc != nil {
+		integrationSvc.SetProductSyncer(product.NewProductSyncerAdapter(productSvc, integration.ErrProductNotRegistered))
+	}
+
 	liveRepo := live.NewRepository(queries, pool)
 	liveSvc := live.NewService(liveRepo, log)
 	liveHandler := live.NewHandler(liveSvc, validate)

@@ -22,13 +22,23 @@ import (
 	"livecart/apps/api/lib/ratelimit"
 )
 
+// ErrProductNotRegistered is returned when a webhook tries to sync a product
+// that hasn't been registered in LiveCart yet.
+var ErrProductNotRegistered = errors.New("product not registered in livecart")
+
+// ProductSyncer syncs products from external ERP systems into the local database.
+type ProductSyncer interface {
+	SyncProduct(ctx context.Context, storeID, externalID, externalSource, name string, price int64, imageURL string, stock int, active bool) error
+}
+
 // Service handles business logic for integrations.
 type Service struct {
-	repo        *Repository
-	factory     *providers.Factory
-	encryptor   *crypto.Encryptor
-	idempotency *idempotency.Service
-	logger      *zap.Logger
+	repo           *Repository
+	factory        *providers.Factory
+	encryptor      *crypto.Encryptor
+	idempotency    *idempotency.Service
+	productSyncer  ProductSyncer
+	logger         *zap.Logger
 }
 
 // NewService creates a new integration service.
@@ -46,6 +56,11 @@ func NewService(
 		idempotency: idempotency,
 		logger:      logger,
 	}
+}
+
+// SetProductSyncer sets the product syncer for webhook processing.
+func (s *Service) SetProductSyncer(syncer ProductSyncer) {
+	s.productSyncer = syncer
 }
 
 // =============================================================================
@@ -609,16 +624,13 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 	}
 
 	if len(result.Products) == 0 {
-		return &SearchProductsOutput{
-			Products:   []ERPProductResponse{},
-			TotalCount: 0,
-			HasMore:    false,
-		}, nil
+		return nil, httpx.ErrNotFound("Produto não encontrado no ERP")
 	}
 
 	// Enrich each product with full details (stock, image, description)
 	// The list endpoint doesn't return stock or images — GetProduct does.
 	var products []ERPProductResponse
+	foundButNoStock := false
 	for _, listed := range result.Products {
 		detailed, err := erpProvider.GetProduct(ctx, listed.ID)
 		if err != nil {
@@ -629,8 +641,8 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 			continue
 		}
 
-		// Filter: only products with stock > 0
 		if detailed.Stock <= 0 {
+			foundButNoStock = true
 			continue
 		}
 
@@ -647,8 +659,11 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 		})
 	}
 
-	if products == nil {
-		products = []ERPProductResponse{}
+	if len(products) == 0 {
+		if foundButNoStock {
+			return nil, httpx.ErrUnprocessable("Produto encontrado, mas sem estoque disponível no momento")
+		}
+		return nil, httpx.ErrNotFound("Produto não encontrado no ERP")
 	}
 
 	return &SearchProductsOutput{
@@ -656,6 +671,103 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 		TotalCount: len(products),
 		HasMore:    result.HasMore,
 	}, nil
+}
+
+const productWebhookMaxRetries = 3
+
+// ProcessProductWebhook fetches a product from the ERP by ID and syncs it locally.
+// Only updates products already registered in LiveCart — ignores unknown products.
+// Retries on transient failures to avoid losing sync events.
+func (s *Service) ProcessProductWebhook(ctx context.Context, integrationID, externalProductID string) error {
+	if s.productSyncer == nil {
+		s.logger.Warn("product syncer not configured, skipping product webhook")
+		return nil
+	}
+
+	integration, err := s.repo.GetByIDOnly(ctx, integrationID)
+	if err != nil {
+		return fmt.Errorf("getting integration: %w", err)
+	}
+
+	var lastErr error
+	for attempt := 0; attempt <= productWebhookMaxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+			s.logger.Warn("retrying product webhook processing",
+				zap.String("integration_id", integrationID),
+				zap.String("product_id", externalProductID),
+				zap.Int("attempt", attempt+1),
+				zap.Duration("backoff", backoff),
+			)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+
+		lastErr = s.processProductSync(ctx, integration, externalProductID)
+		if lastErr == nil {
+			return nil
+		}
+
+		// Product not registered in LiveCart — not a transient error, don't retry
+		if errors.Is(lastErr, ErrProductNotRegistered) {
+			s.logger.Debug("product not registered in livecart, ignoring webhook",
+				zap.String("integration_id", integrationID),
+				zap.String("external_product_id", externalProductID),
+			)
+			return nil
+		}
+	}
+
+	s.logger.Error("product webhook processing failed after retries",
+		zap.String("integration_id", integrationID),
+		zap.String("product_id", externalProductID),
+		zap.Int("max_retries", productWebhookMaxRetries),
+		zap.Error(lastErr),
+	)
+
+	return lastErr
+}
+
+func (s *Service) processProductSync(ctx context.Context, integration *IntegrationRow, externalProductID string) error {
+	provider, err := s.createProviderFromRow(ctx, integration)
+	if err != nil {
+		return fmt.Errorf("creating provider: %w", err)
+	}
+
+	erpProvider, ok := provider.(providers.ERPProvider)
+	if !ok {
+		return fmt.Errorf("integration %s is not an ERP provider", integration.ID)
+	}
+
+	detailed, err := erpProvider.GetProduct(ctx, externalProductID)
+	if err != nil {
+		s.handleProviderError(ctx, integration.ID, "webhook_get_product", err)
+		return fmt.Errorf("fetching product from ERP: %w", err)
+	}
+
+	if err := s.productSyncer.SyncProduct(ctx,
+		integration.StoreID,
+		detailed.ID,
+		integration.Provider,
+		detailed.Name,
+		detailed.Price,
+		detailed.ImageURL,
+		detailed.Stock,
+		detailed.Active,
+	); err != nil {
+		return err
+	}
+
+	s.logger.Info("product synced from webhook",
+		zap.String("integration_id", integration.ID),
+		zap.String("external_product_id", externalProductID),
+		zap.String("store_id", integration.StoreID),
+	)
+
+	return nil
 }
 
 // isGTIN checks if a string looks like a GTIN/barcode (8+ digits).

@@ -281,6 +281,38 @@ func (r *Repository) Delete(ctx context.Context, id vo.ProductID, storeID vo.Sto
 	return nil
 }
 
+func (r *Repository) GetByExternalID(ctx context.Context, storeID vo.StoreID, externalSource domain.ExternalSource, externalID string) (*domain.Product, error) {
+	query := `
+		SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at
+		FROM products
+		WHERE store_id = $1 AND external_source = $2 AND external_id = $3
+	`
+
+	var row sqlc.Product
+	err := r.pool.QueryRow(ctx, query, storeID.ToPgUUID(), externalSource.String(), externalID).Scan(
+		&row.ID,
+		&row.StoreID,
+		&row.Name,
+		&row.ExternalID,
+		&row.ExternalSource,
+		&row.Keyword,
+		&row.Price,
+		&row.ImageUrl,
+		&row.Stock,
+		&row.Active,
+		&row.CreatedAt,
+		&row.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil // Not found, return nil without error for upsert logic
+		}
+		return nil, fmt.Errorf("getting product by external ID: %w", err)
+	}
+
+	return toDomainProduct(row)
+}
+
 func (r *Repository) GetStats(ctx context.Context, storeID vo.StoreID) (ProductStatsOutput, error) {
 	query := `
 		SELECT

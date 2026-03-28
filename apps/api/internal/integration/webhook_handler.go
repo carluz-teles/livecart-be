@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 
@@ -246,8 +247,16 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		return httpx.BadRequest(c, "failed to read body")
 	}
 
+	// Always return 200 to Tiny — after 20 consecutive non-200 responses,
+	// Tiny automatically removes the webhook URL.
+	if len(body) == 0 {
+		h.logger.Info("tiny webhook validation ping",
+			zap.String("integration_id", integrationID),
+		)
+		return httpx.OK(c, fiber.Map{"status": "ok"})
+	}
+
 	// Parse Tiny webhook payload
-	// Tiny uses different payload structures for different events
 	var webhook struct {
 		Dados struct {
 			ID     string `json:"id"`
@@ -289,7 +298,19 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		)
 	}
 
-	// TODO: Process Tiny events (order status updates, invoice generation, etc.)
+	// Process product events (stock, price, title, image changes)
+	if webhook.Dados.Tipo == "produto" && webhook.Dados.ID != "" {
+		go func() {
+			ctx := context.Background()
+			if err := h.service.ProcessProductWebhook(ctx, integrationID, webhook.Dados.ID); err != nil {
+				h.logger.Error("failed to process product webhook",
+					zap.String("integration_id", integrationID),
+					zap.String("product_id", webhook.Dados.ID),
+					zap.Error(err),
+				)
+			}
+		}()
+	}
 
 	return httpx.OK(c, fiber.Map{"status": "received"})
 }

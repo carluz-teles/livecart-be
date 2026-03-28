@@ -151,6 +151,27 @@ func (s *Service) Delete(ctx context.Context, id vo.ProductID, storeID vo.StoreI
 	return s.repo.Delete(ctx, id, storeID)
 }
 
+// SyncFromERP updates an existing product from ERP data.
+// Returns (true, nil) if updated, (false, nil) if product not found in LiveCart.
+func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool, error) {
+	existing, err := s.repo.GetByExternalID(ctx, input.StoreID, input.ExternalSource, input.ExternalID)
+	if err != nil {
+		return false, fmt.Errorf("looking up product by external ID: %w", err)
+	}
+
+	if existing == nil {
+		return false, nil
+	}
+
+	if err := existing.UpdateDetails(input.Name, input.Price, input.ImageURL, input.Stock, input.Active); err != nil {
+		return false, fmt.Errorf("updating product details: %w", err)
+	}
+	if err := s.repo.Update(ctx, existing); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Service) GetStats(ctx context.Context, storeID vo.StoreID) (ProductStatsOutput, error) {
 	return s.repo.GetStats(ctx, storeID)
 }
