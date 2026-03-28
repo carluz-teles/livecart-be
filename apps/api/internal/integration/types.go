@@ -255,6 +255,24 @@ type ERPProductResponse struct {
 	Active      bool   `json:"active"`
 }
 
+// SyncProductInput is the service input for manually syncing a product from an ERP.
+type SyncProductInput struct {
+	StoreID       string
+	IntegrationID string
+	ProductID     string
+}
+
+// SyncProductOutput is the service output for a manual product sync.
+type SyncProductOutput struct {
+	ProductID  string `json:"productId"`
+	ExternalID string `json:"externalId"`
+	Name       string `json:"name"`
+	Price      int64  `json:"price"`
+	Stock      int    `json:"stock"`
+	ImageURL   string `json:"imageUrl"`
+	Active     bool   `json:"active"`
+}
+
 // TestConnectionInput is the service input for testing a connection.
 type TestConnectionInput struct {
 	StoreID       string

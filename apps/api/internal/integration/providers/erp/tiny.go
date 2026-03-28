@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"io"
 	"net/http"
 	"strconv"
@@ -319,7 +320,7 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 			SKU:       p.SKU,
 			GTIN:      p.GTIN,
 			Name:      p.Descricao,
-			Price:     int64(price * 100), // Convert to cents
+			Price:     int64(math.Round(price * 100)), // Convert to cents
 			Stock:     0,                  // Not available in list response — enriched via GetProduct
 			Active:    p.Situacao == "A",
 			UpdatedAt: updatedAt,
@@ -403,7 +404,7 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 		GTIN:        p.GTIN,
 		Name:        p.Descricao,
 		Description: p.DescricaoComplementar,
-		Price:       int64(price * 100),
+		Price:       int64(math.Round(price * 100)),
 		Stock:       int(p.Estoque.Quantidade),
 		Active:      p.Situacao == "A",
 		ImageURL:    imageURL,

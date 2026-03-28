@@ -25,6 +25,7 @@ import (
 // ProductSyncer syncs products from external ERP systems into the local database.
 type ProductSyncer interface {
 	HasProduct(ctx context.Context, storeID, externalID, externalSource string) (bool, error)
+	GetProduct(ctx context.Context, storeID, productID string) (externalID, externalSource string, err error)
 	SyncProduct(ctx context.Context, storeID, externalID, externalSource, name string, price int64, imageURL string, stock int, active bool) error
 }
 
@@ -667,6 +668,76 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 		Products:   products,
 		TotalCount: len(products),
 		HasMore:    result.HasMore,
+	}, nil
+}
+
+// SyncProductManual fetches the latest product data from the ERP and updates the local product.
+func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput) (*SyncProductOutput, error) {
+	if s.productSyncer == nil {
+		return nil, httpx.ErrUnprocessable("product syncer not configured")
+	}
+
+	// Get the product from LiveCart to find its external ID
+	externalID, externalSource, err := s.productSyncer.GetProduct(ctx, input.StoreID, input.ProductID)
+	if err != nil {
+		return nil, err
+	}
+
+	if externalID == "" {
+		return nil, httpx.ErrUnprocessable("produto não possui ID externo vinculado a um ERP")
+	}
+
+	// Verify integration belongs to this store and is an ERP
+	erpProvider, err := s.GetERPProvider(ctx, input.IntegrationID, input.StoreID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Verify the integration provider matches the product's external source
+	integration, err := s.repo.GetByID(ctx, input.IntegrationID, input.StoreID)
+	if err != nil {
+		return nil, err
+	}
+	if integration.Provider != externalSource {
+		return nil, httpx.ErrUnprocessable("integração não corresponde à origem do produto")
+	}
+
+	// Fetch latest product data from the ERP
+	detailed, err := erpProvider.GetProduct(ctx, externalID)
+	if err != nil {
+		s.handleProviderError(ctx, input.IntegrationID, "manual_sync_product", err)
+		return nil, fmt.Errorf("fetching product from ERP: %w", err)
+	}
+
+	// Update the local product
+	if err := s.productSyncer.SyncProduct(ctx,
+		input.StoreID,
+		detailed.ID,
+		externalSource,
+		detailed.Name,
+		detailed.Price,
+		detailed.ImageURL,
+		detailed.Stock,
+		detailed.Active,
+	); err != nil {
+		return nil, fmt.Errorf("syncing product: %w", err)
+	}
+
+	s.logger.Info("product synced manually",
+		zap.String("integration_id", input.IntegrationID),
+		zap.String("product_id", input.ProductID),
+		zap.String("external_id", externalID),
+		zap.String("store_id", input.StoreID),
+	)
+
+	return &SyncProductOutput{
+		ProductID:  input.ProductID,
+		ExternalID: externalID,
+		Name:       detailed.Name,
+		Price:      detailed.Price,
+		Stock:      detailed.Stock,
+		ImageURL:   detailed.ImageURL,
+		Active:     detailed.Active,
 	}, nil
 }
 

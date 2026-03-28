@@ -32,6 +32,26 @@ func (a *ProductSyncerAdapter) HasProduct(ctx context.Context, storeID, external
 	return a.service.HasProductByExternalID(ctx, sid, es, externalID)
 }
 
+// GetProduct returns the external ID and source for a product registered in LiveCart.
+func (a *ProductSyncerAdapter) GetProduct(ctx context.Context, storeID, productID string) (string, string, error) {
+	sid, err := vo.NewStoreID(storeID)
+	if err != nil {
+		return "", "", err
+	}
+
+	pid, err := vo.NewProductID(productID)
+	if err != nil {
+		return "", "", err
+	}
+
+	output, err := a.service.GetByID(ctx, pid, sid)
+	if err != nil {
+		return "", "", err
+	}
+
+	return output.ExternalID, output.ExternalSource, nil
+}
+
 // SyncProduct updates a product from an ERP webhook notification.
 func (a *ProductSyncerAdapter) SyncProduct(ctx context.Context, storeID, externalID, externalSource, name string, price int64, imageURL string, stock int, active bool) error {
 	sid, err := vo.NewStoreID(storeID)

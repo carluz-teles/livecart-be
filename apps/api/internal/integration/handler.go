@@ -41,6 +41,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 
 	// ERP operations
 	g.Get("/:id/products", h.SearchProducts)
+	g.Post("/:id/products/:productId/sync", h.SyncProduct)
 
 	// Payment operations (Mercado Pago)
 	g.Post("/:id/checkout", h.CreateCheckout)
@@ -240,6 +241,36 @@ func (h *Handler) SearchProducts(c *fiber.Ctx) error {
 		IntegrationID: id,
 		Search:        search,
 		PageSize:      c.QueryInt("limit", 20),
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, output)
+}
+
+// SyncProduct manually syncs a product from the ERP to LiveCart.
+// @Summary Sync product from ERP
+// @Description Fetches the latest product data from the ERP and updates the local product
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param id path string true "Integration ID"
+// @Param productId path string true "Product ID (LiveCart)"
+// @Success 200 {object} httpx.Envelope{data=SyncProductOutput}
+// @Failure 404 {object} httpx.Envelope
+// @Failure 422 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/{id}/products/{productId}/sync [post]
+// @Security BearerAuth
+func (h *Handler) SyncProduct(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	integrationID := c.Params("id")
+	productID := c.Params("productId")
+
+	output, err := h.service.SyncProductManual(c.Context(), SyncProductInput{
+		StoreID:       storeID,
+		IntegrationID: integrationID,
+		ProductID:     productID,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
