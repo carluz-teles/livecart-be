@@ -33,12 +33,12 @@ type ProductSyncer interface {
 
 // Service handles business logic for integrations.
 type Service struct {
-	repo           *Repository
-	factory        *providers.Factory
-	encryptor      *crypto.Encryptor
-	idempotency    *idempotency.Service
-	productSyncer  ProductSyncer
-	logger         *zap.Logger
+	repo          *Repository
+	factory       *providers.Factory
+	encryptor     *crypto.Encryptor
+	idempotency   *idempotency.Service
+	productSyncer ProductSyncer
+	logger        *zap.Logger
 }
 
 // NewService creates a new integration service.

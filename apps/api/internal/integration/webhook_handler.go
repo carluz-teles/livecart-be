@@ -3,7 +3,6 @@ package integration
 import (
 	"context"
 	"encoding/json"
-	"io"
 
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
@@ -158,11 +157,7 @@ func (h *WebhookHandler) HandleTinyOAuthCallback(c *fiber.Ctx) error {
 func (h *WebhookHandler) HandleMercadoPago(c *fiber.Ctx) error {
 	integrationID := c.Params("integrationId")
 
-	body, err := io.ReadAll(c.Request().BodyStream())
-	if err != nil {
-		h.logger.Error("failed to read webhook body", zap.Error(err))
-		return httpx.BadRequest(c, "failed to read body")
-	}
+	body := c.Body()
 
 	// Parse Mercado Pago webhook payload
 	var webhook struct {
@@ -241,11 +236,7 @@ func (h *WebhookHandler) HandleMercadoPago(c *fiber.Ctx) error {
 func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	integrationID := c.Params("integrationId")
 
-	body, err := io.ReadAll(c.Request().BodyStream())
-	if err != nil {
-		h.logger.Error("failed to read webhook body", zap.Error(err))
-		return httpx.BadRequest(c, "failed to read body")
-	}
+	body := c.Body()
 
 	// Always return 200 to Tiny — after 20 consecutive non-200 responses,
 	// Tiny automatically removes the webhook URL.
