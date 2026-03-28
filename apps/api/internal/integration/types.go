@@ -244,13 +244,15 @@ type SearchProductsOutput struct {
 
 // ERPProductResponse is the HTTP response for an ERP product.
 type ERPProductResponse struct {
-	ID       string `json:"id"`
-	SKU      string `json:"sku,omitempty"`
-	Name     string `json:"name"`
-	Price    int64  `json:"price"`
-	Stock    int    `json:"stock"`
-	ImageURL string `json:"imageUrl,omitempty"`
-	Active   bool   `json:"active"`
+	ID          string `json:"id"`
+	SKU         string `json:"sku,omitempty"`
+	GTIN        string `json:"gtin,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Price       int64  `json:"price"`
+	Stock       int    `json:"stock"`
+	ImageURL    string `json:"imageUrl,omitempty"`
+	Active      bool   `json:"active"`
 }
 
 // TestConnectionInput is the service input for testing a connection.

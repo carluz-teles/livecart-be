@@ -567,6 +567,8 @@ func (s *Service) GetERPProvider(ctx context.Context, integrationID, storeID str
 // =============================================================================
 
 // SearchProducts searches for products in an ERP integration.
+// It lists products, then enriches each with full details (stock, images)
+// via GetProduct, and filters to only return active products with stock > 0.
 func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput) (*SearchProductsOutput, error) {
 	erpProvider, err := s.GetERPProvider(ctx, input.IntegrationID, input.StoreID)
 	if err != nil {
@@ -580,7 +582,8 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 
 	// Determine search strategy based on input
 	params := providers.ListProductsParams{
-		PageSize: pageSize,
+		PageSize:   pageSize,
+		ActiveOnly: true, // Only fetch active products from the API
 	}
 
 	if isGTIN(input.Search) {
@@ -605,22 +608,52 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 		}
 	}
 
-	products := make([]ERPProductResponse, len(result.Products))
-	for i, p := range result.Products {
-		products[i] = ERPProductResponse{
-			ID:       p.ID,
-			SKU:      p.SKU,
-			Name:     p.Name,
-			Price:    p.Price,
-			Stock:    p.Stock,
-			ImageURL: p.ImageURL,
-			Active:   p.Active,
+	if len(result.Products) == 0 {
+		return &SearchProductsOutput{
+			Products:   []ERPProductResponse{},
+			TotalCount: 0,
+			HasMore:    false,
+		}, nil
+	}
+
+	// Enrich each product with full details (stock, image, description)
+	// The list endpoint doesn't return stock or images — GetProduct does.
+	var products []ERPProductResponse
+	for _, listed := range result.Products {
+		detailed, err := erpProvider.GetProduct(ctx, listed.ID)
+		if err != nil {
+			s.logger.Warn("failed to get product details, skipping",
+				zap.String("product_id", listed.ID),
+				zap.Error(err),
+			)
+			continue
 		}
+
+		// Filter: only products with stock > 0
+		if detailed.Stock <= 0 {
+			continue
+		}
+
+		products = append(products, ERPProductResponse{
+			ID:          detailed.ID,
+			SKU:         detailed.SKU,
+			GTIN:        detailed.GTIN,
+			Name:        detailed.Name,
+			Description: detailed.Description,
+			Price:       detailed.Price,
+			Stock:       detailed.Stock,
+			ImageURL:    detailed.ImageURL,
+			Active:      detailed.Active,
+		})
+	}
+
+	if products == nil {
+		products = []ERPProductResponse{}
 	}
 
 	return &SearchProductsOutput{
 		Products:   products,
-		TotalCount: result.TotalCount,
+		TotalCount: len(products),
 		HasMore:    result.HasMore,
 	}, nil
 }

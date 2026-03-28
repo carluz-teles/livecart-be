@@ -232,6 +232,7 @@ type ListProductsParams struct {
 	Search       string     `json:"search,omitempty"`
 	GTIN         string     `json:"gtin,omitempty"`
 	SKU          string     `json:"sku,omitempty"`
+	ActiveOnly   bool       `json:"active_only,omitempty"`
 	UpdatedAfter *time.Time `json:"updated_after,omitempty"`
 }
 
@@ -246,14 +247,15 @@ type ProductListResult struct {
 
 // ERPProduct represents a product in the ERP.
 type ERPProduct struct {
-	ID          string  `json:"id"`           // ERP product ID
-	SKU         string  `json:"sku,omitempty"`
-	Name        string  `json:"name"`
-	Description string  `json:"description,omitempty"`
-	Price       int64   `json:"price"`        // In cents
-	Stock       int     `json:"stock"`
-	Active      bool    `json:"active"`
-	ImageURL    string  `json:"image_url,omitempty"`
+	ID          string    `json:"id"`           // ERP product ID
+	SKU         string    `json:"sku,omitempty"`
+	GTIN        string    `json:"gtin,omitempty"` // Barcode (EAN/GTIN)
+	Name        string    `json:"name"`
+	Description string    `json:"description,omitempty"`
+	Price       int64     `json:"price"`        // In cents
+	Stock       int       `json:"stock"`
+	Active      bool      `json:"active"`
+	ImageURL    string    `json:"image_url,omitempty"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 

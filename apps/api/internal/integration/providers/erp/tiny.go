@@ -248,6 +248,9 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 	} else if params.Search != "" {
 		query += fmt.Sprintf("nome=%s&", params.Search)
 	}
+	if params.ActiveOnly {
+		query += "situacao=A&"
+	}
 	if params.UpdatedAfter != nil {
 		query += fmt.Sprintf("dataAlteracao=%s&", params.UpdatedAfter.Format("2006-01-02 15:04:05"))
 	}
@@ -314,9 +317,10 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 		products[i] = ERPProduct{
 			ID:        strconv.FormatInt(p.ID, 10),
 			SKU:       p.SKU,
+			GTIN:      p.GTIN,
 			Name:      p.Descricao,
 			Price:     int64(price * 100), // Convert to cents
-			Stock:     0,                  // Not available in list response
+			Stock:     0,                  // Not available in list response — enriched via GetProduct
 			Active:    p.Situacao == "A",
 			UpdatedAt: updatedAt,
 		}
@@ -350,13 +354,14 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 	}
 
 	var p struct {
-		ID            int64  `json:"id"`
-		SKU           string `json:"sku"`
-		Descricao     string `json:"descricao"`
-		Situacao      string `json:"situacao"`
-		GTIN          string `json:"gtin"`
-		DataAlteracao string `json:"dataAlteracao"`
-		Precos        struct {
+		ID                    int64  `json:"id"`
+		SKU                   string `json:"sku"`
+		Descricao             string `json:"descricao"`
+		DescricaoComplementar string `json:"descricaoComplementar"`
+		Situacao              string `json:"situacao"`
+		GTIN                  string `json:"gtin"`
+		DataAlteracao         string `json:"dataAlteracao"`
+		Precos                struct {
 			Preco            float64 `json:"preco"`
 			PrecoPromocional float64 `json:"precoPromocional"`
 		} `json:"precos"`
@@ -364,8 +369,8 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 			Quantidade float64 `json:"quantidade"`
 		} `json:"estoque"`
 		Anexos []struct {
-			URL    string `json:"url"`
-			Externo bool  `json:"externo"`
+			URL     string `json:"url"`
+			Externo bool   `json:"externo"`
 		} `json:"anexos"`
 	}
 
@@ -393,14 +398,16 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 	}
 
 	return &ERPProduct{
-		ID:        strconv.FormatInt(p.ID, 10),
-		SKU:       p.SKU,
-		Name:      p.Descricao,
-		Price:     int64(price * 100),
-		Stock:     int(p.Estoque.Quantidade),
-		Active:    p.Situacao == "A",
-		ImageURL:  imageURL,
-		UpdatedAt: updatedAt,
+		ID:          strconv.FormatInt(p.ID, 10),
+		SKU:         p.SKU,
+		GTIN:        p.GTIN,
+		Name:        p.Descricao,
+		Description: p.DescricaoComplementar,
+		Price:       int64(price * 100),
+		Stock:       int(p.Estoque.Quantidade),
+		Active:      p.Situacao == "A",
+		ImageURL:    imageURL,
+		UpdatedAt:   updatedAt,
 	}, nil
 }
 
