@@ -151,6 +151,15 @@ func (s *Service) Delete(ctx context.Context, id vo.ProductID, storeID vo.StoreI
 	return s.repo.Delete(ctx, id, storeID)
 }
 
+// HasProductByExternalID checks if a product with the given external ID exists.
+func (s *Service) HasProductByExternalID(ctx context.Context, storeID vo.StoreID, externalSource domain.ExternalSource, externalID string) (bool, error) {
+	existing, err := s.repo.GetByExternalID(ctx, storeID, externalSource, externalID)
+	if err != nil {
+		return false, err
+	}
+	return existing != nil, nil
+}
+
 // SyncFromERP updates an existing product from ERP data.
 // Returns (true, nil) if updated, (false, nil) if product not found in LiveCart.
 func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool, error) {

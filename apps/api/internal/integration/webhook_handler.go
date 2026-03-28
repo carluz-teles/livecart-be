@@ -248,29 +248,30 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	}
 
 	// Parse Tiny webhook payload
+	// Events: "estoque_atualizado" (stock changes), "alteracao_produto" (product data changes)
 	var webhook struct {
-		Dados struct {
-			ID     string `json:"id"`
-			Tipo   string `json:"tipo"`
-			Numero string `json:"numero"`
-		} `json:"dados"`
+		Evento      string  `json:"evento"`
+		IDProduto   string  `json:"idProduto"`
+		Codigo      string  `json:"codigo"`
+		Nome        string  `json:"nome"`
+		EstoqueAtual *float64 `json:"estoqueAtual"`
 	}
 	if err := json.Unmarshal(body, &webhook); err != nil {
 		h.logger.Warn("failed to parse Tiny webhook payload",
 			zap.String("integration_id", integrationID),
 			zap.Error(err),
 		)
-		// Continue anyway - we'll store the raw payload
 	}
 
 	h.logger.Info("tiny webhook received",
 		zap.String("integration_id", integrationID),
-		zap.String("tipo", webhook.Dados.Tipo),
-		zap.String("id", webhook.Dados.ID),
+		zap.String("evento", webhook.Evento),
+		zap.String("id_produto", webhook.IDProduto),
+		zap.String("codigo", webhook.Codigo),
 	)
 
 	// Store webhook event
-	eventID := webhook.Dados.ID
+	eventID := webhook.IDProduto
 	if eventID == "" {
 		eventID = c.Get("X-Request-Id")
 	}
@@ -278,7 +279,7 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	if err := h.service.StoreWebhookEvent(c.Context(), StoreWebhookInput{
 		IntegrationID:  integrationID,
 		Provider:       "tiny",
-		EventType:      webhook.Dados.Tipo,
+		EventType:      webhook.Evento,
 		EventID:        eventID,
 		Payload:        body,
 		SignatureValid: true, // Tiny doesn't use signatures
@@ -289,14 +290,16 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		)
 	}
 
-	// Process product events (stock, price, title, image changes)
-	if webhook.Dados.Tipo == "produto" && webhook.Dados.ID != "" {
+	// Process product-related events
+	isProductEvent := webhook.Evento == "estoque_atualizado" || webhook.Evento == "alteracao_produto"
+	if isProductEvent && webhook.IDProduto != "" {
 		go func() {
 			ctx := context.Background()
-			if err := h.service.ProcessProductWebhook(ctx, integrationID, webhook.Dados.ID); err != nil {
+			if err := h.service.ProcessProductWebhook(ctx, integrationID, webhook.IDProduto); err != nil {
 				h.logger.Error("failed to process product webhook",
 					zap.String("integration_id", integrationID),
-					zap.String("product_id", webhook.Dados.ID),
+					zap.String("evento", webhook.Evento),
+					zap.String("id_produto", webhook.IDProduto),
 					zap.Error(err),
 				)
 			}

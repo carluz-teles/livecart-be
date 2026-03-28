@@ -22,12 +22,9 @@ import (
 	"livecart/apps/api/lib/ratelimit"
 )
 
-// ErrProductNotRegistered is returned when a webhook tries to sync a product
-// that hasn't been registered in LiveCart yet.
-var ErrProductNotRegistered = errors.New("product not registered in livecart")
-
 // ProductSyncer syncs products from external ERP systems into the local database.
 type ProductSyncer interface {
+	HasProduct(ctx context.Context, storeID, externalID, externalSource string) (bool, error)
 	SyncProduct(ctx context.Context, storeID, externalID, externalSource, name string, price int64, imageURL string, stock int, active bool) error
 }
 
@@ -675,8 +672,8 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 
 const productWebhookMaxRetries = 3
 
-// ProcessProductWebhook fetches a product from the ERP by ID and syncs it locally.
-// Only updates products already registered in LiveCart — ignores unknown products.
+// ProcessProductWebhook checks if the product exists in LiveCart, then fetches
+// full details from the ERP and syncs locally. Ignores unknown products.
 // Retries on transient failures to avoid losing sync events.
 func (s *Service) ProcessProductWebhook(ctx context.Context, integrationID, externalProductID string) error {
 	if s.productSyncer == nil {
@@ -687,6 +684,19 @@ func (s *Service) ProcessProductWebhook(ctx context.Context, integrationID, exte
 	integration, err := s.repo.GetByIDOnly(ctx, integrationID)
 	if err != nil {
 		return fmt.Errorf("getting integration: %w", err)
+	}
+
+	// Check if product exists in LiveCart before calling the ERP API
+	exists, err := s.productSyncer.HasProduct(ctx, integration.StoreID, externalProductID, integration.Provider)
+	if err != nil {
+		return fmt.Errorf("checking product existence: %w", err)
+	}
+	if !exists {
+		s.logger.Debug("product not registered in livecart, ignoring webhook",
+			zap.String("integration_id", integrationID),
+			zap.String("external_product_id", externalProductID),
+		)
+		return nil
 	}
 
 	var lastErr error
@@ -708,15 +718,6 @@ func (s *Service) ProcessProductWebhook(ctx context.Context, integrationID, exte
 
 		lastErr = s.processProductSync(ctx, integration, externalProductID)
 		if lastErr == nil {
-			return nil
-		}
-
-		// Product not registered in LiveCart — not a transient error, don't retry
-		if errors.Is(lastErr, ErrProductNotRegistered) {
-			s.logger.Debug("product not registered in livecart, ignoring webhook",
-				zap.String("integration_id", integrationID),
-				zap.String("external_product_id", externalProductID),
-			)
 			return nil
 		}
 	}
@@ -758,7 +759,7 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		detailed.Stock,
 		detailed.Active,
 	); err != nil {
-		return err
+		return fmt.Errorf("syncing product: %w", err)
 	}
 
 	s.logger.Info("product synced from webhook",

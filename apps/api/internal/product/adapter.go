@@ -9,18 +9,30 @@ import (
 
 // ProductSyncerAdapter adapts the product Service for use by the integration package.
 type ProductSyncerAdapter struct {
-	service        *Service
-	errNotRegistered error
+	service *Service
 }
 
 // NewProductSyncerAdapter creates a new adapter.
-// errNotRegistered is the error to return when the product doesn't exist in LiveCart.
-func NewProductSyncerAdapter(service *Service, errNotRegistered error) *ProductSyncerAdapter {
-	return &ProductSyncerAdapter{service: service, errNotRegistered: errNotRegistered}
+func NewProductSyncerAdapter(service *Service) *ProductSyncerAdapter {
+	return &ProductSyncerAdapter{service: service}
+}
+
+// HasProduct checks if a product with the given external ID exists in LiveCart.
+func (a *ProductSyncerAdapter) HasProduct(ctx context.Context, storeID, externalID, externalSource string) (bool, error) {
+	sid, err := vo.NewStoreID(storeID)
+	if err != nil {
+		return false, err
+	}
+
+	es, err := domain.NewExternalSource(externalSource)
+	if err != nil {
+		return false, err
+	}
+
+	return a.service.HasProductByExternalID(ctx, sid, es, externalID)
 }
 
 // SyncProduct updates a product from an ERP webhook notification.
-// Returns errNotRegistered if the product is not registered in LiveCart.
 func (a *ProductSyncerAdapter) SyncProduct(ctx context.Context, storeID, externalID, externalSource, name string, price int64, imageURL string, stock int, active bool) error {
 	sid, err := vo.NewStoreID(storeID)
 	if err != nil {
@@ -37,7 +49,7 @@ func (a *ProductSyncerAdapter) SyncProduct(ctx context.Context, storeID, externa
 		return err
 	}
 
-	updated, err := a.service.SyncFromERP(ctx, SyncFromERPInput{
+	_, err = a.service.SyncFromERP(ctx, SyncFromERPInput{
 		StoreID:        sid,
 		ExternalID:     externalID,
 		ExternalSource: es,
@@ -47,13 +59,5 @@ func (a *ProductSyncerAdapter) SyncProduct(ctx context.Context, storeID, externa
 		Stock:          stock,
 		Active:         active,
 	})
-	if err != nil {
-		return err
-	}
-
-	if !updated {
-		return a.errNotRegistered
-	}
-
-	return nil
+	return err
 }

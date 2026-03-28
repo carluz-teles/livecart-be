@@ -309,7 +309,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	// Wire product syncer for ERP webhooks
 	if integrationSvc != nil {
-		integrationSvc.SetProductSyncer(product.NewProductSyncerAdapter(productSvc, integration.ErrProductNotRegistered))
+		integrationSvc.SetProductSyncer(product.NewProductSyncerAdapter(productSvc))
 	}
 
 	liveRepo := live.NewRepository(queries, pool)
