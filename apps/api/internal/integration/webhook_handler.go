@@ -247,14 +247,17 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		return httpx.OK(c, fiber.Map{"status": "ok"})
 	}
 
-	// Parse Tiny webhook payload
-	// Events: "estoque_atualizado" (stock changes), "alteracao_produto" (product data changes)
+	// Parse Tiny V3 webhook payload
+	// Real structure: {"versao":"1.0.1","cnpj":"...","tipo":"estoque","dados":{"idProduto":123,...}}
 	var webhook struct {
-		Evento      string  `json:"evento"`
-		IDProduto   string  `json:"idProduto"`
-		Codigo      string  `json:"codigo"`
-		Nome        string  `json:"nome"`
-		EstoqueAtual *float64 `json:"estoqueAtual"`
+		Tipo  string `json:"tipo"`
+		Dados struct {
+			IDProduto json.Number `json:"idProduto"`
+			ID        string      `json:"id"`
+			SKU       string      `json:"sku"`
+			Nome      string      `json:"nome"`
+			Saldo     *float64    `json:"saldo"`
+		} `json:"dados"`
 	}
 	if err := json.Unmarshal(body, &webhook); err != nil {
 		h.logger.Warn("failed to parse Tiny webhook payload",
@@ -263,15 +266,21 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		)
 	}
 
+	// Resolve product ID: dados.idProduto (number) or dados.id (string)
+	productID := webhook.Dados.IDProduto.String()
+	if productID == "" {
+		productID = webhook.Dados.ID
+	}
+
 	h.logger.Info("tiny webhook received",
 		zap.String("integration_id", integrationID),
-		zap.String("evento", webhook.Evento),
-		zap.String("id_produto", webhook.IDProduto),
-		zap.String("codigo", webhook.Codigo),
+		zap.String("tipo", webhook.Tipo),
+		zap.String("id_produto", productID),
+		zap.String("sku", webhook.Dados.SKU),
 	)
 
 	// Store webhook event
-	eventID := webhook.IDProduto
+	eventID := productID
 	if eventID == "" {
 		eventID = c.Get("X-Request-Id")
 	}
@@ -279,9 +288,9 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	if err := h.service.StoreWebhookEvent(c.Context(), StoreWebhookInput{
 		IntegrationID:  integrationID,
 		Provider:       "tiny",
-		EventType:      webhook.Evento,
+		EventType:      webhook.Tipo,
 		EventID:        eventID,
-		Payload:        body,
+		Payload:        json.RawMessage(body),
 		SignatureValid: true, // Tiny doesn't use signatures
 	}); err != nil {
 		h.logger.Error("failed to store webhook event",
@@ -290,16 +299,16 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		)
 	}
 
-	// Process product-related events
-	isProductEvent := webhook.Evento == "estoque_atualizado" || webhook.Evento == "alteracao_produto"
-	if isProductEvent && webhook.IDProduto != "" {
+	// Process product-related events: "estoque" (stock) and "produto" (product data)
+	isProductEvent := webhook.Tipo == "estoque" || webhook.Tipo == "produto"
+	if isProductEvent && productID != "" {
 		go func() {
 			ctx := context.Background()
-			if err := h.service.ProcessProductWebhook(ctx, integrationID, webhook.IDProduto); err != nil {
+			if err := h.service.ProcessProductWebhook(ctx, integrationID, productID); err != nil {
 				h.logger.Error("failed to process product webhook",
 					zap.String("integration_id", integrationID),
-					zap.String("evento", webhook.Evento),
-					zap.String("id_produto", webhook.IDProduto),
+					zap.String("tipo", webhook.Tipo),
+					zap.String("id_produto", productID),
 					zap.Error(err),
 				)
 			}

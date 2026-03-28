@@ -324,14 +324,31 @@ func (r *Repository) CreateWebhookEvent(ctx context.Context, input StoreWebhookI
 		return nil, err
 	}
 
-	row, err := r.queries.CreateWebhookEvent(ctx, sqlc.CreateWebhookEventParams{
-		IntegrationID:  intID,
-		Provider:       input.Provider,
-		EventType:      input.EventType,
-		EventID:        pgtype.Text{String: input.EventID, Valid: input.EventID != ""},
-		Payload:        input.Payload,
-		SignatureValid: pgtype.Bool{Bool: input.SignatureValid, Valid: true},
-	})
+	// Use raw SQL to insert with explicit ::jsonb cast.
+	// SQLC generates Payload as []byte which pgx sends as bytea, incompatible with jsonb columns.
+	query := `
+		INSERT INTO webhook_events (integration_id, provider, event_type, event_id, payload, signature_valid)
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+		RETURNING id, integration_id, provider, event_type, event_id, payload, signature_valid, processed, processed_at, error_message, created_at
+	`
+
+	eventID := pgtype.Text{String: input.EventID, Valid: input.EventID != ""}
+	sigValid := pgtype.Bool{Bool: input.SignatureValid, Valid: true}
+
+	var row sqlc.WebhookEvent
+	err = r.pool.QueryRow(ctx, query, intID, input.Provider, input.EventType, eventID, string(input.Payload), sigValid).Scan(
+		&row.ID,
+		&row.IntegrationID,
+		&row.Provider,
+		&row.EventType,
+		&row.EventID,
+		&row.Payload,
+		&row.SignatureValid,
+		&row.Processed,
+		&row.ProcessedAt,
+		&row.ErrorMessage,
+		&row.CreatedAt,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("creating webhook event: %w", err)
 	}
