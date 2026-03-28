@@ -39,6 +39,9 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// OAuth connect
 	g.Get("/oauth/:provider/connect", h.OAuthConnect)
 
+	// ERP operations
+	g.Get("/:id/products", h.SearchProducts)
+
 	// Payment operations (Mercado Pago)
 	g.Post("/:id/checkout", h.CreateCheckout)
 	g.Get("/:id/payments/:paymentId", h.GetPaymentStatus)
@@ -203,6 +206,46 @@ func (h *Handler) TestConnection(c *fiber.Ctx) error {
 		AccountInfo: output.AccountInfo,
 		TestedAt:    output.TestedAt,
 	})
+}
+
+// =============================================================================
+// ERP HANDLERS
+// =============================================================================
+
+// SearchProducts searches for products in an ERP integration.
+// @Summary Search ERP products
+// @Description Searches for products in an ERP integration by name, SKU, or barcode
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param id path string true "Integration ID"
+// @Param search query string true "Search term (product name, SKU, or barcode)"
+// @Param limit query int false "Max results" default(20)
+// @Success 200 {object} httpx.Envelope{data=SearchProductsOutput}
+// @Failure 400 {object} httpx.Envelope
+// @Failure 404 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/{id}/products [get]
+// @Security BearerAuth
+func (h *Handler) SearchProducts(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
+	search := c.Query("search")
+
+	if search == "" {
+		return httpx.BadRequest(c, "search parameter is required")
+	}
+
+	output, err := h.service.SearchProducts(c.Context(), SearchProductsInput{
+		StoreID:       storeID,
+		IntegrationID: id,
+		Search:        search,
+		PageSize:      c.QueryInt("limit", 20),
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, output)
 }
 
 // =============================================================================

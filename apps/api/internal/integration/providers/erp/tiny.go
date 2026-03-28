@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/ratelimit"
 )
 
 const (
@@ -43,6 +44,7 @@ type TinyConfig struct {
 	ClientSecret  string
 	Logger        *zap.Logger
 	LogFunc       providers.LogFunc
+	RateLimiter   ratelimit.RateLimiter
 }
 
 // NewTiny creates a new Tiny ERP provider.
@@ -61,6 +63,7 @@ func NewTiny(cfg TinyConfig) (*Tiny, error) {
 			Logger:        cfg.Logger,
 			LogFunc:       cfg.LogFunc,
 			Timeout:       30 * time.Second,
+			RateLimiter:   cfg.RateLimiter,
 		}),
 		credentials:  cfg.Credentials,
 		clientID:     cfg.ClientID,
@@ -238,7 +241,11 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 	if params.PageSize > 0 {
 		query += fmt.Sprintf("limit=%d&", params.PageSize)
 	}
-	if params.Search != "" {
+	if params.GTIN != "" {
+		query += fmt.Sprintf("gtin=%s&", params.GTIN)
+	} else if params.SKU != "" {
+		query += fmt.Sprintf("codigo=%s&", params.SKU)
+	} else if params.Search != "" {
 		query += fmt.Sprintf("nome=%s&", params.Search)
 	}
 	if params.UpdatedAfter != nil {
@@ -268,22 +275,23 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 
 	var tinyResp struct {
 		Itens []struct {
-			ID             int64   `json:"id"`
-			Codigo         string  `json:"codigo"`
-			Nome           string  `json:"nome"`
-			Descricao      string  `json:"descricao"`
-			Preco          float64 `json:"preco"`
-			PrecoPromocional float64 `json:"precoPromocional"`
-			Estoque        float64 `json:"estoque"`
-			Situacao       string  `json:"situacao"` // "A" = Ativo, "I" = Inativo
-			UrlImagem      string  `json:"urlImagem"`
-			DataAlteracao  string  `json:"dataAlteracao"`
+			ID            int64  `json:"id"`
+			SKU           string `json:"sku"`
+			Descricao     string `json:"descricao"`
+			Tipo          string `json:"tipo"`
+			Situacao      string `json:"situacao"` // "A" = Ativo, "I" = Inativo, "E" = Excluído
+			GTIN          string `json:"gtin"`
+			DataCriacao   string `json:"dataCriacao"`
+			DataAlteracao string `json:"dataAlteracao"`
+			Precos        struct {
+				Preco            float64 `json:"preco"`
+				PrecoPromocional float64 `json:"precoPromocional"`
+			} `json:"precos"`
 		} `json:"itens"`
 		Paginacao struct {
-			Limit       int  `json:"limit"`
-			Offset      int  `json:"offset"`
-			TotalItens  int  `json:"totalItens"`
-			MaisItens   bool `json:"maisItens"`
+			Limit  int `json:"limit"`
+			Offset int `json:"offset"`
+			Total  int `json:"total"`
 		} `json:"paginacao"`
 	}
 
@@ -293,9 +301,9 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 
 	products := make([]ERPProduct, len(tinyResp.Itens))
 	for i, p := range tinyResp.Itens {
-		price := p.Preco
-		if p.PrecoPromocional > 0 {
-			price = p.PrecoPromocional
+		price := p.Precos.Preco
+		if p.Precos.PrecoPromocional > 0 {
+			price = p.Precos.PrecoPromocional
 		}
 
 		var updatedAt time.Time
@@ -304,24 +312,24 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 		}
 
 		products[i] = ERPProduct{
-			ID:          strconv.FormatInt(p.ID, 10),
-			SKU:         p.Codigo,
-			Name:        p.Nome,
-			Description: p.Descricao,
-			Price:       int64(price * 100), // Convert to cents
-			Stock:       int(p.Estoque),
-			Active:      p.Situacao == "A",
-			ImageURL:    p.UrlImagem,
-			UpdatedAt:   updatedAt,
+			ID:        strconv.FormatInt(p.ID, 10),
+			SKU:       p.SKU,
+			Name:      p.Descricao,
+			Price:     int64(price * 100), // Convert to cents
+			Stock:     0,                  // Not available in list response
+			Active:    p.Situacao == "A",
+			UpdatedAt: updatedAt,
 		}
 	}
 
+	hasMore := tinyResp.Paginacao.Offset+tinyResp.Paginacao.Limit < tinyResp.Paginacao.Total
+
 	return &ProductListResult{
 		Products:   products,
-		TotalCount: tinyResp.Paginacao.TotalItens,
+		TotalCount: tinyResp.Paginacao.Total,
 		Page:       tinyResp.Paginacao.Offset / max(tinyResp.Paginacao.Limit, 1),
 		PageSize:   tinyResp.Paginacao.Limit,
-		HasMore:    tinyResp.Paginacao.MaisItens,
+		HasMore:    hasMore,
 	}, nil
 }
 
@@ -342,25 +350,32 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 	}
 
 	var p struct {
-		ID             int64   `json:"id"`
-		Codigo         string  `json:"codigo"`
-		Nome           string  `json:"nome"`
-		Descricao      string  `json:"descricao"`
-		Preco          float64 `json:"preco"`
-		PrecoPromocional float64 `json:"precoPromocional"`
-		Estoque        float64 `json:"estoque"`
-		Situacao       string  `json:"situacao"`
-		UrlImagem      string  `json:"urlImagem"`
-		DataAlteracao  string  `json:"dataAlteracao"`
+		ID            int64  `json:"id"`
+		SKU           string `json:"sku"`
+		Descricao     string `json:"descricao"`
+		Situacao      string `json:"situacao"`
+		GTIN          string `json:"gtin"`
+		DataAlteracao string `json:"dataAlteracao"`
+		Precos        struct {
+			Preco            float64 `json:"preco"`
+			PrecoPromocional float64 `json:"precoPromocional"`
+		} `json:"precos"`
+		Estoque struct {
+			Quantidade float64 `json:"quantidade"`
+		} `json:"estoque"`
+		Anexos []struct {
+			URL    string `json:"url"`
+			Externo bool  `json:"externo"`
+		} `json:"anexos"`
 	}
 
 	if err := json.Unmarshal(body, &p); err != nil {
 		return nil, fmt.Errorf("parsing product response: %w", err)
 	}
 
-	price := p.Preco
-	if p.PrecoPromocional > 0 {
-		price = p.PrecoPromocional
+	price := p.Precos.Preco
+	if p.Precos.PrecoPromocional > 0 {
+		price = p.Precos.PrecoPromocional
 	}
 
 	var updatedAt time.Time
@@ -368,16 +383,24 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 		updatedAt, _ = time.Parse("2006-01-02 15:04:05", p.DataAlteracao)
 	}
 
+	// Get image URL from attachments
+	var imageURL string
+	for _, a := range p.Anexos {
+		if a.URL != "" {
+			imageURL = a.URL
+			break
+		}
+	}
+
 	return &ERPProduct{
-		ID:          strconv.FormatInt(p.ID, 10),
-		SKU:         p.Codigo,
-		Name:        p.Nome,
-		Description: p.Descricao,
-		Price:       int64(price * 100),
-		Stock:       int(p.Estoque),
-		Active:      p.Situacao == "A",
-		ImageURL:    p.UrlImagem,
-		UpdatedAt:   updatedAt,
+		ID:        strconv.FormatInt(p.ID, 10),
+		SKU:       p.SKU,
+		Name:      p.Descricao,
+		Price:     int64(price * 100),
+		Stock:     int(p.Estoque.Quantidade),
+		Active:    p.Situacao == "A",
+		ImageURL:  imageURL,
+		UpdatedAt: updatedAt,
 	}, nil
 }
 

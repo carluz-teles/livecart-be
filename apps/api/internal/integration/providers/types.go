@@ -227,9 +227,11 @@ type OrderResult struct {
 
 // ListProductsParams contains parameters for listing products.
 type ListProductsParams struct {
-	Page     int    `json:"page,omitempty"`
-	PageSize int    `json:"page_size,omitempty"`
-	Search   string `json:"search,omitempty"`
+	Page         int        `json:"page,omitempty"`
+	PageSize     int        `json:"page_size,omitempty"`
+	Search       string     `json:"search,omitempty"`
+	GTIN         string     `json:"gtin,omitempty"`
+	SKU          string     `json:"sku,omitempty"`
 	UpdatedAfter *time.Time `json:"updated_after,omitempty"`
 }
 

@@ -227,6 +227,32 @@ type OAuthCallbackOutput struct {
 	Status        string
 }
 
+// SearchProductsInput is the service input for searching products in an ERP.
+type SearchProductsInput struct {
+	StoreID       string
+	IntegrationID string
+	Search        string
+	PageSize      int
+}
+
+// SearchProductsOutput is the service output for searching products.
+type SearchProductsOutput struct {
+	Products   []ERPProductResponse `json:"products"`
+	TotalCount int                  `json:"totalCount"`
+	HasMore    bool                 `json:"hasMore"`
+}
+
+// ERPProductResponse is the HTTP response for an ERP product.
+type ERPProductResponse struct {
+	ID       string `json:"id"`
+	SKU      string `json:"sku,omitempty"`
+	Name     string `json:"name"`
+	Price    int64  `json:"price"`
+	Stock    int    `json:"stock"`
+	ImageURL string `json:"imageUrl,omitempty"`
+	Active   bool   `json:"active"`
+}
+
 // TestConnectionInput is the service input for testing a connection.
 type TestConnectionInput struct {
 	StoreID       string

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"livecart/apps/api/lib/crypto"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/idempotency"
+	"livecart/apps/api/lib/ratelimit"
 )
 
 // Service handles business logic for integrations.
@@ -129,6 +131,7 @@ func (s *Service) TestConnection(ctx context.Context, input TestConnectionInput)
 
 	result, err := provider.TestConnection(ctx)
 	if err != nil {
+		s.handleProviderError(ctx, input.IntegrationID, "test_connection", err)
 		return &TestConnectionOutput{
 			Success:  false,
 			Message:  fmt.Sprintf("Erro ao testar conexão: %v", err),
@@ -560,6 +563,82 @@ func (s *Service) GetERPProvider(ctx context.Context, integrationID, storeID str
 }
 
 // =============================================================================
+// ERP OPERATIONS
+// =============================================================================
+
+// SearchProducts searches for products in an ERP integration.
+func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput) (*SearchProductsOutput, error) {
+	erpProvider, err := s.GetERPProvider(ctx, input.IntegrationID, input.StoreID)
+	if err != nil {
+		return nil, err
+	}
+
+	pageSize := input.PageSize
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+
+	// Determine search strategy based on input
+	params := providers.ListProductsParams{
+		PageSize: pageSize,
+	}
+
+	if isGTIN(input.Search) {
+		params.GTIN = input.Search
+	} else {
+		params.Search = input.Search
+	}
+
+	result, err := erpProvider.ListProducts(ctx, params)
+	if err != nil {
+		s.handleProviderError(ctx, input.IntegrationID, "search_products", err)
+		return nil, fmt.Errorf("searching products: %w", err)
+	}
+
+	// If GTIN search returned no results, fallback to name search
+	if len(result.Products) == 0 && params.GTIN != "" {
+		params.GTIN = ""
+		params.Search = input.Search
+		result, err = erpProvider.ListProducts(ctx, params)
+		if err != nil {
+			return nil, fmt.Errorf("searching products by name: %w", err)
+		}
+	}
+
+	products := make([]ERPProductResponse, len(result.Products))
+	for i, p := range result.Products {
+		products[i] = ERPProductResponse{
+			ID:       p.ID,
+			SKU:      p.SKU,
+			Name:     p.Name,
+			Price:    p.Price,
+			Stock:    p.Stock,
+			ImageURL: p.ImageURL,
+			Active:   p.Active,
+		}
+	}
+
+	return &SearchProductsOutput{
+		Products:   products,
+		TotalCount: result.TotalCount,
+		HasMore:    result.HasMore,
+	}, nil
+}
+
+// isGTIN checks if a string looks like a GTIN/barcode (8+ digits).
+func isGTIN(s string) bool {
+	if len(s) < 8 {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// =============================================================================
 // PAYMENT OPERATIONS
 // =============================================================================
 
@@ -632,6 +711,7 @@ func (s *Service) CreateCheckout(ctx context.Context, input CreateCheckoutInput)
 		Metadata:    input.Metadata,
 	})
 	if err != nil {
+		s.handleProviderError(ctx, input.IntegrationID, "create_checkout", err)
 		if idemRecord != nil {
 			_ = s.idempotency.Fail(ctx, idemRecord.ID, err)
 		}
@@ -661,6 +741,7 @@ func (s *Service) GetPaymentStatus(ctx context.Context, input GetPaymentStatusIn
 
 	status, err := paymentProvider.GetPaymentStatus(ctx, input.PaymentID)
 	if err != nil {
+		s.handleProviderError(ctx, input.IntegrationID, "get_payment_status", err)
 		return nil, fmt.Errorf("getting payment status: %w", err)
 	}
 
@@ -684,6 +765,7 @@ func (s *Service) RefundPayment(ctx context.Context, input RefundPaymentInput) (
 
 	result, err := paymentProvider.RefundPayment(ctx, input.PaymentID, input.Amount)
 	if err != nil {
+		s.handleProviderError(ctx, input.IntegrationID, "refund_payment", err)
 		return nil, fmt.Errorf("refunding payment: %w", err)
 	}
 
@@ -736,6 +818,7 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 
 	status, err := paymentProvider.GetPaymentStatus(ctx, input.PaymentID)
 	if err != nil {
+		s.handleProviderError(ctx, input.IntegrationID, "process_payment_notification", err)
 		return fmt.Errorf("getting payment status: %w", err)
 	}
 
@@ -854,6 +937,31 @@ func (s *Service) toCreateOutput(row *IntegrationRow) *CreateIntegrationOutput {
 		Metadata:     row.Metadata,
 		LastSyncedAt: row.LastSyncedAt,
 		CreatedAt:    row.CreatedAt,
+	}
+}
+
+// handleProviderError checks if a provider error is rate-limit related and logs accordingly.
+// If the error is an ErrRateLimited, it logs at Error level and marks the integration as 'error'.
+func (s *Service) handleProviderError(ctx context.Context, integrationID string, operation string, err error) {
+	if err == nil {
+		return
+	}
+
+	var rateLimitErr *ratelimit.ErrRateLimited
+	if errors.As(err, &rateLimitErr) {
+		s.logger.Error("provider rate limited",
+			zap.String("integration_id", integrationID),
+			zap.String("operation", operation),
+			zap.Duration("retry_after", rateLimitErr.RetryAfter),
+		)
+
+		// Mark integration as error so it's visible in the dashboard
+		if updateErr := s.repo.UpdateStatus(ctx, integrationID, "error"); updateErr != nil {
+			s.logger.Warn("failed to update integration status after rate limit",
+				zap.String("integration_id", integrationID),
+				zap.Error(updateErr),
+			)
+		}
 	}
 }
 
