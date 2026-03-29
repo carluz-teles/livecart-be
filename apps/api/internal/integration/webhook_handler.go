@@ -37,6 +37,11 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App) {
 	// Payment/event webhooks
 	webhooks.Post("/mercado_pago/:integrationId", h.HandleMercadoPago)
 	webhooks.Post("/tiny/:integrationId", h.HandleTiny)
+
+	// Instagram webhooks (Meta platform)
+	instagram := app.Group("/api/webhooks/instagram")
+	instagram.Get("/", h.HandleInstagramVerification)
+	instagram.Post("/", h.HandleInstagramWebhook)
 }
 
 // HandleMercadoPagoOAuthCallback handles the OAuth callback from Mercado Pago.

@@ -11,6 +11,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countCartsBySession = `-- name: CountCartsBySession :one
+SELECT COUNT(*)::int as count FROM carts WHERE session_id = $1 AND status = 'pending'
+`
+
+func (q *Queries) CountCartsBySession(ctx context.Context, sessionID pgtype.UUID) (int32, error) {
+	row := q.db.QueryRow(ctx, countCartsBySession, sessionID)
+	var count int32
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createCart = `-- name: CreateCart :one
 INSERT INTO carts (session_id, platform_user_id, platform_handle, token, expires_at)
 VALUES ($1, $2, $3, $4, $5)
@@ -84,6 +95,18 @@ func (q *Queries) CreateCartItem(ctx context.Context, arg CreateCartItemParams) 
 		&i.UnitPrice,
 	)
 	return i, err
+}
+
+const finalizeCartsBySession = `-- name: FinalizeCartsBySession :exec
+UPDATE carts
+SET status = 'checkout'
+WHERE session_id = $1 AND status = 'pending'
+`
+
+// Updates all pending carts in a session to checkout status
+func (q *Queries) FinalizeCartsBySession(ctx context.Context, sessionID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, finalizeCartsBySession, sessionID)
+	return err
 }
 
 const getCartByID = `-- name: GetCartByID :one
@@ -376,6 +399,40 @@ func (q *Queries) UpdateCartStatus(ctx context.Context, arg UpdateCartStatusPara
 		&i.NotifiedAt,
 		&i.CreatedAt,
 		&i.ExpiresAt,
+	)
+	return i, err
+}
+
+const upsertCartItem = `-- name: UpsertCartItem :one
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (cart_id, product_id)
+DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity
+RETURNING id, cart_id, product_id, quantity, unit_price
+`
+
+type UpsertCartItemParams struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	Quantity  pgtype.Int4 `json:"quantity"`
+	UnitPrice pgtype.Int8 `json:"unit_price"`
+}
+
+// Adds quantity to existing cart item or creates new one
+func (q *Queries) UpsertCartItem(ctx context.Context, arg UpsertCartItemParams) (CartItem, error) {
+	row := q.db.QueryRow(ctx, upsertCartItem,
+		arg.CartID,
+		arg.ProductID,
+		arg.Quantity,
+		arg.UnitPrice,
+	)
+	var i CartItem
+	err := row.Scan(
+		&i.ID,
+		&i.CartID,
+		&i.ProductID,
+		&i.Quantity,
+		&i.UnitPrice,
 	)
 	return i, err
 }

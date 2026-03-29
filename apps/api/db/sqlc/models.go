@@ -91,7 +91,7 @@ type LiveSession struct {
 	ID             pgtype.UUID        `json:"id"`
 	StoreID        pgtype.UUID        `json:"store_id"`
 	Platform       string             `json:"platform"`
-	PlatformLiveID string             `json:"platform_live_id"`
+	PlatformLiveID pgtype.Text        `json:"platform_live_id"`
 	Status         string             `json:"status"`
 	StartedAt      pgtype.Timestamptz `json:"started_at"`
 	EndedAt        pgtype.Timestamptz `json:"ended_at"`
@@ -100,6 +100,14 @@ type LiveSession struct {
 	Title          pgtype.Text        `json:"title"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type LiveSessionPlatform struct {
+	ID             pgtype.UUID        `json:"id"`
+	SessionID      pgtype.UUID        `json:"session_id"`
+	Platform       string             `json:"platform"`
+	PlatformLiveID string             `json:"platform_live_id"`
+	AddedAt        pgtype.Timestamptz `json:"added_at"`
 }
 
 type Membership struct {
@@ -167,6 +175,8 @@ type Store struct {
 	AddressZip pgtype.Text `json:"address_zip"`
 	// Store country
 	AddressCountry pgtype.Text `json:"address_country"`
+	// When true, automatically send checkout links to customers when live ends
+	AutoSendCheckoutLinks bool `json:"auto_send_checkout_links"`
 }
 
 type StoreInvitation struct {

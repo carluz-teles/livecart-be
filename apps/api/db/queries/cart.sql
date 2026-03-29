@@ -35,8 +35,25 @@ INSERT INTO cart_items (cart_id, product_id, quantity, unit_price)
 VALUES ($1, $2, $3, $4)
 RETURNING *;
 
+-- name: UpsertCartItem :one
+-- Adds quantity to existing cart item or creates new one
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (cart_id, product_id)
+DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity
+RETURNING *;
+
 -- name: ListCartItems :many
 SELECT ci.*, p.name AS product_name, p.image_url AS product_image_url
 FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1;
+
+-- name: FinalizeCartsBySession :exec
+-- Updates all pending carts in a session to checkout status
+UPDATE carts
+SET status = 'checkout'
+WHERE session_id = $1 AND status = 'pending';
+
+-- name: CountCartsBySession :one
+SELECT COUNT(*)::int as count FROM carts WHERE session_id = $1 AND status = 'pending';

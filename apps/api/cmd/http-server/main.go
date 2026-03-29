@@ -162,6 +162,10 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	userRepo := user.NewRepository(queries)
 	userSvc := user.NewService(userRepo, log)
 
+	// Live session service (needed by integration for cart operations)
+	liveRepo := live.NewRepository(queries, pool)
+	liveSvc := live.NewService(liveRepo, log)
+
 	// Integration Layer setup
 	var integrationSvc *integration.Service
 	var integrationWebhookHandler *integration.WebhookHandler
@@ -217,6 +221,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				providerFactory,
 				encryptor,
 				idempotencySvc,
+				liveSvc,
 				log,
 			)
 
@@ -259,6 +264,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				providerFactory,
 				encryptor,
 				idempotencySvc,
+				liveSvc,
 				log,
 			)
 
@@ -307,13 +313,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	productHandler := product.NewHandler(productSvc, validate)
 	productHandler.RegisterRoutes(storeScoped)
 
-	// Wire product syncer for ERP webhooks
+// Wire product syncer for ERP webhooks
 	if integrationSvc != nil {
 		integrationSvc.SetProductSyncer(product.NewProductSyncerAdapter(productSvc))
 	}
 
-	liveRepo := live.NewRepository(queries, pool)
-	liveSvc := live.NewService(liveRepo, log)
 	liveHandler := live.NewHandler(liveSvc, validate)
 	liveHandler.RegisterRoutes(storeScoped)
 

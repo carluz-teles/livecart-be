@@ -511,6 +511,65 @@ func (r *IdempotencyRepository) toIdempotencyRecord(row sqlc.IdempotencyKey) *id
 }
 
 // =============================================================================
+// INSTAGRAM LIVE SESSION OPERATIONS
+// =============================================================================
+
+// IncrementLiveSessionComments increments the total_comments counter for a live session.
+func (r *Repository) IncrementLiveSessionComments(ctx context.Context, sessionID string) error {
+	id, err := parseUUID(sessionID)
+	if err != nil {
+		return err
+	}
+	return r.queries.IncrementLiveSessionComments(ctx, id)
+}
+
+// IncrementLiveSessionOrders increments the total_orders counter for a live session.
+func (r *Repository) IncrementLiveSessionOrders(ctx context.Context, sessionID string) error {
+	id, err := parseUUID(sessionID)
+	if err != nil {
+		return err
+	}
+	return r.queries.IncrementLiveSessionOrders(ctx, id)
+}
+
+// ProductRow represents a product for keyword matching.
+type ProductRow struct {
+	ID      string
+	Keyword string
+	Price   int64
+}
+
+// GetProductByKeyword finds an active product by keyword in a store.
+func (r *Repository) GetProductByKeyword(ctx context.Context, storeID, keyword string) (*ProductRow, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := r.queries.GetProductByKeyword(ctx, sqlc.GetProductByKeywordParams{
+		StoreID: sID,
+		Keyword: keyword,
+	})
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("getting product by keyword: %w", err)
+	}
+
+	var price int64
+	if row.Price.Valid {
+		price = row.Price.Int64
+	}
+
+	return &ProductRow{
+		ID:      uuidToString(row.ID),
+		Keyword: row.Keyword,
+		Price:   price,
+	}, nil
+}
+
+// =============================================================================
 // HELPERS
 // =============================================================================
 

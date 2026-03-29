@@ -11,6 +11,35 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const addPlatformToSession = `-- name: AddPlatformToSession :one
+
+INSERT INTO live_session_platforms (session_id, platform, platform_live_id)
+VALUES ($1, $2, $3)
+RETURNING id, session_id, platform, platform_live_id, added_at
+`
+
+type AddPlatformToSessionParams struct {
+	SessionID      pgtype.UUID `json:"session_id"`
+	Platform       string      `json:"platform"`
+	PlatformLiveID string      `json:"platform_live_id"`
+}
+
+// =============================================================================
+// LIVE SESSION PLATFORMS (multiple platform IDs per session)
+// =============================================================================
+func (q *Queries) AddPlatformToSession(ctx context.Context, arg AddPlatformToSessionParams) (LiveSessionPlatform, error) {
+	row := q.db.QueryRow(ctx, addPlatformToSession, arg.SessionID, arg.Platform, arg.PlatformLiveID)
+	var i LiveSessionPlatform
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.Platform,
+		&i.PlatformLiveID,
+		&i.AddedAt,
+	)
+	return i, err
+}
+
 const cancelDetectedOrder = `-- name: CancelDetectedOrder :exec
 UPDATE detected_orders
 SET cancelled = true
@@ -28,6 +57,17 @@ func (q *Queries) CancelDetectedOrder(ctx context.Context, arg CancelDetectedOrd
 	return err
 }
 
+const countPlatformsBySession = `-- name: CountPlatformsBySession :one
+SELECT COUNT(*)::int FROM live_session_platforms WHERE session_id = $1
+`
+
+func (q *Queries) CountPlatformsBySession(ctx context.Context, sessionID pgtype.UUID) (int32, error) {
+	row := q.db.QueryRow(ctx, countPlatformsBySession, sessionID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const createLiveSession = `-- name: CreateLiveSession :one
 INSERT INTO live_sessions (store_id, title, platform, platform_live_id, status)
 VALUES ($1, $2, $3, $4, $5)
@@ -38,7 +78,7 @@ type CreateLiveSessionParams struct {
 	StoreID        pgtype.UUID `json:"store_id"`
 	Title          pgtype.Text `json:"title"`
 	Platform       string      `json:"platform"`
-	PlatformLiveID string      `json:"platform_live_id"`
+	PlatformLiveID pgtype.Text `json:"platform_live_id"`
 	Status         string      `json:"status"`
 }
 
@@ -107,7 +147,7 @@ WHERE store_id = $1 AND platform_live_id = $2 AND status = 'active'
 
 type GetActiveLiveSessionParams struct {
 	StoreID        pgtype.UUID `json:"store_id"`
-	PlatformLiveID string      `json:"platform_live_id"`
+	PlatformLiveID pgtype.Text `json:"platform_live_id"`
 }
 
 func (q *Queries) GetActiveLiveSession(ctx context.Context, arg GetActiveLiveSessionParams) (LiveSession, error) {
@@ -155,6 +195,128 @@ func (q *Queries) GetLiveSessionByID(ctx context.Context, arg GetLiveSessionByID
 		&i.Title,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getLiveSessionByPlatformLiveID = `-- name: GetLiveSessionByPlatformLiveID :one
+SELECT id, store_id, platform, platform_live_id, status, started_at, ended_at, total_comments, total_orders, title, created_at, updated_at FROM live_sessions
+WHERE platform_live_id = $1 AND status IN ('active', 'live')
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+// Busca live session pelo platform_live_id (usado por webhooks Instagram que não têm contexto de store)
+func (q *Queries) GetLiveSessionByPlatformLiveID(ctx context.Context, platformLiveID pgtype.Text) (LiveSession, error) {
+	row := q.db.QueryRow(ctx, getLiveSessionByPlatformLiveID, platformLiveID)
+	var i LiveSession
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.Platform,
+		&i.PlatformLiveID,
+		&i.Status,
+		&i.StartedAt,
+		&i.EndedAt,
+		&i.TotalComments,
+		&i.TotalOrders,
+		&i.Title,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getSessionByPlatformLiveID = `-- name: GetSessionByPlatformLiveID :one
+SELECT ls.id, ls.store_id, ls.platform, ls.platform_live_id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.total_orders, ls.title, ls.created_at, ls.updated_at
+FROM live_sessions ls
+JOIN live_session_platforms lsp ON lsp.session_id = ls.id
+WHERE lsp.platform_live_id = $1 AND ls.status IN ('active', 'live')
+ORDER BY ls.created_at DESC
+LIMIT 1
+`
+
+// Find active live session by any associated platform_live_id
+func (q *Queries) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID string) (LiveSession, error) {
+	row := q.db.QueryRow(ctx, getSessionByPlatformLiveID, platformLiveID)
+	var i LiveSession
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.Platform,
+		&i.PlatformLiveID,
+		&i.Status,
+		&i.StartedAt,
+		&i.EndedAt,
+		&i.TotalComments,
+		&i.TotalOrders,
+		&i.Title,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const incrementLiveSessionComments = `-- name: IncrementLiveSessionComments :exec
+UPDATE live_sessions
+SET total_comments = total_comments + 1, updated_at = now()
+WHERE id = $1
+`
+
+func (q *Queries) IncrementLiveSessionComments(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, incrementLiveSessionComments, id)
+	return err
+}
+
+const incrementLiveSessionOrders = `-- name: IncrementLiveSessionOrders :exec
+UPDATE live_sessions
+SET total_orders = total_orders + 1, updated_at = now()
+WHERE id = $1
+`
+
+func (q *Queries) IncrementLiveSessionOrders(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, incrementLiveSessionOrders, id)
+	return err
+}
+
+const insertDetectedOrderWithoutProduct = `-- name: InsertDetectedOrderWithoutProduct :one
+INSERT INTO detected_orders (session_id, platform_user_id, platform_handle, comment_text, quantity)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (session_id, platform_user_id) WHERE product_id IS NULL
+DO UPDATE SET quantity = detected_orders.quantity + EXCLUDED.quantity, comment_text = EXCLUDED.comment_text
+RETURNING id, session_id, cart_id, platform_user_id, platform_handle, comment_text, product_id, quantity, cancelled, detected_at
+`
+
+type InsertDetectedOrderWithoutProductParams struct {
+	SessionID      pgtype.UUID `json:"session_id"`
+	PlatformUserID string      `json:"platform_user_id"`
+	PlatformHandle string      `json:"platform_handle"`
+	CommentText    pgtype.Text `json:"comment_text"`
+	Quantity       pgtype.Int4 `json:"quantity"`
+}
+
+// Used for Instagram live comments where product_id is unknown
+// Updates quantity if an order already exists for this user in this session
+func (q *Queries) InsertDetectedOrderWithoutProduct(ctx context.Context, arg InsertDetectedOrderWithoutProductParams) (DetectedOrder, error) {
+	row := q.db.QueryRow(ctx, insertDetectedOrderWithoutProduct,
+		arg.SessionID,
+		arg.PlatformUserID,
+		arg.PlatformHandle,
+		arg.CommentText,
+		arg.Quantity,
+	)
+	var i DetectedOrder
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.CartID,
+		&i.PlatformUserID,
+		&i.PlatformHandle,
+		&i.CommentText,
+		&i.ProductID,
+		&i.Quantity,
+		&i.Cancelled,
+		&i.DetectedAt,
 	)
 	return i, err
 }
@@ -324,6 +486,53 @@ func (q *Queries) ListLiveSessionsByStore(ctx context.Context, storeID pgtype.UU
 	return items, nil
 }
 
+const listPlatformsBySession = `-- name: ListPlatformsBySession :many
+SELECT id, session_id, platform, platform_live_id, added_at FROM live_session_platforms
+WHERE session_id = $1
+ORDER BY added_at
+`
+
+func (q *Queries) ListPlatformsBySession(ctx context.Context, sessionID pgtype.UUID) ([]LiveSessionPlatform, error) {
+	rows, err := q.db.Query(ctx, listPlatformsBySession, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []LiveSessionPlatform{}
+	for rows.Next() {
+		var i LiveSessionPlatform
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.Platform,
+			&i.PlatformLiveID,
+			&i.AddedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const removePlatformFromSession = `-- name: RemovePlatformFromSession :exec
+DELETE FROM live_session_platforms
+WHERE session_id = $1 AND platform_live_id = $2
+`
+
+type RemovePlatformFromSessionParams struct {
+	SessionID      pgtype.UUID `json:"session_id"`
+	PlatformLiveID string      `json:"platform_live_id"`
+}
+
+func (q *Queries) RemovePlatformFromSession(ctx context.Context, arg RemovePlatformFromSessionParams) error {
+	_, err := q.db.Exec(ctx, removePlatformFromSession, arg.SessionID, arg.PlatformLiveID)
+	return err
+}
+
 const startLiveSession = `-- name: StartLiveSession :one
 UPDATE live_sessions
 SET status = 'live', started_at = now(), updated_at = now()
@@ -384,7 +593,7 @@ type UpdateLiveSessionParams struct {
 	StoreID        pgtype.UUID `json:"store_id"`
 	Title          pgtype.Text `json:"title"`
 	Platform       string      `json:"platform"`
-	PlatformLiveID string      `json:"platform_live_id"`
+	PlatformLiveID pgtype.Text `json:"platform_live_id"`
 }
 
 func (q *Queries) UpdateLiveSession(ctx context.Context, arg UpdateLiveSessionParams) (LiveSession, error) {
@@ -430,6 +639,7 @@ type UpsertDetectedOrderParams struct {
 	Quantity       pgtype.Int4 `json:"quantity"`
 }
 
+// Used when product_id is known (for upsert behavior)
 func (q *Queries) UpsertDetectedOrder(ctx context.Context, arg UpsertDetectedOrderParams) (DetectedOrder, error) {
 	row := q.db.QueryRow(ctx, upsertDetectedOrder,
 		arg.SessionID,

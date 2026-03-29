@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/internal/live"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/crypto"
 	"livecart/apps/api/lib/httpx"
@@ -35,6 +36,7 @@ type Service struct {
 	factory       *providers.Factory
 	encryptor     *crypto.Encryptor
 	idempotency   *idempotency.Service
+	liveService   *live.Service
 	productSyncer ProductSyncer
 	logger        *zap.Logger
 }
@@ -45,6 +47,7 @@ func NewService(
 	factory *providers.Factory,
 	encryptor *crypto.Encryptor,
 	idempotency *idempotency.Service,
+	liveService *live.Service,
 	logger *zap.Logger,
 ) *Service {
 	return &Service{
@@ -52,6 +55,7 @@ func NewService(
 		factory:     factory,
 		encryptor:   encryptor,
 		idempotency: idempotency,
+		liveService: liveService,
 		logger:      logger,
 	}
 }
@@ -1046,6 +1050,141 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 
 	// TODO: Update cart/order status based on payment status
 	// This will be implemented when we connect to the cart/order domain
+
+	return nil
+}
+
+// =============================================================================
+// INSTAGRAM WEBHOOK OPERATIONS
+// =============================================================================
+
+// ProcessInstagramComment processes a live comment from Instagram webhook.
+func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInstagramCommentInput) error {
+	s.logger.Info("processing instagram comment",
+		zap.String("account_id", input.AccountID),
+		zap.String("media_id", input.MediaID),
+		zap.String("comment_id", input.CommentID),
+		zap.String("user_id", input.UserID),
+		zap.String("username", input.Username),
+		zap.String("text", input.Text),
+	)
+
+	// Find live session by platform_live_id (media_id) in the platforms table
+	session, err := s.liveService.GetSessionByPlatformLiveID(ctx, input.MediaID)
+	if err != nil {
+		return fmt.Errorf("finding live session: %w", err)
+	}
+
+	if session == nil {
+		s.logger.Warn("no active live session found for media_id",
+			zap.String("media_id", input.MediaID),
+		)
+		return nil
+	}
+
+	// Increment comment counter
+	if err := s.repo.IncrementLiveSessionComments(ctx, session.ID); err != nil {
+		s.logger.Error("failed to increment comment counter",
+			zap.String("session_id", session.ID),
+			zap.Error(err),
+		)
+	}
+
+	// Parse purchase intent
+	intent := ParsePurchaseIntent(input.Text)
+	if intent == nil {
+		s.logger.Debug("no purchase intent detected",
+			zap.String("text", input.Text),
+		)
+		return nil
+	}
+
+	s.logger.Info("purchase intent detected",
+		zap.String("username", input.Username),
+		zap.Int("quantity", intent.Quantity),
+		zap.String("text", input.Text),
+	)
+
+	// Try to match product by keyword (REQUIRED)
+	product := s.findProductByKeyword(ctx, session.StoreID, input.Text)
+
+	if product == nil {
+		s.logger.Debug("ignoring comment: purchase intent detected but no valid product keyword",
+			zap.String("username", input.Username),
+			zap.String("text", input.Text),
+		)
+		return nil
+	}
+
+	s.logger.Info("product matched by keyword",
+		zap.String("username", input.Username),
+		zap.String("product_id", product.ID),
+		zap.String("keyword", product.Keyword),
+		zap.Int64("price", product.Price),
+	)
+
+	// Add product to user's cart
+	result, err := s.liveService.AddToCart(ctx, live.AddToCartInput{
+		SessionID:      session.ID,
+		PlatformUserID: input.UserID,
+		PlatformHandle: input.Username,
+		ProductID:      product.ID,
+		ProductPrice:   product.Price,
+		Quantity:       intent.Quantity,
+	})
+	if err != nil {
+		return fmt.Errorf("adding to cart: %w", err)
+	}
+
+	// Increment order counter only for new carts
+	if result.IsNewCart {
+		if err := s.repo.IncrementLiveSessionOrders(ctx, session.ID); err != nil {
+			s.logger.Error("failed to increment order counter",
+				zap.String("session_id", session.ID),
+				zap.Error(err),
+			)
+		}
+	}
+
+	return nil
+}
+
+// findProductByKeyword extracts possible keywords from text and tries to match with products.
+func (s *Service) findProductByKeyword(ctx context.Context, storeID, text string) *ProductRow {
+	keywords := ExtractPossibleKeywords(text)
+	if len(keywords) == 0 {
+		return nil
+	}
+
+	// Try each possible keyword until we find a match
+	for _, keyword := range keywords {
+		product, err := s.repo.GetProductByKeyword(ctx, storeID, keyword)
+		if err != nil {
+			s.logger.Error("failed to lookup product by keyword",
+				zap.String("keyword", keyword),
+				zap.Error(err),
+			)
+			continue
+		}
+		if product != nil {
+			return product
+		}
+	}
+
+	return nil
+}
+
+// ProcessInstagramMessage processes a DM from Instagram webhook.
+func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInstagramMessageInput) error {
+	s.logger.Info("processing instagram message",
+		zap.String("account_id", input.AccountID),
+		zap.String("sender_id", input.SenderID),
+		zap.String("message_id", input.MessageID),
+		zap.String("text", input.Text),
+	)
+
+	// For now, just log the message
+	// Future: Could be used to handle order confirmations, questions, etc.
 
 	return nil
 }

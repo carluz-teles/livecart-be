@@ -27,6 +27,11 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Delete("/:id", h.Delete)
 	g.Post("/:id/start", h.Start)
 	g.Post("/:id/end", h.End)
+
+	// Platform aggregation
+	g.Get("/:id/platforms", h.ListPlatforms)
+	g.Post("/:id/platforms", h.AddPlatform)
+	g.Delete("/:id/platforms/:platformLiveId", h.RemovePlatform)
 }
 
 // Create godoc
@@ -231,12 +236,14 @@ func (h *Handler) Start(c *fiber.Ctx) error {
 
 // End godoc
 // @Summary      End a live session
-// @Description  Ends an active live session
+// @Description  Ends an active live session and finalizes all pending carts
 // @Tags         lives
+// @Accept       json
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Live session UUID"
-// @Success      200 {object} httpx.Envelope{data=LiveResponse}
+// @Param        request body EndLiveRequest false "End live options"
+// @Success      200 {object} httpx.Envelope{data=EndLiveResponse}
 // @Failure      404 {object} httpx.Envelope
 // @Router       /api/v1/stores/{storeId}/lives/{id}/end [post]
 // @Security     BearerAuth
@@ -244,12 +251,28 @@ func (h *Handler) End(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
 	id := c.Params("id")
 
-	output, err := h.service.End(c.Context(), id, storeID)
+	// Parse optional request body
+	var req EndLiveRequest
+	if len(c.Body()) > 0 {
+		if err := c.BodyParser(&req); err != nil {
+			return httpx.BadRequest(c, "invalid request body")
+		}
+	}
+
+	output, err := h.service.End(c.Context(), EndLiveInput{
+		ID:       id,
+		StoreID:  storeID,
+		AutoSend: req.AutoSendCheckoutLinks,
+	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	return httpx.OK(c, toLiveResponse(output))
+	return httpx.OK(c, EndLiveResponse{
+		Live:           toLiveResponse(output.Live),
+		CartsFinalized: output.CartsFinalized,
+		AutoSendLinks:  output.AutoSendLinks,
+	})
 }
 
 // GetStats godoc
@@ -319,4 +342,115 @@ func toLiveResponse(o LiveOutput) LiveResponse {
 		CreatedAt:      o.CreatedAt,
 		UpdatedAt:      o.UpdatedAt,
 	}
+}
+
+// =============================================================================
+// PLATFORM AGGREGATION
+// =============================================================================
+
+// ListPlatforms godoc
+// @Summary      List platforms for a live session
+// @Description  Returns all platform IDs associated with a live session
+// @Tags         lives
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live session UUID"
+// @Success      200 {object} httpx.Envelope{data=ListPlatformsResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/platforms [get]
+// @Security     BearerAuth
+func (h *Handler) ListPlatforms(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	sessionID := c.Params("id")
+
+	platforms, err := h.service.ListPlatforms(c.Context(), sessionID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	responses := make([]PlatformResponse, len(platforms))
+	for i, p := range platforms {
+		responses[i] = PlatformResponse{
+			ID:             p.ID,
+			Platform:       p.Platform,
+			PlatformLiveID: p.PlatformLiveID,
+			AddedAt:        p.AddedAt,
+		}
+	}
+
+	return httpx.OK(c, ListPlatformsResponse{Data: responses})
+}
+
+// AddPlatform godoc
+// @Summary      Add a platform to a live session
+// @Description  Associates a new platform live ID with the session (for crash recovery)
+// @Tags         lives
+// @Accept       json
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live session UUID"
+// @Param        request body AddPlatformRequest true "Platform to add"
+// @Success      201 {object} httpx.Envelope{data=PlatformResponse}
+// @Failure      400 {object} httpx.Envelope
+// @Failure      404 {object} httpx.Envelope
+// @Failure      422 {object} httpx.ValidationEnvelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/platforms [post]
+// @Security     BearerAuth
+func (h *Handler) AddPlatform(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	sessionID := c.Params("id")
+
+	var req AddPlatformRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	// Get session to determine platform type
+	session, err := h.service.GetByID(c.Context(), sessionID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	output, err := h.service.AddPlatform(c.Context(), AddPlatformInput{
+		SessionID:      sessionID,
+		StoreID:        storeID,
+		Platform:       session.Platform,
+		PlatformLiveID: req.PlatformLiveID,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Created(c, PlatformResponse{
+		ID:             output.ID,
+		Platform:       output.Platform,
+		PlatformLiveID: output.PlatformLiveID,
+		AddedAt:        output.AddedAt,
+	})
+}
+
+// RemovePlatform godoc
+// @Summary      Remove a platform from a live session
+// @Description  Disassociates a platform live ID from the session
+// @Tags         lives
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live session UUID"
+// @Param        platformLiveId path string true "Platform live ID to remove"
+// @Success      200 {object} httpx.Envelope{data=httpx.DeletedResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/platforms/{platformLiveId} [delete]
+// @Security     BearerAuth
+func (h *Handler) RemovePlatform(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	sessionID := c.Params("id")
+	platformLiveID := c.Params("platformLiveId")
+
+	if err := h.service.RemovePlatform(c.Context(), sessionID, storeID, platformLiveID); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Deleted(c, platformLiveID)
 }
