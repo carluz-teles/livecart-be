@@ -1069,7 +1069,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		zap.String("text", input.Text),
 	)
 
-	// Find live session by platform_live_id (media_id) in the platforms table
+	// Find live session by platform_live_id (media_id)
 	session, err := s.liveService.GetSessionByPlatformLiveID(ctx, input.MediaID)
 	if err != nil {
 		return fmt.Errorf("finding live session: %w", err)
@@ -1082,7 +1082,19 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		return nil
 	}
 
-	// Increment comment counter
+	// Get the event (which has store_id) from the session
+	event, err := s.liveService.GetEventByPlatformLiveID(ctx, input.MediaID)
+	if err != nil {
+		return fmt.Errorf("finding live event: %w", err)
+	}
+	if event == nil {
+		s.logger.Warn("no active live event found for media_id",
+			zap.String("media_id", input.MediaID),
+		)
+		return nil
+	}
+
+	// Increment comment counter on session
 	if err := s.repo.IncrementLiveSessionComments(ctx, session.ID); err != nil {
 		s.logger.Error("failed to increment comment counter",
 			zap.String("session_id", session.ID),
@@ -1105,8 +1117,8 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		zap.String("text", input.Text),
 	)
 
-	// Try to match product by keyword (REQUIRED)
-	product := s.findProductByKeyword(ctx, session.StoreID, input.Text)
+	// Try to match product by keyword (REQUIRED) - use store_id from event
+	product := s.findProductByKeyword(ctx, event.StoreID, input.Text)
 
 	if product == nil {
 		s.logger.Debug("ignoring comment: purchase intent detected but no valid product keyword",
@@ -1123,9 +1135,9 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		zap.Int64("price", product.Price),
 	)
 
-	// Add product to user's cart
+	// Add product to user's cart (carts are tied to events now)
 	result, err := s.liveService.AddToCart(ctx, live.AddToCartInput{
-		SessionID:      session.ID,
+		EventID:        event.ID, // Changed from SessionID to EventID
 		PlatformUserID: input.UserID,
 		PlatformHandle: input.Username,
 		ProductID:      product.ID,
@@ -1136,11 +1148,11 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		return fmt.Errorf("adding to cart: %w", err)
 	}
 
-	// Increment order counter only for new carts
+	// Increment order counter on event only for new carts
 	if result.IsNewCart {
-		if err := s.repo.IncrementLiveSessionOrders(ctx, session.ID); err != nil {
+		if err := s.repo.IncrementLiveEventOrders(ctx, event.ID); err != nil {
 			s.logger.Error("failed to increment order counter",
-				zap.String("session_id", session.ID),
+				zap.String("event_id", event.ID),
 				zap.Error(err),
 			)
 		}

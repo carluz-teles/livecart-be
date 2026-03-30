@@ -13,6 +13,7 @@ type CartSettingsDTO struct {
 	MaxItems               int  `json:"maxItems"`
 	MaxQuantityPerItem     int  `json:"maxQuantityPerItem"`
 	NotifyBeforeExpiration bool `json:"notifyBeforeExpiration"`
+	AllowEdit              bool `json:"allowEdit"`
 }
 
 // ============================================
@@ -61,6 +62,7 @@ type UpdateCartSettingsRequest struct {
 	MaxItems               int  `json:"maxItems" validate:"gte=0"`
 	MaxQuantityPerItem     int  `json:"maxQuantityPerItem" validate:"gte=0"`
 	NotifyBeforeExpiration bool `json:"notifyBeforeExpiration"`
+	AllowEdit              bool `json:"allowEdit"`
 }
 
 type StoreResponse struct {
@@ -117,6 +119,7 @@ type UpdateCartSettingsInput struct {
 	MaxItems               int
 	MaxQuantityPerItem     int
 	NotifyBeforeExpiration bool
+	AllowEdit              bool
 }
 
 type StoreOutput struct {
@@ -168,6 +171,7 @@ type UpdateCartSettingsParams struct {
 	MaxItems               int
 	MaxQuantityPerItem     int
 	NotifyBeforeExpiration bool
+	AllowEdit              bool
 }
 
 type StoreRow struct {

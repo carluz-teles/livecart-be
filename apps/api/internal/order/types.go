@@ -136,7 +136,7 @@ type ListOrdersResult struct {
 
 type OrderRow struct {
 	ID             string
-	SessionID      string
+	EventID        string
 	PlatformUserID string
 	PlatformHandle string
 	Token          string
@@ -165,7 +165,7 @@ type OrderItemRow struct {
 
 type OrderDetailRow struct {
 	ID             string
-	SessionID      string
+	EventID        string
 	PlatformUserID string
 	PlatformHandle string
 	Token          string

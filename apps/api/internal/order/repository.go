@@ -24,7 +24,7 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 	baseQuery := `
 		SELECT
 			c.id,
-			c.session_id,
+			c.event_id,
 			c.platform_user_id,
 			c.platform_handle,
 			c.token,
@@ -33,8 +33,14 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 			c.paid_at,
 			c.created_at,
 			c.expires_at,
-			ls.title as live_title,
-			ls.platform as live_platform,
+			e.title as live_title,
+			COALESCE(
+				(SELECT lsp.platform FROM live_session_platforms lsp
+				 JOIN live_sessions ls ON ls.id = lsp.session_id
+				 WHERE ls.event_id = e.id
+				 ORDER BY lsp.added_at LIMIT 1),
+				'instagram'
+			) as live_platform,
 			COALESCE(
 				(SELECT SUM(ci.quantity * ci.unit_price)::BIGINT FROM cart_items ci WHERE ci.cart_id = c.id),
 				0
@@ -44,15 +50,15 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 				0
 			) as total_items
 		FROM carts c
-		JOIN live_sessions ls ON ls.id = c.session_id
-		WHERE ls.store_id = $1
+		JOIN live_events e ON e.id = c.event_id
+		WHERE e.store_id = $1
 	`
 
 	countQuery := `
 		SELECT COUNT(*)
 		FROM carts c
-		JOIN live_sessions ls ON ls.id = c.session_id
-		WHERE ls.store_id = $1
+		JOIN live_events e ON e.id = c.event_id
+		WHERE e.store_id = $1
 	`
 
 	args := []interface{}{params.StoreID}
@@ -89,9 +95,9 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 		conditions = append(conditions, fmt.Sprintf("c.payment_status IN (%s)", strings.Join(placeholders, ",")))
 	}
 
-	// Live session filter
+	// Live event filter (was live session filter)
 	if params.Filters.LiveSessionID != nil && *params.Filters.LiveSessionID != "" {
-		conditions = append(conditions, fmt.Sprintf("c.session_id = $%d", argIndex))
+		conditions = append(conditions, fmt.Sprintf("c.event_id = $%d", argIndex))
 		args = append(args, *params.Filters.LiveSessionID)
 		argIndex++
 	}
@@ -160,7 +166,7 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 		var row OrderRow
 		err := rows.Scan(
 			&row.ID,
-			&row.SessionID,
+			&row.EventID,
 			&row.PlatformUserID,
 			&row.PlatformHandle,
 			&row.Token,
@@ -187,7 +193,7 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 	query := `
 		SELECT
 			c.id,
-			c.session_id,
+			c.event_id,
 			c.platform_user_id,
 			c.platform_handle,
 			c.token,
@@ -196,18 +202,24 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 			c.paid_at,
 			c.created_at,
 			c.expires_at,
-			ls.title as live_title,
-			ls.platform as live_platform,
-			ls.store_id
+			e.title as live_title,
+			COALESCE(
+				(SELECT lsp.platform FROM live_session_platforms lsp
+				 JOIN live_sessions ls ON ls.id = lsp.session_id
+				 WHERE ls.event_id = e.id
+				 ORDER BY lsp.added_at LIMIT 1),
+				'instagram'
+			) as live_platform,
+			e.store_id
 		FROM carts c
-		JOIN live_sessions ls ON ls.id = c.session_id
+		JOIN live_events e ON e.id = c.event_id
 		WHERE c.id = $1
 	`
 
 	var row OrderDetailRow
 	err := r.db.QueryRow(ctx, query, id).Scan(
 		&row.ID,
-		&row.SessionID,
+		&row.EventID,
 		&row.PlatformUserID,
 		&row.PlatformHandle,
 		&row.Token,
@@ -315,8 +327,8 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (*OrderStatsO
 				0
 			)::BIGINT as avg_ticket
 		FROM carts c
-		JOIN live_sessions ls ON ls.id = c.session_id
-		WHERE ls.store_id = $1
+		JOIN live_events e ON e.id = c.event_id
+		WHERE e.store_id = $1
 	`
 
 	var stats OrderStatsOutput

@@ -1,7 +1,7 @@
 -- name: ListOrders :many
 SELECT
     c.id,
-    c.session_id,
+    c.event_id,
     c.platform_user_id,
     c.platform_handle,
     c.token,
@@ -10,8 +10,14 @@ SELECT
     c.paid_at,
     c.created_at,
     c.expires_at,
-    ls.title as live_title,
-    ls.platform as live_platform,
+    e.title as live_title,
+    COALESCE(
+        (SELECT lsp.platform FROM live_session_platforms lsp
+         JOIN live_sessions ls ON ls.id = lsp.session_id
+         WHERE ls.event_id = e.id
+         ORDER BY lsp.added_at LIMIT 1),
+        'instagram'
+    ) as live_platform,
     COALESCE(
         (SELECT SUM(ci.quantity * ci.unit_price)::BIGINT FROM cart_items ci WHERE ci.cart_id = c.id),
         0
@@ -21,14 +27,14 @@ SELECT
         0
     ) as total_items
 FROM carts c
-JOIN live_sessions ls ON ls.id = c.session_id
-WHERE ls.store_id = $1
+JOIN live_events e ON e.id = c.event_id
+WHERE e.store_id = $1
 ORDER BY c.created_at DESC;
 
 -- name: GetOrderByID :one
 SELECT
     c.id,
-    c.session_id,
+    c.event_id,
     c.platform_user_id,
     c.platform_handle,
     c.token,
@@ -37,11 +43,17 @@ SELECT
     c.paid_at,
     c.created_at,
     c.expires_at,
-    ls.title as live_title,
-    ls.platform as live_platform,
-    ls.store_id
+    e.title as live_title,
+    COALESCE(
+        (SELECT lsp.platform FROM live_session_platforms lsp
+         JOIN live_sessions ls ON ls.id = lsp.session_id
+         WHERE ls.event_id = e.id
+         ORDER BY lsp.added_at LIMIT 1),
+        'instagram'
+    ) as live_platform,
+    e.store_id
 FROM carts c
-JOIN live_sessions ls ON ls.id = c.session_id
+JOIN live_events e ON e.id = c.event_id
 WHERE c.id = $1;
 
 -- name: GetOrderItems :many
@@ -86,5 +98,5 @@ SELECT
         0
     )::BIGINT as avg_ticket
 FROM carts c
-JOIN live_sessions ls ON ls.id = c.session_id
-WHERE ls.store_id = $1;
+JOIN live_events e ON e.id = c.event_id
+WHERE e.store_id = $1;

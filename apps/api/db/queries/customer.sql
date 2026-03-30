@@ -9,8 +9,8 @@ SELECT
     MAX(c.created_at) as last_order_at,
     MIN(c.created_at) as first_order_at
 FROM carts c
-JOIN live_sessions ls ON ls.id = c.session_id
-WHERE ls.store_id = $1
+JOIN live_events e ON e.id = c.event_id
+WHERE e.store_id = $1
 GROUP BY c.platform_user_id, c.platform_handle
 ORDER BY last_order_at DESC;
 
@@ -25,8 +25,8 @@ SELECT
     MAX(c.created_at) as last_order_at,
     MIN(c.created_at) as first_order_at
 FROM carts c
-JOIN live_sessions ls ON ls.id = c.session_id
-WHERE ls.store_id = $1 AND c.platform_user_id = $2
+JOIN live_events e ON e.id = c.event_id
+WHERE e.store_id = $1 AND c.platform_user_id = $2
 GROUP BY c.platform_user_id, c.platform_handle;
 
 -- name: GetCustomerStats :one
@@ -45,5 +45,5 @@ SELECT
         0
     )::BIGINT as avg_spent_per_customer
 FROM carts c
-JOIN live_sessions ls ON ls.id = c.session_id
-WHERE ls.store_id = $1;
+JOIN live_events e ON e.id = c.event_id
+WHERE e.store_id = $1;

@@ -178,6 +178,7 @@ func (h *Handler) UpdateCartSettings(c *fiber.Ctx) error {
 		MaxItems:               req.MaxItems,
 		MaxQuantityPerItem:     req.MaxQuantityPerItem,
 		NotifyBeforeExpiration: req.NotifyBeforeExpiration,
+		AllowEdit:              req.AllowEdit,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -270,6 +271,7 @@ func (h *Handler) UpdateCartSettingsByID(c *fiber.Ctx) error {
 		MaxItems:               req.MaxItems,
 		MaxQuantityPerItem:     req.MaxQuantityPerItem,
 		NotifyBeforeExpiration: req.NotifyBeforeExpiration,
+		AllowEdit:              req.AllowEdit,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)

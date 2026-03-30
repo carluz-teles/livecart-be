@@ -108,6 +108,7 @@ func (r *Repository) UpdateCartSettings(ctx context.Context, params UpdateCartSe
 		CartMaxItems:               int32(params.MaxItems),
 		CartMaxQuantityPerItem:     int32(params.MaxQuantityPerItem),
 		CartNotifyBeforeExpiration: params.NotifyBeforeExpiration,
+		CartAllowEdit:              params.AllowEdit,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -200,6 +201,7 @@ func toStoreRow(row sqlc.Store) StoreRow {
 			MaxItems:               int(row.CartMaxItems),
 			MaxQuantityPerItem:     int(row.CartMaxQuantityPerItem),
 			NotifyBeforeExpiration: row.CartNotifyBeforeExpiration,
+			AllowEdit:              row.CartAllowEdit,
 		},
 		CreatedAt: row.CreatedAt.Time,
 		UpdatedAt: row.UpdatedAt.Time,

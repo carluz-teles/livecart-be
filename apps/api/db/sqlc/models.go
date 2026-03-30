@@ -10,7 +10,7 @@ import (
 
 type Cart struct {
 	ID                   pgtype.UUID        `json:"id"`
-	SessionID            pgtype.UUID        `json:"session_id"`
+	EventID              pgtype.UUID        `json:"event_id"`
 	PlatformUserID       string             `json:"platform_user_id"`
 	PlatformHandle       string             `json:"platform_handle"`
 	Token                string             `json:"token"`
@@ -87,19 +87,27 @@ type IntegrationLog struct {
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 }
 
+// Container for live sessions. Carts are tied to events, not sessions.
+type LiveEvent struct {
+	ID      pgtype.UUID `json:"id"`
+	StoreID pgtype.UUID `json:"store_id"`
+	Title   pgtype.Text `json:"title"`
+	// active = event ongoing, ended = checkout finalized
+	Status      string             `json:"status"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	TotalOrders int32              `json:"total_orders"`
+}
+
 type LiveSession struct {
-	ID             pgtype.UUID        `json:"id"`
-	StoreID        pgtype.UUID        `json:"store_id"`
-	Platform       string             `json:"platform"`
-	PlatformLiveID pgtype.Text        `json:"platform_live_id"`
-	Status         string             `json:"status"`
-	StartedAt      pgtype.Timestamptz `json:"started_at"`
-	EndedAt        pgtype.Timestamptz `json:"ended_at"`
-	TotalComments  pgtype.Int4        `json:"total_comments"`
-	TotalOrders    pgtype.Int4        `json:"total_orders"`
-	Title          pgtype.Text        `json:"title"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID            pgtype.UUID        `json:"id"`
+	Status        string             `json:"status"`
+	StartedAt     pgtype.Timestamptz `json:"started_at"`
+	EndedAt       pgtype.Timestamptz `json:"ended_at"`
+	TotalComments pgtype.Int4        `json:"total_comments"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	EventID       pgtype.UUID        `json:"event_id"`
 }
 
 type LiveSessionPlatform struct {
@@ -177,6 +185,8 @@ type Store struct {
 	AddressCountry pgtype.Text `json:"address_country"`
 	// When true, automatically send checkout links to customers when live ends
 	AutoSendCheckoutLinks bool `json:"auto_send_checkout_links"`
+	// Allow customers to edit cart (remove items, change quantity) on checkout page
+	CartAllowEdit bool `json:"cart_allow_edit"`
 }
 
 type StoreInvitation struct {

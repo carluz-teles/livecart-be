@@ -40,7 +40,7 @@ func (s *Service) List(ctx context.Context, input ListOrdersInput) (ListOrdersOu
 	for i, row := range result.Orders {
 		orders[i] = OrderOutput{
 			ID:             row.ID,
-			LiveSessionID:  row.SessionID,
+			LiveSessionID:  row.EventID, // Now using EventID but keeping response field name for backwards compatibility
 			LiveTitle:      row.LiveTitle,
 			LivePlatform:   row.LivePlatform,
 			CustomerHandle: row.PlatformHandle,
@@ -105,7 +105,7 @@ func (s *Service) GetByID(ctx context.Context, id string, storeID string) (*Orde
 
 	return &OrderOutput{
 		ID:             row.ID,
-		LiveSessionID:  row.SessionID,
+		LiveSessionID:  row.EventID, // Now using EventID but keeping response field name for backwards compatibility
 		LiveTitle:      row.LiveTitle,
 		LivePlatform:   row.LivePlatform,
 		CustomerHandle: row.PlatformHandle,

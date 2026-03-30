@@ -1,35 +1,82 @@
+-- =============================================================================
+-- LIVE SESSIONS (belong to events, platform-agnostic)
+-- =============================================================================
+
 -- name: CreateLiveSession :one
-INSERT INTO live_sessions (store_id, title, platform, platform_live_id, status)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO live_sessions (event_id, status)
+VALUES ($1, $2)
 RETURNING *;
 
 -- name: GetLiveSessionByID :one
-SELECT * FROM live_sessions WHERE id = $1 AND store_id = $2;
+SELECT * FROM live_sessions WHERE id = $1;
 
--- name: GetActiveLiveSession :one
+-- name: GetLiveSessionByIDAndEvent :one
+SELECT * FROM live_sessions WHERE id = $1 AND event_id = $2;
+
+-- name: GetActiveSessionByEvent :one
 SELECT * FROM live_sessions
-WHERE store_id = $1 AND platform_live_id = $2 AND status = 'active';
+WHERE event_id = $1 AND status IN ('active', 'live')
+ORDER BY created_at DESC
+LIMIT 1;
 
 -- name: StartLiveSession :one
 UPDATE live_sessions
 SET status = 'live', started_at = now(), updated_at = now()
-WHERE id = $1 AND store_id = $2
+WHERE id = $1
 RETURNING *;
 
 -- name: EndLiveSession :one
 UPDATE live_sessions
 SET status = 'ended', ended_at = now(), updated_at = now()
-WHERE id = $1 AND store_id = $2
+WHERE id = $1
 RETURNING *;
 
--- name: UpdateLiveSession :one
+-- name: ListSessionsByEvent :many
+SELECT * FROM live_sessions
+WHERE event_id = $1
+ORDER BY created_at DESC;
+
+-- name: IncrementLiveSessionComments :exec
 UPDATE live_sessions
-SET title = $3, platform = $4, platform_live_id = $5, updated_at = now()
-WHERE id = $1 AND store_id = $2
+SET total_comments = total_comments + 1, updated_at = now()
+WHERE id = $1;
+
+-- =============================================================================
+-- LIVE SESSION PLATFORMS (multiple platform IDs per session)
+-- =============================================================================
+
+-- name: AddPlatformToSession :one
+INSERT INTO live_session_platforms (session_id, platform, platform_live_id)
+VALUES ($1, $2, $3)
 RETURNING *;
 
--- name: ListLiveSessionsByStore :many
-SELECT * FROM live_sessions WHERE store_id = $1 ORDER BY started_at DESC;
+-- name: GetSessionByPlatformLiveID :one
+-- Find active live session by any associated platform_live_id
+SELECT ls.*
+FROM live_sessions ls
+JOIN live_session_platforms lsp ON lsp.session_id = ls.id
+WHERE lsp.platform_live_id = $1 AND ls.status IN ('active', 'live')
+ORDER BY ls.created_at DESC
+LIMIT 1;
+
+-- name: ListPlatformsBySession :many
+SELECT * FROM live_session_platforms
+WHERE session_id = $1
+ORDER BY added_at;
+
+-- name: RemovePlatformFromSession :exec
+DELETE FROM live_session_platforms
+WHERE session_id = $1 AND platform_live_id = $2;
+
+-- name: CountPlatformsBySession :one
+SELECT COUNT(*)::int FROM live_session_platforms WHERE session_id = $1;
+
+-- name: GetPlatformByLiveID :one
+SELECT * FROM live_session_platforms WHERE platform_live_id = $1;
+
+-- =============================================================================
+-- DETECTED ORDERS (still tied to sessions)
+-- =============================================================================
 
 -- name: UpsertDetectedOrder :one
 -- Used when product_id is known (for upsert behavior)
@@ -72,50 +119,3 @@ WHERE d.session_id = $1 AND d.platform_user_id = $2 AND d.cancelled = false;
 -- name: UpdateDetectedOrderCartID :exec
 UPDATE detected_orders SET cart_id = $2
 WHERE session_id = $1 AND platform_user_id = $3 AND cancelled = false;
-
--- name: GetLiveSessionByPlatformLiveID :one
--- Busca live session pelo platform_live_id (usado por webhooks Instagram que não têm contexto de store)
-SELECT * FROM live_sessions
-WHERE platform_live_id = $1 AND status IN ('active', 'live')
-ORDER BY created_at DESC
-LIMIT 1;
-
--- name: IncrementLiveSessionComments :exec
-UPDATE live_sessions
-SET total_comments = total_comments + 1, updated_at = now()
-WHERE id = $1;
-
--- name: IncrementLiveSessionOrders :exec
-UPDATE live_sessions
-SET total_orders = total_orders + 1, updated_at = now()
-WHERE id = $1;
-
--- =============================================================================
--- LIVE SESSION PLATFORMS (multiple platform IDs per session)
--- =============================================================================
-
--- name: AddPlatformToSession :one
-INSERT INTO live_session_platforms (session_id, platform, platform_live_id)
-VALUES ($1, $2, $3)
-RETURNING *;
-
--- name: GetSessionByPlatformLiveID :one
--- Find active live session by any associated platform_live_id
-SELECT ls.*
-FROM live_sessions ls
-JOIN live_session_platforms lsp ON lsp.session_id = ls.id
-WHERE lsp.platform_live_id = $1 AND ls.status IN ('active', 'live')
-ORDER BY ls.created_at DESC
-LIMIT 1;
-
--- name: ListPlatformsBySession :many
-SELECT * FROM live_session_platforms
-WHERE session_id = $1
-ORDER BY added_at;
-
--- name: RemovePlatformFromSession :exec
-DELETE FROM live_session_platforms
-WHERE session_id = $1 AND platform_live_id = $2;
-
--- name: CountPlatformsBySession :one
-SELECT COUNT(*)::int FROM live_session_platforms WHERE session_id = $1;

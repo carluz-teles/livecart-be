@@ -14,7 +14,7 @@ import (
 const getOrderByID = `-- name: GetOrderByID :one
 SELECT
     c.id,
-    c.session_id,
+    c.event_id,
     c.platform_user_id,
     c.platform_handle,
     c.token,
@@ -23,17 +23,23 @@ SELECT
     c.paid_at,
     c.created_at,
     c.expires_at,
-    ls.title as live_title,
-    ls.platform as live_platform,
-    ls.store_id
+    e.title as live_title,
+    COALESCE(
+        (SELECT lsp.platform FROM live_session_platforms lsp
+         JOIN live_sessions ls ON ls.id = lsp.session_id
+         WHERE ls.event_id = e.id
+         ORDER BY lsp.added_at LIMIT 1),
+        'instagram'
+    ) as live_platform,
+    e.store_id
 FROM carts c
-JOIN live_sessions ls ON ls.id = c.session_id
+JOIN live_events e ON e.id = c.event_id
 WHERE c.id = $1
 `
 
 type GetOrderByIDRow struct {
 	ID             pgtype.UUID        `json:"id"`
-	SessionID      pgtype.UUID        `json:"session_id"`
+	EventID        pgtype.UUID        `json:"event_id"`
 	PlatformUserID string             `json:"platform_user_id"`
 	PlatformHandle string             `json:"platform_handle"`
 	Token          string             `json:"token"`
@@ -43,7 +49,7 @@ type GetOrderByIDRow struct {
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
 	LiveTitle      pgtype.Text        `json:"live_title"`
-	LivePlatform   string             `json:"live_platform"`
+	LivePlatform   interface{}        `json:"live_platform"`
 	StoreID        pgtype.UUID        `json:"store_id"`
 }
 
@@ -52,7 +58,7 @@ func (q *Queries) GetOrderByID(ctx context.Context, id pgtype.UUID) (GetOrderByI
 	var i GetOrderByIDRow
 	err := row.Scan(
 		&i.ID,
-		&i.SessionID,
+		&i.EventID,
 		&i.PlatformUserID,
 		&i.PlatformHandle,
 		&i.Token,
@@ -139,8 +145,8 @@ SELECT
         0
     )::BIGINT as avg_ticket
 FROM carts c
-JOIN live_sessions ls ON ls.id = c.session_id
-WHERE ls.store_id = $1
+JOIN live_events e ON e.id = c.event_id
+WHERE e.store_id = $1
 `
 
 type GetOrderStatsRow struct {
@@ -165,7 +171,7 @@ func (q *Queries) GetOrderStats(ctx context.Context, storeID pgtype.UUID) (GetOr
 const listOrders = `-- name: ListOrders :many
 SELECT
     c.id,
-    c.session_id,
+    c.event_id,
     c.platform_user_id,
     c.platform_handle,
     c.token,
@@ -174,8 +180,14 @@ SELECT
     c.paid_at,
     c.created_at,
     c.expires_at,
-    ls.title as live_title,
-    ls.platform as live_platform,
+    e.title as live_title,
+    COALESCE(
+        (SELECT lsp.platform FROM live_session_platforms lsp
+         JOIN live_sessions ls ON ls.id = lsp.session_id
+         WHERE ls.event_id = e.id
+         ORDER BY lsp.added_at LIMIT 1),
+        'instagram'
+    ) as live_platform,
     COALESCE(
         (SELECT SUM(ci.quantity * ci.unit_price)::BIGINT FROM cart_items ci WHERE ci.cart_id = c.id),
         0
@@ -185,14 +197,14 @@ SELECT
         0
     ) as total_items
 FROM carts c
-JOIN live_sessions ls ON ls.id = c.session_id
-WHERE ls.store_id = $1
+JOIN live_events e ON e.id = c.event_id
+WHERE e.store_id = $1
 ORDER BY c.created_at DESC
 `
 
 type ListOrdersRow struct {
 	ID             pgtype.UUID        `json:"id"`
-	SessionID      pgtype.UUID        `json:"session_id"`
+	EventID        pgtype.UUID        `json:"event_id"`
 	PlatformUserID string             `json:"platform_user_id"`
 	PlatformHandle string             `json:"platform_handle"`
 	Token          string             `json:"token"`
@@ -202,7 +214,7 @@ type ListOrdersRow struct {
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
 	LiveTitle      pgtype.Text        `json:"live_title"`
-	LivePlatform   string             `json:"live_platform"`
+	LivePlatform   interface{}        `json:"live_platform"`
 	TotalAmount    interface{}        `json:"total_amount"`
 	TotalItems     interface{}        `json:"total_items"`
 }
@@ -218,7 +230,7 @@ func (q *Queries) ListOrders(ctx context.Context, storeID pgtype.UUID) ([]ListOr
 		var i ListOrdersRow
 		if err := rows.Scan(
 			&i.ID,
-			&i.SessionID,
+			&i.EventID,
 			&i.PlatformUserID,
 			&i.PlatformHandle,
 			&i.Token,
@@ -246,7 +258,7 @@ const updateOrderPaymentStatus = `-- name: UpdateOrderPaymentStatus :one
 UPDATE carts
 SET payment_status = $2, paid_at = CASE WHEN $2 = 'paid' THEN now() ELSE paid_at END
 WHERE id = $1
-RETURNING id, session_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at
 `
 
 type UpdateOrderPaymentStatusParams struct {
@@ -259,7 +271,7 @@ func (q *Queries) UpdateOrderPaymentStatus(ctx context.Context, arg UpdateOrderP
 	var i Cart
 	err := row.Scan(
 		&i.ID,
-		&i.SessionID,
+		&i.EventID,
 		&i.PlatformUserID,
 		&i.PlatformHandle,
 		&i.Token,
@@ -282,7 +294,7 @@ const updateOrderStatus = `-- name: UpdateOrderStatus :one
 UPDATE carts
 SET status = $2
 WHERE id = $1
-RETURNING id, session_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at
 `
 
 type UpdateOrderStatusParams struct {
@@ -295,7 +307,7 @@ func (q *Queries) UpdateOrderStatus(ctx context.Context, arg UpdateOrderStatusPa
 	var i Cart
 	err := row.Scan(
 		&i.ID,
-		&i.SessionID,
+		&i.EventID,
 		&i.PlatformUserID,
 		&i.PlatformHandle,
 		&i.Token,

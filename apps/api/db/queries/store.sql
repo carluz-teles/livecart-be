@@ -37,6 +37,7 @@ SET
   cart_max_items = $5,
   cart_max_quantity_per_item = $6,
   cart_notify_before_expiration = $7,
+  cart_allow_edit = $8,
   updated_at = now()
 WHERE id = $1
 RETURNING *;

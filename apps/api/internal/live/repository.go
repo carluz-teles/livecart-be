@@ -24,27 +24,29 @@ func NewRepository(q *sqlc.Queries, pool *pgxpool.Pool) *Repository {
 	return &Repository{q: q, pool: pool}
 }
 
-func (r *Repository) Create(ctx context.Context, params CreateLiveParams) (LiveRow, error) {
+// =============================================================================
+// EVENT OPERATIONS
+// =============================================================================
+
+func (r *Repository) CreateEvent(ctx context.Context, params CreateEventParams) (EventRow, error) {
 	storeUID, err := parseUUID(params.StoreID)
 	if err != nil {
-		return LiveRow{}, err
+		return EventRow{}, err
 	}
 
-	row, err := r.q.CreateLiveSession(ctx, sqlc.CreateLiveSessionParams{
-		StoreID:        storeUID,
-		Title:          pgtype.Text{String: params.Title, Valid: params.Title != ""},
-		Platform:       params.Platform,
-		PlatformLiveID: pgtype.Text{String: params.PlatformLiveID, Valid: params.PlatformLiveID != ""},
-		Status:         params.Status,
+	row, err := r.q.CreateLiveEvent(ctx, sqlc.CreateLiveEventParams{
+		StoreID: storeUID,
+		Title:   pgtype.Text{String: params.Title, Valid: params.Title != ""},
+		Status:  params.Status,
 	})
 	if err != nil {
-		return LiveRow{}, fmt.Errorf("creating live session: %w", err)
+		return EventRow{}, fmt.Errorf("creating live event: %w", err)
 	}
 
-	return toLiveRow(row), nil
+	return toEventRow(row), nil
 }
 
-func (r *Repository) GetByID(ctx context.Context, id, storeID string) (*LiveRow, error) {
+func (r *Repository) GetEventByID(ctx context.Context, id, storeID string) (*EventRow, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return nil, err
@@ -54,10 +56,179 @@ func (r *Repository) GetByID(ctx context.Context, id, storeID string) (*LiveRow,
 		return nil, err
 	}
 
-	row, err := r.q.GetLiveSessionByID(ctx, sqlc.GetLiveSessionByIDParams{
+	row, err := r.q.GetLiveEventByIDAndStore(ctx, sqlc.GetLiveEventByIDAndStoreParams{
 		ID:      uid,
 		StoreID: storeUID,
 	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.ErrNotFound("live event not found")
+		}
+		return nil, fmt.Errorf("getting live event: %w", err)
+	}
+
+	out := toEventRow(row)
+	return &out, nil
+}
+
+func (r *Repository) GetActiveEventByStore(ctx context.Context, storeID string) (*EventRow, error) {
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := r.q.GetActiveLiveEventByStore(ctx, storeUID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("getting active live event: %w", err)
+	}
+
+	out := toEventRow(row)
+	return &out, nil
+}
+
+func (r *Repository) EndEvent(ctx context.Context, id, storeID string) (EventRow, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return EventRow{}, err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return EventRow{}, err
+	}
+
+	row, err := r.q.EndLiveEvent(ctx, sqlc.EndLiveEventParams{
+		ID:      uid,
+		StoreID: storeUID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return EventRow{}, httpx.ErrNotFound("live event not found")
+		}
+		return EventRow{}, fmt.Errorf("ending live event: %w", err)
+	}
+
+	return toEventRow(row), nil
+}
+
+func (r *Repository) UpdateEventTitle(ctx context.Context, id, title string) (EventRow, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return EventRow{}, err
+	}
+
+	row, err := r.q.UpdateLiveEventTitle(ctx, sqlc.UpdateLiveEventTitleParams{
+		ID:    uid,
+		Title: pgtype.Text{String: title, Valid: title != ""},
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return EventRow{}, httpx.ErrNotFound("live event not found")
+		}
+		return EventRow{}, fmt.Errorf("updating live event title: %w", err)
+	}
+
+	return toEventRow(row), nil
+}
+
+func (r *Repository) ListEvents(ctx context.Context, storeID string, pagination, offset int) ([]EventRow, int, error) {
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := r.q.ListLiveEventsByStore(ctx, storeUID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing live events: %w", err)
+	}
+
+	events := make([]EventRow, len(rows))
+	for i, row := range rows {
+		events[i] = toEventRow(row)
+	}
+
+	return events, len(events), nil
+}
+
+func (r *Repository) GetEventByPlatformLiveID(ctx context.Context, platformLiveID string) (*EventRow, error) {
+	row, err := r.q.GetEventByPlatformLiveID(ctx, platformLiveID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("getting event by platform live id: %w", err)
+	}
+
+	out := toEventRow(row)
+	return &out, nil
+}
+
+func (r *Repository) CountSessionsByEvent(ctx context.Context, eventID string) (int, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return 0, err
+	}
+
+	count, err := r.q.CountSessionsByEvent(ctx, uid)
+	if err != nil {
+		return 0, fmt.Errorf("counting sessions: %w", err)
+	}
+
+	return int(count), nil
+}
+
+func (r *Repository) DeleteEvent(ctx context.Context, id, storeID string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+
+	result, err := r.pool.Exec(ctx, "DELETE FROM live_events WHERE id = $1 AND store_id = $2", uid, storeUID)
+	if err != nil {
+		return fmt.Errorf("deleting live event: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return httpx.ErrNotFound("live event not found")
+	}
+
+	return nil
+}
+
+// =============================================================================
+// SESSION OPERATIONS
+// =============================================================================
+
+func (r *Repository) CreateSession(ctx context.Context, params CreateSessionParams) (SessionRow, error) {
+	eventUID, err := parseUUID(params.EventID)
+	if err != nil {
+		return SessionRow{}, err
+	}
+
+	row, err := r.q.CreateLiveSession(ctx, sqlc.CreateLiveSessionParams{
+		EventID: eventUID,
+		Status:  params.Status,
+	})
+	if err != nil {
+		return SessionRow{}, fmt.Errorf("creating live session: %w", err)
+	}
+
+	return toSessionRow(row), nil
+}
+
+func (r *Repository) GetSessionByID(ctx context.Context, id string) (*SessionRow, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := r.q.GetLiveSessionByID(ctx, uid)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, httpx.ErrNotFound("live session not found")
@@ -65,377 +236,107 @@ func (r *Repository) GetByID(ctx context.Context, id, storeID string) (*LiveRow,
 		return nil, fmt.Errorf("getting live session: %w", err)
 	}
 
-	out := toLiveRow(row)
+	out := toSessionRow(row)
 	return &out, nil
 }
 
-func (r *Repository) List(ctx context.Context, params ListLivesParams) (ListLivesResult, error) {
-	// Build WHERE conditions
-	conditions := []string{"store_id = $1"}
-	args := []interface{}{params.StoreID}
-	argIdx := 2
-
-	// Search filter (title)
-	if params.Search != "" {
-		conditions = append(conditions, fmt.Sprintf("LOWER(title) LIKE $%d", argIdx))
-		args = append(args, "%"+strings.ToLower(params.Search)+"%")
-		argIdx++
-	}
-
-	// Status filter
-	if len(params.Filters.Status) > 0 {
-		placeholders := make([]string, len(params.Filters.Status))
-		for i, status := range params.Filters.Status {
-			placeholders[i] = fmt.Sprintf("$%d", argIdx)
-			args = append(args, status)
-			argIdx++
-		}
-		conditions = append(conditions, fmt.Sprintf("status IN (%s)", strings.Join(placeholders, ", ")))
-	}
-
-	// Platform filter
-	if len(params.Filters.Platform) > 0 {
-		placeholders := make([]string, len(params.Filters.Platform))
-		for i, platform := range params.Filters.Platform {
-			placeholders[i] = fmt.Sprintf("$%d", argIdx)
-			args = append(args, platform)
-			argIdx++
-		}
-		conditions = append(conditions, fmt.Sprintf("platform IN (%s)", strings.Join(placeholders, ", ")))
-	}
-
-	// Date filters
-	if params.Filters.DateFrom != nil && *params.Filters.DateFrom != "" {
-		conditions = append(conditions, fmt.Sprintf("created_at >= $%d", argIdx))
-		args = append(args, *params.Filters.DateFrom)
-		argIdx++
-	}
-	if params.Filters.DateTo != nil && *params.Filters.DateTo != "" {
-		conditions = append(conditions, fmt.Sprintf("created_at <= $%d", argIdx))
-		args = append(args, *params.Filters.DateTo)
-		argIdx++
-	}
-
-	whereClause := strings.Join(conditions, " AND ")
-
-	// Validate and build ORDER BY
-	allowedSortFields := map[string]string{
-		"title":      "title",
-		"status":     "status",
-		"platform":   "platform",
-		"created_at": "created_at",
-		"started_at": "started_at",
-	}
-	sortField, ok := allowedSortFields[params.Sorting.SortBy]
-	if !ok {
-		sortField = "created_at"
-	}
-	orderClause := fmt.Sprintf("%s %s", sortField, params.Sorting.OrderSQL())
-
-	// Count total
-	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM live_sessions WHERE %s", whereClause)
-	var total int
-	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
-		return ListLivesResult{}, fmt.Errorf("counting live sessions: %w", err)
-	}
-
-	// Build main query with pagination
-	query := fmt.Sprintf(`
-		SELECT id, store_id, platform, platform_live_id, status, started_at, ended_at,
-		       total_comments, total_orders, title, created_at, updated_at
-		FROM live_sessions
-		WHERE %s
-		ORDER BY %s
-		LIMIT $%d OFFSET $%d
-	`, whereClause, orderClause, argIdx, argIdx+1)
-
-	args = append(args, params.Pagination.Limit, params.Pagination.Offset())
-
-	rows, err := r.pool.Query(ctx, query, args...)
+func (r *Repository) GetActiveSessionByEvent(ctx context.Context, eventID string) (*SessionRow, error) {
+	eventUID, err := parseUUID(eventID)
 	if err != nil {
-		return ListLivesResult{}, fmt.Errorf("listing live sessions: %w", err)
-	}
-	defer rows.Close()
-
-	lives := make([]LiveRow, 0)
-	for rows.Next() {
-		var row sqlc.LiveSession
-		if err := rows.Scan(
-			&row.ID,
-			&row.StoreID,
-			&row.Platform,
-			&row.PlatformLiveID,
-			&row.Status,
-			&row.StartedAt,
-			&row.EndedAt,
-			&row.TotalComments,
-			&row.TotalOrders,
-			&row.Title,
-			&row.CreatedAt,
-			&row.UpdatedAt,
-		); err != nil {
-			return ListLivesResult{}, fmt.Errorf("scanning live session: %w", err)
-		}
-		lives = append(lives, toLiveRow(row))
+		return nil, err
 	}
 
-	if err := rows.Err(); err != nil {
-		return ListLivesResult{}, fmt.Errorf("iterating live sessions: %w", err)
-	}
-
-	return ListLivesResult{
-		Lives: lives,
-		Total: total,
-	}, nil
-}
-
-func (r *Repository) Update(ctx context.Context, params UpdateLiveParams) (LiveRow, error) {
-	uid, err := parseUUID(params.ID)
-	if err != nil {
-		return LiveRow{}, err
-	}
-	storeUID, err := parseUUID(params.StoreID)
-	if err != nil {
-		return LiveRow{}, err
-	}
-
-	row, err := r.q.UpdateLiveSession(ctx, sqlc.UpdateLiveSessionParams{
-		ID:             uid,
-		StoreID:        storeUID,
-		Title:          pgtype.Text{String: params.Title, Valid: params.Title != ""},
-		Platform:       params.Platform,
-		PlatformLiveID: pgtype.Text{String: params.PlatformLiveID, Valid: params.PlatformLiveID != ""},
-	})
+	row, err := r.q.GetActiveSessionByEvent(ctx, eventUID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return LiveRow{}, httpx.ErrNotFound("live session not found")
+			return nil, nil
 		}
-		return LiveRow{}, fmt.Errorf("updating live session: %w", err)
+		return nil, fmt.Errorf("getting active session: %w", err)
 	}
 
-	return toLiveRow(row), nil
+	out := toSessionRow(row)
+	return &out, nil
 }
 
-func (r *Repository) Start(ctx context.Context, id, storeID string) (LiveRow, error) {
+func (r *Repository) StartSession(ctx context.Context, id string) (SessionRow, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
-		return LiveRow{}, err
-	}
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return LiveRow{}, err
+		return SessionRow{}, err
 	}
 
-	row, err := r.q.StartLiveSession(ctx, sqlc.StartLiveSessionParams{
-		ID:      uid,
-		StoreID: storeUID,
-	})
+	row, err := r.q.StartLiveSession(ctx, uid)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return LiveRow{}, httpx.ErrNotFound("live session not found")
+			return SessionRow{}, httpx.ErrNotFound("live session not found")
 		}
-		return LiveRow{}, fmt.Errorf("starting live session: %w", err)
+		return SessionRow{}, fmt.Errorf("starting live session: %w", err)
 	}
 
-	return toLiveRow(row), nil
+	return toSessionRow(row), nil
 }
 
-func (r *Repository) End(ctx context.Context, id, storeID string) (LiveRow, error) {
+func (r *Repository) EndSession(ctx context.Context, id string) (SessionRow, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
-		return LiveRow{}, err
-	}
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return LiveRow{}, err
+		return SessionRow{}, err
 	}
 
-	row, err := r.q.EndLiveSession(ctx, sqlc.EndLiveSessionParams{
-		ID:      uid,
-		StoreID: storeUID,
-	})
+	row, err := r.q.EndLiveSession(ctx, uid)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return LiveRow{}, httpx.ErrNotFound("live session not found")
+			return SessionRow{}, httpx.ErrNotFound("live session not found")
 		}
-		return LiveRow{}, fmt.Errorf("ending live session: %w", err)
+		return SessionRow{}, fmt.Errorf("ending live session: %w", err)
 	}
 
-	return toLiveRow(row), nil
+	return toSessionRow(row), nil
 }
 
-func (r *Repository) Delete(ctx context.Context, id, storeID string) error {
-	uid, err := parseUUID(id)
+func (r *Repository) ListSessionsByEvent(ctx context.Context, eventID string) ([]SessionRow, error) {
+	eventUID, err := parseUUID(eventID)
 	if err != nil {
-		return err
-	}
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return err
+		return nil, err
 	}
 
-	result, err := r.pool.Exec(ctx, "DELETE FROM live_sessions WHERE id = $1 AND store_id = $2", uid, storeUID)
+	rows, err := r.q.ListSessionsByEvent(ctx, eventUID)
 	if err != nil {
-		return fmt.Errorf("deleting live session: %w", err)
+		return nil, fmt.Errorf("listing sessions: %w", err)
 	}
 
-	if result.RowsAffected() == 0 {
-		return httpx.ErrNotFound("live session not found")
+	sessions := make([]SessionRow, len(rows))
+	for i, row := range rows {
+		sessions[i] = toSessionRow(row)
 	}
 
-	return nil
+	return sessions, nil
 }
 
-func (r *Repository) GetStats(ctx context.Context, storeID string) (LiveStatsOutput, error) {
-	storeUID, err := parseUUID(storeID)
+func (r *Repository) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID string) (*SessionRow, error) {
+	row, err := r.q.GetSessionByPlatformLiveID(ctx, platformLiveID)
 	if err != nil {
-		return LiveStatsOutput{}, err
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("getting session by platform live id: %w", err)
 	}
 
-	query := `
-		SELECT
-			COUNT(*) as total_lives,
-			COUNT(*) FILTER (WHERE status = 'live') as active_lives,
-			COALESCE(SUM(total_orders), 0) as total_orders
-		FROM live_sessions
-		WHERE store_id = $1
-	`
-
-	var stats LiveStatsOutput
-	err = r.pool.QueryRow(ctx, query, storeUID).Scan(
-		&stats.TotalLives,
-		&stats.ActiveLives,
-		&stats.TotalOrders,
-	)
-	if err != nil {
-		return LiveStatsOutput{}, fmt.Errorf("getting live stats: %w", err)
-	}
-
-	return stats, nil
+	out := toSessionRow(row)
+	return &out, nil
 }
 
-// =============================================================================
-// STORE SETTINGS
-// =============================================================================
-
-// GetStoreAutoSendSetting retrieves the auto_send_checkout_links setting for a store.
-func (r *Repository) GetStoreAutoSendSetting(ctx context.Context, storeID string) (bool, error) {
-	uid, err := parseUUID(storeID)
-	if err != nil {
-		return false, err
-	}
-
-	store, err := r.q.GetStoreByID(ctx, uid)
-	if err != nil {
-		return false, fmt.Errorf("getting store: %w", err)
-	}
-
-	return store.AutoSendCheckoutLinks, nil
-}
-
-// =============================================================================
-// CART OPERATIONS
-// =============================================================================
-
-// GetOrCreateCart finds an existing cart for a user in a session or creates a new one.
-func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCartParams) (*CartRow, bool, error) {
-	sessionID, err := parseUUID(params.SessionID)
-	if err != nil {
-		return nil, false, err
-	}
-
-	// Try to get existing cart first
-	existing, err := r.q.GetCartBySessionAndUser(ctx, sqlc.GetCartBySessionAndUserParams{
-		SessionID:      sessionID,
-		PlatformUserID: params.PlatformUserID,
-	})
-	if err == nil {
-		return &CartRow{
-			ID:             existing.ID.String(),
-			SessionID:      existing.SessionID.String(),
-			PlatformUserID: existing.PlatformUserID,
-			PlatformHandle: existing.PlatformHandle,
-			Token:          existing.Token,
-		}, false, nil
-	}
-
-	// Cart doesn't exist, create a new one
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, false, fmt.Errorf("getting cart: %w", err)
-	}
-
-	// Create new cart with expiration 24h from now
-	expiresAt := time.Now().Add(24 * time.Hour)
-	created, err := r.q.CreateCart(ctx, sqlc.CreateCartParams{
-		SessionID:      sessionID,
-		PlatformUserID: params.PlatformUserID,
-		PlatformHandle: params.PlatformHandle,
-		Token:          params.Token,
-		ExpiresAt:      pgtype.Timestamptz{Time: expiresAt, Valid: true},
-	})
-	if err != nil {
-		return nil, false, fmt.Errorf("creating cart: %w", err)
-	}
-
-	return &CartRow{
-		ID:             created.ID.String(),
-		SessionID:      created.SessionID.String(),
-		PlatformUserID: created.PlatformUserID,
-		PlatformHandle: created.PlatformHandle,
-		Token:          created.Token,
-	}, true, nil
-}
-
-// FinalizeCartsBySession marks all pending carts in a session as 'checkout'.
-func (r *Repository) FinalizeCartsBySession(ctx context.Context, sessionID string) (int, error) {
+func (r *Repository) IncrementSessionComments(ctx context.Context, sessionID string) error {
 	uid, err := parseUUID(sessionID)
 	if err != nil {
-		return 0, err
-	}
-
-	// Count first
-	count, err := r.q.CountCartsBySession(ctx, uid)
-	if err != nil {
-		return 0, fmt.Errorf("counting carts: %w", err)
-	}
-
-	// Finalize
-	if err := r.q.FinalizeCartsBySession(ctx, uid); err != nil {
-		return 0, fmt.Errorf("finalizing carts: %w", err)
-	}
-
-	return int(count), nil
-}
-
-// AddCartItem adds a product to a cart (or increments quantity if already exists).
-func (r *Repository) AddCartItem(ctx context.Context, params AddCartItemParams) error {
-	cartID, err := parseUUID(params.CartID)
-	if err != nil {
-		return err
-	}
-	productID, err := parseUUID(params.ProductID)
-	if err != nil {
 		return err
 	}
 
-	_, err = r.q.UpsertCartItem(ctx, sqlc.UpsertCartItemParams{
-		CartID:    cartID,
-		ProductID: productID,
-		Quantity:  pgtype.Int4{Int32: int32(params.Quantity), Valid: true},
-		UnitPrice: pgtype.Int8{Int64: params.UnitPrice, Valid: true},
-	})
-	if err != nil {
-		return fmt.Errorf("upserting cart item: %w", err)
-	}
-
-	return nil
+	return r.q.IncrementLiveSessionComments(ctx, uid)
 }
 
 // =============================================================================
-// PLATFORM AGGREGATION
+// PLATFORM OPERATIONS
 // =============================================================================
 
-// AddPlatformToSession adds a platform ID to a live session.
 func (r *Repository) AddPlatformToSession(ctx context.Context, sessionID, platform, platformLiveID string) (*PlatformRow, error) {
 	sID, err := parseUUID(sessionID)
 	if err != nil {
@@ -460,7 +361,6 @@ func (r *Repository) AddPlatformToSession(ctx context.Context, sessionID, platfo
 	}, nil
 }
 
-// ListPlatformsBySession returns all platforms associated with a session.
 func (r *Repository) ListPlatformsBySession(ctx context.Context, sessionID string) ([]PlatformRow, error) {
 	sID, err := parseUUID(sessionID)
 	if err != nil {
@@ -486,21 +386,6 @@ func (r *Repository) ListPlatformsBySession(ctx context.Context, sessionID strin
 	return platforms, nil
 }
 
-// GetSessionByPlatformLiveID finds an active session by any associated platform_live_id.
-func (r *Repository) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID string) (*LiveRow, error) {
-	row, err := r.q.GetSessionByPlatformLiveID(ctx, platformLiveID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("getting session by platform live id: %w", err)
-	}
-
-	result := toLiveRow(row)
-	return &result, nil
-}
-
-// RemovePlatformFromSession removes a platform ID from a session.
 func (r *Repository) RemovePlatformFromSession(ctx context.Context, sessionID, platformLiveID string) error {
 	sID, err := parseUUID(sessionID)
 	if err != nil {
@@ -513,41 +398,372 @@ func (r *Repository) RemovePlatformFromSession(ctx context.Context, sessionID, p
 	})
 }
 
+func (r *Repository) GetPlatformByLiveID(ctx context.Context, platformLiveID string) (*PlatformRow, error) {
+	row, err := r.q.GetPlatformByLiveID(ctx, platformLiveID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("getting platform by live id: %w", err)
+	}
+
+	return &PlatformRow{
+		ID:             row.ID.String(),
+		SessionID:      row.SessionID.String(),
+		Platform:       row.Platform,
+		PlatformLiveID: row.PlatformLiveID,
+		AddedAt:        row.AddedAt.Time,
+	}, nil
+}
+
+// =============================================================================
+// STORE SETTINGS
+// =============================================================================
+
+func (r *Repository) GetStoreAutoSendSetting(ctx context.Context, storeID string) (bool, error) {
+	uid, err := parseUUID(storeID)
+	if err != nil {
+		return false, err
+	}
+
+	store, err := r.q.GetStoreByID(ctx, uid)
+	if err != nil {
+		return false, fmt.Errorf("getting store: %w", err)
+	}
+
+	return store.AutoSendCheckoutLinks, nil
+}
+
+// =============================================================================
+// CART OPERATIONS (now use event_id)
+// =============================================================================
+
+func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCartParams) (*CartRow, bool, error) {
+	eventID, err := parseUUID(params.EventID)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// Try to get existing cart first
+	existing, err := r.q.GetCartByEventAndUser(ctx, sqlc.GetCartByEventAndUserParams{
+		EventID:        eventID,
+		PlatformUserID: params.PlatformUserID,
+	})
+	if err == nil {
+		return &CartRow{
+			ID:             existing.ID.String(),
+			EventID:        existing.EventID.String(),
+			PlatformUserID: existing.PlatformUserID,
+			PlatformHandle: existing.PlatformHandle,
+			Token:          existing.Token,
+		}, false, nil
+	}
+
+	// Cart doesn't exist, create a new one
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, fmt.Errorf("getting cart: %w", err)
+	}
+
+	// Create new cart with expiration 24h from now
+	expiresAt := time.Now().Add(24 * time.Hour)
+	created, err := r.q.CreateCart(ctx, sqlc.CreateCartParams{
+		EventID:        eventID,
+		PlatformUserID: params.PlatformUserID,
+		PlatformHandle: params.PlatformHandle,
+		Token:          params.Token,
+		ExpiresAt:      pgtype.Timestamptz{Time: expiresAt, Valid: true},
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("creating cart: %w", err)
+	}
+
+	return &CartRow{
+		ID:             created.ID.String(),
+		EventID:        created.EventID.String(),
+		PlatformUserID: created.PlatformUserID,
+		PlatformHandle: created.PlatformHandle,
+		Token:          created.Token,
+	}, true, nil
+}
+
+func (r *Repository) FinalizeCartsByEvent(ctx context.Context, eventID string) (int, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return 0, err
+	}
+
+	// Count first
+	count, err := r.q.CountCartsByEvent(ctx, uid)
+	if err != nil {
+		return 0, fmt.Errorf("counting carts: %w", err)
+	}
+
+	// Finalize
+	if err := r.q.FinalizeCartsByEvent(ctx, uid); err != nil {
+		return 0, fmt.Errorf("finalizing carts: %w", err)
+	}
+
+	return int(count), nil
+}
+
+func (r *Repository) AddCartItem(ctx context.Context, params AddCartItemParams) error {
+	cartID, err := parseUUID(params.CartID)
+	if err != nil {
+		return err
+	}
+	productID, err := parseUUID(params.ProductID)
+	if err != nil {
+		return err
+	}
+
+	_, err = r.q.UpsertCartItem(ctx, sqlc.UpsertCartItemParams{
+		CartID:    cartID,
+		ProductID: productID,
+		Quantity:  pgtype.Int4{Int32: int32(params.Quantity), Valid: true},
+		UnitPrice: pgtype.Int8{Int64: params.UnitPrice, Valid: true},
+	})
+	if err != nil {
+		return fmt.Errorf("upserting cart item: %w", err)
+	}
+
+	return nil
+}
+
+// =============================================================================
+// STATS (now from events)
+// =============================================================================
+
+func (r *Repository) GetStats(ctx context.Context, storeID string) (LiveStatsOutput, error) {
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return LiveStatsOutput{}, err
+	}
+
+	query := `
+		SELECT
+			COUNT(*) as total_lives,
+			COUNT(*) FILTER (WHERE status = 'active') as active_lives,
+			COALESCE(SUM(total_orders), 0) as total_orders
+		FROM live_events
+		WHERE store_id = $1
+	`
+
+	var stats LiveStatsOutput
+	err = r.pool.QueryRow(ctx, query, storeUID).Scan(
+		&stats.TotalLives,
+		&stats.ActiveLives,
+		&stats.TotalOrders,
+	)
+	if err != nil {
+		return LiveStatsOutput{}, fmt.Errorf("getting live stats: %w", err)
+	}
+
+	return stats, nil
+}
+
+// =============================================================================
+// LEGACY LIST (joins events with sessions and platforms)
+// =============================================================================
+
+type ListLivesParams struct {
+	StoreID    string
+	Search     string
+	Pagination struct {
+		Limit  int
+		Offset int
+	}
+	Sorting struct {
+		SortBy    string
+		SortOrder string
+	}
+	Filters LiveFilters
+}
+
+func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]LiveOutput, int, error) {
+	// Build WHERE conditions
+	conditions := []string{"e.store_id = $1"}
+	args := []interface{}{params.StoreID}
+	argIdx := 2
+
+	// Search filter (title)
+	if params.Search != "" {
+		conditions = append(conditions, fmt.Sprintf("LOWER(e.title) LIKE $%d", argIdx))
+		args = append(args, "%"+strings.ToLower(params.Search)+"%")
+		argIdx++
+	}
+
+	// Status filter
+	if len(params.Filters.Status) > 0 {
+		placeholders := make([]string, len(params.Filters.Status))
+		for i, status := range params.Filters.Status {
+			placeholders[i] = fmt.Sprintf("$%d", argIdx)
+			args = append(args, status)
+			argIdx++
+		}
+		conditions = append(conditions, fmt.Sprintf("e.status IN (%s)", strings.Join(placeholders, ", ")))
+	}
+
+	// Date filters
+	if params.Filters.DateFrom != nil && *params.Filters.DateFrom != "" {
+		conditions = append(conditions, fmt.Sprintf("e.created_at >= $%d", argIdx))
+		args = append(args, *params.Filters.DateFrom)
+		argIdx++
+	}
+	if params.Filters.DateTo != nil && *params.Filters.DateTo != "" {
+		conditions = append(conditions, fmt.Sprintf("e.created_at <= $%d", argIdx))
+		args = append(args, *params.Filters.DateTo)
+		argIdx++
+	}
+
+	whereClause := strings.Join(conditions, " AND ")
+
+	// Validate and build ORDER BY
+	allowedSortFields := map[string]string{
+		"title":      "e.title",
+		"status":     "e.status",
+		"created_at": "e.created_at",
+	}
+	sortField, ok := allowedSortFields[params.Sorting.SortBy]
+	if !ok {
+		sortField = "e.created_at"
+	}
+	sortOrder := "DESC"
+	if strings.ToUpper(params.Sorting.SortOrder) == "ASC" {
+		sortOrder = "ASC"
+	}
+	orderClause := fmt.Sprintf("%s %s", sortField, sortOrder)
+
+	// Count total
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM live_events e WHERE %s", whereClause)
+	var total int
+	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("counting live events: %w", err)
+	}
+
+	// Build main query with pagination
+	// Join with sessions to get the first session's start/end times
+	// Join with platforms to get the primary platform
+	query := fmt.Sprintf(`
+		SELECT
+			e.id, e.store_id, e.title, e.status, e.total_orders, e.created_at, e.updated_at,
+			s.started_at, s.ended_at, COALESCE(s.total_comments, 0),
+			COALESCE(p.platform, ''), COALESCE(p.platform_live_id, '')
+		FROM live_events e
+		LEFT JOIN LATERAL (
+			SELECT id, started_at, ended_at, total_comments
+			FROM live_sessions
+			WHERE event_id = e.id
+			ORDER BY created_at ASC
+			LIMIT 1
+		) s ON true
+		LEFT JOIN LATERAL (
+			SELECT platform, platform_live_id
+			FROM live_session_platforms
+			WHERE session_id = s.id
+			ORDER BY added_at ASC
+			LIMIT 1
+		) p ON true
+		WHERE %s
+		ORDER BY %s
+		LIMIT $%d OFFSET $%d
+	`, whereClause, orderClause, argIdx, argIdx+1)
+
+	args = append(args, params.Pagination.Limit, params.Pagination.Offset)
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing live events: %w", err)
+	}
+	defer rows.Close()
+
+	lives := make([]LiveOutput, 0)
+	for rows.Next() {
+		var live LiveOutput
+		var title, platform, platformLiveID pgtype.Text
+		var startedAt, endedAt pgtype.Timestamptz
+
+		if err := rows.Scan(
+			&live.ID,
+			&live.StoreID,
+			&title,
+			&live.Status,
+			&live.TotalOrders,
+			&live.CreatedAt,
+			&live.UpdatedAt,
+			&startedAt,
+			&endedAt,
+			&live.TotalComments,
+			&platform,
+			&platformLiveID,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scanning live event: %w", err)
+		}
+
+		if title.Valid {
+			live.Title = title.String
+		}
+		if platform.Valid {
+			live.Platform = platform.String
+		}
+		if platformLiveID.Valid {
+			live.PlatformLiveID = platformLiveID.String
+		}
+		if startedAt.Valid {
+			live.StartedAt = &startedAt.Time
+		}
+		if endedAt.Valid {
+			live.EndedAt = &endedAt.Time
+		}
+
+		lives = append(lives, live)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterating live events: %w", err)
+	}
+
+	return lives, total, nil
+}
+
 // =============================================================================
 // HELPERS
 // =============================================================================
 
-func toLiveRow(row sqlc.LiveSession) LiveRow {
+func toEventRow(row sqlc.LiveEvent) EventRow {
 	var title string
 	if row.Title.Valid {
 		title = row.Title.String
 	}
-	var platformLiveID string
-	if row.PlatformLiveID.Valid {
-		platformLiveID = row.PlatformLiveID.String
+
+	return EventRow{
+		ID:          row.ID.String(),
+		StoreID:     row.StoreID.String(),
+		Title:       title,
+		Status:      row.Status,
+		TotalOrders: int(row.TotalOrders),
+		CreatedAt:   row.CreatedAt.Time,
+		UpdatedAt:   row.UpdatedAt.Time,
 	}
-	var startedAt *time.Time
+}
+
+func toSessionRow(row sqlc.LiveSession) SessionRow {
+	var startedAt, endedAt *time.Time
 	if row.StartedAt.Valid {
 		startedAt = &row.StartedAt.Time
 	}
-	var endedAt *time.Time
 	if row.EndedAt.Valid {
 		endedAt = &row.EndedAt.Time
 	}
 
-	return LiveRow{
-		ID:             row.ID.String(),
-		StoreID:        row.StoreID.String(),
-		Title:          title,
-		Platform:       row.Platform,
-		PlatformLiveID: platformLiveID,
-		Status:         row.Status,
-		StartedAt:      startedAt,
-		EndedAt:        endedAt,
-		TotalComments:  int(row.TotalComments.Int32),
-		TotalOrders:    int(row.TotalOrders.Int32),
-		CreatedAt:      row.CreatedAt.Time,
-		UpdatedAt:      row.UpdatedAt.Time,
+	return SessionRow{
+		ID:            row.ID.String(),
+		EventID:       row.EventID.String(),
+		Status:        row.Status,
+		StartedAt:     startedAt,
+		EndedAt:       endedAt,
+		TotalComments: int(row.TotalComments.Int32),
+		CreatedAt:     row.CreatedAt.Time,
+		UpdatedAt:     row.UpdatedAt.Time,
 	}
 }
 

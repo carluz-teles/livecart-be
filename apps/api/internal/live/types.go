@@ -6,7 +6,239 @@ import (
 	"livecart/apps/api/lib/query"
 )
 
-// Handler layer - Filters
+// =============================================================================
+// LIVE EVENT - The container for sessions. Carts are tied to events.
+// =============================================================================
+
+// Handler layer - Request/Response types for Events
+type CreateEventRequest struct {
+	Title string `json:"title" validate:"required,min=1,max=200"`
+}
+
+type CreateEventResponse struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type EventResponse struct {
+	ID          string            `json:"id"`
+	Title       string            `json:"title"`
+	Status      string            `json:"status"`
+	TotalOrders int               `json:"totalOrders"`
+	Sessions    []SessionResponse `json:"sessions,omitempty"`
+	CreatedAt   time.Time         `json:"createdAt"`
+	UpdatedAt   time.Time         `json:"updatedAt"`
+}
+
+type ListEventsResponse struct {
+	Data       []EventResponse          `json:"data"`
+	Pagination query.PaginationResponse `json:"pagination"`
+}
+
+// EndEventRequest represents the request body for ending an event.
+type EndEventRequest struct {
+	AutoSendCheckoutLinks *bool `json:"autoSendCheckoutLinks"` // Optional override
+}
+
+// EndEventResponse represents the response after ending an event.
+type EndEventResponse struct {
+	Event          EventResponse `json:"event"`
+	CartsFinalized int           `json:"cartsFinalized"`
+	AutoSendLinks  bool          `json:"autoSendLinks"`
+}
+
+// Service layer - Event
+type CreateEventInput struct {
+	StoreID string
+	Title   string
+}
+
+type CreateEventOutput struct {
+	ID        string
+	Title     string
+	Status    string
+	CreatedAt time.Time
+}
+
+type EndEventInput struct {
+	ID       string
+	StoreID  string
+	AutoSend *bool // Override store's auto_send_checkout_links setting (nil = use store default)
+}
+
+type EndEventOutput struct {
+	Event          EventOutput
+	CartsFinalized int  // Number of carts moved to checkout
+	AutoSendLinks  bool // Whether checkout links will be sent automatically
+}
+
+type EventOutput struct {
+	ID          string
+	StoreID     string
+	Title       string
+	Status      string
+	TotalOrders int
+	Sessions    []SessionOutput
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type ListEventsInput struct {
+	StoreID    string
+	Search     string
+	Pagination query.Pagination
+	Sorting    query.Sorting
+	Filters    EventFilters
+}
+
+type ListEventsOutput struct {
+	Events     []EventOutput
+	Total      int
+	Pagination query.Pagination
+}
+
+type EventFilters struct {
+	Status   []string `query:"status"` // active, ended
+	DateFrom *string  `query:"dateFrom"`
+	DateTo   *string  `query:"dateTo"`
+}
+
+// Repository layer - Event
+type CreateEventParams struct {
+	StoreID string
+	Title   string
+	Status  string
+}
+
+type EventRow struct {
+	ID          string
+	StoreID     string
+	Title       string
+	Status      string
+	TotalOrders int
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// =============================================================================
+// LIVE SESSION - Platform-agnostic broadcast with start/end times
+// =============================================================================
+
+// Handler layer - Request/Response types for Sessions
+type CreateSessionRequest struct {
+	Platform       string `json:"platform" validate:"required,oneof=instagram tiktok youtube facebook"`
+	PlatformLiveID string `json:"platformLiveId" validate:"required"`
+}
+
+type SessionResponse struct {
+	ID            string             `json:"id"`
+	EventID       string             `json:"eventId"`
+	Status        string             `json:"status"`
+	StartedAt     *time.Time         `json:"startedAt"`
+	EndedAt       *time.Time         `json:"endedAt"`
+	TotalComments int                `json:"totalComments"`
+	Platforms     []PlatformResponse `json:"platforms,omitempty"`
+	CreatedAt     time.Time          `json:"createdAt"`
+	UpdatedAt     time.Time          `json:"updatedAt"`
+}
+
+// Service layer - Session
+type CreateSessionInput struct {
+	EventID        string
+	StoreID        string
+	Platform       string
+	PlatformLiveID string
+}
+
+type CreateSessionOutput struct {
+	ID        string
+	EventID   string
+	Status    string
+	Platform  PlatformOutput
+	CreatedAt time.Time
+}
+
+type SessionOutput struct {
+	ID            string
+	EventID       string
+	Status        string
+	StartedAt     *time.Time
+	EndedAt       *time.Time
+	TotalComments int
+	Platforms     []PlatformOutput
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// Repository layer - Session
+type CreateSessionParams struct {
+	EventID string
+	Status  string
+}
+
+type SessionRow struct {
+	ID            string
+	EventID       string
+	Status        string
+	StartedAt     *time.Time
+	EndedAt       *time.Time
+	TotalComments int
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// =============================================================================
+// PLATFORM - Platform IDs associated with sessions
+// =============================================================================
+
+// PlatformResponse represents a platform ID associated with a session.
+type PlatformResponse struct {
+	ID             string    `json:"id"`
+	Platform       string    `json:"platform"`
+	PlatformLiveID string    `json:"platformLiveId"`
+	AddedAt        time.Time `json:"addedAt"`
+}
+
+type ListPlatformsResponse struct {
+	Data []PlatformResponse `json:"data"`
+}
+
+type AddPlatformRequest struct {
+	Platform       string `json:"platform" validate:"required,oneof=instagram tiktok youtube facebook"`
+	PlatformLiveID string `json:"platformLiveId" validate:"required"`
+}
+
+// Service layer - Platform
+type AddPlatformInput struct {
+	SessionID      string
+	Platform       string
+	PlatformLiveID string
+}
+
+type PlatformOutput struct {
+	ID             string
+	SessionID      string
+	Platform       string
+	PlatformLiveID string
+	AddedAt        time.Time
+}
+
+// Repository layer - Platform
+type PlatformRow struct {
+	ID             string
+	SessionID      string
+	Platform       string
+	PlatformLiveID string
+	AddedAt        time.Time
+}
+
+// =============================================================================
+// LEGACY TYPES - For backwards compatibility with existing /lives endpoint
+// =============================================================================
+
+// LiveFilters for legacy compatibility
 type LiveFilters struct {
 	Status   []string `query:"status"`   // scheduled, live, ended, cancelled
 	Platform []string `query:"platform"` // instagram, tiktok, youtube, facebook
@@ -14,7 +246,7 @@ type LiveFilters struct {
 	DateTo   *string  `query:"dateTo"`
 }
 
-// Handler layer - Request/Response types
+// CreateLiveRequest - Creates an event with a session and platform
 type CreateLiveRequest struct {
 	Title          string `json:"title" validate:"required,min=1,max=200"`
 	Platform       string `json:"platform" validate:"required,oneof=instagram tiktok youtube facebook"`
@@ -30,16 +262,14 @@ type CreateLiveResponse struct {
 }
 
 type UpdateLiveRequest struct {
-	Title          string `json:"title" validate:"required,min=1,max=200"`
-	Platform       string `json:"platform" validate:"required,oneof=instagram tiktok youtube facebook"`
-	PlatformLiveID string `json:"platformLiveId" validate:"required"`
+	Title string `json:"title" validate:"required,min=1,max=200"`
 }
 
 type LiveResponse struct {
 	ID             string     `json:"id"`
 	Title          string     `json:"title"`
-	Platform       string     `json:"platform"`
-	PlatformLiveID string     `json:"platformLiveId"`
+	Platform       string     `json:"platform"`       // Primary platform (from first session)
+	PlatformLiveID string     `json:"platformLiveId"` // Primary platform live ID
 	Status         string     `json:"status"`
 	StartedAt      *time.Time `json:"startedAt"`
 	EndedAt        *time.Time `json:"endedAt"`
@@ -60,19 +290,17 @@ type LiveStatsResponse struct {
 	TotalOrders int `json:"totalOrders"`
 }
 
-// EndLiveRequest represents the request body for ending a live session.
 type EndLiveRequest struct {
-	AutoSendCheckoutLinks *bool `json:"autoSendCheckoutLinks"` // Optional override
+	AutoSendCheckoutLinks *bool `json:"autoSendCheckoutLinks"`
 }
 
-// EndLiveResponse represents the response after ending a live session.
 type EndLiveResponse struct {
 	Live           LiveResponse `json:"live"`
 	CartsFinalized int          `json:"cartsFinalized"`
 	AutoSendLinks  bool         `json:"autoSendLinks"`
 }
 
-// Service layer
+// Service layer - Legacy
 type CreateLiveInput struct {
 	StoreID        string
 	Title          string
@@ -89,25 +317,21 @@ type CreateLiveOutput struct {
 }
 
 type UpdateLiveInput struct {
-	ID             string
-	StoreID        string
-	Title          string
-	Platform       string
-	PlatformLiveID string
+	ID      string
+	StoreID string
+	Title   string
 }
 
-// EndLiveInput represents input for ending a live session.
 type EndLiveInput struct {
 	ID       string
 	StoreID  string
-	AutoSend *bool // Override store's auto_send_checkout_links setting (nil = use store default)
+	AutoSend *bool
 }
 
-// EndLiveOutput represents the result of ending a live session.
 type EndLiveOutput struct {
 	Live           LiveOutput
-	CartsFinalized int  // Number of carts moved to checkout
-	AutoSendLinks  bool // Whether checkout links will be sent automatically
+	CartsFinalized int
+	AutoSendLinks  bool
 }
 
 type ListLivesInput struct {
@@ -128,8 +352,8 @@ type LiveOutput struct {
 	ID             string
 	StoreID        string
 	Title          string
-	Platform       string
-	PlatformLiveID string
+	Platform       string // Primary platform
+	PlatformLiveID string // Primary platform live ID
 	Status         string
 	StartedAt      *time.Time
 	EndedAt        *time.Time
@@ -151,7 +375,7 @@ type LiveStatsOutput struct {
 
 // AddToCartInput represents input for adding a product to a user's cart during a live.
 type AddToCartInput struct {
-	SessionID      string
+	EventID        string // Changed from SessionID to EventID
 	PlatformUserID string
 	PlatformHandle string
 	ProductID      string
@@ -165,13 +389,9 @@ type AddToCartOutput struct {
 	IsNewCart bool
 }
 
-// =============================================================================
-// CART - Repository layer
-// =============================================================================
-
 // GetOrCreateCartParams represents parameters for GetOrCreateCart.
 type GetOrCreateCartParams struct {
-	SessionID      string
+	EventID        string // Changed from SessionID to EventID
 	PlatformUserID string
 	PlatformHandle string
 	Token          string
@@ -180,7 +400,7 @@ type GetOrCreateCartParams struct {
 // CartRow represents a cart row from the database.
 type CartRow struct {
 	ID             string
-	SessionID      string
+	EventID        string // Changed from SessionID to EventID
 	PlatformUserID string
 	PlatformHandle string
 	Token          string
@@ -192,107 +412,4 @@ type AddCartItemParams struct {
 	ProductID string
 	Quantity  int
 	UnitPrice int64
-}
-
-// =============================================================================
-// LIVE SESSION - Repository layer
-// =============================================================================
-
-type CreateLiveParams struct {
-	StoreID        string
-	Title          string
-	Platform       string
-	PlatformLiveID string
-	Status         string
-}
-
-type UpdateLiveParams struct {
-	ID             string
-	StoreID        string
-	Title          string
-	Platform       string
-	PlatformLiveID string
-}
-
-type ListLivesParams struct {
-	StoreID    string
-	Search     string
-	Pagination query.Pagination
-	Sorting    query.Sorting
-	Filters    LiveFilters
-}
-
-type ListLivesResult struct {
-	Lives []LiveRow
-	Total int
-}
-
-type LiveRow struct {
-	ID             string
-	StoreID        string
-	Title          string
-	Platform       string
-	PlatformLiveID string
-	Status         string
-	StartedAt      *time.Time
-	EndedAt        *time.Time
-	TotalComments  int
-	TotalOrders    int
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-}
-
-// =============================================================================
-// PLATFORM AGGREGATION - Handler layer
-// =============================================================================
-
-// AddPlatformRequest represents the request to add a platform ID to a session.
-type AddPlatformRequest struct {
-	PlatformLiveID string `json:"platformLiveId" validate:"required"`
-}
-
-// PlatformResponse represents a platform ID associated with a session.
-type PlatformResponse struct {
-	ID             string    `json:"id"`
-	Platform       string    `json:"platform"`
-	PlatformLiveID string    `json:"platformLiveId"`
-	AddedAt        time.Time `json:"addedAt"`
-}
-
-// ListPlatformsResponse represents the list of platforms for a session.
-type ListPlatformsResponse struct {
-	Data []PlatformResponse `json:"data"`
-}
-
-// =============================================================================
-// PLATFORM AGGREGATION - Service layer
-// =============================================================================
-
-// AddPlatformInput represents input for adding a platform to a session.
-type AddPlatformInput struct {
-	SessionID      string
-	StoreID        string
-	Platform       string
-	PlatformLiveID string
-}
-
-// AddPlatformOutput represents the result of adding a platform.
-type AddPlatformOutput struct {
-	ID             string
-	Platform       string
-	PlatformLiveID string
-	AddedAt        time.Time
-}
-
-// =============================================================================
-// PLATFORM AGGREGATION - Repository layer
-// =============================================================================
-
-// PlatformRow represents a platform row from the database.
-type PlatformRow struct {
-	ID             string
-	SessionID      string
-	Platform       string
-	PlatformLiveID string
-	AddedAt        time.Time
 }

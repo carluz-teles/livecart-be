@@ -5,15 +5,15 @@ SELECT
         SELECT SUM(ci.quantity * ci.unit_price)
         FROM cart_items ci
         JOIN carts c ON c.id = ci.cart_id
-        JOIN live_sessions ls ON ls.id = c.session_id
-        WHERE ls.store_id = $1
+        JOIN live_events e ON e.id = c.event_id
+        WHERE e.store_id = $1
     ), 0)::BIGINT as total_revenue,
     -- Total orders
     COALESCE((
         SELECT COUNT(*)
         FROM carts c
-        JOIN live_sessions ls ON ls.id = c.session_id
-        WHERE ls.store_id = $1
+        JOIN live_events e ON e.id = c.event_id
+        WHERE e.store_id = $1
     ), 0)::INT as total_orders,
     -- Active products
     COALESCE((
@@ -21,11 +21,11 @@ SELECT
         FROM products p
         WHERE p.store_id = $1 AND p.active = true
     ), 0)::INT as active_products,
-    -- Total lives
+    -- Total lives (events)
     COALESCE((
         SELECT COUNT(*)
-        FROM live_sessions ls
-        WHERE ls.store_id = $1
+        FROM live_events e
+        WHERE e.store_id = $1
     ), 0)::INT as total_lives;
 
 -- name: GetMonthlyRevenue :many
@@ -34,9 +34,9 @@ SELECT
     EXTRACT(MONTH FROM c.created_at)::INT as month_num,
     COALESCE(SUM(ci.quantity * ci.unit_price), 0)::BIGINT as revenue
 FROM carts c
-JOIN live_sessions ls ON ls.id = c.session_id
+JOIN live_events e ON e.id = c.event_id
 LEFT JOIN cart_items ci ON ci.cart_id = c.id
-WHERE ls.store_id = $1
+WHERE e.store_id = $1
   AND c.created_at >= date_trunc('year', CURRENT_DATE)
 GROUP BY TO_CHAR(c.created_at, 'Mon'), EXTRACT(MONTH FROM c.created_at)
 ORDER BY month_num;
@@ -51,8 +51,8 @@ SELECT
 FROM products p
 JOIN cart_items ci ON ci.product_id = p.id
 JOIN carts c ON c.id = ci.cart_id
-JOIN live_sessions ls ON ls.id = c.session_id
-WHERE ls.store_id = $1
+JOIN live_events e ON e.id = c.event_id
+WHERE e.store_id = $1
 GROUP BY p.id, p.name, p.keyword
 ORDER BY total_sold DESC
 LIMIT 5;

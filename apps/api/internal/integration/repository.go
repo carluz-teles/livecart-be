@@ -523,13 +523,13 @@ func (r *Repository) IncrementLiveSessionComments(ctx context.Context, sessionID
 	return r.queries.IncrementLiveSessionComments(ctx, id)
 }
 
-// IncrementLiveSessionOrders increments the total_orders counter for a live session.
-func (r *Repository) IncrementLiveSessionOrders(ctx context.Context, sessionID string) error {
-	id, err := parseUUID(sessionID)
+// IncrementLiveEventOrders increments the total_orders counter for a live event.
+func (r *Repository) IncrementLiveEventOrders(ctx context.Context, eventID string) error {
+	id, err := parseUUID(eventID)
 	if err != nil {
 		return err
 	}
-	return r.queries.IncrementLiveSessionOrders(ctx, id)
+	return r.queries.IncrementLiveEventOrders(ctx, id)
 }
 
 // ProductRow represents a product for keyword matching.

@@ -28,20 +28,23 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Post("/:id/start", h.Start)
 	g.Post("/:id/end", h.End)
 
-	// Platform aggregation
+	// Session management within an event
+	g.Post("/:id/sessions", h.CreateSession)
+
+	// Platform aggregation (on sessions)
 	g.Get("/:id/platforms", h.ListPlatforms)
 	g.Post("/:id/platforms", h.AddPlatform)
 	g.Delete("/:id/platforms/:platformLiveId", h.RemovePlatform)
 }
 
 // Create godoc
-// @Summary      Create a new live session
-// @Description  Creates a live session for the current store
+// @Summary      Create a new live event
+// @Description  Creates a live event with an initial session and platform
 // @Tags         lives
 // @Accept       json
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
-// @Param        request body CreateLiveRequest true "Live session creation payload"
+// @Param        request body CreateLiveRequest true "Live creation payload"
 // @Success      201 {object} httpx.Envelope{data=CreateLiveResponse}
 // @Failure      400 {object} httpx.Envelope
 // @Failure      422 {object} httpx.ValidationEnvelope
@@ -78,12 +81,12 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 }
 
 // GetByID godoc
-// @Summary      Get live session by ID
-// @Description  Returns a single live session by its UUID
+// @Summary      Get live event by ID
+// @Description  Returns a single live event by its UUID
 // @Tags         lives
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
-// @Param        id path string true "Live session UUID"
+// @Param        id path string true "Live event UUID"
 // @Success      200 {object} httpx.Envelope{data=LiveResponse}
 // @Failure      404 {object} httpx.Envelope
 // @Router       /api/v1/stores/{storeId}/lives/{id} [get]
@@ -101,8 +104,8 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 }
 
 // List godoc
-// @Summary      List live sessions
-// @Description  Returns live sessions with filtering, pagination, and sorting
+// @Summary      List live events
+// @Description  Returns live events with filtering, pagination, and sorting
 // @Tags         lives
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
@@ -112,7 +115,6 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 // @Param        sortBy query string false "Sort field" default(created_at)
 // @Param        sortOrder query string false "Sort order (asc, desc)" default(desc)
 // @Param        status query []string false "Filter by status"
-// @Param        platform query []string false "Filter by platform"
 // @Success      200 {object} httpx.Envelope{data=ListLivesResponse}
 // @Router       /api/v1/stores/{storeId}/lives [get]
 // @Security     BearerAuth
@@ -150,11 +152,11 @@ func (h *Handler) List(c *fiber.Ctx) error {
 }
 
 // Delete godoc
-// @Summary      Delete a live session
-// @Description  Deletes a live session by its UUID
+// @Summary      Delete a live event
+// @Description  Deletes a live event by its UUID
 // @Tags         lives
 // @Param        storeId path string true "Store UUID"
-// @Param        id path string true "Live session UUID"
+// @Param        id path string true "Live event UUID"
 // @Success      200 {object} httpx.Envelope{data=httpx.DeletedResponse}
 // @Failure      404 {object} httpx.Envelope
 // @Router       /api/v1/stores/{storeId}/lives/{id} [delete]
@@ -171,14 +173,14 @@ func (h *Handler) Delete(c *fiber.Ctx) error {
 }
 
 // Update godoc
-// @Summary      Update a live session
-// @Description  Updates an existing live session by its UUID
+// @Summary      Update a live event
+// @Description  Updates an existing live event by its UUID
 // @Tags         lives
 // @Accept       json
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
-// @Param        id path string true "Live session UUID"
-// @Param        request body UpdateLiveRequest true "Live session update payload"
+// @Param        id path string true "Live event UUID"
+// @Param        request body UpdateLiveRequest true "Live event update payload"
 // @Success      200 {object} httpx.Envelope{data=LiveResponse}
 // @Failure      400 {object} httpx.Envelope
 // @Failure      404 {object} httpx.Envelope
@@ -198,11 +200,9 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 	}
 
 	output, err := h.service.Update(c.Context(), UpdateLiveInput{
-		StoreID:        storeID,
-		ID:             id,
-		Title:          req.Title,
-		Platform:       req.Platform,
-		PlatformLiveID: req.PlatformLiveID,
+		StoreID: storeID,
+		ID:      id,
+		Title:   req.Title,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -213,11 +213,11 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 
 // Start godoc
 // @Summary      Start a live session
-// @Description  Starts a scheduled live session
+// @Description  Starts the active session of a live event
 // @Tags         lives
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
-// @Param        id path string true "Live session UUID"
+// @Param        id path string true "Live event UUID"
 // @Success      200 {object} httpx.Envelope{data=LiveResponse}
 // @Failure      404 {object} httpx.Envelope
 // @Router       /api/v1/stores/{storeId}/lives/{id}/start [post]
@@ -235,13 +235,13 @@ func (h *Handler) Start(c *fiber.Ctx) error {
 }
 
 // End godoc
-// @Summary      End a live session
-// @Description  Ends an active live session and finalizes all pending carts
+// @Summary      End a live event
+// @Description  Ends a live event and finalizes all pending carts
 // @Tags         lives
 // @Accept       json
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
-// @Param        id path string true "Live session UUID"
+// @Param        id path string true "Live event UUID"
 // @Param        request body EndLiveRequest false "End live options"
 // @Success      200 {object} httpx.Envelope{data=EndLiveResponse}
 // @Failure      404 {object} httpx.Envelope
@@ -277,7 +277,7 @@ func (h *Handler) End(c *fiber.Ctx) error {
 
 // GetStats godoc
 // @Summary      Get live statistics
-// @Description  Returns aggregated statistics for all live sessions in the store
+// @Description  Returns aggregated statistics for all live events in the store
 // @Tags         lives
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
@@ -297,6 +297,211 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 		ActiveLives: output.ActiveLives,
 		TotalOrders: output.TotalOrders,
 	})
+}
+
+// =============================================================================
+// SESSION MANAGEMENT
+// =============================================================================
+
+// CreateSession godoc
+// @Summary      Create a new session within an event
+// @Description  Creates a new session for an existing event (for multi-session events)
+// @Tags         lives
+// @Accept       json
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live event UUID"
+// @Param        request body CreateSessionRequest true "Session creation payload"
+// @Success      201 {object} httpx.Envelope{data=SessionResponse}
+// @Failure      400 {object} httpx.Envelope
+// @Failure      404 {object} httpx.Envelope
+// @Failure      422 {object} httpx.ValidationEnvelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/sessions [post]
+// @Security     BearerAuth
+func (h *Handler) CreateSession(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	var req CreateSessionRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	output, err := h.service.CreateSession(c.Context(), CreateSessionInput{
+		EventID:        eventID,
+		StoreID:        storeID,
+		Platform:       req.Platform,
+		PlatformLiveID: req.PlatformLiveID,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Created(c, SessionResponse{
+		ID:        output.ID,
+		EventID:   output.EventID,
+		Status:    output.Status,
+		CreatedAt: output.CreatedAt,
+		UpdatedAt: output.CreatedAt,
+		Platforms: []PlatformResponse{{
+			ID:             output.Platform.ID,
+			Platform:       output.Platform.Platform,
+			PlatformLiveID: output.Platform.PlatformLiveID,
+			AddedAt:        output.Platform.AddedAt,
+		}},
+	})
+}
+
+// =============================================================================
+// PLATFORM AGGREGATION
+// =============================================================================
+
+// ListPlatforms godoc
+// @Summary      List platforms for the active session of an event
+// @Description  Returns all platform IDs associated with the active session
+// @Tags         lives
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live event UUID"
+// @Success      200 {object} httpx.Envelope{data=ListPlatformsResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/platforms [get]
+// @Security     BearerAuth
+func (h *Handler) ListPlatforms(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	// Get live to find active session
+	live, err := h.service.GetByID(c.Context(), eventID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	// Get session by event
+	session, err := h.service.repo.GetActiveSessionByEvent(c.Context(), live.ID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	if session == nil {
+		return httpx.OK(c, ListPlatformsResponse{Data: []PlatformResponse{}})
+	}
+
+	platforms, err := h.service.ListPlatforms(c.Context(), session.ID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	responses := make([]PlatformResponse, len(platforms))
+	for i, p := range platforms {
+		responses[i] = PlatformResponse{
+			ID:             p.ID,
+			Platform:       p.Platform,
+			PlatformLiveID: p.PlatformLiveID,
+			AddedAt:        p.AddedAt,
+		}
+	}
+
+	return httpx.OK(c, ListPlatformsResponse{Data: responses})
+}
+
+// AddPlatform godoc
+// @Summary      Add a platform to the active session of an event
+// @Description  Associates a new platform live ID with the active session (for crash recovery)
+// @Tags         lives
+// @Accept       json
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live event UUID"
+// @Param        request body AddPlatformRequest true "Platform to add"
+// @Success      201 {object} httpx.Envelope{data=PlatformResponse}
+// @Failure      400 {object} httpx.Envelope
+// @Failure      404 {object} httpx.Envelope
+// @Failure      422 {object} httpx.ValidationEnvelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/platforms [post]
+// @Security     BearerAuth
+func (h *Handler) AddPlatform(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	var req AddPlatformRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	// Get live to find active session
+	live, err := h.service.GetByID(c.Context(), eventID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	// Get active session
+	session, err := h.service.repo.GetActiveSessionByEvent(c.Context(), live.ID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	if session == nil {
+		return httpx.BadRequest(c, "no active session found for this event")
+	}
+
+	output, err := h.service.AddPlatform(c.Context(), AddPlatformInput{
+		SessionID:      session.ID,
+		Platform:       req.Platform,
+		PlatformLiveID: req.PlatformLiveID,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Created(c, PlatformResponse{
+		ID:             output.ID,
+		Platform:       output.Platform,
+		PlatformLiveID: output.PlatformLiveID,
+		AddedAt:        output.AddedAt,
+	})
+}
+
+// RemovePlatform godoc
+// @Summary      Remove a platform from the active session
+// @Description  Disassociates a platform live ID from the active session
+// @Tags         lives
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live event UUID"
+// @Param        platformLiveId path string true "Platform live ID to remove"
+// @Success      200 {object} httpx.Envelope{data=httpx.DeletedResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/platforms/{platformLiveId} [delete]
+// @Security     BearerAuth
+func (h *Handler) RemovePlatform(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+	platformLiveID := c.Params("platformLiveId")
+
+	// Get live to find active session
+	live, err := h.service.GetByID(c.Context(), eventID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	// Get active session
+	session, err := h.service.repo.GetActiveSessionByEvent(c.Context(), live.ID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	if session == nil {
+		return httpx.BadRequest(c, "no active session found for this event")
+	}
+
+	if err := h.service.RemovePlatform(c.Context(), session.ID, platformLiveID); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Deleted(c, platformLiveID)
 }
 
 func parseLiveFilters(c *fiber.Ctx) LiveFilters {
@@ -342,115 +547,4 @@ func toLiveResponse(o LiveOutput) LiveResponse {
 		CreatedAt:      o.CreatedAt,
 		UpdatedAt:      o.UpdatedAt,
 	}
-}
-
-// =============================================================================
-// PLATFORM AGGREGATION
-// =============================================================================
-
-// ListPlatforms godoc
-// @Summary      List platforms for a live session
-// @Description  Returns all platform IDs associated with a live session
-// @Tags         lives
-// @Produce      json
-// @Param        storeId path string true "Store UUID"
-// @Param        id path string true "Live session UUID"
-// @Success      200 {object} httpx.Envelope{data=ListPlatformsResponse}
-// @Failure      404 {object} httpx.Envelope
-// @Router       /api/v1/stores/{storeId}/lives/{id}/platforms [get]
-// @Security     BearerAuth
-func (h *Handler) ListPlatforms(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	sessionID := c.Params("id")
-
-	platforms, err := h.service.ListPlatforms(c.Context(), sessionID, storeID)
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	responses := make([]PlatformResponse, len(platforms))
-	for i, p := range platforms {
-		responses[i] = PlatformResponse{
-			ID:             p.ID,
-			Platform:       p.Platform,
-			PlatformLiveID: p.PlatformLiveID,
-			AddedAt:        p.AddedAt,
-		}
-	}
-
-	return httpx.OK(c, ListPlatformsResponse{Data: responses})
-}
-
-// AddPlatform godoc
-// @Summary      Add a platform to a live session
-// @Description  Associates a new platform live ID with the session (for crash recovery)
-// @Tags         lives
-// @Accept       json
-// @Produce      json
-// @Param        storeId path string true "Store UUID"
-// @Param        id path string true "Live session UUID"
-// @Param        request body AddPlatformRequest true "Platform to add"
-// @Success      201 {object} httpx.Envelope{data=PlatformResponse}
-// @Failure      400 {object} httpx.Envelope
-// @Failure      404 {object} httpx.Envelope
-// @Failure      422 {object} httpx.ValidationEnvelope
-// @Router       /api/v1/stores/{storeId}/lives/{id}/platforms [post]
-// @Security     BearerAuth
-func (h *Handler) AddPlatform(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	sessionID := c.Params("id")
-
-	var req AddPlatformRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
-	}
-
-	// Get session to determine platform type
-	session, err := h.service.GetByID(c.Context(), sessionID, storeID)
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	output, err := h.service.AddPlatform(c.Context(), AddPlatformInput{
-		SessionID:      sessionID,
-		StoreID:        storeID,
-		Platform:       session.Platform,
-		PlatformLiveID: req.PlatformLiveID,
-	})
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	return httpx.Created(c, PlatformResponse{
-		ID:             output.ID,
-		Platform:       output.Platform,
-		PlatformLiveID: output.PlatformLiveID,
-		AddedAt:        output.AddedAt,
-	})
-}
-
-// RemovePlatform godoc
-// @Summary      Remove a platform from a live session
-// @Description  Disassociates a platform live ID from the session
-// @Tags         lives
-// @Param        storeId path string true "Store UUID"
-// @Param        id path string true "Live session UUID"
-// @Param        platformLiveId path string true "Platform live ID to remove"
-// @Success      200 {object} httpx.Envelope{data=httpx.DeletedResponse}
-// @Failure      404 {object} httpx.Envelope
-// @Router       /api/v1/stores/{storeId}/lives/{id}/platforms/{platformLiveId} [delete]
-// @Security     BearerAuth
-func (h *Handler) RemovePlatform(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	sessionID := c.Params("id")
-	platformLiveID := c.Params("platformLiveId")
-
-	if err := h.service.RemovePlatform(c.Context(), sessionID, storeID, platformLiveID); err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	return httpx.Deleted(c, platformLiveID)
 }

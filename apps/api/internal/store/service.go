@@ -138,6 +138,7 @@ func (s *Service) UpdateCartSettings(ctx context.Context, input UpdateCartSettin
 		MaxItems:               input.MaxItems,
 		MaxQuantityPerItem:     input.MaxQuantityPerItem,
 		NotifyBeforeExpiration: input.NotifyBeforeExpiration,
+		AllowEdit:              input.AllowEdit,
 	})
 	if err != nil {
 		return StoreOutput{}, err
