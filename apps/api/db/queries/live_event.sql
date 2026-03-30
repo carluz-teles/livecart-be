@@ -4,8 +4,8 @@
 -- =============================================================================
 
 -- name: CreateLiveEvent :one
-INSERT INTO live_events (store_id, title, status)
-VALUES ($1, $2, $3)
+INSERT INTO live_events (store_id, title, type, status)
+VALUES ($1, $2, $3, $4)
 RETURNING *;
 
 -- name: GetLiveEventByID :one

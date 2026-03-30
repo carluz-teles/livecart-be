@@ -97,6 +97,8 @@ type LiveEvent struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 	TotalOrders int32              `json:"total_orders"`
+	// single = one live, auto-end; multi = multiple sessions, manual end
+	Type string `json:"type"`
 }
 
 type LiveSession struct {
