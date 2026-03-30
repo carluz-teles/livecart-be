@@ -34,9 +34,15 @@ func (r *Repository) CreateEvent(ctx context.Context, params CreateEventParams) 
 		return EventRow{}, err
 	}
 
+	eventType := params.Type
+	if eventType == "" {
+		eventType = "single"
+	}
+
 	row, err := r.q.CreateLiveEvent(ctx, sqlc.CreateLiveEventParams{
 		StoreID: storeUID,
 		Title:   pgtype.Text{String: params.Title, Valid: params.Title != ""},
+		Type:    eventType,
 		Status:  params.Status,
 	})
 	if err != nil {
@@ -645,7 +651,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 	// Join with platforms to get the primary platform
 	query := fmt.Sprintf(`
 		SELECT
-			e.id, e.store_id, e.title, e.status, e.total_orders, e.created_at, e.updated_at,
+			e.id, e.store_id, e.title, e.type, e.status, e.total_orders, e.created_at, e.updated_at,
 			s.started_at, s.ended_at, COALESCE(s.total_comments, 0),
 			COALESCE(p.platform, ''), COALESCE(p.platform_live_id, '')
 		FROM live_events e
@@ -679,13 +685,14 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 	lives := make([]LiveOutput, 0)
 	for rows.Next() {
 		var live LiveOutput
-		var title, platform, platformLiveID pgtype.Text
+		var title, eventType, platform, platformLiveID pgtype.Text
 		var startedAt, endedAt pgtype.Timestamptz
 
 		if err := rows.Scan(
 			&live.ID,
 			&live.StoreID,
 			&title,
+			&eventType,
 			&live.Status,
 			&live.TotalOrders,
 			&live.CreatedAt,
@@ -701,6 +708,11 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 
 		if title.Valid {
 			live.Title = title.String
+		}
+		if eventType.Valid {
+			live.Type = eventType.String
+		} else {
+			live.Type = "single"
 		}
 		if platform.Valid {
 			live.Platform = platform.String
@@ -735,10 +747,16 @@ func toEventRow(row sqlc.LiveEvent) EventRow {
 		title = row.Title.String
 	}
 
+	eventType := row.Type
+	if eventType == "" {
+		eventType = "single"
+	}
+
 	return EventRow{
 		ID:          row.ID.String(),
 		StoreID:     row.StoreID.String(),
 		Title:       title,
+		Type:        eventType,
 		Status:      row.Status,
 		TotalOrders: int(row.TotalOrders),
 		CreatedAt:   row.CreatedAt.Time,
@@ -773,4 +791,67 @@ func parseUUID(s string) (pgtype.UUID, error) {
 		return uid, httpx.ErrUnprocessable("invalid uuid")
 	}
 	return uid, nil
+}
+
+// =============================================================================
+// EVENT DETAILS - Stats and Cart Listing
+// =============================================================================
+
+func (r *Repository) GetEventStats(ctx context.Context, eventID string) (EventStatsRow, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return EventStatsRow{}, err
+	}
+
+	row, err := r.q.GetEventStats(ctx, uid)
+	if err != nil {
+		return EventStatsRow{}, fmt.Errorf("getting event stats: %w", err)
+	}
+
+	return EventStatsRow{
+		TotalComments:    int(row.TotalComments),
+		OpenCarts:        int(row.OpenCarts),
+		CheckoutCarts:    int(row.CheckoutCarts),
+		ProjectedRevenue: row.ProjectedRevenue,
+		CheckoutRevenue:  row.CheckoutRevenue,
+	}, nil
+}
+
+func (r *Repository) ListCartsWithTotalByEvent(ctx context.Context, eventID string) ([]CartWithTotalRow, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := r.q.ListCartsWithTotalByEvent(ctx, uid)
+	if err != nil {
+		return nil, fmt.Errorf("listing carts with total: %w", err)
+	}
+
+	carts := make([]CartWithTotalRow, len(rows))
+	for i, row := range rows {
+		var paymentStatus *string
+		if row.PaymentStatus.Valid {
+			paymentStatus = &row.PaymentStatus.String
+		}
+		var expiresAt *time.Time
+		if row.ExpiresAt.Valid {
+			expiresAt = &row.ExpiresAt.Time
+		}
+
+		carts[i] = CartWithTotalRow{
+			ID:             row.ID.String(),
+			EventID:        row.EventID.String(),
+			PlatformUserID: row.PlatformUserID,
+			PlatformHandle: row.PlatformHandle,
+			Status:         row.Status,
+			PaymentStatus:  paymentStatus,
+			TotalValue:     row.TotalValue,
+			TotalItems:     int(row.TotalItems),
+			CreatedAt:      row.CreatedAt.Time,
+			ExpiresAt:      expiresAt,
+		}
+	}
+
+	return carts, nil
 }

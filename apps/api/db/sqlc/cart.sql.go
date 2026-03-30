@@ -228,6 +228,51 @@ func (q *Queries) GetCartItem(ctx context.Context, id pgtype.UUID) (CartItem, er
 	return i, err
 }
 
+const getEventStats = `-- name: GetEventStats :one
+
+SELECT
+    COALESCE((SELECT SUM(ls.total_comments) FROM live_sessions ls WHERE ls.event_id = $1), 0)::int AS total_comments,
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.status = 'pending'), 0)::int AS open_carts,
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.status IN ('checkout', 'completed')), 0)::int AS checkout_carts,
+    COALESCE((
+        SELECT SUM(ci.quantity * ci.unit_price)
+        FROM carts ct
+        JOIN cart_items ci ON ci.cart_id = ct.id
+        WHERE ct.event_id = $1 AND ct.status = 'pending'
+    ), 0)::bigint AS projected_revenue,
+    COALESCE((
+        SELECT SUM(ci.quantity * ci.unit_price)
+        FROM carts ct
+        JOIN cart_items ci ON ci.cart_id = ct.id
+        WHERE ct.event_id = $1 AND ct.status IN ('checkout', 'completed')
+    ), 0)::bigint AS checkout_revenue
+`
+
+type GetEventStatsRow struct {
+	TotalComments    int32 `json:"total_comments"`
+	OpenCarts        int32 `json:"open_carts"`
+	CheckoutCarts    int32 `json:"checkout_carts"`
+	ProjectedRevenue int64 `json:"projected_revenue"`
+	CheckoutRevenue  int64 `json:"checkout_revenue"`
+}
+
+// =============================================================================
+// EVENT DETAILS - Stats and Cart Listing
+// =============================================================================
+// Returns stats for an event: comments, open carts, checkout carts, projected revenue
+func (q *Queries) GetEventStats(ctx context.Context, eventID pgtype.UUID) (GetEventStatsRow, error) {
+	row := q.db.QueryRow(ctx, getEventStats, eventID)
+	var i GetEventStatsRow
+	err := row.Scan(
+		&i.TotalComments,
+		&i.OpenCarts,
+		&i.CheckoutCarts,
+		&i.ProjectedRevenue,
+		&i.CheckoutRevenue,
+	)
+	return i, err
+}
+
 const listCartItems = `-- name: ListCartItems :many
 SELECT ci.id, ci.cart_id, ci.product_id, ci.quantity, ci.unit_price, p.name AS product_name, p.image_url AS product_image_url
 FROM cart_items ci
@@ -303,6 +348,70 @@ func (q *Queries) ListCartsByEvent(ctx context.Context, eventID pgtype.UUID) ([]
 			&i.NotifiedAt,
 			&i.CreatedAt,
 			&i.ExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCartsWithTotalByEvent = `-- name: ListCartsWithTotalByEvent :many
+SELECT
+    c.id,
+    c.event_id,
+    c.platform_user_id,
+    c.platform_handle,
+    c.status,
+    c.payment_status,
+    c.created_at,
+    c.expires_at,
+    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_value,
+    COALESCE(SUM(ci.quantity), 0)::int AS total_items
+FROM carts c
+LEFT JOIN cart_items ci ON ci.cart_id = c.id
+WHERE c.event_id = $1
+GROUP BY c.id
+ORDER BY c.created_at DESC
+`
+
+type ListCartsWithTotalByEventRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	EventID        pgtype.UUID        `json:"event_id"`
+	PlatformUserID string             `json:"platform_user_id"`
+	PlatformHandle string             `json:"platform_handle"`
+	Status         string             `json:"status"`
+	PaymentStatus  pgtype.Text        `json:"payment_status"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	TotalValue     int64              `json:"total_value"`
+	TotalItems     int32              `json:"total_items"`
+}
+
+// Returns carts for an event with total value and item count
+func (q *Queries) ListCartsWithTotalByEvent(ctx context.Context, eventID pgtype.UUID) ([]ListCartsWithTotalByEventRow, error) {
+	rows, err := q.db.Query(ctx, listCartsWithTotalByEvent, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCartsWithTotalByEventRow{}
+	for rows.Next() {
+		var i ListCartsWithTotalByEventRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventID,
+			&i.PlatformUserID,
+			&i.PlatformHandle,
+			&i.Status,
+			&i.PaymentStatus,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.TotalValue,
+			&i.TotalItems,
 		); err != nil {
 			return nil, err
 		}

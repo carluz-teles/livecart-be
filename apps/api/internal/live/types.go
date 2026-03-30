@@ -13,11 +13,13 @@ import (
 // Handler layer - Request/Response types for Events
 type CreateEventRequest struct {
 	Title string `json:"title" validate:"required,min=1,max=200"`
+	Type  string `json:"type" validate:"required,oneof=single multi"`
 }
 
 type CreateEventResponse struct {
 	ID        string    `json:"id"`
 	Title     string    `json:"title"`
+	Type      string    `json:"type"`
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"createdAt"`
 }
@@ -25,6 +27,7 @@ type CreateEventResponse struct {
 type EventResponse struct {
 	ID          string            `json:"id"`
 	Title       string            `json:"title"`
+	Type        string            `json:"type"`
 	Status      string            `json:"status"`
 	TotalOrders int               `json:"totalOrders"`
 	Sessions    []SessionResponse `json:"sessions,omitempty"`
@@ -53,11 +56,13 @@ type EndEventResponse struct {
 type CreateEventInput struct {
 	StoreID string
 	Title   string
+	Type    string // single or multi
 }
 
 type CreateEventOutput struct {
 	ID        string
 	Title     string
+	Type      string
 	Status    string
 	CreatedAt time.Time
 }
@@ -78,6 +83,7 @@ type EventOutput struct {
 	ID          string
 	StoreID     string
 	Title       string
+	Type        string
 	Status      string
 	TotalOrders int
 	Sessions    []SessionOutput
@@ -109,6 +115,7 @@ type EventFilters struct {
 type CreateEventParams struct {
 	StoreID string
 	Title   string
+	Type    string
 	Status  string
 }
 
@@ -116,6 +123,7 @@ type EventRow struct {
 	ID          string
 	StoreID     string
 	Title       string
+	Type        string
 	Status      string
 	TotalOrders int
 	CreatedAt   time.Time
@@ -248,15 +256,17 @@ type LiveFilters struct {
 
 // CreateLiveRequest - Creates an event with a session and platform
 type CreateLiveRequest struct {
-	Title          string `json:"title" validate:"required,min=1,max=200"`
-	Platform       string `json:"platform" validate:"required,oneof=instagram tiktok youtube facebook"`
-	PlatformLiveID string `json:"platformLiveId" validate:"required"`
+	Title          string  `json:"title" validate:"required,min=1,max=200"`
+	Type           string  `json:"type" validate:"omitempty,oneof=single multi"`
+	Platform       *string `json:"platform" validate:"omitempty,oneof=instagram tiktok youtube facebook"`
+	PlatformLiveID *string `json:"platformLiveId" validate:"omitempty"`
 }
 
 type CreateLiveResponse struct {
 	ID        string    `json:"id"`
 	Title     string    `json:"title"`
-	Platform  string    `json:"platform"`
+	Type      string    `json:"type"`
+	Platform  string    `json:"platform,omitempty"`
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"createdAt"`
 }
@@ -268,6 +278,7 @@ type UpdateLiveRequest struct {
 type LiveResponse struct {
 	ID             string     `json:"id"`
 	Title          string     `json:"title"`
+	Type           string     `json:"type"`
 	Platform       string     `json:"platform"`       // Primary platform (from first session)
 	PlatformLiveID string     `json:"platformLiveId"` // Primary platform live ID
 	Status         string     `json:"status"`
@@ -304,13 +315,15 @@ type EndLiveResponse struct {
 type CreateLiveInput struct {
 	StoreID        string
 	Title          string
-	Platform       string
-	PlatformLiveID string
+	Type           string
+	Platform       *string
+	PlatformLiveID *string
 }
 
 type CreateLiveOutput struct {
 	ID        string
 	Title     string
+	Type      string
 	Platform  string
 	Status    string
 	CreatedAt time.Time
@@ -352,6 +365,7 @@ type LiveOutput struct {
 	ID             string
 	StoreID        string
 	Title          string
+	Type           string
 	Platform       string // Primary platform
 	PlatformLiveID string // Primary platform live ID
 	Status         string
@@ -412,4 +426,76 @@ type AddCartItemParams struct {
 	ProductID string
 	Quantity  int
 	UnitPrice int64
+}
+
+// =============================================================================
+// EVENT DETAILS - Stats and Cart Listing for event details page
+// =============================================================================
+
+// Handler layer - Event details
+type EventStatsResponse struct {
+	TotalComments    int   `json:"totalComments"`
+	OpenCarts        int   `json:"openCarts"`
+	CheckoutCarts    int   `json:"checkoutCarts"`
+	ProjectedRevenue int64 `json:"projectedRevenue"`
+	CheckoutRevenue  int64 `json:"checkoutRevenue"`
+}
+
+type CartWithTotalResponse struct {
+	ID             string     `json:"id"`
+	PlatformUserID string     `json:"platformUserId"`
+	PlatformHandle string     `json:"platformHandle"`
+	Status         string     `json:"status"`
+	PaymentStatus  *string    `json:"paymentStatus"`
+	TotalValue     int64      `json:"totalValue"`
+	TotalItems     int        `json:"totalItems"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	ExpiresAt      *time.Time `json:"expiresAt"`
+}
+
+type ListCartsResponse struct {
+	Data []CartWithTotalResponse `json:"data"`
+}
+
+// Service layer - Event details
+type EventStatsOutput struct {
+	TotalComments    int
+	OpenCarts        int
+	CheckoutCarts    int
+	ProjectedRevenue int64
+	CheckoutRevenue  int64
+}
+
+type CartWithTotalOutput struct {
+	ID             string
+	PlatformUserID string
+	PlatformHandle string
+	Status         string
+	PaymentStatus  *string
+	TotalValue     int64
+	TotalItems     int
+	CreatedAt      time.Time
+	ExpiresAt      *time.Time
+}
+
+// Repository layer - Event details
+type EventStatsRow struct {
+	TotalComments    int
+	OpenCarts        int
+	CheckoutCarts    int
+	ProjectedRevenue int64
+	CheckoutRevenue  int64
+}
+
+type CartWithTotalRow struct {
+	ID             string
+	EventID        string
+	PlatformUserID string
+	PlatformHandle string
+	Status         string
+	PaymentStatus  *string
+	TotalValue     int64
+	TotalItems     int
+	CreatedAt      time.Time
+	ExpiresAt      *time.Time
 }

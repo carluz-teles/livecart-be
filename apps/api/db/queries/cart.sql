@@ -73,3 +73,45 @@ DELETE FROM cart_items WHERE id = $1;
 
 -- name: GetCartItem :one
 SELECT * FROM cart_items WHERE id = $1;
+
+-- =============================================================================
+-- EVENT DETAILS - Stats and Cart Listing
+-- =============================================================================
+
+-- name: GetEventStats :one
+-- Returns stats for an event: comments, open carts, checkout carts, projected revenue
+SELECT
+    COALESCE((SELECT SUM(ls.total_comments) FROM live_sessions ls WHERE ls.event_id = $1), 0)::int AS total_comments,
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.status = 'pending'), 0)::int AS open_carts,
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.status IN ('checkout', 'completed')), 0)::int AS checkout_carts,
+    COALESCE((
+        SELECT SUM(ci.quantity * ci.unit_price)
+        FROM carts ct
+        JOIN cart_items ci ON ci.cart_id = ct.id
+        WHERE ct.event_id = $1 AND ct.status = 'pending'
+    ), 0)::bigint AS projected_revenue,
+    COALESCE((
+        SELECT SUM(ci.quantity * ci.unit_price)
+        FROM carts ct
+        JOIN cart_items ci ON ci.cart_id = ct.id
+        WHERE ct.event_id = $1 AND ct.status IN ('checkout', 'completed')
+    ), 0)::bigint AS checkout_revenue;
+
+-- name: ListCartsWithTotalByEvent :many
+-- Returns carts for an event with total value and item count
+SELECT
+    c.id,
+    c.event_id,
+    c.platform_user_id,
+    c.platform_handle,
+    c.status,
+    c.payment_status,
+    c.created_at,
+    c.expires_at,
+    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_value,
+    COALESCE(SUM(ci.quantity), 0)::int AS total_items
+FROM carts c
+LEFT JOIN cart_items ci ON ci.cart_id = c.id
+WHERE c.event_id = $1
+GROUP BY c.id
+ORDER BY c.created_at DESC;

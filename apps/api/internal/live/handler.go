@@ -28,6 +28,10 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Post("/:id/start", h.Start)
 	g.Post("/:id/end", h.End)
 
+	// Event details endpoints
+	g.Get("/:id/event-stats", h.GetEventStats)
+	g.Get("/:id/carts", h.ListCarts)
+
 	// Session management within an event
 	g.Post("/:id/sessions", h.CreateSession)
 
@@ -64,6 +68,7 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 	output, err := h.service.Create(c.Context(), CreateLiveInput{
 		StoreID:        storeID,
 		Title:          req.Title,
+		Type:           req.Type,
 		Platform:       req.Platform,
 		PlatformLiveID: req.PlatformLiveID,
 	})
@@ -74,6 +79,7 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 	return httpx.Created(c, CreateLiveResponse{
 		ID:        output.ID,
 		Title:     output.Title,
+		Type:      output.Type,
 		Platform:  output.Platform,
 		Status:    output.Status,
 		CreatedAt: output.CreatedAt,
@@ -82,12 +88,12 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 
 // GetByID godoc
 // @Summary      Get live event by ID
-// @Description  Returns a single live event by its UUID
+// @Description  Returns a single live event by its UUID with all sessions
 // @Tags         lives
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Live event UUID"
-// @Success      200 {object} httpx.Envelope{data=LiveResponse}
+// @Success      200 {object} httpx.Envelope{data=EventResponse}
 // @Failure      404 {object} httpx.Envelope
 // @Router       /api/v1/stores/{storeId}/lives/{id} [get]
 // @Security     BearerAuth
@@ -95,12 +101,12 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
 	id := c.Params("id")
 
-	output, err := h.service.GetByID(c.Context(), id, storeID)
+	output, err := h.service.GetEventWithSessions(c.Context(), id, storeID)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	return httpx.OK(c, toLiveResponse(output))
+	return httpx.OK(c, toEventResponse(output))
 }
 
 // List godoc
@@ -537,6 +543,7 @@ func toLiveResponse(o LiveOutput) LiveResponse {
 	return LiveResponse{
 		ID:             o.ID,
 		Title:          o.Title,
+		Type:           o.Type,
 		Platform:       o.Platform,
 		PlatformLiveID: o.PlatformLiveID,
 		Status:         o.Status,
@@ -547,4 +554,112 @@ func toLiveResponse(o LiveOutput) LiveResponse {
 		CreatedAt:      o.CreatedAt,
 		UpdatedAt:      o.UpdatedAt,
 	}
+}
+
+func toEventResponse(o EventOutput) EventResponse {
+	sessions := make([]SessionResponse, len(o.Sessions))
+	for i, s := range o.Sessions {
+		platforms := make([]PlatformResponse, len(s.Platforms))
+		for j, p := range s.Platforms {
+			platforms[j] = PlatformResponse{
+				ID:             p.ID,
+				Platform:       p.Platform,
+				PlatformLiveID: p.PlatformLiveID,
+				AddedAt:        p.AddedAt,
+			}
+		}
+		sessions[i] = SessionResponse{
+			ID:            s.ID,
+			EventID:       s.EventID,
+			Status:        s.Status,
+			StartedAt:     s.StartedAt,
+			EndedAt:       s.EndedAt,
+			TotalComments: s.TotalComments,
+			Platforms:     platforms,
+			CreatedAt:     s.CreatedAt,
+			UpdatedAt:     s.UpdatedAt,
+		}
+	}
+
+	return EventResponse{
+		ID:          o.ID,
+		Title:       o.Title,
+		Type:        o.Type,
+		Status:      o.Status,
+		TotalOrders: o.TotalOrders,
+		Sessions:    sessions,
+		CreatedAt:   o.CreatedAt,
+		UpdatedAt:   o.UpdatedAt,
+	}
+}
+
+// =============================================================================
+// EVENT DETAILS - Stats and Cart Listing
+// =============================================================================
+
+// GetEventStats godoc
+// @Summary      Get event statistics
+// @Description  Returns stats for a specific event: comments, open carts, checkout carts, projected revenue
+// @Tags         lives
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live event UUID"
+// @Success      200 {object} httpx.Envelope{data=EventStatsResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/event-stats [get]
+// @Security     BearerAuth
+func (h *Handler) GetEventStats(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	output, err := h.service.GetEventStats(c.Context(), eventID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, EventStatsResponse{
+		TotalComments:    output.TotalComments,
+		OpenCarts:        output.OpenCarts,
+		CheckoutCarts:    output.CheckoutCarts,
+		ProjectedRevenue: output.ProjectedRevenue,
+		CheckoutRevenue:  output.CheckoutRevenue,
+	})
+}
+
+// ListCarts godoc
+// @Summary      List carts for an event
+// @Description  Returns all carts for an event with total value and item count
+// @Tags         lives
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live event UUID"
+// @Success      200 {object} httpx.Envelope{data=ListCartsResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/carts [get]
+// @Security     BearerAuth
+func (h *Handler) ListCarts(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	carts, err := h.service.ListCartsWithTotalByEvent(c.Context(), eventID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	responses := make([]CartWithTotalResponse, len(carts))
+	for i, cart := range carts {
+		responses[i] = CartWithTotalResponse{
+			ID:             cart.ID,
+			PlatformUserID: cart.PlatformUserID,
+			PlatformHandle: cart.PlatformHandle,
+			Status:         cart.Status,
+			PaymentStatus:  cart.PaymentStatus,
+			TotalValue:     cart.TotalValue,
+			TotalItems:     cart.TotalItems,
+			CreatedAt:      cart.CreatedAt,
+			ExpiresAt:      cart.ExpiresAt,
+		}
+	}
+
+	return httpx.OK(c, ListCartsResponse{Data: responses})
 }

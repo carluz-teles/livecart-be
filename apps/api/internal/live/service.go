@@ -25,53 +25,72 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 // LEGACY API - Creates an event + session + platform in one call
 // =============================================================================
 
-// Create creates a live event with an initial session and platform.
+// Create creates a live event with an optional initial session and platform.
 // This maintains backwards compatibility with the original /lives API.
 func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLiveOutput, error) {
+	// Default to single type if not specified
+	eventType := input.Type
+	if eventType == "" {
+		eventType = "single"
+	}
+
 	// 1. Create the event
 	event, err := s.repo.CreateEvent(ctx, CreateEventParams{
 		StoreID: input.StoreID,
 		Title:   input.Title,
+		Type:    eventType,
 		Status:  "active",
 	})
 	if err != nil {
 		return CreateLiveOutput{}, err
 	}
 
-	// 2. Create the initial session
-	session, err := s.repo.CreateSession(ctx, CreateSessionParams{
-		EventID: event.ID,
-		Status:  "active",
-	})
-	if err != nil {
-		s.logger.Error("failed to create session after event",
+	// If platform info is provided, create session and add platform
+	var platform string
+	if input.Platform != nil && input.PlatformLiveID != nil && *input.Platform != "" && *input.PlatformLiveID != "" {
+		// 2. Create the initial session
+		session, err := s.repo.CreateSession(ctx, CreateSessionParams{
+			EventID: event.ID,
+			Status:  "active",
+		})
+		if err != nil {
+			s.logger.Error("failed to create session after event",
+				zap.String("event_id", event.ID),
+				zap.Error(err),
+			)
+			return CreateLiveOutput{}, err
+		}
+
+		// 3. Add the platform to the session
+		_, err = s.repo.AddPlatformToSession(ctx, session.ID, *input.Platform, *input.PlatformLiveID)
+		if err != nil {
+			s.logger.Error("failed to add platform after session",
+				zap.String("session_id", session.ID),
+				zap.Error(err),
+			)
+			return CreateLiveOutput{}, err
+		}
+
+		platform = *input.Platform
+
+		s.logger.Info("live created with session",
 			zap.String("event_id", event.ID),
-			zap.Error(err),
-		)
-		return CreateLiveOutput{}, err
-	}
-
-	// 3. Add the platform to the session
-	_, err = s.repo.AddPlatformToSession(ctx, session.ID, input.Platform, input.PlatformLiveID)
-	if err != nil {
-		s.logger.Error("failed to add platform after session",
 			zap.String("session_id", session.ID),
-			zap.Error(err),
+			zap.String("platform", *input.Platform),
+			zap.String("platform_live_id", *input.PlatformLiveID),
 		)
-		return CreateLiveOutput{}, err
+	} else {
+		s.logger.Info("live created without session",
+			zap.String("event_id", event.ID),
+			zap.String("type", eventType),
+		)
 	}
-
-	s.logger.Info("live created",
-		zap.String("event_id", event.ID),
-		zap.String("session_id", session.ID),
-		zap.String("platform", input.Platform),
-		zap.String("platform_live_id", input.PlatformLiveID),
-	)
 
 	return CreateLiveOutput{
 		ID:        event.ID,
 		Title:     event.Title,
-		Platform:  input.Platform,
+		Type:      event.Type,
+		Platform:  platform,
 		Status:    event.Status,
 		CreatedAt: event.CreatedAt,
 	}, nil
@@ -124,6 +143,68 @@ func (s *Service) GetByID(ctx context.Context, id, storeID string) (LiveOutput, 
 		TotalOrders:    event.TotalOrders,
 		CreatedAt:      event.CreatedAt,
 		UpdatedAt:      event.UpdatedAt,
+	}, nil
+}
+
+// GetEventWithSessions returns an event with all its sessions and platforms
+func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) (EventOutput, error) {
+	event, err := s.repo.GetEventByID(ctx, id, storeID)
+	if err != nil {
+		return EventOutput{}, err
+	}
+
+	// Get sessions for this event
+	sessionRows, err := s.repo.ListSessionsByEvent(ctx, event.ID)
+	if err != nil {
+		return EventOutput{}, err
+	}
+
+	// Build session outputs with platforms
+	sessions := make([]SessionOutput, len(sessionRows))
+	for i, sessionRow := range sessionRows {
+		platforms, err := s.repo.ListPlatformsBySession(ctx, sessionRow.ID)
+		if err != nil {
+			s.logger.Warn("failed to list platforms for session",
+				zap.String("session_id", sessionRow.ID),
+				zap.Error(err),
+			)
+			platforms = []PlatformRow{}
+		}
+
+		platformOutputs := make([]PlatformOutput, len(platforms))
+		for j, p := range platforms {
+			platformOutputs[j] = PlatformOutput{
+				ID:             p.ID,
+				SessionID:      p.SessionID,
+				Platform:       p.Platform,
+				PlatformLiveID: p.PlatformLiveID,
+				AddedAt:        p.AddedAt,
+			}
+		}
+
+		sessions[i] = SessionOutput{
+			ID:            sessionRow.ID,
+			EventID:       sessionRow.EventID,
+			Status:        sessionRow.Status,
+			StartedAt:     sessionRow.StartedAt,
+			EndedAt:       sessionRow.EndedAt,
+			TotalComments: sessionRow.TotalComments,
+			Platforms:     platformOutputs,
+			CreatedAt:     sessionRow.CreatedAt,
+			UpdatedAt:     sessionRow.UpdatedAt,
+		}
+	}
+
+	return EventOutput{
+		ID:          event.ID,
+		StoreID:     event.StoreID,
+		Title:       event.Title,
+		Type:        event.Type,
+		Status:      event.Status,
+		TotalOrders: event.TotalOrders,
+		Sessions:    sessions,
+		CreatedAt:   event.CreatedAt,
+		UpdatedAt:   event.UpdatedAt,
 	}, nil
 }
 
@@ -508,4 +589,61 @@ func generateCartToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(bytes), nil
+}
+
+// =============================================================================
+// EVENT DETAILS - Stats and Cart Listing
+// =============================================================================
+
+// GetEventStats returns stats for an event (comments, carts, revenue).
+func (s *Service) GetEventStats(ctx context.Context, eventID, storeID string) (EventStatsOutput, error) {
+	// Verify event exists and belongs to store
+	_, err := s.repo.GetEventByID(ctx, eventID, storeID)
+	if err != nil {
+		return EventStatsOutput{}, err
+	}
+
+	stats, err := s.repo.GetEventStats(ctx, eventID)
+	if err != nil {
+		return EventStatsOutput{}, err
+	}
+
+	return EventStatsOutput{
+		TotalComments:    stats.TotalComments,
+		OpenCarts:        stats.OpenCarts,
+		CheckoutCarts:    stats.CheckoutCarts,
+		ProjectedRevenue: stats.ProjectedRevenue,
+		CheckoutRevenue:  stats.CheckoutRevenue,
+	}, nil
+}
+
+// ListCartsWithTotalByEvent returns all carts for an event with total value and item count.
+func (s *Service) ListCartsWithTotalByEvent(ctx context.Context, eventID, storeID string) ([]CartWithTotalOutput, error) {
+	// Verify event exists and belongs to store
+	_, err := s.repo.GetEventByID(ctx, eventID, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	carts, err := s.repo.ListCartsWithTotalByEvent(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+
+	outputs := make([]CartWithTotalOutput, len(carts))
+	for i, cart := range carts {
+		outputs[i] = CartWithTotalOutput{
+			ID:             cart.ID,
+			PlatformUserID: cart.PlatformUserID,
+			PlatformHandle: cart.PlatformHandle,
+			Status:         cart.Status,
+			PaymentStatus:  cart.PaymentStatus,
+			TotalValue:     cart.TotalValue,
+			TotalItems:     cart.TotalItems,
+			CreatedAt:      cart.CreatedAt,
+			ExpiresAt:      cart.ExpiresAt,
+		}
+	}
+
+	return outputs, nil
 }
