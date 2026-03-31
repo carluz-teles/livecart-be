@@ -147,6 +147,10 @@ type SessionResponse struct {
 	StartedAt     *time.Time         `json:"startedAt"`
 	EndedAt       *time.Time         `json:"endedAt"`
 	TotalComments int                `json:"totalComments"`
+	TotalCarts    int                `json:"totalCarts"`
+	PaidCarts     int                `json:"paidCarts"`
+	TotalRevenue  int64              `json:"totalRevenue"`
+	PaidRevenue   int64              `json:"paidRevenue"`
 	Platforms     []PlatformResponse `json:"platforms,omitempty"`
 	CreatedAt     time.Time          `json:"createdAt"`
 	UpdatedAt     time.Time          `json:"updatedAt"`
@@ -175,6 +179,10 @@ type SessionOutput struct {
 	StartedAt     *time.Time
 	EndedAt       *time.Time
 	TotalComments int
+	TotalCarts    int
+	PaidCarts     int
+	TotalRevenue  int64
+	PaidRevenue   int64
 	Platforms     []PlatformOutput
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
@@ -405,7 +413,8 @@ type AddToCartOutput struct {
 
 // GetOrCreateCartParams represents parameters for GetOrCreateCart.
 type GetOrCreateCartParams struct {
-	EventID        string // Changed from SessionID to EventID
+	EventID        string
+	SessionID      *string // Optional - tracks which session created the cart
 	PlatformUserID string
 	PlatformHandle string
 	Token          string
@@ -434,11 +443,12 @@ type AddCartItemParams struct {
 
 // Handler layer - Event details
 type EventStatsResponse struct {
-	TotalComments    int   `json:"totalComments"`
-	OpenCarts        int   `json:"openCarts"`
-	CheckoutCarts    int   `json:"checkoutCarts"`
-	ProjectedRevenue int64 `json:"projectedRevenue"`
-	CheckoutRevenue  int64 `json:"checkoutRevenue"`
+	TotalComments     int   `json:"totalComments"`
+	OpenCarts         int   `json:"openCarts"`
+	PaidCarts         int   `json:"paidCarts"`
+	TotalProductsSold int   `json:"totalProductsSold"`
+	ProjectedRevenue  int64 `json:"projectedRevenue"`
+	ConfirmedRevenue  int64 `json:"confirmedRevenue"`
 }
 
 type CartWithTotalResponse struct {
@@ -457,13 +467,27 @@ type ListCartsResponse struct {
 	Data []CartWithTotalResponse `json:"data"`
 }
 
+type EventProductResponse struct {
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	ImageURL      *string `json:"imageUrl"`
+	Keyword       string  `json:"keyword"`
+	TotalQuantity int     `json:"totalQuantity"`
+	TotalRevenue  int64   `json:"totalRevenue"`
+}
+
+type ListEventProductsResponse struct {
+	Data []EventProductResponse `json:"data"`
+}
+
 // Service layer - Event details
 type EventStatsOutput struct {
-	TotalComments    int
-	OpenCarts        int
-	CheckoutCarts    int
-	ProjectedRevenue int64
-	CheckoutRevenue  int64
+	TotalComments     int
+	OpenCarts         int
+	PaidCarts         int
+	TotalProductsSold int
+	ProjectedRevenue  int64
+	ConfirmedRevenue  int64
 }
 
 type CartWithTotalOutput struct {
@@ -478,13 +502,23 @@ type CartWithTotalOutput struct {
 	ExpiresAt      *time.Time
 }
 
+type EventProductOutput struct {
+	ID            string
+	Name          string
+	ImageURL      *string
+	Keyword       string
+	TotalQuantity int
+	TotalRevenue  int64
+}
+
 // Repository layer - Event details
 type EventStatsRow struct {
-	TotalComments    int
-	OpenCarts        int
-	CheckoutCarts    int
-	ProjectedRevenue int64
-	CheckoutRevenue  int64
+	TotalComments     int
+	OpenCarts         int
+	PaidCarts         int
+	TotalProductsSold int
+	ProjectedRevenue  int64
+	ConfirmedRevenue  int64
 }
 
 type CartWithTotalRow struct {
@@ -498,4 +532,13 @@ type CartWithTotalRow struct {
 	TotalItems     int
 	CreatedAt      time.Time
 	ExpiresAt      *time.Time
+}
+
+type EventProductRow struct {
+	ID            string
+	Name          string
+	ImageURL      *string
+	Keyword       string
+	TotalQuantity int
+	TotalRevenue  int64
 }

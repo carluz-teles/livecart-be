@@ -24,13 +24,14 @@ func (q *Queries) CountCartsByEvent(ctx context.Context, eventID pgtype.UUID) (i
 
 const createCart = `-- name: CreateCart :one
 
-INSERT INTO carts (event_id, platform_user_id, platform_handle, token, expires_at)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at
+INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id
 `
 
 type CreateCartParams struct {
 	EventID        pgtype.UUID        `json:"event_id"`
+	SessionID      pgtype.UUID        `json:"session_id"`
 	PlatformUserID string             `json:"platform_user_id"`
 	PlatformHandle string             `json:"platform_handle"`
 	Token          string             `json:"token"`
@@ -38,11 +39,12 @@ type CreateCartParams struct {
 }
 
 // =============================================================================
-// CARTS (belong to events, not sessions)
+// CARTS (belong to events, with optional session tracking)
 // =============================================================================
 func (q *Queries) CreateCart(ctx context.Context, arg CreateCartParams) (Cart, error) {
 	row := q.db.QueryRow(ctx, createCart,
 		arg.EventID,
+		arg.SessionID,
 		arg.PlatformUserID,
 		arg.PlatformHandle,
 		arg.Token,
@@ -66,6 +68,7 @@ func (q *Queries) CreateCart(ctx context.Context, arg CreateCartParams) (Cart, e
 		&i.NotifiedAt,
 		&i.CreatedAt,
 		&i.ExpiresAt,
+		&i.SessionID,
 	)
 	return i, err
 }
@@ -123,7 +126,7 @@ func (q *Queries) FinalizeCartsByEvent(ctx context.Context, eventID pgtype.UUID)
 }
 
 const getCartByEventAndUser = `-- name: GetCartByEventAndUser :one
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at FROM carts WHERE event_id = $1 AND platform_user_id = $2
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id FROM carts WHERE event_id = $1 AND platform_user_id = $2
 `
 
 type GetCartByEventAndUserParams struct {
@@ -151,12 +154,13 @@ func (q *Queries) GetCartByEventAndUser(ctx context.Context, arg GetCartByEventA
 		&i.NotifiedAt,
 		&i.CreatedAt,
 		&i.ExpiresAt,
+		&i.SessionID,
 	)
 	return i, err
 }
 
 const getCartByID = `-- name: GetCartByID :one
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at FROM carts WHERE id = $1
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id FROM carts WHERE id = $1
 `
 
 func (q *Queries) GetCartByID(ctx context.Context, id pgtype.UUID) (Cart, error) {
@@ -179,12 +183,13 @@ func (q *Queries) GetCartByID(ctx context.Context, id pgtype.UUID) (Cart, error)
 		&i.NotifiedAt,
 		&i.CreatedAt,
 		&i.ExpiresAt,
+		&i.SessionID,
 	)
 	return i, err
 }
 
 const getCartByToken = `-- name: GetCartByToken :one
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at FROM carts WHERE token = $1
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id FROM carts WHERE token = $1
 `
 
 func (q *Queries) GetCartByToken(ctx context.Context, token string) (Cart, error) {
@@ -207,6 +212,7 @@ func (q *Queries) GetCartByToken(ctx context.Context, token string) (Cart, error
 		&i.NotifiedAt,
 		&i.CreatedAt,
 		&i.ExpiresAt,
+		&i.SessionID,
 	)
 	return i, err
 }
@@ -233,7 +239,13 @@ const getEventStats = `-- name: GetEventStats :one
 SELECT
     COALESCE((SELECT SUM(ls.total_comments) FROM live_sessions ls WHERE ls.event_id = $1), 0)::int AS total_comments,
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.status = 'pending'), 0)::int AS open_carts,
-    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.status IN ('checkout', 'completed')), 0)::int AS checkout_carts,
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.payment_status = 'paid'), 0)::int AS paid_carts,
+    COALESCE((
+        SELECT SUM(ci.quantity)
+        FROM carts ct
+        JOIN cart_items ci ON ci.cart_id = ct.id
+        WHERE ct.event_id = $1 AND ct.status != 'expired'
+    ), 0)::int AS total_products_sold,
     COALESCE((
         SELECT SUM(ci.quantity * ci.unit_price)
         FROM carts ct
@@ -244,31 +256,75 @@ SELECT
         SELECT SUM(ci.quantity * ci.unit_price)
         FROM carts ct
         JOIN cart_items ci ON ci.cart_id = ct.id
-        WHERE ct.event_id = $1 AND ct.status IN ('checkout', 'completed')
-    ), 0)::bigint AS checkout_revenue
+        WHERE ct.event_id = $1 AND ct.payment_status = 'paid'
+    ), 0)::bigint AS confirmed_revenue
 `
 
 type GetEventStatsRow struct {
-	TotalComments    int32 `json:"total_comments"`
-	OpenCarts        int32 `json:"open_carts"`
-	CheckoutCarts    int32 `json:"checkout_carts"`
-	ProjectedRevenue int64 `json:"projected_revenue"`
-	CheckoutRevenue  int64 `json:"checkout_revenue"`
+	TotalComments     int32 `json:"total_comments"`
+	OpenCarts         int32 `json:"open_carts"`
+	PaidCarts         int32 `json:"paid_carts"`
+	TotalProductsSold int32 `json:"total_products_sold"`
+	ProjectedRevenue  int64 `json:"projected_revenue"`
+	ConfirmedRevenue  int64 `json:"confirmed_revenue"`
 }
 
 // =============================================================================
 // EVENT DETAILS - Stats and Cart Listing
 // =============================================================================
-// Returns stats for an event: comments, open carts, checkout carts, projected revenue
+// Returns stats for an event: comments, carts, revenue, products sold
 func (q *Queries) GetEventStats(ctx context.Context, eventID pgtype.UUID) (GetEventStatsRow, error) {
 	row := q.db.QueryRow(ctx, getEventStats, eventID)
 	var i GetEventStatsRow
 	err := row.Scan(
 		&i.TotalComments,
 		&i.OpenCarts,
-		&i.CheckoutCarts,
+		&i.PaidCarts,
+		&i.TotalProductsSold,
 		&i.ProjectedRevenue,
-		&i.CheckoutRevenue,
+		&i.ConfirmedRevenue,
+	)
+	return i, err
+}
+
+const getSessionStats = `-- name: GetSessionStats :one
+
+SELECT
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1), 0)::int AS total_carts,
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1 AND ct.payment_status = 'paid'), 0)::int AS paid_carts,
+    COALESCE((
+        SELECT SUM(ci.quantity * ci.unit_price)
+        FROM carts ct
+        JOIN cart_items ci ON ci.cart_id = ct.id
+        WHERE ct.session_id = $1 AND ct.status != 'expired'
+    ), 0)::bigint AS total_revenue,
+    COALESCE((
+        SELECT SUM(ci.quantity * ci.unit_price)
+        FROM carts ct
+        JOIN cart_items ci ON ci.cart_id = ct.id
+        WHERE ct.session_id = $1 AND ct.payment_status = 'paid'
+    ), 0)::bigint AS paid_revenue
+`
+
+type GetSessionStatsRow struct {
+	TotalCarts   int32 `json:"total_carts"`
+	PaidCarts    int32 `json:"paid_carts"`
+	TotalRevenue int64 `json:"total_revenue"`
+	PaidRevenue  int64 `json:"paid_revenue"`
+}
+
+// =============================================================================
+// SESSION DETAILS - Stats per session
+// =============================================================================
+// Returns stats for a specific session: carts count and revenue
+func (q *Queries) GetSessionStats(ctx context.Context, sessionID pgtype.UUID) (GetSessionStatsRow, error) {
+	row := q.db.QueryRow(ctx, getSessionStats, sessionID)
+	var i GetSessionStatsRow
+	err := row.Scan(
+		&i.TotalCarts,
+		&i.PaidCarts,
+		&i.TotalRevenue,
+		&i.PaidRevenue,
 	)
 	return i, err
 }
@@ -319,7 +375,7 @@ func (q *Queries) ListCartItems(ctx context.Context, cartID pgtype.UUID) ([]List
 }
 
 const listCartsByEvent = `-- name: ListCartsByEvent :many
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at FROM carts WHERE event_id = $1 ORDER BY created_at
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id FROM carts WHERE event_id = $1 ORDER BY created_at
 `
 
 func (q *Queries) ListCartsByEvent(ctx context.Context, eventID pgtype.UUID) ([]Cart, error) {
@@ -348,6 +404,7 @@ func (q *Queries) ListCartsByEvent(ctx context.Context, eventID pgtype.UUID) ([]
 			&i.NotifiedAt,
 			&i.CreatedAt,
 			&i.ExpiresAt,
+			&i.SessionID,
 		); err != nil {
 			return nil, err
 		}
@@ -423,6 +480,59 @@ func (q *Queries) ListCartsWithTotalByEvent(ctx context.Context, eventID pgtype.
 	return items, nil
 }
 
+const listProductsByEvent = `-- name: ListProductsByEvent :many
+SELECT
+    p.id,
+    p.name,
+    p.image_url,
+    p.keyword,
+    COALESCE(SUM(ci.quantity), 0)::int AS total_quantity,
+    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_revenue
+FROM cart_items ci
+JOIN carts c ON c.id = ci.cart_id
+JOIN products p ON p.id = ci.product_id
+WHERE c.event_id = $1 AND c.status != 'expired'
+GROUP BY p.id, p.name, p.image_url, p.keyword
+ORDER BY total_quantity DESC
+`
+
+type ListProductsByEventRow struct {
+	ID            pgtype.UUID `json:"id"`
+	Name          string      `json:"name"`
+	ImageUrl      pgtype.Text `json:"image_url"`
+	Keyword       string      `json:"keyword"`
+	TotalQuantity int32       `json:"total_quantity"`
+	TotalRevenue  int64       `json:"total_revenue"`
+}
+
+// Returns products sold in an event with quantity and revenue
+func (q *Queries) ListProductsByEvent(ctx context.Context, eventID pgtype.UUID) ([]ListProductsByEventRow, error) {
+	rows, err := q.db.Query(ctx, listProductsByEvent, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListProductsByEventRow{}
+	for rows.Next() {
+		var i ListProductsByEventRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.ImageUrl,
+			&i.Keyword,
+			&i.TotalQuantity,
+			&i.TotalRevenue,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const updateCartItem = `-- name: UpdateCartItem :one
 UPDATE cart_items
 SET quantity = $2
@@ -452,7 +562,7 @@ const updateCartNotifyStatus = `-- name: UpdateCartNotifyStatus :one
 UPDATE carts
 SET notify_status = $2, notify_error = $3, notified_at = $4
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id
 `
 
 type UpdateCartNotifyStatusParams struct {
@@ -487,6 +597,7 @@ func (q *Queries) UpdateCartNotifyStatus(ctx context.Context, arg UpdateCartNoti
 		&i.NotifiedAt,
 		&i.CreatedAt,
 		&i.ExpiresAt,
+		&i.SessionID,
 	)
 	return i, err
 }
@@ -495,7 +606,7 @@ const updateCartPayment = `-- name: UpdateCartPayment :one
 UPDATE carts
 SET payment_status = $2, external_order_id = $3, paid_at = $4
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id
 `
 
 type UpdateCartPaymentParams struct {
@@ -530,12 +641,13 @@ func (q *Queries) UpdateCartPayment(ctx context.Context, arg UpdateCartPaymentPa
 		&i.NotifiedAt,
 		&i.CreatedAt,
 		&i.ExpiresAt,
+		&i.SessionID,
 	)
 	return i, err
 }
 
 const updateCartStatus = `-- name: UpdateCartStatus :one
-UPDATE carts SET status = $2 WHERE id = $1 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at
+UPDATE carts SET status = $2 WHERE id = $1 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id
 `
 
 type UpdateCartStatusParams struct {
@@ -563,6 +675,7 @@ func (q *Queries) UpdateCartStatus(ctx context.Context, arg UpdateCartStatusPara
 		&i.NotifiedAt,
 		&i.CreatedAt,
 		&i.ExpiresAt,
+		&i.SessionID,
 	)
 	return i, err
 }

@@ -159,7 +159,7 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		return EventOutput{}, err
 	}
 
-	// Build session outputs with platforms
+	// Build session outputs with platforms and stats
 	sessions := make([]SessionOutput, len(sessionRows))
 	for i, sessionRow := range sessionRows {
 		platforms, err := s.repo.ListPlatformsBySession(ctx, sessionRow.ID)
@@ -182,6 +182,22 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 			}
 		}
 
+		// Get session stats (carts and revenue)
+		var totalCarts, paidCarts int
+		var totalRevenue, paidRevenue int64
+		stats, err := s.repo.GetSessionStats(ctx, sessionRow.ID)
+		if err != nil {
+			s.logger.Warn("failed to get session stats",
+				zap.String("session_id", sessionRow.ID),
+				zap.Error(err),
+			)
+		} else {
+			totalCarts = stats.TotalCarts
+			paidCarts = stats.PaidCarts
+			totalRevenue = stats.TotalRevenue
+			paidRevenue = stats.PaidRevenue
+		}
+
 		sessions[i] = SessionOutput{
 			ID:            sessionRow.ID,
 			EventID:       sessionRow.EventID,
@@ -189,6 +205,10 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 			StartedAt:     sessionRow.StartedAt,
 			EndedAt:       sessionRow.EndedAt,
 			TotalComments: sessionRow.TotalComments,
+			TotalCarts:    totalCarts,
+			PaidCarts:     paidCarts,
+			TotalRevenue:  totalRevenue,
+			PaidRevenue:   paidRevenue,
 			Platforms:     platformOutputs,
 			CreatedAt:     sessionRow.CreatedAt,
 			UpdatedAt:     sessionRow.UpdatedAt,
@@ -609,11 +629,12 @@ func (s *Service) GetEventStats(ctx context.Context, eventID, storeID string) (E
 	}
 
 	return EventStatsOutput{
-		TotalComments:    stats.TotalComments,
-		OpenCarts:        stats.OpenCarts,
-		CheckoutCarts:    stats.CheckoutCarts,
-		ProjectedRevenue: stats.ProjectedRevenue,
-		CheckoutRevenue:  stats.CheckoutRevenue,
+		TotalComments:     stats.TotalComments,
+		OpenCarts:         stats.OpenCarts,
+		PaidCarts:         stats.PaidCarts,
+		TotalProductsSold: stats.TotalProductsSold,
+		ProjectedRevenue:  stats.ProjectedRevenue,
+		ConfirmedRevenue:  stats.ConfirmedRevenue,
 	}, nil
 }
 
@@ -642,6 +663,34 @@ func (s *Service) ListCartsWithTotalByEvent(ctx context.Context, eventID, storeI
 			TotalItems:     cart.TotalItems,
 			CreatedAt:      cart.CreatedAt,
 			ExpiresAt:      cart.ExpiresAt,
+		}
+	}
+
+	return outputs, nil
+}
+
+// ListProductsByEvent returns all products sold in an event with quantity and revenue.
+func (s *Service) ListProductsByEvent(ctx context.Context, eventID, storeID string) ([]EventProductOutput, error) {
+	// Verify event exists and belongs to store
+	_, err := s.repo.GetEventByID(ctx, eventID, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	products, err := s.repo.ListProductsByEvent(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+
+	outputs := make([]EventProductOutput, len(products))
+	for i, product := range products {
+		outputs[i] = EventProductOutput{
+			ID:            product.ID,
+			Name:          product.Name,
+			ImageURL:      product.ImageURL,
+			Keyword:       product.Keyword,
+			TotalQuantity: product.TotalQuantity,
+			TotalRevenue:  product.TotalRevenue,
 		}
 	}
 

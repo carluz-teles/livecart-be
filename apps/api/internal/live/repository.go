@@ -472,8 +472,20 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 
 	// Create new cart with expiration 24h from now
 	expiresAt := time.Now().Add(24 * time.Hour)
+
+	// Parse session ID if provided
+	var sessionID pgtype.UUID
+	if params.SessionID != nil {
+		sid, err := parseUUID(*params.SessionID)
+		if err != nil {
+			return nil, false, fmt.Errorf("parsing session ID: %w", err)
+		}
+		sessionID = sid
+	}
+
 	created, err := r.q.CreateCart(ctx, sqlc.CreateCartParams{
 		EventID:        eventID,
+		SessionID:      sessionID,
 		PlatformUserID: params.PlatformUserID,
 		PlatformHandle: params.PlatformHandle,
 		Token:          params.Token,
@@ -809,11 +821,12 @@ func (r *Repository) GetEventStats(ctx context.Context, eventID string) (EventSt
 	}
 
 	return EventStatsRow{
-		TotalComments:    int(row.TotalComments),
-		OpenCarts:        int(row.OpenCarts),
-		CheckoutCarts:    int(row.CheckoutCarts),
-		ProjectedRevenue: row.ProjectedRevenue,
-		CheckoutRevenue:  row.CheckoutRevenue,
+		TotalComments:     int(row.TotalComments),
+		OpenCarts:         int(row.OpenCarts),
+		PaidCarts:         int(row.PaidCarts),
+		TotalProductsSold: int(row.TotalProductsSold),
+		ProjectedRevenue:  row.ProjectedRevenue,
+		ConfirmedRevenue:  row.ConfirmedRevenue,
 	}, nil
 }
 
@@ -854,4 +867,62 @@ func (r *Repository) ListCartsWithTotalByEvent(ctx context.Context, eventID stri
 	}
 
 	return carts, nil
+}
+
+func (r *Repository) ListProductsByEvent(ctx context.Context, eventID string) ([]EventProductRow, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := r.q.ListProductsByEvent(ctx, uid)
+	if err != nil {
+		return nil, fmt.Errorf("listing products by event: %w", err)
+	}
+
+	products := make([]EventProductRow, len(rows))
+	for i, row := range rows {
+		var imageURL *string
+		if row.ImageUrl.Valid {
+			imageURL = &row.ImageUrl.String
+		}
+
+		products[i] = EventProductRow{
+			ID:            row.ID.String(),
+			Name:          row.Name,
+			ImageURL:      imageURL,
+			Keyword:       row.Keyword,
+			TotalQuantity: int(row.TotalQuantity),
+			TotalRevenue:  row.TotalRevenue,
+		}
+	}
+
+	return products, nil
+}
+
+// SessionStatsRow holds cart statistics for a session
+type SessionStatsRow struct {
+	TotalCarts   int
+	PaidCarts    int
+	TotalRevenue int64
+	PaidRevenue  int64
+}
+
+func (r *Repository) GetSessionStats(ctx context.Context, sessionID string) (*SessionStatsRow, error) {
+	uid, err := parseUUID(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := r.q.GetSessionStats(ctx, uid)
+	if err != nil {
+		return nil, fmt.Errorf("getting session stats: %w", err)
+	}
+
+	return &SessionStatsRow{
+		TotalCarts:   int(row.TotalCarts),
+		PaidCarts:    int(row.PaidCarts),
+		TotalRevenue: row.TotalRevenue,
+		PaidRevenue:  row.PaidRevenue,
+	}, nil
 }

@@ -1,10 +1,10 @@
 -- =============================================================================
--- CARTS (belong to events, not sessions)
+-- CARTS (belong to events, with optional session tracking)
 -- =============================================================================
 
 -- name: CreateCart :one
-INSERT INTO carts (event_id, platform_user_id, platform_handle, token, expires_at)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;
 
 -- name: GetCartByID :one
@@ -79,11 +79,17 @@ SELECT * FROM cart_items WHERE id = $1;
 -- =============================================================================
 
 -- name: GetEventStats :one
--- Returns stats for an event: comments, open carts, checkout carts, projected revenue
+-- Returns stats for an event: comments, carts, revenue, products sold
 SELECT
     COALESCE((SELECT SUM(ls.total_comments) FROM live_sessions ls WHERE ls.event_id = $1), 0)::int AS total_comments,
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.status = 'pending'), 0)::int AS open_carts,
-    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.status IN ('checkout', 'completed')), 0)::int AS checkout_carts,
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.payment_status = 'paid'), 0)::int AS paid_carts,
+    COALESCE((
+        SELECT SUM(ci.quantity)
+        FROM carts ct
+        JOIN cart_items ci ON ci.cart_id = ct.id
+        WHERE ct.event_id = $1 AND ct.status != 'expired'
+    ), 0)::int AS total_products_sold,
     COALESCE((
         SELECT SUM(ci.quantity * ci.unit_price)
         FROM carts ct
@@ -94,8 +100,8 @@ SELECT
         SELECT SUM(ci.quantity * ci.unit_price)
         FROM carts ct
         JOIN cart_items ci ON ci.cart_id = ct.id
-        WHERE ct.event_id = $1 AND ct.status IN ('checkout', 'completed')
-    ), 0)::bigint AS checkout_revenue;
+        WHERE ct.event_id = $1 AND ct.payment_status = 'paid'
+    ), 0)::bigint AS confirmed_revenue;
 
 -- name: ListCartsWithTotalByEvent :many
 -- Returns carts for an event with total value and item count
@@ -115,3 +121,41 @@ LEFT JOIN cart_items ci ON ci.cart_id = c.id
 WHERE c.event_id = $1
 GROUP BY c.id
 ORDER BY c.created_at DESC;
+
+-- name: ListProductsByEvent :many
+-- Returns products sold in an event with quantity and revenue
+SELECT
+    p.id,
+    p.name,
+    p.image_url,
+    p.keyword,
+    COALESCE(SUM(ci.quantity), 0)::int AS total_quantity,
+    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_revenue
+FROM cart_items ci
+JOIN carts c ON c.id = ci.cart_id
+JOIN products p ON p.id = ci.product_id
+WHERE c.event_id = $1 AND c.status != 'expired'
+GROUP BY p.id, p.name, p.image_url, p.keyword
+ORDER BY total_quantity DESC;
+
+-- =============================================================================
+-- SESSION DETAILS - Stats per session
+-- =============================================================================
+
+-- name: GetSessionStats :one
+-- Returns stats for a specific session: carts count and revenue
+SELECT
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1), 0)::int AS total_carts,
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1 AND ct.payment_status = 'paid'), 0)::int AS paid_carts,
+    COALESCE((
+        SELECT SUM(ci.quantity * ci.unit_price)
+        FROM carts ct
+        JOIN cart_items ci ON ci.cart_id = ct.id
+        WHERE ct.session_id = $1 AND ct.status != 'expired'
+    ), 0)::bigint AS total_revenue,
+    COALESCE((
+        SELECT SUM(ci.quantity * ci.unit_price)
+        FROM carts ct
+        JOIN cart_items ci ON ci.cart_id = ct.id
+        WHERE ct.session_id = $1 AND ct.payment_status = 'paid'
+    ), 0)::bigint AS paid_revenue;

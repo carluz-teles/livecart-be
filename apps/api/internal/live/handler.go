@@ -31,6 +31,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// Event details endpoints
 	g.Get("/:id/event-stats", h.GetEventStats)
 	g.Get("/:id/carts", h.ListCarts)
+	g.Get("/:id/products", h.ListProducts)
 
 	// Session management within an event
 	g.Post("/:id/sessions", h.CreateSession)
@@ -575,6 +576,10 @@ func toEventResponse(o EventOutput) EventResponse {
 			StartedAt:     s.StartedAt,
 			EndedAt:       s.EndedAt,
 			TotalComments: s.TotalComments,
+			TotalCarts:    s.TotalCarts,
+			PaidCarts:     s.PaidCarts,
+			TotalRevenue:  s.TotalRevenue,
+			PaidRevenue:   s.PaidRevenue,
 			Platforms:     platforms,
 			CreatedAt:     s.CreatedAt,
 			UpdatedAt:     s.UpdatedAt,
@@ -599,7 +604,7 @@ func toEventResponse(o EventOutput) EventResponse {
 
 // GetEventStats godoc
 // @Summary      Get event statistics
-// @Description  Returns stats for a specific event: comments, open carts, checkout carts, projected revenue
+// @Description  Returns stats for a specific event: comments, carts (open/paid), products sold, revenue (projected/confirmed)
 // @Tags         lives
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
@@ -618,11 +623,12 @@ func (h *Handler) GetEventStats(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, EventStatsResponse{
-		TotalComments:    output.TotalComments,
-		OpenCarts:        output.OpenCarts,
-		CheckoutCarts:    output.CheckoutCarts,
-		ProjectedRevenue: output.ProjectedRevenue,
-		CheckoutRevenue:  output.CheckoutRevenue,
+		TotalComments:     output.TotalComments,
+		OpenCarts:         output.OpenCarts,
+		PaidCarts:         output.PaidCarts,
+		TotalProductsSold: output.TotalProductsSold,
+		ProjectedRevenue:  output.ProjectedRevenue,
+		ConfirmedRevenue:  output.ConfirmedRevenue,
 	})
 }
 
@@ -662,4 +668,39 @@ func (h *Handler) ListCarts(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, ListCartsResponse{Data: responses})
+}
+
+// ListProducts godoc
+// @Summary      List products sold in an event
+// @Description  Returns all products sold in an event with quantity and revenue
+// @Tags         lives
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live event UUID"
+// @Success      200 {object} httpx.Envelope{data=ListEventProductsResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/products [get]
+// @Security     BearerAuth
+func (h *Handler) ListProducts(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	products, err := h.service.ListProductsByEvent(c.Context(), eventID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	responses := make([]EventProductResponse, len(products))
+	for i, product := range products {
+		responses[i] = EventProductResponse{
+			ID:            product.ID,
+			Name:          product.Name,
+			ImageURL:      product.ImageURL,
+			Keyword:       product.Keyword,
+			TotalQuantity: product.TotalQuantity,
+			TotalRevenue:  product.TotalRevenue,
+		}
+	}
+
+	return httpx.OK(c, ListEventProductsResponse{Data: responses})
 }

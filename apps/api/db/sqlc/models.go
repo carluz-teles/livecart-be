@@ -25,6 +25,8 @@ type Cart struct {
 	NotifiedAt           pgtype.Timestamptz `json:"notified_at"`
 	CreatedAt            pgtype.Timestamptz `json:"created_at"`
 	ExpiresAt            pgtype.Timestamptz `json:"expires_at"`
+	// Session where this cart was created. NULL if created outside a session or session was deleted.
+	SessionID pgtype.UUID `json:"session_id"`
 }
 
 type CartItem struct {
