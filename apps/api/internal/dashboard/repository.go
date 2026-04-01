@@ -23,15 +23,15 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (*DashboardSt
 				SELECT SUM(ci.quantity * ci.unit_price)
 				FROM cart_items ci
 				JOIN carts c ON c.id = ci.cart_id
-				JOIN live_sessions ls ON ls.id = c.session_id
-				WHERE ls.store_id = $1
+				JOIN live_events le ON le.id = c.event_id
+				WHERE le.store_id = $1
 			), 0)::BIGINT as total_revenue,
 			-- Total orders
 			COALESCE((
 				SELECT COUNT(*)
 				FROM carts c
-				JOIN live_sessions ls ON ls.id = c.session_id
-				WHERE ls.store_id = $1
+				JOIN live_events le ON le.id = c.event_id
+				WHERE le.store_id = $1
 			), 0)::INT as total_orders,
 			-- Active products
 			COALESCE((
@@ -42,8 +42,8 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (*DashboardSt
 			-- Total lives
 			COALESCE((
 				SELECT COUNT(*)
-				FROM live_sessions ls
-				WHERE ls.store_id = $1
+				FROM live_events le
+				WHERE le.store_id = $1
 			), 0)::INT as total_lives
 	`
 
@@ -68,9 +68,9 @@ func (r *Repository) GetMonthlyRevenue(ctx context.Context, storeID string) ([]M
 			EXTRACT(MONTH FROM c.created_at)::INT as month_num,
 			COALESCE(SUM(ci.quantity * ci.unit_price), 0)::BIGINT as revenue
 		FROM carts c
-		JOIN live_sessions ls ON ls.id = c.session_id
+		JOIN live_events le ON le.id = c.event_id
 		LEFT JOIN cart_items ci ON ci.cart_id = c.id
-		WHERE ls.store_id = $1
+		WHERE le.store_id = $1
 		  AND c.created_at >= date_trunc('year', CURRENT_DATE)
 		GROUP BY TO_CHAR(c.created_at, 'Mon'), EXTRACT(MONTH FROM c.created_at)
 		ORDER BY month_num
@@ -106,8 +106,8 @@ func (r *Repository) GetTopProducts(ctx context.Context, storeID string) ([]TopP
 		FROM products p
 		JOIN cart_items ci ON ci.product_id = p.id
 		JOIN carts c ON c.id = ci.cart_id
-		JOIN live_sessions ls ON ls.id = c.session_id
-		WHERE ls.store_id = $1
+		JOIN live_events le ON le.id = c.event_id
+		WHERE le.store_id = $1
 		GROUP BY p.id, p.name, p.keyword
 		ORDER BY total_sold DESC
 		LIMIT 5

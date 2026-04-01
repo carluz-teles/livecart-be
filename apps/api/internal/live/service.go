@@ -579,10 +579,11 @@ func (s *Service) AddToCart(ctx context.Context, input AddToCartInput) (AddToCar
 
 	// Add item to cart
 	err = s.repo.AddCartItem(ctx, AddCartItemParams{
-		CartID:    cart.ID,
-		ProductID: input.ProductID,
-		Quantity:  input.Quantity,
-		UnitPrice: input.ProductPrice,
+		CartID:     cart.ID,
+		ProductID:  input.ProductID,
+		Quantity:   input.Quantity,
+		UnitPrice:  input.ProductPrice,
+		Waitlisted: input.Waitlisted,
 	})
 	if err != nil {
 		return AddToCartOutput{}, fmt.Errorf("adding item to cart: %w", err)

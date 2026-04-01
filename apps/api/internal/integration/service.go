@@ -1059,6 +1059,7 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 // =============================================================================
 
 // ProcessInstagramComment processes a live comment from Instagram webhook.
+// All comments are saved to DB. Purchase intents trigger stock check → cart or waitlist.
 func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInstagramCommentInput) error {
 	s.logger.Info("processing instagram comment",
 		zap.String("account_id", input.AccountID),
@@ -1074,7 +1075,6 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	if err != nil {
 		return fmt.Errorf("finding live session: %w", err)
 	}
-
 	if session == nil {
 		s.logger.Warn("no active live session found for media_id",
 			zap.String("media_id", input.MediaID),
@@ -1104,48 +1104,129 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 
 	// Parse purchase intent
 	intent := ParsePurchaseIntent(input.Text)
-	if intent == nil {
-		s.logger.Debug("no purchase intent detected",
-			zap.String("text", input.Text),
-		)
+	hasPurchaseIntent := intent != nil
+
+	// Try to match product by keyword
+	var product *ProductRow
+	if hasPurchaseIntent {
+		product = s.findProductByKeyword(ctx, event.StoreID, input.Text)
+	}
+
+	// Determine result for the comment record
+	var commentResult string
+	var matchedProductID string
+	var matchedQuantity int
+	if !hasPurchaseIntent {
+		commentResult = "no_intent"
+	} else if product == nil {
+		commentResult = "no_product"
+	}
+	if product != nil && intent != nil {
+		matchedProductID = product.ID
+		matchedQuantity = intent.Quantity
+	}
+
+	// Save ALL comments to DB
+	commentID, err := s.repo.CreateLiveComment(ctx, CreateLiveCommentParams{
+		SessionID:         session.ID,
+		EventID:           event.ID,
+		Platform:          "instagram",
+		PlatformCommentID: input.CommentID,
+		PlatformUserID:    input.UserID,
+		PlatformHandle:    input.Username,
+		Text:              input.Text,
+		HasPurchaseIntent: hasPurchaseIntent,
+		MatchedProductID:  matchedProductID,
+		MatchedQuantity:   matchedQuantity,
+		Result:            commentResult,
+	})
+	if err != nil {
+		s.logger.Error("failed to save live comment", zap.Error(err))
+		// Continue processing even if save fails
+	}
+
+	// If no purchase intent or no product match, we're done
+	if !hasPurchaseIntent || product == nil {
 		return nil
 	}
 
-	s.logger.Info("purchase intent detected",
-		zap.String("username", input.Username),
-		zap.Int("quantity", intent.Quantity),
-		zap.String("text", input.Text),
-	)
-
-	// Try to match product by keyword (REQUIRED) - use store_id from event
-	product := s.findProductByKeyword(ctx, event.StoreID, input.Text)
-
-	if product == nil {
-		s.logger.Debug("ignoring comment: purchase intent detected but no valid product keyword",
-			zap.String("username", input.Username),
-			zap.String("text", input.Text),
-		)
-		return nil
-	}
-
-	s.logger.Info("product matched by keyword",
+	s.logger.Info("purchase intent detected with product match",
 		zap.String("username", input.Username),
 		zap.String("product_id", product.ID),
 		zap.String("keyword", product.Keyword),
-		zap.Int64("price", product.Price),
+		zap.Int("quantity", intent.Quantity),
+		zap.Int("stock", product.Stock),
 	)
 
-	// Add product to user's cart (carts are tied to events now)
+	// Lazy expiration: process expired carts for this product before checking stock
+	s.ProcessExpiredCartsForProduct(ctx, event.ID, product.ID)
+
+	// Try to reserve stock atomically
+	stockErr := s.repo.DecrementProductStock(ctx, product.ID, intent.Quantity)
+	waitlisted := stockErr != nil
+
+	if waitlisted {
+		// Stock unavailable — check if user already on waitlist
+		alreadyWaiting, _ := s.repo.GetWaitlistItemByEventUserProduct(ctx, event.ID, input.UserID, product.ID)
+		if alreadyWaiting {
+			s.logger.Info("user already on waitlist, ignoring duplicate",
+				zap.String("username", input.Username),
+				zap.String("product_id", product.ID),
+			)
+			// Update comment result
+			if commentID != "" {
+				_ = s.repo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "already_waitlisted")
+			}
+			return nil
+		}
+
+		// Add to waitlist
+		position, _ := s.repo.GetNextWaitlistPosition(ctx, event.ID, product.ID)
+		_, err = s.repo.CreateWaitlistItem(ctx, CreateWaitlistItemParams{
+			EventID:        event.ID,
+			ProductID:      product.ID,
+			PlatformUserID: input.UserID,
+			PlatformHandle: input.Username,
+			Quantity:       intent.Quantity,
+			Position:       position,
+		})
+		if err != nil {
+			s.logger.Error("failed to create waitlist item", zap.Error(err))
+		}
+
+		// Update comment result
+		if commentID != "" {
+			_ = s.repo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "waitlisted")
+		}
+
+		s.logger.Info("user added to waitlist (out of stock)",
+			zap.String("username", input.Username),
+			zap.String("product_id", product.ID),
+			zap.Int("position", position),
+		)
+	}
+
+	// Add product to cart (waitlisted or not)
 	result, err := s.liveService.AddToCart(ctx, live.AddToCartInput{
-		EventID:        event.ID, // Changed from SessionID to EventID
+		EventID:        event.ID,
 		PlatformUserID: input.UserID,
 		PlatformHandle: input.Username,
 		ProductID:      product.ID,
 		ProductPrice:   product.Price,
 		Quantity:       intent.Quantity,
+		Waitlisted:     waitlisted,
 	})
 	if err != nil {
+		// If we reserved stock but failed to add to cart, release it
+		if !waitlisted {
+			_ = s.repo.IncrementProductStock(ctx, product.ID, intent.Quantity)
+		}
 		return fmt.Errorf("adding to cart: %w", err)
+	}
+
+	// Update comment result for successful cart add
+	if commentID != "" && !waitlisted {
+		_ = s.repo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "added_to_cart")
 	}
 
 	// Increment order counter on event only for new carts
@@ -1154,6 +1235,16 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			s.logger.Error("failed to increment order counter",
 				zap.String("event_id", event.ID),
 				zap.Error(err),
+			)
+		}
+	}
+
+	// Sync cart to ERP (only if we have non-waitlisted items)
+	if !waitlisted {
+		if syncErr := s.SyncCartToERP(ctx, event.StoreID, result.CartID, event.ID, input.UserID, input.Username); syncErr != nil {
+			s.logger.Warn("failed to sync cart to ERP",
+				zap.String("cart_id", result.CartID),
+				zap.Error(syncErr),
 			)
 		}
 	}
@@ -1199,6 +1290,292 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 	// Future: Could be used to handle order confirmations, questions, etc.
 
 	return nil
+}
+
+// =============================================================================
+// CART → ERP SYNC
+// =============================================================================
+
+// SyncCartToERP creates (or recreates) an order in the ERP for the given cart.
+// Steps:
+// 1. Resolve or create ERP contact for the platform user
+// 2. If cart already has an external_order_id → cancel old order
+// 3. Collect non-waitlisted items
+// 4. Create order in ERP
+// 5. Launch stock in ERP
+// 6. Save external_order_id on cart
+func (s *Service) SyncCartToERP(ctx context.Context, storeID, cartID, eventID, platformUserID, platformHandle string) error {
+	// Get active ERP integration
+	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	if err != nil {
+		s.logger.Debug("no active ERP integration, skipping cart sync",
+			zap.String("store_id", storeID),
+		)
+		return nil // No ERP integration = skip silently
+	}
+
+	erpProvider, err := s.getERPProvider(ctx, integration)
+	if err != nil {
+		return fmt.Errorf("creating ERP provider: %w", err)
+	}
+
+	// 1. Resolve contact
+	contactID, err := s.resolveERPContact(ctx, erpProvider, integration, storeID, platformUserID, platformHandle)
+	if err != nil {
+		return fmt.Errorf("resolving ERP contact: %w", err)
+	}
+
+	// 2. Cancel existing order if any
+	cart, err := s.repo.GetCartByEventAndUser(ctx, eventID, platformUserID)
+	if err != nil {
+		return fmt.Errorf("getting cart: %w", err)
+	}
+	if cart != nil && cart.ExternalOrderID != "" {
+		if cancelErr := erpProvider.CancelOrder(ctx, cart.ExternalOrderID); cancelErr != nil {
+			s.logger.Warn("failed to cancel previous ERP order",
+				zap.String("order_id", cart.ExternalOrderID),
+				zap.Error(cancelErr),
+			)
+		}
+	}
+
+	// 3. Collect non-waitlisted items
+	items, err := s.repo.ListNonWaitlistedCartItems(ctx, cartID)
+	if err != nil {
+		return fmt.Errorf("listing cart items: %w", err)
+	}
+
+	s.logger.Info("cart items for ERP sync",
+		zap.String("cart_id", cartID),
+		zap.Int("total_items", len(items)),
+	)
+
+	// 4. Build ERP order — only include items with a valid external_id (linked to Tiny)
+	var erpItems []providers.ERPOrderItem
+	var totalAmount int64
+	for _, item := range items {
+		if item.ProductExternalID == "" {
+			s.logger.Warn("skipping cart item without external_id (product not linked to ERP)",
+				zap.String("product_id", item.ProductID),
+				zap.String("product_name", item.ProductName),
+			)
+			continue
+		}
+		s.logger.Debug("including cart item in ERP order",
+			zap.String("product_id", item.ProductID),
+			zap.String("external_id", item.ProductExternalID),
+			zap.String("name", item.ProductName),
+			zap.Int("quantity", item.Quantity),
+			zap.Int64("unit_price", item.UnitPrice),
+		)
+		erpItems = append(erpItems, providers.ERPOrderItem{
+			ProductID: item.ProductExternalID,
+			Name:      item.ProductName,
+			Quantity:  item.Quantity,
+			UnitPrice: item.UnitPrice,
+		})
+		totalAmount += item.UnitPrice * int64(item.Quantity)
+	}
+
+	if len(erpItems) == 0 {
+		// No items with external_id, clear external order
+		_ = s.repo.UpdateCartExternalOrderID(ctx, cartID, "")
+		return nil
+	}
+
+	result, err := erpProvider.CreateOrder(ctx, providers.ERPOrder{
+		ExternalID:  cartID,
+		ContactID:   contactID,
+		Items:       erpItems,
+		TotalAmount: totalAmount,
+		Observation: fmt.Sprintf("LiveCart - Evento %s - @%s", eventID, platformHandle),
+	})
+	if err != nil {
+		return fmt.Errorf("creating ERP order: %w", err)
+	}
+
+	// 5. Launch stock in ERP (decrements ERP inventory).
+	// If this fails (e.g., ERP stock is insufficient), the order still exists in the ERP
+	// but without stock reservation. This is logged as a warning, not a fatal error.
+	if err := erpProvider.LaunchOrderStock(ctx, result.OrderID); err != nil {
+		s.logger.Warn("ERP stock launch failed — order created but stock not reserved in ERP. Check product stock in Tiny.",
+			zap.String("order_id", result.OrderID),
+			zap.String("cart_id", cartID),
+			zap.Error(err),
+		)
+	}
+
+	// 6. Save external order ID
+	if err := s.repo.UpdateCartExternalOrderID(ctx, cartID, result.OrderID); err != nil {
+		return fmt.Errorf("saving external order ID: %w", err)
+	}
+
+	s.logger.Info("cart synced to ERP",
+		zap.String("cart_id", cartID),
+		zap.String("erp_order_id", result.OrderID),
+		zap.Int("items", len(erpItems)),
+	)
+
+	return nil
+}
+
+// resolveERPContact finds or creates an ERP contact for the platform user.
+func (s *Service) resolveERPContact(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, platformUserID, platformHandle string) (string, error) {
+	// Check cache first
+	cachedID, err := s.repo.GetERPContact(ctx, storeID, integration.ID, platformUserID)
+	if err != nil {
+		return "", err
+	}
+	if cachedID != "" {
+		return cachedID, nil
+	}
+
+	// Search by platform handle in ERP
+	results, err := erpProvider.SearchContacts(ctx, providers.SearchContactsParams{
+		Name: platformHandle,
+	})
+	if err == nil && len(results) > 0 {
+		// Cache and return the first match
+		_ = s.repo.UpsertERPContact(ctx, storeID, integration.ID, platformUserID, platformHandle, results[0].ContactID)
+		return results[0].ContactID, nil
+	}
+
+	// Create new contact in ERP
+	contact, err := erpProvider.CreateContact(ctx, providers.ERPContactInput{
+		Name:       platformHandle,
+		PersonType: "F",
+	})
+	if err != nil {
+		return "", fmt.Errorf("creating ERP contact: %w", err)
+	}
+
+	// Cache
+	_ = s.repo.UpsertERPContact(ctx, storeID, integration.ID, platformUserID, platformHandle, contact.ContactID)
+	return contact.ContactID, nil
+}
+
+// getERPProvider gets the ERP provider from an integration row.
+func (s *Service) getERPProvider(ctx context.Context, integration *IntegrationRow) (providers.ERPProvider, error) {
+	provider, err := s.createProviderFromRow(ctx, integration)
+	if err != nil {
+		return nil, err
+	}
+	erpProvider, ok := provider.(providers.ERPProvider)
+	if !ok {
+		return nil, fmt.Errorf("integration %s is not an ERP provider", integration.ID)
+	}
+	return erpProvider, nil
+}
+
+// =============================================================================
+// LAZY EXPIRATION & WAITLIST PROCESSING
+// =============================================================================
+
+// ProcessExpiredCartsForProduct handles expired carts that contain the given product.
+// Called lazily when stock might have freed up (e.g., after a new cart item is added).
+func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, productID string) {
+	carts, err := s.repo.ListExpiredCartsByEventAndProduct(ctx, eventID, productID)
+	if err != nil {
+		s.logger.Error("failed to list expired carts", zap.Error(err))
+		return
+	}
+
+	for _, cart := range carts {
+		// Mark cart as expired
+		if err := s.repo.UpdateCartStatus(ctx, cart.ID, "expired"); err != nil {
+			s.logger.Error("failed to expire cart", zap.String("cart_id", cart.ID), zap.Error(err))
+			continue
+		}
+
+		// Release stock back to product
+		if err := s.repo.IncrementProductStock(ctx, productID, 1); err != nil {
+			s.logger.Error("failed to release stock", zap.String("product_id", productID), zap.Error(err))
+		}
+
+		// Cancel ERP order if exists
+		if cart.ExternalOrderID != "" {
+			integration, err := s.repo.GetActiveByProvider(ctx, cart.StoreID, "erp", "tiny")
+			if err == nil {
+				erpProvider, err := s.getERPProvider(ctx, integration)
+				if err == nil {
+					if cancelErr := erpProvider.CancelOrder(ctx, cart.ExternalOrderID); cancelErr != nil {
+						s.logger.Warn("failed to cancel expired cart ERP order",
+							zap.String("order_id", cart.ExternalOrderID),
+							zap.Error(cancelErr),
+						)
+					}
+				}
+			}
+		}
+
+		s.logger.Info("expired cart processed",
+			zap.String("cart_id", cart.ID),
+			zap.String("product_id", productID),
+		)
+	}
+}
+
+// ProcessWaitlistForProduct checks if stock freed up and fulfills the next waitlisted person.
+// Called after stock is released (expired cart, cancelled order, etc.).
+func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, productID, storeID string) {
+	// Get next person in waitlist
+	next, err := s.repo.GetFirstWaitingByProduct(ctx, eventID, productID)
+	if err != nil {
+		s.logger.Error("failed to get waitlist", zap.Error(err))
+		return
+	}
+	if next == nil {
+		return // No one waiting
+	}
+
+	// Try to reserve stock
+	if err := s.repo.DecrementProductStock(ctx, productID, next.Quantity); err != nil {
+		// Stock not available yet
+		return
+	}
+
+	// Get product info for price
+	product, err := s.repo.GetProductByKeyword(ctx, storeID, "")
+	if err != nil || product == nil {
+		// Can't get product — return stock and bail
+		_ = s.repo.IncrementProductStock(ctx, productID, next.Quantity)
+		return
+	}
+
+	// Add to cart (no longer waitlisted)
+	_, err = s.liveService.AddToCart(ctx, live.AddToCartInput{
+		EventID:        eventID,
+		PlatformUserID: next.PlatformUserID,
+		PlatformHandle: next.PlatformHandle,
+		ProductID:      productID,
+		ProductPrice:   product.Price,
+		Quantity:       next.Quantity,
+		Waitlisted:     false,
+	})
+	if err != nil {
+		// Return stock on failure
+		_ = s.repo.IncrementProductStock(ctx, productID, next.Quantity)
+		s.logger.Error("failed to add waitlisted item to cart", zap.Error(err))
+		return
+	}
+
+	// Mark waitlist item as fulfilled
+	now := time.Now()
+	_ = s.repo.UpdateWaitlistItemStatus(ctx, next.ID, "fulfilled", nil, &now, nil)
+
+	// Sync cart to ERP
+	cart, _ := s.repo.GetCartByEventAndUser(ctx, eventID, next.PlatformUserID)
+	if cart != nil {
+		if syncErr := s.SyncCartToERP(ctx, storeID, cart.ID, eventID, next.PlatformUserID, next.PlatformHandle); syncErr != nil {
+			s.logger.Warn("failed to sync waitlist-fulfilled cart to ERP", zap.Error(syncErr))
+		}
+	}
+
+	s.logger.Info("waitlist fulfilled",
+		zap.String("user", next.PlatformHandle),
+		zap.String("product_id", productID),
+		zap.Int("quantity", next.Quantity),
+	)
 }
 
 // =============================================================================

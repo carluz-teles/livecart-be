@@ -11,11 +11,39 @@ sql:
         emit_json_tags: true
         emit_empty_slices: true
         overrides:
+          - db_type: "jsonb"
+            go_type:
+              import: "encoding/json"
+              type: "RawMessage"
+          - db_type: "jsonb"
+            nullable: true
+            go_type:
+              import: "encoding/json"
+              type: "RawMessage"
+          - db_type: "json"
+            go_type:
+              import: "encoding/json"
+              type: "RawMessage"
+          - db_type: "json"
+            nullable: true
+            go_type:
+              import: "encoding/json"
+              type: "RawMessage"
           - db_type: "pg_catalog.jsonb"
             go_type:
               import: "encoding/json"
               type: "RawMessage"
+          - db_type: "pg_catalog.jsonb"
+            nullable: true
+            go_type:
+              import: "encoding/json"
+              type: "RawMessage"
           - db_type: "pg_catalog.json"
+            go_type:
+              import: "encoding/json"
+              type: "RawMessage"
+          - db_type: "pg_catalog.json"
+            nullable: true
             go_type:
               import: "encoding/json"
               type: "RawMessage"

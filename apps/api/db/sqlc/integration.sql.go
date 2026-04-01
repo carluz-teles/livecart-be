@@ -7,6 +7,7 @@ package sqlc
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -111,19 +112,19 @@ func (q *Queries) CreateIntegration(ctx context.Context, arg CreateIntegrationPa
 const createIntegrationLog = `-- name: CreateIntegrationLog :one
 
 INSERT INTO integration_logs (integration_id, entity_type, entity_id, direction, status, request_payload, response_payload, error_message)
-VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING id, integration_id, entity_type, entity_id, direction, status, request_payload, response_payload, error_message, created_at
 `
 
 type CreateIntegrationLogParams struct {
-	IntegrationID pgtype.UUID `json:"integration_id"`
-	EntityType    pgtype.Text `json:"entity_type"`
-	EntityID      pgtype.UUID `json:"entity_id"`
-	Direction     pgtype.Text `json:"direction"`
-	Status        pgtype.Text `json:"status"`
-	Column6       []byte      `json:"column_6"`
-	Column7       []byte      `json:"column_7"`
-	ErrorMessage  pgtype.Text `json:"error_message"`
+	IntegrationID   pgtype.UUID     `json:"integration_id"`
+	EntityType      pgtype.Text     `json:"entity_type"`
+	EntityID        pgtype.UUID     `json:"entity_id"`
+	Direction       pgtype.Text     `json:"direction"`
+	Status          pgtype.Text     `json:"status"`
+	RequestPayload  json.RawMessage `json:"request_payload"`
+	ResponsePayload json.RawMessage `json:"response_payload"`
+	ErrorMessage    pgtype.Text     `json:"error_message"`
 }
 
 // =============================================================================
@@ -136,8 +137,8 @@ func (q *Queries) CreateIntegrationLog(ctx context.Context, arg CreateIntegratio
 		arg.EntityID,
 		arg.Direction,
 		arg.Status,
-		arg.Column6,
-		arg.Column7,
+		arg.RequestPayload,
+		arg.ResponsePayload,
 		arg.ErrorMessage,
 	)
 	var i IntegrationLog
@@ -203,12 +204,12 @@ RETURNING id, integration_id, provider, event_type, event_id, payload, signature
 `
 
 type CreateWebhookEventParams struct {
-	IntegrationID  pgtype.UUID `json:"integration_id"`
-	Provider       string      `json:"provider"`
-	EventType      string      `json:"event_type"`
-	EventID        pgtype.Text `json:"event_id"`
-	Payload        []byte      `json:"payload"`
-	SignatureValid pgtype.Bool `json:"signature_valid"`
+	IntegrationID  pgtype.UUID     `json:"integration_id"`
+	Provider       string          `json:"provider"`
+	EventType      string          `json:"event_type"`
+	EventID        pgtype.Text     `json:"event_id"`
+	Payload        json.RawMessage `json:"payload"`
+	SignatureValid pgtype.Bool     `json:"signature_valid"`
 }
 
 // =============================================================================
@@ -737,9 +738,9 @@ WHERE id = $1
 `
 
 type UpdateIdempotencyKeyParams struct {
-	ID              pgtype.UUID `json:"id"`
-	ResponsePayload []byte      `json:"response_payload"`
-	Status          string      `json:"status"`
+	ID              pgtype.UUID     `json:"id"`
+	ResponsePayload json.RawMessage `json:"response_payload"`
+	Status          string          `json:"status"`
 }
 
 func (q *Queries) UpdateIdempotencyKey(ctx context.Context, arg UpdateIdempotencyKeyParams) error {
@@ -771,8 +772,8 @@ WHERE id = $1
 `
 
 type UpdateIntegrationMetadataParams struct {
-	ID       pgtype.UUID `json:"id"`
-	Metadata []byte      `json:"metadata"`
+	ID       pgtype.UUID     `json:"id"`
+	Metadata json.RawMessage `json:"metadata"`
 }
 
 func (q *Queries) UpdateIntegrationMetadata(ctx context.Context, arg UpdateIntegrationMetadataParams) error {

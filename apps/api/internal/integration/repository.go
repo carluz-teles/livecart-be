@@ -290,25 +290,20 @@ func (r *Repository) CreateLog(ctx context.Context, integrationID, entityType, e
 		}
 	}
 
-	// Convert []byte to string for JSONB insertion
-	reqPayload := "{}"
-	if len(requestPayload) > 0 {
-		reqPayload = string(requestPayload)
-	}
-	respPayload := "{}"
-	if len(responsePayload) > 0 {
-		respPayload = string(responsePayload)
-	}
+	// Convert []byte to valid JSON for JSONB insertion.
+	// If payload is not valid JSON, wrap it as a JSON string.
+	reqPayload := json.RawMessage(ensureValidJSON(requestPayload))
+	respPayload := json.RawMessage(ensureValidJSON(responsePayload))
 
 	_, err = r.queries.CreateIntegrationLog(ctx, sqlc.CreateIntegrationLogParams{
-		IntegrationID: intID,
-		EntityType:    pgtype.Text{String: entityType, Valid: entityType != ""},
-		EntityID:      entID,
-		Direction:     pgtype.Text{String: direction, Valid: direction != ""},
-		Status:        pgtype.Text{String: status, Valid: status != ""},
-		Column6:       []byte(reqPayload),
-		Column7:       []byte(respPayload),
-		ErrorMessage:  pgtype.Text{String: errorMessage, Valid: errorMessage != ""},
+		IntegrationID:   intID,
+		EntityType:      pgtype.Text{String: entityType, Valid: entityType != ""},
+		EntityID:        entID,
+		Direction:       pgtype.Text{String: direction, Valid: direction != ""},
+		Status:          pgtype.Text{String: status, Valid: status != ""},
+		RequestPayload:  reqPayload,
+		ResponsePayload: respPayload,
+		ErrorMessage:    pgtype.Text{String: errorMessage, Valid: errorMessage != ""},
 	})
 	return err
 }
@@ -532,11 +527,14 @@ func (r *Repository) IncrementLiveEventOrders(ctx context.Context, eventID strin
 	return r.queries.IncrementLiveEventOrders(ctx, id)
 }
 
-// ProductRow represents a product for keyword matching.
+// ProductRow represents a product for keyword matching and stock operations.
 type ProductRow struct {
-	ID      string
-	Keyword string
-	Price   int64
+	ID         string
+	Keyword    string
+	Price      int64
+	Stock      int
+	ExternalID string
+	Name       string
 }
 
 // GetProductByKeyword finds an active product by keyword in a store.
@@ -562,11 +560,504 @@ func (r *Repository) GetProductByKeyword(ctx context.Context, storeID, keyword s
 		price = row.Price.Int64
 	}
 
+	var stock int
+	if row.Stock.Valid {
+		stock = int(row.Stock.Int32)
+	}
+
+	var externalID string
+	if row.ExternalID.Valid {
+		externalID = row.ExternalID.String
+	}
+
 	return &ProductRow{
-		ID:      uuidToString(row.ID),
-		Keyword: row.Keyword,
-		Price:   price,
+		ID:         uuidToString(row.ID),
+		Keyword:    row.Keyword,
+		Price:      price,
+		Stock:      stock,
+		ExternalID: externalID,
+		Name:       row.Name,
 	}, nil
+}
+
+// =============================================================================
+// STOCK OPERATIONS
+// =============================================================================
+
+// DecrementProductStock atomically decrements stock. Returns nil if insufficient stock.
+func (r *Repository) DecrementProductStock(ctx context.Context, productID string, quantity int) error {
+	id, err := parseUUID(productID)
+	if err != nil {
+		return err
+	}
+	_, err = r.queries.DecrementProductStock(ctx, sqlc.DecrementProductStockParams{
+		ID:    id,
+		Stock: pgtype.Int4{Int32: int32(quantity), Valid: true},
+	})
+	return err
+}
+
+// IncrementProductStock releases reserved stock back to product.
+func (r *Repository) IncrementProductStock(ctx context.Context, productID string, quantity int) error {
+	id, err := parseUUID(productID)
+	if err != nil {
+		return err
+	}
+	_, err = r.queries.IncrementProductStock(ctx, sqlc.IncrementProductStockParams{
+		ID:    id,
+		Stock: pgtype.Int4{Int32: int32(quantity), Valid: true},
+	})
+	return err
+}
+
+// =============================================================================
+// LIVE COMMENTS
+// =============================================================================
+
+// CreateLiveComment saves a live comment to the database.
+func (r *Repository) CreateLiveComment(ctx context.Context, params CreateLiveCommentParams) (string, error) {
+	sessionID, err := parseUUID(params.SessionID)
+	if err != nil {
+		return "", err
+	}
+	eventID, err := parseUUID(params.EventID)
+	if err != nil {
+		return "", err
+	}
+
+	var matchedProductID pgtype.UUID
+	if params.MatchedProductID != "" {
+		matchedProductID, err = parseUUID(params.MatchedProductID)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	row, err := r.queries.CreateLiveComment(ctx, sqlc.CreateLiveCommentParams{
+		SessionID:         sessionID,
+		EventID:           eventID,
+		Platform:          params.Platform,
+		PlatformCommentID: pgtype.Text{String: params.PlatformCommentID, Valid: params.PlatformCommentID != ""},
+		PlatformUserID:    params.PlatformUserID,
+		PlatformHandle:    params.PlatformHandle,
+		Text:              params.Text,
+		HasPurchaseIntent: params.HasPurchaseIntent,
+		MatchedProductID:  matchedProductID,
+		MatchedQuantity:   pgtype.Int4{Int32: int32(params.MatchedQuantity), Valid: params.MatchedQuantity > 0},
+		Result:            pgtype.Text{String: params.Result, Valid: params.Result != ""},
+	})
+	if err != nil {
+		return "", fmt.Errorf("creating live comment: %w", err)
+	}
+	return uuidToString(row.ID), nil
+}
+
+// UpdateLiveCommentResult updates the result of processing a live comment.
+func (r *Repository) UpdateLiveCommentResult(ctx context.Context, commentID string, hasPurchaseIntent bool, matchedProductID string, matchedQuantity int, result string) error {
+	id, err := parseUUID(commentID)
+	if err != nil {
+		return err
+	}
+
+	var productID pgtype.UUID
+	if matchedProductID != "" {
+		productID, err = parseUUID(matchedProductID)
+		if err != nil {
+			return err
+		}
+	}
+
+	return r.queries.UpdateLiveCommentResult(ctx, sqlc.UpdateLiveCommentResultParams{
+		ID:                id,
+		HasPurchaseIntent: hasPurchaseIntent,
+		MatchedProductID:  productID,
+		MatchedQuantity:   pgtype.Int4{Int32: int32(matchedQuantity), Valid: matchedQuantity > 0},
+		Result:            pgtype.Text{String: result, Valid: result != ""},
+	})
+}
+
+// CreateLiveCommentParams holds parameters for creating a live comment.
+type CreateLiveCommentParams struct {
+	SessionID         string
+	EventID           string
+	Platform          string
+	PlatformCommentID string
+	PlatformUserID    string
+	PlatformHandle    string
+	Text              string
+	HasPurchaseIntent bool
+	MatchedProductID  string
+	MatchedQuantity   int
+	Result            string
+}
+
+// =============================================================================
+// WAITLIST OPERATIONS
+// =============================================================================
+
+// GetNextWaitlistPosition returns the next position for a product waitlist.
+func (r *Repository) GetNextWaitlistPosition(ctx context.Context, eventID, productID string) (int, error) {
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return 0, err
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return 0, err
+	}
+	pos, err := r.queries.GetNextWaitlistPosition(ctx, sqlc.GetNextWaitlistPositionParams{
+		EventID:   eID,
+		ProductID: pID,
+	})
+	return int(pos), err
+}
+
+// CreateWaitlistItem creates a waitlist entry.
+func (r *Repository) CreateWaitlistItem(ctx context.Context, params CreateWaitlistItemParams) (string, error) {
+	eID, err := parseUUID(params.EventID)
+	if err != nil {
+		return "", err
+	}
+	pID, err := parseUUID(params.ProductID)
+	if err != nil {
+		return "", err
+	}
+	row, err := r.queries.CreateWaitlistItem(ctx, sqlc.CreateWaitlistItemParams{
+		EventID:        eID,
+		ProductID:      pID,
+		PlatformUserID: params.PlatformUserID,
+		PlatformHandle: params.PlatformHandle,
+		Quantity:       int32(params.Quantity),
+		Position:       int32(params.Position),
+	})
+	if err != nil {
+		return "", fmt.Errorf("creating waitlist item: %w", err)
+	}
+	return uuidToString(row.ID), nil
+}
+
+// GetWaitlistItemByEventUserProduct checks if a user already has a waitlist entry for this product.
+func (r *Repository) GetWaitlistItemByEventUserProduct(ctx context.Context, eventID, platformUserID, productID string) (bool, error) {
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return false, err
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return false, err
+	}
+	_, err = r.queries.GetWaitlistItemByEventUserProduct(ctx, sqlc.GetWaitlistItemByEventUserProductParams{
+		EventID:        eID,
+		PlatformUserID: platformUserID,
+		ProductID:      pID,
+	})
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// GetFirstWaitingByProduct gets the first waiting person in the queue.
+func (r *Repository) GetFirstWaitingByProduct(ctx context.Context, eventID, productID string) (*WaitlistItemRow, error) {
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.GetFirstWaitingByProduct(ctx, sqlc.GetFirstWaitingByProductParams{
+		EventID:   eID,
+		ProductID: pID,
+	})
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &WaitlistItemRow{
+		ID:             uuidToString(row.ID),
+		EventID:        uuidToString(row.EventID),
+		ProductID:      uuidToString(row.ProductID),
+		PlatformUserID: row.PlatformUserID,
+		PlatformHandle: row.PlatformHandle,
+		Quantity:       int(row.Quantity),
+		Position:       int(row.Position),
+		Status:         row.Status,
+	}, nil
+}
+
+// UpdateWaitlistItemStatus updates waitlist item status and timestamps.
+func (r *Repository) UpdateWaitlistItemStatus(ctx context.Context, id, status string, notifiedAt, fulfilledAt, expiresAt *time.Time) error {
+	itemID, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	var na, fa, ea pgtype.Timestamptz
+	if notifiedAt != nil {
+		na = pgtype.Timestamptz{Time: *notifiedAt, Valid: true}
+	}
+	if fulfilledAt != nil {
+		fa = pgtype.Timestamptz{Time: *fulfilledAt, Valid: true}
+	}
+	if expiresAt != nil {
+		ea = pgtype.Timestamptz{Time: *expiresAt, Valid: true}
+	}
+	return r.queries.UpdateWaitlistItemStatus(ctx, sqlc.UpdateWaitlistItemStatusParams{
+		ID:          itemID,
+		Status:      status,
+		NotifiedAt:  na,
+		FulfilledAt: fa,
+		ExpiresAt:   ea,
+	})
+}
+
+// CreateWaitlistItemParams holds parameters for creating a waitlist item.
+type CreateWaitlistItemParams struct {
+	EventID        string
+	ProductID      string
+	PlatformUserID string
+	PlatformHandle string
+	Quantity       int
+	Position       int
+}
+
+// WaitlistItemRow represents a waitlist item.
+type WaitlistItemRow struct {
+	ID             string
+	EventID        string
+	ProductID      string
+	PlatformUserID string
+	PlatformHandle string
+	Quantity       int
+	Position       int
+	Status         string
+}
+
+// =============================================================================
+// ERP CONTACTS
+// =============================================================================
+
+// GetERPContact gets a cached ERP contact by store, integration, and platform user.
+func (r *Repository) GetERPContact(ctx context.Context, storeID, integrationID, platformUserID string) (string, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return "", err
+	}
+	iID, err := parseUUID(integrationID)
+	if err != nil {
+		return "", err
+	}
+	row, err := r.queries.GetERPContact(ctx, sqlc.GetERPContactParams{
+		StoreID:        sID,
+		IntegrationID:  iID,
+		PlatformUserID: platformUserID,
+	})
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return "", nil
+		}
+		return "", err
+	}
+	return row.ExternalContactID, nil
+}
+
+// UpsertERPContact creates or updates an ERP contact cache entry.
+func (r *Repository) UpsertERPContact(ctx context.Context, storeID, integrationID, platformUserID, platformHandle, externalContactID string) error {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+	iID, err := parseUUID(integrationID)
+	if err != nil {
+		return err
+	}
+	_, err = r.queries.UpsertERPContact(ctx, sqlc.UpsertERPContactParams{
+		StoreID:           sID,
+		IntegrationID:     iID,
+		PlatformUserID:    platformUserID,
+		PlatformHandle:    platformHandle,
+		ExternalContactID: externalContactID,
+	})
+	return err
+}
+
+// =============================================================================
+// CART ERP OPERATIONS
+// =============================================================================
+
+// UpdateCartExternalOrderID sets the external ERP order ID on a cart.
+func (r *Repository) UpdateCartExternalOrderID(ctx context.Context, cartID, externalOrderID string) error {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	return r.queries.UpdateCartExternalOrderID(ctx, sqlc.UpdateCartExternalOrderIDParams{
+		ID:              id,
+		ExternalOrderID: pgtype.Text{String: externalOrderID, Valid: externalOrderID != ""},
+	})
+}
+
+// NonWaitlistedCartItem represents a cart item that is not waitlisted, with product info.
+type NonWaitlistedCartItem struct {
+	ID                string
+	CartID            string
+	ProductID         string
+	Quantity          int
+	UnitPrice         int64
+	ProductName       string
+	ProductExternalID string
+	ProductKeyword    string
+}
+
+// ListNonWaitlistedCartItems returns non-waitlisted cart items with product external_id for ERP sync.
+func (r *Repository) ListNonWaitlistedCartItems(ctx context.Context, cartID string) ([]NonWaitlistedCartItem, error) {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListNonWaitlistedCartItems(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("listing non-waitlisted cart items: %w", err)
+	}
+	items := make([]NonWaitlistedCartItem, len(rows))
+	for i, row := range rows {
+		var extID string
+		if row.ProductExternalID.Valid {
+			extID = row.ProductExternalID.String
+		}
+		items[i] = NonWaitlistedCartItem{
+			ID:                uuidToString(row.ID),
+			CartID:            uuidToString(row.CartID),
+			ProductID:         uuidToString(row.ProductID),
+			Quantity:          int(row.Quantity.Int32),
+			UnitPrice:         row.UnitPrice.Int64,
+			ProductName:       row.ProductName,
+			ProductExternalID: extID,
+			ProductKeyword:    row.ProductKeyword,
+		}
+	}
+	return items, nil
+}
+
+// ExpiredCartRow represents an expired cart with store_id for ERP operations.
+type ExpiredCartRow struct {
+	ID              string
+	EventID         string
+	PlatformUserID  string
+	PlatformHandle  string
+	ExternalOrderID string
+	StoreID         string
+}
+
+// ListExpiredCartsByEventAndProduct returns expired carts for a specific event/product.
+func (r *Repository) ListExpiredCartsByEventAndProduct(ctx context.Context, eventID, productID string) ([]ExpiredCartRow, error) {
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListExpiredCartsByEventAndProduct(ctx, sqlc.ListExpiredCartsByEventAndProductParams{
+		EventID:   eID,
+		ProductID: pID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing expired carts: %w", err)
+	}
+	carts := make([]ExpiredCartRow, len(rows))
+	for i, row := range rows {
+		var extOrderID string
+		if row.ExternalOrderID.Valid {
+			extOrderID = row.ExternalOrderID.String
+		}
+		carts[i] = ExpiredCartRow{
+			ID:              uuidToString(row.ID),
+			EventID:         uuidToString(row.EventID),
+			PlatformUserID:  row.PlatformUserID,
+			PlatformHandle:  row.PlatformHandle,
+			ExternalOrderID: extOrderID,
+			StoreID:         uuidToString(row.StoreID),
+		}
+	}
+	return carts, nil
+}
+
+// UpdateCartStatus updates a cart's status (e.g., "expired").
+func (r *Repository) UpdateCartStatus(ctx context.Context, cartID, status string) error {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	if _, err := r.queries.UpdateCartStatus(ctx, sqlc.UpdateCartStatusParams{
+		ID:     id,
+		Status: status,
+	}); err != nil {
+		return fmt.Errorf("updating cart status: %w", err)
+	}
+	return nil
+}
+
+// GetCartByEventAndUser gets a cart for a specific event and user.
+func (r *Repository) GetCartByEventAndUser(ctx context.Context, eventID, platformUserID string) (*CartRow, error) {
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.GetCartByEventAndUser(ctx, sqlc.GetCartByEventAndUserParams{
+		EventID:        eID,
+		PlatformUserID: platformUserID,
+	})
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var extOrderID string
+	if row.ExternalOrderID.Valid {
+		extOrderID = row.ExternalOrderID.String
+	}
+	return &CartRow{
+		ID:              uuidToString(row.ID),
+		EventID:         uuidToString(row.EventID),
+		PlatformUserID:  row.PlatformUserID,
+		PlatformHandle:  row.PlatformHandle,
+		ExternalOrderID: extOrderID,
+	}, nil
+}
+
+// CartRow represents a cart for ERP operations.
+type CartRow struct {
+	ID              string
+	EventID         string
+	PlatformUserID  string
+	PlatformHandle  string
+	ExternalOrderID string
+}
+
+// UpdateCartItemWaitlisted updates the waitlisted status of a cart item.
+func (r *Repository) UpdateCartItemWaitlisted(ctx context.Context, cartID, productID string, waitlisted bool) error {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return err
+	}
+	return r.queries.UpdateCartItemWaitlisted(ctx, sqlc.UpdateCartItemWaitlistedParams{
+		CartID:     cID,
+		ProductID:  pID,
+		Waitlisted: waitlisted,
+	})
 }
 
 // =============================================================================
@@ -635,6 +1126,20 @@ func parseUUID(s string) (pgtype.UUID, error) {
 		return pgtype.UUID{}, httpx.ErrUnprocessable(fmt.Sprintf("invalid UUID: %s", s))
 	}
 	return uuid, nil
+}
+
+// ensureValidJSON returns the payload as-is if it's valid JSON,
+// otherwise wraps it as a JSON string. Returns "{}" for nil/empty input.
+func ensureValidJSON(data []byte) string {
+	if len(data) == 0 {
+		return "{}"
+	}
+	if json.Valid(data) {
+		return string(data)
+	}
+	// Wrap non-JSON content as a JSON string value
+	wrapped, _ := json.Marshal(string(data))
+	return string(wrapped)
 }
 
 func uuidToString(uuid pgtype.UUID) string {

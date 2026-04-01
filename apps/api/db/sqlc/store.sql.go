@@ -14,7 +14,7 @@ import (
 const createStore = `-- name: CreateStore :one
 INSERT INTO stores (name, slug)
 VALUES ($1, $2)
-RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, auto_send_checkout_links, cart_allow_edit
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, auto_send_checkout_links, cart_allow_edit, waitlist_claim_minutes, waitlist_expiry_minutes
 `
 
 type CreateStoreParams struct {
@@ -51,6 +51,8 @@ func (q *Queries) CreateStore(ctx context.Context, arg CreateStoreParams) (Store
 		&i.AddressCountry,
 		&i.AutoSendCheckoutLinks,
 		&i.CartAllowEdit,
+		&i.WaitlistClaimMinutes,
+		&i.WaitlistExpiryMinutes,
 	)
 	return i, err
 }
@@ -65,7 +67,7 @@ func (q *Queries) DeleteStore(ctx context.Context, id pgtype.UUID) error {
 }
 
 const getStoreByID = `-- name: GetStoreByID :one
-SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, auto_send_checkout_links, cart_allow_edit FROM stores WHERE id = $1
+SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, auto_send_checkout_links, cart_allow_edit, waitlist_claim_minutes, waitlist_expiry_minutes FROM stores WHERE id = $1
 `
 
 func (q *Queries) GetStoreByID(ctx context.Context, id pgtype.UUID) (Store, error) {
@@ -97,12 +99,14 @@ func (q *Queries) GetStoreByID(ctx context.Context, id pgtype.UUID) (Store, erro
 		&i.AddressCountry,
 		&i.AutoSendCheckoutLinks,
 		&i.CartAllowEdit,
+		&i.WaitlistClaimMinutes,
+		&i.WaitlistExpiryMinutes,
 	)
 	return i, err
 }
 
 const getStoreByOwnerUserID = `-- name: GetStoreByOwnerUserID :one
-SELECT s.id, s.name, s.slug, s.active, s.whatsapp_number, s.email_address, s.sms_number, s.created_at, s.cart_enabled, s.cart_expiration_minutes, s.cart_reserve_stock, s.cart_max_items, s.cart_max_quantity_per_item, s.cart_notify_before_expiration, s.updated_at, s.description, s.website, s.logo_url, s.address_street, s.address_city, s.address_state, s.address_zip, s.address_country, s.auto_send_checkout_links, s.cart_allow_edit
+SELECT s.id, s.name, s.slug, s.active, s.whatsapp_number, s.email_address, s.sms_number, s.created_at, s.cart_enabled, s.cart_expiration_minutes, s.cart_reserve_stock, s.cart_max_items, s.cart_max_quantity_per_item, s.cart_notify_before_expiration, s.updated_at, s.description, s.website, s.logo_url, s.address_street, s.address_city, s.address_state, s.address_zip, s.address_country, s.auto_send_checkout_links, s.cart_allow_edit, s.waitlist_claim_minutes, s.waitlist_expiry_minutes
 FROM stores s
 JOIN memberships m ON s.id = m.store_id
 WHERE m.user_id = $1 AND m.role = 'owner'
@@ -139,12 +143,14 @@ func (q *Queries) GetStoreByOwnerUserID(ctx context.Context, userID pgtype.UUID)
 		&i.AddressCountry,
 		&i.AutoSendCheckoutLinks,
 		&i.CartAllowEdit,
+		&i.WaitlistClaimMinutes,
+		&i.WaitlistExpiryMinutes,
 	)
 	return i, err
 }
 
 const getStoreBySlug = `-- name: GetStoreBySlug :one
-SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, auto_send_checkout_links, cart_allow_edit FROM stores WHERE slug = $1
+SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, auto_send_checkout_links, cart_allow_edit, waitlist_claim_minutes, waitlist_expiry_minutes FROM stores WHERE slug = $1
 `
 
 func (q *Queries) GetStoreBySlug(ctx context.Context, slug string) (Store, error) {
@@ -176,12 +182,14 @@ func (q *Queries) GetStoreBySlug(ctx context.Context, slug string) (Store, error
 		&i.AddressCountry,
 		&i.AutoSendCheckoutLinks,
 		&i.CartAllowEdit,
+		&i.WaitlistClaimMinutes,
+		&i.WaitlistExpiryMinutes,
 	)
 	return i, err
 }
 
 const getStoreByUserID = `-- name: GetStoreByUserID :one
-SELECT s.id, s.name, s.slug, s.active, s.whatsapp_number, s.email_address, s.sms_number, s.created_at, s.cart_enabled, s.cart_expiration_minutes, s.cart_reserve_stock, s.cart_max_items, s.cart_max_quantity_per_item, s.cart_notify_before_expiration, s.updated_at, s.description, s.website, s.logo_url, s.address_street, s.address_city, s.address_state, s.address_zip, s.address_country, s.auto_send_checkout_links, s.cart_allow_edit
+SELECT s.id, s.name, s.slug, s.active, s.whatsapp_number, s.email_address, s.sms_number, s.created_at, s.cart_enabled, s.cart_expiration_minutes, s.cart_reserve_stock, s.cart_max_items, s.cart_max_quantity_per_item, s.cart_notify_before_expiration, s.updated_at, s.description, s.website, s.logo_url, s.address_street, s.address_city, s.address_state, s.address_zip, s.address_country, s.auto_send_checkout_links, s.cart_allow_edit, s.waitlist_claim_minutes, s.waitlist_expiry_minutes
 FROM stores s
 JOIN memberships m ON s.id = m.store_id
 WHERE m.user_id = $1 AND m.status = 'active'
@@ -217,6 +225,8 @@ func (q *Queries) GetStoreByUserID(ctx context.Context, userID pgtype.UUID) (Sto
 		&i.AddressCountry,
 		&i.AutoSendCheckoutLinks,
 		&i.CartAllowEdit,
+		&i.WaitlistClaimMinutes,
+		&i.WaitlistExpiryMinutes,
 	)
 	return i, err
 }
@@ -272,7 +282,7 @@ SET
   address_country = $13,
   updated_at = now()
 WHERE id = $1
-RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, auto_send_checkout_links, cart_allow_edit
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, auto_send_checkout_links, cart_allow_edit, waitlist_claim_minutes, waitlist_expiry_minutes
 `
 
 type UpdateStoreParams struct {
@@ -334,6 +344,8 @@ func (q *Queries) UpdateStore(ctx context.Context, arg UpdateStoreParams) (Store
 		&i.AddressCountry,
 		&i.AutoSendCheckoutLinks,
 		&i.CartAllowEdit,
+		&i.WaitlistClaimMinutes,
+		&i.WaitlistExpiryMinutes,
 	)
 	return i, err
 }
@@ -350,7 +362,7 @@ SET
   cart_allow_edit = $8,
   updated_at = now()
 WHERE id = $1
-RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, auto_send_checkout_links, cart_allow_edit
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, auto_send_checkout_links, cart_allow_edit, waitlist_claim_minutes, waitlist_expiry_minutes
 `
 
 type UpdateStoreCartSettingsParams struct {
@@ -402,6 +414,8 @@ func (q *Queries) UpdateStoreCartSettings(ctx context.Context, arg UpdateStoreCa
 		&i.AddressCountry,
 		&i.AutoSendCheckoutLinks,
 		&i.CartAllowEdit,
+		&i.WaitlistClaimMinutes,
+		&i.WaitlistExpiryMinutes,
 	)
 	return i, err
 }

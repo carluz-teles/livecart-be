@@ -22,3 +22,17 @@ RETURNING *;
 SELECT COALESCE(MAX(keyword), '0999') AS max_keyword
 FROM products
 WHERE store_id = $1;
+
+-- name: DecrementProductStock :one
+-- Atomically decrement stock. Fails (no rows) if insufficient stock.
+UPDATE products
+SET stock = stock - $2, updated_at = now()
+WHERE id = $1 AND stock >= $2
+RETURNING *;
+
+-- name: IncrementProductStock :one
+-- Release reserved stock back to product.
+UPDATE products
+SET stock = stock + $2, updated_at = now()
+WHERE id = $1
+RETURNING *;

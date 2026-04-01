@@ -403,6 +403,7 @@ type AddToCartInput struct {
 	ProductID      string
 	ProductPrice   int64
 	Quantity       int
+	Waitlisted     bool // True if product is out of stock and user is on waitlist
 }
 
 // AddToCartOutput represents the result of adding to cart.
@@ -431,10 +432,11 @@ type CartRow struct {
 
 // AddCartItemParams represents parameters for adding an item to a cart.
 type AddCartItemParams struct {
-	CartID    string
-	ProductID string
-	Quantity  int
-	UnitPrice int64
+	CartID     string
+	ProductID  string
+	Quantity   int
+	UnitPrice  int64
+	Waitlisted bool
 }
 
 // =============================================================================

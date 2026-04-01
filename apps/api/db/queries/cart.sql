@@ -35,16 +35,17 @@ RETURNING *;
 SELECT * FROM carts WHERE event_id = $1 ORDER BY created_at;
 
 -- name: CreateCartItem :one
-INSERT INTO cart_items (cart_id, product_id, quantity, unit_price)
-VALUES ($1, $2, $3, $4)
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
 -- name: UpsertCartItem :one
 -- Adds quantity to existing cart item or creates new one
-INSERT INTO cart_items (cart_id, product_id, quantity, unit_price)
-VALUES ($1, $2, $3, $4)
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (cart_id, product_id)
-DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity
+DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity,
+             waitlisted = EXCLUDED.waitlisted
 RETURNING *;
 
 -- name: ListCartItems :many
@@ -159,3 +160,48 @@ SELECT
         JOIN cart_items ci ON ci.cart_id = ct.id
         WHERE ct.session_id = $1 AND ct.payment_status = 'paid'
     ), 0)::bigint AS paid_revenue;
+
+-- =============================================================================
+-- ERP SYNC & EXPIRATION
+-- =============================================================================
+
+-- name: UpdateCartExternalOrderID :exec
+UPDATE carts SET external_order_id = $2 WHERE id = $1;
+
+-- name: ListNonWaitlistedCartItems :many
+-- Returns cart items that are NOT waitlisted, with product external_id for ERP sync
+SELECT ci.*, p.name AS product_name, p.external_id AS product_external_id,
+       p.keyword AS product_keyword, p.image_url AS product_image_url
+FROM cart_items ci
+JOIN products p ON p.id = ci.product_id
+WHERE ci.cart_id = $1 AND ci.waitlisted = false;
+
+-- name: ListExpiredCarts :many
+-- Returns carts that have expired (pending + past expires_at), with store_id from event
+SELECT c.*, le.store_id
+FROM carts c
+JOIN live_events le ON le.id = c.event_id
+WHERE c.status = 'pending' AND c.expires_at IS NOT NULL AND c.expires_at < now();
+
+-- name: ListExpiredCartsByEventAndProduct :many
+-- Returns expired carts for a specific event that contain a specific product
+SELECT DISTINCT c.*, le.store_id
+FROM carts c
+JOIN live_events le ON le.id = c.event_id
+JOIN cart_items ci ON ci.cart_id = c.id
+WHERE c.event_id = $1
+  AND c.status = 'pending'
+  AND c.expires_at IS NOT NULL
+  AND c.expires_at < now()
+  AND ci.product_id = $2
+  AND ci.waitlisted = false;
+
+-- name: DeleteCartItemByCartAndProduct :exec
+DELETE FROM cart_items WHERE cart_id = $1 AND product_id = $2;
+
+-- name: UpdateCartItemWaitlisted :exec
+UPDATE cart_items SET waitlisted = $3 WHERE cart_id = $1 AND product_id = $2;
+
+-- name: GetCartByEventAndUserForUpdate :one
+-- Lock the cart row for concurrent safety
+SELECT * FROM carts WHERE event_id = $1 AND platform_user_id = $2 FOR UPDATE;

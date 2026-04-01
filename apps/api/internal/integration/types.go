@@ -1,11 +1,52 @@
 package integration
 
 import (
+	"context"
 	"time"
 
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/query"
 )
+
+// =============================================================================
+// NOTIFIER INTERFACE (stub for future notification implementation)
+// =============================================================================
+
+// Notifier sends notifications to platform users (e.g., DM on Instagram).
+type Notifier interface {
+	// NotifyWaitlistAvailable notifies a user that a waitlisted product is now available.
+	NotifyWaitlistAvailable(ctx context.Context, params NotifyWaitlistParams) error
+
+	// NotifyCartExpiring notifies a user that their cart is about to expire.
+	NotifyCartExpiring(ctx context.Context, params NotifyCartExpiringParams) error
+}
+
+// NotifyWaitlistParams holds data for waitlist notifications.
+type NotifyWaitlistParams struct {
+	PlatformUserID string
+	PlatformHandle string
+	ProductName    string
+	ProductKeyword string
+	ClaimMinutes   int
+}
+
+// NotifyCartExpiringParams holds data for cart expiration notifications.
+type NotifyCartExpiringParams struct {
+	PlatformUserID string
+	PlatformHandle string
+	CartID         string
+	ExpiresInMin   int
+}
+
+// NoopNotifier is a placeholder that does nothing. Replace with real implementation later.
+type NoopNotifier struct{}
+
+func (n *NoopNotifier) NotifyWaitlistAvailable(_ context.Context, _ NotifyWaitlistParams) error {
+	return nil
+}
+func (n *NoopNotifier) NotifyCartExpiring(_ context.Context, _ NotifyCartExpiringParams) error {
+	return nil
+}
 
 // =============================================================================
 // REQUEST/RESPONSE TYPES (HTTP Layer)

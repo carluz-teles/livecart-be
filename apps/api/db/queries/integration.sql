@@ -56,7 +56,7 @@ DELETE FROM integrations WHERE id = $1 AND store_id = $2;
 
 -- name: CreateIntegrationLog :one
 INSERT INTO integration_logs (integration_id, entity_type, entity_id, direction, status, request_payload, response_payload, error_message)
-VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING *;
 
 -- name: ListIntegrationLogs :many

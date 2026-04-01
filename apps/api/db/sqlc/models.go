@@ -5,6 +5,8 @@
 package sqlc
 
 import (
+	"encoding/json"
+
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -30,11 +32,12 @@ type Cart struct {
 }
 
 type CartItem struct {
-	ID        pgtype.UUID `json:"id"`
-	CartID    pgtype.UUID `json:"cart_id"`
-	ProductID pgtype.UUID `json:"product_id"`
-	Quantity  pgtype.Int4 `json:"quantity"`
-	UnitPrice pgtype.Int8 `json:"unit_price"`
+	ID         pgtype.UUID `json:"id"`
+	CartID     pgtype.UUID `json:"cart_id"`
+	ProductID  pgtype.UUID `json:"product_id"`
+	Quantity   pgtype.Int4 `json:"quantity"`
+	UnitPrice  pgtype.Int8 `json:"unit_price"`
+	Waitlisted bool        `json:"waitlisted"`
 }
 
 type DetectedOrder struct {
@@ -50,6 +53,17 @@ type DetectedOrder struct {
 	DetectedAt     pgtype.Timestamptz `json:"detected_at"`
 }
 
+type ErpContact struct {
+	ID                pgtype.UUID        `json:"id"`
+	StoreID           pgtype.UUID        `json:"store_id"`
+	IntegrationID     pgtype.UUID        `json:"integration_id"`
+	PlatformUserID    string             `json:"platform_user_id"`
+	PlatformHandle    string             `json:"platform_handle"`
+	ExternalContactID string             `json:"external_contact_id"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
 type IdempotencyKey struct {
 	ID              pgtype.UUID        `json:"id"`
 	IdempotencyKey  string             `json:"idempotency_key"`
@@ -57,7 +71,7 @@ type IdempotencyKey struct {
 	IntegrationID   pgtype.UUID        `json:"integration_id"`
 	Operation       string             `json:"operation"`
 	RequestHash     pgtype.Text        `json:"request_hash"`
-	ResponsePayload []byte             `json:"response_payload"`
+	ResponsePayload json.RawMessage    `json:"response_payload"`
 	Status          string             `json:"status"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
@@ -73,7 +87,7 @@ type Integration struct {
 	LastSyncedAt   pgtype.Timestamptz `json:"last_synced_at"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	Credentials    []byte             `json:"credentials"`
-	Metadata       []byte             `json:"metadata"`
+	Metadata       json.RawMessage    `json:"metadata"`
 }
 
 type IntegrationLog struct {
@@ -83,10 +97,26 @@ type IntegrationLog struct {
 	EntityID        pgtype.UUID        `json:"entity_id"`
 	Direction       pgtype.Text        `json:"direction"`
 	Status          pgtype.Text        `json:"status"`
-	RequestPayload  []byte             `json:"request_payload"`
-	ResponsePayload []byte             `json:"response_payload"`
+	RequestPayload  json.RawMessage    `json:"request_payload"`
+	ResponsePayload json.RawMessage    `json:"response_payload"`
 	ErrorMessage    pgtype.Text        `json:"error_message"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
+type LiveComment struct {
+	ID                pgtype.UUID        `json:"id"`
+	SessionID         pgtype.UUID        `json:"session_id"`
+	EventID           pgtype.UUID        `json:"event_id"`
+	Platform          string             `json:"platform"`
+	PlatformCommentID pgtype.Text        `json:"platform_comment_id"`
+	PlatformUserID    string             `json:"platform_user_id"`
+	PlatformHandle    string             `json:"platform_handle"`
+	Text              string             `json:"text"`
+	HasPurchaseIntent bool               `json:"has_purchase_intent"`
+	MatchedProductID  pgtype.UUID        `json:"matched_product_id"`
+	MatchedQuantity   pgtype.Int4        `json:"matched_quantity"`
+	Result            pgtype.Text        `json:"result"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 }
 
 // Container for live sessions. Carts are tied to events, not sessions.
@@ -190,7 +220,9 @@ type Store struct {
 	// When true, automatically send checkout links to customers when live ends
 	AutoSendCheckoutLinks bool `json:"auto_send_checkout_links"`
 	// Allow customers to edit cart (remove items, change quantity) on checkout page
-	CartAllowEdit bool `json:"cart_allow_edit"`
+	CartAllowEdit         bool        `json:"cart_allow_edit"`
+	WaitlistClaimMinutes  pgtype.Int4 `json:"waitlist_claim_minutes"`
+	WaitlistExpiryMinutes pgtype.Int4 `json:"waitlist_expiry_minutes"`
 }
 
 type StoreInvitation struct {
@@ -228,13 +260,28 @@ type User struct {
 	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
 }
 
+type WaitlistItem struct {
+	ID             pgtype.UUID        `json:"id"`
+	EventID        pgtype.UUID        `json:"event_id"`
+	ProductID      pgtype.UUID        `json:"product_id"`
+	PlatformUserID string             `json:"platform_user_id"`
+	PlatformHandle string             `json:"platform_handle"`
+	Quantity       int32              `json:"quantity"`
+	Position       int32              `json:"position"`
+	Status         string             `json:"status"`
+	NotifiedAt     pgtype.Timestamptz `json:"notified_at"`
+	FulfilledAt    pgtype.Timestamptz `json:"fulfilled_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
 type WebhookEvent struct {
 	ID             pgtype.UUID        `json:"id"`
 	IntegrationID  pgtype.UUID        `json:"integration_id"`
 	Provider       string             `json:"provider"`
 	EventType      string             `json:"event_type"`
 	EventID        pgtype.Text        `json:"event_id"`
-	Payload        []byte             `json:"payload"`
+	Payload        json.RawMessage    `json:"payload"`
 	SignatureValid pgtype.Bool        `json:"signature_valid"`
 	Processed      bool               `json:"processed"`
 	ProcessedAt    pgtype.Timestamptz `json:"processed_at"`

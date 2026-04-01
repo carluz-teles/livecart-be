@@ -57,6 +57,39 @@ func (q *Queries) CreateProduct(ctx context.Context, arg CreateProductParams) (P
 	return i, err
 }
 
+const decrementProductStock = `-- name: DecrementProductStock :one
+UPDATE products
+SET stock = stock - $2, updated_at = now()
+WHERE id = $1 AND stock >= $2
+RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at
+`
+
+type DecrementProductStockParams struct {
+	ID    pgtype.UUID `json:"id"`
+	Stock pgtype.Int4 `json:"stock"`
+}
+
+// Atomically decrement stock. Fails (no rows) if insufficient stock.
+func (q *Queries) DecrementProductStock(ctx context.Context, arg DecrementProductStockParams) (Product, error) {
+	row := q.db.QueryRow(ctx, decrementProductStock, arg.ID, arg.Stock)
+	var i Product
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.Name,
+		&i.ExternalID,
+		&i.ExternalSource,
+		&i.Keyword,
+		&i.Price,
+		&i.ImageUrl,
+		&i.Stock,
+		&i.Active,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getMaxKeyword = `-- name: GetMaxKeyword :one
 SELECT COALESCE(MAX(keyword), '0999') AS max_keyword
 FROM products
@@ -110,6 +143,39 @@ type GetProductByKeywordParams struct {
 
 func (q *Queries) GetProductByKeyword(ctx context.Context, arg GetProductByKeywordParams) (Product, error) {
 	row := q.db.QueryRow(ctx, getProductByKeyword, arg.StoreID, arg.Keyword)
+	var i Product
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.Name,
+		&i.ExternalID,
+		&i.ExternalSource,
+		&i.Keyword,
+		&i.Price,
+		&i.ImageUrl,
+		&i.Stock,
+		&i.Active,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const incrementProductStock = `-- name: IncrementProductStock :one
+UPDATE products
+SET stock = stock + $2, updated_at = now()
+WHERE id = $1
+RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at
+`
+
+type IncrementProductStockParams struct {
+	ID    pgtype.UUID `json:"id"`
+	Stock pgtype.Int4 `json:"stock"`
+}
+
+// Release reserved stock back to product.
+func (q *Queries) IncrementProductStock(ctx context.Context, arg IncrementProductStockParams) (Product, error) {
+	row := q.db.QueryRow(ctx, incrementProductStock, arg.ID, arg.Stock)
 	var i Product
 	err := row.Scan(
 		&i.ID,

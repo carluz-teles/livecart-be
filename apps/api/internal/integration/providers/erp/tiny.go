@@ -19,7 +19,7 @@ import (
 
 const (
 	// Tiny API v3 base URL
-	tinyAPIBaseURL = "https://erp.tiny.com.br/public-api/v3"
+	tinyAPIBaseURL = "https://api.tiny.com.br/public-api/v3"
 )
 
 // OAuth URLs for Tiny
@@ -457,30 +457,37 @@ func (t *Tiny) SyncProduct(ctx context.Context, product ERPProduct) (*SyncResult
 }
 
 // CreateOrder creates an order in Tiny for invoicing.
+// Tiny API v3 requires idContato (integer) instead of inline customer data.
 func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, error) {
 	endpoint := tinyAPIBaseURL + "/pedidos"
+
+	contactID, err := strconv.ParseInt(order.ContactID, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid contact ID %q: %w", order.ContactID, err)
+	}
 
 	// Build order items
 	items := make([]map[string]any, len(order.Items))
 	for i, item := range order.Items {
+		productID, _ := strconv.ParseInt(item.ProductID, 10, 64)
 		items[i] = map[string]any{
 			"produto": map[string]any{
-				"id": item.ProductID,
+				"id": productID,
 			},
-			"quantidade":   item.Quantity,
+			"quantidade":    item.Quantity,
 			"valorUnitario": float64(item.UnitPrice) / 100,
 		}
 	}
 
 	payload := map[string]any{
-		"cliente": map[string]any{
-			"nome":    order.CustomerName,
-			"cpfCnpj": order.CustomerDoc,
-			"email":   order.CustomerEmail,
+		"idContato":   contactID,
+		"data":        time.Now().Format("2006-01-02"),
+		"itens":       items,
+		"observacoes": order.Observation,
+		"ecommerce": map[string]any{
+			"numeroPedidoEcommerce": order.ExternalID,
+			"nomeEcommerce":        "LiveCart",
 		},
-		"itens":            items,
-		"observacoes":      order.Observation,
-		"numeroPedidoLoja": order.ExternalID,
 	}
 
 	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
@@ -498,7 +505,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 
 	var orderResp struct {
 		ID     int64  `json:"id"`
-		Numero string `json:"numero"`
+		Numero string `json:"numeroPedido"`
 	}
 
 	if err := json.Unmarshal(body, &orderResp); err != nil {
@@ -509,6 +516,213 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		OrderID:     strconv.FormatInt(orderResp.ID, 10),
 		OrderNumber: orderResp.Numero,
 		Status:      "created",
+	}, nil
+}
+
+// LaunchOrderStock decrements stock in Tiny for all items in the order.
+// POST /pedidos/{idPedido}/lancar-estoque
+func (t *Tiny) LaunchOrderStock(ctx context.Context, orderID string) error {
+	endpoint := fmt.Sprintf("%s/pedidos/%s/lancar-estoque", tinyAPIBaseURL, orderID)
+
+	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return fmt.Errorf("launching order stock: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusNoContent && !providers.IsSuccessStatus(resp.StatusCode) {
+		var errResp struct {
+			Mensagem string `json:"mensagem"`
+		}
+		_ = json.Unmarshal(body, &errResp)
+
+		// "Estoque já lançado" means Tiny auto-launched stock on order creation — treat as success
+		if strings.Contains(errResp.Mensagem, "já lançado") {
+			t.Logger.Info("stock already launched by Tiny automatically",
+				zap.String("order_id", orderID),
+			)
+			return nil
+		}
+
+		return fmt.Errorf("launch stock failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+	}
+
+	return nil
+}
+
+// ReverseOrderStock returns stock in Tiny for all items in the order.
+// POST /pedidos/{idPedido}/estornar-estoque
+func (t *Tiny) ReverseOrderStock(ctx context.Context, orderID string) error {
+	endpoint := fmt.Sprintf("%s/pedidos/%s/estornar-estoque", tinyAPIBaseURL, orderID)
+
+	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return fmt.Errorf("reversing order stock: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusNoContent && !providers.IsSuccessStatus(resp.StatusCode) {
+		var errResp struct {
+			Mensagem string `json:"mensagem"`
+		}
+		_ = json.Unmarshal(body, &errResp)
+		return fmt.Errorf("reverse stock failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+	}
+
+	return nil
+}
+
+// ApproveOrder sets the order status to "Aprovado" (3) in Tiny.
+// This makes the order visible under "Pedidos de Venda" in the Tiny dashboard.
+func (t *Tiny) ApproveOrder(ctx context.Context, orderID string) error {
+	endpoint := fmt.Sprintf("%s/pedidos/%s/situacao", tinyAPIBaseURL, orderID)
+	payload := map[string]any{
+		"situacao": 3, // Aprovado
+	}
+
+	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, payload, t.authHeaders())
+	if err != nil {
+		return fmt.Errorf("approving order: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusNoContent && !providers.IsSuccessStatus(resp.StatusCode) {
+		var errResp struct {
+			Mensagem string `json:"mensagem"`
+		}
+		_ = json.Unmarshal(body, &errResp)
+		return fmt.Errorf("approve order failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+	}
+
+	return nil
+}
+
+// CancelOrder reverses stock and cancels an order in Tiny.
+// Steps: estornar-estoque → situacao=2 (Cancelada)
+func (t *Tiny) CancelOrder(ctx context.Context, orderID string) error {
+	// First reverse stock
+	if err := t.ReverseOrderStock(ctx, orderID); err != nil {
+		// Log but continue — order might not have stock launched yet
+		t.Logger.Warn("failed to reverse stock before cancel, continuing",
+			zap.String("order_id", orderID),
+			zap.Error(err),
+		)
+	}
+
+	// Then cancel the order
+	endpoint := fmt.Sprintf("%s/pedidos/%s/situacao", tinyAPIBaseURL, orderID)
+	payload := map[string]any{
+		"situacao": 2, // Cancelada
+	}
+
+	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, payload, t.authHeaders())
+	if err != nil {
+		return fmt.Errorf("cancelling order: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusNoContent && !providers.IsSuccessStatus(resp.StatusCode) {
+		var errResp struct {
+			Mensagem string `json:"mensagem"`
+		}
+		_ = json.Unmarshal(body, &errResp)
+		return fmt.Errorf("cancel order failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+	}
+
+	return nil
+}
+
+// SearchContacts searches for contacts by name in Tiny.
+// GET /contatos?nome={name}&limit=10
+func (t *Tiny) SearchContacts(ctx context.Context, params SearchContactsParams) ([]ERPContactResult, error) {
+	endpoint := tinyAPIBaseURL + "/contatos?"
+
+	if params.Name != "" {
+		endpoint += fmt.Sprintf("nome=%s&", params.Name)
+	}
+	if params.CpfCnpj != "" {
+		endpoint += fmt.Sprintf("cpfCnpj=%s&", params.CpfCnpj)
+	}
+	endpoint += "limit=10"
+
+	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return nil, fmt.Errorf("searching contacts: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusNoContent {
+		return []ERPContactResult{}, nil
+	}
+
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return nil, fmt.Errorf("search contacts failed: status %d", resp.StatusCode)
+	}
+
+	var contactResp struct {
+		Itens []struct {
+			ID   int64  `json:"id"`
+			Nome string `json:"nome"`
+		} `json:"itens"`
+	}
+
+	if err := json.Unmarshal(body, &contactResp); err != nil {
+		return nil, fmt.Errorf("parsing contacts response: %w", err)
+	}
+
+	results := make([]ERPContactResult, len(contactResp.Itens))
+	for i, c := range contactResp.Itens {
+		results[i] = ERPContactResult{
+			ContactID: strconv.FormatInt(c.ID, 10),
+			Name:      c.Nome,
+		}
+	}
+
+	return results, nil
+}
+
+// CreateContact creates a new contact in Tiny.
+// POST /contatos
+func (t *Tiny) CreateContact(ctx context.Context, contact ERPContactInput) (*ERPContactResult, error) {
+	endpoint := tinyAPIBaseURL + "/contatos"
+
+	payload := map[string]any{
+		"nome": contact.Name,
+	}
+	if contact.PersonType != "" {
+		payload["tipoPessoa"] = contact.PersonType
+	} else {
+		payload["tipoPessoa"] = "F" // Default: Pessoa Física
+	}
+	if contact.CpfCnpj != "" {
+		payload["cpfCnpj"] = contact.CpfCnpj
+	}
+	if contact.Email != "" {
+		payload["email"] = contact.Email
+	}
+	if contact.Phone != "" {
+		payload["celular"] = contact.Phone
+	}
+
+	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
+	if err != nil {
+		return nil, fmt.Errorf("creating contact: %w", err)
+	}
+
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		var errResp struct {
+			Mensagem string `json:"mensagem"`
+		}
+		_ = json.Unmarshal(body, &errResp)
+		return nil, fmt.Errorf("create contact failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+	}
+
+	var contactResp struct {
+		ID int64 `json:"id"`
+	}
+
+	if err := json.Unmarshal(body, &contactResp); err != nil {
+		return nil, fmt.Errorf("parsing contact response: %w", err)
+	}
+
+	return &ERPContactResult{
+		ContactID: strconv.FormatInt(contactResp.ID, 10),
+		Name:      contact.Name,
 	}, nil
 }
 

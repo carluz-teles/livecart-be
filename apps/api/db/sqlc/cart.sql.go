@@ -74,16 +74,17 @@ func (q *Queries) CreateCart(ctx context.Context, arg CreateCartParams) (Cart, e
 }
 
 const createCartItem = `-- name: CreateCartItem :one
-INSERT INTO cart_items (cart_id, product_id, quantity, unit_price)
-VALUES ($1, $2, $3, $4)
-RETURNING id, cart_id, product_id, quantity, unit_price
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted
 `
 
 type CreateCartItemParams struct {
-	CartID    pgtype.UUID `json:"cart_id"`
-	ProductID pgtype.UUID `json:"product_id"`
-	Quantity  pgtype.Int4 `json:"quantity"`
-	UnitPrice pgtype.Int8 `json:"unit_price"`
+	CartID     pgtype.UUID `json:"cart_id"`
+	ProductID  pgtype.UUID `json:"product_id"`
+	Quantity   pgtype.Int4 `json:"quantity"`
+	UnitPrice  pgtype.Int8 `json:"unit_price"`
+	Waitlisted bool        `json:"waitlisted"`
 }
 
 func (q *Queries) CreateCartItem(ctx context.Context, arg CreateCartItemParams) (CartItem, error) {
@@ -92,6 +93,7 @@ func (q *Queries) CreateCartItem(ctx context.Context, arg CreateCartItemParams) 
 		arg.ProductID,
 		arg.Quantity,
 		arg.UnitPrice,
+		arg.Waitlisted,
 	)
 	var i CartItem
 	err := row.Scan(
@@ -100,6 +102,7 @@ func (q *Queries) CreateCartItem(ctx context.Context, arg CreateCartItemParams) 
 		&i.ProductID,
 		&i.Quantity,
 		&i.UnitPrice,
+		&i.Waitlisted,
 	)
 	return i, err
 }
@@ -110,6 +113,20 @@ DELETE FROM cart_items WHERE id = $1
 
 func (q *Queries) DeleteCartItem(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, deleteCartItem, id)
+	return err
+}
+
+const deleteCartItemByCartAndProduct = `-- name: DeleteCartItemByCartAndProduct :exec
+DELETE FROM cart_items WHERE cart_id = $1 AND product_id = $2
+`
+
+type DeleteCartItemByCartAndProductParams struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+}
+
+func (q *Queries) DeleteCartItemByCartAndProduct(ctx context.Context, arg DeleteCartItemByCartAndProductParams) error {
+	_, err := q.db.Exec(ctx, deleteCartItemByCartAndProduct, arg.CartID, arg.ProductID)
 	return err
 }
 
@@ -136,6 +153,41 @@ type GetCartByEventAndUserParams struct {
 
 func (q *Queries) GetCartByEventAndUser(ctx context.Context, arg GetCartByEventAndUserParams) (Cart, error) {
 	row := q.db.QueryRow(ctx, getCartByEventAndUser, arg.EventID, arg.PlatformUserID)
+	var i Cart
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.PlatformUserID,
+		&i.PlatformHandle,
+		&i.Token,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.PaymentIntegrationID,
+		&i.ExternalOrderID,
+		&i.PaymentStatus,
+		&i.PaidAt,
+		&i.NotifyStatus,
+		&i.NotifyError,
+		&i.NotifiedAt,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.SessionID,
+	)
+	return i, err
+}
+
+const getCartByEventAndUserForUpdate = `-- name: GetCartByEventAndUserForUpdate :one
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id FROM carts WHERE event_id = $1 AND platform_user_id = $2 FOR UPDATE
+`
+
+type GetCartByEventAndUserForUpdateParams struct {
+	EventID        pgtype.UUID `json:"event_id"`
+	PlatformUserID string      `json:"platform_user_id"`
+}
+
+// Lock the cart row for concurrent safety
+func (q *Queries) GetCartByEventAndUserForUpdate(ctx context.Context, arg GetCartByEventAndUserForUpdateParams) (Cart, error) {
+	row := q.db.QueryRow(ctx, getCartByEventAndUserForUpdate, arg.EventID, arg.PlatformUserID)
 	var i Cart
 	err := row.Scan(
 		&i.ID,
@@ -218,7 +270,7 @@ func (q *Queries) GetCartByToken(ctx context.Context, token string) (Cart, error
 }
 
 const getCartItem = `-- name: GetCartItem :one
-SELECT id, cart_id, product_id, quantity, unit_price FROM cart_items WHERE id = $1
+SELECT id, cart_id, product_id, quantity, unit_price, waitlisted FROM cart_items WHERE id = $1
 `
 
 func (q *Queries) GetCartItem(ctx context.Context, id pgtype.UUID) (CartItem, error) {
@@ -230,6 +282,7 @@ func (q *Queries) GetCartItem(ctx context.Context, id pgtype.UUID) (CartItem, er
 		&i.ProductID,
 		&i.Quantity,
 		&i.UnitPrice,
+		&i.Waitlisted,
 	)
 	return i, err
 }
@@ -330,7 +383,7 @@ func (q *Queries) GetSessionStats(ctx context.Context, sessionID pgtype.UUID) (G
 }
 
 const listCartItems = `-- name: ListCartItems :many
-SELECT ci.id, ci.cart_id, ci.product_id, ci.quantity, ci.unit_price, p.name AS product_name, p.image_url AS product_image_url
+SELECT ci.id, ci.cart_id, ci.product_id, ci.quantity, ci.unit_price, ci.waitlisted, p.name AS product_name, p.image_url AS product_image_url
 FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1
@@ -342,6 +395,7 @@ type ListCartItemsRow struct {
 	ProductID       pgtype.UUID `json:"product_id"`
 	Quantity        pgtype.Int4 `json:"quantity"`
 	UnitPrice       pgtype.Int8 `json:"unit_price"`
+	Waitlisted      bool        `json:"waitlisted"`
 	ProductName     string      `json:"product_name"`
 	ProductImageUrl pgtype.Text `json:"product_image_url"`
 }
@@ -361,6 +415,7 @@ func (q *Queries) ListCartItems(ctx context.Context, cartID pgtype.UUID) ([]List
 			&i.ProductID,
 			&i.Quantity,
 			&i.UnitPrice,
+			&i.Waitlisted,
 			&i.ProductName,
 			&i.ProductImageUrl,
 		); err != nil {
@@ -480,6 +535,206 @@ func (q *Queries) ListCartsWithTotalByEvent(ctx context.Context, eventID pgtype.
 	return items, nil
 }
 
+const listExpiredCarts = `-- name: ListExpiredCarts :many
+SELECT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, le.store_id
+FROM carts c
+JOIN live_events le ON le.id = c.event_id
+WHERE c.status = 'pending' AND c.expires_at IS NOT NULL AND c.expires_at < now()
+`
+
+type ListExpiredCartsRow struct {
+	ID                   pgtype.UUID        `json:"id"`
+	EventID              pgtype.UUID        `json:"event_id"`
+	PlatformUserID       string             `json:"platform_user_id"`
+	PlatformHandle       string             `json:"platform_handle"`
+	Token                string             `json:"token"`
+	Status               string             `json:"status"`
+	CheckoutUrl          pgtype.Text        `json:"checkout_url"`
+	PaymentIntegrationID pgtype.UUID        `json:"payment_integration_id"`
+	ExternalOrderID      pgtype.Text        `json:"external_order_id"`
+	PaymentStatus        pgtype.Text        `json:"payment_status"`
+	PaidAt               pgtype.Timestamptz `json:"paid_at"`
+	NotifyStatus         pgtype.Text        `json:"notify_status"`
+	NotifyError          pgtype.Text        `json:"notify_error"`
+	NotifiedAt           pgtype.Timestamptz `json:"notified_at"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt            pgtype.Timestamptz `json:"expires_at"`
+	SessionID            pgtype.UUID        `json:"session_id"`
+	StoreID              pgtype.UUID        `json:"store_id"`
+}
+
+// Returns carts that have expired (pending + past expires_at), with store_id from event
+func (q *Queries) ListExpiredCarts(ctx context.Context) ([]ListExpiredCartsRow, error) {
+	rows, err := q.db.Query(ctx, listExpiredCarts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListExpiredCartsRow{}
+	for rows.Next() {
+		var i ListExpiredCartsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventID,
+			&i.PlatformUserID,
+			&i.PlatformHandle,
+			&i.Token,
+			&i.Status,
+			&i.CheckoutUrl,
+			&i.PaymentIntegrationID,
+			&i.ExternalOrderID,
+			&i.PaymentStatus,
+			&i.PaidAt,
+			&i.NotifyStatus,
+			&i.NotifyError,
+			&i.NotifiedAt,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.SessionID,
+			&i.StoreID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listExpiredCartsByEventAndProduct = `-- name: ListExpiredCartsByEventAndProduct :many
+SELECT DISTINCT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, le.store_id
+FROM carts c
+JOIN live_events le ON le.id = c.event_id
+JOIN cart_items ci ON ci.cart_id = c.id
+WHERE c.event_id = $1
+  AND c.status = 'pending'
+  AND c.expires_at IS NOT NULL
+  AND c.expires_at < now()
+  AND ci.product_id = $2
+  AND ci.waitlisted = false
+`
+
+type ListExpiredCartsByEventAndProductParams struct {
+	EventID   pgtype.UUID `json:"event_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+}
+
+type ListExpiredCartsByEventAndProductRow struct {
+	ID                   pgtype.UUID        `json:"id"`
+	EventID              pgtype.UUID        `json:"event_id"`
+	PlatformUserID       string             `json:"platform_user_id"`
+	PlatformHandle       string             `json:"platform_handle"`
+	Token                string             `json:"token"`
+	Status               string             `json:"status"`
+	CheckoutUrl          pgtype.Text        `json:"checkout_url"`
+	PaymentIntegrationID pgtype.UUID        `json:"payment_integration_id"`
+	ExternalOrderID      pgtype.Text        `json:"external_order_id"`
+	PaymentStatus        pgtype.Text        `json:"payment_status"`
+	PaidAt               pgtype.Timestamptz `json:"paid_at"`
+	NotifyStatus         pgtype.Text        `json:"notify_status"`
+	NotifyError          pgtype.Text        `json:"notify_error"`
+	NotifiedAt           pgtype.Timestamptz `json:"notified_at"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt            pgtype.Timestamptz `json:"expires_at"`
+	SessionID            pgtype.UUID        `json:"session_id"`
+	StoreID              pgtype.UUID        `json:"store_id"`
+}
+
+// Returns expired carts for a specific event that contain a specific product
+func (q *Queries) ListExpiredCartsByEventAndProduct(ctx context.Context, arg ListExpiredCartsByEventAndProductParams) ([]ListExpiredCartsByEventAndProductRow, error) {
+	rows, err := q.db.Query(ctx, listExpiredCartsByEventAndProduct, arg.EventID, arg.ProductID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListExpiredCartsByEventAndProductRow{}
+	for rows.Next() {
+		var i ListExpiredCartsByEventAndProductRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventID,
+			&i.PlatformUserID,
+			&i.PlatformHandle,
+			&i.Token,
+			&i.Status,
+			&i.CheckoutUrl,
+			&i.PaymentIntegrationID,
+			&i.ExternalOrderID,
+			&i.PaymentStatus,
+			&i.PaidAt,
+			&i.NotifyStatus,
+			&i.NotifyError,
+			&i.NotifiedAt,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.SessionID,
+			&i.StoreID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNonWaitlistedCartItems = `-- name: ListNonWaitlistedCartItems :many
+SELECT ci.id, ci.cart_id, ci.product_id, ci.quantity, ci.unit_price, ci.waitlisted, p.name AS product_name, p.external_id AS product_external_id,
+       p.keyword AS product_keyword, p.image_url AS product_image_url
+FROM cart_items ci
+JOIN products p ON p.id = ci.product_id
+WHERE ci.cart_id = $1 AND ci.waitlisted = false
+`
+
+type ListNonWaitlistedCartItemsRow struct {
+	ID                pgtype.UUID `json:"id"`
+	CartID            pgtype.UUID `json:"cart_id"`
+	ProductID         pgtype.UUID `json:"product_id"`
+	Quantity          pgtype.Int4 `json:"quantity"`
+	UnitPrice         pgtype.Int8 `json:"unit_price"`
+	Waitlisted        bool        `json:"waitlisted"`
+	ProductName       string      `json:"product_name"`
+	ProductExternalID pgtype.Text `json:"product_external_id"`
+	ProductKeyword    string      `json:"product_keyword"`
+	ProductImageUrl   pgtype.Text `json:"product_image_url"`
+}
+
+// Returns cart items that are NOT waitlisted, with product external_id for ERP sync
+func (q *Queries) ListNonWaitlistedCartItems(ctx context.Context, cartID pgtype.UUID) ([]ListNonWaitlistedCartItemsRow, error) {
+	rows, err := q.db.Query(ctx, listNonWaitlistedCartItems, cartID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListNonWaitlistedCartItemsRow{}
+	for rows.Next() {
+		var i ListNonWaitlistedCartItemsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.CartID,
+			&i.ProductID,
+			&i.Quantity,
+			&i.UnitPrice,
+			&i.Waitlisted,
+			&i.ProductName,
+			&i.ProductExternalID,
+			&i.ProductKeyword,
+			&i.ProductImageUrl,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listProductsByEvent = `-- name: ListProductsByEvent :many
 SELECT
     p.id,
@@ -533,11 +788,29 @@ func (q *Queries) ListProductsByEvent(ctx context.Context, eventID pgtype.UUID) 
 	return items, nil
 }
 
+const updateCartExternalOrderID = `-- name: UpdateCartExternalOrderID :exec
+
+UPDATE carts SET external_order_id = $2 WHERE id = $1
+`
+
+type UpdateCartExternalOrderIDParams struct {
+	ID              pgtype.UUID `json:"id"`
+	ExternalOrderID pgtype.Text `json:"external_order_id"`
+}
+
+// =============================================================================
+// ERP SYNC & EXPIRATION
+// =============================================================================
+func (q *Queries) UpdateCartExternalOrderID(ctx context.Context, arg UpdateCartExternalOrderIDParams) error {
+	_, err := q.db.Exec(ctx, updateCartExternalOrderID, arg.ID, arg.ExternalOrderID)
+	return err
+}
+
 const updateCartItem = `-- name: UpdateCartItem :one
 UPDATE cart_items
 SET quantity = $2
 WHERE id = $1
-RETURNING id, cart_id, product_id, quantity, unit_price
+RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted
 `
 
 type UpdateCartItemParams struct {
@@ -554,8 +827,24 @@ func (q *Queries) UpdateCartItem(ctx context.Context, arg UpdateCartItemParams) 
 		&i.ProductID,
 		&i.Quantity,
 		&i.UnitPrice,
+		&i.Waitlisted,
 	)
 	return i, err
+}
+
+const updateCartItemWaitlisted = `-- name: UpdateCartItemWaitlisted :exec
+UPDATE cart_items SET waitlisted = $3 WHERE cart_id = $1 AND product_id = $2
+`
+
+type UpdateCartItemWaitlistedParams struct {
+	CartID     pgtype.UUID `json:"cart_id"`
+	ProductID  pgtype.UUID `json:"product_id"`
+	Waitlisted bool        `json:"waitlisted"`
+}
+
+func (q *Queries) UpdateCartItemWaitlisted(ctx context.Context, arg UpdateCartItemWaitlistedParams) error {
+	_, err := q.db.Exec(ctx, updateCartItemWaitlisted, arg.CartID, arg.ProductID, arg.Waitlisted)
+	return err
 }
 
 const updateCartNotifyStatus = `-- name: UpdateCartNotifyStatus :one
@@ -681,18 +970,20 @@ func (q *Queries) UpdateCartStatus(ctx context.Context, arg UpdateCartStatusPara
 }
 
 const upsertCartItem = `-- name: UpsertCartItem :one
-INSERT INTO cart_items (cart_id, product_id, quantity, unit_price)
-VALUES ($1, $2, $3, $4)
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (cart_id, product_id)
-DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity
-RETURNING id, cart_id, product_id, quantity, unit_price
+DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity,
+             waitlisted = EXCLUDED.waitlisted
+RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted
 `
 
 type UpsertCartItemParams struct {
-	CartID    pgtype.UUID `json:"cart_id"`
-	ProductID pgtype.UUID `json:"product_id"`
-	Quantity  pgtype.Int4 `json:"quantity"`
-	UnitPrice pgtype.Int8 `json:"unit_price"`
+	CartID     pgtype.UUID `json:"cart_id"`
+	ProductID  pgtype.UUID `json:"product_id"`
+	Quantity   pgtype.Int4 `json:"quantity"`
+	UnitPrice  pgtype.Int8 `json:"unit_price"`
+	Waitlisted bool        `json:"waitlisted"`
 }
 
 // Adds quantity to existing cart item or creates new one
@@ -702,6 +993,7 @@ func (q *Queries) UpsertCartItem(ctx context.Context, arg UpsertCartItemParams) 
 		arg.ProductID,
 		arg.Quantity,
 		arg.UnitPrice,
+		arg.Waitlisted,
 	)
 	var i CartItem
 	err := row.Scan(
@@ -710,6 +1002,7 @@ func (q *Queries) UpsertCartItem(ctx context.Context, arg UpsertCartItemParams) 
 		&i.ProductID,
 		&i.Quantity,
 		&i.UnitPrice,
+		&i.Waitlisted,
 	)
 	return i, err
 }

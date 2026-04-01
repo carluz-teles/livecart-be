@@ -97,6 +97,24 @@ type ERPProvider interface {
 	// CreateOrder creates an order in the ERP for invoicing.
 	CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, error)
 
+	// LaunchOrderStock decrements stock in ERP for the order items.
+	LaunchOrderStock(ctx context.Context, orderID string) error
+
+	// ReverseOrderStock returns stock in ERP for the order items.
+	ReverseOrderStock(ctx context.Context, orderID string) error
+
+	// ApproveOrder sets the order status to approved in the ERP.
+	ApproveOrder(ctx context.Context, orderID string) error
+
+	// CancelOrder reverses stock and cancels an order in the ERP.
+	CancelOrder(ctx context.Context, orderID string) error
+
+	// SearchContacts searches for contacts by name or document.
+	SearchContacts(ctx context.Context, params SearchContactsParams) ([]ERPContactResult, error)
+
+	// CreateContact creates a new contact in the ERP.
+	CreateContact(ctx context.Context, contact ERPContactInput) (*ERPContactResult, error)
+
 	// ListProducts retrieves products from the ERP.
 	ListProducts(ctx context.Context, params ListProductsParams) (*ProductListResult, error)
 
@@ -199,14 +217,33 @@ type RefundResult struct {
 
 // ERPOrder represents an order to create in the ERP.
 type ERPOrder struct {
-	ExternalID   string         `json:"external_id"` // Your internal order ID
-	CustomerName string         `json:"customer_name"`
-	CustomerDoc  string         `json:"customer_doc,omitempty"` // CPF/CNPJ
-	CustomerEmail string        `json:"customer_email,omitempty"`
-	Items        []ERPOrderItem `json:"items"`
-	TotalAmount  int64          `json:"total_amount"` // In cents
-	Observation  string         `json:"observation,omitempty"`
-	Metadata     map[string]any `json:"metadata,omitempty"`
+	ExternalID  string         `json:"external_id"`            // Your internal order/cart ID
+	ContactID   string         `json:"contact_id"`             // ERP contact ID (required for Tiny v3)
+	Items       []ERPOrderItem `json:"items"`
+	TotalAmount int64          `json:"total_amount"`           // In cents
+	Observation string         `json:"observation,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+}
+
+// SearchContactsParams contains parameters for searching contacts.
+type SearchContactsParams struct {
+	Name    string `json:"name,omitempty"`
+	CpfCnpj string `json:"cpf_cnpj,omitempty"`
+}
+
+// ERPContactInput represents data for creating a contact in the ERP.
+type ERPContactInput struct {
+	Name       string `json:"name"`
+	CpfCnpj    string `json:"cpf_cnpj,omitempty"`
+	Email      string `json:"email,omitempty"`
+	Phone      string `json:"phone,omitempty"`
+	PersonType string `json:"person_type,omitempty"` // "F" = Física, "J" = Jurídica
+}
+
+// ERPContactResult is the result of searching or creating a contact.
+type ERPContactResult struct {
+	ContactID string `json:"contact_id"`
+	Name      string `json:"name"`
 }
 
 // ERPOrderItem represents an item in an ERP order.
