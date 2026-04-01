@@ -62,3 +62,13 @@ LIMIT 1;
 
 -- name: DeleteStore :exec
 DELETE FROM stores WHERE id = $1;
+
+-- name: UpdateStoreCheckoutSettings :one
+UPDATE stores
+SET
+  checkout_link_expiry_hours = $2,
+  checkout_send_methods = $3,
+  auto_send_checkout_links = $4,
+  updated_at = now()
+WHERE id = $1
+RETURNING *;

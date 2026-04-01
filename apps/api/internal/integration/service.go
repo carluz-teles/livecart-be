@@ -1046,10 +1046,48 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 	s.logger.Info("payment notification processed",
 		zap.String("payment_id", input.PaymentID),
 		zap.String("status", string(status.Status)),
+		zap.String("external_reference", status.ExternalReference),
 	)
 
-	// TODO: Update cart/order status based on payment status
-	// This will be implemented when we connect to the cart/order domain
+	// ExternalReference contains the cart ID (set when creating checkout)
+	if status.ExternalReference == "" {
+		s.logger.Warn("payment notification has no external reference, cannot update cart",
+			zap.String("payment_id", input.PaymentID),
+		)
+		return nil
+	}
+
+	// Map payment status to cart payment status
+	var cartPaymentStatus string
+	switch status.Status {
+	case providers.PaymentApproved:
+		cartPaymentStatus = "paid"
+	case providers.PaymentRejected:
+		cartPaymentStatus = "failed"
+	case providers.PaymentCancelled:
+		cartPaymentStatus = "cancelled"
+	case providers.PaymentRefunded:
+		cartPaymentStatus = "refunded"
+	case providers.PaymentPending, providers.PaymentInProcess:
+		cartPaymentStatus = "pending"
+	default:
+		cartPaymentStatus = "pending"
+	}
+
+	// Update cart payment status
+	if err := s.repo.UpdateCartPaymentStatus(ctx, status.ExternalReference, cartPaymentStatus, status.PaymentID, status.PaidAt); err != nil {
+		s.logger.Error("failed to update cart payment status",
+			zap.String("cart_id", status.ExternalReference),
+			zap.String("payment_status", cartPaymentStatus),
+			zap.Error(err),
+		)
+		return fmt.Errorf("updating cart payment status: %w", err)
+	}
+
+	s.logger.Info("cart payment status updated",
+		zap.String("cart_id", status.ExternalReference),
+		zap.String("payment_status", cartPaymentStatus),
+	)
 
 	return nil
 }

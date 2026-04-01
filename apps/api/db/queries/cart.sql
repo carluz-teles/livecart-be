@@ -205,3 +205,84 @@ UPDATE cart_items SET waitlisted = $3 WHERE cart_id = $1 AND product_id = $2;
 -- name: GetCartByEventAndUserForUpdate :one
 -- Lock the cart row for concurrent safety
 SELECT * FROM carts WHERE event_id = $1 AND platform_user_id = $2 FOR UPDATE;
+
+-- =============================================================================
+-- PUBLIC CHECKOUT - Cart page for customers
+-- =============================================================================
+
+-- name: GetCartByTokenWithDetails :one
+-- Returns cart with event info for public checkout page
+SELECT
+    c.id,
+    c.event_id,
+    c.platform_user_id,
+    c.platform_handle,
+    c.token,
+    c.status,
+    c.checkout_url,
+    c.checkout_id,
+    c.checkout_expires_at,
+    c.customer_email,
+    c.payment_status,
+    c.paid_at,
+    c.created_at,
+    c.expires_at,
+    le.title AS event_title,
+    le.store_id,
+    s.name AS store_name,
+    s.logo_url AS store_logo_url,
+    s.cart_allow_edit AS allow_edit
+FROM carts c
+JOIN live_events le ON le.id = c.event_id
+JOIN stores s ON s.id = le.store_id
+WHERE c.token = $1;
+
+-- name: ListCartItemsForCheckout :many
+-- Returns cart items with product details for checkout page
+SELECT
+    ci.id,
+    ci.cart_id,
+    ci.product_id,
+    ci.quantity,
+    ci.unit_price,
+    ci.waitlisted,
+    p.name AS product_name,
+    p.image_url AS product_image_url,
+    p.keyword AS product_keyword
+FROM cart_items ci
+JOIN products p ON p.id = ci.product_id
+WHERE ci.cart_id = $1
+ORDER BY ci.id;
+
+-- name: UpdateCartCustomerEmail :one
+UPDATE carts
+SET customer_email = $2
+WHERE token = $1
+RETURNING *;
+
+-- name: UpdateCartCheckoutInfo :one
+-- Updates checkout URL and ID after generating payment link
+UPDATE carts
+SET checkout_url = $2, checkout_id = $3, checkout_expires_at = $4
+WHERE id = $1
+RETURNING *;
+
+-- name: GetCartByCheckoutID :one
+-- Used by webhook to find cart when payment is confirmed
+SELECT * FROM carts WHERE checkout_id = $1;
+
+-- name: UpdateCartPaymentByCheckoutID :one
+-- Updates payment status when webhook confirms payment
+UPDATE carts
+SET payment_status = $2, paid_at = $3
+WHERE checkout_id = $1
+RETURNING *;
+
+-- name: GetStorePaymentIntegration :one
+-- Gets the active payment integration for a store
+SELECT i.*
+FROM integrations i
+WHERE i.store_id = $1
+  AND i.type = 'payment'
+  AND i.status = 'active'
+LIMIT 1;

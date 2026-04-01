@@ -28,7 +28,10 @@ type Cart struct {
 	CreatedAt            pgtype.Timestamptz `json:"created_at"`
 	ExpiresAt            pgtype.Timestamptz `json:"expires_at"`
 	// Session where this cart was created. NULL if created outside a session or session was deleted.
-	SessionID pgtype.UUID `json:"session_id"`
+	SessionID         pgtype.UUID        `json:"session_id"`
+	CheckoutID        pgtype.Text        `json:"checkout_id"`
+	CheckoutExpiresAt pgtype.Timestamptz `json:"checkout_expires_at"`
+	CustomerEmail     pgtype.Text        `json:"customer_email"`
 }
 
 type CartItem struct {
@@ -37,7 +40,7 @@ type CartItem struct {
 	ProductID  pgtype.UUID `json:"product_id"`
 	Quantity   pgtype.Int4 `json:"quantity"`
 	UnitPrice  pgtype.Int8 `json:"unit_price"`
-	Waitlisted bool        `json:"waitlisted"`
+	Waitlisted pgtype.Bool `json:"waitlisted"`
 }
 
 type DetectedOrder struct {
@@ -108,11 +111,11 @@ type LiveComment struct {
 	SessionID         pgtype.UUID        `json:"session_id"`
 	EventID           pgtype.UUID        `json:"event_id"`
 	Platform          string             `json:"platform"`
-	PlatformCommentID pgtype.Text        `json:"platform_comment_id"`
+	PlatformCommentID string             `json:"platform_comment_id"`
 	PlatformUserID    string             `json:"platform_user_id"`
 	PlatformHandle    string             `json:"platform_handle"`
 	Text              string             `json:"text"`
-	HasPurchaseIntent bool               `json:"has_purchase_intent"`
+	HasPurchaseIntent pgtype.Bool        `json:"has_purchase_intent"`
 	MatchedProductID  pgtype.UUID        `json:"matched_product_id"`
 	MatchedQuantity   pgtype.Int4        `json:"matched_quantity"`
 	Result            pgtype.Text        `json:"result"`
@@ -142,6 +145,8 @@ type LiveSession struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 	EventID       pgtype.UUID        `json:"event_id"`
+	// Array of comments: [{handle, text}]
+	Comments json.RawMessage `json:"comments"`
 }
 
 type LiveSessionPlatform struct {
@@ -220,9 +225,9 @@ type Store struct {
 	// When true, automatically send checkout links to customers when live ends
 	AutoSendCheckoutLinks bool `json:"auto_send_checkout_links"`
 	// Allow customers to edit cart (remove items, change quantity) on checkout page
-	CartAllowEdit         bool        `json:"cart_allow_edit"`
-	WaitlistClaimMinutes  pgtype.Int4 `json:"waitlist_claim_minutes"`
-	WaitlistExpiryMinutes pgtype.Int4 `json:"waitlist_expiry_minutes"`
+	CartAllowEdit           bool            `json:"cart_allow_edit"`
+	CheckoutLinkExpiryHours pgtype.Int4     `json:"checkout_link_expiry_hours"`
+	CheckoutSendMethods     json.RawMessage `json:"checkout_send_methods"`
 }
 
 type StoreInvitation struct {

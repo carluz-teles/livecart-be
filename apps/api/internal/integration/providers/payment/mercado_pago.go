@@ -305,6 +305,7 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 		DateApproved      string         `json:"date_approved,omitempty"`
 		DateCreated       string         `json:"date_created"`
 		Metadata          map[string]any `json:"metadata"`
+		ExternalReference string         `json:"external_reference"`
 	}
 	if err := json.Unmarshal(body, &mpPayment); err != nil {
 		return nil, fmt.Errorf("parsing payment response: %w", err)
@@ -320,12 +321,13 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 	}
 
 	return &PaymentStatus{
-		PaymentID:     fmt.Sprintf("%d", mpPayment.ID),
-		Status:        status,
-		Amount:        int64(mpPayment.TransactionAmount * 100), // Convert to cents
-		PaidAt:        paidAt,
-		FailureReason: mpPayment.StatusDetail,
-		Metadata:      mpPayment.Metadata,
+		PaymentID:         fmt.Sprintf("%d", mpPayment.ID),
+		Status:            status,
+		Amount:            int64(mpPayment.TransactionAmount * 100), // Convert to cents
+		PaidAt:            paidAt,
+		FailureReason:     mpPayment.StatusDetail,
+		Metadata:          mpPayment.Metadata,
+		ExternalReference: mpPayment.ExternalReference,
 	}, nil
 }
 

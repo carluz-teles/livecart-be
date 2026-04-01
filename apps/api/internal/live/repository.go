@@ -539,7 +539,7 @@ func (r *Repository) AddCartItem(ctx context.Context, params AddCartItemParams) 
 		ProductID:  productID,
 		Quantity:   pgtype.Int4{Int32: int32(params.Quantity), Valid: true},
 		UnitPrice:  pgtype.Int8{Int64: params.UnitPrice, Valid: true},
-		Waitlisted: params.Waitlisted,
+		Waitlisted: pgtype.Bool{Bool: params.Waitlisted, Valid: true},
 	})
 	if err != nil {
 		return fmt.Errorf("upserting cart item: %w", err)

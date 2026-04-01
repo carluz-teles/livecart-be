@@ -637,11 +637,11 @@ func (r *Repository) CreateLiveComment(ctx context.Context, params CreateLiveCom
 		SessionID:         sessionID,
 		EventID:           eventID,
 		Platform:          params.Platform,
-		PlatformCommentID: pgtype.Text{String: params.PlatformCommentID, Valid: params.PlatformCommentID != ""},
+		PlatformCommentID: params.PlatformCommentID,
 		PlatformUserID:    params.PlatformUserID,
 		PlatformHandle:    params.PlatformHandle,
 		Text:              params.Text,
-		HasPurchaseIntent: params.HasPurchaseIntent,
+		HasPurchaseIntent: pgtype.Bool{Bool: params.HasPurchaseIntent, Valid: true},
 		MatchedProductID:  matchedProductID,
 		MatchedQuantity:   pgtype.Int4{Int32: int32(params.MatchedQuantity), Valid: params.MatchedQuantity > 0},
 		Result:            pgtype.Text{String: params.Result, Valid: params.Result != ""},
@@ -669,7 +669,7 @@ func (r *Repository) UpdateLiveCommentResult(ctx context.Context, commentID stri
 
 	return r.queries.UpdateLiveCommentResult(ctx, sqlc.UpdateLiveCommentResultParams{
 		ID:                id,
-		HasPurchaseIntent: hasPurchaseIntent,
+		HasPurchaseIntent: pgtype.Bool{Bool: hasPurchaseIntent, Valid: true},
 		MatchedProductID:  productID,
 		MatchedQuantity:   pgtype.Int4{Int32: int32(matchedQuantity), Valid: matchedQuantity > 0},
 		Result:            pgtype.Text{String: result, Valid: result != ""},
@@ -1056,8 +1056,36 @@ func (r *Repository) UpdateCartItemWaitlisted(ctx context.Context, cartID, produ
 	return r.queries.UpdateCartItemWaitlisted(ctx, sqlc.UpdateCartItemWaitlistedParams{
 		CartID:     cID,
 		ProductID:  pID,
-		Waitlisted: waitlisted,
+		Waitlisted: pgtype.Bool{Bool: waitlisted, Valid: true},
 	})
+}
+
+// =============================================================================
+// CART PAYMENT OPERATIONS
+// =============================================================================
+
+// UpdateCartPaymentStatus updates the payment status of a cart.
+func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string, paymentStatus string, paymentID string, paidAt *time.Time) error {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+
+	var paidAtPg pgtype.Timestamptz
+	if paidAt != nil {
+		paidAtPg = pgtype.Timestamptz{Time: *paidAt, Valid: true}
+	}
+
+	_, err = r.queries.UpdateCartPayment(ctx, sqlc.UpdateCartPaymentParams{
+		ID:              cID,
+		PaymentStatus:   pgtype.Text{String: paymentStatus, Valid: true},
+		ExternalOrderID: pgtype.Text{String: paymentID, Valid: paymentID != ""},
+		PaidAt:          paidAtPg,
+	})
+	if err != nil {
+		return fmt.Errorf("updating cart payment status: %w", err)
+	}
+	return nil
 }
 
 // =============================================================================

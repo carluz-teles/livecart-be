@@ -48,11 +48,11 @@ type CreateLiveCommentParams struct {
 	SessionID         pgtype.UUID `json:"session_id"`
 	EventID           pgtype.UUID `json:"event_id"`
 	Platform          string      `json:"platform"`
-	PlatformCommentID pgtype.Text `json:"platform_comment_id"`
+	PlatformCommentID string      `json:"platform_comment_id"`
 	PlatformUserID    string      `json:"platform_user_id"`
 	PlatformHandle    string      `json:"platform_handle"`
 	Text              string      `json:"text"`
-	HasPurchaseIntent bool        `json:"has_purchase_intent"`
+	HasPurchaseIntent pgtype.Bool `json:"has_purchase_intent"`
 	MatchedProductID  pgtype.UUID `json:"matched_product_id"`
 	MatchedQuantity   pgtype.Int4 `json:"matched_quantity"`
 	Result            pgtype.Text `json:"result"`
@@ -246,11 +246,11 @@ type ListPurchaseCommentsByEventRow struct {
 	SessionID         pgtype.UUID        `json:"session_id"`
 	EventID           pgtype.UUID        `json:"event_id"`
 	Platform          string             `json:"platform"`
-	PlatformCommentID pgtype.Text        `json:"platform_comment_id"`
+	PlatformCommentID string             `json:"platform_comment_id"`
 	PlatformUserID    string             `json:"platform_user_id"`
 	PlatformHandle    string             `json:"platform_handle"`
 	Text              string             `json:"text"`
-	HasPurchaseIntent bool               `json:"has_purchase_intent"`
+	HasPurchaseIntent pgtype.Bool        `json:"has_purchase_intent"`
 	MatchedProductID  pgtype.UUID        `json:"matched_product_id"`
 	MatchedQuantity   pgtype.Int4        `json:"matched_quantity"`
 	Result            pgtype.Text        `json:"result"`
@@ -306,7 +306,7 @@ WHERE id = $1
 
 type UpdateLiveCommentResultParams struct {
 	ID                pgtype.UUID `json:"id"`
-	HasPurchaseIntent bool        `json:"has_purchase_intent"`
+	HasPurchaseIntent pgtype.Bool `json:"has_purchase_intent"`
 	MatchedProductID  pgtype.UUID `json:"matched_product_id"`
 	MatchedQuantity   pgtype.Int4 `json:"matched_quantity"`
 	Result            pgtype.Text `json:"result"`

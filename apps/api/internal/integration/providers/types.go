@@ -182,13 +182,14 @@ type CheckoutResult struct {
 
 // PaymentStatus represents the current state of a payment.
 type PaymentStatus struct {
-	PaymentID     string         `json:"payment_id"`
-	Status        PaymentState   `json:"status"`
-	Amount        int64          `json:"amount"`
-	PaidAt        *time.Time     `json:"paid_at,omitempty"`
-	RefundedAt    *time.Time     `json:"refunded_at,omitempty"`
-	FailureReason string         `json:"failure_reason,omitempty"`
-	Metadata      map[string]any `json:"metadata,omitempty"`
+	PaymentID         string         `json:"payment_id"`
+	Status            PaymentState   `json:"status"`
+	Amount            int64          `json:"amount"`
+	PaidAt            *time.Time     `json:"paid_at,omitempty"`
+	RefundedAt        *time.Time     `json:"refunded_at,omitempty"`
+	FailureReason     string         `json:"failure_reason,omitempty"`
+	Metadata          map[string]any `json:"metadata,omitempty"`
+	ExternalReference string         `json:"external_reference,omitempty"` // Cart ID or order reference
 }
 
 // PaymentState represents payment status values.

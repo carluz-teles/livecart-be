@@ -30,6 +30,7 @@ import (
 	"livecart/apps/api/lib/logger"
 	"livecart/apps/api/lib/ratelimit"
 
+	"livecart/apps/api/internal/checkout"
 	"livecart/apps/api/internal/customer"
 	"livecart/apps/api/internal/dashboard"
 	"livecart/apps/api/internal/integration"
@@ -282,6 +283,14 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// Integration webhook routes (if enabled)
 	if integrationWebhookHandler != nil {
 		integrationWebhookHandler.RegisterRoutes(app)
+	}
+
+	// Public checkout routes (no authentication required)
+	if integrationSvc != nil {
+		checkoutRepo := checkout.NewRepository(queries)
+		checkoutSvc := checkout.NewService(checkoutRepo, integrationSvc, log)
+		checkoutHandler := checkout.NewHandler(checkoutSvc)
+		checkoutHandler.RegisterRoutes(app)
 	}
 
 	// Protected routes (user-scoped)
