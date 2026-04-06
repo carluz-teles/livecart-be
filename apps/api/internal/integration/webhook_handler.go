@@ -25,18 +25,19 @@ func NewWebhookHandler(service *Service, logger *zap.Logger) *WebhookHandler {
 	}
 }
 
-// RegisterRoutes registers webhook routes.
-// These routes are unauthenticated but use signature verification.
+// RegisterRoutes registers webhook and OAuth callback routes.
+// These routes are unauthenticated but use signature verification where applicable.
 func (h *WebhookHandler) RegisterRoutes(app *fiber.App) {
-	webhooks := app.Group("/api/webhooks/integrations")
+	// OAuth callbacks (redirect URLs configured in external providers)
+	oauth := app.Group("/api/v1/integrations/oauth")
+	oauth.Get("/mercado_pago/callback", h.HandleMercadoPagoOAuthCallback)
+	oauth.Get("/tiny/callback", h.HandleTinyOAuthCallback)
 
-	// OAuth callbacks
-	webhooks.Get("/mercado_pago/oauth/callback", h.HandleMercadoPagoOAuthCallback)
-	webhooks.Get("/tiny/oauth/callback", h.HandleTinyOAuthCallback)
-
-	// Payment/event webhooks
-	webhooks.Post("/mercado_pago/:integrationId", h.HandleMercadoPago)
-	webhooks.Post("/tiny/:integrationId", h.HandleTiny)
+	// Webhooks (event notifications from external providers)
+	// Uses storeId instead of integrationId for stable URLs across reconnections
+	webhooks := app.Group("/api/webhooks")
+	webhooks.Post("/mercado_pago/:storeId", h.HandleMercadoPago)
+	webhooks.Post("/tiny/:storeId", h.HandleTiny)
 
 	// Instagram webhooks (Meta platform)
 	instagram := app.Group("/api/webhooks/instagram")
@@ -53,7 +54,7 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App) {
 // @Param state query string true "State parameter (contains store_id)"
 // @Success 302 "Redirect to frontend with success"
 // @Failure 302 "Redirect to frontend with error"
-// @Router /api/webhooks/integrations/mercado_pago/oauth/callback [get]
+// @Router /api/v1/integrations/oauth/mercado_pago/callback [get]
 func (h *WebhookHandler) HandleMercadoPagoOAuthCallback(c *fiber.Ctx) error {
 	code := c.Query("code")
 	state := c.Query("state")
@@ -106,7 +107,7 @@ func (h *WebhookHandler) HandleMercadoPagoOAuthCallback(c *fiber.Ctx) error {
 // @Param state query string true "State parameter (contains store_id)"
 // @Success 302 "Redirect to frontend with success"
 // @Failure 302 "Redirect to frontend with error"
-// @Router /api/webhooks/integrations/tiny/oauth/callback [get]
+// @Router /api/v1/integrations/oauth/tiny/callback [get]
 func (h *WebhookHandler) HandleTinyOAuthCallback(c *fiber.Ctx) error {
 	code := c.Query("code")
 	state := c.Query("state")
@@ -156,11 +157,11 @@ func (h *WebhookHandler) HandleTinyOAuthCallback(c *fiber.Ctx) error {
 // @Tags webhooks
 // @Accept json
 // @Produce json
-// @Param integrationId path string true "Integration ID"
+// @Param storeId path string true "Store ID"
 // @Success 200 {object} map[string]string
-// @Router /api/webhooks/integrations/mercado_pago/{integrationId} [post]
+// @Router /api/webhooks/mercado_pago/{storeId} [post]
 func (h *WebhookHandler) HandleMercadoPago(c *fiber.Ctx) error {
-	integrationID := c.Params("integrationId")
+	storeID := c.Params("storeId")
 
 	body := c.Body()
 
@@ -175,14 +176,14 @@ func (h *WebhookHandler) HandleMercadoPago(c *fiber.Ctx) error {
 	}
 	if err := json.Unmarshal(body, &webhook); err != nil {
 		h.logger.Error("failed to parse webhook payload",
-			zap.String("integration_id", integrationID),
+			zap.String("store_id", storeID),
 			zap.Error(err),
 		)
 		return httpx.BadRequest(c, "invalid webhook payload")
 	}
 
 	h.logger.Info("mercado_pago webhook received",
-		zap.String("integration_id", integrationID),
+		zap.String("store_id", storeID),
 		zap.String("type", webhook.Type),
 		zap.String("action", webhook.Action),
 		zap.String("data_id", webhook.Data.ID),
@@ -195,7 +196,7 @@ func (h *WebhookHandler) HandleMercadoPago(c *fiber.Ctx) error {
 	}
 
 	if err := h.service.StoreWebhookEvent(c.Context(), StoreWebhookInput{
-		IntegrationID:  integrationID,
+		StoreID:        storeID,
 		Provider:       "mercado_pago",
 		EventType:      webhook.Type,
 		EventID:        eventID,
@@ -203,7 +204,7 @@ func (h *WebhookHandler) HandleMercadoPago(c *fiber.Ctx) error {
 		SignatureValid: true, // TODO: Implement signature verification
 	}); err != nil {
 		h.logger.Error("failed to store webhook event",
-			zap.String("integration_id", integrationID),
+			zap.String("store_id", storeID),
 			zap.Error(err),
 		)
 		// Don't return error - we still want to process the webhook
@@ -214,11 +215,12 @@ func (h *WebhookHandler) HandleMercadoPago(c *fiber.Ctx) error {
 		// Process asynchronously to respond quickly
 		go func() {
 			if err := h.service.ProcessPaymentNotification(c.Context(), ProcessPaymentInput{
-				IntegrationID: integrationID,
-				PaymentID:     webhook.Data.ID,
+				StoreID:   storeID,
+				Provider:  "mercado_pago",
+				PaymentID: webhook.Data.ID,
 			}); err != nil {
 				h.logger.Error("failed to process payment notification",
-					zap.String("integration_id", integrationID),
+					zap.String("store_id", storeID),
 					zap.String("payment_id", webhook.Data.ID),
 					zap.Error(err),
 				)
@@ -235,11 +237,11 @@ func (h *WebhookHandler) HandleMercadoPago(c *fiber.Ctx) error {
 // @Tags webhooks
 // @Accept json
 // @Produce json
-// @Param integrationId path string true "Integration ID"
+// @Param storeId path string true "Store ID"
 // @Success 200 {object} map[string]string
-// @Router /api/webhooks/integrations/tiny/{integrationId} [post]
+// @Router /api/webhooks/tiny/{storeId} [post]
 func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
-	integrationID := c.Params("integrationId")
+	storeID := c.Params("storeId")
 
 	body := c.Body()
 
@@ -247,7 +249,7 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	// Tiny automatically removes the webhook URL.
 	if len(body) == 0 {
 		h.logger.Info("tiny webhook validation ping",
-			zap.String("integration_id", integrationID),
+			zap.String("store_id", storeID),
 		)
 		return httpx.OK(c, fiber.Map{"status": "ok"})
 	}
@@ -266,7 +268,7 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	}
 	if err := json.Unmarshal(body, &webhook); err != nil {
 		h.logger.Warn("failed to parse Tiny webhook payload",
-			zap.String("integration_id", integrationID),
+			zap.String("store_id", storeID),
 			zap.Error(err),
 		)
 	}
@@ -278,7 +280,7 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	}
 
 	h.logger.Info("tiny webhook received",
-		zap.String("integration_id", integrationID),
+		zap.String("store_id", storeID),
 		zap.String("tipo", webhook.Tipo),
 		zap.String("id_produto", productID),
 		zap.String("sku", webhook.Dados.SKU),
@@ -291,7 +293,7 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	}
 
 	if err := h.service.StoreWebhookEvent(c.Context(), StoreWebhookInput{
-		IntegrationID:  integrationID,
+		StoreID:        storeID,
 		Provider:       "tiny",
 		EventType:      webhook.Tipo,
 		EventID:        eventID,
@@ -299,7 +301,7 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		SignatureValid: true, // Tiny doesn't use signatures
 	}); err != nil {
 		h.logger.Error("failed to store webhook event",
-			zap.String("integration_id", integrationID),
+			zap.String("store_id", storeID),
 			zap.Error(err),
 		)
 	}
@@ -309,9 +311,9 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	if isProductEvent && productID != "" {
 		go func() {
 			ctx := context.Background()
-			if err := h.service.ProcessProductWebhook(ctx, integrationID, productID); err != nil {
+			if err := h.service.ProcessProductWebhook(ctx, storeID, "tiny", productID); err != nil {
 				h.logger.Error("failed to process product webhook",
-					zap.String("integration_id", integrationID),
+					zap.String("store_id", storeID),
 					zap.String("tipo", webhook.Tipo),
 					zap.String("id_produto", productID),
 					zap.Error(err),

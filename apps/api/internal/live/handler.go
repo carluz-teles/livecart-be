@@ -569,6 +569,15 @@ func toEventResponse(o EventOutput) EventResponse {
 				AddedAt:        p.AddedAt,
 			}
 		}
+
+		comments := make([]CommentResponse, len(s.Comments))
+		for k, c := range s.Comments {
+			comments[k] = CommentResponse{
+				Handle: c.Handle,
+				Text:   c.Text,
+			}
+		}
+
 		sessions[i] = SessionResponse{
 			ID:            s.ID,
 			EventID:       s.EventID,
@@ -581,6 +590,7 @@ func toEventResponse(o EventOutput) EventResponse {
 			TotalRevenue:  s.TotalRevenue,
 			PaidRevenue:   s.PaidRevenue,
 			Platforms:     platforms,
+			Comments:      comments,
 			CreatedAt:     s.CreatedAt,
 			UpdatedAt:     s.UpdatedAt,
 		}

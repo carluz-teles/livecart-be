@@ -19,6 +19,9 @@ type Config struct {
 	// Instagram account settings
 	AccountID string
 	Username  string
+
+	// Live media ID (optional - if set, uses this instead of generating UUID)
+	MediaID string
 }
 
 // Load loads configuration from environment variables
@@ -32,6 +35,7 @@ func Load() *Config {
 		VerifyToken: getEnv("EMULATOR_VERIFY_TOKEN", "livecart_verify_token"),
 		AccountID:   getEnv("EMULATOR_ACCOUNT_ID", "17841405822304914"),
 		Username:    getEnv("EMULATOR_USERNAME", "loja_livecart"),
+		MediaID:     getEnv("EMULATOR_MEDIA_ID", ""),
 	}
 }
 

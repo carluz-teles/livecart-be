@@ -198,6 +198,24 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 			paidRevenue = stats.PaidRevenue
 		}
 
+		// Get comments for this session (limit 100 for performance)
+		var commentOutputs []CommentOutput
+		commentRows, err := s.repo.ListCommentsBySession(ctx, sessionRow.ID, 100, 0)
+		if err != nil {
+			s.logger.Warn("failed to list comments for session",
+				zap.String("session_id", sessionRow.ID),
+				zap.Error(err),
+			)
+		} else {
+			commentOutputs = make([]CommentOutput, len(commentRows))
+			for k, c := range commentRows {
+				commentOutputs[k] = CommentOutput{
+					Handle: c.PlatformHandle,
+					Text:   c.Text,
+				}
+			}
+		}
+
 		sessions[i] = SessionOutput{
 			ID:            sessionRow.ID,
 			EventID:       sessionRow.EventID,
@@ -210,6 +228,7 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 			TotalRevenue:  totalRevenue,
 			PaidRevenue:   paidRevenue,
 			Platforms:     platformOutputs,
+			Comments:      commentOutputs,
 			CreatedAt:     sessionRow.CreatedAt,
 			UpdatedAt:     sessionRow.UpdatedAt,
 		}

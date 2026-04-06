@@ -372,8 +372,9 @@ type UpdateIntegrationParams struct {
 
 // StoreWebhookInput is the input for storing a webhook event.
 type StoreWebhookInput struct {
-	IntegrationID  string
+	StoreID        string // From URL parameter
 	Provider       string
+	IntegrationID  string // Resolved by service layer before storing
 	EventType      string
 	EventID        string
 	Payload        []byte
@@ -382,8 +383,9 @@ type StoreWebhookInput struct {
 
 // ProcessPaymentInput is the input for processing a payment notification.
 type ProcessPaymentInput struct {
-	IntegrationID string
-	PaymentID     string
+	StoreID   string
+	Provider  string
+	PaymentID string
 }
 
 // WebhookEventRow represents a row from the webhook_events table.

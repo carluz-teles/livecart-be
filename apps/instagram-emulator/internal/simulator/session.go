@@ -15,19 +15,21 @@ type Session struct {
 	username  string
 
 	// Live state
-	liveActive bool
-	mediaID    string
+	liveActive      bool
+	mediaID         string
+	configuredMedia string // If set, use this media ID instead of generating
 
 	// Generator for creating fake data
 	generator *Generator
 }
 
 // NewSession creates a new simulator session
-func NewSession(accountID, username string) *Session {
+func NewSession(accountID, username, mediaID string) *Session {
 	return &Session{
-		accountID: accountID,
-		username:  username,
-		generator: NewGenerator(),
+		accountID:       accountID,
+		username:        username,
+		configuredMedia: mediaID,
+		generator:       NewGenerator(),
 	}
 }
 
@@ -37,7 +39,11 @@ func (s *Session) StartLive() string {
 	defer s.mu.Unlock()
 
 	s.liveActive = true
-	s.mediaID = uuid.New().String()[:20] // Simulate Instagram media ID format
+	if s.configuredMedia != "" {
+		s.mediaID = s.configuredMedia
+	} else {
+		s.mediaID = uuid.New().String()[:20] // Simulate Instagram media ID format
+	}
 
 	return s.mediaID
 }

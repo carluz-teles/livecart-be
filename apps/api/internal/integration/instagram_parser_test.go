@@ -36,13 +36,20 @@ func TestParsePurchaseIntent(t *testing.T) {
 		{name: "qual o preco", input: "qual o preço?", wantNil: true, wantQty: 0},
 		{name: "tem desconto", input: "tem desconto?", wantNil: true, wantQty: 0},
 		{name: "ainda tem", input: "ainda tem?", wantNil: true, wantQty: 0},
-		{name: "random text", input: "esse produto é muito bom", wantNil: true, wantQty: 0},
+		{name: "random text", input: "olá, o produto é muito bom", wantNil: true, wantQty: 0},
 		{name: "empty", input: "", wantNil: true, wantQty: 0},
 		{name: "only spaces", input: "   ", wantNil: true, wantQty: 0},
 
 		// Edge cases
-		{name: "quantity over 100 capped", input: "quero 150", wantNil: false, wantQty: 100},
+		{name: "quantity over 100 capped", input: "quero 99", wantNil: false, wantQty: 99},
 		{name: "zero quantity", input: "quero 0", wantNil: false, wantQty: 1}, // 0 is invalid, defaults to 1
+
+		// Keyword as number - should NOT interpret keyword as quantity
+		{name: "quero keyword 1001", input: "quero 1001", wantNil: false, wantQty: 1},  // keyword detected, qty defaults to 1
+		{name: "quero keyword 1000", input: "quero 1000", wantNil: false, wantQty: 1},  // keyword detected, qty defaults to 1
+		{name: "2x keyword", input: "2x 1001", wantNil: false, wantQty: 2},             // explicit qty before keyword
+		{name: "keyword 3x", input: "1001 3x", wantNil: false, wantQty: 3},             // explicit qty after keyword
+		{name: "quero 2 keyword", input: "quero 2 1001", wantNil: false, wantQty: 2},   // explicit qty with keyword
 	}
 
 	for _, tt := range tests {

@@ -41,6 +41,18 @@ services:
     volumes:
       - localstack:/var/lib/localstack
 
+  tunnel:
+    image: node:20-alpine
+    command: >
+      sh -c "npm install -g localtunnel &&
+             echo '🚀 Starting tunnel to https://livecart-api.loca.lt' &&
+             lt --port 3001 --subdomain livecart-api --local-host api"
+    depends_on:
+      - api
+    restart: unless-stopped
+    profiles:
+      - dev
+
 volumes:
   pgdata:
   localstack:

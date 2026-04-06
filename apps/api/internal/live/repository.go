@@ -339,6 +339,36 @@ func (r *Repository) IncrementSessionComments(ctx context.Context, sessionID str
 	return r.q.IncrementLiveSessionComments(ctx, uid)
 }
 
+// ListCommentsBySession returns all comments for a session.
+func (r *Repository) ListCommentsBySession(ctx context.Context, sessionID string, limit, offset int) ([]CommentRow, error) {
+	uid, err := parseUUID(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := r.q.ListCommentsBySession(ctx, sqlc.ListCommentsBySessionParams{
+		SessionID: uid,
+		Limit:     int32(limit),
+		Offset:    int32(offset),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing comments by session: %w", err)
+	}
+
+	comments := make([]CommentRow, 0, len(rows))
+	for _, row := range rows {
+		comments = append(comments, CommentRow{
+			ID:             row.ID.String(),
+			SessionID:      row.SessionID.String(),
+			PlatformHandle: row.PlatformHandle,
+			Text:           row.Text,
+			CreatedAt:      row.CreatedAt.Time,
+		})
+	}
+
+	return comments, nil
+}
+
 // =============================================================================
 // PLATFORM OPERATIONS
 // =============================================================================

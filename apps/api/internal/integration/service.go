@@ -3,6 +3,9 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
@@ -181,29 +185,55 @@ func (s *Service) GetOAuthURL(ctx context.Context, input GetOAuthURLInput) (*Get
 	}
 }
 
-// getMercadoPagoOAuthURL generates the Mercado Pago OAuth URL.
+// getMercadoPagoOAuthURL generates the Mercado Pago OAuth URL with PKCE.
 func (s *Service) getMercadoPagoOAuthURL(storeID string) (*GetOAuthURLOutput, error) {
 	appID := config.MercadoPagoAppID.String()
 	if appID == "" {
 		return nil, httpx.ErrUnprocessable("Mercado Pago app not configured")
 	}
 
-	redirectURI := config.WebhookBaseURL.String() + "/api/webhooks/integrations/mercado_pago/oauth/callback"
+	redirectURI := config.WebhookBaseURL.String() + "/api/v1/integrations/oauth/mercado_pago/callback"
 
-	// Generate state with store ID for callback
-	state := storeID
+	// Generate unique state
+	state := uuid.New().String()
+
+	// Generate PKCE code_verifier (43-128 characters, URL-safe)
+	codeVerifier := generateCodeVerifier()
+
+	// Generate code_challenge (SHA256 hash of code_verifier, base64url encoded)
+	codeChallenge := generateCodeChallenge(codeVerifier)
+
+	// Store state and code_verifier for later retrieval in callback
+	ctx := context.Background()
+	if err := s.repo.CreateOAuthState(ctx, state, storeID, "mercado_pago", codeVerifier); err != nil {
+		return nil, fmt.Errorf("storing OAuth state: %w", err)
+	}
 
 	authURL := fmt.Sprintf(
-		"https://auth.mercadopago.com/authorization?client_id=%s&response_type=code&platform_id=mp&redirect_uri=%s&state=%s",
+		"https://auth.mercadopago.com/authorization?client_id=%s&response_type=code&platform_id=mp&redirect_uri=%s&state=%s&code_challenge=%s&code_challenge_method=S256",
 		appID,
-		redirectURI,
+		url.QueryEscape(redirectURI),
 		state,
+		codeChallenge,
 	)
 
 	return &GetOAuthURLOutput{
 		AuthURL: authURL,
 		State:   state,
 	}, nil
+}
+
+// generateCodeVerifier generates a random code verifier for PKCE (43-128 chars).
+func generateCodeVerifier() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// generateCodeChallenge generates the code challenge from the verifier (S256 method).
+func generateCodeChallenge(verifier string) string {
+	h := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(h[:])
 }
 
 // getTinyOAuthURL generates the Tiny ERP OAuth URL using stored credentials.
@@ -225,7 +255,7 @@ func (s *Service) getTinyOAuthURL(storeID string) (*GetOAuthURLOutput, error) {
 		return nil, httpx.ErrUnprocessable("Client ID não encontrado nas credenciais")
 	}
 
-	redirectURI := config.WebhookBaseURL.String() + "/api/webhooks/integrations/tiny/oauth/callback"
+	redirectURI := config.WebhookBaseURL.String() + "/api/v1/integrations/oauth/tiny/callback"
 
 	// Generate state with store ID for callback
 	state := storeID
@@ -259,13 +289,29 @@ func (s *Service) HandleOAuthCallback(ctx context.Context, input OAuthCallbackIn
 func (s *Service) handleMercadoPagoCallback(ctx context.Context, input OAuthCallbackInput) (*OAuthCallbackOutput, error) {
 	appID := config.MercadoPagoAppID.String()
 	appSecret := config.MercadoPagoAppSecret.String()
-	redirectURI := config.WebhookBaseURL.String() + "/api/webhooks/integrations/mercado_pago/oauth/callback"
+	redirectURI := config.WebhookBaseURL.String() + "/api/v1/integrations/oauth/mercado_pago/callback"
 
 	if appID == "" || appSecret == "" {
 		return nil, httpx.ErrUnprocessable("Mercado Pago app not configured")
 	}
 
-	// Exchange code for tokens
+	// Retrieve OAuth state (includes code_verifier for PKCE)
+	oauthState, err := s.repo.GetOAuthState(ctx, input.State)
+	if err != nil {
+		s.logger.Error("OAuth state not found or expired",
+			zap.String("state", input.State),
+			zap.Error(err),
+		)
+		return nil, httpx.ErrUnprocessable("OAuth state expired or invalid")
+	}
+
+	// Clean up the state after retrieval
+	defer s.repo.DeleteOAuthState(ctx, input.State)
+
+	// Override input.State with actual store_id from database
+	input.State = oauthState.StoreID.String()
+
+	// Exchange code for tokens (with PKCE code_verifier)
 	tokenURL := "https://api.mercadopago.com/oauth/token"
 	payload := map[string]string{
 		"grant_type":    "authorization_code",
@@ -273,6 +319,7 @@ func (s *Service) handleMercadoPagoCallback(ctx context.Context, input OAuthCall
 		"client_secret": appSecret,
 		"code":          input.Code,
 		"redirect_uri":  redirectURI,
+		"code_verifier": oauthState.CodeVerifier,
 	}
 
 	payloadBytes, _ := json.Marshal(payload)
@@ -425,7 +472,7 @@ func (s *Service) handleTinyCallback(ctx context.Context, input OAuthCallbackInp
 		return nil, httpx.ErrUnprocessable("Client ID ou Client Secret não encontrado")
 	}
 
-	redirectURI := config.WebhookBaseURL.String() + "/api/webhooks/integrations/tiny/oauth/callback"
+	redirectURI := config.WebhookBaseURL.String() + "/api/v1/integrations/oauth/tiny/callback"
 
 	// Use url.Values for proper URL encoding
 	formData := url.Values{}
@@ -750,15 +797,16 @@ const productWebhookMaxRetries = 3
 // ProcessProductWebhook checks if the product exists in LiveCart, then fetches
 // full details from the ERP and syncs locally. Ignores unknown products.
 // Retries on transient failures to avoid losing sync events.
-func (s *Service) ProcessProductWebhook(ctx context.Context, integrationID, externalProductID string) error {
+func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, externalProductID string) error {
 	if s.productSyncer == nil {
 		s.logger.Warn("product syncer not configured, skipping product webhook")
 		return nil
 	}
 
-	integration, err := s.repo.GetByIDOnly(ctx, integrationID)
+	// Resolve integration from store_id + provider
+	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", provider)
 	if err != nil {
-		return fmt.Errorf("getting integration: %w", err)
+		return fmt.Errorf("no active ERP integration found for store %s provider %s: %w", storeID, provider, err)
 	}
 
 	// Check if product exists in LiveCart before calling the ERP API
@@ -768,7 +816,8 @@ func (s *Service) ProcessProductWebhook(ctx context.Context, integrationID, exte
 	}
 	if !exists {
 		s.logger.Debug("product not registered in livecart, ignoring webhook",
-			zap.String("integration_id", integrationID),
+			zap.String("store_id", storeID),
+			zap.String("integration_id", integration.ID),
 			zap.String("external_product_id", externalProductID),
 		)
 		return nil
@@ -779,7 +828,8 @@ func (s *Service) ProcessProductWebhook(ctx context.Context, integrationID, exte
 		if attempt > 0 {
 			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
 			s.logger.Warn("retrying product webhook processing",
-				zap.String("integration_id", integrationID),
+				zap.String("store_id", storeID),
+				zap.String("integration_id", integration.ID),
 				zap.String("product_id", externalProductID),
 				zap.Int("attempt", attempt+1),
 				zap.Duration("backoff", backoff),
@@ -798,7 +848,8 @@ func (s *Service) ProcessProductWebhook(ctx context.Context, integrationID, exte
 	}
 
 	s.logger.Error("product webhook processing failed after retries",
-		zap.String("integration_id", integrationID),
+		zap.String("store_id", storeID),
+		zap.String("integration_id", integration.ID),
 		zap.String("product_id", externalProductID),
 		zap.Int("max_retries", productWebhookMaxRetries),
 		zap.Error(lastErr),
@@ -911,10 +962,10 @@ func (s *Service) CreateCheckout(ctx context.Context, input CreateCheckoutInput)
 	if notifyURL == "" {
 		baseURL := config.WebhookBaseURL.String()
 		if baseURL != "" {
-			notifyURL = fmt.Sprintf("%s/api/webhooks/integrations/%s/%s",
+			notifyURL = fmt.Sprintf("%s/api/webhooks/%s/%s",
 				baseURL,
 				paymentProvider.Name(),
-				input.IntegrationID,
+				input.StoreID,
 			)
 		}
 	}
@@ -1004,6 +1055,17 @@ func (s *Service) RefundPayment(ctx context.Context, input RefundPaymentInput) (
 
 // StoreWebhookEvent stores a webhook event for processing.
 func (s *Service) StoreWebhookEvent(ctx context.Context, input StoreWebhookInput) error {
+	// Resolve integration from store_id + provider
+	integrationType := "payment"
+	if input.Provider == "tiny" {
+		integrationType = "erp"
+	}
+	integration, err := s.repo.GetActiveByProvider(ctx, input.StoreID, integrationType, input.Provider)
+	if err != nil {
+		return fmt.Errorf("no active integration found for store %s provider %s: %w", input.StoreID, input.Provider, err)
+	}
+	input.IntegrationID = integration.ID
+
 	// Check for duplicate event
 	existing, err := s.repo.GetWebhookEventByEventID(ctx, input.IntegrationID, input.EventID)
 	if err != nil {
@@ -1022,9 +1084,10 @@ func (s *Service) StoreWebhookEvent(ctx context.Context, input StoreWebhookInput
 
 // ProcessPaymentNotification processes a payment webhook notification.
 func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessPaymentInput) error {
-	integration, err := s.repo.GetByIDOnly(ctx, input.IntegrationID)
+	// Resolve integration from store_id + provider
+	integration, err := s.repo.GetActiveByProvider(ctx, input.StoreID, "payment", input.Provider)
 	if err != nil {
-		return err
+		return fmt.Errorf("no active payment integration found for store %s provider %s: %w", input.StoreID, input.Provider, err)
 	}
 
 	provider, err := s.createProviderFromRow(ctx, integration)
@@ -1039,7 +1102,7 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 
 	status, err := paymentProvider.GetPaymentStatus(ctx, input.PaymentID)
 	if err != nil {
-		s.handleProviderError(ctx, input.IntegrationID, "process_payment_notification", err)
+		s.handleProviderError(ctx, integration.ID, "process_payment_notification", err)
 		return fmt.Errorf("getting payment status: %w", err)
 	}
 

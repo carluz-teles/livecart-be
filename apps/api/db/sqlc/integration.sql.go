@@ -157,6 +157,32 @@ func (q *Queries) CreateIntegrationLog(ctx context.Context, arg CreateIntegratio
 	return i, err
 }
 
+const createOAuthState = `-- name: CreateOAuthState :exec
+
+INSERT INTO oauth_states (state, store_id, provider, code_verifier)
+VALUES ($1, $2, $3, $4)
+`
+
+type CreateOAuthStateParams struct {
+	State        string      `json:"state"`
+	StoreID      pgtype.UUID `json:"store_id"`
+	Provider     string      `json:"provider"`
+	CodeVerifier string      `json:"code_verifier"`
+}
+
+// =============================================================================
+// OAUTH STATES (PKCE)
+// =============================================================================
+func (q *Queries) CreateOAuthState(ctx context.Context, arg CreateOAuthStateParams) error {
+	_, err := q.db.Exec(ctx, createOAuthState,
+		arg.State,
+		arg.StoreID,
+		arg.Provider,
+		arg.CodeVerifier,
+	)
+	return err
+}
+
 const createSubscription = `-- name: CreateSubscription :one
 INSERT INTO subscriptions (store_id, integration_id, external_subscription_id, status, current_period_start, current_period_end)
 VALUES ($1, $2, $3, $4, $5, $6)
@@ -250,6 +276,15 @@ func (q *Queries) DeleteExpiredIdempotencyKeys(ctx context.Context) error {
 	return err
 }
 
+const deleteExpiredOAuthStates = `-- name: DeleteExpiredOAuthStates :exec
+DELETE FROM oauth_states WHERE expires_at < now()
+`
+
+func (q *Queries) DeleteExpiredOAuthStates(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, deleteExpiredOAuthStates)
+	return err
+}
+
 const deleteIntegration = `-- name: DeleteIntegration :exec
 DELETE FROM integrations WHERE id = $1 AND store_id = $2
 `
@@ -261,6 +296,15 @@ type DeleteIntegrationParams struct {
 
 func (q *Queries) DeleteIntegration(ctx context.Context, arg DeleteIntegrationParams) error {
 	_, err := q.db.Exec(ctx, deleteIntegration, arg.ID, arg.StoreID)
+	return err
+}
+
+const deleteOAuthState = `-- name: DeleteOAuthState :exec
+DELETE FROM oauth_states WHERE state = $1
+`
+
+func (q *Queries) DeleteOAuthState(ctx context.Context, state string) error {
+	_, err := q.db.Exec(ctx, deleteOAuthState, state)
 	return err
 }
 
@@ -461,6 +505,25 @@ func (q *Queries) GetIntegrationByProvider(ctx context.Context, arg GetIntegrati
 		&i.CreatedAt,
 		&i.Credentials,
 		&i.Metadata,
+	)
+	return i, err
+}
+
+const getOAuthState = `-- name: GetOAuthState :one
+SELECT state, store_id, provider, code_verifier, created_at, expires_at FROM oauth_states
+WHERE state = $1 AND expires_at > now()
+`
+
+func (q *Queries) GetOAuthState(ctx context.Context, state string) (OauthState, error) {
+	row := q.db.QueryRow(ctx, getOAuthState, state)
+	var i OauthState
+	err := row.Scan(
+		&i.State,
+		&i.StoreID,
+		&i.Provider,
+		&i.CodeVerifier,
+		&i.CreatedAt,
+		&i.ExpiresAt,
 	)
 	return i, err
 }

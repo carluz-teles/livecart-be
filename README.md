@@ -26,10 +26,30 @@ API REST monolítica em Go para live commerce — detecção de pedidos via come
 # Subir banco + API
 docker compose up --build
 
+# Subir banco + API + Tunnel (para integrações OAuth)
+docker compose --profile dev up --build
+
 # API disponível em http://localhost:3001
 # Swagger UI em http://localhost:3001/swagger/
 # Health check em http://localhost:3001/health
+# Tunnel (com profile dev) em https://livecart-api.loca.lt
 ```
+
+### Tunnel para Integrações
+
+O tunnel expõe a API local para a internet, necessário para testar integrações OAuth (Mercado Pago, Tiny ERP).
+
+```bash
+# Iniciar com tunnel
+docker compose --profile dev up
+
+# Ver logs do tunnel
+docker compose logs -f tunnel
+```
+
+**URLs de callback para configurar nas integrações:**
+- Mercado Pago: `https://livecart-api.loca.lt/api/v1/integrations/oauth/mercado_pago/callback`
+- Tiny ERP: `https://livecart-api.loca.lt/api/v1/integrations/oauth/tiny/callback`
 
 ## Desenvolvimento local (sem Docker)
 

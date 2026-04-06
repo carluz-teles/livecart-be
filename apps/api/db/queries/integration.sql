@@ -149,3 +149,21 @@ RETURNING *;
 UPDATE subscriptions
 SET status = $2, cancelled_at = $3
 WHERE id = $1;
+
+-- =============================================================================
+-- OAUTH STATES (PKCE)
+-- =============================================================================
+
+-- name: CreateOAuthState :exec
+INSERT INTO oauth_states (state, store_id, provider, code_verifier)
+VALUES ($1, $2, $3, $4);
+
+-- name: GetOAuthState :one
+SELECT * FROM oauth_states
+WHERE state = $1 AND expires_at > now();
+
+-- name: DeleteOAuthState :exec
+DELETE FROM oauth_states WHERE state = $1;
+
+-- name: DeleteExpiredOAuthStates :exec
+DELETE FROM oauth_states WHERE expires_at < now();

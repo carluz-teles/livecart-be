@@ -18,7 +18,7 @@ func main() {
 	cfg := config.Load()
 
 	// Initialize simulator session
-	session := simulator.NewSession(cfg.AccountID, cfg.Username)
+	session := simulator.NewSession(cfg.AccountID, cfg.Username, cfg.MediaID)
 
 	// Initialize webhook sender
 	sender := webhook.NewSender(cfg.WebhookURL)

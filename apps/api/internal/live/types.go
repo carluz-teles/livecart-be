@@ -140,6 +140,12 @@ type CreateSessionRequest struct {
 	PlatformLiveID string `json:"platformLiveId" validate:"required"`
 }
 
+// CommentResponse represents a single comment in the API response.
+type CommentResponse struct {
+	Handle string `json:"handle"`
+	Text   string `json:"text"`
+}
+
 type SessionResponse struct {
 	ID            string             `json:"id"`
 	EventID       string             `json:"eventId"`
@@ -152,6 +158,7 @@ type SessionResponse struct {
 	TotalRevenue  int64              `json:"totalRevenue"`
 	PaidRevenue   int64              `json:"paidRevenue"`
 	Platforms     []PlatformResponse `json:"platforms,omitempty"`
+	Comments      []CommentResponse  `json:"comments,omitempty"`
 	CreatedAt     time.Time          `json:"createdAt"`
 	UpdatedAt     time.Time          `json:"updatedAt"`
 }
@@ -172,6 +179,12 @@ type CreateSessionOutput struct {
 	CreatedAt time.Time
 }
 
+// CommentOutput represents a comment in the service layer.
+type CommentOutput struct {
+	Handle string
+	Text   string
+}
+
 type SessionOutput struct {
 	ID            string
 	EventID       string
@@ -184,6 +197,7 @@ type SessionOutput struct {
 	TotalRevenue  int64
 	PaidRevenue   int64
 	Platforms     []PlatformOutput
+	Comments      []CommentOutput
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
@@ -248,6 +262,15 @@ type PlatformRow struct {
 	Platform       string
 	PlatformLiveID string
 	AddedAt        time.Time
+}
+
+// Repository layer - Comment
+type CommentRow struct {
+	ID             string
+	SessionID      string
+	PlatformHandle string
+	Text           string
+	CreatedAt      time.Time
 }
 
 // =============================================================================

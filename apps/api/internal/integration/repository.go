@@ -1089,6 +1089,55 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 }
 
 // =============================================================================
+// OAUTH STATES (PKCE)
+// =============================================================================
+
+// OAuthStateRow represents an OAuth state record.
+type OAuthStateRow struct {
+	State        string
+	StoreID      pgtype.UUID
+	Provider     string
+	CodeVerifier string
+	CreatedAt    time.Time
+	ExpiresAt    time.Time
+}
+
+// CreateOAuthState stores an OAuth state with PKCE code_verifier.
+func (r *Repository) CreateOAuthState(ctx context.Context, state, storeID, provider, codeVerifier string) error {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+	return r.queries.CreateOAuthState(ctx, sqlc.CreateOAuthStateParams{
+		State:        state,
+		StoreID:      sID,
+		Provider:     provider,
+		CodeVerifier: codeVerifier,
+	})
+}
+
+// GetOAuthState retrieves an OAuth state if not expired.
+func (r *Repository) GetOAuthState(ctx context.Context, state string) (*OAuthStateRow, error) {
+	row, err := r.queries.GetOAuthState(ctx, state)
+	if err != nil {
+		return nil, fmt.Errorf("getting OAuth state: %w", err)
+	}
+	return &OAuthStateRow{
+		State:        row.State,
+		StoreID:      row.StoreID,
+		Provider:     row.Provider,
+		CodeVerifier: row.CodeVerifier,
+		CreatedAt:    row.CreatedAt.Time,
+		ExpiresAt:    row.ExpiresAt.Time,
+	}, nil
+}
+
+// DeleteOAuthState removes an OAuth state after use.
+func (r *Repository) DeleteOAuthState(ctx context.Context, state string) error {
+	return r.queries.DeleteOAuthState(ctx, state)
+}
+
+// =============================================================================
 // HELPERS
 // =============================================================================
 

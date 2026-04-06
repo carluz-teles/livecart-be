@@ -169,6 +169,16 @@ type Membership struct {
 	UserID    pgtype.UUID        `json:"user_id"`
 }
 
+// Temporary storage for OAuth PKCE code_verifier during authorization flow
+type OauthState struct {
+	State        string             `json:"state"`
+	StoreID      pgtype.UUID        `json:"store_id"`
+	Provider     string             `json:"provider"`
+	CodeVerifier string             `json:"code_verifier"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt    pgtype.Timestamptz `json:"expires_at"`
+}
+
 type Product struct {
 	ID             pgtype.UUID        `json:"id"`
 	StoreID        pgtype.UUID        `json:"store_id"`

@@ -52,27 +52,29 @@ var questionPatterns = []*regexp.Regexp{
 }
 
 // quantityPatterns extract quantity from text. Order matters: specific first.
+// IMPORTANT: All patterns use {1,2} to match only 1-2 digit quantities (1-99).
+// This prevents 4-digit keywords like "1001" from being interpreted as quantities.
 var quantityPatterns = []*regexp.Regexp{
 	// "2x", "3X" (multiplier notation)
-	regexp.MustCompile(`(?i)\b(\d+)\s*x\b`),
+	regexp.MustCompile(`(?i)\b(\d{1,2})\s*x\b`),
 	// "x2", "X3"
-	regexp.MustCompile(`(?i)\bx\s*(\d+)\b`),
-	// "quero N", "eu quero N"
-	regexp.MustCompile(`(?i)\bquero\s+(\d+)\b`),
+	regexp.MustCompile(`(?i)\bx\s*(\d{1,2})\b`),
+	// "quero N", "eu quero N" - only match 1-2 digit numbers to avoid matching keywords
+	regexp.MustCompile(`(?i)\bquero\s+(\d{1,2})\b`),
 	// "reserva N"
-	regexp.MustCompile(`(?i)\breserva\s+(\d+)\b`),
+	regexp.MustCompile(`(?i)\breserva\s+(\d{1,2})\b`),
 	// "manda N"
-	regexp.MustCompile(`(?i)\bmanda\s+(\d+)\b`),
+	regexp.MustCompile(`(?i)\bmanda\s+(\d{1,2})\b`),
 	// "separa N"
-	regexp.MustCompile(`(?i)\bsepara\s+(\d+)\b`),
+	regexp.MustCompile(`(?i)\bsepara\s+(\d{1,2})\b`),
 	// "pega N"
-	regexp.MustCompile(`(?i)\bpega\s+(\d+)\b`),
+	regexp.MustCompile(`(?i)\bpega\s+(\d{1,2})\b`),
 	// "coloca N"
-	regexp.MustCompile(`(?i)\bcoloca\s+(\d+)\b`),
+	regexp.MustCompile(`(?i)\bcoloca\s+(\d{1,2})\b`),
 	// "me manda N"
-	regexp.MustCompile(`(?i)\bme\s+manda\s+(\d+)\b`),
+	regexp.MustCompile(`(?i)\bme\s+manda\s+(\d{1,2})\b`),
 	// "N unidade(s)"
-	regexp.MustCompile(`(?i)\b(\d+)\s+unidades?\b`),
+	regexp.MustCompile(`(?i)\b(\d{1,2})\s+unidades?\b`),
 }
 
 // ParsePurchaseIntent analyzes comment text and detects purchase intent.
