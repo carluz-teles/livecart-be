@@ -32,6 +32,7 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App) {
 	oauth := app.Group("/api/v1/integrations/oauth")
 	oauth.Get("/mercado_pago/callback", h.HandleMercadoPagoOAuthCallback)
 	oauth.Get("/tiny/callback", h.HandleTinyOAuthCallback)
+	oauth.Get("/instagram/callback", h.HandleInstagramOAuthCallback)
 
 	// Webhooks (event notifications from external providers)
 	// Uses storeId instead of integrationId for stable URLs across reconnections
@@ -149,6 +150,70 @@ func (h *WebhookHandler) HandleTinyOAuthCallback(c *fiber.Ctx) error {
 
 	// Redirect to frontend with success
 	return c.Redirect(frontendURL+"/settings/integrations?success=tiny_connected", fiber.StatusFound)
+}
+
+// HandleInstagramOAuthCallback handles the OAuth callback from Instagram.
+// @Summary Handle Instagram OAuth callback
+// @Description Exchanges authorization code for access token and creates/updates integration
+// @Tags webhooks
+// @Produce json
+// @Param code query string true "Authorization code"
+// @Param state query string true "State parameter"
+// @Success 302 "Redirect to frontend with success"
+// @Failure 302 "Redirect to frontend with error"
+// @Router /api/v1/integrations/oauth/instagram/callback [get]
+func (h *WebhookHandler) HandleInstagramOAuthCallback(c *fiber.Ctx) error {
+	code := c.Query("code")
+	state := c.Query("state")
+	errorParam := c.Query("error")
+	errorReason := c.Query("error_reason")
+
+	frontendURL := config.FrontendURL.StringOr("http://localhost:3000")
+
+	// Check if user denied access
+	if errorParam != "" {
+		h.logger.Warn("Instagram OAuth denied by user",
+			zap.String("error", errorParam),
+			zap.String("error_reason", errorReason),
+		)
+		return c.Redirect(frontendURL+"/settings/integrations?error=instagram_denied", fiber.StatusFound)
+	}
+
+	if code == "" {
+		h.logger.Error("Instagram OAuth callback missing code")
+		return c.Redirect(frontendURL+"/settings/integrations?error=missing_code", fiber.StatusFound)
+	}
+
+	if state == "" {
+		h.logger.Error("Instagram OAuth callback missing state")
+		return c.Redirect(frontendURL+"/settings/integrations?error=missing_state", fiber.StatusFound)
+	}
+
+	h.logger.Info("Instagram OAuth callback received",
+		zap.String("state", state),
+		zap.Bool("has_code", code != ""),
+	)
+
+	output, err := h.service.HandleOAuthCallback(c.Context(), OAuthCallbackInput{
+		Provider: "instagram",
+		Code:     code,
+		State:    state,
+	})
+	if err != nil {
+		h.logger.Error("failed to handle Instagram OAuth callback",
+			zap.String("state", state),
+			zap.Error(err),
+		)
+		return c.Redirect(frontendURL+"/settings/integrations?error=oauth_failed", fiber.StatusFound)
+	}
+
+	h.logger.Info("Instagram OAuth completed successfully",
+		zap.String("integration_id", output.IntegrationID),
+		zap.String("store_id", output.StoreID),
+	)
+
+	// Redirect to frontend with success
+	return c.Redirect(frontendURL+"/settings/integrations?success=instagram_connected", fiber.StatusFound)
 }
 
 // HandleMercadoPago handles Mercado Pago webhook notifications.

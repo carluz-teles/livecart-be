@@ -31,6 +31,8 @@ const (
 
 	// Instagram/Meta Integration
 	InstagramVerifyToken Key = "INSTAGRAM_VERIFY_TOKEN" // Token for Meta webhook verification
+	InstagramAppID       Key = "INSTAGRAM_APP_ID"       // Instagram OAuth App ID (from Meta for Developers)
+	InstagramAppSecret   Key = "INSTAGRAM_APP_SECRET"   // Instagram OAuth App Secret
 )
 
 // Environment values

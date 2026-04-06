@@ -180,6 +180,8 @@ func (s *Service) GetOAuthURL(ctx context.Context, input GetOAuthURLInput) (*Get
 		return s.getMercadoPagoOAuthURL(input.StoreID)
 	case "tiny":
 		return s.getTinyOAuthURL(input.StoreID)
+	case "instagram":
+		return s.getInstagramOAuthURL(input.StoreID)
 	default:
 		return nil, httpx.ErrUnprocessable("unknown provider: " + input.Provider)
 	}
@@ -236,6 +238,40 @@ func generateCodeChallenge(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(h[:])
 }
 
+// getInstagramOAuthURL generates the Instagram Business Login OAuth URL.
+func (s *Service) getInstagramOAuthURL(storeID string) (*GetOAuthURLOutput, error) {
+	appID := config.InstagramAppID.String()
+	if appID == "" {
+		return nil, httpx.ErrUnprocessable("Instagram app not configured")
+	}
+
+	redirectURI := config.WebhookBaseURL.String() + "/api/v1/integrations/oauth/instagram/callback"
+
+	// Generate unique state
+	state := uuid.New().String()
+
+	// Store state for later retrieval in callback
+	ctx := context.Background()
+	if err := s.repo.CreateOAuthState(ctx, state, storeID, "instagram", ""); err != nil {
+		return nil, fmt.Errorf("storing OAuth state: %w", err)
+	}
+
+	// Build authorization URL
+	// Scopes: instagram_business_basic (required) + instagram_business_manage_comments (for live_comments webhooks)
+	authURL := fmt.Sprintf(
+		"https://www.instagram.com/oauth/authorize?client_id=%s&redirect_uri=%s&response_type=code&scope=%s&state=%s",
+		appID,
+		url.QueryEscape(redirectURI),
+		url.QueryEscape("instagram_business_basic,instagram_business_manage_comments"),
+		state,
+	)
+
+	return &GetOAuthURLOutput{
+		AuthURL: authURL,
+		State:   state,
+	}, nil
+}
+
 // getTinyOAuthURL generates the Tiny ERP OAuth URL using stored credentials.
 func (s *Service) getTinyOAuthURL(storeID string) (*GetOAuthURLOutput, error) {
 	// Find existing integration (active or pending_auth) to get client_id
@@ -280,6 +316,8 @@ func (s *Service) HandleOAuthCallback(ctx context.Context, input OAuthCallbackIn
 		return s.handleMercadoPagoCallback(ctx, input)
 	case "tiny":
 		return s.handleTinyCallback(ctx, input)
+	case "instagram":
+		return s.handleInstagramCallback(ctx, input)
 	default:
 		return nil, httpx.ErrUnprocessable("unknown provider: " + input.Provider)
 	}
@@ -562,6 +600,296 @@ func (s *Service) handleTinyCallback(ctx context.Context, input OAuthCallbackInp
 		Provider:      "tiny",
 		Status:        "active",
 	}, nil
+}
+
+// handleInstagramCallback exchanges the code for tokens and creates the integration.
+func (s *Service) handleInstagramCallback(ctx context.Context, input OAuthCallbackInput) (*OAuthCallbackOutput, error) {
+	appID := config.InstagramAppID.String()
+	appSecret := config.InstagramAppSecret.String()
+	redirectURI := config.WebhookBaseURL.String() + "/api/v1/integrations/oauth/instagram/callback"
+
+	if appID == "" || appSecret == "" {
+		return nil, httpx.ErrUnprocessable("Instagram app not configured")
+	}
+
+	// Retrieve OAuth state
+	oauthState, err := s.repo.GetOAuthState(ctx, input.State)
+	if err != nil {
+		s.logger.Error("OAuth state not found or expired",
+			zap.String("state", input.State),
+			zap.Error(err),
+		)
+		return nil, httpx.ErrUnprocessable("OAuth state expired or invalid")
+	}
+
+	// Clean up the state after retrieval
+	defer s.repo.DeleteOAuthState(ctx, input.State)
+
+	storeID := oauthState.StoreID.String()
+
+	// Step 1: Exchange code for short-lived token
+	shortLivedToken, instagramUserID, err := s.exchangeInstagramCode(ctx, appID, appSecret, redirectURI, input.Code)
+	if err != nil {
+		return nil, fmt.Errorf("exchanging code for token: %w", err)
+	}
+
+	// Step 2: Exchange short-lived token for long-lived token
+	longLivedToken, expiresIn, err := s.exchangeInstagramLongLivedToken(ctx, appSecret, shortLivedToken)
+	if err != nil {
+		s.logger.Warn("failed to get long-lived token, using short-lived",
+			zap.Error(err),
+		)
+		// Fall back to short-lived token (1 hour)
+		longLivedToken = shortLivedToken
+		expiresIn = 3600
+	}
+
+	// Step 3: Get user profile info (username)
+	username, err := s.getInstagramUserProfile(ctx, longLivedToken)
+	if err != nil {
+		s.logger.Warn("failed to get Instagram username",
+			zap.Error(err),
+		)
+		username = instagramUserID // fallback to user ID
+	}
+
+	// Create credentials
+	creds := &providers.Credentials{
+		AccessToken: longLivedToken,
+		TokenType:   "bearer",
+		ExpiresAt:   time.Now().Add(time.Duration(expiresIn) * time.Second),
+		Extra: map[string]any{
+			"instagram_user_id": instagramUserID,
+			"username":          username,
+		},
+	}
+
+	// Encrypt credentials
+	encryptedCreds, err := s.encryptor.EncryptJSON(creds)
+	if err != nil {
+		return nil, fmt.Errorf("encrypting credentials: %w", err)
+	}
+
+	tokenExpiresAt := creds.ExpiresAt
+
+	// Check if integration already exists for this store
+	existing, _ := s.repo.GetActiveByProvider(ctx, storeID, "social", "instagram")
+
+	var integrationID string
+	if existing != nil {
+		// Update existing integration
+		err = s.repo.UpdateCredentials(ctx, existing.ID, encryptedCreds, &tokenExpiresAt)
+		if err != nil {
+			return nil, fmt.Errorf("updating credentials: %w", err)
+		}
+		err = s.repo.UpdateStatus(ctx, existing.ID, "active")
+		if err != nil {
+			return nil, fmt.Errorf("updating status: %w", err)
+		}
+		integrationID = existing.ID
+	} else {
+		// Create new integration
+		row, err := s.repo.Create(ctx, CreateIntegrationParams{
+			StoreID:        storeID,
+			Type:           "social",
+			Provider:       "instagram",
+			Status:         "active",
+			Credentials:    encryptedCreds,
+			TokenExpiresAt: &tokenExpiresAt,
+			Metadata: map[string]any{
+				"instagram_user_id": instagramUserID,
+				"username":          username,
+				"connected_at":      time.Now(),
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("creating integration: %w", err)
+		}
+		integrationID = row.ID
+	}
+
+	s.logger.Info("Instagram OAuth completed",
+		zap.String("store_id", storeID),
+		zap.String("integration_id", integrationID),
+		zap.String("instagram_user_id", instagramUserID),
+		zap.String("username", username),
+	)
+
+	return &OAuthCallbackOutput{
+		IntegrationID: integrationID,
+		StoreID:       storeID,
+		Provider:      "instagram",
+		Status:        "active",
+	}, nil
+}
+
+// exchangeInstagramCode exchanges the authorization code for a short-lived access token.
+func (s *Service) exchangeInstagramCode(ctx context.Context, appID, appSecret, redirectURI, code string) (string, string, error) {
+	tokenURL := "https://api.instagram.com/oauth/access_token"
+
+	// Instagram requires form-urlencoded for this endpoint
+	formData := url.Values{}
+	formData.Set("client_id", appID)
+	formData.Set("client_secret", appSecret)
+	formData.Set("grant_type", "authorization_code")
+	formData.Set("redirect_uri", redirectURI)
+	formData.Set("code", code)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(formData.Encode()))
+	if err != nil {
+		return "", "", fmt.Errorf("creating token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("sending token request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		s.logger.Error("Instagram token exchange failed",
+			zap.Int("status", resp.StatusCode),
+			zap.String("body", string(body)),
+		)
+		return "", "", fmt.Errorf("token exchange failed: status %d", resp.StatusCode)
+	}
+
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+		UserID      int64  `json:"user_id"`
+	}
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return "", "", fmt.Errorf("parsing token response: %w", err)
+	}
+
+	return tokenResp.AccessToken, fmt.Sprintf("%d", tokenResp.UserID), nil
+}
+
+// exchangeInstagramLongLivedToken exchanges a short-lived token for a long-lived token (60 days).
+func (s *Service) exchangeInstagramLongLivedToken(ctx context.Context, appSecret, shortLivedToken string) (string, int, error) {
+	tokenURL := fmt.Sprintf(
+		"https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret=%s&access_token=%s",
+		appSecret,
+		shortLivedToken,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", tokenURL, nil)
+	if err != nil {
+		return "", 0, fmt.Errorf("creating long-lived token request: %w", err)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", 0, fmt.Errorf("sending long-lived token request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		s.logger.Error("Instagram long-lived token exchange failed",
+			zap.Int("status", resp.StatusCode),
+			zap.String("body", string(body)),
+		)
+		return "", 0, fmt.Errorf("long-lived token exchange failed: status %d", resp.StatusCode)
+	}
+
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return "", 0, fmt.Errorf("parsing long-lived token response: %w", err)
+	}
+
+	return tokenResp.AccessToken, tokenResp.ExpiresIn, nil
+}
+
+// getInstagramUserProfile fetches the user's Instagram username.
+func (s *Service) getInstagramUserProfile(ctx context.Context, accessToken string) (string, error) {
+	profileURL := fmt.Sprintf(
+		"https://graph.instagram.com/me?fields=user_id,username&access_token=%s",
+		accessToken,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", profileURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("creating profile request: %w", err)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("sending profile request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		s.logger.Error("Instagram profile fetch failed",
+			zap.Int("status", resp.StatusCode),
+			zap.String("body", string(body)),
+		)
+		return "", fmt.Errorf("profile fetch failed: status %d", resp.StatusCode)
+	}
+
+	var profileResp struct {
+		UserID   string `json:"user_id"`
+		Username string `json:"username"`
+	}
+	if err := json.Unmarshal(body, &profileResp); err != nil {
+		return "", fmt.Errorf("parsing profile response: %w", err)
+	}
+
+	return profileResp.Username, nil
+}
+
+// RefreshInstagramToken refreshes a long-lived Instagram token for another 60 days.
+func (s *Service) RefreshInstagramToken(ctx context.Context, accessToken string) (string, int, error) {
+	refreshURL := fmt.Sprintf(
+		"https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=%s",
+		accessToken,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", refreshURL, nil)
+	if err != nil {
+		return "", 0, fmt.Errorf("creating refresh request: %w", err)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", 0, fmt.Errorf("sending refresh request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		s.logger.Error("Instagram token refresh failed",
+			zap.Int("status", resp.StatusCode),
+			zap.String("body", string(body)),
+		)
+		return "", 0, fmt.Errorf("token refresh failed: status %d", resp.StatusCode)
+	}
+
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return "", 0, fmt.Errorf("parsing refresh response: %w", err)
+	}
+
+	return tokenResp.AccessToken, tokenResp.ExpiresIn, nil
 }
 
 // =============================================================================
