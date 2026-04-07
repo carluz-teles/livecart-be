@@ -133,6 +133,9 @@ type SocialProvider interface {
 
 	// GetProfile retrieves the connected account profile information.
 	GetProfile(ctx context.Context) (*SocialProfile, error)
+
+	// SendDirectMessage sends a text DM to the given platform user.
+	SendDirectMessage(ctx context.Context, recipientID, text string) error
 }
 
 // SocialProfile contains social media account information.

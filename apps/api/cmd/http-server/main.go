@@ -293,6 +293,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// Create webhook handler
 			integrationWebhookHandler = integration.NewWebhookHandler(integrationSvc, log)
 
+			// Wire Notifier into liveSvc (lazy injection breaks the dependency
+			// cycle: integration.Service depends on live.Service, and the
+			// notifier impl depends on integration.Service).
+			liveSvc.SetNotifier(newLiveNotifierAdapter(integration.NewInstagramNotifier(integrationSvc, log)))
+
 			log.Info("integration layer initialized")
 		}
 	}
@@ -397,4 +402,27 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	invitationHandler.RegisterRoutes(storeScoped)
 
 	return app
+}
+
+// liveNotifierAdapter bridges integration.InstagramNotifier (concrete impl)
+// to live.Notifier (local interface). The packages cannot share the params
+// type without introducing an import cycle, so we translate at the boundary.
+type liveNotifierAdapter struct {
+	inner *integration.InstagramNotifier
+}
+
+func newLiveNotifierAdapter(inner *integration.InstagramNotifier) *liveNotifierAdapter {
+	return &liveNotifierAdapter{inner: inner}
+}
+
+func (a *liveNotifierAdapter) NotifyEventCheckout(ctx context.Context, p live.NotifyEventCheckoutParams) error {
+	return a.inner.NotifyEventCheckout(ctx, integration.NotifyEventCheckoutParams{
+		StoreID:        p.StoreID,
+		EventID:        p.EventID,
+		CartID:         p.CartID,
+		PlatformUserID: p.PlatformUserID,
+		PlatformHandle: p.PlatformHandle,
+		TotalItems:     p.TotalItems,
+		TotalValue:     p.TotalValue,
+	})
 }

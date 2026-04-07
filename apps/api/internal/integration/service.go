@@ -257,12 +257,15 @@ func (s *Service) getInstagramOAuthURL(storeID string) (*GetOAuthURLOutput, erro
 	}
 
 	// Build authorization URL
-	// Scopes: instagram_business_basic (required) + instagram_business_manage_comments (for live_comments webhooks)
+	// Scopes:
+	//   instagram_business_basic            (required)
+	//   instagram_business_manage_comments  (live_comments webhooks)
+	//   instagram_business_manage_messages  (send DMs after event end)
 	authURL := fmt.Sprintf(
 		"https://www.instagram.com/oauth/authorize?client_id=%s&redirect_uri=%s&response_type=code&scope=%s&state=%s",
 		appID,
 		url.QueryEscape(redirectURI),
-		url.QueryEscape("instagram_business_basic,instagram_business_manage_comments"),
+		url.QueryEscape("instagram_business_basic,instagram_business_manage_comments,instagram_business_manage_messages"),
 		state,
 	)
 
@@ -952,6 +955,69 @@ func (s *Service) GetERPProvider(ctx context.Context, integrationID, storeID str
 	}
 
 	return erpProvider, nil
+}
+
+// GetSocialProvider returns a SocialProvider for the given integration.
+func (s *Service) GetSocialProvider(ctx context.Context, integrationID, storeID string) (providers.SocialProvider, error) {
+	integration, err := s.repo.GetByID(ctx, integrationID, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	if integration.Type != string(providers.ProviderTypeSocial) {
+		return nil, httpx.ErrUnprocessable("integration is not a social provider")
+	}
+
+	provider, err := s.createProviderFromRow(ctx, integration)
+	if err != nil {
+		return nil, err
+	}
+
+	socialProvider, ok := provider.(providers.SocialProvider)
+	if !ok {
+		return nil, httpx.ErrUnprocessable("failed to cast to social provider")
+	}
+
+	return socialProvider, nil
+}
+
+// SendInstagramDM resolves the active Instagram integration of a store and sends a DM
+// to the given platform user. Best-effort: callers should treat errors as non-fatal.
+func (s *Service) SendInstagramDM(ctx context.Context, storeID, recipientID, text string) error {
+	// GetByProvider returns httpx.ErrNotFound when there is no integration —
+	// no need for a separate nil check.
+	integration, err := s.repo.GetByProvider(ctx, storeID, "social", "instagram")
+	if err != nil {
+		return fmt.Errorf("instagram integration unavailable: %w", err)
+	}
+	if integration.Status != "active" {
+		return fmt.Errorf("instagram integration is not active (status=%s)", integration.Status)
+	}
+
+	provider, err := s.createProviderFromRow(ctx, integration)
+	if err != nil {
+		return fmt.Errorf("instantiating instagram provider: %w", err)
+	}
+
+	socialProvider, ok := provider.(providers.SocialProvider)
+	if !ok {
+		return fmt.Errorf("provider is not a social provider")
+	}
+
+	if err := socialProvider.SendDirectMessage(ctx, recipientID, text); err != nil {
+		s.logger.Warn("failed to send instagram dm",
+			zap.String("store_id", storeID),
+			zap.String("recipient_id", recipientID),
+			zap.Error(err),
+		)
+		return err
+	}
+
+	s.logger.Info("instagram dm sent",
+		zap.String("store_id", storeID),
+		zap.String("recipient_id", recipientID),
+	)
+	return nil
 }
 
 // =============================================================================

@@ -145,8 +145,6 @@ type LiveSession struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 	EventID       pgtype.UUID        `json:"event_id"`
-	// Array of comments: [{handle, text}]
-	Comments json.RawMessage `json:"comments"`
 }
 
 type LiveSessionPlatform struct {

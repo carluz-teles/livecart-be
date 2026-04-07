@@ -9,9 +9,29 @@ import (
 	"go.uber.org/zap"
 )
 
+// Notifier is the minimal notification surface this package depends on.
+// The concrete implementation lives in the integration package; we declare
+// a local interface to avoid an import cycle.
+type Notifier interface {
+	NotifyEventCheckout(ctx context.Context, params NotifyEventCheckoutParams) error
+}
+
+// NotifyEventCheckoutParams mirrors the integration package params struct
+// (Go duck typing only matches methods, so we declare the input shape here).
+type NotifyEventCheckoutParams struct {
+	StoreID        string
+	EventID        string
+	CartID         string
+	PlatformUserID string
+	PlatformHandle string
+	TotalItems     int
+	TotalValue     int64
+}
+
 type Service struct {
-	repo   *Repository
-	logger *zap.Logger
+	repo     *Repository
+	logger   *zap.Logger
+	notifier Notifier
 }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {
@@ -19,6 +39,14 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 		repo:   repo,
 		logger: logger.Named("live"),
 	}
+}
+
+// SetNotifier wires a Notifier into the service after construction. This
+// breaks the dependency cycle between live and integration packages
+// (integration.Service depends on live.Service, and the notifier impl
+// depends on integration.Service).
+func (s *Service) SetNotifier(n Notifier) {
+	s.notifier = n
 }
 
 // =============================================================================
@@ -324,6 +352,21 @@ func (s *Service) Start(ctx context.Context, id, storeID string) (LiveOutput, er
 }
 
 func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, error) {
+	// 0. Idempotency guard: if the event was already ended, do not re-run
+	// the finalization side-effects (carts, DMs). Return the current state.
+	existing, err := s.repo.GetEventByID(ctx, input.ID, input.StoreID)
+	if err != nil {
+		return EndLiveOutput{}, err
+	}
+	if existing != nil && existing.Status == "ended" {
+		liveOutput, _ := s.GetByID(ctx, existing.ID, input.StoreID)
+		return EndLiveOutput{
+			Live:           liveOutput,
+			CartsFinalized: 0,
+			AutoSendLinks:  false,
+		}, nil
+	}
+
 	// 1. End the event
 	event, err := s.repo.EndEvent(ctx, input.ID, input.StoreID)
 	if err != nil {
@@ -360,16 +403,15 @@ func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, e
 		)
 	}
 
-	// 4. Determine if we should auto-send checkout links
-	// Rule: auto-send only if event has 1 session (or crash recovery)
+	// 4. Determine if we should auto-send checkout links.
+	// Carts are unique per (event_id, platform_user_id), so multi-session
+	// events already aggregate items per buyer. Use the explicit override
+	// when provided, otherwise fall back to the store default.
 	sessionCount, _ := s.repo.CountSessionsByEvent(ctx, input.ID)
 	autoSend := false
-
 	if input.AutoSend != nil {
-		// Use override value
 		autoSend = *input.AutoSend
-	} else if sessionCount <= 1 {
-		// Single session event - use store default
+	} else {
 		storeDefault, err := s.repo.GetStoreAutoSendSetting(ctx, input.StoreID)
 		if err != nil {
 			s.logger.Error("failed to get store auto_send setting",
@@ -380,7 +422,6 @@ func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, e
 			autoSend = storeDefault
 		}
 	}
-	// Multi-session events: auto-send is disabled by default
 
 	s.logger.Info("live event ended",
 		zap.String("event_id", input.ID),
@@ -388,6 +429,11 @@ func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, e
 		zap.Int("carts_finalized", cartsFinalized),
 		zap.Bool("auto_send_links", autoSend),
 	)
+
+	// 5. Dispatch checkout DMs (best-effort, async — never blocks the response).
+	if autoSend && s.notifier != nil {
+		go s.sendCheckoutLinksForEvent(context.Background(), input.StoreID, event.ID)
+	}
 
 	// Get full output
 	liveOutput, _ := s.GetByID(ctx, event.ID, input.StoreID)
@@ -397,6 +443,64 @@ func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, e
 		CartsFinalized: cartsFinalized,
 		AutoSendLinks:  autoSend,
 	}, nil
+}
+
+// sendCheckoutLinksForEvent iterates over all carts of an event with at least
+// one item and dispatches a checkout DM per buyer through the configured
+// Notifier. Errors are logged individually and never interrupt the loop.
+func (s *Service) sendCheckoutLinksForEvent(ctx context.Context, storeID, eventID string) {
+	carts, err := s.repo.ListCartsWithTotalByEvent(ctx, eventID)
+	if err != nil {
+		s.logger.Error("failed to list carts for event checkout dispatch",
+			zap.String("event_id", eventID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	sent := 0
+	skipped := 0
+	for _, c := range carts {
+		if c.TotalItems <= 0 || c.PlatformUserID == "" {
+			skipped++
+			continue
+		}
+		// Only notify carts that were just finalized for checkout. Skip
+		// carts already paid, expired, or abandoned during the live.
+		if c.Status != "checkout" {
+			skipped++
+			continue
+		}
+		if c.PaymentStatus != nil && *c.PaymentStatus == "paid" {
+			skipped++
+			continue
+		}
+		if err := s.notifier.NotifyEventCheckout(ctx, NotifyEventCheckoutParams{
+			StoreID:        storeID,
+			EventID:        eventID,
+			CartID:         c.ID,
+			PlatformUserID: c.PlatformUserID,
+			PlatformHandle: c.PlatformHandle,
+			TotalItems:     c.TotalItems,
+			TotalValue:     c.TotalValue,
+		}); err != nil {
+			s.logger.Warn("failed to notify event checkout",
+				zap.String("event_id", eventID),
+				zap.String("cart_id", c.ID),
+				zap.String("platform_user_id", c.PlatformUserID),
+				zap.Error(err),
+			)
+			continue
+		}
+		sent++
+	}
+
+	s.logger.Info("event checkout dispatch finished",
+		zap.String("event_id", eventID),
+		zap.Int("sent", sent),
+		zap.Int("skipped", skipped),
+		zap.Int("total", len(carts)),
+	)
 }
 
 func (s *Service) Delete(ctx context.Context, id, storeID string) error {

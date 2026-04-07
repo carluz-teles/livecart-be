@@ -19,6 +19,10 @@ type Notifier interface {
 
 	// NotifyCartExpiring notifies a user that their cart is about to expire.
 	NotifyCartExpiring(ctx context.Context, params NotifyCartExpiringParams) error
+
+	// NotifyEventCheckout notifies a user that the live event ended and their cart
+	// is ready for checkout.
+	NotifyEventCheckout(ctx context.Context, params NotifyEventCheckoutParams) error
 }
 
 // NotifyWaitlistParams holds data for waitlist notifications.
@@ -38,6 +42,17 @@ type NotifyCartExpiringParams struct {
 	ExpiresInMin   int
 }
 
+// NotifyEventCheckoutParams holds data for end-of-event checkout notifications.
+type NotifyEventCheckoutParams struct {
+	StoreID        string
+	EventID        string
+	CartID         string
+	PlatformUserID string
+	PlatformHandle string
+	TotalItems     int
+	TotalValue     int64 // cents
+}
+
 // NoopNotifier is a placeholder that does nothing. Replace with real implementation later.
 type NoopNotifier struct{}
 
@@ -45,6 +60,9 @@ func (n *NoopNotifier) NotifyWaitlistAvailable(_ context.Context, _ NotifyWaitli
 	return nil
 }
 func (n *NoopNotifier) NotifyCartExpiring(_ context.Context, _ NotifyCartExpiringParams) error {
+	return nil
+}
+func (n *NoopNotifier) NotifyEventCheckout(_ context.Context, _ NotifyEventCheckoutParams) error {
 	return nil
 }
 

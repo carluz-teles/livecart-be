@@ -1,9 +1,11 @@
 package social
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -13,7 +15,11 @@ import (
 	"livecart/apps/api/lib/ratelimit"
 )
 
-const instagramGraphAPIBaseURL = "https://graph.instagram.com"
+const (
+	instagramGraphAPIBaseURL = "https://graph.instagram.com"
+	instagramGraphAPIVersion = "v25.0"
+	instagramDMTextMaxBytes  = 1000
+)
 
 // Instagram implements the SocialProvider interface for Instagram.
 type Instagram struct {
@@ -142,4 +148,64 @@ func (i *Instagram) GetProfile(ctx context.Context) (*providers.SocialProfile, e
 		Username: profileResp.Username,
 		Name:     profileResp.Name,
 	}, nil
+}
+
+// SendDirectMessage sends a text DM to a user via Instagram Graph API.
+// recipientID must be the Instagram-scoped ID (IGSID) of the recipient.
+// The recipient must have messaged the business in the last 24h or the
+// API will reject the request (outside standard messaging window).
+func (i *Instagram) SendDirectMessage(ctx context.Context, recipientID, text string) error {
+	if recipientID == "" {
+		return fmt.Errorf("recipient id is required")
+	}
+	if text == "" {
+		return fmt.Errorf("message text is required")
+	}
+	if len(text) > instagramDMTextMaxBytes {
+		return fmt.Errorf("message text exceeds %d bytes", instagramDMTextMaxBytes)
+	}
+
+	url := fmt.Sprintf("%s/%s/me/messages", instagramGraphAPIBaseURL, instagramGraphAPIVersion)
+
+	payload := map[string]any{
+		"recipient": map[string]string{"id": recipientID},
+		"message":   map[string]string{"text": text},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling dm payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("creating dm request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+i.credentials.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("sending dm request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		bodyStr := string(respBody)
+		if len(bodyStr) > 256 {
+			bodyStr = bodyStr[:256] + "..."
+		}
+		i.logger.Error("instagram send dm failed",
+			zap.Int("status", resp.StatusCode),
+			zap.String("body", bodyStr),
+			zap.String("recipient_id", recipientID),
+		)
+		return fmt.Errorf("instagram send dm failed: status %d", resp.StatusCode)
+	}
+
+	i.logger.Info("instagram dm sent",
+		zap.String("recipient_id", recipientID),
+		zap.Int("text_bytes", len(text)),
+	)
+	return nil
 }
