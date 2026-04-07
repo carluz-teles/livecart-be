@@ -37,6 +37,7 @@ import (
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/integration/providers/erp"
 	"livecart/apps/api/internal/integration/providers/payment"
+	"livecart/apps/api/internal/integration/providers/social"
 	"livecart/apps/api/internal/invitation"
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/internal/member"
@@ -209,6 +210,16 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						RateLimiter:   cfg.RateLimiter,
 					})
 				},
+				InstagramConstructor: func(cfg providers.InstagramConfig) (providers.SocialProvider, error) {
+					return social.NewInstagram(social.InstagramConfig{
+						IntegrationID: cfg.IntegrationID,
+						StoreID:       cfg.StoreID,
+						Credentials:   cfg.Credentials,
+						Logger:        cfg.Logger,
+						LogFunc:       cfg.LogFunc,
+						RateLimiter:   cfg.RateLimiter,
+					})
+				},
 			})
 
 			// Create repositories
@@ -252,6 +263,16 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						Credentials:   cfg.Credentials,
 						ClientID:      cfg.ClientID,
 						ClientSecret:  cfg.ClientSecret,
+						Logger:        cfg.Logger,
+						LogFunc:       cfg.LogFunc,
+						RateLimiter:   cfg.RateLimiter,
+					})
+				},
+				InstagramConstructor: func(cfg providers.InstagramConfig) (providers.SocialProvider, error) {
+					return social.NewInstagram(social.InstagramConfig{
+						IntegrationID: cfg.IntegrationID,
+						StoreID:       cfg.StoreID,
+						Credentials:   cfg.Credentials,
 						Logger:        cfg.Logger,
 						LogFunc:       cfg.LogFunc,
 						RateLimiter:   cfg.RateLimiter,

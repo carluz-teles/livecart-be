@@ -23,6 +23,7 @@ type Factory struct {
 	// Provider constructors (injected to avoid import cycles)
 	mercadoPagoConstructor MercadoPagoConstructor
 	tinyConstructor        TinyConstructor
+	instagramConstructor   InstagramConstructor
 }
 
 // FactoryConfig contains configuration for the provider factory.
@@ -33,9 +34,10 @@ type FactoryConfig struct {
 	MercadoPagoAppSecret string
 	RateLimitManager     *ratelimit.Manager
 
-	// Constructors - these should be injected from the payment/erp packages
+	// Constructors - these should be injected from the payment/erp/social packages
 	MercadoPagoConstructor MercadoPagoConstructor
 	TinyConstructor        TinyConstructor
+	InstagramConstructor   InstagramConstructor
 }
 
 // NewFactory creates a new provider factory.
@@ -48,6 +50,7 @@ func NewFactory(cfg FactoryConfig) *Factory {
 		rateLimitManager:       cfg.RateLimitManager,
 		mercadoPagoConstructor: cfg.MercadoPagoConstructor,
 		tinyConstructor:        cfg.TinyConstructor,
+		instagramConstructor:   cfg.InstagramConstructor,
 	}
 }
 
@@ -68,6 +71,8 @@ func (f *Factory) CreateProvider(cfg ProviderConfig) (Provider, error) {
 		return f.createPaymentProvider(cfg)
 	case ProviderTypeERP:
 		return f.createERPProvider(cfg)
+	case ProviderTypeSocial:
+		return f.createSocialProvider(cfg)
 	default:
 		return nil, fmt.Errorf("unknown provider type: %s", cfg.Type)
 	}
@@ -183,4 +188,49 @@ type TinyConfig struct {
 	Logger        *zap.Logger
 	LogFunc       LogFunc
 	RateLimiter   ratelimit.RateLimiter
+}
+
+// InstagramConstructor is a function type for creating Instagram providers.
+type InstagramConstructor func(cfg InstagramConfig) (SocialProvider, error)
+
+// InstagramConfig contains configuration for Instagram provider.
+type InstagramConfig struct {
+	IntegrationID string
+	StoreID       string
+	Credentials   *Credentials
+	Logger        *zap.Logger
+	LogFunc       LogFunc
+	RateLimiter   ratelimit.RateLimiter
+}
+
+// CreateSocialProvider creates and returns a SocialProvider.
+func (f *Factory) CreateSocialProvider(cfg ProviderConfig) (SocialProvider, error) {
+	if cfg.Type != ProviderTypeSocial {
+		return nil, fmt.Errorf("provider type must be 'social', got '%s'", cfg.Type)
+	}
+	return f.createSocialProvider(cfg)
+}
+
+func (f *Factory) createSocialProvider(cfg ProviderConfig) (SocialProvider, error) {
+	var limiter ratelimit.RateLimiter
+	if f.rateLimitManager != nil {
+		limiter = f.rateLimitManager.GetOrCreate(cfg.IntegrationID)
+	}
+
+	switch cfg.Name {
+	case ProviderInstagram:
+		if f.instagramConstructor == nil {
+			return nil, fmt.Errorf("instagram constructor not configured")
+		}
+		return f.instagramConstructor(InstagramConfig{
+			IntegrationID: cfg.IntegrationID,
+			StoreID:       cfg.StoreID,
+			Credentials:   cfg.Credentials,
+			Logger:        f.logger,
+			LogFunc:       f.logFunc,
+			RateLimiter:   limiter,
+		})
+	default:
+		return nil, fmt.Errorf("unknown social provider: %s", cfg.Name)
+	}
 }

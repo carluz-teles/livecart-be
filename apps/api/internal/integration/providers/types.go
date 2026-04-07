@@ -11,6 +11,7 @@ type ProviderType string
 const (
 	ProviderTypePayment ProviderType = "payment"
 	ProviderTypeERP     ProviderType = "erp"
+	ProviderTypeSocial  ProviderType = "social"
 )
 
 // ProviderName represents a specific integration provider.
@@ -19,6 +20,7 @@ type ProviderName string
 const (
 	ProviderMercadoPago ProviderName = "mercado_pago"
 	ProviderTiny        ProviderName = "tiny"
+	ProviderInstagram   ProviderName = "instagram"
 )
 
 // Credentials holds authentication data for providers.
@@ -123,6 +125,21 @@ type ERPProvider interface {
 
 	// SyncProduct updates or creates a product in the ERP.
 	SyncProduct(ctx context.Context, product ERPProduct) (*SyncResult, error)
+}
+
+// SocialProvider interface for social media integrations.
+type SocialProvider interface {
+	Provider
+
+	// GetProfile retrieves the connected account profile information.
+	GetProfile(ctx context.Context) (*SocialProfile, error)
+}
+
+// SocialProfile contains social media account information.
+type SocialProfile struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
+	Name     string `json:"name,omitempty"`
 }
 
 // WebhookHandler interface for providers that support webhooks.

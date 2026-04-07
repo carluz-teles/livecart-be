@@ -25,13 +25,14 @@ func (h *WebhookHandler) HandleInstagramVerification(c *fiber.Ctx) error {
 	challenge := c.Query("hub.challenge")
 	verifyToken := c.Query("hub.verify_token")
 
+	expectedToken := config.InstagramVerifyToken.StringOr("livecart_verify_token")
+
 	h.logger.Info("instagram webhook verification request",
 		zap.String("mode", mode),
 		zap.Bool("has_challenge", challenge != ""),
-		zap.Bool("has_token", verifyToken != ""),
+		zap.String("received_token", verifyToken),
+		zap.String("expected_token", expectedToken),
 	)
-
-	expectedToken := config.InstagramVerifyToken.StringOr("livecart_verify_token")
 
 	if mode == "subscribe" && verifyToken == expectedToken {
 		h.logger.Info("instagram webhook verification successful")
