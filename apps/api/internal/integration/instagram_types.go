@@ -23,7 +23,7 @@ type InstagramChange struct {
 // InstagramLiveCommentValue represents the value for live_comments field
 type InstagramLiveCommentValue struct {
 	From      InstagramUser  `json:"from"`
-	CommentID string         `json:"comment_id"`
+	CommentID string         `json:"id"`
 	ParentID  string         `json:"parent_id,omitempty"`
 	Text      string         `json:"text"`
 	Media     InstagramMedia `json:"media"`
