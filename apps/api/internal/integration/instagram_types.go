@@ -31,8 +31,9 @@ type InstagramLiveCommentValue struct {
 
 // InstagramUser represents an Instagram user
 type InstagramUser struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
+	ID             string `json:"id"`
+	Username       string `json:"username"`
+	SelfIGScopedID string `json:"self_ig_scoped_id"`
 }
 
 // InstagramMedia represents media information

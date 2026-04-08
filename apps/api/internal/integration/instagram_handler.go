@@ -144,12 +144,20 @@ func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, 
 		zap.String("media_id", comment.Media.ID),
 	)
 
+	// Prefer the Instagram-scoped ID (IGSID) when present — it is the only
+	// identifier accepted by the Messaging API as recipient.id. The plain
+	// from.id is app-scoped and cannot be used to send DMs.
+	userID := comment.From.SelfIGScopedID
+	if userID == "" {
+		userID = comment.From.ID
+	}
+
 	// Process the comment through the service
 	if err := h.service.ProcessInstagramComment(c.Context(), ProcessInstagramCommentInput{
 		AccountID: entry.ID,
 		MediaID:   comment.Media.ID,
 		CommentID: comment.CommentID,
-		UserID:    comment.From.ID,
+		UserID:    userID,
 		Username:  comment.From.Username,
 		Text:      comment.Text,
 		Timestamp: entry.Time,
