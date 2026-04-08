@@ -38,6 +38,9 @@ SET
   cart_max_quantity_per_item = $6,
   cart_notify_before_expiration = $7,
   cart_allow_edit = $8,
+  auto_send_checkout_links = $9,
+  checkout_link_expiry_hours = $10,
+  checkout_send_methods = $11,
   updated_at = now()
 WHERE id = $1
 RETURNING *;

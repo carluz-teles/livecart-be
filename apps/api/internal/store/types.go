@@ -7,13 +7,16 @@ import "time"
 // ============================================
 
 type CartSettingsDTO struct {
-	Enabled                bool `json:"enabled"`
-	ExpirationMinutes      int  `json:"expirationMinutes"`
-	ReserveStock           bool `json:"reserveStock"`
-	MaxItems               int  `json:"maxItems"`
-	MaxQuantityPerItem     int  `json:"maxQuantityPerItem"`
-	NotifyBeforeExpiration bool `json:"notifyBeforeExpiration"`
-	AllowEdit              bool `json:"allowEdit"`
+	Enabled                 bool     `json:"enabled"`
+	ExpirationMinutes       int      `json:"expirationMinutes"`
+	ReserveStock            bool     `json:"reserveStock"`
+	MaxItems                int      `json:"maxItems"`
+	MaxQuantityPerItem      int      `json:"maxQuantityPerItem"`
+	NotifyBeforeExpiration  bool     `json:"notifyBeforeExpiration"`
+	AllowEdit               bool     `json:"allowEdit"`
+	AutoSendCheckoutLinks   bool     `json:"autoSendCheckoutLinks"`
+	CheckoutLinkExpiryHours int      `json:"checkoutLinkExpiryHours"`
+	CheckoutSendMethods     []string `json:"checkoutSendMethods"`
 }
 
 // ============================================
@@ -56,13 +59,16 @@ type UpdateStoreRequest struct {
 }
 
 type UpdateCartSettingsRequest struct {
-	Enabled                bool `json:"enabled"`
-	ExpirationMinutes      int  `json:"expirationMinutes" validate:"gte=0"`
-	ReserveStock           bool `json:"reserveStock"`
-	MaxItems               int  `json:"maxItems" validate:"gte=0"`
-	MaxQuantityPerItem     int  `json:"maxQuantityPerItem" validate:"gte=0"`
-	NotifyBeforeExpiration bool `json:"notifyBeforeExpiration"`
-	AllowEdit              bool `json:"allowEdit"`
+	Enabled                 bool     `json:"enabled"`
+	ExpirationMinutes       int      `json:"expirationMinutes" validate:"gte=0"`
+	ReserveStock            bool     `json:"reserveStock"`
+	MaxItems                int      `json:"maxItems" validate:"gte=0"`
+	MaxQuantityPerItem      int      `json:"maxQuantityPerItem" validate:"gte=0"`
+	NotifyBeforeExpiration  bool     `json:"notifyBeforeExpiration"`
+	AllowEdit               bool     `json:"allowEdit"`
+	AutoSendCheckoutLinks   bool     `json:"autoSendCheckoutLinks"`
+	CheckoutLinkExpiryHours int      `json:"checkoutLinkExpiryHours" validate:"gte=1,lte=168"`
+	CheckoutSendMethods     []string `json:"checkoutSendMethods"`
 }
 
 type StoreResponse struct {
@@ -112,14 +118,17 @@ type UpdateStoreInput struct {
 }
 
 type UpdateCartSettingsInput struct {
-	StoreID                string
-	Enabled                bool
-	ExpirationMinutes      int
-	ReserveStock           bool
-	MaxItems               int
-	MaxQuantityPerItem     int
-	NotifyBeforeExpiration bool
-	AllowEdit              bool
+	StoreID                 string
+	Enabled                 bool
+	ExpirationMinutes       int
+	ReserveStock            bool
+	MaxItems                int
+	MaxQuantityPerItem      int
+	NotifyBeforeExpiration  bool
+	AllowEdit               bool
+	AutoSendCheckoutLinks   bool
+	CheckoutLinkExpiryHours int
+	CheckoutSendMethods     []string
 }
 
 type StoreOutput struct {
@@ -164,14 +173,17 @@ type UpdateStoreParams struct {
 }
 
 type UpdateCartSettingsParams struct {
-	ID                     string
-	Enabled                bool
-	ExpirationMinutes      int
-	ReserveStock           bool
-	MaxItems               int
-	MaxQuantityPerItem     int
-	NotifyBeforeExpiration bool
-	AllowEdit              bool
+	ID                      string
+	Enabled                 bool
+	ExpirationMinutes       int
+	ReserveStock            bool
+	MaxItems                int
+	MaxQuantityPerItem      int
+	NotifyBeforeExpiration  bool
+	AllowEdit               bool
+	AutoSendCheckoutLinks   bool
+	CheckoutLinkExpiryHours int
+	CheckoutSendMethods     []string
 }
 
 type StoreRow struct {

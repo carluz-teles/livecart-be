@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -100,6 +101,12 @@ func (r *Repository) UpdateCartSettings(ctx context.Context, params UpdateCartSe
 		return StoreRow{}, err
 	}
 
+	// Convert checkout methods to JSON
+	checkoutMethodsJSON, err := json.Marshal(params.CheckoutSendMethods)
+	if err != nil {
+		return StoreRow{}, fmt.Errorf("marshaling checkout methods: %w", err)
+	}
+
 	row, err := r.q.UpdateStoreCartSettings(ctx, sqlc.UpdateStoreCartSettingsParams{
 		ID:                         uid,
 		CartEnabled:                params.Enabled,
@@ -109,6 +116,9 @@ func (r *Repository) UpdateCartSettings(ctx context.Context, params UpdateCartSe
 		CartMaxQuantityPerItem:     int32(params.MaxQuantityPerItem),
 		CartNotifyBeforeExpiration: params.NotifyBeforeExpiration,
 		CartAllowEdit:              params.AllowEdit,
+		AutoSendCheckoutLinks:      params.AutoSendCheckoutLinks,
+		CheckoutLinkExpiryHours:    pgtype.Int4{Int32: int32(params.CheckoutLinkExpiryHours), Valid: true},
+		CheckoutSendMethods:        checkoutMethodsJSON,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -178,6 +188,21 @@ func toStoreRow(row sqlc.Store) StoreRow {
 		addressCountry = &row.AddressCountry.String
 	}
 
+	// Parse checkout send methods from JSON
+	var checkoutMethods []string
+	if len(row.CheckoutSendMethods) > 0 {
+		_ = json.Unmarshal(row.CheckoutSendMethods, &checkoutMethods)
+	}
+	if checkoutMethods == nil {
+		checkoutMethods = []string{"public_link", "manual"}
+	}
+
+	// Get checkout link expiry hours with default
+	checkoutExpiryHours := 48
+	if row.CheckoutLinkExpiryHours.Valid {
+		checkoutExpiryHours = int(row.CheckoutLinkExpiryHours.Int32)
+	}
+
 	return StoreRow{
 		ID:             row.ID.String(),
 		Name:           row.Name,
@@ -195,13 +220,16 @@ func toStoreRow(row sqlc.Store) StoreRow {
 		AddressZip:     addressZip,
 		AddressCountry: addressCountry,
 		CartSettings: CartSettingsDTO{
-			Enabled:                row.CartEnabled,
-			ExpirationMinutes:      int(row.CartExpirationMinutes),
-			ReserveStock:           row.CartReserveStock,
-			MaxItems:               int(row.CartMaxItems),
-			MaxQuantityPerItem:     int(row.CartMaxQuantityPerItem),
-			NotifyBeforeExpiration: row.CartNotifyBeforeExpiration,
-			AllowEdit:              row.CartAllowEdit,
+			Enabled:                 row.CartEnabled,
+			ExpirationMinutes:       int(row.CartExpirationMinutes),
+			ReserveStock:            row.CartReserveStock,
+			MaxItems:                int(row.CartMaxItems),
+			MaxQuantityPerItem:      int(row.CartMaxQuantityPerItem),
+			NotifyBeforeExpiration:  row.CartNotifyBeforeExpiration,
+			AllowEdit:               row.CartAllowEdit,
+			AutoSendCheckoutLinks:   row.AutoSendCheckoutLinks,
+			CheckoutLinkExpiryHours: checkoutExpiryHours,
+			CheckoutSendMethods:     checkoutMethods,
 		},
 		CreatedAt: row.CreatedAt.Time,
 		UpdatedAt: row.UpdatedAt.Time,

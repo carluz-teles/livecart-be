@@ -361,20 +361,26 @@ SET
   cart_max_quantity_per_item = $6,
   cart_notify_before_expiration = $7,
   cart_allow_edit = $8,
+  auto_send_checkout_links = $9,
+  checkout_link_expiry_hours = $10,
+  checkout_send_methods = $11,
   updated_at = now()
 WHERE id = $1
 RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, auto_send_checkout_links, cart_allow_edit, checkout_link_expiry_hours, checkout_send_methods
 `
 
 type UpdateStoreCartSettingsParams struct {
-	ID                         pgtype.UUID `json:"id"`
-	CartEnabled                bool        `json:"cart_enabled"`
-	CartExpirationMinutes      int32       `json:"cart_expiration_minutes"`
-	CartReserveStock           bool        `json:"cart_reserve_stock"`
-	CartMaxItems               int32       `json:"cart_max_items"`
-	CartMaxQuantityPerItem     int32       `json:"cart_max_quantity_per_item"`
-	CartNotifyBeforeExpiration bool        `json:"cart_notify_before_expiration"`
-	CartAllowEdit              bool        `json:"cart_allow_edit"`
+	ID                         pgtype.UUID     `json:"id"`
+	CartEnabled                bool            `json:"cart_enabled"`
+	CartExpirationMinutes      int32           `json:"cart_expiration_minutes"`
+	CartReserveStock           bool            `json:"cart_reserve_stock"`
+	CartMaxItems               int32           `json:"cart_max_items"`
+	CartMaxQuantityPerItem     int32           `json:"cart_max_quantity_per_item"`
+	CartNotifyBeforeExpiration bool            `json:"cart_notify_before_expiration"`
+	CartAllowEdit              bool            `json:"cart_allow_edit"`
+	AutoSendCheckoutLinks      bool            `json:"auto_send_checkout_links"`
+	CheckoutLinkExpiryHours    pgtype.Int4     `json:"checkout_link_expiry_hours"`
+	CheckoutSendMethods        json.RawMessage `json:"checkout_send_methods"`
 }
 
 func (q *Queries) UpdateStoreCartSettings(ctx context.Context, arg UpdateStoreCartSettingsParams) (Store, error) {
@@ -387,6 +393,9 @@ func (q *Queries) UpdateStoreCartSettings(ctx context.Context, arg UpdateStoreCa
 		arg.CartMaxQuantityPerItem,
 		arg.CartNotifyBeforeExpiration,
 		arg.CartAllowEdit,
+		arg.AutoSendCheckoutLinks,
+		arg.CheckoutLinkExpiryHours,
+		arg.CheckoutSendMethods,
 	)
 	var i Store
 	err := row.Scan(
