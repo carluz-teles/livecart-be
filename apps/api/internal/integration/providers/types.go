@@ -99,6 +99,10 @@ type ERPProvider interface {
 	// CreateOrder creates an order in the ERP for invoicing.
 	CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, error)
 
+	// UpdateOrder updates an existing order in the ERP (items, contact, observação, data).
+	// Caller must call ReverseOrderStock before and LaunchOrderStock after.
+	UpdateOrder(ctx context.Context, orderID string, order ERPOrder) error
+
 	// LaunchOrderStock decrements stock in ERP for the order items.
 	LaunchOrderStock(ctx context.Context, orderID string) error
 
@@ -243,6 +247,7 @@ type ERPOrder struct {
 	Items       []ERPOrderItem `json:"items"`
 	TotalAmount int64          `json:"total_amount"`           // In cents
 	Observation string         `json:"observation,omitempty"`
+	Date        time.Time      `json:"date,omitempty"` // Order date (falls back to time.Now() if zero)
 	Metadata    map[string]any `json:"metadata,omitempty"`
 }
 

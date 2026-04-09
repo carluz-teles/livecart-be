@@ -479,9 +479,14 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		}
 	}
 
+	orderDate := order.Date
+	if orderDate.IsZero() {
+		orderDate = time.Now()
+	}
+
 	payload := map[string]any{
 		"idContato":   contactID,
-		"data":        time.Now().Format("2006-01-02"),
+		"data":        orderDate.Format("2006-01-02"),
 		"itens":       items,
 		"observacoes": order.Observation,
 		"ecommerce": map[string]any{
@@ -517,6 +522,61 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		OrderNumber: orderResp.Numero,
 		Status:      "created",
 	}, nil
+}
+
+// UpdateOrder updates an existing sales order in Tiny.
+// PUT /pedidos/{idPedido} — body uses the same shape as CreateOrder.
+// Caller is responsible for reversing stock before calling and re-launching after.
+func (t *Tiny) UpdateOrder(ctx context.Context, orderID string, order providers.ERPOrder) error {
+	endpoint := fmt.Sprintf("%s/pedidos/%s", tinyAPIBaseURL, orderID)
+
+	contactID, err := strconv.ParseInt(order.ContactID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid contact ID %q: %w", order.ContactID, err)
+	}
+
+	items := make([]map[string]any, len(order.Items))
+	for i, item := range order.Items {
+		productID, _ := strconv.ParseInt(item.ProductID, 10, 64)
+		items[i] = map[string]any{
+			"produto": map[string]any{
+				"id": productID,
+			},
+			"quantidade":    item.Quantity,
+			"valorUnitario": float64(item.UnitPrice) / 100,
+		}
+	}
+
+	orderDate := order.Date
+	if orderDate.IsZero() {
+		orderDate = time.Now()
+	}
+
+	payload := map[string]any{
+		"idContato":   contactID,
+		"data":        orderDate.Format("2006-01-02"),
+		"itens":       items,
+		"observacoes": order.Observation,
+		"ecommerce": map[string]any{
+			"numeroPedidoEcommerce": order.ExternalID,
+			"nomeEcommerce":         "LiveCart",
+		},
+	}
+
+	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, payload, t.authHeaders())
+	if err != nil {
+		return fmt.Errorf("updating order: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusNoContent && !providers.IsSuccessStatus(resp.StatusCode) {
+		var errResp struct {
+			Mensagem string `json:"mensagem"`
+		}
+		_ = json.Unmarshal(body, &errResp)
+		return fmt.Errorf("update order failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+	}
+
+	return nil
 }
 
 // LaunchOrderStock decrements stock in Tiny for all items in the order.

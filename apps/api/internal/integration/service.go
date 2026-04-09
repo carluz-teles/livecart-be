@@ -1820,18 +1820,10 @@ func (s *Service) SyncCartToERP(ctx context.Context, storeID, cartID, eventID, p
 		return fmt.Errorf("resolving ERP contact: %w", err)
 	}
 
-	// 2. Cancel existing order if any
+	// 2. Load cart (used later for update-vs-create decision and created_at date)
 	cart, err := s.repo.GetCartByEventAndUser(ctx, eventID, platformUserID)
 	if err != nil {
 		return fmt.Errorf("getting cart: %w", err)
-	}
-	if cart != nil && cart.ExternalOrderID != "" {
-		if cancelErr := erpProvider.CancelOrder(ctx, cart.ExternalOrderID); cancelErr != nil {
-			s.logger.Warn("failed to cancel previous ERP order",
-				zap.String("order_id", cart.ExternalOrderID),
-				zap.Error(cancelErr),
-			)
-		}
 	}
 
 	// 3. Collect non-waitlisted items
@@ -1878,13 +1870,43 @@ func (s *Service) SyncCartToERP(ctx context.Context, storeID, cartID, eventID, p
 		return nil
 	}
 
-	result, err := erpProvider.CreateOrder(ctx, providers.ERPOrder{
+	erpOrder := providers.ERPOrder{
 		ExternalID:  cartID,
 		ContactID:   contactID,
 		Items:       erpItems,
 		TotalAmount: totalAmount,
 		Observation: fmt.Sprintf("LiveCart - Evento %s - @%s", eventID, platformHandle),
-	})
+	}
+	if cart != nil {
+		erpOrder.Date = cart.CreatedAt
+	}
+
+	// If cart already has an ERP order, try to edit it in place (estornar → update → relançar).
+	// On failure, fall back to cancel+create to preserve the legacy behavior.
+	if cart != nil && cart.ExternalOrderID != "" {
+		orderID := cart.ExternalOrderID
+		if updateErr := s.updateExistingERPOrder(ctx, erpProvider, orderID, erpOrder); updateErr == nil {
+			s.logger.Info("cart synced to ERP (updated)",
+				zap.String("cart_id", cartID),
+				zap.String("erp_order_id", orderID),
+				zap.Int("items", len(erpItems)),
+			)
+			return nil
+		} else {
+			s.logger.Warn("update existing ERP order failed; falling back to cancel+create",
+				zap.String("order_id", orderID),
+				zap.Error(updateErr),
+			)
+			if cancelErr := erpProvider.CancelOrder(ctx, orderID); cancelErr != nil {
+				s.logger.Warn("failed to cancel previous ERP order during fallback",
+					zap.String("order_id", orderID),
+					zap.Error(cancelErr),
+				)
+			}
+		}
+	}
+
+	result, err := erpProvider.CreateOrder(ctx, erpOrder)
 	if err != nil {
 		return fmt.Errorf("creating ERP order: %w", err)
 	}
@@ -1910,6 +1932,35 @@ func (s *Service) SyncCartToERP(ctx context.Context, storeID, cartID, eventID, p
 		zap.String("erp_order_id", result.OrderID),
 		zap.Int("items", len(erpItems)),
 	)
+
+	return nil
+}
+
+// updateExistingERPOrder performs the estornar → update → relançar dance required by Tiny
+// to edit an existing sales order. If the update step fails, it tries to re-launch stock
+// so the ERP is not left with a reversed-stock order, then returns the original error.
+func (s *Service) updateExistingERPOrder(ctx context.Context, erpProvider providers.ERPProvider, orderID string, erpOrder providers.ERPOrder) error {
+	if err := erpProvider.ReverseOrderStock(ctx, orderID); err != nil {
+		return fmt.Errorf("reversing stock: %w", err)
+	}
+
+	if err := erpProvider.UpdateOrder(ctx, orderID, erpOrder); err != nil {
+		// Try to restore stock so the order isn't left in a reversed state.
+		if relaunchErr := erpProvider.LaunchOrderStock(ctx, orderID); relaunchErr != nil {
+			s.logger.Warn("failed to relaunch stock after update error",
+				zap.String("order_id", orderID),
+				zap.Error(relaunchErr),
+			)
+		}
+		return fmt.Errorf("updating order: %w", err)
+	}
+
+	if err := erpProvider.LaunchOrderStock(ctx, orderID); err != nil {
+		s.logger.Warn("ERP stock launch failed after update — order updated but stock not reserved",
+			zap.String("order_id", orderID),
+			zap.Error(err),
+		)
+	}
 
 	return nil
 }

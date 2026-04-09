@@ -1031,6 +1031,7 @@ func (r *Repository) GetCartByEventAndUser(ctx context.Context, eventID, platfor
 		PlatformUserID:  row.PlatformUserID,
 		PlatformHandle:  row.PlatformHandle,
 		ExternalOrderID: extOrderID,
+		CreatedAt:       row.CreatedAt.Time,
 	}, nil
 }
 
@@ -1041,6 +1042,7 @@ type CartRow struct {
 	PlatformUserID  string
 	PlatformHandle  string
 	ExternalOrderID string
+	CreatedAt       time.Time
 }
 
 // UpdateCartItemWaitlisted updates the waitlisted status of a cart item.
