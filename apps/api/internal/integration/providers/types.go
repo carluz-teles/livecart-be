@@ -99,10 +99,6 @@ type ERPProvider interface {
 	// CreateOrder creates an order in the ERP for invoicing.
 	CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, error)
 
-	// UpdateOrder updates an existing order in the ERP (items, contact, observação, data).
-	// Caller must call ReverseOrderStock before and LaunchOrderStock after.
-	UpdateOrder(ctx context.Context, orderID string, order ERPOrder) error
-
 	// LaunchOrderStock decrements stock in ERP for the order items.
 	LaunchOrderStock(ctx context.Context, orderID string) error
 
@@ -114,6 +110,12 @@ type ERPProvider interface {
 
 	// CancelOrder reverses stock and cancels an order in the ERP.
 	CancelOrder(ctx context.Context, orderID string) error
+
+	// ReserveStock creates a manual stock exit in the ERP. Returns movement ID.
+	ReserveStock(ctx context.Context, productID string, qty int, unitPrice float64, obs string) (string, error)
+
+	// ReverseStockReservation creates a manual stock entry in the ERP. Returns movement ID.
+	ReverseStockReservation(ctx context.Context, productID string, qty int, unitPrice float64, obs string) (string, error)
 
 	// SearchContacts searches for contacts by name or document.
 	SearchContacts(ctx context.Context, params SearchContactsParams) ([]ERPContactResult, error)
@@ -247,7 +249,6 @@ type ERPOrder struct {
 	Items       []ERPOrderItem `json:"items"`
 	TotalAmount int64          `json:"total_amount"`           // In cents
 	Observation string         `json:"observation,omitempty"`
-	Date        time.Time      `json:"date,omitempty"` // Order date (falls back to time.Now() if zero)
 	Metadata    map[string]any `json:"metadata,omitempty"`
 }
 

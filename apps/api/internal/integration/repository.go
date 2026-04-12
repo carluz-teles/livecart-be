@@ -580,6 +580,53 @@ func (r *Repository) GetProductByKeyword(ctx context.Context, storeID, keyword s
 	}, nil
 }
 
+// GetProductByID retrieves a product by its UUID.
+func (r *Repository) GetProductByID(ctx context.Context, storeID, productID string) (*ProductRow, error) {
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return nil, err
+	}
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := r.queries.GetProductByID(ctx, sqlc.GetProductByIDParams{
+		ID:      pID,
+		StoreID: sID,
+	})
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("getting product by ID: %w", err)
+	}
+
+	var price int64
+	if row.Price.Valid {
+		price = row.Price.Int64
+	}
+
+	var stock int
+	if row.Stock.Valid {
+		stock = int(row.Stock.Int32)
+	}
+
+	var externalID string
+	if row.ExternalID.Valid {
+		externalID = row.ExternalID.String
+	}
+
+	return &ProductRow{
+		ID:         uuidToString(row.ID),
+		Keyword:    row.Keyword,
+		Price:      price,
+		Stock:      stock,
+		ExternalID: externalID,
+		Name:       row.Name,
+	}, nil
+}
+
 // =============================================================================
 // STOCK OPERATIONS
 // =============================================================================
@@ -1231,4 +1278,202 @@ func uuidToString(uuid pgtype.UUID) string {
 		uuid.Bytes[6:8],
 		uuid.Bytes[8:10],
 		uuid.Bytes[10:16])
+}
+
+// ListCartsByEventForERP returns carts for an event that are in checkout status (finalized).
+func (r *Repository) ListCartsByEventForERP(ctx context.Context, eventID string) ([]CartRow, error) {
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListCartsByEvent(ctx, eID)
+	if err != nil {
+		return nil, err
+	}
+	var result []CartRow
+	for _, row := range rows {
+		if row.Status != "checkout" {
+			continue
+		}
+		var extOrderID string
+		if row.ExternalOrderID.Valid {
+			extOrderID = row.ExternalOrderID.String
+		}
+		result = append(result, CartRow{
+			ID:              uuidToString(row.ID),
+			EventID:         uuidToString(row.EventID),
+			PlatformUserID:  row.PlatformUserID,
+			PlatformHandle:  row.PlatformHandle,
+			ExternalOrderID: extOrderID,
+			CreatedAt:       row.CreatedAt.Time,
+		})
+	}
+	return result, nil
+}
+
+// =============================================================================
+// STOCK RESERVATIONS
+// =============================================================================
+
+// StockReservationRow represents a stock reservation for ERP operations.
+type StockReservationRow struct {
+	ID                string
+	EventID           string
+	CartID            string
+	ProductID         string
+	ExternalProductID string
+	Quantity          int
+	ERPMovementID     string
+	Status            string
+	CreatedAt         time.Time
+}
+
+// CreateStockReservationParams holds params for creating a stock reservation.
+type CreateStockReservationParams struct {
+	EventID           string
+	CartID            string
+	ProductID         string
+	ExternalProductID string
+	Quantity          int
+	ERPMovementID     string
+}
+
+// CreateStockReservation creates a stock reservation record.
+func (r *Repository) CreateStockReservation(ctx context.Context, params CreateStockReservationParams) (*StockReservationRow, error) {
+	eventID, err := parseUUID(params.EventID)
+	if err != nil {
+		return nil, err
+	}
+	cartID, err := parseUUID(params.CartID)
+	if err != nil {
+		return nil, err
+	}
+	productID, err := parseUUID(params.ProductID)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := r.queries.CreateStockReservation(ctx, sqlc.CreateStockReservationParams{
+		EventID:           eventID,
+		CartID:            cartID,
+		ProductID:         productID,
+		ExternalProductID: params.ExternalProductID,
+		Quantity:          int32(params.Quantity),
+		ErpMovementID:     pgtype.Text{String: params.ERPMovementID, Valid: params.ERPMovementID != ""},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating stock reservation: %w", err)
+	}
+
+	return &StockReservationRow{
+		ID:                uuidToString(row.ID),
+		EventID:           uuidToString(row.EventID),
+		CartID:            uuidToString(row.CartID),
+		ProductID:         uuidToString(row.ProductID),
+		ExternalProductID: row.ExternalProductID,
+		Quantity:          int(row.Quantity),
+		ERPMovementID:     row.ErpMovementID.String,
+		Status:            row.Status,
+		CreatedAt:         row.CreatedAt.Time,
+	}, nil
+}
+
+// ListActiveReservationsByEvent returns all active reservations for an event.
+func (r *Repository) ListActiveReservationsByEvent(ctx context.Context, eventID string) ([]StockReservationRow, error) {
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListActiveReservationsByEvent(ctx, eID)
+	if err != nil {
+		return nil, fmt.Errorf("listing active reservations by event: %w", err)
+	}
+	result := make([]StockReservationRow, len(rows))
+	for i, row := range rows {
+		result[i] = StockReservationRow{
+			ID:                uuidToString(row.ID),
+			EventID:           uuidToString(row.EventID),
+			CartID:            uuidToString(row.CartID),
+			ProductID:         uuidToString(row.ProductID),
+			ExternalProductID: row.ExternalProductID,
+			Quantity:          int(row.Quantity),
+			ERPMovementID:     row.ErpMovementID.String,
+			Status:            row.Status,
+			CreatedAt:         row.CreatedAt.Time,
+		}
+	}
+	return result, nil
+}
+
+// ListActiveReservationsByCartAndProduct returns active reservations for a cart+product.
+func (r *Repository) ListActiveReservationsByCartAndProduct(ctx context.Context, cartID, productID string) ([]StockReservationRow, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListActiveReservationsByCartAndProduct(ctx, sqlc.ListActiveReservationsByCartAndProductParams{
+		CartID:    cID,
+		ProductID: pID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing active reservations by cart and product: %w", err)
+	}
+	result := make([]StockReservationRow, len(rows))
+	for i, row := range rows {
+		result[i] = StockReservationRow{
+			ID:                uuidToString(row.ID),
+			EventID:           uuidToString(row.EventID),
+			CartID:            uuidToString(row.CartID),
+			ProductID:         uuidToString(row.ProductID),
+			ExternalProductID: row.ExternalProductID,
+			Quantity:          int(row.Quantity),
+			ERPMovementID:     row.ErpMovementID.String,
+			Status:            row.Status,
+			CreatedAt:         row.CreatedAt.Time,
+		}
+	}
+	return result, nil
+}
+
+// ReverseReservationsByCart marks all active reservations for a cart as reversed.
+func (r *Repository) ReverseReservationsByCart(ctx context.Context, cartID string) error {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	return r.queries.ReverseReservationsByCart(ctx, cID)
+}
+
+// ReverseReservationsByCartAndProduct marks active reservations for a specific cart+product as reversed.
+func (r *Repository) ReverseReservationsByCartAndProduct(ctx context.Context, cartID, productID string) error {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return fmt.Errorf("parsing cart ID: %w", err)
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return fmt.Errorf("parsing product ID: %w", err)
+	}
+	return r.queries.ReverseReservationsByCartAndProduct(ctx, sqlc.ReverseReservationsByCartAndProductParams{
+		CartID:    cID,
+		ProductID: pID,
+	})
+}
+
+// ConvertReservationsByEvent marks all active reservations for an event as converted.
+func (r *Repository) ConvertReservationsByEvent(ctx context.Context, eventID string) error {
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return err
+	}
+	return r.queries.ConvertReservationsByEvent(ctx, eID)
+}
+
+// HasActiveEventForProduct checks if a product has active reservations in a running event.
+func (r *Repository) HasActiveEventForProduct(ctx context.Context, externalProductID string) (bool, error) {
+	return r.queries.HasActiveEventForProduct(ctx, externalProductID)
 }

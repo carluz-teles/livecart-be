@@ -172,6 +172,7 @@ type SyncFromERPInput struct {
 	ImageURL       string
 	Stock          int
 	Active         bool
+	SkipStock      bool // When true, preserve local stock (e.g. during active live event)
 }
 
 // ============================================

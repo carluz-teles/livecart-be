@@ -297,6 +297,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// cycle: integration.Service depends on live.Service, and the
 			// notifier impl depends on integration.Service).
 			liveSvc.SetNotifier(newLiveNotifierAdapter(integration.NewInstagramNotifier(integrationSvc, log)))
+			liveSvc.SetERPFinalizer(newERPFinalizerAdapter(integrationSvc))
 
 			log.Info("integration layer initialized")
 		}
@@ -425,4 +426,18 @@ func (a *liveNotifierAdapter) NotifyEventCheckout(ctx context.Context, p live.No
 		TotalItems:     p.TotalItems,
 		TotalValue:     p.TotalValue,
 	})
+}
+
+// erpFinalizerAdapter bridges integration.Service.FinalizeEventERP to
+// live.ERPFinalizer (local interface), avoiding the import cycle.
+type erpFinalizerAdapter struct {
+	svc *integration.Service
+}
+
+func newERPFinalizerAdapter(svc *integration.Service) *erpFinalizerAdapter {
+	return &erpFinalizerAdapter{svc: svc}
+}
+
+func (a *erpFinalizerAdapter) FinalizeEventERP(ctx context.Context, storeID, eventID string) error {
+	return a.svc.FinalizeEventERP(ctx, storeID, eventID)
 }

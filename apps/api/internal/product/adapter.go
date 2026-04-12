@@ -53,7 +53,7 @@ func (a *ProductSyncerAdapter) GetProduct(ctx context.Context, storeID, productI
 }
 
 // SyncProduct updates a product from an ERP webhook notification.
-func (a *ProductSyncerAdapter) SyncProduct(ctx context.Context, storeID, externalID, externalSource, name string, price int64, imageURL string, stock int, active bool) error {
+func (a *ProductSyncerAdapter) SyncProduct(ctx context.Context, storeID, externalID, externalSource, name string, price int64, imageURL string, stock int, active bool, skipStock bool) error {
 	sid, err := vo.NewStoreID(storeID)
 	if err != nil {
 		return err
@@ -78,6 +78,7 @@ func (a *ProductSyncerAdapter) SyncProduct(ctx context.Context, storeID, externa
 		ImageURL:       imageURL,
 		Stock:          stock,
 		Active:         active,
+		SkipStock:      skipStock,
 	})
 	return err
 }

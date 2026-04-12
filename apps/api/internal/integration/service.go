@@ -31,7 +31,7 @@ import (
 type ProductSyncer interface {
 	HasProduct(ctx context.Context, storeID, externalID, externalSource string) (bool, error)
 	GetProduct(ctx context.Context, storeID, productID string) (externalID, externalSource string, err error)
-	SyncProduct(ctx context.Context, storeID, externalID, externalSource, name string, price int64, imageURL string, stock int, active bool) error
+	SyncProduct(ctx context.Context, storeID, externalID, externalSource, name string, price int64, imageURL string, stock int, active bool, skipStock bool) error
 }
 
 // Service handles business logic for integrations.
@@ -1164,6 +1164,7 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 		detailed.ImageURL,
 		detailed.Stock,
 		detailed.Active,
+		false, // manual sync: always update stock
 	); err != nil {
 		return nil, fmt.Errorf("syncing product: %w", err)
 	}
@@ -1269,6 +1270,24 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		return fmt.Errorf("fetching product from ERP: %w", err)
 	}
 
+	// Check if product has active stock reservations during a live event.
+	// Fail-safe: on DB error, assume active event to avoid overwriting local stock.
+	skipStock := false
+	hasActive, guardErr := s.repo.HasActiveEventForProduct(ctx, externalProductID)
+	if guardErr != nil {
+		skipStock = true
+		s.logger.Warn("failed to check active event for product, skipping stock sync as precaution",
+			zap.String("external_product_id", externalProductID),
+			zap.Error(guardErr),
+		)
+	} else if hasActive {
+		skipStock = true
+		s.logger.Info("skipping ERP stock sync during active event",
+			zap.String("external_product_id", externalProductID),
+			zap.String("store_id", integration.StoreID),
+		)
+	}
+
 	if err := s.productSyncer.SyncProduct(ctx,
 		integration.StoreID,
 		detailed.ID,
@@ -1278,6 +1297,7 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		detailed.ImageURL,
 		detailed.Stock,
 		detailed.Active,
+		skipStock,
 	); err != nil {
 		return fmt.Errorf("syncing product: %w", err)
 	}
@@ -1286,6 +1306,7 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		zap.String("integration_id", integration.ID),
 		zap.String("external_product_id", externalProductID),
 		zap.String("store_id", integration.StoreID),
+		zap.Bool("skip_stock", skipStock),
 	)
 
 	return nil
@@ -1734,10 +1755,10 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		}
 	}
 
-	// Sync cart to ERP (only if we have non-waitlisted items)
+	// Reserve stock in ERP (only if we have non-waitlisted items)
 	if !waitlisted {
-		if syncErr := s.SyncCartToERP(ctx, event.StoreID, result.CartID, event.ID, input.UserID, input.Username); syncErr != nil {
-			s.logger.Warn("failed to sync cart to ERP",
+		if syncErr := s.ReserveStockInERP(ctx, event.StoreID, result.CartID, event.ID, product.ID, intent.Quantity, product.Price, input.Username); syncErr != nil {
+			s.logger.Warn("failed to reserve stock in ERP",
 				zap.String("cart_id", result.CartID),
 				zap.Error(syncErr),
 			)
@@ -1788,25 +1809,18 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 }
 
 // =============================================================================
-// CART → ERP SYNC
+// CART → ERP STOCK RESERVATION
 // =============================================================================
 
-// SyncCartToERP creates (or recreates) an order in the ERP for the given cart.
-// Steps:
-// 1. Resolve or create ERP contact for the platform user
-// 2. If cart already has an external_order_id → cancel old order
-// 3. Collect non-waitlisted items
-// 4. Create order in ERP
-// 5. Launch stock in ERP
-// 6. Save external_order_id on cart
-func (s *Service) SyncCartToERP(ctx context.Context, storeID, cartID, eventID, platformUserID, platformHandle string) error {
-	// Get active ERP integration
+// ReserveStockInERP creates a manual stock exit (tipo S) in the ERP for a product
+// added to a cart. The movement is tracked in stock_reservations for later reversal.
+func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventID, productID string, quantity int, unitPrice int64, platformHandle string) error {
 	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
 	if err != nil {
-		s.logger.Debug("no active ERP integration, skipping cart sync",
+		s.logger.Debug("no active ERP integration, skipping stock reservation",
 			zap.String("store_id", storeID),
 		)
-		return nil // No ERP integration = skip silently
+		return nil
 	}
 
 	erpProvider, err := s.getERPProvider(ctx, integration)
@@ -1814,47 +1828,188 @@ func (s *Service) SyncCartToERP(ctx context.Context, storeID, cartID, eventID, p
 		return fmt.Errorf("creating ERP provider: %w", err)
 	}
 
-	// 1. Resolve contact
-	contactID, err := s.resolveERPContact(ctx, erpProvider, integration, storeID, platformUserID, platformHandle)
+	// Get external product ID
+	if s.productSyncer == nil {
+		return nil
+	}
+	externalID, _, err := s.productSyncer.GetProduct(ctx, storeID, productID)
+	if err != nil || externalID == "" {
+		s.logger.Debug("product not linked to ERP, skipping stock reservation",
+			zap.String("product_id", productID),
+		)
+		return nil
+	}
+
+	// Idempotency: check if an active reservation already exists for this cart+product
+	existing, _ := s.repo.ListActiveReservationsByCartAndProduct(ctx, cartID, productID)
+	if len(existing) > 0 {
+		s.logger.Debug("stock reservation already exists for cart+product, skipping",
+			zap.String("cart_id", cartID),
+			zap.String("product_id", productID),
+		)
+		return nil
+	}
+
+	obs := fmt.Sprintf("Reserva LiveCart - @%s - Evento %s", platformHandle, eventID)
+	movementID, err := erpProvider.ReserveStock(ctx, externalID, quantity, float64(unitPrice)/100, obs)
+	if err != nil {
+		return fmt.Errorf("reserving stock in ERP: %w", err)
+	}
+
+	_, err = s.repo.CreateStockReservation(ctx, CreateStockReservationParams{
+		EventID:           eventID,
+		CartID:            cartID,
+		ProductID:         productID,
+		ExternalProductID: externalID,
+		Quantity:          quantity,
+		ERPMovementID:     movementID,
+	})
+	if err != nil {
+		// ERP movement was created but we can't track it locally — attempt compensating reversal
+		s.logger.Error("failed to save stock reservation, attempting ERP reversal",
+			zap.String("cart_id", cartID),
+			zap.String("product_id", productID),
+			zap.String("erp_movement_id", movementID),
+			zap.Error(err),
+		)
+		reverseObs := fmt.Sprintf("Estorno compensatório - falha DB - Cart %s", cartID)
+		if _, reverseErr := erpProvider.ReverseStockReservation(ctx, externalID, quantity, 0, reverseObs); reverseErr != nil {
+			s.logger.Error("CRITICAL: failed to compensate ERP stock after DB failure — manual reconciliation required",
+				zap.String("external_product_id", externalID),
+				zap.Int("quantity", quantity),
+				zap.String("erp_movement_id", movementID),
+				zap.Error(reverseErr),
+			)
+		}
+		return fmt.Errorf("saving stock reservation: %w", err)
+	}
+
+	s.logger.Info("stock reserved in ERP",
+		zap.String("cart_id", cartID),
+		zap.String("product_id", productID),
+		zap.String("external_product_id", externalID),
+		zap.Int("quantity", quantity),
+		zap.String("erp_movement_id", movementID),
+	)
+
+	return nil
+}
+
+// =============================================================================
+// EVENT END → ERP FINALIZATION
+// =============================================================================
+
+// FinalizeEventERP reverses all stock reservations for the event and creates
+// one final sales order per cart in the ERP.
+func (s *Service) FinalizeEventERP(ctx context.Context, storeID, eventID string) error {
+	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	if err != nil {
+		s.logger.Debug("no active ERP integration, skipping event finalization",
+			zap.String("store_id", storeID),
+		)
+		return nil
+	}
+
+	erpProvider, err := s.getERPProvider(ctx, integration)
+	if err != nil {
+		return fmt.Errorf("creating ERP provider: %w", err)
+	}
+
+	// 1. Reverse ALL active stock reservations for this event
+	reservations, err := s.repo.ListActiveReservationsByEvent(ctx, eventID)
+	if err != nil {
+		return fmt.Errorf("listing active reservations for event: %w", err)
+	}
+
+	reversalFailures := 0
+	for _, r := range reservations {
+		obs := fmt.Sprintf("Estorno reserva LiveCart - Evento %s", eventID)
+		if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
+			reversalFailures++
+			s.logger.Warn("failed to reverse ERP stock reservation",
+				zap.String("reservation_id", r.ID),
+				zap.String("external_product_id", r.ExternalProductID),
+				zap.Int("quantity", r.Quantity),
+				zap.Error(reverseErr),
+			)
+		}
+	}
+
+	if reversalFailures > 0 {
+		s.logger.Warn("some ERP stock reversals failed — manual reconciliation may be needed",
+			zap.String("event_id", eventID),
+			zap.Int("failures", reversalFailures),
+			zap.Int("total", len(reservations)),
+		)
+	}
+
+	// Mark all reservations as converted (stock was reversed, orders will be created)
+	if err := s.repo.ConvertReservationsByEvent(ctx, eventID); err != nil {
+		s.logger.Error("failed to mark reservations as converted",
+			zap.String("event_id", eventID),
+			zap.Error(err),
+		)
+	}
+
+	// 2. Create ONE sales order per finalized cart
+	carts, err := s.repo.ListCartsByEventForERP(ctx, eventID)
+	if err != nil {
+		return fmt.Errorf("listing carts for ERP finalization: %w", err)
+	}
+
+	orderFailures := 0
+	for _, cart := range carts {
+		if cart.ExternalOrderID != "" {
+			s.logger.Debug("cart already has ERP order, skipping",
+				zap.String("cart_id", cart.ID),
+				zap.String("external_order_id", cart.ExternalOrderID),
+			)
+			continue
+		}
+		if err := s.createFinalERPOrder(ctx, erpProvider, integration, storeID, eventID, cart); err != nil {
+			orderFailures++
+			s.logger.Error("failed to create final ERP order for cart",
+				zap.String("cart_id", cart.ID),
+				zap.Error(err),
+			)
+		}
+	}
+
+	s.logger.Info("event ERP finalization completed",
+		zap.String("event_id", eventID),
+		zap.Int("reservations_reversed", len(reservations)),
+		zap.Int("reversal_failures", reversalFailures),
+		zap.Int("carts_processed", len(carts)),
+		zap.Int("order_failures", orderFailures),
+	)
+
+	if orderFailures > 0 {
+		return fmt.Errorf("%d of %d ERP orders failed to create", orderFailures, len(carts))
+	}
+
+	return nil
+}
+
+// createFinalERPOrder creates a single sales order in the ERP for a finalized cart.
+func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, eventID string, cart CartRow) error {
+	// Resolve contact
+	contactID, err := s.resolveERPContact(ctx, erpProvider, integration, storeID, cart.PlatformUserID, cart.PlatformHandle)
 	if err != nil {
 		return fmt.Errorf("resolving ERP contact: %w", err)
 	}
 
-	// 2. Load cart (used later for update-vs-create decision and created_at date)
-	cart, err := s.repo.GetCartByEventAndUser(ctx, eventID, platformUserID)
-	if err != nil {
-		return fmt.Errorf("getting cart: %w", err)
-	}
-
-	// 3. Collect non-waitlisted items
-	items, err := s.repo.ListNonWaitlistedCartItems(ctx, cartID)
+	// Collect non-waitlisted items
+	items, err := s.repo.ListNonWaitlistedCartItems(ctx, cart.ID)
 	if err != nil {
 		return fmt.Errorf("listing cart items: %w", err)
 	}
 
-	s.logger.Info("cart items for ERP sync",
-		zap.String("cart_id", cartID),
-		zap.Int("total_items", len(items)),
-	)
-
-	// 4. Build ERP order — only include items with a valid external_id (linked to Tiny)
 	var erpItems []providers.ERPOrderItem
 	var totalAmount int64
 	for _, item := range items {
 		if item.ProductExternalID == "" {
-			s.logger.Warn("skipping cart item without external_id (product not linked to ERP)",
-				zap.String("product_id", item.ProductID),
-				zap.String("product_name", item.ProductName),
-			)
 			continue
 		}
-		s.logger.Debug("including cart item in ERP order",
-			zap.String("product_id", item.ProductID),
-			zap.String("external_id", item.ProductExternalID),
-			zap.String("name", item.ProductName),
-			zap.Int("quantity", item.Quantity),
-			zap.Int64("unit_price", item.UnitPrice),
-		)
 		erpItems = append(erpItems, providers.ERPOrderItem{
 			ProductID: item.ProductExternalID,
 			Name:      item.ProductName,
@@ -1865,70 +2020,32 @@ func (s *Service) SyncCartToERP(ctx context.Context, storeID, cartID, eventID, p
 	}
 
 	if len(erpItems) == 0 {
-		// No items with external_id, clear external order
-		_ = s.repo.UpdateCartExternalOrderID(ctx, cartID, "")
 		return nil
 	}
 
-	erpOrder := providers.ERPOrder{
-		ExternalID:  cartID,
+	result, err := erpProvider.CreateOrder(ctx, providers.ERPOrder{
+		ExternalID:  cart.ID,
 		ContactID:   contactID,
 		Items:       erpItems,
 		TotalAmount: totalAmount,
-		Observation: fmt.Sprintf("LiveCart - Evento %s - @%s", eventID, platformHandle),
-	}
-	if cart != nil {
-		erpOrder.Date = cart.CreatedAt
-	}
-
-	// If cart already has an ERP order, try to edit it in place (estornar → update → relançar).
-	// On failure, fall back to cancel+create to preserve the legacy behavior.
-	if cart != nil && cart.ExternalOrderID != "" {
-		orderID := cart.ExternalOrderID
-		if updateErr := s.updateExistingERPOrder(ctx, erpProvider, orderID, erpOrder); updateErr == nil {
-			s.logger.Info("cart synced to ERP (updated)",
-				zap.String("cart_id", cartID),
-				zap.String("erp_order_id", orderID),
-				zap.Int("items", len(erpItems)),
-			)
-			return nil
-		} else {
-			s.logger.Warn("update existing ERP order failed; falling back to cancel+create",
-				zap.String("order_id", orderID),
-				zap.Error(updateErr),
-			)
-			if cancelErr := erpProvider.CancelOrder(ctx, orderID); cancelErr != nil {
-				s.logger.Warn("failed to cancel previous ERP order during fallback",
-					zap.String("order_id", orderID),
-					zap.Error(cancelErr),
-				)
-			}
-		}
-	}
-
-	result, err := erpProvider.CreateOrder(ctx, erpOrder)
+		Observation: fmt.Sprintf("LiveCart - Evento %s - @%s", eventID, cart.PlatformHandle),
+	})
 	if err != nil {
 		return fmt.Errorf("creating ERP order: %w", err)
 	}
 
-	// 5. Launch stock in ERP (decrements ERP inventory).
-	// If this fails (e.g., ERP stock is insufficient), the order still exists in the ERP
-	// but without stock reservation. This is logged as a warning, not a fatal error.
-	if err := erpProvider.LaunchOrderStock(ctx, result.OrderID); err != nil {
-		s.logger.Warn("ERP stock launch failed — order created but stock not reserved in ERP. Check product stock in Tiny.",
-			zap.String("order_id", result.OrderID),
-			zap.String("cart_id", cartID),
-			zap.Error(err),
-		)
-	}
-
-	// 6. Save external order ID
-	if err := s.repo.UpdateCartExternalOrderID(ctx, cartID, result.OrderID); err != nil {
+	// Save external order ID on cart first — ensures idempotency if we retry
+	if err := s.repo.UpdateCartExternalOrderID(ctx, cart.ID, result.OrderID); err != nil {
 		return fmt.Errorf("saving external order ID: %w", err)
 	}
 
-	s.logger.Info("cart synced to ERP",
-		zap.String("cart_id", cartID),
+	// Launch stock (permanent decrement)
+	if err := erpProvider.LaunchOrderStock(ctx, result.OrderID); err != nil {
+		return fmt.Errorf("launching stock for order %s: %w", result.OrderID, err)
+	}
+
+	s.logger.Info("final ERP order created for cart",
+		zap.String("cart_id", cart.ID),
 		zap.String("erp_order_id", result.OrderID),
 		zap.Int("items", len(erpItems)),
 	)
@@ -1936,34 +2053,9 @@ func (s *Service) SyncCartToERP(ctx context.Context, storeID, cartID, eventID, p
 	return nil
 }
 
-// updateExistingERPOrder performs the estornar → update → relançar dance required by Tiny
-// to edit an existing sales order. If the update step fails, it tries to re-launch stock
-// so the ERP is not left with a reversed-stock order, then returns the original error.
-func (s *Service) updateExistingERPOrder(ctx context.Context, erpProvider providers.ERPProvider, orderID string, erpOrder providers.ERPOrder) error {
-	if err := erpProvider.ReverseOrderStock(ctx, orderID); err != nil {
-		return fmt.Errorf("reversing stock: %w", err)
-	}
-
-	if err := erpProvider.UpdateOrder(ctx, orderID, erpOrder); err != nil {
-		// Try to restore stock so the order isn't left in a reversed state.
-		if relaunchErr := erpProvider.LaunchOrderStock(ctx, orderID); relaunchErr != nil {
-			s.logger.Warn("failed to relaunch stock after update error",
-				zap.String("order_id", orderID),
-				zap.Error(relaunchErr),
-			)
-		}
-		return fmt.Errorf("updating order: %w", err)
-	}
-
-	if err := erpProvider.LaunchOrderStock(ctx, orderID); err != nil {
-		s.logger.Warn("ERP stock launch failed after update — order updated but stock not reserved",
-			zap.String("order_id", orderID),
-			zap.Error(err),
-		)
-	}
-
-	return nil
-}
+// =============================================================================
+// ERP HELPERS
+// =============================================================================
 
 // resolveERPContact finds or creates an ERP contact for the platform user.
 func (s *Service) resolveERPContact(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, platformUserID, platformHandle string) (string, error) {
@@ -2038,19 +2130,56 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 			s.logger.Error("failed to release stock", zap.String("product_id", productID), zap.Error(err))
 		}
 
-		// Cancel ERP order if exists
-		if cart.ExternalOrderID != "" {
-			integration, err := s.repo.GetActiveByProvider(ctx, cart.StoreID, "erp", "tiny")
-			if err == nil {
-				erpProvider, err := s.getERPProvider(ctx, integration)
-				if err == nil {
-					if cancelErr := erpProvider.CancelOrder(ctx, cart.ExternalOrderID); cancelErr != nil {
-						s.logger.Warn("failed to cancel expired cart ERP order",
-							zap.String("order_id", cart.ExternalOrderID),
-							zap.Error(cancelErr),
-						)
+		// Reverse ERP stock reservations for this cart+product
+		reservations, resErr := s.repo.ListActiveReservationsByCartAndProduct(ctx, cart.ID, productID)
+		if resErr != nil {
+			s.logger.Error("failed to list reservations for expired cart",
+				zap.String("cart_id", cart.ID),
+				zap.String("product_id", productID),
+				zap.Error(resErr),
+			)
+		}
+		if len(reservations) > 0 {
+			erpReversed := false
+			integration, intErr := s.repo.GetActiveByProvider(ctx, cart.StoreID, "erp", "tiny")
+			if intErr != nil {
+				s.logger.Warn("no active ERP integration for expired cart reversal, marking reservations as reversed locally only",
+					zap.String("store_id", cart.StoreID),
+				)
+			} else {
+				erpProvider, provErr := s.getERPProvider(ctx, integration)
+				if provErr != nil {
+					s.logger.Error("failed to create ERP provider for expired cart reversal",
+						zap.String("cart_id", cart.ID),
+						zap.Error(provErr),
+					)
+				} else {
+					erpReversed = true
+					for _, res := range reservations {
+						obs := fmt.Sprintf("Estorno expiração carrinho LiveCart - Cart %s", cart.ID)
+						if _, reverseErr := erpProvider.ReverseStockReservation(ctx, res.ExternalProductID, res.Quantity, 0, obs); reverseErr != nil {
+							erpReversed = false
+							s.logger.Warn("failed to reverse expired cart stock reservation in ERP",
+								zap.String("cart_id", cart.ID),
+								zap.String("external_product_id", res.ExternalProductID),
+								zap.Error(reverseErr),
+							)
+						}
 					}
 				}
+			}
+			if markErr := s.repo.ReverseReservationsByCartAndProduct(ctx, cart.ID, productID); markErr != nil {
+				s.logger.Error("failed to mark reservations as reversed",
+					zap.String("cart_id", cart.ID),
+					zap.String("product_id", productID),
+					zap.Error(markErr),
+				)
+			}
+			if !erpReversed {
+				s.logger.Warn("ERP stock reservations NOT reversed for expired cart — manual reconciliation may be needed",
+					zap.String("cart_id", cart.ID),
+					zap.String("product_id", productID),
+				)
 			}
 		}
 
@@ -2081,10 +2210,15 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	}
 
 	// Get product info for price
-	product, err := s.repo.GetProductByKeyword(ctx, storeID, "")
+	product, err := s.repo.GetProductByID(ctx, storeID, productID)
 	if err != nil || product == nil {
 		// Can't get product — return stock and bail
 		_ = s.repo.IncrementProductStock(ctx, productID, next.Quantity)
+		s.logger.Error("failed to get product for waitlist fulfillment",
+			zap.String("product_id", productID),
+			zap.String("store_id", storeID),
+			zap.Error(err),
+		)
 		return
 	}
 
@@ -2107,13 +2241,25 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 
 	// Mark waitlist item as fulfilled
 	now := time.Now()
-	_ = s.repo.UpdateWaitlistItemStatus(ctx, next.ID, "fulfilled", nil, &now, nil)
+	if statusErr := s.repo.UpdateWaitlistItemStatus(ctx, next.ID, "fulfilled", nil, &now, nil); statusErr != nil {
+		s.logger.Warn("failed to mark waitlist item as fulfilled",
+			zap.String("waitlist_item_id", next.ID),
+			zap.Error(statusErr),
+		)
+	}
 
-	// Sync cart to ERP
-	cart, _ := s.repo.GetCartByEventAndUser(ctx, eventID, next.PlatformUserID)
+	// Reserve stock in ERP for waitlist-fulfilled item
+	cart, cartErr := s.repo.GetCartByEventAndUser(ctx, eventID, next.PlatformUserID)
+	if cartErr != nil {
+		s.logger.Warn("failed to get cart for waitlist ERP reservation",
+			zap.String("event_id", eventID),
+			zap.String("platform_user_id", next.PlatformUserID),
+			zap.Error(cartErr),
+		)
+	}
 	if cart != nil {
-		if syncErr := s.SyncCartToERP(ctx, storeID, cart.ID, eventID, next.PlatformUserID, next.PlatformHandle); syncErr != nil {
-			s.logger.Warn("failed to sync waitlist-fulfilled cart to ERP", zap.Error(syncErr))
+		if syncErr := s.ReserveStockInERP(ctx, storeID, cart.ID, eventID, productID, next.Quantity, product.Price, next.PlatformHandle); syncErr != nil {
+			s.logger.Warn("failed to reserve stock in ERP for waitlist-fulfilled item", zap.Error(syncErr))
 		}
 	}
 

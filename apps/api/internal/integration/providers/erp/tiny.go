@@ -479,14 +479,8 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		}
 	}
 
-	orderDate := order.Date
-	if orderDate.IsZero() {
-		orderDate = time.Now()
-	}
-
 	payload := map[string]any{
 		"idContato":   contactID,
-		"data":        orderDate.Format("2006-01-02"),
 		"itens":       items,
 		"observacoes": order.Observation,
 		"ecommerce": map[string]any{
@@ -522,61 +516,6 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		OrderNumber: orderResp.Numero,
 		Status:      "created",
 	}, nil
-}
-
-// UpdateOrder updates an existing sales order in Tiny.
-// PUT /pedidos/{idPedido} — body uses the same shape as CreateOrder.
-// Caller is responsible for reversing stock before calling and re-launching after.
-func (t *Tiny) UpdateOrder(ctx context.Context, orderID string, order providers.ERPOrder) error {
-	endpoint := fmt.Sprintf("%s/pedidos/%s", tinyAPIBaseURL, orderID)
-
-	contactID, err := strconv.ParseInt(order.ContactID, 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid contact ID %q: %w", order.ContactID, err)
-	}
-
-	items := make([]map[string]any, len(order.Items))
-	for i, item := range order.Items {
-		productID, _ := strconv.ParseInt(item.ProductID, 10, 64)
-		items[i] = map[string]any{
-			"produto": map[string]any{
-				"id": productID,
-			},
-			"quantidade":    item.Quantity,
-			"valorUnitario": float64(item.UnitPrice) / 100,
-		}
-	}
-
-	orderDate := order.Date
-	if orderDate.IsZero() {
-		orderDate = time.Now()
-	}
-
-	payload := map[string]any{
-		"idContato":   contactID,
-		"data":        orderDate.Format("2006-01-02"),
-		"itens":       items,
-		"observacoes": order.Observation,
-		"ecommerce": map[string]any{
-			"numeroPedidoEcommerce": order.ExternalID,
-			"nomeEcommerce":         "LiveCart",
-		},
-	}
-
-	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, payload, t.authHeaders())
-	if err != nil {
-		return fmt.Errorf("updating order: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusNoContent && !providers.IsSuccessStatus(resp.StatusCode) {
-		var errResp struct {
-			Mensagem string `json:"mensagem"`
-		}
-		_ = json.Unmarshal(body, &errResp)
-		return fmt.Errorf("update order failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
-	}
-
-	return nil
 }
 
 // LaunchOrderStock decrements stock in Tiny for all items in the order.
@@ -686,6 +625,74 @@ func (t *Tiny) CancelOrder(ctx context.Context, orderID string) error {
 	}
 
 	return nil
+}
+
+// ReserveStock creates a manual stock exit (tipo S) in Tiny for the given product.
+// POST /estoque/{idProduto} — returns the movement ID (idLancamento).
+func (t *Tiny) ReserveStock(ctx context.Context, productID string, qty int, unitPrice float64, obs string) (string, error) {
+	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
+	payload := map[string]any{
+		"tipo":          "S",
+		"quantidade":    qty,
+		"precoUnitario": unitPrice,
+		"observacoes":   obs,
+	}
+
+	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
+	if err != nil {
+		return "", fmt.Errorf("reserving stock: %w", err)
+	}
+
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		var errResp struct {
+			Mensagem string `json:"mensagem"`
+		}
+		_ = json.Unmarshal(body, &errResp)
+		return "", fmt.Errorf("reserve stock failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+	}
+
+	var result struct {
+		IDLancamento int64 `json:"idLancamento"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("parsing reserve stock response: %w", err)
+	}
+
+	return strconv.FormatInt(result.IDLancamento, 10), nil
+}
+
+// ReverseStockReservation creates a manual stock entry (tipo E) in Tiny for the given product.
+// POST /estoque/{idProduto} — returns the movement ID (idLancamento).
+func (t *Tiny) ReverseStockReservation(ctx context.Context, productID string, qty int, unitPrice float64, obs string) (string, error) {
+	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
+	payload := map[string]any{
+		"tipo":          "E",
+		"quantidade":    qty,
+		"precoUnitario": unitPrice,
+		"observacoes":   obs,
+	}
+
+	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
+	if err != nil {
+		return "", fmt.Errorf("reversing stock reservation: %w", err)
+	}
+
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		var errResp struct {
+			Mensagem string `json:"mensagem"`
+		}
+		_ = json.Unmarshal(body, &errResp)
+		return "", fmt.Errorf("reverse stock reservation failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+	}
+
+	var result struct {
+		IDLancamento int64 `json:"idLancamento"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("parsing reverse stock response: %w", err)
+	}
+
+	return strconv.FormatInt(result.IDLancamento, 10), nil
 }
 
 // SearchContacts searches for contacts by name in Tiny.

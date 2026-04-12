@@ -192,6 +192,19 @@ type Product struct {
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
+type StockReservation struct {
+	ID                pgtype.UUID        `json:"id"`
+	EventID           pgtype.UUID        `json:"event_id"`
+	CartID            pgtype.UUID        `json:"cart_id"`
+	ProductID         pgtype.UUID        `json:"product_id"`
+	ExternalProductID string             `json:"external_product_id"`
+	Quantity          int32              `json:"quantity"`
+	ErpMovementID     pgtype.Text        `json:"erp_movement_id"`
+	Status            string             `json:"status"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	ReversedAt        pgtype.Timestamptz `json:"reversed_at"`
+}
+
 type Store struct {
 	ID             pgtype.UUID        `json:"id"`
 	Name           string             `json:"name"`

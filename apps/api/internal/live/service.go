@@ -28,10 +28,17 @@ type NotifyEventCheckoutParams struct {
 	TotalValue     int64
 }
 
+// ERPFinalizer is called at event end to reverse stock reservations and
+// create final sales orders in the ERP. Local interface to avoid import cycle.
+type ERPFinalizer interface {
+	FinalizeEventERP(ctx context.Context, storeID, eventID string) error
+}
+
 type Service struct {
-	repo     *Repository
-	logger   *zap.Logger
-	notifier Notifier
+	repo          *Repository
+	logger        *zap.Logger
+	notifier      Notifier
+	erpFinalizer  ERPFinalizer
 }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {
@@ -47,6 +54,11 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 // depends on integration.Service).
 func (s *Service) SetNotifier(n Notifier) {
 	s.notifier = n
+}
+
+// SetERPFinalizer wires an ERPFinalizer into the service after construction.
+func (s *Service) SetERPFinalizer(f ERPFinalizer) {
+	s.erpFinalizer = f
 }
 
 // =============================================================================
@@ -401,6 +413,19 @@ func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, e
 			zap.String("event_id", input.ID),
 			zap.Error(err),
 		)
+	}
+
+	// 3.5. Reverse ERP stock reservations and create final sales orders (async — never blocks the response).
+	if s.erpFinalizer != nil {
+		go func() {
+			bgCtx := context.Background()
+			if err := s.erpFinalizer.FinalizeEventERP(bgCtx, input.StoreID, event.ID); err != nil {
+				s.logger.Error("failed to finalize ERP for event",
+					zap.String("event_id", event.ID),
+					zap.Error(err),
+				)
+			}
+		}()
 	}
 
 	// 4. Determine if we should auto-send checkout links.
