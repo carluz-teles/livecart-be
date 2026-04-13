@@ -19,6 +19,7 @@ type ProviderName string
 
 const (
 	ProviderMercadoPago ProviderName = "mercado_pago"
+	ProviderPagarme     ProviderName = "pagarme"
 	ProviderTiny        ProviderName = "tiny"
 	ProviderInstagram   ProviderName = "instagram"
 )

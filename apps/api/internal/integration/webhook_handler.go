@@ -38,6 +38,7 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App) {
 	// Uses storeId instead of integrationId for stable URLs across reconnections
 	webhooks := app.Group("/api/webhooks")
 	webhooks.Post("/mercado_pago/:storeId", h.HandleMercadoPago)
+	webhooks.Post("/pagarme/:storeId", h.HandlePagarme)
 	webhooks.Post("/tiny/:storeId", h.HandleTiny)
 
 	// Instagram webhooks (Meta platform)
@@ -287,6 +288,102 @@ func (h *WebhookHandler) HandleMercadoPago(c *fiber.Ctx) error {
 				h.logger.Error("failed to process payment notification",
 					zap.String("store_id", storeID),
 					zap.String("payment_id", webhook.Data.ID),
+					zap.Error(err),
+				)
+			}
+		}()
+	}
+
+	return httpx.OK(c, fiber.Map{"status": "received"})
+}
+
+// HandlePagarme handles Pagar.me webhook notifications.
+// @Summary Handle Pagar.me webhook
+// @Description Receives and processes Pagar.me order/payment notifications
+// @Tags webhooks
+// @Accept json
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Success 200 {object} map[string]string
+// @Router /api/webhooks/pagarme/{storeId} [post]
+func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
+	storeID := c.Params("storeId")
+
+	body := c.Body()
+
+	// Parse Pagar.me webhook payload
+	// Format: { "id": "hook_...", "type": "order.paid", "data": { "id": "or_...", ... } }
+	var webhook struct {
+		ID        string `json:"id"`
+		Type      string `json:"type"`
+		CreatedAt string `json:"created_at"`
+		Data      struct {
+			ID      string `json:"id"`
+			Code    string `json:"code"`
+			Status  string `json:"status"`
+			Amount  int    `json:"amount"`
+			Charges []struct {
+				ID            string `json:"id"`
+				Status        string `json:"status"`
+				PaymentMethod string `json:"payment_method"`
+				PaidAt        string `json:"paid_at"`
+			} `json:"charges"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &webhook); err != nil {
+		h.logger.Error("failed to parse Pagar.me webhook payload",
+			zap.String("store_id", storeID),
+			zap.Error(err),
+		)
+		return httpx.BadRequest(c, "invalid webhook payload")
+	}
+
+	h.logger.Info("pagarme webhook received",
+		zap.String("store_id", storeID),
+		zap.String("type", webhook.Type),
+		zap.String("order_id", webhook.Data.ID),
+		zap.String("order_code", webhook.Data.Code),
+		zap.String("status", webhook.Data.Status),
+	)
+
+	// Store webhook event for audit trail
+	eventID := webhook.ID
+	if eventID == "" {
+		eventID = webhook.Data.ID
+	}
+	if eventID == "" {
+		eventID = c.Get("X-Request-Id")
+	}
+
+	if err := h.service.StoreWebhookEvent(c.Context(), StoreWebhookInput{
+		StoreID:        storeID,
+		Provider:       "pagarme",
+		EventType:      webhook.Type,
+		EventID:        eventID,
+		Payload:        body,
+		SignatureValid: true, // TODO: Implement signature verification
+	}); err != nil {
+		h.logger.Error("failed to store webhook event",
+			zap.String("store_id", storeID),
+			zap.Error(err),
+		)
+		// Don't return error - we still want to process the webhook
+	}
+
+	// Process order.paid notifications
+	// Pagar.me sends order.paid when payment is confirmed
+	if webhook.Type == "order.paid" && webhook.Data.ID != "" {
+		// Process asynchronously to respond quickly
+		go func() {
+			// The "code" field contains our external reference (cart token)
+			if err := h.service.ProcessPaymentNotification(c.Context(), ProcessPaymentInput{
+				StoreID:   storeID,
+				Provider:  "pagarme",
+				PaymentID: webhook.Data.ID, // Order ID - we'll fetch status from this
+			}); err != nil {
+				h.logger.Error("failed to process Pagar.me payment notification",
+					zap.String("store_id", storeID),
+					zap.String("order_id", webhook.Data.ID),
 					zap.Error(err),
 				)
 			}

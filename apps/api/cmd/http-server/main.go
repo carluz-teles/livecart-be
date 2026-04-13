@@ -198,6 +198,16 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						RateLimiter:   cfg.RateLimiter,
 					})
 				},
+				PagarmeConstructor: func(cfg providers.PagarmeConfig) (providers.PaymentProvider, error) {
+					return payment.NewPagarme(payment.PagarmeConfig{
+						IntegrationID: cfg.IntegrationID,
+						StoreID:       cfg.StoreID,
+						Credentials:   cfg.Credentials,
+						Logger:        cfg.Logger,
+						LogFunc:       cfg.LogFunc,
+						RateLimiter:   cfg.RateLimiter,
+					})
+				},
 				TinyConstructor: func(cfg providers.TinyConfig) (providers.ERPProvider, error) {
 					return erp.NewTiny(erp.TinyConfig{
 						IntegrationID: cfg.IntegrationID,
@@ -251,6 +261,16 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						Credentials:   cfg.Credentials,
 						AppID:         cfg.AppID,
 						AppSecret:     cfg.AppSecret,
+						Logger:        cfg.Logger,
+						LogFunc:       cfg.LogFunc,
+						RateLimiter:   cfg.RateLimiter,
+					})
+				},
+				PagarmeConstructor: func(cfg providers.PagarmeConfig) (providers.PaymentProvider, error) {
+					return payment.NewPagarme(payment.PagarmeConfig{
+						IntegrationID: cfg.IntegrationID,
+						StoreID:       cfg.StoreID,
+						Credentials:   cfg.Credentials,
 						Logger:        cfg.Logger,
 						LogFunc:       cfg.LogFunc,
 						RateLimiter:   cfg.RateLimiter,

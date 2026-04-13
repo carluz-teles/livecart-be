@@ -22,6 +22,7 @@ type Factory struct {
 
 	// Provider constructors (injected to avoid import cycles)
 	mercadoPagoConstructor MercadoPagoConstructor
+	pagarmeConstructor     PagarmeConstructor
 	tinyConstructor        TinyConstructor
 	instagramConstructor   InstagramConstructor
 }
@@ -36,6 +37,7 @@ type FactoryConfig struct {
 
 	// Constructors - these should be injected from the payment/erp/social packages
 	MercadoPagoConstructor MercadoPagoConstructor
+	PagarmeConstructor     PagarmeConstructor
 	TinyConstructor        TinyConstructor
 	InstagramConstructor   InstagramConstructor
 }
@@ -49,6 +51,7 @@ func NewFactory(cfg FactoryConfig) *Factory {
 		mercadoPagoAppSecret:   cfg.MercadoPagoAppSecret,
 		rateLimitManager:       cfg.RateLimitManager,
 		mercadoPagoConstructor: cfg.MercadoPagoConstructor,
+		pagarmeConstructor:     cfg.PagarmeConstructor,
 		tinyConstructor:        cfg.TinyConstructor,
 		instagramConstructor:   cfg.InstagramConstructor,
 	}
@@ -115,6 +118,18 @@ func (f *Factory) createPaymentProvider(cfg ProviderConfig) (PaymentProvider, er
 			LogFunc:       f.logFunc,
 			RateLimiter:   limiter,
 		})
+	case ProviderPagarme:
+		if f.pagarmeConstructor == nil {
+			return nil, fmt.Errorf("pagarme constructor not configured")
+		}
+		return f.pagarmeConstructor(PagarmeConfig{
+			IntegrationID: cfg.IntegrationID,
+			StoreID:       cfg.StoreID,
+			Credentials:   cfg.Credentials,
+			Logger:        f.logger,
+			LogFunc:       f.logFunc,
+			RateLimiter:   limiter,
+		})
 	default:
 		return nil, fmt.Errorf("unknown payment provider: %s", cfg.Name)
 	}
@@ -163,6 +178,9 @@ func (f *Factory) createERPProvider(cfg ProviderConfig) (ERPProvider, error) {
 // MercadoPagoConstructor is a function type for creating Mercado Pago providers.
 type MercadoPagoConstructor func(cfg MercadoPagoConfig) (PaymentProvider, error)
 
+// PagarmeConstructor is a function type for creating Pagar.me providers.
+type PagarmeConstructor func(cfg PagarmeConfig) (PaymentProvider, error)
+
 // TinyConstructor is a function type for creating Tiny providers.
 type TinyConstructor func(cfg TinyConfig) (ERPProvider, error)
 
@@ -173,6 +191,16 @@ type MercadoPagoConfig struct {
 	Credentials   *Credentials
 	AppID         string
 	AppSecret     string
+	Logger        *zap.Logger
+	LogFunc       LogFunc
+	RateLimiter   ratelimit.RateLimiter
+}
+
+// PagarmeConfig contains configuration for Pagar.me provider.
+type PagarmeConfig struct {
+	IntegrationID string
+	StoreID       string
+	Credentials   *Credentials
 	Logger        *zap.Logger
 	LogFunc       LogFunc
 	RateLimiter   ratelimit.RateLimiter
