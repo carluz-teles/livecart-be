@@ -39,11 +39,30 @@ func (r *Repository) CreateEvent(ctx context.Context, params CreateEventParams) 
 		eventType = "single"
 	}
 
+	// Convert nullable ints to pgtype.Int4
+	var cartExpirationMinutes, cartMaxQuantityPerItem pgtype.Int4
+	if params.CartExpirationMinutes != nil {
+		cartExpirationMinutes = pgtype.Int4{Int32: int32(*params.CartExpirationMinutes), Valid: true}
+	}
+	if params.CartMaxQuantityPerItem != nil {
+		cartMaxQuantityPerItem = pgtype.Int4{Int32: int32(*params.CartMaxQuantityPerItem), Valid: true}
+	}
+
+	// Convert nullable bool to pgtype.Bool
+	var autoSendCheckoutLinks pgtype.Bool
+	if params.AutoSendCheckoutLinks != nil {
+		autoSendCheckoutLinks = pgtype.Bool{Bool: *params.AutoSendCheckoutLinks, Valid: true}
+	}
+
 	row, err := r.q.CreateLiveEvent(ctx, sqlc.CreateLiveEventParams{
-		StoreID: storeUID,
-		Title:   pgtype.Text{String: params.Title, Valid: params.Title != ""},
-		Type:    eventType,
-		Status:  params.Status,
+		StoreID:                storeUID,
+		Title:                  pgtype.Text{String: params.Title, Valid: params.Title != ""},
+		Type:                   eventType,
+		Status:                 params.Status,
+		CloseCartOnEventEnd:    params.CloseCartOnEventEnd,
+		CartExpirationMinutes:  cartExpirationMinutes,
+		CartMaxQuantityPerItem: cartMaxQuantityPerItem,
+		AutoSendCheckoutLinks:  autoSendCheckoutLinks,
 	})
 	if err != nil {
 		return EventRow{}, fmt.Errorf("creating live event: %w", err)
@@ -500,8 +519,18 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 		return nil, false, fmt.Errorf("getting cart: %w", err)
 	}
 
-	// Create new cart with expiration 24h from now
-	expiresAt := time.Now().Add(24 * time.Hour)
+	// Get cart expiration from event settings (with store fallback)
+	settings, err := r.q.GetEventCartSettings(ctx, eventID)
+	if err != nil {
+		return nil, false, fmt.Errorf("getting event cart settings: %w", err)
+	}
+
+	// Use event/store cart_expiration_minutes, default to 30 minutes if not set
+	expirationMinutes := settings.CartExpirationMinutes
+	if expirationMinutes == 0 {
+		expirationMinutes = 30 // Default fallback
+	}
+	expiresAt := time.Now().Add(time.Duration(expirationMinutes) * time.Minute)
 
 	// Parse session ID if provided
 	var sessionID pgtype.UUID
@@ -695,6 +724,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 	query := fmt.Sprintf(`
 		SELECT
 			e.id, e.store_id, e.title, e.type, e.status, e.total_orders, e.created_at, e.updated_at,
+			e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.auto_send_checkout_links,
 			s.started_at, s.ended_at, COALESCE(s.total_comments, 0),
 			COALESCE(p.platform, ''), COALESCE(p.platform_live_id, '')
 		FROM live_events e
@@ -730,6 +760,8 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 		var live LiveOutput
 		var title, eventType, platform, platformLiveID pgtype.Text
 		var startedAt, endedAt pgtype.Timestamptz
+		var cartExpirationMinutes, cartMaxQuantityPerItem pgtype.Int4
+		var autoSendCheckoutLinks pgtype.Bool
 
 		if err := rows.Scan(
 			&live.ID,
@@ -740,6 +772,10 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 			&live.TotalOrders,
 			&live.CreatedAt,
 			&live.UpdatedAt,
+			&live.CloseCartOnEventEnd,
+			&cartExpirationMinutes,
+			&cartMaxQuantityPerItem,
+			&autoSendCheckoutLinks,
 			&startedAt,
 			&endedAt,
 			&live.TotalComments,
@@ -769,6 +805,17 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 		if endedAt.Valid {
 			live.EndedAt = &endedAt.Time
 		}
+		if cartExpirationMinutes.Valid {
+			v := int(cartExpirationMinutes.Int32)
+			live.CartExpirationMinutes = &v
+		}
+		if cartMaxQuantityPerItem.Valid {
+			v := int(cartMaxQuantityPerItem.Int32)
+			live.CartMaxQuantityPerItem = &v
+		}
+		if autoSendCheckoutLinks.Valid {
+			live.AutoSendCheckoutLinks = &autoSendCheckoutLinks.Bool
+		}
 
 		lives = append(lives, live)
 	}
@@ -795,15 +842,34 @@ func toEventRow(row sqlc.LiveEvent) EventRow {
 		eventType = "single"
 	}
 
+	// Convert nullable fields
+	var cartExpirationMinutes, cartMaxQuantityPerItem *int
+	if row.CartExpirationMinutes.Valid {
+		v := int(row.CartExpirationMinutes.Int32)
+		cartExpirationMinutes = &v
+	}
+	if row.CartMaxQuantityPerItem.Valid {
+		v := int(row.CartMaxQuantityPerItem.Int32)
+		cartMaxQuantityPerItem = &v
+	}
+	var autoSendCheckoutLinks *bool
+	if row.AutoSendCheckoutLinks.Valid {
+		autoSendCheckoutLinks = &row.AutoSendCheckoutLinks.Bool
+	}
+
 	return EventRow{
-		ID:          row.ID.String(),
-		StoreID:     row.StoreID.String(),
-		Title:       title,
-		Type:        eventType,
-		Status:      row.Status,
-		TotalOrders: int(row.TotalOrders),
-		CreatedAt:   row.CreatedAt.Time,
-		UpdatedAt:   row.UpdatedAt.Time,
+		ID:                     row.ID.String(),
+		StoreID:                row.StoreID.String(),
+		Title:                  title,
+		Type:                   eventType,
+		Status:                 row.Status,
+		TotalOrders:            int(row.TotalOrders),
+		CloseCartOnEventEnd:    row.CloseCartOnEventEnd,
+		CartExpirationMinutes:  cartExpirationMinutes,
+		CartMaxQuantityPerItem: cartMaxQuantityPerItem,
+		AutoSendCheckoutLinks:  autoSendCheckoutLinks,
+		CreatedAt:              row.CreatedAt.Time,
+		UpdatedAt:              row.UpdatedAt.Time,
 	}
 }
 

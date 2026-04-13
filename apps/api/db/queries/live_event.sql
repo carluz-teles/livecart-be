@@ -4,8 +4,17 @@
 -- =============================================================================
 
 -- name: CreateLiveEvent :one
-INSERT INTO live_events (store_id, title, type, status)
-VALUES ($1, $2, $3, $4)
+INSERT INTO live_events (
+    store_id,
+    title,
+    type,
+    status,
+    close_cart_on_event_end,
+    cart_expiration_minutes,
+    cart_max_quantity_per_item,
+    auto_send_checkout_links
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING *;
 
 -- name: GetLiveEventByID :one
@@ -59,3 +68,16 @@ JOIN live_session_platforms lsp ON lsp.session_id = s.id
 WHERE lsp.platform_live_id = $1 AND e.status = 'active'
 ORDER BY e.created_at DESC
 LIMIT 1;
+
+-- name: GetEventCartSettings :one
+-- Get cart settings for an event with fallback to store defaults
+SELECT
+    e.id AS event_id,
+    e.store_id,
+    e.close_cart_on_event_end,
+    COALESCE(e.cart_expiration_minutes, s.cart_expiration_minutes) AS cart_expiration_minutes,
+    COALESCE(e.cart_max_quantity_per_item, s.cart_max_quantity_per_item) AS cart_max_quantity_per_item,
+    COALESCE(e.auto_send_checkout_links, s.auto_send_checkout_links) AS auto_send_checkout_links
+FROM live_events e
+JOIN stores s ON s.id = e.store_id
+WHERE e.id = $1;

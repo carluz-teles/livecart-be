@@ -134,6 +134,14 @@ type LiveEvent struct {
 	TotalOrders int32              `json:"total_orders"`
 	// single = one live, auto-end; multi = multiple sessions, manual end
 	Type string `json:"type"`
+	// If true, cart stops accepting items when event ends
+	CloseCartOnEventEnd bool `json:"close_cart_on_event_end"`
+	// Override cart expiration (NULL = use store setting)
+	CartExpirationMinutes pgtype.Int4 `json:"cart_expiration_minutes"`
+	// Override max quantity per item (NULL = use store setting)
+	CartMaxQuantityPerItem pgtype.Int4 `json:"cart_max_quantity_per_item"`
+	// Override auto-send checkout links (NULL = use store setting)
+	AutoSendCheckoutLinks pgtype.Bool `json:"auto_send_checkout_links"`
 }
 
 type LiveSession struct {

@@ -25,14 +25,18 @@ type CreateEventResponse struct {
 }
 
 type EventResponse struct {
-	ID          string            `json:"id"`
-	Title       string            `json:"title"`
-	Type        string            `json:"type"`
-	Status      string            `json:"status"`
-	TotalOrders int               `json:"totalOrders"`
-	Sessions    []SessionResponse `json:"sessions,omitempty"`
-	CreatedAt   time.Time         `json:"createdAt"`
-	UpdatedAt   time.Time         `json:"updatedAt"`
+	ID                     string            `json:"id"`
+	Title                  string            `json:"title"`
+	Type                   string            `json:"type"`
+	Status                 string            `json:"status"`
+	TotalOrders            int               `json:"totalOrders"`
+	CloseCartOnEventEnd    bool              `json:"closeCartOnEventEnd"`
+	CartExpirationMinutes  *int              `json:"cartExpirationMinutes"`
+	CartMaxQuantityPerItem *int              `json:"cartMaxQuantityPerItem"`
+	AutoSendCheckoutLinks  *bool             `json:"autoSendCheckoutLinks"`
+	Sessions               []SessionResponse `json:"sessions,omitempty"`
+	CreatedAt              time.Time         `json:"createdAt"`
+	UpdatedAt              time.Time         `json:"updatedAt"`
 }
 
 type ListEventsResponse struct {
@@ -54,9 +58,13 @@ type EndEventResponse struct {
 
 // Service layer - Event
 type CreateEventInput struct {
-	StoreID string
-	Title   string
-	Type    string // single or multi
+	StoreID                string
+	Title                  string
+	Type                   string // single or multi
+	CloseCartOnEventEnd    *bool
+	CartExpirationMinutes  *int
+	CartMaxQuantityPerItem *int
+	AutoSendCheckoutLinks  *bool
 }
 
 type CreateEventOutput struct {
@@ -80,15 +88,19 @@ type EndEventOutput struct {
 }
 
 type EventOutput struct {
-	ID          string
-	StoreID     string
-	Title       string
-	Type        string
-	Status      string
-	TotalOrders int
-	Sessions    []SessionOutput
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID                     string
+	StoreID                string
+	Title                  string
+	Type                   string
+	Status                 string
+	TotalOrders            int
+	CloseCartOnEventEnd    bool
+	CartExpirationMinutes  *int
+	CartMaxQuantityPerItem *int
+	AutoSendCheckoutLinks  *bool
+	Sessions               []SessionOutput
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 type ListEventsInput struct {
@@ -113,21 +125,29 @@ type EventFilters struct {
 
 // Repository layer - Event
 type CreateEventParams struct {
-	StoreID string
-	Title   string
-	Type    string
-	Status  string
+	StoreID                string
+	Title                  string
+	Type                   string
+	Status                 string
+	CloseCartOnEventEnd    bool
+	CartExpirationMinutes  *int
+	CartMaxQuantityPerItem *int
+	AutoSendCheckoutLinks  *bool
 }
 
 type EventRow struct {
-	ID          string
-	StoreID     string
-	Title       string
-	Type        string
-	Status      string
-	TotalOrders int
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID                     string
+	StoreID                string
+	Title                  string
+	Type                   string
+	Status                 string
+	TotalOrders            int
+	CloseCartOnEventEnd    bool
+	CartExpirationMinutes  *int
+	CartMaxQuantityPerItem *int
+	AutoSendCheckoutLinks  *bool
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 // =============================================================================
@@ -289,8 +309,13 @@ type LiveFilters struct {
 type CreateLiveRequest struct {
 	Title          string  `json:"title" validate:"required,min=1,max=200"`
 	Type           string  `json:"type" validate:"omitempty,oneof=single multi"`
-	Platform       *string `json:"platform" validate:"omitempty,oneof=instagram tiktok youtube facebook"`
+	Platform       *string `json:"platform" validate:"omitempty,oneof=instagram"`
 	PlatformLiveID *string `json:"platformLiveId" validate:"omitempty"`
+	// Cart settings (override store defaults)
+	CloseCartOnEventEnd    *bool `json:"closeCartOnEventEnd"`
+	CartExpirationMinutes  *int  `json:"cartExpirationMinutes" validate:"omitempty,min=5,max=1440"`
+	CartMaxQuantityPerItem *int  `json:"cartMaxQuantityPerItem" validate:"omitempty,min=1,max=100"`
+	AutoSendCheckoutLinks  *bool `json:"autoSendCheckoutLinks"`
 }
 
 type CreateLiveResponse struct {
@@ -307,18 +332,22 @@ type UpdateLiveRequest struct {
 }
 
 type LiveResponse struct {
-	ID             string     `json:"id"`
-	Title          string     `json:"title"`
-	Type           string     `json:"type"`
-	Platform       string     `json:"platform"`       // Primary platform (from first session)
-	PlatformLiveID string     `json:"platformLiveId"` // Primary platform live ID
-	Status         string     `json:"status"`
-	StartedAt      *time.Time `json:"startedAt"`
-	EndedAt        *time.Time `json:"endedAt"`
-	TotalComments  int        `json:"totalComments"`
-	TotalOrders    int        `json:"totalOrders"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	ID                     string     `json:"id"`
+	Title                  string     `json:"title"`
+	Type                   string     `json:"type"`
+	Platform               string     `json:"platform"`       // Primary platform (from first session)
+	PlatformLiveID         string     `json:"platformLiveId"` // Primary platform live ID
+	Status                 string     `json:"status"`
+	StartedAt              *time.Time `json:"startedAt"`
+	EndedAt                *time.Time `json:"endedAt"`
+	TotalComments          int        `json:"totalComments"`
+	TotalOrders            int        `json:"totalOrders"`
+	CloseCartOnEventEnd    bool       `json:"closeCartOnEventEnd"`
+	CartExpirationMinutes  *int       `json:"cartExpirationMinutes"`
+	CartMaxQuantityPerItem *int       `json:"cartMaxQuantityPerItem"`
+	AutoSendCheckoutLinks  *bool      `json:"autoSendCheckoutLinks"`
+	CreatedAt              time.Time  `json:"createdAt"`
+	UpdatedAt              time.Time  `json:"updatedAt"`
 }
 
 type ListLivesResponse struct {
@@ -344,11 +373,15 @@ type EndLiveResponse struct {
 
 // Service layer - Legacy
 type CreateLiveInput struct {
-	StoreID        string
-	Title          string
-	Type           string
-	Platform       *string
-	PlatformLiveID *string
+	StoreID                string
+	Title                  string
+	Type                   string
+	Platform               *string
+	PlatformLiveID         *string
+	CloseCartOnEventEnd    *bool
+	CartExpirationMinutes  *int
+	CartMaxQuantityPerItem *int
+	AutoSendCheckoutLinks  *bool
 }
 
 type CreateLiveOutput struct {
@@ -393,19 +426,23 @@ type ListLivesOutput struct {
 }
 
 type LiveOutput struct {
-	ID             string
-	StoreID        string
-	Title          string
-	Type           string
-	Platform       string // Primary platform
-	PlatformLiveID string // Primary platform live ID
-	Status         string
-	StartedAt      *time.Time
-	EndedAt        *time.Time
-	TotalComments  int
-	TotalOrders    int
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID                     string
+	StoreID                string
+	Title                  string
+	Type                   string
+	Platform               string // Primary platform
+	PlatformLiveID         string // Primary platform live ID
+	Status                 string
+	StartedAt              *time.Time
+	EndedAt                *time.Time
+	TotalComments          int
+	TotalOrders            int
+	CloseCartOnEventEnd    bool
+	CartExpirationMinutes  *int
+	CartMaxQuantityPerItem *int
+	AutoSendCheckoutLinks  *bool
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 type LiveStatsOutput struct {

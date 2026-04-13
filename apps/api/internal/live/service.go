@@ -74,12 +74,22 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		eventType = "single"
 	}
 
+	// Default close_cart_on_event_end to true if not specified
+	closeCartOnEventEnd := true
+	if input.CloseCartOnEventEnd != nil {
+		closeCartOnEventEnd = *input.CloseCartOnEventEnd
+	}
+
 	// 1. Create the event
 	event, err := s.repo.CreateEvent(ctx, CreateEventParams{
-		StoreID: input.StoreID,
-		Title:   input.Title,
-		Type:    eventType,
-		Status:  "active",
+		StoreID:                input.StoreID,
+		Title:                  input.Title,
+		Type:                   eventType,
+		Status:                 "active",
+		CloseCartOnEventEnd:    closeCartOnEventEnd,
+		CartExpirationMinutes:  input.CartExpirationMinutes,
+		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
+		AutoSendCheckoutLinks:  input.AutoSendCheckoutLinks,
 	})
 	if err != nil {
 		return CreateLiveOutput{}, err
@@ -171,18 +181,22 @@ func (s *Service) GetByID(ctx context.Context, id, storeID string) (LiveOutput, 
 	}
 
 	return LiveOutput{
-		ID:             event.ID,
-		StoreID:        event.StoreID,
-		Title:          event.Title,
-		Platform:       platform,
-		PlatformLiveID: platformLiveID,
-		Status:         event.Status,
-		StartedAt:      &startedAt,
-		EndedAt:        &endedAt,
-		TotalComments:  totalComments,
-		TotalOrders:    event.TotalOrders,
-		CreatedAt:      event.CreatedAt,
-		UpdatedAt:      event.UpdatedAt,
+		ID:                     event.ID,
+		StoreID:                event.StoreID,
+		Title:                  event.Title,
+		Platform:               platform,
+		PlatformLiveID:         platformLiveID,
+		Status:                 event.Status,
+		StartedAt:              &startedAt,
+		EndedAt:                &endedAt,
+		TotalComments:          totalComments,
+		TotalOrders:            event.TotalOrders,
+		CloseCartOnEventEnd:    event.CloseCartOnEventEnd,
+		CartExpirationMinutes:  event.CartExpirationMinutes,
+		CartMaxQuantityPerItem: event.CartMaxQuantityPerItem,
+		AutoSendCheckoutLinks:  event.AutoSendCheckoutLinks,
+		CreatedAt:              event.CreatedAt,
+		UpdatedAt:              event.UpdatedAt,
 	}, nil
 }
 
@@ -275,15 +289,19 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 	}
 
 	return EventOutput{
-		ID:          event.ID,
-		StoreID:     event.StoreID,
-		Title:       event.Title,
-		Type:        event.Type,
-		Status:      event.Status,
-		TotalOrders: event.TotalOrders,
-		Sessions:    sessions,
-		CreatedAt:   event.CreatedAt,
-		UpdatedAt:   event.UpdatedAt,
+		ID:                     event.ID,
+		StoreID:                event.StoreID,
+		Title:                  event.Title,
+		Type:                   event.Type,
+		Status:                 event.Status,
+		TotalOrders:            event.TotalOrders,
+		CloseCartOnEventEnd:    event.CloseCartOnEventEnd,
+		CartExpirationMinutes:  event.CartExpirationMinutes,
+		CartMaxQuantityPerItem: event.CartMaxQuantityPerItem,
+		AutoSendCheckoutLinks:  event.AutoSendCheckoutLinks,
+		Sessions:               sessions,
+		CreatedAt:              event.CreatedAt,
+		UpdatedAt:              event.UpdatedAt,
 	}, nil
 }
 
@@ -639,13 +657,18 @@ func (s *Service) GetEventByPlatformLiveID(ctx context.Context, platformLiveID s
 	}
 
 	return &EventOutput{
-		ID:          event.ID,
-		StoreID:     event.StoreID,
-		Title:       event.Title,
-		Status:      event.Status,
-		TotalOrders: event.TotalOrders,
-		CreatedAt:   event.CreatedAt,
-		UpdatedAt:   event.UpdatedAt,
+		ID:                     event.ID,
+		StoreID:                event.StoreID,
+		Title:                  event.Title,
+		Type:                   event.Type,
+		Status:                 event.Status,
+		TotalOrders:            event.TotalOrders,
+		CloseCartOnEventEnd:    event.CloseCartOnEventEnd,
+		CartExpirationMinutes:  event.CartExpirationMinutes,
+		CartMaxQuantityPerItem: event.CartMaxQuantityPerItem,
+		AutoSendCheckoutLinks:  event.AutoSendCheckoutLinks,
+		CreatedAt:              event.CreatedAt,
+		UpdatedAt:              event.UpdatedAt,
 	}, nil
 }
 

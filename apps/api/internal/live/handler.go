@@ -67,11 +67,15 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
 
 	output, err := h.service.Create(c.Context(), CreateLiveInput{
-		StoreID:        storeID,
-		Title:          req.Title,
-		Type:           req.Type,
-		Platform:       req.Platform,
-		PlatformLiveID: req.PlatformLiveID,
+		StoreID:                storeID,
+		Title:                  req.Title,
+		Type:                   req.Type,
+		Platform:               req.Platform,
+		PlatformLiveID:         req.PlatformLiveID,
+		CloseCartOnEventEnd:    req.CloseCartOnEventEnd,
+		CartExpirationMinutes:  req.CartExpirationMinutes,
+		CartMaxQuantityPerItem: req.CartMaxQuantityPerItem,
+		AutoSendCheckoutLinks:  req.AutoSendCheckoutLinks,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -542,18 +546,22 @@ func parseLiveFilters(c *fiber.Ctx) LiveFilters {
 
 func toLiveResponse(o LiveOutput) LiveResponse {
 	return LiveResponse{
-		ID:             o.ID,
-		Title:          o.Title,
-		Type:           o.Type,
-		Platform:       o.Platform,
-		PlatformLiveID: o.PlatformLiveID,
-		Status:         o.Status,
-		StartedAt:      o.StartedAt,
-		EndedAt:        o.EndedAt,
-		TotalComments:  o.TotalComments,
-		TotalOrders:    o.TotalOrders,
-		CreatedAt:      o.CreatedAt,
-		UpdatedAt:      o.UpdatedAt,
+		ID:                     o.ID,
+		Title:                  o.Title,
+		Type:                   o.Type,
+		Platform:               o.Platform,
+		PlatformLiveID:         o.PlatformLiveID,
+		Status:                 o.Status,
+		StartedAt:              o.StartedAt,
+		EndedAt:                o.EndedAt,
+		TotalComments:          o.TotalComments,
+		TotalOrders:            o.TotalOrders,
+		CloseCartOnEventEnd:    o.CloseCartOnEventEnd,
+		CartExpirationMinutes:  o.CartExpirationMinutes,
+		CartMaxQuantityPerItem: o.CartMaxQuantityPerItem,
+		AutoSendCheckoutLinks:  o.AutoSendCheckoutLinks,
+		CreatedAt:              o.CreatedAt,
+		UpdatedAt:              o.UpdatedAt,
 	}
 }
 
@@ -597,14 +605,18 @@ func toEventResponse(o EventOutput) EventResponse {
 	}
 
 	return EventResponse{
-		ID:          o.ID,
-		Title:       o.Title,
-		Type:        o.Type,
-		Status:      o.Status,
-		TotalOrders: o.TotalOrders,
-		Sessions:    sessions,
-		CreatedAt:   o.CreatedAt,
-		UpdatedAt:   o.UpdatedAt,
+		ID:                     o.ID,
+		Title:                  o.Title,
+		Type:                   o.Type,
+		Status:                 o.Status,
+		TotalOrders:            o.TotalOrders,
+		CloseCartOnEventEnd:    o.CloseCartOnEventEnd,
+		CartExpirationMinutes:  o.CartExpirationMinutes,
+		CartMaxQuantityPerItem: o.CartMaxQuantityPerItem,
+		AutoSendCheckoutLinks:  o.AutoSendCheckoutLinks,
+		Sessions:               sessions,
+		CreatedAt:              o.CreatedAt,
+		UpdatedAt:              o.UpdatedAt,
 	}
 }
 

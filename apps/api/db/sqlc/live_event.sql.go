@@ -24,16 +24,29 @@ func (q *Queries) CountSessionsByEvent(ctx context.Context, eventID pgtype.UUID)
 
 const createLiveEvent = `-- name: CreateLiveEvent :one
 
-INSERT INTO live_events (store_id, title, type, status)
-VALUES ($1, $2, $3, $4)
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, type
+INSERT INTO live_events (
+    store_id,
+    title,
+    type,
+    status,
+    close_cart_on_event_end,
+    cart_expiration_minutes,
+    cart_max_quantity_per_item,
+    auto_send_checkout_links
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, auto_send_checkout_links
 `
 
 type CreateLiveEventParams struct {
-	StoreID pgtype.UUID `json:"store_id"`
-	Title   pgtype.Text `json:"title"`
-	Type    string      `json:"type"`
-	Status  string      `json:"status"`
+	StoreID                pgtype.UUID `json:"store_id"`
+	Title                  pgtype.Text `json:"title"`
+	Type                   string      `json:"type"`
+	Status                 string      `json:"status"`
+	CloseCartOnEventEnd    bool        `json:"close_cart_on_event_end"`
+	CartExpirationMinutes  pgtype.Int4 `json:"cart_expiration_minutes"`
+	CartMaxQuantityPerItem pgtype.Int4 `json:"cart_max_quantity_per_item"`
+	AutoSendCheckoutLinks  pgtype.Bool `json:"auto_send_checkout_links"`
 }
 
 // =============================================================================
@@ -46,6 +59,10 @@ func (q *Queries) CreateLiveEvent(ctx context.Context, arg CreateLiveEventParams
 		arg.Title,
 		arg.Type,
 		arg.Status,
+		arg.CloseCartOnEventEnd,
+		arg.CartExpirationMinutes,
+		arg.CartMaxQuantityPerItem,
+		arg.AutoSendCheckoutLinks,
 	)
 	var i LiveEvent
 	err := row.Scan(
@@ -57,6 +74,10 @@ func (q *Queries) CreateLiveEvent(ctx context.Context, arg CreateLiveEventParams
 		&i.UpdatedAt,
 		&i.TotalOrders,
 		&i.Type,
+		&i.CloseCartOnEventEnd,
+		&i.CartExpirationMinutes,
+		&i.CartMaxQuantityPerItem,
+		&i.AutoSendCheckoutLinks,
 	)
 	return i, err
 }
@@ -65,7 +86,7 @@ const endLiveEvent = `-- name: EndLiveEvent :one
 UPDATE live_events
 SET status = 'ended', updated_at = now()
 WHERE id = $1 AND store_id = $2
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, type
+RETURNING id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, auto_send_checkout_links
 `
 
 type EndLiveEventParams struct {
@@ -85,12 +106,16 @@ func (q *Queries) EndLiveEvent(ctx context.Context, arg EndLiveEventParams) (Liv
 		&i.UpdatedAt,
 		&i.TotalOrders,
 		&i.Type,
+		&i.CloseCartOnEventEnd,
+		&i.CartExpirationMinutes,
+		&i.CartMaxQuantityPerItem,
+		&i.AutoSendCheckoutLinks,
 	)
 	return i, err
 }
 
 const getActiveLiveEventByStore = `-- name: GetActiveLiveEventByStore :one
-SELECT id, store_id, title, status, created_at, updated_at, total_orders, type FROM live_events
+SELECT id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, auto_send_checkout_links FROM live_events
 WHERE store_id = $1 AND status = 'active'
 ORDER BY created_at DESC
 LIMIT 1
@@ -108,12 +133,16 @@ func (q *Queries) GetActiveLiveEventByStore(ctx context.Context, storeID pgtype.
 		&i.UpdatedAt,
 		&i.TotalOrders,
 		&i.Type,
+		&i.CloseCartOnEventEnd,
+		&i.CartExpirationMinutes,
+		&i.CartMaxQuantityPerItem,
+		&i.AutoSendCheckoutLinks,
 	)
 	return i, err
 }
 
 const getEventByPlatformLiveID = `-- name: GetEventByPlatformLiveID :one
-SELECT e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.type
+SELECT e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.type, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.auto_send_checkout_links
 FROM live_events e
 JOIN live_sessions s ON s.event_id = e.id
 JOIN live_session_platforms lsp ON lsp.session_id = s.id
@@ -135,12 +164,16 @@ func (q *Queries) GetEventByPlatformLiveID(ctx context.Context, platformLiveID s
 		&i.UpdatedAt,
 		&i.TotalOrders,
 		&i.Type,
+		&i.CloseCartOnEventEnd,
+		&i.CartExpirationMinutes,
+		&i.CartMaxQuantityPerItem,
+		&i.AutoSendCheckoutLinks,
 	)
 	return i, err
 }
 
 const getEventBySessionID = `-- name: GetEventBySessionID :one
-SELECT e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.type FROM live_events e
+SELECT e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.type, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.auto_send_checkout_links FROM live_events e
 JOIN live_sessions s ON s.event_id = e.id
 WHERE s.id = $1
 `
@@ -157,12 +190,53 @@ func (q *Queries) GetEventBySessionID(ctx context.Context, id pgtype.UUID) (Live
 		&i.UpdatedAt,
 		&i.TotalOrders,
 		&i.Type,
+		&i.CloseCartOnEventEnd,
+		&i.CartExpirationMinutes,
+		&i.CartMaxQuantityPerItem,
+		&i.AutoSendCheckoutLinks,
+	)
+	return i, err
+}
+
+const getEventCartSettings = `-- name: GetEventCartSettings :one
+SELECT
+    e.id AS event_id,
+    e.store_id,
+    e.close_cart_on_event_end,
+    COALESCE(e.cart_expiration_minutes, s.cart_expiration_minutes) AS cart_expiration_minutes,
+    COALESCE(e.cart_max_quantity_per_item, s.cart_max_quantity_per_item) AS cart_max_quantity_per_item,
+    COALESCE(e.auto_send_checkout_links, s.auto_send_checkout_links) AS auto_send_checkout_links
+FROM live_events e
+JOIN stores s ON s.id = e.store_id
+WHERE e.id = $1
+`
+
+type GetEventCartSettingsRow struct {
+	EventID                pgtype.UUID `json:"event_id"`
+	StoreID                pgtype.UUID `json:"store_id"`
+	CloseCartOnEventEnd    bool        `json:"close_cart_on_event_end"`
+	CartExpirationMinutes  int32       `json:"cart_expiration_minutes"`
+	CartMaxQuantityPerItem int32       `json:"cart_max_quantity_per_item"`
+	AutoSendCheckoutLinks  bool        `json:"auto_send_checkout_links"`
+}
+
+// Get cart settings for an event with fallback to store defaults
+func (q *Queries) GetEventCartSettings(ctx context.Context, id pgtype.UUID) (GetEventCartSettingsRow, error) {
+	row := q.db.QueryRow(ctx, getEventCartSettings, id)
+	var i GetEventCartSettingsRow
+	err := row.Scan(
+		&i.EventID,
+		&i.StoreID,
+		&i.CloseCartOnEventEnd,
+		&i.CartExpirationMinutes,
+		&i.CartMaxQuantityPerItem,
+		&i.AutoSendCheckoutLinks,
 	)
 	return i, err
 }
 
 const getLiveEventByID = `-- name: GetLiveEventByID :one
-SELECT id, store_id, title, status, created_at, updated_at, total_orders, type FROM live_events WHERE id = $1
+SELECT id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, auto_send_checkout_links FROM live_events WHERE id = $1
 `
 
 func (q *Queries) GetLiveEventByID(ctx context.Context, id pgtype.UUID) (LiveEvent, error) {
@@ -177,12 +251,16 @@ func (q *Queries) GetLiveEventByID(ctx context.Context, id pgtype.UUID) (LiveEve
 		&i.UpdatedAt,
 		&i.TotalOrders,
 		&i.Type,
+		&i.CloseCartOnEventEnd,
+		&i.CartExpirationMinutes,
+		&i.CartMaxQuantityPerItem,
+		&i.AutoSendCheckoutLinks,
 	)
 	return i, err
 }
 
 const getLiveEventByIDAndStore = `-- name: GetLiveEventByIDAndStore :one
-SELECT id, store_id, title, status, created_at, updated_at, total_orders, type FROM live_events WHERE id = $1 AND store_id = $2
+SELECT id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, auto_send_checkout_links FROM live_events WHERE id = $1 AND store_id = $2
 `
 
 type GetLiveEventByIDAndStoreParams struct {
@@ -202,6 +280,10 @@ func (q *Queries) GetLiveEventByIDAndStore(ctx context.Context, arg GetLiveEvent
 		&i.UpdatedAt,
 		&i.TotalOrders,
 		&i.Type,
+		&i.CloseCartOnEventEnd,
+		&i.CartExpirationMinutes,
+		&i.CartMaxQuantityPerItem,
+		&i.AutoSendCheckoutLinks,
 	)
 	return i, err
 }
@@ -218,7 +300,7 @@ func (q *Queries) IncrementLiveEventOrders(ctx context.Context, id pgtype.UUID) 
 }
 
 const listLiveEventsByStore = `-- name: ListLiveEventsByStore :many
-SELECT id, store_id, title, status, created_at, updated_at, total_orders, type FROM live_events
+SELECT id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, auto_send_checkout_links FROM live_events
 WHERE store_id = $1
 ORDER BY created_at DESC
 `
@@ -241,6 +323,10 @@ func (q *Queries) ListLiveEventsByStore(ctx context.Context, storeID pgtype.UUID
 			&i.UpdatedAt,
 			&i.TotalOrders,
 			&i.Type,
+			&i.CloseCartOnEventEnd,
+			&i.CartExpirationMinutes,
+			&i.CartMaxQuantityPerItem,
+			&i.AutoSendCheckoutLinks,
 		); err != nil {
 			return nil, err
 		}
@@ -256,7 +342,7 @@ const updateLiveEventTitle = `-- name: UpdateLiveEventTitle :one
 UPDATE live_events
 SET title = $2, updated_at = now()
 WHERE id = $1
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, type
+RETURNING id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, auto_send_checkout_links
 `
 
 type UpdateLiveEventTitleParams struct {
@@ -276,6 +362,10 @@ func (q *Queries) UpdateLiveEventTitle(ctx context.Context, arg UpdateLiveEventT
 		&i.UpdatedAt,
 		&i.TotalOrders,
 		&i.Type,
+		&i.CloseCartOnEventEnd,
+		&i.CartExpirationMinutes,
+		&i.CartMaxQuantityPerItem,
+		&i.AutoSendCheckoutLinks,
 	)
 	return i, err
 }
