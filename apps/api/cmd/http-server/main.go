@@ -346,16 +346,6 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	api.Use(httpx.AuthMiddleware(clerkClient))
 	api.Use(httpx.SubscriptionMiddleware())
 
-	// User routes (not store-scoped)
-	userHandler := user.NewHandler(userSvc, validate)
-	userHandler.RegisterRoutes(api)
-
-	// Store routes (user's own store management)
-	storeRepo := store.NewRepository(queries)
-	membershipCreator := user.NewMembershipCreatorAdapter(userSvc)
-	userLookup := user.NewUserLookupAdapter(userSvc)
-	storeSvc := store.NewService(storeRepo, membershipCreator, userLookup, log)
-
 	// Initialize S3 client for logo uploads (optional)
 	var s3Client *storage.S3Client
 	if config.S3Bucket.IsSet() {
@@ -367,6 +357,16 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			log.Info("S3 storage initialized")
 		}
 	}
+
+	// User routes (not store-scoped)
+	userHandler := user.NewHandler(userSvc, validate, s3Client)
+	userHandler.RegisterRoutes(api)
+
+	// Store routes (user's own store management)
+	storeRepo := store.NewRepository(queries)
+	membershipCreator := user.NewMembershipCreatorAdapter(userSvc)
+	userLookup := user.NewUserLookupAdapter(userSvc)
+	storeSvc := store.NewService(storeRepo, membershipCreator, userLookup, log)
 
 	storeHandler := store.NewHandler(storeSvc, validate, s3Client)
 	storeHandler.RegisterRoutes(api)

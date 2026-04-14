@@ -5,15 +5,17 @@ import (
 	"github.com/gofiber/fiber/v2"
 
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/storage"
 )
 
 type Handler struct {
 	service  *Service
 	validate *validator.Validate
+	s3Client *storage.S3Client
 }
 
-func NewHandler(service *Service, validate *validator.Validate) *Handler {
-	return &Handler{service: service, validate: validate}
+func NewHandler(service *Service, validate *validator.Validate, s3Client *storage.S3Client) *Handler {
+	return &Handler{service: service, validate: validate, s3Client: s3Client}
 }
 
 func (h *Handler) RegisterRoutes(router fiber.Router) {
@@ -61,16 +63,25 @@ func (h *Handler) SyncUser(c *fiber.Ctx) error {
 	var membership *MembershipResponse
 	if output.Membership != nil {
 		membership = &MembershipResponse{
-			ID:        output.Membership.ID,
-			StoreID:   output.Membership.StoreID,
-			StoreName: output.Membership.StoreName,
-			StoreSlug: output.Membership.StoreSlug,
-			Role:      output.Membership.Role,
-			Status:    output.Membership.Status,
-			Email:     output.Membership.Email,
-			Name:      output.Membership.Name,
-			AvatarURL: output.Membership.AvatarURL,
-			CreatedAt: output.Membership.CreatedAt,
+			ID:           output.Membership.ID,
+			StoreID:      output.Membership.StoreID,
+			StoreName:    output.Membership.StoreName,
+			StoreSlug:    output.Membership.StoreSlug,
+			StoreLogoURL: output.Membership.StoreLogoURL,
+			Role:         output.Membership.Role,
+			Status:       output.Membership.Status,
+			Email:        output.Membership.Email,
+			Name:         output.Membership.Name,
+			AvatarURL:    output.Membership.AvatarURL,
+			CreatedAt:    output.Membership.CreatedAt,
+		}
+
+		// Generate presigned URL for store logo if available
+		if h.s3Client != nil && membership.StoreLogoURL != nil && *membership.StoreLogoURL != "" {
+			presignedURL, err := h.s3Client.GeneratePresignedGetURL(c.Context(), *membership.StoreLogoURL, 0)
+			if err == nil && presignedURL != "" {
+				membership.StoreLogoURL = &presignedURL
+			}
 		}
 	}
 

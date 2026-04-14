@@ -46,18 +46,19 @@ func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserO
 	if membership != nil {
 		state = "ready"
 		membershipOutput = &MembershipOutput{
-			ID:        membership.ID,
-			StoreID:   membership.StoreID,
-			UserID:    membership.UserID,
-			StoreName: membership.StoreName,
-			StoreSlug: membership.StoreSlug,
-			Role:      membership.Role,
-			Status:    membership.Status,
-			Email:     membership.Email,
-			Name:      membership.Name,
-			AvatarURL: membership.AvatarURL,
-			CreatedAt: membership.CreatedAt,
-			UpdatedAt: membership.UpdatedAt,
+			ID:           membership.ID,
+			StoreID:      membership.StoreID,
+			UserID:       membership.UserID,
+			StoreName:    membership.StoreName,
+			StoreSlug:    membership.StoreSlug,
+			StoreLogoURL: membership.StoreLogoURL,
+			Role:         membership.Role,
+			Status:       membership.Status,
+			Email:        membership.Email,
+			Name:         membership.Name,
+			AvatarURL:    membership.AvatarURL,
+			CreatedAt:    membership.CreatedAt,
+			UpdatedAt:    membership.UpdatedAt,
 		}
 	}
 

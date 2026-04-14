@@ -298,6 +298,9 @@ func toMembershipRowFromSingle(row sqlc.GetMembershipByUserIDRow) MembershipRow 
 	if row.AvatarUrl.Valid {
 		out.AvatarURL = &row.AvatarUrl.String
 	}
+	if row.StoreLogoUrl.Valid {
+		out.StoreLogoURL = &row.StoreLogoUrl.String
+	}
 	return out
 }
 

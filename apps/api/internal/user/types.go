@@ -24,16 +24,17 @@ type SyncUserResponse struct {
 
 // MembershipResponse represents a user's membership to a store
 type MembershipResponse struct {
-	ID        string    `json:"id"`
-	StoreID   string    `json:"storeId"`
-	StoreName string    `json:"storeName"`
-	StoreSlug string    `json:"storeSlug"`
-	Role      string    `json:"role"`
-	Status    string    `json:"status"`
-	Email     string    `json:"email"`
-	Name      *string   `json:"name"`
-	AvatarURL *string   `json:"avatarUrl"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID           string    `json:"id"`
+	StoreID      string    `json:"storeId"`
+	StoreName    string    `json:"storeName"`
+	StoreSlug    string    `json:"storeSlug"`
+	StoreLogoURL *string   `json:"storeLogoUrl"`
+	Role         string    `json:"role"`
+	Status       string    `json:"status"`
+	Email        string    `json:"email"`
+	Name         *string   `json:"name"`
+	AvatarURL    *string   `json:"avatarUrl"`
+	CreatedAt    time.Time `json:"createdAt"`
 }
 
 // GetMeResponse - current user info for a specific store context
@@ -77,18 +78,19 @@ type SyncUserOutput struct {
 
 // MembershipOutput - membership data from service
 type MembershipOutput struct {
-	ID        string
-	StoreID   string
-	UserID    string
-	StoreName string
-	StoreSlug string
-	Role      string
-	Status    string
-	Email     string
-	Name      *string
-	AvatarURL *string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID           string
+	StoreID      string
+	UserID       string
+	StoreName    string
+	StoreSlug    string
+	StoreLogoURL *string
+	Role         string
+	Status       string
+	Email        string
+	Name         *string
+	AvatarURL    *string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // UserOutput - user info for a specific store context
@@ -143,18 +145,19 @@ type UserRow struct {
 
 // MembershipRow - row from memberships table with store and user info
 type MembershipRow struct {
-	ID        string
-	StoreID   string
-	UserID    string
-	Email     string
-	Name      *string
-	AvatarURL *string
-	Role      string
-	Status    string
-	StoreName string
-	StoreSlug string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID           string
+	StoreID      string
+	UserID       string
+	Email        string
+	Name         *string
+	AvatarURL    *string
+	Role         string
+	Status       string
+	StoreName    string
+	StoreSlug    string
+	StoreLogoURL *string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // CreateMembershipParams - params for creating membership

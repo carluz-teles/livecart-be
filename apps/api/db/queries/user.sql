@@ -71,7 +71,8 @@ SELECT
   u.name,
   u.avatar_url,
   s.name as store_name,
-  s.slug as store_slug
+  s.slug as store_slug,
+  s.logo_url as store_logo_url
 FROM memberships m
 JOIN users u ON u.id = m.user_id
 JOIN stores s ON s.id = m.store_id

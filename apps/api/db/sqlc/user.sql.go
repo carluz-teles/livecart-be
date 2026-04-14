@@ -516,7 +516,8 @@ SELECT
   u.name,
   u.avatar_url,
   s.name as store_name,
-  s.slug as store_slug
+  s.slug as store_slug,
+  s.logo_url as store_logo_url
 FROM memberships m
 JOIN users u ON u.id = m.user_id
 JOIN stores s ON s.id = m.store_id
@@ -524,18 +525,19 @@ WHERE m.user_id = $1 AND m.status = 'active'
 `
 
 type GetMembershipByUserIDRow struct {
-	ID        pgtype.UUID        `json:"id"`
-	StoreID   pgtype.UUID        `json:"store_id"`
-	UserID    pgtype.UUID        `json:"user_id"`
-	Role      string             `json:"role"`
-	Status    string             `json:"status"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
-	Email     string             `json:"email"`
-	Name      pgtype.Text        `json:"name"`
-	AvatarUrl pgtype.Text        `json:"avatar_url"`
-	StoreName string             `json:"store_name"`
-	StoreSlug string             `json:"store_slug"`
+	ID           pgtype.UUID        `json:"id"`
+	StoreID      pgtype.UUID        `json:"store_id"`
+	UserID       pgtype.UUID        `json:"user_id"`
+	Role         string             `json:"role"`
+	Status       string             `json:"status"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	Email        string             `json:"email"`
+	Name         pgtype.Text        `json:"name"`
+	AvatarUrl    pgtype.Text        `json:"avatar_url"`
+	StoreName    string             `json:"store_name"`
+	StoreSlug    string             `json:"store_slug"`
+	StoreLogoUrl pgtype.Text        `json:"store_logo_url"`
 }
 
 // ============================================
@@ -558,6 +560,7 @@ func (q *Queries) GetMembershipByUserID(ctx context.Context, userID pgtype.UUID)
 		&i.AvatarUrl,
 		&i.StoreName,
 		&i.StoreSlug,
+		&i.StoreLogoUrl,
 	)
 	return i, err
 }
