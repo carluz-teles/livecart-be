@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -1038,36 +1039,98 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 		pageSize = 20
 	}
 
-	// Determine search strategy based on input
-	params := providers.ListProductsParams{
+	baseParams := providers.ListProductsParams{
 		PageSize:   pageSize,
-		ActiveOnly: true, // Only fetch active products from the API
+		ActiveOnly: true,
 	}
 
+	type searchResult struct {
+		field    string
+		products []providers.ERPProduct
+		err      error
+	}
+
+	type searchJob struct {
+		field  string
+		params providers.ListProductsParams
+	}
+
+	jobs := []searchJob{
+		{"name", func() providers.ListProductsParams { p := baseParams; p.Search = input.Search; return p }()},
+		{"sku", func() providers.ListProductsParams { p := baseParams; p.SKU = input.Search; return p }()},
+	}
 	if isGTIN(input.Search) {
-		params.GTIN = input.Search
-	} else {
-		params.Search = input.Search
+		p := baseParams
+		p.GTIN = input.Search
+		jobs = append(jobs, searchJob{"gtin", p})
 	}
 
-	result, err := erpProvider.ListProducts(ctx, params)
-	if err != nil {
-		s.handleProviderError(ctx, input.IntegrationID, "search_products", err)
-		return nil, fmt.Errorf("searching products: %w", err)
+	results := make([]searchResult, len(jobs))
+	var wg sync.WaitGroup
+	for i, j := range jobs {
+		wg.Add(1)
+		go func(i int, field string, params providers.ListProductsParams) {
+			defer wg.Done()
+			r, err := erpProvider.ListProducts(ctx, params)
+			if err != nil {
+				results[i] = searchResult{field: field, err: err}
+				return
+			}
+			results[i] = searchResult{field: field, products: r.Products}
+		}(i, j.field, j.params)
 	}
+	wg.Wait()
 
-	// If GTIN search returned no results, fallback to name search
-	if len(result.Products) == 0 && params.GTIN != "" {
-		params.GTIN = ""
-		params.Search = input.Search
-		result, err = erpProvider.ListProducts(ctx, params)
-		if err != nil {
-			return nil, fmt.Errorf("searching products by name: %w", err)
+	merged := make([]providers.ERPProduct, 0)
+	seen := make(map[string]struct{})
+	allErrored := true
+	var firstErr error
+	priority := []string{"gtin", "sku", "name"}
+	for _, prio := range priority {
+		if len(merged) >= pageSize {
+			break
+		}
+		for _, r := range results {
+			if r.field != prio {
+				continue
+			}
+			if r.err != nil {
+				if firstErr == nil {
+					firstErr = r.err
+				}
+				s.logger.Warn("ERP product search partial failure",
+					zap.String("field", r.field),
+					zap.String("integration_id", input.IntegrationID),
+					zap.Error(r.err),
+				)
+				continue
+			}
+			allErrored = false
+			for _, p := range r.products {
+				if _, ok := seen[p.ID]; ok {
+					continue
+				}
+				seen[p.ID] = struct{}{}
+				merged = append(merged, p)
+				if len(merged) >= pageSize {
+					break
+				}
+			}
 		}
 	}
 
-	if len(result.Products) == 0 {
+	if allErrored {
+		s.handleProviderError(ctx, input.IntegrationID, "search_products", firstErr)
+		return nil, fmt.Errorf("searching products: %w", firstErr)
+	}
+
+	if len(merged) == 0 {
 		return nil, httpx.ErrNotFound("Produto não encontrado no ERP")
+	}
+
+	result := &providers.ProductListResult{
+		Products: merged,
+		HasMore:  false,
 	}
 
 	// Enrich each product with full details (stock, image, description)
