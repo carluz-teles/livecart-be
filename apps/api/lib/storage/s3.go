@@ -28,9 +28,22 @@ type S3Client struct {
 
 // NewS3Client creates a new S3 client
 func NewS3Client() (*S3Client, error) {
-	region := appconfig.AWSRegion.StringOr("auto")
-	bucket := appconfig.S3Bucket.StringOr("livecart-uploads")
+	// Support both standard and Railway naming conventions
+	region := appconfig.AWSRegion.String()
+	if region == "" {
+		region = appconfig.AWSDefaultRegion.StringOr("auto")
+	}
+
+	bucket := appconfig.S3Bucket.String()
+	if bucket == "" {
+		bucket = appconfig.AWSS3BucketName.StringOr("livecart-uploads")
+	}
+
 	endpoint := appconfig.S3Endpoint.String()
+	if endpoint == "" {
+		endpoint = appconfig.AWSEndpointURL.String()
+	}
+
 	cdnBaseURL := appconfig.CDNBaseURL.String()
 
 	accessKeyID := appconfig.AWSAccessKeyID.String()

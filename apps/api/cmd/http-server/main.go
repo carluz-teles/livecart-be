@@ -347,8 +347,9 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	api.Use(httpx.SubscriptionMiddleware())
 
 	// Initialize S3 client for logo uploads (optional)
+	// Support both standard (S3_BUCKET) and Railway (AWS_S3_BUCKET_NAME) naming
 	var s3Client *storage.S3Client
-	if config.S3Bucket.IsSet() {
+	if config.S3Bucket.IsSet() || config.AWSS3BucketName.IsSet() {
 		var err error
 		s3Client, err = storage.NewS3Client()
 		if err != nil {

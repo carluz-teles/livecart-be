@@ -34,10 +34,15 @@ const (
 	InstagramAppID       Key = "INSTAGRAM_APP_ID"       // Instagram OAuth App ID (from Meta for Developers)
 	InstagramAppSecret   Key = "INSTAGRAM_APP_SECRET"   // Instagram OAuth App Secret
 
-	// S3 Storage
+	// S3 Storage (supports both standard and Railway naming conventions)
 	S3Bucket   Key = "S3_BUCKET"     // S3 bucket name for uploads
 	S3Endpoint Key = "S3_ENDPOINT"   // Custom S3 endpoint (for Tigris, R2, MinIO, etc.)
 	CDNBaseURL Key = "CDN_BASE_URL"  // Optional CDN base URL for uploaded files
+
+	// Railway alternative names
+	AWSS3BucketName  Key = "AWS_S3_BUCKET_NAME" // Railway: S3 bucket name
+	AWSEndpointURL   Key = "AWS_ENDPOINT_URL"   // Railway: S3 endpoint
+	AWSDefaultRegion Key = "AWS_DEFAULT_REGION" // Railway: AWS region
 )
 
 // Environment values
