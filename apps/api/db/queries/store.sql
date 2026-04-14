@@ -75,3 +75,11 @@ SET
   updated_at = now()
 WHERE id = $1
 RETURNING *;
+
+-- name: UpdateStoreLogoURL :one
+UPDATE stores
+SET
+  logo_url = $2,
+  updated_at = now()
+WHERE id = $1
+RETURNING *;

@@ -45,6 +45,7 @@ import (
 	"livecart/apps/api/internal/product"
 	"livecart/apps/api/internal/store"
 	"livecart/apps/api/internal/user"
+	"livecart/apps/api/lib/storage"
 )
 
 // @title           LiveCart API
@@ -354,7 +355,20 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	membershipCreator := user.NewMembershipCreatorAdapter(userSvc)
 	userLookup := user.NewUserLookupAdapter(userSvc)
 	storeSvc := store.NewService(storeRepo, membershipCreator, userLookup, log)
-	storeHandler := store.NewHandler(storeSvc, validate)
+
+	// Initialize S3 client for logo uploads (optional)
+	var s3Client *storage.S3Client
+	if config.S3Bucket.IsSet() {
+		var err error
+		s3Client, err = storage.NewS3Client()
+		if err != nil {
+			log.Sugar().Warnf("S3 storage disabled: %v", err)
+		} else {
+			log.Info("S3 storage initialized")
+		}
+	}
+
+	storeHandler := store.NewHandler(storeSvc, validate, s3Client)
 	storeHandler.RegisterRoutes(api)
 
 	// Store-scoped routes (require store access validation)

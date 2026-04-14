@@ -87,6 +87,11 @@ type StoreResponse struct {
 	CreatedAt      time.Time       `json:"createdAt"`
 }
 
+type UploadLogoResponse struct {
+	LogoURL string        `json:"logoUrl"`
+	Store   StoreResponse `json:"store"`
+}
+
 // ============================================
 // Service layer
 // ============================================

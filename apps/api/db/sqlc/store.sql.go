@@ -487,3 +487,52 @@ func (q *Queries) UpdateStoreCheckoutSettings(ctx context.Context, arg UpdateSto
 	)
 	return i, err
 }
+
+const updateStoreLogoURL = `-- name: UpdateStoreLogoURL :one
+UPDATE stores
+SET
+  logo_url = $2,
+  updated_at = now()
+WHERE id = $1
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, cart_notify_before_expiration, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, auto_send_checkout_links, cart_allow_edit, checkout_link_expiry_hours, checkout_send_methods
+`
+
+type UpdateStoreLogoURLParams struct {
+	ID      pgtype.UUID `json:"id"`
+	LogoUrl pgtype.Text `json:"logo_url"`
+}
+
+func (q *Queries) UpdateStoreLogoURL(ctx context.Context, arg UpdateStoreLogoURLParams) (Store, error) {
+	row := q.db.QueryRow(ctx, updateStoreLogoURL, arg.ID, arg.LogoUrl)
+	var i Store
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.CartNotifyBeforeExpiration,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.Website,
+		&i.LogoUrl,
+		&i.AddressStreet,
+		&i.AddressCity,
+		&i.AddressState,
+		&i.AddressZip,
+		&i.AddressCountry,
+		&i.AutoSendCheckoutLinks,
+		&i.CartAllowEdit,
+		&i.CheckoutLinkExpiryHours,
+		&i.CheckoutSendMethods,
+	)
+	return i, err
+}

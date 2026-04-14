@@ -150,6 +150,15 @@ func (s *Service) UpdateCartSettings(ctx context.Context, input UpdateCartSettin
 	return toStoreOutput(row), nil
 }
 
+func (s *Service) UpdateLogoURL(ctx context.Context, storeID string, logoURL string) (StoreOutput, error) {
+	row, err := s.repo.UpdateLogoURL(ctx, storeID, logoURL)
+	if err != nil {
+		return StoreOutput{}, err
+	}
+
+	return toStoreOutput(row), nil
+}
+
 func (s *Service) GetByClerkUserID(ctx context.Context, clerkUserID string) (StoreOutput, error) {
 	// Look up internal user ID
 	userID, err := s.userLookup.GetUserIDByClerkID(ctx, clerkUserID)

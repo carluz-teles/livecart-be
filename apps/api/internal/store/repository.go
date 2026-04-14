@@ -148,6 +148,26 @@ func (r *Repository) GetByUserID(ctx context.Context, userID string) (*StoreRow,
 	return &out, nil
 }
 
+func (r *Repository) UpdateLogoURL(ctx context.Context, storeID string, logoURL string) (StoreRow, error) {
+	uid, err := parseUUID(storeID)
+	if err != nil {
+		return StoreRow{}, err
+	}
+
+	row, err := r.q.UpdateStoreLogoURL(ctx, sqlc.UpdateStoreLogoURLParams{
+		ID:      uid,
+		LogoUrl: pgtype.Text{String: logoURL, Valid: logoURL != ""},
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return StoreRow{}, httpx.ErrNotFound("store not found")
+		}
+		return StoreRow{}, fmt.Errorf("updating logo url: %w", err)
+	}
+
+	return toStoreRow(row), nil
+}
+
 func toStoreRow(row sqlc.Store) StoreRow {
 	var whatsapp, email, sms *string
 	if row.WhatsappNumber.Valid {

@@ -60,6 +60,10 @@ func Forbidden(c *fiber.Ctx, msg string) error {
 	return c.Status(fiber.StatusForbidden).JSON(Envelope{Error: msg})
 }
 
+func InternalError(c *fiber.Ctx, msg string) error {
+	return c.Status(fiber.StatusInternalServerError).JSON(Envelope{Error: msg})
+}
+
 func ValidationError(c *fiber.Ctx, err error) error {
 	var ve validator.ValidationErrors
 	if !errors.As(err, &ve) {

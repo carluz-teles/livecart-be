@@ -33,6 +33,11 @@ const (
 	InstagramVerifyToken Key = "INSTAGRAM_VERIFY_TOKEN" // Token for Meta webhook verification
 	InstagramAppID       Key = "INSTAGRAM_APP_ID"       // Instagram OAuth App ID (from Meta for Developers)
 	InstagramAppSecret   Key = "INSTAGRAM_APP_SECRET"   // Instagram OAuth App Secret
+
+	// S3 Storage
+	S3Bucket   Key = "S3_BUCKET"     // S3 bucket name for uploads
+	S3Endpoint Key = "S3_ENDPOINT"   // Custom S3 endpoint (for Tigris, R2, MinIO, etc.)
+	CDNBaseURL Key = "CDN_BASE_URL"  // Optional CDN base URL for uploaded files
 )
 
 // Environment values
