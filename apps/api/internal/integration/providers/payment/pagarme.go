@@ -409,6 +409,289 @@ func mapPagarmeStatus(status string) PaymentState {
 }
 
 // =============================================================================
+// TRANSPARENT CHECKOUT METHODS
+// =============================================================================
+
+// GetPublicKey returns the public key for client-side tokenization.
+func (p *Pagarme) GetPublicKey(ctx context.Context) (string, error) {
+	// For Pagar.me, the public key should be stored in credentials.Extra
+	if p.credentials.Extra != nil {
+		if pk, ok := p.credentials.Extra["public_key"].(string); ok && pk != "" {
+			return pk, nil
+		}
+	}
+
+	// If APISecret is provided, it might be the public key
+	// Pagar.me uses "pk_test_xxx" for public keys and "sk_test_xxx" for secret keys
+	if p.credentials.APISecret != "" {
+		// Check if it's a public key format
+		if len(p.credentials.APISecret) > 3 && p.credentials.APISecret[:3] == "pk_" {
+			return p.credentials.APISecret, nil
+		}
+	}
+
+	return "", fmt.Errorf("public key not available. Please configure the Pagar.me public key")
+}
+
+// ProcessCardPayment processes a payment with a tokenized card.
+func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput) (*CardPaymentResult, error) {
+	url := pagarmeAPIBaseURL + "/orders"
+
+	// Build items array
+	items := make([]map[string]any, len(input.Items))
+	for i, item := range input.Items {
+		items[i] = map[string]any{
+			"amount":      item.UnitPrice, // Already in cents
+			"description": item.Name,
+			"quantity":    item.Quantity,
+			"code":        item.ID,
+		}
+	}
+
+	// Build customer object
+	customer := map[string]any{
+		"name":  input.Customer.Name,
+		"email": input.Customer.Email,
+		"type":  "individual",
+	}
+	if input.Customer.Document != "" {
+		customer["document"] = input.Customer.Document
+		customer["document_type"] = "cpf"
+	}
+	if input.Customer.Phone != "" {
+		customer["phones"] = map[string]any{
+			"mobile_phone": map[string]any{
+				"country_code": "55",
+				"area_code":    extractAreaCode(input.Customer.Phone),
+				"number":       extractPhoneNumber(input.Customer.Phone),
+			},
+		}
+	}
+
+	// Build credit card payment
+	cardPayment := map[string]any{
+		"payment_method": "credit_card",
+		"credit_card": map[string]any{
+			"card_token":           input.Token,
+			"installments":         input.Installments,
+			"statement_descriptor": "LIVECART",
+			"capture":              true,
+		},
+	}
+
+	// Build payload
+	payload := map[string]any{
+		"code":     input.CartID,
+		"items":    items,
+		"customer": customer,
+		"payments": []map[string]any{cardPayment},
+	}
+
+	if input.Metadata != nil {
+		payload["metadata"] = input.Metadata
+	}
+
+	// Add idempotency key header
+	headers := p.authHeaders()
+	headers["X-Idempotency-Key"] = fmt.Sprintf("card-%s-%d", input.CartID, input.TotalAmount)
+
+	resp, body, err := p.DoRequest(ctx, http.MethodPost, url, payload, headers)
+	if err != nil {
+		return nil, fmt.Errorf("processing card payment: %w", err)
+	}
+
+	var pgResp struct {
+		ID       string          `json:"id"`
+		Code     string          `json:"code"`
+		Amount   int             `json:"amount"`
+		Status   string          `json:"status"`
+		Charges  []pagarmeCharge `json:"charges"`
+		Metadata map[string]any  `json:"metadata"`
+		Errors   []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &pgResp); err != nil {
+		return nil, fmt.Errorf("parsing payment response: %w", err)
+	}
+
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		errMsg := "payment failed"
+		if len(pgResp.Errors) > 0 {
+			errMsg = pgResp.Errors[0].Message
+		}
+		return &CardPaymentResult{
+			Status:  PaymentRejected,
+			Message: errMsg,
+		}, nil
+	}
+
+	result := &CardPaymentResult{
+		PaymentID:         pgResp.ID,
+		Status:            mapPagarmeStatus(pgResp.Status),
+		Amount:            int64(pgResp.Amount),
+		Installments:      input.Installments,
+		ExternalReference: pgResp.Code,
+		Message:           getPagarmeStatusMessage(pgResp.Status),
+	}
+
+	// Get card info from charge if available
+	if len(pgResp.Charges) > 0 {
+		charge := pgResp.Charges[0]
+		if charge.LastTransaction != nil {
+			if card := charge.LastTransaction.Card; card != nil {
+				result.LastFourDigits = card.LastFourDigits
+				result.CardBrand = card.Brand
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// GeneratePixPayment generates a PIX QR code for payment.
+func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput) (*PixPaymentResult, error) {
+	url := pagarmeAPIBaseURL + "/orders"
+
+	// Set default expiration if not provided
+	expiresIn := 30 * time.Minute
+	if input.ExpiresIn != nil {
+		expiresIn = *input.ExpiresIn
+	}
+	expiresAt := time.Now().Add(expiresIn)
+
+	// Build items array
+	items := make([]map[string]any, len(input.Items))
+	for i, item := range input.Items {
+		items[i] = map[string]any{
+			"amount":      item.UnitPrice,
+			"description": item.Name,
+			"quantity":    item.Quantity,
+			"code":        item.ID,
+		}
+	}
+
+	// Build customer object
+	customer := map[string]any{
+		"name":  input.Customer.Name,
+		"email": input.Customer.Email,
+		"type":  "individual",
+	}
+	if input.Customer.Document != "" {
+		customer["document"] = input.Customer.Document
+		customer["document_type"] = "cpf"
+	}
+	if input.Customer.Phone != "" {
+		customer["phones"] = map[string]any{
+			"mobile_phone": map[string]any{
+				"country_code": "55",
+				"area_code":    extractAreaCode(input.Customer.Phone),
+				"number":       extractPhoneNumber(input.Customer.Phone),
+			},
+		}
+	}
+
+	// Build PIX payment
+	pixPayment := map[string]any{
+		"payment_method": "pix",
+		"amount":         input.TotalAmount,
+		"pix": map[string]any{
+			"expires_in": int(expiresIn.Seconds()),
+		},
+	}
+
+	// Build payload
+	payload := map[string]any{
+		"code":     input.CartID,
+		"items":    items,
+		"customer": customer,
+		"payments": []map[string]any{pixPayment},
+	}
+
+	if input.Metadata != nil {
+		payload["metadata"] = input.Metadata
+	}
+
+	// Add idempotency key header
+	headers := p.authHeaders()
+	headers["X-Idempotency-Key"] = fmt.Sprintf("pix-%s-%d", input.CartID, input.TotalAmount)
+
+	resp, body, err := p.DoRequest(ctx, http.MethodPost, url, payload, headers)
+	if err != nil {
+		return nil, fmt.Errorf("generating pix payment: %w", err)
+	}
+
+	var pgResp struct {
+		ID       string          `json:"id"`
+		Code     string          `json:"code"`
+		Amount   int             `json:"amount"`
+		Status   string          `json:"status"`
+		Charges  []pagarmeCharge `json:"charges"`
+		Metadata map[string]any  `json:"metadata"`
+		Errors   []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &pgResp); err != nil {
+		return nil, fmt.Errorf("parsing pix response: %w", err)
+	}
+
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		errMsg := "pix generation failed"
+		if len(pgResp.Errors) > 0 {
+			errMsg = pgResp.Errors[0].Message
+		}
+		return nil, fmt.Errorf(errMsg)
+	}
+
+	// Get PIX data from charge
+	var qrCode, qrCodeText string
+	if len(pgResp.Charges) > 0 && pgResp.Charges[0].LastTransaction != nil {
+		if pix := pgResp.Charges[0].LastTransaction.Pix; pix != nil {
+			qrCode = pix.QRCodeURL
+			qrCodeText = pix.QRCode
+			if pix.ExpiresAt != "" {
+				if t, err := time.Parse(time.RFC3339, pix.ExpiresAt); err == nil {
+					expiresAt = t
+				}
+			}
+		}
+	}
+
+	return &PixPaymentResult{
+		PaymentID:         pgResp.ID,
+		Status:            PaymentPending,
+		QRCode:            qrCode,
+		QRCodeText:        qrCodeText,
+		Amount:            int64(pgResp.Amount),
+		ExpiresAt:         expiresAt,
+		ExternalReference: pgResp.Code,
+	}, nil
+}
+
+// GetPaymentMethods returns the available payment methods.
+func (p *Pagarme) GetPaymentMethods(ctx context.Context) ([]string, error) {
+	// Pagar.me supports both card and pix
+	return []string{"card", "pix"}, nil
+}
+
+// getPagarmeStatusMessage returns a user-friendly message for a payment status.
+func getPagarmeStatusMessage(status string) string {
+	switch status {
+	case "paid":
+		return "Pagamento aprovado"
+	case "pending":
+		return "Pagamento pendente"
+	case "failed":
+		return "Pagamento não aprovado"
+	case "canceled":
+		return "Pagamento cancelado"
+	default:
+		return "Status: " + status
+	}
+}
+
+// =============================================================================
 // PAGAR.ME API RESPONSE TYPES
 // =============================================================================
 
@@ -438,12 +721,40 @@ type pagarmeCheckout struct {
 }
 
 type pagarmeCharge struct {
-	ID            string `json:"id"`
-	Code          string `json:"code"`
-	Amount        int    `json:"amount"`
-	Status        string `json:"status"`
-	PaymentMethod string `json:"payment_method"`
-	PaidAt        string `json:"paid_at"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
+	ID              string                  `json:"id"`
+	Code            string                  `json:"code"`
+	Amount          int                     `json:"amount"`
+	Status          string                  `json:"status"`
+	PaymentMethod   string                  `json:"payment_method"`
+	PaidAt          string                  `json:"paid_at"`
+	CreatedAt       string                  `json:"created_at"`
+	UpdatedAt       string                  `json:"updated_at"`
+	LastTransaction *pagarmeLastTransaction `json:"last_transaction"`
+}
+
+type pagarmeLastTransaction struct {
+	ID        string       `json:"id"`
+	Status    string       `json:"status"`
+	Success   bool         `json:"success"`
+	Amount    int          `json:"amount"`
+	Card      *pagarmeCard `json:"card"`
+	Pix       *pagarmePix  `json:"pix"`
+	CreatedAt string       `json:"created_at"`
+	UpdatedAt string       `json:"updated_at"`
+}
+
+type pagarmeCard struct {
+	ID             string `json:"id"`
+	FirstSixDigits string `json:"first_six_digits"`
+	LastFourDigits string `json:"last_four_digits"`
+	Brand          string `json:"brand"`
+	HolderName     string `json:"holder_name"`
+	ExpMonth       int    `json:"exp_month"`
+	ExpYear        int    `json:"exp_year"`
+}
+
+type pagarmePix struct {
+	QRCode    string `json:"qr_code"`
+	QRCodeURL string `json:"qr_code_url"`
+	ExpiresAt string `json:"expires_at"`
 }

@@ -50,6 +50,18 @@ type OrderResponse struct {
 	ExpiresAt      *time.Time          `json:"expiresAt"`
 }
 
+// OrderDetailResponse includes customer comments for the detail page
+type OrderDetailResponse struct {
+	OrderResponse
+	Comments []OrderCommentResponse `json:"comments"`
+}
+
+type OrderCommentResponse struct {
+	ID        string    `json:"id"`
+	Text      string    `json:"text"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
 type ListOrdersResponse struct {
 	Data       []OrderResponse          `json:"data"`
 	Pagination query.PaginationResponse `json:"pagination"`
@@ -177,4 +189,21 @@ type OrderDetailRow struct {
 	LiveTitle      string
 	LivePlatform   string
 	StoreID        string
+}
+
+type CommentRow struct {
+	ID        string
+	Text      string
+	CreatedAt time.Time
+}
+
+type CommentOutput struct {
+	ID        string
+	Text      string
+	CreatedAt time.Time
+}
+
+type OrderDetailOutput struct {
+	OrderOutput
+	Comments []CommentOutput
 }

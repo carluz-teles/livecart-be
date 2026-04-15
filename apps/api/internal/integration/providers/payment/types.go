@@ -15,6 +15,14 @@ type (
 	RefundResult     = providers.RefundResult
 	Credentials      = providers.Credentials
 	WebhookEvent     = providers.WebhookEvent
+
+	// Transparent checkout types
+	CardPaymentInput   = providers.CardPaymentInput
+	CardPaymentResult  = providers.CardPaymentResult
+	PixPaymentInput    = providers.PixPaymentInput
+	PixPaymentResult   = providers.PixPaymentResult
+	CheckoutConfigResult = providers.CheckoutConfigResult
+	PayerCostInfo      = providers.PayerCostInfo
 )
 
 // Re-export constants

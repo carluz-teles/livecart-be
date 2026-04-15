@@ -121,6 +121,41 @@ func (s *Service) GetByID(ctx context.Context, id string, storeID string) (*Orde
 	}, nil
 }
 
+func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) (*OrderDetailOutput, error) {
+	// Get base order
+	orderOutput, err := s.GetByID(ctx, id, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get order detail row for event_id and platform_user_id
+	row, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get customer comments for this event
+	commentRows, err := s.repo.GetCustomerComments(ctx, row.EventID, row.PlatformUserID)
+	if err != nil {
+		s.logger.Warn("failed to get customer comments", zap.Error(err))
+		commentRows = []CommentRow{}
+	}
+
+	comments := make([]CommentOutput, len(commentRows))
+	for i, c := range commentRows {
+		comments[i] = CommentOutput{
+			ID:        c.ID,
+			Text:      c.Text,
+			CreatedAt: c.CreatedAt,
+		}
+	}
+
+	return &OrderDetailOutput{
+		OrderOutput: *orderOutput,
+		Comments:    comments,
+	}, nil
+}
+
 func (s *Service) Update(ctx context.Context, input UpdateOrderInput) (*OrderOutput, error) {
 	// First verify the order exists and belongs to the store
 	row, err := s.repo.GetByID(ctx, input.ID)

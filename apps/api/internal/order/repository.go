@@ -310,6 +310,33 @@ func (r *Repository) UpdatePaymentStatus(ctx context.Context, id string, payment
 	return nil
 }
 
+func (r *Repository) GetCustomerComments(ctx context.Context, eventID string, platformUserID string) ([]CommentRow, error) {
+	query := `
+		SELECT id, text, created_at
+		FROM live_comments
+		WHERE event_id = $1 AND platform_user_id = $2
+		ORDER BY created_at
+	`
+
+	rows, err := r.db.Query(ctx, query, eventID, platformUserID)
+	if err != nil {
+		return nil, fmt.Errorf("getting customer comments: %w", err)
+	}
+	defer rows.Close()
+
+	var comments []CommentRow
+	for rows.Next() {
+		var c CommentRow
+		err := rows.Scan(&c.ID, &c.Text, &c.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("scanning comment row: %w", err)
+		}
+		comments = append(comments, c)
+	}
+
+	return comments, nil
+}
+
 func (r *Repository) GetStats(ctx context.Context, storeID string) (*OrderStatsOutput, error) {
 	query := `
 		SELECT

@@ -1528,6 +1528,101 @@ func (s *Service) RefundPayment(ctx context.Context, input RefundPaymentInput) (
 }
 
 // =============================================================================
+// TRANSPARENT CHECKOUT OPERATIONS
+// =============================================================================
+
+// GetCheckoutConfig retrieves the checkout configuration for a store.
+func (s *Service) GetCheckoutConfig(ctx context.Context, integrationID, storeID string) (string, []string, error) {
+	paymentProvider, err := s.GetPaymentProvider(ctx, integrationID, storeID)
+	if err != nil {
+		return "", nil, err
+	}
+
+	publicKey, err := paymentProvider.GetPublicKey(ctx)
+	if err != nil {
+		s.handleProviderError(ctx, integrationID, "get_public_key", err)
+		return "", nil, fmt.Errorf("getting public key: %w", err)
+	}
+
+	methods, err := paymentProvider.GetPaymentMethods(ctx)
+	if err != nil {
+		s.handleProviderError(ctx, integrationID, "get_payment_methods", err)
+		return "", nil, fmt.Errorf("getting payment methods: %w", err)
+	}
+
+	return publicKey, methods, nil
+}
+
+// ProcessCardPayment processes a card payment with a tokenized card.
+func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPaymentInput) (*ProcessCardPaymentOutput, error) {
+	paymentProvider, err := s.GetPaymentProvider(ctx, input.IntegrationID, input.StoreID)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := paymentProvider.ProcessCardPayment(ctx, providers.CardPaymentInput{
+		CartID:          input.CartID,
+		Token:           input.CardToken,
+		Installments:    input.Installments,
+		Customer:        input.Customer,
+		Items:           input.Items,
+		TotalAmount:     input.TotalAmount,
+		Currency:        input.Currency,
+		NotifyURL:       input.NotifyURL,
+		Metadata:        input.Metadata,
+		PaymentMethodID: input.PaymentMethodID,
+		IssuerID:        input.IssuerID,
+		DeviceID:        input.DeviceID,
+	})
+	if err != nil {
+		s.handleProviderError(ctx, input.IntegrationID, "process_card_payment", err)
+		return nil, fmt.Errorf("processing card payment: %w", err)
+	}
+
+	return &ProcessCardPaymentOutput{
+		PaymentID:      result.PaymentID,
+		Status:         string(result.Status),
+		StatusDetail:   result.StatusDetail,
+		Message:        result.Message,
+		Amount:         result.Amount,
+		Installments:   result.Installments,
+		LastFourDigits: result.LastFourDigits,
+		CardBrand:      result.CardBrand,
+	}, nil
+}
+
+// GeneratePixPayment generates a PIX QR code for payment.
+func (s *Service) GeneratePixPayment(ctx context.Context, input GeneratePixPaymentInput) (*GeneratePixPaymentOutput, error) {
+	paymentProvider, err := s.GetPaymentProvider(ctx, input.IntegrationID, input.StoreID)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := paymentProvider.GeneratePixPayment(ctx, providers.PixPaymentInput{
+		CartID:      input.CartID,
+		Customer:    input.Customer,
+		Items:       input.Items,
+		TotalAmount: input.TotalAmount,
+		Currency:    input.Currency,
+		NotifyURL:   input.NotifyURL,
+		Metadata:    input.Metadata,
+	})
+	if err != nil {
+		s.handleProviderError(ctx, input.IntegrationID, "generate_pix_payment", err)
+		return nil, fmt.Errorf("generating pix payment: %w", err)
+	}
+
+	return &GeneratePixPaymentOutput{
+		PaymentID:  result.PaymentID,
+		QRCode:     result.QRCode,
+		QRCodeText: result.QRCodeText,
+		Amount:     result.Amount,
+		ExpiresAt:  result.ExpiresAt,
+		TicketURL:  result.TicketURL,
+	}, nil
+}
+
+// =============================================================================
 // WEBHOOK OPERATIONS
 // =============================================================================
 

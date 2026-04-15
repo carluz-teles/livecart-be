@@ -77,12 +77,12 @@ func (h *Handler) List(c *fiber.Ctx) error {
 
 // GetByID godoc
 // @Summary      Get order by ID
-// @Description  Returns a single order by its UUID with items
+// @Description  Returns a single order by its UUID with items and customer comments
 // @Tags         orders
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Order UUID"
-// @Success      200 {object} httpx.Envelope{data=OrderResponse}
+// @Success      200 {object} httpx.Envelope{data=OrderDetailResponse}
 // @Failure      404 {object} httpx.Envelope
 // @Router       /api/v1/stores/{storeId}/orders/{id} [get]
 // @Security     BearerAuth
@@ -90,12 +90,12 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
 	id := c.Params("id")
 
-	output, err := h.service.GetByID(c.Context(), id, storeID)
+	output, err := h.service.GetDetailByID(c.Context(), id, storeID)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	return httpx.OK(c, toOrderResponse(*output))
+	return httpx.OK(c, toOrderDetailResponse(*output))
 }
 
 // Update godoc
@@ -227,5 +227,21 @@ func toOrderResponse(o OrderOutput) OrderResponse {
 		PaidAt:         o.PaidAt,
 		CreatedAt:      o.CreatedAt,
 		ExpiresAt:      o.ExpiresAt,
+	}
+}
+
+func toOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
+	comments := make([]OrderCommentResponse, len(o.Comments))
+	for i, c := range o.Comments {
+		comments[i] = OrderCommentResponse{
+			ID:        c.ID,
+			Text:      c.Text,
+			CreatedAt: c.CreatedAt,
+		}
+	}
+
+	return OrderDetailResponse{
+		OrderResponse: toOrderResponse(o.OrderOutput),
+		Comments:      comments,
 	}
 }

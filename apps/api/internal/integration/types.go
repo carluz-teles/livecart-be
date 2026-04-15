@@ -348,6 +348,63 @@ type TestConnectionOutput struct {
 }
 
 // =============================================================================
+// TRANSPARENT CHECKOUT INPUT/OUTPUT (Service Layer)
+// =============================================================================
+
+// ProcessCardPaymentInput is the service input for processing a card payment.
+type ProcessCardPaymentInput struct {
+	StoreID         string
+	IntegrationID   string
+	CartID          string
+	CardToken       string
+	Installments    int
+	Customer        providers.CheckoutCustomer
+	Items           []providers.CheckoutItem
+	TotalAmount     int64
+	Currency        string
+	NotifyURL       string
+	PaymentMethodID string
+	IssuerID        string
+	DeviceID        string
+	Metadata        map[string]any
+}
+
+// ProcessCardPaymentOutput is the service output for processing a card payment.
+type ProcessCardPaymentOutput struct {
+	PaymentID      string
+	Status         string
+	StatusDetail   string
+	Message        string
+	Amount         int64
+	Installments   int
+	LastFourDigits string
+	CardBrand      string
+}
+
+// GeneratePixPaymentInput is the service input for generating a PIX payment.
+type GeneratePixPaymentInput struct {
+	StoreID       string
+	IntegrationID string
+	CartID        string
+	Customer      providers.CheckoutCustomer
+	Items         []providers.CheckoutItem
+	TotalAmount   int64
+	Currency      string
+	NotifyURL     string
+	Metadata      map[string]any
+}
+
+// GeneratePixPaymentOutput is the service output for generating a PIX payment.
+type GeneratePixPaymentOutput struct {
+	PaymentID  string
+	QRCode     string
+	QRCodeText string
+	Amount     int64
+	ExpiresAt  time.Time
+	TicketURL  string
+}
+
+// =============================================================================
 // REPOSITORY TYPES (Data Layer)
 // =============================================================================
 

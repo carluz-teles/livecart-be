@@ -70,6 +70,70 @@ type GenerateCheckoutResponse struct {
 }
 
 // =============================================================================
+// TRANSPARENT CHECKOUT DTOs
+// =============================================================================
+
+// GetCheckoutConfigResponse is the response for GET /api/public/checkout/:token/config
+type GetCheckoutConfigResponse struct {
+	Provider         string   `json:"provider"`
+	PublicKey        string   `json:"publicKey"`
+	AvailableMethods []string `json:"availableMethods"`
+	TotalAmount      int64    `json:"totalAmount"`
+	Currency         string   `json:"currency"`
+}
+
+// ProcessCardPaymentRequest is the request for POST /api/public/checkout/:token/card
+type ProcessCardPaymentRequest struct {
+	Email           string `json:"email" validate:"required,email"`
+	Token           string `json:"token" validate:"required"`
+	Installments    int    `json:"installments" validate:"required,min=1,max=12"`
+	PaymentMethodID string `json:"paymentMethodId,omitempty"` // For Mercado Pago
+	IssuerID        string `json:"issuerId,omitempty"`        // For Mercado Pago
+	DeviceID        string `json:"deviceId,omitempty"`        // For fraud prevention
+	CustomerName    string `json:"customerName,omitempty"`
+	CustomerDocument string `json:"customerDocument,omitempty"`
+	CustomerPhone   string `json:"customerPhone,omitempty"`
+}
+
+// ProcessCardPaymentResponse is the response for POST /api/public/checkout/:token/card
+type ProcessCardPaymentResponse struct {
+	PaymentID      string `json:"paymentId"`
+	Status         string `json:"status"`
+	StatusDetail   string `json:"statusDetail,omitempty"`
+	Message        string `json:"message"`
+	Amount         int64  `json:"amount"`
+	Installments   int    `json:"installments"`
+	LastFourDigits string `json:"lastFourDigits,omitempty"`
+	CardBrand      string `json:"cardBrand,omitempty"`
+}
+
+// GeneratePixRequest is the request for POST /api/public/checkout/:token/pix
+type GeneratePixRequest struct {
+	Email            string `json:"email" validate:"required,email"`
+	CustomerName     string `json:"customerName,omitempty"`
+	CustomerDocument string `json:"customerDocument,omitempty"`
+	CustomerPhone    string `json:"customerPhone,omitempty"`
+}
+
+// GeneratePixResponse is the response for POST /api/public/checkout/:token/pix
+type GeneratePixResponse struct {
+	PaymentID  string    `json:"paymentId"`
+	QRCode     string    `json:"qrCode"`
+	QRCodeText string    `json:"qrCodeText"`
+	Amount     int64     `json:"amount"`
+	ExpiresAt  time.Time `json:"expiresAt"`
+	TicketURL  string    `json:"ticketUrl,omitempty"`
+}
+
+// GetPaymentStatusResponse is the response for GET /api/public/checkout/:token/status
+type GetPaymentStatusResponse struct {
+	Status        string     `json:"status"`
+	PaymentStatus string     `json:"paymentStatus"`
+	PaidAt        *time.Time `json:"paidAt,omitempty"`
+	Message       string     `json:"message,omitempty"`
+}
+
+// =============================================================================
 // SERVICE INPUT/OUTPUT (Service layer)
 // =============================================================================
 
@@ -129,6 +193,82 @@ type GenerateCheckoutInput struct {
 type GenerateCheckoutOutput struct {
 	CheckoutURL string
 	ExpiresAt   *time.Time
+}
+
+// =============================================================================
+// TRANSPARENT CHECKOUT SERVICE INPUT/OUTPUT
+// =============================================================================
+
+// GetCheckoutConfigInput is the input for GetCheckoutConfig service method
+type GetCheckoutConfigInput struct {
+	Token string
+}
+
+// GetCheckoutConfigOutput is the output for GetCheckoutConfig service method
+type GetCheckoutConfigOutput struct {
+	Provider         string
+	PublicKey        string
+	AvailableMethods []string
+	TotalAmount      int64
+	Currency         string
+}
+
+// ProcessCardPaymentInput is the input for ProcessCardPayment service method
+type ProcessCardPaymentInput struct {
+	Token            string
+	Email            string
+	CardToken        string
+	Installments     int
+	PaymentMethodID  string
+	IssuerID         string
+	DeviceID         string
+	CustomerName     string
+	CustomerDocument string
+	CustomerPhone    string
+}
+
+// ProcessCardPaymentOutput is the output for ProcessCardPayment service method
+type ProcessCardPaymentOutput struct {
+	PaymentID      string
+	Status         string
+	StatusDetail   string
+	Message        string
+	Amount         int64
+	Installments   int
+	LastFourDigits string
+	CardBrand      string
+}
+
+// GeneratePixInput is the input for GeneratePix service method
+type GeneratePixInput struct {
+	Token            string
+	Email            string
+	CustomerName     string
+	CustomerDocument string
+	CustomerPhone    string
+}
+
+// GeneratePixOutput is the output for GeneratePix service method
+type GeneratePixOutput struct {
+	PaymentID  string
+	QRCode     string
+	QRCodeText string
+	Amount     int64
+	ExpiresAt  time.Time
+	TicketURL  string
+}
+
+// GetPaymentStatusInput is the input for GetPaymentStatus service method
+type GetPaymentStatusInput struct {
+	Token string
+}
+
+// GetPaymentStatusOutput is the output for GetPaymentStatus service method
+type GetPaymentStatusOutput struct {
+	Status        string
+	PaymentStatus string
+	PaidAt        *time.Time
+	Message       string
 }
 
 // =============================================================================

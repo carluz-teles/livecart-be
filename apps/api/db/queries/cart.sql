@@ -278,6 +278,14 @@ SET payment_status = $2, paid_at = $3
 WHERE checkout_id = $1
 RETURNING *;
 
+-- name: UpdateCartPaymentStatus :one
+-- Updates payment status directly by cart ID (for transparent checkout)
+-- Uses checkout_id to store the payment ID from the provider
+UPDATE carts
+SET payment_status = $2, checkout_id = $3, paid_at = $4
+WHERE id = $1
+RETURNING *;
+
 -- name: GetStorePaymentIntegration :one
 -- Gets the active payment integration for a store
 SELECT i.*

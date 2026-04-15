@@ -377,6 +377,264 @@ func (m *MercadoPago) authHeaders() map[string]string {
 	}
 }
 
+// =============================================================================
+// TRANSPARENT CHECKOUT METHODS
+// =============================================================================
+
+// GetPublicKey returns the public key for client-side SDK initialization.
+func (m *MercadoPago) GetPublicKey(ctx context.Context) (string, error) {
+	// Check if we have the public key in Extra credentials
+	if m.credentials.Extra != nil {
+		if pk, ok := m.credentials.Extra["public_key"].(string); ok && pk != "" {
+			return pk, nil
+		}
+	}
+
+	// Fetch public key from Mercado Pago API
+	url := mpAPIBaseURL + "/users/me"
+	resp, body, err := m.DoRequest(ctx, http.MethodGet, url, nil, m.authHeaders())
+	if err != nil {
+		return "", fmt.Errorf("fetching user info: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return "", fmt.Errorf("failed to get user info: status %d", resp.StatusCode)
+	}
+
+	var userInfo struct {
+		ID   int64 `json:"id"`
+		Site string `json:"site_id"`
+	}
+	if err := json.Unmarshal(body, &userInfo); err != nil {
+		return "", fmt.Errorf("parsing user info: %w", err)
+	}
+
+	// For Mercado Pago, public key is stored during OAuth or needs to be fetched
+	// If not available, we return an error instructing to reconnect the integration
+	return "", fmt.Errorf("public key not available. Please reconnect the Mercado Pago integration")
+}
+
+// ProcessCardPayment processes a payment with a tokenized card.
+func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentInput) (*CardPaymentResult, error) {
+	url := mpAPIBaseURL + "/v1/payments"
+
+	// Build payer object
+	payer := map[string]any{
+		"email": input.Customer.Email,
+	}
+	if input.Customer.Document != "" {
+		payer["identification"] = map[string]string{
+			"type":   "CPF",
+			"number": input.Customer.Document,
+		}
+	}
+	if input.Customer.Name != "" {
+		// Split name into first_name and last_name
+		names := splitName(input.Customer.Name)
+		payer["first_name"] = names[0]
+		if len(names) > 1 {
+			payer["last_name"] = names[1]
+		}
+	}
+
+	// Build payload
+	payload := map[string]any{
+		"transaction_amount": float64(input.TotalAmount) / 100, // Convert cents to currency units
+		"token":              input.Token,
+		"installments":       input.Installments,
+		"payer":              payer,
+		"external_reference": input.CartID,
+		"notification_url":   input.NotifyURL,
+		"statement_descriptor": "LIVECART",
+	}
+
+	// Add payment method if provided
+	if input.PaymentMethodID != "" {
+		payload["payment_method_id"] = input.PaymentMethodID
+	}
+	if input.IssuerID != "" {
+		payload["issuer_id"] = input.IssuerID
+	}
+
+	// Add device ID for fraud prevention if provided
+	if input.DeviceID != "" {
+		payload["additional_info"] = map[string]any{
+			"ip_address": input.DeviceID, // This is actually used for device fingerprint
+		}
+	}
+
+	if input.Metadata != nil {
+		payload["metadata"] = input.Metadata
+	}
+
+	// Add idempotency key header
+	headers := m.authHeaders()
+	headers["X-Idempotency-Key"] = fmt.Sprintf("card-%s-%d", input.CartID, input.TotalAmount)
+
+	resp, body, err := m.DoRequest(ctx, http.MethodPost, url, payload, headers)
+	if err != nil {
+		return nil, fmt.Errorf("processing card payment: %w", err)
+	}
+
+	var mpResp struct {
+		ID                int64          `json:"id"`
+		Status            string         `json:"status"`
+		StatusDetail      string         `json:"status_detail"`
+		TransactionAmount float64        `json:"transaction_amount"`
+		Installments      int            `json:"installments"`
+		ExternalReference string         `json:"external_reference"`
+		Card              *struct {
+			LastFourDigits string `json:"last_four_digits"`
+			Cardholder     *struct {
+				Name string `json:"name"`
+			} `json:"cardholder"`
+		} `json:"card"`
+		PaymentMethodID string `json:"payment_method_id"`
+		Error           string `json:"error"`
+		Message         string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &mpResp); err != nil {
+		return nil, fmt.Errorf("parsing payment response: %w", err)
+	}
+
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		errMsg := mpResp.Message
+		if errMsg == "" {
+			errMsg = mpResp.Error
+		}
+		if errMsg == "" {
+			errMsg = fmt.Sprintf("payment failed with status %d", resp.StatusCode)
+		}
+		return &CardPaymentResult{
+			Status:       PaymentRejected,
+			StatusDetail: mpResp.StatusDetail,
+			Message:      errMsg,
+		}, nil
+	}
+
+	result := &CardPaymentResult{
+		PaymentID:         fmt.Sprintf("%d", mpResp.ID),
+		Status:            mapMPStatus(mpResp.Status),
+		StatusDetail:      mpResp.StatusDetail,
+		Amount:            int64(mpResp.TransactionAmount * 100),
+		Installments:      mpResp.Installments,
+		CardBrand:         mpResp.PaymentMethodID,
+		ExternalReference: mpResp.ExternalReference,
+		Message:           getStatusMessage(mpResp.Status, mpResp.StatusDetail),
+	}
+
+	if mpResp.Card != nil {
+		result.LastFourDigits = mpResp.Card.LastFourDigits
+	}
+
+	return result, nil
+}
+
+// GeneratePixPayment generates a PIX QR code for payment.
+func (m *MercadoPago) GeneratePixPayment(ctx context.Context, input PixPaymentInput) (*PixPaymentResult, error) {
+	url := mpAPIBaseURL + "/v1/payments"
+
+	// Set default expiration if not provided
+	expiresIn := 30 * time.Minute
+	if input.ExpiresIn != nil {
+		expiresIn = *input.ExpiresIn
+	}
+	expiresAt := time.Now().Add(expiresIn)
+
+	// Build payer object
+	payer := map[string]any{
+		"email": input.Customer.Email,
+	}
+	if input.Customer.Document != "" {
+		payer["identification"] = map[string]string{
+			"type":   "CPF",
+			"number": input.Customer.Document,
+		}
+	}
+	if input.Customer.Name != "" {
+		names := splitName(input.Customer.Name)
+		payer["first_name"] = names[0]
+		if len(names) > 1 {
+			payer["last_name"] = names[1]
+		}
+	}
+
+	// Build payload for PIX payment
+	payload := map[string]any{
+		"transaction_amount": float64(input.TotalAmount) / 100,
+		"payment_method_id":  "pix",
+		"payer":              payer,
+		"external_reference": input.CartID,
+		"notification_url":   input.NotifyURL,
+		"date_of_expiration": expiresAt.Format(time.RFC3339),
+	}
+
+	if input.Metadata != nil {
+		payload["metadata"] = input.Metadata
+	}
+
+	// Add idempotency key header
+	headers := m.authHeaders()
+	headers["X-Idempotency-Key"] = fmt.Sprintf("pix-%s-%d", input.CartID, input.TotalAmount)
+
+	resp, body, err := m.DoRequest(ctx, http.MethodPost, url, payload, headers)
+	if err != nil {
+		return nil, fmt.Errorf("generating pix payment: %w", err)
+	}
+
+	var mpResp struct {
+		ID                int64   `json:"id"`
+		Status            string  `json:"status"`
+		TransactionAmount float64 `json:"transaction_amount"`
+		ExternalReference string  `json:"external_reference"`
+		PointOfInteraction struct {
+			TransactionData struct {
+				QRCode       string `json:"qr_code"`
+				QRCodeBase64 string `json:"qr_code_base64"`
+				TicketURL    string `json:"ticket_url"`
+			} `json:"transaction_data"`
+		} `json:"point_of_interaction"`
+		DateOfExpiration string `json:"date_of_expiration"`
+		Error            string `json:"error"`
+		Message          string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &mpResp); err != nil {
+		return nil, fmt.Errorf("parsing pix response: %w", err)
+	}
+
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		errMsg := mpResp.Message
+		if errMsg == "" {
+			errMsg = mpResp.Error
+		}
+		return nil, fmt.Errorf("pix generation failed: %s", errMsg)
+	}
+
+	// Parse expiration date
+	parsedExpiration := expiresAt
+	if mpResp.DateOfExpiration != "" {
+		if t, err := time.Parse(time.RFC3339, mpResp.DateOfExpiration); err == nil {
+			parsedExpiration = t
+		}
+	}
+
+	return &PixPaymentResult{
+		PaymentID:         fmt.Sprintf("%d", mpResp.ID),
+		Status:            PaymentPending,
+		QRCode:            mpResp.PointOfInteraction.TransactionData.QRCodeBase64,
+		QRCodeText:        mpResp.PointOfInteraction.TransactionData.QRCode,
+		Amount:            int64(mpResp.TransactionAmount * 100),
+		ExpiresAt:         parsedExpiration,
+		ExternalReference: mpResp.ExternalReference,
+		TicketURL:         mpResp.PointOfInteraction.TransactionData.TicketURL,
+	}, nil
+}
+
+// GetPaymentMethods returns the available payment methods.
+func (m *MercadoPago) GetPaymentMethods(ctx context.Context) ([]string, error) {
+	// Mercado Pago supports both card and pix in Brazil
+	return []string{"card", "pix"}, nil
+}
+
 // mapMPStatus maps Mercado Pago status to our PaymentState.
 func mapMPStatus(status string) PaymentState {
 	switch status {
@@ -392,5 +650,86 @@ func mapMPStatus(status string) PaymentState {
 		return PaymentRefunded
 	default:
 		return PaymentPending
+	}
+}
+
+// splitName splits a full name into first and last name.
+func splitName(fullName string) []string {
+	parts := make([]string, 0, 2)
+	current := ""
+	for _, r := range fullName {
+		if r == ' ' {
+			if current != "" {
+				parts = append(parts, current)
+				current = ""
+			}
+		} else {
+			current += string(r)
+		}
+	}
+	if current != "" {
+		parts = append(parts, current)
+	}
+	if len(parts) == 0 {
+		return []string{fullName}
+	}
+	if len(parts) == 1 {
+		return parts
+	}
+	// Return first name and the rest joined as last name
+	return []string{parts[0], joinStrings(parts[1:], " ")}
+}
+
+// joinStrings joins strings with a separator.
+func joinStrings(strs []string, sep string) string {
+	if len(strs) == 0 {
+		return ""
+	}
+	result := strs[0]
+	for i := 1; i < len(strs); i++ {
+		result += sep + strs[i]
+	}
+	return result
+}
+
+// getStatusMessage returns a user-friendly message for a payment status.
+func getStatusMessage(status, detail string) string {
+	switch status {
+	case "approved":
+		return "Pagamento aprovado"
+	case "pending":
+		return "Pagamento pendente de confirmação"
+	case "in_process":
+		return "Pagamento em processamento"
+	case "rejected":
+		return getRejectMessage(detail)
+	default:
+		return "Status do pagamento: " + status
+	}
+}
+
+// getRejectMessage returns a user-friendly message for rejection reasons.
+func getRejectMessage(detail string) string {
+	switch detail {
+	case "cc_rejected_insufficient_amount":
+		return "Saldo insuficiente"
+	case "cc_rejected_bad_filled_security_code":
+		return "Código de segurança inválido"
+	case "cc_rejected_bad_filled_date":
+		return "Data de validade inválida"
+	case "cc_rejected_bad_filled_other":
+		return "Dados do cartão incorretos"
+	case "cc_rejected_call_for_authorize":
+		return "Entre em contato com a operadora do cartão"
+	case "cc_rejected_card_disabled":
+		return "Cartão desabilitado"
+	case "cc_rejected_duplicated_payment":
+		return "Pagamento duplicado"
+	case "cc_rejected_high_risk":
+		return "Pagamento rejeitado por segurança"
+	case "cc_rejected_max_attempts":
+		return "Limite de tentativas excedido"
+	default:
+		return "Pagamento não aprovado"
 	}
 }

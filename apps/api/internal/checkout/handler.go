@@ -27,6 +27,12 @@ func (h *Handler) RegisterRoutes(app *fiber.App) {
 	checkout := app.Group("/api/public/checkout")
 	checkout.Get("/:token", h.GetCartForCheckout)
 	checkout.Post("/:token", h.GenerateCheckout)
+
+	// Transparent checkout routes
+	checkout.Get("/:token/config", h.GetCheckoutConfig)
+	checkout.Post("/:token/card", h.ProcessCardPayment)
+	checkout.Post("/:token/pix", h.GeneratePix)
+	checkout.Get("/:token/status", h.GetPaymentStatus)
 }
 
 // GetCartForCheckout handles GET /api/public/checkout/:token
@@ -75,6 +81,140 @@ func (h *Handler) GenerateCheckout(c *fiber.Ctx) error {
 	return httpx.OK(c, GenerateCheckoutResponse{
 		CheckoutURL: output.CheckoutURL,
 		ExpiresAt:   output.ExpiresAt,
+	})
+}
+
+// =============================================================================
+// TRANSPARENT CHECKOUT HANDLERS
+// =============================================================================
+
+// GetCheckoutConfig handles GET /api/public/checkout/:token/config
+// Returns checkout configuration including public key and available methods.
+func (h *Handler) GetCheckoutConfig(c *fiber.Ctx) error {
+	token := c.Params("token")
+	if token == "" {
+		return httpx.BadRequest(c, "token is required")
+	}
+
+	output, err := h.service.GetCheckoutConfig(c.Context(), GetCheckoutConfigInput{
+		Token: token,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, GetCheckoutConfigResponse{
+		Provider:         output.Provider,
+		PublicKey:        output.PublicKey,
+		AvailableMethods: output.AvailableMethods,
+		TotalAmount:      output.TotalAmount,
+		Currency:         output.Currency,
+	})
+}
+
+// ProcessCardPayment handles POST /api/public/checkout/:token/card
+// Processes a card payment using a tokenized card.
+func (h *Handler) ProcessCardPayment(c *fiber.Ctx) error {
+	token := c.Params("token")
+	if token == "" {
+		return httpx.BadRequest(c, "token is required")
+	}
+
+	var req ProcessCardPaymentRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	output, err := h.service.ProcessCardPayment(c.Context(), ProcessCardPaymentInput{
+		Token:            token,
+		Email:            req.Email,
+		CardToken:        req.Token,
+		Installments:     req.Installments,
+		PaymentMethodID:  req.PaymentMethodID,
+		IssuerID:         req.IssuerID,
+		DeviceID:         req.DeviceID,
+		CustomerName:     req.CustomerName,
+		CustomerDocument: req.CustomerDocument,
+		CustomerPhone:    req.CustomerPhone,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, ProcessCardPaymentResponse{
+		PaymentID:      output.PaymentID,
+		Status:         output.Status,
+		StatusDetail:   output.StatusDetail,
+		Message:        output.Message,
+		Amount:         output.Amount,
+		Installments:   output.Installments,
+		LastFourDigits: output.LastFourDigits,
+		CardBrand:      output.CardBrand,
+	})
+}
+
+// GeneratePix handles POST /api/public/checkout/:token/pix
+// Generates a PIX QR code for payment.
+func (h *Handler) GeneratePix(c *fiber.Ctx) error {
+	token := c.Params("token")
+	if token == "" {
+		return httpx.BadRequest(c, "token is required")
+	}
+
+	var req GeneratePixRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	output, err := h.service.GeneratePix(c.Context(), GeneratePixInput{
+		Token:            token,
+		Email:            req.Email,
+		CustomerName:     req.CustomerName,
+		CustomerDocument: req.CustomerDocument,
+		CustomerPhone:    req.CustomerPhone,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, GeneratePixResponse{
+		PaymentID:  output.PaymentID,
+		QRCode:     output.QRCode,
+		QRCodeText: output.QRCodeText,
+		Amount:     output.Amount,
+		ExpiresAt:  output.ExpiresAt,
+		TicketURL:  output.TicketURL,
+	})
+}
+
+// GetPaymentStatus handles GET /api/public/checkout/:token/status
+// Returns the current payment status for polling.
+func (h *Handler) GetPaymentStatus(c *fiber.Ctx) error {
+	token := c.Params("token")
+	if token == "" {
+		return httpx.BadRequest(c, "token is required")
+	}
+
+	output, err := h.service.GetPaymentStatus(c.Context(), GetPaymentStatusInput{
+		Token: token,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, GetPaymentStatusResponse{
+		Status:        output.Status,
+		PaymentStatus: output.PaymentStatus,
+		PaidAt:        output.PaidAt,
+		Message:       output.Message,
 	})
 }
 

@@ -1303,6 +1303,55 @@ func (q *Queries) UpdateCartPaymentByCheckoutID(ctx context.Context, arg UpdateC
 	return i, err
 }
 
+const updateCartPaymentStatus = `-- name: UpdateCartPaymentStatus :one
+UPDATE carts
+SET payment_status = $2, checkout_id = $3, paid_at = $4
+WHERE id = $1
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email
+`
+
+type UpdateCartPaymentStatusParams struct {
+	ID            pgtype.UUID        `json:"id"`
+	PaymentStatus pgtype.Text        `json:"payment_status"`
+	CheckoutID    pgtype.Text        `json:"checkout_id"`
+	PaidAt        pgtype.Timestamptz `json:"paid_at"`
+}
+
+// Updates payment status directly by cart ID (for transparent checkout)
+// Uses checkout_id to store the payment ID from the provider
+func (q *Queries) UpdateCartPaymentStatus(ctx context.Context, arg UpdateCartPaymentStatusParams) (Cart, error) {
+	row := q.db.QueryRow(ctx, updateCartPaymentStatus,
+		arg.ID,
+		arg.PaymentStatus,
+		arg.CheckoutID,
+		arg.PaidAt,
+	)
+	var i Cart
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.PlatformUserID,
+		&i.PlatformHandle,
+		&i.Token,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.PaymentIntegrationID,
+		&i.ExternalOrderID,
+		&i.PaymentStatus,
+		&i.PaidAt,
+		&i.NotifyStatus,
+		&i.NotifyError,
+		&i.NotifiedAt,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.SessionID,
+		&i.CheckoutID,
+		&i.CheckoutExpiresAt,
+		&i.CustomerEmail,
+	)
+	return i, err
+}
+
 const updateCartStatus = `-- name: UpdateCartStatus :one
 UPDATE carts SET status = $2 WHERE id = $1 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email
 `

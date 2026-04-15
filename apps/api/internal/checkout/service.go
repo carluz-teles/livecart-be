@@ -227,3 +227,366 @@ func derefString(s *string) string {
 	}
 	return *s
 }
+
+// =============================================================================
+// TRANSPARENT CHECKOUT METHODS
+// =============================================================================
+
+// GetCheckoutConfig retrieves the checkout configuration for the frontend.
+func (s *Service) GetCheckoutConfig(ctx context.Context, input GetCheckoutConfigInput) (*GetCheckoutConfigOutput, error) {
+	// Get cart
+	cart, err := s.repo.GetCartByToken(ctx, input.Token)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate cart status
+	if cart.Status == "expired" {
+		return nil, httpx.ErrUnprocessable("carrinho expirado")
+	}
+	if cart.PaymentStatus == "paid" {
+		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
+	}
+	if cart.Status != "checkout" {
+		return nil, httpx.ErrUnprocessable("carrinho ainda não foi finalizado. Aguarde o fim do evento.")
+	}
+
+	// Get cart items to calculate total
+	items, err := s.repo.ListCartItems(ctx, cart.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	var totalAmount int64
+	for _, item := range items {
+		if !item.Waitlisted {
+			totalAmount += item.UnitPrice * int64(item.Quantity)
+		}
+	}
+
+	if totalAmount == 0 {
+		return nil, httpx.ErrUnprocessable("carrinho não tem itens disponíveis para pagamento")
+	}
+
+	// Get payment integration for the store
+	paymentIntegration, err := s.repo.GetPaymentIntegration(ctx, cart.StoreID)
+	if err != nil {
+		return nil, err
+	}
+	if paymentIntegration == nil {
+		return nil, httpx.ErrUnprocessable("loja não possui integração de pagamento configurada")
+	}
+
+	// Get public key and payment methods from integration
+	publicKey, methods, err := s.integrationService.GetCheckoutConfig(ctx, paymentIntegration.ID.String(), cart.StoreID)
+	if err != nil {
+		s.logger.Error("failed to get checkout config",
+			zap.String("cart_id", cart.ID),
+			zap.Error(err),
+		)
+		return nil, httpx.ErrUnprocessable("erro ao obter configuração de pagamento")
+	}
+
+	return &GetCheckoutConfigOutput{
+		Provider:         paymentIntegration.ProviderName,
+		PublicKey:        publicKey,
+		AvailableMethods: methods,
+		TotalAmount:      totalAmount,
+		Currency:         "BRL",
+	}, nil
+}
+
+// ProcessCardPayment processes a card payment with a tokenized card.
+func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPaymentInput) (*ProcessCardPaymentOutput, error) {
+	// Get cart
+	cart, err := s.repo.GetCartByToken(ctx, input.Token)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate cart status
+	if cart.Status == "expired" {
+		return nil, httpx.ErrUnprocessable("carrinho expirado")
+	}
+	if cart.PaymentStatus == "paid" {
+		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
+	}
+	if cart.Status != "checkout" {
+		return nil, httpx.ErrUnprocessable("carrinho ainda não foi finalizado. Aguarde o fim do evento.")
+	}
+
+	// Update customer email
+	if err := s.repo.UpdateCustomerEmail(ctx, input.Token, input.Email); err != nil {
+		return nil, err
+	}
+
+	// Get cart items
+	items, err := s.repo.ListCartItems(ctx, cart.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter out waitlisted items and build checkout items
+	var checkoutItems []providers.CheckoutItem
+	var totalAmount int64
+	for _, item := range items {
+		if item.Waitlisted {
+			continue
+		}
+		checkoutItems = append(checkoutItems, providers.CheckoutItem{
+			ID:        item.ProductID,
+			Name:      item.Name,
+			Quantity:  item.Quantity,
+			UnitPrice: item.UnitPrice,
+			ImageURL:  derefString(item.ImageURL),
+		})
+		totalAmount += item.UnitPrice * int64(item.Quantity)
+	}
+
+	if len(checkoutItems) == 0 {
+		return nil, httpx.ErrUnprocessable("carrinho não tem itens disponíveis para pagamento")
+	}
+
+	// Get payment integration
+	paymentIntegration, err := s.repo.GetPaymentIntegration(ctx, cart.StoreID)
+	if err != nil {
+		return nil, err
+	}
+	if paymentIntegration == nil {
+		return nil, httpx.ErrUnprocessable("loja não possui integração de pagamento configurada")
+	}
+
+	// Build customer name
+	customerName := input.CustomerName
+	if customerName == "" {
+		customerName = cart.PlatformHandle
+	}
+
+	// Build notify URL
+	notifyURL := fmt.Sprintf("%s/api/v1/integrations/webhooks/%s/%s",
+		config.WebhookBaseURL.String(),
+		paymentIntegration.ProviderName,
+		paymentIntegration.ID.String(),
+	)
+
+	// Process payment via integration service
+	result, err := s.integrationService.ProcessCardPayment(ctx, integration.ProcessCardPaymentInput{
+		IntegrationID: paymentIntegration.ID.String(),
+		StoreID:       cart.StoreID,
+		CartID:        cart.ID,
+		CardToken:     input.CardToken,
+		Installments:  input.Installments,
+		Customer: providers.CheckoutCustomer{
+			Email:    input.Email,
+			Name:     customerName,
+			Phone:    input.CustomerPhone,
+			Document: input.CustomerDocument,
+		},
+		Items:           checkoutItems,
+		TotalAmount:     totalAmount,
+		Currency:        "BRL",
+		NotifyURL:       notifyURL,
+		PaymentMethodID: input.PaymentMethodID,
+		IssuerID:        input.IssuerID,
+		DeviceID:        input.DeviceID,
+		Metadata: map[string]any{
+			"cart_id":    cart.ID,
+			"cart_token": cart.Token,
+			"event_id":   cart.EventID,
+			"store_id":   cart.StoreID,
+		},
+	})
+	if err != nil {
+		s.logger.Error("failed to process card payment",
+			zap.String("cart_id", cart.ID),
+			zap.Error(err),
+		)
+		return nil, httpx.ErrUnprocessable("erro ao processar pagamento")
+	}
+
+	// Update cart payment status if approved
+	if result.Status == "approved" {
+		if err := s.repo.UpdatePaymentStatus(ctx, cart.ID, "paid", result.PaymentID); err != nil {
+			s.logger.Error("failed to update payment status",
+				zap.String("cart_id", cart.ID),
+				zap.Error(err),
+			)
+		}
+	}
+
+	s.logger.Info("card payment processed",
+		zap.String("cart_id", cart.ID),
+		zap.String("payment_id", result.PaymentID),
+		zap.String("status", result.Status),
+		zap.Int64("amount", result.Amount),
+	)
+
+	return &ProcessCardPaymentOutput{
+		PaymentID:      result.PaymentID,
+		Status:         result.Status,
+		StatusDetail:   result.StatusDetail,
+		Message:        result.Message,
+		Amount:         result.Amount,
+		Installments:   result.Installments,
+		LastFourDigits: result.LastFourDigits,
+		CardBrand:      result.CardBrand,
+	}, nil
+}
+
+// GeneratePix generates a PIX QR code for payment.
+func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*GeneratePixOutput, error) {
+	// Get cart
+	cart, err := s.repo.GetCartByToken(ctx, input.Token)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate cart status
+	if cart.Status == "expired" {
+		return nil, httpx.ErrUnprocessable("carrinho expirado")
+	}
+	if cart.PaymentStatus == "paid" {
+		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
+	}
+	if cart.Status != "checkout" {
+		return nil, httpx.ErrUnprocessable("carrinho ainda não foi finalizado. Aguarde o fim do evento.")
+	}
+
+	// Update customer email
+	if err := s.repo.UpdateCustomerEmail(ctx, input.Token, input.Email); err != nil {
+		return nil, err
+	}
+
+	// Get cart items
+	items, err := s.repo.ListCartItems(ctx, cart.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter out waitlisted items and build checkout items
+	var checkoutItems []providers.CheckoutItem
+	var totalAmount int64
+	for _, item := range items {
+		if item.Waitlisted {
+			continue
+		}
+		checkoutItems = append(checkoutItems, providers.CheckoutItem{
+			ID:        item.ProductID,
+			Name:      item.Name,
+			Quantity:  item.Quantity,
+			UnitPrice: item.UnitPrice,
+			ImageURL:  derefString(item.ImageURL),
+		})
+		totalAmount += item.UnitPrice * int64(item.Quantity)
+	}
+
+	if len(checkoutItems) == 0 {
+		return nil, httpx.ErrUnprocessable("carrinho não tem itens disponíveis para pagamento")
+	}
+
+	// Get payment integration
+	paymentIntegration, err := s.repo.GetPaymentIntegration(ctx, cart.StoreID)
+	if err != nil {
+		return nil, err
+	}
+	if paymentIntegration == nil {
+		return nil, httpx.ErrUnprocessable("loja não possui integração de pagamento configurada")
+	}
+
+	// Build customer name
+	customerName := input.CustomerName
+	if customerName == "" {
+		customerName = cart.PlatformHandle
+	}
+
+	// Build notify URL
+	notifyURL := fmt.Sprintf("%s/api/v1/integrations/webhooks/%s/%s",
+		config.WebhookBaseURL.String(),
+		paymentIntegration.ProviderName,
+		paymentIntegration.ID.String(),
+	)
+
+	// Generate PIX via integration service
+	result, err := s.integrationService.GeneratePixPayment(ctx, integration.GeneratePixPaymentInput{
+		IntegrationID: paymentIntegration.ID.String(),
+		StoreID:       cart.StoreID,
+		CartID:        cart.ID,
+		Customer: providers.CheckoutCustomer{
+			Email:    input.Email,
+			Name:     customerName,
+			Phone:    input.CustomerPhone,
+			Document: input.CustomerDocument,
+		},
+		Items:       checkoutItems,
+		TotalAmount: totalAmount,
+		Currency:    "BRL",
+		NotifyURL:   notifyURL,
+		Metadata: map[string]any{
+			"cart_id":    cart.ID,
+			"cart_token": cart.Token,
+			"event_id":   cart.EventID,
+			"store_id":   cart.StoreID,
+		},
+	})
+	if err != nil {
+		s.logger.Error("failed to generate pix",
+			zap.String("cart_id", cart.ID),
+			zap.Error(err),
+		)
+		return nil, httpx.ErrUnprocessable("erro ao gerar PIX")
+	}
+
+	// Update cart with payment ID for tracking
+	if err := s.repo.UpdateCheckoutInfo(ctx, UpdateCheckoutParams{
+		CartID:     cart.ID,
+		CheckoutID: result.PaymentID,
+	}); err != nil {
+		s.logger.Error("failed to update checkout info",
+			zap.String("cart_id", cart.ID),
+			zap.Error(err),
+		)
+	}
+
+	s.logger.Info("pix payment generated",
+		zap.String("cart_id", cart.ID),
+		zap.String("payment_id", result.PaymentID),
+		zap.Int64("amount", result.Amount),
+	)
+
+	return &GeneratePixOutput{
+		PaymentID:  result.PaymentID,
+		QRCode:     result.QRCode,
+		QRCodeText: result.QRCodeText,
+		Amount:     result.Amount,
+		ExpiresAt:  result.ExpiresAt,
+		TicketURL:  result.TicketURL,
+	}, nil
+}
+
+// GetPaymentStatus retrieves the current payment status.
+func (s *Service) GetPaymentStatus(ctx context.Context, input GetPaymentStatusInput) (*GetPaymentStatusOutput, error) {
+	// Get cart
+	cart, err := s.repo.GetCartByToken(ctx, input.Token)
+	if err != nil {
+		return nil, err
+	}
+
+	message := ""
+	switch cart.PaymentStatus {
+	case "paid":
+		message = "Pagamento confirmado"
+	case "pending":
+		message = "Aguardando pagamento"
+	case "failed":
+		message = "Pagamento não aprovado"
+	default:
+		message = "Status: " + cart.PaymentStatus
+	}
+
+	return &GetPaymentStatusOutput{
+		Status:        cart.Status,
+		PaymentStatus: cart.PaymentStatus,
+		PaidAt:        cart.PaidAt,
+		Message:       message,
+	}, nil
+}

@@ -99,6 +99,33 @@ func (r *Repository) UpdateCheckoutInfo(ctx context.Context, params UpdateChecko
 	return nil
 }
 
+// UpdatePaymentStatus updates the payment status for a cart.
+func (r *Repository) UpdatePaymentStatus(ctx context.Context, cartID, status, paymentID string) error {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return httpx.ErrBadRequest("invalid cart ID")
+	}
+
+	var paidAt pgtype.Timestamptz
+	if status == "paid" {
+		paidAt = pgtype.Timestamptz{Time: time.Now(), Valid: true}
+	}
+
+	_, err = r.q.UpdateCartPaymentStatus(ctx, sqlc.UpdateCartPaymentStatusParams{
+		ID:            pgtype.UUID{Bytes: uid, Valid: true},
+		PaymentStatus: pgtype.Text{String: status, Valid: true},
+		CheckoutID:    pgtype.Text{String: paymentID, Valid: true},
+		PaidAt:        paidAt,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return httpx.ErrNotFound("carrinho não encontrado")
+		}
+		return fmt.Errorf("updating payment status: %w", err)
+	}
+	return nil
+}
+
 // GetPaymentIntegration retrieves the active payment integration for a store.
 func (r *Repository) GetPaymentIntegration(ctx context.Context, storeID string) (*IntegrationRow, error) {
 	uid, err := uuid.Parse(storeID)
@@ -115,21 +142,23 @@ func (r *Repository) GetPaymentIntegration(ctx context.Context, storeID string) 
 	}
 
 	return &IntegrationRow{
-		ID:       row.ID.Bytes,
-		StoreID:  row.StoreID.Bytes,
-		Type:     row.Type,
-		Provider: row.Provider,
-		Status:   row.Status,
+		ID:           row.ID.Bytes,
+		StoreID:      row.StoreID.Bytes,
+		Type:         row.Type,
+		Provider:     row.Provider,
+		ProviderName: row.Provider,
+		Status:       row.Status,
 	}, nil
 }
 
 // IntegrationRow represents a minimal integration row.
 type IntegrationRow struct {
-	ID       uuid.UUID
-	StoreID  uuid.UUID
-	Type     string
-	Provider string
-	Status   string
+	ID           uuid.UUID
+	StoreID      uuid.UUID
+	Type         string
+	Provider     string
+	ProviderName string // Alias for Provider for convenience
+	Status       string
 }
 
 // =============================================================================
