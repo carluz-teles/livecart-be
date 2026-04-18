@@ -131,3 +131,141 @@ func (r *Repository) GetTopProducts(ctx context.Context, storeID string) ([]TopP
 
 	return products, nil
 }
+
+// =============================================================================
+// ANALYTICS - Revenue Attribution
+// =============================================================================
+
+// GetEventsWithRevenue returns all events with their revenue metrics
+func (r *Repository) GetEventsWithRevenue(ctx context.Context, storeID string, limit int) ([]EventWithRevenueRow, error) {
+	query := `
+		SELECT
+			e.id,
+			COALESCE(e.title, '') as title,
+			e.status,
+			e.created_at,
+			COALESCE((SELECT SUM(ls.total_comments) FROM live_sessions ls WHERE ls.event_id = e.id), 0)::int AS total_comments,
+			COALESCE((SELECT COUNT(*) FROM carts c WHERE c.event_id = e.id), 0)::int AS total_carts,
+			COALESCE((SELECT COUNT(*) FROM carts c WHERE c.event_id = e.id AND c.payment_status = 'paid'), 0)::int AS paid_carts,
+			COALESCE((
+				SELECT SUM(ci.quantity * ci.unit_price)
+				FROM carts c
+				JOIN cart_items ci ON ci.cart_id = c.id
+				WHERE c.event_id = e.id AND c.payment_status = 'paid'
+			), 0)::bigint AS confirmed_revenue
+		FROM live_events e
+		WHERE e.store_id = $1
+		ORDER BY e.created_at DESC
+		LIMIT $2
+	`
+
+	rows, err := r.db.Query(ctx, query, storeID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("getting events with revenue: %w", err)
+	}
+	defer rows.Close()
+
+	var events []EventWithRevenueRow
+	for rows.Next() {
+		var row EventWithRevenueRow
+		var createdAt interface{}
+		err := rows.Scan(
+			&row.ID,
+			&row.Title,
+			&row.Status,
+			&createdAt,
+			&row.TotalComments,
+			&row.TotalCarts,
+			&row.PaidCarts,
+			&row.ConfirmedRevenue,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scanning event with revenue row: %w", err)
+		}
+		// Format timestamp as ISO string
+		if t, ok := createdAt.(interface{ Format(string) string }); ok {
+			row.CreatedAt = t.Format("2006-01-02T15:04:05Z")
+		}
+		events = append(events, row)
+	}
+
+	return events, nil
+}
+
+// GetAggregatedFunnel returns aggregated funnel metrics for the store
+func (r *Repository) GetAggregatedFunnel(ctx context.Context, storeID string, days int) (*AggregatedFunnelRow, error) {
+	query := `
+		SELECT
+			-- Total comments across all events
+			COALESCE((
+				SELECT SUM(ls.total_comments)
+				FROM live_sessions ls
+				JOIN live_events e ON e.id = ls.event_id
+				WHERE e.store_id = $1 AND ls.created_at >= NOW() - INTERVAL '1 day' * $2
+			), 0)::int AS total_comments,
+			-- Total carts created
+			COALESCE((
+				SELECT COUNT(*)
+				FROM carts c
+				JOIN live_events e ON e.id = c.event_id
+				WHERE e.store_id = $1 AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+			), 0)::int AS total_carts,
+			-- Carts that reached checkout
+			COALESCE((
+				SELECT COUNT(*)
+				FROM carts c
+				JOIN live_events e ON e.id = c.event_id
+				WHERE e.store_id = $1
+				  AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+				  AND (c.status = 'checkout' OR c.checkout_url IS NOT NULL)
+			), 0)::int AS checkout_carts,
+			-- Paid carts
+			COALESCE((
+				SELECT COUNT(*)
+				FROM carts c
+				JOIN live_events e ON e.id = c.event_id
+				WHERE e.store_id = $1
+				  AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+				  AND c.payment_status = 'paid'
+			), 0)::int AS paid_carts,
+			-- Confirmed revenue (GMV)
+			COALESCE((
+				SELECT SUM(ci.quantity * ci.unit_price)
+				FROM carts c
+				JOIN cart_items ci ON ci.cart_id = c.id
+				JOIN live_events e ON e.id = c.event_id
+				WHERE e.store_id = $1
+				  AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+				  AND c.payment_status = 'paid'
+			), 0)::bigint AS confirmed_revenue,
+			-- Average ticket
+			COALESCE((
+				SELECT AVG(cart_total)
+				FROM (
+					SELECT SUM(ci.quantity * ci.unit_price) as cart_total
+					FROM carts c
+					JOIN cart_items ci ON ci.cart_id = c.id
+					JOIN live_events e ON e.id = c.event_id
+					WHERE e.store_id = $1
+					  AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+					  AND c.payment_status = 'paid'
+					GROUP BY c.id
+				) sub
+			), 0)::bigint AS average_ticket
+	`
+
+	var row AggregatedFunnelRow
+	err := r.db.QueryRow(ctx, query, storeID, days).Scan(
+		&row.TotalComments,
+		&row.TotalCarts,
+		&row.CheckoutCarts,
+		&row.PaidCarts,
+		&row.ConfirmedRevenue,
+		&row.AverageTicket,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("getting aggregated funnel: %w", err)
+	}
+
+	return &row, nil
+}

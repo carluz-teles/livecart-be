@@ -468,8 +468,11 @@ type AddToCartInput struct {
 
 // AddToCartOutput represents the result of adding to cart.
 type AddToCartOutput struct {
-	CartID    string
-	IsNewCart bool
+	CartID     string
+	CartToken  string
+	IsNewCart  bool
+	TotalItems int   // Total items in cart after add
+	TotalCents int64 // Total value in cents after add
 }
 
 // GetOrCreateCartParams represents parameters for GetOrCreateCart.
@@ -505,12 +508,17 @@ type AddCartItemParams struct {
 
 // Handler layer - Event details
 type EventStatsResponse struct {
-	TotalComments     int   `json:"totalComments"`
-	OpenCarts         int   `json:"openCarts"`
-	PaidCarts         int   `json:"paidCarts"`
-	TotalProductsSold int   `json:"totalProductsSold"`
-	ProjectedRevenue  int64 `json:"projectedRevenue"`
-	ConfirmedRevenue  int64 `json:"confirmedRevenue"`
+	// Funnel metrics
+	TotalComments int `json:"totalComments"`
+	TotalCarts    int `json:"totalCarts"`
+	OpenCarts     int `json:"openCarts"`
+	CheckoutCarts int `json:"checkoutCarts"`
+	PaidCarts     int `json:"paidCarts"`
+	// Product metrics
+	TotalProductsSold int `json:"totalProductsSold"`
+	// Revenue metrics
+	ProjectedRevenue int64 `json:"projectedRevenue"`
+	ConfirmedRevenue int64 `json:"confirmedRevenue"`
 }
 
 type CartWithTotalResponse struct {
@@ -544,12 +552,17 @@ type ListEventProductsResponse struct {
 
 // Service layer - Event details
 type EventStatsOutput struct {
-	TotalComments     int
-	OpenCarts         int
-	PaidCarts         int
+	// Funnel metrics
+	TotalComments int
+	TotalCarts    int
+	OpenCarts     int
+	CheckoutCarts int
+	PaidCarts     int
+	// Product metrics
 	TotalProductsSold int
-	ProjectedRevenue  int64
-	ConfirmedRevenue  int64
+	// Revenue metrics
+	ProjectedRevenue int64
+	ConfirmedRevenue int64
 }
 
 type CartWithTotalOutput struct {
@@ -576,7 +589,9 @@ type EventProductOutput struct {
 // Repository layer - Event details
 type EventStatsRow struct {
 	TotalComments     int
+	TotalCarts        int
 	OpenCarts         int
+	CheckoutCarts     int
 	PaidCarts         int
 	TotalProductsSold int
 	ProjectedRevenue  int64

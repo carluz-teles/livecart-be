@@ -646,7 +646,9 @@ func (h *Handler) GetEventStats(c *fiber.Ctx) error {
 
 	return httpx.OK(c, EventStatsResponse{
 		TotalComments:     output.TotalComments,
+		TotalCarts:        output.TotalCarts,
 		OpenCarts:         output.OpenCarts,
+		CheckoutCarts:     output.CheckoutCarts,
 		PaidCarts:         output.PaidCarts,
 		TotalProductsSold: output.TotalProductsSold,
 		ProjectedRevenue:  output.ProjectedRevenue,

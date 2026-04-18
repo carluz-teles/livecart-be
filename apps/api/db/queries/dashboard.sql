@@ -56,3 +56,88 @@ WHERE e.store_id = $1
 GROUP BY p.id, p.name, p.keyword
 ORDER BY total_sold DESC
 LIMIT 5;
+
+-- =============================================================================
+-- ANALYTICS - Revenue Attribution
+-- =============================================================================
+
+-- name: GetEventsWithRevenue :many
+-- Returns all events with their revenue metrics for analytics
+SELECT
+    e.id,
+    e.title,
+    e.status,
+    e.created_at,
+    COALESCE((SELECT SUM(ls.total_comments) FROM live_sessions ls WHERE ls.event_id = e.id), 0)::int AS total_comments,
+    COALESCE((SELECT COUNT(*) FROM carts c WHERE c.event_id = e.id), 0)::int AS total_carts,
+    COALESCE((SELECT COUNT(*) FROM carts c WHERE c.event_id = e.id AND c.payment_status = 'paid'), 0)::int AS paid_carts,
+    COALESCE((
+        SELECT SUM(ci.quantity * ci.unit_price)
+        FROM carts c
+        JOIN cart_items ci ON ci.cart_id = c.id
+        WHERE c.event_id = e.id AND c.payment_status = 'paid'
+    ), 0)::bigint AS confirmed_revenue
+FROM live_events e
+WHERE e.store_id = $1
+ORDER BY e.created_at DESC
+LIMIT $2;
+
+-- name: GetAggregatedFunnel :one
+-- Returns aggregated funnel metrics for the store (last N days)
+SELECT
+    -- Total comments across all events
+    COALESCE((
+        SELECT SUM(ls.total_comments)
+        FROM live_sessions ls
+        JOIN live_events e ON e.id = ls.event_id
+        WHERE e.store_id = $1 AND ls.created_at >= NOW() - INTERVAL '1 day' * $2
+    ), 0)::int AS total_comments,
+    -- Total carts created
+    COALESCE((
+        SELECT COUNT(*)
+        FROM carts c
+        JOIN live_events e ON e.id = c.event_id
+        WHERE e.store_id = $1 AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+    ), 0)::int AS total_carts,
+    -- Carts that reached checkout
+    COALESCE((
+        SELECT COUNT(*)
+        FROM carts c
+        JOIN live_events e ON e.id = c.event_id
+        WHERE e.store_id = $1
+          AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+          AND (c.status = 'checkout' OR c.checkout_url IS NOT NULL)
+    ), 0)::int AS checkout_carts,
+    -- Paid carts
+    COALESCE((
+        SELECT COUNT(*)
+        FROM carts c
+        JOIN live_events e ON e.id = c.event_id
+        WHERE e.store_id = $1
+          AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+          AND c.payment_status = 'paid'
+    ), 0)::int AS paid_carts,
+    -- Confirmed revenue (GMV)
+    COALESCE((
+        SELECT SUM(ci.quantity * ci.unit_price)
+        FROM carts c
+        JOIN cart_items ci ON ci.cart_id = c.id
+        JOIN live_events e ON e.id = c.event_id
+        WHERE e.store_id = $1
+          AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+          AND c.payment_status = 'paid'
+    ), 0)::bigint AS confirmed_revenue,
+    -- Average ticket
+    COALESCE((
+        SELECT AVG(cart_total)
+        FROM (
+            SELECT SUM(ci.quantity * ci.unit_price) as cart_total
+            FROM carts c
+            JOIN cart_items ci ON ci.cart_id = c.id
+            JOIN live_events e ON e.id = c.event_id
+            WHERE e.store_id = $1
+              AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+              AND c.payment_status = 'paid'
+            GROUP BY c.id
+        ) sub
+    ), 0)::bigint AS average_ticket;

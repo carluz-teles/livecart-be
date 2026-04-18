@@ -607,6 +607,21 @@ func (r *Repository) AddCartItem(ctx context.Context, params AddCartItemParams) 
 	return nil
 }
 
+// GetCartTotals returns total items and value for a cart.
+func (r *Repository) GetCartTotals(ctx context.Context, cartID string) (int, int64, error) {
+	uid, err := parseUUID(cartID)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	row, err := r.q.GetCartTotals(ctx, uid)
+	if err != nil {
+		return 0, 0, fmt.Errorf("getting cart totals: %w", err)
+	}
+
+	return int(row.TotalItems), row.TotalValue, nil
+}
+
 // =============================================================================
 // STATS (now from events)
 // =============================================================================
@@ -919,7 +934,9 @@ func (r *Repository) GetEventStats(ctx context.Context, eventID string) (EventSt
 
 	return EventStatsRow{
 		TotalComments:     int(row.TotalComments),
+		TotalCarts:        int(row.TotalCarts),
 		OpenCarts:         int(row.OpenCarts),
+		CheckoutCarts:     int(row.CheckoutCarts),
 		PaidCarts:         int(row.PaidCarts),
 		TotalProductsSold: int(row.TotalProductsSold),
 		ProjectedRevenue:  row.ProjectedRevenue,

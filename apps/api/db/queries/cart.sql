@@ -3,8 +3,8 @@
 -- =============================================================================
 
 -- name: CreateCart :one
-INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, status, expires_at)
+VALUES ($1, $2, $3, $4, $5, 'active', $6)
 RETURNING *;
 
 -- name: GetCartByID :one
@@ -15,6 +15,14 @@ SELECT * FROM carts WHERE token = $1;
 
 -- name: GetCartByEventAndUser :one
 SELECT * FROM carts WHERE event_id = $1 AND platform_user_id = $2;
+
+-- name: GetCartTotals :one
+-- Returns total items and value for a cart (for notifications)
+SELECT
+    COALESCE(SUM(ci.quantity), 0)::int AS total_items,
+    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_value
+FROM cart_items ci
+WHERE ci.cart_id = $1;
 
 -- name: UpdateCartStatus :one
 UPDATE carts SET status = $2 WHERE id = $1 RETURNING *;
@@ -55,13 +63,13 @@ JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1;
 
 -- name: FinalizeCartsByEvent :exec
--- Updates all pending carts in an event to checkout status
+-- Updates all active carts in an event to checkout status (live ended)
 UPDATE carts
 SET status = 'checkout'
-WHERE event_id = $1 AND status = 'pending';
+WHERE event_id = $1 AND status = 'active';
 
 -- name: CountCartsByEvent :one
-SELECT COUNT(*)::int as count FROM carts WHERE event_id = $1 AND status = 'pending';
+SELECT COUNT(*)::int as count FROM carts WHERE event_id = $1 AND status = 'active';
 
 -- name: UpdateCartItem :one
 UPDATE cart_items
@@ -80,22 +88,27 @@ SELECT * FROM cart_items WHERE id = $1;
 -- =============================================================================
 
 -- name: GetEventStats :one
--- Returns stats for an event: comments, carts, revenue, products sold
+-- Returns stats for an event: comments, carts, revenue, products sold, funnel metrics
 SELECT
+    -- Funnel metrics
     COALESCE((SELECT SUM(ls.total_comments) FROM live_sessions ls WHERE ls.event_id = $1), 0)::int AS total_comments,
-    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.status = 'pending'), 0)::int AS open_carts,
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1), 0)::int AS total_carts,
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.status IN ('active', 'checkout')), 0)::int AS open_carts,
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND (ct.status = 'checkout' OR ct.checkout_url IS NOT NULL)), 0)::int AS checkout_carts,
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.payment_status = 'paid'), 0)::int AS paid_carts,
+    -- Product metrics
     COALESCE((
         SELECT SUM(ci.quantity)
         FROM carts ct
         JOIN cart_items ci ON ci.cart_id = ct.id
         WHERE ct.event_id = $1 AND ct.status != 'expired'
     ), 0)::int AS total_products_sold,
+    -- Revenue metrics
     COALESCE((
         SELECT SUM(ci.quantity * ci.unit_price)
         FROM carts ct
         JOIN cart_items ci ON ci.cart_id = ct.id
-        WHERE ct.event_id = $1 AND ct.status = 'pending'
+        WHERE ct.event_id = $1 AND ct.status IN ('active', 'checkout')
     ), 0)::bigint AS projected_revenue,
     COALESCE((
         SELECT SUM(ci.quantity * ci.unit_price)
@@ -177,11 +190,11 @@ JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1 AND ci.waitlisted = false;
 
 -- name: ListExpiredCarts :many
--- Returns carts that have expired (pending + past expires_at), with store_id from event
+-- Returns carts that have expired (active + past expires_at), with store_id from event
 SELECT c.*, le.store_id
 FROM carts c
 JOIN live_events le ON le.id = c.event_id
-WHERE c.status = 'pending' AND c.expires_at IS NOT NULL AND c.expires_at < now();
+WHERE c.status = 'active' AND c.expires_at IS NOT NULL AND c.expires_at < now();
 
 -- name: ListExpiredCartsByEventAndProduct :many
 -- Returns expired carts for a specific event that contain a specific product
@@ -190,7 +203,7 @@ FROM carts c
 JOIN live_events le ON le.id = c.event_id
 JOIN cart_items ci ON ci.cart_id = c.id
 WHERE c.event_id = $1
-  AND c.status = 'pending'
+  AND c.status = 'active'
   AND c.expires_at IS NOT NULL
   AND c.expires_at < now()
   AND ci.product_id = $2

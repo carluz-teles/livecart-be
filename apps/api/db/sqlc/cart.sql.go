@@ -12,7 +12,7 @@ import (
 )
 
 const countCartsByEvent = `-- name: CountCartsByEvent :one
-SELECT COUNT(*)::int as count FROM carts WHERE event_id = $1 AND status = 'pending'
+SELECT COUNT(*)::int as count FROM carts WHERE event_id = $1 AND status = 'active'
 `
 
 func (q *Queries) CountCartsByEvent(ctx context.Context, eventID pgtype.UUID) (int32, error) {
@@ -24,8 +24,8 @@ func (q *Queries) CountCartsByEvent(ctx context.Context, eventID pgtype.UUID) (i
 
 const createCart = `-- name: CreateCart :one
 
-INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, status, expires_at)
+VALUES ($1, $2, $3, $4, $5, 'active', $6)
 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email
 `
 
@@ -136,10 +136,10 @@ func (q *Queries) DeleteCartItemByCartAndProduct(ctx context.Context, arg Delete
 const finalizeCartsByEvent = `-- name: FinalizeCartsByEvent :exec
 UPDATE carts
 SET status = 'checkout'
-WHERE event_id = $1 AND status = 'pending'
+WHERE event_id = $1 AND status = 'active'
 `
 
-// Updates all pending carts in an event to checkout status
+// Updates all active carts in an event to checkout status (live ended)
 func (q *Queries) FinalizeCartsByEvent(ctx context.Context, eventID pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, finalizeCartsByEvent, eventID)
 	return err
@@ -416,23 +416,49 @@ func (q *Queries) GetCartItem(ctx context.Context, id pgtype.UUID) (CartItem, er
 	return i, err
 }
 
+const getCartTotals = `-- name: GetCartTotals :one
+SELECT
+    COALESCE(SUM(ci.quantity), 0)::int AS total_items,
+    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_value
+FROM cart_items ci
+WHERE ci.cart_id = $1
+`
+
+type GetCartTotalsRow struct {
+	TotalItems int32 `json:"total_items"`
+	TotalValue int64 `json:"total_value"`
+}
+
+// Returns total items and value for a cart (for notifications)
+func (q *Queries) GetCartTotals(ctx context.Context, cartID pgtype.UUID) (GetCartTotalsRow, error) {
+	row := q.db.QueryRow(ctx, getCartTotals, cartID)
+	var i GetCartTotalsRow
+	err := row.Scan(&i.TotalItems, &i.TotalValue)
+	return i, err
+}
+
 const getEventStats = `-- name: GetEventStats :one
 
 SELECT
+    -- Funnel metrics
     COALESCE((SELECT SUM(ls.total_comments) FROM live_sessions ls WHERE ls.event_id = $1), 0)::int AS total_comments,
-    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.status = 'pending'), 0)::int AS open_carts,
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1), 0)::int AS total_carts,
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.status IN ('active', 'checkout')), 0)::int AS open_carts,
+    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND (ct.status = 'checkout' OR ct.checkout_url IS NOT NULL)), 0)::int AS checkout_carts,
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.payment_status = 'paid'), 0)::int AS paid_carts,
+    -- Product metrics
     COALESCE((
         SELECT SUM(ci.quantity)
         FROM carts ct
         JOIN cart_items ci ON ci.cart_id = ct.id
         WHERE ct.event_id = $1 AND ct.status != 'expired'
     ), 0)::int AS total_products_sold,
+    -- Revenue metrics
     COALESCE((
         SELECT SUM(ci.quantity * ci.unit_price)
         FROM carts ct
         JOIN cart_items ci ON ci.cart_id = ct.id
-        WHERE ct.event_id = $1 AND ct.status = 'pending'
+        WHERE ct.event_id = $1 AND ct.status IN ('active', 'checkout')
     ), 0)::bigint AS projected_revenue,
     COALESCE((
         SELECT SUM(ci.quantity * ci.unit_price)
@@ -444,7 +470,9 @@ SELECT
 
 type GetEventStatsRow struct {
 	TotalComments     int32 `json:"total_comments"`
+	TotalCarts        int32 `json:"total_carts"`
 	OpenCarts         int32 `json:"open_carts"`
+	CheckoutCarts     int32 `json:"checkout_carts"`
 	PaidCarts         int32 `json:"paid_carts"`
 	TotalProductsSold int32 `json:"total_products_sold"`
 	ProjectedRevenue  int64 `json:"projected_revenue"`
@@ -454,13 +482,15 @@ type GetEventStatsRow struct {
 // =============================================================================
 // EVENT DETAILS - Stats and Cart Listing
 // =============================================================================
-// Returns stats for an event: comments, carts, revenue, products sold
+// Returns stats for an event: comments, carts, revenue, products sold, funnel metrics
 func (q *Queries) GetEventStats(ctx context.Context, eventID pgtype.UUID) (GetEventStatsRow, error) {
 	row := q.db.QueryRow(ctx, getEventStats, eventID)
 	var i GetEventStatsRow
 	err := row.Scan(
 		&i.TotalComments,
+		&i.TotalCarts,
 		&i.OpenCarts,
+		&i.CheckoutCarts,
 		&i.PaidCarts,
 		&i.TotalProductsSold,
 		&i.ProjectedRevenue,
@@ -759,7 +789,7 @@ const listExpiredCarts = `-- name: ListExpiredCarts :many
 SELECT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, le.store_id
 FROM carts c
 JOIN live_events le ON le.id = c.event_id
-WHERE c.status = 'pending' AND c.expires_at IS NOT NULL AND c.expires_at < now()
+WHERE c.status = 'active' AND c.expires_at IS NOT NULL AND c.expires_at < now()
 `
 
 type ListExpiredCartsRow struct {
@@ -786,7 +816,7 @@ type ListExpiredCartsRow struct {
 	StoreID              pgtype.UUID        `json:"store_id"`
 }
 
-// Returns carts that have expired (pending + past expires_at), with store_id from event
+// Returns carts that have expired (active + past expires_at), with store_id from event
 func (q *Queries) ListExpiredCarts(ctx context.Context) ([]ListExpiredCartsRow, error) {
 	rows, err := q.db.Query(ctx, listExpiredCarts)
 	if err != nil {
@@ -835,7 +865,7 @@ FROM carts c
 JOIN live_events le ON le.id = c.event_id
 JOIN cart_items ci ON ci.cart_id = c.id
 WHERE c.event_id = $1
-  AND c.status = 'pending'
+  AND c.status = 'active'
   AND c.expires_at IS NOT NULL
   AND c.expires_at < now()
   AND ci.product_id = $2

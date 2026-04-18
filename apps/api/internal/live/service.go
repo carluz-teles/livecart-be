@@ -760,17 +760,29 @@ func (s *Service) AddToCart(ctx context.Context, input AddToCartInput) (AddToCar
 		return AddToCartOutput{}, fmt.Errorf("adding item to cart: %w", err)
 	}
 
+	// Get updated cart totals
+	totalItems, totalCents, err := s.repo.GetCartTotals(ctx, cart.ID)
+	if err != nil {
+		s.logger.Warn("failed to get cart totals", zap.Error(err))
+		// Continue with zero totals - notification can still be sent
+	}
+
 	s.logger.Info("added product to cart",
 		zap.String("cart_id", cart.ID),
 		zap.String("event_id", input.EventID),
 		zap.String("product_id", input.ProductID),
 		zap.Int("quantity", input.Quantity),
 		zap.Bool("new_cart", isNew),
+		zap.Int("total_items", totalItems),
+		zap.Int64("total_cents", totalCents),
 	)
 
 	return AddToCartOutput{
-		CartID:    cart.ID,
-		IsNewCart: isNew,
+		CartID:     cart.ID,
+		CartToken:  cart.Token,
+		IsNewCart:  isNew,
+		TotalItems: totalItems,
+		TotalCents: totalCents,
 	}, nil
 }
 
@@ -802,7 +814,9 @@ func (s *Service) GetEventStats(ctx context.Context, eventID, storeID string) (E
 
 	return EventStatsOutput{
 		TotalComments:     stats.TotalComments,
+		TotalCarts:        stats.TotalCarts,
 		OpenCarts:         stats.OpenCarts,
+		CheckoutCarts:     stats.CheckoutCarts,
 		PaidCarts:         stats.PaidCarts,
 		TotalProductsSold: stats.TotalProductsSold,
 		ProjectedRevenue:  stats.ProjectedRevenue,

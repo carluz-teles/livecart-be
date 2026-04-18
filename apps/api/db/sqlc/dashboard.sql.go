@@ -11,6 +11,95 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getAggregatedFunnel = `-- name: GetAggregatedFunnel :one
+SELECT
+    -- Total comments across all events
+    COALESCE((
+        SELECT SUM(ls.total_comments)
+        FROM live_sessions ls
+        JOIN live_events e ON e.id = ls.event_id
+        WHERE e.store_id = $1 AND ls.created_at >= NOW() - INTERVAL '1 day' * $2
+    ), 0)::int AS total_comments,
+    -- Total carts created
+    COALESCE((
+        SELECT COUNT(*)
+        FROM carts c
+        JOIN live_events e ON e.id = c.event_id
+        WHERE e.store_id = $1 AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+    ), 0)::int AS total_carts,
+    -- Carts that reached checkout
+    COALESCE((
+        SELECT COUNT(*)
+        FROM carts c
+        JOIN live_events e ON e.id = c.event_id
+        WHERE e.store_id = $1
+          AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+          AND (c.status = 'checkout' OR c.checkout_url IS NOT NULL)
+    ), 0)::int AS checkout_carts,
+    -- Paid carts
+    COALESCE((
+        SELECT COUNT(*)
+        FROM carts c
+        JOIN live_events e ON e.id = c.event_id
+        WHERE e.store_id = $1
+          AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+          AND c.payment_status = 'paid'
+    ), 0)::int AS paid_carts,
+    -- Confirmed revenue (GMV)
+    COALESCE((
+        SELECT SUM(ci.quantity * ci.unit_price)
+        FROM carts c
+        JOIN cart_items ci ON ci.cart_id = c.id
+        JOIN live_events e ON e.id = c.event_id
+        WHERE e.store_id = $1
+          AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+          AND c.payment_status = 'paid'
+    ), 0)::bigint AS confirmed_revenue,
+    -- Average ticket
+    COALESCE((
+        SELECT AVG(cart_total)
+        FROM (
+            SELECT SUM(ci.quantity * ci.unit_price) as cart_total
+            FROM carts c
+            JOIN cart_items ci ON ci.cart_id = c.id
+            JOIN live_events e ON e.id = c.event_id
+            WHERE e.store_id = $1
+              AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+              AND c.payment_status = 'paid'
+            GROUP BY c.id
+        ) sub
+    ), 0)::bigint AS average_ticket
+`
+
+type GetAggregatedFunnelParams struct {
+	StoreID pgtype.UUID `json:"store_id"`
+	Column2 interface{} `json:"column_2"`
+}
+
+type GetAggregatedFunnelRow struct {
+	TotalComments    int32 `json:"total_comments"`
+	TotalCarts       int32 `json:"total_carts"`
+	CheckoutCarts    int32 `json:"checkout_carts"`
+	PaidCarts        int32 `json:"paid_carts"`
+	ConfirmedRevenue int64 `json:"confirmed_revenue"`
+	AverageTicket    int64 `json:"average_ticket"`
+}
+
+// Returns aggregated funnel metrics for the store (last N days)
+func (q *Queries) GetAggregatedFunnel(ctx context.Context, arg GetAggregatedFunnelParams) (GetAggregatedFunnelRow, error) {
+	row := q.db.QueryRow(ctx, getAggregatedFunnel, arg.StoreID, arg.Column2)
+	var i GetAggregatedFunnelRow
+	err := row.Scan(
+		&i.TotalComments,
+		&i.TotalCarts,
+		&i.CheckoutCarts,
+		&i.PaidCarts,
+		&i.ConfirmedRevenue,
+		&i.AverageTicket,
+	)
+	return i, err
+}
+
 const getDashboardStats = `-- name: GetDashboardStats :one
 SELECT
     -- Total revenue from orders
@@ -59,6 +148,77 @@ func (q *Queries) GetDashboardStats(ctx context.Context, storeID pgtype.UUID) (G
 		&i.TotalLives,
 	)
 	return i, err
+}
+
+const getEventsWithRevenue = `-- name: GetEventsWithRevenue :many
+
+SELECT
+    e.id,
+    e.title,
+    e.status,
+    e.created_at,
+    COALESCE((SELECT SUM(ls.total_comments) FROM live_sessions ls WHERE ls.event_id = e.id), 0)::int AS total_comments,
+    COALESCE((SELECT COUNT(*) FROM carts c WHERE c.event_id = e.id), 0)::int AS total_carts,
+    COALESCE((SELECT COUNT(*) FROM carts c WHERE c.event_id = e.id AND c.payment_status = 'paid'), 0)::int AS paid_carts,
+    COALESCE((
+        SELECT SUM(ci.quantity * ci.unit_price)
+        FROM carts c
+        JOIN cart_items ci ON ci.cart_id = c.id
+        WHERE c.event_id = e.id AND c.payment_status = 'paid'
+    ), 0)::bigint AS confirmed_revenue
+FROM live_events e
+WHERE e.store_id = $1
+ORDER BY e.created_at DESC
+LIMIT $2
+`
+
+type GetEventsWithRevenueParams struct {
+	StoreID pgtype.UUID `json:"store_id"`
+	Limit   int32       `json:"limit"`
+}
+
+type GetEventsWithRevenueRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	Title            pgtype.Text        `json:"title"`
+	Status           string             `json:"status"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	TotalComments    int32              `json:"total_comments"`
+	TotalCarts       int32              `json:"total_carts"`
+	PaidCarts        int32              `json:"paid_carts"`
+	ConfirmedRevenue int64              `json:"confirmed_revenue"`
+}
+
+// =============================================================================
+// ANALYTICS - Revenue Attribution
+// =============================================================================
+// Returns all events with their revenue metrics for analytics
+func (q *Queries) GetEventsWithRevenue(ctx context.Context, arg GetEventsWithRevenueParams) ([]GetEventsWithRevenueRow, error) {
+	rows, err := q.db.Query(ctx, getEventsWithRevenue, arg.StoreID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetEventsWithRevenueRow{}
+	for rows.Next() {
+		var i GetEventsWithRevenueRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Title,
+			&i.Status,
+			&i.CreatedAt,
+			&i.TotalComments,
+			&i.TotalCarts,
+			&i.PaidCarts,
+			&i.ConfirmedRevenue,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getMonthlyRevenue = `-- name: GetMonthlyRevenue :many
