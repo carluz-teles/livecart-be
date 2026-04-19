@@ -41,6 +41,7 @@ import (
 	"livecart/apps/api/internal/invitation"
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/internal/member"
+	"livecart/apps/api/internal/notification"
 	"livecart/apps/api/internal/order"
 	"livecart/apps/api/internal/product"
 	"livecart/apps/api/internal/store"
@@ -172,6 +173,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// Integration Layer setup
 	var integrationSvc *integration.Service
 	var integrationWebhookHandler *integration.WebhookHandler
+	var notificationSvc *notification.Service
 
 	if config.EncryptionKey.IsSet() {
 		encryptor, err := crypto.NewEncryptor(config.EncryptionKey.String())
@@ -320,6 +322,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			liveSvc.SetNotifier(newLiveNotifierAdapter(integration.NewInstagramNotifier(integrationSvc, log)))
 			liveSvc.SetERPFinalizer(newERPFinalizerAdapter(integrationSvc))
 
+			// Create notification service and wire into integration service
+			// (integrationSvc implements notification.DMSender via SendInstagramDM)
+			notificationSvc = notification.NewService(queries, integrationSvc, log)
+			integrationSvc.SetNotificationService(notificationSvc)
+
 			log.Info("integration layer initialized")
 		}
 	}
@@ -411,6 +418,10 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	if integrationSvc != nil {
 		integrationHandler := integration.NewHandler(integrationSvc, validate)
 		integrationHandler.RegisterRoutes(storeScoped)
+
+		// Notification settings routes (depends on integration service)
+		notificationHandler := notification.NewHandler(notificationSvc, log)
+		notificationHandler.RegisterRoutes(storeScoped)
 	}
 
 	// Member routes (store-scoped)
