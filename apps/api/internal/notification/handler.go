@@ -69,7 +69,7 @@ func (h *Handler) GetSettings(c *fiber.Ctx) error {
 		return httpx.ErrInternal("Erro ao buscar configurações de notificação")
 	}
 
-	return c.JSON(toSettingsResponse(settings))
+	return httpx.OK(c, toSettingsResponse(settings))
 }
 
 // UpdateSettingsRequest represents the request for updating notification settings.
@@ -138,7 +138,7 @@ func (h *Handler) UpdateSettings(c *fiber.Ctx) error {
 		return httpx.ErrInternal("Erro ao atualizar configurações de notificação")
 	}
 
-	return c.JSON(toSettingsResponse(&settings))
+	return httpx.OK(c, toSettingsResponse(&settings))
 }
 
 // PreviewTemplateRequest represents the request for previewing a template.
@@ -190,7 +190,7 @@ func (h *Handler) PreviewTemplate(c *fiber.Ctx) error {
 		resp.Error = err.Error()
 	}
 
-	return c.JSON(resp)
+	return httpx.OK(c, resp)
 }
 
 // GetAvailableVariablesResponse represents the response for available variables.
@@ -230,7 +230,7 @@ func (h *Handler) GetAvailableVariables(c *fiber.Ctx) error {
 		{Name: "{live_titulo}", Description: "Título da live", Example: sample.LiveTitulo},
 	}
 
-	return c.JSON(GetAvailableVariablesResponse{Variables: variables})
+	return httpx.OK(c, GetAvailableVariablesResponse{Variables: variables})
 }
 
 // Helper functions
