@@ -35,6 +35,8 @@ const (
 )
 
 // Settings represents the notification settings for a store.
+// NOTE: Triggers (when to send) are now in CartMessageSettings.
+// This struct only contains templates (what to send).
 type Settings struct {
 	CheckoutImmediate *TemplateSettings `json:"checkout_immediate"`
 	ItemAdded         *TemplateSettings `json:"item_added"`
@@ -42,23 +44,29 @@ type Settings struct {
 }
 
 // TemplateSettings represents settings for a specific notification type.
+// Contains only template configuration - triggers are in CartMessageSettings.
 type TemplateSettings struct {
-	Enabled         bool   `json:"enabled"`
-	OnFirstItem     bool   `json:"on_first_item,omitempty"`     // Only for checkout_immediate
-	OnNewItems      bool   `json:"on_new_items,omitempty"`      // Only for checkout_immediate
-	CooldownSeconds int    `json:"cooldown_seconds,omitempty"` // Cooldown between messages
-	Template        string `json:"template"`
+	Enabled  bool   `json:"enabled"`
+	Template string `json:"template"`
+}
+
+// CartMessageSettings represents when/how to send automatic messages.
+// These are stored in stores.cart_* columns and control notification triggers.
+type CartMessageSettings struct {
+	SendOnFirstItem           bool `json:"sendOnFirstItem"`
+	SendOnNewItems            bool `json:"sendOnNewItems"`
+	MessageCooldownSeconds    int  `json:"messageCooldownSeconds"`
+	SendExpirationReminder    bool `json:"sendExpirationReminder"`
+	ExpirationReminderMinutes int  `json:"expirationReminderMinutes"`
 }
 
 // DefaultSettings returns the default notification settings.
+// NOTE: These are just templates. Triggers (when to send) are in cart_settings.
 func DefaultSettings() Settings {
 	return Settings{
 		CheckoutImmediate: &TemplateSettings{
-			Enabled:         true,
-			OnFirstItem:     true,
-			OnNewItems:      true,
-			CooldownSeconds: 30,
-			Template:        "Olá {handle}! 🛒\n\nVocê pediu {produto} na live!\n\nTotal: {total}\n\nFinalize aqui: {link}\n\n⏰ Válido por {expira_em}",
+			Enabled:  true,
+			Template: "Olá {handle}! 🛒\n\nVocê pediu {produto} na live!\n\nTotal: {total}\n\nFinalize aqui: {link}\n\n⏰ Válido por {expira_em}",
 		},
 		ItemAdded: &TemplateSettings{
 			Enabled:  true,
@@ -68,6 +76,17 @@ func DefaultSettings() Settings {
 			Enabled:  true,
 			Template: "Oi {handle}! 🛒\n\nSeu carrinho com {total_itens} itens está esperando!\n\nTotal: {total}\n\nFinalize aqui: {link}\n\n⏰ Válido por {expira_em}",
 		},
+	}
+}
+
+// DefaultCartMessageSettings returns the default cart message settings.
+func DefaultCartMessageSettings() CartMessageSettings {
+	return CartMessageSettings{
+		SendOnFirstItem:           true,
+		SendOnNewItems:            true,
+		MessageCooldownSeconds:    30,
+		SendExpirationReminder:    true,
+		ExpirationReminderMinutes: 15,
 	}
 }
 

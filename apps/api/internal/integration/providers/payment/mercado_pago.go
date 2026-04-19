@@ -18,6 +18,31 @@ const (
 	mpOAuthURL   = "https://api.mercadopago.com/oauth/token"
 )
 
+// FlexibleStatus handles Mercado Pago API responses where status can be
+// either a string (payment status like "pending") or a number (HTTP error code like 401)
+type FlexibleStatus string
+
+func (f *FlexibleStatus) UnmarshalJSON(data []byte) error {
+	// Try string first
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*f = FlexibleStatus(s)
+		return nil
+	}
+	// Try number (error responses return HTTP status code)
+	var n int
+	if err := json.Unmarshal(data, &n); err == nil {
+		*f = FlexibleStatus(fmt.Sprintf("%d", n))
+		return nil
+	}
+	return fmt.Errorf("status field is neither string nor number")
+}
+
+// String returns the string value of the status
+func (f FlexibleStatus) String() string {
+	return string(f)
+}
+
 // MercadoPago implements the PaymentProvider interface for Mercado Pago.
 type MercadoPago struct {
 	*providers.BaseProvider
@@ -298,7 +323,7 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 
 	var mpPayment struct {
 		ID                int64          `json:"id"`
-		Status            string         `json:"status"`
+		Status            FlexibleStatus `json:"status"`
 		StatusDetail      string         `json:"status_detail"`
 		TransactionAmount float64        `json:"transaction_amount"`
 		CurrencyID        string         `json:"currency_id"`
@@ -311,7 +336,7 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 		return nil, fmt.Errorf("parsing payment response: %w", err)
 	}
 
-	status := mapMPStatus(mpPayment.Status)
+	status := mapMPStatus(mpPayment.Status.String())
 
 	var paidAt *time.Time
 	if mpPayment.DateApproved != "" {
@@ -352,7 +377,7 @@ func (m *MercadoPago) RefundPayment(ctx context.Context, paymentID string, amoun
 
 	var mpRefund struct {
 		ID          int64   `json:"id"`
-		Status      string  `json:"status"`
+		Status      FlexibleStatus  `json:"status"`
 		Amount      float64 `json:"amount"`
 		DateCreated string  `json:"date_created"`
 	}
@@ -364,7 +389,7 @@ func (m *MercadoPago) RefundPayment(ctx context.Context, paymentID string, amoun
 
 	return &RefundResult{
 		RefundID:  fmt.Sprintf("%d", mpRefund.ID),
-		Status:    mpRefund.Status,
+		Status:    mpRefund.Status.String(),
 		Amount:    int64(mpRefund.Amount * 100), // Convert to cents
 		CreatedAt: createdAt,
 	}, nil
@@ -477,7 +502,7 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 
 	var mpResp struct {
 		ID                int64          `json:"id"`
-		Status            string         `json:"status"`
+		Status            FlexibleStatus `json:"status"`
 		StatusDetail      string         `json:"status_detail"`
 		TransactionAmount float64        `json:"transaction_amount"`
 		Installments      int            `json:"installments"`
@@ -513,13 +538,13 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 
 	result := &CardPaymentResult{
 		PaymentID:         fmt.Sprintf("%d", mpResp.ID),
-		Status:            mapMPStatus(mpResp.Status),
+		Status:            mapMPStatus(mpResp.Status.String()),
 		StatusDetail:      mpResp.StatusDetail,
 		Amount:            int64(mpResp.TransactionAmount * 100),
 		Installments:      mpResp.Installments,
 		CardBrand:         mpResp.PaymentMethodID,
 		ExternalReference: mpResp.ExternalReference,
-		Message:           getStatusMessage(mpResp.Status, mpResp.StatusDetail),
+		Message:           getStatusMessage(mpResp.Status.String(), mpResp.StatusDetail),
 	}
 
 	if mpResp.Card != nil {
@@ -559,13 +584,14 @@ func (m *MercadoPago) GeneratePixPayment(ctx context.Context, input PixPaymentIn
 	}
 
 	// Build payload for PIX payment
+	// Mercado Pago requires ISO 8601 format in UTC
 	payload := map[string]any{
 		"transaction_amount": float64(input.TotalAmount) / 100,
 		"payment_method_id":  "pix",
 		"payer":              payer,
 		"external_reference": input.CartID,
 		"notification_url":   input.NotifyURL,
-		"date_of_expiration": expiresAt.Format(time.RFC3339),
+		"date_of_expiration": expiresAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 	}
 
 	if input.Metadata != nil {
@@ -582,9 +608,9 @@ func (m *MercadoPago) GeneratePixPayment(ctx context.Context, input PixPaymentIn
 	}
 
 	var mpResp struct {
-		ID                int64   `json:"id"`
-		Status            string  `json:"status"`
-		TransactionAmount float64 `json:"transaction_amount"`
+		ID                int64          `json:"id"`
+		Status            FlexibleStatus `json:"status"`
+		TransactionAmount float64        `json:"transaction_amount"`
 		ExternalReference string  `json:"external_reference"`
 		PointOfInteraction struct {
 			TransactionData struct {

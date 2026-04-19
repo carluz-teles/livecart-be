@@ -190,17 +190,22 @@ func (h *Handler) UpdateCartSettings(c *fiber.Ctx) error {
 	}
 
 	output, err := h.service.UpdateCartSettings(c.Context(), UpdateCartSettingsInput{
-		StoreID:                 storeID,
-		Enabled:                 req.Enabled,
-		ExpirationMinutes:       req.ExpirationMinutes,
-		ReserveStock:            req.ReserveStock,
-		MaxItems:                req.MaxItems,
-		MaxQuantityPerItem:      req.MaxQuantityPerItem,
-		NotifyBeforeExpiration:  req.NotifyBeforeExpiration,
-		AllowEdit:               req.AllowEdit,
-		AutoSendCheckoutLinks:   req.AutoSendCheckoutLinks,
-		CheckoutLinkExpiryHours: req.CheckoutLinkExpiryHours,
-		CheckoutSendMethods:     req.CheckoutSendMethods,
+		StoreID:                   storeID,
+		Enabled:                   req.Enabled,
+		ExpirationMinutes:         req.ExpirationMinutes,
+		ReserveStock:              req.ReserveStock,
+		MaxItems:                  req.MaxItems,
+		MaxQuantityPerItem:        req.MaxQuantityPerItem,
+		NotifyBeforeExpiration:    req.NotifyBeforeExpiration,
+		AllowEdit:                 req.AllowEdit,
+		AutoSendCheckoutLinks:     req.AutoSendCheckoutLinks,
+		CheckoutLinkExpiryHours:   req.CheckoutLinkExpiryHours,
+		CheckoutSendMethods:       req.CheckoutSendMethods,
+		SendOnFirstItem:           req.SendOnFirstItem,
+		SendOnNewItems:            req.SendOnNewItems,
+		MessageCooldownSeconds:    req.MessageCooldownSeconds,
+		SendExpirationReminder:    req.SendExpirationReminder,
+		ExpirationReminderMinutes: req.ExpirationReminderMinutes,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -373,17 +378,22 @@ func (h *Handler) UpdateCartSettingsByID(c *fiber.Ctx) error {
 	}
 
 	output, err := h.service.UpdateCartSettings(c.Context(), UpdateCartSettingsInput{
-		StoreID:                 storeID,
-		Enabled:                 req.Enabled,
-		ExpirationMinutes:       req.ExpirationMinutes,
-		ReserveStock:            req.ReserveStock,
-		MaxItems:                req.MaxItems,
-		MaxQuantityPerItem:      req.MaxQuantityPerItem,
-		NotifyBeforeExpiration:  req.NotifyBeforeExpiration,
-		AllowEdit:               req.AllowEdit,
-		AutoSendCheckoutLinks:   req.AutoSendCheckoutLinks,
-		CheckoutLinkExpiryHours: req.CheckoutLinkExpiryHours,
-		CheckoutSendMethods:     req.CheckoutSendMethods,
+		StoreID:                   storeID,
+		Enabled:                   req.Enabled,
+		ExpirationMinutes:         req.ExpirationMinutes,
+		ReserveStock:              req.ReserveStock,
+		MaxItems:                  req.MaxItems,
+		MaxQuantityPerItem:        req.MaxQuantityPerItem,
+		NotifyBeforeExpiration:    req.NotifyBeforeExpiration,
+		AllowEdit:                 req.AllowEdit,
+		AutoSendCheckoutLinks:     req.AutoSendCheckoutLinks,
+		CheckoutLinkExpiryHours:   req.CheckoutLinkExpiryHours,
+		CheckoutSendMethods:       req.CheckoutSendMethods,
+		SendOnFirstItem:           req.SendOnFirstItem,
+		SendOnNewItems:            req.SendOnNewItems,
+		MessageCooldownSeconds:    req.MessageCooldownSeconds,
+		SendExpirationReminder:    req.SendExpirationReminder,
+		ExpirationReminderMinutes: req.ExpirationReminderMinutes,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)

@@ -17,6 +17,12 @@ type CartSettingsDTO struct {
 	AutoSendCheckoutLinks   bool     `json:"autoSendCheckoutLinks"`
 	CheckoutLinkExpiryHours int      `json:"checkoutLinkExpiryHours"`
 	CheckoutSendMethods     []string `json:"checkoutSendMethods"`
+	// Automatic message settings
+	SendOnFirstItem           bool `json:"sendOnFirstItem"`
+	SendOnNewItems            bool `json:"sendOnNewItems"`
+	MessageCooldownSeconds    int  `json:"messageCooldownSeconds"`
+	SendExpirationReminder    bool `json:"sendExpirationReminder"`
+	ExpirationReminderMinutes int  `json:"expirationReminderMinutes"`
 }
 
 // ============================================
@@ -69,6 +75,12 @@ type UpdateCartSettingsRequest struct {
 	AutoSendCheckoutLinks   bool     `json:"autoSendCheckoutLinks"`
 	CheckoutLinkExpiryHours int      `json:"checkoutLinkExpiryHours" validate:"gte=1,lte=168"`
 	CheckoutSendMethods     []string `json:"checkoutSendMethods"`
+	// Automatic message settings
+	SendOnFirstItem           bool `json:"sendOnFirstItem"`
+	SendOnNewItems            bool `json:"sendOnNewItems"`
+	MessageCooldownSeconds    int  `json:"messageCooldownSeconds" validate:"gte=0,lte=3600"`
+	SendExpirationReminder    bool `json:"sendExpirationReminder"`
+	ExpirationReminderMinutes int  `json:"expirationReminderMinutes" validate:"gte=1,lte=1440"`
 }
 
 type StoreResponse struct {
@@ -134,6 +146,12 @@ type UpdateCartSettingsInput struct {
 	AutoSendCheckoutLinks   bool
 	CheckoutLinkExpiryHours int
 	CheckoutSendMethods     []string
+	// Automatic message settings
+	SendOnFirstItem           bool
+	SendOnNewItems            bool
+	MessageCooldownSeconds    int
+	SendExpirationReminder    bool
+	ExpirationReminderMinutes int
 }
 
 type StoreOutput struct {
@@ -189,6 +207,12 @@ type UpdateCartSettingsParams struct {
 	AutoSendCheckoutLinks   bool
 	CheckoutLinkExpiryHours int
 	CheckoutSendMethods     []string
+	// Automatic message settings
+	SendOnFirstItem           bool
+	SendOnNewItems            bool
+	MessageCooldownSeconds    int
+	SendExpirationReminder    bool
+	ExpirationReminderMinutes int
 }
 
 type StoreRow struct {

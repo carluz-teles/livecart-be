@@ -31,6 +31,7 @@ func (h *Handler) RegisterRoutes(api fiber.Router) {
 }
 
 // GetSettingsResponse represents the response for getting notification settings.
+// NOTE: Triggers (when to send) are now in cart_settings, not here.
 type GetSettingsResponse struct {
 	CheckoutImmediate *TemplateSettingsResponse `json:"checkout_immediate"`
 	ItemAdded         *TemplateSettingsResponse `json:"item_added"`
@@ -38,12 +39,10 @@ type GetSettingsResponse struct {
 }
 
 // TemplateSettingsResponse represents template settings in API responses.
+// Only contains enabled + template. Triggers are in cart_settings.
 type TemplateSettingsResponse struct {
-	Enabled         bool   `json:"enabled"`
-	OnFirstItem     bool   `json:"on_first_item,omitempty"`
-	OnNewItems      bool   `json:"on_new_items,omitempty"`
-	CooldownSeconds int    `json:"cooldown_seconds,omitempty"`
-	Template        string `json:"template"`
+	Enabled  bool   `json:"enabled"`
+	Template string `json:"template"`
 }
 
 // GetSettings returns notification settings for a store.
@@ -73,6 +72,7 @@ func (h *Handler) GetSettings(c *fiber.Ctx) error {
 }
 
 // UpdateSettingsRequest represents the request for updating notification settings.
+// NOTE: Triggers (when to send) are now in cart_settings, not here.
 type UpdateSettingsRequest struct {
 	CheckoutImmediate *UpdateTemplateSettingsRequest `json:"checkout_immediate"`
 	ItemAdded         *UpdateTemplateSettingsRequest `json:"item_added"`
@@ -80,12 +80,10 @@ type UpdateSettingsRequest struct {
 }
 
 // UpdateTemplateSettingsRequest represents template settings in API requests.
+// Only contains enabled + template. Triggers are in cart_settings.
 type UpdateTemplateSettingsRequest struct {
-	Enabled         bool   `json:"enabled"`
-	OnFirstItem     bool   `json:"on_first_item,omitempty"`
-	OnNewItems      bool   `json:"on_new_items,omitempty"`
-	CooldownSeconds int    `json:"cooldown_seconds,omitempty"`
-	Template        string `json:"template" validate:"required,min=1,max=1500"`
+	Enabled  bool   `json:"enabled"`
+	Template string `json:"template" validate:"required,min=1,max=1500"`
 }
 
 // UpdateSettings updates notification settings for a store.
@@ -240,11 +238,8 @@ func toSettingsResponse(s *Settings) GetSettingsResponse {
 
 	if s.CheckoutImmediate != nil {
 		resp.CheckoutImmediate = &TemplateSettingsResponse{
-			Enabled:         s.CheckoutImmediate.Enabled,
-			OnFirstItem:     s.CheckoutImmediate.OnFirstItem,
-			OnNewItems:      s.CheckoutImmediate.OnNewItems,
-			CooldownSeconds: s.CheckoutImmediate.CooldownSeconds,
-			Template:        s.CheckoutImmediate.Template,
+			Enabled:  s.CheckoutImmediate.Enabled,
+			Template: s.CheckoutImmediate.Template,
 		}
 	}
 
@@ -270,11 +265,8 @@ func toSettingsFromRequest(req *UpdateSettingsRequest) Settings {
 
 	if req.CheckoutImmediate != nil {
 		settings.CheckoutImmediate = &TemplateSettings{
-			Enabled:         req.CheckoutImmediate.Enabled,
-			OnFirstItem:     req.CheckoutImmediate.OnFirstItem,
-			OnNewItems:      req.CheckoutImmediate.OnNewItems,
-			CooldownSeconds: req.CheckoutImmediate.CooldownSeconds,
-			Template:        req.CheckoutImmediate.Template,
+			Enabled:  req.CheckoutImmediate.Enabled,
+			Template: req.CheckoutImmediate.Template,
 		}
 	}
 

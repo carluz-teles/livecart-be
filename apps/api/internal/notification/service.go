@@ -33,7 +33,7 @@ func NewService(queries *sqlc.Queries, dmSender DMSender, logger *zap.Logger) *S
 	}
 }
 
-// GetSettings retrieves notification settings for a store.
+// GetSettings retrieves notification settings (templates) for a store.
 func (s *Service) GetSettings(ctx context.Context, storeID string) (*Settings, error) {
 	uid, err := parseUUID(storeID)
 	if err != nil {
@@ -64,6 +64,27 @@ func (s *Service) GetSettings(ctx context.Context, storeID string) (*Settings, e
 	return &settings, nil
 }
 
+// GetCartMessageSettings retrieves cart message settings (triggers) for a store.
+func (s *Service) GetCartMessageSettings(ctx context.Context, storeID string) (*CartMessageSettings, error) {
+	uid, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := s.queries.GetStoreCartMessageSettings(ctx, uid)
+	if err != nil {
+		return nil, fmt.Errorf("getting cart message settings: %w", err)
+	}
+
+	return &CartMessageSettings{
+		SendOnFirstItem:           row.CartSendOnFirstItem,
+		SendOnNewItems:            row.CartSendOnNewItems,
+		MessageCooldownSeconds:    int(row.CartMessageCooldownSeconds),
+		SendExpirationReminder:    row.CartSendExpirationReminder,
+		ExpirationReminderMinutes: int(row.CartExpirationReminderMinutes),
+	}, nil
+}
+
 // UpdateSettings updates notification settings for a store.
 func (s *Service) UpdateSettings(ctx context.Context, storeID string, settings Settings) error {
 	uid, err := parseUUID(storeID)
@@ -85,10 +106,16 @@ func (s *Service) UpdateSettings(ctx context.Context, storeID string, settings S
 // Send sends a notification based on type and store settings.
 // Returns the result including whether it was sent, skipped due to cooldown, etc.
 func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error) {
-	// Get store settings
+	// Get template settings
 	settings, err := s.GetSettings(ctx, input.StoreID)
 	if err != nil {
 		return nil, fmt.Errorf("getting settings: %w", err)
+	}
+
+	// Get cart message settings for cooldown
+	cartSettings, err := s.GetCartMessageSettings(ctx, input.StoreID)
+	if err != nil {
+		return nil, fmt.Errorf("getting cart message settings: %w", err)
 	}
 
 	// Get template settings for this notification type
@@ -103,16 +130,17 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 		}, nil
 	}
 
-	// Check cooldown
-	if templateSettings.CooldownSeconds > 0 {
-		inCooldown, err := s.isInCooldown(ctx, input.StoreID, input.PlatformUserID, templateSettings.CooldownSeconds)
+	// Check cooldown (now from cart_settings)
+	cooldownSeconds := cartSettings.MessageCooldownSeconds
+	if cooldownSeconds > 0 {
+		inCooldown, err := s.isInCooldown(ctx, input.StoreID, input.PlatformUserID, cooldownSeconds)
 		if err != nil {
 			s.logger.Warn("failed to check cooldown", zap.Error(err))
 		} else if inCooldown {
 			s.logger.Debug("skipping notification due to cooldown",
 				zap.String("store_id", input.StoreID),
 				zap.String("platform_user_id", input.PlatformUserID),
-				zap.Int("cooldown_seconds", templateSettings.CooldownSeconds),
+				zap.Int("cooldown_seconds", cooldownSeconds),
 			)
 
 			// Log the cooldown skip
@@ -177,33 +205,45 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 }
 
 // ShouldNotify checks if a notification should be sent based on type and cart state.
+// It uses cart_settings for triggers (when to send) and notification_settings for templates (what to send).
 func (s *Service) ShouldNotify(ctx context.Context, storeID string, notifType NotificationType, isNewCart bool) (bool, error) {
-	settings, err := s.GetSettings(ctx, storeID)
+	// Get template settings (to check if template is enabled)
+	templateSettings, err := s.GetSettings(ctx, storeID)
+	if err != nil {
+		return false, err
+	}
+
+	// Get cart message settings (triggers)
+	cartSettings, err := s.GetCartMessageSettings(ctx, storeID)
 	if err != nil {
 		return false, err
 	}
 
 	switch notifType {
 	case TypeCheckoutImmediate:
-		if settings.CheckoutImmediate == nil || !settings.CheckoutImmediate.Enabled {
+		// Template must be enabled
+		if templateSettings.CheckoutImmediate == nil || !templateSettings.CheckoutImmediate.Enabled {
 			return false, nil
 		}
+		// Check triggers from cart_settings
 		if isNewCart {
-			return settings.CheckoutImmediate.OnFirstItem, nil
+			return cartSettings.SendOnFirstItem, nil
 		}
-		return settings.CheckoutImmediate.OnNewItems, nil
+		return cartSettings.SendOnNewItems, nil
 
 	case TypeItemAdded:
-		if settings.ItemAdded == nil {
+		if templateSettings.ItemAdded == nil {
 			return false, nil
 		}
-		return settings.ItemAdded.Enabled && !isNewCart, nil
+		// Only send for existing carts, and only if sendOnNewItems is enabled
+		return templateSettings.ItemAdded.Enabled && !isNewCart && cartSettings.SendOnNewItems, nil
 
 	case TypeCheckoutReminder:
-		if settings.CheckoutReminder == nil {
+		if templateSettings.CheckoutReminder == nil {
 			return false, nil
 		}
-		return settings.CheckoutReminder.Enabled, nil
+		// Use cart_settings trigger for expiration reminder
+		return templateSettings.CheckoutReminder.Enabled && cartSettings.SendExpirationReminder, nil
 
 	default:
 		return false, nil

@@ -281,6 +281,16 @@ type Store struct {
 	CheckoutSendMethods     json.RawMessage `json:"checkout_send_methods"`
 	// JSON settings for automatic notifications: templates, triggers, cooldown
 	NotificationSettings json.RawMessage `json:"notification_settings"`
+	// Send automatic message when first item is added to cart
+	CartSendOnFirstItem bool `json:"cart_send_on_first_item"`
+	// Send automatic message when new items are added to cart
+	CartSendOnNewItems bool `json:"cart_send_on_new_items"`
+	// Minimum interval between automatic messages in seconds
+	CartMessageCooldownSeconds int32 `json:"cart_message_cooldown_seconds"`
+	// Send reminder message before cart expires
+	CartSendExpirationReminder bool `json:"cart_send_expiration_reminder"`
+	// Minutes before expiration to send reminder
+	CartExpirationReminderMinutes int32 `json:"cart_expiration_reminder_minutes"`
 }
 
 type StoreInvitation struct {

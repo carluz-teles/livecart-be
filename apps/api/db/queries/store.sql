@@ -41,6 +41,11 @@ SET
   auto_send_checkout_links = $9,
   checkout_link_expiry_hours = $10,
   checkout_send_methods = $11,
+  cart_send_on_first_item = $12,
+  cart_send_on_new_items = $13,
+  cart_message_cooldown_seconds = $14,
+  cart_send_expiration_reminder = $15,
+  cart_expiration_reminder_minutes = $16,
   updated_at = now()
 WHERE id = $1
 RETURNING *;

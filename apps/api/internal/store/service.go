@@ -131,17 +131,22 @@ func (s *Service) Update(ctx context.Context, input UpdateStoreInput) (StoreOutp
 
 func (s *Service) UpdateCartSettings(ctx context.Context, input UpdateCartSettingsInput) (StoreOutput, error) {
 	row, err := s.repo.UpdateCartSettings(ctx, UpdateCartSettingsParams{
-		ID:                      input.StoreID,
-		Enabled:                 input.Enabled,
-		ExpirationMinutes:       input.ExpirationMinutes,
-		ReserveStock:            input.ReserveStock,
-		MaxItems:                input.MaxItems,
-		MaxQuantityPerItem:      input.MaxQuantityPerItem,
-		NotifyBeforeExpiration:  input.NotifyBeforeExpiration,
-		AllowEdit:               input.AllowEdit,
-		AutoSendCheckoutLinks:   input.AutoSendCheckoutLinks,
-		CheckoutLinkExpiryHours: input.CheckoutLinkExpiryHours,
-		CheckoutSendMethods:     input.CheckoutSendMethods,
+		ID:                        input.StoreID,
+		Enabled:                   input.Enabled,
+		ExpirationMinutes:         input.ExpirationMinutes,
+		ReserveStock:              input.ReserveStock,
+		MaxItems:                  input.MaxItems,
+		MaxQuantityPerItem:        input.MaxQuantityPerItem,
+		NotifyBeforeExpiration:    input.NotifyBeforeExpiration,
+		AllowEdit:                 input.AllowEdit,
+		AutoSendCheckoutLinks:     input.AutoSendCheckoutLinks,
+		CheckoutLinkExpiryHours:   input.CheckoutLinkExpiryHours,
+		CheckoutSendMethods:       input.CheckoutSendMethods,
+		SendOnFirstItem:           input.SendOnFirstItem,
+		SendOnNewItems:            input.SendOnNewItems,
+		MessageCooldownSeconds:    input.MessageCooldownSeconds,
+		SendExpirationReminder:    input.SendExpirationReminder,
+		ExpirationReminderMinutes: input.ExpirationReminderMinutes,
 	})
 	if err != nil {
 		return StoreOutput{}, err

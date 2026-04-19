@@ -163,6 +163,38 @@ func (q *Queries) GetNotificationByCartAndType(ctx context.Context, arg GetNotif
 	return i, err
 }
 
+const getStoreCartMessageSettings = `-- name: GetStoreCartMessageSettings :one
+SELECT
+    cart_send_on_first_item,
+    cart_send_on_new_items,
+    cart_message_cooldown_seconds,
+    cart_send_expiration_reminder,
+    cart_expiration_reminder_minutes
+FROM stores WHERE id = $1
+`
+
+type GetStoreCartMessageSettingsRow struct {
+	CartSendOnFirstItem           bool  `json:"cart_send_on_first_item"`
+	CartSendOnNewItems            bool  `json:"cart_send_on_new_items"`
+	CartMessageCooldownSeconds    int32 `json:"cart_message_cooldown_seconds"`
+	CartSendExpirationReminder    bool  `json:"cart_send_expiration_reminder"`
+	CartExpirationReminderMinutes int32 `json:"cart_expiration_reminder_minutes"`
+}
+
+// Returns cart message settings for notification triggers
+func (q *Queries) GetStoreCartMessageSettings(ctx context.Context, id pgtype.UUID) (GetStoreCartMessageSettingsRow, error) {
+	row := q.db.QueryRow(ctx, getStoreCartMessageSettings, id)
+	var i GetStoreCartMessageSettingsRow
+	err := row.Scan(
+		&i.CartSendOnFirstItem,
+		&i.CartSendOnNewItems,
+		&i.CartMessageCooldownSeconds,
+		&i.CartSendExpirationReminder,
+		&i.CartExpirationReminderMinutes,
+	)
+	return i, err
+}
+
 const getStoreNotificationSettings = `-- name: GetStoreNotificationSettings :one
 
 SELECT notification_settings FROM stores WHERE id = $1
