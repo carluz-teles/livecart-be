@@ -871,20 +871,27 @@ func toEventRow(row sqlc.LiveEvent) EventRow {
 	if row.AutoSendCheckoutLinks.Valid {
 		autoSendCheckoutLinks = &row.AutoSendCheckoutLinks.Bool
 	}
+	var currentActiveProductID *string
+	if row.CurrentActiveProductID.Valid {
+		id := row.CurrentActiveProductID.String()
+		currentActiveProductID = &id
+	}
 
 	return EventRow{
-		ID:                     row.ID.String(),
-		StoreID:                row.StoreID.String(),
-		Title:                  title,
-		Type:                   eventType,
-		Status:                 row.Status,
-		TotalOrders:            int(row.TotalOrders),
-		CloseCartOnEventEnd:    row.CloseCartOnEventEnd,
-		CartExpirationMinutes:  cartExpirationMinutes,
-		CartMaxQuantityPerItem: cartMaxQuantityPerItem,
-		AutoSendCheckoutLinks:  autoSendCheckoutLinks,
-		CreatedAt:              row.CreatedAt.Time,
-		UpdatedAt:              row.UpdatedAt.Time,
+		ID:                      row.ID.String(),
+		StoreID:                 row.StoreID.String(),
+		Title:                   title,
+		Type:                    eventType,
+		Status:                  row.Status,
+		TotalOrders:             int(row.TotalOrders),
+		CloseCartOnEventEnd:     row.CloseCartOnEventEnd,
+		CartExpirationMinutes:   cartExpirationMinutes,
+		CartMaxQuantityPerItem:  cartMaxQuantityPerItem,
+		AutoSendCheckoutLinks:   autoSendCheckoutLinks,
+		CurrentActiveProductID:  currentActiveProductID,
+		ProcessingPaused:        row.ProcessingPaused,
+		CreatedAt:               row.CreatedAt.Time,
+		UpdatedAt:               row.UpdatedAt.Time,
 	}
 }
 
@@ -1039,4 +1046,134 @@ func (r *Repository) GetSessionStats(ctx context.Context, sessionID string) (*Se
 		TotalRevenue: row.TotalRevenue,
 		PaidRevenue:  row.PaidRevenue,
 	}, nil
+}
+
+// =============================================================================
+// LIVE MODE - Active Product and Processing Control
+// =============================================================================
+
+// SetActiveProduct sets the active product for an event
+func (r *Repository) SetActiveProduct(ctx context.Context, eventID, storeID, productID string) (EventRow, error) {
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return EventRow{}, err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return EventRow{}, err
+	}
+	productUID, err := parseUUID(productID)
+	if err != nil {
+		return EventRow{}, err
+	}
+
+	row, err := r.q.SetActiveProduct(ctx, sqlc.SetActiveProductParams{
+		ID:                     eventUID,
+		CurrentActiveProductID: productUID,
+		StoreID:                storeUID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return EventRow{}, httpx.ErrNotFound("event not found")
+		}
+		return EventRow{}, fmt.Errorf("setting active product: %w", err)
+	}
+
+	return toEventRow(row), nil
+}
+
+// ClearActiveProduct clears the active product for an event
+func (r *Repository) ClearActiveProduct(ctx context.Context, eventID, storeID string) (EventRow, error) {
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return EventRow{}, err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return EventRow{}, err
+	}
+
+	row, err := r.q.ClearActiveProduct(ctx, sqlc.ClearActiveProductParams{
+		ID:      eventUID,
+		StoreID: storeUID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return EventRow{}, httpx.ErrNotFound("event not found")
+		}
+		return EventRow{}, fmt.Errorf("clearing active product: %w", err)
+	}
+
+	return toEventRow(row), nil
+}
+
+// SetProcessingPaused sets the processing paused state for an event
+func (r *Repository) SetProcessingPaused(ctx context.Context, eventID, storeID string, paused bool) (EventRow, error) {
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return EventRow{}, err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return EventRow{}, err
+	}
+
+	row, err := r.q.SetProcessingPaused(ctx, sqlc.SetProcessingPausedParams{
+		ID:               eventUID,
+		ProcessingPaused: paused,
+		StoreID:          storeUID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return EventRow{}, httpx.ErrNotFound("event not found")
+		}
+		return EventRow{}, fmt.Errorf("setting processing paused: %w", err)
+	}
+
+	return toEventRow(row), nil
+}
+
+// GetLiveModeState returns the live mode state for an event
+func (r *Repository) GetLiveModeState(ctx context.Context, eventID, storeID string) (*LiveModeStateOutput, error) {
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := r.q.GetLiveModeState(ctx, sqlc.GetLiveModeStateParams{
+		ID:      eventUID,
+		StoreID: storeUID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.ErrNotFound("event not found")
+		}
+		return nil, fmt.Errorf("getting live mode state: %w", err)
+	}
+
+	output := &LiveModeStateOutput{
+		ProcessingPaused: row.ProcessingPaused,
+	}
+
+	// Include active product if set
+	if row.CurrentActiveProductID.Valid && row.ActiveProductName.Valid {
+		var imageURL *string
+		if row.ActiveProductImageUrl.Valid {
+			imageURL = &row.ActiveProductImageUrl.String
+		}
+
+		output.ActiveProduct = &ActiveProductOutput{
+			ID:       row.CurrentActiveProductID.String(),
+			Name:     row.ActiveProductName.String,
+			Keyword:  row.ActiveProductKeyword.String,
+			Price:    row.ActiveProductPrice.Int64,
+			ImageURL: imageURL,
+		}
+	}
+
+	return output, nil
 }

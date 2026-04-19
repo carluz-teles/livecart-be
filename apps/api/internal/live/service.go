@@ -7,6 +7,8 @@ import (
 	"fmt"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/httpx"
 )
 
 // Notifier is the minimal notification surface this package depends on.
@@ -657,18 +659,20 @@ func (s *Service) GetEventByPlatformLiveID(ctx context.Context, platformLiveID s
 	}
 
 	return &EventOutput{
-		ID:                     event.ID,
-		StoreID:                event.StoreID,
-		Title:                  event.Title,
-		Type:                   event.Type,
-		Status:                 event.Status,
-		TotalOrders:            event.TotalOrders,
-		CloseCartOnEventEnd:    event.CloseCartOnEventEnd,
-		CartExpirationMinutes:  event.CartExpirationMinutes,
-		CartMaxQuantityPerItem: event.CartMaxQuantityPerItem,
-		AutoSendCheckoutLinks:  event.AutoSendCheckoutLinks,
-		CreatedAt:              event.CreatedAt,
-		UpdatedAt:              event.UpdatedAt,
+		ID:                      event.ID,
+		StoreID:                 event.StoreID,
+		Title:                   event.Title,
+		Type:                    event.Type,
+		Status:                  event.Status,
+		TotalOrders:             event.TotalOrders,
+		CloseCartOnEventEnd:     event.CloseCartOnEventEnd,
+		CartExpirationMinutes:   event.CartExpirationMinutes,
+		CartMaxQuantityPerItem:  event.CartMaxQuantityPerItem,
+		AutoSendCheckoutLinks:   event.AutoSendCheckoutLinks,
+		CurrentActiveProductID:  event.CurrentActiveProductID,
+		ProcessingPaused:        event.ProcessingPaused,
+		CreatedAt:               event.CreatedAt,
+		UpdatedAt:               event.UpdatedAt,
 	}, nil
 }
 
@@ -881,4 +885,70 @@ func (s *Service) ListProductsByEvent(ctx context.Context, eventID, storeID stri
 	}
 
 	return outputs, nil
+}
+
+// =============================================================================
+// LIVE MODE - Active Product and Processing Control
+// =============================================================================
+
+// SetActiveProduct sets or clears the active product for an event
+func (s *Service) SetActiveProduct(ctx context.Context, eventID, storeID string, productID *string) (*LiveModeStateOutput, error) {
+	// Verify event exists and is active
+	event, err := s.repo.GetEventByID(ctx, eventID, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	if event.Status != "active" {
+		return nil, httpx.ErrBadRequest("can only set active product on active events")
+	}
+
+	// Set or clear active product
+	if productID != nil && *productID != "" {
+		_, err = s.repo.SetActiveProduct(ctx, eventID, storeID, *productID)
+	} else {
+		_, err = s.repo.ClearActiveProduct(ctx, eventID, storeID)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	s.logger.Info("active product updated",
+		zap.String("event_id", eventID),
+		zap.Stringp("product_id", productID),
+	)
+
+	// Return updated state
+	return s.GetLiveModeState(ctx, eventID, storeID)
+}
+
+// SetProcessingPaused pauses or resumes comment processing for an event
+func (s *Service) SetProcessingPaused(ctx context.Context, eventID, storeID string, paused bool) (*LiveModeStateOutput, error) {
+	// Verify event exists and is active
+	event, err := s.repo.GetEventByID(ctx, eventID, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	if event.Status != "active" {
+		return nil, httpx.ErrBadRequest("can only change processing state on active events")
+	}
+
+	_, err = s.repo.SetProcessingPaused(ctx, eventID, storeID, paused)
+	if err != nil {
+		return nil, err
+	}
+
+	s.logger.Info("processing paused state updated",
+		zap.String("event_id", eventID),
+		zap.Bool("paused", paused),
+	)
+
+	// Return updated state
+	return s.GetLiveModeState(ctx, eventID, storeID)
+}
+
+// GetLiveModeState returns the current live mode state for an event
+func (s *Service) GetLiveModeState(ctx context.Context, eventID, storeID string) (*LiveModeStateOutput, error) {
+	return s.repo.GetLiveModeState(ctx, eventID, storeID)
 }

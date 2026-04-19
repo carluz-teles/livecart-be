@@ -81,3 +81,38 @@ SELECT
 FROM live_events e
 JOIN stores s ON s.id = e.store_id
 WHERE e.id = $1;
+
+-- =============================================================================
+-- LIVE MODE - Active Product and Processing Control
+-- =============================================================================
+
+-- name: SetActiveProduct :one
+UPDATE live_events
+SET current_active_product_id = $2, updated_at = now()
+WHERE id = $1 AND store_id = $3
+RETURNING *;
+
+-- name: ClearActiveProduct :one
+UPDATE live_events
+SET current_active_product_id = NULL, updated_at = now()
+WHERE id = $1 AND store_id = $2
+RETURNING *;
+
+-- name: SetProcessingPaused :one
+UPDATE live_events
+SET processing_paused = $2, updated_at = now()
+WHERE id = $1 AND store_id = $3
+RETURNING *;
+
+-- name: GetLiveModeState :one
+SELECT
+    e.id,
+    e.processing_paused,
+    e.current_active_product_id,
+    p.name AS active_product_name,
+    p.keyword AS active_product_keyword,
+    p.price AS active_product_price,
+    p.image_url AS active_product_image_url
+FROM live_events e
+LEFT JOIN products p ON p.id = e.current_active_product_id
+WHERE e.id = $1 AND e.store_id = $2;

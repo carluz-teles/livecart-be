@@ -88,19 +88,21 @@ type EndEventOutput struct {
 }
 
 type EventOutput struct {
-	ID                     string
-	StoreID                string
-	Title                  string
-	Type                   string
-	Status                 string
-	TotalOrders            int
-	CloseCartOnEventEnd    bool
-	CartExpirationMinutes  *int
-	CartMaxQuantityPerItem *int
-	AutoSendCheckoutLinks  *bool
-	Sessions               []SessionOutput
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
+	ID                      string
+	StoreID                 string
+	Title                   string
+	Type                    string
+	Status                  string
+	TotalOrders             int
+	CloseCartOnEventEnd     bool
+	CartExpirationMinutes   *int
+	CartMaxQuantityPerItem  *int
+	AutoSendCheckoutLinks   *bool
+	CurrentActiveProductID  *string
+	ProcessingPaused        bool
+	Sessions                []SessionOutput
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
 }
 
 type ListEventsInput struct {
@@ -136,18 +138,20 @@ type CreateEventParams struct {
 }
 
 type EventRow struct {
-	ID                     string
-	StoreID                string
-	Title                  string
-	Type                   string
-	Status                 string
-	TotalOrders            int
-	CloseCartOnEventEnd    bool
-	CartExpirationMinutes  *int
-	CartMaxQuantityPerItem *int
-	AutoSendCheckoutLinks  *bool
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
+	ID                      string
+	StoreID                 string
+	Title                   string
+	Type                    string
+	Status                  string
+	TotalOrders             int
+	CloseCartOnEventEnd     bool
+	CartExpirationMinutes   *int
+	CartMaxQuantityPerItem  *int
+	AutoSendCheckoutLinks   *bool
+	CurrentActiveProductID  *string
+	ProcessingPaused        bool
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
 }
 
 // =============================================================================
@@ -618,4 +622,44 @@ type EventProductRow struct {
 	Keyword       string
 	TotalQuantity int
 	TotalRevenue  int64
+}
+
+// =============================================================================
+// LIVE MODE - Active Product and Processing Control
+// =============================================================================
+
+// Handler layer - Live Mode
+type SetActiveProductRequest struct {
+	ProductID *string `json:"productId"` // nil to clear
+}
+
+type SetProcessingPausedRequest struct {
+	Paused bool `json:"paused"`
+}
+
+type LiveModeStateResponse struct {
+	ProcessingPaused bool                   `json:"processingPaused"`
+	ActiveProduct    *ActiveProductResponse `json:"activeProduct"`
+}
+
+type ActiveProductResponse struct {
+	ID       string  `json:"id"`
+	Name     string  `json:"name"`
+	Keyword  string  `json:"keyword"`
+	Price    int64   `json:"price"`
+	ImageURL *string `json:"imageUrl"`
+}
+
+// Service layer - Live Mode
+type LiveModeStateOutput struct {
+	ProcessingPaused bool
+	ActiveProduct    *ActiveProductOutput
+}
+
+type ActiveProductOutput struct {
+	ID       string
+	Name     string
+	Keyword  string
+	Price    int64
+	ImageURL *string
 }

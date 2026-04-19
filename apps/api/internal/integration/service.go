@@ -21,6 +21,7 @@ import (
 
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/live"
+	"livecart/apps/api/internal/notification"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/crypto"
 	"livecart/apps/api/lib/httpx"
@@ -37,13 +38,14 @@ type ProductSyncer interface {
 
 // Service handles business logic for integrations.
 type Service struct {
-	repo          *Repository
-	factory       *providers.Factory
-	encryptor     *crypto.Encryptor
-	idempotency   *idempotency.Service
-	liveService   *live.Service
-	productSyncer ProductSyncer
-	logger        *zap.Logger
+	repo                *Repository
+	factory             *providers.Factory
+	encryptor           *crypto.Encryptor
+	idempotency         *idempotency.Service
+	liveService         *live.Service
+	productSyncer       ProductSyncer
+	notificationService *notification.Service
+	logger              *zap.Logger
 }
 
 // NewService creates a new integration service.
@@ -68,6 +70,11 @@ func NewService(
 // SetProductSyncer sets the product syncer for webhook processing.
 func (s *Service) SetProductSyncer(syncer ProductSyncer) {
 	s.productSyncer = syncer
+}
+
+// SetNotificationService sets the notification service for sending DMs.
+func (s *Service) SetNotificationService(svc *notification.Service) {
+	s.notificationService = svc
 }
 
 // =============================================================================
@@ -1776,6 +1783,32 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		)
 	}
 
+	// Check if processing is paused
+	if event.ProcessingPaused {
+		s.logger.Info("processing paused, storing comment only",
+			zap.String("event_id", event.ID),
+			zap.String("comment_id", input.CommentID),
+			zap.String("username", input.Username),
+		)
+
+		// Save comment with "paused" result but don't process cart
+		_, err := s.repo.CreateLiveComment(ctx, CreateLiveCommentParams{
+			SessionID:         session.ID,
+			EventID:           event.ID,
+			Platform:          "instagram",
+			PlatformCommentID: input.CommentID,
+			PlatformUserID:    input.UserID,
+			PlatformHandle:    input.Username,
+			Text:              input.Text,
+			HasPurchaseIntent: false, // Don't parse when paused
+			Result:            "paused",
+		})
+		if err != nil {
+			s.logger.Error("failed to save paused comment", zap.Error(err))
+		}
+		return nil
+	}
+
 	// Parse purchase intent
 	intent := ParsePurchaseIntent(input.Text)
 	hasPurchaseIntent := intent != nil
@@ -1784,6 +1817,15 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	var product *ProductRow
 	if hasPurchaseIntent {
 		product = s.findProductByKeyword(ctx, event.StoreID, input.Text)
+
+		// If no keyword match but has purchase intent, try active product as fallback
+		if product == nil && event.CurrentActiveProductID != nil && *event.CurrentActiveProductID != "" {
+			s.logger.Info("no keyword match, trying active product fallback",
+				zap.String("event_id", event.ID),
+				zap.String("active_product_id", *event.CurrentActiveProductID),
+			)
+			product, _ = s.repo.GetProductByID(ctx, event.StoreID, *event.CurrentActiveProductID)
+		}
 	}
 
 	// Determine result for the comment record
@@ -1923,7 +1965,119 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		}
 	}
 
+	// Send immediate notification (fire-and-forget, doesn't block the flow)
+	s.sendImmediateNotification(ctx, sendNotificationInput{
+		StoreID:        event.StoreID,
+		EventID:        event.ID,
+		EventTitle:     event.Title,
+		CartID:         result.CartID,
+		CartToken:      result.CartToken,
+		PlatformUserID: input.UserID,
+		PlatformHandle: input.Username,
+		ProductName:    product.Name,
+		ProductKeyword: product.Keyword,
+		Quantity:       intent.Quantity,
+		TotalItems:     result.TotalItems,
+		TotalCents:     result.TotalCents,
+		IsNewCart:      result.IsNewCart,
+	})
+
 	return nil
+}
+
+// sendNotificationInput contains all data needed for immediate notifications.
+type sendNotificationInput struct {
+	StoreID        string
+	EventID        string
+	EventTitle     string
+	CartID         string
+	CartToken      string
+	PlatformUserID string
+	PlatformHandle string
+	ProductName    string
+	ProductKeyword string
+	Quantity       int
+	TotalItems     int
+	TotalCents     int64
+	IsNewCart      bool
+}
+
+// sendImmediateNotification sends an immediate checkout notification via the notification service.
+// This is fire-and-forget - errors are logged but don't affect the main flow.
+func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotificationInput) {
+	// Skip if notification service not configured
+	if s.notificationService == nil {
+		return
+	}
+
+	// Check if we should notify based on store settings
+	shouldNotify, err := s.notificationService.ShouldNotify(ctx, input.StoreID, notification.TypeCheckoutImmediate, input.IsNewCart)
+	if err != nil {
+		s.logger.Warn("failed to check notification settings",
+			zap.String("store_id", input.StoreID),
+			zap.Error(err),
+		)
+		return
+	}
+	if !shouldNotify {
+		return
+	}
+
+	// Get store info for notification
+	storeInfo, err := s.repo.GetStoreInfo(ctx, input.StoreID)
+	if err != nil {
+		s.logger.Warn("failed to get store info for notification",
+			zap.String("store_id", input.StoreID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	// Build checkout URL
+	checkoutURL := fmt.Sprintf("https://checkout.livecart.app/c/%s", input.CartToken)
+
+	// Build template variables
+	vars := notification.TemplateVariables{
+		Handle:     "@" + input.PlatformHandle,
+		Produto:    input.ProductName,
+		Keyword:    input.ProductKeyword,
+		Quantidade: input.Quantity,
+		TotalItens: input.TotalItems,
+		Total:      notification.FormatCurrency(input.TotalCents),
+		TotalCents: input.TotalCents,
+		Link:       checkoutURL,
+		Loja:       storeInfo.Name,
+		ExpiraEm:   notification.FormatExpiry(storeInfo.CheckoutLinkExpiryHours),
+		LiveTitulo: input.EventTitle,
+	}
+
+	// Send notification
+	result, err := s.notificationService.Send(ctx, notification.SendInput{
+		StoreID:          input.StoreID,
+		EventID:          input.EventID,
+		CartID:           input.CartID,
+		CartToken:        input.CartToken,
+		PlatformUserID:   input.PlatformUserID,
+		PlatformHandle:   input.PlatformHandle,
+		NotificationType: notification.TypeCheckoutImmediate,
+		Variables:        vars,
+	})
+
+	if err != nil {
+		s.logger.Warn("notification send error",
+			zap.String("store_id", input.StoreID),
+			zap.String("cart_id", input.CartID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	s.logger.Info("immediate notification processed",
+		zap.String("store_id", input.StoreID),
+		zap.String("cart_id", input.CartID),
+		zap.String("status", string(result.Status)),
+		zap.Bool("is_new_cart", input.IsNewCart),
+	)
 }
 
 // findProductByKeyword extracts possible keywords from text and tries to match with products.

@@ -11,11 +11,12 @@ import (
 )
 
 type Cart struct {
-	ID                   pgtype.UUID        `json:"id"`
-	EventID              pgtype.UUID        `json:"event_id"`
-	PlatformUserID       string             `json:"platform_user_id"`
-	PlatformHandle       string             `json:"platform_handle"`
-	Token                string             `json:"token"`
+	ID             pgtype.UUID `json:"id"`
+	EventID        pgtype.UUID `json:"event_id"`
+	PlatformUserID string      `json:"platform_user_id"`
+	PlatformHandle string      `json:"platform_handle"`
+	Token          string      `json:"token"`
+	// Cart status: active (live ongoing, checkout allowed), checkout (live ended), expired, paid
 	Status               string             `json:"status"`
 	CheckoutUrl          pgtype.Text        `json:"checkout_url"`
 	PaymentIntegrationID pgtype.UUID        `json:"payment_integration_id"`
@@ -142,6 +143,10 @@ type LiveEvent struct {
 	CartMaxQuantityPerItem pgtype.Int4 `json:"cart_max_quantity_per_item"`
 	// Override auto-send checkout links (NULL = use store setting)
 	AutoSendCheckoutLinks pgtype.Bool `json:"auto_send_checkout_links"`
+	// Current highlighted product - used as fallback when user comments without keyword
+	CurrentActiveProductID pgtype.UUID `json:"current_active_product_id"`
+	// When true, comments are stored but not processed into carts
+	ProcessingPaused bool `json:"processing_paused"`
 }
 
 type LiveSession struct {
@@ -173,6 +178,23 @@ type Membership struct {
 	InvitedBy pgtype.UUID        `json:"invited_by"`
 	InvitedAt pgtype.Timestamptz `json:"invited_at"`
 	UserID    pgtype.UUID        `json:"user_id"`
+}
+
+// Tracks all notification attempts for analytics and preventing duplicates
+type NotificationLog struct {
+	ID               pgtype.UUID        `json:"id"`
+	StoreID          pgtype.UUID        `json:"store_id"`
+	EventID          pgtype.UUID        `json:"event_id"`
+	CartID           pgtype.UUID        `json:"cart_id"`
+	PlatformUserID   string             `json:"platform_user_id"`
+	PlatformHandle   pgtype.Text        `json:"platform_handle"`
+	NotificationType string             `json:"notification_type"`
+	Channel          string             `json:"channel"`
+	Status           string             `json:"status"`
+	MessageText      pgtype.Text        `json:"message_text"`
+	ErrorMessage     pgtype.Text        `json:"error_message"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	SentAt           pgtype.Timestamptz `json:"sent_at"`
 }
 
 // Temporary storage for OAuth PKCE code_verifier during authorization flow
@@ -257,6 +279,8 @@ type Store struct {
 	CartAllowEdit           bool            `json:"cart_allow_edit"`
 	CheckoutLinkExpiryHours pgtype.Int4     `json:"checkout_link_expiry_hours"`
 	CheckoutSendMethods     json.RawMessage `json:"checkout_send_methods"`
+	// JSON settings for automatic notifications: templates, triggers, cooldown
+	NotificationSettings json.RawMessage `json:"notification_settings"`
 }
 
 type StoreInvitation struct {

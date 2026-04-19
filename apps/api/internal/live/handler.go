@@ -40,6 +40,11 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/:id/platforms", h.ListPlatforms)
 	g.Post("/:id/platforms", h.AddPlatform)
 	g.Delete("/:id/platforms/:platformLiveId", h.RemovePlatform)
+
+	// Live Mode - Active Product and Processing Control
+	g.Get("/:id/live-mode", h.GetLiveModeState)
+	g.Patch("/:id/active-product", h.SetActiveProduct)
+	g.Patch("/:id/pause-processing", h.SetProcessingPaused)
 }
 
 // Create godoc
@@ -727,4 +732,111 @@ func (h *Handler) ListProducts(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, ListEventProductsResponse{Data: responses})
+}
+
+// =============================================================================
+// LIVE MODE - Active Product and Processing Control
+// =============================================================================
+
+// GetLiveModeState godoc
+// @Summary      Get live mode state
+// @Description  Returns the current active product and processing paused state
+// @Tags         lives
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Event UUID"
+// @Success      200 {object} httpx.Envelope{data=LiveModeStateResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/live-mode [get]
+// @Security     BearerAuth
+func (h *Handler) GetLiveModeState(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	state, err := h.service.GetLiveModeState(c.Context(), eventID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, toLiveModeStateResponse(state))
+}
+
+// SetActiveProduct godoc
+// @Summary      Set active product for live mode
+// @Description  Sets the active product that will be used as fallback for comments without keywords
+// @Tags         lives
+// @Accept       json
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Event UUID"
+// @Param        request body SetActiveProductRequest true "Active product"
+// @Success      200 {object} httpx.Envelope{data=LiveModeStateResponse}
+// @Failure      400 {object} httpx.Envelope
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/active-product [patch]
+// @Security     BearerAuth
+func (h *Handler) SetActiveProduct(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	var req SetActiveProductRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+
+	state, err := h.service.SetActiveProduct(c.Context(), eventID, storeID, req.ProductID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, toLiveModeStateResponse(state))
+}
+
+// SetProcessingPaused godoc
+// @Summary      Pause or resume comment processing
+// @Description  When paused, comments are stored but not processed into carts
+// @Tags         lives
+// @Accept       json
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Event UUID"
+// @Param        request body SetProcessingPausedRequest true "Processing state"
+// @Success      200 {object} httpx.Envelope{data=LiveModeStateResponse}
+// @Failure      400 {object} httpx.Envelope
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/pause-processing [patch]
+// @Security     BearerAuth
+func (h *Handler) SetProcessingPaused(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	var req SetProcessingPausedRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+
+	state, err := h.service.SetProcessingPaused(c.Context(), eventID, storeID, req.Paused)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, toLiveModeStateResponse(state))
+}
+
+func toLiveModeStateResponse(state *LiveModeStateOutput) LiveModeStateResponse {
+	resp := LiveModeStateResponse{
+		ProcessingPaused: state.ProcessingPaused,
+	}
+
+	if state.ActiveProduct != nil {
+		resp.ActiveProduct = &ActiveProductResponse{
+			ID:       state.ActiveProduct.ID,
+			Name:     state.ActiveProduct.Name,
+			Keyword:  state.ActiveProduct.Keyword,
+			Price:    state.ActiveProduct.Price,
+			ImageURL: state.ActiveProduct.ImageURL,
+		}
+	}
+
+	return resp
 }
