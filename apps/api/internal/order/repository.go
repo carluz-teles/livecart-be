@@ -341,7 +341,7 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (*OrderStatsO
 	query := `
 		SELECT
 			COUNT(*)::INT as total_orders,
-			COUNT(*) FILTER (WHERE c.status = 'pending')::INT as pending_orders,
+			COUNT(*) FILTER (WHERE c.status = 'active')::INT as pending_orders,
 			COALESCE(SUM(
 				(SELECT SUM(ci.quantity * ci.unit_price) FROM cart_items ci WHERE ci.cart_id = c.id)
 			), 0)::BIGINT as total_revenue,

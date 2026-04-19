@@ -8,7 +8,7 @@ import (
 
 // Handler layer - Filters
 type OrderFilters struct {
-	Status        []string `query:"status"`        // pending, checkout, completed, expired
+	Status        []string `query:"status"`        // active, checkout, completed, expired
 	PaymentStatus []string `query:"paymentStatus"` // pending, paid, failed, refunded
 	LiveSessionID *string  `query:"liveSessionId"`
 	DateFrom      *string  `query:"dateFrom"`
@@ -17,7 +17,7 @@ type OrderFilters struct {
 
 // Handler layer - Request/Response types
 type UpdateOrderRequest struct {
-	Status        *string `json:"status" validate:"omitempty,oneof=pending checkout completed expired"`
+	Status        *string `json:"status" validate:"omitempty,oneof=active checkout completed expired"`
 	PaymentStatus *string `json:"paymentStatus" validate:"omitempty,oneof=pending paid failed refunded"`
 }
 

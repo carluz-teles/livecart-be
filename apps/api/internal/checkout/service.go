@@ -111,8 +111,9 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 	if cart.PaymentStatus == "paid" {
 		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
 	}
-	if cart.Status != "checkout" {
-		return nil, httpx.ErrUnprocessable("carrinho ainda não foi finalizado. Aguarde o fim do evento.")
+	// Allow checkout for both 'active' (live ongoing) and 'checkout' (live ended) status
+	if cart.Status != "checkout" && cart.Status != "active" {
+		return nil, httpx.ErrUnprocessable("carrinho não está disponível para checkout")
 	}
 
 	// Update customer email
@@ -247,8 +248,9 @@ func (s *Service) GetCheckoutConfig(ctx context.Context, input GetCheckoutConfig
 	if cart.PaymentStatus == "paid" {
 		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
 	}
-	if cart.Status != "checkout" {
-		return nil, httpx.ErrUnprocessable("carrinho ainda não foi finalizado. Aguarde o fim do evento.")
+	// Allow checkout for both 'active' (live ongoing) and 'checkout' (live ended) status
+	if cart.Status != "checkout" && cart.Status != "active" {
+		return nil, httpx.ErrUnprocessable("carrinho não está disponível para checkout")
 	}
 
 	// Get cart items to calculate total
@@ -311,8 +313,9 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	if cart.PaymentStatus == "paid" {
 		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
 	}
-	if cart.Status != "checkout" {
-		return nil, httpx.ErrUnprocessable("carrinho ainda não foi finalizado. Aguarde o fim do evento.")
+	// Allow checkout for both 'active' (live ongoing) and 'checkout' (live ended) status
+	if cart.Status != "checkout" && cart.Status != "active" {
+		return nil, httpx.ErrUnprocessable("carrinho não está disponível para checkout")
 	}
 
 	// Update customer email
@@ -448,8 +451,9 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	if cart.PaymentStatus == "paid" {
 		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
 	}
-	if cart.Status != "checkout" {
-		return nil, httpx.ErrUnprocessable("carrinho ainda não foi finalizado. Aguarde o fim do evento.")
+	// Allow checkout for both 'active' (live ongoing) and 'checkout' (live ended) status
+	if cart.Status != "checkout" && cart.Status != "active" {
+		return nil, httpx.ErrUnprocessable("carrinho não está disponível para checkout")
 	}
 
 	// Update customer email
