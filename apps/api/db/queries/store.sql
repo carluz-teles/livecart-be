@@ -83,3 +83,6 @@ SET
   updated_at = now()
 WHERE id = $1
 RETURNING *;
+
+-- name: GetStoreNameByID :one
+SELECT name, checkout_link_expiry_hours FROM stores WHERE id = $1;
