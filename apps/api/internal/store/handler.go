@@ -146,6 +146,7 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 		Website:        req.Website,
 		LogoURL:        req.LogoURL,
 		Address:        req.Address,
+		CNPJ:           req.CNPJ,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -337,6 +338,7 @@ func (h *Handler) UpdateByID(c *fiber.Ctx) error {
 		Website:        req.Website,
 		LogoURL:        req.LogoURL,
 		Address:        req.Address,
+		CNPJ:           req.CNPJ,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -409,6 +411,7 @@ func toStoreResponse(output StoreOutput) StoreResponse {
 		Website:        output.Website,
 		LogoURL:        output.LogoURL,
 		Address:        output.Address,
+		CNPJ:           output.CNPJ,
 		CartSettings:   output.CartSettings,
 		CreatedAt:      output.CreatedAt,
 	}

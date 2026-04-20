@@ -84,6 +84,7 @@ func (r *Repository) Update(ctx context.Context, params UpdateStoreParams) (Stor
 		AddressState:   pgtype.Text{String: params.AddressState, Valid: params.AddressState != ""},
 		AddressZip:     pgtype.Text{String: params.AddressZip, Valid: params.AddressZip != ""},
 		AddressCountry: pgtype.Text{String: params.AddressCountry, Valid: params.AddressCountry != ""},
+		Cnpj:           pgtype.Text{String: params.CNPJ, Valid: params.CNPJ != ""},
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -210,6 +211,11 @@ func toStoreRow(row sqlc.Store) StoreRow {
 		addressCountry = &row.AddressCountry.String
 	}
 
+	var cnpj *string
+	if row.Cnpj.Valid {
+		cnpj = &row.Cnpj.String
+	}
+
 	// Parse checkout send methods from JSON
 	var checkoutMethods []string
 	if len(row.CheckoutSendMethods) > 0 {
@@ -235,6 +241,7 @@ func toStoreRow(row sqlc.Store) StoreRow {
 		AddressState:   addressState,
 		AddressZip:     addressZip,
 		AddressCountry: addressCountry,
+		CNPJ:           cnpj,
 		CartSettings: CartSettingsDTO{
 			Enabled:                   row.CartEnabled,
 			ExpirationMinutes:         int(row.CartExpirationMinutes),

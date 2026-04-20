@@ -121,6 +121,7 @@ func (s *Service) Update(ctx context.Context, input UpdateStoreInput) (StoreOutp
 		AddressState:   input.Address.State,
 		AddressZip:     input.Address.Zip,
 		AddressCountry: input.Address.Country,
+		CNPJ:           input.CNPJ,
 	})
 	if err != nil {
 		return StoreOutput{}, err
@@ -200,6 +201,7 @@ func toStoreOutput(row StoreRow) StoreOutput {
 		Website:        row.Website,
 		LogoURL:        row.LogoURL,
 		Address:        address,
+		CNPJ:           row.CNPJ,
 		CartSettings:   row.CartSettings,
 		CreatedAt:      row.CreatedAt,
 	}

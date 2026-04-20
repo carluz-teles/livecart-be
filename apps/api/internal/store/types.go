@@ -59,6 +59,7 @@ type UpdateStoreRequest struct {
 	Website        string     `json:"website"`
 	LogoURL        string     `json:"logoUrl"`
 	Address        AddressDTO `json:"address"`
+	CNPJ           string     `json:"cnpj"`
 }
 
 type UpdateCartSettingsRequest struct {
@@ -89,6 +90,7 @@ type StoreResponse struct {
 	Website        *string         `json:"website"`
 	LogoURL        *string         `json:"logoUrl"`
 	Address        *AddressDTO     `json:"address"`
+	CNPJ           *string         `json:"cnpj"`
 	CartSettings   CartSettingsDTO `json:"cartSettings"`
 	CreatedAt      time.Time       `json:"createdAt"`
 }
@@ -126,6 +128,7 @@ type UpdateStoreInput struct {
 	Website        string
 	LogoURL        string
 	Address        AddressDTO
+	CNPJ           string
 }
 
 type UpdateCartSettingsInput struct {
@@ -157,6 +160,7 @@ type StoreOutput struct {
 	Website        *string
 	LogoURL        *string
 	Address        *AddressDTO
+	CNPJ           *string
 	CartSettings   CartSettingsDTO
 	CreatedAt      time.Time
 }
@@ -184,6 +188,7 @@ type UpdateStoreParams struct {
 	AddressState   string
 	AddressZip     string
 	AddressCountry string
+	CNPJ           string
 }
 
 type UpdateCartSettingsParams struct {
@@ -219,6 +224,7 @@ type StoreRow struct {
 	AddressState   *string
 	AddressZip     *string
 	AddressCountry *string
+	CNPJ           *string
 	CartSettings   CartSettingsDTO
 	CreatedAt      time.Time
 	UpdatedAt      time.Time

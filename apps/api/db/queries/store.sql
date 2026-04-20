@@ -24,6 +24,7 @@ SET
   address_state = $11,
   address_zip = $12,
   address_country = $13,
+  cnpj = $14,
   updated_at = now()
 WHERE id = $1
 RETURNING *;

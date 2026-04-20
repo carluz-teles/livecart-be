@@ -321,6 +321,8 @@ type Store struct {
 	CartExpirationReminderMinutes int32 `json:"cart_expiration_reminder_minutes"`
 	// When true, sends message every time customer adds item. When false, only sends at end of live.
 	CartRealTime bool `json:"cart_real_time"`
+	// Store CNPJ (Brazilian tax ID) - format: XX.XXX.XXX/XXXX-XX
+	Cnpj pgtype.Text `json:"cnpj"`
 }
 
 type StoreInvitation struct {
