@@ -122,6 +122,7 @@ SELECT
 SELECT
     c.id,
     c.event_id,
+    c.session_id,
     c.platform_user_id,
     c.platform_handle,
     c.status,
@@ -244,7 +245,8 @@ SELECT
     le.store_id,
     s.name AS store_name,
     s.logo_url AS store_logo_url,
-    s.cart_allow_edit AS allow_edit
+    s.cart_allow_edit AS allow_edit,
+    s.cart_max_quantity_per_item AS max_quantity_per_item
 FROM carts c
 JOIN live_events le ON le.id = c.event_id
 JOIN stores s ON s.id = le.store_id

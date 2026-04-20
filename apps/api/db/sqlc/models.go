@@ -68,6 +68,37 @@ type ErpContact struct {
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
 }
 
+// Product whitelist for events. If empty, all store products are available.
+type EventProduct struct {
+	ID        pgtype.UUID `json:"id"`
+	EventID   pgtype.UUID `json:"event_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	// Override price for this event in cents (NULL = use product default)
+	SpecialPrice pgtype.Int4 `json:"special_price"`
+	// Max quantity per cart for this product in this event
+	MaxQuantity  pgtype.Int4 `json:"max_quantity"`
+	DisplayOrder int32       `json:"display_order"`
+	// Highlighted product in live mode UI
+	Featured  bool               `json:"featured"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
+// Global upsell offers for events, shown after any cart addition.
+type EventUpsell struct {
+	ID        pgtype.UUID `json:"id"`
+	EventID   pgtype.UUID `json:"event_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	// Discount percentage (0-100)
+	DiscountPercent int32 `json:"discount_percent"`
+	// Template with placeholders: {product}, {discount}, {price}
+	MessageTemplate pgtype.Text        `json:"message_template"`
+	DisplayOrder    int32              `json:"display_order"`
+	Active          bool               `json:"active"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
 type IdempotencyKey struct {
 	ID              pgtype.UUID        `json:"id"`
 	IdempotencyKey  string             `json:"idempotency_key"`
@@ -141,12 +172,16 @@ type LiveEvent struct {
 	CartExpirationMinutes pgtype.Int4 `json:"cart_expiration_minutes"`
 	// Override max quantity per item (NULL = use store setting)
 	CartMaxQuantityPerItem pgtype.Int4 `json:"cart_max_quantity_per_item"`
-	// Override auto-send checkout links (NULL = use store setting)
-	AutoSendCheckoutLinks pgtype.Bool `json:"auto_send_checkout_links"`
+	// Override send_on_live_end (NULL = use store setting)
+	SendOnLiveEnd pgtype.Bool `json:"send_on_live_end"`
 	// Current highlighted product - used as fallback when user comments without keyword
 	CurrentActiveProductID pgtype.UUID `json:"current_active_product_id"`
 	// When true, comments are stored but not processed into carts
 	ProcessingPaused bool `json:"processing_paused"`
+	// When the event is scheduled to start (NULL = not scheduled)
+	ScheduledAt pgtype.Timestamptz `json:"scheduled_at"`
+	// Internal notes about the event
+	Description pgtype.Text `json:"description"`
 }
 
 type LiveSession struct {
@@ -253,10 +288,8 @@ type Store struct {
 	// Max different items per cart (0 = unlimited)
 	CartMaxItems int32 `json:"cart_max_items"`
 	// Max quantity of same item (0 = unlimited)
-	CartMaxQuantityPerItem int32 `json:"cart_max_quantity_per_item"`
-	// Notify customer before cart expires
-	CartNotifyBeforeExpiration bool               `json:"cart_notify_before_expiration"`
-	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
+	CartMaxQuantityPerItem int32              `json:"cart_max_quantity_per_item"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
 	// Store description/bio for public display
 	Description pgtype.Text `json:"description"`
 	// Store external website URL
@@ -273,24 +306,21 @@ type Store struct {
 	AddressZip pgtype.Text `json:"address_zip"`
 	// Store country
 	AddressCountry pgtype.Text `json:"address_country"`
-	// When true, automatically send checkout links to customers when live ends
-	AutoSendCheckoutLinks bool `json:"auto_send_checkout_links"`
+	// When true, automatically sends checkout links when live ends.
+	SendOnLiveEnd bool `json:"send_on_live_end"`
 	// Allow customers to edit cart (remove items, change quantity) on checkout page
-	CartAllowEdit           bool            `json:"cart_allow_edit"`
-	CheckoutLinkExpiryHours pgtype.Int4     `json:"checkout_link_expiry_hours"`
-	CheckoutSendMethods     json.RawMessage `json:"checkout_send_methods"`
+	CartAllowEdit       bool            `json:"cart_allow_edit"`
+	CheckoutSendMethods json.RawMessage `json:"checkout_send_methods"`
 	// JSON settings for automatic notifications: templates, triggers, cooldown
 	NotificationSettings json.RawMessage `json:"notification_settings"`
-	// Send automatic message when first item is added to cart
-	CartSendOnFirstItem bool `json:"cart_send_on_first_item"`
-	// Send automatic message when new items are added to cart
-	CartSendOnNewItems bool `json:"cart_send_on_new_items"`
 	// Minimum interval between automatic messages in seconds
 	CartMessageCooldownSeconds int32 `json:"cart_message_cooldown_seconds"`
 	// Send reminder message before cart expires
 	CartSendExpirationReminder bool `json:"cart_send_expiration_reminder"`
 	// Minutes before expiration to send reminder
 	CartExpirationReminderMinutes int32 `json:"cart_expiration_reminder_minutes"`
+	// When true, sends message every time customer adds item. When false, only sends at end of live.
+	CartRealTime bool `json:"cart_real_time"`
 }
 
 type StoreInvitation struct {

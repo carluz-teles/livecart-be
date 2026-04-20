@@ -338,7 +338,8 @@ SELECT
     le.store_id,
     s.name AS store_name,
     s.logo_url AS store_logo_url,
-    s.cart_allow_edit AS allow_edit
+    s.cart_allow_edit AS allow_edit,
+    s.cart_max_quantity_per_item AS max_quantity_per_item
 FROM carts c
 JOIN live_events le ON le.id = c.event_id
 JOIN stores s ON s.id = le.store_id
@@ -346,25 +347,26 @@ WHERE c.token = $1
 `
 
 type GetCartByTokenWithDetailsRow struct {
-	ID                pgtype.UUID        `json:"id"`
-	EventID           pgtype.UUID        `json:"event_id"`
-	PlatformUserID    string             `json:"platform_user_id"`
-	PlatformHandle    string             `json:"platform_handle"`
-	Token             string             `json:"token"`
-	Status            string             `json:"status"`
-	CheckoutUrl       pgtype.Text        `json:"checkout_url"`
-	CheckoutID        pgtype.Text        `json:"checkout_id"`
-	CheckoutExpiresAt pgtype.Timestamptz `json:"checkout_expires_at"`
-	CustomerEmail     pgtype.Text        `json:"customer_email"`
-	PaymentStatus     pgtype.Text        `json:"payment_status"`
-	PaidAt            pgtype.Timestamptz `json:"paid_at"`
-	CreatedAt         pgtype.Timestamptz `json:"created_at"`
-	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
-	EventTitle        pgtype.Text        `json:"event_title"`
-	StoreID           pgtype.UUID        `json:"store_id"`
-	StoreName         string             `json:"store_name"`
-	StoreLogoUrl      pgtype.Text        `json:"store_logo_url"`
-	AllowEdit         bool               `json:"allow_edit"`
+	ID                 pgtype.UUID        `json:"id"`
+	EventID            pgtype.UUID        `json:"event_id"`
+	PlatformUserID     string             `json:"platform_user_id"`
+	PlatformHandle     string             `json:"platform_handle"`
+	Token              string             `json:"token"`
+	Status             string             `json:"status"`
+	CheckoutUrl        pgtype.Text        `json:"checkout_url"`
+	CheckoutID         pgtype.Text        `json:"checkout_id"`
+	CheckoutExpiresAt  pgtype.Timestamptz `json:"checkout_expires_at"`
+	CustomerEmail      pgtype.Text        `json:"customer_email"`
+	PaymentStatus      pgtype.Text        `json:"payment_status"`
+	PaidAt             pgtype.Timestamptz `json:"paid_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
+	EventTitle         pgtype.Text        `json:"event_title"`
+	StoreID            pgtype.UUID        `json:"store_id"`
+	StoreName          string             `json:"store_name"`
+	StoreLogoUrl       pgtype.Text        `json:"store_logo_url"`
+	AllowEdit          bool               `json:"allow_edit"`
+	MaxQuantityPerItem int32              `json:"max_quantity_per_item"`
 }
 
 // =============================================================================
@@ -394,6 +396,7 @@ func (q *Queries) GetCartByTokenWithDetails(ctx context.Context, token string) (
 		&i.StoreName,
 		&i.StoreLogoUrl,
 		&i.AllowEdit,
+		&i.MaxQuantityPerItem,
 	)
 	return i, err
 }
@@ -725,6 +728,7 @@ const listCartsWithTotalByEvent = `-- name: ListCartsWithTotalByEvent :many
 SELECT
     c.id,
     c.event_id,
+    c.session_id,
     c.platform_user_id,
     c.platform_handle,
     c.status,
@@ -743,6 +747,7 @@ ORDER BY c.created_at DESC
 type ListCartsWithTotalByEventRow struct {
 	ID             pgtype.UUID        `json:"id"`
 	EventID        pgtype.UUID        `json:"event_id"`
+	SessionID      pgtype.UUID        `json:"session_id"`
 	PlatformUserID string             `json:"platform_user_id"`
 	PlatformHandle string             `json:"platform_handle"`
 	Status         string             `json:"status"`
@@ -766,6 +771,7 @@ func (q *Queries) ListCartsWithTotalByEvent(ctx context.Context, eventID pgtype.
 		if err := rows.Scan(
 			&i.ID,
 			&i.EventID,
+			&i.SessionID,
 			&i.PlatformUserID,
 			&i.PlatformHandle,
 			&i.Status,

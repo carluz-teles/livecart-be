@@ -36,16 +36,13 @@ SET
   cart_reserve_stock = $4,
   cart_max_items = $5,
   cart_max_quantity_per_item = $6,
-  cart_notify_before_expiration = $7,
-  cart_allow_edit = $8,
-  auto_send_checkout_links = $9,
-  checkout_link_expiry_hours = $10,
-  checkout_send_methods = $11,
-  cart_send_on_first_item = $12,
-  cart_send_on_new_items = $13,
-  cart_message_cooldown_seconds = $14,
-  cart_send_expiration_reminder = $15,
-  cart_expiration_reminder_minutes = $16,
+  cart_allow_edit = $7,
+  cart_real_time = $8,
+  send_on_live_end = $9,
+  checkout_send_methods = $10,
+  cart_message_cooldown_seconds = $11,
+  cart_send_expiration_reminder = $12,
+  cart_expiration_reminder_minutes = $13,
   updated_at = now()
 WHERE id = $1
 RETURNING *;
@@ -74,9 +71,8 @@ DELETE FROM stores WHERE id = $1;
 -- name: UpdateStoreCheckoutSettings :one
 UPDATE stores
 SET
-  checkout_link_expiry_hours = $2,
-  checkout_send_methods = $3,
-  auto_send_checkout_links = $4,
+  checkout_send_methods = $2,
+  send_on_live_end = $3,
   updated_at = now()
 WHERE id = $1
 RETURNING *;
@@ -90,4 +86,4 @@ WHERE id = $1
 RETURNING *;
 
 -- name: GetStoreNameByID :one
-SELECT name, checkout_link_expiry_hours FROM stores WHERE id = $1;
+SELECT name, cart_expiration_minutes FROM stores WHERE id = $1;

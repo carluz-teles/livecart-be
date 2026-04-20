@@ -63,8 +63,7 @@ UPDATE stores SET notification_settings = $2 WHERE id = $1;
 -- name: GetStoreCartMessageSettings :one
 -- Returns cart message settings for notification triggers
 SELECT
-    cart_send_on_first_item,
-    cart_send_on_new_items,
+    cart_real_time,
     cart_message_cooldown_seconds,
     cart_send_expiration_reminder,
     cart_expiration_reminder_minutes

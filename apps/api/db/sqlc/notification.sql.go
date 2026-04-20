@@ -165,8 +165,7 @@ func (q *Queries) GetNotificationByCartAndType(ctx context.Context, arg GetNotif
 
 const getStoreCartMessageSettings = `-- name: GetStoreCartMessageSettings :one
 SELECT
-    cart_send_on_first_item,
-    cart_send_on_new_items,
+    cart_real_time,
     cart_message_cooldown_seconds,
     cart_send_expiration_reminder,
     cart_expiration_reminder_minutes
@@ -174,8 +173,7 @@ FROM stores WHERE id = $1
 `
 
 type GetStoreCartMessageSettingsRow struct {
-	CartSendOnFirstItem           bool  `json:"cart_send_on_first_item"`
-	CartSendOnNewItems            bool  `json:"cart_send_on_new_items"`
+	CartRealTime                  bool  `json:"cart_real_time"`
 	CartMessageCooldownSeconds    int32 `json:"cart_message_cooldown_seconds"`
 	CartSendExpirationReminder    bool  `json:"cart_send_expiration_reminder"`
 	CartExpirationReminderMinutes int32 `json:"cart_expiration_reminder_minutes"`
@@ -186,8 +184,7 @@ func (q *Queries) GetStoreCartMessageSettings(ctx context.Context, id pgtype.UUI
 	row := q.db.QueryRow(ctx, getStoreCartMessageSettings, id)
 	var i GetStoreCartMessageSettingsRow
 	err := row.Scan(
-		&i.CartSendOnFirstItem,
-		&i.CartSendOnNewItems,
+		&i.CartRealTime,
 		&i.CartMessageCooldownSeconds,
 		&i.CartSendExpirationReminder,
 		&i.CartExpirationReminderMinutes,

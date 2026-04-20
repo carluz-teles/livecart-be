@@ -2047,7 +2047,7 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 		TotalCents: input.TotalCents,
 		Link:       checkoutURL,
 		Loja:       storeInfo.Name,
-		ExpiraEm:   notification.FormatExpiry(storeInfo.CheckoutLinkExpiryHours),
+		ExpiraEm:   notification.FormatExpiryMinutes(storeInfo.CartExpirationMinutes),
 		LiveTitulo: input.EventTitle,
 	}
 

@@ -50,11 +50,22 @@ func (r *Repository) CreateEvent(ctx context.Context, params CreateEventParams) 
 
 	// Convert nullable bool to pgtype.Bool
 	var autoSendCheckoutLinks pgtype.Bool
-	if params.AutoSendCheckoutLinks != nil {
-		autoSendCheckoutLinks = pgtype.Bool{Bool: *params.AutoSendCheckoutLinks, Valid: true}
+	if params.SendOnLiveEnd != nil {
+		autoSendCheckoutLinks = pgtype.Bool{Bool: *params.SendOnLiveEnd, Valid: true}
 	}
 
-	row, err := r.q.CreateLiveEvent(ctx, sqlc.CreateLiveEventParams{
+	// Convert scheduling fields
+	var scheduledAt pgtype.Timestamptz
+	if params.ScheduledAt != nil {
+		scheduledAt = pgtype.Timestamptz{Time: *params.ScheduledAt, Valid: true}
+	}
+	var description pgtype.Text
+	if params.Description != nil {
+		description = pgtype.Text{String: *params.Description, Valid: true}
+	}
+
+	// Use CreateLiveEventFull to include scheduling fields
+	row, err := r.q.CreateLiveEventFull(ctx, sqlc.CreateLiveEventFullParams{
 		StoreID:                storeUID,
 		Title:                  pgtype.Text{String: params.Title, Valid: params.Title != ""},
 		Type:                   eventType,
@@ -62,7 +73,9 @@ func (r *Repository) CreateEvent(ctx context.Context, params CreateEventParams) 
 		CloseCartOnEventEnd:    params.CloseCartOnEventEnd,
 		CartExpirationMinutes:  cartExpirationMinutes,
 		CartMaxQuantityPerItem: cartMaxQuantityPerItem,
-		AutoSendCheckoutLinks:  autoSendCheckoutLinks,
+		SendOnLiveEnd:          autoSendCheckoutLinks,
+		ScheduledAt:            scheduledAt,
+		Description:            description,
 	})
 	if err != nil {
 		return EventRow{}, fmt.Errorf("creating live event: %w", err)
@@ -486,7 +499,7 @@ func (r *Repository) GetStoreAutoSendSetting(ctx context.Context, storeID string
 		return false, fmt.Errorf("getting store: %w", err)
 	}
 
-	return store.AutoSendCheckoutLinks, nil
+	return store.SendOnLiveEnd, nil
 }
 
 // =============================================================================
@@ -739,7 +752,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 	query := fmt.Sprintf(`
 		SELECT
 			e.id, e.store_id, e.title, e.type, e.status, e.total_orders, e.created_at, e.updated_at,
-			e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.auto_send_checkout_links,
+			e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end,
 			s.started_at, s.ended_at, COALESCE(s.total_comments, 0),
 			COALESCE(p.platform, ''), COALESCE(p.platform_live_id, '')
 		FROM live_events e
@@ -829,7 +842,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 			live.CartMaxQuantityPerItem = &v
 		}
 		if autoSendCheckoutLinks.Valid {
-			live.AutoSendCheckoutLinks = &autoSendCheckoutLinks.Bool
+			live.SendOnLiveEnd = &autoSendCheckoutLinks.Bool
 		}
 
 		lives = append(lives, live)
@@ -868,13 +881,23 @@ func toEventRow(row sqlc.LiveEvent) EventRow {
 		cartMaxQuantityPerItem = &v
 	}
 	var autoSendCheckoutLinks *bool
-	if row.AutoSendCheckoutLinks.Valid {
-		autoSendCheckoutLinks = &row.AutoSendCheckoutLinks.Bool
+	if row.SendOnLiveEnd.Valid {
+		autoSendCheckoutLinks = &row.SendOnLiveEnd.Bool
 	}
 	var currentActiveProductID *string
 	if row.CurrentActiveProductID.Valid {
 		id := row.CurrentActiveProductID.String()
 		currentActiveProductID = &id
+	}
+
+	// Scheduling fields
+	var scheduledAt *time.Time
+	if row.ScheduledAt.Valid {
+		scheduledAt = &row.ScheduledAt.Time
+	}
+	var description *string
+	if row.Description.Valid {
+		description = &row.Description.String
 	}
 
 	return EventRow{
@@ -887,9 +910,11 @@ func toEventRow(row sqlc.LiveEvent) EventRow {
 		CloseCartOnEventEnd:     row.CloseCartOnEventEnd,
 		CartExpirationMinutes:   cartExpirationMinutes,
 		CartMaxQuantityPerItem:  cartMaxQuantityPerItem,
-		AutoSendCheckoutLinks:   autoSendCheckoutLinks,
+		SendOnLiveEnd:           autoSendCheckoutLinks,
 		CurrentActiveProductID:  currentActiveProductID,
 		ProcessingPaused:        row.ProcessingPaused,
+		ScheduledAt:             scheduledAt,
+		Description:             description,
 		CreatedAt:               row.CreatedAt.Time,
 		UpdatedAt:               row.UpdatedAt.Time,
 	}
@@ -964,6 +989,11 @@ func (r *Repository) ListCartsWithTotalByEvent(ctx context.Context, eventID stri
 
 	carts := make([]CartWithTotalRow, len(rows))
 	for i, row := range rows {
+		var sessionID *string
+		if row.SessionID.Valid {
+			s := row.SessionID.String()
+			sessionID = &s
+		}
 		var paymentStatus *string
 		if row.PaymentStatus.Valid {
 			paymentStatus = &row.PaymentStatus.String
@@ -976,6 +1006,7 @@ func (r *Repository) ListCartsWithTotalByEvent(ctx context.Context, eventID stri
 		carts[i] = CartWithTotalRow{
 			ID:             row.ID.String(),
 			EventID:        row.EventID.String(),
+			SessionID:      sessionID,
 			PlatformUserID: row.PlatformUserID,
 			PlatformHandle: row.PlatformHandle,
 			Status:         row.Status,
@@ -1176,4 +1207,599 @@ func (r *Repository) GetLiveModeState(ctx context.Context, eventID, storeID stri
 	}
 
 	return output, nil
+}
+
+// =============================================================================
+// EVENT PRODUCTS (Whitelist)
+// =============================================================================
+
+// AddEventProduct adds a product to an event's whitelist
+func (r *Repository) AddEventProduct(ctx context.Context, input AddEventProductInput) (EventProductOutput, error) {
+	eventUID, err := parseUUID(input.EventID)
+	if err != nil {
+		return EventProductOutput{}, err
+	}
+	productUID, err := parseUUID(input.ProductID)
+	if err != nil {
+		return EventProductOutput{}, err
+	}
+
+	// Convert nullable fields
+	var specialPrice pgtype.Int4
+	if input.SpecialPrice != nil {
+		specialPrice = pgtype.Int4{Int32: int32(*input.SpecialPrice), Valid: true}
+	}
+	var maxQuantity pgtype.Int4
+	if input.MaxQuantity != nil {
+		maxQuantity = pgtype.Int4{Int32: *input.MaxQuantity, Valid: true}
+	}
+
+	_, err = r.q.CreateEventProduct(ctx, sqlc.CreateEventProductParams{
+		EventID:      eventUID,
+		ProductID:    productUID,
+		SpecialPrice: specialPrice,
+		MaxQuantity:  maxQuantity,
+		DisplayOrder: input.DisplayOrder,
+		Featured:     input.Featured,
+	})
+	if err != nil {
+		return EventProductOutput{}, fmt.Errorf("adding event product: %w", err)
+	}
+
+	// Get the created product with joined product data
+	row, err := r.q.GetEventProductByProductID(ctx, sqlc.GetEventProductByProductIDParams{
+		EventID:   eventUID,
+		ProductID: productUID,
+	})
+	if err != nil {
+		return EventProductOutput{}, fmt.Errorf("getting created event product: %w", err)
+	}
+
+	return toEventProductOutput(row), nil
+}
+
+// ListEventProducts returns all products in an event's whitelist
+func (r *Repository) ListEventProducts(ctx context.Context, eventID string) ([]EventProductOutput, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := r.q.ListEventProducts(ctx, uid)
+	if err != nil {
+		return nil, fmt.Errorf("listing event products: %w", err)
+	}
+
+	products := make([]EventProductOutput, len(rows))
+	for i, row := range rows {
+		products[i] = toEventProductOutputFromList(row)
+	}
+
+	return products, nil
+}
+
+// UpdateEventProduct updates a product's configuration in an event
+func (r *Repository) UpdateEventProduct(ctx context.Context, input UpdateEventProductInput) (EventProductOutput, error) {
+	uid, err := parseUUID(input.ID)
+	if err != nil {
+		return EventProductOutput{}, err
+	}
+	eventUID, err := parseUUID(input.EventID)
+	if err != nil {
+		return EventProductOutput{}, err
+	}
+
+	// Convert nullable fields
+	var specialPrice pgtype.Int4
+	if input.SpecialPrice != nil {
+		specialPrice = pgtype.Int4{Int32: int32(*input.SpecialPrice), Valid: true}
+	}
+	var maxQuantity pgtype.Int4
+	if input.MaxQuantity != nil {
+		maxQuantity = pgtype.Int4{Int32: *input.MaxQuantity, Valid: true}
+	}
+
+	updated, err := r.q.UpdateEventProduct(ctx, sqlc.UpdateEventProductParams{
+		ID:           uid,
+		EventID:      eventUID,
+		SpecialPrice: specialPrice,
+		MaxQuantity:  maxQuantity,
+		DisplayOrder: input.DisplayOrder,
+		Featured:     input.Featured,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return EventProductOutput{}, httpx.ErrNotFound("event product not found")
+		}
+		return EventProductOutput{}, fmt.Errorf("updating event product: %w", err)
+	}
+
+	// Get with joined product data
+	row, err := r.q.GetEventProductByID(ctx, updated.ID)
+	if err != nil {
+		return EventProductOutput{}, fmt.Errorf("getting updated event product: %w", err)
+	}
+
+	return toEventProductOutputFromGet(row), nil
+}
+
+// DeleteEventProduct removes a product from an event's whitelist
+func (r *Repository) DeleteEventProduct(ctx context.Context, id, eventID string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return err
+	}
+
+	return r.q.DeleteEventProduct(ctx, sqlc.DeleteEventProductParams{
+		ID:      uid,
+		EventID: eventUID,
+	})
+}
+
+// CountEventProducts returns the number of products in an event's whitelist
+func (r *Repository) CountEventProducts(ctx context.Context, eventID string) (int, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return 0, err
+	}
+
+	count, err := r.q.CountEventProducts(ctx, uid)
+	if err != nil {
+		return 0, fmt.Errorf("counting event products: %w", err)
+	}
+
+	return int(count), nil
+}
+
+// GetEventProductConfig returns product config for cart validation
+func (r *Repository) GetEventProductConfig(ctx context.Context, eventID, productID, storeID string) (*ProductValidationResult, error) {
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+	productUID, err := parseUUID(productID)
+	if err != nil {
+		return nil, err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := r.q.GetEventProductConfig(ctx, sqlc.GetEventProductConfigParams{
+		EventID: eventUID,
+		ID:      productUID,
+		StoreID: storeUID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.ErrNotFound("product not found")
+		}
+		return nil, fmt.Errorf("getting event product config: %w", err)
+	}
+
+	var specialPrice *int64
+	if row.SpecialPrice.Valid {
+		v := int64(row.SpecialPrice.Int32)
+		specialPrice = &v
+	}
+	var maxQuantity *int32
+	if row.MaxQuantity.Valid {
+		maxQuantity = &row.MaxQuantity.Int32
+	}
+
+	return &ProductValidationResult{
+		ProductID:      row.ProductID.String(),
+		ProductName:    row.ProductName,
+		Keyword:        row.ProductKeyword,
+		OriginalPrice:  row.OriginalPrice.Int64,
+		EffectivePrice: row.EffectivePrice,
+		SpecialPrice:   specialPrice,
+		MaxQuantity:    maxQuantity,
+		Stock:          row.ProductStock.Int32,
+		IsAllowed:      row.IsAllowed,
+		IsActive:       row.ProductActive.Bool,
+	}, nil
+}
+
+// =============================================================================
+// EVENT UPSELLS
+// =============================================================================
+
+// AddEventUpsell adds an upsell to an event
+func (r *Repository) AddEventUpsell(ctx context.Context, input AddEventUpsellInput) (EventUpsellOutput, error) {
+	eventUID, err := parseUUID(input.EventID)
+	if err != nil {
+		return EventUpsellOutput{}, err
+	}
+	productUID, err := parseUUID(input.ProductID)
+	if err != nil {
+		return EventUpsellOutput{}, err
+	}
+
+	var messageTemplate pgtype.Text
+	if input.MessageTemplate != nil {
+		messageTemplate = pgtype.Text{String: *input.MessageTemplate, Valid: true}
+	}
+
+	created, err := r.q.CreateEventUpsell(ctx, sqlc.CreateEventUpsellParams{
+		EventID:         eventUID,
+		ProductID:       productUID,
+		DiscountPercent: input.DiscountPercent,
+		MessageTemplate: messageTemplate,
+		DisplayOrder:    input.DisplayOrder,
+		Active:          input.Active,
+	})
+	if err != nil {
+		return EventUpsellOutput{}, fmt.Errorf("adding event upsell: %w", err)
+	}
+
+	// Get with joined product data
+	row, err := r.q.GetEventUpsellByID(ctx, created.ID)
+	if err != nil {
+		return EventUpsellOutput{}, fmt.Errorf("getting created event upsell: %w", err)
+	}
+
+	return toEventUpsellOutputFromGet(row), nil
+}
+
+// ListEventUpsells returns all upsells for an event
+func (r *Repository) ListEventUpsells(ctx context.Context, eventID string) ([]EventUpsellOutput, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := r.q.ListEventUpsells(ctx, uid)
+	if err != nil {
+		return nil, fmt.Errorf("listing event upsells: %w", err)
+	}
+
+	upsells := make([]EventUpsellOutput, len(rows))
+	for i, row := range rows {
+		upsells[i] = toEventUpsellOutputFromList(row)
+	}
+
+	return upsells, nil
+}
+
+// UpdateEventUpsell updates an upsell's configuration
+func (r *Repository) UpdateEventUpsell(ctx context.Context, input UpdateEventUpsellInput) (EventUpsellOutput, error) {
+	uid, err := parseUUID(input.ID)
+	if err != nil {
+		return EventUpsellOutput{}, err
+	}
+	eventUID, err := parseUUID(input.EventID)
+	if err != nil {
+		return EventUpsellOutput{}, err
+	}
+
+	var messageTemplate pgtype.Text
+	if input.MessageTemplate != nil {
+		messageTemplate = pgtype.Text{String: *input.MessageTemplate, Valid: true}
+	}
+
+	updated, err := r.q.UpdateEventUpsell(ctx, sqlc.UpdateEventUpsellParams{
+		ID:              uid,
+		EventID:         eventUID,
+		DiscountPercent: input.DiscountPercent,
+		MessageTemplate: messageTemplate,
+		DisplayOrder:    input.DisplayOrder,
+		Active:          input.Active,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return EventUpsellOutput{}, httpx.ErrNotFound("event upsell not found")
+		}
+		return EventUpsellOutput{}, fmt.Errorf("updating event upsell: %w", err)
+	}
+
+	// Get with joined product data
+	row, err := r.q.GetEventUpsellByID(ctx, updated.ID)
+	if err != nil {
+		return EventUpsellOutput{}, fmt.Errorf("getting updated event upsell: %w", err)
+	}
+
+	return toEventUpsellOutputFromGet(row), nil
+}
+
+// DeleteEventUpsell removes an upsell from an event
+func (r *Repository) DeleteEventUpsell(ctx context.Context, id, eventID string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return err
+	}
+
+	return r.q.DeleteEventUpsell(ctx, sqlc.DeleteEventUpsellParams{
+		ID:      uid,
+		EventID: eventUID,
+	})
+}
+
+// CountEventUpsells returns the number of upsells for an event
+func (r *Repository) CountEventUpsells(ctx context.Context, eventID string) (int, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return 0, err
+	}
+
+	count, err := r.q.CountEventUpsells(ctx, uid)
+	if err != nil {
+		return 0, fmt.Errorf("counting event upsells: %w", err)
+	}
+
+	return int(count), nil
+}
+
+// GetEventWithCounts returns an event with product and upsell counts
+func (r *Repository) GetEventWithCounts(ctx context.Context, eventID, storeID string) (*EventRow, int, int, error) {
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	row, err := r.q.GetLiveEventWithCounts(ctx, sqlc.GetLiveEventWithCountsParams{
+		ID:      eventUID,
+		StoreID: storeUID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, 0, 0, httpx.ErrNotFound("event not found")
+		}
+		return nil, 0, 0, fmt.Errorf("getting event with counts: %w", err)
+	}
+
+	eventRow := toEventRowFromWithCounts(row)
+	return &eventRow, int(row.ProductCount), int(row.UpsellCount), nil
+}
+
+// =============================================================================
+// EVENT PRODUCT/UPSELL HELPERS
+// =============================================================================
+
+func toEventProductOutput(row sqlc.GetEventProductByProductIDRow) EventProductOutput {
+	var specialPrice *int64
+	if row.SpecialPrice.Valid {
+		v := int64(row.SpecialPrice.Int32)
+		specialPrice = &v
+	}
+	var maxQuantity *int32
+	if row.MaxQuantity.Valid {
+		maxQuantity = &row.MaxQuantity.Int32
+	}
+	var imageURL *string
+	if row.ProductImageUrl.Valid {
+		imageURL = &row.ProductImageUrl.String
+	}
+
+	effectivePrice := row.OriginalPrice.Int64
+	if specialPrice != nil {
+		effectivePrice = *specialPrice
+	}
+
+	return EventProductOutput{
+		ID:             row.ID.String(),
+		ProductID:      row.ProductID.String(),
+		Name:           row.ProductName,
+		Keyword:        row.ProductKeyword,
+		ImageURL:       imageURL,
+		OriginalPrice:  row.OriginalPrice.Int64,
+		SpecialPrice:   specialPrice,
+		EffectivePrice: effectivePrice,
+		MaxQuantity:    maxQuantity,
+		DisplayOrder:   row.DisplayOrder,
+		Featured:       row.Featured,
+		Stock:          row.ProductStock.Int32,
+		ProductActive:  row.ProductActive.Bool,
+		CreatedAt:      row.CreatedAt.Time,
+		UpdatedAt:      row.UpdatedAt.Time,
+	}
+}
+
+func toEventProductOutputFromList(row sqlc.ListEventProductsRow) EventProductOutput {
+	var specialPrice *int64
+	if row.SpecialPrice.Valid {
+		v := int64(row.SpecialPrice.Int32)
+		specialPrice = &v
+	}
+	var maxQuantity *int32
+	if row.MaxQuantity.Valid {
+		maxQuantity = &row.MaxQuantity.Int32
+	}
+	var imageURL *string
+	if row.ProductImageUrl.Valid {
+		imageURL = &row.ProductImageUrl.String
+	}
+
+	effectivePrice := row.OriginalPrice.Int64
+	if specialPrice != nil {
+		effectivePrice = *specialPrice
+	}
+
+	return EventProductOutput{
+		ID:             row.ID.String(),
+		ProductID:      row.ProductID.String(),
+		Name:           row.ProductName,
+		Keyword:        row.ProductKeyword,
+		ImageURL:       imageURL,
+		OriginalPrice:  row.OriginalPrice.Int64,
+		SpecialPrice:   specialPrice,
+		EffectivePrice: effectivePrice,
+		MaxQuantity:    maxQuantity,
+		DisplayOrder:   row.DisplayOrder,
+		Featured:       row.Featured,
+		Stock:          row.ProductStock.Int32,
+		ProductActive:  row.ProductActive.Bool,
+		CreatedAt:      row.CreatedAt.Time,
+		UpdatedAt:      row.UpdatedAt.Time,
+	}
+}
+
+func toEventProductOutputFromGet(row sqlc.GetEventProductByIDRow) EventProductOutput {
+	var specialPrice *int64
+	if row.SpecialPrice.Valid {
+		v := int64(row.SpecialPrice.Int32)
+		specialPrice = &v
+	}
+	var maxQuantity *int32
+	if row.MaxQuantity.Valid {
+		maxQuantity = &row.MaxQuantity.Int32
+	}
+	var imageURL *string
+	if row.ProductImageUrl.Valid {
+		imageURL = &row.ProductImageUrl.String
+	}
+
+	effectivePrice := row.OriginalPrice.Int64
+	if specialPrice != nil {
+		effectivePrice = *specialPrice
+	}
+
+	return EventProductOutput{
+		ID:             row.ID.String(),
+		ProductID:      row.ProductID.String(),
+		Name:           row.ProductName,
+		Keyword:        row.ProductKeyword,
+		ImageURL:       imageURL,
+		OriginalPrice:  row.OriginalPrice.Int64,
+		SpecialPrice:   specialPrice,
+		EffectivePrice: effectivePrice,
+		MaxQuantity:    maxQuantity,
+		DisplayOrder:   row.DisplayOrder,
+		Featured:       row.Featured,
+		Stock:          row.ProductStock.Int32,
+		ProductActive:  row.ProductActive.Bool,
+		CreatedAt:      row.CreatedAt.Time,
+		UpdatedAt:      row.UpdatedAt.Time,
+	}
+}
+
+func toEventUpsellOutputFromGet(row sqlc.GetEventUpsellByIDRow) EventUpsellOutput {
+	var messageTemplate *string
+	if row.MessageTemplate.Valid {
+		messageTemplate = &row.MessageTemplate.String
+	}
+	var imageURL *string
+	if row.ProductImageUrl.Valid {
+		imageURL = &row.ProductImageUrl.String
+	}
+
+	discountedPrice := row.OriginalPrice.Int64 * int64(100-row.DiscountPercent) / 100
+
+	return EventUpsellOutput{
+		ID:              row.ID.String(),
+		ProductID:       row.ProductID.String(),
+		Name:            row.ProductName,
+		Keyword:         row.ProductKeyword,
+		ImageURL:        imageURL,
+		OriginalPrice:   row.OriginalPrice.Int64,
+		DiscountPercent: row.DiscountPercent,
+		DiscountedPrice: discountedPrice,
+		MessageTemplate: messageTemplate,
+		DisplayOrder:    row.DisplayOrder,
+		Active:          row.Active,
+		Stock:           row.ProductStock.Int32,
+		CreatedAt:       row.CreatedAt.Time,
+		UpdatedAt:       row.UpdatedAt.Time,
+	}
+}
+
+func toEventUpsellOutputFromList(row sqlc.ListEventUpsellsRow) EventUpsellOutput {
+	var messageTemplate *string
+	if row.MessageTemplate.Valid {
+		messageTemplate = &row.MessageTemplate.String
+	}
+	var imageURL *string
+	if row.ProductImageUrl.Valid {
+		imageURL = &row.ProductImageUrl.String
+	}
+
+	discountedPrice := row.OriginalPrice.Int64 * int64(100-row.DiscountPercent) / 100
+
+	return EventUpsellOutput{
+		ID:              row.ID.String(),
+		ProductID:       row.ProductID.String(),
+		Name:            row.ProductName,
+		Keyword:         row.ProductKeyword,
+		ImageURL:        imageURL,
+		OriginalPrice:   row.OriginalPrice.Int64,
+		DiscountPercent: row.DiscountPercent,
+		DiscountedPrice: discountedPrice,
+		MessageTemplate: messageTemplate,
+		DisplayOrder:    row.DisplayOrder,
+		Active:          row.Active,
+		Stock:           row.ProductStock.Int32,
+		CreatedAt:       row.CreatedAt.Time,
+		UpdatedAt:       row.UpdatedAt.Time,
+	}
+}
+
+func toEventRowFromWithCounts(row sqlc.GetLiveEventWithCountsRow) EventRow {
+	var title string
+	if row.Title.Valid {
+		title = row.Title.String
+	}
+
+	eventType := row.Type
+	if eventType == "" {
+		eventType = "single"
+	}
+
+	var cartExpirationMinutes, cartMaxQuantityPerItem *int
+	if row.CartExpirationMinutes.Valid {
+		v := int(row.CartExpirationMinutes.Int32)
+		cartExpirationMinutes = &v
+	}
+	if row.CartMaxQuantityPerItem.Valid {
+		v := int(row.CartMaxQuantityPerItem.Int32)
+		cartMaxQuantityPerItem = &v
+	}
+	var autoSendCheckoutLinks *bool
+	if row.SendOnLiveEnd.Valid {
+		autoSendCheckoutLinks = &row.SendOnLiveEnd.Bool
+	}
+	var currentActiveProductID *string
+	if row.CurrentActiveProductID.Valid {
+		id := row.CurrentActiveProductID.String()
+		currentActiveProductID = &id
+	}
+	var scheduledAt *time.Time
+	if row.ScheduledAt.Valid {
+		scheduledAt = &row.ScheduledAt.Time
+	}
+	var description *string
+	if row.Description.Valid {
+		description = &row.Description.String
+	}
+
+	return EventRow{
+		ID:                      row.ID.String(),
+		StoreID:                 row.StoreID.String(),
+		Title:                   title,
+		Type:                    eventType,
+		Status:                  row.Status,
+		TotalOrders:             int(row.TotalOrders),
+		CloseCartOnEventEnd:     row.CloseCartOnEventEnd,
+		CartExpirationMinutes:   cartExpirationMinutes,
+		CartMaxQuantityPerItem:  cartMaxQuantityPerItem,
+		SendOnLiveEnd:           autoSendCheckoutLinks,
+		CurrentActiveProductID:  currentActiveProductID,
+		ProcessingPaused:        row.ProcessingPaused,
+		ScheduledAt:             scheduledAt,
+		Description:             description,
+		CreatedAt:               row.CreatedAt.Time,
+		UpdatedAt:               row.UpdatedAt.Time,
+	}
 }

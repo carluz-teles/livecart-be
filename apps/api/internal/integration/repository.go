@@ -1480,8 +1480,8 @@ func (r *Repository) HasActiveEventForProduct(ctx context.Context, externalProdu
 
 // StoreInfo contains minimal store information needed for notifications.
 type StoreInfo struct {
-	Name                    string
-	CheckoutLinkExpiryHours int
+	Name                  string
+	CartExpirationMinutes int
 }
 
 // GetStoreInfo returns minimal store information for notifications.
@@ -1496,13 +1496,8 @@ func (r *Repository) GetStoreInfo(ctx context.Context, storeID string) (*StoreIn
 		return nil, fmt.Errorf("getting store info: %w", err)
 	}
 
-	expiryHours := 48 // default
-	if row.CheckoutLinkExpiryHours.Valid {
-		expiryHours = int(row.CheckoutLinkExpiryHours.Int32)
-	}
-
 	return &StoreInfo{
-		Name:                    row.Name,
-		CheckoutLinkExpiryHours: expiryHours,
+		Name:                  row.Name,
+		CartExpirationMinutes: int(row.CartExpirationMinutes),
 	}, nil
 }

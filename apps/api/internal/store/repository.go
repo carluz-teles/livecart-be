@@ -114,13 +114,10 @@ func (r *Repository) UpdateCartSettings(ctx context.Context, params UpdateCartSe
 		CartReserveStock:              params.ReserveStock,
 		CartMaxItems:                  int32(params.MaxItems),
 		CartMaxQuantityPerItem:        int32(params.MaxQuantityPerItem),
-		CartNotifyBeforeExpiration:    params.NotifyBeforeExpiration,
 		CartAllowEdit:                 params.AllowEdit,
-		AutoSendCheckoutLinks:         params.AutoSendCheckoutLinks,
-		CheckoutLinkExpiryHours:       pgtype.Int4{Int32: int32(params.CheckoutLinkExpiryHours), Valid: true},
+		CartRealTime:                  params.RealTimeCart,
+		SendOnLiveEnd:                 params.SendOnLiveEnd,
 		CheckoutSendMethods:           checkoutMethodsJSON,
-		CartSendOnFirstItem:           params.SendOnFirstItem,
-		CartSendOnNewItems:            params.SendOnNewItems,
 		CartMessageCooldownSeconds:    int32(params.MessageCooldownSeconds),
 		CartSendExpirationReminder:    params.SendExpirationReminder,
 		CartExpirationReminderMinutes: int32(params.ExpirationReminderMinutes),
@@ -222,12 +219,6 @@ func toStoreRow(row sqlc.Store) StoreRow {
 		checkoutMethods = []string{"public_link", "manual"}
 	}
 
-	// Get checkout link expiry hours with default
-	checkoutExpiryHours := 48
-	if row.CheckoutLinkExpiryHours.Valid {
-		checkoutExpiryHours = int(row.CheckoutLinkExpiryHours.Int32)
-	}
-
 	return StoreRow{
 		ID:             row.ID.String(),
 		Name:           row.Name,
@@ -250,13 +241,10 @@ func toStoreRow(row sqlc.Store) StoreRow {
 			ReserveStock:              row.CartReserveStock,
 			MaxItems:                  int(row.CartMaxItems),
 			MaxQuantityPerItem:        int(row.CartMaxQuantityPerItem),
-			NotifyBeforeExpiration:    row.CartNotifyBeforeExpiration,
 			AllowEdit:                 row.CartAllowEdit,
-			AutoSendCheckoutLinks:     row.AutoSendCheckoutLinks,
-			CheckoutLinkExpiryHours:   checkoutExpiryHours,
 			CheckoutSendMethods:       checkoutMethods,
-			SendOnFirstItem:           row.CartSendOnFirstItem,
-			SendOnNewItems:            row.CartSendOnNewItems,
+			RealTimeCart:              row.CartRealTime,
+			SendOnLiveEnd:             row.SendOnLiveEnd,
 			MessageCooldownSeconds:    int(row.CartMessageCooldownSeconds),
 			SendExpirationReminder:    row.CartSendExpirationReminder,
 			ExpirationReminderMinutes: int(row.CartExpirationReminderMinutes),

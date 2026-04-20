@@ -77,8 +77,7 @@ func (s *Service) GetCartMessageSettings(ctx context.Context, storeID string) (*
 	}
 
 	return &CartMessageSettings{
-		SendOnFirstItem:           row.CartSendOnFirstItem,
-		SendOnNewItems:            row.CartSendOnNewItems,
+		RealTimeCart:              row.CartRealTime,
 		MessageCooldownSeconds:    int(row.CartMessageCooldownSeconds),
 		SendExpirationReminder:    row.CartSendExpirationReminder,
 		ExpirationReminderMinutes: int(row.CartExpirationReminderMinutes),
@@ -221,22 +220,19 @@ func (s *Service) ShouldNotify(ctx context.Context, storeID string, notifType No
 
 	switch notifType {
 	case TypeCheckoutImmediate:
-		// Template must be enabled
+		// Template must be enabled and RealTimeCart must be on
 		if templateSettings.CheckoutImmediate == nil || !templateSettings.CheckoutImmediate.Enabled {
 			return false, nil
 		}
-		// Check triggers from cart_settings
-		if isNewCart {
-			return cartSettings.SendOnFirstItem, nil
-		}
-		return cartSettings.SendOnNewItems, nil
+		// Only send if real-time cart is enabled
+		return cartSettings.RealTimeCart && isNewCart, nil
 
 	case TypeItemAdded:
 		if templateSettings.ItemAdded == nil {
 			return false, nil
 		}
-		// Only send for existing carts, and only if sendOnNewItems is enabled
-		return templateSettings.ItemAdded.Enabled && !isNewCart && cartSettings.SendOnNewItems, nil
+		// Only send for existing carts when real-time cart is enabled
+		return templateSettings.ItemAdded.Enabled && !isNewCart && cartSettings.RealTimeCart, nil
 
 	case TypeCheckoutReminder:
 		if templateSettings.CheckoutReminder == nil {

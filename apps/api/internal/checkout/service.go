@@ -57,24 +57,25 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 	// Convert to output
 	output := &GetCartForCheckoutOutput{
 		Cart: CartDetails{
-			ID:             cart.ID,
-			EventID:        cart.EventID,
-			PlatformUserID: cart.PlatformUserID,
-			PlatformHandle: cart.PlatformHandle,
-			Token:          cart.Token,
-			Status:         cart.Status,
-			CheckoutURL:    cart.CheckoutURL,
-			CheckoutID:     cart.CheckoutID,
-			CustomerEmail:  cart.CustomerEmail,
-			PaymentStatus:  cart.PaymentStatus,
-			PaidAt:         cart.PaidAt,
-			CreatedAt:      cart.CreatedAt,
-			ExpiresAt:      cart.ExpiresAt,
-			EventTitle:     cart.EventTitle,
-			StoreID:        cart.StoreID,
-			StoreName:      cart.StoreName,
-			StoreLogoURL:   cart.StoreLogoURL,
-			AllowEdit:      cart.AllowEdit,
+			ID:                 cart.ID,
+			EventID:            cart.EventID,
+			PlatformUserID:     cart.PlatformUserID,
+			PlatformHandle:     cart.PlatformHandle,
+			Token:              cart.Token,
+			Status:             cart.Status,
+			CheckoutURL:        cart.CheckoutURL,
+			CheckoutID:         cart.CheckoutID,
+			CustomerEmail:      cart.CustomerEmail,
+			PaymentStatus:      cart.PaymentStatus,
+			PaidAt:             cart.PaidAt,
+			CreatedAt:          cart.CreatedAt,
+			ExpiresAt:          cart.ExpiresAt,
+			EventTitle:         cart.EventTitle,
+			StoreID:            cart.StoreID,
+			StoreName:          cart.StoreName,
+			StoreLogoURL:       cart.StoreLogoURL,
+			AllowEdit:          cart.AllowEdit,
+			MaxQuantityPerItem: cart.MaxQuantityPerItem,
 		},
 		Items: make([]CartItemDetails, len(items)),
 	}
@@ -157,9 +158,9 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 		return nil, httpx.ErrUnprocessable("loja não possui integração de pagamento configurada")
 	}
 
-	// Get checkout expiry hours from store settings
-	expiryHours, _ := s.repo.GetStoreCheckoutExpiryHours(ctx, cart.StoreID)
-	expiresAt := GetExpiresAt(expiryHours)
+	// Get cart expiration minutes from store settings
+	expirationMinutes, _ := s.repo.GetStoreCartExpirationMinutes(ctx, cart.StoreID)
+	expiresAt := GetExpiresAtMinutes(expirationMinutes)
 
 	// Build URLs
 	baseURL := config.WebhookBaseURL.String()

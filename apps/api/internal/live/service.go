@@ -82,16 +82,24 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		closeCartOnEventEnd = *input.CloseCartOnEventEnd
 	}
 
+	// Determine initial status based on scheduling
+	status := "active"
+	if input.ScheduledAt != nil {
+		status = "scheduled"
+	}
+
 	// 1. Create the event
 	event, err := s.repo.CreateEvent(ctx, CreateEventParams{
 		StoreID:                input.StoreID,
 		Title:                  input.Title,
 		Type:                   eventType,
-		Status:                 "active",
+		Status:                 status,
 		CloseCartOnEventEnd:    closeCartOnEventEnd,
 		CartExpirationMinutes:  input.CartExpirationMinutes,
 		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
-		AutoSendCheckoutLinks:  input.AutoSendCheckoutLinks,
+		SendOnLiveEnd:          input.SendOnLiveEnd,
+		ScheduledAt:            input.ScheduledAt,
+		Description:            input.Description,
 	})
 	if err != nil {
 		return CreateLiveOutput{}, err
@@ -196,7 +204,7 @@ func (s *Service) GetByID(ctx context.Context, id, storeID string) (LiveOutput, 
 		CloseCartOnEventEnd:    event.CloseCartOnEventEnd,
 		CartExpirationMinutes:  event.CartExpirationMinutes,
 		CartMaxQuantityPerItem: event.CartMaxQuantityPerItem,
-		AutoSendCheckoutLinks:  event.AutoSendCheckoutLinks,
+		SendOnLiveEnd:  event.SendOnLiveEnd,
 		CreatedAt:              event.CreatedAt,
 		UpdatedAt:              event.UpdatedAt,
 	}, nil
@@ -290,6 +298,16 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		}
 	}
 
+	// Get product and upsell counts
+	productCount, err := s.repo.CountEventProducts(ctx, event.ID)
+	if err != nil {
+		s.logger.Warn("failed to count event products", zap.String("event_id", event.ID), zap.Error(err))
+	}
+	upsellCount, err := s.repo.CountEventUpsells(ctx, event.ID)
+	if err != nil {
+		s.logger.Warn("failed to count event upsells", zap.String("event_id", event.ID), zap.Error(err))
+	}
+
 	return EventOutput{
 		ID:                     event.ID,
 		StoreID:                event.StoreID,
@@ -300,7 +318,11 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		CloseCartOnEventEnd:    event.CloseCartOnEventEnd,
 		CartExpirationMinutes:  event.CartExpirationMinutes,
 		CartMaxQuantityPerItem: event.CartMaxQuantityPerItem,
-		AutoSendCheckoutLinks:  event.AutoSendCheckoutLinks,
+		SendOnLiveEnd:          event.SendOnLiveEnd,
+		ScheduledAt:            event.ScheduledAt,
+		Description:            event.Description,
+		ProductCount:           productCount,
+		UpsellCount:            upsellCount,
 		Sessions:               sessions,
 		CreatedAt:              event.CreatedAt,
 		UpdatedAt:              event.UpdatedAt,
@@ -668,9 +690,11 @@ func (s *Service) GetEventByPlatformLiveID(ctx context.Context, platformLiveID s
 		CloseCartOnEventEnd:     event.CloseCartOnEventEnd,
 		CartExpirationMinutes:   event.CartExpirationMinutes,
 		CartMaxQuantityPerItem:  event.CartMaxQuantityPerItem,
-		AutoSendCheckoutLinks:   event.AutoSendCheckoutLinks,
+		SendOnLiveEnd:           event.SendOnLiveEnd,
 		CurrentActiveProductID:  event.CurrentActiveProductID,
 		ProcessingPaused:        event.ProcessingPaused,
+		ScheduledAt:             event.ScheduledAt,
+		Description:             event.Description,
 		CreatedAt:               event.CreatedAt,
 		UpdatedAt:               event.UpdatedAt,
 	}, nil
@@ -845,6 +869,7 @@ func (s *Service) ListCartsWithTotalByEvent(ctx context.Context, eventID, storeI
 	for i, cart := range carts {
 		outputs[i] = CartWithTotalOutput{
 			ID:             cart.ID,
+			SessionID:      cart.SessionID,
 			PlatformUserID: cart.PlatformUserID,
 			PlatformHandle: cart.PlatformHandle,
 			Status:         cart.Status,
@@ -860,7 +885,7 @@ func (s *Service) ListCartsWithTotalByEvent(ctx context.Context, eventID, storeI
 }
 
 // ListProductsByEvent returns all products sold in an event with quantity and revenue.
-func (s *Service) ListProductsByEvent(ctx context.Context, eventID, storeID string) ([]EventProductOutput, error) {
+func (s *Service) ListProductsByEvent(ctx context.Context, eventID, storeID string) ([]EventProductSalesOutput, error) {
 	// Verify event exists and belongs to store
 	_, err := s.repo.GetEventByID(ctx, eventID, storeID)
 	if err != nil {
@@ -872,9 +897,9 @@ func (s *Service) ListProductsByEvent(ctx context.Context, eventID, storeID stri
 		return nil, err
 	}
 
-	outputs := make([]EventProductOutput, len(products))
+	outputs := make([]EventProductSalesOutput, len(products))
 	for i, product := range products {
-		outputs[i] = EventProductOutput{
+		outputs[i] = EventProductSalesOutput{
 			ID:            product.ID,
 			Name:          product.Name,
 			ImageURL:      product.ImageURL,
@@ -951,4 +976,163 @@ func (s *Service) SetProcessingPaused(ctx context.Context, eventID, storeID stri
 // GetLiveModeState returns the current live mode state for an event
 func (s *Service) GetLiveModeState(ctx context.Context, eventID, storeID string) (*LiveModeStateOutput, error) {
 	return s.repo.GetLiveModeState(ctx, eventID, storeID)
+}
+
+// =============================================================================
+// EVENT PRODUCTS (Whitelist)
+// =============================================================================
+
+// AddEventProduct adds a product to an event's whitelist
+func (s *Service) AddEventProduct(ctx context.Context, input AddEventProductInput) (EventProductOutput, error) {
+	// Verify event exists and belongs to store
+	_, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID)
+	if err != nil {
+		return EventProductOutput{}, err
+	}
+
+	output, err := s.repo.AddEventProduct(ctx, input)
+	if err != nil {
+		return EventProductOutput{}, err
+	}
+
+	s.logger.Info("added product to event whitelist",
+		zap.String("event_id", input.EventID),
+		zap.String("product_id", input.ProductID),
+	)
+
+	return output, nil
+}
+
+// ListEventProducts returns all products in an event's whitelist
+func (s *Service) ListEventProducts(ctx context.Context, eventID, storeID string) ([]EventProductOutput, error) {
+	// Verify event exists and belongs to store
+	_, err := s.repo.GetEventByID(ctx, eventID, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.repo.ListEventProducts(ctx, eventID)
+}
+
+// UpdateEventProduct updates a product's configuration in an event
+func (s *Service) UpdateEventProduct(ctx context.Context, input UpdateEventProductInput) (EventProductOutput, error) {
+	// Verify event exists and belongs to store
+	_, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID)
+	if err != nil {
+		return EventProductOutput{}, err
+	}
+
+	output, err := s.repo.UpdateEventProduct(ctx, input)
+	if err != nil {
+		return EventProductOutput{}, err
+	}
+
+	s.logger.Info("updated event product",
+		zap.String("event_id", input.EventID),
+		zap.String("product_id", input.ID),
+	)
+
+	return output, nil
+}
+
+// DeleteEventProduct removes a product from an event's whitelist
+func (s *Service) DeleteEventProduct(ctx context.Context, id, eventID, storeID string) error {
+	// Verify event exists and belongs to store
+	_, err := s.repo.GetEventByID(ctx, eventID, storeID)
+	if err != nil {
+		return err
+	}
+
+	if err := s.repo.DeleteEventProduct(ctx, id, eventID); err != nil {
+		return err
+	}
+
+	s.logger.Info("deleted event product",
+		zap.String("event_id", eventID),
+		zap.String("product_id", id),
+	)
+
+	return nil
+}
+
+// ValidateProductForEvent checks if a product can be sold in an event
+func (s *Service) ValidateProductForEvent(ctx context.Context, eventID, productID, storeID string) (*ProductValidationResult, error) {
+	return s.repo.GetEventProductConfig(ctx, eventID, productID, storeID)
+}
+
+// =============================================================================
+// EVENT UPSELLS
+// =============================================================================
+
+// AddEventUpsell adds an upsell to an event
+func (s *Service) AddEventUpsell(ctx context.Context, input AddEventUpsellInput) (EventUpsellOutput, error) {
+	// Verify event exists and belongs to store
+	_, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID)
+	if err != nil {
+		return EventUpsellOutput{}, err
+	}
+
+	output, err := s.repo.AddEventUpsell(ctx, input)
+	if err != nil {
+		return EventUpsellOutput{}, err
+	}
+
+	s.logger.Info("added upsell to event",
+		zap.String("event_id", input.EventID),
+		zap.String("product_id", input.ProductID),
+	)
+
+	return output, nil
+}
+
+// ListEventUpsells returns all upsells for an event
+func (s *Service) ListEventUpsells(ctx context.Context, eventID, storeID string) ([]EventUpsellOutput, error) {
+	// Verify event exists and belongs to store
+	_, err := s.repo.GetEventByID(ctx, eventID, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.repo.ListEventUpsells(ctx, eventID)
+}
+
+// UpdateEventUpsell updates an upsell's configuration
+func (s *Service) UpdateEventUpsell(ctx context.Context, input UpdateEventUpsellInput) (EventUpsellOutput, error) {
+	// Verify event exists and belongs to store
+	_, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID)
+	if err != nil {
+		return EventUpsellOutput{}, err
+	}
+
+	output, err := s.repo.UpdateEventUpsell(ctx, input)
+	if err != nil {
+		return EventUpsellOutput{}, err
+	}
+
+	s.logger.Info("updated event upsell",
+		zap.String("event_id", input.EventID),
+		zap.String("upsell_id", input.ID),
+	)
+
+	return output, nil
+}
+
+// DeleteEventUpsell removes an upsell from an event
+func (s *Service) DeleteEventUpsell(ctx context.Context, id, eventID, storeID string) error {
+	// Verify event exists and belongs to store
+	_, err := s.repo.GetEventByID(ctx, eventID, storeID)
+	if err != nil {
+		return err
+	}
+
+	if err := s.repo.DeleteEventUpsell(ctx, id, eventID); err != nil {
+		return err
+	}
+
+	s.logger.Info("deleted event upsell",
+		zap.String("event_id", eventID),
+		zap.String("upsell_id", id),
+	)
+
+	return nil
 }

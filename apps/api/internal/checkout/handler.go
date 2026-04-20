@@ -247,16 +247,17 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 	}
 
 	return CartForCheckoutResponse{
-		ID:             output.Cart.ID,
-		Token:          output.Cart.Token,
-		Status:         output.Cart.Status,
-		CustomerEmail:  output.Cart.CustomerEmail,
-		PaymentStatus:  output.Cart.PaymentStatus,
-		CheckoutURL:    output.Cart.CheckoutURL,
-		PlatformHandle: output.Cart.PlatformHandle,
-		AllowEdit:      output.Cart.AllowEdit,
-		ExpiresAt:      output.Cart.ExpiresAt,
-		CreatedAt:      output.Cart.CreatedAt,
+		ID:                 output.Cart.ID,
+		Token:              output.Cart.Token,
+		Status:             output.Cart.Status,
+		CustomerEmail:      output.Cart.CustomerEmail,
+		PaymentStatus:      output.Cart.PaymentStatus,
+		CheckoutURL:        output.Cart.CheckoutURL,
+		PlatformHandle:     output.Cart.PlatformHandle,
+		AllowEdit:          output.Cart.AllowEdit,
+		MaxQuantityPerItem: output.Cart.MaxQuantityPerItem,
+		ExpiresAt:          output.Cart.ExpiresAt,
+		CreatedAt:          output.Cart.CreatedAt,
 		Event: CartEventInfo{
 			ID:    output.Cart.EventID,
 			Title: output.Cart.EventTitle,

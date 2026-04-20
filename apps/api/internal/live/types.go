@@ -14,6 +14,9 @@ import (
 type CreateEventRequest struct {
 	Title string `json:"title" validate:"required,min=1,max=200"`
 	Type  string `json:"type" validate:"required,oneof=single multi"`
+	// Scheduling
+	ScheduledAt *string `json:"scheduledAt"` // ISO8601 timestamp
+	Description *string `json:"description" validate:"omitempty,max=2000"`
 }
 
 type CreateEventResponse struct {
@@ -33,10 +36,16 @@ type EventResponse struct {
 	CloseCartOnEventEnd    bool              `json:"closeCartOnEventEnd"`
 	CartExpirationMinutes  *int              `json:"cartExpirationMinutes"`
 	CartMaxQuantityPerItem *int              `json:"cartMaxQuantityPerItem"`
-	AutoSendCheckoutLinks  *bool             `json:"autoSendCheckoutLinks"`
-	Sessions               []SessionResponse `json:"sessions,omitempty"`
-	CreatedAt              time.Time         `json:"createdAt"`
-	UpdatedAt              time.Time         `json:"updatedAt"`
+	SendOnLiveEnd          *bool             `json:"sendOnLiveEnd"`
+	// Scheduling
+	ScheduledAt *time.Time `json:"scheduledAt"`
+	Description *string    `json:"description"`
+	// Counts
+	ProductCount int `json:"productCount"`
+	UpsellCount  int `json:"upsellCount"`
+	Sessions     []SessionResponse `json:"sessions,omitempty"`
+	CreatedAt    time.Time         `json:"createdAt"`
+	UpdatedAt    time.Time         `json:"updatedAt"`
 }
 
 type ListEventsResponse struct {
@@ -46,7 +55,7 @@ type ListEventsResponse struct {
 
 // EndEventRequest represents the request body for ending an event.
 type EndEventRequest struct {
-	AutoSendCheckoutLinks *bool `json:"autoSendCheckoutLinks"` // Optional override
+	SendOnLiveEnd *bool `json:"sendOnLiveEnd"` // Optional override
 }
 
 // EndEventResponse represents the response after ending an event.
@@ -64,7 +73,10 @@ type CreateEventInput struct {
 	CloseCartOnEventEnd    *bool
 	CartExpirationMinutes  *int
 	CartMaxQuantityPerItem *int
-	AutoSendCheckoutLinks  *bool
+	SendOnLiveEnd          *bool
+	// Scheduling
+	ScheduledAt *time.Time
+	Description *string
 }
 
 type CreateEventOutput struct {
@@ -97,12 +109,18 @@ type EventOutput struct {
 	CloseCartOnEventEnd     bool
 	CartExpirationMinutes   *int
 	CartMaxQuantityPerItem  *int
-	AutoSendCheckoutLinks   *bool
+	SendOnLiveEnd           *bool
 	CurrentActiveProductID  *string
 	ProcessingPaused        bool
-	Sessions                []SessionOutput
-	CreatedAt               time.Time
-	UpdatedAt               time.Time
+	// Scheduling
+	ScheduledAt *time.Time
+	Description *string
+	// Counts
+	ProductCount int
+	UpsellCount  int
+	Sessions     []SessionOutput
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 type ListEventsInput struct {
@@ -120,7 +138,7 @@ type ListEventsOutput struct {
 }
 
 type EventFilters struct {
-	Status   []string `query:"status"` // active, ended
+	Status   []string `query:"status"` // scheduled, active, ended
 	DateFrom *string  `query:"dateFrom"`
 	DateTo   *string  `query:"dateTo"`
 }
@@ -134,7 +152,10 @@ type CreateEventParams struct {
 	CloseCartOnEventEnd    bool
 	CartExpirationMinutes  *int
 	CartMaxQuantityPerItem *int
-	AutoSendCheckoutLinks  *bool
+	SendOnLiveEnd          *bool
+	// Scheduling
+	ScheduledAt *time.Time
+	Description *string
 }
 
 type EventRow struct {
@@ -147,11 +168,14 @@ type EventRow struct {
 	CloseCartOnEventEnd     bool
 	CartExpirationMinutes   *int
 	CartMaxQuantityPerItem  *int
-	AutoSendCheckoutLinks   *bool
+	SendOnLiveEnd           *bool
 	CurrentActiveProductID  *string
 	ProcessingPaused        bool
-	CreatedAt               time.Time
-	UpdatedAt               time.Time
+	// Scheduling
+	ScheduledAt *time.Time
+	Description *string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // =============================================================================
@@ -315,11 +339,14 @@ type CreateLiveRequest struct {
 	Type           string  `json:"type" validate:"omitempty,oneof=single multi"`
 	Platform       *string `json:"platform" validate:"omitempty,oneof=instagram"`
 	PlatformLiveID *string `json:"platformLiveId" validate:"omitempty"`
+	// Scheduling
+	ScheduledAt *string `json:"scheduledAt"` // ISO8601 timestamp
+	Description *string `json:"description" validate:"omitempty,max=2000"`
 	// Cart settings (override store defaults)
 	CloseCartOnEventEnd    *bool `json:"closeCartOnEventEnd"`
 	CartExpirationMinutes  *int  `json:"cartExpirationMinutes" validate:"omitempty,min=5,max=1440"`
 	CartMaxQuantityPerItem *int  `json:"cartMaxQuantityPerItem" validate:"omitempty,min=1,max=100"`
-	AutoSendCheckoutLinks  *bool `json:"autoSendCheckoutLinks"`
+	SendOnLiveEnd          *bool `json:"sendOnLiveEnd"`
 }
 
 type CreateLiveResponse struct {
@@ -349,9 +376,15 @@ type LiveResponse struct {
 	CloseCartOnEventEnd    bool       `json:"closeCartOnEventEnd"`
 	CartExpirationMinutes  *int       `json:"cartExpirationMinutes"`
 	CartMaxQuantityPerItem *int       `json:"cartMaxQuantityPerItem"`
-	AutoSendCheckoutLinks  *bool      `json:"autoSendCheckoutLinks"`
-	CreatedAt              time.Time  `json:"createdAt"`
-	UpdatedAt              time.Time  `json:"updatedAt"`
+	SendOnLiveEnd          *bool      `json:"sendOnLiveEnd"`
+	// Scheduling
+	ScheduledAt *time.Time `json:"scheduledAt"`
+	Description *string    `json:"description"`
+	// Counts
+	ProductCount int `json:"productCount"`
+	UpsellCount  int `json:"upsellCount"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	UpdatedAt    time.Time  `json:"updatedAt"`
 }
 
 type ListLivesResponse struct {
@@ -366,7 +399,7 @@ type LiveStatsResponse struct {
 }
 
 type EndLiveRequest struct {
-	AutoSendCheckoutLinks *bool `json:"autoSendCheckoutLinks"`
+	SendOnLiveEnd *bool `json:"sendOnLiveEnd"`
 }
 
 type EndLiveResponse struct {
@@ -385,7 +418,10 @@ type CreateLiveInput struct {
 	CloseCartOnEventEnd    *bool
 	CartExpirationMinutes  *int
 	CartMaxQuantityPerItem *int
-	AutoSendCheckoutLinks  *bool
+	SendOnLiveEnd          *bool
+	// Scheduling
+	ScheduledAt *time.Time
+	Description *string
 }
 
 type CreateLiveOutput struct {
@@ -444,9 +480,15 @@ type LiveOutput struct {
 	CloseCartOnEventEnd    bool
 	CartExpirationMinutes  *int
 	CartMaxQuantityPerItem *int
-	AutoSendCheckoutLinks  *bool
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
+	SendOnLiveEnd          *bool
+	// Scheduling
+	ScheduledAt *time.Time
+	Description *string
+	// Counts
+	ProductCount int
+	UpsellCount  int
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 type LiveStatsOutput struct {
@@ -527,6 +569,7 @@ type EventStatsResponse struct {
 
 type CartWithTotalResponse struct {
 	ID             string     `json:"id"`
+	SessionID      *string    `json:"sessionId"`
 	PlatformUserID string     `json:"platformUserId"`
 	PlatformHandle string     `json:"platformHandle"`
 	Status         string     `json:"status"`
@@ -541,7 +584,7 @@ type ListCartsResponse struct {
 	Data []CartWithTotalResponse `json:"data"`
 }
 
-type EventProductResponse struct {
+type EventProductSalesResponse struct {
 	ID            string  `json:"id"`
 	Name          string  `json:"name"`
 	ImageURL      *string `json:"imageUrl"`
@@ -550,8 +593,8 @@ type EventProductResponse struct {
 	TotalRevenue  int64   `json:"totalRevenue"`
 }
 
-type ListEventProductsResponse struct {
-	Data []EventProductResponse `json:"data"`
+type ListEventProductSalesResponse struct {
+	Data []EventProductSalesResponse `json:"data"`
 }
 
 // Service layer - Event details
@@ -571,6 +614,7 @@ type EventStatsOutput struct {
 
 type CartWithTotalOutput struct {
 	ID             string
+	SessionID      *string
 	PlatformUserID string
 	PlatformHandle string
 	Status         string
@@ -581,7 +625,7 @@ type CartWithTotalOutput struct {
 	ExpiresAt      *time.Time
 }
 
-type EventProductOutput struct {
+type EventProductSalesOutput struct {
 	ID            string
 	Name          string
 	ImageURL      *string
@@ -605,6 +649,7 @@ type EventStatsRow struct {
 type CartWithTotalRow struct {
 	ID             string
 	EventID        string
+	SessionID      *string
 	PlatformUserID string
 	PlatformHandle string
 	Status         string

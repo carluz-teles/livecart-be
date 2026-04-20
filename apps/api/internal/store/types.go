@@ -7,19 +7,16 @@ import "time"
 // ============================================
 
 type CartSettingsDTO struct {
-	Enabled                 bool     `json:"enabled"`
-	ExpirationMinutes       int      `json:"expirationMinutes"`
-	ReserveStock            bool     `json:"reserveStock"`
-	MaxItems                int      `json:"maxItems"`
-	MaxQuantityPerItem      int      `json:"maxQuantityPerItem"`
-	NotifyBeforeExpiration  bool     `json:"notifyBeforeExpiration"`
-	AllowEdit               bool     `json:"allowEdit"`
-	AutoSendCheckoutLinks   bool     `json:"autoSendCheckoutLinks"`
-	CheckoutLinkExpiryHours int      `json:"checkoutLinkExpiryHours"`
-	CheckoutSendMethods     []string `json:"checkoutSendMethods"`
+	Enabled            bool     `json:"enabled"`
+	ExpirationMinutes  int      `json:"expirationMinutes"`
+	ReserveStock       bool     `json:"reserveStock"`
+	MaxItems           int      `json:"maxItems"`
+	MaxQuantityPerItem int      `json:"maxQuantityPerItem"`
+	AllowEdit          bool     `json:"allowEdit"`
+	CheckoutSendMethods []string `json:"checkoutSendMethods"`
 	// Automatic message settings
-	SendOnFirstItem           bool `json:"sendOnFirstItem"`
-	SendOnNewItems            bool `json:"sendOnNewItems"`
+	RealTimeCart              bool `json:"realTimeCart"`
+	SendOnLiveEnd             bool `json:"sendOnLiveEnd"`
 	MessageCooldownSeconds    int  `json:"messageCooldownSeconds"`
 	SendExpirationReminder    bool `json:"sendExpirationReminder"`
 	ExpirationReminderMinutes int  `json:"expirationReminderMinutes"`
@@ -65,22 +62,19 @@ type UpdateStoreRequest struct {
 }
 
 type UpdateCartSettingsRequest struct {
-	Enabled                 bool     `json:"enabled"`
-	ExpirationMinutes       int      `json:"expirationMinutes" validate:"gte=0"`
-	ReserveStock            bool     `json:"reserveStock"`
-	MaxItems                int      `json:"maxItems" validate:"gte=0"`
-	MaxQuantityPerItem      int      `json:"maxQuantityPerItem" validate:"gte=0"`
-	NotifyBeforeExpiration  bool     `json:"notifyBeforeExpiration"`
-	AllowEdit               bool     `json:"allowEdit"`
-	AutoSendCheckoutLinks   bool     `json:"autoSendCheckoutLinks"`
-	CheckoutLinkExpiryHours int      `json:"checkoutLinkExpiryHours" validate:"gte=1,lte=168"`
-	CheckoutSendMethods     []string `json:"checkoutSendMethods"`
+	Enabled            bool     `json:"enabled"`
+	ExpirationMinutes  int      `json:"expirationMinutes" validate:"gte=5,lte=1440"`
+	ReserveStock       bool     `json:"reserveStock"`
+	MaxItems           int      `json:"maxItems" validate:"gte=0"`
+	MaxQuantityPerItem int      `json:"maxQuantityPerItem" validate:"gte=1"`
+	AllowEdit          bool     `json:"allowEdit"`
+	CheckoutSendMethods []string `json:"checkoutSendMethods"`
 	// Automatic message settings
-	SendOnFirstItem           bool `json:"sendOnFirstItem"`
-	SendOnNewItems            bool `json:"sendOnNewItems"`
-	MessageCooldownSeconds    int  `json:"messageCooldownSeconds" validate:"gte=0,lte=3600"`
+	RealTimeCart              bool `json:"realTimeCart"`
+	SendOnLiveEnd             bool `json:"sendOnLiveEnd"`
+	MessageCooldownSeconds    int  `json:"messageCooldownSeconds" validate:"gte=0,lte=300"`
 	SendExpirationReminder    bool `json:"sendExpirationReminder"`
-	ExpirationReminderMinutes int  `json:"expirationReminderMinutes" validate:"gte=1,lte=1440"`
+	ExpirationReminderMinutes int  `json:"expirationReminderMinutes" validate:"gte=1,lte=60"`
 }
 
 type StoreResponse struct {
@@ -135,20 +129,17 @@ type UpdateStoreInput struct {
 }
 
 type UpdateCartSettingsInput struct {
-	StoreID                 string
-	Enabled                 bool
-	ExpirationMinutes       int
-	ReserveStock            bool
-	MaxItems                int
-	MaxQuantityPerItem      int
-	NotifyBeforeExpiration  bool
-	AllowEdit               bool
-	AutoSendCheckoutLinks   bool
-	CheckoutLinkExpiryHours int
-	CheckoutSendMethods     []string
+	StoreID            string
+	Enabled            bool
+	ExpirationMinutes  int
+	ReserveStock       bool
+	MaxItems           int
+	MaxQuantityPerItem int
+	AllowEdit          bool
+	CheckoutSendMethods []string
 	// Automatic message settings
-	SendOnFirstItem           bool
-	SendOnNewItems            bool
+	RealTimeCart              bool
+	SendOnLiveEnd             bool
 	MessageCooldownSeconds    int
 	SendExpirationReminder    bool
 	ExpirationReminderMinutes int
@@ -196,20 +187,17 @@ type UpdateStoreParams struct {
 }
 
 type UpdateCartSettingsParams struct {
-	ID                      string
-	Enabled                 bool
-	ExpirationMinutes       int
-	ReserveStock            bool
-	MaxItems                int
-	MaxQuantityPerItem      int
-	NotifyBeforeExpiration  bool
-	AllowEdit               bool
-	AutoSendCheckoutLinks   bool
-	CheckoutLinkExpiryHours int
-	CheckoutSendMethods     []string
+	ID                 string
+	Enabled            bool
+	ExpirationMinutes  int
+	ReserveStock       bool
+	MaxItems           int
+	MaxQuantityPerItem int
+	AllowEdit          bool
+	CheckoutSendMethods []string
 	// Automatic message settings
-	SendOnFirstItem           bool
-	SendOnNewItems            bool
+	RealTimeCart              bool
+	SendOnLiveEnd             bool
 	MessageCooldownSeconds    int
 	SendExpirationReminder    bool
 	ExpirationReminderMinutes int

@@ -11,23 +11,21 @@ var (
 
 // CartSettings represents the cart configuration for a store.
 type CartSettings struct {
-	enabled                  bool
-	expirationMinutes        int
-	reserveStock             bool
-	maxItems                 int
-	maxQuantityPerItem       int
-	notifyBeforeExpiration   bool
+	enabled            bool
+	expirationMinutes  int
+	reserveStock       bool
+	maxItems           int
+	maxQuantityPerItem int
 }
 
 // DefaultCartSettings returns the default cart settings for a new store.
 func DefaultCartSettings() CartSettings {
 	return CartSettings{
-		enabled:                  true,
-		expirationMinutes:        30,
-		reserveStock:             true,
-		maxItems:                 0,  // unlimited
-		maxQuantityPerItem:       5,
-		notifyBeforeExpiration:   true,
+		enabled:            true,
+		expirationMinutes:  30,
+		reserveStock:       true,
+		maxItems:           0, // unlimited
+		maxQuantityPerItem: 5,
 	}
 }
 
@@ -38,7 +36,6 @@ func NewCartSettings(
 	reserveStock bool,
 	maxItems int,
 	maxQuantityPerItem int,
-	notifyBeforeExpiration bool,
 ) (CartSettings, error) {
 	if expirationMinutes < 0 {
 		return CartSettings{}, ErrInvalidExpirationMinutes
@@ -51,12 +48,11 @@ func NewCartSettings(
 	}
 
 	return CartSettings{
-		enabled:                  enabled,
-		expirationMinutes:        expirationMinutes,
-		reserveStock:             reserveStock,
-		maxItems:                 maxItems,
-		maxQuantityPerItem:       maxQuantityPerItem,
-		notifyBeforeExpiration:   notifyBeforeExpiration,
+		enabled:            enabled,
+		expirationMinutes:  expirationMinutes,
+		reserveStock:       reserveStock,
+		maxItems:           maxItems,
+		maxQuantityPerItem: maxQuantityPerItem,
 	}, nil
 }
 
@@ -67,15 +63,13 @@ func ReconstructCartSettings(
 	reserveStock bool,
 	maxItems int,
 	maxQuantityPerItem int,
-	notifyBeforeExpiration bool,
 ) CartSettings {
 	return CartSettings{
-		enabled:                  enabled,
-		expirationMinutes:        expirationMinutes,
-		reserveStock:             reserveStock,
-		maxItems:                 maxItems,
-		maxQuantityPerItem:       maxQuantityPerItem,
-		notifyBeforeExpiration:   notifyBeforeExpiration,
+		enabled:            enabled,
+		expirationMinutes:  expirationMinutes,
+		reserveStock:       reserveStock,
+		maxItems:           maxItems,
+		maxQuantityPerItem: maxQuantityPerItem,
 	}
 }
 
@@ -83,12 +77,11 @@ func ReconstructCartSettings(
 // Getters (immutable access)
 // ============================================
 
-func (c CartSettings) Enabled() bool                { return c.enabled }
-func (c CartSettings) ExpirationMinutes() int       { return c.expirationMinutes }
-func (c CartSettings) ReserveStock() bool           { return c.reserveStock }
-func (c CartSettings) MaxItems() int                { return c.maxItems }
-func (c CartSettings) MaxQuantityPerItem() int      { return c.maxQuantityPerItem }
-func (c CartSettings) NotifyBeforeExpiration() bool { return c.notifyBeforeExpiration }
+func (c CartSettings) Enabled() bool           { return c.enabled }
+func (c CartSettings) ExpirationMinutes() int  { return c.expirationMinutes }
+func (c CartSettings) ReserveStock() bool      { return c.reserveStock }
+func (c CartSettings) MaxItems() int           { return c.maxItems }
+func (c CartSettings) MaxQuantityPerItem() int { return c.maxQuantityPerItem }
 
 // ============================================
 // Business Rules

@@ -51,6 +51,28 @@ func FormatExpiry(hours int) string {
 	return fmt.Sprintf("%d dias", days)
 }
 
+// FormatExpiryMinutes formats expiry minutes as a human-readable string.
+func FormatExpiryMinutes(minutes int) string {
+	if minutes < 60 {
+		if minutes == 1 {
+			return "1 minuto"
+		}
+		return fmt.Sprintf("%d minutos", minutes)
+	}
+	hours := minutes / 60
+	if hours == 1 {
+		return "1 hora"
+	}
+	if hours < 24 {
+		return fmt.Sprintf("%d horas", hours)
+	}
+	days := hours / 24
+	if days == 1 {
+		return "1 dia"
+	}
+	return fmt.Sprintf("%d dias", days)
+}
+
 // ValidateTemplate checks if a template is valid and within limits.
 // Returns the rendered length and any validation errors.
 func ValidateTemplate(template string, sampleVars TemplateVariables) (int, error) {

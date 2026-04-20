@@ -1,6 +1,8 @@
 package live
 
 import (
+	"time"
+
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
@@ -45,6 +47,18 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/:id/live-mode", h.GetLiveModeState)
 	g.Patch("/:id/active-product", h.SetActiveProduct)
 	g.Patch("/:id/pause-processing", h.SetProcessingPaused)
+
+	// Event Products (Whitelist)
+	g.Get("/:id/whitelist", h.ListEventProducts)
+	g.Post("/:id/whitelist", h.AddEventProduct)
+	g.Put("/:id/whitelist/:productId", h.UpdateEventProduct)
+	g.Delete("/:id/whitelist/:productId", h.DeleteEventProduct)
+
+	// Event Upsells
+	g.Get("/:id/upsells", h.ListEventUpsells)
+	g.Post("/:id/upsells", h.AddEventUpsell)
+	g.Put("/:id/upsells/:upsellId", h.UpdateEventUpsell)
+	g.Delete("/:id/upsells/:upsellId", h.DeleteEventUpsell)
 }
 
 // Create godoc
@@ -71,6 +85,16 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 
 	storeID := c.Locals("store_id").(string)
 
+	// Parse scheduling time if provided
+	var scheduledAt *time.Time
+	if req.ScheduledAt != nil && *req.ScheduledAt != "" {
+		t, err := time.Parse(time.RFC3339, *req.ScheduledAt)
+		if err != nil {
+			return httpx.BadRequest(c, "invalid scheduledAt format, use ISO8601/RFC3339")
+		}
+		scheduledAt = &t
+	}
+
 	output, err := h.service.Create(c.Context(), CreateLiveInput{
 		StoreID:                storeID,
 		Title:                  req.Title,
@@ -80,7 +104,9 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		CloseCartOnEventEnd:    req.CloseCartOnEventEnd,
 		CartExpirationMinutes:  req.CartExpirationMinutes,
 		CartMaxQuantityPerItem: req.CartMaxQuantityPerItem,
-		AutoSendCheckoutLinks:  req.AutoSendCheckoutLinks,
+		SendOnLiveEnd:          req.SendOnLiveEnd,
+		ScheduledAt:            scheduledAt,
+		Description:            req.Description,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -278,7 +304,7 @@ func (h *Handler) End(c *fiber.Ctx) error {
 	output, err := h.service.End(c.Context(), EndLiveInput{
 		ID:       id,
 		StoreID:  storeID,
-		AutoSend: req.AutoSendCheckoutLinks,
+		AutoSend: req.SendOnLiveEnd,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -564,7 +590,11 @@ func toLiveResponse(o LiveOutput) LiveResponse {
 		CloseCartOnEventEnd:    o.CloseCartOnEventEnd,
 		CartExpirationMinutes:  o.CartExpirationMinutes,
 		CartMaxQuantityPerItem: o.CartMaxQuantityPerItem,
-		AutoSendCheckoutLinks:  o.AutoSendCheckoutLinks,
+		SendOnLiveEnd:          o.SendOnLiveEnd,
+		ScheduledAt:            o.ScheduledAt,
+		Description:            o.Description,
+		ProductCount:           o.ProductCount,
+		UpsellCount:            o.UpsellCount,
 		CreatedAt:              o.CreatedAt,
 		UpdatedAt:              o.UpdatedAt,
 	}
@@ -618,7 +648,11 @@ func toEventResponse(o EventOutput) EventResponse {
 		CloseCartOnEventEnd:    o.CloseCartOnEventEnd,
 		CartExpirationMinutes:  o.CartExpirationMinutes,
 		CartMaxQuantityPerItem: o.CartMaxQuantityPerItem,
-		AutoSendCheckoutLinks:  o.AutoSendCheckoutLinks,
+		SendOnLiveEnd:          o.SendOnLiveEnd,
+		ScheduledAt:            o.ScheduledAt,
+		Description:            o.Description,
+		ProductCount:           o.ProductCount,
+		UpsellCount:            o.UpsellCount,
 		Sessions:               sessions,
 		CreatedAt:              o.CreatedAt,
 		UpdatedAt:              o.UpdatedAt,
@@ -685,6 +719,7 @@ func (h *Handler) ListCarts(c *fiber.Ctx) error {
 	for i, cart := range carts {
 		responses[i] = CartWithTotalResponse{
 			ID:             cart.ID,
+			SessionID:      cart.SessionID,
 			PlatformUserID: cart.PlatformUserID,
 			PlatformHandle: cart.PlatformHandle,
 			Status:         cart.Status,
@@ -706,7 +741,7 @@ func (h *Handler) ListCarts(c *fiber.Ctx) error {
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Live event UUID"
-// @Success      200 {object} httpx.Envelope{data=ListEventProductsResponse}
+// @Success      200 {object} httpx.Envelope{data=ListEventProductSalesResponse}
 // @Failure      404 {object} httpx.Envelope
 // @Router       /api/v1/stores/{storeId}/lives/{id}/products [get]
 // @Security     BearerAuth
@@ -719,9 +754,9 @@ func (h *Handler) ListProducts(c *fiber.Ctx) error {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	responses := make([]EventProductResponse, len(products))
+	responses := make([]EventProductSalesResponse, len(products))
 	for i, product := range products {
-		responses[i] = EventProductResponse{
+		responses[i] = EventProductSalesResponse{
 			ID:            product.ID,
 			Name:          product.Name,
 			ImageURL:      product.ImageURL,
@@ -731,7 +766,7 @@ func (h *Handler) ListProducts(c *fiber.Ctx) error {
 		}
 	}
 
-	return httpx.OK(c, ListEventProductsResponse{Data: responses})
+	return httpx.OK(c, ListEventProductSalesResponse{Data: responses})
 }
 
 // =============================================================================
@@ -839,4 +874,319 @@ func toLiveModeStateResponse(state *LiveModeStateOutput) LiveModeStateResponse {
 	}
 
 	return resp
+}
+
+// =============================================================================
+// EVENT PRODUCTS (Whitelist)
+// =============================================================================
+
+// ListEventProducts godoc
+// @Summary      List event products in whitelist
+// @Description  Returns all products configured for this event's whitelist
+// @Tags         lives
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Event UUID"
+// @Success      200 {object} httpx.Envelope{data=ListEventProductsResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/whitelist [get]
+// @Security     BearerAuth
+func (h *Handler) ListEventProducts(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	products, err := h.service.ListEventProducts(c.Context(), eventID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	responses := make([]EventProductResponse, len(products))
+	for i, p := range products {
+		responses[i] = toEventProductResponse(p)
+	}
+
+	return httpx.OK(c, ListEventProductsResponse{Data: responses})
+}
+
+// AddEventProduct godoc
+// @Summary      Add product to event whitelist
+// @Description  Adds a product with optional special price and max quantity
+// @Tags         lives
+// @Accept       json
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Event UUID"
+// @Param        request body EventProductRequest true "Product configuration"
+// @Success      201 {object} httpx.Envelope{data=EventProductResponse}
+// @Failure      400 {object} httpx.Envelope
+// @Failure      404 {object} httpx.Envelope
+// @Failure      422 {object} httpx.ValidationEnvelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/whitelist [post]
+// @Security     BearerAuth
+func (h *Handler) AddEventProduct(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	var req EventProductRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	output, err := h.service.AddEventProduct(c.Context(), AddEventProductInput{
+		EventID:      eventID,
+		StoreID:      storeID,
+		ProductID:    req.ProductID,
+		SpecialPrice: req.SpecialPrice,
+		MaxQuantity:  req.MaxQuantity,
+		DisplayOrder: req.DisplayOrder,
+		Featured:     req.Featured,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Created(c, toEventProductResponse(output))
+}
+
+// UpdateEventProduct godoc
+// @Summary      Update event product configuration
+// @Description  Updates special price, max quantity, display order, or featured status
+// @Tags         lives
+// @Accept       json
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Event UUID"
+// @Param        productId path string true "Event Product UUID"
+// @Param        request body EventProductRequest true "Product configuration"
+// @Success      200 {object} httpx.Envelope{data=EventProductResponse}
+// @Failure      400 {object} httpx.Envelope
+// @Failure      404 {object} httpx.Envelope
+// @Failure      422 {object} httpx.ValidationEnvelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/whitelist/{productId} [put]
+// @Security     BearerAuth
+func (h *Handler) UpdateEventProduct(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+	productID := c.Params("productId")
+
+	var req EventProductRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+
+	output, err := h.service.UpdateEventProduct(c.Context(), UpdateEventProductInput{
+		ID:           productID,
+		EventID:      eventID,
+		StoreID:      storeID,
+		SpecialPrice: req.SpecialPrice,
+		MaxQuantity:  req.MaxQuantity,
+		DisplayOrder: req.DisplayOrder,
+		Featured:     req.Featured,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, toEventProductResponse(output))
+}
+
+// DeleteEventProduct godoc
+// @Summary      Remove product from event whitelist
+// @Description  Removes a product from the event's whitelist
+// @Tags         lives
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Event UUID"
+// @Param        productId path string true "Event Product UUID"
+// @Success      200 {object} httpx.Envelope{data=httpx.DeletedResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/whitelist/{productId} [delete]
+// @Security     BearerAuth
+func (h *Handler) DeleteEventProduct(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+	productID := c.Params("productId")
+
+	if err := h.service.DeleteEventProduct(c.Context(), productID, eventID, storeID); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Deleted(c, productID)
+}
+
+func toEventProductResponse(o EventProductOutput) EventProductResponse {
+	return EventProductResponse{
+		ID:             o.ID,
+		ProductID:      o.ProductID,
+		Name:           o.Name,
+		Keyword:        o.Keyword,
+		ImageURL:       o.ImageURL,
+		OriginalPrice:  o.OriginalPrice,
+		SpecialPrice:   o.SpecialPrice,
+		EffectivePrice: o.EffectivePrice,
+		MaxQuantity:    o.MaxQuantity,
+		DisplayOrder:   o.DisplayOrder,
+		Featured:       o.Featured,
+		Stock:          o.Stock,
+		ProductActive:  o.ProductActive,
+	}
+}
+
+// =============================================================================
+// EVENT UPSELLS
+// =============================================================================
+
+// ListEventUpsells godoc
+// @Summary      List event upsells
+// @Description  Returns all upsells configured for this event
+// @Tags         lives
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Event UUID"
+// @Success      200 {object} httpx.Envelope{data=ListEventUpsellsResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/upsells [get]
+// @Security     BearerAuth
+func (h *Handler) ListEventUpsells(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	upsells, err := h.service.ListEventUpsells(c.Context(), eventID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	responses := make([]EventUpsellResponse, len(upsells))
+	for i, u := range upsells {
+		responses[i] = toEventUpsellResponse(u)
+	}
+
+	return httpx.OK(c, ListEventUpsellsResponse{Data: responses})
+}
+
+// AddEventUpsell godoc
+// @Summary      Add upsell to event
+// @Description  Adds a product as an upsell with discount percentage
+// @Tags         lives
+// @Accept       json
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Event UUID"
+// @Param        request body EventUpsellRequest true "Upsell configuration"
+// @Success      201 {object} httpx.Envelope{data=EventUpsellResponse}
+// @Failure      400 {object} httpx.Envelope
+// @Failure      404 {object} httpx.Envelope
+// @Failure      422 {object} httpx.ValidationEnvelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/upsells [post]
+// @Security     BearerAuth
+func (h *Handler) AddEventUpsell(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	var req EventUpsellRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	output, err := h.service.AddEventUpsell(c.Context(), AddEventUpsellInput{
+		EventID:         eventID,
+		StoreID:         storeID,
+		ProductID:       req.ProductID,
+		DiscountPercent: req.DiscountPercent,
+		MessageTemplate: req.MessageTemplate,
+		DisplayOrder:    req.DisplayOrder,
+		Active:          req.Active,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Created(c, toEventUpsellResponse(output))
+}
+
+// UpdateEventUpsell godoc
+// @Summary      Update event upsell
+// @Description  Updates discount percent, message template, display order, or active status
+// @Tags         lives
+// @Accept       json
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Event UUID"
+// @Param        upsellId path string true "Upsell UUID"
+// @Param        request body EventUpsellRequest true "Upsell configuration"
+// @Success      200 {object} httpx.Envelope{data=EventUpsellResponse}
+// @Failure      400 {object} httpx.Envelope
+// @Failure      404 {object} httpx.Envelope
+// @Failure      422 {object} httpx.ValidationEnvelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/upsells/{upsellId} [put]
+// @Security     BearerAuth
+func (h *Handler) UpdateEventUpsell(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+	upsellID := c.Params("upsellId")
+
+	var req EventUpsellRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+
+	output, err := h.service.UpdateEventUpsell(c.Context(), UpdateEventUpsellInput{
+		ID:              upsellID,
+		EventID:         eventID,
+		StoreID:         storeID,
+		DiscountPercent: req.DiscountPercent,
+		MessageTemplate: req.MessageTemplate,
+		DisplayOrder:    req.DisplayOrder,
+		Active:          req.Active,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, toEventUpsellResponse(output))
+}
+
+// DeleteEventUpsell godoc
+// @Summary      Remove upsell from event
+// @Description  Removes an upsell from the event
+// @Tags         lives
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Event UUID"
+// @Param        upsellId path string true "Upsell UUID"
+// @Success      200 {object} httpx.Envelope{data=httpx.DeletedResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/upsells/{upsellId} [delete]
+// @Security     BearerAuth
+func (h *Handler) DeleteEventUpsell(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+	upsellID := c.Params("upsellId")
+
+	if err := h.service.DeleteEventUpsell(c.Context(), upsellID, eventID, storeID); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Deleted(c, upsellID)
+}
+
+func toEventUpsellResponse(o EventUpsellOutput) EventUpsellResponse {
+	return EventUpsellResponse{
+		ID:              o.ID,
+		ProductID:       o.ProductID,
+		Name:            o.Name,
+		Keyword:         o.Keyword,
+		ImageURL:        o.ImageURL,
+		OriginalPrice:   o.OriginalPrice,
+		DiscountPercent: o.DiscountPercent,
+		DiscountedPrice: o.DiscountedPrice,
+		MessageTemplate: o.MessageTemplate,
+		DisplayOrder:    o.DisplayOrder,
+		Active:          o.Active,
+		Stock:           o.Stock,
+	}
 }

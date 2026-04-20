@@ -172,18 +172,19 @@ func (r *Repository) toCartRow(row sqlc.GetCartByTokenWithDetailsRow) *CartRow {
 	}
 
 	cart := &CartRow{
-		ID:             uuid.UUID(row.ID.Bytes).String(),
-		EventID:        uuid.UUID(row.EventID.Bytes).String(),
-		PlatformUserID: row.PlatformUserID,
-		PlatformHandle: row.PlatformHandle,
-		Token:          row.Token,
-		Status:         row.Status,
-		PaymentStatus:  "unpaid",
-		CreatedAt:      row.CreatedAt.Time,
-		EventTitle:     eventTitle,
-		StoreID:        uuid.UUID(row.StoreID.Bytes).String(),
-		StoreName:      row.StoreName,
-		AllowEdit:      row.AllowEdit,
+		ID:                 uuid.UUID(row.ID.Bytes).String(),
+		EventID:            uuid.UUID(row.EventID.Bytes).String(),
+		PlatformUserID:     row.PlatformUserID,
+		PlatformHandle:     row.PlatformHandle,
+		Token:              row.Token,
+		Status:             row.Status,
+		PaymentStatus:      "unpaid",
+		CreatedAt:          row.CreatedAt.Time,
+		EventTitle:         eventTitle,
+		StoreID:            uuid.UUID(row.StoreID.Bytes).String(),
+		StoreName:          row.StoreName,
+		AllowEdit:          row.AllowEdit,
+		MaxQuantityPerItem: int(row.MaxQuantityPerItem),
 	}
 
 	if row.CheckoutUrl.Valid {
@@ -235,23 +236,20 @@ func (r *Repository) toCartItemRow(row sqlc.ListCartItemsForCheckoutRow) CartIte
 	return item
 }
 
-// GetStoreCheckoutExpiryHours returns the checkout link expiry hours for a store.
-func (r *Repository) GetStoreCheckoutExpiryHours(ctx context.Context, storeID string) (int, error) {
+// Deprecated: Use GetStoreCartExpirationMinutes instead.
+// GetStoreCartExpirationMinutes returns the cart expiration time in minutes.
+func (r *Repository) GetStoreCartExpirationMinutes(ctx context.Context, storeID string) (int, error) {
 	uid, err := uuid.Parse(storeID)
 	if err != nil {
-		return 48, nil // Default to 48 hours
+		return 30, nil // Default to 30 minutes
 	}
 
 	row, err := r.q.GetStoreByID(ctx, pgtype.UUID{Bytes: uid, Valid: true})
 	if err != nil {
-		return 48, nil // Default to 48 hours
+		return 30, nil // Default to 30 minutes
 	}
 
-	if row.CheckoutLinkExpiryHours.Valid {
-		return int(row.CheckoutLinkExpiryHours.Int32), nil
-	}
-
-	return 48, nil // Default
+	return int(row.CartExpirationMinutes), nil
 }
 
 // CalculateCartTotal calculates the total for non-waitlisted items.
@@ -266,10 +264,21 @@ func CalculateCartTotal(items []CartItemRow) (subtotal int64, totalItems int) {
 }
 
 // GetExpiresAt calculates the expiration time based on store settings.
+// GetExpiresAt calculates expiration time from hours.
+// Deprecated: Use GetExpiresAtMinutes instead.
 func GetExpiresAt(hours int) *time.Time {
 	if hours <= 0 {
 		return nil
 	}
 	t := time.Now().Add(time.Duration(hours) * time.Hour)
+	return &t
+}
+
+// GetExpiresAtMinutes calculates expiration time from minutes.
+func GetExpiresAtMinutes(minutes int) *time.Time {
+	if minutes <= 0 {
+		return nil
+	}
+	t := time.Now().Add(time.Duration(minutes) * time.Minute)
 	return &t
 }

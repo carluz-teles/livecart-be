@@ -53,8 +53,7 @@ type TemplateSettings struct {
 // CartMessageSettings represents when/how to send automatic messages.
 // These are stored in stores.cart_* columns and control notification triggers.
 type CartMessageSettings struct {
-	SendOnFirstItem           bool `json:"sendOnFirstItem"`
-	SendOnNewItems            bool `json:"sendOnNewItems"`
+	RealTimeCart              bool `json:"realTimeCart"`
 	MessageCooldownSeconds    int  `json:"messageCooldownSeconds"`
 	SendExpirationReminder    bool `json:"sendExpirationReminder"`
 	ExpirationReminderMinutes int  `json:"expirationReminderMinutes"`
@@ -82,8 +81,7 @@ func DefaultSettings() Settings {
 // DefaultCartMessageSettings returns the default cart message settings.
 func DefaultCartMessageSettings() CartMessageSettings {
 	return CartMessageSettings{
-		SendOnFirstItem:           true,
-		SendOnNewItems:            true,
+		RealTimeCart:              true,
 		MessageCooldownSeconds:    30,
 		SendExpirationReminder:    true,
 		ExpirationReminderMinutes: 15,

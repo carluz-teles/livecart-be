@@ -10,20 +10,21 @@ import (
 
 // CartForCheckoutResponse is the response for GET /api/public/checkout/:token
 type CartForCheckoutResponse struct {
-	ID             string                `json:"id"`
-	Token          string                `json:"token"`
-	Status         string                `json:"status"`
-	CustomerEmail  *string               `json:"customerEmail"`
-	PaymentStatus  string                `json:"paymentStatus"`
-	CheckoutURL    *string               `json:"checkoutUrl"`
-	PlatformHandle string                `json:"platformHandle"`
-	AllowEdit      bool                  `json:"allowEdit"`
-	ExpiresAt      *time.Time            `json:"expiresAt"`
-	CreatedAt      time.Time             `json:"createdAt"`
-	Event          CartEventInfo         `json:"event"`
-	Store          CartStoreInfo         `json:"store"`
-	Items          []CartItemResponse    `json:"items"`
-	Summary        CartSummary           `json:"summary"`
+	ID                 string                `json:"id"`
+	Token              string                `json:"token"`
+	Status             string                `json:"status"`
+	CustomerEmail      *string               `json:"customerEmail"`
+	PaymentStatus      string                `json:"paymentStatus"`
+	CheckoutURL        *string               `json:"checkoutUrl"`
+	PlatformHandle     string                `json:"platformHandle"`
+	AllowEdit          bool                  `json:"allowEdit"`
+	MaxQuantityPerItem int                   `json:"maxQuantityPerItem"`
+	ExpiresAt          *time.Time            `json:"expiresAt"`
+	CreatedAt          time.Time             `json:"createdAt"`
+	Event              CartEventInfo         `json:"event"`
+	Store              CartStoreInfo         `json:"store"`
+	Items              []CartItemResponse    `json:"items"`
+	Summary            CartSummary           `json:"summary"`
 }
 
 // CartEventInfo contains event info for the checkout page
@@ -150,24 +151,25 @@ type GetCartForCheckoutOutput struct {
 
 // CartDetails contains the cart data with event/store info
 type CartDetails struct {
-	ID              string
-	EventID         string
-	PlatformUserID  string
-	PlatformHandle  string
-	Token           string
-	Status          string
-	CheckoutURL     *string
-	CheckoutID      *string
-	CustomerEmail   *string
-	PaymentStatus   string
-	PaidAt          *time.Time
-	CreatedAt       time.Time
-	ExpiresAt       *time.Time
-	EventTitle      string
-	StoreID         string
-	StoreName       string
-	StoreLogoURL    *string
-	AllowEdit       bool
+	ID                 string
+	EventID            string
+	PlatformUserID     string
+	PlatformHandle     string
+	Token              string
+	Status             string
+	CheckoutURL        *string
+	CheckoutID         *string
+	CustomerEmail      *string
+	PaymentStatus      string
+	PaidAt             *time.Time
+	CreatedAt          time.Time
+	ExpiresAt          *time.Time
+	EventTitle         string
+	StoreID            string
+	StoreName          string
+	StoreLogoURL       *string
+	AllowEdit          bool
+	MaxQuantityPerItem int
 }
 
 // CartItemDetails contains a cart item with product info
@@ -277,25 +279,26 @@ type GetPaymentStatusOutput struct {
 
 // CartRow represents a cart row from the database
 type CartRow struct {
-	ID                string
-	EventID           string
-	PlatformUserID    string
-	PlatformHandle    string
-	Token             string
-	Status            string
-	CheckoutURL       *string
-	CheckoutID        *string
-	CheckoutExpiresAt *time.Time
-	CustomerEmail     *string
-	PaymentStatus     string
-	PaidAt            *time.Time
-	CreatedAt         time.Time
-	ExpiresAt         *time.Time
-	EventTitle        string
-	StoreID           string
-	StoreName         string
-	StoreLogoURL      *string
-	AllowEdit         bool
+	ID                 string
+	EventID            string
+	PlatformUserID     string
+	PlatformHandle     string
+	Token              string
+	Status             string
+	CheckoutURL        *string
+	CheckoutID         *string
+	CheckoutExpiresAt  *time.Time
+	CustomerEmail      *string
+	PaymentStatus      string
+	PaidAt             *time.Time
+	CreatedAt          time.Time
+	ExpiresAt          *time.Time
+	EventTitle         string
+	StoreID            string
+	StoreName          string
+	StoreLogoURL       *string
+	AllowEdit          bool
+	MaxQuantityPerItem int
 }
 
 // CartItemRow represents a cart item row from the database
