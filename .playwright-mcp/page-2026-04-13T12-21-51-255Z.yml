@@ -1,0 +1,33 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e101]:
+    - generic [ref=e102]:
+      - generic [ref=e104]:
+        - heading "Utilize outro método" [level=1] [ref=e105]
+        - paragraph [ref=e106]: Encontrando dificuldades? Você pode utilizar qualquer um destes métodos para acessar.
+      - generic [ref=e108]:
+        - generic [ref=e109]:
+          - button "Sign in with Google Continuar com Google" [ref=e112] [cursor=pointer]:
+            - generic [ref=e113]:
+              - img "Sign in with Google" [ref=e115]
+              - generic [ref=e116]: Continuar com Google
+          - button "Enviar código para test+clerk_test@example.com" [ref=e117] [cursor=pointer]:
+            - img [ref=e119]
+            - generic [ref=e123]: Enviar código para test+clerk_test@example.com
+            - img [ref=e124]
+        - link "Voltar" [ref=e127] [cursor=pointer]:
+          - /url: http://localhost:3000/login/factor-one
+          - paragraph [ref=e128]: Voltar
+    - generic [ref=e129]:
+      - generic [ref=e130]:
+        - generic [ref=e131]: Não tem nenhum destes?
+        - link "Ajuda" [ref=e132] [cursor=pointer]:
+          - /url: http://localhost:3000/login/factor-one
+      - generic [ref=e134]:
+        - generic [ref=e136]:
+          - paragraph [ref=e137]: Secured by
+          - link "Clerk logo" [ref=e138] [cursor=pointer]:
+            - /url: https://go.clerk.com/components
+            - img [ref=e139]
+        - paragraph [ref=e144]: Development mode
+  - region "Notifications alt+T"
+  - alert [ref=e54]

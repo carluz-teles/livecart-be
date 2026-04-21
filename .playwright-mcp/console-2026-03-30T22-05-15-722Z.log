@@ -1,0 +1,20 @@
+[    1670ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:3000/events/new:0
+[    1859ms] Error: Cannot find module './vendor-chunks/@clerk.js'
+Require stack:
+- /home/carluz_teles/livecart-fe/.next/server/webpack-runtime.js
+- /home/carluz_teles/livecart-fe/.next/server/app/(dashboard)/events/[id]/page.js
+- /home/carluz_teles/livecart-fe/node_modules/next/dist/server/require.js
+- /home/carluz_teles/livecart-fe/node_modules/next/dist/server/load-components.js
+- /home/carluz_teles/livecart-fe/node_modules/next/dist/build/utils.js
+- /home/carluz_teles/livecart-fe/node_modules/next/dist/server/dev/static-paths-worker.js
+- /home/carluz_teles/livecart-fe/node_modules/next/dist/compiled/jest-worker/processChild.js
+    at Module.<anonymous> (node:internal/modules/cjs/loader:1419:15)
+    at <unknown> (file:///home/carluz_teles/livecart-fe/node_modules/next/dist/server/require-hook.js:55:36)
+    at defaultResolveImpl (node:internal/modules/cjs/loader:1057:19)
+    at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1062:22)
+    at Module._load (node:internal/modules/cjs/loader:1225:37)
+    at TracingChannel.traceSync (node:diagnostics_channel:328:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:244:24)
+    at Module.<anonymous> (node:internal/modules/cjs/loader:1502:12)
+    at mod.require (file:///home/carluz_teles/livecart-fe/node_modules/next/dist/server/require-hook.js:65:28)
+    at require (node:internal/modules/helpers:152:16)

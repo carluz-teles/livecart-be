@@ -1,0 +1,61 @@
+- generic [active]:
+  - alert [ref=e1]
+  - dialog [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - heading "Build Error" [level=1] [ref=e7]
+        - paragraph [ref=e8]: Failed to compile
+        - generic [ref=e9]:
+          - text: Next.js (14.2.35) is outdated
+          - link "(learn more)" [ref=e11] [cursor=pointer]:
+            - /url: https://nextjs.org/docs/messages/version-staleness
+      - generic [ref=e12]:
+        - generic [ref=e13]:
+          - link "./src/components/event/EventForm.tsx:12:1" [ref=e14] [cursor=pointer]:
+            - text: ./src/components/event/EventForm.tsx:12:1
+            - img [ref=e15]
+          - generic [ref=e19]:
+            - generic [ref=e20]: "Module not found: Can't resolve '@/components/ui/radio-group'"
+            - generic [ref=e21]: 10 |
+            - text: import
+            - generic [ref=e22]: "{"
+            - text: Input
+            - generic [ref=e23]: "}"
+            - text: from "@/components/ui/input"
+            - generic [ref=e24]: 11 |
+            - text: import
+            - generic [ref=e25]: "{"
+            - text: Label
+            - generic [ref=e26]: "}"
+            - text: from "@/components/ui/label" >
+            - generic [ref=e27]: 12 |
+            - text: import
+            - generic [ref=e28]: "{"
+            - text: RadioGroup, RadioGroupItem
+            - generic [ref=e29]: "}"
+            - text: from "@/components/ui/radio-group"
+            - generic [ref=e30]: "|"
+            - text: ^
+            - generic [ref=e31]: 13 |
+            - text: import
+            - generic [ref=e32]: "{"
+            - text: Separator
+            - generic [ref=e33]: "}"
+            - text: from "@/components/ui/separator"
+            - generic [ref=e34]: 14 |
+            - text: import
+            - generic [ref=e35]: "{"
+            - generic [ref=e36]: 15 |
+            - text: Sheet,
+            - generic [ref=e37]:
+              - link "https://nextjs.org/docs/messages/module-not-found" [ref=e38] [cursor=pointer]:
+                - /url: https://nextjs.org/docs/messages/module-not-found
+              - text: "Import trace for requested module:"
+            - link "./src/components/event/index.ts" [ref=e39] [cursor=pointer]:
+              - text: ./src/components/event/index.ts
+              - img [ref=e40]
+            - link "./src/app/(dashboard)/events/page.tsx" [ref=e44] [cursor=pointer]:
+              - text: ./src/app/(dashboard)/events/page.tsx
+              - img [ref=e45]
+        - contentinfo [ref=e49]:
+          - paragraph [ref=e50]: This error occurred during the build process and can only be dismissed by fixing the error.

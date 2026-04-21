@@ -164,9 +164,14 @@ type SocialProvider interface {
 	// Note: Subject to 24h messaging window restriction.
 	SendDirectMessage(ctx context.Context, recipientID, text string) error
 
-	// ReplyToComment replies to a comment (live or post).
+	// ReplyToComment replies to a comment (live or post) publicly.
 	// This method does NOT have the 24h messaging window restriction.
 	ReplyToComment(ctx context.Context, commentID, text string) error
+
+	// SendPrivateReply sends a private DM to the user who made a comment.
+	// This uses the Private Reply feature - sends a DM in response to a comment.
+	// Unlike ReplyToComment (public), this sends a private message to the commenter.
+	SendPrivateReply(ctx context.Context, commentID, text string) error
 
 	// GetActiveLives retrieves all live videos currently being broadcast.
 	// Only returns lives that are actively streaming at the time of the request.

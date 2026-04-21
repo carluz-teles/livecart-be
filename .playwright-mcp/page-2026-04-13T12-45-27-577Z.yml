@@ -1,0 +1,123 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - complementary [ref=e3]:
+      - img [ref=e6]
+      - navigation [ref=e13]:
+        - generic [ref=e14]:
+          - generic [ref=e15]:
+            - paragraph [ref=e16]: Geral
+            - generic [ref=e17]:
+              - link "Dashboard" [ref=e18] [cursor=pointer]:
+                - /url: /
+                - img [ref=e19]
+                - text: Dashboard
+              - link "Eventos" [ref=e24] [cursor=pointer]:
+                - /url: /events
+                - img [ref=e25]
+                - text: Eventos
+              - link "Produtos" [ref=e27] [cursor=pointer]:
+                - /url: /products
+                - img [ref=e28]
+                - text: Produtos
+              - link "Pedidos" [ref=e32] [cursor=pointer]:
+                - /url: /orders
+                - img [ref=e33]
+                - text: Pedidos
+              - link "Clientes" [ref=e37] [cursor=pointer]:
+                - /url: /customers
+                - img [ref=e38]
+                - text: Clientes
+          - generic [ref=e43]:
+            - paragraph [ref=e44]: Outros
+            - generic [ref=e45]:
+              - link "Configurações" [ref=e46] [cursor=pointer]:
+                - /url: /settings/account
+                - img [ref=e47]
+                - text: Configurações
+              - link "Documentação" [ref=e50] [cursor=pointer]:
+                - /url: /docs
+                - img [ref=e51]
+                - text: Documentação
+      - generic [ref=e55]:
+        - link "Feedback" [ref=e56] [cursor=pointer]:
+          - /url: mailto:feedback@livecart.app
+          - img [ref=e57]
+          - text: Feedback
+        - link "Suporte" [ref=e59] [cursor=pointer]:
+          - /url: mailto:suporte@livecart.app
+          - img [ref=e60]
+          - text: Suporte
+    - generic [ref=e63]:
+      - banner [ref=e64]:
+        - generic [ref=e65]:
+          - button "Alternar tema" [ref=e66] [cursor=pointer]:
+            - img
+            - generic [ref=e67]: Alternar tema
+          - button "Notificações" [ref=e68] [cursor=pointer]:
+            - img
+            - generic [ref=e69]: Notificações
+          - button "U" [ref=e70] [cursor=pointer]:
+            - generic [ref=e72]: U
+            - img
+      - main [ref=e73]:
+        - generic [ref=e74]:
+          - generic [ref=e75]:
+            - generic [ref=e76]:
+              - heading "Eventos" [level=1] [ref=e77]
+              - paragraph [ref=e78]: Gerencie seus eventos e acompanhe as vendas em tempo real
+            - button "Novo Evento" [ref=e79] [cursor=pointer]:
+              - img
+              - text: Novo Evento
+          - generic [ref=e80]:
+            - generic [ref=e81]:
+              - generic [ref=e82]:
+                - generic [ref=e83]: Total de Eventos
+                - img [ref=e84]
+              - generic [ref=e86]:
+                - generic [ref=e87]: "0"
+                - paragraph [ref=e88]: eventos criados
+            - generic [ref=e89]:
+              - generic [ref=e90]:
+                - generic [ref=e91]: Ativos Agora
+                - img [ref=e92]
+              - generic [ref=e98]:
+                - generic [ref=e99]: "0"
+                - paragraph [ref=e100]: ao vivo agora
+            - generic [ref=e101]:
+              - generic [ref=e102]:
+                - generic [ref=e103]: Total de Pedidos
+                - img [ref=e104]
+              - generic [ref=e108]:
+                - generic [ref=e109]: "0"
+                - paragraph [ref=e110]: carrinhos criados
+            - generic [ref=e111]:
+              - generic [ref=e112]:
+                - generic [ref=e113]: Receita Total
+                - img [ref=e114]
+              - generic [ref=e116]:
+                - generic [ref=e117]: "-"
+                - paragraph [ref=e118]: em vendas
+          - generic [ref=e119]:
+            - generic [ref=e120]:
+              - generic [ref=e121]: Lista de Eventos
+              - generic [ref=e122]: Visualize e gerencie todos os seus eventos.
+            - generic [ref=e123]:
+              - generic [ref=e124]:
+                - generic [ref=e125]:
+                  - img [ref=e126]
+                  - textbox "Buscar por titulo..." [ref=e129]
+                - button "Filtros" [ref=e130] [cursor=pointer]:
+                  - img
+                  - text: Filtros
+              - table [ref=e133]:
+                - rowgroup [ref=e134]:
+                  - row "Titulo Status Pedidos Criado em" [ref=e135]:
+                    - columnheader "Titulo" [ref=e136]
+                    - columnheader "Status" [ref=e137]
+                    - columnheader "Pedidos" [ref=e138]
+                    - columnheader "Criado em" [ref=e139]
+                    - columnheader [ref=e140]
+                - rowgroup [ref=e141]:
+                  - row "Nenhum evento encontrado." [ref=e142]:
+                    - cell "Nenhum evento encontrado." [ref=e143]
+  - region "Notifications alt+T"

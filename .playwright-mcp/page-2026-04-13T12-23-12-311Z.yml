@@ -1,0 +1,90 @@
+- generic [ref=e1]:
+  - generic [ref=e182]:
+    - complementary [ref=e183]:
+      - generic [ref=e184]:
+        - img [ref=e186]
+        - generic [ref=e190]:
+          - generic [ref=e191]: Minha Loja
+          - generic [ref=e192]: LiveCart
+      - navigation [ref=e193]:
+        - generic [ref=e194]:
+          - generic [ref=e195]:
+            - paragraph [ref=e196]: Geral
+            - generic [ref=e197]:
+              - link "Dashboard" [ref=e198] [cursor=pointer]:
+                - /url: /
+                - img [ref=e199]
+                - text: Dashboard
+              - link "Eventos" [ref=e204] [cursor=pointer]:
+                - /url: /events
+                - img [ref=e205]
+                - text: Eventos
+              - link "Produtos" [ref=e207] [cursor=pointer]:
+                - /url: /products
+                - img [ref=e208]
+                - text: Produtos
+              - link "Pedidos" [ref=e212] [cursor=pointer]:
+                - /url: /orders
+                - img [ref=e213]
+                - text: Pedidos
+              - link "Clientes" [ref=e217] [cursor=pointer]:
+                - /url: /customers
+                - img [ref=e218]
+                - text: Clientes
+          - generic [ref=e223]:
+            - paragraph [ref=e224]: Outros
+            - generic [ref=e225]:
+              - link "Configurações" [ref=e226] [cursor=pointer]:
+                - /url: /settings/account
+                - img [ref=e227]
+                - text: Configurações
+              - link "Documentação" [ref=e230] [cursor=pointer]:
+                - /url: /docs
+                - img [ref=e231]
+                - text: Documentação
+      - generic [ref=e235]:
+        - link "Feedback" [ref=e236] [cursor=pointer]:
+          - /url: mailto:feedback@livecart.app
+          - img [ref=e237]
+          - text: Feedback
+        - link "Suporte" [ref=e239] [cursor=pointer]:
+          - /url: mailto:suporte@livecart.app
+          - img [ref=e240]
+          - text: Suporte
+    - generic [ref=e243]:
+      - banner [ref=e244]:
+        - generic [ref=e245]:
+          - button "Alternar tema" [ref=e246] [cursor=pointer]:
+            - img
+            - generic [ref=e247]: Alternar tema
+          - button "Notificações" [ref=e248] [cursor=pointer]:
+            - img
+            - generic [ref=e249]: Notificações
+          - button "Test User Test User test+clerk_test@example.com" [ref=e250] [cursor=pointer]:
+            - img "Test User" [ref=e252]
+            - generic [ref=e253]:
+              - generic [ref=e254]: Test User
+              - generic [ref=e255]: test+clerk_test@example.com
+            - img
+      - main [ref=e256]:
+        - generic [ref=e393]:
+          - generic [ref=e395]:
+            - button "Voltar" [ref=e396] [cursor=pointer]:
+              - img
+              - text: Voltar
+            - generic [ref=e401]: 2 de 3
+          - generic [ref=e451]:
+            - generic [ref=e452]:
+              - heading "Detalhes do evento" [level=1] [ref=e453]
+              - paragraph [ref=e454]: De um nome para identificar seu evento
+            - generic [ref=e456]:
+              - text: Titulo do evento
+              - textbox "Titulo do evento" [active] [ref=e457]:
+                - /placeholder: "Ex: Live de Sabado, Promocao Black Friday..."
+              - paragraph [ref=e458]: Este nome ajuda a identificar o evento na lista e nos relatorios.
+          - generic [ref=e445]:
+            - button "Continuar" [disabled]:
+              - text: Continuar
+              - img
+  - region "Notifications alt+T"
+  - alert [ref=e54]

@@ -1051,8 +1051,9 @@ func (s *Service) SendInstagramDM(ctx context.Context, storeID, recipientID, tex
 	return nil
 }
 
-// ReplyToInstagramComment resolves the active Instagram integration of a store and replies
-// to a comment. This method does NOT have the 24h messaging window restriction.
+// ReplyToInstagramComment resolves the active Instagram integration of a store and sends
+// a private DM to the user who made the comment using Instagram's Private Reply feature.
+// This sends a DM in response to a comment (not a public reply).
 func (s *Service) ReplyToInstagramComment(ctx context.Context, storeID, commentID, text string) error {
 	integration, err := s.repo.GetByProvider(ctx, storeID, "social", "instagram")
 	if err != nil {
@@ -1072,8 +1073,9 @@ func (s *Service) ReplyToInstagramComment(ctx context.Context, storeID, commentI
 		return fmt.Errorf("provider is not a social provider")
 	}
 
-	if err := socialProvider.ReplyToComment(ctx, commentID, text); err != nil {
-		s.logger.Warn("failed to reply to instagram comment",
+	// Use Private Reply to send a DM in response to the comment
+	if err := socialProvider.SendPrivateReply(ctx, commentID, text); err != nil {
+		s.logger.Warn("failed to send private reply to instagram comment",
 			zap.String("store_id", storeID),
 			zap.String("comment_id", commentID),
 			zap.Error(err),
@@ -1081,7 +1083,7 @@ func (s *Service) ReplyToInstagramComment(ctx context.Context, storeID, commentI
 		return err
 	}
 
-	s.logger.Info("instagram comment reply sent",
+	s.logger.Info("instagram private reply sent",
 		zap.String("store_id", storeID),
 		zap.String("comment_id", commentID),
 	)

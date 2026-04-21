@@ -1,0 +1,4 @@
+[    1151ms] [WARNING] Clerk: Clerk has been loaded with development keys. Development instances have strict usage limits and should not be used when deploying your application to production. Learn more: https://clerk.com/docs/deployments/overview @ https://full-squirrel-3.clerk.accounts.dev/npm/@clerk/clerk-js@5/dist/clerk.browser.js:18
+[   56825ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:3001/api/v1/stores/36cc037f-aefa-4860-a11c-7e13d9ce1408/lives:0
+[   57834ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:3001/api/v1/stores/36cc037f-aefa-4860-a11c-7e13d9ce1408/lives:0
+[   57834ms] [ERROR] Mutation error: {mutationKey: undefined, error: Object} @ webpack-internal:///(app-pages-browser)/./node_modules/next/dist/client/app-index.js:32

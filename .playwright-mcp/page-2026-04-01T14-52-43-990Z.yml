@@ -1,0 +1,117 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - complementary [ref=e3]:
+      - img [ref=e6]
+      - navigation [ref=e13]:
+        - generic [ref=e14]:
+          - generic [ref=e15]:
+            - paragraph [ref=e16]: Geral
+            - generic [ref=e17]:
+              - link "Dashboard" [ref=e18] [cursor=pointer]:
+                - /url: /
+                - img [ref=e19]
+                - text: Dashboard
+              - link "Eventos" [ref=e24] [cursor=pointer]:
+                - /url: /events
+                - img [ref=e25]
+                - text: Eventos
+              - link "Produtos" [ref=e27] [cursor=pointer]:
+                - /url: /products
+                - img [ref=e28]
+                - text: Produtos
+              - link "Pedidos" [ref=e32] [cursor=pointer]:
+                - /url: /orders
+                - img [ref=e33]
+                - text: Pedidos
+              - link "Clientes" [ref=e37] [cursor=pointer]:
+                - /url: /customers
+                - img [ref=e38]
+                - text: Clientes
+          - generic [ref=e43]:
+            - paragraph [ref=e44]: Outros
+            - generic [ref=e45]:
+              - link "Configurações" [ref=e46] [cursor=pointer]:
+                - /url: /settings/account
+                - img [ref=e47]
+                - text: Configurações
+              - link "Documentação" [ref=e50] [cursor=pointer]:
+                - /url: /docs
+                - img [ref=e51]
+                - text: Documentação
+      - generic [ref=e55]:
+        - link "Feedback" [ref=e56] [cursor=pointer]:
+          - /url: mailto:feedback@livecart.app
+          - img [ref=e57]
+          - text: Feedback
+        - link "Suporte" [ref=e59] [cursor=pointer]:
+          - /url: mailto:suporte@livecart.app
+          - img [ref=e60]
+          - text: Suporte
+    - generic [ref=e63]:
+      - banner [ref=e64]:
+        - generic [ref=e65]:
+          - button "Alternar tema" [ref=e66] [cursor=pointer]:
+            - img
+            - generic [ref=e67]: Alternar tema
+          - button "Notificações" [ref=e68] [cursor=pointer]:
+            - img
+            - generic [ref=e69]: Notificações
+          - button "U" [ref=e70] [cursor=pointer]:
+            - generic [ref=e72]: U
+            - img
+      - main [ref=e73]:
+        - generic [ref=e74]:
+          - generic [ref=e75]:
+            - generic [ref=e76]:
+              - heading "Dashboard" [level=1] [ref=e77]
+              - paragraph [ref=e78]: Visão geral das suas vendas e lives
+            - button "01 abr - 01 abr, 2026" [ref=e79] [cursor=pointer]:
+              - img
+              - text: 01 abr - 01 abr, 2026
+          - generic [ref=e80]:
+            - tablist [ref=e81]:
+              - tab "Visão Geral" [selected] [ref=e82] [cursor=pointer]
+              - tab "Análises" [ref=e83] [cursor=pointer]
+              - tab "Relatórios" [ref=e84] [cursor=pointer]
+            - tabpanel "Visão Geral" [ref=e85]:
+              - generic [ref=e86]:
+                - generic [ref=e87]:
+                  - generic [ref=e88]:
+                    - generic [ref=e89]: Faturamento Total
+                    - img [ref=e90]
+                  - generic [ref=e92]:
+                    - generic [ref=e93]: R$ 0,00
+                    - paragraph [ref=e94]: Total de vendas
+                - generic [ref=e95]:
+                  - generic [ref=e96]:
+                    - generic [ref=e97]: Pedidos
+                    - img [ref=e98]
+                  - generic [ref=e102]:
+                    - generic [ref=e103]: "0"
+                    - paragraph [ref=e104]: Total de pedidos
+                - generic [ref=e105]:
+                  - generic [ref=e106]:
+                    - generic [ref=e107]: Produtos Ativos
+                    - img [ref=e108]
+                  - generic [ref=e112]:
+                    - generic [ref=e113]: "0"
+                    - paragraph [ref=e114]: Produtos no catálogo
+                - generic [ref=e115]:
+                  - generic [ref=e116]:
+                    - generic [ref=e117]: Lives Realizadas
+                    - img [ref=e118]
+                  - generic [ref=e124]:
+                    - generic [ref=e125]: "0"
+                    - paragraph [ref=e126]: Total de lives
+              - generic [ref=e127]:
+                - generic [ref=e128]:
+                  - generic [ref=e129]:
+                    - generic [ref=e130]: Vendas Totais
+                    - generic [ref=e131]: Faturamento mensal ao longo do ano
+                  - generic [ref=e133]: Nenhum dado disponível
+                - generic [ref=e134]:
+                  - generic [ref=e135]:
+                    - generic [ref=e136]: Top Sellers
+                    - generic [ref=e137]: Produtos mais vendidos no período
+                  - generic [ref=e139]: Nenhum produto vendido ainda
+  - region "Notifications alt+T"

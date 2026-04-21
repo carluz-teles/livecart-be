@@ -1,0 +1,181 @@
+- generic:
+  - generic:
+    - complementary:
+      - generic:
+        - generic:
+          - img
+        - generic:
+          - generic: Minha Loja
+          - generic: LiveCart
+      - navigation:
+        - generic:
+          - generic:
+            - paragraph: Geral
+            - generic:
+              - link:
+                - /url: /
+                - img
+                - text: Dashboard
+              - link:
+                - /url: /events
+                - img
+                - text: Eventos
+              - link:
+                - /url: /products
+                - img
+                - text: Produtos
+              - link:
+                - /url: /orders
+                - img
+                - text: Pedidos
+              - link:
+                - /url: /customers
+                - img
+                - text: Clientes
+          - generic:
+            - paragraph: Outros
+            - generic:
+              - link:
+                - /url: /settings/account
+                - img
+                - text: Configurações
+              - link:
+                - /url: /docs
+                - img
+                - text: Documentação
+      - generic:
+        - generic:
+          - link:
+            - /url: mailto:feedback@livecart.app
+            - img
+            - text: Feedback
+          - link:
+            - /url: mailto:suporte@livecart.app
+            - img
+            - text: Suporte
+    - generic:
+      - banner:
+        - generic:
+          - button:
+            - img
+            - generic: Alternar tema
+          - button:
+            - img
+            - generic: Notificações
+          - button:
+            - generic:
+              - img
+            - generic:
+              - generic: Test User
+              - generic: test+clerk_test@example.com
+            - img
+      - main:
+        - generic:
+          - generic:
+            - generic:
+              - heading [level=1]: Eventos
+              - paragraph: Gerencie seus eventos e acompanhe as vendas em tempo real
+            - button [expanded]:
+              - img
+              - text: Novo Evento
+          - generic:
+            - generic:
+              - generic:
+                - generic: Total de Eventos
+                - img
+              - generic:
+                - generic: "0"
+                - paragraph: eventos criados
+            - generic:
+              - generic:
+                - generic: Ativos Agora
+                - img
+              - generic:
+                - generic: "0"
+                - paragraph: ao vivo agora
+            - generic:
+              - generic:
+                - generic: Total de Pedidos
+                - img
+              - generic:
+                - generic: "0"
+                - paragraph: carrinhos criados
+            - generic:
+              - generic:
+                - generic: Receita Total
+                - img
+              - generic:
+                - generic: "-"
+                - paragraph: em vendas
+          - generic:
+            - generic:
+              - generic: Lista de Eventos
+              - generic: Visualize e gerencie todos os seus eventos.
+            - generic:
+              - generic:
+                - generic:
+                  - img
+                  - textbox:
+                    - /placeholder: Buscar por titulo...
+                - button:
+                  - img
+                  - text: Filtros
+              - generic:
+                - generic:
+                  - table:
+                    - rowgroup:
+                      - row:
+                        - columnheader: Titulo
+                        - columnheader: Status
+                        - columnheader: Pedidos
+                        - columnheader: Criado em
+                        - columnheader
+                    - rowgroup:
+                      - row:
+                        - cell: Nenhum evento encontrado.
+  - region "Notifications alt+T"
+  - alert
+  - dialog "Novo Evento" [active] [ref=e153]:
+    - generic [ref=e154]:
+      - heading "Novo Evento" [level=2] [ref=e155]:
+        - img [ref=e156]
+        - text: Novo Evento
+      - paragraph [ref=e162]: Crie um novo evento e conecte-se a uma transmissao ao vivo para comecar a capturar pedidos.
+    - generic [ref=e163]:
+      - generic [ref=e164]:
+        - generic [ref=e165]: Titulo *
+        - textbox "Titulo *" [ref=e166]:
+          - /placeholder: "Ex: Live de Sabado"
+          - text: Live de Teste - Form Simplificado
+        - paragraph [ref=e167]: Nome do evento para identificacao
+      - generic [ref=e168]:
+        - text: Tipo
+        - radiogroup [ref=e169]:
+          - generic [ref=e170]:
+            - radio "Live Unica" [checked] [ref=e171] [cursor=pointer]:
+              - img [ref=e173]
+            - radio [checked]
+            - generic [ref=e175] [cursor=pointer]: Live Unica
+          - generic [ref=e176]:
+            - radio "Multi-sessao" [ref=e177] [cursor=pointer]
+            - radio
+            - generic [ref=e178] [cursor=pointer]: Multi-sessao
+      - generic [ref=e180]: Conectar a uma live (opcional)
+      - generic [ref=e181]:
+        - text: Plataforma
+        - combobox "Plataforma" [ref=e182] [cursor=pointer]:
+          - generic: Selecione a plataforma
+          - img [ref=e183]
+        - combobox [ref=e185]
+        - paragraph [ref=e186]: Plataforma onde a live esta acontecendo
+      - generic [ref=e187]:
+        - text: ID da Live
+        - textbox "ID da Live" [ref=e188]:
+          - /placeholder: ID da live na plataforma
+        - paragraph [ref=e189]: Identificador unico da transmissao ao vivo
+      - generic [ref=e190]:
+        - button "Cancelar" [ref=e191] [cursor=pointer]
+        - button "Criar Evento" [ref=e192] [cursor=pointer]
+    - button "Close" [ref=e193] [cursor=pointer]:
+      - img [ref=e194]
+      - generic [ref=e197]: Close

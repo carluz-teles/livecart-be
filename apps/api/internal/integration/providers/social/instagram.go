@@ -299,6 +299,76 @@ func (i *Instagram) ReplyToComment(ctx context.Context, commentID, text string) 
 	return nil
 }
 
+// SendPrivateReply sends a private DM to the user who made a comment.
+// This uses the Instagram Private Reply feature which sends a DM in response to a comment.
+// Unlike ReplyToComment (which posts publicly), this sends a private message.
+// commentID is the Instagram comment ID to reply to.
+// text is the reply message (max 1000 characters).
+func (i *Instagram) SendPrivateReply(ctx context.Context, commentID, text string) error {
+	if commentID == "" {
+		return fmt.Errorf("comment id is required")
+	}
+	if text == "" {
+		return fmt.Errorf("reply text is required")
+	}
+	if len(text) > 1000 {
+		text = text[:997] + "..."
+	}
+
+	// Instagram Graph API: POST /me/messages with recipient.comment_id
+	// This sends a private DM to the commenter
+	url := fmt.Sprintf("%s/%s/me/messages",
+		instagramGraphAPIBaseURL,
+		instagramGraphAPIVersion,
+	)
+
+	payload := map[string]any{
+		"recipient": map[string]string{
+			"comment_id": commentID,
+		},
+		"message": map[string]string{
+			"text": text,
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling private reply payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("creating private reply request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+i.credentials.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("sending private reply request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		bodyStr := string(respBody)
+		if len(bodyStr) > 256 {
+			bodyStr = bodyStr[:256] + "..."
+		}
+		i.logger.Error("instagram private reply failed",
+			zap.Int("status", resp.StatusCode),
+			zap.String("body", bodyStr),
+			zap.String("comment_id", commentID),
+		)
+		return fmt.Errorf("instagram private reply failed: status %d, body: %s", resp.StatusCode, bodyStr)
+	}
+
+	i.logger.Info("instagram private reply sent",
+		zap.String("comment_id", commentID),
+		zap.Int("text_bytes", len(text)),
+	)
+	return nil
+}
+
 // GetActiveLives retrieves all live videos currently being broadcast by the user.
 // This endpoint only returns lives that are actively streaming at the time of the request.
 func (i *Instagram) GetActiveLives(ctx context.Context) ([]providers.LiveMedia, error) {

@@ -1,0 +1,9 @@
+- main [ref=e2]:
+  - generic [ref=e9]:
+    - heading "Seleccione el país" [level=2] [ref=e10]
+    - combobox "Seleccione el país" [ref=e14]:
+      - generic [ref=e15]:
+        - generic [ref=e16]: Seleccione el país
+        - img [ref=e18]
+    - button "Confirmar" [disabled]:
+      - generic: Confirmar

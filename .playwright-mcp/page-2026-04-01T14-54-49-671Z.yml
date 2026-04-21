@@ -1,0 +1,41 @@
+- generic [active] [ref=e1]:
+  - main [ref=e9]:
+    - generic [ref=e10]:
+      - generic [ref=e12]:
+        - heading "Loja Teste E2E" [level=1] [ref=e13]
+        - paragraph [ref=e14]: Live Teste Instagram
+      - generic [ref=e15]:
+        - generic [ref=e18]: Seu Carrinho
+        - generic [ref=e19]:
+          - generic [ref=e21]:
+            - img [ref=e24]
+            - generic [ref=e27]:
+              - generic [ref=e28]:
+                - generic [ref=e29]:
+                  - heading "Produto Teste Keyword" [level=3] [ref=e30]
+                  - paragraph [ref=e31]: "Palavra-chave: A9B1"
+                - paragraph [ref=e32]: R$ 299,70
+              - paragraph [ref=e34]: "Qtd: 3"
+          - generic [ref=e35]:
+            - generic [ref=e36]:
+              - generic [ref=e37]: Subtotal (3 itens)
+              - generic [ref=e38]: R$ 299,70
+            - generic [ref=e39]:
+              - generic [ref=e40]: Total
+              - generic [ref=e41]: R$ 299,70
+      - generic [ref=e42]:
+        - generic [ref=e44]: Finalizar Compra
+        - generic [ref=e46]:
+          - generic [ref=e47]:
+            - text: Email para receber o comprovante
+            - textbox "Email para receber o comprovante" [ref=e48]:
+              - /placeholder: seu@email.com
+              - text: cliente+clerk_test@example.com
+          - generic [ref=e53]: Erro ao gerar link de pagamento
+          - button "Pagar R$ 299,70" [ref=e49] [cursor=pointer]
+          - paragraph [ref=e50]: Você será redirecionado para o Mercado Pago para finalizar o pagamento.
+      - paragraph [ref=e51]:
+        - text: Comprando como
+        - generic [ref=e52]: "@joao_test"
+  - region "Notifications alt+T"
+  - alert [ref=e8]

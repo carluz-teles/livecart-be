@@ -1,0 +1,48 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - generic [ref=e8]:
+        - heading "Entrar" [level=1] [ref=e9]
+        - paragraph [ref=e10]: para continuar em Livechat
+      - generic [ref=e11]:
+        - button "Sign in with Google Continuar com Google" [ref=e14] [cursor=pointer]:
+          - generic [ref=e15]:
+            - img "Sign in with Google" [ref=e17]
+            - generic [ref=e18]: Continuar com Google
+        - paragraph [ref=e21]: ou
+        - generic [ref=e23]:
+          - generic [ref=e24]:
+            - generic [ref=e27]:
+              - generic [ref=e28]:
+                - generic [ref=e29]: Seu e-mail
+                - generic [ref=e30]: Último uso
+              - textbox "Seu e-mail" [ref=e31]:
+                - /placeholder: Digite o endereço de e-mail
+            - generic:
+              - generic:
+                - generic:
+                  - generic:
+                    - generic: Senha
+                  - generic:
+                    - textbox "Senha":
+                      - /placeholder: Digite sua senha
+                    - button "Show password":
+                      - img
+          - button "Continuar" [ref=e34] [cursor=pointer]:
+            - generic [ref=e35]:
+              - text: Continuar
+              - img [ref=e36]
+    - generic [ref=e38]:
+      - generic [ref=e39]:
+        - generic [ref=e40]: Não possui uma conta?
+        - link "Registre-se" [ref=e41] [cursor=pointer]:
+          - /url: http://localhost:3000/register#/?redirect_url=http%3A%2F%2Flocalhost%3A3000%2F
+      - generic [ref=e43]:
+        - generic [ref=e45]:
+          - paragraph [ref=e46]: Secured by
+          - link "Clerk logo" [ref=e47] [cursor=pointer]:
+            - /url: https://go.clerk.com/components
+            - img [ref=e48]
+        - paragraph [ref=e53]: Development mode
+  - region "Notifications alt+T"
+  - alert [ref=e54]

@@ -1,0 +1,33 @@
+- generic [ref=e1]:
+  - generic [ref=e145]:
+    - generic [ref=e146]:
+      - generic [ref=e148]:
+        - heading "Verifique seu e-mail" [level=1] [ref=e149]
+        - paragraph [ref=e150]: para continuar em Livechat
+        - generic [ref=e151]:
+          - paragraph [ref=e152]: test+clerk_test@example.com
+          - button "Edit" [ref=e153] [cursor=pointer]:
+            - img [ref=e154]
+      - generic [ref=e156]:
+        - generic [ref=e157]:
+          - generic [ref=e159]:
+            - generic:
+              - group
+              - textbox "Enter verification code" [active] [ref=e160]
+          - button "Reenviar código (28)" [disabled]
+        - generic [ref=e162]:
+          - button "Continuar" [ref=e163] [cursor=pointer]:
+            - generic [ref=e164]:
+              - text: Continuar
+              - img [ref=e165]
+          - link "Utilize outro método" [ref=e168] [cursor=pointer]:
+            - /url: http://localhost:3000/login/factor-one
+    - generic [ref=e171]:
+      - generic [ref=e173]:
+        - paragraph [ref=e174]: Secured by
+        - link "Clerk logo" [ref=e175] [cursor=pointer]:
+          - /url: https://go.clerk.com/components
+          - img [ref=e176]
+      - paragraph [ref=e181]: Development mode
+  - region "Notifications alt+T"
+  - alert [ref=e54]

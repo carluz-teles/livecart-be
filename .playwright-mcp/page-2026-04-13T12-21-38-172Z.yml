@@ -1,0 +1,37 @@
+- generic [ref=e1]:
+  - generic [ref=e56]:
+    - generic [ref=e57]:
+      - generic [ref=e59]:
+        - heading "Insira sua senha" [level=1] [ref=e60]
+        - paragraph [ref=e61]: para continuar em Livechat
+        - generic [ref=e62]:
+          - paragraph [ref=e63]: test+clerk_test@example.com
+          - button "Edit" [ref=e64] [cursor=pointer]:
+            - img [ref=e65]
+      - generic [ref=e67]:
+        - generic [ref=e68]:
+          - generic [ref=e71]:
+            - generic [ref=e72]:
+              - generic [ref=e73]: Senha
+              - link "Esqueceu a senha?" [ref=e74] [cursor=pointer]:
+                - /url: ""
+            - generic [ref=e75]:
+              - textbox "Senha" [active] [ref=e76]:
+                - /placeholder: Digite sua senha
+              - button "Show password" [ref=e77] [cursor=pointer]:
+                - img [ref=e78]
+          - button "Continuar" [ref=e82] [cursor=pointer]:
+            - generic [ref=e83]:
+              - text: Continuar
+              - img [ref=e84]
+        - link "Utilize outro método" [ref=e87] [cursor=pointer]:
+          - /url: http://localhost:3000/login/factor-one
+    - generic [ref=e90]:
+      - generic [ref=e92]:
+        - paragraph [ref=e93]: Secured by
+        - link "Clerk logo" [ref=e94] [cursor=pointer]:
+          - /url: https://go.clerk.com/components
+          - img [ref=e95]
+      - paragraph [ref=e100]: Development mode
+  - region "Notifications alt+T"
+  - alert [ref=e54]

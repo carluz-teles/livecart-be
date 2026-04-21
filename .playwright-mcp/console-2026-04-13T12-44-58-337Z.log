@@ -1,0 +1,92 @@
+[      24ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:3000/events:0
+[     127ms] [INFO] %cDownload the React DevTools for a better development experience: https://reactjs.org/link/react-devtools font-weight:bold @ webpack-internal:///./node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/cjs/react-dom.development.js:29889
+[     140ms] Error: Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx
+    at <unknown> (https://nextjs.org/docs/messages/module-not-found)
+    at getNotFoundError (file:///home/carluz_teles/livecart-fe/node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/build/webpack/plugins/wellknown-errors-plugin/parseNotFoundError.js:124:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async getModuleBuildError (file:///home/carluz_teles/livecart-fe/node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/build/webpack/plugins/wellknown-errors-plugin/webpackModuleError.js:104:27)
+    at async (file:///home/carluz_teles/livecart-fe/node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/build/webpack/plugins/wellknown-errors-plugin/index.js:29:49)
+    at async (file:///home/carluz_teles/livecart-fe/node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/build/webpack/plugins/wellknown-errors-plugin/index.js:27:21)
+[     137ms] [LOG] [HMR] connected @ webpack-internal:///./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/pages/websocket.js:38
+[     138ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/internal/helpers/hydration-error-info.js:62
+[   17583ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/internal/helpers/hydration-error-info.js:62
+[   17584ms] [LOG] [Fast Refresh] rebuilding @ webpack-internal:///./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/pages/hot-reloader-client.js:221
+[   17883ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/internal/helpers/hydration-error-info.js:62
+[   18257ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/internal/helpers/hydration-error-info.js:62
+[   18257ms] [LOG] [Fast Refresh] rebuilding @ webpack-internal:///./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/pages/hot-reloader-client.js:221
+[   18957ms] [LOG] [Fast Refresh] rebuilding @ webpack-internal:///./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/pages/hot-reloader-client.js:221
+[   19492ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:3000/_next/static/webpack/71932679b2161ee1.webpack.hot-update.json:0
+[   19492ms] [WARNING] [Fast Refresh] performing full reload because your application had an unrecoverable error @ webpack-internal:///./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/pages/hot-reloader-client.js:349
+[   19834ms] [INFO] %cDownload the React DevTools for a better development experience: https://reactjs.org/link/react-devtools font-weight:bold @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/compiled/react-dom/cjs/react-dom.development.js:38559
+[   19937ms] [WARNING] Clerk: Clerk has been loaded with development keys. Development instances have strict usage limits and should not be used when deploying your application to production. Learn more: https://clerk.com/docs/deployments/overview @ https://full-squirrel-3.clerk.accounts.dev/npm/@clerk/clerk-js@5/dist/clerk.browser.js:18
+[   17749ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://localhost:3001/api/v1/users/sync:0
+[   17755ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://localhost:3001/api/v1/users/sync:0

@@ -1,0 +1,363 @@
+[   15883ms] [INFO] %cDownload the React DevTools for a better development experience: https://reactjs.org/link/react-devtools font-weight:bold @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/compiled/react-dom/cjs/react-dom.development.js:38559
+[   15960ms] [WARNING] Clerk: Clerk has been loaded with development keys. Development instances have strict usage limits and should not be used when deploying your application to production. Learn more: https://clerk.com/docs/deployments/overview @ https://full-squirrel-3.clerk.accounts.dev/npm/@clerk/clerk-js@5/dist/clerk.browser.js:18
+[   16391ms] [VERBOSE] [DOM] Input elements should have autocomplete attributes (suggested: "current-password"): (More info: https://goo.gl/9p2vKq) %o @ http://localhost:3000/login?redirect_url=http%3A%2F%2Flocalhost%3A3000%2F:0
+[  215577ms] [VERBOSE] [DOM] Input elements should have autocomplete attributes (suggested: "current-password"): (More info: https://goo.gl/9p2vKq) %o @ http://localhost:3000/login/factor-one?redirect_url=http%3A%2F%2Flocalhost%3A3000%2F:0
+[  254496ms] [LOG] [Fast Refresh] rebuilding @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/app/hot-reloader-client.js:186
+[  258478ms] [LOG] [Fast Refresh] done in 3982ms @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/app/hot-reloader-client.js:43
+[  258840ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://localhost:3001/api/v1/users/sync:0
+[  268276ms] [LOG] [Fast Refresh] rebuilding @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/app/hot-reloader-client.js:186
+[  269484ms] [LOG] [Fast Refresh] done in 1208ms @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/app/hot-reloader-client.js:43
+[  284506ms] [LOG] [Fast Refresh] rebuilding @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/app/hot-reloader-client.js:186
+[  284906ms] [LOG] [Fast Refresh] done in 399ms @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/app/hot-reloader-client.js:43
+[ 1324918ms] [LOG] [Fast Refresh] rebuilding @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/app/hot-reloader-client.js:186
+[ 1325571ms] [LOG] [Fast Refresh] done in 652ms @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/app/hot-reloader-client.js:43
+[ 1335456ms] [LOG] [Fast Refresh] rebuilding @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/app/hot-reloader-client.js:186
+[ 1335874ms] [LOG] [Fast Refresh] done in 418ms @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/app/hot-reloader-client.js:43
+[ 1349372ms] [LOG] [Fast Refresh] rebuilding @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/app/hot-reloader-client.js:186
+[ 1349835ms] [LOG] [Fast Refresh] done in 463ms @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/app/hot-reloader-client.js:43
+[ 1365823ms] [LOG] [Fast Refresh] rebuilding @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/app/hot-reloader-client.js:186
+[ 1366491ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1376904ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1377154ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1548388ms] [ERROR] Failed to load resource: net::ERR_NETWORK_CHANGED @ https://full-squirrel-3.clerk.accounts.dev/v1/client/sessions/sess_3CIpRdSivjVChYjyWiitM1tVFbk/tokens?__clerk_api_version=2025-11-10&_clerk_js_version=5.125.7&__clerk_db_jwt=dvb_3BgMYythv0hQB6sQRvfm59jSFOn:0
+[ 1579752ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1578054ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1582756ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1583071ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1587652ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1587859ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1609312ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1609528ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1609549ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1609704ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1609704ms] [LOG] [Fast Refresh] rebuilding @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/app/hot-reloader-client.js:186
+[ 1610071ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1610073ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1610319ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1610321ms] [LOG] [Fast Refresh] rebuilding @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/app/hot-reloader-client.js:186
+[ 1610451ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1611063ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1611580ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1611777ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///(app-pages-browser)/./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/app-index.js:32
+[ 1611879ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:3000/events/new?_rsc=iifd9:0
+[ 1611902ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:3000/events/new?_rsc=iifd9:0
+[ 1611916ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:3000/events/new?_rsc=iifd9:0
+[ 1611932ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:3000/events/new?_rsc=iifd9:0
+[ 1611957ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:3000/events/new:0
+[ 1612122ms] [INFO] %cDownload the React DevTools for a better development experience: https://reactjs.org/link/react-devtools font-weight:bold @ webpack-internal:///./node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/cjs/react-dom.development.js:29889
+[ 1612154ms] Error: Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx
+    at <unknown> (https://nextjs.org/docs/messages/module-not-found)
+    at getNotFoundError (file:///home/carluz_teles/livecart-fe/node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/build/webpack/plugins/wellknown-errors-plugin/parseNotFoundError.js:124:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async getModuleBuildError (file:///home/carluz_teles/livecart-fe/node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/build/webpack/plugins/wellknown-errors-plugin/webpackModuleError.js:104:27)
+    at async (file:///home/carluz_teles/livecart-fe/node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/build/webpack/plugins/wellknown-errors-plugin/index.js:29:49)
+    at async (file:///home/carluz_teles/livecart-fe/node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/build/webpack/plugins/wellknown-errors-plugin/index.js:27:21)
+[ 1612153ms] [LOG] [HMR] connected @ webpack-internal:///./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/pages/websocket.js:38
+[ 1612155ms] [ERROR] ./src/components/event/EventForm.tsx:12:1
+Module not found: Can't resolve '@/components/ui/radio-group'
+  10 | import { Input } from "@/components/ui/input"
+  11 | import { Label } from "@/components/ui/label"
+> 12 | import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+     | ^
+  13 | import { Separator } from "@/components/ui/separator"
+  14 | import {
+  15 |   Sheet,
+
+https://nextjs.org/docs/messages/module-not-found
+
+Import trace for requested module:
+./src/components/event/index.ts
+./src/app/(dashboard)/events/page.tsx @ webpack-internal:///./node_modules/.pnpm/next@14.2.35_@playwright+test@1.59.1_react-dom@18.3.1_react@18.3.1__react@18.3.1/node_modules/next/dist/client/components/react-dev-overlay/internal/helpers/hydration-error-info.js:62
