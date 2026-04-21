@@ -503,13 +503,13 @@ type LiveStatsOutput struct {
 
 // AddToCartInput represents input for adding a product to a user's cart during a live.
 type AddToCartInput struct {
-	EventID        string // Changed from SessionID to EventID
-	PlatformUserID string
-	PlatformHandle string
-	ProductID      string
-	ProductPrice   int64
-	Quantity       int
-	Waitlisted     bool // True if product is out of stock and user is on waitlist
+	EventID            string // Changed from SessionID to EventID
+	PlatformUserID     string
+	PlatformHandle     string
+	ProductID          string
+	ProductPrice       int64
+	Quantity           int    // Total quantity to add
+	WaitlistedQuantity int    // How many of the quantity are waitlisted (0 = all available)
 }
 
 // AddToCartOutput represents the result of adding to cart.
@@ -541,11 +541,11 @@ type CartRow struct {
 
 // AddCartItemParams represents parameters for adding an item to a cart.
 type AddCartItemParams struct {
-	CartID     string
-	ProductID  string
-	Quantity   int
-	UnitPrice  int64
-	Waitlisted bool
+	CartID             string
+	ProductID          string
+	Quantity           int
+	UnitPrice          int64
+	WaitlistedQuantity int // How many of the quantity are waitlisted
 }
 
 // =============================================================================

@@ -82,15 +82,15 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 
 	for i, item := range items {
 		output.Items[i] = CartItemDetails{
-			ID:         item.ID,
-			CartID:     item.CartID,
-			ProductID:  item.ProductID,
-			Quantity:   item.Quantity,
-			UnitPrice:  item.UnitPrice,
-			Waitlisted: item.Waitlisted,
-			Name:       item.Name,
-			ImageURL:   item.ImageURL,
-			Keyword:    item.Keyword,
+			ID:                 item.ID,
+			CartID:             item.CartID,
+			ProductID:          item.ProductID,
+			Quantity:           item.Quantity,
+			UnitPrice:          item.UnitPrice,
+			WaitlistedQuantity: item.WaitlistedQuantity,
+			Name:               item.Name,
+			ImageURL:           item.ImageURL,
+			Keyword:            item.Keyword,
 		}
 	}
 
@@ -128,21 +128,23 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 		return nil, err
 	}
 
-	// Filter out waitlisted items and build checkout items
+	// Filter out fully waitlisted items and build checkout items with available quantities
 	var checkoutItems []providers.CheckoutItem
 	var totalAmount int64
 	for _, item := range items {
-		if item.Waitlisted {
-			continue // Skip waitlisted items
+		// Calculate available quantity (total - waitlisted)
+		availableQty := item.Quantity - item.WaitlistedQuantity
+		if availableQty <= 0 {
+			continue // Skip items that are fully waitlisted
 		}
 		checkoutItems = append(checkoutItems, providers.CheckoutItem{
 			ID:        item.ProductID,
 			Name:      item.Name,
-			Quantity:  item.Quantity,
+			Quantity:  availableQty, // Only the available quantity
 			UnitPrice: item.UnitPrice,
 			ImageURL:  derefString(item.ImageURL),
 		})
-		totalAmount += item.UnitPrice * int64(item.Quantity)
+		totalAmount += item.UnitPrice * int64(availableQty)
 	}
 
 	if len(checkoutItems) == 0 {
@@ -262,8 +264,10 @@ func (s *Service) GetCheckoutConfig(ctx context.Context, input GetCheckoutConfig
 
 	var totalAmount int64
 	for _, item := range items {
-		if !item.Waitlisted {
-			totalAmount += item.UnitPrice * int64(item.Quantity)
+		// Calculate available quantity (total - waitlisted)
+		availableQty := item.Quantity - item.WaitlistedQuantity
+		if availableQty > 0 {
+			totalAmount += item.UnitPrice * int64(availableQty)
 		}
 	}
 
@@ -330,21 +334,23 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		return nil, err
 	}
 
-	// Filter out waitlisted items and build checkout items
+	// Filter out fully waitlisted items and build checkout items with available quantities
 	var checkoutItems []providers.CheckoutItem
 	var totalAmount int64
 	for _, item := range items {
-		if item.Waitlisted {
-			continue
+		// Calculate available quantity (total - waitlisted)
+		availableQty := item.Quantity - item.WaitlistedQuantity
+		if availableQty <= 0 {
+			continue // Skip items that are fully waitlisted
 		}
 		checkoutItems = append(checkoutItems, providers.CheckoutItem{
 			ID:        item.ProductID,
 			Name:      item.Name,
-			Quantity:  item.Quantity,
+			Quantity:  availableQty, // Only the available quantity
 			UnitPrice: item.UnitPrice,
 			ImageURL:  derefString(item.ImageURL),
 		})
-		totalAmount += item.UnitPrice * int64(item.Quantity)
+		totalAmount += item.UnitPrice * int64(availableQty)
 	}
 
 	if len(checkoutItems) == 0 {
@@ -468,21 +474,23 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 		return nil, err
 	}
 
-	// Filter out waitlisted items and build checkout items
+	// Filter out fully waitlisted items and build checkout items with available quantities
 	var checkoutItems []providers.CheckoutItem
 	var totalAmount int64
 	for _, item := range items {
-		if item.Waitlisted {
-			continue
+		// Calculate available quantity (total - waitlisted)
+		availableQty := item.Quantity - item.WaitlistedQuantity
+		if availableQty <= 0 {
+			continue // Skip items that are fully waitlisted
 		}
 		checkoutItems = append(checkoutItems, providers.CheckoutItem{
 			ID:        item.ProductID,
 			Name:      item.Name,
-			Quantity:  item.Quantity,
+			Quantity:  availableQty, // Only the available quantity
 			UnitPrice: item.UnitPrice,
 			ImageURL:  derefString(item.ImageURL),
 		})
-		totalAmount += item.UnitPrice * int64(item.Quantity)
+		totalAmount += item.UnitPrice * int64(availableQty)
 	}
 
 	if len(checkoutItems) == 0 {

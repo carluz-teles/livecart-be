@@ -1000,7 +1000,7 @@ func (r *Repository) ListNonWaitlistedCartItems(ctx context.Context, cartID stri
 			ID:                uuidToString(row.ID),
 			CartID:            uuidToString(row.CartID),
 			ProductID:         uuidToString(row.ProductID),
-			Quantity:          int(row.Quantity.Int32),
+			Quantity:          int(row.Quantity),
 			UnitPrice:         row.UnitPrice.Int64,
 			ProductName:       row.ProductName,
 			ProductExternalID: extID,
@@ -1110,8 +1110,8 @@ type CartRow struct {
 	CreatedAt       time.Time
 }
 
-// UpdateCartItemWaitlisted updates the waitlisted status of a cart item.
-func (r *Repository) UpdateCartItemWaitlisted(ctx context.Context, cartID, productID string, waitlisted bool) error {
+// UpdateCartItemWaitlistedQuantity updates the waitlisted quantity of a cart item.
+func (r *Repository) UpdateCartItemWaitlistedQuantity(ctx context.Context, cartID, productID string, waitlistedQuantity int) error {
 	cID, err := parseUUID(cartID)
 	if err != nil {
 		return err
@@ -1120,10 +1120,10 @@ func (r *Repository) UpdateCartItemWaitlisted(ctx context.Context, cartID, produ
 	if err != nil {
 		return err
 	}
-	return r.queries.UpdateCartItemWaitlisted(ctx, sqlc.UpdateCartItemWaitlistedParams{
-		CartID:     cID,
-		ProductID:  pID,
-		Waitlisted: pgtype.Bool{Bool: waitlisted, Valid: true},
+	return r.queries.UpdateCartItemWaitlistedQuantity(ctx, sqlc.UpdateCartItemWaitlistedQuantityParams{
+		CartID:             cID,
+		ProductID:          pID,
+		WaitlistedQuantity: int32(waitlistedQuantity),
 	})
 }
 

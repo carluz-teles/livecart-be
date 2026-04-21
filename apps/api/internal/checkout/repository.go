@@ -217,13 +217,13 @@ func (r *Repository) toCartRow(row sqlc.GetCartByTokenWithDetailsRow) *CartRow {
 
 func (r *Repository) toCartItemRow(row sqlc.ListCartItemsForCheckoutRow) CartItemRow {
 	item := CartItemRow{
-		ID:         uuid.UUID(row.ID.Bytes).String(),
-		CartID:     uuid.UUID(row.CartID.Bytes).String(),
-		ProductID:  uuid.UUID(row.ProductID.Bytes).String(),
-		Quantity:   int(row.Quantity.Int32),
-		UnitPrice:  row.UnitPrice.Int64,
-		Waitlisted: row.Waitlisted.Bool,
-		Name:       row.ProductName,
+		ID:                 uuid.UUID(row.ID.Bytes).String(),
+		CartID:             uuid.UUID(row.CartID.Bytes).String(),
+		ProductID:          uuid.UUID(row.ProductID.Bytes).String(),
+		Quantity:           int(row.Quantity.Int32),
+		UnitPrice:          row.UnitPrice.Int64,
+		WaitlistedQuantity: int(row.WaitlistedQuantity),
+		Name:               row.ProductName,
 	}
 
 	if row.ProductImageUrl.Valid {
@@ -252,12 +252,14 @@ func (r *Repository) GetStoreCartExpirationMinutes(ctx context.Context, storeID 
 	return int(row.CartExpirationMinutes), nil
 }
 
-// CalculateCartTotal calculates the total for non-waitlisted items.
+// CalculateCartTotal calculates the total for available (non-waitlisted) items.
 func CalculateCartTotal(items []CartItemRow) (subtotal int64, totalItems int) {
 	for _, item := range items {
-		if !item.Waitlisted {
-			subtotal += item.UnitPrice * int64(item.Quantity)
-			totalItems += item.Quantity
+		// Available quantity = total quantity - waitlisted quantity
+		availableQty := item.Quantity - item.WaitlistedQuantity
+		if availableQty > 0 {
+			subtotal += item.UnitPrice * int64(availableQty)
+			totalItems += availableQty
 		}
 	}
 	return

@@ -228,21 +228,25 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 	var totalItems int
 
 	for i, item := range output.Items {
+		// Calculate available quantity (total - waitlisted)
+		availableQty := item.Quantity - item.WaitlistedQuantity
+
 		items[i] = CartItemResponse{
-			ID:         item.ID,
-			ProductID:  item.ProductID,
-			Name:       item.Name,
-			ImageURL:   item.ImageURL,
-			Keyword:    item.Keyword,
-			Quantity:   item.Quantity,
-			UnitPrice:  item.UnitPrice,
-			TotalPrice: item.UnitPrice * int64(item.Quantity),
-			Waitlisted: item.Waitlisted,
+			ID:                 item.ID,
+			ProductID:          item.ProductID,
+			Name:               item.Name,
+			ImageURL:           item.ImageURL,
+			Keyword:            item.Keyword,
+			Quantity:           item.Quantity,
+			UnitPrice:          item.UnitPrice,
+			TotalPrice:         item.UnitPrice * int64(item.Quantity),
+			WaitlistedQuantity: item.WaitlistedQuantity,
 		}
 
-		if !item.Waitlisted {
-			subtotal += item.UnitPrice * int64(item.Quantity)
-			totalItems += item.Quantity
+		// Only count available (non-waitlisted) items in totals
+		if availableQty > 0 {
+			subtotal += item.UnitPrice * int64(availableQty)
+			totalItems += availableQty
 		}
 	}
 

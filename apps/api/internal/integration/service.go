@@ -2014,72 +2014,107 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		}
 	}
 
-	// Try to reserve stock atomically
-	stockErr := s.repo.DecrementProductStock(ctx, product.ID, intent.Quantity)
-	waitlisted := stockErr != nil
+	// Calculate partial fulfillment: how many available vs waitlisted
+	availableQty := intent.Quantity
+	if product.Stock < intent.Quantity {
+		availableQty = product.Stock
+	}
+	if availableQty < 0 {
+		availableQty = 0
+	}
+	waitlistQty := intent.Quantity - availableQty
 
-	if waitlisted {
-		// Stock unavailable — check if user already on waitlist
-		alreadyWaiting, _ := s.repo.GetWaitlistItemByEventUserProduct(ctx, event.ID, input.UserID, product.ID)
-		if alreadyWaiting {
-			s.logger.Info("user already on waitlist, ignoring duplicate",
-				zap.String("username", input.Username),
-				zap.String("product_id", product.ID),
+	// Reserve available stock
+	if availableQty > 0 {
+		if stockErr := s.repo.DecrementProductStock(ctx, product.ID, availableQty); stockErr != nil {
+			// Failed to reserve even available stock - put all in waitlist
+			s.logger.Warn("failed to decrement stock, putting all in waitlist",
+				zap.Error(stockErr),
+				zap.Int("attempted", availableQty),
 			)
-			// Update comment result
-			if commentID != "" {
-				_ = s.repo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "already_waitlisted")
-			}
-			return nil
+			availableQty = 0
+			waitlistQty = intent.Quantity
 		}
-
-		// Add to waitlist
-		position, _ := s.repo.GetNextWaitlistPosition(ctx, event.ID, product.ID)
-		_, err = s.repo.CreateWaitlistItem(ctx, CreateWaitlistItemParams{
-			EventID:        event.ID,
-			ProductID:      product.ID,
-			PlatformUserID: input.UserID,
-			PlatformHandle: input.Username,
-			Quantity:       intent.Quantity,
-			Position:       position,
-		})
-		if err != nil {
-			s.logger.Error("failed to create waitlist item", zap.Error(err))
-		}
-
-		// Update comment result
-		if commentID != "" {
-			_ = s.repo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "waitlisted")
-		}
-
-		s.logger.Info("user added to waitlist (out of stock)",
-			zap.String("username", input.Username),
-			zap.String("product_id", product.ID),
-			zap.Int("position", position),
-		)
 	}
 
-	// Add product to cart (waitlisted or not)
+	// Handle waitlist items
+	if waitlistQty > 0 {
+		// Check if user already on waitlist for this product
+		alreadyWaiting, _ := s.repo.GetWaitlistItemByEventUserProduct(ctx, event.ID, input.UserID, product.ID)
+		if alreadyWaiting {
+			s.logger.Info("user already on waitlist, ignoring waitlist portion",
+				zap.String("username", input.Username),
+				zap.String("product_id", product.ID),
+				zap.Int("waitlist_qty", waitlistQty),
+			)
+			// If no available stock either, just return
+			if availableQty == 0 {
+				if commentID != "" {
+					_ = s.repo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "already_waitlisted")
+				}
+				return nil
+			}
+			// Otherwise, only add the available portion to cart
+			waitlistQty = 0
+		} else {
+			// Add to waitlist table
+			position, _ := s.repo.GetNextWaitlistPosition(ctx, event.ID, product.ID)
+			_, err = s.repo.CreateWaitlistItem(ctx, CreateWaitlistItemParams{
+				EventID:        event.ID,
+				ProductID:      product.ID,
+				PlatformUserID: input.UserID,
+				PlatformHandle: input.Username,
+				Quantity:       waitlistQty,
+				Position:       position,
+			})
+			if err != nil {
+				s.logger.Error("failed to create waitlist item", zap.Error(err))
+			}
+
+			s.logger.Info("user added to waitlist (partial fulfillment)",
+				zap.String("username", input.Username),
+				zap.String("product_id", product.ID),
+				zap.Int("available_qty", availableQty),
+				zap.Int("waitlist_qty", waitlistQty),
+				zap.Int("position", position),
+			)
+		}
+	}
+
+	// Determine total quantity to add to cart
+	totalQtyToAdd := availableQty + waitlistQty
+	if totalQtyToAdd == 0 {
+		// Nothing to add
+		return nil
+	}
+
+	// Add product to cart with partial fulfillment
 	result, err := s.liveService.AddToCart(ctx, live.AddToCartInput{
-		EventID:        event.ID,
-		PlatformUserID: input.UserID,
-		PlatformHandle: input.Username,
-		ProductID:      product.ID,
-		ProductPrice:   product.Price,
-		Quantity:       intent.Quantity,
-		Waitlisted:     waitlisted,
+		EventID:            event.ID,
+		PlatformUserID:     input.UserID,
+		PlatformHandle:     input.Username,
+		ProductID:          product.ID,
+		ProductPrice:       product.Price,
+		Quantity:           totalQtyToAdd,
+		WaitlistedQuantity: waitlistQty,
 	})
 	if err != nil {
 		// If we reserved stock but failed to add to cart, release it
-		if !waitlisted {
-			_ = s.repo.IncrementProductStock(ctx, product.ID, intent.Quantity)
+		if availableQty > 0 {
+			_ = s.repo.IncrementProductStock(ctx, product.ID, availableQty)
 		}
 		return fmt.Errorf("adding to cart: %w", err)
 	}
 
-	// Update comment result for successful cart add
-	if commentID != "" && !waitlisted {
-		_ = s.repo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "added_to_cart")
+	// Update comment result
+	if commentID != "" {
+		if waitlistQty > 0 && availableQty > 0 {
+			_ = s.repo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "partial_fulfillment")
+		} else if waitlistQty > 0 {
+			_ = s.repo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "waitlisted")
+		} else {
+			_ = s.repo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "added_to_cart")
+		}
 	}
 
 	// Increment order counter on event only for new carts
@@ -2092,9 +2127,9 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		}
 	}
 
-	// Reserve stock in ERP (only if we have non-waitlisted items)
-	if !waitlisted {
-		if syncErr := s.ReserveStockInERP(ctx, event.StoreID, result.CartID, event.ID, product.ID, intent.Quantity, product.Price, input.Username); syncErr != nil {
+	// Reserve stock in ERP (only for available items)
+	if availableQty > 0 {
+		if syncErr := s.ReserveStockInERP(ctx, event.StoreID, result.CartID, event.ID, product.ID, availableQty, product.Price, input.Username); syncErr != nil {
 			s.logger.Warn("failed to reserve stock in ERP",
 				zap.String("cart_id", result.CartID),
 				zap.Error(syncErr),
@@ -2720,15 +2755,15 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		return
 	}
 
-	// Add to cart (no longer waitlisted)
+	// Add to cart (no longer waitlisted - WaitlistedQuantity = 0)
 	_, err = s.liveService.AddToCart(ctx, live.AddToCartInput{
-		EventID:        eventID,
-		PlatformUserID: next.PlatformUserID,
-		PlatformHandle: next.PlatformHandle,
-		ProductID:      productID,
-		ProductPrice:   product.Price,
-		Quantity:       next.Quantity,
-		Waitlisted:     false,
+		EventID:            eventID,
+		PlatformUserID:     next.PlatformUserID,
+		PlatformHandle:     next.PlatformHandle,
+		ProductID:          productID,
+		ProductPrice:       product.Price,
+		Quantity:           next.Quantity,
+		WaitlistedQuantity: 0, // Fulfilled from waitlist, all available now
 	})
 	if err != nil {
 		// Return stock on failure

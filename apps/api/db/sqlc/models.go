@@ -37,12 +37,12 @@ type Cart struct {
 }
 
 type CartItem struct {
-	ID         pgtype.UUID `json:"id"`
-	CartID     pgtype.UUID `json:"cart_id"`
-	ProductID  pgtype.UUID `json:"product_id"`
-	Quantity   pgtype.Int4 `json:"quantity"`
-	UnitPrice  pgtype.Int8 `json:"unit_price"`
-	Waitlisted pgtype.Bool `json:"waitlisted"`
+	ID                 pgtype.UUID `json:"id"`
+	CartID             pgtype.UUID `json:"cart_id"`
+	ProductID          pgtype.UUID `json:"product_id"`
+	Quantity           pgtype.Int4 `json:"quantity"`
+	UnitPrice          pgtype.Int8 `json:"unit_price"`
+	WaitlistedQuantity int32       `json:"waitlisted_quantity"`
 }
 
 type DetectedOrder struct {

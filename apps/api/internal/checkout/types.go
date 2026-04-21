@@ -42,15 +42,15 @@ type CartStoreInfo struct {
 
 // CartItemResponse represents a cart item in the checkout response
 type CartItemResponse struct {
-	ID         string  `json:"id"`
-	ProductID  string  `json:"productId"`
-	Name       string  `json:"name"`
-	ImageURL   *string `json:"imageUrl"`
-	Keyword    *string `json:"keyword"`
-	Quantity   int     `json:"quantity"`
-	UnitPrice  int64   `json:"unitPrice"`
-	TotalPrice int64   `json:"totalPrice"`
-	Waitlisted bool    `json:"waitlisted"`
+	ID                 string  `json:"id"`
+	ProductID          string  `json:"productId"`
+	Name               string  `json:"name"`
+	ImageURL           *string `json:"imageUrl"`
+	Keyword            *string `json:"keyword"`
+	Quantity           int     `json:"quantity"`
+	UnitPrice          int64   `json:"unitPrice"`
+	TotalPrice         int64   `json:"totalPrice"`
+	WaitlistedQuantity int     `json:"waitlistedQuantity"`
 }
 
 // CartSummary contains the cart totals
@@ -174,15 +174,15 @@ type CartDetails struct {
 
 // CartItemDetails contains a cart item with product info
 type CartItemDetails struct {
-	ID         string
-	CartID     string
-	ProductID  string
-	Quantity   int
-	UnitPrice  int64
-	Waitlisted bool
-	Name       string
-	ImageURL   *string
-	Keyword    *string
+	ID                 string
+	CartID             string
+	ProductID          string
+	Quantity           int
+	UnitPrice          int64
+	WaitlistedQuantity int
+	Name               string
+	ImageURL           *string
+	Keyword            *string
 }
 
 // GenerateCheckoutInput is the input for GenerateCheckout service method
@@ -303,15 +303,15 @@ type CartRow struct {
 
 // CartItemRow represents a cart item row from the database
 type CartItemRow struct {
-	ID         string
-	CartID     string
-	ProductID  string
-	Quantity   int
-	UnitPrice  int64
-	Waitlisted bool
-	Name       string
-	ImageURL   *string
-	Keyword    *string
+	ID                 string
+	CartID             string
+	ProductID          string
+	Quantity           int
+	UnitPrice          int64
+	WaitlistedQuantity int
+	Name               string
+	ImageURL           *string
+	Keyword            *string
 }
 
 // UpdateCheckoutParams contains parameters for updating cart checkout info

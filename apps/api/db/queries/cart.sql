@@ -43,17 +43,18 @@ RETURNING *;
 SELECT * FROM carts WHERE event_id = $1 ORDER BY created_at;
 
 -- name: CreateCartItem :one
-INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted)
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity)
 VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
 -- name: UpsertCartItem :one
 -- Adds quantity to existing cart item or creates new one
-INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted)
+-- waitlisted_quantity is added to existing (not replaced)
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity)
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (cart_id, product_id)
 DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity,
-             waitlisted = EXCLUDED.waitlisted
+             waitlisted_quantity = cart_items.waitlisted_quantity + EXCLUDED.waitlisted_quantity
 RETURNING *;
 
 -- name: ListCartItems :many
@@ -130,10 +131,10 @@ SELECT
     c.payment_status,
     c.created_at,
     c.expires_at,
-    COALESCE(SUM(ci.quantity * ci.unit_price) FILTER (WHERE ci.waitlisted = false), 0)::bigint AS total_value,
+    COALESCE(SUM((ci.quantity - ci.waitlisted_quantity) * ci.unit_price), 0)::bigint AS total_value,
     COALESCE(SUM(ci.quantity), 0)::int AS total_items,
-    COALESCE(SUM(ci.quantity) FILTER (WHERE ci.waitlisted = false), 0)::int AS available_items,
-    COALESCE(SUM(ci.quantity) FILTER (WHERE ci.waitlisted = true), 0)::int AS waitlisted_items
+    COALESCE(SUM(ci.quantity - ci.waitlisted_quantity), 0)::int AS available_items,
+    COALESCE(SUM(ci.waitlisted_quantity), 0)::int AS waitlisted_items
 FROM carts c
 LEFT JOIN cart_items ci ON ci.cart_id = c.id
 WHERE c.event_id = $1
@@ -186,12 +187,16 @@ SELECT
 UPDATE carts SET external_order_id = $2 WHERE id = $1;
 
 -- name: ListNonWaitlistedCartItems :many
--- Returns cart items that are NOT waitlisted, with product external_id for ERP sync
-SELECT ci.*, p.name AS product_name, p.external_id AS product_external_id,
+-- Returns cart items that have available (non-waitlisted) quantity, with product external_id for ERP sync
+-- Returns available_quantity = quantity - waitlisted_quantity
+SELECT ci.id, ci.cart_id, ci.product_id,
+       (ci.quantity - ci.waitlisted_quantity) AS quantity,
+       ci.unit_price, ci.waitlisted_quantity,
+       p.name AS product_name, p.external_id AS product_external_id,
        p.keyword AS product_keyword, p.image_url AS product_image_url
 FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
-WHERE ci.cart_id = $1 AND ci.waitlisted = false;
+WHERE ci.cart_id = $1 AND ci.quantity > ci.waitlisted_quantity;
 
 -- name: ListExpiredCarts :many
 -- Returns carts that have expired (active + past expires_at), with store_id from event
@@ -201,7 +206,7 @@ JOIN live_events le ON le.id = c.event_id
 WHERE c.status = 'active' AND c.expires_at IS NOT NULL AND c.expires_at < now();
 
 -- name: ListExpiredCartsByEventAndProduct :many
--- Returns expired carts for a specific event that contain a specific product
+-- Returns expired carts for a specific event that contain a specific product (with available qty)
 SELECT DISTINCT c.*, le.store_id
 FROM carts c
 JOIN live_events le ON le.id = c.event_id
@@ -211,13 +216,13 @@ WHERE c.event_id = $1
   AND c.expires_at IS NOT NULL
   AND c.expires_at < now()
   AND ci.product_id = $2
-  AND ci.waitlisted = false;
+  AND ci.quantity > ci.waitlisted_quantity;
 
 -- name: DeleteCartItemByCartAndProduct :exec
 DELETE FROM cart_items WHERE cart_id = $1 AND product_id = $2;
 
--- name: UpdateCartItemWaitlisted :exec
-UPDATE cart_items SET waitlisted = $3 WHERE cart_id = $1 AND product_id = $2;
+-- name: UpdateCartItemWaitlistedQuantity :exec
+UPDATE cart_items SET waitlisted_quantity = $3 WHERE cart_id = $1 AND product_id = $2;
 
 -- name: GetCartByEventAndUserForUpdate :one
 -- Lock the cart row for concurrent safety
@@ -270,7 +275,7 @@ SELECT
     ci.product_id,
     ci.quantity,
     ci.unit_price,
-    ci.waitlisted,
+    ci.waitlisted_quantity,
     p.name AS product_name,
     p.image_url AS product_image_url,
     p.keyword AS product_keyword
