@@ -144,3 +144,102 @@ type AggregatedFunnelRow struct {
 	ConfirmedRevenue int64
 	AverageTicket    int64
 }
+
+// =============================================================================
+// TOP BUYERS
+// =============================================================================
+
+// Handler layer - Top Buyers Response
+type TopBuyersResponse struct {
+	Data []TopBuyerItem `json:"data"`
+}
+
+type TopBuyerItem struct {
+	ID             string `json:"id"`
+	Handle         string `json:"handle"`
+	TotalOrders    int    `json:"totalOrders"`
+	TotalSpent     int64  `json:"totalSpent"`
+	LastPurchaseAt string `json:"lastPurchaseAt"`
+}
+
+// Service layer - Top Buyers
+type TopBuyersOutput struct {
+	Buyers []TopBuyerRow
+}
+
+// Repository layer - Top Buyers
+type TopBuyerRow struct {
+	ID             string
+	Handle         string
+	TotalOrders    int
+	TotalSpent     int64
+	LastPurchaseAt string
+}
+
+// =============================================================================
+// PRODUCT SALES (Stacked Bar Chart)
+// =============================================================================
+
+// Handler layer - Product Sales Response
+type ProductSalesResponse struct {
+	Products []ProductSalesProduct   `json:"products"`
+	Data     []ProductSalesDataPoint `json:"data"`
+}
+
+type ProductSalesProduct struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Keyword string `json:"keyword"`
+}
+
+type ProductSalesDataPoint struct {
+	Month    string           `json:"month"`
+	MonthNum int              `json:"monthNum"`
+	Values   map[string]int64 `json:"values"`
+}
+
+// Service layer - Product Sales
+type ProductSalesOutput struct {
+	Products []ProductSalesProductRow
+	Data     []ProductSalesDataRow
+}
+
+type ProductSalesProductRow struct {
+	ID      string
+	Name    string
+	Keyword string
+}
+
+type ProductSalesDataRow struct {
+	Month    string
+	MonthNum int
+	Values   map[string]int64
+}
+
+// =============================================================================
+// REVENUE BY PAYMENT METHOD (Pie Chart)
+// =============================================================================
+
+// Handler layer - Revenue by Payment Method Response
+type RevenueByPaymentResponse struct {
+	Data []RevenueByPaymentItem `json:"data"`
+}
+
+type RevenueByPaymentItem struct {
+	PaymentMethod string `json:"paymentMethod"`
+	Label         string `json:"label"`
+	Revenue       int64  `json:"revenue"`
+	Count         int    `json:"count"`
+}
+
+// Service layer - Revenue by Payment Method
+type RevenueByPaymentOutput struct {
+	Items []RevenueByPaymentRow
+}
+
+// Repository layer - Revenue by Payment Method
+type RevenueByPaymentRow struct {
+	PaymentMethod string
+	Revenue       int64
+	Count         int
+}

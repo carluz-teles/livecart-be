@@ -122,14 +122,15 @@ type LogEntry struct {
 
 // SendInput represents input for sending a notification.
 type SendInput struct {
-	StoreID          string
-	EventID          string
-	CartID           string
-	CartToken        string
-	PlatformUserID   string
-	PlatformHandle   string
-	NotificationType NotificationType
-	Variables        TemplateVariables
+	StoreID           string
+	EventID           string
+	CartID            string
+	CartToken         string
+	PlatformUserID    string
+	PlatformHandle    string
+	PlatformCommentID string // Instagram comment ID for reply (if available)
+	NotificationType  NotificationType
+	Variables         TemplateVariables
 }
 
 // SendResult represents the result of a notification send attempt.

@@ -33,6 +33,7 @@ type Cart struct {
 	CheckoutID        pgtype.Text        `json:"checkout_id"`
 	CheckoutExpiresAt pgtype.Timestamptz `json:"checkout_expires_at"`
 	CustomerEmail     pgtype.Text        `json:"customer_email"`
+	PaymentMethod     pgtype.Text        `json:"payment_method"`
 }
 
 type CartItem struct {

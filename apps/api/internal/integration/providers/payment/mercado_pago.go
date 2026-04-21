@@ -331,6 +331,8 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 		DateCreated       string         `json:"date_created"`
 		Metadata          map[string]any `json:"metadata"`
 		ExternalReference string         `json:"external_reference"`
+		PaymentTypeID     string         `json:"payment_type_id"`  // credit_card, debit_card, pix, ticket (boleto)
+		PaymentMethodID   string         `json:"payment_method_id"` // visa, master, pix, etc.
 	}
 	if err := json.Unmarshal(body, &mpPayment); err != nil {
 		return nil, fmt.Errorf("parsing payment response: %w", err)
@@ -345,6 +347,9 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 		}
 	}
 
+	// Map Mercado Pago payment type to our payment method
+	paymentMethod := mapMPPaymentType(mpPayment.PaymentTypeID)
+
 	return &PaymentStatus{
 		PaymentID:         fmt.Sprintf("%d", mpPayment.ID),
 		Status:            status,
@@ -353,6 +358,7 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 		FailureReason:     mpPayment.StatusDetail,
 		Metadata:          mpPayment.Metadata,
 		ExternalReference: mpPayment.ExternalReference,
+		PaymentMethod:     paymentMethod,
 	}, nil
 }
 
@@ -659,6 +665,22 @@ func (m *MercadoPago) GeneratePixPayment(ctx context.Context, input PixPaymentIn
 func (m *MercadoPago) GetPaymentMethods(ctx context.Context) ([]string, error) {
 	// Mercado Pago supports both card and pix in Brazil
 	return []string{"card", "pix"}, nil
+}
+
+// mapMPPaymentType maps Mercado Pago payment_type_id to our payment method.
+func mapMPPaymentType(paymentType string) string {
+	switch paymentType {
+	case "credit_card":
+		return "credit_card"
+	case "debit_card":
+		return "debit_card"
+	case "pix", "bank_transfer":
+		return "pix"
+	case "ticket":
+		return "boleto"
+	default:
+		return "other"
+	}
 }
 
 // mapMPStatus maps Mercado Pago status to our PaymentState.

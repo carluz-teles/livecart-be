@@ -29,7 +29,7 @@ UPDATE carts SET status = $2 WHERE id = $1 RETURNING *;
 
 -- name: UpdateCartPayment :one
 UPDATE carts
-SET payment_status = $2, external_order_id = $3, paid_at = $4
+SET payment_status = $2, external_order_id = $3, paid_at = $4, payment_method = $5
 WHERE id = $1
 RETURNING *;
 

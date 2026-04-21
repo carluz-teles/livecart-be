@@ -284,10 +284,15 @@ func (p *Pagarme) GetPaymentStatus(ctx context.Context, orderID string) (*Paymen
 	status := mapPagarmeStatus(pgOrder.Status)
 
 	var paidAt *time.Time
-	if len(pgOrder.Charges) > 0 && pgOrder.Charges[0].PaidAt != "" {
-		if t, err := time.Parse(time.RFC3339, pgOrder.Charges[0].PaidAt); err == nil {
-			paidAt = &t
+	var paymentMethod string
+	if len(pgOrder.Charges) > 0 {
+		if pgOrder.Charges[0].PaidAt != "" {
+			if t, err := time.Parse(time.RFC3339, pgOrder.Charges[0].PaidAt); err == nil {
+				paidAt = &t
+			}
 		}
+		// Extract payment method from charge
+		paymentMethod = mapPagarmePaymentMethod(pgOrder.Charges[0].PaymentMethod)
 	}
 
 	return &PaymentStatus{
@@ -297,6 +302,7 @@ func (p *Pagarme) GetPaymentStatus(ctx context.Context, orderID string) (*Paymen
 		PaidAt:            paidAt,
 		ExternalReference: pgOrder.Code,
 		Metadata:          pgOrder.Metadata,
+		PaymentMethod:     paymentMethod,
 	}, nil
 }
 
@@ -388,6 +394,22 @@ func extractPhoneNumber(phone string) string {
 		return cleaned[2:]
 	}
 	return cleaned
+}
+
+// mapPagarmePaymentMethod maps Pagar.me payment_method to our payment method.
+func mapPagarmePaymentMethod(method string) string {
+	switch method {
+	case "credit_card":
+		return "credit_card"
+	case "debit_card":
+		return "debit_card"
+	case "pix":
+		return "pix"
+	case "boleto":
+		return "boleto"
+	default:
+		return "other"
+	}
 }
 
 // mapPagarmeStatus maps Pagar.me status to our PaymentState.

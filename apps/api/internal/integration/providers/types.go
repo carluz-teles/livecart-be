@@ -161,7 +161,12 @@ type SocialProvider interface {
 	GetProfile(ctx context.Context) (*SocialProfile, error)
 
 	// SendDirectMessage sends a text DM to the given platform user.
+	// Note: Subject to 24h messaging window restriction.
 	SendDirectMessage(ctx context.Context, recipientID, text string) error
+
+	// ReplyToComment replies to a comment (live or post).
+	// This method does NOT have the 24h messaging window restriction.
+	ReplyToComment(ctx context.Context, commentID, text string) error
 }
 
 // SocialProfile contains social media account information.
@@ -236,6 +241,7 @@ type PaymentStatus struct {
 	FailureReason     string         `json:"failure_reason,omitempty"`
 	Metadata          map[string]any `json:"metadata,omitempty"`
 	ExternalReference string         `json:"external_reference,omitempty"` // Cart ID or order reference
+	PaymentMethod     string         `json:"payment_method,omitempty"`     // pix, credit_card, debit_card, boleto
 }
 
 // PaymentState represents payment status values.

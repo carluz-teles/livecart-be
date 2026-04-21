@@ -1132,7 +1132,7 @@ func (r *Repository) UpdateCartItemWaitlisted(ctx context.Context, cartID, produ
 // =============================================================================
 
 // UpdateCartPaymentStatus updates the payment status of a cart.
-func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string, paymentStatus string, paymentID string, paidAt *time.Time) error {
+func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string, paymentStatus string, paymentID string, paidAt *time.Time, paymentMethod string) error {
 	cID, err := parseUUID(cartID)
 	if err != nil {
 		return err
@@ -1148,6 +1148,7 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 		PaymentStatus:   pgtype.Text{String: paymentStatus, Valid: true},
 		ExternalOrderID: pgtype.Text{String: paymentID, Valid: paymentID != ""},
 		PaidAt:          paidAtPg,
+		PaymentMethod:   pgtype.Text{String: paymentMethod, Valid: paymentMethod != ""},
 	})
 	if err != nil {
 		return fmt.Errorf("updating cart payment status: %w", err)

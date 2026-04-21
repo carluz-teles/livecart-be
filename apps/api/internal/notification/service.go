@@ -15,6 +15,7 @@ import (
 // DMSender is an interface for sending direct messages.
 type DMSender interface {
 	SendInstagramDM(ctx context.Context, storeID, recipientID, text string) error
+	ReplyToInstagramComment(ctx context.Context, storeID, commentID, text string) error
 }
 
 // Service handles notification logic including templates, cooldowns, and logging.
@@ -165,8 +166,26 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 		s.logger.Warn("failed to create notification log", zap.Error(err))
 	}
 
-	// Send the DM
-	sendErr := s.dmSender.SendInstagramDM(ctx, input.StoreID, input.PlatformUserID, message)
+	// Try to reply to comment first (no 24h window restriction), then fallback to DM
+	var sendErr error
+	if input.PlatformCommentID != "" {
+		s.logger.Debug("trying comment reply first",
+			zap.String("comment_id", input.PlatformCommentID),
+		)
+		sendErr = s.dmSender.ReplyToInstagramComment(ctx, input.StoreID, input.PlatformCommentID, message)
+		if sendErr != nil {
+			s.logger.Warn("comment reply failed, falling back to DM",
+				zap.String("comment_id", input.PlatformCommentID),
+				zap.Error(sendErr),
+			)
+			// Fallback to DM
+			sendErr = s.dmSender.SendInstagramDM(ctx, input.StoreID, input.PlatformUserID, message)
+		}
+	} else {
+		// No comment ID, send DM directly
+		sendErr = s.dmSender.SendInstagramDM(ctx, input.StoreID, input.PlatformUserID, message)
+	}
+
 	if sendErr != nil {
 		// Update log as failed
 		s.updateLogStatus(ctx, logID, StatusFailed, sendErr.Error())

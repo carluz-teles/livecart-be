@@ -1051,6 +1051,43 @@ func (s *Service) SendInstagramDM(ctx context.Context, storeID, recipientID, tex
 	return nil
 }
 
+// ReplyToInstagramComment resolves the active Instagram integration of a store and replies
+// to a comment. This method does NOT have the 24h messaging window restriction.
+func (s *Service) ReplyToInstagramComment(ctx context.Context, storeID, commentID, text string) error {
+	integration, err := s.repo.GetByProvider(ctx, storeID, "social", "instagram")
+	if err != nil {
+		return fmt.Errorf("instagram integration unavailable: %w", err)
+	}
+	if integration.Status != "active" {
+		return fmt.Errorf("instagram integration is not active (status=%s)", integration.Status)
+	}
+
+	provider, err := s.createProviderFromRow(ctx, integration)
+	if err != nil {
+		return fmt.Errorf("instantiating instagram provider: %w", err)
+	}
+
+	socialProvider, ok := provider.(providers.SocialProvider)
+	if !ok {
+		return fmt.Errorf("provider is not a social provider")
+	}
+
+	if err := socialProvider.ReplyToComment(ctx, commentID, text); err != nil {
+		s.logger.Warn("failed to reply to instagram comment",
+			zap.String("store_id", storeID),
+			zap.String("comment_id", commentID),
+			zap.Error(err),
+		)
+		return err
+	}
+
+	s.logger.Info("instagram comment reply sent",
+		zap.String("store_id", storeID),
+		zap.String("comment_id", commentID),
+	)
+	return nil
+}
+
 // =============================================================================
 // ERP OPERATIONS
 // =============================================================================
@@ -1740,8 +1777,8 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		cartPaymentStatus = "pending"
 	}
 
-	// Update cart payment status
-	if err := s.repo.UpdateCartPaymentStatus(ctx, status.ExternalReference, cartPaymentStatus, status.PaymentID, status.PaidAt); err != nil {
+	// Update cart payment status and payment method
+	if err := s.repo.UpdateCartPaymentStatus(ctx, status.ExternalReference, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod); err != nil {
 		s.logger.Error("failed to update cart payment status",
 			zap.String("cart_id", status.ExternalReference),
 			zap.String("payment_status", cartPaymentStatus),
@@ -1753,6 +1790,7 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 	s.logger.Info("cart payment status updated",
 		zap.String("cart_id", status.ExternalReference),
 		zap.String("payment_status", cartPaymentStatus),
+		zap.String("payment_method", status.PaymentMethod),
 	)
 
 	return nil
@@ -1990,18 +2028,19 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 
 	// Send immediate notification (fire-and-forget, doesn't block the flow)
 	s.sendImmediateNotification(ctx, sendNotificationInput{
-		StoreID:        event.StoreID,
-		EventID:        event.ID,
-		EventTitle:     event.Title,
-		CartID:         result.CartID,
-		CartToken:      result.CartToken,
-		PlatformUserID: input.UserID,
-		PlatformHandle: input.Username,
-		ProductName:    product.Name,
-		ProductKeyword: product.Keyword,
-		Quantity:       intent.Quantity,
-		TotalItems:     result.TotalItems,
-		TotalCents:     result.TotalCents,
+		StoreID:           event.StoreID,
+		EventID:           event.ID,
+		EventTitle:        event.Title,
+		CartID:            result.CartID,
+		CartToken:         result.CartToken,
+		PlatformUserID:    input.UserID,
+		PlatformHandle:    input.Username,
+		PlatformCommentID: input.CommentID,
+		ProductName:       product.Name,
+		ProductKeyword:    product.Keyword,
+		Quantity:          intent.Quantity,
+		TotalItems:        result.TotalItems,
+		TotalCents:        result.TotalCents,
 		IsNewCart:      result.IsNewCart,
 	})
 
@@ -2010,19 +2049,20 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 
 // sendNotificationInput contains all data needed for immediate notifications.
 type sendNotificationInput struct {
-	StoreID        string
-	EventID        string
-	EventTitle     string
-	CartID         string
-	CartToken      string
-	PlatformUserID string
-	PlatformHandle string
-	ProductName    string
-	ProductKeyword string
-	Quantity       int
-	TotalItems     int
-	TotalCents     int64
-	IsNewCart      bool
+	StoreID           string
+	EventID           string
+	EventTitle        string
+	CartID            string
+	CartToken         string
+	PlatformUserID    string
+	PlatformHandle    string
+	PlatformCommentID string // Instagram comment ID for reply
+	ProductName       string
+	ProductKeyword    string
+	Quantity          int
+	TotalItems        int
+	TotalCents        int64
+	IsNewCart         bool
 }
 
 // sendImmediateNotification sends an immediate checkout notification via the notification service.
@@ -2076,14 +2116,15 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 
 	// Send notification
 	result, err := s.notificationService.Send(ctx, notification.SendInput{
-		StoreID:          input.StoreID,
-		EventID:          input.EventID,
-		CartID:           input.CartID,
-		CartToken:        input.CartToken,
-		PlatformUserID:   input.PlatformUserID,
-		PlatformHandle:   input.PlatformHandle,
-		NotificationType: notification.TypeCheckoutImmediate,
-		Variables:        vars,
+		StoreID:           input.StoreID,
+		EventID:           input.EventID,
+		CartID:            input.CartID,
+		CartToken:         input.CartToken,
+		PlatformUserID:    input.PlatformUserID,
+		PlatformHandle:    input.PlatformHandle,
+		PlatformCommentID: input.PlatformCommentID,
+		NotificationType:  notification.TypeCheckoutImmediate,
+		Variables:         vars,
 	})
 
 	if err != nil {

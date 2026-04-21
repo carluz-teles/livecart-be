@@ -94,3 +94,40 @@ func (s *Service) GetAggregatedFunnel(ctx context.Context, storeID string, days 
 		AverageTicket:    row.AverageTicket,
 	}, nil
 }
+
+// =============================================================================
+// TOP BUYERS
+// =============================================================================
+
+// GetTopBuyers returns the top 5 buyers by total spent
+func (s *Service) GetTopBuyers(ctx context.Context, storeID string) (*TopBuyersOutput, error) {
+	rows, err := s.repo.GetTopBuyers(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &TopBuyersOutput{Buyers: rows}, nil
+}
+
+// =============================================================================
+// PRODUCT SALES (Stacked Bar Chart)
+// =============================================================================
+
+// GetProductSales returns monthly sales data by product
+func (s *Service) GetProductSales(ctx context.Context, storeID string) (*ProductSalesOutput, error) {
+	return s.repo.GetProductSales(ctx, storeID)
+}
+
+// =============================================================================
+// REVENUE BY PAYMENT METHOD (Pie Chart)
+// =============================================================================
+
+// GetRevenueByPaymentMethod returns revenue grouped by payment method
+func (s *Service) GetRevenueByPaymentMethod(ctx context.Context, storeID string) (*RevenueByPaymentOutput, error) {
+	rows, err := s.repo.GetRevenueByPaymentMethod(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &RevenueByPaymentOutput{Items: rows}, nil
+}

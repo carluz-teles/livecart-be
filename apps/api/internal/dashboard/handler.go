@@ -21,6 +21,9 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/stats", h.GetStats)
 	g.Get("/chart", h.GetMonthlyRevenue)
 	g.Get("/top-products", h.GetTopProducts)
+	g.Get("/top-buyers", h.GetTopBuyers)
+	g.Get("/product-sales", h.GetProductSales)
+	g.Get("/revenue-by-payment", h.GetRevenueByPaymentMethod)
 
 	// Analytics endpoints
 	analytics := g.Group("/analytics")
@@ -213,4 +216,132 @@ func (h *Handler) GetAggregatedFunnel(c *fiber.Ctx) error {
 		CheckoutToPaidRate:    checkoutToPaidRate,
 		OverallConversionRate: overallRate,
 	})
+}
+
+// =============================================================================
+// TOP BUYERS
+// =============================================================================
+
+// GetTopBuyers godoc
+// @Summary      Get top buyers by total spent
+// @Description  Returns the top 5 buyers sorted by total amount spent
+// @Tags         dashboard
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Success      200 {object} httpx.Envelope{data=TopBuyersResponse}
+// @Router       /api/v1/stores/{storeId}/dashboard/top-buyers [get]
+// @Security     BearerAuth
+func (h *Handler) GetTopBuyers(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	output, err := h.service.GetTopBuyers(c.Context(), storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	buyers := make([]TopBuyerItem, len(output.Buyers))
+	for i, row := range output.Buyers {
+		buyers[i] = TopBuyerItem{
+			ID:             row.ID,
+			Handle:         row.Handle,
+			TotalOrders:    row.TotalOrders,
+			TotalSpent:     row.TotalSpent,
+			LastPurchaseAt: row.LastPurchaseAt,
+		}
+	}
+
+	return httpx.OK(c, TopBuyersResponse{Data: buyers})
+}
+
+// =============================================================================
+// PRODUCT SALES (Stacked Bar Chart)
+// =============================================================================
+
+// GetProductSales godoc
+// @Summary      Get monthly sales by product
+// @Description  Returns monthly sales data by product for stacked bar chart
+// @Tags         dashboard
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Success      200 {object} httpx.Envelope{data=ProductSalesResponse}
+// @Router       /api/v1/stores/{storeId}/dashboard/product-sales [get]
+// @Security     BearerAuth
+func (h *Handler) GetProductSales(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	output, err := h.service.GetProductSales(c.Context(), storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	products := make([]ProductSalesProduct, len(output.Products))
+	for i, p := range output.Products {
+		products[i] = ProductSalesProduct{
+			ID:      p.ID,
+			Name:    p.Name,
+			Keyword: p.Keyword,
+		}
+	}
+
+	data := make([]ProductSalesDataPoint, len(output.Data))
+	for i, d := range output.Data {
+		data[i] = ProductSalesDataPoint{
+			Month:    d.Month,
+			MonthNum: d.MonthNum,
+			Values:   d.Values,
+		}
+	}
+
+	return httpx.OK(c, ProductSalesResponse{
+		Products: products,
+		Data:     data,
+	})
+}
+
+// =============================================================================
+// REVENUE BY PAYMENT METHOD (Pie Chart)
+// =============================================================================
+
+// paymentMethodLabels maps payment method codes to display labels
+var paymentMethodLabels = map[string]string{
+	"pix":         "PIX",
+	"credit_card": "Cartão de Crédito",
+	"debit_card":  "Cartão de Débito",
+	"boleto":      "Boleto",
+	"other":       "Outros",
+}
+
+// GetRevenueByPaymentMethod godoc
+// @Summary      Get revenue by payment method
+// @Description  Returns revenue distribution by payment method for pie chart
+// @Tags         dashboard
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Success      200 {object} httpx.Envelope{data=RevenueByPaymentResponse}
+// @Router       /api/v1/stores/{storeId}/dashboard/revenue-by-payment [get]
+// @Security     BearerAuth
+func (h *Handler) GetRevenueByPaymentMethod(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	output, err := h.service.GetRevenueByPaymentMethod(c.Context(), storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	items := make([]RevenueByPaymentItem, len(output.Items))
+	for i, row := range output.Items {
+		label, ok := paymentMethodLabels[row.PaymentMethod]
+		if !ok {
+			label = row.PaymentMethod
+		}
+
+		items[i] = RevenueByPaymentItem{
+			PaymentMethod: row.PaymentMethod,
+			Label:         label,
+			Revenue:       row.Revenue,
+			Count:         row.Count,
+		}
+	}
+
+	return httpx.OK(c, RevenueByPaymentResponse{Data: items})
 }

@@ -152,8 +152,8 @@ func (i *Instagram) GetProfile(ctx context.Context) (*providers.SocialProfile, e
 
 // SendDirectMessage sends a text DM to a user via Instagram Graph API.
 // recipientID must be the Instagram-scoped ID (IGSID) of the recipient.
-// The recipient must have messaged the business in the last 24h or the
-// API will reject the request (outside standard messaging window).
+// Uses HUMAN_AGENT tag to extend messaging window from 24h to 7 days.
+// If HUMAN_AGENT fails (not approved), falls back to standard messaging.
 func (i *Instagram) SendDirectMessage(ctx context.Context, recipientID, text string) error {
 	if recipientID == "" {
 		return fmt.Errorf("recipient id is required")
@@ -167,10 +167,35 @@ func (i *Instagram) SendDirectMessage(ctx context.Context, recipientID, text str
 
 	url := fmt.Sprintf("%s/%s/me/messages", instagramGraphAPIBaseURL, instagramGraphAPIVersion)
 
+	// Try with HUMAN_AGENT tag first (extends window to 7 days)
 	payload := map[string]any{
+		"recipient":      map[string]string{"id": recipientID},
+		"message":        map[string]string{"text": text},
+		"messaging_type": "MESSAGE_TAG",
+		"tag":            "HUMAN_AGENT",
+	}
+
+	err := i.sendDMRequest(ctx, url, payload, recipientID, text)
+	if err == nil {
+		return nil
+	}
+
+	// If HUMAN_AGENT fails, try standard message (24h window)
+	i.logger.Warn("HUMAN_AGENT tag failed, trying standard message",
+		zap.String("recipient_id", recipientID),
+		zap.Error(err),
+	)
+
+	payload = map[string]any{
 		"recipient": map[string]string{"id": recipientID},
 		"message":   map[string]string{"text": text},
 	}
+
+	return i.sendDMRequest(ctx, url, payload, recipientID, text)
+}
+
+// sendDMRequest handles the actual HTTP request for sending DMs.
+func (i *Instagram) sendDMRequest(ctx context.Context, url string, payload map[string]any, recipientID, text string) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshaling dm payload: %w", err)
@@ -200,11 +225,75 @@ func (i *Instagram) SendDirectMessage(ctx context.Context, recipientID, text str
 			zap.String("body", bodyStr),
 			zap.String("recipient_id", recipientID),
 		)
-		return fmt.Errorf("instagram send dm failed: status %d", resp.StatusCode)
+		return fmt.Errorf("instagram send dm failed: status %d, body: %s", resp.StatusCode, bodyStr)
 	}
 
 	i.logger.Info("instagram dm sent",
 		zap.String("recipient_id", recipientID),
+		zap.Int("text_bytes", len(text)),
+	)
+	return nil
+}
+
+// ReplyToComment replies to an Instagram comment (live or post).
+// This method does NOT have the 24h messaging window restriction.
+// commentID is the Instagram comment ID to reply to.
+// text is the reply message (max 1000 characters).
+func (i *Instagram) ReplyToComment(ctx context.Context, commentID, text string) error {
+	if commentID == "" {
+		return fmt.Errorf("comment id is required")
+	}
+	if text == "" {
+		return fmt.Errorf("reply text is required")
+	}
+	if len(text) > 1000 {
+		text = text[:997] + "..."
+	}
+
+	// Instagram Graph API: POST /{comment-id}/replies
+	url := fmt.Sprintf("%s/%s/%s/replies",
+		instagramGraphAPIBaseURL,
+		instagramGraphAPIVersion,
+		commentID,
+	)
+
+	payload := map[string]string{
+		"message": text,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling reply payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("creating reply request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+i.credentials.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("sending reply request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		bodyStr := string(respBody)
+		if len(bodyStr) > 256 {
+			bodyStr = bodyStr[:256] + "..."
+		}
+		i.logger.Error("instagram reply to comment failed",
+			zap.Int("status", resp.StatusCode),
+			zap.String("body", bodyStr),
+			zap.String("comment_id", commentID),
+		)
+		return fmt.Errorf("instagram reply failed: status %d, body: %s", resp.StatusCode, bodyStr)
+	}
+
+	i.logger.Info("instagram comment reply sent",
+		zap.String("comment_id", commentID),
 		zap.Int("text_bytes", len(text)),
 	)
 	return nil
