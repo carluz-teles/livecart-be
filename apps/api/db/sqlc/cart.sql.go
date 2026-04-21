@@ -764,8 +764,10 @@ SELECT
     c.payment_status,
     c.created_at,
     c.expires_at,
-    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_value,
-    COALESCE(SUM(ci.quantity), 0)::int AS total_items
+    COALESCE(SUM(ci.quantity * ci.unit_price) FILTER (WHERE ci.waitlisted = false), 0)::bigint AS total_value,
+    COALESCE(SUM(ci.quantity), 0)::int AS total_items,
+    COALESCE(SUM(ci.quantity) FILTER (WHERE ci.waitlisted = false), 0)::int AS available_items,
+    COALESCE(SUM(ci.quantity) FILTER (WHERE ci.waitlisted = true), 0)::int AS waitlisted_items
 FROM carts c
 LEFT JOIN cart_items ci ON ci.cart_id = c.id
 WHERE c.event_id = $1
@@ -774,21 +776,23 @@ ORDER BY c.created_at DESC
 `
 
 type ListCartsWithTotalByEventRow struct {
-	ID             pgtype.UUID        `json:"id"`
-	EventID        pgtype.UUID        `json:"event_id"`
-	SessionID      pgtype.UUID        `json:"session_id"`
-	PlatformUserID string             `json:"platform_user_id"`
-	PlatformHandle string             `json:"platform_handle"`
-	Token          string             `json:"token"`
-	Status         string             `json:"status"`
-	PaymentStatus  pgtype.Text        `json:"payment_status"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
-	TotalValue     int64              `json:"total_value"`
-	TotalItems     int32              `json:"total_items"`
+	ID              pgtype.UUID        `json:"id"`
+	EventID         pgtype.UUID        `json:"event_id"`
+	SessionID       pgtype.UUID        `json:"session_id"`
+	PlatformUserID  string             `json:"platform_user_id"`
+	PlatformHandle  string             `json:"platform_handle"`
+	Token           string             `json:"token"`
+	Status          string             `json:"status"`
+	PaymentStatus   pgtype.Text        `json:"payment_status"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	TotalValue      int64              `json:"total_value"`
+	TotalItems      int32              `json:"total_items"`
+	AvailableItems  int32              `json:"available_items"`
+	WaitlistedItems int32              `json:"waitlisted_items"`
 }
 
-// Returns carts for an event with total value and item count
+// Returns carts for an event with total value and item count (available vs waitlisted)
 func (q *Queries) ListCartsWithTotalByEvent(ctx context.Context, eventID pgtype.UUID) ([]ListCartsWithTotalByEventRow, error) {
 	rows, err := q.db.Query(ctx, listCartsWithTotalByEvent, eventID)
 	if err != nil {
@@ -811,6 +815,8 @@ func (q *Queries) ListCartsWithTotalByEvent(ctx context.Context, eventID pgtype.
 			&i.ExpiresAt,
 			&i.TotalValue,
 			&i.TotalItems,
+			&i.AvailableItems,
+			&i.WaitlistedItems,
 		); err != nil {
 			return nil, err
 		}

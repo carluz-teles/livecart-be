@@ -118,7 +118,7 @@ SELECT
     ), 0)::bigint AS confirmed_revenue;
 
 -- name: ListCartsWithTotalByEvent :many
--- Returns carts for an event with total value and item count
+-- Returns carts for an event with total value and item count (available vs waitlisted)
 SELECT
     c.id,
     c.event_id,
@@ -130,8 +130,10 @@ SELECT
     c.payment_status,
     c.created_at,
     c.expires_at,
-    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_value,
-    COALESCE(SUM(ci.quantity), 0)::int AS total_items
+    COALESCE(SUM(ci.quantity * ci.unit_price) FILTER (WHERE ci.waitlisted = false), 0)::bigint AS total_value,
+    COALESCE(SUM(ci.quantity), 0)::int AS total_items,
+    COALESCE(SUM(ci.quantity) FILTER (WHERE ci.waitlisted = false), 0)::int AS available_items,
+    COALESCE(SUM(ci.quantity) FILTER (WHERE ci.waitlisted = true), 0)::int AS waitlisted_items
 FROM carts c
 LEFT JOIN cart_items ci ON ci.cart_id = c.id
 WHERE c.event_id = $1

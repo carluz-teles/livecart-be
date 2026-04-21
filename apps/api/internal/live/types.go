@@ -568,16 +568,18 @@ type EventStatsResponse struct {
 }
 
 type CartWithTotalResponse struct {
-	ID             string     `json:"id"`
-	SessionID      *string    `json:"sessionId"`
-	PlatformUserID string     `json:"platformUserId"`
-	PlatformHandle string     `json:"platformHandle"`
-	Status         string     `json:"status"`
-	PaymentStatus  *string    `json:"paymentStatus"`
-	TotalValue     int64      `json:"totalValue"`
-	TotalItems     int        `json:"totalItems"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	ExpiresAt      *time.Time `json:"expiresAt"`
+	ID              string     `json:"id"`
+	SessionID       *string    `json:"sessionId"`
+	PlatformUserID  string     `json:"platformUserId"`
+	PlatformHandle  string     `json:"platformHandle"`
+	Status          string     `json:"status"`
+	PaymentStatus   *string    `json:"paymentStatus"`
+	TotalValue      int64      `json:"totalValue"`
+	TotalItems      int        `json:"totalItems"`
+	AvailableItems  int        `json:"availableItems"`
+	WaitlistedItems int        `json:"waitlistedItems"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	ExpiresAt       *time.Time `json:"expiresAt"`
 }
 
 type ListCartsResponse struct {
@@ -613,16 +615,18 @@ type EventStatsOutput struct {
 }
 
 type CartWithTotalOutput struct {
-	ID             string
-	SessionID      *string
-	PlatformUserID string
-	PlatformHandle string
-	Status         string
-	PaymentStatus  *string
-	TotalValue     int64
-	TotalItems     int
-	CreatedAt      time.Time
-	ExpiresAt      *time.Time
+	ID              string
+	SessionID       *string
+	PlatformUserID  string
+	PlatformHandle  string
+	Status          string
+	PaymentStatus   *string
+	TotalValue      int64
+	TotalItems      int
+	AvailableItems  int
+	WaitlistedItems int
+	CreatedAt       time.Time
+	ExpiresAt       *time.Time
 }
 
 type EventProductSalesOutput struct {
@@ -647,18 +651,20 @@ type EventStatsRow struct {
 }
 
 type CartWithTotalRow struct {
-	ID             string
-	EventID        string
-	SessionID      *string
-	PlatformUserID string
-	PlatformHandle string
-	Token          string
-	Status         string
-	PaymentStatus  *string
-	TotalValue     int64
-	TotalItems     int
-	CreatedAt      time.Time
-	ExpiresAt      *time.Time
+	ID              string
+	EventID         string
+	SessionID       *string
+	PlatformUserID  string
+	PlatformHandle  string
+	Token           string
+	Status          string
+	PaymentStatus   *string
+	TotalValue      int64
+	TotalItems      int
+	AvailableItems  int
+	WaitlistedItems int
+	CreatedAt       time.Time
+	ExpiresAt       *time.Time
 }
 
 type EventProductRow struct {

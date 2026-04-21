@@ -865,16 +865,18 @@ func (s *Service) ListCartsWithTotalByEvent(ctx context.Context, eventID, storeI
 	outputs := make([]CartWithTotalOutput, len(carts))
 	for i, cart := range carts {
 		outputs[i] = CartWithTotalOutput{
-			ID:             cart.ID,
-			SessionID:      cart.SessionID,
-			PlatformUserID: cart.PlatformUserID,
-			PlatformHandle: cart.PlatformHandle,
-			Status:         cart.Status,
-			PaymentStatus:  cart.PaymentStatus,
-			TotalValue:     cart.TotalValue,
-			TotalItems:     cart.TotalItems,
-			CreatedAt:      cart.CreatedAt,
-			ExpiresAt:      cart.ExpiresAt,
+			ID:              cart.ID,
+			SessionID:       cart.SessionID,
+			PlatformUserID:  cart.PlatformUserID,
+			PlatformHandle:  cart.PlatformHandle,
+			Status:          cart.Status,
+			PaymentStatus:   cart.PaymentStatus,
+			TotalValue:      cart.TotalValue,
+			TotalItems:      cart.TotalItems,
+			AvailableItems:  cart.AvailableItems,
+			WaitlistedItems: cart.WaitlistedItems,
+			CreatedAt:       cart.CreatedAt,
+			ExpiresAt:       cart.ExpiresAt,
 		}
 	}
 

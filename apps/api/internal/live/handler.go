@@ -718,16 +718,18 @@ func (h *Handler) ListCarts(c *fiber.Ctx) error {
 	responses := make([]CartWithTotalResponse, len(carts))
 	for i, cart := range carts {
 		responses[i] = CartWithTotalResponse{
-			ID:             cart.ID,
-			SessionID:      cart.SessionID,
-			PlatformUserID: cart.PlatformUserID,
-			PlatformHandle: cart.PlatformHandle,
-			Status:         cart.Status,
-			PaymentStatus:  cart.PaymentStatus,
-			TotalValue:     cart.TotalValue,
-			TotalItems:     cart.TotalItems,
-			CreatedAt:      cart.CreatedAt,
-			ExpiresAt:      cart.ExpiresAt,
+			ID:              cart.ID,
+			SessionID:       cart.SessionID,
+			PlatformUserID:  cart.PlatformUserID,
+			PlatformHandle:  cart.PlatformHandle,
+			Status:          cart.Status,
+			PaymentStatus:   cart.PaymentStatus,
+			TotalValue:      cart.TotalValue,
+			TotalItems:      cart.TotalItems,
+			AvailableItems:  cart.AvailableItems,
+			WaitlistedItems: cart.WaitlistedItems,
+			CreatedAt:       cart.CreatedAt,
+			ExpiresAt:       cart.ExpiresAt,
 		}
 	}
 

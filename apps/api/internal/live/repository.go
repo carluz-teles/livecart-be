@@ -1156,18 +1156,20 @@ func (r *Repository) ListCartsWithTotalByEvent(ctx context.Context, eventID stri
 		}
 
 		carts[i] = CartWithTotalRow{
-			ID:             row.ID.String(),
-			EventID:        row.EventID.String(),
-			SessionID:      sessionID,
-			PlatformUserID: row.PlatformUserID,
-			PlatformHandle: row.PlatformHandle,
-			Token:          row.Token,
-			Status:         row.Status,
-			PaymentStatus:  paymentStatus,
-			TotalValue:     row.TotalValue,
-			TotalItems:     int(row.TotalItems),
-			CreatedAt:      row.CreatedAt.Time,
-			ExpiresAt:      expiresAt,
+			ID:              row.ID.String(),
+			EventID:         row.EventID.String(),
+			SessionID:       sessionID,
+			PlatformUserID:  row.PlatformUserID,
+			PlatformHandle:  row.PlatformHandle,
+			Token:           row.Token,
+			Status:          row.Status,
+			PaymentStatus:   paymentStatus,
+			TotalValue:      row.TotalValue,
+			TotalItems:      int(row.TotalItems),
+			AvailableItems:  int(row.AvailableItems),
+			WaitlistedItems: int(row.WaitlistedItems),
+			CreatedAt:       row.CreatedAt.Time,
+			ExpiresAt:       expiresAt,
 		}
 	}
 
