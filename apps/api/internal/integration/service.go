@@ -2112,8 +2112,14 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 		return
 	}
 
+	// Determine notification type based on whether this is a new cart or adding to existing
+	notifType := notification.TypeCheckoutImmediate
+	if !input.IsNewCart {
+		notifType = notification.TypeItemAdded
+	}
+
 	// Check if we should notify based on store settings
-	shouldNotify, err := s.notificationService.ShouldNotify(ctx, input.StoreID, notification.TypeCheckoutImmediate, input.IsNewCart)
+	shouldNotify, err := s.notificationService.ShouldNotify(ctx, input.StoreID, notifType, input.IsNewCart)
 	if err != nil {
 		s.logger.Warn("failed to check notification settings",
 			zap.String("store_id", input.StoreID),
@@ -2162,7 +2168,7 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 		PlatformUserID:    input.PlatformUserID,
 		PlatformHandle:    input.PlatformHandle,
 		PlatformCommentID: input.PlatformCommentID,
-		NotificationType:  notification.TypeCheckoutImmediate,
+		NotificationType:  notifType,
 		Variables:         vars,
 	})
 
