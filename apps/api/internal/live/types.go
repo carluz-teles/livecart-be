@@ -652,6 +652,7 @@ type CartWithTotalRow struct {
 	SessionID      *string
 	PlatformUserID string
 	PlatformHandle string
+	Token          string
 	Status         string
 	PaymentStatus  *string
 	TotalValue     int64

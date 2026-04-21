@@ -477,6 +477,7 @@ func (a *liveNotifierAdapter) NotifyEventCheckout(ctx context.Context, p live.No
 		StoreID:        p.StoreID,
 		EventID:        p.EventID,
 		CartID:         p.CartID,
+		CartToken:      p.CartToken,
 		PlatformUserID: p.PlatformUserID,
 		PlatformHandle: p.PlatformHandle,
 		TotalItems:     p.TotalItems,

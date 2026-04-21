@@ -125,6 +125,7 @@ SELECT
     c.session_id,
     c.platform_user_id,
     c.platform_handle,
+    c.token,
     c.status,
     c.payment_status,
     c.created_at,

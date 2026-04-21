@@ -144,7 +144,7 @@ func SampleVariables() TemplateVariables {
 		TotalItens:   3,
 		Total:        "R$ 199,90",
 		TotalCents:   19990,
-		Link:         "https://checkout.livecart.app/c/abc123",
+		Link:         "https://sualoja.com/cart/abc123",
 		Loja:         "Minha Loja",
 		ExpiraEm:     "48 horas",
 		LiveTitulo:   "Black Friday 2024",

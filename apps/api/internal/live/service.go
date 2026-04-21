@@ -24,6 +24,7 @@ type NotifyEventCheckoutParams struct {
 	StoreID        string
 	EventID        string
 	CartID         string
+	CartToken      string
 	PlatformUserID string
 	PlatformHandle string
 	TotalItems     int
@@ -549,6 +550,7 @@ func (s *Service) sendCheckoutLinksForEvent(ctx context.Context, storeID, eventI
 			StoreID:        storeID,
 			EventID:        eventID,
 			CartID:         c.ID,
+			CartToken:      c.Token,
 			PlatformUserID: c.PlatformUserID,
 			PlatformHandle: c.PlatformHandle,
 			TotalItems:     c.TotalItems,

@@ -738,6 +738,7 @@ SELECT
     c.session_id,
     c.platform_user_id,
     c.platform_handle,
+    c.token,
     c.status,
     c.payment_status,
     c.created_at,
@@ -757,6 +758,7 @@ type ListCartsWithTotalByEventRow struct {
 	SessionID      pgtype.UUID        `json:"session_id"`
 	PlatformUserID string             `json:"platform_user_id"`
 	PlatformHandle string             `json:"platform_handle"`
+	Token          string             `json:"token"`
 	Status         string             `json:"status"`
 	PaymentStatus  pgtype.Text        `json:"payment_status"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
@@ -781,6 +783,7 @@ func (q *Queries) ListCartsWithTotalByEvent(ctx context.Context, eventID pgtype.
 			&i.SessionID,
 			&i.PlatformUserID,
 			&i.PlatformHandle,
+			&i.Token,
 			&i.Status,
 			&i.PaymentStatus,
 			&i.CreatedAt,

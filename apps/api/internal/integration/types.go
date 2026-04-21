@@ -47,6 +47,7 @@ type NotifyEventCheckoutParams struct {
 	StoreID        string
 	EventID        string
 	CartID         string
+	CartToken      string
 	PlatformUserID string
 	PlatformHandle string
 	TotalItems     int

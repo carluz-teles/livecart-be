@@ -1161,6 +1161,7 @@ func (r *Repository) ListCartsWithTotalByEvent(ctx context.Context, eventID stri
 			SessionID:      sessionID,
 			PlatformUserID: row.PlatformUserID,
 			PlatformHandle: row.PlatformHandle,
+			Token:          row.Token,
 			Status:         row.Status,
 			PaymentStatus:  paymentStatus,
 			TotalValue:     row.TotalValue,

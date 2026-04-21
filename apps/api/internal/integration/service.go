@@ -2142,7 +2142,8 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 	}
 
 	// Build checkout URL
-	checkoutURL := fmt.Sprintf("https://checkout.livecart.app/c/%s", input.CartToken)
+	frontendURL := config.FrontendURL.StringOr("http://localhost:3000")
+	checkoutURL := fmt.Sprintf("%s/cart/%s", frontendURL, input.CartToken)
 
 	// Build template variables
 	vars := notification.TemplateVariables{

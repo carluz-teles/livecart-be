@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/config"
 )
 
 // InstagramNotifier implements Notifier by sending DMs through the Instagram
@@ -33,14 +35,16 @@ func (n *InstagramNotifier) NotifyCartExpiring(_ context.Context, _ NotifyCartEx
 	return nil
 }
 
-// NotifyEventCheckout sends a (mocked) checkout link DM to the buyer.
+// NotifyEventCheckout sends a checkout link DM to the buyer.
 func (n *InstagramNotifier) NotifyEventCheckout(ctx context.Context, params NotifyEventCheckoutParams) error {
+	frontendURL := config.FrontendURL.StringOr("http://localhost:3000")
 	text := fmt.Sprintf(
-		"Olá @%s! Sua compra na live está pronta 🎉\n%d itens • R$ %.2f\nFinalize aqui: https://checkout.livecart.app/c/%s (link mock)",
+		"Olá @%s! Sua compra na live está pronta 🎉\n%d itens • R$ %.2f\nFinalize aqui: %s/cart/%s",
 		params.PlatformHandle,
 		params.TotalItems,
 		float64(params.TotalValue)/100,
-		params.CartID,
+		frontendURL,
+		params.CartToken,
 	)
 
 	if err := n.svc.SendInstagramDM(ctx, params.StoreID, params.PlatformUserID, text); err != nil {
