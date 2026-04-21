@@ -302,7 +302,7 @@ func (i *Instagram) ReplyToComment(ctx context.Context, commentID, text string) 
 // GetActiveLives retrieves all live videos currently being broadcast by the user.
 // This endpoint only returns lives that are actively streaming at the time of the request.
 func (i *Instagram) GetActiveLives(ctx context.Context) ([]providers.LiveMedia, error) {
-	url := fmt.Sprintf("%s/%s/me/live_media?fields=id,media_type,media_product_type,username&access_token=%s",
+	url := fmt.Sprintf("%s/%s/me/live_media?fields=id,media_type,media_product_type,username,timestamp&access_token=%s",
 		instagramGraphAPIBaseURL,
 		instagramGraphAPIVersion,
 		i.credentials.AccessToken,

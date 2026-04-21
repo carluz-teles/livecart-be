@@ -186,6 +186,7 @@ type LiveMedia struct {
 	MediaType        string `json:"media_type"`
 	MediaProductType string `json:"media_product_type"`
 	Username         string `json:"username"`
+	Timestamp        string `json:"timestamp,omitempty"`
 }
 
 // WebhookHandler interface for providers that support webhooks.
