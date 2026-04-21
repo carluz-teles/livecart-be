@@ -271,6 +271,24 @@ func (r *Repository) Delete(ctx context.Context, id, storeID string) error {
 	})
 }
 
+// ListWithExpiringTokens lists active integrations with tokens expiring before the given time.
+// Used by background token refresh worker.
+func (r *Repository) ListWithExpiringTokens(ctx context.Context, expiresBefore time.Time) ([]IntegrationRow, error) {
+	rows, err := r.queries.ListIntegrationsWithExpiringTokens(ctx, pgtype.Timestamptz{
+		Time:  expiresBefore,
+		Valid: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing integrations with expiring tokens: %w", err)
+	}
+
+	result := make([]IntegrationRow, len(rows))
+	for i, row := range rows {
+		result[i] = *r.toIntegrationRow(row)
+	}
+	return result, nil
+}
+
 // =============================================================================
 // INTEGRATION LOGS
 // =============================================================================

@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"regexp"
 	"syscall"
+	"time"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
@@ -326,6 +327,15 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// (integrationSvc implements notification.DMSender via SendInstagramDM)
 			notificationSvc = notification.NewService(queries, integrationSvc, log)
 			integrationSvc.SetNotificationService(notificationSvc)
+
+			// Start background token refresh worker
+			tokenWorker := integration.NewTokenRefreshWorker(integration.TokenRefreshWorkerConfig{
+				Service:  integrationSvc,
+				Logger:   log,
+				Interval: 5 * time.Minute,  // Check every 5 minutes
+				Window:   30 * time.Minute, // Refresh tokens expiring within 30 minutes
+			})
+			tokenWorker.Start()
 
 			log.Info("integration layer initialized")
 		}

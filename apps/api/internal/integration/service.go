@@ -570,17 +570,40 @@ func (s *Service) handleTinyCallback(ctx context.Context, input OAuthCallbackInp
 		return nil, fmt.Errorf("parsing token response: %w", err)
 	}
 
+	// Log token expiration info for debugging
+	s.logger.Info("Tiny OAuth token received",
+		zap.Int("expires_in", tokenResp.ExpiresIn),
+		zap.Bool("has_access_token", tokenResp.AccessToken != ""),
+		zap.Bool("has_refresh_token", tokenResp.RefreshToken != ""),
+	)
+
+	// Default to 4 hours if expires_in is 0 or not provided
+	// Tiny access tokens typically last about 4 hours
+	expiresInSeconds := tokenResp.ExpiresIn
+	if expiresInSeconds <= 0 {
+		s.logger.Warn("Tiny OAuth: expires_in is 0 or negative, defaulting to 4 hours",
+			zap.Int("original_expires_in", tokenResp.ExpiresIn),
+		)
+		expiresInSeconds = 14400 // 4 hours in seconds
+	}
+
 	// Create credentials preserving client_id and client_secret
+	expiresAt := time.Now().Add(time.Duration(expiresInSeconds) * time.Second)
 	creds := &providers.Credentials{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
 		TokenType:    tokenResp.TokenType,
-		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+		ExpiresAt:    expiresAt,
 		Extra: map[string]any{
 			"client_id":     clientID,
 			"client_secret": clientSecret,
 		},
 	}
+
+	s.logger.Info("Tiny OAuth credentials created",
+		zap.Time("expires_at", expiresAt),
+		zap.Int("expires_in_seconds_used", expiresInSeconds),
+	)
 
 	// Encrypt credentials
 	encryptedCreds, err := s.encryptor.EncryptJSON(creds)
@@ -2593,8 +2616,25 @@ func (s *Service) createProviderFromRow(ctx context.Context, integration *Integr
 		return nil, fmt.Errorf("decrypting credentials: %w", err)
 	}
 
+	// Log credential expiration info for debugging (only for OAuth providers)
+	if creds.AccessToken != "" && integration.Provider != "pagarme" {
+		s.logger.Debug("checking token expiration",
+			zap.String("integration_id", integration.ID),
+			zap.String("provider", integration.Provider),
+			zap.Time("expires_at", creds.ExpiresAt),
+			zap.Bool("expires_at_is_zero", creds.ExpiresAt.IsZero()),
+			zap.Bool("is_expired", creds.IsExpired()),
+			zap.Bool("has_refresh_token", creds.RefreshToken != ""),
+		)
+	}
+
 	// Check if token needs refresh
 	if creds.IsExpired() {
+		s.logger.Info("token expired, attempting refresh",
+			zap.String("integration_id", integration.ID),
+			zap.String("provider", integration.Provider),
+			zap.Time("expires_at", creds.ExpiresAt),
+		)
 		creds, err = s.refreshToken(ctx, integration, creds)
 		if err != nil {
 			s.logger.Warn("failed to refresh token",

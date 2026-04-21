@@ -678,6 +678,49 @@ func (q *Queries) ListIntegrationsByType(ctx context.Context, arg ListIntegratio
 	return items, nil
 }
 
+const listIntegrationsWithExpiringTokens = `-- name: ListIntegrationsWithExpiringTokens :many
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata FROM integrations
+WHERE status = 'active'
+  AND token_expires_at IS NOT NULL
+  AND token_expires_at <= $1
+  AND provider IN ('tiny', 'mercado_pago', 'instagram')
+ORDER BY token_expires_at ASC
+LIMIT 100
+`
+
+// Lists active integrations with OAuth tokens expiring within the given duration.
+// Used by background token refresh worker.
+func (q *Queries) ListIntegrationsWithExpiringTokens(ctx context.Context, tokenExpiresAt pgtype.Timestamptz) ([]Integration, error) {
+	rows, err := q.db.Query(ctx, listIntegrationsWithExpiringTokens, tokenExpiresAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Integration{}
+	for rows.Next() {
+		var i Integration
+		if err := rows.Scan(
+			&i.ID,
+			&i.StoreID,
+			&i.Type,
+			&i.Provider,
+			&i.Status,
+			&i.TokenExpiresAt,
+			&i.LastSyncedAt,
+			&i.CreatedAt,
+			&i.Credentials,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUnprocessedWebhooks = `-- name: ListUnprocessedWebhooks :many
 SELECT id, integration_id, provider, event_type, event_id, payload, signature_valid, processed, processed_at, error_message, created_at FROM webhook_events
 WHERE integration_id = $1 AND processed = false

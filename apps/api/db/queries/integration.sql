@@ -50,6 +50,17 @@ WHERE id = $1;
 -- name: DeleteIntegration :exec
 DELETE FROM integrations WHERE id = $1 AND store_id = $2;
 
+-- name: ListIntegrationsWithExpiringTokens :many
+-- Lists active integrations with OAuth tokens expiring within the given duration.
+-- Used by background token refresh worker.
+SELECT * FROM integrations
+WHERE status = 'active'
+  AND token_expires_at IS NOT NULL
+  AND token_expires_at <= $1
+  AND provider IN ('tiny', 'mercado_pago', 'instagram')
+ORDER BY token_expires_at ASC
+LIMIT 100;
+
 -- =============================================================================
 -- INTEGRATION LOGS
 -- =============================================================================
