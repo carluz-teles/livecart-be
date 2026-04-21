@@ -79,7 +79,6 @@ func (s *Service) GetCartMessageSettings(ctx context.Context, storeID string) (*
 
 	return &CartMessageSettings{
 		RealTimeCart:              row.CartRealTime,
-		MessageCooldownSeconds:    int(row.CartMessageCooldownSeconds),
 		SendExpirationReminder:    row.CartSendExpirationReminder,
 		ExpirationReminderMinutes: int(row.CartExpirationReminderMinutes),
 	}, nil
@@ -104,18 +103,11 @@ func (s *Service) UpdateSettings(ctx context.Context, storeID string, settings S
 }
 
 // Send sends a notification based on type and store settings.
-// Returns the result including whether it was sent, skipped due to cooldown, etc.
 func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error) {
 	// Get template settings
 	settings, err := s.GetSettings(ctx, input.StoreID)
 	if err != nil {
 		return nil, fmt.Errorf("getting settings: %w", err)
-	}
-
-	// Get cart message settings for cooldown
-	cartSettings, err := s.GetCartMessageSettings(ctx, input.StoreID)
-	if err != nil {
-		return nil, fmt.Errorf("getting cart message settings: %w", err)
 	}
 
 	// Get template settings for this notification type
@@ -128,28 +120,6 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 		return &SendResult{
 			Status: StatusSkipped,
 		}, nil
-	}
-
-	// Check cooldown (now from cart_settings)
-	cooldownSeconds := cartSettings.MessageCooldownSeconds
-	if cooldownSeconds > 0 {
-		inCooldown, err := s.isInCooldown(ctx, input.StoreID, input.PlatformUserID, cooldownSeconds)
-		if err != nil {
-			s.logger.Warn("failed to check cooldown", zap.Error(err))
-		} else if inCooldown {
-			s.logger.Debug("skipping notification due to cooldown",
-				zap.String("store_id", input.StoreID),
-				zap.String("platform_user_id", input.PlatformUserID),
-				zap.Int("cooldown_seconds", cooldownSeconds),
-			)
-
-			// Log the cooldown skip
-			logID, _ := s.createLog(ctx, input, StatusCooldown, "", nil)
-			return &SendResult{
-				LogID:  logID,
-				Status: StatusCooldown,
-			}, nil
-		}
 	}
 
 	// Render the message
@@ -294,27 +264,6 @@ func (s *Service) getTemplateSettings(settings *Settings, notifType Notification
 	default:
 		return nil
 	}
-}
-
-func (s *Service) isInCooldown(ctx context.Context, storeID, platformUserID string, cooldownSeconds int) (bool, error) {
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return false, err
-	}
-
-	lastNotification, err := s.queries.GetLastNotificationForUser(ctx, sqlc.GetLastNotificationForUserParams{
-		StoreID:        storeUID,
-		PlatformUserID: platformUserID,
-	})
-	if err != nil {
-		// No previous notification found - not in cooldown
-		return false, nil
-	}
-
-	cooldownDuration := time.Duration(cooldownSeconds) * time.Second
-	cooldownEnd := lastNotification.CreatedAt.Time.Add(cooldownDuration)
-
-	return time.Now().Before(cooldownEnd), nil
 }
 
 func (s *Service) createLog(ctx context.Context, input SendInput, status NotificationStatus, message string, errMsg *string) (string, error) {

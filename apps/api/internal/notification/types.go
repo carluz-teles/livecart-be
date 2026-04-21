@@ -27,11 +27,10 @@ const (
 type NotificationStatus string
 
 const (
-	StatusPending  NotificationStatus = "pending"
-	StatusSent     NotificationStatus = "sent"
-	StatusFailed   NotificationStatus = "failed"
-	StatusSkipped  NotificationStatus = "skipped"
-	StatusCooldown NotificationStatus = "cooldown"
+	StatusPending NotificationStatus = "pending"
+	StatusSent    NotificationStatus = "sent"
+	StatusFailed  NotificationStatus = "failed"
+	StatusSkipped NotificationStatus = "skipped"
 )
 
 // Settings represents the notification settings for a store.
@@ -54,7 +53,6 @@ type TemplateSettings struct {
 // These are stored in stores.cart_* columns and control notification triggers.
 type CartMessageSettings struct {
 	RealTimeCart              bool `json:"realTimeCart"`
-	MessageCooldownSeconds    int  `json:"messageCooldownSeconds"`
 	SendExpirationReminder    bool `json:"sendExpirationReminder"`
 	ExpirationReminderMinutes int  `json:"expirationReminderMinutes"`
 }
@@ -82,7 +80,6 @@ func DefaultSettings() Settings {
 func DefaultCartMessageSettings() CartMessageSettings {
 	return CartMessageSettings{
 		RealTimeCart:              true,
-		MessageCooldownSeconds:    30,
 		SendExpirationReminder:    true,
 		ExpirationReminderMinutes: 15,
 	}
