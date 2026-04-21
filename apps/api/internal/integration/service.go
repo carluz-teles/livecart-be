@@ -1977,6 +1977,43 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	// Lazy expiration: process expired carts for this product before checking stock
 	s.ProcessExpiredCartsForProduct(ctx, event.ID, product.ID)
 
+	// Validate maxQuantityPerItem limit
+	storeInfo, _ := s.repo.GetStoreInfo(ctx, event.StoreID)
+	if storeInfo != nil && storeInfo.MaxQuantityPerItem > 0 {
+		currentQty, _ := s.repo.GetProductQuantityInUserCart(ctx, event.ID, input.UserID, product.ID)
+		maxAllowed := storeInfo.MaxQuantityPerItem
+
+		if currentQty >= maxAllowed {
+			// User already has max quantity, ignore this request
+			s.logger.Info("user already at max quantity for product, ignoring",
+				zap.String("username", input.Username),
+				zap.String("product_id", product.ID),
+				zap.Int("current_qty", currentQty),
+				zap.Int("max_allowed", maxAllowed),
+			)
+			if commentID != "" {
+				_ = s.repo.UpdateLiveCommentResult(ctx, commentID, false, product.ID, intent.Quantity, "max_quantity_reached")
+			}
+			// Send reply notifying user they've reached the limit
+			go s.sendMaxQuantityReply(ctx, event.StoreID, input.CommentID, input.UserID, input.Username, product.Name, maxAllowed, true)
+			return nil
+		}
+
+		// Cap quantity to remaining allowed
+		remaining := maxAllowed - currentQty
+		if intent.Quantity > remaining {
+			s.logger.Info("capping quantity to max allowed",
+				zap.String("username", input.Username),
+				zap.String("product_id", product.ID),
+				zap.Int("requested", intent.Quantity),
+				zap.Int("capped_to", remaining),
+			)
+			// Send reply notifying user their quantity was capped
+			go s.sendMaxQuantityReply(ctx, event.StoreID, input.CommentID, input.UserID, input.Username, product.Name, maxAllowed, false)
+			intent.Quantity = remaining
+		}
+	}
+
 	// Try to reserve stock atomically
 	stockErr := s.repo.DecrementProductStock(ctx, product.ID, intent.Quantity)
 	waitlisted := stockErr != nil
@@ -2187,6 +2224,45 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 		zap.String("cart_id", input.CartID),
 		zap.String("status", string(result.Status)),
 		zap.Bool("is_new_cart", input.IsNewCart),
+	)
+}
+
+// sendMaxQuantityReply sends a reply to the user when they've reached or exceeded the max quantity limit.
+// This is fire-and-forget - errors are logged but don't affect the main flow.
+// isAtLimit: true = already at limit (rejected), false = quantity was capped
+func (s *Service) sendMaxQuantityReply(ctx context.Context, storeID, commentID, userID, username, productName string, maxAllowed int, isAtLimit bool) {
+	if commentID == "" {
+		return
+	}
+
+	var message string
+	if isAtLimit {
+		message = fmt.Sprintf("Oi @%s! Você já atingiu o limite de %d unidades de %s. 🛒", username, maxAllowed, productName)
+	} else {
+		message = fmt.Sprintf("Oi @%s! Adicionei o máximo permitido (%d unidades) de %s ao seu carrinho. 🛒", username, maxAllowed, productName)
+	}
+
+	// Try comment reply first, then DM fallback
+	err := s.ReplyToInstagramComment(ctx, storeID, commentID, message)
+	if err != nil {
+		s.logger.Warn("failed to send max quantity reply via comment, trying DM",
+			zap.String("comment_id", commentID),
+			zap.Error(err),
+		)
+		// Fallback to DM
+		if dmErr := s.SendInstagramDM(ctx, storeID, userID, message); dmErr != nil {
+			s.logger.Warn("failed to send max quantity DM",
+				zap.String("user_id", userID),
+				zap.Error(dmErr),
+			)
+		}
+	}
+
+	s.logger.Info("max quantity reply sent",
+		zap.String("username", username),
+		zap.String("product", productName),
+		zap.Int("max_allowed", maxAllowed),
+		zap.Bool("is_at_limit", isAtLimit),
 	)
 }
 

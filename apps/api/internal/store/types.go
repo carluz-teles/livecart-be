@@ -10,7 +10,6 @@ type CartSettingsDTO struct {
 	Enabled            bool     `json:"enabled"`
 	ExpirationMinutes  int      `json:"expirationMinutes"`
 	ReserveStock       bool     `json:"reserveStock"`
-	MaxItems           int      `json:"maxItems"`
 	MaxQuantityPerItem int      `json:"maxQuantityPerItem"`
 	AllowEdit          bool     `json:"allowEdit"`
 	CheckoutSendMethods []string `json:"checkoutSendMethods"`
@@ -66,7 +65,6 @@ type UpdateCartSettingsRequest struct {
 	Enabled            bool     `json:"enabled"`
 	ExpirationMinutes  int      `json:"expirationMinutes" validate:"gte=5,lte=1440"`
 	ReserveStock       bool     `json:"reserveStock"`
-	MaxItems           int      `json:"maxItems" validate:"gte=0"`
 	MaxQuantityPerItem int      `json:"maxQuantityPerItem" validate:"gte=1"`
 	AllowEdit          bool     `json:"allowEdit"`
 	CheckoutSendMethods []string `json:"checkoutSendMethods"`
@@ -136,7 +134,6 @@ type UpdateCartSettingsInput struct {
 	Enabled            bool
 	ExpirationMinutes  int
 	ReserveStock       bool
-	MaxItems           int
 	MaxQuantityPerItem int
 	AllowEdit          bool
 	CheckoutSendMethods []string
@@ -196,7 +193,6 @@ type UpdateCartSettingsParams struct {
 	Enabled            bool
 	ExpirationMinutes  int
 	ReserveStock       bool
-	MaxItems           int
 	MaxQuantityPerItem int
 	AllowEdit          bool
 	CheckoutSendMethods []string

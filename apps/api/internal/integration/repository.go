@@ -1501,6 +1501,7 @@ func (r *Repository) HasActiveEventForProduct(ctx context.Context, externalProdu
 type StoreInfo struct {
 	Name                  string
 	CartExpirationMinutes int
+	MaxQuantityPerItem    int
 }
 
 // GetStoreInfo returns minimal store information for notifications.
@@ -1518,5 +1519,31 @@ func (r *Repository) GetStoreInfo(ctx context.Context, storeID string) (*StoreIn
 	return &StoreInfo{
 		Name:                  row.Name,
 		CartExpirationMinutes: int(row.CartExpirationMinutes),
+		MaxQuantityPerItem:    int(row.CartMaxQuantityPerItem),
 	}, nil
+}
+
+// GetProductQuantityInUserCart returns the current quantity of a specific product in a user's cart.
+// Returns 0 if no cart exists or if the product is not in the cart.
+func (r *Repository) GetProductQuantityInUserCart(ctx context.Context, eventID, platformUserID, productID string) (int, error) {
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return 0, err
+	}
+	productUID, err := parseUUID(productID)
+	if err != nil {
+		return 0, err
+	}
+
+	qty, err := r.queries.GetProductQuantityInUserCart(ctx, sqlc.GetProductQuantityInUserCartParams{
+		EventID:        eventUID,
+		PlatformUserID: platformUserID,
+		ProductID:      productUID,
+	})
+	if err != nil {
+		// No cart or no item - return 0
+		return 0, nil
+	}
+
+	return int(qty), nil
 }

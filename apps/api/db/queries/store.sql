@@ -35,15 +35,14 @@ SET
   cart_enabled = $2,
   cart_expiration_minutes = $3,
   cart_reserve_stock = $4,
-  cart_max_items = $5,
-  cart_max_quantity_per_item = $6,
-  cart_allow_edit = $7,
-  cart_real_time = $8,
-  send_on_live_end = $9,
-  checkout_send_methods = $10,
-  cart_message_cooldown_seconds = $11,
-  cart_send_expiration_reminder = $12,
-  cart_expiration_reminder_minutes = $13,
+  cart_max_quantity_per_item = $5,
+  cart_allow_edit = $6,
+  cart_real_time = $7,
+  send_on_live_end = $8,
+  checkout_send_methods = $9,
+  cart_message_cooldown_seconds = $10,
+  cart_send_expiration_reminder = $11,
+  cart_expiration_reminder_minutes = $12,
   updated_at = now()
 WHERE id = $1
 RETURNING *;
@@ -87,4 +86,4 @@ WHERE id = $1
 RETURNING *;
 
 -- name: GetStoreNameByID :one
-SELECT name, cart_expiration_minutes FROM stores WHERE id = $1;
+SELECT name, cart_expiration_minutes, cart_max_quantity_per_item FROM stores WHERE id = $1;

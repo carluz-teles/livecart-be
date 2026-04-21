@@ -221,6 +221,13 @@ UPDATE cart_items SET waitlisted = $3 WHERE cart_id = $1 AND product_id = $2;
 -- Lock the cart row for concurrent safety
 SELECT * FROM carts WHERE event_id = $1 AND platform_user_id = $2 FOR UPDATE;
 
+-- name: GetProductQuantityInUserCart :one
+-- Returns the current quantity of a specific product in a user's cart for an event
+SELECT COALESCE(ci.quantity, 0)::INT AS quantity
+FROM carts c
+LEFT JOIN cart_items ci ON ci.cart_id = c.id AND ci.product_id = $3
+WHERE c.event_id = $1 AND c.platform_user_id = $2;
+
 -- =============================================================================
 -- PUBLIC CHECKOUT - Cart page for customers
 -- =============================================================================

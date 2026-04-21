@@ -508,6 +508,27 @@ func (q *Queries) GetEventStats(ctx context.Context, eventID pgtype.UUID) (GetEv
 	return i, err
 }
 
+const getProductQuantityInUserCart = `-- name: GetProductQuantityInUserCart :one
+SELECT COALESCE(ci.quantity, 0)::INT AS quantity
+FROM carts c
+LEFT JOIN cart_items ci ON ci.cart_id = c.id AND ci.product_id = $3
+WHERE c.event_id = $1 AND c.platform_user_id = $2
+`
+
+type GetProductQuantityInUserCartParams struct {
+	EventID        pgtype.UUID `json:"event_id"`
+	PlatformUserID string      `json:"platform_user_id"`
+	ProductID      pgtype.UUID `json:"product_id"`
+}
+
+// Returns the current quantity of a specific product in a user's cart for an event
+func (q *Queries) GetProductQuantityInUserCart(ctx context.Context, arg GetProductQuantityInUserCartParams) (int32, error) {
+	row := q.db.QueryRow(ctx, getProductQuantityInUserCart, arg.EventID, arg.PlatformUserID, arg.ProductID)
+	var quantity int32
+	err := row.Scan(&quantity)
+	return quantity, err
+}
+
 const getSessionStats = `-- name: GetSessionStats :one
 
 SELECT

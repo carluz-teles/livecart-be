@@ -253,18 +253,19 @@ func (q *Queries) GetStoreByUserID(ctx context.Context, userID pgtype.UUID) (Sto
 }
 
 const getStoreNameByID = `-- name: GetStoreNameByID :one
-SELECT name, cart_expiration_minutes FROM stores WHERE id = $1
+SELECT name, cart_expiration_minutes, cart_max_quantity_per_item FROM stores WHERE id = $1
 `
 
 type GetStoreNameByIDRow struct {
-	Name                  string `json:"name"`
-	CartExpirationMinutes int32  `json:"cart_expiration_minutes"`
+	Name                   string `json:"name"`
+	CartExpirationMinutes  int32  `json:"cart_expiration_minutes"`
+	CartMaxQuantityPerItem int32  `json:"cart_max_quantity_per_item"`
 }
 
 func (q *Queries) GetStoreNameByID(ctx context.Context, id pgtype.UUID) (GetStoreNameByIDRow, error) {
 	row := q.db.QueryRow(ctx, getStoreNameByID, id)
 	var i GetStoreNameByIDRow
-	err := row.Scan(&i.Name, &i.CartExpirationMinutes)
+	err := row.Scan(&i.Name, &i.CartExpirationMinutes, &i.CartMaxQuantityPerItem)
 	return i, err
 }
 
@@ -400,15 +401,14 @@ SET
   cart_enabled = $2,
   cart_expiration_minutes = $3,
   cart_reserve_stock = $4,
-  cart_max_items = $5,
-  cart_max_quantity_per_item = $6,
-  cart_allow_edit = $7,
-  cart_real_time = $8,
-  send_on_live_end = $9,
-  checkout_send_methods = $10,
-  cart_message_cooldown_seconds = $11,
-  cart_send_expiration_reminder = $12,
-  cart_expiration_reminder_minutes = $13,
+  cart_max_quantity_per_item = $5,
+  cart_allow_edit = $6,
+  cart_real_time = $7,
+  send_on_live_end = $8,
+  checkout_send_methods = $9,
+  cart_message_cooldown_seconds = $10,
+  cart_send_expiration_reminder = $11,
+  cart_expiration_reminder_minutes = $12,
   updated_at = now()
 WHERE id = $1
 RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj
@@ -419,7 +419,6 @@ type UpdateStoreCartSettingsParams struct {
 	CartEnabled                   bool            `json:"cart_enabled"`
 	CartExpirationMinutes         int32           `json:"cart_expiration_minutes"`
 	CartReserveStock              bool            `json:"cart_reserve_stock"`
-	CartMaxItems                  int32           `json:"cart_max_items"`
 	CartMaxQuantityPerItem        int32           `json:"cart_max_quantity_per_item"`
 	CartAllowEdit                 bool            `json:"cart_allow_edit"`
 	CartRealTime                  bool            `json:"cart_real_time"`
@@ -436,7 +435,6 @@ func (q *Queries) UpdateStoreCartSettings(ctx context.Context, arg UpdateStoreCa
 		arg.CartEnabled,
 		arg.CartExpirationMinutes,
 		arg.CartReserveStock,
-		arg.CartMaxItems,
 		arg.CartMaxQuantityPerItem,
 		arg.CartAllowEdit,
 		arg.CartRealTime,

@@ -136,7 +136,6 @@ func (s *Service) UpdateCartSettings(ctx context.Context, input UpdateCartSettin
 		Enabled:                   input.Enabled,
 		ExpirationMinutes:         input.ExpirationMinutes,
 		ReserveStock:              input.ReserveStock,
-		MaxItems:                  input.MaxItems,
 		MaxQuantityPerItem:        input.MaxQuantityPerItem,
 		AllowEdit:                 input.AllowEdit,
 		CheckoutSendMethods:       input.CheckoutSendMethods,
