@@ -68,7 +68,7 @@ func (s *Service) SetERPFinalizer(f ERPFinalizer) {
 // =============================================================================
 
 // Create creates a live event with an optional initial session and platform.
-// This maintains backwards compatibility with the original /lives API.
+// Uses transactions to ensure atomicity when session/platform are included.
 func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLiveOutput, error) {
 	// Default to single type if not specified
 	eventType := input.Type
@@ -88,7 +88,46 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		status = "scheduled"
 	}
 
-	// 1. Create the event
+	// If platform info is provided, create everything in a single transaction
+	if input.Platform != nil && input.PlatformLiveID != nil && *input.Platform != "" && *input.PlatformLiveID != "" {
+		event, session, _, err := s.repo.CreateEventWithSessionTx(ctx, CreateEventParams{
+			StoreID:                input.StoreID,
+			Title:                  input.Title,
+			Type:                   eventType,
+			Status:                 status,
+			CloseCartOnEventEnd:    closeCartOnEventEnd,
+			CartExpirationMinutes:  input.CartExpirationMinutes,
+			CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
+			SendOnLiveEnd:          input.SendOnLiveEnd,
+			ScheduledAt:            input.ScheduledAt,
+			Description:            input.Description,
+		}, *input.Platform, *input.PlatformLiveID)
+		if err != nil {
+			s.logger.Error("failed to create live with session",
+				zap.String("store_id", input.StoreID),
+				zap.Error(err),
+			)
+			return CreateLiveOutput{}, err
+		}
+
+		s.logger.Info("live created with session",
+			zap.String("event_id", event.ID),
+			zap.String("session_id", session.ID),
+			zap.String("platform", *input.Platform),
+			zap.String("platform_live_id", *input.PlatformLiveID),
+		)
+
+		return CreateLiveOutput{
+			ID:        event.ID,
+			Title:     event.Title,
+			Type:      event.Type,
+			Platform:  *input.Platform,
+			Status:    event.Status,
+			CreatedAt: event.CreatedAt,
+		}, nil
+	}
+
+	// No platform info - just create the event
 	event, err := s.repo.CreateEvent(ctx, CreateEventParams{
 		StoreID:                input.StoreID,
 		Title:                  input.Title,
@@ -105,52 +144,16 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		return CreateLiveOutput{}, err
 	}
 
-	// If platform info is provided, create session and add platform
-	var platform string
-	if input.Platform != nil && input.PlatformLiveID != nil && *input.Platform != "" && *input.PlatformLiveID != "" {
-		// 2. Create the initial session
-		session, err := s.repo.CreateSession(ctx, CreateSessionParams{
-			EventID: event.ID,
-			Status:  "active",
-		})
-		if err != nil {
-			s.logger.Error("failed to create session after event",
-				zap.String("event_id", event.ID),
-				zap.Error(err),
-			)
-			return CreateLiveOutput{}, err
-		}
-
-		// 3. Add the platform to the session
-		_, err = s.repo.AddPlatformToSession(ctx, session.ID, *input.Platform, *input.PlatformLiveID)
-		if err != nil {
-			s.logger.Error("failed to add platform after session",
-				zap.String("session_id", session.ID),
-				zap.Error(err),
-			)
-			return CreateLiveOutput{}, err
-		}
-
-		platform = *input.Platform
-
-		s.logger.Info("live created with session",
-			zap.String("event_id", event.ID),
-			zap.String("session_id", session.ID),
-			zap.String("platform", *input.Platform),
-			zap.String("platform_live_id", *input.PlatformLiveID),
-		)
-	} else {
-		s.logger.Info("live created without session",
-			zap.String("event_id", event.ID),
-			zap.String("type", eventType),
-		)
-	}
+	s.logger.Info("live created without session",
+		zap.String("event_id", event.ID),
+		zap.String("type", eventType),
+	)
 
 	return CreateLiveOutput{
 		ID:        event.ID,
 		Title:     event.Title,
 		Type:      event.Type,
-		Platform:  platform,
+		Platform:  "",
 		Status:    event.Status,
 		CreatedAt: event.CreatedAt,
 	}, nil
@@ -583,6 +586,7 @@ func (s *Service) GetStats(ctx context.Context, storeID string) (LiveStatsOutput
 // =============================================================================
 
 // CreateSession creates a new session within an event.
+// Uses a transaction to ensure atomicity of session + platform creation.
 func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (CreateSessionOutput, error) {
 	// Verify event exists and belongs to store
 	_, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID)
@@ -590,20 +594,11 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		return CreateSessionOutput{}, err
 	}
 
-	// Create the session
-	session, err := s.repo.CreateSession(ctx, CreateSessionParams{
-		EventID: input.EventID,
-		Status:  "active",
-	})
+	// Create the session and add platform in a single transaction
+	session, platform, err := s.repo.CreateSessionWithPlatformTx(ctx, input.EventID, input.Platform, input.PlatformLiveID)
 	if err != nil {
-		return CreateSessionOutput{}, err
-	}
-
-	// Add the platform
-	platform, err := s.repo.AddPlatformToSession(ctx, session.ID, input.Platform, input.PlatformLiveID)
-	if err != nil {
-		s.logger.Error("failed to add platform to session",
-			zap.String("session_id", session.ID),
+		s.logger.Error("failed to create session with platform",
+			zap.String("event_id", input.EventID),
 			zap.Error(err),
 		)
 		return CreateSessionOutput{}, err

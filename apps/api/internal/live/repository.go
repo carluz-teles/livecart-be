@@ -24,6 +24,158 @@ func NewRepository(q *sqlc.Queries, pool *pgxpool.Pool) *Repository {
 	return &Repository{q: q, pool: pool}
 }
 
+// CreateSessionWithPlatformTx creates a session and adds a platform in a single transaction.
+// This ensures atomicity - either both operations succeed or both are rolled back.
+func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, platform, platformLiveID string) (SessionRow, *PlatformRow, error) {
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return SessionRow{}, nil, err
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return SessionRow{}, nil, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // No-op if already committed
+
+	qtx := r.q.WithTx(tx)
+
+	// Create the session
+	sessionRow, err := qtx.CreateLiveSession(ctx, sqlc.CreateLiveSessionParams{
+		EventID: eventUID,
+		Status:  "active",
+	})
+	if err != nil {
+		return SessionRow{}, nil, fmt.Errorf("creating live session: %w", err)
+	}
+
+	// Add the platform to the session
+	platformRow, err := qtx.AddPlatformToSession(ctx, sqlc.AddPlatformToSessionParams{
+		SessionID:      sessionRow.ID,
+		Platform:       platform,
+		PlatformLiveID: platformLiveID,
+	})
+	if err != nil {
+		return SessionRow{}, nil, fmt.Errorf("adding platform to session: %w", err)
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(ctx); err != nil {
+		return SessionRow{}, nil, fmt.Errorf("committing transaction: %w", err)
+	}
+
+	session := toSessionRow(sessionRow)
+	platformOut := &PlatformRow{
+		ID:             platformRow.ID.String(),
+		SessionID:      platformRow.SessionID.String(),
+		Platform:       platformRow.Platform,
+		PlatformLiveID: platformRow.PlatformLiveID,
+		AddedAt:        platformRow.AddedAt.Time,
+	}
+
+	return session, platformOut, nil
+}
+
+// CreateEventWithSessionTx creates an event, session, and platform in a single transaction.
+// This ensures atomicity - either all operations succeed or all are rolled back.
+func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params CreateEventParams, platform, platformLiveID string) (EventRow, SessionRow, *PlatformRow, error) {
+	storeUID, err := parseUUID(params.StoreID)
+	if err != nil {
+		return EventRow{}, SessionRow{}, nil, err
+	}
+
+	eventType := params.Type
+	if eventType == "" {
+		eventType = "single"
+	}
+
+	// Convert nullable ints to pgtype.Int4
+	var cartExpirationMinutes, cartMaxQuantityPerItem pgtype.Int4
+	if params.CartExpirationMinutes != nil {
+		cartExpirationMinutes = pgtype.Int4{Int32: int32(*params.CartExpirationMinutes), Valid: true}
+	}
+	if params.CartMaxQuantityPerItem != nil {
+		cartMaxQuantityPerItem = pgtype.Int4{Int32: int32(*params.CartMaxQuantityPerItem), Valid: true}
+	}
+
+	// Convert nullable bool to pgtype.Bool
+	var autoSendCheckoutLinks pgtype.Bool
+	if params.SendOnLiveEnd != nil {
+		autoSendCheckoutLinks = pgtype.Bool{Bool: *params.SendOnLiveEnd, Valid: true}
+	}
+
+	// Convert scheduling fields
+	var scheduledAt pgtype.Timestamptz
+	if params.ScheduledAt != nil {
+		scheduledAt = pgtype.Timestamptz{Time: *params.ScheduledAt, Valid: true}
+	}
+	var description pgtype.Text
+	if params.Description != nil {
+		description = pgtype.Text{String: *params.Description, Valid: true}
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return EventRow{}, SessionRow{}, nil, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // No-op if already committed
+
+	qtx := r.q.WithTx(tx)
+
+	// 1. Create the event
+	eventRow, err := qtx.CreateLiveEventFull(ctx, sqlc.CreateLiveEventFullParams{
+		StoreID:                storeUID,
+		Title:                  pgtype.Text{String: params.Title, Valid: params.Title != ""},
+		Type:                   eventType,
+		Status:                 params.Status,
+		CloseCartOnEventEnd:    params.CloseCartOnEventEnd,
+		CartExpirationMinutes:  cartExpirationMinutes,
+		CartMaxQuantityPerItem: cartMaxQuantityPerItem,
+		SendOnLiveEnd:          autoSendCheckoutLinks,
+		ScheduledAt:            scheduledAt,
+		Description:            description,
+	})
+	if err != nil {
+		return EventRow{}, SessionRow{}, nil, fmt.Errorf("creating live event: %w", err)
+	}
+
+	// 2. Create the session
+	sessionRow, err := qtx.CreateLiveSession(ctx, sqlc.CreateLiveSessionParams{
+		EventID: eventRow.ID,
+		Status:  "active",
+	})
+	if err != nil {
+		return EventRow{}, SessionRow{}, nil, fmt.Errorf("creating live session: %w", err)
+	}
+
+	// 3. Add the platform to the session
+	platformRow, err := qtx.AddPlatformToSession(ctx, sqlc.AddPlatformToSessionParams{
+		SessionID:      sessionRow.ID,
+		Platform:       platform,
+		PlatformLiveID: platformLiveID,
+	})
+	if err != nil {
+		return EventRow{}, SessionRow{}, nil, fmt.Errorf("adding platform to session: %w", err)
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(ctx); err != nil {
+		return EventRow{}, SessionRow{}, nil, fmt.Errorf("committing transaction: %w", err)
+	}
+
+	event := toEventRow(eventRow)
+	session := toSessionRow(sessionRow)
+	platformOut := &PlatformRow{
+		ID:             platformRow.ID.String(),
+		SessionID:      platformRow.SessionID.String(),
+		Platform:       platformRow.Platform,
+		PlatformLiveID: platformRow.PlatformLiveID,
+		AddedAt:        platformRow.AddedAt.Time,
+	}
+
+	return event, session, platformOut, nil
+}
+
 // =============================================================================
 // EVENT OPERATIONS
 // =============================================================================
