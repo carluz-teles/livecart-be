@@ -36,6 +36,9 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// Test connection
 	g.Post("/:id/test", h.TestConnection)
 
+	// Instagram operations
+	g.Get("/instagram/lives", h.GetInstagramLives)
+
 	// OAuth connect
 	g.Get("/oauth/:provider/connect", h.OAuthConnect)
 
@@ -207,6 +210,31 @@ func (h *Handler) TestConnection(c *fiber.Ctx) error {
 		AccountInfo: output.AccountInfo,
 		TestedAt:    output.TestedAt,
 	})
+}
+
+// =============================================================================
+// INSTAGRAM HANDLERS
+// =============================================================================
+
+// GetInstagramLives retrieves all active Instagram lives for the store.
+// @Summary Get active Instagram lives
+// @Description Returns all live videos currently being broadcast on the connected Instagram account
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Success 200 {object} httpx.Envelope{data=InstagramLivesResponse}
+// @Failure 404 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/instagram/lives [get]
+// @Security BearerAuth
+func (h *Handler) GetInstagramLives(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	lives, err := h.service.FetchInstagramLives(c.Context(), storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, map[string]any{"data": lives})
 }
 
 // =============================================================================

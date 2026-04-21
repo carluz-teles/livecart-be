@@ -1088,6 +1088,43 @@ func (s *Service) ReplyToInstagramComment(ctx context.Context, storeID, commentI
 	return nil
 }
 
+// FetchInstagramLives retrieves all active Instagram lives for a store.
+// Returns an empty slice if no lives are currently streaming.
+func (s *Service) FetchInstagramLives(ctx context.Context, storeID string) ([]providers.LiveMedia, error) {
+	integration, err := s.repo.GetByProvider(ctx, storeID, "social", "instagram")
+	if err != nil {
+		return nil, fmt.Errorf("instagram integration unavailable: %w", err)
+	}
+	if integration.Status != "active" {
+		return nil, fmt.Errorf("instagram integration is not active (status=%s)", integration.Status)
+	}
+
+	provider, err := s.createProviderFromRow(ctx, integration)
+	if err != nil {
+		return nil, fmt.Errorf("instantiating instagram provider: %w", err)
+	}
+
+	socialProvider, ok := provider.(providers.SocialProvider)
+	if !ok {
+		return nil, fmt.Errorf("provider is not a social provider")
+	}
+
+	lives, err := socialProvider.GetActiveLives(ctx)
+	if err != nil {
+		s.logger.Warn("failed to fetch instagram lives",
+			zap.String("store_id", storeID),
+			zap.Error(err),
+		)
+		return nil, err
+	}
+
+	s.logger.Info("fetched instagram lives",
+		zap.String("store_id", storeID),
+		zap.Int("count", len(lives)),
+	)
+	return lives, nil
+}
+
 // =============================================================================
 // ERP OPERATIONS
 // =============================================================================

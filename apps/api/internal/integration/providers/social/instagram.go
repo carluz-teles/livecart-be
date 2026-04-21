@@ -298,3 +298,42 @@ func (i *Instagram) ReplyToComment(ctx context.Context, commentID, text string) 
 	)
 	return nil
 }
+
+// GetActiveLives retrieves all live videos currently being broadcast by the user.
+// This endpoint only returns lives that are actively streaming at the time of the request.
+func (i *Instagram) GetActiveLives(ctx context.Context) ([]providers.LiveMedia, error) {
+	url := fmt.Sprintf("%s/%s/me/live_media?fields=id,media_type,media_product_type,username&access_token=%s",
+		instagramGraphAPIBaseURL,
+		instagramGraphAPIVersion,
+		i.credentials.AccessToken,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("instagram API error: status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Data []providers.LiveMedia `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	i.logger.Info("fetched active instagram lives",
+		zap.Int("count", len(result.Data)),
+	)
+
+	return result.Data, nil
+}

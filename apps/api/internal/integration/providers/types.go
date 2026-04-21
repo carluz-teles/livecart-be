@@ -167,6 +167,10 @@ type SocialProvider interface {
 	// ReplyToComment replies to a comment (live or post).
 	// This method does NOT have the 24h messaging window restriction.
 	ReplyToComment(ctx context.Context, commentID, text string) error
+
+	// GetActiveLives retrieves all live videos currently being broadcast.
+	// Only returns lives that are actively streaming at the time of the request.
+	GetActiveLives(ctx context.Context) ([]LiveMedia, error)
 }
 
 // SocialProfile contains social media account information.
@@ -174,6 +178,14 @@ type SocialProfile struct {
 	ID       string `json:"id"`
 	Username string `json:"username"`
 	Name     string `json:"name,omitempty"`
+}
+
+// LiveMedia represents a live video on a social platform.
+type LiveMedia struct {
+	ID               string `json:"id"`
+	MediaType        string `json:"media_type"`
+	MediaProductType string `json:"media_product_type"`
+	Username         string `json:"username"`
 }
 
 // WebhookHandler interface for providers that support webhooks.
