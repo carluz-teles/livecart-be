@@ -222,6 +222,58 @@ func (r *Repository) GetByProvider(ctx context.Context, storeID, integrationType
 	return r.toIntegrationRow(row), nil
 }
 
+// GetByInstagramUserID returns an active Instagram integration by the Instagram user ID stored in metadata.
+func (r *Repository) GetByInstagramUserID(ctx context.Context, instagramUserID string) (*IntegrationRow, error) {
+	query := `
+		SELECT id, store_id, type, provider, status, credentials, token_expires_at, metadata, last_synced_at, created_at
+		FROM integrations
+		WHERE provider = 'instagram'
+		  AND status = 'active'
+		  AND metadata->>'instagram_user_id' = $1
+		LIMIT 1
+	`
+
+	row := r.pool.QueryRow(ctx, query, instagramUserID)
+
+	var id, storeID pgtype.UUID
+	var intType, provider, status string
+	var credentials []byte
+	var tokenExpiresAt pgtype.Timestamptz
+	var metadata []byte
+	var lastSyncedAt pgtype.Timestamptz
+	var createdAt time.Time
+
+	err := row.Scan(&id, &storeID, &intType, &provider, &status, &credentials, &tokenExpiresAt, &metadata, &lastSyncedAt, &createdAt)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil // Not found, return nil without error
+		}
+		return nil, fmt.Errorf("getting integration by instagram user id: %w", err)
+	}
+
+	result := &IntegrationRow{
+		ID:          uuidToString(id),
+		StoreID:     uuidToString(storeID),
+		Type:        intType,
+		Provider:    provider,
+		Status:      status,
+		Credentials: credentials,
+		CreatedAt:   createdAt,
+	}
+
+	if tokenExpiresAt.Valid {
+		result.TokenExpiresAt = &tokenExpiresAt.Time
+	}
+	if lastSyncedAt.Valid {
+		result.LastSyncedAt = &lastSyncedAt.Time
+	}
+	if len(metadata) > 0 {
+		_ = json.Unmarshal(metadata, &result.Metadata)
+	}
+
+	return result, nil
+}
+
 // UpdateCredentials updates an integration's credentials.
 func (r *Repository) UpdateCredentials(ctx context.Context, id string, credentials []byte, tokenExpiresAt *time.Time) error {
 	integrationID, err := parseUUID(id)

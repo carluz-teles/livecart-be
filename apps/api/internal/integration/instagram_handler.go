@@ -154,13 +154,14 @@ func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, 
 
 	// Process the comment through the service
 	if err := h.service.ProcessInstagramComment(c.Context(), ProcessInstagramCommentInput{
-		AccountID: entry.ID,
-		MediaID:   comment.Media.ID,
-		CommentID: comment.CommentID,
-		UserID:    userID,
-		Username:  comment.From.Username,
-		Text:      comment.Text,
-		Timestamp: entry.Time,
+		AccountID:  entry.ID,
+		MediaID:    comment.Media.ID,
+		CommentID:  comment.CommentID,
+		UserID:     userID,
+		Username:   comment.From.Username,
+		Text:       comment.Text,
+		Timestamp:  entry.Time,
+		RawPayload: rawBody,
 	}); err != nil {
 		h.logger.Error("failed to process instagram comment",
 			zap.String("comment_id", comment.CommentID),
@@ -183,11 +184,12 @@ func (h *WebhookHandler) processInstagramMessage(c *fiber.Ctx, entry InstagramEn
 
 	// Process the message through the service
 	if err := h.service.ProcessInstagramMessage(c.Context(), ProcessInstagramMessageInput{
-		AccountID: entry.ID,
-		SenderID:  msg.Sender.ID,
-		MessageID: msg.Message.MID,
-		Text:      msg.Message.Text,
-		Timestamp: msg.Timestamp,
+		AccountID:  entry.ID,
+		SenderID:   msg.Sender.ID,
+		MessageID:  msg.Message.MID,
+		Text:       msg.Message.Text,
+		Timestamp:  msg.Timestamp,
+		RawPayload: rawBody,
 	}); err != nil {
 		h.logger.Error("failed to process instagram message",
 			zap.String("message_id", msg.Message.MID),

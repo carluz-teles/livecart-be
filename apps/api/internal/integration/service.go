@@ -1736,8 +1736,11 @@ func (s *Service) GeneratePixPayment(ctx context.Context, input GeneratePixPayme
 func (s *Service) StoreWebhookEvent(ctx context.Context, input StoreWebhookInput) error {
 	// Resolve integration from store_id + provider
 	integrationType := "payment"
-	if input.Provider == "tiny" {
+	switch input.Provider {
+	case "tiny":
 		integrationType = "erp"
+	case "instagram":
+		integrationType = "social"
 	}
 	integration, err := s.repo.GetActiveByProvider(ctx, input.StoreID, integrationType, input.Provider)
 	if err != nil {
@@ -1955,6 +1958,25 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			zap.String("media_id", input.MediaID),
 		)
 		return nil
+	}
+
+	// Store webhook event for audit trail (only if we have payload and store context)
+	if len(input.RawPayload) > 0 {
+		if err := s.StoreWebhookEvent(ctx, StoreWebhookInput{
+			StoreID:        event.StoreID,
+			Provider:       "instagram",
+			EventType:      "live_comments",
+			EventID:        input.CommentID,
+			Payload:        input.RawPayload,
+			SignatureValid: true, // Instagram webhook signature validation could be added
+		}); err != nil {
+			s.logger.Error("failed to store instagram webhook event",
+				zap.String("store_id", event.StoreID),
+				zap.String("comment_id", input.CommentID),
+				zap.Error(err),
+			)
+			// Don't return error - continue processing the comment
+		}
 	}
 
 	// Increment comment counter on session
@@ -2417,7 +2439,41 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 		zap.String("text", input.Text),
 	)
 
-	// For now, just log the message
+	// Resolve the store from the Instagram account ID
+	integration, err := s.repo.GetByInstagramUserID(ctx, input.AccountID)
+	if err != nil {
+		s.logger.Error("failed to find integration by instagram account",
+			zap.String("account_id", input.AccountID),
+			zap.Error(err),
+		)
+		return nil // Don't fail the webhook, just skip storage
+	}
+	if integration == nil {
+		s.logger.Warn("no integration found for instagram account",
+			zap.String("account_id", input.AccountID),
+		)
+		return nil
+	}
+
+	// Store webhook event for audit trail
+	if len(input.RawPayload) > 0 {
+		if err := s.StoreWebhookEvent(ctx, StoreWebhookInput{
+			StoreID:        integration.StoreID,
+			Provider:       "instagram",
+			EventType:      "messaging",
+			EventID:        input.MessageID,
+			Payload:        input.RawPayload,
+			SignatureValid: true,
+		}); err != nil {
+			s.logger.Error("failed to store instagram dm webhook event",
+				zap.String("store_id", integration.StoreID),
+				zap.String("message_id", input.MessageID),
+				zap.Error(err),
+			)
+			// Don't return error - continue processing
+		}
+	}
+
 	// Future: Could be used to handle order confirmations, questions, etc.
 
 	return nil

@@ -63,20 +63,22 @@ type InstagramMessageContent struct {
 
 // ProcessInstagramCommentInput represents input for processing a live comment
 type ProcessInstagramCommentInput struct {
-	AccountID      string
-	MediaID        string
-	CommentID      string
-	UserID         string
-	Username       string
-	Text           string
-	Timestamp      int64
+	AccountID  string
+	MediaID    string
+	CommentID  string
+	UserID     string
+	Username   string
+	Text       string
+	Timestamp  int64
+	RawPayload []byte // Original webhook payload for audit storage
 }
 
 // ProcessInstagramMessageInput represents input for processing a DM
 type ProcessInstagramMessageInput struct {
-	AccountID string
-	SenderID  string
-	MessageID string
-	Text      string
-	Timestamp int64
+	AccountID  string
+	SenderID   string
+	MessageID  string
+	Text       string
+	Timestamp  int64
+	RawPayload []byte // Original webhook payload for audit storage
 }
