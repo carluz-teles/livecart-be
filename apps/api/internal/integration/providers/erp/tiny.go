@@ -7,6 +7,7 @@ import (
 	"math"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -475,6 +476,9 @@ func (t *Tiny) SyncProduct(ctx context.Context, product ERPProduct) (*SyncResult
 
 // CreateOrder creates an order in Tiny for invoicing.
 // Tiny API v3 requires idContato (integer) instead of inline customer data.
+// If order.Payment is set, the order is created as paid (parcela with dataPagamento,
+// situação Aprovado) so it shows up under "Pedidos de Venda" already settled.
+// If order.ShippingAddress is set, it is shipped as enderecoEntrega.
 func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, error) {
 	endpoint := tinyAPIBaseURL + "/pedidos"
 
@@ -506,6 +510,44 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		},
 	}
 
+	if addr := order.ShippingAddress; addr != nil {
+		payload["enderecoEntrega"] = map[string]any{
+			"endereco":         addr.Street,
+			"enderecoNro":      addr.Number,
+			"complemento":      addr.Complement,
+			"bairro":           addr.Neighborhood,
+			"municipio":        addr.City,
+			"cep":              addr.ZipCode,
+			"uf":               addr.State,
+			"fone":             addr.Phone,
+			"nomeDestinatario": addr.RecipientName,
+			"cpfCnpj":          addr.Document,
+			"tipoPessoa":       "F",
+		}
+	}
+
+	if pay := order.Payment; pay != nil {
+		parcela := map[string]any{
+			"dias":           0,
+			"data":           pay.PaidAt.Format("2006-01-02"),
+			"valor":          float64(pay.Amount) / 100,
+			"observacoes":    fmt.Sprintf("Pago via %s - ID %s", pay.Method, pay.PaymentID),
+			"dataPagamento":  pay.PaidAt.Format("2006-01-02"),
+		}
+		// Best-effort lookup of the Tiny formaPagamento by payment method name.
+		// If not found (or API fails) we still submit the parcela so Tiny
+		// records the payment date — Tiny accepts parcelas without formaPagamento.
+		if formaID, err := t.lookupFormaPagamentoID(ctx, pay.Method); err == nil && formaID > 0 {
+			parcela["formaPagamento"] = map[string]any{"id": formaID}
+		} else if err != nil {
+			t.Logger.Warn("tiny formaPagamento lookup failed, creating parcela without it",
+				zap.String("method", pay.Method),
+				zap.Error(err),
+			)
+		}
+		payload["parcelas"] = []map[string]any{parcela}
+	}
+
 	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
 	if err != nil {
 		return nil, fmt.Errorf("creating order: %w", err)
@@ -528,11 +570,78 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		return nil, fmt.Errorf("parsing order response: %w", err)
 	}
 
+	orderID := strconv.FormatInt(orderResp.ID, 10)
+
+	// Approve the order so it shows under "Pedidos de Venda" when already paid.
+	// Failure here is non-fatal — the order still exists in Tiny.
+	if order.Payment != nil {
+		if approveErr := t.ApproveOrder(ctx, orderID); approveErr != nil {
+			t.Logger.Warn("failed to approve tiny order after creation",
+				zap.String("order_id", orderID),
+				zap.Error(approveErr),
+			)
+		}
+	}
+
 	return &OrderResult{
-		OrderID:     strconv.FormatInt(orderResp.ID, 10),
+		OrderID:     orderID,
 		OrderNumber: orderResp.Numero,
 		Status:      "created",
 	}, nil
+}
+
+// lookupFormaPagamentoID resolves our payment method string (pix/credit_card/...)
+// to the Tiny formaPagamento ID by matching names (best-effort, no cache).
+// Returns 0 without error if no match is found.
+func (t *Tiny) lookupFormaPagamentoID(ctx context.Context, method string) (int64, error) {
+	var queryName string
+	switch method {
+	case "pix":
+		queryName = "Pix"
+	case "credit_card":
+		queryName = "Cartão de Crédito"
+	case "debit_card":
+		queryName = "Cartão de Débito"
+	case "boleto":
+		queryName = "Boleto"
+	default:
+		return 0, nil
+	}
+
+	endpoint := fmt.Sprintf("%s/formas-pagamento?nome=%s&situacao=1&limit=10",
+		tinyAPIBaseURL, url.QueryEscape(queryName))
+
+	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return 0, fmt.Errorf("listing formas de pagamento: %w", err)
+	}
+	if resp.StatusCode == http.StatusNoContent {
+		return 0, nil
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return 0, fmt.Errorf("list formas de pagamento failed: status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Itens []struct {
+			ID   int64  `json:"id"`
+			Nome string `json:"nome"`
+		} `json:"itens"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, fmt.Errorf("parsing formas de pagamento: %w", err)
+	}
+
+	// Prefer an exact (case-insensitive) name match; fall back to the first result.
+	for _, item := range result.Itens {
+		if strings.EqualFold(item.Nome, queryName) {
+			return item.ID, nil
+		}
+	}
+	if len(result.Itens) > 0 {
+		return result.Itens[0].ID, nil
+	}
+	return 0, nil
 }
 
 // LaunchOrderStock decrements stock in Tiny for all items in the order.

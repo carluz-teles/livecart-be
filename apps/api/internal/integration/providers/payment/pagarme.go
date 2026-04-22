@@ -285,6 +285,7 @@ func (p *Pagarme) GetPaymentStatus(ctx context.Context, orderID string) (*Paymen
 
 	var paidAt *time.Time
 	var paymentMethod string
+	var installments int
 	if len(pgOrder.Charges) > 0 {
 		if pgOrder.Charges[0].PaidAt != "" {
 			if t, err := time.Parse(time.RFC3339, pgOrder.Charges[0].PaidAt); err == nil {
@@ -293,6 +294,9 @@ func (p *Pagarme) GetPaymentStatus(ctx context.Context, orderID string) (*Paymen
 		}
 		// Extract payment method from charge
 		paymentMethod = mapPagarmePaymentMethod(pgOrder.Charges[0].PaymentMethod)
+		if pgOrder.Charges[0].LastTransaction != nil {
+			installments = pgOrder.Charges[0].LastTransaction.Installments
+		}
 	}
 
 	return &PaymentStatus{
@@ -303,6 +307,7 @@ func (p *Pagarme) GetPaymentStatus(ctx context.Context, orderID string) (*Paymen
 		ExternalReference: pgOrder.Code,
 		Metadata:          pgOrder.Metadata,
 		PaymentMethod:     paymentMethod,
+		Installments:      installments,
 	}, nil
 }
 
@@ -755,14 +760,15 @@ type pagarmeCharge struct {
 }
 
 type pagarmeLastTransaction struct {
-	ID        string       `json:"id"`
-	Status    string       `json:"status"`
-	Success   bool         `json:"success"`
-	Amount    int          `json:"amount"`
-	Card      *pagarmeCard `json:"card"`
-	Pix       *pagarmePix  `json:"pix"`
-	CreatedAt string       `json:"created_at"`
-	UpdatedAt string       `json:"updated_at"`
+	ID           string       `json:"id"`
+	Status       string       `json:"status"`
+	Success      bool         `json:"success"`
+	Amount       int          `json:"amount"`
+	Installments int          `json:"installments"`
+	Card         *pagarmeCard `json:"card"`
+	Pix          *pagarmePix  `json:"pix"`
+	CreatedAt    string       `json:"created_at"`
+	UpdatedAt    string       `json:"updated_at"`
 }
 
 type pagarmeCard struct {

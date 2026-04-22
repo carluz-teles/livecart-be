@@ -34,6 +34,10 @@ type Cart struct {
 	CheckoutExpiresAt pgtype.Timestamptz `json:"checkout_expires_at"`
 	CustomerEmail     pgtype.Text        `json:"customer_email"`
 	PaymentMethod     pgtype.Text        `json:"payment_method"`
+	CustomerName      pgtype.Text        `json:"customer_name"`
+	CustomerDocument  pgtype.Text        `json:"customer_document"`
+	CustomerPhone     pgtype.Text        `json:"customer_phone"`
+	ShippingAddress   json.RawMessage    `json:"shipping_address"`
 }
 
 type CartItem struct {

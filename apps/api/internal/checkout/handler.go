@@ -140,6 +140,7 @@ func (h *Handler) ProcessCardPayment(c *fiber.Ctx) error {
 		CustomerName:     req.CustomerName,
 		CustomerDocument: req.CustomerDocument,
 		CustomerPhone:    req.CustomerPhone,
+		ShippingAddress:  req.ShippingAddress,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -180,6 +181,7 @@ func (h *Handler) GeneratePix(c *fiber.Ctx) error {
 		CustomerName:     req.CustomerName,
 		CustomerDocument: req.CustomerDocument,
 		CustomerPhone:    req.CustomerPhone,
+		ShippingAddress:  req.ShippingAddress,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)

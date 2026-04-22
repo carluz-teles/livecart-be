@@ -260,6 +260,7 @@ type PaymentStatus struct {
 	Metadata          map[string]any `json:"metadata,omitempty"`
 	ExternalReference string         `json:"external_reference,omitempty"` // Cart ID or order reference
 	PaymentMethod     string         `json:"payment_method,omitempty"`     // pix, credit_card, debit_card, boleto
+	Installments      int            `json:"installments,omitempty"`
 }
 
 // PaymentState represents payment status values.
@@ -443,6 +444,39 @@ type ERPOrder struct {
 	TotalAmount int64          `json:"total_amount"`           // In cents
 	Observation string         `json:"observation,omitempty"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
+
+	// ShippingAddress is the delivery address. When set, the provider ships it
+	// as enderecoEntrega (or equivalent) on the order.
+	ShippingAddress *ERPShippingAddress `json:"shipping_address,omitempty"`
+
+	// Payment, when set, flags the order as already paid: the provider fills
+	// parcelas with dataPagamento, records the payment method/ID and approves
+	// the order in the ERP.
+	Payment *ERPOrderPayment `json:"payment,omitempty"`
+}
+
+// ERPShippingAddress describes a delivery address for an ERP order.
+type ERPShippingAddress struct {
+	RecipientName string `json:"recipient_name,omitempty"` // nomeDestinatario
+	Document      string `json:"document,omitempty"`       // cpfCnpj
+	Street        string `json:"street"`                   // endereco
+	Number        string `json:"number"`                   // enderecoNro
+	Complement    string `json:"complement,omitempty"`     // complemento
+	Neighborhood  string `json:"neighborhood"`             // bairro
+	City          string `json:"city"`                     // municipio
+	State         string `json:"state"`                    // uf (2 chars)
+	ZipCode       string `json:"zip_code"`                 // cep
+	Phone         string `json:"phone,omitempty"`          // fone
+}
+
+// ERPOrderPayment captures the payment confirmation details so the provider
+// can register the order as paid (e.g. Tiny parcelas with dataPagamento).
+type ERPOrderPayment struct {
+	Method       string    `json:"method"`       // pix, credit_card, debit_card, boleto
+	PaymentID    string    `json:"payment_id"`   // gateway payment ID
+	Installments int       `json:"installments,omitempty"`
+	PaidAt       time.Time `json:"paid_at"`
+	Amount       int64     `json:"amount"`       // paid amount, in cents (usually == TotalAmount)
 }
 
 // SearchContactsParams contains parameters for searching contacts.

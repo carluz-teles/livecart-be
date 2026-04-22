@@ -323,8 +323,9 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		return nil, httpx.ErrUnprocessable("carrinho não está disponível para checkout")
 	}
 
-	// Update customer email
-	if err := s.repo.UpdateCustomerEmail(ctx, input.Token, input.Email); err != nil {
+	// Persist customer identity + shipping address before requesting payment —
+	// the webhook handler will read this when creating the paid order in the ERP.
+	if err := s.repo.UpdateCheckoutCustomer(ctx, cart.ID, input.Email, input.CustomerName, input.CustomerDocument, input.CustomerPhone, input.ShippingAddress); err != nil {
 		return nil, err
 	}
 
@@ -463,8 +464,9 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 		return nil, httpx.ErrUnprocessable("carrinho não está disponível para checkout")
 	}
 
-	// Update customer email
-	if err := s.repo.UpdateCustomerEmail(ctx, input.Token, input.Email); err != nil {
+	// Persist customer identity + shipping address before requesting payment —
+	// the webhook handler will read this when creating the paid order in the ERP.
+	if err := s.repo.UpdateCheckoutCustomer(ctx, cart.ID, input.Email, input.CustomerName, input.CustomerDocument, input.CustomerPhone, input.ShippingAddress); err != nil {
 		return nil, err
 	}
 

@@ -2,6 +2,7 @@ package checkout
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -68,6 +69,41 @@ func (r *Repository) UpdateCustomerEmail(ctx context.Context, token, email strin
 			return httpx.ErrNotFound("carrinho não encontrado")
 		}
 		return fmt.Errorf("updating customer email: %w", err)
+	}
+	return nil
+}
+
+// UpdateCheckoutCustomer persists the customer identity and shipping address
+// entered in the transparent checkout form. These fields are required to later
+// create the paid sales order in the ERP when the payment webhook confirms.
+func (r *Repository) UpdateCheckoutCustomer(ctx context.Context, cartID, email, name, document, phone string, address *ShippingAddress) error {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return httpx.ErrBadRequest("invalid cart ID")
+	}
+
+	var addressJSON json.RawMessage
+	if address != nil {
+		b, err := json.Marshal(address)
+		if err != nil {
+			return fmt.Errorf("marshaling shipping address: %w", err)
+		}
+		addressJSON = b
+	}
+
+	_, err = r.q.UpdateCartCustomerCheckout(ctx, sqlc.UpdateCartCustomerCheckoutParams{
+		ID:               pgtype.UUID{Bytes: uid, Valid: true},
+		CustomerEmail:    pgtype.Text{String: email, Valid: email != ""},
+		CustomerName:     pgtype.Text{String: name, Valid: name != ""},
+		CustomerDocument: pgtype.Text{String: document, Valid: document != ""},
+		CustomerPhone:    pgtype.Text{String: phone, Valid: phone != ""},
+		ShippingAddress:  addressJSON,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return httpx.ErrNotFound("carrinho não encontrado")
+		}
+		return fmt.Errorf("updating checkout customer: %w", err)
 	}
 	return nil
 }

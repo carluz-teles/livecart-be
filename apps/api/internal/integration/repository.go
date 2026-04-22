@@ -1104,10 +1104,61 @@ func (r *Repository) GetCartByEventAndUser(ctx context.Context, eventID, platfor
 type CartRow struct {
 	ID              string
 	EventID         string
+	StoreID         string
 	PlatformUserID  string
 	PlatformHandle  string
 	ExternalOrderID string
 	CreatedAt       time.Time
+
+	// Populated by GetCartForPaidOrder — needed when creating a paid ERP order.
+	CustomerEmail    string
+	CustomerName     string
+	CustomerDocument string
+	CustomerPhone    string
+	ShippingAddress  json.RawMessage
+}
+
+// GetCartForPaidOrder loads a cart by ID with customer/shipping data plus the
+// store ID resolved from the event, so the paid-order ERP flow has everything
+// it needs without an extra join.
+func (r *Repository) GetCartForPaidOrder(ctx context.Context, cartID string) (*CartRow, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	cart, err := r.queries.GetCartByID(ctx, cID)
+	if err != nil {
+		return nil, fmt.Errorf("getting cart: %w", err)
+	}
+
+	event, err := r.queries.GetLiveEventByID(ctx, cart.EventID)
+	if err != nil {
+		return nil, fmt.Errorf("getting live event for cart: %w", err)
+	}
+
+	row := &CartRow{
+		ID:              uuidToString(cart.ID),
+		EventID:         uuidToString(cart.EventID),
+		StoreID:         uuidToString(event.StoreID),
+		PlatformUserID:  cart.PlatformUserID,
+		PlatformHandle:  cart.PlatformHandle,
+		ExternalOrderID: cart.ExternalOrderID.String,
+		CreatedAt:       cart.CreatedAt.Time,
+		ShippingAddress: cart.ShippingAddress,
+	}
+	if cart.CustomerEmail.Valid {
+		row.CustomerEmail = cart.CustomerEmail.String
+	}
+	if cart.CustomerName.Valid {
+		row.CustomerName = cart.CustomerName.String
+	}
+	if cart.CustomerDocument.Valid {
+		row.CustomerDocument = cart.CustomerDocument.String
+	}
+	if cart.CustomerPhone.Valid {
+		row.CustomerPhone = cart.CustomerPhone.String
+	}
+	return row, nil
 }
 
 // UpdateCartItemWaitlistedQuantity updates the waitlisted quantity of a cart item.
@@ -1440,6 +1491,35 @@ func (r *Repository) ListActiveReservationsByCartAndProduct(ctx context.Context,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing active reservations by cart and product: %w", err)
+	}
+	result := make([]StockReservationRow, len(rows))
+	for i, row := range rows {
+		result[i] = StockReservationRow{
+			ID:                uuidToString(row.ID),
+			EventID:           uuidToString(row.EventID),
+			CartID:            uuidToString(row.CartID),
+			ProductID:         uuidToString(row.ProductID),
+			ExternalProductID: row.ExternalProductID,
+			Quantity:          int(row.Quantity),
+			ERPMovementID:     row.ErpMovementID.String,
+			Status:            row.Status,
+			CreatedAt:         row.CreatedAt.Time,
+		}
+	}
+	return result, nil
+}
+
+// ListActiveReservationsByCart returns all active reservations for a cart.
+// Used by the payment-confirmed flow to reverse Tiny saída-manual entries before
+// creating the final sales order.
+func (r *Repository) ListActiveReservationsByCart(ctx context.Context, cartID string) ([]StockReservationRow, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListActiveReservationsByCart(ctx, cID)
+	if err != nil {
+		return nil, fmt.Errorf("listing active reservations by cart: %w", err)
 	}
 	result := make([]StockReservationRow, len(rows))
 	for i, row := range rows {

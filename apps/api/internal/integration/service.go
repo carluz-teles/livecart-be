@@ -1762,6 +1762,12 @@ func (s *Service) StoreWebhookEvent(ctx context.Context, input StoreWebhookInput
 }
 
 // ProcessPaymentNotification processes a payment webhook notification.
+// On paid, it also reverses the cart's stock reservations in the ERP and creates
+// one final sales order already marked as paid (with customer + shipping data).
+//
+// TODO(refunded): when status == refunded we currently only mark the cart —
+// we should also cancel the Tiny sales order (CancelOrder) which reverses stock
+// and puts the order in "Cancelada". See createFinalERPOrder for the creation side.
 func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessPaymentInput) error {
 	// Resolve integration from store_id + provider
 	integration, err := s.repo.GetActiveByProvider(ctx, input.StoreID, "payment", input.Provider)
@@ -1832,7 +1838,83 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		zap.String("payment_method", status.PaymentMethod),
 	)
 
+	// Only the paid path triggers the ERP finalization. Everything else (failed,
+	// cancelled, pending, refunded) just updates the cart status for now — see
+	// the refunded TODO at the top of this method.
+	if cartPaymentStatus != "paid" {
+		return nil
+	}
+
+	if err := s.finalizeCartERPOrder(ctx, status.ExternalReference, input.StoreID, status); err != nil {
+		// Never propagate ERP errors to the payment provider — the money already
+		// moved. Log and fall through so the webhook ACKs.
+		s.logger.Error("failed to finalize ERP order for paid cart",
+			zap.String("cart_id", status.ExternalReference),
+			zap.String("payment_id", status.PaymentID),
+			zap.Error(err),
+		)
+	}
+
 	return nil
+}
+
+// finalizeCartERPOrder is the post-payment ERP workflow: reverse the Tiny
+// saída-manual reservations held during the live, then create a single sales
+// order already marked as paid, with customer identity and delivery address.
+// Idempotent by cart.external_order_id.
+func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID string, status *providers.PaymentStatus) error {
+	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	if err != nil {
+		s.logger.Debug("no active ERP integration, skipping paid-order creation",
+			zap.String("store_id", storeID),
+			zap.String("cart_id", cartID),
+		)
+		return nil
+	}
+
+	cart, err := s.repo.GetCartForPaidOrder(ctx, cartID)
+	if err != nil {
+		return fmt.Errorf("loading cart for ERP order: %w", err)
+	}
+	if cart.ExternalOrderID != "" {
+		s.logger.Debug("cart already has ERP order, skipping",
+			zap.String("cart_id", cartID),
+			zap.String("external_order_id", cart.ExternalOrderID),
+		)
+		return nil
+	}
+
+	erpProvider, err := s.getERPProvider(ctx, erpIntegration)
+	if err != nil {
+		return fmt.Errorf("creating ERP provider: %w", err)
+	}
+
+	// 1. Reverse all active saída-manual reservations for this cart — the final
+	// order will decrement stock itself via LaunchOrderStock, so keeping the
+	// reservations would double-count.
+	reservations, err := s.repo.ListActiveReservationsByCart(ctx, cartID)
+	if err != nil {
+		return fmt.Errorf("listing cart reservations: %w", err)
+	}
+	for _, r := range reservations {
+		obs := fmt.Sprintf("Estorno reserva pós-pagamento - Cart %s", cartID)
+		if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
+			s.logger.Warn("failed to reverse ERP reservation on paid, proceeding anyway",
+				zap.String("cart_id", cartID),
+				zap.String("reservation_id", r.ID),
+				zap.Error(reverseErr),
+			)
+		}
+	}
+	if err := s.repo.ReverseReservationsByCart(ctx, cartID); err != nil {
+		s.logger.Error("failed to mark reservations reversed",
+			zap.String("cart_id", cartID),
+			zap.Error(err),
+		)
+	}
+
+	// 2. Create the paid sales order.
+	return s.createFinalERPOrder(ctx, erpProvider, erpIntegration, storeID, cart.EventID, *cart, status)
 }
 
 // =============================================================================
@@ -2432,101 +2514,33 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 // EVENT END → ERP FINALIZATION
 // =============================================================================
 
-// FinalizeEventERP reverses all stock reservations for the event and creates
-// one final sales order per cart in the ERP.
+// FinalizeEventERP is a no-op in the current flow.
+//
+// Previously, when a live event ended we reversed every active Tiny reservation
+// and created one sales order per cart — regardless of whether the customer had
+// paid. The business rule changed: reservations now live until either the cart
+// expires (ProcessExpiredCartsForProduct reverses them) or the payment is
+// confirmed (ProcessPaymentNotification → finalizeCartERPOrder reverses and
+// creates the paid order).
+//
+// The function is preserved so live.Service can still call it without any
+// behavior change if the rule reverts, and so we have a well-known entry point
+// for future end-of-event ERP work.
 func (s *Service) FinalizeEventERP(ctx context.Context, storeID, eventID string) error {
-	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
-	if err != nil {
-		s.logger.Debug("no active ERP integration, skipping event finalization",
-			zap.String("store_id", storeID),
-		)
-		return nil
-	}
-
-	erpProvider, err := s.getERPProvider(ctx, integration)
-	if err != nil {
-		return fmt.Errorf("creating ERP provider: %w", err)
-	}
-
-	// 1. Reverse ALL active stock reservations for this event
-	reservations, err := s.repo.ListActiveReservationsByEvent(ctx, eventID)
-	if err != nil {
-		return fmt.Errorf("listing active reservations for event: %w", err)
-	}
-
-	reversalFailures := 0
-	for _, r := range reservations {
-		obs := fmt.Sprintf("Estorno reserva LiveCart - Evento %s", eventID)
-		if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
-			reversalFailures++
-			s.logger.Warn("failed to reverse ERP stock reservation",
-				zap.String("reservation_id", r.ID),
-				zap.String("external_product_id", r.ExternalProductID),
-				zap.Int("quantity", r.Quantity),
-				zap.Error(reverseErr),
-			)
-		}
-	}
-
-	if reversalFailures > 0 {
-		s.logger.Warn("some ERP stock reversals failed — manual reconciliation may be needed",
-			zap.String("event_id", eventID),
-			zap.Int("failures", reversalFailures),
-			zap.Int("total", len(reservations)),
-		)
-	}
-
-	// Mark all reservations as converted (stock was reversed, orders will be created)
-	if err := s.repo.ConvertReservationsByEvent(ctx, eventID); err != nil {
-		s.logger.Error("failed to mark reservations as converted",
-			zap.String("event_id", eventID),
-			zap.Error(err),
-		)
-	}
-
-	// 2. Create ONE sales order per finalized cart
-	carts, err := s.repo.ListCartsByEventForERP(ctx, eventID)
-	if err != nil {
-		return fmt.Errorf("listing carts for ERP finalization: %w", err)
-	}
-
-	orderFailures := 0
-	for _, cart := range carts {
-		if cart.ExternalOrderID != "" {
-			s.logger.Debug("cart already has ERP order, skipping",
-				zap.String("cart_id", cart.ID),
-				zap.String("external_order_id", cart.ExternalOrderID),
-			)
-			continue
-		}
-		if err := s.createFinalERPOrder(ctx, erpProvider, integration, storeID, eventID, cart); err != nil {
-			orderFailures++
-			s.logger.Error("failed to create final ERP order for cart",
-				zap.String("cart_id", cart.ID),
-				zap.Error(err),
-			)
-		}
-	}
-
-	s.logger.Info("event ERP finalization completed",
+	s.logger.Debug("FinalizeEventERP called — no-op under paid-first ERP flow",
+		zap.String("store_id", storeID),
 		zap.String("event_id", eventID),
-		zap.Int("reservations_reversed", len(reservations)),
-		zap.Int("reversal_failures", reversalFailures),
-		zap.Int("carts_processed", len(carts)),
-		zap.Int("order_failures", orderFailures),
 	)
-
-	if orderFailures > 0 {
-		return fmt.Errorf("%d of %d ERP orders failed to create", orderFailures, len(carts))
-	}
-
 	return nil
 }
 
-// createFinalERPOrder creates a single sales order in the ERP for a finalized cart.
-func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, eventID string, cart CartRow) error {
-	// Resolve contact
-	contactID, err := s.resolveERPContact(ctx, erpProvider, integration, storeID, cart.PlatformUserID, cart.PlatformHandle)
+// createFinalERPOrder creates a single paid sales order in the ERP for a cart
+// whose payment was just confirmed. Uses the customer identity + shipping
+// address captured at checkout and the payment details from the provider.
+func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, eventID string, cart CartRow, paymentStatus *providers.PaymentStatus) error {
+	// Resolve contact — enriched with customer identity when available, so the
+	// Tiny contact ends up with CPF/email/phone instead of just the @handle.
+	contactID, err := s.resolveERPContact(ctx, erpProvider, integration, storeID, cart.PlatformUserID, cart.PlatformHandle, cart.CustomerName, cart.CustomerDocument, cart.CustomerEmail, cart.CustomerPhone)
 	if err != nil {
 		return fmt.Errorf("resolving ERP contact: %w", err)
 	}
@@ -2556,13 +2570,62 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 		return nil
 	}
 
-	result, err := erpProvider.CreateOrder(ctx, providers.ERPOrder{
+	order := providers.ERPOrder{
 		ExternalID:  cart.ID,
 		ContactID:   contactID,
 		Items:       erpItems,
 		TotalAmount: totalAmount,
 		Observation: fmt.Sprintf("LiveCart - Evento %s - @%s", eventID, cart.PlatformHandle),
-	})
+	}
+
+	// Attach the delivery address from the cart when the customer submitted one.
+	if len(cart.ShippingAddress) > 0 {
+		var addr struct {
+			ZipCode      string `json:"zipCode"`
+			Street       string `json:"street"`
+			Number       string `json:"number"`
+			Complement   string `json:"complement"`
+			Neighborhood string `json:"neighborhood"`
+			City         string `json:"city"`
+			State        string `json:"state"`
+		}
+		if err := json.Unmarshal(cart.ShippingAddress, &addr); err == nil && addr.Street != "" {
+			order.ShippingAddress = &providers.ERPShippingAddress{
+				RecipientName: cart.CustomerName,
+				Document:      cart.CustomerDocument,
+				Phone:         cart.CustomerPhone,
+				ZipCode:       addr.ZipCode,
+				Street:        addr.Street,
+				Number:        addr.Number,
+				Complement:    addr.Complement,
+				Neighborhood:  addr.Neighborhood,
+				City:          addr.City,
+				State:         addr.State,
+			}
+		} else if err != nil {
+			s.logger.Warn("failed to parse cart shipping_address",
+				zap.String("cart_id", cart.ID),
+				zap.Error(err),
+			)
+		}
+	}
+
+	// Flag the order as already paid using the provider-reported details.
+	if paymentStatus != nil {
+		paidAt := time.Now()
+		if paymentStatus.PaidAt != nil {
+			paidAt = *paymentStatus.PaidAt
+		}
+		order.Payment = &providers.ERPOrderPayment{
+			Method:       paymentStatus.PaymentMethod,
+			PaymentID:    paymentStatus.PaymentID,
+			Installments: paymentStatus.Installments,
+			PaidAt:       paidAt,
+			Amount:       totalAmount,
+		}
+	}
+
+	result, err := erpProvider.CreateOrder(ctx, order)
 	if err != nil {
 		return fmt.Errorf("creating ERP order: %w", err)
 	}
@@ -2577,10 +2640,12 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 		return fmt.Errorf("launching stock for order %s: %w", result.OrderID, err)
 	}
 
-	s.logger.Info("final ERP order created for cart",
+	s.logger.Info("paid ERP order created for cart",
 		zap.String("cart_id", cart.ID),
 		zap.String("erp_order_id", result.OrderID),
 		zap.Int("items", len(erpItems)),
+		zap.String("payment_id", paymentStatus.PaymentID),
+		zap.String("payment_method", paymentStatus.PaymentMethod),
 	)
 
 	return nil
@@ -2591,7 +2656,10 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 // =============================================================================
 
 // resolveERPContact finds or creates an ERP contact for the platform user.
-func (s *Service) resolveERPContact(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, platformUserID, platformHandle string) (string, error) {
+// Optional customer fields (name, document, email, phone) enrich the contact
+// when creating it; if the contact is already cached or found by handle,
+// enrichment is skipped to keep the call idempotent and cheap.
+func (s *Service) resolveERPContact(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, platformUserID, platformHandle, customerName, customerDocument, customerEmail, customerPhone string) (string, error) {
 	// Check cache first
 	cachedID, err := s.repo.GetERPContact(ctx, storeID, integration.ID, platformUserID)
 	if err != nil {
@@ -2601,19 +2669,36 @@ func (s *Service) resolveERPContact(ctx context.Context, erpProvider providers.E
 		return cachedID, nil
 	}
 
-	// Search by platform handle in ERP
+	// Search by document first when we have one — most reliable key in Tiny.
+	if customerDocument != "" {
+		results, err := erpProvider.SearchContacts(ctx, providers.SearchContactsParams{
+			CpfCnpj: customerDocument,
+		})
+		if err == nil && len(results) > 0 {
+			_ = s.repo.UpsertERPContact(ctx, storeID, integration.ID, platformUserID, platformHandle, results[0].ContactID)
+			return results[0].ContactID, nil
+		}
+	}
+
+	// Fall back to searching by platform handle.
 	results, err := erpProvider.SearchContacts(ctx, providers.SearchContactsParams{
 		Name: platformHandle,
 	})
 	if err == nil && len(results) > 0 {
-		// Cache and return the first match
 		_ = s.repo.UpsertERPContact(ctx, storeID, integration.ID, platformUserID, platformHandle, results[0].ContactID)
 		return results[0].ContactID, nil
 	}
 
-	// Create new contact in ERP
+	// Create new contact in ERP. Prefer the real customer name over the handle.
+	contactName := customerName
+	if contactName == "" {
+		contactName = platformHandle
+	}
 	contact, err := erpProvider.CreateContact(ctx, providers.ERPContactInput{
-		Name:       platformHandle,
+		Name:       contactName,
+		CpfCnpj:    customerDocument,
+		Email:      customerEmail,
+		Phone:      customerPhone,
 		PersonType: "F",
 	})
 	if err != nil {

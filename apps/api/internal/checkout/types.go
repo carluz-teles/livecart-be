@@ -85,15 +85,16 @@ type GetCheckoutConfigResponse struct {
 
 // ProcessCardPaymentRequest is the request for POST /api/public/checkout/:token/card
 type ProcessCardPaymentRequest struct {
-	Email           string `json:"email" validate:"required,email"`
-	Token           string `json:"token" validate:"required"`
-	Installments    int    `json:"installments" validate:"required,min=1,max=12"`
-	PaymentMethodID string `json:"paymentMethodId,omitempty"` // For Mercado Pago
-	IssuerID        string `json:"issuerId,omitempty"`        // For Mercado Pago
-	DeviceID        string `json:"deviceId,omitempty"`        // For fraud prevention
-	CustomerName    string `json:"customerName,omitempty"`
-	CustomerDocument string `json:"customerDocument,omitempty"`
-	CustomerPhone   string `json:"customerPhone,omitempty"`
+	Email            string           `json:"email" validate:"required,email"`
+	Token            string           `json:"token" validate:"required"`
+	Installments     int              `json:"installments" validate:"required,min=1,max=12"`
+	PaymentMethodID  string           `json:"paymentMethodId,omitempty"` // For Mercado Pago
+	IssuerID         string           `json:"issuerId,omitempty"`        // For Mercado Pago
+	DeviceID         string           `json:"deviceId,omitempty"`        // For fraud prevention
+	CustomerName     string           `json:"customerName" validate:"required"`
+	CustomerDocument string           `json:"customerDocument" validate:"required"`
+	CustomerPhone    string           `json:"customerPhone,omitempty"`
+	ShippingAddress  *ShippingAddress `json:"shippingAddress" validate:"required"`
 }
 
 // ProcessCardPaymentResponse is the response for POST /api/public/checkout/:token/card
@@ -110,10 +111,23 @@ type ProcessCardPaymentResponse struct {
 
 // GeneratePixRequest is the request for POST /api/public/checkout/:token/pix
 type GeneratePixRequest struct {
-	Email            string `json:"email" validate:"required,email"`
-	CustomerName     string `json:"customerName,omitempty"`
-	CustomerDocument string `json:"customerDocument,omitempty"`
-	CustomerPhone    string `json:"customerPhone,omitempty"`
+	Email            string           `json:"email" validate:"required,email"`
+	CustomerName     string           `json:"customerName" validate:"required"`
+	CustomerDocument string           `json:"customerDocument" validate:"required"`
+	CustomerPhone    string           `json:"customerPhone,omitempty"`
+	ShippingAddress  *ShippingAddress `json:"shippingAddress" validate:"required"`
+}
+
+// ShippingAddress is the delivery address supplied by the customer at checkout.
+// Persisted on the cart and forwarded to the ERP when the paid sales order is created.
+type ShippingAddress struct {
+	ZipCode      string `json:"zipCode" validate:"required"`
+	Street       string `json:"street" validate:"required"`
+	Number       string `json:"number" validate:"required"`
+	Complement   string `json:"complement,omitempty"`
+	Neighborhood string `json:"neighborhood" validate:"required"`
+	City         string `json:"city" validate:"required"`
+	State        string `json:"state" validate:"required,len=2"`
 }
 
 // GeneratePixResponse is the response for POST /api/public/checkout/:token/pix
@@ -227,6 +241,7 @@ type ProcessCardPaymentInput struct {
 	CustomerName     string
 	CustomerDocument string
 	CustomerPhone    string
+	ShippingAddress  *ShippingAddress
 }
 
 // ProcessCardPaymentOutput is the output for ProcessCardPayment service method
@@ -248,6 +263,7 @@ type GeneratePixInput struct {
 	CustomerName     string
 	CustomerDocument string
 	CustomerPhone    string
+	ShippingAddress  *ShippingAddress
 }
 
 // GeneratePixOutput is the output for GeneratePix service method

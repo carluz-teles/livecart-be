@@ -290,6 +290,19 @@ SET customer_email = $2
 WHERE token = $1
 RETURNING *;
 
+-- name: UpdateCartCustomerCheckout :one
+-- Persists full customer + shipping data entered in the checkout form.
+-- Called right before a card/pix payment request so the webhook handler
+-- (and ERP order creation on paid) has complete info regardless of provider.
+UPDATE carts
+SET customer_email    = $2,
+    customer_name     = $3,
+    customer_document = $4,
+    customer_phone    = $5,
+    shipping_address  = $6
+WHERE id = $1
+RETURNING *;
+
 -- name: UpdateCartCheckoutInfo :one
 -- Updates checkout URL and ID after generating payment link
 UPDATE carts

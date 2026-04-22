@@ -333,6 +333,7 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 		ExternalReference string         `json:"external_reference"`
 		PaymentTypeID     string         `json:"payment_type_id"`  // credit_card, debit_card, pix, ticket (boleto)
 		PaymentMethodID   string         `json:"payment_method_id"` // visa, master, pix, etc.
+		Installments      int            `json:"installments"`
 	}
 	if err := json.Unmarshal(body, &mpPayment); err != nil {
 		return nil, fmt.Errorf("parsing payment response: %w", err)
@@ -359,6 +360,7 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 		Metadata:          mpPayment.Metadata,
 		ExternalReference: mpPayment.ExternalReference,
 		PaymentMethod:     paymentMethod,
+		Installments:      mpPayment.Installments,
 	}, nil
 }
 
