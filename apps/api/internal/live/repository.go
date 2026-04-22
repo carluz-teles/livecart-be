@@ -664,12 +664,35 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 		return nil, false, err
 	}
 
+	// Parse session ID if provided (before transaction)
+	var sessionID pgtype.UUID
+	if params.SessionID != nil {
+		sid, err := parseUUID(*params.SessionID)
+		if err != nil {
+			return nil, false, fmt.Errorf("parsing session ID: %w", err)
+		}
+		sessionID = sid
+	}
+
+	// Use transaction to ensure atomicity (SELECT + INSERT)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // No-op if already committed
+
+	qtx := r.q.WithTx(tx)
+
 	// Try to get existing cart first
-	existing, err := r.q.GetCartByEventAndUser(ctx, sqlc.GetCartByEventAndUserParams{
+	existing, err := qtx.GetCartByEventAndUser(ctx, sqlc.GetCartByEventAndUserParams{
 		EventID:        eventID,
 		PlatformUserID: params.PlatformUserID,
 	})
 	if err == nil {
+		// Cart exists, commit and return
+		if err := tx.Commit(ctx); err != nil {
+			return nil, false, fmt.Errorf("committing transaction: %w", err)
+		}
 		return &CartRow{
 			ID:             existing.ID.String(),
 			EventID:        existing.EventID.String(),
@@ -684,39 +707,21 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 		return nil, false, fmt.Errorf("getting cart: %w", err)
 	}
 
-	// Get cart expiration from event settings (with store fallback)
-	settings, err := r.q.GetEventCartSettings(ctx, eventID)
-	if err != nil {
-		return nil, false, fmt.Errorf("getting event cart settings: %w", err)
-	}
-
-	// Use event/store cart_expiration_minutes, default to 30 minutes if not set
-	expirationMinutes := settings.CartExpirationMinutes
-	if expirationMinutes == 0 {
-		expirationMinutes = 30 // Default fallback
-	}
-	expiresAt := time.Now().Add(time.Duration(expirationMinutes) * time.Minute)
-
-	// Parse session ID if provided
-	var sessionID pgtype.UUID
-	if params.SessionID != nil {
-		sid, err := parseUUID(*params.SessionID)
-		if err != nil {
-			return nil, false, fmt.Errorf("parsing session ID: %w", err)
-		}
-		sessionID = sid
-	}
-
-	created, err := r.q.CreateCart(ctx, sqlc.CreateCartParams{
+	// Note: expires_at is NOT set on creation. It will be set when the live event ends.
+	created, err := qtx.CreateCart(ctx, sqlc.CreateCartParams{
 		EventID:        eventID,
 		SessionID:      sessionID,
 		PlatformUserID: params.PlatformUserID,
 		PlatformHandle: params.PlatformHandle,
 		Token:          params.Token,
-		ExpiresAt:      pgtype.Timestamptz{Time: expiresAt, Valid: true},
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("creating cart: %w", err)
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, fmt.Errorf("committing transaction: %w", err)
 	}
 
 	return &CartRow{
@@ -734,15 +739,29 @@ func (r *Repository) FinalizeCartsByEvent(ctx context.Context, eventID string) (
 		return 0, err
 	}
 
+	// Use transaction to ensure atomicity (COUNT + UPDATE)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // No-op if already committed
+
+	qtx := r.q.WithTx(tx)
+
 	// Count first
-	count, err := r.q.CountCartsByEvent(ctx, uid)
+	count, err := qtx.CountCartsByEvent(ctx, uid)
 	if err != nil {
 		return 0, fmt.Errorf("counting carts: %w", err)
 	}
 
 	// Finalize
-	if err := r.q.FinalizeCartsByEvent(ctx, uid); err != nil {
+	if err := qtx.FinalizeCartsByEvent(ctx, uid); err != nil {
 		return 0, fmt.Errorf("finalizing carts: %w", err)
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("committing transaction: %w", err)
 	}
 
 	return int(count), nil
@@ -1389,7 +1408,16 @@ func (r *Repository) AddEventProduct(ctx context.Context, input AddEventProductI
 		maxQuantity = pgtype.Int4{Int32: *input.MaxQuantity, Valid: true}
 	}
 
-	_, err = r.q.CreateEventProduct(ctx, sqlc.CreateEventProductParams{
+	// Use transaction to ensure atomicity (INSERT + SELECT)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return EventProductOutput{}, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // No-op if already committed
+
+	qtx := r.q.WithTx(tx)
+
+	_, err = qtx.CreateEventProduct(ctx, sqlc.CreateEventProductParams{
 		EventID:      eventUID,
 		ProductID:    productUID,
 		SpecialPrice: specialPrice,
@@ -1402,12 +1430,17 @@ func (r *Repository) AddEventProduct(ctx context.Context, input AddEventProductI
 	}
 
 	// Get the created product with joined product data
-	row, err := r.q.GetEventProductByProductID(ctx, sqlc.GetEventProductByProductIDParams{
+	row, err := qtx.GetEventProductByProductID(ctx, sqlc.GetEventProductByProductIDParams{
 		EventID:   eventUID,
 		ProductID: productUID,
 	})
 	if err != nil {
 		return EventProductOutput{}, fmt.Errorf("getting created event product: %w", err)
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(ctx); err != nil {
+		return EventProductOutput{}, fmt.Errorf("committing transaction: %w", err)
 	}
 
 	return toEventProductOutput(row), nil
@@ -1454,7 +1487,16 @@ func (r *Repository) UpdateEventProduct(ctx context.Context, input UpdateEventPr
 		maxQuantity = pgtype.Int4{Int32: *input.MaxQuantity, Valid: true}
 	}
 
-	updated, err := r.q.UpdateEventProduct(ctx, sqlc.UpdateEventProductParams{
+	// Use transaction to ensure atomicity (UPDATE + SELECT)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return EventProductOutput{}, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // No-op if already committed
+
+	qtx := r.q.WithTx(tx)
+
+	updated, err := qtx.UpdateEventProduct(ctx, sqlc.UpdateEventProductParams{
 		ID:           uid,
 		EventID:      eventUID,
 		SpecialPrice: specialPrice,
@@ -1470,9 +1512,14 @@ func (r *Repository) UpdateEventProduct(ctx context.Context, input UpdateEventPr
 	}
 
 	// Get with joined product data
-	row, err := r.q.GetEventProductByID(ctx, updated.ID)
+	row, err := qtx.GetEventProductByID(ctx, updated.ID)
 	if err != nil {
 		return EventProductOutput{}, fmt.Errorf("getting updated event product: %w", err)
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(ctx); err != nil {
+		return EventProductOutput{}, fmt.Errorf("committing transaction: %w", err)
 	}
 
 	return toEventProductOutputFromGet(row), nil
@@ -1581,7 +1628,16 @@ func (r *Repository) AddEventUpsell(ctx context.Context, input AddEventUpsellInp
 		messageTemplate = pgtype.Text{String: *input.MessageTemplate, Valid: true}
 	}
 
-	created, err := r.q.CreateEventUpsell(ctx, sqlc.CreateEventUpsellParams{
+	// Use transaction to ensure atomicity (INSERT + SELECT)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return EventUpsellOutput{}, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // No-op if already committed
+
+	qtx := r.q.WithTx(tx)
+
+	created, err := qtx.CreateEventUpsell(ctx, sqlc.CreateEventUpsellParams{
 		EventID:         eventUID,
 		ProductID:       productUID,
 		DiscountPercent: input.DiscountPercent,
@@ -1594,9 +1650,14 @@ func (r *Repository) AddEventUpsell(ctx context.Context, input AddEventUpsellInp
 	}
 
 	// Get with joined product data
-	row, err := r.q.GetEventUpsellByID(ctx, created.ID)
+	row, err := qtx.GetEventUpsellByID(ctx, created.ID)
 	if err != nil {
 		return EventUpsellOutput{}, fmt.Errorf("getting created event upsell: %w", err)
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(ctx); err != nil {
+		return EventUpsellOutput{}, fmt.Errorf("committing transaction: %w", err)
 	}
 
 	return toEventUpsellOutputFromGet(row), nil
@@ -1638,7 +1699,16 @@ func (r *Repository) UpdateEventUpsell(ctx context.Context, input UpdateEventUps
 		messageTemplate = pgtype.Text{String: *input.MessageTemplate, Valid: true}
 	}
 
-	updated, err := r.q.UpdateEventUpsell(ctx, sqlc.UpdateEventUpsellParams{
+	// Use transaction to ensure atomicity (UPDATE + SELECT)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return EventUpsellOutput{}, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // No-op if already committed
+
+	qtx := r.q.WithTx(tx)
+
+	updated, err := qtx.UpdateEventUpsell(ctx, sqlc.UpdateEventUpsellParams{
 		ID:              uid,
 		EventID:         eventUID,
 		DiscountPercent: input.DiscountPercent,
@@ -1654,9 +1724,14 @@ func (r *Repository) UpdateEventUpsell(ctx context.Context, input UpdateEventUps
 	}
 
 	// Get with joined product data
-	row, err := r.q.GetEventUpsellByID(ctx, updated.ID)
+	row, err := qtx.GetEventUpsellByID(ctx, updated.ID)
 	if err != nil {
 		return EventUpsellOutput{}, fmt.Errorf("getting updated event upsell: %w", err)
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(ctx); err != nil {
+		return EventUpsellOutput{}, fmt.Errorf("committing transaction: %w", err)
 	}
 
 	return toEventUpsellOutputFromGet(row), nil
