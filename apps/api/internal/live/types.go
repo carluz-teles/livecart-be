@@ -508,8 +508,9 @@ type AddToCartInput struct {
 	PlatformHandle     string
 	ProductID          string
 	ProductPrice       int64
-	Quantity           int    // Total quantity to add
-	WaitlistedQuantity int    // How many of the quantity are waitlisted (0 = all available)
+	Quantity           int     // Total quantity to add
+	WaitlistedQuantity int     // How many of the quantity are waitlisted (0 = all available)
+	CustomerID         *string // Optional - links cart to a customer
 }
 
 // AddToCartOutput represents the result of adding to cart.
@@ -528,6 +529,7 @@ type GetOrCreateCartParams struct {
 	PlatformUserID string
 	PlatformHandle string
 	Token          string
+	CustomerID     *string // Optional - links cart to a customer
 }
 
 // CartRow represents a cart row from the database.

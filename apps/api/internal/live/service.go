@@ -768,6 +768,7 @@ func (s *Service) AddToCart(ctx context.Context, input AddToCartInput) (AddToCar
 		PlatformUserID: input.PlatformUserID,
 		PlatformHandle: input.PlatformHandle,
 		Token:          token,
+		CustomerID:     input.CustomerID,
 	})
 	if err != nil {
 		return AddToCartOutput{}, fmt.Errorf("getting or creating cart: %w", err)

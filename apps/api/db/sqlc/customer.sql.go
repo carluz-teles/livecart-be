@@ -11,68 +11,174 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const getCustomerByID = `-- name: GetCustomerByID :one
-SELECT
-    c.platform_user_id as id,
-    c.platform_handle as handle,
-    COUNT(DISTINCT c.id)::INT as total_orders,
-    COALESCE(SUM(
-        (SELECT COALESCE(SUM(ci.quantity * ci.unit_price), 0) FROM cart_items ci WHERE ci.cart_id = c.id)
-    ), 0)::BIGINT as total_spent,
-    MAX(c.created_at) as last_order_at,
-    MIN(c.created_at) as first_order_at
-FROM carts c
-JOIN live_events e ON e.id = c.event_id
-WHERE e.store_id = $1 AND c.platform_user_id = $2
-GROUP BY c.platform_user_id, c.platform_handle
+const countCustomers = `-- name: CountCustomers :one
+SELECT COUNT(*)::int FROM customers WHERE store_id = $1
 `
 
-type GetCustomerByIDParams struct {
+func (q *Queries) CountCustomers(ctx context.Context, storeID pgtype.UUID) (int32, error) {
+	row := q.db.QueryRow(ctx, countCustomers, storeID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const createCustomer = `-- name: CreateCustomer :one
+
+INSERT INTO customers (
+    store_id,
+    platform_user_id,
+    platform_handle,
+    email,
+    phone,
+    first_order_at,
+    last_order_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at
+`
+
+type CreateCustomerParams struct {
+	StoreID        pgtype.UUID        `json:"store_id"`
+	PlatformUserID string             `json:"platform_user_id"`
+	PlatformHandle string             `json:"platform_handle"`
+	Email          pgtype.Text        `json:"email"`
+	Phone          pgtype.Text        `json:"phone"`
+	FirstOrderAt   pgtype.Timestamptz `json:"first_order_at"`
+	LastOrderAt    pgtype.Timestamptz `json:"last_order_at"`
+}
+
+// =============================================================================
+// CUSTOMERS
+// =============================================================================
+func (q *Queries) CreateCustomer(ctx context.Context, arg CreateCustomerParams) (Customer, error) {
+	row := q.db.QueryRow(ctx, createCustomer,
+		arg.StoreID,
+		arg.PlatformUserID,
+		arg.PlatformHandle,
+		arg.Email,
+		arg.Phone,
+		arg.FirstOrderAt,
+		arg.LastOrderAt,
+	)
+	var i Customer
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.PlatformUserID,
+		&i.PlatformHandle,
+		&i.Email,
+		&i.Phone,
+		&i.FirstOrderAt,
+		&i.LastOrderAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const deleteCustomer = `-- name: DeleteCustomer :exec
+DELETE FROM customers WHERE id = $1
+`
+
+func (q *Queries) DeleteCustomer(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteCustomer, id)
+	return err
+}
+
+const getCustomerByHandle = `-- name: GetCustomerByHandle :one
+SELECT id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at FROM customers
+WHERE store_id = $1 AND platform_handle = $2
+LIMIT 1
+`
+
+type GetCustomerByHandleParams struct {
+	StoreID        pgtype.UUID `json:"store_id"`
+	PlatformHandle string      `json:"platform_handle"`
+}
+
+func (q *Queries) GetCustomerByHandle(ctx context.Context, arg GetCustomerByHandleParams) (Customer, error) {
+	row := q.db.QueryRow(ctx, getCustomerByHandle, arg.StoreID, arg.PlatformHandle)
+	var i Customer
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.PlatformUserID,
+		&i.PlatformHandle,
+		&i.Email,
+		&i.Phone,
+		&i.FirstOrderAt,
+		&i.LastOrderAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getCustomerByID = `-- name: GetCustomerByID :one
+SELECT id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at FROM customers WHERE id = $1
+`
+
+func (q *Queries) GetCustomerByID(ctx context.Context, id pgtype.UUID) (Customer, error) {
+	row := q.db.QueryRow(ctx, getCustomerByID, id)
+	var i Customer
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.PlatformUserID,
+		&i.PlatformHandle,
+		&i.Email,
+		&i.Phone,
+		&i.FirstOrderAt,
+		&i.LastOrderAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getCustomerByPlatformUser = `-- name: GetCustomerByPlatformUser :one
+SELECT id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at FROM customers
+WHERE store_id = $1 AND platform_user_id = $2
+`
+
+type GetCustomerByPlatformUserParams struct {
 	StoreID        pgtype.UUID `json:"store_id"`
 	PlatformUserID string      `json:"platform_user_id"`
 }
 
-type GetCustomerByIDRow struct {
-	ID           string      `json:"id"`
-	Handle       string      `json:"handle"`
-	TotalOrders  int32       `json:"total_orders"`
-	TotalSpent   int64       `json:"total_spent"`
-	LastOrderAt  interface{} `json:"last_order_at"`
-	FirstOrderAt interface{} `json:"first_order_at"`
-}
-
-func (q *Queries) GetCustomerByID(ctx context.Context, arg GetCustomerByIDParams) (GetCustomerByIDRow, error) {
-	row := q.db.QueryRow(ctx, getCustomerByID, arg.StoreID, arg.PlatformUserID)
-	var i GetCustomerByIDRow
+func (q *Queries) GetCustomerByPlatformUser(ctx context.Context, arg GetCustomerByPlatformUserParams) (Customer, error) {
+	row := q.db.QueryRow(ctx, getCustomerByPlatformUser, arg.StoreID, arg.PlatformUserID)
+	var i Customer
 	err := row.Scan(
 		&i.ID,
-		&i.Handle,
-		&i.TotalOrders,
-		&i.TotalSpent,
-		&i.LastOrderAt,
+		&i.StoreID,
+		&i.PlatformUserID,
+		&i.PlatformHandle,
+		&i.Email,
+		&i.Phone,
 		&i.FirstOrderAt,
+		&i.LastOrderAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
 
 const getCustomerStats = `-- name: GetCustomerStats :one
 SELECT
-    COUNT(DISTINCT c.platform_user_id)::INT as total_customers,
-    COUNT(DISTINCT CASE
-        WHEN c.created_at > now() - interval '30 days' THEN c.platform_user_id
-    END)::INT as active_customers,
+    COUNT(*)::INT as total_customers,
+    COUNT(CASE WHEN last_order_at > now() - interval '30 days' THEN 1 END)::INT as active_customers,
     COALESCE(
-        CASE
-            WHEN COUNT(DISTINCT c.platform_user_id) > 0 THEN
-                SUM((SELECT COALESCE(SUM(ci.quantity * ci.unit_price), 0) FROM cart_items ci WHERE ci.cart_id = c.id))
-                / COUNT(DISTINCT c.platform_user_id)
-            ELSE 0
-        END,
+        (
+            SELECT SUM(ci.quantity * ci.unit_price) / NULLIF(COUNT(DISTINCT c.id), 0)
+            FROM carts cart
+            JOIN cart_items ci ON ci.cart_id = cart.id
+            JOIN customers c ON c.id = cart.customer_id
+            WHERE c.store_id = $1
+        ),
         0
     )::BIGINT as avg_spent_per_customer
-FROM carts c
-JOIN live_events e ON e.id = c.event_id
-WHERE e.store_id = $1
+FROM customers
+WHERE store_id = $1
 `
 
 type GetCustomerStatsRow struct {
@@ -90,32 +196,47 @@ func (q *Queries) GetCustomerStats(ctx context.Context, storeID pgtype.UUID) (Ge
 
 const listCustomers = `-- name: ListCustomers :many
 SELECT
-    c.platform_user_id as id,
-    c.platform_handle as handle,
-    COUNT(DISTINCT c.id)::INT as total_orders,
-    COALESCE(SUM(
-        (SELECT COALESCE(SUM(ci.quantity * ci.unit_price), 0) FROM cart_items ci WHERE ci.cart_id = c.id)
-    ), 0)::BIGINT as total_spent,
-    MAX(c.created_at) as last_order_at,
-    MIN(c.created_at) as first_order_at
-FROM carts c
-JOIN live_events e ON e.id = c.event_id
-WHERE e.store_id = $1
-GROUP BY c.platform_user_id, c.platform_handle
-ORDER BY last_order_at DESC
+    c.id, c.store_id, c.platform_user_id, c.platform_handle, c.email, c.phone, c.first_order_at, c.last_order_at, c.created_at, c.updated_at,
+    COALESCE(stats.total_orders, 0)::INT as total_orders,
+    COALESCE(stats.total_spent, 0)::BIGINT as total_spent
+FROM customers c
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(DISTINCT cart.id)::INT as total_orders,
+        SUM(ci.quantity * ci.unit_price)::BIGINT as total_spent
+    FROM carts cart
+    JOIN cart_items ci ON ci.cart_id = cart.id
+    WHERE cart.customer_id = c.id
+) stats ON true
+WHERE c.store_id = $1
+ORDER BY c.last_order_at DESC NULLS LAST
+LIMIT $2 OFFSET $3
 `
 
-type ListCustomersRow struct {
-	ID           string      `json:"id"`
-	Handle       string      `json:"handle"`
-	TotalOrders  int32       `json:"total_orders"`
-	TotalSpent   int64       `json:"total_spent"`
-	LastOrderAt  interface{} `json:"last_order_at"`
-	FirstOrderAt interface{} `json:"first_order_at"`
+type ListCustomersParams struct {
+	StoreID pgtype.UUID `json:"store_id"`
+	Limit   int32       `json:"limit"`
+	Offset  int32       `json:"offset"`
 }
 
-func (q *Queries) ListCustomers(ctx context.Context, storeID pgtype.UUID) ([]ListCustomersRow, error) {
-	rows, err := q.db.Query(ctx, listCustomers, storeID)
+type ListCustomersRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	StoreID        pgtype.UUID        `json:"store_id"`
+	PlatformUserID string             `json:"platform_user_id"`
+	PlatformHandle string             `json:"platform_handle"`
+	Email          pgtype.Text        `json:"email"`
+	Phone          pgtype.Text        `json:"phone"`
+	FirstOrderAt   pgtype.Timestamptz `json:"first_order_at"`
+	LastOrderAt    pgtype.Timestamptz `json:"last_order_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	TotalOrders    int32              `json:"total_orders"`
+	TotalSpent     int64              `json:"total_spent"`
+}
+
+// List customers with aggregated order stats
+func (q *Queries) ListCustomers(ctx context.Context, arg ListCustomersParams) ([]ListCustomersRow, error) {
+	rows, err := q.db.Query(ctx, listCustomers, arg.StoreID, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
@@ -125,11 +246,17 @@ func (q *Queries) ListCustomers(ctx context.Context, storeID pgtype.UUID) ([]Lis
 		var i ListCustomersRow
 		if err := rows.Scan(
 			&i.ID,
-			&i.Handle,
+			&i.StoreID,
+			&i.PlatformUserID,
+			&i.PlatformHandle,
+			&i.Email,
+			&i.Phone,
+			&i.FirstOrderAt,
+			&i.LastOrderAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
 			&i.TotalOrders,
 			&i.TotalSpent,
-			&i.LastOrderAt,
-			&i.FirstOrderAt,
 		); err != nil {
 			return nil, err
 		}
@@ -139,4 +266,174 @@ func (q *Queries) ListCustomers(ctx context.Context, storeID pgtype.UUID) ([]Lis
 		return nil, err
 	}
 	return items, nil
+}
+
+const searchCustomers = `-- name: SearchCustomers :many
+SELECT
+    c.id, c.store_id, c.platform_user_id, c.platform_handle, c.email, c.phone, c.first_order_at, c.last_order_at, c.created_at, c.updated_at,
+    COALESCE(stats.total_orders, 0)::INT as total_orders,
+    COALESCE(stats.total_spent, 0)::BIGINT as total_spent
+FROM customers c
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(DISTINCT cart.id)::INT as total_orders,
+        SUM(ci.quantity * ci.unit_price)::BIGINT as total_spent
+    FROM carts cart
+    JOIN cart_items ci ON ci.cart_id = cart.id
+    WHERE cart.customer_id = c.id
+) stats ON true
+WHERE c.store_id = $1
+  AND (c.platform_handle ILIKE $2 OR c.email ILIKE $2)
+ORDER BY c.last_order_at DESC NULLS LAST
+LIMIT $3 OFFSET $4
+`
+
+type SearchCustomersParams struct {
+	StoreID        pgtype.UUID `json:"store_id"`
+	PlatformHandle string      `json:"platform_handle"`
+	Limit          int32       `json:"limit"`
+	Offset         int32       `json:"offset"`
+}
+
+type SearchCustomersRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	StoreID        pgtype.UUID        `json:"store_id"`
+	PlatformUserID string             `json:"platform_user_id"`
+	PlatformHandle string             `json:"platform_handle"`
+	Email          pgtype.Text        `json:"email"`
+	Phone          pgtype.Text        `json:"phone"`
+	FirstOrderAt   pgtype.Timestamptz `json:"first_order_at"`
+	LastOrderAt    pgtype.Timestamptz `json:"last_order_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	TotalOrders    int32              `json:"total_orders"`
+	TotalSpent     int64              `json:"total_spent"`
+}
+
+func (q *Queries) SearchCustomers(ctx context.Context, arg SearchCustomersParams) ([]SearchCustomersRow, error) {
+	rows, err := q.db.Query(ctx, searchCustomers,
+		arg.StoreID,
+		arg.PlatformHandle,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SearchCustomersRow{}
+	for rows.Next() {
+		var i SearchCustomersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.StoreID,
+			&i.PlatformUserID,
+			&i.PlatformHandle,
+			&i.Email,
+			&i.Phone,
+			&i.FirstOrderAt,
+			&i.LastOrderAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.TotalOrders,
+			&i.TotalSpent,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updateCustomer = `-- name: UpdateCustomer :exec
+UPDATE customers SET
+    platform_handle = COALESCE($2, platform_handle),
+    email = COALESCE($3, email),
+    phone = COALESCE($4, phone),
+    updated_at = now()
+WHERE id = $1
+`
+
+type UpdateCustomerParams struct {
+	ID             pgtype.UUID `json:"id"`
+	PlatformHandle string      `json:"platform_handle"`
+	Email          pgtype.Text `json:"email"`
+	Phone          pgtype.Text `json:"phone"`
+}
+
+func (q *Queries) UpdateCustomer(ctx context.Context, arg UpdateCustomerParams) error {
+	_, err := q.db.Exec(ctx, updateCustomer,
+		arg.ID,
+		arg.PlatformHandle,
+		arg.Email,
+		arg.Phone,
+	)
+	return err
+}
+
+const updateCustomerLastOrder = `-- name: UpdateCustomerLastOrder :exec
+UPDATE customers SET
+    last_order_at = now(),
+    updated_at = now()
+WHERE id = $1
+`
+
+func (q *Queries) UpdateCustomerLastOrder(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, updateCustomerLastOrder, id)
+	return err
+}
+
+const upsertCustomer = `-- name: UpsertCustomer :one
+INSERT INTO customers (
+    store_id,
+    platform_user_id,
+    platform_handle,
+    email,
+    phone,
+    first_order_at,
+    last_order_at
+) VALUES ($1, $2, $3, $4, $5, now(), now())
+ON CONFLICT (store_id, platform_user_id) DO UPDATE SET
+    platform_handle = COALESCE(EXCLUDED.platform_handle, customers.platform_handle),
+    email = COALESCE(EXCLUDED.email, customers.email),
+    phone = COALESCE(EXCLUDED.phone, customers.phone),
+    last_order_at = now(),
+    updated_at = now()
+RETURNING id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at
+`
+
+type UpsertCustomerParams struct {
+	StoreID        pgtype.UUID `json:"store_id"`
+	PlatformUserID string      `json:"platform_user_id"`
+	PlatformHandle string      `json:"platform_handle"`
+	Email          pgtype.Text `json:"email"`
+	Phone          pgtype.Text `json:"phone"`
+}
+
+// Creates a new customer or updates existing one (by store_id + platform_user_id)
+func (q *Queries) UpsertCustomer(ctx context.Context, arg UpsertCustomerParams) (Customer, error) {
+	row := q.db.QueryRow(ctx, upsertCustomer,
+		arg.StoreID,
+		arg.PlatformUserID,
+		arg.PlatformHandle,
+		arg.Email,
+		arg.Phone,
+	)
+	var i Customer
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.PlatformUserID,
+		&i.PlatformHandle,
+		&i.Email,
+		&i.Phone,
+		&i.FirstOrderAt,
+		&i.LastOrderAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }

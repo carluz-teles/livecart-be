@@ -674,6 +674,16 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 		sessionID = sid
 	}
 
+	// Parse customer ID if provided
+	var customerID pgtype.UUID
+	if params.CustomerID != nil {
+		cid, err := parseUUID(*params.CustomerID)
+		if err != nil {
+			return nil, false, fmt.Errorf("parsing customer ID: %w", err)
+		}
+		customerID = cid
+	}
+
 	// Use transaction to ensure atomicity (SELECT + INSERT)
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -714,6 +724,7 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 		PlatformUserID: params.PlatformUserID,
 		PlatformHandle: params.PlatformHandle,
 		Token:          params.Token,
+		CustomerID:     customerID,
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("creating cart: %w", err)

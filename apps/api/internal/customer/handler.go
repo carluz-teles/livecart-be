@@ -3,6 +3,7 @@ package customer
 import (
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/query"
@@ -76,20 +77,23 @@ func (h *Handler) List(c *fiber.Ctx) error {
 
 // GetByID godoc
 // @Summary      Get customer by ID
-// @Description  Returns a single customer by their platform user ID
+// @Description  Returns a single customer by their UUID
 // @Tags         customers
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
-// @Param        id path string true "Customer platform user ID"
+// @Param        id path string true "Customer UUID"
 // @Success      200 {object} httpx.Envelope{data=CustomerResponse}
 // @Failure      404 {object} httpx.Envelope
 // @Router       /api/v1/stores/{storeId}/customers/{id} [get]
 // @Security     BearerAuth
 func (h *Handler) GetByID(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	id := c.Params("id")
+	idStr := c.Params("id")
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid customer id")
+	}
 
-	output, err := h.service.GetByID(c.Context(), storeID, id)
+	output, err := h.service.GetByID(c.Context(), id)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
@@ -149,6 +153,8 @@ func toCustomerResponse(o CustomerOutput) CustomerResponse {
 	return CustomerResponse{
 		ID:           o.ID,
 		Handle:       o.Handle,
+		Email:        o.Email,
+		Phone:        o.Phone,
 		TotalOrders:  o.TotalOrders,
 		TotalSpent:   o.TotalSpent,
 		LastOrderAt:  o.LastOrderAt,

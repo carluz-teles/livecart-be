@@ -3,8 +3,8 @@
 -- =============================================================================
 
 -- name: CreateCart :one
-INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, status, expires_at)
-VALUES ($1, $2, $3, $4, $5, 'active', $6)
+INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, status, expires_at, customer_id)
+VALUES ($1, $2, $3, $4, $5, 'active', $6, $7)
 RETURNING *;
 
 -- name: GetCartByID :one
@@ -15,6 +15,22 @@ SELECT * FROM carts WHERE token = $1;
 
 -- name: GetCartByEventAndUser :one
 SELECT * FROM carts WHERE event_id = $1 AND platform_user_id = $2;
+
+-- name: ListCartsByCustomer :many
+-- Returns all carts for a specific customer with totals
+SELECT
+    c.*,
+    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_value,
+    COALESCE(SUM(ci.quantity), 0)::int AS total_items
+FROM carts c
+LEFT JOIN cart_items ci ON ci.cart_id = c.id
+WHERE c.customer_id = $1
+GROUP BY c.id
+ORDER BY c.created_at DESC
+LIMIT $2 OFFSET $3;
+
+-- name: UpdateCartCustomerID :exec
+UPDATE carts SET customer_id = $2 WHERE id = $1;
 
 -- name: GetCartTotals :one
 -- Returns total items and value for a cart (for notifications)

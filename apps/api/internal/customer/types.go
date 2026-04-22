@@ -3,22 +3,26 @@ package customer
 import (
 	"time"
 
+	"github.com/google/uuid"
+
 	"livecart/apps/api/lib/query"
 )
 
 // Handler layer - Filters
 type CustomerFilters struct {
-	HasOrders      *bool `query:"hasOrders"`
-	OrderCountMin  *int  `query:"orderCountMin"`
-	OrderCountMax  *int  `query:"orderCountMax"`
-	TotalSpentMin  *int  `query:"totalSpentMin"`
-	TotalSpentMax  *int  `query:"totalSpentMax"`
+	HasOrders     *bool `query:"hasOrders"`
+	OrderCountMin *int  `query:"orderCountMin"`
+	OrderCountMax *int  `query:"orderCountMax"`
+	TotalSpentMin *int  `query:"totalSpentMin"`
+	TotalSpentMax *int  `query:"totalSpentMax"`
 }
 
 // Handler layer - Request/Response types
 type CustomerResponse struct {
 	ID           string     `json:"id"`
 	Handle       string     `json:"handle"`
+	Email        *string    `json:"email,omitempty"`
+	Phone        *string    `json:"phone,omitempty"`
 	TotalOrders  int        `json:"totalOrders"`
 	TotalSpent   int64      `json:"totalSpent"`
 	LastOrderAt  *time.Time `json:"lastOrderAt"`
@@ -36,7 +40,7 @@ type CustomerStatsResponse struct {
 	AvgSpentPerCustomer int64 `json:"avgSpentPerCustomer"`
 }
 
-// Service layer
+// Service layer - Input types
 type ListCustomersInput struct {
 	StoreID    string
 	Search     string
@@ -54,6 +58,8 @@ type ListCustomersOutput struct {
 type CustomerOutput struct {
 	ID           string
 	Handle       string
+	Email        *string
+	Phone        *string
 	TotalOrders  int
 	TotalSpent   int64
 	LastOrderAt  *time.Time
@@ -66,7 +72,23 @@ type CustomerStatsOutput struct {
 	AvgSpentPerCustomer int64
 }
 
-// Repository layer
+// UpsertCustomerInput is used to create or update a customer
+type UpsertCustomerInput struct {
+	StoreID        uuid.UUID
+	PlatformUserID string
+	PlatformHandle string
+	Email          *string
+	Phone          *string
+}
+
+// UpdateCustomerInput is used to update customer fields
+type UpdateCustomerInput struct {
+	Handle *string
+	Email  *string
+	Phone  *string
+}
+
+// Repository layer types
 type ListCustomersParams struct {
 	StoreID    string
 	Search     string
@@ -76,15 +98,30 @@ type ListCustomersParams struct {
 }
 
 type ListCustomersResult struct {
-	Customers []CustomerRow
+	Customers []CustomerWithStatsRow
 	Total     int
 }
 
+// CustomerRow represents a customer from the database (basic info)
 type CustomerRow struct {
-	ID           string
-	Handle       string
-	TotalOrders  int
-	TotalSpent   int64
-	LastOrderAt  *time.Time
-	FirstOrderAt *time.Time
+	ID             string
+	PlatformUserID string
+	Handle         string
+	Email          *string
+	Phone          *string
+	LastOrderAt    *time.Time
+	FirstOrderAt   *time.Time
+}
+
+// CustomerWithStatsRow includes aggregated order stats
+type CustomerWithStatsRow struct {
+	ID             string
+	PlatformUserID string
+	Handle         string
+	Email          *string
+	Phone          *string
+	TotalOrders    int
+	TotalSpent     int64
+	LastOrderAt    *time.Time
+	FirstOrderAt   *time.Time
 }

@@ -414,7 +414,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	orderHandler := order.NewHandler(orderSvc, validate)
 	orderHandler.RegisterRoutes(storeScoped)
 
-	customerRepo := customer.NewRepository(pool)
+	customerRepo := customer.NewRepository(queries)
 	customerSvc := customer.NewService(customerRepo, log)
 	customerHandler := customer.NewHandler(customerSvc, validate)
 	customerHandler.RegisterRoutes(storeScoped)

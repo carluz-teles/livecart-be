@@ -258,7 +258,7 @@ const updateOrderPaymentStatus = `-- name: UpdateOrderPaymentStatus :one
 UPDATE carts
 SET payment_status = $2, paid_at = CASE WHEN $2 = 'paid' THEN now() ELSE paid_at END
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id
 `
 
 type UpdateOrderPaymentStatusParams struct {
@@ -295,6 +295,7 @@ func (q *Queries) UpdateOrderPaymentStatus(ctx context.Context, arg UpdateOrderP
 		&i.CustomerDocument,
 		&i.CustomerPhone,
 		&i.ShippingAddress,
+		&i.CustomerID,
 	)
 	return i, err
 }
@@ -303,7 +304,7 @@ const updateOrderStatus = `-- name: UpdateOrderStatus :one
 UPDATE carts
 SET status = $2
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id
 `
 
 type UpdateOrderStatusParams struct {
@@ -340,6 +341,7 @@ func (q *Queries) UpdateOrderStatus(ctx context.Context, arg UpdateOrderStatusPa
 		&i.CustomerDocument,
 		&i.CustomerPhone,
 		&i.ShippingAddress,
+		&i.CustomerID,
 	)
 	return i, err
 }

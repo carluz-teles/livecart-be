@@ -38,6 +38,7 @@ type Cart struct {
 	CustomerDocument  pgtype.Text        `json:"customer_document"`
 	CustomerPhone     pgtype.Text        `json:"customer_phone"`
 	ShippingAddress   json.RawMessage    `json:"shipping_address"`
+	CustomerID        pgtype.UUID        `json:"customer_id"`
 }
 
 type CartItem struct {
@@ -49,17 +50,17 @@ type CartItem struct {
 	WaitlistedQuantity int32       `json:"waitlisted_quantity"`
 }
 
-type DetectedOrder struct {
+type Customer struct {
 	ID             pgtype.UUID        `json:"id"`
-	SessionID      pgtype.UUID        `json:"session_id"`
-	CartID         pgtype.UUID        `json:"cart_id"`
+	StoreID        pgtype.UUID        `json:"store_id"`
 	PlatformUserID string             `json:"platform_user_id"`
 	PlatformHandle string             `json:"platform_handle"`
-	CommentText    pgtype.Text        `json:"comment_text"`
-	ProductID      pgtype.UUID        `json:"product_id"`
-	Quantity       pgtype.Int4        `json:"quantity"`
-	Cancelled      pgtype.Bool        `json:"cancelled"`
-	DetectedAt     pgtype.Timestamptz `json:"detected_at"`
+	Email          pgtype.Text        `json:"email"`
+	Phone          pgtype.Text        `json:"phone"`
+	FirstOrderAt   pgtype.Timestamptz `json:"first_order_at"`
+	LastOrderAt    pgtype.Timestamptz `json:"last_order_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
 type ErpContact struct {
@@ -245,6 +246,24 @@ type OauthState struct {
 	CodeVerifier string             `json:"code_verifier"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 	ExpiresAt    pgtype.Timestamptz `json:"expires_at"`
+}
+
+type Payment struct {
+	ID                pgtype.UUID        `json:"id"`
+	CartID            pgtype.UUID        `json:"cart_id"`
+	IntegrationID     pgtype.UUID        `json:"integration_id"`
+	ExternalPaymentID pgtype.Text        `json:"external_payment_id"`
+	Provider          string             `json:"provider"`
+	AmountCents       int64              `json:"amount_cents"`
+	Currency          pgtype.Text        `json:"currency"`
+	Method            pgtype.Text        `json:"method"`
+	Status            string             `json:"status"`
+	StatusDetail      pgtype.Text        `json:"status_detail"`
+	ProviderResponse  json.RawMessage    `json:"provider_response"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	PaidAt            pgtype.Timestamptz `json:"paid_at"`
+	IdempotencyKey    pgtype.Text        `json:"idempotency_key"`
 }
 
 type Product struct {
