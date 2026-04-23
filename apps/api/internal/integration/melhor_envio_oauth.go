@@ -89,13 +89,36 @@ func (s *Service) handleMelhorEnvioCallback(ctx context.Context, input OAuthCall
 	if creds.Extra == nil {
 		creds.Extra = map[string]any{}
 	}
-	creds.Extra["env"] = env
+	creds.Extra["environment"] = env
+
+	// Best-effort account info lookup — the badge/profile details in the
+	// admin UI use these fields but we do not want to fail the OAuth flow
+	// if the /me call misbehaves.
+	account, accErr := shipping.FetchAccountInfo(ctx, env, creds.AccessToken, userAgent)
+	if accErr != nil {
+		s.logger.Warn("melhor envio account info fetch failed — persisting without it",
+			zap.String("store_id", storeID),
+			zap.Error(accErr),
+		)
+	}
 
 	encryptedCreds, err := s.encryptor.EncryptJSON(creds)
 	if err != nil {
 		return nil, fmt.Errorf("encrypting credentials: %w", err)
 	}
 	tokenExpiresAt := creds.ExpiresAt
+
+	metadata := map[string]any{
+		"environment":  env,
+		"scopes":       strings.Join(melhorEnvioScopes, " "),
+		"connected_at": time.Now(),
+	}
+	if account.Email != "" {
+		metadata["accountEmail"] = account.Email
+	}
+	if account.Name != "" {
+		metadata["accountName"] = account.Name
+	}
 
 	existing, _ := s.repo.GetActiveByProvider(ctx, storeID, string(providers.ProviderTypeShipping), "melhor_envio")
 	var integrationID string
@@ -115,11 +138,7 @@ func (s *Service) handleMelhorEnvioCallback(ctx context.Context, input OAuthCall
 			Status:         "active",
 			Credentials:    encryptedCreds,
 			TokenExpiresAt: &tokenExpiresAt,
-			Metadata: map[string]any{
-				"env":          env,
-				"scopes":       strings.Join(melhorEnvioScopes, " "),
-				"connected_at": time.Now(),
-			},
+			Metadata:       metadata,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("creating integration: %w", err)

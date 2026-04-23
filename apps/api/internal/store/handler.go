@@ -138,17 +138,22 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 		return httpx.ValidationError(c, err)
 	}
 
+	merged, err := normalizeUpdateStoreRequest(storeOutput, req)
+	if err != nil {
+		return httpx.BadRequest(c, err.Error())
+	}
+
 	output, err := h.service.Update(c.Context(), UpdateStoreInput{
 		StoreID:        storeID,
-		Name:           req.Name,
-		WhatsappNumber: req.WhatsappNumber,
-		EmailAddress:   req.EmailAddress,
-		SMSNumber:      req.SMSNumber,
-		Description:    req.Description,
-		Website:        req.Website,
-		LogoURL:        req.LogoURL,
-		Address:        req.Address,
-		CNPJ:           req.CNPJ,
+		Name:           merged.Name,
+		WhatsappNumber: merged.WhatsappNumber,
+		EmailAddress:   merged.EmailAddress,
+		SMSNumber:      merged.SMSNumber,
+		Description:    merged.Description,
+		Website:        merged.Website,
+		LogoURL:        merged.LogoURL,
+		Address:        merged.Address,
+		CNPJ:           merged.CNPJ,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -329,17 +334,26 @@ func (h *Handler) UpdateByID(c *fiber.Ctx) error {
 		return httpx.ValidationError(c, err)
 	}
 
+	current, err := h.service.GetByID(c.Context(), storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	merged, err := normalizeUpdateStoreRequest(current, req)
+	if err != nil {
+		return httpx.BadRequest(c, err.Error())
+	}
+
 	output, err := h.service.Update(c.Context(), UpdateStoreInput{
 		StoreID:        storeID,
-		Name:           req.Name,
-		WhatsappNumber: req.WhatsappNumber,
-		EmailAddress:   req.EmailAddress,
-		SMSNumber:      req.SMSNumber,
-		Description:    req.Description,
-		Website:        req.Website,
-		LogoURL:        req.LogoURL,
-		Address:        req.Address,
-		CNPJ:           req.CNPJ,
+		Name:           merged.Name,
+		WhatsappNumber: merged.WhatsappNumber,
+		EmailAddress:   merged.EmailAddress,
+		SMSNumber:      merged.SMSNumber,
+		Description:    merged.Description,
+		Website:        merged.Website,
+		LogoURL:        merged.LogoURL,
+		Address:        merged.Address,
+		CNPJ:           merged.CNPJ,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -468,7 +482,7 @@ func toStoreResponse(output StoreOutput) StoreResponse {
 		SMSNumber:        output.SMSNumber,
 		Description:      output.Description,
 		Website:          output.Website,
-		LogoURL:          output.LogoURL,
+		LogoURL:          output.LogoURL, // stays nullable: null until logo is uploaded
 		Address:          output.Address,
 		CNPJ:             output.CNPJ,
 		CartSettings:     output.CartSettings,

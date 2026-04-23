@@ -197,21 +197,18 @@ func (s *Service) GetByClerkUserID(ctx context.Context, clerkUserID string) (Sto
 }
 
 func toStoreOutput(row StoreRow) StoreOutput {
-	var address *AddressDTO
-	if row.AddressStreet != nil || row.AddressCity != nil || row.AddressState != nil || row.AddressZip != nil ||
-		row.AddressCountry != nil || row.AddressNumber != nil || row.AddressComplement != nil ||
-		row.AddressDistrict != nil || row.AddressStateRegister != nil {
-		address = &AddressDTO{
-			Street:        deref(row.AddressStreet),
-			Number:        deref(row.AddressNumber),
-			Complement:    deref(row.AddressComplement),
-			District:      deref(row.AddressDistrict),
-			City:          deref(row.AddressCity),
-			State:         deref(row.AddressState),
-			Zip:           deref(row.AddressZip),
-			Country:       deref(row.AddressCountry),
-			StateRegister: deref(row.AddressStateRegister),
-		}
+	// Always materialize the address so the frontend has a stable shape —
+	// unpopulated fields come back as empty strings, not null objects.
+	address := AddressDTO{
+		Street:        deref(row.AddressStreet),
+		Number:        deref(row.AddressNumber),
+		Complement:    deref(row.AddressComplement),
+		District:      deref(row.AddressDistrict),
+		City:          deref(row.AddressCity),
+		State:         deref(row.AddressState),
+		Zip:           deref(row.AddressZip),
+		Country:       deref(row.AddressCountry),
+		StateRegister: deref(row.AddressStateRegister),
 	}
 
 	return StoreOutput{
@@ -219,14 +216,14 @@ func toStoreOutput(row StoreRow) StoreOutput {
 		Name:             row.Name,
 		Slug:             row.Slug,
 		Active:           row.Active,
-		WhatsappNumber:   row.WhatsappNumber,
-		EmailAddress:     row.EmailAddress,
-		SMSNumber:        row.SMSNumber,
-		Description:      row.Description,
-		Website:          row.Website,
+		WhatsappNumber:   deref(row.WhatsappNumber),
+		EmailAddress:     deref(row.EmailAddress),
+		SMSNumber:        deref(row.SMSNumber),
+		Description:      deref(row.Description),
+		Website:          deref(row.Website),
 		LogoURL:          row.LogoURL,
 		Address:          address,
-		CNPJ:             row.CNPJ,
+		CNPJ:             deref(row.CNPJ),
 		CartSettings:     row.CartSettings,
 		ShippingDefaults: row.ShippingDefaults,
 		CreatedAt:        row.CreatedAt,

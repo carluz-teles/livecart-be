@@ -99,14 +99,14 @@ type StoreResponse struct {
 	Name             string              `json:"name"`
 	Slug             string              `json:"slug"`
 	Active           bool                `json:"active"`
-	WhatsappNumber   *string             `json:"whatsappNumber"`
-	EmailAddress     *string             `json:"emailAddress"`
-	SMSNumber        *string             `json:"smsNumber"`
-	Description      *string             `json:"description"`
-	Website          *string             `json:"website"`
+	WhatsappNumber   string              `json:"whatsappNumber"`
+	EmailAddress     string              `json:"emailAddress"`
+	SMSNumber        string              `json:"smsNumber"`
+	Description      string              `json:"description"`
+	Website          string              `json:"website"`
 	LogoURL          *string             `json:"logoUrl"`
-	Address          *AddressDTO         `json:"address"`
-	CNPJ             *string             `json:"cnpj"`
+	Address          AddressDTO          `json:"address"`
+	CNPJ             string              `json:"cnpj"`
 	CartSettings     CartSettingsDTO     `json:"cartSettings"`
 	ShippingDefaults ShippingDefaultsDTO `json:"shippingDefaults"`
 	CreatedAt        time.Time           `json:"createdAt"`
@@ -175,14 +175,14 @@ type StoreOutput struct {
 	Name             string
 	Slug             string
 	Active           bool
-	WhatsappNumber   *string
-	EmailAddress     *string
-	SMSNumber        *string
-	Description      *string
-	Website          *string
-	LogoURL          *string
-	Address          *AddressDTO
-	CNPJ             *string
+	WhatsappNumber   string
+	EmailAddress     string
+	SMSNumber        string
+	Description      string
+	Website          string
+	LogoURL          *string // nullable - logoUrl é presigned ou null
+	Address          AddressDTO
+	CNPJ             string
 	CartSettings     CartSettingsDTO
 	ShippingDefaults ShippingDefaultsDTO
 	CreatedAt        time.Time

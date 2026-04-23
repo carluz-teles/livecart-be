@@ -29,7 +29,60 @@ const (
 
 	meCalculatePath = "/api/v2/me/shipment/calculate"
 	meCompaniesPath = "/api/v2/me/shipment/companies"
+	meProfilePath   = "/api/v2/me"
 )
+
+// AccountInfo is the minimum subset of /api/v2/me needed by the admin UI.
+type AccountInfo struct {
+	Email string
+	Name  string
+}
+
+// FetchAccountInfo retrieves the authenticated account email/name after an
+// OAuth exchange. Best-effort: callers should treat errors as non-fatal and
+// proceed without the extra metadata.
+func FetchAccountInfo(ctx context.Context, env, accessToken, userAgent string) (AccountInfo, error) {
+	base := meSandboxBaseURL
+	if env == meEnvProduction {
+		base = meProdBaseURL
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+meProfilePath, nil)
+	if err != nil {
+		return AccountInfo{}, fmt.Errorf("creating profile request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("User-Agent", userAgent)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return AccountInfo{}, fmt.Errorf("executing profile request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return AccountInfo{}, fmt.Errorf("profile request failed: status %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var parsed struct {
+		Email     string `json:"email"`
+		FirstName string `json:"firstname"`
+		LastName  string `json:"lastname"`
+		Name      string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return AccountInfo{}, fmt.Errorf("parsing profile: %w", err)
+	}
+
+	name := strings.TrimSpace(parsed.Name)
+	if name == "" {
+		name = strings.TrimSpace(parsed.FirstName + " " + parsed.LastName)
+	}
+	return AccountInfo{Email: parsed.Email, Name: name}, nil
+}
 
 // MelhorEnvio implements the ShippingProvider interface for Melhor Envio.
 // Only read endpoints are used: quote + list carriers. No labels are generated.
