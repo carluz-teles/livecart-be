@@ -420,8 +420,8 @@ func (m *MelhorEnvio) Quote(ctx context.Context, req QuoteRequest) ([]QuoteOptio
 		return nil, err
 	}
 
-	var results []meQuoteResponse
-	if err := json.Unmarshal(respBody, &results); err != nil {
+	results, err := parseQuoteResults(respBody)
+	if err != nil {
 		return nil, fmt.Errorf("parsing quote response: %w, body=%s", err, string(respBody))
 	}
 
@@ -532,6 +532,25 @@ func validateQuoteRequest(req QuoteRequest) error {
 		}
 	}
 	return nil
+}
+
+// parseQuoteResults accepts either an array of quote results (the documented
+// shape) or a single result object — which Melhor Envio returns when the
+// request filters down to one service and the body omits the wrapping array.
+func parseQuoteResults(body []byte) ([]meQuoteResponse, error) {
+	trimmed := strings.TrimLeft(string(body), " \t\r\n")
+	if strings.HasPrefix(trimmed, "[") {
+		var arr []meQuoteResponse
+		if err := json.Unmarshal(body, &arr); err != nil {
+			return nil, err
+		}
+		return arr, nil
+	}
+	var single meQuoteResponse
+	if err := json.Unmarshal(body, &single); err != nil {
+		return nil, err
+	}
+	return []meQuoteResponse{single}, nil
 }
 
 func sanitizeZip(z ShippingZip) string {
