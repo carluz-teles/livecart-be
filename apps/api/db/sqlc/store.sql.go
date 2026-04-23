@@ -14,6 +14,11 @@ import (
 
 const storeColumns = "id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj, address_number, address_complement, address_district, address_state_register, default_package_weight_grams, default_package_format"
 
+// storeColumnsS is the same list prefixed with the `s.` alias so queries that
+// JOIN memberships (which share column names like id, status, created_at)
+// are unambiguous.
+const storeColumnsS = "s.id, s.name, s.slug, s.active, s.whatsapp_number, s.email_address, s.sms_number, s.created_at, s.cart_enabled, s.cart_expiration_minutes, s.cart_reserve_stock, s.cart_max_items, s.cart_max_quantity_per_item, s.updated_at, s.description, s.website, s.logo_url, s.address_street, s.address_city, s.address_state, s.address_zip, s.address_country, s.send_on_live_end, s.cart_allow_edit, s.checkout_send_methods, s.notification_settings, s.cart_message_cooldown_seconds, s.cart_send_expiration_reminder, s.cart_expiration_reminder_minutes, s.cart_real_time, s.cnpj, s.address_number, s.address_complement, s.address_district, s.address_state_register, s.default_package_weight_grams, s.default_package_format"
+
 func scanStore(row interface {
 	Scan(dest ...interface{}) error
 }, i *Store) error {
@@ -95,7 +100,7 @@ func (q *Queries) GetStoreByID(ctx context.Context, id pgtype.UUID) (Store, erro
 }
 
 const getStoreByOwnerUserID = `-- name: GetStoreByOwnerUserID :one
-SELECT ` + storeColumns + `
+SELECT ` + storeColumnsS + `
 FROM stores s
 JOIN memberships m ON s.id = m.store_id
 WHERE m.user_id = $1 AND m.role = 'owner'
@@ -120,7 +125,7 @@ func (q *Queries) GetStoreBySlug(ctx context.Context, slug string) (Store, error
 }
 
 const getStoreByUserID = `-- name: GetStoreByUserID :one
-SELECT ` + storeColumns + `
+SELECT ` + storeColumnsS + `
 FROM stores s
 JOIN memberships m ON s.id = m.store_id
 WHERE m.user_id = $1 AND m.status = 'active'`
