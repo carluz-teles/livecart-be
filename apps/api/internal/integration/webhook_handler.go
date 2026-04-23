@@ -33,6 +33,7 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App) {
 	oauth.Get("/mercado_pago/callback", h.HandleMercadoPagoOAuthCallback)
 	oauth.Get("/tiny/callback", h.HandleTinyOAuthCallback)
 	oauth.Get("/instagram/callback", h.HandleInstagramOAuthCallback)
+	oauth.Get("/melhor_envio/callback", h.HandleMelhorEnvioOAuthCallback)
 
 	// Webhooks (event notifications from external providers)
 	// Uses storeId instead of integrationId for stable URLs across reconnections

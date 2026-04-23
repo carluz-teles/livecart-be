@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
@@ -138,4 +139,56 @@ func (s *Service) handleMelhorEnvioCallback(ctx context.Context, input OAuthCall
 		Provider:      "melhor_envio",
 		Status:        "active",
 	}, nil
+}
+
+// HandleMelhorEnvioOAuthCallback handles the OAuth callback from Melhor Envio.
+// Registered on the public OAuth route group, outside of the auth middleware.
+// @Summary Handle Melhor Envio OAuth callback
+// @Description Exchanges authorization code for access token and creates/updates integration
+// @Tags webhooks
+// @Produce json
+// @Param code query string true "Authorization code"
+// @Param state query string true "State parameter (recovers store_id)"
+// @Success 302 "Redirect to frontend with success"
+// @Failure 302 "Redirect to frontend with error"
+// @Router /api/v1/integrations/oauth/melhor_envio/callback [get]
+func (h *WebhookHandler) HandleMelhorEnvioOAuthCallback(c *fiber.Ctx) error {
+	code := c.Query("code")
+	state := c.Query("state")
+
+	frontendURL := config.FrontendURL.StringOr("http://localhost:3000")
+
+	if code == "" {
+		h.logger.Error("melhor envio OAuth callback missing code")
+		return c.Redirect(frontendURL+"/settings/integrations?error=missing_code", fiber.StatusFound)
+	}
+	if state == "" {
+		h.logger.Error("melhor envio OAuth callback missing state")
+		return c.Redirect(frontendURL+"/settings/integrations?error=missing_state", fiber.StatusFound)
+	}
+
+	h.logger.Info("melhor envio OAuth callback received",
+		zap.String("state", state),
+		zap.Bool("has_code", code != ""),
+	)
+
+	output, err := h.service.HandleOAuthCallback(c.Context(), OAuthCallbackInput{
+		Provider: "melhor_envio",
+		Code:     code,
+		State:    state,
+	})
+	if err != nil {
+		h.logger.Error("failed to handle melhor envio OAuth callback",
+			zap.String("state", state),
+			zap.Error(err),
+		)
+		return c.Redirect(frontendURL+"/settings/integrations?error=oauth_failed", fiber.StatusFound)
+	}
+
+	h.logger.Info("melhor envio OAuth completed successfully",
+		zap.String("integration_id", output.IntegrationID),
+		zap.String("store_id", output.StoreID),
+	)
+
+	return c.Redirect(frontendURL+"/settings/integrations?success=melhor_envio_connected", fiber.StatusFound)
 }
