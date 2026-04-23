@@ -336,9 +336,13 @@ type ShippingQuoteResponse struct {
 	Options      []ShippingQuoteOptionResponse `json:"options"`
 }
 
-// SelectShippingMethodRequest is the body for PUT /api/public/checkout/:token/shipping-method
+// SelectShippingMethodRequest is the body for PUT /api/public/checkout/:token/shipping-method.
+// The zipCode is required because the address is only persisted on the cart
+// at payment time — between quoting and picking a service only the frontend
+// knows the destination.
 type SelectShippingMethodRequest struct {
-	ServiceID int `json:"serviceId" validate:"required,gt=0"`
+	ServiceID int    `json:"serviceId" validate:"required,gt=0"`
+	ZipCode   string `json:"zipCode" validate:"required"`
 }
 
 // SelectShippingMethodResponse is the body returned after selecting a freight option.
@@ -366,6 +370,7 @@ type QuoteShippingOutput struct {
 type SelectShippingMethodInput struct {
 	Token     string
 	ServiceID int
+	ZipCode   string
 }
 
 type SelectShippingMethodOutput struct {

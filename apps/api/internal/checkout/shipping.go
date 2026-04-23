@@ -2,7 +2,6 @@ package checkout
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -321,7 +320,6 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 // and persists the selection on the cart. Re-quoting is cheap and prevents the
 // customer from locking in a stale price.
 func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShippingMethodInput) (*SelectShippingMethodOutput, error) {
-	// Load cart with existing shipping address to reuse the destination zip.
 	cart, err := s.repo.GetCartByToken(ctx, input.Token)
 	if err != nil {
 		return nil, err
@@ -329,18 +327,13 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 	if cart.PaymentStatus == "paid" {
 		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
 	}
-
-	zip, err := s.readCustomerZip(ctx, cart.ID)
-	if err != nil {
-		return nil, err
-	}
-	if zip == "" {
-		return nil, httpx.ErrUnprocessable("endereço de entrega ainda não foi informado")
+	if input.ZipCode == "" {
+		return nil, httpx.ErrUnprocessable("CEP é obrigatório para confirmar o frete")
 	}
 
 	quote, err := s.QuoteShipping(ctx, QuoteShippingInput{
 		Token:      input.Token,
-		ZipCode:    zip,
+		ZipCode:    input.ZipCode,
 		ServiceIDs: []int{input.ServiceID},
 	})
 	if err != nil {
@@ -382,31 +375,6 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 		Shipping: *sel,
 		Summary:  summary,
 	}, nil
-}
-
-// readCustomerZip pulls the destination zip from carts.shipping_address (JSONB).
-func (s *Service) readCustomerZip(ctx context.Context, cartID string) (string, error) {
-	uid, err := uuid.Parse(cartID)
-	if err != nil {
-		return "", httpx.ErrBadRequest("invalid cart ID")
-	}
-	var raw json.RawMessage
-	err = s.pool.QueryRow(ctx, `SELECT shipping_address FROM carts WHERE id = $1`,
-		pgtype.UUID{Bytes: uid, Valid: true}).Scan(&raw)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", httpx.ErrNotFound("carrinho não encontrado")
-		}
-		return "", fmt.Errorf("reading shipping address: %w", err)
-	}
-	if len(raw) == 0 {
-		return "", nil
-	}
-	var addr ShippingAddress
-	if err := json.Unmarshal(raw, &addr); err != nil {
-		return "", nil
-	}
-	return addr.ZipCode, nil
 }
 
 // buildSummary computes the cart summary from the items and a shipping selection.

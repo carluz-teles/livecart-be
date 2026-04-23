@@ -88,6 +88,7 @@ func (h *Handler) SelectShippingMethod(c *fiber.Ctx) error {
 	out, err := h.service.SelectShippingMethod(c.Context(), SelectShippingMethodInput{
 		Token:     token,
 		ServiceID: req.ServiceID,
+		ZipCode:   req.ZipCode,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
