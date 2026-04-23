@@ -24,6 +24,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/me", h.GetCurrent)
 	g.Put("/me", h.Update)
 	g.Put("/me/cart-settings", h.UpdateCartSettings)
+	g.Put("/me/shipping-defaults", h.UpdateShippingDefaults)
 	g.Post("/me/logo", h.UploadLogo)
 }
 
@@ -31,6 +32,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 func (h *Handler) RegisterStoreScopedRoutes(router fiber.Router) {
 	router.Put("", h.UpdateByID)
 	router.Put("/cart-settings", h.UpdateCartSettingsByID)
+	router.Put("/shipping-defaults", h.UpdateShippingDefaultsByID)
 }
 
 // Create godoc
@@ -396,22 +398,82 @@ func (h *Handler) UpdateCartSettingsByID(c *fiber.Ctx) error {
 	return httpx.OK(c, h.toStoreResponseWithPresignedLogo(c, output))
 }
 
+// UpdateShippingDefaults updates the store shipping defaults (package weight/format) for the authenticated user.
+func (h *Handler) UpdateShippingDefaults(c *fiber.Ctx) error {
+	clerkUserID := httpx.GetUserID(c)
+	if clerkUserID == "" {
+		return httpx.Unauthorized(c, "unauthorized")
+	}
+
+	storeOutput, err := h.service.GetByClerkUserID(c.Context(), clerkUserID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	var req UpdateShippingDefaultsRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	output, err := h.service.UpdateShippingDefaults(c.Context(), UpdateShippingDefaultsInput{
+		StoreID:            storeOutput.ID,
+		PackageWeightGrams: req.PackageWeightGrams,
+		PackageFormat:      req.PackageFormat,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, h.toStoreResponseWithPresignedLogo(c, output))
+}
+
+// UpdateShippingDefaultsByID updates the store shipping defaults for a specific store (requires store access).
+func (h *Handler) UpdateShippingDefaultsByID(c *fiber.Ctx) error {
+	storeID := httpx.GetStoreID(c)
+	if storeID == "" {
+		return httpx.Forbidden(c, "no store access")
+	}
+
+	var req UpdateShippingDefaultsRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	output, err := h.service.UpdateShippingDefaults(c.Context(), UpdateShippingDefaultsInput{
+		StoreID:            storeID,
+		PackageWeightGrams: req.PackageWeightGrams,
+		PackageFormat:      req.PackageFormat,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, h.toStoreResponseWithPresignedLogo(c, output))
+}
+
 func toStoreResponse(output StoreOutput) StoreResponse {
 	return StoreResponse{
-		ID:             output.ID,
-		Name:           output.Name,
-		Slug:           output.Slug,
-		Active:         output.Active,
-		WhatsappNumber: output.WhatsappNumber,
-		EmailAddress:   output.EmailAddress,
-		SMSNumber:      output.SMSNumber,
-		Description:    output.Description,
-		Website:        output.Website,
-		LogoURL:        output.LogoURL,
-		Address:        output.Address,
-		CNPJ:           output.CNPJ,
-		CartSettings:   output.CartSettings,
-		CreatedAt:      output.CreatedAt,
+		ID:               output.ID,
+		Name:             output.Name,
+		Slug:             output.Slug,
+		Active:           output.Active,
+		WhatsappNumber:   output.WhatsappNumber,
+		EmailAddress:     output.EmailAddress,
+		SMSNumber:        output.SMSNumber,
+		Description:      output.Description,
+		Website:          output.Website,
+		LogoURL:          output.LogoURL,
+		Address:          output.Address,
+		CNPJ:             output.CNPJ,
+		CartSettings:     output.CartSettings,
+		ShippingDefaults: output.ShippingDefaults,
+		CreatedAt:        output.CreatedAt,
 	}
 }
 

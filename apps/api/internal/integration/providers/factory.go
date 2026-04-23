@@ -17,6 +17,13 @@ type Factory struct {
 	mercadoPagoAppID     string
 	mercadoPagoAppSecret string
 
+	// Melhor Envio OAuth app credentials (one app per environment)
+	melhorEnvioClientID     string
+	melhorEnvioClientSecret string
+	melhorEnvioEnv          string // "sandbox" or "production"
+	melhorEnvioUserAgent    string
+	melhorEnvioRedirectURI  string
+
 	// Rate limit manager
 	rateLimitManager *ratelimit.Manager
 
@@ -25,6 +32,7 @@ type Factory struct {
 	pagarmeConstructor     PagarmeConstructor
 	tinyConstructor        TinyConstructor
 	instagramConstructor   InstagramConstructor
+	melhorEnvioConstructor MelhorEnvioConstructor
 }
 
 // FactoryConfig contains configuration for the provider factory.
@@ -35,25 +43,39 @@ type FactoryConfig struct {
 	MercadoPagoAppSecret string
 	RateLimitManager     *ratelimit.Manager
 
-	// Constructors - these should be injected from the payment/erp/social packages
+	// Melhor Envio OAuth app (each env has its own app/credentials)
+	MelhorEnvioClientID     string
+	MelhorEnvioClientSecret string
+	MelhorEnvioEnv          string // "sandbox" or "production"
+	MelhorEnvioUserAgent    string
+	MelhorEnvioRedirectURI  string
+
+	// Constructors - these should be injected from the payment/erp/social/shipping packages
 	MercadoPagoConstructor MercadoPagoConstructor
 	PagarmeConstructor     PagarmeConstructor
 	TinyConstructor        TinyConstructor
 	InstagramConstructor   InstagramConstructor
+	MelhorEnvioConstructor MelhorEnvioConstructor
 }
 
 // NewFactory creates a new provider factory.
 func NewFactory(cfg FactoryConfig) *Factory {
 	return &Factory{
-		logger:                 cfg.Logger,
-		logFunc:                cfg.LogFunc,
-		mercadoPagoAppID:       cfg.MercadoPagoAppID,
-		mercadoPagoAppSecret:   cfg.MercadoPagoAppSecret,
-		rateLimitManager:       cfg.RateLimitManager,
-		mercadoPagoConstructor: cfg.MercadoPagoConstructor,
-		pagarmeConstructor:     cfg.PagarmeConstructor,
-		tinyConstructor:        cfg.TinyConstructor,
-		instagramConstructor:   cfg.InstagramConstructor,
+		logger:                  cfg.Logger,
+		logFunc:                 cfg.LogFunc,
+		mercadoPagoAppID:        cfg.MercadoPagoAppID,
+		mercadoPagoAppSecret:    cfg.MercadoPagoAppSecret,
+		melhorEnvioClientID:     cfg.MelhorEnvioClientID,
+		melhorEnvioClientSecret: cfg.MelhorEnvioClientSecret,
+		melhorEnvioEnv:          cfg.MelhorEnvioEnv,
+		melhorEnvioUserAgent:    cfg.MelhorEnvioUserAgent,
+		melhorEnvioRedirectURI:  cfg.MelhorEnvioRedirectURI,
+		rateLimitManager:        cfg.RateLimitManager,
+		mercadoPagoConstructor:  cfg.MercadoPagoConstructor,
+		pagarmeConstructor:      cfg.PagarmeConstructor,
+		tinyConstructor:         cfg.TinyConstructor,
+		instagramConstructor:    cfg.InstagramConstructor,
+		melhorEnvioConstructor:  cfg.MelhorEnvioConstructor,
 	}
 }
 
@@ -76,9 +98,66 @@ func (f *Factory) CreateProvider(cfg ProviderConfig) (Provider, error) {
 		return f.createERPProvider(cfg)
 	case ProviderTypeSocial:
 		return f.createSocialProvider(cfg)
+	case ProviderTypeShipping:
+		return f.createShippingProvider(cfg)
 	default:
 		return nil, fmt.Errorf("unknown provider type: %s", cfg.Type)
 	}
+}
+
+// CreateShippingProvider creates and returns a ShippingProvider.
+func (f *Factory) CreateShippingProvider(cfg ProviderConfig) (ShippingProvider, error) {
+	if cfg.Type != ProviderTypeShipping {
+		return nil, fmt.Errorf("provider type must be 'shipping', got '%s'", cfg.Type)
+	}
+	return f.createShippingProvider(cfg)
+}
+
+func (f *Factory) createShippingProvider(cfg ProviderConfig) (ShippingProvider, error) {
+	var limiter ratelimit.RateLimiter
+	if f.rateLimitManager != nil {
+		limiter = f.rateLimitManager.GetOrCreate(cfg.IntegrationID)
+	}
+
+	switch cfg.Name {
+	case ProviderMelhorEnvio:
+		if f.melhorEnvioConstructor == nil {
+			return nil, fmt.Errorf("melhor_envio constructor not configured")
+		}
+		return f.melhorEnvioConstructor(MelhorEnvioConfig{
+			IntegrationID: cfg.IntegrationID,
+			StoreID:       cfg.StoreID,
+			Credentials:   cfg.Credentials,
+			ClientID:      f.melhorEnvioClientID,
+			ClientSecret:  f.melhorEnvioClientSecret,
+			Env:           f.melhorEnvioEnv,
+			UserAgent:     f.melhorEnvioUserAgent,
+			RedirectURI:   f.melhorEnvioRedirectURI,
+			Logger:        f.logger,
+			LogFunc:       f.logFunc,
+			RateLimiter:   limiter,
+		})
+	default:
+		return nil, fmt.Errorf("unknown shipping provider: %s", cfg.Name)
+	}
+}
+
+// MelhorEnvioConstructor is a function type for creating Melhor Envio providers.
+type MelhorEnvioConstructor func(cfg MelhorEnvioConfig) (ShippingProvider, error)
+
+// MelhorEnvioConfig contains configuration for a Melhor Envio provider instance.
+type MelhorEnvioConfig struct {
+	IntegrationID string
+	StoreID       string
+	Credentials   *Credentials
+	ClientID      string
+	ClientSecret  string
+	Env           string // "sandbox" or "production"
+	UserAgent     string // "AppName (contact@email)" - required by the ME API
+	RedirectURI   string
+	Logger        *zap.Logger
+	LogFunc       LogFunc
+	RateLimiter   ratelimit.RateLimiter
 }
 
 // CreatePaymentProvider creates and returns a PaymentProvider.

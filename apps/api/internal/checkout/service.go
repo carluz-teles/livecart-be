@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration"
@@ -15,6 +16,7 @@ import (
 // Service handles business logic for public checkout.
 type Service struct {
 	repo               *Repository
+	pool               *pgxpool.Pool
 	integrationService *integration.Service
 	logger             *zap.Logger
 }
@@ -22,11 +24,13 @@ type Service struct {
 // NewService creates a new checkout service.
 func NewService(
 	repo *Repository,
+	pool *pgxpool.Pool,
 	integrationService *integration.Service,
 	logger *zap.Logger,
 ) *Service {
 	return &Service{
 		repo:               repo,
+		pool:               pool,
 		integrationService: integrationService,
 		logger:             logger.Named("checkout"),
 	}
@@ -54,6 +58,12 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 		return nil, err
 	}
 
+	// Load shipping selection (may be nil if not chosen yet)
+	shippingSel, err := s.repo.ReadCartShipping(ctx, s.pool, cart.ID)
+	if err != nil {
+		return nil, err
+	}
+
 	// Convert to output
 	output := &GetCartForCheckoutOutput{
 		Cart: CartDetails{
@@ -71,11 +81,13 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 			CreatedAt:          cart.CreatedAt,
 			ExpiresAt:          cart.ExpiresAt,
 			EventTitle:         cart.EventTitle,
+			EventFreeShipping:  cart.EventFreeShipping,
 			StoreID:            cart.StoreID,
 			StoreName:          cart.StoreName,
 			StoreLogoURL:       cart.StoreLogoURL,
 			AllowEdit:          cart.AllowEdit,
 			MaxQuantityPerItem: cart.MaxQuantityPerItem,
+			Shipping:           shippingSel,
 		},
 		Items: make([]CartItemDetails, len(items)),
 	}
@@ -149,6 +161,11 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 
 	if len(checkoutItems) == 0 {
 		return nil, httpx.ErrUnprocessable("carrinho não tem itens disponíveis para pagamento")
+	}
+
+	// Add selected shipping cost to the total charged at the gateway.
+	if shippingSel, _ := s.repo.ReadCartShipping(ctx, s.pool, cart.ID); shippingSel != nil {
+		totalAmount += shippingSel.CostCents
 	}
 
 	// Get payment integration for the store
@@ -275,6 +292,11 @@ func (s *Service) GetCheckoutConfig(ctx context.Context, input GetCheckoutConfig
 		return nil, httpx.ErrUnprocessable("carrinho não tem itens disponíveis para pagamento")
 	}
 
+	// Add selected shipping cost to the total for the gateway config.
+	if shippingSel, _ := s.repo.ReadCartShipping(ctx, s.pool, cart.ID); shippingSel != nil {
+		totalAmount += shippingSel.CostCents
+	}
+
 	// Get payment integration for the store
 	paymentIntegration, err := s.repo.GetPaymentIntegration(ctx, cart.StoreID)
 	if err != nil {
@@ -356,6 +378,11 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 
 	if len(checkoutItems) == 0 {
 		return nil, httpx.ErrUnprocessable("carrinho não tem itens disponíveis para pagamento")
+	}
+
+	// Add selected shipping cost to the total charged at the gateway.
+	if shippingSel, _ := s.repo.ReadCartShipping(ctx, s.pool, cart.ID); shippingSel != nil {
+		totalAmount += shippingSel.CostCents
 	}
 
 	// Get payment integration
@@ -497,6 +524,11 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 
 	if len(checkoutItems) == 0 {
 		return nil, httpx.ErrUnprocessable("carrinho não tem itens disponíveis para pagamento")
+	}
+
+	// Add selected shipping cost to the total charged at the gateway.
+	if shippingSel, _ := s.repo.ReadCartShipping(ctx, s.pool, cart.ID); shippingSel != nil {
+		totalAmount += shippingSel.CostCents
 	}
 
 	// Get payment integration

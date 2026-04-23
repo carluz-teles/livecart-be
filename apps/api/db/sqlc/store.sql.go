@@ -12,21 +12,12 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const createStore = `-- name: CreateStore :one
-INSERT INTO stores (name, slug)
-VALUES ($1, $2)
-RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj
-`
+const storeColumns = "id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj, address_number, address_complement, address_district, address_state_register, default_package_weight_grams, default_package_format"
 
-type CreateStoreParams struct {
-	Name string `json:"name"`
-	Slug string `json:"slug"`
-}
-
-func (q *Queries) CreateStore(ctx context.Context, arg CreateStoreParams) (Store, error) {
-	row := q.db.QueryRow(ctx, createStore, arg.Name, arg.Slug)
-	var i Store
-	err := row.Scan(
+func scanStore(row interface {
+	Scan(dest ...interface{}) error
+}, i *Store) error {
+	return row.Scan(
 		&i.ID,
 		&i.Name,
 		&i.Slug,
@@ -58,7 +49,29 @@ func (q *Queries) CreateStore(ctx context.Context, arg CreateStoreParams) (Store
 		&i.CartExpirationReminderMinutes,
 		&i.CartRealTime,
 		&i.Cnpj,
+		&i.AddressNumber,
+		&i.AddressComplement,
+		&i.AddressDistrict,
+		&i.AddressStateRegister,
+		&i.DefaultPackageWeightGrams,
+		&i.DefaultPackageFormat,
 	)
+}
+
+const createStore = `-- name: CreateStore :one
+INSERT INTO stores (name, slug)
+VALUES ($1, $2)
+RETURNING ` + storeColumns
+
+type CreateStoreParams struct {
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+}
+
+func (q *Queries) CreateStore(ctx context.Context, arg CreateStoreParams) (Store, error) {
+	row := q.db.QueryRow(ctx, createStore, arg.Name, arg.Slug)
+	var i Store
+	err := scanStore(row, &i)
 	return i, err
 }
 
@@ -72,183 +85,51 @@ func (q *Queries) DeleteStore(ctx context.Context, id pgtype.UUID) error {
 }
 
 const getStoreByID = `-- name: GetStoreByID :one
-SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj FROM stores WHERE id = $1
-`
+SELECT ` + storeColumns + ` FROM stores WHERE id = $1`
 
 func (q *Queries) GetStoreByID(ctx context.Context, id pgtype.UUID) (Store, error) {
 	row := q.db.QueryRow(ctx, getStoreByID, id)
 	var i Store
-	err := row.Scan(
-		&i.ID,
-		&i.Name,
-		&i.Slug,
-		&i.Active,
-		&i.WhatsappNumber,
-		&i.EmailAddress,
-		&i.SmsNumber,
-		&i.CreatedAt,
-		&i.CartEnabled,
-		&i.CartExpirationMinutes,
-		&i.CartReserveStock,
-		&i.CartMaxItems,
-		&i.CartMaxQuantityPerItem,
-		&i.UpdatedAt,
-		&i.Description,
-		&i.Website,
-		&i.LogoUrl,
-		&i.AddressStreet,
-		&i.AddressCity,
-		&i.AddressState,
-		&i.AddressZip,
-		&i.AddressCountry,
-		&i.SendOnLiveEnd,
-		&i.CartAllowEdit,
-		&i.CheckoutSendMethods,
-		&i.NotificationSettings,
-		&i.CartMessageCooldownSeconds,
-		&i.CartSendExpirationReminder,
-		&i.CartExpirationReminderMinutes,
-		&i.CartRealTime,
-		&i.Cnpj,
-	)
+	err := scanStore(row, &i)
 	return i, err
 }
 
 const getStoreByOwnerUserID = `-- name: GetStoreByOwnerUserID :one
-SELECT s.id, s.name, s.slug, s.active, s.whatsapp_number, s.email_address, s.sms_number, s.created_at, s.cart_enabled, s.cart_expiration_minutes, s.cart_reserve_stock, s.cart_max_items, s.cart_max_quantity_per_item, s.updated_at, s.description, s.website, s.logo_url, s.address_street, s.address_city, s.address_state, s.address_zip, s.address_country, s.send_on_live_end, s.cart_allow_edit, s.checkout_send_methods, s.notification_settings, s.cart_message_cooldown_seconds, s.cart_send_expiration_reminder, s.cart_expiration_reminder_minutes, s.cart_real_time, s.cnpj
+SELECT ` + storeColumns + `
 FROM stores s
 JOIN memberships m ON s.id = m.store_id
 WHERE m.user_id = $1 AND m.role = 'owner'
-LIMIT 1
-`
+LIMIT 1`
 
 // Get store where user is owner
 func (q *Queries) GetStoreByOwnerUserID(ctx context.Context, userID pgtype.UUID) (Store, error) {
 	row := q.db.QueryRow(ctx, getStoreByOwnerUserID, userID)
 	var i Store
-	err := row.Scan(
-		&i.ID,
-		&i.Name,
-		&i.Slug,
-		&i.Active,
-		&i.WhatsappNumber,
-		&i.EmailAddress,
-		&i.SmsNumber,
-		&i.CreatedAt,
-		&i.CartEnabled,
-		&i.CartExpirationMinutes,
-		&i.CartReserveStock,
-		&i.CartMaxItems,
-		&i.CartMaxQuantityPerItem,
-		&i.UpdatedAt,
-		&i.Description,
-		&i.Website,
-		&i.LogoUrl,
-		&i.AddressStreet,
-		&i.AddressCity,
-		&i.AddressState,
-		&i.AddressZip,
-		&i.AddressCountry,
-		&i.SendOnLiveEnd,
-		&i.CartAllowEdit,
-		&i.CheckoutSendMethods,
-		&i.NotificationSettings,
-		&i.CartMessageCooldownSeconds,
-		&i.CartSendExpirationReminder,
-		&i.CartExpirationReminderMinutes,
-		&i.CartRealTime,
-		&i.Cnpj,
-	)
+	err := scanStore(row, &i)
 	return i, err
 }
 
 const getStoreBySlug = `-- name: GetStoreBySlug :one
-SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj FROM stores WHERE slug = $1
-`
+SELECT ` + storeColumns + ` FROM stores WHERE slug = $1`
 
 func (q *Queries) GetStoreBySlug(ctx context.Context, slug string) (Store, error) {
 	row := q.db.QueryRow(ctx, getStoreBySlug, slug)
 	var i Store
-	err := row.Scan(
-		&i.ID,
-		&i.Name,
-		&i.Slug,
-		&i.Active,
-		&i.WhatsappNumber,
-		&i.EmailAddress,
-		&i.SmsNumber,
-		&i.CreatedAt,
-		&i.CartEnabled,
-		&i.CartExpirationMinutes,
-		&i.CartReserveStock,
-		&i.CartMaxItems,
-		&i.CartMaxQuantityPerItem,
-		&i.UpdatedAt,
-		&i.Description,
-		&i.Website,
-		&i.LogoUrl,
-		&i.AddressStreet,
-		&i.AddressCity,
-		&i.AddressState,
-		&i.AddressZip,
-		&i.AddressCountry,
-		&i.SendOnLiveEnd,
-		&i.CartAllowEdit,
-		&i.CheckoutSendMethods,
-		&i.NotificationSettings,
-		&i.CartMessageCooldownSeconds,
-		&i.CartSendExpirationReminder,
-		&i.CartExpirationReminderMinutes,
-		&i.CartRealTime,
-		&i.Cnpj,
-	)
+	err := scanStore(row, &i)
 	return i, err
 }
 
 const getStoreByUserID = `-- name: GetStoreByUserID :one
-SELECT s.id, s.name, s.slug, s.active, s.whatsapp_number, s.email_address, s.sms_number, s.created_at, s.cart_enabled, s.cart_expiration_minutes, s.cart_reserve_stock, s.cart_max_items, s.cart_max_quantity_per_item, s.updated_at, s.description, s.website, s.logo_url, s.address_street, s.address_city, s.address_state, s.address_zip, s.address_country, s.send_on_live_end, s.cart_allow_edit, s.checkout_send_methods, s.notification_settings, s.cart_message_cooldown_seconds, s.cart_send_expiration_reminder, s.cart_expiration_reminder_minutes, s.cart_real_time, s.cnpj
+SELECT ` + storeColumns + `
 FROM stores s
 JOIN memberships m ON s.id = m.store_id
-WHERE m.user_id = $1 AND m.status = 'active'
-`
+WHERE m.user_id = $1 AND m.status = 'active'`
 
 // Get the single store for a user (1 user = 1 store)
 func (q *Queries) GetStoreByUserID(ctx context.Context, userID pgtype.UUID) (Store, error) {
 	row := q.db.QueryRow(ctx, getStoreByUserID, userID)
 	var i Store
-	err := row.Scan(
-		&i.ID,
-		&i.Name,
-		&i.Slug,
-		&i.Active,
-		&i.WhatsappNumber,
-		&i.EmailAddress,
-		&i.SmsNumber,
-		&i.CreatedAt,
-		&i.CartEnabled,
-		&i.CartExpirationMinutes,
-		&i.CartReserveStock,
-		&i.CartMaxItems,
-		&i.CartMaxQuantityPerItem,
-		&i.UpdatedAt,
-		&i.Description,
-		&i.Website,
-		&i.LogoUrl,
-		&i.AddressStreet,
-		&i.AddressCity,
-		&i.AddressState,
-		&i.AddressZip,
-		&i.AddressCountry,
-		&i.SendOnLiveEnd,
-		&i.CartAllowEdit,
-		&i.CheckoutSendMethods,
-		&i.NotificationSettings,
-		&i.CartMessageCooldownSeconds,
-		&i.CartSendExpirationReminder,
-		&i.CartExpirationReminderMinutes,
-		&i.CartRealTime,
-		&i.Cnpj,
-	)
+	err := scanStore(row, &i)
 	return i, err
 }
 
@@ -319,26 +200,33 @@ SET
   address_zip = $12,
   address_country = $13,
   cnpj = $14,
+  address_number = $15,
+  address_complement = $16,
+  address_district = $17,
+  address_state_register = $18,
   updated_at = now()
 WHERE id = $1
-RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj
-`
+RETURNING ` + storeColumns
 
 type UpdateStoreParams struct {
-	ID             pgtype.UUID `json:"id"`
-	Name           string      `json:"name"`
-	WhatsappNumber pgtype.Text `json:"whatsapp_number"`
-	EmailAddress   pgtype.Text `json:"email_address"`
-	SmsNumber      pgtype.Text `json:"sms_number"`
-	Description    pgtype.Text `json:"description"`
-	Website        pgtype.Text `json:"website"`
-	LogoUrl        pgtype.Text `json:"logo_url"`
-	AddressStreet  pgtype.Text `json:"address_street"`
-	AddressCity    pgtype.Text `json:"address_city"`
-	AddressState   pgtype.Text `json:"address_state"`
-	AddressZip     pgtype.Text `json:"address_zip"`
-	AddressCountry pgtype.Text `json:"address_country"`
-	Cnpj           pgtype.Text `json:"cnpj"`
+	ID                   pgtype.UUID `json:"id"`
+	Name                 string      `json:"name"`
+	WhatsappNumber       pgtype.Text `json:"whatsapp_number"`
+	EmailAddress         pgtype.Text `json:"email_address"`
+	SmsNumber            pgtype.Text `json:"sms_number"`
+	Description          pgtype.Text `json:"description"`
+	Website              pgtype.Text `json:"website"`
+	LogoUrl              pgtype.Text `json:"logo_url"`
+	AddressStreet        pgtype.Text `json:"address_street"`
+	AddressCity          pgtype.Text `json:"address_city"`
+	AddressState         pgtype.Text `json:"address_state"`
+	AddressZip           pgtype.Text `json:"address_zip"`
+	AddressCountry       pgtype.Text `json:"address_country"`
+	Cnpj                 pgtype.Text `json:"cnpj"`
+	AddressNumber        pgtype.Text `json:"address_number"`
+	AddressComplement    pgtype.Text `json:"address_complement"`
+	AddressDistrict      pgtype.Text `json:"address_district"`
+	AddressStateRegister pgtype.Text `json:"address_state_register"`
 }
 
 func (q *Queries) UpdateStore(ctx context.Context, arg UpdateStoreParams) (Store, error) {
@@ -357,41 +245,13 @@ func (q *Queries) UpdateStore(ctx context.Context, arg UpdateStoreParams) (Store
 		arg.AddressZip,
 		arg.AddressCountry,
 		arg.Cnpj,
+		arg.AddressNumber,
+		arg.AddressComplement,
+		arg.AddressDistrict,
+		arg.AddressStateRegister,
 	)
 	var i Store
-	err := row.Scan(
-		&i.ID,
-		&i.Name,
-		&i.Slug,
-		&i.Active,
-		&i.WhatsappNumber,
-		&i.EmailAddress,
-		&i.SmsNumber,
-		&i.CreatedAt,
-		&i.CartEnabled,
-		&i.CartExpirationMinutes,
-		&i.CartReserveStock,
-		&i.CartMaxItems,
-		&i.CartMaxQuantityPerItem,
-		&i.UpdatedAt,
-		&i.Description,
-		&i.Website,
-		&i.LogoUrl,
-		&i.AddressStreet,
-		&i.AddressCity,
-		&i.AddressState,
-		&i.AddressZip,
-		&i.AddressCountry,
-		&i.SendOnLiveEnd,
-		&i.CartAllowEdit,
-		&i.CheckoutSendMethods,
-		&i.NotificationSettings,
-		&i.CartMessageCooldownSeconds,
-		&i.CartSendExpirationReminder,
-		&i.CartExpirationReminderMinutes,
-		&i.CartRealTime,
-		&i.Cnpj,
-	)
+	err := scanStore(row, &i)
 	return i, err
 }
 
@@ -411,8 +271,7 @@ SET
   cart_expiration_reminder_minutes = $12,
   updated_at = now()
 WHERE id = $1
-RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj
-`
+RETURNING ` + storeColumns
 
 type UpdateStoreCartSettingsParams struct {
 	ID                            pgtype.UUID     `json:"id"`
@@ -445,39 +304,7 @@ func (q *Queries) UpdateStoreCartSettings(ctx context.Context, arg UpdateStoreCa
 		arg.CartExpirationReminderMinutes,
 	)
 	var i Store
-	err := row.Scan(
-		&i.ID,
-		&i.Name,
-		&i.Slug,
-		&i.Active,
-		&i.WhatsappNumber,
-		&i.EmailAddress,
-		&i.SmsNumber,
-		&i.CreatedAt,
-		&i.CartEnabled,
-		&i.CartExpirationMinutes,
-		&i.CartReserveStock,
-		&i.CartMaxItems,
-		&i.CartMaxQuantityPerItem,
-		&i.UpdatedAt,
-		&i.Description,
-		&i.Website,
-		&i.LogoUrl,
-		&i.AddressStreet,
-		&i.AddressCity,
-		&i.AddressState,
-		&i.AddressZip,
-		&i.AddressCountry,
-		&i.SendOnLiveEnd,
-		&i.CartAllowEdit,
-		&i.CheckoutSendMethods,
-		&i.NotificationSettings,
-		&i.CartMessageCooldownSeconds,
-		&i.CartSendExpirationReminder,
-		&i.CartExpirationReminderMinutes,
-		&i.CartRealTime,
-		&i.Cnpj,
-	)
+	err := scanStore(row, &i)
 	return i, err
 }
 
@@ -488,8 +315,7 @@ SET
   send_on_live_end = $3,
   updated_at = now()
 WHERE id = $1
-RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj
-`
+RETURNING ` + storeColumns
 
 type UpdateStoreCheckoutSettingsParams struct {
 	ID                  pgtype.UUID     `json:"id"`
@@ -500,39 +326,7 @@ type UpdateStoreCheckoutSettingsParams struct {
 func (q *Queries) UpdateStoreCheckoutSettings(ctx context.Context, arg UpdateStoreCheckoutSettingsParams) (Store, error) {
 	row := q.db.QueryRow(ctx, updateStoreCheckoutSettings, arg.ID, arg.CheckoutSendMethods, arg.SendOnLiveEnd)
 	var i Store
-	err := row.Scan(
-		&i.ID,
-		&i.Name,
-		&i.Slug,
-		&i.Active,
-		&i.WhatsappNumber,
-		&i.EmailAddress,
-		&i.SmsNumber,
-		&i.CreatedAt,
-		&i.CartEnabled,
-		&i.CartExpirationMinutes,
-		&i.CartReserveStock,
-		&i.CartMaxItems,
-		&i.CartMaxQuantityPerItem,
-		&i.UpdatedAt,
-		&i.Description,
-		&i.Website,
-		&i.LogoUrl,
-		&i.AddressStreet,
-		&i.AddressCity,
-		&i.AddressState,
-		&i.AddressZip,
-		&i.AddressCountry,
-		&i.SendOnLiveEnd,
-		&i.CartAllowEdit,
-		&i.CheckoutSendMethods,
-		&i.NotificationSettings,
-		&i.CartMessageCooldownSeconds,
-		&i.CartSendExpirationReminder,
-		&i.CartExpirationReminderMinutes,
-		&i.CartRealTime,
-		&i.Cnpj,
-	)
+	err := scanStore(row, &i)
 	return i, err
 }
 
@@ -542,8 +336,7 @@ SET
   logo_url = $2,
   updated_at = now()
 WHERE id = $1
-RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj
-`
+RETURNING ` + storeColumns
 
 type UpdateStoreLogoURLParams struct {
 	ID      pgtype.UUID `json:"id"`
@@ -553,38 +346,28 @@ type UpdateStoreLogoURLParams struct {
 func (q *Queries) UpdateStoreLogoURL(ctx context.Context, arg UpdateStoreLogoURLParams) (Store, error) {
 	row := q.db.QueryRow(ctx, updateStoreLogoURL, arg.ID, arg.LogoUrl)
 	var i Store
-	err := row.Scan(
-		&i.ID,
-		&i.Name,
-		&i.Slug,
-		&i.Active,
-		&i.WhatsappNumber,
-		&i.EmailAddress,
-		&i.SmsNumber,
-		&i.CreatedAt,
-		&i.CartEnabled,
-		&i.CartExpirationMinutes,
-		&i.CartReserveStock,
-		&i.CartMaxItems,
-		&i.CartMaxQuantityPerItem,
-		&i.UpdatedAt,
-		&i.Description,
-		&i.Website,
-		&i.LogoUrl,
-		&i.AddressStreet,
-		&i.AddressCity,
-		&i.AddressState,
-		&i.AddressZip,
-		&i.AddressCountry,
-		&i.SendOnLiveEnd,
-		&i.CartAllowEdit,
-		&i.CheckoutSendMethods,
-		&i.NotificationSettings,
-		&i.CartMessageCooldownSeconds,
-		&i.CartSendExpirationReminder,
-		&i.CartExpirationReminderMinutes,
-		&i.CartRealTime,
-		&i.Cnpj,
-	)
+	err := scanStore(row, &i)
+	return i, err
+}
+
+const updateStoreShippingDefaults = `-- name: UpdateStoreShippingDefaults :one
+UPDATE stores
+SET
+  default_package_weight_grams = $2,
+  default_package_format       = $3,
+  updated_at = now()
+WHERE id = $1
+RETURNING ` + storeColumns
+
+type UpdateStoreShippingDefaultsParams struct {
+	ID                        pgtype.UUID `json:"id"`
+	DefaultPackageWeightGrams int32       `json:"default_package_weight_grams"`
+	DefaultPackageFormat      string      `json:"default_package_format"`
+}
+
+func (q *Queries) UpdateStoreShippingDefaults(ctx context.Context, arg UpdateStoreShippingDefaultsParams) (Store, error) {
+	row := q.db.QueryRow(ctx, updateStoreShippingDefaults, arg.ID, arg.DefaultPackageWeightGrams, arg.DefaultPackageFormat)
+	var i Store
+	err := scanStore(row, &i)
 	return i, err
 }

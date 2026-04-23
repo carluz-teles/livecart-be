@@ -49,6 +49,7 @@ func (s *Service) Create(ctx context.Context, input CreateProductInput) (CreateP
 		input.Price,
 		input.ImageURL,
 		input.Stock,
+		input.Shipping,
 	)
 	if err != nil {
 		return CreateProductOutput{}, fmt.Errorf("creating product: %w", err)
@@ -135,7 +136,7 @@ func (s *Service) Update(ctx context.Context, input UpdateProductInput) (Product
 	}
 
 	// Use domain method to update
-	if err := product.UpdateDetails(input.Name, input.Price, input.ImageURL, input.Stock, input.Active); err != nil {
+	if err := product.UpdateDetails(input.Name, input.Price, input.ImageURL, input.Stock, input.Active, input.Shipping); err != nil {
 		return ProductOutput{}, httpx.ErrUnprocessable(err.Error())
 	}
 
@@ -177,7 +178,7 @@ func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool
 		stock = existing.Stock()
 	}
 
-	if err := existing.UpdateDetails(input.Name, input.Price, input.ImageURL, stock, input.Active); err != nil {
+	if err := existing.UpdateDetails(input.Name, input.Price, input.ImageURL, stock, input.Active, existing.Shipping()); err != nil {
 		return false, fmt.Errorf("updating product details: %w", err)
 	}
 	if err := s.repo.Update(ctx, existing); err != nil {
@@ -201,6 +202,8 @@ func toProductOutput(product *domain.Product) ProductOutput {
 		ImageURL:       product.ImageURL(),
 		Stock:          product.Stock(),
 		Active:         product.Active(),
+		Shipping:       product.Shipping(),
+		Shippable:      product.IsShippable(),
 		CreatedAt:      product.CreatedAt(),
 		UpdatedAt:      product.UpdatedAt(),
 	}

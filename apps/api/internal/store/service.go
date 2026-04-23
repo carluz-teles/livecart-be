@@ -108,25 +108,45 @@ func (s *Service) GetByID(ctx context.Context, id string) (StoreOutput, error) {
 
 func (s *Service) Update(ctx context.Context, input UpdateStoreInput) (StoreOutput, error) {
 	row, err := s.repo.Update(ctx, UpdateStoreParams{
-		ID:             input.StoreID,
-		Name:           input.Name,
-		WhatsappNumber: input.WhatsappNumber,
-		EmailAddress:   input.EmailAddress,
-		SMSNumber:      input.SMSNumber,
-		Description:    input.Description,
-		Website:        input.Website,
-		LogoURL:        input.LogoURL,
-		AddressStreet:  input.Address.Street,
-		AddressCity:    input.Address.City,
-		AddressState:   input.Address.State,
-		AddressZip:     input.Address.Zip,
-		AddressCountry: input.Address.Country,
-		CNPJ:           input.CNPJ,
+		ID:                   input.StoreID,
+		Name:                 input.Name,
+		WhatsappNumber:       input.WhatsappNumber,
+		EmailAddress:         input.EmailAddress,
+		SMSNumber:            input.SMSNumber,
+		Description:          input.Description,
+		Website:              input.Website,
+		LogoURL:              input.LogoURL,
+		AddressStreet:        input.Address.Street,
+		AddressNumber:        input.Address.Number,
+		AddressComplement:    input.Address.Complement,
+		AddressDistrict:      input.Address.District,
+		AddressCity:          input.Address.City,
+		AddressState:         input.Address.State,
+		AddressZip:           input.Address.Zip,
+		AddressCountry:       input.Address.Country,
+		AddressStateRegister: input.Address.StateRegister,
+		CNPJ:                 input.CNPJ,
 	})
 	if err != nil {
 		return StoreOutput{}, err
 	}
 
+	return toStoreOutput(row), nil
+}
+
+func (s *Service) UpdateShippingDefaults(ctx context.Context, input UpdateShippingDefaultsInput) (StoreOutput, error) {
+	format := input.PackageFormat
+	if format == "" {
+		format = "box"
+	}
+	row, err := s.repo.UpdateShippingDefaults(ctx, UpdateShippingDefaultsParams{
+		ID:                 input.StoreID,
+		PackageWeightGrams: input.PackageWeightGrams,
+		PackageFormat:      format,
+	})
+	if err != nil {
+		return StoreOutput{}, err
+	}
 	return toStoreOutput(row), nil
 }
 
@@ -178,31 +198,38 @@ func (s *Service) GetByClerkUserID(ctx context.Context, clerkUserID string) (Sto
 
 func toStoreOutput(row StoreRow) StoreOutput {
 	var address *AddressDTO
-	if row.AddressStreet != nil || row.AddressCity != nil || row.AddressState != nil || row.AddressZip != nil || row.AddressCountry != nil {
+	if row.AddressStreet != nil || row.AddressCity != nil || row.AddressState != nil || row.AddressZip != nil ||
+		row.AddressCountry != nil || row.AddressNumber != nil || row.AddressComplement != nil ||
+		row.AddressDistrict != nil || row.AddressStateRegister != nil {
 		address = &AddressDTO{
-			Street:  deref(row.AddressStreet),
-			City:    deref(row.AddressCity),
-			State:   deref(row.AddressState),
-			Zip:     deref(row.AddressZip),
-			Country: deref(row.AddressCountry),
+			Street:        deref(row.AddressStreet),
+			Number:        deref(row.AddressNumber),
+			Complement:    deref(row.AddressComplement),
+			District:      deref(row.AddressDistrict),
+			City:          deref(row.AddressCity),
+			State:         deref(row.AddressState),
+			Zip:           deref(row.AddressZip),
+			Country:       deref(row.AddressCountry),
+			StateRegister: deref(row.AddressStateRegister),
 		}
 	}
 
 	return StoreOutput{
-		ID:             row.ID,
-		Name:           row.Name,
-		Slug:           row.Slug,
-		Active:         row.Active,
-		WhatsappNumber: row.WhatsappNumber,
-		EmailAddress:   row.EmailAddress,
-		SMSNumber:      row.SMSNumber,
-		Description:    row.Description,
-		Website:        row.Website,
-		LogoURL:        row.LogoURL,
-		Address:        address,
-		CNPJ:           row.CNPJ,
-		CartSettings:   row.CartSettings,
-		CreatedAt:      row.CreatedAt,
+		ID:               row.ID,
+		Name:             row.Name,
+		Slug:             row.Slug,
+		Active:           row.Active,
+		WhatsappNumber:   row.WhatsappNumber,
+		EmailAddress:     row.EmailAddress,
+		SMSNumber:        row.SMSNumber,
+		Description:      row.Description,
+		Website:          row.Website,
+		LogoURL:          row.LogoURL,
+		Address:          address,
+		CNPJ:             row.CNPJ,
+		CartSettings:     row.CartSettings,
+		ShippingDefaults: row.ShippingDefaults,
+		CreatedAt:        row.CreatedAt,
 	}
 }
 

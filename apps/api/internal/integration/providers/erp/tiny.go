@@ -526,6 +526,22 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		}
 	}
 
+	if ship := order.Shipping; ship != nil {
+		transporte := map[string]any{
+			"valor": float64(ship.CostCents) / 100,
+		}
+		if ship.Carrier != "" {
+			transporte["nomeTransportador"] = ship.Carrier
+		}
+		if ship.Service != "" {
+			transporte["formaEnvio"] = map[string]any{"nome": ship.Service}
+		}
+		if ship.DeadlineDays > 0 {
+			transporte["prazoEntrega"] = ship.DeadlineDays
+		}
+		payload["transporte"] = transporte
+	}
+
 	if pay := order.Payment; pay != nil {
 		parcela := map[string]any{
 			"dias":           0,

@@ -25,6 +25,10 @@ SET
   address_zip = $12,
   address_country = $13,
   cnpj = $14,
+  address_number = $15,
+  address_complement = $16,
+  address_district = $17,
+  address_state_register = $18,
   updated_at = now()
 WHERE id = $1
 RETURNING *;
@@ -43,6 +47,15 @@ SET
   cart_message_cooldown_seconds = $10,
   cart_send_expiration_reminder = $11,
   cart_expiration_reminder_minutes = $12,
+  updated_at = now()
+WHERE id = $1
+RETURNING *;
+
+-- name: UpdateStoreShippingDefaults :one
+UPDATE stores
+SET
+  default_package_weight_grams = $2,
+  default_package_format       = $3,
   updated_at = now()
 WHERE id = $1
 RETURNING *;

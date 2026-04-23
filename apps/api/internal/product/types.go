@@ -21,6 +21,7 @@ type ProductFilters struct {
 	StockMin       *int     `query:"stockMin"`       // min stock
 	StockMax       *int     `query:"stockMax"`       // max stock
 	HasLowStock    *bool    `query:"hasLowStock"`    // stock <= 5
+	Shippable      *bool    `query:"shippable"`      // has full shipping profile
 }
 
 // ListProductsRequest represents the query parameters for listing products.
@@ -37,15 +38,28 @@ type ListProductsResponse struct {
 	Pagination query.PaginationResponse `json:"pagination"`
 }
 
+// ShippingProfileDTO carries the physical attributes needed to quote freight.
+// Dimensions and weight are all-or-nothing: provide all four or leave them null.
+type ShippingProfileDTO struct {
+	WeightGrams         *int   `json:"weightGrams" validate:"omitempty,gt=0"`
+	HeightCm            *int   `json:"heightCm" validate:"omitempty,gt=0"`
+	WidthCm             *int   `json:"widthCm" validate:"omitempty,gt=0"`
+	LengthCm            *int   `json:"lengthCm" validate:"omitempty,gt=0"`
+	SKU                 string `json:"sku" validate:"omitempty,max=100"`
+	PackageFormat       string `json:"packageFormat" validate:"omitempty,oneof=box roll letter"`
+	InsuranceValueCents *int64 `json:"insuranceValueCents" validate:"omitempty,gte=0"`
+}
+
 // CreateProductRequest represents the request body for creating a product.
 type CreateProductRequest struct {
-	Name           string `json:"name" validate:"required,min=1,max=200"`
-	ExternalID     string `json:"externalId"`
-	ExternalSource string `json:"externalSource" validate:"required,oneof=bling tiny shopify manual"`
-	Keyword        string `json:"keyword"`
-	Price          int64  `json:"price"` // price in cents
-	ImageURL       string `json:"imageUrl"`
-	Stock          int    `json:"stock" validate:"min=0"`
+	Name           string             `json:"name" validate:"required,min=1,max=200"`
+	ExternalID     string             `json:"externalId"`
+	ExternalSource string             `json:"externalSource" validate:"required,oneof=bling tiny shopify manual"`
+	Keyword        string             `json:"keyword"`
+	Price          int64              `json:"price"` // price in cents
+	ImageURL       string             `json:"imageUrl"`
+	Stock          int                `json:"stock" validate:"min=0"`
+	Shipping       ShippingProfileDTO `json:"shipping"`
 }
 
 // CreateProductResponse represents the response for product creation.
@@ -58,26 +72,29 @@ type CreateProductResponse struct {
 
 // UpdateProductRequest represents the request body for updating a product.
 type UpdateProductRequest struct {
-	Name     string `json:"name" validate:"required,min=1,max=200"`
-	Price    int64  `json:"price"` // price in cents
-	ImageURL string `json:"imageUrl"`
-	Stock    int    `json:"stock" validate:"min=0"`
-	Active   bool   `json:"active"`
+	Name     string             `json:"name" validate:"required,min=1,max=200"`
+	Price    int64              `json:"price"` // price in cents
+	ImageURL string             `json:"imageUrl"`
+	Stock    int                `json:"stock" validate:"min=0"`
+	Active   bool               `json:"active"`
+	Shipping ShippingProfileDTO `json:"shipping"`
 }
 
 // ProductResponse represents a product in API responses.
 type ProductResponse struct {
-	ID             string    `json:"id"`
-	Name           string    `json:"name"`
-	ExternalID     string    `json:"externalId"`
-	ExternalSource string    `json:"externalSource"`
-	Keyword        string    `json:"keyword"`
-	Price          int64     `json:"price"` // price in cents
-	ImageURL       string    `json:"imageUrl"`
-	Stock          int       `json:"stock"`
-	Active         bool      `json:"active"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	ID             string             `json:"id"`
+	Name           string             `json:"name"`
+	ExternalID     string             `json:"externalId"`
+	ExternalSource string             `json:"externalSource"`
+	Keyword        string             `json:"keyword"`
+	Price          int64              `json:"price"` // price in cents
+	ImageURL       string             `json:"imageUrl"`
+	Stock          int                `json:"stock"`
+	Active         bool               `json:"active"`
+	Shipping       ShippingProfileDTO `json:"shipping"`
+	Shippable      bool               `json:"shippable"`
+	CreatedAt      time.Time          `json:"createdAt"`
+	UpdatedAt      time.Time          `json:"updatedAt"`
 }
 
 // ProductStatsResponse represents product statistics.
@@ -118,6 +135,7 @@ type CreateProductInput struct {
 	Price          vo.Money
 	ImageURL       string
 	Stock          int
+	Shipping       domain.ShippingProfile
 }
 
 // CreateProductOutput represents service output for product creation.
@@ -137,6 +155,7 @@ type UpdateProductInput struct {
 	ImageURL string
 	Stock    int
 	Active   bool
+	Shipping domain.ShippingProfile
 }
 
 // ProductOutput represents a product in service layer output.
@@ -150,6 +169,8 @@ type ProductOutput struct {
 	ImageURL       string
 	Stock          int
 	Active         bool
+	Shipping       domain.ShippingProfile
+	Shippable      bool
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }

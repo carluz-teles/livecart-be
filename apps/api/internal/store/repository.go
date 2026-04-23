@@ -71,26 +71,51 @@ func (r *Repository) Update(ctx context.Context, params UpdateStoreParams) (Stor
 	}
 
 	row, err := r.q.UpdateStore(ctx, sqlc.UpdateStoreParams{
-		ID:             uid,
-		Name:           params.Name,
-		WhatsappNumber: pgtype.Text{String: params.WhatsappNumber, Valid: params.WhatsappNumber != ""},
-		EmailAddress:   pgtype.Text{String: params.EmailAddress, Valid: params.EmailAddress != ""},
-		SmsNumber:      pgtype.Text{String: params.SMSNumber, Valid: params.SMSNumber != ""},
-		Description:    pgtype.Text{String: params.Description, Valid: params.Description != ""},
-		Website:        pgtype.Text{String: params.Website, Valid: params.Website != ""},
-		LogoUrl:        pgtype.Text{String: params.LogoURL, Valid: params.LogoURL != ""},
-		AddressStreet:  pgtype.Text{String: params.AddressStreet, Valid: params.AddressStreet != ""},
-		AddressCity:    pgtype.Text{String: params.AddressCity, Valid: params.AddressCity != ""},
-		AddressState:   pgtype.Text{String: params.AddressState, Valid: params.AddressState != ""},
-		AddressZip:     pgtype.Text{String: params.AddressZip, Valid: params.AddressZip != ""},
-		AddressCountry: pgtype.Text{String: params.AddressCountry, Valid: params.AddressCountry != ""},
-		Cnpj:           pgtype.Text{String: params.CNPJ, Valid: params.CNPJ != ""},
+		ID:                   uid,
+		Name:                 params.Name,
+		WhatsappNumber:       pgtype.Text{String: params.WhatsappNumber, Valid: params.WhatsappNumber != ""},
+		EmailAddress:         pgtype.Text{String: params.EmailAddress, Valid: params.EmailAddress != ""},
+		SmsNumber:            pgtype.Text{String: params.SMSNumber, Valid: params.SMSNumber != ""},
+		Description:          pgtype.Text{String: params.Description, Valid: params.Description != ""},
+		Website:              pgtype.Text{String: params.Website, Valid: params.Website != ""},
+		LogoUrl:              pgtype.Text{String: params.LogoURL, Valid: params.LogoURL != ""},
+		AddressStreet:        pgtype.Text{String: params.AddressStreet, Valid: params.AddressStreet != ""},
+		AddressCity:          pgtype.Text{String: params.AddressCity, Valid: params.AddressCity != ""},
+		AddressState:         pgtype.Text{String: params.AddressState, Valid: params.AddressState != ""},
+		AddressZip:           pgtype.Text{String: params.AddressZip, Valid: params.AddressZip != ""},
+		AddressCountry:       pgtype.Text{String: params.AddressCountry, Valid: params.AddressCountry != ""},
+		Cnpj:                 pgtype.Text{String: params.CNPJ, Valid: params.CNPJ != ""},
+		AddressNumber:        pgtype.Text{String: params.AddressNumber, Valid: params.AddressNumber != ""},
+		AddressComplement:    pgtype.Text{String: params.AddressComplement, Valid: params.AddressComplement != ""},
+		AddressDistrict:      pgtype.Text{String: params.AddressDistrict, Valid: params.AddressDistrict != ""},
+		AddressStateRegister: pgtype.Text{String: params.AddressStateRegister, Valid: params.AddressStateRegister != ""},
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return StoreRow{}, httpx.ErrNotFound("store not found")
 		}
 		return StoreRow{}, fmt.Errorf("updating store: %w", err)
+	}
+
+	return toStoreRow(row), nil
+}
+
+func (r *Repository) UpdateShippingDefaults(ctx context.Context, params UpdateShippingDefaultsParams) (StoreRow, error) {
+	uid, err := parseUUID(params.ID)
+	if err != nil {
+		return StoreRow{}, err
+	}
+
+	row, err := r.q.UpdateStoreShippingDefaults(ctx, sqlc.UpdateStoreShippingDefaultsParams{
+		ID:                        uid,
+		DefaultPackageWeightGrams: int32(params.PackageWeightGrams),
+		DefaultPackageFormat:      params.PackageFormat,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return StoreRow{}, httpx.ErrNotFound("store not found")
+		}
+		return StoreRow{}, fmt.Errorf("updating shipping defaults: %w", err)
 	}
 
 	return toStoreRow(row), nil
@@ -210,6 +235,20 @@ func toStoreRow(row sqlc.Store) StoreRow {
 		addressCountry = &row.AddressCountry.String
 	}
 
+	var addressNumber, addressComplement, addressDistrict, addressStateRegister *string
+	if row.AddressNumber.Valid {
+		addressNumber = &row.AddressNumber.String
+	}
+	if row.AddressComplement.Valid {
+		addressComplement = &row.AddressComplement.String
+	}
+	if row.AddressDistrict.Valid {
+		addressDistrict = &row.AddressDistrict.String
+	}
+	if row.AddressStateRegister.Valid {
+		addressStateRegister = &row.AddressStateRegister.String
+	}
+
 	var cnpj *string
 	if row.Cnpj.Valid {
 		cnpj = &row.Cnpj.String
@@ -225,22 +264,26 @@ func toStoreRow(row sqlc.Store) StoreRow {
 	}
 
 	return StoreRow{
-		ID:             row.ID.String(),
-		Name:           row.Name,
-		Slug:           row.Slug,
-		Active:         row.Active.Bool,
-		WhatsappNumber: whatsapp,
-		EmailAddress:   email,
-		SMSNumber:      sms,
-		Description:    description,
-		Website:        website,
-		LogoURL:        logoURL,
-		AddressStreet:  addressStreet,
-		AddressCity:    addressCity,
-		AddressState:   addressState,
-		AddressZip:     addressZip,
-		AddressCountry: addressCountry,
-		CNPJ:           cnpj,
+		ID:                   row.ID.String(),
+		Name:                 row.Name,
+		Slug:                 row.Slug,
+		Active:               row.Active.Bool,
+		WhatsappNumber:       whatsapp,
+		EmailAddress:         email,
+		SMSNumber:            sms,
+		Description:          description,
+		Website:              website,
+		LogoURL:              logoURL,
+		AddressStreet:        addressStreet,
+		AddressNumber:        addressNumber,
+		AddressComplement:    addressComplement,
+		AddressDistrict:      addressDistrict,
+		AddressCity:          addressCity,
+		AddressState:         addressState,
+		AddressZip:           addressZip,
+		AddressCountry:       addressCountry,
+		AddressStateRegister: addressStateRegister,
+		CNPJ:                 cnpj,
 		CartSettings: CartSettingsDTO{
 			Enabled:                   row.CartEnabled,
 			ExpirationMinutes:         int(row.CartExpirationMinutes),
@@ -254,9 +297,20 @@ func toStoreRow(row sqlc.Store) StoreRow {
 			SendExpirationReminder:    row.CartSendExpirationReminder,
 			ExpirationReminderMinutes: int(row.CartExpirationReminderMinutes),
 		},
+		ShippingDefaults: ShippingDefaultsDTO{
+			PackageWeightGrams: int(row.DefaultPackageWeightGrams),
+			PackageFormat:      defaultPackageFormat(row.DefaultPackageFormat),
+		},
 		CreatedAt: row.CreatedAt.Time,
 		UpdatedAt: row.UpdatedAt.Time,
 	}
+}
+
+func defaultPackageFormat(s string) string {
+	if s == "" {
+		return "box"
+	}
+	return s
 }
 
 func parseUUID(s string) (pgtype.UUID, error) {

@@ -72,6 +72,11 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		return httpx.BadRequest(c, "invalid price")
 	}
 
+	shipping, err := shippingDTOToDomain(req.Shipping)
+	if err != nil {
+		return httpx.BadRequest(c, err.Error())
+	}
+
 	output, err := h.service.Create(c.Context(), CreateProductInput{
 		StoreID:        storeID,
 		Name:           req.Name,
@@ -81,6 +86,7 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		Price:          price,
 		ImageURL:       req.ImageURL,
 		Stock:          req.Stock,
+		Shipping:       shipping,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -279,6 +285,11 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 		return httpx.BadRequest(c, "invalid price")
 	}
 
+	shipping, err := shippingDTOToDomain(req.Shipping)
+	if err != nil {
+		return httpx.BadRequest(c, err.Error())
+	}
+
 	output, err := h.service.Update(c.Context(), UpdateProductInput{
 		StoreID:  storeID,
 		ID:       id,
@@ -287,6 +298,7 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 		ImageURL: req.ImageURL,
 		Stock:    req.Stock,
 		Active:   req.Active,
+		Shipping: shipping,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -367,7 +379,42 @@ func toProductResponse(o ProductOutput) ProductResponse {
 		ImageURL:       o.ImageURL,
 		Stock:          o.Stock,
 		Active:         o.Active,
+		Shipping:       shippingDomainToDTO(o.Shipping),
+		Shippable:      o.Shippable,
 		CreatedAt:      o.CreatedAt,
 		UpdatedAt:      o.UpdatedAt,
+	}
+}
+
+// shippingDTOToDomain converts the HTTP DTO into the domain shipping profile.
+func shippingDTOToDomain(dto ShippingProfileDTO) (domain.ShippingProfile, error) {
+	format, err := domain.NewPackageFormat(dto.PackageFormat)
+	if err != nil {
+		return domain.ShippingProfile{}, err
+	}
+	return domain.ShippingProfile{
+		WeightGrams:         dto.WeightGrams,
+		HeightCm:            dto.HeightCm,
+		WidthCm:             dto.WidthCm,
+		LengthCm:            dto.LengthCm,
+		SKU:                 dto.SKU,
+		PackageFormat:       format,
+		InsuranceValueCents: dto.InsuranceValueCents,
+	}, nil
+}
+
+func shippingDomainToDTO(s domain.ShippingProfile) ShippingProfileDTO {
+	format := s.PackageFormat.String()
+	if format == "" {
+		format = string(domain.PackageFormatBox)
+	}
+	return ShippingProfileDTO{
+		WeightGrams:         s.WeightGrams,
+		HeightCm:            s.HeightCm,
+		WidthCm:             s.WidthCm,
+		LengthCm:            s.LengthCm,
+		SKU:                 s.SKU,
+		PackageFormat:       format,
+		InsuranceValueCents: s.InsuranceValueCents,
 	}
 }

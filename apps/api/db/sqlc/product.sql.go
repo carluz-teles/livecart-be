@@ -12,20 +12,30 @@ import (
 )
 
 const createProduct = `-- name: CreateProduct :one
-INSERT INTO products (store_id, name, external_id, external_source, keyword, price, image_url, stock)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at
+INSERT INTO products (
+    store_id, name, external_id, external_source, keyword, price, image_url, stock,
+    weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents
 `
 
 type CreateProductParams struct {
-	StoreID        pgtype.UUID `json:"store_id"`
-	Name           string      `json:"name"`
-	ExternalID     pgtype.Text `json:"external_id"`
-	ExternalSource string      `json:"external_source"`
-	Keyword        string      `json:"keyword"`
-	Price          pgtype.Int8 `json:"price"`
-	ImageUrl       pgtype.Text `json:"image_url"`
-	Stock          pgtype.Int4 `json:"stock"`
+	StoreID             pgtype.UUID `json:"store_id"`
+	Name                string      `json:"name"`
+	ExternalID          pgtype.Text `json:"external_id"`
+	ExternalSource      string      `json:"external_source"`
+	Keyword             string      `json:"keyword"`
+	Price               pgtype.Int8 `json:"price"`
+	ImageUrl            pgtype.Text `json:"image_url"`
+	Stock               pgtype.Int4 `json:"stock"`
+	WeightGrams         pgtype.Int4 `json:"weight_grams"`
+	HeightCm            pgtype.Int4 `json:"height_cm"`
+	WidthCm             pgtype.Int4 `json:"width_cm"`
+	LengthCm            pgtype.Int4 `json:"length_cm"`
+	Sku                 pgtype.Text `json:"sku"`
+	PackageFormat       string      `json:"package_format"`
+	InsuranceValueCents pgtype.Int8 `json:"insurance_value_cents"`
 }
 
 func (q *Queries) CreateProduct(ctx context.Context, arg CreateProductParams) (Product, error) {
@@ -38,6 +48,13 @@ func (q *Queries) CreateProduct(ctx context.Context, arg CreateProductParams) (P
 		arg.Price,
 		arg.ImageUrl,
 		arg.Stock,
+		arg.WeightGrams,
+		arg.HeightCm,
+		arg.WidthCm,
+		arg.LengthCm,
+		arg.Sku,
+		arg.PackageFormat,
+		arg.InsuranceValueCents,
 	)
 	var i Product
 	err := row.Scan(
@@ -53,6 +70,13 @@ func (q *Queries) CreateProduct(ctx context.Context, arg CreateProductParams) (P
 		&i.Active,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WeightGrams,
+		&i.HeightCm,
+		&i.WidthCm,
+		&i.LengthCm,
+		&i.Sku,
+		&i.PackageFormat,
+		&i.InsuranceValueCents,
 	)
 	return i, err
 }
@@ -61,7 +85,7 @@ const decrementProductStock = `-- name: DecrementProductStock :one
 UPDATE products
 SET stock = stock - $2, updated_at = now()
 WHERE id = $1 AND stock >= $2
-RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at
+RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents
 `
 
 type DecrementProductStockParams struct {
@@ -86,6 +110,13 @@ func (q *Queries) DecrementProductStock(ctx context.Context, arg DecrementProduc
 		&i.Active,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WeightGrams,
+		&i.HeightCm,
+		&i.WidthCm,
+		&i.LengthCm,
+		&i.Sku,
+		&i.PackageFormat,
+		&i.InsuranceValueCents,
 	)
 	return i, err
 }
@@ -104,7 +135,7 @@ func (q *Queries) GetMaxKeyword(ctx context.Context, storeID pgtype.UUID) (inter
 }
 
 const getProductByID = `-- name: GetProductByID :one
-SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at FROM products WHERE id = $1 AND store_id = $2
+SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents FROM products WHERE id = $1 AND store_id = $2
 `
 
 type GetProductByIDParams struct {
@@ -128,12 +159,19 @@ func (q *Queries) GetProductByID(ctx context.Context, arg GetProductByIDParams) 
 		&i.Active,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WeightGrams,
+		&i.HeightCm,
+		&i.WidthCm,
+		&i.LengthCm,
+		&i.Sku,
+		&i.PackageFormat,
+		&i.InsuranceValueCents,
 	)
 	return i, err
 }
 
 const getProductByKeyword = `-- name: GetProductByKeyword :one
-SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at FROM products WHERE store_id = $1 AND keyword = $2 AND active = true
+SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents FROM products WHERE store_id = $1 AND keyword = $2 AND active = true
 `
 
 type GetProductByKeywordParams struct {
@@ -157,6 +195,13 @@ func (q *Queries) GetProductByKeyword(ctx context.Context, arg GetProductByKeywo
 		&i.Active,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WeightGrams,
+		&i.HeightCm,
+		&i.WidthCm,
+		&i.LengthCm,
+		&i.Sku,
+		&i.PackageFormat,
+		&i.InsuranceValueCents,
 	)
 	return i, err
 }
@@ -165,7 +210,7 @@ const incrementProductStock = `-- name: IncrementProductStock :one
 UPDATE products
 SET stock = stock + $2, updated_at = now()
 WHERE id = $1
-RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at
+RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents
 `
 
 type IncrementProductStockParams struct {
@@ -190,12 +235,19 @@ func (q *Queries) IncrementProductStock(ctx context.Context, arg IncrementProduc
 		&i.Active,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WeightGrams,
+		&i.HeightCm,
+		&i.WidthCm,
+		&i.LengthCm,
+		&i.Sku,
+		&i.PackageFormat,
+		&i.InsuranceValueCents,
 	)
 	return i, err
 }
 
 const listProductsByStore = `-- name: ListProductsByStore :many
-SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at FROM products WHERE store_id = $1 ORDER BY created_at DESC
+SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents FROM products WHERE store_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListProductsByStore(ctx context.Context, storeID pgtype.UUID) ([]Product, error) {
@@ -220,6 +272,13 @@ func (q *Queries) ListProductsByStore(ctx context.Context, storeID pgtype.UUID) 
 			&i.Active,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.WeightGrams,
+			&i.HeightCm,
+			&i.WidthCm,
+			&i.LengthCm,
+			&i.Sku,
+			&i.PackageFormat,
+			&i.InsuranceValueCents,
 		); err != nil {
 			return nil, err
 		}
@@ -233,19 +292,38 @@ func (q *Queries) ListProductsByStore(ctx context.Context, storeID pgtype.UUID) 
 
 const updateProduct = `-- name: UpdateProduct :one
 UPDATE products
-SET name = $3, price = $4, image_url = $5, stock = $6, active = $7, updated_at = now()
+SET name = $3,
+    price = $4,
+    image_url = $5,
+    stock = $6,
+    active = $7,
+    weight_grams = $8,
+    height_cm = $9,
+    width_cm = $10,
+    length_cm = $11,
+    sku = $12,
+    package_format = $13,
+    insurance_value_cents = $14,
+    updated_at = now()
 WHERE id = $1 AND store_id = $2
-RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at
+RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents
 `
 
 type UpdateProductParams struct {
-	ID       pgtype.UUID `json:"id"`
-	StoreID  pgtype.UUID `json:"store_id"`
-	Name     string      `json:"name"`
-	Price    pgtype.Int8 `json:"price"`
-	ImageUrl pgtype.Text `json:"image_url"`
-	Stock    pgtype.Int4 `json:"stock"`
-	Active   pgtype.Bool `json:"active"`
+	ID                  pgtype.UUID `json:"id"`
+	StoreID             pgtype.UUID `json:"store_id"`
+	Name                string      `json:"name"`
+	Price               pgtype.Int8 `json:"price"`
+	ImageUrl            pgtype.Text `json:"image_url"`
+	Stock               pgtype.Int4 `json:"stock"`
+	Active              pgtype.Bool `json:"active"`
+	WeightGrams         pgtype.Int4 `json:"weight_grams"`
+	HeightCm            pgtype.Int4 `json:"height_cm"`
+	WidthCm             pgtype.Int4 `json:"width_cm"`
+	LengthCm            pgtype.Int4 `json:"length_cm"`
+	Sku                 pgtype.Text `json:"sku"`
+	PackageFormat       string      `json:"package_format"`
+	InsuranceValueCents pgtype.Int8 `json:"insurance_value_cents"`
 }
 
 func (q *Queries) UpdateProduct(ctx context.Context, arg UpdateProductParams) (Product, error) {
@@ -257,6 +335,13 @@ func (q *Queries) UpdateProduct(ctx context.Context, arg UpdateProductParams) (P
 		arg.ImageUrl,
 		arg.Stock,
 		arg.Active,
+		arg.WeightGrams,
+		arg.HeightCm,
+		arg.WidthCm,
+		arg.LengthCm,
+		arg.Sku,
+		arg.PackageFormat,
+		arg.InsuranceValueCents,
 	)
 	var i Product
 	err := row.Scan(
@@ -272,6 +357,13 @@ func (q *Queries) UpdateProduct(ctx context.Context, arg UpdateProductParams) (P
 		&i.Active,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WeightGrams,
+		&i.HeightCm,
+		&i.WidthCm,
+		&i.LengthCm,
+		&i.Sku,
+		&i.PackageFormat,
+		&i.InsuranceValueCents,
 	)
 	return i, err
 }

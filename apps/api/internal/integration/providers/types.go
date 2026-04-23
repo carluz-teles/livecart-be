@@ -9,9 +9,10 @@ import (
 type ProviderType string
 
 const (
-	ProviderTypePayment ProviderType = "payment"
-	ProviderTypeERP     ProviderType = "erp"
-	ProviderTypeSocial  ProviderType = "social"
+	ProviderTypePayment  ProviderType = "payment"
+	ProviderTypeERP      ProviderType = "erp"
+	ProviderTypeSocial   ProviderType = "social"
+	ProviderTypeShipping ProviderType = "shipping"
 )
 
 // ProviderName represents a specific integration provider.
@@ -22,6 +23,7 @@ const (
 	ProviderPagarme     ProviderName = "pagarme"
 	ProviderTiny        ProviderName = "tiny"
 	ProviderInstagram   ProviderName = "instagram"
+	ProviderMelhorEnvio ProviderName = "melhor_envio"
 )
 
 // Credentials holds authentication data for providers.
@@ -441,7 +443,7 @@ type ERPOrder struct {
 	ExternalID  string         `json:"external_id"`            // Your internal order/cart ID
 	ContactID   string         `json:"contact_id"`             // ERP contact ID (required for Tiny v3)
 	Items       []ERPOrderItem `json:"items"`
-	TotalAmount int64          `json:"total_amount"`           // In cents
+	TotalAmount int64          `json:"total_amount"`           // In cents (includes shipping when present)
 	Observation string         `json:"observation,omitempty"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
 
@@ -449,10 +451,23 @@ type ERPOrder struct {
 	// as enderecoEntrega (or equivalent) on the order.
 	ShippingAddress *ERPShippingAddress `json:"shipping_address,omitempty"`
 
+	// Shipping, when set, feeds the provider with the carrier/service chosen
+	// by the customer and the freight value so the ERP records the shipment.
+	Shipping *ERPOrderShipping `json:"shipping,omitempty"`
+
 	// Payment, when set, flags the order as already paid: the provider fills
 	// parcelas with dataPagamento, records the payment method/ID and approves
 	// the order in the ERP.
 	Payment *ERPOrderPayment `json:"payment,omitempty"`
+}
+
+// ERPOrderShipping captures the freight option chosen at checkout so the ERP
+// records the shipment alongside the sales order.
+type ERPOrderShipping struct {
+	Carrier      string `json:"carrier"`                 // "Correios", "Jadlog"...
+	Service      string `json:"service"`                 // "PAC", "SEDEX", ".Package"...
+	CostCents    int64  `json:"cost_cents"`              // actual merchant cost (real quote value)
+	DeadlineDays int    `json:"deadline_days,omitempty"` // estimated max delivery time
 }
 
 // ERPShippingAddress describes a delivery address for an ERP order.
@@ -569,4 +584,73 @@ type WebhookEvent struct {
 	Action    string         `json:"action,omitempty"`
 	Data      map[string]any `json:"data"`
 	CreatedAt time.Time      `json:"created_at"`
+}
+
+// =============================================================================
+// SHIPPING TYPES
+// =============================================================================
+
+// ShippingProvider provides freight quotes from carriers.
+// LiveCart only uses read-only endpoints (no label generation).
+type ShippingProvider interface {
+	Provider
+
+	// Quote calculates freight options for a shipment.
+	Quote(ctx context.Context, req QuoteRequest) ([]QuoteOption, error)
+
+	// ListCarriers returns the available carriers/services for the connected account.
+	ListCarriers(ctx context.Context) ([]CarrierService, error)
+}
+
+// ShippingZip is a Brazilian CEP, digits only (8 chars).
+type ShippingZip string
+
+// ShippingItem represents a cart item being quoted.
+type ShippingItem struct {
+	ID                  string // opaque identifier returned in error messages
+	WeightGrams         int
+	HeightCm            int
+	WidthCm             int
+	LengthCm            int
+	InsuranceValueCents int64
+	Quantity            int
+	PackageFormat       string // "box", "roll", "letter" - optional, carrier hint
+}
+
+// QuoteRequest is the input for a freight quote.
+type QuoteRequest struct {
+	FromZip ShippingZip
+	ToZip   ShippingZip
+	Items   []ShippingItem
+	// ExtraPackageWeightGrams is added once to the shipment to account for
+	// consolidating packaging (empty box, bubble wrap). Applied to the heaviest
+	// item when the provider quotes by individual products.
+	ExtraPackageWeightGrams int
+	// ServiceIDs restricts the quote to a subset of services. Empty = all.
+	ServiceIDs []int
+	// Options are delivery-time flags.
+	Receipt bool
+	OwnHand bool
+}
+
+// QuoteOption is a single carrier/service result.
+type QuoteOption struct {
+	ServiceID    int    // carrier service ID (provider-specific)
+	Service      string // "PAC", "SEDEX", ".Package", etc.
+	Carrier      string // "Correios", "Jadlog", "Loggi", etc.
+	CarrierLogo  string // optional URL
+	PriceCents   int64  // final price in cents
+	DeadlineDays int    // business days
+	Available    bool
+	Error        string // populated when Available is false
+}
+
+// CarrierService describes one service offered by a carrier.
+type CarrierService struct {
+	ServiceID   int
+	Service     string
+	Carrier     string
+	CarrierLogo string
+	// Max insurance value accepted, in cents. 0 means unlimited/unknown.
+	InsuranceMaxCents int64
 }

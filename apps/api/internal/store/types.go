@@ -26,11 +26,24 @@ type CartSettingsDTO struct {
 // ============================================
 
 type AddressDTO struct {
-	Street  string `json:"street"`
-	City    string `json:"city"`
-	State   string `json:"state"`
-	Zip     string `json:"zip"`
-	Country string `json:"country"`
+	Street        string `json:"street"`
+	Number        string `json:"number"`
+	Complement    string `json:"complement"`
+	District      string `json:"district"`
+	City          string `json:"city"`
+	State         string `json:"state"`
+	Zip           string `json:"zip"`
+	Country       string `json:"country"`
+	StateRegister string `json:"stateRegister"`
+}
+
+// ============================================
+// Shipping Defaults
+// ============================================
+
+type ShippingDefaultsDTO struct {
+	PackageWeightGrams int    `json:"packageWeightGrams"`
+	PackageFormat      string `json:"packageFormat"`
 }
 
 // ============================================
@@ -61,6 +74,11 @@ type UpdateStoreRequest struct {
 	CNPJ           string     `json:"cnpj"`
 }
 
+type UpdateShippingDefaultsRequest struct {
+	PackageWeightGrams int    `json:"packageWeightGrams" validate:"gte=0"`
+	PackageFormat      string `json:"packageFormat" validate:"required,oneof=box roll letter"`
+}
+
 type UpdateCartSettingsRequest struct {
 	Enabled            bool     `json:"enabled"`
 	ExpirationMinutes  int      `json:"expirationMinutes" validate:"gte=5,lte=1440"`
@@ -77,20 +95,21 @@ type UpdateCartSettingsRequest struct {
 }
 
 type StoreResponse struct {
-	ID             string          `json:"id"`
-	Name           string          `json:"name"`
-	Slug           string          `json:"slug"`
-	Active         bool            `json:"active"`
-	WhatsappNumber *string         `json:"whatsappNumber"`
-	EmailAddress   *string         `json:"emailAddress"`
-	SMSNumber      *string         `json:"smsNumber"`
-	Description    *string         `json:"description"`
-	Website        *string         `json:"website"`
-	LogoURL        *string         `json:"logoUrl"`
-	Address        *AddressDTO     `json:"address"`
-	CNPJ           *string         `json:"cnpj"`
-	CartSettings   CartSettingsDTO `json:"cartSettings"`
-	CreatedAt      time.Time       `json:"createdAt"`
+	ID               string              `json:"id"`
+	Name             string              `json:"name"`
+	Slug             string              `json:"slug"`
+	Active           bool                `json:"active"`
+	WhatsappNumber   *string             `json:"whatsappNumber"`
+	EmailAddress     *string             `json:"emailAddress"`
+	SMSNumber        *string             `json:"smsNumber"`
+	Description      *string             `json:"description"`
+	Website          *string             `json:"website"`
+	LogoURL          *string             `json:"logoUrl"`
+	Address          *AddressDTO         `json:"address"`
+	CNPJ             *string             `json:"cnpj"`
+	CartSettings     CartSettingsDTO     `json:"cartSettings"`
+	ShippingDefaults ShippingDefaultsDTO `json:"shippingDefaults"`
+	CreatedAt        time.Time           `json:"createdAt"`
 }
 
 type UploadLogoResponse struct {
@@ -129,6 +148,12 @@ type UpdateStoreInput struct {
 	CNPJ           string
 }
 
+type UpdateShippingDefaultsInput struct {
+	StoreID            string
+	PackageWeightGrams int
+	PackageFormat      string
+}
+
 type UpdateCartSettingsInput struct {
 	StoreID            string
 	Enabled            bool
@@ -146,20 +171,21 @@ type UpdateCartSettingsInput struct {
 }
 
 type StoreOutput struct {
-	ID             string
-	Name           string
-	Slug           string
-	Active         bool
-	WhatsappNumber *string
-	EmailAddress   *string
-	SMSNumber      *string
-	Description    *string
-	Website        *string
-	LogoURL        *string
-	Address        *AddressDTO
-	CNPJ           *string
-	CartSettings   CartSettingsDTO
-	CreatedAt      time.Time
+	ID               string
+	Name             string
+	Slug             string
+	Active           bool
+	WhatsappNumber   *string
+	EmailAddress     *string
+	SMSNumber        *string
+	Description      *string
+	Website          *string
+	LogoURL          *string
+	Address          *AddressDTO
+	CNPJ             *string
+	CartSettings     CartSettingsDTO
+	ShippingDefaults ShippingDefaultsDTO
+	CreatedAt        time.Time
 }
 
 // ============================================
@@ -172,20 +198,30 @@ type CreateStoreParams struct {
 }
 
 type UpdateStoreParams struct {
-	ID             string
-	Name           string
-	WhatsappNumber string
-	EmailAddress   string
-	SMSNumber      string
-	Description    string
-	Website        string
-	LogoURL        string
-	AddressStreet  string
-	AddressCity    string
-	AddressState   string
-	AddressZip     string
-	AddressCountry string
-	CNPJ           string
+	ID                   string
+	Name                 string
+	WhatsappNumber       string
+	EmailAddress         string
+	SMSNumber            string
+	Description          string
+	Website              string
+	LogoURL              string
+	AddressStreet        string
+	AddressNumber        string
+	AddressComplement    string
+	AddressDistrict      string
+	AddressCity          string
+	AddressState         string
+	AddressZip           string
+	AddressCountry       string
+	AddressStateRegister string
+	CNPJ                 string
+}
+
+type UpdateShippingDefaultsParams struct {
+	ID                 string
+	PackageWeightGrams int
+	PackageFormat      string
 }
 
 type UpdateCartSettingsParams struct {
@@ -205,23 +241,28 @@ type UpdateCartSettingsParams struct {
 }
 
 type StoreRow struct {
-	ID             string
-	Name           string
-	Slug           string
-	Active         bool
-	WhatsappNumber *string
-	EmailAddress   *string
-	SMSNumber      *string
-	Description    *string
-	Website        *string
-	LogoURL        *string
-	AddressStreet  *string
-	AddressCity    *string
-	AddressState   *string
-	AddressZip     *string
-	AddressCountry *string
-	CNPJ           *string
-	CartSettings   CartSettingsDTO
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID                   string
+	Name                 string
+	Slug                 string
+	Active               bool
+	WhatsappNumber       *string
+	EmailAddress         *string
+	SMSNumber            *string
+	Description          *string
+	Website              *string
+	LogoURL              *string
+	AddressStreet        *string
+	AddressNumber        *string
+	AddressComplement    *string
+	AddressDistrict      *string
+	AddressCity          *string
+	AddressState         *string
+	AddressZip           *string
+	AddressCountry       *string
+	AddressStateRegister *string
+	CNPJ                 *string
+	CartSettings         CartSettingsDTO
+	ShippingDefaults     ShippingDefaultsDTO
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }

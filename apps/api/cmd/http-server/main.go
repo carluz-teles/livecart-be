@@ -38,6 +38,7 @@ import (
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/integration/providers/erp"
 	"livecart/apps/api/internal/integration/providers/payment"
+	"livecart/apps/api/internal/integration/providers/shipping"
 	"livecart/apps/api/internal/integration/providers/social"
 	"livecart/apps/api/internal/invitation"
 	"livecart/apps/api/internal/live"
@@ -186,10 +187,18 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 			// Create provider factory with constructors
 			providerFactory := providers.NewFactory(providers.FactoryConfig{
-				Logger:               log,
-				MercadoPagoAppID:     config.MercadoPagoAppID.String(),
-				MercadoPagoAppSecret: config.MercadoPagoAppSecret.String(),
-				RateLimitManager:     rateLimitManager,
+				Logger:                  log,
+				MercadoPagoAppID:        config.MercadoPagoAppID.String(),
+				MercadoPagoAppSecret:    config.MercadoPagoAppSecret.String(),
+				MelhorEnvioClientID:     config.MelhorEnvioClientID.String(),
+				MelhorEnvioClientSecret: config.MelhorEnvioClientSecret.String(),
+				MelhorEnvioEnv:          config.MelhorEnvioEnv.StringOr("sandbox"),
+				MelhorEnvioUserAgent:    config.MelhorEnvioUserAgent.StringOr("LiveCart (contato@livecart.com.br)"),
+				MelhorEnvioRedirectURI:  config.MelhorEnvioRedirectURI.String(),
+				RateLimitManager:        rateLimitManager,
+				MelhorEnvioConstructor: func(cfg providers.MelhorEnvioConfig) (providers.ShippingProvider, error) {
+					return shipping.New(cfg)
+				},
 				MercadoPagoConstructor: func(cfg providers.MercadoPagoConfig) (providers.PaymentProvider, error) {
 					return payment.NewMercadoPago(payment.MercadoPagoConfig{
 						IntegrationID: cfg.IntegrationID,
@@ -253,11 +262,19 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 			// Set log function for providers
 			providerFactory = providers.NewFactory(providers.FactoryConfig{
-				Logger:               log,
-				LogFunc:              integrationSvc.LogIntegrationOperation,
-				MercadoPagoAppID:     config.MercadoPagoAppID.String(),
-				MercadoPagoAppSecret: config.MercadoPagoAppSecret.String(),
-				RateLimitManager:     rateLimitManager,
+				Logger:                  log,
+				LogFunc:                 integrationSvc.LogIntegrationOperation,
+				MercadoPagoAppID:        config.MercadoPagoAppID.String(),
+				MercadoPagoAppSecret:    config.MercadoPagoAppSecret.String(),
+				MelhorEnvioClientID:     config.MelhorEnvioClientID.String(),
+				MelhorEnvioClientSecret: config.MelhorEnvioClientSecret.String(),
+				MelhorEnvioEnv:          config.MelhorEnvioEnv.StringOr("sandbox"),
+				MelhorEnvioUserAgent:    config.MelhorEnvioUserAgent.StringOr("LiveCart (contato@livecart.com.br)"),
+				MelhorEnvioRedirectURI:  config.MelhorEnvioRedirectURI.String(),
+				RateLimitManager:        rateLimitManager,
+				MelhorEnvioConstructor: func(cfg providers.MelhorEnvioConfig) (providers.ShippingProvider, error) {
+					return shipping.New(cfg)
+				},
 				MercadoPagoConstructor: func(cfg providers.MercadoPagoConfig) (providers.PaymentProvider, error) {
 					return payment.NewMercadoPago(payment.MercadoPagoConfig{
 						IntegrationID: cfg.IntegrationID,
@@ -353,7 +370,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// Public checkout routes (no authentication required)
 	if integrationSvc != nil {
 		checkoutRepo := checkout.NewRepository(queries)
-		checkoutSvc := checkout.NewService(checkoutRepo, integrationSvc, log)
+		checkoutSvc := checkout.NewService(checkoutRepo, pool, integrationSvc, log)
 		checkoutHandler := checkout.NewHandler(checkoutSvc)
 		checkoutHandler.RegisterRoutes(app)
 	}

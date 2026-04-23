@@ -26,15 +26,23 @@ func NewRepository(q *sqlc.Queries, pool *pgxpool.Pool) *Repository {
 }
 
 func (r *Repository) Save(ctx context.Context, product *domain.Product) error {
+	sp := product.Shipping()
 	_, err := r.q.CreateProduct(ctx, sqlc.CreateProductParams{
-		StoreID:        product.StoreID().ToPgUUID(),
-		Name:           product.Name(),
-		ExternalID:     pgtype.Text{String: product.ExternalID(), Valid: product.ExternalID() != ""},
-		ExternalSource: product.ExternalSource().String(),
-		Keyword:        product.Keyword().String(),
-		Price:          pgtype.Int8{Int64: product.Price().Cents(), Valid: true},
-		ImageUrl:       pgtype.Text{String: product.ImageURL(), Valid: product.ImageURL() != ""},
-		Stock:          pgtype.Int4{Int32: int32(product.Stock()), Valid: true},
+		StoreID:             product.StoreID().ToPgUUID(),
+		Name:                product.Name(),
+		ExternalID:          pgtype.Text{String: product.ExternalID(), Valid: product.ExternalID() != ""},
+		ExternalSource:      product.ExternalSource().String(),
+		Keyword:             product.Keyword().String(),
+		Price:               pgtype.Int8{Int64: product.Price().Cents(), Valid: true},
+		ImageUrl:            pgtype.Text{String: product.ImageURL(), Valid: product.ImageURL() != ""},
+		Stock:               pgtype.Int4{Int32: int32(product.Stock()), Valid: true},
+		WeightGrams:         intPtrToInt4(sp.WeightGrams),
+		HeightCm:            intPtrToInt4(sp.HeightCm),
+		WidthCm:             intPtrToInt4(sp.WidthCm),
+		LengthCm:            intPtrToInt4(sp.LengthCm),
+		Sku:                 pgtype.Text{String: sp.SKU, Valid: sp.SKU != ""},
+		PackageFormat:       packageFormatToColumn(sp.PackageFormat),
+		InsuranceValueCents: int64PtrToInt8(sp.InsuranceValueCents),
 	})
 	if err != nil {
 		return fmt.Errorf("inserting product: %w", err)
@@ -158,6 +166,15 @@ func (r *Repository) List(ctx context.Context, params ListProductsParams) (ListP
 		conditions = append(conditions, "stock <= 5")
 	}
 
+	// Shippable filter: products with all four physical fields populated
+	if params.Filters.Shippable != nil {
+		if *params.Filters.Shippable {
+			conditions = append(conditions, "weight_grams IS NOT NULL AND height_cm IS NOT NULL AND width_cm IS NOT NULL AND length_cm IS NOT NULL")
+		} else {
+			conditions = append(conditions, "(weight_grams IS NULL OR height_cm IS NULL OR width_cm IS NULL OR length_cm IS NULL)")
+		}
+	}
+
 	whereClause := strings.Join(conditions, " AND ")
 
 	// Validate and build ORDER BY
@@ -184,7 +201,8 @@ func (r *Repository) List(ctx context.Context, params ListProductsParams) (ListP
 
 	// Build main query with pagination
 	query := fmt.Sprintf(`
-		SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at
+		SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at,
+		       weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents
 		FROM products
 		WHERE %s
 		ORDER BY %s
@@ -215,6 +233,13 @@ func (r *Repository) List(ctx context.Context, params ListProductsParams) (ListP
 			&row.Active,
 			&row.CreatedAt,
 			&row.UpdatedAt,
+			&row.WeightGrams,
+			&row.HeightCm,
+			&row.WidthCm,
+			&row.LengthCm,
+			&row.Sku,
+			&row.PackageFormat,
+			&row.InsuranceValueCents,
 		); err != nil {
 			return ListProductsResult{}, fmt.Errorf("scanning product: %w", err)
 		}
@@ -236,14 +261,22 @@ func (r *Repository) List(ctx context.Context, params ListProductsParams) (ListP
 }
 
 func (r *Repository) Update(ctx context.Context, product *domain.Product) error {
+	sp := product.Shipping()
 	_, err := r.q.UpdateProduct(ctx, sqlc.UpdateProductParams{
-		ID:       product.ID().ToPgUUID(),
-		StoreID:  product.StoreID().ToPgUUID(),
-		Name:     product.Name(),
-		Price:    pgtype.Int8{Int64: product.Price().Cents(), Valid: true},
-		ImageUrl: pgtype.Text{String: product.ImageURL(), Valid: product.ImageURL() != ""},
-		Stock:    pgtype.Int4{Int32: int32(product.Stock()), Valid: true},
-		Active:   pgtype.Bool{Bool: product.Active(), Valid: true},
+		ID:                  product.ID().ToPgUUID(),
+		StoreID:             product.StoreID().ToPgUUID(),
+		Name:                product.Name(),
+		Price:               pgtype.Int8{Int64: product.Price().Cents(), Valid: true},
+		ImageUrl:            pgtype.Text{String: product.ImageURL(), Valid: product.ImageURL() != ""},
+		Stock:               pgtype.Int4{Int32: int32(product.Stock()), Valid: true},
+		Active:              pgtype.Bool{Bool: product.Active(), Valid: true},
+		WeightGrams:         intPtrToInt4(sp.WeightGrams),
+		HeightCm:            intPtrToInt4(sp.HeightCm),
+		WidthCm:             intPtrToInt4(sp.WidthCm),
+		LengthCm:            intPtrToInt4(sp.LengthCm),
+		Sku:                 pgtype.Text{String: sp.SKU, Valid: sp.SKU != ""},
+		PackageFormat:       packageFormatToColumn(sp.PackageFormat),
+		InsuranceValueCents: int64PtrToInt8(sp.InsuranceValueCents),
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -283,7 +316,8 @@ func (r *Repository) Delete(ctx context.Context, id vo.ProductID, storeID vo.Sto
 
 func (r *Repository) GetByExternalID(ctx context.Context, storeID vo.StoreID, externalSource domain.ExternalSource, externalID string) (*domain.Product, error) {
 	query := `
-		SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at
+		SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at,
+		       weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents
 		FROM products
 		WHERE store_id = $1 AND external_source = $2 AND external_id = $3
 	`
@@ -302,6 +336,13 @@ func (r *Repository) GetByExternalID(ctx context.Context, storeID vo.StoreID, ex
 		&row.Active,
 		&row.CreatedAt,
 		&row.UpdatedAt,
+		&row.WeightGrams,
+		&row.HeightCm,
+		&row.WidthCm,
+		&row.LengthCm,
+		&row.Sku,
+		&row.PackageFormat,
+		&row.InsuranceValueCents,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -380,6 +421,21 @@ func toDomainProduct(row sqlc.Product) (*domain.Product, error) {
 		externalID = row.ExternalID.String
 	}
 
+	format, err := domain.NewPackageFormat(row.PackageFormat)
+	if err != nil {
+		return nil, err
+	}
+
+	shipping := domain.ShippingProfile{
+		WeightGrams:         int4ToIntPtr(row.WeightGrams),
+		HeightCm:            int4ToIntPtr(row.HeightCm),
+		WidthCm:             int4ToIntPtr(row.WidthCm),
+		LengthCm:            int4ToIntPtr(row.LengthCm),
+		SKU:                 textToString(row.Sku),
+		PackageFormat:       format,
+		InsuranceValueCents: int8ToInt64Ptr(row.InsuranceValueCents),
+	}
+
 	return domain.Reconstruct(
 		id,
 		storeID,
@@ -391,7 +447,57 @@ func toDomainProduct(row sqlc.Product) (*domain.Product, error) {
 		imageURL,
 		int(row.Stock.Int32),
 		row.Active.Bool,
+		shipping,
 		row.CreatedAt.Time,
 		row.UpdatedAt.Time,
 	), nil
+}
+
+// ============================================
+// pgtype helpers
+// ============================================
+
+func intPtrToInt4(v *int) pgtype.Int4 {
+	if v == nil {
+		return pgtype.Int4{}
+	}
+	return pgtype.Int4{Int32: int32(*v), Valid: true}
+}
+
+func int4ToIntPtr(v pgtype.Int4) *int {
+	if !v.Valid {
+		return nil
+	}
+	i := int(v.Int32)
+	return &i
+}
+
+func int64PtrToInt8(v *int64) pgtype.Int8 {
+	if v == nil {
+		return pgtype.Int8{}
+	}
+	return pgtype.Int8{Int64: *v, Valid: true}
+}
+
+func int8ToInt64Ptr(v pgtype.Int8) *int64 {
+	if !v.Valid {
+		return nil
+	}
+	n := v.Int64
+	return &n
+}
+
+func textToString(v pgtype.Text) string {
+	if !v.Valid {
+		return ""
+	}
+	return v.String
+}
+
+func packageFormatToColumn(f domain.PackageFormat) string {
+	s := f.String()
+	if s == "" {
+		return string(domain.PackageFormatBox)
+	}
+	return s
 }

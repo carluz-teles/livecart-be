@@ -279,6 +279,20 @@ type Product struct {
 	Active         pgtype.Bool        `json:"active"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	// Product weight in grams (packaged individually). Required to quote shipping.
+	WeightGrams pgtype.Int4 `json:"weight_grams"`
+	// Product height in cm (packaged individually). Required to quote shipping.
+	HeightCm pgtype.Int4 `json:"height_cm"`
+	// Product width in cm (packaged individually). Required to quote shipping.
+	WidthCm pgtype.Int4 `json:"width_cm"`
+	// Product length in cm (packaged individually). Required to quote shipping.
+	LengthCm pgtype.Int4 `json:"length_cm"`
+	// Full SKU used by ERP and shipping labels (distinct from short keyword).
+	Sku pgtype.Text `json:"sku"`
+	// Shape hint for carriers: box (default), roll (tube), letter (envelope).
+	PackageFormat string `json:"package_format"`
+	// Declared value for shipping insurance, in cents. Falls back to product price when NULL.
+	InsuranceValueCents pgtype.Int8 `json:"insurance_value_cents"`
 }
 
 type StockReservation struct {
@@ -347,6 +361,18 @@ type Store struct {
 	CartRealTime bool `json:"cart_real_time"`
 	// Store CNPJ (Brazilian tax ID) - format: XX.XXX.XXX/XXXX-XX
 	Cnpj pgtype.Text `json:"cnpj"`
+	// Street number of the shipping origin address
+	AddressNumber pgtype.Text `json:"address_number"`
+	// Optional address complement (suite, floor, etc.) of the shipping origin
+	AddressComplement pgtype.Text `json:"address_complement"`
+	// Neighborhood/bairro of the shipping origin address
+	AddressDistrict pgtype.Text `json:"address_district"`
+	// Inscricao estadual of the store (optional, may be ISENTO)
+	AddressStateRegister pgtype.Text `json:"address_state_register"`
+	// Weight in grams of the consolidating package (empty box, bubble wrap) added once per shipment
+	DefaultPackageWeightGrams int32 `json:"default_package_weight_grams"`
+	// Default package format for shipping: box, roll or letter
+	DefaultPackageFormat string `json:"default_package_format"`
 }
 
 type StoreInvitation struct {

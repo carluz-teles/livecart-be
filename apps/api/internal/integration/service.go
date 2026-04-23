@@ -190,6 +190,8 @@ func (s *Service) GetOAuthURL(ctx context.Context, input GetOAuthURLInput) (*Get
 		return s.getTinyOAuthURL(input.StoreID)
 	case "instagram":
 		return s.getInstagramOAuthURL(input.StoreID)
+	case "melhor_envio":
+		return s.getMelhorEnvioOAuthURL(input.StoreID)
 	default:
 		return nil, httpx.ErrUnprocessable("unknown provider: " + input.Provider)
 	}
@@ -329,6 +331,8 @@ func (s *Service) HandleOAuthCallback(ctx context.Context, input OAuthCallbackIn
 		return s.handleTinyCallback(ctx, input)
 	case "instagram":
 		return s.handleInstagramCallback(ctx, input)
+	case "melhor_envio":
+		return s.handleMelhorEnvioCallback(ctx, input)
 	default:
 		return nil, httpx.ErrUnprocessable("unknown provider: " + input.Provider)
 	}
@@ -986,6 +990,38 @@ func (s *Service) GetERPProvider(ctx context.Context, integrationID, storeID str
 	}
 
 	return erpProvider, nil
+}
+
+// GetShippingProvider returns the ShippingProvider for the store's active
+// shipping integration. Returns httpx.ErrNotFound when no shipping integration
+// is configured for the store.
+func (s *Service) GetShippingProvider(ctx context.Context, storeID string) (providers.ShippingProvider, error) {
+	rows, err := s.repo.ListByType(ctx, storeID, string(providers.ProviderTypeShipping))
+	if err != nil {
+		return nil, err
+	}
+	var active *IntegrationRow
+	for i := range rows {
+		if rows[i].Status == "active" {
+			active = &rows[i]
+			break
+		}
+	}
+	if active == nil {
+		return nil, httpx.ErrNotFound("no active shipping integration for this store")
+	}
+
+	provider, err := s.createProviderFromRow(ctx, active)
+	if err != nil {
+		return nil, err
+	}
+
+	shippingProvider, ok := provider.(providers.ShippingProvider)
+	if !ok {
+		return nil, httpx.ErrUnprocessable("failed to cast to shipping provider")
+	}
+
+	return shippingProvider, nil
 }
 
 // GetSocialProvider returns a SocialProvider for the given integration.
@@ -2663,6 +2699,19 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 				zap.String("cart_id", cart.ID),
 				zap.Error(err),
 			)
+		}
+	}
+
+	// Attach the chosen shipping option (carrier + service + real cost) so the
+	// ERP records the shipment alongside the sales order. Use the real cost
+	// (merchant visibility) even when the event applied free shipping to the
+	// customer, so the ERP order reflects the actual freight expense.
+	if cart.ShippingServiceName != "" {
+		order.Shipping = &providers.ERPOrderShipping{
+			Carrier:      cart.ShippingCarrier,
+			Service:      cart.ShippingServiceName,
+			CostCents:    cart.ShippingRealCost,
+			DeadlineDays: cart.ShippingDeadline,
 		}
 	}
 

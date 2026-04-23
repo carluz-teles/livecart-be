@@ -1168,6 +1168,12 @@ type CartRow struct {
 	CustomerDocument string
 	CustomerPhone    string
 	ShippingAddress  json.RawMessage
+
+	// Shipping selection persisted at checkout time.
+	ShippingServiceName string
+	ShippingCarrier     string
+	ShippingRealCost    int64
+	ShippingDeadline    int
 }
 
 // GetCartForPaidOrder loads a cart by ID with customer/shipping data plus the
@@ -1210,6 +1216,25 @@ func (r *Repository) GetCartForPaidOrder(ctx context.Context, cartID string) (*C
 	if cart.CustomerPhone.Valid {
 		row.CustomerPhone = cart.CustomerPhone.String
 	}
+
+	// Load shipping selection separately (not part of the sqlc cart model yet).
+	var (
+		shipName     pgtype.Text
+		shipCarrier  pgtype.Text
+		shipRealCost pgtype.Int8
+		shipDeadline pgtype.Int4
+	)
+	err = r.pool.QueryRow(ctx, `
+		SELECT shipping_service_name, shipping_carrier, shipping_cost_real_cents, shipping_deadline_days
+		FROM carts WHERE id = $1
+	`, cID).Scan(&shipName, &shipCarrier, &shipRealCost, &shipDeadline)
+	if err == nil {
+		row.ShippingServiceName = shipName.String
+		row.ShippingCarrier = shipCarrier.String
+		row.ShippingRealCost = shipRealCost.Int64
+		row.ShippingDeadline = int(shipDeadline.Int32)
+	}
+
 	return row, nil
 }
 

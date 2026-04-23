@@ -28,11 +28,74 @@ func (h *Handler) RegisterRoutes(app *fiber.App) {
 	checkout.Get("/:token", h.GetCartForCheckout)
 	checkout.Post("/:token", h.GenerateCheckout)
 
+	// Shipping routes
+	checkout.Post("/:token/shipping-quote", h.QuoteShipping)
+	checkout.Put("/:token/shipping-method", h.SelectShippingMethod)
+
 	// Transparent checkout routes
 	checkout.Get("/:token/config", h.GetCheckoutConfig)
 	checkout.Post("/:token/card", h.ProcessCardPayment)
 	checkout.Post("/:token/pix", h.GeneratePix)
 	checkout.Get("/:token/status", h.GetPaymentStatus)
+}
+
+// QuoteShipping handles POST /api/public/checkout/:token/shipping-quote
+// Returns the carrier options available for the cart destination zip.
+func (h *Handler) QuoteShipping(c *fiber.Ctx) error {
+	token := c.Params("token")
+	if token == "" {
+		return httpx.BadRequest(c, "token is required")
+	}
+
+	var req ShippingQuoteRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	out, err := h.service.QuoteShipping(c.Context(), QuoteShippingInput{
+		Token:   token,
+		ZipCode: req.ZipCode,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, ShippingQuoteResponse{
+		QuotedAt:     out.QuotedAt,
+		FreeShipping: out.FreeShipping,
+		Options:      out.Options,
+	})
+}
+
+// SelectShippingMethod handles PUT /api/public/checkout/:token/shipping-method
+// Re-quotes the chosen service and persists the selection on the cart.
+func (h *Handler) SelectShippingMethod(c *fiber.Ctx) error {
+	token := c.Params("token")
+	if token == "" {
+		return httpx.BadRequest(c, "token is required")
+	}
+
+	var req SelectShippingMethodRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	out, err := h.service.SelectShippingMethod(c.Context(), SelectShippingMethodInput{
+		Token:     token,
+		ServiceID: req.ServiceID,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, SelectShippingMethodResponse{
+		Shipping: out.Shipping,
+		Summary:  out.Summary,
+	})
 }
 
 // GetCartForCheckout handles GET /api/public/checkout/:token
@@ -252,6 +315,17 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 		}
 	}
 
+	summary := CartSummary{
+		Subtotal:   subtotal,
+		TotalItems: totalItems,
+		Total:      subtotal,
+	}
+	if output.Cart.Shipping != nil {
+		summary.ShippingCost = output.Cart.Shipping.CostCents
+		summary.Total = subtotal + output.Cart.Shipping.CostCents
+		summary.HasShippingQuote = true
+	}
+
 	return CartForCheckoutResponse{
 		ID:                 output.Cart.ID,
 		Token:              output.Cart.Token,
@@ -273,10 +347,8 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 			Name:    output.Cart.StoreName,
 			LogoURL: output.Cart.StoreLogoURL,
 		},
-		Items: items,
-		Summary: CartSummary{
-			Subtotal:   subtotal,
-			TotalItems: totalItems,
-		},
+		Items:    items,
+		Summary:  summary,
+		Shipping: output.Cart.Shipping,
 	}
 }

@@ -10,21 +10,22 @@ import (
 
 // CartForCheckoutResponse is the response for GET /api/public/checkout/:token
 type CartForCheckoutResponse struct {
-	ID                 string                `json:"id"`
-	Token              string                `json:"token"`
-	Status             string                `json:"status"`
-	CustomerEmail      *string               `json:"customerEmail"`
-	PaymentStatus      string                `json:"paymentStatus"`
-	CheckoutURL        *string               `json:"checkoutUrl"`
-	PlatformHandle     string                `json:"platformHandle"`
-	AllowEdit          bool                  `json:"allowEdit"`
-	MaxQuantityPerItem int                   `json:"maxQuantityPerItem"`
-	ExpiresAt          *time.Time            `json:"expiresAt"`
-	CreatedAt          time.Time             `json:"createdAt"`
-	Event              CartEventInfo         `json:"event"`
-	Store              CartStoreInfo         `json:"store"`
-	Items              []CartItemResponse    `json:"items"`
-	Summary            CartSummary           `json:"summary"`
+	ID                 string                 `json:"id"`
+	Token              string                 `json:"token"`
+	Status             string                 `json:"status"`
+	CustomerEmail      *string                `json:"customerEmail"`
+	PaymentStatus      string                 `json:"paymentStatus"`
+	CheckoutURL        *string                `json:"checkoutUrl"`
+	PlatformHandle     string                 `json:"platformHandle"`
+	AllowEdit          bool                   `json:"allowEdit"`
+	MaxQuantityPerItem int                    `json:"maxQuantityPerItem"`
+	ExpiresAt          *time.Time             `json:"expiresAt"`
+	CreatedAt          time.Time              `json:"createdAt"`
+	Event              CartEventInfo          `json:"event"`
+	Store              CartStoreInfo          `json:"store"`
+	Items              []CartItemResponse     `json:"items"`
+	Summary            CartSummary            `json:"summary"`
+	Shipping           *CartShippingSelection `json:"shipping,omitempty"`
 }
 
 // CartEventInfo contains event info for the checkout page
@@ -55,8 +56,23 @@ type CartItemResponse struct {
 
 // CartSummary contains the cart totals
 type CartSummary struct {
-	Subtotal   int64 `json:"subtotal"`
-	TotalItems int   `json:"totalItems"`
+	Subtotal         int64 `json:"subtotal"`
+	ShippingCost     int64 `json:"shippingCost"`
+	Total            int64 `json:"total"`
+	TotalItems       int   `json:"totalItems"`
+	HasShippingQuote bool  `json:"hasShippingQuote"`
+}
+
+// CartShippingSelection describes the freight option currently attached to the cart.
+// All fields are zero when the customer has not yet chosen an option.
+type CartShippingSelection struct {
+	ServiceID     int    `json:"serviceId"`
+	ServiceName   string `json:"serviceName"`
+	Carrier       string `json:"carrier"`
+	CostCents     int64  `json:"costCents"`     // what the customer is charged (0 when free_shipping)
+	RealCostCents int64  `json:"realCostCents"` // real quote value (merchant visibility)
+	DeadlineDays  int    `json:"deadlineDays"`
+	FreeShipping  bool   `json:"freeShipping"`
 }
 
 // GenerateCheckoutRequest is the request for POST /api/public/checkout/:token
@@ -179,11 +195,13 @@ type CartDetails struct {
 	CreatedAt          time.Time
 	ExpiresAt          *time.Time
 	EventTitle         string
+	EventFreeShipping  bool
 	StoreID            string
 	StoreName          string
 	StoreLogoURL       *string
 	AllowEdit          bool
 	MaxQuantityPerItem int
+	Shipping           *CartShippingSelection
 }
 
 // CartItemDetails contains a cart item with product info
@@ -290,6 +308,72 @@ type GetPaymentStatusOutput struct {
 }
 
 // =============================================================================
+// SHIPPING DTOs
+// =============================================================================
+
+// ShippingQuoteRequest is the body for POST /api/public/checkout/:token/shipping-quote
+type ShippingQuoteRequest struct {
+	ZipCode string `json:"zipCode" validate:"required"`
+}
+
+// ShippingQuoteOptionResponse is a single carrier option returned from a quote.
+type ShippingQuoteOptionResponse struct {
+	ID             int    `json:"id"` // service_id at the provider
+	Service        string `json:"service"`
+	Carrier        string `json:"carrier"`
+	CarrierLogoURL string `json:"carrierLogoUrl,omitempty"`
+	PriceCents     int64  `json:"priceCents"`     // what customer will pay (0 when event free_shipping)
+	RealPriceCents int64  `json:"realPriceCents"` // actual quote value
+	DeadlineDays   int    `json:"deadlineDays"`
+	Available      bool   `json:"available"`
+	Error          string `json:"error,omitempty"`
+}
+
+// ShippingQuoteResponse is the body of a successful quote.
+type ShippingQuoteResponse struct {
+	QuotedAt     time.Time                     `json:"quotedAt"`
+	FreeShipping bool                          `json:"freeShipping"`
+	Options      []ShippingQuoteOptionResponse `json:"options"`
+}
+
+// SelectShippingMethodRequest is the body for PUT /api/public/checkout/:token/shipping-method
+type SelectShippingMethodRequest struct {
+	ServiceID int `json:"serviceId" validate:"required,gt=0"`
+}
+
+// SelectShippingMethodResponse is the body returned after selecting a freight option.
+type SelectShippingMethodResponse struct {
+	Shipping CartShippingSelection `json:"shipping"`
+	Summary  CartSummary           `json:"summary"`
+}
+
+// =============================================================================
+// SHIPPING SERVICE IO
+// =============================================================================
+
+type QuoteShippingInput struct {
+	Token      string
+	ZipCode    string
+	ServiceIDs []int // optional filter
+}
+
+type QuoteShippingOutput struct {
+	QuotedAt     time.Time
+	FreeShipping bool
+	Options      []ShippingQuoteOptionResponse
+}
+
+type SelectShippingMethodInput struct {
+	Token     string
+	ServiceID int
+}
+
+type SelectShippingMethodOutput struct {
+	Shipping CartShippingSelection
+	Summary  CartSummary
+}
+
+// =============================================================================
 // REPOSITORY TYPES
 // =============================================================================
 
@@ -310,11 +394,13 @@ type CartRow struct {
 	CreatedAt          time.Time
 	ExpiresAt          *time.Time
 	EventTitle         string
+	EventFreeShipping  bool
 	StoreID            string
 	StoreName          string
 	StoreLogoURL       *string
 	AllowEdit          bool
 	MaxQuantityPerItem int
+	Shipping           *CartShippingSelection
 }
 
 // CartItemRow represents a cart item row from the database
