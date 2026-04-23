@@ -663,10 +663,72 @@ func (m *MercadoPago) GeneratePixPayment(ctx context.Context, input PixPaymentIn
 	}, nil
 }
 
-// GetPaymentMethods returns the available payment methods.
+// GetPaymentMethods returns the payment methods actually enabled on the
+// collector's Mercado Pago account. Queries /v1/payment_methods and keeps
+// only entries whose status is active. PIX is filtered out when the account
+// hasn't registered a PIX key (or deactivated QR rendering), so the frontend
+// never offers an option the merchant cannot fulfill.
+//
+// On any failure talking to Mercado Pago we fall back to ["card"] to keep
+// the checkout working — we only offer PIX when we have positive evidence
+// that it is enabled.
 func (m *MercadoPago) GetPaymentMethods(ctx context.Context) ([]string, error) {
-	// Mercado Pago supports both card and pix in Brazil
-	return []string{"card", "pix"}, nil
+	url := mpAPIBaseURL + "/v1/payment_methods"
+	resp, body, err := m.DoRequest(ctx, http.MethodGet, url, nil, m.authHeaders())
+	if err != nil || !providers.IsSuccessStatus(resp.StatusCode) {
+		m.Logger.Warn("mercado pago payment_methods lookup failed, falling back to card-only",
+			zap.Int("status", statusOf(resp)),
+			zap.Error(err),
+		)
+		return []string{"card"}, nil
+	}
+
+	var entries []struct {
+		ID              string `json:"id"`
+		PaymentTypeID   string `json:"payment_type_id"`
+		Status          string `json:"status"`
+	}
+	if err := json.Unmarshal(body, &entries); err != nil {
+		m.Logger.Warn("mercado pago payment_methods parse failed, falling back to card-only",
+			zap.Error(err),
+		)
+		return []string{"card"}, nil
+	}
+
+	hasCard, hasPIX := false, false
+	for _, e := range entries {
+		if e.Status != "active" {
+			continue
+		}
+		switch e.PaymentTypeID {
+		case "credit_card", "debit_card":
+			hasCard = true
+		case "bank_transfer":
+			if e.ID == "pix" {
+				hasPIX = true
+			}
+		}
+	}
+
+	methods := make([]string, 0, 2)
+	if hasCard {
+		methods = append(methods, "card")
+	}
+	if hasPIX {
+		methods = append(methods, "pix")
+	}
+	if len(methods) == 0 {
+		methods = append(methods, "card") // last-resort fallback
+	}
+	return methods, nil
+}
+
+// statusOf returns the HTTP status when the response is not nil.
+func statusOf(resp *http.Response) int {
+	if resp == nil {
+		return 0
+	}
+	return resp.StatusCode
 }
 
 // mapMPPaymentType maps Mercado Pago payment_type_id to our payment method.
