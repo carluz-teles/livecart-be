@@ -571,6 +571,7 @@ type EventStatsResponse struct {
 
 type CartWithTotalResponse struct {
 	ID              string     `json:"id"`
+	Token           string     `json:"token"`
 	SessionID       *string    `json:"sessionId"`
 	PlatformUserID  string     `json:"platformUserId"`
 	PlatformHandle  string     `json:"platformHandle"`
@@ -618,6 +619,7 @@ type EventStatsOutput struct {
 
 type CartWithTotalOutput struct {
 	ID              string
+	Token           string
 	SessionID       *string
 	PlatformUserID  string
 	PlatformHandle  string

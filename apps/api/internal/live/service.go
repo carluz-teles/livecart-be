@@ -867,6 +867,7 @@ func (s *Service) ListCartsWithTotalByEvent(ctx context.Context, eventID, storeI
 	for i, cart := range carts {
 		outputs[i] = CartWithTotalOutput{
 			ID:              cart.ID,
+			Token:           cart.Token,
 			SessionID:       cart.SessionID,
 			PlatformUserID:  cart.PlatformUserID,
 			PlatformHandle:  cart.PlatformHandle,

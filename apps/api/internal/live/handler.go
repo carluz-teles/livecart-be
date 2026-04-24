@@ -719,6 +719,7 @@ func (h *Handler) ListCarts(c *fiber.Ctx) error {
 	for i, cart := range carts {
 		responses[i] = CartWithTotalResponse{
 			ID:              cart.ID,
+			Token:           cart.Token,
 			SessionID:       cart.SessionID,
 			PlatformUserID:  cart.PlatformUserID,
 			PlatformHandle:  cart.PlatformHandle,
