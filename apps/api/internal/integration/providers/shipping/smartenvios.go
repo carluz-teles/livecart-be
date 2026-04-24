@@ -304,6 +304,13 @@ func (s *SmartEnvios) ListCarriers(ctx context.Context) ([]CarrierService, error
 	if err != nil {
 		return nil, err
 	}
+	// SmartEnvios occasionally returns 200 OK with a `{"message": "..."}`
+	// error body — for example when the token lacks permission for a given
+	// endpoint. Detect that shape and surface the message verbatim so the
+	// admin knows exactly what to fix at the SmartEnvios side.
+	if msg := extractSmartEnviosErrorMessage(respBody); msg != "" {
+		return nil, fmt.Errorf("smartenvios: %s", msg)
+	}
 	var entries []seServiceListEntry
 	if err := json.Unmarshal(respBody, &entries); err != nil {
 		return nil, fmt.Errorf("parsing smartenvios services response: %w, body=%s", err, string(respBody))
@@ -934,4 +941,23 @@ func valueOr(first, second string) string {
 		return first
 	}
 	return second
+}
+
+// extractSmartEnviosErrorMessage inspects a response body that is expected to
+// be an array (e.g. /quote/services) or success envelope and detects the
+// alternative error shape `{"message": "..."}` SmartEnvios ships with HTTP 200
+// when the token lacks permission for a specific route. Returns the message
+// when the body matches that shape, empty string otherwise.
+func extractSmartEnviosErrorMessage(body []byte) string {
+	trimmed := strings.TrimLeft(string(body), " \t\r\n")
+	if !strings.HasPrefix(trimmed, "{") {
+		return ""
+	}
+	var envelope struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(envelope.Message)
 }

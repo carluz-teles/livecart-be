@@ -1126,8 +1126,20 @@ func (s *Service) ConnectSmartEnvios(ctx context.Context, input ConnectSmartEnvi
 	if err != nil {
 		return nil, fmt.Errorf("instantiating smartenvios provider: %w", err)
 	}
-	if _, err := probe.TestConnection(ctx); err != nil {
+	// TestConnection follows the shared provider convention: it returns
+	// (result, nil) on both success AND failure — failures are surfaced via
+	// result.Success == false. Checking only `err != nil` silently accepts
+	// bad tokens and stores the integration as active. Check both.
+	probeResult, err := probe.TestConnection(ctx)
+	if err != nil {
 		return nil, httpx.ErrUnprocessable("falha ao validar token SmartEnvios: " + err.Error())
+	}
+	if probeResult == nil || !probeResult.Success {
+		msg := "token rejeitado pela SmartEnvios"
+		if probeResult != nil && probeResult.Message != "" {
+			msg = probeResult.Message
+		}
+		return nil, httpx.ErrUnprocessable("falha ao validar token SmartEnvios: " + msg)
 	}
 
 	encrypted, err := s.encryptor.EncryptJSON(creds)
