@@ -92,8 +92,12 @@ func main() {
 	clerkFrontendAPI := config.ClerkFrontendAPI.Required()
 	port := config.Port.StringOr("3001")
 
-	// Run migrations in dev
-	if !config.IsProduction() {
+	// Run migrations automatically in non-production environments. Production
+	// opts in by setting RUN_MIGRATIONS_ON_STARTUP=true on the service — if a
+	// bad migration ships, the boot fails fast with a clear log and the
+	// platform keeps the previous container serving traffic (zero downtime).
+	shouldMigrate := !config.IsProduction() || os.Getenv("RUN_MIGRATIONS_ON_STARTUP") == "true"
+	if shouldMigrate {
 		if err := database.RunMigrations(databaseURL, "apps/api/db/migrations"); err != nil {
 			log.Sugar().Fatalf("running migrations: %v", err)
 		}
