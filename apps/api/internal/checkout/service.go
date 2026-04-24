@@ -44,13 +44,11 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 		return nil, err
 	}
 
-	// Validate cart status
+	// Validate cart status (allow viewing paid carts so frontend can show "paid" message)
 	if cart.Status == "expired" {
 		return nil, httpx.ErrUnprocessable("carrinho expirado")
 	}
-	if cart.PaymentStatus == "paid" {
-		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
-	}
+	// Note: paid carts are allowed - frontend will show a "paid" dialog
 
 	// Get cart items
 	items, err := s.repo.ListCartItems(ctx, cart.ID)
