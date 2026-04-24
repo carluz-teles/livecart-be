@@ -375,6 +375,12 @@ func (s *Service) handleMercadoPagoCallback(ctx context.Context, input OAuthCall
 		"code_verifier": oauthState.CodeVerifier,
 	}
 
+	// Add test_token parameter to get TEST credentials instead of production
+	if config.MercadoPagoTestMode.String() == "true" {
+		payload["test_token"] = "true"
+		s.logger.Info("Mercado Pago OAuth: requesting TEST credentials (test_token=true)")
+	}
+
 	payloadBytes, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, bytes.NewReader(payloadBytes))
 	if err != nil {
