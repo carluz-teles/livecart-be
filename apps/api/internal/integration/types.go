@@ -72,9 +72,14 @@ func (n *NoopNotifier) NotifyEventCheckout(_ context.Context, _ NotifyEventCheck
 // =============================================================================
 
 // CreateIntegrationRequest is the HTTP request body for creating an integration.
+//
+// The `Type` and `Provider` oneof lists must stay in sync with the DB check
+// constraints (`integrations_type_check`, `integrations_provider_check`) and
+// with the factory switches in providers/factory.go — whenever a new provider
+// is plugged in, add it here too or this generic endpoint will 422.
 type CreateIntegrationRequest struct {
-	Type        string         `json:"type" validate:"required,oneof=payment erp"`
-	Provider    string         `json:"provider" validate:"required,oneof=mercado_pago tiny"`
+	Type        string         `json:"type" validate:"required,oneof=payment erp social shipping"`
+	Provider    string         `json:"provider" validate:"required,oneof=mercado_pago pagarme tiny instagram melhor_envio smartenvios"`
 	Credentials map[string]any `json:"credentials" validate:"required"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
 }
