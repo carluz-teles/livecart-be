@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"fmt"
 	"io"
 	"time"
 
@@ -102,6 +103,14 @@ func (h *Handler) ListShippingCarriers(c *fiber.Ctx) error {
 	return httpx.OK(c, toCarrierResponse(carriers))
 }
 
+// valueOrDefault returns v when non-empty, otherwise fallback.
+func valueOrDefault(v, fallback string) string {
+	if v != "" {
+		return v
+	}
+	return fallback
+}
+
 func toCarrierResponse(in []providers.CarrierService) []ShippingCarrierResponse {
 	out := make([]ShippingCarrierResponse, 0, len(in))
 	for _, c := range in {
@@ -181,6 +190,7 @@ type CreateShippingShipmentRequest struct {
 
 // CreateShippingShipmentResponse mirrors providers.CreateShipmentResult for the admin UI.
 type CreateShippingShipmentResponse struct {
+	ShipmentID          string    `json:"shipmentId"` // LiveCart-side shipment id (shipments.id)
 	ProviderOrderID     string    `json:"providerOrderId"`
 	ProviderOrderNumber string    `json:"providerOrderNumber,omitempty"`
 	TrackingCode        string    `json:"trackingCode,omitempty"`
@@ -240,7 +250,36 @@ func (h *Handler) CreateShippingShipment(c *fiber.Ctx) error {
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
+
+	// Persist so the admin UI can resume the flow on future page loads.
+	// `externalOrderId` on the request maps to our internal cart/order id.
+	invoiceKind := ""
+	if req.InvoiceKey != "" {
+		invoiceKind = "nfe"
+	}
+	shipment, err := h.service.repo.CreateShipment(c.Context(), CreateShipmentParams{
+		OrderID:             req.ExternalOrderID,
+		StoreID:             storeID,
+		Provider:            string(providerName),
+		ProviderOrderID:     out.ProviderOrderID,
+		ProviderOrderNumber: out.ProviderOrderNumber,
+		TrackingCode:        out.TrackingCode,
+		InvoiceKey:          req.InvoiceKey,
+		InvoiceKind:         invoiceKind,
+		InvoiceID:           out.InvoiceID,
+		Status:              string(out.Status),
+		StatusRawCode:       out.StatusRawCode,
+		StatusRawName:       out.StatusRawName,
+		ProviderMeta:        out.ProviderMeta,
+	})
+	if err != nil {
+		// Persistence failure is surfaced but the shipment DOES exist at the
+		// provider — caller must retry with the same external_order_id to
+		// reconcile (the ON CONFLICT handles the idempotency path).
+		return httpx.HandleServiceError(c, fmt.Errorf("shipment created at provider but failed to persist locally: %w", err))
+	}
 	return httpx.Created(c, CreateShippingShipmentResponse{
+		ShipmentID:          shipment.ID,
 		ProviderOrderID:     out.ProviderOrderID,
 		ProviderOrderNumber: out.ProviderOrderNumber,
 		TrackingCode:        out.TrackingCode,
@@ -288,13 +327,24 @@ func (h *Handler) AttachShippingInvoice(c *fiber.Ctx) error {
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
+
+	// `shipmentId` on the path is the LiveCart-side id (shipments.id) — resolve
+	// to the provider-side id before calling the provider.
+	shipment, err := h.service.repo.getShipmentByIDForStore(c.Context(), shipmentID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
 	if err := osp.AttachInvoice(c.Context(), providers.AttachInvoiceRequest{
-		ProviderOrderID: shipmentID,
-		ExternalOrderID: req.ExternalOrderID,
+		ProviderOrderID: shipment.ProviderOrderID,
+		ExternalOrderID: valueOrDefault(req.ExternalOrderID, shipment.OrderID),
 		InvoiceKey:      req.InvoiceKey,
 		InvoiceKind:     kind,
 	}); err != nil {
 		return httpx.HandleServiceError(c, err)
+	}
+	if err := h.service.repo.UpdateShipmentInvoice(c.Context(), shipment.ID, req.InvoiceKey, kind); err != nil {
+		return httpx.HandleServiceError(c, fmt.Errorf("invoice attached at provider but failed to persist locally: %w", err))
 	}
 	return httpx.OK(c, map[string]string{"status": "invoice_attached"})
 }
@@ -327,12 +377,22 @@ func (h *Handler) UploadShippingInvoiceXML(c *fiber.Ctx) error {
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
+	shipment, err := h.service.repo.getShipmentByIDForStore(c.Context(), shipmentID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
 	if err := osp.UploadInvoiceXML(c.Context(), providers.UploadInvoiceXMLRequest{
-		ProviderOrderID: shipmentID,
+		ProviderOrderID: shipment.ProviderOrderID,
 		XML:             raw,
 		Filename:        fh.Filename,
 	}); err != nil {
 		return httpx.HandleServiceError(c, err)
+	}
+	// Upload flows do not return an invoice key; mark the shipment's invoice_kind
+	// as 'nfe' so the admin UI knows XML was delivered for this shipment even
+	// if the key is not yet known.
+	if err := h.service.repo.UpdateShipmentInvoice(c.Context(), shipment.ID, shipment.InvoiceKey, "nfe"); err != nil {
+		return httpx.HandleServiceError(c, fmt.Errorf("xml uploaded at provider but failed to persist locally: %w", err))
 	}
 	return httpx.OK(c, map[string]string{"status": "invoice_xml_uploaded"})
 }
@@ -393,6 +453,21 @@ func (h *Handler) GenerateShippingLabels(c *fiber.Ctx) error {
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
+	}
+
+	// Persist per-ticket data back to our shipments. Lookup by provider_order_id
+	// (the one the carrier owns) so label URL + public tracking + tracking code
+	// land on the right row. We ignore lookup misses — the admin may have
+	// requested labels for a shipment that was never persisted locally.
+	for _, t := range result.Tickets {
+		if t.ProviderOrderID == "" {
+			continue
+		}
+		sh, lookupErr := h.service.repo.GetShipmentByProviderOrderID(c.Context(), string(providerName), t.ProviderOrderID)
+		if lookupErr != nil || sh == nil {
+			continue
+		}
+		_ = h.service.repo.UpdateShipmentLabels(c.Context(), sh.ID, result.LabelURL, t.PublicTracking, t.TrackingCode)
 	}
 
 	tickets := make([]GenerateShippingLabelEntry, 0, len(result.Tickets))
@@ -466,6 +541,37 @@ func (h *Handler) TrackShipping(c *fiber.Ctx) error {
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
+	}
+
+	// Persist events + update shipment current status. Best-effort: if we cannot
+	// find a matching shipment locally (e.g. caller tracked by a tracking_code
+	// that is not ours), we still return the data to the admin UI.
+	var targetShipment *ShipmentRow
+	if req.ProviderOrderID != "" {
+		targetShipment, _ = h.service.repo.GetShipmentByProviderOrderID(c.Context(), string(providerName), req.ProviderOrderID)
+	}
+	if targetShipment == nil && result.TrackingCode != "" {
+		targetShipment, _ = h.service.repo.getShipmentByTrackingCode(c.Context(), string(providerName), result.TrackingCode)
+	}
+	if targetShipment != nil {
+		inputs := make([]TrackingEventInput, 0, len(result.Events))
+		for _, e := range result.Events {
+			inputs = append(inputs, TrackingEventInput{
+				Status:      string(e.Status),
+				RawCode:     e.RawCode,
+				RawName:     e.RawName,
+				Observation: e.Observation,
+				EventAt:     e.EventAt,
+				Source:      "poll",
+			})
+		}
+		_ = h.service.repo.InsertTrackingEvents(c.Context(), targetShipment.ID, inputs)
+		if len(result.Events) > 0 {
+			last := result.Events[len(result.Events)-1]
+			_ = h.service.repo.UpdateShipmentStatus(c.Context(), targetShipment.ID, string(result.CurrentStatus), last.RawCode, last.RawName, result.TrackingCode)
+		} else if string(result.CurrentStatus) != "" {
+			_ = h.service.repo.UpdateShipmentStatus(c.Context(), targetShipment.ID, string(result.CurrentStatus), 0, "", result.TrackingCode)
+		}
 	}
 
 	events := make([]TrackShippingEvent, 0, len(result.Events))

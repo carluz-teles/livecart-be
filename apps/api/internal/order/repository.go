@@ -2,10 +2,14 @@ package order
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -210,13 +214,48 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 				 ORDER BY lsp.added_at LIMIT 1),
 				'instagram'
 			) as live_platform,
-			e.store_id
+			e.store_id,
+
+			COALESCE(c.customer_email, ''),
+			COALESCE(c.customer_name, ''),
+			COALESCE(c.customer_document, ''),
+			COALESCE(c.customer_phone, ''),
+
+			c.shipping_address,
+
+			COALESCE(c.shipping_provider, ''),
+			COALESCE(c.shipping_service_id, ''),
+			COALESCE(c.shipping_service_name, ''),
+			COALESCE(c.shipping_carrier, ''),
+			COALESCE(c.shipping_cost_cents, 0),
+			COALESCE(c.shipping_cost_real_cents, 0),
+			COALESCE(c.shipping_deadline_days, 0),
+			COALESCE(e.free_shipping, false),
+
+			s.name,
+			s.logo_url,
+			COALESCE(s.cnpj, ''),
+			COALESCE(s.email_address, ''),
+			COALESCE(s.whatsapp_number, ''),
+			COALESCE(s.address_zip, ''),
+			COALESCE(s.address_street, ''),
+			COALESCE(s.address_number, ''),
+			COALESCE(s.address_complement, ''),
+			COALESCE(s.address_district, ''),
+			COALESCE(s.address_city, ''),
+			COALESCE(s.address_state, ''),
+			COALESCE(s.default_package_weight_grams, 0),
+			COALESCE(s.default_package_format, 'box')
 		FROM carts c
 		JOIN live_events e ON e.id = c.event_id
+		JOIN stores s      ON s.id = e.store_id
 		WHERE c.id = $1
 	`
 
-	var row OrderDetailRow
+	var (
+		row             OrderDetailRow
+		shippingAddress []byte // JSONB
+	)
 	err := r.db.QueryRow(ctx, query, id).Scan(
 		&row.ID,
 		&row.EventID,
@@ -231,12 +270,67 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 		&row.LiveTitle,
 		&row.LivePlatform,
 		&row.StoreID,
+
+		&row.CustomerEmail,
+		&row.CustomerName,
+		&row.CustomerDocument,
+		&row.CustomerPhone,
+
+		&shippingAddress,
+
+		&row.ShippingProvider,
+		&row.ShippingServiceID,
+		&row.ShippingServiceName,
+		&row.ShippingCarrier,
+		&row.ShippingCostCents,
+		&row.ShippingCostRealCents,
+		&row.ShippingDeadlineDays,
+		&row.EventFreeShipping,
+
+		&row.StoreName,
+		&row.StoreLogoURL,
+		&row.StoreCNPJ,
+		&row.StoreEmail,
+		&row.StorePhone,
+		&row.StoreAddressZip,
+		&row.StoreAddressStreet,
+		&row.StoreAddressNumber,
+		&row.StoreAddressComplement,
+		&row.StoreAddressDistrict,
+		&row.StoreAddressCity,
+		&row.StoreAddressState,
+		&row.StoreDefaultPkgWeightGrams,
+		&row.StoreDefaultPkgFormat,
 	)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("getting order by id: %w", err)
+	}
+
+	// Decode the shipping_address JSONB into the flat projection fields. The
+	// column accepts any shape the checkout produces — we only pull known
+	// fields and silently tolerate missing ones.
+	if len(shippingAddress) > 0 {
+		var addr struct {
+			ZipCode      string `json:"zipCode"`
+			Street       string `json:"street"`
+			Number       string `json:"number"`
+			Complement   string `json:"complement"`
+			Neighborhood string `json:"neighborhood"`
+			City         string `json:"city"`
+			State        string `json:"state"`
+		}
+		if jerr := json.Unmarshal(shippingAddress, &addr); jerr == nil {
+			row.ShippingAddressZip = addr.ZipCode
+			row.ShippingAddressStreet = addr.Street
+			row.ShippingAddressNumber = addr.Number
+			row.ShippingAddressComplement = addr.Complement
+			row.ShippingAddressNeighborhood = addr.Neighborhood
+			row.ShippingAddressCity = addr.City
+			row.ShippingAddressState = addr.State
+		}
 	}
 
 	return &row, nil
@@ -253,7 +347,12 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			COALESCE(ci.unit_price, 0)::BIGINT as unit_price,
 			p.name as product_name,
 			p.image_url as product_image,
-			p.keyword as product_keyword
+			p.keyword as product_keyword,
+			COALESCE(p.weight_grams, 0),
+			COALESCE(p.height_cm, 0),
+			COALESCE(p.width_cm, 0),
+			COALESCE(p.length_cm, 0),
+			COALESCE(p.package_format, 'box')
 		FROM cart_items ci
 		JOIN products p ON p.id = ci.product_id
 		WHERE ci.cart_id = $1
@@ -278,6 +377,11 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			&item.ProductName,
 			&item.ProductImage,
 			&item.ProductKeyword,
+			&item.WeightGrams,
+			&item.HeightCm,
+			&item.WidthCm,
+			&item.LengthCm,
+			&item.PackageFormat,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scanning order item row: %w", err)
@@ -370,4 +474,95 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (*OrderStatsO
 	}
 
 	return &stats, nil
+}
+
+// GetShipmentForOrder returns the shipment attached to an order (at most one).
+// Returns nil, nil when no shipment has been created yet — the order detail
+// handler exposes that as `shipment: null`.
+func (r *Repository) GetShipmentForOrder(ctx context.Context, orderID string) (*OrderShipmentRecord, error) {
+	uid, err := uuid.Parse(orderID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid order id: %w", err)
+	}
+	const q = `
+		SELECT
+			id::text,
+			provider,
+			provider_order_id,
+			COALESCE(provider_order_number, ''),
+			COALESCE(tracking_code, ''),
+			COALESCE(public_tracking_url, ''),
+			COALESCE(invoice_key, ''),
+			COALESCE(invoice_kind, ''),
+			COALESCE(label_url, ''),
+			status,
+			COALESCE(status_raw_code, 0),
+			COALESCE(status_raw_name, ''),
+			created_at,
+			updated_at
+		FROM shipments
+		WHERE order_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1
+	`
+	var rec OrderShipmentRecord
+	err = r.db.QueryRow(ctx, q, pgtype.UUID{Bytes: uid, Valid: true}).Scan(
+		&rec.ID,
+		&rec.Provider,
+		&rec.ProviderOrderID,
+		&rec.ProviderOrderNumber,
+		&rec.TrackingCode,
+		&rec.PublicTrackingURL,
+		&rec.InvoiceKey,
+		&rec.InvoiceKind,
+		&rec.LabelURL,
+		&rec.Status,
+		&rec.StatusRawCode,
+		&rec.StatusRawName,
+		&rec.CreatedAt,
+		&rec.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting shipment for order: %w", err)
+	}
+	return &rec, nil
+}
+
+// ListShipmentEvents returns the tracking timeline for a shipment, ascending
+// by event_at so the UI can render it in chronological order (older first).
+func (r *Repository) ListShipmentEvents(ctx context.Context, shipmentID string) ([]OrderShipmentEventRecord, error) {
+	uid, err := uuid.Parse(shipmentID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid shipment id: %w", err)
+	}
+	const q = `
+		SELECT
+			status,
+			COALESCE(raw_code, 0),
+			COALESCE(raw_name, ''),
+			COALESCE(observation, ''),
+			event_at,
+			source
+		FROM shipment_tracking_events
+		WHERE shipment_id = $1
+		ORDER BY event_at ASC, received_at ASC
+	`
+	rows, err := r.db.Query(ctx, q, pgtype.UUID{Bytes: uid, Valid: true})
+	if err != nil {
+		return nil, fmt.Errorf("listing shipment events: %w", err)
+	}
+	defer rows.Close()
+
+	var out []OrderShipmentEventRecord
+	for rows.Next() {
+		var e OrderShipmentEventRecord
+		if err := rows.Scan(&e.Status, &e.RawCode, &e.RawName, &e.Observation, &e.EventAt, &e.Source); err != nil {
+			return nil, fmt.Errorf("scanning shipment event: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }

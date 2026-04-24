@@ -31,6 +31,15 @@ type OrderItemResponse struct {
 	Quantity     int     `json:"quantity"`
 	UnitPrice    int64   `json:"unitPrice"`
 	TotalPrice   int64   `json:"totalPrice"`
+
+	// Shipping dimensions (joined from products). Zero when the product has no
+	// dimensions filled in — admin UIs should treat them as "missing" not "0"
+	// and block create-shipment until the merchant fills them in.
+	WeightGrams   int    `json:"weightGrams"`
+	HeightCm      int    `json:"heightCm"`
+	WidthCm       int    `json:"widthCm"`
+	LengthCm      int    `json:"lengthCm"`
+	PackageFormat string `json:"packageFormat"`
 }
 
 type OrderResponse struct {
@@ -50,10 +59,109 @@ type OrderResponse struct {
 	ExpiresAt      *time.Time          `json:"expiresAt"`
 }
 
-// OrderDetailResponse includes customer comments for the detail page
+// OrderDetailResponse includes everything the admin order-detail page needs:
+// customer captured at checkout, delivery address, freight selection, the
+// shipment created at the carrier (when any) with its tracking timeline, and
+// store shipping defaults so the UI can pre-fill the create-shipment form.
+// The `OrderResponse` embedding keeps list-page fields identical.
 type OrderDetailResponse struct {
 	OrderResponse
-	Comments []OrderCommentResponse `json:"comments"`
+	Comments        []OrderCommentResponse        `json:"comments"`
+	Customer        *OrderCustomerResponse        `json:"customer,omitempty"`
+	ShippingAddress *OrderShippingAddressResponse `json:"shippingAddress,omitempty"`
+	Shipping        *OrderShippingSelectionResp   `json:"shipping,omitempty"`
+	Shipment        *OrderShipmentResponse        `json:"shipment,omitempty"`
+	Store           *OrderStoreResponse           `json:"store,omitempty"`
+}
+
+// OrderCustomerResponse mirrors the customer_* columns on carts captured at checkout.
+type OrderCustomerResponse struct {
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+	Document string `json:"document"`
+	Phone    string `json:"phone"`
+}
+
+// OrderShippingAddressResponse is the destination address captured at checkout.
+// All fields are strings so the admin UI never has to coerce nulls.
+type OrderShippingAddressResponse struct {
+	ZipCode      string `json:"zipCode"`
+	Street       string `json:"street"`
+	Number       string `json:"number"`
+	Complement   string `json:"complement"`
+	Neighborhood string `json:"neighborhood"`
+	City         string `json:"city"`
+	State        string `json:"state"`
+}
+
+// OrderShippingSelectionResp mirrors CartShippingSelection from the checkout
+// DTOs, kept provider-agnostic (serviceId is opaque string + provider name).
+type OrderShippingSelectionResp struct {
+	Provider      string `json:"provider"`
+	ServiceID     string `json:"serviceId"`
+	ServiceName   string `json:"serviceName"`
+	Carrier       string `json:"carrier"`
+	CostCents     int64  `json:"costCents"`
+	RealCostCents int64  `json:"realCostCents"`
+	DeadlineDays  int    `json:"deadlineDays"`
+	FreeShipping  bool   `json:"freeShipping"`
+}
+
+// OrderShipmentResponse is the freight order created at the carrier + its
+// timeline of tracking events. Absent when no shipment has been created yet.
+type OrderShipmentResponse struct {
+	ID                  string                   `json:"id"`
+	Provider            string                   `json:"provider"`
+	ProviderOrderID     string                   `json:"providerOrderId"`
+	ProviderOrderNumber string                   `json:"providerOrderNumber"`
+	TrackingCode        string                   `json:"trackingCode"`
+	PublicTrackingURL   string                   `json:"publicTrackingUrl"`
+	InvoiceKey          string                   `json:"invoiceKey"`
+	InvoiceKind         string                   `json:"invoiceKind"`
+	LabelURL            string                   `json:"labelUrl"`
+	Status              string                   `json:"status"`
+	StatusRawCode       int                      `json:"statusRawCode"`
+	StatusRawName       string                   `json:"statusRawName"`
+	CreatedAt           time.Time                `json:"createdAt"`
+	UpdatedAt           time.Time                `json:"updatedAt"`
+	Events              []OrderShipmentEventResp `json:"events"`
+}
+
+// OrderShipmentEventResp is a single row from shipment_tracking_events.
+type OrderShipmentEventResp struct {
+	Status      string    `json:"status"`
+	RawCode     int       `json:"rawCode"`
+	RawName     string    `json:"rawName"`
+	Observation string    `json:"observation"`
+	EventAt     time.Time `json:"eventAt"`
+	Source      string    `json:"source"`
+}
+
+// OrderStoreResponse exposes the origin data needed to pre-fill create-shipment.
+type OrderStoreResponse struct {
+	ID                string                      `json:"id"`
+	Name              string                      `json:"name"`
+	LogoURL           *string                     `json:"logoUrl"`
+	Document          string                      `json:"document"` // CNPJ
+	Email             string                      `json:"email"`
+	Phone             string                      `json:"phone"`
+	Address           OrderStoreAddressResponse   `json:"address"`
+	ShippingDefaults  OrderStoreShippingDefaults  `json:"shippingDefaults"`
+}
+
+type OrderStoreAddressResponse struct {
+	ZipCode      string `json:"zipCode"`
+	Street       string `json:"street"`
+	Number       string `json:"number"`
+	Complement   string `json:"complement"`
+	Neighborhood string `json:"neighborhood"`
+	City         string `json:"city"`
+	State        string `json:"state"`
+}
+
+type OrderStoreShippingDefaults struct {
+	PackageWeightGrams int    `json:"packageWeightGrams"`
+	PackageFormat      string `json:"packageFormat"`
 }
 
 type OrderCommentResponse struct {
@@ -116,6 +224,12 @@ type OrderItemOutput struct {
 	Quantity     int
 	UnitPrice    int64
 	TotalPrice   int64
+
+	WeightGrams   int
+	HeightCm      int
+	WidthCm       int
+	LengthCm      int
+	PackageFormat string
 }
 
 type UpdateOrderInput struct {
@@ -173,6 +287,15 @@ type OrderItemRow struct {
 	ProductName  string
 	ProductImage *string
 	ProductKeyword string
+
+	// Joined from products for the shipping flow. Zero when the product has
+	// no dimensions filled in — service-layer sets them unchanged (0) so the
+	// UI knows they are missing.
+	WeightGrams   int
+	HeightCm      int
+	WidthCm       int
+	LengthCm      int
+	PackageFormat string
 }
 
 type OrderDetailRow struct {
@@ -189,6 +312,76 @@ type OrderDetailRow struct {
 	LiveTitle      string
 	LivePlatform   string
 	StoreID        string
+
+	// Customer captured at checkout (all optional — nil-safe reads).
+	CustomerEmail    string
+	CustomerName     string
+	CustomerDocument string
+	CustomerPhone    string
+
+	// shipping_address JSONB — decoded into the fields below by the repo.
+	ShippingAddressZip          string
+	ShippingAddressStreet       string
+	ShippingAddressNumber       string
+	ShippingAddressComplement   string
+	ShippingAddressNeighborhood string
+	ShippingAddressCity         string
+	ShippingAddressState        string
+
+	// Cart freight selection (CartShippingSelection projection).
+	ShippingProvider      string
+	ShippingServiceID     string
+	ShippingServiceName   string
+	ShippingCarrier       string
+	ShippingCostCents     int64
+	ShippingCostRealCents int64
+	ShippingDeadlineDays  int
+	EventFreeShipping     bool
+
+	// Store info for create-shipment pre-fill.
+	StoreName                  string
+	StoreLogoURL               *string
+	StoreCNPJ                  string
+	StoreEmail                 string
+	StorePhone                 string
+	StoreAddressZip            string
+	StoreAddressStreet         string
+	StoreAddressNumber         string
+	StoreAddressComplement     string
+	StoreAddressDistrict       string
+	StoreAddressCity           string
+	StoreAddressState          string
+	StoreDefaultPkgWeightGrams int
+	StoreDefaultPkgFormat      string
+}
+
+// OrderShipmentRecord is the projection of `shipments` used by order service.
+// Kept local to avoid importing the integration package here (just a SQL shape).
+type OrderShipmentRecord struct {
+	ID                  string
+	Provider            string
+	ProviderOrderID     string
+	ProviderOrderNumber string
+	TrackingCode        string
+	PublicTrackingURL   string
+	InvoiceKey          string
+	InvoiceKind         string
+	LabelURL            string
+	Status              string
+	StatusRawCode       int
+	StatusRawName       string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+// OrderShipmentEventRecord is the projection of `shipment_tracking_events`.
+type OrderShipmentEventRecord struct {
+	Status      string
+	RawCode     int
+	RawName     string
+	Observation string
+	EventAt     time.Time
+	Source      string
 }
 
 type CommentRow struct {
@@ -203,7 +396,62 @@ type CommentOutput struct {
 	CreatedAt time.Time
 }
 
+// OrderShippingAddressOutput is the parsed shipping_address JSONB projection.
+type OrderShippingAddressOutput struct {
+	ZipCode      string
+	Street       string
+	Number       string
+	Complement   string
+	Neighborhood string
+	City         string
+	State        string
+}
+
+// OrderCustomerOutput mirrors customer_* columns on carts.
+type OrderCustomerOutput struct {
+	Name     string
+	Email    string
+	Document string
+	Phone    string
+}
+
+// OrderShippingOutput is the cart's chosen freight option.
+type OrderShippingOutput struct {
+	Provider      string
+	ServiceID     string
+	ServiceName   string
+	Carrier       string
+	CostCents     int64
+	RealCostCents int64
+	DeadlineDays  int
+	FreeShipping  bool
+}
+
+// OrderStoreOutput is the store origin info.
+type OrderStoreOutput struct {
+	ID                string
+	Name              string
+	LogoURL           *string
+	Document          string
+	Email             string
+	Phone             string
+	Address           OrderShippingAddressOutput // reused shape
+	PackageWeightGrams int
+	PackageFormat     string
+}
+
+// OrderShipmentOutput bundles the shipment record + its tracking events.
+type OrderShipmentOutput struct {
+	OrderShipmentRecord
+	Events []OrderShipmentEventRecord
+}
+
 type OrderDetailOutput struct {
 	OrderOutput
-	Comments []CommentOutput
+	Comments        []CommentOutput
+	Customer        *OrderCustomerOutput
+	ShippingAddress *OrderShippingAddressOutput
+	Shipping        *OrderShippingOutput
+	Shipment        *OrderShipmentOutput
+	Store           *OrderStoreOutput
 }

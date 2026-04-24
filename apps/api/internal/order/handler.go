@@ -200,15 +200,20 @@ func toOrderResponse(o OrderOutput) OrderResponse {
 	items := make([]OrderItemResponse, len(o.Items))
 	for i, item := range o.Items {
 		items[i] = OrderItemResponse{
-			ID:           item.ID,
-			ProductID:    item.ProductID,
-			ProductName:  item.ProductName,
-			ProductImage: item.ProductImage,
-			Keyword:      item.Keyword,
-			Size:         item.Size,
-			Quantity:     item.Quantity,
-			UnitPrice:    item.UnitPrice,
-			TotalPrice:   item.TotalPrice,
+			ID:            item.ID,
+			ProductID:     item.ProductID,
+			ProductName:   item.ProductName,
+			ProductImage:  item.ProductImage,
+			Keyword:       item.Keyword,
+			Size:          item.Size,
+			Quantity:      item.Quantity,
+			UnitPrice:     item.UnitPrice,
+			TotalPrice:    item.TotalPrice,
+			WeightGrams:   item.WeightGrams,
+			HeightCm:      item.HeightCm,
+			WidthCm:       item.WidthCm,
+			LengthCm:      item.LengthCm,
+			PackageFormat: item.PackageFormat,
 		}
 	}
 
@@ -240,8 +245,94 @@ func toOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 		}
 	}
 
-	return OrderDetailResponse{
+	resp := OrderDetailResponse{
 		OrderResponse: toOrderResponse(o.OrderOutput),
 		Comments:      comments,
 	}
+
+	if o.Customer != nil {
+		resp.Customer = &OrderCustomerResponse{
+			Name:     o.Customer.Name,
+			Email:    o.Customer.Email,
+			Document: o.Customer.Document,
+			Phone:    o.Customer.Phone,
+		}
+	}
+	if o.ShippingAddress != nil {
+		resp.ShippingAddress = &OrderShippingAddressResponse{
+			ZipCode:      o.ShippingAddress.ZipCode,
+			Street:       o.ShippingAddress.Street,
+			Number:       o.ShippingAddress.Number,
+			Complement:   o.ShippingAddress.Complement,
+			Neighborhood: o.ShippingAddress.Neighborhood,
+			City:         o.ShippingAddress.City,
+			State:        o.ShippingAddress.State,
+		}
+	}
+	if o.Shipping != nil {
+		resp.Shipping = &OrderShippingSelectionResp{
+			Provider:      o.Shipping.Provider,
+			ServiceID:     o.Shipping.ServiceID,
+			ServiceName:   o.Shipping.ServiceName,
+			Carrier:       o.Shipping.Carrier,
+			CostCents:     o.Shipping.CostCents,
+			RealCostCents: o.Shipping.RealCostCents,
+			DeadlineDays:  o.Shipping.DeadlineDays,
+			FreeShipping:  o.Shipping.FreeShipping,
+		}
+	}
+	if o.Shipment != nil {
+		events := make([]OrderShipmentEventResp, len(o.Shipment.Events))
+		for i, e := range o.Shipment.Events {
+			events[i] = OrderShipmentEventResp{
+				Status:      e.Status,
+				RawCode:     e.RawCode,
+				RawName:     e.RawName,
+				Observation: e.Observation,
+				EventAt:     e.EventAt,
+				Source:      e.Source,
+			}
+		}
+		resp.Shipment = &OrderShipmentResponse{
+			ID:                  o.Shipment.ID,
+			Provider:            o.Shipment.Provider,
+			ProviderOrderID:     o.Shipment.ProviderOrderID,
+			ProviderOrderNumber: o.Shipment.ProviderOrderNumber,
+			TrackingCode:        o.Shipment.TrackingCode,
+			PublicTrackingURL:   o.Shipment.PublicTrackingURL,
+			InvoiceKey:          o.Shipment.InvoiceKey,
+			InvoiceKind:         o.Shipment.InvoiceKind,
+			LabelURL:            o.Shipment.LabelURL,
+			Status:              o.Shipment.Status,
+			StatusRawCode:       o.Shipment.StatusRawCode,
+			StatusRawName:       o.Shipment.StatusRawName,
+			CreatedAt:           o.Shipment.CreatedAt,
+			UpdatedAt:           o.Shipment.UpdatedAt,
+			Events:              events,
+		}
+	}
+	if o.Store != nil {
+		resp.Store = &OrderStoreResponse{
+			ID:       o.Store.ID,
+			Name:     o.Store.Name,
+			LogoURL:  o.Store.LogoURL,
+			Document: o.Store.Document,
+			Email:    o.Store.Email,
+			Phone:    o.Store.Phone,
+			Address: OrderStoreAddressResponse{
+				ZipCode:      o.Store.Address.ZipCode,
+				Street:       o.Store.Address.Street,
+				Number:       o.Store.Address.Number,
+				Complement:   o.Store.Address.Complement,
+				Neighborhood: o.Store.Address.Neighborhood,
+				City:         o.Store.Address.City,
+				State:        o.Store.Address.State,
+			},
+			ShippingDefaults: OrderStoreShippingDefaults{
+				PackageWeightGrams: o.Store.PackageWeightGrams,
+				PackageFormat:      o.Store.PackageFormat,
+			},
+		}
+	}
+	return resp
 }
