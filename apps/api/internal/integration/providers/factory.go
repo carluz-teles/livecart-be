@@ -27,12 +27,17 @@ type Factory struct {
 	// Rate limit manager
 	rateLimitManager *ratelimit.Manager
 
+	// SmartEnvios configuration (token-based — no OAuth).
+	smartEnviosEnv       string // "sandbox" or "production"
+	smartEnviosUserAgent string
+
 	// Provider constructors (injected to avoid import cycles)
 	mercadoPagoConstructor MercadoPagoConstructor
 	pagarmeConstructor     PagarmeConstructor
 	tinyConstructor        TinyConstructor
 	instagramConstructor   InstagramConstructor
 	melhorEnvioConstructor MelhorEnvioConstructor
+	smartEnviosConstructor SmartEnviosConstructor
 }
 
 // FactoryConfig contains configuration for the provider factory.
@@ -50,12 +55,17 @@ type FactoryConfig struct {
 	MelhorEnvioUserAgent    string
 	MelhorEnvioRedirectURI  string
 
+	// SmartEnvios (token-based — no OAuth).
+	SmartEnviosEnv       string // "sandbox" or "production"
+	SmartEnviosUserAgent string
+
 	// Constructors - these should be injected from the payment/erp/social/shipping packages
 	MercadoPagoConstructor MercadoPagoConstructor
 	PagarmeConstructor     PagarmeConstructor
 	TinyConstructor        TinyConstructor
 	InstagramConstructor   InstagramConstructor
 	MelhorEnvioConstructor MelhorEnvioConstructor
+	SmartEnviosConstructor SmartEnviosConstructor
 }
 
 // NewFactory creates a new provider factory.
@@ -70,12 +80,15 @@ func NewFactory(cfg FactoryConfig) *Factory {
 		melhorEnvioEnv:          cfg.MelhorEnvioEnv,
 		melhorEnvioUserAgent:    cfg.MelhorEnvioUserAgent,
 		melhorEnvioRedirectURI:  cfg.MelhorEnvioRedirectURI,
+		smartEnviosEnv:          cfg.SmartEnviosEnv,
+		smartEnviosUserAgent:    cfg.SmartEnviosUserAgent,
 		rateLimitManager:        cfg.RateLimitManager,
 		mercadoPagoConstructor:  cfg.MercadoPagoConstructor,
 		pagarmeConstructor:      cfg.PagarmeConstructor,
 		tinyConstructor:         cfg.TinyConstructor,
 		instagramConstructor:    cfg.InstagramConstructor,
 		melhorEnvioConstructor:  cfg.MelhorEnvioConstructor,
+		smartEnviosConstructor:  cfg.SmartEnviosConstructor,
 	}
 }
 
@@ -137,6 +150,24 @@ func (f *Factory) createShippingProvider(cfg ProviderConfig) (ShippingProvider, 
 			LogFunc:       f.logFunc,
 			RateLimiter:   limiter,
 		})
+	case ProviderSmartEnvios:
+		if f.smartEnviosConstructor == nil {
+			return nil, fmt.Errorf("smartenvios constructor not configured")
+		}
+		env := f.smartEnviosEnv
+		if m, ok := cfg.Metadata["environment"].(string); ok && m != "" {
+			env = m
+		}
+		return f.smartEnviosConstructor(SmartEnviosConfig{
+			IntegrationID: cfg.IntegrationID,
+			StoreID:       cfg.StoreID,
+			Credentials:   cfg.Credentials,
+			Env:           env,
+			UserAgent:     f.smartEnviosUserAgent,
+			Logger:        f.logger,
+			LogFunc:       f.logFunc,
+			RateLimiter:   limiter,
+		})
 	default:
 		return nil, fmt.Errorf("unknown shipping provider: %s", cfg.Name)
 	}
@@ -155,6 +186,22 @@ type MelhorEnvioConfig struct {
 	Env           string // "sandbox" or "production"
 	UserAgent     string // "AppName (contact@email)" - required by the ME API
 	RedirectURI   string
+	Logger        *zap.Logger
+	LogFunc       LogFunc
+	RateLimiter   ratelimit.RateLimiter
+}
+
+// SmartEnviosConstructor is a function type for creating SmartEnvios providers.
+type SmartEnviosConstructor func(cfg SmartEnviosConfig) (ShippingProvider, error)
+
+// SmartEnviosConfig contains configuration for a SmartEnvios provider instance.
+// SmartEnvios uses a static token (no OAuth) — the token lives in Credentials.AccessToken.
+type SmartEnviosConfig struct {
+	IntegrationID string
+	StoreID       string
+	Credentials   *Credentials
+	Env           string // "sandbox" or "production"
+	UserAgent     string // optional — some carriers block generic UAs
 	Logger        *zap.Logger
 	LogFunc       LogFunc
 	RateLimiter   ratelimit.RateLimiter

@@ -408,11 +408,17 @@ func (m *MelhorEnvio) Quote(ctx context.Context, req QuoteRequest) ([]QuoteOptio
 		},
 	}
 	if len(req.ServiceIDs) > 0 {
-		strs := make([]string, len(req.ServiceIDs))
-		for i, id := range req.ServiceIDs {
-			strs[i] = strconv.Itoa(id)
+		// Melhor Envio accepts comma-separated numeric ids. Filter out any
+		// entries we cannot parse as int (they are not ours).
+		valid := make([]string, 0, len(req.ServiceIDs))
+		for _, raw := range req.ServiceIDs {
+			if _, err := strconv.Atoi(raw); err == nil {
+				valid = append(valid, raw)
+			}
 		}
-		body["services"] = strings.Join(strs, ",")
+		if len(valid) > 0 {
+			body["services"] = strings.Join(valid, ",")
+		}
 	}
 
 	respBody, err := m.doAuthenticated(ctx, http.MethodPost, meCalculatePath, body)
@@ -428,7 +434,8 @@ func (m *MelhorEnvio) Quote(ctx context.Context, req QuoteRequest) ([]QuoteOptio
 	options := make([]QuoteOption, 0, len(results))
 	for _, r := range results {
 		opt := QuoteOption{
-			ServiceID:   r.ID,
+			Provider:    providers.ProviderMelhorEnvio,
+			ServiceID:   strconv.Itoa(r.ID),
 			Service:     r.Name,
 			Carrier:     r.Company.Name,
 			CarrierLogo: r.Company.Picture,
@@ -479,7 +486,7 @@ func (m *MelhorEnvio) ListCarriers(ctx context.Context) ([]CarrierService, error
 	for _, c := range companies {
 		for _, s := range c.Services {
 			out = append(out, CarrierService{
-				ServiceID:         s.ID,
+				ServiceID:         strconv.Itoa(s.ID),
 				Service:           s.Name,
 				Carrier:           c.Name,
 				CarrierLogo:       c.Picture,

@@ -995,33 +995,186 @@ func (s *Service) GetERPProvider(ctx context.Context, integrationID, storeID str
 // GetShippingProvider returns the ShippingProvider for the store's active
 // shipping integration. Returns httpx.ErrNotFound when no shipping integration
 // is configured for the store.
+//
+// Deprecated: prefer GetShippingProviders (plural) when quoting — stores may
+// have more than one active shipping integration and the checkout should show
+// options from all of them. This method is kept for callers that genuinely
+// need a single provider by ID.
 func (s *Service) GetShippingProvider(ctx context.Context, storeID string) (providers.ShippingProvider, error) {
+	all, err := s.GetShippingProviders(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+	if len(all) == 0 {
+		return nil, httpx.ErrNotFound("no active shipping integration for this store")
+	}
+	return all[0], nil
+}
+
+// GetShippingProviders returns every active shipping integration for the
+// store, fully initialized. Returns an empty slice (not an error) when the
+// store has no shipping integration configured — callers decide how to treat
+// that (checkout will surface an UnprocessableEntity to the customer).
+func (s *Service) GetShippingProviders(ctx context.Context, storeID string) ([]providers.ShippingProvider, error) {
 	rows, err := s.repo.ListByType(ctx, storeID, string(providers.ProviderTypeShipping))
 	if err != nil {
 		return nil, err
 	}
-	var active *IntegrationRow
+	out := make([]providers.ShippingProvider, 0, len(rows))
 	for i := range rows {
-		if rows[i].Status == "active" {
-			active = &rows[i]
-			break
+		if rows[i].Status != "active" {
+			continue
 		}
+		provider, err := s.createProviderFromRow(ctx, &rows[i])
+		if err != nil {
+			s.logger.Warn("failed to instantiate shipping provider — skipping",
+				zap.String("integration_id", rows[i].ID),
+				zap.String("provider", rows[i].Provider),
+				zap.Error(err),
+			)
+			continue
+		}
+		sp, ok := provider.(providers.ShippingProvider)
+		if !ok {
+			s.logger.Warn("integration is marked as shipping but does not implement ShippingProvider",
+				zap.String("integration_id", rows[i].ID),
+				zap.String("provider", rows[i].Provider),
+			)
+			continue
+		}
+		out = append(out, sp)
 	}
-	if active == nil {
-		return nil, httpx.ErrNotFound("no active shipping integration for this store")
-	}
+	return out, nil
+}
 
-	provider, err := s.createProviderFromRow(ctx, active)
+// GetShippingProviderByName returns the ShippingProvider of a specific
+// integration (store + provider name). Returns httpx.ErrNotFound when the
+// integration is absent, httpx.ErrUnprocessable when it exists but is not
+// active.
+func (s *Service) GetShippingProviderByName(ctx context.Context, storeID string, providerName providers.ProviderName) (providers.ShippingProvider, error) {
+	integration, err := s.repo.GetByProvider(ctx, storeID, string(providers.ProviderTypeShipping), string(providerName))
 	if err != nil {
 		return nil, err
 	}
-
-	shippingProvider, ok := provider.(providers.ShippingProvider)
+	if integration.Status != "active" {
+		return nil, httpx.ErrUnprocessable(fmt.Sprintf("%s integration is not active (status=%s)", providerName, integration.Status))
+	}
+	provider, err := s.createProviderFromRow(ctx, integration)
+	if err != nil {
+		return nil, err
+	}
+	sp, ok := provider.(providers.ShippingProvider)
 	if !ok {
 		return nil, httpx.ErrUnprocessable("failed to cast to shipping provider")
 	}
+	return sp, nil
+}
 
-	return shippingProvider, nil
+// GetShippingOrderProvider returns the ShippingOrderProvider for a specific
+// integration (identified by store + provider name). Returns
+// providers.ErrOperationNotSupported when the provider does not support the
+// order-lifecycle operations (quote-only aggregators).
+func (s *Service) GetShippingOrderProvider(ctx context.Context, storeID string, providerName providers.ProviderName) (providers.ShippingOrderProvider, error) {
+	sp, err := s.GetShippingProviderByName(ctx, storeID, providerName)
+	if err != nil {
+		return nil, err
+	}
+	osp, ok := sp.(providers.ShippingOrderProvider)
+	if !ok {
+		return nil, providers.ErrOperationNotSupported
+	}
+	return osp, nil
+}
+
+// ConnectSmartEnviosInput is the admin payload to set up or rotate the
+// SmartEnvios integration for a store.
+type ConnectSmartEnviosInput struct {
+	StoreID string
+	Token   string
+	Env     string // "sandbox" | "production" — defaults to "production"
+}
+
+// ConnectSmartEnviosOutput mirrors CreateIntegrationOutput for API responses.
+type ConnectSmartEnviosOutput = CreateIntegrationOutput
+
+// ConnectSmartEnvios validates a SmartEnvios token via a live call to
+// /quote/services and persists (or updates) the integration as active. No
+// OAuth involved — token is static and provided by the merchant.
+func (s *Service) ConnectSmartEnvios(ctx context.Context, input ConnectSmartEnviosInput) (*ConnectSmartEnviosOutput, error) {
+	token := strings.TrimSpace(input.Token)
+	if token == "" {
+		return nil, httpx.ErrBadRequest("token is required")
+	}
+	env := input.Env
+	if env == "" {
+		env = "production"
+	}
+	if env != "production" && env != "sandbox" {
+		return nil, httpx.ErrBadRequest("env must be 'sandbox' or 'production'")
+	}
+
+	// Validate the token with a real call so we never persist garbage.
+	creds := &providers.Credentials{AccessToken: token}
+	probe, err := s.factory.CreateShippingProvider(providers.ProviderConfig{
+		IntegrationID: "probe",
+		StoreID:       input.StoreID,
+		Type:          providers.ProviderTypeShipping,
+		Name:          providers.ProviderSmartEnvios,
+		Credentials:   creds,
+		Metadata:      map[string]any{"environment": env},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("instantiating smartenvios provider: %w", err)
+	}
+	if _, err := probe.TestConnection(ctx); err != nil {
+		return nil, httpx.ErrUnprocessable("falha ao validar token SmartEnvios: " + err.Error())
+	}
+
+	encrypted, err := s.encryptor.EncryptJSON(creds)
+	if err != nil {
+		return nil, fmt.Errorf("encrypting smartenvios token: %w", err)
+	}
+
+	// If an integration already exists, update it; otherwise create it.
+	// The repository surfaces "not found" as httpx-wrapped errors whose kind
+	// is opaque here — we treat any error that mentions "not found" as
+	// "integration is missing, go create it".
+	existing, err := s.repo.GetByProvider(ctx, input.StoreID, string(providers.ProviderTypeShipping), string(providers.ProviderSmartEnvios))
+	if err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return nil, err
+		}
+		existing = nil
+	}
+	metadata := map[string]any{"environment": env}
+	if existing != nil {
+		if err := s.repo.UpdateCredentials(ctx, existing.ID, encrypted, nil); err != nil {
+			return nil, err
+		}
+		if err := s.repo.UpdateMetadata(ctx, existing.ID, metadata); err != nil {
+			return nil, err
+		}
+		if err := s.repo.UpdateStatus(ctx, existing.ID, "active"); err != nil {
+			return nil, err
+		}
+		row, err := s.repo.GetByID(ctx, existing.ID, input.StoreID)
+		if err != nil {
+			return nil, err
+		}
+		return s.toCreateOutput(row), nil
+	}
+	row, err := s.repo.Create(ctx, CreateIntegrationParams{
+		StoreID:     input.StoreID,
+		Type:        string(providers.ProviderTypeShipping),
+		Provider:    string(providers.ProviderSmartEnvios),
+		Status:      "active",
+		Credentials: encrypted,
+		Metadata:    metadata,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.toCreateOutput(row), nil
 }
 
 // GetSocialProvider returns a SocialProvider for the given integration.

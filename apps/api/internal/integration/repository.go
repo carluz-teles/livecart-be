@@ -293,6 +293,22 @@ func (r *Repository) UpdateCredentials(ctx context.Context, id string, credentia
 	})
 }
 
+// UpdateMetadata replaces the metadata JSONB of an integration. Used by the
+// admin flow when an integration is (re)configured and the metadata contents
+// (e.g. `environment`) may change.
+func (r *Repository) UpdateMetadata(ctx context.Context, id string, metadata map[string]any) error {
+	integrationID, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("marshaling metadata: %w", err)
+	}
+	_, err = r.pool.Exec(ctx, `UPDATE integrations SET metadata = $2, updated_at = now() WHERE id = $1`, integrationID, raw)
+	return err
+}
+
 // UpdateStatus updates an integration's status.
 func (r *Repository) UpdateStatus(ctx context.Context, id, status string) error {
 	integrationID, err := parseUUID(id)

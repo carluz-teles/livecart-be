@@ -195,9 +195,14 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				MelhorEnvioEnv:          config.MelhorEnvioEnv.StringOr("sandbox"),
 				MelhorEnvioUserAgent:    config.MelhorEnvioUserAgent.StringOr("LiveCart (contato@livecart.com.br)"),
 				MelhorEnvioRedirectURI:  config.MelhorEnvioRedirectURI.String(),
+				SmartEnviosEnv:          config.SmartEnviosEnv.StringOr("production"),
+				SmartEnviosUserAgent:    config.SmartEnviosUserAgent.StringOr("LiveCart (contato@livecart.com.br)"),
 				RateLimitManager:        rateLimitManager,
 				MelhorEnvioConstructor: func(cfg providers.MelhorEnvioConfig) (providers.ShippingProvider, error) {
 					return shipping.New(cfg)
+				},
+				SmartEnviosConstructor: func(cfg providers.SmartEnviosConfig) (providers.ShippingProvider, error) {
+					return shipping.NewSmartEnvios(cfg)
 				},
 				MercadoPagoConstructor: func(cfg providers.MercadoPagoConfig) (providers.PaymentProvider, error) {
 					return payment.NewMercadoPago(payment.MercadoPagoConfig{
@@ -271,9 +276,14 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				MelhorEnvioEnv:          config.MelhorEnvioEnv.StringOr("sandbox"),
 				MelhorEnvioUserAgent:    config.MelhorEnvioUserAgent.StringOr("LiveCart (contato@livecart.com.br)"),
 				MelhorEnvioRedirectURI:  config.MelhorEnvioRedirectURI.String(),
+				SmartEnviosEnv:          config.SmartEnviosEnv.StringOr("production"),
+				SmartEnviosUserAgent:    config.SmartEnviosUserAgent.StringOr("LiveCart (contato@livecart.com.br)"),
 				RateLimitManager:        rateLimitManager,
 				MelhorEnvioConstructor: func(cfg providers.MelhorEnvioConfig) (providers.ShippingProvider, error) {
 					return shipping.New(cfg)
+				},
+				SmartEnviosConstructor: func(cfg providers.SmartEnviosConfig) (providers.ShippingProvider, error) {
+					return shipping.NewSmartEnvios(cfg)
 				},
 				MercadoPagoConstructor: func(cfg providers.MercadoPagoConfig) (providers.PaymentProvider, error) {
 					return payment.NewMercadoPago(payment.MercadoPagoConfig{

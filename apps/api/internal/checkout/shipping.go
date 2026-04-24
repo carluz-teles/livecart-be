@@ -155,16 +155,18 @@ func (r *Repository) UpdateCartShipping(ctx context.Context, pool *pgxpool.Pool,
 
 	_, err = pool.Exec(ctx, `
 		UPDATE carts
-		SET shipping_service_id      = $2,
-		    shipping_service_name    = $3,
-		    shipping_carrier         = $4,
-		    shipping_cost_cents      = $5,
-		    shipping_cost_real_cents = $6,
-		    shipping_deadline_days   = $7,
+		SET shipping_provider        = $2,
+		    shipping_service_id      = $3,
+		    shipping_service_name    = $4,
+		    shipping_carrier         = $5,
+		    shipping_cost_cents      = $6,
+		    shipping_cost_real_cents = $7,
+		    shipping_deadline_days   = $8,
 		    shipping_quoted_at       = now()
 		WHERE id = $1
 	`,
 		pgtype.UUID{Bytes: uid, Valid: true},
+		sel.Provider,
 		sel.ServiceID,
 		sel.ServiceName,
 		sel.Carrier,
@@ -185,7 +187,8 @@ func (r *Repository) ReadCartShipping(ctx context.Context, pool *pgxpool.Pool, c
 		return nil, httpx.ErrBadRequest("invalid cart ID")
 	}
 	var (
-		serviceID    pgtype.Int4
+		provider     pgtype.Text
+		serviceID    pgtype.Text
 		serviceName  pgtype.Text
 		carrier      pgtype.Text
 		cost         pgtype.Int8
@@ -194,7 +197,8 @@ func (r *Repository) ReadCartShipping(ctx context.Context, pool *pgxpool.Pool, c
 		freeShipping bool
 	)
 	err = pool.QueryRow(ctx, `
-		SELECT c.shipping_service_id,
+		SELECT c.shipping_provider,
+		       c.shipping_service_id,
 		       c.shipping_service_name,
 		       c.shipping_carrier,
 		       c.shipping_cost_cents,
@@ -205,7 +209,7 @@ func (r *Repository) ReadCartShipping(ctx context.Context, pool *pgxpool.Pool, c
 		JOIN live_events e ON e.id = c.event_id
 		WHERE c.id = $1
 	`, pgtype.UUID{Bytes: uid, Valid: true}).Scan(
-		&serviceID, &serviceName, &carrier, &cost, &realCost, &deadlineDays, &freeShipping,
+		&provider, &serviceID, &serviceName, &carrier, &cost, &realCost, &deadlineDays, &freeShipping,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -213,11 +217,12 @@ func (r *Repository) ReadCartShipping(ctx context.Context, pool *pgxpool.Pool, c
 		}
 		return nil, fmt.Errorf("reading cart shipping: %w", err)
 	}
-	if !serviceID.Valid {
+	if !serviceID.Valid || serviceID.String == "" {
 		return nil, nil
 	}
 	return &CartShippingSelection{
-		ServiceID:     int(serviceID.Int32),
+		Provider:      provider.String,
+		ServiceID:     serviceID.String,
 		ServiceName:   serviceName.String,
 		Carrier:       carrier.String,
 		CostCents:     cost.Int64,
@@ -231,8 +236,15 @@ func (r *Repository) ReadCartShipping(ctx context.Context, pool *pgxpool.Pool, c
 // SERVICE METHODS
 // =============================================================================
 
-// QuoteShipping calls the store's shipping provider to get freight options for
-// the cart's items. Does not persist anything.
+// QuoteShipping calls every active shipping integration of the store and
+// merges the quote options into a single list. When the store has only one
+// shipping integration active, the behavior is unchanged; when it has two
+// (e.g. Melhor Envio + SmartEnvios) the customer sees options from both.
+//
+// Each option carries the `provider` name so the subsequent selection call
+// knows which integration owns it. One provider failing does not fail the
+// whole call — errors are logged and the other providers' options are still
+// returned.
 func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (*QuoteShippingOutput, error) {
 	shipCtx, err := s.repo.GetShippingContextByToken(ctx, s.pool, input.Token)
 	if err != nil {
@@ -259,59 +271,90 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 		}
 		items = append(items, providers.ShippingItem{
 			ID:                  id,
+			Name:                it.Name,
 			WeightGrams:         it.WeightGrams,
 			HeightCm:            it.HeightCm,
 			WidthCm:             it.WidthCm,
 			LengthCm:            it.LengthCm,
 			InsuranceValueCents: it.InsuranceValueCents,
+			UnitPriceCents:      it.UnitPriceCents,
 			Quantity:            it.Quantity,
 			PackageFormat:       it.PackageFormat,
 		})
 	}
 
-	provider, err := s.integrationService.GetShippingProvider(ctx, shipCtx.StoreID)
+	active, err := s.integrationService.GetShippingProviders(ctx, shipCtx.StoreID)
 	if err != nil {
 		return nil, err
 	}
+	if len(active) == 0 {
+		return nil, httpx.ErrNotFound("nenhuma integração de frete ativa nesta loja")
+	}
 
-	options, err := provider.Quote(ctx, providers.QuoteRequest{
-		FromZip:                 providers.ShippingZip(shipCtx.OriginZip),
-		ToZip:                   providers.ShippingZip(input.ZipCode),
-		Items:                   items,
-		ExtraPackageWeightGrams: shipCtx.DefaultPkgWeightG,
-		ServiceIDs:              input.ServiceIDs,
-	})
-	if err != nil {
-		s.logger.Error("shipping quote failed",
-			zap.String("store_id", shipCtx.StoreID),
-			zap.String("cart_token", input.Token),
-			zap.Error(err),
-		)
-		return nil, httpx.ErrUnprocessable("falha ao cotar frete: " + err.Error())
+	// Optional client-side provider filter (e.g. admin testing a single provider).
+	if len(input.Providers) > 0 {
+		wanted := map[string]bool{}
+		for _, p := range input.Providers {
+			wanted[p] = true
+		}
+		filtered := active[:0]
+		for _, p := range active {
+			if wanted[string(p.Name())] {
+				filtered = append(filtered, p)
+			}
+		}
+		active = filtered
 	}
 
 	out := &QuoteShippingOutput{
 		QuotedAt:     time.Now(),
 		FreeShipping: shipCtx.EventFreeShipping,
-		Options:      make([]ShippingQuoteOptionResponse, 0, len(options)),
+		Options:      []ShippingQuoteOptionResponse{},
 	}
-	for _, opt := range options {
-		resp := ShippingQuoteOptionResponse{
-			ID:             opt.ServiceID,
-			Service:        opt.Service,
-			Carrier:        opt.Carrier,
-			CarrierLogoURL: opt.CarrierLogo,
-			RealPriceCents: opt.PriceCents,
-			DeadlineDays:   opt.DeadlineDays,
-			Available:      opt.Available,
-			Error:          opt.Error,
+
+	req := providers.QuoteRequest{
+		FromZip:                 providers.ShippingZip(shipCtx.OriginZip),
+		ToZip:                   providers.ShippingZip(input.ZipCode),
+		Items:                   items,
+		ExtraPackageWeightGrams: shipCtx.DefaultPkgWeightG,
+		ServiceIDs:              input.ServiceIDs,
+		ExternalID:              shipCtx.CartID,
+	}
+
+	for _, provider := range active {
+		options, qerr := provider.Quote(ctx, req)
+		if qerr != nil {
+			s.logger.Error("shipping quote failed for provider",
+				zap.String("provider", string(provider.Name())),
+				zap.String("store_id", shipCtx.StoreID),
+				zap.String("cart_token", input.Token),
+				zap.Error(qerr),
+			)
+			continue
 		}
-		if shipCtx.EventFreeShipping {
-			resp.PriceCents = 0
-		} else {
-			resp.PriceCents = opt.PriceCents
+		for _, opt := range options {
+			resp := ShippingQuoteOptionResponse{
+				ID:             opt.ServiceID,
+				Provider:       string(provider.Name()),
+				Service:        opt.Service,
+				Carrier:        opt.Carrier,
+				CarrierLogoURL: opt.CarrierLogo,
+				RealPriceCents: opt.PriceCents,
+				DeadlineDays:   opt.DeadlineDays,
+				Available:      opt.Available,
+				Error:          opt.Error,
+			}
+			if shipCtx.EventFreeShipping {
+				resp.PriceCents = 0
+			} else {
+				resp.PriceCents = opt.PriceCents
+			}
+			out.Options = append(out.Options, resp)
 		}
-		out.Options = append(out.Options, resp)
+	}
+
+	if len(out.Options) == 0 {
+		return nil, httpx.ErrUnprocessable("nenhum provider de frete retornou opções")
 	}
 	return out, nil
 }
@@ -331,27 +374,40 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 		return nil, httpx.ErrUnprocessable("CEP é obrigatório para confirmar o frete")
 	}
 
-	quote, err := s.QuoteShipping(ctx, QuoteShippingInput{
+	reQuoteInput := QuoteShippingInput{
 		Token:      input.Token,
 		ZipCode:    input.ZipCode,
-		ServiceIDs: []int{input.ServiceID},
-	})
+		ServiceIDs: []string{input.ServiceID},
+	}
+	if input.Provider != "" {
+		reQuoteInput.Providers = []string{input.Provider}
+	}
+	quote, err := s.QuoteShipping(ctx, reQuoteInput)
 	if err != nil {
 		return nil, err
 	}
 
 	var chosen *ShippingQuoteOptionResponse
 	for i := range quote.Options {
-		if quote.Options[i].ID == input.ServiceID && quote.Options[i].Available {
-			chosen = &quote.Options[i]
-			break
+		opt := &quote.Options[i]
+		if opt.ID != input.ServiceID || !opt.Available {
+			continue
 		}
+		// If the caller specified a provider, require it to match; otherwise
+		// pick the first matching option (only possible when a single
+		// provider returned this id).
+		if input.Provider != "" && opt.Provider != input.Provider {
+			continue
+		}
+		chosen = opt
+		break
 	}
 	if chosen == nil {
 		return nil, httpx.ErrUnprocessable("opção de frete indisponível")
 	}
 
 	sel := &CartShippingSelection{
+		Provider:      chosen.Provider,
 		ServiceID:     chosen.ID,
 		ServiceName:   chosen.Service,
 		Carrier:       chosen.Carrier,

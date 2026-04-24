@@ -66,7 +66,8 @@ type CartSummary struct {
 // CartShippingSelection describes the freight option currently attached to the cart.
 // All fields are zero when the customer has not yet chosen an option.
 type CartShippingSelection struct {
-	ServiceID     int    `json:"serviceId"`
+	Provider      string `json:"provider"`  // integration name (melhor_envio | smartenvios | ...)
+	ServiceID     string `json:"serviceId"` // opaque, provider-specific service id
 	ServiceName   string `json:"serviceName"`
 	Carrier       string `json:"carrier"`
 	CostCents     int64  `json:"costCents"`     // what the customer is charged (0 when free_shipping)
@@ -318,7 +319,8 @@ type ShippingQuoteRequest struct {
 
 // ShippingQuoteOptionResponse is a single carrier option returned from a quote.
 type ShippingQuoteOptionResponse struct {
-	ID             int    `json:"id"` // service_id at the provider
+	ID             string `json:"id"`       // opaque service id returned by the provider
+	Provider       string `json:"provider"` // integration name (melhor_envio | smartenvios | ...)
 	Service        string `json:"service"`
 	Carrier        string `json:"carrier"`
 	CarrierLogoURL string `json:"carrierLogoUrl,omitempty"`
@@ -340,8 +342,14 @@ type ShippingQuoteResponse struct {
 // The zipCode is required because the address is only persisted on the cart
 // at payment time — between quoting and picking a service only the frontend
 // knows the destination.
+//
+// `provider` is required when the store has multiple shipping integrations
+// active (quote options come from several providers with opaque ids that
+// could collide in theory). When only one provider is active the backend
+// will fill it in automatically.
 type SelectShippingMethodRequest struct {
-	ServiceID int    `json:"serviceId" validate:"required,gt=0"`
+	Provider  string `json:"provider,omitempty"`
+	ServiceID string `json:"serviceId" validate:"required"`
 	ZipCode   string `json:"zipCode" validate:"required"`
 }
 
@@ -358,7 +366,10 @@ type SelectShippingMethodResponse struct {
 type QuoteShippingInput struct {
 	Token      string
 	ZipCode    string
-	ServiceIDs []int // optional filter
+	ServiceIDs []string // optional filter
+	// Providers restricts the quote to a subset of integrations (by name).
+	// Empty = query all active shipping integrations for the store.
+	Providers []string
 }
 
 type QuoteShippingOutput struct {
@@ -369,7 +380,8 @@ type QuoteShippingOutput struct {
 
 type SelectShippingMethodInput struct {
 	Token     string
-	ServiceID int
+	Provider  string // optional when only one shipping integration is active
+	ServiceID string
 	ZipCode   string
 }
 

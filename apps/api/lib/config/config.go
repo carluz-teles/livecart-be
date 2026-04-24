@@ -41,6 +41,10 @@ const (
 	MelhorEnvioUserAgent    Key = "MELHOR_ENVIO_USER_AGENT"    // Required header, format: "LiveCart (contato@livecart.com.br)"
 	MelhorEnvioRedirectURI  Key = "MELHOR_ENVIO_REDIRECT_URI"  // OAuth callback URL configured in Melhor Envio app
 
+	// SmartEnvios (shipping provider — static-token auth, no OAuth)
+	SmartEnviosEnv       Key = "SMARTENVIOS_ENV"        // "sandbox" or "production" (default)
+	SmartEnviosUserAgent Key = "SMARTENVIOS_USER_AGENT" // optional — sent on every SmartEnvios request
+
 	// S3 Storage (supports both standard and Railway naming conventions)
 	S3Bucket   Key = "S3_BUCKET"     // S3 bucket name for uploads
 	S3Endpoint Key = "S3_ENDPOINT"   // Custom S3 endpoint (for Tigris, R2, MinIO, etc.)

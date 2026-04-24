@@ -42,6 +42,17 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// OAuth connect
 	g.Get("/oauth/:provider/connect", h.OAuthConnect)
 
+	// Shipping — token-based connect (no OAuth) + order lifecycle helpers.
+	// These are typed at the provider level because each shipping provider
+	// has its own auth model; routing by :provider keeps a single surface.
+	g.Post("/shipping/smartenvios/connect", h.ConnectSmartEnvios)
+	g.Get("/shipping/:provider/carriers", h.ListShippingCarriers)
+	g.Post("/shipping/:provider/shipments", h.CreateShippingShipment)
+	g.Post("/shipping/:provider/shipments/:shipmentId/invoice", h.AttachShippingInvoice)
+	g.Post("/shipping/:provider/shipments/:shipmentId/invoice-xml", h.UploadShippingInvoiceXML)
+	g.Post("/shipping/:provider/labels", h.GenerateShippingLabels)
+	g.Post("/shipping/:provider/tracking", h.TrackShipping)
+
 	// ERP operations
 	g.Get("/:id/products", h.SearchProducts)
 	g.Post("/:id/products/:productId/sync", h.SyncProduct)

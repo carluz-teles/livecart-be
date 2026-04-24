@@ -2,8 +2,15 @@ package providers
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrOperationNotSupported is returned by providers that do not implement a
+// specific capability (for example, a carrier aggregator that only quotes but
+// cannot create shipments). Callers should match against this sentinel rather
+// than parsing error strings.
+var ErrOperationNotSupported = errors.New("operation not supported by this provider")
 
 // ProviderType represents the category of integration.
 type ProviderType string
@@ -24,6 +31,7 @@ const (
 	ProviderTiny        ProviderName = "tiny"
 	ProviderInstagram   ProviderName = "instagram"
 	ProviderMelhorEnvio ProviderName = "melhor_envio"
+	ProviderSmartEnvios ProviderName = "smartenvios"
 )
 
 // Credentials holds authentication data for providers.
@@ -590,8 +598,11 @@ type WebhookEvent struct {
 // SHIPPING TYPES
 // =============================================================================
 
-// ShippingProvider provides freight quotes from carriers.
-// LiveCart only uses read-only endpoints (no label generation).
+// ShippingProvider is the minimum contract all shipping integrations must
+// implement. It covers quoting (checkout) and carrier listing (admin / test
+// connection). Order-lifecycle operations (create shipment, invoice, labels,
+// tracking) live on the optional ShippingOrderProvider extension so that
+// quote-only aggregators are still valid providers.
 type ShippingProvider interface {
 	Provider
 
@@ -602,17 +613,52 @@ type ShippingProvider interface {
 	ListCarriers(ctx context.Context) ([]CarrierService, error)
 }
 
+// ShippingOrderProvider extends ShippingProvider with post-quote operations.
+// Providers that implement it can: create shipments, attach/upload invoices,
+// generate labels, and pull tracking history. Callers should type-assert and
+// surface ErrOperationNotSupported when the provider does not implement this
+// interface or when a specific call returns it.
+type ShippingOrderProvider interface {
+	ShippingProvider
+
+	// CreateShipment creates a freight order at the carrier aggregator, optionally
+	// tied to a prior quote (QuoteServiceID). Returns the provider's shipment
+	// reference that the caller should persist.
+	CreateShipment(ctx context.Context, req CreateShipmentRequest) (*CreateShipmentResult, error)
+
+	// AttachInvoice links an already-emitted fiscal document (NFe/DCe) to an
+	// existing shipment by key. Use this for async flows where the invoice is
+	// emitted after the shipment is created.
+	AttachInvoice(ctx context.Context, req AttachInvoiceRequest) error
+
+	// UploadInvoiceXML uploads the XML of the fiscal document to the carrier
+	// aggregator. Required when the aggregator cannot fetch the XML from the
+	// SEFAZ by key alone.
+	UploadInvoiceXML(ctx context.Context, req UploadInvoiceXMLRequest) error
+
+	// GenerateLabels produces the shipping labels (PDF/ZPL/base64) for the
+	// given shipments. Result contains the downloadable URL plus per-volume
+	// barcodes.
+	GenerateLabels(ctx context.Context, req GenerateLabelsRequest) (*GenerateLabelsResult, error)
+
+	// TrackShipment pulls the latest tracking history for a shipment. Use as
+	// fallback when webhooks are not wired up.
+	TrackShipment(ctx context.Context, req TrackShipmentRequest) (*TrackShipmentResult, error)
+}
+
 // ShippingZip is a Brazilian CEP, digits only (8 chars).
 type ShippingZip string
 
 // ShippingItem represents a cart item being quoted.
 type ShippingItem struct {
 	ID                  string // opaque identifier returned in error messages
+	Name                string // human-readable description (used when creating shipments)
 	WeightGrams         int
 	HeightCm            int
 	WidthCm             int
 	LengthCm            int
 	InsuranceValueCents int64
+	UnitPriceCents      int64 // unit price (used when creating shipments)
 	Quantity            int
 	PackageFormat       string // "box", "roll", "letter" - optional, carrier hint
 }
@@ -627,7 +673,12 @@ type QuoteRequest struct {
 	// item when the provider quotes by individual products.
 	ExtraPackageWeightGrams int
 	// ServiceIDs restricts the quote to a subset of services. Empty = all.
-	ServiceIDs []int
+	// Opaque strings because providers use different id formats (int, UUID,
+	// MongoDB ObjectId, ...).
+	ServiceIDs []string
+	// ExternalID is an optional caller-side correlation id (e.g. cart id)
+	// forwarded to providers that support it for correlation with webhooks.
+	ExternalID string
 	// Options are delivery-time flags.
 	Receipt bool
 	OwnHand bool
@@ -635,7 +686,14 @@ type QuoteRequest struct {
 
 // QuoteOption is a single carrier/service result.
 type QuoteOption struct {
-	ServiceID    int    // carrier service ID (provider-specific)
+	// Provider is the integration name that returned this option. Required so
+	// the caller can route the follow-up CreateShipment call to the right
+	// provider when the store has multiple shipping integrations active.
+	Provider ProviderName
+
+	// ServiceID is the opaque, provider-specific identifier for the service.
+	// Pass it back as-is when creating the shipment.
+	ServiceID    string
 	Service      string // "PAC", "SEDEX", ".Package", etc.
 	Carrier      string // "Correios", "Jadlog", "Loggi", etc.
 	CarrierLogo  string // optional URL
@@ -647,10 +705,183 @@ type QuoteOption struct {
 
 // CarrierService describes one service offered by a carrier.
 type CarrierService struct {
-	ServiceID   int
+	ServiceID   string
 	Service     string
 	Carrier     string
 	CarrierLogo string
 	// Max insurance value accepted, in cents. 0 means unlimited/unknown.
 	InsuranceMaxCents int64
 }
+
+// =============================================================================
+// SHIPPING ORDER LIFECYCLE TYPES
+// =============================================================================
+
+// ShippingAddress describes an address used by CreateShipment (sender/destiny).
+type ShippingAddressPoint struct {
+	Name         string
+	Document     string // CPF/CNPJ
+	ZipCode      string
+	Street       string
+	Number       string
+	Complement   string
+	Neighborhood string
+	City         string
+	State        string // 2-letter UF
+	Phone        string
+	Email        string
+	Observation  string
+}
+
+// CreateShipmentRequest captures everything a provider needs to turn a quote
+// into a concrete freight order.
+type CreateShipmentRequest struct {
+	// QuoteServiceID is the opaque id returned by Quote() for the chosen
+	// carrier/service. Required — callers must not create shipments without
+	// a prior quote (no auto-selection in LiveCart).
+	QuoteServiceID string
+
+	// ExternalOrderID is the caller's own order identifier (used for webhook
+	// correlation and lookups).
+	ExternalOrderID string
+
+	// InvoiceKey, when present, is the NFe access key. When absent the
+	// shipment is created as a Declaração de Conteúdo and the invoice can be
+	// linked later via AttachInvoice / UploadInvoiceXML.
+	InvoiceKey string
+
+	Sender  ShippingAddressPoint
+	Destiny ShippingAddressPoint
+
+	// Items in the shipment. Dimensions/weight MUST be set.
+	Items []ShippingItem
+
+	// VolumeCount is the number of physical packages in the shipment.
+	VolumeCount int
+
+	// Observation is free-form text appended to the shipment record.
+	Observation string
+}
+
+// CreateShipmentResult is the normalized response after creating a shipment.
+type CreateShipmentResult struct {
+	ProviderOrderID     string // provider's internal order id (persisted)
+	ProviderOrderNumber string // human-readable order number (optional)
+	TrackingCode        string // provider tracking code
+	InvoiceID           string // provider's id for the linked NFe (optional)
+	Status              TrackingStatus
+	StatusRawCode       int
+	StatusRawName       string
+	CreatedAt           time.Time
+	// ProviderMeta is the raw response for debugging / auditing. Persisted as JSONB.
+	ProviderMeta map[string]any
+}
+
+// AttachInvoiceRequest links an already-emitted NFe/DCe to an existing shipment.
+type AttachInvoiceRequest struct {
+	ProviderOrderID string
+	ExternalOrderID string // some providers identify the order by external id
+	InvoiceKey      string // NFe or DCe key (44 chars for NFe)
+	InvoiceKind     string // "nfe" | "dce"
+}
+
+// UploadInvoiceXMLRequest uploads the full NFe XML file.
+type UploadInvoiceXMLRequest struct {
+	ProviderOrderID string
+	ExternalOrderID string
+	XML             []byte
+	Filename        string // "nfe-12345.xml"
+}
+
+// GenerateLabelsRequest identifies which shipments should have labels generated.
+// Providers accept multiple identifier types; the caller fills whichever it has.
+type GenerateLabelsRequest struct {
+	ProviderOrderIDs []string
+	TrackingCodes    []string
+	InvoiceKeys      []string
+	ExternalOrderIDs []string
+
+	// Format is the preferred label format. Providers may ignore unsupported
+	// values. Known: "pdf", "zpl", "base64".
+	Format string
+
+	// DocumentType controls how the label interacts with the DANFE — when
+	// supported by the provider. Known: "label_integrated_danfe", "label_separate_danfe".
+	DocumentType string
+}
+
+// GenerateLabelsResult contains the URL of the label batch plus per-shipment
+// tickets. Shape is normalized across providers.
+type GenerateLabelsResult struct {
+	LabelURL string
+	Tickets  []LabelTicket
+}
+
+// LabelTicket represents the labels for a single shipment.
+type LabelTicket struct {
+	ProviderOrderID string
+	TrackingCode    string
+	PublicTracking  string   // public URL the customer can check
+	VolumeBarcodes  []string // one barcode per physical package
+}
+
+// TrackShipmentRequest identifies which shipment to pull tracking for.
+// Exactly ONE field should be set.
+type TrackShipmentRequest struct {
+	ProviderOrderID string
+	ExternalOrderID string
+	InvoiceKey      string
+	TrackingCode    string
+}
+
+// TrackShipmentResult contains the normalized tracking history.
+type TrackShipmentResult struct {
+	TrackingCode    string
+	Carrier         string
+	Service         string
+	CurrentStatus   TrackingStatus
+	Events          []TrackingEvent
+	ProviderMeta    map[string]any
+}
+
+// TrackingEvent is a single movement in the tracking history.
+type TrackingEvent struct {
+	Status      TrackingStatus
+	RawCode     int
+	RawName     string
+	Observation string
+	EventAt     time.Time
+}
+
+// TrackingStatus is the LiveCart-normalized shipment status. Every provider
+// translates its own status codes into this enum so downstream consumers
+// (admin UI, notifications, reports) are provider-agnostic.
+type TrackingStatus string
+
+const (
+	TrackingStatusUnknown                   TrackingStatus = "unknown"
+	TrackingStatusAwaitingInvoice           TrackingStatus = "awaiting_invoice"
+	TrackingStatusPending                   TrackingStatus = "pending"
+	TrackingStatusPendingPickup             TrackingStatus = "pending_pickup"
+	TrackingStatusPendingDropoff            TrackingStatus = "pending_dropoff"
+	TrackingStatusAwaitingPickup            TrackingStatus = "awaiting_pickup"
+	TrackingStatusInTransit                 TrackingStatus = "in_transit"
+	TrackingStatusOutForDelivery            TrackingStatus = "out_for_delivery"
+	TrackingStatusDelivered                 TrackingStatus = "delivered"
+	TrackingStatusDeliveryIssue             TrackingStatus = "delivery_issue"
+	TrackingStatusDeliveryBlocked           TrackingStatus = "delivery_blocked"
+	TrackingStatusIssue                     TrackingStatus = "issue"
+	TrackingStatusShipmentBlocked           TrackingStatus = "shipment_blocked"
+	TrackingStatusDamaged                   TrackingStatus = "damaged"
+	TrackingStatusStolen                    TrackingStatus = "stolen"
+	TrackingStatusLost                      TrackingStatus = "lost"
+	TrackingStatusFiscalIssue               TrackingStatus = "fiscal_issue"
+	TrackingStatusRefused                   TrackingStatus = "refused"
+	TrackingStatusNotDelivered              TrackingStatus = "not_delivered"
+	TrackingStatusIndemnificationRequested  TrackingStatus = "indemnification_requested"
+	TrackingStatusIndemnificationScheduled  TrackingStatus = "indemnification_scheduled"
+	TrackingStatusIndemnificationCompleted  TrackingStatus = "indemnification_completed"
+	TrackingStatusReturning                 TrackingStatus = "returning"
+	TrackingStatusReturned                  TrackingStatus = "returned"
+	TrackingStatusCanceled                  TrackingStatus = "canceled"
+)
