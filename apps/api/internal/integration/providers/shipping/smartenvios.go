@@ -62,11 +62,6 @@ const (
 	seNfeUploadBaseID = "a66cb425-a04c-460a-a0ac-b5ef61367e50"
 
 	seDefaultUserAgent = "LiveCart/1.0 (+https://livecart.com.br)"
-
-	// seSourceTag identifies LiveCart as the originating CMS in quotes/orders.
-	// Reused for `source` and `external_origin` when the caller does not
-	// override them with a more specific value (e.g. cart id).
-	seSourceTag = "LIVECART"
 )
 
 // SmartEnvios implements ShippingProvider + ShippingOrderProvider.
@@ -253,13 +248,16 @@ func (s *SmartEnvios) Quote(ctx context.Context, req QuoteRequest) ([]QuoteOptio
 		volumes[heaviestIdx].Weight += float64(req.ExtraPackageWeightGrams) / 1000.0
 	}
 
+	// Source and ExternalOrigin intentionally omitted: SmartEnvios enforces a
+	// per-shipper allowlist of valid values (e.g. "NUVEMSHOP", "VTEX", "CMS")
+	// and rejects anything custom with a 409 validation error. We do not need
+	// them for correlation — the quote id returned in result[] is the key the
+	// follow-up /dc-create consumes.
 	body := seQuoteRequest{
-		TotalPrice:     math.Round(totalPrice*100) / 100,
-		ZipCodeStart:   from,
-		ZipCodeEnd:     to,
-		Source:         seSourceTag,
-		ExternalOrigin: req.ExternalID,
-		Volumes:        volumes,
+		TotalPrice:   math.Round(totalPrice*100) / 100,
+		ZipCodeStart: from,
+		ZipCodeEnd:   to,
+		Volumes:      volumes,
 	}
 
 	respBody, err := s.doJSON(ctx, http.MethodPost, seQuotePath, body, nil)
@@ -308,13 +306,6 @@ func (s *SmartEnvios) ListCarriers(ctx context.Context) ([]CarrierService, error
 	respBody, err := s.doJSON(ctx, http.MethodGet, seServicesPath, nil, nil)
 	if err != nil {
 		return nil, err
-	}
-	// SmartEnvios occasionally returns 200 OK with a `{"message": "..."}`
-	// error body — for example when the token lacks permission for a given
-	// endpoint. Detect that shape and surface the message verbatim so the
-	// admin knows exactly what to fix at the SmartEnvios side.
-	if msg := extractSmartEnviosErrorMessage(respBody); msg != "" {
-		return nil, fmt.Errorf("smartenvios: %s", msg)
 	}
 	var entries []seServiceListEntry
 	if err := json.Unmarshal(respBody, &entries); err != nil {
@@ -446,9 +437,11 @@ func (s *SmartEnvios) CreateShipment(ctx context.Context, req CreateShipmentRequ
 		volumeQty = 1
 	}
 
+	// ExternalOrigin omitted for the same reason as Quote — SmartEnvios keeps
+	// a per-shipper allowlist for it. Our ExternalOrderID already handles
+	// order correlation.
 	body := seDcCreateRequest{
 		ExternalOrderID: req.ExternalOrderID,
-		ExternalOrigin:  seSourceTag,
 		FreightContentStatement: seDcCreateAddress{
 			SenderName:         req.Sender.Name,
 			SenderDocument:     req.Sender.Document,
@@ -819,6 +812,14 @@ func (s *SmartEnvios) doJSON(ctx context.Context, method, path string, body any,
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
+
+	// SmartEnvios ships error envelopes with HTTP 200 on several endpoints
+	// (permission errors, validation failures, ...) — check first so the
+	// caller gets a clean provider error instead of a JSON parse stacktrace.
+	if msg := extractSmartEnviosErrorMessage(respBody); msg != "" {
+		return nil, fmt.Errorf("smartenvios %s %s: %s", method, path, msg)
+	}
+
 	if !providers.IsSuccessStatus(resp.StatusCode) {
 		return nil, fmt.Errorf("smartenvios %s %s failed: status %d, body: %s", method, path, resp.StatusCode, string(respBody))
 	}
@@ -948,21 +949,59 @@ func valueOr(first, second string) string {
 	return second
 }
 
-// extractSmartEnviosErrorMessage inspects a response body that is expected to
-// be an array (e.g. /quote/services) or success envelope and detects the
-// alternative error shape `{"message": "..."}` SmartEnvios ships with HTTP 200
-// when the token lacks permission for a specific route. Returns the message
-// when the body matches that shape, empty string otherwise.
+// seErrorEnvelope covers the two error shapes SmartEnvios ships with HTTP 200:
+//   - permission errors on /quote/services:   `{"message":"..."}`
+//   - validation errors on /quote/freight:    `{"type":"HttpResponseError","status":409,"message":"...","result":[".." ]}`
+// `result` lives as RawMessage because it's array-of-strings on error and
+// array-of-objects on success — we only parse it when we know we're in the
+// error branch.
+type seErrorEnvelope struct {
+	Type    string          `json:"type"`
+	Status  int             `json:"status"`
+	Message string          `json:"message"`
+	Result  json.RawMessage `json:"result"`
+}
+
+// extractSmartEnviosErrorMessage returns the user-facing message when the
+// body matches one of the error envelopes, empty string when it looks like a
+// normal success payload. Combines the explicit "HttpResponseError" marker
+// (preferred, carries validation details) with a loose "bare message" check
+// for endpoints that return just `{"message":"..."}` on permission errors.
 func extractSmartEnviosErrorMessage(body []byte) string {
 	trimmed := strings.TrimLeft(string(body), " \t\r\n")
 	if !strings.HasPrefix(trimmed, "{") {
 		return ""
 	}
-	var envelope struct {
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
+	var env seErrorEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
 		return ""
 	}
-	return strings.TrimSpace(envelope.Message)
+	message := strings.TrimSpace(env.Message)
+
+	if env.Type == "HttpResponseError" {
+		// Prefer the validation details when present — they are much more
+		// actionable than the generic `message`.
+		var details []string
+		if len(env.Result) > 0 {
+			_ = json.Unmarshal(env.Result, &details)
+		}
+		if len(details) > 0 {
+			if message != "" {
+				return message + " — " + strings.Join(details, "; ")
+			}
+			return strings.Join(details, "; ")
+		}
+		if message != "" {
+			return message
+		}
+		return fmt.Sprintf("HttpResponseError (status %d)", env.Status)
+	}
+
+	// Loose-shape permission errors: `{"message":"..."}` with nothing else.
+	// Success payloads (e.g. /quote/freight) always carry a `result` field so
+	// gating on `Result` absence avoids swallowing real successes.
+	if message != "" && len(env.Result) == 0 {
+		return message
+	}
+	return ""
 }
