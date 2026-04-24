@@ -333,6 +333,20 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 			continue
 		}
 		for _, opt := range options {
+			// Drop unavailable options server-side so the public checkout
+			// never shows a rejected service. Rationale: they carry empty
+			// ids (providers only assign ids to valid quotes) and bloat the
+			// UI with "cinza/disabled" rows that the customer cannot act on
+			// anyway. Keep a log line so admins can still diagnose why a
+			// service was filtered (e.g. "value exceeds carrier limit").
+			if !opt.Available {
+				s.logger.Debug("shipping quote option filtered (unavailable)",
+					zap.String("provider", string(provider.Name())),
+					zap.String("service", opt.Service),
+					zap.String("reason", opt.Error),
+				)
+				continue
+			}
 			resp := ShippingQuoteOptionResponse{
 				ID:             opt.ServiceID,
 				Provider:       string(provider.Name()),
@@ -341,8 +355,7 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 				CarrierLogoURL: opt.CarrierLogo,
 				RealPriceCents: opt.PriceCents,
 				DeadlineDays:   opt.DeadlineDays,
-				Available:      opt.Available,
-				Error:          opt.Error,
+				Available:      true,
 			}
 			if shipCtx.EventFreeShipping {
 				resp.PriceCents = 0
@@ -354,7 +367,7 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 	}
 
 	if len(out.Options) == 0 {
-		return nil, httpx.ErrUnprocessable("nenhum provider de frete retornou opções")
+		return nil, httpx.ErrUnprocessable("nenhuma opção de frete disponível para este carrinho")
 	}
 	return out, nil
 }
@@ -387,15 +400,16 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 		return nil, err
 	}
 
+	// Unavailable options are already filtered out by QuoteShipping, so a
+	// missing match here means the option the customer picked has expired or
+	// changed status between the initial quote and the selection — force a
+	// re-quote on the client side.
 	var chosen *ShippingQuoteOptionResponse
 	for i := range quote.Options {
 		opt := &quote.Options[i]
-		if opt.ID != input.ServiceID || !opt.Available {
+		if opt.ID != input.ServiceID {
 			continue
 		}
-		// If the caller specified a provider, require it to match; otherwise
-		// pick the first matching option (only possible when a single
-		// provider returned this id).
 		if input.Provider != "" && opt.Provider != input.Provider {
 			continue
 		}
@@ -403,7 +417,7 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 		break
 	}
 	if chosen == nil {
-		return nil, httpx.ErrUnprocessable("opção de frete indisponível")
+		return nil, httpx.ErrUnprocessable("opção de frete indisponível — refaça a cotação")
 	}
 
 	sel := &CartShippingSelection{
