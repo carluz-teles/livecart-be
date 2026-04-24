@@ -1,23 +1,28 @@
 package checkout
 
 import (
+	"context"
+
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/storage"
 )
 
 // Handler handles HTTP requests for public checkout.
 type Handler struct {
 	service  *Service
 	validate *validator.Validate
+	s3Client *storage.S3Client
 }
 
 // NewHandler creates a new checkout handler.
-func NewHandler(service *Service) *Handler {
+func NewHandler(service *Service, s3Client *storage.S3Client) *Handler {
 	return &Handler{
 		service:  service,
 		validate: validator.New(),
+		s3Client: s3Client,
 	}
 }
 
@@ -346,10 +351,22 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 		Store: CartStoreInfo{
 			ID:      output.Cart.StoreID,
 			Name:    output.Cart.StoreName,
-			LogoURL: output.Cart.StoreLogoURL,
+			LogoURL: h.getPresignedLogoURL(output.Cart.StoreLogoURL),
 		},
 		Items:    items,
 		Summary:  summary,
 		Shipping: output.Cart.Shipping,
 	}
+}
+
+// getPresignedLogoURL generates a presigned URL for the store logo if available.
+func (h *Handler) getPresignedLogoURL(logoURL *string) *string {
+	if h.s3Client == nil || logoURL == nil || *logoURL == "" {
+		return nil
+	}
+	presignedURL, err := h.s3Client.GeneratePresignedGetURL(context.Background(), *logoURL, 0)
+	if err != nil {
+		return nil
+	}
+	return &presignedURL
 }

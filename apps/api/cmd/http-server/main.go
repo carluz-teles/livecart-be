@@ -367,19 +367,6 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		integrationWebhookHandler.RegisterRoutes(app)
 	}
 
-	// Public checkout routes (no authentication required)
-	if integrationSvc != nil {
-		checkoutRepo := checkout.NewRepository(queries)
-		checkoutSvc := checkout.NewService(checkoutRepo, pool, integrationSvc, log)
-		checkoutHandler := checkout.NewHandler(checkoutSvc)
-		checkoutHandler.RegisterRoutes(app)
-	}
-
-	// Protected routes (user-scoped)
-	api := app.Group("/api/v1")
-	api.Use(httpx.AuthMiddleware(clerkClient))
-	api.Use(httpx.SubscriptionMiddleware())
-
 	// Initialize S3 client for logo uploads (optional)
 	// Support both standard (S3_BUCKET) and Railway (AWS_S3_BUCKET_NAME) naming
 	var s3Client *storage.S3Client
@@ -392,6 +379,19 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			log.Info("S3 storage initialized")
 		}
 	}
+
+	// Public checkout routes (no authentication required)
+	if integrationSvc != nil {
+		checkoutRepo := checkout.NewRepository(queries)
+		checkoutSvc := checkout.NewService(checkoutRepo, pool, integrationSvc, log)
+		checkoutHandler := checkout.NewHandler(checkoutSvc, s3Client)
+		checkoutHandler.RegisterRoutes(app)
+	}
+
+	// Protected routes (user-scoped)
+	api := app.Group("/api/v1")
+	api.Use(httpx.AuthMiddleware(clerkClient))
+	api.Use(httpx.SubscriptionMiddleware())
 
 	// User routes (not store-scoped)
 	userHandler := user.NewHandler(userSvc, validate, s3Client)
