@@ -150,6 +150,10 @@ func (s *SmartEnvios) TestConnection(ctx context.Context) (*providers.TestConnec
 			TestedAt: time.Now(),
 		}, nil
 	}
+	serviceNames := make([]string, 0, len(carriers))
+	for _, c := range carriers {
+		serviceNames = append(serviceNames, c.Service)
+	}
 	return &providers.TestConnectionResult{
 		Success:  true,
 		Message:  fmt.Sprintf("connected to smartenvios (%s), %d services enabled", s.env, len(carriers)),
@@ -158,6 +162,7 @@ func (s *SmartEnvios) TestConnection(ctx context.Context) (*providers.TestConnec
 		AccountInfo: map[string]any{
 			"env":           s.env,
 			"service_count": len(carriers),
+			"service_names": serviceNames,
 		},
 	}, nil
 }

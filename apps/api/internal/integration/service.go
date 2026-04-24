@@ -1158,7 +1158,19 @@ func (s *Service) ConnectSmartEnvios(ctx context.Context, input ConnectSmartEnvi
 		}
 		existing = nil
 	}
+
+	// Build metadata the admin UI can use to render "Informações da Conta".
+	// SmartEnvios has no /me endpoint, so we surface what we can observe:
+	// environment + list of enabled carrier services. The `accountName` field
+	// mirrors the shape used by other providers so the UI doesn't need a
+	// provider-specific branch to pick something to display.
 	metadata := map[string]any{"environment": env}
+	if probeResult != nil && probeResult.AccountInfo != nil {
+		if names, ok := probeResult.AccountInfo["service_names"].([]string); ok && len(names) > 0 {
+			metadata["accountName"] = fmt.Sprintf("%d serviços habilitados", len(names))
+			metadata["enabledServices"] = names
+		}
+	}
 	if existing != nil {
 		if err := s.repo.UpdateCredentials(ctx, existing.ID, encrypted, nil); err != nil {
 			return nil, err
