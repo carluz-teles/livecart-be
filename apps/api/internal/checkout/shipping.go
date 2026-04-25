@@ -251,12 +251,16 @@ func (r *Repository) SaveShippingQuoteCache(ctx context.Context, pool *pgxpool.P
 	if err != nil {
 		return fmt.Errorf("marshaling shipping quote cache: %w", err)
 	}
+	// Pass the marshaled JSON as a string — pgx encodes []byte as BYTEA by
+	// default, which Postgres then refuses to coerce into JSONB ("invalid
+	// input syntax for type json"). string(raw) sends a normal text value
+	// that the JSONB column accepts cleanly.
 	_, err = pool.Exec(ctx, `
 		UPDATE carts
 		SET last_shipping_quote_options = $2,
 		    last_shipping_quote_at      = $3
 		WHERE id = $1
-	`, pgtype.UUID{Bytes: uid, Valid: true}, raw, at)
+	`, pgtype.UUID{Bytes: uid, Valid: true}, string(raw), at)
 	if err != nil {
 		return fmt.Errorf("saving shipping quote cache: %w", err)
 	}
