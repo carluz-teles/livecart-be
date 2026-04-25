@@ -2,6 +2,7 @@ package checkout
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -15,6 +16,12 @@ import (
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/httpx"
 )
+
+// shippingQuoteCacheTTL is how long a snapshot is considered fresh enough to
+// resolve a SelectShippingMethod request without forcing the client to refresh
+// the quote. Long enough that the customer can pick at a normal pace, short
+// enough that prices stay reasonably current.
+const shippingQuoteCacheTTL = 30 * time.Minute
 
 // shippingContext bundles everything we need to build a quote request for a cart.
 type shippingContext struct {
@@ -232,6 +239,65 @@ func (r *Repository) ReadCartShipping(ctx context.Context, pool *pgxpool.Pool, c
 	}, nil
 }
 
+// SaveShippingQuoteCache persists the most recent QuoteShipping output on the
+// cart so SelectShippingMethod can resolve the customer's pick without
+// re-quoting. Overwrites any previous snapshot.
+func (r *Repository) SaveShippingQuoteCache(ctx context.Context, pool *pgxpool.Pool, cartID string, options []ShippingQuoteOptionResponse, at time.Time) error {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return httpx.ErrBadRequest("invalid cart ID")
+	}
+	raw, err := json.Marshal(options)
+	if err != nil {
+		return fmt.Errorf("marshaling shipping quote cache: %w", err)
+	}
+	_, err = pool.Exec(ctx, `
+		UPDATE carts
+		SET last_shipping_quote_options = $2,
+		    last_shipping_quote_at      = $3
+		WHERE id = $1
+	`, pgtype.UUID{Bytes: uid, Valid: true}, raw, at)
+	if err != nil {
+		return fmt.Errorf("saving shipping quote cache: %w", err)
+	}
+	return nil
+}
+
+// ReadShippingQuoteCache returns the snapshot persisted by the most recent
+// QuoteShipping call. Returns (nil, zero-time, nil) when no snapshot exists.
+func (r *Repository) ReadShippingQuoteCache(ctx context.Context, pool *pgxpool.Pool, cartID string) ([]ShippingQuoteOptionResponse, time.Time, error) {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return nil, time.Time{}, httpx.ErrBadRequest("invalid cart ID")
+	}
+	var (
+		raw      []byte
+		quotedAt pgtype.Timestamptz
+	)
+	err = pool.QueryRow(ctx, `
+		SELECT last_shipping_quote_options, last_shipping_quote_at
+		FROM carts
+		WHERE id = $1
+	`, pgtype.UUID{Bytes: uid, Valid: true}).Scan(&raw, &quotedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, time.Time{}, nil
+		}
+		return nil, time.Time{}, fmt.Errorf("reading shipping quote cache: %w", err)
+	}
+	if len(raw) == 0 {
+		return nil, time.Time{}, nil
+	}
+	var options []ShippingQuoteOptionResponse
+	if err := json.Unmarshal(raw, &options); err != nil {
+		return nil, time.Time{}, fmt.Errorf("decoding shipping quote cache: %w", err)
+	}
+	if quotedAt.Valid {
+		return options, quotedAt.Time, nil
+	}
+	return options, time.Time{}, nil
+}
+
 // =============================================================================
 // SERVICE METHODS
 // =============================================================================
@@ -369,12 +435,30 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 	if len(out.Options) == 0 {
 		return nil, httpx.ErrUnprocessable("nenhuma opção de frete disponível para este carrinho")
 	}
+
+	// Snapshot the response so SelectShippingMethod can resolve the
+	// customer's pick without re-quoting. Best-effort: a write failure does
+	// not break the public quote response.
+	if cacheErr := s.repo.SaveShippingQuoteCache(ctx, s.pool, shipCtx.CartID, out.Options, out.QuotedAt); cacheErr != nil {
+		s.logger.Warn("failed to cache shipping quote — selection may force a re-quote",
+			zap.String("cart_id", shipCtx.CartID),
+			zap.Error(cacheErr),
+		)
+	}
 	return out, nil
 }
 
-// SelectShippingMethod re-quotes to make sure the chosen service is still valid
-// and persists the selection on the cart. Re-quoting is cheap and prevents the
-// customer from locking in a stale price.
+// SelectShippingMethod resolves the customer's chosen freight option from the
+// quote snapshot persisted by the previous QuoteShipping call and persists
+// the selection on the cart.
+//
+// We deliberately do NOT re-quote here. Some providers (SmartEnvios) issue a
+// fresh per-quotation `id` on every /quote/freight call, so re-quoting would
+// return options the customer never saw and the search by id would always
+// fail. The snapshot keeps the exact prices the customer was shown, valid for
+// shippingQuoteCacheTTL — which is what we want to lock in at this step.
+// Price freshness for the actual shipment creation is handled at /dc-create
+// time by the order-lifecycle flow, not here.
 func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShippingMethodInput) (*SelectShippingMethodOutput, error) {
 	cart, err := s.repo.GetCartByToken(ctx, input.Token)
 	if err != nil {
@@ -387,26 +471,20 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 		return nil, httpx.ErrUnprocessable("CEP é obrigatório para confirmar o frete")
 	}
 
-	reQuoteInput := QuoteShippingInput{
-		Token:      input.Token,
-		ZipCode:    input.ZipCode,
-		ServiceIDs: []string{input.ServiceID},
-	}
-	if input.Provider != "" {
-		reQuoteInput.Providers = []string{input.Provider}
-	}
-	quote, err := s.QuoteShipping(ctx, reQuoteInput)
+	options, quotedAt, err := s.repo.ReadShippingQuoteCache(ctx, s.pool, cart.ID)
 	if err != nil {
 		return nil, err
 	}
+	if len(options) == 0 {
+		return nil, httpx.ErrUnprocessable("primeiro cote o frete antes de selecionar")
+	}
+	if !quotedAt.IsZero() && time.Since(quotedAt) > shippingQuoteCacheTTL {
+		return nil, httpx.ErrUnprocessable("cotação expirou — refaça a cotação")
+	}
 
-	// Unavailable options are already filtered out by QuoteShipping, so a
-	// missing match here means the option the customer picked has expired or
-	// changed status between the initial quote and the selection — force a
-	// re-quote on the client side.
 	var chosen *ShippingQuoteOptionResponse
-	for i := range quote.Options {
-		opt := &quote.Options[i]
+	for i := range options {
+		opt := &options[i]
 		if opt.ID != input.ServiceID {
 			continue
 		}
@@ -417,9 +495,10 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 		break
 	}
 	if chosen == nil {
-		return nil, httpx.ErrUnprocessable("opção de frete indisponível — refaça a cotação")
+		return nil, httpx.ErrUnprocessable("opção de frete não encontrada na cotação atual — refaça a cotação")
 	}
 
+	freeShipping := chosen.PriceCents == 0 && chosen.RealPriceCents > 0
 	sel := &CartShippingSelection{
 		Provider:      chosen.Provider,
 		ServiceID:     chosen.ID,
@@ -428,7 +507,7 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 		CostCents:     chosen.PriceCents,
 		RealCostCents: chosen.RealPriceCents,
 		DeadlineDays:  chosen.DeadlineDays,
-		FreeShipping:  quote.FreeShipping,
+		FreeShipping:  freeShipping,
 	}
 	if err := s.repo.UpdateCartShipping(ctx, s.pool, cart.ID, sel); err != nil {
 		return nil, err
