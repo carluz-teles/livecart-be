@@ -51,6 +51,7 @@ type ShippingProfileDTO struct {
 }
 
 // CreateProductRequest represents the request body for creating a product.
+// To create a variant of an existing group, pass `groupId`. For a simple product, omit it.
 type CreateProductRequest struct {
 	Name           string             `json:"name" validate:"required,min=1,max=200"`
 	ExternalID     string             `json:"externalId"`
@@ -60,6 +61,8 @@ type CreateProductRequest struct {
 	ImageURL       string             `json:"imageUrl"`
 	Stock          int                `json:"stock" validate:"min=0"`
 	Shipping       ShippingProfileDTO `json:"shipping"`
+	GroupID        string             `json:"groupId" validate:"omitempty,uuid"`
+	Images         []string           `json:"images" validate:"omitempty,dive,required"`
 }
 
 // CreateProductResponse represents the response for product creation.
@@ -68,6 +71,12 @@ type CreateProductResponse struct {
 	Name      string    `json:"name"`
 	Keyword   string    `json:"keyword"`
 	CreatedAt time.Time `json:"createdAt"`
+}
+
+// AddProductImageRequest is the body for POST /products/:id/images.
+type AddProductImageRequest struct {
+	URL      string `json:"url" validate:"required,url"`
+	Position int    `json:"position" validate:"min=0"`
 }
 
 // UpdateProductRequest represents the request body for updating a product.
@@ -81,6 +90,8 @@ type UpdateProductRequest struct {
 }
 
 // ProductResponse represents a product in API responses.
+// `groupId`, `optionValues` and `images` are populated for variants;
+// for simple products `groupId` is empty and `optionValues`/`images` are empty arrays.
 type ProductResponse struct {
 	ID             string             `json:"id"`
 	Name           string             `json:"name"`
@@ -93,6 +104,9 @@ type ProductResponse struct {
 	Active         bool               `json:"active"`
 	Shipping       ShippingProfileDTO `json:"shipping"`
 	Shippable      bool               `json:"shippable"`
+	GroupID        string             `json:"groupId"`
+	OptionValues   []OptionValueRef   `json:"optionValues"`
+	Images         []string           `json:"images"`
 	CreatedAt      time.Time          `json:"createdAt"`
 	UpdatedAt      time.Time          `json:"updatedAt"`
 }
@@ -136,6 +150,8 @@ type CreateProductInput struct {
 	ImageURL       string
 	Stock          int
 	Shipping       domain.ShippingProfile
+	GroupID        *vo.ID   // optional — pass when creating a variant of an existing product_group
+	Images         []string // optional — gallery URLs to attach to the variant
 }
 
 // CreateProductOutput represents service output for product creation.
@@ -171,6 +187,9 @@ type ProductOutput struct {
 	Active         bool
 	Shipping       domain.ShippingProfile
 	Shippable      bool
+	GroupID        string
+	OptionValues   []OptionValueRef
+	Images         []string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }

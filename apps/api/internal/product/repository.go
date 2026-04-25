@@ -43,11 +43,70 @@ func (r *Repository) Save(ctx context.Context, product *domain.Product) error {
 		Sku:                 pgtype.Text{String: sp.SKU, Valid: sp.SKU != ""},
 		PackageFormat:       packageFormatToColumn(sp.PackageFormat),
 		InsuranceValueCents: int64PtrToInt8(sp.InsuranceValueCents),
+		GroupID:             groupIDToPg(product.GroupID()),
 	})
 	if err != nil {
 		return fmt.Errorf("inserting product: %w", err)
 	}
 	return nil
+}
+
+// ListImages returns the gallery images attached to a single variant.
+func (r *Repository) ListImages(ctx context.Context, productID vo.ProductID) ([]string, error) {
+	rows, err := r.q.ListProductImagesByProduct(ctx, productID.ToPgUUID())
+	if err != nil {
+		return nil, fmt.Errorf("listing product images: %w", err)
+	}
+	urls := make([]string, len(rows))
+	for i, row := range rows {
+		urls[i] = row.Url
+	}
+	return urls, nil
+}
+
+// ListVariantOptions returns the option/value pairs that define a variant.
+// Returns empty when the product is simple (no group).
+func (r *Repository) ListVariantOptions(ctx context.Context, productID vo.ProductID) ([]sqlc.ListVariantOptionsByProductRow, error) {
+	rows, err := r.q.ListVariantOptionsByProduct(ctx, productID.ToPgUUID())
+	if err != nil {
+		return nil, fmt.Errorf("listing variant options: %w", err)
+	}
+	return rows, nil
+}
+
+// AddImage inserts one image into the variant gallery.
+func (r *Repository) AddImage(ctx context.Context, productID vo.ProductID, url string, position int) (string, error) {
+	row, err := r.q.CreateProductImage(ctx, sqlc.CreateProductImageParams{
+		ProductID: productID.ToPgUUID(),
+		Url:       url,
+		Position:  int32(position),
+	})
+	if err != nil {
+		return "", fmt.Errorf("inserting product image: %w", err)
+	}
+	return formatPgUUID(row.ID), nil
+}
+
+// DeleteImage removes one image from the variant gallery.
+func (r *Repository) DeleteImage(ctx context.Context, productID vo.ProductID, imageID vo.ID) error {
+	return r.q.DeleteProductImage(ctx, sqlc.DeleteProductImageParams{
+		ID:        imageID.ToPgUUID(),
+		ProductID: productID.ToPgUUID(),
+	})
+}
+
+func groupIDToPg(id *vo.ID) pgtype.UUID {
+	if id == nil || id.IsZero() {
+		return pgtype.UUID{}
+	}
+	return id.ToPgUUID()
+}
+
+func formatPgUUID(p pgtype.UUID) string {
+	if !p.Valid {
+		return ""
+	}
+	return fmt.Sprintf("%x-%x-%x-%x-%x", p.Bytes[0:4], p.Bytes[4:6], p.Bytes[6:8], p.Bytes[8:10], p.Bytes[10:16])
 }
 
 func (r *Repository) GetByID(ctx context.Context, id vo.ProductID, storeID vo.StoreID) (*domain.Product, error) {
@@ -202,7 +261,7 @@ func (r *Repository) List(ctx context.Context, params ListProductsParams) (ListP
 	// Build main query with pagination
 	query := fmt.Sprintf(`
 		SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at,
-		       weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents
+		       weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id
 		FROM products
 		WHERE %s
 		ORDER BY %s
@@ -240,6 +299,7 @@ func (r *Repository) List(ctx context.Context, params ListProductsParams) (ListP
 			&row.Sku,
 			&row.PackageFormat,
 			&row.InsuranceValueCents,
+			&row.GroupID,
 		); err != nil {
 			return ListProductsResult{}, fmt.Errorf("scanning product: %w", err)
 		}
@@ -317,7 +377,7 @@ func (r *Repository) Delete(ctx context.Context, id vo.ProductID, storeID vo.Sto
 func (r *Repository) GetByExternalID(ctx context.Context, storeID vo.StoreID, externalSource domain.ExternalSource, externalID string) (*domain.Product, error) {
 	query := `
 		SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at,
-		       weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents
+		       weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id
 		FROM products
 		WHERE store_id = $1 AND external_source = $2 AND external_id = $3
 	`
@@ -343,6 +403,7 @@ func (r *Repository) GetByExternalID(ctx context.Context, storeID vo.StoreID, ex
 		&row.Sku,
 		&row.PackageFormat,
 		&row.InsuranceValueCents,
+		&row.GroupID,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -436,7 +497,7 @@ func toDomainProduct(row sqlc.Product) (*domain.Product, error) {
 		InsuranceValueCents: int8ToInt64Ptr(row.InsuranceValueCents),
 	}
 
-	return domain.Reconstruct(
+	product := domain.Reconstruct(
 		id,
 		storeID,
 		row.Name,
@@ -450,7 +511,14 @@ func toDomainProduct(row sqlc.Product) (*domain.Product, error) {
 		shipping,
 		row.CreatedAt.Time,
 		row.UpdatedAt.Time,
-	), nil
+	)
+	if row.GroupID.Valid {
+		gid, err := vo.NewID(formatPgUUID(row.GroupID))
+		if err == nil {
+			product.AttachGroup(&gid)
+		}
+	}
+	return product, nil
 }
 
 // ============================================

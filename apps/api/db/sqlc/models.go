@@ -39,6 +39,26 @@ type Cart struct {
 	CustomerPhone     pgtype.Text        `json:"customer_phone"`
 	ShippingAddress   json.RawMessage    `json:"shipping_address"`
 	CustomerID        pgtype.UUID        `json:"customer_id"`
+	// Opaque service id returned by the shipping provider (int-as-string for ME, ObjectId/UUID for others)
+	ShippingServiceID pgtype.Text `json:"shipping_service_id"`
+	// Human name of the service, e.g. PAC, SEDEX, Jadlog .Package
+	ShippingServiceName pgtype.Text `json:"shipping_service_name"`
+	// Carrier behind the service: Correios, Jadlog, Loggi, etc.
+	ShippingCarrier pgtype.Text `json:"shipping_carrier"`
+	// What we charge the customer for shipping (zero for free-shipping events)
+	ShippingCostCents pgtype.Int8 `json:"shipping_cost_cents"`
+	// Actual shipping quote value - what the shipment will cost the merchant
+	ShippingCostRealCents pgtype.Int8 `json:"shipping_cost_real_cents"`
+	// Estimated maximum delivery time in business days
+	ShippingDeadlineDays pgtype.Int4 `json:"shipping_deadline_days"`
+	// When the quote was last refreshed. Quotes expire and must be recomputed after ~1h
+	ShippingQuotedAt pgtype.Timestamptz `json:"shipping_quoted_at"`
+	// Name of the shipping integration that owns this selection: melhor_envio | smartenvios | ...
+	ShippingProvider pgtype.Text `json:"shipping_provider"`
+	// Snapshot of the options array from the most recent QuoteShipping response — exact shape the public API returned to the customer.
+	LastShippingQuoteOptions json.RawMessage `json:"last_shipping_quote_options"`
+	// When the snapshot above was generated. Selections older than the cache TTL should force a re-quote on the client.
+	LastShippingQuoteAt pgtype.Timestamptz `json:"last_shipping_quote_at"`
 }
 
 type CartItem struct {
@@ -188,6 +208,8 @@ type LiveEvent struct {
 	ScheduledAt pgtype.Timestamptz `json:"scheduled_at"`
 	// Internal notes about the event
 	Description pgtype.Text `json:"description"`
+	// When true, charge the customer R$0 shipping regardless of the quoted price (real cost is still recorded on the cart)
+	FreeShipping bool `json:"free_shipping"`
 }
 
 type LiveSession struct {
@@ -293,6 +315,95 @@ type Product struct {
 	PackageFormat string `json:"package_format"`
 	// Declared value for shipping insurance, in cents. Falls back to product price when NULL.
 	InsuranceValueCents pgtype.Int8 `json:"insurance_value_cents"`
+	// FK to product_groups when this product is a variant; NULL for simple products.
+	GroupID pgtype.UUID `json:"group_id"`
+}
+
+// Catalog aggregator over `products` (variants). NULL group_id = simple product.
+type ProductGroup struct {
+	ID             pgtype.UUID        `json:"id"`
+	StoreID        pgtype.UUID        `json:"store_id"`
+	Name           string             `json:"name"`
+	Description    pgtype.Text        `json:"description"`
+	ExternalID     pgtype.Text        `json:"external_id"`
+	ExternalSource string             `json:"external_source"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+// Per-group gallery (generic photos shared by all variants).
+type ProductGroupImage struct {
+	ID        pgtype.UUID        `json:"id"`
+	GroupID   pgtype.UUID        `json:"group_id"`
+	Url       string             `json:"url"`
+	Position  int32              `json:"position"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// Per-variant gallery (in addition to products.image_url thumbnail).
+type ProductImage struct {
+	ID        pgtype.UUID        `json:"id"`
+	ProductID pgtype.UUID        `json:"product_id"`
+	Url       string             `json:"url"`
+	Position  int32              `json:"position"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// Variation dimensions of a group (e.g. Color, Size).
+type ProductOption struct {
+	ID       pgtype.UUID `json:"id"`
+	GroupID  pgtype.UUID `json:"group_id"`
+	Name     string      `json:"name"`
+	Position int32       `json:"position"`
+}
+
+// Allowed values for a given option (e.g. Red, Blue / S, M, L).
+type ProductOptionValue struct {
+	ID       pgtype.UUID `json:"id"`
+	OptionID pgtype.UUID `json:"option_id"`
+	Value    string      `json:"value"`
+	Position int32       `json:"position"`
+}
+
+// Junction: which option values define each variant. Uniqueness of the value combination per group is enforced in service layer.
+type ProductVariantOption struct {
+	ProductID     pgtype.UUID `json:"product_id"`
+	OptionValueID pgtype.UUID `json:"option_value_id"`
+}
+
+// Provider-agnostic freight orders linked to carts. One row per shipment created at a carrier.
+type Shipment struct {
+	ID                  pgtype.UUID        `json:"id"`
+	OrderID             pgtype.UUID        `json:"order_id"`
+	StoreID             pgtype.UUID        `json:"store_id"`
+	Provider            string             `json:"provider"`
+	ProviderOrderID     string             `json:"provider_order_id"`
+	ProviderOrderNumber pgtype.Text        `json:"provider_order_number"`
+	TrackingCode        pgtype.Text        `json:"tracking_code"`
+	PublicTrackingUrl   pgtype.Text        `json:"public_tracking_url"`
+	InvoiceKey          pgtype.Text        `json:"invoice_key"`
+	InvoiceKind         pgtype.Text        `json:"invoice_kind"`
+	InvoiceID           pgtype.Text        `json:"invoice_id"`
+	LabelUrl            pgtype.Text        `json:"label_url"`
+	Status              string             `json:"status"`
+	StatusRawCode       pgtype.Int4        `json:"status_raw_code"`
+	StatusRawName       pgtype.Text        `json:"status_raw_name"`
+	ProviderMeta        json.RawMessage    `json:"provider_meta"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+}
+
+// Append-only timeline of tracking events per shipment. Source = poll (pull) | webhook (future).
+type ShipmentTrackingEvent struct {
+	ID          pgtype.UUID        `json:"id"`
+	ShipmentID  pgtype.UUID        `json:"shipment_id"`
+	Status      string             `json:"status"`
+	RawCode     pgtype.Int4        `json:"raw_code"`
+	RawName     pgtype.Text        `json:"raw_name"`
+	Observation pgtype.Text        `json:"observation"`
+	EventAt     pgtype.Timestamptz `json:"event_at"`
+	ReceivedAt  pgtype.Timestamptz `json:"received_at"`
+	Source      string             `json:"source"`
 }
 
 type StockReservation struct {

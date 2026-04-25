@@ -1,10 +1,17 @@
 -- name: CreateProduct :one
 INSERT INTO products (
     store_id, name, external_id, external_source, keyword, price, image_url, stock,
-    weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents
+    weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents,
+    group_id
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 RETURNING *;
+
+-- name: SetProductGroup :exec
+UPDATE products SET group_id = $2, updated_at = now() WHERE id = $1;
+
+-- name: ListProductsByGroup :many
+SELECT * FROM products WHERE group_id = $1 ORDER BY keyword ASC;
 
 -- name: GetProductByID :one
 SELECT * FROM products WHERE id = $1 AND store_id = $2;

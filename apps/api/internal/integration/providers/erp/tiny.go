@@ -342,6 +342,8 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 			Stock:     0,                  // Not available in list response — enriched via GetProduct
 			Active:    p.Situacao == "A",
 			UpdatedAt: updatedAt,
+			Type:      p.Tipo,
+			IsParent:  p.Tipo == "V",
 		}
 	}
 
@@ -372,31 +374,66 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 		return nil, fmt.Errorf("get product failed: status %d", resp.StatusCode)
 	}
 
-	var p struct {
-		ID                    int64  `json:"id"`
-		SKU                   string `json:"sku"`
-		Descricao             string `json:"descricao"`
-		DescricaoComplementar string `json:"descricaoComplementar"`
-		Situacao              string `json:"situacao"`
-		GTIN                  string `json:"gtin"`
-		DataAlteracao         string `json:"dataAlteracao"`
-		Precos                struct {
-			Preco            float64 `json:"preco"`
-			PrecoPromocional float64 `json:"precoPromocional"`
-		} `json:"precos"`
-		Estoque struct {
-			Quantidade float64 `json:"quantidade"`
-		} `json:"estoque"`
-		Anexos []struct {
-			URL     string `json:"url"`
-			Externo bool   `json:"externo"`
-		} `json:"anexos"`
-	}
-
+	var p tinyProductPayload
 	if err := json.Unmarshal(body, &p); err != nil {
 		return nil, fmt.Errorf("parsing product response: %w", err)
 	}
 
+	out := tinyPayloadToERP(p)
+	return &out, nil
+}
+
+// tinyProductPayload mirrors Tiny v3 GET /produtos/{id} response, including the
+// variation fields documented at https://erp.tiny.com.br/public-api/v3/swagger/swagger.json.
+type tinyProductPayload struct {
+	ID                    int64  `json:"id"`
+	SKU                   string `json:"sku"`
+	Descricao             string `json:"descricao"`
+	DescricaoComplementar string `json:"descricaoComplementar"`
+	Situacao              string `json:"situacao"`
+	Tipo                  string `json:"tipo"` // S, V, K, F, M
+	GTIN                  string `json:"gtin"`
+	DataAlteracao         string `json:"dataAlteracao"`
+	Precos                struct {
+		Preco            float64 `json:"preco"`
+		PrecoPromocional float64 `json:"precoPromocional"`
+	} `json:"precos"`
+	Estoque struct {
+		Quantidade float64 `json:"quantidade"`
+	} `json:"estoque"`
+	Anexos []struct {
+		URL     string `json:"url"`
+		Externo bool   `json:"externo"`
+	} `json:"anexos"`
+	Grade      []string             `json:"grade"`      // dimension keys for parents (tipo=V), e.g. ["Tamanho","Cor"]
+	ProdutoPai *tinyParentRef       `json:"produtoPai"` // present when this is a child variation
+	Variacoes  []tinyVariantPayload `json:"variacoes"`  // children when tipo=V
+}
+
+type tinyParentRef struct {
+	ID  int64  `json:"id"`
+	SKU string `json:"sku"`
+}
+
+type tinyVariantPayload struct {
+	ID        int64  `json:"id"`
+	Descricao string `json:"descricao"`
+	SKU       string `json:"sku"`
+	GTIN      string `json:"gtin"`
+	Precos    struct {
+		Preco            float64 `json:"preco"`
+		PrecoPromocional float64 `json:"precoPromocional"`
+	} `json:"precos"`
+	Estoque struct {
+		Quantidade float64 `json:"quantidade"`
+	} `json:"estoque"`
+	// Grade for variants is returned as an object map ({"Cor":"Azul","Tamanho":"M"})
+	// in some Tiny endpoints — capture both shapes.
+	GradeMap map[string]string `json:"-"`
+	GradeRaw json.RawMessage   `json:"grade"`
+}
+
+func tinyPayloadToERP(p tinyProductPayload) ERPProduct {
 	price := p.Precos.Preco
 	if p.Precos.PrecoPromocional > 0 {
 		price = p.Precos.PrecoPromocional
@@ -407,7 +444,6 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 		updatedAt, _ = time.Parse("2006-01-02 15:04:05", p.DataAlteracao)
 	}
 
-	// Get image URL from attachments
 	var imageURL string
 	for _, a := range p.Anexos {
 		if a.URL != "" {
@@ -416,7 +452,7 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 		}
 	}
 
-	return &ERPProduct{
+	prod := ERPProduct{
 		ID:          strconv.FormatInt(p.ID, 10),
 		SKU:         p.SKU,
 		GTIN:        p.GTIN,
@@ -427,7 +463,68 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 		Active:      p.Situacao == "A",
 		ImageURL:    imageURL,
 		UpdatedAt:   updatedAt,
-	}, nil
+		Type:        p.Tipo,
+		IsParent:    p.Tipo == "V",
+		GradeKeys:   p.Grade,
+	}
+
+	if p.ProdutoPai != nil && p.ProdutoPai.ID != 0 {
+		prod.ParentExternalID = strconv.FormatInt(p.ProdutoPai.ID, 10)
+	}
+
+	if len(p.Variacoes) > 0 {
+		variants := make([]ERPProduct, 0, len(p.Variacoes))
+		for _, v := range p.Variacoes {
+			vPrice := v.Precos.Preco
+			if v.Precos.PrecoPromocional > 0 {
+				vPrice = v.Precos.PrecoPromocional
+			}
+			attrs := decodeTinyGrade(v.GradeRaw, p.Grade)
+			variants = append(variants, ERPProduct{
+				ID:               strconv.FormatInt(v.ID, 10),
+				SKU:              v.SKU,
+				GTIN:             v.GTIN,
+				Name:             v.Descricao,
+				Price:            int64(math.Round(vPrice * 100)),
+				Stock:            int(v.Estoque.Quantidade),
+				Active:           prod.Active, // Tiny variants inherit `situacao` from the parent.
+				ParentExternalID: prod.ID,
+				Attributes:       attrs,
+			})
+		}
+		prod.Variants = variants
+	}
+
+	return prod
+}
+
+// decodeTinyGrade accepts both `{"Cor":"Azul","Tamanho":"M"}` (object map, common in
+// GET /produtos response) and `[{"chave":"Cor","valor":"Azul"}, ...]` (array form,
+// used in the request model). gradeKeys is used to preserve order when the source
+// is an object map.
+func decodeTinyGrade(raw json.RawMessage, gradeKeys []string) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	// Try object form first.
+	var asMap map[string]string
+	if err := json.Unmarshal(raw, &asMap); err == nil && len(asMap) > 0 {
+		_ = gradeKeys // order is preserved by the producer; map iteration order does not matter for our usage
+		return asMap
+	}
+	// Fall back to array form.
+	var asArray []struct {
+		Chave string `json:"chave"`
+		Valor string `json:"valor"`
+	}
+	if err := json.Unmarshal(raw, &asArray); err == nil && len(asArray) > 0 {
+		out := make(map[string]string, len(asArray))
+		for _, kv := range asArray {
+			out[kv.Chave] = kv.Valor
+		}
+		return out
+	}
+	return nil
 }
 
 // SyncProduct updates a product in Tiny.

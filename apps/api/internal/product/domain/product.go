@@ -69,6 +69,7 @@ func (s ShippingProfile) IsComplete() bool {
 type Product struct {
 	id             vo.ProductID
 	storeID        vo.StoreID
+	groupID        *vo.ID // optional: links variants to their product_group aggregator
 	name           string
 	externalID     string
 	externalSource ExternalSource
@@ -164,6 +165,13 @@ func Reconstruct(
 	}
 }
 
+// AttachGroup links the product to a product group (variant of an aggregator).
+// Pass nil to detach.
+func (p *Product) AttachGroup(groupID *vo.ID) {
+	p.groupID = groupID
+	p.updatedAt = time.Now()
+}
+
 // validateShipping enforces: dimensions are all-or-nothing, each positive when set.
 func validateShipping(s ShippingProfile) error {
 	set := 0
@@ -206,6 +214,7 @@ func validateShipping(s ShippingProfile) error {
 
 func (p *Product) ID() vo.ProductID                { return p.id }
 func (p *Product) StoreID() vo.StoreID             { return p.storeID }
+func (p *Product) GroupID() *vo.ID                 { return p.groupID }
 func (p *Product) Name() string                    { return p.name }
 func (p *Product) ExternalID() string              { return p.externalID }
 func (p *Product) ExternalSource() ExternalSource  { return p.externalSource }

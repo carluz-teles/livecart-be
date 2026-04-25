@@ -561,16 +561,25 @@ type ProductListResult struct {
 
 // ERPProduct represents a product in the ERP.
 type ERPProduct struct {
-	ID          string    `json:"id"`           // ERP product ID
+	ID          string    `json:"id"`             // ERP product ID
 	SKU         string    `json:"sku,omitempty"`
 	GTIN        string    `json:"gtin,omitempty"` // Barcode (EAN/GTIN)
 	Name        string    `json:"name"`
 	Description string    `json:"description,omitempty"`
-	Price       int64     `json:"price"`        // In cents
+	Price       int64     `json:"price"` // In cents
 	Stock       int       `json:"stock"`
 	Active      bool      `json:"active"`
 	ImageURL    string    `json:"image_url,omitempty"`
 	UpdatedAt   time.Time `json:"updated_at"`
+
+	// Variant-related fields (populated for ERPs that expose variations like Tiny "Com Variações" / tipo=V).
+	// Type carries the ERP's native product type ("S","V","K","F","M" for Tiny). Empty when unknown.
+	Type             string            `json:"type,omitempty"`
+	IsParent         bool              `json:"is_parent,omitempty"`         // True when this product is the aggregator (has children).
+	ParentExternalID string            `json:"parent_external_id,omitempty"` // ERP id of the parent when this is a child variant.
+	Attributes       map[string]string `json:"attributes,omitempty"`        // Variation grade for a child, e.g. {"Cor":"Azul","Tamanho":"M"}.
+	GradeKeys        []string          `json:"grade_keys,omitempty"`        // Grade dimension names for a parent, e.g. ["Tamanho","Cor"].
+	Variants         []ERPProduct      `json:"variants,omitempty"`          // Children when IsParent — populated by GetProduct.
 }
 
 // SyncResult is the result of syncing a product.

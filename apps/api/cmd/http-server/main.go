@@ -46,6 +46,7 @@ import (
 	"livecart/apps/api/internal/notification"
 	"livecart/apps/api/internal/order"
 	"livecart/apps/api/internal/product"
+	"livecart/apps/api/internal/productgroup"
 	"livecart/apps/api/internal/store"
 	"livecart/apps/api/internal/user"
 	"livecart/apps/api/lib/storage"
@@ -432,9 +433,15 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	productHandler := product.NewHandler(productSvc, validate)
 	productHandler.RegisterRoutes(storeScoped)
 
+	productGroupRepo := productgroup.NewRepository(queries, pool)
+	productGroupSvc := productgroup.NewService(productGroupRepo, log)
+	productGroupHandler := productgroup.NewHandler(productGroupSvc, validate)
+	productGroupHandler.RegisterRoutes(storeScoped)
+
 // Wire product syncer for ERP webhooks
 	if integrationSvc != nil {
 		integrationSvc.SetProductSyncer(product.NewProductSyncerAdapter(productSvc))
+		integrationSvc.SetProductGroupSyncer(productgroup.NewSyncerAdapter(productGroupSvc, productSvc))
 	}
 
 	liveHandler := live.NewHandler(liveSvc, validate)

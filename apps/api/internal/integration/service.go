@@ -36,6 +36,13 @@ type ProductSyncer interface {
 	SyncProduct(ctx context.Context, storeID, externalID, externalSource, name string, price int64, imageURL string, stock int, active bool, skipStock bool) error
 }
 
+// ProductGroupSyncer handles ERP products that ship with variations
+// (e.g. Tiny tipo=V). Wired separately from ProductSyncer to avoid pulling the
+// productgroup package into the product package.
+type ProductGroupSyncer interface {
+	SyncFromERP(ctx context.Context, storeID, externalSource string, parent providers.ERPProduct) error
+}
+
 // Service handles business logic for integrations.
 type Service struct {
 	repo                *Repository
@@ -44,6 +51,7 @@ type Service struct {
 	idempotency         *idempotency.Service
 	liveService         *live.Service
 	productSyncer       ProductSyncer
+	productGroupSyncer  ProductGroupSyncer
 	notificationService *notification.Service
 	logger              *zap.Logger
 }
@@ -70,6 +78,12 @@ func NewService(
 // SetProductSyncer sets the product syncer for webhook processing.
 func (s *Service) SetProductSyncer(syncer ProductSyncer) {
 	s.productSyncer = syncer
+}
+
+// SetProductGroupSyncer wires the syncer used when an imported ERP product has
+// variations (Tiny tipo=V, etc.).
+func (s *Service) SetProductGroupSyncer(syncer ProductGroupSyncer) {
+	s.productGroupSyncer = syncer
 }
 
 // SetNotificationService sets the notification service for sending DMs.
@@ -1656,6 +1670,15 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	if err != nil {
 		s.handleProviderError(ctx, integration.ID, "webhook_get_product", err)
 		return fmt.Errorf("fetching product from ERP: %w", err)
+	}
+
+	// Variant-aware branch: if the ERP returned a parent product with children
+	// (e.g. Tiny tipo=V), delegate the whole tree to the productgroup syncer.
+	if detailed.IsParent && len(detailed.Variants) > 0 && s.productGroupSyncer != nil {
+		if err := s.productGroupSyncer.SyncFromERP(ctx, integration.StoreID, integration.Provider, *detailed); err != nil {
+			return fmt.Errorf("syncing product group: %w", err)
+		}
+		return nil
 	}
 
 	// Check if product has active stock reservations during a live event.

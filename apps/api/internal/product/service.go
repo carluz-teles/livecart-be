@@ -55,9 +55,19 @@ func (s *Service) Create(ctx context.Context, input CreateProductInput) (CreateP
 		return CreateProductOutput{}, fmt.Errorf("creating product: %w", err)
 	}
 
+	if input.GroupID != nil {
+		product.AttachGroup(input.GroupID)
+	}
+
 	// Save to repository
 	if err := s.repo.Save(ctx, product); err != nil {
 		return CreateProductOutput{}, err
+	}
+
+	for i, url := range input.Images {
+		if _, err := s.repo.AddImage(ctx, product.ID(), url, i); err != nil {
+			return CreateProductOutput{}, fmt.Errorf("attaching variant image: %w", err)
+		}
 	}
 
 	return CreateProductOutput{
@@ -97,7 +107,26 @@ func (s *Service) GetByID(ctx context.Context, id vo.ProductID, storeID vo.Store
 	if err != nil {
 		return ProductOutput{}, err
 	}
-	return toProductOutput(product), nil
+	out := toProductOutput(product)
+
+	images, err := s.repo.ListImages(ctx, id)
+	if err != nil {
+		return ProductOutput{}, err
+	}
+	out.Images = images
+
+	if product.GroupID() != nil {
+		opts, err := s.repo.ListVariantOptions(ctx, id)
+		if err != nil {
+			return ProductOutput{}, err
+		}
+		refs := make([]OptionValueRef, len(opts))
+		for i, o := range opts {
+			refs[i] = OptionValueRef{Option: o.OptionName, Value: o.Value}
+		}
+		out.OptionValues = refs
+	}
+	return out, nil
 }
 
 func (s *Service) List(ctx context.Context, input ListProductsInput) (ListProductsOutput, error) {
@@ -152,6 +181,22 @@ func (s *Service) Delete(ctx context.Context, id vo.ProductID, storeID vo.StoreI
 	return s.repo.Delete(ctx, id, storeID)
 }
 
+// AddImage attaches one image URL to a variant gallery (after asserting ownership).
+func (s *Service) AddImage(ctx context.Context, id vo.ProductID, storeID vo.StoreID, url string, position int) (string, error) {
+	if _, err := s.repo.GetByID(ctx, id, storeID); err != nil {
+		return "", err
+	}
+	return s.repo.AddImage(ctx, id, url, position)
+}
+
+// DeleteImage removes one image from a variant gallery.
+func (s *Service) DeleteImage(ctx context.Context, id vo.ProductID, storeID vo.StoreID, imageID vo.ID) error {
+	if _, err := s.repo.GetByID(ctx, id, storeID); err != nil {
+		return err
+	}
+	return s.repo.DeleteImage(ctx, id, imageID)
+}
+
 // HasProductByExternalID checks if a product with the given external ID exists.
 func (s *Service) HasProductByExternalID(ctx context.Context, storeID vo.StoreID, externalSource domain.ExternalSource, externalID string) (bool, error) {
 	existing, err := s.repo.GetByExternalID(ctx, storeID, externalSource, externalID)
@@ -192,6 +237,10 @@ func (s *Service) GetStats(ctx context.Context, storeID vo.StoreID) (ProductStat
 }
 
 func toProductOutput(product *domain.Product) ProductOutput {
+	groupID := ""
+	if g := product.GroupID(); g != nil {
+		groupID = g.String()
+	}
 	return ProductOutput{
 		ID:             product.ID().String(),
 		Name:           product.Name(),
@@ -204,6 +253,9 @@ func toProductOutput(product *domain.Product) ProductOutput {
 		Active:         product.Active(),
 		Shipping:       product.Shipping(),
 		Shippable:      product.IsShippable(),
+		GroupID:        groupID,
+		OptionValues:   []OptionValueRef{},
+		Images:         []string{},
 		CreatedAt:      product.CreatedAt(),
 		UpdatedAt:      product.UpdatedAt(),
 	}

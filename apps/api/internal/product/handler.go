@@ -29,6 +29,71 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/:id", h.GetByID)
 	g.Put("/:id", h.Update)
 	g.Delete("/:id", h.Delete)
+	g.Post("/:id/images", h.AddImage)
+	g.Delete("/:id/images/:imageId", h.DeleteImage)
+}
+
+// AddImage attaches one image URL to a variant gallery.
+// @Summary      Attach image to product/variant
+// @Tags         products
+// @Accept       json
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Product UUID"
+// @Param        request body AddProductImageRequest true "Image payload"
+// @Success      201 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/products/{id}/images [post]
+// @Security     BearerAuth
+func (h *Handler) AddImage(c *fiber.Ctx) error {
+	var req AddProductImageRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
+	if err != nil {
+		return httpx.BadRequest(c, "invalid store ID")
+	}
+	id, err := vo.NewProductID(c.Params("id"))
+	if err != nil {
+		return httpx.BadRequest(c, "invalid product ID")
+	}
+	imageID, err := h.service.AddImage(c.Context(), id, storeID, req.URL, req.Position)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.Created(c, fiber.Map{"id": imageID, "url": req.URL, "position": req.Position})
+}
+
+// DeleteImage removes one image from a variant gallery.
+// @Summary      Detach image from product/variant
+// @Tags         products
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Product UUID"
+// @Param        imageId path string true "Image UUID"
+// @Success      200 {object} httpx.Envelope{data=httpx.DeletedResponse}
+// @Router       /api/v1/stores/{storeId}/products/{id}/images/{imageId} [delete]
+// @Security     BearerAuth
+func (h *Handler) DeleteImage(c *fiber.Ctx) error {
+	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
+	if err != nil {
+		return httpx.BadRequest(c, "invalid store ID")
+	}
+	productID, err := vo.NewProductID(c.Params("id"))
+	if err != nil {
+		return httpx.BadRequest(c, "invalid product ID")
+	}
+	imageIDStr := c.Params("imageId")
+	imageID, err := vo.NewID(imageIDStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid image ID")
+	}
+	if err := h.service.DeleteImage(c.Context(), productID, storeID, imageID); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.Deleted(c, imageIDStr)
 }
 
 // Create godoc
@@ -77,6 +142,15 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		return httpx.BadRequest(c, err.Error())
 	}
 
+	var groupID *vo.ID
+	if req.GroupID != "" {
+		gid, err := vo.NewID(req.GroupID)
+		if err != nil {
+			return httpx.BadRequest(c, "invalid groupId")
+		}
+		groupID = &gid
+	}
+
 	output, err := h.service.Create(c.Context(), CreateProductInput{
 		StoreID:        storeID,
 		Name:           req.Name,
@@ -87,6 +161,8 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		ImageURL:       req.ImageURL,
 		Stock:          req.Stock,
 		Shipping:       shipping,
+		GroupID:        groupID,
+		Images:         req.Images,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -369,6 +445,14 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 }
 
 func toProductResponse(o ProductOutput) ProductResponse {
+	images := o.Images
+	if images == nil {
+		images = []string{}
+	}
+	options := o.OptionValues
+	if options == nil {
+		options = []OptionValueRef{}
+	}
 	return ProductResponse{
 		ID:             o.ID,
 		Name:           o.Name,
@@ -381,6 +465,9 @@ func toProductResponse(o ProductOutput) ProductResponse {
 		Active:         o.Active,
 		Shipping:       shippingDomainToDTO(o.Shipping),
 		Shippable:      o.Shippable,
+		GroupID:        o.GroupID,
+		OptionValues:   options,
+		Images:         images,
 		CreatedAt:      o.CreatedAt,
 		UpdatedAt:      o.UpdatedAt,
 	}
