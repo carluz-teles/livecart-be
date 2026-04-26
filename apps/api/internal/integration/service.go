@@ -1586,6 +1586,25 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 	}, nil
 }
 
+// inheritShippingFromParent fills detailed.Shipping with the parent product's
+// shipping profile when the ERP returned a variation child without its own
+// dimensions. Common Tiny setup: merchant fills `dimensoes` only on the parent
+// and every variation reuses the same packaging — without this, syncing a
+// variation would leave it un-shippable.
+//
+// No-op when the product is not a variation, already has its own shipping,
+// or when fetching the parent fails (best-effort).
+func inheritShippingFromParent(ctx context.Context, erpProvider providers.ERPProvider, detailed *providers.ERPProduct) {
+	if detailed == nil || detailed.Shipping != nil || detailed.ParentExternalID == "" {
+		return
+	}
+	parent, err := erpProvider.GetProduct(ctx, detailed.ParentExternalID)
+	if err != nil || parent == nil || parent.Shipping == nil {
+		return
+	}
+	detailed.Shipping = parent.Shipping
+}
+
 // ImportERPProduct imports a product from the ERP into the LiveCart catalog.
 // For products with variations, it creates a product_group + N variants in one
 // transaction (filtered by VariantIDs when present). For simple products, it
@@ -1758,6 +1777,11 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 		return nil, fmt.Errorf("fetching product from ERP: %w", err)
 	}
 
+	// If this is a variation child without its own dimensions, inherit from
+	// the parent — common in Tiny when the merchant only filled the parent's
+	// dimensoes and let every variation use the same packaging.
+	inheritShippingFromParent(ctx, erpProvider, detailed)
+
 	// Update the local product. Manual sync always refreshes stock and pulls
 	// dimensions if the ERP returned them (detailed.Shipping non-nil).
 	if err := s.productSyncer.SyncProduct(ctx, input.StoreID, externalSource, *detailed, false); err != nil {
@@ -1873,6 +1897,9 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		}
 		return nil
 	}
+
+	// Variation child without its own dimensions inherits from the parent.
+	inheritShippingFromParent(ctx, erpProvider, detailed)
 
 	// Check if product has active stock reservations during a live event.
 	// Fail-safe: on DB error, assume active event to avoid overwriting local stock.

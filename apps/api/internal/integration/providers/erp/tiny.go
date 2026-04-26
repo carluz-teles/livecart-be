@@ -409,6 +409,14 @@ type tinyProductPayload struct {
 	Grade      []string             `json:"grade"`      // dimension keys for parents (tipo=V), e.g. ["Tamanho","Cor"]
 	ProdutoPai *tinyParentRef       `json:"produtoPai"` // present when this is a child variation
 	Variacoes  []tinyVariantPayload `json:"variacoes"`  // children when tipo=V
+
+	// Some Tiny endpoints (notably GET /produtos/{idVariacao}) return dimensions
+	// as flat top-level fields instead of inside `dimensoes`. We capture both
+	// shapes and resolve at mapping time.
+	Peso         float64 `json:"peso"`
+	Altura       float64 `json:"altura"`
+	Largura      float64 `json:"largura"`
+	Profundidade float64 `json:"profundidade"`
 }
 
 // tinyDimensoes mirrors DimensoesProdutoResponseModel: weight in kilograms,
@@ -482,6 +490,14 @@ func tinyPayloadToERP(p tinyProductPayload) ERPProduct {
 		}
 	}
 
+	// Dimensions: prefer the structured `dimensoes` block; fall back to
+	// top-level flat fields (peso/altura/largura/profundidade) which Tiny
+	// returns when the product is a variation fetched individually.
+	shipping := dimensoesToShipping(p.Dimensoes)
+	if shipping == nil {
+		shipping = flatDimensionsToShipping(p.Peso, p.Altura, p.Largura, p.Profundidade)
+	}
+
 	prod := ERPProduct{
 		ID:          strconv.FormatInt(p.ID, 10),
 		SKU:         p.SKU,
@@ -496,7 +512,7 @@ func tinyPayloadToERP(p tinyProductPayload) ERPProduct {
 		Type:        p.Tipo,
 		IsParent:    p.Tipo == "V",
 		GradeKeys:   p.Grade,
-		Shipping:    dimensoesToShipping(p.Dimensoes),
+		Shipping:    shipping,
 	}
 
 	if p.ProdutoPai != nil && p.ProdutoPai.ID != 0 {
@@ -563,14 +579,23 @@ func dimensoesToShipping(d *tinyDimensoes) *ERPShippingProfile {
 // variantToShipping converts the flat `peso/altura/largura/profundidade` Tiny
 // returns inside variacoes[]. Same all-or-nothing contract as the parent.
 func variantToShipping(v tinyVariantPayload) *ERPShippingProfile {
-	if v.Peso <= 0 || v.Altura <= 0 || v.Largura <= 0 || v.Profundidade <= 0 {
+	return flatDimensionsToShipping(v.Peso, v.Altura, v.Largura, v.Profundidade)
+}
+
+// flatDimensionsToShipping is the shared kg+cm flat-field converter used both
+// by inline variations (variacoes[]) and by individual GETs of variations
+// (which return dimensions at the top level instead of inside `dimensoes`).
+// Returns nil unless all four fields are positive — partial profiles are not
+// useful and are rejected by the LiveCart domain validation.
+func flatDimensionsToShipping(weightKg, heightCm, widthCm, lengthCm float64) *ERPShippingProfile {
+	if weightKg <= 0 || heightCm <= 0 || widthCm <= 0 || lengthCm <= 0 {
 		return nil
 	}
 	return &ERPShippingProfile{
-		WeightGrams:   int(math.Round(v.Peso * 1000)),
-		HeightCm:      int(math.Round(v.Altura)),
-		WidthCm:       int(math.Round(v.Largura)),
-		LengthCm:      int(math.Round(v.Profundidade)),
+		WeightGrams:   int(math.Round(weightKg * 1000)),
+		HeightCm:      int(math.Round(heightCm)),
+		WidthCm:       int(math.Round(widthCm)),
+		LengthCm:      int(math.Round(lengthCm)),
 		PackageFormat: "box",
 	}
 }
