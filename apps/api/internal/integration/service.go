@@ -1594,15 +1594,40 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 //
 // No-op when the product is not a variation, already has its own shipping,
 // or when fetching the parent fails (best-effort).
-func inheritShippingFromParent(ctx context.Context, erpProvider providers.ERPProvider, detailed *providers.ERPProduct) {
-	if detailed == nil || detailed.Shipping != nil || detailed.ParentExternalID == "" {
+func (s *Service) inheritShippingFromParent(ctx context.Context, erpProvider providers.ERPProvider, detailed *providers.ERPProduct) {
+	if detailed == nil {
+		return
+	}
+	if detailed.Shipping != nil {
+		s.logger.Debug("variant already has its own shipping, no parent lookup needed",
+			zap.String("tiny_id", detailed.ID))
+		return
+	}
+	if detailed.ParentExternalID == "" {
+		s.logger.Debug("product has no parent, cannot inherit shipping",
+			zap.String("tiny_id", detailed.ID),
+			zap.Bool("is_parent", detailed.IsParent))
 		return
 	}
 	parent, err := erpProvider.GetProduct(ctx, detailed.ParentExternalID)
-	if err != nil || parent == nil || parent.Shipping == nil {
+	if err != nil {
+		s.logger.Warn("failed to fetch parent for shipping inheritance",
+			zap.String("variant_id", detailed.ID),
+			zap.String("parent_id", detailed.ParentExternalID),
+			zap.Error(err))
+		return
+	}
+	if parent == nil || parent.Shipping == nil {
+		s.logger.Info("parent has no shipping either — variation will land without dimensions",
+			zap.String("variant_id", detailed.ID),
+			zap.String("parent_id", detailed.ParentExternalID),
+			zap.Bool("parent_returned", parent != nil))
 		return
 	}
 	detailed.Shipping = parent.Shipping
+	s.logger.Info("inherited shipping from parent",
+		zap.String("variant_id", detailed.ID),
+		zap.String("parent_id", detailed.ParentExternalID))
 }
 
 // ImportERPProduct imports a product from the ERP into the LiveCart catalog.
@@ -1780,7 +1805,7 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 	// If this is a variation child without its own dimensions, inherit from
 	// the parent — common in Tiny when the merchant only filled the parent's
 	// dimensoes and let every variation use the same packaging.
-	inheritShippingFromParent(ctx, erpProvider, detailed)
+	s.inheritShippingFromParent(ctx, erpProvider, detailed)
 
 	// Update the local product. Manual sync always refreshes stock and pulls
 	// dimensions if the ERP returned them (detailed.Shipping non-nil).
@@ -1899,7 +1924,7 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	}
 
 	// Variation child without its own dimensions inherits from the parent.
-	inheritShippingFromParent(ctx, erpProvider, detailed)
+	s.inheritShippingFromParent(ctx, erpProvider, detailed)
 
 	// Check if product has active stock reservations during a live event.
 	// Fail-safe: on DB error, assume active event to avoid overwriting local stock.

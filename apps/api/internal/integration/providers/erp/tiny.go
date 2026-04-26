@@ -380,6 +380,50 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 	}
 
 	out := tinyPayloadToERP(p)
+
+	// TEMP DEBUG: log shipping resolution so we can pinpoint why some Tiny
+	// products land in LiveCart with no dimensions. Remove once the variation
+	// sync flow is confirmed working in production.
+	if t.Logger != nil {
+		hasDim := p.Dimensoes != nil
+		hasFlat := p.Peso > 0 || p.Altura > 0 || p.Largura > 0 || p.Profundidade > 0
+		hasShipping := out.Shipping != nil
+		fields := []zap.Field{
+			zap.String("tiny_id", out.ID),
+			zap.String("tipo", p.Tipo),
+			zap.Bool("has_dimensoes_block", hasDim),
+			zap.Bool("has_flat_dimensions", hasFlat),
+			zap.Bool("resulting_shipping_set", hasShipping),
+			zap.String("parent_external_id", out.ParentExternalID),
+		}
+		if hasDim {
+			fields = append(fields,
+				zap.Float64("dim_largura", p.Dimensoes.Largura),
+				zap.Float64("dim_altura", p.Dimensoes.Altura),
+				zap.Float64("dim_comprimento", p.Dimensoes.Comprimento),
+				zap.Float64("dim_peso_bruto", p.Dimensoes.PesoBruto),
+				zap.Float64("dim_peso_liquido", p.Dimensoes.PesoLiquido),
+			)
+		}
+		if hasFlat {
+			fields = append(fields,
+				zap.Float64("flat_peso", p.Peso),
+				zap.Float64("flat_altura", p.Altura),
+				zap.Float64("flat_largura", p.Largura),
+				zap.Float64("flat_profundidade", p.Profundidade),
+			)
+		}
+		if !hasDim && !hasFlat {
+			// dump first 800 chars of raw body so we see exactly what Tiny sent
+			snippet := string(body)
+			if len(snippet) > 800 {
+				snippet = snippet[:800]
+			}
+			fields = append(fields, zap.String("raw_body_snippet", snippet))
+		}
+		t.Logger.Info("tiny GetProduct shipping resolution", fields...)
+	}
+
 	return &out, nil
 }
 
