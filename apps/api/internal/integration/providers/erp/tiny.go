@@ -404,6 +404,15 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 				zap.Float64("dim_peso_bruto", p.Dimensoes.PesoBruto),
 				zap.Float64("dim_peso_liquido", p.Dimensoes.PesoLiquido),
 			)
+			if p.Dimensoes.Embalagem != nil {
+				fields = append(fields,
+					zap.String("embalagem_tipo_raw", string(p.Dimensoes.Embalagem.Tipo)),
+					zap.String("embalagem_nome", p.Dimensoes.Embalagem.Nome),
+					zap.String("embalagem_resolved", mapTinyEmbalagem(p.Dimensoes.Embalagem)),
+				)
+			} else {
+				fields = append(fields, zap.String("embalagem", "<nil>"))
+			}
 		}
 		if hasFlat {
 			fields = append(fields,
@@ -607,9 +616,16 @@ func tinyPayloadToERP(p tinyProductPayload) ERPProduct {
 }
 
 // dimensoesToShipping converts the parent/simple `dimensoes` block into our
-// ERPShippingProfile. Returns nil if any required field is missing — partial
-// profiles are not useful (LiveCart's domain rejects them) and would silently
-// degrade shipping quotes.
+// ERPShippingProfile. Validation rules differ by package format:
+//
+//   - Envelope (letter): height is meaningless (paper); merchants legitimately
+//     leave altura=0 in the Tiny panel. We accept and substitute height with
+//     the carrier minimum (1cm).
+//   - Box / roll: requires all four (peso + altura + largura + comprimento)
+//     to be positive — partial profiles are silently dropped because the
+//     carrier won't quote a box without height.
+//
+// Returns nil when the profile is incomplete for the resolved format.
 func dimensoesToShipping(d *tinyDimensoes) *ERPShippingProfile {
 	if d == nil {
 		return nil
@@ -618,7 +634,28 @@ func dimensoesToShipping(d *tinyDimensoes) *ERPShippingProfile {
 	if weightKg == 0 {
 		weightKg = d.PesoLiquido
 	}
-	if weightKg <= 0 || d.Altura <= 0 || d.Largura <= 0 || d.Comprimento <= 0 {
+	if weightKg <= 0 {
+		return nil
+	}
+
+	format := mapTinyEmbalagem(d.Embalagem)
+
+	// Envelope: only width and length are meaningful; altura defaults to 1cm.
+	if format == "letter" {
+		if d.Largura <= 0 || d.Comprimento <= 0 {
+			return nil
+		}
+		return &ERPShippingProfile{
+			WeightGrams:   int(math.Round(weightKg * 1000)),
+			HeightCm:      1,
+			WidthCm:       int(math.Round(d.Largura)),
+			LengthCm:      int(math.Round(d.Comprimento)),
+			PackageFormat: format,
+		}
+	}
+
+	// Box / roll: all four required.
+	if d.Altura <= 0 || d.Largura <= 0 || d.Comprimento <= 0 {
 		return nil
 	}
 	return &ERPShippingProfile{
@@ -626,7 +663,7 @@ func dimensoesToShipping(d *tinyDimensoes) *ERPShippingProfile {
 		HeightCm:      int(math.Round(d.Altura)),
 		WidthCm:       int(math.Round(d.Largura)),
 		LengthCm:      int(math.Round(d.Comprimento)),
-		PackageFormat: mapTinyEmbalagem(d.Embalagem),
+		PackageFormat: format,
 	}
 }
 
