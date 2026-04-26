@@ -34,6 +34,9 @@ type ProductSyncer interface {
 	HasProduct(ctx context.Context, storeID, externalID, externalSource string) (bool, error)
 	GetProduct(ctx context.Context, storeID, productID string) (externalID, externalSource string, err error)
 	SyncProduct(ctx context.Context, storeID, externalID, externalSource, name string, price int64, imageURL string, stock int, active bool, skipStock bool) error
+	// ImportProduct creates a new simple product in LiveCart from an ERP source.
+	// Returns the new LiveCart product UUID.
+	ImportProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct) (productID string, err error)
 }
 
 // ProductGroupSyncer handles ERP products that ship with variations
@@ -41,6 +44,10 @@ type ProductSyncer interface {
 // productgroup package into the product package.
 type ProductGroupSyncer interface {
 	SyncFromERP(ctx context.Context, storeID, externalSource string, parent providers.ERPProduct) error
+	// ImportFromERP creates a new product_group in LiveCart with the given
+	// (already filtered) variants. Returns the new group UUID and the external
+	// IDs of the variants that were persisted.
+	ImportFromERP(ctx context.Context, storeID, externalSource string, parent providers.ERPProduct) (groupID string, importedExternalIDs []string, err error)
 }
 
 // Service handles business logic for integrations.
@@ -1572,6 +1579,140 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 		Products:   products,
 		TotalCount: len(products),
 		HasMore:    result.HasMore,
+	}, nil
+}
+
+// ImportERPProduct imports a product from the ERP into the LiveCart catalog.
+// For products with variations, it creates a product_group + N variants in one
+// transaction (filtered by VariantIDs when present). For simple products, it
+// creates a single product.
+func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductInput) (*ImportERPProductOutput, error) {
+	if s.productSyncer == nil {
+		return nil, httpx.ErrUnprocessable("product syncer not configured")
+	}
+
+	erpProvider, err := s.GetERPProvider(ctx, input.IntegrationID, input.StoreID)
+	if err != nil {
+		return nil, err
+	}
+	integration, err := s.repo.GetByID(ctx, input.IntegrationID, input.StoreID)
+	if err != nil {
+		return nil, err
+	}
+
+	detailed, err := erpProvider.GetProduct(ctx, input.TinyProductID)
+	if err != nil {
+		s.handleProviderError(ctx, input.IntegrationID, "import_get_product", err)
+		return nil, fmt.Errorf("fetching product from ERP: %w", err)
+	}
+
+	// === Simple product (no variations) ===
+	if !detailed.IsParent || len(detailed.Variants) == 0 {
+		if len(input.VariantIDs) > 0 {
+			return nil, httpx.ErrUnprocessable("variantIds informado mas o produto não possui variações")
+		}
+		exists, err := s.productSyncer.HasProduct(ctx, input.StoreID, detailed.ID, integration.Provider)
+		if err != nil {
+			return nil, fmt.Errorf("checking product existence: %w", err)
+		}
+		if exists {
+			return nil, httpx.ErrConflict("produto já importado neste catálogo")
+		}
+		productID, err := s.productSyncer.ImportProduct(ctx, input.StoreID, integration.Provider, *detailed)
+		if err != nil {
+			return nil, fmt.Errorf("importing simple product: %w", err)
+		}
+		return &ImportERPProductOutput{
+			ProductID: productID,
+			IsParent:  false,
+			Imported: []ImportedERPVariantSummary{{
+				ExternalID: detailed.ID,
+				SKU:        detailed.SKU,
+			}},
+		}, nil
+	}
+
+	// === Parent with variations ===
+	if s.productGroupSyncer == nil {
+		return nil, httpx.ErrUnprocessable("product group syncer not configured")
+	}
+
+	// Filter variants if a subset was requested.
+	if len(input.VariantIDs) > 0 {
+		want := make(map[string]struct{}, len(input.VariantIDs))
+		for _, id := range input.VariantIDs {
+			want[id] = struct{}{}
+		}
+		filtered := make([]providers.ERPProduct, 0, len(input.VariantIDs))
+		for _, v := range detailed.Variants {
+			if _, ok := want[v.ID]; ok {
+				filtered = append(filtered, v)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil, httpx.ErrUnprocessable("nenhuma das variantIds informadas existe no produto Tiny")
+		}
+		if len(filtered) != len(input.VariantIDs) {
+			return nil, httpx.ErrUnprocessable("uma ou mais variantIds informadas não existem no produto Tiny")
+		}
+		detailed.Variants = filtered
+	}
+
+	// Best-effort enrichment of per-variant images (Tiny does not return anexos
+	// inside variacoes[]). Bounded concurrency keeps us under the rate limit.
+	const enrichConcurrency = 5
+	sem := make(chan struct{}, enrichConcurrency)
+	var enrichWg sync.WaitGroup
+	for i := range detailed.Variants {
+		idx := i
+		childID := detailed.Variants[idx].ID
+		if childID == "" {
+			continue
+		}
+		enrichWg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer enrichWg.Done()
+			defer func() { <-sem }()
+			child, err := erpProvider.GetProduct(ctx, childID)
+			if err != nil || child == nil {
+				return
+			}
+			detailed.Variants[idx].ImageURL = child.ImageURL
+		}()
+	}
+	enrichWg.Wait()
+
+	groupID, importedIDs, err := s.productGroupSyncer.ImportFromERP(ctx, input.StoreID, integration.Provider, *detailed)
+	if err != nil {
+		return nil, fmt.Errorf("importing product group: %w", err)
+	}
+
+	imported := make([]ImportedERPVariantSummary, 0, len(importedIDs))
+	for _, extID := range importedIDs {
+		for _, v := range detailed.Variants {
+			if v.ID == extID {
+				imported = append(imported, ImportedERPVariantSummary{
+					ExternalID: v.ID,
+					SKU:        v.SKU,
+					Attributes: v.Attributes,
+				})
+				break
+			}
+		}
+	}
+
+	s.logger.Info("ERP product imported into catalog",
+		zap.String("integration_id", input.IntegrationID),
+		zap.String("tiny_product_id", input.TinyProductID),
+		zap.String("group_id", groupID),
+		zap.Int("variants_imported", len(imported)),
+	)
+
+	return &ImportERPProductOutput{
+		GroupID:  groupID,
+		IsParent: true,
+		Imported: imported,
 	}, nil
 }
 

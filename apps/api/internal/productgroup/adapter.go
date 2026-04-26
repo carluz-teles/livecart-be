@@ -93,6 +93,67 @@ func (a *SyncerAdapter) SyncFromERP(ctx context.Context, storeIDStr, externalSou
 	return nil
 }
 
+// ImportFromERP creates a brand-new product_group in LiveCart from an ERP
+// parent product whose `Variants` slice has already been filtered to the
+// caller's desired subset. Unlike SyncFromERP it errors out if the group
+// already exists (caller decides what to do — typically ask the user).
+//
+// Returns the new group UUID and the external IDs of the variants that were
+// persisted, in input order.
+func (a *SyncerAdapter) ImportFromERP(ctx context.Context, storeIDStr, externalSourceStr string, parent providers.ERPProduct) (string, []string, error) {
+	if !parent.IsParent || len(parent.Variants) == 0 {
+		return "", nil, fmt.Errorf("ImportFromERP: parent product %q has no variants", parent.ID)
+	}
+
+	storeID, err := vo.NewStoreID(storeIDStr)
+	if err != nil {
+		return "", nil, fmt.Errorf("invalid store id: %w", err)
+	}
+	source, err := productdomain.NewExternalSource(externalSourceStr)
+	if err != nil {
+		return "", nil, fmt.Errorf("invalid external source %q: %w", externalSourceStr, err)
+	}
+
+	exists, err := a.groupSvc.HasGroupForExternalID(ctx, storeID, source, parent.ID)
+	if err != nil {
+		return "", nil, err
+	}
+	if exists {
+		return "", nil, httpx.ErrConflict("grupo de produto já importado neste catálogo")
+	}
+
+	options := buildOptionsFromVariants(parent.GradeKeys, parent.Variants)
+	variants := buildVariantsFromERP(parent.Variants, options)
+	var groupImages []string
+	if parent.ImageURL != "" {
+		groupImages = []string{parent.ImageURL}
+	}
+
+	out, err := a.groupSvc.CreateForERP(ctx, CreateGroupInput{
+		StoreID:        storeID,
+		Name:           parent.Name,
+		Description:    parent.Description,
+		ExternalID:     parent.ID,
+		ExternalSource: source,
+		Options:        options,
+		GroupImages:    groupImages,
+		Variants:       variants,
+	})
+	if err != nil {
+		return "", nil, err
+	}
+
+	// Variants are persisted in input order; map back to ERP external IDs.
+	importedExternalIDs := make([]string, 0, len(variants))
+	for i := range out.Variants {
+		if i >= len(variants) {
+			break
+		}
+		importedExternalIDs = append(importedExternalIDs, variants[i].ExternalID)
+	}
+	return out.ID, importedExternalIDs, nil
+}
+
 // buildOptionsFromVariants infers the option/value matrix from the variants when
 // the parent didn't provide explicit grade keys (some Tiny payloads omit them on
 // the parent and only carry them on each child).

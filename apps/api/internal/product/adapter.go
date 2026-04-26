@@ -3,6 +3,7 @@ package product
 import (
 	"context"
 
+	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/product/domain"
 	vo "livecart/apps/api/lib/valueobject"
 )
@@ -50,6 +51,38 @@ func (a *ProductSyncerAdapter) GetProduct(ctx context.Context, storeID, productI
 	}
 
 	return output.ExternalID, output.ExternalSource, nil
+}
+
+// ImportProduct creates a new simple product in LiveCart from an ERP product.
+// Returns the LiveCart product UUID.
+func (a *ProductSyncerAdapter) ImportProduct(ctx context.Context, storeID, externalSource string, p providers.ERPProduct) (string, error) {
+	sid, err := vo.NewStoreID(storeID)
+	if err != nil {
+		return "", err
+	}
+	es, err := domain.NewExternalSource(externalSource)
+	if err != nil {
+		return "", err
+	}
+	money, err := vo.NewMoney(p.Price)
+	if err != nil {
+		return "", err
+	}
+
+	out, err := a.service.Create(ctx, CreateProductInput{
+		StoreID:        sid,
+		Name:           p.Name,
+		ExternalID:     p.ID,
+		ExternalSource: es,
+		Price:          money,
+		ImageURL:       p.ImageURL,
+		Stock:          p.Stock,
+		// Shipping profile starts empty — merchant fills via PUT /products/:id later.
+	})
+	if err != nil {
+		return "", err
+	}
+	return out.ID, nil
 }
 
 // SyncProduct updates a product from an ERP webhook notification.

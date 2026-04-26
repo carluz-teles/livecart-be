@@ -56,6 +56,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// ERP operations
 	g.Get("/:id/products", h.SearchProducts)
 	g.Post("/:id/products/:productId/sync", h.SyncProduct)
+	g.Post("/:id/products/:tinyProductId/import", h.ImportERPProduct)
 
 	// Payment operations (Mercado Pago)
 	g.Post("/:id/checkout", h.CreateCheckout)
@@ -286,6 +287,55 @@ func (h *Handler) SearchProducts(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, output)
+}
+
+// ImportERPProduct imports a product (or a subset of its variations) from the
+// ERP into the LiveCart catalog. If the product has no variations, a single
+// simple product is created. If it has variations, a product_group with N
+// variants is created in one transaction.
+//
+// Body:
+//   { "variantIds": ["67890", "67891"] }   // optional subset
+//   { }                                    // import everything
+//
+// @Summary Import product from ERP into LiveCart catalog
+// @Tags integrations
+// @Accept json
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param id path string true "Integration ID"
+// @Param tinyProductId path string true "ERP product ID (Tiny parent or simple)"
+// @Param request body ImportERPProductRequest false "Optional subset of variant IDs"
+// @Success 201 {object} httpx.Envelope{data=ImportERPProductOutput}
+// @Failure 404 {object} httpx.Envelope
+// @Failure 422 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/{id}/products/{tinyProductId}/import [post]
+// @Security BearerAuth
+func (h *Handler) ImportERPProduct(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	integrationID := c.Params("id")
+	tinyProductID := c.Params("tinyProductId")
+
+	var req ImportERPProductRequest
+	if len(c.Body()) > 0 {
+		if err := c.BodyParser(&req); err != nil {
+			return httpx.BadRequest(c, "invalid request body")
+		}
+		if err := h.validate.Struct(req); err != nil {
+			return httpx.ValidationError(c, err)
+		}
+	}
+
+	output, err := h.service.ImportERPProduct(c.Context(), ImportERPProductInput{
+		StoreID:       storeID,
+		IntegrationID: integrationID,
+		TinyProductID: tinyProductID,
+		VariantIDs:    req.VariantIDs,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.Created(c, output)
 }
 
 // SyncProduct manually syncs a product from the ERP to LiveCart.

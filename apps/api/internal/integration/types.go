@@ -345,6 +345,38 @@ type SyncProductInput struct {
 	ProductID     string
 }
 
+// ImportERPProductInput is the service input for importing a product (and
+// optionally a subset of its variations) from the ERP into the LiveCart
+// catalog. When VariantIDs is empty the entire product (all variations, or the
+// single SKU when not a parent) is imported.
+type ImportERPProductInput struct {
+	StoreID        string
+	IntegrationID  string
+	TinyProductID  string
+	VariantIDs     []string
+}
+
+// ImportERPProductRequest is the HTTP body of POST /integrations/:id/products/:tinyProductId/import.
+type ImportERPProductRequest struct {
+	VariantIDs []string `json:"variantIds" validate:"omitempty,dive,required"`
+}
+
+// ImportERPProductOutput is the HTTP response after a successful ERP import.
+// GroupID is populated when the imported product had variations; ProductID is
+// populated when a single simple product was imported.
+type ImportERPProductOutput struct {
+	GroupID    string                       `json:"groupId,omitempty"`
+	ProductID  string                       `json:"productId,omitempty"`
+	IsParent   bool                         `json:"isParent"`
+	Imported   []ImportedERPVariantSummary  `json:"imported"`
+}
+
+type ImportedERPVariantSummary struct {
+	ExternalID string            `json:"externalId"`           // Tiny child product id
+	SKU        string            `json:"sku,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
 // SyncProductOutput is the service output for a manual product sync.
 type SyncProductOutput struct {
 	ProductID  string `json:"productId"`
