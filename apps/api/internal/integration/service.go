@@ -1507,6 +1507,10 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 		effectiveStock := detailed.Stock
 		var variantsResp []ERPVariantResponse
 		if isParent {
+			// Tiny doesn't include imageUrl, dimensoes or flat dimensions inside
+			// variacoes[] of a parent response — fetch each child individually.
+			s.enrichVariantsFromIndividualGets(ctx, erpProvider, detailed)
+
 			effectiveStock = 0
 			variantsResp = make([]ERPVariantResponse, len(detailed.Variants))
 			for i, v := range detailed.Variants {
@@ -1519,37 +1523,10 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 					Price:      v.Price,
 					Stock:      v.Stock,
 					Active:     v.Active,
+					ImageURL:   v.ImageURL,
 					Attributes: v.Attributes,
 				}
 			}
-
-			// Best-effort enrichment of per-variant images. Tiny does not include
-			// `anexos` inside `variacoes[]` — each child has to be fetched
-			// individually. Bounded concurrency keeps us under the per-account
-			// rate limit (60 req/min on the basic plan); on failure or timeout
-			// we leave imageUrl empty and the front falls back to parent.imageUrl.
-			const enrichConcurrency = 5
-			sem := make(chan struct{}, enrichConcurrency)
-			var enrichWg sync.WaitGroup
-			for i := range variantsResp {
-				idx := i
-				childID := variantsResp[idx].ID
-				if childID == "" {
-					continue
-				}
-				enrichWg.Add(1)
-				sem <- struct{}{}
-				go func() {
-					defer enrichWg.Done()
-					defer func() { <-sem }()
-					child, err := erpProvider.GetProduct(ctx, childID)
-					if err != nil || child == nil {
-						return
-					}
-					variantsResp[idx].ImageURL = child.ImageURL
-				}()
-			}
-			enrichWg.Wait()
 		}
 
 		if effectiveStock <= 0 {
@@ -1628,6 +1605,51 @@ func (s *Service) inheritShippingFromParent(ctx context.Context, erpProvider pro
 	s.logger.Info("inherited shipping from parent",
 		zap.String("variant_id", detailed.ID),
 		zap.String("parent_id", detailed.ParentExternalID))
+}
+
+// enrichVariantsFromIndividualGets fetches GET /produtos/{idVariacao} for each
+// variation in parallel and merges the response back. Tiny's
+// VariacaoProdutoResponseModel inside the parent's `variacoes[]` does NOT carry
+// imageUrl, dimensoes or per-variant flat dimensions — those only exist on the
+// individual GET. Without this hop we'd discard per-variant shipping that the
+// merchant actually cadastrou no ERP.
+//
+// Bounded concurrency keeps us under the per-account rate limit (60 req/min on
+// Tiny basic). Failures are silent — variant keeps whatever it had.
+func (s *Service) enrichVariantsFromIndividualGets(ctx context.Context, erpProvider providers.ERPProvider, parent *providers.ERPProduct) {
+	if parent == nil || len(parent.Variants) == 0 {
+		return
+	}
+	const enrichConcurrency = 5
+	sem := make(chan struct{}, enrichConcurrency)
+	var wg sync.WaitGroup
+	for i := range parent.Variants {
+		idx := i
+		childID := parent.Variants[idx].ID
+		if childID == "" {
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			child, err := erpProvider.GetProduct(ctx, childID)
+			if err != nil || child == nil {
+				return
+			}
+			if child.ImageURL != "" {
+				parent.Variants[idx].ImageURL = child.ImageURL
+			}
+			if child.Shipping != nil {
+				parent.Variants[idx].Shipping = child.Shipping
+			}
+			if child.WeightGramsHint > 0 {
+				parent.Variants[idx].WeightGramsHint = child.WeightGramsHint
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // applyStoreDefaultDimensions completes detailed.Shipping (and each variant's)
@@ -1768,30 +1790,11 @@ func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductIn
 		detailed.Variants = filtered
 	}
 
-	// Best-effort enrichment of per-variant images (Tiny does not return anexos
-	// inside variacoes[]). Bounded concurrency keeps us under the rate limit.
-	const enrichConcurrency = 5
-	sem := make(chan struct{}, enrichConcurrency)
-	var enrichWg sync.WaitGroup
-	for i := range detailed.Variants {
-		idx := i
-		childID := detailed.Variants[idx].ID
-		if childID == "" {
-			continue
-		}
-		enrichWg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer enrichWg.Done()
-			defer func() { <-sem }()
-			child, err := erpProvider.GetProduct(ctx, childID)
-			if err != nil || child == nil {
-				return
-			}
-			detailed.Variants[idx].ImageURL = child.ImageURL
-		}()
-	}
-	enrichWg.Wait()
+	// Tiny doesn't include imageUrl, dimensoes or flat dimensions inside
+	// variacoes[] of a parent response — fetch each child individually so we
+	// pick up per-variant images AND per-variant shipping the merchant
+	// cadastrou no ERP.
+	s.enrichVariantsFromIndividualGets(ctx, erpProvider, detailed)
 
 	// Fall back to merchant-configured store defaults for any variant whose
 	// shipping is still incomplete after the Tiny payload + parent inheritance.
@@ -1984,8 +1987,11 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	}
 
 	// Variant-aware branch: if the ERP returned a parent product with children
-	// (e.g. Tiny tipo=V), delegate the whole tree to the productgroup syncer.
+	// (e.g. Tiny tipo=V), enrich each variant from its individual GET (where
+	// per-variant shipping actually lives) before delegating the whole tree
+	// to the productgroup syncer.
 	if detailed.IsParent && len(detailed.Variants) > 0 && s.productGroupSyncer != nil {
+		s.enrichVariantsFromIndividualGets(ctx, erpProvider, detailed)
 		s.applyStoreDefaultDimensions(ctx, integration.StoreID, detailed)
 		if err := s.productGroupSyncer.SyncFromERP(ctx, integration.StoreID, integration.Provider, *detailed); err != nil {
 			return fmt.Errorf("syncing product group: %w", err)
