@@ -585,6 +585,11 @@ type ERPProduct struct {
 	ImageURL    string              `json:"image_url,omitempty"`
 	UpdatedAt   time.Time           `json:"updated_at"`
 	Shipping    *ERPShippingProfile `json:"shipping,omitempty"` // nil when the ERP didn't return a complete profile
+	// WeightGramsHint is set whenever the ERP returned a positive weight, even
+	// when dimensions are missing (so Shipping had to be nil). The integration
+	// service uses it to combine with store-level default dimensions and
+	// complete the profile.
+	WeightGramsHint int `json:"weight_grams_hint,omitempty"`
 
 	// Variant-related fields (populated for ERPs that expose variations like Tiny "Com Variações" / tipo=V).
 	// Type carries the ERP's native product type ("S","V","K","F","M" for Tiny). Empty when unknown.

@@ -542,6 +542,10 @@ func tinyPayloadToERP(p tinyProductPayload) ERPProduct {
 		shipping = flatDimensionsToShipping(p.Peso, p.Altura, p.Largura, p.Profundidade)
 	}
 
+	// Capture weight even when dimensions are missing — the integration service
+	// can complete the profile using store-level default dimensions.
+	weightHint := topLevelWeightHintGrams(p)
+
 	prod := ERPProduct{
 		ID:          strconv.FormatInt(p.ID, 10),
 		SKU:         p.SKU,
@@ -553,10 +557,11 @@ func tinyPayloadToERP(p tinyProductPayload) ERPProduct {
 		Active:      p.Situacao == "A",
 		ImageURL:    imageURL,
 		UpdatedAt:   updatedAt,
-		Type:        p.Tipo,
-		IsParent:    p.Tipo == "V",
-		GradeKeys:   p.Grade,
-		Shipping:    shipping,
+		Type:            p.Tipo,
+		IsParent:        p.Tipo == "V",
+		GradeKeys:       p.Grade,
+		Shipping:        shipping,
+		WeightGramsHint: weightHint,
 	}
 
 	if p.ProdutoPai != nil && p.ProdutoPai.ID != 0 {
@@ -577,6 +582,10 @@ func tinyPayloadToERP(p tinyProductPayload) ERPProduct {
 			if vShipping == nil {
 				vShipping = prod.Shipping
 			}
+			vWeightHint := variantWeightHintGrams(v)
+			if vWeightHint == 0 {
+				vWeightHint = weightHint // inherit hint from parent if variant has no own weight
+			}
 			variants = append(variants, ERPProduct{
 				ID:               strconv.FormatInt(v.ID, 10),
 				SKU:              v.SKU,
@@ -588,6 +597,7 @@ func tinyPayloadToERP(p tinyProductPayload) ERPProduct {
 				ParentExternalID: prod.ID,
 				Attributes:       attrs,
 				Shipping:         vShipping,
+				WeightGramsHint:  vWeightHint,
 			})
 		}
 		prod.Variants = variants
@@ -624,6 +634,36 @@ func dimensoesToShipping(d *tinyDimensoes) *ERPShippingProfile {
 // returns inside variacoes[]. Same all-or-nothing contract as the parent.
 func variantToShipping(v tinyVariantPayload) *ERPShippingProfile {
 	return flatDimensionsToShipping(v.Peso, v.Altura, v.Largura, v.Profundidade)
+}
+
+// topLevelWeightHintGrams returns the weight (in grams) the Tiny payload carries
+// for a parent/simple product, regardless of whether dimensions are present.
+// Used so the integration service can combine it with store-level defaults.
+func topLevelWeightHintGrams(p tinyProductPayload) int {
+	weightKg := 0.0
+	if p.Dimensoes != nil {
+		if p.Dimensoes.PesoBruto > 0 {
+			weightKg = p.Dimensoes.PesoBruto
+		} else if p.Dimensoes.PesoLiquido > 0 {
+			weightKg = p.Dimensoes.PesoLiquido
+		}
+	}
+	if weightKg == 0 && p.Peso > 0 {
+		weightKg = p.Peso
+	}
+	if weightKg <= 0 {
+		return 0
+	}
+	return int(math.Round(weightKg * 1000))
+}
+
+// variantWeightHintGrams is the same as topLevelWeightHintGrams but for an
+// inline variation entry (variacoes[i] of the parent payload).
+func variantWeightHintGrams(v tinyVariantPayload) int {
+	if v.Peso <= 0 {
+		return 0
+	}
+	return int(math.Round(v.Peso * 1000))
 }
 
 // flatDimensionsToShipping is the shared kg+cm flat-field converter used both

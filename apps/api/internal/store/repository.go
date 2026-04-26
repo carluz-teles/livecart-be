@@ -110,6 +110,9 @@ func (r *Repository) UpdateShippingDefaults(ctx context.Context, params UpdateSh
 		ID:                        uid,
 		DefaultPackageWeightGrams: int32(params.PackageWeightGrams),
 		DefaultPackageFormat:      params.PackageFormat,
+		DefaultHeightCm:           intPtrToPgInt4(params.HeightCm),
+		DefaultWidthCm:            intPtrToPgInt4(params.WidthCm),
+		DefaultLengthCm:           intPtrToPgInt4(params.LengthCm),
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -300,6 +303,9 @@ func toStoreRow(row sqlc.Store) StoreRow {
 		ShippingDefaults: ShippingDefaultsDTO{
 			PackageWeightGrams: int(row.DefaultPackageWeightGrams),
 			PackageFormat:      defaultPackageFormat(row.DefaultPackageFormat),
+			HeightCm:           pgInt4ToIntPtr(row.DefaultHeightCm),
+			WidthCm:            pgInt4ToIntPtr(row.DefaultWidthCm),
+			LengthCm:           pgInt4ToIntPtr(row.DefaultLengthCm),
 		},
 		CreatedAt: row.CreatedAt.Time,
 		UpdatedAt: row.UpdatedAt.Time,
@@ -311,6 +317,21 @@ func defaultPackageFormat(s string) string {
 		return "box"
 	}
 	return s
+}
+
+func intPtrToPgInt4(v *int) pgtype.Int4 {
+	if v == nil {
+		return pgtype.Int4{}
+	}
+	return pgtype.Int4{Int32: int32(*v), Valid: true}
+}
+
+func pgInt4ToIntPtr(v pgtype.Int4) *int {
+	if !v.Valid {
+		return nil
+	}
+	n := int(v.Int32)
+	return &n
 }
 
 func parseUUID(s string) (pgtype.UUID, error) {

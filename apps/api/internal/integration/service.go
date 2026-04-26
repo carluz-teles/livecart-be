@@ -1630,6 +1630,68 @@ func (s *Service) inheritShippingFromParent(ctx context.Context, erpProvider pro
 		zap.String("parent_id", detailed.ParentExternalID))
 }
 
+// applyStoreDefaultDimensions completes detailed.Shipping (and each variant's)
+// using the merchant-configured store defaults when the ERP returned weight
+// without dimensions, or vice-versa. No-op when the store has no defaults
+// configured or the product is already shippable.
+//
+// Precedence (per product/variant):
+//  1. Use what the ERP gave us as-is when complete.
+//  2. Combine ERP weight (WeightGramsHint) with store default H/W/L when ERP
+//     returned weight only.
+//  3. When ERP returned no weight AND store has both default weight and H/W/L,
+//     build a fully synthetic profile.
+//  4. Otherwise leave Shipping nil (current behavior — merchant edits later).
+func (s *Service) applyStoreDefaultDimensions(ctx context.Context, storeID string, detailed *providers.ERPProduct) {
+	if detailed == nil {
+		return
+	}
+	defaults, err := s.repo.GetStoreShippingDefaults(ctx, storeID)
+	if err != nil {
+		s.logger.Warn("failed to load store shipping defaults",
+			zap.String("store_id", storeID), zap.Error(err))
+		return
+	}
+	if !defaults.IsUsableForDimensionFallback() {
+		return
+	}
+
+	completeFromDefaults := func(p *providers.ERPProduct) {
+		if p.Shipping != nil {
+			return
+		}
+		weight := p.WeightGramsHint
+		if weight <= 0 {
+			weight = defaults.WeightGrams
+		}
+		if weight <= 0 {
+			return
+		}
+		format := defaults.PackageFormat
+		if format == "" {
+			format = "box"
+		}
+		p.Shipping = &providers.ERPShippingProfile{
+			WeightGrams:   weight,
+			HeightCm:      defaults.HeightCm,
+			WidthCm:       defaults.WidthCm,
+			LengthCm:      defaults.LengthCm,
+			PackageFormat: format,
+		}
+		s.logger.Info("completed shipping with store defaults",
+			zap.String("erp_id", p.ID),
+			zap.Int("weight_g", weight),
+			zap.Int("h_cm", defaults.HeightCm),
+			zap.Int("w_cm", defaults.WidthCm),
+			zap.Int("l_cm", defaults.LengthCm))
+	}
+
+	completeFromDefaults(detailed)
+	for i := range detailed.Variants {
+		completeFromDefaults(&detailed.Variants[i])
+	}
+}
+
 // ImportERPProduct imports a product from the ERP into the LiveCart catalog.
 // For products with variations, it creates a product_group + N variants in one
 // transaction (filtered by VariantIDs when present). For simple products, it
@@ -1731,6 +1793,10 @@ func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductIn
 	}
 	enrichWg.Wait()
 
+	// Fall back to merchant-configured store defaults for any variant whose
+	// shipping is still incomplete after the Tiny payload + parent inheritance.
+	s.applyStoreDefaultDimensions(ctx, input.StoreID, detailed)
+
 	groupID, importedIDs, err := s.productGroupSyncer.ImportFromERP(ctx, input.StoreID, integration.Provider, *detailed)
 	if err != nil {
 		return nil, fmt.Errorf("importing product group: %w", err)
@@ -1806,6 +1872,9 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 	// the parent — common in Tiny when the merchant only filled the parent's
 	// dimensoes and let every variation use the same packaging.
 	s.inheritShippingFromParent(ctx, erpProvider, detailed)
+	// Last resort: complete with merchant-configured store defaults when ERP
+	// only carries weight (or nothing).
+	s.applyStoreDefaultDimensions(ctx, input.StoreID, detailed)
 
 	// Update the local product. Manual sync always refreshes stock and pulls
 	// dimensions if the ERP returned them (detailed.Shipping non-nil).
@@ -1917,14 +1986,17 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	// Variant-aware branch: if the ERP returned a parent product with children
 	// (e.g. Tiny tipo=V), delegate the whole tree to the productgroup syncer.
 	if detailed.IsParent && len(detailed.Variants) > 0 && s.productGroupSyncer != nil {
+		s.applyStoreDefaultDimensions(ctx, integration.StoreID, detailed)
 		if err := s.productGroupSyncer.SyncFromERP(ctx, integration.StoreID, integration.Provider, *detailed); err != nil {
 			return fmt.Errorf("syncing product group: %w", err)
 		}
 		return nil
 	}
 
-	// Variation child without its own dimensions inherits from the parent.
+	// Variation child without its own dimensions inherits from the parent,
+	// then falls back to merchant-configured store defaults.
 	s.inheritShippingFromParent(ctx, erpProvider, detailed)
+	s.applyStoreDefaultDimensions(ctx, integration.StoreID, detailed)
 
 	// Check if product has active stock reservations during a live event.
 	// Fail-safe: on DB error, assume active event to avoid overwriting local stock.

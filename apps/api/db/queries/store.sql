@@ -56,7 +56,10 @@ UPDATE stores
 SET
   default_package_weight_grams = $2,
   default_package_format       = $3,
-  updated_at = now()
+  default_height_cm            = $4,
+  default_width_cm             = $5,
+  default_length_cm            = $6,
+  updated_at                   = now()
 WHERE id = $1
 RETURNING *;
 

@@ -12,12 +12,12 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const storeColumns = "id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj, address_number, address_complement, address_district, address_state_register, default_package_weight_grams, default_package_format"
+const storeColumns = "id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj, address_number, address_complement, address_district, address_state_register, default_package_weight_grams, default_package_format, default_height_cm, default_width_cm, default_length_cm"
 
 // storeColumnsS is the same list prefixed with the `s.` alias so queries that
 // JOIN memberships (which share column names like id, status, created_at)
 // are unambiguous.
-const storeColumnsS = "s.id, s.name, s.slug, s.active, s.whatsapp_number, s.email_address, s.sms_number, s.created_at, s.cart_enabled, s.cart_expiration_minutes, s.cart_reserve_stock, s.cart_max_items, s.cart_max_quantity_per_item, s.updated_at, s.description, s.website, s.logo_url, s.address_street, s.address_city, s.address_state, s.address_zip, s.address_country, s.send_on_live_end, s.cart_allow_edit, s.checkout_send_methods, s.notification_settings, s.cart_message_cooldown_seconds, s.cart_send_expiration_reminder, s.cart_expiration_reminder_minutes, s.cart_real_time, s.cnpj, s.address_number, s.address_complement, s.address_district, s.address_state_register, s.default_package_weight_grams, s.default_package_format"
+const storeColumnsS = "s.id, s.name, s.slug, s.active, s.whatsapp_number, s.email_address, s.sms_number, s.created_at, s.cart_enabled, s.cart_expiration_minutes, s.cart_reserve_stock, s.cart_max_items, s.cart_max_quantity_per_item, s.updated_at, s.description, s.website, s.logo_url, s.address_street, s.address_city, s.address_state, s.address_zip, s.address_country, s.send_on_live_end, s.cart_allow_edit, s.checkout_send_methods, s.notification_settings, s.cart_message_cooldown_seconds, s.cart_send_expiration_reminder, s.cart_expiration_reminder_minutes, s.cart_real_time, s.cnpj, s.address_number, s.address_complement, s.address_district, s.address_state_register, s.default_package_weight_grams, s.default_package_format, s.default_height_cm, s.default_width_cm, s.default_length_cm"
 
 func scanStore(row interface {
 	Scan(dest ...interface{}) error
@@ -60,6 +60,9 @@ func scanStore(row interface {
 		&i.AddressStateRegister,
 		&i.DefaultPackageWeightGrams,
 		&i.DefaultPackageFormat,
+		&i.DefaultHeightCm,
+		&i.DefaultWidthCm,
+		&i.DefaultLengthCm,
 	)
 }
 
@@ -360,7 +363,10 @@ UPDATE stores
 SET
   default_package_weight_grams = $2,
   default_package_format       = $3,
-  updated_at = now()
+  default_height_cm            = $4,
+  default_width_cm             = $5,
+  default_length_cm            = $6,
+  updated_at                   = now()
 WHERE id = $1
 RETURNING ` + storeColumns
 
@@ -368,10 +374,13 @@ type UpdateStoreShippingDefaultsParams struct {
 	ID                        pgtype.UUID `json:"id"`
 	DefaultPackageWeightGrams int32       `json:"default_package_weight_grams"`
 	DefaultPackageFormat      string      `json:"default_package_format"`
+	DefaultHeightCm           pgtype.Int4 `json:"default_height_cm"`
+	DefaultWidthCm            pgtype.Int4 `json:"default_width_cm"`
+	DefaultLengthCm           pgtype.Int4 `json:"default_length_cm"`
 }
 
 func (q *Queries) UpdateStoreShippingDefaults(ctx context.Context, arg UpdateStoreShippingDefaultsParams) (Store, error) {
-	row := q.db.QueryRow(ctx, updateStoreShippingDefaults, arg.ID, arg.DefaultPackageWeightGrams, arg.DefaultPackageFormat)
+	row := q.db.QueryRow(ctx, updateStoreShippingDefaults, arg.ID, arg.DefaultPackageWeightGrams, arg.DefaultPackageFormat, arg.DefaultHeightCm, arg.DefaultWidthCm, arg.DefaultLengthCm)
 	var i Store
 	err := scanStore(row, &i)
 	return i, err

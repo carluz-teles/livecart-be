@@ -3,9 +3,11 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -1675,6 +1677,62 @@ type StoreInfo struct {
 	Name                  string
 	CartExpirationMinutes int
 	MaxQuantityPerItem    int
+}
+
+// StoreShippingDefaults are the merchant-configured fallback dimensions used
+// when an ERP-imported product carries weight only (e.g. Tiny camisetas).
+// All four fields must be positive for the fallback to be enabled — any zero
+// disables it.
+type StoreShippingDefaults struct {
+	WeightGrams   int
+	HeightCm      int
+	WidthCm       int
+	LengthCm      int
+	PackageFormat string
+}
+
+// IsUsableForDimensionFallback reports whether the merchant configured all
+// three default dimensions (height/width/length). Default weight is optional —
+// the ERP usually supplies the real weight.
+func (d StoreShippingDefaults) IsUsableForDimensionFallback() bool {
+	return d.HeightCm > 0 && d.WidthCm > 0 && d.LengthCm > 0
+}
+
+// GetStoreShippingDefaults returns the merchant-configured shipping defaults
+// for a store. Returns a zero-value StoreShippingDefaults when the store is
+// missing or has no defaults configured (no error).
+func (r *Repository) GetStoreShippingDefaults(ctx context.Context, storeID string) (StoreShippingDefaults, error) {
+	uid, err := parseUUID(storeID)
+	if err != nil {
+		return StoreShippingDefaults{}, err
+	}
+	var d StoreShippingDefaults
+	const q = `SELECT default_package_weight_grams, default_package_format,
+		default_height_cm, default_width_cm, default_length_cm
+		FROM stores WHERE id = $1`
+	var weightGrams int32
+	var format pgtype.Text
+	var h, w, l pgtype.Int4
+	if err := r.pool.QueryRow(ctx, q, uid).Scan(&weightGrams, &format, &h, &w, &l); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return StoreShippingDefaults{}, nil
+		}
+		return StoreShippingDefaults{}, fmt.Errorf("loading store shipping defaults: %w", err)
+	}
+	d.WeightGrams = int(weightGrams)
+	if format.Valid {
+		d.PackageFormat = format.String
+	}
+	if h.Valid {
+		d.HeightCm = int(h.Int32)
+	}
+	if w.Valid {
+		d.WidthCm = int(w.Int32)
+	}
+	if l.Valid {
+		d.LengthCm = int(l.Int32)
+	}
+	return d, nil
 }
 
 // GetStoreInfo returns minimal store information for notifications.

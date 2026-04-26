@@ -484,6 +484,12 @@ type Store struct {
 	DefaultPackageWeightGrams int32 `json:"default_package_weight_grams"`
 	// Default package format for shipping: box, roll or letter
 	DefaultPackageFormat string `json:"default_package_format"`
+	// Default package height (cm) for ERP imports that only carry weight. Combined with default_width_cm and default_length_cm.
+	DefaultHeightCm pgtype.Int4 `json:"default_height_cm"`
+	// Default package width (cm) for ERP imports that only carry weight.
+	DefaultWidthCm pgtype.Int4 `json:"default_width_cm"`
+	// Default package length (cm) for ERP imports that only carry weight.
+	DefaultLengthCm pgtype.Int4 `json:"default_length_cm"`
 }
 
 type StoreInvitation struct {

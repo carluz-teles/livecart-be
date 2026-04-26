@@ -44,6 +44,12 @@ type AddressDTO struct {
 type ShippingDefaultsDTO struct {
 	PackageWeightGrams int    `json:"packageWeightGrams"`
 	PackageFormat      string `json:"packageFormat"`
+	// Optional default dimensions (cm). Used as a fallback when an
+	// ERP-imported product (e.g. Tiny) only carries weight. Set ALL three
+	// to enable the fallback; leave any nil to disable.
+	HeightCm *int `json:"heightCm,omitempty"`
+	WidthCm  *int `json:"widthCm,omitempty"`
+	LengthCm *int `json:"lengthCm,omitempty"`
 }
 
 // ============================================
@@ -77,6 +83,11 @@ type UpdateStoreRequest struct {
 type UpdateShippingDefaultsRequest struct {
 	PackageWeightGrams int    `json:"packageWeightGrams" validate:"gte=0"`
 	PackageFormat      string `json:"packageFormat" validate:"required,oneof=box roll letter"`
+	// Optional default dimensions (cm). All three must be provided together to
+	// enable the ERP-import fallback; any nil disables it.
+	HeightCm *int `json:"heightCm,omitempty" validate:"omitempty,gt=0"`
+	WidthCm  *int `json:"widthCm,omitempty" validate:"omitempty,gt=0"`
+	LengthCm *int `json:"lengthCm,omitempty" validate:"omitempty,gt=0"`
 }
 
 type UpdateCartSettingsRequest struct {
@@ -152,6 +163,9 @@ type UpdateShippingDefaultsInput struct {
 	StoreID            string
 	PackageWeightGrams int
 	PackageFormat      string
+	HeightCm           *int
+	WidthCm            *int
+	LengthCm           *int
 }
 
 type UpdateCartSettingsInput struct {
@@ -222,6 +236,9 @@ type UpdateShippingDefaultsParams struct {
 	ID                 string
 	PackageWeightGrams int
 	PackageFormat      string
+	HeightCm           *int
+	WidthCm            *int
+	LengthCm           *int
 }
 
 type UpdateCartSettingsParams struct {

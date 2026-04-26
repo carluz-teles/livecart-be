@@ -139,10 +139,19 @@ func (s *Service) UpdateShippingDefaults(ctx context.Context, input UpdateShippi
 	if format == "" {
 		format = "box"
 	}
+	// Default dimensions are all-or-nothing: if any of the three is missing,
+	// the fallback is disabled and we persist NULLs across the board.
+	hCm, wCm, lCm := input.HeightCm, input.WidthCm, input.LengthCm
+	if hCm == nil || wCm == nil || lCm == nil {
+		hCm, wCm, lCm = nil, nil, nil
+	}
 	row, err := s.repo.UpdateShippingDefaults(ctx, UpdateShippingDefaultsParams{
 		ID:                 input.StoreID,
 		PackageWeightGrams: input.PackageWeightGrams,
 		PackageFormat:      format,
+		HeightCm:           hCm,
+		WidthCm:            wCm,
+		LengthCm:           lCm,
 	})
 	if err != nil {
 		return StoreOutput{}, err

@@ -436,6 +436,9 @@ func (h *Handler) UpdateShippingDefaults(c *fiber.Ctx) error {
 		StoreID:            storeOutput.ID,
 		PackageWeightGrams: req.PackageWeightGrams,
 		PackageFormat:      req.PackageFormat,
+		HeightCm:           req.HeightCm,
+		WidthCm:            req.WidthCm,
+		LengthCm:           req.LengthCm,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -463,6 +466,9 @@ func (h *Handler) UpdateShippingDefaultsByID(c *fiber.Ctx) error {
 		StoreID:            storeID,
 		PackageWeightGrams: req.PackageWeightGrams,
 		PackageFormat:      req.PackageFormat,
+		HeightCm:           req.HeightCm,
+		WidthCm:            req.WidthCm,
+		LengthCm:           req.LengthCm,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
