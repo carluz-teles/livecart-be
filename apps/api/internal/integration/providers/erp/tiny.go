@@ -423,12 +423,14 @@ type tinyDimensoes struct {
 	PesoBruto   float64        `json:"pesoBruto"`
 }
 
-// tinyEmbalagem is intentionally permissive — Tiny exposes embalagem.tipo as a
-// loose string ("envelope", "caixa", "rolo"). We map it best-effort to our
-// box|roll|letter enum.
+// tinyEmbalagem is intentionally permissive — in practice Tiny v3 returns
+// `tipo` as either a string ("caixa", "envelope") OR a numeric enum id, and
+// the swagger does not pin down which. We capture it as RawMessage and resolve
+// at mapping time. `nome` carries the human label and is the most reliable
+// signal when present.
 type tinyEmbalagem struct {
-	Tipo string `json:"tipo"`
-	Nome string `json:"nome"`
+	Tipo json.RawMessage `json:"tipo"`
+	Nome string          `json:"nome"`
 }
 
 type tinyParentRef struct {
@@ -573,27 +575,42 @@ func variantToShipping(v tinyVariantPayload) *ERPShippingProfile {
 	}
 }
 
-// mapTinyEmbalagem best-effort maps Tiny's loose package category string to our
-// box|roll|letter enum. Unknown / empty defaults to box.
+// mapTinyEmbalagem best-effort maps Tiny's package category to our
+// box|roll|letter enum. Tiny may return `tipo` as a string OR a numeric id,
+// so we try `nome` (human label) first, then string `tipo`, falling back to
+// "box" when nothing matches. Unknown numeric ids also default to box.
 func mapTinyEmbalagem(e *tinyEmbalagem) string {
 	if e == nil {
 		return "box"
 	}
-	switch strings.ToLower(strings.TrimSpace(e.Tipo)) {
+	// Prefer the human label when present — it's stable across Tiny versions.
+	if mapped := mapEmbalagemLabel(e.Nome); mapped != "" {
+		return mapped
+	}
+	if len(e.Tipo) > 0 {
+		// Try as string first.
+		var asString string
+		if err := json.Unmarshal(e.Tipo, &asString); err == nil {
+			if mapped := mapEmbalagemLabel(asString); mapped != "" {
+				return mapped
+			}
+		}
+		// Fall back to numeric id — values are not documented in the swagger,
+		// so anything we don't recognize stays as "box".
+	}
+	return "box"
+}
+
+func mapEmbalagemLabel(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "envelope", "carta", "letter":
 		return "letter"
 	case "rolo", "cilindro", "tubo", "roll":
 		return "roll"
-	case "":
-		// fall back to nome if tipo is empty
-		switch strings.ToLower(strings.TrimSpace(e.Nome)) {
-		case "envelope", "carta":
-			return "letter"
-		case "rolo", "cilindro", "tubo":
-			return "roll"
-		}
+	case "caixa", "pacote", "box":
+		return "box"
 	}
-	return "box"
+	return ""
 }
 
 // decodeTinyGrade accepts both `{"Cor":"Azul","Tamanho":"M"}` (object map, common in
