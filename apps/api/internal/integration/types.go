@@ -308,16 +308,33 @@ type SearchProductsOutput struct {
 }
 
 // ERPProductResponse is the HTTP response for an ERP product.
+// When IsParent is true, Stock is the SUM of variant stocks (the parent itself
+// holds no stock in Tiny/Bling); the front-end must use Variants to let the
+// user pick a specific SKU before adding to a cart/live.
 type ERPProductResponse struct {
-	ID          string `json:"id"`
-	SKU         string `json:"sku,omitempty"`
-	GTIN        string `json:"gtin,omitempty"`
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Price       int64  `json:"price"`
-	Stock       int    `json:"stock"`
-	ImageURL    string `json:"imageUrl,omitempty"`
-	Active      bool   `json:"active"`
+	ID          string                `json:"id"`
+	SKU         string                `json:"sku,omitempty"`
+	GTIN        string                `json:"gtin,omitempty"`
+	Name        string                `json:"name"`
+	Description string                `json:"description,omitempty"`
+	Price       int64                 `json:"price"`
+	Stock       int                   `json:"stock"`
+	ImageURL    string                `json:"imageUrl,omitempty"`
+	Active      bool                  `json:"active"`
+	IsParent    bool                  `json:"isParent,omitempty"`
+	Variants    []ERPVariantResponse  `json:"variants,omitempty"`
+}
+
+// ERPVariantResponse is one child SKU of an ERP product with variations.
+type ERPVariantResponse struct {
+	ID         string            `json:"id"`
+	SKU        string            `json:"sku,omitempty"`
+	GTIN       string            `json:"gtin,omitempty"`
+	Name       string            `json:"name,omitempty"`
+	Price      int64             `json:"price"`
+	Stock      int               `json:"stock"`
+	Active     bool              `json:"active"`
+	Attributes map[string]string `json:"attributes,omitempty"` // e.g. {"Cor":"Azul","Tamanho":"M"}
 }
 
 // SyncProductInput is the service input for manually syncing a product from an ERP.

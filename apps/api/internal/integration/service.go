@@ -1474,6 +1474,12 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 
 	// Enrich each product with full details (stock, image, description)
 	// The list endpoint doesn't return stock or images — GetProduct does.
+	//
+	// Parents with variations (Tiny tipo=V) carry no stock themselves; the real
+	// stock is on each child. We aggregate it for the parent so the
+	// "out of stock" filter doesn't accidentally hide products that have
+	// inventory on at least one variation, and we surface the variations so the
+	// front-end can let the user pick a SKU.
 	var products []ERPProductResponse
 	foundButNoStock := false
 	for _, listed := range result.Products {
@@ -1486,7 +1492,28 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 			continue
 		}
 
-		if detailed.Stock <= 0 {
+		isParent := detailed.IsParent && len(detailed.Variants) > 0
+		effectiveStock := detailed.Stock
+		var variantsResp []ERPVariantResponse
+		if isParent {
+			effectiveStock = 0
+			variantsResp = make([]ERPVariantResponse, 0, len(detailed.Variants))
+			for _, v := range detailed.Variants {
+				effectiveStock += v.Stock
+				variantsResp = append(variantsResp, ERPVariantResponse{
+					ID:         v.ID,
+					SKU:        v.SKU,
+					GTIN:       v.GTIN,
+					Name:       v.Name,
+					Price:      v.Price,
+					Stock:      v.Stock,
+					Active:     v.Active,
+					Attributes: v.Attributes,
+				})
+			}
+		}
+
+		if effectiveStock <= 0 {
 			foundButNoStock = true
 			continue
 		}
@@ -1498,9 +1525,11 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 			Name:        detailed.Name,
 			Description: detailed.Description,
 			Price:       detailed.Price,
-			Stock:       detailed.Stock,
+			Stock:       effectiveStock,
 			ImageURL:    detailed.ImageURL,
 			Active:      detailed.Active,
+			IsParent:    isParent,
+			Variants:    variantsResp,
 		})
 	}
 
