@@ -106,8 +106,10 @@ func erpShippingToDomain(s *providers.ERPShippingProfile) domain.ShippingProfile
 	}
 }
 
-// SyncProduct updates a product from an ERP webhook notification.
-func (a *ProductSyncerAdapter) SyncProduct(ctx context.Context, storeID, externalID, externalSource, name string, price int64, imageURL string, stock int, active bool, skipStock bool) error {
+// SyncProduct updates a product from an ERP webhook notification or a manual
+// sync. When p.Shipping is non-nil the local shipping profile is refreshed too;
+// otherwise the existing profile is preserved.
+func (a *ProductSyncerAdapter) SyncProduct(ctx context.Context, storeID, externalSource string, p providers.ERPProduct, skipStock bool) error {
 	sid, err := vo.NewStoreID(storeID)
 	if err != nil {
 		return err
@@ -118,21 +120,26 @@ func (a *ProductSyncerAdapter) SyncProduct(ctx context.Context, storeID, externa
 		return err
 	}
 
-	money, err := vo.NewMoney(price)
+	money, err := vo.NewMoney(p.Price)
 	if err != nil {
 		return err
 	}
 
-	_, err = a.service.SyncFromERP(ctx, SyncFromERPInput{
+	input := SyncFromERPInput{
 		StoreID:        sid,
-		ExternalID:     externalID,
+		ExternalID:     p.ID,
 		ExternalSource: es,
-		Name:           name,
+		Name:           p.Name,
 		Price:          money,
-		ImageURL:       imageURL,
-		Stock:          stock,
-		Active:         active,
+		ImageURL:       p.ImageURL,
+		Stock:          p.Stock,
+		Active:         p.Active,
 		SkipStock:      skipStock,
-	})
+	}
+	if p.Shipping != nil {
+		shipping := erpShippingToDomain(p.Shipping)
+		input.Shipping = &shipping
+	}
+	_, err = a.service.SyncFromERP(ctx, input)
 	return err
 }

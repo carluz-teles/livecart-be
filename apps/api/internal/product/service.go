@@ -223,7 +223,12 @@ func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool
 		stock = existing.Stock()
 	}
 
-	if err := existing.UpdateDetails(input.Name, input.Price, input.ImageURL, stock, input.Active, existing.Shipping()); err != nil {
+	shipping := existing.Shipping()
+	if input.Shipping != nil {
+		shipping = *input.Shipping
+	}
+
+	if err := existing.UpdateDetails(input.Name, input.Price, input.ImageURL, stock, input.Active, shipping); err != nil {
 		return false, fmt.Errorf("updating product details: %w", err)
 	}
 	if err := s.repo.Update(ctx, existing); err != nil {

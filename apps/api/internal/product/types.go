@@ -213,6 +213,10 @@ type SyncFromERPInput struct {
 	Stock          int
 	Active         bool
 	SkipStock      bool // When true, preserve local stock (e.g. during active live event)
+	// Shipping is optional. When non-nil and complete, the local shipping
+	// profile is replaced — useful so re-imports/syncs pull the latest
+	// dimensions from the ERP. When nil, the existing local profile is kept.
+	Shipping *domain.ShippingProfile
 }
 
 // ============================================

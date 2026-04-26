@@ -33,7 +33,11 @@ import (
 type ProductSyncer interface {
 	HasProduct(ctx context.Context, storeID, externalID, externalSource string) (bool, error)
 	GetProduct(ctx context.Context, storeID, productID string) (externalID, externalSource string, err error)
-	SyncProduct(ctx context.Context, storeID, externalID, externalSource, name string, price int64, imageURL string, stock int, active bool, skipStock bool) error
+	// SyncProduct updates an existing LiveCart product with the latest ERP data.
+	// When product.Shipping is non-nil, dimensions are refreshed too; otherwise
+	// the local shipping profile is preserved. skipStock=true keeps local stock
+	// (e.g. during an active live event).
+	SyncProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct, skipStock bool) error
 	// ImportProduct creates a new simple product in LiveCart from an ERP source.
 	// Returns the new LiveCart product UUID.
 	ImportProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct) (productID string, err error)
@@ -1754,18 +1758,9 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 		return nil, fmt.Errorf("fetching product from ERP: %w", err)
 	}
 
-	// Update the local product
-	if err := s.productSyncer.SyncProduct(ctx,
-		input.StoreID,
-		detailed.ID,
-		externalSource,
-		detailed.Name,
-		detailed.Price,
-		detailed.ImageURL,
-		detailed.Stock,
-		detailed.Active,
-		false, // manual sync: always update stock
-	); err != nil {
+	// Update the local product. Manual sync always refreshes stock and pulls
+	// dimensions if the ERP returned them (detailed.Shipping non-nil).
+	if err := s.productSyncer.SyncProduct(ctx, input.StoreID, externalSource, *detailed, false); err != nil {
 		return nil, fmt.Errorf("syncing product: %w", err)
 	}
 
@@ -1897,17 +1892,7 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		)
 	}
 
-	if err := s.productSyncer.SyncProduct(ctx,
-		integration.StoreID,
-		detailed.ID,
-		integration.Provider,
-		detailed.Name,
-		detailed.Price,
-		detailed.ImageURL,
-		detailed.Stock,
-		detailed.Active,
-		skipStock,
-	); err != nil {
+	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, skipStock); err != nil {
 		return fmt.Errorf("syncing product: %w", err)
 	}
 

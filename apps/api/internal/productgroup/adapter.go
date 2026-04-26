@@ -77,7 +77,7 @@ func (a *SyncerAdapter) SyncFromERP(ctx context.Context, storeIDStr, externalSou
 			continue
 		}
 		money, _ := vo.NewMoney(v.Price)
-		if _, err := a.productSvc.SyncFromERP(ctx, productpkg.SyncFromERPInput{
+		input := productpkg.SyncFromERPInput{
 			StoreID:        storeID,
 			ExternalID:     v.ID,
 			ExternalSource: source,
@@ -86,7 +86,15 @@ func (a *SyncerAdapter) SyncFromERP(ctx context.Context, storeIDStr, externalSou
 			ImageURL:       v.ImageURL,
 			Stock:          v.Stock,
 			Active:         v.Active,
-		}); err != nil {
+		}
+		if v.Shipping != nil {
+			dto := erpShippingToDTO(v.Shipping)
+			profile, err := productpkg.ShippingDTOToDomain(dto)
+			if err == nil {
+				input.Shipping = &profile
+			}
+		}
+		if _, err := a.productSvc.SyncFromERP(ctx, input); err != nil {
 			return err
 		}
 	}
