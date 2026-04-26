@@ -559,18 +559,32 @@ type ProductListResult struct {
 	HasMore    bool         `json:"has_more"`
 }
 
+// ERPShippingProfile carries the physical attributes the ERP exposes for a
+// product / variation. All four dimensions plus weight are required for the
+// LiveCart catalog to mark the product as "shippable" — partial data is not
+// useful (and is rejected by the domain validation), so providers should
+// return nil when the ERP did not supply the full set.
+type ERPShippingProfile struct {
+	WeightGrams   int    `json:"weight_grams"`             // weight already converted to grams
+	HeightCm      int    `json:"height_cm"`
+	WidthCm       int    `json:"width_cm"`
+	LengthCm      int    `json:"length_cm"`
+	PackageFormat string `json:"package_format,omitempty"` // box | roll | letter
+}
+
 // ERPProduct represents a product in the ERP.
 type ERPProduct struct {
-	ID          string    `json:"id"`             // ERP product ID
-	SKU         string    `json:"sku,omitempty"`
-	GTIN        string    `json:"gtin,omitempty"` // Barcode (EAN/GTIN)
-	Name        string    `json:"name"`
-	Description string    `json:"description,omitempty"`
-	Price       int64     `json:"price"` // In cents
-	Stock       int       `json:"stock"`
-	Active      bool      `json:"active"`
-	ImageURL    string    `json:"image_url,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          string              `json:"id"`             // ERP product ID
+	SKU         string              `json:"sku,omitempty"`
+	GTIN        string              `json:"gtin,omitempty"` // Barcode (EAN/GTIN)
+	Name        string              `json:"name"`
+	Description string              `json:"description,omitempty"`
+	Price       int64               `json:"price"` // In cents
+	Stock       int                 `json:"stock"`
+	Active      bool                `json:"active"`
+	ImageURL    string              `json:"image_url,omitempty"`
+	UpdatedAt   time.Time           `json:"updated_at"`
+	Shipping    *ERPShippingProfile `json:"shipping,omitempty"` // nil when the ERP didn't return a complete profile
 
 	// Variant-related fields (populated for ERPs that expose variations like Tiny "Com Variações" / tipo=V).
 	// Type carries the ERP's native product type ("S","V","K","F","M" for Tiny). Empty when unknown.

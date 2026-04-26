@@ -405,9 +405,30 @@ type tinyProductPayload struct {
 		URL     string `json:"url"`
 		Externo bool   `json:"externo"`
 	} `json:"anexos"`
+	Dimensoes  *tinyDimensoes       `json:"dimensoes"`  // physical profile for parents/simples (DimensoesProdutoResponseModel)
 	Grade      []string             `json:"grade"`      // dimension keys for parents (tipo=V), e.g. ["Tamanho","Cor"]
 	ProdutoPai *tinyParentRef       `json:"produtoPai"` // present when this is a child variation
 	Variacoes  []tinyVariantPayload `json:"variacoes"`  // children when tipo=V
+}
+
+// tinyDimensoes mirrors DimensoesProdutoResponseModel: weight in kilograms,
+// dimensions in centimeters. Used by parent/simple products.
+type tinyDimensoes struct {
+	Embalagem   *tinyEmbalagem `json:"embalagem"`
+	Largura     float64        `json:"largura"`
+	Altura      float64        `json:"altura"`
+	Comprimento float64        `json:"comprimento"`
+	Diametro    *float64       `json:"diametro"`
+	PesoLiquido float64        `json:"pesoLiquido"`
+	PesoBruto   float64        `json:"pesoBruto"`
+}
+
+// tinyEmbalagem is intentionally permissive — Tiny exposes embalagem.tipo as a
+// loose string ("envelope", "caixa", "rolo"). We map it best-effort to our
+// box|roll|letter enum.
+type tinyEmbalagem struct {
+	Tipo string `json:"tipo"`
+	Nome string `json:"nome"`
 }
 
 type tinyParentRef struct {
@@ -427,6 +448,13 @@ type tinyVariantPayload struct {
 	Estoque struct {
 		Quantidade float64 `json:"quantidade"`
 	} `json:"estoque"`
+	// Variant physical profile, returned flat by Tiny (NOT inside `dimensoes`)
+	// per the example in CriarProdutoComVariacoesResponseModel. Weight is in
+	// kilograms; dimensions are in centimeters; "profundidade" maps to length.
+	Peso         float64 `json:"peso"`
+	Altura       float64 `json:"altura"`
+	Largura      float64 `json:"largura"`
+	Profundidade float64 `json:"profundidade"`
 	// Grade for variants is returned as an object map ({"Cor":"Azul","Tamanho":"M"})
 	// in some Tiny endpoints — capture both shapes.
 	GradeMap map[string]string `json:"-"`
@@ -466,6 +494,7 @@ func tinyPayloadToERP(p tinyProductPayload) ERPProduct {
 		Type:        p.Tipo,
 		IsParent:    p.Tipo == "V",
 		GradeKeys:   p.Grade,
+		Shipping:    dimensoesToShipping(p.Dimensoes),
 	}
 
 	if p.ProdutoPai != nil && p.ProdutoPai.ID != 0 {
@@ -480,6 +509,12 @@ func tinyPayloadToERP(p tinyProductPayload) ERPProduct {
 				vPrice = v.Precos.PrecoPromocional
 			}
 			attrs := decodeTinyGrade(v.GradeRaw, p.Grade)
+			vShipping := variantToShipping(v)
+			// Variants without their own dimensions inherit the parent's profile —
+			// common for clothing where every size has the same weight/box.
+			if vShipping == nil {
+				vShipping = prod.Shipping
+			}
 			variants = append(variants, ERPProduct{
 				ID:               strconv.FormatInt(v.ID, 10),
 				SKU:              v.SKU,
@@ -490,12 +525,75 @@ func tinyPayloadToERP(p tinyProductPayload) ERPProduct {
 				Active:           prod.Active, // Tiny variants inherit `situacao` from the parent.
 				ParentExternalID: prod.ID,
 				Attributes:       attrs,
+				Shipping:         vShipping,
 			})
 		}
 		prod.Variants = variants
 	}
 
 	return prod
+}
+
+// dimensoesToShipping converts the parent/simple `dimensoes` block into our
+// ERPShippingProfile. Returns nil if any required field is missing — partial
+// profiles are not useful (LiveCart's domain rejects them) and would silently
+// degrade shipping quotes.
+func dimensoesToShipping(d *tinyDimensoes) *ERPShippingProfile {
+	if d == nil {
+		return nil
+	}
+	weightKg := d.PesoBruto
+	if weightKg == 0 {
+		weightKg = d.PesoLiquido
+	}
+	if weightKg <= 0 || d.Altura <= 0 || d.Largura <= 0 || d.Comprimento <= 0 {
+		return nil
+	}
+	return &ERPShippingProfile{
+		WeightGrams:   int(math.Round(weightKg * 1000)),
+		HeightCm:      int(math.Round(d.Altura)),
+		WidthCm:       int(math.Round(d.Largura)),
+		LengthCm:      int(math.Round(d.Comprimento)),
+		PackageFormat: mapTinyEmbalagem(d.Embalagem),
+	}
+}
+
+// variantToShipping converts the flat `peso/altura/largura/profundidade` Tiny
+// returns inside variacoes[]. Same all-or-nothing contract as the parent.
+func variantToShipping(v tinyVariantPayload) *ERPShippingProfile {
+	if v.Peso <= 0 || v.Altura <= 0 || v.Largura <= 0 || v.Profundidade <= 0 {
+		return nil
+	}
+	return &ERPShippingProfile{
+		WeightGrams:   int(math.Round(v.Peso * 1000)),
+		HeightCm:      int(math.Round(v.Altura)),
+		WidthCm:       int(math.Round(v.Largura)),
+		LengthCm:      int(math.Round(v.Profundidade)),
+		PackageFormat: "box",
+	}
+}
+
+// mapTinyEmbalagem best-effort maps Tiny's loose package category string to our
+// box|roll|letter enum. Unknown / empty defaults to box.
+func mapTinyEmbalagem(e *tinyEmbalagem) string {
+	if e == nil {
+		return "box"
+	}
+	switch strings.ToLower(strings.TrimSpace(e.Tipo)) {
+	case "envelope", "carta", "letter":
+		return "letter"
+	case "rolo", "cilindro", "tubo", "roll":
+		return "roll"
+	case "":
+		// fall back to nome if tipo is empty
+		switch strings.ToLower(strings.TrimSpace(e.Nome)) {
+		case "envelope", "carta":
+			return "letter"
+		case "rolo", "cilindro", "tubo":
+			return "roll"
+		}
+	}
+	return "box"
 }
 
 // decodeTinyGrade accepts both `{"Cor":"Azul","Tamanho":"M"}` (object map, common in

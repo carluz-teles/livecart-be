@@ -77,12 +77,33 @@ func (a *ProductSyncerAdapter) ImportProduct(ctx context.Context, storeID, exter
 		Price:          money,
 		ImageURL:       p.ImageURL,
 		Stock:          p.Stock,
-		// Shipping profile starts empty — merchant fills via PUT /products/:id later.
+		Shipping:       erpShippingToDomain(p.Shipping),
 	})
 	if err != nil {
 		return "", err
 	}
 	return out.ID, nil
+}
+
+// erpShippingToDomain maps the ERP-side shipping profile to the LiveCart
+// domain shape. Returns an empty profile when the ERP did not supply one
+// (callers should treat empty as "merchant fills later via PUT").
+func erpShippingToDomain(s *providers.ERPShippingProfile) domain.ShippingProfile {
+	if s == nil {
+		return domain.ShippingProfile{}
+	}
+	w := s.WeightGrams
+	h := s.HeightCm
+	wd := s.WidthCm
+	l := s.LengthCm
+	pf, _ := domain.NewPackageFormat(s.PackageFormat)
+	return domain.ShippingProfile{
+		WeightGrams:   &w,
+		HeightCm:      &h,
+		WidthCm:       &wd,
+		LengthCm:      &l,
+		PackageFormat: pf,
+	}
 }
 
 // SyncProduct updates a product from an ERP webhook notification.

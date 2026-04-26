@@ -12,6 +12,7 @@ type (
 	ListProductsParams   = providers.ListProductsParams
 	ProductListResult    = providers.ProductListResult
 	ERPProduct           = providers.ERPProduct
+	ERPShippingProfile   = providers.ERPShippingProfile
 	SyncResult           = providers.SyncResult
 	Credentials          = providers.Credentials
 	WebhookEvent         = providers.WebhookEvent

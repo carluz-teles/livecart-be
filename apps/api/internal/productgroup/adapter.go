@@ -206,9 +206,28 @@ func buildVariantsFromERP(variants []providers.ERPProduct, options []OptionReque
 			SKU:          v.SKU,
 			ImageURL:     v.ImageURL,
 			ExternalID:   v.ID,
+			Shipping:     erpShippingToDTO(v.Shipping),
 		})
 	}
 	return out
+}
+
+// erpShippingToDTO maps the provider-side shipping profile to the HTTP DTO the
+// productgroup service expects. Returns the zero value when the ERP did not
+// supply one — the variant just won't be marked as shippable until the merchant
+// edits it.
+func erpShippingToDTO(s *providers.ERPShippingProfile) productpkg.ShippingProfileDTO {
+	if s == nil {
+		return productpkg.ShippingProfileDTO{}
+	}
+	w, h, wd, l := s.WeightGrams, s.HeightCm, s.WidthCm, s.LengthCm
+	return productpkg.ShippingProfileDTO{
+		WeightGrams:   &w,
+		HeightCm:      &h,
+		WidthCm:       &wd,
+		LengthCm:      &l,
+		PackageFormat: s.PackageFormat,
+	}
 }
 
 func joinAttributes(attrs map[string]string) string {
