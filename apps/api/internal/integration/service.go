@@ -1497,10 +1497,10 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 		var variantsResp []ERPVariantResponse
 		if isParent {
 			effectiveStock = 0
-			variantsResp = make([]ERPVariantResponse, 0, len(detailed.Variants))
-			for _, v := range detailed.Variants {
+			variantsResp = make([]ERPVariantResponse, len(detailed.Variants))
+			for i, v := range detailed.Variants {
 				effectiveStock += v.Stock
-				variantsResp = append(variantsResp, ERPVariantResponse{
+				variantsResp[i] = ERPVariantResponse{
 					ID:         v.ID,
 					SKU:        v.SKU,
 					GTIN:       v.GTIN,
@@ -1509,8 +1509,36 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 					Stock:      v.Stock,
 					Active:     v.Active,
 					Attributes: v.Attributes,
-				})
+				}
 			}
+
+			// Best-effort enrichment of per-variant images. Tiny does not include
+			// `anexos` inside `variacoes[]` — each child has to be fetched
+			// individually. Bounded concurrency keeps us under the per-account
+			// rate limit (60 req/min on the basic plan); on failure or timeout
+			// we leave imageUrl empty and the front falls back to parent.imageUrl.
+			const enrichConcurrency = 5
+			sem := make(chan struct{}, enrichConcurrency)
+			var enrichWg sync.WaitGroup
+			for i := range variantsResp {
+				idx := i
+				childID := variantsResp[idx].ID
+				if childID == "" {
+					continue
+				}
+				enrichWg.Add(1)
+				sem <- struct{}{}
+				go func() {
+					defer enrichWg.Done()
+					defer func() { <-sem }()
+					child, err := erpProvider.GetProduct(ctx, childID)
+					if err != nil || child == nil {
+						return
+					}
+					variantsResp[idx].ImageURL = child.ImageURL
+				}()
+			}
+			enrichWg.Wait()
 		}
 
 		if effectiveStock <= 0 {

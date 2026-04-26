@@ -334,6 +334,7 @@ type ERPVariantResponse struct {
 	Price      int64             `json:"price"`
 	Stock      int               `json:"stock"`
 	Active     bool              `json:"active"`
+	ImageURL   string            `json:"imageUrl,omitempty"` // best-effort enrichment from GetProduct(child); may be empty if Tiny returned no anexos or the enrichment timed out — front should fall back to parent.imageUrl
 	Attributes map[string]string `json:"attributes,omitempty"` // e.g. {"Cor":"Azul","Tamanho":"M"}
 }
 
