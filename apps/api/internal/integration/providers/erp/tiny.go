@@ -630,8 +630,12 @@ func dimensoesToShipping(d *tinyDimensoes) *ERPShippingProfile {
 	if d == nil {
 		return nil
 	}
+	// Use the larger of bruto/liquido. Bruto is supposed to include packaging,
+	// so it should be >= liquido — but merchants regularly typo into the wrong
+	// field, so picking max protects shipping quotes from a 25g vs 200g
+	// mismatch breaking the carrier check.
 	weightKg := d.PesoBruto
-	if weightKg == 0 {
+	if d.PesoLiquido > weightKg {
 		weightKg = d.PesoLiquido
 	}
 	if weightKg <= 0 {
@@ -676,16 +680,20 @@ func variantToShipping(v tinyVariantPayload) *ERPShippingProfile {
 // topLevelWeightHintGrams returns the weight (in grams) the Tiny payload carries
 // for a parent/simple product, regardless of whether dimensions are present.
 // Used so the integration service can combine it with store-level defaults.
+//
+// Picks max(pesoBruto, pesoLiquido) when both are present — see the comment in
+// dimensoesToShipping for why we don't blindly trust bruto.
 func topLevelWeightHintGrams(p tinyProductPayload) int {
 	weightKg := 0.0
 	if p.Dimensoes != nil {
-		if p.Dimensoes.PesoBruto > 0 {
+		if p.Dimensoes.PesoBruto > weightKg {
 			weightKg = p.Dimensoes.PesoBruto
-		} else if p.Dimensoes.PesoLiquido > 0 {
+		}
+		if p.Dimensoes.PesoLiquido > weightKg {
 			weightKg = p.Dimensoes.PesoLiquido
 		}
 	}
-	if weightKg == 0 && p.Peso > 0 {
+	if p.Peso > weightKg {
 		weightKg = p.Peso
 	}
 	if weightKg <= 0 {
