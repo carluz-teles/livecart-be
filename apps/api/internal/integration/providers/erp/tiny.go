@@ -723,8 +723,16 @@ func flatDimensionsToShipping(weightKg, heightCm, widthCm, lengthCm float64) *ER
 
 // mapTinyEmbalagem best-effort maps Tiny's package category to our
 // box|roll|letter enum. Tiny may return `tipo` as a string OR a numeric id,
-// so we try `nome` (human label) first, then string `tipo`, falling back to
-// "box" when nothing matches. Unknown numeric ids also default to box.
+// so we try `nome` (human label) first, then string `tipo`, then numeric
+// `tipo`, falling back to "box" when nothing matches.
+//
+// Numeric `tipo` values (observed empirically against the Tiny v3 panel —
+// the swagger does not document the enum):
+//
+//	0 — Pacote (default box)
+//	1 — Envelope                → letter
+//	2 — Caixa                   → box
+//	3 — Rolo / Cilindro / Tubo  → roll (assumed; revisit when we see one in the wild)
 func mapTinyEmbalagem(e *tinyEmbalagem) string {
 	if e == nil {
 		return "box"
@@ -734,15 +742,23 @@ func mapTinyEmbalagem(e *tinyEmbalagem) string {
 		return mapped
 	}
 	if len(e.Tipo) > 0 {
-		// Try as string first.
+		// Try as string first (some Tiny endpoints return "envelope"/"caixa").
 		var asString string
 		if err := json.Unmarshal(e.Tipo, &asString); err == nil {
 			if mapped := mapEmbalagemLabel(asString); mapped != "" {
 				return mapped
 			}
 		}
-		// Fall back to numeric id — values are not documented in the swagger,
-		// so anything we don't recognize stays as "box".
+		// Fall back to numeric id.
+		var asNumber float64
+		if err := json.Unmarshal(e.Tipo, &asNumber); err == nil {
+			switch int(asNumber) {
+			case 1:
+				return "letter"
+			case 3:
+				return "roll"
+			}
+		}
 	}
 	return "box"
 }
