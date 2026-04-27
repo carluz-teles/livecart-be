@@ -1524,6 +1524,7 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 					Stock:      v.Stock,
 					Active:     v.Active,
 					ImageURL:   v.ImageURL,
+					Shipping:   shippingPreviewFromERP(v.Shipping, v.WeightGramsHint),
 					Attributes: v.Attributes,
 				}
 			}
@@ -1544,6 +1545,7 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 			Stock:       effectiveStock,
 			ImageURL:    detailed.ImageURL,
 			Active:      detailed.Active,
+			Shipping:    shippingPreviewFromERP(detailed.Shipping, detailed.WeightGramsHint),
 			IsParent:    isParent,
 			Variants:    variantsResp,
 		})
@@ -1750,6 +1752,12 @@ func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductIn
 		if exists {
 			return nil, httpx.ErrConflict("produto já importado neste catálogo")
 		}
+		// Same shipping completion chain we run for variants: parent inheritance
+		// (no-op for simples) and store-default fallback. Without these the
+		// product would land with an empty shipping profile when Tiny returns
+		// only weight / partial dimensions.
+		s.inheritShippingFromParent(ctx, erpProvider, detailed)
+		s.applyStoreDefaultDimensions(ctx, input.StoreID, detailed)
 		productID, err := s.productSyncer.ImportProduct(ctx, input.StoreID, integration.Provider, *detailed)
 		if err != nil {
 			return nil, fmt.Errorf("importing simple product: %w", err)

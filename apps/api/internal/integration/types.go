@@ -312,30 +312,64 @@ type SearchProductsOutput struct {
 // holds no stock in Tiny/Bling); the front-end must use Variants to let the
 // user pick a specific SKU before adding to a cart/live.
 type ERPProductResponse struct {
-	ID          string                `json:"id"`
-	SKU         string                `json:"sku,omitempty"`
-	GTIN        string                `json:"gtin,omitempty"`
-	Name        string                `json:"name"`
-	Description string                `json:"description,omitempty"`
-	Price       int64                 `json:"price"`
-	Stock       int                   `json:"stock"`
-	ImageURL    string                `json:"imageUrl,omitempty"`
-	Active      bool                  `json:"active"`
-	IsParent    bool                  `json:"isParent,omitempty"`
-	Variants    []ERPVariantResponse  `json:"variants,omitempty"`
+	ID          string                  `json:"id"`
+	SKU         string                  `json:"sku,omitempty"`
+	GTIN        string                  `json:"gtin,omitempty"`
+	Name        string                  `json:"name"`
+	Description string                  `json:"description,omitempty"`
+	Price       int64                   `json:"price"`
+	Stock       int                     `json:"stock"`
+	ImageURL    string                  `json:"imageUrl,omitempty"`
+	Active      bool                    `json:"active"`
+	Shipping    *ERPShippingPreviewDTO  `json:"shipping,omitempty"` // weight + dimensions resolved from the ERP, for the picker preview
+	IsParent    bool                    `json:"isParent,omitempty"`
+	Variants    []ERPVariantResponse    `json:"variants,omitempty"`
+}
+
+// ERPShippingPreviewDTO mirrors the ERP-side shipping data the search response
+// surfaces so the front can show "peso/dimensões a importar" before the user
+// confirms.
+type ERPShippingPreviewDTO struct {
+	WeightGrams   int    `json:"weightGrams,omitempty"`
+	HeightCm      int    `json:"heightCm,omitempty"`
+	WidthCm       int    `json:"widthCm,omitempty"`
+	LengthCm      int    `json:"lengthCm,omitempty"`
+	PackageFormat string `json:"packageFormat,omitempty"`
+}
+
+// shippingPreviewFromERP builds the picker-side preview DTO. When Shipping is
+// fully resolved we expose all four fields plus format. When only weight is
+// known (WeightGramsHint > 0 but no usable dimensions), we still surface the
+// weight so the front can warn "Faltam dimensões — store defaults serão
+// aplicados". Returns nil when nothing is known.
+func shippingPreviewFromERP(s *providers.ERPShippingProfile, weightHint int) *ERPShippingPreviewDTO {
+	if s != nil {
+		return &ERPShippingPreviewDTO{
+			WeightGrams:   s.WeightGrams,
+			HeightCm:      s.HeightCm,
+			WidthCm:       s.WidthCm,
+			LengthCm:      s.LengthCm,
+			PackageFormat: s.PackageFormat,
+		}
+	}
+	if weightHint > 0 {
+		return &ERPShippingPreviewDTO{WeightGrams: weightHint}
+	}
+	return nil
 }
 
 // ERPVariantResponse is one child SKU of an ERP product with variations.
 type ERPVariantResponse struct {
-	ID         string            `json:"id"`
-	SKU        string            `json:"sku,omitempty"`
-	GTIN       string            `json:"gtin,omitempty"`
-	Name       string            `json:"name,omitempty"`
-	Price      int64             `json:"price"`
-	Stock      int               `json:"stock"`
-	Active     bool              `json:"active"`
-	ImageURL   string            `json:"imageUrl,omitempty"` // best-effort enrichment from GetProduct(child); may be empty if Tiny returned no anexos or the enrichment timed out — front should fall back to parent.imageUrl
-	Attributes map[string]string `json:"attributes,omitempty"` // e.g. {"Cor":"Azul","Tamanho":"M"}
+	ID         string                 `json:"id"`
+	SKU        string                 `json:"sku,omitempty"`
+	GTIN       string                 `json:"gtin,omitempty"`
+	Name       string                 `json:"name,omitempty"`
+	Price      int64                  `json:"price"`
+	Stock      int                    `json:"stock"`
+	Active     bool                   `json:"active"`
+	ImageURL   string                 `json:"imageUrl,omitempty"` // best-effort enrichment from GetProduct(child); may be empty if Tiny returned no anexos or the enrichment timed out — front should fall back to parent.imageUrl
+	Shipping   *ERPShippingPreviewDTO `json:"shipping,omitempty"` // resolved per-variant shipping (after individual GET enrichment)
+	Attributes map[string]string      `json:"attributes,omitempty"` // e.g. {"Cor":"Azul","Tamanho":"M"}
 }
 
 // SyncProductInput is the service input for manually syncing a product from an ERP.
