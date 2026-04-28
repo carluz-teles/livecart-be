@@ -166,3 +166,25 @@ docker build --target http-server -t livecart-api .
 # Build apenas do worker
 docker build --target worker -t livecart-worker .
 ```
+
+## Documentação
+
+A pasta `docs/` reúne a documentação de produto, arquitetura e operação. Não confundir com `apps/api/docs/` (Swagger gerado automaticamente).
+
+### Arquitetura
+
+- [`docs/integrations/architecture.md`](docs/integrations/architecture.md) — **Arquitetura de Integrações** (princípios, categorias ERP/ECOM/PAY/SHIP/SOCIAL, contratos, hierarquia de prioridade, regras de fallback e checklist para nova integração)
+
+### Integrações específicas
+
+- [`docs/integrations/smartenvios.md`](docs/integrations/smartenvios.md) — visão geral da integração SmartEnvios
+- [`docs/integrations/smartenvios-frontend-prompt.md`](docs/integrations/smartenvios-frontend-prompt.md)
+- [`docs/integrations/smartenvios-frontend-shape-diff.md`](docs/integrations/smartenvios-frontend-shape-diff.md)
+
+### Produto
+
+- [`docs/prd/`](docs/prd/) — Product Requirements Documents por feature ([índice](docs/prd/README.md))
+
+### Operação
+
+- [`docs/playbooks/`](docs/playbooks/) — playbooks operacionais (testes, troubleshooting)
