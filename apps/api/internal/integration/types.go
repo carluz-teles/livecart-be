@@ -105,10 +105,15 @@ type IntegrationResponse struct {
 	// Populated for providers that need user-side configuration (e.g. Tiny ERP).
 	RedirectURL       string         `json:"redirectUrl,omitempty"`
 	WebhookURL        string         `json:"webhookUrl,omitempty"`
+	// WebhookStatus reflects whether the provider has hit our webhook URL at
+	// least once: "active" means we've received a ping (validation or event)
+	// and the URL is wired correctly; "pending" means we're still waiting.
+	// Only emitted for integrations that expose a webhookUrl.
+	WebhookStatus     string         `json:"webhookStatus,omitempty"`
 	// WebhookLastPingAt is the last time this provider hit our webhook URL for
-	// this store (validation ping or real event). nil = never received → URL is
-	// likely missing or wrong on the provider side.
-	WebhookLastPingAt *time.Time     `json:"webhookLastPingAt,omitempty"`
+	// this store (validation ping or real event). null = never received → URL
+	// is likely missing or wrong on the provider side.
+	WebhookLastPingAt *time.Time     `json:"webhookLastPingAt"`
 }
 
 // ProviderURLsResponse exposes the setup URLs a merchant must paste into the
@@ -226,6 +231,7 @@ type CreateIntegrationOutput struct {
 	CreatedAt         time.Time
 	RedirectURL       string
 	WebhookURL        string
+	WebhookStatus     string
 	WebhookLastPingAt *time.Time
 }
 

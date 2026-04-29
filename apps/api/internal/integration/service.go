@@ -3717,6 +3717,17 @@ func (s *Service) toCreateOutput(row *IntegrationRow) *CreateIntegrationOutput {
 		}
 	}
 
+	// Only surface a webhook status when the provider actually has a webhook
+	// URL — otherwise the field is meaningless and would confuse consumers.
+	var webhookStatus string
+	if urls.WebhookURL != "" {
+		if lastPing != nil {
+			webhookStatus = "active"
+		} else {
+			webhookStatus = "pending"
+		}
+	}
+
 	return &CreateIntegrationOutput{
 		ID:                row.ID,
 		StoreID:           row.StoreID,
@@ -3728,6 +3739,7 @@ func (s *Service) toCreateOutput(row *IntegrationRow) *CreateIntegrationOutput {
 		CreatedAt:         row.CreatedAt,
 		RedirectURL:       urls.RedirectURL,
 		WebhookURL:        urls.WebhookURL,
+		WebhookStatus:     webhookStatus,
 		WebhookLastPingAt: lastPing,
 	}
 }

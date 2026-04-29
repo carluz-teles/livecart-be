@@ -630,6 +630,7 @@ func toIntegrationResponse(output *CreateIntegrationOutput) *IntegrationResponse
 		CreatedAt:         output.CreatedAt,
 		RedirectURL:       output.RedirectURL,
 		WebhookURL:        output.WebhookURL,
+		WebhookStatus:     output.WebhookStatus,
 		WebhookLastPingAt: output.WebhookLastPingAt,
 	}
 }
