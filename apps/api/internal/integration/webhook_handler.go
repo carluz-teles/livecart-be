@@ -408,6 +408,12 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 
 	body := c.Body()
 
+	// Stamp metadata.webhookLastPingAt so the admin UI can tell the merchant
+	// whether the webhook URL is wired correctly on the Tiny side. Done for
+	// every hit — including empty validation pings — and runs in the
+	// background so we never delay the 200 response.
+	go h.service.RecordWebhookPing(context.Background(), storeID, "tiny")
+
 	// Always return 200 to Tiny — after 20 consecutive non-200 responses,
 	// Tiny automatically removes the webhook URL.
 	if len(body) == 0 {

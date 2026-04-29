@@ -93,14 +93,32 @@ type UpdateIntegrationRequest struct {
 
 // IntegrationResponse is the HTTP response for an integration.
 type IntegrationResponse struct {
-	ID           string         `json:"id"`
-	StoreID      string         `json:"storeId"`
-	Type         string         `json:"type"`
-	Provider     string         `json:"provider"`
-	Status       string         `json:"status"`
-	Metadata     map[string]any `json:"metadata,omitempty"`
-	LastSyncedAt *time.Time     `json:"lastSyncedAt,omitempty"`
-	CreatedAt    time.Time      `json:"createdAt"`
+	ID                string         `json:"id"`
+	StoreID           string         `json:"storeId"`
+	Type              string         `json:"type"`
+	Provider          string         `json:"provider"`
+	Status            string         `json:"status"`
+	Metadata          map[string]any `json:"metadata,omitempty"`
+	LastSyncedAt      *time.Time     `json:"lastSyncedAt,omitempty"`
+	CreatedAt         time.Time      `json:"createdAt"`
+	// Setup URLs the merchant must paste into the provider's app config.
+	// Populated for providers that need user-side configuration (e.g. Tiny ERP).
+	RedirectURL       string         `json:"redirectUrl,omitempty"`
+	WebhookURL        string         `json:"webhookUrl,omitempty"`
+	// WebhookLastPingAt is the last time this provider hit our webhook URL for
+	// this store (validation ping or real event). nil = never received → URL is
+	// likely missing or wrong on the provider side.
+	WebhookLastPingAt *time.Time     `json:"webhookLastPingAt,omitempty"`
+}
+
+// ProviderURLsResponse exposes the setup URLs a merchant must paste into the
+// provider's app config (e.g. Tiny redirect URL + webhook URL). Returned by
+// GET /integrations/providers/:provider/urls so the frontend can display them
+// before/while creating the integration.
+type ProviderURLsResponse struct {
+	Provider    string `json:"provider"`
+	RedirectURL string `json:"redirectUrl,omitempty"`
+	WebhookURL  string `json:"webhookUrl,omitempty"`
 }
 
 // ListIntegrationsResponse is the HTTP response for listing integrations.
@@ -198,14 +216,31 @@ type CreateIntegrationInput struct {
 
 // CreateIntegrationOutput is the service output for creating an integration.
 type CreateIntegrationOutput struct {
-	ID           string
-	StoreID      string
-	Type         string
-	Provider     string
-	Status       string
-	Metadata     map[string]any
-	LastSyncedAt *time.Time
-	CreatedAt    time.Time
+	ID                string
+	StoreID           string
+	Type              string
+	Provider          string
+	Status            string
+	Metadata          map[string]any
+	LastSyncedAt      *time.Time
+	CreatedAt         time.Time
+	RedirectURL       string
+	WebhookURL        string
+	WebhookLastPingAt *time.Time
+}
+
+// GetProviderURLsInput is the service input for resolving the per-provider
+// redirect + webhook URLs the merchant must paste into the provider's app config.
+type GetProviderURLsInput struct {
+	StoreID  string
+	Provider string
+}
+
+// GetProviderURLsOutput is the service output for GetProviderURLs.
+type GetProviderURLsOutput struct {
+	Provider    string
+	RedirectURL string
+	WebhookURL  string
 }
 
 // CreateCheckoutInput is the service input for creating a checkout.

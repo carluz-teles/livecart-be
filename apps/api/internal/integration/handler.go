@@ -30,6 +30,11 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// CRUD
 	g.Get("/", h.List)
 	g.Post("/", h.Create)
+
+	// Provider setup URLs (must be registered before /:id so it's not eaten by
+	// the wildcard).
+	g.Get("/providers/:provider/urls", h.GetProviderURLs)
+
 	g.Get("/:id", h.GetByID)
 	g.Delete("/:id", h.Delete)
 
@@ -540,6 +545,37 @@ func (h *Handler) OAuthConnect(c *fiber.Ctx) error {
 	})
 }
 
+// GetProviderURLs returns the redirect (OAuth callback) and webhook URLs the
+// merchant must paste into the provider's app config (e.g. Tiny).
+// @Summary Get provider setup URLs
+// @Description Returns the redirect URL and webhook URL the merchant must paste into the provider's app config
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param provider path string true "Provider name (e.g. tiny, mercado_pago, pagarme)"
+// @Success 200 {object} httpx.Envelope{data=ProviderURLsResponse}
+// @Failure 422 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/providers/{provider}/urls [get]
+// @Security BearerAuth
+func (h *Handler) GetProviderURLs(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	provider := c.Params("provider")
+
+	output, err := h.service.GetProviderURLs(c.Context(), GetProviderURLsInput{
+		StoreID:  storeID,
+		Provider: provider,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, ProviderURLsResponse{
+		Provider:    output.Provider,
+		RedirectURL: output.RedirectURL,
+		WebhookURL:  output.WebhookURL,
+	})
+}
+
 // =============================================================================
 // HELPERS
 // =============================================================================
@@ -584,13 +620,16 @@ func mapToCredentials(m map[string]any) *providers.Credentials {
 
 func toIntegrationResponse(output *CreateIntegrationOutput) *IntegrationResponse {
 	return &IntegrationResponse{
-		ID:           output.ID,
-		StoreID:      output.StoreID,
-		Type:         output.Type,
-		Provider:     output.Provider,
-		Status:       output.Status,
-		Metadata:     output.Metadata,
-		LastSyncedAt: output.LastSyncedAt,
-		CreatedAt:    output.CreatedAt,
+		ID:                output.ID,
+		StoreID:           output.StoreID,
+		Type:              output.Type,
+		Provider:          output.Provider,
+		Status:            output.Status,
+		Metadata:          output.Metadata,
+		LastSyncedAt:      output.LastSyncedAt,
+		CreatedAt:         output.CreatedAt,
+		RedirectURL:       output.RedirectURL,
+		WebhookURL:        output.WebhookURL,
+		WebhookLastPingAt: output.WebhookLastPingAt,
 	}
 }

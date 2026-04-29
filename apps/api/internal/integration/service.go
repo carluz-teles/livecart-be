@@ -347,6 +347,80 @@ func (s *Service) getTinyOAuthURL(storeID string) (*GetOAuthURLOutput, error) {
 	}, nil
 }
 
+// GetProviderURLs returns the redirect (OAuth callback) and webhook URLs the
+// merchant must paste into the provider's app config. The webhook URL embeds
+// the store ID so it stays stable across reconnects.
+func (s *Service) GetProviderURLs(_ context.Context, input GetProviderURLsInput) (*GetProviderURLsOutput, error) {
+	urls := buildProviderURLs(input.Provider, input.StoreID)
+	if urls.RedirectURL == "" && urls.WebhookURL == "" {
+		return nil, httpx.ErrUnprocessable("provider has no setup URLs: " + input.Provider)
+	}
+	return urls, nil
+}
+
+// buildProviderURLs resolves the setup URLs for a provider. Returns an output
+// with empty fields when the provider has nothing to expose. Kept as a pure
+// helper so it can be reused when assembling integration responses.
+func buildProviderURLs(provider, storeID string) *GetProviderURLsOutput {
+	base := strings.TrimRight(config.WebhookBaseURL.String(), "/")
+	out := &GetProviderURLsOutput{Provider: provider}
+	switch provider {
+	case "tiny":
+		out.RedirectURL = base + "/api/v1/integrations/oauth/tiny/callback"
+		if storeID != "" {
+			out.WebhookURL = base + "/api/webhooks/tiny/" + storeID
+		}
+	case "mercado_pago":
+		out.RedirectURL = base + "/api/v1/integrations/oauth/mercado_pago/callback"
+		if storeID != "" {
+			out.WebhookURL = base + "/api/webhooks/mercado_pago/" + storeID
+		}
+	case "pagarme":
+		if storeID != "" {
+			out.WebhookURL = base + "/api/webhooks/pagarme/" + storeID
+		}
+	case "instagram":
+		out.RedirectURL = base + "/api/v1/integrations/oauth/instagram/callback"
+	case "melhor_envio":
+		out.RedirectURL = base + "/api/v1/integrations/oauth/melhor_envio/callback"
+	}
+	return out
+}
+
+// RecordWebhookPing stamps webhookLastPingAt on the integration metadata so the
+// admin UI can show whether the merchant has the webhook URL correctly wired in
+// the provider's app. Best-effort: failures are logged and swallowed so they
+// can't block the webhook 200 response (Tiny disables URLs after 20 non-200s).
+func (s *Service) RecordWebhookPing(ctx context.Context, storeID, provider string) {
+	integrationType := "payment"
+	switch provider {
+	case "tiny":
+		integrationType = "erp"
+	case "instagram":
+		integrationType = "social"
+	}
+
+	integration, err := s.repo.GetByProvider(ctx, storeID, integrationType, provider)
+	if err != nil || integration == nil {
+		// Webhook arrived before the merchant created the integration — nothing to stamp.
+		return
+	}
+
+	metadata := integration.Metadata
+	if metadata == nil {
+		metadata = make(map[string]any)
+	}
+	metadata["webhookLastPingAt"] = time.Now().UTC().Format(time.RFC3339)
+
+	if err := s.repo.UpdateMetadata(ctx, integration.ID, metadata); err != nil {
+		s.logger.Warn("failed to stamp webhook ping",
+			zap.String("store_id", storeID),
+			zap.String("provider", provider),
+			zap.Error(err),
+		)
+	}
+}
+
 // HandleOAuthCallback handles the OAuth callback and creates/updates the integration.
 func (s *Service) HandleOAuthCallback(ctx context.Context, input OAuthCallbackInput) (*OAuthCallbackOutput, error) {
 	switch input.Provider {
@@ -3632,15 +3706,29 @@ func (s *Service) refreshToken(ctx context.Context, integration *IntegrationRow,
 }
 
 func (s *Service) toCreateOutput(row *IntegrationRow) *CreateIntegrationOutput {
+	urls := buildProviderURLs(row.Provider, row.StoreID)
+
+	var lastPing *time.Time
+	if row.Metadata != nil {
+		if raw, ok := row.Metadata["webhookLastPingAt"].(string); ok && raw != "" {
+			if t, err := time.Parse(time.RFC3339, raw); err == nil {
+				lastPing = &t
+			}
+		}
+	}
+
 	return &CreateIntegrationOutput{
-		ID:           row.ID,
-		StoreID:      row.StoreID,
-		Type:         row.Type,
-		Provider:     row.Provider,
-		Status:       row.Status,
-		Metadata:     row.Metadata,
-		LastSyncedAt: row.LastSyncedAt,
-		CreatedAt:    row.CreatedAt,
+		ID:                row.ID,
+		StoreID:           row.StoreID,
+		Type:              row.Type,
+		Provider:          row.Provider,
+		Status:            row.Status,
+		Metadata:          row.Metadata,
+		LastSyncedAt:      row.LastSyncedAt,
+		CreatedAt:         row.CreatedAt,
+		RedirectURL:       urls.RedirectURL,
+		WebhookURL:        urls.WebhookURL,
+		WebhookLastPingAt: lastPing,
 	}
 }
 
