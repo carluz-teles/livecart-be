@@ -298,6 +298,10 @@ func (r *Repository) UpdateCredentials(ctx context.Context, id string, credentia
 // UpdateMetadata replaces the metadata JSONB of an integration. Used by the
 // admin flow when an integration is (re)configured and the metadata contents
 // (e.g. `environment`) may change.
+//
+// We go through the sqlc-generated query (which types $2 as JSON via
+// json.RawMessage) instead of raw pool.Exec — pgx otherwise infers []byte as
+// bytea and Postgres rejects it with "invalid input syntax for type json".
 func (r *Repository) UpdateMetadata(ctx context.Context, id string, metadata map[string]any) error {
 	integrationID, err := parseUUID(id)
 	if err != nil {
@@ -307,8 +311,10 @@ func (r *Repository) UpdateMetadata(ctx context.Context, id string, metadata map
 	if err != nil {
 		return fmt.Errorf("marshaling metadata: %w", err)
 	}
-	_, err = r.pool.Exec(ctx, `UPDATE integrations SET metadata = $2, updated_at = now() WHERE id = $1`, integrationID, raw)
-	return err
+	return r.queries.UpdateIntegrationMetadata(ctx, sqlc.UpdateIntegrationMetadataParams{
+		ID:       integrationID,
+		Metadata: raw,
+	})
 }
 
 // UpdateStatus updates an integration's status.
