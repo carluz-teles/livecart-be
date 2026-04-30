@@ -2332,6 +2332,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		LastFourDigits:    result.LastFourDigits,
 		CardBrand:         result.CardBrand,
 		AuthorizationCode: result.AuthorizationCode,
+		PaidAt:            result.PaidAt,
 	}, nil
 }
 

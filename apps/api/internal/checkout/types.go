@@ -334,6 +334,7 @@ type ProcessCardPaymentOutput struct {
 	LastFourDigits    string
 	CardBrand         string
 	AuthorizationCode string
+	PaidAt            *time.Time
 }
 
 // GeneratePixInput is the input for GeneratePix service method

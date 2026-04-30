@@ -468,7 +468,12 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	// empty and both called Tiny CreateOrder; one got rate-limited (429),
 	// and the other could just as easily have produced a duplicate Tiny order.
 	if result.Status == "approved" {
-		if err := s.repo.UpdatePaymentStatus(ctx, cart.ID, "paid", result.PaymentID); err != nil {
+		// Prefer the gateway-reported authorization instant (date_approved /
+		// charges[0].paid_at) over the server clock so the receipt and the
+		// ERP records match what the customer sees on the gateway dashboard
+		// and we don't drift if the API host's clock is skewed. Falls back
+		// to time.Now() when the provider omitted the field.
+		if err := s.repo.UpdatePaymentStatus(ctx, cart.ID, "paid", result.PaymentID, result.PaidAt); err != nil {
 			s.logger.Error("failed to update payment status",
 				zap.String("cart_id", cart.ID),
 				zap.Error(err),

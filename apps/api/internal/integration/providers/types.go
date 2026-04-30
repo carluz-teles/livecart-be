@@ -383,6 +383,13 @@ type CardPaymentResult struct {
 	// rejected, or not present in this provider's payload).
 	AuthorizationCode string `json:"authorization_code,omitempty"`
 
+	// PaidAt is the moment the gateway recorded the authorization. The
+	// gateway is the source of truth here — using the server clock would
+	// drift in either direction (server skew, retries from queues, etc.).
+	// Nil when the response does not carry a paid_at (still pending /
+	// rejected / provider omitted the field).
+	PaidAt *time.Time `json:"paid_at,omitempty"`
+
 	// ExternalReference is the cart ID or order reference
 	ExternalReference string `json:"external_reference,omitempty"`
 

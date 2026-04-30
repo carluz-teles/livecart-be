@@ -525,6 +525,7 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 		Installments      int            `json:"installments"`
 		ExternalReference string         `json:"external_reference"`
 		AuthorizationCode string         `json:"authorization_code"`
+		DateApproved      string         `json:"date_approved"`
 		Card              *struct {
 			LastFourDigits string `json:"last_four_digits"`
 			Cardholder     *struct {
@@ -568,6 +569,16 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 
 	if mpResp.Card != nil {
 		result.LastFourDigits = mpResp.Card.LastFourDigits
+	}
+
+	// Mercado Pago returns date_approved as RFC3339 with offset (e.g.
+	// "2026-04-30T11:00:00.000-03:00"). pgx persists Timestamptz in UTC
+	// regardless of the parsed Location, so the absolute instant is preserved
+	// whether the gateway uses BRT, UTC, or any other zone.
+	if mpResp.DateApproved != "" {
+		if t, err := time.Parse(time.RFC3339, mpResp.DateApproved); err == nil {
+			result.PaidAt = &t
+		}
 	}
 
 	return result, nil

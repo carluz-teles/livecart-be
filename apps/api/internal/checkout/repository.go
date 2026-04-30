@@ -135,23 +135,31 @@ func (r *Repository) UpdateCheckoutInfo(ctx context.Context, params UpdateChecko
 	return nil
 }
 
-// UpdatePaymentStatus updates the payment status for a cart.
-func (r *Repository) UpdatePaymentStatus(ctx context.Context, cartID, status, paymentID string) error {
+// UpdatePaymentStatus updates the payment status for a cart. When status is
+// "paid", paidAt is the authoritative authorization instant — typically the
+// gateway-reported value (MP date_approved, Pagar.me charges[0].paid_at) so
+// the receipt matches what the customer sees on the gateway dashboard. Pass
+// nil to fall back to time.Now() (the gateway omitted the field).
+func (r *Repository) UpdatePaymentStatus(ctx context.Context, cartID, status, paymentID string, paidAt *time.Time) error {
 	uid, err := uuid.Parse(cartID)
 	if err != nil {
 		return httpx.ErrBadRequest("invalid cart ID")
 	}
 
-	var paidAt pgtype.Timestamptz
+	var paidAtPg pgtype.Timestamptz
 	if status == "paid" {
-		paidAt = pgtype.Timestamptz{Time: time.Now(), Valid: true}
+		ts := time.Now()
+		if paidAt != nil && !paidAt.IsZero() {
+			ts = *paidAt
+		}
+		paidAtPg = pgtype.Timestamptz{Time: ts, Valid: true}
 	}
 
 	_, err = r.q.UpdateCartPaymentStatus(ctx, sqlc.UpdateCartPaymentStatusParams{
 		ID:            pgtype.UUID{Bytes: uid, Valid: true},
 		PaymentStatus: pgtype.Text{String: status, Valid: true},
 		CheckoutID:    pgtype.Text{String: paymentID, Valid: true},
-		PaidAt:        paidAt,
+		PaidAt:        paidAtPg,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

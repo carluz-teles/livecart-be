@@ -579,6 +579,15 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 				result.AuthorizationCode = nsu
 			}
 		}
+		// Pagar.me reports the authorization instant on the charge itself
+		// (charges[0].paid_at) — RFC3339 with offset. We prefer this over
+		// the server clock so the receipt matches what the customer sees on
+		// the gateway dashboard.
+		if charge.PaidAt != "" {
+			if t, err := time.Parse(time.RFC3339, charge.PaidAt); err == nil {
+				result.PaidAt = &t
+			}
+		}
 	}
 
 	return result, nil
