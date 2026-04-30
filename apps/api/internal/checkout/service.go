@@ -398,11 +398,14 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		customerName = cart.PlatformHandle
 	}
 
-	// Build notify URL
-	notifyURL := fmt.Sprintf("%s/api/v1/integrations/webhooks/%s/%s",
+	// Build notify URL — must match the public webhook route:
+	// POST /api/webhooks/:provider/:storeId  (no /v1/integrations prefix; that
+	// group requires auth and would 401 the provider's notification, dropping
+	// the post-payment ERP finalisation entirely).
+	notifyURL := fmt.Sprintf("%s/api/webhooks/%s/%s",
 		config.WebhookBaseURL.String(),
 		paymentIntegration.ProviderName,
-		paymentIntegration.ID.String(),
+		cart.StoreID,
 	)
 
 	// Process payment via integration service
@@ -448,6 +451,25 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 				zap.Error(err),
 			)
 		}
+
+		// Card approvals are synchronous — kick the ERP finalisation off the
+		// hot path here instead of waiting for the provider's webhook.
+		// ProcessPaymentNotification is idempotent (cart.external_order_id
+		// guards re-runs), so the webhook arriving later is harmless.
+		go func() {
+			bgCtx := context.Background()
+			if err := s.integrationService.ProcessPaymentNotification(bgCtx, integration.ProcessPaymentInput{
+				StoreID:   cart.StoreID,
+				Provider:  paymentIntegration.ProviderName,
+				PaymentID: result.PaymentID,
+			}); err != nil {
+				s.logger.Error("failed to finalise ERP order after card approval",
+					zap.String("cart_id", cart.ID),
+					zap.String("payment_id", result.PaymentID),
+					zap.Error(err),
+				)
+			}
+		}()
 	}
 
 	s.logger.Info("card payment processed",
@@ -544,11 +566,14 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 		customerName = cart.PlatformHandle
 	}
 
-	// Build notify URL
-	notifyURL := fmt.Sprintf("%s/api/v1/integrations/webhooks/%s/%s",
+	// Build notify URL — must match the public webhook route:
+	// POST /api/webhooks/:provider/:storeId  (no /v1/integrations prefix; that
+	// group requires auth and would 401 the provider's notification, dropping
+	// the post-payment ERP finalisation entirely).
+	notifyURL := fmt.Sprintf("%s/api/webhooks/%s/%s",
 		config.WebhookBaseURL.String(),
 		paymentIntegration.ProviderName,
-		paymentIntegration.ID.String(),
+		cart.StoreID,
 	)
 
 	// Generate PIX via integration service
