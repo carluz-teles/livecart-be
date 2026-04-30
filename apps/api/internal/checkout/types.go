@@ -9,23 +9,68 @@ import (
 // =============================================================================
 
 // CartForCheckoutResponse is the response for GET /api/public/checkout/:token
+//
+// Customer / ShippingAddress / Payment are only populated when PaymentStatus
+// == "paid" so the post-payment "comprovante" page can render the buyer's
+// data without leaking PII while the checkout token is still pre-payment.
+// All three are optional on the wire — the client treats absence as
+// "data unavailable" (older paid carts may have nothing recorded for
+// card-specific fields, since they were not persisted before this change).
 type CartForCheckoutResponse struct {
-	ID                 string                 `json:"id"`
-	Token              string                 `json:"token"`
-	Status             string                 `json:"status"`
-	CustomerEmail      *string                `json:"customerEmail"`
-	PaymentStatus      string                 `json:"paymentStatus"`
-	CheckoutURL        *string                `json:"checkoutUrl"`
-	PlatformHandle     string                 `json:"platformHandle"`
-	AllowEdit          bool                   `json:"allowEdit"`
-	MaxQuantityPerItem int                    `json:"maxQuantityPerItem"`
-	ExpiresAt          *time.Time             `json:"expiresAt"`
-	CreatedAt          time.Time              `json:"createdAt"`
-	Event              CartEventInfo          `json:"event"`
-	Store              CartStoreInfo          `json:"store"`
-	Items              []CartItemResponse     `json:"items"`
-	Summary            CartSummary            `json:"summary"`
-	Shipping           *CartShippingSelection `json:"shipping,omitempty"`
+	ID                 string                          `json:"id"`
+	Token              string                          `json:"token"`
+	Status             string                          `json:"status"`
+	CustomerEmail      *string                         `json:"customerEmail"`
+	PaymentStatus      string                          `json:"paymentStatus"`
+	CheckoutURL        *string                         `json:"checkoutUrl"`
+	PlatformHandle     string                          `json:"platformHandle"`
+	AllowEdit          bool                            `json:"allowEdit"`
+	MaxQuantityPerItem int                             `json:"maxQuantityPerItem"`
+	ExpiresAt          *time.Time                      `json:"expiresAt"`
+	PaidAt             *time.Time                      `json:"paidAt,omitempty"`
+	CreatedAt          time.Time                       `json:"createdAt"`
+	Event              CartEventInfo                   `json:"event"`
+	Store              CartStoreInfo                   `json:"store"`
+	Items              []CartItemResponse              `json:"items"`
+	Summary            CartSummary                     `json:"summary"`
+	Shipping           *CartShippingSelection          `json:"shipping,omitempty"`
+	Customer           *CheckoutCustomerInfo           `json:"customer,omitempty"`
+	ShippingAddress    *CheckoutShippingAddressInfo    `json:"shippingAddress,omitempty"`
+	Payment            *CheckoutPaymentInfo            `json:"payment,omitempty"`
+}
+
+// CheckoutCustomerInfo is the buyer identity captured at checkout. Exposed
+// only after the cart is paid.
+type CheckoutCustomerInfo struct {
+	Name     string `json:"name"`
+	Document string `json:"document"`
+	Phone    string `json:"phone,omitempty"`
+	Email    string `json:"email"`
+}
+
+// CheckoutShippingAddressInfo is the delivery address recorded at checkout.
+// Exposed only after the cart is paid.
+type CheckoutShippingAddressInfo struct {
+	ZipCode      string `json:"zipCode"`
+	Street       string `json:"street"`
+	Number       string `json:"number"`
+	Complement   string `json:"complement,omitempty"`
+	Neighborhood string `json:"neighborhood"`
+	City         string `json:"city"`
+	State        string `json:"state"`
+}
+
+// CheckoutPaymentInfo is the payment confirmation snapshot for a paid cart.
+// Method is the public-facing value: "pix" or "card". CardBrand /
+// LastFourDigits / Installments are only set for card payments processed
+// through the transparent checkout (they are missing on PIX, on
+// redirect-checkout flows, and on carts paid before this field set existed).
+type CheckoutPaymentInfo struct {
+	Method         string    `json:"method"`
+	PaidAt         time.Time `json:"paidAt"`
+	Installments   int       `json:"installments,omitempty"`
+	CardBrand      string    `json:"cardBrand,omitempty"`
+	LastFourDigits string    `json:"lastFourDigits,omitempty"`
 }
 
 // CartEventInfo contains event info for the checkout page
@@ -174,10 +219,17 @@ type GetCartForCheckoutInput struct {
 	Token string
 }
 
-// GetCartForCheckoutOutput is the output for GetCartForCheckout service method
+// GetCartForCheckoutOutput is the output for GetCartForCheckout service method.
+//
+// Customer / ShippingAddress / Payment are only set when Cart.PaymentStatus is
+// "paid" — see Service.GetCartForCheckout. The handler propagates them as-is
+// to the public response so unpaid carts never leak PII via the public token.
 type GetCartForCheckoutOutput struct {
-	Cart  CartDetails
-	Items []CartItemDetails
+	Cart            CartDetails
+	Items           []CartItemDetails
+	Customer        *CartCustomerInfo
+	ShippingAddress *CartShippingAddressInfo
+	Payment         *CartPaymentInfo
 }
 
 // CartDetails contains the cart data with event/store info
