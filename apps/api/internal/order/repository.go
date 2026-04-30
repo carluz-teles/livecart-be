@@ -342,7 +342,7 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			ci.id,
 			ci.cart_id,
 			ci.product_id,
-			ci.size,
+			NULL::TEXT as size,
 			ci.quantity,
 			COALESCE(ci.unit_price, 0)::BIGINT as unit_price,
 			p.name as product_name,
