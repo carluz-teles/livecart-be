@@ -1283,7 +1283,12 @@ func (r *Repository) UpdateCartItemWaitlistedQuantity(ctx context.Context, cartI
 // CART PAYMENT OPERATIONS
 // =============================================================================
 
-// UpdateCartPaymentStatus updates the payment status of a cart.
+// UpdateCartPaymentStatus updates the payment status of a cart. The
+// payment-provider ID (MP/Pagar.me) is stored in checkout_id; external_order_id
+// is reserved for the ERP order ID written by finalizeCartERPOrder. Mixing the
+// two breaks paid-order idempotency — every paid cart was being skipped because
+// finalize saw a populated external_order_id and assumed the ERP order had
+// already been created.
 func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string, paymentStatus string, paymentID string, paidAt *time.Time, paymentMethod string) error {
 	cID, err := parseUUID(cartID)
 	if err != nil {
@@ -1296,11 +1301,11 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 	}
 
 	_, err = r.queries.UpdateCartPayment(ctx, sqlc.UpdateCartPaymentParams{
-		ID:              cID,
-		PaymentStatus:   pgtype.Text{String: paymentStatus, Valid: true},
-		ExternalOrderID: pgtype.Text{String: paymentID, Valid: paymentID != ""},
-		PaidAt:          paidAtPg,
-		PaymentMethod:   pgtype.Text{String: paymentMethod, Valid: paymentMethod != ""},
+		ID:            cID,
+		PaymentStatus: pgtype.Text{String: paymentStatus, Valid: true},
+		CheckoutID:    pgtype.Text{String: paymentID, Valid: paymentID != ""},
+		PaidAt:        paidAtPg,
+		PaymentMethod: pgtype.Text{String: paymentMethod, Valid: paymentMethod != ""},
 	})
 	if err != nil {
 		return fmt.Errorf("updating cart payment status: %w", err)

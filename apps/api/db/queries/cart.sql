@@ -44,8 +44,11 @@ WHERE ci.cart_id = $1;
 UPDATE carts SET status = $2 WHERE id = $1 RETURNING *;
 
 -- name: UpdateCartPayment :one
+-- $3 = payment-provider ID (MP/Pagar.me). Goes to checkout_id, not
+-- external_order_id — the latter is reserved for the ERP (Tiny) order ID
+-- and is the idempotency key for finalizeCartERPOrder.
 UPDATE carts
-SET payment_status = $2, external_order_id = $3, paid_at = $4, payment_method = $5
+SET payment_status = $2, checkout_id = $3, paid_at = $4, payment_method = $5
 WHERE id = $1
 RETURNING *;
 

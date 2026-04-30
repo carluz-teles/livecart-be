@@ -1551,24 +1551,24 @@ func (q *Queries) UpdateCartNotifyStatus(ctx context.Context, arg UpdateCartNoti
 
 const updateCartPayment = `-- name: UpdateCartPayment :one
 UPDATE carts
-SET payment_status = $2, external_order_id = $3, paid_at = $4, payment_method = $5
+SET payment_status = $2, checkout_id = $3, paid_at = $4, payment_method = $5
 WHERE id = $1
 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id
 `
 
 type UpdateCartPaymentParams struct {
-	ID              pgtype.UUID        `json:"id"`
-	PaymentStatus   pgtype.Text        `json:"payment_status"`
-	ExternalOrderID pgtype.Text        `json:"external_order_id"`
-	PaidAt          pgtype.Timestamptz `json:"paid_at"`
-	PaymentMethod   pgtype.Text        `json:"payment_method"`
+	ID            pgtype.UUID        `json:"id"`
+	PaymentStatus pgtype.Text        `json:"payment_status"`
+	CheckoutID    pgtype.Text        `json:"checkout_id"`
+	PaidAt        pgtype.Timestamptz `json:"paid_at"`
+	PaymentMethod pgtype.Text        `json:"payment_method"`
 }
 
 func (q *Queries) UpdateCartPayment(ctx context.Context, arg UpdateCartPaymentParams) (Cart, error) {
 	row := q.db.QueryRow(ctx, updateCartPayment,
 		arg.ID,
 		arg.PaymentStatus,
-		arg.ExternalOrderID,
+		arg.CheckoutID,
 		arg.PaidAt,
 		arg.PaymentMethod,
 	)
