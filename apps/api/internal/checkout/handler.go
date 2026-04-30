@@ -2,6 +2,7 @@ package checkout
 
 import (
 	"context"
+	"time"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
@@ -343,6 +344,7 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 		AllowEdit:          output.Cart.AllowEdit,
 		MaxQuantityPerItem: output.Cart.MaxQuantityPerItem,
 		ExpiresAt:          output.Cart.ExpiresAt,
+		PaidAt:             output.Cart.PaidAt,
 		CreatedAt:          output.Cart.CreatedAt,
 		Event: CartEventInfo{
 			ID:    output.Cart.EventID,
@@ -353,9 +355,83 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 			Name:    output.Cart.StoreName,
 			LogoURL: h.getPresignedLogoURL(output.Cart.StoreLogoURL),
 		},
-		Items:    items,
-		Summary:  summary,
-		Shipping: output.Cart.Shipping,
+		Items:           items,
+		Summary:         summary,
+		Shipping:        output.Cart.Shipping,
+		Customer:        toCheckoutCustomer(output.Customer),
+		ShippingAddress: toCheckoutShippingAddress(output.ShippingAddress),
+		Payment:         toCheckoutPayment(output.Payment, output.Cart.PaidAt),
+	}
+}
+
+// toCheckoutCustomer projects the service-level customer info onto the public
+// response shape. Returns nil when the service did not load it (i.e. the cart
+// is not paid, or the buyer fields are all empty).
+func toCheckoutCustomer(c *CartCustomerInfo) *CheckoutCustomerInfo {
+	if c == nil {
+		return nil
+	}
+	return &CheckoutCustomerInfo{
+		Name:     c.Name,
+		Document: c.Document,
+		Phone:    c.Phone,
+		Email:    c.Email,
+	}
+}
+
+func toCheckoutShippingAddress(a *CartShippingAddressInfo) *CheckoutShippingAddressInfo {
+	if a == nil {
+		return nil
+	}
+	return &CheckoutShippingAddressInfo{
+		ZipCode:      a.ZipCode,
+		Street:       a.Street,
+		Number:       a.Number,
+		Complement:   a.Complement,
+		Neighborhood: a.Neighborhood,
+		City:         a.City,
+		State:        a.State,
+	}
+}
+
+// toCheckoutPayment projects the persisted payment metadata onto the public
+// response shape. Method is normalized to the public values "pix" | "card";
+// unknown raw values fall back to "card" so the receipt page always has a
+// usable label. Returns nil when there is no method recorded at all
+// (e.g. paid carts from before payment_method was tracked).
+func toCheckoutPayment(p *CartPaymentInfo, paidAt *time.Time) *CheckoutPaymentInfo {
+	if p == nil || paidAt == nil {
+		return nil
+	}
+	method := normalizePaymentMethod(p.RawMethod)
+	if method == "" {
+		return nil
+	}
+	info := &CheckoutPaymentInfo{
+		Method: method,
+		PaidAt: *paidAt,
+	}
+	if method == "card" {
+		info.Installments = p.Installments
+		info.CardBrand = p.CardBrand
+		info.LastFourDigits = p.LastFourDigits
+	}
+	return info
+}
+
+// normalizePaymentMethod maps the persisted carts.payment_method value (set
+// by the providers — "pix", "credit_card", "debit_card", "boleto", ...) to
+// the public-facing "pix" | "card" enum used by the comprovante page.
+// Returns "" when there's nothing recorded so the caller can omit the block.
+func normalizePaymentMethod(raw string) string {
+	switch raw {
+	case "":
+		return ""
+	case "pix":
+		return "pix"
+	default:
+		// credit_card / debit_card / and any future card-like value.
+		return "card"
 	}
 }
 

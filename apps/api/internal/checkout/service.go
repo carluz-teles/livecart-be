@@ -104,6 +104,25 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 		}
 	}
 
+	// Populate receipt fields (customer + shipping address + payment) only for
+	// paid carts. The public checkout token is reachable by anyone — exposing
+	// these on unpaid carts would leak the buyer's PII while payment is still
+	// pending. Errors here are non-fatal; the receipt page just renders
+	// whatever it received.
+	if cart.PaymentStatus == "paid" {
+		customer, address, payment, err := s.repo.ReadCartPaymentDetails(ctx, s.pool, cart.ID)
+		if err != nil {
+			s.logger.Warn("failed to read paid-cart receipt details",
+				zap.String("cart_id", cart.ID),
+				zap.Error(err),
+			)
+		} else {
+			output.Customer = customer
+			output.ShippingAddress = address
+			output.Payment = payment
+		}
+	}
+
 	return output, nil
 }
 
@@ -451,6 +470,15 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	if result.Status == "approved" {
 		if err := s.repo.UpdatePaymentStatus(ctx, cart.ID, "paid", result.PaymentID); err != nil {
 			s.logger.Error("failed to update payment status",
+				zap.String("cart_id", cart.ID),
+				zap.Error(err),
+			)
+		}
+		// Best-effort capture of card details for the post-payment receipt
+		// (public checkout `payment` block). Failure here must not break the
+		// happy path — the comprovante just renders without these fields.
+		if err := s.repo.WriteCartCardPayment(ctx, s.pool, cart.ID, result.CardBrand, result.LastFourDigits, result.Installments); err != nil {
+			s.logger.Warn("failed to persist card payment details",
 				zap.String("cart_id", cart.ID),
 				zap.Error(err),
 			)

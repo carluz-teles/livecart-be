@@ -1,0 +1,183 @@
+package checkout
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"livecart/apps/api/lib/httpx"
+)
+
+// CartCustomerInfo is the customer identity captured at checkout (paid carts only).
+// All fields default to "" when missing — older paid carts may have nothing on file.
+type CartCustomerInfo struct {
+	Name     string
+	Document string
+	Phone    string
+	Email    string
+}
+
+// CartShippingAddressInfo is the delivery address captured at checkout, decoded
+// from carts.shipping_address (JSONB). Optional/older paid carts may return nil.
+type CartShippingAddressInfo struct {
+	ZipCode      string
+	Street       string
+	Number       string
+	Complement   string
+	Neighborhood string
+	City         string
+	State        string
+}
+
+// CartPaymentInfo is the payment confirmation snapshot for a paid cart.
+// Method is the normalized public-facing value ("pix" or "card"); the
+// card-specific fields are only populated for card payments through the
+// transparent checkout flow (CardBrand/LastFourDigits/Installments).
+type CartPaymentInfo struct {
+	RawMethod      string // raw value from carts.payment_method (pix, credit_card, ...)
+	CardBrand      string
+	LastFourDigits string
+	Installments   int
+}
+
+// ReadCartPaymentDetails returns customer + shipping address + payment metadata
+// for a paid cart. Returns nil for any sub-struct whose underlying columns are
+// all empty/null — the caller decides whether to expose them.
+//
+// We deliberately read these via raw SQL (instead of widening the sqlc-managed
+// GetCartByTokenWithDetails query) to keep the post-payment receipt fields
+// isolated from the existing checkout flow.
+func (r *Repository) ReadCartPaymentDetails(ctx context.Context, pool *pgxpool.Pool, cartID string) (*CartCustomerInfo, *CartShippingAddressInfo, *CartPaymentInfo, error) {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return nil, nil, nil, httpx.ErrBadRequest("invalid cart ID")
+	}
+
+	var (
+		customerName     pgtype.Text
+		customerDocument pgtype.Text
+		customerPhone    pgtype.Text
+		customerEmail    pgtype.Text
+		shippingAddress  []byte
+		paymentMethod    pgtype.Text
+		cardBrand        pgtype.Text
+		cardLastFour     pgtype.Text
+		cardInstallments pgtype.Int4
+	)
+
+	err = pool.QueryRow(ctx, `
+		SELECT customer_name,
+		       customer_document,
+		       customer_phone,
+		       customer_email,
+		       shipping_address,
+		       payment_method,
+		       card_brand,
+		       card_last_four,
+		       card_installments
+		FROM carts
+		WHERE id = $1
+	`, pgtype.UUID{Bytes: uid, Valid: true}).Scan(
+		&customerName, &customerDocument, &customerPhone, &customerEmail,
+		&shippingAddress,
+		&paymentMethod, &cardBrand, &cardLastFour, &cardInstallments,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, nil, nil
+		}
+		return nil, nil, nil, fmt.Errorf("reading cart payment details: %w", err)
+	}
+
+	customer := buildCustomerInfo(customerName, customerDocument, customerPhone, customerEmail)
+	address := buildShippingAddressInfo(shippingAddress)
+	payment := buildPaymentInfo(paymentMethod, cardBrand, cardLastFour, cardInstallments)
+
+	return customer, address, payment, nil
+}
+
+// WriteCartCardPayment persists the brand/last4/installments returned by the
+// payment provider after a successful card authorization. Called from the
+// transparent card flow on approved status; PIX never reaches here.
+func (r *Repository) WriteCartCardPayment(ctx context.Context, pool *pgxpool.Pool, cartID, cardBrand, lastFourDigits string, installments int) error {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return httpx.ErrBadRequest("invalid cart ID")
+	}
+	_, err = pool.Exec(ctx, `
+		UPDATE carts
+		SET card_brand        = $2,
+		    card_last_four    = $3,
+		    card_installments = $4
+		WHERE id = $1
+	`,
+		pgtype.UUID{Bytes: uid, Valid: true},
+		pgtype.Text{String: cardBrand, Valid: cardBrand != ""},
+		pgtype.Text{String: lastFourDigits, Valid: lastFourDigits != ""},
+		pgtype.Int4{Int32: int32(installments), Valid: installments > 0},
+	)
+	if err != nil {
+		return fmt.Errorf("updating cart card payment: %w", err)
+	}
+	return nil
+}
+
+func buildCustomerInfo(name, doc, phone, email pgtype.Text) *CartCustomerInfo {
+	if !name.Valid && !doc.Valid && !phone.Valid && !email.Valid {
+		return nil
+	}
+	return &CartCustomerInfo{
+		Name:     name.String,
+		Document: doc.String,
+		Phone:    phone.String,
+		Email:    email.String,
+	}
+}
+
+func buildShippingAddressInfo(raw []byte) *CartShippingAddressInfo {
+	if len(raw) == 0 {
+		return nil
+	}
+	var addr struct {
+		ZipCode      string `json:"zipCode"`
+		Street       string `json:"street"`
+		Number       string `json:"number"`
+		Complement   string `json:"complement"`
+		Neighborhood string `json:"neighborhood"`
+		City         string `json:"city"`
+		State        string `json:"state"`
+	}
+	if err := json.Unmarshal(raw, &addr); err != nil {
+		return nil
+	}
+	if addr.ZipCode == "" && addr.Street == "" && addr.City == "" && addr.State == "" {
+		return nil
+	}
+	return &CartShippingAddressInfo{
+		ZipCode:      addr.ZipCode,
+		Street:       addr.Street,
+		Number:       addr.Number,
+		Complement:   addr.Complement,
+		Neighborhood: addr.Neighborhood,
+		City:         addr.City,
+		State:        addr.State,
+	}
+}
+
+func buildPaymentInfo(method, brand, lastFour pgtype.Text, installments pgtype.Int4) *CartPaymentInfo {
+	if !method.Valid && !brand.Valid && !lastFour.Valid && !installments.Valid {
+		return nil
+	}
+	return &CartPaymentInfo{
+		RawMethod:      method.String,
+		CardBrand:      brand.String,
+		LastFourDigits: lastFour.String,
+		Installments:   int(installments.Int32),
+	}
+}

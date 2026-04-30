@@ -1,0 +1,3 @@
+ALTER TABLE carts DROP COLUMN IF EXISTS card_installments;
+ALTER TABLE carts DROP COLUMN IF EXISTS card_last_four;
+ALTER TABLE carts DROP COLUMN IF EXISTS card_brand;
