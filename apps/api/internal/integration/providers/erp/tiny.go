@@ -956,25 +956,25 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 	// payment-method reference is `meioPagamento` (Pix/Cartão/etc.) — not the
 	// `formaPagamento` key we used in v2. The v3 lookup endpoint is still
 	// `/formas-pagamento` and returns IDs that map to `meioPagamento`.
+	//
+	// For credit-card sales we expand into one parcela per installment with
+	// vencimentos D+30, D+60, ... so contas a receber reflects what Mercado
+	// Pago will repass per cycle. Pix / debit / boleto stay as a single
+	// parcela on the payment date (already settled or settles next-day).
 	if pay := order.Payment; pay != nil {
-		parcela := map[string]any{
-			"dias":        0,
-			"data":        pay.PaidAt.In(tinyLocation).Format("2006-01-02"),
-			"valor":       float64(pay.Amount) / 100,
-			"observacoes": fmt.Sprintf("Pago via %s - ID %s", pay.Method, pay.PaymentID),
-		}
 		var meioRef map[string]any
 		if meioID, err := t.lookupFormaPagamentoID(ctx, pay.Method); err == nil && meioID > 0 {
 			meioRef = map[string]any{"id": meioID}
-			parcela["meioPagamento"] = meioRef
 		} else if err != nil {
-			t.Logger.Warn("tiny meioPagamento lookup failed, creating parcela without it",
+			t.Logger.Warn("tiny meioPagamento lookup failed, sending parcelas without it",
 				zap.String("method", pay.Method),
 				zap.Error(err),
 			)
 		}
+
+		parcelas := buildTinyParcelas(pay, meioRef)
 		pagamento := map[string]any{
-			"parcelas": []map[string]any{parcela},
+			"parcelas": parcelas,
 		}
 		if meioRef != nil {
 			// Mirror at parent level so Tiny applies it as default for the
@@ -1024,6 +1024,60 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		OrderNumber: orderResp.Numero,
 		Status:      "created",
 	}, nil
+}
+
+// buildTinyParcelas turns the captured payment into the parcela list Tiny
+// expects under `pagamento.parcelas`. Credit-card sales are split into one
+// parcela per installment so contas a receber tracks each repasse from
+// Mercado Pago at D+30 / D+60 / ... — Pix, débito and boleto produce a
+// single parcela dated on the payment date (already cleared or clears D+1).
+//
+// Cents-to-reais split absorbs the rounding remainder on the LAST parcela so
+// the parcelas always sum back to pay.Amount exactly.
+func buildTinyParcelas(pay *providers.ERPOrderPayment, meioRef map[string]any) []map[string]any {
+	count := pay.Installments
+	if pay.Method != "credit_card" || count < 1 {
+		count = 1
+	}
+
+	if count == 1 {
+		parcela := map[string]any{
+			"dias":        0,
+			"data":        pay.PaidAt.In(tinyLocation).Format("2006-01-02"),
+			"valor":       float64(pay.Amount) / 100,
+			"observacoes": fmt.Sprintf("Pago via %s - ID %s", pay.Method, pay.PaymentID),
+		}
+		if meioRef != nil {
+			parcela["meioPagamento"] = meioRef
+		}
+		return []map[string]any{parcela}
+	}
+
+	parcelas := make([]map[string]any, count)
+	perCents := pay.Amount / int64(count)
+	remainder := pay.Amount - perCents*int64(count)
+
+	for i := 0; i < count; i++ {
+		cents := perCents
+		if i == count-1 {
+			// Absorb the rounding remainder on the last parcela so the
+			// total matches pay.Amount to the cent.
+			cents += remainder
+		}
+		days := 30 * (i + 1)
+		dueDate := pay.PaidAt.AddDate(0, 0, days).In(tinyLocation).Format("2006-01-02")
+		parcela := map[string]any{
+			"dias":        days,
+			"data":        dueDate,
+			"valor":       float64(cents) / 100,
+			"observacoes": fmt.Sprintf("Parcela %d/%d via %s - ID %s", i+1, count, pay.Method, pay.PaymentID),
+		}
+		if meioRef != nil {
+			parcela["meioPagamento"] = meioRef
+		}
+		parcelas[i] = parcela
+	}
+	return parcelas
 }
 
 // lookupFormaPagamentoID resolves our payment method string (pix/credit_card/...)
