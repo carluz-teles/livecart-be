@@ -1028,22 +1028,46 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 
 // buildTinyParcelas turns the captured payment into the parcela list Tiny
 // expects under `pagamento.parcelas`. Credit-card sales are split into one
-// parcela per installment so contas a receber tracks each repasse from
-// Mercado Pago at D+30 / D+60 / ... — Pix, débito and boleto produce a
-// single parcela dated on the payment date (already cleared or clears D+1).
+// parcela per installment so contas a receber tracks each repasse — Pix,
+// débito and boleto produce a single parcela dated on the payment date
+// (already cleared or clears D+1).
 //
-// Cents-to-reais split absorbs the rounding remainder on the LAST parcela so
-// the parcelas always sum back to pay.Amount exactly.
+// First-parcela date: when the gateway told us when it will release the
+// money (pay.MoneyReleaseDate, surfaced by Mercado Pago) we honour that —
+// it already encodes whether the merchant has antecipation enabled (D+1)
+// or runs on default (D+30). Otherwise we fall back to PaidAt for non-card
+// (instant clears) and PaidAt+30 for credit card. Subsequent installments
+// stagger by 30 days from the first.
+//
+// Cents-to-reais split absorbs the rounding remainder on the LAST parcela
+// so the parcelas always sum back to pay.Amount exactly.
 func buildTinyParcelas(pay *providers.ERPOrderPayment, meioRef map[string]any) []map[string]any {
 	count := pay.Installments
 	if pay.Method != "credit_card" || count < 1 {
 		count = 1
 	}
 
+	// Resolve the first-parcela due date.
+	var firstDue time.Time
+	if pay.MoneyReleaseDate != nil {
+		firstDue = *pay.MoneyReleaseDate
+	} else if pay.Method == "credit_card" {
+		firstDue = pay.PaidAt.AddDate(0, 0, 30)
+	} else {
+		firstDue = pay.PaidAt
+	}
+	// `dias` is days from the order issue date — equivalent to days from
+	// PaidAt for our purposes since we set `data` (top-level) to today
+	// (São Paulo). Negative offsets shouldn't happen in practice; clamp to 0.
+	firstDays := int(firstDue.Sub(pay.PaidAt).Hours() / 24)
+	if firstDays < 0 {
+		firstDays = 0
+	}
+
 	if count == 1 {
 		parcela := map[string]any{
-			"dias":        0,
-			"data":        pay.PaidAt.In(tinyLocation).Format("2006-01-02"),
+			"dias":        firstDays,
+			"data":        firstDue.In(tinyLocation).Format("2006-01-02"),
 			"valor":       float64(pay.Amount) / 100,
 			"observacoes": fmt.Sprintf("Pago via %s - ID %s", pay.Method, pay.PaymentID),
 		}
@@ -1064,8 +1088,8 @@ func buildTinyParcelas(pay *providers.ERPOrderPayment, meioRef map[string]any) [
 			// total matches pay.Amount to the cent.
 			cents += remainder
 		}
-		days := 30 * (i + 1)
-		dueDate := pay.PaidAt.AddDate(0, 0, days).In(tinyLocation).Format("2006-01-02")
+		days := firstDays + 30*i
+		dueDate := firstDue.AddDate(0, 0, 30*i).In(tinyLocation).Format("2006-01-02")
 		parcela := map[string]any{
 			"dias":        days,
 			"data":        dueDate,

@@ -3343,11 +3343,12 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 			paidAt = *paymentStatus.PaidAt
 		}
 		order.Payment = &providers.ERPOrderPayment{
-			Method:       paymentStatus.PaymentMethod,
-			PaymentID:    paymentStatus.PaymentID,
-			Installments: paymentStatus.Installments,
-			PaidAt:       paidAt,
-			Amount:       totalAmount,
+			Method:           paymentStatus.PaymentMethod,
+			PaymentID:        paymentStatus.PaymentID,
+			Installments:     paymentStatus.Installments,
+			PaidAt:           paidAt,
+			Amount:           totalAmount,
+			MoneyReleaseDate: paymentStatus.MoneyReleaseDate,
 		}
 	}
 

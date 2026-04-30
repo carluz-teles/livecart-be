@@ -275,6 +275,11 @@ type PaymentStatus struct {
 	ExternalReference string         `json:"external_reference,omitempty"` // Cart ID or order reference
 	PaymentMethod     string         `json:"payment_method,omitempty"`     // pix, credit_card, debit_card, boleto
 	Installments      int            `json:"installments,omitempty"`
+	// MoneyReleaseDate is when the gateway will actually credit the merchant.
+	// Mercado Pago surfaces this directly in /v1/payments/{id} — D+1 when the
+	// merchant has antecipation enabled, D+30 otherwise — so the ERP can use
+	// it as the real first-parcela due date instead of guessing.
+	MoneyReleaseDate  *time.Time     `json:"money_release_date,omitempty"`
 }
 
 // PaymentState represents payment status values.
@@ -504,6 +509,11 @@ type ERPOrderPayment struct {
 	Installments int       `json:"installments,omitempty"`
 	PaidAt       time.Time `json:"paid_at"`
 	Amount       int64     `json:"amount"`       // paid amount, in cents (usually == TotalAmount)
+	// MoneyReleaseDate is when the gateway tells us it will credit the
+	// merchant for the first installment — populated by MP, used by the ERP
+	// adapter as the base date for parcela 1 so contas a receber matches the
+	// merchant's actual repasse calendar instead of a hardcoded D+30.
+	MoneyReleaseDate *time.Time `json:"money_release_date,omitempty"`
 }
 
 // SearchContactsParams contains parameters for searching contacts.

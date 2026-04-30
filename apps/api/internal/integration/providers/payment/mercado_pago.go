@@ -329,6 +329,7 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 		CurrencyID        string         `json:"currency_id"`
 		DateApproved      string         `json:"date_approved,omitempty"`
 		DateCreated       string         `json:"date_created"`
+		MoneyReleaseDate  string         `json:"money_release_date,omitempty"`
 		Metadata          map[string]any `json:"metadata"`
 		ExternalReference string         `json:"external_reference"`
 		PaymentTypeID     string         `json:"payment_type_id"`  // credit_card, debit_card, pix, ticket (boleto)
@@ -348,6 +349,13 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 		}
 	}
 
+	var moneyReleaseDate *time.Time
+	if mpPayment.MoneyReleaseDate != "" {
+		if t, err := time.Parse(time.RFC3339, mpPayment.MoneyReleaseDate); err == nil {
+			moneyReleaseDate = &t
+		}
+	}
+
 	// Map Mercado Pago payment type to our payment method
 	paymentMethod := mapMPPaymentType(mpPayment.PaymentTypeID)
 
@@ -361,6 +369,7 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 		ExternalReference: mpPayment.ExternalReference,
 		PaymentMethod:     paymentMethod,
 		Installments:      mpPayment.Installments,
+		MoneyReleaseDate:  moneyReleaseDate,
 	}, nil
 }
 
