@@ -61,16 +61,23 @@ type CheckoutShippingAddressInfo struct {
 }
 
 // CheckoutPaymentInfo is the payment confirmation snapshot for a paid cart.
-// Method is the public-facing value: "pix" or "card". CardBrand /
-// LastFourDigits / Installments are only set for card payments processed
-// through the transparent checkout (they are missing on PIX, on
-// redirect-checkout flows, and on carts paid before this field set existed).
+//
+// `method` is the public-facing value: "pix" or "card". `paymentId` is the
+// gateway transaction id (Mercado Pago payment id, Pagar.me order id, etc.) —
+// safe to expose: the customer / suporte uses it to look the payment up.
+// CardBrand / LastFourDigits / Installments / AuthorizationCode are only set
+// for card payments processed through the transparent checkout — missing on
+// PIX, on redirect-checkout flows, and on carts paid before this field set
+// existed. Older paid carts may also be missing `paymentId` if they predate
+// the transparent flow.
 type CheckoutPaymentInfo struct {
-	Method         string    `json:"method"`
-	PaidAt         time.Time `json:"paidAt"`
-	Installments   int       `json:"installments,omitempty"`
-	CardBrand      string    `json:"cardBrand,omitempty"`
-	LastFourDigits string    `json:"lastFourDigits,omitempty"`
+	Method            string    `json:"method"`
+	PaidAt            time.Time `json:"paidAt"`
+	PaymentID         string    `json:"paymentId,omitempty"`
+	Installments      int       `json:"installments,omitempty"`
+	CardBrand         string    `json:"cardBrand,omitempty"`
+	LastFourDigits    string    `json:"lastFourDigits,omitempty"`
+	AuthorizationCode string    `json:"authorizationCode,omitempty"`
 }
 
 // CartEventInfo contains event info for the checkout page
@@ -161,14 +168,15 @@ type ProcessCardPaymentRequest struct {
 
 // ProcessCardPaymentResponse is the response for POST /api/public/checkout/:token/card
 type ProcessCardPaymentResponse struct {
-	PaymentID      string `json:"paymentId"`
-	Status         string `json:"status"`
-	StatusDetail   string `json:"statusDetail,omitempty"`
-	Message        string `json:"message"`
-	Amount         int64  `json:"amount"`
-	Installments   int    `json:"installments"`
-	LastFourDigits string `json:"lastFourDigits,omitempty"`
-	CardBrand      string `json:"cardBrand,omitempty"`
+	PaymentID         string `json:"paymentId"`
+	Status            string `json:"status"`
+	StatusDetail      string `json:"statusDetail,omitempty"`
+	Message           string `json:"message"`
+	Amount            int64  `json:"amount"`
+	Installments      int    `json:"installments"`
+	LastFourDigits    string `json:"lastFourDigits,omitempty"`
+	CardBrand         string `json:"cardBrand,omitempty"`
+	AuthorizationCode string `json:"authorizationCode,omitempty"`
 }
 
 // GeneratePixRequest is the request for POST /api/public/checkout/:token/pix
@@ -317,14 +325,15 @@ type ProcessCardPaymentInput struct {
 
 // ProcessCardPaymentOutput is the output for ProcessCardPayment service method
 type ProcessCardPaymentOutput struct {
-	PaymentID      string
-	Status         string
-	StatusDetail   string
-	Message        string
-	Amount         int64
-	Installments   int
-	LastFourDigits string
-	CardBrand      string
+	PaymentID         string
+	Status            string
+	StatusDetail      string
+	Message           string
+	Amount            int64
+	Installments      int
+	LastFourDigits    string
+	CardBrand         string
+	AuthorizationCode string
 }
 
 // GeneratePixInput is the input for GeneratePix service method

@@ -524,6 +524,7 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 		TransactionAmount float64        `json:"transaction_amount"`
 		Installments      int            `json:"installments"`
 		ExternalReference string         `json:"external_reference"`
+		AuthorizationCode string         `json:"authorization_code"`
 		Card              *struct {
 			LastFourDigits string `json:"last_four_digits"`
 			Cardholder     *struct {
@@ -560,6 +561,7 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 		Amount:            int64(mpResp.TransactionAmount * 100),
 		Installments:      mpResp.Installments,
 		CardBrand:         mpResp.PaymentMethodID,
+		AuthorizationCode: mpResp.AuthorizationCode,
 		ExternalReference: mpResp.ExternalReference,
 		Message:           getStatusMessage(mpResp.Status.String(), mpResp.StatusDetail),
 	}

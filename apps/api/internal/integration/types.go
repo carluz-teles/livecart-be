@@ -502,14 +502,15 @@ type ProcessCardPaymentInput struct {
 
 // ProcessCardPaymentOutput is the service output for processing a card payment.
 type ProcessCardPaymentOutput struct {
-	PaymentID      string
-	Status         string
-	StatusDetail   string
-	Message        string
-	Amount         int64
-	Installments   int
-	LastFourDigits string
-	CardBrand      string
+	PaymentID         string
+	Status            string
+	StatusDetail      string
+	Message           string
+	Amount            int64
+	Installments      int
+	LastFourDigits    string
+	CardBrand         string
+	AuthorizationCode string
 }
 
 // GeneratePixPaymentInput is the service input for generating a PIX payment.

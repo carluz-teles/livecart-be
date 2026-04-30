@@ -477,7 +477,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		// Best-effort capture of card details for the post-payment receipt
 		// (public checkout `payment` block). Failure here must not break the
 		// happy path — the comprovante just renders without these fields.
-		if err := s.repo.WriteCartCardPayment(ctx, s.pool, cart.ID, result.CardBrand, result.LastFourDigits, result.Installments); err != nil {
+		if err := s.repo.WriteCartCardPayment(ctx, s.pool, cart.ID, result.CardBrand, result.LastFourDigits, result.Installments, result.AuthorizationCode); err != nil {
 			s.logger.Warn("failed to persist card payment details",
 				zap.String("cart_id", cart.ID),
 				zap.Error(err),
@@ -493,14 +493,15 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	)
 
 	return &ProcessCardPaymentOutput{
-		PaymentID:      result.PaymentID,
-		Status:         result.Status,
-		StatusDetail:   result.StatusDetail,
-		Message:        result.Message,
-		Amount:         result.Amount,
-		Installments:   result.Installments,
-		LastFourDigits: result.LastFourDigits,
-		CardBrand:      result.CardBrand,
+		PaymentID:         result.PaymentID,
+		Status:            result.Status,
+		StatusDetail:      result.StatusDetail,
+		Message:           result.Message,
+		Amount:            result.Amount,
+		Installments:      result.Installments,
+		LastFourDigits:    result.LastFourDigits,
+		CardBrand:         result.CardBrand,
+		AuthorizationCode: result.AuthorizationCode,
 	}, nil
 }
 

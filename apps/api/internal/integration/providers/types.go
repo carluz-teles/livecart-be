@@ -378,6 +378,11 @@ type CardPaymentResult struct {
 	// Card brand (visa, master, etc.)
 	CardBrand string `json:"card_brand,omitempty"`
 
+	// AuthorizationCode is the NSU / acquirer auth code returned by the
+	// adquirente. Empty when the gateway does not surface it (still pending,
+	// rejected, or not present in this provider's payload).
+	AuthorizationCode string `json:"authorization_code,omitempty"`
+
 	// ExternalReference is the cart ID or order reference
 	ExternalReference string `json:"external_reference,omitempty"`
 

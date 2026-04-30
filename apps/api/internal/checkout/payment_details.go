@@ -38,12 +38,14 @@ type CartShippingAddressInfo struct {
 // CartPaymentInfo is the payment confirmation snapshot for a paid cart.
 // Method is the normalized public-facing value ("pix" or "card"); the
 // card-specific fields are only populated for card payments through the
-// transparent checkout flow (CardBrand/LastFourDigits/Installments).
+// transparent checkout flow (CardBrand/LastFourDigits/Installments/
+// AuthorizationCode).
 type CartPaymentInfo struct {
-	RawMethod      string // raw value from carts.payment_method (pix, credit_card, ...)
-	CardBrand      string
-	LastFourDigits string
-	Installments   int
+	RawMethod         string // raw value from carts.payment_method (pix, credit_card, ...)
+	CardBrand         string
+	LastFourDigits    string
+	Installments      int
+	AuthorizationCode string
 }
 
 // ReadCartPaymentDetails returns customer + shipping address + payment metadata
@@ -60,15 +62,16 @@ func (r *Repository) ReadCartPaymentDetails(ctx context.Context, pool *pgxpool.P
 	}
 
 	var (
-		customerName     pgtype.Text
-		customerDocument pgtype.Text
-		customerPhone    pgtype.Text
-		customerEmail    pgtype.Text
-		shippingAddress  []byte
-		paymentMethod    pgtype.Text
-		cardBrand        pgtype.Text
-		cardLastFour     pgtype.Text
-		cardInstallments pgtype.Int4
+		customerName      pgtype.Text
+		customerDocument  pgtype.Text
+		customerPhone     pgtype.Text
+		customerEmail     pgtype.Text
+		shippingAddress   []byte
+		paymentMethod     pgtype.Text
+		cardBrand         pgtype.Text
+		cardLastFour      pgtype.Text
+		cardInstallments  pgtype.Int4
+		cardAuthorization pgtype.Text
 	)
 
 	err = pool.QueryRow(ctx, `
@@ -80,13 +83,14 @@ func (r *Repository) ReadCartPaymentDetails(ctx context.Context, pool *pgxpool.P
 		       payment_method,
 		       card_brand,
 		       card_last_four,
-		       card_installments
+		       card_installments,
+		       card_authorization_code
 		FROM carts
 		WHERE id = $1
 	`, pgtype.UUID{Bytes: uid, Valid: true}).Scan(
 		&customerName, &customerDocument, &customerPhone, &customerEmail,
 		&shippingAddress,
-		&paymentMethod, &cardBrand, &cardLastFour, &cardInstallments,
+		&paymentMethod, &cardBrand, &cardLastFour, &cardInstallments, &cardAuthorization,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -97,30 +101,34 @@ func (r *Repository) ReadCartPaymentDetails(ctx context.Context, pool *pgxpool.P
 
 	customer := buildCustomerInfo(customerName, customerDocument, customerPhone, customerEmail)
 	address := buildShippingAddressInfo(shippingAddress)
-	payment := buildPaymentInfo(paymentMethod, cardBrand, cardLastFour, cardInstallments)
+	payment := buildPaymentInfo(paymentMethod, cardBrand, cardLastFour, cardInstallments, cardAuthorization)
 
 	return customer, address, payment, nil
 }
 
-// WriteCartCardPayment persists the brand/last4/installments returned by the
-// payment provider after a successful card authorization. Called from the
-// transparent card flow on approved status; PIX never reaches here.
-func (r *Repository) WriteCartCardPayment(ctx context.Context, pool *pgxpool.Pool, cartID, cardBrand, lastFourDigits string, installments int) error {
+// WriteCartCardPayment persists the brand/last4/installments/auth-code
+// returned by the payment provider after a successful card authorization.
+// Called from the transparent card flow on approved status; PIX never
+// reaches here. authorizationCode may be empty when the gateway omitted
+// it — we just leave that column NULL.
+func (r *Repository) WriteCartCardPayment(ctx context.Context, pool *pgxpool.Pool, cartID, cardBrand, lastFourDigits string, installments int, authorizationCode string) error {
 	uid, err := uuid.Parse(cartID)
 	if err != nil {
 		return httpx.ErrBadRequest("invalid cart ID")
 	}
 	_, err = pool.Exec(ctx, `
 		UPDATE carts
-		SET card_brand        = $2,
-		    card_last_four    = $3,
-		    card_installments = $4
+		SET card_brand              = $2,
+		    card_last_four          = $3,
+		    card_installments       = $4,
+		    card_authorization_code = $5
 		WHERE id = $1
 	`,
 		pgtype.UUID{Bytes: uid, Valid: true},
 		pgtype.Text{String: cardBrand, Valid: cardBrand != ""},
 		pgtype.Text{String: lastFourDigits, Valid: lastFourDigits != ""},
 		pgtype.Int4{Int32: int32(installments), Valid: installments > 0},
+		pgtype.Text{String: authorizationCode, Valid: authorizationCode != ""},
 	)
 	if err != nil {
 		return fmt.Errorf("updating cart card payment: %w", err)
@@ -170,14 +178,15 @@ func buildShippingAddressInfo(raw []byte) *CartShippingAddressInfo {
 	}
 }
 
-func buildPaymentInfo(method, brand, lastFour pgtype.Text, installments pgtype.Int4) *CartPaymentInfo {
-	if !method.Valid && !brand.Valid && !lastFour.Valid && !installments.Valid {
+func buildPaymentInfo(method, brand, lastFour pgtype.Text, installments pgtype.Int4, authorization pgtype.Text) *CartPaymentInfo {
+	if !method.Valid && !brand.Valid && !lastFour.Valid && !installments.Valid && !authorization.Valid {
 		return nil
 	}
 	return &CartPaymentInfo{
-		RawMethod:      method.String,
-		CardBrand:      brand.String,
-		LastFourDigits: lastFour.String,
-		Installments:   int(installments.Int32),
+		RawMethod:         method.String,
+		CardBrand:         brand.String,
+		LastFourDigits:    lastFour.String,
+		Installments:      int(installments.Int32),
+		AuthorizationCode: authorization.String,
 	}
 }

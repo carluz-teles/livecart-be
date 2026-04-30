@@ -2323,14 +2323,15 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	}
 
 	return &ProcessCardPaymentOutput{
-		PaymentID:      result.PaymentID,
-		Status:         string(result.Status),
-		StatusDetail:   result.StatusDetail,
-		Message:        result.Message,
-		Amount:         result.Amount,
-		Installments:   result.Installments,
-		LastFourDigits: result.LastFourDigits,
-		CardBrand:      result.CardBrand,
+		PaymentID:         result.PaymentID,
+		Status:            string(result.Status),
+		StatusDetail:      result.StatusDetail,
+		Message:           result.Message,
+		Amount:            result.Amount,
+		Installments:      result.Installments,
+		LastFourDigits:    result.LastFourDigits,
+		CardBrand:         result.CardBrand,
+		AuthorizationCode: result.AuthorizationCode,
 	}, nil
 }
 

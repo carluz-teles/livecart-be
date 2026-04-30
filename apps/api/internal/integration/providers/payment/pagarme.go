@@ -570,6 +570,14 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 				result.LastFourDigits = card.LastFourDigits
 				result.CardBrand = card.Brand
 			}
+			// Pagar.me v5 returns acquirer_auth_code on last_transaction.
+			// Fall back to acquirer_nsu when the gateway omits it (some
+			// adquirentes only fill one of the two).
+			if code := charge.LastTransaction.AcquirerAuthCode; code != "" {
+				result.AuthorizationCode = code
+			} else if nsu := charge.LastTransaction.AcquirerNsu; nsu != "" {
+				result.AuthorizationCode = nsu
+			}
 		}
 	}
 
@@ -760,15 +768,18 @@ type pagarmeCharge struct {
 }
 
 type pagarmeLastTransaction struct {
-	ID           string       `json:"id"`
-	Status       string       `json:"status"`
-	Success      bool         `json:"success"`
-	Amount       int          `json:"amount"`
-	Installments int          `json:"installments"`
-	Card         *pagarmeCard `json:"card"`
-	Pix          *pagarmePix  `json:"pix"`
-	CreatedAt    string       `json:"created_at"`
-	UpdatedAt    string       `json:"updated_at"`
+	ID               string       `json:"id"`
+	Status           string       `json:"status"`
+	Success          bool         `json:"success"`
+	Amount           int          `json:"amount"`
+	Installments     int          `json:"installments"`
+	Card             *pagarmeCard `json:"card"`
+	Pix              *pagarmePix  `json:"pix"`
+	AcquirerAuthCode string       `json:"acquirer_auth_code"`
+	AcquirerNsu      string       `json:"acquirer_nsu"`
+	AcquirerTid      string       `json:"acquirer_tid"`
+	CreatedAt        string       `json:"created_at"`
+	UpdatedAt        string       `json:"updated_at"`
 }
 
 type pagarmeCard struct {

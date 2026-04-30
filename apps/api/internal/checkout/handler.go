@@ -217,14 +217,15 @@ func (h *Handler) ProcessCardPayment(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, ProcessCardPaymentResponse{
-		PaymentID:      output.PaymentID,
-		Status:         output.Status,
-		StatusDetail:   output.StatusDetail,
-		Message:        output.Message,
-		Amount:         output.Amount,
-		Installments:   output.Installments,
-		LastFourDigits: output.LastFourDigits,
-		CardBrand:      output.CardBrand,
+		PaymentID:         output.PaymentID,
+		Status:            output.Status,
+		StatusDetail:      output.StatusDetail,
+		Message:           output.Message,
+		Amount:            output.Amount,
+		Installments:      output.Installments,
+		LastFourDigits:    output.LastFourDigits,
+		CardBrand:         output.CardBrand,
+		AuthorizationCode: output.AuthorizationCode,
 	})
 }
 
@@ -360,7 +361,7 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 		Shipping:        output.Cart.Shipping,
 		Customer:        toCheckoutCustomer(output.Customer),
 		ShippingAddress: toCheckoutShippingAddress(output.ShippingAddress),
-		Payment:         toCheckoutPayment(output.Payment, output.Cart.PaidAt),
+		Payment:         toCheckoutPayment(output.Payment, output.Cart.PaidAt, output.Cart.CheckoutID),
 	}
 }
 
@@ -399,7 +400,10 @@ func toCheckoutShippingAddress(a *CartShippingAddressInfo) *CheckoutShippingAddr
 // unknown raw values fall back to "card" so the receipt page always has a
 // usable label. Returns nil when there is no method recorded at all
 // (e.g. paid carts from before payment_method was tracked).
-func toCheckoutPayment(p *CartPaymentInfo, paidAt *time.Time) *CheckoutPaymentInfo {
+//
+// paymentID is the gateway transaction identifier — the cart row stores it
+// in `checkout_id` after payment confirmation; we surface it as `paymentId`.
+func toCheckoutPayment(p *CartPaymentInfo, paidAt *time.Time, paymentID *string) *CheckoutPaymentInfo {
 	if p == nil || paidAt == nil {
 		return nil
 	}
@@ -411,10 +415,14 @@ func toCheckoutPayment(p *CartPaymentInfo, paidAt *time.Time) *CheckoutPaymentIn
 		Method: method,
 		PaidAt: *paidAt,
 	}
+	if paymentID != nil {
+		info.PaymentID = *paymentID
+	}
 	if method == "card" {
 		info.Installments = p.Installments
 		info.CardBrand = p.CardBrand
 		info.LastFourDigits = p.LastFourDigits
+		info.AuthorizationCode = p.AuthorizationCode
 	}
 	return info
 }
