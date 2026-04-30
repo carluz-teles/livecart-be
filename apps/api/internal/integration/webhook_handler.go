@@ -279,16 +279,22 @@ func (h *WebhookHandler) HandleMercadoPago(c *fiber.Ctx) error {
 
 	// Process payment notifications
 	if webhook.Type == "payment" && webhook.Data.ID != "" {
-		// Process asynchronously to respond quickly
+		// Process asynchronously to respond quickly. The goroutine outlives
+		// the request, so we MUST detach from c.Context(): in Fiber v2 that
+		// returns the *fasthttp.RequestCtx, which is recycled to a sync.Pool
+		// once the handler returns — using it later panics inside pgxpool
+		// (puddle calls ctx.Done() on the now-zeroed RequestCtx).
+		paymentID := webhook.Data.ID
 		go func() {
-			if err := h.service.ProcessPaymentNotification(c.Context(), ProcessPaymentInput{
+			ctx := context.Background()
+			if err := h.service.ProcessPaymentNotification(ctx, ProcessPaymentInput{
 				StoreID:   storeID,
 				Provider:  "mercado_pago",
-				PaymentID: webhook.Data.ID,
+				PaymentID: paymentID,
 			}); err != nil {
 				h.logger.Error("failed to process payment notification",
 					zap.String("store_id", storeID),
-					zap.String("payment_id", webhook.Data.ID),
+					zap.String("payment_id", paymentID),
 					zap.Error(err),
 				)
 			}
@@ -372,19 +378,23 @@ func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 	}
 
 	// Process order.paid notifications
-	// Pagar.me sends order.paid when payment is confirmed
+	// Pagar.me sends order.paid when payment is confirmed.
+	// The goroutine outlives the request, so we detach from c.Context() — in
+	// Fiber v2 that's the *fasthttp.RequestCtx, recycled to a sync.Pool when
+	// the handler returns; touching it later panics inside pgxpool.
 	if webhook.Type == "order.paid" && webhook.Data.ID != "" {
-		// Process asynchronously to respond quickly
+		orderID := webhook.Data.ID
 		go func() {
+			ctx := context.Background()
 			// The "code" field contains our external reference (cart token)
-			if err := h.service.ProcessPaymentNotification(c.Context(), ProcessPaymentInput{
+			if err := h.service.ProcessPaymentNotification(ctx, ProcessPaymentInput{
 				StoreID:   storeID,
 				Provider:  "pagarme",
-				PaymentID: webhook.Data.ID, // Order ID - we'll fetch status from this
+				PaymentID: orderID, // Order ID - we'll fetch status from this
 			}); err != nil {
 				h.logger.Error("failed to process Pagar.me payment notification",
 					zap.String("store_id", storeID),
-					zap.String("order_id", webhook.Data.ID),
+					zap.String("order_id", orderID),
 					zap.Error(err),
 				)
 			}
