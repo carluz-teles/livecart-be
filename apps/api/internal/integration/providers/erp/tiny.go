@@ -857,10 +857,16 @@ func (t *Tiny) SyncProduct(ctx context.Context, product ERPProduct) (*SyncResult
 }
 
 // CreateOrder creates an order in Tiny for invoicing.
-// Tiny API v3 requires idContato (integer) instead of inline customer data.
-// If order.Payment is set, the order is created as paid (parcela with dataPagamento,
-// situação Aprovado) so it shows up under "Pedidos de Venda" already settled.
-// If order.ShippingAddress is set, it is shipped as enderecoEntrega.
+// Tiny API v3 requires `idContato` (integer) instead of inline customer data,
+// and `data` (issue date, YYYY-MM-DD).
+// If order.Payment is set, the parcela goes inside `pagamento.parcelas` and
+// the order is approved separately via ApproveOrder so it shows up under
+// "Pedidos de Venda" already settled.
+// If order.ShippingAddress is set, it is shipped as `enderecoEntrega`.
+// If order.Shipping is set, the cost goes to top-level `valorFrete` and a
+// `transportador` block is sent; carrier/service/deadline (which we cannot
+// translate to Tiny IDs locally) are stamped on `observacoesInternas` for
+// the merchant.
 func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, error) {
 	endpoint := tinyAPIBaseURL + "/pedidos"
 
@@ -884,11 +890,14 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 
 	payload := map[string]any{
 		"idContato":   contactID,
+		// Tiny v3 requires the order issue date — without it the order is
+		// rejected. Always sent in YYYY-MM-DD (UTC, since LiveCart stores all
+		// timestamps in UTC).
+		"data":        time.Now().UTC().Format("2006-01-02"),
 		"itens":       items,
 		"observacoes": order.Observation,
 		"ecommerce": map[string]any{
 			"numeroPedidoEcommerce": order.ExternalID,
-			"nomeEcommerce":        "LiveCart",
 		},
 	}
 
@@ -908,42 +917,64 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		}
 	}
 
+	// Frete (envio): Tiny v3 expects the cost as the top-level `valorFrete` and
+	// a `transportador` block with structural fields (`fretePorConta`,
+	// carrier/service IDs). We don't keep Tiny carrier IDs locally, so the
+	// carrier/service/deadline travel as observacoesInternas — invisible to the
+	// customer, visible to the merchant inside Tiny.
 	if ship := order.Shipping; ship != nil {
-		transporte := map[string]any{
-			"valor": float64(ship.CostCents) / 100,
+		payload["valorFrete"] = float64(ship.CostCents) / 100
+		// "D" = Destinatário paga o frete (modelo padrão LiveCart). If the
+		// store ever runs a free-shipping promo where the merchant absorbs
+		// the cost we may want to flip this to "R" (remetente).
+		payload["transportador"] = map[string]any{
+			"fretePorConta": "D",
 		}
+		var notes []string
 		if ship.Carrier != "" {
-			transporte["nomeTransportador"] = ship.Carrier
+			notes = append(notes, "Transportadora: "+ship.Carrier)
 		}
 		if ship.Service != "" {
-			transporte["formaEnvio"] = map[string]any{"nome": ship.Service}
+			notes = append(notes, "Serviço: "+ship.Service)
 		}
 		if ship.DeadlineDays > 0 {
-			transporte["prazoEntrega"] = ship.DeadlineDays
+			notes = append(notes, fmt.Sprintf("Prazo: %d dia(s)", ship.DeadlineDays))
 		}
-		payload["transporte"] = transporte
+		if len(notes) > 0 {
+			payload["observacoesInternas"] = strings.Join(notes, " | ")
+		}
 	}
 
+	// Pagamento: Tiny v3 expects parcelas nested inside `pagamento`, and the
+	// payment-method reference is `meioPagamento` (Pix/Cartão/etc.) — not the
+	// `formaPagamento` key we used in v2. The v3 lookup endpoint is still
+	// `/formas-pagamento` and returns IDs that map to `meioPagamento`.
 	if pay := order.Payment; pay != nil {
 		parcela := map[string]any{
-			"dias":           0,
-			"data":           pay.PaidAt.Format("2006-01-02"),
-			"valor":          float64(pay.Amount) / 100,
-			"observacoes":    fmt.Sprintf("Pago via %s - ID %s", pay.Method, pay.PaymentID),
-			"dataPagamento":  pay.PaidAt.Format("2006-01-02"),
+			"dias":        0,
+			"data":        pay.PaidAt.Format("2006-01-02"),
+			"valor":       float64(pay.Amount) / 100,
+			"observacoes": fmt.Sprintf("Pago via %s - ID %s", pay.Method, pay.PaymentID),
 		}
-		// Best-effort lookup of the Tiny formaPagamento by payment method name.
-		// If not found (or API fails) we still submit the parcela so Tiny
-		// records the payment date — Tiny accepts parcelas without formaPagamento.
-		if formaID, err := t.lookupFormaPagamentoID(ctx, pay.Method); err == nil && formaID > 0 {
-			parcela["formaPagamento"] = map[string]any{"id": formaID}
+		var meioRef map[string]any
+		if meioID, err := t.lookupFormaPagamentoID(ctx, pay.Method); err == nil && meioID > 0 {
+			meioRef = map[string]any{"id": meioID}
+			parcela["meioPagamento"] = meioRef
 		} else if err != nil {
-			t.Logger.Warn("tiny formaPagamento lookup failed, creating parcela without it",
+			t.Logger.Warn("tiny meioPagamento lookup failed, creating parcela without it",
 				zap.String("method", pay.Method),
 				zap.Error(err),
 			)
 		}
-		payload["parcelas"] = []map[string]any{parcela}
+		pagamento := map[string]any{
+			"parcelas": []map[string]any{parcela},
+		}
+		if meioRef != nil {
+			// Mirror at parent level so Tiny applies it as default for the
+			// pagamento block (matches the v3 schema example).
+			pagamento["meioPagamento"] = meioRef
+		}
+		payload["pagamento"] = pagamento
 	}
 
 	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
