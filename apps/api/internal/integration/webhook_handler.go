@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
@@ -228,7 +229,13 @@ func (h *WebhookHandler) HandleInstagramOAuthCallback(c *fiber.Ctx) error {
 // @Success 200 {object} map[string]string
 // @Router /api/webhooks/mercado_pago/{storeId} [post]
 func (h *WebhookHandler) HandleMercadoPago(c *fiber.Ctx) error {
-	storeID := c.Params("storeId")
+	// Clone the storeId out of fasthttp's recycled request buffer. We spawn
+	// goroutines below that outlive the request, and the raw c.Params()
+	// string aliases a buffer that goes back to a sync.Pool on return —
+	// reuse by another request was corrupting the UUID mid-flight (saw
+	// "invalid UUID: -8acb-4ce2-b40f-..." in production) and breaking
+	// resolveERPContact.
+	storeID := strings.Clone(c.Params("storeId"))
 
 	body := c.Body()
 
@@ -314,7 +321,13 @@ func (h *WebhookHandler) HandleMercadoPago(c *fiber.Ctx) error {
 // @Success 200 {object} map[string]string
 // @Router /api/webhooks/pagarme/{storeId} [post]
 func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
-	storeID := c.Params("storeId")
+	// Clone the storeId out of fasthttp's recycled request buffer. We spawn
+	// goroutines below that outlive the request, and the raw c.Params()
+	// string aliases a buffer that goes back to a sync.Pool on return —
+	// reuse by another request was corrupting the UUID mid-flight (saw
+	// "invalid UUID: -8acb-4ce2-b40f-..." in production) and breaking
+	// resolveERPContact.
+	storeID := strings.Clone(c.Params("storeId"))
 
 	body := c.Body()
 
@@ -414,7 +427,13 @@ func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 // @Success 200 {object} map[string]string
 // @Router /api/webhooks/tiny/{storeId} [post]
 func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
-	storeID := c.Params("storeId")
+	// Clone the storeId out of fasthttp's recycled request buffer. We spawn
+	// goroutines below that outlive the request, and the raw c.Params()
+	// string aliases a buffer that goes back to a sync.Pool on return —
+	// reuse by another request was corrupting the UUID mid-flight (saw
+	// "invalid UUID: -8acb-4ce2-b40f-..." in production) and breaking
+	// resolveERPContact.
+	storeID := strings.Clone(c.Params("storeId"))
 
 	body := c.Body()
 
