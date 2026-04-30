@@ -2503,12 +2503,29 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 // order already marked as paid, with customer identity and delivery address.
 // Idempotent by cart.external_order_id.
 func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID string, status *providers.PaymentStatus) error {
+	s.logger.Info("starting ERP finalisation for paid cart",
+		zap.String("store_id", storeID),
+		zap.String("cart_id", cartID),
+	)
+
 	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
 	if err != nil {
-		s.logger.Debug("no active ERP integration, skipping paid-order creation",
-			zap.String("store_id", storeID),
-			zap.String("cart_id", cartID),
-		)
+		// Disambiguate "merchant never set up Tiny" (info, expected) from
+		// "Tiny exists but is in error state" (warn, recoverable) so we don't
+		// keep losing paid carts under a silent debug log.
+		if any, _ := s.repo.GetByProvider(ctx, storeID, "erp", "tiny"); any != nil {
+			s.logger.Warn("Tiny integration is not active, skipping paid-order creation",
+				zap.String("store_id", storeID),
+				zap.String("cart_id", cartID),
+				zap.String("integration_id", any.ID),
+				zap.String("status", any.Status),
+			)
+		} else {
+			s.logger.Info("no Tiny integration configured, skipping paid-order creation",
+				zap.String("store_id", storeID),
+				zap.String("cart_id", cartID),
+			)
+		}
 		return nil
 	}
 
@@ -2517,7 +2534,10 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 		return fmt.Errorf("loading cart for ERP order: %w", err)
 	}
 	if cart.ExternalOrderID != "" {
-		s.logger.Debug("cart already has ERP order, skipping",
+		// Idempotency hit. Bumped from debug to info because hitting this on a
+		// fresh cart is a strong signal of a duplicate webhook or a previous
+		// run we need to investigate.
+		s.logger.Info("cart already has ERP order, skipping",
 			zap.String("cart_id", cartID),
 			zap.String("external_order_id", cart.ExternalOrderID),
 		)
