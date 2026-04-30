@@ -107,10 +107,19 @@ func (r *Repository) ReadCartPaymentDetails(ctx context.Context, pool *pgxpool.P
 }
 
 // WriteCartCardPayment persists the brand/last4/installments/auth-code
-// returned by the payment provider after a successful card authorization.
-// Called from the transparent card flow on approved status; PIX never
-// reaches here. authorizationCode may be empty when the gateway omitted
-// it — we just leave that column NULL.
+// returned by the payment provider after a successful card authorization,
+// plus the payment_method itself when not already set. Called from the
+// transparent card flow on approved status; PIX never reaches here.
+//
+// We seed payment_method = 'credit_card' via COALESCE so we don't depend
+// on the gateway webhook to populate it — in dev / loca.lt the webhook
+// often never arrives and the public response was omitting the entire
+// `payment` block because normalizePaymentMethod("") returned "". The
+// COALESCE protects against overwriting a more-specific method (e.g.
+// "debit_card") that an earlier webhook might have already recorded.
+//
+// authorizationCode may be empty when the gateway omitted it — we just
+// leave that column NULL.
 func (r *Repository) WriteCartCardPayment(ctx context.Context, pool *pgxpool.Pool, cartID, cardBrand, lastFourDigits string, installments int, authorizationCode string) error {
 	uid, err := uuid.Parse(cartID)
 	if err != nil {
@@ -121,7 +130,8 @@ func (r *Repository) WriteCartCardPayment(ctx context.Context, pool *pgxpool.Poo
 		SET card_brand              = $2,
 		    card_last_four          = $3,
 		    card_installments       = $4,
-		    card_authorization_code = $5
+		    card_authorization_code = $5,
+		    payment_method          = COALESCE(payment_method, 'credit_card')
 		WHERE id = $1
 	`,
 		pgtype.UUID{Bytes: uid, Valid: true},
