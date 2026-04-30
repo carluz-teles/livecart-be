@@ -153,6 +153,10 @@ type ERPProvider interface {
 	// CreateContact creates a new contact in the ERP.
 	CreateContact(ctx context.Context, contact ERPContactInput) (*ERPContactResult, error)
 
+	// UpdateContact patches an existing contact with fresh customer data.
+	// Best-effort caller pattern: errors are logged, not propagated.
+	UpdateContact(ctx context.Context, contactID string, contact ERPContactInput) error
+
 	// ListProducts retrieves products from the ERP.
 	ListProducts(ctx context.Context, params ListProductsParams) (*ProductListResult, error)
 

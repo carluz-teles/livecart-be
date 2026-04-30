@@ -23,6 +23,12 @@ const (
 	tinyAPIBaseURL = "https://api.tiny.com.br/public-api/v3"
 )
 
+// Tiny is a Brazilian ERP and interprets `data` fields against São Paulo
+// local time. Sending UTC made orders created late at night land on the next
+// day from Tiny's perspective, putting them outside the merchant's "últimos 30
+// dias" filter. Brazil dropped DST in 2019, so a fixed -3h offset is correct.
+var tinyLocation = time.FixedZone("America/Sao_Paulo", -3*60*60)
+
 // OAuth URLs for Tiny
 const (
 	tinyAuthURL  = "https://accounts.tiny.com.br/realms/tiny/protocol/openid-connect/auth"
@@ -890,10 +896,11 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 
 	payload := map[string]any{
 		"idContato":   contactID,
-		// Tiny v3 requires the order issue date — without it the order is
-		// rejected. Always sent in YYYY-MM-DD (UTC, since LiveCart stores all
-		// timestamps in UTC).
-		"data":        time.Now().UTC().Format("2006-01-02"),
+		// Tiny v3 requires the order issue date — sent in São Paulo local
+		// time so the order lands on the merchant's "today" rather than UTC's
+		// (otherwise late-night UTC orders fall a day ahead and disappear from
+		// the merchant's "últimos 30 dias" filter).
+		"data":        time.Now().In(tinyLocation).Format("2006-01-02"),
 		"itens":       items,
 		"observacoes": order.Observation,
 		"ecommerce": map[string]any{
@@ -952,7 +959,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 	if pay := order.Payment; pay != nil {
 		parcela := map[string]any{
 			"dias":        0,
-			"data":        pay.PaidAt.Format("2006-01-02"),
+			"data":        pay.PaidAt.In(tinyLocation).Format("2006-01-02"),
 			"valor":       float64(pay.Amount) / 100,
 			"observacoes": fmt.Sprintf("Pago via %s - ID %s", pay.Method, pay.PaymentID),
 		}
@@ -1346,6 +1353,56 @@ func (t *Tiny) CreateContact(ctx context.Context, contact ERPContactInput) (*ERP
 		ContactID: strconv.FormatInt(contactResp.ID, 10),
 		Name:      contact.Name,
 	}, nil
+}
+
+// UpdateContact patches an existing contact with fresh customer data. Used
+// after the merchant types the customer's real name on checkout — the
+// long-lived contact created by an earlier order under the @handle gets
+// rewritten so the Tiny order shows "Alisson Augusto Dahlem" instead of
+// "alisson_dahlem".
+// PUT /contatos/{id}
+func (t *Tiny) UpdateContact(ctx context.Context, contactID string, contact ERPContactInput) error {
+	cID, err := strconv.ParseInt(contactID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid contact ID %q: %w", contactID, err)
+	}
+	endpoint := fmt.Sprintf("%s/contatos/%d", tinyAPIBaseURL, cID)
+
+	payload := map[string]any{}
+	if contact.Name != "" {
+		payload["nome"] = contact.Name
+	}
+	if contact.PersonType != "" {
+		payload["tipoPessoa"] = contact.PersonType
+	}
+	if contact.CpfCnpj != "" {
+		payload["cpfCnpj"] = contact.CpfCnpj
+	}
+	if contact.Email != "" {
+		payload["email"] = contact.Email
+	}
+	if contact.Phone != "" {
+		payload["celular"] = contact.Phone
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+
+	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, payload, t.authHeaders())
+	if err != nil {
+		return fmt.Errorf("updating contact: %w", err)
+	}
+	if resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		var errResp struct {
+			Mensagem string `json:"mensagem"`
+		}
+		_ = json.Unmarshal(body, &errResp)
+		return fmt.Errorf("update contact failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+	}
+	return nil
 }
 
 // authHeaders returns the authorization headers for API v3 requests.

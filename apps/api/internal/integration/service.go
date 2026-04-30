@@ -3382,38 +3382,46 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 // =============================================================================
 
 // resolveERPContact finds or creates an ERP contact for the platform user.
-// Optional customer fields (name, document, email, phone) enrich the contact
-// when creating it; if the contact is already cached or found by handle,
-// enrichment is skipped to keep the call idempotent and cheap.
+// When the cart carries checkout customer data (name, document, email, phone)
+// the contact is enriched on every paid order — without this, a contact
+// created earlier under the Instagram @handle stays with the @handle as its
+// nome forever and Tiny orders display the handle instead of the real name.
 func (s *Service) resolveERPContact(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, platformUserID, platformHandle, customerName, customerDocument, customerEmail, customerPhone string) (string, error) {
+	enrich := providers.ERPContactInput{
+		Name:       customerName,
+		CpfCnpj:    customerDocument,
+		Email:      customerEmail,
+		Phone:      customerPhone,
+		PersonType: "F",
+	}
+
 	// Check cache first
 	cachedID, err := s.repo.GetERPContact(ctx, storeID, integration.ID, platformUserID)
 	if err != nil {
 		return "", err
 	}
 	if cachedID != "" {
+		s.bestEffortUpdateContact(ctx, erpProvider, cachedID, enrich)
 		return cachedID, nil
 	}
 
-	// Search by document first when we have one — most reliable key in Tiny.
+	// Search by document — most reliable key in Tiny.
 	if customerDocument != "" {
 		results, err := erpProvider.SearchContacts(ctx, providers.SearchContactsParams{
 			CpfCnpj: customerDocument,
 		})
 		if err == nil && len(results) > 0 {
 			_ = s.repo.UpsertERPContact(ctx, storeID, integration.ID, platformUserID, platformHandle, results[0].ContactID)
+			s.bestEffortUpdateContact(ctx, erpProvider, results[0].ContactID, enrich)
 			return results[0].ContactID, nil
 		}
 	}
 
-	// Fall back to searching by platform handle.
-	results, err := erpProvider.SearchContacts(ctx, providers.SearchContactsParams{
-		Name: platformHandle,
-	})
-	if err == nil && len(results) > 0 {
-		_ = s.repo.UpsertERPContact(ctx, storeID, integration.ID, platformUserID, platformHandle, results[0].ContactID)
-		return results[0].ContactID, nil
-	}
+	// Note: previously fell back to SearchContacts(Name: platformHandle).
+	// That found contacts left over from prior orders whose nome was the
+	// @handle and reused them — masking the customerName the buyer typed at
+	// checkout. Removed: when there's no document match we just create a
+	// fresh contact so the new order carries the real name.
 
 	// Create new contact in ERP. Prefer the real customer name over the handle.
 	contactName := customerName
@@ -3434,6 +3442,22 @@ func (s *Service) resolveERPContact(ctx context.Context, erpProvider providers.E
 	// Cache
 	_ = s.repo.UpsertERPContact(ctx, storeID, integration.ID, platformUserID, platformHandle, contact.ContactID)
 	return contact.ContactID, nil
+}
+
+// bestEffortUpdateContact pushes the latest checkout customer data into a
+// long-lived ERP contact. Skipped when we have nothing useful to send. Errors
+// are logged and swallowed — the order must still go through even if the
+// enrichment call fails.
+func (s *Service) bestEffortUpdateContact(ctx context.Context, erpProvider providers.ERPProvider, contactID string, contact providers.ERPContactInput) {
+	if contact.Name == "" && contact.CpfCnpj == "" && contact.Email == "" && contact.Phone == "" {
+		return
+	}
+	if err := erpProvider.UpdateContact(ctx, contactID, contact); err != nil {
+		s.logger.Warn("failed to enrich ERP contact, proceeding with order anyway",
+			zap.String("contact_id", contactID),
+			zap.Error(err),
+		)
+	}
 }
 
 // getERPProvider gets the ERP provider from an integration row.
