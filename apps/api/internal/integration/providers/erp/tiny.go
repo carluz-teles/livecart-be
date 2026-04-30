@@ -963,12 +963,22 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 	// parcela on the payment date (already settled or settles next-day).
 	if pay := order.Payment; pay != nil {
 		var meioRef map[string]any
-		if meioID, err := t.lookupFormaPagamentoID(ctx, pay.Method); err == nil && meioID > 0 {
-			meioRef = map[string]any{"id": meioID}
-		} else if err != nil {
+		meioID, err := t.lookupFormaPagamentoID(ctx, pay.Method)
+		switch {
+		case err != nil:
 			t.Logger.Warn("tiny meioPagamento lookup failed, sending parcelas without it",
 				zap.String("method", pay.Method),
 				zap.Error(err),
+			)
+		case meioID > 0:
+			meioRef = map[string]any{"id": meioID}
+		default:
+			// No match for our payment-method name in the merchant's
+			// /formas-pagamento — Tiny falls back to "Conta a Receber" on
+			// the parcela's "Forma" column. Likely the merchant cadastrou
+			// the meio with a different name (e.g. "Crédito", "Cartão MP").
+			t.Logger.Warn("tiny meioPagamento lookup returned no match, parcela will show 'Conta a Receber'",
+				zap.String("method", pay.Method),
 			)
 		}
 
@@ -990,11 +1000,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 	}
 
 	if !providers.IsSuccessStatus(resp.StatusCode) {
-		var errResp struct {
-			Mensagem string `json:"mensagem"`
-		}
-		_ = json.Unmarshal(body, &errResp)
-		return nil, fmt.Errorf("create order failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+		return nil, fmt.Errorf("create order failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
 	}
 
 	var orderResp struct {
@@ -1412,11 +1418,7 @@ func (t *Tiny) CreateContact(ctx context.Context, contact ERPContactInput) (*ERP
 	}
 
 	if !providers.IsSuccessStatus(resp.StatusCode) {
-		var errResp struct {
-			Mensagem string `json:"mensagem"`
-		}
-		_ = json.Unmarshal(body, &errResp)
-		return nil, fmt.Errorf("create contact failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+		return nil, fmt.Errorf("create contact failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
 	}
 
 	var contactResp struct {
@@ -1474,11 +1476,7 @@ func (t *Tiny) UpdateContact(ctx context.Context, contactID string, contact ERPC
 		return nil
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
-		var errResp struct {
-			Mensagem string `json:"mensagem"`
-		}
-		_ = json.Unmarshal(body, &errResp)
-		return fmt.Errorf("update contact failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+		return fmt.Errorf("update contact failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
 	}
 	return nil
 }
@@ -1488,6 +1486,61 @@ func (t *Tiny) authHeaders() map[string]string {
 	return map[string]string{
 		"Authorization": "Bearer " + t.credentials.AccessToken,
 	}
+}
+
+// tinyErrorDetail extracts the per-field validation messages Tiny returns
+// alongside the generic top-level "mensagem". Without these the merchant /
+// log only sees "Ocorreram erros de validação" with no clue about which
+// field is wrong. Falls back to the raw (truncated) body when nothing
+// recognisable is found.
+func tinyErrorDetail(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var parsed struct {
+		Mensagem  string `json:"mensagem"`
+		Mensagens []struct {
+			Campo    string `json:"campo"`
+			Mensagem string `json:"mensagem"`
+		} `json:"mensagens"`
+		Erros []struct {
+			Campo    string `json:"campo"`
+			Mensagem string `json:"mensagem"`
+		} `json:"erros"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return truncate(string(body), 400)
+	}
+
+	parts := make([]string, 0, len(parsed.Mensagens)+len(parsed.Erros)+1)
+	if parsed.Mensagem != "" {
+		parts = append(parts, parsed.Mensagem)
+	}
+	for _, m := range parsed.Mensagens {
+		if m.Campo != "" {
+			parts = append(parts, fmt.Sprintf("%s: %s", m.Campo, m.Mensagem))
+		} else {
+			parts = append(parts, m.Mensagem)
+		}
+	}
+	for _, e := range parsed.Erros {
+		if e.Campo != "" {
+			parts = append(parts, fmt.Sprintf("%s: %s", e.Campo, e.Mensagem))
+		} else {
+			parts = append(parts, e.Mensagem)
+		}
+	}
+	if len(parts) == 0 {
+		return truncate(string(body), 400)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
 }
 
 func boolToSituacao(active bool) string {
