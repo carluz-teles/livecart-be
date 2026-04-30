@@ -443,7 +443,11 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		return nil, httpx.ErrUnprocessable("erro ao processar pagamento")
 	}
 
-	// Update cart payment status if approved
+	// Update cart payment status if approved. ERP finalisation is left to the
+	// provider webhook — running it here too caused a real race: both
+	// goroutines passed the cart.external_order_id idempotency check while
+	// empty and both called Tiny CreateOrder; one got rate-limited (429),
+	// and the other could just as easily have produced a duplicate Tiny order.
 	if result.Status == "approved" {
 		if err := s.repo.UpdatePaymentStatus(ctx, cart.ID, "paid", result.PaymentID); err != nil {
 			s.logger.Error("failed to update payment status",
@@ -451,25 +455,6 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 				zap.Error(err),
 			)
 		}
-
-		// Card approvals are synchronous — kick the ERP finalisation off the
-		// hot path here instead of waiting for the provider's webhook.
-		// ProcessPaymentNotification is idempotent (cart.external_order_id
-		// guards re-runs), so the webhook arriving later is harmless.
-		go func() {
-			bgCtx := context.Background()
-			if err := s.integrationService.ProcessPaymentNotification(bgCtx, integration.ProcessPaymentInput{
-				StoreID:   cart.StoreID,
-				Provider:  paymentIntegration.ProviderName,
-				PaymentID: result.PaymentID,
-			}); err != nil {
-				s.logger.Error("failed to finalise ERP order after card approval",
-					zap.String("cart_id", cart.ID),
-					zap.String("payment_id", result.PaymentID),
-					zap.Error(err),
-				)
-			}
-		}()
 	}
 
 	s.logger.Info("card payment processed",
