@@ -924,19 +924,58 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		}
 	}
 
-	// Frete (envio): Tiny v3 expects the cost as the top-level `valorFrete` and
-	// a `transportador` block with structural fields (`fretePorConta`,
-	// carrier/service IDs). We don't keep Tiny carrier IDs locally, so the
-	// carrier/service/deadline travel as observacoesInternas — invisible to the
-	// customer, visible to the merchant inside Tiny.
+	// Frete (envio): Tiny v3 expects the cost as the top-level `valorFrete`
+	// and a `transportador` block. When the merchant cadastrou a forma de
+	// envio matching the carrier (e.g. "SmartEnvios", "Correios", "Jadlog")
+	// we resolve its id via /formas-envio and link it under
+	// `transportador.formaEnvio.id` — that's how the order shows up under
+	// the right separação/etiqueta queue in Tiny.
 	if ship := order.Shipping; ship != nil {
 		payload["valorFrete"] = float64(ship.CostCents) / 100
+
 		// "D" = Destinatário paga o frete (modelo padrão LiveCart). If the
 		// store ever runs a free-shipping promo where the merchant absorbs
 		// the cost we may want to flip this to "R" (remetente).
-		payload["transportador"] = map[string]any{
+		transportador := map[string]any{
 			"fretePorConta": "D",
 		}
+
+		// Try to resolve the formaEnvio id, preferring the carrier name
+		// (Correios / Jadlog / etc.) and falling back to "SmartEnvios" so
+		// stores that cadastrou só o agregador também batem.
+		formaEnvioID, formaEnvioErr := t.lookupFormaEnvioID(ctx, ship.Carrier)
+		formaEnvioName := ship.Carrier
+		if formaEnvioErr == nil && formaEnvioID == 0 && ship.Carrier != "SmartEnvios" {
+			id, err := t.lookupFormaEnvioID(ctx, "SmartEnvios")
+			if err == nil && id > 0 {
+				formaEnvioID = id
+				formaEnvioName = "SmartEnvios"
+			}
+		}
+		switch {
+		case formaEnvioErr != nil:
+			t.Logger.Warn("tiny formaEnvio lookup failed, sending order without it",
+				zap.String("carrier", ship.Carrier),
+				zap.Error(formaEnvioErr),
+			)
+		case formaEnvioID > 0:
+			transportador["formaEnvio"] = map[string]any{"id": formaEnvioID}
+			t.Logger.Info("tiny formaEnvio matched",
+				zap.String("carrier", ship.Carrier),
+				zap.String("matched_name", formaEnvioName),
+				zap.Int64("forma_envio_id", formaEnvioID),
+			)
+		default:
+			t.Logger.Warn("tiny formaEnvio lookup returned no match, order will use Tiny default",
+				zap.String("carrier", ship.Carrier),
+			)
+		}
+
+		payload["transportador"] = transportador
+
+		// Carrier / serviço / prazo / cost fall into observacoesInternas
+		// for merchant visibility — the formaEnvio id alone tells Tiny
+		// "this order is a SmartEnvios shipment" but not which service.
 		var notes []string
 		if ship.Carrier != "" {
 			notes = append(notes, "Transportadora: "+ship.Carrier)
@@ -946,6 +985,9 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		}
 		if ship.DeadlineDays > 0 {
 			notes = append(notes, fmt.Sprintf("Prazo: %d dia(s)", ship.DeadlineDays))
+		}
+		if ship.CostCents > 0 {
+			notes = append(notes, fmt.Sprintf("Custo real: R$ %.2f", float64(ship.CostCents)/100))
 		}
 		if len(notes) > 0 {
 			payload["observacoesInternas"] = strings.Join(notes, " | ")
@@ -992,7 +1034,32 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 			pagamento["meioPagamento"] = meioRef
 		}
 		payload["pagamento"] = pagamento
+
+		// Snapshot of the parcela schedule for log audit. With this we can
+		// reconcile the merchant's contas a receber against what we sent
+		// (Tiny may rewrite values but not the count / dates).
+		firstDue, _ := parcelas[0]["data"].(string)
+		lastDue, _ := parcelas[len(parcelas)-1]["data"].(string)
+		t.Logger.Info("tiny order parcelas prepared",
+			zap.String("method", pay.Method),
+			zap.Int("installments", pay.Installments),
+			zap.Int("parcelas_count", len(parcelas)),
+			zap.String("first_due", firstDue),
+			zap.String("last_due", lastDue),
+			zap.Int64("amount_cents", pay.Amount),
+			zap.Bool("had_money_release_date", pay.MoneyReleaseDate != nil),
+		)
 	}
+
+	t.Logger.Info("tiny CreateOrder sending payload",
+		zap.String("external_id", order.ExternalID),
+		zap.String("contact_id", order.ContactID),
+		zap.Int("items_count", len(order.Items)),
+		zap.Int64("total_amount_cents", order.TotalAmount),
+		zap.Bool("has_shipping_address", order.ShippingAddress != nil),
+		zap.Bool("has_shipping_method", order.Shipping != nil),
+		zap.Bool("has_payment", order.Payment != nil),
+	)
 
 	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
 	if err != nil {
@@ -1013,6 +1080,11 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 	}
 
 	orderID := strconv.FormatInt(orderResp.ID, 10)
+	t.Logger.Info("tiny order created",
+		zap.String("order_id", orderID),
+		zap.String("numero_pedido", orderResp.Numero),
+		zap.String("external_id", order.ExternalID),
+	)
 
 	// Approve the order so it shows under "Pedidos de Venda" when already paid.
 	// Failure here is non-fatal — the order still exists in Tiny.
@@ -1164,6 +1236,61 @@ func (t *Tiny) lookupFormaPagamentoID(ctx context.Context, method string) (int64
 	return 0, nil
 }
 
+// lookupFormaEnvioID resolves a shipping name (e.g. "SmartEnvios", "Correios",
+// "Jadlog") to the Tiny formaEnvio ID. Tiny v3 lists shipping methods at
+// GET /formas-envio?nome=... — the merchant cadastra cada integração de
+// frete (SmartEnvios, Melhor Envio, Correios direto, etc.) lá e cada uma
+// recebe um id que o pedido referencia em transportador.formaEnvio.id.
+//
+// Returns 0 without error if no match. Best-effort, no cache.
+func (t *Tiny) lookupFormaEnvioID(ctx context.Context, name string) (int64, error) {
+	if name == "" {
+		return 0, nil
+	}
+	endpoint := fmt.Sprintf("%s/formas-envio?nome=%s&limit=10",
+		tinyAPIBaseURL, url.QueryEscape(name))
+
+	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return 0, fmt.Errorf("listing formas de envio: %w", err)
+	}
+	if resp.StatusCode == http.StatusNoContent {
+		return 0, nil
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return 0, fmt.Errorf("list formas de envio failed: status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Itens []struct {
+			ID   int64  `json:"id"`
+			Nome string `json:"nome"`
+		} `json:"itens"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, fmt.Errorf("parsing formas de envio: %w", err)
+	}
+
+	// Prefer exact (case-insensitive) match, then any case-insensitive
+	// substring containing the query so "SmartEnvios" still matches a
+	// merchant who cadastrou "SmartEnvios - PAC".
+	lowerQuery := strings.ToLower(name)
+	for _, item := range result.Itens {
+		if strings.EqualFold(item.Nome, name) {
+			return item.ID, nil
+		}
+	}
+	for _, item := range result.Itens {
+		if strings.Contains(strings.ToLower(item.Nome), lowerQuery) {
+			return item.ID, nil
+		}
+	}
+	if len(result.Itens) > 0 {
+		return result.Itens[0].ID, nil
+	}
+	return 0, nil
+}
+
 // LaunchOrderStock decrements stock in Tiny for all items in the order.
 // POST /pedidos/{idPedido}/lancar-estoque
 func (t *Tiny) LaunchOrderStock(ctx context.Context, orderID string) error {
@@ -1191,6 +1318,9 @@ func (t *Tiny) LaunchOrderStock(ctx context.Context, orderID string) error {
 		return fmt.Errorf("launch stock failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
 	}
 
+	t.Logger.Info("tiny order stock launched",
+		zap.String("order_id", orderID),
+	)
 	return nil
 }
 
@@ -1236,6 +1366,9 @@ func (t *Tiny) ApproveOrder(ctx context.Context, orderID string) error {
 		return fmt.Errorf("approve order failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
 	}
 
+	t.Logger.Info("tiny order approved",
+		zap.String("order_id", orderID),
+	)
 	return nil
 }
 

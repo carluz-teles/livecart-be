@@ -2558,15 +2558,24 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 	if err != nil {
 		return fmt.Errorf("listing cart reservations: %w", err)
 	}
+	s.logger.Info("reversing ERP stock reservations before creating paid order",
+		zap.String("cart_id", cartID),
+		zap.Int("reservations_count", len(reservations)),
+	)
+	reversed := 0
 	for _, r := range reservations {
 		obs := fmt.Sprintf("Estorno reserva pós-pagamento - Cart %s", cartID)
 		if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
 			s.logger.Warn("failed to reverse ERP reservation on paid, proceeding anyway",
 				zap.String("cart_id", cartID),
 				zap.String("reservation_id", r.ID),
+				zap.String("external_product_id", r.ExternalProductID),
+				zap.Int("quantity", r.Quantity),
 				zap.Error(reverseErr),
 			)
+			continue
 		}
+		reversed++
 	}
 	if err := s.repo.ReverseReservationsByCart(ctx, cartID); err != nil {
 		s.logger.Error("failed to mark reservations reversed",
@@ -2574,6 +2583,11 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 			zap.Error(err),
 		)
 	}
+	s.logger.Info("ERP stock reservations reversed",
+		zap.String("cart_id", cartID),
+		zap.Int("requested", len(reservations)),
+		zap.Int("succeeded", reversed),
+	)
 
 	// 2. Create the paid sales order.
 	return s.createFinalERPOrder(ctx, erpProvider, erpIntegration, storeID, cart.EventID, *cart, status)
@@ -3282,8 +3296,20 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 	}
 
 	if len(erpItems) == 0 {
+		s.logger.Warn("paid cart has no ERP-linked items, skipping order creation",
+			zap.String("cart_id", cart.ID),
+			zap.Int("cart_items_total", len(items)),
+		)
 		return nil
 	}
+
+	s.logger.Info("ERP order items prepared",
+		zap.String("cart_id", cart.ID),
+		zap.Int("erp_items", len(erpItems)),
+		zap.Int("cart_items_total", len(items)),
+		zap.Int64("items_total_cents", totalAmount),
+		zap.String("contact_id", contactID),
+	)
 
 	order := providers.ERPOrder{
 		ExternalID:  cart.ID,
@@ -3404,6 +3430,10 @@ func (s *Service) resolveERPContact(ctx context.Context, erpProvider providers.E
 		return "", err
 	}
 	if cachedID != "" {
+		s.logger.Info("ERP contact resolved from cache",
+			zap.String("contact_id", cachedID),
+			zap.String("platform_user_id", platformUserID),
+		)
 		s.bestEffortUpdateContact(ctx, erpProvider, cachedID, enrich)
 		return cachedID, nil
 	}
@@ -3414,6 +3444,10 @@ func (s *Service) resolveERPContact(ctx context.Context, erpProvider providers.E
 			CpfCnpj: customerDocument,
 		})
 		if err == nil && len(results) > 0 {
+			s.logger.Info("ERP contact resolved by document",
+				zap.String("contact_id", results[0].ContactID),
+				zap.String("platform_user_id", platformUserID),
+			)
 			_ = s.repo.UpsertERPContact(ctx, storeID, integration.ID, platformUserID, platformHandle, results[0].ContactID)
 			s.bestEffortUpdateContact(ctx, erpProvider, results[0].ContactID, enrich)
 			return results[0].ContactID, nil
@@ -3441,6 +3475,12 @@ func (s *Service) resolveERPContact(ctx context.Context, erpProvider providers.E
 	if err != nil {
 		return "", fmt.Errorf("creating ERP contact: %w", err)
 	}
+
+	s.logger.Info("ERP contact created",
+		zap.String("contact_id", contact.ContactID),
+		zap.String("platform_user_id", platformUserID),
+		zap.String("contact_name", contactName),
+	)
 
 	// Cache
 	_ = s.repo.UpsertERPContact(ctx, storeID, integration.ID, platformUserID, platformHandle, contact.ContactID)
