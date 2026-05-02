@@ -24,7 +24,12 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrdersResult, error) {
 	var result ListOrdersResult
 
-	// Build dynamic query
+	// Build dynamic query.
+	//
+	// `is_first_purchase` is true only for paid carts that have no earlier
+	// paid cart from the same buyer in the same store. Anonymous carts
+	// (empty platform_user_id) always evaluate to false because the EXISTS
+	// subquery would match every other anon cart on the store.
 	baseQuery := `
 		SELECT
 			c.id,
@@ -52,7 +57,21 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 			COALESCE(
 				(SELECT SUM(ci.quantity)::INT FROM cart_items ci WHERE ci.cart_id = c.id),
 				0
-			) as total_items
+			) as total_items,
+			(
+				c.payment_status = 'paid'
+				AND c.platform_user_id <> ''
+				AND NOT EXISTS (
+					SELECT 1
+					FROM carts c2
+					JOIN live_events e2 ON e2.id = c2.event_id
+					WHERE e2.store_id = e.store_id
+					  AND c2.platform_user_id = c.platform_user_id
+					  AND c2.payment_status = 'paid'
+					  AND c2.id <> c.id
+					  AND COALESCE(c2.paid_at, c2.created_at) < COALESCE(c.paid_at, c.created_at)
+				)
+			) as is_first_purchase
 		FROM carts c
 		JOIN live_events e ON e.id = c.event_id
 		WHERE e.store_id = $1
@@ -183,6 +202,7 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 			&row.LivePlatform,
 			&row.TotalAmount,
 			&row.TotalItems,
+			&row.IsFirstPurchase,
 		)
 		if err != nil {
 			return result, fmt.Errorf("scanning order row: %w", err)
@@ -215,6 +235,20 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 				'instagram'
 			) as live_platform,
 			e.store_id,
+			(
+				c.payment_status = 'paid'
+				AND c.platform_user_id <> ''
+				AND NOT EXISTS (
+					SELECT 1
+					FROM carts c2
+					JOIN live_events e2 ON e2.id = c2.event_id
+					WHERE e2.store_id = e.store_id
+					  AND c2.platform_user_id = c.platform_user_id
+					  AND c2.payment_status = 'paid'
+					  AND c2.id <> c.id
+					  AND COALESCE(c2.paid_at, c2.created_at) < COALESCE(c.paid_at, c.created_at)
+				)
+			) as is_first_purchase,
 
 			COALESCE(c.customer_email, ''),
 			COALESCE(c.customer_name, ''),
@@ -270,6 +304,7 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 		&row.LiveTitle,
 		&row.LivePlatform,
 		&row.StoreID,
+		&row.IsFirstPurchase,
 
 		&row.CustomerEmail,
 		&row.CustomerName,

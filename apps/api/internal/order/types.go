@@ -57,6 +57,9 @@ type OrderResponse struct {
 	PaidAt         *time.Time          `json:"paidAt"`
 	CreatedAt      time.Time           `json:"createdAt"`
 	ExpiresAt      *time.Time          `json:"expiresAt"`
+	// True only for the buyer's earliest paid order in this store. Frontend
+	// renders a "Primeira venda" badge from this flag.
+	IsFirstPurchase bool `json:"isFirstPurchase"`
 }
 
 // OrderDetailResponse includes everything the admin order-detail page needs:
@@ -198,20 +201,21 @@ type ListOrdersOutput struct {
 }
 
 type OrderOutput struct {
-	ID             string
-	LiveSessionID  string
-	LiveTitle      string
-	LivePlatform   string
-	CustomerHandle string
-	CustomerID     string
-	Status         string
-	PaymentStatus  string
-	Items          []OrderItemOutput
-	TotalItems     int
-	TotalAmount    int64
-	PaidAt         *time.Time
-	CreatedAt      time.Time
-	ExpiresAt      *time.Time
+	ID              string
+	LiveSessionID   string
+	LiveTitle       string
+	LivePlatform    string
+	CustomerHandle  string
+	CustomerID      string
+	Status          string
+	PaymentStatus   string
+	Items           []OrderItemOutput
+	TotalItems      int
+	TotalAmount     int64
+	PaidAt          *time.Time
+	CreatedAt       time.Time
+	ExpiresAt       *time.Time
+	IsFirstPurchase bool
 }
 
 type OrderItemOutput struct {
@@ -261,20 +265,21 @@ type ListOrdersResult struct {
 }
 
 type OrderRow struct {
-	ID             string
-	EventID        string
-	PlatformUserID string
-	PlatformHandle string
-	Token          string
-	Status         string
-	PaymentStatus  string
-	PaidAt         *time.Time
-	CreatedAt      time.Time
-	ExpiresAt      *time.Time
-	LiveTitle      string
-	LivePlatform   string
-	TotalAmount    int64
-	TotalItems     int
+	ID              string
+	EventID         string
+	PlatformUserID  string
+	PlatformHandle  string
+	Token           string
+	Status          string
+	PaymentStatus   string
+	PaidAt          *time.Time
+	CreatedAt       time.Time
+	ExpiresAt       *time.Time
+	LiveTitle       string
+	LivePlatform    string
+	TotalAmount     int64
+	TotalItems      int
+	IsFirstPurchase bool
 }
 
 type OrderItemRow struct {
@@ -299,19 +304,20 @@ type OrderItemRow struct {
 }
 
 type OrderDetailRow struct {
-	ID             string
-	EventID        string
-	PlatformUserID string
-	PlatformHandle string
-	Token          string
-	Status         string
-	PaymentStatus  string
-	PaidAt         *time.Time
-	CreatedAt      time.Time
-	ExpiresAt      *time.Time
-	LiveTitle      string
-	LivePlatform   string
-	StoreID        string
+	ID              string
+	EventID         string
+	PlatformUserID  string
+	PlatformHandle  string
+	Token           string
+	Status          string
+	PaymentStatus   string
+	PaidAt          *time.Time
+	CreatedAt       time.Time
+	ExpiresAt       *time.Time
+	LiveTitle       string
+	LivePlatform    string
+	StoreID         string
+	IsFirstPurchase bool
 
 	// Customer captured at checkout (all optional — nil-safe reads).
 	CustomerEmail    string

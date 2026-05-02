@@ -218,20 +218,21 @@ func toOrderResponse(o OrderOutput) OrderResponse {
 	}
 
 	return OrderResponse{
-		ID:             o.ID,
-		LiveSessionID:  o.LiveSessionID,
-		LiveTitle:      o.LiveTitle,
-		LivePlatform:   o.LivePlatform,
-		CustomerHandle: o.CustomerHandle,
-		CustomerID:     o.CustomerID,
-		Status:         o.Status,
-		PaymentStatus:  o.PaymentStatus,
-		Items:          items,
-		TotalItems:     o.TotalItems,
-		TotalAmount:    o.TotalAmount,
-		PaidAt:         o.PaidAt,
-		CreatedAt:      o.CreatedAt,
-		ExpiresAt:      o.ExpiresAt,
+		ID:              o.ID,
+		LiveSessionID:   o.LiveSessionID,
+		LiveTitle:       o.LiveTitle,
+		LivePlatform:    o.LivePlatform,
+		CustomerHandle:  o.CustomerHandle,
+		CustomerID:      o.CustomerID,
+		Status:          o.Status,
+		PaymentStatus:   o.PaymentStatus,
+		Items:           items,
+		TotalItems:      o.TotalItems,
+		TotalAmount:     o.TotalAmount,
+		PaidAt:          o.PaidAt,
+		CreatedAt:       o.CreatedAt,
+		ExpiresAt:       o.ExpiresAt,
+		IsFirstPurchase: o.IsFirstPurchase,
 	}
 }
 

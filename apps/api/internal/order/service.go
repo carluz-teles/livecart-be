@@ -39,20 +39,21 @@ func (s *Service) List(ctx context.Context, input ListOrdersInput) (ListOrdersOu
 	orders := make([]OrderOutput, len(result.Orders))
 	for i, row := range result.Orders {
 		orders[i] = OrderOutput{
-			ID:             row.ID,
-			LiveSessionID:  row.EventID, // Now using EventID but keeping response field name for backwards compatibility
-			LiveTitle:      row.LiveTitle,
-			LivePlatform:   row.LivePlatform,
-			CustomerHandle: row.PlatformHandle,
-			CustomerID:     row.PlatformUserID,
-			Status:         row.Status,
-			PaymentStatus:  row.PaymentStatus,
-			TotalItems:     row.TotalItems,
-			TotalAmount:    row.TotalAmount,
-			PaidAt:         row.PaidAt,
-			CreatedAt:      row.CreatedAt,
-			ExpiresAt:      row.ExpiresAt,
-			Items:          []OrderItemOutput{}, // Items loaded separately when needed
+			ID:              row.ID,
+			LiveSessionID:   row.EventID, // Now using EventID but keeping response field name for backwards compatibility
+			LiveTitle:       row.LiveTitle,
+			LivePlatform:    row.LivePlatform,
+			CustomerHandle:  row.PlatformHandle,
+			CustomerID:      row.PlatformUserID,
+			Status:          row.Status,
+			PaymentStatus:   row.PaymentStatus,
+			TotalItems:      row.TotalItems,
+			TotalAmount:     row.TotalAmount,
+			PaidAt:          row.PaidAt,
+			CreatedAt:       row.CreatedAt,
+			ExpiresAt:       row.ExpiresAt,
+			IsFirstPurchase: row.IsFirstPurchase,
+			Items:           []OrderItemOutput{}, // Items loaded separately when needed
 		}
 	}
 
@@ -109,20 +110,21 @@ func (s *Service) GetByID(ctx context.Context, id string, storeID string) (*Orde
 	}
 
 	return &OrderOutput{
-		ID:             row.ID,
-		LiveSessionID:  row.EventID, // Now using EventID but keeping response field name for backwards compatibility
-		LiveTitle:      row.LiveTitle,
-		LivePlatform:   row.LivePlatform,
-		CustomerHandle: row.PlatformHandle,
-		CustomerID:     row.PlatformUserID,
-		Status:         row.Status,
-		PaymentStatus:  row.PaymentStatus,
-		Items:          items,
-		TotalItems:     totalItems,
-		TotalAmount:    totalAmount,
-		PaidAt:         row.PaidAt,
-		CreatedAt:      row.CreatedAt,
-		ExpiresAt:      row.ExpiresAt,
+		ID:              row.ID,
+		LiveSessionID:   row.EventID, // Now using EventID but keeping response field name for backwards compatibility
+		LiveTitle:       row.LiveTitle,
+		LivePlatform:    row.LivePlatform,
+		CustomerHandle:  row.PlatformHandle,
+		CustomerID:      row.PlatformUserID,
+		Status:          row.Status,
+		PaymentStatus:   row.PaymentStatus,
+		Items:           items,
+		TotalItems:      totalItems,
+		TotalAmount:     totalAmount,
+		PaidAt:          row.PaidAt,
+		CreatedAt:       row.CreatedAt,
+		ExpiresAt:       row.ExpiresAt,
+		IsFirstPurchase: row.IsFirstPurchase,
 	}, nil
 }
 
