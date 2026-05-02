@@ -227,24 +227,6 @@ func (q *Queries) ListActiveReservationsByEvent(ctx context.Context, eventID pgt
 	return items, nil
 }
 
-const reverseExhaustedReservation = `-- name: ReverseExhaustedReservation :exec
-UPDATE stock_reservations
-SET status = 'reversed', reversed_at = now()
-WHERE cart_id = $1 AND product_id = $2 AND status = 'active' AND quantity <= 0
-`
-
-type ReverseExhaustedReservationParams struct {
-	CartID    pgtype.UUID `json:"cart_id"`
-	ProductID pgtype.UUID `json:"product_id"`
-}
-
-// Marks an active reservation as reversed when its quantity has been
-// adjusted down to zero (cart item fully removed).
-func (q *Queries) ReverseExhaustedReservation(ctx context.Context, arg ReverseExhaustedReservationParams) error {
-	_, err := q.db.Exec(ctx, reverseExhaustedReservation, arg.CartID, arg.ProductID)
-	return err
-}
-
 const reverseReservationsByCart = `-- name: ReverseReservationsByCart :exec
 UPDATE stock_reservations SET status = 'reversed', reversed_at = now()
 WHERE cart_id = $1 AND status = 'active'

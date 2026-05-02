@@ -1704,23 +1704,6 @@ func (r *Repository) AdjustActiveReservationQuantity(ctx context.Context, cartID
 	}, nil
 }
 
-// ReverseExhaustedReservation flips an active reservation to reversed once
-// its quantity has been adjusted down to zero.
-func (r *Repository) ReverseExhaustedReservation(ctx context.Context, cartID, productID string) error {
-	cID, err := parseUUID(cartID)
-	if err != nil {
-		return fmt.Errorf("parsing cart ID: %w", err)
-	}
-	pID, err := parseUUID(productID)
-	if err != nil {
-		return fmt.Errorf("parsing product ID: %w", err)
-	}
-	return r.queries.ReverseExhaustedReservation(ctx, sqlc.ReverseExhaustedReservationParams{
-		CartID:    cID,
-		ProductID: pID,
-	})
-}
-
 // ConvertReservationsByEvent marks all active reservations for an event as converted.
 func (r *Repository) ConvertReservationsByEvent(ctx context.Context, eventID string) error {
 	eID, err := parseUUID(eventID)

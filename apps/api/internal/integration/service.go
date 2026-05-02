@@ -3321,27 +3321,35 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 		return "", nil
 	}
 
+	// Sum across all active rows (in practice the unique index keeps it to 1).
+	currentQty := 0
+	for _, r := range existing {
+		currentQty += r.Quantity
+	}
+	newQty := currentQty + delta
+
 	obs := fmt.Sprintf("Ajuste reserva LiveCart (%d) - @%s - Cart %s", delta, platformHandle, cartID)
 	movementID, err := erpProvider.ReverseStockReservation(ctx, externalID, -delta, 0, obs)
 	if err != nil {
 		return "", fmt.Errorf("reversing stock delta in ERP: %w", err)
 	}
 
-	if _, err := s.repo.AdjustActiveReservationQuantity(ctx, cartID, productID, delta, movementID); err != nil {
+	// Full reversal: skip the UPDATE — stock_reservations.quantity has a
+	// CHECK (quantity > 0) constraint, so we cannot zero the row in place.
+	// Mark it reversed instead.
+	if newQty <= 0 {
+		if err := s.repo.ReverseReservationsByCartAndProduct(ctx, cartID, productID); err != nil {
+			return movementID, fmt.Errorf("marking reservation reversed: %w", err)
+		}
+	} else if _, err := s.repo.AdjustActiveReservationQuantity(ctx, cartID, productID, delta, movementID); err != nil {
 		return movementID, fmt.Errorf("decreasing reservation quantity: %w", err)
-	}
-	if err := s.repo.ReverseExhaustedReservation(ctx, cartID, productID); err != nil {
-		s.logger.Warn("failed to mark exhausted reservation reversed",
-			zap.String("cart_id", cartID),
-			zap.String("product_id", productID),
-			zap.Error(err),
-		)
 	}
 
 	s.logger.Info("ERP reservation decreased",
 		zap.String("cart_id", cartID),
 		zap.String("product_id", productID),
 		zap.Int("delta", delta),
+		zap.Int("new_qty", newQty),
 		zap.String("erp_movement_id", movementID),
 	)
 	return movementID, nil
