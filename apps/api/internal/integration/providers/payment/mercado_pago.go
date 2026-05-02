@@ -501,9 +501,16 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 		payload["metadata"] = input.Metadata
 	}
 
-	// Add idempotency key header
+	// Add idempotency key header. Includes UnixNano so each attempt by the
+	// shopper produces a fresh key — without it, a once-failed cart stays
+	// stuck on MP's cached `internal_error` for the next ~24h even after
+	// the underlying issue is fixed. Retries inside this same call (e.g.
+	// network blips on m.DoRequest) still reuse the key because we set it
+	// once per ProcessCardPayment invocation.
 	headers := m.authHeaders()
-	headers["X-Idempotency-Key"] = fmt.Sprintf("card-%s-%d", input.CartID, input.TotalAmount)
+	headers["X-Idempotency-Key"] = fmt.Sprintf(
+		"card-%s-%d-%d", input.CartID, input.TotalAmount, time.Now().UnixNano(),
+	)
 	// Device fingerprint (MP_DEVICE_SESSION_ID from the SDK) goes in the
 	// X-meli-session-id header for anti-fraud, not in additional_info.ip_address
 	// — that field is for the customer IP and using it for the fingerprint
