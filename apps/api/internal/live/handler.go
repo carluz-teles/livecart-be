@@ -335,9 +335,10 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, LiveStatsResponse{
-		TotalLives:  output.TotalLives,
-		ActiveLives: output.ActiveLives,
-		TotalOrders: output.TotalOrders,
+		TotalLives:   output.TotalLives,
+		ActiveLives:  output.ActiveLives,
+		TotalOrders:  output.TotalOrders,
+		TotalRevenue: output.TotalRevenue,
 	})
 }
 

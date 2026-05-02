@@ -827,11 +827,22 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (LiveStatsOut
 		return LiveStatsOutput{}, err
 	}
 
+	// total_revenue mirrors dashboard.Repository.GetStats: sum of every
+	// cart item across every cart attached to this store's events, with no
+	// payment-status filter. Keeping the two surfaces in sync so the card on
+	// /events matches "Faturamento Total" on the dashboard.
 	query := `
 		SELECT
 			COUNT(*) as total_lives,
 			COUNT(*) FILTER (WHERE status = 'active') as active_lives,
-			COALESCE(SUM(total_orders), 0) as total_orders
+			COALESCE(SUM(total_orders), 0) as total_orders,
+			COALESCE((
+				SELECT SUM(ci.quantity * ci.unit_price)
+				FROM cart_items ci
+				JOIN carts c ON c.id = ci.cart_id
+				JOIN live_events le ON le.id = c.event_id
+				WHERE le.store_id = $1
+			), 0)::BIGINT as total_revenue
 		FROM live_events
 		WHERE store_id = $1
 	`
@@ -841,6 +852,7 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (LiveStatsOut
 		&stats.TotalLives,
 		&stats.ActiveLives,
 		&stats.TotalOrders,
+		&stats.TotalRevenue,
 	)
 	if err != nil {
 		return LiveStatsOutput{}, fmt.Errorf("getting live stats: %w", err)

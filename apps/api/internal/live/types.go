@@ -393,9 +393,10 @@ type ListLivesResponse struct {
 }
 
 type LiveStatsResponse struct {
-	TotalLives  int `json:"totalLives"`
-	ActiveLives int `json:"activeLives"`
-	TotalOrders int `json:"totalOrders"`
+	TotalLives   int   `json:"totalLives"`
+	ActiveLives  int   `json:"activeLives"`
+	TotalOrders  int   `json:"totalOrders"`
+	TotalRevenue int64 `json:"totalRevenue"`
 }
 
 type EndLiveRequest struct {
@@ -492,9 +493,10 @@ type LiveOutput struct {
 }
 
 type LiveStatsOutput struct {
-	TotalLives  int
-	ActiveLives int
-	TotalOrders int
+	TotalLives   int
+	ActiveLives  int
+	TotalOrders  int
+	TotalRevenue int64
 }
 
 // =============================================================================
