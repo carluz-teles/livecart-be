@@ -22,6 +22,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/", h.List)
 	g.Get("/stats", h.GetStats)
 	g.Get("/:id", h.GetByID)
+	g.Get("/:id/upsell", h.GetUpsell)
 	g.Patch("/:id", h.Update)
 }
 
@@ -136,6 +137,28 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, toOrderResponse(*output))
+}
+
+// GetUpsell godoc
+// @Summary      Get upsell/downsell summary for an order
+// @Description  Returns the initial cart snapshot, the cart-mutation log, and the delta between initial and final subtotals.
+// @Tags         orders
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Order UUID"
+// @Success      200 {object} httpx.Envelope{data=OrderUpsellOutput}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/orders/{id}/upsell [get]
+// @Security     BearerAuth
+func (h *Handler) GetUpsell(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
+
+	output, err := h.service.GetUpsellSummary(c.Context(), id, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, output)
 }
 
 // GetStats godoc

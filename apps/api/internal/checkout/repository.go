@@ -268,6 +268,7 @@ func (r *Repository) toCartItemRow(row sqlc.ListCartItemsForCheckoutRow) CartIte
 		UnitPrice:          row.UnitPrice.Int64,
 		WaitlistedQuantity: int(row.WaitlistedQuantity),
 		Name:               row.ProductName,
+		AvailableStock:     int(row.ProductStock.Int32),
 	}
 
 	if row.ProductImageUrl.Valid {
@@ -278,6 +279,208 @@ func (r *Repository) toCartItemRow(row sqlc.ListCartItemsForCheckoutRow) CartIte
 	}
 
 	return item
+}
+
+// =============================================================================
+// CART ITEM MUTATIONS (buyer edits at checkout)
+// =============================================================================
+
+// GetCartItem fetches a single cart_items row by id (no product join).
+func (r *Repository) GetCartItem(ctx context.Context, itemID string) (*CartItemRow, error) {
+	uid, err := uuid.Parse(itemID)
+	if err != nil {
+		return nil, httpx.ErrBadRequest("invalid item ID")
+	}
+	row, err := r.q.GetCartItem(ctx, pgtype.UUID{Bytes: uid, Valid: true})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.ErrNotFound("item não encontrado")
+		}
+		return nil, fmt.Errorf("getting cart item: %w", err)
+	}
+	return &CartItemRow{
+		ID:                 uuid.UUID(row.ID.Bytes).String(),
+		CartID:             uuid.UUID(row.CartID.Bytes).String(),
+		ProductID:          uuid.UUID(row.ProductID.Bytes).String(),
+		Quantity:           int(row.Quantity.Int32),
+		UnitPrice:          row.UnitPrice.Int64,
+		WaitlistedQuantity: int(row.WaitlistedQuantity),
+	}, nil
+}
+
+// SetCartItemQuantity overwrites the quantity of a cart_items row.
+func (r *Repository) SetCartItemQuantity(ctx context.Context, itemID string, quantity int) error {
+	uid, err := uuid.Parse(itemID)
+	if err != nil {
+		return httpx.ErrBadRequest("invalid item ID")
+	}
+	_, err = r.q.UpdateCartItem(ctx, sqlc.UpdateCartItemParams{
+		ID:       pgtype.UUID{Bytes: uid, Valid: true},
+		Quantity: pgtype.Int4{Int32: int32(quantity), Valid: true},
+	})
+	if err != nil {
+		return fmt.Errorf("updating cart item quantity: %w", err)
+	}
+	return nil
+}
+
+// DeleteCartItem removes a cart_items row.
+func (r *Repository) DeleteCartItem(ctx context.Context, itemID string) error {
+	uid, err := uuid.Parse(itemID)
+	if err != nil {
+		return httpx.ErrBadRequest("invalid item ID")
+	}
+	if err := r.q.DeleteCartItem(ctx, pgtype.UUID{Bytes: uid, Valid: true}); err != nil {
+		return fmt.Errorf("deleting cart item: %w", err)
+	}
+	return nil
+}
+
+// EnsureInitialSnapshot freezes the current cart_items into cart_initial_items
+// the first time it's called for the cart. Subsequent calls are no-ops.
+func (r *Repository) EnsureInitialSnapshot(ctx context.Context, cartID string) error {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return httpx.ErrBadRequest("invalid cart ID")
+	}
+	if err := r.q.EnsureCartInitialSnapshot(ctx, pgtype.UUID{Bytes: uid, Valid: true}); err != nil {
+		return fmt.Errorf("ensuring cart initial snapshot: %w", err)
+	}
+	return nil
+}
+
+// MutationParams describes one buyer-driven cart edit.
+type MutationParams struct {
+	CartID          string
+	ProductID       string
+	MutationType    string // item_added | item_removed | quantity_increased | quantity_decreased
+	QuantityBefore  int
+	QuantityAfter   int
+	UnitPrice       int64
+	Source          string // buyer_checkout (default), live_add, merchant
+	ERPMovementID   string
+}
+
+// RecordMutation persists one row in cart_mutations.
+func (r *Repository) RecordMutation(ctx context.Context, p MutationParams) error {
+	cID, err := uuid.Parse(p.CartID)
+	if err != nil {
+		return httpx.ErrBadRequest("invalid cart ID")
+	}
+	pID, err := uuid.Parse(p.ProductID)
+	if err != nil {
+		return httpx.ErrBadRequest("invalid product ID")
+	}
+	source := p.Source
+	if source == "" {
+		source = "buyer_checkout"
+	}
+	_, err = r.q.CreateCartMutation(ctx, sqlc.CreateCartMutationParams{
+		CartID:         pgtype.UUID{Bytes: cID, Valid: true},
+		ProductID:      pgtype.UUID{Bytes: pID, Valid: true},
+		MutationType:   p.MutationType,
+		QuantityBefore: int32(p.QuantityBefore),
+		QuantityAfter:  int32(p.QuantityAfter),
+		UnitPrice:      p.UnitPrice,
+		Source:         source,
+		ErpMovementID:  pgtype.Text{String: p.ERPMovementID, Valid: p.ERPMovementID != ""},
+	})
+	if err != nil {
+		return fmt.Errorf("recording cart mutation: %w", err)
+	}
+	return nil
+}
+
+// GetEventProductForCart returns the effective price + max quantity + stock
+// for a product in the cart's event. Used to validate quantity bumps.
+type EventProductConfig struct {
+	ProductID      string
+	Name           string
+	UnitPrice      int64
+	MaxQuantity    int
+	Stock          int
+	Active         bool
+	IsAllowed      bool // false when the event has a whitelist and this product is not in it
+}
+
+// GetEventProductForCart resolves event-aware pricing/limits for a product.
+func (r *Repository) GetEventProductForCart(ctx context.Context, eventID, storeID, productID string) (*EventProductConfig, error) {
+	eID, err := uuid.Parse(eventID)
+	if err != nil {
+		return nil, httpx.ErrBadRequest("invalid event ID")
+	}
+	pID, err := uuid.Parse(productID)
+	if err != nil {
+		return nil, httpx.ErrBadRequest("invalid product ID")
+	}
+	sID, err := uuid.Parse(storeID)
+	if err != nil {
+		return nil, httpx.ErrBadRequest("invalid store ID")
+	}
+	cfg, err := r.q.GetEventProductConfig(ctx, sqlc.GetEventProductConfigParams{
+		EventID: pgtype.UUID{Bytes: eID, Valid: true},
+		ID:      pgtype.UUID{Bytes: pID, Valid: true},
+		StoreID: pgtype.UUID{Bytes: sID, Valid: true},
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.ErrNotFound("produto não encontrado")
+		}
+		return nil, fmt.Errorf("getting event product config: %w", err)
+	}
+	maxQty, _ := r.q.GetEffectiveMaxQuantity(ctx, sqlc.GetEffectiveMaxQuantityParams{
+		ID:        pgtype.UUID{Bytes: eID, Valid: true},
+		ProductID: pgtype.UUID{Bytes: pID, Valid: true},
+	})
+	out := &EventProductConfig{
+		ProductID:   uuid.UUID(cfg.ProductID.Bytes).String(),
+		Name:        cfg.ProductName,
+		UnitPrice:   cfg.EffectivePrice,
+		MaxQuantity: int(maxQty),
+		Stock:       int(cfg.ProductStock.Int32),
+		Active:      cfg.ProductActive.Bool,
+		IsAllowed:   cfg.IsAllowed,
+	}
+	return out, nil
+}
+
+// FindCartItemByProduct returns the existing cart item id (and current qty)
+// for (cart, product), or an empty struct if none exists.
+func (r *Repository) FindCartItemByProduct(ctx context.Context, cartID, productID string) (*CartItemRow, error) {
+	items, err := r.ListCartItems(ctx, cartID)
+	if err != nil {
+		return nil, err
+	}
+	for _, it := range items {
+		if it.ProductID == productID {
+			itCopy := it
+			return &itCopy, nil
+		}
+	}
+	return nil, nil
+}
+
+// CreateCartItem inserts a new cart_items row.
+func (r *Repository) CreateCartItem(ctx context.Context, cartID, productID string, quantity int, unitPrice int64) (string, error) {
+	cID, err := uuid.Parse(cartID)
+	if err != nil {
+		return "", httpx.ErrBadRequest("invalid cart ID")
+	}
+	pID, err := uuid.Parse(productID)
+	if err != nil {
+		return "", httpx.ErrBadRequest("invalid product ID")
+	}
+	row, err := r.q.CreateCartItem(ctx, sqlc.CreateCartItemParams{
+		CartID:             pgtype.UUID{Bytes: cID, Valid: true},
+		ProductID:          pgtype.UUID{Bytes: pID, Valid: true},
+		Quantity:           pgtype.Int4{Int32: int32(quantity), Valid: true},
+		UnitPrice:          pgtype.Int8{Int64: unitPrice, Valid: true},
+		WaitlistedQuantity: 0,
+	})
+	if err != nil {
+		return "", fmt.Errorf("creating cart item: %w", err)
+	}
+	return uuid.UUID(row.ID.Bytes).String(), nil
 }
 
 // Deprecated: Use GetStoreCartExpirationMinutes instead.

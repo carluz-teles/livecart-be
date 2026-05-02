@@ -11,6 +11,47 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const adjustActiveReservationQuantity = `-- name: AdjustActiveReservationQuantity :one
+UPDATE stock_reservations
+SET quantity = quantity + $1::int,
+    erp_movement_id = COALESCE(NULLIF($2::text, ''), erp_movement_id)
+WHERE cart_id = $3 AND product_id = $4 AND status = 'active'
+RETURNING id, event_id, cart_id, product_id, external_product_id, quantity, erp_movement_id, status, created_at, reversed_at
+`
+
+type AdjustActiveReservationQuantityParams struct {
+	DeltaQty      int32       `json:"delta_qty"`
+	ErpMovementID string      `json:"erp_movement_id"`
+	CartID        pgtype.UUID `json:"cart_id"`
+	ProductID     pgtype.UUID `json:"product_id"`
+}
+
+// Atomically increase or decrease the active reservation quantity for a
+// (cart, product) pair. delta_qty can be negative. Returns the row whose
+// quantity was adjusted (callers can flip status when it hits zero).
+func (q *Queries) AdjustActiveReservationQuantity(ctx context.Context, arg AdjustActiveReservationQuantityParams) (StockReservation, error) {
+	row := q.db.QueryRow(ctx, adjustActiveReservationQuantity,
+		arg.DeltaQty,
+		arg.ErpMovementID,
+		arg.CartID,
+		arg.ProductID,
+	)
+	var i StockReservation
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.CartID,
+		&i.ProductID,
+		&i.ExternalProductID,
+		&i.Quantity,
+		&i.ErpMovementID,
+		&i.Status,
+		&i.CreatedAt,
+		&i.ReversedAt,
+	)
+	return i, err
+}
+
 const convertReservationsByEvent = `-- name: ConvertReservationsByEvent :exec
 UPDATE stock_reservations SET status = 'converted', reversed_at = now()
 WHERE event_id = $1 AND status = 'active'
@@ -184,6 +225,24 @@ func (q *Queries) ListActiveReservationsByEvent(ctx context.Context, eventID pgt
 		return nil, err
 	}
 	return items, nil
+}
+
+const reverseExhaustedReservation = `-- name: ReverseExhaustedReservation :exec
+UPDATE stock_reservations
+SET status = 'reversed', reversed_at = now()
+WHERE cart_id = $1 AND product_id = $2 AND status = 'active' AND quantity <= 0
+`
+
+type ReverseExhaustedReservationParams struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+}
+
+// Marks an active reservation as reversed when its quantity has been
+// adjusted down to zero (cart item fully removed).
+func (q *Queries) ReverseExhaustedReservation(ctx context.Context, arg ReverseExhaustedReservationParams) error {
+	_, err := q.db.Exec(ctx, reverseExhaustedReservation, arg.CartID, arg.ProductID)
+	return err
 }
 
 const reverseReservationsByCart = `-- name: ReverseReservationsByCart :exec

@@ -258,7 +258,7 @@ const updateOrderPaymentStatus = `-- name: UpdateOrderPaymentStatus :one
 UPDATE carts
 SET payment_status = $2, paid_at = CASE WHEN $2 = 'paid' THEN now() ELSE paid_at END
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents
 `
 
 type UpdateOrderPaymentStatusParams struct {
@@ -296,6 +296,22 @@ func (q *Queries) UpdateOrderPaymentStatus(ctx context.Context, arg UpdateOrderP
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }
@@ -304,7 +320,7 @@ const updateOrderStatus = `-- name: UpdateOrderStatus :one
 UPDATE carts
 SET status = $2
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents
 `
 
 type UpdateOrderStatusParams struct {
@@ -342,6 +358,22 @@ func (q *Queries) UpdateOrderStatus(ctx context.Context, arg UpdateOrderStatusPa
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }

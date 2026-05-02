@@ -1170,6 +1170,48 @@ func (r *Repository) GetEventStats(ctx context.Context, eventID string) (EventSt
 	}, nil
 }
 
+// ListActiveCheckoutsByEvent returns carts the buyer is currently editing/paying.
+// Powers the merchant's live "active checkouts" panel.
+func (r *Repository) ListActiveCheckoutsByEvent(ctx context.Context, eventID string) ([]ActiveCheckoutRow, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.q.ListActiveCheckoutsByEvent(ctx, uid)
+	if err != nil {
+		return nil, fmt.Errorf("listing active checkouts: %w", err)
+	}
+	out := make([]ActiveCheckoutRow, len(rows))
+	for i, row := range rows {
+		var paymentStatus string
+		if row.PaymentStatus.Valid {
+			paymentStatus = row.PaymentStatus.String
+		}
+		var expiresAt *time.Time
+		if row.ExpiresAt.Valid {
+			expiresAt = &row.ExpiresAt.Time
+		}
+		var lastMutAt *time.Time
+		if row.LastMutationAt.Valid {
+			lastMutAt = &row.LastMutationAt.Time
+		}
+		out[i] = ActiveCheckoutRow{
+			ID:                   row.ID.String(),
+			PlatformHandle:       row.PlatformHandle,
+			Token:                row.Token,
+			Status:               row.Status,
+			PaymentStatus:        paymentStatus,
+			CreatedAt:            row.CreatedAt.Time,
+			ExpiresAt:            expiresAt,
+			InitialSubtotalCents: row.InitialSubtotalCents,
+			CurrentSubtotalCents: row.CurrentSubtotalCents,
+			MutationCount:        int(row.MutationCount),
+			LastMutationAt:       lastMutAt,
+		}
+	}
+	return out, nil
+}
+
 func (r *Repository) ListCartsWithTotalByEvent(ctx context.Context, eventID string) ([]CartWithTotalRow, error) {
 	uid, err := parseUUID(eventID)
 	if err != nil {

@@ -58,7 +58,23 @@ type Cart struct {
 	// Snapshot of the options array from the most recent QuoteShipping response — exact shape the public API returned to the customer.
 	LastShippingQuoteOptions json.RawMessage `json:"last_shipping_quote_options"`
 	// When the snapshot above was generated. Selections older than the cache TTL should force a re-quote on the client.
-	LastShippingQuoteAt pgtype.Timestamptz `json:"last_shipping_quote_at"`
+	LastShippingQuoteAt   pgtype.Timestamptz `json:"last_shipping_quote_at"`
+	CardBrand             pgtype.Text        `json:"card_brand"`
+	CardLastFour          pgtype.Text        `json:"card_last_four"`
+	CardInstallments      pgtype.Int4        `json:"card_installments"`
+	CardAuthorizationCode pgtype.Text        `json:"card_authorization_code"`
+	// When the initial cart snapshot was frozen (NULL = no checkout view yet).
+	InitialSnapshotTakenAt pgtype.Timestamptz `json:"initial_snapshot_taken_at"`
+	// Cached subtotal of cart_initial_items in cents.
+	InitialSubtotalCents pgtype.Int8 `json:"initial_subtotal_cents"`
+}
+
+// Immutable per-cart baseline of items present when the buyer first opened checkout.
+type CartInitialItem struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	Quantity  int32       `json:"quantity"`
+	UnitPrice int64       `json:"unit_price"`
 }
 
 type CartItem struct {
@@ -68,6 +84,20 @@ type CartItem struct {
 	Quantity           pgtype.Int4 `json:"quantity"`
 	UnitPrice          pgtype.Int8 `json:"unit_price"`
 	WaitlistedQuantity int32       `json:"waitlisted_quantity"`
+}
+
+// Append-only log of cart item mutations during checkout (buyer or merchant driven).
+type CartMutation struct {
+	ID             pgtype.UUID        `json:"id"`
+	CartID         pgtype.UUID        `json:"cart_id"`
+	ProductID      pgtype.UUID        `json:"product_id"`
+	MutationType   string             `json:"mutation_type"`
+	QuantityBefore int32              `json:"quantity_before"`
+	QuantityAfter  int32              `json:"quantity_after"`
+	UnitPrice      int64              `json:"unit_price"`
+	Source         string             `json:"source"`
+	ErpMovementID  pgtype.Text        `json:"erp_movement_id"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 }
 
 type Customer struct {

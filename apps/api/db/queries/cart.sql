@@ -275,6 +275,8 @@ SELECT
     c.paid_at,
     c.created_at,
     c.expires_at,
+    c.initial_snapshot_taken_at,
+    c.initial_subtotal_cents,
     le.title AS event_title,
     le.store_id,
     s.name AS store_name,
@@ -287,7 +289,9 @@ JOIN stores s ON s.id = le.store_id
 WHERE c.token = $1;
 
 -- name: ListCartItemsForCheckout :many
--- Returns cart items with product details for checkout page
+-- Returns cart items with product details for checkout page.
+-- product_stock is exposed so the public checkout can disable the "+" button
+-- when the buyer is about to exceed the available stock for the SKU.
 SELECT
     ci.id,
     ci.cart_id,
@@ -297,7 +301,8 @@ SELECT
     ci.waitlisted_quantity,
     p.name AS product_name,
     p.image_url AS product_image_url,
-    p.keyword AS product_keyword
+    p.keyword AS product_keyword,
+    p.stock AS product_stock
 FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1

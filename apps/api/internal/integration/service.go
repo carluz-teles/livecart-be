@@ -3239,6 +3239,114 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 	return nil
 }
 
+// AdjustStockReservationDelta applies a quantity delta (positive or negative)
+// to the active ERP stock reservation for a (cart, product). It is the
+// counterpart of ReserveStockInERP for buyer-driven cart edits at checkout
+// time: each +1/-1 the buyer makes calls this once, which talks to the ERP
+// and updates stock_reservations to keep its `quantity` column in sync.
+//
+// Returns the ERP movement_id of the new ERP movement (empty when no ERP
+// integration is configured or the product is not linked, both treated as
+// no-ops). Errors from the ERP propagate so the checkout service can fail the
+// mutation and roll back.
+func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cartID, eventID, productID string, delta int, unitPrice int64, platformHandle string) (string, error) {
+	if delta == 0 {
+		return "", nil
+	}
+
+	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	if err != nil {
+		s.logger.Debug("no active ERP integration, skipping reservation delta",
+			zap.String("store_id", storeID),
+		)
+		return "", nil
+	}
+
+	erpProvider, err := s.getERPProvider(ctx, integration)
+	if err != nil {
+		return "", fmt.Errorf("creating ERP provider: %w", err)
+	}
+
+	if s.productSyncer == nil {
+		return "", nil
+	}
+	externalID, _, err := s.productSyncer.GetProduct(ctx, storeID, productID)
+	if err != nil || externalID == "" {
+		s.logger.Debug("product not linked to ERP, skipping reservation delta",
+			zap.String("product_id", productID),
+		)
+		return "", nil
+	}
+
+	existing, _ := s.repo.ListActiveReservationsByCartAndProduct(ctx, cartID, productID)
+
+	if delta > 0 {
+		obs := fmt.Sprintf("Ajuste reserva LiveCart (+%d) - @%s - Cart %s", delta, platformHandle, cartID)
+		movementID, err := erpProvider.ReserveStock(ctx, externalID, delta, float64(unitPrice)/100, obs)
+		if err != nil {
+			return "", fmt.Errorf("reserving stock delta in ERP: %w", err)
+		}
+
+		if len(existing) == 0 {
+			if _, err := s.repo.CreateStockReservation(ctx, CreateStockReservationParams{
+				EventID:           eventID,
+				CartID:            cartID,
+				ProductID:         productID,
+				ExternalProductID: externalID,
+				Quantity:          delta,
+				ERPMovementID:     movementID,
+			}); err != nil {
+				return movementID, fmt.Errorf("recording new reservation: %w", err)
+			}
+		} else if _, err := s.repo.AdjustActiveReservationQuantity(ctx, cartID, productID, delta, movementID); err != nil {
+			return movementID, fmt.Errorf("bumping reservation quantity: %w", err)
+		}
+
+		s.logger.Info("ERP reservation increased",
+			zap.String("cart_id", cartID),
+			zap.String("product_id", productID),
+			zap.Int("delta", delta),
+			zap.String("erp_movement_id", movementID),
+		)
+		return movementID, nil
+	}
+
+	// delta < 0
+	if len(existing) == 0 {
+		s.logger.Warn("no active reservation to decrease for cart+product, skipping ERP call",
+			zap.String("cart_id", cartID),
+			zap.String("product_id", productID),
+			zap.Int("delta", delta),
+		)
+		return "", nil
+	}
+
+	obs := fmt.Sprintf("Ajuste reserva LiveCart (%d) - @%s - Cart %s", delta, platformHandle, cartID)
+	movementID, err := erpProvider.ReverseStockReservation(ctx, externalID, -delta, 0, obs)
+	if err != nil {
+		return "", fmt.Errorf("reversing stock delta in ERP: %w", err)
+	}
+
+	if _, err := s.repo.AdjustActiveReservationQuantity(ctx, cartID, productID, delta, movementID); err != nil {
+		return movementID, fmt.Errorf("decreasing reservation quantity: %w", err)
+	}
+	if err := s.repo.ReverseExhaustedReservation(ctx, cartID, productID); err != nil {
+		s.logger.Warn("failed to mark exhausted reservation reversed",
+			zap.String("cart_id", cartID),
+			zap.String("product_id", productID),
+			zap.Error(err),
+		)
+	}
+
+	s.logger.Info("ERP reservation decreased",
+		zap.String("cart_id", cartID),
+		zap.String("product_id", productID),
+		zap.Int("delta", delta),
+		zap.String("erp_movement_id", movementID),
+	)
+	return movementID, nil
+}
+
 // =============================================================================
 // EVENT END → ERP FINALIZATION
 // =============================================================================

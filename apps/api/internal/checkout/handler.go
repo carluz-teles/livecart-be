@@ -43,6 +43,13 @@ func (h *Handler) RegisterRoutes(app *fiber.App) {
 	checkout.Post("/:token/card", h.ProcessCardPayment)
 	checkout.Post("/:token/pix", h.GeneratePix)
 	checkout.Get("/:token/status", h.GetPaymentStatus)
+
+	// Buyer cart-edit routes (PATCH/DELETE/POST items). Protected the same way
+	// as the rest of the public checkout: by knowledge of the cart token and by
+	// the cart's allow_edit + payment_status state — see Service.loadEditableCart.
+	checkout.Post("/:token/items", h.AddCartItem)
+	checkout.Patch("/:token/items/:itemId", h.UpdateCartItemQuantity)
+	checkout.Delete("/:token/items/:itemId", h.RemoveCartItem)
 }
 
 // QuoteShipping handles POST /api/public/checkout/:token/shipping-quote
@@ -292,6 +299,81 @@ func (h *Handler) GetPaymentStatus(c *fiber.Ctx) error {
 }
 
 // =============================================================================
+// CART ITEM MUTATIONS
+// =============================================================================
+
+// UpdateCartItemQuantity handles PATCH /api/public/checkout/:token/items/:itemId
+func (h *Handler) UpdateCartItemQuantity(c *fiber.Ctx) error {
+	token := c.Params("token")
+	itemID := c.Params("itemId")
+	if token == "" || itemID == "" {
+		return httpx.BadRequest(c, "token and itemId are required")
+	}
+
+	var req UpdateCartItemQuantityRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	output, err := h.service.UpdateCartItemQuantity(c.Context(), MutateCartItemInput{
+		Token:    token,
+		ItemID:   itemID,
+		Quantity: req.Quantity,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, h.toCartResponse(output))
+}
+
+// RemoveCartItem handles DELETE /api/public/checkout/:token/items/:itemId
+func (h *Handler) RemoveCartItem(c *fiber.Ctx) error {
+	token := c.Params("token")
+	itemID := c.Params("itemId")
+	if token == "" || itemID == "" {
+		return httpx.BadRequest(c, "token and itemId are required")
+	}
+
+	output, err := h.service.RemoveCartItem(c.Context(), MutateCartItemInput{
+		Token:  token,
+		ItemID: itemID,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, h.toCartResponse(output))
+}
+
+// AddCartItem handles POST /api/public/checkout/:token/items
+func (h *Handler) AddCartItem(c *fiber.Ctx) error {
+	token := c.Params("token")
+	if token == "" {
+		return httpx.BadRequest(c, "token is required")
+	}
+
+	var req AddCartItemRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	output, err := h.service.AddCartItem(c.Context(), MutateCartItemInput{
+		Token:     token,
+		ProductID: req.ProductID,
+		Quantity:  req.Quantity,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, h.toCartResponse(output))
+}
+
+// =============================================================================
 // RESPONSE BUILDERS
 // =============================================================================
 
@@ -314,6 +396,7 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 			UnitPrice:          item.UnitPrice,
 			TotalPrice:         item.UnitPrice * int64(item.Quantity),
 			WaitlistedQuantity: item.WaitlistedQuantity,
+			AvailableStock:     item.AvailableStock,
 		}
 
 		// Only count available (non-waitlisted) items in totals

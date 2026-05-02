@@ -24,6 +24,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/top-buyers", h.GetTopBuyers)
 	g.Get("/product-sales", h.GetProductSales)
 	g.Get("/revenue-by-payment", h.GetRevenueByPaymentMethod)
+	g.Get("/checkout-upsell", h.GetCheckoutUpsell)
 
 	// Analytics endpoints
 	analytics := g.Group("/analytics")
@@ -344,4 +345,50 @@ func (h *Handler) GetRevenueByPaymentMethod(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, RevenueByPaymentResponse{Data: items})
+}
+
+// GetCheckoutUpsell godoc
+// @Summary      Aggregated upsell/downsell metric for paid carts
+// @Description  Returns net change between the initial cart snapshot and the final paid cart, optionally scoped to one event.
+// @Tags         dashboard
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        eventId query string false "Live event UUID (optional)"
+// @Success      200 {object} httpx.Envelope{data=CheckoutUpsellResponse}
+// @Router       /api/v1/stores/{storeId}/dashboard/checkout-upsell [get]
+// @Security     BearerAuth
+func (h *Handler) GetCheckoutUpsell(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Query("eventId")
+	topN := c.QueryInt("topN", 5)
+
+	output, err := h.service.GetCheckoutUpsell(c.Context(), storeID, eventID, topN)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	resp := CheckoutUpsellResponse{
+		CartsWithMutations: output.CartsWithMutations,
+		TotalPaidCarts:     output.TotalPaidCarts,
+		UpsellCents:        output.UpsellCents,
+		DownsellCents:      output.DownsellCents,
+		NetCents:           output.UpsellCents - output.DownsellCents,
+		TopAdded:           toCheckoutUpsellProducts(output.TopAdded),
+		TopRemoved:         toCheckoutUpsellProducts(output.TopRemoved),
+	}
+	return httpx.OK(c, resp)
+}
+
+func toCheckoutUpsellProducts(rows []CheckoutMutationRow) []CheckoutUpsellProduct {
+	out := make([]CheckoutUpsellProduct, len(rows))
+	for i, r := range rows {
+		out[i] = CheckoutUpsellProduct{
+			ProductID:    r.ProductID,
+			ProductName:  r.ProductName,
+			ImageURL:     r.ImageURL,
+			Units:        r.Units,
+			RevenueCents: r.RevenueCents,
+		}
+	}
+	return out
 }

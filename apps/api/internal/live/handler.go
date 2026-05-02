@@ -33,6 +33,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// Event details endpoints
 	g.Get("/:id/event-stats", h.GetEventStats)
 	g.Get("/:id/carts", h.ListCarts)
+	g.Get("/:id/active-checkouts", h.ListActiveCheckouts)
 	g.Get("/:id/products", h.ListProducts)
 
 	// Session management within an event
@@ -736,6 +737,45 @@ func (h *Handler) ListCarts(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, ListCartsResponse{Data: responses})
+}
+
+// ListActiveCheckouts godoc
+// @Summary      List carts currently in checkout phase
+// @Description  Returns carts the buyer is editing/paying for right now, with real-time mutation deltas.
+// @Tags         lives
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live event UUID"
+// @Success      200 {object} httpx.Envelope{data=ListActiveCheckoutsResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/active-checkouts [get]
+// @Security     BearerAuth
+func (h *Handler) ListActiveCheckouts(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	rows, err := h.service.ListActiveCheckouts(c.Context(), eventID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	out := make([]ActiveCheckoutResponse, len(rows))
+	for i, r := range rows {
+		out[i] = ActiveCheckoutResponse{
+			ID:                   r.ID,
+			PlatformHandle:       r.PlatformHandle,
+			Token:                r.Token,
+			Status:               r.Status,
+			PaymentStatus:        r.PaymentStatus,
+			CreatedAt:            r.CreatedAt,
+			ExpiresAt:            r.ExpiresAt,
+			InitialSubtotalCents: r.InitialSubtotalCents,
+			CurrentSubtotalCents: r.CurrentSubtotalCents,
+			DeltaCents:           r.CurrentSubtotalCents - r.InitialSubtotalCents,
+			MutationCount:        r.MutationCount,
+			LastMutationAt:       r.LastMutationAt,
+		}
+	}
+	return httpx.OK(c, ListActiveCheckoutsResponse{Data: out})
 }
 
 // ListProducts godoc

@@ -271,6 +271,33 @@ func (s *Service) Update(ctx context.Context, input UpdateOrderInput) (*OrderOut
 	return s.GetByID(ctx, input.ID, input.StoreID)
 }
 
+// GetUpsellSummary returns the upsell card payload for one order, scoped to
+// the given store. Returns an empty (HasSnapshot=false) struct when the cart
+// has no snapshot — the frontend treats that as "no changes during checkout".
+func (s *Service) GetUpsellSummary(ctx context.Context, id, storeID string) (*OrderUpsellOutput, error) {
+	row, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if row == nil || row.StoreID != storeID {
+		return nil, httpx.ErrNotFound(fmt.Sprintf("order %s not found", id))
+	}
+	out, err := s.repo.GetUpsellSummary(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if out == nil {
+		return &OrderUpsellOutput{HasSnapshot: false, InitialItems: []OrderUpsellItem{}, Mutations: []OrderUpsellMutation{}}, nil
+	}
+	if out.InitialItems == nil {
+		out.InitialItems = []OrderUpsellItem{}
+	}
+	if out.Mutations == nil {
+		out.Mutations = []OrderUpsellMutation{}
+	}
+	return out, nil
+}
+
 func (s *Service) GetStats(ctx context.Context, storeID string) (*OrderStatsOutput, error) {
 	stats, err := s.repo.GetStats(ctx, storeID)
 	if err != nil {

@@ -601,3 +601,161 @@ func (r *Repository) ListShipmentEvents(ctx context.Context, shipmentID string) 
 	}
 	return out, rows.Err()
 }
+
+// =============================================================================
+// UPSELL / DOWNSELL — initial cart vs final paid cart
+// =============================================================================
+
+// GetUpsellSummary builds the per-order upsell card payload: initial subtotal
+// (snapshot taken on first checkout view), final subtotal, the immutable
+// initial item list, and the mutation log. Returns nil when the order has no
+// snapshot at all (cart predates the feature) so the handler can render a
+// neutral "no changes" state.
+func (r *Repository) GetUpsellSummary(ctx context.Context, orderID string) (*OrderUpsellOutput, error) {
+	uid, err := uuid.Parse(orderID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid order id: %w", err)
+	}
+	cartUUID := pgtype.UUID{Bytes: uid, Valid: true}
+
+	headerQ := `
+		SELECT
+			COALESCE(c.initial_subtotal_cents, 0)::bigint                                AS initial_subtotal_cents,
+			c.initial_snapshot_taken_at,
+			COALESCE((
+				SELECT SUM((ci.quantity - ci.waitlisted_quantity) * ci.unit_price)
+				FROM cart_items ci
+				WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity
+			), 0)::bigint                                                                AS final_subtotal_cents,
+			COALESCE((
+				SELECT COUNT(*) FROM cart_mutations m WHERE m.cart_id = c.id AND m.source = 'buyer_checkout'
+			), 0)::int                                                                   AS mutation_count
+		FROM carts c
+		WHERE c.id = $1
+	`
+	var (
+		initialCents pgtype.Int8
+		snapAt       pgtype.Timestamptz
+		finalCents   pgtype.Int8
+		mutCount     int
+	)
+	if err := r.db.QueryRow(ctx, headerQ, cartUUID).Scan(&initialCents, &snapAt, &finalCents, &mutCount); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("loading upsell header: %w", err)
+	}
+
+	out := &OrderUpsellOutput{
+		InitialSubtotalCents:   initialCents.Int64,
+		FinalSubtotalCents:     finalCents.Int64,
+		DeltaCents:             finalCents.Int64 - initialCents.Int64,
+		MutationCount:          mutCount,
+		HasSnapshot:            snapAt.Valid,
+	}
+	if snapAt.Valid {
+		t := snapAt.Time
+		out.SnapshotTakenAt = &t
+	}
+
+	// Initial items list (immutable baseline).
+	itemsQ := `
+		SELECT cii.product_id, cii.quantity, cii.unit_price,
+		       p.name, p.image_url, p.keyword
+		FROM cart_initial_items cii
+		JOIN products p ON p.id = cii.product_id
+		WHERE cii.cart_id = $1
+		ORDER BY p.name
+	`
+	rows, err := r.db.Query(ctx, itemsQ, cartUUID)
+	if err != nil {
+		return nil, fmt.Errorf("listing initial items: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			pid     pgtype.UUID
+			qty     int
+			unitP   int64
+			name    string
+			imgURL  pgtype.Text
+			keyword string
+		)
+		if err := rows.Scan(&pid, &qty, &unitP, &name, &imgURL, &keyword); err != nil {
+			return nil, fmt.Errorf("scanning initial item: %w", err)
+		}
+		item := OrderUpsellItem{
+			ProductID: uuid.UUID(pid.Bytes).String(),
+			Name:      name,
+			Keyword:   keyword,
+			Quantity:  qty,
+			UnitPrice: unitP,
+		}
+		if imgURL.Valid {
+			s := imgURL.String
+			item.ImageURL = &s
+		}
+		out.InitialItems = append(out.InitialItems, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating initial items: %w", err)
+	}
+
+	// Mutation log (timeline) ordered chronologically.
+	mutQ := `
+		SELECT cm.id, cm.product_id, cm.mutation_type,
+		       cm.quantity_before, cm.quantity_after,
+		       cm.unit_price, cm.source, cm.created_at,
+		       p.name, p.image_url, p.keyword
+		FROM cart_mutations cm
+		JOIN products p ON p.id = cm.product_id
+		WHERE cm.cart_id = $1
+		ORDER BY cm.created_at ASC
+	`
+	mrows, err := r.db.Query(ctx, mutQ, cartUUID)
+	if err != nil {
+		return nil, fmt.Errorf("listing mutations: %w", err)
+	}
+	defer mrows.Close()
+	for mrows.Next() {
+		var (
+			id        pgtype.UUID
+			pid       pgtype.UUID
+			mtype     string
+			qBefore   int
+			qAfter    int
+			unitP     int64
+			source    string
+			createdAt pgtype.Timestamptz
+			name      string
+			imgURL    pgtype.Text
+			keyword   string
+		)
+		if err := mrows.Scan(&id, &pid, &mtype, &qBefore, &qAfter, &unitP, &source, &createdAt, &name, &imgURL, &keyword); err != nil {
+			return nil, fmt.Errorf("scanning mutation: %w", err)
+		}
+		m := OrderUpsellMutation{
+			ID:             uuid.UUID(id.Bytes).String(),
+			ProductID:      uuid.UUID(pid.Bytes).String(),
+			ProductName:    name,
+			Keyword:        keyword,
+			MutationType:   mtype,
+			QuantityBefore: qBefore,
+			QuantityAfter:  qAfter,
+			UnitPrice:      unitP,
+			Source:         source,
+			CreatedAt:      createdAt.Time,
+		}
+		if imgURL.Valid {
+			s := imgURL.String
+			m.ImageURL = &s
+		}
+		out.Mutations = append(out.Mutations, m)
+	}
+	if err := mrows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating mutations: %w", err)
+	}
+
+	return out, nil
+}
+

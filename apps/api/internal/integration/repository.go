@@ -1669,6 +1669,58 @@ func (r *Repository) ReverseReservationsByCartAndProduct(ctx context.Context, ca
 	})
 }
 
+// AdjustActiveReservationQuantity bumps the quantity (positive or negative)
+// on the active reservation row for a (cart, product). erpMovementID is the
+// ID of the new ERP movement that produced the delta — empty leaves the
+// existing one in place.
+func (r *Repository) AdjustActiveReservationQuantity(ctx context.Context, cartID, productID string, delta int, erpMovementID string) (*StockReservationRow, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return nil, fmt.Errorf("parsing cart ID: %w", err)
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return nil, fmt.Errorf("parsing product ID: %w", err)
+	}
+	row, err := r.queries.AdjustActiveReservationQuantity(ctx, sqlc.AdjustActiveReservationQuantityParams{
+		CartID:        cID,
+		ProductID:     pID,
+		DeltaQty:      int32(delta),
+		ErpMovementID: erpMovementID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &StockReservationRow{
+		ID:                uuidToString(row.ID),
+		EventID:           uuidToString(row.EventID),
+		CartID:            uuidToString(row.CartID),
+		ProductID:         uuidToString(row.ProductID),
+		ExternalProductID: row.ExternalProductID,
+		Quantity:          int(row.Quantity),
+		ERPMovementID:     row.ErpMovementID.String,
+		Status:            row.Status,
+		CreatedAt:         row.CreatedAt.Time,
+	}, nil
+}
+
+// ReverseExhaustedReservation flips an active reservation to reversed once
+// its quantity has been adjusted down to zero.
+func (r *Repository) ReverseExhaustedReservation(ctx context.Context, cartID, productID string) error {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return fmt.Errorf("parsing cart ID: %w", err)
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return fmt.Errorf("parsing product ID: %w", err)
+	}
+	return r.queries.ReverseExhaustedReservation(ctx, sqlc.ReverseExhaustedReservationParams{
+		CartID:    cID,
+		ProductID: pID,
+	})
+}
+
 // ConvertReservationsByEvent marks all active reservations for an event as converted.
 func (r *Repository) ConvertReservationsByEvent(ctx context.Context, eventID string) error {
 	eID, err := parseUUID(eventID)

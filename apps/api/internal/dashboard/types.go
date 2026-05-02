@@ -243,3 +243,51 @@ type RevenueByPaymentRow struct {
 	Revenue       int64
 	Count         int
 }
+
+// =============================================================================
+// CHECKOUT UPSELL — aggregated dashboard metric
+// =============================================================================
+
+// CheckoutUpsellResponse is the wire-level payload for the metric. Cents
+// fields stay as int64 — UI formats them locally.
+type CheckoutUpsellResponse struct {
+	CartsWithMutations int                      `json:"cartsWithMutations"`
+	TotalPaidCarts     int                      `json:"totalPaidCarts"`
+	UpsellCents        int64                    `json:"upsellCents"`
+	DownsellCents      int64                    `json:"downsellCents"`
+	NetCents           int64                    `json:"netCents"`
+	TopAdded           []CheckoutUpsellProduct  `json:"topAdded"`
+	TopRemoved         []CheckoutUpsellProduct  `json:"topRemoved"`
+}
+
+type CheckoutUpsellProduct struct {
+	ProductID    string  `json:"productId"`
+	ProductName  string  `json:"productName"`
+	ImageURL     *string `json:"imageUrl,omitempty"`
+	Units        int     `json:"units"`
+	RevenueCents int64   `json:"revenueCents"`
+}
+
+type CheckoutUpsellOutput struct {
+	CartsWithMutations int
+	TotalPaidCarts     int
+	UpsellCents        int64
+	DownsellCents      int64
+	TopAdded           []CheckoutMutationRow
+	TopRemoved         []CheckoutMutationRow
+}
+
+type CheckoutUpsellRow struct {
+	CartsWithMutations int
+	TotalPaidCarts     int
+	UpsellCents        int64
+	DownsellCents      int64
+}
+
+type CheckoutMutationRow struct {
+	ProductID    string
+	ProductName  string
+	ImageURL     *string
+	Units        int
+	RevenueCents int64
+}

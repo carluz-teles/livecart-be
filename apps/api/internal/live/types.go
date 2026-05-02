@@ -683,6 +683,45 @@ type EventProductRow struct {
 }
 
 // =============================================================================
+// ACTIVE CHECKOUTS — live merchant view of carts in checkout phase
+// =============================================================================
+
+type ActiveCheckoutRow struct {
+	ID                   string
+	PlatformHandle       string
+	Token                string
+	Status               string
+	PaymentStatus        string
+	CreatedAt            time.Time
+	ExpiresAt            *time.Time
+	InitialSubtotalCents int64
+	CurrentSubtotalCents int64
+	MutationCount        int
+	LastMutationAt       *time.Time
+}
+
+type ActiveCheckoutOutput = ActiveCheckoutRow
+
+type ActiveCheckoutResponse struct {
+	ID                   string     `json:"id"`
+	PlatformHandle       string     `json:"platformHandle"`
+	Token                string     `json:"token"`
+	Status               string     `json:"status"`
+	PaymentStatus        string     `json:"paymentStatus,omitempty"`
+	CreatedAt            time.Time  `json:"createdAt"`
+	ExpiresAt            *time.Time `json:"expiresAt,omitempty"`
+	InitialSubtotalCents int64      `json:"initialSubtotalCents"`
+	CurrentSubtotalCents int64      `json:"currentSubtotalCents"`
+	DeltaCents           int64      `json:"deltaCents"`
+	MutationCount        int        `json:"mutationCount"`
+	LastMutationAt       *time.Time `json:"lastMutationAt,omitempty"`
+}
+
+type ListActiveCheckoutsResponse struct {
+	Data []ActiveCheckoutResponse `json:"data"`
+}
+
+// =============================================================================
 // LIVE MODE - Active Product and Processing Control
 // =============================================================================
 

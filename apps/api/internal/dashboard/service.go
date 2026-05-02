@@ -131,3 +131,36 @@ func (s *Service) GetRevenueByPaymentMethod(ctx context.Context, storeID string)
 
 	return &RevenueByPaymentOutput{Items: rows}, nil
 }
+
+// =============================================================================
+// CHECKOUT UPSELL / DOWNSELL
+// =============================================================================
+
+// GetCheckoutUpsell returns the merchant-facing aggregated upsell/downsell
+// metric for paid carts in a store. eventID is optional — empty narrows to
+// all events.
+func (s *Service) GetCheckoutUpsell(ctx context.Context, storeID, eventID string, topN int) (*CheckoutUpsellOutput, error) {
+	header, err := s.repo.GetCheckoutUpsell(ctx, storeID, eventID)
+	if err != nil {
+		return nil, err
+	}
+	if topN <= 0 {
+		topN = 5
+	}
+	added, err := s.repo.ListTopCheckoutMutations(ctx, storeID, eventID, "added", topN)
+	if err != nil {
+		return nil, err
+	}
+	removed, err := s.repo.ListTopCheckoutMutations(ctx, storeID, eventID, "removed", topN)
+	if err != nil {
+		return nil, err
+	}
+	return &CheckoutUpsellOutput{
+		CartsWithMutations: header.CartsWithMutations,
+		TotalPaidCarts:     header.TotalPaidCarts,
+		UpsellCents:        header.UpsellCents,
+		DownsellCents:      header.DownsellCents,
+		TopAdded:           added,
+		TopRemoved:         removed,
+	}, nil
+}

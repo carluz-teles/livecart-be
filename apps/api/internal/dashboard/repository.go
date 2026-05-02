@@ -458,3 +458,114 @@ func (r *Repository) GetRevenueByPaymentMethod(ctx context.Context, storeID stri
 
 	return items, nil
 }
+
+// =============================================================================
+// CHECKOUT UPSELL / DOWNSELL — aggregated metrics for the merchant dashboard
+// =============================================================================
+
+// GetCheckoutUpsell aggregates upsell/downsell numbers for paid carts. eventID
+// is optional — empty means all paid carts in the store.
+func (r *Repository) GetCheckoutUpsell(ctx context.Context, storeID, eventID string) (*CheckoutUpsellRow, error) {
+	q := `
+		WITH per_cart AS (
+			SELECT
+				c.id AS cart_id,
+				COALESCE(c.initial_subtotal_cents, 0) AS initial_cents,
+				COALESCE((
+					SELECT SUM((ci.quantity - ci.waitlisted_quantity) * ci.unit_price)
+					FROM cart_items ci
+					WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity
+				), 0)::bigint AS final_cents,
+				EXISTS (
+					SELECT 1 FROM cart_mutations m
+					WHERE m.cart_id = c.id AND m.source = 'buyer_checkout'
+				) AS has_mut
+			FROM carts c
+			JOIN live_events le ON le.id = c.event_id
+			WHERE le.store_id = $1
+			  AND c.payment_status = 'paid'
+			  AND ($2::uuid IS NULL OR c.event_id = $2::uuid)
+		)
+		SELECT
+			COUNT(*) FILTER (WHERE has_mut)::int                                         AS carts_with_mutations,
+			COALESCE(SUM(GREATEST(final_cents - initial_cents, 0)), 0)::bigint           AS upsell_cents,
+			COALESCE(SUM(GREATEST(initial_cents - final_cents, 0)), 0)::bigint           AS downsell_cents,
+			COUNT(*)::int                                                                AS total_paid_carts
+		FROM per_cart
+	`
+	var (
+		row      CheckoutUpsellRow
+		eventArg interface{}
+	)
+	if eventID != "" {
+		eventArg = eventID
+	}
+	if err := r.db.QueryRow(ctx, q, storeID, eventArg).Scan(
+		&row.CartsWithMutations,
+		&row.UpsellCents,
+		&row.DownsellCents,
+		&row.TotalPaidCarts,
+	); err != nil {
+		return nil, fmt.Errorf("getting checkout upsell: %w", err)
+	}
+	return &row, nil
+}
+
+// ListTopCheckoutMutations returns the top N products added or removed at
+// checkout. direction is "added" (item_added | quantity_increased) or
+// "removed" (item_removed | quantity_decreased).
+func (r *Repository) ListTopCheckoutMutations(ctx context.Context, storeID, eventID, direction string, limit int) ([]CheckoutMutationRow, error) {
+	if direction != "added" && direction != "removed" {
+		return nil, fmt.Errorf("invalid direction %q", direction)
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+
+	deltaExpr := "(cm.quantity_after - cm.quantity_before)"
+	mutTypes := "('item_added','quantity_increased')"
+	if direction == "removed" {
+		deltaExpr = "(cm.quantity_before - cm.quantity_after)"
+		mutTypes = "('item_removed','quantity_decreased')"
+	}
+
+	q := fmt.Sprintf(`
+		SELECT
+			cm.product_id,
+			p.name,
+			p.image_url,
+			SUM(%s)::int AS units,
+			SUM(%s * cm.unit_price)::bigint AS revenue_cents
+		FROM cart_mutations cm
+		JOIN carts c ON c.id = cm.cart_id
+		JOIN live_events le ON le.id = c.event_id
+		JOIN products p ON p.id = cm.product_id
+		WHERE le.store_id = $1
+		  AND c.payment_status = 'paid'
+		  AND cm.source = 'buyer_checkout'
+		  AND cm.mutation_type IN %s
+		  AND ($2::uuid IS NULL OR c.event_id = $2::uuid)
+		GROUP BY cm.product_id, p.name, p.image_url
+		ORDER BY units DESC
+		LIMIT $3
+	`, deltaExpr, deltaExpr, mutTypes)
+
+	var eventArg interface{}
+	if eventID != "" {
+		eventArg = eventID
+	}
+	rows, err := r.db.Query(ctx, q, storeID, eventArg, limit)
+	if err != nil {
+		return nil, fmt.Errorf("listing top mutations (%s): %w", direction, err)
+	}
+	defer rows.Close()
+	out := make([]CheckoutMutationRow, 0)
+	for rows.Next() {
+		var row CheckoutMutationRow
+		if err := rows.Scan(&row.ProductID, &row.ProductName, &row.ImageURL, &row.Units, &row.RevenueCents); err != nil {
+			return nil, fmt.Errorf("scanning mutation row: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}

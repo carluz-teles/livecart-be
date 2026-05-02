@@ -27,7 +27,7 @@ const createCart = `-- name: CreateCart :one
 
 INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, status, expires_at, customer_id)
 VALUES ($1, $2, $3, $4, $5, 'active', $6, $7)
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents
 `
 
 type CreateCartParams struct {
@@ -81,6 +81,22 @@ func (q *Queries) CreateCart(ctx context.Context, arg CreateCartParams) (Cart, e
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }
@@ -155,7 +171,7 @@ func (q *Queries) FinalizeCartsByEvent(ctx context.Context, eventID pgtype.UUID)
 }
 
 const getCartByCheckoutID = `-- name: GetCartByCheckoutID :one
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id FROM carts WHERE checkout_id = $1
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents FROM carts WHERE checkout_id = $1
 `
 
 // Used by webhook to find cart when payment is confirmed
@@ -189,12 +205,28 @@ func (q *Queries) GetCartByCheckoutID(ctx context.Context, checkoutID pgtype.Tex
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }
 
 const getCartByEventAndUser = `-- name: GetCartByEventAndUser :one
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id FROM carts WHERE event_id = $1 AND platform_user_id = $2
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents FROM carts WHERE event_id = $1 AND platform_user_id = $2
 `
 
 type GetCartByEventAndUserParams struct {
@@ -232,12 +264,28 @@ func (q *Queries) GetCartByEventAndUser(ctx context.Context, arg GetCartByEventA
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }
 
 const getCartByEventAndUserForUpdate = `-- name: GetCartByEventAndUserForUpdate :one
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id FROM carts WHERE event_id = $1 AND platform_user_id = $2 FOR UPDATE
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents FROM carts WHERE event_id = $1 AND platform_user_id = $2 FOR UPDATE
 `
 
 type GetCartByEventAndUserForUpdateParams struct {
@@ -276,12 +324,28 @@ func (q *Queries) GetCartByEventAndUserForUpdate(ctx context.Context, arg GetCar
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }
 
 const getCartByID = `-- name: GetCartByID :one
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id FROM carts WHERE id = $1
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents FROM carts WHERE id = $1
 `
 
 func (q *Queries) GetCartByID(ctx context.Context, id pgtype.UUID) (Cart, error) {
@@ -314,12 +378,28 @@ func (q *Queries) GetCartByID(ctx context.Context, id pgtype.UUID) (Cart, error)
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }
 
 const getCartByToken = `-- name: GetCartByToken :one
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id FROM carts WHERE token = $1
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents FROM carts WHERE token = $1
 `
 
 func (q *Queries) GetCartByToken(ctx context.Context, token string) (Cart, error) {
@@ -352,6 +432,22 @@ func (q *Queries) GetCartByToken(ctx context.Context, token string) (Cart, error
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }
@@ -373,6 +469,8 @@ SELECT
     c.paid_at,
     c.created_at,
     c.expires_at,
+    c.initial_snapshot_taken_at,
+    c.initial_subtotal_cents,
     le.title AS event_title,
     le.store_id,
     s.name AS store_name,
@@ -386,26 +484,28 @@ WHERE c.token = $1
 `
 
 type GetCartByTokenWithDetailsRow struct {
-	ID                 pgtype.UUID        `json:"id"`
-	EventID            pgtype.UUID        `json:"event_id"`
-	PlatformUserID     string             `json:"platform_user_id"`
-	PlatformHandle     string             `json:"platform_handle"`
-	Token              string             `json:"token"`
-	Status             string             `json:"status"`
-	CheckoutUrl        pgtype.Text        `json:"checkout_url"`
-	CheckoutID         pgtype.Text        `json:"checkout_id"`
-	CheckoutExpiresAt  pgtype.Timestamptz `json:"checkout_expires_at"`
-	CustomerEmail      pgtype.Text        `json:"customer_email"`
-	PaymentStatus      pgtype.Text        `json:"payment_status"`
-	PaidAt             pgtype.Timestamptz `json:"paid_at"`
-	CreatedAt          pgtype.Timestamptz `json:"created_at"`
-	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
-	EventTitle         pgtype.Text        `json:"event_title"`
-	StoreID            pgtype.UUID        `json:"store_id"`
-	StoreName          string             `json:"store_name"`
-	StoreLogoUrl       pgtype.Text        `json:"store_logo_url"`
-	AllowEdit          bool               `json:"allow_edit"`
-	MaxQuantityPerItem int32              `json:"max_quantity_per_item"`
+	ID                     pgtype.UUID        `json:"id"`
+	EventID                pgtype.UUID        `json:"event_id"`
+	PlatformUserID         string             `json:"platform_user_id"`
+	PlatformHandle         string             `json:"platform_handle"`
+	Token                  string             `json:"token"`
+	Status                 string             `json:"status"`
+	CheckoutUrl            pgtype.Text        `json:"checkout_url"`
+	CheckoutID             pgtype.Text        `json:"checkout_id"`
+	CheckoutExpiresAt      pgtype.Timestamptz `json:"checkout_expires_at"`
+	CustomerEmail          pgtype.Text        `json:"customer_email"`
+	PaymentStatus          pgtype.Text        `json:"payment_status"`
+	PaidAt                 pgtype.Timestamptz `json:"paid_at"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt              pgtype.Timestamptz `json:"expires_at"`
+	InitialSnapshotTakenAt pgtype.Timestamptz `json:"initial_snapshot_taken_at"`
+	InitialSubtotalCents   pgtype.Int8        `json:"initial_subtotal_cents"`
+	EventTitle             pgtype.Text        `json:"event_title"`
+	StoreID                pgtype.UUID        `json:"store_id"`
+	StoreName              string             `json:"store_name"`
+	StoreLogoUrl           pgtype.Text        `json:"store_logo_url"`
+	AllowEdit              bool               `json:"allow_edit"`
+	MaxQuantityPerItem     int32              `json:"max_quantity_per_item"`
 }
 
 // =============================================================================
@@ -430,6 +530,8 @@ func (q *Queries) GetCartByTokenWithDetails(ctx context.Context, token string) (
 		&i.PaidAt,
 		&i.CreatedAt,
 		&i.ExpiresAt,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 		&i.EventTitle,
 		&i.StoreID,
 		&i.StoreName,
@@ -689,7 +791,8 @@ SELECT
     ci.waitlisted_quantity,
     p.name AS product_name,
     p.image_url AS product_image_url,
-    p.keyword AS product_keyword
+    p.keyword AS product_keyword,
+    p.stock AS product_stock
 FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1
@@ -706,9 +809,12 @@ type ListCartItemsForCheckoutRow struct {
 	ProductName        string      `json:"product_name"`
 	ProductImageUrl    pgtype.Text `json:"product_image_url"`
 	ProductKeyword     string      `json:"product_keyword"`
+	ProductStock       pgtype.Int4 `json:"product_stock"`
 }
 
-// Returns cart items with product details for checkout page
+// Returns cart items with product details for checkout page.
+// product_stock is exposed so the public checkout can disable the "+" button
+// when the buyer is about to exceed the available stock for the SKU.
 func (q *Queries) ListCartItemsForCheckout(ctx context.Context, cartID pgtype.UUID) ([]ListCartItemsForCheckoutRow, error) {
 	rows, err := q.db.Query(ctx, listCartItemsForCheckout, cartID)
 	if err != nil {
@@ -728,6 +834,7 @@ func (q *Queries) ListCartItemsForCheckout(ctx context.Context, cartID pgtype.UU
 			&i.ProductName,
 			&i.ProductImageUrl,
 			&i.ProductKeyword,
+			&i.ProductStock,
 		); err != nil {
 			return nil, err
 		}
@@ -741,7 +848,7 @@ func (q *Queries) ListCartItemsForCheckout(ctx context.Context, cartID pgtype.UU
 
 const listCartsByCustomer = `-- name: ListCartsByCustomer :many
 SELECT
-    c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id,
+    c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, c.shipping_service_id, c.shipping_service_name, c.shipping_carrier, c.shipping_cost_cents, c.shipping_cost_real_cents, c.shipping_deadline_days, c.shipping_quoted_at, c.shipping_provider, c.last_shipping_quote_options, c.last_shipping_quote_at, c.card_brand, c.card_last_four, c.card_installments, c.card_authorization_code, c.initial_snapshot_taken_at, c.initial_subtotal_cents,
     COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_value,
     COALESCE(SUM(ci.quantity), 0)::int AS total_items
 FROM carts c
@@ -759,34 +866,50 @@ type ListCartsByCustomerParams struct {
 }
 
 type ListCartsByCustomerRow struct {
-	ID                   pgtype.UUID        `json:"id"`
-	EventID              pgtype.UUID        `json:"event_id"`
-	PlatformUserID       string             `json:"platform_user_id"`
-	PlatformHandle       string             `json:"platform_handle"`
-	Token                string             `json:"token"`
-	Status               string             `json:"status"`
-	CheckoutUrl          pgtype.Text        `json:"checkout_url"`
-	PaymentIntegrationID pgtype.UUID        `json:"payment_integration_id"`
-	ExternalOrderID      pgtype.Text        `json:"external_order_id"`
-	PaymentStatus        pgtype.Text        `json:"payment_status"`
-	PaidAt               pgtype.Timestamptz `json:"paid_at"`
-	NotifyStatus         pgtype.Text        `json:"notify_status"`
-	NotifyError          pgtype.Text        `json:"notify_error"`
-	NotifiedAt           pgtype.Timestamptz `json:"notified_at"`
-	CreatedAt            pgtype.Timestamptz `json:"created_at"`
-	ExpiresAt            pgtype.Timestamptz `json:"expires_at"`
-	SessionID            pgtype.UUID        `json:"session_id"`
-	CheckoutID           pgtype.Text        `json:"checkout_id"`
-	CheckoutExpiresAt    pgtype.Timestamptz `json:"checkout_expires_at"`
-	CustomerEmail        pgtype.Text        `json:"customer_email"`
-	PaymentMethod        pgtype.Text        `json:"payment_method"`
-	CustomerName         pgtype.Text        `json:"customer_name"`
-	CustomerDocument     pgtype.Text        `json:"customer_document"`
-	CustomerPhone        pgtype.Text        `json:"customer_phone"`
-	ShippingAddress      json.RawMessage    `json:"shipping_address"`
-	CustomerID           pgtype.UUID        `json:"customer_id"`
-	TotalValue           int64              `json:"total_value"`
-	TotalItems           int32              `json:"total_items"`
+	ID                       pgtype.UUID        `json:"id"`
+	EventID                  pgtype.UUID        `json:"event_id"`
+	PlatformUserID           string             `json:"platform_user_id"`
+	PlatformHandle           string             `json:"platform_handle"`
+	Token                    string             `json:"token"`
+	Status                   string             `json:"status"`
+	CheckoutUrl              pgtype.Text        `json:"checkout_url"`
+	PaymentIntegrationID     pgtype.UUID        `json:"payment_integration_id"`
+	ExternalOrderID          pgtype.Text        `json:"external_order_id"`
+	PaymentStatus            pgtype.Text        `json:"payment_status"`
+	PaidAt                   pgtype.Timestamptz `json:"paid_at"`
+	NotifyStatus             pgtype.Text        `json:"notify_status"`
+	NotifyError              pgtype.Text        `json:"notify_error"`
+	NotifiedAt               pgtype.Timestamptz `json:"notified_at"`
+	CreatedAt                pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt                pgtype.Timestamptz `json:"expires_at"`
+	SessionID                pgtype.UUID        `json:"session_id"`
+	CheckoutID               pgtype.Text        `json:"checkout_id"`
+	CheckoutExpiresAt        pgtype.Timestamptz `json:"checkout_expires_at"`
+	CustomerEmail            pgtype.Text        `json:"customer_email"`
+	PaymentMethod            pgtype.Text        `json:"payment_method"`
+	CustomerName             pgtype.Text        `json:"customer_name"`
+	CustomerDocument         pgtype.Text        `json:"customer_document"`
+	CustomerPhone            pgtype.Text        `json:"customer_phone"`
+	ShippingAddress          json.RawMessage    `json:"shipping_address"`
+	CustomerID               pgtype.UUID        `json:"customer_id"`
+	ShippingServiceID        pgtype.Text        `json:"shipping_service_id"`
+	ShippingServiceName      pgtype.Text        `json:"shipping_service_name"`
+	ShippingCarrier          pgtype.Text        `json:"shipping_carrier"`
+	ShippingCostCents        pgtype.Int8        `json:"shipping_cost_cents"`
+	ShippingCostRealCents    pgtype.Int8        `json:"shipping_cost_real_cents"`
+	ShippingDeadlineDays     pgtype.Int4        `json:"shipping_deadline_days"`
+	ShippingQuotedAt         pgtype.Timestamptz `json:"shipping_quoted_at"`
+	ShippingProvider         pgtype.Text        `json:"shipping_provider"`
+	LastShippingQuoteOptions json.RawMessage    `json:"last_shipping_quote_options"`
+	LastShippingQuoteAt      pgtype.Timestamptz `json:"last_shipping_quote_at"`
+	CardBrand                pgtype.Text        `json:"card_brand"`
+	CardLastFour             pgtype.Text        `json:"card_last_four"`
+	CardInstallments         pgtype.Int4        `json:"card_installments"`
+	CardAuthorizationCode    pgtype.Text        `json:"card_authorization_code"`
+	InitialSnapshotTakenAt   pgtype.Timestamptz `json:"initial_snapshot_taken_at"`
+	InitialSubtotalCents     pgtype.Int8        `json:"initial_subtotal_cents"`
+	TotalValue               int64              `json:"total_value"`
+	TotalItems               int32              `json:"total_items"`
 }
 
 // Returns all carts for a specific customer with totals
@@ -826,6 +949,22 @@ func (q *Queries) ListCartsByCustomer(ctx context.Context, arg ListCartsByCustom
 			&i.CustomerPhone,
 			&i.ShippingAddress,
 			&i.CustomerID,
+			&i.ShippingServiceID,
+			&i.ShippingServiceName,
+			&i.ShippingCarrier,
+			&i.ShippingCostCents,
+			&i.ShippingCostRealCents,
+			&i.ShippingDeadlineDays,
+			&i.ShippingQuotedAt,
+			&i.ShippingProvider,
+			&i.LastShippingQuoteOptions,
+			&i.LastShippingQuoteAt,
+			&i.CardBrand,
+			&i.CardLastFour,
+			&i.CardInstallments,
+			&i.CardAuthorizationCode,
+			&i.InitialSnapshotTakenAt,
+			&i.InitialSubtotalCents,
 			&i.TotalValue,
 			&i.TotalItems,
 		); err != nil {
@@ -840,7 +979,7 @@ func (q *Queries) ListCartsByCustomer(ctx context.Context, arg ListCartsByCustom
 }
 
 const listCartsByEvent = `-- name: ListCartsByEvent :many
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id FROM carts WHERE event_id = $1 ORDER BY created_at
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents FROM carts WHERE event_id = $1 ORDER BY created_at
 `
 
 func (q *Queries) ListCartsByEvent(ctx context.Context, eventID pgtype.UUID) ([]Cart, error) {
@@ -879,6 +1018,22 @@ func (q *Queries) ListCartsByEvent(ctx context.Context, eventID pgtype.UUID) ([]
 			&i.CustomerPhone,
 			&i.ShippingAddress,
 			&i.CustomerID,
+			&i.ShippingServiceID,
+			&i.ShippingServiceName,
+			&i.ShippingCarrier,
+			&i.ShippingCostCents,
+			&i.ShippingCostRealCents,
+			&i.ShippingDeadlineDays,
+			&i.ShippingQuotedAt,
+			&i.ShippingProvider,
+			&i.LastShippingQuoteOptions,
+			&i.LastShippingQuoteAt,
+			&i.CardBrand,
+			&i.CardLastFour,
+			&i.CardInstallments,
+			&i.CardAuthorizationCode,
+			&i.InitialSnapshotTakenAt,
+			&i.InitialSubtotalCents,
 		); err != nil {
 			return nil, err
 		}
@@ -967,40 +1122,56 @@ func (q *Queries) ListCartsWithTotalByEvent(ctx context.Context, eventID pgtype.
 }
 
 const listExpiredCarts = `-- name: ListExpiredCarts :many
-SELECT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, le.store_id
+SELECT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, c.shipping_service_id, c.shipping_service_name, c.shipping_carrier, c.shipping_cost_cents, c.shipping_cost_real_cents, c.shipping_deadline_days, c.shipping_quoted_at, c.shipping_provider, c.last_shipping_quote_options, c.last_shipping_quote_at, c.card_brand, c.card_last_four, c.card_installments, c.card_authorization_code, c.initial_snapshot_taken_at, c.initial_subtotal_cents, le.store_id
 FROM carts c
 JOIN live_events le ON le.id = c.event_id
 WHERE c.status = 'active' AND c.expires_at IS NOT NULL AND c.expires_at < now()
 `
 
 type ListExpiredCartsRow struct {
-	ID                   pgtype.UUID        `json:"id"`
-	EventID              pgtype.UUID        `json:"event_id"`
-	PlatformUserID       string             `json:"platform_user_id"`
-	PlatformHandle       string             `json:"platform_handle"`
-	Token                string             `json:"token"`
-	Status               string             `json:"status"`
-	CheckoutUrl          pgtype.Text        `json:"checkout_url"`
-	PaymentIntegrationID pgtype.UUID        `json:"payment_integration_id"`
-	ExternalOrderID      pgtype.Text        `json:"external_order_id"`
-	PaymentStatus        pgtype.Text        `json:"payment_status"`
-	PaidAt               pgtype.Timestamptz `json:"paid_at"`
-	NotifyStatus         pgtype.Text        `json:"notify_status"`
-	NotifyError          pgtype.Text        `json:"notify_error"`
-	NotifiedAt           pgtype.Timestamptz `json:"notified_at"`
-	CreatedAt            pgtype.Timestamptz `json:"created_at"`
-	ExpiresAt            pgtype.Timestamptz `json:"expires_at"`
-	SessionID            pgtype.UUID        `json:"session_id"`
-	CheckoutID           pgtype.Text        `json:"checkout_id"`
-	CheckoutExpiresAt    pgtype.Timestamptz `json:"checkout_expires_at"`
-	CustomerEmail        pgtype.Text        `json:"customer_email"`
-	PaymentMethod        pgtype.Text        `json:"payment_method"`
-	CustomerName         pgtype.Text        `json:"customer_name"`
-	CustomerDocument     pgtype.Text        `json:"customer_document"`
-	CustomerPhone        pgtype.Text        `json:"customer_phone"`
-	ShippingAddress      json.RawMessage    `json:"shipping_address"`
-	CustomerID           pgtype.UUID        `json:"customer_id"`
-	StoreID              pgtype.UUID        `json:"store_id"`
+	ID                       pgtype.UUID        `json:"id"`
+	EventID                  pgtype.UUID        `json:"event_id"`
+	PlatformUserID           string             `json:"platform_user_id"`
+	PlatformHandle           string             `json:"platform_handle"`
+	Token                    string             `json:"token"`
+	Status                   string             `json:"status"`
+	CheckoutUrl              pgtype.Text        `json:"checkout_url"`
+	PaymentIntegrationID     pgtype.UUID        `json:"payment_integration_id"`
+	ExternalOrderID          pgtype.Text        `json:"external_order_id"`
+	PaymentStatus            pgtype.Text        `json:"payment_status"`
+	PaidAt                   pgtype.Timestamptz `json:"paid_at"`
+	NotifyStatus             pgtype.Text        `json:"notify_status"`
+	NotifyError              pgtype.Text        `json:"notify_error"`
+	NotifiedAt               pgtype.Timestamptz `json:"notified_at"`
+	CreatedAt                pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt                pgtype.Timestamptz `json:"expires_at"`
+	SessionID                pgtype.UUID        `json:"session_id"`
+	CheckoutID               pgtype.Text        `json:"checkout_id"`
+	CheckoutExpiresAt        pgtype.Timestamptz `json:"checkout_expires_at"`
+	CustomerEmail            pgtype.Text        `json:"customer_email"`
+	PaymentMethod            pgtype.Text        `json:"payment_method"`
+	CustomerName             pgtype.Text        `json:"customer_name"`
+	CustomerDocument         pgtype.Text        `json:"customer_document"`
+	CustomerPhone            pgtype.Text        `json:"customer_phone"`
+	ShippingAddress          json.RawMessage    `json:"shipping_address"`
+	CustomerID               pgtype.UUID        `json:"customer_id"`
+	ShippingServiceID        pgtype.Text        `json:"shipping_service_id"`
+	ShippingServiceName      pgtype.Text        `json:"shipping_service_name"`
+	ShippingCarrier          pgtype.Text        `json:"shipping_carrier"`
+	ShippingCostCents        pgtype.Int8        `json:"shipping_cost_cents"`
+	ShippingCostRealCents    pgtype.Int8        `json:"shipping_cost_real_cents"`
+	ShippingDeadlineDays     pgtype.Int4        `json:"shipping_deadline_days"`
+	ShippingQuotedAt         pgtype.Timestamptz `json:"shipping_quoted_at"`
+	ShippingProvider         pgtype.Text        `json:"shipping_provider"`
+	LastShippingQuoteOptions json.RawMessage    `json:"last_shipping_quote_options"`
+	LastShippingQuoteAt      pgtype.Timestamptz `json:"last_shipping_quote_at"`
+	CardBrand                pgtype.Text        `json:"card_brand"`
+	CardLastFour             pgtype.Text        `json:"card_last_four"`
+	CardInstallments         pgtype.Int4        `json:"card_installments"`
+	CardAuthorizationCode    pgtype.Text        `json:"card_authorization_code"`
+	InitialSnapshotTakenAt   pgtype.Timestamptz `json:"initial_snapshot_taken_at"`
+	InitialSubtotalCents     pgtype.Int8        `json:"initial_subtotal_cents"`
+	StoreID                  pgtype.UUID        `json:"store_id"`
 }
 
 // Returns carts that have expired (active + past expires_at), with store_id from event
@@ -1040,6 +1211,22 @@ func (q *Queries) ListExpiredCarts(ctx context.Context) ([]ListExpiredCartsRow, 
 			&i.CustomerPhone,
 			&i.ShippingAddress,
 			&i.CustomerID,
+			&i.ShippingServiceID,
+			&i.ShippingServiceName,
+			&i.ShippingCarrier,
+			&i.ShippingCostCents,
+			&i.ShippingCostRealCents,
+			&i.ShippingDeadlineDays,
+			&i.ShippingQuotedAt,
+			&i.ShippingProvider,
+			&i.LastShippingQuoteOptions,
+			&i.LastShippingQuoteAt,
+			&i.CardBrand,
+			&i.CardLastFour,
+			&i.CardInstallments,
+			&i.CardAuthorizationCode,
+			&i.InitialSnapshotTakenAt,
+			&i.InitialSubtotalCents,
 			&i.StoreID,
 		); err != nil {
 			return nil, err
@@ -1053,7 +1240,7 @@ func (q *Queries) ListExpiredCarts(ctx context.Context) ([]ListExpiredCartsRow, 
 }
 
 const listExpiredCartsByEventAndProduct = `-- name: ListExpiredCartsByEventAndProduct :many
-SELECT DISTINCT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, le.store_id
+SELECT DISTINCT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, c.shipping_service_id, c.shipping_service_name, c.shipping_carrier, c.shipping_cost_cents, c.shipping_cost_real_cents, c.shipping_deadline_days, c.shipping_quoted_at, c.shipping_provider, c.last_shipping_quote_options, c.last_shipping_quote_at, c.card_brand, c.card_last_four, c.card_installments, c.card_authorization_code, c.initial_snapshot_taken_at, c.initial_subtotal_cents, le.store_id
 FROM carts c
 JOIN live_events le ON le.id = c.event_id
 JOIN cart_items ci ON ci.cart_id = c.id
@@ -1071,33 +1258,49 @@ type ListExpiredCartsByEventAndProductParams struct {
 }
 
 type ListExpiredCartsByEventAndProductRow struct {
-	ID                   pgtype.UUID        `json:"id"`
-	EventID              pgtype.UUID        `json:"event_id"`
-	PlatformUserID       string             `json:"platform_user_id"`
-	PlatformHandle       string             `json:"platform_handle"`
-	Token                string             `json:"token"`
-	Status               string             `json:"status"`
-	CheckoutUrl          pgtype.Text        `json:"checkout_url"`
-	PaymentIntegrationID pgtype.UUID        `json:"payment_integration_id"`
-	ExternalOrderID      pgtype.Text        `json:"external_order_id"`
-	PaymentStatus        pgtype.Text        `json:"payment_status"`
-	PaidAt               pgtype.Timestamptz `json:"paid_at"`
-	NotifyStatus         pgtype.Text        `json:"notify_status"`
-	NotifyError          pgtype.Text        `json:"notify_error"`
-	NotifiedAt           pgtype.Timestamptz `json:"notified_at"`
-	CreatedAt            pgtype.Timestamptz `json:"created_at"`
-	ExpiresAt            pgtype.Timestamptz `json:"expires_at"`
-	SessionID            pgtype.UUID        `json:"session_id"`
-	CheckoutID           pgtype.Text        `json:"checkout_id"`
-	CheckoutExpiresAt    pgtype.Timestamptz `json:"checkout_expires_at"`
-	CustomerEmail        pgtype.Text        `json:"customer_email"`
-	PaymentMethod        pgtype.Text        `json:"payment_method"`
-	CustomerName         pgtype.Text        `json:"customer_name"`
-	CustomerDocument     pgtype.Text        `json:"customer_document"`
-	CustomerPhone        pgtype.Text        `json:"customer_phone"`
-	ShippingAddress      json.RawMessage    `json:"shipping_address"`
-	CustomerID           pgtype.UUID        `json:"customer_id"`
-	StoreID              pgtype.UUID        `json:"store_id"`
+	ID                       pgtype.UUID        `json:"id"`
+	EventID                  pgtype.UUID        `json:"event_id"`
+	PlatformUserID           string             `json:"platform_user_id"`
+	PlatformHandle           string             `json:"platform_handle"`
+	Token                    string             `json:"token"`
+	Status                   string             `json:"status"`
+	CheckoutUrl              pgtype.Text        `json:"checkout_url"`
+	PaymentIntegrationID     pgtype.UUID        `json:"payment_integration_id"`
+	ExternalOrderID          pgtype.Text        `json:"external_order_id"`
+	PaymentStatus            pgtype.Text        `json:"payment_status"`
+	PaidAt                   pgtype.Timestamptz `json:"paid_at"`
+	NotifyStatus             pgtype.Text        `json:"notify_status"`
+	NotifyError              pgtype.Text        `json:"notify_error"`
+	NotifiedAt               pgtype.Timestamptz `json:"notified_at"`
+	CreatedAt                pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt                pgtype.Timestamptz `json:"expires_at"`
+	SessionID                pgtype.UUID        `json:"session_id"`
+	CheckoutID               pgtype.Text        `json:"checkout_id"`
+	CheckoutExpiresAt        pgtype.Timestamptz `json:"checkout_expires_at"`
+	CustomerEmail            pgtype.Text        `json:"customer_email"`
+	PaymentMethod            pgtype.Text        `json:"payment_method"`
+	CustomerName             pgtype.Text        `json:"customer_name"`
+	CustomerDocument         pgtype.Text        `json:"customer_document"`
+	CustomerPhone            pgtype.Text        `json:"customer_phone"`
+	ShippingAddress          json.RawMessage    `json:"shipping_address"`
+	CustomerID               pgtype.UUID        `json:"customer_id"`
+	ShippingServiceID        pgtype.Text        `json:"shipping_service_id"`
+	ShippingServiceName      pgtype.Text        `json:"shipping_service_name"`
+	ShippingCarrier          pgtype.Text        `json:"shipping_carrier"`
+	ShippingCostCents        pgtype.Int8        `json:"shipping_cost_cents"`
+	ShippingCostRealCents    pgtype.Int8        `json:"shipping_cost_real_cents"`
+	ShippingDeadlineDays     pgtype.Int4        `json:"shipping_deadline_days"`
+	ShippingQuotedAt         pgtype.Timestamptz `json:"shipping_quoted_at"`
+	ShippingProvider         pgtype.Text        `json:"shipping_provider"`
+	LastShippingQuoteOptions json.RawMessage    `json:"last_shipping_quote_options"`
+	LastShippingQuoteAt      pgtype.Timestamptz `json:"last_shipping_quote_at"`
+	CardBrand                pgtype.Text        `json:"card_brand"`
+	CardLastFour             pgtype.Text        `json:"card_last_four"`
+	CardInstallments         pgtype.Int4        `json:"card_installments"`
+	CardAuthorizationCode    pgtype.Text        `json:"card_authorization_code"`
+	InitialSnapshotTakenAt   pgtype.Timestamptz `json:"initial_snapshot_taken_at"`
+	InitialSubtotalCents     pgtype.Int8        `json:"initial_subtotal_cents"`
+	StoreID                  pgtype.UUID        `json:"store_id"`
 }
 
 // Returns expired carts for a specific event that contain a specific product (with available qty)
@@ -1137,6 +1340,22 @@ func (q *Queries) ListExpiredCartsByEventAndProduct(ctx context.Context, arg Lis
 			&i.CustomerPhone,
 			&i.ShippingAddress,
 			&i.CustomerID,
+			&i.ShippingServiceID,
+			&i.ShippingServiceName,
+			&i.ShippingCarrier,
+			&i.ShippingCostCents,
+			&i.ShippingCostRealCents,
+			&i.ShippingDeadlineDays,
+			&i.ShippingQuotedAt,
+			&i.ShippingProvider,
+			&i.LastShippingQuoteOptions,
+			&i.LastShippingQuoteAt,
+			&i.CardBrand,
+			&i.CardLastFour,
+			&i.CardInstallments,
+			&i.CardAuthorizationCode,
+			&i.InitialSnapshotTakenAt,
+			&i.InitialSubtotalCents,
 			&i.StoreID,
 		); err != nil {
 			return nil, err
@@ -1263,7 +1482,7 @@ const updateCartCheckoutInfo = `-- name: UpdateCartCheckoutInfo :one
 UPDATE carts
 SET checkout_url = $2, checkout_id = $3, checkout_expires_at = $4
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents
 `
 
 type UpdateCartCheckoutInfoParams struct {
@@ -1309,6 +1528,22 @@ func (q *Queries) UpdateCartCheckoutInfo(ctx context.Context, arg UpdateCartChec
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }
@@ -1321,7 +1556,7 @@ SET customer_email    = $2,
     customer_phone    = $5,
     shipping_address  = $6
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents
 `
 
 type UpdateCartCustomerCheckoutParams struct {
@@ -1373,6 +1608,22 @@ func (q *Queries) UpdateCartCustomerCheckout(ctx context.Context, arg UpdateCart
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }
@@ -1381,7 +1632,7 @@ const updateCartCustomerEmail = `-- name: UpdateCartCustomerEmail :one
 UPDATE carts
 SET customer_email = $2
 WHERE token = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents
 `
 
 type UpdateCartCustomerEmailParams struct {
@@ -1419,6 +1670,22 @@ func (q *Queries) UpdateCartCustomerEmail(ctx context.Context, arg UpdateCartCus
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }
@@ -1500,7 +1767,7 @@ const updateCartNotifyStatus = `-- name: UpdateCartNotifyStatus :one
 UPDATE carts
 SET notify_status = $2, notify_error = $3, notified_at = $4
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents
 `
 
 type UpdateCartNotifyStatusParams struct {
@@ -1545,6 +1812,22 @@ func (q *Queries) UpdateCartNotifyStatus(ctx context.Context, arg UpdateCartNoti
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }
@@ -1553,7 +1836,7 @@ const updateCartPayment = `-- name: UpdateCartPayment :one
 UPDATE carts
 SET payment_status = $2, checkout_id = $3, paid_at = $4, payment_method = $5
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents
 `
 
 type UpdateCartPaymentParams struct {
@@ -1564,6 +1847,9 @@ type UpdateCartPaymentParams struct {
 	PaymentMethod pgtype.Text        `json:"payment_method"`
 }
 
+// $3 = payment-provider ID (MP/Pagar.me). Goes to checkout_id, not
+// external_order_id — the latter is reserved for the ERP (Tiny) order ID
+// and is the idempotency key for finalizeCartERPOrder.
 func (q *Queries) UpdateCartPayment(ctx context.Context, arg UpdateCartPaymentParams) (Cart, error) {
 	row := q.db.QueryRow(ctx, updateCartPayment,
 		arg.ID,
@@ -1600,6 +1886,22 @@ func (q *Queries) UpdateCartPayment(ctx context.Context, arg UpdateCartPaymentPa
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }
@@ -1608,7 +1910,7 @@ const updateCartPaymentByCheckoutID = `-- name: UpdateCartPaymentByCheckoutID :o
 UPDATE carts
 SET payment_status = $2, paid_at = $3
 WHERE checkout_id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents
 `
 
 type UpdateCartPaymentByCheckoutIDParams struct {
@@ -1648,6 +1950,22 @@ func (q *Queries) UpdateCartPaymentByCheckoutID(ctx context.Context, arg UpdateC
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }
@@ -1656,7 +1974,7 @@ const updateCartPaymentStatus = `-- name: UpdateCartPaymentStatus :one
 UPDATE carts
 SET payment_status = $2, checkout_id = $3, paid_at = $4
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents
 `
 
 type UpdateCartPaymentStatusParams struct {
@@ -1703,12 +2021,28 @@ func (q *Queries) UpdateCartPaymentStatus(ctx context.Context, arg UpdateCartPay
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }
 
 const updateCartStatus = `-- name: UpdateCartStatus :one
-UPDATE carts SET status = $2 WHERE id = $1 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id
+UPDATE carts SET status = $2 WHERE id = $1 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents
 `
 
 type UpdateCartStatusParams struct {
@@ -1746,6 +2080,22 @@ func (q *Queries) UpdateCartStatus(ctx context.Context, arg UpdateCartStatusPara
 		&i.CustomerPhone,
 		&i.ShippingAddress,
 		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
 	)
 	return i, err
 }

@@ -885,6 +885,15 @@ func (s *Service) ListCartsWithTotalByEvent(ctx context.Context, eventID, storeI
 	return outputs, nil
 }
 
+// ListActiveCheckouts returns the carts in checkout phase for an event so the
+// merchant can watch buyer activity in real time before payment lands.
+func (s *Service) ListActiveCheckouts(ctx context.Context, eventID, storeID string) ([]ActiveCheckoutOutput, error) {
+	if _, err := s.repo.GetEventByID(ctx, eventID, storeID); err != nil {
+		return nil, err
+	}
+	return s.repo.ListActiveCheckoutsByEvent(ctx, eventID)
+}
+
 // ListProductsByEvent returns all products sold in an event with quantity and revenue.
 func (s *Service) ListProductsByEvent(ctx context.Context, eventID, storeID string) ([]EventProductSalesOutput, error) {
 	// Verify event exists and belongs to store

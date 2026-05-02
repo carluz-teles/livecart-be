@@ -185,6 +185,49 @@ type OrderStatsResponse struct {
 	AvgTicket     int64 `json:"avgTicket"`
 }
 
+// =============================================================================
+// UPSELL / DOWNSELL TYPES
+// =============================================================================
+
+// OrderUpsellOutput is the per-order summary used by the dashboard upsell
+// card. DeltaCents > 0 means the buyer added value at checkout (upsell);
+// DeltaCents < 0 means they removed value (downsell). HasSnapshot is false
+// for legacy orders that predate the feature — frontend renders a neutral
+// empty state in that case.
+type OrderUpsellOutput struct {
+	HasSnapshot          bool                   `json:"hasSnapshot"`
+	SnapshotTakenAt      *time.Time             `json:"snapshotTakenAt,omitempty"`
+	InitialSubtotalCents int64                  `json:"initialSubtotalCents"`
+	FinalSubtotalCents   int64                  `json:"finalSubtotalCents"`
+	DeltaCents           int64                  `json:"deltaCents"`
+	MutationCount        int                    `json:"mutationCount"`
+	InitialItems         []OrderUpsellItem      `json:"initialItems"`
+	Mutations            []OrderUpsellMutation  `json:"mutations"`
+}
+
+type OrderUpsellItem struct {
+	ProductID string  `json:"productId"`
+	Name      string  `json:"name"`
+	Keyword   string  `json:"keyword,omitempty"`
+	ImageURL  *string `json:"imageUrl,omitempty"`
+	Quantity  int     `json:"quantity"`
+	UnitPrice int64   `json:"unitPrice"`
+}
+
+type OrderUpsellMutation struct {
+	ID             string    `json:"id"`
+	ProductID      string    `json:"productId"`
+	ProductName    string    `json:"productName"`
+	Keyword        string    `json:"keyword,omitempty"`
+	ImageURL       *string   `json:"imageUrl,omitempty"`
+	MutationType   string    `json:"mutationType"`
+	QuantityBefore int       `json:"quantityBefore"`
+	QuantityAfter  int       `json:"quantityAfter"`
+	UnitPrice      int64     `json:"unitPrice"`
+	Source         string    `json:"source"`
+	CreatedAt      time.Time `json:"createdAt"`
+}
+
 // Service layer
 type ListOrdersInput struct {
 	StoreID    string

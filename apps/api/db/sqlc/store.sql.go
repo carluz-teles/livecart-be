@@ -12,17 +12,21 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const storeColumns = "id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj, address_number, address_complement, address_district, address_state_register, default_package_weight_grams, default_package_format, default_height_cm, default_width_cm, default_length_cm"
+const createStore = `-- name: CreateStore :one
+INSERT INTO stores (name, slug)
+VALUES ($1, $2)
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj, address_number, address_complement, address_district, address_state_register, default_package_weight_grams, default_package_format, default_height_cm, default_width_cm, default_length_cm
+`
 
-// storeColumnsS is the same list prefixed with the `s.` alias so queries that
-// JOIN memberships (which share column names like id, status, created_at)
-// are unambiguous.
-const storeColumnsS = "s.id, s.name, s.slug, s.active, s.whatsapp_number, s.email_address, s.sms_number, s.created_at, s.cart_enabled, s.cart_expiration_minutes, s.cart_reserve_stock, s.cart_max_items, s.cart_max_quantity_per_item, s.updated_at, s.description, s.website, s.logo_url, s.address_street, s.address_city, s.address_state, s.address_zip, s.address_country, s.send_on_live_end, s.cart_allow_edit, s.checkout_send_methods, s.notification_settings, s.cart_message_cooldown_seconds, s.cart_send_expiration_reminder, s.cart_expiration_reminder_minutes, s.cart_real_time, s.cnpj, s.address_number, s.address_complement, s.address_district, s.address_state_register, s.default_package_weight_grams, s.default_package_format, s.default_height_cm, s.default_width_cm, s.default_length_cm"
+type CreateStoreParams struct {
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+}
 
-func scanStore(row interface {
-	Scan(dest ...interface{}) error
-}, i *Store) error {
-	return row.Scan(
+func (q *Queries) CreateStore(ctx context.Context, arg CreateStoreParams) (Store, error) {
+	row := q.db.QueryRow(ctx, createStore, arg.Name, arg.Slug)
+	var i Store
+	err := row.Scan(
 		&i.ID,
 		&i.Name,
 		&i.Slug,
@@ -64,22 +68,6 @@ func scanStore(row interface {
 		&i.DefaultWidthCm,
 		&i.DefaultLengthCm,
 	)
-}
-
-const createStore = `-- name: CreateStore :one
-INSERT INTO stores (name, slug)
-VALUES ($1, $2)
-RETURNING ` + storeColumns
-
-type CreateStoreParams struct {
-	Name string `json:"name"`
-	Slug string `json:"slug"`
-}
-
-func (q *Queries) CreateStore(ctx context.Context, arg CreateStoreParams) (Store, error) {
-	row := q.db.QueryRow(ctx, createStore, arg.Name, arg.Slug)
-	var i Store
-	err := scanStore(row, &i)
 	return i, err
 }
 
@@ -93,51 +81,219 @@ func (q *Queries) DeleteStore(ctx context.Context, id pgtype.UUID) error {
 }
 
 const getStoreByID = `-- name: GetStoreByID :one
-SELECT ` + storeColumns + ` FROM stores WHERE id = $1`
+SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj, address_number, address_complement, address_district, address_state_register, default_package_weight_grams, default_package_format, default_height_cm, default_width_cm, default_length_cm FROM stores WHERE id = $1
+`
 
 func (q *Queries) GetStoreByID(ctx context.Context, id pgtype.UUID) (Store, error) {
 	row := q.db.QueryRow(ctx, getStoreByID, id)
 	var i Store
-	err := scanStore(row, &i)
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.Website,
+		&i.LogoUrl,
+		&i.AddressStreet,
+		&i.AddressCity,
+		&i.AddressState,
+		&i.AddressZip,
+		&i.AddressCountry,
+		&i.SendOnLiveEnd,
+		&i.CartAllowEdit,
+		&i.CheckoutSendMethods,
+		&i.NotificationSettings,
+		&i.CartMessageCooldownSeconds,
+		&i.CartSendExpirationReminder,
+		&i.CartExpirationReminderMinutes,
+		&i.CartRealTime,
+		&i.Cnpj,
+		&i.AddressNumber,
+		&i.AddressComplement,
+		&i.AddressDistrict,
+		&i.AddressStateRegister,
+		&i.DefaultPackageWeightGrams,
+		&i.DefaultPackageFormat,
+		&i.DefaultHeightCm,
+		&i.DefaultWidthCm,
+		&i.DefaultLengthCm,
+	)
 	return i, err
 }
 
 const getStoreByOwnerUserID = `-- name: GetStoreByOwnerUserID :one
-SELECT ` + storeColumnsS + `
+SELECT s.id, s.name, s.slug, s.active, s.whatsapp_number, s.email_address, s.sms_number, s.created_at, s.cart_enabled, s.cart_expiration_minutes, s.cart_reserve_stock, s.cart_max_items, s.cart_max_quantity_per_item, s.updated_at, s.description, s.website, s.logo_url, s.address_street, s.address_city, s.address_state, s.address_zip, s.address_country, s.send_on_live_end, s.cart_allow_edit, s.checkout_send_methods, s.notification_settings, s.cart_message_cooldown_seconds, s.cart_send_expiration_reminder, s.cart_expiration_reminder_minutes, s.cart_real_time, s.cnpj, s.address_number, s.address_complement, s.address_district, s.address_state_register, s.default_package_weight_grams, s.default_package_format, s.default_height_cm, s.default_width_cm, s.default_length_cm
 FROM stores s
 JOIN memberships m ON s.id = m.store_id
 WHERE m.user_id = $1 AND m.role = 'owner'
-LIMIT 1`
+LIMIT 1
+`
 
 // Get store where user is owner
 func (q *Queries) GetStoreByOwnerUserID(ctx context.Context, userID pgtype.UUID) (Store, error) {
 	row := q.db.QueryRow(ctx, getStoreByOwnerUserID, userID)
 	var i Store
-	err := scanStore(row, &i)
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.Website,
+		&i.LogoUrl,
+		&i.AddressStreet,
+		&i.AddressCity,
+		&i.AddressState,
+		&i.AddressZip,
+		&i.AddressCountry,
+		&i.SendOnLiveEnd,
+		&i.CartAllowEdit,
+		&i.CheckoutSendMethods,
+		&i.NotificationSettings,
+		&i.CartMessageCooldownSeconds,
+		&i.CartSendExpirationReminder,
+		&i.CartExpirationReminderMinutes,
+		&i.CartRealTime,
+		&i.Cnpj,
+		&i.AddressNumber,
+		&i.AddressComplement,
+		&i.AddressDistrict,
+		&i.AddressStateRegister,
+		&i.DefaultPackageWeightGrams,
+		&i.DefaultPackageFormat,
+		&i.DefaultHeightCm,
+		&i.DefaultWidthCm,
+		&i.DefaultLengthCm,
+	)
 	return i, err
 }
 
 const getStoreBySlug = `-- name: GetStoreBySlug :one
-SELECT ` + storeColumns + ` FROM stores WHERE slug = $1`
+SELECT id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj, address_number, address_complement, address_district, address_state_register, default_package_weight_grams, default_package_format, default_height_cm, default_width_cm, default_length_cm FROM stores WHERE slug = $1
+`
 
 func (q *Queries) GetStoreBySlug(ctx context.Context, slug string) (Store, error) {
 	row := q.db.QueryRow(ctx, getStoreBySlug, slug)
 	var i Store
-	err := scanStore(row, &i)
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.Website,
+		&i.LogoUrl,
+		&i.AddressStreet,
+		&i.AddressCity,
+		&i.AddressState,
+		&i.AddressZip,
+		&i.AddressCountry,
+		&i.SendOnLiveEnd,
+		&i.CartAllowEdit,
+		&i.CheckoutSendMethods,
+		&i.NotificationSettings,
+		&i.CartMessageCooldownSeconds,
+		&i.CartSendExpirationReminder,
+		&i.CartExpirationReminderMinutes,
+		&i.CartRealTime,
+		&i.Cnpj,
+		&i.AddressNumber,
+		&i.AddressComplement,
+		&i.AddressDistrict,
+		&i.AddressStateRegister,
+		&i.DefaultPackageWeightGrams,
+		&i.DefaultPackageFormat,
+		&i.DefaultHeightCm,
+		&i.DefaultWidthCm,
+		&i.DefaultLengthCm,
+	)
 	return i, err
 }
 
 const getStoreByUserID = `-- name: GetStoreByUserID :one
-SELECT ` + storeColumnsS + `
+SELECT s.id, s.name, s.slug, s.active, s.whatsapp_number, s.email_address, s.sms_number, s.created_at, s.cart_enabled, s.cart_expiration_minutes, s.cart_reserve_stock, s.cart_max_items, s.cart_max_quantity_per_item, s.updated_at, s.description, s.website, s.logo_url, s.address_street, s.address_city, s.address_state, s.address_zip, s.address_country, s.send_on_live_end, s.cart_allow_edit, s.checkout_send_methods, s.notification_settings, s.cart_message_cooldown_seconds, s.cart_send_expiration_reminder, s.cart_expiration_reminder_minutes, s.cart_real_time, s.cnpj, s.address_number, s.address_complement, s.address_district, s.address_state_register, s.default_package_weight_grams, s.default_package_format, s.default_height_cm, s.default_width_cm, s.default_length_cm
 FROM stores s
 JOIN memberships m ON s.id = m.store_id
-WHERE m.user_id = $1 AND m.status = 'active'`
+WHERE m.user_id = $1 AND m.status = 'active'
+`
 
 // Get the single store for a user (1 user = 1 store)
 func (q *Queries) GetStoreByUserID(ctx context.Context, userID pgtype.UUID) (Store, error) {
 	row := q.db.QueryRow(ctx, getStoreByUserID, userID)
 	var i Store
-	err := scanStore(row, &i)
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.Website,
+		&i.LogoUrl,
+		&i.AddressStreet,
+		&i.AddressCity,
+		&i.AddressState,
+		&i.AddressZip,
+		&i.AddressCountry,
+		&i.SendOnLiveEnd,
+		&i.CartAllowEdit,
+		&i.CheckoutSendMethods,
+		&i.NotificationSettings,
+		&i.CartMessageCooldownSeconds,
+		&i.CartSendExpirationReminder,
+		&i.CartExpirationReminderMinutes,
+		&i.CartRealTime,
+		&i.Cnpj,
+		&i.AddressNumber,
+		&i.AddressComplement,
+		&i.AddressDistrict,
+		&i.AddressStateRegister,
+		&i.DefaultPackageWeightGrams,
+		&i.DefaultPackageFormat,
+		&i.DefaultHeightCm,
+		&i.DefaultWidthCm,
+		&i.DefaultLengthCm,
+	)
 	return i, err
 }
 
@@ -214,7 +370,8 @@ SET
   address_state_register = $18,
   updated_at = now()
 WHERE id = $1
-RETURNING ` + storeColumns
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj, address_number, address_complement, address_district, address_state_register, default_package_weight_grams, default_package_format, default_height_cm, default_width_cm, default_length_cm
+`
 
 type UpdateStoreParams struct {
 	ID                   pgtype.UUID `json:"id"`
@@ -259,7 +416,48 @@ func (q *Queries) UpdateStore(ctx context.Context, arg UpdateStoreParams) (Store
 		arg.AddressStateRegister,
 	)
 	var i Store
-	err := scanStore(row, &i)
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.Website,
+		&i.LogoUrl,
+		&i.AddressStreet,
+		&i.AddressCity,
+		&i.AddressState,
+		&i.AddressZip,
+		&i.AddressCountry,
+		&i.SendOnLiveEnd,
+		&i.CartAllowEdit,
+		&i.CheckoutSendMethods,
+		&i.NotificationSettings,
+		&i.CartMessageCooldownSeconds,
+		&i.CartSendExpirationReminder,
+		&i.CartExpirationReminderMinutes,
+		&i.CartRealTime,
+		&i.Cnpj,
+		&i.AddressNumber,
+		&i.AddressComplement,
+		&i.AddressDistrict,
+		&i.AddressStateRegister,
+		&i.DefaultPackageWeightGrams,
+		&i.DefaultPackageFormat,
+		&i.DefaultHeightCm,
+		&i.DefaultWidthCm,
+		&i.DefaultLengthCm,
+	)
 	return i, err
 }
 
@@ -279,7 +477,8 @@ SET
   cart_expiration_reminder_minutes = $12,
   updated_at = now()
 WHERE id = $1
-RETURNING ` + storeColumns
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj, address_number, address_complement, address_district, address_state_register, default_package_weight_grams, default_package_format, default_height_cm, default_width_cm, default_length_cm
+`
 
 type UpdateStoreCartSettingsParams struct {
 	ID                            pgtype.UUID     `json:"id"`
@@ -312,7 +511,48 @@ func (q *Queries) UpdateStoreCartSettings(ctx context.Context, arg UpdateStoreCa
 		arg.CartExpirationReminderMinutes,
 	)
 	var i Store
-	err := scanStore(row, &i)
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.Website,
+		&i.LogoUrl,
+		&i.AddressStreet,
+		&i.AddressCity,
+		&i.AddressState,
+		&i.AddressZip,
+		&i.AddressCountry,
+		&i.SendOnLiveEnd,
+		&i.CartAllowEdit,
+		&i.CheckoutSendMethods,
+		&i.NotificationSettings,
+		&i.CartMessageCooldownSeconds,
+		&i.CartSendExpirationReminder,
+		&i.CartExpirationReminderMinutes,
+		&i.CartRealTime,
+		&i.Cnpj,
+		&i.AddressNumber,
+		&i.AddressComplement,
+		&i.AddressDistrict,
+		&i.AddressStateRegister,
+		&i.DefaultPackageWeightGrams,
+		&i.DefaultPackageFormat,
+		&i.DefaultHeightCm,
+		&i.DefaultWidthCm,
+		&i.DefaultLengthCm,
+	)
 	return i, err
 }
 
@@ -323,7 +563,8 @@ SET
   send_on_live_end = $3,
   updated_at = now()
 WHERE id = $1
-RETURNING ` + storeColumns
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj, address_number, address_complement, address_district, address_state_register, default_package_weight_grams, default_package_format, default_height_cm, default_width_cm, default_length_cm
+`
 
 type UpdateStoreCheckoutSettingsParams struct {
 	ID                  pgtype.UUID     `json:"id"`
@@ -334,7 +575,48 @@ type UpdateStoreCheckoutSettingsParams struct {
 func (q *Queries) UpdateStoreCheckoutSettings(ctx context.Context, arg UpdateStoreCheckoutSettingsParams) (Store, error) {
 	row := q.db.QueryRow(ctx, updateStoreCheckoutSettings, arg.ID, arg.CheckoutSendMethods, arg.SendOnLiveEnd)
 	var i Store
-	err := scanStore(row, &i)
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.Website,
+		&i.LogoUrl,
+		&i.AddressStreet,
+		&i.AddressCity,
+		&i.AddressState,
+		&i.AddressZip,
+		&i.AddressCountry,
+		&i.SendOnLiveEnd,
+		&i.CartAllowEdit,
+		&i.CheckoutSendMethods,
+		&i.NotificationSettings,
+		&i.CartMessageCooldownSeconds,
+		&i.CartSendExpirationReminder,
+		&i.CartExpirationReminderMinutes,
+		&i.CartRealTime,
+		&i.Cnpj,
+		&i.AddressNumber,
+		&i.AddressComplement,
+		&i.AddressDistrict,
+		&i.AddressStateRegister,
+		&i.DefaultPackageWeightGrams,
+		&i.DefaultPackageFormat,
+		&i.DefaultHeightCm,
+		&i.DefaultWidthCm,
+		&i.DefaultLengthCm,
+	)
 	return i, err
 }
 
@@ -344,7 +626,8 @@ SET
   logo_url = $2,
   updated_at = now()
 WHERE id = $1
-RETURNING ` + storeColumns
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj, address_number, address_complement, address_district, address_state_register, default_package_weight_grams, default_package_format, default_height_cm, default_width_cm, default_length_cm
+`
 
 type UpdateStoreLogoURLParams struct {
 	ID      pgtype.UUID `json:"id"`
@@ -354,7 +637,48 @@ type UpdateStoreLogoURLParams struct {
 func (q *Queries) UpdateStoreLogoURL(ctx context.Context, arg UpdateStoreLogoURLParams) (Store, error) {
 	row := q.db.QueryRow(ctx, updateStoreLogoURL, arg.ID, arg.LogoUrl)
 	var i Store
-	err := scanStore(row, &i)
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.Website,
+		&i.LogoUrl,
+		&i.AddressStreet,
+		&i.AddressCity,
+		&i.AddressState,
+		&i.AddressZip,
+		&i.AddressCountry,
+		&i.SendOnLiveEnd,
+		&i.CartAllowEdit,
+		&i.CheckoutSendMethods,
+		&i.NotificationSettings,
+		&i.CartMessageCooldownSeconds,
+		&i.CartSendExpirationReminder,
+		&i.CartExpirationReminderMinutes,
+		&i.CartRealTime,
+		&i.Cnpj,
+		&i.AddressNumber,
+		&i.AddressComplement,
+		&i.AddressDistrict,
+		&i.AddressStateRegister,
+		&i.DefaultPackageWeightGrams,
+		&i.DefaultPackageFormat,
+		&i.DefaultHeightCm,
+		&i.DefaultWidthCm,
+		&i.DefaultLengthCm,
+	)
 	return i, err
 }
 
@@ -368,7 +692,8 @@ SET
   default_length_cm            = $6,
   updated_at                   = now()
 WHERE id = $1
-RETURNING ` + storeColumns
+RETURNING id, name, slug, active, whatsapp_number, email_address, sms_number, created_at, cart_enabled, cart_expiration_minutes, cart_reserve_stock, cart_max_items, cart_max_quantity_per_item, updated_at, description, website, logo_url, address_street, address_city, address_state, address_zip, address_country, send_on_live_end, cart_allow_edit, checkout_send_methods, notification_settings, cart_message_cooldown_seconds, cart_send_expiration_reminder, cart_expiration_reminder_minutes, cart_real_time, cnpj, address_number, address_complement, address_district, address_state_register, default_package_weight_grams, default_package_format, default_height_cm, default_width_cm, default_length_cm
+`
 
 type UpdateStoreShippingDefaultsParams struct {
 	ID                        pgtype.UUID `json:"id"`
@@ -380,8 +705,56 @@ type UpdateStoreShippingDefaultsParams struct {
 }
 
 func (q *Queries) UpdateStoreShippingDefaults(ctx context.Context, arg UpdateStoreShippingDefaultsParams) (Store, error) {
-	row := q.db.QueryRow(ctx, updateStoreShippingDefaults, arg.ID, arg.DefaultPackageWeightGrams, arg.DefaultPackageFormat, arg.DefaultHeightCm, arg.DefaultWidthCm, arg.DefaultLengthCm)
+	row := q.db.QueryRow(ctx, updateStoreShippingDefaults,
+		arg.ID,
+		arg.DefaultPackageWeightGrams,
+		arg.DefaultPackageFormat,
+		arg.DefaultHeightCm,
+		arg.DefaultWidthCm,
+		arg.DefaultLengthCm,
+	)
 	var i Store
-	err := scanStore(row, &i)
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Active,
+		&i.WhatsappNumber,
+		&i.EmailAddress,
+		&i.SmsNumber,
+		&i.CreatedAt,
+		&i.CartEnabled,
+		&i.CartExpirationMinutes,
+		&i.CartReserveStock,
+		&i.CartMaxItems,
+		&i.CartMaxQuantityPerItem,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.Website,
+		&i.LogoUrl,
+		&i.AddressStreet,
+		&i.AddressCity,
+		&i.AddressState,
+		&i.AddressZip,
+		&i.AddressCountry,
+		&i.SendOnLiveEnd,
+		&i.CartAllowEdit,
+		&i.CheckoutSendMethods,
+		&i.NotificationSettings,
+		&i.CartMessageCooldownSeconds,
+		&i.CartSendExpirationReminder,
+		&i.CartExpirationReminderMinutes,
+		&i.CartRealTime,
+		&i.Cnpj,
+		&i.AddressNumber,
+		&i.AddressComplement,
+		&i.AddressDistrict,
+		&i.AddressStateRegister,
+		&i.DefaultPackageWeightGrams,
+		&i.DefaultPackageFormat,
+		&i.DefaultHeightCm,
+		&i.DefaultWidthCm,
+		&i.DefaultLengthCm,
+	)
 	return i, err
 }

@@ -3,6 +3,7 @@ package checkout
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
@@ -49,6 +50,19 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 		return nil, httpx.ErrUnprocessable("carrinho expirado")
 	}
 	// Note: paid carts are allowed - frontend will show a "paid" dialog
+
+	// Freeze the initial cart on the very first GET (idempotent — subsequent
+	// calls are no-ops). Failure here is non-fatal: the buyer must still be
+	// able to pay even if snapshotting blew up; the upsell card just won't
+	// have a baseline to compare against.
+	if cart.PaymentStatus != "paid" {
+		if err := s.repo.EnsureInitialSnapshot(ctx, cart.ID); err != nil {
+			s.logger.Warn("failed to snapshot initial cart",
+				zap.String("cart_id", cart.ID),
+				zap.Error(err),
+			)
+		}
+	}
 
 	// Get cart items
 	items, err := s.repo.ListCartItems(ctx, cart.ID)
@@ -101,6 +115,7 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 			Name:               item.Name,
 			ImageURL:           item.ImageURL,
 			Keyword:            item.Keyword,
+			AvailableStock:     item.AvailableStock,
 		}
 	}
 
@@ -666,6 +681,277 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 		ExpiresAt:  result.ExpiresAt,
 		TicketURL:  result.TicketURL,
 	}, nil
+}
+
+// =============================================================================
+// CART ITEM MUTATIONS
+// =============================================================================
+
+// UpdateCartItemQuantity changes an existing item's quantity. delta > 0 grows
+// (and bumps ERP reservation), delta < 0 shrinks (and reverses ERP). Returns
+// the freshly-loaded cart payload so the frontend can swap the React Query
+// cache in one call.
+func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartItemInput) (*GetCartForCheckoutOutput, error) {
+	cart, item, err := s.loadEditableCartItem(ctx, input.Token, input.ItemID)
+	if err != nil {
+		return nil, err
+	}
+	if input.Quantity < 1 {
+		return nil, httpx.ErrUnprocessable("quantidade deve ser pelo menos 1")
+	}
+
+	delta := input.Quantity - item.Quantity
+	if delta == 0 {
+		return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
+	}
+
+	if delta > 0 {
+		if err := s.validateQuantityCap(ctx, cart, item.ProductID, input.Quantity); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := s.repo.EnsureInitialSnapshot(ctx, cart.ID); err != nil {
+		return nil, err
+	}
+	if err := s.repo.SetCartItemQuantity(ctx, item.ID, input.Quantity); err != nil {
+		return nil, err
+	}
+
+	movementID, syncErr := s.integrationService.AdjustStockReservationDelta(
+		ctx, cart.StoreID, cart.ID, cart.EventID, item.ProductID,
+		delta, item.UnitPrice, cart.PlatformHandle,
+	)
+	if syncErr != nil {
+		// Roll back the local change so the buyer sees the failure clearly.
+		_ = s.repo.SetCartItemQuantity(ctx, item.ID, item.Quantity)
+		s.logger.Error("ERP delta sync failed, rolled back cart item quantity",
+			zap.String("cart_id", cart.ID),
+			zap.String("product_id", item.ProductID),
+			zap.Int("delta", delta),
+			zap.Error(syncErr),
+		)
+		return nil, httpx.ErrUnprocessable("não foi possível atualizar o estoque, tente novamente")
+	}
+
+	mutationType := "quantity_increased"
+	if delta < 0 {
+		mutationType = "quantity_decreased"
+	}
+	if err := s.repo.RecordMutation(ctx, MutationParams{
+		CartID:         cart.ID,
+		ProductID:      item.ProductID,
+		MutationType:   mutationType,
+		QuantityBefore: item.Quantity,
+		QuantityAfter:  input.Quantity,
+		UnitPrice:      item.UnitPrice,
+		ERPMovementID:  movementID,
+	}); err != nil {
+		s.logger.Warn("cart item quantity changed but mutation log write failed",
+			zap.String("cart_id", cart.ID),
+			zap.String("product_id", item.ProductID),
+			zap.Error(err),
+		)
+	}
+
+	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
+}
+
+// RemoveCartItem deletes an item entirely and reverses the ERP reservation.
+func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput) (*GetCartForCheckoutOutput, error) {
+	cart, item, err := s.loadEditableCartItem(ctx, input.Token, input.ItemID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.repo.EnsureInitialSnapshot(ctx, cart.ID); err != nil {
+		return nil, err
+	}
+	if err := s.repo.DeleteCartItem(ctx, item.ID); err != nil {
+		return nil, err
+	}
+
+	movementID, syncErr := s.integrationService.AdjustStockReservationDelta(
+		ctx, cart.StoreID, cart.ID, cart.EventID, item.ProductID,
+		-item.Quantity, item.UnitPrice, cart.PlatformHandle,
+	)
+	if syncErr != nil {
+		// Re-create the row at the original quantity to keep state consistent.
+		if _, restoreErr := s.repo.CreateCartItem(ctx, cart.ID, item.ProductID, item.Quantity, item.UnitPrice); restoreErr != nil {
+			s.logger.Error("failed to restore cart item after ERP failure — manual intervention needed",
+				zap.String("cart_id", cart.ID),
+				zap.String("product_id", item.ProductID),
+				zap.Error(restoreErr),
+			)
+		}
+		s.logger.Error("ERP reversal failed on remove, restored cart item",
+			zap.String("cart_id", cart.ID),
+			zap.String("product_id", item.ProductID),
+			zap.Error(syncErr),
+		)
+		return nil, httpx.ErrUnprocessable("não foi possível remover o item, tente novamente")
+	}
+
+	if err := s.repo.RecordMutation(ctx, MutationParams{
+		CartID:         cart.ID,
+		ProductID:      item.ProductID,
+		MutationType:   "item_removed",
+		QuantityBefore: item.Quantity,
+		QuantityAfter:  0,
+		UnitPrice:      item.UnitPrice,
+		ERPMovementID:  movementID,
+	}); err != nil {
+		s.logger.Warn("item removed but mutation log write failed",
+			zap.String("cart_id", cart.ID),
+			zap.String("product_id", item.ProductID),
+			zap.Error(err),
+		)
+	}
+
+	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
+}
+
+// AddCartItem adds a brand-new product to the cart (or sums onto an existing
+// row for the same product). Validates the product against the event whitelist
+// and quantity cap before touching the ERP.
+func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*GetCartForCheckoutOutput, error) {
+	cart, err := s.loadEditableCart(ctx, input.Token)
+	if err != nil {
+		return nil, err
+	}
+	if input.Quantity < 1 {
+		return nil, httpx.ErrUnprocessable("quantidade deve ser pelo menos 1")
+	}
+
+	cfg, err := s.repo.GetEventProductForCart(ctx, cart.EventID, cart.StoreID, input.ProductID)
+	if err != nil {
+		return nil, err
+	}
+	if !cfg.Active {
+		return nil, httpx.ErrUnprocessable("produto não está ativo")
+	}
+	if !cfg.IsAllowed {
+		return nil, httpx.ErrUnprocessable("produto não disponível neste evento")
+	}
+
+	existing, err := s.repo.FindCartItemByProduct(ctx, cart.ID, input.ProductID)
+	if err != nil {
+		return nil, err
+	}
+	currentQty := 0
+	if existing != nil {
+		currentQty = existing.Quantity
+	}
+	desiredQty := currentQty + input.Quantity
+	if cfg.MaxQuantity > 0 && desiredQty > cfg.MaxQuantity {
+		return nil, httpx.ErrUnprocessable(fmt.Sprintf("limite de %d por item", cfg.MaxQuantity))
+	}
+	if cfg.Stock > 0 && desiredQty > cfg.Stock {
+		return nil, httpx.ErrUnprocessable(fmt.Sprintf("apenas %d em estoque", cfg.Stock))
+	}
+
+	if err := s.repo.EnsureInitialSnapshot(ctx, cart.ID); err != nil {
+		return nil, err
+	}
+
+	if existing != nil {
+		if err := s.repo.SetCartItemQuantity(ctx, existing.ID, desiredQty); err != nil {
+			return nil, err
+		}
+	} else {
+		if _, err := s.repo.CreateCartItem(ctx, cart.ID, input.ProductID, input.Quantity, cfg.UnitPrice); err != nil {
+			return nil, err
+		}
+	}
+
+	movementID, syncErr := s.integrationService.AdjustStockReservationDelta(
+		ctx, cart.StoreID, cart.ID, cart.EventID, input.ProductID,
+		input.Quantity, cfg.UnitPrice, cart.PlatformHandle,
+	)
+	if syncErr != nil {
+		// Roll back. With existing != nil, restore previous qty; with new row, delete it.
+		if existing != nil {
+			_ = s.repo.SetCartItemQuantity(ctx, existing.ID, currentQty)
+		} else if rollback, _ := s.repo.FindCartItemByProduct(ctx, cart.ID, input.ProductID); rollback != nil {
+			_ = s.repo.DeleteCartItem(ctx, rollback.ID)
+		}
+		return nil, httpx.ErrUnprocessable("não foi possível adicionar o produto, tente novamente")
+	}
+
+	mutationType := "item_added"
+	if existing != nil {
+		mutationType = "quantity_increased"
+	}
+	if err := s.repo.RecordMutation(ctx, MutationParams{
+		CartID:         cart.ID,
+		ProductID:      input.ProductID,
+		MutationType:   mutationType,
+		QuantityBefore: currentQty,
+		QuantityAfter:  desiredQty,
+		UnitPrice:      cfg.UnitPrice,
+		ERPMovementID:  movementID,
+	}); err != nil {
+		s.logger.Warn("cart item added but mutation log write failed",
+			zap.String("cart_id", cart.ID),
+			zap.String("product_id", input.ProductID),
+			zap.Error(err),
+		)
+	}
+
+	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
+}
+
+// loadEditableCart asserts the cart is in a state that accepts mutations.
+func (s *Service) loadEditableCart(ctx context.Context, token string) (*CartRow, error) {
+	cart, err := s.repo.GetCartByToken(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	if cart.Status == "expired" {
+		return nil, httpx.ErrUnprocessable("carrinho expirado")
+	}
+	if cart.PaymentStatus == "paid" {
+		return nil, httpx.ErrConflict("carrinho já foi pago")
+	}
+	if !cart.AllowEdit {
+		return nil, httpx.ErrConflict("edição do carrinho desabilitada para esta loja")
+	}
+	if cart.ExpiresAt != nil && cart.ExpiresAt.Before(time.Now()) {
+		return nil, httpx.ErrUnprocessable("carrinho expirado")
+	}
+	return cart, nil
+}
+
+// loadEditableCartItem returns the cart and the specific item, asserting the
+// item belongs to the cart and the cart is editable.
+func (s *Service) loadEditableCartItem(ctx context.Context, token, itemID string) (*CartRow, *CartItemRow, error) {
+	cart, err := s.loadEditableCart(ctx, token)
+	if err != nil {
+		return nil, nil, err
+	}
+	item, err := s.repo.GetCartItem(ctx, itemID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if item.CartID != cart.ID {
+		return nil, nil, httpx.ErrNotFound("item não encontrado neste carrinho")
+	}
+	return cart, item, nil
+}
+
+// validateQuantityCap re-checks per-item caps + product stock for an increase.
+func (s *Service) validateQuantityCap(ctx context.Context, cart *CartRow, productID string, desiredQty int) error {
+	cfg, err := s.repo.GetEventProductForCart(ctx, cart.EventID, cart.StoreID, productID)
+	if err != nil {
+		return err
+	}
+	if cfg.MaxQuantity > 0 && desiredQty > cfg.MaxQuantity {
+		return httpx.ErrUnprocessable(fmt.Sprintf("limite de %d por item", cfg.MaxQuantity))
+	}
+	if cfg.Stock > 0 && desiredQty > cfg.Stock {
+		return httpx.ErrUnprocessable(fmt.Sprintf("apenas %d em estoque", cfg.Stock))
+	}
+	return nil
 }
 
 // GetPaymentStatus retrieves the current payment status.

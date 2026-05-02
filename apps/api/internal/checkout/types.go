@@ -108,6 +108,10 @@ type CartItemResponse struct {
 	UnitPrice          int64   `json:"unitPrice"`
 	TotalPrice         int64   `json:"totalPrice"`
 	WaitlistedQuantity int     `json:"waitlistedQuantity"`
+	// AvailableStock is the product.stock value at read time. The frontend
+	// combines it with MaxQuantityPerItem (cart-level cap) to disable the +
+	// button when the buyer would exceed either limit.
+	AvailableStock int `json:"availableStock"`
 }
 
 // CartSummary contains the cart totals
@@ -284,6 +288,7 @@ type CartItemDetails struct {
 	Name               string
 	ImageURL           *string
 	Keyword            *string
+	AvailableStock     int
 }
 
 // GenerateCheckoutInput is the input for GenerateCheckout service method
@@ -368,6 +373,31 @@ type GeneratePixOutput struct {
 // GetPaymentStatusInput is the input for GetPaymentStatus service method
 type GetPaymentStatusInput struct {
 	Token string
+}
+
+// =============================================================================
+// CART ITEM MUTATIONS (PATCH/DELETE/POST /api/public/checkout/:token/items)
+// =============================================================================
+
+// UpdateCartItemQuantityRequest is the body for PATCH /items/:itemId
+type UpdateCartItemQuantityRequest struct {
+	Quantity int `json:"quantity" validate:"required,min=1"`
+}
+
+// AddCartItemRequest is the body for POST /items
+type AddCartItemRequest struct {
+	ProductID string `json:"productId" validate:"required,uuid"`
+	Quantity  int    `json:"quantity" validate:"required,min=1"`
+}
+
+// MutateCartItemInput is the service-level input shared by the three mutation
+// endpoints. ItemID is empty when adding a new product. Quantity is the
+// desired final quantity (0 means delete).
+type MutateCartItemInput struct {
+	Token     string
+	ItemID    string
+	ProductID string
+	Quantity  int
 }
 
 // GetPaymentStatusOutput is the output for GetPaymentStatus service method
@@ -501,6 +531,7 @@ type CartItemRow struct {
 	Name               string
 	ImageURL           *string
 	Keyword            *string
+	AvailableStock     int
 }
 
 // UpdateCheckoutParams contains parameters for updating cart checkout info
