@@ -497,13 +497,6 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 		payload["issuer_id"] = input.IssuerID
 	}
 
-	// Add device ID for fraud prevention if provided
-	if input.DeviceID != "" {
-		payload["additional_info"] = map[string]any{
-			"ip_address": input.DeviceID, // This is actually used for device fingerprint
-		}
-	}
-
 	if input.Metadata != nil {
 		payload["metadata"] = input.Metadata
 	}
@@ -511,6 +504,13 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 	// Add idempotency key header
 	headers := m.authHeaders()
 	headers["X-Idempotency-Key"] = fmt.Sprintf("card-%s-%d", input.CartID, input.TotalAmount)
+	// Device fingerprint (MP_DEVICE_SESSION_ID from the SDK) goes in the
+	// X-meli-session-id header for anti-fraud, not in additional_info.ip_address
+	// — that field is for the customer IP and using it for the fingerprint
+	// taints fraud scoring.
+	if input.DeviceID != "" {
+		headers["X-meli-session-id"] = input.DeviceID
+	}
 
 	resp, body, err := m.DoRequest(ctx, http.MethodPost, url, payload, headers)
 	if err != nil {
@@ -548,6 +548,15 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 		if errMsg == "" {
 			errMsg = fmt.Sprintf("payment failed with status %d", resp.StatusCode)
 		}
+		// Log the raw MP response so we can diagnose internal_error / fraud
+		// rejections from production without having to rerun the flow.
+		m.Logger.Error("mercado pago rejected card payment",
+			zap.Int("status_code", resp.StatusCode),
+			zap.String("status_detail", mpResp.StatusDetail),
+			zap.String("mp_error", mpResp.Error),
+			zap.String("mp_message", mpResp.Message),
+			zap.ByteString("body", body),
+		)
 		return &CardPaymentResult{
 			Status:       PaymentRejected,
 			StatusDetail: mpResp.StatusDetail,
