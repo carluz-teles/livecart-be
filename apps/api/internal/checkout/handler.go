@@ -356,12 +356,13 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 			Name:    output.Cart.StoreName,
 			LogoURL: h.getPresignedLogoURL(output.Cart.StoreLogoURL),
 		},
-		Items:           items,
-		Summary:         summary,
-		Shipping:        output.Cart.Shipping,
-		Customer:        toCheckoutCustomer(output.Customer),
-		ShippingAddress: toCheckoutShippingAddress(output.ShippingAddress),
-		Payment:         toCheckoutPayment(output.Payment, output.Cart.PaidAt, output.Cart.CheckoutID),
+		Items:               items,
+		Summary:             summary,
+		Shipping:            output.Cart.Shipping,
+		Customer:            toCheckoutCustomer(output.Customer),
+		ShippingAddress:     toCheckoutShippingAddress(output.ShippingAddress),
+		Payment:             toCheckoutPayment(output.Payment, output.Cart.PaidAt, output.Cart.CheckoutID),
+		IsReturningCustomer: output.Cart.IsReturningCustomer,
 	}
 }
 

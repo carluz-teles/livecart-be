@@ -106,6 +106,67 @@ func (r *Repository) ReadCartPaymentDetails(ctx context.Context, pool *pgxpool.P
 	return customer, address, payment, nil
 }
 
+// GetLatestPaidCustomerSnapshot returns the customer + shipping address from
+// the most recent paid cart of the same buyer (same store + platform_user_id),
+// excluding the current cart. Used by GetCartForCheckout to prefill the
+// transparent checkout form for returning buyers.
+//
+// Returns (nil, nil, nil) when there is no prior paid cart, when platformUserID
+// is empty (anonymous), or when the prior cart had nothing useful recorded
+// (e.g. older paid carts predating the customer-info columns).
+func (r *Repository) GetLatestPaidCustomerSnapshot(ctx context.Context, pool *pgxpool.Pool, storeID, platformUserID, excludeCartID string) (*CartCustomerInfo, *CartShippingAddressInfo, error) {
+	if platformUserID == "" {
+		return nil, nil, nil
+	}
+
+	storeUID, err := uuid.Parse(storeID)
+	if err != nil {
+		return nil, nil, httpx.ErrBadRequest("invalid store ID")
+	}
+	excludeUID, err := uuid.Parse(excludeCartID)
+	if err != nil {
+		return nil, nil, httpx.ErrBadRequest("invalid cart ID")
+	}
+
+	var (
+		customerName     pgtype.Text
+		customerDocument pgtype.Text
+		customerPhone    pgtype.Text
+		customerEmail    pgtype.Text
+		shippingAddress  []byte
+	)
+
+	err = pool.QueryRow(ctx, `
+		SELECT c.customer_name,
+		       c.customer_document,
+		       c.customer_phone,
+		       c.customer_email,
+		       c.shipping_address
+		FROM carts c
+		JOIN live_events e ON e.id = c.event_id
+		WHERE e.store_id = $1
+		  AND c.platform_user_id = $2
+		  AND c.payment_status = 'paid'
+		  AND c.id <> $3
+		ORDER BY c.paid_at DESC NULLS LAST
+		LIMIT 1
+	`,
+		pgtype.UUID{Bytes: storeUID, Valid: true},
+		platformUserID,
+		pgtype.UUID{Bytes: excludeUID, Valid: true},
+	).Scan(&customerName, &customerDocument, &customerPhone, &customerEmail, &shippingAddress)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("reading prior paid cart snapshot: %w", err)
+	}
+
+	customer := buildCustomerInfo(customerName, customerDocument, customerPhone, customerEmail)
+	address := buildShippingAddressInfo(shippingAddress)
+	return customer, address, nil
+}
+
 // WriteCartCardPayment persists the brand/last4/installments/auth-code
 // returned by the payment provider after a successful card authorization,
 // plus the payment_method itself when not already set. Called from the

@@ -37,6 +37,10 @@ type CartForCheckoutResponse struct {
 	Customer           *CheckoutCustomerInfo           `json:"customer,omitempty"`
 	ShippingAddress    *CheckoutShippingAddressInfo    `json:"shippingAddress,omitempty"`
 	Payment            *CheckoutPaymentInfo            `json:"payment,omitempty"`
+	// True when Customer / ShippingAddress were prefilled from the same buyer's
+	// previous paid cart (returning-buyer flow). Frontend uses it to render the
+	// "olá de novo" banner above the form.
+	IsReturningCustomer bool                           `json:"isReturningCustomer,omitempty"`
 }
 
 // CheckoutCustomerInfo is the buyer identity captured at checkout. Exposed
@@ -242,27 +246,31 @@ type GetCartForCheckoutOutput struct {
 
 // CartDetails contains the cart data with event/store info
 type CartDetails struct {
-	ID                 string
-	EventID            string
-	PlatformUserID     string
-	PlatformHandle     string
-	Token              string
-	Status             string
-	CheckoutURL        *string
-	CheckoutID         *string
-	CustomerEmail      *string
-	PaymentStatus      string
-	PaidAt             *time.Time
-	CreatedAt          time.Time
-	ExpiresAt          *time.Time
-	EventTitle         string
-	EventFreeShipping  bool
-	StoreID            string
-	StoreName          string
-	StoreLogoURL       *string
-	AllowEdit          bool
-	MaxQuantityPerItem int
-	Shipping           *CartShippingSelection
+	ID                  string
+	EventID             string
+	PlatformUserID      string
+	PlatformHandle      string
+	Token               string
+	Status              string
+	CheckoutURL         *string
+	CheckoutID          *string
+	CustomerEmail       *string
+	PaymentStatus       string
+	PaidAt              *time.Time
+	CreatedAt           time.Time
+	ExpiresAt           *time.Time
+	EventTitle          string
+	EventFreeShipping   bool
+	StoreID             string
+	StoreName           string
+	StoreLogoURL        *string
+	AllowEdit           bool
+	MaxQuantityPerItem  int
+	Shipping            *CartShippingSelection
+	// Set by the service when Customer / ShippingAddress on this output came
+	// from the buyer's prior paid cart (returning-buyer prefill) rather than
+	// from the current cart's own paid receipt.
+	IsReturningCustomer bool
 }
 
 // CartItemDetails contains a cart item with product info

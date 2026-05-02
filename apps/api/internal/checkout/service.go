@@ -121,6 +121,22 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 			output.ShippingAddress = address
 			output.Payment = payment
 		}
+	} else if cart.PlatformUserID != "" {
+		// Returning-buyer prefill: the same Instagram user already has a paid
+		// cart on this store, so reuse that snapshot to populate name / CPF /
+		// phone / address. Same trust boundary as the existing email prefill —
+		// the cart token is unguessable and only ever delivered to the buyer.
+		customer, address, err := s.repo.GetLatestPaidCustomerSnapshot(ctx, s.pool, cart.StoreID, cart.PlatformUserID, cart.ID)
+		if err != nil {
+			s.logger.Warn("failed to read returning-buyer snapshot",
+				zap.String("cart_id", cart.ID),
+				zap.Error(err),
+			)
+		} else if customer != nil || address != nil {
+			output.Customer = customer
+			output.ShippingAddress = address
+			output.Cart.IsReturningCustomer = true
+		}
 	}
 
 	return output, nil
