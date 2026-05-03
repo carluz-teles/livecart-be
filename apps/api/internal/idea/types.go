@@ -62,10 +62,6 @@ type ToggleVoteResponse struct {
 	VotedByMe bool `json:"votedByMe"`
 }
 
-type CategoriesResponse struct {
-	Data []Category `json:"data"`
-}
-
 // =============================================================================
 // Service layer
 // =============================================================================

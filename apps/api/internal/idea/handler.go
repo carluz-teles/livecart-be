@@ -31,7 +31,10 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 }
 
 func (h *Handler) ListCategories(c *fiber.Ctx) error {
-	return httpx.OK(c, CategoriesResponse{Data: Categories})
+	// httpx.OK already wraps the value in {data: ...}; sending the slice
+	// directly avoids the double-nested {data: {data: [...]}} that breaks
+	// the frontend client (which only unwraps one layer).
+	return httpx.OK(c, Categories)
 }
 
 func (h *Handler) List(c *fiber.Ctx) error {
