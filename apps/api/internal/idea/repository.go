@@ -71,56 +71,61 @@ func (r *Repository) GetByID(ctx context.Context, ideaID, callerID string) (*Ide
 
 // List builds a dynamic query covering the feed filters: tab (status/scope),
 // category, full-text search (or numeric number lookup), sort, pagination.
+//
+// The COUNT and LIST queries share the same WHERE filters but COUNT does not
+// need the caller's userID (only LIST does, for the votedByMe EXISTS subquery).
+// We collect filters as `(template, value)` pairs with a `?` marker, then
+// render the placeholders against a starting index — that lets us reuse the
+// same filter set with different leading args per query.
 func (r *Repository) List(ctx context.Context, in ListIdeasInput) ([]IdeaListItem, int, error) {
-	args := []any{in.UserID}
-	argIdx := 2
-
-	conditions := []string{}
+	type filter struct {
+		template string
+		value    any
+	}
+	var filters []filter
 
 	switch in.Tab {
 	case TabMine:
-		conditions = append(conditions, fmt.Sprintf("i.author_user_id = $%d", argIdx))
-		args = append(args, in.UserID)
-		argIdx++
+		filters = append(filters, filter{"i.author_user_id = ?", in.UserID})
 	case TabUnderStudy:
-		conditions = append(conditions, fmt.Sprintf("i.status = $%d", argIdx))
-		args = append(args, StatusUnderStudy)
-		argIdx++
+		filters = append(filters, filter{"i.status = ?", StatusUnderStudy})
 	case TabCompleted:
-		conditions = append(conditions, fmt.Sprintf("i.status = $%d", argIdx))
-		args = append(args, StatusCompleted)
-		argIdx++
+		filters = append(filters, filter{"i.status = ?", StatusCompleted})
 	}
 
 	if in.Category != "" {
-		conditions = append(conditions, fmt.Sprintf("i.category = $%d", argIdx))
-		args = append(args, in.Category)
-		argIdx++
+		filters = append(filters, filter{"i.category = ?", in.Category})
 	}
 
 	if in.Search != "" {
-		// "#42" or "42" → number lookup. Otherwise full-text on title+description.
 		raw := strings.TrimSpace(in.Search)
 		raw = strings.TrimPrefix(raw, "#")
 		if n, err := strconv.ParseInt(raw, 10, 64); err == nil {
-			conditions = append(conditions, fmt.Sprintf("i.number = $%d", argIdx))
-			args = append(args, n)
-			argIdx++
+			filters = append(filters, filter{"i.number = ?", n})
 		} else {
-			conditions = append(conditions, fmt.Sprintf(
-				"to_tsvector('portuguese', i.title || ' ' || i.description) @@ plainto_tsquery('portuguese', $%d)", argIdx))
-			args = append(args, in.Search)
-			argIdx++
+			filters = append(filters, filter{
+				"to_tsvector('portuguese', i.title || ' ' || i.description) @@ plainto_tsquery('portuguese', ?)",
+				in.Search,
+			})
 		}
 	}
 
-	where := ""
-	if len(conditions) > 0 {
-		where = " WHERE " + strings.Join(conditions, " AND ")
+	renderWhere := func(startIdx int) (string, []any) {
+		if len(filters) == 0 {
+			return "", nil
+		}
+		parts := make([]string, len(filters))
+		args := make([]any, 0, len(filters))
+		for i, f := range filters {
+			parts[i] = strings.Replace(f.template, "?", fmt.Sprintf("$%d", startIdx+i), 1)
+			args = append(args, f.value)
+		}
+		return " WHERE " + strings.Join(parts, " AND "), args
 	}
 
+	countWhere, countArgs := renderWhere(1)
 	var total int
-	if err := r.db.QueryRow(ctx, "SELECT COUNT(*) FROM ideas i"+where, args[1:]...).Scan(&total); err != nil {
+	if err := r.db.QueryRow(ctx, "SELECT COUNT(*) FROM ideas i"+countWhere, countArgs...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("counting ideas: %w", err)
 	}
 
@@ -131,6 +136,11 @@ func (r *Repository) List(ctx context.Context, in ListIdeasInput) ([]IdeaListIte
 
 	limit := in.Pagination.Limit
 	offset := in.Pagination.Offset()
+
+	// LIST query: $1 is the caller's userID (used by the votedByMe subquery);
+	// filters start at $2.
+	listWhere, listFilterArgs := renderWhere(2)
+	listArgs := append([]any{in.UserID}, listFilterArgs...)
 
 	listQ := fmt.Sprintf(`
 		SELECT i.id, i.number, i.title, i.description, i.category, i.status,
@@ -143,9 +153,9 @@ func (r *Repository) List(ctx context.Context, in ListIdeasInput) ([]IdeaListIte
 		%s
 		ORDER BY %s
 		LIMIT %d OFFSET %d
-	`, where, orderBy, limit, offset)
+	`, listWhere, orderBy, limit, offset)
 
-	rows, err := r.db.Query(ctx, listQ, args...)
+	rows, err := r.db.Query(ctx, listQ, listArgs...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("listing ideas: %w", err)
 	}

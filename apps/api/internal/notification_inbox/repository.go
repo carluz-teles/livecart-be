@@ -114,10 +114,12 @@ func (r *Repository) InsertIdeaNotification(
 	commentID *string,
 	payload []byte,
 ) error {
+	// Cast $6 to jsonb so pgx serializes the []byte as JSON text instead of
+	// bytea (hex), which Postgres rejects for jsonb columns with SQLSTATE 22P02.
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO notifications (recipient_id, actor_id, type, idea_id, comment_id, payload)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, recipientID, actorID, notifType, ideaID, commentID, payload)
+		VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+	`, recipientID, actorID, notifType, ideaID, commentID, string(payload))
 	if err != nil {
 		return fmt.Errorf("inserting notification: %w", err)
 	}
