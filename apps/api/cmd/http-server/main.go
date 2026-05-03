@@ -34,6 +34,7 @@ import (
 	"livecart/apps/api/internal/checkout"
 	"livecart/apps/api/internal/customer"
 	"livecart/apps/api/internal/dashboard"
+	"livecart/apps/api/internal/idea"
 	"livecart/apps/api/internal/integration"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/integration/providers/erp"
@@ -44,6 +45,7 @@ import (
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/internal/member"
 	"livecart/apps/api/internal/notification"
+	notificationinbox "livecart/apps/api/internal/notification_inbox"
 	"livecart/apps/api/internal/order"
 	"livecart/apps/api/internal/product"
 	"livecart/apps/api/internal/productgroup"
@@ -411,6 +413,23 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// User routes (not store-scoped)
 	userHandler := user.NewHandler(userSvc, validate, s3Client)
 	userHandler.RegisterRoutes(api)
+
+	// Ideas channel + in-app notifications inbox: authenticated but global
+	// (not bound to a store). UserOnlyMiddleware resolves the internal user
+	// UUID so handlers can use httpx.GetInternalUserID(c).
+	userScoped := api.Group("", httpx.UserOnlyMiddleware(userSvc))
+
+	ideaRepo := idea.NewRepository(pool)
+	notifInboxRepo := notificationinbox.NewRepository(pool)
+	notifInboxSvc := notificationinbox.NewService(notifInboxRepo, log)
+	notifInboxWriter := notificationinbox.NewWriter(notifInboxRepo)
+
+	ideaSvc := idea.NewService(ideaRepo, notifInboxWriter, log)
+	ideaHandler := idea.NewHandler(ideaSvc, validate)
+	ideaHandler.RegisterRoutes(userScoped)
+
+	notifInboxHandler := notificationinbox.NewHandler(notifInboxSvc)
+	notifInboxHandler.RegisterRoutes(userScoped)
 
 	// Store routes (user's own store management)
 	storeRepo := store.NewRepository(queries)

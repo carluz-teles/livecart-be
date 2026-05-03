@@ -94,6 +94,32 @@ type StoreAccessValidator interface {
 	GetStoreAccessInfo(ctx context.Context, clerkUserID, storeID string) (membershipID string, role string, userID string, err error)
 }
 
+// InternalUserResolver resolves a Clerk user ID to its internal UUID. Used by
+// UserOnlyMiddleware on routes that need the internal user_id but are NOT
+// store-scoped (e.g. the global ideas channel).
+type InternalUserResolver interface {
+	GetUserIDByClerkID(ctx context.Context, clerkUserID string) (string, error)
+}
+
+// UserOnlyMiddleware resolves the authenticated Clerk user to its internal
+// UUID and stores it under "internal_user_id" so handlers can use
+// GetInternalUserID(c) the same way they would in store-scoped routes.
+// Use after AuthMiddleware on routes that don't carry a store in the URL.
+func UserOnlyMiddleware(resolver InternalUserResolver) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		clerkUserID := GetUserID(c)
+		if clerkUserID == "" {
+			return c.Status(fiber.StatusUnauthorized).JSON(Envelope{Error: "unauthorized"})
+		}
+		internalUserID, err := resolver.GetUserIDByClerkID(c.Context(), clerkUserID)
+		if err != nil || internalUserID == "" {
+			return c.Status(fiber.StatusForbidden).JSON(Envelope{Error: "user not synced"})
+		}
+		c.Locals("internal_user_id", internalUserID)
+		return c.Next()
+	}
+}
+
 // StoreAccessMiddleware validates that the authenticated user has access to the store in the URL
 func StoreAccessMiddleware(validator StoreAccessValidator) fiber.Handler {
 	return func(c *fiber.Ctx) error {
