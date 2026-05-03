@@ -470,15 +470,20 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 		"type":         "credit_card",
 		"token":        input.Token,
 		"installments": input.Installments,
-		// Statement descriptor moved from the request root in v1/payments to
-		// inside payment_method in v1/orders.
-		"statement_descriptor": "LIVECART",
 	}
 	if input.PaymentMethodID != "" {
 		paymentMethod["id"] = input.PaymentMethodID
 	}
+	// `statement_descriptor` is documented inside payment_method on the older
+	// v1/payments examples but the Orders API gateway rejects it as
+	// `unprocessable_content` for some seller configurations. Skip until MP
+	// publishes a stable schema for it.
 
-	payer := buildPayer(input.Customer)
+	// Orders API's documented minimal payer is just `email`. MP's gateway
+	// rejects unknown additional properties, so we keep the buyer info to
+	// the bare minimum here. `external_reference` (cart_id) is enough for
+	// the BE to recover full customer details if needed.
+	payer := map[string]any{"email": input.Customer.Email}
 
 	payload := map[string]any{
 		"type":               "online",
