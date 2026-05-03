@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -477,17 +476,6 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 		if len(names) > 1 {
 			payer["last_name"] = names[1]
 		}
-	}
-
-	// Sandbox APRO simulation: MP triggers an "approved" status only when
-	// `payer.first_name` matches the cardholder name token (which we always
-	// tokenize as "APRO" during sandbox testing — see frontend test cards
-	// table). The buyer's real first name from the cart breaks the
-	// simulation and MP falls back to `internal_error` for sandbox sellers.
-	// Override only when the access_token is the TEST- prefix (sandbox); in
-	// production the buyer's actual name is preserved.
-	if strings.HasPrefix(m.credentials.AccessToken, "TEST-") {
-		payer["first_name"] = "APRO"
 	}
 
 	// Build payload
