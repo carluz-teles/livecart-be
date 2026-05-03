@@ -557,12 +557,25 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 		}
 		// Log the raw MP response so we can diagnose internal_error / fraud
 		// rejections from production without having to rerun the flow.
+		// We also log the request payload (with the card token redacted) —
+		// MP's `internal_error` with empty `cause` is opaque, and seeing the
+		// exact field set we sent often reveals issues like wrong
+		// payment_method_id, malformed identification, etc.
+		safePayload := make(map[string]any, len(payload))
+		for k, v := range payload {
+			if k == "token" {
+				safePayload[k] = "[redacted]"
+				continue
+			}
+			safePayload[k] = v
+		}
 		m.Logger.Error("mercado pago rejected card payment",
 			zap.Int("status_code", resp.StatusCode),
 			zap.String("status_detail", mpResp.StatusDetail),
 			zap.String("mp_error", mpResp.Error),
 			zap.String("mp_message", mpResp.Message),
 			zap.ByteString("body", body),
+			zap.Any("request_payload", safePayload),
 		)
 		return &CardPaymentResult{
 			Status:       PaymentRejected,
