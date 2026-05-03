@@ -495,9 +495,9 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 			}},
 		},
 	}
-	if input.Metadata != nil {
-		payload["metadata"] = input.Metadata
-	}
+	// `metadata` was accepted by /v1/payments but Orders API rejects unknown
+	// properties — `external_reference` (cart_id) is enough for the webhook
+	// handler to look up cart→store→event from our DB.
 
 	// Idempotency key includes UnixNano so each shopper attempt is a fresh
 	// request — without it, a previously-failed cart stayed stuck on MP's
@@ -621,9 +621,8 @@ func (m *MercadoPago) GeneratePixPayment(ctx context.Context, input PixPaymentIn
 			}},
 		},
 	}
-	if input.Metadata != nil {
-		payload["metadata"] = input.Metadata
-	}
+	// `metadata` not allowed by Orders API — `external_reference` (cart_id)
+	// is sufficient to recover cart/store/event from our DB on webhook.
 
 	headers := m.authHeaders()
 	headers["X-Idempotency-Key"] = fmt.Sprintf(
