@@ -483,7 +483,6 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 	payload := map[string]any{
 		"type":               "online",
 		"processing_mode":    "automatic",
-		"marketplace":        "NONE",
 		"external_reference": input.CartID,
 		// Orders API expects amounts as strings with two decimal places.
 		"total_amount": fmt.Sprintf("%.2f", float64(input.TotalAmount)/100),
@@ -495,9 +494,10 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 			}},
 		},
 	}
-	// `metadata` was accepted by /v1/payments but Orders API rejects unknown
-	// properties — `external_reference` (cart_id) is enough for the webhook
-	// handler to look up cart→store→event from our DB.
+	// `metadata` and `marketplace` were accepted by /v1/payments but Orders
+	// API rejects unknown properties on regular (non-split) charges. The
+	// `external_reference` (cart_id) is enough for our webhook handler to
+	// look up cart/store/event from our DB.
 
 	// Idempotency key includes UnixNano so each shopper attempt is a fresh
 	// request — without it, a previously-failed cart stayed stuck on MP's
