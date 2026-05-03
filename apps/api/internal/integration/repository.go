@@ -76,6 +76,39 @@ func (r *Repository) Create(ctx context.Context, params CreateIntegrationParams)
 	return r.toIntegrationRow(row), nil
 }
 
+// GetAnyByType returns the first integration of the given type for a store
+// regardless of provider or status. Used to enforce single-instance rules
+// (e.g. only one active ERP per store) before insert. Returns nil/nil when
+// no row exists. Caller checks the row to decide which provider is already
+// connected and surface a friendly error.
+func (r *Repository) GetAnyByType(ctx context.Context, storeID, integrationType string) (*IntegrationRow, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	const q = `
+		SELECT id, store_id, type, provider, status, credentials,
+		       token_expires_at, metadata, last_synced_at, created_at
+		FROM integrations
+		WHERE store_id = $1 AND type = $2
+		ORDER BY created_at ASC
+		LIMIT 1
+	`
+	var row sqlc.Integration
+	scanErr := r.pool.QueryRow(ctx, q, sID, integrationType).Scan(
+		&row.ID, &row.StoreID, &row.Type, &row.Provider, &row.Status,
+		&row.Credentials, &row.TokenExpiresAt, &row.Metadata,
+		&row.LastSyncedAt, &row.CreatedAt,
+	)
+	if errors.Is(scanErr, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if scanErr != nil {
+		return nil, fmt.Errorf("checking existing integration: %w", scanErr)
+	}
+	return r.toIntegrationRow(row), nil
+}
+
 // GetByID retrieves an integration by ID and store ID.
 func (r *Repository) GetByID(ctx context.Context, id, storeID string) (*IntegrationRow, error) {
 	integrationID, err := parseUUID(id)

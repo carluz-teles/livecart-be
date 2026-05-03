@@ -108,6 +108,20 @@ func (s *Service) SetNotificationService(svc *notification.Service) {
 
 // Create creates a new integration.
 func (s *Service) Create(ctx context.Context, input CreateIntegrationInput) (*CreateIntegrationOutput, error) {
+	// Enforce single-ERP-per-store: a merchant must disconnect the current ERP
+	// before connecting a new one. Mirrors the partial unique index in the DB
+	// but surfaces a friendly PT-BR message instead of a constraint violation.
+	if input.Type == string(providers.ProviderTypeERP) {
+		if existing, err := s.repo.GetAnyByType(ctx, input.StoreID, string(providers.ProviderTypeERP)); err != nil {
+			return nil, err
+		} else if existing != nil && existing.Provider != input.Provider {
+			return nil, httpx.ErrConflict(fmt.Sprintf(
+				"você já tem o ERP %s conectado. Desconecte-o antes de conectar outro ERP.",
+				existing.Provider,
+			))
+		}
+	}
+
 	// Encrypt credentials
 	encryptedCreds, err := s.encryptor.EncryptJSON(input.Credentials)
 	if err != nil {
