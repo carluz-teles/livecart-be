@@ -24,6 +24,8 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/:id", h.GetByID)
 	g.Get("/:id/upsell", h.GetUpsell)
 	g.Patch("/:id", h.Update)
+	g.Patch("/:id/shipping-address", h.UpdateShippingAddress)
+	g.Post("/:id/regenerate-checkout", h.RegenerateCheckout)
 }
 
 // List godoc
@@ -184,6 +186,77 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 		TotalRevenue:  output.TotalRevenue,
 		AvgTicket:     output.AvgTicket,
 	})
+}
+
+// UpdateShippingAddress godoc
+// @Summary      Update an order's shipping address
+// @Description  Replaces the cart's shipping_address. Blocked once the order
+// @Description  is paid or has a shipment created — editing past those points
+// @Description  would desynchronize the buyer's receipt and the carrier.
+// @Tags         orders
+// @Accept       json
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Order UUID"
+// @Param        request body UpdateShippingAddressRequest true "New shipping address"
+// @Success      204 "No content"
+// @Failure      404 {object} httpx.Envelope
+// @Failure      409 {object} httpx.Envelope
+// @Failure      422 {object} httpx.ValidationEnvelope
+// @Router       /api/v1/stores/{storeId}/orders/{id}/shipping-address [patch]
+// @Security     BearerAuth
+func (h *Handler) UpdateShippingAddress(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
+
+	var req UpdateShippingAddressRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	address := map[string]string{
+		"zipCode":      req.ZipCode,
+		"street":       req.Street,
+		"number":       req.Number,
+		"complement":   req.Complement,
+		"neighborhood": req.Neighborhood,
+		"city":         req.City,
+		"state":        req.State,
+	}
+
+	if err := h.service.UpdateShippingAddress(c.Context(), id, storeID, address); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// RegenerateCheckout godoc
+// @Summary      Regenerate the checkout window for an order
+// @Description  Pushes expires_at forward, resets status/payment_status, and
+// @Description  clears any cached checkout url so the buyer can pay again.
+// @Description  Blocked when the order is already paid or shipment has been
+// @Description  created.
+// @Tags         orders
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Order UUID"
+// @Success      200 {object} httpx.Envelope{data=RegenerateCheckoutResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Failure      409 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/orders/{id}/regenerate-checkout [post]
+// @Security     BearerAuth
+func (h *Handler) RegenerateCheckout(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
+
+	token, expiresAt, err := h.service.RegenerateCheckout(c.Context(), id, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, RegenerateCheckoutResponse{Token: token, ExpiresAt: expiresAt})
 }
 
 func parseOrderFilters(c *fiber.Ctx) OrderFilters {

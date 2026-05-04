@@ -7,6 +7,28 @@ INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, toke
 VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8)
 RETURNING *;
 
+-- name: UpdateCartShippingAddress :exec
+-- Replaces the cart's shipping_address JSONB. Used by the admin's "edit
+-- address" action — narrower than UpdateCartCustomerCheckout (which also
+-- writes customer fields) so we don't accidentally clear contact info.
+UPDATE carts
+SET shipping_address = $2
+WHERE id = $1;
+
+-- name: RegenerateCartCheckout :exec
+-- Resets the checkout window for a cart so the buyer can pay again. Bumps
+-- expires_at, brings status back to 'active' and payment_status to 'pending'
+-- (covers expired/failed states), and clears any cached checkout url so the
+-- next checkout-side call generates a fresh one.
+UPDATE carts
+SET expires_at         = $2,
+    status             = 'active',
+    payment_status     = 'pending',
+    checkout_url       = NULL,
+    checkout_id        = NULL,
+    checkout_expires_at = NULL
+WHERE id = $1;
+
 -- name: IssueShortIDForEvent :one
 -- Atomically issues the next short_id for the store that owns the given event.
 -- On first call for a store, INSERT seeds last_value at 1000 (the chosen

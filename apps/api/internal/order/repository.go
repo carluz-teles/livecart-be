@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -437,6 +438,69 @@ func (r *Repository) GetItemsPreviewByCartIDs(ctx context.Context, cartIDs []str
 		out[cartID] = append(out[cartID], row)
 	}
 	return out, rows.Err()
+}
+
+// UpdateShippingAddress overwrites the cart's shipping_address JSONB. The
+// caller is responsible for the upstream invariants (cannot edit after
+// shipment exists, cannot edit a paid order); this is a thin write.
+func (r *Repository) UpdateShippingAddress(ctx context.Context, id string, address map[string]string) error {
+	uid, err := uuid.Parse(id)
+	if err != nil {
+		return fmt.Errorf("invalid order id: %w", err)
+	}
+	payload, err := json.Marshal(address)
+	if err != nil {
+		return fmt.Errorf("encoding shipping address: %w", err)
+	}
+	const q = `UPDATE carts SET shipping_address = $2 WHERE id = $1`
+	if _, err := r.db.Exec(ctx, q, pgtype.UUID{Bytes: uid, Valid: true}, payload); err != nil {
+		return fmt.Errorf("updating shipping address: %w", err)
+	}
+	return nil
+}
+
+// RegenerateCheckout pushes expires_at forward and resets the cart back to a
+// state where the buyer can complete payment again. checkout_url is cleared
+// so the next public-checkout call generates a fresh one (avoids reusing a
+// stale Mercado Pago link).
+func (r *Repository) RegenerateCheckout(ctx context.Context, id string, expiresAt time.Time) error {
+	uid, err := uuid.Parse(id)
+	if err != nil {
+		return fmt.Errorf("invalid order id: %w", err)
+	}
+	const q = `
+		UPDATE carts
+		SET expires_at         = $2,
+		    status             = 'active',
+		    payment_status     = 'pending',
+		    checkout_url       = NULL,
+		    checkout_id        = NULL,
+		    checkout_expires_at = NULL
+		WHERE id = $1
+	`
+	if _, err := r.db.Exec(ctx, q, pgtype.UUID{Bytes: uid, Valid: true}, expiresAt); err != nil {
+		return fmt.Errorf("regenerating checkout: %w", err)
+	}
+	return nil
+}
+
+// GetStoreCartExpirationMinutes returns the merchant-configured cart TTL
+// (used to compute new expires_at when regenerating). Falls back to 30 if
+// the lookup fails — same default the checkout package uses.
+func (r *Repository) GetStoreCartExpirationMinutes(ctx context.Context, storeID string) int {
+	uid, err := uuid.Parse(storeID)
+	if err != nil {
+		return 30
+	}
+	var minutes int
+	const q = `SELECT cart_expiration_minutes FROM stores WHERE id = $1`
+	if err := r.db.QueryRow(ctx, q, pgtype.UUID{Bytes: uid, Valid: true}).Scan(&minutes); err != nil {
+		return 30
+	}
+	if minutes <= 0 {
+		return 30
+	}
+	return minutes
 }
 
 func (r *Repository) UpdateStatus(ctx context.Context, id string, status string) error {

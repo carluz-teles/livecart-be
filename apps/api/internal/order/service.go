@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -322,6 +323,71 @@ func (s *Service) GetUpsellSummary(ctx context.Context, id, storeID string) (*Or
 		out.Mutations = []OrderUpsellMutation{}
 	}
 	return out, nil
+}
+
+// UpdateShippingAddress lets the admin fix a buyer-typed mistake (wrong
+// number, missing complement, etc.) before the shipment is created. Hard
+// blocks: order must belong to the store, must not be paid, and must not
+// have a shipment row — once any of those is true editing the address would
+// silently desynchronize with the carrier or the buyer's receipt.
+func (s *Service) UpdateShippingAddress(
+	ctx context.Context,
+	id string,
+	storeID string,
+	address map[string]string,
+) error {
+	row, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if row == nil || row.StoreID != storeID {
+		return httpx.ErrNotFound(fmt.Sprintf("order %s not found", id))
+	}
+	if row.PaymentStatus == "paid" {
+		return httpx.ErrConflict("cannot edit shipping address after payment")
+	}
+	shipment, err := s.repo.GetShipmentForOrder(ctx, id)
+	if err != nil {
+		s.logger.Warn("failed to load shipment for order", zap.Error(err))
+	} else if shipment != nil {
+		return httpx.ErrConflict("cannot edit shipping address after shipment is created")
+	}
+	return s.repo.UpdateShippingAddress(ctx, id, address)
+}
+
+// RegenerateCheckout extends the cart's expiration window and resets it to
+// a state where the buyer can complete payment again. Used when a PIX expired
+// or the buyer abandoned the flow. Returns the cart token + new expiry so
+// the admin UI can build a public link to share.
+func (s *Service) RegenerateCheckout(
+	ctx context.Context,
+	id string,
+	storeID string,
+) (string, time.Time, error) {
+	row, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if row == nil || row.StoreID != storeID {
+		return "", time.Time{}, httpx.ErrNotFound(fmt.Sprintf("order %s not found", id))
+	}
+	if row.PaymentStatus == "paid" {
+		return "", time.Time{}, httpx.ErrConflict("cannot regenerate checkout for a paid order")
+	}
+	shipment, err := s.repo.GetShipmentForOrder(ctx, id)
+	if err != nil {
+		s.logger.Warn("failed to load shipment for order", zap.Error(err))
+	} else if shipment != nil {
+		return "", time.Time{}, httpx.ErrConflict("cannot regenerate checkout after shipment is created")
+	}
+
+	minutes := s.repo.GetStoreCartExpirationMinutes(ctx, storeID)
+	expiresAt := time.Now().Add(time.Duration(minutes) * time.Minute)
+
+	if err := s.repo.RegenerateCheckout(ctx, id, expiresAt); err != nil {
+		return "", time.Time{}, err
+	}
+	return row.Token, expiresAt, nil
 }
 
 func (s *Service) GetStats(ctx context.Context, storeID string, search string, filters OrderFilters) (*OrderStatsOutput, error) {

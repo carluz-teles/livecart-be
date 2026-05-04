@@ -31,6 +31,26 @@ type UpdateOrderRequest struct {
 	PaymentStatus *string `json:"paymentStatus" validate:"omitempty,oneof=pending paid failed refunded"`
 }
 
+// UpdateShippingAddressRequest is the admin's "edit address" payload. State
+// is required; the 2-letter UF guard mirrors the public checkout flow.
+type UpdateShippingAddressRequest struct {
+	ZipCode      string `json:"zipCode" validate:"required"`
+	Street       string `json:"street" validate:"required"`
+	Number       string `json:"number" validate:"required"`
+	Complement   string `json:"complement,omitempty"`
+	Neighborhood string `json:"neighborhood" validate:"required"`
+	City         string `json:"city" validate:"required"`
+	State        string `json:"state" validate:"required,len=2"`
+}
+
+// RegenerateCheckoutResponse returns the data the admin needs to share with
+// the buyer (the cart token + the new expiration). The frontend builds the
+// public URL from the token because the base URL lives in the FE config.
+type RegenerateCheckoutResponse struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
 type OrderItemResponse struct {
 	ID           string  `json:"id"`
 	ProductID    string  `json:"productId"`

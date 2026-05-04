@@ -1514,6 +1514,31 @@ func (q *Queries) ListProductsByEvent(ctx context.Context, eventID pgtype.UUID) 
 	return items, nil
 }
 
+const regenerateCartCheckout = `-- name: RegenerateCartCheckout :exec
+UPDATE carts
+SET expires_at         = $2,
+    status             = 'active',
+    payment_status     = 'pending',
+    checkout_url       = NULL,
+    checkout_id        = NULL,
+    checkout_expires_at = NULL
+WHERE id = $1
+`
+
+type RegenerateCartCheckoutParams struct {
+	ID        pgtype.UUID        `json:"id"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
+// Resets the checkout window for a cart so the buyer can pay again. Bumps
+// expires_at, brings status back to 'active' and payment_status to 'pending'
+// (covers expired/failed states), and clears any cached checkout url so the
+// next checkout-side call generates a fresh one.
+func (q *Queries) RegenerateCartCheckout(ctx context.Context, arg RegenerateCartCheckoutParams) error {
+	_, err := q.db.Exec(ctx, regenerateCartCheckout, arg.ID, arg.ExpiresAt)
+	return err
+}
+
 const updateCartCheckoutInfo = `-- name: UpdateCartCheckoutInfo :one
 UPDATE carts
 SET checkout_url = $2, checkout_id = $3, checkout_expires_at = $4
@@ -2082,6 +2107,25 @@ func (q *Queries) UpdateCartPaymentStatus(ctx context.Context, arg UpdateCartPay
 		&i.ShortID,
 	)
 	return i, err
+}
+
+const updateCartShippingAddress = `-- name: UpdateCartShippingAddress :exec
+UPDATE carts
+SET shipping_address = $2
+WHERE id = $1
+`
+
+type UpdateCartShippingAddressParams struct {
+	ID              pgtype.UUID     `json:"id"`
+	ShippingAddress json.RawMessage `json:"shipping_address"`
+}
+
+// Replaces the cart's shipping_address JSONB. Used by the admin's "edit
+// address" action — narrower than UpdateCartCustomerCheckout (which also
+// writes customer fields) so we don't accidentally clear contact info.
+func (q *Queries) UpdateCartShippingAddress(ctx context.Context, arg UpdateCartShippingAddressParams) error {
+	_, err := q.db.Exec(ctx, updateCartShippingAddress, arg.ID, arg.ShippingAddress)
+	return err
 }
 
 const updateCartStatus = `-- name: UpdateCartStatus :one
