@@ -82,7 +82,8 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 				 WHERE sh.order_id = c.id
 				 ORDER BY sh.created_at DESC LIMIT 1),
 				''
-			) as shipment_status
+			) as shipment_status,
+			(c.shipping_service_id IS NOT NULL AND c.shipping_service_id <> '') as has_shipping
 		FROM carts c
 		JOIN live_events e ON e.id = c.event_id
 		WHERE e.store_id = $1
@@ -169,6 +170,7 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 			&row.TotalItems,
 			&row.IsFirstPurchase,
 			&row.ShipmentStatus,
+			&row.HasShipping,
 		)
 		if err != nil {
 			return result, fmt.Errorf("scanning order row: %w", err)

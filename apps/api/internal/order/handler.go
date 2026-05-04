@@ -355,6 +355,7 @@ func toOrderResponse(o OrderOutput) OrderResponse {
 		Status:          o.Status,
 		PaymentStatus:   o.PaymentStatus,
 		ShipmentStatus:  o.ShipmentStatus,
+		HasShipping:     o.HasShipping,
 		Items:           items,
 		ItemsPreview:    previews,
 		TotalItems:      o.TotalItems,
@@ -378,6 +379,7 @@ func toOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 
 	resp := OrderDetailResponse{
 		OrderResponse: toOrderResponse(o.OrderOutput),
+		Token:         o.Token,
 		Comments:      comments,
 	}
 

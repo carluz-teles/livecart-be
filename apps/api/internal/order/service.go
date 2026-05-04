@@ -72,6 +72,7 @@ func (s *Service) List(ctx context.Context, input ListOrdersInput) (ListOrdersOu
 			Status:          row.Status,
 			PaymentStatus:   row.PaymentStatus,
 			ShipmentStatus:  row.ShipmentStatus,
+			HasShipping:     row.HasShipping,
 			TotalItems:      row.TotalItems,
 			TotalAmount:     row.TotalAmount,
 			PaidAt:          row.PaidAt,
@@ -187,6 +188,7 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 
 	out := &OrderDetailOutput{
 		OrderOutput: *orderOutput,
+		Token:       row.Token,
 		Comments:    comments,
 	}
 

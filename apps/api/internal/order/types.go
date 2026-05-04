@@ -94,6 +94,10 @@ type OrderResponse struct {
 	// Latest shipment status (normalized enum). Empty string when the order has
 	// no shipment yet.
 	ShipmentStatus string              `json:"shipmentStatus"`
+	// True when the buyer picked a shipping service at checkout. Lets the
+	// admin list distinguish "buyer never selected anything" from "selected,
+	// but no shipment row created yet".
+	HasShipping    bool                `json:"hasShipping"`
 	Items          []OrderItemResponse `json:"items"`
 	// Lightweight preview (name/image/qty) so the list can render an avatar
 	// stack without the full Items array. Populated only on list endpoints.
@@ -121,6 +125,10 @@ type OrderItemPreviewResponse struct {
 // The `OrderResponse` embedding keeps list-page fields identical.
 type OrderDetailResponse struct {
 	OrderResponse
+	// Cart token; the public buyer link is `${frontend_origin}/cart/${token}`.
+	// Detail-only — the list endpoint does not expose this to keep the surface
+	// area narrow.
+	Token           string                        `json:"token"`
 	Comments        []OrderCommentResponse        `json:"comments"`
 	Customer        *OrderCustomerResponse        `json:"customer,omitempty"`
 	ShippingAddress *OrderShippingAddressResponse `json:"shippingAddress,omitempty"`
@@ -309,6 +317,7 @@ type OrderOutput struct {
 	Status          string
 	PaymentStatus   string
 	ShipmentStatus  string
+	HasShipping     bool
 	Items           []OrderItemOutput
 	ItemsPreview    []OrderItemPreviewOutput
 	TotalItems      int
@@ -393,6 +402,10 @@ type OrderRow struct {
 	IsFirstPurchase bool
 	// Latest shipment status for the cart, "" when no shipment exists yet.
 	ShipmentStatus  string
+	// True when the buyer picked a shipping service at checkout, even if no
+	// shipment row has been created yet. Lets the list show "Aguardando emissão"
+	// instead of "Sem envio" between checkout and shipment creation.
+	HasShipping bool
 }
 
 // OrderItemPreviewRow is the projection used by the list page to render an
@@ -576,6 +589,10 @@ type OrderShipmentOutput struct {
 
 type OrderDetailOutput struct {
 	OrderOutput
+	// Cart token used to build the public checkout link (/cart/{token}). Only
+	// surfaced on the detail endpoint because the admin actions menu builds the
+	// shareable URL from it.
+	Token           string
 	Comments        []CommentOutput
 	Customer        *OrderCustomerOutput
 	ShippingAddress *OrderShippingAddressOutput
