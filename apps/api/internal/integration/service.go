@@ -1522,7 +1522,9 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 	merged := make([]providers.ERPProduct, 0)
 	seen := make(map[string]struct{})
 	allErrored := true
+	allRateLimited := true
 	var firstErr error
+	var firstNonRateLimitErr error
 	priority := []string{"gtin", "sku", "name"}
 	for _, prio := range priority {
 		if len(merged) >= pageSize {
@@ -1536,14 +1538,23 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 				if firstErr == nil {
 					firstErr = r.err
 				}
+				var rl *ratelimit.ErrRateLimited
+				if !errors.As(r.err, &rl) {
+					allRateLimited = false
+					if firstNonRateLimitErr == nil {
+						firstNonRateLimitErr = r.err
+					}
+				}
 				s.logger.Warn("ERP product search partial failure",
 					zap.String("field", r.field),
 					zap.String("integration_id", input.IntegrationID),
+					zap.Bool("rate_limited", rl != nil),
 					zap.Error(r.err),
 				)
 				continue
 			}
 			allErrored = false
+			allRateLimited = false
 			for _, p := range r.products {
 				if _, ok := seen[p.ID]; ok {
 					continue
@@ -1558,8 +1569,20 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 	}
 
 	if allErrored {
-		s.handleProviderError(ctx, input.IntegrationID, "search_products", firstErr)
-		return nil, fmt.Errorf("searching products: %w", firstErr)
+		// All jobs hit Tiny's rate limit — degrade to "no results" instead of
+		// 500 so the merchant can retry instead of seeing an internal-error
+		// toast. handleProviderError still flags the integration so the
+		// dashboard reflects the throttle.
+		if allRateLimited {
+			s.handleProviderError(ctx, input.IntegrationID, "search_products", firstErr)
+			s.logger.Warn("ERP product search throttled, returning empty results",
+				zap.String("integration_id", input.IntegrationID),
+			)
+			return &SearchProductsOutput{Products: []ERPProductResponse{}, HasMore: false}, nil
+		}
+		// At least one job failed for a non-rate-limit reason — escalate.
+		s.handleProviderError(ctx, input.IntegrationID, "search_products", firstNonRateLimitErr)
+		return nil, fmt.Errorf("searching products: %w", firstNonRateLimitErr)
 	}
 
 	if len(merged) == 0 {

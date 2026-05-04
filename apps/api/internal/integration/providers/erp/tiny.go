@@ -261,26 +261,34 @@ func (t *Tiny) TestConnection(ctx context.Context) (*providers.TestConnectionRes
 func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*ProductListResult, error) {
 	endpoint := tinyAPIBaseURL + "/produtos"
 
-	// Build query string
-	query := "?"
+	// Build query string. Every value MUST be URL-encoded — a previous version
+	// concatenated raw search terms which made any query containing a space or
+	// accent (`"Camiseta Tech"`, `"Coração"`) malformed. Tiny then rejected
+	// the request with HTTP 400 and an empty body, which our service layer
+	// surfaced as a 500 to the user.
+	q := url.Values{}
 	if params.PageSize > 0 {
-		query += fmt.Sprintf("limit=%d&", params.PageSize)
+		q.Set("limit", strconv.Itoa(params.PageSize))
 	}
-	if params.GTIN != "" {
-		query += fmt.Sprintf("gtin=%s&", params.GTIN)
-	} else if params.SKU != "" {
-		query += fmt.Sprintf("codigo=%s&", params.SKU)
-	} else if params.Search != "" {
-		query += fmt.Sprintf("nome=%s&", params.Search)
+	switch {
+	case params.GTIN != "":
+		q.Set("gtin", params.GTIN)
+	case params.SKU != "":
+		q.Set("codigo", params.SKU)
+	case params.Search != "":
+		q.Set("nome", params.Search)
 	}
 	if params.ActiveOnly {
-		query += "situacao=A&"
+		q.Set("situacao", "A")
 	}
 	if params.UpdatedAfter != nil {
-		query += fmt.Sprintf("dataAlteracao=%s&", params.UpdatedAfter.Format("2006-01-02 15:04:05"))
+		q.Set("dataAlteracao", params.UpdatedAfter.Format("2006-01-02 15:04:05"))
 	}
 
-	fullURL := endpoint + query
+	fullURL := endpoint
+	if encoded := q.Encode(); encoded != "" {
+		fullURL += "?" + encoded
+	}
 
 	resp, body, err := t.DoRequest(ctx, http.MethodGet, fullURL, nil, t.authHeaders())
 	if err != nil {
@@ -296,6 +304,13 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 			TotalCount: 0,
 			HasMore:    false,
 		}, nil
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		// Surface as a typed rate-limit error so the search service can treat
+		// it as a "no results" partial failure instead of escalating to 500.
+		// Reuses the same sentinel BaseProvider.DoRequest emits after retries
+		// so handleProviderError keeps the consistent integration-state path.
+		return nil, &ratelimit.ErrRateLimited{}
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
 		return nil, fmt.Errorf("list products failed: status %d, body: %s", resp.StatusCode, string(body))
