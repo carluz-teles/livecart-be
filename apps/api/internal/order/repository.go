@@ -33,6 +33,7 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 	baseQuery := `
 		SELECT
 			c.id,
+			c.short_id,
 			c.event_id,
 			c.platform_user_id,
 			c.platform_handle,
@@ -42,7 +43,10 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 			c.paid_at,
 			c.created_at,
 			c.expires_at,
+			COALESCE(c.customer_name, '') as customer_name,
+			COALESCE(c.customer_email, '') as customer_email,
 			e.title as live_title,
+			COALESCE(e.free_shipping, false) as free_shipping,
 			COALESCE(
 				(SELECT lsp.platform FROM live_session_platforms lsp
 				 JOIN live_sessions ls ON ls.id = lsp.session_id
@@ -71,7 +75,13 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 					  AND c2.id <> c.id
 					  AND COALESCE(c2.paid_at, c2.created_at) < COALESCE(c.paid_at, c.created_at)
 				)
-			) as is_first_purchase
+			) as is_first_purchase,
+			COALESCE(
+				(SELECT sh.status FROM shipments sh
+				 WHERE sh.order_id = c.id
+				 ORDER BY sh.created_at DESC LIMIT 1),
+				''
+			) as shipment_status
 		FROM carts c
 		JOIN live_events e ON e.id = c.event_id
 		WHERE e.store_id = $1
@@ -106,6 +116,7 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 		"status":         "c.status",
 		"payment_status": "c.payment_status",
 		"total_amount":   "total_amount",
+		"short_id":       "c.short_id",
 	}
 	if col, ok := allowedSortColumns[params.Sorting.SortBy]; ok {
 		sortColumn = col
@@ -138,6 +149,7 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 		var row OrderRow
 		err := rows.Scan(
 			&row.ID,
+			&row.ShortID,
 			&row.EventID,
 			&row.PlatformUserID,
 			&row.PlatformHandle,
@@ -147,11 +159,15 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 			&row.PaidAt,
 			&row.CreatedAt,
 			&row.ExpiresAt,
+			&row.CustomerName,
+			&row.CustomerEmail,
 			&row.LiveTitle,
+			&row.FreeShipping,
 			&row.LivePlatform,
 			&row.TotalAmount,
 			&row.TotalItems,
 			&row.IsFirstPurchase,
+			&row.ShipmentStatus,
 		)
 		if err != nil {
 			return result, fmt.Errorf("scanning order row: %w", err)
@@ -166,6 +182,7 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 	query := `
 		SELECT
 			c.id,
+			c.short_id,
 			c.event_id,
 			c.platform_user_id,
 			c.platform_handle,
@@ -241,6 +258,7 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 	)
 	err := r.db.QueryRow(ctx, query, id).Scan(
 		&row.ID,
+		&row.ShortID,
 		&row.EventID,
 		&row.PlatformUserID,
 		&row.PlatformHandle,
@@ -376,6 +394,51 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 	return items, nil
 }
 
+// GetItemsPreviewByCartIDs returns a small per-cart preview of items (name +
+// image + quantity) so the list page can render an avatar stack without
+// loading every column from cart_items. Bulk-fetched in one query and grouped
+// by cart_id on the caller side.
+func (r *Repository) GetItemsPreviewByCartIDs(ctx context.Context, cartIDs []string) (map[string][]OrderItemPreviewRow, error) {
+	out := make(map[string][]OrderItemPreviewRow, len(cartIDs))
+	if len(cartIDs) == 0 {
+		return out, nil
+	}
+
+	uuids := make([]pgtype.UUID, 0, len(cartIDs))
+	for _, id := range cartIDs {
+		parsed, err := uuid.Parse(id)
+		if err != nil {
+			return nil, fmt.Errorf("parsing cart id: %w", err)
+		}
+		uuids = append(uuids, pgtype.UUID{Bytes: parsed, Valid: true})
+	}
+
+	const q = `
+		SELECT ci.cart_id::text, p.name, p.image_url, ci.quantity
+		FROM cart_items ci
+		JOIN products p ON p.id = ci.product_id
+		WHERE ci.cart_id = ANY($1::uuid[])
+		ORDER BY ci.cart_id, ci.id
+	`
+	rows, err := r.db.Query(ctx, q, uuids)
+	if err != nil {
+		return nil, fmt.Errorf("listing item previews: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cartID  string
+			row     OrderItemPreviewRow
+		)
+		if err := rows.Scan(&cartID, &row.ProductName, &row.ProductImage, &row.Quantity); err != nil {
+			return nil, fmt.Errorf("scanning item preview: %w", err)
+		}
+		out[cartID] = append(out[cartID], row)
+	}
+	return out, rows.Err()
+}
+
 func (r *Repository) UpdateStatus(ctx context.Context, id string, status string) error {
 	query := `UPDATE carts SET status = $2 WHERE id = $1`
 	_, err := r.db.Exec(ctx, query, id, status)
@@ -474,9 +537,16 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 	argIndex := 2
 	var conditions []string
 
-	if search != "" {
-		conditions = append(conditions, fmt.Sprintf("(c.platform_handle ILIKE $%d OR c.id::TEXT ILIKE $%d)", argIndex, argIndex))
-		args = append(args, "%"+search+"%")
+	// Trim a leading "#" so merchants can paste "#1247" or "1247" interchangeably
+	// — the UI renders the prefix decoratively, so it's not part of the data.
+	trimmedSearch := strings.TrimSpace(search)
+	trimmedSearch = strings.TrimPrefix(trimmedSearch, "#")
+	if trimmedSearch != "" {
+		conditions = append(conditions, fmt.Sprintf(
+			"(c.platform_handle ILIKE $%d OR c.id::TEXT ILIKE $%d OR c.short_id::TEXT ILIKE $%d OR c.customer_name ILIKE $%d OR c.customer_email ILIKE $%d)",
+			argIndex, argIndex, argIndex, argIndex, argIndex,
+		))
+		args = append(args, "%"+trimmedSearch+"%")
 		argIndex++
 	}
 

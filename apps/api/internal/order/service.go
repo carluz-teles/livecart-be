@@ -36,17 +36,41 @@ func (s *Service) List(ctx context.Context, input ListOrdersInput) (ListOrdersOu
 		return ListOrdersOutput{}, err
 	}
 
+	cartIDs := make([]string, len(result.Orders))
+	for i, row := range result.Orders {
+		cartIDs[i] = row.ID
+	}
+	previewByCart, err := s.repo.GetItemsPreviewByCartIDs(ctx, cartIDs)
+	if err != nil {
+		s.logger.Warn("failed to load item previews", zap.Error(err))
+		previewByCart = map[string][]OrderItemPreviewRow{}
+	}
+
 	orders := make([]OrderOutput, len(result.Orders))
 	for i, row := range result.Orders {
+		previews := previewByCart[row.ID]
+		previewOut := make([]OrderItemPreviewOutput, len(previews))
+		for j, p := range previews {
+			previewOut[j] = OrderItemPreviewOutput{
+				ProductName:  p.ProductName,
+				ProductImage: p.ProductImage,
+				Quantity:     p.Quantity,
+			}
+		}
 		orders[i] = OrderOutput{
 			ID:              row.ID,
+			ShortID:         row.ShortID,
 			LiveSessionID:   row.EventID, // Now using EventID but keeping response field name for backwards compatibility
 			LiveTitle:       row.LiveTitle,
 			LivePlatform:    row.LivePlatform,
 			CustomerHandle:  row.PlatformHandle,
 			CustomerID:      row.PlatformUserID,
+			CustomerName:    row.CustomerName,
+			CustomerEmail:   row.CustomerEmail,
+			FreeShipping:    row.FreeShipping,
 			Status:          row.Status,
 			PaymentStatus:   row.PaymentStatus,
+			ShipmentStatus:  row.ShipmentStatus,
 			TotalItems:      row.TotalItems,
 			TotalAmount:     row.TotalAmount,
 			PaidAt:          row.PaidAt,
@@ -54,6 +78,7 @@ func (s *Service) List(ctx context.Context, input ListOrdersInput) (ListOrdersOu
 			ExpiresAt:       row.ExpiresAt,
 			IsFirstPurchase: row.IsFirstPurchase,
 			Items:           []OrderItemOutput{}, // Items loaded separately when needed
+			ItemsPreview:    previewOut,
 		}
 	}
 
@@ -111,6 +136,7 @@ func (s *Service) GetByID(ctx context.Context, id string, storeID string) (*Orde
 
 	return &OrderOutput{
 		ID:              row.ID,
+		ShortID:         row.ShortID,
 		LiveSessionID:   row.EventID, // Now using EventID but keeping response field name for backwards compatibility
 		LiveTitle:       row.LiveTitle,
 		LivePlatform:    row.LivePlatform,

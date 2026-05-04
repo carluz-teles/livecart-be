@@ -3,9 +3,22 @@
 -- =============================================================================
 
 -- name: CreateCart :one
-INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, status, expires_at, customer_id)
-VALUES ($1, $2, $3, $4, $5, 'active', $6, $7)
+INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, status, expires_at, customer_id, short_id)
+VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8)
 RETURNING *;
+
+-- name: IssueShortIDForEvent :one
+-- Atomically issues the next short_id for the store that owns the given event.
+-- On first call for a store, INSERT seeds last_value at 1000 (the chosen
+-- starting number). On subsequent calls, the ON CONFLICT UPDATE bumps
+-- last_value by 1 and returns the new value. Either way the RETURNING clause
+-- gives the caller the short_id it should write into the cart row in the same
+-- transaction. Accepts event_id so callers don't need to resolve store_id
+-- themselves.
+INSERT INTO store_order_counters (store_id, last_value)
+SELECT e.store_id, 1000 FROM live_events e WHERE e.id = $1
+ON CONFLICT (store_id) DO UPDATE SET last_value = store_order_counters.last_value + 1
+RETURNING last_value;
 
 -- name: GetCartByID :one
 SELECT * FROM carts WHERE id = $1;

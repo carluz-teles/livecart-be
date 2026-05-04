@@ -717,6 +717,14 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 		return nil, false, fmt.Errorf("getting cart: %w", err)
 	}
 
+	// Issue the next human-readable order number for this store. The query
+	// resolves store_id from event_id and bumps store_order_counters atomically
+	// so concurrent cart creations cannot collide on the same short_id.
+	shortID, err := qtx.IssueShortIDForEvent(ctx, eventID)
+	if err != nil {
+		return nil, false, fmt.Errorf("issuing short id: %w", err)
+	}
+
 	// Note: expires_at is NOT set on creation. It will be set when the live event ends.
 	created, err := qtx.CreateCart(ctx, sqlc.CreateCartParams{
 		EventID:        eventID,
@@ -725,6 +733,7 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 		PlatformHandle: params.PlatformHandle,
 		Token:          params.Token,
 		CustomerID:     customerID,
+		ShortID:        shortID,
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("creating cart: %w", err)

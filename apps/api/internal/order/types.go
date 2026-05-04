@@ -54,14 +54,30 @@ type OrderItemResponse struct {
 
 type OrderResponse struct {
 	ID             string              `json:"id"`
+	// Per-store sequential order number, starts at 1000 in each store. UI shows
+	// "#{shortId}" to merchants and customers — the UUID stays as the URL key.
+	ShortID        int                 `json:"shortId"`
 	LiveSessionID  string              `json:"liveSessionId"`
 	LiveTitle      string              `json:"liveTitle"`
 	LivePlatform   string              `json:"livePlatform"`
 	CustomerHandle string              `json:"customerHandle"`
 	CustomerID     string              `json:"customerId"`
+	// Customer name/email captured at checkout. Empty until the buyer fills the
+	// checkout form.
+	CustomerName  string `json:"customerName"`
+	CustomerEmail string `json:"customerEmail"`
+	// Mirrors the live event's freeShipping flag, used by the list to render
+	// a "frete grátis" indicator without loading the full event.
+	FreeShipping  bool   `json:"freeShipping"`
 	Status         string              `json:"status"`
 	PaymentStatus  string              `json:"paymentStatus"`
+	// Latest shipment status (normalized enum). Empty string when the order has
+	// no shipment yet.
+	ShipmentStatus string              `json:"shipmentStatus"`
 	Items          []OrderItemResponse `json:"items"`
+	// Lightweight preview (name/image/qty) so the list can render an avatar
+	// stack without the full Items array. Populated only on list endpoints.
+	ItemsPreview   []OrderItemPreviewResponse `json:"itemsPreview"`
 	TotalItems     int                 `json:"totalItems"`
 	TotalAmount    int64               `json:"totalAmount"`
 	PaidAt         *time.Time          `json:"paidAt"`
@@ -70,6 +86,12 @@ type OrderResponse struct {
 	// True only for the buyer's earliest paid order in this store. Frontend
 	// renders a "Primeira venda" badge from this flag.
 	IsFirstPurchase bool `json:"isFirstPurchase"`
+}
+
+type OrderItemPreviewResponse struct {
+	ProductName  string  `json:"productName"`
+	ProductImage *string `json:"productImage"`
+	Quantity     int     `json:"quantity"`
 }
 
 // OrderDetailResponse includes everything the admin order-detail page needs:
@@ -255,20 +277,32 @@ type ListOrdersOutput struct {
 
 type OrderOutput struct {
 	ID              string
+	ShortID         int
 	LiveSessionID   string
 	LiveTitle       string
 	LivePlatform    string
 	CustomerHandle  string
 	CustomerID      string
+	CustomerName    string
+	CustomerEmail   string
+	FreeShipping    bool
 	Status          string
 	PaymentStatus   string
+	ShipmentStatus  string
 	Items           []OrderItemOutput
+	ItemsPreview    []OrderItemPreviewOutput
 	TotalItems      int
 	TotalAmount     int64
 	PaidAt          *time.Time
 	CreatedAt       time.Time
 	ExpiresAt       *time.Time
 	IsFirstPurchase bool
+}
+
+type OrderItemPreviewOutput struct {
+	ProductName  string
+	ProductImage *string
+	Quantity     int
 }
 
 type OrderItemOutput struct {
@@ -319,6 +353,7 @@ type ListOrdersResult struct {
 
 type OrderRow struct {
 	ID              string
+	ShortID         int
 	EventID         string
 	PlatformUserID  string
 	PlatformHandle  string
@@ -328,11 +363,24 @@ type OrderRow struct {
 	PaidAt          *time.Time
 	CreatedAt       time.Time
 	ExpiresAt       *time.Time
+	CustomerName    string
+	CustomerEmail   string
 	LiveTitle       string
+	FreeShipping    bool
 	LivePlatform    string
 	TotalAmount     int64
 	TotalItems      int
 	IsFirstPurchase bool
+	// Latest shipment status for the cart, "" when no shipment exists yet.
+	ShipmentStatus  string
+}
+
+// OrderItemPreviewRow is the projection used by the list page to render an
+// avatar stack of products on each row without loading every cart_items column.
+type OrderItemPreviewRow struct {
+	ProductName  string
+	ProductImage *string
+	Quantity     int
 }
 
 type OrderItemRow struct {
@@ -358,6 +406,7 @@ type OrderItemRow struct {
 
 type OrderDetailRow struct {
 	ID              string
+	ShortID         int
 	EventID         string
 	PlatformUserID  string
 	PlatformHandle  string

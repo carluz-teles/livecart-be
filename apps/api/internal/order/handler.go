@@ -259,16 +259,31 @@ func toOrderResponse(o OrderOutput) OrderResponse {
 		}
 	}
 
+	previews := make([]OrderItemPreviewResponse, len(o.ItemsPreview))
+	for i, p := range o.ItemsPreview {
+		previews[i] = OrderItemPreviewResponse{
+			ProductName:  p.ProductName,
+			ProductImage: p.ProductImage,
+			Quantity:     p.Quantity,
+		}
+	}
+
 	return OrderResponse{
 		ID:              o.ID,
+		ShortID:         o.ShortID,
 		LiveSessionID:   o.LiveSessionID,
 		LiveTitle:       o.LiveTitle,
 		LivePlatform:    o.LivePlatform,
 		CustomerHandle:  o.CustomerHandle,
 		CustomerID:      o.CustomerID,
+		CustomerName:    o.CustomerName,
+		CustomerEmail:   o.CustomerEmail,
+		FreeShipping:    o.FreeShipping,
 		Status:          o.Status,
 		PaymentStatus:   o.PaymentStatus,
+		ShipmentStatus:  o.ShipmentStatus,
 		Items:           items,
+		ItemsPreview:    previews,
 		TotalItems:      o.TotalItems,
 		TotalAmount:     o.TotalAmount,
 		PaidAt:          o.PaidAt,

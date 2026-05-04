@@ -67,6 +67,7 @@ type Cart struct {
 	InitialSnapshotTakenAt pgtype.Timestamptz `json:"initial_snapshot_taken_at"`
 	// Cached subtotal of cart_initial_items in cents.
 	InitialSubtotalCents pgtype.Int8 `json:"initial_subtotal_cents"`
+	ShortID              int32       `json:"short_id"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.
@@ -153,6 +154,36 @@ type EventUpsell struct {
 	Active          bool               `json:"active"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+// Global ideas channel posts. Status changes are dev-only via SQL; trigger notifies author.
+type Idea struct {
+	ID           pgtype.UUID        `json:"id"`
+	Number       int64              `json:"number"`
+	Title        string             `json:"title"`
+	Description  string             `json:"description"`
+	Category     string             `json:"category"`
+	Status       string             `json:"status"`
+	AuthorUserID pgtype.UUID        `json:"author_user_id"`
+	VoteCount    int32              `json:"vote_count"`
+	CommentCount int32              `json:"comment_count"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
+type IdeaComment struct {
+	ID              pgtype.UUID        `json:"id"`
+	IdeaID          pgtype.UUID        `json:"idea_id"`
+	ParentCommentID pgtype.UUID        `json:"parent_comment_id"`
+	AuthorUserID    pgtype.UUID        `json:"author_user_id"`
+	Body            string             `json:"body"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
+type IdeaVote struct {
+	IdeaID    pgtype.UUID        `json:"idea_id"`
+	UserID    pgtype.UUID        `json:"user_id"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
 type IdempotencyKey struct {
@@ -271,6 +302,19 @@ type Membership struct {
 	InvitedBy pgtype.UUID        `json:"invited_by"`
 	InvitedAt pgtype.Timestamptz `json:"invited_at"`
 	UserID    pgtype.UUID        `json:"user_id"`
+}
+
+// In-app dashboard notifications. Distinct from notification_logs (outbound to buyers).
+type Notification struct {
+	ID          pgtype.UUID        `json:"id"`
+	RecipientID pgtype.UUID        `json:"recipient_id"`
+	ActorID     pgtype.UUID        `json:"actor_id"`
+	Type        string             `json:"type"`
+	IdeaID      pgtype.UUID        `json:"idea_id"`
+	CommentID   pgtype.UUID        `json:"comment_id"`
+	Payload     json.RawMessage    `json:"payload"`
+	ReadAt      pgtype.Timestamptz `json:"read_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 // Tracks all notification attempts for analytics and preventing duplicates
@@ -533,6 +577,11 @@ type StoreInvitation struct {
 	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
 	AcceptedAt pgtype.Timestamptz `json:"accepted_at"`
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
+type StoreOrderCounter struct {
+	StoreID   pgtype.UUID `json:"store_id"`
+	LastValue int32       `json:"last_value"`
 }
 
 type Subscription struct {
