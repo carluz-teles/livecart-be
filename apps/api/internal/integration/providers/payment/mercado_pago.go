@@ -368,12 +368,30 @@ func (m *MercadoPago) RefundPayment(ctx context.Context, paymentID string, amoun
 // We allocate per-call (instead of caching) because a) the token can rotate
 // after a RefreshToken and a stale config would silently 401, and b) the
 // allocation cost is trivial next to the network call that follows.
-func (m *MercadoPago) sdkConfig() (*config.Config, error) {
-	cfg, err := config.New(m.credentials.AccessToken)
+func (m *MercadoPago) sdkConfig(opts ...config.Option) (*config.Config, error) {
+	cfg, err := config.New(m.credentials.AccessToken, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("init mp sdk config: %w", err)
 	}
 	return cfg, nil
+}
+
+// deviceIDRequester injects MP's anti-fraud X-meli-session-id header on
+// every outbound request. The SDK exposes DeviceID as a body field on
+// payment.Request, but /v1/payments rejects device_id in the body
+// (`bad_request`: "The name of the following parameters is wrong:
+// [device_id]"). MP only accepts the device fingerprint as a header, so we
+// wire it via a wrapped Requester instead.
+type deviceIDRequester struct {
+	inner    *http.Client
+	deviceID string
+}
+
+func (r *deviceIDRequester) Do(req *http.Request) (*http.Response, error) {
+	if r.deviceID != "" {
+		req.Header.Set("X-meli-session-id", r.deviceID)
+	}
+	return r.inner.Do(req)
 }
 
 func (m *MercadoPago) authHeaders() map[string]string {
@@ -424,7 +442,13 @@ func (m *MercadoPago) GetPublicKey(ctx context.Context) (string, error) {
 // shopper attempt produced a fresh key, so a once-failed cart never gets
 // stuck on MP's cached `internal_error`.
 func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentInput) (*CardPaymentResult, error) {
-	cfg, err := m.sdkConfig()
+	// Inject the device fingerprint via the X-meli-session-id header. We do
+	// NOT set request.DeviceID — /v1/payments rejects device_id as a body
+	// param ("bad_request: [device_id]"), even though the SDK exposes it.
+	cfg, err := m.sdkConfig(config.WithHTTPClient(&deviceIDRequester{
+		inner:    &http.Client{Timeout: 30 * time.Second},
+		deviceID: input.DeviceID,
+	}))
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +465,6 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 		StatementDescriptor: "LIVECART",
 		PaymentMethodID:     input.PaymentMethodID,
 		IssuerID:            input.IssuerID,
-		DeviceID:            input.DeviceID,
 		Metadata:            input.Metadata,
 	}
 
@@ -464,7 +487,6 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 				StatementDescriptor: req.StatementDescriptor,
 				PaymentMethodID:     req.PaymentMethodID,
 				IssuerID:            req.IssuerID,
-				DeviceID:            req.DeviceID,
 				Metadata:            req.Metadata,
 			}
 			m.Logger.Error("mercado pago rejected card payment",
