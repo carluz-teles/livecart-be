@@ -290,6 +290,24 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 	}, nil
 }
 
+// toProviderAddress maps the buyer's shipping address into the provider-
+// agnostic CheckoutAddress shape. Returns nil when no address was captured
+// (typical of Checkout Pro flows that hand the form off to the gateway).
+func toProviderAddress(addr *ShippingAddress) *providers.CheckoutAddress {
+	if addr == nil {
+		return nil
+	}
+	return &providers.CheckoutAddress{
+		ZipCode:      addr.ZipCode,
+		Street:       addr.Street,
+		Number:       addr.Number,
+		Complement:   addr.Complement,
+		Neighborhood: addr.Neighborhood,
+		City:         addr.City,
+		State:        addr.State,
+	}
+}
+
 func derefString(s *string) string {
 	if s == nil {
 		return ""
@@ -470,6 +488,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 			Name:     customerName,
 			Phone:    input.CustomerPhone,
 			Document: input.CustomerDocument,
+			Address:  toProviderAddress(input.ShippingAddress),
 		},
 		Items:           checkoutItems,
 		TotalAmount:     totalAmount,
@@ -636,6 +655,7 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 			Name:     customerName,
 			Phone:    input.CustomerPhone,
 			Document: input.CustomerDocument,
+			Address:  toProviderAddress(input.ShippingAddress),
 		},
 		Items:       checkoutItems,
 		TotalAmount: totalAmount,

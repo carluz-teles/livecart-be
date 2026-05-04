@@ -3,45 +3,34 @@ package payment
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
+	"github.com/mercadopago/sdk-go/pkg/config"
+	"github.com/mercadopago/sdk-go/pkg/mperror"
+	"github.com/mercadopago/sdk-go/pkg/oauth"
+	"github.com/mercadopago/sdk-go/pkg/payment"
+	"github.com/mercadopago/sdk-go/pkg/paymentmethod"
+	"github.com/mercadopago/sdk-go/pkg/preference"
+	"github.com/mercadopago/sdk-go/pkg/refund"
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/ratelimit"
 )
 
+// MP item category — kept generic for now. Live commerce on the platform
+// is dominantly fashion but we'd rather not bias the fraud-screening signal
+// away from non-fashion stores. Will become per-store config later.
+const mpDefaultCategoryID = "others"
+
 const (
 	mpAPIBaseURL = "https://api.mercadopago.com"
 	mpOAuthURL   = "https://api.mercadopago.com/oauth/token"
 )
-
-// FlexibleStatus handles Mercado Pago API responses where status can be
-// either a string (payment status like "pending") or a number (HTTP error code like 401)
-type FlexibleStatus string
-
-func (f *FlexibleStatus) UnmarshalJSON(data []byte) error {
-	// Try string first
-	var s string
-	if err := json.Unmarshal(data, &s); err == nil {
-		*f = FlexibleStatus(s)
-		return nil
-	}
-	// Try number (error responses return HTTP status code)
-	var n int
-	if err := json.Unmarshal(data, &n); err == nil {
-		*f = FlexibleStatus(fmt.Sprintf("%d", n))
-		return nil
-	}
-	return fmt.Errorf("status field is neither string nor number")
-}
-
-// String returns the string value of the status
-func (f FlexibleStatus) String() string {
-	return string(f)
-}
 
 // MercadoPago implements the PaymentProvider interface for Mercado Pago.
 type MercadoPago struct {
@@ -167,252 +156,226 @@ func (m *MercadoPago) TestConnection(ctx context.Context) (*providers.TestConnec
 	return result, nil
 }
 
-// RefreshToken refreshes the OAuth access token.
+// RefreshToken refreshes the OAuth access token via the sdk-go OAuth client.
+// The SDK init takes the *app secret* as its "access token" — the OAuth
+// endpoints use it as client_secret in the request body. Our long-lived
+// merchant access token (m.credentials.AccessToken) is unrelated here.
 func (m *MercadoPago) RefreshToken(ctx context.Context) (*Credentials, error) {
 	if m.credentials.RefreshToken == "" {
 		return nil, nil // No refresh token available
 	}
-	if m.appID == "" || m.appSecret == "" {
+	if m.appSecret == "" {
 		return nil, fmt.Errorf("app credentials required for token refresh")
 	}
 
-	payload := map[string]string{
-		"grant_type":    "refresh_token",
-		"client_id":     m.appID,
-		"client_secret": m.appSecret,
-		"refresh_token": m.credentials.RefreshToken,
+	cfg, err := config.New(m.appSecret)
+	if err != nil {
+		return nil, fmt.Errorf("init mp oauth config: %w", err)
 	}
 
-	resp, body, err := m.DoRequest(ctx, http.MethodPost, mpOAuthURL, payload, nil)
+	resource, err := oauth.NewClient(cfg).Refresh(ctx, m.credentials.RefreshToken)
 	if err != nil {
 		return nil, fmt.Errorf("refreshing token: %w", err)
 	}
-	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return nil, fmt.Errorf("token refresh failed: status %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	var tokenResp struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int    `json:"expires_in"`
-		TokenType    string `json:"token_type"`
-	}
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, fmt.Errorf("parsing token response: %w", err)
-	}
 
 	return &Credentials{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		TokenType:    tokenResp.TokenType,
-		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+		AccessToken:  resource.AccessToken,
+		RefreshToken: resource.RefreshToken,
+		TokenType:    resource.TokenType,
+		ExpiresAt:    time.Now().Add(time.Duration(resource.ExpiresIn) * time.Second),
 	}, nil
 }
 
-// CreateCheckout creates a checkout preference in Mercado Pago.
+// CreateCheckout creates a checkout preference in Mercado Pago via the
+// official sdk-go. Beyond the migration, this fills three previously-missing
+// fields the MP integration scoring report flagged: items[].category_id,
+// payer.first_name/last_name (split out of the full name we capture as a
+// single field), and payer.address (when the buyer has filled it — Checkout
+// Pro flows hand off the form to the gateway, so address won't be present).
 func (m *MercadoPago) CreateCheckout(ctx context.Context, order CheckoutOrder) (*CheckoutResult, error) {
-	url := mpAPIBaseURL + "/checkout/preferences"
+	cfg, err := m.sdkConfig()
+	if err != nil {
+		return nil, err
+	}
 
-	// Build items array
-	items := make([]map[string]any, len(order.Items))
+	items := make([]preference.ItemRequest, len(order.Items))
 	for i, item := range order.Items {
-		items[i] = map[string]any{
-			"id":          item.ID,
-			"title":       item.Name,
-			"description": item.Description,
-			"quantity":    item.Quantity,
-			"unit_price":  float64(item.UnitPrice) / 100, // Convert cents to currency units
-			"picture_url": item.ImageURL,
-			"currency_id": order.Currency,
+		items[i] = preference.ItemRequest{
+			ID:          item.ID,
+			Title:       item.Name,
+			Description: item.Description,
+			PictureURL:  item.ImageURL,
+			CategoryID:  mpDefaultCategoryID,
+			CurrencyID:  order.Currency,
+			UnitPrice:   float64(item.UnitPrice) / 100, // cents → currency units
+			Quantity:    item.Quantity,
 		}
 	}
 
-	// Build payer object
-	payer := map[string]any{
-		"email": order.Customer.Email,
+	payer := &preference.PayerRequest{
+		Email: order.Customer.Email,
 	}
+	// MP wants name + surname split. We capture a single Name field, so
+	// fall back to the full name as Name when we can't infer a surname.
 	if order.Customer.Name != "" {
-		payer["name"] = order.Customer.Name
+		parts := splitName(order.Customer.Name)
+		payer.Name = parts[0]
+		if len(parts) > 1 {
+			payer.Surname = parts[1]
+		}
 	}
 	if order.Customer.Phone != "" {
-		payer["phone"] = map[string]string{
-			"number": order.Customer.Phone,
-		}
+		payer.Phone = &preference.PhoneRequest{Number: order.Customer.Phone}
 	}
 	if order.Customer.Document != "" {
-		payer["identification"] = map[string]string{
-			"type":   "CPF",
-			"number": order.Customer.Document,
+		payer.Identification = &preference.IdentificationRequest{
+			Type:   "CPF",
+			Number: order.Customer.Document,
+		}
+	}
+	if order.Customer.Address != nil {
+		payer.Address = &preference.AddressRequest{
+			ZipCode:      order.Customer.Address.ZipCode,
+			StreetName:   order.Customer.Address.Street,
+			StreetNumber: order.Customer.Address.Number,
 		}
 	}
 
-	payload := map[string]any{
-		"items":              items,
-		"payer":              payer,
-		"external_reference": order.ExternalID,
-		"back_urls": map[string]string{
-			"success": order.SuccessURL,
-			"failure": order.FailureURL,
-			"pending": order.SuccessURL,
+	req := preference.Request{
+		Items: items,
+		Payer: payer,
+		BackURLs: &preference.BackURLsRequest{
+			Success: order.SuccessURL,
+			Failure: order.FailureURL,
+			Pending: order.SuccessURL,
 		},
-		"auto_return":      "approved",
-		"notification_url": order.NotifyURL,
-	}
-
-	if order.Metadata != nil {
-		payload["metadata"] = order.Metadata
+		AutoReturn:        "approved",
+		ExternalReference: order.ExternalID,
+		NotificationURL:   order.NotifyURL,
+		Metadata:          order.Metadata,
 	}
 
 	if order.ExpiresIn != nil {
 		expiration := time.Now().Add(*order.ExpiresIn)
-		payload["expiration_date_to"] = expiration.Format(time.RFC3339)
+		req.ExpirationDateTo = &expiration
+		req.Expires = true
 	}
 
-	resp, body, err := m.DoRequest(ctx, http.MethodPost, url, payload, m.authHeaders())
+	resource, err := preference.NewClient(cfg).Create(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("creating checkout: %w", err)
 	}
-	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return nil, fmt.Errorf("create checkout failed: status %d, body: %s", resp.StatusCode, string(body))
-	}
 
-	var mpResp struct {
-		ID               string `json:"id"`
-		InitPoint        string `json:"init_point"`
-		SandboxInitPoint string `json:"sandbox_init_point"`
-		DateOfExpiration string `json:"date_of_expiration,omitempty"`
-	}
-	if err := json.Unmarshal(body, &mpResp); err != nil {
-		return nil, fmt.Errorf("parsing checkout response: %w", err)
+	// Sandbox URL falls back when init_point is empty (test credentials).
+	checkoutURL := resource.InitPoint
+	if checkoutURL == "" {
+		checkoutURL = resource.SandboxInitPoint
 	}
 
 	var expiresAt *time.Time
-	if mpResp.DateOfExpiration != "" {
-		if t, err := time.Parse(time.RFC3339, mpResp.DateOfExpiration); err == nil {
-			expiresAt = &t
-		}
-	}
-
-	// Use sandbox URL in development
-	checkoutURL := mpResp.InitPoint
-	if checkoutURL == "" {
-		checkoutURL = mpResp.SandboxInitPoint
+	if !resource.DateOfExpiration.IsZero() {
+		t := resource.DateOfExpiration
+		expiresAt = &t
 	}
 
 	return &CheckoutResult{
-		CheckoutID:  mpResp.ID,
+		CheckoutID:  resource.ID,
 		CheckoutURL: checkoutURL,
 		ExpiresAt:   expiresAt,
 	}, nil
 }
 
-// GetPaymentStatus retrieves the status of a payment.
+// GetPaymentStatus retrieves the status of a payment via the sdk-go
+// Payment client.
 func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*PaymentStatus, error) {
-	url := fmt.Sprintf("%s/v1/payments/%s", mpAPIBaseURL, paymentID)
+	id, err := strconv.Atoi(paymentID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid payment id %q: %w", paymentID, err)
+	}
 
-	resp, body, err := m.DoRequest(ctx, http.MethodGet, url, nil, m.authHeaders())
+	cfg, err := m.sdkConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	resource, err := payment.NewClient(cfg).Get(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("getting payment: %w", err)
 	}
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("payment not found: %s", paymentID)
-	}
-	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return nil, fmt.Errorf("get payment failed: status %d", resp.StatusCode)
-	}
-
-	var mpPayment struct {
-		ID                int64          `json:"id"`
-		Status            FlexibleStatus `json:"status"`
-		StatusDetail      string         `json:"status_detail"`
-		TransactionAmount float64        `json:"transaction_amount"`
-		CurrencyID        string         `json:"currency_id"`
-		DateApproved      string         `json:"date_approved,omitempty"`
-		DateCreated       string         `json:"date_created"`
-		MoneyReleaseDate  string         `json:"money_release_date,omitempty"`
-		Metadata          map[string]any `json:"metadata"`
-		ExternalReference string         `json:"external_reference"`
-		PaymentTypeID     string         `json:"payment_type_id"`  // credit_card, debit_card, pix, ticket (boleto)
-		PaymentMethodID   string         `json:"payment_method_id"` // visa, master, pix, etc.
-		Installments      int            `json:"installments"`
-	}
-	if err := json.Unmarshal(body, &mpPayment); err != nil {
-		return nil, fmt.Errorf("parsing payment response: %w", err)
-	}
-
-	status := mapMPStatus(mpPayment.Status.String())
 
 	var paidAt *time.Time
-	if mpPayment.DateApproved != "" {
-		if t, err := time.Parse(time.RFC3339, mpPayment.DateApproved); err == nil {
-			paidAt = &t
-		}
+	if !resource.DateApproved.IsZero() {
+		t := resource.DateApproved
+		paidAt = &t
 	}
 
 	var moneyReleaseDate *time.Time
-	if mpPayment.MoneyReleaseDate != "" {
-		if t, err := time.Parse(time.RFC3339, mpPayment.MoneyReleaseDate); err == nil {
-			moneyReleaseDate = &t
-		}
+	if !resource.MoneyReleaseDate.IsZero() {
+		t := resource.MoneyReleaseDate
+		moneyReleaseDate = &t
 	}
 
-	// Map Mercado Pago payment type to our payment method
-	paymentMethod := mapMPPaymentType(mpPayment.PaymentTypeID)
-
 	return &PaymentStatus{
-		PaymentID:         fmt.Sprintf("%d", mpPayment.ID),
-		Status:            status,
-		Amount:            int64(mpPayment.TransactionAmount * 100), // Convert to cents
+		PaymentID:         strconv.Itoa(resource.ID),
+		Status:            mapMPStatus(resource.Status),
+		Amount:            int64(resource.TransactionAmount * 100), // currency units → cents
 		PaidAt:            paidAt,
-		FailureReason:     mpPayment.StatusDetail,
-		Metadata:          mpPayment.Metadata,
-		ExternalReference: mpPayment.ExternalReference,
-		PaymentMethod:     paymentMethod,
-		Installments:      mpPayment.Installments,
+		FailureReason:     resource.StatusDetail,
+		Metadata:          resource.Metadata,
+		ExternalReference: resource.ExternalReference,
+		PaymentMethod:     mapMPPaymentType(resource.PaymentTypeID),
+		Installments:      resource.Installments,
 		MoneyReleaseDate:  moneyReleaseDate,
 	}, nil
 }
 
-// RefundPayment initiates a refund for a payment.
+// RefundPayment initiates a full or partial refund for a payment via the
+// sdk-go Refund client.
 func (m *MercadoPago) RefundPayment(ctx context.Context, paymentID string, amount *int64) (*RefundResult, error) {
-	url := fmt.Sprintf("%s/v1/payments/%s/refunds", mpAPIBaseURL, paymentID)
-
-	var payload map[string]any
-	if amount != nil {
-		payload = map[string]any{
-			"amount": float64(*amount) / 100, // Convert cents to currency units
-		}
+	id, err := strconv.Atoi(paymentID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid payment id %q: %w", paymentID, err)
 	}
 
-	resp, body, err := m.DoRequest(ctx, http.MethodPost, url, payload, m.authHeaders())
+	cfg, err := m.sdkConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	client := refund.NewClient(cfg)
+
+	var resource *refund.Response
+	if amount != nil {
+		resource, err = client.CreatePartialRefund(ctx, id, float64(*amount)/100)
+	} else {
+		resource, err = client.Create(ctx, id)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("refunding payment: %w", err)
 	}
-	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return nil, fmt.Errorf("refund failed: status %d, body: %s", resp.StatusCode, string(body))
-	}
 
-	var mpRefund struct {
-		ID          int64   `json:"id"`
-		Status      FlexibleStatus  `json:"status"`
-		Amount      float64 `json:"amount"`
-		DateCreated string  `json:"date_created"`
-	}
-	if err := json.Unmarshal(body, &mpRefund); err != nil {
-		return nil, fmt.Errorf("parsing refund response: %w", err)
-	}
-
-	createdAt, _ := time.Parse(time.RFC3339, mpRefund.DateCreated)
+	createdAt := resource.DateCreated
 
 	return &RefundResult{
-		RefundID:  fmt.Sprintf("%d", mpRefund.ID),
-		Status:    mpRefund.Status.String(),
-		Amount:    int64(mpRefund.Amount * 100), // Convert to cents
+		RefundID:  strconv.Itoa(resource.ID),
+		Status:    resource.Status,
+		Amount:    int64(resource.Amount * 100), // currency units → cents
 		CreatedAt: createdAt,
 	}, nil
 }
 
-// authHeaders returns the authorization headers for API requests.
+// sdkConfig builds a fresh sdk-go config bound to the current access token.
+// We allocate per-call (instead of caching) because a) the token can rotate
+// after a RefreshToken and a stale config would silently 401, and b) the
+// allocation cost is trivial next to the network call that follows.
+func (m *MercadoPago) sdkConfig() (*config.Config, error) {
+	cfg, err := config.New(m.credentials.AccessToken)
+	if err != nil {
+		return nil, fmt.Errorf("init mp sdk config: %w", err)
+	}
+	return cfg, nil
+}
+
 func (m *MercadoPago) authHeaders() map[string]string {
 	return map[string]string{
 		"Authorization": "Bearer " + m.credentials.AccessToken,
@@ -455,292 +418,213 @@ func (m *MercadoPago) GetPublicKey(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("public key not available. Please reconnect the Mercado Pago integration")
 }
 
-// ProcessCardPayment processes a payment with a tokenized card.
+// ProcessCardPayment processes a payment with a tokenized card via the
+// sdk-go Payment client. The SDK auto-attaches a fresh X-Idempotency-Key
+// (random UUID) per request — that matches our prior behavior where each
+// shopper attempt produced a fresh key, so a once-failed cart never gets
+// stuck on MP's cached `internal_error`.
 func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentInput) (*CardPaymentResult, error) {
-	url := mpAPIBaseURL + "/v1/payments"
-
-	// Build payer object
-	payer := map[string]any{
-		"email": input.Customer.Email,
-	}
-	if input.Customer.Document != "" {
-		payer["identification"] = map[string]string{
-			"type":   "CPF",
-			"number": input.Customer.Document,
-		}
-	}
-	if input.Customer.Name != "" {
-		// Split name into first_name and last_name
-		names := splitName(input.Customer.Name)
-		payer["first_name"] = names[0]
-		if len(names) > 1 {
-			payer["last_name"] = names[1]
-		}
-	}
-
-	// Build payload
-	payload := map[string]any{
-		"transaction_amount": float64(input.TotalAmount) / 100, // Convert cents to currency units
-		"token":              input.Token,
-		"installments":       input.Installments,
-		"payer":              payer,
-		"external_reference": input.CartID,
-		"notification_url":   input.NotifyURL,
-		"statement_descriptor": "LIVECART",
-	}
-
-	// Add payment method if provided
-	if input.PaymentMethodID != "" {
-		payload["payment_method_id"] = input.PaymentMethodID
-	}
-	if input.IssuerID != "" {
-		payload["issuer_id"] = input.IssuerID
-	}
-
-	if input.Metadata != nil {
-		payload["metadata"] = input.Metadata
-	}
-
-	// Add idempotency key header. Includes UnixNano so each attempt by the
-	// shopper produces a fresh key — without it, a once-failed cart stays
-	// stuck on MP's cached `internal_error` for the next ~24h even after
-	// the underlying issue is fixed. Retries inside this same call (e.g.
-	// network blips on m.DoRequest) still reuse the key because we set it
-	// once per ProcessCardPayment invocation.
-	headers := m.authHeaders()
-	headers["X-Idempotency-Key"] = fmt.Sprintf(
-		"card-%s-%d-%d", input.CartID, input.TotalAmount, time.Now().UnixNano(),
-	)
-	// Device fingerprint (MP_DEVICE_SESSION_ID from the SDK) goes in the
-	// X-meli-session-id header for anti-fraud, not in additional_info.ip_address
-	// — that field is for the customer IP and using it for the fingerprint
-	// taints fraud scoring.
-	if input.DeviceID != "" {
-		headers["X-meli-session-id"] = input.DeviceID
-	}
-
-	resp, body, err := m.DoRequest(ctx, http.MethodPost, url, payload, headers)
+	cfg, err := m.sdkConfig()
 	if err != nil {
+		return nil, err
+	}
+
+	payer := buildPaymentPayer(input.Customer)
+
+	req := payment.Request{
+		TransactionAmount:   float64(input.TotalAmount) / 100, // cents → currency units
+		Token:               input.Token,
+		Installments:        input.Installments,
+		Payer:               payer,
+		ExternalReference:   input.CartID,
+		NotificationURL:     input.NotifyURL,
+		StatementDescriptor: "LIVECART",
+		PaymentMethodID:     input.PaymentMethodID,
+		IssuerID:            input.IssuerID,
+		DeviceID:            input.DeviceID,
+		Metadata:            input.Metadata,
+	}
+
+	resource, err := payment.NewClient(cfg).Create(ctx, req)
+	if err != nil {
+		// MP rejections come back as *mperror.ResponseError. We log the raw
+		// body + the request payload (token redacted) because MP's
+		// `internal_error` often has an empty `cause` and only the exact
+		// field set reveals the trigger (wrong payment_method_id,
+		// malformed identification, etc.).
+		var mpErr *mperror.ResponseError
+		if errors.As(err, &mpErr) {
+			safe := payment.Request{
+				TransactionAmount:   req.TransactionAmount,
+				Token:               "[redacted]",
+				Installments:        req.Installments,
+				Payer:               req.Payer,
+				ExternalReference:   req.ExternalReference,
+				NotificationURL:     req.NotificationURL,
+				StatementDescriptor: req.StatementDescriptor,
+				PaymentMethodID:     req.PaymentMethodID,
+				IssuerID:            req.IssuerID,
+				DeviceID:            req.DeviceID,
+				Metadata:            req.Metadata,
+			}
+			m.Logger.Error("mercado pago rejected card payment",
+				zap.Int("status_code", mpErr.StatusCode),
+				zap.String("body", mpErr.Message),
+				zap.Any("request_payload", safe),
+			)
+			return &CardPaymentResult{
+				Status:       PaymentRejected,
+				StatusDetail: extractStatusDetail(mpErr.Message),
+				Message:      mpErr.Message,
+			}, nil
+		}
 		return nil, fmt.Errorf("processing card payment: %w", err)
 	}
 
-	var mpResp struct {
-		ID                int64          `json:"id"`
-		Status            FlexibleStatus `json:"status"`
-		StatusDetail      string         `json:"status_detail"`
-		TransactionAmount float64        `json:"transaction_amount"`
-		Installments      int            `json:"installments"`
-		ExternalReference string         `json:"external_reference"`
-		AuthorizationCode string         `json:"authorization_code"`
-		DateApproved      string         `json:"date_approved"`
-		Card              *struct {
-			LastFourDigits string `json:"last_four_digits"`
-			Cardholder     *struct {
-				Name string `json:"name"`
-			} `json:"cardholder"`
-		} `json:"card"`
-		PaymentMethodID string `json:"payment_method_id"`
-		Error           string `json:"error"`
-		Message         string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &mpResp); err != nil {
-		return nil, fmt.Errorf("parsing payment response: %w", err)
-	}
-
-	if !providers.IsSuccessStatus(resp.StatusCode) {
-		errMsg := mpResp.Message
-		if errMsg == "" {
-			errMsg = mpResp.Error
-		}
-		if errMsg == "" {
-			errMsg = fmt.Sprintf("payment failed with status %d", resp.StatusCode)
-		}
-		// Log the raw MP response so we can diagnose internal_error / fraud
-		// rejections from production without having to rerun the flow.
-		// We also log the request payload (with the card token redacted) —
-		// MP's `internal_error` with empty `cause` is opaque, and seeing the
-		// exact field set we sent often reveals issues like wrong
-		// payment_method_id, malformed identification, etc.
-		safePayload := make(map[string]any, len(payload))
-		for k, v := range payload {
-			if k == "token" {
-				safePayload[k] = "[redacted]"
-				continue
-			}
-			safePayload[k] = v
-		}
-		m.Logger.Error("mercado pago rejected card payment",
-			zap.Int("status_code", resp.StatusCode),
-			zap.String("status_detail", mpResp.StatusDetail),
-			zap.String("mp_error", mpResp.Error),
-			zap.String("mp_message", mpResp.Message),
-			zap.ByteString("body", body),
-			zap.Any("request_payload", safePayload),
-		)
-		return &CardPaymentResult{
-			Status:       PaymentRejected,
-			StatusDetail: mpResp.StatusDetail,
-			Message:      errMsg,
-		}, nil
-	}
-
 	result := &CardPaymentResult{
-		PaymentID:         fmt.Sprintf("%d", mpResp.ID),
-		Status:            mapMPStatus(mpResp.Status.String()),
-		StatusDetail:      mpResp.StatusDetail,
-		Amount:            int64(mpResp.TransactionAmount * 100),
-		Installments:      mpResp.Installments,
-		CardBrand:         mpResp.PaymentMethodID,
-		AuthorizationCode: mpResp.AuthorizationCode,
-		ExternalReference: mpResp.ExternalReference,
-		Message:           getStatusMessage(mpResp.Status.String(), mpResp.StatusDetail),
+		PaymentID:         strconv.Itoa(resource.ID),
+		Status:            mapMPStatus(resource.Status),
+		StatusDetail:      resource.StatusDetail,
+		Amount:            int64(resource.TransactionAmount * 100),
+		Installments:      resource.Installments,
+		CardBrand:         resource.PaymentMethodID,
+		AuthorizationCode: resource.AuthorizationCode,
+		ExternalReference: resource.ExternalReference,
+		Message:           getStatusMessage(resource.Status, resource.StatusDetail),
 	}
 
-	if mpResp.Card != nil {
-		result.LastFourDigits = mpResp.Card.LastFourDigits
+	if resource.Card.LastFourDigits != "" {
+		result.LastFourDigits = resource.Card.LastFourDigits
 	}
 
-	// Mercado Pago returns date_approved as RFC3339 with offset (e.g.
-	// "2026-04-30T11:00:00.000-03:00"). pgx persists Timestamptz in UTC
-	// regardless of the parsed Location, so the absolute instant is preserved
-	// whether the gateway uses BRT, UTC, or any other zone.
-	if mpResp.DateApproved != "" {
-		if t, err := time.Parse(time.RFC3339, mpResp.DateApproved); err == nil {
-			result.PaidAt = &t
-		}
+	if !resource.DateApproved.IsZero() {
+		t := resource.DateApproved
+		result.PaidAt = &t
 	}
 
 	return result, nil
 }
 
-// GeneratePixPayment generates a PIX QR code for payment.
-func (m *MercadoPago) GeneratePixPayment(ctx context.Context, input PixPaymentInput) (*PixPaymentResult, error) {
-	url := mpAPIBaseURL + "/v1/payments"
+// buildPaymentPayer maps our internal CheckoutCustomer onto the sdk-go
+// PayerRequest. Shared between ProcessCardPayment and GeneratePixPayment.
+func buildPaymentPayer(c CheckoutCustomer) *payment.PayerRequest {
+	p := &payment.PayerRequest{Email: c.Email}
+	if c.Name != "" {
+		names := splitName(c.Name)
+		p.FirstName = names[0]
+		if len(names) > 1 {
+			p.LastName = names[1]
+		}
+	}
+	if c.Document != "" {
+		p.Identification = &payment.IdentificationRequest{
+			Type:   "CPF",
+			Number: c.Document,
+		}
+	}
+	if c.Phone != "" {
+		p.Phone = &payment.PhoneRequest{Number: c.Phone}
+	}
+	if c.Address != nil {
+		p.Address = &payment.AddressRequest{
+			ZipCode:      c.Address.ZipCode,
+			StreetName:   c.Address.Street,
+			StreetNumber: c.Address.Number,
+			Neighborhood: c.Address.Neighborhood,
+			City:         c.Address.City,
+			FederalUnit:  c.Address.State,
+		}
+	}
+	return p
+}
 
-	// Set default expiration if not provided
+// extractStatusDetail tries to pull MP's `status_detail` out of the raw
+// error body; falls back to "" so we still log a clean rejection.
+func extractStatusDetail(body string) string {
+	var parsed struct {
+		StatusDetail string `json:"status_detail"`
+	}
+	if err := json.Unmarshal([]byte(body), &parsed); err == nil {
+		return parsed.StatusDetail
+	}
+	return ""
+}
+
+// GeneratePixPayment generates a PIX QR code via the sdk-go Payment client.
+// Behavior change vs. the previous raw HTTP call: the SDK auto-attaches a
+// random X-Idempotency-Key per request, so a second PIX generation for the
+// same cart issues a fresh QR instead of returning the cached one. This is
+// safer (a re-attempt after expiry won't reuse the dead QR) and our
+// cart-side idempotency already prevents accidental duplicates.
+func (m *MercadoPago) GeneratePixPayment(ctx context.Context, input PixPaymentInput) (*PixPaymentResult, error) {
+	cfg, err := m.sdkConfig()
+	if err != nil {
+		return nil, err
+	}
+
 	expiresIn := 30 * time.Minute
 	if input.ExpiresIn != nil {
 		expiresIn = *input.ExpiresIn
 	}
 	expiresAt := time.Now().Add(expiresIn)
 
-	// Build payer object
-	payer := map[string]any{
-		"email": input.Customer.Email,
-	}
-	if input.Customer.Document != "" {
-		payer["identification"] = map[string]string{
-			"type":   "CPF",
-			"number": input.Customer.Document,
-		}
-	}
-	if input.Customer.Name != "" {
-		names := splitName(input.Customer.Name)
-		payer["first_name"] = names[0]
-		if len(names) > 1 {
-			payer["last_name"] = names[1]
-		}
+	req := payment.Request{
+		TransactionAmount: float64(input.TotalAmount) / 100,
+		PaymentMethodID:   "pix",
+		Payer:             buildPaymentPayer(input.Customer),
+		ExternalReference: input.CartID,
+		NotificationURL:   input.NotifyURL,
+		DateOfExpiration:  &expiresAt,
+		Metadata:          input.Metadata,
 	}
 
-	// Build payload for PIX payment
-	// Mercado Pago requires ISO 8601 format in UTC
-	payload := map[string]any{
-		"transaction_amount": float64(input.TotalAmount) / 100,
-		"payment_method_id":  "pix",
-		"payer":              payer,
-		"external_reference": input.CartID,
-		"notification_url":   input.NotifyURL,
-		"date_of_expiration": expiresAt.UTC().Format("2006-01-02T15:04:05.000Z"),
-	}
-
-	if input.Metadata != nil {
-		payload["metadata"] = input.Metadata
-	}
-
-	// Add idempotency key header
-	headers := m.authHeaders()
-	headers["X-Idempotency-Key"] = fmt.Sprintf("pix-%s-%d", input.CartID, input.TotalAmount)
-
-	resp, body, err := m.DoRequest(ctx, http.MethodPost, url, payload, headers)
+	resource, err := payment.NewClient(cfg).Create(ctx, req)
 	if err != nil {
+		var mpErr *mperror.ResponseError
+		if errors.As(err, &mpErr) {
+			return nil, fmt.Errorf("pix generation failed: %s", mpErr.Message)
+		}
 		return nil, fmt.Errorf("generating pix payment: %w", err)
 	}
 
-	var mpResp struct {
-		ID                int64          `json:"id"`
-		Status            FlexibleStatus `json:"status"`
-		TransactionAmount float64        `json:"transaction_amount"`
-		ExternalReference string  `json:"external_reference"`
-		PointOfInteraction struct {
-			TransactionData struct {
-				QRCode       string `json:"qr_code"`
-				QRCodeBase64 string `json:"qr_code_base64"`
-				TicketURL    string `json:"ticket_url"`
-			} `json:"transaction_data"`
-		} `json:"point_of_interaction"`
-		DateOfExpiration string `json:"date_of_expiration"`
-		Error            string `json:"error"`
-		Message          string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &mpResp); err != nil {
-		return nil, fmt.Errorf("parsing pix response: %w", err)
-	}
-
-	if !providers.IsSuccessStatus(resp.StatusCode) {
-		errMsg := mpResp.Message
-		if errMsg == "" {
-			errMsg = mpResp.Error
-		}
-		return nil, fmt.Errorf("pix generation failed: %s", errMsg)
-	}
-
-	// Parse expiration date
 	parsedExpiration := expiresAt
-	if mpResp.DateOfExpiration != "" {
-		if t, err := time.Parse(time.RFC3339, mpResp.DateOfExpiration); err == nil {
-			parsedExpiration = t
-		}
+	if !resource.DateOfExpiration.IsZero() {
+		parsedExpiration = resource.DateOfExpiration
 	}
 
 	return &PixPaymentResult{
-		PaymentID:         fmt.Sprintf("%d", mpResp.ID),
+		PaymentID:         strconv.Itoa(resource.ID),
 		Status:            PaymentPending,
-		QRCode:            mpResp.PointOfInteraction.TransactionData.QRCodeBase64,
-		QRCodeText:        mpResp.PointOfInteraction.TransactionData.QRCode,
-		Amount:            int64(mpResp.TransactionAmount * 100),
+		QRCode:            resource.PointOfInteraction.TransactionData.QRCodeBase64,
+		QRCodeText:        resource.PointOfInteraction.TransactionData.QRCode,
+		Amount:            int64(resource.TransactionAmount * 100),
 		ExpiresAt:         parsedExpiration,
-		ExternalReference: mpResp.ExternalReference,
-		TicketURL:         mpResp.PointOfInteraction.TransactionData.TicketURL,
+		ExternalReference: resource.ExternalReference,
+		TicketURL:         resource.PointOfInteraction.TransactionData.TicketURL,
 	}, nil
 }
 
 // GetPaymentMethods returns the payment methods actually enabled on the
-// collector's Mercado Pago account. Queries /v1/payment_methods and keeps
-// only entries whose status is active. PIX is filtered out when the account
-// hasn't registered a PIX key (or deactivated QR rendering), so the frontend
-// never offers an option the merchant cannot fulfill.
+// collector's Mercado Pago account, via the sdk-go PaymentMethod client.
+// Keeps only entries whose status is active. PIX is filtered out when the
+// account hasn't registered a PIX key (or deactivated QR rendering), so the
+// frontend never offers an option the merchant cannot fulfill.
 //
 // On any failure talking to Mercado Pago we fall back to ["card"] to keep
 // the checkout working — we only offer PIX when we have positive evidence
 // that it is enabled.
 func (m *MercadoPago) GetPaymentMethods(ctx context.Context) ([]string, error) {
-	url := mpAPIBaseURL + "/v1/payment_methods"
-	resp, body, err := m.DoRequest(ctx, http.MethodGet, url, nil, m.authHeaders())
-	if err != nil || !providers.IsSuccessStatus(resp.StatusCode) {
-		m.Logger.Warn("mercado pago payment_methods lookup failed, falling back to card-only",
-			zap.Int("status", statusOf(resp)),
+	cfg, err := m.sdkConfig()
+	if err != nil {
+		m.Logger.Warn("mercado pago payment_methods config init failed, falling back to card-only",
 			zap.Error(err),
 		)
 		return []string{"card"}, nil
 	}
 
-	var entries []struct {
-		ID              string `json:"id"`
-		PaymentTypeID   string `json:"payment_type_id"`
-		Status          string `json:"status"`
-	}
-	if err := json.Unmarshal(body, &entries); err != nil {
-		m.Logger.Warn("mercado pago payment_methods parse failed, falling back to card-only",
+	entries, err := paymentmethod.NewClient(cfg).List(ctx)
+	if err != nil {
+		m.Logger.Warn("mercado pago payment_methods lookup failed, falling back to card-only",
 			zap.Error(err),
 		)
 		return []string{"card"}, nil
@@ -772,14 +656,6 @@ func (m *MercadoPago) GetPaymentMethods(ctx context.Context) ([]string, error) {
 		methods = append(methods, "card") // last-resort fallback
 	}
 	return methods, nil
-}
-
-// statusOf returns the HTTP status when the response is not nil.
-func statusOf(resp *http.Response) int {
-	if resp == nil {
-		return 0
-	}
-	return resp.StatusCode
 }
 
 // mapMPPaymentType maps Mercado Pago payment_type_id to our payment method.

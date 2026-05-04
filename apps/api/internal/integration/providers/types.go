@@ -254,6 +254,24 @@ type CheckoutCustomer struct {
 	Name     string `json:"name,omitempty"`
 	Phone    string `json:"phone,omitempty"`
 	Document string `json:"document,omitempty"` // CPF/CNPJ
+	// Address is the shipping address captured at checkout. Optional —
+	// Checkout Pro flows don't have it yet (buyer fills the form on MP's
+	// hosted page) but Card / PIX flows do, and surfacing it as payer.address
+	// lifts the MP fraud-screen approval rate.
+	Address *CheckoutAddress `json:"address,omitempty"`
+}
+
+// CheckoutAddress is the minimal shape MP's payer.address expects. Provider
+// implementations are expected to map this to whatever the upstream API
+// requires (e.g., Mercado Pago's street_name / street_number / zip_code).
+type CheckoutAddress struct {
+	ZipCode      string `json:"zip_code"`
+	Street       string `json:"street"`
+	Number       string `json:"number"`
+	Complement   string `json:"complement,omitempty"`
+	Neighborhood string `json:"neighborhood,omitempty"`
+	City         string `json:"city,omitempty"`
+	State        string `json:"state,omitempty"`
 }
 
 // CheckoutResult is the result of creating a checkout.
