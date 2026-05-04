@@ -84,58 +84,7 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 		WHERE e.store_id = $1
 	`
 
-	args := []interface{}{params.StoreID}
-	argIndex := 2
-
-	var conditions []string
-
-	// Search filter
-	if params.Search != "" {
-		conditions = append(conditions, fmt.Sprintf("(c.platform_handle ILIKE $%d OR c.id::TEXT ILIKE $%d)", argIndex, argIndex))
-		args = append(args, "%"+params.Search+"%")
-		argIndex++
-	}
-
-	// Status filter
-	if len(params.Filters.Status) > 0 {
-		placeholders := make([]string, len(params.Filters.Status))
-		for i, s := range params.Filters.Status {
-			placeholders[i] = fmt.Sprintf("$%d", argIndex)
-			args = append(args, s)
-			argIndex++
-		}
-		conditions = append(conditions, fmt.Sprintf("c.status IN (%s)", strings.Join(placeholders, ",")))
-	}
-
-	// Payment status filter
-	if len(params.Filters.PaymentStatus) > 0 {
-		placeholders := make([]string, len(params.Filters.PaymentStatus))
-		for i, ps := range params.Filters.PaymentStatus {
-			placeholders[i] = fmt.Sprintf("$%d", argIndex)
-			args = append(args, ps)
-			argIndex++
-		}
-		conditions = append(conditions, fmt.Sprintf("c.payment_status IN (%s)", strings.Join(placeholders, ",")))
-	}
-
-	// Live event filter (was live session filter)
-	if params.Filters.LiveSessionID != nil && *params.Filters.LiveSessionID != "" {
-		conditions = append(conditions, fmt.Sprintf("c.event_id = $%d", argIndex))
-		args = append(args, *params.Filters.LiveSessionID)
-		argIndex++
-	}
-
-	// Date filters
-	if params.Filters.DateFrom != nil && *params.Filters.DateFrom != "" {
-		conditions = append(conditions, fmt.Sprintf("c.created_at >= $%d", argIndex))
-		args = append(args, *params.Filters.DateFrom)
-		argIndex++
-	}
-	if params.Filters.DateTo != nil && *params.Filters.DateTo != "" {
-		conditions = append(conditions, fmt.Sprintf("c.created_at <= $%d", argIndex))
-		args = append(args, *params.Filters.DateTo)
-		argIndex++
-	}
+	conditions, args := buildOrderListConditions(params.StoreID, params.Search, params.Filters)
 
 	// Add conditions to queries
 	if len(conditions) > 0 {
@@ -476,7 +425,7 @@ func (r *Repository) GetCustomerComments(ctx context.Context, eventID string, pl
 	return comments, nil
 }
 
-func (r *Repository) GetStats(ctx context.Context, storeID string) (*OrderStatsOutput, error) {
+func (r *Repository) GetStats(ctx context.Context, storeID string, search string, filters OrderFilters) (*OrderStatsOutput, error) {
 	query := `
 		SELECT
 			COUNT(*)::INT as total_orders,
@@ -497,8 +446,13 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (*OrderStatsO
 		WHERE e.store_id = $1
 	`
 
+	conditions, args := buildOrderListConditions(storeID, search, filters)
+	if len(conditions) > 0 {
+		query += " AND " + strings.Join(conditions, " AND ")
+	}
+
 	var stats OrderStatsOutput
-	err := r.db.QueryRow(ctx, query, storeID).Scan(
+	err := r.db.QueryRow(ctx, query, args...).Scan(
 		&stats.TotalOrders,
 		&stats.PendingOrders,
 		&stats.TotalRevenue,
@@ -509,6 +463,83 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (*OrderStatsO
 	}
 
 	return &stats, nil
+}
+
+// buildOrderListConditions builds the WHERE conditions (without leading "AND")
+// and the matching positional args for the order list queries. The returned
+// args always start with storeID so callers can prepend the base WHERE clause
+// `WHERE e.store_id = $1` and append " AND <conditions>" when non-empty.
+func buildOrderListConditions(storeID string, search string, filters OrderFilters) ([]string, []interface{}) {
+	args := []interface{}{storeID}
+	argIndex := 2
+	var conditions []string
+
+	if search != "" {
+		conditions = append(conditions, fmt.Sprintf("(c.platform_handle ILIKE $%d OR c.id::TEXT ILIKE $%d)", argIndex, argIndex))
+		args = append(args, "%"+search+"%")
+		argIndex++
+	}
+
+	if len(filters.Status) > 0 {
+		placeholders := make([]string, len(filters.Status))
+		for i, s := range filters.Status {
+			placeholders[i] = fmt.Sprintf("$%d", argIndex)
+			args = append(args, s)
+			argIndex++
+		}
+		conditions = append(conditions, fmt.Sprintf("c.status IN (%s)", strings.Join(placeholders, ",")))
+	}
+
+	if len(filters.PaymentStatus) > 0 {
+		placeholders := make([]string, len(filters.PaymentStatus))
+		for i, ps := range filters.PaymentStatus {
+			placeholders[i] = fmt.Sprintf("$%d", argIndex)
+			args = append(args, ps)
+			argIndex++
+		}
+		conditions = append(conditions, fmt.Sprintf("c.payment_status IN (%s)", strings.Join(placeholders, ",")))
+	}
+
+	if filters.LiveSessionID != nil && *filters.LiveSessionID != "" {
+		conditions = append(conditions, fmt.Sprintf("c.event_id = $%d", argIndex))
+		args = append(args, *filters.LiveSessionID)
+		argIndex++
+	}
+
+	if filters.DateFrom != nil && *filters.DateFrom != "" {
+		conditions = append(conditions, fmt.Sprintf("c.created_at >= $%d", argIndex))
+		args = append(args, *filters.DateFrom)
+		argIndex++
+	}
+	if filters.DateTo != nil && *filters.DateTo != "" {
+		conditions = append(conditions, fmt.Sprintf("c.created_at <= $%d", argIndex))
+		args = append(args, *filters.DateTo)
+		argIndex++
+	}
+
+	// Shipment status filter implies HasShipment=true, so when both are set the
+	// status filter wins. NOT EXISTS is the only way to ask for orders without
+	// any shipment row.
+	if len(filters.ShipmentStatus) > 0 {
+		placeholders := make([]string, len(filters.ShipmentStatus))
+		for i, st := range filters.ShipmentStatus {
+			placeholders[i] = fmt.Sprintf("$%d", argIndex)
+			args = append(args, st)
+			argIndex++
+		}
+		conditions = append(conditions, fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM shipments sh WHERE sh.order_id = c.id AND sh.status IN (%s))",
+			strings.Join(placeholders, ","),
+		))
+	} else if filters.HasShipment != nil {
+		if *filters.HasShipment {
+			conditions = append(conditions, "EXISTS (SELECT 1 FROM shipments sh WHERE sh.order_id = c.id)")
+		} else {
+			conditions = append(conditions, "NOT EXISTS (SELECT 1 FROM shipments sh WHERE sh.order_id = c.id)")
+		}
+	}
+
+	return conditions, args
 }
 
 // GetShipmentForOrder returns the shipment attached to an order (at most one).

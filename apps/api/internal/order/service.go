@@ -298,8 +298,8 @@ func (s *Service) GetUpsellSummary(ctx context.Context, id, storeID string) (*Or
 	return out, nil
 }
 
-func (s *Service) GetStats(ctx context.Context, storeID string) (*OrderStatsOutput, error) {
-	stats, err := s.repo.GetStats(ctx, storeID)
+func (s *Service) GetStats(ctx context.Context, storeID string, search string, filters OrderFilters) (*OrderStatsOutput, error) {
+	stats, err := s.repo.GetStats(ctx, storeID, search, filters)
 	if err != nil {
 		return nil, err
 	}

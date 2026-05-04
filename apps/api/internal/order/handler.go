@@ -173,7 +173,7 @@ func (h *Handler) GetUpsell(c *fiber.Ctx) error {
 func (h *Handler) GetStats(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
 
-	output, err := h.service.GetStats(c.Context(), storeID)
+	output, err := h.service.GetStats(c.Context(), storeID, c.Query("search"), parseOrderFilters(c))
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
@@ -214,6 +214,25 @@ func parseOrderFilters(c *fiber.Ctx) OrderFilters {
 	}
 	if dateTo := c.Query("dateTo"); dateTo != "" {
 		filters.DateTo = &dateTo
+	}
+
+	if hasShipment := c.Query("hasShipment"); hasShipment != "" {
+		switch hasShipment {
+		case "true":
+			t := true
+			filters.HasShipment = &t
+		case "false":
+			f := false
+			filters.HasShipment = &f
+		}
+	}
+
+	shipmentStatusBytes := c.Context().QueryArgs().PeekMulti("shipmentStatus")
+	if len(shipmentStatusBytes) > 0 {
+		filters.ShipmentStatus = make([]string, len(shipmentStatusBytes))
+		for i, s := range shipmentStatusBytes {
+			filters.ShipmentStatus[i] = string(s)
+		}
 	}
 
 	return filters

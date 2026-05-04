@@ -13,6 +13,16 @@ type OrderFilters struct {
 	LiveSessionID *string  `query:"liveSessionId"`
 	DateFrom      *string  `query:"dateFrom"`
 	DateTo        *string  `query:"dateTo"`
+
+	// Tri-state filter on whether the order has any shipment row.
+	// nil = ignore; *true = only orders with at least one shipment;
+	// *false = only orders without any shipment. Combined with ShipmentStatus
+	// the latter wins (ShipmentStatus implies HasShipment=true).
+	HasShipment *bool `query:"hasShipment"`
+
+	// Filter orders whose latest shipment status is in this set. Empty/nil = ignore.
+	// Values follow the normalized ShipmentStatus enum (in_transit, delivered, ...).
+	ShipmentStatus []string `query:"shipmentStatus"`
 }
 
 // Handler layer - Request/Response types
