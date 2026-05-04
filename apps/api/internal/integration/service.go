@@ -1618,9 +1618,17 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 		effectiveStock := detailed.Stock
 		var variantsResp []ERPVariantResponse
 		if isParent {
-			// Tiny doesn't include imageUrl, dimensoes or flat dimensions inside
-			// variacoes[] of a parent response — fetch each child individually.
-			s.enrichVariantsFromIndividualGets(ctx, erpProvider, detailed)
+			// NOTE: NOT calling enrichVariantsFromIndividualGets here on
+			// purpose — that helper does N extra Tiny GetProducts (one per
+			// variation) just to pull imageUrl + per-variant shipping for the
+			// picker preview. With Tiny's 1 req/s rate limit and products
+			// carrying 9+ variations, the search request was taking ~15-20s
+			// and the front was timing out ("A busca demorou demais").
+			// The per-variation GetProduct happens later when the merchant
+			// actually imports the product, where the latency is acceptable.
+			// At search time we settle for whatever came in the parent's
+			// `variacoes[]` (id/sku/stock/attributes) — enough to render the
+			// picker.
 
 			effectiveStock = 0
 			variantsResp = make([]ERPVariantResponse, len(detailed.Variants))
