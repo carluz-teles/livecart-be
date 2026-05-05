@@ -1281,7 +1281,10 @@ func (t *Tiny) lookupFormaPagamentoID(ctx context.Context, method string) (int64
 	endpoint := fmt.Sprintf("%s/formas-pagamento?nome=%s&situacao=1&limit=10",
 		tinyAPIBaseURL, url.QueryEscape(queryName))
 
-	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+	// Retry on 5xx/429: under HealthCheck the 7 lookups burst together and
+	// occasionally one gets rate-limited or hits a transient server error,
+	// flipping the displayed count between refreshes.
+	resp, body, err := t.DoRequestWithRetry(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
 	if err != nil {
 		return 0, fmt.Errorf("listing formas de pagamento: %w", err)
 	}
@@ -1354,7 +1357,7 @@ func (t *Tiny) lookupFormaRecebimentoID(ctx context.Context, method string) (int
 		endpoint := fmt.Sprintf("%s/formas-recebimento?limit=%d&offset=%d",
 			tinyAPIBaseURL, pageSize, page*pageSize)
 
-		resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+		resp, body, err := t.DoRequestWithRetry(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
 		if err != nil {
 			return 0, fmt.Errorf("listing formas de recebimento: %w", err)
 		}
@@ -1410,7 +1413,7 @@ func (t *Tiny) lookupFormaEnvioID(ctx context.Context, name string) (int64, erro
 	endpoint := fmt.Sprintf("%s/formas-envio?nome=%s&limit=10",
 		tinyAPIBaseURL, url.QueryEscape(name))
 
-	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+	resp, body, err := t.DoRequestWithRetry(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
 	if err != nil {
 		return 0, fmt.Errorf("listing formas de envio: %w", err)
 	}
@@ -1944,12 +1947,44 @@ func (t *Tiny) HealthCheck(ctx context.Context) (*providers.ERPHealthCheckResult
 		})
 	}
 
+	start := time.Now()
 	if err := g.Wait(); err != nil {
 		// errgroup returns the first non-nil error from a goroutine —
 		// because each Go func above returns nil unconditionally, this
 		// path is only reached if the parent context is cancelled.
 		return nil, fmt.Errorf("running tiny health check: %w", err)
 	}
+
+	// Summary log to diagnose flapping counts. Per-item: name, category,
+	// whether matched. Per-category: total/missing breakdown. We log even
+	// on success so two consecutive runs can be diff'd to find which
+	// specific lookup is unstable (e.g. one returning 5xx intermittently).
+	missingByCategory := map[providers.ERPHealthCheckCategory]int{}
+	itemSnapshot := make([]map[string]any, len(items))
+	for i, it := range items {
+		if it.Status == providers.ERPHealthStatusMissing {
+			missingByCategory[it.Category]++
+		}
+		itemSnapshot[i] = map[string]any{
+			"category":      string(it.Category),
+			"expected_name": it.ExpectedName,
+			"status":        string(it.Status),
+			"matched_id":    it.MatchedID,
+		}
+	}
+	totalMissing := 0
+	for _, c := range missingByCategory {
+		totalMissing += c
+	}
+	t.Logger.Info("tiny health check completed",
+		zap.Duration("duration", time.Since(start)),
+		zap.Int("items_total", len(items)),
+		zap.Int("items_missing", totalMissing),
+		zap.Int("missing_forma_pagamento", missingByCategory[providers.ERPHealthFormaPagamento]),
+		zap.Int("missing_forma_recebimento", missingByCategory[providers.ERPHealthFormaRecebimento]),
+		zap.Int("missing_forma_envio", missingByCategory[providers.ERPHealthFormaEnvio]),
+		zap.Any("items", itemSnapshot),
+	)
 
 	return &providers.ERPHealthCheckResult{
 		CheckedAt: time.Now(),
