@@ -41,6 +41,10 @@ type CartForCheckoutResponse struct {
 	// previous paid cart (returning-buyer flow). Frontend uses it to render the
 	// "olá de novo" banner above the form.
 	IsReturningCustomer bool                           `json:"isReturningCustomer,omitempty"`
+	// AppliedCoupon is the snapshot of the coupon currently attached to the
+	// cart, if any. The FE uses it to render the applied state and offer a
+	// remove action.
+	AppliedCoupon       *AppliedCoupon                  `json:"appliedCoupon,omitempty"`
 }
 
 // CheckoutCustomerInfo is the buyer identity captured at checkout. Exposed
@@ -118,9 +122,20 @@ type CartItemResponse struct {
 type CartSummary struct {
 	Subtotal         int64 `json:"subtotal"`
 	ShippingCost     int64 `json:"shippingCost"`
+	// Applied coupon discount in cents — 0 when no coupon. Total already
+	// reflects the subtraction; we expose the absolute discount so the FE
+	// can render the "Cupom CODE −R$ X,XX" line in the totals breakdown.
+	CouponDiscount   int64 `json:"couponDiscount"`
 	Total            int64 `json:"total"`
 	TotalItems       int   `json:"totalItems"`
 	HasShippingQuote bool  `json:"hasShippingQuote"`
+}
+
+// AppliedCoupon is the applied-coupon snapshot the public cart hands the FE.
+// Absent when no coupon is applied.
+type AppliedCoupon struct {
+	Code              string `json:"code"`
+	DiscountCents     int64  `json:"discountCents"`
 }
 
 // CartShippingSelection describes the freight option currently attached to the cart.
@@ -275,6 +290,10 @@ type CartDetails struct {
 	// from the buyer's prior paid cart (returning-buyer prefill) rather than
 	// from the current cart's own paid receipt.
 	IsReturningCustomer bool
+	// Coupon snapshot mirrored from CartRow.
+	CouponID            *string
+	CouponCode          *string
+	CouponDiscountCents int64
 }
 
 // CartItemDetails contains a cart item with product info
@@ -518,6 +537,11 @@ type CartRow struct {
 	AllowEdit          bool
 	MaxQuantityPerItem int
 	Shipping           *CartShippingSelection
+	// Coupon snapshot. CouponID/CouponCode are nil when no coupon is applied;
+	// CouponDiscountCents is the absolute discount in cents and is 0 when none.
+	CouponID            *string
+	CouponCode          *string
+	CouponDiscountCents int64
 }
 
 // CartItemRow represents a cart item row from the database

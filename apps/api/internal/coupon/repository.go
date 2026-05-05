@@ -218,6 +218,393 @@ func (r *Repository) Delete(ctx context.Context, id, eventID string) (bool, erro
 	return tag.RowsAffected() > 0, nil
 }
 
+// =============================================================================
+// PUBLIC-CART APPLY / REMOVE — runs under an explicit tx with a row lock on
+// the coupon so concurrent applies of the same code can never race past
+// max_uses. The caller (Service.ApplyToCart) owns the tx lifecycle.
+// =============================================================================
+
+// CartCouponSnapshot is the minimum cart info ApplyToCart needs to validate
+// and compute the discount. We deliberately fetch it inside the same tx as
+// the coupon lock so the cart's subtotal cannot drift between read and write.
+type CartCouponSnapshot struct {
+	CartID             string
+	EventID            string
+	StoreID            string
+	Status             string
+	PaymentStatus      string
+	SubtotalCents      int64
+	ShippingCostCents  int64
+	HasShippingPicked  bool
+	CouponID           *string // current applied coupon, if any
+}
+
+// LoadCartForCouponTx reads everything ApplyToCart / RemoveFromCart need to
+// validate the operation, locking nothing on the cart side — the coupon row
+// is the contention point. Subtotal sums only the available (non-waitlisted)
+// portion of each cart item, matching the totals the gateway sees.
+func (r *Repository) LoadCartForCouponTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	token string,
+) (*CartCouponSnapshot, error) {
+	const q = `
+		SELECT
+			c.id,
+			c.event_id,
+			le.store_id,
+			c.status,
+			c.payment_status,
+			COALESCE((
+				SELECT SUM(ci.unit_price * GREATEST(ci.quantity - ci.waitlisted_quantity, 0))::BIGINT
+				FROM cart_items ci
+				WHERE ci.cart_id = c.id
+			), 0) AS subtotal_cents,
+			COALESCE(c.shipping_cost_cents, 0) AS shipping_cost_cents,
+			(c.shipping_service_id IS NOT NULL AND c.shipping_service_id <> '') AS has_shipping_picked,
+			c.coupon_id
+		FROM carts c
+		JOIN live_events le ON le.id = c.event_id
+		WHERE c.token = $1
+	`
+	var (
+		out             CartCouponSnapshot
+		paymentStatus   pgtype.Text
+		cartID, eventID pgtype.UUID
+		storeID         pgtype.UUID
+		couponID        pgtype.UUID
+	)
+	err := tx.QueryRow(ctx, q, token).Scan(
+		&cartID, &eventID, &storeID,
+		&out.Status, &paymentStatus,
+		&out.SubtotalCents, &out.ShippingCostCents, &out.HasShippingPicked,
+		&couponID,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("loading cart for coupon: %w", err)
+	}
+	out.CartID = uuid.UUID(cartID.Bytes).String()
+	out.EventID = uuid.UUID(eventID.Bytes).String()
+	out.StoreID = uuid.UUID(storeID.Bytes).String()
+	if paymentStatus.Valid {
+		out.PaymentStatus = paymentStatus.String
+	}
+	if couponID.Valid {
+		id := uuid.UUID(couponID.Bytes).String()
+		out.CouponID = &id
+	}
+	return &out, nil
+}
+
+// LockCouponByEventCodeTx acquires a pessimistic lock on the coupon row
+// matching (event_id, lower(code)). Two concurrent applies of the same code
+// queue here — the second waits until the first commits/rolls back, then
+// re-reads used_count and either passes or 409s.
+func (r *Repository) LockCouponByEventCodeTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	eventID, code string,
+) (*Coupon, error) {
+	const q = `
+		SELECT id, event_id, code, type, value_cents, percent_bps,
+		       max_uses, used_count, min_purchase_cents,
+		       valid_from, valid_until, active, created_at, updated_at
+		FROM coupons
+		WHERE event_id = $1 AND lower(code) = lower($2)
+		FOR UPDATE
+	`
+	row := tx.QueryRow(ctx, q, eventID, code)
+	c, err := scanCoupon(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// LockCouponByIDTx is the dual of LockCouponByEventCodeTx, used by the
+// remove-from-cart flow where we already know the coupon id (from
+// carts.coupon_id) and just need to take the lock to safely decrement
+// used_count.
+func (r *Repository) LockCouponByIDTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	id string,
+) (*Coupon, error) {
+	const q = `
+		SELECT id, event_id, code, type, value_cents, percent_bps,
+		       max_uses, used_count, min_purchase_cents,
+		       valid_from, valid_until, active, created_at, updated_at
+		FROM coupons
+		WHERE id = $1
+		FOR UPDATE
+	`
+	row := tx.QueryRow(ctx, q, id)
+	c, err := scanCoupon(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (r *Repository) InsertReservedRedemptionTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	couponID, cartID string,
+	appliedValueCents int64,
+) error {
+	const q = `
+		INSERT INTO coupon_redemptions (coupon_id, cart_id, status, applied_value_cents)
+		VALUES ($1, $2, 'reserved', $3)
+	`
+	_, err := tx.Exec(ctx, q, couponID, cartID, appliedValueCents)
+	if err != nil {
+		return fmt.Errorf("inserting redemption: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) DeleteRedemptionByCartTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	cartID string,
+) error {
+	_, err := tx.Exec(ctx, `DELETE FROM coupon_redemptions WHERE cart_id = $1`, cartID)
+	if err != nil {
+		return fmt.Errorf("deleting redemption: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) IncrementUsedCountTx(ctx context.Context, tx pgx.Tx, couponID string) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE coupons SET used_count = used_count + 1, updated_at = NOW() WHERE id = $1`,
+		couponID,
+	)
+	return err
+}
+
+func (r *Repository) DecrementUsedCountTx(ctx context.Context, tx pgx.Tx, couponID string) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE coupons SET used_count = GREATEST(used_count - 1, 0), updated_at = NOW() WHERE id = $1`,
+		couponID,
+	)
+	return err
+}
+
+func (r *Repository) ApplyCouponToCartTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	cartID, couponID, code string,
+	discountCents int64,
+) error {
+	const q = `
+		UPDATE carts
+		SET coupon_id = $2, coupon_code = $3, coupon_discount_cents = $4
+		WHERE id = $1
+	`
+	_, err := tx.Exec(ctx, q, cartID, couponID, code, discountCents)
+	return err
+}
+
+func (r *Repository) ClearCouponOnCartTx(ctx context.Context, tx pgx.Tx, cartID string) error {
+	const q = `
+		UPDATE carts
+		SET coupon_id = NULL, coupon_code = NULL, coupon_discount_cents = 0
+		WHERE id = $1
+	`
+	_, err := tx.Exec(ctx, q, cartID)
+	return err
+}
+
+// =============================================================================
+// REDEMPTION LIFECYCLE — webhook flips reserved → confirmed → refunded.
+// =============================================================================
+
+// RedemptionRow is the projection the lifecycle hooks need: just enough to
+// decide whether the transition is valid + which coupon to debit on refund.
+type RedemptionRow struct {
+	ID       string
+	CouponID string
+	Status   string
+}
+
+// LoadRedemptionByCart returns the redemption attached to a cart, or nil
+// when none exists. Read-only (no lock) — callers that mutate take the
+// coupon row lock instead.
+func (r *Repository) LoadRedemptionByCart(ctx context.Context, cartID string) (*RedemptionRow, error) {
+	const q = `
+		SELECT id, coupon_id, status
+		FROM coupon_redemptions
+		WHERE cart_id = $1
+	`
+	var (
+		out      RedemptionRow
+		idVal    pgtype.UUID
+		couponID pgtype.UUID
+	)
+	err := r.db.QueryRow(ctx, q, cartID).Scan(&idVal, &couponID, &out.Status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out.ID = uuid.UUID(idVal.Bytes).String()
+	out.CouponID = uuid.UUID(couponID.Bytes).String()
+	return &out, nil
+}
+
+// MarkRedemptionConfirmed flips a reserved redemption to confirmed and
+// stamps confirmed_at. Idempotent: rows already in 'confirmed' are not
+// touched (RowsAffected=0). Refunded rows are NOT moved back — once a
+// chargeback happens the merchant has to disable+recreate.
+func (r *Repository) MarkRedemptionConfirmed(ctx context.Context, redemptionID string) error {
+	const q = `
+		UPDATE coupon_redemptions
+		SET status = 'confirmed', confirmed_at = NOW()
+		WHERE id = $1 AND status = 'reserved'
+	`
+	_, err := r.db.Exec(ctx, q, redemptionID)
+	return err
+}
+
+// MarkRedemptionRefundedTx flips a reserved/confirmed redemption to
+// refunded inside a tx so the matching used_count decrement on the coupon
+// row stays atomic.
+func (r *Repository) MarkRedemptionRefundedTx(ctx context.Context, tx pgx.Tx, redemptionID string) error {
+	const q = `
+		UPDATE coupon_redemptions
+		SET status = 'refunded'
+		WHERE id = $1 AND status IN ('reserved', 'confirmed')
+	`
+	_, err := tx.Exec(ctx, q, redemptionID)
+	return err
+}
+
+// GetCouponByID is a non-locked read used by the shipping-change re-eval —
+// we don't decrement used_count there, so no row lock needed.
+func (r *Repository) GetCouponByID(ctx context.Context, id string) (*Coupon, error) {
+	const q = `
+		SELECT id, event_id, code, type, value_cents, percent_bps,
+		       max_uses, used_count, min_purchase_cents,
+		       valid_from, valid_until, active, created_at, updated_at
+		FROM coupons
+		WHERE id = $1
+	`
+	row := r.db.QueryRow(ctx, q, id)
+	c, err := scanCoupon(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// GetCartShippingCostCents fetches just the cart's current shipping cost.
+// Returns 0 when no shipping is selected — callers treat that as "discount
+// resets to zero until the buyer picks a new option".
+func (r *Repository) GetCartShippingCostCents(ctx context.Context, cartID string) (int64, error) {
+	var cents int64
+	err := r.db.QueryRow(ctx,
+		`SELECT COALESCE(shipping_cost_cents, 0) FROM carts WHERE id = $1`,
+		cartID,
+	).Scan(&cents)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	return cents, err
+}
+
+// StaleRedemption is the projection the expirer worker scans — only the
+// IDs it needs to decrement and update.
+type StaleRedemption struct {
+	RedemptionID string
+	CouponID     string
+	CartID       string
+}
+
+// ListStaleReservedRedemptions returns reserved redemptions whose cart will
+// never be paid: cart is already 'expired'/'cancelled', payment failed/
+// cancelled, or expires_at slipped past with no payment. Cap per call so
+// one slow run doesn't lock up the worker.
+func (r *Repository) ListStaleReservedRedemptions(ctx context.Context, limit int) ([]StaleRedemption, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	const q = `
+		SELECT cr.id, cr.coupon_id, cr.cart_id
+		FROM coupon_redemptions cr
+		JOIN carts c ON c.id = cr.cart_id
+		WHERE cr.status = 'reserved'
+		  AND (
+		    c.status = 'expired'
+		    OR c.payment_status IN ('failed', 'cancelled', 'refunded')
+		    OR (
+		      c.expires_at IS NOT NULL
+		      AND c.expires_at < NOW()
+		      AND COALESCE(c.payment_status, 'pending') NOT IN ('paid', 'refunded')
+		    )
+		  )
+		LIMIT $1
+	`
+	rows, err := r.db.Query(ctx, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]StaleRedemption, 0)
+	for rows.Next() {
+		var (
+			redID, couponID, cartID pgtype.UUID
+		)
+		if err := rows.Scan(&redID, &couponID, &cartID); err != nil {
+			return nil, err
+		}
+		out = append(out, StaleRedemption{
+			RedemptionID: uuid.UUID(redID.Bytes).String(),
+			CouponID:     uuid.UUID(couponID.Bytes).String(),
+			CartID:       uuid.UUID(cartID.Bytes).String(),
+		})
+	}
+	return out, rows.Err()
+}
+
+// MarkRedemptionExpiredTx flips a reserved redemption to 'expired' inside
+// the same tx that decrements used_count, so the slot returns to circulation
+// atomically.
+func (r *Repository) MarkRedemptionExpiredTx(ctx context.Context, tx pgx.Tx, redemptionID string) error {
+	const q = `
+		UPDATE coupon_redemptions
+		SET status = 'expired'
+		WHERE id = $1 AND status = 'reserved'
+	`
+	_, err := tx.Exec(ctx, q, redemptionID)
+	return err
+}
+
+// UpdateCartCouponDiscount overwrites just the discount cents on the cart;
+// coupon_id and coupon_code are left untouched (used by shipping-change
+// re-eval — the cart still has the same coupon, only the snapshot changes).
+func (r *Repository) UpdateCartCouponDiscount(ctx context.Context, cartID string, discountCents int64) error {
+	_, err := r.db.Exec(ctx,
+		`UPDATE carts SET coupon_discount_cents = $2 WHERE id = $1`,
+		cartID, discountCents,
+	)
+	return err
+}
+
 // rowScanner is a tiny abstraction so scanCoupon can take both the single-
 // row return of QueryRow and the iterator form of Query/Rows.
 type rowScanner interface {

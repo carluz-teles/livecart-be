@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
 	"livecart/apps/api/lib/httpx"
@@ -14,11 +17,12 @@ import (
 
 type Service struct {
 	repo   *Repository
+	pool   *pgxpool.Pool
 	logger *zap.Logger
 }
 
-func NewService(repo *Repository, logger *zap.Logger) *Service {
-	return &Service{repo: repo, logger: logger}
+func NewService(repo *Repository, pool *pgxpool.Pool, logger *zap.Logger) *Service {
+	return &Service{repo: repo, pool: pool, logger: logger}
 }
 
 // List returns every coupon for the event after enforcing tenancy: the
@@ -196,5 +200,345 @@ func validateBusinessRules(t Type, valueCents int64, percentBPS int) error {
 		return httpx.ErrUnprocessable("invalid coupon type")
 	}
 	return nil
+}
+
+// =============================================================================
+// PUBLIC CART — apply / remove
+// =============================================================================
+
+// ApplyResult is what the public-cart endpoint returns after a successful
+// apply. The FE uses these to immediately reflect the new totals without a
+// second round-trip.
+type ApplyResult struct {
+	Code              string
+	Type              Type
+	AppliedValueCents int64
+	SubtotalCents     int64
+	ShippingCostCents int64
+	NewTotalCents     int64 // subtotal + shipping − applied
+}
+
+// ApplyToCart wraps the entire apply path in a single tx so the FOR UPDATE
+// lock on the coupon row blocks concurrent applies and we can never
+// over-redeem (max_uses).
+func (s *Service) ApplyToCart(
+	ctx context.Context,
+	cartToken, code string,
+) (*ApplyResult, error) {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return nil, httpx.ErrUnprocessable("coupon code is required")
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	cart, err := s.repo.LoadCartForCouponTx(ctx, tx, cartToken)
+	if err != nil {
+		return nil, err
+	}
+	if cart == nil {
+		return nil, httpx.ErrNotFound("cart not found")
+	}
+	if cart.PaymentStatus == "paid" {
+		return nil, httpx.ErrConflict("cart already paid")
+	}
+	if cart.Status == "expired" {
+		return nil, httpx.ErrConflict("cart expired")
+	}
+	if cart.CouponID != nil {
+		return nil, httpx.ErrConflict("cart already has a coupon — remove it first")
+	}
+	if cart.SubtotalCents <= 0 {
+		return nil, httpx.ErrUnprocessable("cart is empty")
+	}
+
+	c, err := s.repo.LockCouponByEventCodeTx(ctx, tx, cart.EventID, code)
+	if err != nil {
+		return nil, err
+	}
+	if c == nil {
+		return nil, httpx.ErrNotFound("invalid coupon code")
+	}
+	if !c.Active {
+		return nil, httpx.ErrUnprocessable("coupon is not active")
+	}
+	now := time.Now()
+	if c.ValidFrom != nil && now.Before(*c.ValidFrom) {
+		return nil, httpx.ErrUnprocessable("coupon is not valid yet")
+	}
+	if c.ValidUntil != nil && now.After(*c.ValidUntil) {
+		return nil, httpx.ErrUnprocessable("coupon expired")
+	}
+	if c.MaxUses != nil && c.UsedCount >= *c.MaxUses {
+		return nil, httpx.ErrConflict("coupon already fully redeemed")
+	}
+	if cart.SubtotalCents < c.MinPurchaseCents {
+		return nil, httpx.ErrUnprocessable(
+			fmt.Sprintf("minimum purchase of %.2f BRL not reached", float64(c.MinPurchaseCents)/100),
+		)
+	}
+
+	applied, err := computeAppliedDiscount(c, cart)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.repo.InsertReservedRedemptionTx(ctx, tx, c.ID, cart.CartID, applied); err != nil {
+		return nil, err
+	}
+	if err := s.repo.IncrementUsedCountTx(ctx, tx, c.ID); err != nil {
+		return nil, err
+	}
+	if err := s.repo.ApplyCouponToCartTx(ctx, tx, cart.CartID, c.ID, c.Code, applied); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+
+	return &ApplyResult{
+		Code:              c.Code,
+		Type:              c.Type,
+		AppliedValueCents: applied,
+		SubtotalCents:     cart.SubtotalCents,
+		ShippingCostCents: cart.ShippingCostCents,
+		NewTotalCents:     cart.SubtotalCents + cart.ShippingCostCents - applied,
+	}, nil
+}
+
+// RemoveFromCart undoes ApplyToCart. Idempotent — calling on a cart with no
+// coupon is a no-op (returns the unchanged totals). The decrement is
+// protected by the same FOR UPDATE lock as the apply path.
+func (s *Service) RemoveFromCart(ctx context.Context, cartToken string) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	cart, err := s.repo.LoadCartForCouponTx(ctx, tx, cartToken)
+	if err != nil {
+		return err
+	}
+	if cart == nil {
+		return httpx.ErrNotFound("cart not found")
+	}
+	if cart.PaymentStatus == "paid" {
+		return httpx.ErrConflict("cart already paid")
+	}
+	if cart.CouponID == nil {
+		// No-op: nothing to remove. Don't 404 — keeps the FE safe to call this
+		// idempotently when the user mashes the remove button.
+		return nil
+	}
+
+	c, err := s.repo.LockCouponByIDTx(ctx, tx, *cart.CouponID)
+	if err != nil {
+		return err
+	}
+	if c != nil {
+		// Coupon may have been hard-deleted between apply and remove; if so,
+		// we just clear the cart side.
+		if err := s.repo.DecrementUsedCountTx(ctx, tx, c.ID); err != nil {
+			return err
+		}
+	}
+	if err := s.repo.DeleteRedemptionByCartTx(ctx, tx, cart.CartID); err != nil {
+		return err
+	}
+	if err := s.repo.ClearCouponOnCartTx(ctx, tx, cart.CartID); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+// =============================================================================
+// CART-MUTATION LIFECYCLE — called from checkout when something changes that
+// could invalidate the discount snapshot.
+// =============================================================================
+
+// ReevaluateOnShippingChange re-snapshots a free-shipping coupon's discount
+// against the cart's current shipping cost. No-op when the cart has no
+// coupon, when the coupon is percent / fixed (subtotal-based, immune to
+// shipping changes), or when the cart already has its discount in sync.
+//
+// Runs OUTSIDE a tx because we don't touch coupons.used_count — only
+// carts.coupon_discount_cents — and the cart row is already serialized by
+// the surrounding shipping update.
+func (s *Service) ReevaluateOnShippingChange(ctx context.Context, cartID string) error {
+	r, err := s.repo.LoadRedemptionByCart(ctx, cartID)
+	if err != nil {
+		return err
+	}
+	if r == nil {
+		return nil
+	}
+
+	c, err := s.repo.GetCouponByID(ctx, r.CouponID)
+	if err != nil {
+		return err
+	}
+	if c == nil || c.Type != TypeFreeShipping {
+		return nil
+	}
+
+	shipping, err := s.repo.GetCartShippingCostCents(ctx, cartID)
+	if err != nil {
+		return err
+	}
+	return s.repo.UpdateCartCouponDiscount(ctx, cartID, shipping)
+}
+
+// ExpireStaleReservedRedemptions sweeps reserved redemptions on carts that
+// will never be paid (expired / failed / cancelled) and returns each slot to
+// circulation. Each row gets its own tx so a single bad coupon can't block
+// the whole batch. Returns counts of expired and skipped (rows whose
+// redemption row had already moved to a terminal state between the SELECT
+// and the UPDATE — a benign race with the public-cart remove flow).
+func (s *Service) ExpireStaleReservedRedemptions(ctx context.Context, limit int) (expired, skipped int, err error) {
+	stale, err := s.repo.ListStaleReservedRedemptions(ctx, limit)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	for _, row := range stale {
+		ok, err := s.expireOne(ctx, row)
+		if err != nil {
+			s.logger.Warn("failed to expire reserved redemption",
+				zap.String("redemption_id", row.RedemptionID),
+				zap.String("coupon_id", row.CouponID),
+				zap.String("cart_id", row.CartID),
+				zap.Error(err),
+			)
+			continue
+		}
+		if ok {
+			expired++
+		} else {
+			skipped++
+		}
+	}
+	return expired, skipped, nil
+}
+
+// expireOne wraps a single row in its own tx + lock. Returns true on a
+// successful flip, false when the redemption was already in a terminal
+// state by the time we acquired the lock.
+func (s *Service) expireOne(ctx context.Context, row StaleRow) (bool, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := s.repo.LockCouponByIDTx(ctx, tx, row.CouponID); err != nil {
+		return false, err
+	}
+	if err := s.repo.MarkRedemptionExpiredTx(ctx, tx, row.RedemptionID); err != nil {
+		return false, err
+	}
+	if err := s.repo.DecrementUsedCountTx(ctx, tx, row.CouponID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit: %w", err)
+	}
+	return true, nil
+}
+
+// StaleRow is re-exported from the repository for the worker — keeps the
+// worker package free of the repo type.
+type StaleRow = StaleRedemption
+
+// =============================================================================
+// REDEMPTION LIFECYCLE — called from the payment webhook.
+// =============================================================================
+
+// ConfirmRedemption flips the cart's redemption from 'reserved' to
+// 'confirmed'. No-op when there's no redemption (cart paid without a
+// coupon) or when it's already been confirmed.
+func (s *Service) ConfirmRedemption(ctx context.Context, cartID string) error {
+	r, err := s.repo.LoadRedemptionByCart(ctx, cartID)
+	if err != nil {
+		return err
+	}
+	if r == nil {
+		return nil
+	}
+	if r.Status != "reserved" {
+		// Already confirmed / refunded / expired — webhook may fire twice for
+		// the same cart, this keeps us idempotent.
+		return nil
+	}
+	return s.repo.MarkRedemptionConfirmed(ctx, r.ID)
+}
+
+// RefundRedemption flips the redemption to 'refunded' and decrements the
+// coupon's used_count under a row lock so the slot returns to circulation
+// and the merchant can hand it out again. Idempotent.
+func (s *Service) RefundRedemption(ctx context.Context, cartID string) error {
+	r, err := s.repo.LoadRedemptionByCart(ctx, cartID)
+	if err != nil {
+		return err
+	}
+	if r == nil || r.Status == "refunded" {
+		return nil
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Re-read inside the tx + lock the coupon. The double-check guards
+	// against a TOCTOU between LoadRedemptionByCart and the lock.
+	if _, err := s.repo.LockCouponByIDTx(ctx, tx, r.CouponID); err != nil {
+		return err
+	}
+	if err := s.repo.MarkRedemptionRefundedTx(ctx, tx, r.ID); err != nil {
+		return err
+	}
+	if err := s.repo.DecrementUsedCountTx(ctx, tx, r.CouponID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// computeAppliedDiscount returns the absolute discount in cents for the
+// given coupon + cart snapshot. percent and fixed are capped at the
+// subtotal so a 100% / R$1000 coupon never produces a negative total.
+// free_shipping requires the buyer to have already picked a shipping
+// service so the discount has a stable amount to subtract from.
+func computeAppliedDiscount(c *Coupon, cart *CartCouponSnapshot) (int64, error) {
+	switch c.Type {
+	case TypePercent:
+		applied := cart.SubtotalCents * int64(c.PercentBPS) / 10000
+		if applied > cart.SubtotalCents {
+			applied = cart.SubtotalCents
+		}
+		return applied, nil
+	case TypeFixed:
+		applied := c.ValueCents
+		if applied > cart.SubtotalCents {
+			applied = cart.SubtotalCents
+		}
+		return applied, nil
+	case TypeFreeShipping:
+		if !cart.HasShippingPicked {
+			return 0, httpx.ErrUnprocessable(
+				"select shipping before applying a free-shipping coupon",
+			)
+		}
+		return cart.ShippingCostCents, nil
+	default:
+		return 0, httpx.ErrUnprocessable("invalid coupon type")
+	}
 }
 

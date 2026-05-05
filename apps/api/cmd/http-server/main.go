@@ -398,10 +398,13 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		}
 	}
 
-	// Public checkout routes (no authentication required)
+	// Public checkout routes (no authentication required). Hoisted outside
+	// the integrationSvc guard because downstream wiring (coupon lifecycle)
+	// reaches in to set hooks on the service.
+	var checkoutSvc *checkout.Service
 	if integrationSvc != nil {
 		checkoutRepo := checkout.NewRepository(queries)
-		checkoutSvc := checkout.NewService(checkoutRepo, pool, integrationSvc, log)
+		checkoutSvc = checkout.NewService(checkoutRepo, pool, integrationSvc, log)
 		checkoutHandler := checkout.NewHandler(checkoutSvc, s3Client)
 		checkoutHandler.RegisterRoutes(app)
 	}
@@ -473,9 +476,33 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	orderHandler.RegisterRoutes(storeScoped)
 
 	couponRepo := coupon.NewRepository(pool)
-	couponSvc := coupon.NewService(couponRepo, log)
+	couponSvc := coupon.NewService(couponRepo, pool, log)
 	couponHandler := coupon.NewHandler(couponSvc, validate)
 	couponHandler.RegisterRoutes(storeScoped)
+	couponHandler.RegisterPublicRoutes(app)
+
+	// Wire the redemption lifecycle hook onto the integration service so the
+	// payment webhook flips reserved → confirmed (and confirmed → refunded
+	// on chargebacks). The same syncer also satisfies checkout.CouponLifecycle
+	// so a free-shipping coupon stays in sync across shipping changes.
+	couponLifecycle := coupon.NewRedemptionSyncer(couponSvc)
+	if integrationSvc != nil {
+		integrationSvc.SetCouponSyncer(couponLifecycle)
+	}
+	if checkoutSvc != nil {
+		checkoutSvc.SetCouponLifecycle(couponLifecycle)
+	}
+
+	// Background sweep that returns reserved-redemption slots from carts that
+	// will never be paid (expired / cancelled / failed). Without this, the
+	// merchant's max_uses cap would creep upward across abandoned carts.
+	couponExpirer := coupon.NewRedemptionExpirerWorker(coupon.RedemptionExpirerWorkerConfig{
+		Service:  couponSvc,
+		Logger:   log,
+		Interval: 5 * time.Minute,
+		Limit:    200,
+	})
+	couponExpirer.Start()
 
 	customerRepo := customer.NewRepository(queries)
 	customerSvc := customer.NewService(customerRepo, log)

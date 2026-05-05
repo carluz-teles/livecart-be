@@ -255,6 +255,14 @@ func (r *Repository) toCartRow(row sqlc.GetCartByTokenWithDetailsRow) *CartRow {
 	if row.StoreLogoUrl.Valid {
 		cart.StoreLogoURL = &row.StoreLogoUrl.String
 	}
+	if row.CouponID.Valid {
+		id := uuid.UUID(row.CouponID.Bytes).String()
+		cart.CouponID = &id
+	}
+	if row.CouponCode.Valid {
+		cart.CouponCode = &row.CouponCode.String
+	}
+	cart.CouponDiscountCents = row.CouponDiscountCents
 
 	return cart
 }

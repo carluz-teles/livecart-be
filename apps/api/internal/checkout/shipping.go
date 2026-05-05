@@ -517,12 +517,32 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 		return nil, err
 	}
 
+	// Re-snapshot a free-shipping coupon's discount against the new cost.
+	// Percent / fixed coupons stay untouched (the lifecycle returns no-op).
+	// Errors are logged but never block the shipping selection — the cart
+	// will be re-evaluated on the next mutation either way.
+	if s.couponLifecycle != nil {
+		if err := s.couponLifecycle.OnShippingChanged(ctx, cart.ID); err != nil {
+			s.logger.Warn("coupon re-evaluation on shipping change failed",
+				zap.String("cart_id", cart.ID),
+				zap.Error(err),
+			)
+		}
+	}
+
+	// Re-read the cart to pick up the (possibly updated) coupon discount
+	// for the response summary.
+	refreshed, err := s.repo.GetCartByToken(ctx, input.Token)
+	if err != nil {
+		return nil, err
+	}
+
 	// Recompute summary on the fly.
 	items, err := s.repo.ListCartItems(ctx, cart.ID)
 	if err != nil {
 		return nil, err
 	}
-	summary := buildSummary(items, sel)
+	summary := buildSummary(items, sel, refreshed.CouponDiscountCents)
 
 	return &SelectShippingMethodOutput{
 		Shipping: *sel,
@@ -530,8 +550,10 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 	}, nil
 }
 
-// buildSummary computes the cart summary from the items and a shipping selection.
-func buildSummary(items []CartItemRow, sel *CartShippingSelection) CartSummary {
+// buildSummary computes the cart summary from the items, the selected shipping
+// option, and the coupon discount snapshot. Total is capped at zero so a
+// stale free-shipping snapshot can never produce a negative amount.
+func buildSummary(items []CartItemRow, sel *CartShippingSelection, couponDiscount int64) CartSummary {
 	var subtotal int64
 	var totalItems int
 	for _, it := range items {
@@ -550,6 +572,13 @@ func buildSummary(items []CartItemRow, sel *CartShippingSelection) CartSummary {
 		summary.ShippingCost = sel.CostCents
 		summary.Total = subtotal + sel.CostCents
 		summary.HasShippingQuote = true
+	}
+	if couponDiscount > 0 {
+		summary.CouponDiscount = couponDiscount
+		summary.Total -= couponDiscount
+		if summary.Total < 0 {
+			summary.Total = 0
+		}
 	}
 	return summary
 }

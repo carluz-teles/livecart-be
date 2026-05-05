@@ -416,6 +416,21 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 		summary.Total = subtotal + output.Cart.Shipping.CostCents
 		summary.HasShippingQuote = true
 	}
+	if output.Cart.CouponDiscountCents > 0 {
+		summary.CouponDiscount = output.Cart.CouponDiscountCents
+		summary.Total -= output.Cart.CouponDiscountCents
+		if summary.Total < 0 {
+			summary.Total = 0
+		}
+	}
+
+	var appliedCoupon *AppliedCoupon
+	if output.Cart.CouponCode != nil {
+		appliedCoupon = &AppliedCoupon{
+			Code:          *output.Cart.CouponCode,
+			DiscountCents: output.Cart.CouponDiscountCents,
+		}
+	}
 
 	return CartForCheckoutResponse{
 		ID:                 output.Cart.ID,
@@ -446,6 +461,7 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 		ShippingAddress:     toCheckoutShippingAddress(output.ShippingAddress),
 		Payment:             toCheckoutPayment(output.Payment, output.Cart.PaidAt, output.Cart.CheckoutID),
 		IsReturningCustomer: output.Cart.IsReturningCustomer,
+		AppliedCoupon:       appliedCoupon,
 	}
 }
 

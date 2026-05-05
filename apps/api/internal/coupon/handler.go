@@ -28,6 +28,73 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Delete("/:id", h.Delete)
 }
 
+// RegisterPublicRoutes mounts the buyer-side apply / remove endpoints under
+// /api/public so they bypass auth — same pattern the rest of the public
+// checkout uses (token in path is the trust boundary).
+func (h *Handler) RegisterPublicRoutes(app fiber.Router) {
+	g := app.Group("/api/public/checkout/:token/coupon")
+	g.Post("/", h.Apply)
+	g.Delete("/", h.Remove)
+}
+
+// ApplyCouponRequest is the body for POST /api/public/checkout/:token/coupon.
+type ApplyCouponRequest struct {
+	Code string `json:"code" validate:"required,min=2,max=40"`
+}
+
+// Apply godoc
+// @Summary      Apply a coupon to a public cart
+// @Tags         coupons
+// @Accept       json
+// @Produce      json
+// @Param        token path string true "Cart token"
+// @Param        request body ApplyCouponRequest true "Coupon code"
+// @Success      200 {object} httpx.Envelope{data=ApplyResult}
+// @Failure      404 {object} httpx.Envelope
+// @Failure      409 {object} httpx.Envelope
+// @Failure      422 {object} httpx.ValidationEnvelope
+// @Router       /api/public/checkout/{token}/coupon [post]
+func (h *Handler) Apply(c *fiber.Ctx) error {
+	token := c.Params("token")
+	if token == "" {
+		return httpx.BadRequest(c, "token is required")
+	}
+
+	var req ApplyCouponRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	out, err := h.service.ApplyToCart(c.Context(), token, req.Code)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, out)
+}
+
+// Remove godoc
+// @Summary      Remove the applied coupon from a public cart
+// @Tags         coupons
+// @Produce      json
+// @Param        token path string true "Cart token"
+// @Success      204 "No content"
+// @Failure      404 {object} httpx.Envelope
+// @Failure      409 {object} httpx.Envelope
+// @Router       /api/public/checkout/{token}/coupon [delete]
+func (h *Handler) Remove(c *fiber.Ctx) error {
+	token := c.Params("token")
+	if token == "" {
+		return httpx.BadRequest(c, "token is required")
+	}
+	if err := h.service.RemoveFromCart(c.Context(), token); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
 // List godoc
 // @Summary      List coupons for an event
 // @Tags         coupons

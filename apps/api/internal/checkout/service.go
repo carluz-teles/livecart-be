@@ -14,11 +14,24 @@ import (
 	"livecart/apps/api/lib/httpx"
 )
 
+// CouponLifecycle is the cart-mutation hook the coupon package implements
+// to keep its discount snapshot in sync with the rest of the cart. We define
+// the interface here so the checkout package compiles without a coupon
+// import; the concrete implementation is wired at boot via SetCouponLifecycle.
+type CouponLifecycle interface {
+	// OnShippingChanged is invoked after a successful UpdateCartShipping so
+	// a free-shipping coupon's discount can be re-snapshotted against the
+	// new shipping_cost_cents. Implementation must be a no-op for percent /
+	// fixed coupons (their snapshot is stable across shipping changes).
+	OnShippingChanged(ctx context.Context, cartID string) error
+}
+
 // Service handles business logic for public checkout.
 type Service struct {
 	repo               *Repository
 	pool               *pgxpool.Pool
 	integrationService *integration.Service
+	couponLifecycle    CouponLifecycle
 	logger             *zap.Logger
 }
 
@@ -35,6 +48,14 @@ func NewService(
 		integrationService: integrationService,
 		logger:             logger.Named("checkout"),
 	}
+}
+
+// SetCouponLifecycle wires the redemption hook from the coupon package.
+// Optional — when unset, shipping changes don't re-evaluate coupons (the
+// FE will see a stale free-shipping discount until the cart is mutated
+// some other way).
+func (s *Service) SetCouponLifecycle(lifecycle CouponLifecycle) {
+	s.couponLifecycle = lifecycle
 }
 
 // GetCartForCheckout retrieves a cart for the public checkout page.
@@ -97,9 +118,12 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 			StoreID:            cart.StoreID,
 			StoreName:          cart.StoreName,
 			StoreLogoURL:       cart.StoreLogoURL,
-			AllowEdit:          cart.AllowEdit,
-			MaxQuantityPerItem: cart.MaxQuantityPerItem,
-			Shipping:           shippingSel,
+			AllowEdit:           cart.AllowEdit,
+			MaxQuantityPerItem:  cart.MaxQuantityPerItem,
+			Shipping:            shippingSel,
+			CouponID:            cart.CouponID,
+			CouponCode:          cart.CouponCode,
+			CouponDiscountCents: cart.CouponDiscountCents,
 		},
 		Items: make([]CartItemDetails, len(items)),
 	}
@@ -216,6 +240,12 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 		totalAmount += shippingSel.CostCents
 	}
 
+	// Apply coupon discount snapshot. The coupon module captured a stable
+	// discount-in-cents at apply time; we subtract here, capped at zero so
+	// a percent-on-edge or stale free-shipping snapshot can never produce
+	// a negative transaction_amount.
+	totalAmount = applyCouponDiscount(totalAmount, cart.CouponDiscountCents)
+
 	// Get payment integration for the store
 	paymentIntegration, err := s.repo.GetPaymentIntegration(ctx, cart.StoreID)
 	if err != nil {
@@ -290,6 +320,21 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 	}, nil
 }
 
+// applyCouponDiscount subtracts the persisted coupon discount from the
+// total being sent to the gateway, capped at zero. The discount snapshot
+// lives on the cart (carts.coupon_discount_cents) and was computed by the
+// coupon service under a row lock; we trust it here without re-evaluating.
+func applyCouponDiscount(totalAmount, discountCents int64) int64 {
+	if discountCents <= 0 {
+		return totalAmount
+	}
+	out := totalAmount - discountCents
+	if out < 0 {
+		return 0
+	}
+	return out
+}
+
 // toProviderAddress maps the buyer's shipping address into the provider-
 // agnostic CheckoutAddress shape. Returns nil when no address was captured
 // (typical of Checkout Pro flows that hand the form off to the gateway).
@@ -362,6 +407,7 @@ func (s *Service) GetCheckoutConfig(ctx context.Context, input GetCheckoutConfig
 	if shippingSel, _ := s.repo.ReadCartShipping(ctx, s.pool, cart.ID); shippingSel != nil {
 		totalAmount += shippingSel.CostCents
 	}
+	totalAmount = applyCouponDiscount(totalAmount, cart.CouponDiscountCents)
 
 	// Get payment integration for the store
 	paymentIntegration, err := s.repo.GetPaymentIntegration(ctx, cart.StoreID)
@@ -450,6 +496,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	if shippingSel, _ := s.repo.ReadCartShipping(ctx, s.pool, cart.ID); shippingSel != nil {
 		totalAmount += shippingSel.CostCents
 	}
+	totalAmount = applyCouponDiscount(totalAmount, cart.CouponDiscountCents)
 
 	// Get payment integration
 	paymentIntegration, err := s.repo.GetPaymentIntegration(ctx, cart.StoreID)
@@ -619,6 +666,7 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	if shippingSel, _ := s.repo.ReadCartShipping(ctx, s.pool, cart.ID); shippingSel != nil {
 		totalAmount += shippingSel.CostCents
 	}
+	totalAmount = applyCouponDiscount(totalAmount, cart.CouponDiscountCents)
 
 	// Get payment integration
 	paymentIntegration, err := s.repo.GetPaymentIntegration(ctx, cart.StoreID)

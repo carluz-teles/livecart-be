@@ -68,6 +68,9 @@ type Cart struct {
 	// Cached subtotal of cart_initial_items in cents.
 	InitialSubtotalCents pgtype.Int8 `json:"initial_subtotal_cents"`
 	ShortID              int32       `json:"short_id"`
+	CouponID             pgtype.UUID `json:"coupon_id"`
+	CouponCode           pgtype.Text `json:"coupon_code"`
+	CouponDiscountCents  int64       `json:"coupon_discount_cents"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.
@@ -99,6 +102,33 @@ type CartMutation struct {
 	Source         string             `json:"source"`
 	ErpMovementID  pgtype.Text        `json:"erp_movement_id"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+type Coupon struct {
+	ID               pgtype.UUID        `json:"id"`
+	EventID          pgtype.UUID        `json:"event_id"`
+	Code             string             `json:"code"`
+	Type             string             `json:"type"`
+	ValueCents       int64              `json:"value_cents"`
+	PercentBps       int32              `json:"percent_bps"`
+	MaxUses          pgtype.Int4        `json:"max_uses"`
+	UsedCount        int32              `json:"used_count"`
+	MinPurchaseCents int64              `json:"min_purchase_cents"`
+	ValidFrom        pgtype.Timestamptz `json:"valid_from"`
+	ValidUntil       pgtype.Timestamptz `json:"valid_until"`
+	Active           bool               `json:"active"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+}
+
+type CouponRedemption struct {
+	ID                pgtype.UUID        `json:"id"`
+	CouponID          pgtype.UUID        `json:"coupon_id"`
+	CartID            pgtype.UUID        `json:"cart_id"`
+	Status            string             `json:"status"`
+	AppliedValueCents int64              `json:"applied_value_cents"`
+	ReservedAt        pgtype.Timestamptz `json:"reserved_at"`
+	ConfirmedAt       pgtype.Timestamptz `json:"confirmed_at"`
 }
 
 type Customer struct {

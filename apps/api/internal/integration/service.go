@@ -54,6 +54,15 @@ type ProductGroupSyncer interface {
 	ImportFromERP(ctx context.Context, storeID, externalSource string, parent providers.ERPProduct) (groupID string, importedExternalIDs []string, err error)
 }
 
+// CouponSyncer is the post-payment hook that flips the coupon redemption
+// reserved → confirmed (and confirmed → refunded on chargebacks). Wired
+// from the coupon package via SetCouponSyncer to keep this package's
+// import graph free of coupon internals.
+type CouponSyncer interface {
+	OnCartPaid(ctx context.Context, cartID string) error
+	OnCartRefunded(ctx context.Context, cartID string) error
+}
+
 // Service handles business logic for integrations.
 type Service struct {
 	repo                *Repository
@@ -63,6 +72,7 @@ type Service struct {
 	liveService         *live.Service
 	productSyncer       ProductSyncer
 	productGroupSyncer  ProductGroupSyncer
+	couponSyncer        CouponSyncer
 	notificationService *notification.Service
 	logger              *zap.Logger
 }
@@ -95,6 +105,12 @@ func (s *Service) SetProductSyncer(syncer ProductSyncer) {
 // variations (Tiny tipo=V, etc.).
 func (s *Service) SetProductGroupSyncer(syncer ProductGroupSyncer) {
 	s.productGroupSyncer = syncer
+}
+
+// SetCouponSyncer wires the redemption lifecycle hook called from
+// ProcessPaymentNotification when a cart's payment status flips.
+func (s *Service) SetCouponSyncer(syncer CouponSyncer) {
+	s.couponSyncer = syncer
 }
 
 // SetNotificationService sets the notification service for sending DMs.
@@ -2557,6 +2573,29 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		zap.String("payment_status", cartPaymentStatus),
 		zap.String("payment_method", status.PaymentMethod),
 	)
+
+	// Coupon redemption lifecycle. We never propagate the error — the money
+	// already moved and the webhook must ACK; we'd rather have an
+	// inconsistent redemption row that we can reconcile via cron than retry
+	// the webhook indefinitely and have MP back off our endpoint.
+	if s.couponSyncer != nil {
+		switch cartPaymentStatus {
+		case "paid":
+			if err := s.couponSyncer.OnCartPaid(ctx, status.ExternalReference); err != nil {
+				s.logger.Error("coupon redemption confirm failed",
+					zap.String("cart_id", status.ExternalReference),
+					zap.Error(err),
+				)
+			}
+		case "refunded":
+			if err := s.couponSyncer.OnCartRefunded(ctx, status.ExternalReference); err != nil {
+				s.logger.Error("coupon redemption refund failed",
+					zap.String("cart_id", status.ExternalReference),
+					zap.Error(err),
+				)
+			}
+		}
+	}
 
 	// Only the paid path triggers the ERP finalization. Everything else (failed,
 	// cancelled, pending, refunded) just updates the cart status for now — see
