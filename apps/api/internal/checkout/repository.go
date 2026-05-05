@@ -222,7 +222,7 @@ func (r *Repository) toCartRow(row sqlc.GetCartByTokenWithDetailsRow) *CartRow {
 		PlatformHandle:     row.PlatformHandle,
 		Token:              row.Token,
 		Status:             row.Status,
-		PaymentStatus:      "unpaid",
+		PaymentStatus:      "pending",
 		CreatedAt:          row.CreatedAt.Time,
 		EventTitle:         eventTitle,
 		StoreID:            uuid.UUID(row.StoreID.Bytes).String(),
