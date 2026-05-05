@@ -1318,10 +1318,10 @@ func (t *Tiny) lookupFormaPagamentoID(ctx context.Context, method string) (int64
 }
 
 // expectedFormaRecebimentoName returns the canonical name we expect the
-// merchant to have cadastrado in Tiny → Financeiro → Cadastros → Formas de
-// Recebimento. Mirrors the names lookupFormaPagamentoID searches for, so a
-// merchant who cadastra "Cartão de Crédito" once gets both halves of the
-// parcela populated.
+// merchant to have cadastrado in Tiny → Configurações → Finanças → Formas
+// de Recebimento (Tiny seeds these by default; merchants only need to
+// confirm they're enabled). Mirrors the names lookupFormaPagamentoID
+// searches for, so a single name carries both halves of the parcela.
 func expectedFormaRecebimentoName(method string) string {
 	switch method {
 	case "pix":
@@ -1334,6 +1334,68 @@ func expectedFormaRecebimentoName(method string) string {
 		return "Boleto"
 	}
 	return ""
+}
+
+// formaRecebimentoAliases lists the variants Tiny actually returns for
+// each method. The default seed names changed across versions ("Cartão
+// Crédito" without "de", lowercase "cartão de crédito", "PIX" all caps),
+// and merchants sometimes rename — our lookup matches if the cadastro
+// name equals or contains any alias (case + accent insensitive).
+func formaRecebimentoAliases(method string) []string {
+	switch method {
+	case "pix":
+		return []string{"pix"}
+	case "credit_card":
+		return []string{"cartao de credito", "cartao credito", "credito"}
+	case "debit_card":
+		return []string{"cartao de debito", "cartao debito", "debito"}
+	case "boleto":
+		return []string{"boleto"}
+	}
+	return nil
+}
+
+// stripAccents folds a Latin-1 string to ASCII for fuzzy name matching.
+// Tiny's seed cadastros use accented forms ("Crédito"); merchants who
+// rename sometimes drop the accent ("Credito"), so equality must compare
+// the normalized forms or we report missing on a present cadastro.
+func stripAccents(s string) string {
+	r := []rune(strings.ToLower(s))
+	for i, c := range r {
+		switch c {
+		case 'á', 'à', 'â', 'ã', 'ä':
+			r[i] = 'a'
+		case 'é', 'è', 'ê', 'ë':
+			r[i] = 'e'
+		case 'í', 'ì', 'î', 'ï':
+			r[i] = 'i'
+		case 'ó', 'ò', 'ô', 'õ', 'ö':
+			r[i] = 'o'
+		case 'ú', 'ù', 'û', 'ü':
+			r[i] = 'u'
+		case 'ç':
+			r[i] = 'c'
+		case 'ñ':
+			r[i] = 'n'
+		}
+	}
+	return string(r)
+}
+
+// matchesFormaRecebimento returns true when the cadastro's `nome` is the
+// same method as `method`, comparing accent/case-folded forms with
+// equality first and substring match as fallback. The substring match is
+// only ever applied to the alias list (not free text) so a "Cartão de
+// Crédito - 12x" merchant variant is still picked up but unrelated names
+// like "Recebimento Manual" never match by accident.
+func matchesFormaRecebimento(method, nome string) bool {
+	normalized := stripAccents(nome)
+	for _, alias := range formaRecebimentoAliases(method) {
+		if normalized == alias || strings.Contains(normalized, alias) {
+			return true
+		}
+	}
+	return false
 }
 
 // lookupFormaRecebimentoID resolves the AR-flow side of the parcela
@@ -1370,9 +1432,11 @@ func (t *Tiny) lookupFormaRecebimentoID(ctx context.Context, method string) (int
 
 		var result struct {
 			Itens []struct {
-				ID    int64  `json:"id"`
-				Nome  string `json:"nome"`
-				Ativo bool   `json:"ativo"`
+				ID       int64 `json:"id"`
+				Nome     string `json:"nome"`
+				Ativo    bool   `json:"ativo"`
+				Padrao   bool   `json:"padrao"`
+				Excluido bool   `json:"excluido"`
 			} `json:"itens"`
 			Paginacao struct {
 				TotalRegistros int `json:"totalRegistros"`
@@ -1382,11 +1446,40 @@ func (t *Tiny) lookupFormaRecebimentoID(ctx context.Context, method string) (int
 			return 0, fmt.Errorf("parsing formas de recebimento: %w", err)
 		}
 
+		// Snapshot of what came back so we can debug "cadastro existe e
+		// não bate" reports — Tiny seeds each account with default
+		// formas-recebimento that older code expected to find by exact
+		// name, but the seeds have changed across versions and some
+		// accounts have customized labels.
+		snapshot := make([]map[string]any, 0, len(result.Itens))
 		for _, item := range result.Itens {
-			if !item.Ativo {
+			snapshot = append(snapshot, map[string]any{
+				"id":       item.ID,
+				"nome":     item.Nome,
+				"ativo":    item.Ativo,
+				"padrao":   item.Padrao,
+				"excluido": item.Excluido,
+			})
+		}
+		t.Logger.Debug("tiny formas-recebimento page fetched",
+			zap.String("target_method", method),
+			zap.Int("page", page),
+			zap.Int("count", len(result.Itens)),
+			zap.Int("total_registros", result.Paginacao.TotalRegistros),
+			zap.Any("itens", snapshot),
+		)
+
+		for _, item := range result.Itens {
+			if item.Excluido {
 				continue
 			}
-			if strings.EqualFold(item.Nome, target) {
+			// We tolerate ativo=false here. Tiny's UI can show a
+			// cadastro toggled off but with active=false and the
+			// merchant who confirms "está cadastrado" will be confused
+			// by us reporting missing; the order-create endpoint will
+			// reject the parcela later if ativo is genuinely off, so
+			// the worst case is a deferred error.
+			if matchesFormaRecebimento(method, item.Nome) {
 				return item.ID, nil
 			}
 		}
@@ -1875,34 +1968,38 @@ func (t *Tiny) HealthCheck(ctx context.Context) (*providers.ERPHealthCheckResult
 	}
 
 	jobs := []job{
-		// Formas de Pagamento (meioPagamento on parcela)
+		// Formas de Pagamento (meioPagamento on parcela). Tiny seeds
+		// default cadastros under Configurações → Finanças → Formas de
+		// Pagamento — most accounts only need to confirm they are active.
 		{
 			category:     providers.ERPHealthFormaPagamento,
 			expectedName: "Cartão de Crédito",
 			description:  "Define o instrumento da parcela (Cartão de Crédito). Sem isso, a parcela fica como Conta a Receber genérica.",
-			panelPath:    "Cadastros → Formas de Pagamento",
+			panelPath:    "Configurações → Finanças → Formas de Pagamento",
 			run:          func(ctx context.Context) (int64, error) { return t.lookupFormaPagamentoID(ctx, "credit_card") },
 		},
 		{
 			category:     providers.ERPHealthFormaPagamento,
 			expectedName: "Pix",
 			description:  "Define o instrumento da parcela (Pix). Sem isso, a parcela fica como Conta a Receber genérica.",
-			panelPath:    "Cadastros → Formas de Pagamento",
+			panelPath:    "Configurações → Finanças → Formas de Pagamento",
 			run:          func(ctx context.Context) (int64, error) { return t.lookupFormaPagamentoID(ctx, "pix") },
 		},
-		// Formas de Recebimento (formaRecebimento on parcela)
+		// Formas de Recebimento (formaRecebimento on parcela). Same
+		// section in Tiny's panel — the merchant typically just needs
+		// to confirm they're enabled (Tiny seeds them by default).
 		{
 			category:     providers.ERPHealthFormaRecebimento,
 			expectedName: "Cartão de Crédito",
 			description:  "Define o fluxo financeiro da parcela (Cartão de Crédito). Necessário para classificar a entrada em contas a receber.",
-			panelPath:    "Financeiro → Cadastros → Formas de Recebimento",
+			panelPath:    "Configurações → Finanças → Formas de Recebimento",
 			run:          func(ctx context.Context) (int64, error) { return t.lookupFormaRecebimentoID(ctx, "credit_card") },
 		},
 		{
 			category:     providers.ERPHealthFormaRecebimento,
 			expectedName: "Pix",
 			description:  "Define o fluxo financeiro da parcela (Pix). Necessário para classificar a entrada em contas a receber.",
-			panelPath:    "Financeiro → Cadastros → Formas de Recebimento",
+			panelPath:    "Configurações → Finanças → Formas de Recebimento",
 			run:          func(ctx context.Context) (int64, error) { return t.lookupFormaRecebimentoID(ctx, "pix") },
 		},
 		// Formas de Envio (transportador.formaEnvio on order)
