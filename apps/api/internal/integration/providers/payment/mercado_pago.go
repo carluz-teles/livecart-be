@@ -315,10 +315,17 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 		moneyReleaseDate = &t
 	}
 
-	return &PaymentStatus{
+	amountCents := int64(resource.TransactionAmount * 100)
+	fees, feeCents, netCents := extractFeeBreakdown(
+		resource.FeeDetails,
+		resource.TransactionDetails.NetReceivedAmount,
+		amountCents,
+	)
+
+	status := &PaymentStatus{
 		PaymentID:         strconv.Itoa(resource.ID),
 		Status:            mapMPStatus(resource.Status),
-		Amount:            int64(resource.TransactionAmount * 100), // currency units → cents
+		Amount:            amountCents, // currency units → cents
 		PaidAt:            paidAt,
 		FailureReason:     resource.StatusDetail,
 		Metadata:          resource.Metadata,
@@ -326,7 +333,37 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 		PaymentMethod:     mapMPPaymentType(resource.PaymentTypeID),
 		Installments:      resource.Installments,
 		MoneyReleaseDate:  moneyReleaseDate,
-	}, nil
+		FeeAmountCents:    feeCents,
+		NetAmountCents:    netCents,
+		Fees:              fees,
+	}
+
+	// Audit log so we can reconcile gross/fee/net per payment without having
+	// to re-call /v1/payments. `fees_breakdown` lists every line so a future
+	// fee type (e.g. application_fee for marketplaces) shows up automatically.
+	feesField := make([]map[string]any, 0, len(fees))
+	for _, f := range fees {
+		feesField = append(feesField, map[string]any{
+			"type":         f.Type,
+			"fee_payer":    f.FeePayer,
+			"amount_cents": f.AmountCents,
+		})
+	}
+	m.Logger.Info("mercado pago payment status fetched",
+		zap.String("payment_id", status.PaymentID),
+		zap.String("status", string(status.Status)),
+		zap.String("status_detail", resource.StatusDetail),
+		zap.String("payment_method", status.PaymentMethod),
+		zap.Int("installments", status.Installments),
+		zap.Int64("amount_cents", status.Amount),
+		zap.Int64("fee_amount_cents", status.FeeAmountCents),
+		zap.Int64("net_amount_cents", status.NetAmountCents),
+		zap.Bool("has_money_release_date", moneyReleaseDate != nil),
+		zap.Bool("has_paid_at", paidAt != nil),
+		zap.Any("fees_breakdown", feesField),
+	)
+
+	return status, nil
 }
 
 // RefundPayment initiates a full or partial refund for a payment via the
@@ -524,6 +561,44 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 		result.PaidAt = &t
 	}
 
+	// Capture and log the gross/fee/net breakdown the moment the payment is
+	// created — by the time createFinalERPOrder runs (via webhook), the
+	// numbers are the same, but logging here gives us a per-attempt audit
+	// trail (paymentId + cart + breakdown) even when the merchant never
+	// fetches the status again.
+	amountCents := int64(resource.TransactionAmount * 100)
+	fees, feeCents, netCents := extractFeeBreakdown(
+		resource.FeeDetails,
+		resource.TransactionDetails.NetReceivedAmount,
+		amountCents,
+	)
+	feesField := make([]map[string]any, 0, len(fees))
+	for _, f := range fees {
+		feesField = append(feesField, map[string]any{
+			"type":         f.Type,
+			"fee_payer":    f.FeePayer,
+			"amount_cents": f.AmountCents,
+		})
+	}
+	var moneyReleaseDateStr string
+	if !resource.MoneyReleaseDate.IsZero() {
+		moneyReleaseDateStr = resource.MoneyReleaseDate.Format(time.RFC3339)
+	}
+	m.Logger.Info("mercado pago card payment captured",
+		zap.String("payment_id", result.PaymentID),
+		zap.String("cart_id", input.CartID),
+		zap.String("status", string(result.Status)),
+		zap.String("status_detail", resource.StatusDetail),
+		zap.String("payment_method_id", resource.PaymentMethodID),
+		zap.Int("installments", result.Installments),
+		zap.Int64("amount_cents", amountCents),
+		zap.Int64("fee_amount_cents", feeCents),
+		zap.Int64("net_amount_cents", netCents),
+		zap.String("money_release_date", moneyReleaseDateStr),
+		zap.Bool("has_paid_at", result.PaidAt != nil),
+		zap.Any("fees_breakdown", feesField),
+	)
+
 	return result, nil
 }
 
@@ -678,6 +753,45 @@ func (m *MercadoPago) GetPaymentMethods(ctx context.Context) ([]string, error) {
 		methods = append(methods, "card") // last-resort fallback
 	}
 	return methods, nil
+}
+
+// extractFeeBreakdown turns the SDK fee_details slice + transaction_details
+// block into the cents-based numbers we propagate downstream. We sum only
+// fees where fee_payer == "collector" because those are what the merchant
+// actually pays — payer-side fees show up on the buyer's invoice and don't
+// affect contas a receber.
+//
+// Returns the per-fee list, total collector fees, and the net amount the
+// merchant will receive (gateway-reported `net_received_amount`, or computed
+// gross-fee when the gateway hasn't filled it yet — happens for pending
+// payments).
+func extractFeeBreakdown(
+	feeDetails []payment.FeeDetailResponse,
+	netReceivedAmount float64,
+	transactionAmountCents int64,
+) (fees []providers.PaymentFee, feeCents int64, netCents int64) {
+	if len(feeDetails) > 0 {
+		fees = make([]providers.PaymentFee, 0, len(feeDetails))
+		for _, fd := range feeDetails {
+			amountCents := int64(fd.Amount * 100)
+			fees = append(fees, providers.PaymentFee{
+				Type:        fd.Type,
+				FeePayer:    fd.FeePayer,
+				AmountCents: amountCents,
+			})
+			if fd.FeePayer == "collector" {
+				feeCents += amountCents
+			}
+		}
+	}
+	netCents = int64(netReceivedAmount * 100)
+	if netCents == 0 && transactionAmountCents > 0 && feeCents > 0 {
+		// Pending/in_process payments often return fee_details but leave
+		// net_received_amount at 0 — derive it so the audit log still adds
+		// up. Once the payment settles the gateway will overwrite both.
+		netCents = transactionAmountCents - feeCents
+	}
+	return fees, feeCents, netCents
 }
 
 // mapMPPaymentType maps Mercado Pago payment_type_id to our payment method.

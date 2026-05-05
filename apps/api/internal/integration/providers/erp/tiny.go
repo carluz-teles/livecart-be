@@ -1052,9 +1052,20 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 
 		// Snapshot of the parcela schedule for log audit. With this we can
 		// reconcile the merchant's contas a receber against what we sent
-		// (Tiny may rewrite values but not the count / dates).
+		// (Tiny may rewrite values but not the count / dates). Each parcela
+		// is logged individually (date + valor) so a future Phase 2
+		// (subtract MP fee from parcela.valor or attach a desconto) can be
+		// validated against the same baseline.
 		firstDue, _ := parcelas[0]["data"].(string)
 		lastDue, _ := parcelas[len(parcelas)-1]["data"].(string)
+		schedule := make([]map[string]any, 0, len(parcelas))
+		for _, p := range parcelas {
+			schedule = append(schedule, map[string]any{
+				"data":  p["data"],
+				"valor": p["valor"],
+				"dias":  p["dias"],
+			})
+		}
 		t.Logger.Info("tiny order parcelas prepared",
 			zap.String("method", pay.Method),
 			zap.Int("installments", pay.Installments),
@@ -1062,10 +1073,22 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 			zap.String("first_due", firstDue),
 			zap.String("last_due", lastDue),
 			zap.Int64("amount_cents", pay.Amount),
+			zap.Int64("fee_amount_cents", pay.FeeAmountCents),
+			zap.Int64("net_amount_cents", pay.NetAmountCents),
 			zap.Bool("had_money_release_date", pay.MoneyReleaseDate != nil),
+			zap.Bool("meio_pagamento_matched", meioRef != nil),
+			zap.Any("schedule", schedule),
 		)
 	}
 
+	feeCents := int64(0)
+	netCents := int64(0)
+	paymentMethod := ""
+	if order.Payment != nil {
+		feeCents = order.Payment.FeeAmountCents
+		netCents = order.Payment.NetAmountCents
+		paymentMethod = order.Payment.Method
+	}
 	t.Logger.Info("tiny CreateOrder sending payload",
 		zap.String("external_id", order.ExternalID),
 		zap.String("contact_id", order.ContactID),
@@ -1074,6 +1097,9 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		zap.Bool("has_shipping_address", order.ShippingAddress != nil),
 		zap.Bool("has_shipping_method", order.Shipping != nil),
 		zap.Bool("has_payment", order.Payment != nil),
+		zap.String("payment_method", paymentMethod),
+		zap.Int64("fee_amount_cents", feeCents),
+		zap.Int64("net_amount_cents", netCents),
 	)
 
 	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
@@ -1085,9 +1111,13 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		return nil, fmt.Errorf("create order failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
 	}
 
+	// `situacao` is Tiny's order status code (e.g. "aberto", "aprovado").
+	// Capturing it on creation lets us spot when Tiny rejected fields
+	// silently (status comes back inconsistent vs what we sent).
 	var orderResp struct {
-		ID     int64  `json:"id"`
-		Numero string `json:"numeroPedido"`
+		ID       int64  `json:"id"`
+		Numero   string `json:"numeroPedido"`
+		Situacao string `json:"situacao"`
 	}
 
 	if err := json.Unmarshal(body, &orderResp); err != nil {
@@ -1098,7 +1128,11 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 	t.Logger.Info("tiny order created",
 		zap.String("order_id", orderID),
 		zap.String("numero_pedido", orderResp.Numero),
+		zap.String("situacao", orderResp.Situacao),
 		zap.String("external_id", order.ExternalID),
+		zap.Int64("total_amount_cents", order.TotalAmount),
+		zap.Int64("fee_amount_cents", feeCents),
+		zap.Int64("net_amount_cents", netCents),
 	)
 
 	// Approve the order so it shows under "Pedidos de Venda" when already paid.

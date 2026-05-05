@@ -298,6 +298,28 @@ type PaymentStatus struct {
 	// merchant has antecipation enabled, D+30 otherwise — so the ERP can use
 	// it as the real first-parcela due date instead of guessing.
 	MoneyReleaseDate  *time.Time     `json:"money_release_date,omitempty"`
+
+	// FeeAmountCents is the total fee charged to the merchant by the gateway
+	// (sum of fee_details where fee_payer == "collector"), in cents. Captured
+	// for audit / reconciliation — does NOT change parcela.valor today
+	// (parcela still goes gross). 0 when the gateway didn't return fees yet
+	// (e.g. payment still pending).
+	FeeAmountCents int64 `json:"fee_amount_cents,omitempty"`
+	// NetAmountCents is what the merchant will actually receive after gateway
+	// fees, in cents (Mercado Pago's transaction_details.net_received_amount).
+	// Equals Amount - FeeAmountCents when fees are present.
+	NetAmountCents int64 `json:"net_amount_cents,omitempty"`
+	// Fees is the breakdown of every fee line the gateway returned (type,
+	// payer, amount in cents). Useful when more than one fee type applies
+	// (mercadopago_fee, financing_fee, application_fee for marketplaces).
+	Fees []PaymentFee `json:"fees,omitempty"`
+}
+
+// PaymentFee is a single fee line returned by the payment gateway.
+type PaymentFee struct {
+	Type        string `json:"type"`                   // mercadopago_fee, financing_fee, application_fee, ...
+	FeePayer    string `json:"fee_payer"`              // collector, payer
+	AmountCents int64  `json:"amount_cents"`
 }
 
 // PaymentState represents payment status values.
@@ -538,12 +560,21 @@ type ERPOrderPayment struct {
 	PaymentID    string    `json:"payment_id"`   // gateway payment ID
 	Installments int       `json:"installments,omitempty"`
 	PaidAt       time.Time `json:"paid_at"`
-	Amount       int64     `json:"amount"`       // paid amount, in cents (usually == TotalAmount)
+	Amount       int64     `json:"amount"`       // paid amount, in cents (usually == TotalAmount). Always GROSS — fees live in FeeAmountCents.
 	// MoneyReleaseDate is when the gateway tells us it will credit the
 	// merchant for the first installment — populated by MP, used by the ERP
 	// adapter as the base date for parcela 1 so contas a receber matches the
 	// merchant's actual repasse calendar instead of a hardcoded D+30.
 	MoneyReleaseDate *time.Time `json:"money_release_date,omitempty"`
+
+	// FeeAmountCents and NetAmountCents propagate the gross/fee/net split
+	// from the payment gateway so the ERP adapter can either record the fee
+	// alongside the parcela (e.g. Tiny `descontos` or `observacoes`) or
+	// expose it for reconciliation reports. Today the Tiny adapter logs
+	// these but does NOT subtract fees from parcela.valor — the parcela
+	// stays at the gross Amount, matching the NF-e value.
+	FeeAmountCents int64 `json:"fee_amount_cents,omitempty"`
+	NetAmountCents int64 `json:"net_amount_cents,omitempty"`
 }
 
 // SearchContactsParams contains parameters for searching contacts.

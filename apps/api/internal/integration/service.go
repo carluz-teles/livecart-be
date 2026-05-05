@@ -3538,7 +3538,28 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 			PaidAt:           paidAt,
 			Amount:           totalAmount,
 			MoneyReleaseDate: paymentStatus.MoneyReleaseDate,
+			FeeAmountCents:   paymentStatus.FeeAmountCents,
+			NetAmountCents:   paymentStatus.NetAmountCents,
 		}
+
+		// Snapshot of the financial breakdown right before we hand the
+		// order to the ERP adapter. This is the single point that
+		// connects "what the gateway told us" to "what we asked the ERP
+		// to record" — if the two ever drift (rounding, fee changes,
+		// refund), the diff shows up between this log and the
+		// `tiny CreateOrder sending payload` log that follows.
+		s.logger.Info("ERP order payment snapshot prepared",
+			zap.String("cart_id", cart.ID),
+			zap.String("payment_id", paymentStatus.PaymentID),
+			zap.String("payment_method", paymentStatus.PaymentMethod),
+			zap.String("payment_status", string(paymentStatus.Status)),
+			zap.Int("installments", paymentStatus.Installments),
+			zap.Int64("order_total_cents", totalAmount),
+			zap.Int64("paid_amount_cents", paymentStatus.Amount),
+			zap.Int64("fee_amount_cents", paymentStatus.FeeAmountCents),
+			zap.Int64("net_amount_cents", paymentStatus.NetAmountCents),
+			zap.Bool("has_money_release_date", paymentStatus.MoneyReleaseDate != nil),
+		)
 	}
 
 	result, err := erpProvider.CreateOrder(ctx, order)
@@ -3562,6 +3583,8 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 		zap.Int("items", len(erpItems)),
 		zap.String("payment_id", paymentStatus.PaymentID),
 		zap.String("payment_method", paymentStatus.PaymentMethod),
+		zap.Int64("fee_amount_cents", paymentStatus.FeeAmountCents),
+		zap.Int64("net_amount_cents", paymentStatus.NetAmountCents),
 	)
 
 	return nil
