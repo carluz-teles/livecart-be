@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/ratelimit"
@@ -1855,52 +1856,99 @@ func max(a, b int) int {
 // parcela falls into "Conta a Receber" or the shipment uses Tiny's default
 // carrier instead of the one the customer chose at checkout.
 //
-// Best-effort: any item whose lookup errors out is reported as missing
-// rather than failing the whole check, so the merchant always sees the
-// other items' status.
+// All Tiny lookups run in parallel via errgroup — sequentially this took
+// ~1.5s per audit (7 round trips × ~200ms each), and the FE banner stays
+// invisible until the result lands. Going concurrent collapses the wall
+// time to roughly the slowest single lookup. Best-effort: any item whose
+// lookup errors out is reported as missing rather than failing the whole
+// check, so the merchant always sees the rest.
 func (t *Tiny) HealthCheck(ctx context.Context) (*providers.ERPHealthCheckResult, error) {
-	type pmCheck struct {
-		method string
-		label  string
-	}
-	paymentMethods := []pmCheck{
-		{"credit_card", "Cartão de Crédito"},
-		{"pix", "Pix"},
-	}
-	carriers := []string{"Correios", "Jadlog", "SmartEnvios"}
-
-	items := make([]providers.ERPHealthCheckItem, 0, len(paymentMethods)*2+len(carriers))
-
-	for _, m := range paymentMethods {
-		// Forma de Pagamento (meioPagamento on parcela)
-		id, err := t.lookupFormaPagamentoID(ctx, m.method)
-		items = append(items, healthCheckItem(
-			providers.ERPHealthFormaPagamento,
-			m.label,
-			id, err,
-			"Define o instrumento da parcela ("+m.label+"). Sem isso, a parcela fica como Conta a Receber genérica.",
-			"Cadastros → Formas de Pagamento",
-		))
-		// Forma de Recebimento (formaRecebimento on parcela)
-		id2, err2 := t.lookupFormaRecebimentoID(ctx, m.method)
-		items = append(items, healthCheckItem(
-			providers.ERPHealthFormaRecebimento,
-			m.label,
-			id2, err2,
-			"Define o fluxo financeiro da parcela ("+m.label+"). Necessário para classificar a entrada em contas a receber.",
-			"Financeiro → Cadastros → Formas de Recebimento",
-		))
+	type job struct {
+		category     providers.ERPHealthCheckCategory
+		expectedName string
+		description  string
+		panelPath    string
+		run          func(ctx context.Context) (int64, error)
 	}
 
-	for _, name := range carriers {
-		id, err := t.lookupFormaEnvioID(ctx, name)
-		items = append(items, healthCheckItem(
-			providers.ERPHealthFormaEnvio,
-			name,
-			id, err,
-			"Necessária para que o pedido entre no Tiny já com a transportadora "+name+" associada (etiqueta + acompanhamento).",
-			"Cadastros → Formas de Envio",
-		))
+	jobs := []job{
+		// Formas de Pagamento (meioPagamento on parcela)
+		{
+			category:     providers.ERPHealthFormaPagamento,
+			expectedName: "Cartão de Crédito",
+			description:  "Define o instrumento da parcela (Cartão de Crédito). Sem isso, a parcela fica como Conta a Receber genérica.",
+			panelPath:    "Cadastros → Formas de Pagamento",
+			run:          func(ctx context.Context) (int64, error) { return t.lookupFormaPagamentoID(ctx, "credit_card") },
+		},
+		{
+			category:     providers.ERPHealthFormaPagamento,
+			expectedName: "Pix",
+			description:  "Define o instrumento da parcela (Pix). Sem isso, a parcela fica como Conta a Receber genérica.",
+			panelPath:    "Cadastros → Formas de Pagamento",
+			run:          func(ctx context.Context) (int64, error) { return t.lookupFormaPagamentoID(ctx, "pix") },
+		},
+		// Formas de Recebimento (formaRecebimento on parcela)
+		{
+			category:     providers.ERPHealthFormaRecebimento,
+			expectedName: "Cartão de Crédito",
+			description:  "Define o fluxo financeiro da parcela (Cartão de Crédito). Necessário para classificar a entrada em contas a receber.",
+			panelPath:    "Financeiro → Cadastros → Formas de Recebimento",
+			run:          func(ctx context.Context) (int64, error) { return t.lookupFormaRecebimentoID(ctx, "credit_card") },
+		},
+		{
+			category:     providers.ERPHealthFormaRecebimento,
+			expectedName: "Pix",
+			description:  "Define o fluxo financeiro da parcela (Pix). Necessário para classificar a entrada em contas a receber.",
+			panelPath:    "Financeiro → Cadastros → Formas de Recebimento",
+			run:          func(ctx context.Context) (int64, error) { return t.lookupFormaRecebimentoID(ctx, "pix") },
+		},
+		// Formas de Envio (transportador.formaEnvio on order)
+		{
+			category:     providers.ERPHealthFormaEnvio,
+			expectedName: "Correios",
+			description:  "Necessária para que o pedido entre no Tiny já com a transportadora Correios associada (etiqueta + acompanhamento).",
+			panelPath:    "Cadastros → Formas de Envio",
+			run:          func(ctx context.Context) (int64, error) { return t.lookupFormaEnvioID(ctx, "Correios") },
+		},
+		{
+			category:     providers.ERPHealthFormaEnvio,
+			expectedName: "Jadlog",
+			description:  "Necessária para que o pedido entre no Tiny já com a transportadora Jadlog associada (etiqueta + acompanhamento).",
+			panelPath:    "Cadastros → Formas de Envio",
+			run:          func(ctx context.Context) (int64, error) { return t.lookupFormaEnvioID(ctx, "Jadlog") },
+		},
+		{
+			category:     providers.ERPHealthFormaEnvio,
+			expectedName: "SmartEnvios",
+			description:  "Necessária para que o pedido entre no Tiny já com a transportadora SmartEnvios associada (etiqueta + acompanhamento).",
+			panelPath:    "Cadastros → Formas de Envio",
+			run:          func(ctx context.Context) (int64, error) { return t.lookupFormaEnvioID(ctx, "SmartEnvios") },
+		},
+	}
+
+	items := make([]providers.ERPHealthCheckItem, len(jobs))
+	g, gctx := errgroup.WithContext(ctx)
+	// Cap concurrency to avoid hammering Tiny if the job list grows.
+	g.SetLimit(8)
+
+	for i := range jobs {
+		i := i
+		j := jobs[i]
+		g.Go(func() error {
+			id, err := j.run(gctx)
+			items[i] = healthCheckItem(j.category, j.expectedName, id, err, j.description, j.panelPath)
+			// Lookup-level failures are reported on the item itself
+			// (status=missing). Returning nil keeps the rest of the
+			// audit running even when one endpoint blips.
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		// errgroup returns the first non-nil error from a goroutine —
+		// because each Go func above returns nil unconditionally, this
+		// path is only reached if the parent context is cancelled.
+		return nil, fmt.Errorf("running tiny health check: %w", err)
 	}
 
 	return &providers.ERPHealthCheckResult{
