@@ -538,6 +538,24 @@ func (r *Repository) GetCartShippingCostCents(ctx context.Context, cartID string
 	return cents, err
 }
 
+// GetCartSubtotalCents recomputes the cart's available subtotal from
+// cart_items (sum of unit_price × max(quantity − waitlisted, 0)). Mirrors the
+// projection used inside LoadCartForCouponTx so post-mutation re-evaluation
+// sees the same number ApplyToCart originally compared against.
+func (r *Repository) GetCartSubtotalCents(ctx context.Context, cartID string) (int64, error) {
+	const q = `
+		SELECT COALESCE(SUM(ci.unit_price * GREATEST(ci.quantity - ci.waitlisted_quantity, 0))::BIGINT, 0)
+		FROM cart_items ci
+		WHERE ci.cart_id = $1
+	`
+	var cents int64
+	err := r.db.QueryRow(ctx, q, cartID).Scan(&cents)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	return cents, err
+}
+
 // GetCheapestQuotedShippingCents reads the latest QuoteShipping snapshot
 // from the cart and returns the minimum priceCents across options that are
 // flagged available with a positive price. Returns 0 when no quote cache

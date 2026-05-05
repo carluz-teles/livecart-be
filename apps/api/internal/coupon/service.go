@@ -417,6 +417,113 @@ func (s *Service) ReevaluateOnShippingChange(ctx context.Context, cartID string)
 	return s.repo.UpdateCartCouponDiscount(ctx, cartID, discount)
 }
 
+// ReevaluateOnCartMutation is invoked after every successful cart-item edit
+// (add / quantity change / remove). Two responsibilities:
+//
+//  1. Enforce min_purchase_cents continuously: if the buyer dropped the
+//     subtotal below the threshold the coupon required at apply time, we
+//     auto-remove the coupon (returns the slot to circulation, clears the
+//     cart's coupon fields). The buyer sees the discount disappear on the
+//     next /checkout fetch — the FE renders a toast explaining why.
+//
+//  2. Re-snapshot the discount against the new totals when the coupon
+//     stays applied. percent and fixed both depend on subtotal directly;
+//     free_shipping is unaffected by subtotal but still revalidated against
+//     the cheapest-quoted / merchant-cap rules so a recent shipping
+//     re-quote is also reflected.
+//
+// No-op when the cart has no coupon attached (most checkouts).
+func (s *Service) ReevaluateOnCartMutation(ctx context.Context, cartID string) error {
+	r, err := s.repo.LoadRedemptionByCart(ctx, cartID)
+	if err != nil {
+		return err
+	}
+	if r == nil {
+		return nil
+	}
+
+	c, err := s.repo.GetCouponByID(ctx, r.CouponID)
+	if err != nil {
+		return err
+	}
+	if c == nil {
+		// Coupon was hard-deleted out from under the cart. Tear the cart
+		// side down so the buyer doesn't keep a phantom discount.
+		return s.removeAppliedCouponByCartID(ctx, cartID)
+	}
+
+	subtotal, err := s.repo.GetCartSubtotalCents(ctx, cartID)
+	if err != nil {
+		return err
+	}
+
+	if c.MinPurchaseCents > 0 && subtotal < c.MinPurchaseCents {
+		return s.removeAppliedCouponByCartID(ctx, cartID)
+	}
+
+	var discount int64
+	switch c.Type {
+	case TypePercent:
+		discount = subtotal * int64(c.PercentBPS) / 10000
+		if discount > subtotal {
+			discount = subtotal
+		}
+	case TypeFixed:
+		discount = c.ValueCents
+		if discount > subtotal {
+			discount = subtotal
+		}
+	case TypeFreeShipping:
+		shipping, serr := s.repo.GetCartShippingCostCents(ctx, cartID)
+		if serr != nil {
+			return serr
+		}
+		cheapest, cerr := s.repo.GetCheapestQuotedShippingCents(ctx, cartID)
+		if cerr != nil {
+			return cerr
+		}
+		discount = computeFreeShippingDiscount(shipping, cheapest, freeShippingCap(c))
+	}
+	return s.repo.UpdateCartCouponDiscount(ctx, cartID, discount)
+}
+
+// removeAppliedCouponByCartID is the by-id sibling of RemoveFromCart. Both
+// flows reach the same end state (cart cleared, redemption deleted,
+// used_count decremented under a row lock); we just enter without a token
+// because the lifecycle hooks operate on cart_id.
+func (s *Service) removeAppliedCouponByCartID(ctx context.Context, cartID string) error {
+	r, err := s.repo.LoadRedemptionByCart(ctx, cartID)
+	if err != nil {
+		return err
+	}
+	if r == nil {
+		return nil
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	c, err := s.repo.LockCouponByIDTx(ctx, tx, r.CouponID)
+	if err != nil {
+		return err
+	}
+	if c != nil {
+		if err := s.repo.DecrementUsedCountTx(ctx, tx, c.ID); err != nil {
+			return err
+		}
+	}
+	if err := s.repo.DeleteRedemptionByCartTx(ctx, tx, cartID); err != nil {
+		return err
+	}
+	if err := s.repo.ClearCouponOnCartTx(ctx, tx, cartID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // ExpireStaleReservedRedemptions sweeps reserved redemptions on carts that
 // will never be paid (expired / failed / cancelled) and returns each slot to
 // circulation. Each row gets its own tx so a single bad coupon can't block

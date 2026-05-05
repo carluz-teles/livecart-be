@@ -138,13 +138,17 @@ type CartSummary struct {
 // the FE uses them to explain to the buyer why the discount may be smaller
 // than the chosen shipping cost (merchant cap vs. cheapest-available cap).
 // MaxDiscountCents is 0 when the merchant did not set a ceiling on the
-// coupon. They are still emitted for percent / fixed coupons (with `type`
-// set and the cap as 0) so the FE has the same shape on every applied tile.
+// coupon. MinPurchaseCents is the threshold the cart must keep meeting for
+// the coupon to stay applied — surfaced so the FE can name the amount in
+// the auto-removal toast when a buyer drops below it. All three are still
+// emitted for percent / fixed coupons (with `type` set and the cap as 0)
+// so the FE has the same shape on every applied tile.
 type AppliedCoupon struct {
 	Code             string `json:"code"`
 	Type             string `json:"type,omitempty"`
 	DiscountCents    int64  `json:"discountCents"`
 	MaxDiscountCents int64  `json:"maxDiscountCents,omitempty"`
+	MinPurchaseCents int64  `json:"minPurchaseCents,omitempty"`
 }
 
 // CartShippingSelection describes the freight option currently attached to the cart.
@@ -305,6 +309,7 @@ type CartDetails struct {
 	CouponDiscountCents    int64
 	CouponType             string
 	CouponMaxDiscountCents int64
+	CouponMinPurchaseCents int64
 }
 
 // CartItemDetails contains a cart item with product info
@@ -550,15 +555,16 @@ type CartRow struct {
 	Shipping           *CartShippingSelection
 	// Coupon snapshot. CouponID/CouponCode are nil when no coupon is applied;
 	// CouponDiscountCents is the absolute discount in cents and is 0 when none.
-	// CouponType and CouponMaxDiscountCents are populated lazily by the
-	// service when CouponID is set so the FE can render context for
-	// free-shipping coupons (cap vs. selected service explanation). Empty /
-	// zero when no coupon is applied or for non-free-shipping coupons.
+	// CouponType / CouponMaxDiscountCents / CouponMinPurchaseCents are
+	// populated lazily by the service when CouponID is set so the FE can
+	// render context (free-shipping cap copy + the threshold referenced by
+	// the auto-removal toast). Empty / zero when no coupon is applied.
 	CouponID               *string
 	CouponCode             *string
 	CouponDiscountCents    int64
 	CouponType             string
 	CouponMaxDiscountCents int64
+	CouponMinPurchaseCents int64
 }
 
 // CartItemRow represents a cart item row from the database

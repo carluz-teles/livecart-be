@@ -24,6 +24,16 @@ type CouponLifecycle interface {
 	// new shipping_cost_cents. Implementation must be a no-op for percent /
 	// fixed coupons (their snapshot is stable across shipping changes).
 	OnShippingChanged(ctx context.Context, cartID string) error
+
+	// OnCartMutated is invoked after every successful cart-item edit
+	// (add / quantity update / remove) so the coupon snapshot stays in sync
+	// with the new subtotal. The implementation must:
+	//   - auto-remove the coupon when the new subtotal falls below the
+	//     coupon's min_purchase_cents (slot returns to circulation), and
+	//   - re-snapshot coupon_discount_cents against the new subtotal for
+	//     percent / fixed coupons.
+	// No-op when the cart has no coupon attached.
+	OnCartMutated(ctx context.Context, cartID string) error
 }
 
 // Service handles business logic for public checkout.
@@ -97,15 +107,17 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 		return nil, err
 	}
 
-	// Hydrate the applied coupon's type and merchant cap so the FE can
-	// explain partial free-shipping discounts. Best-effort: a missing /
-	// hard-deleted coupon row leaves the cap at zero (treated by the FE as
-	// "no extra context to show").
+	// Hydrate the applied coupon's type, merchant cap and min-purchase so
+	// the FE can render contextual copy (partial free-shipping explanation,
+	// auto-removal toast referring to the threshold). Best-effort: a missing
+	// / hard-deleted coupon row leaves the fields at zero (treated by the
+	// FE as "no extra context to show").
 	if cart.CouponID != nil {
-		ctype, capCents, cerr := s.repo.ReadCouponSummary(ctx, s.pool, *cart.CouponID)
+		summary, cerr := s.repo.ReadCouponSummary(ctx, s.pool, *cart.CouponID)
 		if cerr == nil {
-			cart.CouponType = ctype
-			cart.CouponMaxDiscountCents = capCents
+			cart.CouponType = summary.Type
+			cart.CouponMaxDiscountCents = summary.MaxDiscountCents
+			cart.CouponMinPurchaseCents = summary.MinPurchaseCents
 		}
 	}
 
@@ -133,11 +145,12 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 			AllowEdit:           cart.AllowEdit,
 			MaxQuantityPerItem:  cart.MaxQuantityPerItem,
 			Shipping:            shippingSel,
-			CouponID:            cart.CouponID,
-			CouponCode:          cart.CouponCode,
-			CouponDiscountCents: cart.CouponDiscountCents,
-			CouponType:          cart.CouponType,
+			CouponID:               cart.CouponID,
+			CouponCode:             cart.CouponCode,
+			CouponDiscountCents:    cart.CouponDiscountCents,
+			CouponType:             cart.CouponType,
 			CouponMaxDiscountCents: cart.CouponMaxDiscountCents,
+			CouponMinPurchaseCents: cart.CouponMinPurchaseCents,
 		},
 		Items: make([]CartItemDetails, len(items)),
 	}
@@ -836,6 +849,8 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 		)
 	}
 
+	s.reevaluateCouponAfterCartMutation(ctx, cart.ID)
+
 	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
 }
 
@@ -889,6 +904,8 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 			zap.Error(err),
 		)
 	}
+
+	s.reevaluateCouponAfterCartMutation(ctx, cart.ID)
 
 	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
 }
@@ -980,7 +997,27 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 		)
 	}
 
+	s.reevaluateCouponAfterCartMutation(ctx, cart.ID)
+
 	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
+}
+
+// reevaluateCouponAfterCartMutation calls the coupon lifecycle hook so the
+// applied coupon (if any) is kept in sync with the new subtotal. We log
+// and swallow the error: the cart mutation already committed and the next
+// /checkout fetch (or another mutation) will reconcile, so failing the
+// caller would leave the buyer staring at a successful mutation that
+// pretends it failed.
+func (s *Service) reevaluateCouponAfterCartMutation(ctx context.Context, cartID string) {
+	if s.couponLifecycle == nil {
+		return
+	}
+	if err := s.couponLifecycle.OnCartMutated(ctx, cartID); err != nil {
+		s.logger.Warn("coupon re-evaluation after cart mutation failed",
+			zap.String("cart_id", cartID),
+			zap.Error(err),
+		)
+	}
 }
 
 // loadEditableCart asserts the cart is in a state that accepts mutations.

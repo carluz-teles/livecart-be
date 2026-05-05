@@ -29,3 +29,10 @@ func (s *RedemptionSyncer) OnCartRefunded(ctx context.Context, cartID string) er
 func (s *RedemptionSyncer) OnShippingChanged(ctx context.Context, cartID string) error {
 	return s.svc.ReevaluateOnShippingChange(ctx, cartID)
 }
+
+// OnCartMutated satisfies checkout.CouponLifecycle. Routes to the coupon
+// service so the discount/redemption stays consistent with the new cart
+// subtotal after item add / update / remove.
+func (s *RedemptionSyncer) OnCartMutated(ctx context.Context, cartID string) error {
+	return s.svc.ReevaluateOnCartMutation(ctx, cartID)
+}

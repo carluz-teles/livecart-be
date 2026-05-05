@@ -187,32 +187,43 @@ func (r *Repository) UpdateCartShipping(ctx context.Context, pool *pgxpool.Pool,
 	return nil
 }
 
-// ReadCouponSummary returns the type + merchant cap (value_cents) for the
-// coupon attached to the cart, when any. Used by GetCartForCheckout to
-// surface enough context that the FE can explain a partial free-shipping
-// discount ("limited by merchant cap" vs. "limited by cheapest available").
-// Returns ("", 0, nil) when no coupon is applied or when the coupon row was
-// hard-deleted between apply and read.
-func (r *Repository) ReadCouponSummary(ctx context.Context, pool *pgxpool.Pool, couponID string) (string, int64, error) {
+// CouponSummary is the projection GetCartForCheckout needs to hydrate the
+// applied-coupon block on the public cart response. All fields are zero / ""
+// when the coupon row was hard-deleted between apply and read.
+type CouponSummary struct {
+	Type             string
+	MaxDiscountCents int64 // value_cents on the row (acts as cap for free_shipping)
+	MinPurchaseCents int64
+}
+
+// ReadCouponSummary returns the snapshot the FE needs to render the applied
+// tile (cap copy, partial-discount explanation, min-purchase context for
+// the auto-removal toast). Empty / zero fields when the coupon was deleted.
+func (r *Repository) ReadCouponSummary(ctx context.Context, pool *pgxpool.Pool, couponID string) (CouponSummary, error) {
 	uid, err := uuid.Parse(couponID)
 	if err != nil {
-		return "", 0, httpx.ErrBadRequest("invalid coupon ID")
+		return CouponSummary{}, httpx.ErrBadRequest("invalid coupon ID")
 	}
 	var (
-		ctype pgtype.Text
-		value pgtype.Int8
+		ctype       pgtype.Text
+		value       pgtype.Int8
+		minPurchase pgtype.Int8
 	)
 	err = pool.QueryRow(ctx,
-		`SELECT type, value_cents FROM coupons WHERE id = $1`,
+		`SELECT type, value_cents, COALESCE(min_purchase_cents, 0) FROM coupons WHERE id = $1`,
 		pgtype.UUID{Bytes: uid, Valid: true},
-	).Scan(&ctype, &value)
+	).Scan(&ctype, &value, &minPurchase)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", 0, nil
+			return CouponSummary{}, nil
 		}
-		return "", 0, fmt.Errorf("reading coupon summary: %w", err)
+		return CouponSummary{}, fmt.Errorf("reading coupon summary: %w", err)
 	}
-	return ctype.String, value.Int64, nil
+	return CouponSummary{
+		Type:             ctype.String,
+		MaxDiscountCents: value.Int64,
+		MinPurchaseCents: minPurchase.Int64,
+	}, nil
 }
 
 // ReadCartShipping fetches the freight option currently stored on the cart, if any.

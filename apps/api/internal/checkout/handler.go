@@ -431,6 +431,7 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 			Type:             output.Cart.CouponType,
 			DiscountCents:    output.Cart.CouponDiscountCents,
 			MaxDiscountCents: output.Cart.CouponMaxDiscountCents,
+			MinPurchaseCents: output.Cart.CouponMinPurchaseCents,
 		}
 	}
 
