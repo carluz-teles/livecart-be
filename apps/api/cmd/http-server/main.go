@@ -32,6 +32,7 @@ import (
 	"livecart/apps/api/lib/ratelimit"
 
 	"livecart/apps/api/internal/checkout"
+	"livecart/apps/api/internal/coupon"
 	"livecart/apps/api/internal/customer"
 	"livecart/apps/api/internal/dashboard"
 	"livecart/apps/api/internal/idea"
@@ -470,6 +471,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	orderSvc := order.NewService(orderRepo, log)
 	orderHandler := order.NewHandler(orderSvc, validate)
 	orderHandler.RegisterRoutes(storeScoped)
+
+	couponRepo := coupon.NewRepository(pool)
+	couponSvc := coupon.NewService(couponRepo, log)
+	couponHandler := coupon.NewHandler(couponSvc, validate)
+	couponHandler.RegisterRoutes(storeScoped)
 
 	customerRepo := customer.NewRepository(queries)
 	customerSvc := customer.NewService(customerRepo, log)
