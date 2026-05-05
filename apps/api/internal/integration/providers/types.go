@@ -122,6 +122,56 @@ type PaymentProvider interface {
 	GetPaymentMethods(ctx context.Context) ([]string, error)
 }
 
+// ERPHealthCheckCategory groups the cadastros the merchant has to keep in
+// sync with LiveCart so orders, parcelas and shipments are categorized
+// correctly. The frontend renders one section per category with copy taken
+// from PanelPath ("where to cadastrar in the ERP").
+type ERPHealthCheckCategory string
+
+const (
+	ERPHealthFormaPagamento  ERPHealthCheckCategory = "forma_pagamento"
+	ERPHealthFormaRecebimento ERPHealthCheckCategory = "forma_recebimento"
+	ERPHealthFormaEnvio      ERPHealthCheckCategory = "forma_envio"
+)
+
+// ERPHealthCheckStatus reports whether a single expected cadastro is present
+// in the ERP. "ok" means the lookup returned a usable ID; "missing" means
+// the merchant needs to create it.
+type ERPHealthCheckStatus string
+
+const (
+	ERPHealthStatusOK      ERPHealthCheckStatus = "ok"
+	ERPHealthStatusMissing ERPHealthCheckStatus = "missing"
+)
+
+// ERPHealthCheckItem describes one expected cadastro and its current state
+// in the merchant's ERP. ExpectedName is the canonical name LiveCart looks
+// for (case-insensitive); MatchedID/MatchedName carry whatever the ERP
+// returned when status is OK so the frontend can show "matched as ...".
+type ERPHealthCheckItem struct {
+	Category     ERPHealthCheckCategory `json:"category"`
+	ExpectedName string                 `json:"expected_name"`
+	Status       ERPHealthCheckStatus   `json:"status"`
+	MatchedID    int64                  `json:"matched_id,omitempty"`
+	MatchedName  string                 `json:"matched_name,omitempty"`
+	Description  string                 `json:"description"`
+	PanelPath    string                 `json:"panel_path"`
+}
+
+// ERPHealthCheckResult is the bundle returned by ERPHealthChecker.HealthCheck.
+type ERPHealthCheckResult struct {
+	CheckedAt time.Time            `json:"checked_at"`
+	Items     []ERPHealthCheckItem `json:"items"`
+}
+
+// ERPHealthChecker is an optional capability some ERP providers expose to
+// audit the merchant's cadastros. Providers implement it via type assertion
+// rather than embedding it in ERPProvider so we don't force every adapter
+// to ship a check (Bling/Omie/etc. may not expose the necessary endpoints).
+type ERPHealthChecker interface {
+	HealthCheck(ctx context.Context) (*ERPHealthCheckResult, error)
+}
+
 // ERPProvider interface for ERP system integrations.
 type ERPProvider interface {
 	Provider

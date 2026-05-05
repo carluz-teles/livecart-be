@@ -1009,10 +1009,13 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		}
 	}
 
-	// Pagamento: Tiny v3 expects parcelas nested inside `pagamento`, and the
-	// payment-method reference is `meioPagamento` (Pix/Cartão/etc.) — not the
-	// `formaPagamento` key we used in v2. The v3 lookup endpoint is still
-	// `/formas-pagamento` and returns IDs that map to `meioPagamento`.
+	// Pagamento: Tiny v3's ParcelaModelRequest declares BOTH `meioPagamento`
+	// (the instrument — Cartão/Pix/Boleto) AND `formaRecebimento` (the AR
+	// flow type — "Cartão de Crédito", "À Vista", etc.) as required. Lookups
+	// hit two distinct cadastros in Tiny: /formas-pagamento (under Cadastros)
+	// and /formas-recebimento (under Financeiro → Cadastros). When either is
+	// missing or doesn't match by name, Tiny silently falls back to the
+	// generic "Conta a Receber" categorization on the parcela's display.
 	//
 	// For credit-card sales we expand into one parcela per installment with
 	// vencimentos D+30, D+60, ... so contas a receber reflects what Mercado
@@ -1030,16 +1033,32 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		case meioID > 0:
 			meioRef = map[string]any{"id": meioID}
 		default:
-			// No match for our payment-method name in the merchant's
-			// /formas-pagamento — Tiny falls back to "Conta a Receber" on
-			// the parcela's "Forma" column. Likely the merchant cadastrou
-			// the meio with a different name (e.g. "Crédito", "Cartão MP").
 			t.Logger.Warn("tiny meioPagamento lookup returned no match, parcela will show 'Conta a Receber'",
 				zap.String("method", pay.Method),
 			)
 		}
 
-		parcelas := buildTinyParcelas(pay, meioRef)
+		// formaRecebimento is the OTHER half of the parcela. /formas-recebimento
+		// doesn't expose a name filter (only limit/offset), so we paginate
+		// once with limit=100 — which covers any realistic merchant — and
+		// match in memory.
+		var recebRef map[string]any
+		recebID, recebErr := t.lookupFormaRecebimentoID(ctx, pay.Method)
+		switch {
+		case recebErr != nil:
+			t.Logger.Warn("tiny formaRecebimento lookup failed, sending parcelas without it",
+				zap.String("method", pay.Method),
+				zap.Error(recebErr),
+			)
+		case recebID > 0:
+			recebRef = map[string]any{"id": recebID}
+		default:
+			t.Logger.Warn("tiny formaRecebimento lookup returned no match, parcela will fall back to default",
+				zap.String("method", pay.Method),
+			)
+		}
+
+		parcelas := buildTinyParcelas(pay, meioRef, recebRef)
 		pagamento := map[string]any{
 			"parcelas": parcelas,
 		}
@@ -1047,6 +1066,9 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 			// Mirror at parent level so Tiny applies it as default for the
 			// pagamento block (matches the v3 schema example).
 			pagamento["meioPagamento"] = meioRef
+		}
+		if recebRef != nil {
+			pagamento["formaRecebimento"] = recebRef
 		}
 		payload["pagamento"] = pagamento
 
@@ -1077,6 +1099,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 			zap.Int64("net_amount_cents", pay.NetAmountCents),
 			zap.Bool("had_money_release_date", pay.MoneyReleaseDate != nil),
 			zap.Bool("meio_pagamento_matched", meioRef != nil),
+			zap.Bool("forma_recebimento_matched", recebRef != nil),
 			zap.Any("schedule", schedule),
 		)
 	}
@@ -1168,7 +1191,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 //
 // Cents-to-reais split absorbs the rounding remainder on the LAST parcela
 // so the parcelas always sum back to pay.Amount exactly.
-func buildTinyParcelas(pay *providers.ERPOrderPayment, meioRef map[string]any) []map[string]any {
+func buildTinyParcelas(pay *providers.ERPOrderPayment, meioRef, recebRef map[string]any) []map[string]any {
 	count := pay.Installments
 	if pay.Method != "credit_card" || count < 1 {
 		count = 1
@@ -1191,6 +1214,15 @@ func buildTinyParcelas(pay *providers.ERPOrderPayment, meioRef map[string]any) [
 		firstDays = 0
 	}
 
+	applyRefs := func(p map[string]any) {
+		if meioRef != nil {
+			p["meioPagamento"] = meioRef
+		}
+		if recebRef != nil {
+			p["formaRecebimento"] = recebRef
+		}
+	}
+
 	if count == 1 {
 		parcela := map[string]any{
 			"dias":        firstDays,
@@ -1198,9 +1230,7 @@ func buildTinyParcelas(pay *providers.ERPOrderPayment, meioRef map[string]any) [
 			"valor":       float64(pay.Amount) / 100,
 			"observacoes": fmt.Sprintf("Pago via %s - ID %s", pay.Method, pay.PaymentID),
 		}
-		if meioRef != nil {
-			parcela["meioPagamento"] = meioRef
-		}
+		applyRefs(parcela)
 		return []map[string]any{parcela}
 	}
 
@@ -1223,9 +1253,7 @@ func buildTinyParcelas(pay *providers.ERPOrderPayment, meioRef map[string]any) [
 			"valor":       float64(cents) / 100,
 			"observacoes": fmt.Sprintf("Parcela %d/%d via %s - ID %s", i+1, count, pay.Method, pay.PaymentID),
 		}
-		if meioRef != nil {
-			parcela["meioPagamento"] = meioRef
-		}
+		applyRefs(parcela)
 		parcelas[i] = parcela
 	}
 	return parcelas
@@ -1281,6 +1309,88 @@ func (t *Tiny) lookupFormaPagamentoID(ctx context.Context, method string) (int64
 	}
 	if len(result.Itens) > 0 {
 		return result.Itens[0].ID, nil
+	}
+	return 0, nil
+}
+
+// expectedFormaRecebimentoName returns the canonical name we expect the
+// merchant to have cadastrado in Tiny → Financeiro → Cadastros → Formas de
+// Recebimento. Mirrors the names lookupFormaPagamentoID searches for, so a
+// merchant who cadastra "Cartão de Crédito" once gets both halves of the
+// parcela populated.
+func expectedFormaRecebimentoName(method string) string {
+	switch method {
+	case "pix":
+		return "Pix"
+	case "credit_card":
+		return "Cartão de Crédito"
+	case "debit_card":
+		return "Cartão de Débito"
+	case "boleto":
+		return "Boleto"
+	}
+	return ""
+}
+
+// lookupFormaRecebimentoID resolves the AR-flow side of the parcela
+// (formaRecebimento on Tiny v3 ParcelaModelRequest) by paginating
+// /formas-recebimento and matching by name in memory — the endpoint
+// doesn't accept a `nome` filter, only limit/offset (default 100). For
+// any realistic merchant the first page covers everything; we cap at
+// 5 pages (500 items) before giving up to avoid pathological loops.
+//
+// Returns 0 without error when no match is found, so the caller can
+// log "no match" and fall back without aborting the order creation.
+func (t *Tiny) lookupFormaRecebimentoID(ctx context.Context, method string) (int64, error) {
+	target := expectedFormaRecebimentoName(method)
+	if target == "" {
+		return 0, nil
+	}
+
+	const pageSize = 100
+	const maxPages = 5
+	for page := 0; page < maxPages; page++ {
+		endpoint := fmt.Sprintf("%s/formas-recebimento?limit=%d&offset=%d",
+			tinyAPIBaseURL, pageSize, page*pageSize)
+
+		resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+		if err != nil {
+			return 0, fmt.Errorf("listing formas de recebimento: %w", err)
+		}
+		if resp.StatusCode == http.StatusNoContent {
+			return 0, nil
+		}
+		if !providers.IsSuccessStatus(resp.StatusCode) {
+			return 0, fmt.Errorf("list formas de recebimento failed: status %d", resp.StatusCode)
+		}
+
+		var result struct {
+			Itens []struct {
+				ID    int64  `json:"id"`
+				Nome  string `json:"nome"`
+				Ativo bool   `json:"ativo"`
+			} `json:"itens"`
+			Paginacao struct {
+				TotalRegistros int `json:"totalRegistros"`
+			} `json:"paginacao"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return 0, fmt.Errorf("parsing formas de recebimento: %w", err)
+		}
+
+		for _, item := range result.Itens {
+			if !item.Ativo {
+				continue
+			}
+			if strings.EqualFold(item.Nome, target) {
+				return item.ID, nil
+			}
+		}
+
+		// Last page reached.
+		if len(result.Itens) < pageSize {
+			return 0, nil
+		}
 	}
 	return 0, nil
 }
@@ -1737,4 +1847,88 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// HealthCheck audits the merchant's Tiny cadastros against the canonical
+// names LiveCart looks up at order time. Catches the silent fallback
+// problem where a payment method or shipping carrier is missing and the
+// parcela falls into "Conta a Receber" or the shipment uses Tiny's default
+// carrier instead of the one the customer chose at checkout.
+//
+// Best-effort: any item whose lookup errors out is reported as missing
+// rather than failing the whole check, so the merchant always sees the
+// other items' status.
+func (t *Tiny) HealthCheck(ctx context.Context) (*providers.ERPHealthCheckResult, error) {
+	type pmCheck struct {
+		method string
+		label  string
+	}
+	paymentMethods := []pmCheck{
+		{"credit_card", "Cartão de Crédito"},
+		{"pix", "Pix"},
+	}
+	carriers := []string{"Correios", "Jadlog", "SmartEnvios"}
+
+	items := make([]providers.ERPHealthCheckItem, 0, len(paymentMethods)*2+len(carriers))
+
+	for _, m := range paymentMethods {
+		// Forma de Pagamento (meioPagamento on parcela)
+		id, err := t.lookupFormaPagamentoID(ctx, m.method)
+		items = append(items, healthCheckItem(
+			providers.ERPHealthFormaPagamento,
+			m.label,
+			id, err,
+			"Define o instrumento da parcela ("+m.label+"). Sem isso, a parcela fica como Conta a Receber genérica.",
+			"Cadastros → Formas de Pagamento",
+		))
+		// Forma de Recebimento (formaRecebimento on parcela)
+		id2, err2 := t.lookupFormaRecebimentoID(ctx, m.method)
+		items = append(items, healthCheckItem(
+			providers.ERPHealthFormaRecebimento,
+			m.label,
+			id2, err2,
+			"Define o fluxo financeiro da parcela ("+m.label+"). Necessário para classificar a entrada em contas a receber.",
+			"Financeiro → Cadastros → Formas de Recebimento",
+		))
+	}
+
+	for _, name := range carriers {
+		id, err := t.lookupFormaEnvioID(ctx, name)
+		items = append(items, healthCheckItem(
+			providers.ERPHealthFormaEnvio,
+			name,
+			id, err,
+			"Necessária para que o pedido entre no Tiny já com a transportadora "+name+" associada (etiqueta + acompanhamento).",
+			"Cadastros → Formas de Envio",
+		))
+	}
+
+	return &providers.ERPHealthCheckResult{
+		CheckedAt: time.Now(),
+		Items:     items,
+	}, nil
+}
+
+func healthCheckItem(
+	cat providers.ERPHealthCheckCategory,
+	expectedName string,
+	matchedID int64,
+	lookupErr error,
+	description string,
+	panelPath string,
+) providers.ERPHealthCheckItem {
+	item := providers.ERPHealthCheckItem{
+		Category:     cat,
+		ExpectedName: expectedName,
+		Description:  description,
+		PanelPath:    panelPath,
+	}
+	if lookupErr == nil && matchedID > 0 {
+		item.Status = providers.ERPHealthStatusOK
+		item.MatchedID = matchedID
+		item.MatchedName = expectedName // best-effort, lookup already case-folds
+		return item
+	}
+	item.Status = providers.ERPHealthStatusMissing
+	return item
 }

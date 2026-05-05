@@ -41,6 +41,11 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// Test connection
 	g.Post("/:id/test", h.TestConnection)
 
+	// ERP cadastro audit (Tiny v3): checks formas-pagamento /
+	// formas-recebimento / formas-envio against the canonical names so
+	// the merchant sees what to register before the first sale.
+	g.Get("/:id/erp/health-check", h.RunERPHealthCheck)
+
 	// Instagram operations
 	g.Get("/instagram/lives", h.GetInstagramLives)
 
@@ -227,6 +232,32 @@ func (h *Handler) TestConnection(c *fiber.Ctx) error {
 		AccountInfo: output.AccountInfo,
 		TestedAt:    output.TestedAt,
 	})
+}
+
+// RunERPHealthCheck audits the merchant's ERP cadastros (formas de pagamento,
+// recebimento e envio) against what LiveCart expects when criando pedidos.
+// Returns supported=false when the underlying ERP provider doesn't expose
+// the audit capability — the frontend should hide the section in that case.
+// @Summary ERP cadastros health check
+// @Description Audits ERP cadastros (formas-pagamento / recebimento / envio) against LiveCart canonical names
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param id path string true "Integration ID"
+// @Success 200 {object} httpx.Envelope{data=ERPHealthCheckResponse}
+// @Failure 404 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/{id}/erp/health-check [get]
+// @Security BearerAuth
+func (h *Handler) RunERPHealthCheck(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
+
+	output, err := h.service.RunERPHealthCheck(c.Context(), id, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, output)
 }
 
 // =============================================================================

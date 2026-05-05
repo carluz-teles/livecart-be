@@ -193,6 +193,15 @@ type TestConnectionResponse struct {
 	TestedAt    time.Time      `json:"testedAt"`
 }
 
+// ERPHealthCheckResponse mirrors providers.ERPHealthCheckResult shaped for
+// the JSON envelope. Items are flattened so the FE can group by category
+// without re-traversing.
+type ERPHealthCheckResponse struct {
+	Supported bool                              `json:"supported"`
+	CheckedAt time.Time                         `json:"checkedAt"`
+	Items     []providers.ERPHealthCheckItem    `json:"items"`
+}
+
 // =============================================================================
 // INPUT/OUTPUT TYPES (Service Layer)
 // =============================================================================

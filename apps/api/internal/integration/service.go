@@ -216,6 +216,39 @@ func (s *Service) TestConnection(ctx context.Context, input TestConnectionInput)
 	}, nil
 }
 
+// RunERPHealthCheck audits the merchant's cadastros against the canonical
+// names the order-creation flow looks up (formas-pagamento,
+// formas-recebimento, formas-envio). Returns supported=false when the
+// underlying ERP provider doesn't implement the optional ERPHealthChecker
+// capability, so the FE can hide the section instead of erroring.
+func (s *Service) RunERPHealthCheck(ctx context.Context, integrationID, storeID string) (*ERPHealthCheckResponse, error) {
+	erpProvider, err := s.GetERPProvider(ctx, integrationID, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	checker, ok := erpProvider.(providers.ERPHealthChecker)
+	if !ok {
+		return &ERPHealthCheckResponse{
+			Supported: false,
+			CheckedAt: time.Now(),
+			Items:     nil,
+		}, nil
+	}
+
+	result, err := checker.HealthCheck(ctx)
+	if err != nil {
+		s.handleProviderError(ctx, integrationID, "erp_health_check", err)
+		return nil, fmt.Errorf("running ERP health check: %w", err)
+	}
+
+	return &ERPHealthCheckResponse{
+		Supported: true,
+		CheckedAt: result.CheckedAt,
+		Items:     result.Items,
+	}, nil
+}
+
 // =============================================================================
 // OAUTH OPERATIONS
 // =============================================================================
