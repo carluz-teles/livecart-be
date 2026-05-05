@@ -208,11 +208,14 @@ func validateBusinessRules(t Type, valueCents int64, percentBPS int) error {
 
 // ApplyResult is what the public-cart endpoint returns after a successful
 // apply. The FE uses these to immediately reflect the new totals without a
-// second round-trip.
+// second round-trip. MaxDiscountCents is the merchant-set ceiling on a
+// free-shipping coupon (0 = uncapped; ignored for percent / fixed) — surfaced
+// so the FE can explain to the buyer why the discount stopped at that value.
 type ApplyResult struct {
 	Code              string
 	Type              Type
 	AppliedValueCents int64
+	MaxDiscountCents  int64
 	SubtotalCents     int64
 	ShippingCostCents int64
 	NewTotalCents     int64 // subtotal + shipping − applied
@@ -305,10 +308,24 @@ func (s *Service) ApplyToCart(
 		Code:              c.Code,
 		Type:              c.Type,
 		AppliedValueCents: applied,
+		MaxDiscountCents:  freeShippingCap(c),
 		SubtotalCents:     cart.SubtotalCents,
 		ShippingCostCents: cart.ShippingCostCents,
 		NewTotalCents:     cart.SubtotalCents + cart.ShippingCostCents - applied,
 	}, nil
+}
+
+// freeShippingCap exposes the merchant-set discount ceiling for a coupon.
+// Reuses ValueCents — only meaningful for free_shipping (percent and fixed
+// have their own usage of that column). Returns 0 for "no cap".
+func freeShippingCap(c *Coupon) int64 {
+	if c.Type != TypeFreeShipping {
+		return 0
+	}
+	if c.ValueCents < 0 {
+		return 0
+	}
+	return c.ValueCents
 }
 
 // RemoveFromCart undoes ApplyToCart. Idempotent — calling on a cart with no
@@ -392,7 +409,12 @@ func (s *Service) ReevaluateOnShippingChange(ctx context.Context, cartID string)
 	if err != nil {
 		return err
 	}
-	return s.repo.UpdateCartCouponDiscount(ctx, cartID, shipping)
+	cheapest, err := s.repo.GetCheapestQuotedShippingCents(ctx, cartID)
+	if err != nil {
+		return err
+	}
+	discount := computeFreeShippingDiscount(shipping, cheapest, freeShippingCap(c))
+	return s.repo.UpdateCartCouponDiscount(ctx, cartID, discount)
 }
 
 // ExpireStaleReservedRedemptions sweeps reserved redemptions on carts that
@@ -536,9 +558,48 @@ func computeAppliedDiscount(c *Coupon, cart *CartCouponSnapshot) (int64, error) 
 				"select shipping before applying a free-shipping coupon",
 			)
 		}
-		return cart.ShippingCostCents, nil
+		return computeFreeShippingDiscount(
+			cart.ShippingCostCents,
+			cart.CheapestQuotedShippingCents,
+			freeShippingCap(c),
+		), nil
 	default:
 		return 0, httpx.ErrUnprocessable("invalid coupon type")
 	}
+}
+
+// computeFreeShippingDiscount applies the layered cap rules for a
+// free-shipping coupon, in order from most restrictive to least:
+//
+//  1. effectiveCap = the lesser of the merchant's max (when set) and the
+//     cheapest available service from the latest quote. This is the most
+//     the store is ever willing to subsidize for this cart.
+//  2. discount = the lesser of effectiveCap and what the buyer actually
+//     pays — never refund more than the buyer is being charged for shipping.
+//
+// Examples (cap=30):
+//   - cheapest=23, selected=23 → 23  (buyer pays 0)
+//   - cheapest=23, selected=35 → 23  (buyer pays 12; coupon stops at cheapest)
+//   - cheapest=35, selected=35 → 30  (buyer pays 5;  coupon stops at cap)
+//   - cheapest=35, selected=50 → 30  (buyer pays 20; coupon stops at cap)
+//
+// cheapestQuoted=0 means we have no quote cache; fall back to the buyer's
+// selected cost so an apply right after selection still works (the select
+// call always re-quotes, so a 0 here is a defensive corner case).
+func computeFreeShippingDiscount(selected, cheapestQuoted, maxDiscount int64) int64 {
+	cap := cheapestQuoted
+	if cheapestQuoted <= 0 {
+		cap = selected
+	}
+	if maxDiscount > 0 && maxDiscount < cap {
+		cap = maxDiscount
+	}
+	if cap > selected {
+		cap = selected
+	}
+	if cap < 0 {
+		return 0
+	}
+	return cap
 }
 

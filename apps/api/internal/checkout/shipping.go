@@ -187,6 +187,34 @@ func (r *Repository) UpdateCartShipping(ctx context.Context, pool *pgxpool.Pool,
 	return nil
 }
 
+// ReadCouponSummary returns the type + merchant cap (value_cents) for the
+// coupon attached to the cart, when any. Used by GetCartForCheckout to
+// surface enough context that the FE can explain a partial free-shipping
+// discount ("limited by merchant cap" vs. "limited by cheapest available").
+// Returns ("", 0, nil) when no coupon is applied or when the coupon row was
+// hard-deleted between apply and read.
+func (r *Repository) ReadCouponSummary(ctx context.Context, pool *pgxpool.Pool, couponID string) (string, int64, error) {
+	uid, err := uuid.Parse(couponID)
+	if err != nil {
+		return "", 0, httpx.ErrBadRequest("invalid coupon ID")
+	}
+	var (
+		ctype pgtype.Text
+		value pgtype.Int8
+	)
+	err = pool.QueryRow(ctx,
+		`SELECT type, value_cents FROM coupons WHERE id = $1`,
+		pgtype.UUID{Bytes: uid, Valid: true},
+	).Scan(&ctype, &value)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", 0, nil
+		}
+		return "", 0, fmt.Errorf("reading coupon summary: %w", err)
+	}
+	return ctype.String, value.Int64, nil
+}
+
 // ReadCartShipping fetches the freight option currently stored on the cart, if any.
 func (r *Repository) ReadCartShipping(ctx context.Context, pool *pgxpool.Pool, cartID string) (*CartShippingSelection, error) {
 	uid, err := uuid.Parse(cartID)

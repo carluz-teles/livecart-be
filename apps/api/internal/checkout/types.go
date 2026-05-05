@@ -133,9 +133,18 @@ type CartSummary struct {
 
 // AppliedCoupon is the applied-coupon snapshot the public cart hands the FE.
 // Absent when no coupon is applied.
+//
+// Type and MaxDiscountCents are only meaningful for `free_shipping` coupons —
+// the FE uses them to explain to the buyer why the discount may be smaller
+// than the chosen shipping cost (merchant cap vs. cheapest-available cap).
+// MaxDiscountCents is 0 when the merchant did not set a ceiling on the
+// coupon. They are still emitted for percent / fixed coupons (with `type`
+// set and the cap as 0) so the FE has the same shape on every applied tile.
 type AppliedCoupon struct {
-	Code              string `json:"code"`
-	DiscountCents     int64  `json:"discountCents"`
+	Code             string `json:"code"`
+	Type             string `json:"type,omitempty"`
+	DiscountCents    int64  `json:"discountCents"`
+	MaxDiscountCents int64  `json:"maxDiscountCents,omitempty"`
 }
 
 // CartShippingSelection describes the freight option currently attached to the cart.
@@ -291,9 +300,11 @@ type CartDetails struct {
 	// from the current cart's own paid receipt.
 	IsReturningCustomer bool
 	// Coupon snapshot mirrored from CartRow.
-	CouponID            *string
-	CouponCode          *string
-	CouponDiscountCents int64
+	CouponID               *string
+	CouponCode             *string
+	CouponDiscountCents    int64
+	CouponType             string
+	CouponMaxDiscountCents int64
 }
 
 // CartItemDetails contains a cart item with product info
@@ -539,9 +550,15 @@ type CartRow struct {
 	Shipping           *CartShippingSelection
 	// Coupon snapshot. CouponID/CouponCode are nil when no coupon is applied;
 	// CouponDiscountCents is the absolute discount in cents and is 0 when none.
-	CouponID            *string
-	CouponCode          *string
-	CouponDiscountCents int64
+	// CouponType and CouponMaxDiscountCents are populated lazily by the
+	// service when CouponID is set so the FE can render context for
+	// free-shipping coupons (cap vs. selected service explanation). Empty /
+	// zero when no coupon is applied or for non-free-shipping coupons.
+	CouponID               *string
+	CouponCode             *string
+	CouponDiscountCents    int64
+	CouponType             string
+	CouponMaxDiscountCents int64
 }
 
 // CartItemRow represents a cart item row from the database

@@ -97,6 +97,18 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 		return nil, err
 	}
 
+	// Hydrate the applied coupon's type and merchant cap so the FE can
+	// explain partial free-shipping discounts. Best-effort: a missing /
+	// hard-deleted coupon row leaves the cap at zero (treated by the FE as
+	// "no extra context to show").
+	if cart.CouponID != nil {
+		ctype, capCents, cerr := s.repo.ReadCouponSummary(ctx, s.pool, *cart.CouponID)
+		if cerr == nil {
+			cart.CouponType = ctype
+			cart.CouponMaxDiscountCents = capCents
+		}
+	}
+
 	// Convert to output
 	output := &GetCartForCheckoutOutput{
 		Cart: CartDetails{
@@ -124,6 +136,8 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 			CouponID:            cart.CouponID,
 			CouponCode:          cart.CouponCode,
 			CouponDiscountCents: cart.CouponDiscountCents,
+			CouponType:          cart.CouponType,
+			CouponMaxDiscountCents: cart.CouponMaxDiscountCents,
 		},
 		Items: make([]CartItemDetails, len(items)),
 	}

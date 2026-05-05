@@ -427,8 +427,10 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 	var appliedCoupon *AppliedCoupon
 	if output.Cart.CouponCode != nil {
 		appliedCoupon = &AppliedCoupon{
-			Code:          *output.Cart.CouponCode,
-			DiscountCents: output.Cart.CouponDiscountCents,
+			Code:             *output.Cart.CouponCode,
+			Type:             output.Cart.CouponType,
+			DiscountCents:    output.Cart.CouponDiscountCents,
+			MaxDiscountCents: output.Cart.CouponMaxDiscountCents,
 		}
 	}
 

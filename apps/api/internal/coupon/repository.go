@@ -237,6 +237,12 @@ type CartCouponSnapshot struct {
 	ShippingCostCents  int64
 	HasShippingPicked  bool
 	CouponID           *string // current applied coupon, if any
+	// Min priceCents across the latest QuoteShipping snapshot for this cart,
+	// considering only options with available=true and priceCents>0. Drives
+	// free-shipping coupon math so the buyer can never game the discount by
+	// picking a premium service: the merchant only ever subsidizes the
+	// cheapest option that was offered. 0 when no quote exists yet.
+	CheapestQuotedShippingCents int64
 }
 
 // LoadCartForCouponTx reads everything ApplyToCart / RemoveFromCart need to
@@ -262,7 +268,13 @@ func (r *Repository) LoadCartForCouponTx(
 			), 0) AS subtotal_cents,
 			COALESCE(c.shipping_cost_cents, 0) AS shipping_cost_cents,
 			(c.shipping_service_id IS NOT NULL AND c.shipping_service_id <> '') AS has_shipping_picked,
-			c.coupon_id
+			c.coupon_id,
+			COALESCE((
+				SELECT MIN((opt->>'priceCents')::bigint)
+				FROM jsonb_array_elements(COALESCE(c.last_shipping_quote_options, '[]'::jsonb)) opt
+				WHERE COALESCE((opt->>'available')::boolean, false) = true
+				  AND COALESCE((opt->>'priceCents')::bigint, 0) > 0
+			), 0) AS cheapest_quoted_shipping_cents
 		FROM carts c
 		JOIN live_events le ON le.id = c.event_id
 		WHERE c.token = $1
@@ -278,7 +290,7 @@ func (r *Repository) LoadCartForCouponTx(
 		&cartID, &eventID, &storeID,
 		&out.Status, &paymentStatus,
 		&out.SubtotalCents, &out.ShippingCostCents, &out.HasShippingPicked,
-		&couponID,
+		&couponID, &out.CheapestQuotedShippingCents,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -520,6 +532,31 @@ func (r *Repository) GetCartShippingCostCents(ctx context.Context, cartID string
 		`SELECT COALESCE(shipping_cost_cents, 0) FROM carts WHERE id = $1`,
 		cartID,
 	).Scan(&cents)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	return cents, err
+}
+
+// GetCheapestQuotedShippingCents reads the latest QuoteShipping snapshot
+// from the cart and returns the minimum priceCents across options that are
+// flagged available with a positive price. Returns 0 when no quote cache
+// exists or every option is unavailable. Used by the shipping-change
+// re-evaluation path; the apply path reads it inline as part of
+// LoadCartForCouponTx.
+func (r *Repository) GetCheapestQuotedShippingCents(ctx context.Context, cartID string) (int64, error) {
+	const q = `
+		SELECT COALESCE((
+			SELECT MIN((opt->>'priceCents')::bigint)
+			FROM jsonb_array_elements(COALESCE(c.last_shipping_quote_options, '[]'::jsonb)) opt
+			WHERE COALESCE((opt->>'available')::boolean, false) = true
+			  AND COALESCE((opt->>'priceCents')::bigint, 0) > 0
+		), 0)
+		FROM carts c
+		WHERE c.id = $1
+	`
+	var cents int64
+	err := r.db.QueryRow(ctx, q, cartID).Scan(&cents)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
 	}
