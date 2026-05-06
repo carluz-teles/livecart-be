@@ -428,7 +428,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// because the read path doesn't depend on payment providers — it only
 	// reads carts that already have a tracking_token populated by the
 	// post-checkout flow.
-	postCheckoutHandler := postcheckout.NewHandler(postcheckout.NewRepository(queries), log)
+	postCheckoutHandler := postcheckout.NewHandler(postcheckout.NewRepository(queries), pool, log)
 	postCheckoutHandler.RegisterRoutes(app)
 
 	// Protected routes (user-scoped)

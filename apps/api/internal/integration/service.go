@@ -69,6 +69,10 @@ type CouponSyncer interface {
 // Wired from the postcheckout package via SetPostCheckoutHook.
 type PostCheckoutHook interface {
 	OnCartPaid(ctx context.Context, cartID string)
+	// OnShipmentPosted fires after a shipment is created or has a
+	// tracking_code attached. Idempotent at the implementation: subsequent
+	// calls for the same cart are no-ops.
+	OnShipmentPosted(ctx context.Context, cartID, trackingCode string)
 }
 
 // Service handles business logic for integrations.

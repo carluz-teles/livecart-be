@@ -3,13 +3,24 @@ package postcheckout
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"livecart/apps/api/db/sqlc"
 )
+
+// timeNow exists so tests can override clock without a clock injection across
+// the call surface.
+var timeNow = func() time.Time { return time.Now() }
+
+func isNoRows(err error) bool {
+	return errors.Is(err, pgx.ErrNoRows)
+}
 
 // Repository is a thin wrapper over sqlc focused on the post-checkout flow.
 // Owning a separate repo (rather than reusing checkout's) keeps the package
@@ -96,6 +107,84 @@ func (r *Repository) SetTrackingToken(ctx context.Context, cartID, token string)
 		ID:            pgtype.UUID{Bytes: uid, Valid: true},
 		TrackingToken: pgtype.Text{String: token, Valid: true},
 	})
+}
+
+// InsertOrderEvent appends an event to the customer-facing timeline.
+// The DB enforces (cart_id, event_type) uniqueness so retried webhooks/hooks
+// don't duplicate emails. Returns true when the row was newly inserted (so
+// the caller can decide whether to fire side effects like emails).
+func (r *Repository) InsertOrderEvent(ctx context.Context, cartID, eventType, source string, metadata json.RawMessage) (bool, error) {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return false, fmt.Errorf("parsing cart id: %w", err)
+	}
+	if len(metadata) == 0 {
+		metadata = json.RawMessage(`{}`)
+	}
+	_, err = r.q.InsertOrderEvent(ctx, sqlc.InsertOrderEventParams{
+		CartID:     pgtype.UUID{Bytes: uid, Valid: true},
+		EventType:  eventType,
+		OccurredAt: pgtype.Timestamptz{Time: timeNow(), Valid: true},
+		Source:     source,
+		Metadata:   metadata,
+	})
+	// pgx returns ErrNoRows when ON CONFLICT DO NOTHING swallows the insert,
+	// which means an event of this type already exists. That's the
+	// idempotency path — not an error.
+	if err != nil {
+		if isNoRows(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inserting order event: %w", err)
+	}
+	return true, nil
+}
+
+// ListOrderEvents returns the cart's timeline ordered chronologically.
+func (r *Repository) ListOrderEvents(ctx context.Context, cartID string) ([]sqlc.OrderEvent, error) {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return nil, fmt.Errorf("parsing cart id: %w", err)
+	}
+	return r.q.ListOrderEventsByCart(ctx, pgtype.UUID{Bytes: uid, Valid: true})
+}
+
+// ShipmentSummary is the slim view the public order page needs from the
+// shipments table. The full integration package owns shipments via raw SQL
+// — this small read keeps us from depending on that repository.
+type ShipmentSummary struct {
+	TrackingCode string
+}
+
+// SQLRunner is the minimal pool surface we need (so callers pass either
+// pgxpool.Pool or a transaction).
+type SQLRunner interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// GetShipmentSummary returns the most-recent shipment row for a cart, or nil
+// when none exists yet. Returns an empty TrackingCode when the merchant
+// created a shipment but the carrier hasn't issued a code.
+func (r *Repository) GetShipmentSummary(ctx context.Context, runner SQLRunner, cartID string) (*ShipmentSummary, error) {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return nil, fmt.Errorf("parsing cart id: %w", err)
+	}
+	row := runner.QueryRow(ctx,
+		`SELECT tracking_code FROM shipments WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`,
+		uid,
+	)
+	var tracking pgtype.Text
+	if err := row.Scan(&tracking); err != nil {
+		if isNoRows(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("loading shipment summary: %w", err)
+	}
+	if !tracking.Valid {
+		return &ShipmentSummary{}, nil
+	}
+	return &ShipmentSummary{TrackingCode: tracking.String}, nil
 }
 
 // ShippingAddressJSON is the minimal shape we read from the cart's

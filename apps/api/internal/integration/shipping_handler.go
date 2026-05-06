@@ -278,6 +278,14 @@ func (h *Handler) CreateShippingShipment(c *fiber.Ctx) error {
 		// reconcile (the ON CONFLICT handles the idempotency path).
 		return httpx.HandleServiceError(c, fmt.Errorf("shipment created at provider but failed to persist locally: %w", err))
 	}
+
+	// Customer-facing notification: if the carrier returned a tracking code
+	// right away, fire the postcheckout shipped flow. Idempotent at the
+	// implementation level (one shipped event per cart).
+	if out.TrackingCode != "" && h.service.postCheckoutHook != nil {
+		h.service.postCheckoutHook.OnShipmentPosted(c.Context(), req.ExternalOrderID, out.TrackingCode)
+	}
+
 	return httpx.Created(c, CreateShippingShipmentResponse{
 		ShipmentID:          shipment.ID,
 		ProviderOrderID:     out.ProviderOrderID,
@@ -468,6 +476,14 @@ func (h *Handler) GenerateShippingLabels(c *fiber.Ctx) error {
 			continue
 		}
 		_ = h.service.repo.UpdateShipmentLabels(c.Context(), sh.ID, result.LabelURL, t.PublicTracking, t.TrackingCode)
+
+		// Notify the customer once a tracking_code becomes available. Many
+		// carriers don't return a code at CreateShipment time; the code only
+		// lands here, after labels are generated. Idempotent — repeats hit
+		// the order_event unique constraint.
+		if t.TrackingCode != "" && sh.OrderID != "" && h.service.postCheckoutHook != nil {
+			h.service.postCheckoutHook.OnShipmentPosted(c.Context(), sh.OrderID, t.TrackingCode)
+		}
 	}
 
 	tickets := make([]GenerateShippingLabelEntry, 0, len(result.Tickets))

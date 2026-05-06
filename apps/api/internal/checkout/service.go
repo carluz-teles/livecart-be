@@ -41,6 +41,7 @@ type CouponLifecycle interface {
 // flow as the asynchronous webhook path.
 type PostCheckoutHook interface {
 	OnCartPaid(ctx context.Context, cartID string)
+	OnShipmentPosted(ctx context.Context, cartID, trackingCode string)
 }
 
 // Service handles business logic for public checkout.

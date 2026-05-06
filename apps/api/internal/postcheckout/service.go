@@ -3,6 +3,7 @@ package postcheckout
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"html"
 	"strings"
@@ -35,9 +36,9 @@ func NewService(repo *Repository, emailClient *email.Client, logger *zap.Logger)
 // It is best-effort: every error is logged but never returned, because the
 // caller is a payment webhook handler that must ACK regardless.
 //
-// Idempotency: the cart's tracking_token is the marker. If it is already set
-// we assume the email was sent and skip — this is robust to webhook retries
-// without needing a separate notification log.
+// Idempotency lives in two places: the tracking_token (set once, never
+// rotated) and the order_events unique index. Either is enough to short
+// circuit duplicate runs.
 func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 	snapshot, err := s.repo.LoadCart(ctx, cartID)
 	if err != nil {
@@ -72,6 +73,16 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 		return
 	}
 
+	// Append `payment_confirmed` to the customer-facing timeline. Insert is
+	// idempotent at the DB level (unique cart_id+event_type) — duplicate
+	// hooks are a no-op.
+	if _, err := s.repo.InsertOrderEvent(ctx, cartID, "payment_confirmed", "system", nil); err != nil {
+		s.logger.Warn("failed to record payment_confirmed event",
+			zap.String("cart_id", cartID),
+			zap.Error(err),
+		)
+	}
+
 	// No customer email captured (rare — checkout currently requires it, but
 	// this guards data drift). Token is still saved so the customer can be
 	// linked manually if they ask.
@@ -96,6 +107,70 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 	s.logger.Info("post-checkout flow completed",
 		zap.String("cart_id", cartID),
 		zap.String("to", customerEmail),
+	)
+}
+
+// OnShipmentPosted fires after the merchant successfully creates a shipment
+// at a carrier (Melhor Envio / SmartEnvios) or attaches a tracking_code via
+// label generation. Records `shipped` in the timeline and emails the customer
+// with the code. Best-effort.
+//
+// trackingCode is required — if empty (e.g. provider didn't return one yet),
+// the call is a no-op.
+func (s *Service) OnShipmentPosted(ctx context.Context, cartID, trackingCode string) {
+	if trackingCode == "" {
+		return
+	}
+
+	snapshot, err := s.repo.LoadCart(ctx, cartID)
+	if err != nil {
+		s.logger.Warn("post-checkout shipped hook could not load cart",
+			zap.String("cart_id", cartID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	// Idempotency: one shipped event per cart. Subsequent calls (label re-
+	// generation, webhook retry) become no-ops without ever touching email.
+	metadata := json.RawMessage(fmt.Sprintf(`{"tracking_code":%q}`, trackingCode))
+	inserted, err := s.repo.InsertOrderEvent(ctx, cartID, "shipped", "merchant", metadata)
+	if err != nil {
+		s.logger.Warn("failed to record shipped event",
+			zap.String("cart_id", cartID),
+			zap.Error(err),
+		)
+		return
+	}
+	if !inserted {
+		// Already shipped — don't re-email.
+		return
+	}
+
+	customerEmail := snapshot.Cart.CustomerEmail.String
+	if customerEmail == "" {
+		return
+	}
+	if !snapshot.Cart.TrackingToken.Valid || snapshot.Cart.TrackingToken.String == "" {
+		// Defensive: shipped before paid would mean tracking_token wasn't
+		// set. Skip the email; the order_event row remains as audit.
+		return
+	}
+
+	input := buildShippedEmailInput(snapshot, trackingCode)
+	if err := s.email.SendOrderShipped(ctx, input); err != nil {
+		s.logger.Warn("failed to send order shipped email",
+			zap.String("cart_id", cartID),
+			zap.String("to", customerEmail),
+			zap.Error(err),
+		)
+		return
+	}
+
+	s.logger.Info("shipped flow completed",
+		zap.String("cart_id", cartID),
+		zap.String("to", customerEmail),
+		zap.String("tracking_code", trackingCode),
 	)
 }
 
@@ -168,6 +243,47 @@ func renderItemsHTML(items []sqlc.ListCartItemsRow) string {
 		b.WriteString(`</td></tr>`)
 	}
 	return b.String()
+}
+
+func buildShippedEmailInput(s *CartSnapshot, trackingCode string) email.OrderShippedEmailInput {
+	customerName := s.Cart.CustomerName.String
+	if customerName == "" {
+		customerName = s.Cart.PlatformHandle
+	}
+	if customerName == "" {
+		customerName = "cliente"
+	}
+
+	carrierLine := ""
+	if s.Cart.ShippingServiceName.Valid && s.Cart.ShippingServiceName.String != "" {
+		carrierLine = s.Cart.ShippingServiceName.String
+		if s.Cart.ShippingCarrier.Valid && s.Cart.ShippingCarrier.String != "" {
+			carrierLine = fmt.Sprintf("%s · %s", s.Cart.ShippingServiceName.String, s.Cart.ShippingCarrier.String)
+		}
+	}
+
+	logoURL := ""
+	if s.Store.LogoUrl.Valid {
+		logoURL = s.Store.LogoUrl.String
+	}
+
+	frontendURL := strings.TrimRight(config.FrontendURL.StringOr("http://localhost:3000"), "/")
+	trackingURL := fmt.Sprintf("%s/order/%d?key=%s",
+		frontendURL,
+		s.Cart.ShortID,
+		s.Cart.TrackingToken.String,
+	)
+
+	return email.OrderShippedEmailInput{
+		StoreName:    s.Store.Name,
+		StoreLogoURL: logoURL,
+		ToEmail:      s.Cart.CustomerEmail.String,
+		ToName:       customerName,
+		OrderShortID: fmt.Sprintf("%d", s.Cart.ShortID),
+		TrackingCode: trackingCode,
+		CarrierLine:  carrierLine,
+		TrackingURL:  trackingURL,
+	}
 }
 
 // formatTotal computes the cart total from item lines + shipping − coupon.

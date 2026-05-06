@@ -375,6 +375,16 @@ type OauthState struct {
 	ExpiresAt    pgtype.Timestamptz `json:"expires_at"`
 }
 
+type OrderEvent struct {
+	ID         pgtype.UUID        `json:"id"`
+	CartID     pgtype.UUID        `json:"cart_id"`
+	EventType  string             `json:"event_type"`
+	OccurredAt pgtype.Timestamptz `json:"occurred_at"`
+	Source     string             `json:"source"`
+	Metadata   json.RawMessage    `json:"metadata"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
 type Payment struct {
 	ID                pgtype.UUID        `json:"id"`
 	CartID            pgtype.UUID        `json:"cart_id"`

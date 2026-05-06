@@ -3,12 +3,19 @@ package postcheckout
 import (
 	"crypto/subtle"
 	"strconv"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/lib/httpx"
 )
+
+// Local alias so the handler doesn't have to drag the full sqlc package
+// reference through every helper signature.
+type sqlcOrderEvent = sqlc.OrderEvent
 
 // Handler exposes the public order-tracking endpoint. The URL surfaced to the
 // customer is `/order/{shortId}?key={token}` — the FE forwards both into this
@@ -16,11 +23,12 @@ import (
 // the token compared in constant time against the persisted value.
 type Handler struct {
 	repo   *Repository
+	pool   *pgxpool.Pool
 	logger *zap.Logger
 }
 
-func NewHandler(repo *Repository, logger *zap.Logger) *Handler {
-	return &Handler{repo: repo, logger: logger.Named("postcheckout-handler")}
+func NewHandler(repo *Repository, pool *pgxpool.Pool, logger *zap.Logger) *Handler {
+	return &Handler{repo: repo, pool: pool, logger: logger.Named("postcheckout-handler")}
 }
 
 func (h *Handler) RegisterRoutes(app *fiber.App) {
@@ -33,20 +41,32 @@ func (h *Handler) RegisterRoutes(app *fiber.App) {
 // We deliberately exclude PII like CPF and full address that the customer
 // already typed; we echo back only what's helpful on the tracking page.
 type PublicOrderResponse struct {
-	ShortID         string                  `json:"short_id"`
-	StoreName       string                  `json:"store_name"`
-	StoreLogoURL    string                  `json:"store_logo_url,omitempty"`
-	Status          string                  `json:"status"` // paid | shipped | delivered
-	PaidAt          *string                 `json:"paid_at,omitempty"`
-	CustomerName    string                  `json:"customer_name"`
-	CustomerEmail   string                  `json:"customer_email"`
-	Items           []PublicOrderItem       `json:"items"`
-	Subtotal        int64                   `json:"subtotal_cents"`
-	ShippingCents   int64                   `json:"shipping_cents"`
-	DiscountCents   int64                   `json:"discount_cents"`
-	TotalCents      int64                   `json:"total_cents"`
-	ShippingAddress *PublicShippingAddress  `json:"shipping_address,omitempty"`
-	Shipping        *PublicShippingSummary  `json:"shipping,omitempty"`
+	ShortID         string                 `json:"short_id"`
+	StoreName       string                 `json:"store_name"`
+	StoreLogoURL    string                 `json:"store_logo_url,omitempty"`
+	Status          string                 `json:"status"` // paid | shipped | delivered
+	PaidAt          *string                `json:"paid_at,omitempty"`
+	CustomerName    string                 `json:"customer_name"`
+	CustomerEmail   string                 `json:"customer_email"`
+	Items           []PublicOrderItem      `json:"items"`
+	Subtotal        int64                  `json:"subtotal_cents"`
+	ShippingCents   int64                  `json:"shipping_cents"`
+	DiscountCents   int64                  `json:"discount_cents"`
+	TotalCents      int64                  `json:"total_cents"`
+	ShippingAddress *PublicShippingAddress `json:"shipping_address,omitempty"`
+	Shipping        *PublicShippingSummary `json:"shipping,omitempty"`
+	Events          []PublicOrderEvent     `json:"events"`
+}
+
+// PublicOrderEvent is one timeline entry. The customer sees these mapped onto
+// the visual status bar; type drives the icon + label, occurred_at drives
+// "há X minutos".
+type PublicOrderEvent struct {
+	Type       string  `json:"type"` // payment_confirmed | shipped | delivered
+	OccurredAt string  `json:"occurred_at"`
+	Title      string  `json:"title"`
+	Subtitle   string  `json:"subtitle,omitempty"`
+	Source     string  `json:"source"` // system | merchant | customer
 }
 
 type PublicOrderItem struct {
@@ -110,14 +130,96 @@ func (h *Handler) GetOrder(c *fiber.Ctx) error {
 		return httpx.ErrInternal("Erro ao carregar pedido")
 	}
 
-	return httpx.OK(c, toPublicResponse(snapshot))
+	events, err := h.repo.ListOrderEvents(c.Context(), cart.ID.String())
+	if err != nil {
+		// Don't fail the whole request — timeline is auxiliary, the order
+		// summary itself is the primary value.
+		h.logger.Warn("failed to load order events",
+			zap.String("cart_id", cart.ID.String()),
+			zap.Error(err),
+		)
+	}
+
+	var shipment *ShipmentSummary
+	if h.pool != nil {
+		shipment, err = h.repo.GetShipmentSummary(c.Context(), h.pool, cart.ID.String())
+		if err != nil {
+			h.logger.Warn("failed to load shipment summary",
+				zap.String("cart_id", cart.ID.String()),
+				zap.Error(err),
+			)
+		}
+	}
+
+	resp := toPublicResponse(snapshot)
+	resp.Events = make([]PublicOrderEvent, 0, len(events))
+	for _, ev := range events {
+		resp.Events = append(resp.Events, eventToResponse(ev.EventType, ev.OccurredAt.Time, ev.Source))
+	}
+	resp.Status = deriveStatusFromEvents(events, snapshot)
+	if shipment != nil && shipment.TrackingCode != "" {
+		if resp.Shipping == nil {
+			resp.Shipping = &PublicShippingSummary{}
+		}
+		resp.Shipping.TrackingCode = shipment.TrackingCode
+	}
+
+	return httpx.OK(c, resp)
+}
+
+func eventToResponse(eventType string, occurred time.Time, source string) PublicOrderEvent {
+	title, subtitle := eventLabel(eventType)
+	return PublicOrderEvent{
+		Type:       eventType,
+		OccurredAt: occurred.Format(time.RFC3339),
+		Title:      title,
+		Subtitle:   subtitle,
+		Source:     source,
+	}
+}
+
+func eventLabel(eventType string) (string, string) {
+	switch eventType {
+	case "payment_confirmed":
+		return "Pagamento confirmado", "Recebemos seu pagamento"
+	case "shipped":
+		return "Pedido enviado", "Sua encomenda foi despachada"
+	case "delivered":
+		return "Pedido entregue", "Esperamos que tenha gostado"
+	default:
+		return eventType, ""
+	}
+}
+
+// deriveStatusFromEvents picks the latest non-refund event as the canonical
+// status. Falls back to payment_status when no events exist (defensive — the
+// migration backfilled paid carts, but this guards data drift).
+func deriveStatusFromEvents(events []sqlcOrderEvent, snapshot *CartSnapshot) string {
+	if snapshot.Cart.PaymentStatus.String == "refunded" {
+		return "refunded"
+	}
+	// Walk in reverse — events come back chronologically, latest one wins.
+	for i := len(events) - 1; i >= 0; i-- {
+		switch events[i].EventType {
+		case "delivered":
+			return "delivered"
+		case "shipped":
+			return "shipped"
+		case "payment_confirmed":
+			return "paid"
+		}
+	}
+	if snapshot.Cart.PaymentStatus.String == "paid" {
+		return "paid"
+	}
+	return "paid"
 }
 
 func toPublicResponse(s *CartSnapshot) PublicOrderResponse {
 	resp := PublicOrderResponse{
 		ShortID:       strconv.Itoa(int(s.Cart.ShortID)),
 		StoreName:     s.Store.Name,
-		Status:        derivePublicStatus(s),
+		Status:        "paid", // overwritten by deriveStatusFromEvents in caller
 		CustomerName:  s.Cart.CustomerName.String,
 		CustomerEmail: s.Cart.CustomerEmail.String,
 	}
@@ -187,16 +289,3 @@ func toPublicResponse(s *CartSnapshot) PublicOrderResponse {
 	return resp
 }
 
-// derivePublicStatus maps the cart's payment_status into the customer-facing
-// state machine surfaced on the public page. Today we only have "paid" — the
-// "shipped" and "delivered" transitions land in Phases 2 and 3.
-func derivePublicStatus(s *CartSnapshot) string {
-	switch s.Cart.PaymentStatus.String {
-	case "paid":
-		return "paid"
-	case "refunded":
-		return "refunded"
-	default:
-		return "paid"
-	}
-}
