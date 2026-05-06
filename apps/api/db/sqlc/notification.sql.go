@@ -96,6 +96,24 @@ func (q *Queries) CreateNotificationLog(ctx context.Context, arg CreateNotificat
 	return i, err
 }
 
+const findStoreByActiveTestSetupCode = `-- name: FindStoreByActiveTestSetupCode :one
+SELECT id
+FROM stores
+WHERE notification_test_setup_code = $1
+  AND notification_test_setup_expires_at IS NOT NULL
+  AND notification_test_setup_expires_at > now()
+LIMIT 1
+`
+
+// Looks up the store that owns a non-expired setup code. Used by the IG
+// webhook handler to route an incoming DM to the right store.
+func (q *Queries) FindStoreByActiveTestSetupCode(ctx context.Context, notificationTestSetupCode pgtype.Text) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, findStoreByActiveTestSetupCode, notificationTestSetupCode)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const getLastNotificationForUser = `-- name: GetLastNotificationForUser :one
 SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at FROM notification_logs
 WHERE store_id = $1 AND platform_user_id = $2 AND status = 'sent'
@@ -207,6 +225,39 @@ func (q *Queries) GetStoreNotificationSettings(ctx context.Context, id pgtype.UU
 	return notification_settings, err
 }
 
+const getStoreTestRecipient = `-- name: GetStoreTestRecipient :one
+
+SELECT
+    notification_test_recipient_psid,
+    notification_test_recipient_handle,
+    notification_test_setup_code,
+    notification_test_setup_expires_at
+FROM stores WHERE id = $1
+`
+
+type GetStoreTestRecipientRow struct {
+	NotificationTestRecipientPsid   pgtype.Text        `json:"notification_test_recipient_psid"`
+	NotificationTestRecipientHandle pgtype.Text        `json:"notification_test_recipient_handle"`
+	NotificationTestSetupCode       pgtype.Text        `json:"notification_test_setup_code"`
+	NotificationTestSetupExpiresAt  pgtype.Timestamptz `json:"notification_test_setup_expires_at"`
+}
+
+// =============================================================================
+// TEST RECIPIENT (for "Testar notificação" feature)
+// =============================================================================
+// Returns the configured test recipient and any active setup code for the store.
+func (q *Queries) GetStoreTestRecipient(ctx context.Context, id pgtype.UUID) (GetStoreTestRecipientRow, error) {
+	row := q.db.QueryRow(ctx, getStoreTestRecipient, id)
+	var i GetStoreTestRecipientRow
+	err := row.Scan(
+		&i.NotificationTestRecipientPsid,
+		&i.NotificationTestRecipientHandle,
+		&i.NotificationTestSetupCode,
+		&i.NotificationTestSetupExpiresAt,
+	)
+	return i, err
+}
+
 const listNotificationsByEvent = `-- name: ListNotificationsByEvent :many
 SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at FROM notification_logs
 WHERE event_id = $1
@@ -293,6 +344,48 @@ func (q *Queries) ListNotificationsByStore(ctx context.Context, arg ListNotifica
 		return nil, err
 	}
 	return items, nil
+}
+
+const setStoreTestRecipient = `-- name: SetStoreTestRecipient :exec
+UPDATE stores
+SET notification_test_recipient_psid = $2,
+    notification_test_recipient_handle = $3,
+    notification_test_setup_code = NULL,
+    notification_test_setup_expires_at = NULL
+WHERE id = $1
+`
+
+type SetStoreTestRecipientParams struct {
+	ID                              pgtype.UUID `json:"id"`
+	NotificationTestRecipientPsid   pgtype.Text `json:"notification_test_recipient_psid"`
+	NotificationTestRecipientHandle pgtype.Text `json:"notification_test_recipient_handle"`
+}
+
+// Stores the captured PSID + handle and clears the setup code. Called from the
+// IG webhook when an incoming DM matches the active setup code.
+func (q *Queries) SetStoreTestRecipient(ctx context.Context, arg SetStoreTestRecipientParams) error {
+	_, err := q.db.Exec(ctx, setStoreTestRecipient, arg.ID, arg.NotificationTestRecipientPsid, arg.NotificationTestRecipientHandle)
+	return err
+}
+
+const setStoreTestSetupCode = `-- name: SetStoreTestSetupCode :exec
+UPDATE stores
+SET notification_test_setup_code = $2,
+    notification_test_setup_expires_at = $3
+WHERE id = $1
+`
+
+type SetStoreTestSetupCodeParams struct {
+	ID                             pgtype.UUID        `json:"id"`
+	NotificationTestSetupCode      pgtype.Text        `json:"notification_test_setup_code"`
+	NotificationTestSetupExpiresAt pgtype.Timestamptz `json:"notification_test_setup_expires_at"`
+}
+
+// Persists a freshly generated setup code with a TTL. Called when the lojista
+// starts the "Configurar destinatário de teste" flow in the dashboard.
+func (q *Queries) SetStoreTestSetupCode(ctx context.Context, arg SetStoreTestSetupCodeParams) error {
+	_, err := q.db.Exec(ctx, setStoreTestSetupCode, arg.ID, arg.NotificationTestSetupCode, arg.NotificationTestSetupExpiresAt)
+	return err
 }
 
 const updateNotificationLogStatus = `-- name: UpdateNotificationLogStatus :exec

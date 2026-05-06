@@ -593,7 +593,11 @@ type Store struct {
 	// Default package width (cm) for ERP imports that only carry weight.
 	DefaultWidthCm pgtype.Int4 `json:"default_width_cm"`
 	// Default package length (cm) for ERP imports that only carry weight.
-	DefaultLengthCm pgtype.Int4 `json:"default_length_cm"`
+	DefaultLengthCm                 pgtype.Int4        `json:"default_length_cm"`
+	NotificationTestRecipientPsid   pgtype.Text        `json:"notification_test_recipient_psid"`
+	NotificationTestRecipientHandle pgtype.Text        `json:"notification_test_recipient_handle"`
+	NotificationTestSetupCode       pgtype.Text        `json:"notification_test_setup_code"`
+	NotificationTestSetupExpiresAt  pgtype.Timestamptz `json:"notification_test_setup_expires_at"`
 }
 
 type StoreInvitation struct {

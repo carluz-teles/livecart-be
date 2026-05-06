@@ -1,6 +1,9 @@
 package notification
 
 import (
+	"errors"
+	"time"
+
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
 
@@ -28,6 +31,9 @@ func (h *Handler) RegisterRoutes(api fiber.Router) {
 	notifications.Put("/settings", h.UpdateSettings)
 	notifications.Post("/preview", h.PreviewTemplate)
 	notifications.Get("/variables", h.GetAvailableVariables)
+	notifications.Get("/test/recipient", h.GetTestRecipient)
+	notifications.Post("/test/setup", h.StartTestSetup)
+	notifications.Post("/test", h.SendTest)
 }
 
 // GetSettingsResponse represents the response for getting notification settings.
@@ -285,4 +291,95 @@ func toSettingsFromRequest(req *UpdateSettingsRequest) Settings {
 	}
 
 	return settings
+}
+
+// =============================================================================
+// Test recipient handlers
+// =============================================================================
+
+// TestRecipientResponse describes the current setup state for a store.
+type TestRecipientResponse struct {
+	Configured       bool       `json:"configured"`
+	Handle           string     `json:"handle,omitempty"`
+	SetupCode        string     `json:"setup_code,omitempty"`
+	SetupExpiresAt   *time.Time `json:"setup_expires_at,omitempty"`
+	SetupCodeActive  bool       `json:"setup_code_active"`
+}
+
+// SendTestRequest is the body for POST /notifications/test.
+type SendTestRequest struct {
+	Type     string `json:"type"`
+	Template string `json:"template"`
+}
+
+func toTestRecipientResponse(r *TestRecipient) TestRecipientResponse {
+	resp := TestRecipientResponse{
+		Configured:      r.Configured(),
+		Handle:          r.Handle,
+		SetupCode:       r.SetupCode,
+		SetupCodeActive: r.SetupActive(time.Now()),
+	}
+	if !r.SetupExpires.IsZero() {
+		expires := r.SetupExpires
+		resp.SetupExpiresAt = &expires
+	}
+	return resp
+}
+
+// GetTestRecipient returns the current test recipient state for a store.
+func (h *Handler) GetTestRecipient(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	recipient, err := h.service.GetTestRecipient(c.Context(), storeID)
+	if err != nil {
+		h.logger.Error("failed to load test recipient",
+			zap.String("store_id", storeID),
+			zap.Error(err),
+		)
+		return httpx.ErrInternal("Erro ao carregar destinatário de teste")
+	}
+	return httpx.OK(c, toTestRecipientResponse(recipient))
+}
+
+// StartTestSetup generates a fresh setup code and returns it so the lojista
+// can DM it from their personal IG to the store's business account.
+func (h *Handler) StartTestSetup(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	recipient, err := h.service.StartTestRecipientSetup(c.Context(), storeID)
+	if err != nil {
+		h.logger.Error("failed to start test recipient setup",
+			zap.String("store_id", storeID),
+			zap.Error(err),
+		)
+		return httpx.ErrInternal("Erro ao iniciar configuração do destinatário")
+	}
+	return httpx.OK(c, toTestRecipientResponse(recipient))
+}
+
+// SendTest dispatches a real Instagram DM rendered with sample data to the
+// configured test recipient.
+func (h *Handler) SendTest(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	var req SendTestRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.ErrBadRequest("Corpo da requisição inválido")
+	}
+	if req.Type == "" || req.Template == "" {
+		return httpx.ErrBadRequest("Type e template são obrigatórios")
+	}
+
+	if err := h.service.SendTest(c.Context(), storeID, NotificationType(req.Type), req.Template); err != nil {
+		if errors.Is(err, ErrTestRecipientNotConfigured) {
+			return httpx.ErrUnprocessable("Configure o destinatário de teste antes de enviar.")
+		}
+		h.logger.Warn("failed to send test notification",
+			zap.String("store_id", storeID),
+			zap.String("type", req.Type),
+			zap.Error(err),
+		)
+		return httpx.ErrInternal("Não foi possível enviar a notificação de teste")
+	}
+	return httpx.OK(c, fiber.Map{"sent": true})
 }

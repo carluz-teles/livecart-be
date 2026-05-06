@@ -68,3 +68,44 @@ SELECT
     cart_send_expiration_reminder,
     cart_expiration_reminder_minutes
 FROM stores WHERE id = $1;
+
+-- =============================================================================
+-- TEST RECIPIENT (for "Testar notificação" feature)
+-- =============================================================================
+
+-- name: GetStoreTestRecipient :one
+-- Returns the configured test recipient and any active setup code for the store.
+SELECT
+    notification_test_recipient_psid,
+    notification_test_recipient_handle,
+    notification_test_setup_code,
+    notification_test_setup_expires_at
+FROM stores WHERE id = $1;
+
+-- name: SetStoreTestSetupCode :exec
+-- Persists a freshly generated setup code with a TTL. Called when the lojista
+-- starts the "Configurar destinatário de teste" flow in the dashboard.
+UPDATE stores
+SET notification_test_setup_code = $2,
+    notification_test_setup_expires_at = $3
+WHERE id = $1;
+
+-- name: SetStoreTestRecipient :exec
+-- Stores the captured PSID + handle and clears the setup code. Called from the
+-- IG webhook when an incoming DM matches the active setup code.
+UPDATE stores
+SET notification_test_recipient_psid = $2,
+    notification_test_recipient_handle = $3,
+    notification_test_setup_code = NULL,
+    notification_test_setup_expires_at = NULL
+WHERE id = $1;
+
+-- name: FindStoreByActiveTestSetupCode :one
+-- Looks up the store that owns a non-expired setup code. Used by the IG
+-- webhook handler to route an incoming DM to the right store.
+SELECT id
+FROM stores
+WHERE notification_test_setup_code = $1
+  AND notification_test_setup_expires_at IS NOT NULL
+  AND notification_test_setup_expires_at > now()
+LIMIT 1;

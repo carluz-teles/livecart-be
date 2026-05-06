@@ -3264,7 +3264,23 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 		}
 	}
 
-	// Future: Could be used to handle order confirmations, questions, etc.
+	// If the message text matches an active "Testar notificação" setup code,
+	// capture this sender as the store's test recipient. We swallow errors
+	// here because a webhook should never fail on optional bookkeeping.
+	if s.notificationService != nil && input.Text != "" {
+		storeID, setupErr := s.notificationService.CompleteTestRecipientSetup(ctx, input.Text, input.SenderID, "")
+		if setupErr != nil {
+			s.logger.Warn("failed to complete test recipient setup",
+				zap.String("account_id", input.AccountID),
+				zap.Error(setupErr),
+			)
+		} else if storeID != "" {
+			s.logger.Info("test recipient configured",
+				zap.String("store_id", storeID),
+				zap.String("sender_id", input.SenderID),
+			)
+		}
+	}
 
 	return nil
 }
