@@ -71,6 +71,7 @@ type Cart struct {
 	CouponID             pgtype.UUID `json:"coupon_id"`
 	CouponCode           pgtype.Text `json:"coupon_code"`
 	CouponDiscountCents  int64       `json:"coupon_discount_cents"`
+	TrackingToken        pgtype.Text `json:"tracking_token"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.

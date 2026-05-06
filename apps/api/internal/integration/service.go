@@ -63,6 +63,14 @@ type CouponSyncer interface {
 	OnCartRefunded(ctx context.Context, cartID string) error
 }
 
+// PostCheckoutHook is the customer-facing post-payment flow: tracking token
+// generation + transactional emails. Best-effort by design — implementations
+// must swallow their own errors so the payment webhook ACKs regardless.
+// Wired from the postcheckout package via SetPostCheckoutHook.
+type PostCheckoutHook interface {
+	OnCartPaid(ctx context.Context, cartID string)
+}
+
 // Service handles business logic for integrations.
 type Service struct {
 	repo                *Repository
@@ -73,6 +81,7 @@ type Service struct {
 	productSyncer       ProductSyncer
 	productGroupSyncer  ProductGroupSyncer
 	couponSyncer        CouponSyncer
+	postCheckoutHook    PostCheckoutHook
 	notificationService *notification.Service
 	logger              *zap.Logger
 }
@@ -111,6 +120,13 @@ func (s *Service) SetProductGroupSyncer(syncer ProductGroupSyncer) {
 // ProcessPaymentNotification when a cart's payment status flips.
 func (s *Service) SetCouponSyncer(syncer CouponSyncer) {
 	s.couponSyncer = syncer
+}
+
+// SetPostCheckoutHook wires the customer-facing post-payment flow. The hook
+// fires after the cart is marked paid and is responsible for tracking-token
+// generation and email receipts.
+func (s *Service) SetPostCheckoutHook(hook PostCheckoutHook) {
+	s.postCheckoutHook = hook
 }
 
 // SetNotificationService sets the notification service for sending DMs.
@@ -2602,6 +2618,14 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 	// the refunded TODO at the top of this method.
 	if cartPaymentStatus != "paid" {
 		return nil
+	}
+
+	// Customer-facing post-payment flow: receipt email + tracking token. Fired
+	// before ERP finalisation so a slow ERP call doesn't delay the email.
+	// Idempotent inside (skips when tracking_token already set), so webhook
+	// retries are safe.
+	if s.postCheckoutHook != nil {
+		s.postCheckoutHook.OnCartPaid(ctx, status.ExternalReference)
 	}
 
 	if err := s.finalizeCartERPOrder(ctx, status.ExternalReference, input.StoreID, status); err != nil {

@@ -36,12 +36,20 @@ type CouponLifecycle interface {
 	OnCartMutated(ctx context.Context, cartID string) error
 }
 
+// PostCheckoutHook mirrors integration.PostCheckoutHook so the synchronous
+// card path in this service can fire the same customer-facing post-payment
+// flow as the asynchronous webhook path.
+type PostCheckoutHook interface {
+	OnCartPaid(ctx context.Context, cartID string)
+}
+
 // Service handles business logic for public checkout.
 type Service struct {
 	repo               *Repository
 	pool               *pgxpool.Pool
 	integrationService *integration.Service
 	couponLifecycle    CouponLifecycle
+	postCheckoutHook   PostCheckoutHook
 	logger             *zap.Logger
 }
 
@@ -66,6 +74,11 @@ func NewService(
 // some other way).
 func (s *Service) SetCouponLifecycle(lifecycle CouponLifecycle) {
 	s.couponLifecycle = lifecycle
+}
+
+// SetPostCheckoutHook wires the customer-facing post-payment flow.
+func (s *Service) SetPostCheckoutHook(hook PostCheckoutHook) {
+	s.postCheckoutHook = hook
 }
 
 // GetCartForCheckout retrieves a cart for the public checkout page.
@@ -611,6 +624,12 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 				zap.String("cart_id", cart.ID),
 				zap.Error(err),
 			)
+		}
+		// Customer-facing post-payment flow (tracking token + receipt email).
+		// Idempotent inside the hook, so duplicate invocations from a webhook
+		// retry are a no-op.
+		if s.postCheckoutHook != nil {
+			s.postCheckoutHook.OnCartPaid(ctx, cart.ID)
 		}
 	}
 

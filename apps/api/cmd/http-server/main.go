@@ -46,6 +46,7 @@ import (
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/internal/member"
 	"livecart/apps/api/internal/notification"
+	"livecart/apps/api/internal/postcheckout"
 	notificationinbox "livecart/apps/api/internal/notification_inbox"
 	"livecart/apps/api/internal/order"
 	"livecart/apps/api/internal/product"
@@ -184,6 +185,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	var integrationSvc *integration.Service
 	var integrationWebhookHandler *integration.WebhookHandler
 	var notificationSvc *notification.Service
+	var postCheckoutSvc *postcheckout.Service
 
 	if config.EncryptionKey.IsSet() {
 		encryptor, err := crypto.NewEncryptor(config.EncryptionKey.String())
@@ -363,6 +365,16 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			notificationSvc = notification.NewService(queries, integrationSvc, log)
 			integrationSvc.SetNotificationService(notificationSvc)
 
+			// Customer-facing post-payment flow (tracking token + receipt
+			// email). Plugged into both the webhook path on integrationSvc
+			// and the synchronous card path on checkoutSvc further down.
+			postCheckoutSvc = postcheckout.NewService(
+				postcheckout.NewRepository(queries),
+				emailClient,
+				log,
+			)
+			integrationSvc.SetPostCheckoutHook(postCheckoutSvc)
+
 			// Start background token refresh worker
 			tokenWorker := integration.NewTokenRefreshWorker(integration.TokenRefreshWorkerConfig{
 				Service:  integrationSvc,
@@ -405,9 +417,19 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	if integrationSvc != nil {
 		checkoutRepo := checkout.NewRepository(queries)
 		checkoutSvc = checkout.NewService(checkoutRepo, pool, integrationSvc, log)
+		if postCheckoutSvc != nil {
+			checkoutSvc.SetPostCheckoutHook(postCheckoutSvc)
+		}
 		checkoutHandler := checkout.NewHandler(checkoutSvc, s3Client)
 		checkoutHandler.RegisterRoutes(app)
 	}
+
+	// Public order-tracking endpoint. Lives outside the integrationSvc guard
+	// because the read path doesn't depend on payment providers — it only
+	// reads carts that already have a tracking_token populated by the
+	// post-checkout flow.
+	postCheckoutHandler := postcheckout.NewHandler(postcheckout.NewRepository(queries), log)
+	postCheckoutHandler.RegisterRoutes(app)
 
 	// Protected routes (user-scoped)
 	api := app.Group("/api/v1")
