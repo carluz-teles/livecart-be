@@ -384,6 +384,16 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			})
 			tokenWorker.Start()
 
+			// Background tracking poller. Pulls SmartEnvios tracking every
+			// 6h and fires OnDelivered when the carrier reports delivered.
+			// Melhor Envio is not polled — its integration is quote-only.
+			trackingPoller := integration.NewTrackingPoller(integration.TrackingPollerConfig{
+				Service:  integrationSvc,
+				Logger:   log,
+				Interval: 6 * time.Hour,
+			})
+			trackingPoller.Start()
+
 			log.Info("integration layer initialized")
 		}
 	}
@@ -428,8 +438,8 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// because the read path doesn't depend on payment providers — it only
 	// reads carts that already have a tracking_token populated by the
 	// post-checkout flow.
-	postCheckoutHandler := postcheckout.NewHandler(postcheckout.NewRepository(queries), pool, log)
-	postCheckoutHandler.RegisterRoutes(app)
+	postCheckoutHandler := postcheckout.NewHandler(postcheckout.NewRepository(queries), postCheckoutSvc, pool, log)
+	postCheckoutHandler.RegisterPublicRoutes(app)
 
 	// Protected routes (user-scoped)
 	api := app.Group("/api/v1")
@@ -496,6 +506,12 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	orderSvc := order.NewService(orderRepo, log)
 	orderHandler := order.NewHandler(orderSvc, validate)
 	orderHandler.RegisterRoutes(storeScoped)
+
+	// Merchant-side post-checkout actions (Marcar como entregue) live next
+	// to the read-only orders routes to share the same store_id middleware.
+	if postCheckoutSvc != nil {
+		postCheckoutHandler.RegisterMerchantRoutes(storeScoped)
+	}
 
 	couponRepo := coupon.NewRepository(pool)
 	couponSvc := coupon.NewService(couponRepo, pool, log)

@@ -158,6 +158,41 @@ func (r *Repository) GetShipmentByOrderID(ctx context.Context, orderID string) (
 	return sh, nil
 }
 
+// ListShipmentsForPolling returns shipments by provider that haven't reached
+// a terminal status. The tracking poller consumes this every few hours to
+// pull carrier updates and emit `delivered` events. We exclude rows with
+// empty tracking_code because the carrier endpoint refuses to look up
+// shipments without one.
+func (r *Repository) ListShipmentsForPolling(ctx context.Context, provider string, limit int) ([]*ShipmentRow, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	const q = `SELECT ` + shipmentColumns + ` FROM shipments
+	  WHERE provider = $1
+	    AND status NOT IN ('delivered', 'returned', 'canceled', 'lost')
+	    AND tracking_code IS NOT NULL AND tracking_code <> ''
+	  ORDER BY updated_at ASC
+	  LIMIT $2`
+	rows, err := r.pool.Query(ctx, q, provider, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]*ShipmentRow, 0)
+	for rows.Next() {
+		sh, err := scanShipmentRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sh)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // getShipmentByIDForStore resolves a shipment by its LiveCart id, scoped to a
 // store so admin endpoints cannot accidentally operate on another tenant's
 // shipment. Returns httpx.ErrNotFound when absent.

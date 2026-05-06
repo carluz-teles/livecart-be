@@ -73,6 +73,10 @@ type PostCheckoutHook interface {
 	// tracking_code attached. Idempotent at the implementation: subsequent
 	// calls for the same cart are no-ops.
 	OnShipmentPosted(ctx context.Context, cartID, trackingCode string)
+	// OnDelivered records the terminal state. Source explains who saw it
+	// first: "merchant" (dashboard click), "customer" (public page click),
+	// "system" (tracking poller saw carrier flip to delivered).
+	OnDelivered(ctx context.Context, cartID, source string)
 }
 
 // Service handles business logic for integrations.

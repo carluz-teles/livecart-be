@@ -22,19 +22,28 @@ type sqlcOrderEvent = sqlc.OrderEvent
 // handler. ShortId is decorative (human-friendly), the security boundary is
 // the token compared in constant time against the persisted value.
 type Handler struct {
-	repo   *Repository
-	pool   *pgxpool.Pool
-	logger *zap.Logger
+	repo    *Repository
+	service *Service
+	pool    *pgxpool.Pool
+	logger  *zap.Logger
 }
 
-func NewHandler(repo *Repository, pool *pgxpool.Pool, logger *zap.Logger) *Handler {
-	return &Handler{repo: repo, pool: pool, logger: logger.Named("postcheckout-handler")}
+func NewHandler(repo *Repository, service *Service, pool *pgxpool.Pool, logger *zap.Logger) *Handler {
+	return &Handler{repo: repo, service: service, pool: pool, logger: logger.Named("postcheckout-handler")}
 }
 
-func (h *Handler) RegisterRoutes(app *fiber.App) {
-	// Public — no auth, token in query string is the secret.
+// RegisterPublicRoutes mounts the unauthenticated routes under /api/public/.
+func (h *Handler) RegisterPublicRoutes(app *fiber.App) {
 	public := app.Group("/api/public/orders")
 	public.Get("/:shortId", h.GetOrder)
+	public.Post("/:shortId/confirm-delivery", h.ConfirmDelivery)
+}
+
+// RegisterMerchantRoutes mounts the auth-protected, store-scoped routes.
+// Caller passes the storeScoped group so this handler inherits both
+// AuthMiddleware and the :storeId resolution.
+func (h *Handler) RegisterMerchantRoutes(g fiber.Router) {
+	g.Post("/orders/:id/mark-delivered", h.MarkDelivered)
 }
 
 // PublicOrderResponse is the slim, customer-safe view of a paid order.
@@ -165,6 +174,61 @@ func (h *Handler) GetOrder(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, resp)
+}
+
+// ConfirmDelivery handles POST /api/public/orders/:shortId/confirm-delivery
+// when the customer clicks "Recebi!" on the public page. Token-gated, same
+// auth model as GetOrder.
+func (h *Handler) ConfirmDelivery(c *fiber.Ctx) error {
+	shortIDParam := c.Params("shortId")
+	token := c.Query("key")
+	if shortIDParam == "" || token == "" {
+		return httpx.ErrNotFound("Pedido não encontrado")
+	}
+	shortID, err := strconv.Atoi(shortIDParam)
+	if err != nil {
+		return httpx.ErrNotFound("Pedido não encontrado")
+	}
+
+	cart, err := h.repo.GetCartByTrackingToken(c.Context(), token)
+	if err != nil || cart == nil {
+		return httpx.ErrNotFound("Pedido não encontrado")
+	}
+	if subtle.ConstantTimeCompare([]byte(cart.TrackingToken.String), []byte(token)) != 1 {
+		return httpx.ErrNotFound("Pedido não encontrado")
+	}
+	if int(cart.ShortID) != shortID {
+		return httpx.ErrNotFound("Pedido não encontrado")
+	}
+
+	h.service.OnDelivered(c.Context(), cart.ID.String(), "customer")
+	return httpx.OK(c, fiber.Map{"confirmed": true})
+}
+
+// MarkDelivered handles POST /api/v1/stores/:storeId/orders/:id/mark-delivered
+// when the merchant clicks the button in the dashboard. Verifies the cart
+// belongs to the authenticated store before firing the hook.
+func (h *Handler) MarkDelivered(c *fiber.Ctx) error {
+	storeID, ok := c.Locals("store_id").(string)
+	if !ok || storeID == "" {
+		return httpx.ErrForbidden("Loja não identificada")
+	}
+	cartID := c.Params("id")
+	if cartID == "" {
+		return httpx.ErrNotFound("Pedido não encontrado")
+	}
+
+	snapshot, err := h.repo.LoadCart(c.Context(), cartID)
+	if err != nil {
+		return httpx.ErrNotFound("Pedido não encontrado")
+	}
+	if snapshot.Event.StoreID.String() != storeID {
+		// Don't leak existence — same response code as not found.
+		return httpx.ErrNotFound("Pedido não encontrado")
+	}
+
+	h.service.OnDelivered(c.Context(), cartID, "merchant")
+	return httpx.OK(c, fiber.Map{"confirmed": true})
 }
 
 func eventToResponse(eventType string, occurred time.Time, source string) PublicOrderEvent {

@@ -110,6 +110,86 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 	)
 }
 
+// OnDelivered records the final state in the timeline. source distinguishes
+// who confirmed the delivery: the merchant clicking in the dashboard, the
+// customer clicking on the public page, or the auto-poller (system) seeing
+// the carrier flip the SmartEnvios status to "entregue". Same idempotency
+// guarantees as OnShipmentPosted: one delivered event per cart.
+func (s *Service) OnDelivered(ctx context.Context, cartID, source string) {
+	if source == "" {
+		source = "system"
+	}
+
+	snapshot, err := s.repo.LoadCart(ctx, cartID)
+	if err != nil {
+		s.logger.Warn("post-checkout delivered hook could not load cart",
+			zap.String("cart_id", cartID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	metadata := json.RawMessage(fmt.Sprintf(`{"source":%q}`, source))
+	inserted, err := s.repo.InsertOrderEvent(ctx, cartID, "delivered", source, metadata)
+	if err != nil {
+		s.logger.Warn("failed to record delivered event",
+			zap.String("cart_id", cartID),
+			zap.Error(err),
+		)
+		return
+	}
+	if !inserted {
+		return
+	}
+
+	customerEmail := snapshot.Cart.CustomerEmail.String
+	if customerEmail == "" {
+		return
+	}
+
+	// Skip the email when the customer themselves confirmed — they don't need
+	// to be notified about something they just clicked. Other paths (merchant,
+	// system poller) still send.
+	if source == "customer" {
+		s.logger.Info("delivery confirmed by customer, skipping email",
+			zap.String("cart_id", cartID),
+		)
+		return
+	}
+
+	customerName := snapshot.Cart.CustomerName.String
+	if customerName == "" {
+		customerName = snapshot.Cart.PlatformHandle
+	}
+	if customerName == "" {
+		customerName = "cliente"
+	}
+	logoURL := ""
+	if snapshot.Store.LogoUrl.Valid {
+		logoURL = snapshot.Store.LogoUrl.String
+	}
+
+	if err := s.email.SendOrderDelivered(ctx, email.OrderDeliveredEmailInput{
+		StoreName:    snapshot.Store.Name,
+		StoreLogoURL: logoURL,
+		ToEmail:      customerEmail,
+		ToName:       customerName,
+		OrderShortID: fmt.Sprintf("%d", snapshot.Cart.ShortID),
+	}); err != nil {
+		s.logger.Warn("failed to send order delivered email",
+			zap.String("cart_id", cartID),
+			zap.String("to", customerEmail),
+			zap.Error(err),
+		)
+		return
+	}
+
+	s.logger.Info("delivered flow completed",
+		zap.String("cart_id", cartID),
+		zap.String("source", source),
+	)
+}
+
 // OnShipmentPosted fires after the merchant successfully creates a shipment
 // at a carrier (Melhor Envio / SmartEnvios) or attaches a tracking_code via
 // label generation. Records `shipped` in the timeline and emails the customer

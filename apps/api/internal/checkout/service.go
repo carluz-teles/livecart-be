@@ -42,6 +42,7 @@ type CouponLifecycle interface {
 type PostCheckoutHook interface {
 	OnCartPaid(ctx context.Context, cartID string)
 	OnShipmentPosted(ctx context.Context, cartID, trackingCode string)
+	OnDelivered(ctx context.Context, cartID, source string)
 }
 
 // Service handles business logic for public checkout.
