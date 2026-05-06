@@ -28,11 +28,20 @@ type OrderPaidEmailInput struct {
 
 	// Public tracking page
 	TrackingURL string
+
+	// Merchant overrides — when set, replace the body block inside the shell
+	// (default header/footer stay). Subject overrides the auto-generated one.
+	OverrideSubject  string
+	OverrideBodyHTML string
 }
 
 // SendOrderPaid sends the "Pagamento confirmado" email. Best-effort: returns
 // nil silently if Resend is not configured so a missing API key never blocks
 // the payment webhook from acknowledging.
+//
+// When OverrideBodyHTML is set, the merchant-customized body replaces the
+// type-specific layout and is wrapped in a neutral shell. Subject defaults
+// to "Pedido #X confirmado · Store" when OverrideSubject is empty.
 func (c *Client) SendOrderPaid(ctx context.Context, input OrderPaidEmailInput) error {
 	if !c.IsConfigured() {
 		c.logger.Warn("Resend not configured, skipping order paid email",
@@ -42,9 +51,22 @@ func (c *Client) SendOrderPaid(ctx context.Context, input OrderPaidEmailInput) e
 		return nil
 	}
 
-	subject := fmt.Sprintf("Pedido #%s confirmado · %s", input.OrderShortID, input.StoreName)
+	subject := input.OverrideSubject
+	if subject == "" {
+		subject = fmt.Sprintf("Pedido #%s confirmado · %s", input.OrderShortID, input.StoreName)
+	}
 
-	htmlContent, err := c.renderOrderPaidHTML(input)
+	var htmlContent string
+	var err error
+	if input.OverrideBodyHTML != "" {
+		htmlContent, err = RenderOverrideShell(ShellInput{
+			StoreName:    input.StoreName,
+			StoreLogoURL: input.StoreLogoURL,
+			BodyHTML:     template.HTML(input.OverrideBodyHTML),
+		})
+	} else {
+		htmlContent, err = c.renderOrderPaidHTML(input)
+	}
 	if err != nil {
 		return fmt.Errorf("rendering order paid html: %w", err)
 	}

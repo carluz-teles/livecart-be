@@ -10,16 +10,20 @@ import (
 // Variables are in the format {variable_name}.
 func RenderTemplate(template string, vars TemplateVariables) string {
 	replacements := map[string]string{
-		"{handle}":      vars.Handle,
-		"{produto}":     vars.Produto,
-		"{keyword}":     vars.Keyword,
-		"{quantidade}":  fmt.Sprintf("%d", vars.Quantidade),
-		"{total_itens}": fmt.Sprintf("%d", vars.TotalItens),
-		"{total}":       vars.Total,
-		"{link}":        vars.Link,
-		"{loja}":        vars.Loja,
-		"{expira_em}":   vars.ExpiraEm,
-		"{live_titulo}": vars.LiveTitulo,
+		"{handle}":         vars.Handle,
+		"{produto}":        vars.Produto,
+		"{keyword}":        vars.Keyword,
+		"{quantidade}":     fmt.Sprintf("%d", vars.Quantidade),
+		"{total_itens}":    fmt.Sprintf("%d", vars.TotalItens),
+		"{total}":          vars.Total,
+		"{link}":           vars.Link,
+		"{loja}":           vars.Loja,
+		"{expira_em}":      vars.ExpiraEm,
+		"{live_titulo}":    vars.LiveTitulo,
+		"{numero_pedido}":  vars.NumeroPedido,
+		"{tracking_code}":  vars.TrackingCode,
+		"{transportadora}": vars.Transportadora,
+		"{link_pedido}":    vars.LinkPedido,
 	}
 
 	result := template
@@ -137,16 +141,20 @@ func GetAvailableVariables() []string {
 // SampleVariables returns sample data for template preview.
 func SampleVariables() TemplateVariables {
 	return TemplateVariables{
-		Handle:       "@cliente_exemplo",
-		Produto:      "Camiseta Preta M",
-		Keyword:      "ABCD",
-		Quantidade:   2,
-		TotalItens:   3,
-		Total:        "R$ 199,90",
-		TotalCents:   19990,
-		Link:         "https://sualoja.com/cart/abc123",
-		Loja:         "Minha Loja",
-		ExpiraEm:     "48 horas",
-		LiveTitulo:   "Black Friday 2024",
+		Handle:         "@cliente_exemplo",
+		Produto:        "Camiseta Preta M",
+		Keyword:        "ABCD",
+		Quantidade:     2,
+		TotalItens:     3,
+		Total:          "R$ 199,90",
+		TotalCents:     19990,
+		Link:           "https://sualoja.com/cart/abc123",
+		Loja:           "Minha Loja",
+		ExpiraEm:       "48 horas",
+		LiveTitulo:     "Black Friday 2024",
+		NumeroPedido:   "1234",
+		TrackingCode:   "BR123456789BR",
+		Transportadora: "Sedex via Correios",
+		LinkPedido:     "https://livecart.app/order/1234?key=abc",
 	}
 }

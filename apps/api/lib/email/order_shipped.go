@@ -24,6 +24,9 @@ type OrderShippedEmailInput struct {
 	CarrierLine  string
 
 	TrackingURL string // public order page on our app
+
+	OverrideSubject  string
+	OverrideBodyHTML string
 }
 
 // SendOrderShipped notifies the customer that the merchant has dispatched the
@@ -38,9 +41,22 @@ func (c *Client) SendOrderShipped(ctx context.Context, input OrderShippedEmailIn
 		return nil
 	}
 
-	subject := fmt.Sprintf("Pedido #%s a caminho · %s", input.OrderShortID, input.StoreName)
+	subject := input.OverrideSubject
+	if subject == "" {
+		subject = fmt.Sprintf("Pedido #%s a caminho · %s", input.OrderShortID, input.StoreName)
+	}
 
-	htmlContent, err := c.renderOrderShippedHTML(input)
+	var htmlContent string
+	var err error
+	if input.OverrideBodyHTML != "" {
+		htmlContent, err = RenderOverrideShell(ShellInput{
+			StoreName:    input.StoreName,
+			StoreLogoURL: input.StoreLogoURL,
+			BodyHTML:     template.HTML(input.OverrideBodyHTML),
+		})
+	} else {
+		htmlContent, err = c.renderOrderShippedHTML(input)
+	}
 	if err != nil {
 		return fmt.Errorf("rendering order shipped html: %w", err)
 	}

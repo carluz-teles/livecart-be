@@ -34,14 +34,18 @@ func (h *Handler) RegisterRoutes(api fiber.Router) {
 	notifications.Get("/test/recipient", h.GetTestRecipient)
 	notifications.Post("/test/setup", h.StartTestSetup)
 	notifications.Post("/test", h.SendTest)
+	notifications.Post("/test/email", h.SendTestEmail)
 }
 
 // GetSettingsResponse represents the response for getting notification settings.
 // NOTE: Triggers (when to send) are now in cart_settings, not here.
 type GetSettingsResponse struct {
-	CheckoutImmediate *TemplateSettingsResponse `json:"checkout_immediate"`
-	ItemAdded         *TemplateSettingsResponse `json:"item_added"`
-	CheckoutReminder  *TemplateSettingsResponse `json:"checkout_reminder"`
+	CheckoutImmediate *TemplateSettingsResponse      `json:"checkout_immediate"`
+	ItemAdded         *TemplateSettingsResponse      `json:"item_added"`
+	CheckoutReminder  *TemplateSettingsResponse      `json:"checkout_reminder"`
+	PaymentConfirmed  *EmailTemplateSettingsResponse `json:"payment_confirmed,omitempty"`
+	Shipped           *EmailTemplateSettingsResponse `json:"shipped,omitempty"`
+	Delivered         *EmailTemplateSettingsResponse `json:"delivered,omitempty"`
 }
 
 // TemplateSettingsResponse represents template settings in API responses.
@@ -49,6 +53,15 @@ type GetSettingsResponse struct {
 type TemplateSettingsResponse struct {
 	Enabled  bool   `json:"enabled"`
 	Template string `json:"template"`
+}
+
+// EmailTemplateSettingsResponse mirrors EmailTemplateSettings on the wire.
+// Subject and BodyHTML may be empty strings — empty means "use the BE
+// default", non-empty means "merchant overrode this".
+type EmailTemplateSettingsResponse struct {
+	Enabled  bool   `json:"enabled"`
+	Subject  string `json:"subject"`
+	BodyHTML string `json:"body_html"`
 }
 
 // GetSettings returns notification settings for a store.
@@ -80,9 +93,12 @@ func (h *Handler) GetSettings(c *fiber.Ctx) error {
 // UpdateSettingsRequest represents the request for updating notification settings.
 // NOTE: Triggers (when to send) are now in cart_settings, not here.
 type UpdateSettingsRequest struct {
-	CheckoutImmediate *UpdateTemplateSettingsRequest `json:"checkout_immediate"`
-	ItemAdded         *UpdateTemplateSettingsRequest `json:"item_added"`
-	CheckoutReminder  *UpdateTemplateSettingsRequest `json:"checkout_reminder"`
+	CheckoutImmediate *UpdateTemplateSettingsRequest      `json:"checkout_immediate"`
+	ItemAdded         *UpdateTemplateSettingsRequest      `json:"item_added"`
+	CheckoutReminder  *UpdateTemplateSettingsRequest      `json:"checkout_reminder"`
+	PaymentConfirmed  *UpdateEmailTemplateSettingsRequest `json:"payment_confirmed,omitempty"`
+	Shipped           *UpdateEmailTemplateSettingsRequest `json:"shipped,omitempty"`
+	Delivered         *UpdateEmailTemplateSettingsRequest `json:"delivered,omitempty"`
 }
 
 // UpdateTemplateSettingsRequest represents template settings in API requests.
@@ -90,6 +106,14 @@ type UpdateSettingsRequest struct {
 type UpdateTemplateSettingsRequest struct {
 	Enabled  bool   `json:"enabled"`
 	Template string `json:"template" validate:"required,min=1,max=1500"`
+}
+
+// UpdateEmailTemplateSettingsRequest is the API shape for the post-payment
+// email overrides. Empty strings are valid — they mean "fall back to default".
+type UpdateEmailTemplateSettingsRequest struct {
+	Enabled  bool   `json:"enabled"`
+	Subject  string `json:"subject" validate:"max=200"`
+	BodyHTML string `json:"body_html" validate:"max=20000"`
 }
 
 // UpdateSettings updates notification settings for a store.
@@ -232,6 +256,10 @@ func (h *Handler) GetAvailableVariables(c *fiber.Ctx) error {
 		{Name: "{loja}", Description: "Nome da loja", Example: sample.Loja},
 		{Name: "{expira_em}", Description: "Tempo até expiração", Example: sample.ExpiraEm},
 		{Name: "{live_titulo}", Description: "Título da live", Example: sample.LiveTitulo},
+		{Name: "{numero_pedido}", Description: "Número do pedido", Example: sample.NumeroPedido},
+		{Name: "{tracking_code}", Description: "Código de rastreio", Example: sample.TrackingCode},
+		{Name: "{transportadora}", Description: "Transportadora + serviço", Example: sample.Transportadora},
+		{Name: "{link_pedido}", Description: "Link para acompanhar pedido", Example: sample.LinkPedido},
 	}
 
 	return httpx.OK(c, GetAvailableVariablesResponse{Variables: variables})
@@ -263,7 +291,22 @@ func toSettingsResponse(s *Settings) GetSettingsResponse {
 		}
 	}
 
+	resp.PaymentConfirmed = toEmailResponse(s.PaymentConfirmed)
+	resp.Shipped = toEmailResponse(s.Shipped)
+	resp.Delivered = toEmailResponse(s.Delivered)
+
 	return resp
+}
+
+func toEmailResponse(e *EmailTemplateSettings) *EmailTemplateSettingsResponse {
+	if e == nil {
+		return nil
+	}
+	return &EmailTemplateSettingsResponse{
+		Enabled:  e.Enabled,
+		Subject:  e.Subject,
+		BodyHTML: e.BodyHTML,
+	}
 }
 
 func toSettingsFromRequest(req *UpdateSettingsRequest) Settings {
@@ -290,7 +333,22 @@ func toSettingsFromRequest(req *UpdateSettingsRequest) Settings {
 		}
 	}
 
+	settings.PaymentConfirmed = fromEmailRequest(req.PaymentConfirmed)
+	settings.Shipped = fromEmailRequest(req.Shipped)
+	settings.Delivered = fromEmailRequest(req.Delivered)
+
 	return settings
+}
+
+func fromEmailRequest(r *UpdateEmailTemplateSettingsRequest) *EmailTemplateSettings {
+	if r == nil {
+		return nil
+	}
+	return &EmailTemplateSettings{
+		Enabled:  r.Enabled,
+		Subject:  r.Subject,
+		BodyHTML: r.BodyHTML,
+	}
 }
 
 // =============================================================================
@@ -355,6 +413,46 @@ func (h *Handler) StartTestSetup(c *fiber.Ctx) error {
 		return httpx.ErrInternal("Erro ao iniciar configuração do destinatário")
 	}
 	return httpx.OK(c, toTestRecipientResponse(recipient))
+}
+
+// SendTestEmailRequest is the payload for POST /notifications/test/email.
+// recipient_email is the address to ship the test to (the FE auto-fills
+// this with the lojista's own Clerk email so it's a one-click flow). The
+// subject + body_html mirror the merchant editor's two fields.
+type SendTestEmailRequest struct {
+	Type           string `json:"type"`            // payment_confirmed | shipped | delivered
+	Subject        string `json:"subject"`
+	BodyHTML       string `json:"body_html"`
+	RecipientEmail string `json:"recipient_email"`
+}
+
+// SendTestEmail renders the merchant's draft template with sample variables
+// and dispatches it via Resend to the supplied recipient. Used by the
+// "Testar envio" button in the post-payment editor.
+func (h *Handler) SendTestEmail(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	var req SendTestEmailRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.ErrBadRequest("Corpo da requisição inválido")
+	}
+	if req.RecipientEmail == "" {
+		return httpx.ErrBadRequest("Email destinatário é obrigatório")
+	}
+	if req.Subject == "" && req.BodyHTML == "" {
+		return httpx.ErrBadRequest("Assunto ou corpo precisam estar preenchidos")
+	}
+
+	if err := h.service.SendTestEmail(c.Context(), storeID, req.Type, req.Subject, req.BodyHTML, req.RecipientEmail); err != nil {
+		h.logger.Warn("failed to send test email",
+			zap.String("store_id", storeID),
+			zap.String("to", req.RecipientEmail),
+			zap.String("type", req.Type),
+			zap.Error(err),
+		)
+		return httpx.ErrInternal("Não foi possível enviar o email de teste")
+	}
+	return httpx.OK(c, fiber.Map{"sent": true})
 }
 
 // SendTest dispatches a real Instagram DM rendered with sample data to the

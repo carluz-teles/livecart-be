@@ -11,17 +11,27 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/notification"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/email"
 )
 
 // Service orchestrates the post-checkout customer flow: token generation +
-// transactional emails. Today only "Pagamento confirmado" is wired; later
-// phases will add shipped/delivered.
+// transactional emails. Reads merchant-customizable templates from
+// notification.Service when configured and falls back to hardcoded defaults
+// when the merchant hasn't overridden them.
 type Service struct {
-	repo   *Repository
-	email  *email.Client
-	logger *zap.Logger
+	repo                *Repository
+	email               *email.Client
+	notificationService NotificationSettingsReader
+	logger              *zap.Logger
+}
+
+// NotificationSettingsReader is the slice of notification.Service this
+// package needs. Defined locally to avoid an import cycle and to keep the
+// dependency surface minimal.
+type NotificationSettingsReader interface {
+	GetSettings(ctx context.Context, storeID string) (*notification.Settings, error)
 }
 
 func NewService(repo *Repository, emailClient *email.Client, logger *zap.Logger) *Service {
@@ -30,6 +40,13 @@ func NewService(repo *Repository, emailClient *email.Client, logger *zap.Logger)
 		email:  emailClient,
 		logger: logger.Named("postcheckout"),
 	}
+}
+
+// SetNotificationService wires the per-store template overrides. When unset,
+// the service uses hardcoded defaults — handy in tests and for graceful
+// rollout (BE deploys before FE editor exists).
+func (s *Service) SetNotificationService(reader NotificationSettingsReader) {
+	s.notificationService = reader
 }
 
 // OnCartPaid is the hook called when a cart's payment_status flips to "paid".
@@ -95,6 +112,7 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 	}
 
 	input := buildEmailInput(snapshot, token)
+	s.applyPaidOverride(ctx, snapshot, &input)
 	if err := s.email.SendOrderPaid(ctx, input); err != nil {
 		s.logger.Warn("failed to send order paid email",
 			zap.String("cart_id", cartID),
@@ -169,13 +187,15 @@ func (s *Service) OnDelivered(ctx context.Context, cartID, source string) {
 		logoURL = snapshot.Store.LogoUrl.String
 	}
 
-	if err := s.email.SendOrderDelivered(ctx, email.OrderDeliveredEmailInput{
+	deliveredInput := email.OrderDeliveredEmailInput{
 		StoreName:    snapshot.Store.Name,
 		StoreLogoURL: logoURL,
 		ToEmail:      customerEmail,
 		ToName:       customerName,
 		OrderShortID: fmt.Sprintf("%d", snapshot.Cart.ShortID),
-	}); err != nil {
+	}
+	s.applyDeliveredOverride(ctx, snapshot, &deliveredInput)
+	if err := s.email.SendOrderDelivered(ctx, deliveredInput); err != nil {
 		s.logger.Warn("failed to send order delivered email",
 			zap.String("cart_id", cartID),
 			zap.String("to", customerEmail),
@@ -238,6 +258,7 @@ func (s *Service) OnShipmentPosted(ctx context.Context, cartID, trackingCode str
 	}
 
 	input := buildShippedEmailInput(snapshot, trackingCode)
+	s.applyShippedOverride(ctx, snapshot, &input, trackingCode)
 	if err := s.email.SendOrderShipped(ctx, input); err != nil {
 		s.logger.Warn("failed to send order shipped email",
 			zap.String("cart_id", cartID),
@@ -296,6 +317,105 @@ func buildEmailInput(s *CartSnapshot, trackingToken string) email.OrderPaidEmail
 		ShippingLine:   formatShippingLine(addr),
 		CarrierLine:    carrierLine,
 		TrackingURL:    trackingURL,
+	}
+}
+
+// loadEmailSettings returns the merchant's notification.Settings, or nil when
+// the feature isn't wired (e.g. tests). Errors are swallowed because every
+// call site is in a best-effort flow.
+func (s *Service) loadEmailSettings(ctx context.Context, storeID string) *notification.Settings {
+	if s.notificationService == nil {
+		return nil
+	}
+	settings, err := s.notificationService.GetSettings(ctx, storeID)
+	if err != nil {
+		s.logger.Debug("notification settings load failed",
+			zap.String("store_id", storeID),
+			zap.Error(err),
+		)
+		return nil
+	}
+	return settings
+}
+
+// vars assembles the substitution map that {variable} placeholders in
+// merchant-customized templates expand against. Same set the IG DM cart
+// templates use, plus the post-payment-only ones.
+func vars(s *CartSnapshot, trackingCode, trackingURL string) notification.TemplateVariables {
+	carrier := ""
+	if s.Cart.ShippingServiceName.Valid && s.Cart.ShippingServiceName.String != "" {
+		carrier = s.Cart.ShippingServiceName.String
+		if s.Cart.ShippingCarrier.Valid && s.Cart.ShippingCarrier.String != "" {
+			carrier = fmt.Sprintf("%s · %s", s.Cart.ShippingServiceName.String, s.Cart.ShippingCarrier.String)
+		}
+	}
+
+	var totalCents int64
+	for _, it := range s.Items {
+		if !it.Quantity.Valid || !it.UnitPrice.Valid {
+			continue
+		}
+		totalCents += int64(it.Quantity.Int32) * it.UnitPrice.Int64
+	}
+	if s.Cart.ShippingCostCents.Valid {
+		totalCents += s.Cart.ShippingCostCents.Int64
+	}
+	totalCents -= s.Cart.CouponDiscountCents
+	if totalCents < 0 {
+		totalCents = 0
+	}
+
+	return notification.TemplateVariables{
+		Handle:         s.Cart.PlatformHandle,
+		Loja:           s.Store.Name,
+		Total:          fmt.Sprintf("R$ %d,%02d", totalCents/100, totalCents%100),
+		TotalCents:     totalCents,
+		NumeroPedido:   fmt.Sprintf("%d", s.Cart.ShortID),
+		TrackingCode:   trackingCode,
+		Transportadora: carrier,
+		LinkPedido:     trackingURL,
+	}
+}
+
+func (s *Service) applyPaidOverride(ctx context.Context, snap *CartSnapshot, input *email.OrderPaidEmailInput) {
+	settings := s.loadEmailSettings(ctx, snap.Store.ID.String())
+	if settings == nil || settings.PaymentConfirmed == nil || !settings.PaymentConfirmed.Enabled {
+		return
+	}
+	v := vars(snap, "", input.TrackingURL)
+	if settings.PaymentConfirmed.Subject != "" {
+		input.OverrideSubject = notification.RenderTemplate(settings.PaymentConfirmed.Subject, v)
+	}
+	if settings.PaymentConfirmed.BodyHTML != "" {
+		input.OverrideBodyHTML = notification.RenderTemplate(settings.PaymentConfirmed.BodyHTML, v)
+	}
+}
+
+func (s *Service) applyShippedOverride(ctx context.Context, snap *CartSnapshot, input *email.OrderShippedEmailInput, trackingCode string) {
+	settings := s.loadEmailSettings(ctx, snap.Store.ID.String())
+	if settings == nil || settings.Shipped == nil || !settings.Shipped.Enabled {
+		return
+	}
+	v := vars(snap, trackingCode, input.TrackingURL)
+	if settings.Shipped.Subject != "" {
+		input.OverrideSubject = notification.RenderTemplate(settings.Shipped.Subject, v)
+	}
+	if settings.Shipped.BodyHTML != "" {
+		input.OverrideBodyHTML = notification.RenderTemplate(settings.Shipped.BodyHTML, v)
+	}
+}
+
+func (s *Service) applyDeliveredOverride(ctx context.Context, snap *CartSnapshot, input *email.OrderDeliveredEmailInput) {
+	settings := s.loadEmailSettings(ctx, snap.Store.ID.String())
+	if settings == nil || settings.Delivered == nil || !settings.Delivered.Enabled {
+		return
+	}
+	v := vars(snap, "", "")
+	if settings.Delivered.Subject != "" {
+		input.OverrideSubject = notification.RenderTemplate(settings.Delivered.Subject, v)
+	}
+	if settings.Delivered.BodyHTML != "" {
+		input.OverrideBodyHTML = notification.RenderTemplate(settings.Delivered.BodyHTML, v)
 	}
 }
 

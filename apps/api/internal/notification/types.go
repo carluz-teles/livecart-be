@@ -36,10 +36,19 @@ const (
 // Settings represents the notification settings for a store.
 // NOTE: Triggers (when to send) are now in CartMessageSettings.
 // This struct only contains templates (what to send).
+//
+// Cart-flow notifications (CheckoutImmediate, ItemAdded, CheckoutReminder)
+// go through Instagram DM. Post-payment notifications (PaymentConfirmed,
+// Shipped, Delivered) go through Email — different channel, different
+// shape (subject + body_html instead of plain template). The two surfaces
+// coexist on the same JSONB column for now.
 type Settings struct {
-	CheckoutImmediate *TemplateSettings `json:"checkout_immediate"`
-	ItemAdded         *TemplateSettings `json:"item_added"`
-	CheckoutReminder  *TemplateSettings `json:"checkout_reminder"`
+	CheckoutImmediate *TemplateSettings      `json:"checkout_immediate"`
+	ItemAdded         *TemplateSettings      `json:"item_added"`
+	CheckoutReminder  *TemplateSettings      `json:"checkout_reminder"`
+	PaymentConfirmed  *EmailTemplateSettings `json:"payment_confirmed,omitempty"`
+	Shipped           *EmailTemplateSettings `json:"shipped,omitempty"`
+	Delivered         *EmailTemplateSettings `json:"delivered,omitempty"`
 }
 
 // TemplateSettings represents settings for a specific notification type.
@@ -47,6 +56,16 @@ type Settings struct {
 type TemplateSettings struct {
 	Enabled  bool   `json:"enabled"`
 	Template string `json:"template"`
+}
+
+// EmailTemplateSettings is the shape of post-payment email overrides.
+// Subject and BodyHTML are merchant-customizable strings with the same
+// {variable} substitution as the IG DM templates. When fields are empty,
+// the postcheckout layer uses its hardcoded defaults.
+type EmailTemplateSettings struct {
+	Enabled  bool   `json:"enabled"`
+	Subject  string `json:"subject"`
+	BodyHTML string `json:"body_html"`
 }
 
 // CartMessageSettings represents when/how to send automatic messages.
@@ -73,6 +92,15 @@ func DefaultSettings() Settings {
 			Enabled:  true,
 			Template: "Oi {handle}! 🛒\n\nSeu carrinho com {total_itens} itens está esperando!\n\nTotal: {total}\n\nFinalize aqui: {link}\n\n⏰ Válido por {expira_em}",
 		},
+		PaymentConfirmed: &EmailTemplateSettings{
+			Enabled: true,
+		},
+		Shipped: &EmailTemplateSettings{
+			Enabled: true,
+		},
+		Delivered: &EmailTemplateSettings{
+			Enabled: true,
+		},
 	}
 }
 
@@ -87,17 +115,24 @@ func DefaultCartMessageSettings() CartMessageSettings {
 
 // TemplateVariables contains all available variables for template rendering.
 type TemplateVariables struct {
-	Handle       string // @username
-	Produto      string // Product name
-	Keyword      string // Product keyword
-	Quantidade   int    // Quantity of last item
-	TotalItens   int    // Total items in cart
-	Total        string // Formatted total (e.g., "R$ 199,90")
-	TotalCents   int64  // Total in cents
-	Link         string // Checkout URL
-	Loja         string // Store name
-	ExpiraEm     string // Expiry time (e.g., "48 horas")
-	LiveTitulo   string // Event title
+	Handle     string // @username
+	Produto    string // Product name
+	Keyword    string // Product keyword
+	Quantidade int    // Quantity of last item
+	TotalItens int    // Total items in cart
+	Total      string // Formatted total (e.g., "R$ 199,90")
+	TotalCents int64  // Total in cents
+	Link       string // Checkout URL
+	Loja       string // Store name
+	ExpiraEm   string // Expiry time (e.g., "48 horas")
+	LiveTitulo string // Event title
+
+	// Post-payment variables. Empty for cart-flow notifications, populated
+	// by the postcheckout package when sending receipt/shipped/delivered.
+	NumeroPedido  string // Order short_id, formatted as "1234"
+	TrackingCode  string // Carrier tracking code, when known
+	Transportadora string // Carrier name + service ("Sedex via Correios")
+	LinkPedido    string // Public order page URL with tracking_token
 }
 
 // LogEntry represents a notification log entry.

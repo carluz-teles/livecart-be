@@ -21,6 +21,9 @@ type OrderDeliveredEmailInput struct {
 	OrderShortID string
 
 	StoreURL string // optional — link back to the store homepage
+
+	OverrideSubject  string
+	OverrideBodyHTML string
 }
 
 func (c *Client) SendOrderDelivered(ctx context.Context, input OrderDeliveredEmailInput) error {
@@ -32,9 +35,22 @@ func (c *Client) SendOrderDelivered(ctx context.Context, input OrderDeliveredEma
 		return nil
 	}
 
-	subject := fmt.Sprintf("Seu pedido #%s chegou · %s", input.OrderShortID, input.StoreName)
+	subject := input.OverrideSubject
+	if subject == "" {
+		subject = fmt.Sprintf("Seu pedido #%s chegou · %s", input.OrderShortID, input.StoreName)
+	}
 
-	htmlContent, err := c.renderOrderDeliveredHTML(input)
+	var htmlContent string
+	var err error
+	if input.OverrideBodyHTML != "" {
+		htmlContent, err = RenderOverrideShell(ShellInput{
+			StoreName:    input.StoreName,
+			StoreLogoURL: input.StoreLogoURL,
+			BodyHTML:     template.HTML(input.OverrideBodyHTML),
+		})
+	} else {
+		htmlContent, err = c.renderOrderDeliveredHTML(input)
+	}
 	if err != nil {
 		return fmt.Errorf("rendering order delivered html: %w", err)
 	}

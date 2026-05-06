@@ -363,6 +363,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// Create notification service and wire into integration service
 			// (integrationSvc implements notification.DMSender via SendInstagramDM)
 			notificationSvc = notification.NewService(queries, integrationSvc, log)
+			notificationSvc.SetEmailSender(emailClient)
 			integrationSvc.SetNotificationService(notificationSvc)
 
 			// Customer-facing post-payment flow (tracking token + receipt
@@ -373,6 +374,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				emailClient,
 				log,
 			)
+			postCheckoutSvc.SetNotificationService(notificationSvc)
 			integrationSvc.SetPostCheckoutHook(postCheckoutSvc)
 
 			// Start background token refresh worker

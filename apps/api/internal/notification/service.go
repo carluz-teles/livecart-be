@@ -20,9 +20,10 @@ type DMSender interface {
 
 // Service handles notification logic including templates, cooldowns, and logging.
 type Service struct {
-	queries  *sqlc.Queries
-	dmSender DMSender
-	logger   *zap.Logger
+	queries     *sqlc.Queries
+	dmSender    DMSender
+	emailSender EmailSender
+	logger      *zap.Logger
 }
 
 // NewService creates a new notification service.
@@ -232,6 +233,84 @@ func (s *Service) ShouldNotify(ctx context.Context, storeID string, notifType No
 
 	default:
 		return false, nil
+	}
+}
+
+// SendTestEmail renders the merchant draft (subject + body_html) with sample
+// variables and dispatches it through the Resend client. Loads the store row
+// for branding (name, logo) so the email looks correct end-to-end. Falls
+// back to the default subject when the merchant left it blank.
+func (s *Service) SendTestEmail(ctx context.Context, storeID, notifType, subject, bodyHTML, recipientEmail string) error {
+	uid, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+
+	store, err := s.queries.GetStoreByID(ctx, uid)
+	if err != nil {
+		return fmt.Errorf("loading store: %w", err)
+	}
+
+	logoURL := ""
+	if store.LogoUrl.Valid {
+		logoURL = store.LogoUrl.String
+	}
+
+	v := SampleVariables()
+	renderedSubject := subject
+	if renderedSubject == "" {
+		renderedSubject = defaultSubjectFor(notifType, v)
+	} else {
+		renderedSubject = RenderTemplate(renderedSubject, v)
+	}
+	renderedBody := bodyHTML
+	if renderedBody != "" {
+		renderedBody = RenderTemplate(renderedBody, v)
+	}
+
+	return s.emailSender.SendTestEmail(ctx, EmailTestSendInput{
+		StoreName:    store.Name,
+		StoreLogoURL: logoURL,
+		ToEmail:      recipientEmail,
+		Subject:      renderedSubject,
+		BodyHTML:     renderedBody,
+	})
+}
+
+// EmailSender abstracts the email client so notification.Service doesn't
+// drag the lib/email package into its import graph during tests. The HTTP
+// server wires the concrete *email.Client at boot via SetEmailSender.
+type EmailSender interface {
+	SendTestEmail(ctx context.Context, input EmailTestSendInput) error
+}
+
+// EmailTestSendInput is the slim payload the test endpoint hands to the email
+// client. Body is empty when the merchant only customized the subject — the
+// email layer falls back to a friendly placeholder body in that case.
+type EmailTestSendInput struct {
+	StoreName    string
+	StoreLogoURL string
+	ToEmail      string
+	Subject      string
+	BodyHTML     string
+}
+
+// SetEmailSender wires the concrete email client. Optional — when unset,
+// SendTestEmail returns a clear error instead of crashing.
+func (s *Service) SetEmailSender(sender EmailSender) {
+	s.emailSender = sender
+}
+
+func defaultSubjectFor(notifType string, vars TemplateVariables) string {
+	switch notifType {
+	case "payment_confirmed":
+		return fmt.Sprintf("Pedido #%s confirmado · %s", vars.NumeroPedido, vars.Loja)
+	case "shipped":
+		return fmt.Sprintf("Pedido #%s a caminho · %s", vars.NumeroPedido, vars.Loja)
+	case "delivered":
+		return fmt.Sprintf("Seu pedido #%s chegou · %s", vars.NumeroPedido, vars.Loja)
+	default:
+		return fmt.Sprintf("Teste · %s", vars.Loja)
 	}
 }
 
