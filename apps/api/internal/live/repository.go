@@ -236,6 +236,50 @@ func (r *Repository) CreateEvent(ctx context.Context, params CreateEventParams) 
 	return toEventRow(row), nil
 }
 
+// GetPixDiscountPercent returns the pix_discount_percent column for an event.
+// Loaded via raw SQL because the field is not yet wired through sqlc.
+func (r *Repository) GetPixDiscountPercent(ctx context.Context, eventID string) (int, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return 0, err
+	}
+	var pct int32
+	err = r.pool.QueryRow(ctx, `SELECT pix_discount_percent FROM live_events WHERE id = $1`, uid).Scan(&pct)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, httpx.ErrNotFound("live event not found")
+		}
+		return 0, fmt.Errorf("getting pix_discount_percent: %w", err)
+	}
+	return int(pct), nil
+}
+
+// SetPixDiscountPercent updates the pix_discount_percent column for an event.
+// Caller validates the percent range (0-100); the table CHECK constraint
+// enforces it again at the database boundary.
+func (r *Repository) SetPixDiscountPercent(ctx context.Context, eventID, storeID string, percent int) error {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE live_events
+		SET pix_discount_percent = $3, updated_at = now()
+		WHERE id = $1 AND store_id = $2
+	`, uid, storeUID, int32(percent))
+	if err != nil {
+		return fmt.Errorf("setting pix_discount_percent: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return httpx.ErrNotFound("live event not found")
+	}
+	return nil
+}
+
 func (r *Repository) GetEventByID(ctx context.Context, id, storeID string) (*EventRow, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
@@ -956,6 +1000,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 		SELECT
 			e.id, e.store_id, e.title, e.type, e.status, e.total_orders, e.created_at, e.updated_at,
 			e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end,
+			COALESCE(e.pix_discount_percent, 0),
 			s.started_at, s.ended_at, COALESCE(s.total_comments, 0),
 			COALESCE(p.platform, ''), COALESCE(p.platform_live_id, '')
 		FROM live_events e
@@ -993,6 +1038,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 		var startedAt, endedAt pgtype.Timestamptz
 		var cartExpirationMinutes, cartMaxQuantityPerItem pgtype.Int4
 		var autoSendCheckoutLinks pgtype.Bool
+		var pixDiscountPercent int32
 
 		if err := rows.Scan(
 			&live.ID,
@@ -1007,6 +1053,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 			&cartExpirationMinutes,
 			&cartMaxQuantityPerItem,
 			&autoSendCheckoutLinks,
+			&pixDiscountPercent,
 			&startedAt,
 			&endedAt,
 			&live.TotalComments,
@@ -1015,6 +1062,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 		); err != nil {
 			return nil, 0, fmt.Errorf("scanning live event: %w", err)
 		}
+		live.PixDiscountPercent = int(pixDiscountPercent)
 
 		if title.Valid {
 			live.Title = title.String

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/lib/httpx"
@@ -36,6 +37,29 @@ func (r *Repository) GetCartByToken(ctx context.Context, token string) (*CartRow
 	}
 
 	return r.toCartRow(row), nil
+}
+
+// LoadEventCheckoutFlags reads the event-level columns that are not yet
+// wired through sqlc — currently free_shipping and pix_discount_percent.
+// Both are zero-valued when the event row vanishes; callers should treat a
+// missing event as a non-fatal hydration miss.
+func (r *Repository) LoadEventCheckoutFlags(ctx context.Context, pool *pgxpool.Pool, eventID string) (freeShipping bool, pixDiscountPercent int, err error) {
+	uid, err := uuid.Parse(eventID)
+	if err != nil {
+		return false, 0, httpx.ErrBadRequest("invalid event ID")
+	}
+	var pct int32
+	err = pool.QueryRow(ctx, `
+		SELECT COALESCE(free_shipping, false), COALESCE(pix_discount_percent, 0)
+		FROM live_events WHERE id = $1
+	`, pgtype.UUID{Bytes: uid, Valid: true}).Scan(&freeShipping, &pct)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, 0, nil
+		}
+		return false, 0, fmt.Errorf("loading event checkout flags: %w", err)
+	}
+	return freeShipping, int(pct), nil
 }
 
 // ListCartItems retrieves all items for a cart.

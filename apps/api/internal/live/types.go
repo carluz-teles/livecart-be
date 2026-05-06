@@ -37,6 +37,7 @@ type EventResponse struct {
 	CartExpirationMinutes  *int              `json:"cartExpirationMinutes"`
 	CartMaxQuantityPerItem *int              `json:"cartMaxQuantityPerItem"`
 	SendOnLiveEnd          *bool             `json:"sendOnLiveEnd"`
+	PixDiscountPercent     int               `json:"pixDiscountPercent"`
 	// Scheduling
 	ScheduledAt *time.Time `json:"scheduledAt"`
 	Description *string    `json:"description"`
@@ -74,6 +75,7 @@ type CreateEventInput struct {
 	CartExpirationMinutes  *int
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
+	PixDiscountPercent     *int
 	// Scheduling
 	ScheduledAt *time.Time
 	Description *string
@@ -110,6 +112,7 @@ type EventOutput struct {
 	CartExpirationMinutes   *int
 	CartMaxQuantityPerItem  *int
 	SendOnLiveEnd           *bool
+	PixDiscountPercent      int
 	CurrentActiveProductID  *string
 	ProcessingPaused        bool
 	// Scheduling
@@ -153,6 +156,7 @@ type CreateEventParams struct {
 	CartExpirationMinutes  *int
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
+	PixDiscountPercent     int
 	// Scheduling
 	ScheduledAt *time.Time
 	Description *string
@@ -169,6 +173,7 @@ type EventRow struct {
 	CartExpirationMinutes   *int
 	CartMaxQuantityPerItem  *int
 	SendOnLiveEnd           *bool
+	PixDiscountPercent      int
 	CurrentActiveProductID  *string
 	ProcessingPaused        bool
 	// Scheduling
@@ -347,6 +352,8 @@ type CreateLiveRequest struct {
 	CartExpirationMinutes  *int  `json:"cartExpirationMinutes" validate:"omitempty,min=5,max=1440"`
 	CartMaxQuantityPerItem *int  `json:"cartMaxQuantityPerItem" validate:"omitempty,min=1,max=100"`
 	SendOnLiveEnd          *bool `json:"sendOnLiveEnd"`
+	// PixDiscountPercent (0-100). 0 disables the feature.
+	PixDiscountPercent *int `json:"pixDiscountPercent" validate:"omitempty,min=0,max=100"`
 }
 
 type CreateLiveResponse struct {
@@ -360,6 +367,8 @@ type CreateLiveResponse struct {
 
 type UpdateLiveRequest struct {
 	Title string `json:"title" validate:"required,min=1,max=200"`
+	// Optional fields. When omitted, the existing value is preserved.
+	PixDiscountPercent *int `json:"pixDiscountPercent" validate:"omitempty,min=0,max=100"`
 }
 
 type LiveResponse struct {
@@ -377,6 +386,7 @@ type LiveResponse struct {
 	CartExpirationMinutes  *int       `json:"cartExpirationMinutes"`
 	CartMaxQuantityPerItem *int       `json:"cartMaxQuantityPerItem"`
 	SendOnLiveEnd          *bool      `json:"sendOnLiveEnd"`
+	PixDiscountPercent     int        `json:"pixDiscountPercent"`
 	// Scheduling
 	ScheduledAt *time.Time `json:"scheduledAt"`
 	Description *string    `json:"description"`
@@ -420,6 +430,7 @@ type CreateLiveInput struct {
 	CartExpirationMinutes  *int
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
+	PixDiscountPercent     *int
 	// Scheduling
 	ScheduledAt *time.Time
 	Description *string
@@ -435,9 +446,10 @@ type CreateLiveOutput struct {
 }
 
 type UpdateLiveInput struct {
-	ID      string
-	StoreID string
-	Title   string
+	ID                 string
+	StoreID            string
+	Title              string
+	PixDiscountPercent *int
 }
 
 type EndLiveInput struct {
@@ -482,6 +494,7 @@ type LiveOutput struct {
 	CartExpirationMinutes  *int
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
+	PixDiscountPercent     int
 	// Scheduling
 	ScheduledAt *time.Time
 	Description *string

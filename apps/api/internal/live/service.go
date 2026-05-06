@@ -118,6 +118,17 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 			zap.String("platform_live_id", *input.PlatformLiveID),
 		)
 
+		// Persist the optional pix discount as a follow-up update — the column
+		// is not yet wired into the sqlc-generated INSERT.
+		if input.PixDiscountPercent != nil && *input.PixDiscountPercent > 0 {
+			if err := s.repo.SetPixDiscountPercent(ctx, event.ID, input.StoreID, *input.PixDiscountPercent); err != nil {
+				s.logger.Warn("failed to set pix_discount_percent on create",
+					zap.String("event_id", event.ID),
+					zap.Error(err),
+				)
+			}
+		}
+
 		return CreateLiveOutput{
 			ID:        event.ID,
 			Title:     event.Title,
@@ -145,6 +156,15 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		return CreateLiveOutput{}, err
 	}
 
+	if input.PixDiscountPercent != nil && *input.PixDiscountPercent > 0 {
+		if err := s.repo.SetPixDiscountPercent(ctx, event.ID, input.StoreID, *input.PixDiscountPercent); err != nil {
+			s.logger.Warn("failed to set pix_discount_percent on create",
+				zap.String("event_id", event.ID),
+				zap.Error(err),
+			)
+		}
+	}
+
 	s.logger.Info("live created without session",
 		zap.String("event_id", event.ID),
 		zap.String("type", eventType),
@@ -164,6 +184,11 @@ func (s *Service) GetByID(ctx context.Context, id, storeID string) (LiveOutput, 
 	event, err := s.repo.GetEventByID(ctx, id, storeID)
 	if err != nil {
 		return LiveOutput{}, err
+	}
+
+	// Hydrate the pix-discount column (not yet wired through sqlc).
+	if pct, err := s.repo.GetPixDiscountPercent(ctx, event.ID); err == nil {
+		event.PixDiscountPercent = pct
 	}
 
 	// Get sessions for this event
@@ -208,7 +233,8 @@ func (s *Service) GetByID(ctx context.Context, id, storeID string) (LiveOutput, 
 		CloseCartOnEventEnd:    event.CloseCartOnEventEnd,
 		CartExpirationMinutes:  event.CartExpirationMinutes,
 		CartMaxQuantityPerItem: event.CartMaxQuantityPerItem,
-		SendOnLiveEnd:  event.SendOnLiveEnd,
+		SendOnLiveEnd:          event.SendOnLiveEnd,
+		PixDiscountPercent:     event.PixDiscountPercent,
 		CreatedAt:              event.CreatedAt,
 		UpdatedAt:              event.UpdatedAt,
 	}, nil
@@ -219,6 +245,10 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 	event, err := s.repo.GetEventByID(ctx, id, storeID)
 	if err != nil {
 		return EventOutput{}, err
+	}
+
+	if pct, err := s.repo.GetPixDiscountPercent(ctx, event.ID); err == nil {
+		event.PixDiscountPercent = pct
 	}
 
 	// Get sessions for this event
@@ -323,6 +353,7 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		CartExpirationMinutes:  event.CartExpirationMinutes,
 		CartMaxQuantityPerItem: event.CartMaxQuantityPerItem,
 		SendOnLiveEnd:          event.SendOnLiveEnd,
+		PixDiscountPercent:     event.PixDiscountPercent,
 		ScheduledAt:            event.ScheduledAt,
 		Description:            event.Description,
 		ProductCount:           productCount,
@@ -378,6 +409,21 @@ func (s *Service) Update(ctx context.Context, input UpdateLiveInput) (LiveOutput
 	event, err := s.repo.UpdateEventTitle(ctx, input.ID, input.Title)
 	if err != nil {
 		return LiveOutput{}, err
+	}
+
+	// Optional pix-discount update — clamp range defensively even though the
+	// handler/validator already gates it.
+	if input.PixDiscountPercent != nil {
+		pct := *input.PixDiscountPercent
+		if pct < 0 {
+			pct = 0
+		}
+		if pct > 100 {
+			pct = 100
+		}
+		if err := s.repo.SetPixDiscountPercent(ctx, event.ID, input.StoreID, pct); err != nil {
+			return LiveOutput{}, err
+		}
 	}
 
 	// Get full live output

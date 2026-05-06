@@ -424,6 +424,19 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 		}
 	}
 
+	// Pix discount preview — applied off (subtotal − couponDiscount). The
+	// `total` field above stays unchanged because the discount only kicks
+	// in when the buyer actually picks Pix at checkout. Service.GeneratePix
+	// applies the same percentage on the gateway-charged amount.
+	summary.PixDiscountPercent = output.Cart.EventPixDiscountPercent
+	if summary.PixDiscountPercent > 0 {
+		base := subtotal - output.Cart.CouponDiscountCents
+		if base < 0 {
+			base = 0
+		}
+		summary.PixDiscountCents = base * int64(summary.PixDiscountPercent) / 100
+	}
+
 	var appliedCoupon *AppliedCoupon
 	if output.Cart.CouponCode != nil {
 		appliedCoupon = &AppliedCoupon{
@@ -449,8 +462,10 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 		PaidAt:             output.Cart.PaidAt,
 		CreatedAt:          output.Cart.CreatedAt,
 		Event: CartEventInfo{
-			ID:    output.Cart.EventID,
-			Title: output.Cart.EventTitle,
+			ID:                 output.Cart.EventID,
+			Title:              output.Cart.EventTitle,
+			PixDiscountPercent: output.Cart.EventPixDiscountPercent,
+			FreeShipping:       output.Cart.EventFreeShipping,
 		},
 		Store: CartStoreInfo{
 			ID:      output.Cart.StoreID,

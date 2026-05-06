@@ -136,6 +136,18 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 		}
 	}
 
+	// Hydrate the event-level checkout flags (free_shipping + pix_discount_percent).
+	// These columns are not yet wired through sqlc, so we read them via raw SQL.
+	if freeShipping, pixPct, err := s.repo.LoadEventCheckoutFlags(ctx, s.pool, cart.EventID); err == nil {
+		cart.EventFreeShipping = freeShipping
+		cart.EventPixDiscountPercent = pixPct
+	} else {
+		s.logger.Warn("failed to load event checkout flags",
+			zap.String("event_id", cart.EventID),
+			zap.Error(err),
+		)
+	}
+
 	// Convert to output
 	output := &GetCartForCheckoutOutput{
 		Cart: CartDetails{
@@ -152,8 +164,9 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 			PaidAt:             cart.PaidAt,
 			CreatedAt:          cart.CreatedAt,
 			ExpiresAt:          cart.ExpiresAt,
-			EventTitle:         cart.EventTitle,
-			EventFreeShipping:  cart.EventFreeShipping,
+			EventTitle:              cart.EventTitle,
+			EventFreeShipping:       cart.EventFreeShipping,
+			EventPixDiscountPercent: cart.EventPixDiscountPercent,
 			StoreID:            cart.StoreID,
 			StoreName:          cart.StoreName,
 			StoreLogoURL:       cart.StoreLogoURL,
@@ -711,10 +724,37 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	}
 
 	// Add selected shipping cost to the total charged at the gateway.
+	shippingPart := int64(0)
 	if shippingSel, _ := s.repo.ReadCartShipping(ctx, s.pool, cart.ID); shippingSel != nil {
+		shippingPart = shippingSel.CostCents
 		totalAmount += shippingSel.CostCents
 	}
 	totalAmount = applyCouponDiscount(totalAmount, cart.CouponDiscountCents)
+
+	// Apply the event-level Pix discount on the (subtotal − coupon) portion.
+	// The free Pix flow always reaches here, so this is the single point that
+	// makes the gateway charge the discounted amount.
+	if cart.EventPixDiscountPercent == 0 {
+		if _, pct, err := s.repo.LoadEventCheckoutFlags(ctx, s.pool, cart.EventID); err == nil {
+			cart.EventPixDiscountPercent = pct
+		}
+	}
+	if cart.EventPixDiscountPercent > 0 {
+		base := totalAmount - shippingPart
+		if base < 0 {
+			base = 0
+		}
+		pixDiscountCents := base * int64(cart.EventPixDiscountPercent) / 100
+		totalAmount -= pixDiscountCents
+		if totalAmount < 0 {
+			totalAmount = 0
+		}
+		s.logger.Info("pix discount applied",
+			zap.String("cart_id", cart.ID),
+			zap.Int("percent", cart.EventPixDiscountPercent),
+			zap.Int64("discount_cents", pixDiscountCents),
+		)
+	}
 
 	// Get payment integration
 	paymentIntegration, err := s.repo.GetPaymentIntegration(ctx, cart.StoreID)

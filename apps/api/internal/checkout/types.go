@@ -92,6 +92,14 @@ type CheckoutPaymentInfo struct {
 type CartEventInfo struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
+	// PixDiscountPercent is the configured Pix discount for the event (0-100).
+	// When > 0 the FE shows a discount preview when Pix is selected and the
+	// BE deducts the matching amount when the Pix payment is generated.
+	PixDiscountPercent int `json:"pixDiscountPercent"`
+	// FreeShipping mirrors live_events.free_shipping so the FE can render the
+	// "frete grátis pelo evento" banner and the BE charges R$0 on shipping
+	// even when the gateway returns a positive quote.
+	FreeShipping bool `json:"freeShipping"`
 }
 
 // CartStoreInfo contains store info for the checkout page
@@ -126,6 +134,15 @@ type CartSummary struct {
 	// reflects the subtraction; we expose the absolute discount so the FE
 	// can render the "Cupom CODE −R$ X,XX" line in the totals breakdown.
 	CouponDiscount   int64 `json:"couponDiscount"`
+	// PixDiscountPercent is the configured event-level Pix discount (0-100).
+	// 0 disables the feature. Computed off (subtotal - couponDiscount) at
+	// payment time when the buyer chooses Pix.
+	PixDiscountPercent int   `json:"pixDiscountPercent"`
+	// PixDiscountCents is the absolute discount that *would* apply if the
+	// buyer pays with Pix — exposed so the FE can preview the line in the
+	// checkout summary. The cart `total` field below does NOT subtract it
+	// (the discount is conditional on the chosen payment method).
+	PixDiscountCents int64 `json:"pixDiscountCents"`
 	Total            int64 `json:"total"`
 	TotalItems       int   `json:"totalItems"`
 	HasShippingQuote bool  `json:"hasShippingQuote"`
@@ -291,8 +308,9 @@ type CartDetails struct {
 	PaidAt              *time.Time
 	CreatedAt           time.Time
 	ExpiresAt           *time.Time
-	EventTitle          string
-	EventFreeShipping   bool
+	EventTitle              string
+	EventFreeShipping       bool
+	EventPixDiscountPercent int
 	StoreID             string
 	StoreName           string
 	StoreLogoURL        *string
@@ -545,8 +563,9 @@ type CartRow struct {
 	PaidAt             *time.Time
 	CreatedAt          time.Time
 	ExpiresAt          *time.Time
-	EventTitle         string
-	EventFreeShipping  bool
+	EventTitle              string
+	EventFreeShipping       bool
+	EventPixDiscountPercent int
 	StoreID            string
 	StoreName          string
 	StoreLogoURL       *string

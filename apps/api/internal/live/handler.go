@@ -106,6 +106,7 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		CartExpirationMinutes:  req.CartExpirationMinutes,
 		CartMaxQuantityPerItem: req.CartMaxQuantityPerItem,
 		SendOnLiveEnd:          req.SendOnLiveEnd,
+		PixDiscountPercent:     req.PixDiscountPercent,
 		ScheduledAt:            scheduledAt,
 		Description:            req.Description,
 	})
@@ -243,9 +244,10 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 	}
 
 	output, err := h.service.Update(c.Context(), UpdateLiveInput{
-		StoreID: storeID,
-		ID:      id,
-		Title:   req.Title,
+		StoreID:            storeID,
+		ID:                 id,
+		Title:              req.Title,
+		PixDiscountPercent: req.PixDiscountPercent,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -593,6 +595,7 @@ func toLiveResponse(o LiveOutput) LiveResponse {
 		CartExpirationMinutes:  o.CartExpirationMinutes,
 		CartMaxQuantityPerItem: o.CartMaxQuantityPerItem,
 		SendOnLiveEnd:          o.SendOnLiveEnd,
+		PixDiscountPercent:     o.PixDiscountPercent,
 		ScheduledAt:            o.ScheduledAt,
 		Description:            o.Description,
 		ProductCount:           o.ProductCount,
@@ -651,6 +654,7 @@ func toEventResponse(o EventOutput) EventResponse {
 		CartExpirationMinutes:  o.CartExpirationMinutes,
 		CartMaxQuantityPerItem: o.CartMaxQuantityPerItem,
 		SendOnLiveEnd:          o.SendOnLiveEnd,
+		PixDiscountPercent:     o.PixDiscountPercent,
 		ScheduledAt:            o.ScheduledAt,
 		Description:            o.Description,
 		ProductCount:           o.ProductCount,
