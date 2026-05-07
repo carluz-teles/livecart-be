@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -1526,6 +1527,49 @@ func (s *Service) ConnectPagarme(ctx context.Context, input ConnectPagarmeInput)
 		return nil, err
 	}
 	return s.toCreateOutput(row), nil
+}
+
+// ValidatePagarmeWebhookAuth reads the integration's stored webhook
+// username/password (set at connect time, optional) and validates an
+// inbound `Authorization: Basic ...` header against them. Returns
+// (true, nil) when the merchant has not configured Basic Auth — we
+// can't verify what wasn't provided, and Pagar.me does not sign payloads
+// so there is no fallback verification path. Returns (false, nil) only
+// when creds ARE configured and the inbound auth is wrong/missing.
+func (s *Service) ValidatePagarmeWebhookAuth(ctx context.Context, storeID, authHeader string) (bool, error) {
+	row, err := s.repo.GetByProvider(ctx, storeID, string(providers.ProviderTypePayment), string(providers.ProviderPagarme))
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return true, nil
+		}
+		return false, err
+	}
+	creds, err := s.decryptCredentials(row.Credentials)
+	if err != nil {
+		return false, err
+	}
+	expectedUser, _ := creds.Extra["webhook_username"].(string)
+	expectedPass, _ := creds.Extra["webhook_password"].(string)
+	if expectedUser == "" && expectedPass == "" {
+		return true, nil
+	}
+
+	const prefix = "Basic "
+	if !strings.HasPrefix(authHeader, prefix) {
+		return false, nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(authHeader, prefix))
+	if err != nil {
+		return false, nil
+	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 {
+		return false, nil
+	}
+	gotUser, gotPass := parts[0], parts[1]
+	userOK := subtle.ConstantTimeCompare([]byte(gotUser), []byte(expectedUser)) == 1
+	passOK := subtle.ConstantTimeCompare([]byte(gotPass), []byte(expectedPass)) == 1
+	return userOK && passOK, nil
 }
 
 // pagarmeKeyEnvironment returns "sandbox" / "production" / "" based on the

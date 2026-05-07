@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -331,6 +332,27 @@ func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 
 	body := c.Body()
 
+	// Pagar.me v5 protects webhooks via HTTP Basic Auth on the inbound URL
+	// (no HMAC signature on the payload — confirmed by their docs). We
+	// validate against credentials the merchant entered at connect time;
+	// when none are configured we let the request through and flag
+	// SignatureValid=false so the audit trail tells us the merchant should
+	// turn auth on.
+	authValid, err := h.service.ValidatePagarmeWebhookAuth(c.Context(), storeID, c.Get("Authorization"))
+	if err != nil {
+		h.logger.Error("failed to validate Pagar.me webhook auth",
+			zap.String("store_id", storeID),
+			zap.Error(err),
+		)
+		return httpx.OK(c, fiber.Map{"status": "received"})
+	}
+	if !authValid {
+		h.logger.Warn("rejected Pagar.me webhook with invalid Basic Auth",
+			zap.String("store_id", storeID),
+		)
+		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": "invalid webhook auth"})
+	}
+
 	// Parse Pagar.me webhook payload
 	// Format: { "id": "hook_...", "type": "order.paid", "data": { "id": "or_...", ... } }
 	var webhook struct {
@@ -381,7 +403,7 @@ func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 		EventType:      webhook.Type,
 		EventID:        eventID,
 		Payload:        body,
-		SignatureValid: true, // TODO: Implement signature verification
+		SignatureValid: authValid,
 	}); err != nil {
 		h.logger.Error("failed to store webhook event",
 			zap.String("store_id", storeID),
@@ -390,28 +412,33 @@ func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 		// Don't return error - we still want to process the webhook
 	}
 
-	// Process order.paid notifications
-	// Pagar.me sends order.paid when payment is confirmed.
+	// Dispatch the events that change cart payment state. ProcessPaymentNotification
+	// fetches the latest status via GetPaymentStatus and reconciles the cart, so a
+	// single dispatcher works for paid/failed/canceled — we only need the trigger.
 	// The goroutine outlives the request, so we detach from c.Context() — in
 	// Fiber v2 that's the *fasthttp.RequestCtx, recycled to a sync.Pool when
 	// the handler returns; touching it later panics inside pgxpool.
-	if webhook.Type == "order.paid" && webhook.Data.ID != "" {
-		orderID := webhook.Data.ID
-		go func() {
-			ctx := context.Background()
-			// The "code" field contains our external reference (cart token)
-			if err := h.service.ProcessPaymentNotification(ctx, ProcessPaymentInput{
-				StoreID:   storeID,
-				Provider:  "pagarme",
-				PaymentID: orderID, // Order ID - we'll fetch status from this
-			}); err != nil {
-				h.logger.Error("failed to process Pagar.me payment notification",
-					zap.String("store_id", storeID),
-					zap.String("order_id", orderID),
-					zap.Error(err),
-				)
-			}
-		}()
+	switch webhook.Type {
+	case "order.paid", "order.payment_failed", "order.canceled":
+		if webhook.Data.ID != "" {
+			orderID := webhook.Data.ID
+			eventType := webhook.Type
+			go func() {
+				ctx := context.Background()
+				if err := h.service.ProcessPaymentNotification(ctx, ProcessPaymentInput{
+					StoreID:   storeID,
+					Provider:  "pagarme",
+					PaymentID: orderID,
+				}); err != nil {
+					h.logger.Error("failed to process Pagar.me payment notification",
+						zap.String("store_id", storeID),
+						zap.String("order_id", orderID),
+						zap.String("event_type", eventType),
+						zap.Error(err),
+					)
+				}
+			}()
+		}
 	}
 
 	return httpx.OK(c, fiber.Map{"status": "received"})

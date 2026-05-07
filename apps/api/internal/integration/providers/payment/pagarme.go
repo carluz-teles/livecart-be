@@ -68,11 +68,11 @@ func (p *Pagarme) Name() providers.ProviderName {
 	return providers.ProviderPagarme
 }
 
-// ValidateCredentials validates the current credentials by calling the API.
+// ValidateCredentials validates the current credentials by hitting
+// /recipients/default — same endpoint TestConnection uses, so a connect
+// flow that passes here will surface consistent account info downstream.
 func (p *Pagarme) ValidateCredentials(ctx context.Context) error {
-	// Pagar.me doesn't have a dedicated endpoint to validate credentials,
-	// so we try to list customers (limited to 1) to verify the API key
-	url := pagarmeAPIBaseURL + "/customers?size=1"
+	url := pagarmeAPIBaseURL + "/recipients/default"
 
 	resp, _, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
 	if err != nil {
@@ -87,12 +87,16 @@ func (p *Pagarme) ValidateCredentials(ctx context.Context) error {
 	return nil
 }
 
-// TestConnection tests the connection to Pagar.me API.
+// TestConnection tests the connection to Pagar.me API and surfaces account
+// info from /recipients/default. The recipient is the entity that actually
+// receives the funds — we use it to populate the "Informações da Conta"
+// card in the admin UI (name, email, document) so the merchant can verify
+// at a glance which Pagar.me account is wired to this store.
 func (p *Pagarme) TestConnection(ctx context.Context) (*providers.TestConnectionResult, error) {
 	start := time.Now()
-	url := pagarmeAPIBaseURL + "/customers?size=1"
+	url := pagarmeAPIBaseURL + "/recipients/default"
 
-	resp, _, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
+	resp, body, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
 	latency := time.Since(start)
 
 	result := &providers.TestConnectionResult{
@@ -102,13 +106,13 @@ func (p *Pagarme) TestConnection(ctx context.Context) (*providers.TestConnection
 
 	if err != nil {
 		result.Success = false
-		result.Message = fmt.Sprintf("Falha na conexao: %v", err)
+		result.Message = fmt.Sprintf("Falha na conexão: %v", err)
 		return result, nil
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		result.Success = false
-		result.Message = "Chave de API invalida"
+		result.Message = "Chave de API inválida"
 		return result, nil
 	}
 
@@ -118,12 +122,39 @@ func (p *Pagarme) TestConnection(ctx context.Context) (*providers.TestConnection
 		return result, nil
 	}
 
+	var recipient struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Email    string `json:"email"`
+		Document string `json:"document"`
+		Type     string `json:"type"`
+		Status   string `json:"status"`
+	}
+	_ = json.Unmarshal(body, &recipient) // best-effort; missing fields stay empty
+
 	result.Success = true
-	result.Message = "Conexao estabelecida com sucesso"
+	result.Message = "Conexão estabelecida com sucesso"
 	result.AccountInfo = map[string]any{
-		"provider": "pagarme",
+		"id":          recipient.ID,
+		"name":        recipient.Name,
+		"email":       recipient.Email,
+		"document":    recipient.Document,
+		"environment": pagarmeEnvironmentFromKey(p.credentials.APIKey),
 	}
 	return result, nil
+}
+
+// pagarmeEnvironmentFromKey returns "sandbox" / "production" / "unknown"
+// based on the secret key prefix. Pagar.me has no separate sandbox host;
+// the test/live segment in the key is the only switch.
+func pagarmeEnvironmentFromKey(secretKey string) string {
+	switch {
+	case strings.HasPrefix(secretKey, "sk_test_"):
+		return "sandbox"
+	case strings.HasPrefix(secretKey, "sk_live_"):
+		return "production"
+	}
+	return "unknown"
 }
 
 // RefreshToken refreshes OAuth tokens - Pagar.me uses API keys, so no refresh needed.
@@ -132,81 +163,47 @@ func (p *Pagarme) RefreshToken(ctx context.Context) (*Credentials, error) {
 	return nil, nil
 }
 
-// CreateCheckout creates an order with checkout payment method in Pagar.me.
+// CreateCheckout creates a hosted-checkout order at Pagar.me. Live commerce
+// only takes credit_card + pix today (boleto's 1-3 day clearance kills the
+// "live now" UX), so the accepted_payment_methods list is intentionally narrow.
 func (p *Pagarme) CreateCheckout(ctx context.Context, order CheckoutOrder) (*CheckoutResult, error) {
 	url := pagarmeAPIBaseURL + "/orders"
 
-	// Build items array
 	items := make([]map[string]any, len(order.Items))
 	for i, item := range order.Items {
 		items[i] = map[string]any{
-			"amount":      item.UnitPrice,      // Already in cents
+			"amount":      item.UnitPrice,
 			"description": item.Name,
 			"quantity":    item.Quantity,
 			"code":        item.ID,
 		}
 	}
 
-	// Build customer object
-	customer := map[string]any{
-		"name":  order.Customer.Name,
-		"email": order.Customer.Email,
-		"type":  "individual",
-	}
-	if order.Customer.Document != "" {
-		customer["document"] = order.Customer.Document
-		customer["document_type"] = "cpf"
-	}
-	if order.Customer.Phone != "" {
-		customer["phones"] = map[string]any{
-			"mobile_phone": map[string]any{
-				"country_code": "55",
-				"area_code":    extractAreaCode(order.Customer.Phone),
-				"number":       extractPhoneNumber(order.Customer.Phone),
-			},
-		}
-	}
+	customer := buildPagarmeCustomer(order.Customer)
 
-	// Calculate expiration time
-	expiresInMinutes := 120 // Default: 2 hours
+	expiresInMinutes := 120
 	if order.ExpiresIn != nil {
 		expiresInMinutes = int(order.ExpiresIn.Minutes())
 	}
 
-	// Build checkout configuration
 	checkoutConfig := map[string]any{
 		"expires_in":               expiresInMinutes,
 		"billing_address_editable": true,
 		"customer_editable":        true,
-		"accepted_payment_methods": []string{"credit_card", "pix", "boleto"},
+		"accepted_payment_methods": []string{"credit_card", "pix"},
 		"success_url":              order.SuccessURL,
-	}
-
-	// Add credit card installment options (1x full amount)
-	checkoutConfig["credit_card"] = map[string]any{
-		"capture":              true,
-		"statement_descriptor": "LIVECART",
-		"installments": []map[string]any{
-			{
-				"number": 1,
-				"total":  order.TotalAmount,
+		"credit_card": map[string]any{
+			"capture":              true,
+			"statement_descriptor": "LIVECART",
+			"installments": []map[string]any{
+				{"number": 1, "total": order.TotalAmount},
 			},
+		},
+		"pix": map[string]any{
+			"expires_in": expiresInMinutes * 60,
 		},
 	}
 
-	// Add PIX configuration
-	checkoutConfig["pix"] = map[string]any{
-		"expires_in": expiresInMinutes * 60, // PIX expiration in seconds
-	}
-
-	// Add Boleto configuration
-	checkoutConfig["boleto"] = map[string]any{
-		"bank":         "033", // Santander
-		"instructions": "Pagar ate o vencimento",
-		"due_at":       time.Now().Add(72 * time.Hour).Format(time.RFC3339),
-	}
-
-	// Build payload
 	payload := map[string]any{
 		"code":     order.ExternalID,
 		"items":    items,
@@ -263,7 +260,11 @@ func (p *Pagarme) CreateCheckout(ctx context.Context, order CheckoutOrder) (*Che
 	}, nil
 }
 
-// GetPaymentStatus retrieves the status of a payment/order.
+// GetPaymentStatus retrieves the status of a Pagar.me order. The fee/net
+// breakdown stays empty here — Pagar.me v5 surfaces fees on /recipients/balance
+// (separate API), not on the order. The audit log mirrors the MP shape so
+// downstream observability dashboards (status, payment_method, installments,
+// auth_code) work uniformly across providers.
 func (p *Pagarme) GetPaymentStatus(ctx context.Context, orderID string) (*PaymentStatus, error) {
 	url := fmt.Sprintf("%s/orders/%s", pagarmeAPIBaseURL, orderID)
 
@@ -285,27 +286,49 @@ func (p *Pagarme) GetPaymentStatus(ctx context.Context, orderID string) (*Paymen
 
 	status := mapPagarmeStatus(pgOrder.Status)
 
-	var paidAt *time.Time
-	var paymentMethod string
-	var installments int
+	var (
+		paidAt        *time.Time
+		paymentMethod string
+		statusDetail  string
+		installments  int
+		authCode      string
+	)
 	if len(pgOrder.Charges) > 0 {
-		if pgOrder.Charges[0].PaidAt != "" {
-			if t, err := time.Parse(time.RFC3339, pgOrder.Charges[0].PaidAt); err == nil {
+		charge := pgOrder.Charges[0]
+		if charge.PaidAt != "" {
+			if t, err := time.Parse(time.RFC3339, charge.PaidAt); err == nil {
 				paidAt = &t
 			}
 		}
-		// Extract payment method from charge
-		paymentMethod = mapPagarmePaymentMethod(pgOrder.Charges[0].PaymentMethod)
-		if pgOrder.Charges[0].LastTransaction != nil {
-			installments = pgOrder.Charges[0].LastTransaction.Installments
+		paymentMethod = mapPagarmePaymentMethod(charge.PaymentMethod)
+		if charge.LastTransaction != nil {
+			installments = charge.LastTransaction.Installments
+			statusDetail = charge.LastTransaction.Status
+			if code := charge.LastTransaction.AcquirerAuthCode; code != "" {
+				authCode = code
+			} else if nsu := charge.LastTransaction.AcquirerNsu; nsu != "" {
+				authCode = nsu
+			}
 		}
 	}
+
+	p.Logger.Info("pagarme order status fetched",
+		zap.String("payment_id", pgOrder.ID),
+		zap.String("status", string(status)),
+		zap.String("status_detail", statusDetail),
+		zap.String("payment_method", paymentMethod),
+		zap.Int("installments", installments),
+		zap.Int64("amount_cents", int64(pgOrder.Amount)),
+		zap.String("authorization_code", authCode),
+		zap.Bool("has_paid_at", paidAt != nil),
+	)
 
 	return &PaymentStatus{
 		PaymentID:         pgOrder.ID,
 		Status:            status,
 		Amount:            int64(pgOrder.Amount),
 		PaidAt:            paidAt,
+		FailureReason:     statusDetail,
 		ExternalReference: pgOrder.Code,
 		Metadata:          pgOrder.Metadata,
 		PaymentMethod:     paymentMethod,
