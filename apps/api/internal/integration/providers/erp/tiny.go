@@ -1023,21 +1023,17 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 	// Pago will repass per cycle. Pix / debit / boleto stay as a single
 	// parcela on the payment date (already settled or settles next-day).
 	if pay := order.Payment; pay != nil {
+		// meioPagamento is intentionally NOT looked up / sent on the parcela.
+		// /formas-pagamento returns the merchant's local cadastro IDs, but the
+		// `meioPagamento.id` field on a parcela is validated against a
+		// different namespace inside Tiny — sending the cadastro ID there
+		// fails strict validation with:
+		//   pagamento.parcelas[0].meioPagamento.id: Meio de pagamento não encontrado
+		// Omitting the field lets Tiny apply its default and the order goes
+		// through; formaRecebimento alone is enough to keep the parcela out
+		// of the generic "Conta a Receber" bucket. If/when we map our
+		// payment methods to Tiny's system enum we can re-enable this.
 		var meioRef map[string]any
-		meioID, err := t.lookupFormaPagamentoID(ctx, pay.Method)
-		switch {
-		case err != nil:
-			t.Logger.Warn("tiny meioPagamento lookup failed, sending parcelas without it",
-				zap.String("method", pay.Method),
-				zap.Error(err),
-			)
-		case meioID > 0:
-			meioRef = map[string]any{"id": meioID}
-		default:
-			t.Logger.Warn("tiny meioPagamento lookup returned no match, parcela will show 'Conta a Receber'",
-				zap.String("method", pay.Method),
-			)
-		}
 
 		// formaRecebimento is the OTHER half of the parcela. /formas-recebimento
 		// doesn't expose a name filter (only limit/offset), so we paginate
