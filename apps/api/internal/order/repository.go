@@ -83,7 +83,8 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 				 ORDER BY sh.created_at DESC LIMIT 1),
 				''
 			) as shipment_status,
-			(c.shipping_service_id IS NOT NULL AND c.shipping_service_id <> '') as has_shipping
+			(c.shipping_service_id IS NOT NULL AND c.shipping_service_id <> '') as has_shipping,
+			c.erp_finalisation_status
 		FROM carts c
 		JOIN live_events e ON e.id = c.event_id
 		WHERE e.store_id = $1
@@ -171,6 +172,7 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 			&row.IsFirstPurchase,
 			&row.ShipmentStatus,
 			&row.HasShipping,
+			&row.ERPFinalisationStatus,
 		)
 		if err != nil {
 			return result, fmt.Errorf("scanning order row: %w", err)
@@ -683,6 +685,19 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 		} else {
 			conditions = append(conditions, "NOT EXISTS (SELECT 1 FROM shipments sh WHERE sh.order_id = c.id)")
 		}
+	}
+
+	if len(filters.ERPFinalisation) > 0 {
+		placeholders := make([]string, len(filters.ERPFinalisation))
+		for i, st := range filters.ERPFinalisation {
+			placeholders[i] = fmt.Sprintf("$%d", argIndex)
+			args = append(args, st)
+			argIndex++
+		}
+		conditions = append(conditions, fmt.Sprintf(
+			"c.erp_finalisation_status IN (%s)",
+			strings.Join(placeholders, ","),
+		))
 	}
 
 	return conditions, args

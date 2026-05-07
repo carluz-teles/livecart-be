@@ -23,6 +23,11 @@ type OrderFilters struct {
 	// Filter orders whose latest shipment status is in this set. Empty/nil = ignore.
 	// Values follow the normalized ShipmentStatus enum (in_transit, delivered, ...).
 	ShipmentStatus []string `query:"shipmentStatus"`
+
+	// Filter by the cart's ERP finalisation lifecycle. Drives the admin
+	// "Precisam atenção" tab — passing ['failed'] surfaces paid orders that
+	// blew up in Tiny and still need a retry from the merchant.
+	ERPFinalisation []string `query:"erpFinalisation"` // pending | done | failed
 }
 
 // Handler layer - Request/Response types
@@ -110,6 +115,10 @@ type OrderResponse struct {
 	// True only for the buyer's earliest paid order in this store. Frontend
 	// renders a "Primeira venda" badge from this flag.
 	IsFirstPurchase bool `json:"isFirstPurchase"`
+	// Lifecycle of the post-payment Tiny order creation: pending | done | failed.
+	// Surfaced on the list so the admin can spot "Pedido pago, Tiny falhou" rows
+	// without opening each one. Values mirror cart.erp_finalisation_status.
+	ERPFinalisationStatus string `json:"erpFinalisationStatus"`
 }
 
 type OrderItemPreviewResponse struct {
@@ -316,28 +325,29 @@ type ListOrdersOutput struct {
 }
 
 type OrderOutput struct {
-	ID              string
-	ShortID         int
-	LiveSessionID   string
-	LiveTitle       string
-	LivePlatform    string
-	CustomerHandle  string
-	CustomerID      string
-	CustomerName    string
-	CustomerEmail   string
-	FreeShipping    bool
-	Status          string
-	PaymentStatus   string
-	ShipmentStatus  string
-	HasShipping     bool
-	Items           []OrderItemOutput
-	ItemsPreview    []OrderItemPreviewOutput
-	TotalItems      int
-	TotalAmount     int64
-	PaidAt          *time.Time
-	CreatedAt       time.Time
-	ExpiresAt       *time.Time
-	IsFirstPurchase bool
+	ID                    string
+	ShortID               int
+	LiveSessionID         string
+	LiveTitle             string
+	LivePlatform          string
+	CustomerHandle        string
+	CustomerID            string
+	CustomerName          string
+	CustomerEmail         string
+	FreeShipping          bool
+	Status                string
+	PaymentStatus         string
+	ShipmentStatus        string
+	HasShipping           bool
+	Items                 []OrderItemOutput
+	ItemsPreview          []OrderItemPreviewOutput
+	TotalItems            int
+	TotalAmount           int64
+	PaidAt                *time.Time
+	CreatedAt             time.Time
+	ExpiresAt             *time.Time
+	IsFirstPurchase       bool
+	ERPFinalisationStatus string // pending | done | failed
 }
 
 type OrderItemPreviewOutput struct {
@@ -417,7 +427,8 @@ type OrderRow struct {
 	// True when the buyer picked a shipping service at checkout, even if no
 	// shipment row has been created yet. Lets the list show "Aguardando emissão"
 	// instead of "Sem envio" between checkout and shipment creation.
-	HasShipping bool
+	HasShipping           bool
+	ERPFinalisationStatus string
 }
 
 // OrderItemPreviewRow is the projection used by the list page to render an

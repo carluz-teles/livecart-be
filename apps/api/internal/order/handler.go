@@ -342,6 +342,14 @@ func parseOrderFilters(c *fiber.Ctx) OrderFilters {
 		}
 	}
 
+	erpFinalisationBytes := c.Context().QueryArgs().PeekMulti("erpFinalisation")
+	if len(erpFinalisationBytes) > 0 {
+		filters.ERPFinalisation = make([]string, len(erpFinalisationBytes))
+		for i, s := range erpFinalisationBytes {
+			filters.ERPFinalisation[i] = string(s)
+		}
+	}
+
 	return filters
 }
 
@@ -376,28 +384,29 @@ func toOrderResponse(o OrderOutput) OrderResponse {
 	}
 
 	return OrderResponse{
-		ID:              o.ID,
-		ShortID:         o.ShortID,
-		LiveSessionID:   o.LiveSessionID,
-		LiveTitle:       o.LiveTitle,
-		LivePlatform:    o.LivePlatform,
-		CustomerHandle:  o.CustomerHandle,
-		CustomerID:      o.CustomerID,
-		CustomerName:    o.CustomerName,
-		CustomerEmail:   o.CustomerEmail,
-		FreeShipping:    o.FreeShipping,
-		Status:          o.Status,
-		PaymentStatus:   o.PaymentStatus,
-		ShipmentStatus:  o.ShipmentStatus,
-		HasShipping:     o.HasShipping,
-		Items:           items,
-		ItemsPreview:    previews,
-		TotalItems:      o.TotalItems,
-		TotalAmount:     o.TotalAmount,
-		PaidAt:          o.PaidAt,
-		CreatedAt:       o.CreatedAt,
-		ExpiresAt:       o.ExpiresAt,
-		IsFirstPurchase: o.IsFirstPurchase,
+		ID:                    o.ID,
+		ShortID:               o.ShortID,
+		LiveSessionID:         o.LiveSessionID,
+		LiveTitle:             o.LiveTitle,
+		LivePlatform:          o.LivePlatform,
+		CustomerHandle:        o.CustomerHandle,
+		CustomerID:            o.CustomerID,
+		CustomerName:          o.CustomerName,
+		CustomerEmail:         o.CustomerEmail,
+		FreeShipping:          o.FreeShipping,
+		Status:                o.Status,
+		PaymentStatus:         o.PaymentStatus,
+		ShipmentStatus:        o.ShipmentStatus,
+		HasShipping:           o.HasShipping,
+		Items:                 items,
+		ItemsPreview:          previews,
+		TotalItems:            o.TotalItems,
+		TotalAmount:           o.TotalAmount,
+		PaidAt:                o.PaidAt,
+		CreatedAt:             o.CreatedAt,
+		ExpiresAt:             o.ExpiresAt,
+		IsFirstPurchase:       o.IsFirstPurchase,
+		ERPFinalisationStatus: o.ERPFinalisationStatus,
 	}
 }
 

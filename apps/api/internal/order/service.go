@@ -90,28 +90,29 @@ func (s *Service) List(ctx context.Context, input ListOrdersInput) (ListOrdersOu
 			}
 		}
 		orders[i] = OrderOutput{
-			ID:              row.ID,
-			ShortID:         row.ShortID,
-			LiveSessionID:   row.EventID, // Now using EventID but keeping response field name for backwards compatibility
-			LiveTitle:       row.LiveTitle,
-			LivePlatform:    row.LivePlatform,
-			CustomerHandle:  row.PlatformHandle,
-			CustomerID:      row.PlatformUserID,
-			CustomerName:    row.CustomerName,
-			CustomerEmail:   row.CustomerEmail,
-			FreeShipping:    row.FreeShipping,
-			Status:          row.Status,
-			PaymentStatus:   row.PaymentStatus,
-			ShipmentStatus:  row.ShipmentStatus,
-			HasShipping:     row.HasShipping,
-			TotalItems:      row.TotalItems,
-			TotalAmount:     row.TotalAmount,
-			PaidAt:          row.PaidAt,
-			CreatedAt:       row.CreatedAt,
-			ExpiresAt:       row.ExpiresAt,
-			IsFirstPurchase: row.IsFirstPurchase,
-			Items:           []OrderItemOutput{}, // Items loaded separately when needed
-			ItemsPreview:    previewOut,
+			ID:                    row.ID,
+			ShortID:               row.ShortID,
+			LiveSessionID:         row.EventID, // Now using EventID but keeping response field name for backwards compatibility
+			LiveTitle:             row.LiveTitle,
+			LivePlatform:          row.LivePlatform,
+			CustomerHandle:        row.PlatformHandle,
+			CustomerID:            row.PlatformUserID,
+			CustomerName:          row.CustomerName,
+			CustomerEmail:         row.CustomerEmail,
+			FreeShipping:          row.FreeShipping,
+			Status:                row.Status,
+			PaymentStatus:         row.PaymentStatus,
+			ShipmentStatus:        row.ShipmentStatus,
+			HasShipping:           row.HasShipping,
+			TotalItems:            row.TotalItems,
+			TotalAmount:           row.TotalAmount,
+			PaidAt:                row.PaidAt,
+			CreatedAt:             row.CreatedAt,
+			ExpiresAt:             row.ExpiresAt,
+			IsFirstPurchase:       row.IsFirstPurchase,
+			ERPFinalisationStatus: row.ERPFinalisationStatus,
+			Items:                 []OrderItemOutput{}, // Items loaded separately when needed
+			ItemsPreview:          previewOut,
 		}
 	}
 
@@ -168,22 +169,23 @@ func (s *Service) GetByID(ctx context.Context, id string, storeID string) (*Orde
 	}
 
 	return &OrderOutput{
-		ID:              row.ID,
-		ShortID:         row.ShortID,
-		LiveSessionID:   row.EventID, // Now using EventID but keeping response field name for backwards compatibility
-		LiveTitle:       row.LiveTitle,
-		LivePlatform:    row.LivePlatform,
-		CustomerHandle:  row.PlatformHandle,
-		CustomerID:      row.PlatformUserID,
-		Status:          row.Status,
-		PaymentStatus:   row.PaymentStatus,
-		Items:           items,
-		TotalItems:      totalItems,
-		TotalAmount:     totalAmount,
-		PaidAt:          row.PaidAt,
-		CreatedAt:       row.CreatedAt,
-		ExpiresAt:       row.ExpiresAt,
-		IsFirstPurchase: row.IsFirstPurchase,
+		ID:                    row.ID,
+		ShortID:               row.ShortID,
+		LiveSessionID:         row.EventID, // Now using EventID but keeping response field name for backwards compatibility
+		LiveTitle:             row.LiveTitle,
+		LivePlatform:          row.LivePlatform,
+		CustomerHandle:        row.PlatformHandle,
+		CustomerID:            row.PlatformUserID,
+		Status:                row.Status,
+		PaymentStatus:         row.PaymentStatus,
+		Items:                 items,
+		TotalItems:            totalItems,
+		TotalAmount:           totalAmount,
+		PaidAt:                row.PaidAt,
+		CreatedAt:             row.CreatedAt,
+		ExpiresAt:             row.ExpiresAt,
+		IsFirstPurchase:       row.IsFirstPurchase,
+		ERPFinalisationStatus: row.ERPFinalisationStatus,
 	}, nil
 }
 
