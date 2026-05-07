@@ -493,15 +493,12 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 
 	payer := buildPaymentPayer(input.Customer)
 
-	// TEST tokens: MP's sandbox is stricter than production. It needs
-	// payer.first_name == "APRO" to trigger an approved status, and also
-	// returns 500 internal_error (cause:[]) when payer carries phone or
-	// address — fields production accepts for fraud-screening. Trim TEST
-	// to a minimal payer; production keeps the enriched one.
+	// TEST tokens: MP's sandbox only triggers an approved status when
+	// payer.first_name matches the cardholder-name token ("APRO"). A real
+	// first name breaks the trigger and MP responds with internal_error.
+	// Production tokens keep the buyer's real name.
 	if strings.HasPrefix(m.credentials.AccessToken, "TEST-") && payer != nil {
 		payer.FirstName = "APRO"
-		payer.Phone = nil
-		payer.Address = nil
 	}
 
 	req := payment.Request{
