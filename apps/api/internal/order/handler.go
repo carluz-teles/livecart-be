@@ -350,6 +350,17 @@ func parseOrderFilters(c *fiber.Ctx) OrderFilters {
 		}
 	}
 
+	if needsAttention := c.Query("needsAttention"); needsAttention != "" {
+		switch needsAttention {
+		case "true":
+			t := true
+			filters.NeedsAttention = &t
+		case "false":
+			f := false
+			filters.NeedsAttention = &f
+		}
+	}
+
 	return filters
 }
 

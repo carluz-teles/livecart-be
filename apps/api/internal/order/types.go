@@ -24,10 +24,17 @@ type OrderFilters struct {
 	// Values follow the normalized ShipmentStatus enum (in_transit, delivered, ...).
 	ShipmentStatus []string `query:"shipmentStatus"`
 
-	// Filter by the cart's ERP finalisation lifecycle. Drives the admin
-	// "Precisam atenção" tab — passing ['failed'] surfaces paid orders that
-	// blew up in Tiny and still need a retry from the merchant.
+	// Filter by the cart's ERP finalisation lifecycle. Direct-query escape
+	// hatch — most callers should use NeedsAttention which folds this into
+	// the unified "Precisam atenção" bucket.
 	ERPFinalisation []string `query:"erpFinalisation"` // pending | done | failed
+
+	// Single triage flag that ORs every kind of "merchant has to fix this"
+	// state into one filter — payment failed/refunded, shipment in error,
+	// or ERP finalisation failed. Drives the unified "Precisam atenção"
+	// tab so the merchant sees one bucket regardless of which subsystem
+	// blew up. ERP-agnostic by design (works for Tiny, Bling, …).
+	NeedsAttention *bool `query:"needsAttention"`
 }
 
 // Handler layer - Request/Response types

@@ -700,6 +700,49 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 		))
 	}
 
+	// NeedsAttention=true folds three independent failure surfaces into one
+	// triage bucket so the admin only has to scan a single "Precisam atenção"
+	// list. The OR covers:
+	//   - Payment gateway failed or refunded the charge (cart left mid-flow).
+	//   - Carrier rejected the shipment / NF-e blocked / package damaged /
+	//     refused / not delivered.
+	//   - ERP finalisation rejected the paid cart (any provider — Tiny today,
+	//     Bling next; the cart column is provider-agnostic).
+	// NeedsAttention=false intentionally does nothing to keep the filter
+	// shape symmetric with bool defaults; combine with explicit subset
+	// filters when an exclusion is needed.
+	if filters.NeedsAttention != nil && *filters.NeedsAttention {
+		shipmentIssueStatuses := []string{
+			"awaiting_invoice",
+			"issue",
+			"delivery_issue",
+			"delivery_blocked",
+			"shipment_blocked",
+			"fiscal_issue",
+			"damaged",
+			"refused",
+			"not_delivered",
+		}
+		shipmentPlaceholders := make([]string, len(shipmentIssueStatuses))
+		for i, st := range shipmentIssueStatuses {
+			shipmentPlaceholders[i] = fmt.Sprintf("$%d", argIndex)
+			args = append(args, st)
+			argIndex++
+		}
+		paymentIssueStatuses := []string{"failed", "refunded"}
+		paymentPlaceholders := make([]string, len(paymentIssueStatuses))
+		for i, st := range paymentIssueStatuses {
+			paymentPlaceholders[i] = fmt.Sprintf("$%d", argIndex)
+			args = append(args, st)
+			argIndex++
+		}
+		conditions = append(conditions, fmt.Sprintf(
+			"(c.erp_finalisation_status = 'failed' OR c.payment_status IN (%s) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.order_id = c.id AND sh.status IN (%s)))",
+			strings.Join(paymentPlaceholders, ","),
+			strings.Join(shipmentPlaceholders, ","),
+		))
+	}
+
 	return conditions, args
 }
 
