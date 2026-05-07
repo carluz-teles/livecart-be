@@ -1807,6 +1807,24 @@ func (t *Tiny) CreateContact(ctx context.Context, contact ERPContactInput) (*ERP
 	}
 
 	if !providers.IsSuccessStatus(resp.StatusCode) {
+		// Log the (masked) payload alongside Tiny's per-field error so we can
+		// see which value was rejected — the generic top-level "Ocorreram
+		// erros de validação" is useless on its own.
+		if t.Logger != nil {
+			t.Logger.Warn("tiny CreateContact rejected",
+				zap.Int("status", resp.StatusCode),
+				zap.String("error", tinyErrorDetail(body)),
+				zap.String("nome", contact.Name),
+				zap.Int("nome_len", len(contact.Name)),
+				zap.String("tipoPessoa", payload["tipoPessoa"].(string)),
+				zap.String("cpfCnpj_masked", maskDocument(contact.CpfCnpj)),
+				zap.Int("cpfCnpj_len", len(contact.CpfCnpj)),
+				zap.String("email_masked", maskEmail(contact.Email)),
+				zap.Int("email_len", len(contact.Email)),
+				zap.String("celular_masked", maskPhone(contact.Phone)),
+				zap.Int("celular_len", len(contact.Phone)),
+			)
+		}
 		return nil, fmt.Errorf("create contact failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
 	}
 
@@ -1822,6 +1840,49 @@ func (t *Tiny) CreateContact(ctx context.Context, contact ERPContactInput) (*ERP
 		ContactID: strconv.FormatInt(contactResp.ID, 10),
 		Name:      contact.Name,
 	}, nil
+}
+
+// maskEmail returns "abc***@domain.com" — preserves the domain (where most
+// validation issues live: TLD, length, accepted characters) and the first
+// three local-part chars without leaking the full address into logs.
+func maskEmail(email string) string {
+	if email == "" {
+		return ""
+	}
+	at := strings.IndexByte(email, '@')
+	if at < 0 {
+		return "***"
+	}
+	local := email[:at]
+	domain := email[at:]
+	if len(local) <= 3 {
+		return "***" + domain
+	}
+	return local[:3] + "***" + domain
+}
+
+// maskDocument keeps the first 3 and last 2 digits of a CPF/CNPJ — enough
+// to spot formatting issues (dots/dashes/spaces, wrong length) without
+// exposing the full document.
+func maskDocument(doc string) string {
+	if doc == "" {
+		return ""
+	}
+	if len(doc) <= 5 {
+		return "***"
+	}
+	return doc[:3] + "***" + doc[len(doc)-2:]
+}
+
+// maskPhone keeps DDD + last 2 digits.
+func maskPhone(phone string) string {
+	if phone == "" {
+		return ""
+	}
+	if len(phone) <= 4 {
+		return "***"
+	}
+	return phone[:2] + "***" + phone[len(phone)-2:]
 }
 
 // UpdateContact patches an existing contact with fresh customer data. Used
@@ -1882,41 +1943,35 @@ func (t *Tiny) authHeaders() map[string]string {
 // log only sees "Ocorreram erros de validação" with no clue about which
 // field is wrong. Falls back to the raw (truncated) body when nothing
 // recognisable is found.
+//
+// Tiny v3 ErrorDTO shape: { "mensagem": "...", "detalhes": [{ "campo": "...", "mensagem": "..." }] }.
+// Earlier versions of this parser looked for "mensagens" / "erros" arrays
+// that don't exist in v3, so per-field details were silently dropped and
+// every Tiny 400 surfaced as the generic top-level message only.
 func tinyErrorDetail(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
 	var parsed struct {
-		Mensagem  string `json:"mensagem"`
-		Mensagens []struct {
+		Mensagem string `json:"mensagem"`
+		Detalhes []struct {
 			Campo    string `json:"campo"`
 			Mensagem string `json:"mensagem"`
-		} `json:"mensagens"`
-		Erros []struct {
-			Campo    string `json:"campo"`
-			Mensagem string `json:"mensagem"`
-		} `json:"erros"`
+		} `json:"detalhes"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return truncate(string(body), 400)
 	}
 
-	parts := make([]string, 0, len(parsed.Mensagens)+len(parsed.Erros)+1)
+	parts := make([]string, 0, len(parsed.Detalhes)+1)
 	if parsed.Mensagem != "" {
 		parts = append(parts, parsed.Mensagem)
 	}
-	for _, m := range parsed.Mensagens {
-		if m.Campo != "" {
-			parts = append(parts, fmt.Sprintf("%s: %s", m.Campo, m.Mensagem))
+	for _, d := range parsed.Detalhes {
+		if d.Campo != "" {
+			parts = append(parts, fmt.Sprintf("%s: %s", d.Campo, d.Mensagem))
 		} else {
-			parts = append(parts, m.Mensagem)
-		}
-	}
-	for _, e := range parsed.Erros {
-		if e.Campo != "" {
-			parts = append(parts, fmt.Sprintf("%s: %s", e.Campo, e.Mensagem))
-		} else {
-			parts = append(parts, e.Mensagem)
+			parts = append(parts, d.Mensagem)
 		}
 	}
 	if len(parts) == 0 {
