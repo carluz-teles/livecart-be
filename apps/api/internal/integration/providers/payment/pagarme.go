@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
@@ -369,32 +371,42 @@ func base64Encode(s string) string {
 	return base64.StdEncoding.EncodeToString([]byte(s))
 }
 
-// Helper function to extract area code from phone number
-func extractAreaCode(phone string) string {
-	// Remove non-numeric characters
-	cleaned := ""
-	for _, r := range phone {
+// stripPhonePrefix returns the BR-relevant digits of a phone string —
+// non-digits removed, "55" country prefix dropped when present (13-digit
+// inputs like "5547992596026" reduce to the 11-digit "47992596026").
+func stripPhonePrefix(phone string) string {
+	cleaned := digitsOnly(phone)
+	if len(cleaned) == 13 && strings.HasPrefix(cleaned, "55") {
+		return cleaned[2:]
+	}
+	return cleaned
+}
+
+func digitsOnly(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
 		if r >= '0' && r <= '9' {
-			cleaned += string(r)
+			b.WriteRune(r)
 		}
 	}
-	// Brazilian phone format: (XX) XXXXX-XXXX
+	return b.String()
+}
+
+// extractAreaCode pulls the 2-digit DDD from a Brazilian phone string.
+// Defaults to "11" (São Paulo) only when the input is too short to
+// contain one — Pagar.me requires the field non-empty.
+func extractAreaCode(phone string) string {
+	cleaned := stripPhonePrefix(phone)
 	if len(cleaned) >= 2 {
 		return cleaned[:2]
 	}
-	return "11" // Default to Sao Paulo area code
+	return "11"
 }
 
-// Helper function to extract phone number without area code
+// extractPhoneNumber returns the local-part digits (everything after the DDD).
 func extractPhoneNumber(phone string) string {
-	// Remove non-numeric characters
-	cleaned := ""
-	for _, r := range phone {
-		if r >= '0' && r <= '9' {
-			cleaned += string(r)
-		}
-	}
-	// Skip area code (first 2 digits)
+	cleaned := stripPhonePrefix(phone)
 	if len(cleaned) > 2 {
 		return cleaned[2:]
 	}
@@ -460,53 +472,45 @@ func (p *Pagarme) GetPublicKey(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("public key not available. Please configure the Pagar.me public key")
 }
 
-// ProcessCardPayment processes a payment with a tokenized card.
+// ProcessCardPayment processes a payment with a tokenized card via the
+// Pagar.me v5 /orders endpoint. The X-Idempotency-Key is a fresh UUID per
+// call (not derived from cart+amount) so a retry after a rejected attempt
+// gets evaluated as a new charge instead of replaying the cached failure.
 func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput) (*CardPaymentResult, error) {
 	url := pagarmeAPIBaseURL + "/orders"
 
-	// Build items array
 	items := make([]map[string]any, len(input.Items))
 	for i, item := range input.Items {
 		items[i] = map[string]any{
-			"amount":      item.UnitPrice, // Already in cents
+			"amount":      item.UnitPrice,
 			"description": item.Name,
 			"quantity":    item.Quantity,
 			"code":        item.ID,
 		}
 	}
 
-	// Build customer object
-	customer := map[string]any{
-		"name":  input.Customer.Name,
-		"email": input.Customer.Email,
-		"type":  "individual",
+	customer := buildPagarmeCustomer(input.Customer)
+
+	// holder_document on the card boosts approval rate with most adquirentes
+	// (some hard-reject without it). Optional in the API but we always send
+	// it when the buyer's CPF is captured at checkout.
+	cardConfig := map[string]any{
+		"card_token":           input.Token,
+		"installments":         input.Installments,
+		"statement_descriptor": "LIVECART",
+		"capture":              true,
 	}
 	if input.Customer.Document != "" {
-		customer["document"] = input.Customer.Document
-		customer["document_type"] = "cpf"
-	}
-	if input.Customer.Phone != "" {
-		customer["phones"] = map[string]any{
-			"mobile_phone": map[string]any{
-				"country_code": "55",
-				"area_code":    extractAreaCode(input.Customer.Phone),
-				"number":       extractPhoneNumber(input.Customer.Phone),
-			},
+		cardConfig["card"] = map[string]any{
+			"holder_document": input.Customer.Document,
 		}
 	}
 
-	// Build credit card payment
 	cardPayment := map[string]any{
 		"payment_method": "credit_card",
-		"credit_card": map[string]any{
-			"card_token":           input.Token,
-			"installments":         input.Installments,
-			"statement_descriptor": "LIVECART",
-			"capture":              true,
-		},
+		"credit_card":    cardConfig,
 	}
 
-	// Build payload
 	payload := map[string]any{
 		"code":     input.CartID,
 		"items":    items,
@@ -518,13 +522,26 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 		payload["metadata"] = input.Metadata
 	}
 
-	// Add idempotency key header
 	headers := p.authHeaders()
-	headers["X-Idempotency-Key"] = fmt.Sprintf("card-%s-%d", input.CartID, input.TotalAmount)
+	headers["X-Idempotency-Key"] = uuid.New().String()
 
 	resp, body, err := p.DoRequest(ctx, http.MethodPost, url, payload, headers)
 	if err != nil {
 		return nil, fmt.Errorf("processing card payment: %w", err)
+	}
+
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		errMsg := parsePagarmeError(body)
+		safe := redactCardPayload(payload)
+		p.Logger.Error("pagarme rejected card payment",
+			zap.Int("status_code", resp.StatusCode),
+			zap.String("body", string(body)),
+			zap.Any("request_payload", safe),
+		)
+		return &CardPaymentResult{
+			Status:  PaymentRejected,
+			Message: errMsg,
+		}, nil
 	}
 
 	var pgResp struct {
@@ -534,23 +551,9 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 		Status   string          `json:"status"`
 		Charges  []pagarmeCharge `json:"charges"`
 		Metadata map[string]any  `json:"metadata"`
-		Errors   []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
 	}
 	if err := json.Unmarshal(body, &pgResp); err != nil {
 		return nil, fmt.Errorf("parsing payment response: %w", err)
-	}
-
-	if !providers.IsSuccessStatus(resp.StatusCode) {
-		errMsg := "payment failed"
-		if len(pgResp.Errors) > 0 {
-			errMsg = pgResp.Errors[0].Message
-		}
-		return &CardPaymentResult{
-			Status:  PaymentRejected,
-			Message: errMsg,
-		}, nil
 	}
 
 	result := &CardPaymentResult{
@@ -562,10 +565,11 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 		Message:           getPagarmeStatusMessage(pgResp.Status),
 	}
 
-	// Get card info from charge if available
+	var statusDetail string
 	if len(pgResp.Charges) > 0 {
 		charge := pgResp.Charges[0]
 		if charge.LastTransaction != nil {
+			statusDetail = charge.LastTransaction.Status
 			if card := charge.LastTransaction.Card; card != nil {
 				result.LastFourDigits = card.LastFourDigits
 				result.CardBrand = card.Brand
@@ -589,22 +593,42 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 			}
 		}
 	}
+	result.StatusDetail = statusDetail
+
+	p.Logger.Info("pagarme card payment captured",
+		zap.String("payment_id", result.PaymentID),
+		zap.String("cart_id", input.CartID),
+		zap.String("status", string(result.Status)),
+		zap.String("status_detail", statusDetail),
+		zap.String("payment_method_id", "credit_card"),
+		zap.String("card_brand", result.CardBrand),
+		zap.Int("installments", result.Installments),
+		zap.Int64("amount_cents", result.Amount),
+		zap.String("authorization_code", result.AuthorizationCode),
+		zap.Bool("has_paid_at", result.PaidAt != nil),
+	)
 
 	return result, nil
 }
 
-// GeneratePixPayment generates a PIX QR code for payment.
+// GeneratePixPayment generates a PIX QR code via Pagar.me v5 /orders.
+// Pagar.me requires customer.phones for PIX, so we reject upfront when
+// the cart has no phone instead of letting the gateway return an opaque
+// 422. The X-Idempotency-Key is a fresh UUID per call so a retry after
+// expiration issues a new QR instead of replaying the dead one.
 func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput) (*PixPaymentResult, error) {
+	if strings.TrimSpace(input.Customer.Phone) == "" {
+		return nil, fmt.Errorf("telefone do comprador é obrigatório para pagamento PIX")
+	}
+
 	url := pagarmeAPIBaseURL + "/orders"
 
-	// Set default expiration if not provided
 	expiresIn := 30 * time.Minute
 	if input.ExpiresIn != nil {
 		expiresIn = *input.ExpiresIn
 	}
 	expiresAt := time.Now().Add(expiresIn)
 
-	// Build items array
 	items := make([]map[string]any, len(input.Items))
 	for i, item := range input.Items {
 		items[i] = map[string]any{
@@ -615,27 +639,8 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 		}
 	}
 
-	// Build customer object
-	customer := map[string]any{
-		"name":  input.Customer.Name,
-		"email": input.Customer.Email,
-		"type":  "individual",
-	}
-	if input.Customer.Document != "" {
-		customer["document"] = input.Customer.Document
-		customer["document_type"] = "cpf"
-	}
-	if input.Customer.Phone != "" {
-		customer["phones"] = map[string]any{
-			"mobile_phone": map[string]any{
-				"country_code": "55",
-				"area_code":    extractAreaCode(input.Customer.Phone),
-				"number":       extractPhoneNumber(input.Customer.Phone),
-			},
-		}
-	}
+	customer := buildPagarmeCustomer(input.Customer)
 
-	// Build PIX payment
 	pixPayment := map[string]any{
 		"payment_method": "pix",
 		"amount":         input.TotalAmount,
@@ -644,7 +649,6 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 		},
 	}
 
-	// Build payload
 	payload := map[string]any{
 		"code":     input.CartID,
 		"items":    items,
@@ -656,13 +660,23 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 		payload["metadata"] = input.Metadata
 	}
 
-	// Add idempotency key header
 	headers := p.authHeaders()
-	headers["X-Idempotency-Key"] = fmt.Sprintf("pix-%s-%d", input.CartID, input.TotalAmount)
+	headers["X-Idempotency-Key"] = uuid.New().String()
 
 	resp, body, err := p.DoRequest(ctx, http.MethodPost, url, payload, headers)
 	if err != nil {
 		return nil, fmt.Errorf("generating pix payment: %w", err)
+	}
+
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		errMsg := parsePagarmeError(body)
+		p.Logger.Error("pagarme rejected pix generation",
+			zap.Int("status_code", resp.StatusCode),
+			zap.String("body", string(body)),
+			zap.String("cart_id", input.CartID),
+			zap.Int64("amount_cents", input.TotalAmount),
+		)
+		return nil, fmt.Errorf("%s", errMsg)
 	}
 
 	var pgResp struct {
@@ -672,23 +686,11 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 		Status   string          `json:"status"`
 		Charges  []pagarmeCharge `json:"charges"`
 		Metadata map[string]any  `json:"metadata"`
-		Errors   []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
 	}
 	if err := json.Unmarshal(body, &pgResp); err != nil {
 		return nil, fmt.Errorf("parsing pix response: %w", err)
 	}
 
-	if !providers.IsSuccessStatus(resp.StatusCode) {
-		errMsg := "pix generation failed"
-		if len(pgResp.Errors) > 0 {
-			errMsg = pgResp.Errors[0].Message
-		}
-		return nil, fmt.Errorf(errMsg)
-	}
-
-	// Get PIX data from charge
 	var qrCode, qrCodeText string
 	if len(pgResp.Charges) > 0 && pgResp.Charges[0].LastTransaction != nil {
 		if pix := pgResp.Charges[0].LastTransaction.Pix; pix != nil {
@@ -702,6 +704,13 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 		}
 	}
 
+	p.Logger.Info("pagarme pix generated",
+		zap.String("payment_id", pgResp.ID),
+		zap.String("cart_id", input.CartID),
+		zap.Int64("amount_cents", int64(pgResp.Amount)),
+		zap.String("expires_at", expiresAt.Format(time.RFC3339)),
+	)
+
 	return &PixPaymentResult{
 		PaymentID:         pgResp.ID,
 		Status:            PaymentPending,
@@ -711,6 +720,118 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 		ExpiresAt:         expiresAt,
 		ExternalReference: pgResp.Code,
 	}, nil
+}
+
+// buildPagarmeCustomer maps our internal CheckoutCustomer onto the
+// Pagar.me v5 customer payload shared by Card / PIX / Checkout flows.
+func buildPagarmeCustomer(c CheckoutCustomer) map[string]any {
+	customer := map[string]any{
+		"name":  c.Name,
+		"email": c.Email,
+		"type":  "individual",
+	}
+	if c.Document != "" {
+		customer["document"] = c.Document
+		customer["document_type"] = "cpf"
+	}
+	if c.Phone != "" {
+		customer["phones"] = map[string]any{
+			"mobile_phone": map[string]any{
+				"country_code": "55",
+				"area_code":    extractAreaCode(c.Phone),
+				"number":       extractPhoneNumber(c.Phone),
+			},
+		}
+	}
+	if c.Address != nil {
+		address := map[string]any{
+			"country":      "BR",
+			"zip_code":     c.Address.ZipCode,
+			"line_1":       buildPagarmeLine1(c.Address.Street, c.Address.Number, c.Address.Neighborhood),
+			"city":         c.Address.City,
+			"state":        c.Address.State,
+		}
+		if c.Address.Complement != "" {
+			address["line_2"] = c.Address.Complement
+		}
+		customer["address"] = address
+	}
+	return customer
+}
+
+// buildPagarmeLine1 assembles the Pagar.me line_1 field (free-form street
+// address). Pagar.me v5 does not have separate street_name / street_number
+// fields like MP — it expects "Rua X, 123, Bairro Y" in a single string.
+func buildPagarmeLine1(street, number, neighborhood string) string {
+	parts := make([]string, 0, 3)
+	if street != "" {
+		parts = append(parts, street)
+	}
+	if number != "" {
+		parts = append(parts, number)
+	}
+	if neighborhood != "" {
+		parts = append(parts, neighborhood)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// parsePagarmeError extracts a user-friendly message out of a Pagar.me v5
+// error response. The shape is `{ "message": "...", "errors": { "field":
+// ["msg1", "msg2"], ... } }` — we surface the first field-level message
+// when present (more actionable than the generic top-level `message`),
+// falling back to `message` and finally to the raw body.
+func parsePagarmeError(body []byte) string {
+	var parsed struct {
+		Message string              `json:"message"`
+		Errors  map[string][]string `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &parsed); err == nil {
+		for field, msgs := range parsed.Errors {
+			if len(msgs) > 0 {
+				return fmt.Sprintf("%s: %s", field, msgs[0])
+			}
+		}
+		if parsed.Message != "" {
+			return parsed.Message
+		}
+	}
+	if len(body) > 0 {
+		return string(body)
+	}
+	return "pagamento rejeitado pela Pagar.me"
+}
+
+// redactCardPayload strips the card token from a payload before logging.
+// Pagar.me's card_token is single-use but leaking it in logs still risks
+// it being replayed before the gateway invalidates it.
+func redactCardPayload(payload map[string]any) map[string]any {
+	clone := make(map[string]any, len(payload))
+	for k, v := range payload {
+		clone[k] = v
+	}
+	if payments, ok := clone["payments"].([]map[string]any); ok && len(payments) > 0 {
+		safePayments := make([]map[string]any, 0, len(payments))
+		for _, pmt := range payments {
+			cp := make(map[string]any, len(pmt))
+			for k, v := range pmt {
+				cp[k] = v
+			}
+			if cc, ok := cp["credit_card"].(map[string]any); ok {
+				ccc := make(map[string]any, len(cc))
+				for k, v := range cc {
+					ccc[k] = v
+				}
+				if _, ok := ccc["card_token"]; ok {
+					ccc["card_token"] = "[redacted]"
+				}
+				cp["credit_card"] = ccc
+			}
+			safePayments = append(safePayments, cp)
+		}
+		clone["payments"] = safePayments
+	}
+	return clone
 }
 
 // GetPaymentMethods returns the available payment methods.

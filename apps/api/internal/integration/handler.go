@@ -52,6 +52,11 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// OAuth connect
 	g.Get("/oauth/:provider/connect", h.OAuthConnect)
 
+	// Payment — provider-specific connect (no OAuth). Pagar.me uses static
+	// API keys (sk_*/pk_*), so the merchant pastes them into a form and we
+	// validate live against the gateway before persisting.
+	g.Post("/payment/pagarme/connect", h.ConnectPagarme)
+
 	// Shipping — token-based connect (no OAuth) + order lifecycle helpers.
 	// These are typed at the provider level because each shipping provider
 	// has its own auth model; routing by :provider keeps a single surface.

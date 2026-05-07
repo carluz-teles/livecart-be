@@ -1393,6 +1393,155 @@ func (s *Service) ConnectSmartEnvios(ctx context.Context, input ConnectSmartEnvi
 	return s.toCreateOutput(row), nil
 }
 
+// =============================================================================
+// CONNECT PAGAR.ME
+// =============================================================================
+
+// ConnectPagarmeInput is the admin payload to set up or rotate the Pagar.me
+// payment integration for a store. Pagar.me uses static API keys (no OAuth),
+// so the merchant pastes secret + public into a form and we validate live.
+type ConnectPagarmeInput struct {
+	StoreID         string
+	SecretKey       string
+	PublicKey       string
+	WebhookUsername string
+	WebhookPassword string
+}
+
+// ConnectPagarmeOutput mirrors CreateIntegrationOutput for API responses.
+type ConnectPagarmeOutput = CreateIntegrationOutput
+
+// ConnectPagarme validates a Pagar.me secret key via TestConnection and
+// persists (or updates) the integration as active. The "environment" is
+// derived from the key prefix (sk_test_ → sandbox, sk_live_ → production)
+// — Pagar.me has no separate sandbox host; the prefix is the only switch.
+func (s *Service) ConnectPagarme(ctx context.Context, input ConnectPagarmeInput) (*ConnectPagarmeOutput, error) {
+	secret := strings.TrimSpace(input.SecretKey)
+	public := strings.TrimSpace(input.PublicKey)
+	if secret == "" {
+		return nil, httpx.ErrBadRequest("chave secreta é obrigatória")
+	}
+	if public == "" {
+		return nil, httpx.ErrBadRequest("chave pública é obrigatória")
+	}
+
+	secretEnv := pagarmeKeyEnvironment(secret, "sk_")
+	publicEnv := pagarmeKeyEnvironment(public, "pk_")
+	if secretEnv == "" {
+		return nil, httpx.ErrBadRequest("chave secreta inválida — deve começar com sk_test_ ou sk_live_")
+	}
+	if publicEnv == "" {
+		return nil, httpx.ErrBadRequest("chave pública inválida — deve começar com pk_test_ ou pk_live_")
+	}
+	if secretEnv != publicEnv {
+		return nil, httpx.ErrBadRequest("as chaves precisam ser do mesmo ambiente (ambas test ou ambas live)")
+	}
+
+	creds := &providers.Credentials{
+		APIKey:    secret,
+		APISecret: public,
+		Extra: map[string]any{
+			"public_key":  public,
+			"environment": secretEnv,
+		},
+	}
+	if input.WebhookUsername != "" {
+		creds.Extra["webhook_username"] = input.WebhookUsername
+	}
+	if input.WebhookPassword != "" {
+		creds.Extra["webhook_password"] = input.WebhookPassword
+	}
+
+	probe, err := s.factory.CreatePaymentProvider(providers.ProviderConfig{
+		IntegrationID: "probe",
+		StoreID:       input.StoreID,
+		Type:          providers.ProviderTypePayment,
+		Name:          providers.ProviderPagarme,
+		Credentials:   creds,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("instantiating pagarme provider: %w", err)
+	}
+	probeResult, err := probe.TestConnection(ctx)
+	if err != nil {
+		return nil, httpx.ErrUnprocessable("falha ao validar chave Pagar.me: " + err.Error())
+	}
+	if probeResult == nil || !probeResult.Success {
+		msg := "chave rejeitada pela Pagar.me"
+		if probeResult != nil && probeResult.Message != "" {
+			msg = probeResult.Message
+		}
+		return nil, httpx.ErrUnprocessable("falha ao validar chave Pagar.me: " + msg)
+	}
+
+	encrypted, err := s.encryptor.EncryptJSON(creds)
+	if err != nil {
+		return nil, fmt.Errorf("encrypting pagarme credentials: %w", err)
+	}
+
+	metadata := map[string]any{
+		"public_key":  public,
+		"environment": secretEnv,
+	}
+	if probeResult.AccountInfo != nil {
+		if name, ok := probeResult.AccountInfo["name"].(string); ok && name != "" {
+			metadata["accountName"] = name
+		}
+	}
+
+	existing, err := s.repo.GetByProvider(ctx, input.StoreID, string(providers.ProviderTypePayment), string(providers.ProviderPagarme))
+	if err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return nil, err
+		}
+		existing = nil
+	}
+
+	if existing != nil {
+		if err := s.repo.UpdateCredentials(ctx, existing.ID, encrypted, nil); err != nil {
+			return nil, err
+		}
+		if err := s.repo.UpdateMetadata(ctx, existing.ID, metadata); err != nil {
+			return nil, err
+		}
+		if err := s.repo.UpdateStatus(ctx, existing.ID, "active"); err != nil {
+			return nil, err
+		}
+		row, err := s.repo.GetByID(ctx, existing.ID, input.StoreID)
+		if err != nil {
+			return nil, err
+		}
+		return s.toCreateOutput(row), nil
+	}
+
+	row, err := s.repo.Create(ctx, CreateIntegrationParams{
+		StoreID:     input.StoreID,
+		Type:        string(providers.ProviderTypePayment),
+		Provider:    string(providers.ProviderPagarme),
+		Status:      "active",
+		Credentials: encrypted,
+		Metadata:    metadata,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.toCreateOutput(row), nil
+}
+
+// pagarmeKeyEnvironment returns "sandbox" / "production" / "" based on the
+// key prefix. Pagar.me v5 uses sk_test_ / sk_live_ for secrets and
+// pk_test_ / pk_live_ for public keys — the test/live segment is the only
+// distinction between sandbox and production.
+func pagarmeKeyEnvironment(key, scope string) string {
+	switch {
+	case strings.HasPrefix(key, scope+"test_"):
+		return "sandbox"
+	case strings.HasPrefix(key, scope+"live_"):
+		return "production"
+	}
+	return ""
+}
+
 // GetSocialProvider returns a SocialProvider for the given integration.
 func (s *Service) GetSocialProvider(ctx context.Context, integrationID, storeID string) (providers.SocialProvider, error) {
 	integration, err := s.repo.GetByID(ctx, integrationID, storeID)
