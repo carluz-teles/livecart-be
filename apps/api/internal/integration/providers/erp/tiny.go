@@ -1063,14 +1063,13 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		pagamento := map[string]any{
 			"parcelas": parcelas,
 		}
-		if meioRef != nil {
-			// Mirror at parent level so Tiny applies it as default for the
-			// pagamento block (matches the v3 schema example).
-			pagamento["meioPagamento"] = meioRef
-		}
-		if recebRef != nil {
-			pagamento["formaRecebimento"] = recebRef
-		}
+		// meioPagamento and formaRecebimento live INSIDE each parcela
+		// (see ParcelaModelRequest in the Tiny v3 swagger). An earlier
+		// version mirrored them at the pagamento parent level "as a
+		// default" — Tiny started strict-validating that field and
+		// rejecting orders with `pagamento.meioPagamento.id: Meio de
+		// pagamento não encontrado`. The parcela-level refs alone are
+		// what the API actually expects.
 		payload["pagamento"] = pagamento
 
 		// Snapshot of the parcela schedule for log audit. With this we can
