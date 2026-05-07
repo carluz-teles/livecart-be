@@ -10,9 +10,17 @@ import (
 	"livecart/apps/api/lib/httpx"
 )
 
+// ERPFinalisationRetrier is fulfilled by integration.Service. We invert the
+// dependency so the order package doesn't import integration directly (which
+// would loop the import graph).
+type ERPFinalisationRetrier interface {
+	RetryERPFinalisation(ctx context.Context, cartID, storeID string) error
+}
+
 type Service struct {
-	repo   *Repository
-	logger *zap.Logger
+	repo            *Repository
+	logger          *zap.Logger
+	erpRetryService ERPFinalisationRetrier
 }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {
@@ -20,6 +28,29 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 		repo:   repo,
 		logger: logger.Named("order"),
 	}
+}
+
+// SetERPFinalisationRetrier wires the integration service that knows how to
+// rerun the post-payment ERP flow on a previously-failed cart. Called once
+// at app boot from main.go after both services exist.
+func (s *Service) SetERPFinalisationRetrier(r ERPFinalisationRetrier) {
+	s.erpRetryService = r
+}
+
+// RetryERPFinalisation re-runs the post-payment ERP order creation for an
+// order whose Tiny finalisation previously failed. Validates that the order
+// belongs to the store before delegating — the integration service trusts
+// its callers to have done the storeID check.
+func (s *Service) RetryERPFinalisation(ctx context.Context, orderID, storeID string) error {
+	if s.erpRetryService == nil {
+		return httpx.ErrUnprocessable("retry de ERP indisponível")
+	}
+	// Reuse the existing scoped lookup so a hostile storeID can't trigger a
+	// retry on someone else's cart.
+	if _, err := s.GetByID(ctx, orderID, storeID); err != nil {
+		return err
+	}
+	return s.erpRetryService.RetryERPFinalisation(ctx, orderID, storeID)
 }
 
 func (s *Service) List(ctx context.Context, input ListOrdersInput) (ListOrdersOutput, error) {
@@ -248,6 +279,15 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 		},
 		PackageWeightGrams: row.StoreDefaultPkgWeightGrams,
 		PackageFormat:      row.StoreDefaultPkgFormat,
+	}
+
+	// ERP finalisation lifecycle. Always populated — the FE decides whether
+	// to render the retry banner based on Status.
+	out.ERPFinalisation = &ERPFinalisationOutput{
+		Status:        row.ERPFinalisationStatus,
+		LastError:     row.ERPLastError,
+		LastAttemptAt: row.ERPLastAttemptAt,
+		AttemptsCount: row.ERPAttemptsCount,
 	}
 
 	// Shipment (may be absent). Events are loaded in a follow-up query.

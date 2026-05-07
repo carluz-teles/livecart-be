@@ -26,6 +26,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Patch("/:id", h.Update)
 	g.Patch("/:id/shipping-address", h.UpdateShippingAddress)
 	g.Post("/:id/regenerate-checkout", h.RegenerateCheckout)
+	g.Post("/:id/retry-erp", h.RetryERPFinalisation)
 }
 
 // List godoc
@@ -259,6 +260,39 @@ func (h *Handler) RegenerateCheckout(c *fiber.Ctx) error {
 	return httpx.OK(c, RegenerateCheckoutResponse{Token: token, ExpiresAt: expiresAt})
 }
 
+// RetryERPFinalisation godoc
+// @Summary      Retry ERP order creation for a paid cart
+// @Description  Re-runs the post-payment Tiny order creation for an order
+// @Description  whose finalisation previously failed. Stock stays held against
+// @Description  the cart between attempts, so retrying never overcommits or
+// @Description  releases inventory. No-op when the cart is already finalised;
+// @Description  errors when finalisation is still in 'pending' state.
+// @Tags         orders
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Order UUID"
+// @Success      200 {object} httpx.Envelope{data=OrderDetailResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Failure      422 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/orders/{id}/retry-erp [post]
+// @Security     BearerAuth
+func (h *Handler) RetryERPFinalisation(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
+
+	if err := h.service.RetryERPFinalisation(c.Context(), id, storeID); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	// Return the refreshed order detail so the FE can swap the banner state
+	// in-place without a follow-up request.
+	output, err := h.service.GetDetailByID(c.Context(), id, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, toOrderDetailResponse(*output))
+}
+
 func parseOrderFilters(c *fiber.Ctx) OrderFilters {
 	var filters OrderFilters
 
@@ -442,6 +476,15 @@ func toOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 			CreatedAt:           o.Shipment.CreatedAt,
 			UpdatedAt:           o.Shipment.UpdatedAt,
 			Events:              events,
+		}
+	}
+	if o.ERPFinalisation != nil {
+		resp.ERPFinalisation = &ERPFinalisationResponse{
+			Status:        o.ERPFinalisation.Status,
+			LastError:     o.ERPFinalisation.LastError,
+			LastAttemptAt: o.ERPFinalisation.LastAttemptAt,
+			AttemptsCount: o.ERPFinalisation.AttemptsCount,
+			CanRetry:      o.ERPFinalisation.Status == "failed",
 		}
 	}
 	if o.Store != nil {

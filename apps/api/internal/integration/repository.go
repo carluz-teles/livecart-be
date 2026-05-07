@@ -1077,6 +1077,83 @@ func (r *Repository) UpdateCartExternalOrderID(ctx context.Context, cartID, exte
 	})
 }
 
+// MarkCartERPFinalisationDone flips the cart out of pending/failed and into
+// the terminal "done" state once the Tiny order is successfully created. The
+// attempts counter is bumped so the admin retry UI can show "took N tries".
+func (r *Repository) MarkCartERPFinalisationDone(ctx context.Context, cartID string) error {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	return r.queries.MarkCartERPFinalisationDone(ctx, id)
+}
+
+// MarkCartERPFinalisationFailed records a finalisation failure on the cart
+// so the admin order page can show the error and a retry button. The caller
+// is responsible for re-creating the saída-manual reservations in Tiny BEFORE
+// calling this — the cart row must reach the "failed" state already with the
+// stock held against it, never released.
+//
+// paymentSnapshot is the JSON-serialised providers.PaymentStatus from the
+// initial webhook attempt. It's stored COALESCE-style so the original
+// gateway snapshot is preserved across retries (the SQL guards against
+// overwrite); pass an empty slice on retry calls.
+func (r *Repository) MarkCartERPFinalisationFailed(ctx context.Context, cartID, errMsg string, paymentSnapshot []byte) error {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	return r.queries.MarkCartERPFinalisationFailed(ctx, sqlc.MarkCartERPFinalisationFailedParams{
+		ID:                 id,
+		ErpLastError:       pgtype.Text{String: errMsg, Valid: errMsg != ""},
+		ErpPaymentSnapshot: paymentSnapshot,
+	})
+}
+
+// CartERPFinalisationRow is the slim view used by the admin retry endpoint
+// and order detail page. Status follows the cart column lifecycle:
+// pending|done|failed.
+type CartERPFinalisationRow struct {
+	CartID          string
+	Status          string
+	LastError       string
+	LastAttemptAt   *time.Time
+	AttemptsCount   int
+	ExternalOrderID string
+	PaymentSnapshot []byte
+}
+
+// GetCartERPFinalisationStatus reads the cart's ERP finalisation lifecycle
+// fields. Used by the admin retry endpoint to gate the retry on
+// status='failed' and surface the error verbatim on the order detail page.
+func (r *Repository) GetCartERPFinalisationStatus(ctx context.Context, cartID string) (*CartERPFinalisationRow, error) {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.GetCartERPFinalisationStatus(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	out := &CartERPFinalisationRow{
+		CartID:          uuidToString(row.ID),
+		Status:          row.ErpFinalisationStatus,
+		AttemptsCount:   int(row.ErpAttemptsCount),
+		PaymentSnapshot: row.ErpPaymentSnapshot,
+	}
+	if row.ErpLastError.Valid {
+		out.LastError = row.ErpLastError.String
+	}
+	if row.ErpLastAttemptAt.Valid {
+		t := row.ErpLastAttemptAt.Time
+		out.LastAttemptAt = &t
+	}
+	if row.ExternalOrderID.Valid {
+		out.ExternalOrderID = row.ExternalOrderID.String
+	}
+	return out, nil
+}
+
 // NonWaitlistedCartItem represents a cart item that is not waitlisted, with product info.
 type NonWaitlistedCartItem struct {
 	ID                string

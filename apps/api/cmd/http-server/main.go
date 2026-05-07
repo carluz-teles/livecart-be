@@ -506,6 +506,12 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	orderRepo := order.NewRepository(pool)
 	orderSvc := order.NewService(orderRepo, log)
+	if integrationSvc != nil {
+		// Wire the ERP-finalisation retry path: the admin "tentar novamente"
+		// button on a failed paid cart routes through orderSvc but the actual
+		// re-creation lives on the integration service.
+		orderSvc.SetERPFinalisationRetrier(integrationSvc)
+	}
 	orderHandler := order.NewHandler(orderSvc, validate)
 	orderHandler.RegisterRoutes(storeScoped)
 

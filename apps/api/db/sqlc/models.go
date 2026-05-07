@@ -72,6 +72,16 @@ type Cart struct {
 	CouponCode           pgtype.Text `json:"coupon_code"`
 	CouponDiscountCents  int64       `json:"coupon_discount_cents"`
 	TrackingToken        pgtype.Text `json:"tracking_token"`
+	// pending|done|failed — set on paid carts to track post-payment ERP order creation. failed means stock stays reserved against this cart and the merchant can retry from the admin.
+	ErpFinalisationStatus string `json:"erp_finalisation_status"`
+	// Last error message from a failed ERP finalisation attempt. Surfaced verbatim on the order detail page.
+	ErpLastError pgtype.Text `json:"erp_last_error"`
+	// Timestamp of the most recent ERP finalisation attempt (success or failure).
+	ErpLastAttemptAt pgtype.Timestamptz `json:"erp_last_attempt_at"`
+	// Total number of ERP finalisation attempts on this cart, including the initial one.
+	ErpAttemptsCount int32 `json:"erp_attempts_count"`
+	// JSON snapshot of providers.PaymentStatus captured on first finalisation attempt. Used to replay createFinalERPOrder on retry without re-fetching from the gateway.
+	ErpPaymentSnapshot json.RawMessage `json:"erp_payment_snapshot"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.
@@ -302,6 +312,8 @@ type LiveEvent struct {
 	Description pgtype.Text `json:"description"`
 	// When true, charge the customer R$0 shipping regardless of the quoted price (real cost is still recorded on the cart)
 	FreeShipping bool `json:"free_shipping"`
+	// Discount percent applied at checkout when the buyer pays with Pix (0-100). 0 disables the feature.
+	PixDiscountPercent int32 `json:"pix_discount_percent"`
 }
 
 type LiveSession struct {

@@ -135,6 +135,18 @@ type OrderDetailResponse struct {
 	Shipping        *OrderShippingSelectionResp   `json:"shipping,omitempty"`
 	Shipment        *OrderShipmentResponse        `json:"shipment,omitempty"`
 	Store           *OrderStoreResponse           `json:"store,omitempty"`
+	ERPFinalisation *ERPFinalisationResponse      `json:"erpFinalisation,omitempty"`
+}
+
+// ERPFinalisationResponse is the FE-visible projection of the cart's ERP
+// finalisation lifecycle. Sent on every paid-cart detail; the FE shows the
+// retry banner only when Status == "failed".
+type ERPFinalisationResponse struct {
+	Status        string     `json:"status"` // pending | done | failed
+	LastError     string     `json:"lastError,omitempty"`
+	LastAttemptAt *time.Time `json:"lastAttemptAt,omitempty"`
+	AttemptsCount int        `json:"attemptsCount"`
+	CanRetry      bool       `json:"canRetry"`
 }
 
 // OrderCustomerResponse mirrors the customer_* columns on carts captured at checkout.
@@ -494,6 +506,14 @@ type OrderDetailRow struct {
 	StoreAddressState          string
 	StoreDefaultPkgWeightGrams int
 	StoreDefaultPkgFormat      string
+
+	// ERP finalisation lifecycle on the underlying cart. Surfaced on the
+	// admin order detail so the page can show a "tentar novamente" banner
+	// when the post-payment Tiny order creation failed mid-flow.
+	ERPFinalisationStatus string
+	ERPLastError          string
+	ERPLastAttemptAt      *time.Time
+	ERPAttemptsCount      int
 }
 
 // OrderShipmentRecord is the projection of `shipments` used by order service.
@@ -592,11 +612,23 @@ type OrderDetailOutput struct {
 	// Cart token used to build the public checkout link (/cart/{token}). Only
 	// surfaced on the detail endpoint because the admin actions menu builds the
 	// shareable URL from it.
-	Token           string
-	Comments        []CommentOutput
-	Customer        *OrderCustomerOutput
-	ShippingAddress *OrderShippingAddressOutput
-	Shipping        *OrderShippingOutput
-	Shipment        *OrderShipmentOutput
-	Store           *OrderStoreOutput
+	Token            string
+	Comments         []CommentOutput
+	Customer         *OrderCustomerOutput
+	ShippingAddress  *OrderShippingAddressOutput
+	Shipping         *OrderShippingOutput
+	Shipment         *OrderShipmentOutput
+	Store            *OrderStoreOutput
+	ERPFinalisation  *ERPFinalisationOutput
+}
+
+// ERPFinalisationOutput exposes the cart's ERP finalisation lifecycle to the
+// admin order detail page. Drives the "tentar novamente" banner: when status
+// is "failed" the FE shows the error and a retry button; otherwise the
+// section stays hidden.
+type ERPFinalisationOutput struct {
+	Status        string     // pending | done | failed
+	LastError     string     // populated when Status == "failed"
+	LastAttemptAt *time.Time // most recent attempt (success or failure)
+	AttemptsCount int        // includes the initial finalisation
 }

@@ -251,6 +251,37 @@ SELECT
 -- name: UpdateCartExternalOrderID :exec
 UPDATE carts SET external_order_id = $2 WHERE id = $1;
 
+-- name: MarkCartERPFinalisationDone :exec
+UPDATE carts
+SET erp_finalisation_status = 'done',
+    erp_last_error           = NULL,
+    erp_last_attempt_at      = now(),
+    erp_attempts_count       = erp_attempts_count + 1
+WHERE id = $1;
+
+-- name: MarkCartERPFinalisationFailed :exec
+-- erp_payment_snapshot is COALESCEd so the snapshot is only written on the
+-- first failure (initial finalisation attempt), preserving the gateway's
+-- canonical view of the payment for any number of subsequent retries.
+UPDATE carts
+SET erp_finalisation_status = 'failed',
+    erp_last_error           = $2,
+    erp_last_attempt_at      = now(),
+    erp_attempts_count       = erp_attempts_count + 1,
+    erp_payment_snapshot     = COALESCE(erp_payment_snapshot, $3)
+WHERE id = $1;
+
+-- name: GetCartERPFinalisationStatus :one
+SELECT id,
+       erp_finalisation_status,
+       erp_last_error,
+       erp_last_attempt_at,
+       erp_attempts_count,
+       erp_payment_snapshot,
+       external_order_id
+FROM carts
+WHERE id = $1;
+
 -- name: ListNonWaitlistedCartItems :many
 -- Returns cart items that have available (non-waitlisted) quantity, with product external_id for ERP sync
 -- Returns available_quantity = quantity - waitlisted_quantity

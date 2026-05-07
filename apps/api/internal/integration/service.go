@@ -2845,6 +2845,15 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 // finalizeCartERPOrder is the post-payment ERP workflow: reverse the Tiny
 // saída-manual reservations held during the live, then create a single sales
 // order already marked as paid, with customer identity and delivery address.
+//
+// Failure recovery: if the order creation throws AFTER we have already
+// reversed reservations, we re-create the saída-manual exits in Tiny and
+// new active reservation rows in the DB so the unit stays held against this
+// cart. The cart is then marked `erp_finalisation_status='failed'` with the
+// error message — the merchant sees a banner with a "Tentar novamente"
+// button on the order detail page. Stock is never silently released against
+// a paid cart, even when CreateOrder fails permanently.
+//
 // Idempotent by cart.external_order_id.
 func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID string, status *providers.PaymentStatus) error {
 	s.logger.Info("starting ERP finalisation for paid cart",
@@ -2904,7 +2913,12 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 		zap.String("cart_id", cartID),
 		zap.Int("reservations_count", len(reservations)),
 	)
-	reversed := 0
+
+	// Track which reservations actually made it through the Tiny reversal so
+	// we know which ones to re-create in the failure path. A reservation that
+	// failed to reverse is still "active" on Tiny's side — re-creating it
+	// would double-deduct stock.
+	reversedSnapshot := make([]StockReservationRow, 0, len(reservations))
 	for _, r := range reservations {
 		obs := fmt.Sprintf("Estorno reserva pós-pagamento - Cart %s", cartID)
 		if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
@@ -2917,7 +2931,7 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 			)
 			continue
 		}
-		reversed++
+		reversedSnapshot = append(reversedSnapshot, r)
 	}
 	if err := s.repo.ReverseReservationsByCart(ctx, cartID); err != nil {
 		s.logger.Error("failed to mark reservations reversed",
@@ -2928,11 +2942,141 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 	s.logger.Info("ERP stock reservations reversed",
 		zap.String("cart_id", cartID),
 		zap.Int("requested", len(reservations)),
-		zap.Int("succeeded", reversed),
+		zap.Int("succeeded", len(reversedSnapshot)),
 	)
 
-	// 2. Create the paid sales order.
-	return s.createFinalERPOrder(ctx, erpProvider, erpIntegration, storeID, cart.EventID, *cart, status)
+	// 2. Create the paid sales order. On failure, re-reserve and surface the
+	//    error to the merchant via cart.erp_finalisation_status='failed'.
+	createErr := s.createFinalERPOrder(ctx, erpProvider, erpIntegration, storeID, cart.EventID, *cart, status)
+	if createErr != nil {
+		s.reReserveAfterFailedFinalisation(ctx, erpProvider, cartID, cart.EventID, reversedSnapshot)
+		// JSON-encode the gateway PaymentStatus so the admin retry path
+		// can replay the order creation without a fresh webhook. Errors
+		// here are non-fatal — the failed cart is still flagged, just
+		// without the snapshot.
+		var snapshot []byte
+		if status != nil {
+			if b, encErr := json.Marshal(status); encErr == nil {
+				snapshot = b
+			} else {
+				s.logger.Warn("failed to encode payment status snapshot",
+					zap.String("cart_id", cartID),
+					zap.Error(encErr),
+				)
+			}
+		}
+		if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, createErr.Error(), snapshot); markErr != nil {
+			s.logger.Error("failed to mark cart ERP finalisation failed",
+				zap.String("cart_id", cartID),
+				zap.Error(markErr),
+			)
+		}
+		return createErr
+	}
+
+	if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
+		// The order is in Tiny — don't propagate. Just log so the cart
+		// shows up in the admin "stuck pending" view if the column ever
+		// drifts from reality.
+		s.logger.Error("failed to mark cart ERP finalisation done",
+			zap.String("cart_id", cartID),
+			zap.Error(markErr),
+		)
+	}
+	return nil
+}
+
+// reReserveAfterFailedFinalisation re-creates Tiny saída-manual exits for the
+// reservations we reversed during the failed finalisation, and inserts new
+// active rows in stock_reservations so the cart still owns the units. Errors
+// here are logged but never returned — the caller's primary signal is the
+// upstream createFinalERPOrder error, and we don't want to mask it. Even a
+// partial success keeps more stock held than the alternative of releasing
+// everything.
+func (s *Service) reReserveAfterFailedFinalisation(ctx context.Context, erpProvider providers.ERPProvider, cartID, eventID string, snapshot []StockReservationRow) {
+	if len(snapshot) == 0 {
+		return
+	}
+	s.logger.Warn("re-reserving stock after failed ERP finalisation",
+		zap.String("cart_id", cartID),
+		zap.Int("reservations_count", len(snapshot)),
+	)
+	restored := 0
+	for _, r := range snapshot {
+		obs := fmt.Sprintf("Re-reserva pós-falha de finalização - Cart %s", cartID)
+		movementID, reserveErr := erpProvider.ReserveStock(ctx, r.ExternalProductID, r.Quantity, 0, obs)
+		if reserveErr != nil {
+			s.logger.Error("failed to re-reserve stock after finalisation failure",
+				zap.String("cart_id", cartID),
+				zap.String("external_product_id", r.ExternalProductID),
+				zap.Int("quantity", r.Quantity),
+				zap.Error(reserveErr),
+			)
+			continue
+		}
+		if _, dbErr := s.repo.CreateStockReservation(ctx, CreateStockReservationParams{
+			EventID:           eventID,
+			CartID:            cartID,
+			ProductID:         r.ProductID,
+			ExternalProductID: r.ExternalProductID,
+			Quantity:          r.Quantity,
+			ERPMovementID:     movementID,
+		}); dbErr != nil {
+			// Tiny holds the stock, but our DB row failed. The reservation
+			// is real on the merchant's side — flag loudly so we can
+			// reconcile manually instead of silently losing the link.
+			s.logger.Error("re-reserved on Tiny but failed to persist reservation row",
+				zap.String("cart_id", cartID),
+				zap.String("external_product_id", r.ExternalProductID),
+				zap.String("erp_movement_id", movementID),
+				zap.Int("quantity", r.Quantity),
+				zap.Error(dbErr),
+			)
+			continue
+		}
+		restored++
+	}
+	s.logger.Info("re-reservation after failed ERP finalisation completed",
+		zap.String("cart_id", cartID),
+		zap.Int("requested", len(snapshot)),
+		zap.Int("succeeded", restored),
+	)
+}
+
+// RetryERPFinalisation is the admin-triggered retry of the post-payment ERP
+// flow for a cart that previously failed. It only runs on carts whose
+// finalisation is currently 'failed' (no-op on 'done', error on 'pending'
+// because that means the initial flow is still in progress and a retry would
+// race it).
+func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID string) error {
+	row, err := s.repo.GetCartERPFinalisationStatus(ctx, cartID)
+	if err != nil {
+		return fmt.Errorf("loading cart ERP status: %w", err)
+	}
+	switch row.Status {
+	case "done":
+		return nil
+	case "pending":
+		return httpx.ErrUnprocessable("aguarde a finalização inicial concluir antes de tentar de novo")
+	case "failed":
+		// proceed
+	default:
+		return httpx.ErrUnprocessable("estado inválido para retry: " + row.Status)
+	}
+
+	// Replay the original gateway PaymentStatus snapshot we captured at the
+	// first failure. The snapshot has the canonical fee/net/installments/
+	// money-release values the order needs — re-fetching from the gateway
+	// would work too but adds an external dependency to a manual action.
+	if len(row.PaymentSnapshot) == 0 {
+		return httpx.ErrUnprocessable("snapshot de pagamento ausente — retry não disponível")
+	}
+	var status providers.PaymentStatus
+	if err := json.Unmarshal(row.PaymentSnapshot, &status); err != nil {
+		return fmt.Errorf("decoding payment snapshot: %w", err)
+	}
+
+	return s.finalizeCartERPOrder(ctx, cartID, storeID, &status)
 }
 
 // =============================================================================
