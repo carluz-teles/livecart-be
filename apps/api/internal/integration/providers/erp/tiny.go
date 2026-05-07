@@ -1727,16 +1727,23 @@ func (t *Tiny) ReverseStockReservation(ctx context.Context, productID string, qt
 
 // SearchContacts searches for contacts by name in Tiny.
 // GET /contatos?nome={name}&limit=10
+//
+// CPF/CNPJ note: Tiny's /contatos search does literal string matching on the
+// stored value, and Tiny stores the document with its canonical mask
+// ("096.760.139-86" for CPF, "00.000.000/0000-00" for CNPJ). Sending raw
+// digits silently returns no matches even when the contact exists, which then
+// drives a duplicate-create against the very contact we were trying to find.
+// We normalise to the formatted variant before querying.
 func (t *Tiny) SearchContacts(ctx context.Context, params SearchContactsParams) ([]ERPContactResult, error) {
-	endpoint := tinyAPIBaseURL + "/contatos?"
-
+	q := url.Values{}
 	if params.Name != "" {
-		endpoint += fmt.Sprintf("nome=%s&", params.Name)
+		q.Set("nome", params.Name)
 	}
 	if params.CpfCnpj != "" {
-		endpoint += fmt.Sprintf("cpfCnpj=%s&", params.CpfCnpj)
+		q.Set("cpfCnpj", formatBrazilianDocument(params.CpfCnpj))
 	}
-	endpoint += "limit=10"
+	q.Set("limit", "10")
+	endpoint := tinyAPIBaseURL + "/contatos?" + q.Encode()
 
 	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
 	if err != nil {
@@ -1787,7 +1794,11 @@ func (t *Tiny) CreateContact(ctx context.Context, contact ERPContactInput) (*ERP
 		payload["tipoPessoa"] = "F" // Default: Pessoa Física
 	}
 	if contact.CpfCnpj != "" {
-		payload["cpfCnpj"] = contact.CpfCnpj
+		// Tiny stores the document in its canonical masked format, so we
+		// send it that way too. Keeps create/update symmetric with
+		// SearchContacts and avoids letting Tiny silently double-store
+		// the same document under different representations.
+		payload["cpfCnpj"] = formatBrazilianDocument(contact.CpfCnpj)
 	}
 	if contact.Email != "" {
 		payload["email"] = contact.Email
@@ -1835,6 +1846,28 @@ func (t *Tiny) CreateContact(ctx context.Context, contact ERPContactInput) (*ERP
 		ContactID: strconv.FormatInt(contactResp.ID, 10),
 		Name:      contact.Name,
 	}, nil
+}
+
+// formatBrazilianDocument returns CPF / CNPJ in Tiny's canonical masked
+// representation: "000.000.000-00" for 11 digits, "00.000.000/0000-00" for
+// 14 digits. Strips any existing punctuation/whitespace before formatting,
+// so it's safe to call on already-formatted input. Anything else (empty,
+// wrong length) is returned untouched — the caller will get back exactly
+// what it sent and Tiny will report whatever validation error applies.
+func formatBrazilianDocument(doc string) string {
+	digits := make([]byte, 0, len(doc))
+	for i := 0; i < len(doc); i++ {
+		if doc[i] >= '0' && doc[i] <= '9' {
+			digits = append(digits, doc[i])
+		}
+	}
+	switch len(digits) {
+	case 11:
+		return fmt.Sprintf("%s.%s.%s-%s", digits[0:3], digits[3:6], digits[6:9], digits[9:11])
+	case 14:
+		return fmt.Sprintf("%s.%s.%s/%s-%s", digits[0:2], digits[2:5], digits[5:8], digits[8:12], digits[12:14])
+	}
+	return doc
 }
 
 // maskEmail returns "abc***@domain.com" — preserves the domain (where most
@@ -1901,7 +1934,11 @@ func (t *Tiny) UpdateContact(ctx context.Context, contactID string, contact ERPC
 		payload["tipoPessoa"] = contact.PersonType
 	}
 	if contact.CpfCnpj != "" {
-		payload["cpfCnpj"] = contact.CpfCnpj
+		// Tiny stores the document in its canonical masked format, so we
+		// send it that way too. Keeps create/update symmetric with
+		// SearchContacts and avoids letting Tiny silently double-store
+		// the same document under different representations.
+		payload["cpfCnpj"] = formatBrazilianDocument(contact.CpfCnpj)
 	}
 	if contact.Email != "" {
 		payload["email"] = contact.Email
