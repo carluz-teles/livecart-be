@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/mercadopago/sdk-go/pkg/config"
@@ -492,14 +491,6 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 	}
 
 	payer := buildPaymentPayer(input.Customer)
-
-	// TEST tokens: MP's sandbox only triggers an approved status when
-	// payer.first_name matches the cardholder-name token ("APRO"). A real
-	// first name breaks the trigger and MP responds with internal_error.
-	// Production tokens keep the buyer's real name.
-	if strings.HasPrefix(m.credentials.AccessToken, "TEST-") && payer != nil {
-		payer.FirstName = "APRO"
-	}
 
 	req := payment.Request{
 		TransactionAmount:   float64(input.TotalAmount) / 100, // cents → currency units
