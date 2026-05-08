@@ -66,7 +66,8 @@ func (s *Service) Upsert(ctx context.Context, input UpsertCustomerInput) (*Custo
 	}, nil
 }
 
-// GetByID returns a customer by its UUID
+// GetByID returns a customer by its UUID, enriched with cart totals so the
+// detail drawer matches the numbers shown on the listing.
 func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*CustomerOutput, error) {
 	row, err := s.repo.GetByID(ctx, id)
 	if err != nil {
@@ -76,11 +77,24 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*CustomerOutput, e
 		return nil, httpx.ErrNotFound(fmt.Sprintf("customer %s not found", id))
 	}
 
+	// Aggregate from the customer's carts to keep the detail view consistent
+	// with the list aggregation (COUNT distinct carts, SUM line totals).
+	orders, err := s.repo.ListOrders(ctx, id, 1000, 0)
+	if err != nil {
+		return nil, fmt.Errorf("listing customer orders: %w", err)
+	}
+	var totalSpent int64
+	for _, o := range orders {
+		totalSpent += o.TotalValue
+	}
+
 	return &CustomerOutput{
 		ID:           row.ID,
 		Handle:       row.Handle,
 		Email:        row.Email,
 		Phone:        row.Phone,
+		TotalOrders:  len(orders),
+		TotalSpent:   totalSpent,
 		LastOrderAt:  row.LastOrderAt,
 		FirstOrderAt: row.FirstOrderAt,
 	}, nil
