@@ -518,6 +518,7 @@ type LiveStatsOutput struct {
 
 // AddToCartInput represents input for adding a product to a user's cart during a live.
 type AddToCartInput struct {
+	StoreID            string // Required - used to upsert the customer row
 	EventID            string // Changed from SessionID to EventID
 	PlatformUserID     string
 	PlatformHandle     string
@@ -525,7 +526,7 @@ type AddToCartInput struct {
 	ProductPrice       int64
 	Quantity           int     // Total quantity to add
 	WaitlistedQuantity int     // How many of the quantity are waitlisted (0 = all available)
-	CustomerID         *string // Optional - links cart to a customer
+	CustomerID         *string // Optional - links cart to a customer (if set, skips upsert)
 }
 
 // AddToCartOutput represents the result of adding to cart.

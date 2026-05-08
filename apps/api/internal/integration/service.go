@@ -3353,6 +3353,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 
 	// Add product to cart with partial fulfillment
 	result, err := s.liveService.AddToCart(ctx, live.AddToCartInput{
+		StoreID:            event.StoreID,
 		EventID:            event.ID,
 		PlatformUserID:     input.UserID,
 		PlatformHandle:     input.Username,
@@ -4276,6 +4277,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 
 	// Add to cart (no longer waitlisted - WaitlistedQuantity = 0)
 	_, err = s.liveService.AddToCart(ctx, live.AddToCartInput{
+		StoreID:            storeID,
 		EventID:            eventID,
 		PlatformUserID:     next.PlatformUserID,
 		PlatformHandle:     next.PlatformHandle,

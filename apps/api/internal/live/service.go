@@ -37,11 +37,19 @@ type ERPFinalizer interface {
 	FinalizeEventERP(ctx context.Context, storeID, eventID string) error
 }
 
+// CustomerUpserter creates or updates a customer record from cart-creation
+// inputs and returns the customer UUID. Wired from the customer package via
+// SetCustomerUpserter to keep this package free of customer internals.
+type CustomerUpserter interface {
+	UpsertForCart(ctx context.Context, storeID, platformUserID, platformHandle string) (customerID string, err error)
+}
+
 type Service struct {
-	repo          *Repository
-	logger        *zap.Logger
-	notifier      Notifier
-	erpFinalizer  ERPFinalizer
+	repo             *Repository
+	logger           *zap.Logger
+	notifier         Notifier
+	erpFinalizer     ERPFinalizer
+	customerUpserter CustomerUpserter
 }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {
@@ -62,6 +70,14 @@ func (s *Service) SetNotifier(n Notifier) {
 // SetERPFinalizer wires an ERPFinalizer into the service after construction.
 func (s *Service) SetERPFinalizer(f ERPFinalizer) {
 	s.erpFinalizer = f
+}
+
+// SetCustomerUpserter wires a CustomerUpserter into the service. When set,
+// AddToCart will materialize a customer row and link the cart to it before
+// creating the cart, so the Customers tab and downstream analytics always
+// reflect the latest activity.
+func (s *Service) SetCustomerUpserter(u CustomerUpserter) {
+	s.customerUpserter = u
 }
 
 // =============================================================================
@@ -808,13 +824,30 @@ func (s *Service) AddToCart(ctx context.Context, input AddToCartInput) (AddToCar
 		return AddToCartOutput{}, fmt.Errorf("generating cart token: %w", err)
 	}
 
+	// Resolve customer for this cart so the Customers tab reflects activity
+	// in real time. Best-effort: a failure here must not block adding to cart
+	// (the cart still works, the customer link is just missing).
+	customerID := input.CustomerID
+	if customerID == nil && s.customerUpserter != nil && input.StoreID != "" && input.PlatformUserID != "" {
+		id, upsertErr := s.customerUpserter.UpsertForCart(ctx, input.StoreID, input.PlatformUserID, input.PlatformHandle)
+		if upsertErr != nil {
+			s.logger.Warn("failed to upsert customer for cart",
+				zap.String("store_id", input.StoreID),
+				zap.String("platform_user_id", input.PlatformUserID),
+				zap.Error(upsertErr),
+			)
+		} else if id != "" {
+			customerID = &id
+		}
+	}
+
 	// Get or create cart for this user in this event
 	cart, isNew, err := s.repo.GetOrCreateCart(ctx, GetOrCreateCartParams{
 		EventID:        input.EventID,
 		PlatformUserID: input.PlatformUserID,
 		PlatformHandle: input.PlatformHandle,
 		Token:          token,
-		CustomerID:     input.CustomerID,
+		CustomerID:     customerID,
 	})
 	if err != nil {
 		return AddToCartOutput{}, fmt.Errorf("getting or creating cart: %w", err)

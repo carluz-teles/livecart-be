@@ -197,6 +197,42 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (*CustomerSta
 	}, nil
 }
 
+// ListOrders returns the latest carts (paid + pending) for a customer.
+func (r *Repository) ListOrders(ctx context.Context, id uuid.UUID, limit, offset int32) ([]CustomerOrderOutput, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := r.queries.ListCartsByCustomer(ctx, sqlc.ListCartsByCustomerParams{
+		CustomerID: uuidToPgtype(id),
+		Limit:      limit,
+		Offset:     offset,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing carts by customer: %w", err)
+	}
+
+	orders := make([]CustomerOrderOutput, len(rows))
+	for i, row := range rows {
+		orders[i] = CustomerOrderOutput{
+			ID:            pgtypeToUUID(row.ID).String(),
+			ShortID:       row.ShortID,
+			Status:        row.Status,
+			PaymentStatus: pgtypeTextToPtr(row.PaymentStatus),
+			TotalItems:    int(row.TotalItems),
+			TotalValue:    row.TotalValue,
+		}
+		if row.PaidAt.Valid {
+			t := row.PaidAt.Time
+			orders[i].PaidAt = &t
+		}
+		if row.CreatedAt.Valid {
+			t := row.CreatedAt.Time
+			orders[i].CreatedAt = &t
+		}
+	}
+	return orders, nil
+}
+
 // Update updates customer fields
 func (r *Repository) Update(ctx context.Context, id uuid.UUID, input UpdateCustomerInput) error {
 	params := sqlc.UpdateCustomerParams{

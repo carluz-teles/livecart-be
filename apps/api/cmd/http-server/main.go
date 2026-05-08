@@ -181,6 +181,12 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	liveRepo := live.NewRepository(queries, pool)
 	liveSvc := live.NewService(liveRepo, log)
 
+	// Customer service is created early so the live service can upsert
+	// customers as carts are created during a live event.
+	customerRepo := customer.NewRepository(queries)
+	customerSvc := customer.NewService(customerRepo, log)
+	liveSvc.SetCustomerUpserter(customerSvc)
+
 	// Integration Layer setup
 	var integrationSvc *integration.Service
 	var integrationWebhookHandler *integration.WebhookHandler
@@ -550,8 +556,6 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	})
 	couponExpirer.Start()
 
-	customerRepo := customer.NewRepository(queries)
-	customerSvc := customer.NewService(customerRepo, log)
 	customerHandler := customer.NewHandler(customerSvc, validate)
 	customerHandler.RegisterRoutes(storeScoped)
 

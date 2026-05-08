@@ -72,6 +72,19 @@ type CustomerStatsOutput struct {
 	AvgSpentPerCustomer int64
 }
 
+// CustomerOrderOutput is a flattened summary of a cart attached to a
+// customer, optimized for the customer-detail drawer.
+type CustomerOrderOutput struct {
+	ID            string     `json:"id"`
+	ShortID       int32      `json:"shortId"`
+	Status        string     `json:"status"`
+	PaymentStatus *string    `json:"paymentStatus"`
+	TotalItems    int        `json:"totalItems"`
+	TotalValue    int64      `json:"totalValue"`
+	PaidAt        *time.Time `json:"paidAt"`
+	CreatedAt     *time.Time `json:"createdAt"`
+}
+
 // UpsertCustomerInput is used to create or update a customer
 type UpsertCustomerInput struct {
 	StoreID        uuid.UUID

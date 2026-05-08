@@ -23,6 +23,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/", h.List)
 	g.Get("/stats", h.GetStats)
 	g.Get("/:id", h.GetByID)
+	g.Get("/:id/orders", h.ListOrders)
 }
 
 // List godoc
@@ -123,6 +124,36 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 		ActiveCustomers:     output.ActiveCustomers,
 		AvgSpentPerCustomer: output.AvgSpentPerCustomer,
 	})
+}
+
+// ListOrders godoc
+// @Summary      List orders for a customer
+// @Description  Returns the most recent carts (paid + pending) for the given customer
+// @Tags         customers
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Customer UUID"
+// @Param        limit query int false "Items per page" default(20)
+// @Param        offset query int false "Offset" default(0)
+// @Success      200 {object} httpx.Envelope{data=[]CustomerOrderOutput}
+// @Router       /api/v1/stores/{storeId}/customers/{id}/orders [get]
+// @Security     BearerAuth
+func (h *Handler) ListOrders(c *fiber.Ctx) error {
+	idStr := c.Params("id")
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		return httpx.BadRequest(c, "invalid customer id")
+	}
+
+	limit := int32(c.QueryInt("limit", 20))
+	offset := int32(c.QueryInt("offset", 0))
+
+	orders, err := h.service.ListOrders(c.Context(), id, limit, offset)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, orders)
 }
 
 func parseCustomerFilters(c *fiber.Ctx) CustomerFilters {

@@ -22,6 +22,26 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 	}
 }
 
+// UpsertForCart is a convenience method for the live cart flow: it parses the
+// store UUID, calls Upsert with handle-only data (email/phone are filled in
+// later by checkout) and returns the customer's UUID as a string. Satisfies
+// the live.CustomerUpserter interface.
+func (s *Service) UpsertForCart(ctx context.Context, storeID, platformUserID, platformHandle string) (string, error) {
+	storeUUID, err := uuid.Parse(storeID)
+	if err != nil {
+		return "", fmt.Errorf("parsing store id: %w", err)
+	}
+	out, err := s.Upsert(ctx, UpsertCustomerInput{
+		StoreID:        storeUUID,
+		PlatformUserID: platformUserID,
+		PlatformHandle: platformHandle,
+	})
+	if err != nil {
+		return "", err
+	}
+	return out.ID, nil
+}
+
 // Upsert creates a new customer or updates existing one (by store_id + platform_user_id)
 // Returns the customer (existing or new) with its UUID
 func (s *Service) Upsert(ctx context.Context, input UpsertCustomerInput) (*CustomerOutput, error) {
@@ -130,6 +150,11 @@ func (s *Service) GetStats(ctx context.Context, storeID string) (*CustomerStatsO
 		return nil, err
 	}
 	return stats, nil
+}
+
+// ListOrders returns recent carts for a customer (paid + pending).
+func (s *Service) ListOrders(ctx context.Context, id uuid.UUID, limit, offset int32) ([]CustomerOrderOutput, error) {
+	return s.repo.ListOrders(ctx, id, limit, offset)
 }
 
 // Update updates customer fields
