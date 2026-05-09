@@ -1154,6 +1154,99 @@ func (r *Repository) GetCartERPFinalisationStatus(ctx context.Context, cartID st
 	return out, nil
 }
 
+// CartERPInvoiceRow mirrors the persisted NFe state on a cart. Status may be
+// empty when no NFe has ever been linked.
+type CartERPInvoiceRow struct {
+	CartID          string
+	InvoiceID       string
+	InvoiceKey      string
+	InvoiceStatus   string
+	EmittedAt       *time.Time
+	ExternalOrderID string
+}
+
+// GetCartERPInvoice returns the NFe state currently stored on the cart. Used
+// by the order detail handler (to decide whether "Aguardando NFe" or "Criar
+// envio" should be shown) and by the manual sync endpoint.
+func (r *Repository) GetCartERPInvoice(ctx context.Context, cartID string) (*CartERPInvoiceRow, error) {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.GetCartERPInvoice(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	out := &CartERPInvoiceRow{CartID: uuidToString(row.ID)}
+	if row.ErpInvoiceID.Valid {
+		out.InvoiceID = row.ErpInvoiceID.String
+	}
+	if row.ErpInvoiceKey.Valid {
+		out.InvoiceKey = row.ErpInvoiceKey.String
+	}
+	if row.ErpInvoiceStatus.Valid {
+		out.InvoiceStatus = row.ErpInvoiceStatus.String
+	}
+	if row.ErpInvoiceEmittedAt.Valid {
+		t := row.ErpInvoiceEmittedAt.Time
+		out.EmittedAt = &t
+	}
+	if row.ExternalOrderID.Valid {
+		out.ExternalOrderID = row.ExternalOrderID.String
+	}
+	return out, nil
+}
+
+// UpsertCartERPInvoiceParams carries the NFe fields written to the cart.
+// EmittedAt nil = preserve previous value (COALESCE on the SQL side).
+type UpsertCartERPInvoiceParams struct {
+	CartID        string
+	InvoiceID     string
+	InvoiceKey    string
+	InvoiceStatus string
+	EmittedAt     *time.Time
+}
+
+// UpsertCartERPInvoice persists the NFe pulled from the ERP onto the cart.
+// Idempotent — both the webhook handler and the manual sync endpoint go
+// through it so re-running the same fetch never produces a different state.
+func (r *Repository) UpsertCartERPInvoice(ctx context.Context, p UpsertCartERPInvoiceParams) error {
+	id, err := parseUUID(p.CartID)
+	if err != nil {
+		return err
+	}
+	var emitted pgtype.Timestamptz
+	if p.EmittedAt != nil && !p.EmittedAt.IsZero() {
+		emitted = pgtype.Timestamptz{Time: *p.EmittedAt, Valid: true}
+	}
+	return r.queries.UpsertCartERPInvoice(ctx, sqlc.UpsertCartERPInvoiceParams{
+		ID:            id,
+		InvoiceID:     pgtype.Text{String: p.InvoiceID, Valid: p.InvoiceID != ""},
+		InvoiceKey:    pgtype.Text{String: p.InvoiceKey, Valid: p.InvoiceKey != ""},
+		InvoiceStatus: pgtype.Text{String: p.InvoiceStatus, Valid: p.InvoiceStatus != ""},
+		EmittedAt:     emitted,
+	})
+}
+
+// FindCartByExternalOrderID locates the cart linked to an ERP pedido id for a
+// given store. Used by the Tiny webhook handler — Tiny only sends the pedido
+// id on nota_fiscal events, so we have to bridge back to the LiveCart cart
+// before we can persist the invoice fields.
+func (r *Repository) FindCartByExternalOrderID(ctx context.Context, externalOrderID, storeID string) (string, error) {
+	store, err := parseUUID(storeID)
+	if err != nil {
+		return "", err
+	}
+	row, err := r.queries.FindCartByExternalOrderID(ctx, sqlc.FindCartByExternalOrderIDParams{
+		ExternalOrderID: pgtype.Text{String: externalOrderID, Valid: externalOrderID != ""},
+		StoreID:         store,
+	})
+	if err != nil {
+		return "", err
+	}
+	return uuidToString(row.ID), nil
+}
+
 // NonWaitlistedCartItem represents a cart item that is not waitlisted, with product info.
 type NonWaitlistedCartItem struct {
 	ID                string

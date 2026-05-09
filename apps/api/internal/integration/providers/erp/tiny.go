@@ -1963,6 +1963,235 @@ func (t *Tiny) UpdateContact(ctx context.Context, contactID string, contact ERPC
 	return nil
 }
 
+// =============================================================================
+// NFe (nota fiscal) lookup — implements providers.ERPInvoiceProvider.
+// =============================================================================
+
+// tinyNotaFiscalLite captures the subset of Tiny's nota fiscal payload we use.
+// It maps both NotaFiscalModel (returned standalone by GET /notafiscal/{id})
+// and the embedded notaFiscal field on a pedido response — fields not present
+// in one shape stay zero-valued and the caller falls back accordingly.
+type tinyNotaFiscalLite struct {
+	ID          int64       `json:"id"`
+	Numero      json.Number `json:"numero"`
+	Serie       json.Number `json:"serie"`
+	Situacao    json.Number `json:"situacao"`
+	ChaveAcesso string      `json:"chaveAcesso"`
+	LinkAcesso  string      `json:"linkAcesso"`
+	DataEmissao string      `json:"dataEmissao"`
+	XML         string      `json:"xml"`
+}
+
+// situacao codes returned by Tiny for NotaFiscalModel.situacao. Centralised so
+// a future change to the mapping is a single edit.
+const (
+	tinyNFeSituacaoPendente            = 1
+	tinyNFeSituacaoEmitida             = 2
+	tinyNFeSituacaoCancelada           = 3
+	tinyNFeSituacaoAguardandoRecibo    = 4
+	tinyNFeSituacaoRejeitada           = 5
+	tinyNFeSituacaoAutorizada          = 6
+	tinyNFeSituacaoEmitidaDanfe        = 7
+	tinyNFeSituacaoRegistrada          = 8
+	tinyNFeSituacaoAguardandoProtocolo = 9
+	tinyNFeSituacaoDenegada            = 10
+)
+
+// GetInvoiceByOrder fetches the order in Tiny and returns the NFe attached to
+// it (if any). Returns providers.ErrInvoiceNotFound when the pedido has no
+// nota fiscal yet — the merchant is still expected to emit it in the ERP.
+func (t *Tiny) GetInvoiceByOrder(ctx context.Context, orderID string) (*providers.ERPInvoice, error) {
+	if strings.TrimSpace(orderID) == "" {
+		return nil, fmt.Errorf("orderID is required")
+	}
+	endpoint := fmt.Sprintf("%s/pedidos/%s", tinyAPIBaseURL, orderID)
+
+	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return nil, fmt.Errorf("getting tiny order: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, providers.ErrInvoiceNotFound
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return nil, fmt.Errorf("get tiny order failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+	}
+
+	// Tiny v3 returns a single notaFiscal object on the pedido once the
+	// merchant has emitted it. Some installations report it as an array of
+	// historical entries (re-emissions), so we tolerate both and pick the
+	// most "advanced" one (highest situacao wins) so a re-emitted NFe wins
+	// over a previously-cancelled one.
+	var orderResp struct {
+		NotaFiscal      *tinyNotaFiscalLite  `json:"notaFiscal"`
+		NotasFiscais    []tinyNotaFiscalLite `json:"notasFiscais"`
+		Ecommerce       struct {
+			NotaFiscal *tinyNotaFiscalLite `json:"notaFiscal"`
+		} `json:"ecommerce"`
+	}
+	if err := json.Unmarshal(body, &orderResp); err != nil {
+		return nil, fmt.Errorf("parsing tiny order response: %w", err)
+	}
+
+	candidates := make([]tinyNotaFiscalLite, 0, len(orderResp.NotasFiscais)+2)
+	if orderResp.NotaFiscal != nil {
+		candidates = append(candidates, *orderResp.NotaFiscal)
+	}
+	if orderResp.Ecommerce.NotaFiscal != nil {
+		candidates = append(candidates, *orderResp.Ecommerce.NotaFiscal)
+	}
+	candidates = append(candidates, orderResp.NotasFiscais...)
+
+	// Discard empties (Tiny sometimes returns the field with id=0 for orders
+	// that haven't been invoiced) and pick the best representative.
+	best, ok := pickBestNotaFiscal(candidates)
+	if !ok {
+		return nil, providers.ErrInvoiceNotFound
+	}
+	return tinyNotaFiscalToERP(best), nil
+}
+
+// GetInvoiceByID fetches a NFe directly by its Tiny-side id. Used when a
+// webhook hands us the notafiscal id without the chave de acesso.
+func (t *Tiny) GetInvoiceByID(ctx context.Context, invoiceID string) (*providers.ERPInvoice, error) {
+	if strings.TrimSpace(invoiceID) == "" {
+		return nil, fmt.Errorf("invoiceID is required")
+	}
+	endpoint := fmt.Sprintf("%s/notafiscal/%s", tinyAPIBaseURL, invoiceID)
+
+	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return nil, fmt.Errorf("getting tiny nota fiscal: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, providers.ErrInvoiceNotFound
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return nil, fmt.Errorf("get tiny nota fiscal failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+	}
+
+	var nfe tinyNotaFiscalLite
+	if err := json.Unmarshal(body, &nfe); err != nil {
+		return nil, fmt.Errorf("parsing tiny nota fiscal response: %w", err)
+	}
+	if nfe.ID == 0 {
+		return nil, providers.ErrInvoiceNotFound
+	}
+	return tinyNotaFiscalToERP(nfe), nil
+}
+
+// GetInvoiceXML fetches the XML payload for a NFe. Tiny returns it as a
+// JSON-wrapped string ({ "xmlNfe": "..." }) so we unwrap before returning.
+func (t *Tiny) GetInvoiceXML(ctx context.Context, invoiceID string) ([]byte, error) {
+	if strings.TrimSpace(invoiceID) == "" {
+		return nil, fmt.Errorf("invoiceID is required")
+	}
+	endpoint := fmt.Sprintf("%s/notafiscal/%s/xml", tinyAPIBaseURL, invoiceID)
+
+	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return nil, fmt.Errorf("getting tiny nota fiscal xml: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, providers.ErrInvoiceNotFound
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return nil, fmt.Errorf("get tiny nota fiscal xml failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+	}
+
+	var wrapped struct {
+		XMLNfe string `json:"xmlNfe"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err == nil && wrapped.XMLNfe != "" {
+		return []byte(wrapped.XMLNfe), nil
+	}
+	// Fallback: some Tiny tenants return the xml as text/xml directly.
+	return body, nil
+}
+
+// pickBestNotaFiscal chooses the most relevant NFe from a list. Cancelled
+// (situacao=3) loses to anything authorised; among remaining candidates the
+// one with the highest id (most recent) wins so re-emissions override stale
+// drafts.
+func pickBestNotaFiscal(in []tinyNotaFiscalLite) (tinyNotaFiscalLite, bool) {
+	var best tinyNotaFiscalLite
+	found := false
+	for _, n := range in {
+		if n.ID == 0 {
+			continue
+		}
+		if !found {
+			best = n
+			found = true
+			continue
+		}
+		bs, _ := best.Situacao.Int64()
+		ns, _ := n.Situacao.Int64()
+		// Prefer authorised over cancelled/rejected/denegada.
+		bestActive := bs != tinyNFeSituacaoCancelada && bs != tinyNFeSituacaoRejeitada && bs != tinyNFeSituacaoDenegada
+		newActive := ns != tinyNFeSituacaoCancelada && ns != tinyNFeSituacaoRejeitada && ns != tinyNFeSituacaoDenegada
+		if newActive && !bestActive {
+			best = n
+			continue
+		}
+		if !newActive && bestActive {
+			continue
+		}
+		// Tie-break by id (most recent emission wins).
+		if n.ID > best.ID {
+			best = n
+		}
+	}
+	return best, found
+}
+
+// tinyNotaFiscalToERP normalises Tiny's NFe shape into providers.ERPInvoice.
+func tinyNotaFiscalToERP(in tinyNotaFiscalLite) *providers.ERPInvoice {
+	situacao, _ := in.Situacao.Int64()
+	status := mapTinyNFeStatus(int(situacao))
+
+	out := &providers.ERPInvoice{
+		InvoiceID: strconv.FormatInt(in.ID, 10),
+		Number:    in.Numero.String(),
+		Series:    in.Serie.String(),
+		AccessKey: strings.TrimSpace(in.ChaveAcesso),
+		Status:    status,
+		StatusRaw: in.Situacao.String(),
+	}
+	if in.XML != "" {
+		out.XMLContent = []byte(in.XML)
+	}
+	if in.DataEmissao != "" {
+		// Tiny emits dataEmissao either as RFC3339 or as Brazilian "dd/mm/aaaa hh:mm:ss".
+		if t, err := time.Parse(time.RFC3339, in.DataEmissao); err == nil {
+			out.IssuedAt = t
+		} else if t, err := time.ParseInLocation("02/01/2006 15:04:05", in.DataEmissao, tinyLocation); err == nil {
+			out.IssuedAt = t
+		} else if t, err := time.ParseInLocation("02/01/2006", in.DataEmissao, tinyLocation); err == nil {
+			out.IssuedAt = t
+		}
+	}
+	return out
+}
+
+func mapTinyNFeStatus(situacao int) providers.ERPInvoiceStatus {
+	switch situacao {
+	case tinyNFeSituacaoEmitida,
+		tinyNFeSituacaoAutorizada,
+		tinyNFeSituacaoEmitidaDanfe:
+		return providers.ERPInvoiceStatusAuthorized
+	case tinyNFeSituacaoCancelada:
+		return providers.ERPInvoiceStatusCancelled
+	case tinyNFeSituacaoRejeitada,
+		tinyNFeSituacaoDenegada:
+		return providers.ERPInvoiceStatusRejected
+	default:
+		// Pendente, Aguardando Recibo, Aguardando Protocolo, Registrada — all
+		// in-flight states from LiveCart's perspective.
+		return providers.ERPInvoiceStatusPending
+	}
+}
+
 // authHeaders returns the authorization headers for API v3 requests.
 func (t *Tiny) authHeaders() map[string]string {
 	return map[string]string{

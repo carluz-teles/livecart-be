@@ -152,6 +152,7 @@ type OrderDetailResponse struct {
 	Shipment        *OrderShipmentResponse        `json:"shipment,omitempty"`
 	Store           *OrderStoreResponse           `json:"store,omitempty"`
 	ERPFinalisation *ERPFinalisationResponse      `json:"erpFinalisation,omitempty"`
+	ERPInvoice      *ERPInvoiceResponse           `json:"erpInvoice,omitempty"`
 }
 
 // ERPFinalisationResponse is the FE-visible projection of the cart's ERP
@@ -163,6 +164,17 @@ type ERPFinalisationResponse struct {
 	LastAttemptAt *time.Time `json:"lastAttemptAt,omitempty"`
 	AttemptsCount int        `json:"attemptsCount"`
 	CanRetry      bool       `json:"canRetry"`
+}
+
+// ERPInvoiceResponse is the FE-visible projection of carts.erp_invoice_*.
+// Absent (nil pointer in the parent) means the merchant hasn't emitted the
+// NFe yet — the FE renders "Aguardando NFe na Tiny" with a "Verificar NFe"
+// button. Once present, status drives the next-step copy.
+type ERPInvoiceResponse struct {
+	InvoiceID  string     `json:"invoiceId,omitempty"`
+	InvoiceKey string     `json:"invoiceKey,omitempty"`
+	Status     string     `json:"status"` // pending | authorized | cancelled | rejected
+	EmittedAt  *time.Time `json:"emittedAt,omitempty"`
 }
 
 // OrderCustomerResponse mirrors the customer_* columns on carts captured at checkout.
@@ -534,6 +546,14 @@ type OrderDetailRow struct {
 	ERPLastError          string
 	ERPLastAttemptAt      *time.Time
 	ERPAttemptsCount      int
+
+	// ERP invoice (NFe) state captured by the Tiny webhook or the manual
+	// "Verificar NFe" button. Empty status means no NFe has been linked yet
+	// — that's the "Aguardando NFe" branch on the FE.
+	ERPInvoiceID         string
+	ERPInvoiceKey        string
+	ERPInvoiceStatus     string
+	ERPInvoiceEmittedAt  *time.Time
 }
 
 // OrderShipmentRecord is the projection of `shipments` used by order service.
@@ -640,6 +660,21 @@ type OrderDetailOutput struct {
 	Shipment         *OrderShipmentOutput
 	Store            *OrderStoreOutput
 	ERPFinalisation  *ERPFinalisationOutput
+	// ERPInvoice is populated once the merchant emits the NFe in the ERP.
+	// Drives the "Aguardando NFe" / "Criar envio" gate on the order detail
+	// page — pointer so the FE can distinguish "no NFe yet" (nil) from
+	// "rejected/cancelled" (status is set, key may be empty).
+	ERPInvoice       *ERPInvoiceOutput
+}
+
+// ERPInvoiceOutput surfaces the persisted erp_invoice_* state on the cart.
+// The FE reads InvoiceKey to pre-fill "Criar envio" and Status to decide
+// which copy to show.
+type ERPInvoiceOutput struct {
+	InvoiceID  string
+	InvoiceKey string
+	Status     string // pending | authorized | cancelled | rejected
+	EmittedAt  *time.Time
 }
 
 // ERPFinalisationOutput exposes the cart's ERP finalisation lifecycle to the

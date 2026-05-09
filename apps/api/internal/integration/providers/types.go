@@ -172,6 +172,60 @@ type ERPHealthChecker interface {
 	HealthCheck(ctx context.Context) (*ERPHealthCheckResult, error)
 }
 
+// ERPInvoiceStatus is the LiveCart-normalised state of an issued NFe across
+// ERPs. The merchant emits the NFe directly in the ERP — LiveCart only
+// consumes status transitions (via webhook or manual sync) so the shipping
+// flow knows when a chave de acesso is ready.
+type ERPInvoiceStatus string
+
+const (
+	ERPInvoiceStatusPending    ERPInvoiceStatus = "pending"
+	ERPInvoiceStatusAuthorized ERPInvoiceStatus = "authorized"
+	ERPInvoiceStatusCancelled  ERPInvoiceStatus = "cancelled"
+	ERPInvoiceStatusRejected   ERPInvoiceStatus = "rejected"
+)
+
+// ERPInvoice is the normalised NFe view returned by ERPInvoiceProvider. Some
+// fields are optional because not every ERP exposes them (e.g. XML may need
+// a separate call); callers tolerate the empty string.
+type ERPInvoice struct {
+	InvoiceID  string           // ERP-side id (e.g. Tiny notafiscal.id)
+	Number     string           // human-readable nfe number
+	Series     string           // serie da nfe
+	AccessKey  string           // chave de acesso (44 digits) — empty when not yet authorised
+	Status     ERPInvoiceStatus // normalised across ERPs
+	StatusRaw  string           // provider-specific raw value, for debugging
+	IssuedAt   time.Time        // when the NFe was emitted/authorised; zero when still pending
+	XMLContent []byte           // optional XML payload; ERPs that need a separate fetch leave this empty
+}
+
+// ERPInvoiceProvider is an optional capability for ERP integrations that
+// expose access to the NFe issued for an order. LiveCart never triggers
+// emission — the merchant always emits in the ERP's panel — but it does
+// fetch the resulting chave de acesso to feed the shipping carriers.
+//
+// Providers implement it via type assertion so adapters that don't speak
+// nota-fiscal aren't forced to ship a stub.
+type ERPInvoiceProvider interface {
+	// GetInvoiceByOrder returns the NFe attached to an ERP order, when one
+	// exists. ErrInvoiceNotFound is returned when the order has no NFe yet.
+	GetInvoiceByOrder(ctx context.Context, orderID string) (*ERPInvoice, error)
+
+	// GetInvoiceByID fetches a specific NFe by its ERP-side id (the value
+	// arriving on a webhook). Useful when the webhook payload doesn't carry
+	// the chaveAcesso directly.
+	GetInvoiceByID(ctx context.Context, invoiceID string) (*ERPInvoice, error)
+
+	// GetInvoiceXML fetches the raw NFe XML so it can be uploaded to the
+	// shipping carrier (when required).
+	GetInvoiceXML(ctx context.Context, invoiceID string) ([]byte, error)
+}
+
+// ErrInvoiceNotFound is returned by ERPInvoiceProvider implementations when
+// the order has no NFe linked yet. Callers translate this to the "aguardando
+// NFe" UI state instead of surfacing a generic error.
+var ErrInvoiceNotFound = errors.New("invoice not found")
+
 // ERPProvider interface for ERP system integrations.
 type ERPProvider interface {
 	Provider

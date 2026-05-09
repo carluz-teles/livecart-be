@@ -82,6 +82,14 @@ type Cart struct {
 	ErpAttemptsCount int32 `json:"erp_attempts_count"`
 	// JSON snapshot of providers.PaymentStatus captured on first finalisation attempt. Used to replay createFinalERPOrder on retry without re-fetching from the gateway.
 	ErpPaymentSnapshot json.RawMessage `json:"erp_payment_snapshot"`
+	// ERP-side identifier for the issued NFe (e.g. Tiny notafiscal.id). Populated when the merchant emits the NFe in the ERP.
+	ErpInvoiceID pgtype.Text `json:"erp_invoice_id"`
+	// Chave de acesso (44 dígitos) of the issued NFe. Filled in once the NFe is authorised at SEFAZ.
+	ErpInvoiceKey pgtype.Text `json:"erp_invoice_key"`
+	// pending|authorized|cancelled|rejected — normalised across ERPs. The "Criar envio" flow is unlocked when status=authorized.
+	ErpInvoiceStatus pgtype.Text `json:"erp_invoice_status"`
+	// Timestamp from the ERP when the NFe was emitted/authorised. Surfaced on the order detail timeline.
+	ErpInvoiceEmittedAt pgtype.Timestamptz `json:"erp_invoice_emitted_at"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.

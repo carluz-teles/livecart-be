@@ -27,6 +27,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Patch("/:id/shipping-address", h.UpdateShippingAddress)
 	g.Post("/:id/regenerate-checkout", h.RegenerateCheckout)
 	g.Post("/:id/retry-erp", h.RetryERPFinalisation)
+	g.Post("/:id/sync-invoice", h.SyncInvoice)
 }
 
 // List godoc
@@ -293,6 +294,39 @@ func (h *Handler) RetryERPFinalisation(c *fiber.Ctx) error {
 	return httpx.OK(c, toOrderDetailResponse(*output))
 }
 
+// SyncInvoice godoc
+// @Summary      Verificar NFe na Tiny
+// @Description  Pulls the NFe state from the active ERP integration and
+// @Description  persists it on the order. Used by the "Verificar NFe" button
+// @Description  on the order detail page when the merchant emitted the NFe
+// @Description  in the ERP but the webhook didn't arrive (or hasn't been
+// @Description  configured). Returns the refreshed order detail so the FE
+// @Description  picks up the new erp_invoice_* fields without a follow-up
+// @Description  fetch.
+// @Tags         orders
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Order UUID"
+// @Success      200 {object} httpx.Envelope{data=OrderDetailResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Failure      422 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/orders/{id}/sync-invoice [post]
+// @Security     BearerAuth
+func (h *Handler) SyncInvoice(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
+
+	if err := h.service.SyncInvoice(c.Context(), id, storeID); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	output, err := h.service.GetDetailByID(c.Context(), id, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, toOrderDetailResponse(*output))
+}
+
 func parseOrderFilters(c *fiber.Ctx) OrderFilters {
 	var filters OrderFilters
 
@@ -505,6 +539,14 @@ func toOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 			LastAttemptAt: o.ERPFinalisation.LastAttemptAt,
 			AttemptsCount: o.ERPFinalisation.AttemptsCount,
 			CanRetry:      o.ERPFinalisation.Status == "failed",
+		}
+	}
+	if o.ERPInvoice != nil {
+		resp.ERPInvoice = &ERPInvoiceResponse{
+			InvoiceID:  o.ERPInvoice.InvoiceID,
+			InvoiceKey: o.ERPInvoice.InvoiceKey,
+			Status:     o.ERPInvoice.Status,
+			EmittedAt:  o.ERPInvoice.EmittedAt,
 		}
 	}
 	if o.Store != nil {

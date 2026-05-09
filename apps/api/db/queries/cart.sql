@@ -282,6 +282,41 @@ SELECT id,
 FROM carts
 WHERE id = $1;
 
+-- name: UpsertCartERPInvoice :exec
+-- Persist the NFe state pulled from the ERP onto the cart. Called from the
+-- Tiny webhook (tipo='nota_fiscal') and from the manual "Verificar NFe" sync
+-- endpoint. emitted_at is COALESCEd so we only stamp the first authorised
+-- transition — re-fetching a cancelled NFe later doesn't blank the original
+-- emission timestamp.
+UPDATE carts
+SET erp_invoice_id         = sqlc.narg('invoice_id'),
+    erp_invoice_key        = sqlc.narg('invoice_key'),
+    erp_invoice_status     = sqlc.narg('invoice_status'),
+    erp_invoice_emitted_at = COALESCE(erp_invoice_emitted_at, sqlc.narg('emitted_at'))
+WHERE id = $1;
+
+-- name: GetCartERPInvoice :one
+SELECT id,
+       erp_invoice_id,
+       erp_invoice_key,
+       erp_invoice_status,
+       erp_invoice_emitted_at,
+       external_order_id
+FROM carts
+WHERE id = $1;
+
+-- name: FindCartByExternalOrderID :one
+-- Resolve a cart from a Tiny pedido id (or any ERP external order id) for a
+-- given store. Used by the Tiny webhook handler when only the pedido id is
+-- available on the payload.
+SELECT c.*, le.store_id
+FROM carts c
+JOIN live_events le ON le.id = c.event_id
+WHERE c.external_order_id = $1
+  AND le.store_id = $2
+ORDER BY c.created_at DESC
+LIMIT 1;
+
 -- name: ListNonWaitlistedCartItems :many
 -- Returns cart items that have available (non-waitlisted) quantity, with product external_id for ERP sync
 -- Returns available_quantity = quantity - waitlisted_quantity

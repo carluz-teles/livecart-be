@@ -17,10 +17,20 @@ type ERPFinalisationRetrier interface {
 	RetryERPFinalisation(ctx context.Context, cartID, storeID string) error
 }
 
+// CartInvoiceSyncer is fulfilled by integration.Service. The order handler
+// uses it to expose a manual "Verificar NFe" button without importing the
+// integration package directly. We don't surface the fetched invoice state on
+// this side of the boundary — the handler re-reads the order so the FE picks
+// up the new erp_invoice_* columns through the regular GetDetailByID payload.
+type CartInvoiceSyncer interface {
+	SyncCartInvoiceFromERP(ctx context.Context, storeID, cartID, invoiceID string) error
+}
+
 type Service struct {
 	repo            *Repository
 	logger          *zap.Logger
 	erpRetryService ERPFinalisationRetrier
+	invoiceSyncer   CartInvoiceSyncer
 }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {
@@ -35,6 +45,31 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 // at app boot from main.go after both services exist.
 func (s *Service) SetERPFinalisationRetrier(r ERPFinalisationRetrier) {
 	s.erpRetryService = r
+}
+
+// SetCartInvoiceSyncer wires the integration service for manual NFe sync.
+// Same boot-time injection pattern as SetERPFinalisationRetrier — called from
+// main.go once both services exist.
+func (s *Service) SetCartInvoiceSyncer(syncer CartInvoiceSyncer) {
+	s.invoiceSyncer = syncer
+}
+
+// SyncInvoice fetches the NFe state from the ERP and persists it on the
+// cart. The order detail returned by GetDetailByID picks up the new fields
+// on the next read, so the handler can simply return the refreshed order
+// after a successful sync.
+//
+// Returns nil error when the merchant hasn't emitted the NFe yet — the FE
+// re-reads the cart and surfaces "Aguardando NFe na Tiny" via the absence of
+// the erp_invoice_* fields, without treating it as an error.
+func (s *Service) SyncInvoice(ctx context.Context, orderID, storeID string) error {
+	if s.invoiceSyncer == nil {
+		return httpx.ErrUnprocessable("sync de NFe indisponível")
+	}
+	if _, err := s.GetByID(ctx, orderID, storeID); err != nil {
+		return err
+	}
+	return s.invoiceSyncer.SyncCartInvoiceFromERP(ctx, storeID, orderID, "")
 }
 
 // RetryERPFinalisation re-runs the post-payment ERP order creation for an
@@ -290,6 +325,18 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 		LastError:     row.ERPLastError,
 		LastAttemptAt: row.ERPLastAttemptAt,
 		AttemptsCount: row.ERPAttemptsCount,
+	}
+
+	// ERP invoice (NFe). Pointer is left nil when nothing has been linked
+	// yet so the FE can branch on its presence to show "Aguardando NFe"
+	// vs the chave / status copy.
+	if row.ERPInvoiceID != "" || row.ERPInvoiceKey != "" || row.ERPInvoiceStatus != "" {
+		out.ERPInvoice = &ERPInvoiceOutput{
+			InvoiceID:  row.ERPInvoiceID,
+			InvoiceKey: row.ERPInvoiceKey,
+			Status:     row.ERPInvoiceStatus,
+			EmittedAt:  row.ERPInvoiceEmittedAt,
+		}
 	}
 
 	// Shipment (may be absent). Events are loaded in a follow-up query.

@@ -517,6 +517,9 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		// button on a failed paid cart routes through orderSvc but the actual
 		// re-creation lives on the integration service.
 		orderSvc.SetERPFinalisationRetrier(integrationSvc)
+		// Same pattern for the manual "Verificar NFe" button: orderSvc is the
+		// HTTP entry point but the ERP fetch lives on the integration service.
+		orderSvc.SetCartInvoiceSyncer(integrationSvc)
 	}
 	orderHandler := order.NewHandler(orderSvc, validate)
 	orderHandler.RegisterRoutes(storeScoped)

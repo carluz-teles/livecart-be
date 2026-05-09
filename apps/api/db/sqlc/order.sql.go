@@ -258,7 +258,7 @@ const updateOrderPaymentStatus = `-- name: UpdateOrderPaymentStatus :one
 UPDATE carts
 SET payment_status = $2, paid_at = CASE WHEN $2 = 'paid' THEN now() ELSE paid_at END
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, tracking_token, erp_finalisation_status, erp_last_error, erp_last_attempt_at, erp_attempts_count, erp_payment_snapshot
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, tracking_token, erp_finalisation_status, erp_last_error, erp_last_attempt_at, erp_attempts_count, erp_payment_snapshot, erp_invoice_id, erp_invoice_key, erp_invoice_status, erp_invoice_emitted_at
 `
 
 type UpdateOrderPaymentStatusParams struct {
@@ -322,6 +322,10 @@ func (q *Queries) UpdateOrderPaymentStatus(ctx context.Context, arg UpdateOrderP
 		&i.ErpLastAttemptAt,
 		&i.ErpAttemptsCount,
 		&i.ErpPaymentSnapshot,
+		&i.ErpInvoiceID,
+		&i.ErpInvoiceKey,
+		&i.ErpInvoiceStatus,
+		&i.ErpInvoiceEmittedAt,
 	)
 	return i, err
 }
@@ -330,7 +334,7 @@ const updateOrderStatus = `-- name: UpdateOrderStatus :one
 UPDATE carts
 SET status = $2
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, tracking_token, erp_finalisation_status, erp_last_error, erp_last_attempt_at, erp_attempts_count, erp_payment_snapshot
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, tracking_token, erp_finalisation_status, erp_last_error, erp_last_attempt_at, erp_attempts_count, erp_payment_snapshot, erp_invoice_id, erp_invoice_key, erp_invoice_status, erp_invoice_emitted_at
 `
 
 type UpdateOrderStatusParams struct {
@@ -394,6 +398,10 @@ func (q *Queries) UpdateOrderStatus(ctx context.Context, arg UpdateOrderStatusPa
 		&i.ErpLastAttemptAt,
 		&i.ErpAttemptsCount,
 		&i.ErpPaymentSnapshot,
+		&i.ErpInvoiceID,
+		&i.ErpInvoiceKey,
+		&i.ErpInvoiceStatus,
+		&i.ErpInvoiceEmittedAt,
 	)
 	return i, err
 }

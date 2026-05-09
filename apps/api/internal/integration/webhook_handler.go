@@ -481,14 +481,23 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 
 	// Parse Tiny V3 webhook payload
 	// Real structure: {"versao":"1.0.1","cnpj":"...","tipo":"estoque","dados":{"idProduto":123,...}}
+	//
+	// nota_fiscal events use "dados.idPedido" (the LiveCart-side anchor) and
+	// optionally "dados.id" / "dados.idNotaFiscal" for the NFe id. Order events
+	// also reuse idPedido. Each tipo is parsed against the same flat struct so
+	// the dispatcher below can read whichever field is relevant.
 	var webhook struct {
 		Tipo  string `json:"tipo"`
 		Dados struct {
-			IDProduto json.Number `json:"idProduto"`
-			ID        string      `json:"id"`
-			SKU       string      `json:"sku"`
-			Nome      string      `json:"nome"`
-			Saldo     *float64    `json:"saldo"`
+			IDProduto     json.Number `json:"idProduto"`
+			IDPedido      json.Number `json:"idPedido"`
+			IDNotaFiscal  json.Number `json:"idNotaFiscal"`
+			ID            string      `json:"id"`
+			SKU           string      `json:"sku"`
+			Nome          string      `json:"nome"`
+			Saldo         *float64    `json:"saldo"`
+			ChaveAcesso   string      `json:"chaveAcesso"`
+			Situacao      json.Number `json:"situacao"`
 		} `json:"dados"`
 	}
 	if err := json.Unmarshal(body, &webhook); err != nil {
@@ -545,6 +554,36 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 				)
 			}
 		}()
+	}
+
+	// Process NFe events: when the merchant emits/cancels a nota fiscal in
+	// Tiny we resolve the local cart by external_order_id and refresh the
+	// erp_invoice_* fields. The shipping flow listens to those fields to
+	// transition out of "Aguardando NFe".
+	if webhook.Tipo == "nota_fiscal" {
+		idPedido := webhook.Dados.IDPedido.String()
+		idNFe := webhook.Dados.IDNotaFiscal.String()
+		if idNFe == "" {
+			idNFe = webhook.Dados.ID
+		}
+		if idPedido != "" {
+			go func() {
+				ctx := context.Background()
+				if _, err := h.service.SyncCartInvoiceByExternalOrder(ctx, storeID, idPedido, idNFe); err != nil {
+					h.logger.Error("failed to process nota_fiscal webhook",
+						zap.String("store_id", storeID),
+						zap.String("id_pedido", idPedido),
+						zap.String("id_nfe", idNFe),
+						zap.Error(err),
+					)
+				}
+			}()
+		} else {
+			h.logger.Warn("nota_fiscal webhook missing idPedido — cannot resolve cart",
+				zap.String("store_id", storeID),
+				zap.String("id_nfe", idNFe),
+			)
+		}
 	}
 
 	return httpx.OK(c, fiber.Map{"status": "received"})
