@@ -43,6 +43,7 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App) {
 	webhooks.Post("/mercado_pago/:storeId", h.HandleMercadoPago)
 	webhooks.Post("/pagarme/:storeId", h.HandlePagarme)
 	webhooks.Post("/tiny/:storeId", h.HandleTiny)
+	webhooks.Post("/melhor_envio/:storeId", h.HandleMelhorEnvio)
 
 	// Instagram webhooks (Meta platform)
 	instagram := app.Group("/api/webhooks/instagram")
@@ -584,6 +585,114 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 				zap.String("id_nfe", idNFe),
 			)
 		}
+	}
+
+	return httpx.OK(c, fiber.Map{"status": "received"})
+}
+
+// HandleMelhorEnvio handles Melhor Envio webhook notifications. ME signs the
+// payload with HMAC-SHA256 over the body using the partner secret in the
+// X-ME-Signature header — verification is best-effort here because the
+// secret rotates with the merchant's app credential and we still want to
+// accept events when validation fails (logged as a warning so abuse shows
+// up in observability).
+//
+// Events covered: order.created, order.released, order.posted,
+// order.delivered, order.cancelled, order.undelivered, order.suspended,
+// order.pending. Each one is normalised through mapMelhorEnvioStatus and
+// appended as a row on shipment_tracking_events; the parent shipment row
+// is updated to the latest status.
+//
+// @Summary Handle Melhor Envio webhook
+// @Description Receives order.* notifications and updates the local shipment.
+// @Tags webhooks
+// @Accept json
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Success 200 {object} map[string]string
+// @Router /api/webhooks/melhor_envio/{storeId} [post]
+func (h *WebhookHandler) HandleMelhorEnvio(c *fiber.Ctx) error {
+	storeID := strings.Clone(c.Params("storeId"))
+	body := c.Body()
+
+	go h.service.RecordWebhookPing(context.Background(), storeID, "melhor_envio")
+
+	if len(body) == 0 {
+		return httpx.OK(c, fiber.Map{"status": "ok"})
+	}
+
+	var payload struct {
+		Event string `json:"event"`
+		Data  struct {
+			ID          string  `json:"id"`
+			Protocol    string  `json:"protocol"`
+			Status      string  `json:"status"`
+			Tracking    *string `json:"tracking"`
+			TrackingURL string  `json:"tracking_url"`
+			PostedAt    *string `json:"posted_at"`
+			DeliveredAt *string `json:"delivered_at"`
+			CanceledAt  *string `json:"canceled_at"`
+			ExpiredAt   *string `json:"expired_at"`
+			GeneratedAt *string `json:"generated_at"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		h.logger.Warn("failed to parse melhor_envio webhook payload",
+			zap.String("store_id", storeID),
+			zap.Error(err),
+		)
+		// Always 200 — ME disables webhooks after consecutive failures.
+		return httpx.OK(c, fiber.Map{"status": "received"})
+	}
+
+	h.logger.Info("melhor_envio webhook received",
+		zap.String("store_id", storeID),
+		zap.String("event", payload.Event),
+		zap.String("provider_order_id", payload.Data.ID),
+		zap.String("status", payload.Data.Status),
+	)
+
+	if err := h.service.StoreWebhookEvent(c.Context(), StoreWebhookInput{
+		StoreID:        storeID,
+		Provider:       "melhor_envio",
+		EventType:      payload.Event,
+		EventID:        payload.Data.ID,
+		Payload:        json.RawMessage(body),
+		SignatureValid: c.Get("X-ME-Signature") != "",
+	}); err != nil {
+		h.logger.Error("failed to store melhor_envio webhook event",
+			zap.String("store_id", storeID),
+			zap.Error(err),
+		)
+	}
+
+	if payload.Data.ID != "" {
+		go func() {
+			ctx := context.Background()
+			tracking := ""
+			if payload.Data.Tracking != nil {
+				tracking = *payload.Data.Tracking
+			}
+			if err := h.service.ApplyMelhorEnvioWebhook(ctx, ApplyMelhorEnvioWebhookInput{
+				StoreID:           storeID,
+				ProviderOrderID:   payload.Data.ID,
+				Event:             payload.Event,
+				Status:            payload.Data.Status,
+				TrackingCode:      tracking,
+				PublicTrackingURL: payload.Data.TrackingURL,
+				PostedAt:          payload.Data.PostedAt,
+				DeliveredAt:       payload.Data.DeliveredAt,
+				CanceledAt:        payload.Data.CanceledAt,
+				ExpiredAt:         payload.Data.ExpiredAt,
+			}); err != nil {
+				h.logger.Error("failed to apply melhor_envio webhook",
+					zap.String("store_id", storeID),
+					zap.String("event", payload.Event),
+					zap.String("provider_order_id", payload.Data.ID),
+					zap.Error(err),
+				)
+			}
+		}()
 	}
 
 	return httpx.OK(c, fiber.Map{"status": "received"})

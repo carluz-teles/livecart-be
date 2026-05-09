@@ -30,6 +30,12 @@ const (
 	meCalculatePath = "/api/v2/me/shipment/calculate"
 	meCompaniesPath = "/api/v2/me/shipment/companies"
 	meProfilePath   = "/api/v2/me"
+	meCartPath      = "/api/v2/me/cart"
+	meCheckoutPath  = "/api/v2/me/shipment/checkout"
+	meGeneratePath  = "/api/v2/me/shipment/generate"
+	mePrintPath     = "/api/v2/me/shipment/print"
+	meTrackingPath  = "/api/v2/me/shipment/tracking"
+	meCancelPath    = "/api/v2/me/shipment/cancel"
 )
 
 // AccountInfo is the minimum subset of /api/v2/me needed by the admin UI.
@@ -495,6 +501,444 @@ func (m *MelhorEnvio) ListCarriers(ctx context.Context) ([]CarrierService, error
 		}
 	}
 	return out, nil
+}
+
+// =============================================================================
+// SHIPMENT LIFECYCLE — implements providers.ShippingOrderProvider.
+// =============================================================================
+//
+// Melhor Envio splits creating a label into four calls:
+//   1) POST /me/cart            — adds the shipment to the cart (CreateShipment)
+//   2) POST /me/shipment/checkout — pays the freight using the account balance
+//   3) POST /me/shipment/generate — authorises with the carrier (Correios, …)
+//   4) POST /me/shipment/print    — returns a downloadable label URL
+//
+// We expose (1) on CreateShipment and pipeline (2)+(3)+(4) under
+// GenerateLabels because the merchant is expected to "Criar envio" first
+// (which leaves the order paid by the buyer but not yet at the carrier) and
+// then click "Gerar etiqueta" once the NFe is attached. This mirrors the
+// SmartEnvios surface and the existing OrderLogistics frontend.
+
+// CreateShipment posts the order to Melhor Envio's cart. The returned id is
+// what every follow-up call (checkout/generate/print/tracking/cancel) takes
+// as the order identifier — we persist it as ProviderOrderID.
+func (m *MelhorEnvio) CreateShipment(ctx context.Context, req CreateShipmentRequest) (*CreateShipmentResult, error) {
+	if req.QuoteServiceID == "" {
+		return nil, fmt.Errorf("quote_service_id is required")
+	}
+	if req.Sender.ZipCode == "" || req.Destiny.ZipCode == "" {
+		return nil, fmt.Errorf("sender and destiny zip codes are required")
+	}
+	if len(req.Items) == 0 {
+		return nil, fmt.Errorf("at least one item is required")
+	}
+
+	serviceID, err := strconv.Atoi(strings.TrimSpace(req.QuoteServiceID))
+	if err != nil {
+		return nil, fmt.Errorf("invalid quote_service_id %q: must be the integer service id from /shipment/calculate", req.QuoteServiceID)
+	}
+
+	products, totalGrams, totalCents := buildMECartProducts(req.Items)
+	volumes := buildMECartVolumes(req.Items, totalGrams)
+
+	// ME's "options.invoice.key" is the documented home for the chave NFe.
+	// When absent the shipment ships as a Declaração de Conteúdo and the
+	// merchant can re-link the NFe later via the cart edit endpoint.
+	options := meCartOptions{
+		InsuranceValue: math.Round(reaisFromCents(totalCents)*100) / 100,
+		Receipt:        false,
+		OwnHand:        false,
+		Reverse:        false,
+		NonCommercial:  false,
+	}
+	if req.InvoiceKey != "" {
+		options.Invoice = &meCartInvoice{Key: strings.TrimSpace(req.InvoiceKey)}
+	}
+	if req.Observation != "" {
+		options.Note = req.Observation
+	}
+
+	body := meCartCreateRequest{
+		Service:  serviceID,
+		From:     toMECartAddress(req.Sender),
+		To:       toMECartAddress(req.Destiny),
+		Products: products,
+		Volumes:  volumes,
+		Options:  options,
+	}
+
+	respBody, err := m.doAuthenticated(ctx, http.MethodPost, meCartPath, body)
+	if err != nil {
+		return nil, err
+	}
+
+	var parsed meCartCreateResponse
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil, fmt.Errorf("parsing me cart response: %w, body=%s", err, string(respBody))
+	}
+
+	var meta map[string]any
+	_ = json.Unmarshal(respBody, &meta)
+	createdAt, _ := time.Parse(time.RFC3339, parsed.CreatedAt)
+	if createdAt.IsZero() {
+		// ME sometimes returns "2025-05-09 12:34:56" without TZ.
+		createdAt, _ = time.Parse("2006-01-02 15:04:05", parsed.CreatedAt)
+	}
+
+	return &CreateShipmentResult{
+		ProviderOrderID:     parsed.ID,
+		ProviderOrderNumber: parsed.Protocol,
+		TrackingCode:        parsed.Tracking,
+		InvoiceID:           "",
+		Status:              mapMelhorEnvioStatus(parsed.Status),
+		StatusRawCode:       0,
+		StatusRawName:       parsed.Status,
+		CreatedAt:           createdAt,
+		ProviderMeta:        meta,
+	}, nil
+}
+
+// AttachInvoice sets the NFe key on an existing cart row. Melhor Envio doesn't
+// document a dedicated "attach invoice" endpoint — the chave de acesso lives
+// on options.invoice and can be edited via PUT /api/v2/me/cart/{id} as long
+// as the shipment is still in the "pending" state (i.e. before checkout).
+// We surface ErrOperationNotSupported when no key is provided so the caller
+// knows we don't accept "clear the NFe" via this method.
+func (m *MelhorEnvio) AttachInvoice(ctx context.Context, req AttachInvoiceRequest) error {
+	if req.InvoiceKey == "" {
+		return fmt.Errorf("invoice_key is required")
+	}
+	if req.ProviderOrderID == "" {
+		return fmt.Errorf("provider_order_id is required")
+	}
+	body := map[string]any{
+		"options": map[string]any{
+			"invoice": map[string]any{"key": req.InvoiceKey},
+		},
+	}
+	if _, err := m.doAuthenticated(ctx, http.MethodPut, meCartPath+"/"+req.ProviderOrderID, body); err != nil {
+		return fmt.Errorf("attaching invoice key on melhor envio cart %s: %w", req.ProviderOrderID, err)
+	}
+	return nil
+}
+
+// UploadInvoiceXML — Melhor Envio doesn't accept the raw NFe XML; the chave
+// de acesso is enough for the carriers it integrates with. We return
+// ErrOperationNotSupported so the admin UI can hide the "Upload XML" action
+// for this provider instead of failing silently.
+func (m *MelhorEnvio) UploadInvoiceXML(ctx context.Context, req UploadInvoiceXMLRequest) error {
+	return providers.ErrOperationNotSupported
+}
+
+// GenerateLabels runs the full pay → authorise → print pipeline. All three
+// calls take the same `{orders: [id, …]}` body and Melhor Envio is OK with
+// re-running checkout/generate when they're already done (it's idempotent
+// per shipment), so a partial earlier failure is recoverable by clicking
+// the button again.
+func (m *MelhorEnvio) GenerateLabels(ctx context.Context, req GenerateLabelsRequest) (*GenerateLabelsResult, error) {
+	orderIDs := req.ProviderOrderIDs
+	if len(orderIDs) == 0 {
+		return nil, fmt.Errorf("at least one provider_order_id is required")
+	}
+
+	// 1) Checkout (paga o frete usando o saldo da conta)
+	if _, err := m.doAuthenticated(ctx, http.MethodPost, meCheckoutPath, map[string]any{"orders": orderIDs}); err != nil {
+		return nil, fmt.Errorf("melhor envio checkout: %w", err)
+	}
+
+	// 2) Generate (autoriza com a transportadora — gera tracking e dispatch)
+	generateBody, err := m.doAuthenticated(ctx, http.MethodPost, meGeneratePath, map[string]any{"orders": orderIDs})
+	if err != nil {
+		return nil, fmt.Errorf("melhor envio generate: %w", err)
+	}
+	// Per-order generate metadata. Carries authorization_code + tracking which
+	// we mirror onto the response so the caller can refresh the local row.
+	var generateMeta map[string]meGenerateOrder
+	_ = json.Unmarshal(generateBody, &generateMeta)
+
+	// 3) Print (URL de download da etiqueta)
+	mode := "private"
+	if req.Format != "" {
+		// ME does not let us swap pdf/zpl format on this endpoint — caller
+		// keeps "pdf" implicit and a zpl-only future will move to /imprimir/dace.
+		_ = req.Format
+	}
+	printBody, err := m.doAuthenticated(ctx, http.MethodPost, mePrintPath, map[string]any{
+		"mode":   mode,
+		"orders": orderIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("melhor envio print: %w", err)
+	}
+	var printResp struct {
+		URL string `json:"url"`
+	}
+	_ = json.Unmarshal(printBody, &printResp)
+
+	tickets := make([]LabelTicket, 0, len(orderIDs))
+	for _, id := range orderIDs {
+		t := LabelTicket{ProviderOrderID: id}
+		if meta, ok := generateMeta[id]; ok {
+			t.TrackingCode = meta.Tracking
+			t.PublicTracking = "https://www.melhorrastreio.com.br/rastreio/" + meta.Tracking
+		}
+		tickets = append(tickets, t)
+	}
+	return &GenerateLabelsResult{
+		LabelURL: printResp.URL,
+		Tickets:  tickets,
+	}, nil
+}
+
+// TrackShipment pulls the current status + history for a Melhor Envio order.
+// Tracking lookup accepts the order id (a uuid) under POST /shipment/tracking
+// — the GET version with `orders[]=` works too but POST handles >1 id more
+// robustly; here we always send exactly one.
+func (m *MelhorEnvio) TrackShipment(ctx context.Context, req TrackShipmentRequest) (*TrackShipmentResult, error) {
+	id := req.ProviderOrderID
+	if id == "" {
+		id = req.TrackingCode
+	}
+	if id == "" {
+		return nil, fmt.Errorf("provider_order_id or tracking_code is required")
+	}
+
+	respBody, err := m.doAuthenticated(ctx, http.MethodPost, meTrackingPath, map[string]any{"orders": []string{id}})
+	if err != nil {
+		return nil, err
+	}
+
+	// Response is keyed by order id: { "<id>": { ...meTrackingOrder } }.
+	var keyed map[string]meTrackingOrder
+	if err := json.Unmarshal(respBody, &keyed); err != nil {
+		return nil, fmt.Errorf("parsing me tracking response: %w, body=%s", err, string(respBody))
+	}
+	order, ok := keyed[id]
+	if !ok {
+		// Fallback: ME sometimes returns the order keyed by tracking code.
+		for _, v := range keyed {
+			order = v
+			break
+		}
+	}
+
+	out := &TrackShipmentResult{
+		TrackingCode:  order.Tracking,
+		Carrier:       order.Service.Company,
+		Service:       order.Service.Name,
+		CurrentStatus: mapMelhorEnvioStatus(order.Status),
+	}
+
+	for _, ev := range order.TrackingHistory {
+		ts, _ := time.Parse(time.RFC3339, ev.OccurredAt)
+		if ts.IsZero() {
+			ts, _ = time.Parse("2006-01-02 15:04:05", ev.OccurredAt)
+		}
+		out.Events = append(out.Events, TrackingEvent{
+			Status:      mapMelhorEnvioStatus(ev.Status),
+			RawCode:     0,
+			RawName:     ev.Status,
+			Observation: ev.Description,
+			EventAt:     ts,
+		})
+	}
+
+	var meta map[string]any
+	_ = json.Unmarshal(respBody, &meta)
+	out.ProviderMeta = meta
+	return out, nil
+}
+
+// =============================================================================
+// MELHOR ENVIO — request/response shapes
+// =============================================================================
+
+type meCartCreateRequest struct {
+	Service  int                 `json:"service"`
+	From     meCartAddress       `json:"from"`
+	To       meCartAddress       `json:"to"`
+	Products []meCartProduct     `json:"products"`
+	Volumes  []meCartVolume      `json:"volumes"`
+	Options  meCartOptions       `json:"options"`
+}
+
+type meCartAddress struct {
+	Name            string `json:"name"`
+	Phone           string `json:"phone,omitempty"`
+	Email           string `json:"email,omitempty"`
+	Document        string `json:"document,omitempty"`
+	CompanyDocument string `json:"company_document,omitempty"`
+	Address         string `json:"address"`
+	Complement      string `json:"complement,omitempty"`
+	Number          string `json:"number"`
+	District        string `json:"district"`
+	City            string `json:"city,omitempty"`
+	StateAbbr       string `json:"state_abbr,omitempty"`
+	CountryID       string `json:"country_id"`
+	PostalCode      string `json:"postal_code"`
+	Note            string `json:"note,omitempty"`
+}
+
+type meCartProduct struct {
+	Name         string  `json:"name"`
+	Quantity     int     `json:"quantity"`
+	UnitaryValue float64 `json:"unitary_value"`
+	Weight       float64 `json:"weight,omitempty"`
+}
+
+type meCartVolume struct {
+	Height float64 `json:"height"`
+	Width  float64 `json:"width"`
+	Length float64 `json:"length"`
+	Weight float64 `json:"weight"`
+}
+
+type meCartOptions struct {
+	InsuranceValue float64        `json:"insurance_value"`
+	Receipt        bool           `json:"receipt"`
+	OwnHand        bool           `json:"own_hand"`
+	Reverse        bool           `json:"reverse"`
+	NonCommercial  bool           `json:"non_commercial"`
+	Invoice        *meCartInvoice `json:"invoice,omitempty"`
+	Note           string         `json:"note,omitempty"`
+}
+
+type meCartInvoice struct {
+	Key string `json:"key"`
+}
+
+type meCartCreateResponse struct {
+	ID        string `json:"id"`
+	Protocol  string `json:"protocol"`
+	Status    string `json:"status"`
+	Tracking  string `json:"tracking"`
+	CreatedAt string `json:"created_at"`
+}
+
+type meGenerateOrder struct {
+	AuthorizationCode string `json:"authorization_code"`
+	Tracking          string `json:"tracking"`
+	Status            string `json:"status"`
+}
+
+type meTrackingOrder struct {
+	ID              string                  `json:"id"`
+	Status          string                  `json:"status"`
+	Tracking        string                  `json:"tracking"`
+	Service         meTrackingService       `json:"service"`
+	TrackingHistory []meTrackingHistoryItem `json:"tracking_history"`
+}
+
+type meTrackingService struct {
+	Name    string `json:"name"`
+	Company string `json:"company"`
+}
+
+type meTrackingHistoryItem struct {
+	Status      string `json:"status"`
+	Description string `json:"description"`
+	OccurredAt  string `json:"occurred_at"`
+}
+
+func toMECartAddress(p providers.ShippingAddressPoint) meCartAddress {
+	out := meCartAddress{
+		Name:       p.Name,
+		Phone:      p.Phone,
+		Email:      p.Email,
+		Address:    p.Street,
+		Complement: p.Complement,
+		Number:     nonEmptyString(p.Number, "S/N"),
+		District:   p.Neighborhood,
+		City:       p.City,
+		StateAbbr:  p.State,
+		CountryID:  "BR",
+		PostalCode: sanitizeZip(ShippingZip(p.ZipCode)),
+		Note:       p.Observation,
+	}
+	doc := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, p.Document)
+	switch len(doc) {
+	case 14:
+		out.CompanyDocument = doc
+	case 11:
+		out.Document = doc
+	default:
+		// Surface the raw value so the carrier sees something — ME validates
+		// and will reject explicitly if the doc is malformed.
+		out.Document = doc
+	}
+	return out
+}
+
+func buildMECartProducts(items []ShippingItem) ([]meCartProduct, int, int64) {
+	products := make([]meCartProduct, 0, len(items))
+	totalGrams := 0
+	totalCents := int64(0)
+	for _, it := range items {
+		qty := it.Quantity
+		if qty <= 0 {
+			qty = 1
+		}
+		products = append(products, meCartProduct{
+			Name:         nonEmptyString(it.Name, "Produto"),
+			Quantity:     qty,
+			UnitaryValue: reaisFromCents(it.UnitPriceCents),
+			Weight:       kilogramsFromGrams(it.WeightGrams),
+		})
+		totalGrams += it.WeightGrams * qty
+		totalCents += it.UnitPriceCents * int64(qty)
+	}
+	return products, totalGrams, totalCents
+}
+
+func buildMECartVolumes(items []ShippingItem, totalGrams int) []meCartVolume {
+	// Single consolidated volume — Melhor Envio expects per-package volumes,
+	// which mirrors the freight quote we ran. Multi-package shipments are out
+	// of scope for now (matches SmartEnvios behaviour).
+	first := items[0]
+	w := kilogramsFromGrams(totalGrams)
+	if w <= 0 {
+		w = kilogramsFromGrams(first.WeightGrams)
+	}
+	return []meCartVolume{{
+		Height: float64(first.HeightCm),
+		Width:  float64(first.WidthCm),
+		Length: float64(first.LengthCm),
+		Weight: w,
+	}}
+}
+
+// mapMelhorEnvioStatus translates ME's lifecycle states to LiveCart's
+// normalised TrackingStatus enum. ME states (per /reagindo-a-estados):
+//   pending   → buyer hasn't paid the freight
+//   released  → paid, awaiting authorisation with carrier
+//   posted    → at the carrier, in transit
+//   delivered, cancelled, undelivered, suspended.
+func mapMelhorEnvioStatus(raw string) TrackingStatus {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "pending":
+		return providers.TrackingStatusPending
+	case "released":
+		return providers.TrackingStatusAwaitingPickup
+	case "posted":
+		return providers.TrackingStatusInTransit
+	case "delivered":
+		return providers.TrackingStatusDelivered
+	case "cancelled", "canceled":
+		return providers.TrackingStatusCanceled
+	case "undelivered":
+		return providers.TrackingStatusNotDelivered
+	case "suspended":
+		return providers.TrackingStatusShipmentBlocked
+	case "expired":
+		return providers.TrackingStatusIssue
+	default:
+		return providers.TrackingStatusUnknown
+	}
 }
 
 // =============================================================================

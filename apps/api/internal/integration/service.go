@@ -3080,6 +3080,166 @@ func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID stri
 }
 
 // =============================================================================
+// MELHOR ENVIO WEBHOOK
+// =============================================================================
+
+// ApplyMelhorEnvioWebhookInput is the normalised payload extracted from a
+// melhor_envio webhook. The handler validates and parses; the service applies
+// the side effects (status update + tracking event).
+type ApplyMelhorEnvioWebhookInput struct {
+	StoreID           string
+	ProviderOrderID   string
+	Event             string
+	Status            string
+	TrackingCode      string
+	PublicTrackingURL string
+	PostedAt          *string
+	DeliveredAt       *string
+	CanceledAt        *string
+	ExpiredAt         *string
+}
+
+// ApplyMelhorEnvioWebhook updates the local shipment row to reflect a ME
+// order.* webhook and appends a corresponding tracking event. No-op when the
+// shipment isn't known locally — that happens when the ME account fires
+// webhooks for orders created outside LiveCart and we don't want to leak
+// errors back to the provider (which disables the webhook URL after enough
+// failures).
+func (s *Service) ApplyMelhorEnvioWebhook(ctx context.Context, in ApplyMelhorEnvioWebhookInput) error {
+	if in.ProviderOrderID == "" {
+		return nil
+	}
+	shipment, err := s.repo.GetShipmentByProviderOrderID(ctx, "melhor_envio", in.ProviderOrderID)
+	if err != nil {
+		return fmt.Errorf("looking up me shipment: %w", err)
+	}
+	if shipment == nil {
+		s.logger.Debug("melhor_envio webhook for unknown shipment — ignoring",
+			zap.String("store_id", in.StoreID),
+			zap.String("provider_order_id", in.ProviderOrderID),
+		)
+		return nil
+	}
+
+	normalised := mapMelhorEnvioWebhookStatus(in.Event, in.Status)
+
+	// Persist the canonical status + tracking code on the parent row.
+	if err := s.repo.UpdateShipmentStatus(ctx, shipment.ID, string(normalised), 0, in.Status, in.TrackingCode); err != nil {
+		return fmt.Errorf("updating shipment status: %w", err)
+	}
+	// Mirror the public tracking URL when the carrier eventually exposes one
+	// (it lands on order.posted).
+	if in.PublicTrackingURL != "" || in.TrackingCode != "" {
+		if err := s.repo.UpdateShipmentLabels(ctx, shipment.ID, shipment.LabelURL, in.PublicTrackingURL, in.TrackingCode); err != nil {
+			s.logger.Warn("failed to mirror tracking url onto shipment",
+				zap.String("shipment_id", shipment.ID),
+				zap.Error(err),
+			)
+		}
+	}
+
+	// Append the event to the timeline. We pick the most specific timestamp
+	// available for the event so the FE timeline matches what the merchant
+	// sees on the ME panel.
+	eventAt := pickMelhorEnvioEventTime(in)
+	if err := s.repo.InsertTrackingEvents(ctx, shipment.ID, []TrackingEventInput{{
+		Status:      string(normalised),
+		RawCode:     0,
+		RawName:     in.Event,
+		Observation: meWebhookObservation(in.Event),
+		EventAt:     eventAt,
+		Source:      "webhook",
+	}}); err != nil {
+		return fmt.Errorf("inserting tracking event: %w", err)
+	}
+
+	// Customer-facing notification on first dispatch — same hook the manual
+	// CreateShipment flow uses when the carrier returns the tracking inline.
+	if normalised == providers.TrackingStatusInTransit && in.TrackingCode != "" && s.postCheckoutHook != nil {
+		s.postCheckoutHook.OnShipmentPosted(ctx, shipment.OrderID, in.TrackingCode)
+	}
+	return nil
+}
+
+func mapMelhorEnvioWebhookStatus(event, raw string) providers.TrackingStatus {
+	switch event {
+	case "order.posted":
+		return providers.TrackingStatusInTransit
+	case "order.delivered":
+		return providers.TrackingStatusDelivered
+	case "order.cancelled", "order.canceled":
+		return providers.TrackingStatusCanceled
+	case "order.undelivered":
+		return providers.TrackingStatusNotDelivered
+	case "order.suspended":
+		return providers.TrackingStatusShipmentBlocked
+	case "order.released":
+		return providers.TrackingStatusAwaitingPickup
+	case "order.created", "order.pending":
+		return providers.TrackingStatusPending
+	}
+	// Fallback: trust the raw `status` field on the payload.
+	return mapMelhorEnvioStatusRaw(raw)
+}
+
+func mapMelhorEnvioStatusRaw(raw string) providers.TrackingStatus {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "pending":
+		return providers.TrackingStatusPending
+	case "released":
+		return providers.TrackingStatusAwaitingPickup
+	case "posted":
+		return providers.TrackingStatusInTransit
+	case "delivered":
+		return providers.TrackingStatusDelivered
+	case "cancelled", "canceled":
+		return providers.TrackingStatusCanceled
+	case "undelivered":
+		return providers.TrackingStatusNotDelivered
+	case "suspended":
+		return providers.TrackingStatusShipmentBlocked
+	default:
+		return providers.TrackingStatusUnknown
+	}
+}
+
+func pickMelhorEnvioEventTime(in ApplyMelhorEnvioWebhookInput) time.Time {
+	candidates := []*string{in.DeliveredAt, in.CanceledAt, in.ExpiredAt, in.PostedAt}
+	for _, c := range candidates {
+		if c == nil || *c == "" {
+			continue
+		}
+		if t, err := time.Parse(time.RFC3339, *c); err == nil {
+			return t
+		}
+	}
+	return time.Now()
+}
+
+func meWebhookObservation(event string) string {
+	switch event {
+	case "order.created":
+		return "Etiqueta gerada"
+	case "order.released":
+		return "Etiqueta paga"
+	case "order.posted":
+		return "Postado"
+	case "order.delivered":
+		return "Entregue"
+	case "order.cancelled", "order.canceled":
+		return "Cancelado"
+	case "order.undelivered":
+		return "Não entregue"
+	case "order.suspended":
+		return "Suspenso"
+	case "order.pending":
+		return "Aguardando pagamento"
+	default:
+		return event
+	}
+}
+
+// =============================================================================
 // CART NFe SYNC (ERP → carts.erp_invoice_*)
 // =============================================================================
 
