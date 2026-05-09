@@ -83,7 +83,11 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 				 ORDER BY sh.created_at DESC LIMIT 1),
 				''
 			) as shipment_status,
-			(c.shipping_service_id IS NOT NULL AND c.shipping_service_id <> '') as has_shipping,
+			(
+				c.shipping_service_id IS NOT NULL
+				AND c.shipping_service_id <> ''
+				AND c.payment_status NOT IN ('cancelled', 'refunded')
+			) as has_shipping,
 			c.erp_finalisation_status
 		FROM carts c
 		JOIN live_events e ON e.id = c.event_id

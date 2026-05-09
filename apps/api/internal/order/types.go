@@ -431,9 +431,11 @@ type OrderRow struct {
 	IsFirstPurchase bool
 	// Latest shipment status for the cart, "" when no shipment exists yet.
 	ShipmentStatus  string
-	// True when the buyer picked a shipping service at checkout, even if no
-	// shipment row has been created yet. Lets the list show "Aguardando emissão"
-	// instead of "Sem envio" between checkout and shipment creation.
+	// True when the buyer picked a shipping service at checkout and the cart
+	// is still in a state where a shipment can be issued (i.e. payment is not
+	// 'cancelled'/'refunded'). Lets the list show "Aguardando emissão" instead
+	// of "Sem envio" between checkout and shipment creation, while keeping
+	// terminal/non-shippable orders out of that label.
 	HasShipping           bool
 	ERPFinalisationStatus string
 }
