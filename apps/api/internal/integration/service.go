@@ -471,6 +471,9 @@ func buildProviderURLs(provider, storeID string) *GetProviderURLsOutput {
 		out.RedirectURL = base + "/api/v1/integrations/oauth/instagram/callback"
 	case "melhor_envio":
 		out.RedirectURL = base + "/api/v1/integrations/oauth/melhor_envio/callback"
+		if storeID != "" {
+			out.WebhookURL = base + "/api/webhooks/melhor_envio/" + storeID
+		}
 	}
 	return out
 }
