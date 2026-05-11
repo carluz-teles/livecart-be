@@ -753,21 +753,44 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 	}
 	expiresAt := time.Now().Add(expiresIn)
 
-	items := make([]map[string]any, len(input.Items))
-	for i, item := range input.Items {
-		items[i] = map[string]any{
+	items := make([]map[string]any, 0, len(input.Items)+1)
+	var itemsSum int64
+	for _, item := range input.Items {
+		items = append(items, map[string]any{
 			"amount":      item.UnitPrice,
 			"description": item.Name,
 			"quantity":    item.Quantity,
 			"code":        item.ID,
+		})
+		itemsSum += item.UnitPrice * int64(item.Quantity)
+	}
+	// Same invariant as the card flow: Pagar.me derives order.amount from
+	// sum(items.amount * quantity). input.TotalAmount already includes
+	// shipping/coupon, so when it differs from itemsSum we expose the gap
+	// as a single line item — otherwise sum(items) won't match the charge
+	// amount the buyer agreed to.
+	if diff := input.TotalAmount - itemsSum; diff != 0 {
+		desc := "Frete"
+		if diff < 0 {
+			desc = "Desconto"
 		}
+		items = append(items, map[string]any{
+			"amount":      diff,
+			"description": desc,
+			"quantity":    1,
+			"code":        "checkout-adjustment",
+		})
 	}
 
 	customer := buildPagarmeCustomer(input.Customer)
 
+	// Like the card flow, we omit payments[].amount and let Pagar.me derive
+	// the charge total from sum(items.amount). Setting it explicitly was
+	// what caused the items=820000 / charge=825285 mismatch in the empty-QR
+	// reproduction — the gateway accepted the call with action_forbidden
+	// but downstream validators would have rejected on amount mismatch.
 	pixPayment := map[string]any{
 		"payment_method": "pix",
-		"amount":         input.TotalAmount,
 		"pix": map[string]any{
 			"expires_in": int(expiresIn.Seconds()),
 		},
@@ -871,14 +894,31 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 		zap.Any("antifraud_response", antifraudResp),
 	}
 
-	// QR vazio em resposta 2xx geralmente indica que o charge nasceu
-	// failed (antifraude/validação) ou que a chave PIX da conta não está
-	// homologada. Dump do body bruto pra correlacionar com o webhook.
-	if qrCode == "" || qrCodeText == "" {
+	// Pagar.me v5 retorna HTTP 200 mesmo quando o charge nasce failed
+	// (ex.: conta sem PIX habilitado devolve gateway_response.code=400
+	// com "action_forbidden | Sem ambiente configurado..."). Sem essa
+	// checagem, o FE recebia paymentId válido + QR vazio e ficava preso
+	// na tela de pagamento sem entender o motivo.
+	chargeFailed := chargeStatus == "failed" || lastTxStatus == "failed"
+	qrEmpty := qrCode == "" || qrCodeText == ""
+
+	if chargeFailed || qrEmpty {
 		logFields = append(logFields, zap.String("response_body", string(body)))
 		p.Logger.Warn("pagarme pix generated with empty qr code", logFields...)
 	} else {
 		p.Logger.Info("pagarme pix generated", logFields...)
+	}
+
+	if chargeFailed {
+		msg := extractPagarmeGatewayMessage(gatewayResp)
+		if msg == "" {
+			msg = "Pagar.me recusou a geração do PIX. Verifique se a conta tem PIX habilitado."
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
+
+	if qrEmpty {
+		return nil, fmt.Errorf("Pagar.me não retornou o QR Code do PIX. Tente novamente.")
 	}
 
 	return &PixPaymentResult{
@@ -890,6 +930,26 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 		ExpiresAt:         expiresAt,
 		ExternalReference: pgResp.Code,
 	}, nil
+}
+
+// extractPagarmeGatewayMessage pulls the first gateway error message out of
+// a last_transaction.gateway_response. Pagar.me wraps adquirente-level errors
+// here as { code: "400", errors: [{ message: "..." }] }. Returns "" when the
+// shape doesn't match so the caller can fall back to a generic message.
+func extractPagarmeGatewayMessage(gw map[string]any) string {
+	if gw == nil {
+		return ""
+	}
+	errs, ok := gw["errors"].([]any)
+	if !ok || len(errs) == 0 {
+		return ""
+	}
+	first, ok := errs[0].(map[string]any)
+	if !ok {
+		return ""
+	}
+	msg, _ := first["message"].(string)
+	return msg
 }
 
 // buildPagarmeCustomer maps our internal CheckoutCustomer onto the
