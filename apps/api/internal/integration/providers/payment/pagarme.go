@@ -680,8 +680,18 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 	}
 	// Log at Error level on rejection so the message + return code
 	// surface in error dashboards alongside the 5xx transport failures.
-	// Approved/pending payments stay at Info.
+	// Approved/pending payments stay at Info. On rejection also dump the
+	// (redacted) request payload + the raw body so we can correlate the
+	// dashboard's validation_error path against what we actually sent —
+	// the captured path is hit even when the gateway's gateway_response
+	// is HTTP 400 wrapped inside a 200, so this is the only place that
+	// surfaces the request body for that case.
 	if result.Status == PaymentRejected {
+		safe := redactCardPayload(payload)
+		logFields = append(logFields,
+			zap.Any("request_payload", safe),
+			zap.String("response_body", string(body)),
+		)
 		p.Logger.Error("pagarme card payment captured", logFields...)
 	} else {
 		p.Logger.Info("pagarme card payment captured", logFields...)
