@@ -2,6 +2,7 @@ package checkout
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -926,6 +927,12 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 	if syncErr != nil {
 		// Roll back the local change so the buyer sees the failure clearly.
 		_ = s.repo.SetCartItemQuantity(ctx, item.ID, item.Quantity)
+		// Propagate typed httpx errors verbatim (e.g., "estoque insuficiente")
+		// so the buyer sees the actual reason instead of a generic retry copy.
+		var svcErr *httpx.ServiceError
+		if errors.As(syncErr, &svcErr) {
+			return nil, syncErr
+		}
 		s.logger.Error("ERP delta sync failed, rolled back cart item quantity",
 			zap.String("cart_id", cart.ID),
 			zap.String("product_id", item.ProductID),
@@ -993,6 +1000,10 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 				zap.String("product_id", item.ProductID),
 				zap.Error(restoreErr),
 			)
+		}
+		var svcErr *httpx.ServiceError
+		if errors.As(syncErr, &svcErr) {
+			return nil, syncErr
 		}
 		s.logger.Error("ERP reversal failed on remove, restored cart item",
 			zap.String("cart_id", cart.ID),
@@ -1117,6 +1128,10 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 			_ = s.repo.SetCartItemQuantity(ctx, existing.ID, currentQty)
 		} else if rollback, _ := s.repo.FindCartItemByProduct(ctx, cart.ID, input.ProductID); rollback != nil {
 			_ = s.repo.DeleteCartItem(ctx, rollback.ID)
+		}
+		var svcErr *httpx.ServiceError
+		if errors.As(syncErr, &svcErr) {
+			return nil, syncErr
 		}
 		return nil, httpx.ErrUnprocessable("não foi possível adicionar o produto, tente novamente")
 	}

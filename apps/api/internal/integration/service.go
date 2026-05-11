@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
@@ -4060,20 +4061,66 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 }
 
 // AdjustStockReservationDelta applies a quantity delta (positive or negative)
-// to the active ERP stock reservation for a (cart, product). It is the
-// counterpart of ReserveStockInERP for buyer-driven cart edits at checkout
-// time: each +1/-1 the buyer makes calls this once, which talks to the ERP
-// and updates stock_reservations to keep its `quantity` column in sync.
+// to a (cart, product) reservation. It mutates both the local products.stock
+// counter and the ERP reservation in a single call so the two stay in sync.
 //
-// Returns the ERP movement_id of the new ERP movement (empty when no ERP
-// integration is configured or the product is not linked, both treated as
-// no-ops). Errors from the ERP propagate so the checkout service can fail the
-// mutation and roll back.
+// Local stock is the source-of-truth gate for waitlist promotion
+// (ProcessWaitlistForProduct's atomic DecrementProductStock) and live-add
+// availability (processLiveAdd reads product.Stock). It is mutated FIRST so
+// that even stores without an ERP integration get correct waitlist behavior.
+// A failure in the optional ERP sync rolls the local mutation back.
+//
+// On delta > 0, an insufficient-stock condition returns httpx 422 instead of
+// silently over-allocating (the previous behavior caused buyers reducing then
+// re-increasing their cart to over-allocate against the original stock).
+//
+// Returns the ERP movement_id (empty when no ERP integration is configured or
+// the product is not linked — both treated as no-ops for the ERP side; local
+// stock is still updated).
 func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cartID, eventID, productID string, delta int, unitPrice int64, platformHandle string) (string, error) {
 	if delta == 0 {
 		return "", nil
 	}
 
+	// 1. Local stock mutation — atomic gate for delta>0, mirror of the ERP
+	//    reversal for delta<0. Runs unconditionally so waitlist promotion sees
+	//    freed units immediately, even when the store has no ERP integration.
+	if delta > 0 {
+		if err := s.repo.DecrementProductStock(ctx, productID, delta); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return "", httpx.ErrUnprocessable("estoque insuficiente para esse aumento")
+			}
+			return "", fmt.Errorf("decrementing local stock: %w", err)
+		}
+	} else {
+		if err := s.repo.IncrementProductStock(ctx, productID, -delta); err != nil {
+			return "", fmt.Errorf("releasing local stock: %w", err)
+		}
+	}
+
+	// Rollback helper used when ERP sync fails after local stock already moved.
+	rollbackLocal := func() {
+		if delta > 0 {
+			if err := s.repo.IncrementProductStock(ctx, productID, delta); err != nil {
+				s.logger.Error("failed to rollback local stock decrement after ERP failure",
+					zap.String("product_id", productID),
+					zap.Int("delta", delta),
+					zap.Error(err),
+				)
+			}
+		} else {
+			if err := s.repo.DecrementProductStock(ctx, productID, -delta); err != nil {
+				s.logger.Error("failed to rollback local stock increment after ERP failure",
+					zap.String("product_id", productID),
+					zap.Int("delta", delta),
+					zap.Error(err),
+				)
+			}
+		}
+	}
+
+	// 2. ERP sync — optional. Anything below is best-effort against the ERP;
+	//    any failure rolls back the local change above.
 	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
 	if err != nil {
 		s.logger.Debug("no active ERP integration, skipping reservation delta",
@@ -4084,6 +4131,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 
 	erpProvider, err := s.getERPProvider(ctx, integration)
 	if err != nil {
+		rollbackLocal()
 		return "", fmt.Errorf("creating ERP provider: %w", err)
 	}
 
@@ -4104,6 +4152,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 		obs := fmt.Sprintf("Ajuste reserva LiveCart (+%d) - @%s - Cart %s", delta, platformHandle, cartID)
 		movementID, err := erpProvider.ReserveStock(ctx, externalID, delta, float64(unitPrice)/100, obs)
 		if err != nil {
+			rollbackLocal()
 			return "", fmt.Errorf("reserving stock delta in ERP: %w", err)
 		}
 
@@ -4151,6 +4200,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 	obs := fmt.Sprintf("Ajuste reserva LiveCart (%d) - @%s - Cart %s", delta, platformHandle, cartID)
 	movementID, err := erpProvider.ReverseStockReservation(ctx, externalID, -delta, 0, obs)
 	if err != nil {
+		rollbackLocal()
 		return "", fmt.Errorf("reversing stock delta in ERP: %w", err)
 	}
 
@@ -4747,18 +4797,23 @@ func (s *Service) CancelWaitlistItem(ctx context.Context, waitlistItemID, cartID
 		}
 		cart, _ := s.repo.GetCartByID(ctx, cartID)
 		if cart != nil {
+			// AdjustStockReservationDelta also bumps products.stock for delta<0,
+			// so no separate IncrementProductStock call is needed here.
 			if _, err := s.AdjustStockReservationDelta(ctx, cart.StoreID, cartID, item.EventID, item.ProductID, -item.Quantity, 0, cart.PlatformHandle); err != nil {
-				s.logger.Warn("failed to reverse ERP reservation on waitlist cancel",
+				s.logger.Warn("failed to reverse reservation on waitlist cancel",
 					zap.String("waitlist_item_id", waitlistItemID),
 					zap.Error(err),
 				)
 			}
-		}
-		if err := s.repo.IncrementProductStock(ctx, item.ProductID, item.Quantity); err != nil {
-			s.logger.Warn("failed to increment local stock on waitlist cancel",
-				zap.String("waitlist_item_id", waitlistItemID),
-				zap.Error(err),
-			)
+		} else {
+			// Cart desapareceu: ainda precisamos devolver o estoque local que
+			// o promote consumiu, para a próxima entry da fila ser promovível.
+			if err := s.repo.IncrementProductStock(ctx, item.ProductID, item.Quantity); err != nil {
+				s.logger.Warn("failed to increment local stock on waitlist cancel (cart missing)",
+					zap.String("waitlist_item_id", waitlistItemID),
+					zap.Error(err),
+				)
+			}
 		}
 		// Promove o próximo da fila — best-effort.
 		if cart != nil {
@@ -4791,28 +4846,28 @@ func (s *Service) ExpireNotifiedWaitlistItem(ctx context.Context, item WaitlistI
 			)
 		}
 
-		// Reverte a reserva no ERP. Pode ser no-op se o produto não tiver
-		// integração (a função interna já lida com isso). Falha aqui não
-		// bloqueia — o estoque local é a fonte da verdade para a fila.
+		// Reverte a reserva no ERP e devolve o estoque local em uma única
+		// chamada (AdjustStockReservationDelta lida com ambos para delta<0).
+		// Falha aqui não bloqueia — o sweep tenta de novo no próximo tick.
 		cart, _ := s.repo.GetCartByID(ctx, cartID)
 		if cart != nil {
 			if _, err := s.AdjustStockReservationDelta(ctx, cart.StoreID, cartID, eventID, productID, -item.Quantity, 0, cart.PlatformHandle); err != nil {
-				s.logger.Warn("failed to reverse ERP reservation on waitlist expire",
+				s.logger.Warn("failed to reverse reservation on waitlist expire",
 					zap.String("waitlist_item_id", item.ID),
 					zap.String("cart_id", cartID),
 					zap.Error(err),
 				)
 			}
+		} else {
+			// Cart desapareceu (raro): nada para reverter no ERP, mas ainda
+			// precisamos devolver o estoque local que o promote consumiu.
+			if err := s.repo.IncrementProductStock(ctx, productID, item.Quantity); err != nil {
+				s.logger.Warn("failed to increment local stock on waitlist expire (cart missing)",
+					zap.String("waitlist_item_id", item.ID),
+					zap.Error(err),
+				)
+			}
 		}
-	}
-
-	// Devolve o estoque local. Mesmo no-op se o cart_item não existia
-	// (defensive), porque o promote chamou DecrementProductStock antes.
-	if err := s.repo.IncrementProductStock(ctx, productID, item.Quantity); err != nil {
-		s.logger.Warn("failed to increment local stock on waitlist expire",
-			zap.String("waitlist_item_id", item.ID),
-			zap.Error(err),
-		)
 	}
 
 	// Marca como expired — esse é o gate de idempotência. Se isso falhar,
