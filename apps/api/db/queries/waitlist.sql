@@ -3,8 +3,8 @@
 -- =============================================================================
 
 -- name: CreateWaitlistItem :one
-INSERT INTO waitlist_items (event_id, product_id, platform_user_id, platform_handle, quantity, position)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO waitlist_items (event_id, product_id, platform_user_id, platform_handle, quantity, position, cart_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING *;
 
 -- name: GetNextWaitlistPosition :one
@@ -55,3 +55,65 @@ WHERE status = 'notified' AND expires_at IS NOT NULL AND expires_at < now();
 -- name: CountWaitingByProduct :one
 SELECT COUNT(*)::int FROM waitlist_items
 WHERE event_id = $1 AND product_id = $2 AND status = 'waiting';
+
+-- name: CountActiveByEventProduct :one
+-- waiting + notified — usado pelo webhook ERP para decidir se vale tentar
+-- promover alguém após uma mudança de saldo.
+SELECT COUNT(*)::int FROM waitlist_items
+WHERE event_id = $1 AND product_id = $2 AND status IN ('waiting','notified');
+
+-- name: ListEventsWithWaitingByProduct :many
+-- Eventos distintos que têm pelo menos um cliente em status='waiting' para
+-- o produto. Usado pelo webhook Tiny para varrer e promover. Filtramos só
+-- 'waiting' porque 'notified' já tem stock alocado — não precisa promover
+-- o mesmo evento de novo.
+SELECT DISTINCT event_id
+FROM waitlist_items
+WHERE product_id = $1 AND status = 'waiting';
+
+-- name: ListActiveByCart :many
+-- Itens em fila (waiting/notified) vinculados ao carrinho do cliente —
+-- alimenta a seção de waitlist no /cart/:token.
+SELECT wi.*,
+       p.name      AS product_name,
+       p.keyword   AS product_keyword,
+       p.image_url AS product_image_url,
+       p.price     AS product_price
+FROM waitlist_items wi
+JOIN products p ON p.id = wi.product_id
+WHERE wi.cart_id = $1 AND wi.status IN ('waiting','notified')
+ORDER BY wi.created_at;
+
+-- name: CancelWaitlistItem :exec
+-- cart_id no WHERE garante ownership (cliente só consegue cancelar itens
+-- do próprio carrinho); status no WHERE evita atropelar fulfilled/expired.
+UPDATE waitlist_items
+SET status = 'cancelled', cancelled_at = now()
+WHERE id = $1 AND cart_id = $2 AND status IN ('waiting','notified');
+
+-- name: GetWaitlistItemForCart :one
+SELECT * FROM waitlist_items
+WHERE id = $1 AND cart_id = $2;
+
+-- name: MarkWaitlistNotified :exec
+-- Promove o cliente da fila para "notified" com a janela de TTL extra.
+UPDATE waitlist_items
+SET status               = 'notified',
+    notified_at          = now(),
+    expires_at           = $2,
+    notification_sent_at = $3
+WHERE id = $1;
+
+-- name: MarkWaitlistFulfilledByCart :exec
+-- Chamado no callback OnCartPaid: tudo que estava notified naquele cart
+-- vira fulfilled (cliente pagou dentro da janela).
+UPDATE waitlist_items
+SET status = 'fulfilled', fulfilled_at = now()
+WHERE cart_id = $1 AND status = 'notified';
+
+-- name: ListNotifiedByCart :many
+-- Carts pagos: precisamos saber quais notified existem para marcar como
+-- fulfilled e logar (não é estritamente necessário porque
+-- MarkWaitlistFulfilledByCart cobre — usado em testes/observabilidade).
+SELECT * FROM waitlist_items
+WHERE cart_id = $1 AND status = 'notified';

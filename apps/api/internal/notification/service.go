@@ -231,6 +231,16 @@ func (s *Service) ShouldNotify(ctx context.Context, storeID string, notifType No
 		// Use cart_settings trigger for expiration reminder
 		return templateSettings.CheckoutReminder.Enabled && cartSettings.SendExpirationReminder, nil
 
+	case TypeWaitlistNotified:
+		// No cart_settings trigger here — waitlist promotion is always
+		// sent (the merchant only opts out by disabling the template).
+		// Customer is implicitly opted-in: they explicitly asked to be
+		// queued for an out-of-stock item.
+		if templateSettings.WaitlistNotified == nil {
+			return true, nil // default-on when merchant hasn't customized
+		}
+		return templateSettings.WaitlistNotified.Enabled, nil
+
 	default:
 		return false, nil
 	}
@@ -340,6 +350,15 @@ func (s *Service) getTemplateSettings(settings *Settings, notifType Notification
 		return settings.ItemAdded
 	case TypeCheckoutReminder:
 		return settings.CheckoutReminder
+	case TypeWaitlistNotified:
+		// Existing stores' notification_settings JSON pré-data esse
+		// campo, então quando vier nil caímos no default (em vez de
+		// retornar nil e pular a notificação inteira).
+		if settings.WaitlistNotified != nil {
+			return settings.WaitlistNotified
+		}
+		def := DefaultSettings().WaitlistNotified
+		return def
 	default:
 		return nil
 	}

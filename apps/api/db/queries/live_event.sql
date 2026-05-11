@@ -77,10 +77,14 @@ SELECT
     e.close_cart_on_event_end,
     COALESCE(e.cart_expiration_minutes, s.cart_expiration_minutes) AS cart_expiration_minutes,
     COALESCE(e.cart_max_quantity_per_item, s.cart_max_quantity_per_item) AS cart_max_quantity_per_item,
-    COALESCE(e.send_on_live_end, s.send_on_live_end) AS send_on_live_end
+    COALESCE(e.send_on_live_end, s.send_on_live_end) AS send_on_live_end,
+    e.waitlist_notified_ttl_minutes
 FROM live_events e
 JOIN stores s ON s.id = e.store_id
 WHERE e.id = $1;
+
+-- name: GetWaitlistNotifiedTTLByEvent :one
+SELECT waitlist_notified_ttl_minutes FROM live_events WHERE id = $1;
 
 -- =============================================================================
 -- LIVE MODE - Active Product and Processing Control

@@ -11,6 +11,43 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const cancelWaitlistItem = `-- name: CancelWaitlistItem :exec
+UPDATE waitlist_items
+SET status = 'cancelled', cancelled_at = now()
+WHERE id = $1 AND cart_id = $2 AND status IN ('waiting','notified')
+`
+
+type CancelWaitlistItemParams struct {
+	ID     pgtype.UUID `json:"id"`
+	CartID pgtype.UUID `json:"cart_id"`
+}
+
+// cart_id no WHERE garante ownership (cliente só consegue cancelar itens
+// do próprio carrinho); status no WHERE evita atropelar fulfilled/expired.
+func (q *Queries) CancelWaitlistItem(ctx context.Context, arg CancelWaitlistItemParams) error {
+	_, err := q.db.Exec(ctx, cancelWaitlistItem, arg.ID, arg.CartID)
+	return err
+}
+
+const countActiveByEventProduct = `-- name: CountActiveByEventProduct :one
+SELECT COUNT(*)::int FROM waitlist_items
+WHERE event_id = $1 AND product_id = $2 AND status IN ('waiting','notified')
+`
+
+type CountActiveByEventProductParams struct {
+	EventID   pgtype.UUID `json:"event_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+}
+
+// waiting + notified — usado pelo webhook ERP para decidir se vale tentar
+// promover alguém após uma mudança de saldo.
+func (q *Queries) CountActiveByEventProduct(ctx context.Context, arg CountActiveByEventProductParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countActiveByEventProduct, arg.EventID, arg.ProductID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const countWaitingByProduct = `-- name: CountWaitingByProduct :one
 SELECT COUNT(*)::int FROM waitlist_items
 WHERE event_id = $1 AND product_id = $2 AND status = 'waiting'
@@ -30,9 +67,9 @@ func (q *Queries) CountWaitingByProduct(ctx context.Context, arg CountWaitingByP
 
 const createWaitlistItem = `-- name: CreateWaitlistItem :one
 
-INSERT INTO waitlist_items (event_id, product_id, platform_user_id, platform_handle, quantity, position)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at
+INSERT INTO waitlist_items (event_id, product_id, platform_user_id, platform_handle, quantity, position, cart_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at, cart_id, notification_sent_at, cancelled_at
 `
 
 type CreateWaitlistItemParams struct {
@@ -42,6 +79,7 @@ type CreateWaitlistItemParams struct {
 	PlatformHandle string      `json:"platform_handle"`
 	Quantity       int32       `json:"quantity"`
 	Position       int32       `json:"position"`
+	CartID         pgtype.UUID `json:"cart_id"`
 }
 
 // =============================================================================
@@ -55,6 +93,7 @@ func (q *Queries) CreateWaitlistItem(ctx context.Context, arg CreateWaitlistItem
 		arg.PlatformHandle,
 		arg.Quantity,
 		arg.Position,
+		arg.CartID,
 	)
 	var i WaitlistItem
 	err := row.Scan(
@@ -70,6 +109,9 @@ func (q *Queries) CreateWaitlistItem(ctx context.Context, arg CreateWaitlistItem
 		&i.FulfilledAt,
 		&i.ExpiresAt,
 		&i.CreatedAt,
+		&i.CartID,
+		&i.NotificationSentAt,
+		&i.CancelledAt,
 	)
 	return i, err
 }
@@ -86,7 +128,7 @@ func (q *Queries) ExpireWaitlistByEvent(ctx context.Context, eventID pgtype.UUID
 }
 
 const getFirstWaitingByProduct = `-- name: GetFirstWaitingByProduct :one
-SELECT id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at FROM waitlist_items
+SELECT id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at, cart_id, notification_sent_at, cancelled_at FROM waitlist_items
 WHERE event_id = $1 AND product_id = $2 AND status = 'waiting'
 ORDER BY position ASC
 LIMIT 1
@@ -113,6 +155,9 @@ func (q *Queries) GetFirstWaitingByProduct(ctx context.Context, arg GetFirstWait
 		&i.FulfilledAt,
 		&i.ExpiresAt,
 		&i.CreatedAt,
+		&i.CartID,
+		&i.NotificationSentAt,
+		&i.CancelledAt,
 	)
 	return i, err
 }
@@ -136,7 +181,7 @@ func (q *Queries) GetNextWaitlistPosition(ctx context.Context, arg GetNextWaitli
 }
 
 const getWaitlistItemByEventUserProduct = `-- name: GetWaitlistItemByEventUserProduct :one
-SELECT id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at FROM waitlist_items
+SELECT id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at, cart_id, notification_sent_at, cancelled_at FROM waitlist_items
 WHERE event_id = $1 AND platform_user_id = $2 AND product_id = $3
   AND status IN ('waiting', 'notified')
 `
@@ -163,12 +208,154 @@ func (q *Queries) GetWaitlistItemByEventUserProduct(ctx context.Context, arg Get
 		&i.FulfilledAt,
 		&i.ExpiresAt,
 		&i.CreatedAt,
+		&i.CartID,
+		&i.NotificationSentAt,
+		&i.CancelledAt,
 	)
 	return i, err
 }
 
+const getWaitlistItemForCart = `-- name: GetWaitlistItemForCart :one
+SELECT id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at, cart_id, notification_sent_at, cancelled_at FROM waitlist_items
+WHERE id = $1 AND cart_id = $2
+`
+
+type GetWaitlistItemForCartParams struct {
+	ID     pgtype.UUID `json:"id"`
+	CartID pgtype.UUID `json:"cart_id"`
+}
+
+func (q *Queries) GetWaitlistItemForCart(ctx context.Context, arg GetWaitlistItemForCartParams) (WaitlistItem, error) {
+	row := q.db.QueryRow(ctx, getWaitlistItemForCart, arg.ID, arg.CartID)
+	var i WaitlistItem
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.ProductID,
+		&i.PlatformUserID,
+		&i.PlatformHandle,
+		&i.Quantity,
+		&i.Position,
+		&i.Status,
+		&i.NotifiedAt,
+		&i.FulfilledAt,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.CartID,
+		&i.NotificationSentAt,
+		&i.CancelledAt,
+	)
+	return i, err
+}
+
+const listActiveByCart = `-- name: ListActiveByCart :many
+SELECT wi.id, wi.event_id, wi.product_id, wi.platform_user_id, wi.platform_handle, wi.quantity, wi.position, wi.status, wi.notified_at, wi.fulfilled_at, wi.expires_at, wi.created_at, wi.cart_id, wi.notification_sent_at, wi.cancelled_at,
+       p.name      AS product_name,
+       p.keyword   AS product_keyword,
+       p.image_url AS product_image_url,
+       p.price     AS product_price
+FROM waitlist_items wi
+JOIN products p ON p.id = wi.product_id
+WHERE wi.cart_id = $1 AND wi.status IN ('waiting','notified')
+ORDER BY wi.created_at
+`
+
+type ListActiveByCartRow struct {
+	ID                 pgtype.UUID        `json:"id"`
+	EventID            pgtype.UUID        `json:"event_id"`
+	ProductID          pgtype.UUID        `json:"product_id"`
+	PlatformUserID     string             `json:"platform_user_id"`
+	PlatformHandle     string             `json:"platform_handle"`
+	Quantity           int32              `json:"quantity"`
+	Position           int32              `json:"position"`
+	Status             string             `json:"status"`
+	NotifiedAt         pgtype.Timestamptz `json:"notified_at"`
+	FulfilledAt        pgtype.Timestamptz `json:"fulfilled_at"`
+	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	CartID             pgtype.UUID        `json:"cart_id"`
+	NotificationSentAt pgtype.Timestamptz `json:"notification_sent_at"`
+	CancelledAt        pgtype.Timestamptz `json:"cancelled_at"`
+	ProductName        string             `json:"product_name"`
+	ProductKeyword     string             `json:"product_keyword"`
+	ProductImageUrl    pgtype.Text        `json:"product_image_url"`
+	ProductPrice       pgtype.Int8        `json:"product_price"`
+}
+
+// Itens em fila (waiting/notified) vinculados ao carrinho do cliente —
+// alimenta a seção de waitlist no /cart/:token.
+func (q *Queries) ListActiveByCart(ctx context.Context, cartID pgtype.UUID) ([]ListActiveByCartRow, error) {
+	rows, err := q.db.Query(ctx, listActiveByCart, cartID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListActiveByCartRow{}
+	for rows.Next() {
+		var i ListActiveByCartRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventID,
+			&i.ProductID,
+			&i.PlatformUserID,
+			&i.PlatformHandle,
+			&i.Quantity,
+			&i.Position,
+			&i.Status,
+			&i.NotifiedAt,
+			&i.FulfilledAt,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.CartID,
+			&i.NotificationSentAt,
+			&i.CancelledAt,
+			&i.ProductName,
+			&i.ProductKeyword,
+			&i.ProductImageUrl,
+			&i.ProductPrice,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEventsWithWaitingByProduct = `-- name: ListEventsWithWaitingByProduct :many
+SELECT DISTINCT event_id
+FROM waitlist_items
+WHERE product_id = $1 AND status = 'waiting'
+`
+
+// Eventos distintos que têm pelo menos um cliente em status='waiting' para
+// o produto. Usado pelo webhook Tiny para varrer e promover. Filtramos só
+// 'waiting' porque 'notified' já tem stock alocado — não precisa promover
+// o mesmo evento de novo.
+func (q *Queries) ListEventsWithWaitingByProduct(ctx context.Context, productID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listEventsWithWaitingByProduct, productID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var event_id pgtype.UUID
+		if err := rows.Scan(&event_id); err != nil {
+			return nil, err
+		}
+		items = append(items, event_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listExpiredNotifiedWaitlistItems = `-- name: ListExpiredNotifiedWaitlistItems :many
-SELECT id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at FROM waitlist_items
+SELECT id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at, cart_id, notification_sent_at, cancelled_at FROM waitlist_items
 WHERE status = 'notified' AND expires_at IS NOT NULL AND expires_at < now()
 `
 
@@ -194,6 +381,53 @@ func (q *Queries) ListExpiredNotifiedWaitlistItems(ctx context.Context) ([]Waitl
 			&i.FulfilledAt,
 			&i.ExpiresAt,
 			&i.CreatedAt,
+			&i.CartID,
+			&i.NotificationSentAt,
+			&i.CancelledAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNotifiedByCart = `-- name: ListNotifiedByCart :many
+SELECT id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at, cart_id, notification_sent_at, cancelled_at FROM waitlist_items
+WHERE cart_id = $1 AND status = 'notified'
+`
+
+// Carts pagos: precisamos saber quais notified existem para marcar como
+// fulfilled e logar (não é estritamente necessário porque
+// MarkWaitlistFulfilledByCart cobre — usado em testes/observabilidade).
+func (q *Queries) ListNotifiedByCart(ctx context.Context, cartID pgtype.UUID) ([]WaitlistItem, error) {
+	rows, err := q.db.Query(ctx, listNotifiedByCart, cartID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WaitlistItem{}
+	for rows.Next() {
+		var i WaitlistItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventID,
+			&i.ProductID,
+			&i.PlatformUserID,
+			&i.PlatformHandle,
+			&i.Quantity,
+			&i.Position,
+			&i.Status,
+			&i.NotifiedAt,
+			&i.FulfilledAt,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.CartID,
+			&i.NotificationSentAt,
+			&i.CancelledAt,
 		); err != nil {
 			return nil, err
 		}
@@ -206,7 +440,7 @@ func (q *Queries) ListExpiredNotifiedWaitlistItems(ctx context.Context) ([]Waitl
 }
 
 const listWaitlistByEventAndProduct = `-- name: ListWaitlistByEventAndProduct :many
-SELECT id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at FROM waitlist_items
+SELECT id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at, cart_id, notification_sent_at, cancelled_at FROM waitlist_items
 WHERE event_id = $1 AND product_id = $2 AND status = 'waiting'
 ORDER BY position ASC
 `
@@ -238,6 +472,9 @@ func (q *Queries) ListWaitlistByEventAndProduct(ctx context.Context, arg ListWai
 			&i.FulfilledAt,
 			&i.ExpiresAt,
 			&i.CreatedAt,
+			&i.CartID,
+			&i.NotificationSentAt,
+			&i.CancelledAt,
 		); err != nil {
 			return nil, err
 		}
@@ -250,7 +487,7 @@ func (q *Queries) ListWaitlistByEventAndProduct(ctx context.Context, arg ListWai
 }
 
 const listWaitlistByEventAndUser = `-- name: ListWaitlistByEventAndUser :many
-SELECT wi.id, wi.event_id, wi.product_id, wi.platform_user_id, wi.platform_handle, wi.quantity, wi.position, wi.status, wi.notified_at, wi.fulfilled_at, wi.expires_at, wi.created_at, p.name AS product_name, p.keyword AS product_keyword, p.image_url AS product_image_url
+SELECT wi.id, wi.event_id, wi.product_id, wi.platform_user_id, wi.platform_handle, wi.quantity, wi.position, wi.status, wi.notified_at, wi.fulfilled_at, wi.expires_at, wi.created_at, wi.cart_id, wi.notification_sent_at, wi.cancelled_at, p.name AS product_name, p.keyword AS product_keyword, p.image_url AS product_image_url
 FROM waitlist_items wi
 JOIN products p ON p.id = wi.product_id
 WHERE wi.event_id = $1 AND wi.platform_user_id = $2
@@ -263,21 +500,24 @@ type ListWaitlistByEventAndUserParams struct {
 }
 
 type ListWaitlistByEventAndUserRow struct {
-	ID              pgtype.UUID        `json:"id"`
-	EventID         pgtype.UUID        `json:"event_id"`
-	ProductID       pgtype.UUID        `json:"product_id"`
-	PlatformUserID  string             `json:"platform_user_id"`
-	PlatformHandle  string             `json:"platform_handle"`
-	Quantity        int32              `json:"quantity"`
-	Position        int32              `json:"position"`
-	Status          string             `json:"status"`
-	NotifiedAt      pgtype.Timestamptz `json:"notified_at"`
-	FulfilledAt     pgtype.Timestamptz `json:"fulfilled_at"`
-	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	ProductName     string             `json:"product_name"`
-	ProductKeyword  string             `json:"product_keyword"`
-	ProductImageUrl pgtype.Text        `json:"product_image_url"`
+	ID                 pgtype.UUID        `json:"id"`
+	EventID            pgtype.UUID        `json:"event_id"`
+	ProductID          pgtype.UUID        `json:"product_id"`
+	PlatformUserID     string             `json:"platform_user_id"`
+	PlatformHandle     string             `json:"platform_handle"`
+	Quantity           int32              `json:"quantity"`
+	Position           int32              `json:"position"`
+	Status             string             `json:"status"`
+	NotifiedAt         pgtype.Timestamptz `json:"notified_at"`
+	FulfilledAt        pgtype.Timestamptz `json:"fulfilled_at"`
+	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	CartID             pgtype.UUID        `json:"cart_id"`
+	NotificationSentAt pgtype.Timestamptz `json:"notification_sent_at"`
+	CancelledAt        pgtype.Timestamptz `json:"cancelled_at"`
+	ProductName        string             `json:"product_name"`
+	ProductKeyword     string             `json:"product_keyword"`
+	ProductImageUrl    pgtype.Text        `json:"product_image_url"`
 }
 
 func (q *Queries) ListWaitlistByEventAndUser(ctx context.Context, arg ListWaitlistByEventAndUserParams) ([]ListWaitlistByEventAndUserRow, error) {
@@ -302,6 +542,9 @@ func (q *Queries) ListWaitlistByEventAndUser(ctx context.Context, arg ListWaitli
 			&i.FulfilledAt,
 			&i.ExpiresAt,
 			&i.CreatedAt,
+			&i.CartID,
+			&i.NotificationSentAt,
+			&i.CancelledAt,
 			&i.ProductName,
 			&i.ProductKeyword,
 			&i.ProductImageUrl,
@@ -314,6 +557,40 @@ func (q *Queries) ListWaitlistByEventAndUser(ctx context.Context, arg ListWaitli
 		return nil, err
 	}
 	return items, nil
+}
+
+const markWaitlistFulfilledByCart = `-- name: MarkWaitlistFulfilledByCart :exec
+UPDATE waitlist_items
+SET status = 'fulfilled', fulfilled_at = now()
+WHERE cart_id = $1 AND status = 'notified'
+`
+
+// Chamado no callback OnCartPaid: tudo que estava notified naquele cart
+// vira fulfilled (cliente pagou dentro da janela).
+func (q *Queries) MarkWaitlistFulfilledByCart(ctx context.Context, cartID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, markWaitlistFulfilledByCart, cartID)
+	return err
+}
+
+const markWaitlistNotified = `-- name: MarkWaitlistNotified :exec
+UPDATE waitlist_items
+SET status               = 'notified',
+    notified_at          = now(),
+    expires_at           = $2,
+    notification_sent_at = $3
+WHERE id = $1
+`
+
+type MarkWaitlistNotifiedParams struct {
+	ID                 pgtype.UUID        `json:"id"`
+	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
+	NotificationSentAt pgtype.Timestamptz `json:"notification_sent_at"`
+}
+
+// Promove o cliente da fila para "notified" com a janela de TTL extra.
+func (q *Queries) MarkWaitlistNotified(ctx context.Context, arg MarkWaitlistNotifiedParams) error {
+	_, err := q.db.Exec(ctx, markWaitlistNotified, arg.ID, arg.ExpiresAt, arg.NotificationSentAt)
+	return err
 }
 
 const updateWaitlistItemStatus = `-- name: UpdateWaitlistItemStatus :exec

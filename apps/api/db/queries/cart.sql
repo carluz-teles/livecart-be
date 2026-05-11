@@ -7,6 +7,17 @@ INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, toke
 VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8)
 RETURNING *;
 
+-- name: ExtendCartExpiration :exec
+-- Empurra expires_at para no mínimo @new_expires_at ("gordura" extra para
+-- clientes promovidos da waitlist). GREATEST evita encolher o prazo se o
+-- cart já tem um expires_at maior do que o pedido.
+UPDATE carts
+SET expires_at = GREATEST(
+    COALESCE(expires_at, @new_expires_at::timestamptz),
+    @new_expires_at::timestamptz
+)
+WHERE id = $1;
+
 -- name: UpdateCartShippingAddress :exec
 -- Replaces the cart's shipping_address JSONB. Used by the admin's "edit
 -- address" action — narrower than UpdateCartCustomerCheckout (which also
@@ -351,6 +362,15 @@ WHERE c.event_id = $1
 
 -- name: DeleteCartItemByCartAndProduct :exec
 DELETE FROM cart_items WHERE cart_id = $1 AND product_id = $2;
+
+-- name: DecrementCartItemQuantity :one
+-- Subtrai @delta da quantidade do item; se zerar, retorna a row mas a
+-- limpeza fica a cargo do caller (delete em outro statement). Não permite
+-- ir negativo.
+UPDATE cart_items
+SET quantity = GREATEST(quantity - @delta::int, 0)
+WHERE cart_id = $1 AND product_id = $2
+RETURNING quantity;
 
 -- name: UpdateCartItemWaitlistedQuantity :exec
 UPDATE cart_items SET waitlisted_quantity = $3 WHERE cart_id = $1 AND product_id = $2;

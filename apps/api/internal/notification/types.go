@@ -12,6 +12,10 @@ const (
 	TypeItemAdded NotificationType = "item_added"
 	// TypeCheckoutReminder is sent when the live ends (current behavior).
 	TypeCheckoutReminder NotificationType = "checkout_reminder"
+	// TypeWaitlistNotified is fired when a waitlisted item is promoted: the
+	// next-in-line customer was just bumped to "notified" and has the
+	// configurable TTL window to finalize before the slot is released.
+	TypeWaitlistNotified NotificationType = "waitlist_notified"
 )
 
 // NotificationChannel represents the channel used to send notifications.
@@ -46,6 +50,7 @@ type Settings struct {
 	CheckoutImmediate *TemplateSettings      `json:"checkout_immediate"`
 	ItemAdded         *TemplateSettings      `json:"item_added"`
 	CheckoutReminder  *TemplateSettings      `json:"checkout_reminder"`
+	WaitlistNotified  *TemplateSettings      `json:"waitlist_notified,omitempty"`
 	PaymentConfirmed  *EmailTemplateSettings `json:"payment_confirmed,omitempty"`
 	Shipped           *EmailTemplateSettings `json:"shipped,omitempty"`
 	Delivered         *EmailTemplateSettings `json:"delivered,omitempty"`
@@ -91,6 +96,10 @@ func DefaultSettings() Settings {
 		CheckoutReminder: &TemplateSettings{
 			Enabled:  true,
 			Template: "Oi {handle}! 🛒\n\nSeu carrinho com {total_itens} itens está esperando!\n\nTotal: {total}\n\nFinalize aqui: {link}\n\n⏰ Válido por {expira_em}",
+		},
+		WaitlistNotified: &TemplateSettings{
+			Enabled:  true,
+			Template: "Boa notícia, {handle}! ✅\n\nO produto {produto} que você esperava acabou de liberar.\n\nFinalize a compra: {link}\n\n⏰ Você tem {expira_em} antes do item voltar para a fila.",
 		},
 		PaymentConfirmed: &EmailTemplateSettings{
 			Enabled: true,

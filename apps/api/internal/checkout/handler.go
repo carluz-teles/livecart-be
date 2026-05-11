@@ -50,6 +50,10 @@ func (h *Handler) RegisterRoutes(app *fiber.App) {
 	checkout.Post("/:token/items", h.AddCartItem)
 	checkout.Patch("/:token/items/:itemId", h.UpdateCartItemQuantity)
 	checkout.Delete("/:token/items/:itemId", h.RemoveCartItem)
+
+	// "Sair da fila": cliente desiste de uma waitlist entry. Ownership é
+	// validada na query (cart_id no WHERE) — basta o token do cart.
+	checkout.Delete("/:token/waitlist/:id", h.DropFromWaitlist)
 }
 
 // QuoteShipping handles POST /api/public/checkout/:token/shipping-quote
@@ -347,6 +351,27 @@ func (h *Handler) RemoveCartItem(c *fiber.Ctx) error {
 	return httpx.OK(c, h.toCartResponse(output))
 }
 
+// DropFromWaitlist handles DELETE /api/public/checkout/:token/waitlist/:id —
+// o cliente desiste de continuar na fila por um produto. Se a entry estava
+// 'notified' (já reservada para ele), o stock volta para o próximo da fila;
+// 'waiting' apenas marca como cancelled.
+func (h *Handler) DropFromWaitlist(c *fiber.Ctx) error {
+	token := c.Params("token")
+	id := c.Params("id")
+	if token == "" || id == "" {
+		return httpx.BadRequest(c, "token and id are required")
+	}
+
+	output, err := h.service.DropFromWaitlist(c.Context(), DropFromWaitlistInput{
+		Token:          token,
+		WaitlistItemID: id,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, h.toCartResponse(output))
+}
+
 // AddCartItem handles POST /api/public/checkout/:token/items
 func (h *Handler) AddCartItem(c *fiber.Ctx) error {
 	token := c.Params("token")
@@ -473,6 +498,7 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 			LogoURL: h.getPresignedLogoURL(output.Cart.StoreLogoURL),
 		},
 		Items:               items,
+		WaitlistItems:       toWaitlistItemResponses(output.WaitlistItems),
 		Summary:             summary,
 		Shipping:            output.Cart.Shipping,
 		Customer:            toCheckoutCustomer(output.Customer),
@@ -481,6 +507,28 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 		IsReturningCustomer: output.Cart.IsReturningCustomer,
 		AppliedCoupon:       appliedCoupon,
 	}
+}
+
+// toWaitlistItemResponses preserves the service-level shape on the wire and
+// guarantees a non-nil slice (the FE iterates without a null-guard).
+func toWaitlistItemResponses(items []WaitlistItemDetails) []WaitlistItemResponse {
+	out := make([]WaitlistItemResponse, len(items))
+	for i, w := range items {
+		out[i] = WaitlistItemResponse{
+			ID:           w.ID,
+			ProductID:    w.ProductID,
+			ProductName:  w.ProductName,
+			ProductImage: w.ProductImage,
+			UnitPrice:    w.UnitPrice,
+			Quantity:     w.Quantity,
+			Position:     w.Position,
+			Status:       w.Status,
+			NotifiedAt:   w.NotifiedAt,
+			ExpiresAt:    w.ExpiresAt,
+			CreatedAt:    w.CreatedAt,
+		}
+	}
+	return out
 }
 
 // toCheckoutCustomer projects the service-level customer info onto the public

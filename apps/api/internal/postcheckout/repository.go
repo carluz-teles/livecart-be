@@ -109,6 +109,17 @@ func (r *Repository) SetTrackingToken(ctx context.Context, cartID, token string)
 	})
 }
 
+// MarkWaitlistFulfilledByCart flips every notified row tied to this cart to
+// 'fulfilled' (waiting rows for items the customer didn't pay for stay
+// queued — alinhado com a regra "pagamento parcial mantém a fila").
+func (r *Repository) MarkWaitlistFulfilledByCart(ctx context.Context, cartID string) error {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return fmt.Errorf("parsing cart id: %w", err)
+	}
+	return r.q.MarkWaitlistFulfilledByCart(ctx, pgtype.UUID{Bytes: uid, Valid: true})
+}
+
 // InsertOrderEvent appends an event to the customer-facing timeline.
 // The DB enforces (cart_id, event_type) uniqueness so retried webhooks/hooks
 // don't duplicate emails. Returns true when the row was newly inserted (so

@@ -151,6 +151,29 @@ func (q *Queries) CreateCartItem(ctx context.Context, arg CreateCartItemParams) 
 	return i, err
 }
 
+const decrementCartItemQuantity = `-- name: DecrementCartItemQuantity :one
+UPDATE cart_items
+SET quantity = GREATEST(quantity - $3::int, 0)
+WHERE cart_id = $1 AND product_id = $2
+RETURNING quantity
+`
+
+type DecrementCartItemQuantityParams struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	Delta     int32       `json:"delta"`
+}
+
+// Subtrai @delta da quantidade do item; se zerar, retorna a row mas a
+// limpeza fica a cargo do caller (delete em outro statement). Não permite
+// ir negativo.
+func (q *Queries) DecrementCartItemQuantity(ctx context.Context, arg DecrementCartItemQuantityParams) (pgtype.Int4, error) {
+	row := q.db.QueryRow(ctx, decrementCartItemQuantity, arg.CartID, arg.ProductID, arg.Delta)
+	var quantity pgtype.Int4
+	err := row.Scan(&quantity)
+	return quantity, err
+}
+
 const deleteCartItem = `-- name: DeleteCartItem :exec
 DELETE FROM cart_items WHERE id = $1
 `
@@ -171,6 +194,28 @@ type DeleteCartItemByCartAndProductParams struct {
 
 func (q *Queries) DeleteCartItemByCartAndProduct(ctx context.Context, arg DeleteCartItemByCartAndProductParams) error {
 	_, err := q.db.Exec(ctx, deleteCartItemByCartAndProduct, arg.CartID, arg.ProductID)
+	return err
+}
+
+const extendCartExpiration = `-- name: ExtendCartExpiration :exec
+UPDATE carts
+SET expires_at = GREATEST(
+    COALESCE(expires_at, $2::timestamptz),
+    $2::timestamptz
+)
+WHERE id = $1
+`
+
+type ExtendCartExpirationParams struct {
+	ID           pgtype.UUID        `json:"id"`
+	NewExpiresAt pgtype.Timestamptz `json:"new_expires_at"`
+}
+
+// Empurra expires_at para no mínimo @new_expires_at ("gordura" extra para
+// clientes promovidos da waitlist). GREATEST evita encolher o prazo se o
+// cart já tem um expires_at maior do que o pedido.
+func (q *Queries) ExtendCartExpiration(ctx context.Context, arg ExtendCartExpirationParams) error {
+	_, err := q.db.Exec(ctx, extendCartExpiration, arg.ID, arg.NewExpiresAt)
 	return err
 }
 

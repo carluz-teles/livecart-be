@@ -3607,9 +3607,12 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		}
 	}
 
-	// Handle waitlist items
+	// Handle waitlist gating: if user already has a row, skip the waitlist
+	// portion (we don't double-queue) and either return early or fall back
+	// to adding only the available portion to the cart.
+	createWaitlistRow := false
+	var waitlistPosition int
 	if waitlistQty > 0 {
-		// Check if user already on waitlist for this product
 		alreadyWaiting, _ := s.repo.GetWaitlistItemByEventUserProduct(ctx, event.ID, input.UserID, product.ID)
 		if alreadyWaiting {
 			s.logger.Info("user already on waitlist, ignoring waitlist portion",
@@ -3617,37 +3620,20 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 				zap.String("product_id", product.ID),
 				zap.Int("waitlist_qty", waitlistQty),
 			)
-			// If no available stock either, just return
 			if availableQty == 0 {
 				if commentID != "" {
 					_ = s.repo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "already_waitlisted")
 				}
 				return nil
 			}
-			// Otherwise, only add the available portion to cart
 			waitlistQty = 0
 		} else {
-			// Add to waitlist table
-			position, _ := s.repo.GetNextWaitlistPosition(ctx, event.ID, product.ID)
-			_, err = s.repo.CreateWaitlistItem(ctx, CreateWaitlistItemParams{
-				EventID:        event.ID,
-				ProductID:      product.ID,
-				PlatformUserID: input.UserID,
-				PlatformHandle: input.Username,
-				Quantity:       waitlistQty,
-				Position:       position,
-			})
-			if err != nil {
-				s.logger.Error("failed to create waitlist item", zap.Error(err))
-			}
-
-			s.logger.Info("user added to waitlist (partial fulfillment)",
-				zap.String("username", input.Username),
-				zap.String("product_id", product.ID),
-				zap.Int("available_qty", availableQty),
-				zap.Int("waitlist_qty", waitlistQty),
-				zap.Int("position", position),
-			)
+			// Defer the actual INSERT to after AddToCart so we can stamp
+			// cart_id on the row (the public checkout lists waitlist items
+			// by cart_id). Position is read here to keep ordering stable
+			// even if two intents race on the same event+product.
+			waitlistPosition, _ = s.repo.GetNextWaitlistPosition(ctx, event.ID, product.ID)
+			createWaitlistRow = true
 		}
 	}
 
@@ -3675,6 +3661,30 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			_ = s.repo.IncrementProductStock(ctx, product.ID, availableQty)
 		}
 		return fmt.Errorf("adding to cart: %w", err)
+	}
+
+	// Persist the waitlist row now that we have the cart_id from AddToCart.
+	if createWaitlistRow {
+		if _, wlErr := s.repo.CreateWaitlistItem(ctx, CreateWaitlistItemParams{
+			EventID:        event.ID,
+			ProductID:      product.ID,
+			PlatformUserID: input.UserID,
+			PlatformHandle: input.Username,
+			Quantity:       waitlistQty,
+			Position:       waitlistPosition,
+			CartID:         result.CartID,
+		}); wlErr != nil {
+			s.logger.Error("failed to create waitlist item", zap.Error(wlErr))
+		} else {
+			s.logger.Info("user added to waitlist (partial fulfillment)",
+				zap.String("username", input.Username),
+				zap.String("product_id", product.ID),
+				zap.String("cart_id", result.CartID),
+				zap.Int("available_qty", availableQty),
+				zap.Int("waitlist_qty", waitlistQty),
+				zap.Int("position", waitlistPosition),
+			)
+		}
 	}
 
 	// Update comment result
@@ -4548,33 +4558,59 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 			zap.String("product_id", productID),
 		)
 	}
+
+	// Após liberar todo o estoque dos carts expirados, tenta promover o
+	// próximo da fila. Idempotente: se ninguém está esperando ou se o
+	// stock zerou no meio do caminho, ProcessWaitlistForProduct no-ops.
+	if len(carts) > 0 {
+		// fire-and-forget: o release acima já completou e os logs vão
+		// indicar se a promoção rodou; não faz sentido bloquear o caller.
+		s.ProcessWaitlistForProduct(ctx, eventID, productID, carts[0].StoreID)
+	}
 }
 
-// ProcessWaitlistForProduct checks if stock freed up and fulfills the next waitlisted person.
-// Called after stock is released (expired cart, cancelled order, etc.).
+// ProcessWaitlistForProduct promotes the next waiting customer to "notified"
+// when stock is available. Called after any stock release (cart expired,
+// cart paid, item removed, ERP webhook). Idempotent: if no one is waiting,
+// or DecrementProductStock fails (race with another caller), it no-ops.
+//
+// Flow:
+//  1. Decrement local stock (this is the gate — atomic, prevents double-promote)
+//  2. Promote item to the next person's cart (WaitlistedQuantity=0)
+//  3. Push the cart's expires_at by event.waitlist_notified_ttl_minutes (the
+//     "gordura" the customer asked for)
+//  4. Mark waitlist row as 'notified' with expires_at
+//  5. Reserve stock in the ERP (Tiny saída)
+//  6. Fire-and-forget DM via the notification service
+//
+// If anything in steps 2-3 fails we roll back the local stock decrement so
+// nobody else loses the slot. Steps 4-6 are best-effort post-promotion.
 func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, productID, storeID string) {
-	// Get next person in waitlist
 	next, err := s.repo.GetFirstWaitingByProduct(ctx, eventID, productID)
 	if err != nil {
 		s.logger.Error("failed to get waitlist", zap.Error(err))
 		return
 	}
 	if next == nil {
-		return // No one waiting
-	}
-
-	// Try to reserve stock
-	if err := s.repo.DecrementProductStock(ctx, productID, next.Quantity); err != nil {
-		// Stock not available yet
 		return
 	}
 
-	// Get product info for price
+	// Atomic gate: if another caller already promoted someone (or stock is
+	// truly empty after the ERP webhook), this fails and we bail. Resolves
+	// the race condition the merchant flagged: "ERP webhook says available
+	// but it was already sold to the next in line".
+	if err := s.repo.DecrementProductStock(ctx, productID, next.Quantity); err != nil {
+		s.logger.Debug("waitlist promote skipped: stock not available",
+			zap.String("product_id", productID),
+			zap.String("waitlist_item_id", next.ID),
+		)
+		return
+	}
+
 	product, err := s.repo.GetProductByID(ctx, storeID, productID)
 	if err != nil || product == nil {
-		// Can't get product — return stock and bail
 		_ = s.repo.IncrementProductStock(ctx, productID, next.Quantity)
-		s.logger.Error("failed to get product for waitlist fulfillment",
+		s.logger.Error("failed to get product for waitlist promotion",
 			zap.String("product_id", productID),
 			zap.String("store_id", storeID),
 			zap.Error(err),
@@ -4582,8 +4618,10 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		return
 	}
 
-	// Add to cart (no longer waitlisted - WaitlistedQuantity = 0)
-	_, err = s.liveService.AddToCart(ctx, live.AddToCartInput{
+	// Promote: add to the next person's cart with WaitlistedQuantity=0 so
+	// the checkout treats it as available (counts toward total, included in
+	// the payment payload).
+	addResult, err := s.liveService.AddToCart(ctx, live.AddToCartInput{
 		StoreID:            storeID,
 		EventID:            eventID,
 		PlatformUserID:     next.PlatformUserID,
@@ -4591,43 +4629,349 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		ProductID:          productID,
 		ProductPrice:       product.Price,
 		Quantity:           next.Quantity,
-		WaitlistedQuantity: 0, // Fulfilled from waitlist, all available now
+		WaitlistedQuantity: 0,
 	})
 	if err != nil {
-		// Return stock on failure
 		_ = s.repo.IncrementProductStock(ctx, productID, next.Quantity)
-		s.logger.Error("failed to add waitlisted item to cart", zap.Error(err))
+		s.logger.Error("failed to add waitlisted item to cart on promotion",
+			zap.String("waitlist_item_id", next.ID),
+			zap.Error(err),
+		)
 		return
 	}
 
-	// Mark waitlist item as fulfilled
-	now := time.Now()
-	if statusErr := s.repo.UpdateWaitlistItemStatus(ctx, next.ID, "fulfilled", nil, &now, nil); statusErr != nil {
-		s.logger.Warn("failed to mark waitlist item as fulfilled",
+	// "Gordura": empurra o cart.expires_at para garantir que o cliente tem
+	// o TTL configurado para finalizar. Usa GREATEST no banco — não encolhe
+	// um cart que já tinha um expires_at maior.
+	ttl, ttlErr := s.repo.GetWaitlistNotifiedTTL(ctx, eventID)
+	if ttlErr != nil {
+		s.logger.Warn("failed to read waitlist TTL, defaulting to 30min",
+			zap.String("event_id", eventID),
+			zap.Error(ttlErr),
+		)
+		ttl = 30 * time.Minute
+	}
+	notifiedUntil := time.Now().Add(ttl)
+	if extendErr := s.repo.ExtendCartExpiration(ctx, addResult.CartID, notifiedUntil); extendErr != nil {
+		s.logger.Warn("failed to extend cart expiration for notified waitlist",
+			zap.String("cart_id", addResult.CartID),
+			zap.Error(extendErr),
+		)
+	}
+
+	if statusErr := s.repo.MarkWaitlistNotified(ctx, next.ID, notifiedUntil, time.Now()); statusErr != nil {
+		s.logger.Warn("failed to mark waitlist item as notified",
 			zap.String("waitlist_item_id", next.ID),
 			zap.Error(statusErr),
 		)
 	}
 
-	// Reserve stock in ERP for waitlist-fulfilled item
-	cart, cartErr := s.repo.GetCartByEventAndUser(ctx, eventID, next.PlatformUserID)
-	if cartErr != nil {
-		s.logger.Warn("failed to get cart for waitlist ERP reservation",
-			zap.String("event_id", eventID),
-			zap.String("platform_user_id", next.PlatformUserID),
-			zap.Error(cartErr),
+	// ERP saída — reserva pareada ao cart_item recém-criado. Falha aqui
+	// não bloqueia: o worker de finalisation/reconciliation pega depois.
+	if syncErr := s.ReserveStockInERP(ctx, storeID, addResult.CartID, eventID, productID, next.Quantity, product.Price, next.PlatformHandle); syncErr != nil {
+		s.logger.Warn("failed to reserve stock in ERP for promoted waitlist item",
+			zap.String("cart_id", addResult.CartID),
+			zap.Error(syncErr),
 		)
 	}
-	if cart != nil {
-		if syncErr := s.ReserveStockInERP(ctx, storeID, cart.ID, eventID, productID, next.Quantity, product.Price, next.PlatformHandle); syncErr != nil {
-			s.logger.Warn("failed to reserve stock in ERP for waitlist-fulfilled item", zap.Error(syncErr))
+
+	// Fire-and-forget DM. Email é desnecessário aqui — o cliente foi
+	// adicionado via comentário no Instagram, então não temos email
+	// confirmado a essa altura. (Quando ele abrir o checkout e preencher
+	// o email, o cart já vai estar com o item disponível.)
+	s.sendWaitlistNotifiedDM(ctx, sendWaitlistNotifiedInput{
+		StoreID:        storeID,
+		EventID:        eventID,
+		EventTitle:     "", // resolved below if needed
+		CartID:         addResult.CartID,
+		CartToken:      addResult.CartToken,
+		PlatformUserID: next.PlatformUserID,
+		PlatformHandle: next.PlatformHandle,
+		ProductName:    product.Name,
+		ProductKeyword: product.Keyword,
+		Quantity:       next.Quantity,
+		TTL:            ttl,
+	})
+
+	s.logger.Info("waitlist promoted to notified",
+		zap.String("user", next.PlatformHandle),
+		zap.String("waitlist_item_id", next.ID),
+		zap.String("cart_id", addResult.CartID),
+		zap.String("product_id", productID),
+		zap.Int("quantity", next.Quantity),
+		zap.Duration("ttl", ttl),
+		zap.Time("notified_until", notifiedUntil),
+	)
+}
+
+// ListActiveWaitlistByCart é a leitura usada pelo checkout para popular a
+// seção "produtos em fila". Retorna apenas waiting/notified.
+func (s *Service) ListActiveWaitlistByCart(ctx context.Context, cartID string) ([]ListActiveByCartRow, error) {
+	return s.repo.ListActiveByCart(ctx, cartID)
+}
+
+// CancelWaitlistItem é a operação pública "sair da fila": cliente desiste
+// de uma entry. Quando estava 'notified' (já promovido para o cart), o
+// stock volta para o próximo da fila — mesmo fluxo do worker de expiração.
+// Quando estava 'waiting', apenas marca como 'cancelled'.
+//
+// Ownership é validada pela query (cart_id no WHERE de CancelWaitlistItem).
+// Retorna (true) se algo foi alterado, (false) se a row não existia ou já
+// estava em estado terminal.
+func (s *Service) CancelWaitlistItem(ctx context.Context, waitlistItemID, cartID string) (bool, error) {
+	// Carrega antes do UPDATE para saber se precisamos disparar a
+	// devolução de estoque (status='notified').
+	item, err := s.repo.GetWaitlistItemForCart(ctx, waitlistItemID, cartID)
+	if err != nil {
+		return false, fmt.Errorf("loading waitlist item: %w", err)
+	}
+	if item == nil {
+		return false, nil
+	}
+	if item.Status != "waiting" && item.Status != "notified" {
+		// Já fulfilled / expired / cancelled — no-op.
+		return false, nil
+	}
+	if err := s.repo.CancelWaitlistItem(ctx, waitlistItemID, cartID); err != nil {
+		return false, fmt.Errorf("cancelling waitlist item: %w", err)
+	}
+
+	if item.Status == "notified" {
+		// O cliente já tinha o item reservado no cart + ERP. Devolve
+		// tudo via mesmo fluxo do worker de expiração.
+		if _, err := s.repo.DecrementCartItem(ctx, cartID, item.ProductID, item.Quantity); err != nil {
+			s.logger.Warn("failed to decrement cart item on waitlist cancel",
+				zap.String("waitlist_item_id", waitlistItemID),
+				zap.Error(err),
+			)
+		}
+		cart, _ := s.repo.GetCartByID(ctx, cartID)
+		if cart != nil {
+			if _, err := s.AdjustStockReservationDelta(ctx, cart.StoreID, cartID, item.EventID, item.ProductID, -item.Quantity, 0, cart.PlatformHandle); err != nil {
+				s.logger.Warn("failed to reverse ERP reservation on waitlist cancel",
+					zap.String("waitlist_item_id", waitlistItemID),
+					zap.Error(err),
+				)
+			}
+		}
+		if err := s.repo.IncrementProductStock(ctx, item.ProductID, item.Quantity); err != nil {
+			s.logger.Warn("failed to increment local stock on waitlist cancel",
+				zap.String("waitlist_item_id", waitlistItemID),
+				zap.Error(err),
+			)
+		}
+		// Promove o próximo da fila — best-effort.
+		if cart != nil {
+			s.ProcessWaitlistForProduct(ctx, item.EventID, item.ProductID, cart.StoreID)
+		}
+	}
+	return true, nil
+}
+
+// ExpireNotifiedWaitlistItem expira uma entrada 'notified' cujo TTL passou:
+// devolve o item ao estoque, reverte a reserva no ERP, marca como
+// 'expired' e tenta promover o próximo da fila. Best-effort em todos os
+// passos secundários — só falha se a marcação de status falhar (que é o
+// gate de idempotência: enquanto status='notified' a row reaparece no
+// próximo sweep).
+func (s *Service) ExpireNotifiedWaitlistItem(ctx context.Context, item WaitlistItemRow) error {
+	cartID := item.CartID
+	productID := item.ProductID
+	eventID := item.EventID
+
+	if cartID != "" {
+		// Devolve o item do carrinho. DecrementCartItem deleta a row se
+		// zerar — mantém a invariante quantity>0.
+		if _, err := s.repo.DecrementCartItem(ctx, cartID, productID, item.Quantity); err != nil {
+			s.logger.Warn("failed to decrement cart item on waitlist expire",
+				zap.String("waitlist_item_id", item.ID),
+				zap.String("cart_id", cartID),
+				zap.String("product_id", productID),
+				zap.Error(err),
+			)
+		}
+
+		// Reverte a reserva no ERP. Pode ser no-op se o produto não tiver
+		// integração (a função interna já lida com isso). Falha aqui não
+		// bloqueia — o estoque local é a fonte da verdade para a fila.
+		cart, _ := s.repo.GetCartByID(ctx, cartID)
+		if cart != nil {
+			if _, err := s.AdjustStockReservationDelta(ctx, cart.StoreID, cartID, eventID, productID, -item.Quantity, 0, cart.PlatformHandle); err != nil {
+				s.logger.Warn("failed to reverse ERP reservation on waitlist expire",
+					zap.String("waitlist_item_id", item.ID),
+					zap.String("cart_id", cartID),
+					zap.Error(err),
+				)
+			}
 		}
 	}
 
-	s.logger.Info("waitlist fulfilled",
-		zap.String("user", next.PlatformHandle),
-		zap.String("product_id", productID),
-		zap.Int("quantity", next.Quantity),
+	// Devolve o estoque local. Mesmo no-op se o cart_item não existia
+	// (defensive), porque o promote chamou DecrementProductStock antes.
+	if err := s.repo.IncrementProductStock(ctx, productID, item.Quantity); err != nil {
+		s.logger.Warn("failed to increment local stock on waitlist expire",
+			zap.String("waitlist_item_id", item.ID),
+			zap.Error(err),
+		)
+	}
+
+	// Marca como expired — esse é o gate de idempotência. Se isso falhar,
+	// a próxima varredura tenta de novo.
+	now := time.Now()
+	if err := s.repo.UpdateWaitlistItemStatus(ctx, item.ID, "expired", nil, nil, &now); err != nil {
+		return fmt.Errorf("marking waitlist item expired: %w", err)
+	}
+
+	// Tenta promover o próximo da fila para esse evento+produto.
+	storeID := ""
+	if item.CartID != "" {
+		if cart, _ := s.repo.GetCartByID(ctx, item.CartID); cart != nil {
+			storeID = cart.StoreID
+		}
+	}
+	if storeID == "" {
+		// Fallback: resolve via evento (se cart sumiu por algum motivo).
+		// ProcessWaitlistForProduct tolera storeID vazio na lookup do
+		// produto? Não — então só pulamos a promoção. O Tiny webhook
+		// pega depois.
+		s.logger.Info("waitlist expired but storeID unresolved, skipping next-promotion",
+			zap.String("waitlist_item_id", item.ID),
+			zap.String("event_id", eventID),
+		)
+		return nil
+	}
+	s.ProcessWaitlistForProduct(ctx, eventID, productID, storeID)
+	return nil
+}
+
+// ExpireNotifiedWaitlistSweep busca todos os 'notified' vencidos e chama
+// ExpireNotifiedWaitlistItem em cada um. Retorna a contagem de processados
+// e o primeiro erro encontrado (não interrompe — best-effort).
+func (s *Service) ExpireNotifiedWaitlistSweep(ctx context.Context) (int, error) {
+	items, err := s.repo.ListExpiredNotifiedWaitlist(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("listing expired notified waitlist: %w", err)
+	}
+	processed := 0
+	var firstErr error
+	for _, item := range items {
+		if err := s.ExpireNotifiedWaitlistItem(ctx, item); err != nil {
+			s.logger.Warn("failed to expire notified waitlist item",
+				zap.String("waitlist_item_id", item.ID),
+				zap.Error(err),
+			)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		processed++
+	}
+	return processed, firstErr
+}
+
+// ProcessWaitlistAfterStockWebhook é o backstop para mudanças de estoque
+// vindas do ERP que não foram disparadas por uma operação local (ex.:
+// merchant ajusta saldo manualmente no Tiny, devolução, importação).
+// Resolve o produto local pelo external_id e tenta promover o próximo da
+// fila em cada evento ativo. ProcessWaitlistForProduct é idempotente e
+// gateado por DecrementProductStock — chamadas concorrentes não causam
+// over-promotion.
+func (s *Service) ProcessWaitlistAfterStockWebhook(ctx context.Context, storeID, externalSource, externalProductID string) error {
+	productID, err := s.repo.GetProductIDByExternalID(ctx, storeID, externalSource, externalProductID)
+	if err != nil {
+		return fmt.Errorf("resolving product by external id: %w", err)
+	}
+	if productID == "" {
+		// Produto não cadastrado no LiveCart — não temos fila para ele.
+		return nil
+	}
+	eventIDs, err := s.repo.ListEventsWithWaitingByProduct(ctx, productID)
+	if err != nil {
+		return fmt.Errorf("listing events with waiting waitlist: %w", err)
+	}
+	for _, eventID := range eventIDs {
+		s.ProcessWaitlistForProduct(ctx, eventID, productID, storeID)
+	}
+	return nil
+}
+
+// sendWaitlistNotifiedInput é o payload da DM "produto liberou".
+type sendWaitlistNotifiedInput struct {
+	StoreID        string
+	EventID        string
+	EventTitle     string
+	CartID         string
+	CartToken      string
+	PlatformUserID string
+	PlatformHandle string
+	ProductName    string
+	ProductKeyword string
+	Quantity       int
+	TTL            time.Duration
+}
+
+func (s *Service) sendWaitlistNotifiedDM(ctx context.Context, input sendWaitlistNotifiedInput) {
+	if s.notificationService == nil {
+		return
+	}
+	shouldNotify, err := s.notificationService.ShouldNotify(ctx, input.StoreID, notification.TypeWaitlistNotified, false)
+	if err != nil {
+		s.logger.Warn("failed to check notification settings for waitlist",
+			zap.String("store_id", input.StoreID),
+			zap.Error(err),
+		)
+		return
+	}
+	if !shouldNotify {
+		return
+	}
+
+	storeInfo, err := s.repo.GetStoreInfo(ctx, input.StoreID)
+	if err != nil {
+		s.logger.Warn("failed to get store info for waitlist notification",
+			zap.String("store_id", input.StoreID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	frontendURL := config.FrontendURL.StringOr("http://localhost:3000")
+	checkoutURL := fmt.Sprintf("%s/cart/%s", frontendURL, input.CartToken)
+
+	vars := notification.TemplateVariables{
+		Handle:     "@" + input.PlatformHandle,
+		Produto:    input.ProductName,
+		Keyword:    input.ProductKeyword,
+		Quantidade: input.Quantity,
+		Link:       checkoutURL,
+		Loja:       storeInfo.Name,
+		ExpiraEm:   notification.FormatExpiryMinutes(int(input.TTL.Minutes())),
+		LiveTitulo: input.EventTitle,
+	}
+
+	result, err := s.notificationService.Send(ctx, notification.SendInput{
+		StoreID:          input.StoreID,
+		EventID:          input.EventID,
+		CartID:           input.CartID,
+		CartToken:        input.CartToken,
+		PlatformUserID:   input.PlatformUserID,
+		PlatformHandle:   input.PlatformHandle,
+		NotificationType: notification.TypeWaitlistNotified,
+		Variables:        vars,
+	})
+	if err != nil {
+		s.logger.Warn("waitlist notification send error",
+			zap.String("store_id", input.StoreID),
+			zap.String("cart_id", input.CartID),
+			zap.Error(err),
+		)
+		return
+	}
+	s.logger.Info("waitlist notification dispatched",
+		zap.String("store_id", input.StoreID),
+		zap.String("cart_id", input.CartID),
+		zap.String("status", string(result.Status)),
 	)
 }
 

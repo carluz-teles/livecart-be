@@ -19,6 +19,12 @@ SELECT * FROM products WHERE id = $1 AND store_id = $2;
 -- name: GetProductByKeyword :one
 SELECT * FROM products WHERE store_id = $1 AND keyword = $2 AND active = true;
 
+-- name: GetProductByExternalID :one
+-- Resolve um produto local pelo identificador do ERP. Usado pelo webhook
+-- Tiny para mapear o produto antes de processar a fila de waitlist.
+SELECT * FROM products
+WHERE store_id = $1 AND external_source = $2 AND external_id = $3;
+
 -- name: ListProductsByStore :many
 SELECT * FROM products WHERE store_id = $1 ORDER BY created_at DESC;
 

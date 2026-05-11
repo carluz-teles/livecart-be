@@ -32,6 +32,7 @@ type CartForCheckoutResponse struct {
 	Event              CartEventInfo                   `json:"event"`
 	Store              CartStoreInfo                   `json:"store"`
 	Items              []CartItemResponse              `json:"items"`
+	WaitlistItems      []WaitlistItemResponse          `json:"waitlistItems"`
 	Summary            CartSummary                     `json:"summary"`
 	Shipping           *CartShippingSelection          `json:"shipping,omitempty"`
 	Customer           *CheckoutCustomerInfo           `json:"customer,omitempty"`
@@ -124,6 +125,23 @@ type CartItemResponse struct {
 	// combines it with MaxQuantityPerItem (cart-level cap) to disable the +
 	// button when the buyer would exceed either limit.
 	AvailableStock int `json:"availableStock"`
+}
+
+// WaitlistItemResponse é a entrada de fila renderizada no /cart/:token. A
+// FE separa em duas seções: 'waiting' (ainda aguardando) e 'notified'
+// (estoque liberou — cliente tem ExpiresAt para finalizar).
+type WaitlistItemResponse struct {
+	ID           string     `json:"id"`
+	ProductID    string     `json:"productId"`
+	ProductName  string     `json:"productName"`
+	ProductImage *string    `json:"productImage"`
+	UnitPrice    int64      `json:"unitPrice"`
+	Quantity     int        `json:"quantity"`
+	Position     int        `json:"position"`
+	Status       string     `json:"status"`
+	NotifiedAt   *time.Time `json:"notifiedAt,omitempty"`
+	ExpiresAt    *time.Time `json:"expiresAt,omitempty"`
+	CreatedAt    *time.Time `json:"createdAt,omitempty"`
 }
 
 // CartSummary contains the cart totals
@@ -288,9 +306,26 @@ type GetCartForCheckoutInput struct {
 type GetCartForCheckoutOutput struct {
 	Cart            CartDetails
 	Items           []CartItemDetails
+	WaitlistItems   []WaitlistItemDetails
 	Customer        *CartCustomerInfo
 	ShippingAddress *CartShippingAddressInfo
 	Payment         *CartPaymentInfo
+}
+
+// WaitlistItemDetails é a projeção de uma entrada de fila visível ao cliente
+// no checkout. Status pode ser 'waiting' ou 'notified'.
+type WaitlistItemDetails struct {
+	ID            string
+	ProductID     string
+	ProductName   string
+	ProductImage  *string
+	UnitPrice     int64
+	Quantity      int
+	Position      int
+	Status        string
+	NotifiedAt    *time.Time
+	ExpiresAt     *time.Time
+	CreatedAt     *time.Time
 }
 
 // CartDetails contains the cart data with event/store info
@@ -451,6 +486,14 @@ type MutateCartItemInput struct {
 	ItemID    string
 	ProductID string
 	Quantity  int
+}
+
+// DropFromWaitlistInput é o input para o endpoint "sair da fila".
+// Token escopa a operação ao cart do cliente; WaitlistItemID identifica
+// qual entry cancelar.
+type DropFromWaitlistInput struct {
+	Token          string
+	WaitlistItemID string
 }
 
 // GetPaymentStatusOutput is the output for GetPaymentStatus service method

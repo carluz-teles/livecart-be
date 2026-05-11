@@ -554,6 +554,21 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 					zap.Error(err),
 				)
 			}
+
+			// Após sincronizar produto/estoque, varre eventos ativos com
+			// fila para esse produto e tenta promover o próximo. Esse é
+			// o catch-all do "ERP devolveu estoque por mudança manual"
+			// — para release vindo de carts/checkout o caller já chama
+			// ProcessWaitlistForProduct inline; aqui é o backstop.
+			if webhook.Tipo == "estoque" {
+				if err := h.service.ProcessWaitlistAfterStockWebhook(ctx, storeID, "tiny", productID); err != nil {
+					h.logger.Warn("failed to process waitlist after stock webhook",
+						zap.String("store_id", storeID),
+						zap.String("external_product_id", productID),
+						zap.Error(err),
+					)
+				}
+			}
 		}()
 	}
 

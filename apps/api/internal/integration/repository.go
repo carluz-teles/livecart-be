@@ -896,6 +896,14 @@ func (r *Repository) CreateWaitlistItem(ctx context.Context, params CreateWaitli
 	if err != nil {
 		return "", err
 	}
+	var cartID pgtype.UUID
+	if params.CartID != "" {
+		cID, err := parseUUID(params.CartID)
+		if err != nil {
+			return "", err
+		}
+		cartID = cID
+	}
 	row, err := r.queries.CreateWaitlistItem(ctx, sqlc.CreateWaitlistItemParams{
 		EventID:        eID,
 		ProductID:      pID,
@@ -903,6 +911,7 @@ func (r *Repository) CreateWaitlistItem(ctx context.Context, params CreateWaitli
 		PlatformHandle: params.PlatformHandle,
 		Quantity:       int32(params.Quantity),
 		Position:       int32(params.Position),
+		CartID:         cartID,
 	})
 	if err != nil {
 		return "", fmt.Errorf("creating waitlist item: %w", err)
@@ -963,7 +972,263 @@ func (r *Repository) GetFirstWaitingByProduct(ctx context.Context, eventID, prod
 		Quantity:       int(row.Quantity),
 		Position:       int(row.Position),
 		Status:         row.Status,
+		CartID:         uuidToString(row.CartID),
+		NotifiedAt:     timestamptzToPtr(row.NotifiedAt),
+		ExpiresAt:      timestamptzToPtr(row.ExpiresAt),
 	}, nil
+}
+
+// MarkWaitlistNotified flips a waitlist row to "notified" with the TTL window.
+// notificationSentAt records that we actually fired the DM/email so the worker
+// can avoid double-sending if it ever resumes processing the same row.
+func (r *Repository) MarkWaitlistNotified(ctx context.Context, id string, expiresAt, notificationSentAt time.Time) error {
+	itemID, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	return r.queries.MarkWaitlistNotified(ctx, sqlc.MarkWaitlistNotifiedParams{
+		ID:                 itemID,
+		ExpiresAt:          pgtype.Timestamptz{Time: expiresAt, Valid: true},
+		NotificationSentAt: pgtype.Timestamptz{Time: notificationSentAt, Valid: true},
+	})
+}
+
+// MarkWaitlistFulfilledByCart marks every notified row tied to this cart as
+// fulfilled. Called from the OnCartPaid hook when the customer pays within
+// the notified TTL.
+func (r *Repository) MarkWaitlistFulfilledByCart(ctx context.Context, cartID string) error {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	return r.queries.MarkWaitlistFulfilledByCart(ctx, cID)
+}
+
+// CancelWaitlistItem flips status to 'cancelled' iff the row belongs to the
+// given cart and is still actionable (waiting/notified). Ownership and
+// status are enforced in the WHERE clause so we don't need a separate read.
+// Returns true when a row was actually updated.
+func (r *Repository) CancelWaitlistItem(ctx context.Context, id, cartID string) error {
+	itemID, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	return r.queries.CancelWaitlistItem(ctx, sqlc.CancelWaitlistItemParams{
+		ID:     itemID,
+		CartID: cID,
+	})
+}
+
+// GetWaitlistItemForCart fetches a single row scoped to a cart — used by the
+// drop endpoint to know whether the row was 'notified' (and therefore needs
+// stock release + queue advancement) before cancelling.
+func (r *Repository) GetWaitlistItemForCart(ctx context.Context, id, cartID string) (*WaitlistItemRow, error) {
+	itemID, err := parseUUID(id)
+	if err != nil {
+		return nil, err
+	}
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.GetWaitlistItemForCart(ctx, sqlc.GetWaitlistItemForCartParams{
+		ID:     itemID,
+		CartID: cID,
+	})
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &WaitlistItemRow{
+		ID:             uuidToString(row.ID),
+		EventID:        uuidToString(row.EventID),
+		ProductID:      uuidToString(row.ProductID),
+		PlatformUserID: row.PlatformUserID,
+		PlatformHandle: row.PlatformHandle,
+		Quantity:       int(row.Quantity),
+		Position:       int(row.Position),
+		Status:         row.Status,
+		CartID:         uuidToString(row.CartID),
+		NotifiedAt:     timestamptzToPtr(row.NotifiedAt),
+		ExpiresAt:      timestamptzToPtr(row.ExpiresAt),
+	}, nil
+}
+
+// CountActiveByEventProduct returns how many waiting+notified entries exist
+// for an event/product. Used by the Tiny webhook to decide whether to even
+// attempt a fila promotion after a stock change.
+func (r *Repository) CountActiveByEventProduct(ctx context.Context, eventID, productID string) (int, error) {
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return 0, err
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return 0, err
+	}
+	count, err := r.queries.CountActiveByEventProduct(ctx, sqlc.CountActiveByEventProductParams{
+		EventID:   eID,
+		ProductID: pID,
+	})
+	return int(count), err
+}
+
+// ListActiveByCartRow is the projection returned to the public checkout.
+type ListActiveByCartRow struct {
+	ID              string
+	EventID         string
+	ProductID       string
+	ProductName     string
+	ProductKeyword  string
+	ProductImageURL string
+	ProductPrice    int64
+	Quantity        int
+	Position        int
+	Status          string
+	NotifiedAt      *time.Time
+	ExpiresAt       *time.Time
+	CreatedAt       *time.Time
+}
+
+// DecrementCartItem reduz a quantidade do (cart, product) por @delta. Se
+// chegar a zero, executa o DELETE numa segunda chamada para manter a
+// invariante "linha existe sse quantity > 0". Retorna a quantidade
+// resultante (0 quando deletado).
+func (r *Repository) DecrementCartItem(ctx context.Context, cartID, productID string, delta int) (int, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return 0, err
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return 0, err
+	}
+	q, err := r.queries.DecrementCartItemQuantity(ctx, sqlc.DecrementCartItemQuantityParams{
+		CartID:    cID,
+		ProductID: pID,
+		Delta:     int32(delta),
+	})
+	if err != nil {
+		return 0, err
+	}
+	if q.Valid && q.Int32 == 0 {
+		if delErr := r.queries.DeleteCartItemByCartAndProduct(ctx, sqlc.DeleteCartItemByCartAndProductParams{
+			CartID:    cID,
+			ProductID: pID,
+		}); delErr != nil {
+			return 0, delErr
+		}
+	}
+	if !q.Valid {
+		return 0, nil
+	}
+	return int(q.Int32), nil
+}
+
+// ListExpiredNotifiedWaitlist returns rows with status='notified' whose
+// expires_at já passou. Esses são os candidatos a expirar (devolver
+// estoque) e ceder a vez para o próximo da fila.
+func (r *Repository) ListExpiredNotifiedWaitlist(ctx context.Context) ([]WaitlistItemRow, error) {
+	rows, err := r.queries.ListExpiredNotifiedWaitlistItems(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]WaitlistItemRow, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, WaitlistItemRow{
+			ID:             uuidToString(row.ID),
+			EventID:        uuidToString(row.EventID),
+			ProductID:      uuidToString(row.ProductID),
+			PlatformUserID: row.PlatformUserID,
+			PlatformHandle: row.PlatformHandle,
+			Quantity:       int(row.Quantity),
+			Position:       int(row.Position),
+			Status:         row.Status,
+			CartID:         uuidToString(row.CartID),
+			NotifiedAt:     timestamptzToPtr(row.NotifiedAt),
+			ExpiresAt:      timestamptzToPtr(row.ExpiresAt),
+		})
+	}
+	return out, nil
+}
+
+// ListEventsWithWaitingByProduct returns event_ids that have at least one
+// waiting (not notified) row for the given product. Used by the Tiny stock
+// webhook to fan out promotion attempts.
+func (r *Repository) ListEventsWithWaitingByProduct(ctx context.Context, productID string) ([]string, error) {
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListEventsWithWaitingByProduct(ctx, pID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, uuidToString(row))
+	}
+	return out, nil
+}
+
+// GetProductIDByExternalID resolves a local product UUID from the ERP
+// external_id (Tiny idProduto). Returns "" + nil error when no match.
+func (r *Repository) GetProductIDByExternalID(ctx context.Context, storeID, externalSource, externalID string) (string, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return "", err
+	}
+	row, err := r.queries.GetProductByExternalID(ctx, sqlc.GetProductByExternalIDParams{
+		StoreID:        sID,
+		ExternalSource: externalSource,
+		ExternalID:     pgtype.Text{String: externalID, Valid: externalID != ""},
+	})
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return "", nil
+		}
+		return "", err
+	}
+	return uuidToString(row.ID), nil
+}
+
+// ListActiveByCart returns the waitlist rows the public checkout should
+// surface — only waiting/notified, ordered by created_at so the UI matches
+// the order the customer asked for them.
+func (r *Repository) ListActiveByCart(ctx context.Context, cartID string) ([]ListActiveByCartRow, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListActiveByCart(ctx, cID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ListActiveByCartRow, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, ListActiveByCartRow{
+			ID:              uuidToString(row.ID),
+			EventID:         uuidToString(row.EventID),
+			ProductID:       uuidToString(row.ProductID),
+			ProductName:     row.ProductName,
+			ProductKeyword:  row.ProductKeyword,
+			ProductImageURL: textToString(row.ProductImageUrl),
+			ProductPrice:    row.ProductPrice.Int64,
+			Quantity:        int(row.Quantity),
+			Position:        int(row.Position),
+			Status:          row.Status,
+			NotifiedAt:      timestamptzToPtr(row.NotifiedAt),
+			ExpiresAt:       timestamptzToPtr(row.ExpiresAt),
+			CreatedAt:       timestamptzToPtr(row.CreatedAt),
+		})
+	}
+	return out, nil
 }
 
 // UpdateWaitlistItemStatus updates waitlist item status and timestamps.
@@ -999,6 +1264,9 @@ type CreateWaitlistItemParams struct {
 	PlatformHandle string
 	Quantity       int
 	Position       int
+	// CartID is optional — populated when a waitlist row is created against
+	// an existing cart so the public checkout (/cart/:token) can list it.
+	CartID string
 }
 
 // WaitlistItemRow represents a waitlist item.
@@ -1011,6 +1279,9 @@ type WaitlistItemRow struct {
 	Quantity       int
 	Position       int
 	Status         string
+	CartID         string
+	NotifiedAt     *time.Time
+	ExpiresAt      *time.Time
 }
 
 // =============================================================================
@@ -1334,6 +1605,34 @@ func (r *Repository) ListExpiredCartsByEventAndProduct(ctx context.Context, even
 	return carts, nil
 }
 
+// ExtendCartExpiration empurra cart.expires_at para no mínimo 'until'. Usado
+// quando promovemos um cliente da waitlist para "notified" — ele precisa de
+// uma janela extra para finalizar o checkout antes do cart expirar.
+func (r *Repository) ExtendCartExpiration(ctx context.Context, cartID string, until time.Time) error {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	return r.queries.ExtendCartExpiration(ctx, sqlc.ExtendCartExpirationParams{
+		ID:           id,
+		NewExpiresAt: pgtype.Timestamptz{Time: until, Valid: true},
+	})
+}
+
+// GetWaitlistNotifiedTTL retorna o TTL configurado para notified em um evento.
+// Default 30min vem do schema (DEFAULT na coluna).
+func (r *Repository) GetWaitlistNotifiedTTL(ctx context.Context, eventID string) (time.Duration, error) {
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return 0, err
+	}
+	mins, err := r.queries.GetWaitlistNotifiedTTLByEvent(ctx, eID)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(mins) * time.Minute, nil
+}
+
 // UpdateCartStatus updates a cart's status (e.g., "expired").
 func (r *Repository) UpdateCartStatus(ctx context.Context, cartID, status string) error {
 	id, err := parseUUID(cartID)
@@ -1401,6 +1700,35 @@ type CartRow struct {
 	ShippingCarrier     string
 	ShippingRealCost    int64
 	ShippingDeadline    int
+}
+
+// GetCartByID loads a cart with the resolved storeID. Slim version of
+// GetCartForPaidOrder — used in flows (waitlist expire, drop endpoint) that
+// just need ownership/store context, not the customer/address blob.
+func (r *Repository) GetCartByID(ctx context.Context, cartID string) (*CartRow, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	cart, err := r.queries.GetCartByID(ctx, cID)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("getting cart: %w", err)
+	}
+	event, err := r.queries.GetLiveEventByID(ctx, cart.EventID)
+	if err != nil {
+		return nil, fmt.Errorf("getting live event for cart: %w", err)
+	}
+	return &CartRow{
+		ID:             uuidToString(cart.ID),
+		EventID:        uuidToString(cart.EventID),
+		StoreID:        uuidToString(event.StoreID),
+		PlatformUserID: cart.PlatformUserID,
+		PlatformHandle: cart.PlatformHandle,
+		CreatedAt:      cart.CreatedAt.Time,
+	}, nil
 }
 
 // GetCartForPaidOrder loads a cart by ID with customer/shipping data plus the
@@ -1657,6 +1985,21 @@ func uuidToString(uuid pgtype.UUID) string {
 		uuid.Bytes[6:8],
 		uuid.Bytes[8:10],
 		uuid.Bytes[10:16])
+}
+
+func timestamptzToPtr(ts pgtype.Timestamptz) *time.Time {
+	if !ts.Valid {
+		return nil
+	}
+	t := ts.Time
+	return &t
+}
+
+func textToString(t pgtype.Text) string {
+	if !t.Valid {
+		return ""
+	}
+	return t.String
 }
 
 // ListCartsByEventForERP returns carts for an event that are in checkout status (finalized).

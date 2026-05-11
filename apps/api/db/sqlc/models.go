@@ -322,6 +322,8 @@ type LiveEvent struct {
 	FreeShipping bool `json:"free_shipping"`
 	// Discount percent applied at checkout when the buyer pays with Pix (0-100). 0 disables the feature.
 	PixDiscountPercent int32 `json:"pix_discount_percent"`
+	// Minutos extras que um cliente promovido da waitlist (status=notified) tem para finalizar o checkout antes de devolver o estoque para o próximo da fila.
+	WaitlistNotifiedTtlMinutes int32 `json:"waitlist_notified_ttl_minutes"`
 }
 
 type LiveSession struct {
@@ -672,18 +674,21 @@ type User struct {
 }
 
 type WaitlistItem struct {
-	ID             pgtype.UUID        `json:"id"`
-	EventID        pgtype.UUID        `json:"event_id"`
-	ProductID      pgtype.UUID        `json:"product_id"`
-	PlatformUserID string             `json:"platform_user_id"`
-	PlatformHandle string             `json:"platform_handle"`
-	Quantity       int32              `json:"quantity"`
-	Position       int32              `json:"position"`
-	Status         string             `json:"status"`
-	NotifiedAt     pgtype.Timestamptz `json:"notified_at"`
-	FulfilledAt    pgtype.Timestamptz `json:"fulfilled_at"`
-	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ID                 pgtype.UUID        `json:"id"`
+	EventID            pgtype.UUID        `json:"event_id"`
+	ProductID          pgtype.UUID        `json:"product_id"`
+	PlatformUserID     string             `json:"platform_user_id"`
+	PlatformHandle     string             `json:"platform_handle"`
+	Quantity           int32              `json:"quantity"`
+	Position           int32              `json:"position"`
+	Status             string             `json:"status"`
+	NotifiedAt         pgtype.Timestamptz `json:"notified_at"`
+	FulfilledAt        pgtype.Timestamptz `json:"fulfilled_at"`
+	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	CartID             pgtype.UUID        `json:"cart_id"`
+	NotificationSentAt pgtype.Timestamptz `json:"notification_sent_at"`
+	CancelledAt        pgtype.Timestamptz `json:"cancelled_at"`
 }
 
 type WebhookEvent struct {

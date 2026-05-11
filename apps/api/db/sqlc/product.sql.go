@@ -139,6 +139,47 @@ func (q *Queries) GetMaxKeyword(ctx context.Context, storeID pgtype.UUID) (inter
 	return max_keyword, err
 }
 
+const getProductByExternalID = `-- name: GetProductByExternalID :one
+SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id FROM products
+WHERE store_id = $1 AND external_source = $2 AND external_id = $3
+`
+
+type GetProductByExternalIDParams struct {
+	StoreID        pgtype.UUID `json:"store_id"`
+	ExternalSource string      `json:"external_source"`
+	ExternalID     pgtype.Text `json:"external_id"`
+}
+
+// Resolve um produto local pelo identificador do ERP. Usado pelo webhook
+// Tiny para mapear o produto antes de processar a fila de waitlist.
+func (q *Queries) GetProductByExternalID(ctx context.Context, arg GetProductByExternalIDParams) (Product, error) {
+	row := q.db.QueryRow(ctx, getProductByExternalID, arg.StoreID, arg.ExternalSource, arg.ExternalID)
+	var i Product
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.Name,
+		&i.ExternalID,
+		&i.ExternalSource,
+		&i.Keyword,
+		&i.Price,
+		&i.ImageUrl,
+		&i.Stock,
+		&i.Active,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.WeightGrams,
+		&i.HeightCm,
+		&i.WidthCm,
+		&i.LengthCm,
+		&i.Sku,
+		&i.PackageFormat,
+		&i.InsuranceValueCents,
+		&i.GroupID,
+	)
+	return i, err
+}
+
 const getProductByID = `-- name: GetProductByID :one
 SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id FROM products WHERE id = $1 AND store_id = $2
 `

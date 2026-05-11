@@ -100,6 +100,16 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 		)
 	}
 
+	// Marca como 'fulfilled' qualquer waitlist em status='notified' deste
+	// cart — o cliente pagou dentro da janela. Itens em 'waiting' (que ele
+	// optou por deixar na fila) permanecem.
+	if err := s.repo.MarkWaitlistFulfilledByCart(ctx, cartID); err != nil {
+		s.logger.Warn("failed to mark notified waitlist as fulfilled",
+			zap.String("cart_id", cartID),
+			zap.Error(err),
+		)
+	}
+
 	// No customer email captured (rare — checkout currently requires it, but
 	// this guards data drift). Token is still saved so the customer can be
 	// linked manually if they ask.

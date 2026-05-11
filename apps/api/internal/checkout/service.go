@@ -198,6 +198,51 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 		}
 	}
 
+	// Lazy expiration: antes de listar a waitlist, varre 'notified' com
+	// expires_at vencido e devolve o estoque para o próximo da fila.
+	// Substitui um worker dedicado — a fila só precisa "andar" quando
+	// alguém está olhando para o checkout. Best-effort: erro aqui só vira
+	// log, a leitura segue mesmo com o sweep meio rodado.
+	if processed, err := s.integrationService.ExpireNotifiedWaitlistSweep(ctx); err != nil {
+		s.logger.Warn("inline waitlist expiration sweep failed",
+			zap.String("cart_id", cart.ID),
+			zap.Int("processed_before_err", processed),
+			zap.Error(err),
+		)
+	}
+
+	// Hidrata a fila de espera vinculada ao cart (waiting + notified). É
+	// tolerante a falha — só faz log e devolve a lista vazia se algo der
+	// errado, porque a UI degrada graciosamente sem essa seção.
+	if waitlist, wlErr := s.integrationService.ListActiveWaitlistByCart(ctx, cart.ID); wlErr != nil {
+		s.logger.Warn("failed to load waitlist for checkout",
+			zap.String("cart_id", cart.ID),
+			zap.Error(wlErr),
+		)
+	} else {
+		output.WaitlistItems = make([]WaitlistItemDetails, 0, len(waitlist))
+		for _, w := range waitlist {
+			img := w.ProductImageURL
+			var imgPtr *string
+			if img != "" {
+				imgPtr = &img
+			}
+			output.WaitlistItems = append(output.WaitlistItems, WaitlistItemDetails{
+				ID:           w.ID,
+				ProductID:    w.ProductID,
+				ProductName:  w.ProductName,
+				ProductImage: imgPtr,
+				UnitPrice:    w.ProductPrice,
+				Quantity:     w.Quantity,
+				Position:     w.Position,
+				Status:       w.Status,
+				NotifiedAt:   w.NotifiedAt,
+				ExpiresAt:    w.ExpiresAt,
+				CreatedAt:    w.CreatedAt,
+			})
+		}
+	}
+
 	// Populate receipt fields (customer + shipping address + payment) only for
 	// paid carts. The public checkout token is reachable by anyone — exposing
 	// these on unpaid carts would leak the buyer's PII while payment is still
@@ -912,6 +957,13 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 
 	s.reevaluateCouponAfterCartMutation(ctx, cart.ID)
 
+	// Quando a quantidade diminui, parte do estoque foi devolvida — tenta
+	// promover o próximo da fila. Best-effort em goroutine para não
+	// bloquear o response do checkout.
+	if delta < 0 {
+		go s.integrationService.ProcessWaitlistForProduct(context.Background(), cart.EventID, item.ProductID, cart.StoreID)
+	}
+
 	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
 }
 
@@ -968,6 +1020,37 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 
 	s.reevaluateCouponAfterCartMutation(ctx, cart.ID)
 
+	// Estoque liberado pela remoção — promove o próximo da fila se houver.
+	go s.integrationService.ProcessWaitlistForProduct(context.Background(), cart.EventID, item.ProductID, cart.StoreID)
+
+	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
+}
+
+// DropFromWaitlist é o "sair da fila": cancela uma waitlist entry do
+// cart. Aceita carts ativos (mesmo regra de loadEditableCart) — não faz
+// sentido cancelar fila de um cart já pago/expirado. Delegate ao
+// integrationService que conhece a mecânica de devolver estoque caso a
+// entry estivesse 'notified'.
+func (s *Service) DropFromWaitlist(ctx context.Context, input DropFromWaitlistInput) (*GetCartForCheckoutOutput, error) {
+	cart, err := s.loadEditableCart(ctx, input.Token)
+	if err != nil {
+		return nil, err
+	}
+	if input.WaitlistItemID == "" {
+		return nil, httpx.ErrBadRequest("waitlist id is required")
+	}
+	changed, err := s.integrationService.CancelWaitlistItem(ctx, input.WaitlistItemID, cart.ID)
+	if err != nil {
+		s.logger.Warn("failed to cancel waitlist item",
+			zap.String("cart_id", cart.ID),
+			zap.String("waitlist_item_id", input.WaitlistItemID),
+			zap.Error(err),
+		)
+		return nil, httpx.ErrUnprocessable("não foi possível sair da fila, tente novamente")
+	}
+	if !changed {
+		return nil, httpx.ErrNotFound("item da fila não encontrado neste carrinho")
+	}
 	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
 }
 
