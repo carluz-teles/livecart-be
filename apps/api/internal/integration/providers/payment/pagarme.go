@@ -69,10 +69,14 @@ func (p *Pagarme) Name() providers.ProviderName {
 }
 
 // ValidateCredentials validates the current credentials by hitting
-// /recipients/default — same endpoint TestConnection uses, so a connect
-// flow that passes here will surface consistent account info downstream.
+// /recipients?size=1 — a paginated listing that authenticates the key
+// without requiring any business setup. The previous probe used
+// /recipients/default, which returns 412 on accounts that don't have a
+// "default recipient" configured (anything that isn't a marketplace
+// split-payment setup), so brand-new Pagar.me accounts couldn't connect
+// even with a perfectly valid sk_test_/sk_live_ key.
 func (p *Pagarme) ValidateCredentials(ctx context.Context) error {
-	url := pagarmeAPIBaseURL + "/recipients/default"
+	url := pagarmeAPIBaseURL + "/recipients?size=1"
 
 	resp, _, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
 	if err != nil {
@@ -88,13 +92,14 @@ func (p *Pagarme) ValidateCredentials(ctx context.Context) error {
 }
 
 // TestConnection tests the connection to Pagar.me API and surfaces account
-// info from /recipients/default. The recipient is the entity that actually
-// receives the funds — we use it to populate the "Informações da Conta"
-// card in the admin UI (name, email, document) so the merchant can verify
-// at a glance which Pagar.me account is wired to this store.
+// info to populate the "Informações da Conta" card in the admin UI. Uses
+// /recipients?size=1 for authentication (works on any active account) and,
+// when a recipient is returned, uses it for the displayed name/email/doc.
+// Accounts without recipients yet still pass — the card just shows the
+// environment (sandbox/production) from the key prefix.
 func (p *Pagarme) TestConnection(ctx context.Context) (*providers.TestConnectionResult, error) {
 	start := time.Now()
-	url := pagarmeAPIBaseURL + "/recipients/default"
+	url := pagarmeAPIBaseURL + "/recipients?size=1"
 
 	resp, body, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
 	latency := time.Since(start)
@@ -122,25 +127,32 @@ func (p *Pagarme) TestConnection(ctx context.Context) (*providers.TestConnection
 		return result, nil
 	}
 
-	var recipient struct {
-		ID       string `json:"id"`
-		Name     string `json:"name"`
-		Email    string `json:"email"`
-		Document string `json:"document"`
-		Type     string `json:"type"`
-		Status   string `json:"status"`
+	var listing struct {
+		Data []struct {
+			ID       string `json:"id"`
+			Name     string `json:"name"`
+			Email    string `json:"email"`
+			Document string `json:"document"`
+			Type     string `json:"type"`
+			Status   string `json:"status"`
+		} `json:"data"`
 	}
-	_ = json.Unmarshal(body, &recipient) // best-effort; missing fields stay empty
+	_ = json.Unmarshal(body, &listing) // best-effort; missing fields stay empty
+
+	accountInfo := map[string]any{
+		"environment": pagarmeEnvironmentFromKey(p.credentials.APIKey),
+	}
+	if len(listing.Data) > 0 {
+		r := listing.Data[0]
+		accountInfo["id"] = r.ID
+		accountInfo["name"] = r.Name
+		accountInfo["email"] = r.Email
+		accountInfo["document"] = r.Document
+	}
 
 	result.Success = true
 	result.Message = "Conexão estabelecida com sucesso"
-	result.AccountInfo = map[string]any{
-		"id":          recipient.ID,
-		"name":        recipient.Name,
-		"email":       recipient.Email,
-		"document":    recipient.Document,
-		"environment": pagarmeEnvironmentFromKey(p.credentials.APIKey),
-	}
+	result.AccountInfo = accountInfo
 	return result, nil
 }
 
