@@ -609,22 +609,42 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 		Message:           getPagarmeStatusMessage(pgResp.Status),
 	}
 
-	var statusDetail string
+	var (
+		statusDetail       string
+		acquirerName       string
+		acquirerMessage    string
+		acquirerReturnCode string
+		gatewayResp        map[string]any
+		antifraudResp      map[string]any
+	)
 	if len(pgResp.Charges) > 0 {
 		charge := pgResp.Charges[0]
 		if charge.LastTransaction != nil {
-			statusDetail = charge.LastTransaction.Status
-			if card := charge.LastTransaction.Card; card != nil {
+			lt := charge.LastTransaction
+			statusDetail = lt.Status
+			acquirerName = lt.AcquirerName
+			acquirerMessage = lt.AcquirerMessage
+			acquirerReturnCode = lt.AcquirerReturnCode
+			gatewayResp = lt.GatewayResponse
+			antifraudResp = lt.AntifraudResponse
+			if card := lt.Card; card != nil {
 				result.LastFourDigits = card.LastFourDigits
 				result.CardBrand = card.Brand
 			}
 			// Pagar.me v5 returns acquirer_auth_code on last_transaction.
 			// Fall back to acquirer_nsu when the gateway omits it (some
 			// adquirentes only fill one of the two).
-			if code := charge.LastTransaction.AcquirerAuthCode; code != "" {
+			if code := lt.AcquirerAuthCode; code != "" {
 				result.AuthorizationCode = code
-			} else if nsu := charge.LastTransaction.AcquirerNsu; nsu != "" {
+			} else if nsu := lt.AcquirerNsu; nsu != "" {
 				result.AuthorizationCode = nsu
+			}
+			// Surface acquirer_message in the buyer-facing copy when the
+			// transaction failed — without this, every rejection shows the
+			// generic "pagamento recusado" without saying whether it was
+			// CVV wrong, no funds, fraud rules, etc.
+			if !lt.Success && acquirerMessage != "" {
+				result.Message = acquirerMessage
 			}
 		}
 		// Pagar.me reports the authorization instant on the charge itself
@@ -639,7 +659,7 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 	}
 	result.StatusDetail = statusDetail
 
-	p.Logger.Info("pagarme card payment captured",
+	logFields := []zap.Field{
 		zap.String("payment_id", result.PaymentID),
 		zap.String("cart_id", input.CartID),
 		zap.String("status", string(result.Status)),
@@ -650,7 +670,20 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 		zap.Int64("amount_cents", result.Amount),
 		zap.String("authorization_code", result.AuthorizationCode),
 		zap.Bool("has_paid_at", result.PaidAt != nil),
-	)
+		zap.String("acquirer_name", acquirerName),
+		zap.String("acquirer_message", acquirerMessage),
+		zap.String("acquirer_return_code", acquirerReturnCode),
+		zap.Any("gateway_response", gatewayResp),
+		zap.Any("antifraud_response", antifraudResp),
+	}
+	// Log at Error level on rejection so the message + return code
+	// surface in error dashboards alongside the 5xx transport failures.
+	// Approved/pending payments stay at Info.
+	if result.Status == PaymentRejected {
+		p.Logger.Error("pagarme card payment captured", logFields...)
+	} else {
+		p.Logger.Info("pagarme card payment captured", logFields...)
+	}
 
 	return result, nil
 }
@@ -942,18 +975,23 @@ type pagarmeCharge struct {
 }
 
 type pagarmeLastTransaction struct {
-	ID               string       `json:"id"`
-	Status           string       `json:"status"`
-	Success          bool         `json:"success"`
-	Amount           int          `json:"amount"`
-	Installments     int          `json:"installments"`
-	Card             *pagarmeCard `json:"card"`
-	Pix              *pagarmePix  `json:"pix"`
-	AcquirerAuthCode string       `json:"acquirer_auth_code"`
-	AcquirerNsu      string       `json:"acquirer_nsu"`
-	AcquirerTid      string       `json:"acquirer_tid"`
-	CreatedAt        string       `json:"created_at"`
-	UpdatedAt        string       `json:"updated_at"`
+	ID                 string                 `json:"id"`
+	Status             string                 `json:"status"`
+	Success            bool                   `json:"success"`
+	Amount             int                    `json:"amount"`
+	Installments       int                    `json:"installments"`
+	Card               *pagarmeCard           `json:"card"`
+	Pix                *pagarmePix            `json:"pix"`
+	AcquirerName       string                 `json:"acquirer_name"`
+	AcquirerAuthCode   string                 `json:"acquirer_auth_code"`
+	AcquirerNsu        string                 `json:"acquirer_nsu"`
+	AcquirerTid        string                 `json:"acquirer_tid"`
+	AcquirerMessage    string                 `json:"acquirer_message"`
+	AcquirerReturnCode string                 `json:"acquirer_return_code"`
+	GatewayResponse    map[string]any         `json:"gateway_response"`
+	AntifraudResponse  map[string]any         `json:"antifraud_response"`
+	CreatedAt          string                 `json:"created_at"`
+	UpdatedAt          string                 `json:"updated_at"`
 }
 
 type pagarmeCard struct {
