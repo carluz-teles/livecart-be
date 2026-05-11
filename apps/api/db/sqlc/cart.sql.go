@@ -12,6 +12,27 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const bindCartPaymentIntegration = `-- name: BindCartPaymentIntegration :exec
+UPDATE carts
+SET payment_integration_id = $2
+WHERE id = $1
+`
+
+type BindCartPaymentIntegrationParams struct {
+	ID                   pgtype.UUID `json:"id"`
+	PaymentIntegrationID pgtype.UUID `json:"payment_integration_id"`
+}
+
+// Pins the cart to a specific payment integration the moment GetCheckoutConfig
+// successfully instantiates a provider. Subsequent ProcessCardPayment /
+// GeneratePixPayment calls use this binding instead of re-resolving the
+// store's primary, so a FE that tokenized with provider X always reaches
+// provider X server-side (card tokens are provider-bound).
+func (q *Queries) BindCartPaymentIntegration(ctx context.Context, arg BindCartPaymentIntegrationParams) error {
+	_, err := q.db.Exec(ctx, bindCartPaymentIntegration, arg.ID, arg.PaymentIntegrationID)
+	return err
+}
+
 const countCartsByEvent = `-- name: CountCartsByEvent :one
 SELECT COUNT(*)::int as count FROM carts WHERE event_id = $1 AND status = 'active'
 `
@@ -741,6 +762,7 @@ SELECT
     c.customer_email,
     c.payment_status,
     c.paid_at,
+    c.payment_integration_id,
     c.created_at,
     c.expires_at,
     c.initial_snapshot_taken_at,
@@ -773,6 +795,7 @@ type GetCartByTokenWithDetailsRow struct {
 	CustomerEmail          pgtype.Text        `json:"customer_email"`
 	PaymentStatus          pgtype.Text        `json:"payment_status"`
 	PaidAt                 pgtype.Timestamptz `json:"paid_at"`
+	PaymentIntegrationID   pgtype.UUID        `json:"payment_integration_id"`
 	CreatedAt              pgtype.Timestamptz `json:"created_at"`
 	ExpiresAt              pgtype.Timestamptz `json:"expires_at"`
 	InitialSnapshotTakenAt pgtype.Timestamptz `json:"initial_snapshot_taken_at"`
@@ -808,6 +831,7 @@ func (q *Queries) GetCartByTokenWithDetails(ctx context.Context, token string) (
 		&i.CustomerEmail,
 		&i.PaymentStatus,
 		&i.PaidAt,
+		&i.PaymentIntegrationID,
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.InitialSnapshotTakenAt,
@@ -1132,15 +1156,18 @@ func (q *Queries) GetSessionStats(ctx context.Context, sessionID pgtype.UUID) (G
 }
 
 const getStorePaymentIntegration = `-- name: GetStorePaymentIntegration :one
-SELECT i.id, i.store_id, i.type, i.provider, i.status, i.token_expires_at, i.last_synced_at, i.created_at, i.credentials, i.metadata
+SELECT i.id, i.store_id, i.type, i.provider, i.status, i.token_expires_at, i.last_synced_at, i.created_at, i.credentials, i.metadata, i.priority
 FROM integrations i
 WHERE i.store_id = $1
   AND i.type = 'payment'
   AND i.status = 'active'
+ORDER BY i.priority ASC, i.created_at ASC
 LIMIT 1
 `
 
-// Gets the active payment integration for a store
+// Returns the highest-priority active payment integration for a store.
+// Lower `priority` wins; created_at tie-breaks (oldest first within a tie).
+// See ListStorePaymentIntegrations for the fallback chain.
 func (q *Queries) GetStorePaymentIntegration(ctx context.Context, storeID pgtype.UUID) (Integration, error) {
 	row := q.db.QueryRow(ctx, getStorePaymentIntegration, storeID)
 	var i Integration
@@ -1155,6 +1182,7 @@ func (q *Queries) GetStorePaymentIntegration(ctx context.Context, storeID pgtype
 		&i.CreatedAt,
 		&i.Credentials,
 		&i.Metadata,
+		&i.Priority,
 	)
 	return i, err
 }
@@ -2011,6 +2039,51 @@ func (q *Queries) ListProductsByEvent(ctx context.Context, eventID pgtype.UUID) 
 			&i.Keyword,
 			&i.TotalQuantity,
 			&i.TotalRevenue,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStorePaymentIntegrations = `-- name: ListStorePaymentIntegrations :many
+SELECT i.id, i.store_id, i.type, i.provider, i.status, i.token_expires_at, i.last_synced_at, i.created_at, i.credentials, i.metadata, i.priority
+FROM integrations i
+WHERE i.store_id = $1
+  AND i.type = 'payment'
+  AND i.status = 'active'
+ORDER BY i.priority ASC, i.created_at ASC
+`
+
+// Returns all active payment integrations for a store in priority order.
+// The checkout layer walks this list as a fallback chain: if the primary
+// can't be instantiated (credentials corrupted, provider unsupported, etc.),
+// the next one is tried.
+func (q *Queries) ListStorePaymentIntegrations(ctx context.Context, storeID pgtype.UUID) ([]Integration, error) {
+	rows, err := q.db.Query(ctx, listStorePaymentIntegrations, storeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Integration{}
+	for rows.Next() {
+		var i Integration
+		if err := rows.Scan(
+			&i.ID,
+			&i.StoreID,
+			&i.Type,
+			&i.Provider,
+			&i.Status,
+			&i.TokenExpiresAt,
+			&i.LastSyncedAt,
+			&i.CreatedAt,
+			&i.Credentials,
+			&i.Metadata,
+			&i.Priority,
 		); err != nil {
 			return nil, err
 		}

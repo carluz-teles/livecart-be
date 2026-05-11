@@ -363,6 +363,23 @@ func (r *Repository) UpdateStatus(ctx context.Context, id, status string) error 
 	})
 }
 
+// UpdatePriority sets the integration's priority within its store.
+func (r *Repository) UpdatePriority(ctx context.Context, id, storeID string, priority int) error {
+	integrationID, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+	return r.queries.UpdateIntegrationPriority(ctx, sqlc.UpdateIntegrationPriorityParams{
+		ID:       integrationID,
+		StoreID:  sID,
+		Priority: int32(priority),
+	})
+}
+
 // Delete deletes an integration.
 func (r *Repository) Delete(ctx context.Context, id, storeID string) error {
 	integrationID, err := parseUUID(id)
@@ -1924,6 +1941,7 @@ func (r *Repository) toIntegrationRow(row sqlc.Integration) *IntegrationRow {
 		Metadata:       metadata,
 		LastSyncedAt:   lastSyncedAt,
 		CreatedAt:      row.CreatedAt.Time,
+		Priority:       int(row.Priority),
 	}
 }
 

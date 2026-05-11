@@ -259,6 +259,7 @@ type Integration struct {
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	Credentials    []byte             `json:"credentials"`
 	Metadata       json.RawMessage    `json:"metadata"`
+	Priority       int32              `json:"priority"`
 }
 
 type IntegrationLog struct {

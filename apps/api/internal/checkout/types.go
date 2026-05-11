@@ -604,6 +604,11 @@ type CartRow struct {
 	CustomerEmail      *string
 	PaymentStatus      string
 	PaidAt             *time.Time
+	// PaymentIntegrationID is the integration the cart was bound to on its
+	// first successful GetCheckoutConfig call. nil while no provider was
+	// resolved yet; once set, all payment-processing calls reuse this exact
+	// row so card tokens (which are provider-bound) reach the right gateway.
+	PaymentIntegrationID *string
 	CreatedAt          time.Time
 	ExpiresAt          *time.Time
 	EventTitle              string

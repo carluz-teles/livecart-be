@@ -37,6 +37,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 
 	g.Get("/:id", h.GetByID)
 	g.Delete("/:id", h.Delete)
+	g.Patch("/:id/priority", h.UpdatePriority)
 
 	// Test connection
 	g.Post("/:id/test", h.TestConnection)
@@ -205,6 +206,37 @@ func (h *Handler) Delete(c *fiber.Ctx) error {
 	}
 
 	return httpx.Deleted(c, id)
+}
+
+// UpdatePriority sets the priority of a single integration. Lower number =
+// higher priority in the checkout selection ordering. The admin UI uses this
+// to reorder multiple payment providers connected to the same store.
+// @Summary Update integration priority
+// @Tags integrations
+// @Accept json
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param id path string true "Integration ID"
+// @Param body body UpdatePriorityRequest true "Priority"
+// @Success 200 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/{id}/priority [patch]
+// @Security BearerAuth
+func (h *Handler) UpdatePriority(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	id := c.Params("id")
+
+	var req UpdatePriorityRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.HandleServiceError(c, httpx.ErrBadRequest("payload inválido"))
+	}
+	if req.Priority < 0 {
+		return httpx.HandleServiceError(c, httpx.ErrBadRequest("priority deve ser >= 0"))
+	}
+
+	if err := h.service.UpdatePriority(c.Context(), id, storeID, req.Priority); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, fiber.Map{"id": id, "priority": req.Priority})
 }
 
 // TestConnection tests the connection to the integration provider.
@@ -668,5 +700,6 @@ func toIntegrationResponse(output *CreateIntegrationOutput) *IntegrationResponse
 		WebhookURL:        output.WebhookURL,
 		WebhookStatus:     output.WebhookStatus,
 		WebhookLastPingAt: output.WebhookLastPingAt,
+		Priority:          output.Priority,
 	}
 }

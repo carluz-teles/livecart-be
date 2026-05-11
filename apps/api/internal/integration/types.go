@@ -91,6 +91,14 @@ type UpdateIntegrationRequest struct {
 	Status      string         `json:"status,omitempty" validate:"omitempty,oneof=active error disconnected"`
 }
 
+// UpdatePriorityRequest is the HTTP body for PATCH /integrations/:id/priority.
+// Lower number wins the checkout selection. Frontend reorders payment cards
+// and sends 10, 20, 30… so future inserts have room without touching every
+// existing row.
+type UpdatePriorityRequest struct {
+	Priority int `json:"priority" validate:"gte=0"`
+}
+
 // IntegrationResponse is the HTTP response for an integration.
 type IntegrationResponse struct {
 	ID                string         `json:"id"`
@@ -114,6 +122,9 @@ type IntegrationResponse struct {
 	// this store (validation ping or real event). null = never received → URL
 	// is likely missing or wrong on the provider side.
 	WebhookLastPingAt *time.Time     `json:"webhookLastPingAt"`
+	// Priority drives checkout selection when a store has multiple integrations
+	// of the same type (only payment uses this today). Lower = primary.
+	Priority          int            `json:"priority"`
 }
 
 // ProviderURLsResponse exposes the setup URLs a merchant must paste into the
@@ -242,6 +253,7 @@ type CreateIntegrationOutput struct {
 	WebhookURL        string
 	WebhookStatus     string
 	WebhookLastPingAt *time.Time
+	Priority          int
 }
 
 // GetProviderURLsInput is the service input for resolving the per-provider
@@ -562,6 +574,7 @@ type IntegrationRow struct {
 	Metadata       map[string]any
 	LastSyncedAt   *time.Time
 	CreatedAt      time.Time
+	Priority       int
 }
 
 // CreateIntegrationParams contains parameters for creating an integration.

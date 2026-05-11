@@ -347,13 +347,10 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 	// a negative transaction_amount.
 	totalAmount = applyCouponDiscount(totalAmount, cart.CouponDiscountCents)
 
-	// Get payment integration for the store
-	paymentIntegration, err := s.repo.GetPaymentIntegration(ctx, cart.StoreID)
+	// Get payment integration — honors cart binding from GetCheckoutConfig.
+	paymentIntegration, err := s.resolvePaymentIntegration(ctx, cart)
 	if err != nil {
 		return nil, err
-	}
-	if paymentIntegration == nil {
-		return nil, httpx.ErrUnprocessable("loja não possui integração de pagamento configurada")
 	}
 
 	// Get cart expiration minutes from store settings
@@ -510,32 +507,116 @@ func (s *Service) GetCheckoutConfig(ctx context.Context, input GetCheckoutConfig
 	}
 	totalAmount = applyCouponDiscount(totalAmount, cart.CouponDiscountCents)
 
-	// Get payment integration for the store
-	paymentIntegration, err := s.repo.GetPaymentIntegration(ctx, cart.StoreID)
+	// Resolve the payment integration to render the FE widget for. Walks the
+	// store's priority list as a fallback chain: first integration whose
+	// provider can be instantiated (credentials decryptable, provider class
+	// supported) wins. The choice is persisted via BindCartPaymentIntegration
+	// so subsequent ProcessCardPayment / GeneratePixPayment calls reach the
+	// SAME provider — card tokens are gateway-bound.
+	chosen, publicKey, methods, err := s.resolveCheckoutIntegration(ctx, cart)
 	if err != nil {
 		return nil, err
 	}
-	if paymentIntegration == nil {
-		return nil, httpx.ErrUnprocessable("loja não possui integração de pagamento configurada")
-	}
-
-	// Get public key and payment methods from integration
-	publicKey, methods, err := s.integrationService.GetCheckoutConfig(ctx, paymentIntegration.ID.String(), cart.StoreID)
-	if err != nil {
-		s.logger.Error("failed to get checkout config",
-			zap.String("cart_id", cart.ID),
-			zap.Error(err),
-		)
-		return nil, httpx.ErrUnprocessable("erro ao obter configuração de pagamento")
-	}
 
 	return &GetCheckoutConfigOutput{
-		Provider:         paymentIntegration.ProviderName,
+		Provider:         chosen.ProviderName,
 		PublicKey:        publicKey,
 		AvailableMethods: methods,
 		TotalAmount:      totalAmount,
 		Currency:         "BRL",
 	}, nil
+}
+
+// resolveCheckoutIntegration walks the store's payment integrations in
+// priority order, picks the first one we can build a config for, and binds it
+// to the cart. Honors an existing cart.PaymentIntegrationID — re-binding
+// mid-checkout would break card tokens already minted by the FE.
+//
+// Returns an httpx 422 only when *every* candidate fails, so the merchant
+// sees a clear "no working provider" error instead of a generic 500.
+func (s *Service) resolveCheckoutIntegration(ctx context.Context, cart *CartRow) (*IntegrationRow, string, []string, error) {
+	// Honor a previously chosen integration: the FE may have tokenized cards
+	// against its public key already.
+	if cart.PaymentIntegrationID != nil && *cart.PaymentIntegrationID != "" {
+		bound, err := s.repo.GetIntegrationByID(ctx, *cart.PaymentIntegrationID)
+		if err == nil && bound != nil && bound.Status == "active" {
+			publicKey, methods, configErr := s.integrationService.GetCheckoutConfig(ctx, bound.ID.String(), cart.StoreID)
+			if configErr == nil {
+				return bound, publicKey, methods, nil
+			}
+			s.logger.Warn("bound payment integration failed config, falling through to priority chain",
+				zap.String("cart_id", cart.ID),
+				zap.String("integration_id", bound.ID.String()),
+				zap.Error(configErr),
+			)
+		}
+	}
+
+	candidates, err := s.repo.ListPaymentIntegrations(ctx, cart.StoreID)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, "", nil, httpx.ErrUnprocessable("loja não possui integração de pagamento configurada")
+	}
+
+	var lastErr error
+	for i := range candidates {
+		candidate := candidates[i]
+		publicKey, methods, configErr := s.integrationService.GetCheckoutConfig(ctx, candidate.ID.String(), cart.StoreID)
+		if configErr != nil {
+			s.logger.Warn("payment integration failed checkout config, trying next",
+				zap.String("cart_id", cart.ID),
+				zap.String("integration_id", candidate.ID.String()),
+				zap.String("provider", candidate.ProviderName),
+				zap.Error(configErr),
+			)
+			lastErr = configErr
+			continue
+		}
+		if bindErr := s.repo.BindCartPaymentIntegration(ctx, cart.ID, candidate.ID.String()); bindErr != nil {
+			// Binding failure is recoverable — the FE still gets a working
+			// config; subsequent calls will just re-resolve via the same
+			// priority walk and (hopefully) land on the same provider.
+			s.logger.Warn("failed to bind cart to payment integration",
+				zap.String("cart_id", cart.ID),
+				zap.String("integration_id", candidate.ID.String()),
+				zap.Error(bindErr),
+			)
+		}
+		return &candidate, publicKey, methods, nil
+	}
+
+	if lastErr != nil {
+		s.logger.Error("all payment integrations failed checkout config",
+			zap.String("cart_id", cart.ID),
+			zap.Int("candidates", len(candidates)),
+			zap.Error(lastErr),
+		)
+	}
+	return nil, "", nil, httpx.ErrUnprocessable("nenhuma integração de pagamento está respondendo agora")
+}
+
+// resolvePaymentIntegration returns the integration that should process this
+// cart's payment. Prefers the cart's bound integration (set during
+// GetCheckoutConfig) so the gateway matches the public key the FE used.
+// Falls back to the store's primary when the cart has no binding yet (e.g.,
+// legacy carts that started checkout before this rollout).
+func (s *Service) resolvePaymentIntegration(ctx context.Context, cart *CartRow) (*IntegrationRow, error) {
+	if cart.PaymentIntegrationID != nil && *cart.PaymentIntegrationID != "" {
+		bound, err := s.repo.GetIntegrationByID(ctx, *cart.PaymentIntegrationID)
+		if err == nil && bound != nil {
+			return bound, nil
+		}
+	}
+	primary, err := s.repo.GetPaymentIntegration(ctx, cart.StoreID)
+	if err != nil {
+		return nil, err
+	}
+	if primary == nil {
+		return nil, httpx.ErrUnprocessable("loja não possui integração de pagamento configurada")
+	}
+	return primary, nil
 }
 
 // ProcessCardPayment processes a card payment with a tokenized card.
@@ -599,13 +680,11 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	}
 	totalAmount = applyCouponDiscount(totalAmount, cart.CouponDiscountCents)
 
-	// Get payment integration
-	paymentIntegration, err := s.repo.GetPaymentIntegration(ctx, cart.StoreID)
+	// Use the integration the cart was bound to during GetCheckoutConfig so
+	// card tokens reach the gateway that issued the public key on the FE.
+	paymentIntegration, err := s.resolvePaymentIntegration(ctx, cart)
 	if err != nil {
 		return nil, err
-	}
-	if paymentIntegration == nil {
-		return nil, httpx.ErrUnprocessable("loja não possui integração de pagamento configurada")
 	}
 
 	// Build customer name
@@ -802,13 +881,10 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 		)
 	}
 
-	// Get payment integration
-	paymentIntegration, err := s.repo.GetPaymentIntegration(ctx, cart.StoreID)
+	// Use the integration the cart was bound to during GetCheckoutConfig.
+	paymentIntegration, err := s.resolvePaymentIntegration(ctx, cart)
 	if err != nil {
 		return nil, err
-	}
-	if paymentIntegration == nil {
-		return nil, httpx.ErrUnprocessable("loja não possui integração de pagamento configurada")
 	}
 
 	// Build customer name

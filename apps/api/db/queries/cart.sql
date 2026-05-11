@@ -405,6 +405,7 @@ SELECT
     c.customer_email,
     c.payment_status,
     c.paid_at,
+    c.payment_integration_id,
     c.created_at,
     c.expires_at,
     c.initial_snapshot_taken_at,
@@ -422,6 +423,16 @@ FROM carts c
 JOIN live_events le ON le.id = c.event_id
 JOIN stores s ON s.id = le.store_id
 WHERE c.token = $1;
+
+-- name: BindCartPaymentIntegration :exec
+-- Pins the cart to a specific payment integration the moment GetCheckoutConfig
+-- successfully instantiates a provider. Subsequent ProcessCardPayment /
+-- GeneratePixPayment calls use this binding instead of re-resolving the
+-- store's primary, so a FE that tokenized with provider X always reaches
+-- provider X server-side (card tokens are provider-bound).
+UPDATE carts
+SET payment_integration_id = $2
+WHERE id = $1;
 
 -- name: ListCartItemsForCheckout :many
 -- Returns cart items with product details for checkout page.
@@ -489,10 +500,25 @@ WHERE id = $1
 RETURNING *;
 
 -- name: GetStorePaymentIntegration :one
--- Gets the active payment integration for a store
+-- Returns the highest-priority active payment integration for a store.
+-- Lower `priority` wins; created_at tie-breaks (oldest first within a tie).
+-- See ListStorePaymentIntegrations for the fallback chain.
 SELECT i.*
 FROM integrations i
 WHERE i.store_id = $1
   AND i.type = 'payment'
   AND i.status = 'active'
+ORDER BY i.priority ASC, i.created_at ASC
 LIMIT 1;
+
+-- name: ListStorePaymentIntegrations :many
+-- Returns all active payment integrations for a store in priority order.
+-- The checkout layer walks this list as a fallback chain: if the primary
+-- can't be instantiated (credentials corrupted, provider unsupported, etc.),
+-- the next one is tried.
+SELECT i.*
+FROM integrations i
+WHERE i.store_id = $1
+  AND i.type = 'payment'
+  AND i.status = 'active'
+ORDER BY i.priority ASC, i.created_at ASC;

@@ -47,6 +47,13 @@ UPDATE integrations
 SET metadata = $2
 WHERE id = $1;
 
+-- name: UpdateIntegrationPriority :exec
+-- Sets the priority of a single integration for an explicit store. Lower
+-- number = higher priority in the checkout selection ordering.
+UPDATE integrations
+SET priority = $3
+WHERE id = $1 AND store_id = $2;
+
 -- name: DeleteIntegration :exec
 DELETE FROM integrations WHERE id = $1 AND store_id = $2;
 

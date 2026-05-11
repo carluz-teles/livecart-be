@@ -194,7 +194,9 @@ func (r *Repository) UpdatePaymentStatus(ctx context.Context, cartID, status, pa
 	return nil
 }
 
-// GetPaymentIntegration retrieves the active payment integration for a store.
+// GetPaymentIntegration retrieves the highest-priority active payment
+// integration for a store. Lower priority = primary. See
+// ListStorePaymentIntegrations for the fallback chain.
 func (r *Repository) GetPaymentIntegration(ctx context.Context, storeID string) (*IntegrationRow, error) {
 	uid, err := uuid.Parse(storeID)
 	if err != nil {
@@ -217,6 +219,80 @@ func (r *Repository) GetPaymentIntegration(ctx context.Context, storeID string) 
 		ProviderName: row.Provider,
 		Status:       row.Status,
 	}, nil
+}
+
+// BindCartPaymentIntegration pins a cart to a specific payment integration so
+// subsequent processing reuses the exact provider the FE was tokenized for.
+// Skips the UPDATE when the same integration is already bound.
+func (r *Repository) BindCartPaymentIntegration(ctx context.Context, cartID, integrationID string) error {
+	cartUID, err := uuid.Parse(cartID)
+	if err != nil {
+		return httpx.ErrBadRequest("invalid cart ID")
+	}
+	intUID, err := uuid.Parse(integrationID)
+	if err != nil {
+		return httpx.ErrBadRequest("invalid integration ID")
+	}
+	if err := r.q.BindCartPaymentIntegration(ctx, sqlc.BindCartPaymentIntegrationParams{
+		ID:                   pgtype.UUID{Bytes: cartUID, Valid: true},
+		PaymentIntegrationID: pgtype.UUID{Bytes: intUID, Valid: true},
+	}); err != nil {
+		return fmt.Errorf("binding cart payment integration: %w", err)
+	}
+	return nil
+}
+
+// GetIntegrationByID fetches a single integration row by ID (any type/status).
+// Used when a cart was previously bound to a specific payment integration so
+// the checkout service can reuse it instead of re-resolving the store primary.
+func (r *Repository) GetIntegrationByID(ctx context.Context, integrationID string) (*IntegrationRow, error) {
+	uid, err := uuid.Parse(integrationID)
+	if err != nil {
+		return nil, httpx.ErrBadRequest("invalid integration ID")
+	}
+	row, err := r.q.GetIntegrationByIDOnly(ctx, pgtype.UUID{Bytes: uid, Valid: true})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("getting integration: %w", err)
+	}
+	return &IntegrationRow{
+		ID:           row.ID.Bytes,
+		StoreID:      row.StoreID.Bytes,
+		Type:         row.Type,
+		Provider:     row.Provider,
+		ProviderName: row.Provider,
+		Status:       row.Status,
+	}, nil
+}
+
+// ListPaymentIntegrations returns all active payment integrations for a store
+// in priority order. The checkout service walks this slice as a fallback chain
+// — if the primary fails to instantiate, the next entry is tried.
+func (r *Repository) ListPaymentIntegrations(ctx context.Context, storeID string) ([]IntegrationRow, error) {
+	uid, err := uuid.Parse(storeID)
+	if err != nil {
+		return nil, httpx.ErrBadRequest("invalid store ID")
+	}
+
+	rows, err := r.q.ListStorePaymentIntegrations(ctx, pgtype.UUID{Bytes: uid, Valid: true})
+	if err != nil {
+		return nil, fmt.Errorf("listing payment integrations: %w", err)
+	}
+
+	out := make([]IntegrationRow, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, IntegrationRow{
+			ID:           row.ID.Bytes,
+			StoreID:      row.StoreID.Bytes,
+			Type:         row.Type,
+			Provider:     row.Provider,
+			ProviderName: row.Provider,
+			Status:       row.Status,
+		})
+	}
+	return out, nil
 }
 
 // IntegrationRow represents a minimal integration row.
@@ -272,6 +348,10 @@ func (r *Repository) toCartRow(row sqlc.GetCartByTokenWithDetailsRow) *CartRow {
 	}
 	if row.PaidAt.Valid {
 		cart.PaidAt = &row.PaidAt.Time
+	}
+	if row.PaymentIntegrationID.Valid {
+		id := uuid.UUID(row.PaymentIntegrationID.Bytes).String()
+		cart.PaymentIntegrationID = &id
 	}
 	if row.ExpiresAt.Valid {
 		cart.ExpiresAt = &row.ExpiresAt.Time

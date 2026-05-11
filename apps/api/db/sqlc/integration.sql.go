@@ -67,7 +67,7 @@ const createIntegration = `-- name: CreateIntegration :one
 
 INSERT INTO integrations (store_id, type, provider, status, credentials, token_expires_at, metadata)
 VALUES ($1, $2, $3, $4, $5, $6, COALESCE(NULLIF($7::text, '')::jsonb, '{}'::jsonb))
-RETURNING id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata
+RETURNING id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority
 `
 
 type CreateIntegrationParams struct {
@@ -105,6 +105,7 @@ func (q *Queries) CreateIntegration(ctx context.Context, arg CreateIntegrationPa
 		&i.CreatedAt,
 		&i.Credentials,
 		&i.Metadata,
+		&i.Priority,
 	)
 	return i, err
 }
@@ -309,7 +310,7 @@ func (q *Queries) DeleteOAuthState(ctx context.Context, state string) error {
 }
 
 const getActiveIntegrationByProvider = `-- name: GetActiveIntegrationByProvider :one
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata FROM integrations
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority FROM integrations
 WHERE store_id = $1 AND type = $2 AND provider = $3 AND status = 'active'
 LIMIT 1
 `
@@ -334,6 +335,7 @@ func (q *Queries) GetActiveIntegrationByProvider(ctx context.Context, arg GetAct
 		&i.CreatedAt,
 		&i.Credentials,
 		&i.Metadata,
+		&i.Priority,
 	)
 	return i, err
 }
@@ -430,7 +432,7 @@ func (q *Queries) GetIdempotencyByKey(ctx context.Context, arg GetIdempotencyByK
 }
 
 const getIntegrationByID = `-- name: GetIntegrationByID :one
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata FROM integrations WHERE id = $1 AND store_id = $2
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority FROM integrations WHERE id = $1 AND store_id = $2
 `
 
 type GetIntegrationByIDParams struct {
@@ -452,12 +454,13 @@ func (q *Queries) GetIntegrationByID(ctx context.Context, arg GetIntegrationByID
 		&i.CreatedAt,
 		&i.Credentials,
 		&i.Metadata,
+		&i.Priority,
 	)
 	return i, err
 }
 
 const getIntegrationByIDOnly = `-- name: GetIntegrationByIDOnly :one
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata FROM integrations WHERE id = $1
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority FROM integrations WHERE id = $1
 `
 
 func (q *Queries) GetIntegrationByIDOnly(ctx context.Context, id pgtype.UUID) (Integration, error) {
@@ -474,12 +477,13 @@ func (q *Queries) GetIntegrationByIDOnly(ctx context.Context, id pgtype.UUID) (I
 		&i.CreatedAt,
 		&i.Credentials,
 		&i.Metadata,
+		&i.Priority,
 	)
 	return i, err
 }
 
 const getIntegrationByProvider = `-- name: GetIntegrationByProvider :one
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata FROM integrations
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority FROM integrations
 WHERE store_id = $1 AND type = $2 AND provider = $3 AND status IN ('active', 'pending_auth')
 ORDER BY created_at DESC
 LIMIT 1
@@ -505,6 +509,7 @@ func (q *Queries) GetIntegrationByProvider(ctx context.Context, arg GetIntegrati
 		&i.CreatedAt,
 		&i.Credentials,
 		&i.Metadata,
+		&i.Priority,
 	)
 	return i, err
 }
@@ -602,7 +607,7 @@ func (q *Queries) ListIntegrationLogs(ctx context.Context, arg ListIntegrationLo
 }
 
 const listIntegrationsByStore = `-- name: ListIntegrationsByStore :many
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata FROM integrations WHERE store_id = $1 ORDER BY created_at DESC
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority FROM integrations WHERE store_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListIntegrationsByStore(ctx context.Context, storeID pgtype.UUID) ([]Integration, error) {
@@ -625,6 +630,7 @@ func (q *Queries) ListIntegrationsByStore(ctx context.Context, storeID pgtype.UU
 			&i.CreatedAt,
 			&i.Credentials,
 			&i.Metadata,
+			&i.Priority,
 		); err != nil {
 			return nil, err
 		}
@@ -637,7 +643,7 @@ func (q *Queries) ListIntegrationsByStore(ctx context.Context, storeID pgtype.UU
 }
 
 const listIntegrationsByType = `-- name: ListIntegrationsByType :many
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata FROM integrations
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority FROM integrations
 WHERE store_id = $1 AND type = $2 AND status = 'active'
 ORDER BY created_at DESC
 `
@@ -667,6 +673,7 @@ func (q *Queries) ListIntegrationsByType(ctx context.Context, arg ListIntegratio
 			&i.CreatedAt,
 			&i.Credentials,
 			&i.Metadata,
+			&i.Priority,
 		); err != nil {
 			return nil, err
 		}
@@ -679,7 +686,7 @@ func (q *Queries) ListIntegrationsByType(ctx context.Context, arg ListIntegratio
 }
 
 const listIntegrationsWithExpiringTokens = `-- name: ListIntegrationsWithExpiringTokens :many
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata FROM integrations
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority FROM integrations
 WHERE status = 'active'
   AND token_expires_at IS NOT NULL
   AND token_expires_at <= $1
@@ -710,6 +717,7 @@ func (q *Queries) ListIntegrationsWithExpiringTokens(ctx context.Context, tokenE
 			&i.CreatedAt,
 			&i.Credentials,
 			&i.Metadata,
+			&i.Priority,
 		); err != nil {
 			return nil, err
 		}
@@ -884,6 +892,25 @@ type UpdateIntegrationMetadataParams struct {
 
 func (q *Queries) UpdateIntegrationMetadata(ctx context.Context, arg UpdateIntegrationMetadataParams) error {
 	_, err := q.db.Exec(ctx, updateIntegrationMetadata, arg.ID, arg.Metadata)
+	return err
+}
+
+const updateIntegrationPriority = `-- name: UpdateIntegrationPriority :exec
+UPDATE integrations
+SET priority = $3
+WHERE id = $1 AND store_id = $2
+`
+
+type UpdateIntegrationPriorityParams struct {
+	ID       pgtype.UUID `json:"id"`
+	StoreID  pgtype.UUID `json:"store_id"`
+	Priority int32       `json:"priority"`
+}
+
+// Sets the priority of a single integration for an explicit store. Lower
+// number = higher priority in the checkout selection ordering.
+func (q *Queries) UpdateIntegrationPriority(ctx context.Context, arg UpdateIntegrationPriorityParams) error {
+	_, err := q.db.Exec(ctx, updateIntegrationPriority, arg.ID, arg.StoreID, arg.Priority)
 	return err
 }
 

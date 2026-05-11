@@ -232,6 +232,12 @@ func (s *Service) UpdateStatus(ctx context.Context, id, status string) error {
 	return s.repo.UpdateStatus(ctx, id, status)
 }
 
+// UpdatePriority sets the priority of an integration scoped to a store. Lower
+// number = higher priority in the checkout selection ordering.
+func (s *Service) UpdatePriority(ctx context.Context, id, storeID string, priority int) error {
+	return s.repo.UpdatePriority(ctx, id, storeID, priority)
+}
+
 // TestConnection tests if the integration credentials are valid and the provider is reachable.
 func (s *Service) TestConnection(ctx context.Context, input TestConnectionInput) (*TestConnectionOutput, error) {
 	provider, err := s.GetProvider(ctx, input.IntegrationID, input.StoreID)
@@ -5177,6 +5183,7 @@ func (s *Service) toCreateOutput(row *IntegrationRow) *CreateIntegrationOutput {
 		WebhookURL:        urls.WebhookURL,
 		WebhookStatus:     webhookStatus,
 		WebhookLastPingAt: lastPing,
+		Priority:          row.Priority,
 	}
 }
 
