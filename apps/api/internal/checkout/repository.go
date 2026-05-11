@@ -242,6 +242,30 @@ func (r *Repository) BindCartPaymentIntegration(ctx context.Context, cartID, int
 	return nil
 }
 
+// ClearCartPaymentIntegration sets carts.payment_integration_id back to NULL so
+// the next /config call walks resolveCheckoutIntegration's priority chain
+// fresh. Called when the currently-bound provider returns a transport error
+// (5xx/429): keeping the binding would trap the buyer on a gateway that's
+// down, defeating the priority-chain fallback. Pairs with the FE re-tokenizing
+// against the new provider's public key on the retry.
+//
+// Re-uses BindCartPaymentIntegration's generated query — pgtype.UUID with
+// Valid=false is encoded as SQL NULL by pgx, so the same UPDATE writes NULL
+// without needing a second SQLC query.
+func (r *Repository) ClearCartPaymentIntegration(ctx context.Context, cartID string) error {
+	cartUID, err := uuid.Parse(cartID)
+	if err != nil {
+		return httpx.ErrBadRequest("invalid cart ID")
+	}
+	if err := r.q.BindCartPaymentIntegration(ctx, sqlc.BindCartPaymentIntegrationParams{
+		ID:                   pgtype.UUID{Bytes: cartUID, Valid: true},
+		PaymentIntegrationID: pgtype.UUID{Valid: false},
+	}); err != nil {
+		return fmt.Errorf("clearing cart payment integration: %w", err)
+	}
+	return nil
+}
+
 // GetIntegrationByID fetches a single integration row by ID (any type/status).
 // Used when a cart was previously bound to a specific payment integration so
 // the checkout service can reuse it instead of re-resolving the store primary.

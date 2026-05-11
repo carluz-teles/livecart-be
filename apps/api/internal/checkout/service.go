@@ -738,10 +738,19 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 			zap.String("provider", paymentIntegration.ProviderName),
 			zap.Error(err),
 		)
-		// Provider returned 5xx / network failed — the card was NOT charged.
-		// Tell the buyer it was a provider hiccup so the FE can offer "retry"
-		// instead of the misleading "your card was rejected" copy that a
-		// PaymentRejected result would trigger.
+		// Provider call failed at the transport layer (5xx / network / 429).
+		// Unbind the cart from this provider so the next /config call lets
+		// resolveCheckoutIntegration pick the next one in the priority chain.
+		// Without this, the buyer stays trapped on the failing gateway because
+		// the binding wins inside resolvePaymentIntegration regardless of how
+		// many times they retry. The FE re-tokenizes against the new public
+		// key after seeing this 422 + re-fetching /config.
+		if clearErr := s.repo.ClearCartPaymentIntegration(ctx, cart.ID); clearErr != nil {
+			s.logger.Warn("failed to clear cart payment binding after provider failure",
+				zap.String("cart_id", cart.ID),
+				zap.Error(clearErr),
+			)
+		}
 		return nil, httpx.ErrUnprocessable("provedor de pagamento indisponível, tente novamente em instantes")
 	}
 
@@ -935,9 +944,20 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	if err != nil {
 		s.logger.Error("failed to generate pix",
 			zap.String("cart_id", cart.ID),
+			zap.String("integration_id", paymentIntegration.ID.String()),
+			zap.String("provider", paymentIntegration.ProviderName),
 			zap.Error(err),
 		)
-		return nil, httpx.ErrUnprocessable("erro ao gerar PIX")
+		// Same self-healing as ProcessCardPayment: drop the binding so the
+		// retry can land on the next priority integration. PIX has no token,
+		// so the FE doesn't even need a re-tokenization step here.
+		if clearErr := s.repo.ClearCartPaymentIntegration(ctx, cart.ID); clearErr != nil {
+			s.logger.Warn("failed to clear cart payment binding after pix failure",
+				zap.String("cart_id", cart.ID),
+				zap.Error(clearErr),
+			)
+		}
+		return nil, httpx.ErrUnprocessable("provedor de pagamento indisponível, tente novamente em instantes")
 	}
 
 	// Update cart with payment ID for tracking
