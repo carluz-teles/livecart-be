@@ -543,8 +543,16 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 		"capture":              true,
 	}
 
+	// Pagar.me's PSP layer requires payments[].amount even on
+	// single-payment orders — the public-API examples for card_token omit
+	// it, but the simulator's internal validator surfaces it under the
+	// alias "billing" and rejects with `validation_error | billing |
+	// "value" is required` when missing. We pass the full TotalAmount
+	// (items + shipping − coupon) here so the charge reflects exactly
+	// what the buyer agreed to at checkout, not just sum(items.amount).
 	cardPayment := map[string]any{
 		"payment_method": "credit_card",
+		"amount":         input.TotalAmount,
 		"credit_card":    cardConfig,
 	}
 
