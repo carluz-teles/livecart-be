@@ -4674,26 +4674,58 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		return
 	}
 
-	// Promote: add to the next person's cart with WaitlistedQuantity=0 so
-	// the checkout treats it as available (counts toward total, included in
-	// the payment payload).
-	addResult, err := s.liveService.AddToCart(ctx, live.AddToCartInput{
-		StoreID:            storeID,
-		EventID:            eventID,
-		PlatformUserID:     next.PlatformUserID,
-		PlatformHandle:     next.PlatformHandle,
-		ProductID:          productID,
-		ProductPrice:       product.Price,
-		Quantity:           next.Quantity,
-		WaitlistedQuantity: 0,
-	})
+	// Promote: the cart_items row was created at waitlist signup with
+	// quantity == waitlisted_quantity. Flip it to "available" by decrementing
+	// waitlisted_quantity in place — re-running AddToCart here would hit
+	// UpsertCartItem's ON CONFLICT branch and add both columns again, ending
+	// up with quantity=2N, waitlisted=N (the shipping query then computes
+	// available=N but the cart visibly carries phantom items, and a later
+	// quantity edit on the inflated row leaves available <= 0, which makes
+	// /shipping-quote return "nenhum item no carrinho para cotar" on a cart
+	// that the FE still renders as non-empty).
+	cartID := next.CartID
+	found, err := s.repo.DecrementCartItemWaitlistedQuantity(ctx, cartID, productID, next.Quantity)
 	if err != nil {
 		_ = s.repo.IncrementProductStock(ctx, productID, next.Quantity)
-		s.logger.Error("failed to add waitlisted item to cart on promotion",
+		s.logger.Error("failed to decrement waitlisted quantity on promotion",
 			zap.String("waitlist_item_id", next.ID),
+			zap.String("cart_id", cartID),
 			zap.Error(err),
 		)
 		return
+	}
+	if !found {
+		// Edge case: the cart_items row was deleted between waitlist signup
+		// and promotion (manual remove from the dashboard, expiration sweep,
+		// etc.). Recreate it via the standard AddToCart path — no existing
+		// row, no upsert inflation.
+		fbResult, fbErr := s.liveService.AddToCart(ctx, live.AddToCartInput{
+			StoreID:            storeID,
+			EventID:            eventID,
+			PlatformUserID:     next.PlatformUserID,
+			PlatformHandle:     next.PlatformHandle,
+			ProductID:          productID,
+			ProductPrice:       product.Price,
+			Quantity:           next.Quantity,
+			WaitlistedQuantity: 0,
+		})
+		if fbErr != nil {
+			_ = s.repo.IncrementProductStock(ctx, productID, next.Quantity)
+			s.logger.Error("failed to recreate cart item on promotion",
+				zap.String("waitlist_item_id", next.ID),
+				zap.Error(fbErr),
+			)
+			return
+		}
+		cartID = fbResult.CartID
+	}
+
+	cartToken, tokenErr := s.repo.GetCartTokenByID(ctx, cartID)
+	if tokenErr != nil {
+		s.logger.Warn("failed to read cart token after waitlist promotion",
+			zap.String("cart_id", cartID),
+			zap.Error(tokenErr),
+		)
 	}
 
 	// "Gordura": empurra o cart.expires_at para garantir que o cliente tem
@@ -4708,9 +4740,9 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		ttl = 30 * time.Minute
 	}
 	notifiedUntil := time.Now().Add(ttl)
-	if extendErr := s.repo.ExtendCartExpiration(ctx, addResult.CartID, notifiedUntil); extendErr != nil {
+	if extendErr := s.repo.ExtendCartExpiration(ctx, cartID, notifiedUntil); extendErr != nil {
 		s.logger.Warn("failed to extend cart expiration for notified waitlist",
-			zap.String("cart_id", addResult.CartID),
+			zap.String("cart_id", cartID),
 			zap.Error(extendErr),
 		)
 	}
@@ -4724,9 +4756,9 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 
 	// ERP saída — reserva pareada ao cart_item recém-criado. Falha aqui
 	// não bloqueia: o worker de finalisation/reconciliation pega depois.
-	if syncErr := s.ReserveStockInERP(ctx, storeID, addResult.CartID, eventID, productID, next.Quantity, product.Price, next.PlatformHandle); syncErr != nil {
+	if syncErr := s.ReserveStockInERP(ctx, storeID, cartID, eventID, productID, next.Quantity, product.Price, next.PlatformHandle); syncErr != nil {
 		s.logger.Warn("failed to reserve stock in ERP for promoted waitlist item",
-			zap.String("cart_id", addResult.CartID),
+			zap.String("cart_id", cartID),
 			zap.Error(syncErr),
 		)
 	}
@@ -4739,8 +4771,8 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		StoreID:        storeID,
 		EventID:        eventID,
 		EventTitle:     "", // resolved below if needed
-		CartID:         addResult.CartID,
-		CartToken:      addResult.CartToken,
+		CartID:         cartID,
+		CartToken:      cartToken,
 		PlatformUserID: next.PlatformUserID,
 		PlatformHandle: next.PlatformHandle,
 		ProductName:    product.Name,
@@ -4752,7 +4784,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	s.logger.Info("waitlist promoted to notified",
 		zap.String("user", next.PlatformHandle),
 		zap.String("waitlist_item_id", next.ID),
-		zap.String("cart_id", addResult.CartID),
+		zap.String("cart_id", cartID),
 		zap.String("product_id", productID),
 		zap.Int("quantity", next.Quantity),
 		zap.Duration("ttl", ttl),

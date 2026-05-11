@@ -1827,6 +1827,48 @@ func (r *Repository) UpdateCartItemWaitlistedQuantity(ctx context.Context, cartI
 	})
 }
 
+// DecrementCartItemWaitlistedQuantity atomically subtracts `delta` from the
+// waitlisted_quantity of the (cartID, productID) cart_items row, clamping at
+// zero. Returns true when a matching row was found. Used by the waitlist
+// promotion to flip a row from "waiting" to "available" without re-running
+// UpsertCartItem (which sums both quantity and waitlisted_quantity, inflating
+// the row to 2x the customer's actual order).
+func (r *Repository) DecrementCartItemWaitlistedQuantity(ctx context.Context, cartID, productID string, delta int) (bool, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return false, err
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return false, err
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE cart_items
+		SET waitlisted_quantity = GREATEST(waitlisted_quantity - $3::int, 0)
+		WHERE cart_id = $1 AND product_id = $2
+	`, cID, pID, delta)
+	if err != nil {
+		return false, fmt.Errorf("decrementing waitlisted quantity: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// GetCartTokenByID returns the public checkout token for a cart. Used after
+// a waitlist promotion to build the DM that drops the customer back into
+// their checkout — we already know the cart_id (waitlist row points at it),
+// only the token is missing.
+func (r *Repository) GetCartTokenByID(ctx context.Context, cartID string) (string, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return "", err
+	}
+	var token string
+	if err := r.pool.QueryRow(ctx, `SELECT token FROM carts WHERE id = $1`, cID).Scan(&token); err != nil {
+		return "", fmt.Errorf("reading cart token: %w", err)
+	}
+	return token, nil
+}
+
 // =============================================================================
 // CART PAYMENT OPERATIONS
 // =============================================================================
