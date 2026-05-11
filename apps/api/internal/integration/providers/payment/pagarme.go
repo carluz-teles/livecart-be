@@ -815,15 +815,18 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 		return nil, fmt.Errorf("parsing pix response: %w", err)
 	}
 
+	// Pagar.me v5 returns PIX fields flat on last_transaction (qr_code,
+	// qr_code_url, expires_at) — there is no nested `pix` object on the
+	// order-creation response, despite what the request payload shape
+	// suggests. Reading from a nested pix.* path always yields empty.
 	var qrCode, qrCodeText string
 	if len(pgResp.Charges) > 0 && pgResp.Charges[0].LastTransaction != nil {
-		if pix := pgResp.Charges[0].LastTransaction.Pix; pix != nil {
-			qrCode = pix.QRCodeURL
-			qrCodeText = pix.QRCode
-			if pix.ExpiresAt != "" {
-				if t, err := time.Parse(time.RFC3339, pix.ExpiresAt); err == nil {
-					expiresAt = t
-				}
+		lt := pgResp.Charges[0].LastTransaction
+		qrCode = lt.QRCodeURL
+		qrCodeText = lt.QRCode
+		if lt.ExpiresAt != "" {
+			if t, err := time.Parse(time.RFC3339, lt.ExpiresAt); err == nil {
+				expiresAt = t
 			}
 		}
 	}
@@ -1028,7 +1031,9 @@ type pagarmeLastTransaction struct {
 	Amount             int                    `json:"amount"`
 	Installments       int                    `json:"installments"`
 	Card               *pagarmeCard           `json:"card"`
-	Pix                *pagarmePix            `json:"pix"`
+	QRCode             string                 `json:"qr_code"`
+	QRCodeURL          string                 `json:"qr_code_url"`
+	ExpiresAt          string                 `json:"expires_at"`
 	AcquirerName       string                 `json:"acquirer_name"`
 	AcquirerAuthCode   string                 `json:"acquirer_auth_code"`
 	AcquirerNsu        string                 `json:"acquirer_nsu"`
@@ -1051,8 +1056,3 @@ type pagarmeCard struct {
 	ExpYear        int    `json:"exp_year"`
 }
 
-type pagarmePix struct {
-	QRCode    string `json:"qr_code"`
-	QRCodeURL string `json:"qr_code_url"`
-	ExpiresAt string `json:"expires_at"`
-}
