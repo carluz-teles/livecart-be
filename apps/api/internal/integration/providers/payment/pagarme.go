@@ -514,14 +514,39 @@ func (p *Pagarme) GetPublicKey(ctx context.Context) (string, error) {
 func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput) (*CardPaymentResult, error) {
 	url := pagarmeAPIBaseURL + "/orders"
 
-	items := make([]map[string]any, len(input.Items))
-	for i, item := range input.Items {
-		items[i] = map[string]any{
+	items := make([]map[string]any, 0, len(input.Items)+1)
+	var itemsSum int64
+	for _, item := range input.Items {
+		items = append(items, map[string]any{
 			"amount":      item.UnitPrice,
 			"description": item.Name,
 			"quantity":    item.Quantity,
 			"code":        item.ID,
+		})
+		itemsSum += item.UnitPrice * int64(item.Quantity)
+	}
+	// Reconcile shipping/coupon: input.TotalAmount already factors in
+	// the selected shipping option and any applied coupon, but our items
+	// array carries only the product subtotals. Pagar.me's order.amount
+	// is derived as sum(items.amount * quantity); if we leave it equal
+	// to itemsSum the charge silently drops shipping (and the merchant
+	// undercharges) or, worse, the PSP-layer validator rejects the
+	// whole order with an opaque "validation_error | billing | value is
+	// required" when the sum doesn't match a payments[].amount we set
+	// elsewhere. Expressing the gap as a single line item keeps the
+	// invariant items_sum == order_amount and keeps the buyer charged
+	// for exactly what they agreed to at checkout.
+	if diff := input.TotalAmount - itemsSum; diff != 0 {
+		desc := "Frete"
+		if diff < 0 {
+			desc = "Desconto"
 		}
+		items = append(items, map[string]any{
+			"amount":      diff,
+			"description": desc,
+			"quantity":    1,
+			"code":        "checkout-adjustment",
+		})
 	}
 
 	customer := buildPagarmeCustomer(input.Customer)
@@ -543,16 +568,18 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 		"capture":              true,
 	}
 
-	// Pagar.me's PSP layer requires payments[].amount even on
-	// single-payment orders — the public-API examples for card_token omit
-	// it, but the simulator's internal validator surfaces it under the
-	// alias "billing" and rejects with `validation_error | billing |
-	// "value" is required` when missing. We pass the full TotalAmount
-	// (items + shipping − coupon) here so the charge reflects exactly
-	// what the buyer agreed to at checkout, not just sum(items.amount).
+	// We intentionally do not set payments[].amount here. The canonical
+	// card_token example in the Pagar.me docs omits it and lets the
+	// gateway derive the charge amount from sum(items.amount). When we
+	// passed input.TotalAmount (which already includes the shipping
+	// premium summed by checkout/service.go) the value did not match
+	// sum(items), and the PSP-layer validator rejected the order under
+	// an opaque "validation_error | billing | value is required"
+	// message. The proper place to expose shipping is the top-level
+	// shipping object (with its own amount / address / recipient),
+	// added below when the cart has a selected shipping option.
 	cardPayment := map[string]any{
 		"payment_method": "credit_card",
-		"amount":         input.TotalAmount,
 		"credit_card":    cardConfig,
 	}
 
