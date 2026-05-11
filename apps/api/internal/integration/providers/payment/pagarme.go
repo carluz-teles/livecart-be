@@ -526,19 +526,21 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 
 	customer := buildPagarmeCustomer(input.Customer)
 
-	// holder_document on the card boosts approval rate with most adquirentes
-	// (some hard-reject without it). Optional in the API but we always send
-	// it when the buyer's CPF is captured at checkout.
+	// Pagar.me v5 mixes `card_token` and `card` mutually: when you set
+	// card_token the gateway pulls the card data (including holder_document
+	// and billing_address) out of the token itself, set on the FE during
+	// the /tokens POST. Sending a partial `card: { holder_document }`
+	// alongside the token flips the validator into "raw card mode" and it
+	// rejects the order with `validation_error | billing | "value" is
+	// required` because the rest of the card object (number, cvv, exp,
+	// billing_address) is missing. The FE already includes holder_document
+	// inside the token payload, and customer.document covers the buyer-
+	// level CPF for the order — there's no need to repeat it on `card`.
 	cardConfig := map[string]any{
 		"card_token":           input.Token,
 		"installments":         input.Installments,
 		"statement_descriptor": "LIVECART",
 		"capture":              true,
-	}
-	if input.Customer.Document != "" {
-		cardConfig["card"] = map[string]any{
-			"holder_document": input.Customer.Document,
-		}
 	}
 
 	cardPayment := map[string]any{
