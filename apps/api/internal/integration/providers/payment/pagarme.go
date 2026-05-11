@@ -819,24 +819,67 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 	// qr_code_url, expires_at) — there is no nested `pix` object on the
 	// order-creation response, despite what the request payload shape
 	// suggests. Reading from a nested pix.* path always yields empty.
-	var qrCode, qrCodeText string
-	if len(pgResp.Charges) > 0 && pgResp.Charges[0].LastTransaction != nil {
-		lt := pgResp.Charges[0].LastTransaction
-		qrCode = lt.QRCodeURL
-		qrCodeText = lt.QRCode
-		if lt.ExpiresAt != "" {
-			if t, err := time.Parse(time.RFC3339, lt.ExpiresAt); err == nil {
-				expiresAt = t
+	var (
+		qrCode, qrCodeText string
+		chargeID           string
+		chargeStatus       string
+		chargesCount       = len(pgResp.Charges)
+		hasLastTx          bool
+		lastTxStatus       string
+		lastTxSuccess      bool
+		gatewayResp        map[string]any
+		antifraudResp      map[string]any
+	)
+	if chargesCount > 0 {
+		charge := pgResp.Charges[0]
+		chargeID = charge.ID
+		chargeStatus = charge.Status
+		if charge.LastTransaction != nil {
+			lt := charge.LastTransaction
+			hasLastTx = true
+			lastTxStatus = lt.Status
+			lastTxSuccess = lt.Success
+			gatewayResp = lt.GatewayResponse
+			antifraudResp = lt.AntifraudResponse
+			qrCode = lt.QRCodeURL
+			qrCodeText = lt.QRCode
+			if lt.ExpiresAt != "" {
+				if t, err := time.Parse(time.RFC3339, lt.ExpiresAt); err == nil {
+					expiresAt = t
+				}
 			}
 		}
 	}
 
-	p.Logger.Info("pagarme pix generated",
+	logFields := []zap.Field{
 		zap.String("payment_id", pgResp.ID),
+		zap.String("order_code", pgResp.Code),
+		zap.String("order_status", pgResp.Status),
+		zap.String("charge_id", chargeID),
+		zap.String("charge_status", chargeStatus),
+		zap.Int("charges_count", chargesCount),
+		zap.Bool("has_last_transaction", hasLastTx),
+		zap.String("last_transaction_status", lastTxStatus),
+		zap.Bool("last_transaction_success", lastTxSuccess),
 		zap.String("cart_id", input.CartID),
 		zap.Int64("amount_cents", int64(pgResp.Amount)),
+		zap.Int64("requested_amount_cents", input.TotalAmount),
 		zap.String("expires_at", expiresAt.Format(time.RFC3339)),
-	)
+		zap.Int("qr_code_len", len(qrCode)),
+		zap.Int("qr_code_text_len", len(qrCodeText)),
+		zap.Any("gateway_response", gatewayResp),
+		zap.Any("antifraud_response", antifraudResp),
+	}
+
+	// QR vazio em resposta 2xx geralmente indica que o charge nasceu
+	// failed (antifraude/validação) ou que a chave PIX da conta não está
+	// homologada. Dump do body bruto pra correlacionar com o webhook.
+	if qrCode == "" || qrCodeText == "" {
+		logFields = append(logFields, zap.String("response_body", string(body)))
+		p.Logger.Warn("pagarme pix generated with empty qr code", logFields...)
+	} else {
+		p.Logger.Info("pagarme pix generated", logFields...)
+	}
 
 	return &PixPaymentResult{
 		PaymentID:         pgResp.ID,
