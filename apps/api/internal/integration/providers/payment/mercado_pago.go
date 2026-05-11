@@ -507,11 +507,11 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 
 	resource, err := payment.NewClient(cfg).Create(ctx, req)
 	if err != nil {
-		// MP rejections come back as *mperror.ResponseError. We log the raw
+		// MP non-2xx responses come back as *mperror.ResponseError. Log the raw
 		// body + the request payload (token redacted) because MP's
-		// `internal_error` often has an empty `cause` and only the exact
-		// field set reveals the trigger (wrong payment_method_id,
-		// malformed identification, etc.).
+		// `internal_error` often has an empty `cause` and only the exact field
+		// set reveals the trigger (wrong payment_method_id, malformed
+		// identification, etc.).
 		var mpErr *mperror.ResponseError
 		if errors.As(err, &mpErr) {
 			safe := payment.Request{
@@ -526,11 +526,21 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 				IssuerID:            req.IssuerID,
 				Metadata:            req.Metadata,
 			}
-			m.Logger.Error("mercado pago rejected card payment",
+			m.Logger.Error("mercado pago card payment failed",
 				zap.Int("status_code", mpErr.StatusCode),
 				zap.String("body", mpErr.Message),
 				zap.Any("request_payload", safe),
 			)
+			// 5xx (and 429) is provider-side, not a real card rejection —
+			// the buyer's card was never charged. Surface it as a transport
+			// error so the checkout layer returns a retryable response
+			// instead of telling the buyer "your card was rejected" when MP
+			// just had an internal_error. Real card rejections come back as
+			// HTTP 200 with resource.Status="rejected" and don't hit this
+			// branch at all.
+			if mpErr.StatusCode >= 500 || mpErr.StatusCode == 429 {
+				return nil, fmt.Errorf("mercado pago indisponível (HTTP %d): %s", mpErr.StatusCode, mpErr.Message)
+			}
 			return &CardPaymentResult{
 				Status:       PaymentRejected,
 				StatusDetail: extractStatusDetail(mpErr.Message),

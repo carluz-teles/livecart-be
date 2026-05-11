@@ -734,9 +734,15 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	if err != nil {
 		s.logger.Error("failed to process card payment",
 			zap.String("cart_id", cart.ID),
+			zap.String("integration_id", paymentIntegration.ID.String()),
+			zap.String("provider", paymentIntegration.ProviderName),
 			zap.Error(err),
 		)
-		return nil, httpx.ErrUnprocessable("erro ao processar pagamento")
+		// Provider returned 5xx / network failed — the card was NOT charged.
+		// Tell the buyer it was a provider hiccup so the FE can offer "retry"
+		// instead of the misleading "your card was rejected" copy that a
+		// PaymentRejected result would trigger.
+		return nil, httpx.ErrUnprocessable("provedor de pagamento indisponível, tente novamente em instantes")
 	}
 
 	// Update cart payment status if approved. ERP finalisation is left to the

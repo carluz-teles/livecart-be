@@ -568,11 +568,20 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 	if !providers.IsSuccessStatus(resp.StatusCode) {
 		errMsg := parsePagarmeError(body)
 		safe := redactCardPayload(payload)
-		p.Logger.Error("pagarme rejected card payment",
+		p.Logger.Error("pagarme card payment failed",
 			zap.Int("status_code", resp.StatusCode),
 			zap.String("body", string(body)),
 			zap.Any("request_payload", safe),
 		)
+		// 5xx (and 429) means Pagar.me itself is unhappy — the buyer's card
+		// was not charged. Bubble it up as a transport error so the checkout
+		// layer returns a retryable 422 instead of telling the buyer "card
+		// rejected" when the gateway never actually evaluated the card.
+		// Genuine card declines come back as 2xx with status="failed" on the
+		// charge and are handled below.
+		if resp.StatusCode >= 500 || resp.StatusCode == 429 {
+			return nil, fmt.Errorf("pagar.me indisponível (HTTP %d): %s", resp.StatusCode, errMsg)
+		}
 		return &CardPaymentResult{
 			Status:  PaymentRejected,
 			Message: errMsg,
