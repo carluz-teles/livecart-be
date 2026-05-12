@@ -413,6 +413,11 @@ func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 		// Don't return error - we still want to process the webhook
 	}
 
+	// Stamp metadata.webhookLastPingAt on every successful Pagar.me webhook
+	// so the admin UI can show whether the merchant has the URL wired up.
+	// Detached from c.Context() (recycled by Fiber) — same pattern as Tiny.
+	go h.service.RecordWebhookPing(context.Background(), storeID, "pagarme")
+
 	// Dispatch the events that change cart payment state. ProcessPaymentNotification
 	// fetches the latest status via GetPaymentStatus and reconciles the cart, so a
 	// single dispatcher works for paid/failed/canceled — we only need the trigger.

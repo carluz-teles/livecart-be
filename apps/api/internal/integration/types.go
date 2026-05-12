@@ -327,6 +327,22 @@ type RefundPaymentOutput struct {
 	CreatedAt time.Time
 }
 
+// PagarmeWebhookStatusOutput surfaces whether the merchant has registered our
+// webhook URL on the Pagar.me dashboard, inferred from recent delivery
+// history. LastDeliveryStatus is "sent" / "failed" / "pending" — combined
+// with LastResponseStatus (the HTTP code our endpoint returned), the UI can
+// tell the merchant whether the URL is wired correctly and whether it has
+// been failing.
+type PagarmeWebhookStatusOutput struct {
+	ExpectedURL        string
+	Configured         bool
+	MatchCount         int
+	LastDeliveryAt     time.Time
+	LastDeliveryStatus string
+	LastResponseStatus int
+	LastEvent          string
+}
+
 // GetOAuthURLInput is the service input for getting OAuth URL.
 type GetOAuthURLInput struct {
 	StoreID  string

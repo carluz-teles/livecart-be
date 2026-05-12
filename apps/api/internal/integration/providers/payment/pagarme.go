@@ -175,6 +175,72 @@ func (p *Pagarme) RefreshToken(ctx context.Context) (*Credentials, error) {
 	return nil, nil
 }
 
+// HookDelivery is one row from GET /hooks — a webhook delivery attempt.
+type HookDelivery struct {
+	ID             string    `json:"id"`
+	URL            string    `json:"url"`
+	Event          string    `json:"event"`
+	Status         string    `json:"status"` // sent | failed | pending
+	Attempts       string    `json:"attempts"`
+	LastAttempt    time.Time `json:"last_attempt"`
+	ResponseStatus int       `json:"response_status"`
+}
+
+// ListRecentHookDeliveries returns recent webhook delivery attempts for this
+// account. Pagar.me v5 has no public API to list webhook *subscriptions*
+// (GET /webhooks is 404) — only the delivery history at /hooks. By scanning
+// it for entries matching our expected URL we can tell whether the merchant
+// has configured the webhook correctly, and surface the delivery health
+// (response_status, attempts) of the last few hits.
+func (p *Pagarme) ListRecentHookDeliveries(ctx context.Context, size int) ([]HookDelivery, error) {
+	if size <= 0 || size > 50 {
+		size = 20
+	}
+	url := fmt.Sprintf("%s/hooks?size=%d", pagarmeAPIBaseURL, size)
+
+	resp, body, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
+	if err != nil {
+		return nil, fmt.Errorf("listing hooks: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return nil, fmt.Errorf("list hooks failed: status %d", resp.StatusCode)
+	}
+
+	var parsed struct {
+		Data []struct {
+			ID             string `json:"id"`
+			URL            string `json:"url"`
+			Event          string `json:"event"`
+			Status         string `json:"status"`
+			Attempts       string `json:"attempts"`
+			LastAttempt    string `json:"last_attempt"`
+			ResponseStatus int    `json:"response_status"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("parsing hooks response: %w", err)
+	}
+
+	out := make([]HookDelivery, 0, len(parsed.Data))
+	for _, h := range parsed.Data {
+		d := HookDelivery{
+			ID:             h.ID,
+			URL:            h.URL,
+			Event:          h.Event,
+			Status:         h.Status,
+			Attempts:       h.Attempts,
+			ResponseStatus: h.ResponseStatus,
+		}
+		if h.LastAttempt != "" {
+			if t, err := time.Parse(time.RFC3339, h.LastAttempt); err == nil {
+				d.LastAttempt = t
+			}
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
 // CreateCheckout creates a hosted-checkout order at Pagar.me. Live commerce
 // only takes credit_card + pix today (boleto's 1-3 day clearance kills the
 // "live now" UX), so the accepted_payment_methods list is intentionally narrow.

@@ -22,6 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/internal/integration/providers/payment"
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/internal/notification"
 	"livecart/apps/api/lib/config"
@@ -2568,6 +2569,54 @@ func (s *Service) GetPaymentStatus(ctx context.Context, input GetPaymentStatusIn
 		FailureReason: status.FailureReason,
 		Metadata:      status.Metadata,
 	}, nil
+}
+
+// GetPagarmeWebhookStatus checks whether the merchant has registered our
+// webhook URL on the Pagar.me dashboard by inspecting recent delivery history
+// (GET /hooks). Pagar.me v5 has no public API to list webhook subscriptions,
+// so we infer "configured" from at least one matching delivery in the recent
+// window, and surface health via the last attempt's response_status.
+func (s *Service) GetPagarmeWebhookStatus(ctx context.Context, integrationID, storeID string) (*PagarmeWebhookStatusOutput, error) {
+	paymentProvider, err := s.GetPaymentProvider(ctx, integrationID, storeID)
+	if err != nil {
+		return nil, err
+	}
+	pagarme, ok := paymentProvider.(*payment.Pagarme)
+	if !ok {
+		return nil, httpx.ErrUnprocessable("integration is not Pagar.me")
+	}
+
+	urls := buildProviderURLs("pagarme", storeID)
+	expectedURL := urls.WebhookURL
+
+	deliveries, err := pagarme.ListRecentHookDeliveries(ctx, 30)
+	if err != nil {
+		s.handleProviderError(ctx, integrationID, "list_hook_deliveries", err)
+		return nil, fmt.Errorf("listing hook deliveries: %w", err)
+	}
+
+	out := &PagarmeWebhookStatusOutput{
+		ExpectedURL: expectedURL,
+		Configured:  false,
+	}
+	// Pagar.me returns deliveries newest-first. Walk once: count matches,
+	// stamp the most recent attempt, and capture the last response_status
+	// so the UI can warn when the URL is configured but failing (e.g. 5xx
+	// during a deploy, or 401 because basic auth drifted).
+	for _, d := range deliveries {
+		if d.URL != expectedURL {
+			continue
+		}
+		out.Configured = true
+		out.MatchCount++
+		if out.LastDeliveryAt.IsZero() || d.LastAttempt.After(out.LastDeliveryAt) {
+			out.LastDeliveryAt = d.LastAttempt
+			out.LastDeliveryStatus = d.Status
+			out.LastResponseStatus = d.ResponseStatus
+			out.LastEvent = d.Event
+		}
+	}
+	return out, nil
 }
 
 // RefundPayment initiates a refund.

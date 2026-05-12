@@ -1,6 +1,8 @@
 package integration
 
 import (
+	"time"
+
 	"github.com/gofiber/fiber/v2"
 
 	"livecart/apps/api/lib/httpx"
@@ -61,4 +63,53 @@ func (h *Handler) ConnectPagarme(c *fiber.Ctx) error {
 		return httpx.HandleServiceError(c, err)
 	}
 	return httpx.OK(c, toIntegrationResponse(output))
+}
+
+// PagarmeWebhookStatusResponse is the API shape returned by
+// GET /integrations/{id}/pagarme/webhook-status. Empty time fields are
+// serialized as null so the UI can branch on "never delivered yet".
+type PagarmeWebhookStatusResponse struct {
+	ExpectedURL        string     `json:"expectedUrl"`
+	Configured         bool       `json:"configured"`
+	MatchCount         int        `json:"matchCount"`
+	LastDeliveryAt     *time.Time `json:"lastDeliveryAt"`
+	LastDeliveryStatus string     `json:"lastDeliveryStatus"`
+	LastResponseStatus int        `json:"lastResponseStatus"`
+	LastEvent          string     `json:"lastEvent"`
+}
+
+// GetPagarmeWebhookStatus checks Pagar.me's delivery history for hooks
+// targeting our webhook URL. Useful for confirming the merchant set up
+// the webhook in the Pagar.me dashboard without waiting for a real event.
+//
+// @Summary Pagar.me webhook status
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param id path string true "Integration ID"
+// @Success 200 {object} httpx.Envelope{data=PagarmeWebhookStatusResponse}
+// @Router /api/v1/stores/{storeId}/integrations/{id}/pagarme/webhook-status [get]
+// @Security BearerAuth
+func (h *Handler) GetPagarmeWebhookStatus(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	integrationID := c.Params("id")
+
+	output, err := h.service.GetPagarmeWebhookStatus(c.Context(), integrationID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	resp := PagarmeWebhookStatusResponse{
+		ExpectedURL:        output.ExpectedURL,
+		Configured:         output.Configured,
+		MatchCount:         output.MatchCount,
+		LastDeliveryStatus: output.LastDeliveryStatus,
+		LastResponseStatus: output.LastResponseStatus,
+		LastEvent:          output.LastEvent,
+	}
+	if !output.LastDeliveryAt.IsZero() {
+		t := output.LastDeliveryAt
+		resp.LastDeliveryAt = &t
+	}
+	return httpx.OK(c, resp)
 }

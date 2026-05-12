@@ -57,6 +57,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// API keys (sk_*/pk_*), so the merchant pastes them into a form and we
 	// validate live against the gateway before persisting.
 	g.Post("/payment/pagarme/connect", h.ConnectPagarme)
+	g.Get("/:id/pagarme/webhook-status", h.GetPagarmeWebhookStatus)
 
 	// Shipping — token-based connect (no OAuth) + order lifecycle helpers.
 	// These are typed at the provider level because each shipping provider
