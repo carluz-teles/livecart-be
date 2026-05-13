@@ -391,6 +391,9 @@ func (r *Repository) toCartRow(row sqlc.GetCartByTokenWithDetailsRow) *CartRow {
 		cart.CouponCode = &row.CouponCode.String
 	}
 	cart.CouponDiscountCents = row.CouponDiscountCents
+	if row.CancelledReason.Valid {
+		cart.CancelledReason = row.CancelledReason.String
+	}
 
 	return cart
 }

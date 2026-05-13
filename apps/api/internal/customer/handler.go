@@ -22,6 +22,9 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g := router.Group("/customers")
 	g.Get("/", h.List)
 	g.Get("/stats", h.GetStats)
+	// /blocks routes registered before /:id so the literal segment wins over
+	// the UUID-shaped param.
+	h.RegisterBlockRoutes(g)
 	g.Get("/:id", h.GetByID)
 	g.Get("/:id/orders", h.ListOrders)
 }

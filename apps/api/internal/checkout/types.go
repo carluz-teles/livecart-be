@@ -632,6 +632,10 @@ type CartRow struct {
 	CouponType             string
 	CouponMaxDiscountCents int64
 	CouponMinPurchaseCents int64
+	// CancelledReason explains why a cart left the open flow without being
+	// paid. Used by GetCartForCheckout to surface a generic 404 when the
+	// merchant blocked the buyer ('customer_blocked').
+	CancelledReason        string
 }
 
 // CartItemRow represents a cart item row from the database

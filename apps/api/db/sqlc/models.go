@@ -10,6 +10,19 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type BlockedHandle struct {
+	ID                pgtype.UUID        `json:"id"`
+	StoreID           pgtype.UUID        `json:"store_id"`
+	PlatformHandle    string             `json:"platform_handle"`
+	Reason            pgtype.Text        `json:"reason"`
+	BlockedByUserID   pgtype.UUID        `json:"blocked_by_user_id"`
+	BlockedAt         pgtype.Timestamptz `json:"blocked_at"`
+	UnblockedAt       pgtype.Timestamptz `json:"unblocked_at"`
+	UnblockedByUserID pgtype.UUID        `json:"unblocked_by_user_id"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Cart struct {
 	ID             pgtype.UUID `json:"id"`
 	EventID        pgtype.UUID `json:"event_id"`
@@ -90,6 +103,7 @@ type Cart struct {
 	ErpInvoiceStatus pgtype.Text `json:"erp_invoice_status"`
 	// Timestamp from the ERP when the NFe was emitted/authorised. Surfaced on the order detail timeline.
 	ErpInvoiceEmittedAt pgtype.Timestamptz `json:"erp_invoice_emitted_at"`
+	CancelledReason     pgtype.Text        `json:"cancelled_reason"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.

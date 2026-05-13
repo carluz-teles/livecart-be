@@ -2259,6 +2259,64 @@ func (r *Repository) ReverseReservationsByCart(ctx context.Context, cartID strin
 	return r.queries.ReverseReservationsByCart(ctx, cID)
 }
 
+// IsHandleBlocked is a fast lookup used by the comment processor to skip
+// blocked customers without round-tripping through the customer package.
+func (r *Repository) IsHandleBlocked(ctx context.Context, storeID, handle string) (bool, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return false, fmt.Errorf("parsing store id: %w", err)
+	}
+	return r.queries.IsHandleBlocked(ctx, sqlc.IsHandleBlockedParams{
+		StoreID:        sID,
+		PlatformHandle: handle,
+	})
+}
+
+// ListOpenCartsByHandle returns non-paid carts for the given (store, handle),
+// used by the customer-block flow to find what needs cancelling.
+func (r *Repository) ListOpenCartsByHandle(ctx context.Context, storeID, handle string) ([]CartRow, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, fmt.Errorf("parsing store id: %w", err)
+	}
+	rows, err := r.queries.ListOpenCartsByHandle(ctx, sqlc.ListOpenCartsByHandleParams{
+		StoreID:        sID,
+		PlatformHandle: handle,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing open carts by handle: %w", err)
+	}
+	out := make([]CartRow, len(rows))
+	for i, c := range rows {
+		out[i] = CartRow{
+			ID:             uuidToString(c.ID),
+			EventID:        uuidToString(c.EventID),
+			PlatformUserID: c.PlatformUserID,
+			PlatformHandle: c.PlatformHandle,
+			CreatedAt:      c.CreatedAt.Time,
+		}
+	}
+	return out, nil
+}
+
+// CancelCartAsBlocked flips a cart to status='cancelled' with reason='customer_blocked'.
+// Idempotent — already-paid carts are left untouched by the underlying query.
+func (r *Repository) CancelCartAsBlocked(ctx context.Context, cartID string) error {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	_, err = r.queries.CancelCartAsBlocked(ctx, cID)
+	if err != nil && err.Error() == "no rows in result set" {
+		// Cart was already paid or cancelled — nothing to do.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("cancelling cart as blocked: %w", err)
+	}
+	return nil
+}
+
 // ReverseReservationsByCartAndProduct marks active reservations for a specific cart+product as reversed.
 func (r *Repository) ReverseReservationsByCartAndProduct(ctx context.Context, cartID, productID string) error {
 	cID, err := parseUUID(cartID)

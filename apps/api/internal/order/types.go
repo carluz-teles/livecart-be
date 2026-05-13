@@ -153,6 +153,9 @@ type OrderDetailResponse struct {
 	Store           *OrderStoreResponse           `json:"store,omitempty"`
 	ERPFinalisation *ERPFinalisationResponse      `json:"erpFinalisation,omitempty"`
 	ERPInvoice      *ERPInvoiceResponse           `json:"erpInvoice,omitempty"`
+	// CustomerBlocked is true when the buyer's handle is currently blocked
+	// for this store. The FE uses it to render a "Cliente bloqueado" badge.
+	CustomerBlocked bool                          `json:"customerBlocked"`
 }
 
 // ERPFinalisationResponse is the FE-visible projection of the cart's ERP
@@ -665,6 +668,10 @@ type OrderDetailOutput struct {
 	// page — pointer so the FE can distinguish "no NFe yet" (nil) from
 	// "rejected/cancelled" (status is set, key may be empty).
 	ERPInvoice       *ERPInvoiceOutput
+	// CustomerBlocked is true when the buyer's Instagram handle is currently
+	// blocked for this store. Drives the "Cliente bloqueado" badge on the
+	// order detail page. Doesn't affect past orders — informational only.
+	CustomerBlocked  bool
 }
 
 // ERPInvoiceOutput surfaces the persisted erp_invoice_* state on the cart.

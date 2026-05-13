@@ -366,6 +366,10 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			liveSvc.SetNotifier(newLiveNotifierAdapter(integration.NewInstagramNotifier(integrationSvc, log)))
 			liveSvc.SetERPFinalizer(newERPFinalizerAdapter(integrationSvc))
 
+			// Customer block flow needs the integration service to sweep
+			// open carts (release local + ERP stock, promote waitlist).
+			customerSvc.SetCartCanceler(integrationSvc)
+
 			// Create notification service and wire into integration service
 			// (integrationSvc implements notification.DMSender via SendInstagramDM)
 			notificationSvc = notification.NewService(queries, integrationSvc, log)
@@ -521,6 +525,9 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		// HTTP entry point but the ERP fetch lives on the integration service.
 		orderSvc.SetCartInvoiceSyncer(integrationSvc)
 	}
+	// Block-status lookup for the order detail page; customerSvc is the
+	// authoritative source for blocked_handles.
+	orderSvc.SetBlockedHandleChecker(customerSvc)
 	orderHandler := order.NewHandler(orderSvc, validate)
 	orderHandler.RegisterRoutes(storeScoped)
 

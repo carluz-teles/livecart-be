@@ -96,6 +96,12 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 	if cart.Status == "expired" {
 		return nil, httpx.ErrUnprocessable("carrinho expirado")
 	}
+	// Carts cancelled because the buyer was blocked should look like they
+	// never existed — return 404 so the public /cart/[token] page hits the
+	// generic "carrinho não existe" branch.
+	if cart.Status == "cancelled" && cart.CancelledReason == "customer_blocked" {
+		return nil, httpx.ErrNotFound("carrinho não encontrado")
+	}
 	// Note: paid carts are allowed - frontend will show a "paid" dialog
 
 	// Freeze the initial cart on the very first GET (idempotent — subsequent

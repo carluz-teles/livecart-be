@@ -413,6 +413,7 @@ SELECT
     c.coupon_id,
     c.coupon_code,
     c.coupon_discount_cents,
+    c.cancelled_reason,
     le.title AS event_title,
     le.store_id,
     s.name AS store_name,

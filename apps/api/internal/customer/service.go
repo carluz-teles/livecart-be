@@ -11,8 +11,9 @@ import (
 )
 
 type Service struct {
-	repo   *Repository
-	logger *zap.Logger
+	repo         *Repository
+	logger       *zap.Logger
+	cartCanceler CartCanceler
 }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {

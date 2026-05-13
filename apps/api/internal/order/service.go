@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"livecart/apps/api/lib/httpx"
@@ -26,11 +27,18 @@ type CartInvoiceSyncer interface {
 	SyncCartInvoiceFromERP(ctx context.Context, storeID, cartID, invoiceID string) error
 }
 
+// BlockedHandleChecker reports whether a buyer's handle is currently blocked.
+// Implemented by customer.Service and wired at boot to break the package cycle.
+type BlockedHandleChecker interface {
+	IsHandleBlocked(ctx context.Context, storeID uuid.UUID, handle string) (bool, error)
+}
+
 type Service struct {
 	repo            *Repository
 	logger          *zap.Logger
 	erpRetryService ERPFinalisationRetrier
 	invoiceSyncer   CartInvoiceSyncer
+	blockChecker    BlockedHandleChecker
 }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {
@@ -52,6 +60,13 @@ func (s *Service) SetERPFinalisationRetrier(r ERPFinalisationRetrier) {
 // main.go once both services exist.
 func (s *Service) SetCartInvoiceSyncer(syncer CartInvoiceSyncer) {
 	s.invoiceSyncer = syncer
+}
+
+// SetBlockedHandleChecker wires customer.Service so GetDetailByID can flag
+// orders whose buyer is currently blocked. Optional — if unset, the FE just
+// never sees a "Cliente bloqueado" badge, which is the right degraded mode.
+func (s *Service) SetBlockedHandleChecker(c BlockedHandleChecker) {
+	s.blockChecker = c
 }
 
 // SyncInvoice fetches the NFe state from the ERP and persists it on the
@@ -336,6 +351,22 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 			InvoiceKey: row.ERPInvoiceKey,
 			Status:     row.ERPInvoiceStatus,
 			EmittedAt:  row.ERPInvoiceEmittedAt,
+		}
+	}
+
+	// Buyer block status. Best-effort: log and skip on lookup error so the
+	// detail page still loads even if the block table is unreachable.
+	if s.blockChecker != nil && orderOutput.CustomerHandle != "" {
+		if storeUUID, parseErr := uuid.Parse(storeID); parseErr == nil {
+			if blocked, blockErr := s.blockChecker.IsHandleBlocked(ctx, storeUUID, orderOutput.CustomerHandle); blockErr == nil {
+				out.CustomerBlocked = blocked
+			} else {
+				s.logger.Warn("failed to look up block status for order detail",
+					zap.String("order_id", id),
+					zap.String("handle", orderOutput.CustomerHandle),
+					zap.Error(blockErr),
+				)
+			}
 		}
 	}
 

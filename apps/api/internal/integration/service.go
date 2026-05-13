@@ -3535,6 +3535,40 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		return nil
 	}
 
+	// Block list: if the merchant has blocked this handle, drop the comment
+	// from the purchase flow. Still persist it with result='blocked' so the
+	// live feed can show "ignorado" badge and the merchant can see that the
+	// person is still trying to buy.
+	blocked, blockErr := s.repo.IsHandleBlocked(ctx, event.StoreID, strings.ToLower(strings.TrimPrefix(strings.TrimSpace(input.Username), "@")))
+	if blockErr != nil {
+		s.logger.Error("failed to check blocked handle, proceeding",
+			zap.String("store_id", event.StoreID),
+			zap.String("username", input.Username),
+			zap.Error(blockErr),
+		)
+	} else if blocked {
+		s.logger.Info("comment from blocked handle ignored",
+			zap.String("event_id", event.ID),
+			zap.String("username", input.Username),
+			zap.String("comment_id", input.CommentID),
+		)
+		_, err := s.repo.CreateLiveComment(ctx, CreateLiveCommentParams{
+			SessionID:         session.ID,
+			EventID:           event.ID,
+			Platform:          "instagram",
+			PlatformCommentID: input.CommentID,
+			PlatformUserID:    input.UserID,
+			PlatformHandle:    input.Username,
+			Text:              input.Text,
+			HasPurchaseIntent: false,
+			Result:            "blocked",
+		})
+		if err != nil {
+			s.logger.Error("failed to save blocked comment", zap.Error(err))
+		}
+		return nil
+	}
+
 	// Parse purchase intent
 	intent := ParsePurchaseIntent(input.Text)
 	hasPurchaseIntent := intent != nil
@@ -4672,6 +4706,124 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 		// indicar se a promoção rodou; não faz sentido bloquear o caller.
 		s.ProcessWaitlistForProduct(ctx, eventID, productID, carts[0].StoreID)
 	}
+}
+
+// CancelOpenCartsForBlockedHandle is invoked by the customer service after a
+// handle is blocked: it sweeps every non-paid cart of that handle in the
+// store, releases local + ERP stock for each item, marks the carts as
+// cancelled with reason='customer_blocked', then promotes the waitlist for
+// each freed product.
+//
+// All errors are logged; the function never fails hard — the block row is
+// already persisted by the caller, so even if some cleanup fails the block
+// itself is in effect (future comments are filtered).
+func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, handle string) error {
+	carts, err := s.repo.ListOpenCartsByHandle(ctx, storeID, handle)
+	if err != nil {
+		return fmt.Errorf("listing open carts for blocked handle: %w", err)
+	}
+	if len(carts) == 0 {
+		return nil
+	}
+
+	type freed struct {
+		eventID, productID string
+	}
+	freedKeys := make(map[freed]bool)
+
+	// Resolve the ERP integration once — same one applies to every cart in
+	// this store. nil is OK: handle the no-ERP case by skipping the remote
+	// reversal step and only flipping the local DB.
+	var erpProvider providers.ERPProvider
+	if integration, intErr := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny"); intErr == nil {
+		if provider, provErr := s.getERPProvider(ctx, integration); provErr == nil {
+			erpProvider = provider
+		} else {
+			s.logger.Warn("failed to build ERP provider for block sweep",
+				zap.String("store_id", storeID),
+				zap.Error(provErr),
+			)
+		}
+	}
+
+	for _, cart := range carts {
+		items, listErr := s.repo.ListNonWaitlistedCartItems(ctx, cart.ID)
+		if listErr != nil {
+			s.logger.Error("failed to list cart items for blocked cart",
+				zap.String("cart_id", cart.ID),
+				zap.Error(listErr),
+			)
+			continue
+		}
+
+		// 1. Release local stock per item (waitlisted items don't hold stock
+		//    so we ignore them — they auto-cancel when the cart is killed).
+		for _, item := range items {
+			if err := s.repo.IncrementProductStock(ctx, item.ProductID, item.Quantity); err != nil {
+				s.logger.Error("failed to release local stock for blocked cart",
+					zap.String("cart_id", cart.ID),
+					zap.String("product_id", item.ProductID),
+					zap.Error(err),
+				)
+			}
+			freedKeys[freed{eventID: cart.EventID, productID: item.ProductID}] = true
+		}
+
+		// 2. Reverse ERP stock reservations (saída-manual) so Tiny gets its
+		//    inventory back. Best-effort: if the ERP call fails we still mark
+		//    the DB rows reversed and surface a warning for manual reconciliation.
+		reservations, resErr := s.repo.ListActiveReservationsByCart(ctx, cart.ID)
+		if resErr != nil {
+			s.logger.Error("failed to list reservations for blocked cart",
+				zap.String("cart_id", cart.ID),
+				zap.Error(resErr),
+			)
+		}
+		if len(reservations) > 0 && erpProvider != nil {
+			for _, r := range reservations {
+				obs := fmt.Sprintf("Estorno cliente bloqueado - Cart %s", cart.ID)
+				if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
+					s.logger.Warn("failed to reverse ERP reservation on block",
+						zap.String("cart_id", cart.ID),
+						zap.String("external_product_id", r.ExternalProductID),
+						zap.Int("quantity", r.Quantity),
+						zap.Error(reverseErr),
+					)
+				}
+			}
+		}
+		if len(reservations) > 0 {
+			if err := s.repo.ReverseReservationsByCart(ctx, cart.ID); err != nil {
+				s.logger.Error("failed to mark reservations reversed for blocked cart",
+					zap.String("cart_id", cart.ID),
+					zap.Error(err),
+				)
+			}
+		}
+
+		// 3. Mark cart as cancelled (no-op if it was paid in the gap).
+		if err := s.repo.CancelCartAsBlocked(ctx, cart.ID); err != nil {
+			s.logger.Error("failed to cancel cart as blocked",
+				zap.String("cart_id", cart.ID),
+				zap.Error(err),
+			)
+			continue
+		}
+
+		s.logger.Info("cart cancelled by customer block",
+			zap.String("cart_id", cart.ID),
+			zap.String("handle", handle),
+			zap.Int("items_released", len(items)),
+		)
+	}
+
+	// 4. Try to promote the next person in line for each freed product.
+	//    Fire-and-forget within this request — same pattern as cart-expiration.
+	for key := range freedKeys {
+		s.ProcessWaitlistForProduct(ctx, key.eventID, key.productID, storeID)
+	}
+
+	return nil
 }
 
 // ProcessWaitlistForProduct promotes the next waiting customer to "notified"

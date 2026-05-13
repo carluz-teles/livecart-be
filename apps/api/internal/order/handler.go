@@ -466,9 +466,10 @@ func toOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 	}
 
 	resp := OrderDetailResponse{
-		OrderResponse: toOrderResponse(o.OrderOutput),
-		Token:         o.Token,
-		Comments:      comments,
+		OrderResponse:   toOrderResponse(o.OrderOutput),
+		Token:           o.Token,
+		Comments:        comments,
+		CustomerBlocked: o.CustomerBlocked,
 	}
 
 	if o.Customer != nil {
