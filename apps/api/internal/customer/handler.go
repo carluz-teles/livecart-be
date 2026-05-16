@@ -184,14 +184,28 @@ func parseCustomerFilters(c *fiber.Ctx) CustomerFilters {
 }
 
 func toCustomerResponse(o CustomerOutput) CustomerResponse {
-	return CustomerResponse{
+	resp := CustomerResponse{
 		ID:           o.ID,
 		Handle:       o.Handle,
 		Email:        o.Email,
 		Phone:        o.Phone,
+		Name:         o.Name,
+		Document:     o.Document,
 		TotalOrders:  o.TotalOrders,
 		TotalSpent:   o.TotalSpent,
 		LastOrderAt:  o.LastOrderAt,
 		FirstOrderAt: o.FirstOrderAt,
 	}
+	if o.LastShippingAddress != nil {
+		resp.LastShippingAddress = &CustomerShippingAddressResponse{
+			ZipCode:      o.LastShippingAddress.ZipCode,
+			Street:       o.LastShippingAddress.Street,
+			Number:       o.LastShippingAddress.Number,
+			Complement:   o.LastShippingAddress.Complement,
+			Neighborhood: o.LastShippingAddress.Neighborhood,
+			City:         o.LastShippingAddress.City,
+			State:        o.LastShippingAddress.State,
+		}
+	}
+	return resp
 }

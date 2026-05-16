@@ -89,7 +89,7 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*CustomerOutput, e
 		totalSpent += o.TotalValue
 	}
 
-	return &CustomerOutput{
+	out := &CustomerOutput{
 		ID:           row.ID,
 		Handle:       row.Handle,
 		Email:        row.Email,
@@ -98,7 +98,43 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*CustomerOutput, e
 		TotalSpent:   totalSpent,
 		LastOrderAt:  row.LastOrderAt,
 		FirstOrderAt: row.FirstOrderAt,
-	}, nil
+	}
+
+	// Enrich with the latest checkout snapshot so the drawer can show name,
+	// document, the most recent shipping address and a WhatsApp-ready phone
+	// even when the customers row hasn't been backfilled. customers.email and
+	// customers.phone (set at checkout) win over the snapshot — that's the
+	// canonical place; the snapshot only fills gaps.
+	snap, err := s.repo.GetCheckoutSnapshot(ctx, id)
+	if err != nil {
+		s.logger.Warn("failed to load customer checkout snapshot",
+			zap.String("customerId", id.String()),
+			zap.Error(err),
+		)
+	}
+	if snap != nil {
+		if snap.Name != "" {
+			n := snap.Name
+			out.Name = &n
+		}
+		if snap.Document != "" {
+			d := snap.Document
+			out.Document = &d
+		}
+		if out.Phone == nil && snap.Phone != "" {
+			p := snap.Phone
+			out.Phone = &p
+		}
+		if out.Email == nil && snap.Email != "" {
+			e := snap.Email
+			out.Email = &e
+		}
+		if snap.Address != nil {
+			out.LastShippingAddress = snap.Address
+		}
+	}
+
+	return out, nil
 }
 
 // GetByPlatformUser returns a customer by store_id + platform_user_id

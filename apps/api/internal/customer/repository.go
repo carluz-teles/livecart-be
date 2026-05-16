@@ -2,6 +2,7 @@ package customer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -263,6 +264,54 @@ func (r *Repository) UpdateLastOrder(ctx context.Context, id uuid.UUID) error {
 		return fmt.Errorf("updating customer last order: %w", err)
 	}
 	return nil
+}
+
+// GetCheckoutSnapshot pulls the most-recent non-empty customer/shipping
+// fields from any cart owned by the customer. Returns nil when there is no
+// cart with checkout data yet.
+func (r *Repository) GetCheckoutSnapshot(ctx context.Context, id uuid.UUID) (*CustomerCheckoutSnapshot, error) {
+	row, err := r.queries.GetCustomerCheckoutSnapshot(ctx, uuidToPgtype(id))
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting checkout snapshot: %w", err)
+	}
+
+	snap := &CustomerCheckoutSnapshot{}
+	if row.CustomerName.Valid {
+		snap.Name = row.CustomerName.String
+	}
+	if row.CustomerDocument.Valid {
+		snap.Document = row.CustomerDocument.String
+	}
+	if row.CustomerPhone.Valid {
+		snap.Phone = row.CustomerPhone.String
+	}
+	if row.CustomerEmail.Valid {
+		snap.Email = row.CustomerEmail.String
+	}
+	if len(row.ShippingAddress) > 0 {
+		// shipping_address is JSONB with the same shape the checkout writes;
+		// best-effort decode and silently drop malformed payloads.
+		var addr CustomerShippingAddress
+		if err := json.Unmarshal(row.ShippingAddress, &addr); err == nil {
+			if addr.ZipCode != "" || addr.Street != "" || addr.City != "" {
+				snap.Address = &addr
+			}
+		}
+	}
+	return snap, nil
+}
+
+// CustomerCheckoutSnapshot is the merged identity+address blob the service
+// uses to enrich the bare customer row.
+type CustomerCheckoutSnapshot struct {
+	Name     string
+	Document string
+	Phone    string
+	Email    string
+	Address  *CustomerShippingAddress
 }
 
 // Helper functions

@@ -17,16 +17,38 @@ type CustomerFilters struct {
 	TotalSpentMax *int  `query:"totalSpentMax"`
 }
 
+// CustomerShippingAddressResponse mirrors the JSON the buyer fills at checkout
+// (zipCode, street, number, complement, neighborhood, city, state). Sent
+// verbatim by the detail endpoint so the FE can render the last delivery
+// destination without re-fetching an order.
+type CustomerShippingAddressResponse struct {
+	ZipCode      string `json:"zipCode,omitempty"`
+	Street       string `json:"street,omitempty"`
+	Number       string `json:"number,omitempty"`
+	Complement   string `json:"complement,omitempty"`
+	Neighborhood string `json:"neighborhood,omitempty"`
+	City         string `json:"city,omitempty"`
+	State        string `json:"state,omitempty"`
+}
+
 // Handler layer - Request/Response types
 type CustomerResponse struct {
 	ID           string     `json:"id"`
 	Handle       string     `json:"handle"`
 	Email        *string    `json:"email,omitempty"`
 	Phone        *string    `json:"phone,omitempty"`
+	// Identity fields captured at the most recent checkout. Empty until the
+	// buyer fills the public cart form. Surfaced on the detail drawer so the
+	// merchant can address the customer by name and call them via WhatsApp.
+	Name         *string    `json:"name,omitempty"`
+	Document     *string    `json:"document,omitempty"`
 	TotalOrders  int        `json:"totalOrders"`
 	TotalSpent   int64      `json:"totalSpent"`
 	LastOrderAt  *time.Time `json:"lastOrderAt"`
 	FirstOrderAt *time.Time `json:"firstOrderAt"`
+	// LastShippingAddress is the destination from the buyer's latest cart
+	// with shipping data. Nil when no cart has shipping yet.
+	LastShippingAddress *CustomerShippingAddressResponse `json:"lastShippingAddress,omitempty"`
 }
 
 type ListCustomersResponse struct {
@@ -56,14 +78,31 @@ type ListCustomersOutput struct {
 }
 
 type CustomerOutput struct {
-	ID           string
-	Handle       string
-	Email        *string
-	Phone        *string
-	TotalOrders  int
-	TotalSpent   int64
-	LastOrderAt  *time.Time
-	FirstOrderAt *time.Time
+	ID                  string
+	Handle              string
+	Email               *string
+	Phone               *string
+	Name                *string
+	Document            *string
+	TotalOrders         int
+	TotalSpent          int64
+	LastOrderAt         *time.Time
+	FirstOrderAt        *time.Time
+	LastShippingAddress *CustomerShippingAddress
+}
+
+// CustomerShippingAddress is the parsed shape of carts.shipping_address.
+// JSON tags mirror the camelCase keys the checkout flow writes via
+// CheckoutShippingAddressInfo so json.Unmarshal in the repository hits the
+// right fields.
+type CustomerShippingAddress struct {
+	ZipCode      string `json:"zipCode,omitempty"`
+	Street       string `json:"street,omitempty"`
+	Number       string `json:"number,omitempty"`
+	Complement   string `json:"complement,omitempty"`
+	Neighborhood string `json:"neighborhood,omitempty"`
+	City         string `json:"city,omitempty"`
+	State        string `json:"state,omitempty"`
 }
 
 type CustomerStatsOutput struct {

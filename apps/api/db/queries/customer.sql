@@ -119,3 +119,28 @@ LIMIT $3 OFFSET $4;
 
 -- name: DeleteCustomer :exec
 DELETE FROM customers WHERE id = $1;
+
+-- name: GetCustomerCheckoutSnapshot :one
+-- Pulls the most-recent non-empty customer/shipping fields from a cart so the
+-- detail drawer can show what the buyer filled at checkout (name, document,
+-- phone, address) even when the customers table itself is sparse. Prefers
+-- paid carts; falls back to any cart with the fields filled.
+SELECT
+    c.customer_name,
+    c.customer_document,
+    c.customer_phone,
+    c.customer_email,
+    c.shipping_address,
+    c.created_at
+FROM carts c
+WHERE c.customer_id = $1
+  AND (
+    NULLIF(c.customer_name, '') IS NOT NULL
+    OR NULLIF(c.customer_document, '') IS NOT NULL
+    OR NULLIF(c.customer_phone, '') IS NOT NULL
+    OR c.shipping_address IS NOT NULL
+  )
+ORDER BY
+  CASE WHEN c.payment_status = 'paid' THEN 0 ELSE 1 END,
+  c.created_at DESC
+LIMIT 1;

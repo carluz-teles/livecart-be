@@ -7,6 +7,7 @@ package sqlc
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -159,6 +160,55 @@ func (q *Queries) GetCustomerByPlatformUser(ctx context.Context, arg GetCustomer
 		&i.LastOrderAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getCustomerCheckoutSnapshot = `-- name: GetCustomerCheckoutSnapshot :one
+SELECT
+    c.customer_name,
+    c.customer_document,
+    c.customer_phone,
+    c.customer_email,
+    c.shipping_address,
+    c.created_at
+FROM carts c
+WHERE c.customer_id = $1
+  AND (
+    NULLIF(c.customer_name, '') IS NOT NULL
+    OR NULLIF(c.customer_document, '') IS NOT NULL
+    OR NULLIF(c.customer_phone, '') IS NOT NULL
+    OR c.shipping_address IS NOT NULL
+  )
+ORDER BY
+  CASE WHEN c.payment_status = 'paid' THEN 0 ELSE 1 END,
+  c.created_at DESC
+LIMIT 1
+`
+
+type GetCustomerCheckoutSnapshotRow struct {
+	CustomerName     pgtype.Text        `json:"customer_name"`
+	CustomerDocument pgtype.Text        `json:"customer_document"`
+	CustomerPhone    pgtype.Text        `json:"customer_phone"`
+	CustomerEmail    pgtype.Text        `json:"customer_email"`
+	ShippingAddress  json.RawMessage    `json:"shipping_address"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+}
+
+// Pulls the most-recent non-empty customer/shipping fields from a cart so the
+// detail drawer can show what the buyer filled at checkout (name, document,
+// phone, address) even when the customers table itself is sparse. Prefers
+// paid carts; falls back to any cart with the fields filled.
+func (q *Queries) GetCustomerCheckoutSnapshot(ctx context.Context, customerID pgtype.UUID) (GetCustomerCheckoutSnapshotRow, error) {
+	row := q.db.QueryRow(ctx, getCustomerCheckoutSnapshot, customerID)
+	var i GetCustomerCheckoutSnapshotRow
+	err := row.Scan(
+		&i.CustomerName,
+		&i.CustomerDocument,
+		&i.CustomerPhone,
+		&i.CustomerEmail,
+		&i.ShippingAddress,
+		&i.CreatedAt,
 	)
 	return i, err
 }
