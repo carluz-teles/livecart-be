@@ -50,6 +50,7 @@ type NotifyEventCheckoutParams struct {
 	CartToken      string
 	PlatformUserID string
 	PlatformHandle string
+	CommentID      string // optional: buyer's last comment ID, used for private reply
 	TotalItems     int
 	TotalValue     int64 // cents
 }

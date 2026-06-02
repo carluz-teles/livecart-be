@@ -27,6 +27,7 @@ type NotifyEventCheckoutParams struct {
 	CartToken      string
 	PlatformUserID string
 	PlatformHandle string
+	CommentID      string
 	TotalItems     int
 	TotalValue     int64
 }
@@ -608,6 +609,7 @@ func (s *Service) sendCheckoutLinksForEvent(ctx context.Context, storeID, eventI
 			skipped++
 			continue
 		}
+		commentID, _ := s.repo.GetLatestCommentIDByUser(ctx, eventID, c.PlatformUserID)
 		if err := s.notifier.NotifyEventCheckout(ctx, NotifyEventCheckoutParams{
 			StoreID:        storeID,
 			EventID:        eventID,
@@ -615,6 +617,7 @@ func (s *Service) sendCheckoutLinksForEvent(ctx context.Context, storeID, eventI
 			CartToken:      c.Token,
 			PlatformUserID: c.PlatformUserID,
 			PlatformHandle: c.PlatformHandle,
+			CommentID:      commentID,
 			TotalItems:     c.TotalItems,
 			TotalValue:     c.TotalValue,
 		}); err != nil {
@@ -1014,6 +1017,12 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 		return CartWithTotalOutput{}, httpx.ErrUnprocessable("cart has no items to send")
 	}
 
+	// Prefer delivering via a private reply to the buyer's last comment (7-day
+	// window) rather than a direct message by IGSID (24h window opened only by an
+	// inbound DM). A comment does not open the DM window, so without this the
+	// resend is rejected with error 2534022 even moments after the comment.
+	commentID, _ := s.repo.GetLatestCommentIDByUser(ctx, eventID, cart.PlatformUserID)
+
 	if err := s.notifier.NotifyEventCheckout(ctx, NotifyEventCheckoutParams{
 		StoreID:        storeID,
 		EventID:        eventID,
@@ -1021,6 +1030,7 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 		CartToken:      cart.Token,
 		PlatformUserID: cart.PlatformUserID,
 		PlatformHandle: cart.PlatformHandle,
+		CommentID:      commentID,
 		TotalItems:     cart.TotalItems,
 		TotalValue:     cart.TotalValue,
 	}); err != nil {

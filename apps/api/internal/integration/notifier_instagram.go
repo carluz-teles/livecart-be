@@ -47,6 +47,23 @@ func (n *InstagramNotifier) NotifyEventCheckout(ctx context.Context, params Noti
 		params.CartToken,
 	)
 
+	// Prefer a private reply to the buyer's last comment. Instagram allows it
+	// within 7 days of the comment without requiring the buyer to have opened a
+	// 24h messaging window via an inbound DM — a comment alone does not open that
+	// window, so a plain direct message by IGSID is rejected (error 2534022).
+	// Fall back to a direct message when no comment is available or the reply fails.
+	if params.CommentID != "" {
+		if err := n.svc.ReplyToInstagramComment(ctx, params.StoreID, params.CommentID, text); err == nil {
+			return nil
+		} else {
+			n.logger.Warn("checkout private reply failed, falling back to direct message",
+				zap.String("store_id", params.StoreID),
+				zap.String("comment_id", params.CommentID),
+				zap.Error(err),
+			)
+		}
+	}
+
 	if err := n.svc.SendInstagramDM(ctx, params.StoreID, params.PlatformUserID, text); err != nil {
 		n.logger.Warn("notify event checkout failed",
 			zap.String("store_id", params.StoreID),

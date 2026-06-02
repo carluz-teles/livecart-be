@@ -567,6 +567,34 @@ func (r *Repository) IncrementSessionComments(ctx context.Context, sessionID str
 	return r.q.IncrementLiveSessionComments(ctx, uid)
 }
 
+// GetLatestCommentIDByUser returns the most recent Instagram comment ID a buyer
+// posted in an event. Used to deliver checkout links via private reply (which
+// works within 7 days of the comment) instead of a direct message by IGSID
+// (which requires an open 24h messaging window). Returns "" when none exists.
+func (r *Repository) GetLatestCommentIDByUser(ctx context.Context, eventID, platformUserID string) (string, error) {
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return "", err
+	}
+
+	comments, err := r.q.ListCommentsByUser(ctx, sqlc.ListCommentsByUserParams{
+		EventID:        eventUID,
+		PlatformUserID: platformUserID,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	// ListCommentsByUser is ordered by created_at ascending, so the last entry
+	// with a non-empty comment ID is the most recent one.
+	for i := len(comments) - 1; i >= 0; i-- {
+		if comments[i].PlatformCommentID != "" {
+			return comments[i].PlatformCommentID, nil
+		}
+	}
+	return "", nil
+}
+
 // ListCommentsBySession returns all comments for a session.
 func (r *Repository) ListCommentsBySession(ctx context.Context, sessionID string, limit, offset int) ([]CommentRow, error) {
 	uid, err := parseUUID(sessionID)
