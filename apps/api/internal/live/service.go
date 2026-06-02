@@ -964,6 +964,83 @@ func (s *Service) ListCartsWithTotalByEvent(ctx context.Context, eventID, storeI
 	return outputs, nil
 }
 
+// ResendCheckoutMessage re-sends the Instagram checkout DM for a single cart.
+// It lets the merchant manually re-deliver the checkout link to a buyer from the
+// event detail UI (for example, when the buyer missed the original message).
+func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, storeID string) (CartWithTotalOutput, error) {
+	if s.notifier == nil {
+		return CartWithTotalOutput{}, httpx.ErrUnprocessable("instagram notifications are not configured")
+	}
+
+	// Verify event exists and belongs to store (authorization).
+	if _, err := s.repo.GetEventByID(ctx, eventID, storeID); err != nil {
+		return CartWithTotalOutput{}, err
+	}
+
+	carts, err := s.repo.ListCartsWithTotalByEvent(ctx, eventID)
+	if err != nil {
+		return CartWithTotalOutput{}, err
+	}
+
+	var cart *CartWithTotalOutput
+	for i := range carts {
+		if carts[i].ID == cartID {
+			c := CartWithTotalOutput{
+				ID:              carts[i].ID,
+				Token:           carts[i].Token,
+				SessionID:       carts[i].SessionID,
+				PlatformUserID:  carts[i].PlatformUserID,
+				PlatformHandle:  carts[i].PlatformHandle,
+				Status:          carts[i].Status,
+				PaymentStatus:   carts[i].PaymentStatus,
+				TotalValue:      carts[i].TotalValue,
+				TotalItems:      carts[i].TotalItems,
+				AvailableItems:  carts[i].AvailableItems,
+				WaitlistedItems: carts[i].WaitlistedItems,
+				CreatedAt:       carts[i].CreatedAt,
+				ExpiresAt:       carts[i].ExpiresAt,
+			}
+			cart = &c
+			break
+		}
+	}
+	if cart == nil {
+		return CartWithTotalOutput{}, httpx.ErrNotFound("cart not found")
+	}
+	if cart.PlatformUserID == "" {
+		return CartWithTotalOutput{}, httpx.ErrUnprocessable("cart has no Instagram recipient")
+	}
+	if cart.TotalItems <= 0 {
+		return CartWithTotalOutput{}, httpx.ErrUnprocessable("cart has no items to send")
+	}
+
+	if err := s.notifier.NotifyEventCheckout(ctx, NotifyEventCheckoutParams{
+		StoreID:        storeID,
+		EventID:        eventID,
+		CartID:         cart.ID,
+		CartToken:      cart.Token,
+		PlatformUserID: cart.PlatformUserID,
+		PlatformHandle: cart.PlatformHandle,
+		TotalItems:     cart.TotalItems,
+		TotalValue:     cart.TotalValue,
+	}); err != nil {
+		s.logger.Warn("failed to resend checkout message",
+			zap.String("event_id", eventID),
+			zap.String("cart_id", cartID),
+			zap.String("platform_user_id", cart.PlatformUserID),
+			zap.Error(err),
+		)
+		return CartWithTotalOutput{}, httpx.ErrUnprocessable("failed to send Instagram message")
+	}
+
+	s.logger.Info("checkout message resent",
+		zap.String("event_id", eventID),
+		zap.String("cart_id", cartID),
+		zap.String("platform_user_id", cart.PlatformUserID),
+	)
+	return *cart, nil
+}
+
 // ListActiveCheckouts returns the carts in checkout phase for an event so the
 // merchant can watch buyer activity in real time before payment lands.
 func (s *Service) ListActiveCheckouts(ctx context.Context, eventID, storeID string) ([]ActiveCheckoutOutput, error) {

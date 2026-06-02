@@ -33,6 +33,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// Event details endpoints
 	g.Get("/:id/event-stats", h.GetEventStats)
 	g.Get("/:id/carts", h.ListCarts)
+	g.Post("/:id/carts/:cartId/resend-message", h.ResendCartMessage)
 	g.Get("/:id/active-checkouts", h.ListActiveCheckouts)
 	g.Get("/:id/products", h.ListProducts)
 
@@ -741,6 +742,46 @@ func (h *Handler) ListCarts(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, ListCartsResponse{Data: responses})
+}
+
+// ResendCartMessage godoc
+// @Summary      Resend the checkout DM for a cart
+// @Description  Re-sends the Instagram checkout link Direct Message to the buyer of a single cart
+// @Tags         lives
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live event UUID"
+// @Param        cartId path string true "Cart UUID"
+// @Success      200 {object} httpx.Envelope{data=CartWithTotalResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Failure      422 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/carts/{cartId}/resend-message [post]
+// @Security     BearerAuth
+func (h *Handler) ResendCartMessage(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+	cartID := c.Params("cartId")
+
+	cart, err := h.service.ResendCheckoutMessage(c.Context(), eventID, cartID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, CartWithTotalResponse{
+		ID:              cart.ID,
+		Token:           cart.Token,
+		SessionID:       cart.SessionID,
+		PlatformUserID:  cart.PlatformUserID,
+		PlatformHandle:  cart.PlatformHandle,
+		Status:          cart.Status,
+		PaymentStatus:   cart.PaymentStatus,
+		TotalValue:      cart.TotalValue,
+		TotalItems:      cart.TotalItems,
+		AvailableItems:  cart.AvailableItems,
+		WaitlistedItems: cart.WaitlistedItems,
+		CreatedAt:       cart.CreatedAt,
+		ExpiresAt:       cart.ExpiresAt,
+	})
 }
 
 // ListActiveCheckouts godoc
