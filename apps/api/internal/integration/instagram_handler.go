@@ -114,12 +114,39 @@ func (h *WebhookHandler) processInstagramChange(c *fiber.Ctx, entry InstagramEnt
 	switch change.Field {
 	case "live_comments":
 		return h.processLiveComment(c, entry, change, rawBody)
+	case "comments":
+		// Feed-post comments share the same payload shape as live comments and
+		// the same processing path (the post media id maps to the event). Mark
+		// the post event as webhook-active so the polling capture can stop.
+		return h.processPostComment(c, entry, change, rawBody)
 	default:
 		h.logger.Info("ignoring unhandled instagram change field",
 			zap.String("field", change.Field),
 		)
 		return nil
 	}
+}
+
+// processPostComment handles a feed-post comment event. It reuses the live
+// comment path and flags the mapped post event so polling stops.
+func (h *WebhookHandler) processPostComment(c *fiber.Ctx, entry InstagramEntry, change InstagramChange, rawBody []byte) error {
+	valueBytes, err := json.Marshal(change.Value)
+	if err != nil {
+		return err
+	}
+	var comment InstagramLiveCommentValue
+	if err := json.Unmarshal(valueBytes, &comment); err != nil {
+		return err
+	}
+	if comment.Media.ID != "" {
+		if mErr := h.service.MarkPostEventWebhookActive(c.Context(), comment.Media.ID); mErr != nil {
+			h.logger.Warn("failed to mark post event webhook active",
+				zap.String("media_id", comment.Media.ID),
+				zap.Error(mErr),
+			)
+		}
+	}
+	return h.processLiveComment(c, entry, change, rawBody)
 }
 
 // processLiveComment processes a live_comments event

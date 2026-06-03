@@ -3698,6 +3698,31 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		}
 	}
 
+	// Post-commerce events apply their own rules: only the selected products
+	// participate, a single-product post auto-adds on a bare "EU QUERO", and an
+	// unavailable or ambiguous request gets a private reply listing what's
+	// available. When the request is fully handled here, persist and stop.
+	if event.Type == "post" && hasPurchaseIntent {
+		resolved, handled, resultLabel := s.resolvePostEventProduct(ctx, event, input, intent, product)
+		if handled {
+			if _, cErr := s.repo.CreateLiveComment(ctx, CreateLiveCommentParams{
+				SessionID:         session.ID,
+				EventID:           event.ID,
+				Platform:          "instagram",
+				PlatformCommentID: input.CommentID,
+				PlatformUserID:    input.UserID,
+				PlatformHandle:    input.Username,
+				Text:              input.Text,
+				HasPurchaseIntent: true,
+				Result:            resultLabel,
+			}); cErr != nil {
+				s.logger.Error("failed to save post comment", zap.Error(cErr))
+			}
+			return nil
+		}
+		product = resolved
+	}
+
 	// Determine result for the comment record
 	var commentResult string
 	var matchedProductID string
@@ -4170,6 +4195,133 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 	}
 
 	return nil
+}
+
+// MarkPostEventWebhookActive flags the post event mapped to mediaID as
+// webhook-driven, so the polling capture stops. Delegates to the live service.
+func (s *Service) MarkPostEventWebhookActive(ctx context.Context, mediaID string) error {
+	return s.liveService.MarkPostEventWebhookActive(ctx, mediaID)
+}
+
+// =============================================================================
+// POST-COMMERCE COMMENT RULES
+// =============================================================================
+
+// resolvePostEventProduct applies post-event rules. It returns the product to
+// add (resolved from a single-product promotion when the comment is a bare
+// "EU QUERO"), and handled=true when it already answered the commenter (product
+// not in the promotion, or ambiguous request), in which case the caller saves
+// the comment with resultLabel and stops.
+func (s *Service) resolvePostEventProduct(
+	ctx context.Context,
+	event *live.EventOutput,
+	input ProcessInstagramCommentInput,
+	intent *PurchaseIntent,
+	matched *ProductRow,
+) (resolved *ProductRow, handled bool, resultLabel string) {
+	whitelist, err := s.liveService.ListEventProducts(ctx, event.ID, event.StoreID)
+	if err != nil {
+		s.logger.Warn("failed to load post promotion products", zap.Error(err))
+		return matched, false, ""
+	}
+
+	inPromo := func(productID string) bool {
+		for _, w := range whitelist {
+			if w.ProductID == productID {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Case A: a code matched a real product.
+	if matched != nil {
+		if inPromo(matched.ID) {
+			return matched, false, "" // proceed to the normal cart flow
+		}
+		s.replyPostUnavailable(ctx, event, input, whitelist)
+		return nil, true, "not_in_promo"
+	}
+
+	// Case B: no product matched. A typed-but-unknown code is "unavailable";
+	// a bare trigger with one promo product auto-adds it, with many it asks.
+	if codes := ExtractPossibleKeywords(input.Text); len(codes) > 0 {
+		s.replyPostUnavailable(ctx, event, input, whitelist)
+		return nil, true, "not_in_promo"
+	}
+
+	available := availablePromoProducts(whitelist)
+	switch len(available) {
+	case 1:
+		p, err := s.repo.GetProductByID(ctx, event.StoreID, available[0].ProductID)
+		if err == nil && p != nil {
+			return p, false, ""
+		}
+		return nil, true, "no_product"
+	case 0:
+		return nil, true, "no_product"
+	default:
+		s.replyPostChooseProduct(ctx, event, input, available)
+		return nil, true, "needs_keyword"
+	}
+}
+
+// availablePromoProducts filters the promotion to active, in-stock products.
+func availablePromoProducts(whitelist []live.EventProductOutput) []live.EventProductOutput {
+	out := make([]live.EventProductOutput, 0, len(whitelist))
+	for _, w := range whitelist {
+		if w.ProductActive && w.Stock > 0 {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// promoProductLines renders "• CODE — Name" lines for a list of products.
+func promoProductLines(products []live.EventProductOutput) string {
+	var b strings.Builder
+	for _, p := range products {
+		b.WriteString(fmt.Sprintf("• %s — %s\n", p.Keyword, p.Name))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// replyPostUnavailable privately tells the commenter the product isn't in this
+// promotion and lists what is available.
+func (s *Service) replyPostUnavailable(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, whitelist []live.EventProductOutput) {
+	available := availablePromoProducts(whitelist)
+	var msg string
+	if len(available) == 0 {
+		msg = fmt.Sprintf("Oi @%s! Esse produto não está disponível nesta promoção no momento. 😕", input.Username)
+	} else {
+		msg = fmt.Sprintf(
+			"Oi @%s! Esse produto não está disponível nesta promoção. 😕\nDisponíveis nesta publicação:\n%s\n\nComente o código do produto que você quer. 💜",
+			input.Username, promoProductLines(available),
+		)
+	}
+	if err := s.ReplyToInstagramComment(ctx, event.StoreID, input.CommentID, msg); err != nil {
+		s.logger.Warn("failed to send post unavailable reply",
+			zap.String("event_id", event.ID),
+			zap.String("comment_id", input.CommentID),
+			zap.Error(err),
+		)
+	}
+}
+
+// replyPostChooseProduct privately asks the commenter to specify which product
+// (used when a bare "EU QUERO" is posted on a multi-product promotion).
+func (s *Service) replyPostChooseProduct(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, available []live.EventProductOutput) {
+	msg := fmt.Sprintf(
+		"Oi @%s! Pra adicionar ao carrinho, comente o código do produto que você quer:\n%s 💜",
+		input.Username, promoProductLines(available),
+	)
+	if err := s.ReplyToInstagramComment(ctx, event.StoreID, input.CommentID, msg); err != nil {
+		s.logger.Warn("failed to send post choose-product reply",
+			zap.String("event_id", event.ID),
+			zap.String("comment_id", input.CommentID),
+			zap.Error(err),
+		)
+	}
 }
 
 // =============================================================================

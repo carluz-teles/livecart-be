@@ -261,6 +261,17 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 	return out, nil
 }
 
+// MarkPostEventWebhookActive flags that a comments webhook arrived for the post
+// event mapped to mediaID, so the polling capture stops handling it.
+func (s *Service) MarkPostEventWebhookActive(ctx context.Context, mediaID string) error {
+	return s.repo.MarkPostEventWebhookActive(ctx, mediaID)
+}
+
+// ListActivePostEvents returns active post events still served by polling.
+func (s *Service) ListActivePostEvents(ctx context.Context) ([]PostEventRef, error) {
+	return s.repo.ListActivePostEvents(ctx)
+}
+
 func (s *Service) GetByID(ctx context.Context, id, storeID string) (LiveOutput, error) {
 	event, err := s.repo.GetEventByID(ctx, id, storeID)
 	if err != nil {
