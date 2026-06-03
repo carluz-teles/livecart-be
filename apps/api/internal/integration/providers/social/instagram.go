@@ -635,6 +635,169 @@ func (i *Instagram) postGraph(ctx context.Context, path string, payload map[stri
 	return out.ID, nil
 }
 
+// PublishReel publishes a Reel by streaming the video bytes directly to
+// Instagram via the resumable upload protocol — no public hosting required.
+// Flow: init resumable container -> upload bytes -> poll status until FINISHED
+// -> media_publish. Returns the published media id.
+func (i *Instagram) PublishReel(ctx context.Context, video io.Reader, size int64, caption string) (string, error) {
+	if video == nil || size <= 0 {
+		return "", fmt.Errorf("video is required")
+	}
+
+	// Step 1 — init a resumable container.
+	containerID, uploadURI, err := i.initResumableReel(ctx, caption)
+	if err != nil {
+		return "", fmt.Errorf("init reel container: %w", err)
+	}
+
+	// Step 2 — upload the bytes to the returned URI.
+	if uploadURI == "" {
+		uploadURI = fmt.Sprintf("https://rupload.facebook.com/ig-api-upload/%s/%s", instagramGraphAPIVersion, containerID)
+	}
+	if err := i.uploadResumable(ctx, uploadURI, video, size); err != nil {
+		return "", fmt.Errorf("uploading reel: %w", err)
+	}
+
+	// Step 3 — wait for Instagram to finish processing the video.
+	if err := i.waitContainerFinished(ctx, containerID); err != nil {
+		return "", err
+	}
+
+	// Step 4 — publish.
+	mediaID, err := i.postGraph(ctx, "/me/media_publish", map[string]any{"creation_id": containerID})
+	if err != nil {
+		return "", fmt.Errorf("publishing reel: %w", err)
+	}
+
+	i.logger.Info("instagram reel published",
+		zap.String("container_id", containerID),
+		zap.String("media_id", mediaID),
+	)
+	return mediaID, nil
+}
+
+// initResumableReel creates a REELS container with upload_type=resumable and
+// returns the container id and the upload URI (when provided by the API).
+func (i *Instagram) initResumableReel(ctx context.Context, caption string) (containerID, uploadURI string, err error) {
+	url := fmt.Sprintf("%s/%s/me/media", instagramGraphAPIBaseURL, instagramGraphAPIVersion)
+	payload := map[string]any{
+		"media_type":  "REELS",
+		"upload_type": "resumable",
+		"caption":     caption,
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+i.credentials.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return "", "", fmt.Errorf("status %d, body: %s", resp.StatusCode, truncate(string(respBody), 300))
+	}
+	var out struct {
+		ID  string `json:"id"`
+		URI string `json:"uri"`
+	}
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return "", "", err
+	}
+	if out.ID == "" {
+		return "", "", fmt.Errorf("no container id returned")
+	}
+	return out.ID, out.URI, nil
+}
+
+// uploadResumable streams the video bytes to the resumable upload URI.
+func (i *Instagram) uploadResumable(ctx context.Context, uploadURI string, video io.Reader, size int64) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURI, video)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "OAuth "+i.credentials.AccessToken)
+	req.Header.Set("offset", "0")
+	req.Header.Set("file_size", fmt.Sprintf("%d", size))
+	req.ContentLength = size
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("upload status %d, body: %s", resp.StatusCode, truncate(string(respBody), 300))
+	}
+	return nil
+}
+
+// waitContainerFinished polls the container status until FINISHED (or fails).
+// Instagram recommends polling ~once/minute for up to 5 minutes; we poll a bit
+// more frequently with the same overall budget.
+func (i *Instagram) waitContainerFinished(ctx context.Context, containerID string) error {
+	deadline := time.Now().Add(5 * time.Minute)
+	for {
+		status, err := i.containerStatus(ctx, containerID)
+		if err != nil {
+			return err
+		}
+		switch status {
+		case "FINISHED":
+			return nil
+		case "ERROR", "EXPIRED":
+			return fmt.Errorf("instagram video processing failed: %s", status)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("instagram video still processing after timeout")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(6 * time.Second):
+		}
+	}
+}
+
+// containerStatus reads the status_code of a media container.
+func (i *Instagram) containerStatus(ctx context.Context, containerID string) (string, error) {
+	url := fmt.Sprintf("%s/%s/%s?fields=status_code&access_token=%s",
+		instagramGraphAPIBaseURL, instagramGraphAPIVersion, containerID, i.credentials.AccessToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("status %d, body: %s", resp.StatusCode, truncate(string(respBody), 200))
+	}
+	var out struct {
+		StatusCode string `json:"status_code"`
+	}
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return "", err
+	}
+	return out.StatusCode, nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "..."
+	}
+	return s
+}
+
 // GetMediaDetails fetches metadata (permalink, thumbnail, caption) for a media id.
 func (i *Instagram) GetMediaDetails(ctx context.Context, mediaID string) (*providers.MediaPost, error) {
 	if mediaID == "" {

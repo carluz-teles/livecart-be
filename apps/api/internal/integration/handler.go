@@ -1,6 +1,9 @@
 package integration
 
 import (
+	"encoding/json"
+	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -59,6 +62,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// Instagram content publishing (create a post in LiveCart)
 	g.Post("/instagram/media/upload", h.UploadInstagramMedia)
 	g.Post("/instagram/posts", h.CreateInstagramPost)
+	g.Post("/instagram/reels", h.CreateInstagramReel)
 
 	// Instagram comment moderation (reply / hide / delete)
 	g.Post("/instagram/comments/:commentId/reply", h.ReplyInstagramComment)
@@ -468,6 +472,107 @@ func (h *Handler) CreateInstagramPost(c *fiber.Ctx) error {
 	}
 
 	return httpx.Created(c, event)
+}
+
+// CreateInstagramReel uploads a video as a Reel (streamed directly to Instagram,
+// no hosting), publishes it, and creates the bound post event. Multipart: the
+// video file plus the same fields as a post (caption, products, window).
+// @Summary Create an Instagram Reel and its post event
+// @Tags integrations
+// @Accept multipart/form-data
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param file formData file true "Video (MP4, max 300MB)"
+// @Success 201 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/instagram/reels [post]
+// @Security BearerAuth
+func (h *Handler) CreateInstagramReel(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	file, err := c.FormFile("file")
+	if err != nil {
+		return httpx.BadRequest(c, "file is required")
+	}
+	if file.Size > 300*1024*1024 {
+		return httpx.BadRequest(c, "video too large, maximum size is 300MB")
+	}
+	ct := file.Header.Get("Content-Type")
+	if ct != "video/mp4" && ct != "video/quicktime" {
+		return httpx.BadRequest(c, "invalid file type — Instagram Reels require an MP4 video")
+	}
+
+	// productIds is sent as a JSON array string in the multipart form.
+	var productIDs []string
+	if raw := c.FormValue("productIds"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &productIDs); err != nil {
+			return httpx.BadRequest(c, "invalid productIds")
+		}
+	}
+	if len(productIDs) == 0 {
+		return httpx.BadRequest(c, "select at least one product for the promotion")
+	}
+
+	startsAt, endsAt, perr := parseOptionalWindow(c.FormValue("startsAt"), c.FormValue("endsAt"))
+	if perr != nil {
+		return httpx.BadRequest(c, perr.Error())
+	}
+
+	var cartExp, maxQty *int
+	if v := c.FormValue("cartExpirationMinutes"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cartExp = &n
+		}
+	}
+	if v := c.FormValue("cartMaxQuantityPerItem"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			maxQty = &n
+		}
+	}
+
+	src, err := file.Open()
+	if err != nil {
+		return httpx.InternalError(c, "failed to read file")
+	}
+	defer src.Close()
+
+	event, err := h.service.CreateInstagramReelEvent(c.Context(), CreateInstagramPostInput{
+		StoreID:                storeID,
+		Caption:                c.FormValue("caption"),
+		Title:                  c.FormValue("title"),
+		ProductIDs:             productIDs,
+		StartsAt:               startsAt,
+		EndsAt:                 endsAt,
+		CartExpirationMinutes:  cartExp,
+		CartMaxQuantityPerItem: maxQty,
+	}, src, file.Size)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Created(c, event)
+}
+
+// parseOptionalWindow parses optional RFC3339 start/end and validates ordering.
+func parseOptionalWindow(startRaw, endRaw string) (*time.Time, *time.Time, error) {
+	var startsAt, endsAt *time.Time
+	if startRaw != "" {
+		t, err := time.Parse(time.RFC3339, startRaw)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid startsAt format")
+		}
+		startsAt = &t
+	}
+	if endRaw != "" {
+		t, err := time.Parse(time.RFC3339, endRaw)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid endsAt format")
+		}
+		endsAt = &t
+	}
+	if startsAt != nil && endsAt != nil && !endsAt.After(*startsAt) {
+		return nil, nil, fmt.Errorf("endsAt must be after startsAt")
+	}
+	return startsAt, endsAt, nil
 }
 
 // ReplyInstagramComment posts a public reply comment to a live/post comment.

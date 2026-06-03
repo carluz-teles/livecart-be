@@ -1907,6 +1907,59 @@ func (s *Service) CreateInstagramPostEvent(ctx context.Context, input CreateInst
 	return out, nil
 }
 
+// CreateInstagramReelEvent uploads a video as a Reel (resumable upload, no
+// hosting), publishes it, and creates the bound post-commerce event. The video
+// bytes are streamed straight to Instagram.
+func (s *Service) CreateInstagramReelEvent(ctx context.Context, input CreateInstagramPostInput, video io.Reader, size int64) (live.CreateLiveOutput, error) {
+	provider, err := s.resolveInstagramSocialProvider(ctx, input.StoreID)
+	if err != nil {
+		return live.CreateLiveOutput{}, err
+	}
+
+	mediaID, err := provider.PublishReel(ctx, video, size, input.Caption)
+	if err != nil {
+		s.logger.Warn("failed to publish instagram reel",
+			zap.String("store_id", input.StoreID), zap.Error(err))
+		return live.CreateLiveOutput{}, httpx.ErrUnprocessable("failed to publish the reel on Instagram")
+	}
+
+	permalink, thumbnail := "", ""
+	if details, dErr := provider.GetMediaDetails(ctx, mediaID); dErr == nil && details != nil {
+		permalink = details.Permalink
+		thumbnail = details.ThumbnailURL
+		if thumbnail == "" {
+			thumbnail = details.MediaURL
+		}
+	}
+
+	out, err := s.liveService.CreatePostEvent(ctx, live.CreatePostInput{
+		StoreID:                input.StoreID,
+		Title:                  input.Title,
+		MediaID:                mediaID,
+		MediaPermalink:         permalink,
+		MediaThumbnailURL:      thumbnail,
+		MediaCaption:           input.Caption,
+		ProductIDs:             input.ProductIDs,
+		StartsAt:               input.StartsAt,
+		EndsAt:                 input.EndsAt,
+		CartExpirationMinutes:  input.CartExpirationMinutes,
+		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
+	})
+	if err != nil {
+		s.logger.Error("reel published but event creation failed",
+			zap.String("store_id", input.StoreID),
+			zap.String("media_id", mediaID), zap.Error(err))
+		return live.CreateLiveOutput{}, err
+	}
+
+	s.logger.Info("instagram reel created and event bound",
+		zap.String("store_id", input.StoreID),
+		zap.String("media_id", mediaID),
+		zap.String("event_id", out.ID),
+	)
+	return out, nil
+}
+
 // =============================================================================
 // ERP OPERATIONS
 // =============================================================================
