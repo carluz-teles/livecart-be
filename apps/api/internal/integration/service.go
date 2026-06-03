@@ -1860,6 +1860,13 @@ func (s *Service) FetchInstagramMedia(ctx context.Context, storeID string, limit
 // Reuses live.Service.CreatePostEvent so the post then sells via comments exactly
 // like a manually-selected post.
 func (s *Service) CreateInstagramPostEvent(ctx context.Context, input CreateInstagramPostInput) (live.CreateLiveOutput, error) {
+	return s.publishWithIdempotency(ctx, input, "create_instagram_post",
+		func() { s.deleteTransientImage(ctx, input.ImageKey) },
+		func() (live.CreateLiveOutput, error) { return s.publishInstagramPostEvent(ctx, input) },
+	)
+}
+
+func (s *Service) publishInstagramPostEvent(ctx context.Context, input CreateInstagramPostInput) (live.CreateLiveOutput, error) {
 	provider, err := s.resolveInstagramSocialProvider(ctx, input.StoreID)
 	if err != nil {
 		return live.CreateLiveOutput{}, err
@@ -1941,9 +1948,111 @@ func (s *Service) deleteTransientImage(ctx context.Context, key string) {
 	s.logger.Info("deleted transient post image", zap.String("key", key))
 }
 
+// publishWithIdempotency dedupes a publish+bind so a retried submit (e.g. the
+// client timed out on a slow publish and the user resubmitted) returns the
+// original event instead of publishing the same media to Instagram again.
+//
+// Dedup is by explicit client key when provided, falling back to a hash of the
+// stable inputs within a short window — the uploaded media URL/key are excluded
+// from that hash since they differ on every upload, so a resubmit of the same
+// post still matches. On a cache hit, onDuplicate cleans up the just-uploaded
+// transient media that won't be published.
+func (s *Service) publishWithIdempotency(
+	ctx context.Context,
+	input CreateInstagramPostInput,
+	operation string,
+	onDuplicate func(),
+	publish func() (live.CreateLiveOutput, error),
+) (live.CreateLiveOutput, error) {
+	integrationID := s.instagramIntegrationID(ctx, input.StoreID)
+	// Without the idempotency service or a known integration we can't dedup
+	// safely (the record FK needs the integration id) — publish directly.
+	if s.idempotency == nil || integrationID == "" {
+		return publish()
+	}
+
+	// Stable dedup payload: everything that identifies the post EXCEPT the
+	// per-upload media url/key, so resubmits of the same content collide.
+	dedup := struct {
+		Operation              string
+		Title                  string
+		Caption                string
+		ProductIDs             []string
+		StartsAt               *time.Time
+		EndsAt                 *time.Time
+		CartExpirationMinutes  *int
+		CartMaxQuantityPerItem *int
+	}{
+		Operation:              operation,
+		Title:                  input.Title,
+		Caption:                input.Caption,
+		ProductIDs:             input.ProductIDs,
+		StartsAt:               input.StartsAt,
+		EndsAt:                 input.EndsAt,
+		CartExpirationMinutes:  input.CartExpirationMinutes,
+		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
+	}
+
+	req := idempotency.CheckRequest{
+		IdempotencyKey: input.IdempotencyKey,
+		StoreID:        input.StoreID,
+		IntegrationID:  integrationID,
+		Operation:      operation,
+		Payload:        dedup,
+	}
+
+	if cached, err := s.idempotency.Check(ctx, req); err != nil {
+		s.logger.Warn("instagram publish idempotency check failed", zap.Error(err))
+	} else if cached != nil && cached.Found {
+		var out live.CreateLiveOutput
+		if json.Unmarshal(cached.Response, &out) == nil && out.ID != "" {
+			s.logger.Info("instagram publish deduped, returning original event",
+				zap.String("store_id", input.StoreID),
+				zap.String("operation", operation),
+				zap.String("event_id", out.ID))
+			if onDuplicate != nil {
+				onDuplicate()
+			}
+			return out, nil
+		}
+	}
+
+	rec, err := s.idempotency.Start(ctx, req)
+	if err != nil {
+		// Couldn't record the attempt — publish anyway rather than block the user.
+		s.logger.Warn("instagram publish idempotency start failed", zap.Error(err))
+		return publish()
+	}
+
+	out, pErr := publish()
+	if pErr != nil {
+		_ = s.idempotency.Fail(ctx, rec.ID, pErr)
+		return out, pErr
+	}
+	_ = s.idempotency.Complete(ctx, rec.ID, out)
+	return out, nil
+}
+
+// instagramIntegrationID returns the store's Instagram integration id, or ""
+// when none is available (used as the idempotency record FK).
+func (s *Service) instagramIntegrationID(ctx context.Context, storeID string) string {
+	integ, err := s.repo.GetByProvider(ctx, storeID, "social", "instagram")
+	if err != nil || integ == nil {
+		return ""
+	}
+	return integ.ID
+}
+
 // CreateInstagramReelEvent publishes a Reel from a public video URL and creates
 // the bound post event. The transient video (input.ImageKey) is deleted after.
 func (s *Service) CreateInstagramReelEvent(ctx context.Context, input CreateInstagramPostInput, videoURL string) (live.CreateLiveOutput, error) {
+	return s.publishWithIdempotency(ctx, input, "create_instagram_reel",
+		func() { s.deleteTransientImage(ctx, input.ImageKey) },
+		func() (live.CreateLiveOutput, error) { return s.publishInstagramReelEvent(ctx, input, videoURL) },
+	)
+}
+
+func (s *Service) publishInstagramReelEvent(ctx context.Context, input CreateInstagramPostInput, videoURL string) (live.CreateLiveOutput, error) {
 	provider, err := s.resolveInstagramSocialProvider(ctx, input.StoreID)
 	if err != nil {
 		return live.CreateLiveOutput{}, err

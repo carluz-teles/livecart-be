@@ -662,6 +662,9 @@ type CreateInstagramPostRequest struct {
 	EndsAt                 *string  `json:"endsAt"`
 	CartExpirationMinutes  *int     `json:"cartExpirationMinutes"`
 	CartMaxQuantityPerItem *int     `json:"cartMaxQuantityPerItem"`
+	// IdempotencyKey dedupes retried submits so a slow publish the client gave
+	// up on isn't published twice. Stable per selected media on the client.
+	IdempotencyKey *string `json:"idempotencyKey"`
 }
 
 // CreateInstagramPostInput is the service input to publish an image post and
@@ -677,4 +680,5 @@ type CreateInstagramPostInput struct {
 	EndsAt                 *time.Time
 	CartExpirationMinutes  *int
 	CartMaxQuantityPerItem *int
+	IdempotencyKey         string // dedupes retried publishes (empty = none)
 }

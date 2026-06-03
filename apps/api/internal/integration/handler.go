@@ -469,6 +469,7 @@ func (h *Handler) CreateInstagramPost(c *fiber.Ctx) error {
 		EndsAt:                 endsAt,
 		CartExpirationMinutes:  req.CartExpirationMinutes,
 		CartMaxQuantityPerItem: req.CartMaxQuantityPerItem,
+		IdempotencyKey:         derefString(req.IdempotencyKey),
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -563,12 +564,21 @@ func (h *Handler) CreateInstagramReel(c *fiber.Ctx) error {
 		EndsAt:                 endsAt,
 		CartExpirationMinutes:  cartExp,
 		CartMaxQuantityPerItem: maxQty,
+		IdempotencyKey:         c.FormValue("idempotencyKey"),
 	}, videoURL)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
 	return httpx.Created(c, event)
+}
+
+// derefString returns the pointed-to string, or "" when the pointer is nil.
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // parseOptionalWindow parses optional RFC3339 start/end and validates ordering.
