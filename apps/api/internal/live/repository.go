@@ -305,6 +305,38 @@ func (r *Repository) SetEventMedia(ctx context.Context, eventID, storeID string,
 	return nil
 }
 
+// SetEventWindow persists the optional start (scheduled_at) and end (ends_at)
+// of an event. Either may be nil. Stored via raw SQL.
+func (r *Repository) SetEventWindow(ctx context.Context, eventID, storeID string, startsAt, endsAt *time.Time) error {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+	var start, end pgtype.Timestamptz
+	if startsAt != nil {
+		start = pgtype.Timestamptz{Time: *startsAt, Valid: true}
+	}
+	if endsAt != nil {
+		end = pgtype.Timestamptz{Time: *endsAt, Valid: true}
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE live_events
+		SET scheduled_at = $3, ends_at = $4, updated_at = now()
+		WHERE id = $1 AND store_id = $2
+	`, uid, storeUID, start, end)
+	if err != nil {
+		return fmt.Errorf("setting event window: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return httpx.ErrNotFound("event not found")
+	}
+	return nil
+}
+
 // GetEventMedia returns the post media metadata for an event.
 func (r *Repository) GetEventMedia(ctx context.Context, eventID string) (*PostMedia, error) {
 	uid, err := parseUUID(eventID)
@@ -1172,6 +1204,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 			e.id, e.store_id, e.title, e.type, e.status, e.total_orders, e.created_at, e.updated_at,
 			e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end,
 			COALESCE(e.pix_discount_percent, 0),
+			e.scheduled_at, e.ends_at,
 			s.started_at, s.ended_at, COALESCE(s.total_comments, 0),
 			COALESCE(p.platform, ''), COALESCE(p.platform_live_id, '')
 		FROM live_events e
@@ -1206,7 +1239,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 	for rows.Next() {
 		var live LiveOutput
 		var title, eventType, platform, platformLiveID pgtype.Text
-		var startedAt, endedAt pgtype.Timestamptz
+		var startedAt, endedAt, scheduledAt, endsAt pgtype.Timestamptz
 		var cartExpirationMinutes, cartMaxQuantityPerItem pgtype.Int4
 		var autoSendCheckoutLinks pgtype.Bool
 		var pixDiscountPercent int32
@@ -1225,6 +1258,8 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 			&cartMaxQuantityPerItem,
 			&autoSendCheckoutLinks,
 			&pixDiscountPercent,
+			&scheduledAt,
+			&endsAt,
 			&startedAt,
 			&endedAt,
 			&live.TotalComments,
@@ -1266,6 +1301,14 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 		if autoSendCheckoutLinks.Valid {
 			live.SendOnLiveEnd = &autoSendCheckoutLinks.Bool
 		}
+		if scheduledAt.Valid {
+			live.ScheduledAt = &scheduledAt.Time
+		}
+		if endsAt.Valid {
+			live.EndsAt = &endsAt.Time
+		}
+		// Show the status derived from the scheduled window (no background job).
+		live.Status = EffectiveStatus(live.Status, live.ScheduledAt, live.EndsAt)
 
 		lives = append(lives, live)
 	}
@@ -1317,6 +1360,10 @@ func toEventRow(row sqlc.LiveEvent) EventRow {
 	if row.ScheduledAt.Valid {
 		scheduledAt = &row.ScheduledAt.Time
 	}
+	var endsAt *time.Time
+	if row.EndsAt.Valid {
+		endsAt = &row.EndsAt.Time
+	}
 	var description *string
 	if row.Description.Valid {
 		description = &row.Description.String
@@ -1336,6 +1383,7 @@ func toEventRow(row sqlc.LiveEvent) EventRow {
 		CurrentActiveProductID:  currentActiveProductID,
 		ProcessingPaused:        row.ProcessingPaused,
 		ScheduledAt:             scheduledAt,
+		EndsAt:                  endsAt,
 		Description:             description,
 		CreatedAt:               row.CreatedAt.Time,
 		UpdatedAt:               row.UpdatedAt.Time,
@@ -2302,6 +2350,10 @@ func toEventRowFromWithCounts(row sqlc.GetLiveEventWithCountsRow) EventRow {
 	if row.ScheduledAt.Valid {
 		scheduledAt = &row.ScheduledAt.Time
 	}
+	var endsAt *time.Time
+	if row.EndsAt.Valid {
+		endsAt = &row.EndsAt.Time
+	}
 	var description *string
 	if row.Description.Valid {
 		description = &row.Description.String
@@ -2321,6 +2373,7 @@ func toEventRowFromWithCounts(row sqlc.GetLiveEventWithCountsRow) EventRow {
 		CurrentActiveProductID:  currentActiveProductID,
 		ProcessingPaused:        row.ProcessingPaused,
 		ScheduledAt:             scheduledAt,
+		EndsAt:                  endsAt,
 		Description:             description,
 		CreatedAt:               row.CreatedAt.Time,
 		UpdatedAt:               row.UpdatedAt.Time,

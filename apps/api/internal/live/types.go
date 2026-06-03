@@ -40,6 +40,7 @@ type EventResponse struct {
 	PixDiscountPercent     int               `json:"pixDiscountPercent"`
 	// Scheduling
 	ScheduledAt *time.Time `json:"scheduledAt"`
+	EndsAt      *time.Time `json:"endsAt"`
 	Description *string    `json:"description"`
 	// Counts
 	ProductCount int `json:"productCount"`
@@ -117,6 +118,7 @@ type EventOutput struct {
 	ProcessingPaused        bool
 	// Scheduling
 	ScheduledAt *time.Time
+	EndsAt      *time.Time
 	Description *string
 	// Counts
 	ProductCount int
@@ -176,8 +178,9 @@ type EventRow struct {
 	PixDiscountPercent      int
 	CurrentActiveProductID  *string
 	ProcessingPaused        bool
-	// Scheduling
+	// Scheduling: ScheduledAt is the start; EndsAt is the optional end.
 	ScheduledAt *time.Time
+	EndsAt      *time.Time
 	Description *string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
@@ -372,6 +375,7 @@ type PostEventRef struct {
 }
 
 // CreatePostRequest is the HTTP payload to create a post-commerce event.
+// StartsAt/EndsAt are optional ISO8601 timestamps (with timezone).
 type CreatePostRequest struct {
 	Title                  string   `json:"title"`
 	MediaID                string   `json:"mediaId" validate:"required"`
@@ -379,6 +383,8 @@ type CreatePostRequest struct {
 	MediaThumbnailURL      string   `json:"mediaThumbnailUrl"`
 	MediaCaption           string   `json:"mediaCaption"`
 	ProductIDs             []string `json:"productIds" validate:"required,min=1"`
+	StartsAt               *string  `json:"startsAt"`
+	EndsAt                 *string  `json:"endsAt"`
 	CartExpirationMinutes  *int     `json:"cartExpirationMinutes"`
 	CartMaxQuantityPerItem *int     `json:"cartMaxQuantityPerItem"`
 }
@@ -392,6 +398,8 @@ type CreatePostInput struct {
 	MediaThumbnailURL      string
 	MediaCaption           string
 	ProductIDs             []string
+	StartsAt               *time.Time
+	EndsAt                 *time.Time
 	CartExpirationMinutes  *int
 	CartMaxQuantityPerItem *int
 }
@@ -459,6 +467,7 @@ type LiveResponse struct {
 	PixDiscountPercent     int        `json:"pixDiscountPercent"`
 	// Scheduling
 	ScheduledAt *time.Time `json:"scheduledAt"`
+	EndsAt      *time.Time `json:"endsAt"`
 	Description *string    `json:"description"`
 	// Counts
 	ProductCount int `json:"productCount"`
@@ -565,8 +574,9 @@ type LiveOutput struct {
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
 	PixDiscountPercent     int
-	// Scheduling
+	// Scheduling: ScheduledAt is the start, EndsAt the optional scheduled end.
 	ScheduledAt *time.Time
+	EndsAt      *time.Time
 	Description *string
 	// Counts
 	ProductCount int

@@ -339,6 +339,15 @@ type LiveEvent struct {
 	PixDiscountPercent int32 `json:"pix_discount_percent"`
 	// Minutos extras que um cliente promovido da waitlist (status=notified) tem para finalizar o checkout antes de devolver o estoque para o próximo da fila.
 	WaitlistNotifiedTtlMinutes int32 `json:"waitlist_notified_ttl_minutes"`
+	// Instagram media id when type = post
+	MediaID           pgtype.Text `json:"media_id"`
+	MediaPermalink    pgtype.Text `json:"media_permalink"`
+	MediaThumbnailUrl pgtype.Text `json:"media_thumbnail_url"`
+	MediaCaption      pgtype.Text `json:"media_caption"`
+	// true once a comments webhook arrived for this post event; polling stops
+	WebhookActive bool `json:"webhook_active"`
+	// Optional scheduled end (UTC). NULL = manual end only.
+	EndsAt pgtype.Timestamptz `json:"ends_at"`
 }
 
 type LiveSession struct {

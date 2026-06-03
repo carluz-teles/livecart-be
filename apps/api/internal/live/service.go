@@ -211,6 +211,10 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 
 	platform := "instagram"
 	closeCart := true
+	// Create the event as 'active' regardless of a future start: the effective
+	// status (and comment gating) is derived from the window, so the event is
+	// always resolvable by media id. We do NOT pass ScheduledAt to Create here,
+	// because that would set status='scheduled' and hide it from lookups.
 	out, err := s.Create(ctx, CreateLiveInput{
 		StoreID:                input.StoreID,
 		Title:                  input.Title,
@@ -223,6 +227,14 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 	})
 	if err != nil {
 		return CreateLiveOutput{}, err
+	}
+
+	// Persist the optional start/end window (raw SQL columns).
+	if input.StartsAt != nil || input.EndsAt != nil {
+		if err := s.repo.SetEventWindow(ctx, out.ID, input.StoreID, input.StartsAt, input.EndsAt); err != nil {
+			s.logger.Warn("failed to set post event window",
+				zap.String("event_id", out.ID), zap.Error(err))
+		}
 	}
 
 	// Persist post metadata (raw SQL columns, not in the sqlc INSERT).
@@ -315,9 +327,10 @@ func (s *Service) GetByID(ctx context.Context, id, storeID string) (LiveOutput, 
 		ID:                     event.ID,
 		StoreID:                event.StoreID,
 		Title:                  event.Title,
+		Type:                   event.Type,
 		Platform:               platform,
 		PlatformLiveID:         platformLiveID,
-		Status:                 event.Status,
+		Status:                 EffectiveStatus(event.Status, event.ScheduledAt, event.EndsAt),
 		StartedAt:              &startedAt,
 		EndedAt:                &endedAt,
 		TotalComments:          totalComments,
@@ -327,6 +340,8 @@ func (s *Service) GetByID(ctx context.Context, id, storeID string) (LiveOutput, 
 		CartMaxQuantityPerItem: event.CartMaxQuantityPerItem,
 		SendOnLiveEnd:          event.SendOnLiveEnd,
 		PixDiscountPercent:     event.PixDiscountPercent,
+		ScheduledAt:            event.ScheduledAt,
+		EndsAt:                 event.EndsAt,
 		CreatedAt:              event.CreatedAt,
 		UpdatedAt:              event.UpdatedAt,
 	}, nil
@@ -447,6 +462,7 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		SendOnLiveEnd:          event.SendOnLiveEnd,
 		PixDiscountPercent:     event.PixDiscountPercent,
 		ScheduledAt:            event.ScheduledAt,
+		EndsAt:                 event.EndsAt,
 		Description:            event.Description,
 		ProductCount:           productCount,
 		UpsellCount:            upsellCount,
@@ -831,6 +847,7 @@ func (s *Service) GetEventByPlatformLiveID(ctx context.Context, platformLiveID s
 		CurrentActiveProductID:  event.CurrentActiveProductID,
 		ProcessingPaused:        event.ProcessingPaused,
 		ScheduledAt:             event.ScheduledAt,
+		EndsAt:                  event.EndsAt,
 		Description:             event.Description,
 		CreatedAt:               event.CreatedAt,
 		UpdatedAt:               event.UpdatedAt,

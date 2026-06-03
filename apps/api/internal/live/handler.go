@@ -151,6 +151,25 @@ func (h *Handler) CreatePost(c *fiber.Ctx) error {
 
 	storeID := c.Locals("store_id").(string)
 
+	var startsAt, endsAt *time.Time
+	if req.StartsAt != nil && *req.StartsAt != "" {
+		t, err := time.Parse(time.RFC3339, *req.StartsAt)
+		if err != nil {
+			return httpx.BadRequest(c, "invalid startsAt format, use ISO8601/RFC3339")
+		}
+		startsAt = &t
+	}
+	if req.EndsAt != nil && *req.EndsAt != "" {
+		t, err := time.Parse(time.RFC3339, *req.EndsAt)
+		if err != nil {
+			return httpx.BadRequest(c, "invalid endsAt format, use ISO8601/RFC3339")
+		}
+		endsAt = &t
+	}
+	if startsAt != nil && endsAt != nil && !endsAt.After(*startsAt) {
+		return httpx.BadRequest(c, "endsAt must be after startsAt")
+	}
+
 	output, err := h.service.CreatePostEvent(c.Context(), CreatePostInput{
 		StoreID:                storeID,
 		Title:                  req.Title,
@@ -159,6 +178,8 @@ func (h *Handler) CreatePost(c *fiber.Ctx) error {
 		MediaThumbnailURL:      req.MediaThumbnailURL,
 		MediaCaption:           req.MediaCaption,
 		ProductIDs:             req.ProductIDs,
+		StartsAt:               startsAt,
+		EndsAt:                 endsAt,
 		CartExpirationMinutes:  req.CartExpirationMinutes,
 		CartMaxQuantityPerItem: req.CartMaxQuantityPerItem,
 	})
@@ -649,6 +670,7 @@ func toLiveResponse(o LiveOutput) LiveResponse {
 		SendOnLiveEnd:          o.SendOnLiveEnd,
 		PixDiscountPercent:     o.PixDiscountPercent,
 		ScheduledAt:            o.ScheduledAt,
+		EndsAt:                 o.EndsAt,
 		Description:            o.Description,
 		ProductCount:           o.ProductCount,
 		UpsellCount:            o.UpsellCount,
@@ -700,7 +722,7 @@ func toEventResponse(o EventOutput) EventResponse {
 		ID:                     o.ID,
 		Title:                  o.Title,
 		Type:                   o.Type,
-		Status:                 o.Status,
+		Status:                 EffectiveStatus(o.Status, o.ScheduledAt, o.EndsAt),
 		TotalOrders:            o.TotalOrders,
 		CloseCartOnEventEnd:    o.CloseCartOnEventEnd,
 		CartExpirationMinutes:  o.CartExpirationMinutes,
@@ -708,6 +730,7 @@ func toEventResponse(o EventOutput) EventResponse {
 		SendOnLiveEnd:          o.SendOnLiveEnd,
 		PixDiscountPercent:     o.PixDiscountPercent,
 		ScheduledAt:            o.ScheduledAt,
+		EndsAt:                 o.EndsAt,
 		Description:            o.Description,
 		ProductCount:           o.ProductCount,
 		UpsellCount:            o.UpsellCount,
