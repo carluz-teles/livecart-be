@@ -284,6 +284,12 @@ func (s *Service) ListActivePostEvents(ctx context.Context) ([]PostEventRef, err
 	return s.repo.ListActivePostEvents(ctx)
 }
 
+// EndPostEventByMediaID closes the post event mapped to mediaID when its media
+// is gone on Instagram, so polling stops retrying a dead media id.
+func (s *Service) EndPostEventByMediaID(ctx context.Context, mediaID string) error {
+	return s.repo.EndPostEventByMediaID(ctx, mediaID)
+}
+
 func (s *Service) GetByID(ctx context.Context, id, storeID string) (LiveOutput, error) {
 	event, err := s.repo.GetEventByID(ctx, id, storeID)
 	if err != nil {

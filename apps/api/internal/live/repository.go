@@ -423,6 +423,17 @@ func (r *Repository) MarkPostEventWebhookActive(ctx context.Context, mediaID str
 	return err
 }
 
+// EndPostEventByMediaID closes the active post event mapped to mediaID. Used when
+// Instagram reports the media is gone (deleted / no longer accessible) so the
+// polling loop stops hammering a dead media id every tick.
+func (r *Repository) EndPostEventByMediaID(ctx context.Context, mediaID string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE live_events SET status = 'ended', updated_at = now()
+		WHERE media_id = $1 AND type = 'post' AND status = 'active'
+	`, mediaID)
+	return err
+}
+
 func (r *Repository) GetEventByID(ctx context.Context, id, storeID string) (*EventRow, error) {
 	uid, err := parseUUID(id)
 	if err != nil {

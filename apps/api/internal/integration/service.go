@@ -4389,6 +4389,19 @@ func (s *Service) StartPostCommentPolling(ctx context.Context) {
 	}()
 }
 
+// isMediaGoneError reports whether an Instagram Graph error means the media is
+// permanently unreachable for us (deleted or no longer accessible) rather than a
+// transient failure. Graph signals this with code 100 / subcode 33 and the
+// "does not exist, cannot be loaded due to missing permissions" message.
+func isMediaGoneError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "error_subcode\":33") ||
+		strings.Contains(msg, "does not exist, cannot be loaded")
+}
+
 // pollPostCommentsOnce processes one capture pass over active post events that
 // are not yet webhook-driven. New comments (deduped by platform_comment_id) are
 // fed into the same ProcessInstagramComment path used by the webhook.
@@ -4408,6 +4421,18 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 		}
 		comments, err := provider.GetMediaComments(ctx, ev.MediaID)
 		if err != nil {
+			// Media gone (deleted / no longer accessible): close the event so we
+			// stop hammering a dead media id every tick instead of warning forever.
+			if isMediaGoneError(err) {
+				if endErr := s.liveService.EndPostEventByMediaID(ctx, ev.MediaID); endErr != nil {
+					s.logger.Warn("post polling: failed to end event for missing media",
+						zap.String("media_id", ev.MediaID), zap.Error(endErr))
+				} else {
+					s.logger.Info("post polling: ended event, media no longer accessible",
+						zap.String("media_id", ev.MediaID))
+				}
+				continue
+			}
 			s.logger.Warn("post polling: failed to fetch comments",
 				zap.String("media_id", ev.MediaID), zap.Error(err))
 			continue

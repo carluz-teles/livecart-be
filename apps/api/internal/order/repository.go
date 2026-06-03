@@ -46,7 +46,7 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 			c.expires_at,
 			COALESCE(c.customer_name, '') as customer_name,
 			COALESCE(c.customer_email, '') as customer_email,
-			e.title as live_title,
+			COALESCE(e.title, '') as live_title,
 			COALESCE(e.free_shipping, false) as free_shipping,
 			COALESCE(
 				(SELECT lsp.platform FROM live_session_platforms lsp
@@ -201,7 +201,7 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 			c.paid_at,
 			c.created_at,
 			c.expires_at,
-			e.title as live_title,
+			COALESCE(e.title, '') as live_title,
 			COALESCE(
 				(SELECT lsp.platform FROM live_session_platforms lsp
 				 JOIN live_sessions ls ON ls.id = lsp.session_id
