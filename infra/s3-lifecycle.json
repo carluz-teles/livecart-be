@@ -1,0 +1,10 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-instagram-uploads",
+      "Filter": { "Prefix": "instagram/" },
+      "Status": "Enabled",
+      "Expiration": { "Days": 1 }
+    }
+  ]
+}
