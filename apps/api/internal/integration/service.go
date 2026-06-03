@@ -1825,13 +1825,14 @@ func (s *Service) FetchInstagramLives(ctx context.Context, storeID string) ([]pr
 }
 
 // FetchInstagramMedia lists recent published posts/reels of the store's
-// connected Instagram account, for the post-event selector.
-func (s *Service) FetchInstagramMedia(ctx context.Context, storeID string, limit int) ([]providers.MediaPost, error) {
+// connected Instagram account (newest first), for the post-event selector.
+// `after` pages through results.
+func (s *Service) FetchInstagramMedia(ctx context.Context, storeID string, limit int, after string) (*providers.MediaPage, error) {
 	provider, err := s.resolveInstagramSocialProvider(ctx, storeID)
 	if err != nil {
 		return nil, err
 	}
-	media, err := provider.GetUserMedia(ctx, limit)
+	page, err := provider.GetUserMedia(ctx, limit, after)
 	if err != nil {
 		s.logger.Warn("failed to fetch instagram media",
 			zap.String("store_id", storeID),
@@ -1841,9 +1842,9 @@ func (s *Service) FetchInstagramMedia(ctx context.Context, storeID string, limit
 	}
 	s.logger.Info("fetched instagram media",
 		zap.String("store_id", storeID),
-		zap.Int("count", len(media)),
+		zap.Int("count", len(page.Posts)),
 	)
-	return media, nil
+	return page, nil
 }
 
 // =============================================================================

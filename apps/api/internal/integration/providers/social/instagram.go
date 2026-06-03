@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"time"
 
 	"go.uber.org/zap"
@@ -502,10 +503,11 @@ func (i *Instagram) DeleteComment(ctx context.Context, commentID string) error {
 	return nil
 }
 
-// GetUserMedia lists recent published posts/reels for the post selector.
-func (i *Instagram) GetUserMedia(ctx context.Context, limit int) ([]providers.MediaPost, error) {
+// GetUserMedia lists recent published posts/reels (newest first) for the post
+// selector. `after` pages through results using the Graph API cursor.
+func (i *Instagram) GetUserMedia(ctx context.Context, limit int, after string) (*providers.MediaPage, error) {
 	if limit <= 0 || limit > 50 {
-		limit = 25
+		limit = 24
 	}
 
 	url := fmt.Sprintf("%s/%s/me/media?fields=id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,comments_count&limit=%d&access_token=%s",
@@ -514,6 +516,9 @@ func (i *Instagram) GetUserMedia(ctx context.Context, limit int) ([]providers.Me
 		limit,
 		i.credentials.AccessToken,
 	)
+	if after != "" {
+		url += "&after=" + neturl.QueryEscape(after)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -532,14 +537,29 @@ func (i *Instagram) GetUserMedia(ctx context.Context, limit int) ([]providers.Me
 	}
 
 	var result struct {
-		Data []providers.MediaPost `json:"data"`
+		Data   []providers.MediaPost `json:"data"`
+		Paging struct {
+			Cursors struct {
+				After string `json:"after"`
+			} `json:"cursors"`
+			Next string `json:"next"`
+		} `json:"paging"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
-	i.logger.Info("fetched instagram user media", zap.Int("count", len(result.Data)))
-	return result.Data, nil
+	// Only expose a cursor when there is actually a next page.
+	nextCursor := ""
+	if result.Paging.Next != "" {
+		nextCursor = result.Paging.Cursors.After
+	}
+
+	i.logger.Info("fetched instagram user media",
+		zap.Int("count", len(result.Data)),
+		zap.Bool("has_more", nextCursor != ""),
+	)
+	return &providers.MediaPage{Posts: result.Data, After: nextCursor}, nil
 }
 
 // GetMediaComments lists top-level comments on a media object.

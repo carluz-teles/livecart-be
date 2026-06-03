@@ -342,12 +342,12 @@ func (h *Handler) GetInstagramLives(c *fiber.Ctx) error {
 func (h *Handler) GetInstagramMedia(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
 
-	media, err := h.service.FetchInstagramMedia(c.Context(), storeID, c.QueryInt("limit", 25))
+	page, err := h.service.FetchInstagramMedia(c.Context(), storeID, c.QueryInt("limit", 24), c.Query("after"))
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	return httpx.OK(c, map[string]any{"data": media})
+	return httpx.OK(c, map[string]any{"data": page.Posts, "after": page.After})
 }
 
 // ReplyInstagramComment posts a public reply comment to a live/post comment.

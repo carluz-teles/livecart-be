@@ -302,8 +302,9 @@ type SocialProvider interface {
 	// DeleteComment deletes a comment owned by the connected account.
 	DeleteComment(ctx context.Context, commentID string) error
 
-	// GetUserMedia lists recent published posts/reels for the post selector.
-	GetUserMedia(ctx context.Context, limit int) ([]MediaPost, error)
+	// GetUserMedia lists recent published posts/reels (newest first) for the post
+	// selector. `after` is the paging cursor ("" for the first page).
+	GetUserMedia(ctx context.Context, limit int, after string) (*MediaPage, error)
 
 	// GetMediaComments lists top-level comments on a media object (used by the
 	// polling capture for post-commerce events).
@@ -337,6 +338,12 @@ type LiveMedia struct {
 	MediaProductType string `json:"media_product_type"`
 	Username         string `json:"username"`
 	Timestamp        string `json:"timestamp,omitempty"`
+}
+
+// MediaPage is a page of media with the cursor for the next page.
+type MediaPage struct {
+	Posts []MediaPost `json:"posts"`
+	After string      `json:"after"` // next-page cursor; empty when there are no more
 }
 
 // MediaPost is a published feed post/reel used as the target of a post-commerce event.
