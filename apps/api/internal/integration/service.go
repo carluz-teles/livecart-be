@@ -3682,6 +3682,18 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		zap.String("text", input.Text),
 	)
 
+	// Idempotency guard: a comment can reach us from BOTH the real-time webhook
+	// and the polling capture. Skip if we've already stored this comment id, so
+	// we never create a duplicate cart for the same comment.
+	if input.CommentID != "" {
+		if exists, _ := s.repo.LiveCommentExistsByPlatformID(ctx, input.CommentID); exists {
+			s.logger.Info("comment already processed, skipping",
+				zap.String("comment_id", input.CommentID),
+			)
+			return nil
+		}
+	}
+
 	// Find live session by platform_live_id (media_id)
 	session, err := s.liveService.GetSessionByPlatformLiveID(ctx, input.MediaID)
 	if err != nil {
