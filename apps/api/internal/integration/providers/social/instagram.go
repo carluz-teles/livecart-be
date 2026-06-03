@@ -407,3 +407,97 @@ func (i *Instagram) GetActiveLives(ctx context.Context) ([]providers.LiveMedia, 
 
 	return result.Data, nil
 }
+
+// HideComment hides or unhides an Instagram comment.
+// Instagram Graph API: POST /{comment-id} with hide=true|false.
+// Instagram has no endpoint to edit a comment's text, so hide/unhide is the
+// supported "update" moderation action.
+func (i *Instagram) HideComment(ctx context.Context, commentID string, hidden bool) error {
+	if commentID == "" {
+		return fmt.Errorf("comment id is required")
+	}
+
+	url := fmt.Sprintf("%s/%s/%s?hide=%t",
+		instagramGraphAPIBaseURL,
+		instagramGraphAPIVersion,
+		commentID,
+		hidden,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return fmt.Errorf("creating hide request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+i.credentials.AccessToken)
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("sending hide request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		bodyStr := string(respBody)
+		if len(bodyStr) > 256 {
+			bodyStr = bodyStr[:256] + "..."
+		}
+		i.logger.Error("instagram hide comment failed",
+			zap.Int("status", resp.StatusCode),
+			zap.String("body", bodyStr),
+			zap.String("comment_id", commentID),
+		)
+		return fmt.Errorf("instagram hide comment failed: status %d, body: %s", resp.StatusCode, bodyStr)
+	}
+
+	i.logger.Info("instagram comment hidden",
+		zap.String("comment_id", commentID),
+		zap.Bool("hidden", hidden),
+	)
+	return nil
+}
+
+// DeleteComment deletes an Instagram comment owned by the connected account.
+// Instagram Graph API: DELETE /{comment-id}.
+func (i *Instagram) DeleteComment(ctx context.Context, commentID string) error {
+	if commentID == "" {
+		return fmt.Errorf("comment id is required")
+	}
+
+	url := fmt.Sprintf("%s/%s/%s",
+		instagramGraphAPIBaseURL,
+		instagramGraphAPIVersion,
+		commentID,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("creating delete request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+i.credentials.AccessToken)
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("sending delete request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		bodyStr := string(respBody)
+		if len(bodyStr) > 256 {
+			bodyStr = bodyStr[:256] + "..."
+		}
+		i.logger.Error("instagram delete comment failed",
+			zap.Int("status", resp.StatusCode),
+			zap.String("body", bodyStr),
+			zap.String("comment_id", commentID),
+		)
+		return fmt.Errorf("instagram delete comment failed: status %d, body: %s", resp.StatusCode, bodyStr)
+	}
+
+	i.logger.Info("instagram comment deleted",
+		zap.String("comment_id", commentID),
+	)
+	return nil
+}

@@ -294,6 +294,13 @@ type SocialProvider interface {
 	// GetActiveLives retrieves all live videos currently being broadcast.
 	// Only returns lives that are actively streaming at the time of the request.
 	GetActiveLives(ctx context.Context) ([]LiveMedia, error)
+
+	// HideComment hides or unhides a comment. Instagram has no edit-text
+	// endpoint, so hide/unhide is the supported "update" moderation action.
+	HideComment(ctx context.Context, commentID string, hidden bool) error
+
+	// DeleteComment deletes a comment owned by the connected account.
+	DeleteComment(ctx context.Context, commentID string) error
 }
 
 // SocialProfile contains social media account information.

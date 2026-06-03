@@ -614,11 +614,48 @@ func (r *Repository) ListCommentsBySession(ctx context.Context, sessionID string
 	comments := make([]CommentRow, 0, len(rows))
 	for _, row := range rows {
 		comments = append(comments, CommentRow{
-			ID:             row.ID.String(),
-			SessionID:      row.SessionID.String(),
-			PlatformHandle: row.PlatformHandle,
-			Text:           row.Text,
-			CreatedAt:      row.CreatedAt.Time,
+			ID:                row.ID.String(),
+			SessionID:         row.SessionID.String(),
+			PlatformCommentID: row.PlatformCommentID,
+			PlatformUserID:    row.PlatformUserID,
+			PlatformHandle:    row.PlatformHandle,
+			Text:              row.Text,
+			HasPurchaseIntent: row.HasPurchaseIntent.Bool,
+			CreatedAt:         row.CreatedAt.Time,
+		})
+	}
+
+	return comments, nil
+}
+
+// ListCommentsByEvent returns comments for an event, including the Instagram
+// comment ID needed for moderation (reply / hide / delete).
+func (r *Repository) ListCommentsByEvent(ctx context.Context, eventID string, limit, offset int) ([]CommentRow, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := r.q.ListCommentsByEvent(ctx, sqlc.ListCommentsByEventParams{
+		EventID: uid,
+		Limit:   int32(limit),
+		Offset:  int32(offset),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing comments by event: %w", err)
+	}
+
+	comments := make([]CommentRow, 0, len(rows))
+	for _, row := range rows {
+		comments = append(comments, CommentRow{
+			ID:                row.ID.String(),
+			SessionID:         row.SessionID.String(),
+			PlatformCommentID: row.PlatformCommentID,
+			PlatformUserID:    row.PlatformUserID,
+			PlatformHandle:    row.PlatformHandle,
+			Text:              row.Text,
+			HasPurchaseIntent: row.HasPurchaseIntent.Bool,
+			CreatedAt:         row.CreatedAt.Time,
 		})
 	}
 

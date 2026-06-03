@@ -33,6 +33,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// Event details endpoints
 	g.Get("/:id/event-stats", h.GetEventStats)
 	g.Get("/:id/carts", h.ListCarts)
+	g.Get("/:id/comments", h.ListComments)
 	g.Post("/:id/carts/:cartId/resend-message", h.ResendCartMessage)
 	g.Get("/:id/active-checkouts", h.ListActiveCheckouts)
 	g.Get("/:id/products", h.ListProducts)
@@ -742,6 +743,42 @@ func (h *Handler) ListCarts(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, ListCartsResponse{Data: responses})
+}
+
+// ListComments godoc
+// @Summary      List comments for an event (moderation)
+// @Description  Returns the event's comments including the Instagram comment ID for reply/hide/delete
+// @Tags         lives
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live event UUID"
+// @Success      200 {object} httpx.Envelope{data=ListCommentsResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/comments [get]
+// @Security     BearerAuth
+func (h *Handler) ListComments(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	comments, err := h.service.ListCommentsByEvent(c.Context(), eventID, storeID,
+		c.QueryInt("limit", 100), c.QueryInt("offset", 0))
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	responses := make([]CommentModerationResponse, len(comments))
+	for i, cm := range comments {
+		responses[i] = CommentModerationResponse{
+			ID:                cm.ID,
+			PlatformCommentID: cm.PlatformCommentID,
+			Handle:            cm.PlatformHandle,
+			Text:              cm.Text,
+			HasPurchaseIntent: cm.HasPurchaseIntent,
+			CreatedAt:         cm.CreatedAt,
+		}
+	}
+
+	return httpx.OK(c, ListCommentsResponse{Data: responses})
 }
 
 // ResendCartMessage godoc

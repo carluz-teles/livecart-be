@@ -1699,6 +1699,94 @@ func (s *Service) ReplyToInstagramComment(ctx context.Context, storeID, commentI
 	return nil
 }
 
+// resolveInstagramSocialProvider returns the active Instagram social provider
+// for a store, or an error when the integration is missing/inactive.
+func (s *Service) resolveInstagramSocialProvider(ctx context.Context, storeID string) (providers.SocialProvider, error) {
+	integration, err := s.repo.GetByProvider(ctx, storeID, "social", "instagram")
+	if err != nil {
+		return nil, fmt.Errorf("instagram integration unavailable: %w", err)
+	}
+	if integration.Status != "active" {
+		return nil, fmt.Errorf("instagram integration is not active (status=%s)", integration.Status)
+	}
+	provider, err := s.createProviderFromRow(ctx, integration)
+	if err != nil {
+		return nil, fmt.Errorf("instantiating instagram provider: %w", err)
+	}
+	socialProvider, ok := provider.(providers.SocialProvider)
+	if !ok {
+		return nil, fmt.Errorf("provider is not a social provider")
+	}
+	return socialProvider, nil
+}
+
+// PublicReplyToInstagramComment posts a PUBLIC reply comment under the buyer's
+// comment (visible on the live/post), as opposed to ReplyToInstagramComment
+// which sends a private DM. Used by the comment-moderation surface.
+func (s *Service) PublicReplyToInstagramComment(ctx context.Context, storeID, commentID, text string) error {
+	provider, err := s.resolveInstagramSocialProvider(ctx, storeID)
+	if err != nil {
+		return err
+	}
+	if err := provider.ReplyToComment(ctx, commentID, text); err != nil {
+		s.logger.Warn("failed to post public reply to instagram comment",
+			zap.String("store_id", storeID),
+			zap.String("comment_id", commentID),
+			zap.Error(err),
+		)
+		return err
+	}
+	s.logger.Info("instagram public reply posted",
+		zap.String("store_id", storeID),
+		zap.String("comment_id", commentID),
+	)
+	return nil
+}
+
+// HideInstagramComment hides or unhides a comment on the connected account.
+func (s *Service) HideInstagramComment(ctx context.Context, storeID, commentID string, hidden bool) error {
+	provider, err := s.resolveInstagramSocialProvider(ctx, storeID)
+	if err != nil {
+		return err
+	}
+	if err := provider.HideComment(ctx, commentID, hidden); err != nil {
+		s.logger.Warn("failed to hide instagram comment",
+			zap.String("store_id", storeID),
+			zap.String("comment_id", commentID),
+			zap.Bool("hidden", hidden),
+			zap.Error(err),
+		)
+		return err
+	}
+	s.logger.Info("instagram comment hidden",
+		zap.String("store_id", storeID),
+		zap.String("comment_id", commentID),
+		zap.Bool("hidden", hidden),
+	)
+	return nil
+}
+
+// DeleteInstagramComment deletes a comment on the connected account.
+func (s *Service) DeleteInstagramComment(ctx context.Context, storeID, commentID string) error {
+	provider, err := s.resolveInstagramSocialProvider(ctx, storeID)
+	if err != nil {
+		return err
+	}
+	if err := provider.DeleteComment(ctx, commentID); err != nil {
+		s.logger.Warn("failed to delete instagram comment",
+			zap.String("store_id", storeID),
+			zap.String("comment_id", commentID),
+			zap.Error(err),
+		)
+		return err
+	}
+	s.logger.Info("instagram comment deleted",
+		zap.String("store_id", storeID),
+		zap.String("comment_id", commentID),
+	)
+	return nil
+}
+
 // FetchInstagramLives retrieves all active Instagram lives for a store.
 // Returns an empty slice if no lives are currently streaming.
 func (s *Service) FetchInstagramLives(ctx context.Context, storeID string) ([]providers.LiveMedia, error) {

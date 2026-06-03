@@ -319,11 +319,30 @@ type PlatformRow struct {
 
 // Repository layer - Comment
 type CommentRow struct {
-	ID             string
-	SessionID      string
-	PlatformHandle string
-	Text           string
-	CreatedAt      time.Time
+	ID                string
+	SessionID         string
+	PlatformCommentID string
+	PlatformUserID    string
+	PlatformHandle    string
+	Text              string
+	HasPurchaseIntent bool
+	CreatedAt         time.Time
+}
+
+// CommentModerationResponse is a comment returned to the moderation UI, including
+// the Instagram comment ID needed to reply / hide / delete via the Graph API.
+type CommentModerationResponse struct {
+	ID                string    `json:"id"`
+	PlatformCommentID string    `json:"platformCommentId"`
+	Handle            string    `json:"handle"`
+	Text              string    `json:"text"`
+	HasPurchaseIntent bool      `json:"hasPurchaseIntent"`
+	CreatedAt         time.Time `json:"createdAt"`
+}
+
+// ListCommentsResponse wraps the moderation comment list.
+type ListCommentsResponse struct {
+	Data []CommentModerationResponse `json:"data"`
 }
 
 // =============================================================================

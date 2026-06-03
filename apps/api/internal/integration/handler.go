@@ -50,6 +50,11 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// Instagram operations
 	g.Get("/instagram/lives", h.GetInstagramLives)
 
+	// Instagram comment moderation (reply / hide / delete)
+	g.Post("/instagram/comments/:commentId/reply", h.ReplyInstagramComment)
+	g.Post("/instagram/comments/:commentId/hide", h.HideInstagramComment)
+	g.Delete("/instagram/comments/:commentId", h.DeleteInstagramComment)
+
 	// OAuth connect
 	g.Get("/oauth/:provider/connect", h.OAuthConnect)
 
@@ -321,6 +326,85 @@ func (h *Handler) GetInstagramLives(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, map[string]any{"data": lives})
+}
+
+// ReplyInstagramComment posts a public reply comment to a live/post comment.
+// @Summary Reply to an Instagram comment (public)
+// @Tags integrations
+// @Accept json
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param commentId path string true "Instagram comment ID"
+// @Success 200 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/instagram/comments/{commentId}/reply [post]
+// @Security BearerAuth
+func (h *Handler) ReplyInstagramComment(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	commentID := c.Params("commentId")
+
+	var req struct {
+		Text string `json:"text"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if req.Text == "" {
+		return httpx.BadRequest(c, "text is required")
+	}
+
+	if err := h.service.PublicReplyToInstagramComment(c.Context(), storeID, commentID, req.Text); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, map[string]any{"commentId": commentID, "replied": true})
+}
+
+// HideInstagramComment hides or unhides an Instagram comment.
+// @Summary Hide/unhide an Instagram comment
+// @Tags integrations
+// @Accept json
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param commentId path string true "Instagram comment ID"
+// @Success 200 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/instagram/comments/{commentId}/hide [post]
+// @Security BearerAuth
+func (h *Handler) HideInstagramComment(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	commentID := c.Params("commentId")
+
+	var req struct {
+		Hidden bool `json:"hidden"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+
+	if err := h.service.HideInstagramComment(c.Context(), storeID, commentID, req.Hidden); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, map[string]any{"commentId": commentID, "hidden": req.Hidden})
+}
+
+// DeleteInstagramComment deletes an Instagram comment.
+// @Summary Delete an Instagram comment
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param commentId path string true "Instagram comment ID"
+// @Success 200 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/instagram/comments/{commentId} [delete]
+// @Security BearerAuth
+func (h *Handler) DeleteInstagramComment(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	commentID := c.Params("commentId")
+
+	if err := h.service.DeleteInstagramComment(c.Context(), storeID, commentID); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, map[string]any{"commentId": commentID, "deleted": true})
 }
 
 // =============================================================================
