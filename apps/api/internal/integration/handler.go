@@ -406,14 +406,16 @@ func (h *Handler) UploadInstagramMedia(c *fiber.Ctx) error {
 		return httpx.InternalError(c, "failed to upload file")
 	}
 
-	// A presigned GET URL (a few hours) is enough: Instagram fetches the image
-	// at publish time, which happens moments after the merchant submits.
-	url, err := h.s3Client.GeneratePresignedGetURL(c.Context(), key, 6*time.Hour)
+	// A short-lived presigned GET URL is enough: Instagram fetches the image at
+	// publish time (moments after the merchant submits), and we delete the
+	// object right after publishing. The key is returned so the publish step
+	// can remove it.
+	url, err := h.s3Client.GeneratePresignedGetURL(c.Context(), key, 2*time.Hour)
 	if err != nil {
 		return httpx.InternalError(c, "failed to generate file URL")
 	}
 
-	return httpx.OK(c, map[string]any{"url": url})
+	return httpx.OK(c, map[string]any{"url": url, "key": key})
 }
 
 // CreateInstagramPost publishes an image post on the connected Instagram account
@@ -469,6 +471,15 @@ func (h *Handler) CreateInstagramPost(c *fiber.Ctx) error {
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
+	}
+
+	// Instagram has already fetched and stored the image during publish, so the
+	// transient upload can be removed immediately (best-effort).
+	if req.ImageKey != "" && h.s3Client != nil {
+		if delErr := h.s3Client.DeleteByKey(c.Context(), req.ImageKey); delErr != nil {
+			// Non-fatal: the presigned URL expires on its own anyway.
+			_ = delErr
+		}
 	}
 
 	return httpx.Created(c, event)

@@ -160,11 +160,16 @@ func (c *S3Client) GetPublicURL(key string) string {
 
 // DeleteFile deletes a file from S3
 func (c *S3Client) DeleteFile(ctx context.Context, url string) error {
-	key := c.extractKeyFromURL(url)
+	return c.DeleteByKey(ctx, c.extractKeyFromURL(url))
+}
+
+// DeleteByKey deletes an object by its storage key (no URL parsing). Used to
+// remove transient uploads — e.g. an Instagram post image right after it has
+// been published, so it never lingers in storage.
+func (c *S3Client) DeleteByKey(ctx context.Context, key string) error {
 	if key == "" {
 		return nil
 	}
-
 	_, err := c.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(c.bucket),
 		Key:    aws.String(key),
@@ -172,7 +177,6 @@ func (c *S3Client) DeleteFile(ctx context.Context, url string) error {
 	if err != nil {
 		return fmt.Errorf("failed to delete file: %w", err)
 	}
-
 	return nil
 }
 

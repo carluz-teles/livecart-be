@@ -654,6 +654,7 @@ type WebhookEventRow struct {
 // create its post-commerce event in one step.
 type CreateInstagramPostRequest struct {
 	ImageURL               string   `json:"imageUrl" validate:"required,url"`
+	ImageKey               string   `json:"imageKey"` // storage key, deleted after publish
 	Caption                string   `json:"caption"`
 	Title                  string   `json:"title"`
 	ProductIDs             []string `json:"productIds" validate:"required,min=1"`
