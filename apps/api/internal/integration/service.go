@@ -30,6 +30,7 @@ import (
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/idempotency"
 	"livecart/apps/api/lib/ratelimit"
+	"livecart/apps/api/lib/storage"
 )
 
 // ProductSyncer syncs products from external ERP systems into the local database.
@@ -94,7 +95,14 @@ type Service struct {
 	couponSyncer        CouponSyncer
 	postCheckoutHook    PostCheckoutHook
 	notificationService *notification.Service
+	storage             *storage.S3Client
 	logger              *zap.Logger
+}
+
+// SetStorage wires the object storage client (used to delete transient post
+// images after they are published to Instagram).
+func (s *Service) SetStorage(c *storage.S3Client) {
+	s.storage = c
 }
 
 // NewService creates a new integration service.
@@ -1862,8 +1870,15 @@ func (s *Service) CreateInstagramPostEvent(ctx context.Context, input CreateInst
 	if err != nil {
 		s.logger.Warn("failed to publish instagram image post",
 			zap.String("store_id", input.StoreID), zap.Error(err))
+		// Clean up the uploaded image even when publishing fails, so a failed
+		// attempt doesn't leave an orphan in storage.
+		s.deleteTransientImage(ctx, input.ImageKey)
 		return live.CreateLiveOutput{}, httpx.ErrUnprocessable("failed to publish the post on Instagram")
 	}
+
+	// Instagram has now fetched and stored the image, so the transient upload
+	// can be removed. Logged (not swallowed) so a delete failure is visible.
+	s.deleteTransientImage(ctx, input.ImageKey)
 
 	// Fetch the new post's permalink/thumbnail (best-effort).
 	permalink, thumbnail := "", ""
@@ -1905,6 +1920,25 @@ func (s *Service) CreateInstagramPostEvent(ctx context.Context, input CreateInst
 		zap.String("event_id", out.ID),
 	)
 	return out, nil
+}
+
+// deleteTransientImage removes a just-published post image from storage. The
+// result is logged (success or failure) so a stuck object is visible — the
+// presigned URL also expires on its own, so this is best-effort.
+func (s *Service) deleteTransientImage(ctx context.Context, key string) {
+	if key == "" {
+		return
+	}
+	if s.storage == nil {
+		s.logger.Warn("cannot delete post image: storage not wired", zap.String("key", key))
+		return
+	}
+	if err := s.storage.DeleteByKey(ctx, key); err != nil {
+		s.logger.Error("failed to delete post image from storage",
+			zap.String("key", key), zap.Error(err))
+		return
+	}
+	s.logger.Info("deleted transient post image", zap.String("key", key))
 }
 
 // CreateInstagramReelEvent uploads a video as a Reel (resumable upload, no

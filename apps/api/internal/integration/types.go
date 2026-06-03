@@ -669,6 +669,7 @@ type CreateInstagramPostRequest struct {
 type CreateInstagramPostInput struct {
 	StoreID                string
 	ImageURL               string
+	ImageKey               string // storage key, deleted after publish
 	Caption                string
 	Title                  string
 	ProductIDs             []string

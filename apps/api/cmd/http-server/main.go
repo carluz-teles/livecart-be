@@ -436,6 +436,12 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		}
 	}
 
+	// Wire storage into the integration service so it can delete transient
+	// Instagram post images after they're published.
+	if integrationSvc != nil && s3Client != nil {
+		integrationSvc.SetStorage(s3Client)
+	}
+
 	// Public checkout routes (no authentication required). Hoisted outside
 	// the integrationSvc guard because downstream wiring (coupon lifecycle)
 	// reaches in to set hooks on the service.

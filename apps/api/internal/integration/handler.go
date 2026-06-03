@@ -461,6 +461,7 @@ func (h *Handler) CreateInstagramPost(c *fiber.Ctx) error {
 	event, err := h.service.CreateInstagramPostEvent(c.Context(), CreateInstagramPostInput{
 		StoreID:                storeID,
 		ImageURL:               req.ImageURL,
+		ImageKey:               req.ImageKey, // deleted (with logging) after publish
 		Caption:                req.Caption,
 		Title:                  req.Title,
 		ProductIDs:             req.ProductIDs,
@@ -471,15 +472,6 @@ func (h *Handler) CreateInstagramPost(c *fiber.Ctx) error {
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
-	}
-
-	// Instagram has already fetched and stored the image during publish, so the
-	// transient upload can be removed immediately (best-effort).
-	if req.ImageKey != "" && h.s3Client != nil {
-		if delErr := h.s3Client.DeleteByKey(c.Context(), req.ImageKey); delErr != nil {
-			// Non-fatal: the presigned URL expires on its own anyway.
-			_ = delErr
-		}
 	}
 
 	return httpx.Created(c, event)
