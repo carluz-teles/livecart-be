@@ -1,25 +1,30 @@
 package integration
 
 import (
+	"time"
+
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/query"
+	"livecart/apps/api/lib/storage"
 )
 
 // Handler handles HTTP requests for integrations.
 type Handler struct {
 	service  *Service
 	validate *validator.Validate
+	s3Client *storage.S3Client
 }
 
 // NewHandler creates a new integration handler.
-func NewHandler(service *Service, validate *validator.Validate) *Handler {
+func NewHandler(service *Service, validate *validator.Validate, s3Client *storage.S3Client) *Handler {
 	return &Handler{
 		service:  service,
 		validate: validate,
+		s3Client: s3Client,
 	}
 }
 
@@ -50,6 +55,10 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// Instagram operations
 	g.Get("/instagram/lives", h.GetInstagramLives)
 	g.Get("/instagram/media", h.GetInstagramMedia)
+
+	// Instagram content publishing (create a post in LiveCart)
+	g.Post("/instagram/media/upload", h.UploadInstagramMedia)
+	g.Post("/instagram/posts", h.CreateInstagramPost)
 
 	// Instagram comment moderation (reply / hide / delete)
 	g.Post("/instagram/comments/:commentId/reply", h.ReplyInstagramComment)
@@ -348,6 +357,117 @@ func (h *Handler) GetInstagramMedia(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, map[string]any{"data": page.Posts, "after": page.After})
+}
+
+// UploadInstagramMedia uploads a JPEG image to storage and returns a public URL
+// Instagram can fetch during content publishing. The image is transient — once
+// the post is published, the event references the Instagram media itself.
+// @Summary Upload an image for an Instagram post
+// @Tags integrations
+// @Accept multipart/form-data
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param file formData file true "JPEG image (max 8MB)"
+// @Success 200 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/instagram/media/upload [post]
+// @Security BearerAuth
+func (h *Handler) UploadInstagramMedia(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	if h.s3Client == nil {
+		return httpx.InternalError(c, "storage not configured")
+	}
+
+	file, err := c.FormFile("file")
+	if err != nil {
+		return httpx.BadRequest(c, "file is required")
+	}
+	// Instagram content publishing accepts JPEG images up to 8MB.
+	if file.Size > 8*1024*1024 {
+		return httpx.BadRequest(c, "file too large, maximum size is 8MB")
+	}
+	contentType := file.Header.Get("Content-Type")
+	if contentType != "image/jpeg" && contentType != "image/jpg" {
+		return httpx.BadRequest(c, "invalid file type — Instagram requires a JPEG image")
+	}
+
+	src, err := file.Open()
+	if err != nil {
+		return httpx.InternalError(c, "failed to read file")
+	}
+	defer src.Close()
+
+	key, err := h.s3Client.UploadFile(c.Context(), src, file.Filename, contentType, "instagram/"+storeID)
+	if err != nil {
+		return httpx.InternalError(c, "failed to upload file")
+	}
+
+	// A presigned GET URL (a few hours) is enough: Instagram fetches the image
+	// at publish time, which happens moments after the merchant submits.
+	url, err := h.s3Client.GeneratePresignedGetURL(c.Context(), key, 6*time.Hour)
+	if err != nil {
+		return httpx.InternalError(c, "failed to generate file URL")
+	}
+
+	return httpx.OK(c, map[string]any{"url": url})
+}
+
+// CreateInstagramPost publishes an image post on the connected Instagram account
+// and creates a post-commerce event bound to the new post in one step.
+// @Summary Create an Instagram post and its post event
+// @Tags integrations
+// @Accept json
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Success 201 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/instagram/posts [post]
+// @Security BearerAuth
+func (h *Handler) CreateInstagramPost(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	var req CreateInstagramPostRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	var startsAt, endsAt *time.Time
+	if req.StartsAt != nil && *req.StartsAt != "" {
+		t, err := time.Parse(time.RFC3339, *req.StartsAt)
+		if err != nil {
+			return httpx.BadRequest(c, "invalid startsAt format")
+		}
+		startsAt = &t
+	}
+	if req.EndsAt != nil && *req.EndsAt != "" {
+		t, err := time.Parse(time.RFC3339, *req.EndsAt)
+		if err != nil {
+			return httpx.BadRequest(c, "invalid endsAt format")
+		}
+		endsAt = &t
+	}
+	if startsAt != nil && endsAt != nil && !endsAt.After(*startsAt) {
+		return httpx.BadRequest(c, "endsAt must be after startsAt")
+	}
+
+	event, err := h.service.CreateInstagramPostEvent(c.Context(), CreateInstagramPostInput{
+		StoreID:                storeID,
+		ImageURL:               req.ImageURL,
+		Caption:                req.Caption,
+		Title:                  req.Title,
+		ProductIDs:             req.ProductIDs,
+		StartsAt:               startsAt,
+		EndsAt:                 endsAt,
+		CartExpirationMinutes:  req.CartExpirationMinutes,
+		CartMaxQuantityPerItem: req.CartMaxQuantityPerItem,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Created(c, event)
 }
 
 // ReplyInstagramComment posts a public reply comment to a live/post comment.

@@ -580,7 +580,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	// Integration routes (store-scoped)
 	if integrationSvc != nil {
-		integrationHandler := integration.NewHandler(integrationSvc, validate)
+		integrationHandler := integration.NewHandler(integrationSvc, validate, s3Client)
 		integrationHandler.RegisterRoutes(storeScoped)
 
 		// Notification settings routes (depends on integration service)

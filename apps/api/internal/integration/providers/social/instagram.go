@@ -562,6 +562,110 @@ func (i *Instagram) GetUserMedia(ctx context.Context, limit int, after string) (
 	return &providers.MediaPage{Posts: result.Data, After: nextCursor}, nil
 }
 
+// PublishImagePost creates an image feed container and publishes it, returning
+// the published media id. The image must be a public JPEG URL Instagram can
+// fetch. Two-step flow: POST /me/media then POST /me/media_publish.
+func (i *Instagram) PublishImagePost(ctx context.Context, imageURL, caption string) (string, error) {
+	if imageURL == "" {
+		return "", fmt.Errorf("image url is required")
+	}
+
+	// Step 1 — create the media container.
+	containerID, err := i.postGraph(ctx, "/me/media", map[string]any{
+		"image_url": imageURL,
+		"caption":   caption,
+	})
+	if err != nil {
+		return "", fmt.Errorf("creating media container: %w", err)
+	}
+
+	// Step 2 — publish the container.
+	mediaID, err := i.postGraph(ctx, "/me/media_publish", map[string]any{
+		"creation_id": containerID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("publishing media: %w", err)
+	}
+
+	i.logger.Info("instagram image post published",
+		zap.String("container_id", containerID),
+		zap.String("media_id", mediaID),
+	)
+	return mediaID, nil
+}
+
+// postGraph POSTs a JSON body to a graph endpoint and returns the response "id".
+func (i *Instagram) postGraph(ctx context.Context, path string, payload map[string]any) (string, error) {
+	url := fmt.Sprintf("%s/%s%s", instagramGraphAPIBaseURL, instagramGraphAPIVersion, path)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshaling payload: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+i.credentials.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		bodyStr := string(respBody)
+		if len(bodyStr) > 300 {
+			bodyStr = bodyStr[:300] + "..."
+		}
+		return "", fmt.Errorf("instagram API error: status %d, body: %s", resp.StatusCode, bodyStr)
+	}
+
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return "", fmt.Errorf("decoding response: %w", err)
+	}
+	if out.ID == "" {
+		return "", fmt.Errorf("instagram API returned no id")
+	}
+	return out.ID, nil
+}
+
+// GetMediaDetails fetches metadata (permalink, thumbnail, caption) for a media id.
+func (i *Instagram) GetMediaDetails(ctx context.Context, mediaID string) (*providers.MediaPost, error) {
+	if mediaID == "" {
+		return nil, fmt.Errorf("media id is required")
+	}
+	url := fmt.Sprintf("%s/%s/%s?fields=id,caption,media_type,media_url,thumbnail_url,permalink,timestamp&access_token=%s",
+		instagramGraphAPIBaseURL,
+		instagramGraphAPIVersion,
+		mediaID,
+		i.credentials.AccessToken,
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("instagram API error: status %d, body: %s", resp.StatusCode, string(respBody))
+	}
+	var post providers.MediaPost
+	if err := json.NewDecoder(resp.Body).Decode(&post); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &post, nil
+}
+
 // GetMediaComments lists top-level comments on a media object.
 func (i *Instagram) GetMediaComments(ctx context.Context, mediaID string) ([]providers.MediaComment, error) {
 	if mediaID == "" {

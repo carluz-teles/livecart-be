@@ -649,3 +649,30 @@ type WebhookEventRow struct {
 	ErrorMessage  string
 	CreatedAt     time.Time
 }
+
+// CreateInstagramPostRequest is the HTTP payload to publish an image post and
+// create its post-commerce event in one step.
+type CreateInstagramPostRequest struct {
+	ImageURL               string   `json:"imageUrl" validate:"required,url"`
+	Caption                string   `json:"caption"`
+	Title                  string   `json:"title"`
+	ProductIDs             []string `json:"productIds" validate:"required,min=1"`
+	StartsAt               *string  `json:"startsAt"`
+	EndsAt                 *string  `json:"endsAt"`
+	CartExpirationMinutes  *int     `json:"cartExpirationMinutes"`
+	CartMaxQuantityPerItem *int     `json:"cartMaxQuantityPerItem"`
+}
+
+// CreateInstagramPostInput is the service input to publish an image post and
+// create its post event.
+type CreateInstagramPostInput struct {
+	StoreID                string
+	ImageURL               string
+	Caption                string
+	Title                  string
+	ProductIDs             []string
+	StartsAt               *time.Time
+	EndsAt                 *time.Time
+	CartExpirationMinutes  *int
+	CartMaxQuantityPerItem *int
+}

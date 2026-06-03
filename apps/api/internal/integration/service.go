@@ -1847,6 +1847,66 @@ func (s *Service) FetchInstagramMedia(ctx context.Context, storeID string, limit
 	return page, nil
 }
 
+// CreateInstagramPostEvent publishes an image post on the connected Instagram
+// account and creates a post-commerce event bound to the new post, in one step.
+// Reuses live.Service.CreatePostEvent so the post then sells via comments exactly
+// like a manually-selected post.
+func (s *Service) CreateInstagramPostEvent(ctx context.Context, input CreateInstagramPostInput) (live.CreateLiveOutput, error) {
+	provider, err := s.resolveInstagramSocialProvider(ctx, input.StoreID)
+	if err != nil {
+		return live.CreateLiveOutput{}, err
+	}
+
+	// Publish the image post.
+	mediaID, err := provider.PublishImagePost(ctx, input.ImageURL, input.Caption)
+	if err != nil {
+		s.logger.Warn("failed to publish instagram image post",
+			zap.String("store_id", input.StoreID), zap.Error(err))
+		return live.CreateLiveOutput{}, httpx.ErrUnprocessable("failed to publish the post on Instagram")
+	}
+
+	// Fetch the new post's permalink/thumbnail (best-effort).
+	permalink, thumbnail := "", ""
+	if details, dErr := provider.GetMediaDetails(ctx, mediaID); dErr == nil && details != nil {
+		permalink = details.Permalink
+		thumbnail = details.ThumbnailURL
+		if thumbnail == "" {
+			thumbnail = details.MediaURL
+		}
+	}
+
+	// Create the post-commerce event bound to the freshly published post.
+	out, err := s.liveService.CreatePostEvent(ctx, live.CreatePostInput{
+		StoreID:                input.StoreID,
+		Title:                  input.Title,
+		MediaID:                mediaID,
+		MediaPermalink:         permalink,
+		MediaThumbnailURL:      thumbnail,
+		MediaCaption:           input.Caption,
+		ProductIDs:             input.ProductIDs,
+		StartsAt:               input.StartsAt,
+		EndsAt:                 input.EndsAt,
+		CartExpirationMinutes:  input.CartExpirationMinutes,
+		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
+	})
+	if err != nil {
+		// The post is already live on Instagram; surface the event error so the
+		// merchant can retry binding via "select a post".
+		s.logger.Error("post published but event creation failed",
+			zap.String("store_id", input.StoreID),
+			zap.String("media_id", mediaID),
+			zap.Error(err))
+		return live.CreateLiveOutput{}, err
+	}
+
+	s.logger.Info("instagram post created and event bound",
+		zap.String("store_id", input.StoreID),
+		zap.String("media_id", mediaID),
+		zap.String("event_id", out.ID),
+	)
+	return out, nil
+}
+
 // =============================================================================
 // ERP OPERATIONS
 // =============================================================================

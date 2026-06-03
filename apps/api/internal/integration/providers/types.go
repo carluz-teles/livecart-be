@@ -309,6 +309,13 @@ type SocialProvider interface {
 	// GetMediaComments lists top-level comments on a media object (used by the
 	// polling capture for post-commerce events).
 	GetMediaComments(ctx context.Context, mediaID string) ([]MediaComment, error)
+
+	// PublishImagePost creates and publishes an image feed post from a public
+	// JPEG URL, returning the published media id.
+	PublishImagePost(ctx context.Context, imageURL, caption string) (string, error)
+
+	// GetMediaDetails fetches metadata (permalink, thumbnail, caption) for a media id.
+	GetMediaDetails(ctx context.Context, mediaID string) (*MediaPost, error)
 }
 
 // MediaComment is a top-level comment on a media object as returned by
