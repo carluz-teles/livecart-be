@@ -570,11 +570,17 @@ func (i *Instagram) PublishImagePost(ctx context.Context, imageURL, caption stri
 		return "", fmt.Errorf("image url is required")
 	}
 
-	// Step 1 — create the media container.
-	containerID, err := i.postGraph(ctx, "/me/media", map[string]any{
-		"image_url": imageURL,
-		"caption":   caption,
-	})
+	// Step 1 — create the media container. The container-create endpoint reads
+	// its parameters from the query string, so we pass image_url/caption there
+	// (sending them only in the JSON body can drop the caption).
+	createURL := fmt.Sprintf("%s/%s/me/media?image_url=%s&caption=%s&access_token=%s",
+		instagramGraphAPIBaseURL,
+		instagramGraphAPIVersion,
+		neturl.QueryEscape(imageURL),
+		neturl.QueryEscape(caption),
+		neturl.QueryEscape(i.credentials.AccessToken),
+	)
+	containerID, err := i.postGraphURL(ctx, createURL)
 	if err != nil {
 		return "", fmt.Errorf("creating media container: %w", err)
 	}
@@ -607,7 +613,21 @@ func (i *Instagram) postGraph(ctx context.Context, path string, payload map[stri
 	}
 	req.Header.Set("Authorization", "Bearer "+i.credentials.AccessToken)
 	req.Header.Set("Content-Type", "application/json")
+	return i.doGraphIDRequest(req)
+}
 
+// postGraphURL POSTs to a fully-built URL (params in the query string) and
+// returns the response "id".
+func (i *Instagram) postGraphURL(ctx context.Context, url string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("creating request: %w", err)
+	}
+	return i.doGraphIDRequest(req)
+}
+
+// doGraphIDRequest executes a request expected to return a JSON object with "id".
+func (i *Instagram) doGraphIDRequest(req *http.Request) (string, error) {
 	resp, err := i.client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("sending request: %w", err)
@@ -616,11 +636,7 @@ func (i *Instagram) postGraph(ctx context.Context, path string, payload map[stri
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		bodyStr := string(respBody)
-		if len(bodyStr) > 300 {
-			bodyStr = bodyStr[:300] + "..."
-		}
-		return "", fmt.Errorf("instagram API error: status %d, body: %s", resp.StatusCode, bodyStr)
+		return "", fmt.Errorf("instagram API error: status %d, body: %s", resp.StatusCode, truncate(string(respBody), 300))
 	}
 
 	var out struct {
