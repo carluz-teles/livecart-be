@@ -1824,6 +1824,28 @@ func (s *Service) FetchInstagramLives(ctx context.Context, storeID string) ([]pr
 	return lives, nil
 }
 
+// FetchInstagramMedia lists recent published posts/reels of the store's
+// connected Instagram account, for the post-event selector.
+func (s *Service) FetchInstagramMedia(ctx context.Context, storeID string, limit int) ([]providers.MediaPost, error) {
+	provider, err := s.resolveInstagramSocialProvider(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+	media, err := provider.GetUserMedia(ctx, limit)
+	if err != nil {
+		s.logger.Warn("failed to fetch instagram media",
+			zap.String("store_id", storeID),
+			zap.Error(err),
+		)
+		return nil, err
+	}
+	s.logger.Info("fetched instagram media",
+		zap.String("store_id", storeID),
+		zap.Int("count", len(media)),
+	)
+	return media, nil
+}
+
 // =============================================================================
 // ERP OPERATIONS
 // =============================================================================

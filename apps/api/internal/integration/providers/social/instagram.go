@@ -501,3 +501,82 @@ func (i *Instagram) DeleteComment(ctx context.Context, commentID string) error {
 	)
 	return nil
 }
+
+// GetUserMedia lists recent published posts/reels for the post selector.
+func (i *Instagram) GetUserMedia(ctx context.Context, limit int) ([]providers.MediaPost, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 25
+	}
+
+	url := fmt.Sprintf("%s/%s/me/media?fields=id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,comments_count&limit=%d&access_token=%s",
+		instagramGraphAPIBaseURL,
+		instagramGraphAPIVersion,
+		limit,
+		i.credentials.AccessToken,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("instagram API error: status %d, body: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Data []providers.MediaPost `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	i.logger.Info("fetched instagram user media", zap.Int("count", len(result.Data)))
+	return result.Data, nil
+}
+
+// GetMediaComments lists top-level comments on a media object.
+func (i *Instagram) GetMediaComments(ctx context.Context, mediaID string) ([]providers.MediaComment, error) {
+	if mediaID == "" {
+		return nil, fmt.Errorf("media id is required")
+	}
+
+	url := fmt.Sprintf("%s/%s/%s/comments?fields=id,text,timestamp,username,from&access_token=%s",
+		instagramGraphAPIBaseURL,
+		instagramGraphAPIVersion,
+		mediaID,
+		i.credentials.AccessToken,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("instagram API error: status %d, body: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Data []providers.MediaComment `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return result.Data, nil
+}

@@ -301,6 +301,26 @@ type SocialProvider interface {
 
 	// DeleteComment deletes a comment owned by the connected account.
 	DeleteComment(ctx context.Context, commentID string) error
+
+	// GetUserMedia lists recent published posts/reels for the post selector.
+	GetUserMedia(ctx context.Context, limit int) ([]MediaPost, error)
+
+	// GetMediaComments lists top-level comments on a media object (used by the
+	// polling capture for post-commerce events).
+	GetMediaComments(ctx context.Context, mediaID string) ([]MediaComment, error)
+}
+
+// MediaComment is a top-level comment on a media object as returned by
+// GET /{ig-media-id}/comments.
+type MediaComment struct {
+	ID        string `json:"id"`
+	Text      string `json:"text"`
+	Timestamp string `json:"timestamp,omitempty"`
+	Username  string `json:"username,omitempty"`
+	From      struct {
+		ID       string `json:"id"`
+		Username string `json:"username"`
+	} `json:"from"`
 }
 
 // SocialProfile contains social media account information.
@@ -317,6 +337,18 @@ type LiveMedia struct {
 	MediaProductType string `json:"media_product_type"`
 	Username         string `json:"username"`
 	Timestamp        string `json:"timestamp,omitempty"`
+}
+
+// MediaPost is a published feed post/reel used as the target of a post-commerce event.
+type MediaPost struct {
+	ID            string `json:"id"`
+	Caption       string `json:"caption,omitempty"`
+	MediaType     string `json:"media_type"`
+	MediaURL      string `json:"media_url,omitempty"`
+	ThumbnailURL  string `json:"thumbnail_url,omitempty"`
+	Permalink     string `json:"permalink,omitempty"`
+	Timestamp     string `json:"timestamp,omitempty"`
+	CommentsCount int    `json:"comments_count,omitempty"`
 }
 
 // WebhookHandler interface for providers that support webhooks.

@@ -49,6 +49,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 
 	// Instagram operations
 	g.Get("/instagram/lives", h.GetInstagramLives)
+	g.Get("/instagram/media", h.GetInstagramMedia)
 
 	// Instagram comment moderation (reply / hide / delete)
 	g.Post("/instagram/comments/:commentId/reply", h.ReplyInstagramComment)
@@ -326,6 +327,27 @@ func (h *Handler) GetInstagramLives(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, map[string]any{"data": lives})
+}
+
+// GetInstagramMedia lists recent posts/reels for the post-event selector.
+// @Summary Get recent Instagram posts
+// @Description Returns recent published posts/reels of the connected Instagram account
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param limit query int false "Max items" default(25)
+// @Success 200 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/instagram/media [get]
+// @Security BearerAuth
+func (h *Handler) GetInstagramMedia(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	media, err := h.service.FetchInstagramMedia(c.Context(), storeID, c.QueryInt("limit", 25))
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, map[string]any{"data": media})
 }
 
 // ReplyInstagramComment posts a public reply comment to a live/post comment.
