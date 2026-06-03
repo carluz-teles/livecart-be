@@ -406,6 +406,10 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			})
 			trackingPoller.Start()
 
+			// Capture comments on active post-commerce events via polling until
+			// the real-time `comments` webhook takes over for each post.
+			integrationSvc.StartPostCommentPolling(context.Background())
+
 			log.Info("integration layer initialized")
 		}
 	}

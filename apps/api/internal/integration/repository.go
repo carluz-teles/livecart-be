@@ -806,6 +806,21 @@ func (r *Repository) IncrementProductStock(ctx context.Context, productID string
 // =============================================================================
 
 // CreateLiveComment saves a live comment to the database.
+// LiveCommentExistsByPlatformID reports whether a comment with the given
+// Instagram comment id was already stored. Used by the post-comment polling
+// capture to avoid reprocessing comments across polls (and vs the webhook).
+func (r *Repository) LiveCommentExistsByPlatformID(ctx context.Context, platformCommentID string) (bool, error) {
+	if platformCommentID == "" {
+		return false, nil
+	}
+	var exists bool
+	err := r.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM live_comments WHERE platform_comment_id = $1)`,
+		platformCommentID,
+	).Scan(&exists)
+	return exists, err
+}
+
 func (r *Repository) CreateLiveComment(ctx context.Context, params CreateLiveCommentParams) (string, error) {
 	sessionID, err := parseUUID(params.SessionID)
 	if err != nil {

@@ -4203,6 +4203,75 @@ func (s *Service) MarkPostEventWebhookActive(ctx context.Context, mediaID string
 	return s.liveService.MarkPostEventWebhookActive(ctx, mediaID)
 }
 
+// StartPostCommentPolling launches a background loop that captures comments on
+// active post events until the real-time `comments` webhook takes over. The
+// loop stops when ctx is cancelled.
+func (s *Service) StartPostCommentPolling(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		s.logger.Info("post-comment polling started")
+		for {
+			select {
+			case <-ctx.Done():
+				s.logger.Info("post-comment polling stopped")
+				return
+			case <-ticker.C:
+				s.pollPostCommentsOnce(ctx)
+			}
+		}
+	}()
+}
+
+// pollPostCommentsOnce processes one capture pass over active post events that
+// are not yet webhook-driven. New comments (deduped by platform_comment_id) are
+// fed into the same ProcessInstagramComment path used by the webhook.
+func (s *Service) pollPostCommentsOnce(ctx context.Context) {
+	events, err := s.liveService.ListActivePostEvents(ctx)
+	if err != nil {
+		s.logger.Warn("post polling: failed to list active post events", zap.Error(err))
+		return
+	}
+	for _, ev := range events {
+		if ev.MediaID == "" {
+			continue
+		}
+		provider, err := s.resolveInstagramSocialProvider(ctx, ev.StoreID)
+		if err != nil {
+			continue
+		}
+		comments, err := provider.GetMediaComments(ctx, ev.MediaID)
+		if err != nil {
+			s.logger.Warn("post polling: failed to fetch comments",
+				zap.String("media_id", ev.MediaID), zap.Error(err))
+			continue
+		}
+		for _, c := range comments {
+			if c.ID == "" {
+				continue
+			}
+			exists, _ := s.repo.LiveCommentExistsByPlatformID(ctx, c.ID)
+			if exists {
+				continue
+			}
+			username := c.From.Username
+			if username == "" {
+				username = c.Username
+			}
+			if err := s.ProcessInstagramComment(ctx, ProcessInstagramCommentInput{
+				MediaID:   ev.MediaID,
+				CommentID: c.ID,
+				UserID:    c.From.ID,
+				Username:  username,
+				Text:      c.Text,
+			}); err != nil {
+				s.logger.Warn("post polling: failed to process comment",
+					zap.String("comment_id", c.ID), zap.Error(err))
+			}
+		}
+	}
+}
+
 // =============================================================================
 // POST-COMMERCE COMMENT RULES
 // =============================================================================
