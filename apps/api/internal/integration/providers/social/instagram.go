@@ -580,7 +580,15 @@ func (i *Instagram) PublishImagePost(ctx context.Context, imageURL, caption stri
 		return "", fmt.Errorf("creating media container: %w", err)
 	}
 
-	// Step 2 — publish (images are ready immediately).
+	// Step 2 — wait for the container to finish. Despite images usually being
+	// ready in ~1s, graph.instagram.com can still return code 9007/2207027
+	// ("media is not ready for publishing") if we publish too soon, so we poll
+	// the container status first (returns immediately once FINISHED).
+	if err := i.waitContainerFinished(ctx, containerID); err != nil {
+		return "", err
+	}
+
+	// Step 3 — publish.
 	mediaID, err := i.postGraph(ctx, "/me/media_publish", map[string]any{
 		"creation_id": containerID,
 	})
@@ -694,10 +702,10 @@ func (i *Instagram) waitContainerFinished(ctx context.Context, containerID strin
 		case "FINISHED":
 			return nil
 		case "ERROR", "EXPIRED":
-			return fmt.Errorf("instagram video processing failed: %s", status)
+			return fmt.Errorf("instagram media processing failed: %s", status)
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("instagram video still processing after timeout")
+			return fmt.Errorf("instagram media still processing after timeout")
 		}
 		select {
 		case <-ctx.Done():
