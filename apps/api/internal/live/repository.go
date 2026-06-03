@@ -386,9 +386,14 @@ func (r *Repository) GetActivePostEventByMediaID(ctx context.Context, mediaID st
 
 // ListActivePostEvents returns active post events for the polling capture loop.
 func (r *Repository) ListActivePostEvents(ctx context.Context) ([]PostEventRef, error) {
+	// Poll post events that aren't manually ended and aren't yet webhook-driven.
+	// We keep polling slightly before the start (so pre-start comments get a
+	// "not started" reply) and up to 2 days after the end (so late comments get
+	// an "ended" reply), then stop to avoid polling stale events forever.
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, store_id, COALESCE(media_id,''), status, webhook_active FROM live_events
 		WHERE type = 'post' AND status = 'active' AND media_id IS NOT NULL AND webhook_active = false
+		  AND (ends_at IS NULL OR ends_at >= now() - interval '2 days')
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("listing active post events: %w", err)

@@ -3703,21 +3703,24 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	// unavailable or ambiguous request gets a private reply listing what's
 	// available. When the request is fully handled here, persist and stop.
 	if event.Type == "post" && hasPurchaseIntent {
+		// Window gates (no background job): a buyer who comments before the
+		// event starts or after it ends gets a private reply explaining when,
+		// instead of having a cart created.
+		now := time.Now()
+		if event.ScheduledAt != nil && now.Before(*event.ScheduledAt) {
+			s.replyPostNotStarted(ctx, event, input, *event.ScheduledAt)
+			s.savePostComment(ctx, session.ID, event.ID, input, "event_not_started")
+			return nil
+		}
+		if event.Status == "ended" || (event.EndsAt != nil && now.After(*event.EndsAt)) {
+			s.replyPostEnded(ctx, event, input)
+			s.savePostComment(ctx, session.ID, event.ID, input, "event_ended")
+			return nil
+		}
+
 		resolved, handled, resultLabel := s.resolvePostEventProduct(ctx, event, input, intent, product)
 		if handled {
-			if _, cErr := s.repo.CreateLiveComment(ctx, CreateLiveCommentParams{
-				SessionID:         session.ID,
-				EventID:           event.ID,
-				Platform:          "instagram",
-				PlatformCommentID: input.CommentID,
-				PlatformUserID:    input.UserID,
-				PlatformHandle:    input.Username,
-				Text:              input.Text,
-				HasPurchaseIntent: true,
-				Result:            resultLabel,
-			}); cErr != nil {
-				s.logger.Error("failed to save post comment", zap.Error(cErr))
-			}
+			s.savePostComment(ctx, session.ID, event.ID, input, resultLabel)
 			return nil
 		}
 		product = resolved
@@ -4306,6 +4309,10 @@ func (s *Service) resolvePostEventProduct(
 	// Case A: a code matched a real product.
 	if matched != nil {
 		if inPromo(matched.ID) {
+			if matched.Stock <= 0 {
+				s.replyPostOutOfStock(ctx, event, input, matched.Name, whitelist)
+				return nil, true, "out_of_stock"
+			}
 			return matched, false, "" // proceed to the normal cart flow
 		}
 		s.replyPostUnavailable(ctx, event, input, whitelist)
@@ -4328,10 +4335,76 @@ func (s *Service) resolvePostEventProduct(
 		}
 		return nil, true, "no_product"
 	case 0:
+		// No available products: if the promotion has products but all are out
+		// of stock, tell the buyer; otherwise stay silent.
+		if len(whitelist) > 0 {
+			s.replyPostOutOfStock(ctx, event, input, "", whitelist)
+			return nil, true, "out_of_stock"
+		}
 		return nil, true, "no_product"
 	default:
 		s.replyPostChooseProduct(ctx, event, input, available)
 		return nil, true, "needs_keyword"
+	}
+}
+
+// savePostComment persists a post comment that was fully handled by the rules.
+func (s *Service) savePostComment(ctx context.Context, sessionID, eventID string, input ProcessInstagramCommentInput, result string) {
+	if _, err := s.repo.CreateLiveComment(ctx, CreateLiveCommentParams{
+		SessionID:         sessionID,
+		EventID:           eventID,
+		Platform:          "instagram",
+		PlatformCommentID: input.CommentID,
+		PlatformUserID:    input.UserID,
+		PlatformHandle:    input.Username,
+		Text:              input.Text,
+		HasPurchaseIntent: true,
+		Result:            result,
+	}); err != nil {
+		s.logger.Error("failed to save post comment", zap.Error(err))
+	}
+}
+
+// replyPostNotStarted privately tells the buyer the promotion hasn't started and
+// when it will (formatted in Brazil time, UTC-3).
+func (s *Service) replyPostNotStarted(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, startsAt time.Time) {
+	msg := fmt.Sprintf(
+		"Oi @%s! Esta promoção ainda não começou. 🗓️\nEla começa em %s. Volte lá pra garantir o seu! 💜",
+		input.Username, live.FormatBRT(startsAt),
+	)
+	s.sendPostReply(ctx, event, input.CommentID, msg)
+}
+
+// replyPostEnded privately tells the buyer the promotion has ended.
+func (s *Service) replyPostEnded(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput) {
+	msg := fmt.Sprintf("Oi @%s! Esta promoção já foi encerrada. 😕 Fique de olho que logo teremos novidades! 💜", input.Username)
+	s.sendPostReply(ctx, event, input.CommentID, msg)
+}
+
+// replyPostOutOfStock privately tells the buyer the product is sold out and
+// lists what's still available (when there is anything).
+func (s *Service) replyPostOutOfStock(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, productName string, whitelist []live.EventProductOutput) {
+	available := availablePromoProducts(whitelist)
+	var msg string
+	switch {
+	case productName != "" && len(available) > 0:
+		msg = fmt.Sprintf("Oi @%s! O produto %s esgotou. 😕\nAinda temos:\n%s\n\nComente o código do que você quer. 💜", input.Username, productName, promoProductLines(available))
+	case productName != "":
+		msg = fmt.Sprintf("Oi @%s! O produto %s esgotou. 😕", input.Username, productName)
+	default:
+		msg = fmt.Sprintf("Oi @%s! Os produtos desta promoção esgotaram. 😕 Fique de olho nas próximas! 💜", input.Username)
+	}
+	s.sendPostReply(ctx, event, input.CommentID, msg)
+}
+
+// sendPostReply sends a private reply to a post comment, logging on failure.
+func (s *Service) sendPostReply(ctx context.Context, event *live.EventOutput, commentID, msg string) {
+	if err := s.ReplyToInstagramComment(ctx, event.StoreID, commentID, msg); err != nil {
+		s.logger.Warn("failed to send post reply",
+			zap.String("event_id", event.ID),
+			zap.String("comment_id", commentID),
+			zap.Error(err),
+		)
 	}
 }
 
