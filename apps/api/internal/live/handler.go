@@ -24,6 +24,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/", h.List)
 	g.Get("/stats", h.GetStats)
 	g.Post("/", h.Create)
+	g.Post("/posts", h.CreatePost)
 	g.Get("/:id", h.GetByID)
 	g.Put("/:id", h.Update)
 	g.Delete("/:id", h.Delete)
@@ -111,6 +112,55 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		PixDiscountPercent:     req.PixDiscountPercent,
 		ScheduledAt:            scheduledAt,
 		Description:            req.Description,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Created(c, CreateLiveResponse{
+		ID:        output.ID,
+		Title:     output.Title,
+		Type:      output.Type,
+		Platform:  output.Platform,
+		Status:    output.Status,
+		CreatedAt: output.CreatedAt,
+	})
+}
+
+// CreatePost godoc
+// @Summary      Create a post-commerce event
+// @Description  Maps a published Instagram post to a commerce event with selected products
+// @Tags         lives
+// @Accept       json
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        request body CreatePostRequest true "Post event payload"
+// @Success      201 {object} httpx.Envelope{data=CreateLiveResponse}
+// @Failure      400 {object} httpx.Envelope
+// @Failure      422 {object} httpx.ValidationEnvelope
+// @Router       /api/v1/stores/{storeId}/lives/posts [post]
+// @Security     BearerAuth
+func (h *Handler) CreatePost(c *fiber.Ctx) error {
+	var req CreatePostRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	storeID := c.Locals("store_id").(string)
+
+	output, err := h.service.CreatePostEvent(c.Context(), CreatePostInput{
+		StoreID:                storeID,
+		Title:                  req.Title,
+		MediaID:                req.MediaID,
+		MediaPermalink:         req.MediaPermalink,
+		MediaThumbnailURL:      req.MediaThumbnailURL,
+		MediaCaption:           req.MediaCaption,
+		ProductIDs:             req.ProductIDs,
+		CartExpirationMinutes:  req.CartExpirationMinutes,
+		CartMaxQuantityPerItem: req.CartMaxQuantityPerItem,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)

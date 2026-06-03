@@ -345,6 +345,57 @@ type ListCommentsResponse struct {
 	Data []CommentModerationResponse `json:"data"`
 }
 
+// PostMediaInput carries the Instagram post metadata when creating a post event.
+type PostMediaInput struct {
+	MediaID      string
+	Permalink    string
+	ThumbnailURL string
+	Caption      string
+}
+
+// PostMedia is the stored post metadata for an event.
+type PostMedia struct {
+	MediaID       string `json:"mediaId"`
+	Permalink     string `json:"permalink"`
+	ThumbnailURL  string `json:"thumbnailUrl"`
+	Caption       string `json:"caption"`
+	WebhookActive bool   `json:"webhookActive"`
+}
+
+// PostEventRef is a lightweight reference to a post event for capture loops.
+type PostEventRef struct {
+	EventID       string
+	StoreID       string
+	MediaID       string
+	Status        string
+	WebhookActive bool
+}
+
+// CreatePostRequest is the HTTP payload to create a post-commerce event.
+type CreatePostRequest struct {
+	Title                  string   `json:"title"`
+	MediaID                string   `json:"mediaId" validate:"required"`
+	MediaPermalink         string   `json:"mediaPermalink"`
+	MediaThumbnailURL      string   `json:"mediaThumbnailUrl"`
+	MediaCaption           string   `json:"mediaCaption"`
+	ProductIDs             []string `json:"productIds" validate:"required,min=1"`
+	CartExpirationMinutes  *int     `json:"cartExpirationMinutes"`
+	CartMaxQuantityPerItem *int     `json:"cartMaxQuantityPerItem"`
+}
+
+// CreatePostInput is the input to create a post-commerce event.
+type CreatePostInput struct {
+	StoreID                string
+	Title                  string
+	MediaID                string
+	MediaPermalink         string
+	MediaThumbnailURL      string
+	MediaCaption           string
+	ProductIDs             []string
+	CartExpirationMinutes  *int
+	CartMaxQuantityPerItem *int
+}
+
 // =============================================================================
 // LEGACY TYPES - For backwards compatibility with existing /lives endpoint
 // =============================================================================

@@ -280,6 +280,112 @@ func (r *Repository) SetPixDiscountPercent(ctx context.Context, eventID, storeID
 	return nil
 }
 
+// SetEventMedia persists the Instagram post metadata for a post-commerce event.
+// Stored via raw SQL because these columns are not wired into the sqlc INSERT.
+func (r *Repository) SetEventMedia(ctx context.Context, eventID, storeID string, media PostMediaInput) error {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE live_events
+		SET media_id = $3, media_permalink = $4, media_thumbnail_url = $5, media_caption = $6, updated_at = now()
+		WHERE id = $1 AND store_id = $2
+	`, uid, storeUID, media.MediaID, media.Permalink, media.ThumbnailURL, media.Caption)
+	if err != nil {
+		return fmt.Errorf("setting event media: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return httpx.ErrNotFound("event not found")
+	}
+	return nil
+}
+
+// GetEventMedia returns the post media metadata for an event.
+func (r *Repository) GetEventMedia(ctx context.Context, eventID string) (*PostMedia, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+	var m PostMedia
+	var mediaID, permalink, thumb, caption pgtype.Text
+	err = r.pool.QueryRow(ctx, `
+		SELECT COALESCE(media_id,''), COALESCE(media_permalink,''), COALESCE(media_thumbnail_url,''), COALESCE(media_caption,''), webhook_active
+		FROM live_events WHERE id = $1
+	`, uid).Scan(&mediaID, &permalink, &thumb, &caption, &m.WebhookActive)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.ErrNotFound("event not found")
+		}
+		return nil, fmt.Errorf("getting event media: %w", err)
+	}
+	m.MediaID = mediaID.String
+	m.Permalink = permalink.String
+	m.ThumbnailURL = thumb.String
+	m.Caption = caption.String
+	return &m, nil
+}
+
+// GetActivePostEventByMediaID returns the active post event mapped to a media id,
+// used by webhook/polling capture. Returns nil when none exists.
+func (r *Repository) GetActivePostEventByMediaID(ctx context.Context, mediaID string) (*PostEventRef, error) {
+	var ref PostEventRef
+	var id, storeID pgtype.UUID
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, store_id, status FROM live_events
+		WHERE media_id = $1 AND type = 'post' AND status = 'active'
+		ORDER BY created_at DESC LIMIT 1
+	`, mediaID).Scan(&id, &storeID, &ref.Status)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("getting post event by media id: %w", err)
+	}
+	ref.EventID = id.String()
+	ref.StoreID = storeID.String()
+	ref.MediaID = mediaID
+	return &ref, nil
+}
+
+// ListActivePostEvents returns active post events for the polling capture loop.
+func (r *Repository) ListActivePostEvents(ctx context.Context) ([]PostEventRef, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, store_id, COALESCE(media_id,''), status, webhook_active FROM live_events
+		WHERE type = 'post' AND status = 'active' AND media_id IS NOT NULL AND webhook_active = false
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("listing active post events: %w", err)
+	}
+	defer rows.Close()
+	var out []PostEventRef
+	for rows.Next() {
+		var ref PostEventRef
+		var id, storeID pgtype.UUID
+		if err := rows.Scan(&id, &storeID, &ref.MediaID, &ref.Status, &ref.WebhookActive); err != nil {
+			return nil, err
+		}
+		ref.EventID = id.String()
+		ref.StoreID = storeID.String()
+		out = append(out, ref)
+	}
+	return out, rows.Err()
+}
+
+// MarkPostEventWebhookActive flags that a comments webhook arrived for the post
+// event mapped to mediaID, so the polling loop stops handling it.
+func (r *Repository) MarkPostEventWebhookActive(ctx context.Context, mediaID string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE live_events SET webhook_active = true, updated_at = now()
+		WHERE media_id = $1 AND type = 'post' AND status = 'active'
+	`, mediaID)
+	return err
+}
+
 func (r *Repository) GetEventByID(ctx context.Context, id, storeID string) (*EventRow, error) {
 	uid, err := parseUUID(id)
 	if err != nil {

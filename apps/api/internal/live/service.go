@@ -197,6 +197,70 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 	}, nil
 }
 
+// CreatePostEvent creates a post-commerce event mapped to a published Instagram
+// post. It reuses the live create path (the post media id is stored as the
+// session platform_live_id so comment processing finds the event), persists the
+// post metadata, and whitelists the selected products for the promotion.
+func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (CreateLiveOutput, error) {
+	if input.MediaID == "" {
+		return CreateLiveOutput{}, httpx.ErrBadRequest("mediaId is required")
+	}
+	if len(input.ProductIDs) == 0 {
+		return CreateLiveOutput{}, httpx.ErrBadRequest("select at least one product for the promotion")
+	}
+
+	platform := "instagram"
+	closeCart := true
+	out, err := s.Create(ctx, CreateLiveInput{
+		StoreID:                input.StoreID,
+		Title:                  input.Title,
+		Type:                   "post",
+		Platform:               &platform,
+		PlatformLiveID:         &input.MediaID,
+		CloseCartOnEventEnd:    &closeCart,
+		CartExpirationMinutes:  input.CartExpirationMinutes,
+		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
+	})
+	if err != nil {
+		return CreateLiveOutput{}, err
+	}
+
+	// Persist post metadata (raw SQL columns, not in the sqlc INSERT).
+	if err := s.repo.SetEventMedia(ctx, out.ID, input.StoreID, PostMediaInput{
+		MediaID:      input.MediaID,
+		Permalink:    input.MediaPermalink,
+		ThumbnailURL: input.MediaThumbnailURL,
+		Caption:      input.MediaCaption,
+	}); err != nil {
+		s.logger.Warn("failed to set post media metadata",
+			zap.String("event_id", out.ID), zap.Error(err))
+	}
+
+	// Whitelist the selected products for this promotion.
+	for i, productID := range input.ProductIDs {
+		if _, err := s.AddEventProduct(ctx, AddEventProductInput{
+			EventID:      out.ID,
+			StoreID:      input.StoreID,
+			ProductID:    productID,
+			DisplayOrder: int32(i),
+		}); err != nil {
+			s.logger.Warn("failed to whitelist product on post event",
+				zap.String("event_id", out.ID),
+				zap.String("product_id", productID),
+				zap.Error(err))
+		}
+	}
+
+	s.logger.Info("post event created",
+		zap.String("event_id", out.ID),
+		zap.String("media_id", input.MediaID),
+		zap.Int("product_count", len(input.ProductIDs)),
+	)
+
+	out.Platform = platform
+	return out, nil
+}
+
 func (s *Service) GetByID(ctx context.Context, id, storeID string) (LiveOutput, error) {
 	event, err := s.repo.GetEventByID(ctx, id, storeID)
 	if err != nil {
