@@ -489,6 +489,7 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 		Event: CartEventInfo{
 			ID:                 output.Cart.EventID,
 			Title:              output.Cart.EventTitle,
+			Type:               output.Cart.EventType,
 			PixDiscountPercent: output.Cart.EventPixDiscountPercent,
 			FreeShipping:       output.Cart.EventFreeShipping,
 		},

@@ -62,6 +62,27 @@ func (r *Repository) LoadEventCheckoutFlags(ctx context.Context, pool *pgxpool.P
 	return freeShipping, int(pct), nil
 }
 
+// LoadEventType reads the event type ('single' | 'multi' | 'post') for a cart's
+// event so the checkout UI can use post-appropriate wording instead of "live".
+// Returns "" on a missing event (non-fatal hydration miss).
+func (r *Repository) LoadEventType(ctx context.Context, pool *pgxpool.Pool, eventID string) (string, error) {
+	uid, err := uuid.Parse(eventID)
+	if err != nil {
+		return "", httpx.ErrBadRequest("invalid event ID")
+	}
+	var eventType string
+	err = pool.QueryRow(ctx, `
+		SELECT COALESCE(type, 'single') FROM live_events WHERE id = $1
+	`, pgtype.UUID{Bytes: uid, Valid: true}).Scan(&eventType)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("loading event type: %w", err)
+	}
+	return eventType, nil
+}
+
 // ListCartItems retrieves all items for a cart.
 func (r *Repository) ListCartItems(ctx context.Context, cartID string) ([]CartItemRow, error) {
 	uid, err := uuid.Parse(cartID)

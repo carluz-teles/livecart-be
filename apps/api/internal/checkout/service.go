@@ -154,6 +154,9 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 			zap.Error(err),
 		)
 	}
+	if eventType, err := s.repo.LoadEventType(ctx, s.pool, cart.EventID); err == nil {
+		cart.EventType = eventType
+	}
 
 	// Convert to output
 	output := &GetCartForCheckoutOutput{
@@ -172,6 +175,7 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 			CreatedAt:          cart.CreatedAt,
 			ExpiresAt:          cart.ExpiresAt,
 			EventTitle:              cart.EventTitle,
+			EventType:               cart.EventType,
 			EventFreeShipping:       cart.EventFreeShipping,
 			EventPixDiscountPercent: cart.EventPixDiscountPercent,
 			StoreID:            cart.StoreID,
