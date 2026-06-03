@@ -3,7 +3,6 @@ package providers
 import (
 	"context"
 	"errors"
-	"io"
 	"time"
 )
 
@@ -315,9 +314,9 @@ type SocialProvider interface {
 	// JPEG URL, returning the published media id.
 	PublishImagePost(ctx context.Context, imageURL, caption string) (string, error)
 
-	// PublishReel uploads the video bytes directly (resumable upload, no hosting)
-	// and publishes a Reel, returning the published media id.
-	PublishReel(ctx context.Context, video io.Reader, size int64, caption string) (string, error)
+	// PublishReel publishes a Reel from a public video URL (graph.instagram.com
+	// requires video_url), returning the published media id.
+	PublishReel(ctx context.Context, videoURL, caption string) (string, error)
 
 	// GetMediaDetails fetches metadata (permalink, thumbnail, caption) for a media id.
 	GetMediaDetails(ctx context.Context, mediaID string) (*MediaPost, error)

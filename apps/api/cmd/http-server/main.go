@@ -159,6 +159,10 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			return httpx.HandleServiceError(c, err)
 		},
+		// Reels can be up to 300MB; stream the request body to disk instead of
+		// buffering it in memory.
+		BodyLimit:         320 * 1024 * 1024,
+		StreamRequestBody: true,
 	})
 
 	app.Use(recover.New())

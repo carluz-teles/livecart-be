@@ -532,14 +532,30 @@ func (h *Handler) CreateInstagramReel(c *fiber.Ctx) error {
 		}
 	}
 
+	if h.s3Client == nil {
+		return httpx.InternalError(c, "storage not configured")
+	}
 	src, err := file.Open()
 	if err != nil {
 		return httpx.InternalError(c, "failed to read file")
 	}
 	defer src.Close()
 
+	// Instagram fetches the video from a public URL (it does not accept the bytes
+	// on this API), so host it transiently and pass a presigned URL. The service
+	// deletes the object after publishing.
+	key, err := h.s3Client.UploadFile(c.Context(), src, file.Filename, ct, "instagram/"+storeID)
+	if err != nil {
+		return httpx.InternalError(c, "failed to upload video")
+	}
+	videoURL, err := h.s3Client.GeneratePresignedGetURL(c.Context(), key, 6*time.Hour)
+	if err != nil {
+		return httpx.InternalError(c, "failed to generate video URL")
+	}
+
 	event, err := h.service.CreateInstagramReelEvent(c.Context(), CreateInstagramPostInput{
 		StoreID:                storeID,
+		ImageKey:               key, // the transient video key, deleted after publish
 		Caption:                c.FormValue("caption"),
 		Title:                  c.FormValue("title"),
 		ProductIDs:             productIDs,
@@ -547,7 +563,7 @@ func (h *Handler) CreateInstagramReel(c *fiber.Ctx) error {
 		EndsAt:                 endsAt,
 		CartExpirationMinutes:  cartExp,
 		CartMaxQuantityPerItem: maxQty,
-	}, src, file.Size)
+	}, videoURL)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}

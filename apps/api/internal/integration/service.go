@@ -1941,21 +1941,24 @@ func (s *Service) deleteTransientImage(ctx context.Context, key string) {
 	s.logger.Info("deleted transient post image", zap.String("key", key))
 }
 
-// CreateInstagramReelEvent uploads a video as a Reel (resumable upload, no
-// hosting), publishes it, and creates the bound post-commerce event. The video
-// bytes are streamed straight to Instagram.
-func (s *Service) CreateInstagramReelEvent(ctx context.Context, input CreateInstagramPostInput, video io.Reader, size int64) (live.CreateLiveOutput, error) {
+// CreateInstagramReelEvent publishes a Reel from a public video URL and creates
+// the bound post event. The transient video (input.ImageKey) is deleted after.
+func (s *Service) CreateInstagramReelEvent(ctx context.Context, input CreateInstagramPostInput, videoURL string) (live.CreateLiveOutput, error) {
 	provider, err := s.resolveInstagramSocialProvider(ctx, input.StoreID)
 	if err != nil {
 		return live.CreateLiveOutput{}, err
 	}
 
-	mediaID, err := provider.PublishReel(ctx, video, size, input.Caption)
+	mediaID, err := provider.PublishReel(ctx, videoURL, input.Caption)
 	if err != nil {
 		s.logger.Warn("failed to publish instagram reel",
 			zap.String("store_id", input.StoreID), zap.Error(err))
+		s.deleteTransientImage(ctx, input.ImageKey)
 		return live.CreateLiveOutput{}, httpx.ErrUnprocessable("failed to publish the reel on Instagram")
 	}
+
+	// Instagram has fetched and processed the video; remove the transient upload.
+	s.deleteTransientImage(ctx, input.ImageKey)
 
 	permalink, thumbnail := "", ""
 	if details, dErr := provider.GetMediaDetails(ctx, mediaID); dErr == nil && details != nil {

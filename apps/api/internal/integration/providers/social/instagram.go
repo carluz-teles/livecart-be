@@ -570,22 +570,17 @@ func (i *Instagram) PublishImagePost(ctx context.Context, imageURL, caption stri
 		return "", fmt.Errorf("image url is required")
 	}
 
-	// Step 1 — create the media container. The container-create endpoint reads
-	// its parameters from the query string, so we pass image_url/caption there
-	// (sending them only in the JSON body can drop the caption).
-	createURL := fmt.Sprintf("%s/%s/me/media?image_url=%s&caption=%s&access_token=%s",
-		instagramGraphAPIBaseURL,
-		instagramGraphAPIVersion,
-		neturl.QueryEscape(imageURL),
-		neturl.QueryEscape(caption),
-		neturl.QueryEscape(i.credentials.AccessToken),
-	)
-	containerID, err := i.postGraphURL(ctx, createURL)
+	// Step 1 — create the image container (JSON body). Long presigned image URLs
+	// don't fit reliably in the query string, so the params go in the body.
+	containerID, err := i.postGraph(ctx, "/me/media", map[string]any{
+		"image_url": imageURL,
+		"caption":   caption,
+	})
 	if err != nil {
 		return "", fmt.Errorf("creating media container: %w", err)
 	}
 
-	// Step 2 — publish the container.
+	// Step 2 — publish (images are ready immediately).
 	mediaID, err := i.postGraph(ctx, "/me/media_publish", map[string]any{
 		"creation_id": containerID,
 	})
@@ -651,35 +646,28 @@ func (i *Instagram) doGraphIDRequest(req *http.Request) (string, error) {
 	return out.ID, nil
 }
 
-// PublishReel publishes a Reel by streaming the video bytes directly to
-// Instagram via the resumable upload protocol — no public hosting required.
-// Flow: init resumable container -> upload bytes -> poll status until FINISHED
-// -> media_publish. Returns the published media id.
-func (i *Instagram) PublishReel(ctx context.Context, video io.Reader, size int64, caption string) (string, error) {
-	if video == nil || size <= 0 {
-		return "", fmt.Errorf("video is required")
+// PublishReel publishes a Reel from a public video URL. The Instagram-Login API
+// (graph.instagram.com) requires video_url (it does not support the resumable
+// upload protocol, which is Facebook-Login only). Flow: create REELS container
+// -> poll status until FINISHED (video processing) -> media_publish.
+func (i *Instagram) PublishReel(ctx context.Context, videoURL, caption string) (string, error) {
+	if videoURL == "" {
+		return "", fmt.Errorf("video url is required")
 	}
 
-	// Step 1 — init a resumable container.
-	containerID, uploadURI, err := i.initResumableReel(ctx, caption)
+	containerID, err := i.postGraph(ctx, "/me/media", map[string]any{
+		"media_type": "REELS",
+		"video_url":  videoURL,
+		"caption":    caption,
+	})
 	if err != nil {
-		return "", fmt.Errorf("init reel container: %w", err)
+		return "", fmt.Errorf("creating reel container: %w", err)
 	}
 
-	// Step 2 — upload the bytes to the returned URI.
-	if uploadURI == "" {
-		uploadURI = fmt.Sprintf("https://rupload.facebook.com/ig-api-upload/%s/%s", instagramGraphAPIVersion, containerID)
-	}
-	if err := i.uploadResumable(ctx, uploadURI, video, size); err != nil {
-		return "", fmt.Errorf("uploading reel: %w", err)
-	}
-
-	// Step 3 — wait for Instagram to finish processing the video.
 	if err := i.waitContainerFinished(ctx, containerID); err != nil {
 		return "", err
 	}
 
-	// Step 4 — publish.
 	mediaID, err := i.postGraph(ctx, "/me/media_publish", map[string]any{"creation_id": containerID})
 	if err != nil {
 		return "", fmt.Errorf("publishing reel: %w", err)
@@ -690,68 +678,6 @@ func (i *Instagram) PublishReel(ctx context.Context, video io.Reader, size int64
 		zap.String("media_id", mediaID),
 	)
 	return mediaID, nil
-}
-
-// initResumableReel creates a REELS container with upload_type=resumable and
-// returns the container id and the upload URI (when provided by the API).
-func (i *Instagram) initResumableReel(ctx context.Context, caption string) (containerID, uploadURI string, err error) {
-	url := fmt.Sprintf("%s/%s/me/media", instagramGraphAPIBaseURL, instagramGraphAPIVersion)
-	payload := map[string]any{
-		"media_type":  "REELS",
-		"upload_type": "resumable",
-		"caption":     caption,
-	}
-	body, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+i.credentials.AccessToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := i.client.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return "", "", fmt.Errorf("status %d, body: %s", resp.StatusCode, truncate(string(respBody), 300))
-	}
-	var out struct {
-		ID  string `json:"id"`
-		URI string `json:"uri"`
-	}
-	if err := json.Unmarshal(respBody, &out); err != nil {
-		return "", "", err
-	}
-	if out.ID == "" {
-		return "", "", fmt.Errorf("no container id returned")
-	}
-	return out.ID, out.URI, nil
-}
-
-// uploadResumable streams the video bytes to the resumable upload URI.
-func (i *Instagram) uploadResumable(ctx context.Context, uploadURI string, video io.Reader, size int64) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURI, video)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "OAuth "+i.credentials.AccessToken)
-	req.Header.Set("offset", "0")
-	req.Header.Set("file_size", fmt.Sprintf("%d", size))
-	req.ContentLength = size
-
-	resp, err := i.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("upload status %d, body: %s", resp.StatusCode, truncate(string(respBody), 300))
-	}
-	return nil
 }
 
 // waitContainerFinished polls the container status until FINISHED (or fails).
