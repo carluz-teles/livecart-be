@@ -125,6 +125,10 @@ func (s *Service) GetByID(ctx context.Context, id vo.ProductID, storeID vo.Store
 			refs[i] = OptionValueRef{Option: o.OptionName, Value: o.Value}
 		}
 		out.OptionValues = refs
+		// Group base name for the short title (best-effort).
+		if info, err := s.repo.VariantInfoForProducts(ctx, []string{out.ID}); err == nil {
+			out.GroupName = info[out.ID].GroupName
+		}
 	}
 	return out, nil
 }
@@ -146,8 +150,27 @@ func (s *Service) List(ctx context.Context, input ListProductsInput) (ListProduc
 	}
 
 	products := make([]ProductOutput, len(result.Products))
+	variantIDs := make([]string, 0)
 	for i, product := range result.Products {
 		products[i] = toProductOutput(product)
+		if products[i].GroupID != "" {
+			variantIDs = append(variantIDs, products[i].ID)
+		}
+	}
+
+	// Enrich variants with their group name + option values so the picker can
+	// show "Camiseta · Cor: Preto · Tam: M" instead of one giant product name.
+	if len(variantIDs) > 0 {
+		if info, err := s.repo.VariantInfoForProducts(ctx, variantIDs); err != nil {
+			s.logger.Warn("failed to load variant info for product list", zap.Error(err))
+		} else {
+			for i := range products {
+				if vi, ok := info[products[i].ID]; ok {
+					products[i].GroupName = vi.GroupName
+					products[i].OptionValues = vi.Options
+				}
+			}
+		}
 	}
 
 	return ListProductsOutput{

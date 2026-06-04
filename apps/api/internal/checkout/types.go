@@ -17,35 +17,35 @@ import (
 // "data unavailable" (older paid carts may have nothing recorded for
 // card-specific fields, since they were not persisted before this change).
 type CartForCheckoutResponse struct {
-	ID                 string                          `json:"id"`
-	Token              string                          `json:"token"`
-	Status             string                          `json:"status"`
-	CustomerEmail      *string                         `json:"customerEmail"`
-	PaymentStatus      string                          `json:"paymentStatus"`
-	CheckoutURL        *string                         `json:"checkoutUrl"`
-	PlatformHandle     string                          `json:"platformHandle"`
-	AllowEdit          bool                            `json:"allowEdit"`
-	MaxQuantityPerItem int                             `json:"maxQuantityPerItem"`
-	ExpiresAt          *time.Time                      `json:"expiresAt"`
-	PaidAt             *time.Time                      `json:"paidAt,omitempty"`
-	CreatedAt          time.Time                       `json:"createdAt"`
-	Event              CartEventInfo                   `json:"event"`
-	Store              CartStoreInfo                   `json:"store"`
-	Items              []CartItemResponse              `json:"items"`
-	WaitlistItems      []WaitlistItemResponse          `json:"waitlistItems"`
-	Summary            CartSummary                     `json:"summary"`
-	Shipping           *CartShippingSelection          `json:"shipping,omitempty"`
-	Customer           *CheckoutCustomerInfo           `json:"customer,omitempty"`
-	ShippingAddress    *CheckoutShippingAddressInfo    `json:"shippingAddress,omitempty"`
-	Payment            *CheckoutPaymentInfo            `json:"payment,omitempty"`
+	ID                 string                       `json:"id"`
+	Token              string                       `json:"token"`
+	Status             string                       `json:"status"`
+	CustomerEmail      *string                      `json:"customerEmail"`
+	PaymentStatus      string                       `json:"paymentStatus"`
+	CheckoutURL        *string                      `json:"checkoutUrl"`
+	PlatformHandle     string                       `json:"platformHandle"`
+	AllowEdit          bool                         `json:"allowEdit"`
+	MaxQuantityPerItem int                          `json:"maxQuantityPerItem"`
+	ExpiresAt          *time.Time                   `json:"expiresAt"`
+	PaidAt             *time.Time                   `json:"paidAt,omitempty"`
+	CreatedAt          time.Time                    `json:"createdAt"`
+	Event              CartEventInfo                `json:"event"`
+	Store              CartStoreInfo                `json:"store"`
+	Items              []CartItemResponse           `json:"items"`
+	WaitlistItems      []WaitlistItemResponse       `json:"waitlistItems"`
+	Summary            CartSummary                  `json:"summary"`
+	Shipping           *CartShippingSelection       `json:"shipping,omitempty"`
+	Customer           *CheckoutCustomerInfo        `json:"customer,omitempty"`
+	ShippingAddress    *CheckoutShippingAddressInfo `json:"shippingAddress,omitempty"`
+	Payment            *CheckoutPaymentInfo         `json:"payment,omitempty"`
 	// True when Customer / ShippingAddress were prefilled from the same buyer's
 	// previous paid cart (returning-buyer flow). Frontend uses it to render the
 	// "olá de novo" banner above the form.
-	IsReturningCustomer bool                           `json:"isReturningCustomer,omitempty"`
+	IsReturningCustomer bool `json:"isReturningCustomer,omitempty"`
 	// AppliedCoupon is the snapshot of the coupon currently attached to the
 	// cart, if any. The FE uses it to render the applied state and offer a
 	// remove action.
-	AppliedCoupon       *AppliedCoupon                  `json:"appliedCoupon,omitempty"`
+	AppliedCoupon *AppliedCoupon `json:"appliedCoupon,omitempty"`
 }
 
 // CheckoutCustomerInfo is the buyer identity captured at checkout. Exposed
@@ -128,6 +128,17 @@ type CartItemResponse struct {
 	// combines it with MaxQuantityPerItem (cart-level cap) to disable the +
 	// button when the buyer would exceed either limit.
 	AvailableStock int `json:"availableStock"`
+	// GroupName + Variant describe a variant product so the checkout can show a
+	// short title plus the chosen options (Cor/Tamanho) instead of one giant
+	// product name. Empty for simple products.
+	GroupName string          `json:"groupName,omitempty"`
+	Variant   []VariantOption `json:"variant,omitempty"`
+}
+
+// VariantOption is one option/value pair of a variant (e.g. {Cor, Preto}).
+type VariantOption struct {
+	Option string `json:"option"`
+	Value  string `json:"value"`
 }
 
 // WaitlistItemResponse é a entrada de fila renderizada no /cart/:token. A
@@ -149,16 +160,16 @@ type WaitlistItemResponse struct {
 
 // CartSummary contains the cart totals
 type CartSummary struct {
-	Subtotal         int64 `json:"subtotal"`
-	ShippingCost     int64 `json:"shippingCost"`
+	Subtotal     int64 `json:"subtotal"`
+	ShippingCost int64 `json:"shippingCost"`
 	// Applied coupon discount in cents — 0 when no coupon. Total already
 	// reflects the subtraction; we expose the absolute discount so the FE
 	// can render the "Cupom CODE −R$ X,XX" line in the totals breakdown.
-	CouponDiscount   int64 `json:"couponDiscount"`
+	CouponDiscount int64 `json:"couponDiscount"`
 	// PixDiscountPercent is the configured event-level Pix discount (0-100).
 	// 0 disables the feature. Computed off (subtotal - couponDiscount) at
 	// payment time when the buyer chooses Pix.
-	PixDiscountPercent int   `json:"pixDiscountPercent"`
+	PixDiscountPercent int `json:"pixDiscountPercent"`
 	// PixDiscountCents is the absolute discount that *would* apply if the
 	// buyer pays with Pix — exposed so the FE can preview the line in the
 	// checkout summary. The cart `total` field below does NOT subtract it
@@ -318,44 +329,44 @@ type GetCartForCheckoutOutput struct {
 // WaitlistItemDetails é a projeção de uma entrada de fila visível ao cliente
 // no checkout. Status pode ser 'waiting' ou 'notified'.
 type WaitlistItemDetails struct {
-	ID            string
-	ProductID     string
-	ProductName   string
-	ProductImage  *string
-	UnitPrice     int64
-	Quantity      int
-	Position      int
-	Status        string
-	NotifiedAt    *time.Time
-	ExpiresAt     *time.Time
-	CreatedAt     *time.Time
+	ID           string
+	ProductID    string
+	ProductName  string
+	ProductImage *string
+	UnitPrice    int64
+	Quantity     int
+	Position     int
+	Status       string
+	NotifiedAt   *time.Time
+	ExpiresAt    *time.Time
+	CreatedAt    *time.Time
 }
 
 // CartDetails contains the cart data with event/store info
 type CartDetails struct {
-	ID                  string
-	EventID             string
-	PlatformUserID      string
-	PlatformHandle      string
-	Token               string
-	Status              string
-	CheckoutURL         *string
-	CheckoutID          *string
-	CustomerEmail       *string
-	PaymentStatus       string
-	PaidAt              *time.Time
-	CreatedAt           time.Time
-	ExpiresAt           *time.Time
+	ID                      string
+	EventID                 string
+	PlatformUserID          string
+	PlatformHandle          string
+	Token                   string
+	Status                  string
+	CheckoutURL             *string
+	CheckoutID              *string
+	CustomerEmail           *string
+	PaymentStatus           string
+	PaidAt                  *time.Time
+	CreatedAt               time.Time
+	ExpiresAt               *time.Time
 	EventTitle              string
 	EventType               string
 	EventFreeShipping       bool
 	EventPixDiscountPercent int
-	StoreID             string
-	StoreName           string
-	StoreLogoURL        *string
-	AllowEdit           bool
-	MaxQuantityPerItem  int
-	Shipping            *CartShippingSelection
+	StoreID                 string
+	StoreName               string
+	StoreLogoURL            *string
+	AllowEdit               bool
+	MaxQuantityPerItem      int
+	Shipping                *CartShippingSelection
 	// Set by the service when Customer / ShippingAddress on this output came
 	// from the buyer's prior paid cart (returning-buyer prefill) rather than
 	// from the current cart's own paid receipt.
@@ -381,6 +392,8 @@ type CartItemDetails struct {
 	ImageURL           *string
 	Keyword            *string
 	AvailableStock     int
+	GroupName          string
+	Variant            []VariantOption
 }
 
 // GenerateCheckoutInput is the input for GenerateCheckout service method
@@ -596,35 +609,35 @@ type SelectShippingMethodOutput struct {
 
 // CartRow represents a cart row from the database
 type CartRow struct {
-	ID                 string
-	EventID            string
-	PlatformUserID     string
-	PlatformHandle     string
-	Token              string
-	Status             string
-	CheckoutURL        *string
-	CheckoutID         *string
-	CheckoutExpiresAt  *time.Time
-	CustomerEmail      *string
-	PaymentStatus      string
-	PaidAt             *time.Time
+	ID                string
+	EventID           string
+	PlatformUserID    string
+	PlatformHandle    string
+	Token             string
+	Status            string
+	CheckoutURL       *string
+	CheckoutID        *string
+	CheckoutExpiresAt *time.Time
+	CustomerEmail     *string
+	PaymentStatus     string
+	PaidAt            *time.Time
 	// PaymentIntegrationID is the integration the cart was bound to on its
 	// first successful GetCheckoutConfig call. nil while no provider was
 	// resolved yet; once set, all payment-processing calls reuse this exact
 	// row so card tokens (which are provider-bound) reach the right gateway.
-	PaymentIntegrationID *string
-	CreatedAt          time.Time
-	ExpiresAt          *time.Time
+	PaymentIntegrationID    *string
+	CreatedAt               time.Time
+	ExpiresAt               *time.Time
 	EventTitle              string
 	EventType               string
 	EventFreeShipping       bool
 	EventPixDiscountPercent int
-	StoreID            string
-	StoreName          string
-	StoreLogoURL       *string
-	AllowEdit          bool
-	MaxQuantityPerItem int
-	Shipping           *CartShippingSelection
+	StoreID                 string
+	StoreName               string
+	StoreLogoURL            *string
+	AllowEdit               bool
+	MaxQuantityPerItem      int
+	Shipping                *CartShippingSelection
 	// Coupon snapshot. CouponID/CouponCode are nil when no coupon is applied;
 	// CouponDiscountCents is the absolute discount in cents and is 0 when none.
 	// CouponType / CouponMaxDiscountCents / CouponMinPurchaseCents are
@@ -640,7 +653,7 @@ type CartRow struct {
 	// CancelledReason explains why a cart left the open flow without being
 	// paid. Used by GetCartForCheckout to surface a generic 404 when the
 	// merchant blocked the buyer ('customer_blocked').
-	CancelledReason        string
+	CancelledReason string
 }
 
 // CartItemRow represents a cart item row from the database
@@ -655,6 +668,8 @@ type CartItemRow struct {
 	ImageURL           *string
 	Keyword            *string
 	AvailableStock     int
+	GroupName          string
+	Variant            []VariantOption
 }
 
 // UpdateCheckoutParams contains parameters for updating cart checkout info

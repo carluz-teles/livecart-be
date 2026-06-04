@@ -123,6 +123,24 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 		return nil, err
 	}
 
+	// Enrich variant items with their group name + chosen options so the
+	// checkout renders a short title + "Cor: Preto · Tam: M" rather than a giant
+	// product name. Best-effort — failure leaves items unchanged.
+	productIDs := make([]string, 0, len(items))
+	for _, it := range items {
+		productIDs = append(productIDs, it.ProductID)
+	}
+	if vinfo, vErr := s.repo.LoadVariantInfo(ctx, s.pool, productIDs); vErr != nil {
+		s.logger.Warn("failed to load variant info for checkout", zap.Error(vErr))
+	} else {
+		for i := range items {
+			if vi, ok := vinfo[items[i].ProductID]; ok {
+				items[i].GroupName = vi.GroupName
+				items[i].Variant = vi.Variant
+			}
+		}
+	}
+
 	// Load shipping selection (may be nil if not chosen yet)
 	shippingSel, err := s.repo.ReadCartShipping(ctx, s.pool, cart.ID)
 	if err != nil {
@@ -161,35 +179,35 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 	// Convert to output
 	output := &GetCartForCheckoutOutput{
 		Cart: CartDetails{
-			ID:                 cart.ID,
-			EventID:            cart.EventID,
-			PlatformUserID:     cart.PlatformUserID,
-			PlatformHandle:     cart.PlatformHandle,
-			Token:              cart.Token,
-			Status:             cart.Status,
-			CheckoutURL:        cart.CheckoutURL,
-			CheckoutID:         cart.CheckoutID,
-			CustomerEmail:      cart.CustomerEmail,
-			PaymentStatus:      cart.PaymentStatus,
-			PaidAt:             cart.PaidAt,
-			CreatedAt:          cart.CreatedAt,
-			ExpiresAt:          cart.ExpiresAt,
+			ID:                      cart.ID,
+			EventID:                 cart.EventID,
+			PlatformUserID:          cart.PlatformUserID,
+			PlatformHandle:          cart.PlatformHandle,
+			Token:                   cart.Token,
+			Status:                  cart.Status,
+			CheckoutURL:             cart.CheckoutURL,
+			CheckoutID:              cart.CheckoutID,
+			CustomerEmail:           cart.CustomerEmail,
+			PaymentStatus:           cart.PaymentStatus,
+			PaidAt:                  cart.PaidAt,
+			CreatedAt:               cart.CreatedAt,
+			ExpiresAt:               cart.ExpiresAt,
 			EventTitle:              cart.EventTitle,
 			EventType:               cart.EventType,
 			EventFreeShipping:       cart.EventFreeShipping,
 			EventPixDiscountPercent: cart.EventPixDiscountPercent,
-			StoreID:            cart.StoreID,
-			StoreName:          cart.StoreName,
-			StoreLogoURL:       cart.StoreLogoURL,
-			AllowEdit:           cart.AllowEdit,
-			MaxQuantityPerItem:  cart.MaxQuantityPerItem,
-			Shipping:            shippingSel,
-			CouponID:               cart.CouponID,
-			CouponCode:             cart.CouponCode,
-			CouponDiscountCents:    cart.CouponDiscountCents,
-			CouponType:             cart.CouponType,
-			CouponMaxDiscountCents: cart.CouponMaxDiscountCents,
-			CouponMinPurchaseCents: cart.CouponMinPurchaseCents,
+			StoreID:                 cart.StoreID,
+			StoreName:               cart.StoreName,
+			StoreLogoURL:            cart.StoreLogoURL,
+			AllowEdit:               cart.AllowEdit,
+			MaxQuantityPerItem:      cart.MaxQuantityPerItem,
+			Shipping:                shippingSel,
+			CouponID:                cart.CouponID,
+			CouponCode:              cart.CouponCode,
+			CouponDiscountCents:     cart.CouponDiscountCents,
+			CouponType:              cart.CouponType,
+			CouponMaxDiscountCents:  cart.CouponMaxDiscountCents,
+			CouponMinPurchaseCents:  cart.CouponMinPurchaseCents,
 		},
 		Items: make([]CartItemDetails, len(items)),
 	}
@@ -206,6 +224,8 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 			ImageURL:           item.ImageURL,
 			Keyword:            item.Keyword,
 			AvailableStock:     item.AvailableStock,
+			GroupName:          item.GroupName,
+			Variant:            item.Variant,
 		}
 	}
 

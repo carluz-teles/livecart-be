@@ -105,10 +105,13 @@ type ProductResponse struct {
 	Shipping       ShippingProfileDTO `json:"shipping"`
 	Shippable      bool               `json:"shippable"`
 	GroupID        string             `json:"groupId"`
-	OptionValues   []OptionValueRef   `json:"optionValues"`
-	Images         []string           `json:"images"`
-	CreatedAt      time.Time          `json:"createdAt"`
-	UpdatedAt      time.Time          `json:"updatedAt"`
+	// GroupName is the variant group's base name (e.g. "Camiseta Básica"), used
+	// as a short title so the long per-variant name doesn't dominate the UI.
+	GroupName    string           `json:"groupName"`
+	OptionValues []OptionValueRef `json:"optionValues"`
+	Images       []string         `json:"images"`
+	CreatedAt    time.Time        `json:"createdAt"`
+	UpdatedAt    time.Time        `json:"updatedAt"`
 }
 
 // ProductStatsResponse represents product statistics.
@@ -188,6 +191,7 @@ type ProductOutput struct {
 	Shipping       domain.ShippingProfile
 	Shippable      bool
 	GroupID        string
+	GroupName      string
 	OptionValues   []OptionValueRef
 	Images         []string
 	CreatedAt      time.Time

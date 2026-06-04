@@ -83,6 +83,42 @@ func (r *Repository) LoadEventType(ctx context.Context, pool *pgxpool.Pool, even
 	return eventType, nil
 }
 
+// LoadVariantInfo batch-loads the variant group name + option values for the
+// given product ids (variant products only) so the checkout can render a short
+// title + the chosen options instead of one giant product name. Best-effort:
+// products without variants simply don't appear in the map.
+func (r *Repository) LoadVariantInfo(ctx context.Context, pool *pgxpool.Pool, productIDs []string) (map[string]CartItemRow, error) {
+	out := make(map[string]CartItemRow)
+	if len(productIDs) == 0 {
+		return out, nil
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT p.id::text, COALESCE(pg.name, ''), po.name, pov.value
+		FROM products p
+		JOIN product_groups pg ON pg.id = p.group_id
+		JOIN product_variant_options pvo ON pvo.product_id = p.id
+		JOIN product_option_values pov ON pov.id = pvo.option_value_id
+		JOIN product_options po ON po.id = pov.option_id
+		WHERE p.id::text = ANY($1)
+		ORDER BY p.id, po.position, pov.position
+	`, productIDs)
+	if err != nil {
+		return nil, fmt.Errorf("loading variant info: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pid, groupName, optName, optValue string
+		if err := rows.Scan(&pid, &groupName, &optName, &optValue); err != nil {
+			return nil, fmt.Errorf("scanning variant info: %w", err)
+		}
+		info := out[pid]
+		info.GroupName = groupName
+		info.Variant = append(info.Variant, VariantOption{Option: optName, Value: optValue})
+		out[pid] = info
+	}
+	return out, rows.Err()
+}
+
 // ListCartItems retrieves all items for a cart.
 func (r *Repository) ListCartItems(ctx context.Context, cartID string) ([]CartItemRow, error) {
 	uid, err := uuid.Parse(cartID)
@@ -511,14 +547,14 @@ func (r *Repository) EnsureInitialSnapshot(ctx context.Context, cartID string) e
 
 // MutationParams describes one buyer-driven cart edit.
 type MutationParams struct {
-	CartID          string
-	ProductID       string
-	MutationType    string // item_added | item_removed | quantity_increased | quantity_decreased
-	QuantityBefore  int
-	QuantityAfter   int
-	UnitPrice       int64
-	Source          string // buyer_checkout (default), live_add, merchant
-	ERPMovementID   string
+	CartID         string
+	ProductID      string
+	MutationType   string // item_added | item_removed | quantity_increased | quantity_decreased
+	QuantityBefore int
+	QuantityAfter  int
+	UnitPrice      int64
+	Source         string // buyer_checkout (default), live_add, merchant
+	ERPMovementID  string
 }
 
 // RecordMutation persists one row in cart_mutations.
@@ -554,13 +590,13 @@ func (r *Repository) RecordMutation(ctx context.Context, p MutationParams) error
 // GetEventProductForCart returns the effective price + max quantity + stock
 // for a product in the cart's event. Used to validate quantity bumps.
 type EventProductConfig struct {
-	ProductID      string
-	Name           string
-	UnitPrice      int64
-	MaxQuantity    int
-	Stock          int
-	Active         bool
-	IsAllowed      bool // false when the event has a whitelist and this product is not in it
+	ProductID   string
+	Name        string
+	UnitPrice   int64
+	MaxQuantity int
+	Stock       int
+	Active      bool
+	IsAllowed   bool // false when the event has a whitelist and this product is not in it
 }
 
 // GetEventProductForCart resolves event-aware pricing/limits for a product.

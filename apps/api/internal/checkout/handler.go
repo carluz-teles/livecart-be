@@ -422,6 +422,8 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 			TotalPrice:         item.UnitPrice * int64(item.Quantity),
 			WaitlistedQuantity: item.WaitlistedQuantity,
 			AvailableStock:     item.AvailableStock,
+			GroupName:          item.GroupName,
+			Variant:            item.Variant,
 		}
 
 		// Only count available (non-waitlisted) items in totals

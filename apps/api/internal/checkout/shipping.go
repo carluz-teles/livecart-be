@@ -29,9 +29,9 @@ type shippingContext struct {
 	StoreID           string
 	EventFreeShipping bool
 
-	OriginZip          string
-	DefaultPkgWeightG  int
-	DefaultPkgFormat   string
+	OriginZip         string
+	DefaultPkgWeightG int
+	DefaultPkgFormat  string
 
 	Items []shippingContextItem
 }

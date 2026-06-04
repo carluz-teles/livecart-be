@@ -74,6 +74,49 @@ func (r *Repository) ListVariantOptions(ctx context.Context, productID vo.Produc
 	return rows, nil
 }
 
+// VariantInfo is a product's group name + ordered option values, used to render
+// variants compactly (short title + "Cor: Preto · Tamanho: M").
+type VariantInfo struct {
+	GroupName string
+	Options   []OptionValueRef
+}
+
+// VariantInfoForProducts batch-loads variant group name + option values for the
+// given product ids in one query (only variant products are returned). Used to
+// enrich product lists so the picker shows the variations instead of a single
+// giant name.
+func (r *Repository) VariantInfoForProducts(ctx context.Context, productIDs []string) (map[string]VariantInfo, error) {
+	out := make(map[string]VariantInfo)
+	if len(productIDs) == 0 {
+		return out, nil
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT p.id::text, COALESCE(pg.name, ''), po.name, pov.value
+		FROM products p
+		JOIN product_groups pg ON pg.id = p.group_id
+		JOIN product_variant_options pvo ON pvo.product_id = p.id
+		JOIN product_option_values pov ON pov.id = pvo.option_value_id
+		JOIN product_options po ON po.id = pov.option_id
+		WHERE p.id::text = ANY($1)
+		ORDER BY p.id, po.position, pov.position
+	`, productIDs)
+	if err != nil {
+		return nil, fmt.Errorf("loading variant info: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pid, groupName, optName, optValue string
+		if err := rows.Scan(&pid, &groupName, &optName, &optValue); err != nil {
+			return nil, fmt.Errorf("scanning variant info: %w", err)
+		}
+		info := out[pid]
+		info.GroupName = groupName
+		info.Options = append(info.Options, OptionValueRef{Option: optName, Value: optValue})
+		out[pid] = info
+	}
+	return out, rows.Err()
+}
+
 // AddImage inserts one image into the variant gallery.
 func (r *Repository) AddImage(ctx context.Context, productID vo.ProductID, url string, position int) (string, error) {
 	row, err := r.q.CreateProductImage(ctx, sqlc.CreateProductImageParams{

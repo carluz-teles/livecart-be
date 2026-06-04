@@ -466,6 +466,7 @@ func toProductResponse(o ProductOutput) ProductResponse {
 		Shipping:       shippingDomainToDTO(o.Shipping),
 		Shippable:      o.Shippable,
 		GroupID:        o.GroupID,
+		GroupName:      o.GroupName,
 		OptionValues:   options,
 		Images:         images,
 		CreatedAt:      o.CreatedAt,

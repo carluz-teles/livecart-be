@@ -212,20 +212,20 @@ func validateShipping(s ShippingProfile) error {
 // Getters (immutable access)
 // ============================================
 
-func (p *Product) ID() vo.ProductID                { return p.id }
-func (p *Product) StoreID() vo.StoreID             { return p.storeID }
-func (p *Product) GroupID() *vo.ID                 { return p.groupID }
-func (p *Product) Name() string                    { return p.name }
-func (p *Product) ExternalID() string              { return p.externalID }
-func (p *Product) ExternalSource() ExternalSource  { return p.externalSource }
-func (p *Product) Keyword() Keyword                { return p.keyword }
-func (p *Product) Price() vo.Money                 { return p.price }
-func (p *Product) ImageURL() string                { return p.imageURL }
-func (p *Product) Stock() int                      { return p.stock }
-func (p *Product) Active() bool                    { return p.active }
-func (p *Product) Shipping() ShippingProfile       { return p.shipping }
-func (p *Product) CreatedAt() time.Time            { return p.createdAt }
-func (p *Product) UpdatedAt() time.Time            { return p.updatedAt }
+func (p *Product) ID() vo.ProductID               { return p.id }
+func (p *Product) StoreID() vo.StoreID            { return p.storeID }
+func (p *Product) GroupID() *vo.ID                { return p.groupID }
+func (p *Product) Name() string                   { return p.name }
+func (p *Product) ExternalID() string             { return p.externalID }
+func (p *Product) ExternalSource() ExternalSource { return p.externalSource }
+func (p *Product) Keyword() Keyword               { return p.keyword }
+func (p *Product) Price() vo.Money                { return p.price }
+func (p *Product) ImageURL() string               { return p.imageURL }
+func (p *Product) Stock() int                     { return p.stock }
+func (p *Product) Active() bool                   { return p.active }
+func (p *Product) Shipping() ShippingProfile      { return p.shipping }
+func (p *Product) CreatedAt() time.Time           { return p.createdAt }
+func (p *Product) UpdatedAt() time.Time           { return p.updatedAt }
 
 // IsShippable reports whether the product has the physical data required for carriers.
 func (p *Product) IsShippable() bool { return p.shipping.IsComplete() }
