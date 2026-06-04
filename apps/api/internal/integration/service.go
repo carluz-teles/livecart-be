@@ -4503,9 +4503,30 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 		zap.String("sender_id", input.SenderID),
 		zap.String("message_id", input.MessageID),
 		zap.String("text", input.Text),
+		zap.String("reply_to_story_id", input.ReplyToStoryID),
+		zap.Bool("is_echo", input.IsEcho),
 	)
 
-	// Resolve the store from the Instagram account ID
+	// Skip echoes of our own outbound messages.
+	if input.IsEcho {
+		return nil
+	}
+
+	// Story-commerce: a DM that replies to one of our published Stories carries
+	// reply_to.story.id. Resolve the store from the story EVENT (not the account
+	// lookup, which the comment/live paths also avoid) and feed it into the same
+	// intent→cart pipeline as comments, answering via DM.
+	if input.ReplyToStoryID != "" {
+		if err := s.processStoryReply(ctx, input); err != nil {
+			s.logger.Warn("failed to process story reply",
+				zap.String("story_id", input.ReplyToStoryID),
+				zap.Error(err))
+		}
+		return nil
+	}
+
+	// Non-story DM: resolve the store from the Instagram account ID for audit +
+	// the "Testar notificação" setup capture.
 	integration, err := s.repo.GetByInstagramUserID(ctx, input.AccountID)
 	if err != nil {
 		s.logger.Error("failed to find integration by instagram account",
@@ -4540,19 +4561,6 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 		}
 	}
 
-	// Story-commerce: a DM that replies to one of our published Stories carries
-	// reply_to.story.id. Feed it into the same intent→cart pipeline as comments,
-	// answering via DM. Skip echoes (our own outbound messages).
-	if input.ReplyToStoryID != "" && !input.IsEcho {
-		if err := s.processStoryReply(ctx, integration.StoreID, input); err != nil {
-			s.logger.Warn("failed to process story reply",
-				zap.String("store_id", integration.StoreID),
-				zap.String("story_id", input.ReplyToStoryID),
-				zap.Error(err))
-		}
-		return nil
-	}
-
 	// If the message text matches an active "Testar notificação" setup code,
 	// capture this sender as the store's test recipient. We swallow errors
 	// here because a webhook should never fail on optional bookkeeping.
@@ -4578,16 +4586,20 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 // It resolves the bound story-commerce event by the replied-to story media id,
 // best-effort resolves the buyer's @handle, then reuses the comment→cart
 // pipeline with the DM reply channel (answers go straight to the buyer's DM).
-func (s *Service) processStoryReply(ctx context.Context, storeID string, input ProcessInstagramMessageInput) error {
-	// Only act on replies to one of our story-commerce events.
+func (s *Service) processStoryReply(ctx context.Context, input ProcessInstagramMessageInput) error {
+	// Only act on replies to one of our story-commerce events. The event carries
+	// the store, so we don't need the (separate, sometimes-missing) account lookup.
 	event, err := s.liveService.GetEventByPlatformLiveID(ctx, input.ReplyToStoryID)
 	if err != nil {
 		return fmt.Errorf("resolving story event: %w", err)
 	}
 	if event == nil || event.Type != "story" {
 		// Reply to a non-commerce story (or unknown) — nothing to do.
+		s.logger.Info("story reply ignored: no matching story event",
+			zap.String("story_id", input.ReplyToStoryID))
 		return nil
 	}
+	storeID := event.StoreID
 
 	// Resolve the buyer's @handle from their IGSID (best-effort — the DM still
 	// works without it; we just fall back to a generic label).
