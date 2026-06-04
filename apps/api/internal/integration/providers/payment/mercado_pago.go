@@ -461,7 +461,7 @@ func (m *MercadoPago) GetPublicKey(ctx context.Context) (string, error) {
 	}
 
 	var userInfo struct {
-		ID   int64 `json:"id"`
+		ID   int64  `json:"id"`
 		Site string `json:"site_id"`
 	}
 	if err := json.Unmarshal(body, &userInfo); err != nil {

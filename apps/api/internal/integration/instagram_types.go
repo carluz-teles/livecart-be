@@ -57,28 +57,53 @@ type InstagramIDOnly struct {
 
 // InstagramMessageContent represents the content of a direct message
 type InstagramMessageContent struct {
-	MID  string `json:"mid"`
-	Text string `json:"text"`
+	MID     string                 `json:"mid"`
+	Text    string                 `json:"text"`
+	IsEcho  bool                   `json:"is_echo,omitempty"`
+	ReplyTo *InstagramMessageReply `json:"reply_to,omitempty"`
+}
+
+// InstagramMessageReply carries the context a DM is replying to. For story
+// replies it holds the story the buyer tapped reply on — that story id maps to
+// our published story-commerce event.
+type InstagramMessageReply struct {
+	MID   string               `json:"mid,omitempty"`
+	Story *InstagramReplyStory `json:"story,omitempty"`
+}
+
+// InstagramReplyStory is the story a DM is replying to.
+type InstagramReplyStory struct {
+	ID  string `json:"id"`
+	URL string `json:"url,omitempty"`
 }
 
 // ProcessInstagramCommentInput represents input for processing a live comment
 type ProcessInstagramCommentInput struct {
-	AccountID  string
-	MediaID    string
-	CommentID  string
-	UserID     string
-	Username   string
-	Text       string
-	Timestamp  int64
+	AccountID string
+	MediaID   string
+	CommentID string
+	UserID    string
+	Username  string
+	Text      string
+	Timestamp int64
+	// Channel is the reply channel: "" / "comment" (default) replies on the
+	// comment thread with a DM fallback; "dm" replies straight via DM — used by
+	// story replies, which arrive as DMs and have no public comment to answer.
+	Channel    string
 	RawPayload []byte // Original webhook payload for audit storage
 }
 
 // ProcessInstagramMessageInput represents input for processing a DM
 type ProcessInstagramMessageInput struct {
-	AccountID  string
-	SenderID   string
-	MessageID  string
-	Text       string
-	Timestamp  int64
+	AccountID string
+	SenderID  string
+	MessageID string
+	Text      string
+	Timestamp int64
+	// ReplyToStoryID is set when the DM is a reply to a story (reply_to.story.id),
+	// mapping it to a published story-commerce event.
+	ReplyToStoryID string
+	// IsEcho is true for echoes of our own outbound messages — skip those.
+	IsEcho     bool
 	RawPayload []byte // Original webhook payload for audit storage
 }

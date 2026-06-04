@@ -129,9 +129,9 @@ type PaymentProvider interface {
 type ERPHealthCheckCategory string
 
 const (
-	ERPHealthFormaPagamento  ERPHealthCheckCategory = "forma_pagamento"
+	ERPHealthFormaPagamento   ERPHealthCheckCategory = "forma_pagamento"
 	ERPHealthFormaRecebimento ERPHealthCheckCategory = "forma_recebimento"
-	ERPHealthFormaEnvio      ERPHealthCheckCategory = "forma_envio"
+	ERPHealthFormaEnvio       ERPHealthCheckCategory = "forma_envio"
 )
 
 // ERPHealthCheckStatus reports whether a single expected cadastro is present
@@ -318,6 +318,14 @@ type SocialProvider interface {
 	// requires video_url), returning the published media id.
 	PublishReel(ctx context.Context, videoURL, caption string) (string, error)
 
+	// PublishStory publishes a Story (media_type=STORIES) from a public photo or
+	// video URL (isVideo selects image_url vs video_url), returning the media id.
+	PublishStory(ctx context.Context, mediaURL string, isVideo bool) (string, error)
+
+	// GetUsername resolves a user's @handle from their Instagram-scoped id
+	// (IGSID). Best-effort — returns "" when the lookup isn't permitted.
+	GetUsername(ctx context.Context, igsid string) (string, error)
+
 	// GetMediaDetails fetches metadata (permalink, thumbnail, caption) for a media id.
 	GetMediaDetails(ctx context.Context, mediaID string) (*MediaPost, error)
 }
@@ -387,7 +395,7 @@ type WebhookHandler interface {
 
 // CheckoutOrder represents an order to be paid.
 type CheckoutOrder struct {
-	ExternalID  string           `json:"external_id"`  // Your internal order/cart ID
+	ExternalID  string           `json:"external_id"` // Your internal order/cart ID
 	Items       []CheckoutItem   `json:"items"`
 	Customer    CheckoutCustomer `json:"customer"`
 	TotalAmount int64            `json:"total_amount"` // In cents
@@ -458,7 +466,7 @@ type PaymentStatus struct {
 	// Mercado Pago surfaces this directly in /v1/payments/{id} — D+1 when the
 	// merchant has antecipation enabled, D+30 otherwise — so the ERP can use
 	// it as the real first-parcela due date instead of guessing.
-	MoneyReleaseDate  *time.Time     `json:"money_release_date,omitempty"`
+	MoneyReleaseDate *time.Time `json:"money_release_date,omitempty"`
 
 	// FeeAmountCents is the total fee charged to the merchant by the gateway
 	// (sum of fee_details where fee_payer == "collector"), in cents. Captured
@@ -478,8 +486,8 @@ type PaymentStatus struct {
 
 // PaymentFee is a single fee line returned by the payment gateway.
 type PaymentFee struct {
-	Type        string `json:"type"`                   // mercadopago_fee, financing_fee, application_fee, ...
-	FeePayer    string `json:"fee_payer"`              // collector, payer
+	Type        string `json:"type"`      // mercadopago_fee, financing_fee, application_fee, ...
+	FeePayer    string `json:"fee_payer"` // collector, payer
 	AmountCents int64  `json:"amount_cents"`
 }
 
@@ -670,10 +678,10 @@ type CheckoutConfigResult struct {
 
 // ERPOrder represents an order to create in the ERP.
 type ERPOrder struct {
-	ExternalID  string         `json:"external_id"`            // Your internal order/cart ID
-	ContactID   string         `json:"contact_id"`             // ERP contact ID (required for Tiny v3)
+	ExternalID  string         `json:"external_id"` // Your internal order/cart ID
+	ContactID   string         `json:"contact_id"`  // ERP contact ID (required for Tiny v3)
 	Items       []ERPOrderItem `json:"items"`
-	TotalAmount int64          `json:"total_amount"`           // In cents (includes shipping when present)
+	TotalAmount int64          `json:"total_amount"` // In cents (includes shipping when present)
 	Observation string         `json:"observation,omitempty"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
 
@@ -717,11 +725,11 @@ type ERPShippingAddress struct {
 // ERPOrderPayment captures the payment confirmation details so the provider
 // can register the order as paid (e.g. Tiny parcelas with dataPagamento).
 type ERPOrderPayment struct {
-	Method       string    `json:"method"`       // pix, credit_card, debit_card, boleto
-	PaymentID    string    `json:"payment_id"`   // gateway payment ID
+	Method       string    `json:"method"`     // pix, credit_card, debit_card, boleto
+	PaymentID    string    `json:"payment_id"` // gateway payment ID
 	Installments int       `json:"installments,omitempty"`
 	PaidAt       time.Time `json:"paid_at"`
-	Amount       int64     `json:"amount"`       // paid amount, in cents (usually == TotalAmount). Always GROSS — fees live in FeeAmountCents.
+	Amount       int64     `json:"amount"` // paid amount, in cents (usually == TotalAmount). Always GROSS — fees live in FeeAmountCents.
 	// MoneyReleaseDate is when the gateway tells us it will credit the
 	// merchant for the first installment — populated by MP, used by the ERP
 	// adapter as the base date for parcela 1 so contas a receber matches the
@@ -761,11 +769,11 @@ type ERPContactResult struct {
 
 // ERPOrderItem represents an item in an ERP order.
 type ERPOrderItem struct {
-	ProductID   string `json:"product_id"` // ERP product ID
-	SKU         string `json:"sku,omitempty"`
-	Name        string `json:"name"`
-	Quantity    int    `json:"quantity"`
-	UnitPrice   int64  `json:"unit_price"` // In cents
+	ProductID string `json:"product_id"` // ERP product ID
+	SKU       string `json:"sku,omitempty"`
+	Name      string `json:"name"`
+	Quantity  int    `json:"quantity"`
+	UnitPrice int64  `json:"unit_price"` // In cents
 }
 
 // OrderResult is the result of creating an order in the ERP.
@@ -801,7 +809,7 @@ type ProductListResult struct {
 // useful (and is rejected by the domain validation), so providers should
 // return nil when the ERP did not supply the full set.
 type ERPShippingProfile struct {
-	WeightGrams   int    `json:"weight_grams"`             // weight already converted to grams
+	WeightGrams   int    `json:"weight_grams"` // weight already converted to grams
 	HeightCm      int    `json:"height_cm"`
 	WidthCm       int    `json:"width_cm"`
 	LengthCm      int    `json:"length_cm"`
@@ -810,7 +818,7 @@ type ERPShippingProfile struct {
 
 // ERPProduct represents a product in the ERP.
 type ERPProduct struct {
-	ID          string              `json:"id"`             // ERP product ID
+	ID          string              `json:"id"` // ERP product ID
 	SKU         string              `json:"sku,omitempty"`
 	GTIN        string              `json:"gtin,omitempty"` // Barcode (EAN/GTIN)
 	Name        string              `json:"name"`
@@ -830,11 +838,11 @@ type ERPProduct struct {
 	// Variant-related fields (populated for ERPs that expose variations like Tiny "Com Variações" / tipo=V).
 	// Type carries the ERP's native product type ("S","V","K","F","M" for Tiny). Empty when unknown.
 	Type             string            `json:"type,omitempty"`
-	IsParent         bool              `json:"is_parent,omitempty"`         // True when this product is the aggregator (has children).
+	IsParent         bool              `json:"is_parent,omitempty"`          // True when this product is the aggregator (has children).
 	ParentExternalID string            `json:"parent_external_id,omitempty"` // ERP id of the parent when this is a child variant.
-	Attributes       map[string]string `json:"attributes,omitempty"`        // Variation grade for a child, e.g. {"Cor":"Azul","Tamanho":"M"}.
-	GradeKeys        []string          `json:"grade_keys,omitempty"`        // Grade dimension names for a parent, e.g. ["Tamanho","Cor"].
-	Variants         []ERPProduct      `json:"variants,omitempty"`          // Children when IsParent — populated by GetProduct.
+	Attributes       map[string]string `json:"attributes,omitempty"`         // Variation grade for a child, e.g. {"Cor":"Azul","Tamanho":"M"}.
+	GradeKeys        []string          `json:"grade_keys,omitempty"`         // Grade dimension names for a parent, e.g. ["Tamanho","Cor"].
+	Variants         []ERPProduct      `json:"variants,omitempty"`           // Children when IsParent — populated by GetProduct.
 }
 
 // SyncResult is the result of syncing a product.
@@ -1100,12 +1108,12 @@ type TrackShipmentRequest struct {
 
 // TrackShipmentResult contains the normalized tracking history.
 type TrackShipmentResult struct {
-	TrackingCode    string
-	Carrier         string
-	Service         string
-	CurrentStatus   TrackingStatus
-	Events          []TrackingEvent
-	ProviderMeta    map[string]any
+	TrackingCode  string
+	Carrier       string
+	Service       string
+	CurrentStatus TrackingStatus
+	Events        []TrackingEvent
+	ProviderMeta  map[string]any
 }
 
 // TrackingEvent is a single movement in the tracking history.
@@ -1123,29 +1131,29 @@ type TrackingEvent struct {
 type TrackingStatus string
 
 const (
-	TrackingStatusUnknown                   TrackingStatus = "unknown"
-	TrackingStatusAwaitingInvoice           TrackingStatus = "awaiting_invoice"
-	TrackingStatusPending                   TrackingStatus = "pending"
-	TrackingStatusPendingPickup             TrackingStatus = "pending_pickup"
-	TrackingStatusPendingDropoff            TrackingStatus = "pending_dropoff"
-	TrackingStatusAwaitingPickup            TrackingStatus = "awaiting_pickup"
-	TrackingStatusInTransit                 TrackingStatus = "in_transit"
-	TrackingStatusOutForDelivery            TrackingStatus = "out_for_delivery"
-	TrackingStatusDelivered                 TrackingStatus = "delivered"
-	TrackingStatusDeliveryIssue             TrackingStatus = "delivery_issue"
-	TrackingStatusDeliveryBlocked           TrackingStatus = "delivery_blocked"
-	TrackingStatusIssue                     TrackingStatus = "issue"
-	TrackingStatusShipmentBlocked           TrackingStatus = "shipment_blocked"
-	TrackingStatusDamaged                   TrackingStatus = "damaged"
-	TrackingStatusStolen                    TrackingStatus = "stolen"
-	TrackingStatusLost                      TrackingStatus = "lost"
-	TrackingStatusFiscalIssue               TrackingStatus = "fiscal_issue"
-	TrackingStatusRefused                   TrackingStatus = "refused"
-	TrackingStatusNotDelivered              TrackingStatus = "not_delivered"
-	TrackingStatusIndemnificationRequested  TrackingStatus = "indemnification_requested"
-	TrackingStatusIndemnificationScheduled  TrackingStatus = "indemnification_scheduled"
-	TrackingStatusIndemnificationCompleted  TrackingStatus = "indemnification_completed"
-	TrackingStatusReturning                 TrackingStatus = "returning"
-	TrackingStatusReturned                  TrackingStatus = "returned"
-	TrackingStatusCanceled                  TrackingStatus = "canceled"
+	TrackingStatusUnknown                  TrackingStatus = "unknown"
+	TrackingStatusAwaitingInvoice          TrackingStatus = "awaiting_invoice"
+	TrackingStatusPending                  TrackingStatus = "pending"
+	TrackingStatusPendingPickup            TrackingStatus = "pending_pickup"
+	TrackingStatusPendingDropoff           TrackingStatus = "pending_dropoff"
+	TrackingStatusAwaitingPickup           TrackingStatus = "awaiting_pickup"
+	TrackingStatusInTransit                TrackingStatus = "in_transit"
+	TrackingStatusOutForDelivery           TrackingStatus = "out_for_delivery"
+	TrackingStatusDelivered                TrackingStatus = "delivered"
+	TrackingStatusDeliveryIssue            TrackingStatus = "delivery_issue"
+	TrackingStatusDeliveryBlocked          TrackingStatus = "delivery_blocked"
+	TrackingStatusIssue                    TrackingStatus = "issue"
+	TrackingStatusShipmentBlocked          TrackingStatus = "shipment_blocked"
+	TrackingStatusDamaged                  TrackingStatus = "damaged"
+	TrackingStatusStolen                   TrackingStatus = "stolen"
+	TrackingStatusLost                     TrackingStatus = "lost"
+	TrackingStatusFiscalIssue              TrackingStatus = "fiscal_issue"
+	TrackingStatusRefused                  TrackingStatus = "refused"
+	TrackingStatusNotDelivered             TrackingStatus = "not_delivered"
+	TrackingStatusIndemnificationRequested TrackingStatus = "indemnification_requested"
+	TrackingStatusIndemnificationScheduled TrackingStatus = "indemnification_scheduled"
+	TrackingStatusIndemnificationCompleted TrackingStatus = "indemnification_completed"
+	TrackingStatusReturning                TrackingStatus = "returning"
+	TrackingStatusReturned                 TrackingStatus = "returned"
+	TrackingStatusCanceled                 TrackingStatus = "canceled"
 )

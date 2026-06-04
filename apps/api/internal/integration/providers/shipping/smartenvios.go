@@ -329,12 +329,12 @@ func (s *SmartEnvios) ListCarriers(ctx context.Context) ([]CarrierService, error
 type seDcCreateItem struct {
 	Description string   `json:"description"`
 	Amount      int      `json:"amount"`
-	UnitPrice   int      `json:"unit_price"`   // reais inteiros
-	TotalPrice  int      `json:"total_price"`  // reais inteiros
-	Weight      float64  `json:"weight"`       // kg
-	Height      int      `json:"height"`       // cm
-	Width       int      `json:"width"`        // cm
-	Length      int      `json:"length"`       // cm
+	UnitPrice   int      `json:"unit_price"`  // reais inteiros
+	TotalPrice  int      `json:"total_price"` // reais inteiros
+	Weight      float64  `json:"weight"`      // kg
+	Height      int      `json:"height"`      // cm
+	Width       int      `json:"width"`       // cm
+	Length      int      `json:"length"`      // cm
 	SKU         []string `json:"sku,omitempty"`
 }
 
@@ -703,11 +703,11 @@ type seTrackingEvent struct {
 
 type seTrackingResponse struct {
 	Result struct {
-		Number        string            `json:"number"`
-		TrackingCode  string            `json:"tracking_code"`
-		ShippingName  string            `json:"shipping_name"`
-		ServiceName   string            `json:"service_name"`
-		Trackings     []seTrackingEvent `json:"trackings"`
+		Number       string            `json:"number"`
+		TrackingCode string            `json:"tracking_code"`
+		ShippingName string            `json:"shipping_name"`
+		ServiceName  string            `json:"service_name"`
+		Trackings    []seTrackingEvent `json:"trackings"`
 	} `json:"result"`
 }
 
@@ -952,6 +952,7 @@ func valueOr(first, second string) string {
 // seErrorEnvelope covers the two error shapes SmartEnvios ships with HTTP 200:
 //   - permission errors on /quote/services:   `{"message":"..."}`
 //   - validation errors on /quote/freight:    `{"type":"HttpResponseError","status":409,"message":"...","result":[".." ]}`
+//
 // `result` lives as RawMessage because it's array-of-strings on error and
 // array-of-objects on success — we only parse it when we know we're in the
 // error branch.

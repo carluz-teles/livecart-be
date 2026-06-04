@@ -28,23 +28,23 @@ type CreateEventResponse struct {
 }
 
 type EventResponse struct {
-	ID                     string            `json:"id"`
-	Title                  string            `json:"title"`
-	Type                   string            `json:"type"`
-	Status                 string            `json:"status"`
-	TotalOrders            int               `json:"totalOrders"`
-	CloseCartOnEventEnd    bool              `json:"closeCartOnEventEnd"`
-	CartExpirationMinutes  *int              `json:"cartExpirationMinutes"`
-	CartMaxQuantityPerItem *int              `json:"cartMaxQuantityPerItem"`
-	SendOnLiveEnd          *bool             `json:"sendOnLiveEnd"`
-	PixDiscountPercent     int               `json:"pixDiscountPercent"`
+	ID                     string `json:"id"`
+	Title                  string `json:"title"`
+	Type                   string `json:"type"`
+	Status                 string `json:"status"`
+	TotalOrders            int    `json:"totalOrders"`
+	CloseCartOnEventEnd    bool   `json:"closeCartOnEventEnd"`
+	CartExpirationMinutes  *int   `json:"cartExpirationMinutes"`
+	CartMaxQuantityPerItem *int   `json:"cartMaxQuantityPerItem"`
+	SendOnLiveEnd          *bool  `json:"sendOnLiveEnd"`
+	PixDiscountPercent     int    `json:"pixDiscountPercent"`
 	// Scheduling
 	ScheduledAt *time.Time `json:"scheduledAt"`
 	EndsAt      *time.Time `json:"endsAt"`
 	Description *string    `json:"description"`
 	// Counts
-	ProductCount int `json:"productCount"`
-	UpsellCount  int `json:"upsellCount"`
+	ProductCount int               `json:"productCount"`
+	UpsellCount  int               `json:"upsellCount"`
 	Sessions     []SessionResponse `json:"sessions,omitempty"`
 	CreatedAt    time.Time         `json:"createdAt"`
 	UpdatedAt    time.Time         `json:"updatedAt"`
@@ -103,19 +103,19 @@ type EndEventOutput struct {
 }
 
 type EventOutput struct {
-	ID                      string
-	StoreID                 string
-	Title                   string
-	Type                    string
-	Status                  string
-	TotalOrders             int
-	CloseCartOnEventEnd     bool
-	CartExpirationMinutes   *int
-	CartMaxQuantityPerItem  *int
-	SendOnLiveEnd           *bool
-	PixDiscountPercent      int
-	CurrentActiveProductID  *string
-	ProcessingPaused        bool
+	ID                     string
+	StoreID                string
+	Title                  string
+	Type                   string
+	Status                 string
+	TotalOrders            int
+	CloseCartOnEventEnd    bool
+	CartExpirationMinutes  *int
+	CartMaxQuantityPerItem *int
+	SendOnLiveEnd          *bool
+	PixDiscountPercent     int
+	CurrentActiveProductID *string
+	ProcessingPaused       bool
 	// Scheduling
 	ScheduledAt *time.Time
 	EndsAt      *time.Time
@@ -165,19 +165,19 @@ type CreateEventParams struct {
 }
 
 type EventRow struct {
-	ID                      string
-	StoreID                 string
-	Title                   string
-	Type                    string
-	Status                  string
-	TotalOrders             int
-	CloseCartOnEventEnd     bool
-	CartExpirationMinutes   *int
-	CartMaxQuantityPerItem  *int
-	SendOnLiveEnd           *bool
-	PixDiscountPercent      int
-	CurrentActiveProductID  *string
-	ProcessingPaused        bool
+	ID                     string
+	StoreID                string
+	Title                  string
+	Type                   string
+	Status                 string
+	TotalOrders            int
+	CloseCartOnEventEnd    bool
+	CartExpirationMinutes  *int
+	CartMaxQuantityPerItem *int
+	SendOnLiveEnd          *bool
+	PixDiscountPercent     int
+	CurrentActiveProductID *string
+	ProcessingPaused       bool
 	// Scheduling: ScheduledAt is the start; EndsAt is the optional end.
 	ScheduledAt *time.Time
 	EndsAt      *time.Time
@@ -391,7 +391,10 @@ type CreatePostRequest struct {
 
 // CreatePostInput is the input to create a post-commerce event.
 type CreatePostInput struct {
-	StoreID                string
+	StoreID string
+	// Type is the event discriminator: "post" (default) for feed posts/Reels, or
+	// "story" for Stories (24h window, purchase intent captured via DM replies).
+	Type                   string
 	Title                  string
 	MediaID                string
 	MediaPermalink         string
@@ -470,10 +473,10 @@ type LiveResponse struct {
 	EndsAt      *time.Time `json:"endsAt"`
 	Description *string    `json:"description"`
 	// Counts
-	ProductCount int `json:"productCount"`
-	UpsellCount  int `json:"upsellCount"`
-	CreatedAt    time.Time  `json:"createdAt"`
-	UpdatedAt    time.Time  `json:"updatedAt"`
+	ProductCount int       `json:"productCount"`
+	UpsellCount  int       `json:"upsellCount"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 type ListLivesResponse struct {

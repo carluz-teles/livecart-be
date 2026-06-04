@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -361,7 +361,7 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 			GTIN:      p.GTIN,
 			Name:      p.Descricao,
 			Price:     int64(math.Round(price * 100)), // Convert to cents
-			Stock:     0,                  // Not available in list response — enriched via GetProduct
+			Stock:     0,                              // Not available in list response — enriched via GetProduct
 			Active:    p.Situacao == "A",
 			UpdatedAt: updatedAt,
 			Type:      p.Tipo,
@@ -578,16 +578,16 @@ func tinyPayloadToERP(p tinyProductPayload) ERPProduct {
 	weightHint := topLevelWeightHintGrams(p)
 
 	prod := ERPProduct{
-		ID:          strconv.FormatInt(p.ID, 10),
-		SKU:         p.SKU,
-		GTIN:        p.GTIN,
-		Name:        p.Descricao,
-		Description: p.DescricaoComplementar,
-		Price:       int64(math.Round(price * 100)),
-		Stock:       int(p.Estoque.Quantidade),
-		Active:      p.Situacao == "A",
-		ImageURL:    imageURL,
-		UpdatedAt:   updatedAt,
+		ID:              strconv.FormatInt(p.ID, 10),
+		SKU:             p.SKU,
+		GTIN:            p.GTIN,
+		Name:            p.Descricao,
+		Description:     p.DescricaoComplementar,
+		Price:           int64(math.Round(price * 100)),
+		Stock:           int(p.Estoque.Quantidade),
+		Active:          p.Situacao == "A",
+		ImageURL:        imageURL,
+		UpdatedAt:       updatedAt,
 		Type:            p.Tipo,
 		IsParent:        p.Tipo == "V",
 		GradeKeys:       p.Grade,
@@ -911,7 +911,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 	}
 
 	payload := map[string]any{
-		"idContato":   contactID,
+		"idContato": contactID,
 		// Tiny v3 requires the order issue date — sent in São Paulo local
 		// time so the order lands on the merchant's "today" rather than UTC's
 		// (otherwise late-night UTC orders fall a day ahead and disappear from
@@ -1427,7 +1427,7 @@ func (t *Tiny) lookupFormaRecebimentoID(ctx context.Context, method string) (int
 
 		var result struct {
 			Itens []struct {
-				ID       int64 `json:"id"`
+				ID       int64  `json:"id"`
 				Nome     string `json:"nome"`
 				Ativo    bool   `json:"ativo"`
 				Padrao   bool   `json:"padrao"`
@@ -2023,9 +2023,9 @@ func (t *Tiny) GetInvoiceByOrder(ctx context.Context, orderID string) (*provider
 	// most "advanced" one (highest situacao wins) so a re-emitted NFe wins
 	// over a previously-cancelled one.
 	var orderResp struct {
-		NotaFiscal      *tinyNotaFiscalLite  `json:"notaFiscal"`
-		NotasFiscais    []tinyNotaFiscalLite `json:"notasFiscais"`
-		Ecommerce       struct {
+		NotaFiscal   *tinyNotaFiscalLite  `json:"notaFiscal"`
+		NotasFiscais []tinyNotaFiscalLite `json:"notasFiscais"`
+		Ecommerce    struct {
 			NotaFiscal *tinyNotaFiscalLite `json:"notaFiscal"`
 		} `json:"ecommerce"`
 	}

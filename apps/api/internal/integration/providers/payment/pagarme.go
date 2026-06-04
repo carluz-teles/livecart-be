@@ -1041,11 +1041,11 @@ func buildPagarmeCustomer(c CheckoutCustomer) map[string]any {
 	}
 	if c.Address != nil {
 		address := map[string]any{
-			"country":      "BR",
-			"zip_code":     c.Address.ZipCode,
-			"line_1":       buildPagarmeLine1(c.Address.Street, c.Address.Number, c.Address.Neighborhood),
-			"city":         c.Address.City,
-			"state":        c.Address.State,
+			"country":  "BR",
+			"zip_code": c.Address.ZipCode,
+			"line_1":   buildPagarmeLine1(c.Address.Street, c.Address.Number, c.Address.Neighborhood),
+			"city":     c.Address.City,
+			"state":    c.Address.State,
 		}
 		if c.Address.Complement != "" {
 			address["line_2"] = c.Address.Complement
@@ -1194,25 +1194,25 @@ type pagarmeCharge struct {
 }
 
 type pagarmeLastTransaction struct {
-	ID                 string                 `json:"id"`
-	Status             string                 `json:"status"`
-	Success            bool                   `json:"success"`
-	Amount             int                    `json:"amount"`
-	Installments       int                    `json:"installments"`
-	Card               *pagarmeCard           `json:"card"`
-	QRCode             string                 `json:"qr_code"`
-	QRCodeURL          string                 `json:"qr_code_url"`
-	ExpiresAt          string                 `json:"expires_at"`
-	AcquirerName       string                 `json:"acquirer_name"`
-	AcquirerAuthCode   string                 `json:"acquirer_auth_code"`
-	AcquirerNsu        string                 `json:"acquirer_nsu"`
-	AcquirerTid        string                 `json:"acquirer_tid"`
-	AcquirerMessage    string                 `json:"acquirer_message"`
-	AcquirerReturnCode string                 `json:"acquirer_return_code"`
-	GatewayResponse    map[string]any         `json:"gateway_response"`
-	AntifraudResponse  map[string]any         `json:"antifraud_response"`
-	CreatedAt          string                 `json:"created_at"`
-	UpdatedAt          string                 `json:"updated_at"`
+	ID                 string         `json:"id"`
+	Status             string         `json:"status"`
+	Success            bool           `json:"success"`
+	Amount             int            `json:"amount"`
+	Installments       int            `json:"installments"`
+	Card               *pagarmeCard   `json:"card"`
+	QRCode             string         `json:"qr_code"`
+	QRCodeURL          string         `json:"qr_code_url"`
+	ExpiresAt          string         `json:"expires_at"`
+	AcquirerName       string         `json:"acquirer_name"`
+	AcquirerAuthCode   string         `json:"acquirer_auth_code"`
+	AcquirerNsu        string         `json:"acquirer_nsu"`
+	AcquirerTid        string         `json:"acquirer_tid"`
+	AcquirerMessage    string         `json:"acquirer_message"`
+	AcquirerReturnCode string         `json:"acquirer_return_code"`
+	GatewayResponse    map[string]any `json:"gateway_response"`
+	AntifraudResponse  map[string]any `json:"antifraud_response"`
+	CreatedAt          string         `json:"created_at"`
+	UpdatedAt          string         `json:"updated_at"`
 }
 
 type pagarmeCard struct {
@@ -1224,4 +1224,3 @@ type pagarmeCard struct {
 	ExpMonth       int    `json:"exp_month"`
 	ExpYear        int    `json:"exp_year"`
 }
-

@@ -6,10 +6,10 @@ import (
 
 func TestParsePurchaseIntent(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		wantNil  bool
-		wantQty  int
+		name    string
+		input   string
+		wantNil bool
+		wantQty int
 	}{
 		// Positive cases - should detect purchase intent
 		{name: "quero simples", input: "quero", wantNil: false, wantQty: 1},
@@ -45,11 +45,11 @@ func TestParsePurchaseIntent(t *testing.T) {
 		{name: "zero quantity", input: "quero 0", wantNil: false, wantQty: 1}, // 0 is invalid, defaults to 1
 
 		// Keyword as number - should NOT interpret keyword as quantity
-		{name: "quero keyword 1001", input: "quero 1001", wantNil: false, wantQty: 1},  // keyword detected, qty defaults to 1
-		{name: "quero keyword 1000", input: "quero 1000", wantNil: false, wantQty: 1},  // keyword detected, qty defaults to 1
-		{name: "2x keyword", input: "2x 1001", wantNil: false, wantQty: 2},             // explicit qty before keyword
-		{name: "keyword 3x", input: "1001 3x", wantNil: false, wantQty: 3},             // explicit qty after keyword
-		{name: "quero 2 keyword", input: "quero 2 1001", wantNil: false, wantQty: 2},   // explicit qty with keyword
+		{name: "quero keyword 1001", input: "quero 1001", wantNil: false, wantQty: 1}, // keyword detected, qty defaults to 1
+		{name: "quero keyword 1000", input: "quero 1000", wantNil: false, wantQty: 1}, // keyword detected, qty defaults to 1
+		{name: "2x keyword", input: "2x 1001", wantNil: false, wantQty: 2},            // explicit qty before keyword
+		{name: "keyword 3x", input: "1001 3x", wantNil: false, wantQty: 3},            // explicit qty after keyword
+		{name: "quero 2 keyword", input: "quero 2 1001", wantNil: false, wantQty: 2},  // explicit qty with keyword
 	}
 
 	for _, tt := range tests {

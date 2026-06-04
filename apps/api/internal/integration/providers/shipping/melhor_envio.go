@@ -178,7 +178,7 @@ func (m *MelhorEnvio) TestConnection(ctx context.Context) (*providers.TestConnec
 		Latency:  latency,
 		TestedAt: time.Now(),
 		AccountInfo: map[string]any{
-			"env":          m.env,
+			"env":           m.env,
 			"carrier_count": len(carriers),
 		},
 	}, nil
@@ -358,13 +358,13 @@ type meProductRequest struct {
 
 // meQuoteResponse is a single entry in the calculate response array.
 type meQuoteResponse struct {
-	ID           int             `json:"id"`
-	Name         string          `json:"name"`
-	Price        json.RawMessage `json:"price"`         // "23.50" or 23.50
-	CustomPrice  json.RawMessage `json:"custom_price"`  // same
-	DeliveryTime json.RawMessage `json:"delivery_time"` // int or { min, max }
+	ID                 int             `json:"id"`
+	Name               string          `json:"name"`
+	Price              json.RawMessage `json:"price"`         // "23.50" or 23.50
+	CustomPrice        json.RawMessage `json:"custom_price"`  // same
+	DeliveryTime       json.RawMessage `json:"delivery_time"` // int or { min, max }
 	CustomDeliveryTime json.RawMessage `json:"custom_delivery_time"`
-	Company      struct {
+	Company            struct {
 		ID      int    `json:"id"`
 		Name    string `json:"name"`
 		Picture string `json:"picture"`
@@ -405,8 +405,8 @@ func (m *MelhorEnvio) Quote(ctx context.Context, req QuoteRequest) ([]QuoteOptio
 	}
 
 	body := map[string]any{
-		"from": map[string]string{"postal_code": sanitizeZip(req.FromZip)},
-		"to":   map[string]string{"postal_code": sanitizeZip(req.ToZip)},
+		"from":     map[string]string{"postal_code": sanitizeZip(req.FromZip)},
+		"to":       map[string]string{"postal_code": sanitizeZip(req.ToZip)},
 		"products": products,
 		"options": map[string]any{
 			"receipt":  req.Receipt,
@@ -754,12 +754,12 @@ func (m *MelhorEnvio) TrackShipment(ctx context.Context, req TrackShipmentReques
 // =============================================================================
 
 type meCartCreateRequest struct {
-	Service  int                 `json:"service"`
-	From     meCartAddress       `json:"from"`
-	To       meCartAddress       `json:"to"`
-	Products []meCartProduct     `json:"products"`
-	Volumes  []meCartVolume      `json:"volumes"`
-	Options  meCartOptions       `json:"options"`
+	Service  int             `json:"service"`
+	From     meCartAddress   `json:"from"`
+	To       meCartAddress   `json:"to"`
+	Products []meCartProduct `json:"products"`
+	Volumes  []meCartVolume  `json:"volumes"`
+	Options  meCartOptions   `json:"options"`
 }
 
 type meCartAddress struct {
@@ -914,10 +914,11 @@ func buildMECartVolumes(items []ShippingItem, totalGrams int) []meCartVolume {
 
 // mapMelhorEnvioStatus translates ME's lifecycle states to LiveCart's
 // normalised TrackingStatus enum. ME states (per /reagindo-a-estados):
-//   pending   → buyer hasn't paid the freight
-//   released  → paid, awaiting authorisation with carrier
-//   posted    → at the carrier, in transit
-//   delivered, cancelled, undelivered, suspended.
+//
+//	pending   → buyer hasn't paid the freight
+//	released  → paid, awaiting authorisation with carrier
+//	posted    → at the carrier, in transit
+//	delivered, cancelled, undelivered, suspended.
 func mapMelhorEnvioStatus(raw string) TrackingStatus {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "pending":

@@ -516,11 +516,11 @@ type TrackShippingRequest struct {
 
 // TrackShippingResponse mirrors providers.TrackShipmentResult.
 type TrackShippingResponse struct {
-	TrackingCode  string                 `json:"trackingCode"`
-	Carrier       string                 `json:"carrier"`
-	Service       string                 `json:"service"`
-	CurrentStatus string                 `json:"currentStatus"`
-	Events        []TrackShippingEvent   `json:"events"`
+	TrackingCode  string               `json:"trackingCode"`
+	Carrier       string               `json:"carrier"`
+	Service       string               `json:"service"`
+	CurrentStatus string               `json:"currentStatus"`
+	Events        []TrackShippingEvent `json:"events"`
 }
 
 // TrackShippingEvent is a single timeline entry.

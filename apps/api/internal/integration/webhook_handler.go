@@ -495,15 +495,15 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	var webhook struct {
 		Tipo  string `json:"tipo"`
 		Dados struct {
-			IDProduto     json.Number `json:"idProduto"`
-			IDPedido      json.Number `json:"idPedido"`
-			IDNotaFiscal  json.Number `json:"idNotaFiscal"`
-			ID            string      `json:"id"`
-			SKU           string      `json:"sku"`
-			Nome          string      `json:"nome"`
-			Saldo         *float64    `json:"saldo"`
-			ChaveAcesso   string      `json:"chaveAcesso"`
-			Situacao      json.Number `json:"situacao"`
+			IDProduto    json.Number `json:"idProduto"`
+			IDPedido     json.Number `json:"idPedido"`
+			IDNotaFiscal json.Number `json:"idNotaFiscal"`
+			ID           string      `json:"id"`
+			SKU          string      `json:"sku"`
+			Nome         string      `json:"nome"`
+			Saldo        *float64    `json:"saldo"`
+			ChaveAcesso  string      `json:"chaveAcesso"`
+			Situacao     json.Number `json:"situacao"`
 		} `json:"dados"`
 	}
 	if err := json.Unmarshal(body, &webhook); err != nil {

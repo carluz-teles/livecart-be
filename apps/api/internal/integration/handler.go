@@ -63,6 +63,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Post("/instagram/media/upload", h.UploadInstagramMedia)
 	g.Post("/instagram/posts", h.CreateInstagramPost)
 	g.Post("/instagram/reels", h.CreateInstagramReel)
+	g.Post("/instagram/stories", h.CreateInstagramStory)
 
 	// Instagram comment moderation (reply / hide / delete)
 	g.Post("/instagram/comments/:commentId/reply", h.ReplyInstagramComment)
@@ -573,6 +574,101 @@ func (h *Handler) CreateInstagramReel(c *fiber.Ctx) error {
 	return httpx.Created(c, event)
 }
 
+// CreateInstagramStory publishes a Story (photo or video) and creates the bound
+// story-commerce event (24h window, purchase intent captured via DM replies).
+// Multipart: the media file plus products + cart settings (no start/end window —
+// Stories always run for their 24h lifetime).
+// @Summary Create an Instagram Story and its event
+// @Tags integrations
+// @Accept multipart/form-data
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param file formData file true "Photo (JPEG) or video (MP4)"
+// @Success 201 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/instagram/stories [post]
+// @Security BearerAuth
+func (h *Handler) CreateInstagramStory(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	file, err := c.FormFile("file")
+	if err != nil {
+		return httpx.BadRequest(c, "file is required")
+	}
+	ct := file.Header.Get("Content-Type")
+	var isVideo bool
+	switch ct {
+	case "image/jpeg":
+		isVideo = false
+		if file.Size > 8*1024*1024 {
+			return httpx.BadRequest(c, "image too large, maximum size is 8MB")
+		}
+	case "video/mp4", "video/quicktime":
+		isVideo = true
+		if file.Size > 100*1024*1024 {
+			return httpx.BadRequest(c, "video too large, maximum size is 100MB")
+		}
+	default:
+		return httpx.BadRequest(c, "invalid file type — send a JPEG photo or an MP4 video")
+	}
+
+	var productIDs []string
+	if raw := c.FormValue("productIds"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &productIDs); err != nil {
+			return httpx.BadRequest(c, "invalid productIds")
+		}
+	}
+	if len(productIDs) == 0 {
+		return httpx.BadRequest(c, "select at least one product for the promotion")
+	}
+
+	var cartExp, maxQty *int
+	if v := c.FormValue("cartExpirationMinutes"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cartExp = &n
+		}
+	}
+	if v := c.FormValue("cartMaxQuantityPerItem"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			maxQty = &n
+		}
+	}
+
+	if h.s3Client == nil {
+		return httpx.InternalError(c, "storage not configured")
+	}
+	src, err := file.Open()
+	if err != nil {
+		return httpx.InternalError(c, "failed to read file")
+	}
+	defer src.Close()
+
+	// Instagram fetches the media from a public URL, so host it transiently and
+	// pass a presigned URL. The service deletes the object after publishing.
+	key, err := h.s3Client.UploadFile(c.Context(), src, file.Filename, ct, "instagram/"+storeID)
+	if err != nil {
+		return httpx.InternalError(c, "failed to upload media")
+	}
+	mediaURL, err := h.s3Client.GeneratePresignedGetURL(c.Context(), key, 6*time.Hour)
+	if err != nil {
+		return httpx.InternalError(c, "failed to generate media URL")
+	}
+
+	event, err := h.service.CreateInstagramStoryEvent(c.Context(), CreateInstagramPostInput{
+		StoreID:                storeID,
+		ImageKey:               key, // transient media key, deleted after publish
+		Title:                  c.FormValue("title"),
+		ProductIDs:             productIDs,
+		CartExpirationMinutes:  cartExp,
+		CartMaxQuantityPerItem: maxQty,
+		IdempotencyKey:         c.FormValue("idempotencyKey"),
+	}, mediaURL, isVideo)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.Created(c, event)
+}
+
 // derefString returns the pointed-to string, or "" when the pointer is nil.
 func derefString(s *string) string {
 	if s == nil {
@@ -729,8 +825,9 @@ func (h *Handler) SearchProducts(c *fiber.Ctx) error {
 // variants is created in one transaction.
 //
 // Body:
-//   { "variantIds": ["67890", "67891"] }   // optional subset
-//   { }                                    // import everything
+//
+//	{ "variantIds": ["67890", "67891"] }   // optional subset
+//	{ }                                    // import everything
 //
 // @Summary Import product from ERP into LiveCart catalog
 // @Tags integrations

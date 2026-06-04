@@ -688,6 +688,79 @@ func (i *Instagram) PublishReel(ctx context.Context, videoURL, caption string) (
 	return mediaID, nil
 }
 
+// PublishStory publishes a Story (media_type=STORIES) from a public media URL.
+// Stories accept a photo (image_url) or a video (video_url) and expire after 24h.
+// Flow mirrors posts/Reels: create container -> wait until FINISHED -> publish.
+// Stories have no caption and no public comments — buyers engage via DM replies.
+func (i *Instagram) PublishStory(ctx context.Context, mediaURL string, isVideo bool) (string, error) {
+	if mediaURL == "" {
+		return "", fmt.Errorf("media url is required")
+	}
+
+	params := map[string]any{"media_type": "STORIES"}
+	if isVideo {
+		params["video_url"] = mediaURL
+	} else {
+		params["image_url"] = mediaURL
+	}
+
+	containerID, err := i.postGraph(ctx, "/me/media", params)
+	if err != nil {
+		return "", fmt.Errorf("creating story container: %w", err)
+	}
+
+	if err := i.waitContainerFinished(ctx, containerID); err != nil {
+		return "", err
+	}
+
+	mediaID, err := i.postGraph(ctx, "/me/media_publish", map[string]any{"creation_id": containerID})
+	if err != nil {
+		return "", fmt.Errorf("publishing story: %w", err)
+	}
+
+	i.logger.Info("instagram story published",
+		zap.String("container_id", containerID),
+		zap.String("media_id", mediaID),
+		zap.Bool("is_video", isVideo),
+	)
+	return mediaID, nil
+}
+
+// GetUsername resolves the @handle of a user from their Instagram-scoped id
+// (IGSID), used to label story-reply DMs in the merchant UI and @mention the
+// buyer. Best-effort: returns "" if the lookup is not permitted.
+func (i *Instagram) GetUsername(ctx context.Context, igsid string) (string, error) {
+	if igsid == "" {
+		return "", fmt.Errorf("igsid is required")
+	}
+	url := fmt.Sprintf("%s/%s/%s?fields=username&access_token=%s",
+		instagramGraphAPIBaseURL,
+		instagramGraphAPIVersion,
+		igsid,
+		i.credentials.AccessToken,
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("creating request: %w", err)
+	}
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("instagram API error: status %d, body: %s", resp.StatusCode, truncate(string(respBody), 200))
+	}
+	var out struct {
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("decoding response: %w", err)
+	}
+	return out.Username, nil
+}
+
 // waitContainerFinished polls the container status until FINISHED (or fails).
 // Instagram recommends polling ~once/minute for up to 5 minutes; we poll a bit
 // more frequently with the same overall budget.

@@ -209,14 +209,22 @@ func (h *WebhookHandler) processInstagramMessage(c *fiber.Ctx, entry InstagramEn
 		zap.String("text", msg.Message.Text),
 	)
 
+	// A reply to a story (reply_to.story.id) maps the DM to a story-commerce event.
+	var replyToStoryID string
+	if msg.Message.ReplyTo != nil && msg.Message.ReplyTo.Story != nil {
+		replyToStoryID = msg.Message.ReplyTo.Story.ID
+	}
+
 	// Process the message through the service
 	if err := h.service.ProcessInstagramMessage(c.Context(), ProcessInstagramMessageInput{
-		AccountID:  entry.ID,
-		SenderID:   msg.Sender.ID,
-		MessageID:  msg.Message.MID,
-		Text:       msg.Message.Text,
-		Timestamp:  msg.Timestamp,
-		RawPayload: rawBody,
+		AccountID:      entry.ID,
+		SenderID:       msg.Sender.ID,
+		MessageID:      msg.Message.MID,
+		Text:           msg.Message.Text,
+		Timestamp:      msg.Timestamp,
+		ReplyToStoryID: replyToStoryID,
+		IsEcho:         msg.Message.IsEcho,
+		RawPayload:     rawBody,
 	}); err != nil {
 		h.logger.Error("failed to process instagram message",
 			zap.String("message_id", msg.Message.MID),

@@ -102,30 +102,30 @@ type UpdatePriorityRequest struct {
 
 // IntegrationResponse is the HTTP response for an integration.
 type IntegrationResponse struct {
-	ID                string         `json:"id"`
-	StoreID           string         `json:"storeId"`
-	Type              string         `json:"type"`
-	Provider          string         `json:"provider"`
-	Status            string         `json:"status"`
-	Metadata          map[string]any `json:"metadata,omitempty"`
-	LastSyncedAt      *time.Time     `json:"lastSyncedAt,omitempty"`
-	CreatedAt         time.Time      `json:"createdAt"`
+	ID           string         `json:"id"`
+	StoreID      string         `json:"storeId"`
+	Type         string         `json:"type"`
+	Provider     string         `json:"provider"`
+	Status       string         `json:"status"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+	LastSyncedAt *time.Time     `json:"lastSyncedAt,omitempty"`
+	CreatedAt    time.Time      `json:"createdAt"`
 	// Setup URLs the merchant must paste into the provider's app config.
 	// Populated for providers that need user-side configuration (e.g. Tiny ERP).
-	RedirectURL       string         `json:"redirectUrl,omitempty"`
-	WebhookURL        string         `json:"webhookUrl,omitempty"`
+	RedirectURL string `json:"redirectUrl,omitempty"`
+	WebhookURL  string `json:"webhookUrl,omitempty"`
 	// WebhookStatus reflects whether the provider has hit our webhook URL at
 	// least once: "active" means we've received a ping (validation or event)
 	// and the URL is wired correctly; "pending" means we're still waiting.
 	// Only emitted for integrations that expose a webhookUrl.
-	WebhookStatus     string         `json:"webhookStatus,omitempty"`
+	WebhookStatus string `json:"webhookStatus,omitempty"`
 	// WebhookLastPingAt is the last time this provider hit our webhook URL for
 	// this store (validation ping or real event). null = never received → URL
 	// is likely missing or wrong on the provider side.
-	WebhookLastPingAt *time.Time     `json:"webhookLastPingAt"`
+	WebhookLastPingAt *time.Time `json:"webhookLastPingAt"`
 	// Priority drives checkout selection when a store has multiple integrations
 	// of the same type (only payment uses this today). Lower = primary.
-	Priority          int            `json:"priority"`
+	Priority int `json:"priority"`
 }
 
 // ProviderURLsResponse exposes the setup URLs a merchant must paste into the
@@ -140,15 +140,15 @@ type ProviderURLsResponse struct {
 
 // ListIntegrationsResponse is the HTTP response for listing integrations.
 type ListIntegrationsResponse struct {
-	Data       []IntegrationResponse  `json:"data"`
+	Data       []IntegrationResponse    `json:"data"`
 	Pagination query.PaginationResponse `json:"pagination"`
 }
 
 // CreateCheckoutRequest is the HTTP request for creating a payment checkout.
 type CreateCheckoutRequest struct {
-	IntegrationID string                    `json:"integrationId" validate:"required,uuid"`
-	CartID        string                    `json:"cartId" validate:"required"`
-	Items         []providers.CheckoutItem  `json:"items" validate:"required,min=1,dive"`
+	IntegrationID string                     `json:"integrationId" validate:"required,uuid"`
+	CartID        string                     `json:"cartId" validate:"required"`
+	Items         []providers.CheckoutItem   `json:"items" validate:"required,min=1,dive"`
 	Customer      providers.CheckoutCustomer `json:"customer" validate:"required"`
 	TotalAmount   int64                      `json:"totalAmount" validate:"required,gt=0"`
 	Currency      string                     `json:"currency" validate:"required,len=3"`
@@ -209,9 +209,9 @@ type TestConnectionResponse struct {
 // the JSON envelope. Items are flattened so the FE can group by category
 // without re-traversing.
 type ERPHealthCheckResponse struct {
-	Supported bool                              `json:"supported"`
-	CheckedAt time.Time                         `json:"checkedAt"`
-	Items     []providers.ERPHealthCheckItem    `json:"items"`
+	Supported bool                           `json:"supported"`
+	CheckedAt time.Time                      `json:"checkedAt"`
+	Items     []providers.ERPHealthCheckItem `json:"items"`
 }
 
 // =============================================================================
@@ -391,18 +391,18 @@ type SearchProductsOutput struct {
 // holds no stock in Tiny/Bling); the front-end must use Variants to let the
 // user pick a specific SKU before adding to a cart/live.
 type ERPProductResponse struct {
-	ID          string                  `json:"id"`
-	SKU         string                  `json:"sku,omitempty"`
-	GTIN        string                  `json:"gtin,omitempty"`
-	Name        string                  `json:"name"`
-	Description string                  `json:"description,omitempty"`
-	Price       int64                   `json:"price"`
-	Stock       int                     `json:"stock"`
-	ImageURL    string                  `json:"imageUrl,omitempty"`
-	Active      bool                    `json:"active"`
-	Shipping    *ERPShippingPreviewDTO  `json:"shipping,omitempty"` // weight + dimensions resolved from the ERP, for the picker preview
-	IsParent    bool                    `json:"isParent,omitempty"`
-	Variants    []ERPVariantResponse    `json:"variants,omitempty"`
+	ID          string                 `json:"id"`
+	SKU         string                 `json:"sku,omitempty"`
+	GTIN        string                 `json:"gtin,omitempty"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	Price       int64                  `json:"price"`
+	Stock       int                    `json:"stock"`
+	ImageURL    string                 `json:"imageUrl,omitempty"`
+	Active      bool                   `json:"active"`
+	Shipping    *ERPShippingPreviewDTO `json:"shipping,omitempty"` // weight + dimensions resolved from the ERP, for the picker preview
+	IsParent    bool                   `json:"isParent,omitempty"`
+	Variants    []ERPVariantResponse   `json:"variants,omitempty"`
 }
 
 // ERPShippingPreviewDTO mirrors the ERP-side shipping data the search response
@@ -446,8 +446,8 @@ type ERPVariantResponse struct {
 	Price      int64                  `json:"price"`
 	Stock      int                    `json:"stock"`
 	Active     bool                   `json:"active"`
-	ImageURL   string                 `json:"imageUrl,omitempty"` // best-effort enrichment from GetProduct(child); may be empty if Tiny returned no anexos or the enrichment timed out — front should fall back to parent.imageUrl
-	Shipping   *ERPShippingPreviewDTO `json:"shipping,omitempty"` // resolved per-variant shipping (after individual GET enrichment)
+	ImageURL   string                 `json:"imageUrl,omitempty"`   // best-effort enrichment from GetProduct(child); may be empty if Tiny returned no anexos or the enrichment timed out — front should fall back to parent.imageUrl
+	Shipping   *ERPShippingPreviewDTO `json:"shipping,omitempty"`   // resolved per-variant shipping (after individual GET enrichment)
 	Attributes map[string]string      `json:"attributes,omitempty"` // e.g. {"Cor":"Azul","Tamanho":"M"}
 }
 
@@ -463,10 +463,10 @@ type SyncProductInput struct {
 // catalog. When VariantIDs is empty the entire product (all variations, or the
 // single SKU when not a parent) is imported.
 type ImportERPProductInput struct {
-	StoreID        string
-	IntegrationID  string
-	TinyProductID  string
-	VariantIDs     []string
+	StoreID       string
+	IntegrationID string
+	TinyProductID string
+	VariantIDs    []string
 }
 
 // ImportERPProductRequest is the HTTP body of POST /integrations/:id/products/:tinyProductId/import.
@@ -478,14 +478,14 @@ type ImportERPProductRequest struct {
 // GroupID is populated when the imported product had variations; ProductID is
 // populated when a single simple product was imported.
 type ImportERPProductOutput struct {
-	GroupID    string                       `json:"groupId,omitempty"`
-	ProductID  string                       `json:"productId,omitempty"`
-	IsParent   bool                         `json:"isParent"`
-	Imported   []ImportedERPVariantSummary  `json:"imported"`
+	GroupID   string                      `json:"groupId,omitempty"`
+	ProductID string                      `json:"productId,omitempty"`
+	IsParent  bool                        `json:"isParent"`
+	Imported  []ImportedERPVariantSummary `json:"imported"`
 }
 
 type ImportedERPVariantSummary struct {
-	ExternalID string            `json:"externalId"`           // Tiny child product id
+	ExternalID string            `json:"externalId"` // Tiny child product id
 	SKU        string            `json:"sku,omitempty"`
 	Attributes map[string]string `json:"attributes,omitempty"`
 }
@@ -637,17 +637,17 @@ type ProcessPaymentInput struct {
 
 // WebhookEventRow represents a row from the webhook_events table.
 type WebhookEventRow struct {
-	ID            string
-	IntegrationID string
-	Provider      string
-	EventType     string
-	EventID       string
-	Payload       []byte
+	ID             string
+	IntegrationID  string
+	Provider       string
+	EventType      string
+	EventID        string
+	Payload        []byte
 	SignatureValid *bool
-	Processed     bool
-	ProcessedAt   *time.Time
-	ErrorMessage  string
-	CreatedAt     time.Time
+	Processed      bool
+	ProcessedAt    *time.Time
+	ErrorMessage   string
+	CreatedAt      time.Time
 }
 
 // CreateInstagramPostRequest is the HTTP payload to publish an image post and

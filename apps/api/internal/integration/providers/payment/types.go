@@ -17,12 +17,12 @@ type (
 	WebhookEvent     = providers.WebhookEvent
 
 	// Transparent checkout types
-	CardPaymentInput   = providers.CardPaymentInput
-	CardPaymentResult  = providers.CardPaymentResult
-	PixPaymentInput    = providers.PixPaymentInput
-	PixPaymentResult   = providers.PixPaymentResult
+	CardPaymentInput     = providers.CardPaymentInput
+	CardPaymentResult    = providers.CardPaymentResult
+	PixPaymentInput      = providers.PixPaymentInput
+	PixPaymentResult     = providers.PixPaymentResult
 	CheckoutConfigResult = providers.CheckoutConfigResult
-	PayerCostInfo      = providers.PayerCostInfo
+	PayerCostInfo        = providers.PayerCostInfo
 )
 
 // Re-export constants

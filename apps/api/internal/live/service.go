@@ -211,6 +211,10 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 
 	platform := "instagram"
 	closeCart := true
+	eventType := input.Type
+	if eventType == "" {
+		eventType = "post"
+	}
 	// Create the event as 'active' regardless of a future start: the effective
 	// status (and comment gating) is derived from the window, so the event is
 	// always resolvable by media id. We do NOT pass ScheduledAt to Create here,
@@ -218,7 +222,7 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 	out, err := s.Create(ctx, CreateLiveInput{
 		StoreID:                input.StoreID,
 		Title:                  input.Title,
-		Type:                   "post",
+		Type:                   eventType,
 		Platform:               &platform,
 		PlatformLiveID:         &input.MediaID,
 		CloseCartOnEventEnd:    &closeCart,
@@ -840,23 +844,23 @@ func (s *Service) GetEventByPlatformLiveID(ctx context.Context, platformLiveID s
 	}
 
 	return &EventOutput{
-		ID:                      event.ID,
-		StoreID:                 event.StoreID,
-		Title:                   event.Title,
-		Type:                    event.Type,
-		Status:                  event.Status,
-		TotalOrders:             event.TotalOrders,
-		CloseCartOnEventEnd:     event.CloseCartOnEventEnd,
-		CartExpirationMinutes:   event.CartExpirationMinutes,
-		CartMaxQuantityPerItem:  event.CartMaxQuantityPerItem,
-		SendOnLiveEnd:           event.SendOnLiveEnd,
-		CurrentActiveProductID:  event.CurrentActiveProductID,
-		ProcessingPaused:        event.ProcessingPaused,
-		ScheduledAt:             event.ScheduledAt,
-		EndsAt:                  event.EndsAt,
-		Description:             event.Description,
-		CreatedAt:               event.CreatedAt,
-		UpdatedAt:               event.UpdatedAt,
+		ID:                     event.ID,
+		StoreID:                event.StoreID,
+		Title:                  event.Title,
+		Type:                   event.Type,
+		Status:                 event.Status,
+		TotalOrders:            event.TotalOrders,
+		CloseCartOnEventEnd:    event.CloseCartOnEventEnd,
+		CartExpirationMinutes:  event.CartExpirationMinutes,
+		CartMaxQuantityPerItem: event.CartMaxQuantityPerItem,
+		SendOnLiveEnd:          event.SendOnLiveEnd,
+		CurrentActiveProductID: event.CurrentActiveProductID,
+		ProcessingPaused:       event.ProcessingPaused,
+		ScheduledAt:            event.ScheduledAt,
+		EndsAt:                 event.EndsAt,
+		Description:            event.Description,
+		CreatedAt:              event.CreatedAt,
+		UpdatedAt:              event.UpdatedAt,
 	}, nil
 }
 

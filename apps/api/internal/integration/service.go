@@ -2106,6 +2106,79 @@ func (s *Service) publishInstagramReelEvent(ctx context.Context, input CreateIns
 	return out, nil
 }
 
+// CreateInstagramStoryEvent publishes a Story (photo or video) from a public URL
+// and creates the bound story-commerce event (type='story', 24h window). Buyers
+// reply to the Story via DM; ProcessInstagramMessage feeds those into the same
+// cart pipeline. The transient media (input.ImageKey) is deleted after publish.
+func (s *Service) CreateInstagramStoryEvent(ctx context.Context, input CreateInstagramPostInput, mediaURL string, isVideo bool) (live.CreateLiveOutput, error) {
+	return s.publishWithIdempotency(ctx, input, "create_instagram_story",
+		func() { s.deleteTransientImage(ctx, input.ImageKey) },
+		func() (live.CreateLiveOutput, error) {
+			return s.publishInstagramStoryEvent(ctx, input, mediaURL, isVideo)
+		},
+	)
+}
+
+func (s *Service) publishInstagramStoryEvent(ctx context.Context, input CreateInstagramPostInput, mediaURL string, isVideo bool) (live.CreateLiveOutput, error) {
+	provider, err := s.resolveInstagramSocialProvider(ctx, input.StoreID)
+	if err != nil {
+		return live.CreateLiveOutput{}, err
+	}
+
+	mediaID, err := provider.PublishStory(ctx, mediaURL, isVideo)
+	if err != nil {
+		s.logger.Warn("failed to publish instagram story",
+			zap.String("store_id", input.StoreID), zap.Error(err))
+		s.deleteTransientImage(ctx, input.ImageKey)
+		return live.CreateLiveOutput{}, httpx.ErrUnprocessable("failed to publish the story on Instagram")
+	}
+
+	// Instagram has fetched the media; remove the transient upload.
+	s.deleteTransientImage(ctx, input.ImageKey)
+
+	// Best-effort metadata (a Story may not expose a public permalink).
+	permalink, thumbnail := "", ""
+	if details, dErr := provider.GetMediaDetails(ctx, mediaID); dErr == nil && details != nil {
+		permalink = details.Permalink
+		thumbnail = details.ThumbnailURL
+		if thumbnail == "" {
+			thumbnail = details.MediaURL
+		}
+	}
+
+	// Stories expire after 24h — the event ends then too (effective status is
+	// derived from ends_at, no background job). Computed here (not in the dedup
+	// input) so a retried publish still hashes identically.
+	endsAt := time.Now().Add(24 * time.Hour)
+
+	out, err := s.liveService.CreatePostEvent(ctx, live.CreatePostInput{
+		StoreID:                input.StoreID,
+		Type:                   "story",
+		Title:                  input.Title,
+		MediaID:                mediaID,
+		MediaPermalink:         permalink,
+		MediaThumbnailURL:      thumbnail,
+		MediaCaption:           input.Caption,
+		ProductIDs:             input.ProductIDs,
+		EndsAt:                 &endsAt,
+		CartExpirationMinutes:  input.CartExpirationMinutes,
+		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
+	})
+	if err != nil {
+		s.logger.Error("story published but event creation failed",
+			zap.String("store_id", input.StoreID),
+			zap.String("media_id", mediaID), zap.Error(err))
+		return live.CreateLiveOutput{}, err
+	}
+
+	s.logger.Info("instagram story created and event bound",
+		zap.String("store_id", input.StoreID),
+		zap.String("media_id", mediaID),
+		zap.String("event_id", out.ID),
+	)
+	return out, nil
+}
+
 // =============================================================================
 // ERP OPERATIONS
 // =============================================================================
@@ -3970,11 +4043,11 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		}
 	}
 
-	// Post-commerce events apply their own rules: only the selected products
-	// participate, a single-product post auto-adds on a bare "EU QUERO", and an
-	// unavailable or ambiguous request gets a private reply listing what's
-	// available. When the request is fully handled here, persist and stop.
-	if event.Type == "post" && hasPurchaseIntent {
+	// Post-commerce events (feed posts and Stories) apply their own rules: only
+	// the selected products participate, a single-product promotion auto-adds on a
+	// bare "EU QUERO", and an unavailable or ambiguous request gets a private
+	// reply listing what's available. When fully handled here, persist and stop.
+	if isPostCommerce(event.Type) && hasPurchaseIntent {
 		// Window gates (no background job): a buyer who comments before the
 		// event starts or after it ends gets a private reply explaining when,
 		// instead of having a cart created.
@@ -4065,7 +4138,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 				_ = s.repo.UpdateLiveCommentResult(ctx, commentID, false, product.ID, intent.Quantity, "max_quantity_reached")
 			}
 			// Send reply notifying user they've reached the limit
-			go s.sendMaxQuantityReply(ctx, event.StoreID, input.CommentID, input.UserID, input.Username, product.Name, maxAllowed, true)
+			go s.sendMaxQuantityReply(ctx, event.StoreID, input.Channel, input.CommentID, input.UserID, input.Username, product.Name, maxAllowed, true)
 			return nil
 		}
 
@@ -4079,7 +4152,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 				zap.Int("capped_to", remaining),
 			)
 			// Send reply notifying user their quantity was capped
-			go s.sendMaxQuantityReply(ctx, event.StoreID, input.CommentID, input.UserID, input.Username, product.Name, maxAllowed, false)
+			go s.sendMaxQuantityReply(ctx, event.StoreID, input.Channel, input.CommentID, input.UserID, input.Username, product.Name, maxAllowed, false)
 			intent.Quantity = remaining
 		}
 	}
@@ -4218,7 +4291,14 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		}
 	}
 
-	// Send immediate notification (fire-and-forget, doesn't block the flow)
+	// Send immediate notification (fire-and-forget, doesn't block the flow). For
+	// story replies (Channel="dm") there is no comment to reply on, so we clear
+	// the comment id — the notification service then delivers straight via DM to
+	// the buyer's IGSID.
+	notifyCommentID := input.CommentID
+	if input.Channel == "dm" {
+		notifyCommentID = ""
+	}
 	s.sendImmediateNotification(ctx, sendNotificationInput{
 		StoreID:           event.StoreID,
 		EventID:           event.ID,
@@ -4227,13 +4307,13 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		CartToken:         result.CartToken,
 		PlatformUserID:    input.UserID,
 		PlatformHandle:    input.Username,
-		PlatformCommentID: input.CommentID,
+		PlatformCommentID: notifyCommentID,
 		ProductName:       product.Name,
 		ProductKeyword:    product.Keyword,
 		Quantity:          intent.Quantity,
 		TotalItems:        result.TotalItems,
 		TotalCents:        result.TotalCents,
-		IsNewCart:      result.IsNewCart,
+		IsNewCart:         result.IsNewCart,
 	})
 
 	return nil
@@ -4346,16 +4426,25 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 // sendMaxQuantityReply sends a reply to the user when they've reached or exceeded the max quantity limit.
 // This is fire-and-forget - errors are logged but don't affect the main flow.
 // isAtLimit: true = already at limit (rejected), false = quantity was capped
-func (s *Service) sendMaxQuantityReply(ctx context.Context, storeID, commentID, userID, username, productName string, maxAllowed int, isAtLimit bool) {
-	if commentID == "" {
-		return
-	}
-
+func (s *Service) sendMaxQuantityReply(ctx context.Context, storeID, channel, commentID, userID, username, productName string, maxAllowed int, isAtLimit bool) {
 	var message string
 	if isAtLimit {
 		message = fmt.Sprintf("Oi @%s! Você já atingiu o limite de %d unidades de %s. 🛒", username, maxAllowed, productName)
 	} else {
 		message = fmt.Sprintf("Oi @%s! Adicionei o máximo permitido (%d unidades) de %s ao seu carrinho. 🛒", username, maxAllowed, productName)
+	}
+
+	// Story replies have no comment to answer — DM the buyer directly.
+	if channel == "dm" {
+		if dmErr := s.SendInstagramDM(ctx, storeID, userID, message); dmErr != nil {
+			s.logger.Warn("failed to send max quantity DM",
+				zap.String("user_id", userID), zap.Error(dmErr))
+		}
+		return
+	}
+
+	if commentID == "" {
+		return
 	}
 
 	// Try comment reply first, then DM fallback
@@ -4451,6 +4540,19 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 		}
 	}
 
+	// Story-commerce: a DM that replies to one of our published Stories carries
+	// reply_to.story.id. Feed it into the same intent→cart pipeline as comments,
+	// answering via DM. Skip echoes (our own outbound messages).
+	if input.ReplyToStoryID != "" && !input.IsEcho {
+		if err := s.processStoryReply(ctx, integration.StoreID, input); err != nil {
+			s.logger.Warn("failed to process story reply",
+				zap.String("store_id", integration.StoreID),
+				zap.String("story_id", input.ReplyToStoryID),
+				zap.Error(err))
+		}
+		return nil
+	}
+
 	// If the message text matches an active "Testar notificação" setup code,
 	// capture this sender as the store's test recipient. We swallow errors
 	// here because a webhook should never fail on optional bookkeeping.
@@ -4470,6 +4572,49 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 	}
 
 	return nil
+}
+
+// processStoryReply turns a DM reply to a published Story into a purchase intent.
+// It resolves the bound story-commerce event by the replied-to story media id,
+// best-effort resolves the buyer's @handle, then reuses the comment→cart
+// pipeline with the DM reply channel (answers go straight to the buyer's DM).
+func (s *Service) processStoryReply(ctx context.Context, storeID string, input ProcessInstagramMessageInput) error {
+	// Only act on replies to one of our story-commerce events.
+	event, err := s.liveService.GetEventByPlatformLiveID(ctx, input.ReplyToStoryID)
+	if err != nil {
+		return fmt.Errorf("resolving story event: %w", err)
+	}
+	if event == nil || event.Type != "story" {
+		// Reply to a non-commerce story (or unknown) — nothing to do.
+		return nil
+	}
+
+	// Resolve the buyer's @handle from their IGSID (best-effort — the DM still
+	// works without it; we just fall back to a generic label).
+	username := ""
+	if provider, perr := s.resolveInstagramSocialProvider(ctx, storeID); perr == nil {
+		if uname, uerr := provider.GetUsername(ctx, input.SenderID); uerr == nil {
+			username = uname
+		} else {
+			s.logger.Warn("failed to resolve story buyer username",
+				zap.String("sender_id", input.SenderID), zap.Error(uerr))
+		}
+	}
+	if username == "" {
+		username = "cliente"
+	}
+
+	return s.ProcessInstagramComment(ctx, ProcessInstagramCommentInput{
+		AccountID:  input.AccountID,
+		MediaID:    input.ReplyToStoryID,
+		CommentID:  input.MessageID, // DM mid — dedup key
+		UserID:     input.SenderID,  // IGSID — DM recipient
+		Username:   username,
+		Text:       input.Text,
+		Timestamp:  input.Timestamp,
+		Channel:    "dm",
+		RawPayload: input.RawPayload,
+	})
 }
 
 // MarkPostEventWebhookActive flags the post event mapped to mediaID as
@@ -4502,6 +4647,13 @@ func (s *Service) StartPostCommentPolling(ctx context.Context) {
 // permanently unreachable for us (deleted or no longer accessible) rather than a
 // transient failure. Graph signals this with code 100 / subcode 33 and the
 // "does not exist, cannot be loaded due to missing permissions" message.
+// isPostCommerce reports whether an event type uses the post-commerce intent
+// rules (whitelisted products, single-product auto-add, window gates). Both feed
+// posts and Stories share these rules — only the reply channel differs.
+func isPostCommerce(eventType string) bool {
+	return eventType == "post" || eventType == "story"
+}
+
 func isMediaGoneError(err error) bool {
 	if err == nil {
 		return false
@@ -4669,13 +4821,13 @@ func (s *Service) replyPostNotStarted(ctx context.Context, event *live.EventOutp
 		"Oi @%s! Esta promoção ainda não começou. 🗓️\nEla começa em %s. Volte lá pra garantir o seu! 💜",
 		input.Username, live.FormatBRT(startsAt),
 	)
-	s.sendPostReply(ctx, event, input.CommentID, msg)
+	s.sendPostReply(ctx, event, input, msg)
 }
 
 // replyPostEnded privately tells the buyer the promotion has ended.
 func (s *Service) replyPostEnded(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput) {
 	msg := fmt.Sprintf("Oi @%s! Esta promoção já foi encerrada. 😕 Fique de olho que logo teremos novidades! 💜", input.Username)
-	s.sendPostReply(ctx, event, input.CommentID, msg)
+	s.sendPostReply(ctx, event, input, msg)
 }
 
 // replyPostOutOfStock privately tells the buyer the product is sold out and
@@ -4691,15 +4843,28 @@ func (s *Service) replyPostOutOfStock(ctx context.Context, event *live.EventOutp
 	default:
 		msg = fmt.Sprintf("Oi @%s! Os produtos desta promoção esgotaram. 😕 Fique de olho nas próximas! 💜", input.Username)
 	}
-	s.sendPostReply(ctx, event, input.CommentID, msg)
+	s.sendPostReply(ctx, event, input, msg)
 }
 
-// sendPostReply sends a private reply to a post comment, logging on failure.
-func (s *Service) sendPostReply(ctx context.Context, event *live.EventOutput, commentID, msg string) {
-	if err := s.ReplyToInstagramComment(ctx, event.StoreID, commentID, msg); err != nil {
+// sendPostReply privately answers the buyer. For a comment-channel event it
+// replies on the comment thread (which Instagram delivers as a private reply);
+// for a story (Channel="dm") it messages the buyer's IGSID directly, since a
+// story reply arrives as a DM and has no public comment to answer.
+func (s *Service) sendPostReply(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, msg string) {
+	if input.Channel == "dm" {
+		if err := s.SendInstagramDM(ctx, event.StoreID, input.UserID, msg); err != nil {
+			s.logger.Warn("failed to send story DM reply",
+				zap.String("event_id", event.ID),
+				zap.String("user_id", input.UserID),
+				zap.Error(err),
+			)
+		}
+		return
+	}
+	if err := s.ReplyToInstagramComment(ctx, event.StoreID, input.CommentID, msg); err != nil {
 		s.logger.Warn("failed to send post reply",
 			zap.String("event_id", event.ID),
-			zap.String("comment_id", commentID),
+			zap.String("comment_id", input.CommentID),
 			zap.Error(err),
 		)
 	}
@@ -4738,13 +4903,7 @@ func (s *Service) replyPostUnavailable(ctx context.Context, event *live.EventOut
 			input.Username, promoProductLines(available),
 		)
 	}
-	if err := s.ReplyToInstagramComment(ctx, event.StoreID, input.CommentID, msg); err != nil {
-		s.logger.Warn("failed to send post unavailable reply",
-			zap.String("event_id", event.ID),
-			zap.String("comment_id", input.CommentID),
-			zap.Error(err),
-		)
-	}
+	s.sendPostReply(ctx, event, input, msg)
 }
 
 // replyPostChooseProduct privately asks the commenter to specify which product
@@ -4754,13 +4913,7 @@ func (s *Service) replyPostChooseProduct(ctx context.Context, event *live.EventO
 		"Oi @%s! Pra adicionar ao carrinho, comente o código do produto que você quer:\n%s 💜",
 		input.Username, promoProductLines(available),
 	)
-	if err := s.ReplyToInstagramComment(ctx, event.StoreID, input.CommentID, msg); err != nil {
-		s.logger.Warn("failed to send post choose-product reply",
-			zap.String("event_id", event.ID),
-			zap.String("comment_id", input.CommentID),
-			zap.Error(err),
-		)
-	}
+	s.sendPostReply(ctx, event, input, msg)
 }
 
 // =============================================================================
