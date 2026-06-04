@@ -434,6 +434,38 @@ func (r *Repository) EndPostEventByMediaID(ctx context.Context, mediaID string) 
 	return err
 }
 
+// GetEventPulse returns a tiny "did anything change" snapshot for an event,
+// powering the dashboard's near-real-time refresh. It reads the counters the
+// service already maintains (event.total_orders, sessions.total_comments) plus
+// the latest cart change — a single cheap, indexed read per poll, so the client
+// only refetches the heavy lists when one of these moves.
+func (r *Repository) GetEventPulse(ctx context.Context, eventID, storeID string) (EventPulse, error) {
+	eid, err := parseUUID(eventID)
+	if err != nil {
+		return EventPulse{}, err
+	}
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return EventPulse{}, err
+	}
+	var p EventPulse
+	err = r.pool.QueryRow(ctx, `
+		SELECT
+			e.total_orders,
+			COALESCE((SELECT SUM(ls.total_comments) FROM live_sessions ls WHERE ls.event_id = e.id), 0)::int,
+			COALESCE((SELECT MAX(c.updated_at) FROM carts c WHERE c.event_id = e.id), e.updated_at)
+		FROM live_events e
+		WHERE e.id = $1 AND e.store_id = $2
+	`, eid, sid).Scan(&p.Orders, &p.Comments, &p.OrdersChangedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return EventPulse{}, httpx.ErrNotFound("event not found")
+		}
+		return EventPulse{}, fmt.Errorf("getting event pulse: %w", err)
+	}
+	return p, nil
+}
+
 func (r *Repository) GetEventByID(ctx context.Context, id, storeID string) (*EventRow, error) {
 	uid, err := parseUUID(id)
 	if err != nil {

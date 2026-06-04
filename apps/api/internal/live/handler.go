@@ -33,6 +33,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 
 	// Event details endpoints
 	g.Get("/:id/event-stats", h.GetEventStats)
+	g.Get("/:id/pulse", h.GetPulse)
 	g.Get("/:id/carts", h.ListCarts)
 	g.Get("/:id/comments", h.ListComments)
 	g.Post("/:id/carts/:cartId/resend-message", h.ResendCartMessage)
@@ -829,6 +830,19 @@ func (h *Handler) ListCarts(c *fiber.Ctx) error {
 // @Failure      404 {object} httpx.Envelope
 // @Router       /api/v1/stores/{storeId}/lives/{id}/comments [get]
 // @Security     BearerAuth
+// GetPulse returns the cheap change-signal (orders/comments counters + latest
+// cart change) the dashboard polls for near-real-time refresh.
+func (h *Handler) GetPulse(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	pulse, err := h.service.GetEventPulse(c.Context(), eventID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, pulse)
+}
+
 func (h *Handler) ListComments(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
 	eventID := c.Params("id")

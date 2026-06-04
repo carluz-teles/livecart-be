@@ -294,6 +294,11 @@ func (s *Service) EndPostEventByMediaID(ctx context.Context, mediaID string) err
 	return s.repo.EndPostEventByMediaID(ctx, mediaID)
 }
 
+// GetEventPulse returns the cheap change-signal used for near-real-time refresh.
+func (s *Service) GetEventPulse(ctx context.Context, eventID, storeID string) (EventPulse, error) {
+	return s.repo.GetEventPulse(ctx, eventID, storeID)
+}
+
 func (s *Service) GetByID(ctx context.Context, id, storeID string) (LiveOutput, error) {
 	event, err := s.repo.GetEventByID(ctx, id, storeID)
 	if err != nil {

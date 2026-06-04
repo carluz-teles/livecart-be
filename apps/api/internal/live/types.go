@@ -196,6 +196,15 @@ type CreateSessionRequest struct {
 	PlatformLiveID string `json:"platformLiveId" validate:"required"`
 }
 
+// EventPulse is a tiny change-signal for near-real-time dashboard refresh. The
+// client polls it cheaply and only refetches the heavy lists when a field moves:
+// Orders/OrdersChangedAt → carts; Comments → comments feed.
+type EventPulse struct {
+	Orders          int       `json:"orders"`          // new-cart counter (event.total_orders)
+	Comments        int       `json:"comments"`        // total comments across sessions
+	OrdersChangedAt time.Time `json:"ordersChangedAt"` // latest cart change (catches edits/payments)
+}
+
 // CommentResponse represents a single comment in the API response.
 type CommentResponse struct {
 	Handle string `json:"handle"`
