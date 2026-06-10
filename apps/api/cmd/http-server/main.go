@@ -644,8 +644,13 @@ func (a *liveNotifierAdapter) NotifyEventCheckout(ctx context.Context, p live.No
 		CartToken:      p.CartToken,
 		PlatformUserID: p.PlatformUserID,
 		PlatformHandle: p.PlatformHandle,
-		TotalItems:     p.TotalItems,
-		TotalValue:     p.TotalValue,
+		// CommentID enables the private-reply delivery path (7-day window per
+		// comment). Dropping it here silently forced every resend onto the
+		// direct-message path, which Instagram rejects outside the 24h window
+		// (error 2534022) — a comment alone never opens that window.
+		CommentID:  p.CommentID,
+		TotalItems: p.TotalItems,
+		TotalValue: p.TotalValue,
 	})
 }
 
