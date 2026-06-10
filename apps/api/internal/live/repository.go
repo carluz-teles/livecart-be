@@ -448,12 +448,22 @@ func (r *Repository) GetEventPulse(ctx context.Context, eventID, storeID string)
 	if err != nil {
 		return EventPulse{}, err
 	}
+	// carts has no updated_at column — the change signal is the newest of:
+	// cart creation, payment, and any item mutation (cart_mutations records every
+	// quantity/item change with its own created_at).
 	var p EventPulse
 	err = r.pool.QueryRow(ctx, `
 		SELECT
 			e.total_orders,
 			COALESCE((SELECT SUM(ls.total_comments) FROM live_sessions ls WHERE ls.event_id = e.id), 0)::int,
-			COALESCE((SELECT MAX(c.updated_at) FROM carts c WHERE c.event_id = e.id), e.updated_at)
+			GREATEST(
+				COALESCE((SELECT MAX(c.created_at) FROM carts c WHERE c.event_id = e.id), e.updated_at),
+				COALESCE((SELECT MAX(c.paid_at) FROM carts c WHERE c.event_id = e.id), e.updated_at),
+				COALESCE((SELECT MAX(cm.created_at)
+				          FROM cart_mutations cm
+				          JOIN carts c2 ON c2.id = cm.cart_id
+				          WHERE c2.event_id = e.id), e.updated_at)
+			)
 		FROM live_events e
 		WHERE e.id = $1 AND e.store_id = $2
 	`, eid, sid).Scan(&p.Orders, &p.Comments, &p.OrdersChangedAt)
@@ -763,22 +773,22 @@ func (r *Repository) GetLatestCommentIDByUser(ctx context.Context, eventID, plat
 		return "", err
 	}
 
-	comments, err := r.q.ListCommentsByUser(ctx, sqlc.ListCommentsByUserParams{
-		EventID:        eventUID,
-		PlatformUserID: platformUserID,
-	})
+	// Direct, explicit query: newest non-empty Instagram comment id for this
+	// buyer on this event. Returns "" (no error) when the buyer has no comment.
+	var commentID string
+	err = r.pool.QueryRow(ctx, `
+		SELECT platform_comment_id FROM live_comments
+		WHERE event_id = $1 AND platform_user_id = $2 AND platform_comment_id <> ''
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, eventUID, platformUserID).Scan(&commentID)
 	if err != nil {
-		return "", err
-	}
-
-	// ListCommentsByUser is ordered by created_at ascending, so the last entry
-	// with a non-empty comment ID is the most recent one.
-	for i := len(comments) - 1; i >= 0; i-- {
-		if comments[i].PlatformCommentID != "" {
-			return comments[i].PlatformCommentID, nil
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
 		}
+		return "", fmt.Errorf("getting latest comment id: %w", err)
 	}
-	return "", nil
+	return commentID, nil
 }
 
 // ListCommentsBySession returns all comments for a session.

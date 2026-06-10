@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -1128,7 +1129,23 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 	// window) rather than a direct message by IGSID (24h window opened only by an
 	// inbound DM). A comment does not open the DM window, so without this the
 	// resend is rejected with error 2534022 even moments after the comment.
-	commentID, _ := s.repo.GetLatestCommentIDByUser(ctx, eventID, cart.PlatformUserID)
+	commentID, lookupErr := s.repo.GetLatestCommentIDByUser(ctx, eventID, cart.PlatformUserID)
+	if lookupErr != nil {
+		// Don't abort — the DM path may still work — but make the failure visible
+		// instead of silently degrading to DM-only (which fails outside the 24h
+		// window with error 2534022).
+		s.logger.Error("failed to look up buyer's latest comment for private reply",
+			zap.String("event_id", eventID),
+			zap.String("platform_user_id", cart.PlatformUserID),
+			zap.Error(lookupErr),
+		)
+	}
+	s.logger.Info("resend checkout message: delivery context",
+		zap.String("event_id", eventID),
+		zap.String("cart_id", cartID),
+		zap.String("platform_user_id", cart.PlatformUserID),
+		zap.String("comment_id", commentID),
+	)
 
 	if err := s.notifier.NotifyEventCheckout(ctx, NotifyEventCheckoutParams{
 		StoreID:        storeID,
@@ -1145,8 +1162,15 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 			zap.String("event_id", eventID),
 			zap.String("cart_id", cartID),
 			zap.String("platform_user_id", cart.PlatformUserID),
+			zap.String("comment_id", commentID),
 			zap.Error(err),
 		)
+		// Outside-the-window rejection (IG error 2534022): tell the merchant the
+		// concrete fix instead of a generic failure.
+		if strings.Contains(err.Error(), "2534022") {
+			return CartWithTotalOutput{}, httpx.ErrUnprocessable(
+				"O Instagram só permite enviar a mensagem se o comprador comentou recentemente ou mandou uma DM para a loja. Peça para o comprador comentar de novo na live (ou enviar uma DM) e clique em reenviar em seguida.")
+		}
 		return CartWithTotalOutput{}, httpx.ErrUnprocessable("failed to send Instagram message")
 	}
 
