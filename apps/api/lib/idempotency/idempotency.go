@@ -85,7 +85,16 @@ func (s *Service) Check(ctx context.Context, req CheckRequest) (*CheckResult, er
 			}, nil
 		}
 		// If found but pending/failed, we'll proceed with the request
-		// This allows retrying failed operations with the same key
+		// This allows retrying failed operations with the same key.
+		//
+		// When the client supplies an explicit key, NEVER fall back to the
+		// payload-hash window: a fresh key is the client saying "this is a NEW
+		// request". The hash intentionally ignores volatile fields (e.g. the
+		// uploaded media URL), so two legitimately different requests can hash
+		// alike — falling through here made a second Instagram post with the
+		// same caption/products silently return the first one instead of
+		// publishing.
+		return &CheckResult{Found: false}, nil
 	}
 
 	// Fallback: check by payload hash within time window
