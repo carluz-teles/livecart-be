@@ -821,6 +821,32 @@ func (r *Repository) LiveCommentExistsByPlatformID(ctx context.Context, platform
 	return exists, err
 }
 
+// MarkLiveCommentPrivateReplyUsed records that a comment consumed its single
+// allowed private reply, so the resend lookup skips it next time.
+func (r *Repository) MarkLiveCommentPrivateReplyUsed(ctx context.Context, platformCommentID string) error {
+	if platformCommentID == "" {
+		return nil
+	}
+	_, err := r.pool.Exec(ctx,
+		`UPDATE live_comments SET private_reply_used = true WHERE platform_comment_id = $1`,
+		platformCommentID,
+	)
+	return err
+}
+
+// SetLiveCommentHidden mirrors the Instagram hide/unhide (and delete) state so
+// the resend lookup never targets a comment that can't receive a private reply.
+func (r *Repository) SetLiveCommentHidden(ctx context.Context, platformCommentID string, hidden bool) error {
+	if platformCommentID == "" {
+		return nil
+	}
+	_, err := r.pool.Exec(ctx,
+		`UPDATE live_comments SET hidden = $2 WHERE platform_comment_id = $1`,
+		platformCommentID, hidden,
+	)
+	return err
+}
+
 func (r *Repository) CreateLiveComment(ctx context.Context, params CreateLiveCommentParams) (string, error) {
 	sessionID, err := parseUUID(params.SessionID)
 	if err != nil {

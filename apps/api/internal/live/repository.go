@@ -773,12 +773,15 @@ func (r *Repository) GetLatestCommentIDByUser(ctx context.Context, eventID, plat
 		return "", err
 	}
 
-	// Direct, explicit query: newest non-empty Instagram comment id for this
-	// buyer on this event. Returns "" (no error) when the buyer has no comment.
+	// Direct, explicit query: newest USABLE Instagram comment id for this buyer
+	// on this event — one that hasn't consumed its single private reply and
+	// isn't hidden/deleted (Instagram rejects replies to those, error 2534066).
+	// Returns "" (no error) when the buyer has no usable comment.
 	var commentID string
 	err = r.pool.QueryRow(ctx, `
 		SELECT platform_comment_id FROM live_comments
 		WHERE event_id = $1 AND platform_user_id = $2 AND platform_comment_id <> ''
+		  AND NOT private_reply_used AND NOT hidden
 		ORDER BY created_at DESC
 		LIMIT 1
 	`, eventUID, platformUserID).Scan(&commentID)

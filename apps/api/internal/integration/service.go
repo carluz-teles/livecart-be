@@ -1700,6 +1700,13 @@ func (s *Service) ReplyToInstagramComment(ctx context.Context, storeID, commentI
 		return err
 	}
 
+	// Instagram allows exactly ONE private reply per comment — record that this
+	// one is spent so the resend lookup picks a different (fresh) comment.
+	if err := s.repo.MarkLiveCommentPrivateReplyUsed(ctx, commentID); err != nil {
+		s.logger.Warn("failed to mark private reply as used",
+			zap.String("comment_id", commentID), zap.Error(err))
+	}
+
 	s.logger.Info("instagram private reply sent",
 		zap.String("store_id", storeID),
 		zap.String("comment_id", commentID),
@@ -1766,6 +1773,12 @@ func (s *Service) HideInstagramComment(ctx context.Context, storeID, commentID s
 		)
 		return err
 	}
+	// Mirror the hidden state locally: a hidden comment can't receive a private
+	// reply, so the resend lookup must skip it (and pick it back up on unhide).
+	if err := s.repo.SetLiveCommentHidden(ctx, commentID, hidden); err != nil {
+		s.logger.Warn("failed to mirror comment hidden state",
+			zap.String("comment_id", commentID), zap.Error(err))
+	}
 	s.logger.Info("instagram comment hidden",
 		zap.String("store_id", storeID),
 		zap.String("comment_id", commentID),
@@ -1787,6 +1800,12 @@ func (s *Service) DeleteInstagramComment(ctx context.Context, storeID, commentID
 			zap.Error(err),
 		)
 		return err
+	}
+	// A deleted comment can never receive a private reply — exclude it from the
+	// resend lookup permanently (hidden=true is the exclusion flag).
+	if err := s.repo.SetLiveCommentHidden(ctx, commentID, true); err != nil {
+		s.logger.Warn("failed to mark deleted comment as excluded",
+			zap.String("comment_id", commentID), zap.Error(err))
 	}
 	s.logger.Info("instagram comment deleted",
 		zap.String("store_id", storeID),
