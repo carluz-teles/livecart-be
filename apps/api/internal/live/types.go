@@ -338,7 +338,10 @@ type CommentRow struct {
 	PlatformHandle    string
 	Text              string
 	HasPurchaseIntent bool
-	CreatedAt         time.Time
+	// Hidden mirrors the Instagram hide state (kept in sync by the moderation
+	// actions) so the UI's hide button can toggle hide ↔ unhide.
+	Hidden    bool
+	CreatedAt time.Time
 }
 
 // CommentModerationResponse is a comment returned to the moderation UI, including
@@ -349,6 +352,7 @@ type CommentModerationResponse struct {
 	Handle            string    `json:"handle"`
 	Text              string    `json:"text"`
 	HasPurchaseIntent bool      `json:"hasPurchaseIntent"`
+	Hidden            bool      `json:"hidden"`
 	CreatedAt         time.Time `json:"createdAt"`
 }
 

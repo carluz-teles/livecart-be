@@ -398,13 +398,14 @@ func (s *Service) getInstagramOAuthURL(storeID string) (*GetOAuthURLOutput, erro
 	// Build authorization URL
 	// Scopes:
 	//   instagram_business_basic            (required)
-	//   instagram_business_manage_comments  (live_comments webhooks)
-	//   instagram_business_manage_messages  (send DMs after event end)
+	//   instagram_business_manage_comments  (comments + live_comments webhooks, moderation)
+	//   instagram_business_manage_messages  (checkout-link DMs, story-reply DMs)
+	//   instagram_business_content_publish  (publish posts/Reels/Stories from the app)
 	authURL := fmt.Sprintf(
 		"https://www.instagram.com/oauth/authorize?client_id=%s&redirect_uri=%s&response_type=code&scope=%s&state=%s",
 		appID,
 		url.QueryEscape(redirectURI),
-		url.QueryEscape("instagram_business_basic,instagram_business_manage_comments,instagram_business_manage_messages"),
+		url.QueryEscape("instagram_business_basic,instagram_business_manage_comments,instagram_business_manage_messages,instagram_business_content_publish"),
 		state,
 	)
 

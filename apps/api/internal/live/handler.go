@@ -861,6 +861,7 @@ func (h *Handler) ListComments(c *fiber.Ctx) error {
 			Handle:            cm.PlatformHandle,
 			Text:              cm.Text,
 			HasPurchaseIntent: cm.HasPurchaseIntent,
+			Hidden:            cm.Hidden,
 			CreatedAt:         cm.CreatedAt,
 		}
 	}

@@ -828,37 +828,43 @@ func (r *Repository) ListCommentsBySession(ctx context.Context, sessionID string
 }
 
 // ListCommentsByEvent returns comments for an event, including the Instagram
-// comment ID needed for moderation (reply / hide / delete).
+// comment ID needed for moderation (reply / hide / delete) and the mirrored
+// hidden state so the UI's hide button can toggle (hide ↔ unhide).
 func (r *Repository) ListCommentsByEvent(ctx context.Context, eventID string, limit, offset int) ([]CommentRow, error) {
 	uid, err := parseUUID(eventID)
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := r.q.ListCommentsByEvent(ctx, sqlc.ListCommentsByEventParams{
-		EventID: uid,
-		Limit:   int32(limit),
-		Offset:  int32(offset),
-	})
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, session_id, platform_comment_id, platform_user_id, platform_handle,
+		       text, COALESCE(has_purchase_intent, false), hidden, created_at
+		FROM live_comments
+		WHERE event_id = $1
+		ORDER BY created_at
+		LIMIT $2 OFFSET $3
+	`, uid, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("listing comments by event: %w", err)
 	}
+	defer rows.Close()
 
-	comments := make([]CommentRow, 0, len(rows))
-	for _, row := range rows {
-		comments = append(comments, CommentRow{
-			ID:                row.ID.String(),
-			SessionID:         row.SessionID.String(),
-			PlatformCommentID: row.PlatformCommentID,
-			PlatformUserID:    row.PlatformUserID,
-			PlatformHandle:    row.PlatformHandle,
-			Text:              row.Text,
-			HasPurchaseIntent: row.HasPurchaseIntent.Bool,
-			CreatedAt:         row.CreatedAt.Time,
-		})
+	comments := make([]CommentRow, 0)
+	for rows.Next() {
+		var c CommentRow
+		var id, sessionID pgtype.UUID
+		var createdAt pgtype.Timestamptz
+		if err := rows.Scan(&id, &sessionID, &c.PlatformCommentID, &c.PlatformUserID,
+			&c.PlatformHandle, &c.Text, &c.HasPurchaseIntent, &c.Hidden, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning comment row: %w", err)
+		}
+		c.ID = id.String()
+		c.SessionID = sessionID.String()
+		c.CreatedAt = createdAt.Time
+		comments = append(comments, c)
 	}
 
-	return comments, nil
+	return comments, rows.Err()
 }
 
 // =============================================================================
