@@ -47,7 +47,7 @@ INSERT INTO notification_logs (
     notification_type, channel, status, message_text
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at
+RETURNING id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id
 `
 
 type CreateNotificationLogParams struct {
@@ -92,6 +92,7 @@ func (q *Queries) CreateNotificationLog(ctx context.Context, arg CreateNotificat
 		&i.ErrorMessage,
 		&i.CreatedAt,
 		&i.SentAt,
+		&i.ProviderMessageID,
 	)
 	return i, err
 }
@@ -115,7 +116,7 @@ func (q *Queries) FindStoreByActiveTestSetupCode(ctx context.Context, notificati
 }
 
 const getLastNotificationForUser = `-- name: GetLastNotificationForUser :one
-SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at FROM notification_logs
+SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id FROM notification_logs
 WHERE store_id = $1 AND platform_user_id = $2 AND status = 'sent'
 ORDER BY created_at DESC
 LIMIT 1
@@ -144,12 +145,13 @@ func (q *Queries) GetLastNotificationForUser(ctx context.Context, arg GetLastNot
 		&i.ErrorMessage,
 		&i.CreatedAt,
 		&i.SentAt,
+		&i.ProviderMessageID,
 	)
 	return i, err
 }
 
 const getNotificationByCartAndType = `-- name: GetNotificationByCartAndType :one
-SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at FROM notification_logs
+SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id FROM notification_logs
 WHERE cart_id = $1 AND notification_type = $2 AND status = 'sent'
 LIMIT 1
 `
@@ -177,6 +179,7 @@ func (q *Queries) GetNotificationByCartAndType(ctx context.Context, arg GetNotif
 		&i.ErrorMessage,
 		&i.CreatedAt,
 		&i.SentAt,
+		&i.ProviderMessageID,
 	)
 	return i, err
 }
@@ -259,7 +262,7 @@ func (q *Queries) GetStoreTestRecipient(ctx context.Context, id pgtype.UUID) (Ge
 }
 
 const listNotificationsByEvent = `-- name: ListNotificationsByEvent :many
-SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at FROM notification_logs
+SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id FROM notification_logs
 WHERE event_id = $1
 ORDER BY created_at DESC
 `
@@ -288,6 +291,7 @@ func (q *Queries) ListNotificationsByEvent(ctx context.Context, eventID pgtype.U
 			&i.ErrorMessage,
 			&i.CreatedAt,
 			&i.SentAt,
+			&i.ProviderMessageID,
 		); err != nil {
 			return nil, err
 		}
@@ -300,7 +304,7 @@ func (q *Queries) ListNotificationsByEvent(ctx context.Context, eventID pgtype.U
 }
 
 const listNotificationsByStore = `-- name: ListNotificationsByStore :many
-SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at FROM notification_logs
+SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id FROM notification_logs
 WHERE store_id = $1
 ORDER BY created_at DESC
 LIMIT $2
@@ -335,6 +339,7 @@ func (q *Queries) ListNotificationsByStore(ctx context.Context, arg ListNotifica
 			&i.ErrorMessage,
 			&i.CreatedAt,
 			&i.SentAt,
+			&i.ProviderMessageID,
 		); err != nil {
 			return nil, err
 		}
@@ -344,6 +349,28 @@ func (q *Queries) ListNotificationsByStore(ctx context.Context, arg ListNotifica
 		return nil, err
 	}
 	return items, nil
+}
+
+const setNotificationLogProviderMessageID = `-- name: SetNotificationLogProviderMessageID :exec
+
+UPDATE notification_logs
+SET provider_message_id = $2
+WHERE id = $1
+`
+
+type SetNotificationLogProviderMessageIDParams struct {
+	ID                pgtype.UUID `json:"id"`
+	ProviderMessageID pgtype.Text `json:"provider_message_id"`
+}
+
+// =============================================================================
+// WHATSAPP (PRD 006)
+// =============================================================================
+// Stamps the provider message SID right after a successful send so status
+// callbacks can be correlated back to this row.
+func (q *Queries) SetNotificationLogProviderMessageID(ctx context.Context, arg SetNotificationLogProviderMessageIDParams) error {
+	_, err := q.db.Exec(ctx, setNotificationLogProviderMessageID, arg.ID, arg.ProviderMessageID)
+	return err
 }
 
 const setStoreTestRecipient = `-- name: SetStoreTestRecipient :exec
@@ -386,6 +413,51 @@ type SetStoreTestSetupCodeParams struct {
 func (q *Queries) SetStoreTestSetupCode(ctx context.Context, arg SetStoreTestSetupCodeParams) error {
 	_, err := q.db.Exec(ctx, setStoreTestSetupCode, arg.ID, arg.NotificationTestSetupCode, arg.NotificationTestSetupExpiresAt)
 	return err
+}
+
+const updateNotificationLogByProviderMessageID = `-- name: UpdateNotificationLogByProviderMessageID :one
+UPDATE notification_logs
+SET status = $2,
+    error_message = $3,
+    sent_at = COALESCE(sent_at, $4)
+WHERE provider_message_id = $1
+RETURNING id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id
+`
+
+type UpdateNotificationLogByProviderMessageIDParams struct {
+	ProviderMessageID pgtype.Text        `json:"provider_message_id"`
+	Status            string             `json:"status"`
+	ErrorMessage      pgtype.Text        `json:"error_message"`
+	SentAt            pgtype.Timestamptz `json:"sent_at"`
+}
+
+// Twilio status callbacks (sent/delivered/read/failed) arrive keyed by
+// MessageSid. sent_at is stamped once and preserved on later transitions.
+func (q *Queries) UpdateNotificationLogByProviderMessageID(ctx context.Context, arg UpdateNotificationLogByProviderMessageIDParams) (NotificationLog, error) {
+	row := q.db.QueryRow(ctx, updateNotificationLogByProviderMessageID,
+		arg.ProviderMessageID,
+		arg.Status,
+		arg.ErrorMessage,
+		arg.SentAt,
+	)
+	var i NotificationLog
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.EventID,
+		&i.CartID,
+		&i.PlatformUserID,
+		&i.PlatformHandle,
+		&i.NotificationType,
+		&i.Channel,
+		&i.Status,
+		&i.MessageText,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.SentAt,
+		&i.ProviderMessageID,
+	)
+	return i, err
 }
 
 const updateNotificationLogStatus = `-- name: UpdateNotificationLogStatus :exec

@@ -79,8 +79,8 @@ func (n *NoopNotifier) NotifyEventCheckout(_ context.Context, _ NotifyEventCheck
 // with the factory switches in providers/factory.go — whenever a new provider
 // is plugged in, add it here too or this generic endpoint will 422.
 type CreateIntegrationRequest struct {
-	Type        string         `json:"type" validate:"required,oneof=payment erp social shipping"`
-	Provider    string         `json:"provider" validate:"required,oneof=mercado_pago pagarme tiny instagram melhor_envio smartenvios"`
+	Type        string         `json:"type" validate:"required,oneof=payment erp social shipping communication"`
+	Provider    string         `json:"provider" validate:"required,oneof=mercado_pago pagarme tiny instagram melhor_envio smartenvios twilio_whatsapp"`
 	Credentials map[string]any `json:"credentials" validate:"required"`
 	Metadata    map[string]any `json:"metadata,omitempty"`
 }

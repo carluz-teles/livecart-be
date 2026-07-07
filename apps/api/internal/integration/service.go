@@ -506,6 +506,8 @@ func (s *Service) RecordWebhookPing(ctx context.Context, storeID, provider strin
 		integrationType = "erp"
 	case "instagram":
 		integrationType = "social"
+	case "twilio_whatsapp":
+		integrationType = "communication"
 	}
 
 	integration, err := s.repo.GetByProvider(ctx, storeID, integrationType, provider)

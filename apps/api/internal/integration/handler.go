@@ -73,6 +73,10 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// OAuth connect
 	g.Get("/oauth/:provider/connect", h.OAuthConnect)
 
+	// WhatsApp (Twilio) — test send using the store's approved template
+	// (PRD 006). Onboarding/connect endpoints land in Sprint 2.
+	g.Post("/whatsapp/test-message", h.SendWhatsAppTestMessage)
+
 	// Payment — provider-specific connect (no OAuth). Pagar.me uses static
 	// API keys (sk_*/pk_*), so the merchant pastes them into a form and we
 	// validate live against the gateway before persisting.

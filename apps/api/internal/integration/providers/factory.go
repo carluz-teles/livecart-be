@@ -31,6 +31,12 @@ type Factory struct {
 	smartEnviosEnv       string // "sandbox" or "production"
 	smartEnviosUserAgent string
 
+	// Twilio master account (WhatsApp — per-store subaccounts live in the
+	// integration credentials; the master signs webhooks and creates
+	// subaccounts).
+	twilioAccountSID string
+	twilioAuthToken  string
+
 	// Provider constructors (injected to avoid import cycles)
 	mercadoPagoConstructor MercadoPagoConstructor
 	pagarmeConstructor     PagarmeConstructor
@@ -38,6 +44,7 @@ type Factory struct {
 	instagramConstructor   InstagramConstructor
 	melhorEnvioConstructor MelhorEnvioConstructor
 	smartEnviosConstructor SmartEnviosConstructor
+	twilioConstructor      TwilioConstructor
 }
 
 // FactoryConfig contains configuration for the provider factory.
@@ -59,6 +66,10 @@ type FactoryConfig struct {
 	SmartEnviosEnv       string // "sandbox" or "production"
 	SmartEnviosUserAgent string
 
+	// Twilio master account (WhatsApp)
+	TwilioAccountSID string
+	TwilioAuthToken  string
+
 	// Constructors - these should be injected from the payment/erp/social/shipping packages
 	MercadoPagoConstructor MercadoPagoConstructor
 	PagarmeConstructor     PagarmeConstructor
@@ -66,6 +77,7 @@ type FactoryConfig struct {
 	InstagramConstructor   InstagramConstructor
 	MelhorEnvioConstructor MelhorEnvioConstructor
 	SmartEnviosConstructor SmartEnviosConstructor
+	TwilioConstructor      TwilioConstructor
 }
 
 // NewFactory creates a new provider factory.
@@ -82,6 +94,8 @@ func NewFactory(cfg FactoryConfig) *Factory {
 		melhorEnvioRedirectURI:  cfg.MelhorEnvioRedirectURI,
 		smartEnviosEnv:          cfg.SmartEnviosEnv,
 		smartEnviosUserAgent:    cfg.SmartEnviosUserAgent,
+		twilioAccountSID:        cfg.TwilioAccountSID,
+		twilioAuthToken:         cfg.TwilioAuthToken,
 		rateLimitManager:        cfg.RateLimitManager,
 		mercadoPagoConstructor:  cfg.MercadoPagoConstructor,
 		pagarmeConstructor:      cfg.PagarmeConstructor,
@@ -89,6 +103,7 @@ func NewFactory(cfg FactoryConfig) *Factory {
 		instagramConstructor:    cfg.InstagramConstructor,
 		melhorEnvioConstructor:  cfg.MelhorEnvioConstructor,
 		smartEnviosConstructor:  cfg.SmartEnviosConstructor,
+		twilioConstructor:       cfg.TwilioConstructor,
 	}
 }
 
@@ -113,10 +128,65 @@ func (f *Factory) CreateProvider(cfg ProviderConfig) (Provider, error) {
 		return f.createSocialProvider(cfg)
 	case ProviderTypeShipping:
 		return f.createShippingProvider(cfg)
+	case ProviderTypeCommunication:
+		return f.createCommunicationProvider(cfg)
 	default:
 		return nil, fmt.Errorf("unknown provider type: %s", cfg.Type)
 	}
 }
+
+// CreateCommunicationProvider creates and returns a CommunicationProvider.
+func (f *Factory) CreateCommunicationProvider(cfg ProviderConfig) (CommunicationProvider, error) {
+	if cfg.Type != ProviderTypeCommunication {
+		return nil, fmt.Errorf("provider type must be 'communication', got '%s'", cfg.Type)
+	}
+	return f.createCommunicationProvider(cfg)
+}
+
+func (f *Factory) createCommunicationProvider(cfg ProviderConfig) (CommunicationProvider, error) {
+	var limiter ratelimit.RateLimiter
+	if f.rateLimitManager != nil {
+		limiter = f.rateLimitManager.GetOrCreate(cfg.IntegrationID)
+	}
+
+	switch cfg.Name {
+	case ProviderTwilioWhatsApp:
+		if f.twilioConstructor == nil {
+			return nil, fmt.Errorf("twilio_whatsapp constructor not configured")
+		}
+		return f.twilioConstructor(TwilioConfig{
+			IntegrationID:    cfg.IntegrationID,
+			StoreID:          cfg.StoreID,
+			Credentials:      cfg.Credentials,
+			Metadata:         cfg.Metadata,
+			MasterAccountSID: f.twilioAccountSID,
+			MasterAuthToken:  f.twilioAuthToken,
+			Logger:           f.logger,
+			LogFunc:          f.logFunc,
+			RateLimiter:      limiter,
+		})
+	default:
+		return nil, fmt.Errorf("unknown communication provider: %s", cfg.Name)
+	}
+}
+
+// TwilioConfig is the provider-agnostic config handed to the Twilio
+// constructor (defined here to avoid import cycles, like the others).
+type TwilioConfig struct {
+	IntegrationID    string
+	StoreID          string
+	Credentials      *Credentials
+	Metadata         map[string]any
+	MasterAccountSID string
+	MasterAuthToken  string
+	Logger           *zap.Logger
+	LogFunc          LogFunc
+	RateLimiter      ratelimit.RateLimiter
+}
+
+// TwilioConstructor creates a Twilio WhatsApp provider (injected from the
+// communication package).
+type TwilioConstructor func(cfg TwilioConfig) (CommunicationProvider, error)
 
 // CreateShippingProvider creates and returns a ShippingProvider.
 func (f *Factory) CreateShippingProvider(cfg ProviderConfig) (ShippingProvider, error) {

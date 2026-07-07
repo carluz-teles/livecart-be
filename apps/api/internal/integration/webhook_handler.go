@@ -44,6 +44,7 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App) {
 	webhooks.Post("/pagarme/:storeId", h.HandlePagarme)
 	webhooks.Post("/tiny/:storeId", h.HandleTiny)
 	webhooks.Post("/melhor_envio/:storeId", h.HandleMelhorEnvio)
+	webhooks.Post("/twilio/:storeId", h.HandleTwilio)
 
 	// Instagram webhooks (Meta platform)
 	instagram := app.Group("/api/webhooks/instagram")
@@ -713,6 +714,67 @@ func (h *WebhookHandler) HandleMelhorEnvio(c *fiber.Ctx) error {
 				)
 			}
 		}()
+	}
+
+	return httpx.OK(c, fiber.Map{"status": "received"})
+}
+
+// HandleTwilio handles Twilio WhatsApp webhooks (PRD 006): message status
+// callbacks (sent/delivered/read/failed) and inbound customer replies
+// (opt-out). Twilio posts application/x-www-form-urlencoded and signs every
+// request with X-Twilio-Signature (HMAC-SHA1 of URL + sorted params, keyed by
+// the subaccount auth token).
+// @Summary Handle Twilio WhatsApp webhook
+// @Description Processes message status callbacks and inbound replies
+// @Tags webhooks
+// @Accept x-www-form-urlencoded
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Success 200 {object} map[string]string
+// @Router /api/webhooks/twilio/{storeId} [post]
+func (h *WebhookHandler) HandleTwilio(c *fiber.Ctx) error {
+	storeID := strings.Clone(c.Params("storeId"))
+
+	params := make(map[string]string)
+	c.Request().PostArgs().VisitAll(func(k, v []byte) {
+		params[string(k)] = string(v)
+	})
+
+	valid, err := h.service.ValidateTwilioWebhookSignature(c.Context(), storeID, params, c.Get("X-Twilio-Signature"))
+	if err != nil {
+		// Integration missing or credentials unreadable — ack so Twilio
+		// doesn't retry-storm us; the log keeps the trail.
+		h.logger.Warn("twilio webhook signature validation errored",
+			zap.String("store_id", storeID),
+			zap.Error(err),
+		)
+		return httpx.OK(c, fiber.Map{"status": "received"})
+	}
+	if !valid {
+		h.logger.Warn("rejected twilio webhook with invalid signature",
+			zap.String("store_id", storeID),
+		)
+		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": "invalid signature"})
+	}
+
+	h.service.RecordWebhookPing(c.Context(), storeID, "twilio_whatsapp")
+
+	// Status callback (MessageStatus present) vs inbound message (Body present).
+	if status := params["MessageStatus"]; status != "" {
+		if err := h.service.ProcessTwilioStatusCallback(c.Context(), storeID, params["MessageSid"], status, params["ErrorCode"]); err != nil {
+			h.logger.Error("failed to process twilio status callback",
+				zap.String("store_id", storeID),
+				zap.String("message_sid", params["MessageSid"]),
+				zap.Error(err),
+			)
+		}
+	} else if body := params["Body"]; body != "" {
+		if err := h.service.ProcessTwilioInbound(c.Context(), storeID, params["From"], body); err != nil {
+			h.logger.Error("failed to process twilio inbound message",
+				zap.String("store_id", storeID),
+				zap.Error(err),
+			)
+		}
 	}
 
 	return httpx.OK(c, fiber.Map{"status": "received"})

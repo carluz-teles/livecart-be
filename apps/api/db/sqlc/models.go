@@ -10,19 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-type BlockedHandle struct {
-	ID                pgtype.UUID        `json:"id"`
-	StoreID           pgtype.UUID        `json:"store_id"`
-	PlatformHandle    string             `json:"platform_handle"`
-	Reason            pgtype.Text        `json:"reason"`
-	BlockedByUserID   pgtype.UUID        `json:"blocked_by_user_id"`
-	BlockedAt         pgtype.Timestamptz `json:"blocked_at"`
-	UnblockedAt       pgtype.Timestamptz `json:"unblocked_at"`
-	UnblockedByUserID pgtype.UUID        `json:"unblocked_by_user_id"`
-	CreatedAt         pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
-}
-
 type Cart struct {
 	ID             pgtype.UUID `json:"id"`
 	EventID        pgtype.UUID `json:"event_id"`
@@ -103,7 +90,8 @@ type Cart struct {
 	ErpInvoiceStatus pgtype.Text `json:"erp_invoice_status"`
 	// Timestamp from the ERP when the NFe was emitted/authorised. Surfaced on the order detail timeline.
 	ErpInvoiceEmittedAt pgtype.Timestamptz `json:"erp_invoice_emitted_at"`
-	CancelledReason     pgtype.Text        `json:"cancelled_reason"`
+	WhatsappConsent     bool               `json:"whatsapp_consent"`
+	WhatsappConsentAt   pgtype.Timestamptz `json:"whatsapp_consent_at"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.
@@ -165,16 +153,17 @@ type CouponRedemption struct {
 }
 
 type Customer struct {
-	ID             pgtype.UUID        `json:"id"`
-	StoreID        pgtype.UUID        `json:"store_id"`
-	PlatformUserID string             `json:"platform_user_id"`
-	PlatformHandle string             `json:"platform_handle"`
-	Email          pgtype.Text        `json:"email"`
-	Phone          pgtype.Text        `json:"phone"`
-	FirstOrderAt   pgtype.Timestamptz `json:"first_order_at"`
-	LastOrderAt    pgtype.Timestamptz `json:"last_order_at"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID               pgtype.UUID        `json:"id"`
+	StoreID          pgtype.UUID        `json:"store_id"`
+	PlatformUserID   string             `json:"platform_user_id"`
+	PlatformHandle   string             `json:"platform_handle"`
+	Email            pgtype.Text        `json:"email"`
+	Phone            pgtype.Text        `json:"phone"`
+	FirstOrderAt     pgtype.Timestamptz `json:"first_order_at"`
+	LastOrderAt      pgtype.Timestamptz `json:"last_order_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	WhatsappOptedOut bool               `json:"whatsapp_opted_out"`
 }
 
 type ErpContact struct {
@@ -339,15 +328,6 @@ type LiveEvent struct {
 	PixDiscountPercent int32 `json:"pix_discount_percent"`
 	// Minutos extras que um cliente promovido da waitlist (status=notified) tem para finalizar o checkout antes de devolver o estoque para o próximo da fila.
 	WaitlistNotifiedTtlMinutes int32 `json:"waitlist_notified_ttl_minutes"`
-	// Instagram media id when type = post
-	MediaID           pgtype.Text `json:"media_id"`
-	MediaPermalink    pgtype.Text `json:"media_permalink"`
-	MediaThumbnailUrl pgtype.Text `json:"media_thumbnail_url"`
-	MediaCaption      pgtype.Text `json:"media_caption"`
-	// true once a comments webhook arrived for this post event; polling stops
-	WebhookActive bool `json:"webhook_active"`
-	// Optional scheduled end (UTC). NULL = manual end only.
-	EndsAt pgtype.Timestamptz `json:"ends_at"`
 }
 
 type LiveSession struct {
@@ -396,19 +376,20 @@ type Notification struct {
 
 // Tracks all notification attempts for analytics and preventing duplicates
 type NotificationLog struct {
-	ID               pgtype.UUID        `json:"id"`
-	StoreID          pgtype.UUID        `json:"store_id"`
-	EventID          pgtype.UUID        `json:"event_id"`
-	CartID           pgtype.UUID        `json:"cart_id"`
-	PlatformUserID   string             `json:"platform_user_id"`
-	PlatformHandle   pgtype.Text        `json:"platform_handle"`
-	NotificationType string             `json:"notification_type"`
-	Channel          string             `json:"channel"`
-	Status           string             `json:"status"`
-	MessageText      pgtype.Text        `json:"message_text"`
-	ErrorMessage     pgtype.Text        `json:"error_message"`
-	CreatedAt        pgtype.Timestamptz `json:"created_at"`
-	SentAt           pgtype.Timestamptz `json:"sent_at"`
+	ID                pgtype.UUID        `json:"id"`
+	StoreID           pgtype.UUID        `json:"store_id"`
+	EventID           pgtype.UUID        `json:"event_id"`
+	CartID            pgtype.UUID        `json:"cart_id"`
+	PlatformUserID    string             `json:"platform_user_id"`
+	PlatformHandle    pgtype.Text        `json:"platform_handle"`
+	NotificationType  string             `json:"notification_type"`
+	Channel           string             `json:"channel"`
+	Status            string             `json:"status"`
+	MessageText       pgtype.Text        `json:"message_text"`
+	ErrorMessage      pgtype.Text        `json:"error_message"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	SentAt            pgtype.Timestamptz `json:"sent_at"`
+	ProviderMessageID pgtype.Text        `json:"provider_message_id"`
 }
 
 // Temporary storage for OAuth PKCE code_verifier during authorization flow

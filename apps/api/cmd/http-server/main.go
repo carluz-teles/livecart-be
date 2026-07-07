@@ -38,6 +38,7 @@ import (
 	"livecart/apps/api/internal/idea"
 	"livecart/apps/api/internal/integration"
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/internal/integration/providers/communication"
 	"livecart/apps/api/internal/integration/providers/erp"
 	"livecart/apps/api/internal/integration/providers/payment"
 	"livecart/apps/api/internal/integration/providers/shipping"
@@ -217,6 +218,8 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				MelhorEnvioRedirectURI:  config.MelhorEnvioRedirectURI.String(),
 				SmartEnviosEnv:          config.SmartEnviosEnv.StringOr("production"),
 				SmartEnviosUserAgent:    config.SmartEnviosUserAgent.StringOr("LiveCart (contato@livecart.com.br)"),
+				TwilioAccountSID:        config.TwilioAccountSID.String(),
+				TwilioAuthToken:         config.TwilioAuthToken.String(),
 				RateLimitManager:        rateLimitManager,
 				MelhorEnvioConstructor: func(cfg providers.MelhorEnvioConfig) (providers.ShippingProvider, error) {
 					return shipping.New(cfg)
@@ -267,6 +270,9 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						LogFunc:       cfg.LogFunc,
 						RateLimiter:   cfg.RateLimiter,
 					})
+				},
+				TwilioConstructor: func(cfg providers.TwilioConfig) (providers.CommunicationProvider, error) {
+					return communication.NewTwilio(cfg)
 				},
 			})
 
@@ -298,6 +304,8 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				MelhorEnvioRedirectURI:  config.MelhorEnvioRedirectURI.String(),
 				SmartEnviosEnv:          config.SmartEnviosEnv.StringOr("production"),
 				SmartEnviosUserAgent:    config.SmartEnviosUserAgent.StringOr("LiveCart (contato@livecart.com.br)"),
+				TwilioAccountSID:        config.TwilioAccountSID.String(),
+				TwilioAuthToken:         config.TwilioAuthToken.String(),
 				RateLimitManager:        rateLimitManager,
 				MelhorEnvioConstructor: func(cfg providers.MelhorEnvioConfig) (providers.ShippingProvider, error) {
 					return shipping.New(cfg)
@@ -348,6 +356,9 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						LogFunc:       cfg.LogFunc,
 						RateLimiter:   cfg.RateLimiter,
 					})
+				},
+				TwilioConstructor: func(cfg providers.TwilioConfig) (providers.CommunicationProvider, error) {
+					return communication.NewTwilio(cfg)
 				},
 			})
 

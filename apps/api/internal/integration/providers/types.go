@@ -16,10 +16,11 @@ var ErrOperationNotSupported = errors.New("operation not supported by this provi
 type ProviderType string
 
 const (
-	ProviderTypePayment  ProviderType = "payment"
-	ProviderTypeERP      ProviderType = "erp"
-	ProviderTypeSocial   ProviderType = "social"
-	ProviderTypeShipping ProviderType = "shipping"
+	ProviderTypePayment       ProviderType = "payment"
+	ProviderTypeERP           ProviderType = "erp"
+	ProviderTypeSocial        ProviderType = "social"
+	ProviderTypeShipping      ProviderType = "shipping"
+	ProviderTypeCommunication ProviderType = "communication"
 )
 
 // ProviderName represents a specific integration provider.
@@ -32,6 +33,8 @@ const (
 	ProviderInstagram   ProviderName = "instagram"
 	ProviderMelhorEnvio ProviderName = "melhor_envio"
 	ProviderSmartEnvios ProviderName = "smartenvios"
+
+	ProviderTwilioWhatsApp ProviderName = "twilio_whatsapp"
 )
 
 // Credentials holds authentication data for providers.
@@ -348,6 +351,45 @@ type SocialProfile struct {
 	ID       string `json:"id"`
 	Username string `json:"username"`
 	Name     string `json:"name,omitempty"`
+}
+
+// =============================================================================
+// COMMUNICATION PROVIDER (WhatsApp — PRD 006)
+// =============================================================================
+
+// CommunicationProvider interface for messaging integrations (e.g. WhatsApp
+// via Twilio). Business-initiated messages require a pre-approved template.
+type CommunicationProvider interface {
+	Provider
+
+	// SendTemplateMessage sends a pre-approved template message to a phone
+	// number. Returns the provider message ID for status tracking.
+	SendTemplateMessage(ctx context.Context, msg TemplateMessage) (*MessageResult, error)
+
+	// GetSenderStatus returns the registration/health status of the WhatsApp
+	// sender (the merchant's phone number).
+	GetSenderStatus(ctx context.Context) (*SenderStatus, error)
+}
+
+// TemplateMessage is a business-initiated WhatsApp template send.
+type TemplateMessage struct {
+	To          string            // destination in E.164 (+5511999999999)
+	ContentSid  string            // approved content/template ID at the provider
+	Variables   map[string]string // template variables, keyed "1", "2", ...
+	CallbackURL string            // per-message status callback URL (optional)
+}
+
+// MessageResult is the immediate result of a message send.
+type MessageResult struct {
+	MessageID string // provider message SID (e.g. Twilio "SM...")
+	Status    string // queued | sent | ...
+}
+
+// SenderStatus describes the WhatsApp sender (merchant number) state.
+type SenderStatus struct {
+	Status        string `json:"status"`         // ONLINE | PENDING_VERIFICATION | OFFLINE | ...
+	PhoneNumber   string `json:"phone_number"`   // E.164
+	QualityRating string `json:"quality_rating"` // HIGH | MEDIUM | LOW | UNKNOWN
 }
 
 // LiveMedia represents a live video on a social platform.

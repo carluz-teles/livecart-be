@@ -46,6 +46,10 @@ const (
 	SmartEnviosEnv       Key = "SMARTENVIOS_ENV"        // "sandbox" or "production" (default)
 	SmartEnviosUserAgent Key = "SMARTENVIOS_USER_AGENT" // optional — sent on every SmartEnvios request
 
+	// Twilio (WhatsApp communication provider — PRD 006)
+	TwilioAccountSID Key = "TWILIO_ACCOUNT_SID" // Master account SID (Console -> Account Info)
+	TwilioAuthToken  Key = "TWILIO_AUTH_TOKEN"  // Master auth token — also signs webhook validation
+
 	// S3 Storage (supports both standard and Railway naming conventions)
 	S3Bucket   Key = "S3_BUCKET"     // S3 bucket name for uploads
 	S3Endpoint Key = "S3_ENDPOINT"   // Custom S3 endpoint (for Tigris, R2, MinIO, etc.)

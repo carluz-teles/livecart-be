@@ -144,3 +144,10 @@ ORDER BY
   CASE WHEN c.payment_status = 'paid' THEN 0 ELSE 1 END,
   c.created_at DESC
 LIMIT 1;
+
+-- name: SetCustomerWhatsAppOptOutByPhone :execrows
+-- Inbound SAIR/PARAR reply on WhatsApp — opt the customer out of future
+-- business-initiated messages. Matched by store + phone (E.164).
+UPDATE customers
+SET whatsapp_opted_out = $3, updated_at = NOW()
+WHERE store_id = $1 AND phone = $2;

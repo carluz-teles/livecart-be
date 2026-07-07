@@ -34,7 +34,7 @@ INSERT INTO customers (
     first_order_at,
     last_order_at
 ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at
+RETURNING id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at, whatsapp_opted_out
 `
 
 type CreateCustomerParams struct {
@@ -72,6 +72,7 @@ func (q *Queries) CreateCustomer(ctx context.Context, arg CreateCustomerParams) 
 		&i.LastOrderAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WhatsappOptedOut,
 	)
 	return i, err
 }
@@ -86,7 +87,7 @@ func (q *Queries) DeleteCustomer(ctx context.Context, id pgtype.UUID) error {
 }
 
 const getCustomerByHandle = `-- name: GetCustomerByHandle :one
-SELECT id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at FROM customers
+SELECT id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at, whatsapp_opted_out FROM customers
 WHERE store_id = $1 AND platform_handle = $2
 LIMIT 1
 `
@@ -110,12 +111,13 @@ func (q *Queries) GetCustomerByHandle(ctx context.Context, arg GetCustomerByHand
 		&i.LastOrderAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WhatsappOptedOut,
 	)
 	return i, err
 }
 
 const getCustomerByID = `-- name: GetCustomerByID :one
-SELECT id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at FROM customers WHERE id = $1
+SELECT id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at, whatsapp_opted_out FROM customers WHERE id = $1
 `
 
 func (q *Queries) GetCustomerByID(ctx context.Context, id pgtype.UUID) (Customer, error) {
@@ -132,12 +134,13 @@ func (q *Queries) GetCustomerByID(ctx context.Context, id pgtype.UUID) (Customer
 		&i.LastOrderAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WhatsappOptedOut,
 	)
 	return i, err
 }
 
 const getCustomerByPlatformUser = `-- name: GetCustomerByPlatformUser :one
-SELECT id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at FROM customers
+SELECT id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at, whatsapp_opted_out FROM customers
 WHERE store_id = $1 AND platform_user_id = $2
 `
 
@@ -160,6 +163,7 @@ func (q *Queries) GetCustomerByPlatformUser(ctx context.Context, arg GetCustomer
 		&i.LastOrderAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WhatsappOptedOut,
 	)
 	return i, err
 }
@@ -246,7 +250,7 @@ func (q *Queries) GetCustomerStats(ctx context.Context, storeID pgtype.UUID) (Ge
 
 const listCustomers = `-- name: ListCustomers :many
 SELECT
-    c.id, c.store_id, c.platform_user_id, c.platform_handle, c.email, c.phone, c.first_order_at, c.last_order_at, c.created_at, c.updated_at,
+    c.id, c.store_id, c.platform_user_id, c.platform_handle, c.email, c.phone, c.first_order_at, c.last_order_at, c.created_at, c.updated_at, c.whatsapp_opted_out,
     COALESCE(stats.total_orders, 0)::INT as total_orders,
     COALESCE(stats.total_spent, 0)::BIGINT as total_spent
 FROM customers c
@@ -270,18 +274,19 @@ type ListCustomersParams struct {
 }
 
 type ListCustomersRow struct {
-	ID             pgtype.UUID        `json:"id"`
-	StoreID        pgtype.UUID        `json:"store_id"`
-	PlatformUserID string             `json:"platform_user_id"`
-	PlatformHandle string             `json:"platform_handle"`
-	Email          pgtype.Text        `json:"email"`
-	Phone          pgtype.Text        `json:"phone"`
-	FirstOrderAt   pgtype.Timestamptz `json:"first_order_at"`
-	LastOrderAt    pgtype.Timestamptz `json:"last_order_at"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
-	TotalOrders    int32              `json:"total_orders"`
-	TotalSpent     int64              `json:"total_spent"`
+	ID               pgtype.UUID        `json:"id"`
+	StoreID          pgtype.UUID        `json:"store_id"`
+	PlatformUserID   string             `json:"platform_user_id"`
+	PlatformHandle   string             `json:"platform_handle"`
+	Email            pgtype.Text        `json:"email"`
+	Phone            pgtype.Text        `json:"phone"`
+	FirstOrderAt     pgtype.Timestamptz `json:"first_order_at"`
+	LastOrderAt      pgtype.Timestamptz `json:"last_order_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	WhatsappOptedOut bool               `json:"whatsapp_opted_out"`
+	TotalOrders      int32              `json:"total_orders"`
+	TotalSpent       int64              `json:"total_spent"`
 }
 
 // List customers with aggregated order stats
@@ -305,6 +310,7 @@ func (q *Queries) ListCustomers(ctx context.Context, arg ListCustomersParams) ([
 			&i.LastOrderAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.WhatsappOptedOut,
 			&i.TotalOrders,
 			&i.TotalSpent,
 		); err != nil {
@@ -320,7 +326,7 @@ func (q *Queries) ListCustomers(ctx context.Context, arg ListCustomersParams) ([
 
 const searchCustomers = `-- name: SearchCustomers :many
 SELECT
-    c.id, c.store_id, c.platform_user_id, c.platform_handle, c.email, c.phone, c.first_order_at, c.last_order_at, c.created_at, c.updated_at,
+    c.id, c.store_id, c.platform_user_id, c.platform_handle, c.email, c.phone, c.first_order_at, c.last_order_at, c.created_at, c.updated_at, c.whatsapp_opted_out,
     COALESCE(stats.total_orders, 0)::INT as total_orders,
     COALESCE(stats.total_spent, 0)::BIGINT as total_spent
 FROM customers c
@@ -346,18 +352,19 @@ type SearchCustomersParams struct {
 }
 
 type SearchCustomersRow struct {
-	ID             pgtype.UUID        `json:"id"`
-	StoreID        pgtype.UUID        `json:"store_id"`
-	PlatformUserID string             `json:"platform_user_id"`
-	PlatformHandle string             `json:"platform_handle"`
-	Email          pgtype.Text        `json:"email"`
-	Phone          pgtype.Text        `json:"phone"`
-	FirstOrderAt   pgtype.Timestamptz `json:"first_order_at"`
-	LastOrderAt    pgtype.Timestamptz `json:"last_order_at"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
-	TotalOrders    int32              `json:"total_orders"`
-	TotalSpent     int64              `json:"total_spent"`
+	ID               pgtype.UUID        `json:"id"`
+	StoreID          pgtype.UUID        `json:"store_id"`
+	PlatformUserID   string             `json:"platform_user_id"`
+	PlatformHandle   string             `json:"platform_handle"`
+	Email            pgtype.Text        `json:"email"`
+	Phone            pgtype.Text        `json:"phone"`
+	FirstOrderAt     pgtype.Timestamptz `json:"first_order_at"`
+	LastOrderAt      pgtype.Timestamptz `json:"last_order_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	WhatsappOptedOut bool               `json:"whatsapp_opted_out"`
+	TotalOrders      int32              `json:"total_orders"`
+	TotalSpent       int64              `json:"total_spent"`
 }
 
 func (q *Queries) SearchCustomers(ctx context.Context, arg SearchCustomersParams) ([]SearchCustomersRow, error) {
@@ -385,6 +392,7 @@ func (q *Queries) SearchCustomers(ctx context.Context, arg SearchCustomersParams
 			&i.LastOrderAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.WhatsappOptedOut,
 			&i.TotalOrders,
 			&i.TotalSpent,
 		); err != nil {
@@ -396,6 +404,28 @@ func (q *Queries) SearchCustomers(ctx context.Context, arg SearchCustomersParams
 		return nil, err
 	}
 	return items, nil
+}
+
+const setCustomerWhatsAppOptOutByPhone = `-- name: SetCustomerWhatsAppOptOutByPhone :execrows
+UPDATE customers
+SET whatsapp_opted_out = $3, updated_at = NOW()
+WHERE store_id = $1 AND phone = $2
+`
+
+type SetCustomerWhatsAppOptOutByPhoneParams struct {
+	StoreID          pgtype.UUID `json:"store_id"`
+	Phone            pgtype.Text `json:"phone"`
+	WhatsappOptedOut bool        `json:"whatsapp_opted_out"`
+}
+
+// Inbound SAIR/PARAR reply on WhatsApp — opt the customer out of future
+// business-initiated messages. Matched by store + phone (E.164).
+func (q *Queries) SetCustomerWhatsAppOptOutByPhone(ctx context.Context, arg SetCustomerWhatsAppOptOutByPhoneParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setCustomerWhatsAppOptOutByPhone, arg.StoreID, arg.Phone, arg.WhatsappOptedOut)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const updateCustomer = `-- name: UpdateCustomer :exec
@@ -452,7 +482,7 @@ ON CONFLICT (store_id, platform_user_id) DO UPDATE SET
     phone = COALESCE(EXCLUDED.phone, customers.phone),
     last_order_at = now(),
     updated_at = now()
-RETURNING id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at
+RETURNING id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at, whatsapp_opted_out
 `
 
 type UpsertCustomerParams struct {
@@ -484,6 +514,7 @@ func (q *Queries) UpsertCustomer(ctx context.Context, arg UpsertCustomerParams) 
 		&i.LastOrderAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.WhatsappOptedOut,
 	)
 	return i, err
 }

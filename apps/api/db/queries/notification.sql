@@ -109,3 +109,24 @@ WHERE notification_test_setup_code = $1
   AND notification_test_setup_expires_at IS NOT NULL
   AND notification_test_setup_expires_at > now()
 LIMIT 1;
+
+-- =============================================================================
+-- WHATSAPP (PRD 006)
+-- =============================================================================
+
+-- name: SetNotificationLogProviderMessageID :exec
+-- Stamps the provider message SID right after a successful send so status
+-- callbacks can be correlated back to this row.
+UPDATE notification_logs
+SET provider_message_id = $2
+WHERE id = $1;
+
+-- name: UpdateNotificationLogByProviderMessageID :one
+-- Twilio status callbacks (sent/delivered/read/failed) arrive keyed by
+-- MessageSid. sent_at is stamped once and preserved on later transitions.
+UPDATE notification_logs
+SET status = $2,
+    error_message = $3,
+    sent_at = COALESCE(sent_at, $4)
+WHERE provider_message_id = $1
+RETURNING *;
