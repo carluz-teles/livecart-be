@@ -350,3 +350,355 @@ func (h *Handler) SendWhatsAppTestMessage(c *fiber.Ctx) error {
 		"status":    result.Status,
 	})
 }
+
+// =============================================================================
+// ONBOARDING (Sprint 2)
+// =============================================================================
+
+// twilioMaster builds the master-account client from config.
+func (s *Service) twilioMaster() (*communication.MasterClient, error) {
+	return communication.NewMasterClient(config.TwilioAccountSID.String(), config.TwilioAuthToken.String(), s.logger)
+}
+
+// ConnectWhatsAppInput starts (or resumes) WhatsApp onboarding for a store.
+type ConnectWhatsAppInput struct {
+	StoreID     string
+	PhoneE164   string // merchant's WhatsApp number
+	WABAID      string // from Meta embedded signup (optional until ISV approval)
+	DisplayName string // business name shown on WhatsApp
+}
+
+// WhatsAppStatusResponse is the FE-facing onboarding/health state.
+type WhatsAppStatusResponse struct {
+	IntegrationID  string `json:"integrationId"`
+	Status         string `json:"status"` // integration lifecycle: pending_auth | active | error
+	PhoneNumber    string `json:"phoneNumber"`
+	SenderStatus   string `json:"senderStatus"`   // NOT_REGISTERED | PENDING_VERIFICATION | ONLINE | ...
+	QualityRating  string `json:"qualityRating"`  // HIGH | MEDIUM | LOW | UNKNOWN
+	TemplateStatus string `json:"templateStatus"` // missing | pending | approved | rejected
+	TemplateReason string `json:"templateReason,omitempty"`
+}
+
+// ConnectWhatsApp provisions the store's subaccount, registers the merchant
+// number as a WhatsApp sender (OTP flows to their phone) and submits the
+// default recovery template for approval. Safe to call again to resume a
+// partially-completed onboarding.
+func (s *Service) ConnectWhatsApp(ctx context.Context, input ConnectWhatsAppInput) (*WhatsAppStatusResponse, error) {
+	master, err := s.twilioMaster()
+	if err != nil {
+		return nil, httpx.ErrUnprocessable("integração WhatsApp indisponível: credenciais Twilio não configuradas")
+	}
+
+	// Resume path: reuse the existing subaccount/integration when present.
+	row, _ := s.repo.GetByProvider(ctx, input.StoreID, string(providers.ProviderTypeCommunication), string(providers.ProviderTwilioWhatsApp))
+
+	var subSID, subToken string
+	if row == nil {
+		sub, err := master.CreateSubaccount(ctx, "livecart-store-"+input.StoreID)
+		if err != nil {
+			return nil, fmt.Errorf("creating twilio subaccount: %w", err)
+		}
+		subSID, subToken = sub.SID, sub.AuthToken
+
+		out, err := s.Create(ctx, CreateIntegrationInput{
+			StoreID:  input.StoreID,
+			Type:     string(providers.ProviderTypeCommunication),
+			Provider: string(providers.ProviderTwilioWhatsApp),
+			Credentials: &providers.Credentials{
+				APIKey:    subSID,
+				APISecret: subToken,
+			},
+			Metadata: map[string]any{
+				communication.MetaPhoneNumber: input.PhoneE164,
+				communication.MetaWABAID:      input.WABAID,
+				"display_name":                input.DisplayName,
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		row, err = s.repo.GetByID(ctx, out.ID, input.StoreID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		creds, err := s.decryptCredentials(row.Credentials)
+		if err != nil {
+			return nil, fmt.Errorf("decrypting credentials: %w", err)
+		}
+		subSID, subToken = creds.APIKey, creds.APISecret
+	}
+
+	metadata := row.Metadata
+	if metadata == nil {
+		metadata = make(map[string]any)
+	}
+	metadata[communication.MetaPhoneNumber] = input.PhoneE164
+	if input.WABAID != "" {
+		metadata[communication.MetaWABAID] = input.WABAID
+	}
+	if input.DisplayName != "" {
+		metadata["display_name"] = input.DisplayName
+	}
+
+	// Sender registration (best effort — fails cleanly while the ISV/WABA
+	// prerequisites are still pending; calling connect again resumes here).
+	if _, ok := metadata[communication.MetaSenderSID].(string); !ok {
+		wabaID, _ := metadata[communication.MetaWABAID].(string)
+		displayName, _ := metadata["display_name"].(string)
+		sender, err := master.RegisterSender(ctx, communication.RegisterSenderInput{
+			SubaccountSID:   subSID,
+			SubaccountToken: subToken,
+			PhoneE164:       input.PhoneE164,
+			WABAID:          wabaID,
+			DisplayName:     displayName,
+			CallbackURL:     twilioWebhookURL(input.StoreID),
+		})
+		if err != nil {
+			s.logger.Warn("whatsapp sender registration pending",
+				zap.String("store_id", input.StoreID),
+				zap.Error(err),
+			)
+			metadata["sender_error"] = err.Error()
+		} else {
+			metadata[communication.MetaSenderSID] = sender.SID
+			metadata["sender_status"] = sender.Status
+			delete(metadata, "sender_error")
+		}
+	}
+
+	// Default recovery template (best effort, resumable).
+	if _, ok := metadata[communication.MetaContentSIDRecovery].(string); !ok {
+		displayName, _ := metadata["display_name"].(string)
+		if displayName == "" {
+			displayName = "sua loja"
+		}
+		tpl, err := master.CreateRecoveryTemplate(ctx, subSID, subToken, displayName)
+		if err != nil {
+			s.logger.Warn("whatsapp recovery template creation pending",
+				zap.String("store_id", input.StoreID),
+				zap.Error(err),
+			)
+			metadata["template_error"] = err.Error()
+		} else {
+			metadata[communication.MetaContentSIDRecovery] = tpl.SID
+			delete(metadata, "template_error")
+			if err := master.SubmitTemplateApproval(ctx, subSID, subToken, tpl.SID); err != nil {
+				s.logger.Warn("whatsapp template approval submission failed",
+					zap.String("store_id", input.StoreID),
+					zap.Error(err),
+				)
+			}
+		}
+	}
+
+	if err := s.repo.UpdateMetadata(ctx, row.ID, metadata); err != nil {
+		return nil, fmt.Errorf("persisting onboarding metadata: %w", err)
+	}
+	row.Metadata = metadata
+
+	return s.buildWhatsAppStatus(ctx, row, subSID, subToken)
+}
+
+// VerifyWhatsAppSender submits the OTP the merchant received. On ONLINE the
+// integration flips to active.
+func (s *Service) VerifyWhatsAppSender(ctx context.Context, storeID, code string) (*WhatsAppStatusResponse, error) {
+	_, row, err := s.getWhatsAppRow(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+	creds, err := s.decryptCredentials(row.Credentials)
+	if err != nil {
+		return nil, fmt.Errorf("decrypting credentials: %w", err)
+	}
+	senderSID, _ := row.Metadata[communication.MetaSenderSID].(string)
+	if senderSID == "" {
+		return nil, httpx.ErrUnprocessable("registro do número ainda não foi iniciado")
+	}
+
+	master, err := s.twilioMaster()
+	if err != nil {
+		return nil, httpx.ErrUnprocessable("integração WhatsApp indisponível: credenciais Twilio não configuradas")
+	}
+
+	sender, err := master.VerifySender(ctx, creds.APIKey, creds.APISecret, senderSID, code)
+	if err != nil {
+		return nil, err
+	}
+
+	metadata := row.Metadata
+	metadata["sender_status"] = sender.Status
+	if err := s.repo.UpdateMetadata(ctx, row.ID, metadata); err != nil {
+		return nil, fmt.Errorf("persisting sender status: %w", err)
+	}
+
+	if strings.EqualFold(sender.Status, "ONLINE") {
+		if err := s.repo.UpdateStatus(ctx, row.ID, "active"); err != nil {
+			return nil, fmt.Errorf("activating integration: %w", err)
+		}
+		row.Status = "active"
+	}
+	row.Metadata = metadata
+
+	return s.buildWhatsAppStatus(ctx, row, creds.APIKey, creds.APISecret)
+}
+
+// GetWhatsAppStatus returns onboarding/health state for FE polling.
+func (s *Service) GetWhatsAppStatus(ctx context.Context, storeID string) (*WhatsAppStatusResponse, error) {
+	_, row, err := s.getWhatsAppRow(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+	creds, err := s.decryptCredentials(row.Credentials)
+	if err != nil {
+		return nil, fmt.Errorf("decrypting credentials: %w", err)
+	}
+	return s.buildWhatsAppStatus(ctx, row, creds.APIKey, creds.APISecret)
+}
+
+// buildWhatsAppStatus assembles the FE status payload, refreshing sender and
+// template state live (and flipping the integration to active when the sender
+// comes ONLINE outside the verify flow).
+func (s *Service) buildWhatsAppStatus(ctx context.Context, row *IntegrationRow, subSID, subToken string) (*WhatsAppStatusResponse, error) {
+	resp := &WhatsAppStatusResponse{
+		IntegrationID:  row.ID,
+		Status:         row.Status,
+		SenderStatus:   "NOT_REGISTERED",
+		QualityRating:  "UNKNOWN",
+		TemplateStatus: "missing",
+	}
+	resp.PhoneNumber, _ = row.Metadata[communication.MetaPhoneNumber].(string)
+
+	if senderStatus, ok := row.Metadata["sender_status"].(string); ok && senderStatus != "" {
+		resp.SenderStatus = senderStatus
+	}
+
+	// Live sender refresh when registered.
+	if senderSID, _ := row.Metadata[communication.MetaSenderSID].(string); senderSID != "" {
+		if provider, _, err := s.GetCommunicationProvider(ctx, row.StoreID); err == nil {
+			if status, err := provider.GetSenderStatus(ctx); err == nil {
+				resp.SenderStatus = status.Status
+				resp.QualityRating = status.QualityRating
+				if status.PhoneNumber != "" {
+					resp.PhoneNumber = status.PhoneNumber
+				}
+				if strings.EqualFold(status.Status, "ONLINE") && row.Status == "pending_auth" {
+					if err := s.repo.UpdateStatus(ctx, row.ID, "active"); err == nil {
+						resp.Status = "active"
+					}
+				}
+			}
+		}
+	}
+
+	// Template approval state.
+	if contentSID, _ := row.Metadata[communication.MetaContentSIDRecovery].(string); contentSID != "" {
+		resp.TemplateStatus = "pending"
+		if master, err := s.twilioMaster(); err == nil {
+			if approval, err := master.GetTemplateApprovalStatus(ctx, subSID, subToken, contentSID); err == nil && approval.Status != "" {
+				resp.TemplateStatus = approval.Status
+				resp.TemplateReason = approval.Reason
+			}
+		}
+	}
+
+	return resp, nil
+}
+
+// =============================================================================
+// ONBOARDING HTTP HANDLERS
+// =============================================================================
+
+// ConnectWhatsAppRequest is the body for the connect endpoint.
+type ConnectWhatsAppRequest struct {
+	PhoneNumber string `json:"phoneNumber" validate:"required,e164"`
+	WABAID      string `json:"wabaId,omitempty"`
+	DisplayName string `json:"displayName,omitempty" validate:"omitempty,max=100"`
+}
+
+// VerifyWhatsAppRequest is the body for the OTP verify endpoint.
+type VerifyWhatsAppRequest struct {
+	Code string `json:"code" validate:"required,min=4,max=10"`
+}
+
+// ConnectWhatsApp starts or resumes WhatsApp onboarding for the store.
+// @Summary Connect WhatsApp
+// @Description Provisions a Twilio subaccount, registers the merchant number (OTP) and submits the default template
+// @Tags integrations
+// @Accept json
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param body body ConnectWhatsAppRequest true "Merchant number"
+// @Success 200 {object} httpx.Envelope{data=WhatsAppStatusResponse}
+// @Router /api/v1/stores/{storeId}/integrations/whatsapp/connect [post]
+// @Security BearerAuth
+func (h *Handler) ConnectWhatsApp(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	var req ConnectWhatsAppRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	resp, err := h.service.ConnectWhatsApp(c.Context(), ConnectWhatsAppInput{
+		StoreID:     storeID,
+		PhoneE164:   req.PhoneNumber,
+		WABAID:      req.WABAID,
+		DisplayName: req.DisplayName,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, resp)
+}
+
+// VerifyWhatsApp submits the OTP received on the merchant's phone.
+// @Summary Verify WhatsApp sender
+// @Description Submits the SMS/voice OTP; on success the integration becomes active
+// @Tags integrations
+// @Accept json
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param body body VerifyWhatsAppRequest true "OTP code"
+// @Success 200 {object} httpx.Envelope{data=WhatsAppStatusResponse}
+// @Router /api/v1/stores/{storeId}/integrations/whatsapp/verify [post]
+// @Security BearerAuth
+func (h *Handler) VerifyWhatsApp(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	var req VerifyWhatsAppRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.BadRequest(c, "invalid request body")
+	}
+	if err := h.validate.Struct(req); err != nil {
+		return httpx.ValidationError(c, err)
+	}
+
+	resp, err := h.service.VerifyWhatsAppSender(c.Context(), storeID, req.Code)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, resp)
+}
+
+// GetWhatsAppStatus returns onboarding/health state for polling.
+// @Summary Get WhatsApp status
+// @Description Returns sender, quality and template approval state
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Success 200 {object} httpx.Envelope{data=WhatsAppStatusResponse}
+// @Router /api/v1/stores/{storeId}/integrations/whatsapp/status [get]
+// @Security BearerAuth
+func (h *Handler) GetWhatsAppStatus(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	resp, err := h.service.GetWhatsAppStatus(c.Context(), storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, resp)
+}
