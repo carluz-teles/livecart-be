@@ -702,3 +702,15 @@ func (h *Handler) GetWhatsAppStatus(c *fiber.Ctx) error {
 	}
 	return httpx.OK(c, resp)
 }
+
+// SendCartRecoveryTemplate implements notification.WhatsAppSender: sends the
+// store's approved recovery template (reminder fallback uses the same one).
+func (s *Service) SendCartRecoveryTemplate(ctx context.Context, storeID, toPhone string, variables map[string]string, logID string) error {
+	_, err := s.SendWhatsAppTemplate(ctx, SendWhatsAppTemplateInput{
+		StoreID:           storeID,
+		To:                toPhone,
+		Variables:         variables,
+		NotificationLogID: logID,
+	})
+	return err
+}

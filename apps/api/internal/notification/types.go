@@ -16,6 +16,10 @@ const (
 	// next-in-line customer was just bumped to "notified" and has the
 	// configurable TTL window to finalize before the slot is released.
 	TypeWaitlistNotified NotificationType = "waitlist_notified"
+	// TypeCartRecovery is the post-expiration WhatsApp recovery message
+	// (PRD 006): the cart expired unpaid, a fresh checkout was regenerated
+	// and the approved template goes out with the new link.
+	TypeCartRecovery NotificationType = "cart_recovery"
 )
 
 // NotificationChannel represents the channel used to send notifications.

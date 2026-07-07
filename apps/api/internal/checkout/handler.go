@@ -221,6 +221,7 @@ func (h *Handler) ProcessCardPayment(c *fiber.Ctx) error {
 		CustomerName:     req.CustomerName,
 		CustomerDocument: req.CustomerDocument,
 		CustomerPhone:    req.CustomerPhone,
+		WhatsappConsent:  req.WhatsappConsent,
 		ShippingAddress:  req.ShippingAddress,
 	})
 	if err != nil {
@@ -263,6 +264,7 @@ func (h *Handler) GeneratePix(c *fiber.Ctx) error {
 		CustomerName:     req.CustomerName,
 		CustomerDocument: req.CustomerDocument,
 		CustomerPhone:    req.CustomerPhone,
+		WhatsappConsent:  req.WhatsappConsent,
 		ShippingAddress:  req.ShippingAddress,
 	})
 	if err != nil {

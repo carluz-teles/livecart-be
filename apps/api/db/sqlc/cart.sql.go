@@ -1585,6 +1585,92 @@ func (q *Queries) ListCartsByEvent(ctx context.Context, eventID pgtype.UUID) ([]
 	return items, nil
 }
 
+const listCartsForWhatsAppRecovery = `-- name: ListCartsForWhatsAppRecovery :many
+SELECT
+    c.id,
+    c.token,
+    le.id AS event_id,
+    le.store_id,
+    c.customer_name,
+    c.customer_phone,
+    COALESCE(SUM(ci.quantity), 0)::int AS total_items,
+    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_cents,
+    (COALESCE((s.notification_settings->'cart_recovery'->>'quiet_hours_start')::int, 21))::int AS quiet_hours_start,
+    (COALESCE((s.notification_settings->'cart_recovery'->>'quiet_hours_end')::int, 8))::int AS quiet_hours_end
+FROM carts c
+JOIN live_events le ON le.id = c.event_id
+JOIN stores s ON s.id = le.store_id
+LEFT JOIN cart_items ci ON ci.cart_id = c.id
+WHERE c.whatsapp_consent = TRUE
+  AND c.customer_phone IS NOT NULL
+  AND c.payment_status IS DISTINCT FROM 'paid'
+  AND c.expires_at IS NOT NULL
+  AND COALESCE((s.notification_settings->'cart_recovery'->>'enabled')::boolean, FALSE) = TRUE
+  AND c.expires_at < NOW() - (COALESCE((s.notification_settings->'cart_recovery'->>'delay_minutes')::int, 30) * INTERVAL '1 minute')
+  AND c.expires_at > NOW() - INTERVAL '7 days'
+  AND NOT EXISTS (
+    SELECT 1 FROM notification_logs nl
+    WHERE nl.cart_id = c.id AND nl.notification_type = 'cart_recovery'
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM customers cu
+    WHERE cu.store_id = le.store_id
+      AND cu.phone = c.customer_phone
+      AND cu.whatsapp_opted_out = TRUE
+  )
+GROUP BY c.id, c.token, le.id, le.store_id, c.customer_name, c.customer_phone, c.expires_at, s.notification_settings
+ORDER BY c.expires_at ASC
+LIMIT $1
+`
+
+type ListCartsForWhatsAppRecoveryRow struct {
+	ID              pgtype.UUID `json:"id"`
+	Token           string      `json:"token"`
+	EventID         pgtype.UUID `json:"event_id"`
+	StoreID         pgtype.UUID `json:"store_id"`
+	CustomerName    pgtype.Text `json:"customer_name"`
+	CustomerPhone   pgtype.Text `json:"customer_phone"`
+	TotalItems      int32       `json:"total_items"`
+	TotalCents      int64       `json:"total_cents"`
+	QuietHoursStart int32       `json:"quiet_hours_start"`
+	QuietHoursEnd   int32       `json:"quiet_hours_end"`
+}
+
+// PRD 006: expired, unpaid carts with phone + consent whose store enabled
+// cart recovery and whose post-expiration delay has elapsed. One attempt per
+// cart (NOT EXISTS on notification_logs) and opted-out customers excluded.
+// The 7-day floor avoids resurrecting ancient carts when the feature ships.
+func (q *Queries) ListCartsForWhatsAppRecovery(ctx context.Context, limit int32) ([]ListCartsForWhatsAppRecoveryRow, error) {
+	rows, err := q.db.Query(ctx, listCartsForWhatsAppRecovery, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCartsForWhatsAppRecoveryRow{}
+	for rows.Next() {
+		var i ListCartsForWhatsAppRecoveryRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Token,
+			&i.EventID,
+			&i.StoreID,
+			&i.CustomerName,
+			&i.CustomerPhone,
+			&i.TotalItems,
+			&i.TotalCents,
+			&i.QuietHoursStart,
+			&i.QuietHoursEnd,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCartsWithTotalByEvent = `-- name: ListCartsWithTotalByEvent :many
 SELECT
     c.id,
@@ -2298,7 +2384,12 @@ SET customer_email    = $2,
     customer_name     = $3,
     customer_document = $4,
     customer_phone    = $5,
-    shipping_address  = $6
+    shipping_address  = $6,
+    whatsapp_consent  = $7,
+    whatsapp_consent_at = CASE
+      WHEN $7 = TRUE AND whatsapp_consent = FALSE THEN NOW()
+      ELSE whatsapp_consent_at
+    END
 WHERE id = $1
 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, tracking_token, erp_finalisation_status, erp_last_error, erp_last_attempt_at, erp_attempts_count, erp_payment_snapshot, erp_invoice_id, erp_invoice_key, erp_invoice_status, erp_invoice_emitted_at, whatsapp_consent, whatsapp_consent_at
 `
@@ -2310,6 +2401,7 @@ type UpdateCartCustomerCheckoutParams struct {
 	CustomerDocument pgtype.Text     `json:"customer_document"`
 	CustomerPhone    pgtype.Text     `json:"customer_phone"`
 	ShippingAddress  json.RawMessage `json:"shipping_address"`
+	WhatsappConsent  bool            `json:"whatsapp_consent"`
 }
 
 // Persists full customer + shipping data entered in the checkout form.
@@ -2323,6 +2415,7 @@ func (q *Queries) UpdateCartCustomerCheckout(ctx context.Context, arg UpdateCart
 		arg.CustomerDocument,
 		arg.CustomerPhone,
 		arg.ShippingAddress,
+		arg.WhatsappConsent,
 	)
 	var i Cart
 	err := row.Scan(

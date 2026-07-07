@@ -50,6 +50,7 @@ import (
 	"livecart/apps/api/internal/postcheckout"
 	notificationinbox "livecart/apps/api/internal/notification_inbox"
 	"livecart/apps/api/internal/order"
+	"livecart/apps/api/internal/recovery"
 	"livecart/apps/api/internal/product"
 	"livecart/apps/api/internal/productgroup"
 	"livecart/apps/api/internal/store"
@@ -389,6 +390,8 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// (integrationSvc implements notification.DMSender via SendInstagramDM)
 			notificationSvc = notification.NewService(queries, integrationSvc, log)
 			notificationSvc.SetEmailSender(emailClient)
+			// PRD 006: reminder fallback IG -> WhatsApp
+			notificationSvc.SetWhatsAppSender(integrationSvc)
 			integrationSvc.SetNotificationService(notificationSvc)
 
 			// Customer-facing post-payment flow (tracking token + receipt
@@ -590,6 +593,22 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		Limit:    200,
 	})
 	couponExpirer.Start()
+
+	// WhatsApp cart-recovery sweep (PRD 006): expired unpaid carts with phone
+	// + consent get a regenerated checkout link via the store's WhatsApp
+	// number. Only runs when the integration layer is up (Twilio credentials
+	// are checked per store at send time).
+	if integrationSvc != nil {
+		recoveryWorker := recovery.NewWorker(recovery.WorkerConfig{
+			Queries:      queries,
+			Orders:       orderSvc,
+			Integrations: integrationSvc,
+			Logger:       log,
+			Interval:     5 * time.Minute,
+			Limit:        100,
+		})
+		recoveryWorker.Start()
+	}
 
 	customerHandler := customer.NewHandler(customerSvc, validate)
 	customerHandler.RegisterRoutes(storeScoped)

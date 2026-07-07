@@ -248,6 +248,7 @@ type ProcessCardPaymentRequest struct {
 	CustomerName     string           `json:"customerName" validate:"required"`
 	CustomerDocument string           `json:"customerDocument" validate:"required"`
 	CustomerPhone    string           `json:"customerPhone,omitempty"`
+	WhatsappConsent  bool             `json:"whatsappConsent,omitempty"` // PRD 006: opt-in p/ lembretes e recuperação
 	ShippingAddress  *ShippingAddress `json:"shippingAddress" validate:"required"`
 }
 
@@ -270,6 +271,7 @@ type GeneratePixRequest struct {
 	CustomerName     string           `json:"customerName" validate:"required"`
 	CustomerDocument string           `json:"customerDocument" validate:"required"`
 	CustomerPhone    string           `json:"customerPhone,omitempty"`
+	WhatsappConsent  bool             `json:"whatsappConsent,omitempty"` // PRD 006: opt-in p/ lembretes e recuperação
 	ShippingAddress  *ShippingAddress `json:"shippingAddress" validate:"required"`
 }
 
@@ -438,6 +440,7 @@ type ProcessCardPaymentInput struct {
 	CustomerName     string
 	CustomerDocument string
 	CustomerPhone    string
+	WhatsappConsent  bool
 	ShippingAddress  *ShippingAddress
 }
 
@@ -462,6 +465,7 @@ type GeneratePixInput struct {
 	CustomerName     string
 	CustomerDocument string
 	CustomerPhone    string
+	WhatsappConsent  bool
 	ShippingAddress  *ShippingAddress
 }
 

@@ -248,6 +248,27 @@ func (q *Queries) GetCustomerStats(ctx context.Context, storeID pgtype.UUID) (Ge
 	return i, err
 }
 
+const isCustomerWhatsAppOptedOut = `-- name: IsCustomerWhatsAppOptedOut :one
+SELECT EXISTS(
+  SELECT 1 FROM customers
+  WHERE store_id = $1 AND phone = $2 AND whatsapp_opted_out = TRUE
+) AS opted_out
+`
+
+type IsCustomerWhatsAppOptedOutParams struct {
+	StoreID pgtype.UUID `json:"store_id"`
+	Phone   pgtype.Text `json:"phone"`
+}
+
+// LGPD gate for the reminder fallback: any customer of this store with this
+// phone that replied SAIR/PARAR blocks further business-initiated messages.
+func (q *Queries) IsCustomerWhatsAppOptedOut(ctx context.Context, arg IsCustomerWhatsAppOptedOutParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isCustomerWhatsAppOptedOut, arg.StoreID, arg.Phone)
+	var opted_out bool
+	err := row.Scan(&opted_out)
+	return opted_out, err
+}
+
 const listCustomers = `-- name: ListCustomers :many
 SELECT
     c.id, c.store_id, c.platform_user_id, c.platform_handle, c.email, c.phone, c.first_order_at, c.last_order_at, c.created_at, c.updated_at, c.whatsapp_opted_out,

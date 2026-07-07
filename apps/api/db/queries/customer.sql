@@ -151,3 +151,11 @@ LIMIT 1;
 UPDATE customers
 SET whatsapp_opted_out = $3, updated_at = NOW()
 WHERE store_id = $1 AND phone = $2;
+
+-- name: IsCustomerWhatsAppOptedOut :one
+-- LGPD gate for the reminder fallback: any customer of this store with this
+-- phone that replied SAIR/PARAR blocks further business-initiated messages.
+SELECT EXISTS(
+  SELECT 1 FROM customers
+  WHERE store_id = $1 AND phone = $2 AND whatsapp_opted_out = TRUE
+) AS opted_out;

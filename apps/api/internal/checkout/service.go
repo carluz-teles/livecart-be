@@ -671,7 +671,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 
 	// Persist customer identity + shipping address before requesting payment —
 	// the webhook handler will read this when creating the paid order in the ERP.
-	if err := s.repo.UpdateCheckoutCustomer(ctx, cart.ID, input.Email, input.CustomerName, input.CustomerDocument, input.CustomerPhone, input.ShippingAddress); err != nil {
+	if err := s.repo.UpdateCheckoutCustomer(ctx, cart.ID, input.Email, input.CustomerName, input.CustomerDocument, input.CustomerPhone, input.ShippingAddress, input.WhatsappConsent); err != nil {
 		return nil, err
 	}
 
@@ -860,7 +860,7 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 
 	// Persist customer identity + shipping address before requesting payment —
 	// the webhook handler will read this when creating the paid order in the ERP.
-	if err := s.repo.UpdateCheckoutCustomer(ctx, cart.ID, input.Email, input.CustomerName, input.CustomerDocument, input.CustomerPhone, input.ShippingAddress); err != nil {
+	if err := s.repo.UpdateCheckoutCustomer(ctx, cart.ID, input.Email, input.CustomerName, input.CustomerDocument, input.CustomerPhone, input.ShippingAddress, input.WhatsappConsent); err != nil {
 		return nil, err
 	}
 

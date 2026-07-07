@@ -157,7 +157,7 @@ func (r *Repository) UpdateCustomerEmail(ctx context.Context, token, email strin
 // UpdateCheckoutCustomer persists the customer identity and shipping address
 // entered in the transparent checkout form. These fields are required to later
 // create the paid sales order in the ERP when the payment webhook confirms.
-func (r *Repository) UpdateCheckoutCustomer(ctx context.Context, cartID, email, name, document, phone string, address *ShippingAddress) error {
+func (r *Repository) UpdateCheckoutCustomer(ctx context.Context, cartID, email, name, document, phone string, address *ShippingAddress, whatsappConsent bool) error {
 	uid, err := uuid.Parse(cartID)
 	if err != nil {
 		return httpx.ErrBadRequest("invalid cart ID")
@@ -179,6 +179,8 @@ func (r *Repository) UpdateCheckoutCustomer(ctx context.Context, cartID, email, 
 		CustomerDocument: pgtype.Text{String: document, Valid: document != ""},
 		CustomerPhone:    pgtype.Text{String: phone, Valid: phone != ""},
 		ShippingAddress:  addressJSON,
+		// LGPD: consent only counts when a phone was actually provided.
+		WhatsappConsent: whatsappConsent && phone != "",
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

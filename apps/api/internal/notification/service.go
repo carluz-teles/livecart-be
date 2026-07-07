@@ -20,10 +20,11 @@ type DMSender interface {
 
 // Service handles notification logic including templates, cooldowns, and logging.
 type Service struct {
-	queries     *sqlc.Queries
-	dmSender    DMSender
-	emailSender EmailSender
-	logger      *zap.Logger
+	queries        *sqlc.Queries
+	dmSender       DMSender
+	emailSender    EmailSender
+	whatsappSender WhatsAppSender // optional — reminder fallback (PRD 006)
+	logger         *zap.Logger
 }
 
 // NewService creates a new notification service.
@@ -167,6 +168,16 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 			zap.String("type", string(input.NotificationType)),
 			zap.Error(sendErr),
 		)
+
+		// PRD 006: the checkout reminder falls back to WhatsApp when the IG
+		// window is closed and the buyer left phone + consent at checkout.
+		if waLogID := s.tryWhatsAppFallback(ctx, input); waLogID != "" {
+			return &SendResult{
+				LogID:       waLogID,
+				Status:      StatusSent,
+				MessageText: message,
+			}, nil
+		}
 
 		return &SendResult{
 			LogID:       logID,
