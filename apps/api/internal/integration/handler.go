@@ -78,6 +78,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Post("/whatsapp/connect", h.ConnectWhatsApp)
 	g.Post("/whatsapp/verify", h.VerifyWhatsApp)
 	g.Get("/whatsapp/status", h.GetWhatsAppStatus)
+	g.Get("/whatsapp/recovery-stats", h.GetWhatsAppRecoveryStatsHandler)
 	g.Post("/whatsapp/test-message", h.SendWhatsAppTestMessage)
 
 	// Payment — provider-specific connect (no OAuth). Pagar.me uses static

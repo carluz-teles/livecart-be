@@ -261,6 +261,44 @@ func (q *Queries) GetStoreTestRecipient(ctx context.Context, id pgtype.UUID) (Ge
 	return i, err
 }
 
+const getWhatsAppRecoveryStats = `-- name: GetWhatsAppRecoveryStats :one
+SELECT
+  COUNT(*) FILTER (WHERE nl.status IN ('sent', 'delivered', 'read'))::int AS messages_sent,
+  COUNT(*) FILTER (
+    WHERE c.payment_status = 'paid'
+      AND c.paid_at > nl.created_at
+      AND c.paid_at < nl.created_at + INTERVAL '48 hours'
+  )::int AS carts_recovered,
+  COALESCE(SUM(
+    CASE WHEN c.payment_status = 'paid'
+      AND c.paid_at > nl.created_at
+      AND c.paid_at < nl.created_at + INTERVAL '48 hours'
+    THEN (SELECT COALESCE(SUM(ci.quantity * ci.unit_price), 0) FROM cart_items ci WHERE ci.cart_id = c.id)
+    ELSE 0 END
+  ), 0)::bigint AS revenue_recovered_cents
+FROM notification_logs nl
+JOIN carts c ON c.id = nl.cart_id
+WHERE nl.store_id = $1
+  AND nl.notification_type = 'cart_recovery'
+  AND nl.created_at > NOW() - INTERVAL '30 days'
+`
+
+type GetWhatsAppRecoveryStatsRow struct {
+	MessagesSent          int32 `json:"messages_sent"`
+	CartsRecovered        int32 `json:"carts_recovered"`
+	RevenueRecoveredCents int64 `json:"revenue_recovered_cents"`
+}
+
+// PRD 006: last-30-days recovery funnel. A cart counts as recovered when it
+// was paid within 48h of the recovery message (same attribution window as
+// PRD 005).
+func (q *Queries) GetWhatsAppRecoveryStats(ctx context.Context, storeID pgtype.UUID) (GetWhatsAppRecoveryStatsRow, error) {
+	row := q.db.QueryRow(ctx, getWhatsAppRecoveryStats, storeID)
+	var i GetWhatsAppRecoveryStatsRow
+	err := row.Scan(&i.MessagesSent, &i.CartsRecovered, &i.RevenueRecoveredCents)
+	return i, err
+}
+
 const listNotificationsByEvent = `-- name: ListNotificationsByEvent :many
 SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id FROM notification_logs
 WHERE event_id = $1

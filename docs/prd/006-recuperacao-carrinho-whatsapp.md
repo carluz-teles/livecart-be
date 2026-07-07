@@ -168,4 +168,30 @@ Pedido pago ate 48h apos mensagem de recuperacao do mesmo carrinho →
 - [x] Conta Twilio (Account SID + Auth Token no .env)
 - [ ] Cadastro no WhatsApp ISV/Tech Provider Program (Twilio Console) — em andamento
 - [ ] Numero de teste para validacao fim-a-fim
-- [ ] Template default aprovado pela Meta (submeter na Sprint 1-2)
+- [ ] Template default aprovado pela Meta (submetido automaticamente no onboarding de cada loja)
+
+---
+
+## 9. Status da Implementacao (jul/2026)
+
+Todas as 4 sprints implementadas. Commits: 9b1ad69 (S1), 837a571 + a6088a8-fe
+(S2), f26e3c5 + c42fb53-fe (S3), sprint 4 no commit seguinte.
+
+Decisoes tomadas durante a implementacao:
+- Lembrete continua IG-first; fallback WhatsApp quando a janela de 24h fecha
+  (decisao de produto). Recuperacao pos-expiracao e sempre WhatsApp.
+- O fallback usa o MESMO template aprovado da recuperacao (business-initiated
+  nao aceita texto livre); template dedicado de lembrete fica para depois.
+- Settings (toggle/delay) + stats de receita recuperada vivem no dialog do
+  WhatsApp em Integracoes — nao houve card no dashboard ainda.
+- max_attempts efetivo e 1 (NOT EXISTS no sweep); multi-tentativa e follow-up.
+- Sweep tem piso de 7 dias para nao ressuscitar carrinhos antigos no launch.
+
+Follow-ups conhecidos:
+- Editor de template custom (criar Content novo + aprovacao Meta + swap do
+  content_sid) — a UI atual mostra o status de aprovacao, mas o texto enviado
+  e sempre o template default provisionado no onboarding.
+- Card "Receita recuperada" no dashboard principal (PRD 005).
+- Segunda tentativa de recuperacao em 24h (config max_attempts ja existe).
+- Validar fim-a-fim quando o cadastro ISV/Tech Provider for aprovado
+  (registro de sender exige WABA via embedded signup).

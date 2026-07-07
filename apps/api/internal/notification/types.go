@@ -58,6 +58,22 @@ type Settings struct {
 	PaymentConfirmed  *EmailTemplateSettings `json:"payment_confirmed,omitempty"`
 	Shipped           *EmailTemplateSettings `json:"shipped,omitempty"`
 	Delivered         *EmailTemplateSettings `json:"delivered,omitempty"`
+	// CartRecovery (PRD 006): WhatsApp post-expiration recovery. Must stay in
+	// this struct so UpdateSettings round-trips the JSONB without dropping it.
+	CartRecovery *CartRecoverySettings `json:"cart_recovery,omitempty"`
+}
+
+// CartRecoverySettings configures the WhatsApp recovery worker per store.
+// The template text here is informational for the merchant UI — the message
+// actually sent is the Meta-approved content template on the Twilio side.
+type CartRecoverySettings struct {
+	Enabled            bool   `json:"enabled"`
+	DelayMinutes       int    `json:"delay_minutes"`
+	MaxAttempts        int    `json:"max_attempts"`
+	QuietHoursStart    int    `json:"quiet_hours_start"`
+	QuietHoursEnd      int    `json:"quiet_hours_end"`
+	RecoverEndedEvents bool   `json:"recover_ended_events"`
+	Template           string `json:"template"`
 }
 
 // TemplateSettings represents settings for a specific notification type.
