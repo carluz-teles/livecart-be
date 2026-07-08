@@ -1,1 +1,4 @@
 .env
+
+# Debug artifacts (Playwright MCP sessions)
+.playwright-mcp/
