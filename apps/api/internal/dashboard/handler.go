@@ -18,6 +18,10 @@ func NewHandler(service *Service, validate *validator.Validate) *Handler {
 
 func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g := router.Group("/dashboard")
+	// Range-aware (redesign jul/2026): overview consolidado + série de receita
+	g.Get("/overview", h.GetOverview)
+	g.Get("/series", h.GetRevenueSeries)
+
 	g.Get("/stats", h.GetStats)
 	g.Get("/chart", h.GetMonthlyRevenue)
 	g.Get("/top-products", h.GetTopProducts)
@@ -98,9 +102,24 @@ func (h *Handler) GetMonthlyRevenue(c *fiber.Ctx) error {
 func (h *Handler) GetTopProducts(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
 
-	output, err := h.service.GetTopProducts(c.Context(), storeID)
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
+	var output *TopProductsOutput
+	var err error
+	if c.Query("from") != "" || c.Query("to") != "" {
+		// Redesign jul/2026: ranking coerente com o filtro de período
+		from, to, perr := parseRange(c)
+		if perr != nil {
+			return httpx.BadRequest(c, perr.Error())
+		}
+		products, rerr := h.service.GetTopProductsRange(c.Context(), storeID, from, to)
+		if rerr != nil {
+			return httpx.HandleServiceError(c, rerr)
+		}
+		output = &TopProductsOutput{Products: products}
+	} else {
+		output, err = h.service.GetTopProducts(c.Context(), storeID)
+		if err != nil {
+			return httpx.HandleServiceError(c, err)
+		}
 	}
 
 	products := make([]TopProductItem, len(output.Products))
@@ -235,9 +254,23 @@ func (h *Handler) GetAggregatedFunnel(c *fiber.Ctx) error {
 func (h *Handler) GetTopBuyers(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
 
-	output, err := h.service.GetTopBuyers(c.Context(), storeID)
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
+	var output *TopBuyersOutput
+	var err error
+	if c.Query("from") != "" || c.Query("to") != "" {
+		from, to, perr := parseRange(c)
+		if perr != nil {
+			return httpx.BadRequest(c, perr.Error())
+		}
+		buyers, rerr := h.service.GetTopBuyersRange(c.Context(), storeID, from, to)
+		if rerr != nil {
+			return httpx.HandleServiceError(c, rerr)
+		}
+		output = &TopBuyersOutput{Buyers: buyers}
+	} else {
+		output, err = h.service.GetTopBuyers(c.Context(), storeID)
+		if err != nil {
+			return httpx.HandleServiceError(c, err)
+		}
 	}
 
 	buyers := make([]TopBuyerItem, len(output.Buyers))
