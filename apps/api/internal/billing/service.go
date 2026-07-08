@@ -476,3 +476,44 @@ func (s *Service) ChangePlan(ctx context.Context, storeID string, target Plan) (
 	state := s.toState(&fresh)
 	return &state, nil
 }
+
+// =============================================================================
+// GMV METERING (Sprint 4)
+// =============================================================================
+
+// ReportPaidGMV sends the paid-cart GMV to the Stripe meter. Fire-and-forget
+// semantics: failures are logged, never propagated (billing telemetry must
+// not affect the payment flow). During the trial there is no metered item on
+// the subscription, so reported events simply aren't billed — correct, the
+// trial is free.
+func (s *Service) ReportPaidGMV(ctx context.Context, storeID, cartID string, amountCents int64) {
+	if s.stripe == nil || amountCents <= 0 {
+		return
+	}
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return
+	}
+	row, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
+	if err != nil || !row.StripeCustomerID.Valid {
+		s.logger.Debug("gmv not reported: no stripe customer",
+			zap.String("store_id", storeID))
+		return
+	}
+
+	event := config.StripeGMVMeterEvent.StringOr("gmv_cents")
+	if err := s.stripe.SendMeterEvent(ctx, event, row.StripeCustomerID.String, "gmv-"+cartID, amountCents); err != nil {
+		s.logger.Warn("failed to report gmv meter event",
+			zap.String("store_id", storeID),
+			zap.String("cart_id", cartID),
+			zap.Int64("amount_cents", amountCents),
+			zap.Error(err),
+		)
+		return
+	}
+	s.logger.Info("gmv reported to stripe meter",
+		zap.String("store_id", storeID),
+		zap.String("cart_id", cartID),
+		zap.Int64("amount_cents", amountCents),
+	)
+}

@@ -8,6 +8,7 @@ import (
 	"html"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/zap"
 
 	"livecart/apps/api/db/sqlc"
@@ -25,6 +26,7 @@ type Service struct {
 	email               *email.Client
 	notificationService NotificationSettingsReader
 	logger              *zap.Logger
+	gmvReporter GMVReporter // optional — Stripe metered GMV fee (PRD 007)
 }
 
 // NotificationSettingsReader is the slice of notification.Service this
@@ -45,6 +47,17 @@ func NewService(repo *Repository, emailClient *email.Client, logger *zap.Logger)
 // SetNotificationService wires the per-store template overrides. When unset,
 // the service uses hardcoded defaults — handy in tests and for graceful
 // rollout (BE deploys before FE editor exists).
+// GMVReporter reports paid GMV for the metered subscription fee (PRD 007).
+// Implemented by billing.Service; narrow interface keeps packages decoupled.
+type GMVReporter interface {
+	ReportPaidGMV(ctx context.Context, storeID, cartID string, amountCents int64)
+}
+
+// SetGMVReporter wires the metered-fee reporter (optional).
+func (s *Service) SetGMVReporter(r GMVReporter) {
+	s.gmvReporter = r
+}
+
 func (s *Service) SetNotificationService(reader NotificationSettingsReader) {
 	s.notificationService = reader
 }
@@ -88,6 +101,16 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 			zap.Error(err),
 		)
 		return
+	}
+
+	// Metered GMV fee (PRD 007): report the paid total to Stripe. Runs after
+	// the tracking-token guard above, so webhook retries never double-report.
+	if s.gmvReporter != nil {
+		total := int64(0)
+		for _, item := range snapshot.Items {
+			total += itemLineTotalCents(item)
+		}
+		s.gmvReporter.ReportPaidGMV(ctx, uuidStr(snapshot.Store.ID), cartID, total)
 	}
 
 	// Append `payment_confirmed` to the customer-facing timeline. Insert is
@@ -542,3 +565,26 @@ func formatShippingLine(a ShippingAddressJSON) string {
 	return b.String()
 }
 
+
+// itemLineTotalCents mirrors the GetCartTotals expression
+// (SUM(quantity * unit_price)) used across notifications and dashboards, so
+// the metered GMV matches the totals the merchant sees elsewhere.
+func itemLineTotalCents(item sqlc.ListCartItemsRow) int64 {
+	qty := int64(item.Quantity.Int32)
+	if !item.Quantity.Valid {
+		qty = 0
+	}
+	price := item.UnitPrice.Int64
+	if !item.UnitPrice.Valid {
+		price = 0
+	}
+	return qty * price
+}
+
+func uuidStr(u pgtype.UUID) string {
+	if !u.Valid {
+		return ""
+	}
+	b := u.Bytes
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}

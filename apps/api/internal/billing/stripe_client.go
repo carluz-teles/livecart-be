@@ -419,3 +419,22 @@ func findItemIDs(sub *StripeSubscription, _ PlanConfig) (flatItemID, meterItemID
 	}
 	return flatItemID, meterItemID
 }
+
+// =============================================================================
+// USAGE (Billing Meters — GMV fee)
+// =============================================================================
+
+// SendMeterEvent reports paid GMV for metered billing. identifier dedupes on
+// Stripe's side (retries of the same cart are no-ops).
+func (c *StripeClient) SendMeterEvent(ctx context.Context, eventName, customerID, identifier string, valueCents int64) error {
+	form := url.Values{}
+	form.Set("event_name", eventName)
+	form.Set("identifier", identifier)
+	form.Set("payload[stripe_customer_id]", customerID)
+	form.Set("payload[value]", strconv.FormatInt(valueCents, 10))
+
+	if err := c.do(ctx, http.MethodPost, "/billing/meter_events", form, nil); err != nil {
+		return fmt.Errorf("sending meter event: %w", err)
+	}
+	return nil
+}

@@ -412,6 +412,8 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				log,
 			)
 			postCheckoutSvc.SetNotificationService(notificationSvc)
+			// PRD 007: taxa metered de GMV — pedido pago vira meter event
+			postCheckoutSvc.SetGMVReporter(billingSvc)
 			integrationSvc.SetPostCheckoutHook(postCheckoutSvc)
 
 			// Start background token refresh worker

@@ -140,3 +140,29 @@ cart_id, idempotente) → Stripe soma no ciclo → linha na fatura.
 - [ ] Webhook secret (`whsec_...`) apos criar o endpoint
 - [ ] Products/Prices criados (posso criar via API com a secret key)
 - [ ] Ativacao do faturamento em BRL na conta
+
+---
+
+## 11. Status da Implementacao (jul/2026)
+
+Sprints 1-4 implementadas. Commits BE: 8fef93f (S1), 8cefa6f (S2, inclui
+conversao antecipada), a7acfed (S3), S4 no commit seguinte. FE: f827a10 (S2),
+25abac9 (S3).
+
+O que esta no ar:
+- Trial 7d sem cartao no CreateStore + lazy no /users/sync (cobre legado)
+- Enforcement: 402 no BE (fail-open), redirect /paywall no FE, workers pausam
+- Conversao: paywall/billing -> Checkout (setup) -> webhook ativa plano
+  escolhido (flat + metered) e encerra o trial
+- Portal do cliente, upgrade imediato com proracao, downgrade via schedule
+- GMV metered: OnCartPaid (ponto unico de "pago") envia meter event
+  idempotente (identifier = gmv-<cart_id>; guard de tracking token evita
+  duplicata local)
+
+Follow-ups conhecidos:
+- Exibir uso do periodo (GMV acumulado x taxa) na tela de billing
+- E-mails de trial D-2/D0 (infra de email existe; falta scheduler)
+- Configurar STRIPE_WEBHOOK_SECRET (dashboard -> Webhooks -> endpoint
+  /api/webhooks/stripe; local: stripe listen --forward-to)
+- Reconciliacao periodica local<->Stripe (hoje so webhooks)
+- Enterprise: fluxo manual documentado, sem UI dedicada
