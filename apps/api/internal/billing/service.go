@@ -396,3 +396,83 @@ func (s *Service) completeConversion(ctx context.Context, session *CheckoutSessi
 	// Sync imediato (o customer.subscription.updated também chega e é idempotente).
 	return s.applySubscription(ctx, activated, "conversion")
 }
+
+// =============================================================================
+// PORTAL + PLAN CHANGE (Sprint 3)
+// =============================================================================
+
+// CreatePortalSession opens the Customer Portal for the store.
+func (s *Service) CreatePortalSession(ctx context.Context, storeID string) (string, error) {
+	if s.stripe == nil {
+		return "", fmt.Errorf("billing não configurado")
+	}
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return "", err
+	}
+	row, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
+	if err != nil || !row.StripeCustomerID.Valid {
+		return "", fmt.Errorf("assinatura Stripe não encontrada para esta loja")
+	}
+	frontend := strings.TrimRight(config.FrontendURL.String(), "/")
+	return s.stripe.CreatePortalSession(ctx, row.StripeCustomerID.String, frontend+"/settings/billing")
+}
+
+// ChangePlan applies an upgrade immediately (prorated) or schedules a
+// downgrade for the period end. Requires an active (converted) subscription —
+// trials convert through the checkout flow instead.
+func (s *Service) ChangePlan(ctx context.Context, storeID string, target Plan) (*SubscriptionState, error) {
+	cfg, ok := Plans()[target]
+	if !ok || !cfg.SelfService {
+		return nil, fmt.Errorf("plano inválido: %s", target)
+	}
+	if s.stripe == nil {
+		return nil, fmt.Errorf("billing não configurado")
+	}
+
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
+	if err != nil || !row.StripeSubscriptionID.Valid {
+		return nil, fmt.Errorf("assinatura Stripe não encontrada para esta loja")
+	}
+	if row.Status != StatusActive && row.Status != StatusPastDue {
+		return nil, fmt.Errorf("mudança de plano requer assinatura ativa — finalize a contratação primeiro")
+	}
+	if Plan(row.Plan) == target {
+		state := s.toState(&row)
+		return &state, nil
+	}
+
+	sub, err := s.stripe.GetSubscription(ctx, row.StripeSubscriptionID.String)
+	if err != nil {
+		return nil, err
+	}
+
+	current := Plans()[Plan(row.Plan)]
+	if cfg.FlatCents > current.FlatCents {
+		// Upgrade: imediato com proração.
+		updated, err := s.stripe.UpgradeSubscription(ctx, sub, cfg)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.applySubscription(ctx, updated, "plan_change"); err != nil {
+			return nil, err
+		}
+	} else {
+		// Downgrade: agendado para o fim do período (sem estorno).
+		if err := s.stripe.ScheduleDowngrade(ctx, sub, cfg); err != nil {
+			return nil, err
+		}
+		// O plano local muda quando a fase virar (webhook subscription.updated).
+	}
+
+	fresh, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
+	if err != nil {
+		return nil, err
+	}
+	state := s.toState(&fresh)
+	return &state, nil
+}

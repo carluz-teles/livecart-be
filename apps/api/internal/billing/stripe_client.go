@@ -314,3 +314,108 @@ func (c *StripeClient) ActivateSubscription(ctx context.Context, sub *StripeSubs
 	}
 	return &out, nil
 }
+
+// =============================================================================
+// PORTAL + PLAN CHANGES
+// =============================================================================
+
+// CreatePortalSession opens the Stripe Customer Portal (card, invoices,
+// cancellation).
+func (c *StripeClient) CreatePortalSession(ctx context.Context, customerID, returnURL string) (string, error) {
+	form := url.Values{}
+	form.Set("customer", customerID)
+	form.Set("return_url", returnURL)
+
+	var out struct {
+		URL string `json:"url"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/billing_portal/sessions", form, &out); err != nil {
+		return "", fmt.Errorf("creating portal session: %w", err)
+	}
+	return out.URL, nil
+}
+
+// UpgradeSubscription applies the new plan immediately, invoicing the
+// prorated flat difference now (PRD 007: upgrade imediato com proration).
+func (c *StripeClient) UpgradeSubscription(ctx context.Context, sub *StripeSubscription, cfg PlanConfig) (*StripeSubscription, error) {
+	form := url.Values{}
+	form.Set("proration_behavior", "always_invoice")
+	form.Set("payment_behavior", "allow_incomplete")
+
+	flatID, meterID := findItemIDs(sub, cfg)
+	i := 0
+	if flatID != "" {
+		form.Set(fmt.Sprintf("items[%d][id]", i), flatID)
+		form.Set(fmt.Sprintf("items[%d][price]", i), cfg.FlatPriceID)
+		i++
+	} else {
+		form.Set(fmt.Sprintf("items[%d][price]", i), cfg.FlatPriceID)
+		i++
+	}
+	if meterID != "" {
+		form.Set(fmt.Sprintf("items[%d][id]", i), meterID)
+		form.Set(fmt.Sprintf("items[%d][price]", i), cfg.MeterPriceID)
+	} else {
+		form.Set(fmt.Sprintf("items[%d][price]", i), cfg.MeterPriceID)
+	}
+
+	var out StripeSubscription
+	if err := c.do(ctx, http.MethodPost, "/subscriptions/"+sub.ID, form, &out); err != nil {
+		return nil, fmt.Errorf("upgrading subscription: %w", err)
+	}
+	return &out, nil
+}
+
+// ScheduleDowngrade swaps the plan at the end of the current period via a
+// subscription schedule (PRD 007: downgrade agendado, sem estorno).
+func (c *StripeClient) ScheduleDowngrade(ctx context.Context, sub *StripeSubscription, cfg PlanConfig) error {
+	// 1. Wrap the subscription in a schedule.
+	form := url.Values{}
+	form.Set("from_subscription", sub.ID)
+	var schedule struct {
+		ID     string `json:"id"`
+		Phases []struct {
+			StartDate int64 `json:"start_date"`
+			EndDate   int64 `json:"end_date"`
+		} `json:"phases"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/subscription_schedules", form, &schedule); err != nil {
+		// Already managed by a schedule — surface a friendly error; the
+		// merchant can retry after the pending change resolves.
+		return fmt.Errorf("creating subscription schedule: %w", err)
+	}
+
+	// 2. Keep the current phase as-is and append the downgraded phase.
+	update := url.Values{}
+	update.Set("end_behavior", "release")
+	// current phase: preserve existing prices until period end
+	update.Set("phases[0][start_date]", strconv.FormatInt(schedule.Phases[0].StartDate, 10))
+	update.Set("phases[0][end_date]", strconv.FormatInt(sub.CurrentPeriodEnd, 10))
+	for i, item := range sub.Items.Data {
+		update.Set(fmt.Sprintf("phases[0][items][%d][price]", i), item.Price.ID)
+	}
+	// next phase: new plan prices
+	update.Set("phases[1][items][0][price]", cfg.FlatPriceID)
+	update.Set("phases[1][items][1][price]", cfg.MeterPriceID)
+
+	if err := c.do(ctx, http.MethodPost, "/subscription_schedules/"+schedule.ID, update, nil); err != nil {
+		return fmt.Errorf("scheduling downgrade phases: %w", err)
+	}
+	return nil
+}
+
+// findItemIDs maps the subscription's current items to flat/meter slots by
+// matching against any known plan price.
+func findItemIDs(sub *StripeSubscription, _ PlanConfig) (flatItemID, meterItemID string) {
+	for _, item := range sub.Items.Data {
+		for _, cfg := range Plans() {
+			if item.Price.ID == cfg.FlatPriceID {
+				flatItemID = item.ID
+			}
+			if item.Price.ID == cfg.MeterPriceID {
+				meterItemID = item.ID
+			}
+		}
+	}
+	return flatItemID, meterItemID
+}
