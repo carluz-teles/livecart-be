@@ -1,6 +1,10 @@
 package user
 
-import "time"
+import (
+	"time"
+
+	"livecart/apps/api/internal/billing"
+)
 
 // ============================================
 // Handler layer - Request/Response types
@@ -13,13 +17,14 @@ type SyncUserRequest struct {
 
 // SyncUserResponse - returns user info and single membership (1 user = 1 store)
 type SyncUserResponse struct {
-	UserID      string              `json:"userId"`
-	ClerkUserID string              `json:"clerkUserId"`
-	Email       string              `json:"email"`
-	Name        *string             `json:"name"`
-	AvatarURL   *string             `json:"avatarUrl"`
-	Membership  *MembershipResponse `json:"membership"` // Single membership (or null)
-	State       string              `json:"state"`      // "no_store" | "ready"
+	UserID       string                     `json:"userId"`
+	ClerkUserID  string                     `json:"clerkUserId"`
+	Email        string                     `json:"email"`
+	Name         *string                    `json:"name"`
+	AvatarURL    *string                    `json:"avatarUrl"`
+	Membership   *MembershipResponse        `json:"membership"`             // Single membership (or null)
+	State        string                     `json:"state"`                  // "no_store" | "ready"
+	Subscription *billing.SubscriptionState `json:"subscription,omitempty"` // paywall state (PRD 007)
 }
 
 // MembershipResponse represents a user's membership to a store
@@ -67,13 +72,14 @@ type SyncUserInput struct {
 
 // SyncUserOutput - output from sync service (single membership)
 type SyncUserOutput struct {
-	UserID      string
-	ClerkUserID string
-	Email       string
-	Name        *string
-	AvatarURL   *string
-	Membership  *MembershipOutput // Single membership (or nil)
-	State       string            // "no_store" | "ready"
+	UserID       string
+	ClerkUserID  string
+	Email        string
+	Name         *string
+	AvatarURL    *string
+	Membership   *MembershipOutput // Single membership (or nil)
+	State        string            // "no_store" | "ready"
+	Subscription *billing.SubscriptionState
 }
 
 // MembershipOutput - membership data from service

@@ -1,0 +1,297 @@
+package billing
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	"go.uber.org/zap"
+
+	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/lib/config"
+)
+
+// Service owns the subscription lifecycle. The local table is the access
+// source of truth; Stripe webhooks keep it in sync.
+type Service struct {
+	queries *sqlc.Queries
+	stripe  *StripeClient // nil when STRIPE_SECRET_KEY is absent (local-only trials)
+	logger  *zap.Logger
+}
+
+// NewService builds the billing service.
+func NewService(queries *sqlc.Queries, logger *zap.Logger) *Service {
+	return &Service{
+		queries: queries,
+		stripe:  NewStripeClient(config.StripeSecretKey.String(), logger),
+		logger:  logger.Named("billing"),
+	}
+}
+
+// =============================================================================
+// TRIAL PROVISIONING (store creation + lazy on sync)
+// =============================================================================
+
+// EnsureTrialSubscription guarantees the store has a subscription row (local
+// trial) and, best-effort, the mirroring Stripe customer + trial
+// subscription. Idempotent — safe to call on every /users/sync.
+func (s *Service) EnsureTrialSubscription(ctx context.Context, storeID, storeName, email string) (*SubscriptionState, error) {
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	trialEnd := time.Now().Add(TrialDays * 24 * time.Hour)
+	row, err := s.queries.EnsureTrialSubscription(ctx, sqlc.EnsureTrialSubscriptionParams{
+		StoreID:     sid,
+		TrialEndsAt: pgtype.Timestamptz{Time: trialEnd, Valid: true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ensuring local trial: %w", err)
+	}
+
+	// Mirror on Stripe when configured and not yet linked. Failures are
+	// non-fatal: the local trial grants access and the next call retries.
+	if s.stripe != nil && !row.StripeSubscriptionID.Valid {
+		if err := s.provisionStripe(ctx, &row, storeID, storeName, email); err != nil {
+			s.logger.Warn("stripe trial provisioning pending",
+				zap.String("store_id", storeID),
+				zap.Error(err),
+			)
+		}
+	}
+
+	state := s.toState(&row)
+	return &state, nil
+}
+
+func (s *Service) provisionStripe(ctx context.Context, row *sqlc.Subscription, storeID, storeName, email string) error {
+	customerID := row.StripeCustomerID.String
+	if customerID == "" {
+		customer, err := s.stripe.CreateCustomer(ctx, storeID, storeName, email)
+		if err != nil {
+			return err
+		}
+		customerID = customer.ID
+	}
+
+	// Trial anchored on the Grow plan (PRD 007 decision: plan chosen at
+	// conversion; prices only matter once a card exists).
+	trialEnd := row.TrialEndsAt.Time
+	if !row.TrialEndsAt.Valid || trialEnd.Before(time.Now()) {
+		trialEnd = time.Now().Add(TrialDays * 24 * time.Hour)
+	}
+	sub, err := s.stripe.CreateTrialSubscription(ctx, customerID, Plans()[PlanGrow], trialEnd)
+	if err != nil {
+		// Persist the customer even when the subscription fails, so the
+		// retry skips customer creation.
+		_, _ = s.queries.SetSubscriptionStripeRefs(ctx, sqlc.SetSubscriptionStripeRefsParams{
+			StoreID:          row.StoreID,
+			StripeCustomerID: pgtype.Text{String: customerID, Valid: true},
+		})
+		return err
+	}
+
+	updated, err := s.queries.SetSubscriptionStripeRefs(ctx, sqlc.SetSubscriptionStripeRefsParams{
+		StoreID:              row.StoreID,
+		StripeCustomerID:     pgtype.Text{String: customerID, Valid: true},
+		StripeSubscriptionID: pgtype.Text{String: sub.ID, Valid: true},
+	})
+	if err != nil {
+		return fmt.Errorf("persisting stripe refs: %w", err)
+	}
+	*row = updated
+
+	s.logger.Info("stripe trial provisioned",
+		zap.String("store_id", storeID),
+		zap.String("customer", customerID),
+		zap.String("subscription", sub.ID),
+	)
+	return nil
+}
+
+// =============================================================================
+// STATE (middleware / sync / FE)
+// =============================================================================
+
+// GetState returns the access snapshot for a store. Missing row (legacy
+// store) returns nil — caller decides whether to lazily ensure.
+func (s *Service) GetState(ctx context.Context, storeID string) (*SubscriptionState, error) {
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	state := s.toState(&row)
+	return &state, nil
+}
+
+func (s *Service) toState(row *sqlc.Subscription) SubscriptionState {
+	now := time.Now()
+	state := SubscriptionState{
+		Status:            row.Status,
+		Plan:              Plan(row.Plan),
+		CancelAtPeriodEnd: row.CancelAtPeriodEnd,
+		HasPaymentMethod:  row.Status == StatusActive || row.Status == StatusPastDue,
+	}
+	if row.TrialEndsAt.Valid {
+		t := row.TrialEndsAt.Time
+		state.TrialEndsAt = &t
+		if days := int(time.Until(t).Hours()/24) + 1; days > 0 && row.Status == StatusTrialing {
+			state.TrialDaysLeft = days
+		}
+	}
+	if row.CurrentPeriodEnd.Valid {
+		t := row.CurrentPeriodEnd.Time
+		state.CurrentPeriodEnd = &t
+	}
+	if row.GraceUntil.Valid {
+		t := row.GraceUntil.Time
+		state.GraceUntil = &t
+	}
+	state.Blocked = blocked(row.Status, row.ManualOverride, state.TrialEndsAt, state.GraceUntil, now)
+	return state
+}
+
+// =============================================================================
+// WEBHOOK PROCESSING
+// =============================================================================
+
+// ProcessWebhookEvent applies a verified Stripe event to the local table.
+func (s *Service) ProcessWebhookEvent(ctx context.Context, event *StripeEvent) error {
+	switch event.Type {
+	case "customer.subscription.created",
+		"customer.subscription.updated",
+		"customer.subscription.deleted",
+		"customer.subscription.paused",
+		"customer.subscription.resumed":
+		var sub StripeSubscription
+		if err := json.Unmarshal(event.Data.Object, &sub); err != nil {
+			return fmt.Errorf("parsing subscription object: %w", err)
+		}
+		return s.applySubscription(ctx, &sub, event.Type)
+
+	case "invoice.payment_failed":
+		// Grace handling rides the subscription.updated → past_due event;
+		// logged here for the audit trail.
+		s.logger.Warn("stripe invoice payment failed", zap.String("event", event.ID))
+		return nil
+
+	default:
+		s.logger.Debug("stripe event ignored", zap.String("type", event.Type))
+		return nil
+	}
+}
+
+func (s *Service) applySubscription(ctx context.Context, sub *StripeSubscription, eventType string) error {
+	status := mapStripeStatus(sub.Status, eventType)
+
+	// Resolve plan from the flat price on the subscription items; when the
+	// items don't map (e.g. Enterprise custom prices), keep the stored plan.
+	plan := ""
+	for _, item := range sub.Items.Data {
+		if p := planFromPriceID(item.Price.ID); p != "" {
+			plan = string(p)
+			break
+		}
+	}
+	if plan == "" {
+		if current, err := s.queries.GetSubscriptionByStripeSubID(ctx, pgtype.Text{String: sub.ID, Valid: true}); err == nil {
+			plan = current.Plan
+		} else {
+			plan = string(PlanGrow)
+		}
+	}
+
+	var graceUntil pgtype.Timestamptz
+	if status == StatusPastDue {
+		graceUntil = pgtype.Timestamptz{Time: time.Now().Add(GraceDays * 24 * time.Hour), Valid: true}
+	}
+
+	row, err := s.queries.UpdateSubscriptionFromStripe(ctx, sqlc.UpdateSubscriptionFromStripeParams{
+		StripeSubscriptionID: pgtype.Text{String: sub.ID, Valid: true},
+		Status:               status,
+		Plan:                 plan,
+		TrialEndsAt:          unixToTimestamptz(sub.TrialEnd),
+		CurrentPeriodStart:   unixToTimestamptz(sub.CurrentPeriodStart),
+		CurrentPeriodEnd:     unixToTimestamptz(sub.CurrentPeriodEnd),
+		CancelAtPeriodEnd:    sub.CancelAtPeriodEnd,
+		GraceUntil:           graceUntil,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			s.logger.Warn("webhook for unknown subscription",
+				zap.String("subscription", sub.ID),
+			)
+			return nil
+		}
+		return fmt.Errorf("applying subscription update: %w", err)
+	}
+
+	s.logger.Info("subscription updated from stripe",
+		zap.String("store_id", uuidToString(row.StoreID)),
+		zap.String("status", status),
+		zap.String("plan", row.Plan),
+	)
+	return nil
+}
+
+// mapStripeStatus converts Stripe statuses to our local set.
+func mapStripeStatus(stripeStatus, eventType string) string {
+	if eventType == "customer.subscription.deleted" {
+		return StatusCanceled
+	}
+	switch stripeStatus {
+	case "trialing":
+		return StatusTrialing
+	case "active":
+		return StatusActive
+	case "past_due":
+		return StatusPastDue
+	case "paused":
+		return StatusPaused
+	case "canceled":
+		return StatusCanceled
+	case "unpaid", "incomplete", "incomplete_expired":
+		return StatusUnpaid
+	default:
+		return StatusUnpaid
+	}
+}
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+func parseUUID(s string) (pgtype.UUID, error) {
+	var u pgtype.UUID
+	if err := u.Scan(s); err != nil {
+		return u, fmt.Errorf("invalid uuid %q: %w", s, err)
+	}
+	return u, nil
+}
+
+func uuidToString(u pgtype.UUID) string {
+	if !u.Valid {
+		return ""
+	}
+	b := u.Bytes
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+func unixToTimestamptz(ts int64) pgtype.Timestamptz {
+	if ts == 0 {
+		return pgtype.Timestamptz{}
+	}
+	return pgtype.Timestamptz{Time: time.Unix(ts, 0), Valid: true}
+}

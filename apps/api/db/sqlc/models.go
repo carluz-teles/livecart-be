@@ -657,15 +657,21 @@ type StoreOrderCounter struct {
 }
 
 type Subscription struct {
-	ID                     pgtype.UUID        `json:"id"`
-	StoreID                pgtype.UUID        `json:"store_id"`
-	IntegrationID          pgtype.UUID        `json:"integration_id"`
-	ExternalSubscriptionID pgtype.Text        `json:"external_subscription_id"`
-	Status                 string             `json:"status"`
-	CurrentPeriodStart     pgtype.Timestamptz `json:"current_period_start"`
-	CurrentPeriodEnd       pgtype.Timestamptz `json:"current_period_end"`
-	CancelledAt            pgtype.Timestamptz `json:"cancelled_at"`
-	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	ID                   pgtype.UUID        `json:"id"`
+	StoreID              pgtype.UUID        `json:"store_id"`
+	Status               string             `json:"status"`
+	CurrentPeriodStart   pgtype.Timestamptz `json:"current_period_start"`
+	CurrentPeriodEnd     pgtype.Timestamptz `json:"current_period_end"`
+	CancelledAt          pgtype.Timestamptz `json:"cancelled_at"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	StripeCustomerID     pgtype.Text        `json:"stripe_customer_id"`
+	StripeSubscriptionID pgtype.Text        `json:"stripe_subscription_id"`
+	Plan                 string             `json:"plan"`
+	TrialEndsAt          pgtype.Timestamptz `json:"trial_ends_at"`
+	CancelAtPeriodEnd    bool               `json:"cancel_at_period_end"`
+	GraceUntil           pgtype.Timestamptz `json:"grace_until"`
+	ManualOverride       bool               `json:"manual_override"`
+	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
 }
 
 type User struct {

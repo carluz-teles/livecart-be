@@ -31,6 +31,7 @@ import (
 	"livecart/apps/api/lib/logger"
 	"livecart/apps/api/lib/ratelimit"
 
+	"livecart/apps/api/internal/billing"
 	"livecart/apps/api/internal/checkout"
 	"livecart/apps/api/internal/coupon"
 	"livecart/apps/api/internal/customer"
@@ -182,6 +183,12 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// User repository and service (shared between webhook and API handlers)
 	userRepo := user.NewRepository(queries)
 	userSvc := user.NewService(userRepo, log)
+
+	// Billing / paywall (PRD 007): trial de 7 dias, estado de assinatura no
+	// sync e webhook Stripe.
+	billingSvc := billing.NewService(queries, log)
+	userSvc.SetBilling(billingSvc)
+	billingWebhook := billing.NewWebhookHandler(billingSvc, log)
 
 	// Live session service (needed by integration for cart operations)
 	liveRepo := live.NewRepository(queries, pool)
@@ -436,6 +443,9 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	webhookHandler := user.NewWebhookHandler(userSvc)
 	webhookHandler.RegisterRoutes(app)
 
+	// Stripe billing webhook (PRD 007) — independent of the integration layer.
+	billingWebhook.RegisterRoutes(app)
+
 	// Integration webhook routes (if enabled)
 	if integrationWebhookHandler != nil {
 		integrationWebhookHandler.RegisterRoutes(app)
@@ -512,6 +522,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	membershipCreator := user.NewMembershipCreatorAdapter(userSvc)
 	userLookup := user.NewUserLookupAdapter(userSvc)
 	storeSvc := store.NewService(storeRepo, membershipCreator, userLookup, log)
+	storeSvc.SetBilling(billingSvc)
 
 	storeHandler := store.NewHandler(storeSvc, validate, s3Client)
 	storeHandler.RegisterRoutes(api)

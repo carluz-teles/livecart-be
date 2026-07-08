@@ -160,6 +160,7 @@ func (q *Queries) CreateIntegrationLog(ctx context.Context, arg CreateIntegratio
 
 const createOAuthState = `-- name: CreateOAuthState :exec
 
+
 INSERT INTO oauth_states (state, store_id, provider, code_verifier)
 VALUES ($1, $2, $3, $4)
 `
@@ -171,6 +172,8 @@ type CreateOAuthStateParams struct {
 	CodeVerifier string      `json:"code_verifier"`
 }
 
+// (Queries de subscriptions migraram para db/queries/subscription.sql na
+// remodelagem do billing via Stripe — PRD 007, migration 000076.)
 // =============================================================================
 // OAUTH STATES (PKCE)
 // =============================================================================
@@ -182,45 +185,6 @@ func (q *Queries) CreateOAuthState(ctx context.Context, arg CreateOAuthStatePara
 		arg.CodeVerifier,
 	)
 	return err
-}
-
-const createSubscription = `-- name: CreateSubscription :one
-INSERT INTO subscriptions (store_id, integration_id, external_subscription_id, status, current_period_start, current_period_end)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, store_id, integration_id, external_subscription_id, status, current_period_start, current_period_end, cancelled_at, created_at
-`
-
-type CreateSubscriptionParams struct {
-	StoreID                pgtype.UUID        `json:"store_id"`
-	IntegrationID          pgtype.UUID        `json:"integration_id"`
-	ExternalSubscriptionID pgtype.Text        `json:"external_subscription_id"`
-	Status                 string             `json:"status"`
-	CurrentPeriodStart     pgtype.Timestamptz `json:"current_period_start"`
-	CurrentPeriodEnd       pgtype.Timestamptz `json:"current_period_end"`
-}
-
-func (q *Queries) CreateSubscription(ctx context.Context, arg CreateSubscriptionParams) (Subscription, error) {
-	row := q.db.QueryRow(ctx, createSubscription,
-		arg.StoreID,
-		arg.IntegrationID,
-		arg.ExternalSubscriptionID,
-		arg.Status,
-		arg.CurrentPeriodStart,
-		arg.CurrentPeriodEnd,
-	)
-	var i Subscription
-	err := row.Scan(
-		&i.ID,
-		&i.StoreID,
-		&i.IntegrationID,
-		&i.ExternalSubscriptionID,
-		&i.Status,
-		&i.CurrentPeriodStart,
-		&i.CurrentPeriodEnd,
-		&i.CancelledAt,
-		&i.CreatedAt,
-	)
-	return i, err
 }
 
 const createWebhookEvent = `-- name: CreateWebhookEvent :one
@@ -336,34 +300,6 @@ func (q *Queries) GetActiveIntegrationByProvider(ctx context.Context, arg GetAct
 		&i.Credentials,
 		&i.Metadata,
 		&i.Priority,
-	)
-	return i, err
-}
-
-const getActiveSubscription = `-- name: GetActiveSubscription :one
-
-SELECT id, store_id, integration_id, external_subscription_id, status, current_period_start, current_period_end, cancelled_at, created_at FROM subscriptions
-WHERE store_id = $1 AND status IN ('active', 'trialing')
-ORDER BY created_at DESC
-LIMIT 1
-`
-
-// =============================================================================
-// SUBSCRIPTIONS
-// =============================================================================
-func (q *Queries) GetActiveSubscription(ctx context.Context, storeID pgtype.UUID) (Subscription, error) {
-	row := q.db.QueryRow(ctx, getActiveSubscription, storeID)
-	var i Subscription
-	err := row.Scan(
-		&i.ID,
-		&i.StoreID,
-		&i.IntegrationID,
-		&i.ExternalSubscriptionID,
-		&i.Status,
-		&i.CurrentPeriodStart,
-		&i.CurrentPeriodEnd,
-		&i.CancelledAt,
-		&i.CreatedAt,
 	)
 	return i, err
 }
@@ -927,22 +863,5 @@ type UpdateIntegrationStatusParams struct {
 
 func (q *Queries) UpdateIntegrationStatus(ctx context.Context, arg UpdateIntegrationStatusParams) error {
 	_, err := q.db.Exec(ctx, updateIntegrationStatus, arg.ID, arg.Status)
-	return err
-}
-
-const updateSubscriptionStatus = `-- name: UpdateSubscriptionStatus :exec
-UPDATE subscriptions
-SET status = $2, cancelled_at = $3
-WHERE id = $1
-`
-
-type UpdateSubscriptionStatusParams struct {
-	ID          pgtype.UUID        `json:"id"`
-	Status      string             `json:"status"`
-	CancelledAt pgtype.Timestamptz `json:"cancelled_at"`
-}
-
-func (q *Queries) UpdateSubscriptionStatus(ctx context.Context, arg UpdateSubscriptionStatusParams) error {
-	_, err := q.db.Exec(ctx, updateSubscriptionStatus, arg.ID, arg.Status, arg.CancelledAt)
 	return err
 }

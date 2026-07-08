@@ -2,13 +2,15 @@ package user
 
 import (
 	"context"
+	"livecart/apps/api/internal/billing"
 
 	"go.uber.org/zap"
 )
 
 type Service struct {
-	repo   *Repository
-	logger *zap.Logger
+	repo    *Repository
+	logger  *zap.Logger
+	billing *billing.Service // optional — paywall state no sync (PRD 007)
 }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {
@@ -16,6 +18,11 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 		repo:   repo,
 		logger: logger.Named("user"),
 	}
+}
+
+// SetBilling wires the billing service for subscription state on sync.
+func (s *Service) SetBilling(b *billing.Service) {
+	s.billing = b
 }
 
 // SyncUser creates/updates user and returns the single membership (1 user = 1 store)
@@ -62,14 +69,29 @@ func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserO
 		}
 	}
 
+	// Paywall state (PRD 007): lazy-ensure garante trial para lojas criadas
+	// antes do billing existir e cobre falhas transitórias do onboarding.
+	var subscription *billing.SubscriptionState
+	if s.billing != nil && membershipOutput != nil {
+		if sub, err := s.billing.EnsureTrialSubscription(ctx, membershipOutput.StoreID, membershipOutput.StoreName, user.Email); err == nil {
+			subscription = sub
+		} else {
+			s.logger.Warn("failed to resolve subscription state on sync",
+				zap.String("store_id", membershipOutput.StoreID),
+				zap.Error(err),
+			)
+		}
+	}
+
 	return &SyncUserOutput{
-		UserID:      user.ID,
-		ClerkUserID: user.ClerkID,
-		Email:       user.Email,
-		Name:        user.Name,
-		AvatarURL:   user.AvatarURL,
-		Membership:  membershipOutput,
-		State:       state,
+		UserID:       user.ID,
+		ClerkUserID:  user.ClerkID,
+		Email:        user.Email,
+		Name:         user.Name,
+		AvatarURL:    user.AvatarURL,
+		Membership:   membershipOutput,
+		State:        state,
+		Subscription: subscription,
 	}, nil
 }
 

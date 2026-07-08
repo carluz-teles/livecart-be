@@ -148,25 +148,8 @@ WHERE integration_id = $1
 ORDER BY created_at DESC
 LIMIT $2 OFFSET $3;
 
--- =============================================================================
--- SUBSCRIPTIONS
--- =============================================================================
-
--- name: GetActiveSubscription :one
-SELECT * FROM subscriptions
-WHERE store_id = $1 AND status IN ('active', 'trialing')
-ORDER BY created_at DESC
-LIMIT 1;
-
--- name: CreateSubscription :one
-INSERT INTO subscriptions (store_id, integration_id, external_subscription_id, status, current_period_start, current_period_end)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING *;
-
--- name: UpdateSubscriptionStatus :exec
-UPDATE subscriptions
-SET status = $2, cancelled_at = $3
-WHERE id = $1;
+-- (Queries de subscriptions migraram para db/queries/subscription.sql na
+-- remodelagem do billing via Stripe — PRD 007, migration 000076.)
 
 -- =============================================================================
 -- OAUTH STATES (PKCE)

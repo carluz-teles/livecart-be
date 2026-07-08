@@ -6,6 +6,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/billing"
 	"livecart/apps/api/lib/httpx"
 )
 
@@ -25,7 +26,14 @@ type Service struct {
 	repo              *Repository
 	membershipCreator MembershipCreator
 	userLookup        UserLookup
+	billing           *billing.Service // optional — starts the 7-day trial (PRD 007)
 	logger            *zap.Logger
+}
+
+// SetBilling wires the billing service (optional; store creation degrades to
+// no-trial when absent, and /users/sync lazily ensures it later).
+func (s *Service) SetBilling(b *billing.Service) {
+	s.billing = b
 }
 
 func NewService(repo *Repository, membershipCreator MembershipCreator, userLookup UserLookup, logger *zap.Logger) *Service {
@@ -80,6 +88,17 @@ func (s *Service) Create(ctx context.Context, input CreateStoreInput) (CreateSto
 	if err != nil {
 		s.logger.Error("failed to create owner membership", zap.Error(err), zap.String("store_id", storeRow.ID))
 		return CreateStoreOutput{}, fmt.Errorf("creating owner membership: %w", err)
+	}
+
+	// 6. Start the 7-day cardless trial (PRD 007). Non-fatal: /users/sync
+	// lazily retries, so a Stripe hiccup never blocks onboarding.
+	if s.billing != nil {
+		if _, err := s.billing.EnsureTrialSubscription(ctx, storeRow.ID, storeRow.Name, ""); err != nil {
+			s.logger.Warn("trial provisioning failed at store creation",
+				zap.String("store_id", storeRow.ID),
+				zap.Error(err),
+			)
+		}
 	}
 
 	s.logger.Info("store created successfully",

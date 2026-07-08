@@ -50,6 +50,18 @@ const (
 	TwilioAccountSID Key = "TWILIO_ACCOUNT_SID" // Master account SID (Console -> Account Info)
 	TwilioAuthToken  Key = "TWILIO_AUTH_TOKEN"  // Master auth token — also signs webhook validation
 
+	// Stripe (paywall/assinaturas — PRD 007)
+	StripeSecretKey     Key = "STRIPE_SECRET_KEY"     // sk_test_/sk_live_
+	StripeWebhookSecret Key = "STRIPE_WEBHOOK_SECRET" // whsec_ do endpoint /api/webhooks/stripe
+
+	StripePriceStartFlat    Key = "STRIPE_PRICE_START_FLAT"
+	StripePriceStartMetered Key = "STRIPE_PRICE_START_METERED"
+	StripePriceGrowFlat     Key = "STRIPE_PRICE_GROW_FLAT"
+	StripePriceGrowMetered  Key = "STRIPE_PRICE_GROW_METERED"
+	StripePriceScaleFlat    Key = "STRIPE_PRICE_SCALE_FLAT"
+	StripePriceScaleMetered Key = "STRIPE_PRICE_SCALE_METERED"
+	StripeGMVMeterEvent     Key = "STRIPE_GMV_METER_EVENT" // default: gmv_cents
+
 	// S3 Storage (supports both standard and Railway naming conventions)
 	S3Bucket   Key = "S3_BUCKET"     // S3 bucket name for uploads
 	S3Endpoint Key = "S3_ENDPOINT"   // Custom S3 endpoint (for Tigris, R2, MinIO, etc.)

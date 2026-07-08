@@ -86,13 +86,14 @@ func (h *Handler) SyncUser(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, SyncUserResponse{
-		UserID:      output.UserID,
-		ClerkUserID: output.ClerkUserID,
-		Email:       output.Email,
-		Name:        output.Name,
-		AvatarURL:   output.AvatarURL,
-		Membership:  membership,
-		State:       output.State,
+		UserID:       output.UserID,
+		ClerkUserID:  output.ClerkUserID,
+		Email:        output.Email,
+		Name:         output.Name,
+		AvatarURL:    output.AvatarURL,
+		Membership:   membership,
+		State:        output.State,
+		Subscription: output.Subscription,
 	})
 }
 
