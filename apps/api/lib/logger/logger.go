@@ -11,7 +11,8 @@ func New() (*zap.Logger, error) {
 	env := os.Getenv("APP_ENV")
 
 	var config zap.Config
-	if env == "production" {
+	// staging usa o mesmo formato estruturado de producao (agregadores de log)
+	if env == "production" || env == "staging" {
 		config = zap.NewProductionConfig()
 		config.EncoderConfig.TimeKey = "ts"
 		config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
