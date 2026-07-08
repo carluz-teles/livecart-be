@@ -166,3 +166,24 @@ Follow-ups conhecidos:
   /api/webhooks/stripe; local: stripe listen --forward-to)
 - Reconciliacao periodica local<->Stripe (hoje so webhooks)
 - Enterprise: fluxo manual documentado, sem UI dedicada
+
+
+---
+
+## 12. Fase 2 — Cobranca manual (decisao jul/2026)
+
+Alguns lojistas preferem nao deixar a cobranca no cartao (limite, fluxo de
+caixa, contabilidade). Mapeamento direto no `collection_method` da Stripe:
+
+- **automatic** (default): `charge_automatically` — cartao salvo, debita na
+  virada. Comportamento atual.
+- **manual** (APENAS mediante solicitacao, flag interna sem toggle
+  self-service): `send_invoice` + `days_until_due=7` — a Stripe envia a
+  fatura hospedada (boleto/PIX/cartao) por e-mail e o lojista paga ativamente.
+  Fatura unica (mensalidade + taxa GMV juntas). Vencida -> past_due ->
+  grace 7d -> paywall (mesma maquina de estados).
+
+Implementacao (~1-2 dias quando solicitado): coluna `collection_mode` na
+tabela subscriptions, aplicacao do collection_method na subscription Stripe,
+branch da conversao sem Checkout no modo manual. Pre-requisito: ativar
+boleto/PIX como payment methods na conta Stripe.
