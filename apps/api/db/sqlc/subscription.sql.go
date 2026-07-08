@@ -48,6 +48,67 @@ func (q *Queries) EnsureTrialSubscription(ctx context.Context, arg EnsureTrialSu
 	return i, err
 }
 
+const getLedgerSaleEntry = `-- name: GetLedgerSaleEntry :one
+SELECT id, store_id, cart_id, entry_type, amount_cents, plan, fee_bps, fee_cents, billable, stripe_ref, created_at FROM billing_ledger_entries WHERE cart_id = $1 AND entry_type = 'sale'
+`
+
+func (q *Queries) GetLedgerSaleEntry(ctx context.Context, cartID pgtype.UUID) (BillingLedgerEntry, error) {
+	row := q.db.QueryRow(ctx, getLedgerSaleEntry, cartID)
+	var i BillingLedgerEntry
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.CartID,
+		&i.EntryType,
+		&i.AmountCents,
+		&i.Plan,
+		&i.FeeBps,
+		&i.FeeCents,
+		&i.Billable,
+		&i.StripeRef,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getLedgerUsageSince = `-- name: GetLedgerUsageSince :one
+SELECT
+  COALESCE(SUM(amount_cents), 0)::bigint                                          AS gmv_cents,
+  COALESCE(SUM(CASE WHEN billable THEN fee_cents ELSE 0 END), 0)::bigint          AS fee_cents,
+  COUNT(*) FILTER (WHERE entry_type = 'sale')::int                                AS sales,
+  COUNT(*) FILTER (WHERE entry_type = 'refund_credit')::int                       AS refunds,
+  COALESCE(SUM(CASE WHEN entry_type = 'refund_credit' AND billable THEN -fee_cents ELSE 0 END), 0)::bigint AS refund_credits_cents
+FROM billing_ledger_entries
+WHERE store_id = $1 AND created_at >= $2
+`
+
+type GetLedgerUsageSinceParams struct {
+	StoreID   pgtype.UUID        `json:"store_id"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type GetLedgerUsageSinceRow struct {
+	GmvCents           int64 `json:"gmv_cents"`
+	FeeCents           int64 `json:"fee_cents"`
+	Sales              int32 `json:"sales"`
+	Refunds            int32 `json:"refunds"`
+	RefundCreditsCents int64 `json:"refund_credits_cents"`
+}
+
+// Resumo do ciclo (somas assinadas): GMV liquido, taxa liquida, contagens.
+func (q *Queries) GetLedgerUsageSince(ctx context.Context, arg GetLedgerUsageSinceParams) (GetLedgerUsageSinceRow, error) {
+	row := q.db.QueryRow(ctx, getLedgerUsageSince, arg.StoreID, arg.CreatedAt)
+	var i GetLedgerUsageSinceRow
+	err := row.Scan(
+		&i.GmvCents,
+		&i.FeeCents,
+		&i.Sales,
+		&i.Refunds,
+		&i.RefundCreditsCents,
+	)
+	return i, err
+}
+
 const getSubscriptionByStoreID = `-- name: GetSubscriptionByStoreID :one
 
 SELECT id, store_id, status, current_period_start, current_period_end, cancelled_at, created_at, stripe_customer_id, stripe_subscription_id, plan, trial_ends_at, cancel_at_period_end, grace_until, manual_override, updated_at FROM subscriptions WHERE store_id = $1
@@ -131,6 +192,137 @@ func (q *Queries) GetSubscriptionByStripeSubID(ctx context.Context, stripeSubscr
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const insertLedgerEntry = `-- name: InsertLedgerEntry :one
+
+INSERT INTO billing_ledger_entries (store_id, cart_id, entry_type, amount_cents, plan, fee_bps, fee_cents, billable, stripe_ref)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (cart_id, entry_type) DO NOTHING
+RETURNING id, store_id, cart_id, entry_type, amount_cents, plan, fee_bps, fee_cents, billable, stripe_ref, created_at
+`
+
+type InsertLedgerEntryParams struct {
+	StoreID     pgtype.UUID `json:"store_id"`
+	CartID      pgtype.UUID `json:"cart_id"`
+	EntryType   string      `json:"entry_type"`
+	AmountCents int64       `json:"amount_cents"`
+	Plan        string      `json:"plan"`
+	FeeBps      int32       `json:"fee_bps"`
+	FeeCents    int64       `json:"fee_cents"`
+	Billable    bool        `json:"billable"`
+	StripeRef   pgtype.Text `json:"stripe_ref"`
+}
+
+// =============================================================================
+// GMV LEDGER (append-only — PRD 007)
+// =============================================================================
+// Idempotente por (cart_id, entry_type): retry de webhook nao duplica.
+func (q *Queries) InsertLedgerEntry(ctx context.Context, arg InsertLedgerEntryParams) (BillingLedgerEntry, error) {
+	row := q.db.QueryRow(ctx, insertLedgerEntry,
+		arg.StoreID,
+		arg.CartID,
+		arg.EntryType,
+		arg.AmountCents,
+		arg.Plan,
+		arg.FeeBps,
+		arg.FeeCents,
+		arg.Billable,
+		arg.StripeRef,
+	)
+	var i BillingLedgerEntry
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.CartID,
+		&i.EntryType,
+		&i.AmountCents,
+		&i.Plan,
+		&i.FeeBps,
+		&i.FeeCents,
+		&i.Billable,
+		&i.StripeRef,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const listLedgerEntries = `-- name: ListLedgerEntries :many
+SELECT
+  le.id, le.entry_type, le.amount_cents, le.fee_cents, le.fee_bps, le.billable, le.created_at,
+  le.cart_id,
+  c.platform_handle,
+  c.customer_name
+FROM billing_ledger_entries le
+JOIN carts c ON c.id = le.cart_id
+WHERE le.store_id = $1
+ORDER BY le.created_at DESC
+LIMIT $2 OFFSET $3
+`
+
+type ListLedgerEntriesParams struct {
+	StoreID pgtype.UUID `json:"store_id"`
+	Limit   int32       `json:"limit"`
+	Offset  int32       `json:"offset"`
+}
+
+type ListLedgerEntriesRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	EntryType      string             `json:"entry_type"`
+	AmountCents    int64              `json:"amount_cents"`
+	FeeCents       int64              `json:"fee_cents"`
+	FeeBps         int32              `json:"fee_bps"`
+	Billable       bool               `json:"billable"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	CartID         pgtype.UUID        `json:"cart_id"`
+	PlatformHandle string             `json:"platform_handle"`
+	CustomerName   pgtype.Text        `json:"customer_name"`
+}
+
+// Extrato do lojista, mais recente primeiro, com contexto do pedido.
+func (q *Queries) ListLedgerEntries(ctx context.Context, arg ListLedgerEntriesParams) ([]ListLedgerEntriesRow, error) {
+	rows, err := q.db.Query(ctx, listLedgerEntries, arg.StoreID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListLedgerEntriesRow{}
+	for rows.Next() {
+		var i ListLedgerEntriesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.EntryType,
+			&i.AmountCents,
+			&i.FeeCents,
+			&i.FeeBps,
+			&i.Billable,
+			&i.CreatedAt,
+			&i.CartID,
+			&i.PlatformHandle,
+			&i.CustomerName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const setLedgerEntryStripeRef = `-- name: SetLedgerEntryStripeRef :exec
+UPDATE billing_ledger_entries SET stripe_ref = $2 WHERE id = $1
+`
+
+type SetLedgerEntryStripeRefParams struct {
+	ID        pgtype.UUID `json:"id"`
+	StripeRef pgtype.Text `json:"stripe_ref"`
+}
+
+func (q *Queries) SetLedgerEntryStripeRef(ctx context.Context, arg SetLedgerEntryStripeRefParams) error {
+	_, err := q.db.Exec(ctx, setLedgerEntryStripeRef, arg.ID, arg.StripeRef)
+	return err
 }
 
 const setSubscriptionStripeRefs = `-- name: SetSubscriptionStripeRefs :one

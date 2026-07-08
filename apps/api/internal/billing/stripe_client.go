@@ -438,3 +438,20 @@ func (c *StripeClient) SendMeterEvent(ctx context.Context, eventName, customerID
 	}
 	return nil
 }
+
+// CreateCustomerBalanceCredit adds a negative balance transaction — Stripe
+// automatically deducts it from the customer's next finalized invoice. Used
+// to reimburse the GMV fee when a sale is refunded (PRD 007 §refunds), which
+// also covers cross-cycle refunds (sale billed on cycle 1, refunded on
+// cycle 2 → credit lands on cycle 2's invoice).
+func (c *StripeClient) CreateCustomerBalanceCredit(ctx context.Context, customerID string, amountCents int64, description string) error {
+	form := url.Values{}
+	form.Set("amount", strconv.FormatInt(-amountCents, 10)) // negativo = crédito
+	form.Set("currency", "brl")
+	form.Set("description", description)
+
+	if err := c.do(ctx, http.MethodPost, "/customers/"+customerID+"/balance_transactions", form, nil); err != nil {
+		return fmt.Errorf("creating balance credit: %w", err)
+	}
+	return nil
+}

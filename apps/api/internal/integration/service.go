@@ -111,6 +111,9 @@ func (s *Service) SetStorage(c *storage.S3Client) {
 // to keep the packages decoupled.
 type BillingGate interface {
 	IsStoreBlocked(ctx context.Context, storeID string) bool
+	// OnCartRefunded registra o estorno no ledger e devolve a taxa cobrada
+	// (credito na proxima fatura) — cobre estorno em ciclo posterior.
+	OnCartRefunded(ctx context.Context, storeID, cartID string)
 }
 
 // SetBillingGate wires the paywall gate (optional — absent means no gating).
@@ -3349,6 +3352,12 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 				)
 			}
 		}
+	}
+
+	// PRD 007: estorno/chargeback devolve a taxa de sucesso da venda no
+	// ledger + credito de saldo Stripe (fire-and-forget).
+	if cartPaymentStatus == "refunded" && s.billingGate != nil {
+		s.billingGate.OnCartRefunded(ctx, input.StoreID, status.ExternalReference)
 	}
 
 	// Only the paid path triggers the ERP finalization. Everything else (failed,

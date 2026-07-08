@@ -10,6 +10,20 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type BillingLedgerEntry struct {
+	ID          pgtype.UUID        `json:"id"`
+	StoreID     pgtype.UUID        `json:"store_id"`
+	CartID      pgtype.UUID        `json:"cart_id"`
+	EntryType   string             `json:"entry_type"`
+	AmountCents int64              `json:"amount_cents"`
+	Plan        string             `json:"plan"`
+	FeeBps      int32              `json:"fee_bps"`
+	FeeCents    int64              `json:"fee_cents"`
+	Billable    bool               `json:"billable"`
+	StripeRef   pgtype.Text        `json:"stripe_ref"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type BlockedHandle struct {
 	ID                pgtype.UUID        `json:"id"`
 	StoreID           pgtype.UUID        `json:"store_id"`

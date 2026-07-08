@@ -478,42 +478,245 @@ func (s *Service) ChangePlan(ctx context.Context, storeID string, target Plan) (
 }
 
 // =============================================================================
-// GMV METERING (Sprint 4)
+// LEDGER DE GMV (append-only) + METERING (PRD 007)
 // =============================================================================
 
-// ReportPaidGMV sends the paid-cart GMV to the Stripe meter. Fire-and-forget
-// semantics: failures are logged, never propagated (billing telemetry must
-// not affect the payment flow). During the trial there is no metered item on
-// the subscription, so reported events simply aren't billed — correct, the
-// trial is free.
+// ReportPaidGMV records the paid sale on the local ledger (source of truth
+// for the merchant's Financeiro and platform GMV) and reports it to the
+// Stripe meter. Fire-and-forget: failures are logged, never propagated.
+//
+// Idempotent end to end: the ledger has UNIQUE (cart_id, 'sale') and the
+// meter event carries identifier gmv-<cart_id>.
 func (s *Service) ReportPaidGMV(ctx context.Context, storeID, cartID string, amountCents int64) {
-	if s.stripe == nil || amountCents <= 0 {
+	if amountCents <= 0 {
 		return
 	}
 	sid, err := parseUUID(storeID)
 	if err != nil {
 		return
 	}
-	row, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
-	if err != nil || !row.StripeCustomerID.Valid {
-		s.logger.Debug("gmv not reported: no stripe customer",
-			zap.String("store_id", storeID))
+	cid, err := parseUUID(cartID)
+	if err != nil {
 		return
 	}
 
-	event := config.StripeGMVMeterEvent.StringOr("gmv_cents")
-	if err := s.stripe.SendMeterEvent(ctx, event, row.StripeCustomerID.String, "gmv-"+cartID, amountCents); err != nil {
-		s.logger.Warn("failed to report gmv meter event",
-			zap.String("store_id", storeID),
-			zap.String("cart_id", cartID),
-			zap.Int64("amount_cents", amountCents),
-			zap.Error(err),
-		)
+	sub, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
+	if err != nil {
+		s.logger.Warn("gmv not recorded: no subscription row",
+			zap.String("store_id", storeID), zap.Error(err))
 		return
 	}
-	s.logger.Info("gmv reported to stripe meter",
+
+	cfg := Plans()[Plan(sub.Plan)]
+	// billable = a taxa deste ciclo sera cobrada (assinatura convertida).
+	// Trial/paused/etc: registramos a venda para visibilidade, com fee
+	// snapshot, mas billable=false (estorno nao gera credito).
+	billable := sub.Status == StatusActive || sub.Status == StatusPastDue
+	feeCents := amountCents * int64(cfg.GMVBps) / 10000
+
+	entry, err := s.queries.InsertLedgerEntry(ctx, sqlc.InsertLedgerEntryParams{
+		StoreID:     sid,
+		CartID:      cid,
+		EntryType:   "sale",
+		AmountCents: amountCents,
+		Plan:        sub.Plan,
+		FeeBps:      int32(cfg.GMVBps),
+		FeeCents:    feeCents,
+		Billable:    billable,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return // conflito (cart_id, sale) — ja registrado, retry de webhook
+		}
+		s.logger.Error("failed to record gmv ledger entry",
+			zap.String("cart_id", cartID), zap.Error(err))
+		return
+	}
+
+	// Meter na Stripe (melhor esforco; a linha do ledger fica sem stripe_ref
+	// quando falha — visivel para reconciliacao).
+	if s.stripe != nil && sub.StripeCustomerID.Valid {
+		event := config.StripeGMVMeterEvent.StringOr("gmv_cents")
+		if err := s.stripe.SendMeterEvent(ctx, event, sub.StripeCustomerID.String, "gmv-"+cartID, amountCents); err != nil {
+			s.logger.Warn("failed to report gmv meter event",
+				zap.String("cart_id", cartID), zap.Error(err))
+		} else {
+			_ = s.queries.SetLedgerEntryStripeRef(ctx, sqlc.SetLedgerEntryStripeRefParams{
+				ID:        entry.ID,
+				StripeRef: pgtype.Text{String: "meter:gmv-" + cartID, Valid: true},
+			})
+		}
+	}
+
+	s.logger.Info("gmv sale recorded",
 		zap.String("store_id", storeID),
 		zap.String("cart_id", cartID),
 		zap.Int64("amount_cents", amountCents),
+		zap.Bool("billable", billable),
 	)
+}
+
+// OnCartRefunded records the refund on the ledger and reimburses the fee via
+// a Stripe customer-balance credit — at the bps charged ON THE SALE, even
+// when the refund lands on a later billing cycle (the credit auto-applies to
+// the next invoice). Trial sales (billable=false) record the entry for
+// visibility but credit nothing (no fee was ever charged).
+func (s *Service) OnCartRefunded(ctx context.Context, storeID, cartID string) {
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return
+	}
+	cid, err := parseUUID(cartID)
+	if err != nil {
+		return
+	}
+
+	sale, err := s.queries.GetLedgerSaleEntry(ctx, cid)
+	if err != nil {
+		s.logger.Debug("refund without a recorded sale — ignored",
+			zap.String("cart_id", cartID))
+		return
+	}
+
+	feeCredit := int64(0)
+	if sale.Billable {
+		feeCredit = sale.FeeCents
+	}
+
+	entry, err := s.queries.InsertLedgerEntry(ctx, sqlc.InsertLedgerEntryParams{
+		StoreID:     sid,
+		CartID:      cid,
+		EntryType:   "refund_credit",
+		AmountCents: -sale.AmountCents,
+		Plan:        sale.Plan,
+		FeeBps:      sale.FeeBps,
+		FeeCents:    -feeCredit,
+		Billable:    sale.Billable,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return // estorno ja registrado (retry de webhook)
+		}
+		s.logger.Error("failed to record refund ledger entry",
+			zap.String("cart_id", cartID), zap.Error(err))
+		return
+	}
+
+	if feeCredit > 0 && s.stripe != nil {
+		sub, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
+		if err == nil && sub.StripeCustomerID.Valid {
+			desc := fmt.Sprintf("Estorno de venda — devolução da taxa (%.2f%% de R$ %.2f)",
+				float64(sale.FeeBps)/100, float64(sale.AmountCents)/100)
+			if err := s.stripe.CreateCustomerBalanceCredit(ctx, sub.StripeCustomerID.String, feeCredit, desc); err != nil {
+				s.logger.Error("failed to create refund balance credit",
+					zap.String("cart_id", cartID), zap.Error(err))
+			} else {
+				_ = s.queries.SetLedgerEntryStripeRef(ctx, sqlc.SetLedgerEntryStripeRefParams{
+					ID:        entry.ID,
+					StripeRef: pgtype.Text{String: "balance_credit", Valid: true},
+				})
+				s.logger.Info("refund fee credited",
+					zap.String("store_id", storeID),
+					zap.String("cart_id", cartID),
+					zap.Int64("credit_cents", feeCredit),
+				)
+			}
+		}
+	}
+}
+
+// =============================================================================
+// FINANCEIRO (usage + extrato)
+// =============================================================================
+
+// PeriodUsage resumes the current billing cycle for the Financeiro hero.
+type PeriodUsage struct {
+	PeriodStart        time.Time `json:"periodStart"`
+	GMVCents           int64     `json:"gmvCents"`
+	FeeCents           int64     `json:"feeCents"`
+	Sales              int32     `json:"sales"`
+	Refunds            int32     `json:"refunds"`
+	RefundCreditsCents int64     `json:"refundCreditsCents"`
+}
+
+// GetUsage returns the ledger summary for the store's current cycle
+// (falls back to the last 30 days when no period anchor exists).
+func (s *Service) GetUsage(ctx context.Context, storeID string) (*PeriodUsage, error) {
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	since := time.Now().Add(-30 * 24 * time.Hour)
+	if sub, err := s.queries.GetSubscriptionByStoreID(ctx, sid); err == nil && sub.CurrentPeriodStart.Valid {
+		since = sub.CurrentPeriodStart.Time
+	}
+
+	row, err := s.queries.GetLedgerUsageSince(ctx, sqlc.GetLedgerUsageSinceParams{
+		StoreID:   sid,
+		CreatedAt: pgtype.Timestamptz{Time: since, Valid: true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("loading ledger usage: %w", err)
+	}
+	return &PeriodUsage{
+		PeriodStart:        since,
+		GMVCents:           row.GmvCents,
+		FeeCents:           row.FeeCents,
+		Sales:              row.Sales,
+		Refunds:            row.Refunds,
+		RefundCreditsCents: row.RefundCreditsCents,
+	}, nil
+}
+
+// StatementEntry is one extrato line for the merchant.
+type StatementEntry struct {
+	ID           string    `json:"id"`
+	Type         string    `json:"type"` // sale | refund_credit | adjustment
+	AmountCents  int64     `json:"amountCents"`
+	FeeCents     int64     `json:"feeCents"`
+	FeeBps       int32     `json:"feeBps"`
+	Billable     bool      `json:"billable"`
+	CustomerName string    `json:"customerName,omitempty"`
+	Handle       string    `json:"handle,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
+// GetStatement returns the paginated extrato (most recent first).
+func (s *Service) GetStatement(ctx context.Context, storeID string, page, limit int) ([]StatementEntry, error) {
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 30
+	}
+	if page < 1 {
+		page = 1
+	}
+
+	rows, err := s.queries.ListLedgerEntries(ctx, sqlc.ListLedgerEntriesParams{
+		StoreID: sid,
+		Limit:   int32(limit),
+		Offset:  int32((page - 1) * limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("loading statement: %w", err)
+	}
+
+	entries := make([]StatementEntry, len(rows))
+	for i, r := range rows {
+		entries[i] = StatementEntry{
+			ID:           uuidToString(r.ID),
+			Type:         r.EntryType,
+			AmountCents:  r.AmountCents,
+			FeeCents:     r.FeeCents,
+			FeeBps:       r.FeeBps,
+			Billable:     r.Billable,
+			CustomerName: r.CustomerName.String,
+			Handle:       r.PlatformHandle,
+			CreatedAt:    r.CreatedAt.Time,
+		}
+	}
+	return entries, nil
 }

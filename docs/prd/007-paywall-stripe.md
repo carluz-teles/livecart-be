@@ -187,3 +187,33 @@ Implementacao (~1-2 dias quando solicitado): coluna `collection_mode` na
 tabela subscriptions, aplicacao do collection_method na subscription Stripe,
 branch da conversao sem Checkout no modo manual. Pre-requisito: ativar
 boleto/PIX como payment methods na conta Stripe.
+
+
+---
+
+## 13. Ledger Financeiro de GMV (append-only) — decisao jul/2026
+
+Tabela `billing_ledger_entries` (migration 000082), append-only: cada pedido
+pago gera uma entrada `sale` (+valor, +taxa, snapshot de plano/bps/billable);
+estorno gera `refund_credit` (−valor, −taxa) — nada e editado, trilha de
+auditoria completa.
+
+Papeis do ledger:
+1. Billing: transparencia da taxa + estorno devolvido na taxa DA VENDA (mesmo
+   em ciclo posterior, via credito de Customer Balance que abate a proxima
+   fatura)
+2. Lojista: pagina FINANCEIRO (menu principal) — hero com vendas do ciclo,
+   "gerado pelo LiveCart" (ROI/receita recuperada) e composicao da proxima
+   fatura + extrato linha a linha
+3. Plataforma: GMV/take-rate por loja direto do ledger
+4. Reconciliacao: stripe_ref por entrada; linha sem ref = pendencia visivel
+
+Framing de produto (anti-"prejuizo"): vendas como numero-heroi, "taxa de
+sucesso" como vocabulario, ROI justaposto, estorno celebrado ("taxa devolvida
+automaticamente"), composicao da fatura antes de cobrar. Paginas separadas:
+Settings > Plano e cobranca (config da assinatura) vs Financeiro (dinheiro do
+lojista); fusao com o Dashboard avaliada depois.
+
+Regras: venda em trial = billable=false (estorno nao credita, taxa nunca foi
+cobrada); teto de 1 estorno por carrinho (parcial e follow-up); meter Stripe
+permanece bruto — o acerto financeiro e via credito.

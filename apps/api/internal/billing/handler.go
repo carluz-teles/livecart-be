@@ -26,6 +26,8 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Post("/checkout", h.CreateCheckout)
 	g.Post("/portal", h.CreatePortal)
 	g.Post("/change-plan", h.ChangePlan)
+	g.Get("/usage", h.GetUsage)
+	g.Get("/statement", h.GetStatement)
 }
 
 // GetSubscription returns the paywall/subscription snapshot for the store.
@@ -137,4 +139,41 @@ func (h *Handler) ChangePlan(c *fiber.Ctx) error {
 		return httpx.HandleServiceError(c, err)
 	}
 	return httpx.OK(c, state)
+}
+
+
+// GetUsage returns the current-cycle ledger summary (Financeiro hero).
+// @Summary Get period usage
+// @Tags billing
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Success 200 {object} httpx.Envelope{data=PeriodUsage}
+// @Router /api/v1/stores/{storeId}/billing/usage [get]
+// @Security BearerAuth
+func (h *Handler) GetUsage(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	usage, err := h.service.GetUsage(c.Context(), storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, usage)
+}
+
+// GetStatement returns the paginated merchant extrato.
+// @Summary Get billing statement
+// @Tags billing
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param page query int false "Page" default(1)
+// @Param limit query int false "Limit" default(30)
+// @Success 200 {object} httpx.Envelope{data=[]StatementEntry}
+// @Router /api/v1/stores/{storeId}/billing/statement [get]
+// @Security BearerAuth
+func (h *Handler) GetStatement(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	entries, err := h.service.GetStatement(c.Context(), storeID, c.QueryInt("page", 1), c.QueryInt("limit", 30))
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, entries)
 }
