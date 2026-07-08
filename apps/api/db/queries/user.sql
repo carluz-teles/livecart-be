@@ -268,3 +268,16 @@ WHERE status = 'pending' AND expires_at < now();
 
 -- name: DeleteInvitation :exec
 DELETE FROM store_invitations WHERE store_id = $1 AND id = $2;
+
+-- name: RelinkUserByEmail :one
+-- Instance-migration path: same person, new Clerk instance (new clerk_id,
+-- same email). Relinks the existing row so the old membership/store follows
+-- the new Clerk account. Called by the repo when UpsertUser hits
+-- users_email_key.
+UPDATE users SET
+  clerk_id = $1,
+  name = CASE WHEN sqlc.narg('name')::text IS NULL THEN users.name ELSE sqlc.narg('name') END,
+  avatar_url = CASE WHEN sqlc.narg('avatar_url')::text IS NULL THEN users.avatar_url ELSE sqlc.narg('avatar_url') END,
+  updated_at = now()
+WHERE email = $2
+RETURNING id, clerk_id, email, name, avatar_url, created_at, updated_at;

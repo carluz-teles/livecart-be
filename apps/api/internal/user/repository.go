@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"livecart/apps/api/db/sqlc"
@@ -25,7 +26,12 @@ func NewRepository(q *sqlc.Queries) *Repository {
 // User operations
 // ============================================
 
-// UpsertUser creates or updates a user in the users table
+// UpsertUser creates or updates a user in the users table.
+//
+// Email collision path: quando o clerk_id é novo mas o e-mail já existe
+// (migração de instância do Clerk — mesma pessoa, instância nova), religamos
+// a linha existente ao clerk_id novo em vez de falhar no users_email_key.
+// A membership/loja antiga segue com a conta nova automaticamente.
 func (r *Repository) UpsertUser(ctx context.Context, clerkID, email, name, avatarURL string) (*UserRow, error) {
 	row, err := r.q.UpsertUser(ctx, sqlc.UpsertUserParams{
 		ClerkID:   clerkID,
@@ -34,6 +40,19 @@ func (r *Repository) UpsertUser(ctx context.Context, clerkID, email, name, avata
 		AvatarUrl: pgtype.Text{String: avatarURL, Valid: avatarURL != ""},
 	})
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "users_email_key" {
+			relinked, rerr := r.q.RelinkUserByEmail(ctx, sqlc.RelinkUserByEmailParams{
+				ClerkID:   clerkID,
+				Email:     email,
+				Name:      pgtype.Text{String: name, Valid: name != ""},
+				AvatarUrl: pgtype.Text{String: avatarURL, Valid: avatarURL != ""},
+			})
+			if rerr != nil {
+				return nil, fmt.Errorf("relinking user by email: %w", rerr)
+			}
+			return toUserRow(relinked), nil
+		}
 		return nil, fmt.Errorf("upserting user: %w", err)
 	}
 

@@ -771,6 +771,47 @@ func (q *Queries) ListStoreInvitations(ctx context.Context, storeID pgtype.UUID)
 	return items, nil
 }
 
+const relinkUserByEmail = `-- name: RelinkUserByEmail :one
+UPDATE users SET
+  clerk_id = $1,
+  name = CASE WHEN $3::text IS NULL THEN users.name ELSE $3 END,
+  avatar_url = CASE WHEN $4::text IS NULL THEN users.avatar_url ELSE $4 END,
+  updated_at = now()
+WHERE email = $2
+RETURNING id, clerk_id, email, name, avatar_url, created_at, updated_at
+`
+
+type RelinkUserByEmailParams struct {
+	ClerkID   string      `json:"clerk_id"`
+	Email     string      `json:"email"`
+	Name      pgtype.Text `json:"name"`
+	AvatarUrl pgtype.Text `json:"avatar_url"`
+}
+
+// Instance-migration path: same person, new Clerk instance (new clerk_id,
+// same email). Relinks the existing row so the old membership/store follows
+// the new Clerk account. Called by the repo when UpsertUser hits
+// users_email_key.
+func (q *Queries) RelinkUserByEmail(ctx context.Context, arg RelinkUserByEmailParams) (User, error) {
+	row := q.db.QueryRow(ctx, relinkUserByEmail,
+		arg.ClerkID,
+		arg.Email,
+		arg.Name,
+		arg.AvatarUrl,
+	)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.ClerkID,
+		&i.Email,
+		&i.Name,
+		&i.AvatarUrl,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const revokeInvitation = `-- name: RevokeInvitation :exec
 UPDATE store_invitations
 SET status = 'revoked'
