@@ -61,6 +61,7 @@ const (
 	StripePriceScaleFlat    Key = "STRIPE_PRICE_SCALE_FLAT"
 	StripePriceScaleMetered Key = "STRIPE_PRICE_SCALE_METERED"
 	StripeGMVMeterEvent     Key = "STRIPE_GMV_METER_EVENT" // default: gmv_cents
+	PaywallEnabled          Key = "PAYWALL_ENABLED"        // default false: trial/ledger/meter rodam, mas NADA bloqueia
 
 	// S3 Storage (supports both standard and Railway naming conventions)
 	S3Bucket   Key = "S3_BUCKET"     // S3 bucket name for uploads

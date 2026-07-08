@@ -100,6 +100,10 @@ type SubscriptionState struct {
 	GraceUntil        *time.Time `json:"graceUntil,omitempty"`
 	HasPaymentMethod  bool       `json:"hasPaymentMethod"`
 	Blocked           bool       `json:"blocked"`
+	// Enforced=false: paywall globalmente desativado (PAYWALL_ENABLED) — o
+	// estado continua sendo calculado/exibível, mas nada bloqueia e o FE
+	// esconde banners de pressão.
+	Enforced bool `json:"enforced"`
 }
 
 // blocked computes access denial (PRD 007 §4/§5): manual_override always

@@ -7,6 +7,8 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/config"
 )
 
 // AccessGuard blocks store-scoped requests for stores whose subscription is
@@ -17,6 +19,11 @@ import (
 // merchant down — enforcement resumes on the next healthy request.
 func (s *Service) AccessGuard() fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		// Kill switch global (PAYWALL_ENABLED=false): enforcement desligado,
+		// billing/ledger seguem rodando normalmente.
+		if !config.PaywallEnabled.Bool() {
+			return c.Next()
+		}
 		// The merchant needs these to convert/regularize.
 		if strings.Contains(c.Path(), "/billing") {
 			return c.Next()
@@ -55,6 +62,9 @@ func (s *Service) AccessGuard() fiber.Handler {
 // IsStoreBlocked is the narrow gate used by workers and the comment pipeline
 // (fail-open on errors, consistent with the HTTP guard).
 func (s *Service) IsStoreBlocked(ctx context.Context, storeID string) bool {
+	if !config.PaywallEnabled.Bool() {
+		return false
+	}
 	state, err := s.GetState(ctx, storeID)
 	if err != nil || state == nil {
 		return false

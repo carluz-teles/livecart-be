@@ -160,7 +160,8 @@ func (s *Service) toState(row *sqlc.Subscription) SubscriptionState {
 		t := row.GraceUntil.Time
 		state.GraceUntil = &t
 	}
-	state.Blocked = blocked(row.Status, row.ManualOverride, state.TrialEndsAt, state.GraceUntil, now)
+	state.Enforced = config.PaywallEnabled.Bool()
+	state.Blocked = state.Enforced && blocked(row.Status, row.ManualOverride, state.TrialEndsAt, state.GraceUntil, now)
 	return state
 }
 
