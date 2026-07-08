@@ -99,3 +99,17 @@ s.logger.Info("action completed",
     zap.String("user_id", userID),
 )
 ```
+
+---
+
+## Trabalhando no FRONTEND (livecart-fe) a partir desta sessao
+
+**OBRIGATORIO**: antes de escrever qualquer codigo em `/home/carluz_teles/livecart-fe`,
+ler e seguir `/home/carluz_teles/livecart-fe/.claude/CLAUDE.md`. Regras principais:
+
+- **Camadas: Service → Hook → UI.** Component APENAS renderiza (zero logica de
+  negocio); Hook gerencia estado/efeitos/regras e chama o service; Service faz
+  a comunicacao com APIs (internas ou externas). Component nunca chama service.
+- Server state SEMPRE via React Query (nunca useState+useEffect para fetch).
+- Hooks por dominio em `src/hooks/{dominio}/`; services em `src/services/`.
+- `npm run build` obrigatorio antes de push no FE.
