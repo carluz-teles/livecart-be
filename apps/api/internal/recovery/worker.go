@@ -28,6 +28,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/billing"
 	"livecart/apps/api/internal/integration"
 	"livecart/apps/api/internal/notification"
 	"livecart/apps/api/internal/order"
@@ -49,6 +50,7 @@ type Worker struct {
 	queries      *sqlc.Queries
 	orders       *order.Service
 	integrations *integration.Service
+	billing      *billing.Service // optional paywall gate (PRD 007)
 	logger       *zap.Logger
 	interval     time.Duration
 	limit        int32
@@ -61,6 +63,7 @@ type WorkerConfig struct {
 	Queries      *sqlc.Queries
 	Orders       *order.Service
 	Integrations *integration.Service
+	Billing      *billing.Service
 	Logger       *zap.Logger
 	Interval     time.Duration // default: 5 minutes
 	Limit        int32         // rows per sweep, default: 100
@@ -80,6 +83,7 @@ func NewWorker(cfg WorkerConfig) *Worker {
 		queries:      cfg.Queries,
 		orders:       cfg.Orders,
 		integrations: cfg.Integrations,
+		billing:      cfg.Billing,
 		logger:       cfg.Logger,
 		interval:     interval,
 		limit:        limit,
@@ -134,6 +138,12 @@ func (w *Worker) sweep() {
 		if inQuietHours(now, int(row.QuietHoursStart), int(row.QuietHoursEnd)) {
 			skipped++
 			continue // a later sweep picks it up after the quiet window
+		}
+		// Paywall (PRD 007): no recovery messages for blocked stores. The
+		// cart stays eligible for when the subscription is regularized.
+		if w.billing != nil && w.billing.IsStoreBlocked(ctx, uuidString(row.StoreID)) {
+			skipped++
+			continue
 		}
 		if err := w.processCart(ctx, row); err != nil {
 			w.logger.Warn("cart recovery attempt failed",

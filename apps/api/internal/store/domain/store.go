@@ -83,16 +83,16 @@ func Reconstruct(
 // Getters (immutable access)
 // ============================================
 
-func (s *Store) ID() vo.StoreID          { return s.id }
-func (s *Store) Name() string            { return s.name }
-func (s *Store) Slug() Slug              { return s.slug }
-func (s *Store) Active() bool            { return s.active }
-func (s *Store) WhatsappNumber() *string { return s.whatsappNumber }
-func (s *Store) EmailAddress() *string   { return s.emailAddress }
-func (s *Store) SMSNumber() *string      { return s.smsNumber }
+func (s *Store) ID() vo.StoreID             { return s.id }
+func (s *Store) Name() string               { return s.name }
+func (s *Store) Slug() Slug                 { return s.slug }
+func (s *Store) Active() bool               { return s.active }
+func (s *Store) WhatsappNumber() *string    { return s.whatsappNumber }
+func (s *Store) EmailAddress() *string      { return s.emailAddress }
+func (s *Store) SMSNumber() *string         { return s.smsNumber }
 func (s *Store) CartSettings() CartSettings { return s.cartSettings }
-func (s *Store) CreatedAt() time.Time    { return s.createdAt }
-func (s *Store) UpdatedAt() time.Time    { return s.updatedAt }
+func (s *Store) CreatedAt() time.Time       { return s.createdAt }
+func (s *Store) UpdatedAt() time.Time       { return s.updatedAt }
 
 // ============================================
 // Business Rules

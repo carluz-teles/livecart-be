@@ -399,6 +399,8 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			notificationSvc.SetEmailSender(emailClient)
 			// PRD 006: reminder fallback IG -> WhatsApp
 			notificationSvc.SetWhatsAppSender(integrationSvc)
+			// PRD 007: paywall gate — lojas bloqueadas param de criar carrinhos
+			integrationSvc.SetBillingGate(billingSvc)
 			integrationSvc.SetNotificationService(notificationSvc)
 
 			// Customer-facing post-payment flow (tracking token + receipt
@@ -530,6 +532,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// Store-scoped routes (require store access validation)
 	storeScoped := api.Group("/stores/:storeId")
 	storeScoped.Use(httpx.StoreAccessMiddleware(userRepo))
+	// Paywall (PRD 007): 402 para lojas com assinatura bloqueada; endpoints
+	// de billing ficam na allowlist para o lojista conseguir regularizar.
+	storeScoped.Use(billingSvc.AccessGuard())
+	billingHandler := billing.NewHandler(billingSvc, validate)
+	billingHandler.RegisterRoutes(storeScoped)
 
 	// Store cart settings (store-scoped)
 	storeHandler.RegisterStoreScopedRoutes(storeScoped)
@@ -614,6 +621,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			Queries:      queries,
 			Orders:       orderSvc,
 			Integrations: integrationSvc,
+			Billing:      billingSvc,
 			Logger:       log,
 			Interval:     5 * time.Minute,
 			Limit:        100,

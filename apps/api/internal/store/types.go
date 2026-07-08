@@ -7,11 +7,11 @@ import "time"
 // ============================================
 
 type CartSettingsDTO struct {
-	Enabled            bool     `json:"enabled"`
-	ExpirationMinutes  int      `json:"expirationMinutes"`
-	ReserveStock       bool     `json:"reserveStock"`
-	MaxQuantityPerItem int      `json:"maxQuantityPerItem"`
-	AllowEdit          bool     `json:"allowEdit"`
+	Enabled             bool     `json:"enabled"`
+	ExpirationMinutes   int      `json:"expirationMinutes"`
+	ReserveStock        bool     `json:"reserveStock"`
+	MaxQuantityPerItem  int      `json:"maxQuantityPerItem"`
+	AllowEdit           bool     `json:"allowEdit"`
 	CheckoutSendMethods []string `json:"checkoutSendMethods"`
 	// Automatic message settings
 	RealTimeCart              bool `json:"realTimeCart"`
@@ -91,11 +91,11 @@ type UpdateShippingDefaultsRequest struct {
 }
 
 type UpdateCartSettingsRequest struct {
-	Enabled            bool     `json:"enabled"`
-	ExpirationMinutes  int      `json:"expirationMinutes" validate:"gte=5,lte=1440"`
-	ReserveStock       bool     `json:"reserveStock"`
-	MaxQuantityPerItem int      `json:"maxQuantityPerItem" validate:"gte=1"`
-	AllowEdit          bool     `json:"allowEdit"`
+	Enabled             bool     `json:"enabled"`
+	ExpirationMinutes   int      `json:"expirationMinutes" validate:"gte=5,lte=1440"`
+	ReserveStock        bool     `json:"reserveStock"`
+	MaxQuantityPerItem  int      `json:"maxQuantityPerItem" validate:"gte=1"`
+	AllowEdit           bool     `json:"allowEdit"`
 	CheckoutSendMethods []string `json:"checkoutSendMethods"`
 	// Automatic message settings
 	RealTimeCart              bool `json:"realTimeCart"`
@@ -169,12 +169,12 @@ type UpdateShippingDefaultsInput struct {
 }
 
 type UpdateCartSettingsInput struct {
-	StoreID            string
-	Enabled            bool
-	ExpirationMinutes  int
-	ReserveStock       bool
-	MaxQuantityPerItem int
-	AllowEdit          bool
+	StoreID             string
+	Enabled             bool
+	ExpirationMinutes   int
+	ReserveStock        bool
+	MaxQuantityPerItem  int
+	AllowEdit           bool
 	CheckoutSendMethods []string
 	// Automatic message settings
 	RealTimeCart              bool
@@ -242,12 +242,12 @@ type UpdateShippingDefaultsParams struct {
 }
 
 type UpdateCartSettingsParams struct {
-	ID                 string
-	Enabled            bool
-	ExpirationMinutes  int
-	ReserveStock       bool
-	MaxQuantityPerItem int
-	AllowEdit          bool
+	ID                  string
+	Enabled             bool
+	ExpirationMinutes   int
+	ReserveStock        bool
+	MaxQuantityPerItem  int
+	AllowEdit           bool
 	CheckoutSendMethods []string
 	// Automatic message settings
 	RealTimeCart              bool

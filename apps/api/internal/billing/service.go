@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -181,6 +182,16 @@ func (s *Service) ProcessWebhookEvent(ctx context.Context, event *StripeEvent) e
 		}
 		return s.applySubscription(ctx, &sub, event.Type)
 
+	case "checkout.session.completed":
+		var session CheckoutSession
+		if err := json.Unmarshal(event.Data.Object, &session); err != nil {
+			return fmt.Errorf("parsing checkout session: %w", err)
+		}
+		if session.Mode != "setup" {
+			return nil
+		}
+		return s.completeConversion(ctx, &session)
+
 	case "invoice.payment_failed":
 		// Grace handling rides the subscription.updated → past_due event;
 		// logged here for the audit trail.
@@ -294,4 +305,94 @@ func unixToTimestamptz(ts int64) pgtype.Timestamptz {
 		return pgtype.Timestamptz{}
 	}
 	return pgtype.Timestamptz{Time: time.Unix(ts, 0), Valid: true}
+}
+
+// =============================================================================
+// CONVERSION (trial → active) — PRD 007
+// =============================================================================
+
+// CreateConversionCheckout opens a hosted Stripe Checkout (setup mode) where
+// the merchant picks... rather: the plan was picked in our UI; the session
+// collects the card. Conversion completes on the webhook.
+func (s *Service) CreateConversionCheckout(ctx context.Context, storeID string, plan Plan) (string, error) {
+	cfg, ok := Plans()[plan]
+	if !ok || !cfg.SelfService {
+		return "", fmt.Errorf("plano inválido para contratação self-service: %s", plan)
+	}
+	if s.stripe == nil {
+		return "", fmt.Errorf("billing não configurado (STRIPE_SECRET_KEY ausente)")
+	}
+
+	// Garante customer+subscription (lazy — cobre lojas legadas).
+	if _, err := s.EnsureTrialSubscription(ctx, storeID, "", ""); err != nil {
+		return "", err
+	}
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return "", err
+	}
+	row, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
+	if err != nil {
+		return "", fmt.Errorf("loading subscription: %w", err)
+	}
+	if !row.StripeCustomerID.Valid || !row.StripeSubscriptionID.Valid {
+		return "", fmt.Errorf("assinatura Stripe ainda não provisionada — tente novamente em instantes")
+	}
+
+	frontend := strings.TrimRight(config.FrontendURL.String(), "/")
+	session, err := s.stripe.CreateSetupCheckoutSession(ctx,
+		row.StripeCustomerID.String,
+		frontend+"/settings/billing?billing=success",
+		frontend+"/settings/billing?billing=cancelled",
+		map[string]string{
+			"store_id":        storeID,
+			"plan":            string(plan),
+			"subscription_id": row.StripeSubscriptionID.String,
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+	return session.URL, nil
+}
+
+// completeConversion runs on checkout.session.completed (setup mode): grabs
+// the collected card, activates the chosen plan and syncs the local row.
+func (s *Service) completeConversion(ctx context.Context, session *CheckoutSession) error {
+	plan := Plan(session.Metadata["plan"])
+	subID := session.Metadata["subscription_id"]
+	if plan == "" || subID == "" {
+		s.logger.Debug("checkout session without conversion metadata — ignored",
+			zap.String("session", session.ID))
+		return nil
+	}
+	cfg, ok := Plans()[plan]
+	if !ok {
+		return fmt.Errorf("unknown plan in session metadata: %s", plan)
+	}
+
+	paymentMethod, err := s.stripe.GetSetupIntentPaymentMethod(ctx, session.SetupIntent)
+	if err != nil {
+		return err
+	}
+	if paymentMethod == "" {
+		return fmt.Errorf("setup intent %s has no payment method", session.SetupIntent)
+	}
+
+	sub, err := s.stripe.GetSubscription(ctx, subID)
+	if err != nil {
+		return err
+	}
+	activated, err := s.stripe.ActivateSubscription(ctx, sub, cfg, paymentMethod)
+	if err != nil {
+		return err
+	}
+
+	s.logger.Info("subscription converted",
+		zap.String("store_id", session.Metadata["store_id"]),
+		zap.String("plan", string(plan)),
+		zap.String("status", activated.Status),
+	)
+	// Sync imediato (o customer.subscription.updated também chega e é idempotente).
+	return s.applySubscription(ctx, activated, "conversion")
 }

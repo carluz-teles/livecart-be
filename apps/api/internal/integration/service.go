@@ -96,6 +96,7 @@ type Service struct {
 	postCheckoutHook    PostCheckoutHook
 	notificationService *notification.Service
 	storage             *storage.S3Client
+	billingGate         BillingGate
 	logger              *zap.Logger
 }
 
@@ -103,6 +104,18 @@ type Service struct {
 // images after they are published to Instagram).
 func (s *Service) SetStorage(c *storage.S3Client) {
 	s.storage = c
+}
+
+// BillingGate blocks new-cart creation for stores with an inactive
+// subscription (PRD 007). Implemented by billing.Service; narrow interface
+// to keep the packages decoupled.
+type BillingGate interface {
+	IsStoreBlocked(ctx context.Context, storeID string) bool
+}
+
+// SetBillingGate wires the paywall gate (optional — absent means no gating).
+func (s *Service) SetBillingGate(gate BillingGate) {
+	s.billingGate = gate
 }
 
 // NewService creates a new integration service.
@@ -3955,6 +3968,16 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	if event == nil {
 		s.logger.Warn("no active live event found for media_id",
 			zap.String("media_id", input.MediaID),
+		)
+		return nil
+	}
+
+	// Paywall (PRD 007): blocked stores stop creating carts from comments.
+	// Existing checkouts and payment webhooks keep working elsewhere.
+	if s.billingGate != nil && s.billingGate.IsStoreBlocked(ctx, event.StoreID) {
+		s.logger.Info("comment ignored: store subscription blocked",
+			zap.String("store_id", event.StoreID),
+			zap.String("comment_id", input.CommentID),
 		)
 		return nil
 	}

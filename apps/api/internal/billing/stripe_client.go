@@ -235,3 +235,82 @@ func (c *StripeClient) do(ctx context.Context, method, path string, form url.Val
 	}
 	return nil
 }
+
+// =============================================================================
+// CONVERSION (trial → active)
+// =============================================================================
+
+// CheckoutSession is the subset of the session resource we consume.
+type CheckoutSession struct {
+	ID          string            `json:"id"`
+	URL         string            `json:"url"`
+	Mode        string            `json:"mode"`
+	Customer    string            `json:"customer"`
+	Metadata    map[string]string `json:"metadata"`
+	SetupIntent string            `json:"setup_intent"`
+}
+
+// CreateSetupCheckoutSession opens a hosted Checkout that collects a payment
+// method for an existing (trialing/paused) subscription. Conversion itself
+// happens on the checkout.session.completed webhook.
+func (c *StripeClient) CreateSetupCheckoutSession(ctx context.Context, customerID, successURL, cancelURL string, metadata map[string]string) (*CheckoutSession, error) {
+	form := url.Values{}
+	form.Set("mode", "setup")
+	form.Set("customer", customerID)
+	form.Set("currency", "brl")
+	form.Set("success_url", successURL)
+	form.Set("cancel_url", cancelURL)
+	for k, v := range metadata {
+		form.Set("metadata["+k+"]", v)
+	}
+
+	var out CheckoutSession
+	if err := c.do(ctx, http.MethodPost, "/checkout/sessions", form, &out); err != nil {
+		return nil, fmt.Errorf("creating checkout session: %w", err)
+	}
+	return &out, nil
+}
+
+// GetSetupIntentPaymentMethod resolves the payment method collected by a
+// setup-mode Checkout.
+func (c *StripeClient) GetSetupIntentPaymentMethod(ctx context.Context, setupIntentID string) (string, error) {
+	var out struct {
+		PaymentMethod string `json:"payment_method"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/setup_intents/"+setupIntentID, nil, &out); err != nil {
+		return "", fmt.Errorf("fetching setup intent: %w", err)
+	}
+	return out.PaymentMethod, nil
+}
+
+// ActivateSubscription converts the trial: attaches the payment method, swaps
+// the flat item to the chosen plan, adds the metered GMV item (allowed now —
+// the pause constraint only applies to trials without a card) and ends the
+// trial so the first flat invoice bills immediately.
+func (c *StripeClient) ActivateSubscription(ctx context.Context, sub *StripeSubscription, cfg PlanConfig, paymentMethodID string) (*StripeSubscription, error) {
+	if cfg.FlatPriceID == "" || cfg.MeterPriceID == "" {
+		return nil, fmt.Errorf("plan %s has no stripe price ids configured", cfg.Plan)
+	}
+
+	form := url.Values{}
+	form.Set("default_payment_method", paymentMethodID)
+	form.Set("trial_end", "now")
+	form.Set("proration_behavior", "none")
+	form.Set("payment_behavior", "allow_incomplete")
+
+	// Swap the existing flat item and append the metered one.
+	if len(sub.Items.Data) > 0 {
+		form.Set("items[0][id]", sub.Items.Data[0].ID)
+		form.Set("items[0][price]", cfg.FlatPriceID)
+		form.Set("items[1][price]", cfg.MeterPriceID)
+	} else {
+		form.Set("items[0][price]", cfg.FlatPriceID)
+		form.Set("items[1][price]", cfg.MeterPriceID)
+	}
+
+	var out StripeSubscription
+	if err := c.do(ctx, http.MethodPost, "/subscriptions/"+sub.ID, form, &out); err != nil {
+		return nil, fmt.Errorf("activating subscription: %w", err)
+	}
+	return &out, nil
+}

@@ -9,9 +9,9 @@ import (
 )
 
 type Handler struct {
-	service   *Service
-	validate  *validator.Validate
-	s3Client  *storage.S3Client
+	service  *Service
+	validate *validator.Validate
+	s3Client *storage.S3Client
 }
 
 func NewHandler(service *Service, validate *validator.Validate, s3Client *storage.S3Client) *Handler {

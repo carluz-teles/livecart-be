@@ -4,8 +4,8 @@ import "errors"
 
 // Domain errors for cart settings
 var (
-	ErrInvalidExpirationMinutes    = errors.New("expiration minutes must be 0 or positive")
-	ErrInvalidMaxQuantityPerItem   = errors.New("max quantity per item must be 0 or positive")
+	ErrInvalidExpirationMinutes  = errors.New("expiration minutes must be 0 or positive")
+	ErrInvalidMaxQuantityPerItem = errors.New("max quantity per item must be 0 or positive")
 )
 
 // CartSettings represents the cart configuration for a store.
