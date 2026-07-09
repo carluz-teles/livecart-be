@@ -15,10 +15,13 @@ SET
   name = $2,
   whatsapp_number = $3,
   email_address = $4,
-  sms_number = $5,
-  description = $6,
+  -- COALESCE: a tela de Organizacao nao envia estes 3 campos (logo tem
+  -- endpoint proprio; description/sms nao tem UI) — NULL = "manter o atual".
+  -- Sem isto, salvar o form apagava o logo recem-enviado.
+  sms_number = COALESCE($5, sms_number),
+  description = COALESCE($6, description),
   website = $7,
-  logo_url = $8,
+  logo_url = COALESCE($8, logo_url),
   address_street = $9,
   address_city = $10,
   address_state = $11,
