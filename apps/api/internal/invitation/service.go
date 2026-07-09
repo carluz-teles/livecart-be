@@ -179,11 +179,13 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*Acc
 		return nil, httpx.ErrUnprocessable("user not found - please sync your account first")
 	}
 
-	// NEW: Check if user already has a membership (1 user = 1 store rule)
+	// Check if user already has a membership (1 user = 1 store rule).
+	// FAIL-CLOSED: erro real na consulta aborta o aceite — continuar aqui
+	// pulava a checagem de dono e criava membership indevida.
 	existingMembership, err := s.membershipLookup.GetMembershipByUserID(ctx, userID)
 	if err != nil {
-		s.logger.Debug("error checking existing membership", zap.Error(err), zap.String("user_id", userID))
-		// Continue - no existing membership found
+		s.logger.Error("failed to check existing membership", zap.Error(err), zap.String("user_id", userID))
+		return nil, httpx.ErrInternal("failed to verify your current store membership")
 	}
 
 	if existingMembership != nil {
@@ -196,34 +198,20 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*Acc
 			return nil, httpx.ErrConflict("you are the owner of another store - delete your store first to accept this invitation")
 		}
 
-		// User is a member, remove from previous store
-		s.logger.Info("removing user from previous store to join new one",
+		// User is a member of another store — the swap happens inside the
+		// atomic accept below
+		s.logger.Info("user will be moved from previous store",
 			zap.String("user_id", userID),
 			zap.String("old_store", existingMembership.GetStoreName()),
 			zap.String("new_store", inv.StoreName()),
 		)
-
-		if err := s.membershipLookup.DeleteMembershipByUserID(ctx, userID); err != nil {
-			s.logger.Error("failed to remove user from previous store", zap.Error(err))
-			return nil, httpx.ErrInternal("failed to leave previous store")
-		}
 	}
 
-	// Add user to store membership
-	err = s.repo.AddUserToStore(ctx, inv.StoreID(), userID, inv.Role(), inv.InvitedBy())
-	if err != nil {
-		return nil, err
-	}
-
-	// Mark invitation as accepted
+	// Troca de loja + criação da membership + marcação do convite numa única
+	// transação — nunca mais "membership criada com convite pendente".
 	inv.Accept()
-	err = s.repo.Accept(ctx, inv.ID())
-	if err != nil {
-		s.logger.Error("failed to mark invitation as accepted",
-			zap.Error(err),
-			zap.String("invitation_id", inv.ID().String()),
-		)
-		// Don't fail the operation, user was already added
+	if err := s.repo.AcceptAtomically(ctx, inv.ID(), inv.StoreID(), userID, inv.Role(), inv.InvitedBy(), existingMembership != nil); err != nil {
+		return nil, err
 	}
 
 	s.logger.Info("invitation accepted",

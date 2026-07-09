@@ -656,7 +656,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	memberHandler.RegisterRoutes(storeScoped)
 
 	// Invitation routes
-	invitationRepo := invitation.NewRepository(queries)
+	invitationRepo := invitation.NewRepository(queries, pool)
 	storeLookup := store.NewStoreLookupAdapter(storeSvc)
 	memberLookup := member.NewMemberLookupAdapter(memberRepo)
 	membershipLookup := member.NewMembershipLookupAdapter(memberRepo)

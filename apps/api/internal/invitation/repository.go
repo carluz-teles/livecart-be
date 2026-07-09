@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/invitation/domain"
@@ -16,11 +17,57 @@ import (
 )
 
 type Repository struct {
-	q *sqlc.Queries
+	q    *sqlc.Queries
+	pool *pgxpool.Pool
 }
 
-func NewRepository(q *sqlc.Queries) *Repository {
-	return &Repository{q: q}
+func NewRepository(q *sqlc.Queries, pool *pgxpool.Pool) *Repository {
+	return &Repository{q: q, pool: pool}
+}
+
+// AcceptAtomically executa o aceite como UMA transação: remove a membership
+// anterior (se membro de outra loja), cria a nova e marca o convite como
+// aceito — tudo ou nada. Sem isso, uma falha no meio deixava estados
+// inconsistentes (ex.: membership criada com convite ainda "pending", ou
+// usuário órfão sem loja nenhuma).
+func (r *Repository) AcceptAtomically(ctx context.Context, invID vo.InvitationID, storeID vo.StoreID, userID string, role vo.Role, invitedBy vo.MemberID, removeExisting bool) error {
+	userUID, err := parseUUID(userID)
+	if err != nil {
+		return err
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning accept tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck — rollback após commit é no-op
+
+	qtx := r.q.WithTx(tx)
+
+	if removeExisting {
+		if err := qtx.DeleteMembershipByUserID(ctx, userUID); err != nil {
+			return fmt.Errorf("removing previous membership: %w", err)
+		}
+	}
+
+	if _, err := qtx.CreateMembership(ctx, sqlc.CreateMembershipParams{
+		StoreID:   storeID.ToPgUUID(),
+		UserID:    userUID,
+		Role:      role.String(),
+		InvitedBy: invitedBy.ToPgUUID(),
+		InvitedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	}); err != nil {
+		return fmt.Errorf("creating membership: %w", err)
+	}
+
+	if _, err := qtx.AcceptInvitation(ctx, invID.ToPgUUID()); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return httpx.ErrGone("invitation is no longer pending")
+		}
+		return fmt.Errorf("marking invitation accepted: %w", err)
+	}
+
+	return tx.Commit(ctx)
 }
 
 func (r *Repository) Save(ctx context.Context, inv *domain.Invitation) error {
