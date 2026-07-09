@@ -20,7 +20,7 @@ SET
   -- Sem isto, salvar o form apagava o logo recem-enviado.
   sms_number = COALESCE($5, sms_number),
   description = COALESCE($6, description),
-  website = $7,
+  website = COALESCE($7, website),
   logo_url = COALESCE($8, logo_url),
   address_street = $9,
   address_city = $10,
