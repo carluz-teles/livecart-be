@@ -495,8 +495,21 @@ func vars(s *CartSnapshot, trackingCode, trackingURL string) notification.Templa
 		totalCents = 0
 	}
 
+	formaPagamento := ""
+	if s.Cart.PaymentMethod.Valid {
+		switch s.Cart.PaymentMethod.String {
+		case "pix":
+			formaPagamento = "PIX"
+		case "credit_card", "card":
+			formaPagamento = "Cartão"
+		default:
+			formaPagamento = s.Cart.PaymentMethod.String
+		}
+	}
+
 	return notification.TemplateVariables{
 		Handle:         s.Cart.PlatformHandle,
+		FormaPagamento: formaPagamento,
 		Loja:           s.Store.Name,
 		Total:          fmt.Sprintf("R$ %d,%02d", totalCents/100, totalCents%100),
 		TotalCents:     totalCents,

@@ -46,6 +46,8 @@ type GetSettingsResponse struct {
 	PaymentConfirmed  *EmailTemplateSettingsResponse `json:"payment_confirmed,omitempty"`
 	Shipped           *EmailTemplateSettingsResponse `json:"shipped,omitempty"`
 	Delivered         *EmailTemplateSettingsResponse `json:"delivered,omitempty"`
+	PaymentCancelled  *EmailTemplateSettingsResponse `json:"payment_cancelled,omitempty"`
+	PaymentRefunded   *EmailTemplateSettingsResponse `json:"payment_refunded,omitempty"`
 }
 
 // TemplateSettingsResponse represents template settings in API responses.
@@ -99,6 +101,8 @@ type UpdateSettingsRequest struct {
 	PaymentConfirmed  *UpdateEmailTemplateSettingsRequest `json:"payment_confirmed,omitempty"`
 	Shipped           *UpdateEmailTemplateSettingsRequest `json:"shipped,omitempty"`
 	Delivered         *UpdateEmailTemplateSettingsRequest `json:"delivered,omitempty"`
+	PaymentCancelled  *UpdateEmailTemplateSettingsRequest `json:"payment_cancelled,omitempty"`
+	PaymentRefunded   *UpdateEmailTemplateSettingsRequest `json:"payment_refunded,omitempty"`
 }
 
 // UpdateTemplateSettingsRequest represents template settings in API requests.
@@ -260,6 +264,7 @@ func (h *Handler) GetAvailableVariables(c *fiber.Ctx) error {
 		{Name: "{tracking_code}", Description: "Código de rastreio", Example: sample.TrackingCode},
 		{Name: "{transportadora}", Description: "Transportadora + serviço", Example: sample.Transportadora},
 		{Name: "{link_pedido}", Description: "Link para acompanhar pedido", Example: sample.LinkPedido},
+		{Name: "{forma_pagamento}", Description: "Forma de pagamento (PIX/cartão)", Example: "PIX"},
 	}
 
 	return httpx.OK(c, GetAvailableVariablesResponse{Variables: variables})
@@ -294,6 +299,8 @@ func toSettingsResponse(s *Settings) GetSettingsResponse {
 	resp.PaymentConfirmed = toEmailResponse(s.PaymentConfirmed)
 	resp.Shipped = toEmailResponse(s.Shipped)
 	resp.Delivered = toEmailResponse(s.Delivered)
+	resp.PaymentCancelled = toEmailResponse(s.PaymentCancelled)
+	resp.PaymentRefunded = toEmailResponse(s.PaymentRefunded)
 
 	return resp
 }
@@ -336,6 +343,8 @@ func toSettingsFromRequest(req *UpdateSettingsRequest) Settings {
 	settings.PaymentConfirmed = fromEmailRequest(req.PaymentConfirmed)
 	settings.Shipped = fromEmailRequest(req.Shipped)
 	settings.Delivered = fromEmailRequest(req.Delivered)
+	settings.PaymentCancelled = fromEmailRequest(req.PaymentCancelled)
+	settings.PaymentRefunded = fromEmailRequest(req.PaymentRefunded)
 
 	return settings
 }

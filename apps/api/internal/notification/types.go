@@ -164,6 +164,9 @@ type TemplateVariables struct {
 	ExpiraEm   string // Expiry time (e.g., "48 horas")
 	LiveTitulo string // Event title
 
+	// FormaPagamento: "PIX" / "Cartão" — populada no pós-pagamento.
+	FormaPagamento string
+
 	// Post-payment variables. Empty for cart-flow notifications, populated
 	// by the postcheckout package when sending receipt/shipped/delivered.
 	NumeroPedido  string // Order short_id, formatted as "1234"

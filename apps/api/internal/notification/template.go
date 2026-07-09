@@ -21,6 +21,7 @@ func RenderTemplate(template string, vars TemplateVariables) string {
 		"{expira_em}":      vars.ExpiraEm,
 		"{live_titulo}":    vars.LiveTitulo,
 		"{numero_pedido}":  vars.NumeroPedido,
+		"{forma_pagamento}": vars.FormaPagamento,
 		"{tracking_code}":  vars.TrackingCode,
 		"{transportadora}": vars.Transportadora,
 		"{link_pedido}":    vars.LinkPedido,
