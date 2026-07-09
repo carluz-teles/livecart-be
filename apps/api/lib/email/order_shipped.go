@@ -27,6 +27,9 @@ type OrderShippedEmailInput struct {
 
 	OverrideSubject  string
 	OverrideBodyHTML string
+
+	// Reply-to: e-mail de contato da loja (suporte)
+	ReplyTo string
 }
 
 // SendOrderShipped notifies the customer that the merchant has dispatched the
@@ -68,6 +71,7 @@ func (c *Client) SendOrderShipped(ctx context.Context, input OrderShippedEmailIn
 		Subject:     subject,
 		HTMLContent: htmlContent,
 		TextContent: textContent,
+		ReplyTo:     input.ReplyTo,
 	})
 }
 

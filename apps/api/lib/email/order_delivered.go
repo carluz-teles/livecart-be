@@ -24,6 +24,9 @@ type OrderDeliveredEmailInput struct {
 
 	OverrideSubject  string
 	OverrideBodyHTML string
+
+	// Reply-to: e-mail de contato da loja (suporte)
+	ReplyTo string
 }
 
 func (c *Client) SendOrderDelivered(ctx context.Context, input OrderDeliveredEmailInput) error {
@@ -62,6 +65,7 @@ func (c *Client) SendOrderDelivered(ctx context.Context, input OrderDeliveredEma
 		Subject:     subject,
 		HTMLContent: htmlContent,
 		TextContent: textContent,
+		ReplyTo:     input.ReplyTo,
 	})
 }
 

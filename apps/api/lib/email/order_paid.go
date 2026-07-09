@@ -33,6 +33,9 @@ type OrderPaidEmailInput struct {
 	// (default header/footer stay). Subject overrides the auto-generated one.
 	OverrideSubject  string
 	OverrideBodyHTML string
+
+	// Reply-to: e-mail de contato da loja (suporte)
+	ReplyTo string
 }
 
 // SendOrderPaid sends the "Pagamento confirmado" email. Best-effort: returns
@@ -78,6 +81,7 @@ func (c *Client) SendOrderPaid(ctx context.Context, input OrderPaidEmailInput) e
 		Subject:     subject,
 		HTMLContent: htmlContent,
 		TextContent: textContent,
+		ReplyTo:     input.ReplyTo,
 	})
 }
 

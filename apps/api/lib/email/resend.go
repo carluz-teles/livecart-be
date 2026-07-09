@@ -92,6 +92,9 @@ type SendEmailInput struct {
 	Subject     string
 	HTMLContent string
 	TextContent string
+	// ReplyTo: e-mail de contato da LOJA — respostas do cliente caem direto
+	// no lojista em vez de morrer na caixa do remetente da plataforma.
+	ReplyTo string
 }
 
 // send sends an email via Resend API
@@ -114,6 +117,9 @@ func (c *Client) send(ctx context.Context, input SendEmailInput) error {
 		"subject": input.Subject,
 		"html":    input.HTMLContent,
 		"text":    input.TextContent,
+	}
+	if input.ReplyTo != "" {
+		payload["reply_to"] = input.ReplyTo
 	}
 
 	jsonPayload, err := json.Marshal(payload)

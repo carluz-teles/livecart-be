@@ -226,6 +226,7 @@ func (s *Service) OnDelivered(ctx context.Context, cartID, source string) {
 		ToEmail:      customerEmail,
 		ToName:       customerName,
 		OrderShortID: fmt.Sprintf("%d", snapshot.Cart.ShortID),
+		ReplyTo:      storeReplyTo(snapshot.Store),
 	}
 	s.applyDeliveredOverride(ctx, snapshot, &deliveredInput)
 	if err := s.email.SendOrderDelivered(ctx, deliveredInput); err != nil {
@@ -350,6 +351,7 @@ func buildEmailInput(s *CartSnapshot, trackingToken string) email.OrderPaidEmail
 		ShippingLine:   formatShippingLine(addr),
 		CarrierLine:    carrierLine,
 		TrackingURL:    trackingURL,
+		ReplyTo:        storeReplyTo(s.Store),
 	}
 }
 
@@ -516,6 +518,7 @@ func buildShippedEmailInput(s *CartSnapshot, trackingCode string) email.OrderShi
 		TrackingCode: trackingCode,
 		CarrierLine:  carrierLine,
 		TrackingURL:  trackingURL,
+		ReplyTo:      storeReplyTo(s.Store),
 	}
 }
 
@@ -579,6 +582,16 @@ func itemLineTotalCents(item sqlc.ListCartItemsRow) int64 {
 		price = 0
 	}
 	return qty * price
+}
+
+// storeReplyTo devolve o e-mail de contato da loja para o reply-to dos
+// e-mails transacionais — respostas do cliente caem no lojista, não na
+// caixa da plataforma.
+func storeReplyTo(store sqlc.Store) string {
+	if store.EmailAddress.Valid {
+		return store.EmailAddress.String
+	}
+	return ""
 }
 
 func uuidStr(u pgtype.UUID) string {
