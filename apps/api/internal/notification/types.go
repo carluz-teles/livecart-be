@@ -58,6 +58,8 @@ type Settings struct {
 	PaymentConfirmed  *EmailTemplateSettings `json:"payment_confirmed,omitempty"`
 	Shipped           *EmailTemplateSettings `json:"shipped,omitempty"`
 	Delivered         *EmailTemplateSettings `json:"delivered,omitempty"`
+	PaymentCancelled  *EmailTemplateSettings `json:"payment_cancelled,omitempty"`
+	PaymentRefunded   *EmailTemplateSettings `json:"payment_refunded,omitempty"`
 	// CartRecovery (PRD 006): WhatsApp post-expiration recovery. Must stay in
 	// this struct so UpdateSettings round-trips the JSONB without dropping it.
 	CartRecovery *CartRecoverySettings `json:"cart_recovery,omitempty"`
@@ -128,6 +130,12 @@ func DefaultSettings() Settings {
 			Enabled: true,
 		},
 		Delivered: &EmailTemplateSettings{
+			Enabled: true,
+		},
+		PaymentCancelled: &EmailTemplateSettings{
+			Enabled: true,
+		},
+		PaymentRefunded: &EmailTemplateSettings{
 			Enabled: true,
 		},
 	}

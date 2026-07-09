@@ -95,14 +95,22 @@ type SendEmailInput struct {
 	// ReplyTo: e-mail de contato da LOJA — respostas do cliente caem direto
 	// no lojista em vez de morrer na caixa do remetente da plataforma.
 	ReplyTo string
+	// FromName: display name do remetente (nome da LOJA nos e-mails de
+	// pedido). O ENDEREÇO segue sendo o da plataforma — só o rótulo muda.
+	FromName string
 }
 
 // send sends an email via Resend API
 func (c *Client) send(ctx context.Context, input SendEmailInput) error {
-	// Build the "from" field
+	// Build the "from" field: display name da loja quando fornecido; o
+	// endereço é sempre o da plataforma (domínio autenticado).
+	fromName := c.fromName
+	if input.FromName != "" {
+		fromName = input.FromName
+	}
 	from := c.fromEmail
-	if c.fromName != "" {
-		from = fmt.Sprintf("%s <%s>", c.fromName, c.fromEmail)
+	if fromName != "" {
+		from = fmt.Sprintf("%s <%s>", fromName, c.fromEmail)
 	}
 
 	// Build the "to" field

@@ -72,6 +72,7 @@ func (c *Client) SendOrderShipped(ctx context.Context, input OrderShippedEmailIn
 		HTMLContent: htmlContent,
 		TextContent: textContent,
 		ReplyTo:     input.ReplyTo,
+		FromName:    input.StoreName,
 	})
 }
 

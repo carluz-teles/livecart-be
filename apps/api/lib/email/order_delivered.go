@@ -66,6 +66,7 @@ func (c *Client) SendOrderDelivered(ctx context.Context, input OrderDeliveredEma
 		HTMLContent: htmlContent,
 		TextContent: textContent,
 		ReplyTo:     input.ReplyTo,
+		FromName:    input.StoreName,
 	})
 }
 

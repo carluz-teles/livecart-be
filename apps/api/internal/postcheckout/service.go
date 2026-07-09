@@ -161,6 +161,101 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 	)
 }
 
+// OnCartCancelled sends the "pedido cancelado" email. Exactly-once via the
+// timeline insert (unique cart_id+event_type) — webhook retries are no-ops.
+func (s *Service) OnCartCancelled(ctx context.Context, cartID string) {
+	snapshot, err := s.repo.LoadCart(ctx, cartID)
+	if err != nil || !snapshot.Cart.CustomerEmail.Valid || snapshot.Cart.CustomerEmail.String == "" {
+		return
+	}
+	inserted, err := s.repo.InsertOrderEvent(ctx, cartID, "payment_cancelled", "system", nil)
+	if err != nil || !inserted {
+		return
+	}
+
+	input := email.OrderCancelledEmailInput{
+		StoreName:      snapshot.Store.Name,
+		StoreLogoURL:   storeLogo(snapshot.Store),
+		ToEmail:        snapshot.Cart.CustomerEmail.String,
+		ToName:         customerDisplayName(snapshot),
+		OrderShortID:   fmt.Sprintf("%d", snapshot.Cart.ShortID),
+		TotalFormatted: formatTotal(snapshot),
+		// cancelamento chega quando a cobrança não completou; estorno de
+		// pagamento concluído entra pelo OnCartRefunded
+		WasCharged: false,
+		ReplyTo:    storeReplyTo(snapshot.Store),
+	}
+	s.applyEmailOverride(ctx, snapshot, s.settingsFor(ctx, snapshot, "cancelled"), &input.OverrideSubject, &input.OverrideBodyHTML, "", "")
+
+	if err := s.email.SendOrderCancelled(ctx, input); err != nil {
+		s.logger.Warn("failed to send order cancelled email",
+			zap.String("cart_id", cartID), zap.Error(err))
+	}
+}
+
+// OnCartRefunded sends the "pedido estornado" email (mesma garantia de
+// exactly-once do cancelamento).
+func (s *Service) OnCartRefunded(ctx context.Context, cartID string) {
+	snapshot, err := s.repo.LoadCart(ctx, cartID)
+	if err != nil || !snapshot.Cart.CustomerEmail.Valid || snapshot.Cart.CustomerEmail.String == "" {
+		return
+	}
+	inserted, err := s.repo.InsertOrderEvent(ctx, cartID, "payment_refunded", "system", nil)
+	if err != nil || !inserted {
+		return
+	}
+
+	method := ""
+	if snapshot.Cart.PaymentMethod.Valid {
+		method = snapshot.Cart.PaymentMethod.String
+	}
+	input := email.OrderRefundedEmailInput{
+		StoreName:      snapshot.Store.Name,
+		StoreLogoURL:   storeLogo(snapshot.Store),
+		ToEmail:        snapshot.Cart.CustomerEmail.String,
+		ToName:         customerDisplayName(snapshot),
+		OrderShortID:   fmt.Sprintf("%d", snapshot.Cart.ShortID),
+		TotalFormatted: formatTotal(snapshot),
+		PaymentMethod:  method,
+		ReplyTo:        storeReplyTo(snapshot.Store),
+	}
+	s.applyEmailOverride(ctx, snapshot, s.settingsFor(ctx, snapshot, "refunded"), &input.OverrideSubject, &input.OverrideBodyHTML, "", "")
+
+	if err := s.email.SendOrderRefunded(ctx, input); err != nil {
+		s.logger.Warn("failed to send order refunded email",
+			zap.String("cart_id", cartID), zap.Error(err))
+	}
+}
+
+// settingsFor resolve o override configurado pro tipo de e-mail.
+func (s *Service) settingsFor(ctx context.Context, snap *CartSnapshot, kind string) *notification.EmailTemplateSettings {
+	settings := s.loadEmailSettings(ctx, snap.Store.ID.String())
+	if settings == nil {
+		return nil
+	}
+	switch kind {
+	case "cancelled":
+		return settings.PaymentCancelled
+	case "refunded":
+		return settings.PaymentRefunded
+	}
+	return nil
+}
+
+// applyEmailOverride renderiza subject/body customizados quando habilitados.
+func (s *Service) applyEmailOverride(_ context.Context, snap *CartSnapshot, tpl *notification.EmailTemplateSettings, subject, body *string, trackingCode, trackingURL string) {
+	if tpl == nil || !tpl.Enabled {
+		return
+	}
+	v := vars(snap, trackingCode, trackingURL)
+	if tpl.Subject != "" {
+		*subject = notification.RenderTemplate(tpl.Subject, v)
+	}
+	if tpl.BodyHTML != "" {
+		*body = notification.RenderTemplate(tpl.BodyHTML, v)
+	}
+}
+
 // OnDelivered records the final state in the timeline. source distinguishes
 // who confirmed the delivery: the merchant clicking in the dashboard, the
 // customer clicking on the public page, or the auto-poller (system) seeing
@@ -592,6 +687,20 @@ func storeReplyTo(store sqlc.Store) string {
 		return store.EmailAddress.String
 	}
 	return ""
+}
+
+func storeLogo(store sqlc.Store) string {
+	if store.LogoUrl.Valid {
+		return store.LogoUrl.String
+	}
+	return ""
+}
+
+func customerDisplayName(snap *CartSnapshot) string {
+	if snap.Cart.CustomerName.Valid && snap.Cart.CustomerName.String != "" {
+		return snap.Cart.CustomerName.String
+	}
+	return "cliente"
 }
 
 func uuidStr(u pgtype.UUID) string {

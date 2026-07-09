@@ -73,6 +73,10 @@ type CouponSyncer interface {
 // Wired from the postcheckout package via SetPostCheckoutHook.
 type PostCheckoutHook interface {
 	OnCartPaid(ctx context.Context, cartID string)
+	// OnCartCancelled/OnCartRefunded enviam os e-mails transacionais dos
+	// estados negativos. Idempotentes na implementação (timeline unique).
+	OnCartCancelled(ctx context.Context, cartID string)
+	OnCartRefunded(ctx context.Context, cartID string)
 	// OnShipmentPosted fires after a shipment is created or has a
 	// tracking_code attached. Idempotent at the implementation: subsequent
 	// calls for the same cart are no-ops.
@@ -3358,6 +3362,16 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 	// ledger + credito de saldo Stripe (fire-and-forget).
 	if cartPaymentStatus == "refunded" && s.billingGate != nil {
 		s.billingGate.OnCartRefunded(ctx, input.StoreID, status.ExternalReference)
+	}
+
+	// E-mails transacionais dos estados negativos (exactly-once via timeline)
+	if s.postCheckoutHook != nil {
+		switch cartPaymentStatus {
+		case "cancelled":
+			s.postCheckoutHook.OnCartCancelled(ctx, status.ExternalReference)
+		case "refunded":
+			s.postCheckoutHook.OnCartRefunded(ctx, status.ExternalReference)
+		}
 	}
 
 	// Only the paid path triggers the ERP finalization. Everything else (failed,

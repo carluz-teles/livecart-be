@@ -82,6 +82,7 @@ func (c *Client) SendOrderPaid(ctx context.Context, input OrderPaidEmailInput) e
 		HTMLContent: htmlContent,
 		TextContent: textContent,
 		ReplyTo:     input.ReplyTo,
+		FromName:    input.StoreName,
 	})
 }
 
