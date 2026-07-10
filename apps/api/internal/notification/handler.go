@@ -265,6 +265,11 @@ func (h *Handler) GetAvailableVariables(c *fiber.Ctx) error {
 		{Name: "{transportadora}", Description: "Transportadora + serviço", Example: sample.Transportadora},
 		{Name: "{link_pedido}", Description: "Link para acompanhar pedido", Example: sample.LinkPedido},
 		{Name: "{forma_pagamento}", Description: "Forma de pagamento (PIX/cartão)", Example: "PIX"},
+		{Name: "{nome_cliente}", Description: "Nome do cliente no checkout", Example: "Ana Reis"},
+		{Name: "{lista_produtos}", Description: "Tabela com os itens do pedido (e-mails)", Example: "2× Vestido Midi — R$ 179,80…"},
+		{Name: "{endereco_entrega}", Description: "Endereço de entrega em uma linha", Example: "Rua das Flores, 123 — São Paulo/SP"},
+		{Name: "{prazo_entrega}", Description: "Prazo estimado do frete", Example: "até 5 dias úteis"},
+		{Name: "{valor_frete}", Description: "Valor do frete", Example: "R$ 18,90"},
 	}
 
 	return httpx.OK(c, GetAvailableVariablesResponse{Variables: variables})

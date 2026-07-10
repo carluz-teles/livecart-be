@@ -507,9 +507,38 @@ func vars(s *CartSnapshot, trackingCode, trackingURL string) notification.Templa
 		}
 	}
 
+	nomeCliente := s.Cart.PlatformHandle
+	if s.Cart.CustomerName.Valid && s.Cart.CustomerName.String != "" {
+		nomeCliente = s.Cart.CustomerName.String
+	}
+
+	prazo := ""
+	if s.Cart.ShippingDeadlineDays.Valid && s.Cart.ShippingDeadlineDays.Int32 > 0 {
+		prazo = fmt.Sprintf("até %d dias úteis", s.Cart.ShippingDeadlineDays.Int32)
+	}
+
+	valorFrete := ""
+	if s.Cart.ShippingCostCents.Valid {
+		valorFrete = fmt.Sprintf("R$ %d,%02d", s.Cart.ShippingCostCents.Int64/100, s.Cart.ShippingCostCents.Int64%100)
+	}
+
+	// Tabela completa pros overrides de e-mail (corpo é HTML). Envelopa as
+	// <tr> do renderItemsHTML numa <table> própria — dentro de um override o
+	// lojista não tem a tabela do shell default.
+	listaProdutos := ""
+	if len(s.Items) > 0 {
+		listaProdutos = `<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-collapse:collapse;">` +
+			renderItemsHTML(s.Items) + `</table>`
+	}
+
 	return notification.TemplateVariables{
-		Handle:         s.Cart.PlatformHandle,
-		FormaPagamento: formaPagamento,
+		Handle:          s.Cart.PlatformHandle,
+		FormaPagamento:  formaPagamento,
+		NomeCliente:     nomeCliente,
+		ListaProdutos:   listaProdutos,
+		EnderecoEntrega: formatShippingLine(ParseShippingAddress(s.Cart.ShippingAddress)),
+		PrazoEntrega:    prazo,
+		ValorFrete:      valorFrete,
 		Loja:           s.Store.Name,
 		Total:          fmt.Sprintf("R$ %d,%02d", totalCents/100, totalCents%100),
 		TotalCents:     totalCents,

@@ -166,6 +166,16 @@ type TemplateVariables struct {
 
 	// FormaPagamento: "PIX" / "Cartão" — populada no pós-pagamento.
 	FormaPagamento string
+	// NomeCliente: nome preenchido no checkout (fallback: handle).
+	NomeCliente string
+	// ListaProdutos: tabela HTML dos itens (e-mails); vazia no fluxo de DM.
+	ListaProdutos string
+	// EnderecoEntrega: linha única "Rua X, 123 — Cidade/UF".
+	EnderecoEntrega string
+	// PrazoEntrega: "até N dias úteis" (da cotação de frete).
+	PrazoEntrega string
+	// ValorFrete: "R$ 18,90".
+	ValorFrete string
 
 	// Post-payment variables. Empty for cart-flow notifications, populated
 	// by the postcheckout package when sending receipt/shipped/delivered.
