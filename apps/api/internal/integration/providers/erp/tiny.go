@@ -2284,38 +2284,39 @@ func (t *Tiny) HealthCheck(ctx context.Context) (*providers.ERPHealthCheckResult
 	}
 
 	jobs := []job{
-		// Formas de Pagamento (meioPagamento on parcela). Tiny seeds
-		// default cadastros under Configurações → Finanças → Formas de
-		// Pagamento — most accounts only need to confirm they are active.
+		// ATENÇÃO à nomenclatura da Tiny (relato de campo, jul/2026): o
+		// endpoint /formas-pagamento valida os MEIOS que o painel exibe em
+		// "Formas de RECEBIMENTO" (contas a receber = como o cliente paga o
+		// lojista), e /formas-recebimento cobre o fluxo que o painel chama
+		// de "Formas de Pagamento". As categorias/painéis abaixo apontam o
+		// usuário pra página CERTA do painel — não "corrigir" pelos nomes
+		// dos endpoints.
 		{
-			category:     providers.ERPHealthFormaPagamento,
+			category:     providers.ERPHealthFormaRecebimento,
 			expectedName: "Cartão de Crédito",
 			description:  "Define o instrumento da parcela (Cartão de Crédito). Sem isso, a parcela fica como Conta a Receber genérica.",
-			panelPath:    "Configurações → Finanças → Formas de Pagamento",
+			panelPath:    "Configurações → Finanças → Formas de Recebimento",
 			run:          func(ctx context.Context) (int64, error) { return t.lookupFormaPagamentoID(ctx, "credit_card") },
 		},
 		{
-			category:     providers.ERPHealthFormaPagamento,
+			category:     providers.ERPHealthFormaRecebimento,
 			expectedName: "Pix",
 			description:  "Define o instrumento da parcela (Pix). Sem isso, a parcela fica como Conta a Receber genérica.",
-			panelPath:    "Configurações → Finanças → Formas de Pagamento",
+			panelPath:    "Configurações → Finanças → Formas de Recebimento",
 			run:          func(ctx context.Context) (int64, error) { return t.lookupFormaPagamentoID(ctx, "pix") },
 		},
-		// Formas de Recebimento (formaRecebimento on parcela). Same
-		// section in Tiny's panel — the merchant typically just needs
-		// to confirm they're enabled (Tiny seeds them by default).
 		{
-			category:     providers.ERPHealthFormaRecebimento,
+			category:     providers.ERPHealthFormaPagamento,
 			expectedName: "Cartão de Crédito",
-			description:  "Define o fluxo financeiro da parcela (Cartão de Crédito). Necessário para classificar a entrada em contas a receber.",
-			panelPath:    "Configurações → Finanças → Formas de Recebimento",
+			description:  "Define o fluxo financeiro da parcela (Cartão de Crédito). Necessário para classificar a entrada.",
+			panelPath:    "Configurações → Finanças → Formas de Pagamento",
 			run:          func(ctx context.Context) (int64, error) { return t.lookupFormaRecebimentoID(ctx, "credit_card") },
 		},
 		{
-			category:     providers.ERPHealthFormaRecebimento,
+			category:     providers.ERPHealthFormaPagamento,
 			expectedName: "Pix",
-			description:  "Define o fluxo financeiro da parcela (Pix). Necessário para classificar a entrada em contas a receber.",
-			panelPath:    "Configurações → Finanças → Formas de Recebimento",
+			description:  "Define o fluxo financeiro da parcela (Pix). Necessário para classificar a entrada.",
+			panelPath:    "Configurações → Finanças → Formas de Pagamento",
 			run:          func(ctx context.Context) (int64, error) { return t.lookupFormaRecebimentoID(ctx, "pix") },
 		},
 		// Formas de Envio (transportador.formaEnvio on order)
