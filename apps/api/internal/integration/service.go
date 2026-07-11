@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -102,6 +103,40 @@ type Service struct {
 	storage             *storage.S3Client
 	billingGate         BillingGate
 	logger              *zap.Logger
+
+	// erpProviderFactory lets the finalisation state-machine tests inject a
+	// scripted ERP provider. nil in production (falls back to getERPProvider,
+	// which builds the real Tiny client from the integration credentials).
+	erpProviderFactory func(ctx context.Context, integration *IntegrationRow) (providers.ERPProvider, error)
+
+	// Fase 3 do fix do race: lojas com finalização INVERTIDA (criar pedido e
+	// lançar estoque ANTES de estornar as reservas — o saldo do Tiny nunca
+	// sobe acima do real). Populado de ERP_FINALISE_INVERTED_STORE_IDS
+	// (lista separada por vírgula; "*" liga para todas). Pré-requisito da
+	// loja: "Permissão de estoque negativo = Sim" no Tiny — sem isso o
+	// fallback degrada para a ordem legada, protegida pelos guards da Fase 1.
+	invertFinalisationAll      bool
+	invertFinalisationStoreIDs map[string]bool
+
+	// Design C: lojas no modo pedido-como-reserva (conversão na iniciação do
+	// pagamento). Populado de ERP_ORDER_AT_CHECKOUT_STORE_IDS ("*" = todas).
+	orderAtCheckoutAll      bool
+	orderAtCheckoutStoreIDs map[string]bool
+}
+
+// finalisationInverted reports whether this store runs the launch-first
+// finalisation order (Fase 3).
+func (s *Service) finalisationInverted(storeID string) bool {
+	return s.invertFinalisationAll || s.invertFinalisationStoreIDs[storeID]
+}
+
+// erpProviderFor resolves the ERP provider for an integration, honouring the
+// test seam when set.
+func (s *Service) erpProviderFor(ctx context.Context, integration *IntegrationRow) (providers.ERPProvider, error) {
+	if s.erpProviderFactory != nil {
+		return s.erpProviderFactory(ctx, integration)
+	}
+	return s.getERPProvider(ctx, integration)
 }
 
 // SetStorage wires the object storage client (used to delete transient post
@@ -134,13 +169,33 @@ func NewService(
 	liveService *live.Service,
 	logger *zap.Logger,
 ) *Service {
+	parseStoreFlag := func(envName string) (bool, map[string]bool) {
+		all := false
+		ids := map[string]bool{}
+		for _, part := range strings.Split(os.Getenv(envName), ",") {
+			part = strings.TrimSpace(part)
+			switch {
+			case part == "*":
+				all = true
+			case part != "":
+				ids[part] = true
+			}
+		}
+		return all, ids
+	}
+	invertAll, invertIDs := parseStoreFlag("ERP_FINALISE_INVERTED_STORE_IDS")
+	orderModeAll, orderModeIDs := parseStoreFlag("ERP_ORDER_AT_CHECKOUT_STORE_IDS")
 	return &Service{
-		repo:        repo,
-		factory:     factory,
-		encryptor:   encryptor,
-		idempotency: idempotency,
-		liveService: liveService,
-		logger:      logger,
+		repo:                       repo,
+		factory:                    factory,
+		encryptor:                  encryptor,
+		idempotency:                idempotency,
+		liveService:                liveService,
+		logger:                     logger,
+		invertFinalisationAll:      invertAll,
+		invertFinalisationStoreIDs: invertIDs,
+		orderAtCheckoutAll:         orderModeAll,
+		orderAtCheckoutStoreIDs:    orderModeIDs,
 	}
 }
 
@@ -2797,22 +2852,27 @@ const productWebhookMaxRetries = 3
 // ProcessProductWebhook checks if the product exists in LiveCart, then fetches
 // full details from the ERP and syncs locally. Ignores unknown products.
 // Retries on transient failures to avoid losing sync events.
-func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, externalProductID string) error {
+//
+// The boolean return reports whether the LOCAL STOCK counter was actually
+// overwritten by this sync ("stock applied"). The waitlist backstop keys off
+// it: promoting after a sync that skipped stock (guard armed) or failed would
+// act on a stale/poisoned counter.
+func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, externalProductID string) (bool, error) {
 	if s.productSyncer == nil {
 		s.logger.Warn("product syncer not configured, skipping product webhook")
-		return nil
+		return false, nil
 	}
 
 	// Resolve integration from store_id + provider
 	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", provider)
 	if err != nil {
-		return fmt.Errorf("no active ERP integration found for store %s provider %s: %w", storeID, provider, err)
+		return false, fmt.Errorf("no active ERP integration found for store %s provider %s: %w", storeID, provider, err)
 	}
 
 	// Check if product exists in LiveCart before calling the ERP API
 	exists, err := s.productSyncer.HasProduct(ctx, integration.StoreID, externalProductID, integration.Provider)
 	if err != nil {
-		return fmt.Errorf("checking product existence: %w", err)
+		return false, fmt.Errorf("checking product existence: %w", err)
 	}
 	if !exists {
 		s.logger.Debug("product not registered in livecart, ignoring webhook",
@@ -2820,7 +2880,7 @@ func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, 
 			zap.String("integration_id", integration.ID),
 			zap.String("external_product_id", externalProductID),
 		)
-		return nil
+		return false, nil
 	}
 
 	var lastErr error
@@ -2836,15 +2896,16 @@ func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, 
 			)
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return false, ctx.Err()
 			case <-time.After(backoff):
 			}
 		}
 
-		lastErr = s.processProductSync(ctx, integration, externalProductID)
-		if lastErr == nil {
-			return nil
+		stockApplied, syncErr := s.processProductSync(ctx, integration, externalProductID)
+		if syncErr == nil {
+			return stockApplied, nil
 		}
+		lastErr = syncErr
 	}
 
 	s.logger.Error("product webhook processing failed after retries",
@@ -2855,24 +2916,24 @@ func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, 
 		zap.Error(lastErr),
 	)
 
-	return lastErr
+	return false, lastErr
 }
 
-func (s *Service) processProductSync(ctx context.Context, integration *IntegrationRow, externalProductID string) error {
+func (s *Service) processProductSync(ctx context.Context, integration *IntegrationRow, externalProductID string) (bool, error) {
 	provider, err := s.createProviderFromRow(ctx, integration)
 	if err != nil {
-		return fmt.Errorf("creating provider: %w", err)
+		return false, fmt.Errorf("creating provider: %w", err)
 	}
 
 	erpProvider, ok := provider.(providers.ERPProvider)
 	if !ok {
-		return fmt.Errorf("integration %s is not an ERP provider", integration.ID)
+		return false, fmt.Errorf("integration %s is not an ERP provider", integration.ID)
 	}
 
 	detailed, err := erpProvider.GetProduct(ctx, externalProductID)
 	if err != nil {
 		s.handleProviderError(ctx, integration.ID, "webhook_get_product", err)
-		return fmt.Errorf("fetching product from ERP: %w", err)
+		return false, fmt.Errorf("fetching product from ERP: %w", err)
 	}
 
 	// Variant-aware branch: if the ERP returned a parent product with children
@@ -2883,9 +2944,9 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		s.enrichVariantsFromIndividualGets(ctx, erpProvider, detailed)
 		s.applyStoreDefaultDimensions(ctx, integration.StoreID, detailed)
 		if err := s.productGroupSyncer.SyncFromERP(ctx, integration.StoreID, integration.Provider, *detailed); err != nil {
-			return fmt.Errorf("syncing product group: %w", err)
+			return false, fmt.Errorf("syncing product group: %w", err)
 		}
-		return nil
+		return true, nil
 	}
 
 	// Variation child without its own dimensions inherits from the parent,
@@ -2893,26 +2954,30 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	s.inheritShippingFromParent(ctx, erpProvider, detailed)
 	s.applyStoreDefaultDimensions(ctx, integration.StoreID, detailed)
 
-	// Check if product has active stock reservations during a live event.
-	// Fail-safe: on DB error, assume active event to avoid overwriting local stock.
+	// Guard do overwrite de estoque: além de "live ativa com reserva ativa"
+	// (comportamento anterior), também segura o sync enquanto houver cart pago
+	// com finalização ERP em voo contendo o produto — a reversão das reservas
+	// na finalização infla o saldo do Tiny por segundos e o webhook resultante
+	// sobrescreveria products.stock com oferta falsa (promoção fantasma da
+	// waitlist). Fail-safe: em erro de DB, não sobrescreve.
 	skipStock := false
-	hasActive, guardErr := s.repo.HasActiveEventForProduct(ctx, externalProductID)
+	guarded, guardErr := s.repo.HasStockGuardForProduct(ctx, externalProductID, integration.StoreID, integration.Provider)
 	if guardErr != nil {
 		skipStock = true
-		s.logger.Warn("failed to check active event for product, skipping stock sync as precaution",
+		s.logger.Warn("failed to check stock guard for product, skipping stock sync as precaution",
 			zap.String("external_product_id", externalProductID),
 			zap.Error(guardErr),
 		)
-	} else if hasActive {
+	} else if guarded {
 		skipStock = true
-		s.logger.Info("skipping ERP stock sync during active event",
+		s.logger.Info("skipping ERP stock sync: reservation or finalisation in flight for product",
 			zap.String("external_product_id", externalProductID),
 			zap.String("store_id", integration.StoreID),
 		)
 	}
 
 	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, skipStock); err != nil {
-		return fmt.Errorf("syncing product: %w", err)
+		return false, fmt.Errorf("syncing product: %w", err)
 	}
 
 	s.logger.Info("product synced from webhook",
@@ -2922,7 +2987,7 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		zap.Bool("skip_stock", skipStock),
 	)
 
-	return nil
+	return !skipStock, nil
 }
 
 // isGTIN checks if a string looks like a GTIN/barcode (8+ digits).
@@ -3374,9 +3439,23 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		}
 	}
 
+	// Refund de cart convertido (design C): pedido confirmado no Tiny é
+	// cancelado e o estoque devolvido — situação 2 → estorno. Carts legados
+	// mantêm o TODO histórico (sem call site de CancelOrder).
+	if cartPaymentStatus == "refunded" {
+		if err := s.RefundConvertedCartOrder(ctx, status.ExternalReference, input.StoreID); err != nil {
+			s.logger.Error("failed to cancel refunded converted cart order",
+				zap.String("cart_id", status.ExternalReference),
+				zap.Error(err),
+			)
+		}
+	}
+
 	// Only the paid path triggers the ERP finalization. Everything else (failed,
 	// cancelled, pending, refunded) just updates the cart status for now — see
-	// the refunded TODO at the top of this method.
+	// the refunded TODO at the top of this method. Pix expirado/cancelado NÃO
+	// cancela o pedido convertido aqui: o comprador pode regenerar o pagamento
+	// (RegenerateCartCheckout) — quem cancela em definitivo é a expiração.
 	if cartPaymentStatus != "paid" {
 		return nil
 	}
@@ -3389,7 +3468,7 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		s.postCheckoutHook.OnCartPaid(ctx, status.ExternalReference)
 	}
 
-	if err := s.finalizeCartERPOrder(ctx, status.ExternalReference, input.StoreID, status); err != nil {
+	if err := s.finalizeOrConfirmCartERP(ctx, status.ExternalReference, input.StoreID, status); err != nil {
 		// Never propagate ERP errors to the payment provider — the money already
 		// moved. Log and fall through so the webhook ACKs.
 		s.logger.Error("failed to finalize ERP order for paid cart",
@@ -3406,20 +3485,58 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 // saída-manual reservations held during the live, then create a single sales
 // order already marked as paid, with customer identity and delivery address.
 //
+// Resumable state machine (Fase 2): every step leaves a durable marker and
+// re-entry only moves FORWARD — no compensation on retry:
+//
+//	[L]  advisory lock por cart — webhooks de gateway duplicados perdem o
+//	     lock e retornam cedo; o vencedor termina o trabalho
+//	[S1] snapshot do gateway + carimbo da tentativa persistidos ANTES de
+//	     tocar o ERP (retry admin faz replay sem novo webhook)
+//	[S0] external_order_id já gravado ⇒ RESUME: re-lança o estoque
+//	     (tolerante a "Estoque já lançado." — validado em sandbox 11/07) e
+//	     estorna só as reservas ainda 'active'. Mata os Gaps A e B (carts
+//	     zumbis presos em 'pending' que o retry recusava).
+//	[S2] estornos per-row: cada reserva só é marcada 'reversed' após o Tiny
+//	     confirmar a entrada E; falha aborta com 'failed' retomável (antes:
+//	     marcação em massa mesmo com Tiny falho ⇒ saída órfã)
+//	[S3] createFinalERPOrder (grava external_order_id antes do launch)
+//	[S4] done
+//
 // Failure recovery: if the order creation throws AFTER we have already
 // reversed reservations, we re-create the saída-manual exits in Tiny and
 // new active reservation rows in the DB so the unit stays held against this
-// cart. The cart is then marked `erp_finalisation_status='failed'` with the
-// error message — the merchant sees a banner with a "Tentar novamente"
-// button on the order detail page. Stock is never silently released against
-// a paid cart, even when CreateOrder fails permanently.
-//
-// Idempotent by cart.external_order_id.
+// cart — stock is never silently released against a paid cart. The retry
+// then resumes via [S0] (order exists) or re-runs from [S2] (it doesn't).
 func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID string, status *providers.PaymentStatus) error {
 	s.logger.Info("starting ERP finalisation for paid cart",
 		zap.String("store_id", storeID),
 		zap.String("cart_id", cartID),
 	)
+
+	// [L] Claim único por cart. Perder o lock significa que outra entrega do
+	// mesmo webhook está finalizando AGORA — sem isso, duas goroutines listam
+	// as mesmas reservas 'active' e cada uma aplica sua entrada E (saldo do
+	// Tiny acima do real: a invariante central do fix quebraria).
+	release, acquired, lockErr := s.repo.AcquireCartFinalisationLock(ctx, cartID)
+	if lockErr != nil {
+		return fmt.Errorf("acquiring finalisation lock: %w", lockErr)
+	}
+	if !acquired {
+		s.logger.Info("ERP finalisation already in flight for cart, skipping duplicate trigger",
+			zap.String("cart_id", cartID),
+		)
+		return nil
+	}
+	defer release()
+
+	// Idempotência dura: um trigger tardio (redelivery de horas depois) sobre
+	// cart já finalizado não deve custar nem uma chamada ao Tiny.
+	if stRow, stErr := s.repo.GetCartERPFinalisationStatus(ctx, cartID); stErr == nil && stRow.Status == "done" {
+		s.logger.Info("cart ERP finalisation already done, skipping",
+			zap.String("cart_id", cartID),
+		)
+		return nil
+	}
 
 	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
 	if err != nil {
@@ -3446,25 +3563,52 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 	if err != nil {
 		return fmt.Errorf("loading cart for ERP order: %w", err)
 	}
-	if cart.ExternalOrderID != "" {
-		// Idempotency hit. Bumped from debug to info because hitting this on a
-		// fresh cart is a strong signal of a duplicate webhook or a previous
-		// run we need to investigate.
-		s.logger.Info("cart already has ERP order, skipping",
+
+	// [S1] Snapshot + carimbo ANTES de agir. Best-effort: a finalização não
+	// para por falha aqui, mas o retry perde o replay se o snapshot faltar.
+	var snapshot []byte
+	if status != nil {
+		if b, encErr := json.Marshal(status); encErr == nil {
+			snapshot = b
+		} else {
+			s.logger.Warn("failed to encode payment status snapshot",
+				zap.String("cart_id", cartID),
+				zap.Error(encErr),
+			)
+		}
+	}
+	if markErr := s.repo.MarkCartERPFinalisationAttempt(ctx, cartID, snapshot); markErr != nil {
+		s.logger.Warn("failed to mark ERP finalisation attempt",
 			zap.String("cart_id", cartID),
-			zap.String("external_order_id", cart.ExternalOrderID),
+			zap.Error(markErr),
 		)
-		return nil
 	}
 
-	erpProvider, err := s.getERPProvider(ctx, erpIntegration)
+	erpProvider, err := s.erpProviderFor(ctx, erpIntegration)
 	if err != nil {
 		return fmt.Errorf("creating ERP provider: %w", err)
 	}
 
-	// 1. Reverse all active saída-manual reservations for this cart — the final
-	// order will decrement stock itself via LaunchOrderStock, so keeping the
-	// reservations would double-count.
+	// [S0] RESUME: o pedido já existe no Tiny — crash ou falha após o
+	// CreateOrder de uma tentativa anterior (Gaps A/B). Nunca pular o launch:
+	// ele é tolerante a "já lançado", e pulá-lo devolveria as reservas sem o
+	// pedido ter baixado estoque (oversell contra cart pago).
+	if cart.ExternalOrderID != "" {
+		return s.resumeCartERPFinalisation(ctx, erpProvider, cartID, cart.ExternalOrderID, snapshot)
+	}
+
+	// Fase 3: lojas com a flag ligada finalizam em ordem invertida
+	// (launch-first) — a perna de oferta do race morre na origem.
+	if s.finalisationInverted(storeID) {
+		return s.finalizeCartERPOrderInverted(ctx, erpProvider, erpIntegration, storeID, cart, status, snapshot)
+	}
+
+	// [S2] Reverse all active saída-manual reservations for this cart — the
+	// final order will decrement stock itself via LaunchOrderStock, so keeping
+	// the reservations would double-count. Per-row: a row only flips to
+	// 'reversed' after Tiny confirmed the entrada E; on failure we abort with
+	// a RESUMABLE 'failed' instead of proceeding (the old behaviour created
+	// the order anyway, leaving an orphan saída holding phantom stock).
 	reservations, err := s.repo.ListActiveReservationsByCart(ctx, cartID)
 	if err != nil {
 		return fmt.Errorf("listing cart reservations: %w", err)
@@ -3482,22 +3626,36 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 	for _, r := range reservations {
 		obs := fmt.Sprintf("Estorno reserva pós-pagamento - Cart %s", cartID)
 		if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
-			s.logger.Warn("failed to reverse ERP reservation on paid, proceeding anyway",
+			msg := fmt.Sprintf("estorno de reserva pendente (produto %s): %v", r.ExternalProductID, reverseErr)
+			if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, msg, snapshot); markErr != nil {
+				s.logger.Error("failed to mark cart ERP finalisation failed",
+					zap.String("cart_id", cartID),
+					zap.Error(markErr),
+				)
+			}
+			s.logger.Warn("failed to reverse ERP reservation on paid cart, aborting for retry",
 				zap.String("cart_id", cartID),
 				zap.String("reservation_id", r.ID),
 				zap.String("external_product_id", r.ExternalProductID),
 				zap.Int("quantity", r.Quantity),
 				zap.Error(reverseErr),
 			)
-			continue
+			return fmt.Errorf("reversing reservation %s: %w", r.ID, reverseErr)
+		}
+		if dbErr := s.repo.ReverseReservationByID(ctx, r.ID); dbErr != nil {
+			// Tiny estornou mas a marcação local falhou: um retry re-estornaria
+			// esta row e DUPLICARIA a entrada E (sandbox T10: o Tiny aceita e
+			// infla o saldo em silêncio). Loga alto com o movementID para
+			// reconciliação manual e segue — a direção do erro é estoque
+			// segurado a mais, nunca oferta falsa.
+			s.logger.Error("reservation reversed on Tiny but local mark failed — reconcile manually",
+				zap.String("cart_id", cartID),
+				zap.String("reservation_id", r.ID),
+				zap.String("erp_movement_id", r.ERPMovementID),
+				zap.Error(dbErr),
+			)
 		}
 		reversedSnapshot = append(reversedSnapshot, r)
-	}
-	if err := s.repo.ReverseReservationsByCart(ctx, cartID); err != nil {
-		s.logger.Error("failed to mark reservations reversed",
-			zap.String("cart_id", cartID),
-			zap.Error(err),
-		)
 	}
 	s.logger.Info("ERP stock reservations reversed",
 		zap.String("cart_id", cartID),
@@ -3505,26 +3663,11 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 		zap.Int("succeeded", len(reversedSnapshot)),
 	)
 
-	// 2. Create the paid sales order. On failure, re-reserve and surface the
-	//    error to the merchant via cart.erp_finalisation_status='failed'.
-	createErr := s.createFinalERPOrder(ctx, erpProvider, erpIntegration, storeID, cart.EventID, *cart, status)
+	// [S3] Create the paid sales order. On failure, re-reserve and surface
+	//     the error to the merchant via cart.erp_finalisation_status='failed'.
+	createErr := s.createFinalERPOrder(ctx, erpProvider, erpIntegration, storeID, cart.EventID, *cart, status, true)
 	if createErr != nil {
 		s.reReserveAfterFailedFinalisation(ctx, erpProvider, cartID, cart.EventID, reversedSnapshot)
-		// JSON-encode the gateway PaymentStatus so the admin retry path
-		// can replay the order creation without a fresh webhook. Errors
-		// here are non-fatal — the failed cart is still flagged, just
-		// without the snapshot.
-		var snapshot []byte
-		if status != nil {
-			if b, encErr := json.Marshal(status); encErr == nil {
-				snapshot = b
-			} else {
-				s.logger.Warn("failed to encode payment status snapshot",
-					zap.String("cart_id", cartID),
-					zap.Error(encErr),
-				)
-			}
-		}
 		if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, createErr.Error(), snapshot); markErr != nil {
 			s.logger.Error("failed to mark cart ERP finalisation failed",
 				zap.String("cart_id", cartID),
@@ -3534,6 +3677,7 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 		return createErr
 	}
 
+	// [S4]
 	if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
 		// The order is in Tiny — don't propagate. Just log so the cart
 		// shows up in the admin "stuck pending" view if the column ever
@@ -3543,6 +3687,199 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 			zap.Error(markErr),
 		)
 	}
+	return nil
+}
+
+// resumeCartERPFinalisation finishes a finalisation that was interrupted
+// AFTER the Tiny order already existed (Gaps A/B): re-launches the order
+// stock — LaunchOrderStock treats "Estoque já lançado." as success, validated
+// against the real API in the 11/07 sandbox battery — then reverses only the
+// reservations still 'active' (per-row marks from the first attempt survive),
+// and marks the cart done. Monotonic: it only ever moves forward; running it
+// twice is a no-op beyond one tolerated launch call.
+func (s *Service) resumeCartERPFinalisation(ctx context.Context, erpProvider providers.ERPProvider, cartID, externalOrderID string, snapshot []byte) error {
+	s.logger.Info("resuming ERP finalisation for cart with existing order",
+		zap.String("cart_id", cartID),
+		zap.String("external_order_id", externalOrderID),
+	)
+
+	if err := erpProvider.LaunchOrderStock(ctx, externalOrderID); err != nil {
+		msg := fmt.Sprintf("relançamento de estoque do pedido %s falhou: %v", externalOrderID, err)
+		if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, msg, snapshot); markErr != nil {
+			s.logger.Error("failed to mark cart ERP finalisation failed",
+				zap.String("cart_id", cartID),
+				zap.Error(markErr),
+			)
+		}
+		return fmt.Errorf("re-launching stock for order %s: %w", externalOrderID, err)
+	}
+
+	if err := s.reverseCartReservationsPerRow(ctx, erpProvider, cartID); err != nil {
+		s.markFinalisationFailed(ctx, cartID, err.Error(), snapshot)
+		return fmt.Errorf("reversing reservations on resume: %w", err)
+	}
+
+	if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
+		s.logger.Error("failed to mark cart ERP finalisation done after resume",
+			zap.String("cart_id", cartID),
+			zap.Error(markErr),
+		)
+	}
+	s.logger.Info("ERP finalisation resumed to done",
+		zap.String("cart_id", cartID),
+		zap.String("external_order_id", externalOrderID),
+	)
+	return nil
+}
+
+// reverseCartReservationsPerRow estorna todas as reservas 'active' do cart,
+// marcando cada row somente após o Tiny confirmar a entrada E correspondente.
+// NÃO altera erp_finalisation_status — quem decide o efeito de uma falha é o
+// caller (a finalização pós-pago marca 'failed'; a conversão pré-pagamento do
+// design C não toca nessa coluna).
+func (s *Service) reverseCartReservationsPerRow(ctx context.Context, erpProvider providers.ERPProvider, cartID string) error {
+	reservations, err := s.repo.ListActiveReservationsByCart(ctx, cartID)
+	if err != nil {
+		return fmt.Errorf("listing cart reservations: %w", err)
+	}
+	for _, r := range reservations {
+		obs := fmt.Sprintf("Estorno reserva pós-pagamento - Cart %s", cartID)
+		if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
+			return fmt.Errorf("reversing reservation %s: estorno de reserva pendente (produto %s): %w", r.ID, r.ExternalProductID, reverseErr)
+		}
+		if dbErr := s.repo.ReverseReservationByID(ctx, r.ID); dbErr != nil {
+			// Tiny estornou mas a marcação local falhou: um retry re-estornaria
+			// esta row e duplicaria a entrada E (sandbox T10: o Tiny aceita e
+			// infla em silêncio). Loga alto com o movementID para reconciliação.
+			s.logger.Error("reservation reversed on Tiny but local mark failed — reconcile manually",
+				zap.String("cart_id", cartID),
+				zap.String("reservation_id", r.ID),
+				zap.String("erp_movement_id", r.ERPMovementID),
+				zap.Error(dbErr),
+			)
+		}
+	}
+	return nil
+}
+
+// markFinalisationFailed grava o estado 'failed' com o erro e loga falhas da
+// própria marcação (nunca as propaga — o sinal primário é o erro do caller).
+func (s *Service) markFinalisationFailed(ctx context.Context, cartID, msg string, snapshot []byte) {
+	if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, msg, snapshot); markErr != nil {
+		s.logger.Error("failed to mark cart ERP finalisation failed",
+			zap.String("cart_id", cartID),
+			zap.Error(markErr),
+		)
+	}
+}
+
+// finalizeCartERPOrderInverted é a Fase 3 do fix: cria o pedido e LANÇA o
+// estoque ANTES de estornar as reservas. O saldo do Tiny nunca sobe acima do
+// valor real durante a finalização — o perfil vira um mergulho transitório
+// (desce no launch, volta ao real nos estornos), e mergulho não gera oferta
+// falsa: a perna de oferta do race morre na origem, sem depender do guard.
+// Bônus estrutural: falha de CreateOrder não compensa NADA (as reservas nunca
+// foram tocadas) — reReserveAfterFailedFinalisation é exclusiva do legado.
+//
+// Fallback: se o launch falhar (ex.: conta com "estoque negativo = Não" e o
+// saldo preso nas próprias saídas manuais das reservas — o caso típico de
+// live esgotada), estorna as reservas PRIMEIRO e re-tenta o launch uma vez,
+// degradando para a ordem legada sob a proteção dos guards da Fase 1. Não há
+// matcher confiável de "saldo insuficiente" (mensagem não documentada), então
+// o fallback dispara para qualquer erro de launch — inofensivo quando a falha
+// era transiente, e o resume cobre se o re-launch também falhar.
+func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider providers.ERPProvider, erpIntegration *IntegrationRow, storeID string, cart *CartRow, status *providers.PaymentStatus, snapshot []byte) error {
+	cartID := cart.ID
+	s.logger.Info("finalising cart with inverted order (launch-first)",
+		zap.String("cart_id", cartID),
+		zap.String("store_id", storeID),
+	)
+
+	// [I1] Cria o pedido SEM lançar — o launch é orquestrado aqui fora para
+	// permitir o fallback.
+	if createErr := s.createFinalERPOrder(ctx, erpProvider, erpIntegration, storeID, cart.EventID, *cart, status, false); createErr != nil {
+		if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, createErr.Error(), snapshot); markErr != nil {
+			s.logger.Error("failed to mark cart ERP finalisation failed",
+				zap.String("cart_id", cartID),
+				zap.Error(markErr),
+			)
+		}
+		return createErr
+	}
+
+	// createFinalERPOrder grava external_order_id no sucesso; recarrega para
+	// obtê-lo. Vazio = cart sem itens vinculados ao ERP (create pulou): não há
+	// pedido para lançar — só devolve as reservas e encerra.
+	fresh, err := s.repo.GetCartForPaidOrder(ctx, cartID)
+	if err != nil {
+		return fmt.Errorf("reloading cart after order creation: %w", err)
+	}
+	orderID := fresh.ExternalOrderID
+	if orderID == "" {
+		if err := s.reverseCartReservationsPerRow(ctx, erpProvider, cartID); err != nil {
+			s.markFinalisationFailed(ctx, cartID, err.Error(), snapshot)
+			return err
+		}
+		if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
+			s.logger.Error("failed to mark cart ERP finalisation done",
+				zap.String("cart_id", cartID),
+				zap.Error(markErr),
+			)
+		}
+		return nil
+	}
+
+	// [I2] Launch-first, com fallback reverse-first.
+	if launchErr := erpProvider.LaunchOrderStock(ctx, orderID); launchErr != nil {
+		s.logger.Warn("launch-first failed, falling back to reverse-first order",
+			zap.String("cart_id", cartID),
+			zap.String("external_order_id", orderID),
+			zap.Bool("insufficient_balance", isTinyInsufficientBalanceErr(launchErr)),
+			zap.Error(launchErr),
+		)
+		if err := s.reverseCartReservationsPerRow(ctx, erpProvider, cartID); err != nil {
+			s.markFinalisationFailed(ctx, cartID, err.Error(), snapshot)
+			return err
+		}
+		if retryErr := erpProvider.LaunchOrderStock(ctx, orderID); retryErr != nil {
+			msg := fmt.Sprintf("lançamento de estoque do pedido %s falhou após fallback: %v", orderID, retryErr)
+			if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, msg, snapshot); markErr != nil {
+				s.logger.Error("failed to mark cart ERP finalisation failed",
+					zap.String("cart_id", cartID),
+					zap.Error(markErr),
+				)
+			}
+			// O pedido existe e external_order_id está gravado: o retry entra
+			// pelo RESUME (launch tolerante) e termina o trabalho.
+			return fmt.Errorf("launching stock for order %s after fallback: %w", orderID, retryErr)
+		}
+		if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
+			s.logger.Error("failed to mark cart ERP finalisation done",
+				zap.String("cart_id", cartID),
+				zap.Error(markErr),
+			)
+		}
+		return nil
+	}
+
+	// [I3] Estornos per-row: o saldo do Tiny volta ao valor real. Falha aqui é
+	// retomável — o resume re-lança (no-op tolerado) e estorna o restante.
+	if err := s.reverseCartReservationsPerRow(ctx, erpProvider, cartID); err != nil {
+		s.markFinalisationFailed(ctx, cartID, err.Error(), snapshot)
+		return err
+	}
+
+	// [I4]
+	if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
+		s.logger.Error("failed to mark cart ERP finalisation done",
+			zap.String("cart_id", cartID),
+			zap.Error(markErr),
+		)
+	}
+	s.logger.Info("inverted ERP finalisation completed",
+		zap.String("cart_id", cartID),
+		zap.String("external_order_id", orderID),
+	)
 	return nil
 }
 
@@ -3604,10 +3941,12 @@ func (s *Service) reReserveAfterFailedFinalisation(ctx context.Context, erpProvi
 }
 
 // RetryERPFinalisation is the admin-triggered retry of the post-payment ERP
-// flow for a cart that previously failed. It only runs on carts whose
-// finalisation is currently 'failed' (no-op on 'done', error on 'pending'
-// because that means the initial flow is still in progress and a retry would
-// race it).
+// flow. Runs on 'failed' carts (replaying the persisted gateway snapshot) and
+// — Fase 2 — also on 'pending' zombies: carts whose finalisation crashed
+// mid-flight (Gap A/B). A pending cart is retryable when the Tiny order
+// already exists (resume path) or when the last attempt is old/absent; a
+// FRESH pending still gets a 422 because the initial flow is running right
+// now (and the advisory lock would make this retry a no-op anyway).
 func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID string) error {
 	row, err := s.repo.GetCartERPFinalisationStatus(ctx, cartID)
 	if err != nil {
@@ -3617,18 +3956,27 @@ func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID stri
 	case "done":
 		return nil
 	case "pending":
-		return httpx.ErrUnprocessable("aguarde a finalização inicial concluir antes de tentar de novo")
+		stale := row.LastAttemptAt == nil || time.Since(*row.LastAttemptAt) > 15*time.Minute
+		if row.ExternalOrderID == "" && !stale {
+			return httpx.ErrUnprocessable("aguarde a finalização inicial concluir antes de tentar de novo")
+		}
 	case "failed":
 		// proceed
 	default:
 		return httpx.ErrUnprocessable("estado inválido para retry: " + row.Status)
 	}
 
-	// Replay the original gateway PaymentStatus snapshot we captured at the
-	// first failure. The snapshot has the canonical fee/net/installments/
+	// Replay the original gateway PaymentStatus snapshot we captured on the
+	// first attempt (S1). The snapshot has the canonical fee/net/installments/
 	// money-release values the order needs — re-fetching from the gateway
 	// would work too but adds an external dependency to a manual action.
 	if len(row.PaymentSnapshot) == 0 {
+		if row.ExternalOrderID != "" {
+			// Resume puro: o pedido já existe no Tiny, e launch + estornos não
+			// usam dados de pagamento — dá para terminar sem snapshot (carts
+			// zumbis pré-deploy caem aqui).
+			return s.finalizeCartERPOrder(ctx, cartID, storeID, nil)
+		}
 		return httpx.ErrUnprocessable("snapshot de pagamento ausente — retry não disponível")
 	}
 	var status providers.PaymentStatus
@@ -5011,7 +5359,19 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 		return nil
 	}
 
-	erpProvider, err := s.getERPProvider(ctx, integration)
+	// Cart convertido em pedido-como-reserva (design C): quem segura a peça é
+	// o PEDIDO, não saídas manuais — a grade nova (o caller já gravou o item
+	// no cart) entra pelo ciclo estornar→PUT→lançar. Cobre o live-add pós-pix
+	// e a promoção de waitlist de cart convertido num único ponto.
+	if st, stErr := s.repo.GetCartERPOrderState(ctx, cartID); stErr == nil &&
+		st.State != erpOrderStateNone && st.State != erpOrderStateCancelled {
+		if mutErr := s.MutateERPOrderItems(ctx, cartID, storeID); mutErr != nil {
+			return fmt.Errorf("applying grid to converted cart order: %w", mutErr)
+		}
+		return nil
+	}
+
+	erpProvider, err := s.erpProviderFor(ctx, integration)
 	if err != nil {
 		return fmt.Errorf("creating ERP provider: %w", err)
 	}
@@ -5142,6 +5502,19 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 		}
 	}
 
+	// Cart convertido (design C): a mutação vai para o PEDIDO via ciclo
+	// estornar→PUT→lançar — a grade final já está no banco (o checkout grava
+	// o cart_item ANTES de chamar este método). Sem movimentação manual e sem
+	// movementID; falha desfaz o estoque local para o comprador ver o erro.
+	if st, stErr := s.repo.GetCartERPOrderState(ctx, cartID); stErr == nil &&
+		st.State != erpOrderStateNone && st.State != erpOrderStateCancelled {
+		if mutErr := s.MutateERPOrderItems(ctx, cartID, storeID); mutErr != nil {
+			rollbackLocal()
+			return "", fmt.Errorf("applying grid to converted cart order: %w", mutErr)
+		}
+		return "", nil
+	}
+
 	// 2. ERP sync — optional. Anything below is best-effort against the ERP;
 	//    any failure rolls back the local change above.
 	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
@@ -5152,7 +5525,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 		return "", nil
 	}
 
-	erpProvider, err := s.getERPProvider(ctx, integration)
+	erpProvider, err := s.erpProviderFor(ctx, integration)
 	if err != nil {
 		rollbackLocal()
 		return "", fmt.Errorf("creating ERP provider: %w", err)
@@ -5275,7 +5648,7 @@ func (s *Service) FinalizeEventERP(ctx context.Context, storeID, eventID string)
 // createFinalERPOrder creates a single paid sales order in the ERP for a cart
 // whose payment was just confirmed. Uses the customer identity + shipping
 // address captured at checkout and the payment details from the provider.
-func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, eventID string, cart CartRow, paymentStatus *providers.PaymentStatus) error {
+func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, eventID string, cart CartRow, paymentStatus *providers.PaymentStatus, launchStock bool) error {
 	// Resolve contact — enriched with customer identity when available, so the
 	// Tiny contact ends up with CPF/email/phone instead of just the @handle.
 	contactID, err := s.resolveERPContact(ctx, erpProvider, integration, storeID, cart.PlatformUserID, cart.PlatformHandle, cart.CustomerName, cart.CustomerDocument, cart.CustomerEmail, cart.CustomerPhone)
@@ -5420,20 +5793,30 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 		return fmt.Errorf("saving external order ID: %w", err)
 	}
 
-	// Launch stock (permanent decrement)
-	if err := erpProvider.LaunchOrderStock(ctx, result.OrderID); err != nil {
-		return fmt.Errorf("launching stock for order %s: %w", result.OrderID, err)
+	// Launch stock (permanent decrement). O fluxo invertido (Fase 3) passa
+	// launchStock=false e orquestra o launch no caller, com fallback próprio.
+	if launchStock {
+		if err := erpProvider.LaunchOrderStock(ctx, result.OrderID); err != nil {
+			return fmt.Errorf("launching stock for order %s: %w", result.OrderID, err)
+		}
 	}
 
-	s.logger.Info("paid ERP order created for cart",
+	logFields := []zap.Field{
 		zap.String("cart_id", cart.ID),
 		zap.String("erp_order_id", result.OrderID),
 		zap.Int("items", len(erpItems)),
-		zap.String("payment_id", paymentStatus.PaymentID),
-		zap.String("payment_method", paymentStatus.PaymentMethod),
-		zap.Int64("fee_amount_cents", paymentStatus.FeeAmountCents),
-		zap.Int64("net_amount_cents", paymentStatus.NetAmountCents),
-	)
+	}
+	// paymentStatus é nil na conversão pré-pagamento do design C (pedido
+	// nasce Aberta, sem parcelas).
+	if paymentStatus != nil {
+		logFields = append(logFields,
+			zap.String("payment_id", paymentStatus.PaymentID),
+			zap.String("payment_method", paymentStatus.PaymentMethod),
+			zap.Int64("fee_amount_cents", paymentStatus.FeeAmountCents),
+			zap.Int64("net_amount_cents", paymentStatus.NetAmountCents),
+		)
+	}
+	s.logger.Info("ERP order created for cart", logFields...)
 
 	return nil
 }
@@ -5568,8 +5951,37 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 			continue
 		}
 
-		// Release stock back to product
-		if err := s.repo.IncrementProductStock(ctx, productID, 1); err != nil {
+		// Cart convertido (design C): quem devolve o estoque é o cancelamento
+		// do PEDIDO (situação 2 → estorno incondicional). As saídas manuais já
+		// foram estornadas na conversão — o branch de reservas abaixo no-opa.
+		if st, stErr := s.repo.GetCartERPOrderState(ctx, cart.ID); stErr == nil &&
+			st.State != erpOrderStateNone && st.State != erpOrderStateCancelled {
+			if cancelErr := s.CancelERPOrderForCart(ctx, cart.ID, cart.StoreID); cancelErr != nil {
+				s.logger.Error("failed to cancel converted cart order on expiry",
+					zap.String("cart_id", cart.ID),
+					zap.Error(cancelErr),
+				)
+			}
+		}
+
+		// Release stock back to product — the real non-waitlisted quantity of
+		// the item, not 1: o add da live decrementou (quantity -
+		// waitlisted_quantity) unidades e é isso que a expiração devolve.
+		// Antes deste fix o valor era hardcoded em 1 e o local sub-contava
+		// para itens com qty>1, "consertado" por acaso pelo overwrite do
+		// webhook — que o guard novo passou a segurar.
+		releaseQty, qtyErr := s.repo.GetCartItemAvailableQty(ctx, cart.ID, productID)
+		if qtyErr != nil || releaseQty < 1 {
+			if qtyErr != nil {
+				s.logger.Warn("failed to read cart item quantity for expiry release, falling back to 1",
+					zap.String("cart_id", cart.ID),
+					zap.String("product_id", productID),
+					zap.Error(qtyErr),
+				)
+			}
+			releaseQty = 1
+		}
+		if err := s.repo.IncrementProductStock(ctx, productID, releaseQty); err != nil {
 			s.logger.Error("failed to release stock", zap.String("product_id", productID), zap.Error(err))
 		}
 
@@ -5590,7 +6002,7 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 					zap.String("store_id", cart.StoreID),
 				)
 			} else {
-				erpProvider, provErr := s.getERPProvider(ctx, integration)
+				erpProvider, provErr := s.erpProviderFor(ctx, integration)
 				if provErr != nil {
 					s.logger.Error("failed to create ERP provider for expired cart reversal",
 						zap.String("cart_id", cart.ID),
@@ -5670,7 +6082,7 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 	// reversal step and only flipping the local DB.
 	var erpProvider providers.ERPProvider
 	if integration, intErr := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny"); intErr == nil {
-		if provider, provErr := s.getERPProvider(ctx, integration); provErr == nil {
+		if provider, provErr := s.erpProviderFor(ctx, integration); provErr == nil {
 			erpProvider = provider
 		} else {
 			s.logger.Warn("failed to build ERP provider for block sweep",
@@ -6114,6 +6526,30 @@ func (s *Service) ProcessWaitlistAfterStockWebhook(ctx context.Context, storeID,
 		// Produto não cadastrado no LiveCart — não temos fila para ele.
 		return nil
 	}
+
+	// Defesa em profundidade: com finalização ERP em voo para algum cart pago
+	// contendo o produto, o saldo reportado pelo webhook pode ser a inflação
+	// transitória da reversão de reservas — promover agora enviaria a DM
+	// (irreversível) contra unidades já vendidas. A promoção não é perdida:
+	// o LaunchOrderStock/estornos subsequentes disparam novos webhooks e o
+	// backstop roda de novo com o guard já desarmado. Fail-safe: em erro de
+	// DB, adia a promoção (direção conservadora).
+	inFlight, guardErr := s.repo.HasInFlightFinalisationForProduct(ctx, productID)
+	if guardErr != nil {
+		s.logger.Warn("failed to check in-flight finalisation, deferring waitlist backstop",
+			zap.String("product_id", productID),
+			zap.Error(guardErr),
+		)
+		return nil
+	}
+	if inFlight {
+		s.logger.Info("deferring waitlist backstop: ERP finalisation in flight for product",
+			zap.String("product_id", productID),
+			zap.String("store_id", storeID),
+		)
+		return nil
+	}
+
 	eventIDs, err := s.repo.ListEventsWithWaitingByProduct(ctx, productID)
 	if err != nil {
 		return fmt.Errorf("listing events with waiting waitlist: %w", err)

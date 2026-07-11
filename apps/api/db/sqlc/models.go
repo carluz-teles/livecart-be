@@ -120,6 +120,9 @@ type Cart struct {
 	CancelledReason     pgtype.Text        `json:"cancelled_reason"`
 	WhatsappConsent     bool               `json:"whatsapp_consent"`
 	WhatsappConsentAt   pgtype.Timestamptz `json:"whatsapp_consent_at"`
+	ErpOrderState       string             `json:"erp_order_state"`
+	ErpStockLaunched    bool               `json:"erp_stock_launched"`
+	ErpOpStartedAt      pgtype.Timestamptz `json:"erp_op_started_at"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.

@@ -569,3 +569,71 @@ WHERE c.whatsapp_consent = TRUE
 GROUP BY c.id, c.token, le.id, le.store_id, c.customer_name, c.customer_phone, c.expires_at, s.notification_settings
 ORDER BY c.expires_at ASC
 LIMIT $1;
+
+-- name: HasInFlightFinalisationForProduct :one
+-- Defesa em profundidade do backstop de waitlist: TRUE se existe cart pago
+-- com finalização ERP em andamento (ou falha recente, ainda retomável via
+-- retry) contendo o produto. Enquanto verdadeiro, promoção disparada por
+-- webhook de estoque é adiada — a DM de promoção é irreversível.
+SELECT EXISTS(
+    SELECT 1 FROM carts c
+    JOIN cart_items ci ON ci.cart_id = c.id
+    WHERE ci.product_id = $1
+      AND ((c.payment_status = 'paid'
+            AND c.erp_finalisation_status <> 'done'
+            AND (c.paid_at > now() - interval '30 minutes'
+                 OR c.erp_last_attempt_at > now() - interval '30 minutes'))
+           -- design C: ciclo de conversão/mutação em voo — adia a promoção
+           OR (c.erp_order_state IN ('converting','mutating')
+               AND c.erp_op_started_at > now() - interval '30 minutes'))
+)::bool AS in_flight;
+
+-- name: GetCartItemAvailableQty :one
+-- Unidades não-waitlisted de um item (o que foi decrementado do estoque
+-- local no add e deve voltar quando o cart expira).
+SELECT (quantity - waitlisted_quantity)::int AS available
+FROM cart_items
+WHERE cart_id = $1 AND product_id = $2;
+
+-- name: MarkCartERPFinalisationAttempt :exec
+-- S1 da finalização retomável: persiste o snapshot do gateway ANTES de tocar
+-- o ERP (o retry admin depende dele para replay) e carimba a tentativa — o
+-- carimbo alimenta o guard de sync e o gate do retry. COALESCE preserva o
+-- snapshot da primeira tentativa.
+-- (erp_attempts_count NÃO é incrementado aqui — MarkDone/MarkFailed já contam
+-- tentativas concluídas; este marker só registra o INÍCIO da tentativa.)
+UPDATE carts
+SET erp_payment_snapshot = COALESCE(erp_payment_snapshot, $2),
+    erp_last_attempt_at  = now()
+WHERE id = $1;
+
+-- ============================================================================
+-- DESIGN C — pedido Tiny como reserva a partir da iniciação do pagamento
+-- ============================================================================
+
+-- name: TransitionCartERPOrderState :execrows
+-- CAS de transição da máquina de estados do pedido-como-reserva. rows=0 quando
+-- o estado atual não é o esperado — single-flight de conversão/mutação.
+UPDATE carts
+SET erp_order_state = sqlc.arg(to_state)::varchar,
+    erp_op_started_at = CASE WHEN sqlc.arg(to_state)::varchar IN ('converting','mutating') THEN now() ELSE erp_op_started_at END
+WHERE id = sqlc.arg(cart_id) AND erp_order_state = sqlc.arg(from_state);
+
+-- name: GetCartERPOrderState :one
+SELECT erp_order_state, erp_stock_launched, COALESCE(external_order_id,'') AS external_order_id
+FROM carts WHERE id = $1;
+
+-- name: SetCartERPStockLaunched :exec
+UPDATE carts SET erp_stock_launched = $2 WHERE id = $1;
+
+-- name: ListStuckERPOrderOps :many
+-- Sweep: conversões/mutações em voo há mais tempo que o limiar — o processo
+-- morreu no meio; o sweep reconcilia (adota pedido via marcador ou re-roda o
+-- ciclo). NUNCA resetar para 'none' (a chamada em voo pode ter sucedido
+-- server-side e o caminho legado criaria pedido duplicado).
+SELECT c.id, c.erp_order_state, c.erp_op_started_at, COALESCE(c.external_order_id,'') AS external_order_id,
+       le.store_id
+FROM carts c
+JOIN live_events le ON le.id = c.event_id
+WHERE c.erp_order_state IN ('converting','mutating')
+  AND c.erp_op_started_at < now() - make_interval(secs => sqlc.arg(older_than_seconds)::int);

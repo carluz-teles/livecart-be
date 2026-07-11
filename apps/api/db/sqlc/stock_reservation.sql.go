@@ -117,6 +117,54 @@ func (q *Queries) HasActiveEventForProduct(ctx context.Context, externalProductI
 	return has_active, err
 }
 
+const hasStockGuardForProduct = `-- name: HasStockGuardForProduct :one
+SELECT (
+    EXISTS(
+        SELECT 1 FROM stock_reservations sr
+        JOIN live_events le ON le.id = sr.event_id
+        JOIN products p ON p.id = sr.product_id
+        WHERE sr.external_product_id = $1
+          AND p.store_id = $2
+          AND sr.status = 'active'
+          AND le.status = 'active')
+    OR EXISTS(
+        SELECT 1 FROM carts c
+        JOIN cart_items ci ON ci.cart_id = c.id
+        JOIN products p2 ON p2.id = ci.product_id
+        WHERE p2.store_id = $2
+          AND p2.external_source = $3
+          AND p2.external_id = $1
+          AND ((c.payment_status = 'paid'
+                AND c.erp_finalisation_status <> 'done'
+                AND (c.paid_at > now() - interval '30 minutes'
+                     OR c.erp_last_attempt_at > now() - interval '30 minutes'))
+               -- design C: conversão/mutação em voo também movimenta o saldo
+               -- transitoriamente (estornos do ciclo) — mesma supressão
+               OR (c.erp_order_state IN ('converting','mutating')
+                   AND c.erp_op_started_at > now() - interval '30 minutes')))
+)::bool AS guarded
+`
+
+type HasStockGuardForProductParams struct {
+	ExternalProductID string      `json:"external_product_id"`
+	StoreID           pgtype.UUID `json:"store_id"`
+	ExternalSource    string      `json:"external_source"`
+}
+
+// Guard do sync de estoque vindo de webhook: TRUE quando o valor absoluto
+// reportado pelo ERP não pode sobrescrever o contador local — (a) live ativa
+// com reserva ativa segurando o produto (mesma semântica do antigo
+// HasActiveEventForProduct, agora com escopo por loja), ou (b) cart pago com
+// finalização ERP em voo ou falha recente contendo o produto: a reversão das
+// reservas na finalização infla o saldo do ERP por alguns segundos e o
+// overwrite local promoveria a waitlist contra unidades já vendidas.
+func (q *Queries) HasStockGuardForProduct(ctx context.Context, arg HasStockGuardForProductParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasStockGuardForProduct, arg.ExternalProductID, arg.StoreID, arg.ExternalSource)
+	var guarded bool
+	err := row.Scan(&guarded)
+	return guarded, err
+}
+
 const listActiveReservationsByCart = `-- name: ListActiveReservationsByCart :many
 SELECT id, event_id, cart_id, product_id, external_product_id, quantity, erp_movement_id, status, created_at, reversed_at FROM stock_reservations WHERE cart_id = $1 AND status = 'active' ORDER BY created_at ASC
 `
@@ -225,6 +273,19 @@ func (q *Queries) ListActiveReservationsByEvent(ctx context.Context, eventID pgt
 		return nil, err
 	}
 	return items, nil
+}
+
+const reverseReservationByID = `-- name: ReverseReservationByID :exec
+UPDATE stock_reservations SET status = 'reversed', reversed_at = now()
+WHERE id = $1 AND status = 'active'
+`
+
+// Marcação per-row da finalização retomável: cada reserva só vira 'reversed'
+// depois que o Tiny confirmou a entrada E correspondente — o resume estorna
+// apenas as que continuam 'active'.
+func (q *Queries) ReverseReservationByID(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, reverseReservationByID, id)
+	return err
 }
 
 const reverseReservationsByCart = `-- name: ReverseReservationsByCart :exec

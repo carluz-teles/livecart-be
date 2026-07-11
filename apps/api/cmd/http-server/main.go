@@ -439,6 +439,17 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// the real-time `comments` webhook takes over for each post.
 			integrationSvc.StartPostCommentPolling(context.Background())
 
+			// Sweep do pedido-como-reserva (design C): reconcilia conversões e
+			// mutações presas em voo (processo morto no meio do ciclo) — adota
+			// pedidos órfãos via marcador e termina o trabalho.
+			go func() {
+				ticker := time.NewTicker(5 * time.Minute)
+				defer ticker.Stop()
+				for range ticker.C {
+					integrationSvc.RunERPOrderOpsSweep(context.Background())
+				}
+			}()
+
 			log.Info("integration layer initialized")
 		}
 	}

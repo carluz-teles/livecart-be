@@ -306,6 +306,15 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 			output.Customer = customer
 			output.ShippingAddress = address
 			output.Cart.IsReturningCustomer = true
+
+			// Cliente recorrente com dados conhecidos: pré-aquece o contato no
+			// Tiny em background para a conversão na iniciação do pagamento
+			// encontrar o cache quente (design C). Best-effort.
+			if customer != nil {
+				go s.integrationService.PrewarmERPContact(context.Background(),
+					cart.StoreID, cart.PlatformUserID, cart.PlatformHandle,
+					customer.Name, customer.Document, customer.Email, customer.Phone)
+			}
 		}
 	}
 
@@ -336,6 +345,10 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 	if err := s.repo.UpdateCustomerEmail(ctx, input.Token, input.Email); err != nil {
 		return nil, err
 	}
+
+	// Iniciação de pagamento via link hospedado: mesmo gancho de conversão do
+	// pedido-como-reserva (design C, flag por loja).
+	go s.integrationService.PrepareCartForPayment(context.Background(), cart.ID, cart.StoreID)
 
 	// Get cart items
 	items, err := s.repo.ListCartItems(ctx, cart.ID)
@@ -675,6 +688,11 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		return nil, err
 	}
 
+	// Iniciação de pagamento = ponto de conversão do pedido-como-reserva
+	// (design C, flag por loja). Fire-and-forget: o pagamento nunca espera o
+	// ERP — o webhook de pago retoma/adota se a conversão estiver em voo.
+	go s.integrationService.PrepareCartForPayment(context.Background(), cart.ID, cart.StoreID)
+
 	// Get cart items
 	items, err := s.repo.ListCartItems(ctx, cart.ID)
 	if err != nil {
@@ -863,6 +881,11 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	if err := s.repo.UpdateCheckoutCustomer(ctx, cart.ID, input.Email, input.CustomerName, input.CustomerDocument, input.CustomerPhone, input.ShippingAddress, input.WhatsappConsent); err != nil {
 		return nil, err
 	}
+
+	// Iniciação de pagamento = ponto de conversão do pedido-como-reserva
+	// (design C, flag por loja). Fire-and-forget: o pagamento nunca espera o
+	// ERP — o webhook de pago retoma/adota se a conversão estiver em voo.
+	go s.integrationService.PrepareCartForPayment(context.Background(), cart.ID, cart.StoreID)
 
 	// Get cart items
 	items, err := s.repo.ListCartItems(ctx, cart.ID)

@@ -2,3 +2,5 @@
 
 # Debug artifacts (Playwright MCP sessions)
 .playwright-mcp/
+tiny-sandbox-results/
+tiny-sandbox-bin

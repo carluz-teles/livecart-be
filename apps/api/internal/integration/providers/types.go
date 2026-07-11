@@ -248,6 +248,29 @@ type ERPProvider interface {
 	// CancelOrder reverses stock and cancels an order in the ERP.
 	CancelOrder(ctx context.Context, orderID string) error
 
+	// UpdateOrderItems replaces the order's item grid (PUT /pedidos/{id}/itens).
+	// The ERP blocks this while the order stock is launched ("estoque lançado")
+	// — callers must run the estornar → PUT → lançar cycle.
+	UpdateOrderItems(ctx context.Context, orderID string, items []ERPOrderItem) error
+
+	// UpdateOrderPayment writes the real payment installments onto an existing
+	// order (PUT /pedidos/{id}). No stock movement — the confirm path of the
+	// order-as-reservation flow depends on that.
+	UpdateOrderPayment(ctx context.Context, orderID string, payment *ERPOrderPayment) error
+
+	// SetOrderSituacao transitions the order status (PUT /pedidos/{id}/situacao).
+	// Situação codes: 0 Aberta · 3 Aprovada · 2 Cancelada (swagger v3.1).
+	SetOrderSituacao(ctx context.Context, orderID string, situacao int) error
+
+	// AddOrderMarker tags the order (POST /pedidos/{id}/marcadores). LiveCart's
+	// idempotency anchor is the marker lc-cart-<cartID>.
+	AddOrderMarker(ctx context.Context, orderID, marker string) error
+
+	// FindOrderIDByMarker resolves an order by marker (GET /pedidos?marcadores=,
+	// exact match — validated in sandbox 11/07, ~300ms read-after-write).
+	// Returns "" when not found.
+	FindOrderIDByMarker(ctx context.Context, marker string) (string, error)
+
 	// ReserveStock creates a manual stock exit in the ERP. Returns movement ID.
 	ReserveStock(ctx context.Context, productID string, qty int, unitPrice float64, obs string) (string, error)
 

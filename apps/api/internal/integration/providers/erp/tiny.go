@@ -922,6 +922,11 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		"ecommerce": map[string]any{
 			"numeroPedidoEcommerce": order.ExternalID,
 		},
+		// numeroPedidoEcommerce é IGNORADO em contas sem canal e-commerce
+		// cadastrado (validado em sandbox 11/07: o GET devolve o campo vazio).
+		// numeroOrdemCompra é gravado sempre — é o vínculo pedido↔cart que
+		// sobrevive no Tiny e o insumo da reconciliação por varredura.
+		"numeroOrdemCompra": "lc-cart-" + order.ExternalID,
 	}
 
 	if addr := order.ShippingAddress; addr != nil {
@@ -1655,6 +1660,132 @@ func (t *Tiny) CancelOrder(ctx context.Context, orderID string) error {
 	}
 
 	return nil
+}
+
+// UpdateOrderItems replaces the order's item grid via PUT /pedidos/{id}/itens.
+// Spec (v3.1): "O corpo substitui os itens atuais; totais, impostos e valores
+// das parcelas existentes são recalculados." — nunca chamar depois de gravar
+// parcelas reais sem reenviá-las. Com estoque lançado o Tiny bloqueia com
+// 400 motivosBloqueio "estoque lançado" (validado em sandbox 11/07): o ciclo
+// obrigatório é estornar-estoque → PUT /itens → lancar-estoque.
+func (t *Tiny) UpdateOrderItems(ctx context.Context, orderID string, items []providers.ERPOrderItem) error {
+	endpoint := fmt.Sprintf("%s/pedidos/%s/itens", tinyAPIBaseURL, orderID)
+
+	grid := make([]map[string]any, len(items))
+	for i, item := range items {
+		productID, _ := strconv.ParseInt(item.ProductID, 10, 64)
+		grid[i] = map[string]any{
+			"produto":       map[string]any{"id": productID},
+			"quantidade":    item.Quantity,
+			"valorUnitario": float64(item.UnitPrice) / 100,
+		}
+	}
+
+	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, map[string]any{"itens": grid}, t.authHeaders())
+	if err != nil {
+		return fmt.Errorf("updating order items: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return fmt.Errorf("update order items failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+	}
+	t.Logger.Info("tiny order items updated",
+		zap.String("order_id", orderID),
+		zap.Int("items", len(items)),
+	)
+	return nil
+}
+
+// UpdateOrderPayment writes the real gateway installments onto an existing
+// order via PUT /pedidos/{id} — pagamento/parcelas only, zero movimentação de
+// estoque (shape do swagger {dias,data,valor} validado em sandbox 11/07; o
+// PUT parcial não anula campos omitidos).
+func (t *Tiny) UpdateOrderPayment(ctx context.Context, orderID string, payment *providers.ERPOrderPayment) error {
+	if payment == nil {
+		return nil
+	}
+	endpoint := fmt.Sprintf("%s/pedidos/%s", tinyAPIBaseURL, orderID)
+
+	// formaRecebimento é OMITIDO de propósito: o pedido do fluxo
+	// pedido-como-reserva nasce SEM pagamento (situação Aberta), e o Tiny
+	// valida a formaRecebimento da parcela contra a do PEDIDO — divergência
+	// rejeita com 400 "Forma de recebimento da parcela diferente da forma de
+	// recebimento do pedido" (observado no E2E de 11/07 contra a conta real;
+	// o PUT /pedidos não aceita formaRecebimento no nível do pedido para
+	// alinhar antes). Custo: a parcela cai na categorização default de contas
+	// a receber — refinamento futuro: gravar pagamento.formaRecebimento já no
+	// POST da conversão quando o método do checkout for conhecido.
+	parcelas := buildTinyParcelas(payment, nil, nil)
+	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, map[string]any{
+		"pagamento": map[string]any{"parcelas": parcelas},
+	}, t.authHeaders())
+	if err != nil {
+		return fmt.Errorf("updating order payment: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return fmt.Errorf("update order payment failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+	}
+	t.Logger.Info("tiny order payment updated",
+		zap.String("order_id", orderID),
+		zap.String("method", payment.Method),
+		zap.Int("parcelas", len(parcelas)),
+	)
+	return nil
+}
+
+// SetOrderSituacao transitions the order status via PUT /pedidos/{id}/situacao.
+// Codes (swagger v3.1): 0 Aberta · 3 Aprovada · 2 Cancelada · 1 Faturada etc.
+// Cancelar NÃO devolve estoque lançado (sandbox T7) — o par obrigatório do
+// cancelamento é SetOrderSituacao(2) seguido de ReverseOrderStock.
+func (t *Tiny) SetOrderSituacao(ctx context.Context, orderID string, situacao int) error {
+	endpoint := fmt.Sprintf("%s/pedidos/%s/situacao", tinyAPIBaseURL, orderID)
+	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, map[string]any{"situacao": situacao}, t.authHeaders())
+	if err != nil {
+		return fmt.Errorf("setting order situacao: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return fmt.Errorf("set order situacao %d failed: status %d: %s", situacao, resp.StatusCode, tinyErrorDetail(body))
+	}
+	return nil
+}
+
+// AddOrderMarker tags the order via POST /pedidos/{id}/marcadores. O marcador
+// lc-cart-<cartID> é a âncora de idempotência do fluxo pedido-como-reserva.
+func (t *Tiny) AddOrderMarker(ctx context.Context, orderID, marker string) error {
+	endpoint := fmt.Sprintf("%s/pedidos/%s/marcadores", tinyAPIBaseURL, orderID)
+	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, []map[string]any{{"descricao": marker}}, t.authHeaders())
+	if err != nil {
+		return fmt.Errorf("adding order marker: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return fmt.Errorf("add order marker failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+	}
+	return nil
+}
+
+// FindOrderIDByMarker resolves an order by marker via GET /pedidos?marcadores=.
+// Match exato com read-after-write de ~300ms (sandbox T8; a forma com
+// colchetes `marcadores[]=` NÃO funciona). Retorna "" quando não encontrado.
+func (t *Tiny) FindOrderIDByMarker(ctx context.Context, marker string) (string, error) {
+	endpoint := fmt.Sprintf("%s/pedidos?marcadores=%s", tinyAPIBaseURL, url.QueryEscape(marker))
+	resp, body, err := t.DoRequestWithRetry(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return "", fmt.Errorf("searching order by marker: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return "", fmt.Errorf("search order by marker failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+	}
+	var result struct {
+		Itens []struct {
+			ID int64 `json:"id"`
+		} `json:"itens"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("parsing marker search response: %w", err)
+	}
+	if len(result.Itens) == 0 {
+		return "", nil
+	}
+	return strconv.FormatInt(result.Itens[0].ID, 10), nil
 }
 
 // ReserveStock creates a manual stock exit (tipo S) in Tiny for the given product.

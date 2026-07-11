@@ -40,3 +40,44 @@ SELECT EXISTS(
     JOIN live_events le ON le.id = sr.event_id
     WHERE sr.external_product_id = $1 AND sr.status = 'active' AND le.status = 'active'
 ) AS has_active;
+
+-- name: HasStockGuardForProduct :one
+-- Guard do sync de estoque vindo de webhook: TRUE quando o valor absoluto
+-- reportado pelo ERP não pode sobrescrever o contador local — (a) live ativa
+-- com reserva ativa segurando o produto (mesma semântica do antigo
+-- HasActiveEventForProduct, agora com escopo por loja), ou (b) cart pago com
+-- finalização ERP em voo ou falha recente contendo o produto: a reversão das
+-- reservas na finalização infla o saldo do ERP por alguns segundos e o
+-- overwrite local promoveria a waitlist contra unidades já vendidas.
+SELECT (
+    EXISTS(
+        SELECT 1 FROM stock_reservations sr
+        JOIN live_events le ON le.id = sr.event_id
+        JOIN products p ON p.id = sr.product_id
+        WHERE sr.external_product_id = sqlc.arg(external_product_id)
+          AND p.store_id = sqlc.arg(store_id)
+          AND sr.status = 'active'
+          AND le.status = 'active')
+    OR EXISTS(
+        SELECT 1 FROM carts c
+        JOIN cart_items ci ON ci.cart_id = c.id
+        JOIN products p2 ON p2.id = ci.product_id
+        WHERE p2.store_id = sqlc.arg(store_id)
+          AND p2.external_source = sqlc.arg(external_source)
+          AND p2.external_id = sqlc.arg(external_product_id)
+          AND ((c.payment_status = 'paid'
+                AND c.erp_finalisation_status <> 'done'
+                AND (c.paid_at > now() - interval '30 minutes'
+                     OR c.erp_last_attempt_at > now() - interval '30 minutes'))
+               -- design C: conversão/mutação em voo também movimenta o saldo
+               -- transitoriamente (estornos do ciclo) — mesma supressão
+               OR (c.erp_order_state IN ('converting','mutating')
+                   AND c.erp_op_started_at > now() - interval '30 minutes')))
+)::bool AS guarded;
+
+-- name: ReverseReservationByID :exec
+-- Marcação per-row da finalização retomável: cada reserva só vira 'reversed'
+-- depois que o Tiny confirmou a entrada E correspondente — o resume estorna
+-- apenas as que continuam 'active'.
+UPDATE stock_reservations SET status = 'reversed', reversed_at = now()
+WHERE id = $1 AND status = 'active';

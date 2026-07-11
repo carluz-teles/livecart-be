@@ -552,12 +552,13 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	if isProductEvent && productID != "" {
 		go func() {
 			ctx := context.Background()
-			if err := h.service.ProcessProductWebhook(ctx, storeID, "tiny", productID); err != nil {
+			stockApplied, syncErr := h.service.ProcessProductWebhook(ctx, storeID, "tiny", productID)
+			if syncErr != nil {
 				h.logger.Error("failed to process product webhook",
 					zap.String("store_id", storeID),
 					zap.String("tipo", webhook.Tipo),
 					zap.String("id_produto", productID),
-					zap.Error(err),
+					zap.Error(syncErr),
 				)
 			}
 
@@ -566,7 +567,22 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 			// o catch-all do "ERP devolveu estoque por mudança manual"
 			// — para release vindo de carts/checkout o caller já chama
 			// ProcessWaitlistForProduct inline; aqui é o backstop.
+			//
+			// Condicionado ao sync ter APLICADO o estoque local: se o sync
+			// falhou ou o guard segurou o overwrite (reserva ativa ou
+			// finalização ERP em voo), promover agora agiria sobre um
+			// contador stale/envenenado. O próximo webhook do produto
+			// re-dispara o backstop com o guard desarmado.
 			if webhook.Tipo == "estoque" {
+				if syncErr != nil || !stockApplied {
+					h.logger.Info("skipping waitlist backstop: stock sync not applied",
+						zap.String("store_id", storeID),
+						zap.String("external_product_id", productID),
+						zap.Bool("stock_applied", stockApplied),
+						zap.Bool("sync_failed", syncErr != nil),
+					)
+					return
+				}
 				if err := h.service.ProcessWaitlistAfterStockWebhook(ctx, storeID, "tiny", productID); err != nil {
 					h.logger.Warn("failed to process waitlist after stock webhook",
 						zap.String("store_id", storeID),

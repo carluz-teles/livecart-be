@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -2421,6 +2422,191 @@ func (r *Repository) ConvertReservationsByEvent(ctx context.Context, eventID str
 // HasActiveEventForProduct checks if a product has active reservations in a running event.
 func (r *Repository) HasActiveEventForProduct(ctx context.Context, externalProductID string) (bool, error) {
 	return r.queries.HasActiveEventForProduct(ctx, externalProductID)
+}
+
+// MarkCartERPFinalisationAttempt persists the gateway snapshot (first write
+// wins) and stamps erp_last_attempt_at/erp_attempts_count BEFORE the
+// finalisation touches the ERP — S1 of the resumable state machine.
+func (r *Repository) MarkCartERPFinalisationAttempt(ctx context.Context, cartID string, paymentSnapshot []byte) error {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	return r.queries.MarkCartERPFinalisationAttempt(ctx, sqlc.MarkCartERPFinalisationAttemptParams{
+		ID:                 id,
+		ErpPaymentSnapshot: paymentSnapshot,
+	})
+}
+
+// ReverseReservationByID marks a single reservation reversed — only after the
+// ERP confirmed the corresponding entrada E. The resume path re-reverses only
+// rows still 'active'.
+func (r *Repository) ReverseReservationByID(ctx context.Context, reservationID string) error {
+	id, err := parseUUID(reservationID)
+	if err != nil {
+		return err
+	}
+	return r.queries.ReverseReservationByID(ctx, id)
+}
+
+// CartERPOrderState is the order-as-reservation lifecycle snapshot (design C).
+type CartERPOrderState struct {
+	State           string
+	StockLaunched   bool
+	ExternalOrderID string
+}
+
+// GetCartERPOrderState reads the cart's order-as-reservation state.
+func (r *Repository) GetCartERPOrderState(ctx context.Context, cartID string) (*CartERPOrderState, error) {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.GetCartERPOrderState(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &CartERPOrderState{
+		State:           row.ErpOrderState,
+		StockLaunched:   row.ErpStockLaunched,
+		ExternalOrderID: row.ExternalOrderID,
+	}, nil
+}
+
+// TransitionCartERPOrderState is the CAS of the order-as-reservation state
+// machine. Returns false when the current state differs from `from` — the
+// single-flight primitive of conversion/mutation.
+func (r *Repository) TransitionCartERPOrderState(ctx context.Context, cartID, from, to string) (bool, error) {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return false, err
+	}
+	rows, err := r.queries.TransitionCartERPOrderState(ctx, sqlc.TransitionCartERPOrderStateParams{
+		CartID:    id,
+		FromState: from,
+		ToState:   to,
+	})
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
+}
+
+// SetCartERPStockLaunched flips the durable "order stock launched" marker.
+func (r *Repository) SetCartERPStockLaunched(ctx context.Context, cartID string, launched bool) error {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	return r.queries.SetCartERPStockLaunched(ctx, sqlc.SetCartERPStockLaunchedParams{
+		ID:               id,
+		ErpStockLaunched: launched,
+	})
+}
+
+// StuckERPOrderOp is a conversion/mutation stuck in flight (process died).
+type StuckERPOrderOp struct {
+	CartID          string
+	State           string
+	ExternalOrderID string
+	StoreID         string
+}
+
+// ListStuckERPOrderOps lists carts stuck in converting/mutating older than
+// the threshold — input for the reconciliation sweep.
+func (r *Repository) ListStuckERPOrderOps(ctx context.Context, olderThan time.Duration) ([]StuckERPOrderOp, error) {
+	rows, err := r.queries.ListStuckERPOrderOps(ctx, int32(olderThan.Seconds()))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]StuckERPOrderOp, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, StuckERPOrderOp{
+			CartID:          uuidToString(row.ID),
+			State:           row.ErpOrderState,
+			ExternalOrderID: row.ExternalOrderID,
+			StoreID:         uuidToString(row.StoreID),
+		})
+	}
+	return out, nil
+}
+
+// AcquireCartFinalisationLock takes a session-scoped Postgres advisory lock
+// keyed on the cart id, held on a dedicated pool connection (advisory locks
+// are per-connection). acquired=false means another finalisation of the SAME
+// cart is running right now — gateway webhooks arrive duplicated and each one
+// spawns its own goroutine (webhook_handler.go), so the loser just bails.
+// The caller MUST call release() when acquired.
+func (r *Repository) AcquireCartFinalisationLock(ctx context.Context, cartID string) (release func(), acquired bool, err error) {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte("erp_finalisation:" + cartID))
+	key := int64(h.Sum64())
+
+	conn, err := r.pool.Acquire(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("acquiring connection for advisory lock: %w", err)
+	}
+	var ok bool
+	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&ok); err != nil {
+		conn.Release()
+		return nil, false, fmt.Errorf("pg_try_advisory_lock: %w", err)
+	}
+	if !ok {
+		conn.Release()
+		return nil, false, nil
+	}
+	release = func() {
+		// context.Background(): the unlock must run even when the caller's
+		// ctx was cancelled mid-finalisation.
+		_, _ = conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", key)
+		conn.Release()
+	}
+	return release, true, nil
+}
+
+// HasStockGuardForProduct reports whether the ERP-reported absolute stock must
+// NOT overwrite the local counter right now: live ativa com reserva ativa
+// (escopo por loja) OU cart pago com finalização ERP em voo/falha recente
+// contendo o produto. Substitui HasActiveEventForProduct no sync de webhook.
+func (r *Repository) HasStockGuardForProduct(ctx context.Context, externalProductID, storeID, externalSource string) (bool, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return false, err
+	}
+	return r.queries.HasStockGuardForProduct(ctx, sqlc.HasStockGuardForProductParams{
+		ExternalProductID: externalProductID,
+		StoreID:           sID,
+		ExternalSource:    externalSource,
+	})
+}
+
+// HasInFlightFinalisationForProduct reports whether some paid cart containing
+// the product still has its ERP finalisation pending/failed within the guard
+// window — promotion triggered by stock webhooks must wait it out.
+func (r *Repository) HasInFlightFinalisationForProduct(ctx context.Context, productID string) (bool, error) {
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return false, err
+	}
+	return r.queries.HasInFlightFinalisationForProduct(ctx, pID)
+}
+
+// GetCartItemAvailableQty returns quantity - waitlisted_quantity for one cart
+// item — the units the live add actually decremented from local stock.
+func (r *Repository) GetCartItemAvailableQty(ctx context.Context, cartID, productID string) (int, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return 0, err
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return 0, err
+	}
+	qty, err := r.queries.GetCartItemAvailableQty(ctx, sqlc.GetCartItemAvailableQtyParams{
+		CartID:    cID,
+		ProductID: pID,
+	})
+	return int(qty), err
 }
 
 // StoreInfo contains minimal store information needed for notifications.
