@@ -2476,8 +2476,11 @@ func (t *Tiny) HealthCheck(ctx context.Context) (*providers.ERPHealthCheckResult
 
 	items := make([]providers.ERPHealthCheckItem, len(jobs))
 	g, gctx := errgroup.WithContext(ctx)
-	// Cap concurrency to avoid hammering Tiny if the job list grows.
-	g.SetLimit(8)
+	// Concorrência 3 (era 8): o burst de 7 lookups simultâneos estourava o
+	// rate limit do Tiny e enchia a auditoria de falsos transitórios. Com 3,
+	// o wall-time segue ~3 roundtrips e o 429 praticamente some — e quando
+	// acontecer, agora vira status "unknown", não falsa pendência.
+	g.SetLimit(3)
 
 	for i := range jobs {
 		i := i
