@@ -1401,3 +1401,206 @@ func TestStaleStockWebhookDetection(t *testing.T) {
 		t.Fatal("integração com evento recente não deveria alertar")
 	}
 }
+
+// ============================================================================
+// RACE CONDITION — reprodução literal da timeline t0-t8 do relatório
+// (a promoção fantasma da waitlist que originou toda a refatoração)
+// ============================================================================
+
+// Cenário: produto esgotado (estoque local 0), cliente A pagou 1 unidade e sua
+// finalização ERP está EM VOO (reserva active, cart paid+pending), cliente B
+// esperando na fila. Durante a finalização, a reversão da reserva de A infla o
+// saldo do Tiny → webhook tipo=estoque chega. SEM o guard, o backstop promovia
+// B contra uma unidade que não existe (DM irreversível + Tiny negativo). COM o
+// guard, a promoção é ADIADA enquanto a finalização de A está em voo.
+func TestRaceWaitlistPhantomPromotionBlockedDuringFinalisation(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	fx := seedPaidCart(t, 1, 1) // cart A: paid+pending, 1 reserva active
+	ext := extProductID(t, fx.productID)
+
+	// Produto esgotado: estoque local 0 (A já consumiu na live).
+	if _, err := testPool.Exec(ctx, `UPDATE products SET stock = 0 WHERE id = $1`, fx.productID); err != nil {
+		t.Fatalf("zerando estoque: %v", err)
+	}
+	// Cliente B na fila para o MESMO produto/evento.
+	seedWaitingBuyer(t, fx, "B")
+
+	fake := newScriptedERP()
+	svc := newFinalisationService(fake)
+	svc.productSyncer = raceStubالسyncer{ext: ext}
+
+	// t3: webhook de estoque chega COM a finalização de A em voo (paid+pending).
+	if err := svc.ProcessWaitlistAfterStockWebhook(ctx, fx.storeID, "tiny", ext); err != nil {
+		t.Fatalf("backstop: %v", err)
+	}
+
+	// B NÃO pode ter sido promovido — guard armado.
+	if s := waitlistStatus(t, fx.eventID, fx.productID); s != "waiting" {
+		t.Fatalf("PROMOÇÃO FANTASMA: B saiu de 'waiting' para %q com finalização em voo", s)
+	}
+	if st := localStock(t, fx.productID); st != 0 {
+		t.Fatalf("estoque local mexeu (=%d) — guard não segurou", st)
+	}
+	if fake.count("ReReserve") != 0 {
+		t.Fatalf("saída manual criada para B durante o race: %v", fake.calls)
+	}
+
+	// t8+: finalização de A conclui (done) → o guard desarma → o PRÓXIMO
+	// webhook promove B legitimamente (agora com estoque real devolvido).
+	if err := testRepo.MarkCartERPFinalisationDone(ctx, fx.cartID); err != nil {
+		t.Fatalf("mark done: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `UPDATE products SET stock = 1 WHERE id = $1`, fx.productID); err != nil {
+		t.Fatalf("devolvendo 1 unidade real: %v", err)
+	}
+	if err := svc.ProcessWaitlistAfterStockWebhook(ctx, fx.storeID, "tiny", ext); err != nil {
+		t.Fatalf("backstop pós-done: %v", err)
+	}
+	if s := waitlistStatus(t, fx.eventID, fx.productID); s != "notified" {
+		t.Fatalf("B deveria ser promovido após o guard desarmar (status=%q)", s)
+	}
+}
+
+// Controle negativo: sem finalização em voo e com estoque real, a promoção
+// acontece — prova que o guard bloqueia SÓ a janela perigosa, não sempre.
+func TestRaceWaitlistPromotesWhenStockGenuinelyFree(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	fx := seedPaidCart(t, 1, 0)
+	ext := extProductID(t, fx.productID)
+	// Cart A já finalizado (não arma guard) e estoque real devolvido.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE carts SET erp_finalisation_status = 'done', payment_status = 'paid' WHERE id = $1`, fx.cartID); err != nil {
+		t.Fatalf("marcando A done: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `UPDATE products SET stock = 1 WHERE id = $1`, fx.productID); err != nil {
+		t.Fatalf("estoque: %v", err)
+	}
+	seedWaitingBuyer(t, fx, "B")
+
+	svc := newFinalisationService(newScriptedERP())
+	svc.productSyncer = raceStubالسyncer{ext: ext}
+
+	if err := svc.ProcessWaitlistAfterStockWebhook(ctx, fx.storeID, "tiny", ext); err != nil {
+		t.Fatalf("backstop: %v", err)
+	}
+	if s := waitlistStatus(t, fx.eventID, fx.productID); s != "notified" {
+		t.Fatalf("B deveria ser promovido com estoque livre (status=%q)", s)
+	}
+	if st := localStock(t, fx.productID); st != 0 {
+		t.Fatalf("promoção deveria consumir a unidade (estoque=%d)", st)
+	}
+}
+
+// Concorrência real: dois webhooks de estoque batendo ao mesmo tempo com UMA
+// unidade livre e DOIS clientes na fila — o gate atômico DecrementProductStock
+// garante que só um é promovido (sem over-promote).
+func TestRaceConcurrentWebhooksSinglePromotion(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	fx := seedPaidCart(t, 1, 0)
+	ext := extProductID(t, fx.productID)
+	if _, err := testPool.Exec(ctx,
+		`UPDATE carts SET erp_finalisation_status = 'done' WHERE id = $1`, fx.cartID); err != nil {
+		t.Fatalf("done: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `UPDATE products SET stock = 1 WHERE id = $1`, fx.productID); err != nil {
+		t.Fatalf("estoque: %v", err)
+	}
+	seedWaitingBuyer(t, fx, "B")
+	seedWaitingBuyer(t, fx, "C")
+
+	svc := newFinalisationService(newScriptedERP())
+	svc.productSyncer = raceStubالسyncer{ext: ext}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = svc.ProcessWaitlistAfterStockWebhook(ctx, fx.storeID, "tiny", ext)
+		}()
+	}
+	wg.Wait()
+
+	var notified int
+	if err := testPool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM waitlist_items WHERE event_id = $1 AND product_id = $2 AND status = 'notified'`,
+		fx.eventID, fx.productID).Scan(&notified); err != nil {
+		t.Fatalf("contando notified: %v", err)
+	}
+	if notified != 1 {
+		t.Fatalf("over-promote: %d clientes promovidos para 1 unidade", notified)
+	}
+	if st := localStock(t, fx.productID); st != 0 {
+		t.Fatalf("estoque final = %d (esperado 0)", st)
+	}
+}
+
+// --- helpers do race ---
+
+type raceStubالسyncer struct{ ext string }
+
+func (s raceStubالسyncer) HasProduct(ctx context.Context, storeID, externalID, externalSource string) (bool, error) {
+	return true, nil
+}
+func (s raceStubالسyncer) GetProduct(ctx context.Context, storeID, productID string) (string, string, error) {
+	return s.ext, "tiny", nil
+}
+func (s raceStubالسyncer) SyncProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct, skipStock bool) error {
+	return nil
+}
+func (s raceStubالسyncer) ImportProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct) (string, error) {
+	return "", nil
+}
+
+func seedWaitingBuyer(t *testing.T, fx finFixture, tag string) {
+	t.Helper()
+	ctx := context.Background()
+	seedSeq++
+	uniq := fmt.Sprintf("%s-%d", tag, seedSeq) // único entre testes (DB compartilhado)
+	var pos int
+	_ = testPool.QueryRow(ctx,
+		`SELECT COALESCE(MAX(position),0)+1 FROM waitlist_items WHERE event_id=$1 AND product_id=$2`,
+		fx.eventID, fx.productID).Scan(&pos)
+	var cartID string
+	if err := testPool.QueryRow(ctx,
+		`INSERT INTO carts (event_id, platform_user_id, platform_handle, token, short_id, status, payment_status)
+		 VALUES ($1, 'user-'||$2, '@wl'||$2, 'tokwl-'||$2, (floor(random()*90000)+1)::int, 'checkout', 'unpaid')
+		 RETURNING id::text`, fx.eventID, uniq).Scan(&cartID); err != nil {
+		t.Fatalf("seed cart B/%s: %v", tag, err)
+	}
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity)
+		 VALUES ($1, $2, 1, 1000, 1)`, cartID, fx.productID); err != nil {
+		t.Fatalf("seed cart_item wl: %v", err)
+	}
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO waitlist_items (event_id, product_id, platform_user_id, platform_handle, quantity, position, cart_id, status)
+		 VALUES ($1, $2, 'user-'||$3, '@wl'||$3, 1, $4, $5, 'waiting')`,
+		fx.eventID, fx.productID, uniq, pos, cartID); err != nil {
+		t.Fatalf("seed waitlist_item: %v", err)
+	}
+}
+
+func waitlistStatus(t *testing.T, eventID, productID string) string {
+	t.Helper()
+	var s string
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT status FROM waitlist_items WHERE event_id=$1 AND product_id=$2 ORDER BY position ASC LIMIT 1`,
+		eventID, productID).Scan(&s); err != nil {
+		t.Fatalf("lendo waitlist status: %v", err)
+	}
+	return s
+}
+
+func localStock(t *testing.T, productID string) int {
+	t.Helper()
+	var n int
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT stock FROM products WHERE id=$1`, productID).Scan(&n); err != nil {
+		t.Fatalf("lendo stock: %v", err)
+	}
+	return n
+}
