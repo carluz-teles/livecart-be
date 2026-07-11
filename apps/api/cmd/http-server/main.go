@@ -441,12 +441,23 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 			// Sweep do pedido-como-reserva (design C): reconcilia conversões e
 			// mutações presas em voo (processo morto no meio do ciclo) — adota
-			// pedidos órfãos via marcador e termina o trabalho.
+			// pedidos órfãos via marcador e termina o trabalho. O health-check
+			// de entrega de webhook roda no mesmo loop, a cada hora: o Tiny
+			// REMOVE a URL cadastrada após falhas consecutivas e para de
+			// entregar em silêncio — sem este alarme, a loja fica sem sync até
+			// alguém notar.
 			go func() {
-				ticker := time.NewTicker(5 * time.Minute)
-				defer ticker.Stop()
-				for range ticker.C {
-					integrationSvc.RunERPOrderOpsSweep(context.Background())
+				sweepTicker := time.NewTicker(5 * time.Minute)
+				webhookTicker := time.NewTicker(1 * time.Hour)
+				defer sweepTicker.Stop()
+				defer webhookTicker.Stop()
+				for {
+					select {
+					case <-sweepTicker.C:
+						integrationSvc.RunERPOrderOpsSweep(context.Background())
+					case <-webhookTicker.C:
+						integrationSvc.CheckTinyStockWebhookDelivery(context.Background(), 12*time.Hour)
+					}
 				}
 			}()
 

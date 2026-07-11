@@ -1225,3 +1225,179 @@ func TestExpiredConvertedCartCancelsOrder(t *testing.T) {
 		t.Fatalf("cart status = %q (err=%v)", cartStatus, err)
 	}
 }
+
+// ============================================================================
+// Sweep, refund, guard composto e health-check de entrega de webhook
+// ============================================================================
+
+func TestSweepFinishesStuckConversion(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 1, 1)
+	fake := newScriptedERP()
+	svc := newFinalisationService(fake)
+
+	// Conversão que morreu após criar o pedido: converting + order gravado,
+	// op velha, reserva manual ainda active.
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE carts SET erp_order_state = 'converting', external_order_id = 'ORD-SW1',
+		        erp_op_started_at = now() - interval '30 minutes' WHERE id = $1`, fx.cartID); err != nil {
+		t.Fatalf("seed stuck: %v", err)
+	}
+
+	svc.RunERPOrderOpsSweep(context.Background())
+
+	state, launched, orderID := cartOrderState(t, fx.cartID)
+	if state != "open" || !launched || orderID != "ORD-SW1" {
+		t.Fatalf("sweep não terminou a conversão: state=%q launched=%v order=%q", state, launched, orderID)
+	}
+	if fake.count("Launch:ORD-SW1") != 1 || fake.count("CreateOrder") != 0 {
+		t.Fatalf("sweep deve lançar sem criar pedido novo: %v", fake.calls)
+	}
+	if n := activeReservationCount(t, fx.cartID); n != 0 {
+		t.Fatalf("sweep não estornou a reserva (n=%d)", n)
+	}
+}
+
+func TestSweepAdoptsOrphanConversionByMarker(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 1, 0)
+	fake := newScriptedERP()
+	fake.markerOrders = map[string]string{"lc-cart-" + fx.cartID: "ORD-SW2"}
+	svc := newFinalisationService(fake)
+
+	// Conversão que morreu ENTRE o POST e a persistência do id.
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE carts SET erp_order_state = 'converting',
+		        erp_op_started_at = now() - interval '30 minutes' WHERE id = $1`, fx.cartID); err != nil {
+		t.Fatalf("seed orphan: %v", err)
+	}
+
+	svc.RunERPOrderOpsSweep(context.Background())
+
+	state, _, orderID := cartOrderState(t, fx.cartID)
+	if state != "open" || orderID != "ORD-SW2" {
+		t.Fatalf("sweep não adotou o órfão: state=%q order=%q", state, orderID)
+	}
+	if fake.count("FindByMarker") != 1 || fake.count("CreateOrder") != 0 {
+		t.Fatalf("adoção errada: %v", fake.calls)
+	}
+}
+
+func TestRefundConvertedCartOrderReturnsStock(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 1, 1)
+	fake := newScriptedERP()
+	svc := newFinalisationService(fake)
+
+	if err := svc.EnsureERPOrderForCart(context.Background(), fx.cartID, fx.storeID); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if err := svc.ConfirmERPOrderPayment(context.Background(), fx.cartID, fx.storeID, testPaymentStatus()); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	if err := svc.RefundConvertedCartOrder(context.Background(), fx.cartID, fx.storeID); err != nil {
+		t.Fatalf("refund: %v", err)
+	}
+	iSit, iRev := fake.firstIndex("Situacao:2"), fake.firstIndex("OrderReverse")
+	if !(iSit >= 0 && iRev > iSit) {
+		t.Fatalf("refund deve cancelar e SÓ ENTÃO estornar: %v", fake.calls)
+	}
+	state, _, _ := cartOrderState(t, fx.cartID)
+	if state != "cancelled" {
+		t.Fatalf("state pós-refund = %q", state)
+	}
+	// Idempotente: segundo refund é no-op (estado já cancelled).
+	callsBefore := len(fake.calls)
+	if err := svc.RefundConvertedCartOrder(context.Background(), fx.cartID, fx.storeID); err != nil {
+		t.Fatalf("refund 2×: %v", err)
+	}
+	if len(fake.calls) != callsBefore {
+		t.Fatalf("refund duplo tocou o ERP: %v", fake.calls[callsBefore:])
+	}
+}
+
+// Guard composto: conversão/mutação em voo arma a supressão de sync/promoção
+// mesmo sem cart pago.
+func TestStockGuardArmsDuringConversion(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 1, 0)
+	ctx := context.Background()
+	if _, err := testPool.Exec(ctx,
+		`UPDATE carts SET payment_status = 'pending', paid_at = NULL,
+		        erp_order_state = 'converting', erp_op_started_at = now() WHERE id = $1`, fx.cartID); err != nil {
+		t.Fatalf("seed converting: %v", err)
+	}
+	ext := extProductID(t, fx.productID)
+
+	guarded, err := testRepo.HasStockGuardForProduct(ctx, ext, fx.storeID, "tiny")
+	if err != nil || !guarded {
+		t.Fatalf("guard deveria armar durante converting (guarded=%v err=%v)", guarded, err)
+	}
+	inFlight, err := testRepo.HasInFlightFinalisationForProduct(ctx, fx.productID)
+	if err != nil || !inFlight {
+		t.Fatalf("in-flight deveria armar durante converting (err=%v)", err)
+	}
+
+	if _, err := testPool.Exec(ctx,
+		`UPDATE carts SET erp_order_state = 'open' WHERE id = $1`, fx.cartID); err != nil {
+		t.Fatalf("move to open: %v", err)
+	}
+	guarded, err = testRepo.HasStockGuardForProduct(ctx, ext, fx.storeID, "tiny")
+	if err != nil {
+		t.Fatalf("guard pós-open: %v", err)
+	}
+	if guarded {
+		t.Fatal("guard deve DESARMAR em open (estado estável, sem ciclo em voo)")
+	}
+}
+
+// Health-check de entrega: integração ativa sem eventos de estoque na janela
+// é listada uma vez (dedupe de 24h via metadata).
+func TestStaleStockWebhookDetection(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 1, 0)
+	ctx := context.Background()
+
+	var integrationID string
+	if err := testPool.QueryRow(ctx,
+		`UPDATE integrations SET created_at = now() - interval '2 days'
+		 WHERE store_id = $1 AND provider = 'tiny' RETURNING id::text`, fx.storeID).Scan(&integrationID); err != nil {
+		t.Fatalf("envelhecendo integração: %v", err)
+	}
+
+	listedIDs := func() map[string]bool {
+		rows, err := testRepo.ListTinyIntegrationsWithStaleStockWebhook(ctx, 12*time.Hour)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		out := map[string]bool{}
+		for _, r := range rows {
+			out[r.IntegrationID] = true
+		}
+		return out
+	}
+
+	if !listedIDs()[integrationID] {
+		t.Fatal("integração sem eventos deveria ser listada")
+	}
+	// Dedupe: após o carimbo, some por 24h.
+	if err := testRepo.StampIntegrationStockWebhookAlert(ctx, integrationID); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	if listedIDs()[integrationID] {
+		t.Fatal("integração carimbada não deveria repetir o alerta")
+	}
+	// Evento recente também silencia (independente do carimbo).
+	if _, err := testPool.Exec(ctx,
+		`UPDATE integrations SET metadata = metadata - 'stock_webhook_alerted_at' WHERE id = $1::uuid;`, integrationID); err != nil {
+		t.Fatalf("limpando carimbo: %v", err)
+	}
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO webhook_events (integration_id, provider, event_type, event_id, payload, signature_valid)
+		 VALUES ($1::uuid, 'tiny', 'estoque', 'evt-1', '{}'::jsonb, true)`, integrationID); err != nil {
+		t.Fatalf("seed evento: %v", err)
+	}
+	if listedIDs()[integrationID] {
+		t.Fatal("integração com evento recente não deveria alertar")
+	}
+}

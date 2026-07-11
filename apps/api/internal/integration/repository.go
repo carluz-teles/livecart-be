@@ -2531,6 +2531,48 @@ func (r *Repository) ListStuckERPOrderOps(ctx context.Context, olderThan time.Du
 	return out, nil
 }
 
+// StaleStockWebhookIntegration is an active Tiny integration that stopped
+// receiving stock webhooks — the Tiny side silently removes the URL after
+// consecutive delivery failures (field lesson, 11/07/2026).
+type StaleStockWebhookIntegration struct {
+	IntegrationID    string
+	StoreID          string
+	LastStockEventAt *time.Time
+}
+
+// ListTinyIntegrationsWithStaleStockWebhook lists active Tiny integrations
+// with zero 'estoque' webhook events in the window and no alert in the last
+// 24h (dedupe stamped in metadata).
+func (r *Repository) ListTinyIntegrationsWithStaleStockWebhook(ctx context.Context, staleAfter time.Duration) ([]StaleStockWebhookIntegration, error) {
+	rows, err := r.queries.ListTinyIntegrationsWithStaleStockWebhook(ctx, int32(staleAfter.Hours()))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]StaleStockWebhookIntegration, 0, len(rows))
+	for _, row := range rows {
+		item := StaleStockWebhookIntegration{
+			IntegrationID: uuidToString(row.ID),
+			StoreID:       uuidToString(row.StoreID),
+		}
+		if row.LastStockEventAt.Valid {
+			t := row.LastStockEventAt.Time
+			item.LastStockEventAt = &t
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+// StampIntegrationStockWebhookAlert records the alert moment in the
+// integration metadata (24h dedupe for the delivery health-check).
+func (r *Repository) StampIntegrationStockWebhookAlert(ctx context.Context, integrationID string) error {
+	id, err := parseUUID(integrationID)
+	if err != nil {
+		return err
+	}
+	return r.queries.StampIntegrationStockWebhookAlert(ctx, id)
+}
+
 // AcquireCartFinalisationLock takes a session-scoped Postgres advisory lock
 // keyed on the cart id, held on a dedicated pool connection (advisory locks
 // are per-connection). acquired=false means another finalisation of the SAME

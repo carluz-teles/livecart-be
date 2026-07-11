@@ -2557,6 +2557,12 @@ func healthCheckItem(
 		item.MatchedName = expectedName // best-effort, lookup already case-folds
 		return item
 	}
+	if lookupErr != nil {
+		// Falha de lookup (429/timeout/5xx) ≠ cadastro ausente: reporta
+		// "unknown" para o FE mostrar "não verificado" em vez de pendência.
+		item.Status = providers.ERPHealthStatusUnknown
+		return item
+	}
 	item.Status = providers.ERPHealthStatusMissing
 	return item
 }

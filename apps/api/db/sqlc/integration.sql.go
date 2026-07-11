@@ -665,6 +665,51 @@ func (q *Queries) ListIntegrationsWithExpiringTokens(ctx context.Context, tokenE
 	return items, nil
 }
 
+const listTinyIntegrationsWithStaleStockWebhook = `-- name: ListTinyIntegrationsWithStaleStockWebhook :many
+SELECT i.id, i.store_id, MAX(we.created_at)::timestamptz AS last_stock_event_at
+FROM integrations i
+LEFT JOIN webhook_events we
+       ON we.integration_id = i.id AND we.event_type = 'estoque'
+WHERE i.type = 'erp' AND i.provider = 'tiny' AND i.status = 'active'
+  AND i.created_at < now() - make_interval(hours => $1::int)
+  AND COALESCE((i.metadata->>'stock_webhook_alerted_at')::timestamptz, 'epoch'::timestamptz)
+      < now() - interval '24 hours'
+GROUP BY i.id, i.store_id
+HAVING COALESCE(MAX(we.created_at), 'epoch'::timestamptz)
+       < now() - make_interval(hours => $1::int)
+`
+
+type ListTinyIntegrationsWithStaleStockWebhookRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	StoreID          pgtype.UUID        `json:"store_id"`
+	LastStockEventAt pgtype.Timestamptz `json:"last_stock_event_at"`
+}
+
+// Health-check de ENTREGA de webhook (aprendizado de 11/07: o Tiny remove o
+// cadastro da URL após falhas consecutivas e para de entregar em silêncio).
+// Lista integrações Tiny ativas, criadas há mais de @stale_hours, sem NENHUM
+// webhook de estoque nesse período e ainda não alertadas nas últimas 24h
+// (dedupe via metadata->>'stock_webhook_alerted_at').
+func (q *Queries) ListTinyIntegrationsWithStaleStockWebhook(ctx context.Context, staleHours int32) ([]ListTinyIntegrationsWithStaleStockWebhookRow, error) {
+	rows, err := q.db.Query(ctx, listTinyIntegrationsWithStaleStockWebhook, staleHours)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTinyIntegrationsWithStaleStockWebhookRow{}
+	for rows.Next() {
+		var i ListTinyIntegrationsWithStaleStockWebhookRow
+		if err := rows.Scan(&i.ID, &i.StoreID, &i.LastStockEventAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUnprocessedWebhooks = `-- name: ListUnprocessedWebhooks :many
 SELECT id, integration_id, provider, event_type, event_id, payload, signature_valid, processed, processed_at, error_message, created_at FROM webhook_events
 WHERE integration_id = $1 AND processed = false
@@ -778,6 +823,19 @@ WHERE id = $1
 
 func (q *Queries) MarkWebhookProcessed(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, markWebhookProcessed, id)
+	return err
+}
+
+const stampIntegrationStockWebhookAlert = `-- name: StampIntegrationStockWebhookAlert :exec
+UPDATE integrations
+SET metadata = COALESCE(metadata, '{}'::jsonb)
+    || jsonb_build_object('stock_webhook_alerted_at', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+WHERE id = $1
+`
+
+// Dedupe do alerta acima: carimba o momento no metadata (merge, não replace).
+func (q *Queries) StampIntegrationStockWebhookAlert(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, stampIntegrationStockWebhookAlert, id)
 	return err
 }
 

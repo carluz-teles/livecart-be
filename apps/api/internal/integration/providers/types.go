@@ -145,6 +145,10 @@ type ERPHealthCheckStatus string
 const (
 	ERPHealthStatusOK      ERPHealthCheckStatus = "ok"
 	ERPHealthStatusMissing ERPHealthCheckStatus = "missing"
+	// ERPHealthStatusUnknown: o lookup FALHOU (429/timeout/5xx) — não dá para
+	// afirmar que o cadastro falta. Sem este estado, erro transitório virava
+	// falsa pendência na cara do lojista (bug de campo, jul/2026).
+	ERPHealthStatusUnknown ERPHealthCheckStatus = "unknown"
 )
 
 // ERPHealthCheckItem describes one expected cadastro and its current state

@@ -168,6 +168,40 @@ func (s *Service) RefundConvertedCartOrder(ctx context.Context, cartID, storeID 
 	return nil
 }
 
+// CheckTinyStockWebhookDelivery é o health-check de ENTREGA de webhook:
+// integração Tiny ativa sem NENHUM evento 'estoque' na janela = quase certeza
+// de URL removida pelo Tiny (eles deletam o cadastro após falhas consecutivas
+// e param de entregar em silêncio — aprendizado de campo de 11/07). Loga em
+// ERROR (visível no Railway/alertas de log) com dedupe de 24h por integração.
+// Follow-up registrado: notificação in-app ao lojista (o inbox atual é
+// idea-cêntrico; exige migration própria).
+func (s *Service) CheckTinyStockWebhookDelivery(ctx context.Context, staleAfter time.Duration) {
+	stale, err := s.repo.ListTinyIntegrationsWithStaleStockWebhook(ctx, staleAfter)
+	if err != nil {
+		s.logger.Error("stock webhook delivery check failed to list", zap.Error(err))
+		return
+	}
+	for _, integ := range stale {
+		fields := []zap.Field{
+			zap.String("integration_id", integ.IntegrationID),
+			zap.String("store_id", integ.StoreID),
+			zap.Duration("stale_after", staleAfter),
+		}
+		if integ.LastStockEventAt != nil {
+			fields = append(fields, zap.Time("last_stock_event_at", *integ.LastStockEventAt))
+		} else {
+			fields = append(fields, zap.String("last_stock_event_at", "nunca"))
+		}
+		s.logger.Error("TINY WEBHOOK POSSIVELMENTE REMOVIDO: sem eventos de estoque na janela — recadastrar a URL no painel do Tiny", fields...)
+		if stampErr := s.repo.StampIntegrationStockWebhookAlert(ctx, integ.IntegrationID); stampErr != nil {
+			s.logger.Warn("failed to stamp stock webhook alert",
+				zap.String("integration_id", integ.IntegrationID),
+				zap.Error(stampErr),
+			)
+		}
+	}
+}
+
 // RunERPOrderOpsSweep reconcilia conversões/mutações presas (processo morreu
 // no meio): converting com pedido → termina a conversão; converting sem
 // pedido → tenta adotar por marcador; mutating → re-aplica a grade do banco.

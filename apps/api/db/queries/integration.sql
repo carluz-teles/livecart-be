@@ -168,3 +168,28 @@ DELETE FROM oauth_states WHERE state = $1;
 
 -- name: DeleteExpiredOAuthStates :exec
 DELETE FROM oauth_states WHERE expires_at < now();
+
+-- name: ListTinyIntegrationsWithStaleStockWebhook :many
+-- Health-check de ENTREGA de webhook (aprendizado de 11/07: o Tiny remove o
+-- cadastro da URL após falhas consecutivas e para de entregar em silêncio).
+-- Lista integrações Tiny ativas, criadas há mais de @stale_hours, sem NENHUM
+-- webhook de estoque nesse período e ainda não alertadas nas últimas 24h
+-- (dedupe via metadata->>'stock_webhook_alerted_at').
+SELECT i.id, i.store_id, MAX(we.created_at)::timestamptz AS last_stock_event_at
+FROM integrations i
+LEFT JOIN webhook_events we
+       ON we.integration_id = i.id AND we.event_type = 'estoque'
+WHERE i.type = 'erp' AND i.provider = 'tiny' AND i.status = 'active'
+  AND i.created_at < now() - make_interval(hours => sqlc.arg(stale_hours)::int)
+  AND COALESCE((i.metadata->>'stock_webhook_alerted_at')::timestamptz, 'epoch'::timestamptz)
+      < now() - interval '24 hours'
+GROUP BY i.id, i.store_id
+HAVING COALESCE(MAX(we.created_at), 'epoch'::timestamptz)
+       < now() - make_interval(hours => sqlc.arg(stale_hours)::int);
+
+-- name: StampIntegrationStockWebhookAlert :exec
+-- Dedupe do alerta acima: carimba o momento no metadata (merge, não replace).
+UPDATE integrations
+SET metadata = COALESCE(metadata, '{}'::jsonb)
+    || jsonb_build_object('stock_webhook_alerted_at', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+WHERE id = $1;
