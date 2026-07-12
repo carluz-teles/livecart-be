@@ -13,6 +13,7 @@ type Key string
 // Environment keys
 const (
 	AppEnv             Key = "APP_ENV"
+	LogLevel           Key = "LOG_LEVEL" // debug | info | warn | error (default do ambiente se vazio)
 	Port               Key = "PORT"
 	DatabaseURL        Key = "DATABASE_URL"
 	ClerkFrontendAPI   Key = "CLERK_FRONTEND_API"

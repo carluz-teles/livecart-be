@@ -15,10 +15,12 @@ func SetLogger(l *zap.Logger) {
 	logger = l
 }
 
-// Envelope is the standard API response wrapper.
+// Envelope is the standard API response wrapper. RequestID acompanha respostas
+// de erro para correlacionar o que o cliente reporta com a linha de log.
 type Envelope struct {
-	Data  any    `json:"data,omitempty"`
-	Error string `json:"error,omitempty"`
+	Data      any    `json:"data,omitempty"`
+	Error     string `json:"error,omitempty"`
+	RequestID string `json:"requestId,omitempty"`
 }
 
 // ValidationEnvelope is the response for validation errors.
@@ -82,27 +84,72 @@ func ValidationError(c *fiber.Ctx, err error) error {
 }
 
 func HandleServiceError(c *fiber.Ctx, err error) error {
+	reqID := RequestID(c)
+
 	var se *ServiceError
 	if errors.As(err, &se) {
-		// Log client errors (4xx) at warn level, they're expected
-		if logger != nil && se.Code >= 400 && se.Code < 500 {
+		if se.Code >= 500 {
+			logUnhandledError(c, err, reqID)
+		} else if logger != nil {
+			// Client errors (4xx) are expected — warn keeps the message visible
+			// without paging anyone.
 			logger.Warn("service error",
 				zap.Int("status", se.Code),
 				zap.String("message", se.Message),
+				zap.String("request_id", reqID),
 				zap.String("path", c.Path()),
 				zap.String("method", c.Method()),
 			)
 		}
-		return c.Status(se.Code).JSON(Envelope{Error: se.Message})
+		return c.Status(se.Code).JSON(Envelope{Error: se.Message, RequestID: reqID})
 	}
 
-	// Log unexpected errors (5xx) at error level
-	if logger != nil {
-		logger.Error("internal error",
-			zap.Error(err),
-			zap.String("path", c.Path()),
-			zap.String("method", c.Method()),
-		)
+	// Erros do próprio Fiber (rota inexistente → 404, método não permitido →
+	// 405, body acima do limite → 413...) mantêm o status real. Antes caíam no
+	// ramo genérico e viravam 500 "internal error" — poluía o log de erro e
+	// mascarava o que de fato aconteceu.
+	var fe *fiber.Error
+	if errors.As(err, &fe) {
+		if fe.Code >= 500 {
+			logUnhandledError(c, err, reqID)
+		} else if logger != nil {
+			logger.Warn("http error",
+				zap.Int("status", fe.Code),
+				zap.String("message", fe.Message),
+				zap.String("request_id", reqID),
+				zap.String("path", c.Path()),
+				zap.String("method", c.Method()),
+			)
+		}
+		return c.Status(fe.Code).JSON(Envelope{Error: fe.Message, RequestID: reqID})
 	}
-	return c.Status(fiber.StatusInternalServerError).JSON(Envelope{Error: "internal server error"})
+
+	logUnhandledError(c, err, reqID)
+	return c.Status(fiber.StatusInternalServerError).JSON(Envelope{Error: "internal server error", RequestID: reqID})
+}
+
+// logUnhandledError é a linha que diz O QUE quebrou e para QUEM: erro completo
+// (cadeia de wraps) + request_id + rota + identidade. O access log do
+// RequestLogger só diz que o request falhou; o diagnóstico começa por aqui.
+func logUnhandledError(c *fiber.Ctx, err error, reqID string) {
+	if logger == nil {
+		return
+	}
+	fields := []zap.Field{
+		zap.Error(err),
+		zap.String("request_id", reqID),
+		zap.String("method", c.Method()),
+		zap.String("path", c.Path()),
+		zap.String("ip", c.IP()),
+	}
+	if route := c.Route(); route != nil && route.Path != "" {
+		fields = append(fields, zap.String("route", route.Path))
+	}
+	if userID := GetUserID(c); userID != "" {
+		fields = append(fields, zap.String("user_id", userID))
+	}
+	if storeID := GetStoreID(c); storeID != "" {
+		fields = append(fields, zap.String("store_id", storeID))
+	}
+	logger.Error("internal error", fields...)
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -168,7 +169,20 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		StreamRequestBody: true,
 	})
 
-	app.Use(recover.New())
+	// Panics viram log estruturado com o stack da goroutine que quebrou — o
+	// default do middleware imprime em stderr fora do formato do agregador.
+	app.Use(recover.New(recover.Config{
+		EnableStackTrace: true,
+		StackTraceHandler: func(c *fiber.Ctx, e any) {
+			log.Error("panic recovered",
+				zap.Any("panic", e),
+				zap.String("request_id", httpx.RequestID(c)),
+				zap.String("method", c.Method()),
+				zap.String("path", c.Path()),
+				zap.String("stack", string(debug.Stack())),
+			)
+		},
+	}))
 	app.Use(requestid.New())
 	app.Use(cors.New())
 	app.Use(httpx.RequestLogger(log))
