@@ -236,6 +236,23 @@ func (s *Service) FilterRegisteredExternalIDs(ctx context.Context, storeID vo.St
 	return s.repo.ListRegisteredExternalIDs(ctx, storeID, externalSource, externalIDs)
 }
 
+// resolveSyncedStock decide o estoque local após um sync vindo do ERP:
+//   - skipStock: preserva o local (fail-safe de erro de DB);
+//   - downgradeOnly: janela do guard — aplica o valor do ERP só quando é MENOR
+//     que o local (redução legítima do lojista, direção segura); um valor >=
+//     local é eco de reserva ou inflação de finalização e é preservado, para
+//     nunca inflar o local e disparar promoção fantasma da waitlist;
+//   - caso normal: aplica o valor do ERP.
+func resolveSyncedStock(localStock, erpStock int, skipStock, downgradeOnly bool) int {
+	if skipStock {
+		return localStock
+	}
+	if downgradeOnly && erpStock >= localStock {
+		return localStock
+	}
+	return erpStock
+}
+
 // SyncFromERP updates an existing product from ERP data.
 // Returns (true, nil) if updated, (false, nil) if product not found in LiveCart.
 func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool, error) {
@@ -248,10 +265,7 @@ func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool
 		return false, nil
 	}
 
-	stock := input.Stock
-	if input.SkipStock {
-		stock = existing.Stock()
-	}
+	stock := resolveSyncedStock(existing.Stock(), input.Stock, input.SkipStock, input.DowngradeOnly)
 
 	shipping := existing.Shipping()
 	if input.Shipping != nil {

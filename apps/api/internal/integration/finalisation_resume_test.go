@@ -32,6 +32,7 @@ import (
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/internal/product"
 	"livecart/apps/api/lib/database"
 	"livecart/apps/api/lib/httpx"
 )
@@ -140,7 +141,7 @@ func seedPaidCart(t *testing.T, qty, activeReservations int) finFixture {
 		`INSERT INTO integrations (store_id, type, provider, status) VALUES ($1, 'erp', 'tiny', 'active') RETURNING id::text`, fx.storeID)
 	mustScan(&fx.eventID,
 		`INSERT INTO live_events (store_id, status, title) VALUES ($1, 'ended', 'Live Teste') RETURNING id::text`, fx.storeID)
-	kw := fmt.Sprintf("K%03d", seedSeq%1000) // products.keyword é character(4)
+	kw := fmt.Sprintf("%d", 1000+seedSeq%9000) // keyword numérica 1000-9999 (regra do domínio)
 	mustScan(&fx.productID,
 		`INSERT INTO products (store_id, name, external_source, external_id, keyword, price, stock)
 		 VALUES ($1, 'Produto Teste', 'tiny', 'EXT-'||$2, $3, 1000, 10) RETURNING id::text`, fx.storeID, n, kw)
@@ -1551,7 +1552,7 @@ func (s raceStubالسyncer) GetProduct(ctx context.Context, storeID, productID 
 func (s raceStubالسyncer) FilterRegisteredExternalIDs(ctx context.Context, storeID, externalSource string, externalIDs []string) ([]string, error) {
 	return nil, nil
 }
-func (s raceStubالسyncer) SyncProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct, skipStock bool) error {
+func (s raceStubالسyncer) SyncProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct, skipStock, downgradeOnly bool) error {
 	return nil
 }
 func (s raceStubالسyncer) ImportProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct) (string, error) {
@@ -1606,4 +1607,89 @@ func localStock(t *testing.T, productID string) int {
 		t.Fatalf("lendo stock: %v", err)
 	}
 	return n
+}
+
+// ============================================================================
+// Guard downgrade-only: redução do lojista reflete, aumento é ignorado
+// (correção do bug: estoque do Tiny não refletia durante a live)
+// ============================================================================
+
+func realProductSyncer() ProductSyncer {
+	return product.NewProductSyncerAdapter(
+		product.NewService(product.NewRepository(sqlc.New(testPool), testPool), zap.NewNop()),
+	)
+}
+
+func productStockByID(t *testing.T, productID string) int {
+	t.Helper()
+	var n int
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT stock FROM products WHERE id=$1`, productID).Scan(&n); err != nil {
+		t.Fatalf("lendo stock: %v", err)
+	}
+	return n
+}
+
+func erpProd(ext string, stock int) providers.ERPProduct {
+	return providers.ERPProduct{ID: ext, Name: "Produto Teste", Price: 1000, Stock: stock, Active: true}
+}
+
+// Na janela do guard: uma REDUÇÃO do lojista no Tiny deve refletir no local.
+func TestGuardDowngradeOnlyAppliesReduction(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	fx := seedPaidCart(t, 1, 0)
+	ext := extProductID(t, fx.productID)
+	if _, err := testPool.Exec(ctx, `UPDATE products SET stock = 10 WHERE id=$1`, fx.productID); err != nil {
+		t.Fatalf("seed stock: %v", err)
+	}
+	syncer := realProductSyncer()
+
+	// downgradeOnly=true (guard armado), ERP reporta 4 (< 10) → aplica.
+	if err := syncer.SyncProduct(ctx, fx.storeID, "tiny", erpProd(ext, 4), false, true); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if got := productStockByID(t, fx.productID); got != 4 {
+		t.Fatalf("redução do lojista deveria refletir (stock=%d, esperado 4)", got)
+	}
+}
+
+// Na janela do guard: um AUMENTO (eco de reserva / inflação de finalização)
+// deve ser IGNORADO — é o que evita a promoção fantasma.
+func TestGuardDowngradeOnlyIgnoresIncrease(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	fx := seedPaidCart(t, 1, 0)
+	ext := extProductID(t, fx.productID)
+	if _, err := testPool.Exec(ctx, `UPDATE products SET stock = 5 WHERE id=$1`, fx.productID); err != nil {
+		t.Fatalf("seed stock: %v", err)
+	}
+	syncer := realProductSyncer()
+
+	// downgradeOnly=true, ERP reporta 9 (> 5) → preserva o local.
+	if err := syncer.SyncProduct(ctx, fx.storeID, "tiny", erpProd(ext, 9), false, true); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if got := productStockByID(t, fx.productID); got != 5 {
+		t.Fatalf("aumento na janela do guard deveria ser ignorado (stock=%d, esperado 5)", got)
+	}
+}
+
+// Fora da janela do guard (sync normal): aplica qualquer valor.
+func TestNormalSyncAppliesAnyValue(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	fx := seedPaidCart(t, 1, 0)
+	ext := extProductID(t, fx.productID)
+	if _, err := testPool.Exec(ctx, `UPDATE products SET stock = 5 WHERE id=$1`, fx.productID); err != nil {
+		t.Fatalf("seed stock: %v", err)
+	}
+	syncer := realProductSyncer()
+
+	if err := syncer.SyncProduct(ctx, fx.storeID, "tiny", erpProd(ext, 12), false, false); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if got := productStockByID(t, fx.productID); got != 12 {
+		t.Fatalf("sync normal deveria aplicar o valor do ERP (stock=%d, esperado 12)", got)
+	}
 }

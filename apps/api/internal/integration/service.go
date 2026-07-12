@@ -44,8 +44,10 @@ type ProductSyncer interface {
 	// SyncProduct updates an existing LiveCart product with the latest ERP data.
 	// When product.Shipping is non-nil, dimensions are refreshed too; otherwise
 	// the local shipping profile is preserved. skipStock=true keeps local stock
-	// (e.g. during an active live event).
-	SyncProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct, skipStock bool) error
+	// entirely (DB-error fail-safe); downgradeOnly=true applies the ERP stock
+	// only when it is LOWER than local (safe reductions during the guard
+	// window). Both false = normal full stock sync.
+	SyncProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct, skipStock, downgradeOnly bool) error
 	// ImportProduct creates a new simple product in LiveCart from an ERP source.
 	// Returns the new LiveCart product UUID.
 	ImportProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct) (productID string, err error)
@@ -2855,7 +2857,7 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 
 	// Update the local product. Manual sync always refreshes stock and pulls
 	// dimensions if the ERP returned them (detailed.Shipping non-nil).
-	if err := s.productSyncer.SyncProduct(ctx, input.StoreID, externalSource, *detailed, false); err != nil {
+	if err := s.productSyncer.SyncProduct(ctx, input.StoreID, externalSource, *detailed, false, false); err != nil {
 		return nil, fmt.Errorf("syncing product: %w", err)
 	}
 
@@ -2984,13 +2986,17 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	s.inheritShippingFromParent(ctx, erpProvider, detailed)
 	s.applyStoreDefaultDimensions(ctx, integration.StoreID, detailed)
 
-	// Guard do overwrite de estoque: além de "live ativa com reserva ativa"
-	// (comportamento anterior), também segura o sync enquanto houver cart pago
-	// com finalização ERP em voo contendo o produto — a reversão das reservas
-	// na finalização infla o saldo do Tiny por segundos e o webhook resultante
-	// sobrescreveria products.stock com oferta falsa (promoção fantasma da
-	// waitlist). Fail-safe: em erro de DB, não sobrescreve.
+	// Guard do overwrite de estoque. Enquanto houver reserva ativa numa live
+	// OU finalização ERP em voo para o produto, o webhook de estoque do Tiny
+	// não pode SUBIR o contador local (a reversão de reservas na finalização
+	// infla o saldo do Tiny por segundos → oferta falsa → promoção fantasma da
+	// waitlist). Mas REDUÇÕES do lojista no Tiny durante a live são legítimas e
+	// devem refletir — então na janela do guard usamos "downgrade-only": aplica
+	// só quando o valor do ERP é menor que o local (direção segura, nunca
+	// causa promoção fantasma). Fora da janela, sync normal. Fail-safe: em erro
+	// de DB, preserva o local inteiro.
 	skipStock := false
+	downgradeOnly := false
 	guarded, guardErr := s.repo.HasStockGuardForProduct(ctx, externalProductID, integration.StoreID, integration.Provider)
 	if guardErr != nil {
 		skipStock = true
@@ -2999,25 +3005,31 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 			zap.Error(guardErr),
 		)
 	} else if guarded {
-		skipStock = true
-		s.logger.Info("skipping ERP stock sync: reservation or finalisation in flight for product",
+		downgradeOnly = true
+		s.logger.Info("ERP stock sync in guard window: applying reductions only (reservation/finalisation in flight)",
 			zap.String("external_product_id", externalProductID),
 			zap.String("store_id", integration.StoreID),
 		)
 	}
 
-	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, skipStock); err != nil {
+	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, skipStock, downgradeOnly); err != nil {
 		return false, fmt.Errorf("syncing product: %w", err)
 	}
 
+	// O backstop de waitlist só deve rodar quando o estoque pôde AUMENTAR (sync
+	// normal). Na janela do guard nunca subimos o local, então não promove;
+	// uma redução não libera unidade para ninguém.
 	s.logger.Info("product synced from webhook",
 		zap.String("integration_id", integration.ID),
 		zap.String("external_product_id", externalProductID),
 		zap.String("store_id", integration.StoreID),
 		zap.Bool("skip_stock", skipStock),
+		zap.Bool("downgrade_only", downgradeOnly),
 	)
 
-	return !skipStock, nil
+	// stockApplied gate para o backstop de waitlist: só quando o estoque pôde
+	// subir (sync normal). skip e downgrade-only nunca sobem o local.
+	return !skipStock && !downgradeOnly, nil
 }
 
 // isGTIN checks if a string looks like a GTIN/barcode (8+ digits).
