@@ -47,6 +47,10 @@ func (stubProductSyncer) GetProduct(ctx context.Context, storeID, productID stri
 	return ext, "tiny", err
 }
 
+func (stubProductSyncer) FilterRegisteredExternalIDs(ctx context.Context, storeID, externalSource string, externalIDs []string) ([]string, error) {
+	return nil, nil
+}
+
 func (stubProductSyncer) SyncProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct, skipStock bool) error {
 	return nil
 }

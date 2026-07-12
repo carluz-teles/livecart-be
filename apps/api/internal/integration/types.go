@@ -403,6 +403,9 @@ type ERPProductResponse struct {
 	Shipping    *ERPShippingPreviewDTO `json:"shipping,omitempty"` // weight + dimensions resolved from the ERP, for the picker preview
 	IsParent    bool                   `json:"isParent,omitempty"`
 	Variants    []ERPVariantResponse   `json:"variants,omitempty"`
+	// AlreadyImported is true when a product with this external ID is already
+	// in the store's catalog — the FE flags it and blocks re-importing.
+	AlreadyImported bool `json:"alreadyImported,omitempty"`
 }
 
 // ERPShippingPreviewDTO mirrors the ERP-side shipping data the search response

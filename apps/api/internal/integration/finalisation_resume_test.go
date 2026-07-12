@@ -1548,6 +1548,9 @@ func (s raceStubالسyncer) HasProduct(ctx context.Context, storeID, externalID
 func (s raceStubالسyncer) GetProduct(ctx context.Context, storeID, productID string) (string, string, error) {
 	return s.ext, "tiny", nil
 }
+func (s raceStubالسyncer) FilterRegisteredExternalIDs(ctx context.Context, storeID, externalSource string, externalIDs []string) ([]string, error) {
+	return nil, nil
+}
 func (s raceStubالسyncer) SyncProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct, skipStock bool) error {
 	return nil
 }

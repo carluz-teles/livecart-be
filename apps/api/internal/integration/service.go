@@ -37,6 +37,9 @@ import (
 // ProductSyncer syncs products from external ERP systems into the local database.
 type ProductSyncer interface {
 	HasProduct(ctx context.Context, storeID, externalID, externalSource string) (bool, error)
+	// FilterRegisteredExternalIDs returns which of the given ERP external IDs
+	// are already imported for the store+source (batch, no pagination gaps).
+	FilterRegisteredExternalIDs(ctx context.Context, storeID, externalSource string, externalIDs []string) ([]string, error)
 	GetProduct(ctx context.Context, storeID, productID string) (externalID, externalSource string, err error)
 	// SyncProduct updates an existing LiveCart product with the latest ERP data.
 	// When product.Shipping is non-nil, dimensions are refreshed too; otherwise
@@ -2492,6 +2495,33 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 			return nil, httpx.ErrUnprocessable("Produto encontrado, mas sem estoque disponível no momento")
 		}
 		return nil, httpx.ErrNotFound("Produto não encontrado no ERP")
+	}
+
+	// Flag products already in the store's catalog so the FE can badge them
+	// "já cadastrado" and block re-importing (single batch query — no
+	// pagination gaps). Best-effort: a failure here just leaves the flags off.
+	if s.productSyncer != nil {
+		externalIDs := make([]string, 0, len(products))
+		for _, p := range products {
+			externalIDs = append(externalIDs, p.ID)
+		}
+		registered, err := s.productSyncer.FilterRegisteredExternalIDs(ctx, input.StoreID, string(erpProvider.Name()), externalIDs)
+		if err != nil {
+			s.logger.Warn("failed to check already-imported products",
+				zap.String("integration_id", input.IntegrationID),
+				zap.Error(err),
+			)
+		} else if len(registered) > 0 {
+			registeredSet := make(map[string]struct{}, len(registered))
+			for _, id := range registered {
+				registeredSet[id] = struct{}{}
+			}
+			for i := range products {
+				if _, ok := registeredSet[products[i].ID]; ok {
+					products[i].AlreadyImported = true
+				}
+			}
+		}
 	}
 
 	return &SearchProductsOutput{

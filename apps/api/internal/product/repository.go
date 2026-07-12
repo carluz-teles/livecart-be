@@ -458,6 +458,36 @@ func (r *Repository) GetByExternalID(ctx context.Context, storeID vo.StoreID, ex
 	return toDomainProduct(row)
 }
 
+// ListRegisteredExternalIDs returns which of the given ERP external IDs are
+// already imported for the store+source — one query, no pagination gaps.
+// Powers the "já cadastrado" flag on the ERP product search so the merchant
+// can't reimport a duplicate.
+func (r *Repository) ListRegisteredExternalIDs(ctx context.Context, storeID vo.StoreID, externalSource domain.ExternalSource, externalIDs []string) ([]string, error) {
+	if len(externalIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT external_id FROM products
+		WHERE store_id = $1 AND external_source = $2 AND external_id = ANY($3)
+	`, storeID.ToPgUUID(), externalSource.String(), externalIDs)
+	if err != nil {
+		return nil, fmt.Errorf("listing registered external IDs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id pgtype.Text
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scanning external ID: %w", err)
+		}
+		if id.Valid {
+			out = append(out, id.String)
+		}
+	}
+	return out, rows.Err()
+}
+
 func (r *Repository) GetStats(ctx context.Context, storeID vo.StoreID) (ProductStatsOutput, error) {
 	query := `
 		SELECT

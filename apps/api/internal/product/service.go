@@ -229,6 +229,13 @@ func (s *Service) HasProductByExternalID(ctx context.Context, storeID vo.StoreID
 	return existing != nil, nil
 }
 
+// FilterRegisteredExternalIDs returns the subset of externalIDs already
+// imported for the store+source — used to flag "já cadastrado" in the ERP
+// product search.
+func (s *Service) FilterRegisteredExternalIDs(ctx context.Context, storeID vo.StoreID, externalSource domain.ExternalSource, externalIDs []string) ([]string, error) {
+	return s.repo.ListRegisteredExternalIDs(ctx, storeID, externalSource, externalIDs)
+}
+
 // SyncFromERP updates an existing product from ERP data.
 // Returns (true, nil) if updated, (false, nil) if product not found in LiveCart.
 func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool, error) {

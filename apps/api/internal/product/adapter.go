@@ -33,6 +33,20 @@ func (a *ProductSyncerAdapter) HasProduct(ctx context.Context, storeID, external
 	return a.service.HasProductByExternalID(ctx, sid, es, externalID)
 }
 
+// FilterRegisteredExternalIDs returns which of the given ERP external IDs are
+// already imported for the store+source.
+func (a *ProductSyncerAdapter) FilterRegisteredExternalIDs(ctx context.Context, storeID, externalSource string, externalIDs []string) ([]string, error) {
+	sid, err := vo.NewStoreID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	es, err := domain.NewExternalSource(externalSource)
+	if err != nil {
+		return nil, err
+	}
+	return a.service.FilterRegisteredExternalIDs(ctx, sid, es, externalIDs)
+}
+
 // GetProduct returns the external ID and source for a product registered in LiveCart.
 func (a *ProductSyncerAdapter) GetProduct(ctx context.Context, storeID, productID string) (string, string, error) {
 	sid, err := vo.NewStoreID(storeID)
