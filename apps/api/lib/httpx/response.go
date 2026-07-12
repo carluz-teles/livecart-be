@@ -21,6 +21,9 @@ type Envelope struct {
 	Data      any    `json:"data,omitempty"`
 	Error     string `json:"error,omitempty"`
 	RequestID string `json:"requestId,omitempty"`
+	// Reason is an optional stable machine code accompanying an error so the
+	// frontend can branch without matching the human message.
+	Reason string `json:"reason,omitempty"`
 }
 
 // ValidationEnvelope is the response for validation errors.
@@ -101,7 +104,7 @@ func HandleServiceError(c *fiber.Ctx, err error) error {
 				zap.String("method", c.Method()),
 			)
 		}
-		return c.Status(se.Code).JSON(Envelope{Error: se.Message, RequestID: reqID})
+		return c.Status(se.Code).JSON(Envelope{Error: se.Message, RequestID: reqID, Reason: se.Reason})
 	}
 
 	// Erros do próprio Fiber (rota inexistente → 404, método não permitido →

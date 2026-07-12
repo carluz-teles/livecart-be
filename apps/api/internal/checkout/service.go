@@ -600,7 +600,10 @@ func (s *Service) resolveCheckoutIntegration(ctx context.Context, cart *CartRow)
 		return nil, "", nil, err
 	}
 	if len(candidates) == 0 {
-		return nil, "", nil, httpx.ErrUnprocessable("loja não possui integração de pagamento configurada")
+		return nil, "", nil, httpx.WithReason(
+			httpx.ErrUnprocessable("loja não possui integração de pagamento configurada"),
+			"payment_not_configured",
+		)
 	}
 
 	var lastErr error
@@ -637,7 +640,10 @@ func (s *Service) resolveCheckoutIntegration(ctx context.Context, cart *CartRow)
 			zap.Error(lastErr),
 		)
 	}
-	return nil, "", nil, httpx.ErrUnprocessable("nenhuma integração de pagamento está respondendo agora")
+	return nil, "", nil, httpx.WithReason(
+		httpx.ErrUnprocessable("nenhuma integração de pagamento está respondendo agora"),
+		"payment_unavailable",
+	)
 }
 
 // resolvePaymentIntegration returns the integration that should process this
@@ -657,7 +663,10 @@ func (s *Service) resolvePaymentIntegration(ctx context.Context, cart *CartRow) 
 		return nil, err
 	}
 	if primary == nil {
-		return nil, httpx.ErrUnprocessable("loja não possui integração de pagamento configurada")
+		return nil, httpx.WithReason(
+			httpx.ErrUnprocessable("loja não possui integração de pagamento configurada"),
+			"payment_not_configured",
+		)
 	}
 	return primary, nil
 }

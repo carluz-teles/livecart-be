@@ -9,9 +9,23 @@ import (
 type ServiceError struct {
 	Code    int
 	Message string
+	// Reason is an optional stable machine code (e.g. "payment_not_configured")
+	// the frontend can branch on instead of matching the human message. Empty
+	// for most errors; set via WithReason.
+	Reason string
 }
 
 func (e *ServiceError) Error() string { return e.Message }
+
+// WithReason attaches a stable machine code to a ServiceError so the frontend
+// can render a tailored message. No-op if err is not a *ServiceError.
+func WithReason(err error, reason string) error {
+	var se *ServiceError
+	if errors.As(err, &se) {
+		se.Reason = reason
+	}
+	return err
+}
 
 func ErrBadRequest(msg string) error    { return &ServiceError{Code: 400, Message: msg} }
 func ErrNotFound(msg string) error      { return &ServiceError{Code: 404, Message: msg} }
