@@ -9,6 +9,7 @@ type (
 	CheckoutOrder    = providers.CheckoutOrder
 	CheckoutItem     = providers.CheckoutItem
 	CheckoutCustomer = providers.CheckoutCustomer
+	CheckoutAddress  = providers.CheckoutAddress
 	CheckoutResult   = providers.CheckoutResult
 	PaymentStatus    = providers.PaymentStatus
 	PaymentState     = providers.PaymentState

@@ -704,7 +704,7 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 			zap.String("cart_id", input.CartID), zap.Error(err))
 		return nil, fmt.Errorf("criando cliente no Pagar.me: %w", err)
 	}
-	cardID, err := p.createCardFromToken(ctx, customerID, input.Token)
+	cardID, err := p.createCardFromToken(ctx, customerID, input.Token, input.Customer.Address)
 	if err != nil {
 		p.Logger.Error("pagarme create card failed",
 			zap.String("cart_id", input.CartID),
@@ -909,12 +909,28 @@ func (p *Pagarme) createCustomer(ctx context.Context, customer map[string]any) (
 }
 
 // createCardFromToken turns the transparent-checkout card token into a stored
-// card_id under the given customer. The billing_address the FE embedded in the
-// /tokens call is preserved on the card, which is exactly what the PSP order
-// validator needs.
-func (p *Pagarme) createCardFromToken(ctx context.Context, customerID, token string) (string, error) {
+// card_id under the given customer. We send billing_address explicitly (from
+// the checkout address) instead of relying on it surviving the token→card
+// conversion — the PSP acquirer rejects the order with "billing value is
+// required" when the stored card has no billing_address, and empirically the
+// token's billing did not carry over.
+func (p *Pagarme) createCardFromToken(ctx context.Context, customerID, token string, addr *CheckoutAddress) (string, error) {
 	url := fmt.Sprintf("%s/customers/%s/cards", pagarmeAPIBaseURL, customerID)
-	resp, body, err := p.DoRequest(ctx, http.MethodPost, url, map[string]any{"token": token}, p.authHeaders())
+	cardBody := map[string]any{"token": token}
+	if addr != nil {
+		billing := map[string]any{
+			"country":  "BR",
+			"zip_code": addr.ZipCode,
+			"line_1":   buildPagarmeLine1(addr.Street, addr.Number, addr.Neighborhood),
+			"city":     addr.City,
+			"state":    addr.State,
+		}
+		if addr.Complement != "" {
+			billing["line_2"] = addr.Complement
+		}
+		cardBody["billing_address"] = billing
+	}
+	resp, body, err := p.DoRequest(ctx, http.MethodPost, url, cardBody, p.authHeaders())
 	if err != nil {
 		return "", fmt.Errorf("creating card: %w", err)
 	}
