@@ -96,6 +96,12 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 	if cart.Status == "expired" {
 		return nil, httpx.ErrUnprocessable("carrinho expirado")
 	}
+	// Prazo de pagamento vencido (armado ao encerrar a live). Só bloqueia
+	// carts não pagos — quem pagou dentro do prazo continua vendo o pedido
+	// mesmo depois que o expires_at passa.
+	if cart.PaymentStatus != "paid" && cart.ExpiresAt != nil && cart.ExpiresAt.Before(time.Now()) {
+		return nil, httpx.ErrUnprocessable("carrinho expirado")
+	}
 	// Carts cancelled because the buyer was blocked should look like they
 	// never existed — return 404 so the public /cart/[token] page hits the
 	// generic "carrinho não existe" branch.

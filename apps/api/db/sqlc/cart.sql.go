@@ -247,12 +247,23 @@ func (q *Queries) ExtendCartExpiration(ctx context.Context, arg ExtendCartExpira
 }
 
 const finalizeCartsByEvent = `-- name: FinalizeCartsByEvent :exec
-UPDATE carts
-SET status = 'checkout'
-WHERE event_id = $1 AND status = 'active'
+UPDATE carts c
+SET status = 'checkout',
+    expires_at = CASE
+        WHEN c.payment_status <> 'paid'
+             AND COALESCE(le.cart_expiration_minutes, s.cart_expiration_minutes, 0) > 0
+        THEN now() + make_interval(mins => COALESCE(le.cart_expiration_minutes, s.cart_expiration_minutes))
+        ELSE c.expires_at
+    END
+FROM live_events le
+JOIN stores s ON s.id = le.store_id
+WHERE c.event_id = $1 AND c.status = 'active' AND le.id = c.event_id
 `
 
-// Updates all active carts in an event to checkout status (live ended)
+// Ao encerrar a live, move os carrinhos ativos para 'checkout' e arma o prazo
+// de pagamento: expires_at = now() + cart_expiration_minutes (do evento, com
+// fallback para o default da loja). 0 = sem expiração (preserva o que havia).
+// Carrinhos já pagos não recebem prazo — não faz sentido expirar uma venda.
 func (q *Queries) FinalizeCartsByEvent(ctx context.Context, eventID pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, finalizeCartsByEvent, eventID)
 	return err
