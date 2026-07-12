@@ -117,3 +117,34 @@ WHERE cart_id = $1 AND status = 'notified';
 -- MarkWaitlistFulfilledByCart cobre — usado em testes/observabilidade).
 SELECT * FROM waitlist_items
 WHERE cart_id = $1 AND status = 'notified';
+
+-- name: ClaimNextWaitlistItem :one
+-- Reivindica ATOMICAMENTE o próximo da fila (menor position) e o marca
+-- 'notified' na MESMA transação. FOR UPDATE SKIP LOCKED garante que callers
+-- concorrentes reivindicam clientes DISTINTOS — nunca o mesmo. Corrige a
+-- promoção desperdiçada quando N unidades são liberadas ao mesmo tempo: sem
+-- isso, dois callers pegavam o mesmo W1 e consumiam 2 unidades avançando a
+-- fila só 1 (o próximo ficava preso com uma unidade "perdida").
+UPDATE waitlist_items
+SET status               = 'notified',
+    notified_at          = now(),
+    expires_at           = $3,
+    notification_sent_at = now()
+WHERE id = (
+    SELECT wi.id FROM waitlist_items wi
+    WHERE wi.event_id = $1 AND wi.product_id = $2 AND wi.status = 'waiting'
+    ORDER BY wi.position ASC
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1
+)
+RETURNING *;
+
+-- name: RevertWaitlistToWaiting :exec
+-- Desfaz uma reivindicação quando o gate de estoque falha DEPOIS do claim
+-- (não havia unidade para este cliente) — devolve-o ao topo da fila.
+UPDATE waitlist_items
+SET status               = 'waiting',
+    notified_at          = NULL,
+    expires_at           = NULL,
+    notification_sent_at = NULL
+WHERE id = $1 AND status = 'notified';

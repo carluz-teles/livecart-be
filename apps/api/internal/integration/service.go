@@ -6189,20 +6189,40 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 // If anything in steps 2-3 fails we roll back the local stock decrement so
 // nobody else loses the slot. Steps 4-6 are best-effort post-promotion.
 func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, productID, storeID string) {
-	next, err := s.repo.GetFirstWaitingByProduct(ctx, eventID, productID)
+	// TTL primeiro: a reivindicação atômica já grava a janela de notificação
+	// na row da fila, então precisamos de notifiedUntil antes do claim.
+	ttl, ttlErr := s.repo.GetWaitlistNotifiedTTL(ctx, eventID)
+	if ttlErr != nil {
+		s.logger.Warn("failed to read waitlist TTL, defaulting to 30min",
+			zap.String("event_id", eventID),
+			zap.Error(ttlErr),
+		)
+		ttl = 30 * time.Minute
+	}
+	notifiedUntil := time.Now().Add(ttl)
+
+	// Reivindica ATOMICAMENTE o próximo da fila (FOR UPDATE SKIP LOCKED):
+	// callers concorrentes pegam clientes DISTINTOS. Sem isso, duas
+	// liberações simultâneas selecionavam o MESMO W1 e consumiam 2 unidades
+	// avançando a fila só 1 — o próximo ficava preso com uma unidade perdida.
+	next, err := s.repo.ClaimNextWaitlistItem(ctx, eventID, productID, notifiedUntil)
 	if err != nil {
-		s.logger.Error("failed to get waitlist", zap.Error(err))
+		s.logger.Error("failed to claim next waitlist item", zap.Error(err))
 		return
 	}
 	if next == nil {
-		return
+		return // fila vazia
 	}
 
-	// Atomic gate: if another caller already promoted someone (or stock is
-	// truly empty after the ERP webhook), this fails and we bail. Resolves
-	// the race condition the merchant flagged: "ERP webhook says available
-	// but it was already sold to the next in line".
+	// Gate de estoque: exatamente uma unidade por reivindicação. Se não houver
+	// unidade, devolve o cliente ao topo da fila (nenhuma unidade consumida).
 	if err := s.repo.DecrementProductStock(ctx, productID, next.Quantity); err != nil {
+		if revErr := s.repo.RevertWaitlistToWaiting(ctx, next.ID); revErr != nil {
+			s.logger.Error("failed to revert waitlist claim after stock gate miss",
+				zap.String("waitlist_item_id", next.ID),
+				zap.Error(revErr),
+			)
+		}
 		s.logger.Debug("waitlist promote skipped: stock not available",
 			zap.String("product_id", productID),
 			zap.String("waitlist_item_id", next.ID),
@@ -6213,6 +6233,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	product, err := s.repo.GetProductByID(ctx, storeID, productID)
 	if err != nil || product == nil {
 		_ = s.repo.IncrementProductStock(ctx, productID, next.Quantity)
+		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
 		s.logger.Error("failed to get product for waitlist promotion",
 			zap.String("product_id", productID),
 			zap.String("store_id", storeID),
@@ -6234,6 +6255,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	found, err := s.repo.DecrementCartItemWaitlistedQuantity(ctx, cartID, productID, next.Quantity)
 	if err != nil {
 		_ = s.repo.IncrementProductStock(ctx, productID, next.Quantity)
+		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
 		s.logger.Error("failed to decrement waitlisted quantity on promotion",
 			zap.String("waitlist_item_id", next.ID),
 			zap.String("cart_id", cartID),
@@ -6258,6 +6280,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		})
 		if fbErr != nil {
 			_ = s.repo.IncrementProductStock(ctx, productID, next.Quantity)
+			_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
 			s.logger.Error("failed to recreate cart item on promotion",
 				zap.String("waitlist_item_id", next.ID),
 				zap.Error(fbErr),
@@ -6277,27 +6300,12 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 
 	// "Gordura": empurra o cart.expires_at para garantir que o cliente tem
 	// o TTL configurado para finalizar. Usa GREATEST no banco — não encolhe
-	// um cart que já tinha um expires_at maior.
-	ttl, ttlErr := s.repo.GetWaitlistNotifiedTTL(ctx, eventID)
-	if ttlErr != nil {
-		s.logger.Warn("failed to read waitlist TTL, defaulting to 30min",
-			zap.String("event_id", eventID),
-			zap.Error(ttlErr),
-		)
-		ttl = 30 * time.Minute
-	}
-	notifiedUntil := time.Now().Add(ttl)
+	// um cart que já tinha um expires_at maior. (A row da fila já foi marcada
+	// 'notified' com notifiedUntil pela reivindicação atômica no topo.)
 	if extendErr := s.repo.ExtendCartExpiration(ctx, cartID, notifiedUntil); extendErr != nil {
 		s.logger.Warn("failed to extend cart expiration for notified waitlist",
 			zap.String("cart_id", cartID),
 			zap.Error(extendErr),
-		)
-	}
-
-	if statusErr := s.repo.MarkWaitlistNotified(ctx, next.ID, notifiedUntil, time.Now()); statusErr != nil {
-		s.logger.Warn("failed to mark waitlist item as notified",
-			zap.String("waitlist_item_id", next.ID),
-			zap.Error(statusErr),
 		)
 	}
 

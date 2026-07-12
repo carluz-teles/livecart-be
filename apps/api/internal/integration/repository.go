@@ -1037,6 +1037,56 @@ func (r *Repository) GetFirstWaitingByProduct(ctx context.Context, eventID, prod
 	}, nil
 }
 
+// ClaimNextWaitlistItem atomically claims the next waiting buyer (lowest
+// position) and flips it to 'notified' in the same statement — FOR UPDATE SKIP
+// LOCKED guarantees concurrent callers claim DISTINCT buyers. Returns nil when
+// the queue is empty. The stock gate still runs after the claim; on
+// insufficient stock the caller reverts via RevertWaitlistToWaiting.
+func (r *Repository) ClaimNextWaitlistItem(ctx context.Context, eventID, productID string, expiresAt time.Time) (*WaitlistItemRow, error) {
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.ClaimNextWaitlistItem(ctx, sqlc.ClaimNextWaitlistItemParams{
+		EventID:   eID,
+		ProductID: pID,
+		ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true},
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) || err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &WaitlistItemRow{
+		ID:             uuidToString(row.ID),
+		EventID:        uuidToString(row.EventID),
+		ProductID:      uuidToString(row.ProductID),
+		PlatformUserID: row.PlatformUserID,
+		PlatformHandle: row.PlatformHandle,
+		Quantity:       int(row.Quantity),
+		Position:       int(row.Position),
+		Status:         row.Status,
+		CartID:         uuidToString(row.CartID),
+		NotifiedAt:     timestamptzToPtr(row.NotifiedAt),
+		ExpiresAt:      timestamptzToPtr(row.ExpiresAt),
+	}, nil
+}
+
+// RevertWaitlistToWaiting undoes a claim when the stock gate fails after it —
+// returns the buyer to the head of the queue.
+func (r *Repository) RevertWaitlistToWaiting(ctx context.Context, id string) error {
+	itemID, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	return r.queries.RevertWaitlistToWaiting(ctx, itemID)
+}
+
 // MarkWaitlistNotified flips a waitlist row to "notified" with the TTL window.
 // notificationSentAt records that we actually fired the DM/email so the worker
 // can avoid double-sending if it ever resumes processing the same row.

@@ -29,6 +29,57 @@ func (q *Queries) CancelWaitlistItem(ctx context.Context, arg CancelWaitlistItem
 	return err
 }
 
+const claimNextWaitlistItem = `-- name: ClaimNextWaitlistItem :one
+UPDATE waitlist_items
+SET status               = 'notified',
+    notified_at          = now(),
+    expires_at           = $3,
+    notification_sent_at = now()
+WHERE id = (
+    SELECT wi.id FROM waitlist_items wi
+    WHERE wi.event_id = $1 AND wi.product_id = $2 AND wi.status = 'waiting'
+    ORDER BY wi.position ASC
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1
+)
+RETURNING id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at, cart_id, notification_sent_at, cancelled_at
+`
+
+type ClaimNextWaitlistItemParams struct {
+	EventID   pgtype.UUID        `json:"event_id"`
+	ProductID pgtype.UUID        `json:"product_id"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
+// Reivindica ATOMICAMENTE o próximo da fila (menor position) e o marca
+// 'notified' na MESMA transação. FOR UPDATE SKIP LOCKED garante que callers
+// concorrentes reivindicam clientes DISTINTOS — nunca o mesmo. Corrige a
+// promoção desperdiçada quando N unidades são liberadas ao mesmo tempo: sem
+// isso, dois callers pegavam o mesmo W1 e consumiam 2 unidades avançando a
+// fila só 1 (o próximo ficava preso com uma unidade "perdida").
+func (q *Queries) ClaimNextWaitlistItem(ctx context.Context, arg ClaimNextWaitlistItemParams) (WaitlistItem, error) {
+	row := q.db.QueryRow(ctx, claimNextWaitlistItem, arg.EventID, arg.ProductID, arg.ExpiresAt)
+	var i WaitlistItem
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.ProductID,
+		&i.PlatformUserID,
+		&i.PlatformHandle,
+		&i.Quantity,
+		&i.Position,
+		&i.Status,
+		&i.NotifiedAt,
+		&i.FulfilledAt,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.CartID,
+		&i.NotificationSentAt,
+		&i.CancelledAt,
+	)
+	return i, err
+}
+
 const countActiveByEventProduct = `-- name: CountActiveByEventProduct :one
 SELECT COUNT(*)::int FROM waitlist_items
 WHERE event_id = $1 AND product_id = $2 AND status IN ('waiting','notified')
@@ -590,6 +641,22 @@ type MarkWaitlistNotifiedParams struct {
 // Promove o cliente da fila para "notified" com a janela de TTL extra.
 func (q *Queries) MarkWaitlistNotified(ctx context.Context, arg MarkWaitlistNotifiedParams) error {
 	_, err := q.db.Exec(ctx, markWaitlistNotified, arg.ID, arg.ExpiresAt, arg.NotificationSentAt)
+	return err
+}
+
+const revertWaitlistToWaiting = `-- name: RevertWaitlistToWaiting :exec
+UPDATE waitlist_items
+SET status               = 'waiting',
+    notified_at          = NULL,
+    expires_at           = NULL,
+    notification_sent_at = NULL
+WHERE id = $1 AND status = 'notified'
+`
+
+// Desfaz uma reivindicação quando o gate de estoque falha DEPOIS do claim
+// (não havia unidade para este cliente) — devolve-o ao topo da fila.
+func (q *Queries) RevertWaitlistToWaiting(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, revertWaitlistToWaiting, id)
 	return err
 }
 
