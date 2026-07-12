@@ -126,6 +126,35 @@ func (q *Queries) DecrementProductStock(ctx context.Context, arg DecrementProduc
 	return i, err
 }
 
+const decrementProductStockUpTo = `-- name: DecrementProductStockUpTo :one
+WITH before AS (
+    SELECT stock AS s FROM products WHERE id = $2 FOR UPDATE
+)
+UPDATE products p
+SET stock = p.stock - LEAST(before.s, $1::int),
+    updated_at = now()
+FROM before
+WHERE p.id = $2
+RETURNING LEAST(before.s, $1::int)::int AS taken
+`
+
+type DecrementProductStockUpToParams struct {
+	Want int32       `json:"want"`
+	ID   pgtype.UUID `json:"id"`
+}
+
+// Toma ATÉ `want` unidades, nunca abaixo de zero, e retorna quantas foram
+// de fato tomadas (0 quando o produto já estava esgotado). Habilita a
+// promoção PARCIAL da waitlist: 1 unidade livre atende parte de um pedido de
+// N na fila; o restante continua esperando. FOR UPDATE serializa contra
+// liberações concorrentes.
+func (q *Queries) DecrementProductStockUpTo(ctx context.Context, arg DecrementProductStockUpToParams) (int32, error) {
+	row := q.db.QueryRow(ctx, decrementProductStockUpTo, arg.Want, arg.ID)
+	var taken int32
+	err := row.Scan(&taken)
+	return taken, err
+}
+
 const getMaxKeyword = `-- name: GetMaxKeyword :one
 SELECT COALESCE(MAX(keyword), '0999') AS max_keyword
 FROM products

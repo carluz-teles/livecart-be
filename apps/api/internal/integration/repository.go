@@ -789,6 +789,34 @@ func (r *Repository) DecrementProductStock(ctx context.Context, productID string
 	return err
 }
 
+// DecrementProductStockUpTo takes up to `want` units atomically and returns
+// how many were actually taken (0 when out of stock). Powers partial waitlist
+// promotion — one freed unit can serve part of a larger queued request.
+func (r *Repository) DecrementProductStockUpTo(ctx context.Context, productID string, want int) (int, error) {
+	id, err := parseUUID(productID)
+	if err != nil {
+		return 0, err
+	}
+	taken, err := r.queries.DecrementProductStockUpTo(ctx, sqlc.DecrementProductStockUpToParams{
+		ID:   id,
+		Want: int32(want),
+	})
+	return int(taken), err
+}
+
+// RequeueWaitlistItemPartial re-queues a partially promoted waitlist item with
+// the remaining quantity (the customer got some units, still waits for the rest).
+func (r *Repository) RequeueWaitlistItemPartial(ctx context.Context, id string, remainingQty int) error {
+	itemID, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	return r.queries.RequeueWaitlistItemPartial(ctx, sqlc.RequeueWaitlistItemPartialParams{
+		ID:       itemID,
+		Quantity: int32(remainingQty),
+	})
+}
+
 // IncrementProductStock releases reserved stock back to product.
 func (r *Repository) IncrementProductStock(ctx context.Context, productID string, quantity int) error {
 	id, err := parseUUID(productID)

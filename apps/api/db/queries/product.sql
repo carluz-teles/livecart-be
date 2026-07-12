@@ -64,3 +64,19 @@ UPDATE products
 SET stock = stock + $2, updated_at = now()
 WHERE id = $1
 RETURNING *;
+
+-- name: DecrementProductStockUpTo :one
+-- Toma ATÉ `want` unidades, nunca abaixo de zero, e retorna quantas foram
+-- de fato tomadas (0 quando o produto já estava esgotado). Habilita a
+-- promoção PARCIAL da waitlist: 1 unidade livre atende parte de um pedido de
+-- N na fila; o restante continua esperando. FOR UPDATE serializa contra
+-- liberações concorrentes.
+WITH before AS (
+    SELECT stock AS s FROM products WHERE id = sqlc.arg(id) FOR UPDATE
+)
+UPDATE products p
+SET stock = p.stock - LEAST(before.s, sqlc.arg(want)::int),
+    updated_at = now()
+FROM before
+WHERE p.id = sqlc.arg(id)
+RETURNING LEAST(before.s, sqlc.arg(want)::int)::int AS taken;

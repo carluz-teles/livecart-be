@@ -1693,3 +1693,154 @@ func TestNormalSyncAppliesAnyValue(t *testing.T) {
 		t.Fatalf("sync normal deveria aplicar o valor do ERP (stock=%d, esperado 12)", got)
 	}
 }
+
+// ============================================================================
+// Promoção PARCIAL da fila (bug do teste real: fila de 3, libera 1 unidade)
+// ============================================================================
+
+func waitlistQtyAndStatus(t *testing.T, eventID, productID string) (qty int, status string) {
+	t.Helper()
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT quantity, status FROM waitlist_items WHERE event_id=$1 AND product_id=$2 ORDER BY position ASC LIMIT 1`,
+		eventID, productID).Scan(&qty, &status); err != nil {
+		t.Fatalf("lendo waitlist: %v", err)
+	}
+	return
+}
+
+func cartItemAvailable(t *testing.T, cartID, productID string) int {
+	t.Helper()
+	var n int
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT (quantity - waitlisted_quantity) FROM cart_items WHERE cart_id=$1 AND product_id=$2`,
+		cartID, productID).Scan(&n); err != nil {
+		t.Fatalf("lendo cart_item: %v", err)
+	}
+	return n
+}
+
+// Reprodução do bug: um cliente na fila pediu 3, apenas 1 unidade libera.
+// Antes: promoção all-or-nothing falhava e a unidade ficava órfã.
+// Agora: promoção parcial — cliente recebe 1, continua na fila por 2.
+func TestWaitlistPartialPromotion(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	fx := seedPaidCart(t, 1, 0)
+	ext := extProductID(t, fx.productID)
+	// produto esgotado, cliente na fila pedindo 3
+	if _, err := testPool.Exec(ctx, `UPDATE products SET stock = 0 WHERE id=$1`, fx.productID); err != nil {
+		t.Fatalf("zerar estoque: %v", err)
+	}
+	wlCart := seedQueueWaiterQty(t, fx, fx.productID, 1, 3) // fila: pos 1, qtd 3
+
+	svc := newFinalisationService(newScriptedERP())
+	svc.productSyncer = raceStubالسyncer{ext: ext}
+
+	// 1 unidade libera (ex.: outro cliente removeu 1 do carrinho)
+	if err := testRepo.IncrementProductStock(ctx, fx.productID, 1); err != nil {
+		t.Fatalf("liberar 1: %v", err)
+	}
+	svc.ProcessWaitlistForProduct(ctx, fx.eventID, fx.productID, fx.storeID)
+
+	// O cliente da fila deve ter recebido 1, e continuar na fila por 2.
+	qty, status := waitlistQtyAndStatus(t, fx.eventID, fx.productID)
+	if status != "waiting" || qty != 2 {
+		t.Fatalf("PARCIAL falhou: status=%q qtd_restante=%d (esperado waiting/2)", status, qty)
+	}
+	if avail := cartItemAvailable(t, wlCart, fx.productID); avail != 1 {
+		t.Fatalf("cliente deveria ter 1 disponível no carrinho (avail=%d)", avail)
+	}
+	if st := localStock(t, fx.productID); st != 0 {
+		t.Fatalf("a unidade liberada deveria ter ido para a fila (stock=%d, esperado 0)", st)
+	}
+
+	// Libera mais 2 → completa o pedido; agora vira 'notified'.
+	if err := testRepo.IncrementProductStock(ctx, fx.productID, 2); err != nil {
+		t.Fatalf("liberar 2: %v", err)
+	}
+	svc.ProcessWaitlistForProduct(ctx, fx.eventID, fx.productID, fx.storeID)
+	qty, status = waitlistQtyAndStatus(t, fx.eventID, fx.productID)
+	if status != "notified" {
+		t.Fatalf("após completar, deveria ser notified (status=%q qtd=%d)", status, qty)
+	}
+	if avail := cartItemAvailable(t, wlCart, fx.productID); avail != 3 {
+		t.Fatalf("cliente deveria ter os 3 disponíveis (avail=%d)", avail)
+	}
+}
+
+// Promoção TOTAL num passo continua funcionando (estoque >= pedido).
+func TestWaitlistFullPromotionStillWorks(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	fx := seedPaidCart(t, 1, 0)
+	ext := extProductID(t, fx.productID)
+	if _, err := testPool.Exec(ctx, `UPDATE products SET stock = 0 WHERE id=$1`, fx.productID); err != nil {
+		t.Fatalf("zerar: %v", err)
+	}
+	wlCart := seedQueueWaiterQty(t, fx, fx.productID, 1, 3)
+	svc := newFinalisationService(newScriptedERP())
+	svc.productSyncer = raceStubالسyncer{ext: ext}
+
+	if err := testRepo.IncrementProductStock(ctx, fx.productID, 5); err != nil { // sobra estoque
+		t.Fatalf("liberar 5: %v", err)
+	}
+	svc.ProcessWaitlistForProduct(ctx, fx.eventID, fx.productID, fx.storeID)
+
+	_, status := waitlistQtyAndStatus(t, fx.eventID, fx.productID)
+	if status != "notified" {
+		t.Fatalf("promoção total deveria virar notified (status=%q)", status)
+	}
+	if avail := cartItemAvailable(t, wlCart, fx.productID); avail != 3 {
+		t.Fatalf("cliente deveria ter 3 disponíveis (avail=%d)", avail)
+	}
+	if st := localStock(t, fx.productID); st != 2 {
+		t.Fatalf("estoque restante deveria ser 2 (st=%d)", st)
+	}
+}
+
+// Sem estoque, o cliente permanece esperando com a quantidade intacta.
+func TestWaitlistNoStockKeepsWaiting(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	fx := seedPaidCart(t, 1, 0)
+	ext := extProductID(t, fx.productID)
+	if _, err := testPool.Exec(ctx, `UPDATE products SET stock = 0 WHERE id=$1`, fx.productID); err != nil {
+		t.Fatalf("zerar: %v", err)
+	}
+	seedQueueWaiterQty(t, fx, fx.productID, 1, 3)
+	svc := newFinalisationService(newScriptedERP())
+	svc.productSyncer = raceStubالسyncer{ext: ext}
+
+	svc.ProcessWaitlistForProduct(ctx, fx.eventID, fx.productID, fx.storeID)
+	qty, status := waitlistQtyAndStatus(t, fx.eventID, fx.productID)
+	if status != "waiting" || qty != 3 {
+		t.Fatalf("sem estoque deveria manter waiting/3 (status=%q qtd=%d)", status, qty)
+	}
+}
+
+// seedQueueWaiterQty: como seedWaitingBuyer mas com quantidade explícita.
+func seedQueueWaiterQty(t *testing.T, fx finFixture, productID string, position, qty int) string {
+	t.Helper()
+	ctx := context.Background()
+	seedSeq++
+	uniq := fmt.Sprintf("wq%d-%d", position, seedSeq)
+	var cartID string
+	if err := testPool.QueryRow(ctx,
+		`INSERT INTO carts (event_id, platform_user_id, platform_handle, token, short_id, status, payment_status)
+		 VALUES ($1, 'u-'||$2, '@'||$2, 'tk-'||$2, (floor(random()*2000000000))::int, 'checkout', 'unpaid')
+		 RETURNING id::text`, fx.eventID, uniq).Scan(&cartID); err != nil {
+		t.Fatalf("seed waiter cart: %v", err)
+	}
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity)
+		 VALUES ($1, $2, $3, 1000, $3)`, cartID, productID, qty); err != nil {
+		t.Fatalf("seed cart_item: %v", err)
+	}
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO waitlist_items (event_id, product_id, platform_user_id, platform_handle, quantity, position, cart_id, status)
+		 VALUES ($1, $2, 'u-'||$3, '@'||$3, $4, $5, $6, 'waiting')`,
+		fx.eventID, productID, uniq, qty, position, cartID); err != nil {
+		t.Fatalf("seed waitlist_item: %v", err)
+	}
+	return cartID
+}

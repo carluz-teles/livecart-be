@@ -6256,9 +6256,21 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		return // fila vazia
 	}
 
-	// Gate de estoque: exatamente uma unidade por reivindicação. Se não houver
-	// unidade, devolve o cliente ao topo da fila (nenhuma unidade consumida).
-	if err := s.repo.DecrementProductStock(ctx, productID, next.Quantity); err != nil {
+	// Gate de estoque com promoção PARCIAL: toma ATÉ a quantidade pedida. Uma
+	// unidade livre atende parte de um pedido de N na fila — o cliente recebe
+	// o que houver e continua esperando o restante. Sem unidade nenhuma,
+	// devolve o cliente ao topo da fila.
+	taken, err := s.repo.DecrementProductStockUpTo(ctx, productID, next.Quantity)
+	if err != nil {
+		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
+		s.logger.Error("failed to take stock for waitlist promotion",
+			zap.String("product_id", productID),
+			zap.String("waitlist_item_id", next.ID),
+			zap.Error(err),
+		)
+		return
+	}
+	if taken <= 0 {
 		if revErr := s.repo.RevertWaitlistToWaiting(ctx, next.ID); revErr != nil {
 			s.logger.Error("failed to revert waitlist claim after stock gate miss",
 				zap.String("waitlist_item_id", next.ID),
@@ -6274,7 +6286,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 
 	product, err := s.repo.GetProductByID(ctx, storeID, productID)
 	if err != nil || product == nil {
-		_ = s.repo.IncrementProductStock(ctx, productID, next.Quantity)
+		_ = s.repo.IncrementProductStock(ctx, productID, taken)
 		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
 		s.logger.Error("failed to get product for waitlist promotion",
 			zap.String("product_id", productID),
@@ -6294,9 +6306,9 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	// /shipping-quote return "nenhum item no carrinho para cotar" on a cart
 	// that the FE still renders as non-empty).
 	cartID := next.CartID
-	found, err := s.repo.DecrementCartItemWaitlistedQuantity(ctx, cartID, productID, next.Quantity)
+	found, err := s.repo.DecrementCartItemWaitlistedQuantity(ctx, cartID, productID, taken)
 	if err != nil {
-		_ = s.repo.IncrementProductStock(ctx, productID, next.Quantity)
+		_ = s.repo.IncrementProductStock(ctx, productID, taken)
 		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
 		s.logger.Error("failed to decrement waitlisted quantity on promotion",
 			zap.String("waitlist_item_id", next.ID),
@@ -6317,11 +6329,11 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 			PlatformHandle:     next.PlatformHandle,
 			ProductID:          productID,
 			ProductPrice:       product.Price,
-			Quantity:           next.Quantity,
+			Quantity:           taken,
 			WaitlistedQuantity: 0,
 		})
 		if fbErr != nil {
-			_ = s.repo.IncrementProductStock(ctx, productID, next.Quantity)
+			_ = s.repo.IncrementProductStock(ctx, productID, taken)
 			_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
 			s.logger.Error("failed to recreate cart item on promotion",
 				zap.String("waitlist_item_id", next.ID),
@@ -6330,6 +6342,20 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 			return
 		}
 		cartID = fbResult.CartID
+	}
+
+	// Promoção PARCIAL: se demos menos que o pedido, re-enfileira o restante
+	// (o cliente ganhou `taken` no carrinho e continua na fila pelo resto). Se
+	// atendemos tudo, a row já está 'notified' pela reivindicação atômica.
+	remaining := next.Quantity - taken
+	if remaining > 0 {
+		if err := s.repo.RequeueWaitlistItemPartial(ctx, next.ID, remaining); err != nil {
+			s.logger.Warn("failed to requeue partial waitlist remainder",
+				zap.String("waitlist_item_id", next.ID),
+				zap.Int("remaining", remaining),
+				zap.Error(err),
+			)
+		}
 	}
 
 	cartToken, tokenErr := s.repo.GetCartTokenByID(ctx, cartID)
@@ -6351,9 +6377,9 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		)
 	}
 
-	// ERP saída — reserva pareada ao cart_item recém-criado. Falha aqui
-	// não bloqueia: o worker de finalisation/reconciliation pega depois.
-	if syncErr := s.ReserveStockInERP(ctx, storeID, cartID, eventID, productID, next.Quantity, product.Price, next.PlatformHandle); syncErr != nil {
+	// ERP saída — reserva pareada às `taken` unidades recém-liberadas para o
+	// cart. Falha aqui não bloqueia: o worker de reconciliação pega depois.
+	if syncErr := s.ReserveStockInERP(ctx, storeID, cartID, eventID, productID, taken, product.Price, next.PlatformHandle); syncErr != nil {
 		s.logger.Warn("failed to reserve stock in ERP for promoted waitlist item",
 			zap.String("cart_id", cartID),
 			zap.Error(syncErr),
@@ -6374,16 +6400,19 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		PlatformHandle: next.PlatformHandle,
 		ProductName:    product.Name,
 		ProductKeyword: product.Keyword,
-		Quantity:       next.Quantity,
+		Quantity:       taken,
 		TTL:            ttl,
 	})
 
-	s.logger.Info("waitlist promoted to notified",
+	s.logger.Info("waitlist promoted",
 		zap.String("user", next.PlatformHandle),
 		zap.String("waitlist_item_id", next.ID),
 		zap.String("cart_id", cartID),
 		zap.String("product_id", productID),
-		zap.Int("quantity", next.Quantity),
+		zap.Int("requested", next.Quantity),
+		zap.Int("promoted", taken),
+		zap.Int("still_waiting", remaining),
+		zap.Bool("partial", remaining > 0),
 		zap.Duration("ttl", ttl),
 		zap.Time("notified_until", notifiedUntil),
 	)

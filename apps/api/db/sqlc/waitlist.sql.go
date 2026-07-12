@@ -644,6 +644,29 @@ func (q *Queries) MarkWaitlistNotified(ctx context.Context, arg MarkWaitlistNoti
 	return err
 }
 
+const requeueWaitlistItemPartial = `-- name: RequeueWaitlistItemPartial :exec
+UPDATE waitlist_items
+SET quantity             = $2,
+    status               = 'waiting',
+    notified_at          = NULL,
+    expires_at           = NULL,
+    notification_sent_at = NULL
+WHERE id = $1
+`
+
+type RequeueWaitlistItemPartialParams struct {
+	ID       pgtype.UUID `json:"id"`
+	Quantity int32       `json:"quantity"`
+}
+
+// Promoção PARCIAL: o cliente recebeu parte do pedido; a entry volta para a
+// fila (mesma posição) aguardando o restante. Limpa os campos de notificação
+// porque ela deixa de estar 'notified'.
+func (q *Queries) RequeueWaitlistItemPartial(ctx context.Context, arg RequeueWaitlistItemPartialParams) error {
+	_, err := q.db.Exec(ctx, requeueWaitlistItemPartial, arg.ID, arg.Quantity)
+	return err
+}
+
 const revertWaitlistToWaiting = `-- name: RevertWaitlistToWaiting :exec
 UPDATE waitlist_items
 SET status               = 'waiting',
