@@ -37,6 +37,13 @@ PSQL() { docker compose exec -T postgres psql -U livecart -d livecart -tA -c "$1
 curl -s $API_BASE/health && curl -s -o /dev/null -w "%{http_code}" $FE_BASE   # aguardar ambos
 ```
 
+⚠️ **Antes de subir o FE local, conferir para onde ele aponta** — o `apiClient` monta as URLs como `${NEXT_PUBLIC_API_URL}${path}`, então a env **deve incluir o sufixo `/api/v1`** e apontar para a API do alvo escolhido:
+```bash
+grep NEXT_PUBLIC_API_URL /home/carluz_teles/livecart-fe/.env.local
+# rodada local exige: NEXT_PUBLIC_API_URL="http://localhost:3001/api/v1"
+```
+Se estiver apontando para produção ou outro ambiente, **parar e confirmar com o usuário** antes de alterar o `.env.local` (anotar o valor original para restaurar ao final). Sem o sufixo `/api/v1`, todo request do painel vira 404 `Cannot GET /stores/...`.
+
 **Staging (Railway):** obter URL da API, URL do FE e `DATABASE_URL` via `railway` CLI (`railway environment`, `railway variables`) ou perguntar ao usuário — não adivinhar URLs. Confirmar com o usuário que são de staging antes de qualquer escrita.
 ```bash
 API_BASE="https://<api-staging>"; FE_BASE="https://<fe-staging>"
