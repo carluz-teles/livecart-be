@@ -33,7 +33,28 @@ type shippingContext struct {
 	DefaultPkgWeightG int
 	DefaultPkgFormat  string
 
+	// AllowStorePickup + PickupAddress feed the "Retirar na loja" option.
+	AllowStorePickup bool
+	PickupAddress    PickupAddress
+
 	Items []shippingContextItem
+}
+
+// PickupAddress is the store address shown to the customer when they pick
+// "Retirar na loja".
+type PickupAddress struct {
+	Street     string `json:"street,omitempty"`
+	Number     string `json:"number,omitempty"`
+	Complement string `json:"complement,omitempty"`
+	District   string `json:"district,omitempty"`
+	City       string `json:"city,omitempty"`
+	State      string `json:"state,omitempty"`
+	Zip        string `json:"zip,omitempty"`
+}
+
+// HasContent reports whether the store has enough address to display.
+func (p PickupAddress) HasContent() bool {
+	return p.Street != "" || p.City != "" || p.Zip != ""
 }
 
 type shippingContextItem struct {
@@ -62,7 +83,14 @@ func (r *Repository) GetShippingContextByToken(ctx context.Context, pool *pgxpoo
 			COALESCE(e.free_shipping, false),
 			COALESCE(s.address_zip, ''),
 			COALESCE(s.default_package_weight_grams, 0),
-			COALESCE(s.default_package_format, 'box')
+			COALESCE(s.default_package_format, 'box'),
+			COALESCE(s.allow_store_pickup, false),
+			COALESCE(s.address_street, ''),
+			COALESCE(s.address_number, ''),
+			COALESCE(s.address_complement, ''),
+			COALESCE(s.address_district, ''),
+			COALESCE(s.address_city, ''),
+			COALESCE(s.address_state, '')
 		FROM carts c
 		JOIN live_events e ON e.id = c.event_id
 		JOIN stores s      ON s.id = e.store_id
@@ -76,6 +104,13 @@ func (r *Repository) GetShippingContextByToken(ctx context.Context, pool *pgxpoo
 		&ctxOut.OriginZip,
 		&ctxOut.DefaultPkgWeightG,
 		&ctxOut.DefaultPkgFormat,
+		&ctxOut.AllowStorePickup,
+		&ctxOut.PickupAddress.Street,
+		&ctxOut.PickupAddress.Number,
+		&ctxOut.PickupAddress.Complement,
+		&ctxOut.PickupAddress.District,
+		&ctxOut.PickupAddress.City,
+		&ctxOut.PickupAddress.State,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -83,6 +118,7 @@ func (r *Repository) GetShippingContextByToken(ctx context.Context, pool *pgxpoo
 		}
 		return nil, fmt.Errorf("loading shipping context: %w", err)
 	}
+	ctxOut.PickupAddress.Zip = ctxOut.OriginZip
 
 	const itemsQ = `
 		SELECT
@@ -359,17 +395,30 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 	if err != nil {
 		return nil, err
 	}
-	if shipCtx.OriginZip == "" {
-		return nil, httpx.ErrUnprocessable("loja sem CEP de origem cadastrado")
-	}
 	if len(shipCtx.Items) == 0 {
 		return nil, httpx.ErrUnprocessable("nenhum item no carrinho para cotar")
 	}
 
+	out := &QuoteShippingOutput{
+		QuotedAt:     time.Now(),
+		FreeShipping: shipCtx.EventFreeShipping,
+		Options:      []ShippingQuoteOptionResponse{},
+	}
+
+	// Cotação de entrega: só é possível com CEP de origem, dimensões em TODOS
+	// os itens e ao menos uma integração de frete ativa. Faltando qualquer um,
+	// a entrega é PULADA (logada para o admin) — nunca vira erro para o
+	// cliente; a retirada na loja e/ou o "sem frete" assumem.
 	items := make([]providers.ShippingItem, 0, len(shipCtx.Items))
+	missingDims := false
 	for _, it := range shipCtx.Items {
 		if it.WeightGrams <= 0 || it.HeightCm <= 0 || it.WidthCm <= 0 || it.LengthCm <= 0 {
-			return nil, httpx.ErrUnprocessable(fmt.Sprintf("produto %q sem dimensões cadastradas", it.Name))
+			missingDims = true
+			s.logger.Info("shipping quote: item missing dimensions, delivery skipped",
+				zap.String("cart_token", input.Token),
+				zap.String("product", it.Name),
+			)
+			break
 		}
 		id := it.SKU
 		if id == "" {
@@ -392,12 +441,11 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 		})
 	}
 
-	active, err := s.integrationService.GetShippingProviders(ctx, shipCtx.StoreID)
-	if err != nil {
-		return nil, err
-	}
-	if len(active) == 0 {
-		return nil, httpx.ErrNotFound("nenhuma integração de frete ativa nesta loja")
+	active, provErr := s.integrationService.GetShippingProviders(ctx, shipCtx.StoreID)
+	if provErr != nil {
+		s.logger.Warn("shipping quote: failed to load providers, delivery skipped",
+			zap.String("store_id", shipCtx.StoreID), zap.Error(provErr))
+		active = nil
 	}
 
 	// Optional client-side provider filter (e.g. admin testing a single provider).
@@ -415,10 +463,14 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 		active = filtered
 	}
 
-	out := &QuoteShippingOutput{
-		QuotedAt:     time.Now(),
-		FreeShipping: shipCtx.EventFreeShipping,
-		Options:      []ShippingQuoteOptionResponse{},
+	deliveryPossible := shipCtx.OriginZip != "" && !missingDims && len(active) > 0
+	if !deliveryPossible {
+		s.logger.Info("shipping quote: delivery not possible",
+			zap.String("cart_token", input.Token),
+			zap.Bool("has_origin_zip", shipCtx.OriginZip != ""),
+			zap.Bool("missing_dims", missingDims),
+			zap.Int("active_providers", len(active)),
+		)
 	}
 
 	req := providers.QuoteRequest{
@@ -430,7 +482,11 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 		ExternalID:              shipCtx.CartID,
 	}
 
-	for _, provider := range active {
+	providersToQuote := active
+	if !deliveryPossible {
+		providersToQuote = nil
+	}
+	for _, provider := range providersToQuote {
 		options, qerr := provider.Quote(ctx, req)
 		if qerr != nil {
 			s.logger.Error("shipping quote failed for provider",
@@ -475,8 +531,30 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 		}
 	}
 
+	// "Retirar na loja": sempre presente quando a loja ativou o toggle. Grátis,
+	// com o endereço da loja. Vira o fallback automático quando não há entrega.
+	if shipCtx.AllowStorePickup {
+		out.Options = append(out.Options, ShippingQuoteOptionResponse{
+			ID:             pickupOptionID,
+			Provider:       pickupProvider,
+			Service:        "Retirar na loja",
+			Carrier:        "Retirada na loja",
+			PriceCents:     0,
+			RealPriceCents: 0,
+			DeadlineDays:   0,
+			Available:      true,
+		})
+		if shipCtx.PickupAddress.HasContent() {
+			addr := shipCtx.PickupAddress
+			out.PickupAddress = &addr
+		}
+	}
+
+	// Sem entrega E sem retirada: não é erro — o checkout deixa o cliente
+	// finalizar sem frete ("a combinar"). O FE trata esse estado.
 	if len(out.Options) == 0 {
-		return nil, httpx.ErrUnprocessable("nenhuma opção de frete disponível para este carrinho")
+		out.NoShippingAvailable = true
+		return out, nil
 	}
 
 	// Snapshot the response so SelectShippingMethod can resolve the
@@ -490,6 +568,12 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 	}
 	return out, nil
 }
+
+// Identificadores da opção sintética de retirada na loja.
+const (
+	pickupOptionID = "pickup"
+	pickupProvider = "pickup"
+)
 
 // SelectShippingMethod resolves the customer's chosen freight option from the
 // quote snapshot persisted by the previous QuoteShipping call and persists

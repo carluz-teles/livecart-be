@@ -678,6 +678,7 @@ type Store struct {
 	NotificationTestRecipientHandle pgtype.Text        `json:"notification_test_recipient_handle"`
 	NotificationTestSetupCode       pgtype.Text        `json:"notification_test_setup_code"`
 	NotificationTestSetupExpiresAt  pgtype.Timestamptz `json:"notification_test_setup_expires_at"`
+	AllowStorePickup                bool               `json:"allow_store_pickup"`
 }
 
 type StoreInvitation struct {

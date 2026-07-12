@@ -593,6 +593,12 @@ type QuoteShippingOutput struct {
 	QuotedAt     time.Time
 	FreeShipping bool
 	Options      []ShippingQuoteOptionResponse
+	// PickupAddress is populated when a "Retirar na loja" option is present.
+	PickupAddress *PickupAddress `json:"pickupAddress,omitempty"`
+	// NoShippingAvailable is true when the store has no delivery integration
+	// and no pickup — the checkout lets the customer finish without shipping
+	// ("frete a combinar") instead of showing an error.
+	NoShippingAvailable bool `json:"noShippingAvailable,omitempty"`
 }
 
 type SelectShippingMethodInput struct {
