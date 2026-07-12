@@ -80,9 +80,11 @@ func (h *Handler) QuoteShipping(c *fiber.Ctx) error {
 		return httpx.HandleServiceError(c, err)
 	}
 	return httpx.OK(c, ShippingQuoteResponse{
-		QuotedAt:     out.QuotedAt,
-		FreeShipping: out.FreeShipping,
-		Options:      out.Options,
+		QuotedAt:            out.QuotedAt,
+		FreeShipping:        out.FreeShipping,
+		Options:             out.Options,
+		PickupAddress:       out.PickupAddress,
+		NoShippingAvailable: out.NoShippingAvailable,
 	})
 }
 

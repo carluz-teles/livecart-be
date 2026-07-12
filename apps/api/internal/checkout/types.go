@@ -553,6 +553,12 @@ type ShippingQuoteResponse struct {
 	QuotedAt     time.Time                     `json:"quotedAt"`
 	FreeShipping bool                          `json:"freeShipping"`
 	Options      []ShippingQuoteOptionResponse `json:"options"`
+	// PickupAddress carries the store address so the checkout can show where to
+	// pick up when a "Retirar na loja" option is present.
+	PickupAddress *PickupAddress `json:"pickupAddress,omitempty"`
+	// NoShippingAvailable signals the checkout to offer "finalizar sem frete"
+	// (frete a combinar) instead of surfacing a shipping error to the customer.
+	NoShippingAvailable bool `json:"noShippingAvailable,omitempty"`
 }
 
 // SelectShippingMethodRequest is the body for PUT /api/public/checkout/:token/shipping-method.
