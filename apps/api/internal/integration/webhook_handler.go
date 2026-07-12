@@ -425,8 +425,16 @@ func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 	// The goroutine outlives the request, so we detach from c.Context() — in
 	// Fiber v2 that's the *fasthttp.RequestCtx, recycled to a sync.Pool when
 	// the handler returns; touching it later panics inside pgxpool.
+	// Gateway accounts emit order.* (Data.ID = or_...); PSP accounts emit
+	// charge.* (Data.ID = ch_...). GetPaymentStatus routes on the id prefix, so
+	// a single dispatcher reconciles both — we only need to fire on the events
+	// that move a cart to a terminal state. Without the charge.* cases, PIX and
+	// card payments on PSP accounts were confirmed at the gateway but never
+	// reconciled here, leaving the cart stuck on "pending".
 	switch webhook.Type {
-	case "order.paid", "order.payment_failed", "order.canceled":
+	case "order.paid", "order.payment_failed", "order.canceled",
+		"charge.paid", "charge.payment_failed", "charge.canceled",
+		"charge.refunded", "charge.chargedback":
 		if webhook.Data.ID != "" {
 			orderID := webhook.Data.ID
 			eventType := webhook.Type

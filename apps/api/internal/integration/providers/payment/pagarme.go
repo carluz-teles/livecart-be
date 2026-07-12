@@ -343,7 +343,73 @@ func (p *Pagarme) CreateCheckout(ctx context.Context, order CheckoutOrder) (*Che
 // (separate API), not on the order. The audit log mirrors the MP shape so
 // downstream observability dashboards (status, payment_method, installments,
 // auth_code) work uniformly across providers.
-func (p *Pagarme) GetPaymentStatus(ctx context.Context, orderID string) (*PaymentStatus, error) {
+// GetPaymentStatus reconciles a payment by its Pagar.me id. PSP accounts emit
+// charge.* webhooks carrying a charge id (ch_...), while the order flow and
+// Gateway accounts carry an order id (or_...). Both resolve to the same cart
+// via the `code` field, so we route on the id prefix and normalise into a
+// single PaymentStatus — the caller (ProcessPaymentNotification) doesn't need
+// to know which model the merchant's account uses.
+func (p *Pagarme) GetPaymentStatus(ctx context.Context, id string) (*PaymentStatus, error) {
+	if strings.HasPrefix(id, "ch_") {
+		return p.getChargeStatus(ctx, id)
+	}
+	return p.getOrderStatus(ctx, id)
+}
+
+func (p *Pagarme) getChargeStatus(ctx context.Context, chargeID string) (*PaymentStatus, error) {
+	url := fmt.Sprintf("%s/charges/%s", pagarmeAPIBaseURL, chargeID)
+
+	resp, body, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
+	if err != nil {
+		return nil, fmt.Errorf("getting charge: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("charge not found: %s", chargeID)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return nil, fmt.Errorf("get charge failed: status %d", resp.StatusCode)
+	}
+
+	var ch pagarmeCharge
+	if err := json.Unmarshal(body, &ch); err != nil {
+		return nil, fmt.Errorf("parsing charge response: %w", err)
+	}
+
+	status := mapPagarmeStatus(ch.Status)
+	var paidAt *time.Time
+	if ch.PaidAt != "" {
+		if t, err := time.Parse(time.RFC3339, ch.PaidAt); err == nil {
+			paidAt = &t
+		}
+	}
+	var statusDetail string
+	var installments int
+	if ch.LastTransaction != nil {
+		statusDetail = ch.LastTransaction.Status
+		installments = ch.LastTransaction.Installments
+	}
+
+	p.Logger.Info("pagarme charge status fetched",
+		zap.String("charge_id", ch.ID),
+		zap.String("external_reference", ch.Code),
+		zap.String("status", string(status)),
+		zap.String("status_detail", statusDetail),
+		zap.Bool("has_paid_at", paidAt != nil),
+	)
+
+	return &PaymentStatus{
+		PaymentID:         ch.ID,
+		Status:            status,
+		Amount:            int64(ch.Amount),
+		PaidAt:            paidAt,
+		FailureReason:     statusDetail,
+		ExternalReference: ch.Code,
+		PaymentMethod:     mapPagarmePaymentMethod(ch.PaymentMethod),
+		Installments:      installments,
+	}, nil
+}
+
+func (p *Pagarme) getOrderStatus(ctx context.Context, orderID string) (*PaymentStatus, error) {
 	url := fmt.Sprintf("%s/orders/%s", pagarmeAPIBaseURL, orderID)
 
 	resp, body, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
@@ -617,43 +683,60 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 
 	customer := buildPagarmeCustomer(input.Customer)
 
-	// Pagar.me v5 mixes `card_token` and `card` mutually: when you set
-	// card_token the gateway pulls the card data (including holder_document
-	// and billing_address) out of the token itself, set on the FE during
-	// the /tokens POST. Sending a partial `card: { holder_document }`
-	// alongside the token flips the validator into "raw card mode" and it
-	// rejects the order with `validation_error | billing | "value" is
-	// required` because the rest of the card object (number, cvv, exp,
-	// billing_address) is missing. The FE already includes holder_document
-	// inside the token payload, and customer.document covers the buyer-
-	// level CPF for the order — there's no need to repeat it on `card`.
+	// Pagar.me tem dois modelos de conta e eles NÃO aceitam os mesmos dados de
+	// cartão na criação do pedido: contas Gateway aceitam `card_token` direto,
+	// mas contas PSP não — a doc é explícita ("Apenas clientes Gateway estão
+	// aptos a utilizar card_token na criação do pedido; caso PSP, use
+	// card_id"). Com card_token numa conta PSP o validador do adquirente não
+	// resolve o billing_address (que viaja dentro do token) e rejeita o pedido
+	// inteiro com o opaco `validation_error | billing | "value" is required`.
+	//
+	// Como o lojista conecta a conta dele — e não controlamos se é PSP ou
+	// Gateway — seguimos o caminho `card_id`, que é aceito por AMBOS: primeiro
+	// persistimos o comprador (POST /customers), depois criamos o cartão a
+	// partir do token do checkout transparente (POST /customers/{id}/cards, com
+	// o billing_address preservado do token) e por fim referenciamos o card_id
+	// no pedido. Uma chamada HTTP a mais, mas o fluxo passa a funcionar
+	// independentemente do tipo de conta.
+	customerID, err := p.createCustomer(ctx, customer)
+	if err != nil {
+		p.Logger.Error("pagarme create customer failed",
+			zap.String("cart_id", input.CartID), zap.Error(err))
+		return nil, fmt.Errorf("criando cliente no Pagar.me: %w", err)
+	}
+	cardID, err := p.createCardFromToken(ctx, customerID, input.Token)
+	if err != nil {
+		p.Logger.Error("pagarme create card failed",
+			zap.String("cart_id", input.CartID),
+			zap.String("customer_id", customerID), zap.Error(err))
+		return nil, fmt.Errorf("registrando cartão no Pagar.me: %w", err)
+	}
+
+	// We intentionally do not set payments[].amount here. The canonical
+	// example omits it and lets the gateway derive the charge amount from
+	// sum(items.amount); passing input.TotalAmount (which already includes the
+	// shipping premium summed by checkout/service.go) made the value diverge
+	// from sum(items) and the PSP validator rejected the order. Shipping is
+	// reconciled as a line item above so items_sum == order_amount.
 	cardConfig := map[string]any{
-		"card_token":           input.Token,
+		"card_id":              cardID,
 		"installments":         input.Installments,
 		"statement_descriptor": "LIVECART",
 		"capture":              true,
 	}
 
-	// We intentionally do not set payments[].amount here. The canonical
-	// card_token example in the Pagar.me docs omits it and lets the
-	// gateway derive the charge amount from sum(items.amount). When we
-	// passed input.TotalAmount (which already includes the shipping
-	// premium summed by checkout/service.go) the value did not match
-	// sum(items), and the PSP-layer validator rejected the order under
-	// an opaque "validation_error | billing | value is required"
-	// message. The proper place to expose shipping is the top-level
-	// shipping object (with its own amount / address / recipient),
-	// added below when the cart has a selected shipping option.
 	cardPayment := map[string]any{
 		"payment_method": "credit_card",
 		"credit_card":    cardConfig,
 	}
 
+	// card_id belongs to the persisted customer, so the order references the
+	// buyer by id (customer_id) instead of an inline customer object.
 	payload := map[string]any{
-		"code":     input.CartID,
-		"items":    items,
-		"customer": customer,
-		"payments": []map[string]any{cardPayment},
+		"code":        input.CartID,
+		"items":       items,
+		"customer_id": customerID,
+		"payments":    []map[string]any{cardPayment},
 	}
 
 	if input.Metadata != nil {
@@ -799,6 +882,55 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 	}
 
 	return result, nil
+}
+
+// createCustomer persists the buyer on Pagar.me and returns the cus_ id. The
+// card_id card flow (see ProcessCardPayment) requires a persisted customer to
+// attach the card to; the inline customer used by the PIX flow is not enough.
+func (p *Pagarme) createCustomer(ctx context.Context, customer map[string]any) (string, error) {
+	url := pagarmeAPIBaseURL + "/customers"
+	resp, body, err := p.DoRequest(ctx, http.MethodPost, url, customer, p.authHeaders())
+	if err != nil {
+		return "", fmt.Errorf("creating customer: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return "", fmt.Errorf("creating customer: HTTP %d: %s", resp.StatusCode, parsePagarmeError(body))
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", fmt.Errorf("parsing customer response: %w", err)
+	}
+	if out.ID == "" {
+		return "", fmt.Errorf("customer created without id")
+	}
+	return out.ID, nil
+}
+
+// createCardFromToken turns the transparent-checkout card token into a stored
+// card_id under the given customer. The billing_address the FE embedded in the
+// /tokens call is preserved on the card, which is exactly what the PSP order
+// validator needs.
+func (p *Pagarme) createCardFromToken(ctx context.Context, customerID, token string) (string, error) {
+	url := fmt.Sprintf("%s/customers/%s/cards", pagarmeAPIBaseURL, customerID)
+	resp, body, err := p.DoRequest(ctx, http.MethodPost, url, map[string]any{"token": token}, p.authHeaders())
+	if err != nil {
+		return "", fmt.Errorf("creating card: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return "", fmt.Errorf("creating card: HTTP %d: %s", resp.StatusCode, parsePagarmeError(body))
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", fmt.Errorf("parsing card response: %w", err)
+	}
+	if out.ID == "" {
+		return "", fmt.Errorf("card created without id")
+	}
+	return out.ID, nil
 }
 
 // GeneratePixPayment generates a PIX QR code via Pagar.me v5 /orders.
