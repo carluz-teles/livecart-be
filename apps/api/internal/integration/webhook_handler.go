@@ -382,6 +382,17 @@ func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 		return httpx.BadRequest(c, "invalid webhook payload")
 	}
 
+	// Loopback self-test (TestPagarmeWebhookEndpoint): the dashboard "Testar
+	// endpoint" button POSTs this synthetic event to our own public URL to
+	// prove the endpoint is reachable and the Basic Auth is consistent. It has
+	// already passed the auth check above; short-circuit here as a pure no-op —
+	// no audit row, no ping stamp, no cart reconciliation — so the
+	// delivery-history probe stays honest about REAL Pagar.me deliveries.
+	if webhook.Type == pagarmeWebhookTestType {
+		h.logger.Info("pagarme webhook self-test received", zap.String("store_id", storeID))
+		return httpx.OK(c, fiber.Map{"status": "test_ok"})
+	}
+
 	h.logger.Info("pagarme webhook received",
 		zap.String("store_id", storeID),
 		zap.String("type", webhook.Type),

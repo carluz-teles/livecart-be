@@ -344,6 +344,25 @@ type PagarmeWebhookStatusOutput struct {
 	LastEvent          string
 }
 
+// PagarmeWebhookTestOutput is the result of the loopback self-test: we POST a
+// synthetic event to our OWN public webhook URL and report whether it is
+// reachable and healthy. It proves the LiveCart side (public URL reachable,
+// TLS, routing, handler, and that our stored Basic Auth authenticates against
+// our own validator) WITHOUT needing a real Pagar.me delivery — so the
+// merchant can validate right after configuring, instead of after a sale.
+// It cannot verify that the merchant pasted this exact URL into the Pagar.me
+// dashboard (we can't read their panel); the delivery-history probe covers
+// that side.
+type PagarmeWebhookTestOutput struct {
+	URL            string
+	Reachable      bool
+	Healthy        bool
+	HTTPStatus     int
+	AuthConfigured bool
+	LatencyMs      int64
+	Message        string
+}
+
 // GetOAuthURLInput is the service input for getting OAuth URL.
 type GetOAuthURLInput struct {
 	StoreID  string

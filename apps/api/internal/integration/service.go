@@ -3211,6 +3211,101 @@ func (s *Service) GetPagarmeWebhookStatus(ctx context.Context, integrationID, st
 	return out, nil
 }
 
+// pagarmeWebhookTestType marks the synthetic event the loopback self-test
+// POSTs to our own webhook URL. The receiver (HandlePagarme) recognizes it and
+// returns 200 as a pure no-op — no audit row, no ping stamp, no cart change —
+// so the delivery-history probe stays honest about real Pagar.me deliveries.
+const pagarmeWebhookTestType = "livecart.webhook_test"
+
+// TestPagarmeWebhookEndpoint runs a loopback self-test: it POSTs a synthetic
+// event to the store's OWN public Pagar.me webhook URL (reconstructing the
+// stored Basic Auth) and reports whether our endpoint is reachable and healthy.
+// This lets the merchant validate the webhook right after configuring it,
+// instead of waiting for a real customer payment. It never touches Pagar.me.
+func (s *Service) TestPagarmeWebhookEndpoint(ctx context.Context, integrationID, storeID string) (*PagarmeWebhookTestOutput, error) {
+	// Load the same integration + credentials the inbound path validates
+	// against, so the test exercises the real Basic Auth check.
+	row, err := s.repo.GetByProvider(ctx, storeID, string(providers.ProviderTypePayment), string(providers.ProviderPagarme))
+	if err != nil {
+		return nil, httpx.ErrNotFound("integração Pagar.me não encontrada")
+	}
+	creds, err := s.decryptCredentials(row.Credentials)
+	if err != nil {
+		return nil, fmt.Errorf("decrypting credentials: %w", err)
+	}
+	webhookUser, _ := creds.Extra["webhook_username"].(string)
+	webhookPass, _ := creds.Extra["webhook_password"].(string)
+	authConfigured := webhookUser != "" || webhookPass != ""
+
+	url := buildProviderURLs("pagarme", storeID).WebhookURL
+	if url == "" {
+		return nil, httpx.ErrUnprocessable("URL de webhook indisponível — verifique a configuração do servidor")
+	}
+
+	out := &PagarmeWebhookTestOutput{URL: url, AuthConfigured: authConfigured}
+
+	// Synthetic payload shaped like a Pagar.me v5 event so it flows through the
+	// exact same parsing as a real one. The nonce only aids log correlation —
+	// the caller observes the HTTP response directly, so no async matching is
+	// needed. The URL is built from our own config + a UUID storeId, never from
+	// user input, so there is no SSRF surface.
+	nonce := uuid.New().String()
+	payload := map[string]any{
+		"id":         "livecart_test_" + nonce,
+		"type":       pagarmeWebhookTestType,
+		"created_at": time.Now().UTC().Format(time.RFC3339),
+		"data":       map[string]any{"id": "", "nonce": nonce},
+	}
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling test payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("building test request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if authConfigured {
+		basic := base64.StdEncoding.EncodeToString([]byte(webhookUser + ":" + webhookPass))
+		req.Header.Set("Authorization", "Basic "+basic)
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	start := time.Now()
+	resp, err := client.Do(req)
+	out.LatencyMs = time.Since(start).Milliseconds()
+	if err != nil {
+		// Transport-level failure: DNS, TLS, connection refused, timeout — the
+		// endpoint is not reachable over the public internet.
+		out.Reachable = false
+		out.Healthy = false
+		out.Message = "Não foi possível alcançar o endpoint (timeout ou falha de conexão). Verifique se a API está no ar e acessível publicamente."
+		s.logger.Warn("pagarme webhook self-test unreachable",
+			zap.String("store_id", storeID),
+			zap.String("url", url),
+			zap.Error(err),
+		)
+		return out, nil
+	}
+	defer resp.Body.Close()
+
+	out.Reachable = true
+	out.HTTPStatus = resp.StatusCode
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		out.Healthy = true
+		out.Message = "Endpoint no ar e respondendo. O lado do LiveCart está pronto para receber webhooks."
+	case resp.StatusCode == http.StatusUnauthorized:
+		out.Healthy = false
+		out.Message = "O endpoint respondeu 401. As credenciais Basic Auth salvas aqui não conferem — confira usuário/senha do webhook."
+	default:
+		out.Healthy = false
+		out.Message = fmt.Sprintf("O endpoint respondeu HTTP %d. Verifique os logs da API.", resp.StatusCode)
+	}
+	return out, nil
+}
+
 // RefundPayment initiates a refund.
 func (s *Service) RefundPayment(ctx context.Context, input RefundPaymentInput) (*RefundPaymentOutput, error) {
 	paymentProvider, err := s.GetPaymentProvider(ctx, input.IntegrationID, input.StoreID)

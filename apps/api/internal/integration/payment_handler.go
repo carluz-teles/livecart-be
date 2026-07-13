@@ -78,6 +78,51 @@ type PagarmeWebhookStatusResponse struct {
 	LastEvent          string     `json:"lastEvent"`
 }
 
+// PagarmeWebhookTestResponse is the API shape returned by
+// POST /integrations/{id}/pagarme/webhook-test — the loopback self-test.
+type PagarmeWebhookTestResponse struct {
+	URL            string `json:"url"`
+	Reachable      bool   `json:"reachable"`
+	Healthy        bool   `json:"healthy"`
+	HTTPStatus     int    `json:"httpStatus"`
+	AuthConfigured bool   `json:"authConfigured"`
+	LatencyMs      int64  `json:"latencyMs"`
+	Message        string `json:"message"`
+}
+
+// TestPagarmeWebhook runs the loopback self-test: it POSTs a synthetic event
+// to the store's own public webhook URL and reports whether our endpoint is
+// reachable and healthy. Lets the merchant validate the webhook right after
+// configuring it, without waiting for a real customer payment.
+//
+// @Summary Pagar.me webhook self-test
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param id path string true "Integration ID"
+// @Success 200 {object} httpx.Envelope{data=PagarmeWebhookTestResponse}
+// @Router /api/v1/stores/{storeId}/integrations/{id}/pagarme/webhook-test [post]
+// @Security BearerAuth
+func (h *Handler) TestPagarmeWebhook(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	integrationID := c.Params("id")
+
+	output, err := h.service.TestPagarmeWebhookEndpoint(c.Context(), integrationID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, PagarmeWebhookTestResponse{
+		URL:            output.URL,
+		Reachable:      output.Reachable,
+		Healthy:        output.Healthy,
+		HTTPStatus:     output.HTTPStatus,
+		AuthConfigured: output.AuthConfigured,
+		LatencyMs:      output.LatencyMs,
+		Message:        output.Message,
+	})
+}
+
 // GetPagarmeWebhookStatus checks Pagar.me's delivery history for hooks
 // targeting our webhook URL. Useful for confirming the merchant set up
 // the webhook in the Pagar.me dashboard without waiting for a real event.
