@@ -184,6 +184,12 @@ type HookDelivery struct {
 	Attempts       string    `json:"attempts"`
 	LastAttempt    time.Time `json:"last_attempt"`
 	ResponseStatus int       `json:"response_status"`
+	ResponseRaw    string    `json:"response_raw"`
+	// OrderID / OrderCode come from the delivered event's data payload — used
+	// to correlate a delivery with a specific order (the live webhook test
+	// matches its throwaway order by code).
+	OrderID   string `json:"order_id"`
+	OrderCode string `json:"order_code"`
 }
 
 // ListRecentHookDeliveries returns recent webhook delivery attempts for this
@@ -215,6 +221,11 @@ func (p *Pagarme) ListRecentHookDeliveries(ctx context.Context, size int) ([]Hoo
 			Attempts       string `json:"attempts"`
 			LastAttempt    string `json:"last_attempt"`
 			ResponseStatus int    `json:"response_status"`
+			ResponseRaw    string `json:"response_raw"`
+			Data           struct {
+				ID   string `json:"id"`
+				Code string `json:"code"`
+			} `json:"data"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
@@ -230,6 +241,9 @@ func (p *Pagarme) ListRecentHookDeliveries(ctx context.Context, size int) ([]Hoo
 			Status:         h.Status,
 			Attempts:       h.Attempts,
 			ResponseStatus: h.ResponseStatus,
+			ResponseRaw:    h.ResponseRaw,
+			OrderID:        h.Data.ID,
+			OrderCode:      h.Data.Code,
 		}
 		if h.LastAttempt != "" {
 			if t, err := time.Parse(time.RFC3339, h.LastAttempt); err == nil {
@@ -239,6 +253,87 @@ func (p *Pagarme) ListRecentHookDeliveries(ctx context.Context, size int) ([]Hoo
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// WebhookTestOrder is the minimal footprint of the throwaway order created to
+// force a real order.created webhook. ChargeID lets the caller cancel it.
+type WebhookTestOrder struct {
+	OrderID  string
+	Code     string
+	ChargeID string
+}
+
+// CreateWebhookTestOrder creates a tiny unpaid PIX order whose only purpose is
+// to make Pagar.me fire a REAL order.created webhook to the merchant's
+// configured endpoint — the only way to validate the real delivery path on
+// demand, since v5 exposes no test/simulate webhook endpoint. The caller
+// cancels the charge afterwards; the PIX also expires on its own.
+func (p *Pagarme) CreateWebhookTestOrder(ctx context.Context, code string) (*WebhookTestOrder, error) {
+	url := pagarmeAPIBaseURL + "/orders"
+	payload := map[string]any{
+		"code": code,
+		"items": []map[string]any{{
+			"amount":      100, // R$1,00 — never paid, canceled right after
+			"description": "LiveCart · teste de webhook",
+			"quantity":    1,
+			"code":        "livecart-webhook-test",
+		}},
+		"customer": map[string]any{
+			"name":          "LiveCart Teste",
+			"email":         "webhook-test@livecart.com.br",
+			"type":          "individual",
+			"document":      "01234567890",
+			"document_type": "cpf",
+			"phones": map[string]any{
+				"mobile_phone": map[string]any{
+					"country_code": "55",
+					"area_code":    "11",
+					"number":       "999999999",
+				},
+			},
+		},
+		"payments": []map[string]any{{
+			"payment_method": "pix",
+			"pix":            map[string]any{"expires_in": 3600},
+		}},
+		"metadata": map[string]any{"livecart_webhook_test": "true"},
+	}
+	headers := p.authHeaders()
+	headers["X-Idempotency-Key"] = uuid.New().String()
+
+	resp, body, err := p.DoRequest(ctx, http.MethodPost, url, payload, headers)
+	if err != nil {
+		return nil, fmt.Errorf("creating test order: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return nil, fmt.Errorf("creating test order: HTTP %d: %s", resp.StatusCode, parsePagarmeError(body))
+	}
+	var outOrder pagarmeOrderResponse
+	if err := json.Unmarshal(body, &outOrder); err != nil {
+		return nil, fmt.Errorf("parsing test order response: %w", err)
+	}
+	res := &WebhookTestOrder{OrderID: outOrder.ID, Code: outOrder.Code}
+	if len(outOrder.Charges) > 0 {
+		res.ChargeID = outOrder.Charges[0].ID
+	}
+	return res, nil
+}
+
+// CancelTestCharge best-effort cancels the pending charge from
+// CreateWebhookTestOrder so the test leaves no residue on the merchant account.
+func (p *Pagarme) CancelTestCharge(ctx context.Context, chargeID string) error {
+	if chargeID == "" {
+		return nil
+	}
+	url := fmt.Sprintf("%s/charges/%s", pagarmeAPIBaseURL, chargeID)
+	resp, body, err := p.DoRequest(ctx, http.MethodDelete, url, nil, p.authHeaders())
+	if err != nil {
+		return fmt.Errorf("cancelling test charge: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return fmt.Errorf("cancelling test charge: HTTP %d: %s", resp.StatusCode, parsePagarmeError(body))
+	}
+	return nil
 }
 
 // CreateCheckout creates a hosted-checkout order at Pagar.me. Live commerce

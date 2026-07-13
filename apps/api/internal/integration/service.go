@@ -3306,6 +3306,113 @@ func (s *Service) TestPagarmeWebhookEndpoint(ctx context.Context, integrationID,
 	return out, nil
 }
 
+// pagarmeWebhookTestOrderPrefix marks the throwaway order created by the live
+// (round-trip) webhook test, so its order code can be matched in Pagar.me's
+// delivery history.
+const pagarmeWebhookTestOrderPrefix = "LCWHTEST-"
+
+// RunPagarmeWebhookLiveTest validates the REAL webhook delivery path on demand:
+// it creates a throwaway PIX order so Pagar.me fires a real order.created
+// webhook to the merchant's configured endpoint, then polls Pagar.me's own
+// delivery history (GET /hooks) for that order to confirm the event reached our
+// URL and what status we returned. The order is canceled at the end. Unlike the
+// loopback self-test, this exercises the merchant's dashboard config end-to-end
+// without waiting for a real customer payment.
+func (s *Service) RunPagarmeWebhookLiveTest(ctx context.Context, integrationID, storeID string) (*PagarmeWebhookLiveTestOutput, error) {
+	paymentProvider, err := s.GetPaymentProvider(ctx, integrationID, storeID)
+	if err != nil {
+		return nil, err
+	}
+	pagarme, ok := paymentProvider.(*payment.Pagarme)
+	if !ok {
+		return nil, httpx.ErrUnprocessable("integration is not Pagar.me")
+	}
+
+	expectedURL := buildProviderURLs("pagarme", storeID).WebhookURL
+	if expectedURL == "" {
+		return nil, httpx.ErrUnprocessable("URL de webhook indisponível — verifique a configuração do servidor")
+	}
+
+	code := pagarmeWebhookTestOrderPrefix + uuid.New().String()[:8]
+	order, err := pagarme.CreateWebhookTestOrder(ctx, code)
+	if err != nil {
+		s.handleProviderError(ctx, integrationID, "create_webhook_test_order", err)
+		return nil, httpx.ErrUnprocessable("não foi possível criar o pedido de teste na Pagar.me: " + err.Error())
+	}
+
+	// Always clean up the throwaway charge, whatever the outcome. Detached
+	// context so cleanup runs even if the request context is canceled.
+	defer func() {
+		if order.ChargeID == "" {
+			return
+		}
+		if cErr := pagarme.CancelTestCharge(context.Background(), order.ChargeID); cErr != nil {
+			s.logger.Warn("failed to cancel webhook test charge",
+				zap.String("store_id", storeID),
+				zap.String("charge_id", order.ChargeID),
+				zap.Error(cErr),
+			)
+		}
+	}()
+
+	out := &PagarmeWebhookLiveTestOutput{ExpectedURL: expectedURL, OrderCode: code}
+
+	// Delivery is async — Pagar.me usually posts order.created within a few
+	// seconds. Poll its delivery history for OUR order for up to ~18s.
+	deadline := time.Now().Add(18 * time.Second)
+	for {
+		deliveries, derr := pagarme.ListRecentHookDeliveries(ctx, 30)
+		if derr == nil {
+			for _, d := range deliveries {
+				// Match order.* deliveries by order id/code, and charge.*
+				// deliveries by the charge id — both belong to our test order.
+				if d.OrderCode != code && d.OrderID != order.OrderID && d.OrderID != order.ChargeID {
+					continue
+				}
+				out.Delivered = true
+				out.Event = d.Event
+				out.HTTPStatus = d.ResponseStatus
+				out.ResponseRaw = d.ResponseRaw
+				out.DeliveredURL = d.URL
+				switch {
+				case d.URL != expectedURL:
+					// Delivered our test event, but to a different URL than
+					// ours — the dashboard endpoint doesn't match.
+					out.Healthy = false
+					out.Message = "A Pagar.me entregou o evento de teste, mas para uma URL diferente da nossa. Ajuste a URL do webhook no painel para a exibida acima."
+				case d.ResponseStatus >= 200 && d.ResponseStatus < 300:
+					out.Healthy = true
+					out.Message = "Webhook validado de ponta a ponta: a Pagar.me disparou um evento real e nosso endpoint recebeu com sucesso (HTTP " + fmt.Sprintf("%d", d.ResponseStatus) + ")."
+				default:
+					out.Healthy = false
+					msg := fmt.Sprintf("A Pagar.me entregou o evento, mas nosso endpoint respondeu HTTP %d.", d.ResponseStatus)
+					if d.ResponseStatus == http.StatusUnauthorized {
+						msg += " As credenciais Basic Auth do painel não conferem com as cadastradas aqui."
+					}
+					out.Message = msg
+				}
+				return out, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+
+	// No delivery for our order within the window: either the merchant didn't
+	// subscribe to order.created, or the dashboard URL differs, or nothing was
+	// wired at all.
+	out.Delivered = false
+	out.Healthy = false
+	out.Message = "Criamos um pedido de teste, mas a Pagar.me não registrou nenhuma entrega no nosso endpoint. Confirme no painel da Pagar.me que a URL do webhook é idêntica à exibida acima e que o evento \"order.created\" (ou \"order.*\") está marcado."
+	return out, nil
+}
+
 // RefundPayment initiates a refund.
 func (s *Service) RefundPayment(ctx context.Context, input RefundPaymentInput) (*RefundPaymentOutput, error) {
 	paymentProvider, err := s.GetPaymentProvider(ctx, input.IntegrationID, input.StoreID)

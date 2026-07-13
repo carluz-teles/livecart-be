@@ -363,6 +363,24 @@ type PagarmeWebhookTestOutput struct {
 	Message        string
 }
 
+// PagarmeWebhookLiveTestOutput is the result of the REAL end-to-end test: we
+// create a throwaway PIX order so Pagar.me fires a real order.created webhook
+// to the merchant's configured endpoint, then read Pagar.me's own delivery
+// history to confirm the event reached us and what HTTP status we returned.
+// This proves the actual delivery path (dashboard config + URL + Basic Auth),
+// not just our side — and needs no real sale (the order is canceled).
+type PagarmeWebhookLiveTestOutput struct {
+	ExpectedURL  string
+	OrderCode    string
+	Delivered    bool   // Pagar.me recorded a delivery of our test event
+	Healthy      bool   // delivered AND our endpoint returned 2xx
+	HTTPStatus   int    // the status our endpoint returned to Pagar.me
+	Event        string // e.g. "order.created"
+	DeliveredURL string // URL Pagar.me actually posted to (to catch mismatches)
+	ResponseRaw  string // our endpoint's raw response body, per Pagar.me
+	Message      string
+}
+
 // GetOAuthURLInput is the service input for getting OAuth URL.
 type GetOAuthURLInput struct {
 	StoreID  string

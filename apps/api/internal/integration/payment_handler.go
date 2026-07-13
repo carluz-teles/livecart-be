@@ -123,6 +123,55 @@ func (h *Handler) TestPagarmeWebhook(c *fiber.Ctx) error {
 	})
 }
 
+// PagarmeWebhookLiveTestResponse is the API shape returned by
+// POST /integrations/{id}/pagarme/webhook-live-test — the real round-trip test.
+type PagarmeWebhookLiveTestResponse struct {
+	ExpectedURL  string `json:"expectedUrl"`
+	OrderCode    string `json:"orderCode"`
+	Delivered    bool   `json:"delivered"`
+	Healthy      bool   `json:"healthy"`
+	HTTPStatus   int    `json:"httpStatus"`
+	Event        string `json:"event"`
+	DeliveredURL string `json:"deliveredUrl"`
+	ResponseRaw  string `json:"responseRaw"`
+	Message      string `json:"message"`
+}
+
+// RunPagarmeWebhookLiveTest runs the REAL end-to-end webhook test: it creates a
+// throwaway PIX order so Pagar.me fires a real order.created webhook to the
+// merchant's endpoint, confirms delivery via Pagar.me's history, then cancels
+// the order. Validates the actual delivery path without waiting for a sale.
+//
+// @Summary Pagar.me real webhook test
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param id path string true "Integration ID"
+// @Success 200 {object} httpx.Envelope{data=PagarmeWebhookLiveTestResponse}
+// @Router /api/v1/stores/{storeId}/integrations/{id}/pagarme/webhook-live-test [post]
+// @Security BearerAuth
+func (h *Handler) RunPagarmeWebhookLiveTest(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	integrationID := c.Params("id")
+
+	output, err := h.service.RunPagarmeWebhookLiveTest(c.Context(), integrationID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, PagarmeWebhookLiveTestResponse{
+		ExpectedURL:  output.ExpectedURL,
+		OrderCode:    output.OrderCode,
+		Delivered:    output.Delivered,
+		Healthy:      output.Healthy,
+		HTTPStatus:   output.HTTPStatus,
+		Event:        output.Event,
+		DeliveredURL: output.DeliveredURL,
+		ResponseRaw:  output.ResponseRaw,
+		Message:      output.Message,
+	})
+}
+
 // GetPagarmeWebhookStatus checks Pagar.me's delivery history for hooks
 // targeting our webhook URL. Useful for confirming the merchant set up
 // the webhook in the Pagar.me dashboard without waiting for a real event.

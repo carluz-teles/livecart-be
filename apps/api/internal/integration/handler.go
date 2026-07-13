@@ -87,6 +87,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Post("/payment/pagarme/connect", h.ConnectPagarme)
 	g.Get("/:id/pagarme/webhook-status", h.GetPagarmeWebhookStatus)
 	g.Post("/:id/pagarme/webhook-test", h.TestPagarmeWebhook)
+	g.Post("/:id/pagarme/webhook-live-test", h.RunPagarmeWebhookLiveTest)
 
 	// Shipping — token-based connect (no OAuth) + order lifecycle helpers.
 	// These are typed at the provider level because each shipping provider
