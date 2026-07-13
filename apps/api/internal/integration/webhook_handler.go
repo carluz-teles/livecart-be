@@ -405,6 +405,10 @@ func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 			zap.String("type", webhook.Type),
 			zap.String("order_code", webhook.Data.Code),
 		)
+		// A real Pagar.me webhook reached us — stamp the ping so the admin UI
+		// flips from "pending" to "active" and the setup warning clears without
+		// waiting for organic traffic. Detached ctx: outlives the request.
+		go h.service.RecordWebhookPing(context.Background(), storeID, "pagarme")
 		return httpx.OK(c, fiber.Map{"status": "webhook_test_ok"})
 	}
 
