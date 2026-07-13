@@ -393,6 +393,21 @@ func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 		return httpx.OK(c, fiber.Map{"status": "test_ok"})
 	}
 
+	// Real webhook test: events for the throwaway order created by
+	// RunPagarmeWebhookLiveTest carry the LCWHTEST- code prefix. Never process
+	// these as a real payment — return 200 so Pagar.me records a healthy
+	// delivery (which the test reads back from GET /hooks) and stop before the
+	// dispatch switch. This is the identifier guard so a test order can never
+	// be mistaken for a real sale.
+	if strings.HasPrefix(webhook.Data.Code, pagarmeWebhookTestOrderPrefix) {
+		h.logger.Info("pagarme webhook live-test event received",
+			zap.String("store_id", storeID),
+			zap.String("type", webhook.Type),
+			zap.String("order_code", webhook.Data.Code),
+		)
+		return httpx.OK(c, fiber.Map{"status": "webhook_test_ok"})
+	}
+
 	h.logger.Info("pagarme webhook received",
 		zap.String("store_id", storeID),
 		zap.String("type", webhook.Type),
