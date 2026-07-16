@@ -3628,9 +3628,11 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		// estorno. O Pagar.me responde "canceled" ao refund de charge não
 		// liquidada (praticamente todo estorno same-day) — sem esta
 		// transição os hooks de estorno (devolução da taxa de sucesso,
-		// e-mail, ERP) nunca rodam nesses casos.
+		// e-mail, ERP) nunca rodam nesses casos. "refunded" é terminal: o
+		// estorno dispara uma rajada de webhooks (charge.refunded +
+		// order.canceled) e o segundo não pode rebaixar o estado.
 		if cart, cErr := s.repo.GetCartByID(ctx, status.ExternalReference); cErr == nil &&
-			cart != nil && cart.PaymentStatus == "paid" {
+			cart != nil && (cart.PaymentStatus == "paid" || cart.PaymentStatus == "refunded") {
 			cartPaymentStatus = "refunded"
 		}
 	case providers.PaymentRefunded:
