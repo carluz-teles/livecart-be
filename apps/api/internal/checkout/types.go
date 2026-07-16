@@ -247,7 +247,10 @@ type ProcessCardPaymentRequest struct {
 	DeviceID         string           `json:"deviceId,omitempty"`        // For fraud prevention
 	CustomerName     string           `json:"customerName" validate:"required"`
 	CustomerDocument string           `json:"customerDocument" validate:"required"`
-	CustomerPhone    string           `json:"customerPhone,omitempty"`
+	// Obrigatório: contas PSP do Pagar.me rejeitam customer sem telefone
+	// ("At least one customer phone is required") — melhor falhar na
+	// validação com mensagem clara do que no gateway.
+	CustomerPhone    string           `json:"customerPhone" validate:"required"`
 	WhatsappConsent  bool             `json:"whatsappConsent,omitempty"` // PRD 006: opt-in p/ lembretes e recuperação
 	ShippingAddress  *ShippingAddress `json:"shippingAddress" validate:"required"`
 }
@@ -270,7 +273,8 @@ type GeneratePixRequest struct {
 	Email            string           `json:"email" validate:"required,email"`
 	CustomerName     string           `json:"customerName" validate:"required"`
 	CustomerDocument string           `json:"customerDocument" validate:"required"`
-	CustomerPhone    string           `json:"customerPhone,omitempty"`
+	// Obrigatório: mesma exigência de telefone das contas PSP (ver card).
+	CustomerPhone    string           `json:"customerPhone" validate:"required"`
 	WhatsappConsent  bool             `json:"whatsappConsent,omitempty"` // PRD 006: opt-in p/ lembretes e recuperação
 	ShippingAddress  *ShippingAddress `json:"shippingAddress" validate:"required"`
 }
