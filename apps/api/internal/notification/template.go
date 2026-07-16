@@ -162,5 +162,14 @@ func SampleVariables() TemplateVariables {
 		TrackingCode:   "BR123456789BR",
 		Transportadora: "Sedex via Correios",
 		LinkPedido:     "https://livecart.app/order/1234?key=abc",
+		// Variáveis do pós-pagamento anunciadas no catálogo (/variables) e
+		// usáveis nos e-mails — precisam de amostra, senão a prévia e o
+		// "Testar email" renderizam um template válido como vazio.
+		FormaPagamento:  "Cartão",
+		NomeCliente:     "Maria Silva",
+		ListaProdutos:   "Camiseta Preta M (2×) — R$ 199,90",
+		EnderecoEntrega: "Av. Paulista, 1000 — São Paulo/SP",
+		PrazoEntrega:    "até 5 dias úteis",
+		ValorFrete:      "R$ 18,90",
 	}
 }
