@@ -81,12 +81,40 @@ type StripeSubscription struct {
 	LatestInvoice      string `json:"latest_invoice"`
 	Items              struct {
 		Data []struct {
-			ID    string `json:"id"`
-			Price struct {
+			ID                 string `json:"id"`
+			CurrentPeriodStart int64  `json:"current_period_start"`
+			CurrentPeriodEnd   int64  `json:"current_period_end"`
+			Price              struct {
 				ID string `json:"id"`
 			} `json:"price"`
 		} `json:"data"`
 	} `json:"items"`
+}
+
+// PeriodStart returns the current cycle start. Recent Stripe API versions
+// moved current_period_* to the subscription items (the top-level fields come
+// back null) — fall back to the first item so webhooks keep the local period
+// in sync regardless of the account's API version.
+func (s *StripeSubscription) PeriodStart() int64 {
+	if s.CurrentPeriodStart != 0 {
+		return s.CurrentPeriodStart
+	}
+	if len(s.Items.Data) > 0 {
+		return s.Items.Data[0].CurrentPeriodStart
+	}
+	return 0
+}
+
+// PeriodEnd returns the current cycle end (see PeriodStart for the item-level
+// fallback rationale).
+func (s *StripeSubscription) PeriodEnd() int64 {
+	if s.CurrentPeriodEnd != 0 {
+		return s.CurrentPeriodEnd
+	}
+	if len(s.Items.Data) > 0 {
+		return s.Items.Data[0].CurrentPeriodEnd
+	}
+	return 0
 }
 
 // CreateTrialSubscription starts the cardless 7-day trial on the given plan.

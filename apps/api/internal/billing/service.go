@@ -235,8 +235,8 @@ func (s *Service) applySubscription(ctx context.Context, sub *StripeSubscription
 		Status:               status,
 		Plan:                 plan,
 		TrialEndsAt:          unixToTimestamptz(sub.TrialEnd),
-		CurrentPeriodStart:   unixToTimestamptz(sub.CurrentPeriodStart),
-		CurrentPeriodEnd:     unixToTimestamptz(sub.CurrentPeriodEnd),
+		CurrentPeriodStart:   unixToTimestamptz(sub.PeriodStart()),
+		CurrentPeriodEnd:     unixToTimestamptz(sub.PeriodEnd()),
 		CancelAtPeriodEnd:    sub.CancelAtPeriodEnd,
 		GraceUntil:           graceUntil,
 	})
