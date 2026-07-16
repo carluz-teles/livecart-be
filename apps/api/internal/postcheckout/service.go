@@ -521,11 +521,13 @@ func vars(s *CartSnapshot, trackingCode, trackingURL string) notification.Templa
 	}
 
 	var totalCents int64
+	var totalItens int
 	for _, it := range s.Items {
 		if !it.Quantity.Valid || !it.UnitPrice.Valid {
 			continue
 		}
 		totalCents += int64(it.Quantity.Int32) * it.UnitPrice.Int64
+		totalItens += int(it.Quantity.Int32)
 	}
 	if s.Cart.ShippingCostCents.Valid {
 		totalCents += s.Cart.ShippingCostCents.Int64
@@ -534,6 +536,28 @@ func vars(s *CartSnapshot, trackingCode, trackingURL string) notification.Templa
 	if totalCents < 0 {
 		totalCents = 0
 	}
+
+	// Variaveis "de carrinho" ({produto}/{keyword}/{quantidade}) referem-se ao
+	// ultimo item, igual ao DM. Mantidas tambem nos e-mails para que o catalogo
+	// de variaveis seja o mesmo em todos os templates.
+	produto, keyword := "", ""
+	quantidade := 0
+	if n := len(s.Items); n > 0 {
+		last := s.Items[n-1]
+		produto = last.ProductName
+		keyword = last.ProductKeyword
+		if last.Quantity.Valid {
+			quantidade = int(last.Quantity.Int32)
+		}
+	}
+
+	expiraEm := ""
+	if s.Event.CartExpirationMinutes.Valid && s.Event.CartExpirationMinutes.Int32 > 0 {
+		expiraEm = notification.FormatExpiryMinutes(int(s.Event.CartExpirationMinutes.Int32))
+	}
+
+	checkoutURL := fmt.Sprintf("%s/cart/%s",
+		config.FrontendURL.StringOr("http://localhost:3000"), s.Cart.Token)
 
 	formaPagamento := ""
 	if s.Cart.PaymentMethod.Valid {
@@ -573,6 +597,13 @@ func vars(s *CartSnapshot, trackingCode, trackingURL string) notification.Templa
 
 	return notification.TemplateVariables{
 		Handle:          s.Cart.PlatformHandle,
+		Produto:         produto,
+		Keyword:         keyword,
+		Quantidade:      quantidade,
+		TotalItens:      totalItens,
+		Link:            checkoutURL,
+		ExpiraEm:        expiraEm,
+		LiveTitulo:      s.Event.Title.String,
 		FormaPagamento:  formaPagamento,
 		NomeCliente:     nomeCliente,
 		ListaProdutos:   listaProdutos,
