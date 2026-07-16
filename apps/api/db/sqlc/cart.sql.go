@@ -1341,8 +1341,7 @@ func (q *Queries) IssueShortIDForEvent(ctx context.Context, id pgtype.UUID) (int
 }
 
 const listCartItems = `-- name: ListCartItems :many
-SELECT ci.id, ci.cart_id, ci.product_id, ci.quantity, ci.unit_price, ci.waitlisted_quantity, p.name AS product_name, p.image_url AS product_image_url,
-       p.keyword AS product_keyword
+SELECT ci.id, ci.cart_id, ci.product_id, ci.quantity, ci.unit_price, ci.waitlisted_quantity, p.name AS product_name, p.image_url AS product_image_url
 FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1
@@ -1357,7 +1356,6 @@ type ListCartItemsRow struct {
 	WaitlistedQuantity int32       `json:"waitlisted_quantity"`
 	ProductName        string      `json:"product_name"`
 	ProductImageUrl    pgtype.Text `json:"product_image_url"`
-	ProductKeyword     string      `json:"product_keyword"`
 }
 
 func (q *Queries) ListCartItems(ctx context.Context, cartID pgtype.UUID) ([]ListCartItemsRow, error) {
@@ -1378,7 +1376,6 @@ func (q *Queries) ListCartItems(ctx context.Context, cartID pgtype.UUID) ([]List
 			&i.WaitlistedQuantity,
 			&i.ProductName,
 			&i.ProductImageUrl,
-			&i.ProductKeyword,
 		); err != nil {
 			return nil, err
 		}

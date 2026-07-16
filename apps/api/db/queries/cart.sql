@@ -134,8 +134,7 @@ DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity,
 RETURNING *;
 
 -- name: ListCartItems :many
-SELECT ci.*, p.name AS product_name, p.image_url AS product_image_url,
-       p.keyword AS product_keyword
+SELECT ci.*, p.name AS product_name, p.image_url AS product_image_url
 FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1;
