@@ -78,6 +78,7 @@ type StripeSubscription struct {
 	CurrentPeriodEnd   int64  `json:"current_period_end"`
 	Customer           string `json:"customer"`
 	DefaultPayment     string `json:"default_payment_method"`
+	LatestInvoice      string `json:"latest_invoice"`
 	Items              struct {
 		Data []struct {
 			ID    string `json:"id"`
@@ -284,35 +285,114 @@ func (c *StripeClient) GetSetupIntentPaymentMethod(ctx context.Context, setupInt
 }
 
 // ActivateSubscription converts the trial: attaches the payment method, swaps
-// the flat item to the chosen plan, adds the metered GMV item (allowed now —
-// the pause constraint only applies to trials without a card) and ends the
-// trial so the first flat invoice bills immediately.
+// the flat item to the chosen plan, adds the metered GMV item and bills the
+// first flat invoice immediately.
+//
+// Stripe blocks several of these updates while the pause-at-trial-end
+// behavior is set or the subscription is already paused (constraints
+// verified against the test API):
+//   - the pause validator runs against the PRE-update state, so
+//     trial_settings must be cleared in its own request first;
+//   - metered items and payment_behavior are rejected while paused — the
+//     paused path goes through resume instead (activatePausedSubscription).
 func (c *StripeClient) ActivateSubscription(ctx context.Context, sub *StripeSubscription, cfg PlanConfig, paymentMethodID string) (*StripeSubscription, error) {
 	if cfg.FlatPriceID == "" || cfg.MeterPriceID == "" {
 		return nil, fmt.Errorf("plan %s has no stripe price ids configured", cfg.Plan)
 	}
+	if sub.Status == "paused" {
+		return c.activatePausedSubscription(ctx, sub, cfg, paymentMethodID)
+	}
+
+	clear := url.Values{}
+	clear.Set("trial_settings[end_behavior][missing_payment_method]", "create_invoice")
+	if err := c.do(ctx, http.MethodPost, "/subscriptions/"+sub.ID, clear, nil); err != nil {
+		return nil, fmt.Errorf("clearing trial pause behavior: %w", err)
+	}
 
 	form := url.Values{}
 	form.Set("default_payment_method", paymentMethodID)
-	form.Set("trial_end", "now")
+	if sub.Status == "trialing" {
+		form.Set("trial_end", "now")
+	}
 	form.Set("proration_behavior", "none")
 	form.Set("payment_behavior", "allow_incomplete")
-
-	// Swap the existing flat item and append the metered one.
-	if len(sub.Items.Data) > 0 {
-		form.Set("items[0][id]", sub.Items.Data[0].ID)
-		form.Set("items[0][price]", cfg.FlatPriceID)
-		form.Set("items[1][price]", cfg.MeterPriceID)
-	} else {
-		form.Set("items[0][price]", cfg.FlatPriceID)
-		form.Set("items[1][price]", cfg.MeterPriceID)
-	}
+	c.setConversionItems(form, sub, cfg)
 
 	var out StripeSubscription
 	if err := c.do(ctx, http.MethodPost, "/subscriptions/"+sub.ID, form, &out); err != nil {
 		return nil, fmt.Errorf("activating subscription: %w", err)
 	}
 	return &out, nil
+}
+
+// activatePausedSubscription converts a subscription paused at trial end (the
+// merchant let the trial expire and is paying through the paywall). Sequence
+// required by Stripe: card + flat swap while paused, resume on a fresh cycle,
+// pay the resumption invoice, then add the metered item.
+func (c *StripeClient) activatePausedSubscription(ctx context.Context, sub *StripeSubscription, cfg PlanConfig, paymentMethodID string) (*StripeSubscription, error) {
+	form := url.Values{}
+	form.Set("default_payment_method", paymentMethodID)
+	if len(sub.Items.Data) > 0 {
+		form.Set("items[0][id]", sub.Items.Data[0].ID)
+	}
+	form.Set("items[0][price]", cfg.FlatPriceID)
+	if err := c.do(ctx, http.MethodPost, "/subscriptions/"+sub.ID, form, nil); err != nil {
+		return nil, fmt.Errorf("preparing paused subscription: %w", err)
+	}
+
+	var resumed StripeSubscription
+	resume := url.Values{}
+	resume.Set("billing_cycle_anchor", "now")
+	if err := c.do(ctx, http.MethodPost, "/subscriptions/"+sub.ID+"/resume", resume, &resumed); err != nil {
+		return nil, fmt.Errorf("resuming subscription: %w", err)
+	}
+
+	// The resumption invoice finalizes as open and Stripe collects it
+	// asynchronously; pay it now so access doesn't wait (nor depend on) the
+	// async attempt.
+	if resumed.Status != "active" && resumed.LatestInvoice != "" {
+		if err := c.do(ctx, http.MethodPost, "/invoices/"+resumed.LatestInvoice+"/pay", nil, nil); err != nil {
+			return nil, fmt.Errorf("paying resumption invoice: %w", err)
+		}
+	}
+
+	form = url.Values{}
+	form.Set("trial_settings[end_behavior][missing_payment_method]", "create_invoice")
+	form.Set("items[0][price]", cfg.MeterPriceID)
+	form.Set("proration_behavior", "none")
+	var out StripeSubscription
+	if err := c.do(ctx, http.MethodPost, "/subscriptions/"+sub.ID, form, &out); err != nil {
+		return nil, fmt.Errorf("adding metered item after resume: %w", err)
+	}
+	return &out, nil
+}
+
+// setConversionItems swaps the existing flat item to the chosen plan and
+// appends the metered item when absent — converges on webhook retries that
+// land after a partial activation.
+func (c *StripeClient) setConversionItems(form url.Values, sub *StripeSubscription, cfg PlanConfig) {
+	idx := 0
+	hasMetered := false
+	for _, item := range sub.Items.Data {
+		if item.Price.ID == cfg.MeterPriceID {
+			hasMetered = true
+		}
+	}
+	for _, item := range sub.Items.Data {
+		if item.Price.ID != cfg.MeterPriceID {
+			form.Set("items[0][id]", item.ID)
+			form.Set("items[0][price]", cfg.FlatPriceID)
+			idx = 1
+			break
+		}
+	}
+	if idx == 0 {
+		form.Set("items[0][price]", cfg.FlatPriceID)
+		idx = 1
+	}
+	if !hasMetered {
+		form.Set(fmt.Sprintf("items[%d][price]", idx), cfg.MeterPriceID)
+	}
 }
 
 // =============================================================================
