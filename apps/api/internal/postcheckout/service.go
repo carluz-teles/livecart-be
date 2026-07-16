@@ -165,11 +165,25 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 // timeline insert (unique cart_id+event_type) — webhook retries are no-ops.
 func (s *Service) OnCartCancelled(ctx context.Context, cartID string) {
 	snapshot, err := s.repo.LoadCart(ctx, cartID)
-	if err != nil || !snapshot.Cart.CustomerEmail.Valid || snapshot.Cart.CustomerEmail.String == "" {
+	if err != nil {
+		s.logger.Warn("cancellation email skipped: load cart failed",
+			zap.String("cart_id", cartID), zap.Error(err))
+		return
+	}
+	if !snapshot.Cart.CustomerEmail.Valid || snapshot.Cart.CustomerEmail.String == "" {
+		s.logger.Warn("cancellation email skipped: cart has no customer email",
+			zap.String("cart_id", cartID))
 		return
 	}
 	inserted, err := s.repo.InsertOrderEvent(ctx, cartID, "payment_cancelled", "system", nil)
-	if err != nil || !inserted {
+	if err != nil {
+		s.logger.Error("cancellation email skipped: insert timeline event failed",
+			zap.String("cart_id", cartID), zap.Error(err))
+		return
+	}
+	if !inserted {
+		s.logger.Info("cancellation email skipped: timeline event already exists (idempotent)",
+			zap.String("cart_id", cartID))
 		return
 	}
 
@@ -200,11 +214,25 @@ func (s *Service) OnCartCancelled(ctx context.Context, cartID string) {
 // exactly-once do cancelamento).
 func (s *Service) OnCartRefunded(ctx context.Context, cartID string) {
 	snapshot, err := s.repo.LoadCart(ctx, cartID)
-	if err != nil || !snapshot.Cart.CustomerEmail.Valid || snapshot.Cart.CustomerEmail.String == "" {
+	if err != nil {
+		s.logger.Warn("refund email skipped: load cart failed",
+			zap.String("cart_id", cartID), zap.Error(err))
+		return
+	}
+	if !snapshot.Cart.CustomerEmail.Valid || snapshot.Cart.CustomerEmail.String == "" {
+		s.logger.Warn("refund email skipped: cart has no customer email",
+			zap.String("cart_id", cartID))
 		return
 	}
 	inserted, err := s.repo.InsertOrderEvent(ctx, cartID, "payment_refunded", "system", nil)
-	if err != nil || !inserted {
+	if err != nil {
+		s.logger.Error("refund email skipped: insert timeline event failed",
+			zap.String("cart_id", cartID), zap.Error(err))
+		return
+	}
+	if !inserted {
+		s.logger.Info("refund email skipped: timeline event already exists (idempotent)",
+			zap.String("cart_id", cartID))
 		return
 	}
 
