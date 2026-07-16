@@ -16,6 +16,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/requestid"
 	"github.com/gofiber/swagger"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
@@ -126,6 +127,10 @@ func main() {
 
 	// Email client for sending invitation emails (reads from env vars)
 	emailClient := email.NewClient(log)
+	// Trilha unificada de auditoria: todo envio de e-mail (sent/failed/skipped)
+	// vira uma linha em notification_logs (channel='email'), lado a lado com os
+	// DMs/WhatsApp do módulo de comunicações.
+	emailClient.SetAuditHook(emailAuditHook(log, queries))
 
 	app := newApp(log, pool, queries, validate, clerkClient, emailClient)
 
@@ -156,6 +161,72 @@ func registerCustomValidators(validate *validator.Validate) {
 	validate.RegisterValidation("slug", func(fl validator.FieldLevel) bool {
 		return slugRegex.MatchString(fl.Field().String())
 	})
+}
+
+// emailAuditHook grava cada tentativa de envio do lib/email em
+// notification_logs (channel='email'), unificando a trilha de auditoria com
+// os DMs/WhatsApp do módulo de comunicações. Best-effort: qualquer falha no
+// insert vira log estruturado — nunca erro no caminho de envio.
+func emailAuditHook(log *zap.Logger, queries *sqlc.Queries) email.AuditHook {
+	auditLog := log.Named("email_audit")
+	return func(ctx context.Context, e email.AuditEntry) {
+		// store_id é NOT NULL na tabela — sem ele não há linha válida. Callers
+		// sem contexto de loja ficam só no log estruturado do client.
+		storeID := pgUUIDFromString(e.StoreID)
+		if !storeID.Valid {
+			auditLog.Debug("email audit entry without store_id, skipping db log",
+				zap.String("kind", e.Kind),
+				zap.String("to", e.ToEmail),
+				zap.String("status", e.Status),
+			)
+			return
+		}
+
+		// O envio costuma acontecer dentro de handlers de webhook que cancelam
+		// o contexto logo depois do ACK — desacopla o insert desse cancelamento.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+
+		params := sqlc.CreateEmailNotificationLogParams{
+			StoreID:           storeID,
+			EventID:           pgUUIDFromString(e.EventID),
+			CartID:            pgUUIDFromString(e.CartID),
+			PlatformUserID:    e.ToEmail,
+			NotificationType:  e.Kind,
+			Status:            e.Status,
+			MessageText:       pgTextFromString(e.Subject),
+			ErrorMessage:      pgTextFromString(e.ErrorMessage),
+			ProviderMessageID: pgTextFromString(e.ProviderMessageID),
+		}
+		if e.Status == email.AuditStatusSent {
+			params.SentAt = pgtype.Timestamptz{Time: time.Now(), Valid: true}
+		}
+
+		if err := queries.CreateEmailNotificationLog(ctx, params); err != nil {
+			auditLog.Warn("failed to record email in notification_logs",
+				zap.String("kind", e.Kind),
+				zap.String("to", e.ToEmail),
+				zap.String("status", e.Status),
+				zap.Error(err),
+			)
+		}
+	}
+}
+
+// pgUUIDFromString converte um uuid em string (possivelmente vazio) para
+// pgtype.UUID — Valid=false quando vazio ou malformado.
+func pgUUIDFromString(s string) pgtype.UUID {
+	var u pgtype.UUID
+	if s == "" {
+		return u
+	}
+	_ = u.Scan(s) // erro deixa o zero value (Valid=false)
+	return u
+}
+
+// pgTextFromString mapeia string vazia para NULL.
+func pgTextFromString(s string) pgtype.Text {
+	return pgtype.Text{String: s, Valid: s != ""}
 }
 
 func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate *validator.Validate, clerkClient *clerk.Client, emailClient *email.Client) *fiber.App {

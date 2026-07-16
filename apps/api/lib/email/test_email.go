@@ -17,10 +17,19 @@ import (
 // This signature satisfies notification.EmailSender — the notification
 // package defines an interface to avoid importing this package directly.
 func (c *Client) SendTestEmail(ctx context.Context, input notification.EmailTestSendInput) error {
+	subject := prefixTestSubject(input.Subject)
+	audit := AuditEntry{
+		StoreID: input.StoreID,
+		Kind:    "test_email",
+		ToEmail: input.ToEmail,
+		Subject: subject,
+	}
+
 	if !c.IsConfigured() {
 		c.logger.Warn("Resend not configured, skipping test email",
 			zap.String("to", input.ToEmail),
 		)
+		c.auditSkipped(ctx, audit)
 		return fmt.Errorf("email service is not configured")
 	}
 
@@ -37,14 +46,16 @@ func (c *Client) SendTestEmail(ctx context.Context, input notification.EmailTest
 		BodyHTML:     template.HTML(body),
 	})
 	if err != nil {
+		c.auditFailed(ctx, audit, err)
 		return fmt.Errorf("rendering test email html: %w", err)
 	}
 
 	return c.send(ctx, SendEmailInput{
 		ToEmail:     input.ToEmail,
-		Subject:     prefixTestSubject(input.Subject),
+		Subject:     subject,
 		HTMLContent: htmlContent,
 		TextContent: stripHTML(body),
+		Audit:       audit,
 	})
 }
 

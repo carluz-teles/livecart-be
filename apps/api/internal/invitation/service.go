@@ -95,6 +95,7 @@ func (s *Service) Create(ctx context.Context, input CreateInvitationInput) (*Inv
 		Role:        input.Role.String(),
 		AcceptURL:   acceptURL,
 		ExpiresAt:   inv.ExpiresAt(),
+		StoreID:     input.StoreID.String(),
 	})
 	if err != nil {
 		s.logger.Error("failed to send invitation email",

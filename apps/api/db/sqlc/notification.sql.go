@@ -40,6 +40,47 @@ func (q *Queries) CountNotificationsByStatus(ctx context.Context, arg CountNotif
 	return i, err
 }
 
+const createEmailNotificationLog = `-- name: CreateEmailNotificationLog :exec
+INSERT INTO notification_logs (
+    store_id, event_id, cart_id, platform_user_id,
+    notification_type, channel, status, message_text,
+    error_message, provider_message_id, sent_at
+)
+VALUES ($1, $2, $3, $4, $5, 'email', $6, $7, $8, $9, $10)
+`
+
+type CreateEmailNotificationLogParams struct {
+	StoreID           pgtype.UUID        `json:"store_id"`
+	EventID           pgtype.UUID        `json:"event_id"`
+	CartID            pgtype.UUID        `json:"cart_id"`
+	PlatformUserID    string             `json:"platform_user_id"`
+	NotificationType  string             `json:"notification_type"`
+	Status            string             `json:"status"`
+	MessageText       pgtype.Text        `json:"message_text"`
+	ErrorMessage      pgtype.Text        `json:"error_message"`
+	ProviderMessageID pgtype.Text        `json:"provider_message_id"`
+	SentAt            pgtype.Timestamptz `json:"sent_at"`
+}
+
+// Trilha unificada de auditoria de e-mails (lib/email): uma linha por
+// tentativa de envio (sent/failed/skipped), na mesma tabela dos DMs/WhatsApp.
+// platform_user_id carrega o e-mail do destinatário (identidade no canal).
+func (q *Queries) CreateEmailNotificationLog(ctx context.Context, arg CreateEmailNotificationLogParams) error {
+	_, err := q.db.Exec(ctx, createEmailNotificationLog,
+		arg.StoreID,
+		arg.EventID,
+		arg.CartID,
+		arg.PlatformUserID,
+		arg.NotificationType,
+		arg.Status,
+		arg.MessageText,
+		arg.ErrorMessage,
+		arg.ProviderMessageID,
+		arg.SentAt,
+	)
+	return err
+}
+
 const createNotificationLog = `-- name: CreateNotificationLog :one
 
 INSERT INTO notification_logs (

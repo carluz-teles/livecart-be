@@ -30,23 +30,38 @@ type OrderShippedEmailInput struct {
 
 	// Reply-to: e-mail de contato da loja (suporte)
 	ReplyTo string
+
+	// Audit context (optional) — links the notification_logs row to the
+	// store/cart/event. Callers without these ids can leave them empty.
+	StoreID string
+	CartID  string
+	EventID string
 }
 
 // SendOrderShipped notifies the customer that the merchant has dispatched the
 // order. Carries the tracking_code prominently so the customer can paste it
 // into the carrier's site if they want carrier-side tracking detail.
 func (c *Client) SendOrderShipped(ctx context.Context, input OrderShippedEmailInput) error {
+	subject := input.OverrideSubject
+	if subject == "" {
+		subject = fmt.Sprintf("Pedido #%s a caminho · %s", input.OrderShortID, input.StoreName)
+	}
+	audit := AuditEntry{
+		StoreID: input.StoreID,
+		CartID:  input.CartID,
+		EventID: input.EventID,
+		Kind:    "order_shipped",
+		ToEmail: input.ToEmail,
+		Subject: subject,
+	}
+
 	if !c.IsConfigured() {
 		c.logger.Warn("Resend not configured, skipping order shipped email",
 			zap.String("to", input.ToEmail),
 			zap.String("order", input.OrderShortID),
 		)
+		c.auditSkipped(ctx, audit)
 		return nil
-	}
-
-	subject := input.OverrideSubject
-	if subject == "" {
-		subject = fmt.Sprintf("Pedido #%s a caminho · %s", input.OrderShortID, input.StoreName)
 	}
 
 	var htmlContent string
@@ -61,6 +76,7 @@ func (c *Client) SendOrderShipped(ctx context.Context, input OrderShippedEmailIn
 		htmlContent, err = c.renderOrderShippedHTML(input)
 	}
 	if err != nil {
+		c.auditFailed(ctx, audit, err)
 		return fmt.Errorf("rendering order shipped html: %w", err)
 	}
 	textContent := c.renderOrderShippedText(input)
@@ -73,6 +89,7 @@ func (c *Client) SendOrderShipped(ctx context.Context, input OrderShippedEmailIn
 		TextContent: textContent,
 		ReplyTo:     input.ReplyTo,
 		FromName:    input.StoreName,
+		Audit:       audit,
 	})
 }
 

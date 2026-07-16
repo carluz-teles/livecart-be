@@ -27,20 +27,35 @@ type OrderDeliveredEmailInput struct {
 
 	// Reply-to: e-mail de contato da loja (suporte)
 	ReplyTo string
+
+	// Audit context (optional) — links the notification_logs row to the
+	// store/cart/event. Callers without these ids can leave them empty.
+	StoreID string
+	CartID  string
+	EventID string
 }
 
 func (c *Client) SendOrderDelivered(ctx context.Context, input OrderDeliveredEmailInput) error {
+	subject := input.OverrideSubject
+	if subject == "" {
+		subject = fmt.Sprintf("Seu pedido #%s chegou · %s", input.OrderShortID, input.StoreName)
+	}
+	audit := AuditEntry{
+		StoreID: input.StoreID,
+		CartID:  input.CartID,
+		EventID: input.EventID,
+		Kind:    "order_delivered",
+		ToEmail: input.ToEmail,
+		Subject: subject,
+	}
+
 	if !c.IsConfigured() {
 		c.logger.Warn("Resend not configured, skipping order delivered email",
 			zap.String("to", input.ToEmail),
 			zap.String("order", input.OrderShortID),
 		)
+		c.auditSkipped(ctx, audit)
 		return nil
-	}
-
-	subject := input.OverrideSubject
-	if subject == "" {
-		subject = fmt.Sprintf("Seu pedido #%s chegou · %s", input.OrderShortID, input.StoreName)
 	}
 
 	var htmlContent string
@@ -55,6 +70,7 @@ func (c *Client) SendOrderDelivered(ctx context.Context, input OrderDeliveredEma
 		htmlContent, err = c.renderOrderDeliveredHTML(input)
 	}
 	if err != nil {
+		c.auditFailed(ctx, audit, err)
 		return fmt.Errorf("rendering order delivered html: %w", err)
 	}
 	textContent := c.renderOrderDeliveredText(input)
@@ -67,6 +83,7 @@ func (c *Client) SendOrderDelivered(ctx context.Context, input OrderDeliveredEma
 		TextContent: textContent,
 		ReplyTo:     input.ReplyTo,
 		FromName:    input.StoreName,
+		Audit:       audit,
 	})
 }
 

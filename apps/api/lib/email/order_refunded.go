@@ -27,21 +27,36 @@ type OrderRefundedEmailInput struct {
 
 	// Reply-to: e-mail de contato da loja (suporte)
 	ReplyTo string
+
+	// Audit context (optional) — links the notification_logs row to the
+	// store/cart/event. Callers without these ids can leave them empty.
+	StoreID string
+	CartID  string
+	EventID string
 }
 
 // SendOrderRefunded notifies the customer that the payment was refunded.
 func (c *Client) SendOrderRefunded(ctx context.Context, input OrderRefundedEmailInput) error {
+	subject := input.OverrideSubject
+	if subject == "" {
+		subject = fmt.Sprintf("Reembolso do pedido #%s · %s", input.OrderShortID, input.StoreName)
+	}
+	audit := AuditEntry{
+		StoreID: input.StoreID,
+		CartID:  input.CartID,
+		EventID: input.EventID,
+		Kind:    "order_refunded",
+		ToEmail: input.ToEmail,
+		Subject: subject,
+	}
+
 	if !c.IsConfigured() {
 		c.logger.Warn("Resend not configured, skipping order refunded email",
 			zap.String("to", input.ToEmail),
 			zap.String("order", input.OrderShortID),
 		)
+		c.auditSkipped(ctx, audit)
 		return nil
-	}
-
-	subject := input.OverrideSubject
-	if subject == "" {
-		subject = fmt.Sprintf("Reembolso do pedido #%s · %s", input.OrderShortID, input.StoreName)
 	}
 
 	var htmlContent string
@@ -56,6 +71,7 @@ func (c *Client) SendOrderRefunded(ctx context.Context, input OrderRefundedEmail
 		htmlContent, err = c.renderOrderRefundedHTML(input)
 	}
 	if err != nil {
+		c.auditFailed(ctx, audit, err)
 		return fmt.Errorf("rendering order refunded html: %w", err)
 	}
 
@@ -67,6 +83,7 @@ func (c *Client) SendOrderRefunded(ctx context.Context, input OrderRefundedEmail
 		TextContent: c.renderOrderRefundedText(input),
 		ReplyTo:     input.ReplyTo,
 		FromName:    input.StoreName,
+		Audit:       audit,
 	})
 }
 

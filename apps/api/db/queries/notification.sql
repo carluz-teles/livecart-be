@@ -10,6 +10,17 @@ INSERT INTO notification_logs (
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 RETURNING *;
 
+-- name: CreateEmailNotificationLog :exec
+-- Trilha unificada de auditoria de e-mails (lib/email): uma linha por
+-- tentativa de envio (sent/failed/skipped), na mesma tabela dos DMs/WhatsApp.
+-- platform_user_id carrega o e-mail do destinatário (identidade no canal).
+INSERT INTO notification_logs (
+    store_id, event_id, cart_id, platform_user_id,
+    notification_type, channel, status, message_text,
+    error_message, provider_message_id, sent_at
+)
+VALUES ($1, $2, $3, $4, $5, 'email', $6, $7, $8, $9, $10);
+
 -- name: UpdateNotificationLogStatus :exec
 UPDATE notification_logs
 SET status = $2, sent_at = $3, error_message = $4

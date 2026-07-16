@@ -36,6 +36,12 @@ type OrderPaidEmailInput struct {
 
 	// Reply-to: e-mail de contato da loja (suporte)
 	ReplyTo string
+
+	// Audit context (optional) — links the notification_logs row to the
+	// store/cart/event. Callers without these ids can leave them empty.
+	StoreID string
+	CartID  string
+	EventID string
 }
 
 // SendOrderPaid sends the "Pagamento confirmado" email. Best-effort: returns
@@ -46,17 +52,26 @@ type OrderPaidEmailInput struct {
 // type-specific layout and is wrapped in a neutral shell. Subject defaults
 // to "Pedido #X confirmado · Store" when OverrideSubject is empty.
 func (c *Client) SendOrderPaid(ctx context.Context, input OrderPaidEmailInput) error {
+	subject := input.OverrideSubject
+	if subject == "" {
+		subject = fmt.Sprintf("Pedido #%s confirmado · %s", input.OrderShortID, input.StoreName)
+	}
+	audit := AuditEntry{
+		StoreID: input.StoreID,
+		CartID:  input.CartID,
+		EventID: input.EventID,
+		Kind:    "order_paid",
+		ToEmail: input.ToEmail,
+		Subject: subject,
+	}
+
 	if !c.IsConfigured() {
 		c.logger.Warn("Resend not configured, skipping order paid email",
 			zap.String("to", input.ToEmail),
 			zap.String("order", input.OrderShortID),
 		)
+		c.auditSkipped(ctx, audit)
 		return nil
-	}
-
-	subject := input.OverrideSubject
-	if subject == "" {
-		subject = fmt.Sprintf("Pedido #%s confirmado · %s", input.OrderShortID, input.StoreName)
 	}
 
 	var htmlContent string
@@ -71,6 +86,7 @@ func (c *Client) SendOrderPaid(ctx context.Context, input OrderPaidEmailInput) e
 		htmlContent, err = c.renderOrderPaidHTML(input)
 	}
 	if err != nil {
+		c.auditFailed(ctx, audit, err)
 		return fmt.Errorf("rendering order paid html: %w", err)
 	}
 	textContent := c.renderOrderPaidText(input)
@@ -83,6 +99,7 @@ func (c *Client) SendOrderPaid(ctx context.Context, input OrderPaidEmailInput) e
 		TextContent: textContent,
 		ReplyTo:     input.ReplyTo,
 		FromName:    input.StoreName,
+		Audit:       audit,
 	})
 }
 

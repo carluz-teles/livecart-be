@@ -295,6 +295,7 @@ func (s *Service) SendTestEmail(ctx context.Context, storeID, notifType, subject
 		ToEmail:      recipientEmail,
 		Subject:      renderedSubject,
 		BodyHTML:     renderedBody,
+		StoreID:      storeID,
 	})
 }
 
@@ -314,6 +315,9 @@ type EmailTestSendInput struct {
 	ToEmail      string
 	Subject      string
 	BodyHTML     string
+
+	// StoreID (optional) links the email audit trail row to the store.
+	StoreID string
 }
 
 // SetEmailSender wires the concrete email client. Optional — when unset,

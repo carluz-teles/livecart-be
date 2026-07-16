@@ -20,6 +20,7 @@ type Client struct {
 	fromName  string
 	logger    *zap.Logger
 	client    *http.Client
+	auditHook AuditHook // optional — see SetAuditHook
 }
 
 // NewClient creates a new Resend email client
@@ -56,21 +57,33 @@ type InvitationEmailInput struct {
 	Role        string
 	AcceptURL   string
 	ExpiresAt   time.Time
+
+	// StoreID (optional) links the audit trail row to the store.
+	StoreID string
 }
 
 // SendInvitation sends an invitation email
 func (c *Client) SendInvitation(ctx context.Context, input InvitationEmailInput) error {
+	subject := fmt.Sprintf("Você foi convidado para %s no LiveCart", input.StoreName)
+	audit := AuditEntry{
+		StoreID: input.StoreID,
+		Kind:    "invitation",
+		ToEmail: input.ToEmail,
+		Subject: subject,
+	}
+
 	if !c.IsConfigured() {
 		c.logger.Warn("Resend not configured, skipping email",
 			zap.String("to", input.ToEmail),
 			zap.String("store", input.StoreName),
 		)
+		c.auditSkipped(ctx, audit)
 		return nil
 	}
 
-	subject := fmt.Sprintf("Você foi convidado para %s no LiveCart", input.StoreName)
 	htmlContent, err := c.renderInvitationHTML(input)
 	if err != nil {
+		c.auditFailed(ctx, audit, err)
 		return fmt.Errorf("rendering email template: %w", err)
 	}
 
@@ -82,6 +95,7 @@ func (c *Client) SendInvitation(ctx context.Context, input InvitationEmailInput)
 		Subject:     subject,
 		HTMLContent: htmlContent,
 		TextContent: textContent,
+		Audit:       audit,
 	})
 }
 
@@ -98,10 +112,18 @@ type SendEmailInput struct {
 	// FromName: display name do remetente (nome da LOJA nos e-mails de
 	// pedido). O ENDEREÇO segue sendo o da plataforma — só o rótulo muda.
 	FromName string
+	// Audit: contexto pro trilho unificado em notification_logs. Só os campos
+	// de identidade (StoreID/CartID/EventID/Kind) precisam vir preenchidos —
+	// ToEmail/Subject/Status são completados pelo send.
+	Audit AuditEntry
 }
 
 // send sends an email via Resend API
 func (c *Client) send(ctx context.Context, input SendEmailInput) error {
+	audit := input.Audit
+	audit.ToEmail = input.ToEmail
+	audit.Subject = input.Subject
+
 	// Build the "from" field: display name da loja quando fornecido; o
 	// endereço é sempre o da plataforma (domínio autenticado).
 	fromName := c.fromName
@@ -132,12 +154,16 @@ func (c *Client) send(ctx context.Context, input SendEmailInput) error {
 
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshaling email payload: %w", err)
+		err = fmt.Errorf("marshaling email payload: %w", err)
+		c.auditFailed(ctx, audit, err)
+		return err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.resend.com/emails", bytes.NewBuffer(jsonPayload))
 	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
+		err = fmt.Errorf("creating request: %w", err)
+		c.auditFailed(ctx, audit, err)
+		return err
 	}
 
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
@@ -145,7 +171,9 @@ func (c *Client) send(ctx context.Context, input SendEmailInput) error {
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("sending email: %w", err)
+		err = fmt.Errorf("sending email: %w", err)
+		c.auditFailed(ctx, audit, err)
+		return err
 	}
 	defer resp.Body.Close()
 
@@ -156,13 +184,28 @@ func (c *Client) send(ctx context.Context, input SendEmailInput) error {
 			zap.Int("status", resp.StatusCode),
 			zap.Any("error", errorBody),
 		)
-		return fmt.Errorf("resend returned status %d", resp.StatusCode)
+		err = fmt.Errorf("resend returned status %d", resp.StatusCode)
+		c.auditFailed(ctx, audit, err)
+		return err
 	}
+
+	// Resend responde {"id": "..."} — o message id amarra a linha de auditoria
+	// ao evento no painel/webhooks do provedor. Falha de parse não é falha de
+	// envio: o e-mail já saiu, então só ficamos sem o id.
+	var result struct {
+		ID string `json:"id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&result)
 
 	c.logger.Info("email sent successfully",
 		zap.String("to", input.ToEmail),
 		zap.String("subject", input.Subject),
+		zap.String("provider_message_id", result.ID),
 	)
+
+	audit.Status = AuditStatusSent
+	audit.ProviderMessageID = result.ID
+	c.audit(ctx, audit)
 
 	return nil
 }

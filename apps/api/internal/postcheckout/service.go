@@ -184,6 +184,9 @@ func (s *Service) OnCartCancelled(ctx context.Context, cartID string) {
 		// pagamento concluído entra pelo OnCartRefunded
 		WasCharged: false,
 		ReplyTo:    storeReplyTo(snapshot.Store),
+		StoreID:    uuidStr(snapshot.Store.ID),
+		CartID:     uuidStr(snapshot.Cart.ID),
+		EventID:    uuidStr(snapshot.Cart.EventID),
 	}
 	s.applyEmailOverride(ctx, snapshot, s.settingsFor(ctx, snapshot, "cancelled"), &input.OverrideSubject, &input.OverrideBodyHTML, "", "")
 
@@ -218,6 +221,9 @@ func (s *Service) OnCartRefunded(ctx context.Context, cartID string) {
 		TotalFormatted: formatTotal(snapshot),
 		PaymentMethod:  method,
 		ReplyTo:        storeReplyTo(snapshot.Store),
+		StoreID:        uuidStr(snapshot.Store.ID),
+		CartID:         uuidStr(snapshot.Cart.ID),
+		EventID:        uuidStr(snapshot.Cart.EventID),
 	}
 	s.applyEmailOverride(ctx, snapshot, s.settingsFor(ctx, snapshot, "refunded"), &input.OverrideSubject, &input.OverrideBodyHTML, "", "")
 
@@ -322,6 +328,9 @@ func (s *Service) OnDelivered(ctx context.Context, cartID, source string) {
 		ToName:       customerName,
 		OrderShortID: fmt.Sprintf("%d", snapshot.Cart.ShortID),
 		ReplyTo:      storeReplyTo(snapshot.Store),
+		StoreID:      uuidStr(snapshot.Store.ID),
+		CartID:       uuidStr(snapshot.Cart.ID),
+		EventID:      uuidStr(snapshot.Cart.EventID),
 	}
 	s.applyDeliveredOverride(ctx, snapshot, &deliveredInput)
 	if err := s.email.SendOrderDelivered(ctx, deliveredInput); err != nil {
@@ -447,6 +456,9 @@ func buildEmailInput(s *CartSnapshot, trackingToken string) email.OrderPaidEmail
 		CarrierLine:    carrierLine,
 		TrackingURL:    trackingURL,
 		ReplyTo:        storeReplyTo(s.Store),
+		StoreID:        uuidStr(s.Store.ID),
+		CartID:         uuidStr(s.Cart.ID),
+		EventID:        uuidStr(s.Cart.EventID),
 	}
 }
 
@@ -656,6 +668,9 @@ func buildShippedEmailInput(s *CartSnapshot, trackingCode string) email.OrderShi
 		CarrierLine:  carrierLine,
 		TrackingURL:  trackingURL,
 		ReplyTo:      storeReplyTo(s.Store),
+		StoreID:      uuidStr(s.Store.ID),
+		CartID:       uuidStr(s.Cart.ID),
+		EventID:      uuidStr(s.Cart.EventID),
 	}
 }
 
