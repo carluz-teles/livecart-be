@@ -1823,6 +1823,7 @@ type CartRow struct {
 	PlatformUserID  string
 	PlatformHandle  string
 	ExternalOrderID string
+	PaymentStatus   string
 	CreatedAt       time.Time
 
 	// Populated by GetCartForPaidOrder — needed when creating a paid ERP order.
@@ -1864,6 +1865,7 @@ func (r *Repository) GetCartByID(ctx context.Context, cartID string) (*CartRow, 
 		StoreID:        uuidToString(event.StoreID),
 		PlatformUserID: cart.PlatformUserID,
 		PlatformHandle: cart.PlatformHandle,
+		PaymentStatus:  cart.PaymentStatus.String,
 		CreatedAt:      cart.CreatedAt.Time,
 	}, nil
 }
