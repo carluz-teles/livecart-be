@@ -1516,8 +1516,10 @@ type ConnectPagarmeOutput = CreateIntegrationOutput
 
 // ConnectPagarme validates a Pagar.me secret key via TestConnection and
 // persists (or updates) the integration as active. The "environment" is
-// derived from the key prefix (sk_test_ → sandbox, sk_live_ → production)
+// derived from the key prefix (sk_test_ → sandbox, plain sk_ → production)
 // — Pagar.me has no separate sandbox host; the prefix is the only switch.
+// The live TestConnection probe below is the authoritative check: the prefix
+// rule only catches obvious mistakes like swapping the secret and public keys.
 func (s *Service) ConnectPagarme(ctx context.Context, input ConnectPagarmeInput) (*ConnectPagarmeOutput, error) {
 	secret := strings.TrimSpace(input.SecretKey)
 	public := strings.TrimSpace(input.PublicKey)
@@ -1531,13 +1533,13 @@ func (s *Service) ConnectPagarme(ctx context.Context, input ConnectPagarmeInput)
 	secretEnv := pagarmeKeyEnvironment(secret, "sk_")
 	publicEnv := pagarmeKeyEnvironment(public, "pk_")
 	if secretEnv == "" {
-		return nil, httpx.ErrBadRequest("chave secreta inválida — deve começar com sk_test_ ou sk_live_")
+		return nil, httpx.ErrBadRequest("chave secreta inválida — deve começar com sk_")
 	}
 	if publicEnv == "" {
-		return nil, httpx.ErrBadRequest("chave pública inválida — deve começar com pk_test_ ou pk_live_")
+		return nil, httpx.ErrBadRequest("chave pública inválida — deve começar com pk_")
 	}
 	if secretEnv != publicEnv {
-		return nil, httpx.ErrBadRequest("as chaves precisam ser do mesmo ambiente (ambas test ou ambas live)")
+		return nil, httpx.ErrBadRequest("as chaves precisam ser do mesmo ambiente (ambas de teste ou ambas de produção)")
 	}
 
 	creds := &providers.Credentials{
@@ -1674,18 +1676,20 @@ func (s *Service) ValidatePagarmeWebhookAuth(ctx context.Context, storeID, authH
 	return userOK && passOK, nil
 }
 
-// pagarmeKeyEnvironment returns "sandbox" / "production" / "" based on the
-// key prefix. Pagar.me v5 uses sk_test_ / sk_live_ for secrets and
-// pk_test_ / pk_live_ for public keys — the test/live segment is the only
-// distinction between sandbox and production.
+// pagarmeKeyEnvironment returns "sandbox" / "production" / "" based on the key
+// prefix. Pagar.me only tags SANDBOX keys: sk_test_/pk_test_. Production keys
+// carry no environment segment — they are just sk_/pk_ followed by the token.
+// There is no sk_live_ (that's Stripe's convention); assuming there was made
+// the connect form reject every real production key. Returns "" only when the
+// key lacks the scope prefix entirely (e.g. secret and public swapped).
 func pagarmeKeyEnvironment(key, scope string) string {
-	switch {
-	case strings.HasPrefix(key, scope+"test_"):
-		return "sandbox"
-	case strings.HasPrefix(key, scope+"live_"):
-		return "production"
+	if !strings.HasPrefix(key, scope) || len(key) <= len(scope) {
+		return ""
 	}
-	return ""
+	if strings.HasPrefix(key, scope+"test_") {
+		return "sandbox"
+	}
+	return "production"
 }
 
 // GetSocialProvider returns a SocialProvider for the given integration.

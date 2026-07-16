@@ -74,7 +74,7 @@ func (p *Pagarme) Name() providers.ProviderName {
 // /recipients/default, which returns 412 on accounts that don't have a
 // "default recipient" configured (anything that isn't a marketplace
 // split-payment setup), so brand-new Pagar.me accounts couldn't connect
-// even with a perfectly valid sk_test_/sk_live_ key.
+// even with a perfectly valid secret key.
 func (p *Pagarme) ValidateCredentials(ctx context.Context) error {
 	url := pagarmeAPIBaseURL + "/recipients?size=1"
 
@@ -159,11 +159,14 @@ func (p *Pagarme) TestConnection(ctx context.Context) (*providers.TestConnection
 // pagarmeEnvironmentFromKey returns "sandbox" / "production" / "unknown"
 // based on the secret key prefix. Pagar.me has no separate sandbox host;
 // the test/live segment in the key is the only switch.
+// pagarmeEnvironmentFromKey maps a secret key to its environment. Only sandbox
+// keys are tagged (sk_test_); production keys are plain sk_ + token, with no
+// environment segment — Pagar.me has no sk_live_ (that's Stripe's convention).
 func pagarmeEnvironmentFromKey(secretKey string) string {
 	switch {
 	case strings.HasPrefix(secretKey, "sk_test_"):
 		return "sandbox"
-	case strings.HasPrefix(secretKey, "sk_live_"):
+	case strings.HasPrefix(secretKey, "sk_"):
 		return "production"
 	}
 	return "unknown"
