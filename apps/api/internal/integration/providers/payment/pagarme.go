@@ -578,8 +578,18 @@ func (p *Pagarme) getOrderStatus(ctx context.Context, orderID string) (*PaymentS
 	}, nil
 }
 
-// RefundPayment initiates a refund for an order's charge.
+// RefundPayment initiates a refund for an order's charge. The platform stores
+// the ORDER id (or_...) as the external payment id, but Pagar.me only refunds
+// by CHARGE (DELETE /charges/{ch_...}) — resolve the order to its charge
+// before calling.
 func (p *Pagarme) RefundPayment(ctx context.Context, chargeID string, amount *int64) (*RefundResult, error) {
+	if strings.HasPrefix(chargeID, "or_") {
+		resolved, err := p.resolveOrderCharge(ctx, chargeID)
+		if err != nil {
+			return nil, err
+		}
+		chargeID = resolved
+	}
 	url := fmt.Sprintf("%s/charges/%s", pagarmeAPIBaseURL, chargeID)
 
 	var payload map[string]any
@@ -615,6 +625,33 @@ func (p *Pagarme) RefundPayment(ctx context.Context, chargeID string, amount *in
 		Amount:    int64(pgCharge.Amount),
 		CreatedAt: updatedAt,
 	}, nil
+}
+
+// resolveOrderCharge fetches the order and returns the id of its refundable
+// charge — the paid one when present (retries can leave failed charges on the
+// same order), else the first.
+func (p *Pagarme) resolveOrderCharge(ctx context.Context, orderID string) (string, error) {
+	url := fmt.Sprintf("%s/orders/%s", pagarmeAPIBaseURL, orderID)
+	resp, body, err := p.DoRequest(ctx, http.MethodGet, url, nil, p.authHeaders())
+	if err != nil {
+		return "", fmt.Errorf("fetching order for refund: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return "", fmt.Errorf("fetching order for refund: status %d, body: %s", resp.StatusCode, string(body))
+	}
+	var pgOrder pagarmeOrderResponse
+	if err := json.Unmarshal(body, &pgOrder); err != nil {
+		return "", fmt.Errorf("parsing order for refund: %w", err)
+	}
+	if len(pgOrder.Charges) == 0 {
+		return "", fmt.Errorf("order %s has no charges to refund", orderID)
+	}
+	for _, ch := range pgOrder.Charges {
+		if ch.Status == "paid" {
+			return ch.ID, nil
+		}
+	}
+	return pgOrder.Charges[0].ID, nil
 }
 
 // authHeaders returns the authorization headers for API requests.
