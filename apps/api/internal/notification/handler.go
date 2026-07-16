@@ -247,29 +247,17 @@ type VariableInfo struct {
 // @Success 200 {object} GetAvailableVariablesResponse
 // @Router /stores/{storeId}/notifications/variables [get]
 func (h *Handler) GetAvailableVariables(c *fiber.Ctx) error {
-	sample := SampleVariables()
+	// ?type=<template_type> escopa o catálogo às variáveis que fazem sentido
+	// naquele template (o editor passa a rota atual). Sem type, devolve tudo.
+	specs := VariablesForTemplate(c.Query("type"))
 
-	variables := []VariableInfo{
-		{Name: "{handle}", Description: "Nome de usuário do comprador", Example: sample.Handle},
-		{Name: "{produto}", Description: "Nome do produto adicionado", Example: sample.Produto},
-		{Name: "{keyword}", Description: "Palavra-chave do produto", Example: sample.Keyword},
-		{Name: "{quantidade}", Description: "Quantidade do último item", Example: "2"},
-		{Name: "{total_itens}", Description: "Total de itens no carrinho", Example: "3"},
-		{Name: "{total}", Description: "Valor total formatado", Example: sample.Total},
-		{Name: "{link}", Description: "Link de checkout", Example: sample.Link},
-		{Name: "{loja}", Description: "Nome da loja", Example: sample.Loja},
-		{Name: "{expira_em}", Description: "Tempo até expiração", Example: sample.ExpiraEm},
-		{Name: "{live_titulo}", Description: "Título da live", Example: sample.LiveTitulo},
-		{Name: "{numero_pedido}", Description: "Número do pedido", Example: sample.NumeroPedido},
-		{Name: "{tracking_code}", Description: "Código de rastreio", Example: sample.TrackingCode},
-		{Name: "{transportadora}", Description: "Transportadora + serviço", Example: sample.Transportadora},
-		{Name: "{link_pedido}", Description: "Link para acompanhar pedido", Example: sample.LinkPedido},
-		{Name: "{forma_pagamento}", Description: "Forma de pagamento (PIX/cartão)", Example: "PIX"},
-		{Name: "{nome_cliente}", Description: "Nome do cliente no checkout", Example: "Ana Reis"},
-		{Name: "{lista_produtos}", Description: "Tabela com os itens do pedido (e-mails)", Example: "2× Vestido Midi — R$ 179,80…"},
-		{Name: "{endereco_entrega}", Description: "Endereço de entrega em uma linha", Example: "Rua das Flores, 123 — São Paulo/SP"},
-		{Name: "{prazo_entrega}", Description: "Prazo estimado do frete", Example: "até 5 dias úteis"},
-		{Name: "{valor_frete}", Description: "Valor do frete", Example: "R$ 18,90"},
+	variables := make([]VariableInfo, 0, len(specs))
+	for _, s := range specs {
+		variables = append(variables, VariableInfo{
+			Name:        s.Name,
+			Description: s.Description,
+			Example:     s.Example,
+		})
 	}
 
 	return httpx.OK(c, GetAvailableVariablesResponse{Variables: variables})
