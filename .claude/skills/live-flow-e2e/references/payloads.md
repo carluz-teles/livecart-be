@@ -106,7 +106,10 @@ Resposta: `paymentId`, `qrCode` (base64), `qrCodeText`, `expiresAt`.
 |---|---|---|
 | CPF válido | `529.982.247-25` | Passa validação de dígitos; uso corrente em exemplos BR |
 | CEP real | `01310-100` | Av. Paulista, São Paulo/SP — ViaCEP autopreenche |
-| E-mail | `qualquer+e2e@teste.com` | Para Clerk dev: `*+clerk_test@...` com código `424242` |
+| E-mail do comprador | `delivered@resend.dev` | **Sempre** endereços `@resend.dev` no checkout — staging envia e-mail REAL via Resend; domínios inventados geram bounce (reputação) ou entregam em caixa de terceiros (`teste.com` existe!). Desfechos: `bounced@`, `complained@`, `suppressed@resend.dev` |
+| E-mail do lojista (login) | `*+clerk_test@...` | Clerk dev com código `424242` (precisa "receber" o código, não usar resend.dev) |
+
+**Verificar e-mails disparados** (módulo de comunicações): `scripts/resend-emails.sh list [N]` (assunto/destinatário/status na API do Resend), `get <id>` (payload), `html <id>` (corpo para abrir/screenshotar no Playwright). O nome do comprador no assunto/destinatário identifica a rodada.
 
 ### Cartões sandbox
 
