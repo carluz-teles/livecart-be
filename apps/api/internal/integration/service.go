@@ -1048,12 +1048,67 @@ func (s *Service) handleInstagramCallback(ctx context.Context, input OAuthCallba
 		zap.String("username", username),
 	)
 
+	// Inscreve a conta nos eventos de webhook. Sem este passo a Meta NÃO
+	// entrega nada para a conta — foi o que derrubou a venda por Story do
+	// primeiro cliente (18/07/2026): comentário seguia funcionando pelo
+	// polling, mas resposta de Story (DM) não tem fallback e morria em
+	// silêncio. Best-effort aqui para não quebrar a conexão; o resultado fica
+	// no log e o lojista pode reexecutar por EnsureInstagramWebhookSubscription.
+	if err := s.SubscribeInstagramWebhooks(ctx, storeID); err != nil {
+		s.logger.Error("instagram connected BUT webhook subscription failed — story/DM sales will not work until this is fixed",
+			zap.String("store_id", storeID),
+			zap.String("integration_id", integrationID),
+			zap.Error(err),
+		)
+	}
+
 	return &OAuthCallbackOutput{
 		IntegrationID: integrationID,
 		StoreID:       storeID,
 		Provider:      "instagram",
 		Status:        "active",
 	}, nil
+}
+
+// SubscribeInstagramWebhooks subscribes the store's connected Instagram account
+// to the webhook fields LiveCart consumes (comments + messages). Idempotent:
+// Meta accepts repeated calls, so it is safe to run on every connect and from
+// the admin repair endpoint.
+func (s *Service) SubscribeInstagramWebhooks(ctx context.Context, storeID string) error {
+	provider, err := s.resolveInstagramSocialProvider(ctx, storeID)
+	if err != nil {
+		return err
+	}
+	subscriber, ok := provider.(interface {
+		SubscribeWebhooks(ctx context.Context) error
+	})
+	if !ok {
+		return fmt.Errorf("instagram provider does not support webhook subscription")
+	}
+	if err := subscriber.SubscribeWebhooks(ctx); err != nil {
+		return fmt.Errorf("subscribing instagram webhooks: %w", err)
+	}
+	s.logger.Info("instagram webhook subscription ensured",
+		zap.String("store_id", storeID),
+	)
+	return nil
+}
+
+// GetInstagramWebhookSubscription reports which webhook fields the account is
+// currently subscribed to, so the dashboard (and support) can tell at a glance
+// whether story/DM sales will work.
+func (s *Service) GetInstagramWebhookSubscription(ctx context.Context, storeID string) ([]string, error) {
+	provider, err := s.resolveInstagramSocialProvider(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+	lister, ok := provider.(interface {
+		ListSubscribedFields(ctx context.Context) ([]string, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("instagram provider does not support reading the subscription")
+	}
+	return lister.ListSubscribedFields(ctx)
 }
 
 // exchangeInstagramCode exchanges the authorization code for a short-lived access token.

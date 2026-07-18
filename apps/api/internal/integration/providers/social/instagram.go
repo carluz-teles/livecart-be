@@ -726,6 +726,95 @@ func (i *Instagram) PublishStory(ctx context.Context, mediaURL string, isVideo b
 	return mediaID, nil
 }
 
+// instagramWebhookFields are the webhook fields LiveCart depends on:
+//   - comments: keyword sales on posts/lives (has a polling fallback)
+//   - messages: story replies and DM sales (NO fallback — dead without this)
+const instagramWebhookFields = "comments,messages"
+
+// SubscribeWebhooks subscribes the connected account to LiveCart's webhook
+// fields (POST /me/subscribed_apps). WITHOUT this call Meta never delivers
+// webhooks for the account, no matter how the app-level webhook is configured
+// or which permissions were granted.
+//
+// Field bug (18/07/2026): this step didn't exist, so every merchant who
+// connected Instagram got zero webhook deliveries. Comment sales still worked
+// because of the polling fallback, which masked the problem — but story-reply
+// (DM) sales silently produced no orders. It "worked" only on accounts that had
+// been subscribed by hand during development.
+func (i *Instagram) SubscribeWebhooks(ctx context.Context) error {
+	url := fmt.Sprintf("%s/%s/me/subscribed_apps?subscribed_fields=%s",
+		instagramGraphAPIBaseURL, instagramGraphAPIVersion, instagramWebhookFields)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+i.credentials.AccessToken)
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("instagram API error: status %d, body: %s", resp.StatusCode, truncate(string(respBody), 300))
+	}
+
+	// Meta answers {"success": true}; anything else means the subscription did
+	// not take effect and webhooks would silently not arrive.
+	var out struct {
+		Success bool `json:"success"`
+	}
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return fmt.Errorf("parsing response: %w", err)
+	}
+	if !out.Success {
+		return fmt.Errorf("instagram did not confirm the subscription: %s", truncate(string(respBody), 300))
+	}
+
+	i.logger.Info("instagram webhook subscription active",
+		zap.String("fields", instagramWebhookFields),
+	)
+	return nil
+}
+
+// ListSubscribedFields reads the account's current webhook subscription
+// (GET /me/subscribed_apps) so the dashboard can tell the merchant whether
+// story/DM sales will actually work.
+func (i *Instagram) ListSubscribedFields(ctx context.Context) ([]string, error) {
+	url := fmt.Sprintf("%s/%s/me/subscribed_apps", instagramGraphAPIBaseURL, instagramGraphAPIVersion)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+i.credentials.AccessToken)
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("instagram API error: status %d, body: %s", resp.StatusCode, truncate(string(respBody), 300))
+	}
+
+	var parsed struct {
+		Data []struct {
+			SubscribedFields []string `json:"subscribed_fields"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil, fmt.Errorf("parsing response: %w", err)
+	}
+	fields := []string{}
+	for _, d := range parsed.Data {
+		fields = append(fields, d.SubscribedFields...)
+	}
+	return fields, nil
+}
+
 // GetUsername resolves the @handle of a user from their Instagram-scoped id
 // (IGSID), used to label story-reply DMs in the merchant UI and @mention the
 // buyer. Best-effort: returns "" if the lookup is not permitted.

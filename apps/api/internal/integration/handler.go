@@ -59,6 +59,12 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/instagram/lives", h.GetInstagramLives)
 	g.Get("/instagram/media", h.GetInstagramMedia)
 
+	// Assinatura dos webhooks da conta (comments + messages). O GET diz se a
+	// venda por Story/DM vai funcionar; o POST conserta contas conectadas
+	// antes do fix, sem exigir que o lojista reconecte o Instagram.
+	g.Get("/instagram/webhook-subscription", h.GetInstagramWebhookSubscription)
+	g.Post("/instagram/webhook-subscription", h.SubscribeInstagramWebhooks)
+
 	// Instagram content publishing (create a post in LiveCart)
 	g.Post("/instagram/media/upload", h.UploadInstagramMedia)
 	g.Post("/instagram/posts", h.CreateInstagramPost)
@@ -351,6 +357,71 @@ func (h *Handler) GetInstagramLives(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, map[string]any{"data": lives})
+}
+
+// GetInstagramWebhookSubscription reports which webhook fields the connected
+// account is subscribed to. Without `messages`, story-reply (DM) sales never
+// generate orders — and without `comments`, post/live keyword sales fall back
+// to slower polling.
+// @Summary Get Instagram webhook subscription
+// @Description Returns the webhook fields the connected Instagram account is subscribed to
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Success 200 {object} httpx.Envelope
+// @Failure 404 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/instagram/webhook-subscription [get]
+// @Security BearerAuth
+func (h *Handler) GetInstagramWebhookSubscription(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	fields, err := h.service.GetInstagramWebhookSubscription(c.Context(), storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	has := func(f string) bool {
+		for _, v := range fields {
+			if v == f {
+				return true
+			}
+		}
+		return false
+	}
+	return httpx.OK(c, map[string]any{
+		"fields":       fields,
+		"comments":     has("comments"),
+		"messages":     has("messages"),
+		"storySales":   has("messages"),
+		"commentSales": has("comments"),
+	})
+}
+
+// SubscribeInstagramWebhooks (re)subscribes the connected account to the
+// webhook fields LiveCart consumes. Repair path for accounts connected before
+// the subscription step existed — no need to disconnect and reconnect.
+// @Summary Subscribe Instagram webhooks
+// @Description Subscribes the connected Instagram account to the comments and messages webhook fields
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Success 200 {object} httpx.Envelope
+// @Failure 404 {object} httpx.Envelope
+// @Router /api/v1/stores/{storeId}/integrations/instagram/webhook-subscription [post]
+// @Security BearerAuth
+func (h *Handler) SubscribeInstagramWebhooks(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	if err := h.service.SubscribeInstagramWebhooks(c.Context(), storeID); err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	fields, err := h.service.GetInstagramWebhookSubscription(c.Context(), storeID)
+	if err != nil {
+		// A inscrição foi confirmada pela Meta; a leitura de volta é extra.
+		return httpx.OK(c, map[string]any{"subscribed": true})
+	}
+	return httpx.OK(c, map[string]any{"subscribed": true, "fields": fields})
 }
 
 // GetInstagramMedia lists recent posts/reels for the post-event selector.
