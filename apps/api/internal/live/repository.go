@@ -781,7 +781,7 @@ func (r *Repository) GetLatestCommentIDByUser(ctx context.Context, eventID, plat
 	err = r.pool.QueryRow(ctx, `
 		SELECT platform_comment_id FROM live_comments
 		WHERE event_id = $1 AND platform_user_id = $2 AND platform_comment_id <> ''
-		  AND NOT private_reply_used AND NOT hidden
+		  AND NOT private_reply_used AND NOT hidden AND deleted_at IS NULL
 		ORDER BY created_at DESC
 		LIMIT 1
 	`, eventUID, platformUserID).Scan(&commentID)
@@ -840,7 +840,7 @@ func (r *Repository) ListCommentsByEvent(ctx context.Context, eventID string, li
 		SELECT id, session_id, platform_comment_id, platform_user_id, platform_handle,
 		       text, COALESCE(has_purchase_intent, false), hidden, created_at
 		FROM live_comments
-		WHERE event_id = $1
+		WHERE event_id = $1 AND deleted_at IS NULL
 		ORDER BY created_at
 		LIMIT $2 OFFSET $3
 	`, uid, limit, offset)

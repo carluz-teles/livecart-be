@@ -863,8 +863,8 @@ func (r *Repository) MarkLiveCommentPrivateReplyUsed(ctx context.Context, platfo
 	return err
 }
 
-// SetLiveCommentHidden mirrors the Instagram hide/unhide (and delete) state so
-// the resend lookup never targets a comment that can't receive a private reply.
+// SetLiveCommentHidden mirrors the Instagram hide/unhide state so the resend
+// lookup never targets a comment that can't receive a private reply.
 func (r *Repository) SetLiveCommentHidden(ctx context.Context, platformCommentID string, hidden bool) error {
 	if platformCommentID == "" {
 		return nil
@@ -872,6 +872,20 @@ func (r *Repository) SetLiveCommentHidden(ctx context.Context, platformCommentID
 	_, err := r.pool.Exec(ctx,
 		`UPDATE live_comments SET hidden = $2 WHERE platform_comment_id = $1`,
 		platformCommentID, hidden,
+	)
+	return err
+}
+
+// MarkLiveCommentDeleted records that the comment no longer exists on Instagram.
+// Kept separate from hidden: a deleted comment disappears from the merchant's
+// list (mirroring Instagram), while a hidden one stays visible and reversible.
+func (r *Repository) MarkLiveCommentDeleted(ctx context.Context, platformCommentID string) error {
+	if platformCommentID == "" {
+		return nil
+	}
+	_, err := r.pool.Exec(ctx,
+		`UPDATE live_comments SET deleted_at = now() WHERE platform_comment_id = $1`,
+		platformCommentID,
 	)
 	return err
 }

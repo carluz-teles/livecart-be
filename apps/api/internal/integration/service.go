@@ -1888,10 +1888,11 @@ func (s *Service) DeleteInstagramComment(ctx context.Context, storeID, commentID
 		)
 		return err
 	}
-	// A deleted comment can never receive a private reply — exclude it from the
-	// resend lookup permanently (hidden=true is the exclusion flag).
-	if err := s.repo.SetLiveCommentHidden(ctx, commentID, true); err != nil {
-		s.logger.Warn("failed to mark deleted comment as excluded",
+	// Mirror the deletion locally so the comment leaves the merchant's list, just
+	// like it left the Instagram post. This also excludes it from the resend
+	// lookup — a deleted comment can never receive a private reply.
+	if err := s.repo.MarkLiveCommentDeleted(ctx, commentID); err != nil {
+		s.logger.Warn("failed to mirror comment deletion",
 			zap.String("comment_id", commentID), zap.Error(err))
 	}
 	s.logger.Info("instagram comment deleted",
