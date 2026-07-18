@@ -3316,6 +3316,28 @@ func (s *Service) TestPagarmeWebhookEndpoint(ctx context.Context, integrationID,
 // delivery history.
 const pagarmeWebhookTestOrderPrefix = "LCWHTEST-"
 
+// sameWebhookURL compares the URL Pagar.me reports in its delivery history
+// against the URL we expect, ignoring differences that do NOT change where the
+// request lands: surrounding whitespace, a trailing slash (Fiber routes
+// /path and /path/ to the same handler), case of scheme/host, and any query
+// string the merchant may have appended.
+//
+// Field bug (first client, 18/07/2026): the merchant pasted the URL with a
+// trailing slash. Pagar.me delivered every event correctly — our handler logged
+// them — but the strict string comparison reported "URL diferente da nossa",
+// sending the merchant to fix something that was already right.
+func sameWebhookURL(a, b string) bool {
+	norm := func(raw string) string {
+		raw = strings.TrimSpace(raw)
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			return strings.TrimRight(raw, "/")
+		}
+		return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + strings.TrimRight(u.Path, "/")
+	}
+	return norm(a) == norm(b)
+}
+
 // RunPagarmeWebhookLiveTest validates the REAL webhook delivery path on demand:
 // it creates a throwaway PIX order so Pagar.me fires a real order.created
 // webhook to the merchant's configured endpoint, then polls Pagar.me's own
@@ -3352,11 +3374,22 @@ func (s *Service) RunPagarmeWebhookLiveTest(ctx context.Context, integrationID, 
 			return
 		}
 		if cErr := pagarme.CancelTestCharge(context.Background(), order.ChargeID); cErr != nil {
-			s.logger.Warn("failed to cancel webhook test charge",
-				zap.String("store_id", storeID),
-				zap.String("charge_id", order.ChargeID),
-				zap.Error(cErr),
-			)
+			// A cobrança de teste costuma FALHAR sozinha na Pagar.me (é um Pix
+			// descartável que ninguém paga) e aí não há o que cancelar — ela já
+			// está em estado terminal. Isso não é problema: baixa o nível para
+			// não poluir os alertas com um warn a cada teste de webhook.
+			if strings.Contains(cErr.Error(), "cannot be canceled") {
+				s.logger.Info("webhook test charge already in a terminal state, nothing to cancel",
+					zap.String("store_id", storeID),
+					zap.String("charge_id", order.ChargeID),
+				)
+			} else {
+				s.logger.Warn("failed to cancel webhook test charge",
+					zap.String("store_id", storeID),
+					zap.String("charge_id", order.ChargeID),
+					zap.Error(cErr),
+				)
+			}
 		}
 	}()
 
@@ -3380,11 +3413,14 @@ func (s *Service) RunPagarmeWebhookLiveTest(ctx context.Context, integrationID, 
 				out.ResponseRaw = d.ResponseRaw
 				out.DeliveredURL = d.URL
 				switch {
-				case d.URL != expectedURL:
+				case !sameWebhookURL(d.URL, expectedURL):
 					// Delivered our test event, but to a different URL than
 					// ours — the dashboard endpoint doesn't match.
 					out.Healthy = false
-					out.Message = "A Pagar.me entregou o evento de teste, mas para uma URL diferente da nossa. Ajuste a URL do webhook no painel para a exibida acima."
+					out.Message = fmt.Sprintf(
+						"A Pagar.me entregou o evento de teste, mas para uma URL diferente da nossa (entregue em %q, esperada %q). Ajuste a URL do webhook no painel para a exibida acima.",
+						d.URL, expectedURL,
+					)
 				case d.ResponseStatus >= 200 && d.ResponseStatus < 300:
 					out.Healthy = true
 					out.Message = "Webhook validado de ponta a ponta: a Pagar.me disparou um evento real e nosso endpoint recebeu com sucesso (HTTP " + fmt.Sprintf("%d", d.ResponseStatus) + ")."
