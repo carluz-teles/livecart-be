@@ -829,25 +829,31 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		// and we don't drift if the API host's clock is skewed. Falls back
 		// to time.Now() when the provider omitted the field.
 		if err := s.repo.UpdatePaymentStatus(ctx, cart.ID, "paid", result.PaymentID, result.PaidAt); err != nil {
-			s.logger.Error("failed to update payment status",
+			// Guard da corrida com a expiração: o UPDATE guarded volta 0 rows
+			// (ErrNotFound) quando o cart expirou/cancelou entre a aprovação no
+			// gateway e este write. NÃO finalizamos um cart não-pagável; o
+			// dinheiro entrou no gateway, então fica para a reconciliação (E6).
+			s.logger.Warn("card approved at gateway but cart not payable (expired/cancelled) — skipping finalization, needs reconciliation",
 				zap.String("cart_id", cart.ID),
+				zap.String("payment_id", result.PaymentID),
 				zap.Error(err),
 			)
-		}
-		// Best-effort capture of card details for the post-payment receipt
-		// (public checkout `payment` block). Failure here must not break the
-		// happy path — the comprovante just renders without these fields.
-		if err := s.repo.WriteCartCardPayment(ctx, s.pool, cart.ID, result.CardBrand, result.LastFourDigits, result.Installments, result.AuthorizationCode); err != nil {
-			s.logger.Warn("failed to persist card payment details",
-				zap.String("cart_id", cart.ID),
-				zap.Error(err),
-			)
-		}
-		// Customer-facing post-payment flow (tracking token + receipt email).
-		// Idempotent inside the hook, so duplicate invocations from a webhook
-		// retry are a no-op.
-		if s.postCheckoutHook != nil {
-			s.postCheckoutHook.OnCartPaid(ctx, cart.ID)
+		} else {
+			// Best-effort capture of card details for the post-payment receipt
+			// (public checkout `payment` block). Failure here must not break the
+			// happy path — the comprovante just renders without these fields.
+			if err := s.repo.WriteCartCardPayment(ctx, s.pool, cart.ID, result.CardBrand, result.LastFourDigits, result.Installments, result.AuthorizationCode); err != nil {
+				s.logger.Warn("failed to persist card payment details",
+					zap.String("cart_id", cart.ID),
+					zap.Error(err),
+				)
+			}
+			// Customer-facing post-payment flow (tracking token + receipt email).
+			// Idempotent inside the hook, so duplicate invocations from a webhook
+			// retry are a no-op.
+			if s.postCheckoutHook != nil {
+				s.postCheckoutHook.OnCartPaid(ctx, cart.ID)
+			}
 		}
 	}
 

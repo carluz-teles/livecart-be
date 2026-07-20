@@ -224,6 +224,102 @@ func (q *Queries) DeleteCartItemByCartAndProduct(ctx context.Context, arg Delete
 	return err
 }
 
+const deleteCartItemsByCart = `-- name: DeleteCartItemsByCart :exec
+DELETE FROM cart_items WHERE cart_id = $1
+`
+
+// Apaga todos os itens de um cart. Usado ao reabrir um cart expirado/cancelado
+// para reuso (os itens antigos já tiveram o estoque devolvido pela expiração).
+func (q *Queries) DeleteCartItemsByCart(ctx context.Context, cartID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteCartItemsByCart, cartID)
+	return err
+}
+
+const expireCart = `-- name: ExpireCart :one
+UPDATE carts
+SET status = 'expired', cancelled_reason = 'expired'
+WHERE id = $1
+  AND status IN ('active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, tracking_token, erp_finalisation_status, erp_last_error, erp_last_attempt_at, erp_attempts_count, erp_payment_snapshot, erp_invoice_id, erp_invoice_key, erp_invoice_status, erp_invoice_emitted_at, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at
+`
+
+// Flip idempotente e guard-first do worker de expiração. O guard vive DENTRO do
+// UPDATE para fechar a corrida com o webhook de pagamento: se alguém pagou ou o
+// cart já foi expirado/cancelado no intervalo, 0 rows retornam e o caller ABORTA
+// sem devolver estoque nem tocar o ERP. Marcar 'expired' é a PRIMEIRA ação (no
+// mesmo tx da devolução de estoque local) — a ação irreversível de ERP só roda
+// depois que o cart está comprovadamente 'expired'.
+func (q *Queries) ExpireCart(ctx context.Context, id pgtype.UUID) (Cart, error) {
+	row := q.db.QueryRow(ctx, expireCart, id)
+	var i Cart
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.PlatformUserID,
+		&i.PlatformHandle,
+		&i.Token,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.PaymentIntegrationID,
+		&i.ExternalOrderID,
+		&i.PaymentStatus,
+		&i.PaidAt,
+		&i.NotifyStatus,
+		&i.NotifyError,
+		&i.NotifiedAt,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.SessionID,
+		&i.CheckoutID,
+		&i.CheckoutExpiresAt,
+		&i.CustomerEmail,
+		&i.PaymentMethod,
+		&i.CustomerName,
+		&i.CustomerDocument,
+		&i.CustomerPhone,
+		&i.ShippingAddress,
+		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
+		&i.ShortID,
+		&i.CouponID,
+		&i.CouponCode,
+		&i.CouponDiscountCents,
+		&i.TrackingToken,
+		&i.ErpFinalisationStatus,
+		&i.ErpLastError,
+		&i.ErpLastAttemptAt,
+		&i.ErpAttemptsCount,
+		&i.ErpPaymentSnapshot,
+		&i.ErpInvoiceID,
+		&i.ErpInvoiceKey,
+		&i.ErpInvoiceStatus,
+		&i.ErpInvoiceEmittedAt,
+		&i.CancelledReason,
+		&i.WhatsappConsent,
+		&i.WhatsappConsentAt,
+		&i.ErpOrderState,
+		&i.ErpStockLaunched,
+		&i.ErpOpStartedAt,
+	)
+	return i, err
+}
+
 const extendCartExpiration = `-- name: ExtendCartExpiration :exec
 UPDATE carts
 SET expires_at = GREATEST(
@@ -1877,7 +1973,15 @@ const listExpiredCarts = `-- name: ListExpiredCarts :many
 SELECT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, c.shipping_service_id, c.shipping_service_name, c.shipping_carrier, c.shipping_cost_cents, c.shipping_cost_real_cents, c.shipping_deadline_days, c.shipping_quoted_at, c.shipping_provider, c.last_shipping_quote_options, c.last_shipping_quote_at, c.card_brand, c.card_last_four, c.card_installments, c.card_authorization_code, c.initial_snapshot_taken_at, c.initial_subtotal_cents, c.short_id, c.coupon_id, c.coupon_code, c.coupon_discount_cents, c.tracking_token, c.erp_finalisation_status, c.erp_last_error, c.erp_last_attempt_at, c.erp_attempts_count, c.erp_payment_snapshot, c.erp_invoice_id, c.erp_invoice_key, c.erp_invoice_status, c.erp_invoice_emitted_at, c.cancelled_reason, c.whatsapp_consent, c.whatsapp_consent_at, c.erp_order_state, c.erp_stock_launched, c.erp_op_started_at, le.store_id
 FROM carts c
 JOIN live_events le ON le.id = c.event_id
-WHERE c.status = 'active' AND c.expires_at IS NOT NULL AND c.expires_at < now()
+WHERE c.status IN ('active', 'checkout')
+  AND c.payment_status IS DISTINCT FROM 'paid'
+  AND c.payment_status IS DISTINCT FROM 'refunded'
+  AND c.expires_at IS NOT NULL
+  AND c.expires_at < now()
+  AND NOT (c.erp_order_state IN ('converting', 'mutating')
+           AND c.erp_op_started_at > now() - interval '30 minutes')
+ORDER BY c.expires_at ASC
+LIMIT $1
 `
 
 type ListExpiredCartsRow struct {
@@ -1946,9 +2050,18 @@ type ListExpiredCartsRow struct {
 	StoreID                  pgtype.UUID        `json:"store_id"`
 }
 
-// Returns carts that have expired (active + past expires_at), with store_id from event
-func (q *Queries) ListExpiredCarts(ctx context.Context) ([]ListExpiredCartsRow, error) {
-	rows, err := q.db.Query(ctx, listExpiredCarts)
+// Varredura global do worker de expiração. Retorna carts vencidos elegíveis
+// para expirar, com store_id do evento. Diferente da versão antiga (que só
+// pegava 'active' e por isso deixava os carts pós-live em 'checkout' presos
+// para sempre), aqui:
+//   - status IN ('active','checkout')  → inclui o pós-live (D1)
+//   - payment_status nunca 'paid'/'refunded' → jamais expira uma venda (E2)
+//   - exclui design C com ciclo de conversão/mutação em voo (não correr com o
+//     sweep de ERP; o mesmo predicado de HasInFlightFinalisationForProduct)
+//
+// NÃO filtra le.status: um evento 'ended' com carts vencidos precisa expirar.
+func (q *Queries) ListExpiredCarts(ctx context.Context, limit int32) ([]ListExpiredCartsRow, error) {
+	rows, err := q.db.Query(ctx, listExpiredCarts, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -2470,7 +2583,19 @@ SET expires_at         = $2,
     payment_status     = 'pending',
     checkout_url       = NULL,
     checkout_id        = NULL,
-    checkout_expires_at = NULL
+    checkout_expires_at = NULL,
+    -- Reset das colunas de ERP (must-fix C): reabrir um cart design-C sem isto
+    -- deixaria erp_order_state/external_order_id obsoletos e o próximo pagamento
+    -- cairia em "cart pago após cancelamento — reconciliação manual". A
+    -- expiração já cancelou/estornou o pedido antigo; o reopen zera para um
+    -- ciclo pagamento→ERP limpo.
+    erp_order_state         = 'none',
+    external_order_id       = NULL,
+    erp_stock_launched      = FALSE,
+    erp_finalisation_status = 'pending',
+    erp_op_started_at       = NULL,
+    erp_last_attempt_at     = NULL,
+    erp_payment_snapshot    = NULL
 WHERE id = $1
 `
 
@@ -2485,6 +2610,42 @@ type RegenerateCartCheckoutParams struct {
 // next checkout-side call generates a fresh one.
 func (q *Queries) RegenerateCartCheckout(ctx context.Context, arg RegenerateCartCheckoutParams) error {
 	_, err := q.db.Exec(ctx, regenerateCartCheckout, arg.ID, arg.ExpiresAt)
+	return err
+}
+
+const reopenExpiredCartForReuse = `-- name: ReopenExpiredCartForReuse :exec
+UPDATE carts
+SET status                  = 'active',
+    payment_status          = 'pending',
+    cancelled_reason        = NULL,
+    expires_at              = NULL,
+    checkout_url            = NULL,
+    checkout_id             = NULL,
+    checkout_expires_at     = NULL,
+    paid_at                 = NULL,
+    payment_method          = NULL,
+    coupon_id               = NULL,
+    coupon_code             = NULL,
+    coupon_discount_cents   = 0,
+    erp_order_state         = 'none',
+    external_order_id       = NULL,
+    erp_stock_launched      = FALSE,
+    erp_finalisation_status = 'pending',
+    erp_op_started_at       = NULL,
+    erp_last_attempt_at     = NULL,
+    erp_payment_snapshot    = NULL
+WHERE id = $1
+`
+
+// Reabre um cart 'expired'/'cancelled' para reuso pelo MESMO comprador no MESMO
+// evento (a unique (event_id, platform_user_id) impede criar um 2º cart). Reseta
+// TUDO para um estado limpo — inclusive as colunas de ERP: sem isso, um cart
+// design-C reaberto pagaria e cairia em "cart pago após cancelamento —
+// reconciliação manual" (external_order_id/erp_order_state obsoletos). Os
+// cart_items antigos são apagados à parte (DeleteCartItemsByCart) — já tiveram o
+// estoque devolvido pela expiração; o item novo entra fresco pelo fluxo de add.
+func (q *Queries) ReopenExpiredCartForReuse(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, reopenExpiredCartForReuse, id)
 	return err
 }
 
@@ -2988,8 +3149,10 @@ func (q *Queries) UpdateCartNotifyStatus(ctx context.Context, arg UpdateCartNoti
 
 const updateCartPayment = `-- name: UpdateCartPayment :one
 UPDATE carts
-SET payment_status = $2, checkout_id = $3, paid_at = $4, payment_method = $5
+SET payment_status = $2, checkout_id = $3, paid_at = $4, payment_method = $5,
+    expires_at = CASE WHEN $2 = 'paid' THEN NULL ELSE expires_at END
 WHERE id = $1
+  AND status NOT IN ('expired', 'cancelled')
 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, tracking_token, erp_finalisation_status, erp_last_error, erp_last_attempt_at, erp_attempts_count, erp_payment_snapshot, erp_invoice_id, erp_invoice_key, erp_invoice_status, erp_invoice_emitted_at, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at
 `
 
@@ -3004,6 +3167,11 @@ type UpdateCartPaymentParams struct {
 // $3 = payment-provider ID (MP/Pagar.me). Goes to checkout_id, not
 // external_order_id — the latter is reserved for the ERP (Tiny) order ID
 // and is the idempotency key for finalizeCartERPOrder.
+// Guard (must-fix da corrida com o worker de expiração): recusa marcar
+// pagamento em cart já 'expired'/'cancelled' — 0 rows sinalizam ao caller que
+// não deve finalizar (evita o estado inconsistente pago+expirado e o cancel de
+// pedido ERP de venda paga). Ao pagar, neutraliza expires_at para que o worker
+// nunca reselcione a venda.
 func (q *Queries) UpdateCartPayment(ctx context.Context, arg UpdateCartPaymentParams) (Cart, error) {
 	row := q.db.QueryRow(ctx, updateCartPayment,
 		arg.ID,
@@ -3166,8 +3334,10 @@ func (q *Queries) UpdateCartPaymentByCheckoutID(ctx context.Context, arg UpdateC
 
 const updateCartPaymentStatus = `-- name: UpdateCartPaymentStatus :one
 UPDATE carts
-SET payment_status = $2, checkout_id = $3, paid_at = $4
+SET payment_status = $2, checkout_id = $3, paid_at = $4,
+    expires_at = CASE WHEN $2 = 'paid' THEN NULL ELSE expires_at END
 WHERE id = $1
+  AND status NOT IN ('expired', 'cancelled')
 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, tracking_token, erp_finalisation_status, erp_last_error, erp_last_attempt_at, erp_attempts_count, erp_payment_snapshot, erp_invoice_id, erp_invoice_key, erp_invoice_status, erp_invoice_emitted_at, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at
 `
 
@@ -3179,7 +3349,9 @@ type UpdateCartPaymentStatusParams struct {
 }
 
 // Updates payment status directly by cart ID (for transparent checkout)
-// Uses checkout_id to store the payment ID from the provider
+// Uses checkout_id to store the payment ID from the provider.
+// Mesmo guard de UpdateCartPayment: não marca pagamento em cart expirado/
+// cancelado (0 rows = caller não finaliza) e neutraliza expires_at ao pagar.
 func (q *Queries) UpdateCartPaymentStatus(ctx context.Context, arg UpdateCartPaymentStatusParams) (Cart, error) {
 	row := q.db.QueryRow(ctx, updateCartPaymentStatus,
 		arg.ID,

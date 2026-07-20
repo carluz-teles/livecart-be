@@ -343,6 +343,29 @@ func (q *Queries) GetActiveLiveEventByStore(ctx context.Context, storeID pgtype.
 	return i, err
 }
 
+const getActiveTimedEventByMediaID = `-- name: GetActiveTimedEventByMediaID :one
+SELECT id, store_id
+FROM live_events
+WHERE media_id = $1
+  AND status = 'active'
+  AND type IN ('post', 'story')
+LIMIT 1
+`
+
+type GetActiveTimedEventByMediaIDRow struct {
+	ID      pgtype.UUID `json:"id"`
+	StoreID pgtype.UUID `json:"store_id"`
+}
+
+// Resolve o evento post/story ativo mapeado a uma media_id (mídia apagada no
+// Instagram) para roteá-lo por End (finaliza carts + ERP), não só flipar status.
+func (q *Queries) GetActiveTimedEventByMediaID(ctx context.Context, mediaID pgtype.Text) (GetActiveTimedEventByMediaIDRow, error) {
+	row := q.db.QueryRow(ctx, getActiveTimedEventByMediaID, mediaID)
+	var i GetActiveTimedEventByMediaIDRow
+	err := row.Scan(&i.ID, &i.StoreID)
+	return i, err
+}
+
 const getEventByPlatformLiveID = `-- name: GetEventByPlatformLiveID :one
 SELECT e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.type, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end, e.current_active_product_id, e.processing_paused, e.scheduled_at, e.description, e.free_shipping, e.pix_discount_percent, e.waitlist_notified_ttl_minutes, e.media_id, e.media_permalink, e.media_thumbnail_url, e.media_caption, e.webhook_active, e.ends_at
 FROM live_events e
@@ -740,6 +763,47 @@ WHERE id = $1
 func (q *Queries) IncrementLiveEventOrders(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, incrementLiveEventOrders, id)
 	return err
+}
+
+const listEventsPastEndsAt = `-- name: ListEventsPastEndsAt :many
+SELECT id, store_id
+FROM live_events
+WHERE type IN ('post', 'story')
+  AND status = 'active'
+  AND ends_at IS NOT NULL
+  AND ends_at < now()
+ORDER BY ends_at ASC
+LIMIT $1
+`
+
+type ListEventsPastEndsAtRow struct {
+	ID      pgtype.UUID `json:"id"`
+	StoreID pgtype.UUID `json:"store_id"`
+}
+
+// D5: eventos post/story cuja janela (ends_at) já fechou mas que continuam
+// 'active' porque nada dispara o encerramento (EffectiveStatus é só derivado em
+// leitura). O sweep chama live.Service.End em cada um para finalizar carts
+// (armar expires_at) e o ERP. Restrito a post/story para NÃO auto-encerrar
+// lives agendadas que o lojista quer manter rodando além do horário nominal.
+func (q *Queries) ListEventsPastEndsAt(ctx context.Context, limit int32) ([]ListEventsPastEndsAtRow, error) {
+	rows, err := q.db.Query(ctx, listEventsPastEndsAt, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListEventsPastEndsAtRow{}
+	for rows.Next() {
+		var i ListEventsPastEndsAtRow
+		if err := rows.Scan(&i.ID, &i.StoreID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listEventsReadyToStart = `-- name: ListEventsReadyToStart :many

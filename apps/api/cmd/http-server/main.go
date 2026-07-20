@@ -536,10 +536,17 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				webhookTicker := time.NewTicker(1 * time.Hour)
 				defer sweepTicker.Stop()
 				defer webhookTicker.Stop()
+				// Boot run: finaliza post/story cujo ends_at já fechou enquanto o
+				// serviço estava fora do ar (catch-up no deploy), em vez de
+				// esperar o primeiro tick. Mesmo padrão dos demais workers.
+				liveSvc.SweepEndedTimedEvents(context.Background())
 				for {
 					select {
 					case <-sweepTicker.C:
 						integrationSvc.RunERPOrderOpsSweep(context.Background())
+						// D5: finaliza post/story cujo ends_at fechou (arma
+						// expires_at nos carts → o expiry worker os alcança).
+						liveSvc.SweepEndedTimedEvents(context.Background())
 					case <-webhookTicker.C:
 						integrationSvc.CheckTinyStockWebhookDelivery(context.Background(), 12*time.Hour)
 					}
@@ -736,6 +743,19 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			Limit:        100,
 		})
 		recoveryWorker.Start()
+
+		// Global cart-expiration sweep. The missing clock: expires carts whose
+		// payment window elapsed (incl. post-live 'checkout' carts that the old
+		// lazy path never reached), returning local stock + Tiny reservations
+		// and promoting the waitlist. Each cart is expired under a per-cart
+		// advisory lock so it never races the payment webhook.
+		cartExpiryWorker := integration.NewCartExpiryWorker(integration.CartExpiryWorkerConfig{
+			Service:  integrationSvc,
+			Logger:   log,
+			Interval: 5 * time.Minute,
+			Limit:    200,
+		})
+		cartExpiryWorker.Start()
 	}
 
 	customerHandler := customer.NewHandler(customerSvc, validate)
