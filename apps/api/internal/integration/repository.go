@@ -18,6 +18,11 @@ import (
 	"livecart/apps/api/lib/query"
 )
 
+// ErrCartNotPayable sinaliza que uma escrita de pagamento foi recusada pelo
+// guard da query (cart 'expired'/'cancelled') — 0 rows. O caller deve tratar
+// como skip benigno (não finalizar), não como falha do webhook.
+var ErrCartNotPayable = errors.New("cart not payable (expired or cancelled)")
+
 // Repository handles database operations for integrations.
 type Repository struct {
 	queries *sqlc.Queries
@@ -787,6 +792,28 @@ func (r *Repository) DecrementProductStock(ctx context.Context, productID string
 		Stock: pgtype.Int4{Int32: int32(quantity), Valid: true},
 	})
 	return err
+}
+
+// TryDecrementProductStock decrements stock all-or-nothing for one product,
+// returning ok=false (sem erro) quando não há estoque suficiente — o UPDATE
+// atômico (WHERE stock >= qty) casou 0 rows. Distingue "estoque insuficiente"
+// de erro real de banco, para o caller decidir (ex.: recovery pula reabertura).
+func (r *Repository) TryDecrementProductStock(ctx context.Context, productID string, quantity int) (bool, error) {
+	id, err := parseUUID(productID)
+	if err != nil {
+		return false, err
+	}
+	_, err = r.queries.DecrementProductStock(ctx, sqlc.DecrementProductStockParams{
+		ID:    id,
+		Stock: pgtype.Int4{Int32: int32(quantity), Valid: true},
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("decrementing product stock: %w", err)
+	}
+	return true, nil
 }
 
 // DecrementProductStockUpTo takes up to `want` units atomically and returns
@@ -1799,6 +1826,97 @@ func (r *Repository) UpdateCartStatus(ctx context.Context, cartID, status string
 	return nil
 }
 
+// ExpiredCartToProcess is a cart eligible for expiration returned by the global
+// sweep (ListExpiredCarts), with the store_id resolved from the event.
+type ExpiredCartToProcess struct {
+	ID      string
+	StoreID string
+}
+
+// ListExpiredCarts returns carts eligible for the global expiration worker:
+// status IN ('active','checkout') (inclui o pós-live), nunca pago/estornado,
+// past expires_at, e sem design C em voo. Ver db/queries/cart.sql.
+func (r *Repository) ListExpiredCarts(ctx context.Context, limit int32) ([]ExpiredCartToProcess, error) {
+	rows, err := r.queries.ListExpiredCarts(ctx, limit)
+	if err != nil {
+		return nil, fmt.Errorf("listing expired carts: %w", err)
+	}
+	out := make([]ExpiredCartToProcess, len(rows))
+	for i, row := range rows {
+		out[i] = ExpiredCartToProcess{
+			ID:      uuidToString(row.ID),
+			StoreID: uuidToString(row.StoreID),
+		}
+	}
+	return out, nil
+}
+
+// ExpireCartResult is the outcome of the atomic flip+local-release transaction.
+type ExpireCartResult struct {
+	// Eligible=false quando o guard do UPDATE devolveu 0 rows (o cart foi pago
+	// ou já expirado/cancelado no intervalo) — o caller ABORTA sem tocar ERP.
+	Eligible bool
+	EventID  string
+	// FreedProductIDs: produtos cujo estoque local foi devolvido (para promover
+	// a waitlist depois do commit).
+	FreedProductIDs []string
+}
+
+// ExpireCartAndReleaseStock faz, numa ÚNICA transação: (1) o flip guard-first
+// do cart para 'expired' (ExpireCart — recusa cart pago/já-terminal) e, só se
+// ele ganhou, (2) devolve ao estoque local a quantidade não-waitlisted de TODOS
+// os itens do cart. Atomicidade é a garantia anti-dupla-devolução: uma vez
+// commitado, o cart sai de ListExpiredCarts e um retry pós-crash não redevolve;
+// um crash antes do commit reverte tudo (o cart segue elegível, sem vazamento).
+// As ações de ERP (best-effort, remotas) ficam FORA deste tx, no Service.
+func (r *Repository) ExpireCartAndReleaseStock(ctx context.Context, cartID string) (ExpireCartResult, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return ExpireCartResult{}, err
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return ExpireCartResult{}, fmt.Errorf("begin expire tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	qtx := r.queries.WithTx(tx)
+
+	cart, err := qtx.ExpireCart(ctx, cID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Guard pegou: cart pago ou já expirado/cancelado. Não elegível.
+			return ExpireCartResult{Eligible: false}, nil
+		}
+		return ExpireCartResult{}, fmt.Errorf("flip cart to expired: %w", err)
+	}
+
+	items, err := qtx.ListNonWaitlistedCartItems(ctx, cID)
+	if err != nil {
+		return ExpireCartResult{}, fmt.Errorf("listing items for expiry release: %w", err)
+	}
+	freed := make([]string, 0, len(items))
+	for _, item := range items {
+		if _, err := qtx.IncrementProductStock(ctx, sqlc.IncrementProductStockParams{
+			ID:    item.ProductID,
+			Stock: pgtype.Int4{Int32: item.Quantity, Valid: true},
+		}); err != nil {
+			return ExpireCartResult{}, fmt.Errorf("release local stock on expiry: %w", err)
+		}
+		freed = append(freed, uuidToString(item.ProductID))
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return ExpireCartResult{}, fmt.Errorf("commit expire tx: %w", err)
+	}
+
+	return ExpireCartResult{
+		Eligible:        true,
+		EventID:         uuidToString(cart.EventID),
+		FreedProductIDs: freed,
+	}, nil
+}
+
 // GetCartByEventAndUser gets a cart for a specific event and user.
 func (r *Repository) GetCartByEventAndUser(ctx context.Context, eventID, platformUserID string) (*CartRow, error) {
 	eID, err := parseUUID(eventID)
@@ -2034,6 +2152,10 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 		PaymentMethod: pgtype.Text{String: paymentMethod, Valid: paymentMethod != ""},
 	})
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Guard da query recusou: cart expirado/cancelado. Não é falha.
+			return ErrCartNotPayable
+		}
 		return fmt.Errorf("updating cart payment status: %w", err)
 	}
 	return nil

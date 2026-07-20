@@ -37,7 +37,49 @@ SET expires_at         = $2,
     payment_status     = 'pending',
     checkout_url       = NULL,
     checkout_id        = NULL,
-    checkout_expires_at = NULL
+    checkout_expires_at = NULL,
+    -- Reset das colunas de ERP (must-fix C): reabrir um cart design-C sem isto
+    -- deixaria erp_order_state/external_order_id obsoletos e o próximo pagamento
+    -- cairia em "cart pago após cancelamento — reconciliação manual". A
+    -- expiração já cancelou/estornou o pedido antigo; o reopen zera para um
+    -- ciclo pagamento→ERP limpo.
+    erp_order_state         = 'none',
+    external_order_id       = NULL,
+    erp_stock_launched      = FALSE,
+    erp_finalisation_status = 'pending',
+    erp_op_started_at       = NULL,
+    erp_last_attempt_at     = NULL,
+    erp_payment_snapshot    = NULL
+WHERE id = $1;
+
+-- name: ReopenExpiredCartForReuse :exec
+-- Reabre um cart 'expired'/'cancelled' para reuso pelo MESMO comprador no MESMO
+-- evento (a unique (event_id, platform_user_id) impede criar um 2º cart). Reseta
+-- TUDO para um estado limpo — inclusive as colunas de ERP: sem isso, um cart
+-- design-C reaberto pagaria e cairia em "cart pago após cancelamento —
+-- reconciliação manual" (external_order_id/erp_order_state obsoletos). Os
+-- cart_items antigos são apagados à parte (DeleteCartItemsByCart) — já tiveram o
+-- estoque devolvido pela expiração; o item novo entra fresco pelo fluxo de add.
+UPDATE carts
+SET status                  = 'active',
+    payment_status          = 'pending',
+    cancelled_reason        = NULL,
+    expires_at              = NULL,
+    checkout_url            = NULL,
+    checkout_id             = NULL,
+    checkout_expires_at     = NULL,
+    paid_at                 = NULL,
+    payment_method          = NULL,
+    coupon_id               = NULL,
+    coupon_code             = NULL,
+    coupon_discount_cents   = 0,
+    erp_order_state         = 'none',
+    external_order_id       = NULL,
+    erp_stock_launched      = FALSE,
+    erp_finalisation_status = 'pending',
+    erp_op_started_at       = NULL,
+    erp_last_attempt_at     = NULL,
+    erp_payment_snapshot    = NULL
 WHERE id = $1;
 
 -- name: IssueShortIDForEvent :one
@@ -100,13 +142,34 @@ WHERE ci.cart_id = $1;
 -- name: UpdateCartStatus :one
 UPDATE carts SET status = $2 WHERE id = $1 RETURNING *;
 
+-- name: ExpireCart :one
+-- Flip idempotente e guard-first do worker de expiração. O guard vive DENTRO do
+-- UPDATE para fechar a corrida com o webhook de pagamento: se alguém pagou ou o
+-- cart já foi expirado/cancelado no intervalo, 0 rows retornam e o caller ABORTA
+-- sem devolver estoque nem tocar o ERP. Marcar 'expired' é a PRIMEIRA ação (no
+-- mesmo tx da devolução de estoque local) — a ação irreversível de ERP só roda
+-- depois que o cart está comprovadamente 'expired'.
+UPDATE carts
+SET status = 'expired', cancelled_reason = 'expired'
+WHERE id = $1
+  AND status IN ('active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+RETURNING *;
+
 -- name: UpdateCartPayment :one
 -- $3 = payment-provider ID (MP/Pagar.me). Goes to checkout_id, not
 -- external_order_id — the latter is reserved for the ERP (Tiny) order ID
 -- and is the idempotency key for finalizeCartERPOrder.
+-- Guard (must-fix da corrida com o worker de expiração): recusa marcar
+-- pagamento em cart já 'expired'/'cancelled' — 0 rows sinalizam ao caller que
+-- não deve finalizar (evita o estado inconsistente pago+expirado e o cancel de
+-- pedido ERP de venda paga). Ao pagar, neutraliza expires_at para que o worker
+-- nunca reselcione a venda.
 UPDATE carts
-SET payment_status = $2, checkout_id = $3, paid_at = $4, payment_method = $5
+SET payment_status = $2, checkout_id = $3, paid_at = $4, payment_method = $5,
+    expires_at = CASE WHEN $2 = 'paid' THEN NULL ELSE expires_at END
 WHERE id = $1
+  AND status NOT IN ('expired', 'cancelled')
 RETURNING *;
 
 -- name: UpdateCartNotifyStatus :one
@@ -352,11 +415,27 @@ JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1 AND ci.quantity > ci.waitlisted_quantity;
 
 -- name: ListExpiredCarts :many
--- Returns carts that have expired (active + past expires_at), with store_id from event
+-- Varredura global do worker de expiração. Retorna carts vencidos elegíveis
+-- para expirar, com store_id do evento. Diferente da versão antiga (que só
+-- pegava 'active' e por isso deixava os carts pós-live em 'checkout' presos
+-- para sempre), aqui:
+--   * status IN ('active','checkout')  → inclui o pós-live (D1)
+--   * payment_status nunca 'paid'/'refunded' → jamais expira uma venda (E2)
+--   * exclui design C com ciclo de conversão/mutação em voo (não correr com o
+--     sweep de ERP; o mesmo predicado de HasInFlightFinalisationForProduct)
+-- NÃO filtra le.status: um evento 'ended' com carts vencidos precisa expirar.
 SELECT c.*, le.store_id
 FROM carts c
 JOIN live_events le ON le.id = c.event_id
-WHERE c.status = 'active' AND c.expires_at IS NOT NULL AND c.expires_at < now();
+WHERE c.status IN ('active', 'checkout')
+  AND c.payment_status IS DISTINCT FROM 'paid'
+  AND c.payment_status IS DISTINCT FROM 'refunded'
+  AND c.expires_at IS NOT NULL
+  AND c.expires_at < now()
+  AND NOT (c.erp_order_state IN ('converting', 'mutating')
+           AND c.erp_op_started_at > now() - interval '30 minutes')
+ORDER BY c.expires_at ASC
+LIMIT $1;
 
 -- name: ListExpiredCartsByEventAndProduct :many
 -- Returns expired carts for a specific event that contain a specific product (with available qty)
@@ -373,6 +452,11 @@ WHERE c.event_id = $1
 
 -- name: DeleteCartItemByCartAndProduct :exec
 DELETE FROM cart_items WHERE cart_id = $1 AND product_id = $2;
+
+-- name: DeleteCartItemsByCart :exec
+-- Apaga todos os itens de um cart. Usado ao reabrir um cart expirado/cancelado
+-- para reuso (os itens antigos já tiveram o estoque devolvido pela expiração).
+DELETE FROM cart_items WHERE cart_id = $1;
 
 -- name: DecrementCartItemQuantity :one
 -- Subtrai @delta da quantidade do item; se zerar, retorna a row mas a
@@ -510,10 +594,14 @@ RETURNING *;
 
 -- name: UpdateCartPaymentStatus :one
 -- Updates payment status directly by cart ID (for transparent checkout)
--- Uses checkout_id to store the payment ID from the provider
+-- Uses checkout_id to store the payment ID from the provider.
+-- Mesmo guard de UpdateCartPayment: não marca pagamento em cart expirado/
+-- cancelado (0 rows = caller não finaliza) e neutraliza expires_at ao pagar.
 UPDATE carts
-SET payment_status = $2, checkout_id = $3, paid_at = $4
+SET payment_status = $2, checkout_id = $3, paid_at = $4,
+    expires_at = CASE WHEN $2 = 'paid' THEN NULL ELSE expires_at END
 WHERE id = $1
+  AND status NOT IN ('expired', 'cancelled')
 RETURNING *;
 
 -- name: GetStorePaymentIntegration :one

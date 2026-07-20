@@ -429,9 +429,45 @@ func (r *Repository) MarkPostEventWebhookActive(ctx context.Context, mediaID str
 func (r *Repository) EndPostEventByMediaID(ctx context.Context, mediaID string) error {
 	_, err := r.pool.Exec(ctx, `
 		UPDATE live_events SET status = 'ended', updated_at = now()
-		WHERE media_id = $1 AND type = 'post' AND status = 'active'
+		WHERE media_id = $1 AND type IN ('post', 'story') AND status = 'active'
 	`, mediaID)
 	return err
+}
+
+// TimedEventRef identifies a post/story event for the ends_at finalization sweep
+// and the media-gone reroute (D5).
+type TimedEventRef struct {
+	EventID string
+	StoreID string
+}
+
+// ListEventsPastEndsAt returns active post/story events whose ends_at window has
+// closed — they need End() to finalize their carts (which the read-only
+// EffectiveStatus never does).
+func (r *Repository) ListEventsPastEndsAt(ctx context.Context, limit int32) ([]TimedEventRef, error) {
+	rows, err := r.q.ListEventsPastEndsAt(ctx, limit)
+	if err != nil {
+		return nil, fmt.Errorf("listing events past ends_at: %w", err)
+	}
+	out := make([]TimedEventRef, len(rows))
+	for i, row := range rows {
+		out[i] = TimedEventRef{EventID: row.ID.String(), StoreID: row.StoreID.String()}
+	}
+	return out, nil
+}
+
+// GetActiveTimedEventByMediaID resolves the active post/story event mapped to a
+// media_id, so the media-gone path can route through End (finalize) instead of a
+// bare status flip. Returns nil when there is no such event.
+func (r *Repository) GetActiveTimedEventByMediaID(ctx context.Context, mediaID string) (*TimedEventRef, error) {
+	row, err := r.q.GetActiveTimedEventByMediaID(ctx, pgtype.Text{String: mediaID, Valid: true})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("resolving timed event by media id: %w", err)
+	}
+	return &TimedEventRef{EventID: row.ID.String(), StoreID: row.StoreID.String()}, nil
 }
 
 // GetEventPulse returns a tiny "did anything change" snapshot for an event,
@@ -1007,13 +1043,31 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 
 	qtx := r.q.WithTx(tx)
 
-	// Try to get existing cart first
-	existing, err := qtx.GetCartByEventAndUser(ctx, sqlc.GetCartByEventAndUserParams{
+	// Try to get existing cart first. FOR UPDATE trava a row: além de resolver
+	// a corrida de dois comentários simultâneos do mesmo comprador (que antes
+	// colidiam na unique constraint), permite reabrir com segurança um cart
+	// morto sob o lock.
+	existing, err := qtx.GetCartByEventAndUserForUpdate(ctx, sqlc.GetCartByEventAndUserForUpdateParams{
 		EventID:        eventID,
 		PlatformUserID: params.PlatformUserID,
 	})
 	if err == nil {
-		// Cart exists, commit and return
+		// E5: um cart 'expired'/'cancelled' não pode ser reusado como está — o
+		// item novo entraria num cart impagável e os itens antigos (cujo estoque
+		// já voltou na expiração) reivindicariam estoque inexistente. Reabrimos
+		// in-place: purga os itens antigos e reseta tudo (status/pagamento/
+		// checkout/cupom/ERP). A unique (event_id, platform_user_id) impede criar
+		// um 2º cart, por isso reabrir em vez de novo. 'paid' NÃO é reaberto (não
+		// destruir uma venda concluída) — cai no reuso.
+		if existing.Status == "expired" || existing.Status == "cancelled" {
+			if err := qtx.DeleteCartItemsByCart(ctx, existing.ID); err != nil {
+				return nil, false, fmt.Errorf("purging items on cart reopen: %w", err)
+			}
+			if err := qtx.ReopenExpiredCartForReuse(ctx, existing.ID); err != nil {
+				return nil, false, fmt.Errorf("reopening cart for reuse: %w", err)
+			}
+		}
+		// Cart exists (reused or reopened), commit and return
 		if err := tx.Commit(ctx); err != nil {
 			return nil, false, fmt.Errorf("committing transaction: %w", err)
 		}

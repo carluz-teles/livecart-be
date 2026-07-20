@@ -289,10 +289,46 @@ func (s *Service) ListActivePostEvents(ctx context.Context) ([]PostEventRef, err
 	return s.repo.ListActivePostEvents(ctx)
 }
 
-// EndPostEventByMediaID closes the post event mapped to mediaID when its media
-// is gone on Instagram, so polling stops retrying a dead media id.
+// EndPostEventByMediaID closes the post/story event mapped to mediaID when its
+// media is gone on Instagram. D5: routes through End so the carts are finalized
+// (moved to 'checkout' with expires_at armed → eligible for the expiry worker)
+// and the ERP is reconciled — not just a bare status flip that left carts
+// 'active' without a deadline forever. Falls back to the raw flip if the event
+// can't be resolved.
 func (s *Service) EndPostEventByMediaID(ctx context.Context, mediaID string) error {
-	return s.repo.EndPostEventByMediaID(ctx, mediaID)
+	ref, err := s.repo.GetActiveTimedEventByMediaID(ctx, mediaID)
+	if err != nil {
+		return err
+	}
+	if ref == nil {
+		// Nothing active to finalize; ensure polling stops anyway.
+		return s.repo.EndPostEventByMediaID(ctx, mediaID)
+	}
+	if _, err := s.End(ctx, EndLiveInput{ID: ref.EventID, StoreID: ref.StoreID}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// SweepEndedTimedEvents finalizes post/story events whose ends_at window has
+// closed. D5: without it, a story (ends_at = now()+24h) or a scheduled-window
+// post just changes its *effective* status on read while its carts stay
+// 'active' without a deadline — the expiry worker never reaches them. End() is
+// idempotent, so re-sweeping an already-ended event is a no-op.
+func (s *Service) SweepEndedTimedEvents(ctx context.Context) {
+	events, err := s.repo.ListEventsPastEndsAt(ctx, 200)
+	if err != nil {
+		s.logger.Error("ends_at sweep: failed to list events", zap.Error(err))
+		return
+	}
+	for _, ev := range events {
+		if _, err := s.End(ctx, EndLiveInput{ID: ev.EventID, StoreID: ev.StoreID}); err != nil {
+			s.logger.Error("ends_at sweep: failed to finalize event",
+				zap.String("event_id", ev.EventID),
+				zap.String("store_id", ev.StoreID),
+				zap.Error(err))
+		}
+	}
 }
 
 // GetEventPulse returns the cheap change-signal used for near-real-time refresh.

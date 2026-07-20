@@ -175,3 +175,28 @@ SELECT
     (SELECT COUNT(*)::int FROM event_upsells WHERE event_id = e.id) AS upsell_count
 FROM live_events e
 WHERE e.id = $1 AND e.store_id = $2;
+
+-- name: ListEventsPastEndsAt :many
+-- D5: eventos post/story cuja janela (ends_at) já fechou mas que continuam
+-- 'active' porque nada dispara o encerramento (EffectiveStatus é só derivado em
+-- leitura). O sweep chama live.Service.End em cada um para finalizar carts
+-- (armar expires_at) e o ERP. Restrito a post/story para NÃO auto-encerrar
+-- lives agendadas que o lojista quer manter rodando além do horário nominal.
+SELECT id, store_id
+FROM live_events
+WHERE type IN ('post', 'story')
+  AND status = 'active'
+  AND ends_at IS NOT NULL
+  AND ends_at < now()
+ORDER BY ends_at ASC
+LIMIT $1;
+
+-- name: GetActiveTimedEventByMediaID :one
+-- Resolve o evento post/story ativo mapeado a uma media_id (mídia apagada no
+-- Instagram) para roteá-lo por End (finaliza carts + ERP), não só flipar status.
+SELECT id, store_id
+FROM live_events
+WHERE media_id = $1
+  AND status = 'active'
+  AND type IN ('post', 'story')
+LIMIT 1;

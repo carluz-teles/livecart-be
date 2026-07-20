@@ -3737,6 +3737,16 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 
 	// Update cart payment status and payment method
 	if err := s.repo.UpdateCartPaymentStatus(ctx, status.ExternalReference, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod); err != nil {
+		if errors.Is(err, ErrCartNotPayable) {
+			// O cart expirou/cancelou entre a cobrança e este webhook. Não
+			// finalizamos (não marca pago, não toca ERP). Se dinheiro entrou
+			// mesmo, fica para a reconciliação (E6). ACK benigno.
+			s.logger.Info("payment webhook for cart no longer payable (expired/cancelled), skipping finalization",
+				zap.String("cart_id", status.ExternalReference),
+				zap.String("payment_status", cartPaymentStatus),
+			)
+			return nil
+		}
 		s.logger.Error("failed to update cart payment status",
 			zap.String("cart_id", status.ExternalReference),
 			zap.String("payment_status", cartPaymentStatus),
@@ -4884,8 +4894,12 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		zap.Int("stock", product.Stock),
 	)
 
-	// Lazy expiration: process expired carts for this product before checking stock
-	s.ProcessExpiredCartsForProduct(ctx, event.ID, product.ID)
+	// A expiração de carrinhos deixou de ser lazy (por-comentário, por-produto):
+	// era cega a carts 'checkout' pós-live e corria com o webhook de pagamento
+	// sem lock. Agora um worker global (SweepExpiredCarts → ExpireCart) expira
+	// por-cart, com advisory lock, filtro de pago e devolução de TODOS os itens.
+	// A promoção de waitlist do produto liberado passou a ser disparada pelo
+	// próprio worker; aqui não é mais necessário nada.
 
 	// Validate maxQuantityPerItem limit
 	storeInfo, _ := s.repo.GetStoreInfo(ctx, event.StoreID)
@@ -6286,8 +6300,191 @@ func (s *Service) getERPProvider(ctx context.Context, integration *IntegrationRo
 // LAZY EXPIRATION & WAITLIST PROCESSING
 // =============================================================================
 
+// SweepExpiredCarts is the entry point of the global expiration worker. It
+// pulls a batch of eligible expired carts (status active/checkout, unpaid, past
+// expires_at, no design-C op in flight) and expires each one. Runs independent
+// of comment traffic and of the event status — the missing clock that left
+// post-live 'checkout' carts (and their stock + Tiny reservations) stuck forever.
+func (s *Service) SweepExpiredCarts(ctx context.Context, limit int32) {
+	carts, err := s.repo.ListExpiredCarts(ctx, limit)
+	if err != nil {
+		s.logger.Error("expiry sweep: failed to list expired carts", zap.Error(err))
+		return
+	}
+	for _, cart := range carts {
+		s.ExpireCart(ctx, cart.ID, cart.StoreID)
+	}
+}
+
+// ExpireCart expira UM carrinho, com segurança contra a corrida do pagamento.
+// Ordem (crítica):
+//  1. Advisory lock por cart — serializa contra o confirm/finalize do webhook
+//     de pagamento (ConfirmERPOrderPayment/finalizeCartERPOrder tomam o mesmo
+//     lock). !acquired = pagamento finalizando; sai.
+//  2. Flip 'expired' + devolução de estoque local de TODOS os itens numa única
+//     transação (ExpireCartAndReleaseStock). O flip é guard-first: se o cart
+//     foi pago/expirado no intervalo, 0 rows → NÃO elegível → aborta sem tocar
+//     ERP (a ação irreversível de cancelar pedido só roda com o cart já 'expired').
+//  3. ERP (best-effort, fora do tx): design C cancela o pedido (situação 2 +
+//     estorno); senão reverte as reservas saída-manual POR CART.
+//  4. Promove a waitlist de cada produto liberado (pós-commit, fire-and-forget).
+func (s *Service) ExpireCart(ctx context.Context, cartID, storeID string) {
+	release, acquired, err := s.repo.AcquireCartFinalisationLock(ctx, cartID)
+	if err != nil {
+		s.logger.Warn("expiry: failed to acquire cart lock", zap.String("cart_id", cartID), zap.Error(err))
+		return
+	}
+	if !acquired {
+		// Webhook de pagamento está finalizando este mesmo cart. Ele decide.
+		s.logger.Info("expiry: skip, finalisation in progress", zap.String("cart_id", cartID))
+		return
+	}
+	defer release()
+
+	res, err := s.repo.ExpireCartAndReleaseStock(ctx, cartID)
+	if err != nil {
+		s.logger.Error("expiry: failed to expire cart", zap.String("cart_id", cartID), zap.Error(err))
+		return
+	}
+	if !res.Eligible {
+		// Pago ou já expirado/cancelado entre a seleção e o flip. Nada a fazer.
+		s.logger.Info("expiry: cart no longer eligible (paid/terminal in gap)", zap.String("cart_id", cartID))
+		return
+	}
+
+	// ERP: cart convertido (design C) → cancelar o pedido devolve o estoque no
+	// Tiny (situação 2 + estorno). Caso contrário, reverter as reservas
+	// saída-manual POR CART (não por produto — evita o vazamento de D2).
+	if st, stErr := s.repo.GetCartERPOrderState(ctx, cartID); stErr == nil &&
+		st.State != erpOrderStateNone && st.State != erpOrderStateCancelled {
+		if cancelErr := s.CancelERPOrderForCart(ctx, cartID, storeID); cancelErr != nil {
+			s.logger.Error("expiry: failed to cancel converted cart order",
+				zap.String("cart_id", cartID), zap.Error(cancelErr))
+		}
+	} else {
+		s.reverseCartReservationsInERP(ctx, cartID, storeID)
+	}
+
+	s.logger.Info("expired cart processed",
+		zap.String("cart_id", cartID),
+		zap.Int("items_released", len(res.FreedProductIDs)),
+	)
+
+	// Promove o próximo da fila para cada produto liberado. Idempotente.
+	for _, productID := range res.FreedProductIDs {
+		s.ProcessWaitlistForProduct(ctx, res.EventID, productID, storeID)
+	}
+}
+
+// reverseCartReservationsInERP estorna todas as reservas saída-manual ativas de
+// um cart no Tiny e marca as rows como revertidas. Best-effort: espelha o passo
+// do block-sweep (CancelOpenCartsForBlockedHandle) mas por cart único.
+func (s *Service) reverseCartReservationsInERP(ctx context.Context, cartID, storeID string) {
+	reservations, resErr := s.repo.ListActiveReservationsByCart(ctx, cartID)
+	if resErr != nil {
+		s.logger.Error("expiry: failed to list reservations", zap.String("cart_id", cartID), zap.Error(resErr))
+		return
+	}
+	if len(reservations) == 0 {
+		return
+	}
+
+	erpReversed := true
+	if integration, intErr := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny"); intErr == nil {
+		if erpProvider, provErr := s.erpProviderFor(ctx, integration); provErr == nil {
+			for _, r := range reservations {
+				obs := fmt.Sprintf("Estorno expiração carrinho LiveCart - Cart %s", cartID)
+				if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
+					erpReversed = false
+					s.logger.Warn("expiry: failed to reverse ERP reservation",
+						zap.String("cart_id", cartID),
+						zap.String("external_product_id", r.ExternalProductID),
+						zap.Error(reverseErr))
+				}
+			}
+		} else {
+			erpReversed = false
+			s.logger.Error("expiry: failed to build ERP provider", zap.String("cart_id", cartID), zap.Error(provErr))
+		}
+	} else {
+		erpReversed = false
+		s.logger.Warn("expiry: no active ERP integration, marking reservations reversed locally only",
+			zap.String("store_id", storeID))
+	}
+
+	if markErr := s.repo.ReverseReservationsByCart(ctx, cartID); markErr != nil {
+		s.logger.Error("expiry: failed to mark reservations reversed", zap.String("cart_id", cartID), zap.Error(markErr))
+	}
+	if !erpReversed {
+		s.logger.Warn("expiry: ERP reservations NOT fully reversed — manual reconciliation may be needed",
+			zap.String("cart_id", cartID))
+	}
+}
+
+// TryReSecureCartStock re-decrementa o estoque local de TODOS os itens
+// não-waitlisted de um cart, all-or-nothing. Retorna ok=false (revertendo os
+// itens já garantidos) quando o estoque de algum item não está mais disponível
+// — foi devolvido pela expiração e promovido a um cliente da waitlist (fila
+// vence). Usado pelo recovery worker ANTES de reabrir um cart expirado, para
+// evitar oversell: só reabre se o estoque puder ser re-garantido de fato.
+func (s *Service) TryReSecureCartStock(ctx context.Context, cartID string) (bool, error) {
+	items, err := s.repo.ListNonWaitlistedCartItems(ctx, cartID)
+	if err != nil {
+		return false, fmt.Errorf("listing items to re-secure: %w", err)
+	}
+
+	secured := make([]NonWaitlistedCartItem, 0, len(items))
+	rollback := func() {
+		for _, it := range secured {
+			if incErr := s.repo.IncrementProductStock(ctx, it.ProductID, it.Quantity); incErr != nil {
+				s.logger.Error("recovery: failed to roll back re-secured stock",
+					zap.String("cart_id", cartID),
+					zap.String("product_id", it.ProductID),
+					zap.Error(incErr))
+			}
+		}
+	}
+
+	for _, it := range items {
+		ok, err := s.repo.TryDecrementProductStock(ctx, it.ProductID, it.Quantity)
+		if err != nil {
+			rollback()
+			return false, fmt.Errorf("re-securing stock: %w", err)
+		}
+		if !ok {
+			// Estoque promovido à waitlist — fila vence.
+			rollback()
+			return false, nil
+		}
+		secured = append(secured, it)
+	}
+	return true, nil
+}
+
+// ReleaseCartStock devolve ao estoque local a quantidade não-waitlisted de
+// todos os itens de um cart. Contraparte de TryReSecureCartStock: usada para
+// compensar quando a reabertura (RegenerateCheckout) falha depois de o estoque
+// já ter sido re-garantido, evitando vazamento.
+func (s *Service) ReleaseCartStock(ctx context.Context, cartID string) {
+	items, err := s.repo.ListNonWaitlistedCartItems(ctx, cartID)
+	if err != nil {
+		s.logger.Error("failed to list items to release cart stock", zap.String("cart_id", cartID), zap.Error(err))
+		return
+	}
+	for _, it := range items {
+		if err := s.repo.IncrementProductStock(ctx, it.ProductID, it.Quantity); err != nil {
+			s.logger.Error("failed to release cart stock",
+				zap.String("cart_id", cartID),
+				zap.String("product_id", it.ProductID),
+				zap.Error(err))
+		}
+	}
+}
+
 // ProcessExpiredCartsForProduct handles expired carts that contain the given product.
-// Called lazily when stock might have freed up (e.g., after a new cart item is added).
+// DEPRECATED: substituída pelo worker global (SweepExpiredCarts/ExpireCart). Não
+// é mais chamada em produção — o único caller remanescente é teste. Mantida
+// temporariamente para não quebrar o teste de resume; não usar em código novo.
 func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, productID string) {
 	carts, err := s.repo.ListExpiredCartsByEventAndProduct(ctx, eventID, productID)
 	if err != nil {

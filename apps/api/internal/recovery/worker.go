@@ -170,10 +170,36 @@ func (w *Worker) processCart(ctx context.Context, row sqlc.ListCartsForWhatsAppR
 	storeID := uuidString(row.StoreID)
 	phone := row.CustomerPhone.String
 
-	// Re-check + regenerate under the existing order rules (rejects paid
-	// carts and carts with shipments; re-reserves stock under normal rules).
+	// Fila vence: um cart expirado já teve o estoque devolvido — e talvez
+	// promovido a um cliente da waitlist. Antes de reabrir, re-garantimos o
+	// estoque de todos os itens, all-or-nothing. Se algum item não puder ser
+	// re-garantido (foi para a fila), NÃO reabrimos: o cliente da waitlist
+	// mantém a prioridade e o comprador original é tratado como sem estoque.
+	// (Sem isto, reabrir + pagar geraria oversell — o worker de expiração e o
+	// recovery brigariam pela mesma unidade.)
+	secured, err := w.integrations.TryReSecureCartStock(ctx, cartID)
+	if err != nil {
+		w.log(ctx, row, "skipped", "", fmt.Sprintf("re-secure stock: %v", err))
+		return fmt.Errorf("re-securing stock: %w", err)
+	}
+	if !secured {
+		w.log(ctx, row, "skipped", "", "stock promoted to waitlist (fila vence)")
+		w.logger.Info("cart recovery skipped: stock no longer available (fila vence)",
+			zap.String("cart_id", cartID),
+			zap.String("store_id", storeID),
+		)
+		return nil
+	}
+
+	// Re-check + regenerate under the existing order rules (rejects paid carts
+	// and carts with shipments). O estoque já foi re-garantido acima; aqui o
+	// RegenerateCheckout reabre a janela e zera as colunas de ERP para um ciclo
+	// de pagamento limpo.
 	token, _, err := w.orders.RegenerateCheckout(ctx, cartID, storeID)
 	if err != nil {
+		// Reabertura falhou depois de re-garantir o estoque: devolve as
+		// unidades para não vazar (o cart continua expirado).
+		w.integrations.ReleaseCartStock(ctx, cartID)
 		w.log(ctx, row, "skipped", "", fmt.Sprintf("regenerate: %v", err))
 		return fmt.Errorf("regenerating checkout: %w", err)
 	}
