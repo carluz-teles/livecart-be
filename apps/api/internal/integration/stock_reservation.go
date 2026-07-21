@@ -30,9 +30,6 @@ const (
 // Keeping it small makes the manager unit-testable and states its dependencies
 // explicitly (interface segregation).
 type stockReservationRepo interface {
-	DecrementProductStock(ctx context.Context, productID string, quantity int) error
-	TryDecrementProductStock(ctx context.Context, productID string, quantity int) (bool, error)
-	DecrementProductStockUpTo(ctx context.Context, productID string, want int) (int, error)
 	IncrementProductStock(ctx context.Context, productID string, quantity int) error
 	EmitStockReserved(ctx context.Context, p StockEventParams) error
 	EmitStockReleased(ctx context.Context, p StockEventParams) error
@@ -75,40 +72,9 @@ type ReserveParams struct {
 // ReleaseParams is the same shape as ReserveParams.
 type ReleaseParams = ReserveParams
 
-// Reserve decrements local stock and emits stock.reserved.
-func (m *StockReservations) Reserve(ctx context.Context, p ReserveParams) error {
-	if err := m.repo.DecrementProductStock(ctx, p.ProductID, p.Quantity); err != nil {
-		return err
-	}
-	m.NoteReserved(ctx, p)
-	return nil
-}
-
-// TryReserve decrements all-or-nothing and emits only when stock was actually
-// taken. Mirrors Repository.TryDecrementProductStock.
-func (m *StockReservations) TryReserve(ctx context.Context, p ReserveParams) (bool, error) {
-	ok, err := m.repo.TryDecrementProductStock(ctx, p.ProductID, p.Quantity)
-	if err != nil || !ok {
-		return ok, err
-	}
-	m.NoteReserved(ctx, p)
-	return true, nil
-}
-
-// ReserveUpTo takes up to p.Quantity units, emits stock.reserved for the amount
-// actually taken (when > 0) and returns it. Mirrors DecrementProductStockUpTo.
-func (m *StockReservations) ReserveUpTo(ctx context.Context, p ReserveParams) (int, error) {
-	taken, err := m.repo.DecrementProductStockUpTo(ctx, p.ProductID, p.Quantity)
-	if err != nil || taken <= 0 {
-		return taken, err
-	}
-	q := p
-	q.Quantity = taken
-	m.NoteReserved(ctx, q)
-	return taken, nil
-}
-
-// Release increments local stock and emits stock.released.
+// Release increments local stock and emits stock.released. Releases are terminal
+// (giving stock back is never rolled back), so mutating + emitting together here
+// is safe.
 func (m *StockReservations) Release(ctx context.Context, p ReleaseParams) error {
 	if err := m.repo.IncrementProductStock(ctx, p.ProductID, p.Quantity); err != nil {
 		return err
@@ -117,11 +83,16 @@ func (m *StockReservations) Release(ctx context.Context, p ReleaseParams) error 
 	return nil
 }
 
-// NoteReserved / NoteReleased emit the event WITHOUT mutating stock, for callers
-// that own their stock mutation (and its rollback) directly — currently
-// AdjustStockReservationDelta, whose optional ERP step can roll the local change
-// back, so the event must fire only at the definitive success point rather than
-// at mutation time.
+// NoteReserved / NoteReleased emit the event WITHOUT mutating stock.
+//
+// Reserves are PROVISIONAL: cart-add, waitlist promotion and cart recovery all
+// decrement stock and then may roll it back on a later failure. Emitting
+// stock.reserved at decrement time would orphan the event when the operation
+// rolls back, so those callers do the raw decrement themselves and call
+// NoteReserved only at the definitive success point (with the real cart_id).
+// AdjustStockReservationDelta likewise owns its local mutation + rollback and
+// notes at its guarded success point. There is deliberately no immediate-emit
+// Reserve helper — it would invite the orphan bug.
 func (m *StockReservations) NoteReserved(ctx context.Context, p ReserveParams) {
 	if err := m.repo.EmitStockReserved(ctx, p.toEventParams()); err != nil {
 		logger.From(ctx, m.logger).Warn("failed to emit stock.reserved",

@@ -4986,9 +4986,11 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	}
 	waitlistQty := intent.Quantity - availableQty
 
-	// Reserve available stock
+	// Reserve available stock (provisional: rolled back below if AddToCart
+	// fails). stock.reserved is emitted only after the add succeeds, with the
+	// real cart_id — see NoteReserved after AddToCart.
 	if availableQty > 0 {
-		if stockErr := s.stock.Reserve(ctx, ReserveParams{Op: StockOpCartAdd, ProductID: product.ID, Quantity: availableQty, EventID: event.ID}); stockErr != nil {
+		if stockErr := s.repo.DecrementProductStock(ctx, product.ID, availableQty); stockErr != nil {
 			// Failed to reserve even available stock - put all in waitlist
 			logger.From(ctx, s.logger).Warn("failed to decrement stock, putting all in waitlist",
 				zap.Error(stockErr),
@@ -5054,6 +5056,11 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			_ = s.repo.IncrementProductStock(ctx, product.ID, availableQty)
 		}
 		return fmt.Errorf("adding to cart: %w", err)
+	}
+
+	// Reservation is now definitive — emit stock.reserved keyed by the real cart.
+	if availableQty > 0 {
+		s.stock.NoteReserved(ctx, ReserveParams{Op: StockOpCartAdd, ProductID: product.ID, Quantity: availableQty, CartID: result.CartID, EventID: event.ID})
 	}
 
 	// Persist the waitlist row now that we have the cart_id from AddToCart.
@@ -6512,7 +6519,9 @@ func (s *Service) TryReSecureCartStock(ctx context.Context, cartID string) (bool
 	}
 
 	for _, it := range items {
-		ok, err := s.stock.TryReserve(ctx, ReserveParams{Op: StockOpCartRecovery, ProductID: it.ProductID, Quantity: it.Quantity, CartID: cartID})
+		// Provisional take: all-or-nothing, so stock.reserved is emitted only
+		// after the whole batch secures (below), never on the rollback paths.
+		ok, err := s.repo.TryDecrementProductStock(ctx, it.ProductID, it.Quantity)
 		if err != nil {
 			rollback()
 			return false, fmt.Errorf("re-securing stock: %w", err)
@@ -6523,6 +6532,11 @@ func (s *Service) TryReSecureCartStock(ctx context.Context, cartID string) (bool
 			return false, nil
 		}
 		secured = append(secured, it)
+	}
+
+	// Batch secured for good — emit stock.reserved per item.
+	for _, it := range secured {
+		s.stock.NoteReserved(ctx, ReserveParams{Op: StockOpCartRecovery, ProductID: it.ProductID, Quantity: it.Quantity, CartID: cartID})
 	}
 	return true, nil
 }
@@ -6832,13 +6846,9 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	// unidade livre atende parte de um pedido de N na fila — o cliente recebe
 	// o que houver e continua esperando o restante. Sem unidade nenhuma,
 	// devolve o cliente ao topo da fila.
-	taken, err := s.stock.ReserveUpTo(ctx, ReserveParams{
-		Op:        StockOpWaitlistPromote,
-		ProductID: productID,
-		Quantity:  next.Quantity,
-		CartID:    next.CartID,
-		EventID:   eventID,
-	})
+	// Provisional take: rolled back below on any promotion failure, so
+	// stock.reserved is emitted only at the definitive success point.
+	taken, err := s.repo.DecrementProductStockUpTo(ctx, productID, next.Quantity)
 	if err != nil {
 		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
 		logger.From(ctx, s.logger).Error("failed to take stock for waitlist promotion",
@@ -6981,6 +6991,11 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		Quantity:       taken,
 		TTL:            ttl,
 	})
+
+	// Definitive success point: every revert path above returns early, so
+	// reaching this line means the buyer was actually promoted. Emit the
+	// provisional stock.reserved (op waitlist_promote) here, keyed by the cart.
+	s.stock.NoteReserved(ctx, ReserveParams{Op: StockOpWaitlistPromote, ProductID: productID, Quantity: taken, CartID: cartID, EventID: eventID})
 
 	// waitlist.notified — emitted only here, at the definitive success point:
 	// every revert path above returns early, so reaching this line means the
