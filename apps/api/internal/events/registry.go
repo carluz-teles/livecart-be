@@ -20,7 +20,9 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	// richer consumers (notifications, analytics) arrive in later phases. Every
 	// emitted event needs a handler or asynq reports "handler not found".
 	mux.HandleFunc(string(EventEventCreated), logEvent(log))
+	mux.HandleFunc(string(EventEventEnded), logEvent(log))
 	mux.HandleFunc(string(SessionCreated), logEvent(log))
+	mux.HandleFunc(string(SessionEnded), logEvent(log))
 	mux.HandleFunc(string(CartCreated), logEvent(log))
 	mux.HandleFunc(string(CartItemAdded), logEvent(log))
 	mux.HandleFunc(string(CartReopened), logEvent(log))

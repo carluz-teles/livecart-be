@@ -634,7 +634,14 @@ func (r *Repository) EndEvent(ctx context.Context, id, storeID string) (EventRow
 		return EventRow{}, err
 	}
 
-	row, err := r.q.EndLiveEvent(ctx, sqlc.EndLiveEventParams{
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return EventRow{}, fmt.Errorf("begin end-event tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+	qtx := r.q.WithTx(tx)
+
+	row, err := qtx.EndLiveEvent(ctx, sqlc.EndLiveEventParams{
 		ID:      uid,
 		StoreID: storeUID,
 	})
@@ -643,6 +650,27 @@ func (r *Repository) EndEvent(ctx context.Context, id, storeID string) (EventRow
 			return EventRow{}, httpx.ErrNotFound("live event not found")
 		}
 		return EventRow{}, fmt.Errorf("ending live event: %w", err)
+	}
+
+	// event.ended in the same tx (transactional outbox).
+	payload, err := json.Marshal(struct {
+		EventID string `json:"event_id"`
+		StoreID string `json:"store_id"`
+	}{EventID: row.ID.String(), StoreID: row.StoreID.String()})
+	if err != nil {
+		return EventRow{}, fmt.Errorf("marshaling event.ended payload: %w", err)
+	}
+	if err := events.Emit(ctx, qtx, events.Envelope{
+		Name:     events.EventEventEnded,
+		Source:   events.SourceInternal,
+		DedupKey: "event.ended:" + row.ID.String(),
+		Payload:  payload,
+	}); err != nil {
+		return EventRow{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return EventRow{}, fmt.Errorf("commit end-event tx: %w", err)
 	}
 
 	return toEventRow(row), nil
@@ -816,12 +844,41 @@ func (r *Repository) EndSession(ctx context.Context, id string) (SessionRow, err
 		return SessionRow{}, err
 	}
 
-	row, err := r.q.EndLiveSession(ctx, uid)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return SessionRow{}, fmt.Errorf("begin end-session tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+	qtx := r.q.WithTx(tx)
+
+	row, err := qtx.EndLiveSession(ctx, uid)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return SessionRow{}, httpx.ErrNotFound("live session not found")
 		}
 		return SessionRow{}, fmt.Errorf("ending live session: %w", err)
+	}
+
+	// session.ended in the same tx (transactional outbox).
+	payload, err := json.Marshal(struct {
+		EventID       string `json:"event_id"`
+		SessionID     string `json:"session_id"`
+		SequenceOrder int32  `json:"sequence_order"`
+	}{EventID: row.EventID.String(), SessionID: row.ID.String(), SequenceOrder: row.SequenceOrder})
+	if err != nil {
+		return SessionRow{}, fmt.Errorf("marshaling session.ended payload: %w", err)
+	}
+	if err := events.Emit(ctx, qtx, events.Envelope{
+		Name:     events.SessionEnded,
+		Source:   events.SourceInternal,
+		DedupKey: "session.ended:" + row.ID.String(),
+		Payload:  payload,
+	}); err != nil {
+		return SessionRow{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return SessionRow{}, fmt.Errorf("commit end-session tx: %w", err)
 	}
 
 	return toSessionRow(row), nil
