@@ -208,6 +208,30 @@ type ErpContact struct {
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
 }
 
+type EventConsumed struct {
+	EventID    pgtype.UUID        `json:"event_id"`
+	Handler    string             `json:"handler"`
+	ConsumedAt pgtype.Timestamptz `json:"consumed_at"`
+}
+
+type EventOutbox struct {
+	ID          pgtype.UUID        `json:"id"`
+	EventID     pgtype.UUID        `json:"event_id"`
+	Name        string             `json:"name"`
+	Source      string             `json:"source"`
+	Metadata    json.RawMessage    `json:"metadata"`
+	Payload     json.RawMessage    `json:"payload"`
+	TraceID     string             `json:"trace_id"`
+	SpanID      string             `json:"span_id"`
+	DedupKey    string             `json:"dedup_key"`
+	Queue       string             `json:"queue"`
+	Status      string             `json:"status"`
+	Attempts    int32              `json:"attempts"`
+	LastError   string             `json:"last_error"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	PublishedAt pgtype.Timestamptz `json:"published_at"`
+}
+
 // Product whitelist for events. If empty, all store products are available.
 type EventProduct struct {
 	ID        pgtype.UUID `json:"id"`
@@ -325,6 +349,7 @@ type LiveComment struct {
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	PrivateReplyUsed  bool               `json:"private_reply_used"`
 	Hidden            bool               `json:"hidden"`
+	DeletedAt         pgtype.Timestamptz `json:"deleted_at"`
 }
 
 // Container for live sessions. Carts are tied to events, not sessions.

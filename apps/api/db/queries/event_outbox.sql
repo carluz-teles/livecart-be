@@ -1,0 +1,35 @@
+-- =============================================================================
+-- EVENT OUTBOX
+-- =============================================================================
+-- Transactional outbox for the async event pipeline. Producers insert in the
+-- same tx as the state change; the relay drains pending rows to asynq.
+
+-- name: InsertOutboxEvent :exec
+INSERT INTO event_outbox (event_id, name, source, metadata, payload, trace_id, span_id, dedup_key, queue)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+
+-- name: ListPendingOutbox :many
+-- Oldest-first, row-locked so concurrent relays (or replicas) never grab the
+-- same event. SKIP LOCKED keeps the scan non-blocking.
+SELECT * FROM event_outbox
+WHERE status = 'pending'
+ORDER BY created_at
+FOR UPDATE SKIP LOCKED
+LIMIT $1;
+
+-- name: MarkOutboxPublished :exec
+UPDATE event_outbox
+SET status = 'published', published_at = now()
+WHERE id = $1;
+
+-- name: MarkOutboxFailed :exec
+UPDATE event_outbox
+SET attempts = attempts + 1, last_error = $2
+WHERE id = $1;
+
+-- name: TryConsumeEvent :execrows
+-- Idempotency guard for consumers without a natural unique key. Returns rows
+-- affected: 1 on first consume, 0 if this (event, handler) was already applied.
+INSERT INTO event_consumed (event_id, handler)
+VALUES ($1, $2)
+ON CONFLICT (event_id, handler) DO NOTHING;

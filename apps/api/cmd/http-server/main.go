@@ -156,13 +156,18 @@ func main() {
 	redisAddr := config.RedisAddr.StringOr("localhost:6379")
 	eventsClient := events.NewClient(redisAddr)
 	eventsServer := events.NewServer(events.ServerConfig{RedisAddr: redisAddr, Logger: log})
+	eventsRelay := events.NewRelay(events.RelayConfig{Pool: pool, Client: eventsClient, Logger: log})
 
-	app, lifecycle := newApp(log, pool, queries, validate, clerkClient, emailClient, eventsClient)
+	app, lifecycle := newApp(log, pool, queries, validate, clerkClient, emailClient)
+	// Registered after the workers in newApp so shutdown stops the producer
+	// (relay) and consumer (server) before the DB pool closes.
 	lifecycle.add("events-server", eventsServer.Stop)
+	lifecycle.add("events-relay", eventsRelay.Stop)
 
 	if err := eventsServer.Start(); err != nil {
 		log.Sugar().Fatalf("starting event server: %v", err)
 	}
+	eventsRelay.Start()
 
 	go func() {
 		if err := app.Listen(":" + port); err != nil {
@@ -291,7 +296,7 @@ func pgTextFromString(s string) pgtype.Text {
 	return pgtype.Text{String: s, Valid: s != ""}
 }
 
-func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate *validator.Validate, clerkClient *clerk.Client, emailClient *email.Client, eventsClient *events.Client) (*fiber.App, *appLifecycle) {
+func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate *validator.Validate, clerkClient *clerk.Client, emailClient *email.Client) (*fiber.App, *appLifecycle) {
 	lifecycle := &appLifecycle{log: log}
 	app := fiber.New(fiber.Config{
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
@@ -332,17 +337,22 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		return c.JSON(fiber.Map{"status": "ok"})
 	})
 
-	// Dev-only smoke test for the event pipeline (Fase 01): publishes a
-	// canonical test.ping through Redis so it is consumed by the event server.
+	// Dev-only smoke test for the event pipeline: emits a canonical test.ping
+	// through the transactional outbox, exercising the full path
+	// (Emit -> outbox -> relay -> Redis -> consumer).
 	if !config.IsProduction() {
 		app.Post("/internal/dev/ping", func(c *fiber.Ctx) error {
-			env := events.Envelope{
-				EventID:    uuid.NewString(),
-				Name:       events.TestPing,
-				Source:     events.SourceInternal,
-				OccurredAt: time.Now().UTC(),
+			ctx := c.UserContext()
+			env := events.Envelope{EventID: uuid.NewString(), Name: events.TestPing, Source: events.SourceInternal}
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				return httpx.HandleServiceError(c, err)
 			}
-			if _, err := eventsClient.Enqueue(c.UserContext(), env); err != nil {
+			defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+			if err := events.Emit(ctx, sqlc.New(tx), env); err != nil {
+				return httpx.HandleServiceError(c, err)
+			}
+			if err := tx.Commit(ctx); err != nil {
 				return httpx.HandleServiceError(c, err)
 			}
 			return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"event_id": env.EventID})
