@@ -27,6 +27,8 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(PostWindowClosed), logEvent(log))
 	mux.HandleFunc(string(CartCreated), logEvent(log))
 	mux.HandleFunc(string(CartItemAdded), logEvent(log))
+	mux.HandleFunc(string(CartItemQtyChanged), logEvent(log))
+	mux.HandleFunc(string(CartItemRemoved), logEvent(log))
 	mux.HandleFunc(string(CartCheckoutArmed), logEvent(log))
 	mux.HandleFunc(string(CartReopened), logEvent(log))
 	mux.HandleFunc(string(CartCancelled), logEvent(log))

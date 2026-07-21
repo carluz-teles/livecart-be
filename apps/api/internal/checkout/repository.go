@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/lib/httpx"
 )
 
@@ -560,8 +561,13 @@ type MutationParams struct {
 	ERPMovementID  string
 }
 
-// RecordMutation persists one row in cart_mutations.
-func (r *Repository) RecordMutation(ctx context.Context, p MutationParams) error {
+// RecordMutation persists one row in cart_mutations and, in the SAME
+// transaction, emits the canonical cart-item event for the mutation (group C:
+// cart.item_added / cart.item_qty_changed / cart.item_removed). The event is
+// keyed by the mutation row id, which is the catalog idempotency key. Every
+// checkout item edit (add/qty/remove) funnels through here, so this is the
+// single canonical emission point for buyer-checkout cart mutations.
+func (r *Repository) RecordMutation(ctx context.Context, pool *pgxpool.Pool, p MutationParams) error {
 	cID, err := uuid.Parse(p.CartID)
 	if err != nil {
 		return httpx.ErrBadRequest("invalid cart ID")
@@ -574,7 +580,15 @@ func (r *Repository) RecordMutation(ctx context.Context, p MutationParams) error
 	if source == "" {
 		source = "buyer_checkout"
 	}
-	_, err = r.q.CreateCartMutation(ctx, sqlc.CreateCartMutationParams{
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin cart-mutation tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+	qtx := r.q.WithTx(tx)
+
+	mutation, err := qtx.CreateCartMutation(ctx, sqlc.CreateCartMutationParams{
 		CartID:         pgtype.UUID{Bytes: cID, Valid: true},
 		ProductID:      pgtype.UUID{Bytes: pID, Valid: true},
 		MutationType:   p.MutationType,
@@ -587,7 +601,55 @@ func (r *Repository) RecordMutation(ctx context.Context, p MutationParams) error
 	if err != nil {
 		return fmt.Errorf("recording cart mutation: %w", err)
 	}
-	return nil
+
+	if name := cartMutationEventName(p.MutationType); name != "" {
+		mutationID := uuid.UUID(mutation.ID.Bytes).String()
+		payload, err := json.Marshal(struct {
+			MutationID     string `json:"mutation_id"`
+			CartID         string `json:"cart_id"`
+			ProductID      string `json:"product_id"`
+			MutationType   string `json:"mutation_type"`
+			QuantityBefore int    `json:"quantity_before"`
+			QuantityAfter  int    `json:"quantity_after"`
+			Source         string `json:"source"`
+		}{
+			MutationID:     mutationID,
+			CartID:         p.CartID,
+			ProductID:      p.ProductID,
+			MutationType:   p.MutationType,
+			QuantityBefore: p.QuantityBefore,
+			QuantityAfter:  p.QuantityAfter,
+			Source:         source,
+		})
+		if err != nil {
+			return fmt.Errorf("marshaling %s payload: %w", name, err)
+		}
+		if err := events.Emit(ctx, qtx, events.Envelope{
+			Name:     name,
+			Source:   events.SourceInternal,
+			DedupKey: string(name) + ":" + mutationID,
+			Payload:  payload,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+// cartMutationEventName maps a cart_mutations.mutation_type to its canonical
+// group-C event name. Returns "" for types that have no event yet.
+func cartMutationEventName(mutationType string) events.Name {
+	switch mutationType {
+	case "item_added":
+		return events.CartItemAdded
+	case "quantity_increased", "quantity_decreased":
+		return events.CartItemQtyChanged
+	case "item_removed":
+		return events.CartItemRemoved
+	default:
+		return ""
+	}
 }
 
 // GetEventProductForCart returns the effective price + max quantity + stock

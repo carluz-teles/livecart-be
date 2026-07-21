@@ -40,12 +40,14 @@ const (
 	CommentReceived Name = "comment.received"
 
 	// Cart lifecycle (group C).
-	CartCreated       Name = "cart.created"
-	CartItemAdded     Name = "cart.item_added"
-	CartCheckoutArmed Name = "cart.checkout_armed"
-	CartExpired       Name = "cart.expired"
-	CartReopened      Name = "cart.reopened"
-	CartCancelled     Name = "cart.cancelled"
+	CartCreated        Name = "cart.created"
+	CartItemAdded      Name = "cart.item_added"
+	CartItemQtyChanged Name = "cart.item_qty_changed"
+	CartItemRemoved    Name = "cart.item_removed"
+	CartCheckoutArmed  Name = "cart.checkout_armed"
+	CartExpired        Name = "cart.expired"
+	CartReopened       Name = "cart.reopened"
+	CartCancelled      Name = "cart.cancelled"
 )
 
 // Source identifies where an event was dispatched from. It is metadata on the

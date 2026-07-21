@@ -1131,7 +1131,7 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 	if delta < 0 {
 		mutationType = "quantity_decreased"
 	}
-	if err := s.repo.RecordMutation(ctx, MutationParams{
+	if err := s.repo.RecordMutation(ctx, s.pool, MutationParams{
 		CartID:         cart.ID,
 		ProductID:      item.ProductID,
 		MutationType:   mutationType,
@@ -1199,7 +1199,7 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 		return nil, httpx.ErrUnprocessable("não foi possível remover o item, tente novamente")
 	}
 
-	if err := s.repo.RecordMutation(ctx, MutationParams{
+	if err := s.repo.RecordMutation(ctx, s.pool, MutationParams{
 		CartID:         cart.ID,
 		ProductID:      item.ProductID,
 		MutationType:   "item_removed",
@@ -1328,7 +1328,7 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 	if existing != nil {
 		mutationType = "quantity_increased"
 	}
-	if err := s.repo.RecordMutation(ctx, MutationParams{
+	if err := s.repo.RecordMutation(ctx, s.pool, MutationParams{
 		CartID:         cart.ID,
 		ProductID:      input.ProductID,
 		MutationType:   mutationType,
