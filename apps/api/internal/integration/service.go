@@ -109,6 +109,7 @@ type Service struct {
 	notificationService *notification.Service
 	storage             *storage.S3Client
 	billingGate         BillingGate
+	stock               *StockReservations
 	logger              *zap.Logger
 
 	// erpProviderFactory lets the finalisation state-machine tests inject a
@@ -198,6 +199,7 @@ func NewService(
 		encryptor:                  encryptor,
 		idempotency:                idempotency,
 		liveService:                liveService,
+		stock:                      NewStockReservations(repo, logger),
 		logger:                     logger,
 		invertFinalisationAll:      invertAll,
 		invertFinalisationStoreIDs: invertIDs,
@@ -5888,8 +5890,14 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 		}
 	}
 
+	// localCommitted tracks whether the local stock mutation above stands. It is
+	// cleared by rollbackLocal so the deferred emit below fires ONLY on the
+	// definitive success of this operation (every rollback path returns an error).
+	localCommitted := true
+
 	// Rollback helper used when ERP sync fails after local stock already moved.
 	rollbackLocal := func() {
+		localCommitted = false
 		if delta > 0 {
 			if err := s.repo.IncrementProductStock(ctx, productID, delta); err != nil {
 				logger.From(ctx, s.logger).Error("failed to rollback local stock decrement after ERP failure",
@@ -5908,6 +5916,21 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 			}
 		}
 	}
+
+	// stock.reserved / stock.released — the single emit point for this operation.
+	// Deferred + guarded so every nil-error return below funnels through here
+	// without instrumenting each one, and rollbacks (which clear localCommitted)
+	// stay silent.
+	defer func() {
+		if !localCommitted {
+			return
+		}
+		if delta > 0 {
+			s.stock.NoteReserved(ctx, ReserveParams{Op: StockOpQtyIncrease, ProductID: productID, Quantity: delta, CartID: cartID, EventID: eventID})
+		} else {
+			s.stock.NoteReleased(ctx, ReleaseParams{Op: StockOpQtyDecrease, ProductID: productID, Quantity: -delta, CartID: cartID, EventID: eventID})
+		}
+	}()
 
 	// Cart convertido (design C): a mutação vai para o PEDIDO via ciclo
 	// estornar→PUT→lançar — a grade final já está no banco (o checkout grava
@@ -6809,7 +6832,13 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	// unidade livre atende parte de um pedido de N na fila — o cliente recebe
 	// o que houver e continua esperando o restante. Sem unidade nenhuma,
 	// devolve o cliente ao topo da fila.
-	taken, err := s.repo.DecrementProductStockUpTo(ctx, productID, next.Quantity)
+	taken, err := s.stock.ReserveUpTo(ctx, ReserveParams{
+		Op:        StockOpWaitlistPromote,
+		ProductID: productID,
+		Quantity:  next.Quantity,
+		CartID:    next.CartID,
+		EventID:   eventID,
+	})
 	if err != nil {
 		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
 		logger.From(ctx, s.logger).Error("failed to take stock for waitlist promotion",

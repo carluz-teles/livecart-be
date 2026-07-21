@@ -35,6 +35,8 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(CartExpired), logEvent(log))
 
 	// Group D — stock & waitlist. Observability-only for now.
+	mux.HandleFunc(string(StockReserved), logEvent(log))
+	mux.HandleFunc(string(StockReleased), logEvent(log))
 	mux.HandleFunc(string(WaitlistQueued), logEvent(log))
 	mux.HandleFunc(string(WaitlistNotified), logEvent(log))
 	mux.HandleFunc(string(WaitlistFulfilled), logEvent(log))

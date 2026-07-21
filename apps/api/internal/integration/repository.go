@@ -1284,6 +1284,60 @@ func (r *Repository) EmitWaitlistExpired(ctx context.Context, waitlistItemID, ev
 	})
 }
 
+// StockEventParams carries the identifiers for a stock.reserved / stock.released
+// event. ReservationID is the ERP reservation row id when one exists (design-A
+// stores); Op labels the business operation (see StockOp).
+type StockEventParams struct {
+	Op            string
+	ProductID     string
+	Quantity      int
+	CartID        string
+	EventID       string
+	ReservationID string
+}
+
+// EmitStockReserved publishes stock.reserved best-effort. Keyed by reservation
+// id when present, else by cart+product+op — both stable within one operation.
+func (r *Repository) EmitStockReserved(ctx context.Context, p StockEventParams) error {
+	return r.emitStockEvent(ctx, events.StockReserved, "stock.reserved:", p)
+}
+
+// EmitStockReleased publishes stock.released best-effort, keyed by cart+product+op.
+func (r *Repository) EmitStockReleased(ctx context.Context, p StockEventParams) error {
+	return r.emitStockEvent(ctx, events.StockReleased, "stock.released:", p)
+}
+
+func (r *Repository) emitStockEvent(ctx context.Context, name events.Name, keyPrefix string, p StockEventParams) error {
+	payload, err := json.Marshal(struct {
+		Op            string `json:"op"`
+		ProductID     string `json:"product_id"`
+		Quantity      int    `json:"quantity"`
+		CartID        string `json:"cart_id,omitempty"`
+		EventID       string `json:"event_id,omitempty"`
+		ReservationID string `json:"reservation_id,omitempty"`
+	}{
+		Op:            p.Op,
+		ProductID:     p.ProductID,
+		Quantity:      p.Quantity,
+		CartID:        p.CartID,
+		EventID:       p.EventID,
+		ReservationID: p.ReservationID,
+	})
+	if err != nil {
+		return fmt.Errorf("marshaling %s payload: %w", name, err)
+	}
+	dedup := keyPrefix + p.CartID + ":" + p.ProductID + ":" + p.Op
+	if name == events.StockReserved && p.ReservationID != "" {
+		dedup = keyPrefix + p.ReservationID
+	}
+	return events.Emit(ctx, r.queries, events.Envelope{
+		Name:     name,
+		Source:   events.SourceInternal,
+		DedupKey: dedup,
+		Payload:  payload,
+	})
+}
+
 // CancelWaitlistItem flips status to 'cancelled' iff the row belongs to the
 // given cart and is still actionable (waiting/notified). Ownership and
 // status are enforced in the WHERE clause so we don't need a separate read.
