@@ -48,6 +48,14 @@ const (
 	CartExpired        Name = "cart.expired"
 	CartReopened       Name = "cart.reopened"
 	CartCancelled      Name = "cart.cancelled"
+
+	// Stock & waitlist (group D).
+	StockReserved     Name = "stock.reserved"
+	StockReleased     Name = "stock.released"
+	WaitlistQueued    Name = "waitlist.queued"
+	WaitlistNotified  Name = "waitlist.notified"
+	WaitlistFulfilled Name = "waitlist.fulfilled"
+	WaitlistExpired   Name = "waitlist.expired"
 )
 
 // Source identifies where an event was dispatched from. It is metadata on the

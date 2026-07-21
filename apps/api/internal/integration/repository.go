@@ -1033,7 +1033,14 @@ func (r *Repository) CreateWaitlistItem(ctx context.Context, params CreateWaitli
 		}
 		cartID = cID
 	}
-	row, err := r.queries.CreateWaitlistItem(ctx, sqlc.CreateWaitlistItemParams{
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin waitlist-queue tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+	qtx := r.queries.WithTx(tx)
+
+	row, err := qtx.CreateWaitlistItem(ctx, sqlc.CreateWaitlistItemParams{
 		EventID:        eID,
 		ProductID:      pID,
 		PlatformUserID: params.PlatformUserID,
@@ -1045,7 +1052,43 @@ func (r *Repository) CreateWaitlistItem(ctx context.Context, params CreateWaitli
 	if err != nil {
 		return "", fmt.Errorf("creating waitlist item: %w", err)
 	}
-	return uuidToString(row.ID), nil
+
+	// Emit waitlist.queued in the SAME tx (transactional outbox), keyed by the
+	// waitlist item id — the catalog idempotency key.
+	itemID := uuidToString(row.ID)
+	payload, err := json.Marshal(struct {
+		WaitlistItemID string `json:"waitlist_item_id"`
+		EventID        string `json:"event_id"`
+		ProductID      string `json:"product_id"`
+		CartID         string `json:"cart_id,omitempty"`
+		PlatformHandle string `json:"platform_handle,omitempty"`
+		Quantity       int    `json:"quantity"`
+		Position       int    `json:"position"`
+	}{
+		WaitlistItemID: itemID,
+		EventID:        params.EventID,
+		ProductID:      params.ProductID,
+		CartID:         params.CartID,
+		PlatformHandle: params.PlatformHandle,
+		Quantity:       params.Quantity,
+		Position:       params.Position,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshaling waitlist.queued payload: %w", err)
+	}
+	if err := events.Emit(ctx, qtx, events.Envelope{
+		Name:     events.WaitlistQueued,
+		Source:   events.SourceInternal,
+		DedupKey: "waitlist.queued:" + itemID,
+		Payload:  payload,
+	}); err != nil {
+		return "", fmt.Errorf("emitting waitlist.queued: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit waitlist-queue tx: %w", err)
+	}
+	return itemID, nil
 }
 
 // GetWaitlistItemByEventUserProduct checks if a user already has a waitlist entry for this product.
@@ -1169,6 +1212,48 @@ func (r *Repository) MarkWaitlistNotified(ctx context.Context, id string, expire
 		ID:                 itemID,
 		ExpiresAt:          pgtype.Timestamptz{Time: expiresAt, Valid: true},
 		NotificationSentAt: pgtype.Timestamptz{Time: notificationSentAt, Valid: true},
+	})
+}
+
+// EmitWaitlistNotifiedParams carries the identifiers for a waitlist.notified event.
+type EmitWaitlistNotifiedParams struct {
+	WaitlistItemID string
+	EventID        string
+	ProductID      string
+	CartID         string
+	Quantity       int
+	Remaining      int
+}
+
+// EmitWaitlistNotified publishes waitlist.notified best-effort (non-transactional
+// outbox insert). Unlike waitlist.queued, the "notified" transition is a multi-step
+// promotion saga (claim → stock gate → cart promotion → DM) with no single tx to
+// bind to, so the producer emits at the definitive success point. Keyed by the
+// waitlist item id.
+func (r *Repository) EmitWaitlistNotified(ctx context.Context, p EmitWaitlistNotifiedParams) error {
+	payload, err := json.Marshal(struct {
+		WaitlistItemID string `json:"waitlist_item_id"`
+		EventID        string `json:"event_id"`
+		ProductID      string `json:"product_id"`
+		CartID         string `json:"cart_id,omitempty"`
+		Quantity       int    `json:"quantity"`
+		Remaining      int    `json:"remaining"`
+	}{
+		WaitlistItemID: p.WaitlistItemID,
+		EventID:        p.EventID,
+		ProductID:      p.ProductID,
+		CartID:         p.CartID,
+		Quantity:       p.Quantity,
+		Remaining:      p.Remaining,
+	})
+	if err != nil {
+		return fmt.Errorf("marshaling waitlist.notified payload: %w", err)
+	}
+	return events.Emit(ctx, r.queries, events.Envelope{
+		Name:     events.WaitlistNotified,
+		Source:   events.SourceInternal,
+		DedupKey: "waitlist.notified:" + p.WaitlistItemID,
+		Payload:  payload,
 	})
 }
 

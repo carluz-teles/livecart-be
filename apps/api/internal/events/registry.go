@@ -33,6 +33,10 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(CartReopened), logEvent(log))
 	mux.HandleFunc(string(CartCancelled), logEvent(log))
 	mux.HandleFunc(string(CartExpired), logEvent(log))
+
+	// Group D — stock & waitlist. Observability-only for now.
+	mux.HandleFunc(string(WaitlistQueued), logEvent(log))
+	mux.HandleFunc(string(WaitlistNotified), logEvent(log))
 }
 
 // logEvent is a generic observability consumer: it records that a canonical

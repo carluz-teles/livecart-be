@@ -6953,6 +6953,24 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		TTL:            ttl,
 	})
 
+	// waitlist.notified — emitted only here, at the definitive success point:
+	// every revert path above returns early, so reaching this line means the
+	// buyer was actually promoted and notified. Best-effort (the promotion state
+	// is already committed across several steps).
+	if emitErr := s.repo.EmitWaitlistNotified(ctx, EmitWaitlistNotifiedParams{
+		WaitlistItemID: next.ID,
+		EventID:        eventID,
+		ProductID:      productID,
+		CartID:         cartID,
+		Quantity:       taken,
+		Remaining:      remaining,
+	}); emitErr != nil {
+		logger.From(ctx, s.logger).Warn("failed to emit waitlist.notified",
+			zap.String("waitlist_item_id", next.ID),
+			zap.Error(emitErr),
+		)
+	}
+
 	logger.From(ctx, s.logger).Info("waitlist promoted",
 		zap.String("user", next.PlatformHandle),
 		zap.String("waitlist_item_id", next.ID),
