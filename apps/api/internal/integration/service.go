@@ -4988,7 +4988,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 
 	// Reserve available stock
 	if availableQty > 0 {
-		if stockErr := s.repo.DecrementProductStock(ctx, product.ID, availableQty); stockErr != nil {
+		if stockErr := s.stock.Reserve(ctx, ReserveParams{Op: StockOpCartAdd, ProductID: product.ID, Quantity: availableQty, EventID: event.ID}); stockErr != nil {
 			// Failed to reserve even available stock - put all in waitlist
 			logger.From(ctx, s.logger).Warn("failed to decrement stock, putting all in waitlist",
 				zap.Error(stockErr),
@@ -6512,7 +6512,7 @@ func (s *Service) TryReSecureCartStock(ctx context.Context, cartID string) (bool
 	}
 
 	for _, it := range items {
-		ok, err := s.repo.TryDecrementProductStock(ctx, it.ProductID, it.Quantity)
+		ok, err := s.stock.TryReserve(ctx, ReserveParams{Op: StockOpCartRecovery, ProductID: it.ProductID, Quantity: it.Quantity, CartID: cartID})
 		if err != nil {
 			rollback()
 			return false, fmt.Errorf("re-securing stock: %w", err)
@@ -6538,7 +6538,7 @@ func (s *Service) ReleaseCartStock(ctx context.Context, cartID string) {
 		return
 	}
 	for _, it := range items {
-		if err := s.repo.IncrementProductStock(ctx, it.ProductID, it.Quantity); err != nil {
+		if err := s.stock.Release(ctx, ReleaseParams{Op: StockOpRecoveryRelease, ProductID: it.ProductID, Quantity: it.Quantity, CartID: cartID}); err != nil {
 			logger.From(ctx, s.logger).Error("failed to release cart stock",
 				zap.String("cart_id", cartID),
 				zap.String("product_id", it.ProductID),
@@ -6719,7 +6719,7 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 		// 1. Release local stock per item (waitlisted items don't hold stock
 		//    so we ignore them — they auto-cancel when the cart is killed).
 		for _, item := range items {
-			if err := s.repo.IncrementProductStock(ctx, item.ProductID, item.Quantity); err != nil {
+			if err := s.stock.Release(ctx, ReleaseParams{Op: StockOpCancelBlocked, ProductID: item.ProductID, Quantity: item.Quantity, CartID: cart.ID, EventID: cart.EventID}); err != nil {
 				logger.From(ctx, s.logger).Error("failed to release local stock for blocked cart",
 					zap.String("cart_id", cart.ID),
 					zap.String("product_id", item.ProductID),
@@ -7068,7 +7068,7 @@ func (s *Service) CancelWaitlistItem(ctx context.Context, waitlistItemID, cartID
 		} else {
 			// Cart desapareceu: ainda precisamos devolver o estoque local que
 			// o promote consumiu, para a próxima entry da fila ser promovível.
-			if err := s.repo.IncrementProductStock(ctx, item.ProductID, item.Quantity); err != nil {
+			if err := s.stock.Release(ctx, ReleaseParams{Op: StockOpWaitlistCancel, ProductID: item.ProductID, Quantity: item.Quantity, CartID: cartID, EventID: item.EventID}); err != nil {
 				logger.From(ctx, s.logger).Warn("failed to increment local stock on waitlist cancel (cart missing)",
 					zap.String("waitlist_item_id", waitlistItemID),
 					zap.Error(err),
@@ -7121,7 +7121,7 @@ func (s *Service) ExpireNotifiedWaitlistItem(ctx context.Context, item WaitlistI
 		} else {
 			// Cart desapareceu (raro): nada para reverter no ERP, mas ainda
 			// precisamos devolver o estoque local que o promote consumiu.
-			if err := s.repo.IncrementProductStock(ctx, productID, item.Quantity); err != nil {
+			if err := s.stock.Release(ctx, ReleaseParams{Op: StockOpWaitlistExpire, ProductID: productID, Quantity: item.Quantity, CartID: cartID, EventID: eventID}); err != nil {
 				logger.From(ctx, s.logger).Warn("failed to increment local stock on waitlist expire (cart missing)",
 					zap.String("waitlist_item_id", item.ID),
 					zap.Error(err),

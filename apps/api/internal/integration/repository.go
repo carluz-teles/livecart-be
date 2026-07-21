@@ -1299,15 +1299,18 @@ type StockEventParams struct {
 // EmitStockReserved publishes stock.reserved best-effort. Keyed by reservation
 // id when present, else by cart+product+op — both stable within one operation.
 func (r *Repository) EmitStockReserved(ctx context.Context, p StockEventParams) error {
-	return r.emitStockEvent(ctx, events.StockReserved, "stock.reserved:", p)
+	return r.emitStockEvent(ctx, r.queries, events.StockReserved, "stock.reserved:", p)
 }
 
 // EmitStockReleased publishes stock.released best-effort, keyed by cart+product+op.
 func (r *Repository) EmitStockReleased(ctx context.Context, p StockEventParams) error {
-	return r.emitStockEvent(ctx, events.StockReleased, "stock.released:", p)
+	return r.emitStockEvent(ctx, r.queries, events.StockReleased, "stock.released:", p)
 }
 
-func (r *Repository) emitStockEvent(ctx context.Context, name events.Name, keyPrefix string, p StockEventParams) error {
+// emitStockEvent is the single emission shape for stock events. It takes the
+// queries handle so both best-effort (r.queries) and transactional (a WithTx
+// handle, e.g. the expiry release loop) callers share the payload + dedup logic.
+func (r *Repository) emitStockEvent(ctx context.Context, q *sqlc.Queries, name events.Name, keyPrefix string, p StockEventParams) error {
 	payload, err := json.Marshal(struct {
 		Op            string `json:"op"`
 		ProductID     string `json:"product_id"`
@@ -1330,7 +1333,7 @@ func (r *Repository) emitStockEvent(ctx context.Context, name events.Name, keyPr
 	if name == events.StockReserved && p.ReservationID != "" {
 		dedup = keyPrefix + p.ReservationID
 	}
-	return events.Emit(ctx, r.queries, events.Envelope{
+	return events.Emit(ctx, q, events.Envelope{
 		Name:     name,
 		Source:   events.SourceInternal,
 		DedupKey: dedup,
@@ -2052,6 +2055,7 @@ func (r *Repository) ExpireCartAndReleaseStock(ctx context.Context, cartID strin
 		return ExpireCartResult{}, fmt.Errorf("listing items for expiry release: %w", err)
 	}
 	freed := make([]string, 0, len(items))
+	eventID := uuidToString(cart.EventID)
 	for _, item := range items {
 		if _, err := qtx.IncrementProductStock(ctx, sqlc.IncrementProductStockParams{
 			ID:    item.ProductID,
@@ -2059,13 +2063,23 @@ func (r *Repository) ExpireCartAndReleaseStock(ctx context.Context, cartID strin
 		}); err != nil {
 			return ExpireCartResult{}, fmt.Errorf("release local stock on expiry: %w", err)
 		}
-		freed = append(freed, uuidToString(item.ProductID))
+		productID := uuidToString(item.ProductID)
+		// stock.released in the SAME tx as the release (transactional outbox).
+		if err := r.emitStockEvent(ctx, qtx, events.StockReleased, "stock.released:", StockEventParams{
+			Op:        string(StockOpCartExpiry),
+			ProductID: productID,
+			Quantity:  int(item.Quantity),
+			CartID:    cartID,
+			EventID:   eventID,
+		}); err != nil {
+			return ExpireCartResult{}, fmt.Errorf("emitting stock.released on expiry: %w", err)
+		}
+		freed = append(freed, productID)
 	}
 
 	// Emit cart.expired in the SAME tx (transactional outbox): the event is
 	// committed atomically with the flip + stock release, so it is never lost.
 	// The relay delivers it. Payload carries data only known inside this tx.
-	eventID := uuidToString(cart.EventID)
 	payload, err := json.Marshal(struct {
 		CartID          string   `json:"cart_id"`
 		EventID         string   `json:"event_id"`
