@@ -2586,15 +2586,41 @@ func (r *Repository) CancelCartAsBlocked(ctx context.Context, cartID string) err
 	if err != nil {
 		return err
 	}
-	_, err = r.queries.CancelCartAsBlocked(ctx, cID)
-	if err != nil && err.Error() == "no rows in result set" {
-		// Cart was already paid or cancelled — nothing to do.
-		return nil
-	}
+
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("begin cancel-cart tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+	qtx := r.queries.WithTx(tx)
+
+	cart, err := qtx.CancelCartAsBlocked(ctx, cID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) || err.Error() == "no rows in result set" {
+			// Cart was already paid or cancelled — nothing to do.
+			return nil
+		}
 		return fmt.Errorf("cancelling cart as blocked: %w", err)
 	}
-	return nil
+
+	// cart.cancelled in the same tx (transactional outbox).
+	payload, err := json.Marshal(struct {
+		CartID  string `json:"cart_id"`
+		EventID string `json:"event_id"`
+		Reason  string `json:"reason"`
+	}{CartID: cartID, EventID: cart.EventID.String(), Reason: "customer_blocked"})
+	if err != nil {
+		return fmt.Errorf("marshaling cart.cancelled payload: %w", err)
+	}
+	if err := events.Emit(ctx, qtx, events.Envelope{
+		Name:     events.CartCancelled,
+		Source:   events.SourceInternal,
+		DedupKey: "cart.cancelled:" + cartID,
+		Payload:  payload,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // ReverseReservationsByCartAndProduct marks active reservations for a specific cart+product as reversed.

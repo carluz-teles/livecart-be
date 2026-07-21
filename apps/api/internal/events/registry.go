@@ -21,6 +21,10 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	// emitted event needs a handler or asynq reports "handler not found".
 	mux.HandleFunc(string(EventEventCreated), logEvent(log))
 	mux.HandleFunc(string(SessionCreated), logEvent(log))
+	mux.HandleFunc(string(CartCreated), logEvent(log))
+	mux.HandleFunc(string(CartItemAdded), logEvent(log))
+	mux.HandleFunc(string(CartReopened), logEvent(log))
+	mux.HandleFunc(string(CartCancelled), logEvent(log))
 	mux.HandleFunc(string(CartExpired), logEvent(log))
 }
 

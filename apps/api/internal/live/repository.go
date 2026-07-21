@@ -1135,6 +1135,10 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 			if err := qtx.ReopenExpiredCartForReuse(ctx, existing.ID); err != nil {
 				return nil, false, fmt.Errorf("reopening cart for reuse: %w", err)
 			}
+			// cart.reopened: distinct event per reopen (no static dedup key).
+			if err := emitCartEvent(ctx, qtx, events.CartReopened, existing.ID.String(), existing.EventID.String(), pgUUIDString(sessionID), ""); err != nil {
+				return nil, false, err
+			}
 		}
 		// Cart exists (reused or reopened), commit and return
 		if err := tx.Commit(ctx); err != nil {
@@ -1176,6 +1180,11 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 		return nil, false, fmt.Errorf("creating cart: %w", err)
 	}
 
+	// cart.created in the same tx (transactional outbox).
+	if err := emitCartEvent(ctx, qtx, events.CartCreated, created.ID.String(), created.EventID.String(), pgUUIDString(sessionID), "cart.created:"+created.ID.String()); err != nil {
+		return nil, false, err
+	}
+
 	// Commit the transaction
 	if err := tx.Commit(ctx); err != nil {
 		return nil, false, fmt.Errorf("committing transaction: %w", err)
@@ -1188,6 +1197,34 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 		PlatformHandle: created.PlatformHandle,
 		Token:          created.Token,
 	}, true, nil
+}
+
+// emitCartEvent writes a canonical cart lifecycle event to the outbox within
+// the caller's transaction. dedupKey may be empty for events that legitimately
+// repeat for the same cart (e.g. cart.reopened).
+func emitCartEvent(ctx context.Context, q *sqlc.Queries, name events.Name, cartID, eventID, sessionID, dedupKey string) error {
+	payload, err := json.Marshal(struct {
+		CartID    string `json:"cart_id"`
+		EventID   string `json:"event_id"`
+		SessionID string `json:"session_id,omitempty"`
+	}{CartID: cartID, EventID: eventID, SessionID: sessionID})
+	if err != nil {
+		return fmt.Errorf("marshaling %s payload: %w", name, err)
+	}
+	return events.Emit(ctx, q, events.Envelope{
+		Name:     name,
+		Source:   events.SourceInternal,
+		DedupKey: dedupKey,
+		Payload:  payload,
+	})
+}
+
+// pgUUIDString returns the string form of a pgtype.UUID, or "" when unset.
+func pgUUIDString(u pgtype.UUID) string {
+	if !u.Valid {
+		return ""
+	}
+	return u.String()
 }
 
 func (r *Repository) FinalizeCartsByEvent(ctx context.Context, eventID string) (int, error) {
@@ -1242,19 +1279,43 @@ func (r *Repository) AddCartItem(ctx context.Context, params AddCartItemParams) 
 		}
 	}
 
-	_, err = r.q.UpsertCartItem(ctx, sqlc.UpsertCartItemParams{
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin add-item tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+	qtx := r.q.WithTx(tx)
+
+	if _, err = qtx.UpsertCartItem(ctx, sqlc.UpsertCartItemParams{
 		CartID:             cartID,
 		ProductID:          productID,
 		Quantity:           pgtype.Int4{Int32: int32(params.Quantity), Valid: true},
 		UnitPrice:          pgtype.Int8{Int64: params.UnitPrice, Valid: true},
 		WaitlistedQuantity: int32(params.WaitlistedQuantity),
 		SessionID:          sessionID,
-	})
-	if err != nil {
+	}); err != nil {
 		return fmt.Errorf("upserting cart item: %w", err)
 	}
 
-	return nil
+	// cart.item_added in the same tx (can repeat per cart+product, so no dedup key).
+	payload, err := json.Marshal(struct {
+		CartID    string `json:"cart_id"`
+		ProductID string `json:"product_id"`
+		Quantity  int    `json:"quantity"`
+		SessionID string `json:"session_id,omitempty"`
+	}{CartID: params.CartID, ProductID: params.ProductID, Quantity: params.Quantity, SessionID: params.SessionID})
+	if err != nil {
+		return fmt.Errorf("marshaling cart.item_added payload: %w", err)
+	}
+	if err := events.Emit(ctx, qtx, events.Envelope{
+		Name:    events.CartItemAdded,
+		Source:  events.SourceInternal,
+		Payload: payload,
+	}); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
 }
 
 // GetCartTotals returns total items and value for a cart.
