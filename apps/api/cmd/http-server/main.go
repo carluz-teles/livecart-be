@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -17,6 +18,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/requestid"
 	"github.com/gofiber/swagger"
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
@@ -152,22 +154,10 @@ func main() {
 	// DMs/WhatsApp do módulo de comunicações.
 	emailClient.SetAuditHook(emailAuditHook(log, queries))
 
-	// Async event pipeline (asynq + Redis) — runs in this same process.
-	redisAddr := config.RedisAddr.StringOr("localhost:6379")
-	eventsClient := events.NewClient(redisAddr)
-	eventsServer := events.NewServer(events.ServerConfig{RedisAddr: redisAddr, Logger: log})
-	eventsRelay := events.NewRelay(events.RelayConfig{Pool: pool, Client: eventsClient, Logger: log})
-
+	// The async event pipeline (asynq client/server + outbox relay) is built and
+	// started inside newApp, where the domain services its consumers dispatch to
+	// are constructed. Its stop hooks are registered on the returned lifecycle.
 	app, lifecycle := newApp(log, pool, queries, validate, clerkClient, emailClient)
-	// Registered after the workers in newApp so shutdown stops the producer
-	// (relay) and consumer (server) before the DB pool closes.
-	lifecycle.add("events-server", eventsServer.Stop)
-	lifecycle.add("events-relay", eventsRelay.Stop)
-
-	if err := eventsServer.Start(); err != nil {
-		log.Sugar().Fatalf("starting event server: %v", err)
-	}
-	eventsRelay.Start()
 
 	go func() {
 		if err := app.Listen(":" + port); err != nil {
@@ -191,9 +181,6 @@ func main() {
 	lifecycle.shutdown()
 	if err := app.ShutdownWithTimeout(10 * time.Second); err != nil {
 		log.Sugar().Errorf("server shutdown error: %v", err)
-	}
-	if err := eventsClient.Close(); err != nil {
-		log.Sugar().Errorf("events client close error: %v", err)
 	}
 }
 
@@ -904,6 +891,40 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	// Store-scoped invitation routes (create, list, revoke)
 	invitationHandler.RegisterRoutes(storeScoped)
+
+	// ---------------------------------------------------------------------------
+	// Async event pipeline (asynq + Redis) — built here, after the domain
+	// services, so consumer handlers can dispatch to them. Publisher feeds the
+	// outbox relay; server consumes; relay drains the outbox to Redis.
+	// ---------------------------------------------------------------------------
+	redisAddr := config.RedisAddr.StringOr("localhost:6379")
+	eventsClient := events.NewClient(redisAddr)
+	eventsServer := events.NewServer(events.ServerConfig{RedisAddr: redisAddr, Logger: log})
+	if integrationSvc != nil {
+		// Inverted comment flow: the webhook dispatches comment.received; the
+		// domain work (cart/stock/waitlist) runs here, idempotent by comment_id.
+		eventsServer.Register(events.CommentReceived, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var input integration.ProcessInstagramCommentInput
+			if err := json.Unmarshal(env.Payload, &input); err != nil {
+				return asynq.SkipRetry
+			}
+			return integrationSvc.ProcessInstagramComment(ctx, input)
+		})
+	}
+	eventsRelay := events.NewRelay(events.RelayConfig{Pool: pool, Client: eventsClient, Logger: log})
+
+	if err := eventsServer.Start(); err != nil {
+		log.Sugar().Fatalf("starting event server: %v", err)
+	}
+	eventsRelay.Start()
+	// Reverse stop order: relay (producer) -> server (consumer) -> client close.
+	lifecycle.add("events-client", func() { _ = eventsClient.Close() })
+	lifecycle.add("events-server", eventsServer.Stop)
+	lifecycle.add("events-relay", eventsRelay.Stop)
 
 	return app, lifecycle
 }

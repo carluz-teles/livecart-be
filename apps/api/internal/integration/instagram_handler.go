@@ -6,6 +6,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
@@ -180,8 +181,10 @@ func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, 
 		userID = comment.From.ID
 	}
 
-	// Process the comment through the service
-	if err := h.service.ProcessInstagramComment(c.Context(), ProcessInstagramCommentInput{
+	// Inverted flow: dispatch a canonical comment.received event (transactional
+	// outbox) and return fast. The domain work (cart/stock/waitlist) runs in the
+	// event consumer via ProcessInstagramComment — idempotent by comment_id.
+	if err := h.service.DispatchCommentReceived(c.Context(), ProcessInstagramCommentInput{
 		AccountID:  entry.ID,
 		MediaID:    comment.Media.ID,
 		CommentID:  comment.CommentID,
@@ -190,12 +193,12 @@ func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, 
 		Text:       comment.Text,
 		Timestamp:  entry.Time,
 		RawPayload: rawBody,
-	}); err != nil {
-		logger.From(c.Context(), h.logger).Error("failed to process instagram comment",
+	}, events.SourceInstagramLive); err != nil {
+		logger.From(c.Context(), h.logger).Error("failed to dispatch instagram comment",
 			zap.String("comment_id", comment.CommentID),
 			zap.Error(err),
 		)
-		// Don't return error - we still want to acknowledge the webhook
+		// Don't return error - we still want to acknowledge the webhook.
 	}
 
 	return nil

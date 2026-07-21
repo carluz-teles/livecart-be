@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/integration/providers/payment"
 	"livecart/apps/api/internal/live"
@@ -4656,6 +4657,36 @@ func invoiceTimePtr(t time.Time) *time.Time {
 // =============================================================================
 // INSTAGRAM WEBHOOK OPERATIONS
 // =============================================================================
+
+// DispatchCommentReceived is the inbound edge of the inverted comment flow: the
+// webhook validates and dispatches a canonical comment.received event (via the
+// transactional outbox) instead of processing inline. The domain work runs in
+// the event consumer, which calls ProcessInstagramComment. The origin
+// (live/story/dm) travels as the event Source, keeping the event canonical.
+//
+// Idempotency: ProcessInstagramComment already dedups by platform_comment_id,
+// so at-least-once redelivery is safe. dedup_key mirrors that for visibility.
+func (s *Service) DispatchCommentReceived(ctx context.Context, input ProcessInstagramCommentInput, source events.Source) error {
+	payload, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("marshaling comment.received payload: %w", err)
+	}
+	tx, err := s.repo.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin comment.received tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+	if err := events.Emit(ctx, s.repo.queries.WithTx(tx), events.Envelope{
+		Name:     events.CommentReceived,
+		Source:   source,
+		DedupKey: "comment.received:" + input.CommentID,
+		Metadata: map[string]string{"comment_id": input.CommentID, "media_id": input.MediaID},
+		Payload:  payload,
+	}); err != nil {
+		return fmt.Errorf("emitting comment.received: %w", err)
+	}
+	return tx.Commit(ctx)
+}
 
 // ProcessInstagramComment processes a live comment from Instagram webhook.
 // All comments are saved to DB. Purchase intents trigger stock check → cart or waitlist.

@@ -98,6 +98,14 @@ func traceMiddleware(next asynq.Handler) asynq.Handler {
 	})
 }
 
+// Register wires a domain handler for a canonical event. Call it before Start.
+// Handlers that need domain services are registered from the composition root
+// (main.newApp), since the events package must not import domain packages
+// (they already import events).
+func (s *Server) Register(name Name, handler asynq.HandlerFunc) {
+	s.mux.HandleFunc(string(name), handler)
+}
+
 // Start begins processing tasks in the background (non-blocking).
 func (s *Server) Start() error {
 	if err := s.inner.Start(s.mux); err != nil {
