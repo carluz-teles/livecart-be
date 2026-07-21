@@ -129,7 +129,7 @@ func (r *Repository) MarkWaitlistFulfilledByCart(ctx context.Context, cartID str
 	// (there is no logger at this layer).
 	for _, item := range fulfilled {
 		itemID := uuid.UUID(item.ID.Bytes).String()
-		payload, mErr := json.Marshal(struct {
+		_ = events.EmitInternal(ctx, r.q, events.WaitlistFulfilled, "waitlist.fulfilled:"+itemID, struct {
 			WaitlistItemID string `json:"waitlist_item_id"`
 			CartID         string `json:"cart_id"`
 			ProductID      string `json:"product_id"`
@@ -139,15 +139,6 @@ func (r *Repository) MarkWaitlistFulfilledByCart(ctx context.Context, cartID str
 			CartID:         cartID,
 			ProductID:      uuid.UUID(item.ProductID.Bytes).String(),
 			EventID:        uuid.UUID(item.EventID.Bytes).String(),
-		})
-		if mErr != nil {
-			continue
-		}
-		_ = events.Emit(ctx, r.q, events.Envelope{
-			Name:     events.WaitlistFulfilled,
-			Source:   events.SourceInternal,
-			DedupKey: "waitlist.fulfilled:" + itemID,
-			Payload:  payload,
 		})
 	}
 	return nil

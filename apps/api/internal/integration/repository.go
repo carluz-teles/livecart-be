@@ -14,6 +14,7 @@ import (
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/events"
+	"livecart/apps/api/lib/dbtx"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/idempotency"
 	"livecart/apps/api/lib/query"
@@ -1033,60 +1034,43 @@ func (r *Repository) CreateWaitlistItem(ctx context.Context, params CreateWaitli
 		}
 		cartID = cID
 	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return "", fmt.Errorf("begin waitlist-queue tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
-	qtx := r.queries.WithTx(tx)
-
-	row, err := qtx.CreateWaitlistItem(ctx, sqlc.CreateWaitlistItemParams{
-		EventID:        eID,
-		ProductID:      pID,
-		PlatformUserID: params.PlatformUserID,
-		PlatformHandle: params.PlatformHandle,
-		Quantity:       int32(params.Quantity),
-		Position:       int32(params.Position),
-		CartID:         cartID,
+	// Create the row and emit waitlist.queued (keyed by the waitlist item id, the
+	// catalog idempotency key) atomically in one tx via the shared runner.
+	var itemID string
+	err = dbtx.InTx(ctx, r.pool, r.queries, func(q *sqlc.Queries) error {
+		row, err := q.CreateWaitlistItem(ctx, sqlc.CreateWaitlistItemParams{
+			EventID:        eID,
+			ProductID:      pID,
+			PlatformUserID: params.PlatformUserID,
+			PlatformHandle: params.PlatformHandle,
+			Quantity:       int32(params.Quantity),
+			Position:       int32(params.Position),
+			CartID:         cartID,
+		})
+		if err != nil {
+			return fmt.Errorf("creating waitlist item: %w", err)
+		}
+		itemID = uuidToString(row.ID)
+		return events.EmitInternal(ctx, q, events.WaitlistQueued, "waitlist.queued:"+itemID, struct {
+			WaitlistItemID string `json:"waitlist_item_id"`
+			EventID        string `json:"event_id"`
+			ProductID      string `json:"product_id"`
+			CartID         string `json:"cart_id,omitempty"`
+			PlatformHandle string `json:"platform_handle,omitempty"`
+			Quantity       int    `json:"quantity"`
+			Position       int    `json:"position"`
+		}{
+			WaitlistItemID: itemID,
+			EventID:        params.EventID,
+			ProductID:      params.ProductID,
+			CartID:         params.CartID,
+			PlatformHandle: params.PlatformHandle,
+			Quantity:       params.Quantity,
+			Position:       params.Position,
+		})
 	})
 	if err != nil {
-		return "", fmt.Errorf("creating waitlist item: %w", err)
-	}
-
-	// Emit waitlist.queued in the SAME tx (transactional outbox), keyed by the
-	// waitlist item id — the catalog idempotency key.
-	itemID := uuidToString(row.ID)
-	payload, err := json.Marshal(struct {
-		WaitlistItemID string `json:"waitlist_item_id"`
-		EventID        string `json:"event_id"`
-		ProductID      string `json:"product_id"`
-		CartID         string `json:"cart_id,omitempty"`
-		PlatformHandle string `json:"platform_handle,omitempty"`
-		Quantity       int    `json:"quantity"`
-		Position       int    `json:"position"`
-	}{
-		WaitlistItemID: itemID,
-		EventID:        params.EventID,
-		ProductID:      params.ProductID,
-		CartID:         params.CartID,
-		PlatformHandle: params.PlatformHandle,
-		Quantity:       params.Quantity,
-		Position:       params.Position,
-	})
-	if err != nil {
-		return "", fmt.Errorf("marshaling waitlist.queued payload: %w", err)
-	}
-	if err := events.Emit(ctx, qtx, events.Envelope{
-		Name:     events.WaitlistQueued,
-		Source:   events.SourceInternal,
-		DedupKey: "waitlist.queued:" + itemID,
-		Payload:  payload,
-	}); err != nil {
-		return "", fmt.Errorf("emitting waitlist.queued: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return "", fmt.Errorf("commit waitlist-queue tx: %w", err)
+		return "", err
 	}
 	return itemID, nil
 }
@@ -1231,7 +1215,7 @@ type EmitWaitlistNotifiedParams struct {
 // bind to, so the producer emits at the definitive success point. Keyed by the
 // waitlist item id.
 func (r *Repository) EmitWaitlistNotified(ctx context.Context, p EmitWaitlistNotifiedParams) error {
-	payload, err := json.Marshal(struct {
+	return events.EmitInternal(ctx, r.queries, events.WaitlistNotified, "waitlist.notified:"+p.WaitlistItemID, struct {
 		WaitlistItemID string `json:"waitlist_item_id"`
 		EventID        string `json:"event_id"`
 		ProductID      string `json:"product_id"`
@@ -1246,15 +1230,6 @@ func (r *Repository) EmitWaitlistNotified(ctx context.Context, p EmitWaitlistNot
 		Quantity:       p.Quantity,
 		Remaining:      p.Remaining,
 	})
-	if err != nil {
-		return fmt.Errorf("marshaling waitlist.notified payload: %w", err)
-	}
-	return events.Emit(ctx, r.queries, events.Envelope{
-		Name:     events.WaitlistNotified,
-		Source:   events.SourceInternal,
-		DedupKey: "waitlist.notified:" + p.WaitlistItemID,
-		Payload:  payload,
-	})
 }
 
 // EmitWaitlistExpired publishes waitlist.expired best-effort (non-transactional
@@ -1262,7 +1237,7 @@ func (r *Repository) EmitWaitlistNotified(ctx context.Context, p EmitWaitlistNot
 // idempotency-gate status flip to 'expired'; the surrounding stock/ERP reversal
 // is itself best-effort, so binding a tx here would add no real guarantee.
 func (r *Repository) EmitWaitlistExpired(ctx context.Context, waitlistItemID, eventID, productID, cartID string) error {
-	payload, err := json.Marshal(struct {
+	return events.EmitInternal(ctx, r.queries, events.WaitlistExpired, "waitlist.expired:"+waitlistItemID, struct {
 		WaitlistItemID string `json:"waitlist_item_id"`
 		EventID        string `json:"event_id"`
 		ProductID      string `json:"product_id"`
@@ -1272,15 +1247,6 @@ func (r *Repository) EmitWaitlistExpired(ctx context.Context, waitlistItemID, ev
 		EventID:        eventID,
 		ProductID:      productID,
 		CartID:         cartID,
-	})
-	if err != nil {
-		return fmt.Errorf("marshaling waitlist.expired payload: %w", err)
-	}
-	return events.Emit(ctx, r.queries, events.Envelope{
-		Name:     events.WaitlistExpired,
-		Source:   events.SourceInternal,
-		DedupKey: "waitlist.expired:" + waitlistItemID,
-		Payload:  payload,
 	})
 }
 
@@ -1311,7 +1277,7 @@ func (r *Repository) EmitStockReleased(ctx context.Context, p StockEventParams) 
 // queries handle so both best-effort (r.queries) and transactional (a WithTx
 // handle, e.g. the expiry release loop) callers share the payload + dedup logic.
 func (r *Repository) emitStockEvent(ctx context.Context, q *sqlc.Queries, name events.Name, keyPrefix string, p StockEventParams) error {
-	payload, err := json.Marshal(struct {
+	return events.EmitInternal(ctx, q, name, stockDedupKey(name, keyPrefix, p), struct {
 		Op            string `json:"op"`
 		ProductID     string `json:"product_id"`
 		Quantity      int    `json:"quantity"`
@@ -1326,19 +1292,18 @@ func (r *Repository) emitStockEvent(ctx context.Context, q *sqlc.Queries, name e
 		EventID:       p.EventID,
 		ReservationID: p.ReservationID,
 	})
-	if err != nil {
-		return fmt.Errorf("marshaling %s payload: %w", name, err)
-	}
-	dedup := keyPrefix + p.CartID + ":" + p.ProductID + ":" + p.Op
+}
+
+// stockDedupKey builds the idempotency key for a stock event: the ERP
+// reservation id when one exists (reserved only), else cart+product+op. When
+// there is no cart yet (e.g. cart_add reserves before the cart row exists) the
+// key falls back to product+op, which is not unique across buyers — callers that
+// need a stable key must supply a ReservationID.
+func stockDedupKey(name events.Name, keyPrefix string, p StockEventParams) string {
 	if name == events.StockReserved && p.ReservationID != "" {
-		dedup = keyPrefix + p.ReservationID
+		return keyPrefix + p.ReservationID
 	}
-	return events.Emit(ctx, q, events.Envelope{
-		Name:     name,
-		Source:   events.SourceInternal,
-		DedupKey: dedup,
-		Payload:  payload,
-	})
+	return keyPrefix + p.CartID + ":" + p.ProductID + ":" + p.Op
 }
 
 // CancelWaitlistItem flips status to 'cancelled' iff the row belongs to the
@@ -2034,78 +1999,62 @@ func (r *Repository) ExpireCartAndReleaseStock(ctx context.Context, cartID strin
 		return ExpireCartResult{}, err
 	}
 
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return ExpireCartResult{}, fmt.Errorf("begin expire tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	qtx := r.queries.WithTx(tx)
-
-	cart, err := qtx.ExpireCart(ctx, cID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Guard pegou: cart pago ou já expirado/cancelado. Não elegível.
-			return ExpireCartResult{Eligible: false}, nil
+	var result ExpireCartResult
+	err = dbtx.InTx(ctx, r.pool, r.queries, func(q *sqlc.Queries) error {
+		cart, err := q.ExpireCart(ctx, cID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// Guard pegou: cart pago ou já expirado/cancelado. Não elegível.
+				result = ExpireCartResult{Eligible: false}
+				return nil
+			}
+			return fmt.Errorf("flip cart to expired: %w", err)
 		}
-		return ExpireCartResult{}, fmt.Errorf("flip cart to expired: %w", err)
-	}
 
-	items, err := qtx.ListNonWaitlistedCartItems(ctx, cID)
-	if err != nil {
-		return ExpireCartResult{}, fmt.Errorf("listing items for expiry release: %w", err)
-	}
-	freed := make([]string, 0, len(items))
-	eventID := uuidToString(cart.EventID)
-	for _, item := range items {
-		if _, err := qtx.IncrementProductStock(ctx, sqlc.IncrementProductStockParams{
-			ID:    item.ProductID,
-			Stock: pgtype.Int4{Int32: item.Quantity, Valid: true},
-		}); err != nil {
-			return ExpireCartResult{}, fmt.Errorf("release local stock on expiry: %w", err)
+		items, err := q.ListNonWaitlistedCartItems(ctx, cID)
+		if err != nil {
+			return fmt.Errorf("listing items for expiry release: %w", err)
 		}
-		productID := uuidToString(item.ProductID)
-		// stock.released in the SAME tx as the release (transactional outbox).
-		if err := r.emitStockEvent(ctx, qtx, events.StockReleased, "stock.released:", StockEventParams{
-			Op:        string(StockOpCartExpiry),
-			ProductID: productID,
-			Quantity:  int(item.Quantity),
-			CartID:    cartID,
-			EventID:   eventID,
-		}); err != nil {
-			return ExpireCartResult{}, fmt.Errorf("emitting stock.released on expiry: %w", err)
+		freed := make([]string, 0, len(items))
+		eventID := uuidToString(cart.EventID)
+		for _, item := range items {
+			if _, err := q.IncrementProductStock(ctx, sqlc.IncrementProductStockParams{
+				ID:    item.ProductID,
+				Stock: pgtype.Int4{Int32: item.Quantity, Valid: true},
+			}); err != nil {
+				return fmt.Errorf("release local stock on expiry: %w", err)
+			}
+			productID := uuidToString(item.ProductID)
+			// stock.released in the SAME tx as the release (transactional outbox).
+			if err := r.emitStockEvent(ctx, q, events.StockReleased, "stock.released:", StockEventParams{
+				Op:        string(StockOpCartExpiry),
+				ProductID: productID,
+				Quantity:  int(item.Quantity),
+				CartID:    cartID,
+				EventID:   eventID,
+			}); err != nil {
+				return fmt.Errorf("emitting stock.released on expiry: %w", err)
+			}
+			freed = append(freed, productID)
 		}
-		freed = append(freed, productID)
-	}
 
-	// Emit cart.expired in the SAME tx (transactional outbox): the event is
-	// committed atomically with the flip + stock release, so it is never lost.
-	// The relay delivers it. Payload carries data only known inside this tx.
-	payload, err := json.Marshal(struct {
-		CartID          string   `json:"cart_id"`
-		EventID         string   `json:"event_id"`
-		FreedProductIDs []string `json:"freed_product_ids"`
-	}{CartID: cartID, EventID: eventID, FreedProductIDs: freed})
+		// cart.expired in the SAME tx: committed atomically with the flip + stock
+		// release, so it is never lost. Payload carries data only known in-tx.
+		if err := events.EmitInternal(ctx, q, events.CartExpired, "cart.expired:"+cartID, struct {
+			CartID          string   `json:"cart_id"`
+			EventID         string   `json:"event_id"`
+			FreedProductIDs []string `json:"freed_product_ids"`
+		}{CartID: cartID, EventID: eventID, FreedProductIDs: freed}); err != nil {
+			return fmt.Errorf("emitting cart.expired: %w", err)
+		}
+
+		result = ExpireCartResult{Eligible: true, EventID: eventID, FreedProductIDs: freed}
+		return nil
+	})
 	if err != nil {
-		return ExpireCartResult{}, fmt.Errorf("marshaling cart.expired payload: %w", err)
+		return ExpireCartResult{}, err
 	}
-	if err := events.Emit(ctx, qtx, events.Envelope{
-		Name:     events.CartExpired,
-		Source:   events.SourceInternal,
-		DedupKey: "cart.expired:" + cartID,
-		Payload:  payload,
-	}); err != nil {
-		return ExpireCartResult{}, fmt.Errorf("emitting cart.expired: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return ExpireCartResult{}, fmt.Errorf("commit expire tx: %w", err)
-	}
-
-	return ExpireCartResult{
-		Eligible:        true,
-		EventID:         eventID,
-		FreedProductIDs: freed,
-	}, nil
+	return result, nil
 }
 
 // GetCartByEventAndUser gets a cart for a specific event and user.

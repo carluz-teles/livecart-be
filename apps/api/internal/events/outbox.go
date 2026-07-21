@@ -13,6 +13,24 @@ import (
 	"livecart/apps/api/db/sqlc"
 )
 
+// EmitInternal is the one-liner most domain producers want: it marshals the
+// payload, tags the event as SourceInternal and emits it on q. It removes the
+// repeated marshal + build-Envelope + wrap-error boilerplate that every domain
+// transition would otherwise copy. Use Emit directly only when the Source is not
+// internal (e.g. a webhook adapter) or the envelope needs custom fields.
+func EmitInternal(ctx context.Context, q *sqlc.Queries, name Name, dedupKey string, payload any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling %s payload: %w", name, err)
+	}
+	return Emit(ctx, q, Envelope{
+		Name:     name,
+		Source:   SourceInternal,
+		DedupKey: dedupKey,
+		Payload:  body,
+	})
+}
+
 // Emit writes a canonical event to the transactional outbox. Call it with a
 // tx-scoped *sqlc.Queries (queries.WithTx(tx)) so the event is committed in the
 // SAME transaction as the state change — the event is never lost between the

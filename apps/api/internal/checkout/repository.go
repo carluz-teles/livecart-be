@@ -14,6 +14,7 @@ import (
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/events"
+	"livecart/apps/api/lib/dbtx"
 	"livecart/apps/api/lib/httpx"
 )
 
@@ -581,30 +582,29 @@ func (r *Repository) RecordMutation(ctx context.Context, pool *pgxpool.Pool, p M
 		source = "buyer_checkout"
 	}
 
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin cart-mutation tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
-	qtx := r.q.WithTx(tx)
+	// Record the mutation and, when it maps to a canonical event, emit it in the
+	// SAME tx (keyed by the mutation id) via the shared runner.
+	return dbtx.InTx(ctx, pool, r.q, func(q *sqlc.Queries) error {
+		mutation, err := q.CreateCartMutation(ctx, sqlc.CreateCartMutationParams{
+			CartID:         pgtype.UUID{Bytes: cID, Valid: true},
+			ProductID:      pgtype.UUID{Bytes: pID, Valid: true},
+			MutationType:   p.MutationType,
+			QuantityBefore: int32(p.QuantityBefore),
+			QuantityAfter:  int32(p.QuantityAfter),
+			UnitPrice:      p.UnitPrice,
+			Source:         source,
+			ErpMovementID:  pgtype.Text{String: p.ERPMovementID, Valid: p.ERPMovementID != ""},
+		})
+		if err != nil {
+			return fmt.Errorf("recording cart mutation: %w", err)
+		}
 
-	mutation, err := qtx.CreateCartMutation(ctx, sqlc.CreateCartMutationParams{
-		CartID:         pgtype.UUID{Bytes: cID, Valid: true},
-		ProductID:      pgtype.UUID{Bytes: pID, Valid: true},
-		MutationType:   p.MutationType,
-		QuantityBefore: int32(p.QuantityBefore),
-		QuantityAfter:  int32(p.QuantityAfter),
-		UnitPrice:      p.UnitPrice,
-		Source:         source,
-		ErpMovementID:  pgtype.Text{String: p.ERPMovementID, Valid: p.ERPMovementID != ""},
-	})
-	if err != nil {
-		return fmt.Errorf("recording cart mutation: %w", err)
-	}
-
-	if name := cartMutationEventName(p.MutationType); name != "" {
+		name := cartMutationEventName(p.MutationType)
+		if name == "" {
+			return nil
+		}
 		mutationID := uuid.UUID(mutation.ID.Bytes).String()
-		payload, err := json.Marshal(struct {
+		return events.EmitInternal(ctx, q, name, string(name)+":"+mutationID, struct {
 			MutationID     string `json:"mutation_id"`
 			CartID         string `json:"cart_id"`
 			ProductID      string `json:"product_id"`
@@ -621,20 +621,7 @@ func (r *Repository) RecordMutation(ctx context.Context, pool *pgxpool.Pool, p M
 			QuantityAfter:  p.QuantityAfter,
 			Source:         source,
 		})
-		if err != nil {
-			return fmt.Errorf("marshaling %s payload: %w", name, err)
-		}
-		if err := events.Emit(ctx, qtx, events.Envelope{
-			Name:     name,
-			Source:   events.SourceInternal,
-			DedupKey: string(name) + ":" + mutationID,
-			Payload:  payload,
-		}); err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit(ctx)
+	})
 }
 
 // cartMutationEventName maps a cart_mutations.mutation_type to its canonical
