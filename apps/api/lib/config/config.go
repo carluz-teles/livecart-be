@@ -21,7 +21,6 @@ const (
 	AWSRegion          Key = "AWS_REGION"
 	AWSAccessKeyID     Key = "AWS_ACCESS_KEY_ID"
 	AWSSecretAccessKey Key = "AWS_SECRET_ACCESS_KEY"
-	SQSQueueURL        Key = "SQS_QUEUE_URL"
 
 	// Integration Layer
 	EncryptionKey        Key = "ENCRYPTION_KEY"          // Base64-encoded 32-byte key for AES-GCM

@@ -31,16 +31,6 @@ services:
       postgres:
         condition: service_healthy
 
-  localstack:
-    image: localstack/localstack:3.8
-    ports:
-      - "4566:4566"
-    environment:
-      SERVICES: sqs
-      DEFAULT_REGION: us-east-1
-    volumes:
-      - localstack:/var/lib/localstack
-
   tunnel:
     image: node:20-alpine
     command: >
@@ -55,4 +45,3 @@ services:
 
 volumes:
   pgdata:
-  localstack:

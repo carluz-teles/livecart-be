@@ -9,8 +9,6 @@ API REST monolítica em Go para live commerce — detecção de pedidos via come
 - **sqlc** para geração de código a partir de SQL puro
 - **golang-migrate** para migrations
 - **zap** para logs estruturados (CloudWatch)
-- **AWS SQS** para fila de eventos
-- **AWS Lambda** para workers
 - **Swagger** (swaggo) para documentação da API
 
 ## Requisitos
@@ -74,16 +72,14 @@ go run ./apps/api/cmd/http-server
 | `APP_ENV` | `development` ou `production` | `development` |
 | `PORT` | Porta do servidor HTTP | `3001` |
 | `CLERK_SECRET_KEY` | Chave secreta do Clerk (JWT) | — |
-| `AWS_REGION` | Região AWS | `us-east-1` |
-| `AWS_SQS_QUEUE_URL` | URL da fila SQS | — |
+| `AWS_REGION` | Região AWS (storage S3/Tigris) | `us-east-1` |
 
 ## Estrutura do Projeto
 
 ```
 apps/api/
 ├── cmd/
-│   ├── http-server/main.go    # Entrypoint ECS — Fiber
-│   └── worker/main.go         # Entrypoint Lambda — SQS consumer
+│   └── http-server/main.go    # Entrypoint ECS — Fiber
 ├── internal/                   # Domínios (store, product, live, cart, order, integration, notification)
 │   └── <domain>/
 │       ├── handler.go          # Parse HTTP, validação de formato, serialização
@@ -94,7 +90,6 @@ apps/api/
 │   ├── httpx/                  # Response helpers, errors, middlewares
 │   ├── logger/                 # zap setup
 │   ├── database/               # Pool pgx + migrations
-│   ├── queue/                  # SQS client
 │   └── clock/                  # Abstração de tempo
 ├── db/
 │   ├── migrations/             # SQL migrations (golang-migrate)
