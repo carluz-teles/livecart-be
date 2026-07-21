@@ -59,6 +59,7 @@ import (
 	"livecart/apps/api/internal/product"
 	"livecart/apps/api/internal/productgroup"
 	"livecart/apps/api/internal/store"
+	"livecart/apps/api/internal/telemetry"
 	"livecart/apps/api/internal/user"
 	"livecart/apps/api/lib/storage"
 )
@@ -99,6 +100,23 @@ func main() {
 
 	// Set logger for httpx error handling
 	httpx.SetLogger(log)
+
+	// OpenTelemetry tracing. No-op when OTEL_EXPORTER_OTLP_ENDPOINT is unset
+	// (local dev without a collector, tests); exports to Jaeger locally and to
+	// the Datadog agent in staging/prod.
+	otelShutdown, err := telemetry.Init(ctx, telemetry.Config{
+		Endpoint:    config.OTELExporterEndpoint.String(),
+		ServiceName: config.OTELServiceName.StringOr("livecart-api"),
+		Environment: config.Environment(),
+	})
+	if err != nil {
+		log.Sugar().Fatalf("initializing telemetry: %v", err)
+	}
+	defer func() {
+		if err := otelShutdown(context.Background()); err != nil {
+			log.Sugar().Errorf("telemetry shutdown error: %v", err)
+		}
+	}()
 
 	databaseURL := config.DatabaseURL.Required()
 	clerkFrontendAPI := config.ClerkFrontendAPI.Required()
@@ -301,6 +319,10 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	}))
 	app.Use(requestid.New())
 	app.Use(cors.New())
+	// Span-per-request: opens/continues the trace and puts trace_id in Locals so
+	// the access logger and error logger below emit it. Must run before the
+	// request logger and after requestid.
+	app.Use(telemetry.Middleware())
 	app.Use(httpx.RequestLogger(log))
 
 	// Swagger UI

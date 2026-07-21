@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/hibiken/asynq"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Client publishes canonical events onto the asynq queue. It is used by the
@@ -28,6 +29,14 @@ func NewClient(redisAddr string) *Client {
 // The queue and its default retry/timeout policy come from the envelope unless
 // the caller overrides them via opts.
 func (c *Client) Enqueue(ctx context.Context, env Envelope, opts ...asynq.Option) (*asynq.TaskInfo, error) {
+	// Inject the producer's trace context so the consumer continues the span.
+	if env.TraceID == "" {
+		if sc := trace.SpanContextFromContext(ctx); sc.HasTraceID() {
+			env.TraceID = sc.TraceID().String()
+			env.SpanID = sc.SpanID().String()
+		}
+	}
+
 	data, err := json.Marshal(env)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling event envelope: %w", err)

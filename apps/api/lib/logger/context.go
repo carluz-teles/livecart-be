@@ -13,6 +13,9 @@ import (
 const (
 	StoreIDKey   = "store_id"
 	StoreSlugKey = "store_slug"
+	// TraceIDKey carries the OTEL trace id. The telemetry middleware sets it in
+	// c.Locals per request so every log correlates with its distributed trace.
+	TraceIDKey = "trace_id"
 )
 
 // setUserValuer é o RequestCtx do fasthttp. Quando o ctx é o próprio request
@@ -49,12 +52,15 @@ func From(ctx context.Context, base *zap.Logger) *zap.Logger {
 	if ctx == nil {
 		return base
 	}
-	fields := make([]zap.Field, 0, 2)
+	fields := make([]zap.Field, 0, 3)
 	if id, ok := ctx.Value(StoreIDKey).(string); ok && id != "" {
 		fields = append(fields, zap.String("store_id", id))
 	}
 	if slug, ok := ctx.Value(StoreSlugKey).(string); ok && slug != "" {
 		fields = append(fields, zap.String("store_slug", slug))
+	}
+	if traceID, ok := ctx.Value(TraceIDKey).(string); ok && traceID != "" {
+		fields = append(fields, zap.String("trace_id", traceID))
 	}
 	if len(fields) == 0 {
 		return base

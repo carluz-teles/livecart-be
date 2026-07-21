@@ -165,5 +165,8 @@ func identityFields(c *fiber.Ctx) []zap.Field {
 	if storeSlug := GetStoreSlug(c); storeSlug != "" {
 		fields = append(fields, zap.String("store_slug", storeSlug))
 	}
+	if traceID, ok := c.Locals("trace_id").(string); ok && traceID != "" {
+		fields = append(fields, zap.String("trace_id", traceID))
+	}
 	return fields
 }

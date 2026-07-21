@@ -2,11 +2,18 @@ package events
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/hibiken/asynq"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/logger"
 )
+
+var consumerTracer = otel.Tracer("livecart/events")
 
 // Server consumes canonical events from Redis and dispatches them to registered
 // handlers. It mirrors the Start()/Stop() lifecycle of the existing background
@@ -50,9 +57,45 @@ func NewServer(cfg ServerConfig) *Server {
 	)
 
 	mux := asynq.NewServeMux()
+	// Continue the producer's trace and expose trace_id to logger.From for every
+	// event before it reaches its handler.
+	mux.Use(traceMiddleware)
 	RegisterHandlers(mux, log)
 
 	return &Server{inner: srv, mux: mux, logger: log}
+}
+
+// traceMiddleware reconstructs the producer's span context from the envelope
+// and starts a consumer span, making trace_id available to logger.From inside
+// the handler so consumer logs correlate with the originating request trace.
+func traceMiddleware(next asynq.Handler) asynq.Handler {
+	return asynq.HandlerFunc(func(ctx context.Context, t *asynq.Task) error {
+		var env Envelope
+		_ = json.Unmarshal(t.Payload(), &env)
+
+		if env.TraceID != "" && env.SpanID != "" {
+			if tid, err := trace.TraceIDFromHex(env.TraceID); err == nil {
+				if sid, err := trace.SpanIDFromHex(env.SpanID); err == nil {
+					sc := trace.NewSpanContext(trace.SpanContextConfig{
+						TraceID:    tid,
+						SpanID:     sid,
+						TraceFlags: trace.FlagsSampled,
+						Remote:     true,
+					})
+					ctx = trace.ContextWithRemoteSpanContext(ctx, sc)
+				}
+			}
+		}
+
+		ctx, span := consumerTracer.Start(ctx, "event "+t.Type(), trace.WithSpanKind(trace.SpanKindConsumer))
+		defer span.End()
+
+		if sc := span.SpanContext(); sc.HasTraceID() {
+			//nolint:staticcheck // string key matches logger.From / c.Locals convention
+			ctx = context.WithValue(ctx, logger.TraceIDKey, sc.TraceID().String())
+		}
+		return next.ProcessTask(ctx, t)
+	})
 }
 
 // Start begins processing tasks in the background (non-blocking).

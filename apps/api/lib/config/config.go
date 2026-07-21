@@ -23,7 +23,9 @@ const (
 	AWSSecretAccessKey Key = "AWS_SECRET_ACCESS_KEY"
 
 	// Async events / telemetry
-	RedisAddr Key = "REDIS_ADDR" // Redis address for the asynq event queue (default localhost:6379)
+	RedisAddr             Key = "REDIS_ADDR"                  // Redis address for the asynq event queue (default localhost:6379)
+	OTELExporterEndpoint  Key = "OTEL_EXPORTER_OTLP_ENDPOINT" // OTLP gRPC endpoint (Jaeger local, Datadog agent in prod); empty = tracing no-op
+	OTELServiceName       Key = "OTEL_SERVICE_NAME"           // service.name resource attr (default livecart-api)
 
 	// Integration Layer
 	EncryptionKey        Key = "ENCRYPTION_KEY"          // Base64-encoded 32-byte key for AES-GCM
