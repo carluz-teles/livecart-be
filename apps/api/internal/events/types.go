@@ -55,6 +55,7 @@ type Source string
 const (
 	SourceInstagramLive  Source = "instagram_live"
 	SourceInstagramStory Source = "instagram_story"
+	SourceInstagramPost  Source = "instagram_post"
 	SourceInstagramDM    Source = "instagram_dm"
 	SourcePagarme        Source = "pagarme"
 	SourceMercadoPago    Source = "mercadopago"

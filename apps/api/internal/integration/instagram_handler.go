@@ -115,7 +115,7 @@ func (h *WebhookHandler) processInstagramChange(c *fiber.Ctx, entry InstagramEnt
 
 	switch change.Field {
 	case "live_comments":
-		return h.processLiveComment(c, entry, change, rawBody)
+		return h.processLiveComment(c, entry, change, rawBody, events.SourceInstagramLive)
 	case "comments":
 		// Feed-post comments share the same payload shape as live comments and
 		// the same processing path (the post media id maps to the event). Mark
@@ -148,11 +148,13 @@ func (h *WebhookHandler) processPostComment(c *fiber.Ctx, entry InstagramEntry, 
 			)
 		}
 	}
-	return h.processLiveComment(c, entry, change, rawBody)
+	return h.processLiveComment(c, entry, change, rawBody, events.SourceInstagramPost)
 }
 
-// processLiveComment processes a live_comments event
-func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, change InstagramChange, rawBody []byte) error {
+// processLiveComment processes a live_comments (or feed-post comments) event.
+// source is the canonical origin stamped on the dispatched comment.received
+// event (instagram_live for live comments, instagram_post for feed posts).
+func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, change InstagramChange, rawBody []byte, source events.Source) error {
 	// Parse the value as LiveCommentValue
 	valueBytes, err := json.Marshal(change.Value)
 	if err != nil {
@@ -193,7 +195,7 @@ func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, 
 		Text:       comment.Text,
 		Timestamp:  entry.Time,
 		RawPayload: rawBody,
-	}, events.SourceInstagramLive); err != nil {
+	}, source); err != nil {
 		logger.From(c.Context(), h.logger).Error("failed to dispatch instagram comment",
 			zap.String("comment_id", comment.CommentID),
 			zap.Error(err),

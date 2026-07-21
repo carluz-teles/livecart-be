@@ -5434,7 +5434,9 @@ func (s *Service) processStoryReply(ctx context.Context, input ProcessInstagramM
 		username = "cliente"
 	}
 
-	return s.ProcessInstagramComment(ctx, ProcessInstagramCommentInput{
+	// Inverted flow: dispatch canonical comment.received with the story origin.
+	// Channel="dm" is preserved in the payload so the consumer replies via DM.
+	return s.DispatchCommentReceived(ctx, ProcessInstagramCommentInput{
 		AccountID:  input.AccountID,
 		MediaID:    input.ReplyToStoryID,
 		CommentID:  input.MessageID, // DM mid — dedup key
@@ -5444,7 +5446,7 @@ func (s *Service) processStoryReply(ctx context.Context, input ProcessInstagramM
 		Timestamp:  input.Timestamp,
 		Channel:    "dm",
 		RawPayload: input.RawPayload,
-	})
+	}, events.SourceInstagramStory)
 }
 
 // MarkPostEventWebhookActive flags the post event mapped to mediaID as
