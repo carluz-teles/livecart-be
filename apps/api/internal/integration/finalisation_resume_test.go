@@ -309,6 +309,7 @@ func newFinalisationService(fake providers.ERPProvider) *Service {
 	return &Service{
 		repo:   testRepo,
 		logger: zap.NewNop(),
+		stock:  NewStockReservations(testRepo, zap.NewNop()),
 		erpProviderFactory: func(ctx context.Context, integration *IntegrationRow) (providers.ERPProvider, error) {
 			return fake, nil
 		},

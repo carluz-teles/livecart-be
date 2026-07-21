@@ -35,7 +35,7 @@ import (
 // scaleService: Service mínimo, sem ERP/notification/live — a promoção é
 // puramente local (ReserveStockInERP no-opa por falta de integração Tiny).
 func scaleService() *Service {
-	return &Service{repo: testRepo, logger: zap.NewNop()}
+	return &Service{repo: testRepo, logger: zap.NewNop(), stock: NewStockReservations(testRepo, zap.NewNop())}
 }
 
 // scaleFixture é um evento com N produtos, cada um com 1 unidade "sold out"

@@ -101,6 +101,7 @@ func TestE2EOrderAsReservationAgainstRealTiny(t *testing.T) {
 	svc := &Service{
 		repo:          testRepo,
 		logger:        logger,
+		stock:         NewStockReservations(testRepo, logger),
 		productSyncer: stubProductSyncer{},
 		erpProviderFactory: func(ctx context.Context, integration *IntegrationRow) (providers.ERPProvider, error) {
 			return realTiny, nil
