@@ -22,6 +22,9 @@ const (
 	AWSAccessKeyID     Key = "AWS_ACCESS_KEY_ID"
 	AWSSecretAccessKey Key = "AWS_SECRET_ACCESS_KEY"
 
+	// Async events / telemetry
+	RedisAddr Key = "REDIS_ADDR" // Redis address for the asynq event queue (default localhost:6379)
+
 	// Integration Layer
 	EncryptionKey        Key = "ENCRYPTION_KEY"          // Base64-encoded 32-byte key for AES-GCM
 	WebhookBaseURL       Key = "WEBHOOK_BASE_URL"        // Base URL for webhook callbacks (e.g., https://api.livecart.com)

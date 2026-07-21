@@ -15,6 +15,18 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   api:
     build:
       context: .
@@ -27,8 +39,12 @@ services:
     environment:
       # Override DATABASE_URL to use Docker network hostname
       DATABASE_URL: postgres://livecart:livecart@postgres:5432/livecart?sslmode=disable
+      # Redis on the Docker network for the asynq event queue
+      REDIS_ADDR: redis:6379
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   tunnel:
@@ -45,3 +61,4 @@ services:
 
 volumes:
   pgdata:
+  redisdata:

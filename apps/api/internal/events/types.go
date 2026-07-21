@@ -1,0 +1,99 @@
+// Package events is the backbone of LiveCart's asynchronous, event-driven
+// architecture. Domain transitions publish canonical events (via a
+// transactional outbox) that fan out to idempotent consumers over an asynq +
+// Redis task queue.
+//
+// Design rules (see docs/async-events-analysis.md):
+//   - Event names are canonical DOMAIN facts ("comment.received",
+//     "payment.succeeded"), never implementation details. The origin (which
+//     webhook/provider/channel dispatched it) travels as Envelope.Source /
+//     Envelope.Metadata, not as a distinct event type.
+//   - Webhooks are thin adapters: they validate, dedup by the provider event id
+//     and dispatch the canonical event. Domain logic runs in the consumer.
+package events
+
+import (
+	"encoding/json"
+	"time"
+)
+
+// Name is a canonical domain event name, e.g. "comment.received".
+type Name string
+
+// Canonical event names. This list grows as flows migrate (Fases 04-11); Fase
+// 01 ships only the smoke-test event.
+const (
+	// TestPing is a no-op event used to prove the pipeline end to end.
+	TestPing Name = "test.ping"
+)
+
+// Source identifies where an event was dispatched from. It is metadata on the
+// envelope — the same canonical event can arrive from several sources.
+type Source string
+
+const (
+	SourceInstagramLive  Source = "instagram_live"
+	SourceInstagramStory Source = "instagram_story"
+	SourceInstagramDM    Source = "instagram_dm"
+	SourcePagarme        Source = "pagarme"
+	SourceMercadoPago    Source = "mercadopago"
+	SourceStripe         Source = "stripe"
+	SourceClerk          Source = "clerk"
+	// SourceInternal marks events emitted by internal domain transitions and
+	// background workers (e.g. cart expiry) rather than an inbound webhook.
+	SourceInternal Source = "internal"
+)
+
+// Queue names, ordered by priority. The asynq server weights them (see server.go).
+const (
+	QueueFastTrack = "fast-track" // low-latency, high-priority (session/event lifecycle)
+	QueueNormal    = "normal"     // default for most domain events
+	QueueBatch     = "batch"      // heavy, tolerant-of-delay aggregation work
+)
+
+// QueuePolicy is the default per-queue task processing policy applied when a
+// publisher does not override retry/timeout explicitly.
+type QueuePolicy struct {
+	MaxRetry int
+	Timeout  time.Duration
+}
+
+// DefaultPolicies maps each queue to its default processing policy.
+var DefaultPolicies = map[string]QueuePolicy{
+	QueueFastTrack: {MaxRetry: 3, Timeout: 5 * time.Second},
+	QueueNormal:    {MaxRetry: 3, Timeout: 15 * time.Second},
+	QueueBatch:     {MaxRetry: 1, Timeout: 60 * time.Second},
+}
+
+// Envelope is the canonical wire format for every event. It is serialized as
+// the asynq task payload, so a consumer can reconstruct the domain payload, the
+// origin metadata and the trace context.
+type Envelope struct {
+	// EventID uniquely identifies this event instance (idempotency + outbox key).
+	EventID string `json:"event_id"`
+	// Name is the canonical domain event name.
+	Name Name `json:"name"`
+	// Source is where the event was dispatched from (webhook/provider/internal).
+	Source Source `json:"source"`
+	// Metadata carries origin details that are NOT part of the domain payload
+	// (e.g. provider event id, channel), kept out of the event name on purpose.
+	Metadata map[string]string `json:"metadata,omitempty"`
+	// OccurredAt is when the domain transition happened.
+	OccurredAt time.Time `json:"occurred_at"`
+	// TraceID / SpanID carry W3C trace context so the consumer continues the
+	// span started by the producer (Fase 02).
+	TraceID string `json:"trace_id,omitempty"`
+	SpanID  string `json:"span_id,omitempty"`
+	// DedupKey lets consumers deduplicate at-least-once delivery when there is
+	// no natural unique key on the side-effect.
+	DedupKey string `json:"dedup_key,omitempty"`
+	// Payload is the domain-specific data for this event.
+	Payload json.RawMessage `json:"payload,omitempty"`
+}
+
+// Queue returns the queue this event should be enqueued on. For now every event
+// rides the normal queue; later phases route lifecycle events to fast-track and
+// aggregation to batch.
+func (e Envelope) Queue() string {
+	return QueueNormal
+}

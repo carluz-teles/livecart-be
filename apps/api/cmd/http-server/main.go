@@ -16,6 +16,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/requestid"
 	"github.com/gofiber/swagger"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
@@ -38,6 +39,7 @@ import (
 	"livecart/apps/api/internal/coupon"
 	"livecart/apps/api/internal/customer"
 	"livecart/apps/api/internal/dashboard"
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/idea"
 	"livecart/apps/api/internal/integration"
 	"livecart/apps/api/internal/integration/providers"
@@ -132,7 +134,17 @@ func main() {
 	// DMs/WhatsApp do módulo de comunicações.
 	emailClient.SetAuditHook(emailAuditHook(log, queries))
 
-	app := newApp(log, pool, queries, validate, clerkClient, emailClient)
+	// Async event pipeline (asynq + Redis) — runs in this same process.
+	redisAddr := config.RedisAddr.StringOr("localhost:6379")
+	eventsClient := events.NewClient(redisAddr)
+	eventsServer := events.NewServer(events.ServerConfig{RedisAddr: redisAddr, Logger: log})
+
+	app, lifecycle := newApp(log, pool, queries, validate, clerkClient, emailClient, eventsClient)
+	lifecycle.add("events-server", eventsServer.Stop)
+
+	if err := eventsServer.Start(); err != nil {
+		log.Sugar().Fatalf("starting event server: %v", err)
+	}
 
 	go func() {
 		if err := app.Listen(":" + port); err != nil {
@@ -146,10 +158,42 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
+	// Shutdown order: stop accepting/drain HTTP, then stop workers + event
+	// server (reverse registration order), then close the publisher.
 	log.Info("shutting down server")
 	cancel()
 	if err := app.Shutdown(); err != nil {
 		log.Sugar().Errorf("server shutdown error: %v", err)
+	}
+	lifecycle.shutdown()
+	if err := eventsClient.Close(); err != nil {
+		log.Sugar().Errorf("events client close error: %v", err)
+	}
+}
+
+// appLifecycle collects components that must be stopped on shutdown and stops
+// them in reverse registration order. It also closes a pre-existing gap: the
+// background workers created in newApp had no reference held by main(), so
+// SIGTERM never stopped them cleanly.
+type appLifecycle struct {
+	log      *zap.Logger
+	stoppers []namedStopper
+}
+
+type namedStopper struct {
+	name string
+	stop func()
+}
+
+func (l *appLifecycle) add(name string, stop func()) {
+	l.stoppers = append(l.stoppers, namedStopper{name: name, stop: stop})
+}
+
+func (l *appLifecycle) shutdown() {
+	for i := len(l.stoppers) - 1; i >= 0; i-- {
+		s := l.stoppers[i]
+		l.log.Info("stopping component", zap.String("component", s.name))
+		s.stop()
 	}
 }
 
@@ -229,7 +273,8 @@ func pgTextFromString(s string) pgtype.Text {
 	return pgtype.Text{String: s, Valid: s != ""}
 }
 
-func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate *validator.Validate, clerkClient *clerk.Client, emailClient *email.Client) *fiber.App {
+func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate *validator.Validate, clerkClient *clerk.Client, emailClient *email.Client, eventsClient *events.Client) (*fiber.App, *appLifecycle) {
+	lifecycle := &appLifecycle{log: log}
 	app := fiber.New(fiber.Config{
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			return httpx.HandleServiceError(c, err)
@@ -264,6 +309,23 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok"})
 	})
+
+	// Dev-only smoke test for the event pipeline (Fase 01): publishes a
+	// canonical test.ping through Redis so it is consumed by the event server.
+	if !config.IsProduction() {
+		app.Post("/internal/dev/ping", func(c *fiber.Ctx) error {
+			env := events.Envelope{
+				EventID:    uuid.NewString(),
+				Name:       events.TestPing,
+				Source:     events.SourceInternal,
+				OccurredAt: time.Now().UTC(),
+			}
+			if _, err := eventsClient.Enqueue(c.UserContext(), env); err != nil {
+				return httpx.HandleServiceError(c, err)
+			}
+			return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"event_id": env.EventID})
+		})
+	}
 
 	// User repository and service (shared between webhook and API handlers)
 	userRepo := user.NewRepository(queries)
@@ -509,6 +571,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				Window:   30 * time.Minute, // Refresh tokens expiring within 30 minutes
 			})
 			tokenWorker.Start()
+			lifecycle.add("token-refresh", tokenWorker.Stop)
 
 			// Background tracking poller. Pulls SmartEnvios tracking every
 			// 6h and fires OnDelivered when the carrier reports delivered.
@@ -519,6 +582,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				Interval: 6 * time.Hour,
 			})
 			trackingPoller.Start()
+			lifecycle.add("tracking-poller", trackingPoller.Stop)
 
 			// Capture comments on active post-commerce events via polling until
 			// the real-time `comments` webhook takes over for each post.
@@ -730,6 +794,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		Limit:    200,
 	})
 	couponExpirer.Start()
+	lifecycle.add("coupon-expirer", couponExpirer.Stop)
 
 	// WhatsApp cart-recovery sweep (PRD 006): expired unpaid carts with phone
 	// + consent get a regenerated checkout link via the store's WhatsApp
@@ -746,6 +811,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			Limit:        100,
 		})
 		recoveryWorker.Start()
+		lifecycle.add("cart-recovery", recoveryWorker.Stop)
 
 		// Global cart-expiration sweep. The missing clock: expires carts whose
 		// payment window elapsed (incl. post-live 'checkout' carts that the old
@@ -759,6 +825,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			Limit:    200,
 		})
 		cartExpiryWorker.Start()
+		lifecycle.add("cart-expiry", cartExpiryWorker.Stop)
 	}
 
 	customerHandler := customer.NewHandler(customerSvc, validate)
@@ -803,7 +870,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// Store-scoped invitation routes (create, list, revoke)
 	invitationHandler.RegisterRoutes(storeScoped)
 
-	return app
+	return app, lifecycle
 }
 
 // liveNotifierAdapter bridges integration.InstagramNotifier (concrete impl)
