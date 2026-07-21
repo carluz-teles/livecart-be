@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/logger"
 	"livecart/apps/api/lib/ratelimit"
 )
 
@@ -165,7 +166,7 @@ func (t *Tiny) RefreshToken(ctx context.Context) (*Credentials, error) {
 	}
 
 	// Log token refresh result for debugging
-	t.Logger.Info("Tiny token refresh successful",
+	logger.From(ctx, t.Logger).Info("Tiny token refresh successful",
 		zap.Int("expires_in", tokenResp.ExpiresIn),
 		zap.Bool("has_new_refresh_token", tokenResp.RefreshToken != ""),
 	)
@@ -174,7 +175,7 @@ func (t *Tiny) RefreshToken(ctx context.Context) (*Credentials, error) {
 	// Tiny access tokens typically last about 4 hours
 	expiresInSeconds := tokenResp.ExpiresIn
 	if expiresInSeconds <= 0 {
-		t.Logger.Warn("Tiny token refresh: expires_in is 0 or negative, defaulting to 4 hours",
+		logger.From(ctx, t.Logger).Warn("Tiny token refresh: expires_in is 0 or negative, defaulting to 4 hours",
 			zap.Int("original_expires_in", tokenResp.ExpiresIn),
 		)
 		expiresInSeconds = 14400 // 4 hours in seconds
@@ -452,7 +453,7 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 			}
 			fields = append(fields, zap.String("raw_body_snippet", snippet))
 		}
-		t.Logger.Info("tiny GetProduct shipping resolution", fields...)
+		logger.From(ctx, t.Logger).Info("tiny GetProduct shipping resolution", fields...)
 	}
 
 	return &out, nil
@@ -975,19 +976,19 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		}
 		switch {
 		case formaEnvioErr != nil:
-			t.Logger.Warn("tiny formaEnvio lookup failed, sending order without it",
+			logger.From(ctx, t.Logger).Warn("tiny formaEnvio lookup failed, sending order without it",
 				zap.String("carrier", ship.Carrier),
 				zap.Error(formaEnvioErr),
 			)
 		case formaEnvioID > 0:
 			transportador["formaEnvio"] = map[string]any{"id": formaEnvioID}
-			t.Logger.Info("tiny formaEnvio matched",
+			logger.From(ctx, t.Logger).Info("tiny formaEnvio matched",
 				zap.String("carrier", ship.Carrier),
 				zap.String("matched_name", formaEnvioName),
 				zap.Int64("forma_envio_id", formaEnvioID),
 			)
 		default:
-			t.Logger.Warn("tiny formaEnvio lookup returned no match, order will use Tiny default",
+			logger.From(ctx, t.Logger).Warn("tiny formaEnvio lookup returned no match, order will use Tiny default",
 				zap.String("carrier", ship.Carrier),
 			)
 		}
@@ -1048,14 +1049,14 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		recebID, recebErr := t.lookupFormaRecebimentoID(ctx, pay.Method)
 		switch {
 		case recebErr != nil:
-			t.Logger.Warn("tiny formaRecebimento lookup failed, sending parcelas without it",
+			logger.From(ctx, t.Logger).Warn("tiny formaRecebimento lookup failed, sending parcelas without it",
 				zap.String("method", pay.Method),
 				zap.Error(recebErr),
 			)
 		case recebID > 0:
 			recebRef = map[string]any{"id": recebID}
 		default:
-			t.Logger.Warn("tiny formaRecebimento lookup returned no match, parcela will fall back to default",
+			logger.From(ctx, t.Logger).Warn("tiny formaRecebimento lookup returned no match, parcela will fall back to default",
 				zap.String("method", pay.Method),
 			)
 		}
@@ -1089,7 +1090,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 				"dias":  p["dias"],
 			})
 		}
-		t.Logger.Info("tiny order parcelas prepared",
+		logger.From(ctx, t.Logger).Info("tiny order parcelas prepared",
 			zap.String("method", pay.Method),
 			zap.Int("installments", pay.Installments),
 			zap.Int("parcelas_count", len(parcelas)),
@@ -1113,7 +1114,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		netCents = order.Payment.NetAmountCents
 		paymentMethod = order.Payment.Method
 	}
-	t.Logger.Info("tiny CreateOrder sending payload",
+	logger.From(ctx, t.Logger).Info("tiny CreateOrder sending payload",
 		zap.String("external_id", order.ExternalID),
 		zap.String("contact_id", order.ContactID),
 		zap.Int("items_count", len(order.Items)),
@@ -1149,7 +1150,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 	}
 
 	orderID := strconv.FormatInt(orderResp.ID, 10)
-	t.Logger.Info("tiny order created",
+	logger.From(ctx, t.Logger).Info("tiny order created",
 		zap.String("order_id", orderID),
 		zap.String("numero_pedido", orderResp.Numero),
 		zap.String("situacao", orderResp.Situacao),
@@ -1163,7 +1164,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 	// Failure here is non-fatal — the order still exists in Tiny.
 	if order.Payment != nil {
 		if approveErr := t.ApproveOrder(ctx, orderID); approveErr != nil {
-			t.Logger.Warn("failed to approve tiny order after creation",
+			logger.From(ctx, t.Logger).Warn("failed to approve tiny order after creation",
 				zap.String("order_id", orderID),
 				zap.Error(approveErr),
 			)
@@ -1461,7 +1462,7 @@ func (t *Tiny) lookupFormaRecebimentoID(ctx context.Context, method string) (int
 				"excluido": item.Excluido,
 			})
 		}
-		t.Logger.Debug("tiny formas-recebimento page fetched",
+		logger.From(ctx, t.Logger).Debug("tiny formas-recebimento page fetched",
 			zap.String("target_method", method),
 			zap.Int("page", page),
 			zap.Int("count", len(result.Itens)),
@@ -1565,7 +1566,7 @@ func (t *Tiny) LaunchOrderStock(ctx context.Context, orderID string) error {
 
 		// "Estoque já lançado" means Tiny auto-launched stock on order creation — treat as success
 		if strings.Contains(errResp.Mensagem, "já lançado") {
-			t.Logger.Info("stock already launched by Tiny automatically",
+			logger.From(ctx, t.Logger).Info("stock already launched by Tiny automatically",
 				zap.String("order_id", orderID),
 			)
 			return nil
@@ -1574,7 +1575,7 @@ func (t *Tiny) LaunchOrderStock(ctx context.Context, orderID string) error {
 		return fmt.Errorf("launch stock failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
 	}
 
-	t.Logger.Info("tiny order stock launched",
+	logger.From(ctx, t.Logger).Info("tiny order stock launched",
 		zap.String("order_id", orderID),
 	)
 	return nil
@@ -1622,7 +1623,7 @@ func (t *Tiny) ApproveOrder(ctx context.Context, orderID string) error {
 		return fmt.Errorf("approve order failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
 	}
 
-	t.Logger.Info("tiny order approved",
+	logger.From(ctx, t.Logger).Info("tiny order approved",
 		zap.String("order_id", orderID),
 	)
 	return nil
@@ -1634,7 +1635,7 @@ func (t *Tiny) CancelOrder(ctx context.Context, orderID string) error {
 	// First reverse stock
 	if err := t.ReverseOrderStock(ctx, orderID); err != nil {
 		// Log but continue — order might not have stock launched yet
-		t.Logger.Warn("failed to reverse stock before cancel, continuing",
+		logger.From(ctx, t.Logger).Warn("failed to reverse stock before cancel, continuing",
 			zap.String("order_id", orderID),
 			zap.Error(err),
 		)
@@ -1688,7 +1689,7 @@ func (t *Tiny) UpdateOrderItems(ctx context.Context, orderID string, items []pro
 	if !providers.IsSuccessStatus(resp.StatusCode) {
 		return fmt.Errorf("update order items failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
 	}
-	t.Logger.Info("tiny order items updated",
+	logger.From(ctx, t.Logger).Info("tiny order items updated",
 		zap.String("order_id", orderID),
 		zap.Int("items", len(items)),
 	)
@@ -1724,7 +1725,7 @@ func (t *Tiny) UpdateOrderPayment(ctx context.Context, orderID string, payment *
 	if !providers.IsSuccessStatus(resp.StatusCode) {
 		return fmt.Errorf("update order payment failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
 	}
-	t.Logger.Info("tiny order payment updated",
+	logger.From(ctx, t.Logger).Info("tiny order payment updated",
 		zap.String("order_id", orderID),
 		zap.String("method", payment.Method),
 		zap.Int("parcelas", len(parcelas)),
@@ -1948,7 +1949,7 @@ func (t *Tiny) CreateContact(ctx context.Context, contact ERPContactInput) (*ERP
 		// see which value was rejected — the generic top-level "Ocorreram
 		// erros de validação" is useless on its own.
 		if t.Logger != nil {
-			t.Logger.Warn("tiny CreateContact rejected",
+			logger.From(ctx, t.Logger).Warn("tiny CreateContact rejected",
 				zap.Int("status", resp.StatusCode),
 				zap.String("error", tinyErrorDetail(body)),
 				zap.String("nome", contact.Name),
@@ -2524,7 +2525,7 @@ func (t *Tiny) HealthCheck(ctx context.Context) (*providers.ERPHealthCheckResult
 	for _, c := range missingByCategory {
 		totalMissing += c
 	}
-	t.Logger.Info("tiny health check completed",
+	logger.From(ctx, t.Logger).Info("tiny health check completed",
 		zap.Duration("duration", time.Since(start)),
 		zap.Int("items_total", len(items)),
 		zap.Int("items_missing", totalMissing),

@@ -6,6 +6,8 @@ import (
 	"html/template"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/logger"
 )
 
 // OrderCancelledEmailInput carries the data for the "Pedido cancelado" email.
@@ -52,7 +54,7 @@ func (c *Client) SendOrderCancelled(ctx context.Context, input OrderCancelledEma
 	}
 
 	if !c.IsConfigured() {
-		c.logger.Warn("Resend not configured, skipping order cancelled email",
+		logger.From(ctx, c.logger).Warn("Resend not configured, skipping order cancelled email",
 			zap.String("to", input.ToEmail),
 			zap.String("order", input.OrderShortID),
 		)

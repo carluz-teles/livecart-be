@@ -7,6 +7,8 @@ import (
 	"html/template"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/logger"
 )
 
 // OrderShippedEmailInput is the payload for the "Pedido enviado" email.
@@ -56,7 +58,7 @@ func (c *Client) SendOrderShipped(ctx context.Context, input OrderShippedEmailIn
 	}
 
 	if !c.IsConfigured() {
-		c.logger.Warn("Resend not configured, skipping order shipped email",
+		logger.From(ctx, c.logger).Warn("Resend not configured, skipping order shipped email",
 			zap.String("to", input.ToEmail),
 			zap.String("order", input.OrderShortID),
 		)

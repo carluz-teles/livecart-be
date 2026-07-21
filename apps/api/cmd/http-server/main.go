@@ -557,6 +557,10 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		}
 	}
 
+	// storeRepo é criado antes dos webhooks: além do domínio store, ele resolve
+	// store_id→slug para enriquecer os logs das rotas de webhook.
+	storeRepo := store.NewRepository(queries)
+
 	// Webhook routes (unauthenticated, use webhook signature)
 	webhookHandler := user.NewWebhookHandler(userSvc)
 	webhookHandler.RegisterRoutes(app)
@@ -566,7 +570,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	// Integration webhook routes (if enabled)
 	if integrationWebhookHandler != nil {
-		integrationWebhookHandler.RegisterRoutes(app)
+		integrationWebhookHandler.RegisterRoutes(app, storeRepo)
 	}
 
 	// Initialize S3 client for logo uploads (optional)
@@ -636,7 +640,6 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	notifInboxHandler.RegisterRoutes(userScoped)
 
 	// Store routes (user's own store management)
-	storeRepo := store.NewRepository(queries)
 	membershipCreator := user.NewMembershipCreatorAdapter(userSvc)
 	userLookup := user.NewUserLookupAdapter(userSvc)
 	storeSvc := store.NewService(storeRepo, membershipCreator, userLookup, log)

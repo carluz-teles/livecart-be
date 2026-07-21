@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/logger"
 	"livecart/apps/api/lib/ratelimit"
 )
 
@@ -182,7 +183,7 @@ func (i *Instagram) SendDirectMessage(ctx context.Context, recipientID, text str
 	}
 
 	// If HUMAN_AGENT fails, try standard message (24h window)
-	i.logger.Warn("HUMAN_AGENT tag failed, trying standard message",
+	logger.From(ctx, i.logger).Warn("HUMAN_AGENT tag failed, trying standard message",
 		zap.String("recipient_id", recipientID),
 		zap.Error(err),
 	)
@@ -221,7 +222,7 @@ func (i *Instagram) sendDMRequest(ctx context.Context, url string, payload map[s
 		if len(bodyStr) > 256 {
 			bodyStr = bodyStr[:256] + "..."
 		}
-		i.logger.Error("instagram send dm failed",
+		logger.From(ctx, i.logger).Error("instagram send dm failed",
 			zap.Int("status", resp.StatusCode),
 			zap.String("body", bodyStr),
 			zap.String("recipient_id", recipientID),
@@ -229,7 +230,7 @@ func (i *Instagram) sendDMRequest(ctx context.Context, url string, payload map[s
 		return fmt.Errorf("instagram send dm failed: status %d, body: %s", resp.StatusCode, bodyStr)
 	}
 
-	i.logger.Info("instagram dm sent",
+	logger.From(ctx, i.logger).Info("instagram dm sent",
 		zap.String("recipient_id", recipientID),
 		zap.Int("text_bytes", len(text)),
 	)
@@ -285,7 +286,7 @@ func (i *Instagram) ReplyToComment(ctx context.Context, commentID, text string) 
 		if len(bodyStr) > 256 {
 			bodyStr = bodyStr[:256] + "..."
 		}
-		i.logger.Error("instagram reply to comment failed",
+		logger.From(ctx, i.logger).Error("instagram reply to comment failed",
 			zap.Int("status", resp.StatusCode),
 			zap.String("body", bodyStr),
 			zap.String("comment_id", commentID),
@@ -293,7 +294,7 @@ func (i *Instagram) ReplyToComment(ctx context.Context, commentID, text string) 
 		return fmt.Errorf("instagram reply failed: status %d, body: %s", resp.StatusCode, bodyStr)
 	}
 
-	i.logger.Info("instagram comment reply sent",
+	logger.From(ctx, i.logger).Info("instagram comment reply sent",
 		zap.String("comment_id", commentID),
 		zap.Int("text_bytes", len(text)),
 	)
@@ -355,7 +356,7 @@ func (i *Instagram) SendPrivateReply(ctx context.Context, commentID, text string
 		if len(bodyStr) > 256 {
 			bodyStr = bodyStr[:256] + "..."
 		}
-		i.logger.Error("instagram private reply failed",
+		logger.From(ctx, i.logger).Error("instagram private reply failed",
 			zap.Int("status", resp.StatusCode),
 			zap.String("body", bodyStr),
 			zap.String("comment_id", commentID),
@@ -363,7 +364,7 @@ func (i *Instagram) SendPrivateReply(ctx context.Context, commentID, text string
 		return fmt.Errorf("instagram private reply failed: status %d, body: %s", resp.StatusCode, bodyStr)
 	}
 
-	i.logger.Info("instagram private reply sent",
+	logger.From(ctx, i.logger).Info("instagram private reply sent",
 		zap.String("comment_id", commentID),
 		zap.Int("text_bytes", len(text)),
 	)
@@ -402,7 +403,7 @@ func (i *Instagram) GetActiveLives(ctx context.Context) ([]providers.LiveMedia, 
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
-	i.logger.Info("fetched active instagram lives",
+	logger.From(ctx, i.logger).Info("fetched active instagram lives",
 		zap.Int("count", len(result.Data)),
 	)
 
@@ -443,7 +444,7 @@ func (i *Instagram) HideComment(ctx context.Context, commentID string, hidden bo
 		if len(bodyStr) > 256 {
 			bodyStr = bodyStr[:256] + "..."
 		}
-		i.logger.Error("instagram hide comment failed",
+		logger.From(ctx, i.logger).Error("instagram hide comment failed",
 			zap.Int("status", resp.StatusCode),
 			zap.String("body", bodyStr),
 			zap.String("comment_id", commentID),
@@ -451,7 +452,7 @@ func (i *Instagram) HideComment(ctx context.Context, commentID string, hidden bo
 		return fmt.Errorf("instagram hide comment failed: status %d, body: %s", resp.StatusCode, bodyStr)
 	}
 
-	i.logger.Info("instagram comment hidden",
+	logger.From(ctx, i.logger).Info("instagram comment hidden",
 		zap.String("comment_id", commentID),
 		zap.Bool("hidden", hidden),
 	)
@@ -489,7 +490,7 @@ func (i *Instagram) DeleteComment(ctx context.Context, commentID string) error {
 		if len(bodyStr) > 256 {
 			bodyStr = bodyStr[:256] + "..."
 		}
-		i.logger.Error("instagram delete comment failed",
+		logger.From(ctx, i.logger).Error("instagram delete comment failed",
 			zap.Int("status", resp.StatusCode),
 			zap.String("body", bodyStr),
 			zap.String("comment_id", commentID),
@@ -497,7 +498,7 @@ func (i *Instagram) DeleteComment(ctx context.Context, commentID string) error {
 		return fmt.Errorf("instagram delete comment failed: status %d, body: %s", resp.StatusCode, bodyStr)
 	}
 
-	i.logger.Info("instagram comment deleted",
+	logger.From(ctx, i.logger).Info("instagram comment deleted",
 		zap.String("comment_id", commentID),
 	)
 	return nil
@@ -555,7 +556,7 @@ func (i *Instagram) GetUserMedia(ctx context.Context, limit int, after string) (
 		nextCursor = result.Paging.Cursors.After
 	}
 
-	i.logger.Info("fetched instagram user media",
+	logger.From(ctx, i.logger).Info("fetched instagram user media",
 		zap.Int("count", len(result.Data)),
 		zap.Bool("has_more", nextCursor != ""),
 	)
@@ -596,7 +597,7 @@ func (i *Instagram) PublishImagePost(ctx context.Context, imageURL, caption stri
 		return "", fmt.Errorf("publishing media: %w", err)
 	}
 
-	i.logger.Info("instagram image post published",
+	logger.From(ctx, i.logger).Info("instagram image post published",
 		zap.String("container_id", containerID),
 		zap.String("media_id", mediaID),
 	)
@@ -681,7 +682,7 @@ func (i *Instagram) PublishReel(ctx context.Context, videoURL, caption string) (
 		return "", fmt.Errorf("publishing reel: %w", err)
 	}
 
-	i.logger.Info("instagram reel published",
+	logger.From(ctx, i.logger).Info("instagram reel published",
 		zap.String("container_id", containerID),
 		zap.String("media_id", mediaID),
 	)
@@ -718,7 +719,7 @@ func (i *Instagram) PublishStory(ctx context.Context, mediaURL string, isVideo b
 		return "", fmt.Errorf("publishing story: %w", err)
 	}
 
-	i.logger.Info("instagram story published",
+	logger.From(ctx, i.logger).Info("instagram story published",
 		zap.String("container_id", containerID),
 		zap.String("media_id", mediaID),
 		zap.Bool("is_video", isVideo),
@@ -773,7 +774,7 @@ func (i *Instagram) SubscribeWebhooks(ctx context.Context) error {
 		return fmt.Errorf("instagram did not confirm the subscription: %s", truncate(string(respBody), 300))
 	}
 
-	i.logger.Info("instagram webhook subscription active",
+	logger.From(ctx, i.logger).Info("instagram webhook subscription active",
 		zap.String("fields", instagramWebhookFields),
 	)
 	return nil

@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/logger"
 )
 
 // TokenRefreshWorker proactively refreshes OAuth tokens before they expire.
@@ -92,16 +94,16 @@ func (w *TokenRefreshWorker) refreshExpiringTokens() {
 	expiresBefore := time.Now().Add(w.window)
 	integrations, err := w.service.repo.ListWithExpiringTokens(ctx, expiresBefore)
 	if err != nil {
-		w.logger.Error("failed to list integrations with expiring tokens", zap.Error(err))
+		logger.From(ctx, w.logger).Error("failed to list integrations with expiring tokens", zap.Error(err))
 		return
 	}
 
 	if len(integrations) == 0 {
-		w.logger.Debug("no tokens expiring soon")
+		logger.From(ctx, w.logger).Debug("no tokens expiring soon")
 		return
 	}
 
-	w.logger.Info("found integrations with expiring tokens",
+	logger.From(ctx, w.logger).Info("found integrations with expiring tokens",
 		zap.Int("count", len(integrations)),
 		zap.Time("expires_before", expiresBefore),
 	)
@@ -109,15 +111,16 @@ func (w *TokenRefreshWorker) refreshExpiringTokens() {
 	// Refresh each token
 	var refreshed, failed int
 	for _, integration := range integrations {
-		if err := w.refreshToken(ctx, &integration); err != nil {
-			w.logger.Warn("failed to refresh token",
+		itemCtx := logger.WithStore(ctx, integration.StoreID, "")
+		if err := w.refreshToken(itemCtx, &integration); err != nil {
+			logger.From(itemCtx, w.logger).Warn("failed to refresh token",
 				zap.String("integration_id", integration.ID),
 				zap.String("provider", integration.Provider),
 				zap.Error(err),
 			)
 			failed++
 		} else {
-			w.logger.Info("token refreshed successfully",
+			logger.From(itemCtx, w.logger).Info("token refreshed successfully",
 				zap.String("integration_id", integration.ID),
 				zap.String("provider", integration.Provider),
 			)
@@ -125,7 +128,7 @@ func (w *TokenRefreshWorker) refreshExpiringTokens() {
 		}
 	}
 
-	w.logger.Info("token refresh cycle completed",
+	logger.From(ctx, w.logger).Info("token refresh cycle completed",
 		zap.Int("refreshed", refreshed),
 		zap.Int("failed", failed),
 	)
@@ -140,7 +143,7 @@ func (w *TokenRefreshWorker) refreshToken(ctx context.Context, integration *Inte
 
 	// Skip if no refresh token
 	if creds.RefreshToken == "" {
-		w.logger.Debug("skipping integration without refresh token",
+		logger.From(ctx, w.logger).Debug("skipping integration without refresh token",
 			zap.String("integration_id", integration.ID),
 		)
 		return nil

@@ -7,6 +7,8 @@ import (
 	"html/template"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/logger"
 )
 
 // OrderPaidEmailInput is the data the postcheckout service hands us when a
@@ -66,7 +68,7 @@ func (c *Client) SendOrderPaid(ctx context.Context, input OrderPaidEmailInput) e
 	}
 
 	if !c.IsConfigured() {
-		c.logger.Warn("Resend not configured, skipping order paid email",
+		logger.From(ctx, c.logger).Warn("Resend not configured, skipping order paid email",
 			zap.String("to", input.ToEmail),
 			zap.String("order", input.OrderShortID),
 		)

@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/logger"
 )
 
 const (
@@ -249,7 +250,7 @@ func (t *Twilio) do(ctx context.Context, method, endpoint, body string, headers 
 
 	start := time.Now()
 	resp, err := t.HTTPClient.Do(req)
-	t.Logger.Debug("twilio http request",
+	logger.From(ctx, t.Logger).Debug("twilio http request",
 		zap.String("integration_id", t.IntegrationID),
 		zap.String("method", method),
 		zap.String("url", endpoint),

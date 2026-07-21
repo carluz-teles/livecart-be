@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/lib/logger"
 	"livecart/apps/api/lib/ratelimit"
 )
 
@@ -103,7 +104,7 @@ func (b *BaseProvider) DoRequest(ctx context.Context, method, url string, body a
 	resp, err := b.HTTPClient.Do(req)
 	duration := time.Since(startTime)
 
-	b.Logger.Debug("http request",
+	logger.From(ctx, b.Logger).Debug("http request",
 		zap.String("integration_id", b.IntegrationID),
 		zap.String("method", method),
 		zap.String("url", url),
@@ -168,7 +169,7 @@ func (b *BaseProvider) DoRequestWithRetry(ctx context.Context, maxRetries int, m
 				backoff = 5 * time.Second
 			}
 
-			b.Logger.Debug("retrying request",
+			logger.From(ctx, b.Logger).Debug("retrying request",
 				zap.Int("attempt", attempt+1),
 				zap.Duration("backoff", backoff),
 			)
@@ -199,7 +200,7 @@ func (b *BaseProvider) DoRequestWithRetry(ctx context.Context, maxRetries int, m
 				}
 			}
 
-			b.Logger.Warn("rate limited by API (429), waiting for reset",
+			logger.From(ctx, b.Logger).Warn("rate limited by API (429), waiting for reset",
 				zap.String("integration_id", b.IntegrationID),
 				zap.Int("retry_after_seconds", retryAfter),
 			)
@@ -239,7 +240,7 @@ func (b *BaseProvider) logOperation(ctx context.Context, log IntegrationLog) {
 	}
 
 	if err := b.LogFunc(ctx, log); err != nil {
-		b.Logger.Warn("failed to log integration operation",
+		logger.From(ctx, b.Logger).Warn("failed to log integration operation",
 			zap.String("integration_id", log.IntegrationID),
 			zap.Error(err),
 		)

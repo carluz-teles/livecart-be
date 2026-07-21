@@ -14,6 +14,7 @@ import (
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/lib/config"
+	"livecart/apps/api/lib/logger"
 )
 
 // Service owns the subscription lifecycle. The local table is the access
@@ -59,7 +60,7 @@ func (s *Service) EnsureTrialSubscription(ctx context.Context, storeID, storeNam
 	// non-fatal: the local trial grants access and the next call retries.
 	if s.stripe != nil && !row.StripeSubscriptionID.Valid {
 		if err := s.provisionStripe(ctx, &row, storeID, storeName, email); err != nil {
-			s.logger.Warn("stripe trial provisioning pending",
+			logger.From(ctx, s.logger).Warn("stripe trial provisioning pending",
 				zap.String("store_id", storeID),
 				zap.Error(err),
 			)
@@ -107,7 +108,7 @@ func (s *Service) provisionStripe(ctx context.Context, row *sqlc.Subscription, s
 	}
 	*row = updated
 
-	s.logger.Info("stripe trial provisioned",
+	logger.From(ctx, s.logger).Info("stripe trial provisioned",
 		zap.String("store_id", storeID),
 		zap.String("customer", customerID),
 		zap.String("subscription", sub.ID),
@@ -196,11 +197,11 @@ func (s *Service) ProcessWebhookEvent(ctx context.Context, event *StripeEvent) e
 	case "invoice.payment_failed":
 		// Grace handling rides the subscription.updated → past_due event;
 		// logged here for the audit trail.
-		s.logger.Warn("stripe invoice payment failed", zap.String("event", event.ID))
+		logger.From(ctx, s.logger).Warn("stripe invoice payment failed", zap.String("event", event.ID))
 		return nil
 
 	default:
-		s.logger.Debug("stripe event ignored", zap.String("type", event.Type))
+		logger.From(ctx, s.logger).Debug("stripe event ignored", zap.String("type", event.Type))
 		return nil
 	}
 }
@@ -242,7 +243,7 @@ func (s *Service) applySubscription(ctx context.Context, sub *StripeSubscription
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			s.logger.Warn("webhook for unknown subscription",
+			logger.From(ctx, s.logger).Warn("webhook for unknown subscription",
 				zap.String("subscription", sub.ID),
 			)
 			return nil
@@ -250,8 +251,10 @@ func (s *Service) applySubscription(ctx context.Context, sub *StripeSubscription
 		return fmt.Errorf("applying subscription update: %w", err)
 	}
 
-	s.logger.Info("subscription updated from stripe",
-		zap.String("store_id", uuidToString(row.StoreID)),
+	// Store resolvido a partir da subscription do evento — enriquece o ctx
+	// para os logs seguintes do fluxo.
+	ctx = logger.WithStore(ctx, uuidToString(row.StoreID), "")
+	logger.From(ctx, s.logger).Info("subscription updated from stripe",
 		zap.String("status", status),
 		zap.String("plan", row.Plan),
 	)
@@ -363,10 +366,13 @@ func (s *Service) completeConversion(ctx context.Context, session *CheckoutSessi
 	plan := Plan(session.Metadata["plan"])
 	subID := session.Metadata["subscription_id"]
 	if plan == "" || subID == "" {
-		s.logger.Debug("checkout session without conversion metadata — ignored",
+		logger.From(ctx, s.logger).Debug("checkout session without conversion metadata — ignored",
 			zap.String("session", session.ID))
 		return nil
 	}
+	// Store resolvido a partir do metadata da session — enriquece o ctx para
+	// os logs seguintes do fluxo.
+	ctx = logger.WithStore(ctx, session.Metadata["store_id"], "")
 	cfg, ok := Plans()[plan]
 	if !ok {
 		return fmt.Errorf("unknown plan in session metadata: %s", plan)
@@ -389,8 +395,7 @@ func (s *Service) completeConversion(ctx context.Context, session *CheckoutSessi
 		return err
 	}
 
-	s.logger.Info("subscription converted",
-		zap.String("store_id", session.Metadata["store_id"]),
+	logger.From(ctx, s.logger).Info("subscription converted",
 		zap.String("plan", string(plan)),
 		zap.String("status", activated.Status),
 	)
@@ -503,7 +508,7 @@ func (s *Service) ReportPaidGMV(ctx context.Context, storeID, cartID string, amo
 
 	sub, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
 	if err != nil {
-		s.logger.Warn("gmv not recorded: no subscription row",
+		logger.From(ctx, s.logger).Warn("gmv not recorded: no subscription row",
 			zap.String("store_id", storeID), zap.Error(err))
 		return
 	}
@@ -529,7 +534,7 @@ func (s *Service) ReportPaidGMV(ctx context.Context, storeID, cartID string, amo
 		if errors.Is(err, pgx.ErrNoRows) {
 			return // conflito (cart_id, sale) — ja registrado, retry de webhook
 		}
-		s.logger.Error("failed to record gmv ledger entry",
+		logger.From(ctx, s.logger).Error("failed to record gmv ledger entry",
 			zap.String("cart_id", cartID), zap.Error(err))
 		return
 	}
@@ -539,7 +544,7 @@ func (s *Service) ReportPaidGMV(ctx context.Context, storeID, cartID string, amo
 	if s.stripe != nil && sub.StripeCustomerID.Valid {
 		event := config.StripeGMVMeterEvent.StringOr("gmv_cents")
 		if err := s.stripe.SendMeterEvent(ctx, event, sub.StripeCustomerID.String, "gmv-"+cartID, amountCents); err != nil {
-			s.logger.Warn("failed to report gmv meter event",
+			logger.From(ctx, s.logger).Warn("failed to report gmv meter event",
 				zap.String("cart_id", cartID), zap.Error(err))
 		} else {
 			_ = s.queries.SetLedgerEntryStripeRef(ctx, sqlc.SetLedgerEntryStripeRefParams{
@@ -549,7 +554,7 @@ func (s *Service) ReportPaidGMV(ctx context.Context, storeID, cartID string, amo
 		}
 	}
 
-	s.logger.Info("gmv sale recorded",
+	logger.From(ctx, s.logger).Info("gmv sale recorded",
 		zap.String("store_id", storeID),
 		zap.String("cart_id", cartID),
 		zap.Int64("amount_cents", amountCents),
@@ -574,7 +579,7 @@ func (s *Service) OnCartRefunded(ctx context.Context, storeID, cartID string) {
 
 	sale, err := s.queries.GetLedgerSaleEntry(ctx, cid)
 	if err != nil {
-		s.logger.Debug("refund without a recorded sale — ignored",
+		logger.From(ctx, s.logger).Debug("refund without a recorded sale — ignored",
 			zap.String("cart_id", cartID))
 		return
 	}
@@ -598,7 +603,7 @@ func (s *Service) OnCartRefunded(ctx context.Context, storeID, cartID string) {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return // estorno ja registrado (retry de webhook)
 		}
-		s.logger.Error("failed to record refund ledger entry",
+		logger.From(ctx, s.logger).Error("failed to record refund ledger entry",
 			zap.String("cart_id", cartID), zap.Error(err))
 		return
 	}
@@ -609,14 +614,14 @@ func (s *Service) OnCartRefunded(ctx context.Context, storeID, cartID string) {
 			desc := fmt.Sprintf("Estorno de venda — devolução da taxa (%.2f%% de R$ %.2f)",
 				float64(sale.FeeBps)/100, float64(sale.AmountCents)/100)
 			if err := s.stripe.CreateCustomerBalanceCredit(ctx, sub.StripeCustomerID.String, feeCredit, desc); err != nil {
-				s.logger.Error("failed to create refund balance credit",
+				logger.From(ctx, s.logger).Error("failed to create refund balance credit",
 					zap.String("cart_id", cartID), zap.Error(err))
 			} else {
 				_ = s.queries.SetLedgerEntryStripeRef(ctx, sqlc.SetLedgerEntryStripeRefParams{
 					ID:        entry.ID,
 					StripeRef: pgtype.Text{String: "balance_credit", Valid: true},
 				})
-				s.logger.Info("refund fee credited",
+				logger.From(ctx, s.logger).Info("refund fee credited",
 					zap.String("store_id", storeID),
 					zap.String("cart_id", cartID),
 					zap.Int64("credit_cents", feeCredit),

@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 )
 
 // Notifier is the minimal notification surface this package depends on.
@@ -122,14 +123,13 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 			Description:            input.Description,
 		}, *input.Platform, *input.PlatformLiveID)
 		if err != nil {
-			s.logger.Error("failed to create live with session",
-				zap.String("store_id", input.StoreID),
+			logger.From(ctx, s.logger).Error("failed to create live with session",
 				zap.Error(err),
 			)
 			return CreateLiveOutput{}, err
 		}
 
-		s.logger.Info("live created with session",
+		logger.From(ctx, s.logger).Info("live created with session",
 			zap.String("event_id", event.ID),
 			zap.String("session_id", session.ID),
 			zap.String("platform", *input.Platform),
@@ -140,7 +140,7 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		// is not yet wired into the sqlc-generated INSERT.
 		if input.PixDiscountPercent != nil && *input.PixDiscountPercent > 0 {
 			if err := s.repo.SetPixDiscountPercent(ctx, event.ID, input.StoreID, *input.PixDiscountPercent); err != nil {
-				s.logger.Warn("failed to set pix_discount_percent on create",
+				logger.From(ctx, s.logger).Warn("failed to set pix_discount_percent on create",
 					zap.String("event_id", event.ID),
 					zap.Error(err),
 				)
@@ -176,14 +176,14 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 
 	if input.PixDiscountPercent != nil && *input.PixDiscountPercent > 0 {
 		if err := s.repo.SetPixDiscountPercent(ctx, event.ID, input.StoreID, *input.PixDiscountPercent); err != nil {
-			s.logger.Warn("failed to set pix_discount_percent on create",
+			logger.From(ctx, s.logger).Warn("failed to set pix_discount_percent on create",
 				zap.String("event_id", event.ID),
 				zap.Error(err),
 			)
 		}
 	}
 
-	s.logger.Info("live created without session",
+	logger.From(ctx, s.logger).Info("live created without session",
 		zap.String("event_id", event.ID),
 		zap.String("type", eventType),
 	)
@@ -237,7 +237,7 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 	// Persist the optional start/end window (raw SQL columns).
 	if input.StartsAt != nil || input.EndsAt != nil {
 		if err := s.repo.SetEventWindow(ctx, out.ID, input.StoreID, input.StartsAt, input.EndsAt); err != nil {
-			s.logger.Warn("failed to set post event window",
+			logger.From(ctx, s.logger).Warn("failed to set post event window",
 				zap.String("event_id", out.ID), zap.Error(err))
 		}
 	}
@@ -249,7 +249,7 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 		ThumbnailURL: input.MediaThumbnailURL,
 		Caption:      input.MediaCaption,
 	}); err != nil {
-		s.logger.Warn("failed to set post media metadata",
+		logger.From(ctx, s.logger).Warn("failed to set post media metadata",
 			zap.String("event_id", out.ID), zap.Error(err))
 	}
 
@@ -261,14 +261,14 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 			ProductID:    productID,
 			DisplayOrder: int32(i),
 		}); err != nil {
-			s.logger.Warn("failed to whitelist product on post event",
+			logger.From(ctx, s.logger).Warn("failed to whitelist product on post event",
 				zap.String("event_id", out.ID),
 				zap.String("product_id", productID),
 				zap.Error(err))
 		}
 	}
 
-	s.logger.Info("post event created",
+	logger.From(ctx, s.logger).Info("post event created",
 		zap.String("event_id", out.ID),
 		zap.String("media_id", input.MediaID),
 		zap.Int("product_count", len(input.ProductIDs)),
@@ -318,14 +318,14 @@ func (s *Service) EndPostEventByMediaID(ctx context.Context, mediaID string) err
 func (s *Service) SweepEndedTimedEvents(ctx context.Context) {
 	events, err := s.repo.ListEventsPastEndsAt(ctx, 200)
 	if err != nil {
-		s.logger.Error("ends_at sweep: failed to list events", zap.Error(err))
+		logger.From(ctx, s.logger).Error("ends_at sweep: failed to list events", zap.Error(err))
 		return
 	}
 	for _, ev := range events {
-		if _, err := s.End(ctx, EndLiveInput{ID: ev.EventID, StoreID: ev.StoreID}); err != nil {
-			s.logger.Error("ends_at sweep: failed to finalize event",
+		evCtx := logger.WithStore(ctx, ev.StoreID, "")
+		if _, err := s.End(evCtx, EndLiveInput{ID: ev.EventID, StoreID: ev.StoreID}); err != nil {
+			logger.From(evCtx, s.logger).Error("ends_at sweep: failed to finalize event",
 				zap.String("event_id", ev.EventID),
-				zap.String("store_id", ev.StoreID),
 				zap.Error(err))
 		}
 	}
@@ -421,7 +421,7 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 	for i, sessionRow := range sessionRows {
 		platforms, err := s.repo.ListPlatformsBySession(ctx, sessionRow.ID)
 		if err != nil {
-			s.logger.Warn("failed to list platforms for session",
+			logger.From(ctx, s.logger).Warn("failed to list platforms for session",
 				zap.String("session_id", sessionRow.ID),
 				zap.Error(err),
 			)
@@ -444,7 +444,7 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		var totalRevenue, paidRevenue int64
 		stats, err := s.repo.GetSessionStats(ctx, sessionRow.ID)
 		if err != nil {
-			s.logger.Warn("failed to get session stats",
+			logger.From(ctx, s.logger).Warn("failed to get session stats",
 				zap.String("session_id", sessionRow.ID),
 				zap.Error(err),
 			)
@@ -459,7 +459,7 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		var commentOutputs []CommentOutput
 		commentRows, err := s.repo.ListCommentsBySession(ctx, sessionRow.ID, 100, 0)
 		if err != nil {
-			s.logger.Warn("failed to list comments for session",
+			logger.From(ctx, s.logger).Warn("failed to list comments for session",
 				zap.String("session_id", sessionRow.ID),
 				zap.Error(err),
 			)
@@ -494,11 +494,11 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 	// Get product and upsell counts
 	productCount, err := s.repo.CountEventProducts(ctx, event.ID)
 	if err != nil {
-		s.logger.Warn("failed to count event products", zap.String("event_id", event.ID), zap.Error(err))
+		logger.From(ctx, s.logger).Warn("failed to count event products", zap.String("event_id", event.ID), zap.Error(err))
 	}
 	upsellCount, err := s.repo.CountEventUpsells(ctx, event.ID)
 	if err != nil {
-		s.logger.Warn("failed to count event upsells", zap.String("event_id", event.ID), zap.Error(err))
+		logger.From(ctx, s.logger).Warn("failed to count event upsells", zap.String("event_id", event.ID), zap.Error(err))
 	}
 
 	return EventOutput{
@@ -640,7 +640,7 @@ func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, e
 	// 2. End all active sessions for this event
 	sessions, err := s.repo.ListSessionsByEvent(ctx, input.ID)
 	if err != nil {
-		s.logger.Error("failed to list sessions for event",
+		logger.From(ctx, s.logger).Error("failed to list sessions for event",
 			zap.String("event_id", input.ID),
 			zap.Error(err),
 		)
@@ -649,7 +649,7 @@ func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, e
 			if session.Status == "active" || session.Status == "live" {
 				_, err := s.repo.EndSession(ctx, session.ID)
 				if err != nil {
-					s.logger.Error("failed to end session",
+					logger.From(ctx, s.logger).Error("failed to end session",
 						zap.String("session_id", session.ID),
 						zap.Error(err),
 					)
@@ -661,18 +661,21 @@ func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, e
 	// 3. Finalize all pending carts (now tied to event)
 	cartsFinalized, err := s.repo.FinalizeCartsByEvent(ctx, input.ID)
 	if err != nil {
-		s.logger.Error("failed to finalize carts",
+		logger.From(ctx, s.logger).Error("failed to finalize carts",
 			zap.String("event_id", input.ID),
 			zap.Error(err),
 		)
 	}
 
 	// 3.5. Reverse ERP stock reservations and create final sales orders (async — never blocks the response).
+	// Capture the slug before spawning detached goroutines: the request ctx is
+	// recycled by fasthttp when the response is sent.
+	storeSlug, _ := ctx.Value(logger.StoreSlugKey).(string)
 	if s.erpFinalizer != nil {
 		go func() {
-			bgCtx := context.Background()
+			bgCtx := logger.WithStore(context.Background(), input.StoreID, storeSlug)
 			if err := s.erpFinalizer.FinalizeEventERP(bgCtx, input.StoreID, event.ID); err != nil {
-				s.logger.Error("failed to finalize ERP for event",
+				logger.From(bgCtx, s.logger).Error("failed to finalize ERP for event",
 					zap.String("event_id", event.ID),
 					zap.Error(err),
 				)
@@ -691,8 +694,7 @@ func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, e
 	} else {
 		storeDefault, err := s.repo.GetStoreAutoSendSetting(ctx, input.StoreID)
 		if err != nil {
-			s.logger.Error("failed to get store auto_send setting",
-				zap.String("store_id", input.StoreID),
+			logger.From(ctx, s.logger).Error("failed to get store auto_send setting",
 				zap.Error(err),
 			)
 		} else {
@@ -700,7 +702,7 @@ func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, e
 		}
 	}
 
-	s.logger.Info("live event ended",
+	logger.From(ctx, s.logger).Info("live event ended",
 		zap.String("event_id", input.ID),
 		zap.Int("session_count", sessionCount),
 		zap.Int("carts_finalized", cartsFinalized),
@@ -709,7 +711,7 @@ func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, e
 
 	// 5. Dispatch checkout DMs (best-effort, async — never blocks the response).
 	if autoSend && s.notifier != nil {
-		go s.sendCheckoutLinksForEvent(context.Background(), input.StoreID, event.ID)
+		go s.sendCheckoutLinksForEvent(logger.WithStore(context.Background(), input.StoreID, storeSlug), input.StoreID, event.ID)
 	}
 
 	// Get full output
@@ -728,7 +730,7 @@ func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, e
 func (s *Service) sendCheckoutLinksForEvent(ctx context.Context, storeID, eventID string) {
 	carts, err := s.repo.ListCartsWithTotalByEvent(ctx, eventID)
 	if err != nil {
-		s.logger.Error("failed to list carts for event checkout dispatch",
+		logger.From(ctx, s.logger).Error("failed to list carts for event checkout dispatch",
 			zap.String("event_id", eventID),
 			zap.Error(err),
 		)
@@ -764,7 +766,7 @@ func (s *Service) sendCheckoutLinksForEvent(ctx context.Context, storeID, eventI
 			TotalItems:     c.TotalItems,
 			TotalValue:     c.TotalValue,
 		}); err != nil {
-			s.logger.Warn("failed to notify event checkout",
+			logger.From(ctx, s.logger).Warn("failed to notify event checkout",
 				zap.String("event_id", eventID),
 				zap.String("cart_id", c.ID),
 				zap.String("platform_user_id", c.PlatformUserID),
@@ -775,7 +777,7 @@ func (s *Service) sendCheckoutLinksForEvent(ctx context.Context, storeID, eventI
 		sent++
 	}
 
-	s.logger.Info("event checkout dispatch finished",
+	logger.From(ctx, s.logger).Info("event checkout dispatch finished",
 		zap.String("event_id", eventID),
 		zap.Int("sent", sent),
 		zap.Int("skipped", skipped),
@@ -807,14 +809,14 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 	// Create the session and add platform in a single transaction
 	session, platform, err := s.repo.CreateSessionWithPlatformTx(ctx, input.EventID, input.Platform, input.PlatformLiveID)
 	if err != nil {
-		s.logger.Error("failed to create session with platform",
+		logger.From(ctx, s.logger).Error("failed to create session with platform",
 			zap.String("event_id", input.EventID),
 			zap.Error(err),
 		)
 		return CreateSessionOutput{}, err
 	}
 
-	s.logger.Info("session created",
+	logger.From(ctx, s.logger).Info("session created",
 		zap.String("event_id", input.EventID),
 		zap.String("session_id", session.ID),
 		zap.String("platform", input.Platform),
@@ -917,7 +919,7 @@ func (s *Service) AddPlatform(ctx context.Context, input AddPlatformInput) (Plat
 		return PlatformOutput{}, err
 	}
 
-	s.logger.Info("platform added to session",
+	logger.From(ctx, s.logger).Info("platform added to session",
 		zap.String("session_id", input.SessionID),
 		zap.String("platform", input.Platform),
 		zap.String("platform_live_id", input.PlatformLiveID),
@@ -978,7 +980,7 @@ func (s *Service) AddToCart(ctx context.Context, input AddToCartInput) (AddToCar
 	if customerID == nil && s.customerUpserter != nil && input.StoreID != "" && input.PlatformUserID != "" {
 		id, upsertErr := s.customerUpserter.UpsertForCart(ctx, input.StoreID, input.PlatformUserID, input.PlatformHandle)
 		if upsertErr != nil {
-			s.logger.Warn("failed to upsert customer for cart",
+			logger.From(ctx, s.logger).Warn("failed to upsert customer for cart",
 				zap.String("store_id", input.StoreID),
 				zap.String("platform_user_id", input.PlatformUserID),
 				zap.Error(upsertErr),
@@ -1015,11 +1017,11 @@ func (s *Service) AddToCart(ctx context.Context, input AddToCartInput) (AddToCar
 	// Get updated cart totals
 	totalItems, totalCents, err := s.repo.GetCartTotals(ctx, cart.ID)
 	if err != nil {
-		s.logger.Warn("failed to get cart totals", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("failed to get cart totals", zap.Error(err))
 		// Continue with zero totals - notification can still be sent
 	}
 
-	s.logger.Info("added product to cart",
+	logger.From(ctx, s.logger).Info("added product to cart",
 		zap.String("cart_id", cart.ID),
 		zap.String("event_id", input.EventID),
 		zap.String("product_id", input.ProductID),
@@ -1170,13 +1172,13 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 		// Don't abort — the DM path may still work — but make the failure visible
 		// instead of silently degrading to DM-only (which fails outside the 24h
 		// window with error 2534022).
-		s.logger.Error("failed to look up buyer's latest comment for private reply",
+		logger.From(ctx, s.logger).Error("failed to look up buyer's latest comment for private reply",
 			zap.String("event_id", eventID),
 			zap.String("platform_user_id", cart.PlatformUserID),
 			zap.Error(lookupErr),
 		)
 	}
-	s.logger.Info("resend checkout message: delivery context",
+	logger.From(ctx, s.logger).Info("resend checkout message: delivery context",
 		zap.String("event_id", eventID),
 		zap.String("cart_id", cartID),
 		zap.String("platform_user_id", cart.PlatformUserID),
@@ -1194,7 +1196,7 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 		TotalItems:     cart.TotalItems,
 		TotalValue:     cart.TotalValue,
 	}); err != nil {
-		s.logger.Warn("failed to resend checkout message",
+		logger.From(ctx, s.logger).Warn("failed to resend checkout message",
 			zap.String("event_id", eventID),
 			zap.String("cart_id", cartID),
 			zap.String("platform_user_id", cart.PlatformUserID),
@@ -1210,7 +1212,7 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 		return CartWithTotalOutput{}, httpx.ErrUnprocessable("failed to send Instagram message")
 	}
 
-	s.logger.Info("checkout message resent",
+	logger.From(ctx, s.logger).Info("checkout message resent",
 		zap.String("event_id", eventID),
 		zap.String("cart_id", cartID),
 		zap.String("platform_user_id", cart.PlatformUserID),
@@ -1293,7 +1295,7 @@ func (s *Service) SetActiveProduct(ctx context.Context, eventID, storeID string,
 		return nil, err
 	}
 
-	s.logger.Info("active product updated",
+	logger.From(ctx, s.logger).Info("active product updated",
 		zap.String("event_id", eventID),
 		zap.Stringp("product_id", productID),
 	)
@@ -1319,7 +1321,7 @@ func (s *Service) SetProcessingPaused(ctx context.Context, eventID, storeID stri
 		return nil, err
 	}
 
-	s.logger.Info("processing paused state updated",
+	logger.From(ctx, s.logger).Info("processing paused state updated",
 		zap.String("event_id", eventID),
 		zap.Bool("paused", paused),
 	)
@@ -1350,7 +1352,7 @@ func (s *Service) AddEventProduct(ctx context.Context, input AddEventProductInpu
 		return EventProductOutput{}, err
 	}
 
-	s.logger.Info("added product to event whitelist",
+	logger.From(ctx, s.logger).Info("added product to event whitelist",
 		zap.String("event_id", input.EventID),
 		zap.String("product_id", input.ProductID),
 	)
@@ -1382,7 +1384,7 @@ func (s *Service) UpdateEventProduct(ctx context.Context, input UpdateEventProdu
 		return EventProductOutput{}, err
 	}
 
-	s.logger.Info("updated event product",
+	logger.From(ctx, s.logger).Info("updated event product",
 		zap.String("event_id", input.EventID),
 		zap.String("product_id", input.ID),
 	)
@@ -1402,7 +1404,7 @@ func (s *Service) DeleteEventProduct(ctx context.Context, id, eventID, storeID s
 		return err
 	}
 
-	s.logger.Info("deleted event product",
+	logger.From(ctx, s.logger).Info("deleted event product",
 		zap.String("event_id", eventID),
 		zap.String("product_id", id),
 	)
@@ -1432,7 +1434,7 @@ func (s *Service) AddEventUpsell(ctx context.Context, input AddEventUpsellInput)
 		return EventUpsellOutput{}, err
 	}
 
-	s.logger.Info("added upsell to event",
+	logger.From(ctx, s.logger).Info("added upsell to event",
 		zap.String("event_id", input.EventID),
 		zap.String("product_id", input.ProductID),
 	)
@@ -1464,7 +1466,7 @@ func (s *Service) UpdateEventUpsell(ctx context.Context, input UpdateEventUpsell
 		return EventUpsellOutput{}, err
 	}
 
-	s.logger.Info("updated event upsell",
+	logger.From(ctx, s.logger).Info("updated event upsell",
 		zap.String("event_id", input.EventID),
 		zap.String("upsell_id", input.ID),
 	)
@@ -1484,7 +1486,7 @@ func (s *Service) DeleteEventUpsell(ctx context.Context, id, eventID, storeID st
 		return err
 	}
 
-	s.logger.Info("deleted event upsell",
+	logger.From(ctx, s.logger).Info("deleted event upsell",
 		zap.String("event_id", eventID),
 		zap.String("upsell_id", id),
 	)

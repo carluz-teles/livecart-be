@@ -339,6 +339,17 @@ func (q *Queries) GetStoreNameByID(ctx context.Context, id pgtype.UUID) (GetStor
 	return i, err
 }
 
+const getStoreSlugByID = `-- name: GetStoreSlugByID :one
+SELECT slug FROM stores WHERE id = $1
+`
+
+func (q *Queries) GetStoreSlugByID(ctx context.Context, id pgtype.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, getStoreSlugByID, id)
+	var slug string
+	err := row.Scan(&slug)
+	return slug, err
+}
+
 const listStoreMembers = `-- name: ListStoreMembers :many
 SELECT id, store_id, role, created_at, updated_at, status, invited_by, invited_at, user_id FROM memberships WHERE store_id = $1 ORDER BY created_at
 `

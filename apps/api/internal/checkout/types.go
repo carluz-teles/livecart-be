@@ -654,6 +654,7 @@ type CartRow struct {
 	EventPixDiscountPercent int
 	StoreID                 string
 	StoreName               string
+	StoreSlug               string
 	StoreLogoURL            *string
 	AllowEdit               bool
 	MaxQuantityPerItem      int

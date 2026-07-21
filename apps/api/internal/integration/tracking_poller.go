@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/logger"
 )
 
 // TrackingPoller periodically pulls carrier tracking for active shipments and
@@ -96,7 +97,7 @@ func (w *TrackingPoller) pollAll() {
 func (w *TrackingPoller) pollProvider(ctx context.Context, providerName providers.ProviderName) {
 	rows, err := w.service.repo.ListShipmentsForPolling(ctx, string(providerName), 200)
 	if err != nil {
-		w.logger.Warn("failed to list shipments for polling",
+		logger.From(ctx, w.logger).Warn("failed to list shipments for polling",
 			zap.String("provider", string(providerName)),
 			zap.Error(err),
 		)
@@ -106,7 +107,7 @@ func (w *TrackingPoller) pollProvider(ctx context.Context, providerName provider
 		return
 	}
 
-	w.logger.Info("polling shipments",
+	logger.From(ctx, w.logger).Info("polling shipments",
 		zap.String("provider", string(providerName)),
 		zap.Int("count", len(rows)),
 	)
@@ -117,13 +118,13 @@ func (w *TrackingPoller) pollProvider(ctx context.Context, providerName provider
 }
 
 func (w *TrackingPoller) pollShipment(ctx context.Context, providerName providers.ProviderName, sh *ShipmentRow) {
+	ctx = logger.WithStore(ctx, sh.StoreID, "")
 	osp, err := w.service.GetShippingOrderProvider(ctx, sh.StoreID, providerName)
 	if err != nil {
 		// Integration may have been disconnected between shipment creation
 		// and now — common during poller's lifetime. Skip without raising.
-		w.logger.Debug("provider unavailable for shipment, skipping",
+		logger.From(ctx, w.logger).Debug("provider unavailable for shipment, skipping",
 			zap.String("shipment_id", sh.ID),
-			zap.String("store_id", sh.StoreID),
 			zap.Error(err),
 		)
 		return
@@ -140,7 +141,7 @@ func (w *TrackingPoller) pollShipment(ctx context.Context, providerName provider
 	}
 	result, err := osp.TrackShipment(ctx, req)
 	if err != nil {
-		w.logger.Warn("track shipment failed",
+		logger.From(ctx, w.logger).Warn("track shipment failed",
 			zap.String("shipment_id", sh.ID),
 			zap.String("tracking_code", sh.TrackingCode),
 			zap.Error(err),
@@ -166,7 +167,7 @@ func (w *TrackingPoller) pollShipment(ctx context.Context, providerName provider
 	}
 	if len(events) > 0 {
 		if err := w.service.repo.InsertTrackingEvents(ctx, sh.ID, events); err != nil {
-			w.logger.Warn("failed to persist tracking events",
+			logger.From(ctx, w.logger).Warn("failed to persist tracking events",
 				zap.String("shipment_id", sh.ID),
 				zap.Error(err),
 			)
@@ -185,7 +186,7 @@ func (w *TrackingPoller) pollShipment(ctx context.Context, providerName provider
 			lastRawName = last.RawName
 		}
 		if err := w.service.repo.UpdateShipmentStatus(ctx, sh.ID, currentStatus, lastRawCode, lastRawName, sh.TrackingCode); err != nil {
-			w.logger.Warn("failed to update shipment status",
+			logger.From(ctx, w.logger).Warn("failed to update shipment status",
 				zap.String("shipment_id", sh.ID),
 				zap.Error(err),
 			)

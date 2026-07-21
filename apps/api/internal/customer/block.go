@@ -15,6 +15,7 @@ import (
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 )
 
 // =============================================================================
@@ -191,7 +192,7 @@ func (s *Service) BlockHandle(ctx context.Context, input BlockHandleInput) (*Blo
 		return nil, err
 	}
 
-	s.logger.Info("handle blocked",
+	logger.From(ctx, s.logger).Info("handle blocked",
 		zap.String("storeId", input.StoreID.String()),
 		zap.String("handle", input.Handle),
 	)
@@ -203,7 +204,7 @@ func (s *Service) BlockHandle(ctx context.Context, input BlockHandleInput) (*Blo
 			// comments will already be ignored. The admin can retry the
 			// cleanup by toggling the block off and on, and we surface the
 			// failure via logs / Sentry.
-			s.logger.Error("failed to cancel open carts after block",
+			logger.From(ctx, s.logger).Error("failed to cancel open carts after block",
 				zap.String("storeId", input.StoreID.String()),
 				zap.String("handle", input.Handle),
 				zap.Error(err),
@@ -232,7 +233,7 @@ func (s *Service) UnblockHandle(ctx context.Context, input UnblockHandleInput) (
 		return nil, httpx.ErrNotFound(fmt.Sprintf("handle %q is not blocked", input.Handle))
 	}
 
-	s.logger.Info("handle unblocked",
+	logger.From(ctx, s.logger).Info("handle unblocked",
 		zap.String("storeId", input.StoreID.String()),
 		zap.String("handle", input.Handle),
 	)
@@ -425,4 +426,3 @@ func toBlockedHandleOutput(row *sqlc.BlockedHandle) *BlockedHandleOutput {
 	}
 	return out
 }
-

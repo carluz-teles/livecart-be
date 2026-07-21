@@ -511,6 +511,7 @@ SELECT
     c.cancelled_reason,
     le.title AS event_title,
     le.store_id,
+    s.slug AS store_slug,
     s.name AS store_name,
     s.logo_url AS store_logo_url,
     s.cart_allow_edit AS allow_edit,

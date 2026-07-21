@@ -13,6 +13,7 @@ import (
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 )
 
 // CouponLifecycle is the cart-mutation hook the coupon package implements
@@ -91,6 +92,8 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 	if err != nil {
 		return nil, err
 	}
+	// Rota pública (sem middleware de store): o store é resolvido pelo token.
+	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 
 	// Validate cart status (allow viewing paid carts so frontend can show "paid" message)
 	if cart.Status == "expired" {
@@ -116,7 +119,7 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 	// have a baseline to compare against.
 	if cart.PaymentStatus != "paid" {
 		if err := s.repo.EnsureInitialSnapshot(ctx, cart.ID); err != nil {
-			s.logger.Warn("failed to snapshot initial cart",
+			logger.From(ctx, s.logger).Warn("failed to snapshot initial cart",
 				zap.String("cart_id", cart.ID),
 				zap.Error(err),
 			)
@@ -137,7 +140,7 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 		productIDs = append(productIDs, it.ProductID)
 	}
 	if vinfo, vErr := s.repo.LoadVariantInfo(ctx, s.pool, productIDs); vErr != nil {
-		s.logger.Warn("failed to load variant info for checkout", zap.Error(vErr))
+		logger.From(ctx, s.logger).Warn("failed to load variant info for checkout", zap.Error(vErr))
 	} else {
 		for i := range items {
 			if vi, ok := vinfo[items[i].ProductID]; ok {
@@ -173,7 +176,7 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 		cart.EventFreeShipping = freeShipping
 		cart.EventPixDiscountPercent = pixPct
 	} else {
-		s.logger.Warn("failed to load event checkout flags",
+		logger.From(ctx, s.logger).Warn("failed to load event checkout flags",
 			zap.String("event_id", cart.EventID),
 			zap.Error(err),
 		)
@@ -241,7 +244,7 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 	// alguém está olhando para o checkout. Best-effort: erro aqui só vira
 	// log, a leitura segue mesmo com o sweep meio rodado.
 	if processed, err := s.integrationService.ExpireNotifiedWaitlistSweep(ctx); err != nil {
-		s.logger.Warn("inline waitlist expiration sweep failed",
+		logger.From(ctx, s.logger).Warn("inline waitlist expiration sweep failed",
 			zap.String("cart_id", cart.ID),
 			zap.Int("processed_before_err", processed),
 			zap.Error(err),
@@ -252,7 +255,7 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 	// tolerante a falha — só faz log e devolve a lista vazia se algo der
 	// errado, porque a UI degrada graciosamente sem essa seção.
 	if waitlist, wlErr := s.integrationService.ListActiveWaitlistByCart(ctx, cart.ID); wlErr != nil {
-		s.logger.Warn("failed to load waitlist for checkout",
+		logger.From(ctx, s.logger).Warn("failed to load waitlist for checkout",
 			zap.String("cart_id", cart.ID),
 			zap.Error(wlErr),
 		)
@@ -288,7 +291,7 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 	if cart.PaymentStatus == "paid" {
 		customer, address, payment, err := s.repo.ReadCartPaymentDetails(ctx, s.pool, cart.ID)
 		if err != nil {
-			s.logger.Warn("failed to read paid-cart receipt details",
+			logger.From(ctx, s.logger).Warn("failed to read paid-cart receipt details",
 				zap.String("cart_id", cart.ID),
 				zap.Error(err),
 			)
@@ -304,7 +307,7 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 		// the cart token is unguessable and only ever delivered to the buyer.
 		customer, address, err := s.repo.GetLatestPaidCustomerSnapshot(ctx, s.pool, cart.StoreID, cart.PlatformUserID, cart.ID)
 		if err != nil {
-			s.logger.Warn("failed to read returning-buyer snapshot",
+			logger.From(ctx, s.logger).Warn("failed to read returning-buyer snapshot",
 				zap.String("cart_id", cart.ID),
 				zap.Error(err),
 			)
@@ -317,7 +320,8 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 			// Tiny em background para a conversão na iniciação do pagamento
 			// encontrar o cache quente (design C). Best-effort.
 			if customer != nil {
-				go s.integrationService.PrewarmERPContact(context.Background(),
+				go s.integrationService.PrewarmERPContact(
+					logger.WithStore(context.Background(), cart.StoreID, cart.StoreSlug),
 					cart.StoreID, cart.PlatformUserID, cart.PlatformHandle,
 					customer.Name, customer.Document, customer.Email, customer.Phone)
 			}
@@ -334,6 +338,7 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 	if err != nil {
 		return nil, err
 	}
+	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 
 	// Validate cart status
 	if cart.Status == "expired" {
@@ -354,7 +359,7 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 
 	// Iniciação de pagamento via link hospedado: mesmo gancho de conversão do
 	// pedido-como-reserva (design C, flag por loja).
-	go s.integrationService.PrepareCartForPayment(context.Background(), cart.ID, cart.StoreID)
+	go s.integrationService.PrepareCartForPayment(logger.WithStore(context.Background(), cart.StoreID, cart.StoreSlug), cart.ID, cart.StoreID)
 
 	// Get cart items
 	items, err := s.repo.ListCartItems(ctx, cart.ID)
@@ -434,7 +439,7 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 		},
 	})
 	if err != nil {
-		s.logger.Error("failed to create checkout",
+		logger.From(ctx, s.logger).Error("failed to create checkout",
 			zap.String("cart_id", cart.ID),
 			zap.Error(err),
 		)
@@ -448,14 +453,14 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 		CheckoutID:        checkoutResult.CheckoutID,
 		CheckoutExpiresAt: expiresAt,
 	}); err != nil {
-		s.logger.Error("failed to update checkout info",
+		logger.From(ctx, s.logger).Error("failed to update checkout info",
 			zap.String("cart_id", cart.ID),
 			zap.Error(err),
 		)
 		// Don't fail - we already have the checkout URL
 	}
 
-	s.logger.Info("checkout generated",
+	logger.From(ctx, s.logger).Info("checkout generated",
 		zap.String("cart_id", cart.ID),
 		zap.String("checkout_id", checkoutResult.CheckoutID),
 		zap.Int64("total_amount", totalAmount),
@@ -518,6 +523,7 @@ func (s *Service) GetCheckoutConfig(ctx context.Context, input GetCheckoutConfig
 	if err != nil {
 		return nil, err
 	}
+	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 
 	// Validate cart status
 	if cart.Status == "expired" {
@@ -593,7 +599,7 @@ func (s *Service) resolveCheckoutIntegration(ctx context.Context, cart *CartRow)
 			if configErr == nil {
 				return bound, publicKey, methods, nil
 			}
-			s.logger.Warn("bound payment integration failed config, falling through to priority chain",
+			logger.From(ctx, s.logger).Warn("bound payment integration failed config, falling through to priority chain",
 				zap.String("cart_id", cart.ID),
 				zap.String("integration_id", bound.ID.String()),
 				zap.Error(configErr),
@@ -617,7 +623,7 @@ func (s *Service) resolveCheckoutIntegration(ctx context.Context, cart *CartRow)
 		candidate := candidates[i]
 		publicKey, methods, configErr := s.integrationService.GetCheckoutConfig(ctx, candidate.ID.String(), cart.StoreID)
 		if configErr != nil {
-			s.logger.Warn("payment integration failed checkout config, trying next",
+			logger.From(ctx, s.logger).Warn("payment integration failed checkout config, trying next",
 				zap.String("cart_id", cart.ID),
 				zap.String("integration_id", candidate.ID.String()),
 				zap.String("provider", candidate.ProviderName),
@@ -630,7 +636,7 @@ func (s *Service) resolveCheckoutIntegration(ctx context.Context, cart *CartRow)
 			// Binding failure is recoverable — the FE still gets a working
 			// config; subsequent calls will just re-resolve via the same
 			// priority walk and (hopefully) land on the same provider.
-			s.logger.Warn("failed to bind cart to payment integration",
+			logger.From(ctx, s.logger).Warn("failed to bind cart to payment integration",
 				zap.String("cart_id", cart.ID),
 				zap.String("integration_id", candidate.ID.String()),
 				zap.Error(bindErr),
@@ -640,7 +646,7 @@ func (s *Service) resolveCheckoutIntegration(ctx context.Context, cart *CartRow)
 	}
 
 	if lastErr != nil {
-		s.logger.Error("all payment integrations failed checkout config",
+		logger.From(ctx, s.logger).Error("all payment integrations failed checkout config",
 			zap.String("cart_id", cart.ID),
 			zap.Int("candidates", len(candidates)),
 			zap.Error(lastErr),
@@ -684,6 +690,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	if err != nil {
 		return nil, err
 	}
+	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 
 	// Validate cart status
 	if cart.Status == "expired" {
@@ -706,7 +713,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	// Iniciação de pagamento = ponto de conversão do pedido-como-reserva
 	// (design C, flag por loja). Fire-and-forget: o pagamento nunca espera o
 	// ERP — o webhook de pago retoma/adota se a conversão estiver em voo.
-	go s.integrationService.PrepareCartForPayment(context.Background(), cart.ID, cart.StoreID)
+	go s.integrationService.PrepareCartForPayment(logger.WithStore(context.Background(), cart.StoreID, cart.StoreSlug), cart.ID, cart.StoreID)
 
 	// Get cart items
 	items, err := s.repo.ListCartItems(ctx, cart.ID)
@@ -795,7 +802,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		},
 	})
 	if err != nil {
-		s.logger.Error("failed to process card payment",
+		logger.From(ctx, s.logger).Error("failed to process card payment",
 			zap.String("cart_id", cart.ID),
 			zap.String("integration_id", paymentIntegration.ID.String()),
 			zap.String("provider", paymentIntegration.ProviderName),
@@ -809,7 +816,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		// many times they retry. The FE re-tokenizes against the new public
 		// key after seeing this 422 + re-fetching /config.
 		if clearErr := s.repo.ClearCartPaymentIntegration(ctx, cart.ID); clearErr != nil {
-			s.logger.Warn("failed to clear cart payment binding after provider failure",
+			logger.From(ctx, s.logger).Warn("failed to clear cart payment binding after provider failure",
 				zap.String("cart_id", cart.ID),
 				zap.Error(clearErr),
 			)
@@ -833,7 +840,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 			// (ErrNotFound) quando o cart expirou/cancelou entre a aprovação no
 			// gateway e este write. NÃO finalizamos um cart não-pagável; o
 			// dinheiro entrou no gateway, então fica para a reconciliação (E6).
-			s.logger.Warn("card approved at gateway but cart not payable (expired/cancelled) — skipping finalization, needs reconciliation",
+			logger.From(ctx, s.logger).Warn("card approved at gateway but cart not payable (expired/cancelled) — skipping finalization, needs reconciliation",
 				zap.String("cart_id", cart.ID),
 				zap.String("payment_id", result.PaymentID),
 				zap.Error(err),
@@ -843,7 +850,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 			// (public checkout `payment` block). Failure here must not break the
 			// happy path — the comprovante just renders without these fields.
 			if err := s.repo.WriteCartCardPayment(ctx, s.pool, cart.ID, result.CardBrand, result.LastFourDigits, result.Installments, result.AuthorizationCode); err != nil {
-				s.logger.Warn("failed to persist card payment details",
+				logger.From(ctx, s.logger).Warn("failed to persist card payment details",
 					zap.String("cart_id", cart.ID),
 					zap.Error(err),
 				)
@@ -857,7 +864,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		}
 	}
 
-	s.logger.Info("card payment processed",
+	logger.From(ctx, s.logger).Info("card payment processed",
 		zap.String("cart_id", cart.ID),
 		zap.String("payment_id", result.PaymentID),
 		zap.String("status", result.Status),
@@ -884,6 +891,7 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	if err != nil {
 		return nil, err
 	}
+	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 
 	// Validate cart status
 	if cart.Status == "expired" {
@@ -906,7 +914,7 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	// Iniciação de pagamento = ponto de conversão do pedido-como-reserva
 	// (design C, flag por loja). Fire-and-forget: o pagamento nunca espera o
 	// ERP — o webhook de pago retoma/adota se a conversão estiver em voo.
-	go s.integrationService.PrepareCartForPayment(context.Background(), cart.ID, cart.StoreID)
+	go s.integrationService.PrepareCartForPayment(logger.WithStore(context.Background(), cart.StoreID, cart.StoreSlug), cart.ID, cart.StoreID)
 
 	// Get cart items
 	items, err := s.repo.ListCartItems(ctx, cart.ID)
@@ -963,7 +971,7 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 		if totalAmount < 0 {
 			totalAmount = 0
 		}
-		s.logger.Info("pix discount applied",
+		logger.From(ctx, s.logger).Info("pix discount applied",
 			zap.String("cart_id", cart.ID),
 			zap.Int("percent", cart.EventPixDiscountPercent),
 			zap.Int64("discount_cents", pixDiscountCents),
@@ -1016,7 +1024,7 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 		},
 	})
 	if err != nil {
-		s.logger.Error("failed to generate pix",
+		logger.From(ctx, s.logger).Error("failed to generate pix",
 			zap.String("cart_id", cart.ID),
 			zap.String("integration_id", paymentIntegration.ID.String()),
 			zap.String("provider", paymentIntegration.ProviderName),
@@ -1026,7 +1034,7 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 		// retry can land on the next priority integration. PIX has no token,
 		// so the FE doesn't even need a re-tokenization step here.
 		if clearErr := s.repo.ClearCartPaymentIntegration(ctx, cart.ID); clearErr != nil {
-			s.logger.Warn("failed to clear cart payment binding after pix failure",
+			logger.From(ctx, s.logger).Warn("failed to clear cart payment binding after pix failure",
 				zap.String("cart_id", cart.ID),
 				zap.Error(clearErr),
 			)
@@ -1039,13 +1047,13 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 		CartID:     cart.ID,
 		CheckoutID: result.PaymentID,
 	}); err != nil {
-		s.logger.Error("failed to update checkout info",
+		logger.From(ctx, s.logger).Error("failed to update checkout info",
 			zap.String("cart_id", cart.ID),
 			zap.Error(err),
 		)
 	}
 
-	s.logger.Info("pix payment generated",
+	logger.From(ctx, s.logger).Info("pix payment generated",
 		zap.String("cart_id", cart.ID),
 		zap.String("payment_id", result.PaymentID),
 		zap.Int64("amount", result.Amount),
@@ -1074,6 +1082,7 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 	if err != nil {
 		return nil, err
 	}
+	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 	if input.Quantity < 1 {
 		return nil, httpx.ErrUnprocessable("quantidade deve ser pelo menos 1")
 	}
@@ -1109,7 +1118,7 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 		if errors.As(syncErr, &svcErr) {
 			return nil, syncErr
 		}
-		s.logger.Error("ERP delta sync failed, rolled back cart item quantity",
+		logger.From(ctx, s.logger).Error("ERP delta sync failed, rolled back cart item quantity",
 			zap.String("cart_id", cart.ID),
 			zap.String("product_id", item.ProductID),
 			zap.Int("delta", delta),
@@ -1131,7 +1140,7 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 		UnitPrice:      item.UnitPrice,
 		ERPMovementID:  movementID,
 	}); err != nil {
-		s.logger.Warn("cart item quantity changed but mutation log write failed",
+		logger.From(ctx, s.logger).Warn("cart item quantity changed but mutation log write failed",
 			zap.String("cart_id", cart.ID),
 			zap.String("product_id", item.ProductID),
 			zap.Error(err),
@@ -1144,7 +1153,7 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 	// promover o próximo da fila. Best-effort em goroutine para não
 	// bloquear o response do checkout.
 	if delta < 0 {
-		go s.integrationService.ProcessWaitlistForProduct(context.Background(), cart.EventID, item.ProductID, cart.StoreID)
+		go s.integrationService.ProcessWaitlistForProduct(logger.WithStore(context.Background(), cart.StoreID, cart.StoreSlug), cart.EventID, item.ProductID, cart.StoreID)
 	}
 
 	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
@@ -1156,6 +1165,7 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 	if err != nil {
 		return nil, err
 	}
+	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 
 	if err := s.repo.EnsureInitialSnapshot(ctx, cart.ID); err != nil {
 		return nil, err
@@ -1171,7 +1181,7 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 	if syncErr != nil {
 		// Re-create the row at the original quantity to keep state consistent.
 		if _, restoreErr := s.repo.CreateCartItem(ctx, cart.ID, item.ProductID, item.Quantity, item.UnitPrice); restoreErr != nil {
-			s.logger.Error("failed to restore cart item after ERP failure — manual intervention needed",
+			logger.From(ctx, s.logger).Error("failed to restore cart item after ERP failure — manual intervention needed",
 				zap.String("cart_id", cart.ID),
 				zap.String("product_id", item.ProductID),
 				zap.Error(restoreErr),
@@ -1181,7 +1191,7 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 		if errors.As(syncErr, &svcErr) {
 			return nil, syncErr
 		}
-		s.logger.Error("ERP reversal failed on remove, restored cart item",
+		logger.From(ctx, s.logger).Error("ERP reversal failed on remove, restored cart item",
 			zap.String("cart_id", cart.ID),
 			zap.String("product_id", item.ProductID),
 			zap.Error(syncErr),
@@ -1198,7 +1208,7 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 		UnitPrice:      item.UnitPrice,
 		ERPMovementID:  movementID,
 	}); err != nil {
-		s.logger.Warn("item removed but mutation log write failed",
+		logger.From(ctx, s.logger).Warn("item removed but mutation log write failed",
 			zap.String("cart_id", cart.ID),
 			zap.String("product_id", item.ProductID),
 			zap.Error(err),
@@ -1208,7 +1218,7 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 	s.reevaluateCouponAfterCartMutation(ctx, cart.ID)
 
 	// Estoque liberado pela remoção — promove o próximo da fila se houver.
-	go s.integrationService.ProcessWaitlistForProduct(context.Background(), cart.EventID, item.ProductID, cart.StoreID)
+	go s.integrationService.ProcessWaitlistForProduct(logger.WithStore(context.Background(), cart.StoreID, cart.StoreSlug), cart.EventID, item.ProductID, cart.StoreID)
 
 	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
 }
@@ -1223,12 +1233,13 @@ func (s *Service) DropFromWaitlist(ctx context.Context, input DropFromWaitlistIn
 	if err != nil {
 		return nil, err
 	}
+	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 	if input.WaitlistItemID == "" {
 		return nil, httpx.ErrBadRequest("waitlist id is required")
 	}
 	changed, err := s.integrationService.CancelWaitlistItem(ctx, input.WaitlistItemID, cart.ID)
 	if err != nil {
-		s.logger.Warn("failed to cancel waitlist item",
+		logger.From(ctx, s.logger).Warn("failed to cancel waitlist item",
 			zap.String("cart_id", cart.ID),
 			zap.String("waitlist_item_id", input.WaitlistItemID),
 			zap.Error(err),
@@ -1249,6 +1260,7 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 	if err != nil {
 		return nil, err
 	}
+	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 	if input.Quantity < 1 {
 		return nil, httpx.ErrUnprocessable("quantidade deve ser pelo menos 1")
 	}
@@ -1325,7 +1337,7 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 		UnitPrice:      cfg.UnitPrice,
 		ERPMovementID:  movementID,
 	}); err != nil {
-		s.logger.Warn("cart item added but mutation log write failed",
+		logger.From(ctx, s.logger).Warn("cart item added but mutation log write failed",
 			zap.String("cart_id", cart.ID),
 			zap.String("product_id", input.ProductID),
 			zap.Error(err),
@@ -1348,7 +1360,7 @@ func (s *Service) reevaluateCouponAfterCartMutation(ctx context.Context, cartID 
 		return
 	}
 	if err := s.couponLifecycle.OnCartMutated(ctx, cartID); err != nil {
-		s.logger.Warn("coupon re-evaluation after cart mutation failed",
+		logger.From(ctx, s.logger).Warn("coupon re-evaluation after cart mutation failed",
 			zap.String("cart_id", cartID),
 			zap.Error(err),
 		)

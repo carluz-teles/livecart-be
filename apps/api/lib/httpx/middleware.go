@@ -46,6 +46,10 @@ func RequestLogger(log *zap.Logger) fiber.Handler {
 			fields = append(fields, zap.String("store_id", storeID))
 		}
 
+		if storeSlug := GetStoreSlug(c); storeSlug != "" {
+			fields = append(fields, zap.String("store_slug", storeSlug))
+		}
+
 		log.Info("request", fields...)
 
 		return err
@@ -112,11 +116,32 @@ func SubscriptionMiddleware() fiber.Handler {
 	}
 }
 
+// StoreSlugResolver resolves a store ID to its slug (log enrichment).
+type StoreSlugResolver interface {
+	GetSlugByID(ctx context.Context, storeID string) (string, error)
+}
+
+// WebhookStoreContext seta store_id/store_slug nos Locals a partir do param
+// :storeId da rota de webhook, para que o access log e logger.From carreguem o
+// store. Falha na resolução do slug não bloqueia o webhook — segue sem slug.
+// Registrar como handler na própria rota (não via Use) para o param existir.
+func WebhookStoreContext(resolver StoreSlugResolver) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		if storeID := c.Params("storeId"); storeID != "" {
+			c.Locals("store_id", storeID)
+			if slug, err := resolver.GetSlugByID(c.Context(), storeID); err == nil && slug != "" {
+				c.Locals("store_slug", slug)
+			}
+		}
+		return c.Next()
+	}
+}
+
 // StoreAccessValidator validates if a user has access to a store
 type StoreAccessValidator interface {
 	ValidateStoreAccess(ctx context.Context, clerkUserID, storeID string) (bool, error)
-	// GetStoreAccessInfo returns membershipID, role, userID (internal UUID), error
-	GetStoreAccessInfo(ctx context.Context, clerkUserID, storeID string) (membershipID string, role string, userID string, err error)
+	// GetStoreAccessInfo returns membershipID, role, userID (internal UUID), storeSlug, error
+	GetStoreAccessInfo(ctx context.Context, clerkUserID, storeID string) (membershipID string, role string, userID string, storeSlug string, err error)
 }
 
 // InternalUserResolver resolves a Clerk user ID to its internal UUID. Used by
@@ -158,7 +183,7 @@ func StoreAccessMiddleware(validator StoreAccessValidator) fiber.Handler {
 			return c.Status(fiber.StatusUnauthorized).JSON(Envelope{Error: "unauthorized"})
 		}
 
-		membershipID, role, internalUserID, err := validator.GetStoreAccessInfo(c.Context(), clerkUserID, storeID)
+		membershipID, role, internalUserID, storeSlug, err := validator.GetStoreAccessInfo(c.Context(), clerkUserID, storeID)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(Envelope{Error: "failed to validate store access"})
 		}
@@ -167,8 +192,11 @@ func StoreAccessMiddleware(validator StoreAccessValidator) fiber.Handler {
 			return c.Status(fiber.StatusForbidden).JSON(Envelope{Error: "you don't have access to this store"})
 		}
 
-		// Set store info in context for handlers
+		// Set store info in context for handlers. store_id/store_slug também são
+		// lidos via ctx.Value pelos services (logger.From) — Locals grava no
+		// UserValue do fasthttp, que é o Value do c.Context().
 		c.Locals("store_id", storeID)
+		c.Locals("store_slug", storeSlug)
 		c.Locals("store_user_id", membershipID)     // Membership ID for this store
 		c.Locals("store_role", role)                 // Role in this store
 		c.Locals("internal_user_id", internalUserID) // Internal user UUID
@@ -228,6 +256,13 @@ func GetUserID(c *fiber.Ctx) string {
 
 func GetStoreID(c *fiber.Ctx) string {
 	if v := c.Locals("store_id"); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+func GetStoreSlug(c *fiber.Ctx) string {
+	if v := c.Locals("store_slug"); v != nil {
 		return v.(string)
 	}
 	return ""

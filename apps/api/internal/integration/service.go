@@ -30,6 +30,7 @@ import (
 	"livecart/apps/api/lib/crypto"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/idempotency"
+	"livecart/apps/api/lib/logger"
 	"livecart/apps/api/lib/ratelimit"
 	"livecart/apps/api/lib/storage"
 )
@@ -603,7 +604,7 @@ func (s *Service) RecordWebhookPing(ctx context.Context, storeID, provider strin
 	metadata["webhookLastPingAt"] = time.Now().UTC().Format(time.RFC3339)
 
 	if err := s.repo.UpdateMetadata(ctx, integration.ID, metadata); err != nil {
-		s.logger.Warn("failed to stamp webhook ping",
+		logger.From(ctx, s.logger).Warn("failed to stamp webhook ping",
 			zap.String("store_id", storeID),
 			zap.String("provider", provider),
 			zap.Error(err),
@@ -640,7 +641,7 @@ func (s *Service) handleMercadoPagoCallback(ctx context.Context, input OAuthCall
 	// Retrieve OAuth state (includes code_verifier for PKCE)
 	oauthState, err := s.repo.GetOAuthState(ctx, input.State)
 	if err != nil {
-		s.logger.Error("OAuth state not found or expired",
+		logger.From(ctx, s.logger).Error("OAuth state not found or expired",
 			zap.String("state", input.State),
 			zap.Error(err),
 		)
@@ -667,7 +668,7 @@ func (s *Service) handleMercadoPagoCallback(ctx context.Context, input OAuthCall
 	// Add test_token parameter to get TEST credentials instead of production
 	if config.MercadoPagoTestMode.String() == "true" {
 		payload["test_token"] = "true"
-		s.logger.Info("Mercado Pago OAuth: requesting TEST credentials (test_token=true)")
+		logger.From(ctx, s.logger).Info("Mercado Pago OAuth: requesting TEST credentials (test_token=true)")
 	}
 
 	payloadBytes, _ := json.Marshal(payload)
@@ -688,7 +689,7 @@ func (s *Service) handleMercadoPagoCallback(ctx context.Context, input OAuthCall
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		s.logger.Error("OAuth token exchange failed",
+		logger.From(ctx, s.logger).Error("OAuth token exchange failed",
 			zap.Int("status", resp.StatusCode),
 			zap.String("body", string(body)),
 		)
@@ -766,7 +767,7 @@ func (s *Service) handleMercadoPagoCallback(ctx context.Context, input OAuthCall
 		integrationID = row.ID
 	}
 
-	s.logger.Info("Mercado Pago OAuth completed",
+	logger.From(ctx, s.logger).Info("Mercado Pago OAuth completed",
 		zap.String("store_id", storeID),
 		zap.String("integration_id", integrationID),
 		zap.Int64("mp_user_id", tokenResp.UserID),
@@ -807,7 +808,7 @@ func (s *Service) handleTinyCallback(ctx context.Context, input OAuthCallbackInp
 	} else if clientID != "" {
 		clientIDPrefix = clientID
 	}
-	s.logger.Info("Tiny OAuth token exchange - credentials loaded",
+	logger.From(ctx, s.logger).Info("Tiny OAuth token exchange - credentials loaded",
 		zap.String("store_id", storeID),
 		zap.String("integration_id", existing.ID),
 		zap.String("client_id_prefix", clientIDPrefix),
@@ -830,7 +831,7 @@ func (s *Service) handleTinyCallback(ctx context.Context, input OAuthCallbackInp
 	formData.Set("code", input.Code)
 	formData.Set("redirect_uri", redirectURI)
 
-	s.logger.Info("Tiny OAuth token exchange - request params",
+	logger.From(ctx, s.logger).Info("Tiny OAuth token exchange - request params",
 		zap.String("redirect_uri", redirectURI),
 		zap.Bool("has_code", input.Code != ""),
 	)
@@ -852,7 +853,7 @@ func (s *Service) handleTinyCallback(ctx context.Context, input OAuthCallbackInp
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		s.logger.Error("Tiny OAuth token exchange failed",
+		logger.From(ctx, s.logger).Error("Tiny OAuth token exchange failed",
 			zap.Int("status", resp.StatusCode),
 			zap.String("body", string(body)),
 		)
@@ -870,7 +871,7 @@ func (s *Service) handleTinyCallback(ctx context.Context, input OAuthCallbackInp
 	}
 
 	// Log token expiration info for debugging
-	s.logger.Info("Tiny OAuth token received",
+	logger.From(ctx, s.logger).Info("Tiny OAuth token received",
 		zap.Int("expires_in", tokenResp.ExpiresIn),
 		zap.Bool("has_access_token", tokenResp.AccessToken != ""),
 		zap.Bool("has_refresh_token", tokenResp.RefreshToken != ""),
@@ -880,7 +881,7 @@ func (s *Service) handleTinyCallback(ctx context.Context, input OAuthCallbackInp
 	// Tiny access tokens typically last about 4 hours
 	expiresInSeconds := tokenResp.ExpiresIn
 	if expiresInSeconds <= 0 {
-		s.logger.Warn("Tiny OAuth: expires_in is 0 or negative, defaulting to 4 hours",
+		logger.From(ctx, s.logger).Warn("Tiny OAuth: expires_in is 0 or negative, defaulting to 4 hours",
 			zap.Int("original_expires_in", tokenResp.ExpiresIn),
 		)
 		expiresInSeconds = 14400 // 4 hours in seconds
@@ -899,7 +900,7 @@ func (s *Service) handleTinyCallback(ctx context.Context, input OAuthCallbackInp
 		},
 	}
 
-	s.logger.Info("Tiny OAuth credentials created",
+	logger.From(ctx, s.logger).Info("Tiny OAuth credentials created",
 		zap.Time("expires_at", expiresAt),
 		zap.Int("expires_in_seconds_used", expiresInSeconds),
 	)
@@ -922,7 +923,7 @@ func (s *Service) handleTinyCallback(ctx context.Context, input OAuthCallbackInp
 		return nil, fmt.Errorf("updating status: %w", err)
 	}
 
-	s.logger.Info("Tiny OAuth completed",
+	logger.From(ctx, s.logger).Info("Tiny OAuth completed",
 		zap.String("store_id", storeID),
 		zap.String("integration_id", existing.ID),
 	)
@@ -948,7 +949,7 @@ func (s *Service) handleInstagramCallback(ctx context.Context, input OAuthCallba
 	// Retrieve OAuth state
 	oauthState, err := s.repo.GetOAuthState(ctx, input.State)
 	if err != nil {
-		s.logger.Error("OAuth state not found or expired",
+		logger.From(ctx, s.logger).Error("OAuth state not found or expired",
 			zap.String("state", input.State),
 			zap.Error(err),
 		)
@@ -969,7 +970,7 @@ func (s *Service) handleInstagramCallback(ctx context.Context, input OAuthCallba
 	// Step 2: Exchange short-lived token for long-lived token
 	longLivedToken, expiresIn, err := s.exchangeInstagramLongLivedToken(ctx, appSecret, shortLivedToken)
 	if err != nil {
-		s.logger.Warn("failed to get long-lived token, using short-lived",
+		logger.From(ctx, s.logger).Warn("failed to get long-lived token, using short-lived",
 			zap.Error(err),
 		)
 		// Fall back to short-lived token (1 hour)
@@ -980,7 +981,7 @@ func (s *Service) handleInstagramCallback(ctx context.Context, input OAuthCallba
 	// Step 3: Get user profile info (username)
 	username, err := s.getInstagramUserProfile(ctx, longLivedToken)
 	if err != nil {
-		s.logger.Warn("failed to get Instagram username",
+		logger.From(ctx, s.logger).Warn("failed to get Instagram username",
 			zap.Error(err),
 		)
 		username = instagramUserID // fallback to user ID
@@ -1041,7 +1042,7 @@ func (s *Service) handleInstagramCallback(ctx context.Context, input OAuthCallba
 		integrationID = row.ID
 	}
 
-	s.logger.Info("Instagram OAuth completed",
+	logger.From(ctx, s.logger).Info("Instagram OAuth completed",
 		zap.String("store_id", storeID),
 		zap.String("integration_id", integrationID),
 		zap.String("instagram_user_id", instagramUserID),
@@ -1055,7 +1056,7 @@ func (s *Service) handleInstagramCallback(ctx context.Context, input OAuthCallba
 	// silêncio. Best-effort aqui para não quebrar a conexão; o resultado fica
 	// no log e o lojista pode reexecutar por EnsureInstagramWebhookSubscription.
 	if err := s.SubscribeInstagramWebhooks(ctx, storeID); err != nil {
-		s.logger.Error("instagram connected BUT webhook subscription failed — story/DM sales will not work until this is fixed",
+		logger.From(ctx, s.logger).Error("instagram connected BUT webhook subscription failed — story/DM sales will not work until this is fixed",
 			zap.String("store_id", storeID),
 			zap.String("integration_id", integrationID),
 			zap.Error(err),
@@ -1088,7 +1089,7 @@ func (s *Service) SubscribeInstagramWebhooks(ctx context.Context, storeID string
 	if err := subscriber.SubscribeWebhooks(ctx); err != nil {
 		return fmt.Errorf("subscribing instagram webhooks: %w", err)
 	}
-	s.logger.Info("instagram webhook subscription ensured",
+	logger.From(ctx, s.logger).Info("instagram webhook subscription ensured",
 		zap.String("store_id", storeID),
 	)
 	return nil
@@ -1139,7 +1140,7 @@ func (s *Service) exchangeInstagramCode(ctx context.Context, appID, appSecret, r
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		s.logger.Error("Instagram token exchange failed",
+		logger.From(ctx, s.logger).Error("Instagram token exchange failed",
 			zap.Int("status", resp.StatusCode),
 			zap.String("body", string(body)),
 		)
@@ -1180,7 +1181,7 @@ func (s *Service) exchangeInstagramLongLivedToken(ctx context.Context, appSecret
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		s.logger.Error("Instagram long-lived token exchange failed",
+		logger.From(ctx, s.logger).Error("Instagram long-lived token exchange failed",
 			zap.Int("status", resp.StatusCode),
 			zap.String("body", string(body)),
 		)
@@ -1221,7 +1222,7 @@ func (s *Service) getInstagramUserProfile(ctx context.Context, accessToken strin
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		s.logger.Error("Instagram profile fetch failed",
+		logger.From(ctx, s.logger).Error("Instagram profile fetch failed",
 			zap.Int("status", resp.StatusCode),
 			zap.String("body", string(body)),
 		)
@@ -1261,7 +1262,7 @@ func (s *Service) RefreshInstagramToken(ctx context.Context, accessToken string)
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		s.logger.Error("Instagram token refresh failed",
+		logger.From(ctx, s.logger).Error("Instagram token refresh failed",
 			zap.Int("status", resp.StatusCode),
 			zap.String("body", string(body)),
 		)
@@ -1377,7 +1378,7 @@ func (s *Service) GetShippingProviders(ctx context.Context, storeID string) ([]p
 		}
 		provider, err := s.createProviderFromRow(ctx, &rows[i])
 		if err != nil {
-			s.logger.Warn("failed to instantiate shipping provider — skipping",
+			logger.From(ctx, s.logger).Warn("failed to instantiate shipping provider — skipping",
 				zap.String("integration_id", rows[i].ID),
 				zap.String("provider", rows[i].Provider),
 				zap.Error(err),
@@ -1386,7 +1387,7 @@ func (s *Service) GetShippingProviders(ctx context.Context, storeID string) ([]p
 		}
 		sp, ok := provider.(providers.ShippingProvider)
 		if !ok {
-			s.logger.Warn("integration is marked as shipping but does not implement ShippingProvider",
+			logger.From(ctx, s.logger).Warn("integration is marked as shipping but does not implement ShippingProvider",
 				zap.String("integration_id", rows[i].ID),
 				zap.String("provider", rows[i].Provider),
 			)
@@ -1795,7 +1796,7 @@ func (s *Service) SendInstagramDM(ctx context.Context, storeID, recipientID, tex
 	}
 
 	if err := socialProvider.SendDirectMessage(ctx, recipientID, text); err != nil {
-		s.logger.Warn("failed to send instagram dm",
+		logger.From(ctx, s.logger).Warn("failed to send instagram dm",
 			zap.String("store_id", storeID),
 			zap.String("recipient_id", recipientID),
 			zap.Error(err),
@@ -1803,7 +1804,7 @@ func (s *Service) SendInstagramDM(ctx context.Context, storeID, recipientID, tex
 		return err
 	}
 
-	s.logger.Info("instagram dm sent",
+	logger.From(ctx, s.logger).Info("instagram dm sent",
 		zap.String("store_id", storeID),
 		zap.String("recipient_id", recipientID),
 	)
@@ -1834,7 +1835,7 @@ func (s *Service) ReplyToInstagramComment(ctx context.Context, storeID, commentI
 
 	// Use Private Reply to send a DM in response to the comment
 	if err := socialProvider.SendPrivateReply(ctx, commentID, text); err != nil {
-		s.logger.Warn("failed to send private reply to instagram comment",
+		logger.From(ctx, s.logger).Warn("failed to send private reply to instagram comment",
 			zap.String("store_id", storeID),
 			zap.String("comment_id", commentID),
 			zap.Error(err),
@@ -1845,11 +1846,11 @@ func (s *Service) ReplyToInstagramComment(ctx context.Context, storeID, commentI
 	// Instagram allows exactly ONE private reply per comment — record that this
 	// one is spent so the resend lookup picks a different (fresh) comment.
 	if err := s.repo.MarkLiveCommentPrivateReplyUsed(ctx, commentID); err != nil {
-		s.logger.Warn("failed to mark private reply as used",
+		logger.From(ctx, s.logger).Warn("failed to mark private reply as used",
 			zap.String("comment_id", commentID), zap.Error(err))
 	}
 
-	s.logger.Info("instagram private reply sent",
+	logger.From(ctx, s.logger).Info("instagram private reply sent",
 		zap.String("store_id", storeID),
 		zap.String("comment_id", commentID),
 	)
@@ -1886,14 +1887,14 @@ func (s *Service) PublicReplyToInstagramComment(ctx context.Context, storeID, co
 		return err
 	}
 	if err := provider.ReplyToComment(ctx, commentID, text); err != nil {
-		s.logger.Warn("failed to post public reply to instagram comment",
+		logger.From(ctx, s.logger).Warn("failed to post public reply to instagram comment",
 			zap.String("store_id", storeID),
 			zap.String("comment_id", commentID),
 			zap.Error(err),
 		)
 		return err
 	}
-	s.logger.Info("instagram public reply posted",
+	logger.From(ctx, s.logger).Info("instagram public reply posted",
 		zap.String("store_id", storeID),
 		zap.String("comment_id", commentID),
 	)
@@ -1907,7 +1908,7 @@ func (s *Service) HideInstagramComment(ctx context.Context, storeID, commentID s
 		return err
 	}
 	if err := provider.HideComment(ctx, commentID, hidden); err != nil {
-		s.logger.Warn("failed to hide instagram comment",
+		logger.From(ctx, s.logger).Warn("failed to hide instagram comment",
 			zap.String("store_id", storeID),
 			zap.String("comment_id", commentID),
 			zap.Bool("hidden", hidden),
@@ -1918,10 +1919,10 @@ func (s *Service) HideInstagramComment(ctx context.Context, storeID, commentID s
 	// Mirror the hidden state locally: a hidden comment can't receive a private
 	// reply, so the resend lookup must skip it (and pick it back up on unhide).
 	if err := s.repo.SetLiveCommentHidden(ctx, commentID, hidden); err != nil {
-		s.logger.Warn("failed to mirror comment hidden state",
+		logger.From(ctx, s.logger).Warn("failed to mirror comment hidden state",
 			zap.String("comment_id", commentID), zap.Error(err))
 	}
-	s.logger.Info("instagram comment hidden",
+	logger.From(ctx, s.logger).Info("instagram comment hidden",
 		zap.String("store_id", storeID),
 		zap.String("comment_id", commentID),
 		zap.Bool("hidden", hidden),
@@ -1936,7 +1937,7 @@ func (s *Service) DeleteInstagramComment(ctx context.Context, storeID, commentID
 		return err
 	}
 	if err := provider.DeleteComment(ctx, commentID); err != nil {
-		s.logger.Warn("failed to delete instagram comment",
+		logger.From(ctx, s.logger).Warn("failed to delete instagram comment",
 			zap.String("store_id", storeID),
 			zap.String("comment_id", commentID),
 			zap.Error(err),
@@ -1947,10 +1948,10 @@ func (s *Service) DeleteInstagramComment(ctx context.Context, storeID, commentID
 	// like it left the Instagram post. This also excludes it from the resend
 	// lookup — a deleted comment can never receive a private reply.
 	if err := s.repo.MarkLiveCommentDeleted(ctx, commentID); err != nil {
-		s.logger.Warn("failed to mirror comment deletion",
+		logger.From(ctx, s.logger).Warn("failed to mirror comment deletion",
 			zap.String("comment_id", commentID), zap.Error(err))
 	}
-	s.logger.Info("instagram comment deleted",
+	logger.From(ctx, s.logger).Info("instagram comment deleted",
 		zap.String("store_id", storeID),
 		zap.String("comment_id", commentID),
 	)
@@ -1980,14 +1981,14 @@ func (s *Service) FetchInstagramLives(ctx context.Context, storeID string) ([]pr
 
 	lives, err := socialProvider.GetActiveLives(ctx)
 	if err != nil {
-		s.logger.Warn("failed to fetch instagram lives",
+		logger.From(ctx, s.logger).Warn("failed to fetch instagram lives",
 			zap.String("store_id", storeID),
 			zap.Error(err),
 		)
 		return nil, err
 	}
 
-	s.logger.Info("fetched instagram lives",
+	logger.From(ctx, s.logger).Info("fetched instagram lives",
 		zap.String("store_id", storeID),
 		zap.Int("count", len(lives)),
 	)
@@ -2004,13 +2005,13 @@ func (s *Service) FetchInstagramMedia(ctx context.Context, storeID string, limit
 	}
 	page, err := provider.GetUserMedia(ctx, limit, after)
 	if err != nil {
-		s.logger.Warn("failed to fetch instagram media",
+		logger.From(ctx, s.logger).Warn("failed to fetch instagram media",
 			zap.String("store_id", storeID),
 			zap.Error(err),
 		)
 		return nil, err
 	}
-	s.logger.Info("fetched instagram media",
+	logger.From(ctx, s.logger).Info("fetched instagram media",
 		zap.String("store_id", storeID),
 		zap.Int("count", len(page.Posts)),
 	)
@@ -2037,7 +2038,7 @@ func (s *Service) publishInstagramPostEvent(ctx context.Context, input CreateIns
 	// Publish the image post.
 	mediaID, err := provider.PublishImagePost(ctx, input.ImageURL, input.Caption)
 	if err != nil {
-		s.logger.Warn("failed to publish instagram image post",
+		logger.From(ctx, s.logger).Warn("failed to publish instagram image post",
 			zap.String("store_id", input.StoreID), zap.Error(err))
 		// Clean up the uploaded image even when publishing fails, so a failed
 		// attempt doesn't leave an orphan in storage.
@@ -2076,14 +2077,14 @@ func (s *Service) publishInstagramPostEvent(ctx context.Context, input CreateIns
 	if err != nil {
 		// The post is already live on Instagram; surface the event error so the
 		// merchant can retry binding via "select a post".
-		s.logger.Error("post published but event creation failed",
+		logger.From(ctx, s.logger).Error("post published but event creation failed",
 			zap.String("store_id", input.StoreID),
 			zap.String("media_id", mediaID),
 			zap.Error(err))
 		return live.CreateLiveOutput{}, err
 	}
 
-	s.logger.Info("instagram post created and event bound",
+	logger.From(ctx, s.logger).Info("instagram post created and event bound",
 		zap.String("store_id", input.StoreID),
 		zap.String("media_id", mediaID),
 		zap.String("event_id", out.ID),
@@ -2099,15 +2100,15 @@ func (s *Service) deleteTransientImage(ctx context.Context, key string) {
 		return
 	}
 	if s.storage == nil {
-		s.logger.Warn("cannot delete post image: storage not wired", zap.String("key", key))
+		logger.From(ctx, s.logger).Warn("cannot delete post image: storage not wired", zap.String("key", key))
 		return
 	}
 	if err := s.storage.DeleteByKey(ctx, key); err != nil {
-		s.logger.Error("failed to delete post image from storage",
+		logger.From(ctx, s.logger).Error("failed to delete post image from storage",
 			zap.String("key", key), zap.Error(err))
 		return
 	}
-	s.logger.Info("deleted transient post image", zap.String("key", key))
+	logger.From(ctx, s.logger).Info("deleted transient post image", zap.String("key", key))
 }
 
 // publishWithIdempotency dedupes a publish+bind so a retried submit (e.g. the
@@ -2164,11 +2165,11 @@ func (s *Service) publishWithIdempotency(
 	}
 
 	if cached, err := s.idempotency.Check(ctx, req); err != nil {
-		s.logger.Warn("instagram publish idempotency check failed", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("instagram publish idempotency check failed", zap.Error(err))
 	} else if cached != nil && cached.Found {
 		var out live.CreateLiveOutput
 		if json.Unmarshal(cached.Response, &out) == nil && out.ID != "" {
-			s.logger.Info("instagram publish deduped, returning original event",
+			logger.From(ctx, s.logger).Info("instagram publish deduped, returning original event",
 				zap.String("store_id", input.StoreID),
 				zap.String("operation", operation),
 				zap.String("event_id", out.ID))
@@ -2182,7 +2183,7 @@ func (s *Service) publishWithIdempotency(
 	rec, err := s.idempotency.Start(ctx, req)
 	if err != nil {
 		// Couldn't record the attempt — publish anyway rather than block the user.
-		s.logger.Warn("instagram publish idempotency start failed", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("instagram publish idempotency start failed", zap.Error(err))
 		return publish()
 	}
 
@@ -2222,7 +2223,7 @@ func (s *Service) publishInstagramReelEvent(ctx context.Context, input CreateIns
 
 	mediaID, err := provider.PublishReel(ctx, videoURL, input.Caption)
 	if err != nil {
-		s.logger.Warn("failed to publish instagram reel",
+		logger.From(ctx, s.logger).Warn("failed to publish instagram reel",
 			zap.String("store_id", input.StoreID), zap.Error(err))
 		s.deleteTransientImage(ctx, input.ImageKey)
 		return live.CreateLiveOutput{}, httpx.ErrUnprocessable("failed to publish the reel on Instagram")
@@ -2254,13 +2255,13 @@ func (s *Service) publishInstagramReelEvent(ctx context.Context, input CreateIns
 		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
 	})
 	if err != nil {
-		s.logger.Error("reel published but event creation failed",
+		logger.From(ctx, s.logger).Error("reel published but event creation failed",
 			zap.String("store_id", input.StoreID),
 			zap.String("media_id", mediaID), zap.Error(err))
 		return live.CreateLiveOutput{}, err
 	}
 
-	s.logger.Info("instagram reel created and event bound",
+	logger.From(ctx, s.logger).Info("instagram reel created and event bound",
 		zap.String("store_id", input.StoreID),
 		zap.String("media_id", mediaID),
 		zap.String("event_id", out.ID),
@@ -2289,7 +2290,7 @@ func (s *Service) publishInstagramStoryEvent(ctx context.Context, input CreateIn
 
 	mediaID, err := provider.PublishStory(ctx, mediaURL, isVideo)
 	if err != nil {
-		s.logger.Warn("failed to publish instagram story",
+		logger.From(ctx, s.logger).Warn("failed to publish instagram story",
 			zap.String("store_id", input.StoreID), zap.Error(err))
 		s.deleteTransientImage(ctx, input.ImageKey)
 		return live.CreateLiveOutput{}, httpx.ErrUnprocessable("failed to publish the story on Instagram")
@@ -2327,13 +2328,13 @@ func (s *Service) publishInstagramStoryEvent(ctx context.Context, input CreateIn
 		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
 	})
 	if err != nil {
-		s.logger.Error("story published but event creation failed",
+		logger.From(ctx, s.logger).Error("story published but event creation failed",
 			zap.String("store_id", input.StoreID),
 			zap.String("media_id", mediaID), zap.Error(err))
 		return live.CreateLiveOutput{}, err
 	}
 
-	s.logger.Info("instagram story created and event bound",
+	logger.From(ctx, s.logger).Info("instagram story created and event bound",
 		zap.String("store_id", input.StoreID),
 		zap.String("media_id", mediaID),
 		zap.String("event_id", out.ID),
@@ -2427,7 +2428,7 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 						firstNonRateLimitErr = r.err
 					}
 				}
-				s.logger.Warn("ERP product search partial failure",
+				logger.From(ctx, s.logger).Warn("ERP product search partial failure",
 					zap.String("field", r.field),
 					zap.String("integration_id", input.IntegrationID),
 					zap.Bool("rate_limited", rl != nil),
@@ -2457,7 +2458,7 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 		// dashboard reflects the throttle.
 		if allRateLimited {
 			s.handleProviderError(ctx, input.IntegrationID, "search_products", firstErr)
-			s.logger.Warn("ERP product search throttled, returning empty results",
+			logger.From(ctx, s.logger).Warn("ERP product search throttled, returning empty results",
 				zap.String("integration_id", input.IntegrationID),
 			)
 			return &SearchProductsOutput{Products: []ERPProductResponse{}, HasMore: false}, nil
@@ -2489,7 +2490,7 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 	for _, listed := range result.Products {
 		detailed, err := erpProvider.GetProduct(ctx, listed.ID)
 		if err != nil {
-			s.logger.Warn("failed to get product details, skipping",
+			logger.From(ctx, s.logger).Warn("failed to get product details, skipping",
 				zap.String("product_id", listed.ID),
 				zap.Error(err),
 			)
@@ -2569,7 +2570,7 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 		}
 		registered, err := s.productSyncer.FilterRegisteredExternalIDs(ctx, input.StoreID, string(erpProvider.Name()), externalIDs)
 		if err != nil {
-			s.logger.Warn("failed to check already-imported products",
+			logger.From(ctx, s.logger).Warn("failed to check already-imported products",
 				zap.String("integration_id", input.IntegrationID),
 				zap.Error(err),
 			)
@@ -2606,33 +2607,33 @@ func (s *Service) inheritShippingFromParent(ctx context.Context, erpProvider pro
 		return
 	}
 	if detailed.Shipping != nil {
-		s.logger.Debug("variant already has its own shipping, no parent lookup needed",
+		logger.From(ctx, s.logger).Debug("variant already has its own shipping, no parent lookup needed",
 			zap.String("tiny_id", detailed.ID))
 		return
 	}
 	if detailed.ParentExternalID == "" {
-		s.logger.Debug("product has no parent, cannot inherit shipping",
+		logger.From(ctx, s.logger).Debug("product has no parent, cannot inherit shipping",
 			zap.String("tiny_id", detailed.ID),
 			zap.Bool("is_parent", detailed.IsParent))
 		return
 	}
 	parent, err := erpProvider.GetProduct(ctx, detailed.ParentExternalID)
 	if err != nil {
-		s.logger.Warn("failed to fetch parent for shipping inheritance",
+		logger.From(ctx, s.logger).Warn("failed to fetch parent for shipping inheritance",
 			zap.String("variant_id", detailed.ID),
 			zap.String("parent_id", detailed.ParentExternalID),
 			zap.Error(err))
 		return
 	}
 	if parent == nil || parent.Shipping == nil {
-		s.logger.Info("parent has no shipping either — variation will land without dimensions",
+		logger.From(ctx, s.logger).Info("parent has no shipping either — variation will land without dimensions",
 			zap.String("variant_id", detailed.ID),
 			zap.String("parent_id", detailed.ParentExternalID),
 			zap.Bool("parent_returned", parent != nil))
 		return
 	}
 	detailed.Shipping = parent.Shipping
-	s.logger.Info("inherited shipping from parent",
+	logger.From(ctx, s.logger).Info("inherited shipping from parent",
 		zap.String("variant_id", detailed.ID),
 		zap.String("parent_id", detailed.ParentExternalID))
 }
@@ -2700,7 +2701,7 @@ func (s *Service) applyStoreDefaultDimensions(ctx context.Context, storeID strin
 	}
 	defaults, err := s.repo.GetStoreShippingDefaults(ctx, storeID)
 	if err != nil {
-		s.logger.Warn("failed to load store shipping defaults",
+		logger.From(ctx, s.logger).Warn("failed to load store shipping defaults",
 			zap.String("store_id", storeID), zap.Error(err))
 		return
 	}
@@ -2730,7 +2731,7 @@ func (s *Service) applyStoreDefaultDimensions(ctx context.Context, storeID strin
 			LengthCm:      defaults.LengthCm,
 			PackageFormat: format,
 		}
-		s.logger.Info("completed shipping with store defaults",
+		logger.From(ctx, s.logger).Info("completed shipping with store defaults",
 			zap.String("erp_id", p.ID),
 			zap.Int("weight_g", weight),
 			zap.Int("h_cm", defaults.HeightCm),
@@ -2855,7 +2856,7 @@ func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductIn
 		}
 	}
 
-	s.logger.Info("ERP product imported into catalog",
+	logger.From(ctx, s.logger).Info("ERP product imported into catalog",
 		zap.String("integration_id", input.IntegrationID),
 		zap.String("tiny_product_id", input.TinyProductID),
 		zap.String("group_id", groupID),
@@ -2921,7 +2922,7 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 		return nil, fmt.Errorf("syncing product: %w", err)
 	}
 
-	s.logger.Info("product synced manually",
+	logger.From(ctx, s.logger).Info("product synced manually",
 		zap.String("integration_id", input.IntegrationID),
 		zap.String("product_id", input.ProductID),
 		zap.String("external_id", externalID),
@@ -2951,7 +2952,7 @@ const productWebhookMaxRetries = 3
 // act on a stale/poisoned counter.
 func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, externalProductID string) (bool, error) {
 	if s.productSyncer == nil {
-		s.logger.Warn("product syncer not configured, skipping product webhook")
+		logger.From(ctx, s.logger).Warn("product syncer not configured, skipping product webhook")
 		return false, nil
 	}
 
@@ -2967,7 +2968,7 @@ func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, 
 		return false, fmt.Errorf("checking product existence: %w", err)
 	}
 	if !exists {
-		s.logger.Debug("product not registered in livecart, ignoring webhook",
+		logger.From(ctx, s.logger).Debug("product not registered in livecart, ignoring webhook",
 			zap.String("store_id", storeID),
 			zap.String("integration_id", integration.ID),
 			zap.String("external_product_id", externalProductID),
@@ -2979,7 +2980,7 @@ func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, 
 	for attempt := 0; attempt <= productWebhookMaxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
-			s.logger.Warn("retrying product webhook processing",
+			logger.From(ctx, s.logger).Warn("retrying product webhook processing",
 				zap.String("store_id", storeID),
 				zap.String("integration_id", integration.ID),
 				zap.String("product_id", externalProductID),
@@ -3000,7 +3001,7 @@ func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, 
 		lastErr = syncErr
 	}
 
-	s.logger.Error("product webhook processing failed after retries",
+	logger.From(ctx, s.logger).Error("product webhook processing failed after retries",
 		zap.String("store_id", storeID),
 		zap.String("integration_id", integration.ID),
 		zap.String("product_id", externalProductID),
@@ -3060,13 +3061,13 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	guarded, guardErr := s.repo.HasStockGuardForProduct(ctx, externalProductID, integration.StoreID, integration.Provider)
 	if guardErr != nil {
 		skipStock = true
-		s.logger.Warn("failed to check stock guard for product, skipping stock sync as precaution",
+		logger.From(ctx, s.logger).Warn("failed to check stock guard for product, skipping stock sync as precaution",
 			zap.String("external_product_id", externalProductID),
 			zap.Error(guardErr),
 		)
 	} else if guarded {
 		downgradeOnly = true
-		s.logger.Info("ERP stock sync in guard window: applying reductions only (reservation/finalisation in flight)",
+		logger.From(ctx, s.logger).Info("ERP stock sync in guard window: applying reductions only (reservation/finalisation in flight)",
 			zap.String("external_product_id", externalProductID),
 			zap.String("store_id", integration.StoreID),
 		)
@@ -3079,7 +3080,7 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	// O backstop de waitlist só deve rodar quando o estoque pôde AUMENTAR (sync
 	// normal). Na janela do guard nunca subimos o local, então não promove;
 	// uma redução não libera unidade para ninguém.
-	s.logger.Info("product synced from webhook",
+	logger.From(ctx, s.logger).Info("product synced from webhook",
 		zap.String("integration_id", integration.ID),
 		zap.String("external_product_id", externalProductID),
 		zap.String("store_id", integration.StoreID),
@@ -3122,12 +3123,12 @@ func (s *Service) CreateCheckout(ctx context.Context, input CreateCheckoutInput)
 
 	cached, err := s.idempotency.Check(ctx, idemReq)
 	if err != nil {
-		s.logger.Warn("idempotency check failed", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("idempotency check failed", zap.Error(err))
 	}
 	if cached != nil && cached.Found {
 		var output CreateCheckoutOutput
 		if err := json.Unmarshal(cached.Response, &output); err == nil {
-			s.logger.Debug("returning cached checkout response",
+			logger.From(ctx, s.logger).Debug("returning cached checkout response",
 				zap.String("idempotency_key", input.IdempotencyKey),
 			)
 			return &output, nil
@@ -3139,7 +3140,7 @@ func (s *Service) CreateCheckout(ctx context.Context, input CreateCheckoutInput)
 	if input.IdempotencyKey != "" || s.idempotency != nil {
 		idemRecord, err = s.idempotency.Start(ctx, idemReq)
 		if err != nil {
-			s.logger.Warn("idempotency start failed", zap.Error(err))
+			logger.From(ctx, s.logger).Warn("idempotency start failed", zap.Error(err))
 		}
 	}
 
@@ -3341,7 +3342,7 @@ func (s *Service) TestPagarmeWebhookEndpoint(ctx context.Context, integrationID,
 		out.Reachable = false
 		out.Healthy = false
 		out.Message = "Não foi possível alcançar o endpoint (timeout ou falha de conexão). Verifique se a API está no ar e acessível publicamente."
-		s.logger.Warn("pagarme webhook self-test unreachable",
+		logger.From(ctx, s.logger).Warn("pagarme webhook self-test unreachable",
 			zap.String("store_id", storeID),
 			zap.String("url", url),
 			zap.Error(err),
@@ -3434,12 +3435,12 @@ func (s *Service) RunPagarmeWebhookLiveTest(ctx context.Context, integrationID, 
 			// está em estado terminal. Isso não é problema: baixa o nível para
 			// não poluir os alertas com um warn a cada teste de webhook.
 			if strings.Contains(cErr.Error(), "cannot be canceled") {
-				s.logger.Info("webhook test charge already in a terminal state, nothing to cancel",
+				logger.From(ctx, s.logger).Info("webhook test charge already in a terminal state, nothing to cancel",
 					zap.String("store_id", storeID),
 					zap.String("charge_id", order.ChargeID),
 				)
 			} else {
-				s.logger.Warn("failed to cancel webhook test charge",
+				logger.From(ctx, s.logger).Warn("failed to cancel webhook test charge",
 					zap.String("store_id", storeID),
 					zap.String("charge_id", order.ChargeID),
 					zap.Error(cErr),
@@ -3653,7 +3654,7 @@ func (s *Service) StoreWebhookEvent(ctx context.Context, input StoreWebhookInput
 		return err
 	}
 	if existing != nil {
-		s.logger.Debug("duplicate webhook event, skipping",
+		logger.From(ctx, s.logger).Debug("duplicate webhook event, skipping",
 			zap.String("event_id", input.EventID),
 		)
 		return nil
@@ -3693,7 +3694,7 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		return fmt.Errorf("getting payment status: %w", err)
 	}
 
-	s.logger.Info("payment notification processed",
+	logger.From(ctx, s.logger).Info("payment notification processed",
 		zap.String("payment_id", input.PaymentID),
 		zap.String("status", string(status.Status)),
 		zap.String("external_reference", status.ExternalReference),
@@ -3701,7 +3702,7 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 
 	// ExternalReference contains the cart ID (set when creating checkout)
 	if status.ExternalReference == "" {
-		s.logger.Warn("payment notification has no external reference, cannot update cart",
+		logger.From(ctx, s.logger).Warn("payment notification has no external reference, cannot update cart",
 			zap.String("payment_id", input.PaymentID),
 		)
 		return nil
@@ -3741,13 +3742,13 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 			// O cart expirou/cancelou entre a cobrança e este webhook. Não
 			// finalizamos (não marca pago, não toca ERP). Se dinheiro entrou
 			// mesmo, fica para a reconciliação (E6). ACK benigno.
-			s.logger.Info("payment webhook for cart no longer payable (expired/cancelled), skipping finalization",
+			logger.From(ctx, s.logger).Info("payment webhook for cart no longer payable (expired/cancelled), skipping finalization",
 				zap.String("cart_id", status.ExternalReference),
 				zap.String("payment_status", cartPaymentStatus),
 			)
 			return nil
 		}
-		s.logger.Error("failed to update cart payment status",
+		logger.From(ctx, s.logger).Error("failed to update cart payment status",
 			zap.String("cart_id", status.ExternalReference),
 			zap.String("payment_status", cartPaymentStatus),
 			zap.Error(err),
@@ -3755,7 +3756,7 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		return fmt.Errorf("updating cart payment status: %w", err)
 	}
 
-	s.logger.Info("cart payment status updated",
+	logger.From(ctx, s.logger).Info("cart payment status updated",
 		zap.String("cart_id", status.ExternalReference),
 		zap.String("payment_status", cartPaymentStatus),
 		zap.String("payment_method", status.PaymentMethod),
@@ -3769,14 +3770,14 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		switch cartPaymentStatus {
 		case "paid":
 			if err := s.couponSyncer.OnCartPaid(ctx, status.ExternalReference); err != nil {
-				s.logger.Error("coupon redemption confirm failed",
+				logger.From(ctx, s.logger).Error("coupon redemption confirm failed",
 					zap.String("cart_id", status.ExternalReference),
 					zap.Error(err),
 				)
 			}
 		case "refunded":
 			if err := s.couponSyncer.OnCartRefunded(ctx, status.ExternalReference); err != nil {
-				s.logger.Error("coupon redemption refund failed",
+				logger.From(ctx, s.logger).Error("coupon redemption refund failed",
 					zap.String("cart_id", status.ExternalReference),
 					zap.Error(err),
 				)
@@ -3805,7 +3806,7 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 	// mantêm o TODO histórico (sem call site de CancelOrder).
 	if cartPaymentStatus == "refunded" {
 		if err := s.RefundConvertedCartOrder(ctx, status.ExternalReference, input.StoreID); err != nil {
-			s.logger.Error("failed to cancel refunded converted cart order",
+			logger.From(ctx, s.logger).Error("failed to cancel refunded converted cart order",
 				zap.String("cart_id", status.ExternalReference),
 				zap.Error(err),
 			)
@@ -3832,7 +3833,7 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 	if err := s.finalizeOrConfirmCartERP(ctx, status.ExternalReference, input.StoreID, status); err != nil {
 		// Never propagate ERP errors to the payment provider — the money already
 		// moved. Log and fall through so the webhook ACKs.
-		s.logger.Error("failed to finalize ERP order for paid cart",
+		logger.From(ctx, s.logger).Error("failed to finalize ERP order for paid cart",
 			zap.String("cart_id", status.ExternalReference),
 			zap.String("payment_id", status.PaymentID),
 			zap.Error(err),
@@ -3869,7 +3870,7 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 // cart — stock is never silently released against a paid cart. The retry
 // then resumes via [S0] (order exists) or re-runs from [S2] (it doesn't).
 func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID string, status *providers.PaymentStatus) error {
-	s.logger.Info("starting ERP finalisation for paid cart",
+	logger.From(ctx, s.logger).Info("starting ERP finalisation for paid cart",
 		zap.String("store_id", storeID),
 		zap.String("cart_id", cartID),
 	)
@@ -3883,7 +3884,7 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 		return fmt.Errorf("acquiring finalisation lock: %w", lockErr)
 	}
 	if !acquired {
-		s.logger.Info("ERP finalisation already in flight for cart, skipping duplicate trigger",
+		logger.From(ctx, s.logger).Info("ERP finalisation already in flight for cart, skipping duplicate trigger",
 			zap.String("cart_id", cartID),
 		)
 		return nil
@@ -3893,7 +3894,7 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 	// Idempotência dura: um trigger tardio (redelivery de horas depois) sobre
 	// cart já finalizado não deve custar nem uma chamada ao Tiny.
 	if stRow, stErr := s.repo.GetCartERPFinalisationStatus(ctx, cartID); stErr == nil && stRow.Status == "done" {
-		s.logger.Info("cart ERP finalisation already done, skipping",
+		logger.From(ctx, s.logger).Info("cart ERP finalisation already done, skipping",
 			zap.String("cart_id", cartID),
 		)
 		return nil
@@ -3905,14 +3906,14 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 		// "Tiny exists but is in error state" (warn, recoverable) so we don't
 		// keep losing paid carts under a silent debug log.
 		if any, _ := s.repo.GetByProvider(ctx, storeID, "erp", "tiny"); any != nil {
-			s.logger.Warn("Tiny integration is not active, skipping paid-order creation",
+			logger.From(ctx, s.logger).Warn("Tiny integration is not active, skipping paid-order creation",
 				zap.String("store_id", storeID),
 				zap.String("cart_id", cartID),
 				zap.String("integration_id", any.ID),
 				zap.String("status", any.Status),
 			)
 		} else {
-			s.logger.Info("no Tiny integration configured, skipping paid-order creation",
+			logger.From(ctx, s.logger).Info("no Tiny integration configured, skipping paid-order creation",
 				zap.String("store_id", storeID),
 				zap.String("cart_id", cartID),
 			)
@@ -3932,14 +3933,14 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 		if b, encErr := json.Marshal(status); encErr == nil {
 			snapshot = b
 		} else {
-			s.logger.Warn("failed to encode payment status snapshot",
+			logger.From(ctx, s.logger).Warn("failed to encode payment status snapshot",
 				zap.String("cart_id", cartID),
 				zap.Error(encErr),
 			)
 		}
 	}
 	if markErr := s.repo.MarkCartERPFinalisationAttempt(ctx, cartID, snapshot); markErr != nil {
-		s.logger.Warn("failed to mark ERP finalisation attempt",
+		logger.From(ctx, s.logger).Warn("failed to mark ERP finalisation attempt",
 			zap.String("cart_id", cartID),
 			zap.Error(markErr),
 		)
@@ -3974,7 +3975,7 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 	if err != nil {
 		return fmt.Errorf("listing cart reservations: %w", err)
 	}
-	s.logger.Info("reversing ERP stock reservations before creating paid order",
+	logger.From(ctx, s.logger).Info("reversing ERP stock reservations before creating paid order",
 		zap.String("cart_id", cartID),
 		zap.Int("reservations_count", len(reservations)),
 	)
@@ -3989,12 +3990,12 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 		if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
 			msg := fmt.Sprintf("estorno de reserva pendente (produto %s): %v", r.ExternalProductID, reverseErr)
 			if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, msg, snapshot); markErr != nil {
-				s.logger.Error("failed to mark cart ERP finalisation failed",
+				logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation failed",
 					zap.String("cart_id", cartID),
 					zap.Error(markErr),
 				)
 			}
-			s.logger.Warn("failed to reverse ERP reservation on paid cart, aborting for retry",
+			logger.From(ctx, s.logger).Warn("failed to reverse ERP reservation on paid cart, aborting for retry",
 				zap.String("cart_id", cartID),
 				zap.String("reservation_id", r.ID),
 				zap.String("external_product_id", r.ExternalProductID),
@@ -4009,7 +4010,7 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 			// infla o saldo em silêncio). Loga alto com o movementID para
 			// reconciliação manual e segue — a direção do erro é estoque
 			// segurado a mais, nunca oferta falsa.
-			s.logger.Error("reservation reversed on Tiny but local mark failed — reconcile manually",
+			logger.From(ctx, s.logger).Error("reservation reversed on Tiny but local mark failed — reconcile manually",
 				zap.String("cart_id", cartID),
 				zap.String("reservation_id", r.ID),
 				zap.String("erp_movement_id", r.ERPMovementID),
@@ -4018,7 +4019,7 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 		}
 		reversedSnapshot = append(reversedSnapshot, r)
 	}
-	s.logger.Info("ERP stock reservations reversed",
+	logger.From(ctx, s.logger).Info("ERP stock reservations reversed",
 		zap.String("cart_id", cartID),
 		zap.Int("requested", len(reservations)),
 		zap.Int("succeeded", len(reversedSnapshot)),
@@ -4030,7 +4031,7 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 	if createErr != nil {
 		s.reReserveAfterFailedFinalisation(ctx, erpProvider, cartID, cart.EventID, reversedSnapshot)
 		if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, createErr.Error(), snapshot); markErr != nil {
-			s.logger.Error("failed to mark cart ERP finalisation failed",
+			logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation failed",
 				zap.String("cart_id", cartID),
 				zap.Error(markErr),
 			)
@@ -4043,7 +4044,7 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 		// The order is in Tiny — don't propagate. Just log so the cart
 		// shows up in the admin "stuck pending" view if the column ever
 		// drifts from reality.
-		s.logger.Error("failed to mark cart ERP finalisation done",
+		logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation done",
 			zap.String("cart_id", cartID),
 			zap.Error(markErr),
 		)
@@ -4059,7 +4060,7 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 // and marks the cart done. Monotonic: it only ever moves forward; running it
 // twice is a no-op beyond one tolerated launch call.
 func (s *Service) resumeCartERPFinalisation(ctx context.Context, erpProvider providers.ERPProvider, cartID, externalOrderID string, snapshot []byte) error {
-	s.logger.Info("resuming ERP finalisation for cart with existing order",
+	logger.From(ctx, s.logger).Info("resuming ERP finalisation for cart with existing order",
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", externalOrderID),
 	)
@@ -4067,7 +4068,7 @@ func (s *Service) resumeCartERPFinalisation(ctx context.Context, erpProvider pro
 	if err := erpProvider.LaunchOrderStock(ctx, externalOrderID); err != nil {
 		msg := fmt.Sprintf("relançamento de estoque do pedido %s falhou: %v", externalOrderID, err)
 		if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, msg, snapshot); markErr != nil {
-			s.logger.Error("failed to mark cart ERP finalisation failed",
+			logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation failed",
 				zap.String("cart_id", cartID),
 				zap.Error(markErr),
 			)
@@ -4081,12 +4082,12 @@ func (s *Service) resumeCartERPFinalisation(ctx context.Context, erpProvider pro
 	}
 
 	if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
-		s.logger.Error("failed to mark cart ERP finalisation done after resume",
+		logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation done after resume",
 			zap.String("cart_id", cartID),
 			zap.Error(markErr),
 		)
 	}
-	s.logger.Info("ERP finalisation resumed to done",
+	logger.From(ctx, s.logger).Info("ERP finalisation resumed to done",
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", externalOrderID),
 	)
@@ -4112,7 +4113,7 @@ func (s *Service) reverseCartReservationsPerRow(ctx context.Context, erpProvider
 			// Tiny estornou mas a marcação local falhou: um retry re-estornaria
 			// esta row e duplicaria a entrada E (sandbox T10: o Tiny aceita e
 			// infla em silêncio). Loga alto com o movementID para reconciliação.
-			s.logger.Error("reservation reversed on Tiny but local mark failed — reconcile manually",
+			logger.From(ctx, s.logger).Error("reservation reversed on Tiny but local mark failed — reconcile manually",
 				zap.String("cart_id", cartID),
 				zap.String("reservation_id", r.ID),
 				zap.String("erp_movement_id", r.ERPMovementID),
@@ -4127,7 +4128,7 @@ func (s *Service) reverseCartReservationsPerRow(ctx context.Context, erpProvider
 // própria marcação (nunca as propaga — o sinal primário é o erro do caller).
 func (s *Service) markFinalisationFailed(ctx context.Context, cartID, msg string, snapshot []byte) {
 	if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, msg, snapshot); markErr != nil {
-		s.logger.Error("failed to mark cart ERP finalisation failed",
+		logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation failed",
 			zap.String("cart_id", cartID),
 			zap.Error(markErr),
 		)
@@ -4151,7 +4152,7 @@ func (s *Service) markFinalisationFailed(ctx context.Context, cartID, msg string
 // era transiente, e o resume cobre se o re-launch também falhar.
 func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider providers.ERPProvider, erpIntegration *IntegrationRow, storeID string, cart *CartRow, status *providers.PaymentStatus, snapshot []byte) error {
 	cartID := cart.ID
-	s.logger.Info("finalising cart with inverted order (launch-first)",
+	logger.From(ctx, s.logger).Info("finalising cart with inverted order (launch-first)",
 		zap.String("cart_id", cartID),
 		zap.String("store_id", storeID),
 	)
@@ -4160,7 +4161,7 @@ func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider 
 	// permitir o fallback.
 	if createErr := s.createFinalERPOrder(ctx, erpProvider, erpIntegration, storeID, cart.EventID, *cart, status, false); createErr != nil {
 		if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, createErr.Error(), snapshot); markErr != nil {
-			s.logger.Error("failed to mark cart ERP finalisation failed",
+			logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation failed",
 				zap.String("cart_id", cartID),
 				zap.Error(markErr),
 			)
@@ -4182,7 +4183,7 @@ func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider 
 			return err
 		}
 		if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
-			s.logger.Error("failed to mark cart ERP finalisation done",
+			logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation done",
 				zap.String("cart_id", cartID),
 				zap.Error(markErr),
 			)
@@ -4192,7 +4193,7 @@ func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider 
 
 	// [I2] Launch-first, com fallback reverse-first.
 	if launchErr := erpProvider.LaunchOrderStock(ctx, orderID); launchErr != nil {
-		s.logger.Warn("launch-first failed, falling back to reverse-first order",
+		logger.From(ctx, s.logger).Warn("launch-first failed, falling back to reverse-first order",
 			zap.String("cart_id", cartID),
 			zap.String("external_order_id", orderID),
 			zap.Bool("insufficient_balance", isTinyInsufficientBalanceErr(launchErr)),
@@ -4205,7 +4206,7 @@ func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider 
 		if retryErr := erpProvider.LaunchOrderStock(ctx, orderID); retryErr != nil {
 			msg := fmt.Sprintf("lançamento de estoque do pedido %s falhou após fallback: %v", orderID, retryErr)
 			if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, msg, snapshot); markErr != nil {
-				s.logger.Error("failed to mark cart ERP finalisation failed",
+				logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation failed",
 					zap.String("cart_id", cartID),
 					zap.Error(markErr),
 				)
@@ -4215,7 +4216,7 @@ func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider 
 			return fmt.Errorf("launching stock for order %s after fallback: %w", orderID, retryErr)
 		}
 		if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
-			s.logger.Error("failed to mark cart ERP finalisation done",
+			logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation done",
 				zap.String("cart_id", cartID),
 				zap.Error(markErr),
 			)
@@ -4232,12 +4233,12 @@ func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider 
 
 	// [I4]
 	if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
-		s.logger.Error("failed to mark cart ERP finalisation done",
+		logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation done",
 			zap.String("cart_id", cartID),
 			zap.Error(markErr),
 		)
 	}
-	s.logger.Info("inverted ERP finalisation completed",
+	logger.From(ctx, s.logger).Info("inverted ERP finalisation completed",
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", orderID),
 	)
@@ -4255,7 +4256,7 @@ func (s *Service) reReserveAfterFailedFinalisation(ctx context.Context, erpProvi
 	if len(snapshot) == 0 {
 		return
 	}
-	s.logger.Warn("re-reserving stock after failed ERP finalisation",
+	logger.From(ctx, s.logger).Warn("re-reserving stock after failed ERP finalisation",
 		zap.String("cart_id", cartID),
 		zap.Int("reservations_count", len(snapshot)),
 	)
@@ -4264,7 +4265,7 @@ func (s *Service) reReserveAfterFailedFinalisation(ctx context.Context, erpProvi
 		obs := fmt.Sprintf("Re-reserva pós-falha de finalização - Cart %s", cartID)
 		movementID, reserveErr := erpProvider.ReserveStock(ctx, r.ExternalProductID, r.Quantity, 0, obs)
 		if reserveErr != nil {
-			s.logger.Error("failed to re-reserve stock after finalisation failure",
+			logger.From(ctx, s.logger).Error("failed to re-reserve stock after finalisation failure",
 				zap.String("cart_id", cartID),
 				zap.String("external_product_id", r.ExternalProductID),
 				zap.Int("quantity", r.Quantity),
@@ -4283,7 +4284,7 @@ func (s *Service) reReserveAfterFailedFinalisation(ctx context.Context, erpProvi
 			// Tiny holds the stock, but our DB row failed. The reservation
 			// is real on the merchant's side — flag loudly so we can
 			// reconcile manually instead of silently losing the link.
-			s.logger.Error("re-reserved on Tiny but failed to persist reservation row",
+			logger.From(ctx, s.logger).Error("re-reserved on Tiny but failed to persist reservation row",
 				zap.String("cart_id", cartID),
 				zap.String("external_product_id", r.ExternalProductID),
 				zap.String("erp_movement_id", movementID),
@@ -4294,7 +4295,7 @@ func (s *Service) reReserveAfterFailedFinalisation(ctx context.Context, erpProvi
 		}
 		restored++
 	}
-	s.logger.Info("re-reservation after failed ERP finalisation completed",
+	logger.From(ctx, s.logger).Info("re-reservation after failed ERP finalisation completed",
 		zap.String("cart_id", cartID),
 		zap.Int("requested", len(snapshot)),
 		zap.Int("succeeded", restored),
@@ -4383,7 +4384,7 @@ func (s *Service) ApplyMelhorEnvioWebhook(ctx context.Context, in ApplyMelhorEnv
 		return fmt.Errorf("looking up me shipment: %w", err)
 	}
 	if shipment == nil {
-		s.logger.Debug("melhor_envio webhook for unknown shipment — ignoring",
+		logger.From(ctx, s.logger).Debug("melhor_envio webhook for unknown shipment — ignoring",
 			zap.String("store_id", in.StoreID),
 			zap.String("provider_order_id", in.ProviderOrderID),
 		)
@@ -4400,7 +4401,7 @@ func (s *Service) ApplyMelhorEnvioWebhook(ctx context.Context, in ApplyMelhorEnv
 	// (it lands on order.posted).
 	if in.PublicTrackingURL != "" || in.TrackingCode != "" {
 		if err := s.repo.UpdateShipmentLabels(ctx, shipment.ID, shipment.LabelURL, in.PublicTrackingURL, in.TrackingCode); err != nil {
-			s.logger.Warn("failed to mirror tracking url onto shipment",
+			logger.From(ctx, s.logger).Warn("failed to mirror tracking url onto shipment",
 				zap.String("shipment_id", shipment.ID),
 				zap.Error(err),
 			)
@@ -4611,7 +4612,7 @@ func (s *Service) fetchAndPersistCartInvoice(ctx context.Context, storeID, cartI
 	if invoice.AccessKey != "" {
 		if sh, _ := s.repo.GetShipmentByOrderID(ctx, cartID); sh != nil && sh.InvoiceKey == "" {
 			if err := s.repo.UpdateShipmentInvoice(ctx, sh.ID, invoice.AccessKey, "nfe"); err != nil {
-				s.logger.Warn("failed to mirror NFe key onto existing shipment",
+				logger.From(ctx, s.logger).Warn("failed to mirror NFe key onto existing shipment",
 					zap.String("cart_id", cartID),
 					zap.String("shipment_id", sh.ID),
 					zap.Error(err),
@@ -4635,7 +4636,7 @@ func (s *Service) fetchAndPersistCartInvoice(ctx context.Context, storeID, cartI
 func (s *Service) SyncCartInvoiceByExternalOrder(ctx context.Context, storeID, externalOrderID, invoiceID string) (*CartInvoiceState, error) {
 	cartID, err := s.repo.FindCartByExternalOrderID(ctx, externalOrderID, storeID)
 	if err != nil {
-		s.logger.Debug("nota_fiscal webhook for unknown pedido — skipping",
+		logger.From(ctx, s.logger).Debug("nota_fiscal webhook for unknown pedido — skipping",
 			zap.String("store_id", storeID),
 			zap.String("external_order_id", externalOrderID),
 			zap.Error(err),
@@ -4659,7 +4660,7 @@ func invoiceTimePtr(t time.Time) *time.Time {
 // ProcessInstagramComment processes a live comment from Instagram webhook.
 // All comments are saved to DB. Purchase intents trigger stock check → cart or waitlist.
 func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInstagramCommentInput) error {
-	s.logger.Info("processing instagram comment",
+	logger.From(ctx, s.logger).Info("processing instagram comment",
 		zap.String("account_id", input.AccountID),
 		zap.String("media_id", input.MediaID),
 		zap.String("comment_id", input.CommentID),
@@ -4673,7 +4674,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	// we never create a duplicate cart for the same comment.
 	if input.CommentID != "" {
 		if exists, _ := s.repo.LiveCommentExistsByPlatformID(ctx, input.CommentID); exists {
-			s.logger.Info("comment already processed, skipping",
+			logger.From(ctx, s.logger).Info("comment already processed, skipping",
 				zap.String("comment_id", input.CommentID),
 			)
 			return nil
@@ -4686,7 +4687,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		return fmt.Errorf("finding live session: %w", err)
 	}
 	if session == nil {
-		s.logger.Warn("no active live session found for media_id",
+		logger.From(ctx, s.logger).Warn("no active live session found for media_id",
 			zap.String("media_id", input.MediaID),
 		)
 		return nil
@@ -4698,17 +4699,20 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		return fmt.Errorf("finding live event: %w", err)
 	}
 	if event == nil {
-		s.logger.Warn("no active live event found for media_id",
+		logger.From(ctx, s.logger).Warn("no active live event found for media_id",
 			zap.String("media_id", input.MediaID),
 		)
 		return nil
 	}
 
+	// Store resolved (media_id → event): carry it on the ctx so every log below
+	// gets store_id without manual fields. Slug lookup skipped on this hot path.
+	ctx = logger.WithStore(ctx, event.StoreID, "")
+
 	// Paywall (PRD 007): blocked stores stop creating carts from comments.
 	// Existing checkouts and payment webhooks keep working elsewhere.
 	if s.billingGate != nil && s.billingGate.IsStoreBlocked(ctx, event.StoreID) {
-		s.logger.Info("comment ignored: store subscription blocked",
-			zap.String("store_id", event.StoreID),
+		logger.From(ctx, s.logger).Info("comment ignored: store subscription blocked",
 			zap.String("comment_id", input.CommentID),
 		)
 		return nil
@@ -4724,8 +4728,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			Payload:        input.RawPayload,
 			SignatureValid: true, // Instagram webhook signature validation could be added
 		}); err != nil {
-			s.logger.Error("failed to store instagram webhook event",
-				zap.String("store_id", event.StoreID),
+			logger.From(ctx, s.logger).Error("failed to store instagram webhook event",
 				zap.String("comment_id", input.CommentID),
 				zap.Error(err),
 			)
@@ -4735,7 +4738,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 
 	// Increment comment counter on session
 	if err := s.repo.IncrementLiveSessionComments(ctx, session.ID); err != nil {
-		s.logger.Error("failed to increment comment counter",
+		logger.From(ctx, s.logger).Error("failed to increment comment counter",
 			zap.String("session_id", session.ID),
 			zap.Error(err),
 		)
@@ -4743,7 +4746,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 
 	// Check if processing is paused
 	if event.ProcessingPaused {
-		s.logger.Info("processing paused, storing comment only",
+		logger.From(ctx, s.logger).Info("processing paused, storing comment only",
 			zap.String("event_id", event.ID),
 			zap.String("comment_id", input.CommentID),
 			zap.String("username", input.Username),
@@ -4762,7 +4765,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			Result:            "paused",
 		})
 		if err != nil {
-			s.logger.Error("failed to save paused comment", zap.Error(err))
+			logger.From(ctx, s.logger).Error("failed to save paused comment", zap.Error(err))
 		}
 		return nil
 	}
@@ -4773,13 +4776,12 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	// person is still trying to buy.
 	blocked, blockErr := s.repo.IsHandleBlocked(ctx, event.StoreID, strings.ToLower(strings.TrimPrefix(strings.TrimSpace(input.Username), "@")))
 	if blockErr != nil {
-		s.logger.Error("failed to check blocked handle, proceeding",
-			zap.String("store_id", event.StoreID),
+		logger.From(ctx, s.logger).Error("failed to check blocked handle, proceeding",
 			zap.String("username", input.Username),
 			zap.Error(blockErr),
 		)
 	} else if blocked {
-		s.logger.Info("comment from blocked handle ignored",
+		logger.From(ctx, s.logger).Info("comment from blocked handle ignored",
 			zap.String("event_id", event.ID),
 			zap.String("username", input.Username),
 			zap.String("comment_id", input.CommentID),
@@ -4796,7 +4798,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			Result:            "blocked",
 		})
 		if err != nil {
-			s.logger.Error("failed to save blocked comment", zap.Error(err))
+			logger.From(ctx, s.logger).Error("failed to save blocked comment", zap.Error(err))
 		}
 		return nil
 	}
@@ -4812,7 +4814,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 
 		// If no keyword match but has purchase intent, try active product as fallback
 		if product == nil && event.CurrentActiveProductID != nil && *event.CurrentActiveProductID != "" {
-			s.logger.Info("no keyword match, trying active product fallback",
+			logger.From(ctx, s.logger).Info("no keyword match, trying active product fallback",
 				zap.String("event_id", event.ID),
 				zap.String("active_product_id", *event.CurrentActiveProductID),
 			)
@@ -4877,7 +4879,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		Result:            commentResult,
 	})
 	if err != nil {
-		s.logger.Error("failed to save live comment", zap.Error(err))
+		logger.From(ctx, s.logger).Error("failed to save live comment", zap.Error(err))
 		// Continue processing even if save fails
 	}
 
@@ -4886,7 +4888,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		return nil
 	}
 
-	s.logger.Info("purchase intent detected with product match",
+	logger.From(ctx, s.logger).Info("purchase intent detected with product match",
 		zap.String("username", input.Username),
 		zap.String("product_id", product.ID),
 		zap.String("keyword", product.Keyword),
@@ -4909,7 +4911,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 
 		if currentQty >= maxAllowed {
 			// User already has max quantity, ignore this request
-			s.logger.Info("user already at max quantity for product, ignoring",
+			logger.From(ctx, s.logger).Info("user already at max quantity for product, ignoring",
 				zap.String("username", input.Username),
 				zap.String("product_id", product.ID),
 				zap.Int("current_qty", currentQty),
@@ -4918,22 +4920,25 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			if commentID != "" {
 				_ = s.repo.UpdateLiveCommentResult(ctx, commentID, false, product.ID, intent.Quantity, "max_quantity_reached")
 			}
-			// Send reply notifying user they've reached the limit
-			go s.sendMaxQuantityReply(ctx, event.StoreID, input.Channel, input.CommentID, input.UserID, input.Username, product.Name, maxAllowed, true)
+			// Send reply notifying user they've reached the limit.
+			// Detached goroutine: never carry the (recyclable) request ctx —
+			// hand it a Background ctx enriched with the store instead.
+			go s.sendMaxQuantityReply(logger.WithStore(context.Background(), event.StoreID, ""), event.StoreID, input.Channel, input.CommentID, input.UserID, input.Username, product.Name, maxAllowed, true)
 			return nil
 		}
 
 		// Cap quantity to remaining allowed
 		remaining := maxAllowed - currentQty
 		if intent.Quantity > remaining {
-			s.logger.Info("capping quantity to max allowed",
+			logger.From(ctx, s.logger).Info("capping quantity to max allowed",
 				zap.String("username", input.Username),
 				zap.String("product_id", product.ID),
 				zap.Int("requested", intent.Quantity),
 				zap.Int("capped_to", remaining),
 			)
-			// Send reply notifying user their quantity was capped
-			go s.sendMaxQuantityReply(ctx, event.StoreID, input.Channel, input.CommentID, input.UserID, input.Username, product.Name, maxAllowed, false)
+			// Send reply notifying user their quantity was capped.
+			// Detached goroutine: same ctx rule as above.
+			go s.sendMaxQuantityReply(logger.WithStore(context.Background(), event.StoreID, ""), event.StoreID, input.Channel, input.CommentID, input.UserID, input.Username, product.Name, maxAllowed, false)
 			intent.Quantity = remaining
 		}
 	}
@@ -4952,7 +4957,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	if availableQty > 0 {
 		if stockErr := s.repo.DecrementProductStock(ctx, product.ID, availableQty); stockErr != nil {
 			// Failed to reserve even available stock - put all in waitlist
-			s.logger.Warn("failed to decrement stock, putting all in waitlist",
+			logger.From(ctx, s.logger).Warn("failed to decrement stock, putting all in waitlist",
 				zap.Error(stockErr),
 				zap.Int("attempted", availableQty),
 			)
@@ -4969,7 +4974,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	if waitlistQty > 0 {
 		alreadyWaiting, _ := s.repo.GetWaitlistItemByEventUserProduct(ctx, event.ID, input.UserID, product.ID)
 		if alreadyWaiting {
-			s.logger.Info("user already on waitlist, ignoring waitlist portion",
+			logger.From(ctx, s.logger).Info("user already on waitlist, ignoring waitlist portion",
 				zap.String("username", input.Username),
 				zap.String("product_id", product.ID),
 				zap.Int("waitlist_qty", waitlistQty),
@@ -5028,9 +5033,9 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			Position:       waitlistPosition,
 			CartID:         result.CartID,
 		}); wlErr != nil {
-			s.logger.Error("failed to create waitlist item", zap.Error(wlErr))
+			logger.From(ctx, s.logger).Error("failed to create waitlist item", zap.Error(wlErr))
 		} else {
-			s.logger.Info("user added to waitlist (partial fulfillment)",
+			logger.From(ctx, s.logger).Info("user added to waitlist (partial fulfillment)",
 				zap.String("username", input.Username),
 				zap.String("product_id", product.ID),
 				zap.String("cart_id", result.CartID),
@@ -5055,7 +5060,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	// Increment order counter on event only for new carts
 	if result.IsNewCart {
 		if err := s.repo.IncrementLiveEventOrders(ctx, event.ID); err != nil {
-			s.logger.Error("failed to increment order counter",
+			logger.From(ctx, s.logger).Error("failed to increment order counter",
 				zap.String("event_id", event.ID),
 				zap.Error(err),
 			)
@@ -5065,7 +5070,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	// Reserve stock in ERP (only for available items)
 	if availableQty > 0 {
 		if syncErr := s.ReserveStockInERP(ctx, event.StoreID, result.CartID, event.ID, product.ID, availableQty, product.Price, input.Username); syncErr != nil {
-			s.logger.Warn("failed to reserve stock in ERP",
+			logger.From(ctx, s.logger).Warn("failed to reserve stock in ERP",
 				zap.String("cart_id", result.CartID),
 				zap.Error(syncErr),
 			)
@@ -5135,8 +5140,7 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 	// Check if we should notify based on store settings
 	shouldNotify, err := s.notificationService.ShouldNotify(ctx, input.StoreID, notifType, input.IsNewCart)
 	if err != nil {
-		s.logger.Warn("failed to check notification settings",
-			zap.String("store_id", input.StoreID),
+		logger.From(ctx, s.logger).Warn("failed to check notification settings",
 			zap.Error(err),
 		)
 		return
@@ -5148,8 +5152,7 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 	// Get store info for notification
 	storeInfo, err := s.repo.GetStoreInfo(ctx, input.StoreID)
 	if err != nil {
-		s.logger.Warn("failed to get store info for notification",
-			zap.String("store_id", input.StoreID),
+		logger.From(ctx, s.logger).Warn("failed to get store info for notification",
 			zap.Error(err),
 		)
 		return
@@ -5188,16 +5191,14 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 	})
 
 	if err != nil {
-		s.logger.Warn("notification send error",
-			zap.String("store_id", input.StoreID),
+		logger.From(ctx, s.logger).Warn("notification send error",
 			zap.String("cart_id", input.CartID),
 			zap.Error(err),
 		)
 		return
 	}
 
-	s.logger.Info("immediate notification processed",
-		zap.String("store_id", input.StoreID),
+	logger.From(ctx, s.logger).Info("immediate notification processed",
 		zap.String("cart_id", input.CartID),
 		zap.String("status", string(result.Status)),
 		zap.Bool("is_new_cart", input.IsNewCart),
@@ -5218,7 +5219,7 @@ func (s *Service) sendMaxQuantityReply(ctx context.Context, storeID, channel, co
 	// Story replies have no comment to answer — DM the buyer directly.
 	if channel == "dm" {
 		if dmErr := s.SendInstagramDM(ctx, storeID, userID, message); dmErr != nil {
-			s.logger.Warn("failed to send max quantity DM",
+			logger.From(ctx, s.logger).Warn("failed to send max quantity DM",
 				zap.String("user_id", userID), zap.Error(dmErr))
 		}
 		return
@@ -5231,20 +5232,20 @@ func (s *Service) sendMaxQuantityReply(ctx context.Context, storeID, channel, co
 	// Try comment reply first, then DM fallback
 	err := s.ReplyToInstagramComment(ctx, storeID, commentID, message)
 	if err != nil {
-		s.logger.Warn("failed to send max quantity reply via comment, trying DM",
+		logger.From(ctx, s.logger).Warn("failed to send max quantity reply via comment, trying DM",
 			zap.String("comment_id", commentID),
 			zap.Error(err),
 		)
 		// Fallback to DM
 		if dmErr := s.SendInstagramDM(ctx, storeID, userID, message); dmErr != nil {
-			s.logger.Warn("failed to send max quantity DM",
+			logger.From(ctx, s.logger).Warn("failed to send max quantity DM",
 				zap.String("user_id", userID),
 				zap.Error(dmErr),
 			)
 		}
 	}
 
-	s.logger.Info("max quantity reply sent",
+	logger.From(ctx, s.logger).Info("max quantity reply sent",
 		zap.String("username", username),
 		zap.String("product", productName),
 		zap.Int("max_allowed", maxAllowed),
@@ -5263,7 +5264,7 @@ func (s *Service) findProductByKeyword(ctx context.Context, storeID, text string
 	for _, keyword := range keywords {
 		product, err := s.repo.GetProductByKeyword(ctx, storeID, keyword)
 		if err != nil {
-			s.logger.Error("failed to lookup product by keyword",
+			logger.From(ctx, s.logger).Error("failed to lookup product by keyword",
 				zap.String("keyword", keyword),
 				zap.Error(err),
 			)
@@ -5279,7 +5280,7 @@ func (s *Service) findProductByKeyword(ctx context.Context, storeID, text string
 
 // ProcessInstagramMessage processes a DM from Instagram webhook.
 func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInstagramMessageInput) error {
-	s.logger.Info("processing instagram message",
+	logger.From(ctx, s.logger).Info("processing instagram message",
 		zap.String("account_id", input.AccountID),
 		zap.String("sender_id", input.SenderID),
 		zap.String("message_id", input.MessageID),
@@ -5299,7 +5300,7 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 	// intent→cart pipeline as comments, answering via DM.
 	if input.ReplyToStoryID != "" {
 		if err := s.processStoryReply(ctx, input); err != nil {
-			s.logger.Warn("failed to process story reply",
+			logger.From(ctx, s.logger).Warn("failed to process story reply",
 				zap.String("story_id", input.ReplyToStoryID),
 				zap.Error(err))
 		}
@@ -5310,18 +5311,21 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 	// the "Testar notificação" setup capture.
 	integration, err := s.repo.GetByInstagramUserID(ctx, input.AccountID)
 	if err != nil {
-		s.logger.Error("failed to find integration by instagram account",
+		logger.From(ctx, s.logger).Error("failed to find integration by instagram account",
 			zap.String("account_id", input.AccountID),
 			zap.Error(err),
 		)
 		return nil // Don't fail the webhook, just skip storage
 	}
 	if integration == nil {
-		s.logger.Warn("no integration found for instagram account",
+		logger.From(ctx, s.logger).Warn("no integration found for instagram account",
 			zap.String("account_id", input.AccountID),
 		)
 		return nil
 	}
+
+	// Store resolved (account_id → integration): enrich the ctx for the logs below.
+	ctx = logger.WithStore(ctx, integration.StoreID, "")
 
 	// Store webhook event for audit trail
 	if len(input.RawPayload) > 0 {
@@ -5333,8 +5337,7 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 			Payload:        input.RawPayload,
 			SignatureValid: true,
 		}); err != nil {
-			s.logger.Error("failed to store instagram dm webhook event",
-				zap.String("store_id", integration.StoreID),
+			logger.From(ctx, s.logger).Error("failed to store instagram dm webhook event",
 				zap.String("message_id", input.MessageID),
 				zap.Error(err),
 			)
@@ -5348,12 +5351,12 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 	if s.notificationService != nil && input.Text != "" {
 		storeID, setupErr := s.notificationService.CompleteTestRecipientSetup(ctx, input.Text, input.SenderID, "")
 		if setupErr != nil {
-			s.logger.Warn("failed to complete test recipient setup",
+			logger.From(ctx, s.logger).Warn("failed to complete test recipient setup",
 				zap.String("account_id", input.AccountID),
 				zap.Error(setupErr),
 			)
 		} else if storeID != "" {
-			s.logger.Info("test recipient configured",
+			logger.From(ctx, s.logger).Info("test recipient configured",
 				zap.String("store_id", storeID),
 				zap.String("sender_id", input.SenderID),
 			)
@@ -5376,11 +5379,13 @@ func (s *Service) processStoryReply(ctx context.Context, input ProcessInstagramM
 	}
 	if event == nil || event.Type != "story" {
 		// Reply to a non-commerce story (or unknown) — nothing to do.
-		s.logger.Info("story reply ignored: no matching story event",
+		logger.From(ctx, s.logger).Info("story reply ignored: no matching story event",
 			zap.String("story_id", input.ReplyToStoryID))
 		return nil
 	}
 	storeID := event.StoreID
+	// Store resolved (reply_to_story → event): enrich the ctx for the logs below.
+	ctx = logger.WithStore(ctx, storeID, "")
 
 	// Resolve the buyer's @handle from their IGSID (best-effort — the DM still
 	// works without it; we just fall back to a generic label).
@@ -5389,7 +5394,7 @@ func (s *Service) processStoryReply(ctx context.Context, input ProcessInstagramM
 		if uname, uerr := provider.GetUsername(ctx, input.SenderID); uerr == nil {
 			username = uname
 		} else {
-			s.logger.Warn("failed to resolve story buyer username",
+			logger.From(ctx, s.logger).Warn("failed to resolve story buyer username",
 				zap.String("sender_id", input.SenderID), zap.Error(uerr))
 		}
 	}
@@ -5423,11 +5428,11 @@ func (s *Service) StartPostCommentPolling(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
-		s.logger.Info("post-comment polling started")
+		logger.From(ctx, s.logger).Info("post-comment polling started")
 		for {
 			select {
 			case <-ctx.Done():
-				s.logger.Info("post-comment polling stopped")
+				logger.From(ctx, s.logger).Info("post-comment polling stopped")
 				return
 			case <-ticker.C:
 				s.pollPostCommentsOnce(ctx)
@@ -5462,32 +5467,35 @@ func isMediaGoneError(err error) bool {
 func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 	events, err := s.liveService.ListActivePostEvents(ctx)
 	if err != nil {
-		s.logger.Warn("post polling: failed to list active post events", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("post polling: failed to list active post events", zap.Error(err))
 		return
 	}
 	for _, ev := range events {
 		if ev.MediaID == "" {
 			continue
 		}
-		provider, err := s.resolveInstagramSocialProvider(ctx, ev.StoreID)
+		// The polling loop runs on the app-level ctx (no store): enrich a
+		// per-event ctx with the store each event belongs to.
+		evCtx := logger.WithStore(ctx, ev.StoreID, "")
+		provider, err := s.resolveInstagramSocialProvider(evCtx, ev.StoreID)
 		if err != nil {
 			continue
 		}
-		comments, err := provider.GetMediaComments(ctx, ev.MediaID)
+		comments, err := provider.GetMediaComments(evCtx, ev.MediaID)
 		if err != nil {
 			// Media gone (deleted / no longer accessible): close the event so we
 			// stop hammering a dead media id every tick instead of warning forever.
 			if isMediaGoneError(err) {
-				if endErr := s.liveService.EndPostEventByMediaID(ctx, ev.MediaID); endErr != nil {
-					s.logger.Warn("post polling: failed to end event for missing media",
+				if endErr := s.liveService.EndPostEventByMediaID(evCtx, ev.MediaID); endErr != nil {
+					logger.From(evCtx, s.logger).Warn("post polling: failed to end event for missing media",
 						zap.String("media_id", ev.MediaID), zap.Error(endErr))
 				} else {
-					s.logger.Info("post polling: ended event, media no longer accessible",
+					logger.From(evCtx, s.logger).Info("post polling: ended event, media no longer accessible",
 						zap.String("media_id", ev.MediaID))
 				}
 				continue
 			}
-			s.logger.Warn("post polling: failed to fetch comments",
+			logger.From(evCtx, s.logger).Warn("post polling: failed to fetch comments",
 				zap.String("media_id", ev.MediaID), zap.Error(err))
 			continue
 		}
@@ -5495,7 +5503,7 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 			if c.ID == "" {
 				continue
 			}
-			exists, _ := s.repo.LiveCommentExistsByPlatformID(ctx, c.ID)
+			exists, _ := s.repo.LiveCommentExistsByPlatformID(evCtx, c.ID)
 			if exists {
 				continue
 			}
@@ -5503,14 +5511,14 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 			if username == "" {
 				username = c.Username
 			}
-			if err := s.ProcessInstagramComment(ctx, ProcessInstagramCommentInput{
+			if err := s.ProcessInstagramComment(evCtx, ProcessInstagramCommentInput{
 				MediaID:   ev.MediaID,
 				CommentID: c.ID,
 				UserID:    c.From.ID,
 				Username:  username,
 				Text:      c.Text,
 			}); err != nil {
-				s.logger.Warn("post polling: failed to process comment",
+				logger.From(evCtx, s.logger).Warn("post polling: failed to process comment",
 					zap.String("comment_id", c.ID), zap.Error(err))
 			}
 		}
@@ -5535,7 +5543,7 @@ func (s *Service) resolvePostEventProduct(
 ) (resolved *ProductRow, handled bool, resultLabel string) {
 	whitelist, err := s.liveService.ListEventProducts(ctx, event.ID, event.StoreID)
 	if err != nil {
-		s.logger.Warn("failed to load post promotion products", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("failed to load post promotion products", zap.Error(err))
 		return matched, false, ""
 	}
 
@@ -5603,7 +5611,7 @@ func (s *Service) savePostComment(ctx context.Context, sessionID, eventID string
 		HasPurchaseIntent: true,
 		Result:            result,
 	}); err != nil {
-		s.logger.Error("failed to save post comment", zap.Error(err))
+		logger.From(ctx, s.logger).Error("failed to save post comment", zap.Error(err))
 	}
 }
 
@@ -5646,7 +5654,7 @@ func (s *Service) replyPostOutOfStock(ctx context.Context, event *live.EventOutp
 func (s *Service) sendPostReply(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, msg string) {
 	if input.Channel == "dm" {
 		if err := s.SendInstagramDM(ctx, event.StoreID, input.UserID, msg); err != nil {
-			s.logger.Warn("failed to send story DM reply",
+			logger.From(ctx, s.logger).Warn("failed to send story DM reply",
 				zap.String("event_id", event.ID),
 				zap.String("user_id", input.UserID),
 				zap.Error(err),
@@ -5655,7 +5663,7 @@ func (s *Service) sendPostReply(ctx context.Context, event *live.EventOutput, in
 		return
 	}
 	if err := s.ReplyToInstagramComment(ctx, event.StoreID, input.CommentID, msg); err != nil {
-		s.logger.Warn("failed to send post reply",
+		logger.From(ctx, s.logger).Warn("failed to send post reply",
 			zap.String("event_id", event.ID),
 			zap.String("comment_id", input.CommentID),
 			zap.Error(err),
@@ -5718,7 +5726,7 @@ func (s *Service) replyPostChooseProduct(ctx context.Context, event *live.EventO
 func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventID, productID string, quantity int, unitPrice int64, platformHandle string) error {
 	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
 	if err != nil {
-		s.logger.Debug("no active ERP integration, skipping stock reservation",
+		logger.From(ctx, s.logger).Debug("no active ERP integration, skipping stock reservation",
 			zap.String("store_id", storeID),
 		)
 		return nil
@@ -5747,7 +5755,7 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 	}
 	externalID, _, err := s.productSyncer.GetProduct(ctx, storeID, productID)
 	if err != nil || externalID == "" {
-		s.logger.Debug("product not linked to ERP, skipping stock reservation",
+		logger.From(ctx, s.logger).Debug("product not linked to ERP, skipping stock reservation",
 			zap.String("product_id", productID),
 		)
 		return nil
@@ -5756,7 +5764,7 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 	// Idempotency: check if an active reservation already exists for this cart+product
 	existing, _ := s.repo.ListActiveReservationsByCartAndProduct(ctx, cartID, productID)
 	if len(existing) > 0 {
-		s.logger.Debug("stock reservation already exists for cart+product, skipping",
+		logger.From(ctx, s.logger).Debug("stock reservation already exists for cart+product, skipping",
 			zap.String("cart_id", cartID),
 			zap.String("product_id", productID),
 		)
@@ -5779,7 +5787,7 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 	})
 	if err != nil {
 		// ERP movement was created but we can't track it locally — attempt compensating reversal
-		s.logger.Error("failed to save stock reservation, attempting ERP reversal",
+		logger.From(ctx, s.logger).Error("failed to save stock reservation, attempting ERP reversal",
 			zap.String("cart_id", cartID),
 			zap.String("product_id", productID),
 			zap.String("erp_movement_id", movementID),
@@ -5787,7 +5795,7 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 		)
 		reverseObs := fmt.Sprintf("Estorno compensatório - falha DB - Cart %s", cartID)
 		if _, reverseErr := erpProvider.ReverseStockReservation(ctx, externalID, quantity, 0, reverseObs); reverseErr != nil {
-			s.logger.Error("CRITICAL: failed to compensate ERP stock after DB failure — manual reconciliation required",
+			logger.From(ctx, s.logger).Error("CRITICAL: failed to compensate ERP stock after DB failure — manual reconciliation required",
 				zap.String("external_product_id", externalID),
 				zap.Int("quantity", quantity),
 				zap.String("erp_movement_id", movementID),
@@ -5797,7 +5805,7 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 		return fmt.Errorf("saving stock reservation: %w", err)
 	}
 
-	s.logger.Info("stock reserved in ERP",
+	logger.From(ctx, s.logger).Info("stock reserved in ERP",
 		zap.String("cart_id", cartID),
 		zap.String("product_id", productID),
 		zap.String("external_product_id", externalID),
@@ -5850,7 +5858,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 	rollbackLocal := func() {
 		if delta > 0 {
 			if err := s.repo.IncrementProductStock(ctx, productID, delta); err != nil {
-				s.logger.Error("failed to rollback local stock decrement after ERP failure",
+				logger.From(ctx, s.logger).Error("failed to rollback local stock decrement after ERP failure",
 					zap.String("product_id", productID),
 					zap.Int("delta", delta),
 					zap.Error(err),
@@ -5858,7 +5866,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 			}
 		} else {
 			if err := s.repo.DecrementProductStock(ctx, productID, -delta); err != nil {
-				s.logger.Error("failed to rollback local stock increment after ERP failure",
+				logger.From(ctx, s.logger).Error("failed to rollback local stock increment after ERP failure",
 					zap.String("product_id", productID),
 					zap.Int("delta", delta),
 					zap.Error(err),
@@ -5884,7 +5892,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 	//    any failure rolls back the local change above.
 	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
 	if err != nil {
-		s.logger.Debug("no active ERP integration, skipping reservation delta",
+		logger.From(ctx, s.logger).Debug("no active ERP integration, skipping reservation delta",
 			zap.String("store_id", storeID),
 		)
 		return "", nil
@@ -5901,7 +5909,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 	}
 	externalID, _, err := s.productSyncer.GetProduct(ctx, storeID, productID)
 	if err != nil || externalID == "" {
-		s.logger.Debug("product not linked to ERP, skipping reservation delta",
+		logger.From(ctx, s.logger).Debug("product not linked to ERP, skipping reservation delta",
 			zap.String("product_id", productID),
 		)
 		return "", nil
@@ -5932,7 +5940,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 			return movementID, fmt.Errorf("bumping reservation quantity: %w", err)
 		}
 
-		s.logger.Info("ERP reservation increased",
+		logger.From(ctx, s.logger).Info("ERP reservation increased",
 			zap.String("cart_id", cartID),
 			zap.String("product_id", productID),
 			zap.Int("delta", delta),
@@ -5943,7 +5951,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 
 	// delta < 0
 	if len(existing) == 0 {
-		s.logger.Warn("no active reservation to decrease for cart+product, skipping ERP call",
+		logger.From(ctx, s.logger).Warn("no active reservation to decrease for cart+product, skipping ERP call",
 			zap.String("cart_id", cartID),
 			zap.String("product_id", productID),
 			zap.Int("delta", delta),
@@ -5976,7 +5984,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 		return movementID, fmt.Errorf("decreasing reservation quantity: %w", err)
 	}
 
-	s.logger.Info("ERP reservation decreased",
+	logger.From(ctx, s.logger).Info("ERP reservation decreased",
 		zap.String("cart_id", cartID),
 		zap.String("product_id", productID),
 		zap.Int("delta", delta),
@@ -6003,7 +6011,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 // behavior change if the rule reverts, and so we have a well-known entry point
 // for future end-of-event ERP work.
 func (s *Service) FinalizeEventERP(ctx context.Context, storeID, eventID string) error {
-	s.logger.Debug("FinalizeEventERP called — no-op under paid-first ERP flow",
+	logger.From(ctx, s.logger).Debug("FinalizeEventERP called — no-op under paid-first ERP flow",
 		zap.String("store_id", storeID),
 		zap.String("event_id", eventID),
 	)
@@ -6043,14 +6051,14 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 	}
 
 	if len(erpItems) == 0 {
-		s.logger.Warn("paid cart has no ERP-linked items, skipping order creation",
+		logger.From(ctx, s.logger).Warn("paid cart has no ERP-linked items, skipping order creation",
 			zap.String("cart_id", cart.ID),
 			zap.Int("cart_items_total", len(items)),
 		)
 		return nil
 	}
 
-	s.logger.Info("ERP order items prepared",
+	logger.From(ctx, s.logger).Info("ERP order items prepared",
 		zap.String("cart_id", cart.ID),
 		zap.Int("erp_items", len(erpItems)),
 		zap.Int("cart_items_total", len(items)),
@@ -6091,7 +6099,7 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 				State:         addr.State,
 			}
 		} else if err != nil {
-			s.logger.Warn("failed to parse cart shipping_address",
+			logger.From(ctx, s.logger).Warn("failed to parse cart shipping_address",
 				zap.String("cart_id", cart.ID),
 				zap.Error(err),
 			)
@@ -6134,7 +6142,7 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 		// to record" — if the two ever drift (rounding, fee changes,
 		// refund), the diff shows up between this log and the
 		// `tiny CreateOrder sending payload` log that follows.
-		s.logger.Info("ERP order payment snapshot prepared",
+		logger.From(ctx, s.logger).Info("ERP order payment snapshot prepared",
 			zap.String("cart_id", cart.ID),
 			zap.String("payment_id", paymentStatus.PaymentID),
 			zap.String("payment_method", paymentStatus.PaymentMethod),
@@ -6181,7 +6189,7 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 			zap.Int64("net_amount_cents", paymentStatus.NetAmountCents),
 		)
 	}
-	s.logger.Info("ERP order created for cart", logFields...)
+	logger.From(ctx, s.logger).Info("ERP order created for cart", logFields...)
 
 	return nil
 }
@@ -6210,7 +6218,7 @@ func (s *Service) resolveERPContact(ctx context.Context, erpProvider providers.E
 		return "", err
 	}
 	if cachedID != "" {
-		s.logger.Info("ERP contact resolved from cache",
+		logger.From(ctx, s.logger).Info("ERP contact resolved from cache",
 			zap.String("contact_id", cachedID),
 			zap.String("platform_user_id", platformUserID),
 		)
@@ -6224,7 +6232,7 @@ func (s *Service) resolveERPContact(ctx context.Context, erpProvider providers.E
 			CpfCnpj: customerDocument,
 		})
 		if err == nil && len(results) > 0 {
-			s.logger.Info("ERP contact resolved by document",
+			logger.From(ctx, s.logger).Info("ERP contact resolved by document",
 				zap.String("contact_id", results[0].ContactID),
 				zap.String("platform_user_id", platformUserID),
 			)
@@ -6256,7 +6264,7 @@ func (s *Service) resolveERPContact(ctx context.Context, erpProvider providers.E
 		return "", fmt.Errorf("creating ERP contact: %w", err)
 	}
 
-	s.logger.Info("ERP contact created",
+	logger.From(ctx, s.logger).Info("ERP contact created",
 		zap.String("contact_id", contact.ContactID),
 		zap.String("platform_user_id", platformUserID),
 		zap.String("contact_name", contactName),
@@ -6276,7 +6284,7 @@ func (s *Service) bestEffortUpdateContact(ctx context.Context, erpProvider provi
 		return
 	}
 	if err := erpProvider.UpdateContact(ctx, contactID, contact); err != nil {
-		s.logger.Warn("failed to enrich ERP contact, proceeding with order anyway",
+		logger.From(ctx, s.logger).Warn("failed to enrich ERP contact, proceeding with order anyway",
 			zap.String("contact_id", contactID),
 			zap.Error(err),
 		)
@@ -6308,7 +6316,7 @@ func (s *Service) getERPProvider(ctx context.Context, integration *IntegrationRo
 func (s *Service) SweepExpiredCarts(ctx context.Context, limit int32) {
 	carts, err := s.repo.ListExpiredCarts(ctx, limit)
 	if err != nil {
-		s.logger.Error("expiry sweep: failed to list expired carts", zap.Error(err))
+		logger.From(ctx, s.logger).Error("expiry sweep: failed to list expired carts", zap.Error(err))
 		return
 	}
 	for _, cart := range carts {
@@ -6329,26 +6337,27 @@ func (s *Service) SweepExpiredCarts(ctx context.Context, limit int32) {
 //     estorno); senão reverte as reservas saída-manual POR CART.
 //  4. Promove a waitlist de cada produto liberado (pós-commit, fire-and-forget).
 func (s *Service) ExpireCart(ctx context.Context, cartID, storeID string) {
+	ctx = logger.WithStore(ctx, storeID, "")
 	release, acquired, err := s.repo.AcquireCartFinalisationLock(ctx, cartID)
 	if err != nil {
-		s.logger.Warn("expiry: failed to acquire cart lock", zap.String("cart_id", cartID), zap.Error(err))
+		logger.From(ctx, s.logger).Warn("expiry: failed to acquire cart lock", zap.String("cart_id", cartID), zap.Error(err))
 		return
 	}
 	if !acquired {
 		// Webhook de pagamento está finalizando este mesmo cart. Ele decide.
-		s.logger.Info("expiry: skip, finalisation in progress", zap.String("cart_id", cartID))
+		logger.From(ctx, s.logger).Info("expiry: skip, finalisation in progress", zap.String("cart_id", cartID))
 		return
 	}
 	defer release()
 
 	res, err := s.repo.ExpireCartAndReleaseStock(ctx, cartID)
 	if err != nil {
-		s.logger.Error("expiry: failed to expire cart", zap.String("cart_id", cartID), zap.Error(err))
+		logger.From(ctx, s.logger).Error("expiry: failed to expire cart", zap.String("cart_id", cartID), zap.Error(err))
 		return
 	}
 	if !res.Eligible {
 		// Pago ou já expirado/cancelado entre a seleção e o flip. Nada a fazer.
-		s.logger.Info("expiry: cart no longer eligible (paid/terminal in gap)", zap.String("cart_id", cartID))
+		logger.From(ctx, s.logger).Info("expiry: cart no longer eligible (paid/terminal in gap)", zap.String("cart_id", cartID))
 		return
 	}
 
@@ -6358,14 +6367,14 @@ func (s *Service) ExpireCart(ctx context.Context, cartID, storeID string) {
 	if st, stErr := s.repo.GetCartERPOrderState(ctx, cartID); stErr == nil &&
 		st.State != erpOrderStateNone && st.State != erpOrderStateCancelled {
 		if cancelErr := s.CancelERPOrderForCart(ctx, cartID, storeID); cancelErr != nil {
-			s.logger.Error("expiry: failed to cancel converted cart order",
+			logger.From(ctx, s.logger).Error("expiry: failed to cancel converted cart order",
 				zap.String("cart_id", cartID), zap.Error(cancelErr))
 		}
 	} else {
 		s.reverseCartReservationsInERP(ctx, cartID, storeID)
 	}
 
-	s.logger.Info("expired cart processed",
+	logger.From(ctx, s.logger).Info("expired cart processed",
 		zap.String("cart_id", cartID),
 		zap.Int("items_released", len(res.FreedProductIDs)),
 	)
@@ -6382,7 +6391,7 @@ func (s *Service) ExpireCart(ctx context.Context, cartID, storeID string) {
 func (s *Service) reverseCartReservationsInERP(ctx context.Context, cartID, storeID string) {
 	reservations, resErr := s.repo.ListActiveReservationsByCart(ctx, cartID)
 	if resErr != nil {
-		s.logger.Error("expiry: failed to list reservations", zap.String("cart_id", cartID), zap.Error(resErr))
+		logger.From(ctx, s.logger).Error("expiry: failed to list reservations", zap.String("cart_id", cartID), zap.Error(resErr))
 		return
 	}
 	if len(reservations) == 0 {
@@ -6396,7 +6405,7 @@ func (s *Service) reverseCartReservationsInERP(ctx context.Context, cartID, stor
 				obs := fmt.Sprintf("Estorno expiração carrinho LiveCart - Cart %s", cartID)
 				if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
 					erpReversed = false
-					s.logger.Warn("expiry: failed to reverse ERP reservation",
+					logger.From(ctx, s.logger).Warn("expiry: failed to reverse ERP reservation",
 						zap.String("cart_id", cartID),
 						zap.String("external_product_id", r.ExternalProductID),
 						zap.Error(reverseErr))
@@ -6404,19 +6413,19 @@ func (s *Service) reverseCartReservationsInERP(ctx context.Context, cartID, stor
 			}
 		} else {
 			erpReversed = false
-			s.logger.Error("expiry: failed to build ERP provider", zap.String("cart_id", cartID), zap.Error(provErr))
+			logger.From(ctx, s.logger).Error("expiry: failed to build ERP provider", zap.String("cart_id", cartID), zap.Error(provErr))
 		}
 	} else {
 		erpReversed = false
-		s.logger.Warn("expiry: no active ERP integration, marking reservations reversed locally only",
+		logger.From(ctx, s.logger).Warn("expiry: no active ERP integration, marking reservations reversed locally only",
 			zap.String("store_id", storeID))
 	}
 
 	if markErr := s.repo.ReverseReservationsByCart(ctx, cartID); markErr != nil {
-		s.logger.Error("expiry: failed to mark reservations reversed", zap.String("cart_id", cartID), zap.Error(markErr))
+		logger.From(ctx, s.logger).Error("expiry: failed to mark reservations reversed", zap.String("cart_id", cartID), zap.Error(markErr))
 	}
 	if !erpReversed {
-		s.logger.Warn("expiry: ERP reservations NOT fully reversed — manual reconciliation may be needed",
+		logger.From(ctx, s.logger).Warn("expiry: ERP reservations NOT fully reversed — manual reconciliation may be needed",
 			zap.String("cart_id", cartID))
 	}
 }
@@ -6437,7 +6446,7 @@ func (s *Service) TryReSecureCartStock(ctx context.Context, cartID string) (bool
 	rollback := func() {
 		for _, it := range secured {
 			if incErr := s.repo.IncrementProductStock(ctx, it.ProductID, it.Quantity); incErr != nil {
-				s.logger.Error("recovery: failed to roll back re-secured stock",
+				logger.From(ctx, s.logger).Error("recovery: failed to roll back re-secured stock",
 					zap.String("cart_id", cartID),
 					zap.String("product_id", it.ProductID),
 					zap.Error(incErr))
@@ -6468,12 +6477,12 @@ func (s *Service) TryReSecureCartStock(ctx context.Context, cartID string) (bool
 func (s *Service) ReleaseCartStock(ctx context.Context, cartID string) {
 	items, err := s.repo.ListNonWaitlistedCartItems(ctx, cartID)
 	if err != nil {
-		s.logger.Error("failed to list items to release cart stock", zap.String("cart_id", cartID), zap.Error(err))
+		logger.From(ctx, s.logger).Error("failed to list items to release cart stock", zap.String("cart_id", cartID), zap.Error(err))
 		return
 	}
 	for _, it := range items {
 		if err := s.repo.IncrementProductStock(ctx, it.ProductID, it.Quantity); err != nil {
-			s.logger.Error("failed to release cart stock",
+			logger.From(ctx, s.logger).Error("failed to release cart stock",
 				zap.String("cart_id", cartID),
 				zap.String("product_id", it.ProductID),
 				zap.Error(err))
@@ -6488,14 +6497,14 @@ func (s *Service) ReleaseCartStock(ctx context.Context, cartID string) {
 func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, productID string) {
 	carts, err := s.repo.ListExpiredCartsByEventAndProduct(ctx, eventID, productID)
 	if err != nil {
-		s.logger.Error("failed to list expired carts", zap.Error(err))
+		logger.From(ctx, s.logger).Error("failed to list expired carts", zap.Error(err))
 		return
 	}
 
 	for _, cart := range carts {
 		// Mark cart as expired
 		if err := s.repo.UpdateCartStatus(ctx, cart.ID, "expired"); err != nil {
-			s.logger.Error("failed to expire cart", zap.String("cart_id", cart.ID), zap.Error(err))
+			logger.From(ctx, s.logger).Error("failed to expire cart", zap.String("cart_id", cart.ID), zap.Error(err))
 			continue
 		}
 
@@ -6505,7 +6514,7 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 		if st, stErr := s.repo.GetCartERPOrderState(ctx, cart.ID); stErr == nil &&
 			st.State != erpOrderStateNone && st.State != erpOrderStateCancelled {
 			if cancelErr := s.CancelERPOrderForCart(ctx, cart.ID, cart.StoreID); cancelErr != nil {
-				s.logger.Error("failed to cancel converted cart order on expiry",
+				logger.From(ctx, s.logger).Error("failed to cancel converted cart order on expiry",
 					zap.String("cart_id", cart.ID),
 					zap.Error(cancelErr),
 				)
@@ -6521,7 +6530,7 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 		releaseQty, qtyErr := s.repo.GetCartItemAvailableQty(ctx, cart.ID, productID)
 		if qtyErr != nil || releaseQty < 1 {
 			if qtyErr != nil {
-				s.logger.Warn("failed to read cart item quantity for expiry release, falling back to 1",
+				logger.From(ctx, s.logger).Warn("failed to read cart item quantity for expiry release, falling back to 1",
 					zap.String("cart_id", cart.ID),
 					zap.String("product_id", productID),
 					zap.Error(qtyErr),
@@ -6530,13 +6539,13 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 			releaseQty = 1
 		}
 		if err := s.repo.IncrementProductStock(ctx, productID, releaseQty); err != nil {
-			s.logger.Error("failed to release stock", zap.String("product_id", productID), zap.Error(err))
+			logger.From(ctx, s.logger).Error("failed to release stock", zap.String("product_id", productID), zap.Error(err))
 		}
 
 		// Reverse ERP stock reservations for this cart+product
 		reservations, resErr := s.repo.ListActiveReservationsByCartAndProduct(ctx, cart.ID, productID)
 		if resErr != nil {
-			s.logger.Error("failed to list reservations for expired cart",
+			logger.From(ctx, s.logger).Error("failed to list reservations for expired cart",
 				zap.String("cart_id", cart.ID),
 				zap.String("product_id", productID),
 				zap.Error(resErr),
@@ -6546,13 +6555,13 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 			erpReversed := false
 			integration, intErr := s.repo.GetActiveByProvider(ctx, cart.StoreID, "erp", "tiny")
 			if intErr != nil {
-				s.logger.Warn("no active ERP integration for expired cart reversal, marking reservations as reversed locally only",
+				logger.From(ctx, s.logger).Warn("no active ERP integration for expired cart reversal, marking reservations as reversed locally only",
 					zap.String("store_id", cart.StoreID),
 				)
 			} else {
 				erpProvider, provErr := s.erpProviderFor(ctx, integration)
 				if provErr != nil {
-					s.logger.Error("failed to create ERP provider for expired cart reversal",
+					logger.From(ctx, s.logger).Error("failed to create ERP provider for expired cart reversal",
 						zap.String("cart_id", cart.ID),
 						zap.Error(provErr),
 					)
@@ -6562,7 +6571,7 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 						obs := fmt.Sprintf("Estorno expiração carrinho LiveCart - Cart %s", cart.ID)
 						if _, reverseErr := erpProvider.ReverseStockReservation(ctx, res.ExternalProductID, res.Quantity, 0, obs); reverseErr != nil {
 							erpReversed = false
-							s.logger.Warn("failed to reverse expired cart stock reservation in ERP",
+							logger.From(ctx, s.logger).Warn("failed to reverse expired cart stock reservation in ERP",
 								zap.String("cart_id", cart.ID),
 								zap.String("external_product_id", res.ExternalProductID),
 								zap.Error(reverseErr),
@@ -6572,21 +6581,21 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 				}
 			}
 			if markErr := s.repo.ReverseReservationsByCartAndProduct(ctx, cart.ID, productID); markErr != nil {
-				s.logger.Error("failed to mark reservations as reversed",
+				logger.From(ctx, s.logger).Error("failed to mark reservations as reversed",
 					zap.String("cart_id", cart.ID),
 					zap.String("product_id", productID),
 					zap.Error(markErr),
 				)
 			}
 			if !erpReversed {
-				s.logger.Warn("ERP stock reservations NOT reversed for expired cart — manual reconciliation may be needed",
+				logger.From(ctx, s.logger).Warn("ERP stock reservations NOT reversed for expired cart — manual reconciliation may be needed",
 					zap.String("cart_id", cart.ID),
 					zap.String("product_id", productID),
 				)
 			}
 		}
 
-		s.logger.Info("expired cart processed",
+		logger.From(ctx, s.logger).Info("expired cart processed",
 			zap.String("cart_id", cart.ID),
 			zap.String("product_id", productID),
 		)
@@ -6633,7 +6642,7 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 		if provider, provErr := s.erpProviderFor(ctx, integration); provErr == nil {
 			erpProvider = provider
 		} else {
-			s.logger.Warn("failed to build ERP provider for block sweep",
+			logger.From(ctx, s.logger).Warn("failed to build ERP provider for block sweep",
 				zap.String("store_id", storeID),
 				zap.Error(provErr),
 			)
@@ -6643,7 +6652,7 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 	for _, cart := range carts {
 		items, listErr := s.repo.ListNonWaitlistedCartItems(ctx, cart.ID)
 		if listErr != nil {
-			s.logger.Error("failed to list cart items for blocked cart",
+			logger.From(ctx, s.logger).Error("failed to list cart items for blocked cart",
 				zap.String("cart_id", cart.ID),
 				zap.Error(listErr),
 			)
@@ -6654,7 +6663,7 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 		//    so we ignore them — they auto-cancel when the cart is killed).
 		for _, item := range items {
 			if err := s.repo.IncrementProductStock(ctx, item.ProductID, item.Quantity); err != nil {
-				s.logger.Error("failed to release local stock for blocked cart",
+				logger.From(ctx, s.logger).Error("failed to release local stock for blocked cart",
 					zap.String("cart_id", cart.ID),
 					zap.String("product_id", item.ProductID),
 					zap.Error(err),
@@ -6668,7 +6677,7 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 		//    the DB rows reversed and surface a warning for manual reconciliation.
 		reservations, resErr := s.repo.ListActiveReservationsByCart(ctx, cart.ID)
 		if resErr != nil {
-			s.logger.Error("failed to list reservations for blocked cart",
+			logger.From(ctx, s.logger).Error("failed to list reservations for blocked cart",
 				zap.String("cart_id", cart.ID),
 				zap.Error(resErr),
 			)
@@ -6677,7 +6686,7 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 			for _, r := range reservations {
 				obs := fmt.Sprintf("Estorno cliente bloqueado - Cart %s", cart.ID)
 				if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
-					s.logger.Warn("failed to reverse ERP reservation on block",
+					logger.From(ctx, s.logger).Warn("failed to reverse ERP reservation on block",
 						zap.String("cart_id", cart.ID),
 						zap.String("external_product_id", r.ExternalProductID),
 						zap.Int("quantity", r.Quantity),
@@ -6688,7 +6697,7 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 		}
 		if len(reservations) > 0 {
 			if err := s.repo.ReverseReservationsByCart(ctx, cart.ID); err != nil {
-				s.logger.Error("failed to mark reservations reversed for blocked cart",
+				logger.From(ctx, s.logger).Error("failed to mark reservations reversed for blocked cart",
 					zap.String("cart_id", cart.ID),
 					zap.Error(err),
 				)
@@ -6697,14 +6706,14 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 
 		// 3. Mark cart as cancelled (no-op if it was paid in the gap).
 		if err := s.repo.CancelCartAsBlocked(ctx, cart.ID); err != nil {
-			s.logger.Error("failed to cancel cart as blocked",
+			logger.From(ctx, s.logger).Error("failed to cancel cart as blocked",
 				zap.String("cart_id", cart.ID),
 				zap.Error(err),
 			)
 			continue
 		}
 
-		s.logger.Info("cart cancelled by customer block",
+		logger.From(ctx, s.logger).Info("cart cancelled by customer block",
 			zap.String("cart_id", cart.ID),
 			zap.String("handle", handle),
 			zap.Int("items_released", len(items)),
@@ -6741,7 +6750,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	// na row da fila, então precisamos de notifiedUntil antes do claim.
 	ttl, ttlErr := s.repo.GetWaitlistNotifiedTTL(ctx, eventID)
 	if ttlErr != nil {
-		s.logger.Warn("failed to read waitlist TTL, defaulting to 30min",
+		logger.From(ctx, s.logger).Warn("failed to read waitlist TTL, defaulting to 30min",
 			zap.String("event_id", eventID),
 			zap.Error(ttlErr),
 		)
@@ -6755,7 +6764,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	// avançando a fila só 1 — o próximo ficava preso com uma unidade perdida.
 	next, err := s.repo.ClaimNextWaitlistItem(ctx, eventID, productID, notifiedUntil)
 	if err != nil {
-		s.logger.Error("failed to claim next waitlist item", zap.Error(err))
+		logger.From(ctx, s.logger).Error("failed to claim next waitlist item", zap.Error(err))
 		return
 	}
 	if next == nil {
@@ -6769,7 +6778,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	taken, err := s.repo.DecrementProductStockUpTo(ctx, productID, next.Quantity)
 	if err != nil {
 		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
-		s.logger.Error("failed to take stock for waitlist promotion",
+		logger.From(ctx, s.logger).Error("failed to take stock for waitlist promotion",
 			zap.String("product_id", productID),
 			zap.String("waitlist_item_id", next.ID),
 			zap.Error(err),
@@ -6778,12 +6787,12 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	}
 	if taken <= 0 {
 		if revErr := s.repo.RevertWaitlistToWaiting(ctx, next.ID); revErr != nil {
-			s.logger.Error("failed to revert waitlist claim after stock gate miss",
+			logger.From(ctx, s.logger).Error("failed to revert waitlist claim after stock gate miss",
 				zap.String("waitlist_item_id", next.ID),
 				zap.Error(revErr),
 			)
 		}
-		s.logger.Debug("waitlist promote skipped: stock not available",
+		logger.From(ctx, s.logger).Debug("waitlist promote skipped: stock not available",
 			zap.String("product_id", productID),
 			zap.String("waitlist_item_id", next.ID),
 		)
@@ -6794,7 +6803,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	if err != nil || product == nil {
 		_ = s.repo.IncrementProductStock(ctx, productID, taken)
 		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
-		s.logger.Error("failed to get product for waitlist promotion",
+		logger.From(ctx, s.logger).Error("failed to get product for waitlist promotion",
 			zap.String("product_id", productID),
 			zap.String("store_id", storeID),
 			zap.Error(err),
@@ -6816,7 +6825,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	if err != nil {
 		_ = s.repo.IncrementProductStock(ctx, productID, taken)
 		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
-		s.logger.Error("failed to decrement waitlisted quantity on promotion",
+		logger.From(ctx, s.logger).Error("failed to decrement waitlisted quantity on promotion",
 			zap.String("waitlist_item_id", next.ID),
 			zap.String("cart_id", cartID),
 			zap.Error(err),
@@ -6841,7 +6850,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		if fbErr != nil {
 			_ = s.repo.IncrementProductStock(ctx, productID, taken)
 			_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
-			s.logger.Error("failed to recreate cart item on promotion",
+			logger.From(ctx, s.logger).Error("failed to recreate cart item on promotion",
 				zap.String("waitlist_item_id", next.ID),
 				zap.Error(fbErr),
 			)
@@ -6856,7 +6865,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	remaining := next.Quantity - taken
 	if remaining > 0 {
 		if err := s.repo.RequeueWaitlistItemPartial(ctx, next.ID, remaining); err != nil {
-			s.logger.Warn("failed to requeue partial waitlist remainder",
+			logger.From(ctx, s.logger).Warn("failed to requeue partial waitlist remainder",
 				zap.String("waitlist_item_id", next.ID),
 				zap.Int("remaining", remaining),
 				zap.Error(err),
@@ -6866,7 +6875,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 
 	cartToken, tokenErr := s.repo.GetCartTokenByID(ctx, cartID)
 	if tokenErr != nil {
-		s.logger.Warn("failed to read cart token after waitlist promotion",
+		logger.From(ctx, s.logger).Warn("failed to read cart token after waitlist promotion",
 			zap.String("cart_id", cartID),
 			zap.Error(tokenErr),
 		)
@@ -6877,7 +6886,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	// um cart que já tinha um expires_at maior. (A row da fila já foi marcada
 	// 'notified' com notifiedUntil pela reivindicação atômica no topo.)
 	if extendErr := s.repo.ExtendCartExpiration(ctx, cartID, notifiedUntil); extendErr != nil {
-		s.logger.Warn("failed to extend cart expiration for notified waitlist",
+		logger.From(ctx, s.logger).Warn("failed to extend cart expiration for notified waitlist",
 			zap.String("cart_id", cartID),
 			zap.Error(extendErr),
 		)
@@ -6886,7 +6895,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	// ERP saída — reserva pareada às `taken` unidades recém-liberadas para o
 	// cart. Falha aqui não bloqueia: o worker de reconciliação pega depois.
 	if syncErr := s.ReserveStockInERP(ctx, storeID, cartID, eventID, productID, taken, product.Price, next.PlatformHandle); syncErr != nil {
-		s.logger.Warn("failed to reserve stock in ERP for promoted waitlist item",
+		logger.From(ctx, s.logger).Warn("failed to reserve stock in ERP for promoted waitlist item",
 			zap.String("cart_id", cartID),
 			zap.Error(syncErr),
 		)
@@ -6910,7 +6919,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		TTL:            ttl,
 	})
 
-	s.logger.Info("waitlist promoted",
+	logger.From(ctx, s.logger).Info("waitlist promoted",
 		zap.String("user", next.PlatformHandle),
 		zap.String("waitlist_item_id", next.ID),
 		zap.String("cart_id", cartID),
@@ -6960,7 +6969,7 @@ func (s *Service) CancelWaitlistItem(ctx context.Context, waitlistItemID, cartID
 		// O cliente já tinha o item reservado no cart + ERP. Devolve
 		// tudo via mesmo fluxo do worker de expiração.
 		if _, err := s.repo.DecrementCartItem(ctx, cartID, item.ProductID, item.Quantity); err != nil {
-			s.logger.Warn("failed to decrement cart item on waitlist cancel",
+			logger.From(ctx, s.logger).Warn("failed to decrement cart item on waitlist cancel",
 				zap.String("waitlist_item_id", waitlistItemID),
 				zap.Error(err),
 			)
@@ -6970,7 +6979,7 @@ func (s *Service) CancelWaitlistItem(ctx context.Context, waitlistItemID, cartID
 			// AdjustStockReservationDelta also bumps products.stock for delta<0,
 			// so no separate IncrementProductStock call is needed here.
 			if _, err := s.AdjustStockReservationDelta(ctx, cart.StoreID, cartID, item.EventID, item.ProductID, -item.Quantity, 0, cart.PlatformHandle); err != nil {
-				s.logger.Warn("failed to reverse reservation on waitlist cancel",
+				logger.From(ctx, s.logger).Warn("failed to reverse reservation on waitlist cancel",
 					zap.String("waitlist_item_id", waitlistItemID),
 					zap.Error(err),
 				)
@@ -6979,7 +6988,7 @@ func (s *Service) CancelWaitlistItem(ctx context.Context, waitlistItemID, cartID
 			// Cart desapareceu: ainda precisamos devolver o estoque local que
 			// o promote consumiu, para a próxima entry da fila ser promovível.
 			if err := s.repo.IncrementProductStock(ctx, item.ProductID, item.Quantity); err != nil {
-				s.logger.Warn("failed to increment local stock on waitlist cancel (cart missing)",
+				logger.From(ctx, s.logger).Warn("failed to increment local stock on waitlist cancel (cart missing)",
 					zap.String("waitlist_item_id", waitlistItemID),
 					zap.Error(err),
 				)
@@ -7008,7 +7017,7 @@ func (s *Service) ExpireNotifiedWaitlistItem(ctx context.Context, item WaitlistI
 		// Devolve o item do carrinho. DecrementCartItem deleta a row se
 		// zerar — mantém a invariante quantity>0.
 		if _, err := s.repo.DecrementCartItem(ctx, cartID, productID, item.Quantity); err != nil {
-			s.logger.Warn("failed to decrement cart item on waitlist expire",
+			logger.From(ctx, s.logger).Warn("failed to decrement cart item on waitlist expire",
 				zap.String("waitlist_item_id", item.ID),
 				zap.String("cart_id", cartID),
 				zap.String("product_id", productID),
@@ -7022,7 +7031,7 @@ func (s *Service) ExpireNotifiedWaitlistItem(ctx context.Context, item WaitlistI
 		cart, _ := s.repo.GetCartByID(ctx, cartID)
 		if cart != nil {
 			if _, err := s.AdjustStockReservationDelta(ctx, cart.StoreID, cartID, eventID, productID, -item.Quantity, 0, cart.PlatformHandle); err != nil {
-				s.logger.Warn("failed to reverse reservation on waitlist expire",
+				logger.From(ctx, s.logger).Warn("failed to reverse reservation on waitlist expire",
 					zap.String("waitlist_item_id", item.ID),
 					zap.String("cart_id", cartID),
 					zap.Error(err),
@@ -7032,7 +7041,7 @@ func (s *Service) ExpireNotifiedWaitlistItem(ctx context.Context, item WaitlistI
 			// Cart desapareceu (raro): nada para reverter no ERP, mas ainda
 			// precisamos devolver o estoque local que o promote consumiu.
 			if err := s.repo.IncrementProductStock(ctx, productID, item.Quantity); err != nil {
-				s.logger.Warn("failed to increment local stock on waitlist expire (cart missing)",
+				logger.From(ctx, s.logger).Warn("failed to increment local stock on waitlist expire (cart missing)",
 					zap.String("waitlist_item_id", item.ID),
 					zap.Error(err),
 				)
@@ -7059,7 +7068,7 @@ func (s *Service) ExpireNotifiedWaitlistItem(ctx context.Context, item WaitlistI
 		// ProcessWaitlistForProduct tolera storeID vazio na lookup do
 		// produto? Não — então só pulamos a promoção. O Tiny webhook
 		// pega depois.
-		s.logger.Info("waitlist expired but storeID unresolved, skipping next-promotion",
+		logger.From(ctx, s.logger).Info("waitlist expired but storeID unresolved, skipping next-promotion",
 			zap.String("waitlist_item_id", item.ID),
 			zap.String("event_id", eventID),
 		)
@@ -7081,7 +7090,7 @@ func (s *Service) ExpireNotifiedWaitlistSweep(ctx context.Context) (int, error) 
 	var firstErr error
 	for _, item := range items {
 		if err := s.ExpireNotifiedWaitlistItem(ctx, item); err != nil {
-			s.logger.Warn("failed to expire notified waitlist item",
+			logger.From(ctx, s.logger).Warn("failed to expire notified waitlist item",
 				zap.String("waitlist_item_id", item.ID),
 				zap.Error(err),
 			)
@@ -7121,14 +7130,14 @@ func (s *Service) ProcessWaitlistAfterStockWebhook(ctx context.Context, storeID,
 	// DB, adia a promoção (direção conservadora).
 	inFlight, guardErr := s.repo.HasInFlightFinalisationForProduct(ctx, productID)
 	if guardErr != nil {
-		s.logger.Warn("failed to check in-flight finalisation, deferring waitlist backstop",
+		logger.From(ctx, s.logger).Warn("failed to check in-flight finalisation, deferring waitlist backstop",
 			zap.String("product_id", productID),
 			zap.Error(guardErr),
 		)
 		return nil
 	}
 	if inFlight {
-		s.logger.Info("deferring waitlist backstop: ERP finalisation in flight for product",
+		logger.From(ctx, s.logger).Info("deferring waitlist backstop: ERP finalisation in flight for product",
 			zap.String("product_id", productID),
 			zap.String("store_id", storeID),
 		)
@@ -7166,7 +7175,7 @@ func (s *Service) sendWaitlistNotifiedDM(ctx context.Context, input sendWaitlist
 	}
 	shouldNotify, err := s.notificationService.ShouldNotify(ctx, input.StoreID, notification.TypeWaitlistNotified, false)
 	if err != nil {
-		s.logger.Warn("failed to check notification settings for waitlist",
+		logger.From(ctx, s.logger).Warn("failed to check notification settings for waitlist",
 			zap.String("store_id", input.StoreID),
 			zap.Error(err),
 		)
@@ -7178,7 +7187,7 @@ func (s *Service) sendWaitlistNotifiedDM(ctx context.Context, input sendWaitlist
 
 	storeInfo, err := s.repo.GetStoreInfo(ctx, input.StoreID)
 	if err != nil {
-		s.logger.Warn("failed to get store info for waitlist notification",
+		logger.From(ctx, s.logger).Warn("failed to get store info for waitlist notification",
 			zap.String("store_id", input.StoreID),
 			zap.Error(err),
 		)
@@ -7210,14 +7219,14 @@ func (s *Service) sendWaitlistNotifiedDM(ctx context.Context, input sendWaitlist
 		Variables:        vars,
 	})
 	if err != nil {
-		s.logger.Warn("waitlist notification send error",
+		logger.From(ctx, s.logger).Warn("waitlist notification send error",
 			zap.String("store_id", input.StoreID),
 			zap.String("cart_id", input.CartID),
 			zap.Error(err),
 		)
 		return
 	}
-	s.logger.Info("waitlist notification dispatched",
+	logger.From(ctx, s.logger).Info("waitlist notification dispatched",
 		zap.String("store_id", input.StoreID),
 		zap.String("cart_id", input.CartID),
 		zap.String("status", string(result.Status)),
@@ -7237,7 +7246,7 @@ func (s *Service) createProviderFromRow(ctx context.Context, integration *Integr
 
 	// Log credential expiration info for debugging (only for OAuth providers)
 	if creds.AccessToken != "" && integration.Provider != "pagarme" {
-		s.logger.Debug("checking token expiration",
+		logger.From(ctx, s.logger).Debug("checking token expiration",
 			zap.String("integration_id", integration.ID),
 			zap.String("provider", integration.Provider),
 			zap.Time("expires_at", creds.ExpiresAt),
@@ -7249,14 +7258,14 @@ func (s *Service) createProviderFromRow(ctx context.Context, integration *Integr
 
 	// Check if token needs refresh
 	if creds.IsExpired() {
-		s.logger.Info("token expired, attempting refresh",
+		logger.From(ctx, s.logger).Info("token expired, attempting refresh",
 			zap.String("integration_id", integration.ID),
 			zap.String("provider", integration.Provider),
 			zap.Time("expires_at", creds.ExpiresAt),
 		)
 		creds, err = s.refreshToken(ctx, integration, creds)
 		if err != nil {
-			s.logger.Warn("failed to refresh token",
+			logger.From(ctx, s.logger).Warn("failed to refresh token",
 				zap.String("integration_id", integration.ID),
 				zap.Error(err),
 			)
@@ -7328,7 +7337,7 @@ func (s *Service) refreshToken(ctx context.Context, integration *IntegrationRow,
 		return nil, fmt.Errorf("saving new credentials: %w", err)
 	}
 
-	s.logger.Info("token refreshed successfully",
+	logger.From(ctx, s.logger).Info("token refreshed successfully",
 		zap.String("integration_id", integration.ID),
 	)
 
@@ -7384,7 +7393,7 @@ func (s *Service) handleProviderError(ctx context.Context, integrationID string,
 
 	var rateLimitErr *ratelimit.ErrRateLimited
 	if errors.As(err, &rateLimitErr) {
-		s.logger.Error("provider rate limited",
+		logger.From(ctx, s.logger).Error("provider rate limited",
 			zap.String("integration_id", integrationID),
 			zap.String("operation", operation),
 			zap.Duration("retry_after", rateLimitErr.RetryAfter),
@@ -7392,7 +7401,7 @@ func (s *Service) handleProviderError(ctx context.Context, integrationID string,
 
 		// Mark integration as error so it's visible in the dashboard
 		if updateErr := s.repo.UpdateStatus(ctx, integrationID, "error"); updateErr != nil {
-			s.logger.Warn("failed to update integration status after rate limit",
+			logger.From(ctx, s.logger).Warn("failed to update integration status after rate limit",
 				zap.String("integration_id", integrationID),
 				zap.Error(updateErr),
 			)

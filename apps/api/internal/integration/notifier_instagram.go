@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/lib/config"
+	"livecart/apps/api/lib/logger"
 )
 
 // InstagramNotifier implements Notifier by sending DMs through the Instagram
@@ -56,7 +57,7 @@ func (n *InstagramNotifier) NotifyEventCheckout(ctx context.Context, params Noti
 		if err := n.svc.ReplyToInstagramComment(ctx, params.StoreID, params.CommentID, text); err == nil {
 			return nil
 		} else {
-			n.logger.Warn("checkout private reply failed, falling back to direct message",
+			logger.From(ctx, n.logger).Warn("checkout private reply failed, falling back to direct message",
 				zap.String("store_id", params.StoreID),
 				zap.String("comment_id", params.CommentID),
 				zap.Error(err),
@@ -65,7 +66,7 @@ func (n *InstagramNotifier) NotifyEventCheckout(ctx context.Context, params Noti
 	}
 
 	if err := n.svc.SendInstagramDM(ctx, params.StoreID, params.PlatformUserID, text); err != nil {
-		n.logger.Warn("notify event checkout failed",
+		logger.From(ctx, n.logger).Warn("notify event checkout failed",
 			zap.String("store_id", params.StoreID),
 			zap.String("event_id", params.EventID),
 			zap.String("cart_id", params.CartID),

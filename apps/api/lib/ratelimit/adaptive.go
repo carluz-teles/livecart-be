@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/logger"
 )
 
 // AdaptiveLimiter implements RateLimiter using uniform throttling based on
@@ -106,7 +108,7 @@ func (l *AdaptiveLimiter) Wait(ctx context.Context) error {
 			return nil
 		}
 
-		l.logger.Debug("rate limit: throttling request",
+		logger.From(ctx, l.logger).Debug("rate limit: throttling request",
 			zap.Duration("wait", res.RetryAfter),
 			zap.Int("remaining", res.Remaining),
 		)

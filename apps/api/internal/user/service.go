@@ -2,9 +2,11 @@ package user
 
 import (
 	"context"
-	"livecart/apps/api/internal/billing"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/internal/billing"
+	"livecart/apps/api/lib/logger"
 )
 
 type Service struct {
@@ -34,7 +36,7 @@ func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserO
 		return nil, err
 	}
 
-	s.logger.Debug("user synced",
+	logger.From(ctx, s.logger).Debug("user synced",
 		zap.String("user_id", user.ID),
 		zap.String("clerk_id", user.ClerkID),
 		zap.String("email", user.Email),
@@ -76,7 +78,7 @@ func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserO
 		if sub, err := s.billing.EnsureTrialSubscription(ctx, membershipOutput.StoreID, membershipOutput.StoreName, user.Email); err == nil {
 			subscription = sub
 		} else {
-			s.logger.Warn("failed to resolve subscription state on sync",
+			logger.From(ctx, s.logger).Warn("failed to resolve subscription state on sync",
 				zap.String("store_id", membershipOutput.StoreID),
 				zap.Error(err),
 			)

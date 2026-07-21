@@ -975,9 +975,11 @@ const validateStoreAccessByClerkID = `-- name: ValidateStoreAccessByClerkID :one
 SELECT
   m.id,
   m.role,
-  u.id as user_id
+  u.id as user_id,
+  s.slug as store_slug
 FROM memberships m
 JOIN users u ON u.id = m.user_id
+JOIN stores s ON s.id = m.store_id
 WHERE u.clerk_id = $1 AND m.store_id = $2 AND m.status = 'active'
 `
 
@@ -987,15 +989,21 @@ type ValidateStoreAccessByClerkIDParams struct {
 }
 
 type ValidateStoreAccessByClerkIDRow struct {
-	ID     pgtype.UUID `json:"id"`
-	Role   string      `json:"role"`
-	UserID pgtype.UUID `json:"user_id"`
+	ID        pgtype.UUID `json:"id"`
+	Role      string      `json:"role"`
+	UserID    pgtype.UUID `json:"user_id"`
+	StoreSlug string      `json:"store_slug"`
 }
 
 // Check if user has access to a store using Clerk ID (for middleware)
 func (q *Queries) ValidateStoreAccessByClerkID(ctx context.Context, arg ValidateStoreAccessByClerkIDParams) (ValidateStoreAccessByClerkIDRow, error) {
 	row := q.db.QueryRow(ctx, validateStoreAccessByClerkID, arg.ClerkID, arg.StoreID)
 	var i ValidateStoreAccessByClerkIDRow
-	err := row.Scan(&i.ID, &i.Role, &i.UserID)
+	err := row.Scan(
+		&i.ID,
+		&i.Role,
+		&i.UserID,
+		&i.StoreSlug,
+	)
 	return i, err
 }

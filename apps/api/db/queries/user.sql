@@ -138,9 +138,11 @@ WHERE m.user_id = $1 AND m.store_id = $2 AND m.status = 'active';
 SELECT
   m.id,
   m.role,
-  u.id as user_id
+  u.id as user_id,
+  s.slug as store_slug
 FROM memberships m
 JOIN users u ON u.id = m.user_id
+JOIN stores s ON s.id = m.store_id
 WHERE u.clerk_id = $1 AND m.store_id = $2 AND m.status = 'active';
 
 -- name: GetMembershipByID :one

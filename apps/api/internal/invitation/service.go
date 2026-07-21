@@ -10,6 +10,7 @@ import (
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/email"
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 	vo "livecart/apps/api/lib/valueobject"
 )
 
@@ -18,7 +19,6 @@ type UserLookup interface {
 	GetUserByEmail(ctx context.Context, email string) (userID string, err error)
 	GetUserIDByClerkID(ctx context.Context, clerkUserID string) (userID string, err error)
 }
-
 
 // StoreLookup interface to look up store info
 type StoreLookup interface {
@@ -63,13 +63,13 @@ func (s *Service) Create(ctx context.Context, input CreateInvitationInput) (*Inv
 	// Look up store name and inviter name for email template
 	storeName, err := s.storeLookup.GetStoreNameByID(ctx, input.StoreID.String())
 	if err != nil {
-		s.logger.Warn("could not look up store name", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("could not look up store name", zap.Error(err))
 		storeName = "Store" // Fallback
 	}
 
 	inviterName, err := s.memberLookup.GetMemberNameByID(ctx, input.StoreID.String(), input.InviterID.String())
 	if err != nil {
-		s.logger.Warn("could not look up inviter name", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("could not look up inviter name", zap.Error(err))
 		inviterName = "A team member" // Fallback
 	}
 
@@ -98,15 +98,14 @@ func (s *Service) Create(ctx context.Context, input CreateInvitationInput) (*Inv
 		StoreID:     input.StoreID.String(),
 	})
 	if err != nil {
-		s.logger.Error("failed to send invitation email",
+		logger.From(ctx, s.logger).Error("failed to send invitation email",
 			zap.Error(err),
 			zap.String("email", input.Email.String()),
 		)
 		// Don't fail the operation, invitation is created
 	}
 
-	s.logger.Info("invitation created",
-		zap.String("store_id", input.StoreID.String()),
+	logger.From(ctx, s.logger).Info("invitation created",
 		zap.String("email", input.Email.String()),
 		zap.String("role", input.Role.String()),
 	)
@@ -176,7 +175,7 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*Acc
 	// Look up internal user ID from Clerk user ID
 	userID, err := s.userLookup.GetUserIDByClerkID(ctx, input.ClerkUserID)
 	if err != nil {
-		s.logger.Error("failed to look up user", zap.Error(err), zap.String("clerk_user_id", input.ClerkUserID))
+		logger.From(ctx, s.logger).Error("failed to look up user", zap.Error(err), zap.String("clerk_user_id", input.ClerkUserID))
 		return nil, httpx.ErrUnprocessable("user not found - please sync your account first")
 	}
 
@@ -185,14 +184,14 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*Acc
 	// pulava a checagem de dono e criava membership indevida.
 	existingMembership, err := s.membershipLookup.GetMembershipByUserID(ctx, userID)
 	if err != nil {
-		s.logger.Error("failed to check existing membership", zap.Error(err), zap.String("user_id", userID))
+		logger.From(ctx, s.logger).Error("failed to check existing membership", zap.Error(err), zap.String("user_id", userID))
 		return nil, httpx.ErrInternal("failed to verify your current store membership")
 	}
 
 	if existingMembership != nil {
 		// If user is owner of their current store, block acceptance
 		if existingMembership.GetRole() == "owner" {
-			s.logger.Warn("owner tried to accept invite",
+			logger.From(ctx, s.logger).Warn("owner tried to accept invite",
 				zap.String("user_id", userID),
 				zap.String("current_store", existingMembership.GetStoreName()),
 			)
@@ -201,7 +200,7 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*Acc
 
 		// User is a member of another store — the swap happens inside the
 		// atomic accept below
-		s.logger.Info("user will be moved from previous store",
+		logger.From(ctx, s.logger).Info("user will be moved from previous store",
 			zap.String("user_id", userID),
 			zap.String("old_store", existingMembership.GetStoreName()),
 			zap.String("new_store", inv.StoreName()),
@@ -215,7 +214,7 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*Acc
 		return nil, err
 	}
 
-	s.logger.Info("invitation accepted",
+	logger.From(ctx, s.logger).Info("invitation accepted",
 		zap.String("store_id", inv.StoreID().String()),
 		zap.String("email", input.Email.String()),
 		zap.String("role", inv.Role().String()),
@@ -236,8 +235,7 @@ func (s *Service) Revoke(ctx context.Context, storeID vo.StoreID, invitationID v
 		return err
 	}
 
-	s.logger.Info("invitation revoked",
-		zap.String("store_id", storeID.String()),
+	logger.From(ctx, s.logger).Info("invitation revoked",
 		zap.String("invitation_id", invitationID.String()),
 	)
 

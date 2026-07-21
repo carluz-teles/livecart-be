@@ -107,3 +107,6 @@ RETURNING *;
 
 -- name: GetStoreNameByID :one
 SELECT name, cart_expiration_minutes, cart_max_quantity_per_item FROM stores WHERE id = $1;
+
+-- name: GetStoreSlugByID :one
+SELECT slug FROM stores WHERE id = $1;

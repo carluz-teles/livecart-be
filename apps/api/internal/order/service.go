@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 )
 
 // ERPFinalisationRetrier is fulfilled by integration.Service. We invert the
@@ -124,7 +125,7 @@ func (s *Service) List(ctx context.Context, input ListOrdersInput) (ListOrdersOu
 	}
 	previewByCart, err := s.repo.GetItemsPreviewByCartIDs(ctx, cartIDs)
 	if err != nil {
-		s.logger.Warn("failed to load item previews", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("failed to load item previews", zap.Error(err))
 		previewByCart = map[string][]OrderItemPreviewRow{}
 	}
 
@@ -256,7 +257,7 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 	// Get customer comments for this event
 	commentRows, err := s.repo.GetCustomerComments(ctx, row.EventID, row.PlatformUserID)
 	if err != nil {
-		s.logger.Warn("failed to get customer comments", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("failed to get customer comments", zap.Error(err))
 		commentRows = []CommentRow{}
 	}
 
@@ -361,7 +362,7 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 			if blocked, blockErr := s.blockChecker.IsHandleBlocked(ctx, storeUUID, orderOutput.CustomerHandle); blockErr == nil {
 				out.CustomerBlocked = blocked
 			} else {
-				s.logger.Warn("failed to look up block status for order detail",
+				logger.From(ctx, s.logger).Warn("failed to look up block status for order detail",
 					zap.String("order_id", id),
 					zap.String("handle", orderOutput.CustomerHandle),
 					zap.Error(blockErr),
@@ -373,11 +374,11 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 	// Shipment (may be absent). Events are loaded in a follow-up query.
 	shipment, serr := s.repo.GetShipmentForOrder(ctx, id)
 	if serr != nil {
-		s.logger.Warn("failed to load shipment for order", zap.Error(serr))
+		logger.From(ctx, s.logger).Warn("failed to load shipment for order", zap.Error(serr))
 	} else if shipment != nil {
 		events, eerr := s.repo.ListShipmentEvents(ctx, shipment.ID)
 		if eerr != nil {
-			s.logger.Warn("failed to list shipment events", zap.Error(eerr))
+			logger.From(ctx, s.logger).Warn("failed to list shipment events", zap.Error(eerr))
 			events = []OrderShipmentEventRecord{}
 		}
 		out.Shipment = &OrderShipmentOutput{
@@ -470,7 +471,7 @@ func (s *Service) UpdateShippingAddress(
 	}
 	shipment, err := s.repo.GetShipmentForOrder(ctx, id)
 	if err != nil {
-		s.logger.Warn("failed to load shipment for order", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("failed to load shipment for order", zap.Error(err))
 	} else if shipment != nil {
 		return httpx.ErrConflict("cannot edit shipping address after shipment is created")
 	}
@@ -498,7 +499,7 @@ func (s *Service) RegenerateCheckout(
 	}
 	shipment, err := s.repo.GetShipmentForOrder(ctx, id)
 	if err != nil {
-		s.logger.Warn("failed to load shipment for order", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("failed to load shipment for order", zap.Error(err))
 	} else if shipment != nil {
 		return "", time.Time{}, httpx.ErrConflict("cannot regenerate checkout after shipment is created")
 	}

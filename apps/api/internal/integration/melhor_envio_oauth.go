@@ -14,6 +14,7 @@ import (
 	"livecart/apps/api/internal/integration/providers/shipping"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 )
 
 // Scopes requested for the Melhor Envio app. LiveCart only needs read-only
@@ -41,7 +42,7 @@ func (s *Service) getMelhorEnvioOAuthURL(storeID string) (*GetOAuthURLOutput, er
 	env := config.MelhorEnvioEnv.StringOr("sandbox")
 
 	state := uuid.New().String()
-	ctx := context.Background()
+	ctx := logger.WithStore(context.Background(), storeID, "")
 	if err := s.repo.CreateOAuthState(ctx, state, storeID, "melhor_envio", ""); err != nil {
 		return nil, fmt.Errorf("storing OAuth state: %w", err)
 	}
@@ -72,7 +73,7 @@ func (s *Service) handleMelhorEnvioCallback(ctx context.Context, input OAuthCall
 	// Validate state and recover the store ID
 	oauthState, err := s.repo.GetOAuthState(ctx, input.State)
 	if err != nil {
-		s.logger.Error("melhor envio OAuth state not found",
+		logger.From(ctx, s.logger).Error("melhor envio OAuth state not found",
 			zap.String("state", input.State),
 			zap.Error(err),
 		)
@@ -81,6 +82,7 @@ func (s *Service) handleMelhorEnvioCallback(ctx context.Context, input OAuthCall
 	defer s.repo.DeleteOAuthState(ctx, input.State)
 
 	storeID := oauthState.StoreID.String()
+	ctx = logger.WithStore(ctx, storeID, "")
 
 	creds, err := shipping.ExchangeAuthorizationCode(ctx, env, clientID, clientSecret, redirectURI, input.Code, userAgent)
 	if err != nil {
@@ -96,8 +98,7 @@ func (s *Service) handleMelhorEnvioCallback(ctx context.Context, input OAuthCall
 	// if the /me call misbehaves.
 	account, accErr := shipping.FetchAccountInfo(ctx, env, creds.AccessToken, userAgent)
 	if accErr != nil {
-		s.logger.Warn("melhor envio account info fetch failed — persisting without it",
-			zap.String("store_id", storeID),
+		logger.From(ctx, s.logger).Warn("melhor envio account info fetch failed — persisting without it",
 			zap.Error(accErr),
 		)
 	}
@@ -146,8 +147,7 @@ func (s *Service) handleMelhorEnvioCallback(ctx context.Context, input OAuthCall
 		integrationID = row.ID
 	}
 
-	s.logger.Info("Melhor Envio OAuth completed",
-		zap.String("store_id", storeID),
+	logger.From(ctx, s.logger).Info("Melhor Envio OAuth completed",
 		zap.String("integration_id", integrationID),
 		zap.String("env", env),
 	)
@@ -178,15 +178,15 @@ func (h *WebhookHandler) HandleMelhorEnvioOAuthCallback(c *fiber.Ctx) error {
 	frontendURL := config.FrontendURL.StringOr("http://localhost:3000")
 
 	if code == "" {
-		h.logger.Error("melhor envio OAuth callback missing code")
+		logger.From(c.Context(), h.logger).Error("melhor envio OAuth callback missing code")
 		return c.Redirect(frontendURL+"/settings/integrations?error=missing_code", fiber.StatusFound)
 	}
 	if state == "" {
-		h.logger.Error("melhor envio OAuth callback missing state")
+		logger.From(c.Context(), h.logger).Error("melhor envio OAuth callback missing state")
 		return c.Redirect(frontendURL+"/settings/integrations?error=missing_state", fiber.StatusFound)
 	}
 
-	h.logger.Info("melhor envio OAuth callback received",
+	logger.From(c.Context(), h.logger).Info("melhor envio OAuth callback received",
 		zap.String("state", state),
 		zap.Bool("has_code", code != ""),
 	)
@@ -197,16 +197,15 @@ func (h *WebhookHandler) HandleMelhorEnvioOAuthCallback(c *fiber.Ctx) error {
 		State:    state,
 	})
 	if err != nil {
-		h.logger.Error("failed to handle melhor envio OAuth callback",
+		logger.From(c.Context(), h.logger).Error("failed to handle melhor envio OAuth callback",
 			zap.String("state", state),
 			zap.Error(err),
 		)
 		return c.Redirect(frontendURL+"/settings/integrations?error=oauth_failed", fiber.StatusFound)
 	}
 
-	h.logger.Info("melhor envio OAuth completed successfully",
+	logger.From(logger.WithStore(c.Context(), output.StoreID, ""), h.logger).Info("melhor envio OAuth completed successfully",
 		zap.String("integration_id", output.IntegrationID),
-		zap.String("store_id", output.StoreID),
 	)
 
 	return c.Redirect(frontendURL+"/settings/integrations?success=melhor_envio_connected", fiber.StatusFound)

@@ -33,6 +33,7 @@ import (
 	"livecart/apps/api/internal/notification"
 	"livecart/apps/api/internal/order"
 	"livecart/apps/api/lib/config"
+	"livecart/apps/api/lib/logger"
 )
 
 // saoPaulo is the reference timezone for quiet hours. Stores are BR-focused;
@@ -125,7 +126,7 @@ func (w *Worker) sweep() {
 
 	rows, err := w.queries.ListCartsForWhatsAppRecovery(ctx, w.limit)
 	if err != nil {
-		w.logger.Error("recovery sweep query failed", zap.Error(err))
+		logger.From(ctx, w.logger).Error("recovery sweep query failed", zap.Error(err))
 		return
 	}
 	if len(rows) == 0 {
@@ -135,18 +136,20 @@ func (w *Worker) sweep() {
 	now := time.Now().In(saoPaulo)
 	recovered, skipped := 0, 0
 	for _, row := range rows {
+		storeID := uuidString(row.StoreID)
+		itemCtx := logger.WithStore(ctx, storeID, "")
 		if inQuietHours(now, int(row.QuietHoursStart), int(row.QuietHoursEnd)) {
 			skipped++
 			continue // a later sweep picks it up after the quiet window
 		}
 		// Paywall (PRD 007): no recovery messages for blocked stores. The
 		// cart stays eligible for when the subscription is regularized.
-		if w.billing != nil && w.billing.IsStoreBlocked(ctx, uuidString(row.StoreID)) {
+		if w.billing != nil && w.billing.IsStoreBlocked(itemCtx, storeID) {
 			skipped++
 			continue
 		}
-		if err := w.processCart(ctx, row); err != nil {
-			w.logger.Warn("cart recovery attempt failed",
+		if err := w.processCart(itemCtx, row); err != nil {
+			logger.From(itemCtx, w.logger).Warn("cart recovery attempt failed",
 				zap.String("cart_id", uuidString(row.ID)),
 				zap.Error(err),
 			)
@@ -155,7 +158,7 @@ func (w *Worker) sweep() {
 		}
 	}
 
-	w.logger.Info("whatsapp recovery sweep done",
+	logger.From(ctx, w.logger).Info("whatsapp recovery sweep done",
 		zap.Int("candidates", len(rows)),
 		zap.Int("sent", recovered),
 		zap.Int("quiet_hours_skipped", skipped),
@@ -184,9 +187,8 @@ func (w *Worker) processCart(ctx context.Context, row sqlc.ListCartsForWhatsAppR
 	}
 	if !secured {
 		w.log(ctx, row, "skipped", "", "stock promoted to waitlist (fila vence)")
-		w.logger.Info("cart recovery skipped: stock no longer available (fila vence)",
+		logger.From(ctx, w.logger).Info("cart recovery skipped: stock no longer available (fila vence)",
 			zap.String("cart_id", cartID),
-			zap.String("store_id", storeID),
 		)
 		return nil
 	}
@@ -225,9 +227,8 @@ func (w *Worker) processCart(ctx context.Context, row sqlc.ListCartsForWhatsAppR
 	}
 
 	w.updateLog(ctx, logID, "sent", "")
-	w.logger.Info("cart recovery message sent",
+	logger.From(ctx, w.logger).Info("cart recovery message sent",
 		zap.String("cart_id", cartID),
-		zap.String("store_id", storeID),
 	)
 	return nil
 }
@@ -246,7 +247,7 @@ func (w *Worker) log(ctx context.Context, row sqlc.ListCartsForWhatsAppRecoveryR
 		MessageText:      pgtype.Text{String: message, Valid: message != ""},
 	})
 	if err != nil {
-		w.logger.Warn("failed to create recovery log", zap.Error(err))
+		logger.From(ctx, w.logger).Warn("failed to create recovery log", zap.Error(err))
 		return ""
 	}
 	if errMsg != "" {
@@ -269,7 +270,7 @@ func (w *Worker) updateLog(ctx context.Context, logID, status, errMsg string) {
 		SentAt:       pgtype.Timestamptz{Time: time.Now(), Valid: status == "sent"},
 		ErrorMessage: pgtype.Text{String: errMsg, Valid: errMsg != ""},
 	}); err != nil {
-		w.logger.Warn("failed to update recovery log", zap.Error(err))
+		logger.From(ctx, w.logger).Warn("failed to update recovery log", zap.Error(err))
 	}
 }
 

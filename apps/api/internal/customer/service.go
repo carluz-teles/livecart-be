@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 )
 
 type Service struct {
@@ -51,7 +52,7 @@ func (s *Service) Upsert(ctx context.Context, input UpsertCustomerInput) (*Custo
 		return nil, fmt.Errorf("upserting customer: %w", err)
 	}
 
-	s.logger.Debug("customer upserted",
+	logger.From(ctx, s.logger).Debug("customer upserted",
 		zap.String("customerId", row.ID),
 		zap.String("storeId", input.StoreID.String()),
 		zap.String("platformUserID", input.PlatformUserID),
@@ -107,7 +108,7 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*CustomerOutput, e
 	// canonical place; the snapshot only fills gaps.
 	snap, err := s.repo.GetCheckoutSnapshot(ctx, id)
 	if err != nil {
-		s.logger.Warn("failed to load customer checkout snapshot",
+		logger.From(ctx, s.logger).Warn("failed to load customer checkout snapshot",
 			zap.String("customerId", id.String()),
 			zap.Error(err),
 		)

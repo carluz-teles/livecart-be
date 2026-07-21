@@ -6,6 +6,8 @@ import (
 	"html/template"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/logger"
 )
 
 // OrderRefundedEmailInput carries the data for the "Pedido estornado" email.
@@ -51,7 +53,7 @@ func (c *Client) SendOrderRefunded(ctx context.Context, input OrderRefundedEmail
 	}
 
 	if !c.IsConfigured() {
-		c.logger.Warn("Resend not configured, skipping order refunded email",
+		logger.From(ctx, c.logger).Warn("Resend not configured, skipping order refunded email",
 			zap.String("to", input.ToEmail),
 			zap.String("order", input.OrderShortID),
 		)

@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/notification"
+	"livecart/apps/api/lib/logger"
 )
 
 // SendTestEmail wraps the merchant's draft body in the override shell and
@@ -26,7 +27,7 @@ func (c *Client) SendTestEmail(ctx context.Context, input notification.EmailTest
 	}
 
 	if !c.IsConfigured() {
-		c.logger.Warn("Resend not configured, skipping test email",
+		logger.From(ctx, c.logger).Warn("Resend not configured, skipping test email",
 			zap.String("to", input.ToEmail),
 		)
 		c.auditSkipped(ctx, audit)

@@ -7,6 +7,8 @@ import (
 	"html/template"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/logger"
 )
 
 // OrderDeliveredEmailInput is the payload for the final email in the
@@ -50,7 +52,7 @@ func (c *Client) SendOrderDelivered(ctx context.Context, input OrderDeliveredEma
 	}
 
 	if !c.IsConfigured() {
-		c.logger.Warn("Resend not configured, skipping order delivered email",
+		logger.From(ctx, c.logger).Warn("Resend not configured, skipping order delivered email",
 			zap.String("to", input.ToEmail),
 			zap.String("order", input.OrderShortID),
 		)

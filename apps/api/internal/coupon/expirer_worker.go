@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/logger"
 )
 
 // RedemptionExpirerWorker periodically returns reserved-redemption slots
@@ -91,15 +93,15 @@ func (w *RedemptionExpirerWorker) sweep() {
 
 	expired, skipped, err := w.service.ExpireStaleReservedRedemptions(ctx, w.limit)
 	if err != nil {
-		w.logger.Error("expirer sweep failed", zap.Error(err))
+		logger.From(ctx, w.logger).Error("expirer sweep failed", zap.Error(err))
 		return
 	}
 	if expired == 0 && skipped == 0 {
 		// Quiet successful no-op — most sweeps in steady state.
-		w.logger.Debug("expirer sweep clean")
+		logger.From(ctx, w.logger).Debug("expirer sweep clean")
 		return
 	}
-	w.logger.Info("expirer sweep finished",
+	logger.From(ctx, w.logger).Info("expirer sweep finished",
 		zap.Int("expired", expired),
 		zap.Int("skipped_terminal_race", skipped),
 	)

@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/logger"
 )
 
 const (
@@ -243,7 +244,7 @@ func (m *MelhorEnvio) RefreshToken(ctx context.Context) (*Credentials, error) {
 		expiresInSeconds = 30 * 24 * 3600 // default 30 days
 	}
 
-	m.Logger.Info("melhor envio token refresh successful",
+	logger.From(ctx, m.Logger).Info("melhor envio token refresh successful",
 		zap.Int("expires_in", expiresInSeconds),
 		zap.Bool("has_new_refresh_token", tokenResp.RefreshToken != ""),
 	)

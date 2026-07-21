@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/logger"
 	"livecart/apps/api/lib/ratelimit"
 )
 
@@ -487,7 +488,7 @@ func (p *Pagarme) getChargeStatus(ctx context.Context, chargeID string) (*Paymen
 		installments = ch.LastTransaction.Installments
 	}
 
-	p.Logger.Info("pagarme charge status fetched",
+	logger.From(ctx, p.Logger).Info("pagarme charge status fetched",
 		zap.String("charge_id", ch.ID),
 		zap.String("external_reference", ch.Code),
 		zap.String("status", string(status)),
@@ -554,7 +555,7 @@ func (p *Pagarme) getOrderStatus(ctx context.Context, orderID string) (*PaymentS
 		}
 	}
 
-	p.Logger.Info("pagarme order status fetched",
+	logger.From(ctx, p.Logger).Info("pagarme order status fetched",
 		zap.String("payment_id", pgOrder.ID),
 		zap.String("status", string(status)),
 		zap.String("status_detail", statusDetail),
@@ -835,13 +836,13 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 	// independentemente do tipo de conta.
 	customerID, err := p.createCustomer(ctx, customer)
 	if err != nil {
-		p.Logger.Error("pagarme create customer failed",
+		logger.From(ctx, p.Logger).Error("pagarme create customer failed",
 			zap.String("cart_id", input.CartID), zap.Error(err))
 		return nil, fmt.Errorf("criando cliente no Pagar.me: %w", err)
 	}
 	cardID, err := p.createCardFromToken(ctx, customerID, input.Token, input.Customer.Address)
 	if err != nil {
-		p.Logger.Error("pagarme create card failed",
+		logger.From(ctx, p.Logger).Error("pagarme create card failed",
 			zap.String("cart_id", input.CartID),
 			zap.String("customer_id", customerID), zap.Error(err))
 		return nil, fmt.Errorf("registrando cartão no Pagar.me: %w", err)
@@ -889,7 +890,7 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 	if !providers.IsSuccessStatus(resp.StatusCode) {
 		errMsg := parsePagarmeError(body)
 		safe := redactCardPayload(payload)
-		p.Logger.Error("pagarme card payment failed",
+		logger.From(ctx, p.Logger).Error("pagarme card payment failed",
 			zap.Int("status_code", resp.StatusCode),
 			zap.String("body", string(body)),
 			zap.Any("request_payload", safe),
@@ -1011,9 +1012,9 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 			zap.Any("request_payload", safe),
 			zap.String("response_body", string(body)),
 		)
-		p.Logger.Error("pagarme card payment captured", logFields...)
+		logger.From(ctx, p.Logger).Error("pagarme card payment captured", logFields...)
 	} else {
-		p.Logger.Info("pagarme card payment captured", logFields...)
+		logger.From(ctx, p.Logger).Info("pagarme card payment captured", logFields...)
 	}
 
 	return result, nil
@@ -1166,7 +1167,7 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 
 	if !providers.IsSuccessStatus(resp.StatusCode) {
 		errMsg := parsePagarmeError(body)
-		p.Logger.Error("pagarme rejected pix generation",
+		logger.From(ctx, p.Logger).Error("pagarme rejected pix generation",
 			zap.Int("status_code", resp.StatusCode),
 			zap.String("body", string(body)),
 			zap.String("cart_id", input.CartID),
@@ -1253,9 +1254,9 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 
 	if chargeFailed || qrEmpty {
 		logFields = append(logFields, zap.String("response_body", string(body)))
-		p.Logger.Warn("pagarme pix generated with empty qr code", logFields...)
+		logger.From(ctx, p.Logger).Warn("pagarme pix generated with empty qr code", logFields...)
 	} else {
-		p.Logger.Info("pagarme pix generated", logFields...)
+		logger.From(ctx, p.Logger).Info("pagarme pix generated", logFields...)
 	}
 
 	if chargeFailed {

@@ -8,6 +8,7 @@ import (
 
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 )
 
 // HandleInstagramVerification handles GET /api/webhooks/instagram for Meta webhook verification
@@ -27,7 +28,7 @@ func (h *WebhookHandler) HandleInstagramVerification(c *fiber.Ctx) error {
 
 	expectedToken := config.InstagramVerifyToken.StringOr("livecart_verify_token")
 
-	h.logger.Info("instagram webhook verification request",
+	logger.From(c.Context(), h.logger).Info("instagram webhook verification request",
 		zap.String("mode", mode),
 		zap.Bool("has_challenge", challenge != ""),
 		zap.String("received_token", verifyToken),
@@ -35,11 +36,11 @@ func (h *WebhookHandler) HandleInstagramVerification(c *fiber.Ctx) error {
 	)
 
 	if mode == "subscribe" && verifyToken == expectedToken {
-		h.logger.Info("instagram webhook verification successful")
+		logger.From(c.Context(), h.logger).Info("instagram webhook verification successful")
 		return c.SendString(challenge)
 	}
 
-	h.logger.Warn("instagram webhook verification failed",
+	logger.From(c.Context(), h.logger).Warn("instagram webhook verification failed",
 		zap.String("mode", mode),
 		zap.Bool("token_match", verifyToken == expectedToken),
 	)
@@ -60,18 +61,18 @@ func (h *WebhookHandler) HandleInstagramVerification(c *fiber.Ctx) error {
 func (h *WebhookHandler) HandleInstagramWebhook(c *fiber.Ctx) error {
 	body := c.Body()
 	if len(body) == 0 {
-		h.logger.Error("empty instagram webhook body")
+		logger.From(c.Context(), h.logger).Error("empty instagram webhook body")
 		return httpx.BadRequest(c, "empty body")
 	}
 
 	// Parse the webhook payload
 	var payload InstagramWebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		h.logger.Error("failed to parse instagram webhook payload", zap.Error(err))
+		logger.From(c.Context(), h.logger).Error("failed to parse instagram webhook payload", zap.Error(err))
 		return httpx.BadRequest(c, "invalid webhook payload")
 	}
 
-	h.logger.Info("instagram webhook received",
+	logger.From(c.Context(), h.logger).Info("instagram webhook received",
 		zap.String("object", payload.Object),
 		zap.Int("entries", len(payload.Entry)),
 	)
@@ -81,7 +82,7 @@ func (h *WebhookHandler) HandleInstagramWebhook(c *fiber.Ctx) error {
 		// Process changes (live_comments)
 		for _, change := range entry.Changes {
 			if err := h.processInstagramChange(c, entry, change, body); err != nil {
-				h.logger.Error("failed to process instagram change",
+				logger.From(c.Context(), h.logger).Error("failed to process instagram change",
 					zap.String("field", change.Field),
 					zap.Error(err),
 				)
@@ -92,7 +93,7 @@ func (h *WebhookHandler) HandleInstagramWebhook(c *fiber.Ctx) error {
 		// Process messaging (DMs)
 		for _, msg := range entry.Messaging {
 			if err := h.processInstagramMessage(c, entry, msg, body); err != nil {
-				h.logger.Error("failed to process instagram message",
+				logger.From(c.Context(), h.logger).Error("failed to process instagram message",
 					zap.String("sender_id", msg.Sender.ID),
 					zap.Error(err),
 				)
@@ -106,7 +107,7 @@ func (h *WebhookHandler) HandleInstagramWebhook(c *fiber.Ctx) error {
 
 // processInstagramChange processes a single change event (like live_comments)
 func (h *WebhookHandler) processInstagramChange(c *fiber.Ctx, entry InstagramEntry, change InstagramChange, rawBody []byte) error {
-	h.logger.Info("processing instagram change",
+	logger.From(c.Context(), h.logger).Info("processing instagram change",
 		zap.String("account_id", entry.ID),
 		zap.String("field", change.Field),
 	)
@@ -120,7 +121,7 @@ func (h *WebhookHandler) processInstagramChange(c *fiber.Ctx, entry InstagramEnt
 		// the post event as webhook-active so the polling capture can stop.
 		return h.processPostComment(c, entry, change, rawBody)
 	default:
-		h.logger.Info("ignoring unhandled instagram change field",
+		logger.From(c.Context(), h.logger).Info("ignoring unhandled instagram change field",
 			zap.String("field", change.Field),
 		)
 		return nil
@@ -140,7 +141,7 @@ func (h *WebhookHandler) processPostComment(c *fiber.Ctx, entry InstagramEntry, 
 	}
 	if comment.Media.ID != "" {
 		if mErr := h.service.MarkPostEventWebhookActive(c.Context(), comment.Media.ID); mErr != nil {
-			h.logger.Warn("failed to mark post event webhook active",
+			logger.From(c.Context(), h.logger).Warn("failed to mark post event webhook active",
 				zap.String("media_id", comment.Media.ID),
 				zap.Error(mErr),
 			)
@@ -162,7 +163,7 @@ func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, 
 		return err
 	}
 
-	h.logger.Info("processing live comment",
+	logger.From(c.Context(), h.logger).Info("processing live comment",
 		zap.String("account_id", entry.ID),
 		zap.String("comment_id", comment.CommentID),
 		zap.String("user_id", comment.From.ID),
@@ -190,7 +191,7 @@ func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, 
 		Timestamp:  entry.Time,
 		RawPayload: rawBody,
 	}); err != nil {
-		h.logger.Error("failed to process instagram comment",
+		logger.From(c.Context(), h.logger).Error("failed to process instagram comment",
 			zap.String("comment_id", comment.CommentID),
 			zap.Error(err),
 		)
@@ -202,7 +203,7 @@ func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, 
 
 // processInstagramMessage processes a messaging event (DM)
 func (h *WebhookHandler) processInstagramMessage(c *fiber.Ctx, entry InstagramEntry, msg InstagramMessage, rawBody []byte) error {
-	h.logger.Info("processing instagram message",
+	logger.From(c.Context(), h.logger).Info("processing instagram message",
 		zap.String("account_id", entry.ID),
 		zap.String("sender_id", msg.Sender.ID),
 		zap.String("message_id", msg.Message.MID),
@@ -226,7 +227,7 @@ func (h *WebhookHandler) processInstagramMessage(c *fiber.Ctx, entry InstagramEn
 		IsEcho:         msg.Message.IsEcho,
 		RawPayload:     rawBody,
 	}); err != nil {
-		h.logger.Error("failed to process instagram message",
+		logger.From(c.Context(), h.logger).Error("failed to process instagram message",
 			zap.String("message_id", msg.Message.MID),
 			zap.Error(err),
 		)

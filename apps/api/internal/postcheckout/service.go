@@ -15,6 +15,7 @@ import (
 	"livecart/apps/api/internal/notification"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/email"
+	"livecart/apps/api/lib/logger"
 )
 
 // Service orchestrates the post-checkout customer flow: token generation +
@@ -26,7 +27,7 @@ type Service struct {
 	email               *email.Client
 	notificationService NotificationSettingsReader
 	logger              *zap.Logger
-	gmvReporter GMVReporter // optional — Stripe metered GMV fee (PRD 007)
+	gmvReporter         GMVReporter // optional — Stripe metered GMV fee (PRD 007)
 }
 
 // NotificationSettingsReader is the slice of notification.Service this
@@ -72,16 +73,17 @@ func (s *Service) SetNotificationService(reader NotificationSettingsReader) {
 func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 	snapshot, err := s.repo.LoadCart(ctx, cartID)
 	if err != nil {
-		s.logger.Warn("post-checkout flow could not load cart",
+		logger.From(ctx, s.logger).Warn("post-checkout flow could not load cart",
 			zap.String("cart_id", cartID),
 			zap.Error(err),
 		)
 		return
 	}
+	ctx = logger.WithStore(ctx, uuidStr(snapshot.Store.ID), snapshot.Store.Slug)
 
 	// Already processed — webhook retry or merchant manual mark-as-paid.
 	if snapshot.Cart.TrackingToken.Valid && snapshot.Cart.TrackingToken.String != "" {
-		s.logger.Debug("post-checkout already ran for cart",
+		logger.From(ctx, s.logger).Debug("post-checkout already ran for cart",
 			zap.String("cart_id", cartID),
 		)
 		return
@@ -89,14 +91,14 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 
 	token, err := generateTrackingToken()
 	if err != nil {
-		s.logger.Error("failed to generate tracking token",
+		logger.From(ctx, s.logger).Error("failed to generate tracking token",
 			zap.String("cart_id", cartID),
 			zap.Error(err),
 		)
 		return
 	}
 	if err := s.repo.SetTrackingToken(ctx, cartID, token); err != nil {
-		s.logger.Error("failed to persist tracking token",
+		logger.From(ctx, s.logger).Error("failed to persist tracking token",
 			zap.String("cart_id", cartID),
 			zap.Error(err),
 		)
@@ -117,7 +119,7 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 	// idempotent at the DB level (unique cart_id+event_type) — duplicate
 	// hooks are a no-op.
 	if _, err := s.repo.InsertOrderEvent(ctx, cartID, "payment_confirmed", "system", nil); err != nil {
-		s.logger.Warn("failed to record payment_confirmed event",
+		logger.From(ctx, s.logger).Warn("failed to record payment_confirmed event",
 			zap.String("cart_id", cartID),
 			zap.Error(err),
 		)
@@ -127,7 +129,7 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 	// cart — o cliente pagou dentro da janela. Itens em 'waiting' (que ele
 	// optou por deixar na fila) permanecem.
 	if err := s.repo.MarkWaitlistFulfilledByCart(ctx, cartID); err != nil {
-		s.logger.Warn("failed to mark notified waitlist as fulfilled",
+		logger.From(ctx, s.logger).Warn("failed to mark notified waitlist as fulfilled",
 			zap.String("cart_id", cartID),
 			zap.Error(err),
 		)
@@ -138,7 +140,7 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 	// linked manually if they ask.
 	customerEmail := snapshot.Cart.CustomerEmail.String
 	if customerEmail == "" {
-		s.logger.Info("cart has no customer email, skipping receipt",
+		logger.From(ctx, s.logger).Info("cart has no customer email, skipping receipt",
 			zap.String("cart_id", cartID),
 		)
 		return
@@ -147,7 +149,7 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 	input := buildEmailInput(snapshot, token)
 	s.applyPaidOverride(ctx, snapshot, &input)
 	if err := s.email.SendOrderPaid(ctx, input); err != nil {
-		s.logger.Warn("failed to send order paid email",
+		logger.From(ctx, s.logger).Warn("failed to send order paid email",
 			zap.String("cart_id", cartID),
 			zap.String("to", customerEmail),
 			zap.Error(err),
@@ -155,7 +157,7 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 		return
 	}
 
-	s.logger.Info("post-checkout flow completed",
+	logger.From(ctx, s.logger).Info("post-checkout flow completed",
 		zap.String("cart_id", cartID),
 		zap.String("to", customerEmail),
 	)
@@ -166,23 +168,24 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 func (s *Service) OnCartCancelled(ctx context.Context, cartID string) {
 	snapshot, err := s.repo.LoadCart(ctx, cartID)
 	if err != nil {
-		s.logger.Warn("cancellation email skipped: load cart failed",
+		logger.From(ctx, s.logger).Warn("cancellation email skipped: load cart failed",
 			zap.String("cart_id", cartID), zap.Error(err))
 		return
 	}
+	ctx = logger.WithStore(ctx, uuidStr(snapshot.Store.ID), snapshot.Store.Slug)
 	if !snapshot.Cart.CustomerEmail.Valid || snapshot.Cart.CustomerEmail.String == "" {
-		s.logger.Warn("cancellation email skipped: cart has no customer email",
+		logger.From(ctx, s.logger).Warn("cancellation email skipped: cart has no customer email",
 			zap.String("cart_id", cartID))
 		return
 	}
 	inserted, err := s.repo.InsertOrderEvent(ctx, cartID, "payment_cancelled", "system", nil)
 	if err != nil {
-		s.logger.Error("cancellation email skipped: insert timeline event failed",
+		logger.From(ctx, s.logger).Error("cancellation email skipped: insert timeline event failed",
 			zap.String("cart_id", cartID), zap.Error(err))
 		return
 	}
 	if !inserted {
-		s.logger.Info("cancellation email skipped: timeline event already exists (idempotent)",
+		logger.From(ctx, s.logger).Info("cancellation email skipped: timeline event already exists (idempotent)",
 			zap.String("cart_id", cartID))
 		return
 	}
@@ -205,7 +208,7 @@ func (s *Service) OnCartCancelled(ctx context.Context, cartID string) {
 	s.applyEmailOverride(ctx, snapshot, s.settingsFor(ctx, snapshot, "cancelled"), &input.OverrideSubject, &input.OverrideBodyHTML, "", "")
 
 	if err := s.email.SendOrderCancelled(ctx, input); err != nil {
-		s.logger.Warn("failed to send order cancelled email",
+		logger.From(ctx, s.logger).Warn("failed to send order cancelled email",
 			zap.String("cart_id", cartID), zap.Error(err))
 	}
 }
@@ -215,23 +218,24 @@ func (s *Service) OnCartCancelled(ctx context.Context, cartID string) {
 func (s *Service) OnCartRefunded(ctx context.Context, cartID string) {
 	snapshot, err := s.repo.LoadCart(ctx, cartID)
 	if err != nil {
-		s.logger.Warn("refund email skipped: load cart failed",
+		logger.From(ctx, s.logger).Warn("refund email skipped: load cart failed",
 			zap.String("cart_id", cartID), zap.Error(err))
 		return
 	}
+	ctx = logger.WithStore(ctx, uuidStr(snapshot.Store.ID), snapshot.Store.Slug)
 	if !snapshot.Cart.CustomerEmail.Valid || snapshot.Cart.CustomerEmail.String == "" {
-		s.logger.Warn("refund email skipped: cart has no customer email",
+		logger.From(ctx, s.logger).Warn("refund email skipped: cart has no customer email",
 			zap.String("cart_id", cartID))
 		return
 	}
 	inserted, err := s.repo.InsertOrderEvent(ctx, cartID, "payment_refunded", "system", nil)
 	if err != nil {
-		s.logger.Error("refund email skipped: insert timeline event failed",
+		logger.From(ctx, s.logger).Error("refund email skipped: insert timeline event failed",
 			zap.String("cart_id", cartID), zap.Error(err))
 		return
 	}
 	if !inserted {
-		s.logger.Info("refund email skipped: timeline event already exists (idempotent)",
+		logger.From(ctx, s.logger).Info("refund email skipped: timeline event already exists (idempotent)",
 			zap.String("cart_id", cartID))
 		return
 	}
@@ -256,7 +260,7 @@ func (s *Service) OnCartRefunded(ctx context.Context, cartID string) {
 	s.applyEmailOverride(ctx, snapshot, s.settingsFor(ctx, snapshot, "refunded"), &input.OverrideSubject, &input.OverrideBodyHTML, "", "")
 
 	if err := s.email.SendOrderRefunded(ctx, input); err != nil {
-		s.logger.Warn("failed to send order refunded email",
+		logger.From(ctx, s.logger).Warn("failed to send order refunded email",
 			zap.String("cart_id", cartID), zap.Error(err))
 	}
 }
@@ -302,17 +306,18 @@ func (s *Service) OnDelivered(ctx context.Context, cartID, source string) {
 
 	snapshot, err := s.repo.LoadCart(ctx, cartID)
 	if err != nil {
-		s.logger.Warn("post-checkout delivered hook could not load cart",
+		logger.From(ctx, s.logger).Warn("post-checkout delivered hook could not load cart",
 			zap.String("cart_id", cartID),
 			zap.Error(err),
 		)
 		return
 	}
+	ctx = logger.WithStore(ctx, uuidStr(snapshot.Store.ID), snapshot.Store.Slug)
 
 	metadata := json.RawMessage(fmt.Sprintf(`{"source":%q}`, source))
 	inserted, err := s.repo.InsertOrderEvent(ctx, cartID, "delivered", source, metadata)
 	if err != nil {
-		s.logger.Warn("failed to record delivered event",
+		logger.From(ctx, s.logger).Warn("failed to record delivered event",
 			zap.String("cart_id", cartID),
 			zap.Error(err),
 		)
@@ -331,7 +336,7 @@ func (s *Service) OnDelivered(ctx context.Context, cartID, source string) {
 	// to be notified about something they just clicked. Other paths (merchant,
 	// system poller) still send.
 	if source == "customer" {
-		s.logger.Info("delivery confirmed by customer, skipping email",
+		logger.From(ctx, s.logger).Info("delivery confirmed by customer, skipping email",
 			zap.String("cart_id", cartID),
 		)
 		return
@@ -362,7 +367,7 @@ func (s *Service) OnDelivered(ctx context.Context, cartID, source string) {
 	}
 	s.applyDeliveredOverride(ctx, snapshot, &deliveredInput)
 	if err := s.email.SendOrderDelivered(ctx, deliveredInput); err != nil {
-		s.logger.Warn("failed to send order delivered email",
+		logger.From(ctx, s.logger).Warn("failed to send order delivered email",
 			zap.String("cart_id", cartID),
 			zap.String("to", customerEmail),
 			zap.Error(err),
@@ -370,7 +375,7 @@ func (s *Service) OnDelivered(ctx context.Context, cartID, source string) {
 		return
 	}
 
-	s.logger.Info("delivered flow completed",
+	logger.From(ctx, s.logger).Info("delivered flow completed",
 		zap.String("cart_id", cartID),
 		zap.String("source", source),
 	)
@@ -390,19 +395,20 @@ func (s *Service) OnShipmentPosted(ctx context.Context, cartID, trackingCode str
 
 	snapshot, err := s.repo.LoadCart(ctx, cartID)
 	if err != nil {
-		s.logger.Warn("post-checkout shipped hook could not load cart",
+		logger.From(ctx, s.logger).Warn("post-checkout shipped hook could not load cart",
 			zap.String("cart_id", cartID),
 			zap.Error(err),
 		)
 		return
 	}
+	ctx = logger.WithStore(ctx, uuidStr(snapshot.Store.ID), snapshot.Store.Slug)
 
 	// Idempotency: one shipped event per cart. Subsequent calls (label re-
 	// generation, webhook retry) become no-ops without ever touching email.
 	metadata := json.RawMessage(fmt.Sprintf(`{"tracking_code":%q}`, trackingCode))
 	inserted, err := s.repo.InsertOrderEvent(ctx, cartID, "shipped", "merchant", metadata)
 	if err != nil {
-		s.logger.Warn("failed to record shipped event",
+		logger.From(ctx, s.logger).Warn("failed to record shipped event",
 			zap.String("cart_id", cartID),
 			zap.Error(err),
 		)
@@ -426,7 +432,7 @@ func (s *Service) OnShipmentPosted(ctx context.Context, cartID, trackingCode str
 	input := buildShippedEmailInput(snapshot, trackingCode)
 	s.applyShippedOverride(ctx, snapshot, &input, trackingCode)
 	if err := s.email.SendOrderShipped(ctx, input); err != nil {
-		s.logger.Warn("failed to send order shipped email",
+		logger.From(ctx, s.logger).Warn("failed to send order shipped email",
 			zap.String("cart_id", cartID),
 			zap.String("to", customerEmail),
 			zap.Error(err),
@@ -434,7 +440,7 @@ func (s *Service) OnShipmentPosted(ctx context.Context, cartID, trackingCode str
 		return
 	}
 
-	s.logger.Info("shipped flow completed",
+	logger.From(ctx, s.logger).Info("shipped flow completed",
 		zap.String("cart_id", cartID),
 		zap.String("to", customerEmail),
 		zap.String("tracking_code", trackingCode),
@@ -499,7 +505,7 @@ func (s *Service) loadEmailSettings(ctx context.Context, storeID string) *notifi
 	}
 	settings, err := s.notificationService.GetSettings(ctx, storeID)
 	if err != nil {
-		s.logger.Debug("notification settings load failed",
+		logger.From(ctx, s.logger).Debug("notification settings load failed",
 			zap.String("store_id", storeID),
 			zap.Error(err),
 		)
@@ -579,13 +585,13 @@ func vars(s *CartSnapshot, trackingCode, trackingURL string) notification.Templa
 		EnderecoEntrega: formatShippingLine(ParseShippingAddress(s.Cart.ShippingAddress)),
 		PrazoEntrega:    prazo,
 		ValorFrete:      valorFrete,
-		Loja:           s.Store.Name,
-		Total:          fmt.Sprintf("R$ %d,%02d", totalCents/100, totalCents%100),
-		TotalCents:     totalCents,
-		NumeroPedido:   fmt.Sprintf("%d", s.Cart.ShortID),
-		TrackingCode:   trackingCode,
-		Transportadora: carrier,
-		LinkPedido:     trackingURL,
+		Loja:            s.Store.Name,
+		Total:           fmt.Sprintf("R$ %d,%02d", totalCents/100, totalCents%100),
+		TotalCents:      totalCents,
+		NumeroPedido:    fmt.Sprintf("%d", s.Cart.ShortID),
+		TrackingCode:    trackingCode,
+		Transportadora:  carrier,
+		LinkPedido:      trackingURL,
 	}
 }
 
@@ -747,7 +753,6 @@ func formatShippingLine(a ShippingAddressJSON) string {
 	}
 	return b.String()
 }
-
 
 // itemLineTotalCents mirrors the GetCartTotals expression
 // (SUM(quantity * unit_price)) used across notifications and dashboards, so

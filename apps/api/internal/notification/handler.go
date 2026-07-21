@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 )
 
 // Handler handles HTTP requests for notification settings.
@@ -82,8 +83,7 @@ func (h *Handler) GetSettings(c *fiber.Ctx) error {
 
 	settings, err := h.service.GetSettings(c.Context(), storeID)
 	if err != nil {
-		h.logger.Error("failed to get notification settings",
-			zap.String("store_id", storeID),
+		logger.From(c.Context(), h.logger).Error("failed to get notification settings",
 			zap.Error(err),
 		)
 		return httpx.ErrInternal("Erro ao buscar configurações de notificação")
@@ -163,8 +163,7 @@ func (h *Handler) UpdateSettings(c *fiber.Ctx) error {
 	}
 
 	if err := h.service.UpdateSettings(c.Context(), storeID, settings); err != nil {
-		h.logger.Error("failed to update notification settings",
-			zap.String("store_id", storeID),
+		logger.From(c.Context(), h.logger).Error("failed to update notification settings",
 			zap.Error(err),
 		)
 		return httpx.ErrInternal("Erro ao atualizar configurações de notificação")
@@ -359,11 +358,11 @@ func fromEmailRequest(r *UpdateEmailTemplateSettingsRequest) *EmailTemplateSetti
 
 // TestRecipientResponse describes the current setup state for a store.
 type TestRecipientResponse struct {
-	Configured       bool       `json:"configured"`
-	Handle           string     `json:"handle,omitempty"`
-	SetupCode        string     `json:"setup_code,omitempty"`
-	SetupExpiresAt   *time.Time `json:"setup_expires_at,omitempty"`
-	SetupCodeActive  bool       `json:"setup_code_active"`
+	Configured      bool       `json:"configured"`
+	Handle          string     `json:"handle,omitempty"`
+	SetupCode       string     `json:"setup_code,omitempty"`
+	SetupExpiresAt  *time.Time `json:"setup_expires_at,omitempty"`
+	SetupCodeActive bool       `json:"setup_code_active"`
 }
 
 // SendTestRequest is the body for POST /notifications/test.
@@ -392,8 +391,7 @@ func (h *Handler) GetTestRecipient(c *fiber.Ctx) error {
 
 	recipient, err := h.service.GetTestRecipient(c.Context(), storeID)
 	if err != nil {
-		h.logger.Error("failed to load test recipient",
-			zap.String("store_id", storeID),
+		logger.From(c.Context(), h.logger).Error("failed to load test recipient",
 			zap.Error(err),
 		)
 		return httpx.ErrInternal("Erro ao carregar destinatário de teste")
@@ -408,8 +406,7 @@ func (h *Handler) StartTestSetup(c *fiber.Ctx) error {
 
 	recipient, err := h.service.StartTestRecipientSetup(c.Context(), storeID)
 	if err != nil {
-		h.logger.Error("failed to start test recipient setup",
-			zap.String("store_id", storeID),
+		logger.From(c.Context(), h.logger).Error("failed to start test recipient setup",
 			zap.Error(err),
 		)
 		return httpx.ErrInternal("Erro ao iniciar configuração do destinatário")
@@ -422,7 +419,7 @@ func (h *Handler) StartTestSetup(c *fiber.Ctx) error {
 // this with the lojista's own Clerk email so it's a one-click flow). The
 // subject + body_html mirror the merchant editor's two fields.
 type SendTestEmailRequest struct {
-	Type           string `json:"type"`            // payment_confirmed | shipped | delivered
+	Type           string `json:"type"` // payment_confirmed | shipped | delivered
 	Subject        string `json:"subject"`
 	BodyHTML       string `json:"body_html"`
 	RecipientEmail string `json:"recipient_email"`
@@ -446,8 +443,7 @@ func (h *Handler) SendTestEmail(c *fiber.Ctx) error {
 	}
 
 	if err := h.service.SendTestEmail(c.Context(), storeID, req.Type, req.Subject, req.BodyHTML, req.RecipientEmail); err != nil {
-		h.logger.Warn("failed to send test email",
-			zap.String("store_id", storeID),
+		logger.From(c.Context(), h.logger).Warn("failed to send test email",
 			zap.String("to", req.RecipientEmail),
 			zap.String("type", req.Type),
 			zap.Error(err),
@@ -474,8 +470,7 @@ func (h *Handler) SendTest(c *fiber.Ctx) error {
 		if errors.Is(err, ErrTestRecipientNotConfigured) {
 			return httpx.ErrUnprocessable("Configure o destinatário de teste antes de enviar.")
 		}
-		h.logger.Warn("failed to send test notification",
-			zap.String("store_id", storeID),
+		logger.From(c.Context(), h.logger).Warn("failed to send test notification",
 			zap.String("type", req.Type),
 			zap.Error(err),
 		)

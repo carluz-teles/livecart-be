@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/logger"
 )
 
 const stripeAPIBaseURL = "https://api.stripe.com/v1"
@@ -236,7 +238,7 @@ func (c *StripeClient) do(ctx context.Context, method, path string, form url.Val
 
 	start := time.Now()
 	resp, err := c.httpClient.Do(req)
-	c.logger.Debug("stripe request",
+	logger.From(ctx, c.logger).Debug("stripe request",
 		zap.String("method", method),
 		zap.String("path", path),
 		zap.Duration("duration", time.Since(start)),

@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 )
 
 // NotificationWriter is the dependency the idea service uses to fire in-app
@@ -189,7 +190,7 @@ func (s *Service) CreateComment(ctx context.Context, ideaID, authorID string, re
 			// Top-level comment: notify the idea author (unless self-comment).
 			if ideaAuthorID != authorID {
 				if err := s.notifier.NotifyIdeaComment(ctx, ideaAuthorID, authorID, ideaID, row.ID, excerpt); err != nil {
-					s.logger.Warn("failed to send idea_comment notification", zap.Error(err))
+					logger.From(ctx, s.logger).Warn("failed to send idea_comment notification", zap.Error(err))
 				}
 			}
 		} else {
@@ -197,7 +198,7 @@ func (s *Service) CreateComment(ctx context.Context, ideaID, authorID string, re
 			recipients := dedupRecipients(authorID, ideaAuthorID, parentAuthorID)
 			for _, rid := range recipients {
 				if err := s.notifier.NotifyIdeaReply(ctx, rid, authorID, ideaID, row.ID, excerpt); err != nil {
-					s.logger.Warn("failed to send idea_reply notification",
+					logger.From(ctx, s.logger).Warn("failed to send idea_reply notification",
 						zap.String("recipient_id", rid),
 						zap.Error(err))
 				}

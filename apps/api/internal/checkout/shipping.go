@@ -15,6 +15,7 @@ import (
 
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 )
 
 // shippingQuoteCacheTTL is how long a snapshot is considered fresh enough to
@@ -395,6 +396,7 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 	if err != nil {
 		return nil, err
 	}
+	ctx = logger.WithStore(ctx, shipCtx.StoreID, "")
 	if len(shipCtx.Items) == 0 {
 		return nil, httpx.ErrUnprocessable("nenhum item no carrinho para cotar")
 	}
@@ -414,7 +416,7 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 	for _, it := range shipCtx.Items {
 		if it.WeightGrams <= 0 || it.HeightCm <= 0 || it.WidthCm <= 0 || it.LengthCm <= 0 {
 			missingDims = true
-			s.logger.Info("shipping quote: item missing dimensions, delivery skipped",
+			logger.From(ctx, s.logger).Info("shipping quote: item missing dimensions, delivery skipped",
 				zap.String("cart_token", input.Token),
 				zap.String("product", it.Name),
 			)
@@ -443,7 +445,7 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 
 	active, provErr := s.integrationService.GetShippingProviders(ctx, shipCtx.StoreID)
 	if provErr != nil {
-		s.logger.Warn("shipping quote: failed to load providers, delivery skipped",
+		logger.From(ctx, s.logger).Warn("shipping quote: failed to load providers, delivery skipped",
 			zap.String("store_id", shipCtx.StoreID), zap.Error(provErr))
 		active = nil
 	}
@@ -465,7 +467,7 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 
 	deliveryPossible := shipCtx.OriginZip != "" && !missingDims && len(active) > 0
 	if !deliveryPossible {
-		s.logger.Info("shipping quote: delivery not possible",
+		logger.From(ctx, s.logger).Info("shipping quote: delivery not possible",
 			zap.String("cart_token", input.Token),
 			zap.Bool("has_origin_zip", shipCtx.OriginZip != ""),
 			zap.Bool("missing_dims", missingDims),
@@ -489,7 +491,7 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 	for _, provider := range providersToQuote {
 		options, qerr := provider.Quote(ctx, req)
 		if qerr != nil {
-			s.logger.Error("shipping quote failed for provider",
+			logger.From(ctx, s.logger).Error("shipping quote failed for provider",
 				zap.String("provider", string(provider.Name())),
 				zap.String("store_id", shipCtx.StoreID),
 				zap.String("cart_token", input.Token),
@@ -505,7 +507,7 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 			// anyway. Keep a log line so admins can still diagnose why a
 			// service was filtered (e.g. "value exceeds carrier limit").
 			if !opt.Available {
-				s.logger.Debug("shipping quote option filtered (unavailable)",
+				logger.From(ctx, s.logger).Debug("shipping quote option filtered (unavailable)",
 					zap.String("provider", string(provider.Name())),
 					zap.String("service", opt.Service),
 					zap.String("reason", opt.Error),
@@ -561,7 +563,7 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 	// customer's pick without re-quoting. Best-effort: a write failure does
 	// not break the public quote response.
 	if cacheErr := s.repo.SaveShippingQuoteCache(ctx, s.pool, shipCtx.CartID, out.Options, out.QuotedAt); cacheErr != nil {
-		s.logger.Warn("failed to cache shipping quote — selection may force a re-quote",
+		logger.From(ctx, s.logger).Warn("failed to cache shipping quote — selection may force a re-quote",
 			zap.String("cart_id", shipCtx.CartID),
 			zap.Error(cacheErr),
 		)
@@ -591,6 +593,7 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 	if err != nil {
 		return nil, err
 	}
+	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 	if cart.PaymentStatus == "paid" {
 		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
 	}
@@ -646,7 +649,7 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 	// will be re-evaluated on the next mutation either way.
 	if s.couponLifecycle != nil {
 		if err := s.couponLifecycle.OnShippingChanged(ctx, cart.ID); err != nil {
-			s.logger.Warn("coupon re-evaluation on shipping change failed",
+			logger.From(ctx, s.logger).Warn("coupon re-evaluation on shipping change failed",
 				zap.String("cart_id", cart.ID),
 				zap.Error(err),
 			)

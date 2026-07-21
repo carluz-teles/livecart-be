@@ -51,6 +51,20 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*StoreRow, error) 
 	return &out, nil
 }
 
+// GetSlugByID resolves only the slug — lookup barato usado para enriquecer
+// logs em webhooks/workers que só conhecem o store_id (httpx.StoreSlugResolver).
+func (r *Repository) GetSlugByID(ctx context.Context, id string) (string, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return "", err
+	}
+	slug, err := r.q.GetStoreSlugByID(ctx, uid)
+	if err != nil {
+		return "", fmt.Errorf("getting store slug: %w", err)
+	}
+	return slug, nil
+}
+
 func (r *Repository) GetBySlug(ctx context.Context, slug string) (*StoreRow, error) {
 	row, err := r.q.GetStoreBySlug(ctx, slug)
 	if err != nil {

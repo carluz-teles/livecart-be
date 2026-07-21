@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/lib/config"
+	"livecart/apps/api/lib/logger"
 )
 
 // AccessGuard blocks store-scoped requests for stores whose subscription is
@@ -36,8 +37,7 @@ func (s *Service) AccessGuard() fiber.Handler {
 
 		state, err := s.GetState(c.Context(), storeID)
 		if err != nil {
-			s.logger.Warn("billing guard lookup failed (fail-open)",
-				zap.String("store_id", storeID),
+			logger.From(c.Context(), s.logger).Warn("billing guard lookup failed (fail-open)",
 				zap.Error(err),
 			)
 			return c.Next()

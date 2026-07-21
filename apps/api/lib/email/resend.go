@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/logger"
 )
 
 // Client handles email sending via Resend
@@ -73,7 +75,7 @@ func (c *Client) SendInvitation(ctx context.Context, input InvitationEmailInput)
 	}
 
 	if !c.IsConfigured() {
-		c.logger.Warn("Resend not configured, skipping email",
+		logger.From(ctx, c.logger).Warn("Resend not configured, skipping email",
 			zap.String("to", input.ToEmail),
 			zap.String("store", input.StoreName),
 		)
@@ -180,7 +182,7 @@ func (c *Client) send(ctx context.Context, input SendEmailInput) error {
 	if resp.StatusCode >= 400 {
 		var errorBody map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&errorBody)
-		c.logger.Error("Resend API error",
+		logger.From(ctx, c.logger).Error("Resend API error",
 			zap.Int("status", resp.StatusCode),
 			zap.Any("error", errorBody),
 		)
@@ -197,7 +199,7 @@ func (c *Client) send(ctx context.Context, input SendEmailInput) error {
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&result)
 
-	c.logger.Info("email sent successfully",
+	logger.From(ctx, c.logger).Info("email sent successfully",
 		zap.String("to", input.ToEmail),
 		zap.String("subject", input.Subject),
 		zap.String("provider_message_id", result.ID),

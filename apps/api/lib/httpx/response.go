@@ -96,13 +96,13 @@ func HandleServiceError(c *fiber.Ctx, err error) error {
 		} else if logger != nil {
 			// Client errors (4xx) are expected — warn keeps the message visible
 			// without paging anyone.
-			logger.Warn("service error",
+			logger.Warn("service error", append([]zap.Field{
 				zap.Int("status", se.Code),
 				zap.String("message", se.Message),
 				zap.String("request_id", reqID),
 				zap.String("path", c.Path()),
 				zap.String("method", c.Method()),
-			)
+			}, identityFields(c)...)...)
 		}
 		return c.Status(se.Code).JSON(Envelope{Error: se.Message, RequestID: reqID, Reason: se.Reason})
 	}
@@ -116,13 +116,13 @@ func HandleServiceError(c *fiber.Ctx, err error) error {
 		if fe.Code >= 500 {
 			logUnhandledError(c, err, reqID)
 		} else if logger != nil {
-			logger.Warn("http error",
+			logger.Warn("http error", append([]zap.Field{
 				zap.Int("status", fe.Code),
 				zap.String("message", fe.Message),
 				zap.String("request_id", reqID),
 				zap.String("path", c.Path()),
 				zap.String("method", c.Method()),
-			)
+			}, identityFields(c)...)...)
 		}
 		return c.Status(fe.Code).JSON(Envelope{Error: fe.Message, RequestID: reqID})
 	}
@@ -148,11 +148,22 @@ func logUnhandledError(c *fiber.Ctx, err error, reqID string) {
 	if route := c.Route(); route != nil && route.Path != "" {
 		fields = append(fields, zap.String("route", route.Path))
 	}
+	fields = append(fields, identityFields(c)...)
+	logger.Error("internal error", fields...)
+}
+
+// identityFields devolve quem sofreu o erro: user + store (id e slug), quando
+// o request os carrega nos Locals.
+func identityFields(c *fiber.Ctx) []zap.Field {
+	fields := make([]zap.Field, 0, 3)
 	if userID := GetUserID(c); userID != "" {
 		fields = append(fields, zap.String("user_id", userID))
 	}
 	if storeID := GetStoreID(c); storeID != "" {
 		fields = append(fields, zap.String("store_id", storeID))
 	}
-	logger.Error("internal error", fields...)
+	if storeSlug := GetStoreSlug(c); storeSlug != "" {
+		fields = append(fields, zap.String("store_slug", storeSlug))
+	}
+	return fields
 }

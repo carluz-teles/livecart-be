@@ -928,6 +928,7 @@ SELECT
     c.cancelled_reason,
     le.title AS event_title,
     le.store_id,
+    s.slug AS store_slug,
     s.name AS store_name,
     s.logo_url AS store_logo_url,
     s.cart_allow_edit AS allow_edit,
@@ -962,6 +963,7 @@ type GetCartByTokenWithDetailsRow struct {
 	CancelledReason        pgtype.Text        `json:"cancelled_reason"`
 	EventTitle             pgtype.Text        `json:"event_title"`
 	StoreID                pgtype.UUID        `json:"store_id"`
+	StoreSlug              string             `json:"store_slug"`
 	StoreName              string             `json:"store_name"`
 	StoreLogoUrl           pgtype.Text        `json:"store_logo_url"`
 	AllowEdit              bool               `json:"allow_edit"`
@@ -999,6 +1001,7 @@ func (q *Queries) GetCartByTokenWithDetails(ctx context.Context, token string) (
 		&i.CancelledReason,
 		&i.EventTitle,
 		&i.StoreID,
+		&i.StoreSlug,
 		&i.StoreName,
 		&i.StoreLogoUrl,
 		&i.AllowEdit,

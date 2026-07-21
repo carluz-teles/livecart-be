@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	applog "livecart/apps/api/lib/logger"
 )
 
 const twilioContentBaseURL = "https://content.twilio.com/v1"
@@ -247,7 +249,7 @@ func (m *MasterClient) do(ctx context.Context, method, endpoint string, body io.
 
 	start := time.Now()
 	resp, err := m.httpClient.Do(req)
-	m.logger.Debug("twilio master request",
+	applog.From(ctx, m.logger).Debug("twilio master request",
 		zap.String("method", method),
 		zap.String("url", endpoint),
 		zap.Duration("duration", time.Since(start)),

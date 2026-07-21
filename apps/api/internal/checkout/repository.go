@@ -410,6 +410,7 @@ func (r *Repository) toCartRow(row sqlc.GetCartByTokenWithDetailsRow) *CartRow {
 		EventTitle:         eventTitle,
 		StoreID:            uuid.UUID(row.StoreID.Bytes).String(),
 		StoreName:          row.StoreName,
+		StoreSlug:          row.StoreSlug,
 		AllowEdit:          row.AllowEdit,
 		MaxQuantityPerItem: int(row.MaxQuantityPerItem),
 	}

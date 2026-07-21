@@ -8,6 +8,7 @@ import (
 
 	"livecart/apps/api/internal/product/domain"
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 	vo "livecart/apps/api/lib/valueobject"
 )
 
@@ -162,7 +163,7 @@ func (s *Service) List(ctx context.Context, input ListProductsInput) (ListProduc
 	// show "Camiseta · Cor: Preto · Tam: M" instead of one giant product name.
 	if len(variantIDs) > 0 {
 		if info, err := s.repo.VariantInfoForProducts(ctx, variantIDs); err != nil {
-			s.logger.Warn("failed to load variant info for product list", zap.Error(err))
+			logger.From(ctx, s.logger).Warn("failed to load variant info for product list", zap.Error(err))
 		} else {
 			for i := range products {
 				if vi, ok := info[products[i].ID]; ok {

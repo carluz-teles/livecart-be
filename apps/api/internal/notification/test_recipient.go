@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/lib/logger"
 )
 
 // SetupCodeTTL is how long the lojista has to send the magic code from their
@@ -158,7 +159,7 @@ func (s *Service) SendTest(ctx context.Context, storeID string, notifType Notifi
 	}
 
 	if err := s.dmSender.SendInstagramDM(ctx, storeID, recipient.PSID, message); err != nil {
-		s.logger.Warn("test notification failed",
+		logger.From(ctx, s.logger).Warn("test notification failed",
 			zap.String("store_id", storeID),
 			zap.String("type", string(notifType)),
 			zap.Error(err),

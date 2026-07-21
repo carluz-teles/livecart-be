@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+
+	"livecart/apps/api/lib/logger"
 )
 
 type Service struct {
@@ -30,7 +32,7 @@ func (s *Service) Create(ctx context.Context, input CreatePaymentInput) (*Paymen
 			return nil, fmt.Errorf("checking idempotency: %w", err)
 		}
 		if existing != nil {
-			s.logger.Info("returning existing payment due to idempotency key",
+			logger.From(ctx, s.logger).Info("returning existing payment due to idempotency key",
 				zap.String("paymentId", existing.ID.String()),
 				zap.String("idempotencyKey", *input.IdempotencyKey))
 			return existing, nil
@@ -42,7 +44,7 @@ func (s *Service) Create(ctx context.Context, input CreatePaymentInput) (*Paymen
 		return nil, err
 	}
 
-	s.logger.Info("payment created",
+	logger.From(ctx, s.logger).Info("payment created",
 		zap.String("paymentId", payment.ID.String()),
 		zap.String("cartId", payment.CartID.String()),
 		zap.String("provider", payment.Provider),
@@ -79,7 +81,7 @@ func (s *Service) UpdateStatus(ctx context.Context, id uuid.UUID, input UpdatePa
 		return err
 	}
 
-	s.logger.Info("payment status updated",
+	logger.From(ctx, s.logger).Info("payment status updated",
 		zap.String("paymentId", id.String()),
 		zap.String("status", string(input.Status)))
 
@@ -95,7 +97,7 @@ func (s *Service) ProcessWebhook(ctx context.Context, input UpdatePaymentByExter
 		return nil, fmt.Errorf("getting payment: %w", err)
 	}
 	if existing == nil {
-		s.logger.Warn("payment not found for webhook",
+		logger.From(ctx, s.logger).Warn("payment not found for webhook",
 			zap.String("externalPaymentId", input.ExternalPaymentID))
 		return nil, nil
 	}
@@ -106,7 +108,7 @@ func (s *Service) ProcessWebhook(ctx context.Context, input UpdatePaymentByExter
 		return nil, fmt.Errorf("updating payment: %w", err)
 	}
 
-	s.logger.Info("payment updated via webhook",
+	logger.From(ctx, s.logger).Info("payment updated via webhook",
 		zap.String("paymentId", existing.ID.String()),
 		zap.String("externalPaymentId", input.ExternalPaymentID),
 		zap.String("status", string(input.Status)))

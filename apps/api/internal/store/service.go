@@ -8,6 +8,7 @@ import (
 
 	"livecart/apps/api/internal/billing"
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 )
 
 // MembershipCreator interface to avoid circular dependency with user package
@@ -50,14 +51,14 @@ func (s *Service) Create(ctx context.Context, input CreateStoreInput) (CreateSto
 	// 1. Look up internal user ID from Clerk user ID
 	userID, err := s.userLookup.GetUserIDByClerkID(ctx, input.ClerkUserID)
 	if err != nil {
-		s.logger.Error("failed to look up user", zap.Error(err), zap.String("clerk_user_id", input.ClerkUserID))
+		logger.From(ctx, s.logger).Error("failed to look up user", zap.Error(err), zap.String("clerk_user_id", input.ClerkUserID))
 		return CreateStoreOutput{}, httpx.ErrUnprocessable("user not found - please sync your account first")
 	}
 
 	// 2. Check if user already has a store (1 user = 1 store rule)
 	hasMembership, err := s.membershipCreator.HasMembership(ctx, userID)
 	if err != nil {
-		s.logger.Error("failed to check existing membership", zap.Error(err), zap.String("user_id", userID))
+		logger.From(ctx, s.logger).Error("failed to check existing membership", zap.Error(err), zap.String("user_id", userID))
 		return CreateStoreOutput{}, fmt.Errorf("checking existing membership: %w", err)
 	}
 	if hasMembership {
@@ -79,14 +80,14 @@ func (s *Service) Create(ctx context.Context, input CreateStoreInput) (CreateSto
 		Slug: input.Slug,
 	})
 	if err != nil {
-		s.logger.Error("failed to create store", zap.Error(err), zap.String("slug", input.Slug))
+		logger.From(ctx, s.logger).Error("failed to create store", zap.Error(err), zap.String("slug", input.Slug))
 		return CreateStoreOutput{}, fmt.Errorf("creating store: %w", err)
 	}
 
 	// 5. Create owner membership
 	membershipID, err := s.membershipCreator.CreateOwnerMembership(ctx, storeRow.ID, userID)
 	if err != nil {
-		s.logger.Error("failed to create owner membership", zap.Error(err), zap.String("store_id", storeRow.ID))
+		logger.From(ctx, s.logger).Error("failed to create owner membership", zap.Error(err), zap.String("store_id", storeRow.ID))
 		return CreateStoreOutput{}, fmt.Errorf("creating owner membership: %w", err)
 	}
 
@@ -94,14 +95,14 @@ func (s *Service) Create(ctx context.Context, input CreateStoreInput) (CreateSto
 	// lazily retries, so a Stripe hiccup never blocks onboarding.
 	if s.billing != nil {
 		if _, err := s.billing.EnsureTrialSubscription(ctx, storeRow.ID, storeRow.Name, ""); err != nil {
-			s.logger.Warn("trial provisioning failed at store creation",
+			logger.From(ctx, s.logger).Warn("trial provisioning failed at store creation",
 				zap.String("store_id", storeRow.ID),
 				zap.Error(err),
 			)
 		}
 	}
 
-	s.logger.Info("store created successfully",
+	logger.From(ctx, s.logger).Info("store created successfully",
 		zap.String("store_id", storeRow.ID),
 		zap.String("membership_id", membershipID),
 		zap.String("user_id", userID),

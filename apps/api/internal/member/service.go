@@ -7,6 +7,7 @@ import (
 
 	"livecart/apps/api/internal/member/domain"
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 	vo "livecart/apps/api/lib/valueobject"
 )
 
@@ -70,8 +71,7 @@ func (s *Service) UpdateRole(ctx context.Context, input UpdateMemberRoleInput) (
 		return nil, err
 	}
 
-	s.logger.Info("member role updated",
-		zap.String("store_id", input.StoreID),
+	logger.From(ctx, s.logger).Info("member role updated",
 		zap.String("member_id", input.MemberID),
 		zap.String("new_role", input.Role),
 		zap.String("updated_by", input.ActorID),
@@ -104,8 +104,7 @@ func (s *Service) Remove(ctx context.Context, input RemoveMemberInput) error {
 		return err
 	}
 
-	s.logger.Info("member removed from store",
-		zap.String("store_id", input.StoreID),
+	logger.From(ctx, s.logger).Info("member removed from store",
 		zap.String("member_id", input.MemberID),
 		zap.String("removed_by", input.ActorID),
 	)

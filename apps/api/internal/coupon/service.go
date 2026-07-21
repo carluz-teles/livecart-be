@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 )
 
 type Service struct {
@@ -539,7 +540,7 @@ func (s *Service) ExpireStaleReservedRedemptions(ctx context.Context, limit int)
 	for _, row := range stale {
 		ok, err := s.expireOne(ctx, row)
 		if err != nil {
-			s.logger.Warn("failed to expire reserved redemption",
+			logger.From(ctx, s.logger).Warn("failed to expire reserved redemption",
 				zap.String("redemption_id", row.RedemptionID),
 				zap.String("coupon_id", row.CouponID),
 				zap.String("cart_id", row.CartID),
@@ -709,4 +710,3 @@ func computeFreeShippingDiscount(selected, cheapestQuoted, maxDiscount int64) in
 	}
 	return cap
 }
-

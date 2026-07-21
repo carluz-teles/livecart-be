@@ -248,7 +248,7 @@ func (r *Repository) DeleteMembership(ctx context.Context, storeID, membershipID
 
 // ValidateStoreAccess implements httpx.StoreAccessValidator
 func (r *Repository) ValidateStoreAccess(ctx context.Context, clerkUserID, storeID string) (bool, error) {
-	membershipID, _, _, err := r.GetStoreAccessInfo(ctx, clerkUserID, storeID)
+	membershipID, _, _, _, err := r.GetStoreAccessInfo(ctx, clerkUserID, storeID)
 	if err != nil {
 		return false, err
 	}
@@ -256,10 +256,10 @@ func (r *Repository) ValidateStoreAccess(ctx context.Context, clerkUserID, store
 }
 
 // GetStoreAccessInfo returns the user's membership info for a specific store using Clerk ID
-func (r *Repository) GetStoreAccessInfo(ctx context.Context, clerkUserID, storeID string) (membershipID string, role string, userID string, err error) {
+func (r *Repository) GetStoreAccessInfo(ctx context.Context, clerkUserID, storeID string) (membershipID string, role string, userID string, storeSlug string, err error) {
 	storeUID, err := parseUUID(storeID)
 	if err != nil {
-		return "", "", "", nil // Invalid UUID means no access
+		return "", "", "", "", nil // Invalid UUID means no access
 	}
 
 	row, err := r.q.ValidateStoreAccessByClerkID(ctx, sqlc.ValidateStoreAccessByClerkIDParams{
@@ -268,12 +268,12 @@ func (r *Repository) GetStoreAccessInfo(ctx context.Context, clerkUserID, storeI
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", "", "", nil
+			return "", "", "", "", nil
 		}
-		return "", "", "", fmt.Errorf("validating store access: %w", err)
+		return "", "", "", "", fmt.Errorf("validating store access: %w", err)
 	}
 
-	return row.ID.String(), row.Role, row.UserID.String(), nil
+	return row.ID.String(), row.Role, row.UserID.String(), row.StoreSlug, nil
 }
 
 // ============================================

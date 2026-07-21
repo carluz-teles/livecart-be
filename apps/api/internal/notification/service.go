@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/lib/logger"
 )
 
 // DMSender is an interface for sending direct messages.
@@ -56,7 +57,7 @@ func (s *Service) GetSettings(ctx context.Context, storeID string) (*Settings, e
 
 	var settings Settings
 	if err := json.Unmarshal(settingsJSON, &settings); err != nil {
-		s.logger.Warn("failed to parse notification settings, using defaults",
+		logger.From(ctx, s.logger).Warn("failed to parse notification settings, using defaults",
 			zap.String("store_id", storeID),
 			zap.Error(err),
 		)
@@ -115,7 +116,7 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 	// Get template settings for this notification type
 	templateSettings := s.getTemplateSettings(settings, input.NotificationType)
 	if templateSettings == nil || !templateSettings.Enabled {
-		s.logger.Debug("notification type disabled",
+		logger.From(ctx, s.logger).Debug("notification type disabled",
 			zap.String("store_id", input.StoreID),
 			zap.String("type", string(input.NotificationType)),
 		)
@@ -135,18 +136,18 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 	// Create log entry as pending
 	logID, err := s.createLog(ctx, input, StatusPending, message, nil)
 	if err != nil {
-		s.logger.Warn("failed to create notification log", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("failed to create notification log", zap.Error(err))
 	}
 
 	// Try to reply to comment first (no 24h window restriction), then fallback to DM
 	var sendErr error
 	if input.PlatformCommentID != "" {
-		s.logger.Debug("trying comment reply first",
+		logger.From(ctx, s.logger).Debug("trying comment reply first",
 			zap.String("comment_id", input.PlatformCommentID),
 		)
 		sendErr = s.dmSender.ReplyToInstagramComment(ctx, input.StoreID, input.PlatformCommentID, message)
 		if sendErr != nil {
-			s.logger.Warn("comment reply failed, falling back to DM",
+			logger.From(ctx, s.logger).Warn("comment reply failed, falling back to DM",
 				zap.String("comment_id", input.PlatformCommentID),
 				zap.Error(sendErr),
 			)
@@ -162,7 +163,7 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 		// Update log as failed
 		s.updateLogStatus(ctx, logID, StatusFailed, sendErr.Error())
 
-		s.logger.Warn("failed to send notification",
+		logger.From(ctx, s.logger).Warn("failed to send notification",
 			zap.String("store_id", input.StoreID),
 			zap.String("platform_user_id", input.PlatformUserID),
 			zap.String("type", string(input.NotificationType)),
@@ -190,7 +191,7 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 	// Update log as sent
 	s.updateLogStatus(ctx, logID, StatusSent, "")
 
-	s.logger.Info("notification sent",
+	logger.From(ctx, s.logger).Info("notification sent",
 		zap.String("store_id", input.StoreID),
 		zap.String("platform_user_id", input.PlatformUserID),
 		zap.String("type", string(input.NotificationType)),

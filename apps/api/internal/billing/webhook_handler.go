@@ -10,6 +10,7 @@ import (
 
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 )
 
 // WebhookHandler receives Stripe events.
@@ -41,11 +42,11 @@ func (h *WebhookHandler) HandleStripe(c *fiber.Ctx) error {
 
 	secret := config.StripeWebhookSecret.String()
 	if secret == "" {
-		h.logger.Warn("stripe webhook received but STRIPE_WEBHOOK_SECRET is not set")
+		logger.From(c.Context(), h.logger).Warn("stripe webhook received but STRIPE_WEBHOOK_SECRET is not set")
 		return c.Status(http.StatusServiceUnavailable).JSON(fiber.Map{"error": "webhook not configured"})
 	}
 	if !VerifyWebhookSignature(payload, c.Get("Stripe-Signature"), secret, time.Now()) {
-		h.logger.Warn("rejected stripe webhook with invalid signature")
+		logger.From(c.Context(), h.logger).Warn("rejected stripe webhook with invalid signature")
 		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": "invalid signature"})
 	}
 
@@ -56,7 +57,7 @@ func (h *WebhookHandler) HandleStripe(c *fiber.Ctx) error {
 
 	if err := h.service.ProcessWebhookEvent(c.Context(), &event); err != nil {
 		// 500 makes Stripe retry — desired for transient DB failures.
-		h.logger.Error("failed to process stripe event",
+		logger.From(c.Context(), h.logger).Error("failed to process stripe event",
 			zap.String("event", event.ID),
 			zap.String("type", event.Type),
 			zap.Error(err),

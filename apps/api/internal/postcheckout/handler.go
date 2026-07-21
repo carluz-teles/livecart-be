@@ -11,6 +11,7 @@ import (
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 )
 
 // Local alias so the handler doesn't have to drag the full sqlc package
@@ -71,11 +72,11 @@ type PublicOrderResponse struct {
 // the visual status bar; type drives the icon + label, occurred_at drives
 // "há X minutos".
 type PublicOrderEvent struct {
-	Type       string  `json:"type"` // payment_confirmed | shipped | delivered
-	OccurredAt string  `json:"occurred_at"`
-	Title      string  `json:"title"`
-	Subtitle   string  `json:"subtitle,omitempty"`
-	Source     string  `json:"source"` // system | merchant | customer
+	Type       string `json:"type"` // payment_confirmed | shipped | delivered
+	OccurredAt string `json:"occurred_at"`
+	Title      string `json:"title"`
+	Subtitle   string `json:"subtitle,omitempty"`
+	Source     string `json:"source"` // system | merchant | customer
 }
 
 type PublicOrderItem struct {
@@ -132,18 +133,20 @@ func (h *Handler) GetOrder(c *fiber.Ctx) error {
 
 	snapshot, err := h.repo.LoadCart(c.Context(), cart.ID.String())
 	if err != nil {
-		h.logger.Error("failed to load order snapshot",
+		logger.From(c.Context(), h.logger).Error("failed to load order snapshot",
 			zap.String("cart_id", cart.ID.String()),
 			zap.Error(err),
 		)
 		return httpx.ErrInternal("Erro ao carregar pedido")
 	}
+	// Rota pública por tracking token: o store só é conhecido após o snapshot.
+	ctx := logger.WithStore(c.Context(), uuidStr(snapshot.Store.ID), snapshot.Store.Slug)
 
 	events, err := h.repo.ListOrderEvents(c.Context(), cart.ID.String())
 	if err != nil {
 		// Don't fail the whole request — timeline is auxiliary, the order
 		// summary itself is the primary value.
-		h.logger.Warn("failed to load order events",
+		logger.From(ctx, h.logger).Warn("failed to load order events",
 			zap.String("cart_id", cart.ID.String()),
 			zap.Error(err),
 		)
@@ -153,7 +156,7 @@ func (h *Handler) GetOrder(c *fiber.Ctx) error {
 	if h.pool != nil {
 		shipment, err = h.repo.GetShipmentSummary(c.Context(), h.pool, cart.ID.String())
 		if err != nil {
-			h.logger.Warn("failed to load shipment summary",
+			logger.From(ctx, h.logger).Warn("failed to load shipment summary",
 				zap.String("cart_id", cart.ID.String()),
 				zap.Error(err),
 			)
@@ -352,4 +355,3 @@ func toPublicResponse(s *CartSnapshot) PublicOrderResponse {
 
 	return resp
 }
-

@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/logger"
 	"livecart/apps/api/lib/ratelimit"
 )
 
@@ -349,7 +350,7 @@ func (m *MercadoPago) GetPaymentStatus(ctx context.Context, paymentID string) (*
 			"amount_cents": f.AmountCents,
 		})
 	}
-	m.Logger.Info("mercado pago payment status fetched",
+	logger.From(ctx, m.Logger).Info("mercado pago payment status fetched",
 		zap.String("payment_id", status.PaymentID),
 		zap.String("status", string(status.Status)),
 		zap.String("status_detail", resource.StatusDetail),
@@ -526,7 +527,7 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 				IssuerID:            req.IssuerID,
 				Metadata:            req.Metadata,
 			}
-			m.Logger.Error("mercado pago card payment failed",
+			logger.From(ctx, m.Logger).Error("mercado pago card payment failed",
 				zap.Int("status_code", mpErr.StatusCode),
 				zap.String("body", mpErr.Message),
 				zap.Any("request_payload", safe),
@@ -594,7 +595,7 @@ func (m *MercadoPago) ProcessCardPayment(ctx context.Context, input CardPaymentI
 	if !resource.MoneyReleaseDate.IsZero() {
 		moneyReleaseDateStr = resource.MoneyReleaseDate.Format(time.RFC3339)
 	}
-	m.Logger.Info("mercado pago card payment captured",
+	logger.From(ctx, m.Logger).Info("mercado pago card payment captured",
 		zap.String("payment_id", result.PaymentID),
 		zap.String("cart_id", input.CartID),
 		zap.String("status", string(result.Status)),
@@ -723,7 +724,7 @@ func (m *MercadoPago) GeneratePixPayment(ctx context.Context, input PixPaymentIn
 func (m *MercadoPago) GetPaymentMethods(ctx context.Context) ([]string, error) {
 	cfg, err := m.sdkConfig()
 	if err != nil {
-		m.Logger.Warn("mercado pago payment_methods config init failed, falling back to card-only",
+		logger.From(ctx, m.Logger).Warn("mercado pago payment_methods config init failed, falling back to card-only",
 			zap.Error(err),
 		)
 		return []string{"card"}, nil
@@ -731,7 +732,7 @@ func (m *MercadoPago) GetPaymentMethods(ctx context.Context) ([]string, error) {
 
 	entries, err := paymentmethod.NewClient(cfg).List(ctx)
 	if err != nil {
-		m.Logger.Warn("mercado pago payment_methods lookup failed, falling back to card-only",
+		logger.From(ctx, m.Logger).Warn("mercado pago payment_methods lookup failed, falling back to card-only",
 			zap.Error(err),
 		)
 		return []string{"card"}, nil

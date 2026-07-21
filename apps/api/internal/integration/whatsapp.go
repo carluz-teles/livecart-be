@@ -27,6 +27,7 @@ import (
 	"livecart/apps/api/internal/integration/providers/communication"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/httpx"
+	"livecart/apps/api/lib/logger"
 )
 
 // =============================================================================
@@ -94,7 +95,7 @@ func (s *Service) SendWhatsAppTemplate(ctx context.Context, input SendWhatsAppTe
 
 	if input.NotificationLogID != "" && result.MessageID != "" {
 		if err := s.repo.SetNotificationLogProviderMessageID(ctx, input.NotificationLogID, result.MessageID); err != nil {
-			s.logger.Warn("failed to stamp provider message id on notification log",
+			logger.From(ctx, s.logger).Warn("failed to stamp provider message id on notification log",
 				zap.String("log_id", input.NotificationLogID),
 				zap.String("message_sid", result.MessageID),
 				zap.Error(err),
@@ -102,7 +103,7 @@ func (s *Service) SendWhatsAppTemplate(ctx context.Context, input SendWhatsAppTe
 		}
 	}
 
-	s.logger.Info("whatsapp template sent",
+	logger.From(ctx, s.logger).Info("whatsapp template sent",
 		zap.String("store_id", input.StoreID),
 		zap.String("message_sid", result.MessageID),
 		zap.String("status", result.Status),
@@ -222,8 +223,7 @@ func (s *Service) ProcessTwilioStatusCallback(ctx context.Context, storeID, mess
 		return fmt.Errorf("updating notification log by message sid: %w", err)
 	}
 	if !found {
-		s.logger.Debug("twilio status callback for untracked message",
-			zap.String("store_id", storeID),
+		logger.From(ctx, s.logger).Debug("twilio status callback for untracked message",
 			zap.String("message_sid", messageSid),
 			zap.String("status", twilioStatus),
 		)
@@ -251,8 +251,7 @@ func (s *Service) ProcessTwilioInbound(ctx context.Context, storeID, from, body 
 		return fmt.Errorf("setting whatsapp opt-out: %w", err)
 	}
 
-	s.logger.Info("whatsapp opt-out processed",
-		zap.String("store_id", storeID),
+	logger.From(ctx, s.logger).Info("whatsapp opt-out processed",
 		zap.String("phone", phone),
 		zap.Int64("customers_updated", rows),
 	)
@@ -455,8 +454,7 @@ func (s *Service) ConnectWhatsApp(ctx context.Context, input ConnectWhatsAppInpu
 			CallbackURL:     twilioWebhookURL(input.StoreID),
 		})
 		if err != nil {
-			s.logger.Warn("whatsapp sender registration pending",
-				zap.String("store_id", input.StoreID),
+			logger.From(ctx, s.logger).Warn("whatsapp sender registration pending",
 				zap.Error(err),
 			)
 			metadata["sender_error"] = err.Error()
@@ -475,8 +473,7 @@ func (s *Service) ConnectWhatsApp(ctx context.Context, input ConnectWhatsAppInpu
 		}
 		tpl, err := master.CreateRecoveryTemplate(ctx, subSID, subToken, displayName)
 		if err != nil {
-			s.logger.Warn("whatsapp recovery template creation pending",
-				zap.String("store_id", input.StoreID),
+			logger.From(ctx, s.logger).Warn("whatsapp recovery template creation pending",
 				zap.Error(err),
 			)
 			metadata["template_error"] = err.Error()
@@ -484,8 +481,7 @@ func (s *Service) ConnectWhatsApp(ctx context.Context, input ConnectWhatsAppInpu
 			metadata[communication.MetaContentSIDRecovery] = tpl.SID
 			delete(metadata, "template_error")
 			if err := master.SubmitTemplateApproval(ctx, subSID, subToken, tpl.SID); err != nil {
-				s.logger.Warn("whatsapp template approval submission failed",
-					zap.String("store_id", input.StoreID),
+				logger.From(ctx, s.logger).Warn("whatsapp template approval submission failed",
 					zap.Error(err),
 				)
 			}

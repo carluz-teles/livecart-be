@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/lib/logger"
 )
 
 // WhatsAppSender sends the approved recovery/reminder template through the
@@ -79,12 +80,12 @@ func (s *Service) tryWhatsAppFallback(ctx context.Context, input SendInput) stri
 
 	logID, err := s.createWhatsAppLog(ctx, input, cart.CustomerPhone.String, vars)
 	if err != nil {
-		s.logger.Warn("failed to create whatsapp fallback log", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("failed to create whatsapp fallback log", zap.Error(err))
 	}
 
 	if err := s.whatsappSender.SendCartRecoveryTemplate(ctx, input.StoreID, cart.CustomerPhone.String, vars, logID); err != nil {
 		s.updateLogStatus(ctx, logID, StatusFailed, err.Error())
-		s.logger.Warn("whatsapp reminder fallback failed",
+		logger.From(ctx, s.logger).Warn("whatsapp reminder fallback failed",
 			zap.String("store_id", input.StoreID),
 			zap.String("cart_id", input.CartID),
 			zap.Error(err),
@@ -93,7 +94,7 @@ func (s *Service) tryWhatsAppFallback(ctx context.Context, input SendInput) stri
 	}
 
 	s.updateLogStatus(ctx, logID, StatusSent, "")
-	s.logger.Info("reminder delivered via whatsapp fallback",
+	logger.From(ctx, s.logger).Info("reminder delivered via whatsapp fallback",
 		zap.String("store_id", input.StoreID),
 		zap.String("cart_id", input.CartID),
 	)
