@@ -15,6 +15,28 @@ import (
 // the smoke-test handler.
 func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(TestPing), handleTestPing(log))
+
+	// Group C — cart lifecycle. Observability-only for now; richer consumers
+	// (notifications, analytics) arrive in later phases. Every emitted event
+	// needs a handler or asynq reports "handler not found".
+	mux.HandleFunc(string(CartExpired), logEvent(log))
+}
+
+// logEvent is a generic observability consumer: it records that a canonical
+// event was delivered, correlated by trace_id via logger.From.
+func logEvent(log *zap.Logger) asynq.HandlerFunc {
+	return func(ctx context.Context, t *asynq.Task) error {
+		var env Envelope
+		if err := json.Unmarshal(t.Payload(), &env); err != nil {
+			return asynq.SkipRetry
+		}
+		logger.From(ctx, log).Info("event observed",
+			zap.String("event", string(env.Name)),
+			zap.String("event_id", env.EventID),
+			zap.String("source", string(env.Source)),
+		)
+		return nil
+	}
 }
 
 // handleTestPing is a no-op consumer that proves the pipeline end to end:

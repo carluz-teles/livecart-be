@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/idempotency"
 	"livecart/apps/api/lib/query"
@@ -1906,13 +1907,34 @@ func (r *Repository) ExpireCartAndReleaseStock(ctx context.Context, cartID strin
 		freed = append(freed, uuidToString(item.ProductID))
 	}
 
+	// Emit cart.expired in the SAME tx (transactional outbox): the event is
+	// committed atomically with the flip + stock release, so it is never lost.
+	// The relay delivers it. Payload carries data only known inside this tx.
+	eventID := uuidToString(cart.EventID)
+	payload, err := json.Marshal(struct {
+		CartID          string   `json:"cart_id"`
+		EventID         string   `json:"event_id"`
+		FreedProductIDs []string `json:"freed_product_ids"`
+	}{CartID: cartID, EventID: eventID, FreedProductIDs: freed})
+	if err != nil {
+		return ExpireCartResult{}, fmt.Errorf("marshaling cart.expired payload: %w", err)
+	}
+	if err := events.Emit(ctx, qtx, events.Envelope{
+		Name:     events.CartExpired,
+		Source:   events.SourceInternal,
+		DedupKey: "cart.expired:" + cartID,
+		Payload:  payload,
+	}); err != nil {
+		return ExpireCartResult{}, fmt.Errorf("emitting cart.expired: %w", err)
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return ExpireCartResult{}, fmt.Errorf("commit expire tx: %w", err)
 	}
 
 	return ExpireCartResult{
 		Eligible:        true,
-		EventID:         uuidToString(cart.EventID),
+		EventID:         eventID,
 		FreedProductIDs: freed,
 	}, nil
 }

@@ -20,11 +20,32 @@ import (
 // Name is a canonical domain event name, e.g. "comment.received".
 type Name string
 
-// Canonical event names. This list grows as flows migrate (Fases 04-11); Fase
-// 01 ships only the smoke-test event.
+// Canonical event names. Domain facts, never implementation details — the
+// origin travels in Envelope.Source. This list grows as flows migrate.
 const (
 	// TestPing is a no-op event used to prove the pipeline end to end.
 	TestPing Name = "test.ping"
+
+	// Live / session / event lifecycle (group A).
+	EventEventCreated Name = "event.created"
+	EventEventStarted Name = "event.started"
+	EventEventEnded   Name = "event.ended"
+	SessionCreated    Name = "session.created"
+	SessionLive       Name = "session.live"
+	SessionEnded      Name = "session.ended"
+	PostWindowClosed  Name = "post.window_closed"
+
+	// Comment ingestion (group B). One canonical event; the platform/channel
+	// (live, story, dm) is Envelope.Source.
+	CommentReceived Name = "comment.received"
+
+	// Cart lifecycle (group C).
+	CartCreated       Name = "cart.created"
+	CartItemAdded     Name = "cart.item_added"
+	CartCheckoutArmed Name = "cart.checkout_armed"
+	CartExpired       Name = "cart.expired"
+	CartReopened      Name = "cart.reopened"
+	CartCancelled     Name = "cart.cancelled"
 )
 
 // Source identifies where an event was dispatched from. It is metadata on the
