@@ -616,6 +616,7 @@ type LiveStatsOutput struct {
 type AddToCartInput struct {
 	StoreID            string // Required - used to upsert the customer row
 	EventID            string // Changed from SessionID to EventID
+	SessionID          string // Optional - session the item is attributed to (first-touch)
 	PlatformUserID     string
 	PlatformHandle     string
 	ProductID          string
@@ -657,6 +658,7 @@ type CartRow struct {
 type AddCartItemParams struct {
 	CartID             string
 	ProductID          string
+	SessionID          string // Optional - session the item is attributed to (first-touch)
 	Quantity           int
 	UnitPrice          int64
 	WaitlistedQuantity int // How many of the quantity are waitlisted

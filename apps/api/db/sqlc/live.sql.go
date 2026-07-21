@@ -53,9 +53,9 @@ func (q *Queries) CountPlatformsBySession(ctx context.Context, sessionID pgtype.
 
 const createLiveSession = `-- name: CreateLiveSession :one
 
-INSERT INTO live_sessions (event_id, status)
-VALUES ($1, $2)
-RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id
+INSERT INTO live_sessions (event_id, status, sequence_order)
+VALUES ($1, $2, COALESCE((SELECT MAX(sequence_order) FROM live_sessions WHERE event_id = $1), 0) + 1)
+RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order
 `
 
 type CreateLiveSessionParams struct {
@@ -66,6 +66,8 @@ type CreateLiveSessionParams struct {
 // =============================================================================
 // LIVE SESSIONS (belong to events, platform-agnostic)
 // =============================================================================
+// sequence_order is MAX+1 per event, computed atomically. The unique index
+// (event_id, sequence_order) catches the rare concurrent-create race.
 func (q *Queries) CreateLiveSession(ctx context.Context, arg CreateLiveSessionParams) (LiveSession, error) {
 	row := q.db.QueryRow(ctx, createLiveSession, arg.EventID, arg.Status)
 	var i LiveSession
@@ -78,6 +80,7 @@ func (q *Queries) CreateLiveSession(ctx context.Context, arg CreateLiveSessionPa
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.EventID,
+		&i.SequenceOrder,
 	)
 	return i, err
 }
@@ -86,7 +89,7 @@ const endLiveSession = `-- name: EndLiveSession :one
 UPDATE live_sessions
 SET status = 'ended', ended_at = now(), updated_at = now()
 WHERE id = $1
-RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id
+RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order
 `
 
 func (q *Queries) EndLiveSession(ctx context.Context, id pgtype.UUID) (LiveSession, error) {
@@ -101,12 +104,13 @@ func (q *Queries) EndLiveSession(ctx context.Context, id pgtype.UUID) (LiveSessi
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.EventID,
+		&i.SequenceOrder,
 	)
 	return i, err
 }
 
 const getActiveSessionByEvent = `-- name: GetActiveSessionByEvent :one
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id FROM live_sessions
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order FROM live_sessions
 WHERE event_id = $1 AND status IN ('active', 'live')
 ORDER BY created_at DESC
 LIMIT 1
@@ -124,12 +128,13 @@ func (q *Queries) GetActiveSessionByEvent(ctx context.Context, eventID pgtype.UU
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.EventID,
+		&i.SequenceOrder,
 	)
 	return i, err
 }
 
 const getLiveSessionByID = `-- name: GetLiveSessionByID :one
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id FROM live_sessions WHERE id = $1
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order FROM live_sessions WHERE id = $1
 `
 
 func (q *Queries) GetLiveSessionByID(ctx context.Context, id pgtype.UUID) (LiveSession, error) {
@@ -144,12 +149,13 @@ func (q *Queries) GetLiveSessionByID(ctx context.Context, id pgtype.UUID) (LiveS
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.EventID,
+		&i.SequenceOrder,
 	)
 	return i, err
 }
 
 const getLiveSessionByIDAndEvent = `-- name: GetLiveSessionByIDAndEvent :one
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id FROM live_sessions WHERE id = $1 AND event_id = $2
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order FROM live_sessions WHERE id = $1 AND event_id = $2
 `
 
 type GetLiveSessionByIDAndEventParams struct {
@@ -169,6 +175,7 @@ func (q *Queries) GetLiveSessionByIDAndEvent(ctx context.Context, arg GetLiveSes
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.EventID,
+		&i.SequenceOrder,
 	)
 	return i, err
 }
@@ -191,7 +198,7 @@ func (q *Queries) GetPlatformByLiveID(ctx context.Context, platformLiveID string
 }
 
 const getSessionByPlatformLiveID = `-- name: GetSessionByPlatformLiveID :one
-SELECT ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.created_at, ls.updated_at, ls.event_id
+SELECT ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.created_at, ls.updated_at, ls.event_id, ls.sequence_order
 FROM live_sessions ls
 JOIN live_session_platforms lsp ON lsp.session_id = ls.id
 WHERE lsp.platform_live_id = $1 AND ls.status IN ('active', 'live')
@@ -212,6 +219,7 @@ func (q *Queries) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.EventID,
+		&i.SequenceOrder,
 	)
 	return i, err
 }
@@ -260,7 +268,7 @@ func (q *Queries) ListPlatformsBySession(ctx context.Context, sessionID pgtype.U
 }
 
 const listSessionsByEvent = `-- name: ListSessionsByEvent :many
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id FROM live_sessions
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order FROM live_sessions
 WHERE event_id = $1
 ORDER BY created_at DESC
 `
@@ -283,6 +291,7 @@ func (q *Queries) ListSessionsByEvent(ctx context.Context, eventID pgtype.UUID) 
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.EventID,
+			&i.SequenceOrder,
 		); err != nil {
 			return nil, err
 		}
@@ -313,7 +322,7 @@ const startLiveSession = `-- name: StartLiveSession :one
 UPDATE live_sessions
 SET status = 'live', started_at = now(), updated_at = now()
 WHERE id = $1
-RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id
+RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order
 `
 
 func (q *Queries) StartLiveSession(ctx context.Context, id pgtype.UUID) (LiveSession, error) {
@@ -328,6 +337,7 @@ func (q *Queries) StartLiveSession(ctx context.Context, id pgtype.UUID) (LiveSes
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.EventID,
+		&i.SequenceOrder,
 	)
 	return i, err
 }

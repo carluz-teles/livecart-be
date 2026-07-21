@@ -5038,6 +5038,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	result, err := s.liveService.AddToCart(ctx, live.AddToCartInput{
 		StoreID:            event.StoreID,
 		EventID:            event.ID,
+		SessionID:          session.ID,
 		PlatformUserID:     input.UserID,
 		PlatformHandle:     input.Username,
 		ProductID:          product.ID,

@@ -3,8 +3,10 @@
 -- =============================================================================
 
 -- name: CreateLiveSession :one
-INSERT INTO live_sessions (event_id, status)
-VALUES ($1, $2)
+-- sequence_order is MAX+1 per event, computed atomically. The unique index
+-- (event_id, sequence_order) catches the rare concurrent-create race.
+INSERT INTO live_sessions (event_id, status, sequence_order)
+VALUES ($1, $2, COALESCE((SELECT MAX(sequence_order) FROM live_sessions WHERE event_id = $1), 0) + 1)
 RETURNING *;
 
 -- name: GetLiveSessionByID :one

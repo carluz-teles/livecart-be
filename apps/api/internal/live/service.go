@@ -990,9 +990,15 @@ func (s *Service) AddToCart(ctx context.Context, input AddToCartInput) (AddToCar
 		}
 	}
 
-	// Get or create cart for this user in this event
+	// Get or create cart for this user in this event. Thread the session so a
+	// new cart records its originating session.
+	var originSession *string
+	if input.SessionID != "" {
+		originSession = &input.SessionID
+	}
 	cart, isNew, err := s.repo.GetOrCreateCart(ctx, GetOrCreateCartParams{
 		EventID:        input.EventID,
+		SessionID:      originSession,
 		PlatformUserID: input.PlatformUserID,
 		PlatformHandle: input.PlatformHandle,
 		Token:          token,
@@ -1002,10 +1008,11 @@ func (s *Service) AddToCart(ctx context.Context, input AddToCartInput) (AddToCar
 		return AddToCartOutput{}, fmt.Errorf("getting or creating cart: %w", err)
 	}
 
-	// Add item to cart
+	// Add item to cart, attributed to the session it was added in (first-touch).
 	err = s.repo.AddCartItem(ctx, AddCartItemParams{
 		CartID:             cart.ID,
 		ProductID:          input.ProductID,
+		SessionID:          input.SessionID,
 		Quantity:           input.Quantity,
 		UnitPrice:          input.ProductPrice,
 		WaitlistedQuantity: input.WaitlistedQuantity,

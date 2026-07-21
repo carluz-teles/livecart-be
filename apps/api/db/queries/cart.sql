@@ -182,18 +182,21 @@ RETURNING *;
 SELECT * FROM carts WHERE event_id = $1 ORDER BY created_at;
 
 -- name: CreateCartItem :one
-INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;
 
 -- name: UpsertCartItem :one
 -- Adds quantity to existing cart item or creates new one
 -- waitlisted_quantity is added to existing (not replaced)
-INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity)
-VALUES ($1, $2, $3, $4, $5)
+-- session_id is first-touch: kept from the original add (COALESCE), so
+-- re-adds in later sessions accumulate quantity under the first session.
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (cart_id, product_id)
 DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity,
-             waitlisted_quantity = cart_items.waitlisted_quantity + EXCLUDED.waitlisted_quantity
+             waitlisted_quantity = cart_items.waitlisted_quantity + EXCLUDED.waitlisted_quantity,
+             session_id = COALESCE(cart_items.session_id, EXCLUDED.session_id)
 RETURNING *;
 
 -- name: ListCartItems :many
@@ -201,6 +204,28 @@ SELECT ci.*, p.name AS product_name, p.image_url AS product_image_url
 FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1;
+
+-- name: SessionAttributionByEvent :many
+-- Per-session attribution within an event (first-touch): sold units and paid
+-- revenue in cents, credited to the session each item was first added in.
+-- Returns every session of the event, ordered, including zero-revenue ones.
+SELECT
+    s.id AS session_id,
+    s.sequence_order,
+    COALESCE(SUM(
+        CASE WHEN c.payment_status = 'paid'
+             THEN GREATEST(ci.quantity - ci.waitlisted_quantity, 0)
+             ELSE 0 END), 0)::bigint AS sold_units,
+    COALESCE(SUM(
+        CASE WHEN c.payment_status = 'paid'
+             THEN GREATEST(ci.quantity - ci.waitlisted_quantity, 0) * ci.unit_price
+             ELSE 0 END), 0)::bigint AS revenue_cents
+FROM live_sessions s
+LEFT JOIN cart_items ci ON ci.session_id = s.id
+LEFT JOIN carts c ON c.id = ci.cart_id
+WHERE s.event_id = $1
+GROUP BY s.id, s.sequence_order
+ORDER BY s.sequence_order;
 
 -- name: FinalizeCartsByEvent :exec
 -- Ao encerrar a live, move os carrinhos ativos para 'checkout' e arma o prazo

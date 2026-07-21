@@ -145,9 +145,9 @@ func (q *Queries) CreateCart(ctx context.Context, arg CreateCartParams) (Cart, e
 }
 
 const createCartItem = `-- name: CreateCartItem :one
-INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id
 `
 
 type CreateCartItemParams struct {
@@ -156,6 +156,7 @@ type CreateCartItemParams struct {
 	Quantity           pgtype.Int4 `json:"quantity"`
 	UnitPrice          pgtype.Int8 `json:"unit_price"`
 	WaitlistedQuantity int32       `json:"waitlisted_quantity"`
+	SessionID          pgtype.UUID `json:"session_id"`
 }
 
 func (q *Queries) CreateCartItem(ctx context.Context, arg CreateCartItemParams) (CartItem, error) {
@@ -165,6 +166,7 @@ func (q *Queries) CreateCartItem(ctx context.Context, arg CreateCartItemParams) 
 		arg.Quantity,
 		arg.UnitPrice,
 		arg.WaitlistedQuantity,
+		arg.SessionID,
 	)
 	var i CartItem
 	err := row.Scan(
@@ -174,6 +176,7 @@ func (q *Queries) CreateCartItem(ctx context.Context, arg CreateCartItemParams) 
 		&i.Quantity,
 		&i.UnitPrice,
 		&i.WaitlistedQuantity,
+		&i.SessionID,
 	)
 	return i, err
 }
@@ -1177,7 +1180,7 @@ func (q *Queries) GetCartERPOrderState(ctx context.Context, id pgtype.UUID) (Get
 }
 
 const getCartItem = `-- name: GetCartItem :one
-SELECT id, cart_id, product_id, quantity, unit_price, waitlisted_quantity FROM cart_items WHERE id = $1
+SELECT id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id FROM cart_items WHERE id = $1
 `
 
 func (q *Queries) GetCartItem(ctx context.Context, id pgtype.UUID) (CartItem, error) {
@@ -1190,6 +1193,7 @@ func (q *Queries) GetCartItem(ctx context.Context, id pgtype.UUID) (CartItem, er
 		&i.Quantity,
 		&i.UnitPrice,
 		&i.WaitlistedQuantity,
+		&i.SessionID,
 	)
 	return i, err
 }
@@ -1440,7 +1444,7 @@ func (q *Queries) IssueShortIDForEvent(ctx context.Context, id pgtype.UUID) (int
 }
 
 const listCartItems = `-- name: ListCartItems :many
-SELECT ci.id, ci.cart_id, ci.product_id, ci.quantity, ci.unit_price, ci.waitlisted_quantity, p.name AS product_name, p.image_url AS product_image_url
+SELECT ci.id, ci.cart_id, ci.product_id, ci.quantity, ci.unit_price, ci.waitlisted_quantity, ci.session_id, p.name AS product_name, p.image_url AS product_image_url
 FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1
@@ -1453,6 +1457,7 @@ type ListCartItemsRow struct {
 	Quantity           pgtype.Int4 `json:"quantity"`
 	UnitPrice          pgtype.Int8 `json:"unit_price"`
 	WaitlistedQuantity int32       `json:"waitlisted_quantity"`
+	SessionID          pgtype.UUID `json:"session_id"`
 	ProductName        string      `json:"product_name"`
 	ProductImageUrl    pgtype.Text `json:"product_image_url"`
 }
@@ -1473,6 +1478,7 @@ func (q *Queries) ListCartItems(ctx context.Context, cartID pgtype.UUID) ([]List
 			&i.Quantity,
 			&i.UnitPrice,
 			&i.WaitlistedQuantity,
+			&i.SessionID,
 			&i.ProductName,
 			&i.ProductImageUrl,
 		); err != nil {
@@ -2652,6 +2658,61 @@ func (q *Queries) ReopenExpiredCartForReuse(ctx context.Context, id pgtype.UUID)
 	return err
 }
 
+const sessionAttributionByEvent = `-- name: SessionAttributionByEvent :many
+SELECT
+    s.id AS session_id,
+    s.sequence_order,
+    COALESCE(SUM(
+        CASE WHEN c.payment_status = 'paid'
+             THEN GREATEST(ci.quantity - ci.waitlisted_quantity, 0)
+             ELSE 0 END), 0)::bigint AS sold_units,
+    COALESCE(SUM(
+        CASE WHEN c.payment_status = 'paid'
+             THEN GREATEST(ci.quantity - ci.waitlisted_quantity, 0) * ci.unit_price
+             ELSE 0 END), 0)::bigint AS revenue_cents
+FROM live_sessions s
+LEFT JOIN cart_items ci ON ci.session_id = s.id
+LEFT JOIN carts c ON c.id = ci.cart_id
+WHERE s.event_id = $1
+GROUP BY s.id, s.sequence_order
+ORDER BY s.sequence_order
+`
+
+type SessionAttributionByEventRow struct {
+	SessionID     pgtype.UUID `json:"session_id"`
+	SequenceOrder int32       `json:"sequence_order"`
+	SoldUnits     int64       `json:"sold_units"`
+	RevenueCents  int64       `json:"revenue_cents"`
+}
+
+// Per-session attribution within an event (first-touch): sold units and paid
+// revenue in cents, credited to the session each item was first added in.
+// Returns every session of the event, ordered, including zero-revenue ones.
+func (q *Queries) SessionAttributionByEvent(ctx context.Context, eventID pgtype.UUID) ([]SessionAttributionByEventRow, error) {
+	rows, err := q.db.Query(ctx, sessionAttributionByEvent, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SessionAttributionByEventRow{}
+	for rows.Next() {
+		var i SessionAttributionByEventRow
+		if err := rows.Scan(
+			&i.SessionID,
+			&i.SequenceOrder,
+			&i.SoldUnits,
+			&i.RevenueCents,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setCartERPStockLaunched = `-- name: SetCartERPStockLaunched :exec
 UPDATE carts SET erp_stock_launched = $2 WHERE id = $1
 `
@@ -3024,7 +3085,7 @@ const updateCartItem = `-- name: UpdateCartItem :one
 UPDATE cart_items
 SET quantity = $2
 WHERE id = $1
-RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity
+RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id
 `
 
 type UpdateCartItemParams struct {
@@ -3042,6 +3103,7 @@ func (q *Queries) UpdateCartItem(ctx context.Context, arg UpdateCartItemParams) 
 		&i.Quantity,
 		&i.UnitPrice,
 		&i.WaitlistedQuantity,
+		&i.SessionID,
 	)
 	return i, err
 }
@@ -3562,12 +3624,13 @@ func (q *Queries) UpsertCartERPInvoice(ctx context.Context, arg UpsertCartERPInv
 }
 
 const upsertCartItem = `-- name: UpsertCartItem :one
-INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (cart_id, product_id)
 DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity,
-             waitlisted_quantity = cart_items.waitlisted_quantity + EXCLUDED.waitlisted_quantity
-RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity
+             waitlisted_quantity = cart_items.waitlisted_quantity + EXCLUDED.waitlisted_quantity,
+             session_id = COALESCE(cart_items.session_id, EXCLUDED.session_id)
+RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id
 `
 
 type UpsertCartItemParams struct {
@@ -3576,10 +3639,13 @@ type UpsertCartItemParams struct {
 	Quantity           pgtype.Int4 `json:"quantity"`
 	UnitPrice          pgtype.Int8 `json:"unit_price"`
 	WaitlistedQuantity int32       `json:"waitlisted_quantity"`
+	SessionID          pgtype.UUID `json:"session_id"`
 }
 
 // Adds quantity to existing cart item or creates new one
 // waitlisted_quantity is added to existing (not replaced)
+// session_id is first-touch: kept from the original add (COALESCE), so
+// re-adds in later sessions accumulate quantity under the first session.
 func (q *Queries) UpsertCartItem(ctx context.Context, arg UpsertCartItemParams) (CartItem, error) {
 	row := q.db.QueryRow(ctx, upsertCartItem,
 		arg.CartID,
@@ -3587,6 +3653,7 @@ func (q *Queries) UpsertCartItem(ctx context.Context, arg UpsertCartItemParams) 
 		arg.Quantity,
 		arg.UnitPrice,
 		arg.WaitlistedQuantity,
+		arg.SessionID,
 	)
 	var i CartItem
 	err := row.Scan(
@@ -3596,6 +3663,7 @@ func (q *Queries) UpsertCartItem(ctx context.Context, arg UpsertCartItemParams) 
 		&i.Quantity,
 		&i.UnitPrice,
 		&i.WaitlistedQuantity,
+		&i.SessionID,
 	)
 	return i, err
 }

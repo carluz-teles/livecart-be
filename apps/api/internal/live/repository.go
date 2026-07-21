@@ -1165,12 +1165,21 @@ func (r *Repository) AddCartItem(ctx context.Context, params AddCartItemParams) 
 		return err
 	}
 
+	var sessionID pgtype.UUID
+	if params.SessionID != "" {
+		sessionID, err = parseUUID(params.SessionID)
+		if err != nil {
+			return fmt.Errorf("parsing session id: %w", err)
+		}
+	}
+
 	_, err = r.q.UpsertCartItem(ctx, sqlc.UpsertCartItemParams{
 		CartID:             cartID,
 		ProductID:          productID,
 		Quantity:           pgtype.Int4{Int32: int32(params.Quantity), Valid: true},
 		UnitPrice:          pgtype.Int8{Int64: params.UnitPrice, Valid: true},
 		WaitlistedQuantity: int32(params.WaitlistedQuantity),
+		SessionID:          sessionID,
 	})
 	if err != nil {
 		return fmt.Errorf("upserting cart item: %w", err)

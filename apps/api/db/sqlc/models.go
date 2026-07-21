@@ -140,6 +140,7 @@ type CartItem struct {
 	Quantity           pgtype.Int4 `json:"quantity"`
 	UnitPrice          pgtype.Int8 `json:"unit_price"`
 	WaitlistedQuantity int32       `json:"waitlisted_quantity"`
+	SessionID          pgtype.UUID `json:"session_id"`
 }
 
 // Append-only log of cart item mutations during checkout (buyer or merchant driven).
@@ -406,6 +407,7 @@ type LiveSession struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 	EventID       pgtype.UUID        `json:"event_id"`
+	SequenceOrder int32              `json:"sequence_order"`
 }
 
 type LiveSessionPlatform struct {
