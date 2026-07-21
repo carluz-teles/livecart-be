@@ -181,14 +181,17 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	// Shutdown order: stop accepting/drain HTTP, then stop workers + event
-	// server (reverse registration order), then close the publisher.
+	// Shutdown: stop the background workers, event server and relay first (in
+	// reverse registration order) so nothing new is picked up, then drain HTTP
+	// with a bounded timeout — app.Shutdown() waits on idle keep-alive
+	// connections indefinitely and would otherwise hang the process until the
+	// orchestrator SIGKILLs it. Finally close the publisher.
 	log.Info("shutting down server")
 	cancel()
-	if err := app.Shutdown(); err != nil {
+	lifecycle.shutdown()
+	if err := app.ShutdownWithTimeout(10 * time.Second); err != nil {
 		log.Sugar().Errorf("server shutdown error: %v", err)
 	}
-	lifecycle.shutdown()
 	if err := eventsClient.Close(); err != nil {
 		log.Sugar().Errorf("events client close error: %v", err)
 	}
