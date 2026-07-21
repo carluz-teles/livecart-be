@@ -827,12 +827,41 @@ func (r *Repository) StartSession(ctx context.Context, id string) (SessionRow, e
 		return SessionRow{}, err
 	}
 
-	row, err := r.q.StartLiveSession(ctx, uid)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return SessionRow{}, fmt.Errorf("begin start-session tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+	qtx := r.q.WithTx(tx)
+
+	row, err := qtx.StartLiveSession(ctx, uid)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return SessionRow{}, httpx.ErrNotFound("live session not found")
 		}
 		return SessionRow{}, fmt.Errorf("starting live session: %w", err)
+	}
+
+	// session.live in the same tx (transactional outbox).
+	payload, err := json.Marshal(struct {
+		EventID       string `json:"event_id"`
+		SessionID     string `json:"session_id"`
+		SequenceOrder int32  `json:"sequence_order"`
+	}{EventID: row.EventID.String(), SessionID: row.ID.String(), SequenceOrder: row.SequenceOrder})
+	if err != nil {
+		return SessionRow{}, fmt.Errorf("marshaling session.live payload: %w", err)
+	}
+	if err := events.Emit(ctx, qtx, events.Envelope{
+		Name:     events.SessionLive,
+		Source:   events.SourceInternal,
+		DedupKey: "session.live:" + row.ID.String(),
+		Payload:  payload,
+	}); err != nil {
+		return SessionRow{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return SessionRow{}, fmt.Errorf("commit start-session tx: %w", err)
 	}
 
 	return toSessionRow(row), nil
@@ -1276,6 +1305,34 @@ func emitCartEvent(ctx context.Context, q *sqlc.Queries, name events.Name, cartI
 	})
 }
 
+// EmitPostWindowClosed emits post.window_closed in its own transaction. Called
+// by the timed-event sweep / media-deleted path just before Service.End; those
+// queries only return still-active events, so it fires once per window close.
+func (r *Repository) EmitPostWindowClosed(ctx context.Context, eventID string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin post-window tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+	qtx := r.q.WithTx(tx)
+
+	payload, err := json.Marshal(struct {
+		EventID string `json:"event_id"`
+	}{EventID: eventID})
+	if err != nil {
+		return fmt.Errorf("marshaling post.window_closed payload: %w", err)
+	}
+	if err := events.Emit(ctx, qtx, events.Envelope{
+		Name:     events.PostWindowClosed,
+		Source:   events.SourceInternal,
+		DedupKey: "post.window_closed:" + eventID,
+		Payload:  payload,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // pgUUIDString returns the string form of a pgtype.UUID, or "" when unset.
 func pgUUIDString(u pgtype.UUID) string {
 	if !u.Valid {
@@ -1299,15 +1356,17 @@ func (r *Repository) FinalizeCartsByEvent(ctx context.Context, eventID string) (
 
 	qtx := r.q.WithTx(tx)
 
-	// Count first
-	count, err := qtx.CountCartsByEvent(ctx, uid)
+	// Finalize (active carts → checkout). Returns the finalized cart ids so we
+	// can emit cart.checkout_armed per cart in the same tx.
+	ids, err := qtx.FinalizeCartsByEvent(ctx, uid)
 	if err != nil {
-		return 0, fmt.Errorf("counting carts: %w", err)
+		return 0, fmt.Errorf("finalizing carts: %w", err)
 	}
 
-	// Finalize
-	if err := qtx.FinalizeCartsByEvent(ctx, uid); err != nil {
-		return 0, fmt.Errorf("finalizing carts: %w", err)
+	for _, id := range ids {
+		if err := emitCartEvent(ctx, qtx, events.CartCheckoutArmed, id.String(), eventID, "", "cart.checkout_armed:"+id.String()); err != nil {
+			return 0, err
+		}
 	}
 
 	// Commit the transaction
@@ -1315,7 +1374,7 @@ func (r *Repository) FinalizeCartsByEvent(ctx context.Context, eventID string) (
 		return 0, fmt.Errorf("committing transaction: %w", err)
 	}
 
-	return int(count), nil
+	return len(ids), nil
 }
 
 func (r *Repository) AddCartItem(ctx context.Context, params AddCartItemParams) error {

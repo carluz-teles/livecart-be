@@ -345,7 +345,7 @@ func (q *Queries) ExtendCartExpiration(ctx context.Context, arg ExtendCartExpira
 	return err
 }
 
-const finalizeCartsByEvent = `-- name: FinalizeCartsByEvent :exec
+const finalizeCartsByEvent = `-- name: FinalizeCartsByEvent :many
 UPDATE carts c
 SET status = 'checkout',
     expires_at = CASE
@@ -357,15 +357,32 @@ SET status = 'checkout',
 FROM live_events le
 JOIN stores s ON s.id = le.store_id
 WHERE c.event_id = $1 AND c.status = 'active' AND le.id = c.event_id
+RETURNING c.id
 `
 
 // Ao encerrar a live, move os carrinhos ativos para 'checkout' e arma o prazo
 // de pagamento: expires_at = now() + cart_expiration_minutes (do evento, com
 // fallback para o default da loja). 0 = sem expiração (preserva o que havia).
 // Carrinhos já pagos não recebem prazo — não faz sentido expirar uma venda.
-func (q *Queries) FinalizeCartsByEvent(ctx context.Context, eventID pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, finalizeCartsByEvent, eventID)
-	return err
+// Retorna os ids finalizados para emitir cart.checkout_armed por carrinho.
+func (q *Queries) FinalizeCartsByEvent(ctx context.Context, eventID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, finalizeCartsByEvent, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const findCartByExternalOrderID = `-- name: FindCartByExternalOrderID :one

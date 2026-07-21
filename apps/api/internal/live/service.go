@@ -304,6 +304,12 @@ func (s *Service) EndPostEventByMediaID(ctx context.Context, mediaID string) err
 		// Nothing active to finalize; ensure polling stops anyway.
 		return s.repo.EndPostEventByMediaID(ctx, mediaID)
 	}
+	// post.window_closed: the media was deleted / window closed (distinct from a
+	// manual live end). Emitted before End (which fires event.ended).
+	if err := s.repo.EmitPostWindowClosed(ctx, ref.EventID); err != nil {
+		logger.From(ctx, s.logger).Error("failed to emit post.window_closed",
+			zap.String("event_id", ref.EventID), zap.Error(err))
+	}
 	if _, err := s.End(ctx, EndLiveInput{ID: ref.EventID, StoreID: ref.StoreID}); err != nil {
 		return err
 	}
@@ -323,6 +329,12 @@ func (s *Service) SweepEndedTimedEvents(ctx context.Context) {
 	}
 	for _, ev := range events {
 		evCtx := logger.WithStore(ctx, ev.StoreID, "")
+		// post.window_closed before End (which fires event.ended). The list query
+		// only returns still-active events, so this fires once per window close.
+		if err := s.repo.EmitPostWindowClosed(evCtx, ev.EventID); err != nil {
+			logger.From(evCtx, s.logger).Error("ends_at sweep: failed to emit post.window_closed",
+				zap.String("event_id", ev.EventID), zap.Error(err))
+		}
 		if _, err := s.End(evCtx, EndLiveInput{ID: ev.EventID, StoreID: ev.StoreID}); err != nil {
 			logger.From(evCtx, s.logger).Error("ends_at sweep: failed to finalize event",
 				zap.String("event_id", ev.EventID),

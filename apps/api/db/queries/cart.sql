@@ -227,11 +227,12 @@ WHERE s.event_id = $1
 GROUP BY s.id, s.sequence_order
 ORDER BY s.sequence_order;
 
--- name: FinalizeCartsByEvent :exec
+-- name: FinalizeCartsByEvent :many
 -- Ao encerrar a live, move os carrinhos ativos para 'checkout' e arma o prazo
 -- de pagamento: expires_at = now() + cart_expiration_minutes (do evento, com
 -- fallback para o default da loja). 0 = sem expiração (preserva o que havia).
 -- Carrinhos já pagos não recebem prazo — não faz sentido expirar uma venda.
+-- Retorna os ids finalizados para emitir cart.checkout_armed por carrinho.
 UPDATE carts c
 SET status = 'checkout',
     expires_at = CASE
@@ -242,7 +243,8 @@ SET status = 'checkout',
     END
 FROM live_events le
 JOIN stores s ON s.id = le.store_id
-WHERE c.event_id = $1 AND c.status = 'active' AND le.id = c.event_id;
+WHERE c.event_id = $1 AND c.status = 'active' AND le.id = c.event_id
+RETURNING c.id;
 
 -- name: CountCartsByEvent :one
 SELECT COUNT(*)::int as count FROM carts WHERE event_id = $1 AND status = 'active';
