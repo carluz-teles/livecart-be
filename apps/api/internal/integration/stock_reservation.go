@@ -39,18 +39,32 @@ type stockReservationRepo interface {
 	EmitStockReleased(ctx context.Context, p StockEventParams) error
 }
 
-// StockReservations is the SINGLE maintenance point for reserving and releasing
-// LOCAL product stock. Every domain reservation change funnels through it so the
-// stock mutation and its canonical event (stock.reserved / stock.released) live
-// in one place instead of scattered across ~8 call sites. Callers declare WHICH
-// operation they perform (the op); the manager owns the mutation + emission.
+// StockReservations is the maintenance point for the stock.reserved /
+// stock.released events over LOCAL product stock. Callers declare WHICH
+// operation they perform (the op) and this owns the emission, so the semantics
+// are not scattered across the ~8 stock call sites.
 //
-// Rollbacks — undoing a just-failed operation — intentionally bypass it: they
-// are corrections, not domain movements, and must not emit.
+// Three emission modes, by design (not accident):
 //
-// The emitted event is a best-effort side-effect: the reserve/release methods
-// return the raw mutation error UNCHANGED so callers' error handling is
-// preserved, and a failed emit is logged, never surfaced.
+//  1. Terminal release (expiry-fallback, cancel, blocked, recovery release):
+//     Release() mutates local stock and emits — safe because giving stock back
+//     is never rolled back.
+//  2. Provisional reserve (cart_add, waitlist promote, recovery re-secure): the
+//     caller does the raw decrement itself (it owns the rollback) and calls
+//     NoteReserved ONLY at the definitive success point. Emitting at decrement
+//     time would orphan the event when the op rolls back.
+//  3. Transactional flows (cart expiry in ExpireCartAndReleaseStock): the stock
+//     mutation and the event must commit atomically in the SAME tx, so those
+//     emit via the repo's emitStockEvent on the tx handle rather than through
+//     this best-effort component. emitStockEvent is the single event SHAPE for
+//     all three modes.
+//
+// Rollbacks that undo a just-failed op bypass this entirely: they are
+// corrections, not domain movements, and must not emit.
+//
+// The emitted event is best-effort: Release returns the raw mutation error
+// UNCHANGED so callers' error handling is preserved, and a failed emit is
+// logged, never surfaced.
 type StockReservations struct {
 	repo   stockReservationRepo
 	logger *zap.Logger
