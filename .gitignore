@@ -4,3 +4,6 @@
 .playwright-mcp/
 tiny-sandbox-results/
 tiny-sandbox-bin
+
+# Compiled Go binary (built from apps/api/cmd/http-server)
+/http-server
