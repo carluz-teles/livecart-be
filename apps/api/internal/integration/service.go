@@ -5876,7 +5876,11 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 // Returns the ERP movement_id (empty when no ERP integration is configured or
 // the product is not linked — both treated as no-ops for the ERP side; local
 // stock is still updated).
-func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cartID, eventID, productID string, delta int, unitPrice int64, platformHandle string) (string, error) {
+// op labels the emitted stock event; pass StockOpUnspecified to use the default
+// sign-based label (qty_increase / qty_decrease), or a specific op (e.g.
+// waitlist_cancel / waitlist_expire) when the delta represents a domain action
+// other than a buyer quantity edit.
+func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cartID, eventID, productID string, delta int, unitPrice int64, platformHandle string, op StockOp) (string, error) {
 	if delta == 0 {
 		return "", nil
 	}
@@ -5933,9 +5937,17 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 			return
 		}
 		if delta > 0 {
-			s.stock.NoteReserved(ctx, ReserveParams{Op: StockOpQtyIncrease, ProductID: productID, Quantity: delta, CartID: cartID, EventID: eventID})
+			reserveOp := op
+			if reserveOp == StockOpUnspecified {
+				reserveOp = StockOpQtyIncrease
+			}
+			s.stock.NoteReserved(ctx, ReserveParams{Op: reserveOp, ProductID: productID, Quantity: delta, CartID: cartID, EventID: eventID})
 		} else {
-			s.stock.NoteReleased(ctx, ReleaseParams{Op: StockOpQtyDecrease, ProductID: productID, Quantity: -delta, CartID: cartID, EventID: eventID})
+			releaseOp := op
+			if releaseOp == StockOpUnspecified {
+				releaseOp = StockOpQtyDecrease
+			}
+			s.stock.NoteReleased(ctx, ReleaseParams{Op: releaseOp, ProductID: productID, Quantity: -delta, CartID: cartID, EventID: eventID})
 		}
 	}()
 
@@ -7074,7 +7086,7 @@ func (s *Service) CancelWaitlistItem(ctx context.Context, waitlistItemID, cartID
 		if cart != nil {
 			// AdjustStockReservationDelta also bumps products.stock for delta<0,
 			// so no separate IncrementProductStock call is needed here.
-			if _, err := s.AdjustStockReservationDelta(ctx, cart.StoreID, cartID, item.EventID, item.ProductID, -item.Quantity, 0, cart.PlatformHandle); err != nil {
+			if _, err := s.AdjustStockReservationDelta(ctx, cart.StoreID, cartID, item.EventID, item.ProductID, -item.Quantity, 0, cart.PlatformHandle, StockOpWaitlistCancel); err != nil {
 				logger.From(ctx, s.logger).Warn("failed to reverse reservation on waitlist cancel",
 					zap.String("waitlist_item_id", waitlistItemID),
 					zap.Error(err),
@@ -7126,7 +7138,7 @@ func (s *Service) ExpireNotifiedWaitlistItem(ctx context.Context, item WaitlistI
 		// Falha aqui não bloqueia — o sweep tenta de novo no próximo tick.
 		cart, _ := s.repo.GetCartByID(ctx, cartID)
 		if cart != nil {
-			if _, err := s.AdjustStockReservationDelta(ctx, cart.StoreID, cartID, eventID, productID, -item.Quantity, 0, cart.PlatformHandle); err != nil {
+			if _, err := s.AdjustStockReservationDelta(ctx, cart.StoreID, cartID, eventID, productID, -item.Quantity, 0, cart.PlatformHandle, StockOpWaitlistExpire); err != nil {
 				logger.From(ctx, s.logger).Warn("failed to reverse reservation on waitlist expire",
 					zap.String("waitlist_item_id", item.ID),
 					zap.String("cart_id", cartID),

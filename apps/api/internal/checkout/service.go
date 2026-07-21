@@ -1107,7 +1107,7 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 
 	movementID, syncErr := s.integrationService.AdjustStockReservationDelta(
 		ctx, cart.StoreID, cart.ID, cart.EventID, item.ProductID,
-		delta, item.UnitPrice, cart.PlatformHandle,
+		delta, item.UnitPrice, cart.PlatformHandle, integration.StockOpUnspecified,
 	)
 	if syncErr != nil {
 		// Roll back the local change so the buyer sees the failure clearly.
@@ -1176,7 +1176,7 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 
 	movementID, syncErr := s.integrationService.AdjustStockReservationDelta(
 		ctx, cart.StoreID, cart.ID, cart.EventID, item.ProductID,
-		-item.Quantity, item.UnitPrice, cart.PlatformHandle,
+		-item.Quantity, item.UnitPrice, cart.PlatformHandle, integration.StockOpUnspecified,
 	)
 	if syncErr != nil {
 		// Re-create the row at the original quantity to keep state consistent.
@@ -1308,7 +1308,7 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 
 	movementID, syncErr := s.integrationService.AdjustStockReservationDelta(
 		ctx, cart.StoreID, cart.ID, cart.EventID, input.ProductID,
-		input.Quantity, cfg.UnitPrice, cart.PlatformHandle,
+		input.Quantity, cfg.UnitPrice, cart.PlatformHandle, integration.StockOpUnspecified,
 	)
 	if syncErr != nil {
 		// Roll back. With existing != nil, restore previous qty; with new row, delete it.

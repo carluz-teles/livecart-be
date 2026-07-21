@@ -179,7 +179,7 @@ func TestE2EOrderAsReservationAgainstRealTiny(t *testing.T) {
 		`UPDATE cart_items SET quantity = 2 WHERE cart_id = $1`, fx.cartID); err != nil {
 		t.Fatalf("update qty: %v", err)
 	}
-	if _, err := svc.AdjustStockReservationDelta(ctx, fx.storeID, fx.cartID, fx.eventID, fx.productID, 1, 1000, "@e2e"); err != nil {
+	if _, err := svc.AdjustStockReservationDelta(ctx, fx.storeID, fx.cartID, fx.eventID, fx.productID, 1, 1000, "@e2e", StockOpUnspecified); err != nil {
 		t.Fatalf("mutação: %v", err)
 	}
 	if got := saldo("após mutação qty 1→2"); got != saldo0-2 {

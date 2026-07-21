@@ -1122,7 +1122,7 @@ func TestAdjustDeltaRoutesToOrderCycle(t *testing.T) {
 	manualBefore := fake.count("ReverseRes") + fake.count("ReReserve")
 
 	movementID, err := svc.AdjustStockReservationDelta(context.Background(),
-		fx.storeID, fx.cartID, fx.eventID, fx.productID, -1, 1000, "@buyer")
+		fx.storeID, fx.cartID, fx.eventID, fx.productID, -1, 1000, "@buyer", StockOpUnspecified)
 	if err != nil {
 		t.Fatalf("adjust: %v", err)
 	}

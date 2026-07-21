@@ -14,6 +14,10 @@ import (
 type StockOp string
 
 const (
+	// StockOpUnspecified lets a caller of AdjustStockReservationDelta defer to
+	// the default sign-based label (qty_increase / qty_decrease).
+	StockOpUnspecified StockOp = ""
+
 	StockOpCartAdd         StockOp = "cart_add"
 	StockOpQtyIncrease     StockOp = "qty_increase"
 	StockOpQtyDecrease     StockOp = "qty_decrease"
