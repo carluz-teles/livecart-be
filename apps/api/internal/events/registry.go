@@ -16,9 +16,11 @@ import (
 func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(TestPing), handleTestPing(log))
 
-	// Group C — cart lifecycle. Observability-only for now; richer consumers
-	// (notifications, analytics) arrive in later phases. Every emitted event
-	// needs a handler or asynq reports "handler not found".
+	// Groups A/C — event/session/cart lifecycle. Observability-only for now;
+	// richer consumers (notifications, analytics) arrive in later phases. Every
+	// emitted event needs a handler or asynq reports "handler not found".
+	mux.HandleFunc(string(EventEventCreated), logEvent(log))
+	mux.HandleFunc(string(SessionCreated), logEvent(log))
 	mux.HandleFunc(string(CartExpired), logEvent(log))
 }
 

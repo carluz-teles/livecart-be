@@ -2,6 +2,7 @@ package live
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/lib/httpx"
 )
 
@@ -59,6 +61,12 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, p
 		return SessionRow{}, nil, fmt.Errorf("adding platform to session: %w", err)
 	}
 
+	// Emit session.created in the same tx (transactional outbox), carrying the
+	// assigned sequence_order so consumers see session ordering.
+	if err := emitSessionCreated(ctx, qtx, sessionRow, platform, platformLiveID); err != nil {
+		return SessionRow{}, nil, err
+	}
+
 	// Commit the transaction
 	if err := tx.Commit(ctx); err != nil {
 		return SessionRow{}, nil, fmt.Errorf("committing transaction: %w", err)
@@ -74,6 +82,59 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, p
 	}
 
 	return session, platformOut, nil
+}
+
+// emitSessionCreated writes the canonical session.created event to the outbox
+// within the caller's transaction. Carries the assigned sequence_order (LIV-83)
+// so consumers observe session ordering.
+func emitSessionCreated(ctx context.Context, q *sqlc.Queries, s sqlc.LiveSession, platform, platformLiveID string) error {
+	payload, err := json.Marshal(struct {
+		EventID        string `json:"event_id"`
+		SessionID      string `json:"session_id"`
+		SequenceOrder  int32  `json:"sequence_order"`
+		Platform       string `json:"platform"`
+		PlatformLiveID string `json:"platform_live_id"`
+	}{
+		EventID:        s.EventID.String(),
+		SessionID:      s.ID.String(),
+		SequenceOrder:  s.SequenceOrder,
+		Platform:       platform,
+		PlatformLiveID: platformLiveID,
+	})
+	if err != nil {
+		return fmt.Errorf("marshaling session.created payload: %w", err)
+	}
+	return events.Emit(ctx, q, events.Envelope{
+		Name:     events.SessionCreated,
+		Source:   events.SourceInternal,
+		DedupKey: "session.created:" + s.ID.String(),
+		Payload:  payload,
+	})
+}
+
+// emitEventCreated writes the canonical event.created event to the outbox
+// within the caller's transaction.
+func emitEventCreated(ctx context.Context, q *sqlc.Queries, e sqlc.LiveEvent) error {
+	payload, err := json.Marshal(struct {
+		EventID string `json:"event_id"`
+		StoreID string `json:"store_id"`
+		Type    string `json:"type"`
+		Status  string `json:"status"`
+	}{
+		EventID: e.ID.String(),
+		StoreID: e.StoreID.String(),
+		Type:    e.Type,
+		Status:  e.Status,
+	})
+	if err != nil {
+		return fmt.Errorf("marshaling event.created payload: %w", err)
+	}
+	return events.Emit(ctx, q, events.Envelope{
+		Name:     events.EventEventCreated,
+		Source:   events.SourceInternal,
+		DedupKey: "event.created:" + e.ID.String(),
+		Payload:  payload,
+	})
 }
 
 // CreateEventWithSessionTx creates an event, session, and platform in a single transaction.
@@ -156,6 +217,14 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 	})
 	if err != nil {
 		return EventRow{}, SessionRow{}, nil, fmt.Errorf("adding platform to session: %w", err)
+	}
+
+	// Emit event.created + session.created in the same tx (transactional outbox).
+	if err := emitEventCreated(ctx, qtx, eventRow); err != nil {
+		return EventRow{}, SessionRow{}, nil, err
+	}
+	if err := emitSessionCreated(ctx, qtx, sessionRow, platform, platformLiveID); err != nil {
+		return EventRow{}, SessionRow{}, nil, err
 	}
 
 	// Commit the transaction
