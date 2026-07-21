@@ -610,17 +610,40 @@ func (q *Queries) ListWaitlistByEventAndUser(ctx context.Context, arg ListWaitli
 	return items, nil
 }
 
-const markWaitlistFulfilledByCart = `-- name: MarkWaitlistFulfilledByCart :exec
+const markWaitlistFulfilledByCart = `-- name: MarkWaitlistFulfilledByCart :many
 UPDATE waitlist_items
 SET status = 'fulfilled', fulfilled_at = now()
 WHERE cart_id = $1 AND status = 'notified'
+RETURNING id, product_id, event_id
 `
 
+type MarkWaitlistFulfilledByCartRow struct {
+	ID        pgtype.UUID `json:"id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	EventID   pgtype.UUID `json:"event_id"`
+}
+
 // Chamado no callback OnCartPaid: tudo que estava notified naquele cart
-// vira fulfilled (cliente pagou dentro da janela).
-func (q *Queries) MarkWaitlistFulfilledByCart(ctx context.Context, cartID pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, markWaitlistFulfilledByCart, cartID)
-	return err
+// vira fulfilled (cliente pagou dentro da janela). Retorna as rows afetadas
+// para emitir um waitlist.fulfilled por item (keyed by waitlist_item_id).
+func (q *Queries) MarkWaitlistFulfilledByCart(ctx context.Context, cartID pgtype.UUID) ([]MarkWaitlistFulfilledByCartRow, error) {
+	rows, err := q.db.Query(ctx, markWaitlistFulfilledByCart, cartID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MarkWaitlistFulfilledByCartRow{}
+	for rows.Next() {
+		var i MarkWaitlistFulfilledByCartRow
+		if err := rows.Scan(&i.ID, &i.ProductID, &i.EventID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const markWaitlistNotified = `-- name: MarkWaitlistNotified :exec

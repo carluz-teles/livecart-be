@@ -104,12 +104,14 @@ SET status               = 'notified',
     notification_sent_at = $3
 WHERE id = $1;
 
--- name: MarkWaitlistFulfilledByCart :exec
+-- name: MarkWaitlistFulfilledByCart :many
 -- Chamado no callback OnCartPaid: tudo que estava notified naquele cart
--- vira fulfilled (cliente pagou dentro da janela).
+-- vira fulfilled (cliente pagou dentro da janela). Retorna as rows afetadas
+-- para emitir um waitlist.fulfilled por item (keyed by waitlist_item_id).
 UPDATE waitlist_items
 SET status = 'fulfilled', fulfilled_at = now()
-WHERE cart_id = $1 AND status = 'notified';
+WHERE cart_id = $1 AND status = 'notified'
+RETURNING id, product_id, event_id;
 
 -- name: ListNotifiedByCart :many
 -- Carts pagos: precisamos saber quais notified existem para marcar como

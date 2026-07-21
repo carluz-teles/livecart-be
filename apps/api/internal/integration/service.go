@@ -7108,6 +7108,15 @@ func (s *Service) ExpireNotifiedWaitlistItem(ctx context.Context, item WaitlistI
 		return fmt.Errorf("marking waitlist item expired: %w", err)
 	}
 
+	// waitlist.expired — emitido best-effort logo após o gate de idempotência
+	// (o flip para 'expired'). Só chega aqui uma vez por item graças ao gate.
+	if emitErr := s.repo.EmitWaitlistExpired(ctx, item.ID, eventID, productID, cartID); emitErr != nil {
+		logger.From(ctx, s.logger).Warn("failed to emit waitlist.expired",
+			zap.String("waitlist_item_id", item.ID),
+			zap.Error(emitErr),
+		)
+	}
+
 	// Tenta promover o próximo da fila para esse evento+produto.
 	storeID := ""
 	if item.CartID != "" {

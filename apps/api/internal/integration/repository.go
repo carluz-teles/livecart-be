@@ -1257,15 +1257,31 @@ func (r *Repository) EmitWaitlistNotified(ctx context.Context, p EmitWaitlistNot
 	})
 }
 
-// MarkWaitlistFulfilledByCart marks every notified row tied to this cart as
-// fulfilled. Called from the OnCartPaid hook when the customer pays within
-// the notified TTL.
-func (r *Repository) MarkWaitlistFulfilledByCart(ctx context.Context, cartID string) error {
-	cID, err := parseUUID(cartID)
+// EmitWaitlistExpired publishes waitlist.expired best-effort (non-transactional
+// outbox insert), keyed by the waitlist item id. Emitted right after the
+// idempotency-gate status flip to 'expired'; the surrounding stock/ERP reversal
+// is itself best-effort, so binding a tx here would add no real guarantee.
+func (r *Repository) EmitWaitlistExpired(ctx context.Context, waitlistItemID, eventID, productID, cartID string) error {
+	payload, err := json.Marshal(struct {
+		WaitlistItemID string `json:"waitlist_item_id"`
+		EventID        string `json:"event_id"`
+		ProductID      string `json:"product_id"`
+		CartID         string `json:"cart_id,omitempty"`
+	}{
+		WaitlistItemID: waitlistItemID,
+		EventID:        eventID,
+		ProductID:      productID,
+		CartID:         cartID,
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("marshaling waitlist.expired payload: %w", err)
 	}
-	return r.queries.MarkWaitlistFulfilledByCart(ctx, cID)
+	return events.Emit(ctx, r.queries, events.Envelope{
+		Name:     events.WaitlistExpired,
+		Source:   events.SourceInternal,
+		DedupKey: "waitlist.expired:" + waitlistItemID,
+		Payload:  payload,
+	})
 }
 
 // CancelWaitlistItem flips status to 'cancelled' iff the row belongs to the

@@ -37,6 +37,8 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	// Group D — stock & waitlist. Observability-only for now.
 	mux.HandleFunc(string(WaitlistQueued), logEvent(log))
 	mux.HandleFunc(string(WaitlistNotified), logEvent(log))
+	mux.HandleFunc(string(WaitlistFulfilled), logEvent(log))
+	mux.HandleFunc(string(WaitlistExpired), logEvent(log))
 }
 
 // logEvent is a generic observability consumer: it records that a canonical

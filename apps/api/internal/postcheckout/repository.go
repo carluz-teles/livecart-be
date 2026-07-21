@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/events"
 )
 
 // timeNow exists so tests can override clock without a clock injection across
@@ -117,7 +118,39 @@ func (r *Repository) MarkWaitlistFulfilledByCart(ctx context.Context, cartID str
 	if err != nil {
 		return fmt.Errorf("parsing cart id: %w", err)
 	}
-	return r.q.MarkWaitlistFulfilledByCart(ctx, pgtype.UUID{Bytes: uid, Valid: true})
+	fulfilled, err := r.q.MarkWaitlistFulfilledByCart(ctx, pgtype.UUID{Bytes: uid, Valid: true})
+	if err != nil {
+		return err
+	}
+
+	// Emit waitlist.fulfilled per affected row (keyed by waitlist_item_id).
+	// Best-effort: the fulfill flip already committed and this observability
+	// event must not fail the paid flow, so outbox-insert errors are swallowed
+	// (there is no logger at this layer).
+	for _, item := range fulfilled {
+		itemID := uuid.UUID(item.ID.Bytes).String()
+		payload, mErr := json.Marshal(struct {
+			WaitlistItemID string `json:"waitlist_item_id"`
+			CartID         string `json:"cart_id"`
+			ProductID      string `json:"product_id"`
+			EventID        string `json:"event_id"`
+		}{
+			WaitlistItemID: itemID,
+			CartID:         cartID,
+			ProductID:      uuid.UUID(item.ProductID.Bytes).String(),
+			EventID:        uuid.UUID(item.EventID.Bytes).String(),
+		})
+		if mErr != nil {
+			continue
+		}
+		_ = events.Emit(ctx, r.q, events.Envelope{
+			Name:     events.WaitlistFulfilled,
+			Source:   events.SourceInternal,
+			DedupKey: "waitlist.fulfilled:" + itemID,
+			Payload:  payload,
+		})
+	}
+	return nil
 }
 
 // InsertOrderEvent appends an event to the customer-facing timeline.
