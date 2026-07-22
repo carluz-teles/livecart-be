@@ -3,6 +3,8 @@ package order
 import (
 	"time"
 
+	validation "github.com/go-ozzo/ozzo-validation/v4"
+
 	"livecart/apps/api/lib/query"
 )
 
@@ -39,20 +41,70 @@ type OrderFilters struct {
 
 // Handler layer - Request/Response types
 type UpdateOrderRequest struct {
-	Status        *string `json:"status" validate:"omitempty,oneof=active checkout completed expired"`
-	PaymentStatus *string `json:"paymentStatus" validate:"omitempty,oneof=pending paid failed refunded"`
+	Status        *string `json:"status"`
+	PaymentStatus *string `json:"paymentStatus"`
+}
+
+// Validate is the syntactic gate (ozzo). Both fields are optional; when present
+// they must be one of the allowed enum values.
+func (r UpdateOrderRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.Status, validation.In("active", "checkout", "completed", "expired")),
+		validation.Field(&r.PaymentStatus, validation.In("pending", "paid", "failed", "refunded")),
+	)
+}
+
+// ToInput builds the usecase input from the validated request and the path/context
+// arguments the handler supplies.
+func (r UpdateOrderRequest) ToInput(id, storeID string) (UpdateOrderInput, error) {
+	return UpdateOrderInput{
+		ID:            id,
+		StoreID:       storeID,
+		Status:        r.Status,
+		PaymentStatus: r.PaymentStatus,
+	}, nil
 }
 
 // UpdateShippingAddressRequest is the admin's "edit address" payload. State
 // is required; the 2-letter UF guard mirrors the public checkout flow.
 type UpdateShippingAddressRequest struct {
-	ZipCode      string `json:"zipCode" validate:"required"`
-	Street       string `json:"street" validate:"required"`
-	Number       string `json:"number" validate:"required"`
+	ZipCode      string `json:"zipCode"`
+	Street       string `json:"street"`
+	Number       string `json:"number"`
 	Complement   string `json:"complement,omitempty"`
-	Neighborhood string `json:"neighborhood" validate:"required"`
-	City         string `json:"city" validate:"required"`
-	State        string `json:"state" validate:"required,len=2"`
+	Neighborhood string `json:"neighborhood"`
+	City         string `json:"city"`
+	State        string `json:"state"`
+}
+
+// Validate is the syntactic gate (ozzo). State is the 2-letter UF.
+func (r UpdateShippingAddressRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.ZipCode, validation.Required),
+		validation.Field(&r.Street, validation.Required),
+		validation.Field(&r.Number, validation.Required),
+		validation.Field(&r.Neighborhood, validation.Required),
+		validation.Field(&r.City, validation.Required),
+		validation.Field(&r.State, validation.Required, validation.Length(2, 2)),
+	)
+}
+
+// ToInput builds the address map the usecase expects, carrying the path/context
+// scoping args (order id + store id) alongside the address fields.
+func (r UpdateShippingAddressRequest) ToInput(id, storeID string) (UpdateShippingAddressInput, error) {
+	return UpdateShippingAddressInput{
+		ID:      id,
+		StoreID: storeID,
+		Address: map[string]string{
+			"zipCode":      r.ZipCode,
+			"street":       r.Street,
+			"number":       r.Number,
+			"complement":   r.Complement,
+			"neighborhood": r.Neighborhood,
+			"city":         r.City,
+			"state":        r.State,
+		},
+	}, nil
 }
 
 // RegenerateCheckoutResponse returns the data the admin needs to share with
@@ -288,6 +340,221 @@ type OrderStatsResponse struct {
 	AvgTicket     int64 `json:"avgTicket"`
 }
 
+// ============================================
+// Outbound mappers (Output -> Response). These are the controller's outbound
+// mappers, co-located with the Response structs: presentation knows the service
+// output; the service never knows the Response.
+// ============================================
+
+// NewOrderResponse maps a single order output to its API response.
+func NewOrderResponse(o OrderOutput) OrderResponse {
+	items := make([]OrderItemResponse, len(o.Items))
+	for i, item := range o.Items {
+		items[i] = OrderItemResponse{
+			ID:            item.ID,
+			ProductID:     item.ProductID,
+			ProductName:   item.ProductName,
+			ProductImage:  item.ProductImage,
+			Keyword:       item.Keyword,
+			Size:          item.Size,
+			Quantity:      item.Quantity,
+			UnitPrice:     item.UnitPrice,
+			TotalPrice:    item.TotalPrice,
+			WeightGrams:   item.WeightGrams,
+			HeightCm:      item.HeightCm,
+			WidthCm:       item.WidthCm,
+			LengthCm:      item.LengthCm,
+			PackageFormat: item.PackageFormat,
+		}
+	}
+
+	previews := make([]OrderItemPreviewResponse, len(o.ItemsPreview))
+	for i, p := range o.ItemsPreview {
+		previews[i] = OrderItemPreviewResponse{
+			ProductName:  p.ProductName,
+			ProductImage: p.ProductImage,
+			Quantity:     p.Quantity,
+		}
+	}
+
+	return OrderResponse{
+		ID:                    o.ID,
+		ShortID:               o.ShortID,
+		LiveSessionID:         o.LiveSessionID,
+		LiveTitle:             o.LiveTitle,
+		LivePlatform:          o.LivePlatform,
+		CustomerHandle:        o.CustomerHandle,
+		CustomerID:            o.CustomerID,
+		CustomerName:          o.CustomerName,
+		CustomerEmail:         o.CustomerEmail,
+		FreeShipping:          o.FreeShipping,
+		Status:                o.Status,
+		PaymentStatus:         o.PaymentStatus,
+		ShipmentStatus:        o.ShipmentStatus,
+		HasShipping:           o.HasShipping,
+		Items:                 items,
+		ItemsPreview:          previews,
+		TotalItems:            o.TotalItems,
+		TotalAmount:           o.TotalAmount,
+		PaidAt:                o.PaidAt,
+		CreatedAt:             o.CreatedAt,
+		ExpiresAt:             o.ExpiresAt,
+		IsFirstPurchase:       o.IsFirstPurchase,
+		ERPFinalisationStatus: o.ERPFinalisationStatus,
+	}
+}
+
+// NewListOrdersResponse maps a page of order outputs + pagination to the list response.
+func NewListOrdersResponse(out ListOrdersOutput) ListOrdersResponse {
+	responses := make([]OrderResponse, len(out.Orders))
+	for i, o := range out.Orders {
+		responses[i] = NewOrderResponse(o)
+	}
+	return ListOrdersResponse{
+		Data:       responses,
+		Pagination: query.NewPaginationResponse(out.Pagination, out.Total),
+	}
+}
+
+// NewOrderStatsResponse maps the aggregated stats output to its response.
+func NewOrderStatsResponse(o OrderStatsOutput) OrderStatsResponse {
+	return OrderStatsResponse{
+		TotalOrders:   o.TotalOrders,
+		PendingOrders: o.PendingOrders,
+		TotalRevenue:  o.TotalRevenue,
+		AvgTicket:     o.AvgTicket,
+	}
+}
+
+// NewRegenerateCheckoutResponse builds the admin-facing regenerate payload.
+func NewRegenerateCheckoutResponse(token string, expiresAt time.Time) RegenerateCheckoutResponse {
+	return RegenerateCheckoutResponse{Token: token, ExpiresAt: expiresAt}
+}
+
+// NewOrderDetailResponse maps the rich order-detail aggregate output to its
+// response, including customer, address, shipping, shipment, store and ERP
+// projections.
+func NewOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
+	comments := make([]OrderCommentResponse, len(o.Comments))
+	for i, c := range o.Comments {
+		comments[i] = OrderCommentResponse{
+			ID:        c.ID,
+			Text:      c.Text,
+			CreatedAt: c.CreatedAt,
+		}
+	}
+
+	resp := OrderDetailResponse{
+		OrderResponse:   NewOrderResponse(o.OrderOutput),
+		Token:           o.Token,
+		Comments:        comments,
+		CustomerBlocked: o.CustomerBlocked,
+	}
+
+	if o.Customer != nil {
+		resp.Customer = &OrderCustomerResponse{
+			Name:     o.Customer.Name,
+			Email:    o.Customer.Email,
+			Document: o.Customer.Document,
+			Phone:    o.Customer.Phone,
+		}
+	}
+	if o.ShippingAddress != nil {
+		resp.ShippingAddress = &OrderShippingAddressResponse{
+			ZipCode:      o.ShippingAddress.ZipCode,
+			Street:       o.ShippingAddress.Street,
+			Number:       o.ShippingAddress.Number,
+			Complement:   o.ShippingAddress.Complement,
+			Neighborhood: o.ShippingAddress.Neighborhood,
+			City:         o.ShippingAddress.City,
+			State:        o.ShippingAddress.State,
+		}
+	}
+	if o.Shipping != nil {
+		resp.Shipping = &OrderShippingSelectionResp{
+			Provider:      o.Shipping.Provider,
+			ServiceID:     o.Shipping.ServiceID,
+			ServiceName:   o.Shipping.ServiceName,
+			Carrier:       o.Shipping.Carrier,
+			CostCents:     o.Shipping.CostCents,
+			RealCostCents: o.Shipping.RealCostCents,
+			DeadlineDays:  o.Shipping.DeadlineDays,
+			FreeShipping:  o.Shipping.FreeShipping,
+		}
+	}
+	if o.Shipment != nil {
+		events := make([]OrderShipmentEventResp, len(o.Shipment.Events))
+		for i, e := range o.Shipment.Events {
+			events[i] = OrderShipmentEventResp{
+				Status:      e.Status,
+				RawCode:     e.RawCode,
+				RawName:     e.RawName,
+				Observation: e.Observation,
+				EventAt:     e.EventAt,
+				Source:      e.Source,
+			}
+		}
+		resp.Shipment = &OrderShipmentResponse{
+			ID:                  o.Shipment.ID,
+			Provider:            o.Shipment.Provider,
+			ProviderOrderID:     o.Shipment.ProviderOrderID,
+			ProviderOrderNumber: o.Shipment.ProviderOrderNumber,
+			TrackingCode:        o.Shipment.TrackingCode,
+			PublicTrackingURL:   o.Shipment.PublicTrackingURL,
+			InvoiceKey:          o.Shipment.InvoiceKey,
+			InvoiceKind:         o.Shipment.InvoiceKind,
+			LabelURL:            o.Shipment.LabelURL,
+			Status:              o.Shipment.Status,
+			StatusRawCode:       o.Shipment.StatusRawCode,
+			StatusRawName:       o.Shipment.StatusRawName,
+			CreatedAt:           o.Shipment.CreatedAt,
+			UpdatedAt:           o.Shipment.UpdatedAt,
+			Events:              events,
+		}
+	}
+	if o.ERPFinalisation != nil {
+		resp.ERPFinalisation = &ERPFinalisationResponse{
+			Status:        o.ERPFinalisation.Status,
+			LastError:     o.ERPFinalisation.LastError,
+			LastAttemptAt: o.ERPFinalisation.LastAttemptAt,
+			AttemptsCount: o.ERPFinalisation.AttemptsCount,
+			CanRetry:      o.ERPFinalisation.Status == "failed",
+		}
+	}
+	if o.ERPInvoice != nil {
+		resp.ERPInvoice = &ERPInvoiceResponse{
+			InvoiceID:  o.ERPInvoice.InvoiceID,
+			InvoiceKey: o.ERPInvoice.InvoiceKey,
+			Status:     o.ERPInvoice.Status,
+			EmittedAt:  o.ERPInvoice.EmittedAt,
+		}
+	}
+	if o.Store != nil {
+		resp.Store = &OrderStoreResponse{
+			ID:       o.Store.ID,
+			Name:     o.Store.Name,
+			LogoURL:  o.Store.LogoURL,
+			Document: o.Store.Document,
+			Email:    o.Store.Email,
+			Phone:    o.Store.Phone,
+			Address: OrderStoreAddressResponse{
+				ZipCode:      o.Store.Address.ZipCode,
+				Street:       o.Store.Address.Street,
+				Number:       o.Store.Address.Number,
+				Complement:   o.Store.Address.Complement,
+				Neighborhood: o.Store.Address.Neighborhood,
+				City:         o.Store.Address.City,
+				State:        o.Store.Address.State,
+			},
+			ShippingDefaults: OrderStoreShippingDefaults{
+				PackageWeightGrams: o.Store.PackageWeightGrams,
+				PackageFormat:      o.Store.PackageFormat,
+			},
+		}
+	}
+	return resp
+}
+
 // =============================================================================
 // UPSELL / DOWNSELL TYPES
 // =============================================================================
@@ -401,6 +668,14 @@ type UpdateOrderInput struct {
 	StoreID       string
 	Status        *string
 	PaymentStatus *string
+}
+
+// UpdateShippingAddressInput carries the scoping ids plus the parsed address map
+// the repository persists into the cart's shipping_address JSONB.
+type UpdateShippingAddressInput struct {
+	ID      string
+	StoreID string
+	Address map[string]string
 }
 
 type OrderStatsOutput struct {

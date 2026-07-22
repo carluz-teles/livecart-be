@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/billing"
+	storedomain "livecart/apps/api/internal/store/domain"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
 )
@@ -46,115 +47,112 @@ func NewService(repo *Repository, membershipCreator MembershipCreator, userLooku
 	}
 }
 
-// Create creates a new store and owner membership
-func (s *Service) Create(ctx context.Context, input CreateStoreInput) (CreateStoreOutput, error) {
+// Create creates a new store and owner membership, returning the domain entity.
+func (s *Service) Create(ctx context.Context, input CreateStoreInput) (*storedomain.Store, error) {
 	// 1. Look up internal user ID from Clerk user ID
 	userID, err := s.userLookup.GetUserIDByClerkID(ctx, input.ClerkUserID)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("failed to look up user", zap.Error(err), zap.String("clerk_user_id", input.ClerkUserID))
-		return CreateStoreOutput{}, httpx.ErrUnprocessable("user not found - please sync your account first")
+		return nil, httpx.ErrUnprocessable("user not found - please sync your account first")
 	}
 
 	// 2. Check if user already has a store (1 user = 1 store rule)
 	hasMembership, err := s.membershipCreator.HasMembership(ctx, userID)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("failed to check existing membership", zap.Error(err), zap.String("user_id", userID))
-		return CreateStoreOutput{}, fmt.Errorf("checking existing membership: %w", err)
+		return nil, fmt.Errorf("checking existing membership: %w", err)
 	}
 	if hasMembership {
-		return CreateStoreOutput{}, httpx.ErrConflict("you already have a store - delete your current store first to create a new one")
+		return nil, httpx.ErrConflict("you already have a store - delete your current store first to create a new one")
 	}
 
 	// 3. Check slug uniqueness
 	existing, err := s.repo.GetBySlug(ctx, input.Slug)
 	if err != nil && !httpx.IsNotFound(err) {
-		return CreateStoreOutput{}, fmt.Errorf("checking slug uniqueness: %w", err)
+		return nil, fmt.Errorf("checking slug uniqueness: %w", err)
 	}
 	if existing != nil {
-		return CreateStoreOutput{}, httpx.ErrConflict("slug already in use")
+		return nil, httpx.ErrConflict("slug already in use")
 	}
 
 	// 4. Create store
-	storeRow, err := s.repo.Create(ctx, CreateStoreParams{
+	store, err := s.repo.Create(ctx, CreateStoreParams{
 		Name: input.Name,
 		Slug: input.Slug,
 	})
 	if err != nil {
 		logger.From(ctx, s.logger).Error("failed to create store", zap.Error(err), zap.String("slug", input.Slug))
-		return CreateStoreOutput{}, fmt.Errorf("creating store: %w", err)
+		return nil, fmt.Errorf("creating store: %w", err)
 	}
+	storeID := store.ID().String()
 
 	// 5. Create owner membership
-	membershipID, err := s.membershipCreator.CreateOwnerMembership(ctx, storeRow.ID, userID)
+	membershipID, err := s.membershipCreator.CreateOwnerMembership(ctx, storeID, userID)
 	if err != nil {
-		logger.From(ctx, s.logger).Error("failed to create owner membership", zap.Error(err), zap.String("store_id", storeRow.ID))
-		return CreateStoreOutput{}, fmt.Errorf("creating owner membership: %w", err)
+		logger.From(ctx, s.logger).Error("failed to create owner membership", zap.Error(err), zap.String("store_id", storeID))
+		return nil, fmt.Errorf("creating owner membership: %w", err)
 	}
 
 	// 6. Start the 7-day cardless trial (PRD 007). Non-fatal: /users/sync
 	// lazily retries, so a Stripe hiccup never blocks onboarding.
 	if s.billing != nil {
-		if _, err := s.billing.EnsureTrialSubscription(ctx, storeRow.ID, storeRow.Name, ""); err != nil {
+		if _, err := s.billing.EnsureTrialSubscription(ctx, storeID, store.Name(), ""); err != nil {
 			logger.From(ctx, s.logger).Warn("trial provisioning failed at store creation",
-				zap.String("store_id", storeRow.ID),
+				zap.String("store_id", storeID),
 				zap.Error(err),
 			)
 		}
 	}
 
 	logger.From(ctx, s.logger).Info("store created successfully",
-		zap.String("store_id", storeRow.ID),
+		zap.String("store_id", storeID),
 		zap.String("membership_id", membershipID),
 		zap.String("user_id", userID),
 	)
 
-	return CreateStoreOutput{
-		ID:           storeRow.ID,
-		Name:         storeRow.Name,
-		Slug:         storeRow.Slug,
-		MembershipID: membershipID,
-		CreatedAt:    storeRow.CreatedAt,
-	}, nil
+	return store, nil
 }
 
-func (s *Service) GetByID(ctx context.Context, id string) (StoreOutput, error) {
-	row, err := s.repo.GetByID(ctx, id)
+func (s *Service) GetByID(ctx context.Context, id string) (*storedomain.Store, error) {
+	return s.repo.GetByID(ctx, id)
+}
+
+// Update merges the incoming request with the store's current persisted values
+// (subset semantics), normalizes CEP/UF/CNPJ and persists the result.
+func (s *Service) Update(ctx context.Context, input UpdateStoreInput) (*storedomain.Store, error) {
+	current, err := s.repo.GetByID(ctx, input.StoreID)
 	if err != nil {
-		return StoreOutput{}, err
+		return nil, err
 	}
 
-	return toStoreOutput(*row), nil
-}
+	merged, err := normalizeUpdateStoreInput(current, input)
+	if err != nil {
+		return nil, httpx.ErrBadRequest(err.Error())
+	}
 
-func (s *Service) Update(ctx context.Context, input UpdateStoreInput) (StoreOutput, error) {
-	row, err := s.repo.Update(ctx, UpdateStoreParams{
+	return s.repo.Update(ctx, UpdateStoreParams{
 		ID:                   input.StoreID,
-		Name:                 input.Name,
-		WhatsappNumber:       input.WhatsappNumber,
-		EmailAddress:         input.EmailAddress,
-		SMSNumber:            input.SMSNumber,
-		Description:          input.Description,
-		Website:              input.Website,
-		LogoURL:              input.LogoURL,
-		AddressStreet:        input.Address.Street,
-		AddressNumber:        input.Address.Number,
-		AddressComplement:    input.Address.Complement,
-		AddressDistrict:      input.Address.District,
-		AddressCity:          input.Address.City,
-		AddressState:         input.Address.State,
-		AddressZip:           input.Address.Zip,
-		AddressCountry:       input.Address.Country,
-		AddressStateRegister: input.Address.StateRegister,
-		CNPJ:                 input.CNPJ,
+		Name:                 merged.Name,
+		WhatsappNumber:       merged.WhatsappNumber,
+		EmailAddress:         merged.EmailAddress,
+		SMSNumber:            merged.SMSNumber,
+		Description:          merged.Description,
+		Website:              merged.Website,
+		LogoURL:              merged.LogoURL,
+		AddressStreet:        merged.Address.Street,
+		AddressNumber:        merged.Address.Number,
+		AddressComplement:    merged.Address.Complement,
+		AddressDistrict:      merged.Address.District,
+		AddressCity:          merged.Address.City,
+		AddressState:         merged.Address.State,
+		AddressZip:           merged.Address.Zip,
+		AddressCountry:       merged.Address.Country,
+		AddressStateRegister: merged.Address.StateRegister,
+		CNPJ:                 merged.CNPJ,
 	})
-	if err != nil {
-		return StoreOutput{}, err
-	}
-
-	return toStoreOutput(row), nil
 }
 
-func (s *Service) UpdateShippingDefaults(ctx context.Context, input UpdateShippingDefaultsInput) (StoreOutput, error) {
+func (s *Service) UpdateShippingDefaults(ctx context.Context, input UpdateShippingDefaultsInput) (*storedomain.Store, error) {
 	format := input.PackageFormat
 	if format == "" {
 		format = "box"
@@ -165,7 +163,7 @@ func (s *Service) UpdateShippingDefaults(ctx context.Context, input UpdateShippi
 	if hCm == nil || wCm == nil || lCm == nil {
 		hCm, wCm, lCm = nil, nil, nil
 	}
-	row, err := s.repo.UpdateShippingDefaults(ctx, UpdateShippingDefaultsParams{
+	return s.repo.UpdateShippingDefaults(ctx, UpdateShippingDefaultsParams{
 		ID:                 input.StoreID,
 		PackageWeightGrams: input.PackageWeightGrams,
 		PackageFormat:      format,
@@ -173,14 +171,10 @@ func (s *Service) UpdateShippingDefaults(ctx context.Context, input UpdateShippi
 		WidthCm:            wCm,
 		LengthCm:           lCm,
 	})
-	if err != nil {
-		return StoreOutput{}, err
-	}
-	return toStoreOutput(row), nil
 }
 
-func (s *Service) UpdateCartSettings(ctx context.Context, input UpdateCartSettingsInput) (StoreOutput, error) {
-	row, err := s.repo.UpdateCartSettings(ctx, UpdateCartSettingsParams{
+func (s *Service) UpdateCartSettings(ctx context.Context, input UpdateCartSettingsInput) (*storedomain.Store, error) {
+	return s.repo.UpdateCartSettings(ctx, UpdateCartSettingsParams{
 		ID:                        input.StoreID,
 		Enabled:                   input.Enabled,
 		ExpirationMinutes:         input.ExpirationMinutes,
@@ -195,76 +189,20 @@ func (s *Service) UpdateCartSettings(ctx context.Context, input UpdateCartSettin
 		SendExpirationReminder:    input.SendExpirationReminder,
 		ExpirationReminderMinutes: input.ExpirationReminderMinutes,
 	})
-	if err != nil {
-		return StoreOutput{}, err
-	}
-
-	return toStoreOutput(row), nil
 }
 
-func (s *Service) UpdateLogoURL(ctx context.Context, storeID string, logoURL string) (StoreOutput, error) {
-	row, err := s.repo.UpdateLogoURL(ctx, storeID, logoURL)
-	if err != nil {
-		return StoreOutput{}, err
-	}
-
-	return toStoreOutput(row), nil
+func (s *Service) UpdateLogoURL(ctx context.Context, storeID string, logoURL string) (*storedomain.Store, error) {
+	return s.repo.UpdateLogoURL(ctx, storeID, logoURL)
 }
 
-func (s *Service) GetByClerkUserID(ctx context.Context, clerkUserID string) (StoreOutput, error) {
+func (s *Service) GetByClerkUserID(ctx context.Context, clerkUserID string) (*storedomain.Store, error) {
 	// Look up internal user ID
 	userID, err := s.userLookup.GetUserIDByClerkID(ctx, clerkUserID)
 	if err != nil {
-		return StoreOutput{}, httpx.ErrNotFound("user not found")
+		return nil, httpx.ErrNotFound("user not found")
 	}
 
-	row, err := s.repo.GetByUserID(ctx, userID)
-	if err != nil {
-		return StoreOutput{}, err
-	}
-
-	return toStoreOutput(*row), nil
-}
-
-func toStoreOutput(row StoreRow) StoreOutput {
-	// Always materialize the address so the frontend has a stable shape —
-	// unpopulated fields come back as empty strings, not null objects.
-	address := AddressDTO{
-		Street:        deref(row.AddressStreet),
-		Number:        deref(row.AddressNumber),
-		Complement:    deref(row.AddressComplement),
-		District:      deref(row.AddressDistrict),
-		City:          deref(row.AddressCity),
-		State:         deref(row.AddressState),
-		Zip:           deref(row.AddressZip),
-		Country:       deref(row.AddressCountry),
-		StateRegister: deref(row.AddressStateRegister),
-	}
-
-	return StoreOutput{
-		ID:               row.ID,
-		Name:             row.Name,
-		Slug:             row.Slug,
-		Active:           row.Active,
-		WhatsappNumber:   deref(row.WhatsappNumber),
-		EmailAddress:     deref(row.EmailAddress),
-		SMSNumber:        deref(row.SMSNumber),
-		Description:      deref(row.Description),
-		Website:          deref(row.Website),
-		LogoURL:          row.LogoURL,
-		Address:          address,
-		CNPJ:             deref(row.CNPJ),
-		CartSettings:     row.CartSettings,
-		ShippingDefaults: row.ShippingDefaults,
-		CreatedAt:        row.CreatedAt,
-	}
-}
-
-func deref(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
+	return s.repo.GetByUserID(ctx, userID)
 }
 
 // StoreLookupAdapter implements invitation.StoreLookup interface
@@ -283,5 +221,5 @@ func (a *StoreLookupAdapter) GetStoreNameByID(ctx context.Context, storeID strin
 	if err != nil {
 		return "", err
 	}
-	return store.Name, nil
+	return store.Name(), nil
 }

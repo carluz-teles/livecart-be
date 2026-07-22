@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/customer/domain"
+	vo "livecart/apps/api/lib/valueobject"
 )
 
 type Repository struct {
@@ -21,7 +24,7 @@ func NewRepository(queries *sqlc.Queries) *Repository {
 }
 
 // Upsert creates or updates a customer (by store_id + platform_user_id)
-func (r *Repository) Upsert(ctx context.Context, input UpsertCustomerInput) (*CustomerRow, error) {
+func (r *Repository) Upsert(ctx context.Context, input UpsertCustomerInput) (*domain.Customer, error) {
 	params := sqlc.UpsertCustomerParams{
 		StoreID:        uuidToPgtype(input.StoreID),
 		PlatformUserID: input.PlatformUserID,
@@ -39,11 +42,11 @@ func (r *Repository) Upsert(ctx context.Context, input UpsertCustomerInput) (*Cu
 		return nil, fmt.Errorf("upserting customer: %w", err)
 	}
 
-	return r.sqlcToCustomerRow(row), nil
+	return r.toDomainCustomer(row), nil
 }
 
 // GetByID returns a customer by its UUID
-func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*CustomerRow, error) {
+func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Customer, error) {
 	row, err := r.queries.GetCustomerByID(ctx, uuidToPgtype(id))
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -52,11 +55,11 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*CustomerRow, e
 		return nil, fmt.Errorf("getting customer by id: %w", err)
 	}
 
-	return r.sqlcToCustomerRow(row), nil
+	return r.toDomainCustomer(row), nil
 }
 
 // GetByPlatformUser returns a customer by store_id + platform_user_id
-func (r *Repository) GetByPlatformUser(ctx context.Context, storeID uuid.UUID, platformUserID string) (*CustomerRow, error) {
+func (r *Repository) GetByPlatformUser(ctx context.Context, storeID uuid.UUID, platformUserID string) (*domain.Customer, error) {
 	row, err := r.queries.GetCustomerByPlatformUser(ctx, sqlc.GetCustomerByPlatformUserParams{
 		StoreID:        uuidToPgtype(storeID),
 		PlatformUserID: platformUserID,
@@ -68,11 +71,11 @@ func (r *Repository) GetByPlatformUser(ctx context.Context, storeID uuid.UUID, p
 		return nil, fmt.Errorf("getting customer by platform user: %w", err)
 	}
 
-	return r.sqlcToCustomerRow(row), nil
+	return r.toDomainCustomer(row), nil
 }
 
 // GetByHandle returns a customer by store_id + platform_handle
-func (r *Repository) GetByHandle(ctx context.Context, storeID uuid.UUID, handle string) (*CustomerRow, error) {
+func (r *Repository) GetByHandle(ctx context.Context, storeID uuid.UUID, handle string) (*domain.Customer, error) {
 	row, err := r.queries.GetCustomerByHandle(ctx, sqlc.GetCustomerByHandleParams{
 		StoreID:        uuidToPgtype(storeID),
 		PlatformHandle: handle,
@@ -84,24 +87,23 @@ func (r *Repository) GetByHandle(ctx context.Context, storeID uuid.UUID, handle 
 		return nil, fmt.Errorf("getting customer by handle: %w", err)
 	}
 
-	return r.sqlcToCustomerRow(row), nil
+	return r.toDomainCustomer(row), nil
 }
 
-// List returns customers with aggregated order stats
-func (r *Repository) List(ctx context.Context, params ListCustomersParams) (ListCustomersResult, error) {
-	var result ListCustomersResult
-
+// List returns customers with aggregated order stats as domain entities,
+// alongside the total count for pagination.
+func (r *Repository) List(ctx context.Context, params ListCustomersParams) ([]*domain.Customer, int, error) {
 	storeUUID, err := uuid.Parse(params.StoreID)
 	if err != nil {
-		return result, fmt.Errorf("parsing store id: %w", err)
+		return nil, 0, fmt.Errorf("parsing store id: %w", err)
 	}
 
 	// Get total count
 	count, err := r.queries.CountCustomers(ctx, uuidToPgtype(storeUUID))
 	if err != nil {
-		return result, fmt.Errorf("counting customers: %w", err)
+		return nil, 0, fmt.Errorf("counting customers: %w", err)
 	}
-	result.Total = int(count)
+	total := int(count)
 
 	// Pagination
 	limit := int32(params.Pagination.Limit)
@@ -125,7 +127,7 @@ func (r *Repository) List(ctx context.Context, params ListCustomersParams) (List
 			Offset:         offset,
 		})
 		if err != nil {
-			return result, fmt.Errorf("searching customers: %w", err)
+			return nil, 0, fmt.Errorf("searching customers: %w", err)
 		}
 		// Convert search rows to list rows
 		for _, sr := range searchRows {
@@ -151,36 +153,42 @@ func (r *Repository) List(ctx context.Context, params ListCustomersParams) (List
 			Offset:  offset,
 		})
 		if err != nil {
-			return result, fmt.Errorf("listing customers: %w", err)
+			return nil, 0, fmt.Errorf("listing customers: %w", err)
 		}
 	}
 
-	result.Customers = make([]CustomerWithStatsRow, len(rows))
+	customers := make([]*domain.Customer, len(rows))
 	for i, row := range rows {
-		result.Customers[i] = CustomerWithStatsRow{
-			ID:             pgtypeToUUID(row.ID).String(),
-			PlatformUserID: row.PlatformUserID,
-			Handle:         row.PlatformHandle,
-			Email:          pgtypeTextToPtr(row.Email),
-			Phone:          pgtypeTextToPtr(row.Phone),
-			TotalOrders:    int(row.TotalOrders),
-			TotalSpent:     row.TotalSpent,
-		}
+		var lastOrderAt, firstOrderAt *time.Time
 		if row.LastOrderAt.Valid {
 			t := row.LastOrderAt.Time
-			result.Customers[i].LastOrderAt = &t
+			lastOrderAt = &t
 		}
 		if row.FirstOrderAt.Valid {
 			t := row.FirstOrderAt.Time
-			result.Customers[i].FirstOrderAt = &t
+			firstOrderAt = &t
 		}
+		customers[i] = domain.Reconstruct(
+			mustCustomerID(pgtypeToUUID(row.ID)),
+			row.PlatformUserID,
+			row.PlatformHandle,
+			pgtypeTextToPtr(row.Email),
+			pgtypeTextToPtr(row.Phone),
+			nil, // name: not part of the list projection
+			nil, // document: not part of the list projection
+			int(row.TotalOrders),
+			row.TotalSpent,
+			lastOrderAt,
+			firstOrderAt,
+			nil, // shipping address: only enriched on detail
+		)
 	}
 
-	return result, nil
+	return customers, total, nil
 }
 
 // GetStats returns aggregated statistics for customers
-func (r *Repository) GetStats(ctx context.Context, storeID string) (*CustomerStatsOutput, error) {
+func (r *Repository) GetStats(ctx context.Context, storeID string) (*domain.CustomerStats, error) {
 	storeUUID, err := uuid.Parse(storeID)
 	if err != nil {
 		return nil, fmt.Errorf("parsing store id: %w", err)
@@ -191,15 +199,15 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (*CustomerSta
 		return nil, fmt.Errorf("getting customer stats: %w", err)
 	}
 
-	return &CustomerStatsOutput{
-		TotalCustomers:      int(row.TotalCustomers),
-		ActiveCustomers:     int(row.ActiveCustomers),
-		AvgSpentPerCustomer: row.AvgSpentPerCustomer,
-	}, nil
+	return domain.ReconstructStats(
+		int(row.TotalCustomers),
+		int(row.ActiveCustomers),
+		row.AvgSpentPerCustomer,
+	), nil
 }
 
 // ListOrders returns the latest carts (paid + pending) for a customer.
-func (r *Repository) ListOrders(ctx context.Context, id uuid.UUID, limit, offset int32) ([]CustomerOrderOutput, error) {
+func (r *Repository) ListOrders(ctx context.Context, id uuid.UUID, limit, offset int32) ([]*domain.OrderSummary, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -212,24 +220,27 @@ func (r *Repository) ListOrders(ctx context.Context, id uuid.UUID, limit, offset
 		return nil, fmt.Errorf("listing carts by customer: %w", err)
 	}
 
-	orders := make([]CustomerOrderOutput, len(rows))
+	orders := make([]*domain.OrderSummary, len(rows))
 	for i, row := range rows {
-		orders[i] = CustomerOrderOutput{
-			ID:            pgtypeToUUID(row.ID).String(),
-			ShortID:       row.ShortID,
-			Status:        row.Status,
-			PaymentStatus: pgtypeTextToPtr(row.PaymentStatus),
-			TotalItems:    int(row.TotalItems),
-			TotalValue:    row.TotalValue,
-		}
+		var paidAt, createdAt *time.Time
 		if row.PaidAt.Valid {
 			t := row.PaidAt.Time
-			orders[i].PaidAt = &t
+			paidAt = &t
 		}
 		if row.CreatedAt.Valid {
 			t := row.CreatedAt.Time
-			orders[i].CreatedAt = &t
+			createdAt = &t
 		}
+		orders[i] = domain.ReconstructOrderSummary(
+			pgtypeToUUID(row.ID).String(),
+			row.ShortID,
+			row.Status,
+			pgtypeTextToPtr(row.PaymentStatus),
+			int(row.TotalItems),
+			row.TotalValue,
+			paidAt,
+			createdAt,
+		)
 	}
 	return orders, nil
 }
@@ -333,23 +344,47 @@ func pgtypeTextToPtr(t pgtype.Text) *string {
 	return &t.String
 }
 
-func (r *Repository) sqlcToCustomerRow(c sqlc.Customer) *CustomerRow {
-	row := &CustomerRow{
-		ID:             pgtypeToUUID(c.ID).String(),
-		PlatformUserID: c.PlatformUserID,
-		Handle:         c.PlatformHandle,
+// mustCustomerID builds a CustomerID from a persistence UUID. Rows are already
+// consistent, so a parse failure would be a programmer error; we fall back to a
+// zero-value ID rather than panic to keep read paths resilient.
+func mustCustomerID(id uuid.UUID) vo.CustomerID {
+	cid, err := vo.NewCustomerID(id.String())
+	if err != nil {
+		return vo.CustomerID{}
 	}
+	return cid
+}
+
+// toDomainCustomer maps the base customers row to a Customer entity. Stats and
+// checkout enrichment are layered in by the service; the base row only carries
+// identity, contact and order timestamps.
+func (r *Repository) toDomainCustomer(c sqlc.Customer) *domain.Customer {
+	var email, phone *string
+	var lastOrderAt, firstOrderAt *time.Time
 	if c.Email.Valid {
-		row.Email = &c.Email.String
+		email = &c.Email.String
 	}
 	if c.Phone.Valid {
-		row.Phone = &c.Phone.String
+		phone = &c.Phone.String
 	}
 	if c.LastOrderAt.Valid {
-		row.LastOrderAt = &c.LastOrderAt.Time
+		lastOrderAt = &c.LastOrderAt.Time
 	}
 	if c.FirstOrderAt.Valid {
-		row.FirstOrderAt = &c.FirstOrderAt.Time
+		firstOrderAt = &c.FirstOrderAt.Time
 	}
-	return row
+	return domain.Reconstruct(
+		mustCustomerID(pgtypeToUUID(c.ID)),
+		c.PlatformUserID,
+		c.PlatformHandle,
+		email,
+		phone,
+		nil, // name
+		nil, // document
+		0,   // totalOrders
+		0,   // totalSpent
+		lastOrderAt,
+		firstOrderAt,
+		nil, // shipping address
+	)
 }

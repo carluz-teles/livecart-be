@@ -53,7 +53,7 @@ func NewService(repo *Repository, emailer *email.Client, userLookup UserLookup, 
 }
 
 // Create creates a new invitation and sends email via SendGrid
-func (s *Service) Create(ctx context.Context, input CreateInvitationInput) (*InvitationOutput, error) {
+func (s *Service) Create(ctx context.Context, input CreateInvitationInput) (*domain.Invitation, error) {
 	// Check if invitation already exists
 	existing, err := s.repo.GetByEmail(ctx, input.StoreID, input.Email)
 	if err == nil && existing.IsPending() {
@@ -110,11 +110,11 @@ func (s *Service) Create(ctx context.Context, input CreateInvitationInput) (*Inv
 		zap.String("role", input.Role.String()),
 	)
 
-	return toInvitationOutput(inv), nil
+	return inv, nil
 }
 
 // GetByToken retrieves invitation details by token (for accept page)
-func (s *Service) GetByToken(ctx context.Context, token string) (*InvitationDetailsOutput, error) {
+func (s *Service) GetByToken(ctx context.Context, token string) (*domain.Invitation, error) {
 	inv, err := s.repo.GetByToken(ctx, token)
 	if err != nil {
 		return nil, err
@@ -132,26 +132,16 @@ func (s *Service) GetByToken(ctx context.Context, token string) (*InvitationDeta
 		}
 	}
 
-	return toInvitationDetailsOutput(inv), nil
+	return inv, nil
 }
 
-// List returns all invitations for a store
-func (s *Service) List(ctx context.Context, storeID vo.StoreID) ([]InvitationOutput, error) {
-	invitations, err := s.repo.ListByStore(ctx, storeID)
-	if err != nil {
-		return nil, err
-	}
-
-	result := make([]InvitationOutput, len(invitations))
-	for i, inv := range invitations {
-		result[i] = *toInvitationOutput(inv)
-	}
-
-	return result, nil
+// List returns all invitations for a store as domain entities.
+func (s *Service) List(ctx context.Context, storeID vo.StoreID) ([]*domain.Invitation, error) {
+	return s.repo.ListByStore(ctx, storeID)
 }
 
 // Accept accepts an invitation and adds the user to the store
-func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*AcceptInvitationOutput, error) {
+func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*domain.Invitation, error) {
 	// Get invitation by token
 	inv, err := s.repo.GetByToken(ctx, input.Token)
 	if err != nil {
@@ -220,12 +210,7 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*Acc
 		zap.String("role", inv.Role().String()),
 	)
 
-	return &AcceptInvitationOutput{
-		StoreID:   inv.StoreID().String(),
-		StoreName: inv.StoreName(),
-		StoreSlug: inv.StoreSlug(),
-		Role:      inv.Role().String(),
-	}, nil
+	return inv, nil
 }
 
 // Revoke revokes a pending invitation
@@ -243,7 +228,7 @@ func (s *Service) Revoke(ctx context.Context, storeID vo.StoreID, invitationID v
 }
 
 // Resend generates a new token for an existing invitation
-func (s *Service) Resend(ctx context.Context, input ResendInvitationInput) (*InvitationOutput, error) {
+func (s *Service) Resend(ctx context.Context, input ResendInvitationInput) (*domain.Invitation, error) {
 	// Get existing invitation
 	existing, err := s.repo.GetByID(ctx, input.StoreID, input.InvitationID)
 	if err != nil {
@@ -268,38 +253,4 @@ func (s *Service) Resend(ctx context.Context, input ResendInvitationInput) (*Inv
 		Email:     existing.Email(),
 		Role:      existing.Role(),
 	})
-}
-
-// ============================================
-// Output Converters
-// ============================================
-
-func toInvitationOutput(inv *domain.Invitation) *InvitationOutput {
-	return &InvitationOutput{
-		ID:          inv.ID().String(),
-		StoreID:     inv.StoreID().String(),
-		Email:       inv.Email().String(),
-		Role:        inv.Role().String(),
-		Token:       inv.Token().String(),
-		Status:      inv.Status().String(),
-		InviterName: inv.InviterName(),
-		ExpiresAt:   inv.ExpiresAt(),
-		AcceptedAt:  inv.AcceptedAt(),
-		CreatedAt:   inv.CreatedAt(),
-	}
-}
-
-func toInvitationDetailsOutput(inv *domain.Invitation) *InvitationDetailsOutput {
-	return &InvitationDetailsOutput{
-		ID:          inv.ID().String(),
-		StoreID:     inv.StoreID().String(),
-		Email:       inv.Email().String(),
-		Role:        inv.Role().String(),
-		Status:      inv.Status().String(),
-		StoreName:   inv.StoreName(),
-		StoreSlug:   inv.StoreSlug(),
-		InviterName: inv.InviterName(),
-		ExpiresAt:   inv.ExpiresAt(),
-		CreatedAt:   inv.CreatedAt(),
-	}
 }

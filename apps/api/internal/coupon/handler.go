@@ -1,19 +1,17 @@
 package coupon
 
 import (
-	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
 	"livecart/apps/api/lib/httpx"
 )
 
 type Handler struct {
-	service  *Service
-	validate *validator.Validate
+	service *Service
 }
 
-func NewHandler(service *Service, validate *validator.Validate) *Handler {
-	return &Handler{service: service, validate: validate}
+func NewHandler(service *Service) *Handler {
+	return &Handler{service: service}
 }
 
 // RegisterRoutes mounts the admin CRUD under each event. The router argument
@@ -37,11 +35,6 @@ func (h *Handler) RegisterPublicRoutes(app fiber.Router) {
 	g.Delete("/", h.Remove)
 }
 
-// ApplyCouponRequest is the body for POST /api/public/checkout/:token/coupon.
-type ApplyCouponRequest struct {
-	Code string `json:"code" validate:"required,min=2,max=40"`
-}
-
 // Apply godoc
 // @Summary      Apply a coupon to a public cart
 // @Tags         coupons
@@ -49,7 +42,7 @@ type ApplyCouponRequest struct {
 // @Produce      json
 // @Param        token path string true "Cart token"
 // @Param        request body ApplyCouponRequest true "Coupon code"
-// @Success      200 {object} httpx.Envelope{data=ApplyResult}
+// @Success      200 {object} httpx.Envelope{data=ApplyResponse}
 // @Failure      404 {object} httpx.Envelope
 // @Failure      409 {object} httpx.Envelope
 // @Failure      422 {object} httpx.ValidationEnvelope
@@ -57,22 +50,19 @@ type ApplyCouponRequest struct {
 func (h *Handler) Apply(c *fiber.Ctx) error {
 	token := c.Params("token")
 	if token == "" {
-		return httpx.BadRequest(c, "token is required")
+		return httpx.ErrBadRequest("token is required")
 	}
 
 	var req ApplyCouponRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
 
-	out, err := h.service.ApplyToCart(c.Context(), token, req.Code)
+	result, err := h.service.ApplyToCart(c.UserContext(), token, req.Code)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.OK(c, out)
+	return httpx.OK(c, NewApplyResponse(result))
 }
 
 // Remove godoc
@@ -87,12 +77,12 @@ func (h *Handler) Apply(c *fiber.Ctx) error {
 func (h *Handler) Remove(c *fiber.Ctx) error {
 	token := c.Params("token")
 	if token == "" {
-		return httpx.BadRequest(c, "token is required")
+		return httpx.ErrBadRequest("token is required")
 	}
-	if err := h.service.RemoveFromCart(c.Context(), token); err != nil {
-		return httpx.HandleServiceError(c, err)
+	if err := h.service.RemoveFromCart(c.UserContext(), token); err != nil {
+		return err
 	}
-	return c.SendStatus(fiber.StatusNoContent)
+	return httpx.NoContent(c)
 }
 
 // List godoc
@@ -101,39 +91,32 @@ func (h *Handler) Remove(c *fiber.Ctx) error {
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
 // @Param        eventId path string true "Event UUID"
-// @Success      200 {object} httpx.Envelope{data=[]Coupon}
+// @Success      200 {object} httpx.Envelope{data=ListCouponsResponse}
 // @Failure      404 {object} httpx.Envelope
 // @Router       /api/v1/stores/{storeId}/events/{eventId}/coupons [get]
 // @Security     BearerAuth
 func (h *Handler) List(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	eventID := c.Params("eventId")
-
-	coupons, err := h.service.List(c.Context(), eventID, storeID)
+	coupons, err := h.service.List(c.UserContext(), c.Params("eventId"), httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.OK(c, coupons)
+	return httpx.OK(c, NewListCouponsResponse(coupons))
 }
 
 // GetByID godoc
 // @Summary      Get a coupon by id
 // @Tags         coupons
 // @Produce      json
-// @Success      200 {object} httpx.Envelope{data=Coupon}
+// @Success      200 {object} httpx.Envelope{data=CouponResponse}
 // @Failure      404 {object} httpx.Envelope
 // @Router       /api/v1/stores/{storeId}/events/{eventId}/coupons/{id} [get]
 // @Security     BearerAuth
 func (h *Handler) GetByID(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	eventID := c.Params("eventId")
-	id := c.Params("id")
-
-	coupon, err := h.service.Get(c.Context(), id, eventID, storeID)
+	coupon, err := h.service.Get(c.UserContext(), c.Params("id"), c.Params("eventId"), httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.OK(c, coupon)
+	return httpx.OK(c, NewCouponResponse(coupon))
 }
 
 // Create godoc
@@ -142,29 +125,26 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 // @Accept       json
 // @Produce      json
 // @Param        request body CreateRequest true "Coupon to create"
-// @Success      201 {object} httpx.Envelope{data=Coupon}
+// @Success      201 {object} httpx.Envelope{data=CouponResponse}
 // @Failure      404 {object} httpx.Envelope
 // @Failure      409 {object} httpx.Envelope
 // @Failure      422 {object} httpx.ValidationEnvelope
 // @Router       /api/v1/stores/{storeId}/events/{eventId}/coupons [post]
 // @Security     BearerAuth
 func (h *Handler) Create(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	eventID := c.Params("eventId")
-
 	var req CreateRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
-	}
-
-	coupon, err := h.service.Create(c.Context(), eventID, storeID, req)
+	input, err := req.ToInput(httpx.GetStoreID(c), c.Params("eventId"))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.Created(c, coupon)
+	coupon, err := h.service.Create(c.UserContext(), input)
+	if err != nil {
+		return err
+	}
+	return httpx.Created(c, NewCouponResponse(coupon))
 }
 
 // Update godoc
@@ -172,29 +152,25 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 // @Tags         coupons
 // @Accept       json
 // @Produce      json
-// @Success      200 {object} httpx.Envelope{data=Coupon}
+// @Success      200 {object} httpx.Envelope{data=CouponResponse}
 // @Failure      404 {object} httpx.Envelope
 // @Failure      422 {object} httpx.ValidationEnvelope
 // @Router       /api/v1/stores/{storeId}/events/{eventId}/coupons/{id} [patch]
 // @Security     BearerAuth
 func (h *Handler) Update(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	eventID := c.Params("eventId")
-	id := c.Params("id")
-
 	var req UpdateRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
-	}
-
-	coupon, err := h.service.Update(c.Context(), id, eventID, storeID, req)
+	input, err := req.ToInput(httpx.GetStoreID(c), c.Params("eventId"), c.Params("id"))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.OK(c, coupon)
+	coupon, err := h.service.Update(c.UserContext(), input)
+	if err != nil {
+		return err
+	}
+	return httpx.OK(c, NewCouponResponse(coupon))
 }
 
 // Delete godoc
@@ -207,12 +183,8 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/events/{eventId}/coupons/{id} [delete]
 // @Security     BearerAuth
 func (h *Handler) Delete(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	eventID := c.Params("eventId")
-	id := c.Params("id")
-
-	if err := h.service.Delete(c.Context(), id, eventID, storeID); err != nil {
-		return httpx.HandleServiceError(c, err)
+	if err := h.service.Delete(c.UserContext(), c.Params("id"), c.Params("eventId"), httpx.GetStoreID(c)); err != nil {
+		return err
 	}
-	return c.SendStatus(fiber.StatusNoContent)
+	return httpx.NoContent(c)
 }

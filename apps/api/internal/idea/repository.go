@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"livecart/apps/api/internal/idea/domain"
 )
 
 type Repository struct {
@@ -23,27 +26,24 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 // Ideas
 // =============================================================================
 
-func (r *Repository) Create(ctx context.Context, authorID, title, description, category string) (IdeaListItem, error) {
+// Create inserts a new idea and returns its id. The full entity (with
+// author name and caller-relative projections) is loaded by GetByID afterwards.
+func (r *Repository) Create(ctx context.Context, authorID, title, description, category string) (string, error) {
 	const q = `
 		INSERT INTO ideas (title, description, category, author_user_id)
 		VALUES ($1, $2, $3, $4)
-		RETURNING id, number, title, description, category, status,
-		          author_user_id, vote_count, comment_count, created_at
+		RETURNING id
 	`
-	var it IdeaListItem
-	err := r.db.QueryRow(ctx, q, title, description, category, authorID).Scan(
-		&it.ID, &it.Number, &it.Title, &it.Description, &it.Category, &it.Status,
-		&it.AuthorID, &it.VoteCount, &it.CommentCount, &it.CreatedAt,
-	)
-	if err != nil {
-		return IdeaListItem{}, fmt.Errorf("creating idea: %w", err)
+	var id string
+	if err := r.db.QueryRow(ctx, q, title, description, category, authorID).Scan(&id); err != nil {
+		return "", fmt.Errorf("creating idea: %w", err)
 	}
-	// Author name is filled by service via a follow-up read; new idea has 0
-	// votes/comments so VotedByMe is implicitly false (and self-vote is blocked anyway).
-	return it, nil
+	return id, nil
 }
 
-func (r *Repository) GetByID(ctx context.Context, ideaID, callerID string) (*IdeaListItem, error) {
+// GetByID loads an idea as a domain entity, resolving the author name and the
+// caller-relative votedByMe flag. Returns nil when not found.
+func (r *Repository) GetByID(ctx context.Context, ideaID, callerID string) (*domain.Idea, error) {
 	const q = `
 		SELECT i.id, i.number, i.title, i.description, i.category, i.status,
 		       i.author_user_id, COALESCE(u.name, u.email) AS author_name,
@@ -54,11 +54,16 @@ func (r *Repository) GetByID(ctx context.Context, ideaID, callerID string) (*Ide
 		JOIN users u ON u.id = i.author_user_id
 		WHERE i.id = $1
 	`
-	var it IdeaListItem
+	var (
+		id, title, description, category, status, authorID, authorName string
+		number                                                         int64
+		voteCount, commentCount                                        int
+		votedByMe                                                      bool
+		createdAt                                                      time.Time
+	)
 	err := r.db.QueryRow(ctx, q, ideaID, callerID).Scan(
-		&it.ID, &it.Number, &it.Title, &it.Description, &it.Category, &it.Status,
-		&it.AuthorID, &it.AuthorName, &it.VoteCount, &it.CommentCount,
-		&it.VotedByMe, &it.CreatedAt,
+		&id, &number, &title, &description, &category, &status,
+		&authorID, &authorName, &voteCount, &commentCount, &votedByMe, &createdAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -66,7 +71,10 @@ func (r *Repository) GetByID(ctx context.Context, ideaID, callerID string) (*Ide
 	if err != nil {
 		return nil, fmt.Errorf("getting idea: %w", err)
 	}
-	return &it, nil
+	return domain.Reconstruct(
+		id, number, title, description, category, status,
+		authorID, authorName, voteCount, commentCount, votedByMe, createdAt,
+	), nil
 }
 
 // List builds a dynamic query covering the feed filters: tab (status/scope),
@@ -77,7 +85,7 @@ func (r *Repository) GetByID(ctx context.Context, ideaID, callerID string) (*Ide
 // We collect filters as `(template, value)` pairs with a `?` marker, then
 // render the placeholders against a starting index — that lets us reuse the
 // same filter set with different leading args per query.
-func (r *Repository) List(ctx context.Context, in ListIdeasInput) ([]IdeaListItem, int, error) {
+func (r *Repository) List(ctx context.Context, in ListIdeasInput) ([]*domain.Idea, int, error) {
 	type filter struct {
 		template string
 		value    any
@@ -161,17 +169,25 @@ func (r *Repository) List(ctx context.Context, in ListIdeasInput) ([]IdeaListIte
 	}
 	defer rows.Close()
 
-	out := make([]IdeaListItem, 0, limit)
+	out := make([]*domain.Idea, 0, limit)
 	for rows.Next() {
-		var it IdeaListItem
+		var (
+			id, title, description, category, status, authorID, authorName string
+			number                                                         int64
+			voteCount, commentCount                                        int
+			votedByMe                                                      bool
+			createdAt                                                      time.Time
+		)
 		if err := rows.Scan(
-			&it.ID, &it.Number, &it.Title, &it.Description, &it.Category, &it.Status,
-			&it.AuthorID, &it.AuthorName, &it.VoteCount, &it.CommentCount,
-			&it.VotedByMe, &it.CreatedAt,
+			&id, &number, &title, &description, &category, &status,
+			&authorID, &authorName, &voteCount, &commentCount, &votedByMe, &createdAt,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scanning idea row: %w", err)
 		}
-		out = append(out, it)
+		out = append(out, domain.Reconstruct(
+			id, number, title, description, category, status,
+			authorID, authorName, voteCount, commentCount, votedByMe, createdAt,
+		))
 	}
 	return out, total, rows.Err()
 }
@@ -233,13 +249,14 @@ func (r *Repository) GetVoteCount(ctx context.Context, ideaID string) (int, erro
 // Comments
 // =============================================================================
 
-// CreateComment inserts the comment and returns it together with the parent
-// comment's author_user_id (or "" when top-level). The service uses both to
-// decide which notifications to fire. Counter is updated by the trigger.
-func (r *Repository) CreateComment(ctx context.Context, ideaID, authorID, body string, parentCommentID *string) (CommentRow, string, error) {
+// CreateComment inserts the comment and returns it as a domain entity together
+// with the parent comment's author_user_id (or "" when top-level). The service
+// uses both to decide which notifications to fire. Counter is updated by the
+// trigger.
+func (r *Repository) CreateComment(ctx context.Context, ideaID, authorID, body string, parentCommentID *string) (*domain.Comment, string, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return CommentRow{}, "", fmt.Errorf("begin tx: %w", err)
+		return nil, "", fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -250,43 +267,44 @@ func (r *Repository) CreateComment(ctx context.Context, ideaID, authorID, body s
 			*parentCommentID, ideaID,
 		).Scan(&parentAuthorID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return CommentRow{}, "", fmt.Errorf("parent comment not in this idea")
+			return nil, "", fmt.Errorf("parent comment not in this idea")
 		}
 		if err != nil {
-			return CommentRow{}, "", fmt.Errorf("loading parent comment: %w", err)
+			return nil, "", fmt.Errorf("loading parent comment: %w", err)
 		}
 	}
 
-	var c CommentRow
-	c.IdeaID = ideaID
-	c.ParentCommentID = parentCommentID
-	c.AuthorID = authorID
-	c.Body = body
-
+	var (
+		id        string
+		createdAt time.Time
+	)
 	err = tx.QueryRow(ctx, `
 		INSERT INTO idea_comments (idea_id, parent_comment_id, author_user_id, body)
 		VALUES ($1, $2, $3, $4)
 		RETURNING id, created_at
-	`, ideaID, parentCommentID, authorID, body).Scan(&c.ID, &c.CreatedAt)
+	`, ideaID, parentCommentID, authorID, body).Scan(&id, &createdAt)
 	if err != nil {
-		return CommentRow{}, "", fmt.Errorf("inserting comment: %w", err)
+		return nil, "", fmt.Errorf("inserting comment: %w", err)
 	}
 
+	var authorName string
 	if err := tx.QueryRow(ctx,
 		`SELECT COALESCE(name, email) FROM users WHERE id = $1`, authorID,
-	).Scan(&c.AuthorName); err != nil {
-		return CommentRow{}, "", fmt.Errorf("loading author name: %w", err)
+	).Scan(&authorName); err != nil {
+		return nil, "", fmt.Errorf("loading author name: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return CommentRow{}, "", fmt.Errorf("commit comment tx: %w", err)
+		return nil, "", fmt.Errorf("commit comment tx: %w", err)
 	}
-	return c, parentAuthorID, nil
+
+	comment := domain.ReconstructComment(id, ideaID, parentCommentID, authorID, authorName, body, createdAt)
+	return comment, parentAuthorID, nil
 }
 
-// ListCommentsForIdea returns all comments flat, sorted by created_at ASC.
-// Service builds the tree from this.
-func (r *Repository) ListCommentsForIdea(ctx context.Context, ideaID string) ([]CommentRow, error) {
+// ListCommentsForIdea returns all comments flat as domain entities, sorted by
+// created_at ASC. The service builds the reply tree from this.
+func (r *Repository) ListCommentsForIdea(ctx context.Context, ideaID string) ([]*domain.Comment, error) {
 	const q = `
 		SELECT c.id, c.idea_id, c.parent_comment_id, c.author_user_id,
 		       COALESCE(u.name, u.email) AS author_name, c.body, c.created_at
@@ -301,17 +319,19 @@ func (r *Repository) ListCommentsForIdea(ctx context.Context, ideaID string) ([]
 	}
 	defer rows.Close()
 
-	var out []CommentRow
+	var out []*domain.Comment
 	for rows.Next() {
-		var c CommentRow
-		var parent *string
+		var (
+			id, cIdeaID, authorID, authorName, body string
+			parent                                  *string
+			createdAt                               time.Time
+		)
 		if err := rows.Scan(
-			&c.ID, &c.IdeaID, &parent, &c.AuthorID, &c.AuthorName, &c.Body, &c.CreatedAt,
+			&id, &cIdeaID, &parent, &authorID, &authorName, &body, &createdAt,
 		); err != nil {
 			return nil, fmt.Errorf("scanning comment: %w", err)
 		}
-		c.ParentCommentID = parent
-		out = append(out, c)
+		out = append(out, domain.ReconstructComment(id, cIdeaID, parent, authorID, authorName, body, createdAt))
 	}
 	return out, rows.Err()
 }

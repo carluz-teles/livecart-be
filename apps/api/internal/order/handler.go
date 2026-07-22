@@ -1,7 +1,6 @@
 package order
 
 import (
-	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
 	"livecart/apps/api/lib/httpx"
@@ -9,12 +8,11 @@ import (
 )
 
 type Handler struct {
-	service  *Service
-	validate *validator.Validate
+	service *Service
 }
 
-func NewHandler(service *Service, validate *validator.Validate) *Handler {
-	return &Handler{service: service, validate: validate}
+func NewHandler(service *Service) *Handler {
+	return &Handler{service: service}
 }
 
 func (h *Handler) RegisterRoutes(router fiber.Router) {
@@ -48,10 +46,8 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Router       /api/v1/stores/{storeId}/orders [get]
 // @Security     BearerAuth
 func (h *Handler) List(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-
 	input := ListOrdersInput{
-		StoreID: storeID,
+		StoreID: httpx.GetStoreID(c),
 		Search:  c.Query("search"),
 		Pagination: query.Pagination{
 			Page:  c.QueryInt("page", query.DefaultPage),
@@ -64,20 +60,11 @@ func (h *Handler) List(c *fiber.Ctx) error {
 		Filters: parseOrderFilters(c),
 	}
 
-	output, err := h.service.List(c.Context(), input)
+	output, err := h.service.List(c.UserContext(), input)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-
-	responses := make([]OrderResponse, len(output.Orders))
-	for i, o := range output.Orders {
-		responses[i] = toOrderResponse(o)
-	}
-
-	return httpx.OK(c, ListOrdersResponse{
-		Data:       responses,
-		Pagination: query.NewPaginationResponse(output.Pagination, output.Total),
-	})
+	return httpx.OK(c, NewListOrdersResponse(output))
 }
 
 // GetByID godoc
@@ -92,15 +79,11 @@ func (h *Handler) List(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/orders/{id} [get]
 // @Security     BearerAuth
 func (h *Handler) GetByID(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	id := c.Params("id")
-
-	output, err := h.service.GetDetailByID(c.Context(), id, storeID)
+	output, err := h.service.GetDetailByID(c.UserContext(), c.Params("id"), httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-
-	return httpx.OK(c, toOrderDetailResponse(*output))
+	return httpx.OK(c, NewOrderDetailResponse(*output))
 }
 
 // Update godoc
@@ -119,28 +102,19 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/orders/{id} [patch]
 // @Security     BearerAuth
 func (h *Handler) Update(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	id := c.Params("id")
-
 	var req UpdateOrderRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
-	}
-
-	output, err := h.service.Update(c.Context(), UpdateOrderInput{
-		ID:            id,
-		StoreID:       storeID,
-		Status:        req.Status,
-		PaymentStatus: req.PaymentStatus,
-	})
+	input, err := req.ToInput(c.Params("id"), httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-
-	return httpx.OK(c, toOrderResponse(*output))
+	output, err := h.service.Update(c.UserContext(), input)
+	if err != nil {
+		return err
+	}
+	return httpx.OK(c, NewOrderResponse(*output))
 }
 
 // GetUpsell godoc
@@ -155,12 +129,9 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/orders/{id}/upsell [get]
 // @Security     BearerAuth
 func (h *Handler) GetUpsell(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	id := c.Params("id")
-
-	output, err := h.service.GetUpsellSummary(c.Context(), id, storeID)
+	output, err := h.service.GetUpsellSummary(c.UserContext(), c.Params("id"), httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 	return httpx.OK(c, output)
 }
@@ -175,19 +146,11 @@ func (h *Handler) GetUpsell(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/orders/stats [get]
 // @Security     BearerAuth
 func (h *Handler) GetStats(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-
-	output, err := h.service.GetStats(c.Context(), storeID, c.Query("search"), parseOrderFilters(c))
+	output, err := h.service.GetStats(c.UserContext(), httpx.GetStoreID(c), c.Query("search"), parseOrderFilters(c))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-
-	return httpx.OK(c, OrderStatsResponse{
-		TotalOrders:   output.TotalOrders,
-		PendingOrders: output.PendingOrders,
-		TotalRevenue:  output.TotalRevenue,
-		AvgTicket:     output.AvgTicket,
-	})
+	return httpx.OK(c, NewOrderStatsResponse(*output))
 }
 
 // UpdateShippingAddress godoc
@@ -208,31 +171,18 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/orders/{id}/shipping-address [patch]
 // @Security     BearerAuth
 func (h *Handler) UpdateShippingAddress(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	id := c.Params("id")
-
 	var req UpdateShippingAddressRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
+	input, err := req.ToInput(c.Params("id"), httpx.GetStoreID(c))
+	if err != nil {
+		return err
 	}
-
-	address := map[string]string{
-		"zipCode":      req.ZipCode,
-		"street":       req.Street,
-		"number":       req.Number,
-		"complement":   req.Complement,
-		"neighborhood": req.Neighborhood,
-		"city":         req.City,
-		"state":        req.State,
+	if err := h.service.UpdateShippingAddress(c.UserContext(), input); err != nil {
+		return err
 	}
-
-	if err := h.service.UpdateShippingAddress(c.Context(), id, storeID, address); err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-	return c.SendStatus(fiber.StatusNoContent)
+	return httpx.NoContent(c)
 }
 
 // RegenerateCheckout godoc
@@ -251,14 +201,11 @@ func (h *Handler) UpdateShippingAddress(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/orders/{id}/regenerate-checkout [post]
 // @Security     BearerAuth
 func (h *Handler) RegenerateCheckout(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	id := c.Params("id")
-
-	token, expiresAt, err := h.service.RegenerateCheckout(c.Context(), id, storeID)
+	token, expiresAt, err := h.service.RegenerateCheckout(c.UserContext(), c.Params("id"), httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.OK(c, RegenerateCheckoutResponse{Token: token, ExpiresAt: expiresAt})
+	return httpx.OK(c, NewRegenerateCheckoutResponse(token, expiresAt))
 }
 
 // RetryERPFinalisation godoc
@@ -278,20 +225,20 @@ func (h *Handler) RegenerateCheckout(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/orders/{id}/retry-erp [post]
 // @Security     BearerAuth
 func (h *Handler) RetryERPFinalisation(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
 	id := c.Params("id")
+	storeID := httpx.GetStoreID(c)
 
-	if err := h.service.RetryERPFinalisation(c.Context(), id, storeID); err != nil {
-		return httpx.HandleServiceError(c, err)
+	if err := h.service.RetryERPFinalisation(c.UserContext(), id, storeID); err != nil {
+		return err
 	}
 
 	// Return the refreshed order detail so the FE can swap the banner state
 	// in-place without a follow-up request.
-	output, err := h.service.GetDetailByID(c.Context(), id, storeID)
+	output, err := h.service.GetDetailByID(c.UserContext(), id, storeID)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.OK(c, toOrderDetailResponse(*output))
+	return httpx.OK(c, NewOrderDetailResponse(*output))
 }
 
 // SyncInvoice godoc
@@ -313,18 +260,18 @@ func (h *Handler) RetryERPFinalisation(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/orders/{id}/sync-invoice [post]
 // @Security     BearerAuth
 func (h *Handler) SyncInvoice(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
 	id := c.Params("id")
+	storeID := httpx.GetStoreID(c)
 
-	if err := h.service.SyncInvoice(c.Context(), id, storeID); err != nil {
-		return httpx.HandleServiceError(c, err)
+	if err := h.service.SyncInvoice(c.UserContext(), id, storeID); err != nil {
+		return err
 	}
 
-	output, err := h.service.GetDetailByID(c.Context(), id, storeID)
+	output, err := h.service.GetDetailByID(c.UserContext(), id, storeID)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.OK(c, toOrderDetailResponse(*output))
+	return httpx.OK(c, NewOrderDetailResponse(*output))
 }
 
 func parseOrderFilters(c *fiber.Ctx) OrderFilters {
@@ -396,182 +343,4 @@ func parseOrderFilters(c *fiber.Ctx) OrderFilters {
 	}
 
 	return filters
-}
-
-func toOrderResponse(o OrderOutput) OrderResponse {
-	items := make([]OrderItemResponse, len(o.Items))
-	for i, item := range o.Items {
-		items[i] = OrderItemResponse{
-			ID:            item.ID,
-			ProductID:     item.ProductID,
-			ProductName:   item.ProductName,
-			ProductImage:  item.ProductImage,
-			Keyword:       item.Keyword,
-			Size:          item.Size,
-			Quantity:      item.Quantity,
-			UnitPrice:     item.UnitPrice,
-			TotalPrice:    item.TotalPrice,
-			WeightGrams:   item.WeightGrams,
-			HeightCm:      item.HeightCm,
-			WidthCm:       item.WidthCm,
-			LengthCm:      item.LengthCm,
-			PackageFormat: item.PackageFormat,
-		}
-	}
-
-	previews := make([]OrderItemPreviewResponse, len(o.ItemsPreview))
-	for i, p := range o.ItemsPreview {
-		previews[i] = OrderItemPreviewResponse{
-			ProductName:  p.ProductName,
-			ProductImage: p.ProductImage,
-			Quantity:     p.Quantity,
-		}
-	}
-
-	return OrderResponse{
-		ID:                    o.ID,
-		ShortID:               o.ShortID,
-		LiveSessionID:         o.LiveSessionID,
-		LiveTitle:             o.LiveTitle,
-		LivePlatform:          o.LivePlatform,
-		CustomerHandle:        o.CustomerHandle,
-		CustomerID:            o.CustomerID,
-		CustomerName:          o.CustomerName,
-		CustomerEmail:         o.CustomerEmail,
-		FreeShipping:          o.FreeShipping,
-		Status:                o.Status,
-		PaymentStatus:         o.PaymentStatus,
-		ShipmentStatus:        o.ShipmentStatus,
-		HasShipping:           o.HasShipping,
-		Items:                 items,
-		ItemsPreview:          previews,
-		TotalItems:            o.TotalItems,
-		TotalAmount:           o.TotalAmount,
-		PaidAt:                o.PaidAt,
-		CreatedAt:             o.CreatedAt,
-		ExpiresAt:             o.ExpiresAt,
-		IsFirstPurchase:       o.IsFirstPurchase,
-		ERPFinalisationStatus: o.ERPFinalisationStatus,
-	}
-}
-
-func toOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
-	comments := make([]OrderCommentResponse, len(o.Comments))
-	for i, c := range o.Comments {
-		comments[i] = OrderCommentResponse{
-			ID:        c.ID,
-			Text:      c.Text,
-			CreatedAt: c.CreatedAt,
-		}
-	}
-
-	resp := OrderDetailResponse{
-		OrderResponse:   toOrderResponse(o.OrderOutput),
-		Token:           o.Token,
-		Comments:        comments,
-		CustomerBlocked: o.CustomerBlocked,
-	}
-
-	if o.Customer != nil {
-		resp.Customer = &OrderCustomerResponse{
-			Name:     o.Customer.Name,
-			Email:    o.Customer.Email,
-			Document: o.Customer.Document,
-			Phone:    o.Customer.Phone,
-		}
-	}
-	if o.ShippingAddress != nil {
-		resp.ShippingAddress = &OrderShippingAddressResponse{
-			ZipCode:      o.ShippingAddress.ZipCode,
-			Street:       o.ShippingAddress.Street,
-			Number:       o.ShippingAddress.Number,
-			Complement:   o.ShippingAddress.Complement,
-			Neighborhood: o.ShippingAddress.Neighborhood,
-			City:         o.ShippingAddress.City,
-			State:        o.ShippingAddress.State,
-		}
-	}
-	if o.Shipping != nil {
-		resp.Shipping = &OrderShippingSelectionResp{
-			Provider:      o.Shipping.Provider,
-			ServiceID:     o.Shipping.ServiceID,
-			ServiceName:   o.Shipping.ServiceName,
-			Carrier:       o.Shipping.Carrier,
-			CostCents:     o.Shipping.CostCents,
-			RealCostCents: o.Shipping.RealCostCents,
-			DeadlineDays:  o.Shipping.DeadlineDays,
-			FreeShipping:  o.Shipping.FreeShipping,
-		}
-	}
-	if o.Shipment != nil {
-		events := make([]OrderShipmentEventResp, len(o.Shipment.Events))
-		for i, e := range o.Shipment.Events {
-			events[i] = OrderShipmentEventResp{
-				Status:      e.Status,
-				RawCode:     e.RawCode,
-				RawName:     e.RawName,
-				Observation: e.Observation,
-				EventAt:     e.EventAt,
-				Source:      e.Source,
-			}
-		}
-		resp.Shipment = &OrderShipmentResponse{
-			ID:                  o.Shipment.ID,
-			Provider:            o.Shipment.Provider,
-			ProviderOrderID:     o.Shipment.ProviderOrderID,
-			ProviderOrderNumber: o.Shipment.ProviderOrderNumber,
-			TrackingCode:        o.Shipment.TrackingCode,
-			PublicTrackingURL:   o.Shipment.PublicTrackingURL,
-			InvoiceKey:          o.Shipment.InvoiceKey,
-			InvoiceKind:         o.Shipment.InvoiceKind,
-			LabelURL:            o.Shipment.LabelURL,
-			Status:              o.Shipment.Status,
-			StatusRawCode:       o.Shipment.StatusRawCode,
-			StatusRawName:       o.Shipment.StatusRawName,
-			CreatedAt:           o.Shipment.CreatedAt,
-			UpdatedAt:           o.Shipment.UpdatedAt,
-			Events:              events,
-		}
-	}
-	if o.ERPFinalisation != nil {
-		resp.ERPFinalisation = &ERPFinalisationResponse{
-			Status:        o.ERPFinalisation.Status,
-			LastError:     o.ERPFinalisation.LastError,
-			LastAttemptAt: o.ERPFinalisation.LastAttemptAt,
-			AttemptsCount: o.ERPFinalisation.AttemptsCount,
-			CanRetry:      o.ERPFinalisation.Status == "failed",
-		}
-	}
-	if o.ERPInvoice != nil {
-		resp.ERPInvoice = &ERPInvoiceResponse{
-			InvoiceID:  o.ERPInvoice.InvoiceID,
-			InvoiceKey: o.ERPInvoice.InvoiceKey,
-			Status:     o.ERPInvoice.Status,
-			EmittedAt:  o.ERPInvoice.EmittedAt,
-		}
-	}
-	if o.Store != nil {
-		resp.Store = &OrderStoreResponse{
-			ID:       o.Store.ID,
-			Name:     o.Store.Name,
-			LogoURL:  o.Store.LogoURL,
-			Document: o.Store.Document,
-			Email:    o.Store.Email,
-			Phone:    o.Store.Phone,
-			Address: OrderStoreAddressResponse{
-				ZipCode:      o.Store.Address.ZipCode,
-				Street:       o.Store.Address.Street,
-				Number:       o.Store.Address.Number,
-				Complement:   o.Store.Address.Complement,
-				Neighborhood: o.Store.Address.Neighborhood,
-				City:         o.Store.Address.City,
-				State:        o.Store.Address.State,
-			},
-			ShippingDefaults: OrderStoreShippingDefaults{
-				PackageWeightGrams: o.Store.PackageWeightGrams,
-				PackageFormat:      o.Store.PackageFormat,
-			},
-		}
-	}
-	return resp
 }

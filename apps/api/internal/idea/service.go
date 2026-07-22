@@ -6,6 +6,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/idea/domain"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
 )
@@ -32,115 +33,51 @@ func NewService(repo *Repository, notifier NotificationWriter, logger *zap.Logge
 	}
 }
 
-func (s *Service) Create(ctx context.Context, authorID string, req CreateIdeaRequest) (*IdeaListItem, error) {
-	if !IsValidCategory(req.Category) {
+// Create validates the category, inserts the idea, and returns the persisted
+// entity (loaded with author name and caller-relative projections).
+func (s *Service) Create(ctx context.Context, in CreateIdeaInput) (*domain.Idea, error) {
+	if !IsValidCategory(in.Category) {
 		return nil, httpx.ErrBadRequest("categoria inválida")
 	}
 
-	created, err := s.repo.Create(ctx, authorID, req.Title, req.Description, req.Category)
+	id, err := s.repo.Create(ctx, in.AuthorID, in.Title, in.Description, in.Category)
 	if err != nil {
 		return nil, err
 	}
 
-	out, err := s.repo.GetByID(ctx, created.ID, authorID)
+	created, err := s.repo.GetByID(ctx, id, in.AuthorID)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	return created, nil
 }
 
-func (s *Service) List(ctx context.Context, in ListIdeasInput) (ListIdeasOutput, error) {
+// List returns a page of idea entities plus the total for pagination.
+func (s *Service) List(ctx context.Context, in ListIdeasInput) ([]*domain.Idea, int, error) {
 	in.Pagination.Normalize()
-	items, total, err := s.repo.List(ctx, in)
-	if err != nil {
-		return ListIdeasOutput{}, err
-	}
-	return ListIdeasOutput{
-		Items:      items,
-		Total:      total,
-		Pagination: in.Pagination,
-	}, nil
+	return s.repo.List(ctx, in)
 }
 
-func (s *Service) GetDetail(ctx context.Context, ideaID, callerID string) (*IdeaDetail, error) {
-	it, err := s.repo.GetByID(ctx, ideaID, callerID)
+// GetDetail returns an idea with its threaded comments.
+func (s *Service) GetDetail(ctx context.Context, ideaID, callerID string) (*domain.IdeaDetail, error) {
+	idea, err := s.repo.GetByID(ctx, ideaID, callerID)
 	if err != nil {
 		return nil, err
 	}
-	if it == nil {
+	if idea == nil {
 		return nil, httpx.ErrNotFound(fmt.Sprintf("ideia %s não encontrada", ideaID))
 	}
 
-	rows, err := s.repo.ListCommentsForIdea(ctx, ideaID)
+	comments, err := s.repo.ListCommentsForIdea(ctx, ideaID)
 	if err != nil {
 		return nil, err
 	}
 
-	return &IdeaDetail{
-		IdeaListItem: *it,
-		Comments:     buildCommentTree(rows),
-	}, nil
-}
-
-// buildCommentTree assembles a parent→replies tree from the flat, time-ordered
-// comment list. O(n) — single pass building a map then linking.
-func buildCommentTree(rows []CommentRow) []CommentNode {
-	byID := make(map[string]*CommentNode, len(rows))
-	for _, r := range rows {
-		byID[r.ID] = &CommentNode{
-			ID:         r.ID,
-			Body:       r.Body,
-			AuthorID:   r.AuthorID,
-			AuthorName: r.AuthorName,
-			CreatedAt:  r.CreatedAt,
-			Replies:    []CommentNode{},
-		}
-	}
-
-	var roots []CommentNode
-	for _, r := range rows {
-		node := byID[r.ID]
-		if r.ParentCommentID == nil {
-			roots = append(roots, *node)
-			continue
-		}
-		parent, ok := byID[*r.ParentCommentID]
-		if !ok {
-			// Parent missing (shouldn't happen with the FK) — promote to root.
-			roots = append(roots, *node)
-			continue
-		}
-		parent.Replies = append(parent.Replies, *node)
-	}
-
-	// The slice copy on append loses the linkage between roots and their
-	// nested updates, so re-walk from byID to materialize the final tree.
-	resolved := make([]CommentNode, 0, len(roots))
-	for _, r := range rows {
-		if r.ParentCommentID != nil {
-			continue
-		}
-		resolved = append(resolved, materialize(byID[r.ID], byID, rows))
-	}
-	return resolved
-}
-
-// materialize rebuilds a node with its full replies tree by walking children
-// from the flat row list (parent_comment_id == node.ID).
-func materialize(node *CommentNode, byID map[string]*CommentNode, rows []CommentRow) CommentNode {
-	out := *node
-	out.Replies = []CommentNode{}
-	for _, r := range rows {
-		if r.ParentCommentID == nil || *r.ParentCommentID != node.ID {
-			continue
-		}
-		out.Replies = append(out.Replies, materialize(byID[r.ID], byID, rows))
-	}
-	return out
+	return domain.NewIdeaDetail(idea, domain.BuildTree(comments)), nil
 }
 
 // ToggleVote enforces the self-vote rule and returns the new vote state.
-func (s *Service) ToggleVote(ctx context.Context, ideaID, userID string) (*ToggleVoteResponse, error) {
+func (s *Service) ToggleVote(ctx context.Context, ideaID, userID string) (*domain.VoteResult, error) {
 	authorID, err := s.repo.GetIdeaAuthor(ctx, ideaID)
 	if err != nil {
 		return nil, err
@@ -162,42 +99,42 @@ func (s *Service) ToggleVote(ctx context.Context, ideaID, userID string) (*Toggl
 		return nil, err
 	}
 
-	return &ToggleVoteResponse{VoteCount: count, VotedByMe: voted}, nil
+	return domain.NewVoteResult(count, voted), nil
 }
 
 // CreateComment posts a comment (or reply) and fans out notifications to the
 // idea author and (when a reply) the parent comment author. Self-notifications
 // and duplicates are suppressed. Notification failures are logged but do not
 // fail the request — the comment is the canonical event.
-func (s *Service) CreateComment(ctx context.Context, ideaID, authorID string, req CreateCommentRequest) (*CommentNodeResponse, error) {
-	ideaAuthorID, err := s.repo.GetIdeaAuthor(ctx, ideaID)
+func (s *Service) CreateComment(ctx context.Context, in CreateCommentInput) (*domain.Comment, error) {
+	ideaAuthorID, err := s.repo.GetIdeaAuthor(ctx, in.IdeaID)
 	if err != nil {
 		return nil, err
 	}
 	if ideaAuthorID == "" {
-		return nil, httpx.ErrNotFound(fmt.Sprintf("ideia %s não encontrada", ideaID))
+		return nil, httpx.ErrNotFound(fmt.Sprintf("ideia %s não encontrada", in.IdeaID))
 	}
 
-	row, parentAuthorID, err := s.repo.CreateComment(ctx, ideaID, authorID, req.Body, req.ParentCommentID)
+	comment, parentAuthorID, err := s.repo.CreateComment(ctx, in.IdeaID, in.AuthorID, in.Body, in.ParentCommentID)
 	if err != nil {
 		return nil, err
 	}
 
 	if s.notifier != nil {
-		excerpt := excerptOf(req.Body, 120)
+		excerpt := excerptOf(in.Body, 120)
 
-		if req.ParentCommentID == nil {
+		if in.ParentCommentID == nil {
 			// Top-level comment: notify the idea author (unless self-comment).
-			if ideaAuthorID != authorID {
-				if err := s.notifier.NotifyIdeaComment(ctx, ideaAuthorID, authorID, ideaID, row.ID, excerpt); err != nil {
+			if ideaAuthorID != in.AuthorID {
+				if err := s.notifier.NotifyIdeaComment(ctx, ideaAuthorID, in.AuthorID, in.IdeaID, comment.ID(), excerpt); err != nil {
 					logger.From(ctx, s.logger).Warn("failed to send idea_comment notification", zap.Error(err))
 				}
 			}
 		} else {
 			// Reply: idea author + parent comment author, deduped, no self-notif.
-			recipients := dedupRecipients(authorID, ideaAuthorID, parentAuthorID)
+			recipients := dedupRecipients(in.AuthorID, ideaAuthorID, parentAuthorID)
 			for _, rid := range recipients {
-				if err := s.notifier.NotifyIdeaReply(ctx, rid, authorID, ideaID, row.ID, excerpt); err != nil {
+				if err := s.notifier.NotifyIdeaReply(ctx, rid, in.AuthorID, in.IdeaID, comment.ID(), excerpt); err != nil {
 					logger.From(ctx, s.logger).Warn("failed to send idea_reply notification",
 						zap.String("recipient_id", rid),
 						zap.Error(err))
@@ -206,14 +143,7 @@ func (s *Service) CreateComment(ctx context.Context, ideaID, authorID string, re
 		}
 	}
 
-	return &CommentNodeResponse{
-		ID:         row.ID,
-		Body:       row.Body,
-		AuthorID:   row.AuthorID,
-		AuthorName: row.AuthorName,
-		CreatedAt:  row.CreatedAt,
-		Replies:    []CommentNodeResponse{},
-	}, nil
+	return comment, nil
 }
 
 // dedupRecipients returns the set of userIDs to notify, excluding the actor and

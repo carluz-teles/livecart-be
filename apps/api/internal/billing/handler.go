@@ -1,22 +1,23 @@
 package billing
 
 import (
-	"github.com/go-playground/validator/v10"
+	"time"
+
 	"github.com/gofiber/fiber/v2"
 
+	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/httpx"
 )
 
 // Handler exposes the store-scoped billing endpoints. The AccessGuard
 // allowlists everything under /billing so a blocked merchant can still pay.
 type Handler struct {
-	service  *Service
-	validate *validator.Validate
+	service *Service
 }
 
 // NewHandler builds the billing handler.
-func NewHandler(service *Service, validate *validator.Validate) *Handler {
-	return &Handler{service: service, validate: validate}
+func NewHandler(service *Service) *Handler {
+	return &Handler{service: service}
 }
 
 // RegisterRoutes mounts /billing under the store-scoped group.
@@ -40,25 +41,21 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Router /api/v1/stores/{storeId}/billing/subscription [get]
 // @Security BearerAuth
 func (h *Handler) GetSubscription(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
+	storeID := httpx.GetStoreID(c)
 
-	state, err := h.service.GetState(c.Context(), storeID)
+	sub, err := h.service.GetSubscription(c.UserContext(), storeID)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	if state == nil {
+	if sub == nil {
 		// Legacy store — provision the trial lazily and return it.
-		state, err = h.service.EnsureTrialSubscription(c.Context(), storeID, "", "")
+		state, err := h.service.EnsureTrialSubscription(c.UserContext(), storeID, "", "")
 		if err != nil {
-			return httpx.HandleServiceError(c, err)
+			return err
 		}
+		return httpx.OK(c, state)
 	}
-	return httpx.OK(c, state)
-}
-
-// CreateCheckoutRequest picks the plan being contracted.
-type CreateCheckoutRequest struct {
-	Plan string `json:"plan" validate:"required,oneof=start grow scale"`
+	return httpx.OK(c, NewSubscriptionResponse(sub, config.PaywallEnabled.Bool(), time.Now()))
 }
 
 // CreateCheckout opens the hosted Stripe Checkout for conversion.
@@ -70,26 +67,24 @@ type CreateCheckoutRequest struct {
 // @Param storeId path string true "Store ID"
 // @Param body body CreateCheckoutRequest true "Chosen plan"
 // @Success 200 {object} httpx.Envelope
+// @Failure 422 {object} httpx.ValidationEnvelope
 // @Router /api/v1/stores/{storeId}/billing/checkout [post]
 // @Security BearerAuth
 func (h *Handler) CreateCheckout(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-
 	var req CreateCheckoutRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
-	}
-
-	url, err := h.service.CreateConversionCheckout(c.Context(), storeID, Plan(req.Plan))
+	input, err := req.ToInput(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
+	}
+	url, err := h.service.CreateConversionCheckout(c.UserContext(), input)
+	if err != nil {
+		return err
 	}
 	return httpx.OK(c, fiber.Map{"url": url})
 }
-
 
 // CreatePortal opens the Stripe Customer Portal (card, invoices, cancel).
 // @Summary Open customer portal
@@ -100,17 +95,11 @@ func (h *Handler) CreateCheckout(c *fiber.Ctx) error {
 // @Router /api/v1/stores/{storeId}/billing/portal [post]
 // @Security BearerAuth
 func (h *Handler) CreatePortal(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	url, err := h.service.CreatePortalSession(c.Context(), storeID)
+	url, err := h.service.CreatePortalSession(c.UserContext(), httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 	return httpx.OK(c, fiber.Map{"url": url})
-}
-
-// ChangePlanRequest picks the target plan.
-type ChangePlanRequest struct {
-	Plan string `json:"plan" validate:"required,oneof=start grow scale"`
 }
 
 // ChangePlan upgrades immediately (prorated) or schedules a downgrade.
@@ -121,26 +110,24 @@ type ChangePlanRequest struct {
 // @Param storeId path string true "Store ID"
 // @Param body body ChangePlanRequest true "Target plan"
 // @Success 200 {object} httpx.Envelope{data=SubscriptionState}
+// @Failure 422 {object} httpx.ValidationEnvelope
 // @Router /api/v1/stores/{storeId}/billing/change-plan [post]
 // @Security BearerAuth
 func (h *Handler) ChangePlan(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-
 	var req ChangePlanRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
-	}
-
-	state, err := h.service.ChangePlan(c.Context(), storeID, Plan(req.Plan))
+	input, err := req.ToInput(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.OK(c, state)
+	sub, err := h.service.ChangePlan(c.UserContext(), input)
+	if err != nil {
+		return err
+	}
+	return httpx.OK(c, NewSubscriptionResponse(sub, config.PaywallEnabled.Bool(), time.Now()))
 }
-
 
 // GetUsage returns the current-cycle ledger summary (Financeiro hero).
 // @Summary Get period usage
@@ -151,10 +138,9 @@ func (h *Handler) ChangePlan(c *fiber.Ctx) error {
 // @Router /api/v1/stores/{storeId}/billing/usage [get]
 // @Security BearerAuth
 func (h *Handler) GetUsage(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	usage, err := h.service.GetUsage(c.Context(), storeID)
+	usage, err := h.service.GetUsage(c.UserContext(), httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 	return httpx.OK(c, usage)
 }
@@ -170,10 +156,9 @@ func (h *Handler) GetUsage(c *fiber.Ctx) error {
 // @Router /api/v1/stores/{storeId}/billing/statement [get]
 // @Security BearerAuth
 func (h *Handler) GetStatement(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	entries, err := h.service.GetStatement(c.Context(), storeID, c.QueryInt("page", 1), c.QueryInt("limit", 30))
+	entries, err := h.service.GetStatement(c.UserContext(), httpx.GetStoreID(c), c.QueryInt("page", 1), c.QueryInt("limit", 30))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 	return httpx.OK(c, entries)
 }

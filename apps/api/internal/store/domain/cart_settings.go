@@ -8,25 +8,37 @@ var (
 	ErrInvalidMaxQuantityPerItem = errors.New("max quantity per item must be 0 or positive")
 )
 
-// CartSettings represents the cart configuration for a store.
+// CartSettings represents the cart configuration for a store. It carries the
+// full persisted shape (base rules + automatic-message settings) so the
+// presentation layer can render the whole cartSettings object from getters.
 type CartSettings struct {
-	enabled            bool
-	expirationMinutes  int
-	reserveStock       bool
-	maxQuantityPerItem int
+	enabled             bool
+	expirationMinutes   int
+	reserveStock        bool
+	allowStorePickup    bool
+	maxQuantityPerItem  int
+	allowEdit           bool
+	checkoutSendMethods []string
+	// Automatic message settings
+	realTimeCart              bool
+	sendOnLiveEnd             bool
+	messageCooldownSeconds    int
+	sendExpirationReminder    bool
+	expirationReminderMinutes int
 }
 
 // DefaultCartSettings returns the default cart settings for a new store.
 func DefaultCartSettings() CartSettings {
 	return CartSettings{
-		enabled:            true,
-		expirationMinutes:  30,
-		reserveStock:       true,
-		maxQuantityPerItem: 5,
+		enabled:             true,
+		expirationMinutes:   30,
+		reserveStock:        true,
+		maxQuantityPerItem:  5,
+		checkoutSendMethods: []string{"public_link", "manual"},
 	}
 }
 
-// NewCartSettings creates a new CartSettings with validation.
+// NewCartSettings creates a new CartSettings with validation of the base rules.
 func NewCartSettings(
 	enabled bool,
 	expirationMinutes int,
@@ -48,18 +60,35 @@ func NewCartSettings(
 	}, nil
 }
 
-// ReconstructCartSettings rebuilds CartSettings from persistence data.
+// ReconstructCartSettings rebuilds the full CartSettings from persistence data
+// (no validation — the row is trusted).
 func ReconstructCartSettings(
 	enabled bool,
 	expirationMinutes int,
 	reserveStock bool,
+	allowStorePickup bool,
 	maxQuantityPerItem int,
+	allowEdit bool,
+	checkoutSendMethods []string,
+	realTimeCart bool,
+	sendOnLiveEnd bool,
+	messageCooldownSeconds int,
+	sendExpirationReminder bool,
+	expirationReminderMinutes int,
 ) CartSettings {
 	return CartSettings{
-		enabled:            enabled,
-		expirationMinutes:  expirationMinutes,
-		reserveStock:       reserveStock,
-		maxQuantityPerItem: maxQuantityPerItem,
+		enabled:                   enabled,
+		expirationMinutes:         expirationMinutes,
+		reserveStock:              reserveStock,
+		allowStorePickup:          allowStorePickup,
+		maxQuantityPerItem:        maxQuantityPerItem,
+		allowEdit:                 allowEdit,
+		checkoutSendMethods:       checkoutSendMethods,
+		realTimeCart:              realTimeCart,
+		sendOnLiveEnd:             sendOnLiveEnd,
+		messageCooldownSeconds:    messageCooldownSeconds,
+		sendExpirationReminder:    sendExpirationReminder,
+		expirationReminderMinutes: expirationReminderMinutes,
 	}
 }
 
@@ -67,10 +96,18 @@ func ReconstructCartSettings(
 // Getters (immutable access)
 // ============================================
 
-func (c CartSettings) Enabled() bool           { return c.enabled }
-func (c CartSettings) ExpirationMinutes() int  { return c.expirationMinutes }
-func (c CartSettings) ReserveStock() bool      { return c.reserveStock }
-func (c CartSettings) MaxQuantityPerItem() int { return c.maxQuantityPerItem }
+func (c CartSettings) Enabled() bool                  { return c.enabled }
+func (c CartSettings) ExpirationMinutes() int         { return c.expirationMinutes }
+func (c CartSettings) ReserveStock() bool             { return c.reserveStock }
+func (c CartSettings) AllowStorePickup() bool         { return c.allowStorePickup }
+func (c CartSettings) MaxQuantityPerItem() int        { return c.maxQuantityPerItem }
+func (c CartSettings) AllowEdit() bool                { return c.allowEdit }
+func (c CartSettings) CheckoutSendMethods() []string  { return c.checkoutSendMethods }
+func (c CartSettings) RealTimeCart() bool             { return c.realTimeCart }
+func (c CartSettings) SendOnLiveEnd() bool            { return c.sendOnLiveEnd }
+func (c CartSettings) MessageCooldownSeconds() int    { return c.messageCooldownSeconds }
+func (c CartSettings) SendExpirationReminder() bool   { return c.sendExpirationReminder }
+func (c CartSettings) ExpirationReminderMinutes() int { return c.expirationReminderMinutes }
 
 // ============================================
 // Business Rules

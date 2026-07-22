@@ -7,6 +7,9 @@ package billing
 import (
 	"time"
 
+	validation "github.com/go-ozzo/ozzo-validation/v4"
+
+	"livecart/apps/api/internal/billing/domain"
 	"livecart/apps/api/lib/config"
 )
 
@@ -88,8 +91,10 @@ func planFromPriceID(priceID string) Plan {
 	return ""
 }
 
-// SubscriptionState is the FE/middleware-facing snapshot. Embedded in the
-// /users/sync payload and returned by the billing endpoints.
+// SubscriptionState is the paywall/subscription Response. It doubles as the
+// FE/middleware-facing snapshot embedded in the /users/sync payload and returned
+// by the billing endpoints (shared read-model — cross-package consumers rely on
+// this shape).
 type SubscriptionState struct {
 	Status            string     `json:"status"`
 	Plan              Plan       `json:"plan"`
@@ -106,22 +111,76 @@ type SubscriptionState struct {
 	Enforced bool `json:"enforced"`
 }
 
-// blocked computes access denial (PRD 007 §4/§5): manual_override always
-// grants access; hard-blocked statuses deny; past_due denies only after the
-// grace window; a stale trialing row past its end denies as a safety net for
-// delayed webhooks.
-func blocked(status string, manualOverride bool, trialEndsAt, graceUntil *time.Time, now time.Time) bool {
-	if manualOverride {
-		return false
+// NewSubscriptionResponse maps a domain Subscription entity to its API response.
+// This is the controller's outbound mapper: presentation knows the domain, the
+// domain never knows the Response. `enforced` reflects the global paywall kill
+// switch — when off, nothing blocks even if the entity would.
+func NewSubscriptionResponse(sub *domain.Subscription, enforced bool, now time.Time) SubscriptionState {
+	state := SubscriptionState{
+		Status:            sub.Status(),
+		Plan:              Plan(sub.Plan()),
+		TrialEndsAt:       sub.TrialEndsAt(),
+		TrialDaysLeft:     sub.TrialDaysLeft(now),
+		CurrentPeriodEnd:  sub.CurrentPeriodEnd(),
+		CancelAtPeriodEnd: sub.CancelAtPeriodEnd(),
+		GraceUntil:        sub.GraceUntil(),
+		HasPaymentMethod:  sub.HasPaymentMethod(),
+		Enforced:          enforced,
 	}
-	switch status {
-	case StatusPaused, StatusUnpaid, StatusCanceled:
-		return true
-	case StatusPastDue:
-		return graceUntil == nil || now.After(*graceUntil)
-	case StatusTrialing:
-		return trialEndsAt != nil && now.After(*trialEndsAt)
-	default:
-		return false
-	}
+	state.Blocked = enforced && sub.IsBlocked(now)
+	return state
+}
+
+// ============================================
+// Request types (ozzo syntactic gate + ToInput semantic build)
+// ============================================
+
+// CreateCheckoutRequest picks the plan being contracted.
+type CreateCheckoutRequest struct {
+	Plan string `json:"plan"`
+}
+
+// Validate is the syntactic gate (ozzo): only self-service plans are contractable.
+func (r CreateCheckoutRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.Plan, validation.Required, validation.In("start", "grow", "scale")),
+	)
+}
+
+// ToInput builds the usecase input for a store-scoped checkout.
+func (r CreateCheckoutRequest) ToInput(storeID string) (CheckoutInput, error) {
+	return CheckoutInput{StoreID: storeID, Plan: Plan(r.Plan)}, nil
+}
+
+// ChangePlanRequest picks the target plan.
+type ChangePlanRequest struct {
+	Plan string `json:"plan"`
+}
+
+// Validate is the syntactic gate (ozzo): only self-service plans are targetable.
+func (r ChangePlanRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.Plan, validation.Required, validation.In("start", "grow", "scale")),
+	)
+}
+
+// ToInput builds the usecase input for a store-scoped plan change.
+func (r ChangePlanRequest) ToInput(storeID string) (ChangePlanInput, error) {
+	return ChangePlanInput{StoreID: storeID, Plan: Plan(r.Plan)}, nil
+}
+
+// ============================================
+// Service layer - Input types
+// ============================================
+
+// CheckoutInput is the usecase input for opening a conversion checkout.
+type CheckoutInput struct {
+	StoreID string
+	Plan    Plan
+}
+
+// ChangePlanInput is the usecase input for an upgrade/downgrade.
+type ChangePlanInput struct {
+	StoreID string
+	Plan    Plan
 }

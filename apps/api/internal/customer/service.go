@@ -7,8 +7,10 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/customer/domain"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
+	"livecart/apps/api/lib/query"
 )
 
 type Service struct {
@@ -33,7 +35,7 @@ func (s *Service) UpsertForCart(ctx context.Context, storeID, platformUserID, pl
 	if err != nil {
 		return "", fmt.Errorf("parsing store id: %w", err)
 	}
-	out, err := s.Upsert(ctx, UpsertCustomerInput{
+	cust, err := s.Upsert(ctx, UpsertCustomerInput{
 		StoreID:        storeUUID,
 		PlatformUserID: platformUserID,
 		PlatformHandle: platformHandle,
@@ -41,41 +43,34 @@ func (s *Service) UpsertForCart(ctx context.Context, storeID, platformUserID, pl
 	if err != nil {
 		return "", err
 	}
-	return out.ID, nil
+	return cust.ID().String(), nil
 }
 
 // Upsert creates a new customer or updates existing one (by store_id + platform_user_id)
 // Returns the customer (existing or new) with its UUID
-func (s *Service) Upsert(ctx context.Context, input UpsertCustomerInput) (*CustomerOutput, error) {
-	row, err := s.repo.Upsert(ctx, input)
+func (s *Service) Upsert(ctx context.Context, input UpsertCustomerInput) (*domain.Customer, error) {
+	cust, err := s.repo.Upsert(ctx, input)
 	if err != nil {
 		return nil, fmt.Errorf("upserting customer: %w", err)
 	}
 
 	logger.From(ctx, s.logger).Debug("customer upserted",
-		zap.String("customerId", row.ID),
+		zap.String("customerId", cust.ID().String()),
 		zap.String("storeId", input.StoreID.String()),
 		zap.String("platformUserID", input.PlatformUserID),
 		zap.String("handle", input.PlatformHandle))
 
-	return &CustomerOutput{
-		ID:           row.ID,
-		Handle:       row.Handle,
-		Email:        row.Email,
-		Phone:        row.Phone,
-		LastOrderAt:  row.LastOrderAt,
-		FirstOrderAt: row.FirstOrderAt,
-	}, nil
+	return cust, nil
 }
 
 // GetByID returns a customer by its UUID, enriched with cart totals so the
 // detail drawer matches the numbers shown on the listing.
-func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*CustomerOutput, error) {
-	row, err := s.repo.GetByID(ctx, id)
+func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*domain.Customer, error) {
+	base, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if row == nil {
+	if base == nil {
 		return nil, httpx.ErrNotFound(fmt.Sprintf("customer %s not found", id))
 	}
 
@@ -87,19 +82,13 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*CustomerOutput, e
 	}
 	var totalSpent int64
 	for _, o := range orders {
-		totalSpent += o.TotalValue
+		totalSpent += o.TotalValue()
 	}
 
-	out := &CustomerOutput{
-		ID:           row.ID,
-		Handle:       row.Handle,
-		Email:        row.Email,
-		Phone:        row.Phone,
-		TotalOrders:  len(orders),
-		TotalSpent:   totalSpent,
-		LastOrderAt:  row.LastOrderAt,
-		FirstOrderAt: row.FirstOrderAt,
-	}
+	email := base.Email()
+	phone := base.Phone()
+	var name, document *string
+	var address *domain.ShippingAddress
 
 	// Enrich with the latest checkout snapshot so the drawer can show name,
 	// document, the most recent shipping address and a WhatsApp-ready phone
@@ -116,54 +105,66 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*CustomerOutput, e
 	if snap != nil {
 		if snap.Name != "" {
 			n := snap.Name
-			out.Name = &n
+			name = &n
 		}
 		if snap.Document != "" {
 			d := snap.Document
-			out.Document = &d
+			document = &d
 		}
-		if out.Phone == nil && snap.Phone != "" {
+		if phone == nil && snap.Phone != "" {
 			p := snap.Phone
-			out.Phone = &p
+			phone = &p
 		}
-		if out.Email == nil && snap.Email != "" {
+		if email == nil && snap.Email != "" {
 			e := snap.Email
-			out.Email = &e
+			email = &e
 		}
 		if snap.Address != nil {
-			out.LastShippingAddress = snap.Address
+			addr := domain.NewShippingAddress(
+				snap.Address.ZipCode,
+				snap.Address.Street,
+				snap.Address.Number,
+				snap.Address.Complement,
+				snap.Address.Neighborhood,
+				snap.Address.City,
+				snap.Address.State,
+			)
+			address = &addr
 		}
 	}
 
-	return out, nil
+	return domain.Reconstruct(
+		base.ID(),
+		base.PlatformUserID(),
+		base.Handle(),
+		email,
+		phone,
+		name,
+		document,
+		len(orders),
+		totalSpent,
+		base.LastOrderAt(),
+		base.FirstOrderAt(),
+		address,
+	), nil
 }
 
-// GetByPlatformUser returns a customer by store_id + platform_user_id
-func (s *Service) GetByPlatformUser(ctx context.Context, storeID uuid.UUID, platformUserID string) (*CustomerOutput, error) {
-	row, err := s.repo.GetByPlatformUser(ctx, storeID, platformUserID)
+// GetByPlatformUser returns a customer by store_id + platform_user_id. Returns
+// nil (not an error) when the customer doesn't exist.
+func (s *Service) GetByPlatformUser(ctx context.Context, storeID uuid.UUID, platformUserID string) (*domain.Customer, error) {
+	cust, err := s.repo.GetByPlatformUser(ctx, storeID, platformUserID)
 	if err != nil {
 		return nil, err
 	}
-	if row == nil {
-		return nil, nil // Not an error, just doesn't exist
-	}
-
-	return &CustomerOutput{
-		ID:           row.ID,
-		Handle:       row.Handle,
-		Email:        row.Email,
-		Phone:        row.Phone,
-		LastOrderAt:  row.LastOrderAt,
-		FirstOrderAt: row.FirstOrderAt,
-	}, nil
+	return cust, nil
 }
 
-// List returns customers with pagination and search
-func (s *Service) List(ctx context.Context, input ListCustomersInput) (ListCustomersOutput, error) {
+// List returns customers with pagination and search as domain entities.
+func (s *Service) List(ctx context.Context, input ListCustomersInput) ([]*domain.Customer, query.Pagination, int, error) {
 	input.Pagination.Normalize()
 	input.Sorting.Normalize("last_order_at")
 
-	result, err := s.repo.List(ctx, ListCustomersParams{
+	customers, total, err := s.repo.List(ctx, ListCustomersParams{
 		StoreID:    input.StoreID,
 		Search:     input.Search,
 		Pagination: input.Pagination,
@@ -171,50 +172,28 @@ func (s *Service) List(ctx context.Context, input ListCustomersInput) (ListCusto
 		Filters:    input.Filters,
 	})
 	if err != nil {
-		return ListCustomersOutput{}, err
+		return nil, input.Pagination, 0, err
 	}
 
-	customers := make([]CustomerOutput, len(result.Customers))
-	for i, row := range result.Customers {
-		customers[i] = CustomerOutput{
-			ID:           row.ID,
-			Handle:       row.Handle,
-			Email:        row.Email,
-			Phone:        row.Phone,
-			TotalOrders:  row.TotalOrders,
-			TotalSpent:   row.TotalSpent,
-			LastOrderAt:  row.LastOrderAt,
-			FirstOrderAt: row.FirstOrderAt,
-		}
-	}
-
-	return ListCustomersOutput{
-		Customers:  customers,
-		Total:      result.Total,
-		Pagination: input.Pagination,
-	}, nil
+	return customers, input.Pagination, total, nil
 }
 
-// GetStats returns aggregated customer statistics
-func (s *Service) GetStats(ctx context.Context, storeID string) (*CustomerStatsOutput, error) {
-	stats, err := s.repo.GetStats(ctx, storeID)
-	if err != nil {
-		return nil, err
-	}
-	return stats, nil
+// GetStats returns aggregated customer statistics.
+func (s *Service) GetStats(ctx context.Context, storeID string) (*domain.CustomerStats, error) {
+	return s.repo.GetStats(ctx, storeID)
 }
 
 // ListOrders returns recent carts for a customer (paid + pending).
-func (s *Service) ListOrders(ctx context.Context, id uuid.UUID, limit, offset int32) ([]CustomerOrderOutput, error) {
+func (s *Service) ListOrders(ctx context.Context, id uuid.UUID, limit, offset int32) ([]*domain.OrderSummary, error) {
 	return s.repo.ListOrders(ctx, id, limit, offset)
 }
 
-// Update updates customer fields
+// Update updates customer fields.
 func (s *Service) Update(ctx context.Context, id uuid.UUID, input UpdateCustomerInput) error {
 	return s.repo.Update(ctx, id, input)
 }
 
-// UpdateLastOrder updates the last_order_at timestamp (called when cart is created/updated)
+// UpdateLastOrder updates the last_order_at timestamp (called when cart is created/updated).
 func (s *Service) UpdateLastOrder(ctx context.Context, id uuid.UUID) error {
 	return s.repo.UpdateLastOrder(ctx, id)
 }

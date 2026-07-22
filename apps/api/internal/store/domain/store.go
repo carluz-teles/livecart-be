@@ -14,18 +14,26 @@ var (
 	ErrStoreNameTooLong  = errors.New("store name must be at most 100 characters")
 )
 
-// Store represents a store in the system.
+// Store represents a store in the system. It carries the full persisted state
+// so the presentation layer can render the whole store response from getters —
+// the domain never knows about the response DTO.
 type Store struct {
-	id             vo.StoreID
-	name           string
-	slug           Slug
-	active         bool
-	whatsappNumber *string
-	emailAddress   *string
-	smsNumber      *string
-	cartSettings   CartSettings
-	createdAt      time.Time
-	updatedAt      time.Time
+	id               vo.StoreID
+	name             string
+	slug             Slug
+	active           bool
+	whatsappNumber   *string
+	emailAddress     *string
+	smsNumber        *string
+	description      *string
+	website          *string
+	logoURL          *string
+	cnpj             *string
+	address          Address
+	cartSettings     CartSettings
+	shippingDefaults ShippingDefaults
+	createdAt        time.Time
+	updatedAt        time.Time
 }
 
 // NewStore creates a new Store entity.
@@ -52,7 +60,7 @@ func NewStore(name string, slug Slug) (*Store, error) {
 	}, nil
 }
 
-// Reconstruct rebuilds a Store from persistence data.
+// Reconstruct rebuilds a Store from persistence data (trusted; no validation).
 func Reconstruct(
 	id vo.StoreID,
 	name string,
@@ -61,21 +69,33 @@ func Reconstruct(
 	whatsappNumber *string,
 	emailAddress *string,
 	smsNumber *string,
+	description *string,
+	website *string,
+	logoURL *string,
+	cnpj *string,
+	address Address,
 	cartSettings CartSettings,
+	shippingDefaults ShippingDefaults,
 	createdAt time.Time,
 	updatedAt time.Time,
 ) *Store {
 	return &Store{
-		id:             id,
-		name:           name,
-		slug:           slug,
-		active:         active,
-		whatsappNumber: whatsappNumber,
-		emailAddress:   emailAddress,
-		smsNumber:      smsNumber,
-		cartSettings:   cartSettings,
-		createdAt:      createdAt,
-		updatedAt:      updatedAt,
+		id:               id,
+		name:             name,
+		slug:             slug,
+		active:           active,
+		whatsappNumber:   whatsappNumber,
+		emailAddress:     emailAddress,
+		smsNumber:        smsNumber,
+		description:      description,
+		website:          website,
+		logoURL:          logoURL,
+		cnpj:             cnpj,
+		address:          address,
+		cartSettings:     cartSettings,
+		shippingDefaults: shippingDefaults,
+		createdAt:        createdAt,
+		updatedAt:        updatedAt,
 	}
 }
 
@@ -83,16 +103,26 @@ func Reconstruct(
 // Getters (immutable access)
 // ============================================
 
-func (s *Store) ID() vo.StoreID             { return s.id }
-func (s *Store) Name() string               { return s.name }
-func (s *Store) Slug() Slug                 { return s.slug }
-func (s *Store) Active() bool               { return s.active }
-func (s *Store) WhatsappNumber() *string    { return s.whatsappNumber }
-func (s *Store) EmailAddress() *string      { return s.emailAddress }
-func (s *Store) SMSNumber() *string         { return s.smsNumber }
-func (s *Store) CartSettings() CartSettings { return s.cartSettings }
-func (s *Store) CreatedAt() time.Time       { return s.createdAt }
-func (s *Store) UpdatedAt() time.Time       { return s.updatedAt }
+func (s *Store) ID() vo.StoreID                     { return s.id }
+func (s *Store) Name() string                       { return s.name }
+func (s *Store) Slug() Slug                         { return s.slug }
+func (s *Store) Active() bool                       { return s.active }
+func (s *Store) WhatsappNumber() *string            { return s.whatsappNumber }
+func (s *Store) EmailAddress() *string              { return s.emailAddress }
+func (s *Store) SMSNumber() *string                 { return s.smsNumber }
+func (s *Store) Description() *string               { return s.description }
+func (s *Store) Website() *string                   { return s.website }
+func (s *Store) LogoURL() *string                   { return s.logoURL }
+func (s *Store) CNPJ() *string                      { return s.cnpj }
+func (s *Store) Address() Address                   { return s.address }
+func (s *Store) CartSettings() CartSettings         { return s.cartSettings }
+func (s *Store) ShippingDefaults() ShippingDefaults { return s.shippingDefaults }
+func (s *Store) CreatedAt() time.Time               { return s.createdAt }
+func (s *Store) UpdatedAt() time.Time               { return s.updatedAt }
+
+// SetLogoURL overrides the logo URL in-memory (used by the controller to swap
+// the stored S3 key for a presigned URL before rendering the response).
+func (s *Store) SetLogoURL(url *string) { s.logoURL = url }
 
 // ============================================
 // Business Rules

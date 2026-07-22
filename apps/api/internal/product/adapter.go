@@ -59,12 +59,12 @@ func (a *ProductSyncerAdapter) GetProduct(ctx context.Context, storeID, productI
 		return "", "", err
 	}
 
-	output, err := a.service.GetByID(ctx, pid, sid)
+	view, err := a.service.GetByID(ctx, pid, sid)
 	if err != nil {
 		return "", "", err
 	}
 
-	return output.ExternalID, output.ExternalSource, nil
+	return view.Product.ExternalID(), view.Product.ExternalSource().String(), nil
 }
 
 // ImportProduct creates a new simple product in LiveCart from an ERP product.
@@ -83,7 +83,7 @@ func (a *ProductSyncerAdapter) ImportProduct(ctx context.Context, storeID, exter
 		return "", err
 	}
 
-	out, err := a.service.Create(ctx, CreateProductInput{
+	created, err := a.service.Create(ctx, CreateProductInput{
 		StoreID:        sid,
 		Name:           p.Name,
 		ExternalID:     p.ID,
@@ -96,7 +96,7 @@ func (a *ProductSyncerAdapter) ImportProduct(ctx context.Context, storeID, exter
 	if err != nil {
 		return "", err
 	}
-	return out.ID, nil
+	return created.ID().String(), nil
 }
 
 // erpShippingToDomain maps the ERP-side shipping profile to the LiveCart

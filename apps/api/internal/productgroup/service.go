@@ -28,14 +28,14 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 }
 
 // Create creates the group + options + values + variants atomically.
-func (s *Service) Create(ctx context.Context, input CreateGroupInput) (CreateGroupResponse, error) {
+func (s *Service) Create(ctx context.Context, input CreateGroupInput) (*domain.CreateResult, error) {
 	if err := validateCreateInput(input); err != nil {
-		return CreateGroupResponse{}, httpx.ErrUnprocessable(err.Error())
+		return nil, httpx.ErrUnprocessable(err.Error())
 	}
 
 	tx, err := s.repo.Pool().BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return CreateGroupResponse{}, fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -43,7 +43,7 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (CreateGro
 
 	group, err := domain.NewGroup(input.StoreID, input.Name, input.Description, input.ExternalID, input.ExternalSource)
 	if err != nil {
-		return CreateGroupResponse{}, httpx.ErrUnprocessable(err.Error())
+		return nil, httpx.ErrUnprocessable(err.Error())
 	}
 
 	groupRow, err := q.CreateProductGroup(ctx, sqlc.CreateProductGroupParams{
@@ -54,7 +54,7 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (CreateGro
 		ExternalSource: group.ExternalSource().String(),
 	})
 	if err != nil {
-		return CreateGroupResponse{}, fmt.Errorf("inserting group: %w", err)
+		return nil, fmt.Errorf("inserting group: %w", err)
 	}
 	groupID := groupRow.ID
 
@@ -67,7 +67,7 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (CreateGro
 			Position: int32(i),
 		})
 		if err != nil {
-			return CreateGroupResponse{}, fmt.Errorf("inserting option %q: %w", opt.Name, err)
+			return nil, fmt.Errorf("inserting option %q: %w", opt.Name, err)
 		}
 		valueMap := make(map[string]pgtype.UUID, len(opt.Values))
 		for j, v := range opt.Values {
@@ -77,7 +77,7 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (CreateGro
 				Position: int32(j),
 			})
 			if err != nil {
-				return CreateGroupResponse{}, fmt.Errorf("inserting option value %q/%q: %w", opt.Name, v, err)
+				return nil, fmt.Errorf("inserting option value %q/%q: %w", opt.Name, v, err)
 			}
 			valueMap[v] = vRow.ID
 		}
@@ -87,19 +87,19 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (CreateGro
 	// Auto-generate keywords for variants that did not provide one.
 	maxKw, err := q.GetMaxKeyword(ctx, input.StoreID.ToPgUUID())
 	if err != nil {
-		return CreateGroupResponse{}, fmt.Errorf("getting max keyword: %w", err)
+		return nil, fmt.Errorf("getting max keyword: %w", err)
 	}
 	currentMax, _ := maxKw.(string)
 	if currentMax == "" {
 		currentMax = "0999"
 	}
 
-	createdVariants := make([]CreatedVariantSummary, 0, len(input.Variants))
+	createdVariants := make([]domain.CreatedVariant, 0, len(input.Variants))
 	seenCombos := make(map[string]struct{}, len(input.Variants))
 
 	for vIdx, v := range input.Variants {
 		if len(v.OptionValues) != len(input.Options) {
-			return CreateGroupResponse{}, httpx.ErrUnprocessable(fmt.Sprintf("variant #%d: %s", vIdx+1, domain.ErrVariantOptionsMismatch.Error()))
+			return nil, httpx.ErrUnprocessable(fmt.Sprintf("variant #%d: %s", vIdx+1, domain.ErrVariantOptionsMismatch.Error()))
 		}
 
 		// Resolve option_value IDs in the order of options (position-based mapping).
@@ -109,7 +109,7 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (CreateGro
 			optName := input.Options[k].Name
 			id, ok := optionValuesByOption[optName][value]
 			if !ok {
-				return CreateGroupResponse{}, httpx.ErrUnprocessable(fmt.Sprintf("variant #%d: option %q does not have value %q", vIdx+1, optName, value))
+				return nil, httpx.ErrUnprocessable(fmt.Sprintf("variant #%d: option %q does not have value %q", vIdx+1, optName, value))
 			}
 			valueIDs[k] = id
 			comboKey[k] = value
@@ -117,7 +117,7 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (CreateGro
 
 		key := strings.Join(comboKey, "||")
 		if _, dup := seenCombos[key]; dup {
-			return CreateGroupResponse{}, httpx.ErrUnprocessable(fmt.Sprintf("variant #%d: %s", vIdx+1, domain.ErrDuplicateVariant.Error()))
+			return nil, httpx.ErrUnprocessable(fmt.Sprintf("variant #%d: %s", vIdx+1, domain.ErrDuplicateVariant.Error()))
 		}
 		seenCombos[key] = struct{}{}
 
@@ -125,17 +125,17 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (CreateGro
 		if keyword == "" {
 			next, err := productdomain.NextKeyword(currentMax)
 			if err != nil {
-				return CreateGroupResponse{}, httpx.ErrUnprocessable("keyword range exhausted (max 9999)")
+				return nil, httpx.ErrUnprocessable("keyword range exhausted (max 9999)")
 			}
 			keyword = next.String()
 			currentMax = keyword
 		} else if !productdomain.IsValidKeyword(keyword) {
-			return CreateGroupResponse{}, httpx.ErrUnprocessable(fmt.Sprintf("variant #%d: invalid keyword %q", vIdx+1, keyword))
+			return nil, httpx.ErrUnprocessable(fmt.Sprintf("variant #%d: invalid keyword %q", vIdx+1, keyword))
 		}
 
 		shipping, err := productpkg.ShippingDTOToDomain(v.Shipping)
 		if err != nil {
-			return CreateGroupResponse{}, httpx.ErrUnprocessable(fmt.Sprintf("variant #%d: %s", vIdx+1, err.Error()))
+			return nil, httpx.ErrUnprocessable(fmt.Sprintf("variant #%d: %s", vIdx+1, err.Error()))
 		}
 
 		variantName := buildVariantName(input.Name, v.OptionValues)
@@ -159,7 +159,7 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (CreateGro
 			GroupID:             groupID,
 		})
 		if err != nil {
-			return CreateGroupResponse{}, fmt.Errorf("inserting variant #%d: %w", vIdx+1, err)
+			return nil, fmt.Errorf("inserting variant #%d: %w", vIdx+1, err)
 		}
 
 		for _, optValueID := range valueIDs {
@@ -167,7 +167,7 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (CreateGro
 				ProductID:     productRow.ID,
 				OptionValueID: optValueID,
 			}); err != nil {
-				return CreateGroupResponse{}, fmt.Errorf("assigning option to variant #%d: %w", vIdx+1, err)
+				return nil, fmt.Errorf("assigning option to variant #%d: %w", vIdx+1, err)
 			}
 		}
 
@@ -177,11 +177,11 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (CreateGro
 				Url:       url,
 				Position:  int32(imgIdx),
 			}); err != nil {
-				return CreateGroupResponse{}, fmt.Errorf("inserting variant image: %w", err)
+				return nil, fmt.Errorf("inserting variant image: %w", err)
 			}
 		}
 
-		createdVariants = append(createdVariants, CreatedVariantSummary{
+		createdVariants = append(createdVariants, domain.CreatedVariant{
 			ID:           pgUUIDToString(productRow.ID),
 			Keyword:      keyword,
 			OptionValues: append([]string(nil), v.OptionValues...),
@@ -195,52 +195,53 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (CreateGro
 			Url:      url,
 			Position: int32(i),
 		}); err != nil {
-			return CreateGroupResponse{}, fmt.Errorf("inserting group image: %w", err)
+			return nil, fmt.Errorf("inserting group image: %w", err)
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return CreateGroupResponse{}, fmt.Errorf("commit: %w", err)
+		return nil, fmt.Errorf("commit: %w", err)
 	}
 
-	return CreateGroupResponse{
-		ID:        pgUUIDToString(groupID),
-		Name:      group.Name(),
-		Variants:  createdVariants,
-		CreatedAt: groupRow.CreatedAt.Time,
-	}, nil
+	return domain.NewCreateResult(
+		pgUUIDToString(groupID),
+		group.Name(),
+		createdVariants,
+		groupRow.CreatedAt.Time,
+	), nil
 }
 
-// GetByID returns the full detail (options, values, variants, images) of a group.
-func (s *Service) GetByID(ctx context.Context, id vo.ID, storeID vo.StoreID) (GroupDetailResponse, error) {
+// GetByID returns the full detail (options, values, variants, images) of a group
+// as a domain aggregate. Presentation maps it via NewGroupDetailResponse.
+func (s *Service) GetByID(ctx context.Context, id vo.ID, storeID vo.StoreID) (*domain.Detail, error) {
 	group, err := s.repo.GetByID(ctx, id, storeID)
 	if err != nil {
-		return GroupDetailResponse{}, err
+		return nil, err
 	}
 
 	options, err := s.repo.LoadOptions(ctx, group.ID())
 	if err != nil {
-		return GroupDetailResponse{}, err
+		return nil, err
 	}
 
 	groupImages, err := s.repo.ListGroupImages(ctx, group.ID())
 	if err != nil {
-		return GroupDetailResponse{}, err
+		return nil, err
 	}
 
 	variantRows, err := s.repo.ListVariantsByGroup(ctx, group.ID())
 	if err != nil {
-		return GroupDetailResponse{}, fmt.Errorf("listing variants: %w", err)
+		return nil, fmt.Errorf("listing variants: %w", err)
 	}
 
 	variantOptions, err := s.repo.ListVariantOptionsByGroup(ctx, group.ID())
 	if err != nil {
-		return GroupDetailResponse{}, fmt.Errorf("listing variant options: %w", err)
+		return nil, fmt.Errorf("listing variant options: %w", err)
 	}
-	optsByVariant := make(map[string][]productpkg.OptionValueRef, len(variantRows))
+	optsByVariant := make(map[string][]domain.OptionValuePair, len(variantRows))
 	for _, opt := range variantOptions {
 		key := pgUUIDToString(opt.ProductID)
-		optsByVariant[key] = append(optsByVariant[key], productpkg.OptionValueRef{
+		optsByVariant[key] = append(optsByVariant[key], domain.OptionValuePair{
 			Option: opt.OptionName,
 			Value:  opt.Value,
 		})
@@ -248,20 +249,20 @@ func (s *Service) GetByID(ctx context.Context, id vo.ID, storeID vo.StoreID) (Gr
 
 	variantImages, err := s.repo.ListVariantImagesByGroup(ctx, group.ID())
 	if err != nil {
-		return GroupDetailResponse{}, fmt.Errorf("listing variant images: %w", err)
+		return nil, fmt.Errorf("listing variant images: %w", err)
 	}
-	imgsByVariant := make(map[string][]ImageResponse, len(variantRows))
+	imgsByVariant := make(map[string][]domain.Image, len(variantRows))
 	for _, img := range variantImages {
 		key := pgUUIDToString(img.ProductID)
-		imgsByVariant[key] = append(imgsByVariant[key], ImageResponse{
+		imgsByVariant[key] = append(imgsByVariant[key], domain.Image{
 			ID: pgUUIDToString(img.ID), URL: img.Url, Position: int(img.Position),
 		})
 	}
 
-	variants := make([]VariantResponse, len(variantRows))
+	variants := make([]domain.Variant, len(variantRows))
 	for i, row := range variantRows {
 		key := pgUUIDToString(row.ID)
-		variants[i] = VariantResponse{
+		variants[i] = domain.Variant{
 			ID:           key,
 			Keyword:      row.Keyword,
 			OptionValues: optsByVariant[key],
@@ -273,48 +274,26 @@ func (s *Service) GetByID(ctx context.Context, id vo.ID, storeID vo.StoreID) (Gr
 		}
 	}
 
-	optionsResp := make([]OptionResponse, len(options))
-	for i, o := range options {
-		valuesResp := make([]OptionValueResponse, len(o.Values))
-		for j, v := range o.Values {
-			valuesResp[j] = OptionValueResponse{ID: v.ID.String(), Value: v.Value, Position: v.Position}
-		}
-		optionsResp[i] = OptionResponse{
-			ID: o.ID.String(), Name: o.Name, Position: o.Position, Values: valuesResp,
-		}
-	}
-
-	return GroupDetailResponse{
-		ID:             group.ID().String(),
-		Name:           group.Name(),
-		Description:    group.Description(),
-		ExternalID:     group.ExternalID(),
-		ExternalSource: group.ExternalSource().String(),
-		Options:        optionsResp,
-		GroupImages:    groupImages,
-		Variants:       variants,
-		CreatedAt:      group.CreatedAt(),
-		UpdatedAt:      group.UpdatedAt(),
-	}, nil
+	return domain.NewDetail(group, options, groupImages, variants), nil
 }
 
-func (s *Service) List(ctx context.Context, storeID vo.StoreID, limit, offset int) ([]GroupSummaryResponse, int, error) {
+func (s *Service) List(ctx context.Context, storeID vo.StoreID, limit, offset int) ([]domain.Summary, int, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	return s.repo.ListByStore(ctx, storeID, limit, offset)
 }
 
-func (s *Service) Update(ctx context.Context, id vo.ID, storeID vo.StoreID, name, description string) (GroupDetailResponse, error) {
+func (s *Service) Update(ctx context.Context, id vo.ID, storeID vo.StoreID, name, description string) (*domain.Detail, error) {
 	group, err := s.repo.GetByID(ctx, id, storeID)
 	if err != nil {
-		return GroupDetailResponse{}, err
+		return nil, err
 	}
 	if err := group.Update(name, description); err != nil {
-		return GroupDetailResponse{}, httpx.ErrUnprocessable(err.Error())
+		return nil, httpx.ErrUnprocessable(err.Error())
 	}
 	if err := s.repo.Update(ctx, group); err != nil {
-		return GroupDetailResponse{}, err
+		return nil, err
 	}
 	return s.GetByID(ctx, id, storeID)
 }
@@ -327,9 +306,9 @@ func (s *Service) Delete(ctx context.Context, id vo.ID, storeID vo.StoreID) erro
 	return s.repo.Delete(ctx, id, storeID)
 }
 
-func (s *Service) AddGroupImage(ctx context.Context, groupID vo.ID, storeID vo.StoreID, url string, position int) (ImageResponse, error) {
+func (s *Service) AddGroupImage(ctx context.Context, groupID vo.ID, storeID vo.StoreID, url string, position int) (domain.Image, error) {
 	if _, err := s.repo.GetByID(ctx, groupID, storeID); err != nil {
-		return ImageResponse{}, err
+		return domain.Image{}, err
 	}
 	return s.repo.AddGroupImage(ctx, groupID, url, position)
 }
@@ -356,7 +335,7 @@ func (s *Service) HasGroupForExternalID(ctx context.Context, storeID vo.StoreID,
 // It is identical to Create but accepts variants whose ExternalID is propagated
 // to the created product rows so subsequent stock/price webhook updates can
 // resolve the variant by external_id.
-func (s *Service) CreateForERP(ctx context.Context, input CreateGroupInput) (CreateGroupResponse, error) {
+func (s *Service) CreateForERP(ctx context.Context, input CreateGroupInput) (*domain.CreateResult, error) {
 	return s.Create(ctx, input)
 }
 

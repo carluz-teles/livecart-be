@@ -1,6 +1,13 @@
 package store
 
-import "time"
+import (
+	"time"
+
+	validation "github.com/go-ozzo/ozzo-validation/v4"
+
+	storedomain "livecart/apps/api/internal/store/domain"
+	appvalidation "livecart/apps/api/lib/validation"
+)
 
 // ============================================
 // Cart Settings Types
@@ -54,23 +61,33 @@ type ShippingDefaultsDTO struct {
 }
 
 // ============================================
-// Handler layer
+// Handler layer - Request types (ozzo Validate + ToInput)
 // ============================================
 
 type CreateStoreRequest struct {
-	Name string `json:"name" validate:"required,min=2,max=100"`
-	Slug string `json:"slug" validate:"required,min=2,max=50,alphanum"`
+	Name string `json:"name"`
+	Slug string `json:"slug"`
 }
 
-type CreateStoreResponse struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Slug      string    `json:"slug"`
-	CreatedAt time.Time `json:"createdAt"`
+// Validate is the syntactic gate (ozzo).
+func (r CreateStoreRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.Name, validation.Required, validation.Length(2, 100)),
+		validation.Field(&r.Slug, validation.Required, validation.Length(2, 50), appvalidation.Slug),
+	)
+}
+
+// ToInput builds the create usecase input. ClerkUserID comes from the JWT.
+func (r CreateStoreRequest) ToInput(clerkUserID string) CreateStoreInput {
+	return CreateStoreInput{
+		Name:        r.Name,
+		Slug:        r.Slug,
+		ClerkUserID: clerkUserID,
+	}
 }
 
 type UpdateStoreRequest struct {
-	Name           string     `json:"name" validate:"required,min=2,max=100"`
+	Name           string     `json:"name"`
 	WhatsappNumber string     `json:"whatsappNumber"`
 	EmailAddress   string     `json:"emailAddress"`
 	SMSNumber      string     `json:"smsNumber"`
@@ -81,30 +98,128 @@ type UpdateStoreRequest struct {
 	CNPJ           string     `json:"cnpj"`
 }
 
+// Validate is the syntactic gate (ozzo).
+func (r UpdateStoreRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.Name, validation.Required, validation.Length(2, 100)),
+	)
+}
+
+// ToInput builds the update usecase input for a given store. The service loads
+// the current store, merges (subset semantics) and normalizes CEP/UF/CNPJ.
+func (r UpdateStoreRequest) ToInput(storeID string) UpdateStoreInput {
+	return UpdateStoreInput{
+		StoreID:        storeID,
+		Name:           r.Name,
+		WhatsappNumber: r.WhatsappNumber,
+		EmailAddress:   r.EmailAddress,
+		SMSNumber:      r.SMSNumber,
+		Description:    r.Description,
+		Website:        r.Website,
+		LogoURL:        r.LogoURL,
+		Address:        r.Address,
+		CNPJ:           r.CNPJ,
+	}
+}
+
 type UpdateShippingDefaultsRequest struct {
-	PackageWeightGrams int    `json:"packageWeightGrams" validate:"gte=0"`
-	PackageFormat      string `json:"packageFormat" validate:"required,oneof=box roll letter"`
+	PackageWeightGrams int    `json:"packageWeightGrams"`
+	PackageFormat      string `json:"packageFormat"`
 	// Optional default dimensions (cm). All three must be provided together to
 	// enable the ERP-import fallback; any nil disables it.
-	HeightCm *int `json:"heightCm,omitempty" validate:"omitempty,gt=0"`
-	WidthCm  *int `json:"widthCm,omitempty" validate:"omitempty,gt=0"`
-	LengthCm *int `json:"lengthCm,omitempty" validate:"omitempty,gt=0"`
+	HeightCm *int `json:"heightCm,omitempty"`
+	WidthCm  *int `json:"widthCm,omitempty"`
+	LengthCm *int `json:"lengthCm,omitempty"`
+}
+
+// Validate is the syntactic gate (ozzo).
+func (r UpdateShippingDefaultsRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.PackageWeightGrams, validation.Min(0)),
+		validation.Field(&r.PackageFormat, validation.Required, validation.In("box", "roll", "letter")),
+		validation.Field(&r.HeightCm, validation.Min(1)),
+		validation.Field(&r.WidthCm, validation.Min(1)),
+		validation.Field(&r.LengthCm, validation.Min(1)),
+	)
+}
+
+// ToInput builds the shipping-defaults usecase input for a given store.
+func (r UpdateShippingDefaultsRequest) ToInput(storeID string) UpdateShippingDefaultsInput {
+	return UpdateShippingDefaultsInput{
+		StoreID:            storeID,
+		PackageWeightGrams: r.PackageWeightGrams,
+		PackageFormat:      r.PackageFormat,
+		HeightCm:           r.HeightCm,
+		WidthCm:            r.WidthCm,
+		LengthCm:           r.LengthCm,
+	}
 }
 
 type UpdateCartSettingsRequest struct {
 	Enabled             bool     `json:"enabled"`
-	ExpirationMinutes   int      `json:"expirationMinutes" validate:"gte=5,lte=1440"`
+	ExpirationMinutes   int      `json:"expirationMinutes"`
 	ReserveStock        bool     `json:"reserveStock"`
 	AllowStorePickup    bool     `json:"allowStorePickup"`
-	MaxQuantityPerItem  int      `json:"maxQuantityPerItem" validate:"gte=1"`
+	MaxQuantityPerItem  int      `json:"maxQuantityPerItem"`
 	AllowEdit           bool     `json:"allowEdit"`
 	CheckoutSendMethods []string `json:"checkoutSendMethods"`
 	// Automatic message settings
 	RealTimeCart              bool `json:"realTimeCart"`
 	SendOnLiveEnd             bool `json:"sendOnLiveEnd"`
-	MessageCooldownSeconds    int  `json:"messageCooldownSeconds" validate:"gte=0,lte=300"`
+	MessageCooldownSeconds    int  `json:"messageCooldownSeconds"`
 	SendExpirationReminder    bool `json:"sendExpirationReminder"`
-	ExpirationReminderMinutes int  `json:"expirationReminderMinutes" validate:"gte=1,lte=60"`
+	ExpirationReminderMinutes int  `json:"expirationReminderMinutes"`
+}
+
+// Validate is the syntactic gate (ozzo).
+func (r UpdateCartSettingsRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.ExpirationMinutes, validation.Min(5), validation.Max(1440)),
+		validation.Field(&r.MaxQuantityPerItem, validation.Min(1)),
+		validation.Field(&r.MessageCooldownSeconds, validation.Min(0), validation.Max(300)),
+		validation.Field(&r.ExpirationReminderMinutes, validation.Min(1), validation.Max(60)),
+	)
+}
+
+// ToInput builds the cart-settings usecase input for a given store.
+func (r UpdateCartSettingsRequest) ToInput(storeID string) UpdateCartSettingsInput {
+	return UpdateCartSettingsInput{
+		StoreID:                   storeID,
+		Enabled:                   r.Enabled,
+		ExpirationMinutes:         r.ExpirationMinutes,
+		ReserveStock:              r.ReserveStock,
+		AllowStorePickup:          r.AllowStorePickup,
+		MaxQuantityPerItem:        r.MaxQuantityPerItem,
+		AllowEdit:                 r.AllowEdit,
+		CheckoutSendMethods:       r.CheckoutSendMethods,
+		RealTimeCart:              r.RealTimeCart,
+		SendOnLiveEnd:             r.SendOnLiveEnd,
+		MessageCooldownSeconds:    r.MessageCooldownSeconds,
+		SendExpirationReminder:    r.SendExpirationReminder,
+		ExpirationReminderMinutes: r.ExpirationReminderMinutes,
+	}
+}
+
+// ============================================
+// Handler layer - Response types (mappers from *domain.Store)
+// ============================================
+
+type CreateStoreResponse struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Slug      string    `json:"slug"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// NewCreateStoreResponse maps the freshly created Store entity to the create
+// response.
+func NewCreateStoreResponse(s *storedomain.Store) CreateStoreResponse {
+	return CreateStoreResponse{
+		ID:        s.ID().String(),
+		Name:      s.Name(),
+		Slug:      s.Slug().String(),
+		CreatedAt: s.CreatedAt(),
+	}
 }
 
 type StoreResponse struct {
@@ -125,27 +240,76 @@ type StoreResponse struct {
 	CreatedAt        time.Time           `json:"createdAt"`
 }
 
+// NewStoreResponse maps a domain Store entity to its API response. This is the
+// controller's outbound mapper: presentation knows the domain; the domain never
+// knows the response. LogoURL stays nullable — the handler swaps the stored S3
+// key for a presigned URL (via Store.SetLogoURL) before calling this.
+func NewStoreResponse(s *storedomain.Store) StoreResponse {
+	addr := s.Address()
+	cart := s.CartSettings()
+	ship := s.ShippingDefaults()
+
+	return StoreResponse{
+		ID:             s.ID().String(),
+		Name:           s.Name(),
+		Slug:           s.Slug().String(),
+		Active:         s.Active(),
+		WhatsappNumber: deref(s.WhatsappNumber()),
+		EmailAddress:   deref(s.EmailAddress()),
+		SMSNumber:      deref(s.SMSNumber()),
+		Description:    deref(s.Description()),
+		Website:        deref(s.Website()),
+		LogoURL:        s.LogoURL(),
+		Address: AddressDTO{
+			Street:        addr.Street(),
+			Number:        addr.Number(),
+			Complement:    addr.Complement(),
+			District:      addr.District(),
+			City:          addr.City(),
+			State:         addr.State(),
+			Zip:           addr.Zip(),
+			Country:       addr.Country(),
+			StateRegister: addr.StateRegister(),
+		},
+		CNPJ: deref(s.CNPJ()),
+		CartSettings: CartSettingsDTO{
+			Enabled:                   cart.Enabled(),
+			ExpirationMinutes:         cart.ExpirationMinutes(),
+			ReserveStock:              cart.ReserveStock(),
+			AllowStorePickup:          cart.AllowStorePickup(),
+			MaxQuantityPerItem:        cart.MaxQuantityPerItem(),
+			AllowEdit:                 cart.AllowEdit(),
+			CheckoutSendMethods:       cart.CheckoutSendMethods(),
+			RealTimeCart:              cart.RealTimeCart(),
+			SendOnLiveEnd:             cart.SendOnLiveEnd(),
+			MessageCooldownSeconds:    cart.MessageCooldownSeconds(),
+			SendExpirationReminder:    cart.SendExpirationReminder(),
+			ExpirationReminderMinutes: cart.ExpirationReminderMinutes(),
+		},
+		ShippingDefaults: ShippingDefaultsDTO{
+			PackageWeightGrams: ship.PackageWeightGrams(),
+			PackageFormat:      ship.PackageFormat(),
+			HeightCm:           ship.HeightCm(),
+			WidthCm:            ship.WidthCm(),
+			LengthCm:           ship.LengthCm(),
+		},
+		CreatedAt: s.CreatedAt(),
+	}
+}
+
 type UploadLogoResponse struct {
 	LogoURL string        `json:"logoUrl"`
 	Store   StoreResponse `json:"store"`
 }
 
 // ============================================
-// Service layer
+// Service layer - Input types (usecase returns *domain.Store)
 // ============================================
 
 type CreateStoreInput struct {
 	Name        string
 	Slug        string
 	ClerkUserID string // Clerk user ID from JWT
-}
-
-type CreateStoreOutput struct {
-	ID           string
-	Name         string
-	Slug         string
-	MembershipID string
-	CreatedAt    time.Time
 }
 
 type UpdateStoreInput struct {
@@ -187,26 +351,8 @@ type UpdateCartSettingsInput struct {
 	ExpirationReminderMinutes int
 }
 
-type StoreOutput struct {
-	ID               string
-	Name             string
-	Slug             string
-	Active           bool
-	WhatsappNumber   string
-	EmailAddress     string
-	SMSNumber        string
-	Description      string
-	Website          string
-	LogoURL          *string // nullable - logoUrl é presigned ou null
-	Address          AddressDTO
-	CNPJ             string
-	CartSettings     CartSettingsDTO
-	ShippingDefaults ShippingDefaultsDTO
-	CreatedAt        time.Time
-}
-
 // ============================================
-// Repository layer
+// Repository layer - persistence params
 // ============================================
 
 type CreateStoreParams struct {
@@ -261,29 +407,11 @@ type UpdateCartSettingsParams struct {
 	ExpirationReminderMinutes int
 }
 
-type StoreRow struct {
-	ID                   string
-	Name                 string
-	Slug                 string
-	Active               bool
-	WhatsappNumber       *string
-	EmailAddress         *string
-	SMSNumber            *string
-	Description          *string
-	Website              *string
-	LogoURL              *string
-	AddressStreet        *string
-	AddressNumber        *string
-	AddressComplement    *string
-	AddressDistrict      *string
-	AddressCity          *string
-	AddressState         *string
-	AddressZip           *string
-	AddressCountry       *string
-	AddressStateRegister *string
-	CNPJ                 *string
-	CartSettings         CartSettingsDTO
-	ShippingDefaults     ShippingDefaultsDTO
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+// deref is used by NewStoreResponse to flatten nullable string fields into the
+// stable empty-string shape the frontend expects.
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

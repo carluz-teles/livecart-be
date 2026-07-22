@@ -1,7 +1,6 @@
 package user
 
 import (
-	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
 	"livecart/apps/api/lib/httpx"
@@ -10,12 +9,11 @@ import (
 
 type Handler struct {
 	service  *Service
-	validate *validator.Validate
 	s3Client *storage.S3Client
 }
 
-func NewHandler(service *Service, validate *validator.Validate, s3Client *storage.S3Client) *Handler {
-	return &Handler{service: service, validate: validate, s3Client: s3Client}
+func NewHandler(service *Service, s3Client *storage.S3Client) *Handler {
+	return &Handler{service: service, s3Client: s3Client}
 }
 
 func (h *Handler) RegisterRoutes(router fiber.Router) {
@@ -31,12 +29,13 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Produce      json
 // @Success      200 {object} httpx.Envelope{data=SyncUserResponse}
 // @Failure      401 {object} httpx.Envelope
+// @Failure      422 {object} httpx.ValidationEnvelope
 // @Router       /api/v1/users/sync [post]
 // @Security     BearerAuth
 func (h *Handler) SyncUser(c *fiber.Ctx) error {
 	clerkUserID := httpx.GetUserID(c)
 	if clerkUserID == "" {
-		return c.Status(fiber.StatusUnauthorized).JSON(httpx.Envelope{Error: "unauthorized"})
+		return &httpx.ServiceError{Code: fiber.StatusUnauthorized, Message: "unauthorized"}
 	}
 
 	claims := httpx.GetClaims(c)
@@ -49,102 +48,26 @@ func (h *Handler) SyncUser(c *fiber.Ctx) error {
 		avatarURL = claims.ImageURL
 	}
 
-	output, err := h.service.SyncUser(c.Context(), SyncUserInput{
-		ClerkUserID: clerkUserID,
-		Email:       email,
-		Name:        name,
-		AvatarURL:   avatarURL,
-	})
+	// Sync is bodyless: it derives its data from the JWT claims, so we build the
+	// input via ToInput directly (no body to parse/validate).
+	input, err := SyncUserRequest{}.ToInput(clerkUserID, email, name, avatarURL)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
-	// Convert service output to response
-	var membership *MembershipResponse
-	if output.Membership != nil {
-		membership = &MembershipResponse{
-			ID:           output.Membership.ID,
-			StoreID:      output.Membership.StoreID,
-			StoreName:    output.Membership.StoreName,
-			StoreSlug:    output.Membership.StoreSlug,
-			StoreLogoURL: output.Membership.StoreLogoURL,
-			Role:         output.Membership.Role,
-			Status:       output.Membership.Status,
-			Email:        output.Membership.Email,
-			Name:         output.Membership.Name,
-			AvatarURL:    output.Membership.AvatarURL,
-			CreatedAt:    output.Membership.CreatedAt,
-		}
+	out, err := h.service.SyncUser(c.UserContext(), input)
+	if err != nil {
+		return err
+	}
 
-		// Generate presigned URL for store logo if available
-		if h.s3Client != nil && membership.StoreLogoURL != nil && *membership.StoreLogoURL != "" {
-			presignedURL, err := h.s3Client.GeneratePresignedGetURL(c.Context(), *membership.StoreLogoURL, 0)
-			if err == nil && presignedURL != "" {
-				membership.StoreLogoURL = &presignedURL
-			}
+	// Presigned URL for the store logo is a presentation concern applied to the
+	// outbound response (needs the per-request S3 client).
+	if h.s3Client != nil && out.Membership != nil &&
+		out.Membership.StoreLogoURL != nil && *out.Membership.StoreLogoURL != "" {
+		if presignedURL, perr := h.s3Client.GeneratePresignedGetURL(c.UserContext(), *out.Membership.StoreLogoURL, 0); perr == nil && presignedURL != "" {
+			out.Membership.StoreLogoURL = &presignedURL
 		}
 	}
 
-	return httpx.OK(c, SyncUserResponse{
-		UserID:       output.UserID,
-		ClerkUserID:  output.ClerkUserID,
-		Email:        output.Email,
-		Name:         output.Name,
-		AvatarURL:    output.AvatarURL,
-		Membership:   membership,
-		State:        output.State,
-		Subscription: output.Subscription,
-	})
-}
-
-// GetMe godoc
-// @Summary      Get current user in store context
-// @Description  Returns the authenticated user's membership info for the current store
-// @Tags         users
-// @Produce      json
-// @Success      200 {object} httpx.Envelope{data=GetMeResponse}
-// @Failure      401 {object} httpx.Envelope
-// @Failure      403 {object} httpx.Envelope
-// @Failure      404 {object} httpx.Envelope
-// @Router       /api/v1/stores/{storeId}/me [get]
-// @Security     BearerAuth
-func (h *Handler) GetMe(c *fiber.Ctx) error {
-	clerkUserID := httpx.GetUserID(c)
-	if clerkUserID == "" {
-		return c.Status(fiber.StatusUnauthorized).JSON(httpx.Envelope{Error: "unauthorized"})
-	}
-
-	storeID := httpx.GetStoreID(c)
-	if storeID == "" {
-		return c.Status(fiber.StatusForbidden).JSON(httpx.Envelope{Error: "no store context"})
-	}
-
-	// Get user ID from clerk ID
-	userID, err := h.service.GetUserIDByClerkID(c.Context(), clerkUserID)
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	m, err := h.service.GetMembership(c.Context(), userID)
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-	if m == nil {
-		return c.Status(fiber.StatusNotFound).JSON(httpx.Envelope{Error: "no membership found"})
-	}
-
-	return httpx.OK(c, GetMeResponse{
-		ID:        m.ID,
-		UserID:    m.UserID,
-		StoreID:   m.StoreID,
-		Email:     m.Email,
-		Name:      m.Name,
-		AvatarURL: m.AvatarURL,
-		Role:      m.Role,
-		Status:    m.Status,
-		StoreName: m.StoreName,
-		StoreSlug: m.StoreSlug,
-		CreatedAt: m.CreatedAt,
-		UpdatedAt: m.UpdatedAt,
-	})
+	return httpx.OK(c, NewSyncUserResponse(out))
 }

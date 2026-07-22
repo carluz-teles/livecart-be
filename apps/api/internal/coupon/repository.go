@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"livecart/apps/api/internal/coupon/domain"
 )
 
 type Repository struct {
@@ -24,7 +26,7 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 // ListByEvent returns every coupon attached to an event, newest first.
 // Admin-only — no active=true filter, the merchant needs to see disabled
 // rows to flip them back on.
-func (r *Repository) ListByEvent(ctx context.Context, eventID string) ([]Coupon, error) {
+func (r *Repository) ListByEvent(ctx context.Context, eventID string) ([]*domain.Coupon, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, event_id, code, type, value_cents, percent_bps,
 		       max_uses, used_count, min_purchase_cents,
@@ -38,7 +40,7 @@ func (r *Repository) ListByEvent(ctx context.Context, eventID string) ([]Coupon,
 	}
 	defer rows.Close()
 
-	out := make([]Coupon, 0)
+	out := make([]*domain.Coupon, 0)
 	for rows.Next() {
 		c, err := scanCoupon(rows)
 		if err != nil {
@@ -52,7 +54,7 @@ func (r *Repository) ListByEvent(ctx context.Context, eventID string) ([]Coupon,
 // GetByID returns the coupon when it belongs to the supplied event. The
 // double constraint (id + event_id) lets handlers safely use a single query
 // to enforce both existence and tenancy in one round-trip.
-func (r *Repository) GetByID(ctx context.Context, id, eventID string) (*Coupon, error) {
+func (r *Repository) GetByID(ctx context.Context, id, eventID string) (*domain.Coupon, error) {
 	row := r.db.QueryRow(ctx, `
 		SELECT id, event_id, code, type, value_cents, percent_bps,
 		       max_uses, used_count, min_purchase_cents,
@@ -67,7 +69,7 @@ func (r *Repository) GetByID(ctx context.Context, id, eventID string) (*Coupon, 
 	if err != nil {
 		return nil, err
 	}
-	return &c, nil
+	return c, nil
 }
 
 // EventExistsForStore verifies the eventId path param actually belongs to
@@ -94,7 +96,7 @@ type CreateParams struct {
 	Active           bool
 }
 
-func (r *Repository) Create(ctx context.Context, p CreateParams) (*Coupon, error) {
+func (r *Repository) Create(ctx context.Context, p CreateParams) (*domain.Coupon, error) {
 	row := r.db.QueryRow(ctx, `
 		INSERT INTO coupons (
 			event_id, code, type, value_cents, percent_bps,
@@ -112,7 +114,7 @@ func (r *Repository) Create(ctx context.Context, p CreateParams) (*Coupon, error
 	if err != nil {
 		return nil, fmt.Errorf("creating coupon: %w", err)
 	}
-	return &c, nil
+	return c, nil
 }
 
 type UpdateParams struct {
@@ -133,7 +135,7 @@ type UpdateParams struct {
 
 // Update builds a dynamic SET clause so the merchant can flip a single field
 // without resending the whole row. Returns nil when no row matched.
-func (r *Repository) Update(ctx context.Context, p UpdateParams) (*Coupon, error) {
+func (r *Repository) Update(ctx context.Context, p UpdateParams) (*domain.Coupon, error) {
 	sets := make([]string, 0, 8)
 	args := make([]any, 0, 10)
 	idx := 1
@@ -203,7 +205,7 @@ func (r *Repository) Update(ctx context.Context, p UpdateParams) (*Coupon, error
 	if err != nil {
 		return nil, err
 	}
-	return &c, nil
+	return c, nil
 }
 
 // Delete drops the coupon. Returns false when no row matched (handler maps
@@ -319,7 +321,7 @@ func (r *Repository) LockCouponByEventCodeTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	eventID, code string,
-) (*Coupon, error) {
+) (*domain.Coupon, error) {
 	const q = `
 		SELECT id, event_id, code, type, value_cents, percent_bps,
 		       max_uses, used_count, min_purchase_cents,
@@ -336,7 +338,7 @@ func (r *Repository) LockCouponByEventCodeTx(
 	if err != nil {
 		return nil, err
 	}
-	return &c, nil
+	return c, nil
 }
 
 // LockCouponByIDTx is the dual of LockCouponByEventCodeTx, used by the
@@ -347,7 +349,7 @@ func (r *Repository) LockCouponByIDTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	id string,
-) (*Coupon, error) {
+) (*domain.Coupon, error) {
 	const q = `
 		SELECT id, event_id, code, type, value_cents, percent_bps,
 		       max_uses, used_count, min_purchase_cents,
@@ -364,7 +366,7 @@ func (r *Repository) LockCouponByIDTx(
 	if err != nil {
 		return nil, err
 	}
-	return &c, nil
+	return c, nil
 }
 
 func (r *Repository) InsertReservedRedemptionTx(
@@ -504,7 +506,7 @@ func (r *Repository) MarkRedemptionRefundedTx(ctx context.Context, tx pgx.Tx, re
 
 // GetCouponByID is a non-locked read used by the shipping-change re-eval —
 // we don't decrement used_count there, so no row lock needed.
-func (r *Repository) GetCouponByID(ctx context.Context, id string) (*Coupon, error) {
+func (r *Repository) GetCouponByID(ctx context.Context, id string) (*domain.Coupon, error) {
 	const q = `
 		SELECT id, event_id, code, type, value_cents, percent_bps,
 		       max_uses, used_count, min_purchase_cents,
@@ -520,7 +522,7 @@ func (r *Repository) GetCouponByID(ctx context.Context, id string) (*Coupon, err
 	if err != nil {
 		return nil, err
 	}
-	return &c, nil
+	return c, nil
 }
 
 // GetCartShippingCostCents fetches just the cart's current shipping cost.
@@ -666,51 +668,77 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanCoupon(s rowScanner) (Coupon, error) {
+// scanCoupon maps a coupons row to the domain entity (Reconstruct). This is
+// the repository's inbound mapper: DB row → aggregate.
+func scanCoupon(s rowScanner) (*domain.Coupon, error) {
 	var (
-		c          Coupon
-		typeStr    string
-		eventID    pgtype.UUID
-		idVal      pgtype.UUID
-		validFrom  pgtype.Timestamptz
-		validUntil pgtype.Timestamptz
-		maxUses    pgtype.Int4
+		code             string
+		typeStr          string
+		valueCents       int64
+		percentBPS       int
+		usedCount        int
+		minPurchaseCents int64
+		active           bool
+		createdAt        time.Time
+		updatedAt        time.Time
+		eventID          pgtype.UUID
+		idVal            pgtype.UUID
+		validFrom        pgtype.Timestamptz
+		validUntil       pgtype.Timestamptz
+		maxUses          pgtype.Int4
 	)
 	err := s.Scan(
 		&idVal,
 		&eventID,
-		&c.Code,
+		&code,
 		&typeStr,
-		&c.ValueCents,
-		&c.PercentBPS,
+		&valueCents,
+		&percentBPS,
 		&maxUses,
-		&c.UsedCount,
-		&c.MinPurchaseCents,
+		&usedCount,
+		&minPurchaseCents,
 		&validFrom,
 		&validUntil,
-		&c.Active,
-		&c.CreatedAt,
-		&c.UpdatedAt,
+		&active,
+		&createdAt,
+		&updatedAt,
 	)
 	if err != nil {
-		return c, err
+		return nil, err
 	}
-	c.ID = uuid.UUID(idVal.Bytes).String()
-	c.EventID = uuid.UUID(eventID.Bytes).String()
-	c.Type = Type(typeStr)
+
+	var maxUsesPtr *int
 	if maxUses.Valid {
 		v := int(maxUses.Int32)
-		c.MaxUses = &v
+		maxUsesPtr = &v
 	}
+	var validFromPtr *time.Time
 	if validFrom.Valid {
 		t := validFrom.Time
-		c.ValidFrom = &t
+		validFromPtr = &t
 	}
+	var validUntilPtr *time.Time
 	if validUntil.Valid {
 		t := validUntil.Time
-		c.ValidUntil = &t
+		validUntilPtr = &t
 	}
-	return c, nil
+
+	return domain.Reconstruct(
+		uuid.UUID(idVal.Bytes).String(),
+		uuid.UUID(eventID.Bytes).String(),
+		code,
+		domain.Type(typeStr),
+		valueCents,
+		percentBPS,
+		maxUsesPtr,
+		usedCount,
+		minPurchaseCents,
+		validFromPtr,
+		validUntilPtr,
+		active,
+		createdAt,
+		updatedAt,
+	), nil
 }
 
 func nullableInt(p *int) any {

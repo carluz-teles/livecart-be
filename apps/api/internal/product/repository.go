@@ -488,7 +488,7 @@ func (r *Repository) ListRegisteredExternalIDs(ctx context.Context, storeID vo.S
 	return out, rows.Err()
 }
 
-func (r *Repository) GetStats(ctx context.Context, storeID vo.StoreID) (ProductStatsOutput, error) {
+func (r *Repository) GetStats(ctx context.Context, storeID vo.StoreID) (ProductStats, error) {
 	query := `
 		SELECT
 			COUNT(*) as total_products,
@@ -499,7 +499,7 @@ func (r *Repository) GetStats(ctx context.Context, storeID vo.StoreID) (ProductS
 		WHERE store_id = $1
 	`
 
-	var stats ProductStatsOutput
+	var stats ProductStats
 	err := r.pool.QueryRow(ctx, query, storeID.ToPgUUID()).Scan(
 		&stats.TotalProducts,
 		&stats.ActiveCount,
@@ -507,7 +507,7 @@ func (r *Repository) GetStats(ctx context.Context, storeID vo.StoreID) (ProductS
 		&stats.StockValue,
 	)
 	if err != nil {
-		return ProductStatsOutput{}, fmt.Errorf("getting product stats: %w", err)
+		return ProductStats{}, fmt.Errorf("getting product stats: %w", err)
 	}
 
 	return stats, nil

@@ -10,7 +10,9 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"livecart/apps/api/db/sqlc"
+	storedomain "livecart/apps/api/internal/store/domain"
 	"livecart/apps/api/lib/httpx"
+	vo "livecart/apps/api/lib/valueobject"
 )
 
 type Repository struct {
@@ -21,19 +23,19 @@ func NewRepository(q *sqlc.Queries) *Repository {
 	return &Repository{q: q}
 }
 
-func (r *Repository) Create(ctx context.Context, params CreateStoreParams) (StoreRow, error) {
+func (r *Repository) Create(ctx context.Context, params CreateStoreParams) (*storedomain.Store, error) {
 	row, err := r.q.CreateStore(ctx, sqlc.CreateStoreParams{
 		Name: params.Name,
 		Slug: params.Slug,
 	})
 	if err != nil {
-		return StoreRow{}, fmt.Errorf("inserting store: %w", err)
+		return nil, fmt.Errorf("inserting store: %w", err)
 	}
 
-	return toStoreRow(row), nil
+	return rowToEntity(row), nil
 }
 
-func (r *Repository) GetByID(ctx context.Context, id string) (*StoreRow, error) {
+func (r *Repository) GetByID(ctx context.Context, id string) (*storedomain.Store, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return nil, err
@@ -47,8 +49,7 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*StoreRow, error) 
 		return nil, fmt.Errorf("getting store: %w", err)
 	}
 
-	out := toStoreRow(row)
-	return &out, nil
+	return rowToEntity(row), nil
 }
 
 // GetSlugByID resolves only the slug — lookup barato usado para enriquecer
@@ -65,7 +66,7 @@ func (r *Repository) GetSlugByID(ctx context.Context, id string) (string, error)
 	return slug, nil
 }
 
-func (r *Repository) GetBySlug(ctx context.Context, slug string) (*StoreRow, error) {
+func (r *Repository) GetBySlug(ctx context.Context, slug string) (*storedomain.Store, error) {
 	row, err := r.q.GetStoreBySlug(ctx, slug)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -74,14 +75,13 @@ func (r *Repository) GetBySlug(ctx context.Context, slug string) (*StoreRow, err
 		return nil, fmt.Errorf("getting store by slug: %w", err)
 	}
 
-	out := toStoreRow(row)
-	return &out, nil
+	return rowToEntity(row), nil
 }
 
-func (r *Repository) Update(ctx context.Context, params UpdateStoreParams) (StoreRow, error) {
+func (r *Repository) Update(ctx context.Context, params UpdateStoreParams) (*storedomain.Store, error) {
 	uid, err := parseUUID(params.ID)
 	if err != nil {
-		return StoreRow{}, err
+		return nil, err
 	}
 
 	row, err := r.q.UpdateStore(ctx, sqlc.UpdateStoreParams{
@@ -106,18 +106,18 @@ func (r *Repository) Update(ctx context.Context, params UpdateStoreParams) (Stor
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return StoreRow{}, httpx.ErrNotFound("store not found")
+			return nil, httpx.ErrNotFound("store not found")
 		}
-		return StoreRow{}, fmt.Errorf("updating store: %w", err)
+		return nil, fmt.Errorf("updating store: %w", err)
 	}
 
-	return toStoreRow(row), nil
+	return rowToEntity(row), nil
 }
 
-func (r *Repository) UpdateShippingDefaults(ctx context.Context, params UpdateShippingDefaultsParams) (StoreRow, error) {
+func (r *Repository) UpdateShippingDefaults(ctx context.Context, params UpdateShippingDefaultsParams) (*storedomain.Store, error) {
 	uid, err := parseUUID(params.ID)
 	if err != nil {
-		return StoreRow{}, err
+		return nil, err
 	}
 
 	row, err := r.q.UpdateStoreShippingDefaults(ctx, sqlc.UpdateStoreShippingDefaultsParams{
@@ -130,24 +130,24 @@ func (r *Repository) UpdateShippingDefaults(ctx context.Context, params UpdateSh
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return StoreRow{}, httpx.ErrNotFound("store not found")
+			return nil, httpx.ErrNotFound("store not found")
 		}
-		return StoreRow{}, fmt.Errorf("updating shipping defaults: %w", err)
+		return nil, fmt.Errorf("updating shipping defaults: %w", err)
 	}
 
-	return toStoreRow(row), nil
+	return rowToEntity(row), nil
 }
 
-func (r *Repository) UpdateCartSettings(ctx context.Context, params UpdateCartSettingsParams) (StoreRow, error) {
+func (r *Repository) UpdateCartSettings(ctx context.Context, params UpdateCartSettingsParams) (*storedomain.Store, error) {
 	uid, err := parseUUID(params.ID)
 	if err != nil {
-		return StoreRow{}, err
+		return nil, err
 	}
 
 	// Convert checkout methods to JSON
 	checkoutMethodsJSON, err := json.Marshal(params.CheckoutSendMethods)
 	if err != nil {
-		return StoreRow{}, fmt.Errorf("marshaling checkout methods: %w", err)
+		return nil, fmt.Errorf("marshaling checkout methods: %w", err)
 	}
 
 	row, err := r.q.UpdateStoreCartSettings(ctx, sqlc.UpdateStoreCartSettingsParams{
@@ -167,15 +167,15 @@ func (r *Repository) UpdateCartSettings(ctx context.Context, params UpdateCartSe
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return StoreRow{}, httpx.ErrNotFound("store not found")
+			return nil, httpx.ErrNotFound("store not found")
 		}
-		return StoreRow{}, fmt.Errorf("updating cart settings: %w", err)
+		return nil, fmt.Errorf("updating cart settings: %w", err)
 	}
 
-	return toStoreRow(row), nil
+	return rowToEntity(row), nil
 }
 
-func (r *Repository) GetByUserID(ctx context.Context, userID string) (*StoreRow, error) {
+func (r *Repository) GetByUserID(ctx context.Context, userID string) (*storedomain.Store, error) {
 	uid, err := parseUUID(userID)
 	if err != nil {
 		return nil, err
@@ -189,14 +189,13 @@ func (r *Repository) GetByUserID(ctx context.Context, userID string) (*StoreRow,
 		return nil, fmt.Errorf("getting store by user id: %w", err)
 	}
 
-	out := toStoreRow(row)
-	return &out, nil
+	return rowToEntity(row), nil
 }
 
-func (r *Repository) UpdateLogoURL(ctx context.Context, storeID string, logoURL string) (StoreRow, error) {
+func (r *Repository) UpdateLogoURL(ctx context.Context, storeID string, logoURL string) (*storedomain.Store, error) {
 	uid, err := parseUUID(storeID)
 	if err != nil {
-		return StoreRow{}, err
+		return nil, err
 	}
 
 	row, err := r.q.UpdateStoreLogoURL(ctx, sqlc.UpdateStoreLogoURLParams{
@@ -205,74 +204,38 @@ func (r *Repository) UpdateLogoURL(ctx context.Context, storeID string, logoURL 
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return StoreRow{}, httpx.ErrNotFound("store not found")
+			return nil, httpx.ErrNotFound("store not found")
 		}
-		return StoreRow{}, fmt.Errorf("updating logo url: %w", err)
+		return nil, fmt.Errorf("updating logo url: %w", err)
 	}
 
-	return toStoreRow(row), nil
+	return rowToEntity(row), nil
 }
 
-func toStoreRow(row sqlc.Store) StoreRow {
-	var whatsapp, email, sms *string
-	if row.WhatsappNumber.Valid {
-		whatsapp = &row.WhatsappNumber.String
-	}
-	if row.EmailAddress.Valid {
-		email = &row.EmailAddress.String
-	}
-	if row.SmsNumber.Valid {
-		sms = &row.SmsNumber.String
-	}
+// rowToEntity maps a persisted sqlc.Store row into the domain entity
+// (Reconstruct — no validation, the row is trusted).
+func rowToEntity(row sqlc.Store) *storedomain.Store {
+	whatsapp := textPtr(row.WhatsappNumber)
+	email := textPtr(row.EmailAddress)
+	sms := textPtr(row.SmsNumber)
+	description := textPtr(row.Description)
+	website := textPtr(row.Website)
+	logoURL := textPtr(row.LogoUrl)
+	cnpj := textPtr(row.Cnpj)
 
-	var description, website, logoURL *string
-	if row.Description.Valid {
-		description = &row.Description.String
-	}
-	if row.Website.Valid {
-		website = &row.Website.String
-	}
-	if row.LogoUrl.Valid {
-		logoURL = &row.LogoUrl.String
-	}
+	address := storedomain.ReconstructAddress(
+		textStr(row.AddressStreet),
+		textStr(row.AddressNumber),
+		textStr(row.AddressComplement),
+		textStr(row.AddressDistrict),
+		textStr(row.AddressCity),
+		textStr(row.AddressState),
+		textStr(row.AddressZip),
+		textStr(row.AddressCountry),
+		textStr(row.AddressStateRegister),
+	)
 
-	var addressStreet, addressCity, addressState, addressZip, addressCountry *string
-	if row.AddressStreet.Valid {
-		addressStreet = &row.AddressStreet.String
-	}
-	if row.AddressCity.Valid {
-		addressCity = &row.AddressCity.String
-	}
-	if row.AddressState.Valid {
-		addressState = &row.AddressState.String
-	}
-	if row.AddressZip.Valid {
-		addressZip = &row.AddressZip.String
-	}
-	if row.AddressCountry.Valid {
-		addressCountry = &row.AddressCountry.String
-	}
-
-	var addressNumber, addressComplement, addressDistrict, addressStateRegister *string
-	if row.AddressNumber.Valid {
-		addressNumber = &row.AddressNumber.String
-	}
-	if row.AddressComplement.Valid {
-		addressComplement = &row.AddressComplement.String
-	}
-	if row.AddressDistrict.Valid {
-		addressDistrict = &row.AddressDistrict.String
-	}
-	if row.AddressStateRegister.Valid {
-		addressStateRegister = &row.AddressStateRegister.String
-	}
-
-	var cnpj *string
-	if row.Cnpj.Valid {
-		cnpj = &row.Cnpj.String
-	}
-
-	// Parse checkout send methods from JSON
+	// Parse checkout send methods from JSON (fallback to the platform default).
 	var checkoutMethods []string
 	if len(row.CheckoutSendMethods) > 0 {
 		_ = json.Unmarshal(row.CheckoutSendMethods, &checkoutMethods)
@@ -281,51 +244,62 @@ func toStoreRow(row sqlc.Store) StoreRow {
 		checkoutMethods = []string{"public_link", "manual"}
 	}
 
-	return StoreRow{
-		ID:                   row.ID.String(),
-		Name:                 row.Name,
-		Slug:                 row.Slug,
-		Active:               row.Active.Bool,
-		WhatsappNumber:       whatsapp,
-		EmailAddress:         email,
-		SMSNumber:            sms,
-		Description:          description,
-		Website:              website,
-		LogoURL:              logoURL,
-		AddressStreet:        addressStreet,
-		AddressNumber:        addressNumber,
-		AddressComplement:    addressComplement,
-		AddressDistrict:      addressDistrict,
-		AddressCity:          addressCity,
-		AddressState:         addressState,
-		AddressZip:           addressZip,
-		AddressCountry:       addressCountry,
-		AddressStateRegister: addressStateRegister,
-		CNPJ:                 cnpj,
-		CartSettings: CartSettingsDTO{
-			Enabled:                   row.CartEnabled,
-			ExpirationMinutes:         int(row.CartExpirationMinutes),
-			ReserveStock:              row.CartReserveStock,
-			AllowStorePickup:          row.AllowStorePickup,
-			MaxQuantityPerItem:        int(row.CartMaxQuantityPerItem),
-			AllowEdit:                 row.CartAllowEdit,
-			CheckoutSendMethods:       checkoutMethods,
-			RealTimeCart:              row.CartRealTime,
-			SendOnLiveEnd:             row.SendOnLiveEnd,
-			MessageCooldownSeconds:    int(row.CartMessageCooldownSeconds),
-			SendExpirationReminder:    row.CartSendExpirationReminder,
-			ExpirationReminderMinutes: int(row.CartExpirationReminderMinutes),
-		},
-		ShippingDefaults: ShippingDefaultsDTO{
-			PackageWeightGrams: int(row.DefaultPackageWeightGrams),
-			PackageFormat:      defaultPackageFormat(row.DefaultPackageFormat),
-			HeightCm:           pgInt4ToIntPtr(row.DefaultHeightCm),
-			WidthCm:            pgInt4ToIntPtr(row.DefaultWidthCm),
-			LengthCm:           pgInt4ToIntPtr(row.DefaultLengthCm),
-		},
-		CreatedAt: row.CreatedAt.Time,
-		UpdatedAt: row.UpdatedAt.Time,
+	cartSettings := storedomain.ReconstructCartSettings(
+		row.CartEnabled,
+		int(row.CartExpirationMinutes),
+		row.CartReserveStock,
+		row.AllowStorePickup,
+		int(row.CartMaxQuantityPerItem),
+		row.CartAllowEdit,
+		checkoutMethods,
+		row.CartRealTime,
+		row.SendOnLiveEnd,
+		int(row.CartMessageCooldownSeconds),
+		row.CartSendExpirationReminder,
+		int(row.CartExpirationReminderMinutes),
+	)
+
+	shippingDefaults := storedomain.ReconstructShippingDefaults(
+		int(row.DefaultPackageWeightGrams),
+		defaultPackageFormat(row.DefaultPackageFormat),
+		pgInt4ToIntPtr(row.DefaultHeightCm),
+		pgInt4ToIntPtr(row.DefaultWidthCm),
+		pgInt4ToIntPtr(row.DefaultLengthCm),
+	)
+
+	return storedomain.Reconstruct(
+		vo.MustNewStoreID(row.ID.String()),
+		row.Name,
+		storedomain.MustSlug(row.Slug),
+		row.Active.Bool,
+		whatsapp,
+		email,
+		sms,
+		description,
+		website,
+		logoURL,
+		cnpj,
+		address,
+		cartSettings,
+		shippingDefaults,
+		row.CreatedAt.Time,
+		row.UpdatedAt.Time,
+	)
+}
+
+func textPtr(t pgtype.Text) *string {
+	if !t.Valid {
+		return nil
 	}
+	s := t.String
+	return &s
+}
+
+func textStr(t pgtype.Text) string {
+	if !t.Valid {
+		return ""
+	}
+	return t.String
 }
 
 func defaultPackageFormat(s string) string {

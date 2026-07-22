@@ -1,22 +1,19 @@
 package productgroup
 
 import (
-	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
-	productdomain "livecart/apps/api/internal/product/domain"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/query"
 	vo "livecart/apps/api/lib/valueobject"
 )
 
 type Handler struct {
-	service  *Service
-	validate *validator.Validate
+	service *Service
 }
 
-func NewHandler(service *Service, validate *validator.Validate) *Handler {
-	return &Handler{service: service, validate: validate}
+func NewHandler(service *Service) *Handler {
+	return &Handler{service: service}
 }
 
 func (h *Handler) RegisterRoutes(router fiber.Router) {
@@ -45,37 +42,18 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Security     BearerAuth
 func (h *Handler) Create(c *fiber.Ctx) error {
 	var req CreateGroupRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
-	}
-
-	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
+	input, err := req.ToInput(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return err
 	}
-
-	source, err := productdomain.NewExternalSource(req.ExternalSource)
+	result, err := h.service.Create(c.UserContext(), input)
 	if err != nil {
-		return httpx.BadRequest(c, "invalid external source")
+		return err
 	}
-
-	out, err := h.service.Create(c.Context(), CreateGroupInput{
-		StoreID:        storeID,
-		Name:           req.Name,
-		Description:    req.Description,
-		ExternalID:     req.ExternalID,
-		ExternalSource: source,
-		Options:        req.Options,
-		GroupImages:    req.GroupImages,
-		Variants:       req.Variants,
-	})
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-	return httpx.Created(c, out)
+	return httpx.Created(c, NewCreateGroupResponse(result))
 }
 
 // GetByID godoc
@@ -91,17 +69,17 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 func (h *Handler) GetByID(c *fiber.Ctx) error {
 	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return httpx.ErrBadRequest("invalid store ID")
 	}
 	id, err := vo.NewID(c.Params("id"))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid group ID")
+		return httpx.ErrBadRequest("invalid group ID")
 	}
-	out, err := h.service.GetByID(c.Context(), id, storeID)
+	detail, err := h.service.GetByID(c.UserContext(), id, storeID)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.OK(c, out)
+	return httpx.OK(c, NewGroupDetailResponse(detail))
 }
 
 // List godoc
@@ -117,7 +95,7 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 func (h *Handler) List(c *fiber.Ctx) error {
 	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return httpx.ErrBadRequest("invalid store ID")
 	}
 	pag := query.Pagination{
 		Page:  c.QueryInt("page", query.DefaultPage),
@@ -125,14 +103,11 @@ func (h *Handler) List(c *fiber.Ctx) error {
 	}
 	pag.Normalize()
 
-	groups, total, err := h.service.List(c.Context(), storeID, pag.Limit, pag.Offset())
+	groups, total, err := h.service.List(c.UserContext(), storeID, pag.Limit, pag.Offset())
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.OK(c, ListGroupsResponse{
-		Data:       groups,
-		Pagination: query.NewPaginationResponse(pag, total),
-	})
+	return httpx.OK(c, NewListGroupsResponse(groups, query.NewPaginationResponse(pag, total)))
 }
 
 // Update godoc
@@ -144,29 +119,27 @@ func (h *Handler) List(c *fiber.Ctx) error {
 // @Param        id path string true "Group UUID"
 // @Param        request body UpdateGroupRequest true "Group update"
 // @Success      200 {object} httpx.Envelope{data=GroupDetailResponse}
+// @Failure      422 {object} httpx.ValidationEnvelope
 // @Router       /api/v1/stores/{storeId}/product-groups/{id} [put]
 // @Security     BearerAuth
 func (h *Handler) Update(c *fiber.Ctx) error {
 	var req UpdateGroupRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
 	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return httpx.ErrBadRequest("invalid store ID")
 	}
 	id, err := vo.NewID(c.Params("id"))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid group ID")
+		return httpx.ErrBadRequest("invalid group ID")
 	}
-	out, err := h.service.Update(c.Context(), id, storeID, req.Name, req.Description)
+	detail, err := h.service.Update(c.UserContext(), id, storeID, req.Name, req.Description)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.OK(c, out)
+	return httpx.OK(c, NewGroupDetailResponse(detail))
 }
 
 // Delete godoc
@@ -180,15 +153,15 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 func (h *Handler) Delete(c *fiber.Ctx) error {
 	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return httpx.ErrBadRequest("invalid store ID")
 	}
 	idStr := c.Params("id")
 	id, err := vo.NewID(idStr)
 	if err != nil {
-		return httpx.BadRequest(c, "invalid group ID")
+		return httpx.ErrBadRequest("invalid group ID")
 	}
-	if err := h.service.Delete(c.Context(), id, storeID); err != nil {
-		return httpx.HandleServiceError(c, err)
+	if err := h.service.Delete(c.UserContext(), id, storeID); err != nil {
+		return err
 	}
 	return httpx.Deleted(c, idStr)
 }
@@ -202,29 +175,27 @@ func (h *Handler) Delete(c *fiber.Ctx) error {
 // @Param        id path string true "Group UUID"
 // @Param        request body AddImageRequest true "Image payload"
 // @Success      201 {object} httpx.Envelope{data=ImageResponse}
+// @Failure      422 {object} httpx.ValidationEnvelope
 // @Router       /api/v1/stores/{storeId}/product-groups/{id}/images [post]
 // @Security     BearerAuth
 func (h *Handler) AddImage(c *fiber.Ctx) error {
 	var req AddImageRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
 	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return httpx.ErrBadRequest("invalid store ID")
 	}
 	id, err := vo.NewID(c.Params("id"))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid group ID")
+		return httpx.ErrBadRequest("invalid group ID")
 	}
-	out, err := h.service.AddGroupImage(c.Context(), id, storeID, req.URL, req.Position)
+	img, err := h.service.AddGroupImage(c.UserContext(), id, storeID, req.URL, req.Position)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.Created(c, out)
+	return httpx.Created(c, NewImageResponse(img))
 }
 
 // DeleteImage godoc
@@ -239,19 +210,19 @@ func (h *Handler) AddImage(c *fiber.Ctx) error {
 func (h *Handler) DeleteImage(c *fiber.Ctx) error {
 	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return httpx.ErrBadRequest("invalid store ID")
 	}
 	groupID, err := vo.NewID(c.Params("id"))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid group ID")
+		return httpx.ErrBadRequest("invalid group ID")
 	}
 	imageIDStr := c.Params("imageId")
 	imageID, err := vo.NewID(imageIDStr)
 	if err != nil {
-		return httpx.BadRequest(c, "invalid image ID")
+		return httpx.ErrBadRequest("invalid image ID")
 	}
-	if err := h.service.DeleteGroupImage(c.Context(), imageID, groupID, storeID); err != nil {
-		return httpx.HandleServiceError(c, err)
+	if err := h.service.DeleteGroupImage(c.UserContext(), imageID, groupID, storeID); err != nil {
+		return err
 	}
 	return httpx.Deleted(c, imageIDStr)
 }

@@ -52,12 +52,12 @@ func (h *WebhookHandler) HandleStripe(c *fiber.Ctx) error {
 
 	var event StripeEvent
 	if err := json.Unmarshal(payload, &event); err != nil {
-		return httpx.BadRequest(c, "invalid event payload")
+		return httpx.ErrBadRequest("invalid event payload")
 	}
 
-	if err := h.service.ProcessWebhookEvent(c.Context(), &event); err != nil {
+	if err := h.service.ProcessWebhookEvent(c.UserContext(), &event); err != nil {
 		// 500 makes Stripe retry — desired for transient DB failures.
-		logger.From(c.Context(), h.logger).Error("failed to process stripe event",
+		logger.From(c.UserContext(), h.logger).Error("failed to process stripe event",
 			zap.String("event", event.ID),
 			zap.String("type", event.Type),
 			zap.Error(err),

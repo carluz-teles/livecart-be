@@ -4,12 +4,28 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	storedomain "livecart/apps/api/internal/store/domain"
 )
 
 var (
 	digitsOnly = regexp.MustCompile(`\D`)
 	ufRegex    = regexp.MustCompile(`^[A-Z]{2}$`)
 )
+
+// mergedStoreFields is the result of merging an UpdateStoreInput over the
+// current persisted store (subset semantics), ready to be persisted.
+type mergedStoreFields struct {
+	Name           string
+	WhatsappNumber string
+	EmailAddress   string
+	SMSNumber      string
+	Description    string
+	Website        string
+	LogoURL        string
+	CNPJ           string
+	Address        AddressDTO
+}
 
 // normalizeAndValidateAddress normalizes CEP/UF and returns an error when the
 // non-empty fields have invalid shape. Fields left empty pass through — the
@@ -57,8 +73,18 @@ func normalizeAndValidateCNPJ(in string) (string, error) {
 // existing values when the frontend sends a subset on PUT /stores/me.
 // Empty strings in the request mean "not sent" — to explicitly clear a
 // field the caller would need a dedicated endpoint.
-func mergeAddress(current, req AddressDTO) AddressDTO {
-	out := current
+func mergeAddress(current storedomain.Address, req AddressDTO) AddressDTO {
+	out := AddressDTO{
+		Street:        current.Street(),
+		Number:        current.Number(),
+		Complement:    current.Complement(),
+		District:      current.District(),
+		City:          current.City(),
+		State:         current.State(),
+		Zip:           current.Zip(),
+		Country:       current.Country(),
+		StateRegister: current.StateRegister(),
+	}
 	if req.Street != "" {
 		out.Street = req.Street
 	}
@@ -89,43 +115,23 @@ func mergeAddress(current, req AddressDTO) AddressDTO {
 	return out
 }
 
-// mergeUpdateStoreFields applies the same "non-empty wins" merge to the top
-// level store fields (whatsapp/email/sms/description/website/cnpj). Name
-// is not merged because it is required by the validator and always arrives
-// populated.
-func mergeUpdateStoreFields(current StoreOutput, req UpdateStoreRequest) UpdateStoreRequest {
-	out := req
-	if out.WhatsappNumber == "" {
-		out.WhatsappNumber = current.WhatsappNumber
+// normalizeUpdateStoreInput merges the incoming input with the store's current
+// persisted values (subset semantics), normalizes CEP/UF/CNPJ and returns the
+// merged fields ready to be applied. Errors carry a human-readable message
+// safe to expose via BadRequest. Name is not merged because it is required by
+// the request validator and always arrives populated.
+func normalizeUpdateStoreInput(current *storedomain.Store, input UpdateStoreInput) (mergedStoreFields, error) {
+	merged := mergedStoreFields{
+		Name:           input.Name,
+		WhatsappNumber: firstNonEmpty(input.WhatsappNumber, deref(current.WhatsappNumber())),
+		EmailAddress:   firstNonEmpty(input.EmailAddress, deref(current.EmailAddress())),
+		SMSNumber:      firstNonEmpty(input.SMSNumber, deref(current.SMSNumber())),
+		Description:    firstNonEmpty(input.Description, deref(current.Description())),
+		Website:        firstNonEmpty(input.Website, deref(current.Website())),
+		LogoURL:        firstNonEmpty(input.LogoURL, deref(current.LogoURL())),
+		CNPJ:           firstNonEmpty(input.CNPJ, deref(current.CNPJ())),
+		Address:        mergeAddress(current.Address(), input.Address),
 	}
-	if out.EmailAddress == "" {
-		out.EmailAddress = current.EmailAddress
-	}
-	if out.SMSNumber == "" {
-		out.SMSNumber = current.SMSNumber
-	}
-	if out.Description == "" {
-		out.Description = current.Description
-	}
-	if out.Website == "" {
-		out.Website = current.Website
-	}
-	if out.LogoURL == "" && current.LogoURL != nil {
-		out.LogoURL = *current.LogoURL
-	}
-	if out.CNPJ == "" {
-		out.CNPJ = current.CNPJ
-	}
-	out.Address = mergeAddress(current.Address, out.Address)
-	return out
-}
-
-// normalizeUpdateStoreRequest merges the incoming request with the store's
-// current persisted values (subset semantics), normalizes CEP/UF/CNPJ and
-// returns the merged request ready to be applied. Errors carry a
-// human-readable message safe to expose via BadRequest.
-func normalizeUpdateStoreRequest(current StoreOutput, req UpdateStoreRequest) (UpdateStoreRequest, error) {
-	merged := mergeUpdateStoreFields(current, req)
 
 	addr, err := normalizeAndValidateAddress(merged.Address)
 	if err != nil {
@@ -140,4 +146,11 @@ func normalizeUpdateStoreRequest(current StoreOutput, req UpdateStoreRequest) (U
 	merged.CNPJ = cnpj
 
 	return merged, nil
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }

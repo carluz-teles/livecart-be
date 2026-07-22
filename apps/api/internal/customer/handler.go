@@ -1,7 +1,6 @@
 package customer
 
 import (
-	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 
@@ -10,12 +9,11 @@ import (
 )
 
 type Handler struct {
-	service  *Service
-	validate *validator.Validate
+	service *Service
 }
 
-func NewHandler(service *Service, validate *validator.Validate) *Handler {
-	return &Handler{service: service, validate: validate}
+func NewHandler(service *Service) *Handler {
+	return &Handler{service: service}
 }
 
 func (h *Handler) RegisterRoutes(router fiber.Router) {
@@ -47,10 +45,8 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Router       /api/v1/stores/{storeId}/customers [get]
 // @Security     BearerAuth
 func (h *Handler) List(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-
 	input := ListCustomersInput{
-		StoreID: storeID,
+		StoreID: httpx.GetStoreID(c),
 		Search:  c.Query("search"),
 		Pagination: query.Pagination{
 			Page:  c.QueryInt("page", query.DefaultPage),
@@ -63,20 +59,12 @@ func (h *Handler) List(c *fiber.Ctx) error {
 		Filters: parseCustomerFilters(c),
 	}
 
-	output, err := h.service.List(c.Context(), input)
+	customers, pagination, total, err := h.service.List(c.UserContext(), input)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
-	responses := make([]CustomerResponse, len(output.Customers))
-	for i, o := range output.Customers {
-		responses[i] = toCustomerResponse(o)
-	}
-
-	return httpx.OK(c, ListCustomersResponse{
-		Data:       responses,
-		Pagination: query.NewPaginationResponse(output.Pagination, output.Total),
-	})
+	return httpx.OK(c, NewListCustomersResponse(customers, pagination, total))
 }
 
 // GetByID godoc
@@ -91,18 +79,17 @@ func (h *Handler) List(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/customers/{id} [get]
 // @Security     BearerAuth
 func (h *Handler) GetByID(c *fiber.Ctx) error {
-	idStr := c.Params("id")
-	id, err := uuid.Parse(idStr)
+	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid customer id")
+		return httpx.ErrBadRequest("invalid customer id")
 	}
 
-	output, err := h.service.GetByID(c.Context(), id)
+	cust, err := h.service.GetByID(c.UserContext(), id)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
-	return httpx.OK(c, toCustomerResponse(*output))
+	return httpx.OK(c, NewCustomerResponse(cust))
 }
 
 // GetStats godoc
@@ -115,18 +102,12 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/customers/stats [get]
 // @Security     BearerAuth
 func (h *Handler) GetStats(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-
-	output, err := h.service.GetStats(c.Context(), storeID)
+	stats, err := h.service.GetStats(c.UserContext(), httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
-	return httpx.OK(c, CustomerStatsResponse{
-		TotalCustomers:      output.TotalCustomers,
-		ActiveCustomers:     output.ActiveCustomers,
-		AvgSpentPerCustomer: output.AvgSpentPerCustomer,
-	})
+	return httpx.OK(c, NewCustomerStatsResponse(stats))
 }
 
 // ListOrders godoc
@@ -138,25 +119,24 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 // @Param        id path string true "Customer UUID"
 // @Param        limit query int false "Items per page" default(20)
 // @Param        offset query int false "Offset" default(0)
-// @Success      200 {object} httpx.Envelope{data=[]CustomerOrderOutput}
+// @Success      200 {object} httpx.Envelope{data=[]CustomerOrderResponse}
 // @Router       /api/v1/stores/{storeId}/customers/{id}/orders [get]
 // @Security     BearerAuth
 func (h *Handler) ListOrders(c *fiber.Ctx) error {
-	idStr := c.Params("id")
-	id, err := uuid.Parse(idStr)
+	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid customer id")
+		return httpx.ErrBadRequest("invalid customer id")
 	}
 
 	limit := int32(c.QueryInt("limit", 20))
 	offset := int32(c.QueryInt("offset", 0))
 
-	orders, err := h.service.ListOrders(c.Context(), id, limit, offset)
+	orders, err := h.service.ListOrders(c.UserContext(), id, limit, offset)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
-	return httpx.OK(c, orders)
+	return httpx.OK(c, NewListCustomerOrdersResponse(orders))
 }
 
 func parseCustomerFilters(c *fiber.Ctx) CustomerFilters {
@@ -181,31 +161,4 @@ func parseCustomerFilters(c *fiber.Ctx) CustomerFilters {
 	}
 
 	return filters
-}
-
-func toCustomerResponse(o CustomerOutput) CustomerResponse {
-	resp := CustomerResponse{
-		ID:           o.ID,
-		Handle:       o.Handle,
-		Email:        o.Email,
-		Phone:        o.Phone,
-		Name:         o.Name,
-		Document:     o.Document,
-		TotalOrders:  o.TotalOrders,
-		TotalSpent:   o.TotalSpent,
-		LastOrderAt:  o.LastOrderAt,
-		FirstOrderAt: o.FirstOrderAt,
-	}
-	if o.LastShippingAddress != nil {
-		resp.LastShippingAddress = &CustomerShippingAddressResponse{
-			ZipCode:      o.LastShippingAddress.ZipCode,
-			Street:       o.LastShippingAddress.Street,
-			Number:       o.LastShippingAddress.Number,
-			Complement:   o.LastShippingAddress.Complement,
-			Neighborhood: o.LastShippingAddress.Neighborhood,
-			City:         o.LastShippingAddress.City,
-			State:        o.LastShippingAddress.State,
-		}
-	}
-	return resp
 }

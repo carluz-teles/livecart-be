@@ -55,7 +55,7 @@ func (r *Repository) GetByExternalID(ctx context.Context, storeID vo.StoreID, so
 	return rowToGroup(row)
 }
 
-func (r *Repository) ListByStore(ctx context.Context, storeID vo.StoreID, limit, offset int) ([]GroupSummaryResponse, int, error) {
+func (r *Repository) ListByStore(ctx context.Context, storeID vo.StoreID, limit, offset int) ([]domain.Summary, int, error) {
 	total, err := r.q.CountProductGroupsByStore(ctx, storeID.ToPgUUID())
 	if err != nil {
 		return nil, 0, fmt.Errorf("counting groups: %w", err)
@@ -68,9 +68,9 @@ func (r *Repository) ListByStore(ctx context.Context, storeID vo.StoreID, limit,
 	if err != nil {
 		return nil, 0, fmt.Errorf("listing groups: %w", err)
 	}
-	out := make([]GroupSummaryResponse, len(rows))
+	out := make([]domain.Summary, len(rows))
 	for i, row := range rows {
-		out[i] = GroupSummaryResponse{
+		out[i] = domain.Summary{
 			ID:             pgUUIDToString(row.ID),
 			Name:           row.Name,
 			Description:    textOrEmpty(row.Description),
@@ -141,28 +141,28 @@ func (r *Repository) LoadOptions(ctx context.Context, groupID vo.ID) ([]domain.O
 	return out, nil
 }
 
-func (r *Repository) ListGroupImages(ctx context.Context, groupID vo.ID) ([]ImageResponse, error) {
+func (r *Repository) ListGroupImages(ctx context.Context, groupID vo.ID) ([]domain.Image, error) {
 	rows, err := r.q.ListProductGroupImagesByGroup(ctx, groupID.ToPgUUID())
 	if err != nil {
 		return nil, fmt.Errorf("listing group images: %w", err)
 	}
-	out := make([]ImageResponse, len(rows))
+	out := make([]domain.Image, len(rows))
 	for i, row := range rows {
-		out[i] = ImageResponse{ID: pgUUIDToString(row.ID), URL: row.Url, Position: int(row.Position)}
+		out[i] = domain.Image{ID: pgUUIDToString(row.ID), URL: row.Url, Position: int(row.Position)}
 	}
 	return out, nil
 }
 
-func (r *Repository) AddGroupImage(ctx context.Context, groupID vo.ID, url string, position int) (ImageResponse, error) {
+func (r *Repository) AddGroupImage(ctx context.Context, groupID vo.ID, url string, position int) (domain.Image, error) {
 	row, err := r.q.CreateProductGroupImage(ctx, sqlc.CreateProductGroupImageParams{
 		GroupID:  groupID.ToPgUUID(),
 		Url:      url,
 		Position: int32(position),
 	})
 	if err != nil {
-		return ImageResponse{}, fmt.Errorf("inserting group image: %w", err)
+		return domain.Image{}, fmt.Errorf("inserting group image: %w", err)
 	}
-	return ImageResponse{ID: pgUUIDToString(row.ID), URL: row.Url, Position: int(row.Position)}, nil
+	return domain.Image{ID: pgUUIDToString(row.ID), URL: row.Url, Position: int(row.Position)}, nil
 }
 
 func (r *Repository) DeleteGroupImage(ctx context.Context, imageID vo.ID, groupID vo.ID) error {

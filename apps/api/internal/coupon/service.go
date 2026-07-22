@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/coupon/domain"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
 )
@@ -30,14 +31,14 @@ func NewService(repo *Repository, pool *pgxpool.Pool, logger *zap.Logger) *Servi
 // event must belong to the caller's store. We do this check on every
 // admin-side handler because eventId is a path param and could otherwise
 // leak across stores.
-func (s *Service) List(ctx context.Context, eventID, storeID string) ([]Coupon, error) {
+func (s *Service) List(ctx context.Context, eventID, storeID string) ([]*domain.Coupon, error) {
 	if err := s.assertEventOwnership(ctx, eventID, storeID); err != nil {
 		return nil, err
 	}
 	return s.repo.ListByEvent(ctx, eventID)
 }
 
-func (s *Service) Get(ctx context.Context, id, eventID, storeID string) (*Coupon, error) {
+func (s *Service) Get(ctx context.Context, id, eventID, storeID string) (*domain.Coupon, error) {
 	if err := s.assertEventOwnership(ctx, eventID, storeID); err != nil {
 		return nil, err
 	}
@@ -51,32 +52,32 @@ func (s *Service) Get(ctx context.Context, id, eventID, storeID string) (*Coupon
 	return c, nil
 }
 
-func (s *Service) Create(ctx context.Context, eventID, storeID string, req CreateRequest) (*Coupon, error) {
-	if err := s.assertEventOwnership(ctx, eventID, storeID); err != nil {
+func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Coupon, error) {
+	if err := s.assertEventOwnership(ctx, in.EventID, in.StoreID); err != nil {
 		return nil, err
 	}
-	if err := validateBusinessRules(req.Type, req.ValueCents, req.PercentBPS); err != nil {
+	if err := validateBusinessRules(in.Type, in.ValueCents, in.PercentBPS); err != nil {
 		return nil, err
 	}
-	if req.ValidFrom != nil && req.ValidUntil != nil && !req.ValidUntil.After(*req.ValidFrom) {
+	if in.ValidFrom != nil && in.ValidUntil != nil && !in.ValidUntil.After(*in.ValidFrom) {
 		return nil, httpx.ErrUnprocessable("validUntil must be after validFrom")
 	}
-	code := strings.TrimSpace(req.Code)
+	code := strings.TrimSpace(in.Code)
 	if code == "" {
 		return nil, httpx.ErrUnprocessable("code cannot be empty")
 	}
 
 	created, err := s.repo.Create(ctx, CreateParams{
-		EventID:          eventID,
+		EventID:          in.EventID,
 		Code:             code,
-		Type:             req.Type,
-		ValueCents:       req.ValueCents,
-		PercentBPS:       req.PercentBPS,
-		MaxUses:          req.MaxUses,
-		MinPurchaseCents: req.MinPurchaseCents,
-		ValidFrom:        req.ValidFrom,
-		ValidUntil:       req.ValidUntil,
-		Active:           req.Active,
+		Type:             in.Type,
+		ValueCents:       in.ValueCents,
+		PercentBPS:       in.PercentBPS,
+		MaxUses:          in.MaxUses,
+		MinPurchaseCents: in.MinPurchaseCents,
+		ValidFrom:        in.ValidFrom,
+		ValidUntil:       in.ValidUntil,
+		Active:           in.Active,
 	})
 	if err != nil {
 		// Friendlier 409 when the merchant tried to reuse a code in the same
@@ -91,14 +92,14 @@ func (s *Service) Create(ctx context.Context, eventID, storeID string, req Creat
 	return created, nil
 }
 
-func (s *Service) Update(ctx context.Context, id, eventID, storeID string, req UpdateRequest) (*Coupon, error) {
-	if err := s.assertEventOwnership(ctx, eventID, storeID); err != nil {
+func (s *Service) Update(ctx context.Context, in UpdateInput) (*domain.Coupon, error) {
+	if err := s.assertEventOwnership(ctx, in.EventID, in.StoreID); err != nil {
 		return nil, err
 	}
 
 	// We need the current type to re-validate the value/percent invariants
 	// even when only one of them is patched.
-	current, err := s.repo.GetByID(ctx, id, eventID)
+	current, err := s.repo.GetByID(ctx, in.CouponID, in.EventID)
 	if err != nil {
 		return nil, err
 	}
@@ -106,33 +107,33 @@ func (s *Service) Update(ctx context.Context, id, eventID, storeID string, req U
 		return nil, httpx.ErrNotFound("coupon not found")
 	}
 
-	effectiveType := current.Type
-	if req.Type != nil {
-		effectiveType = *req.Type
+	effectiveType := current.Type()
+	if in.Type != nil {
+		effectiveType = *in.Type
 	}
-	effectiveValue := current.ValueCents
-	if req.ValueCents != nil {
-		effectiveValue = *req.ValueCents
+	effectiveValue := current.ValueCents()
+	if in.ValueCents != nil {
+		effectiveValue = *in.ValueCents
 	}
-	effectivePercent := current.PercentBPS
-	if req.PercentBPS != nil {
-		effectivePercent = *req.PercentBPS
+	effectivePercent := current.PercentBPS()
+	if in.PercentBPS != nil {
+		effectivePercent = *in.PercentBPS
 	}
 	if err := validateBusinessRules(effectiveType, effectiveValue, effectivePercent); err != nil {
 		return nil, err
 	}
 
 	updated, err := s.repo.Update(ctx, UpdateParams{
-		ID:               id,
-		EventID:          eventID,
-		Type:             req.Type,
-		ValueCents:       req.ValueCents,
-		PercentBPS:       req.PercentBPS,
-		MaxUses:          req.MaxUses,
-		MinPurchaseCents: req.MinPurchaseCents,
-		ValidFrom:        req.ValidFrom,
-		ValidUntil:       req.ValidUntil,
-		Active:           req.Active,
+		ID:               in.CouponID,
+		EventID:          in.EventID,
+		Type:             in.Type,
+		ValueCents:       in.ValueCents,
+		PercentBPS:       in.PercentBPS,
+		MaxUses:          in.MaxUses,
+		MinPurchaseCents: in.MinPurchaseCents,
+		ValidFrom:        in.ValidFrom,
+		ValidUntil:       in.ValidUntil,
+		Active:           in.Active,
 	})
 	if err != nil {
 		return nil, err
@@ -207,21 +208,6 @@ func validateBusinessRules(t Type, valueCents int64, percentBPS int) error {
 // PUBLIC CART — apply / remove
 // =============================================================================
 
-// ApplyResult is what the public-cart endpoint returns after a successful
-// apply. The FE uses these to immediately reflect the new totals without a
-// second round-trip. MaxDiscountCents is the merchant-set ceiling on a
-// free-shipping coupon (0 = uncapped; ignored for percent / fixed) — surfaced
-// so the FE can explain to the buyer why the discount stopped at that value.
-type ApplyResult struct {
-	Code              string
-	Type              Type
-	AppliedValueCents int64
-	MaxDiscountCents  int64
-	SubtotalCents     int64
-	ShippingCostCents int64
-	NewTotalCents     int64 // subtotal + shipping − applied
-}
-
 // ApplyToCart wraps the entire apply path in a single tx so the FOR UPDATE
 // lock on the coupon row blocks concurrent applies and we can never
 // over-redeem (max_uses).
@@ -267,22 +253,22 @@ func (s *Service) ApplyToCart(
 	if c == nil {
 		return nil, httpx.ErrNotFound("invalid coupon code")
 	}
-	if !c.Active {
+	if !c.Active() {
 		return nil, httpx.ErrUnprocessable("coupon is not active")
 	}
 	now := time.Now()
-	if c.ValidFrom != nil && now.Before(*c.ValidFrom) {
+	if c.ValidFrom() != nil && now.Before(*c.ValidFrom()) {
 		return nil, httpx.ErrUnprocessable("coupon is not valid yet")
 	}
-	if c.ValidUntil != nil && now.After(*c.ValidUntil) {
+	if c.ValidUntil() != nil && now.After(*c.ValidUntil()) {
 		return nil, httpx.ErrUnprocessable("coupon expired")
 	}
-	if c.MaxUses != nil && c.UsedCount >= *c.MaxUses {
+	if c.MaxUses() != nil && c.UsedCount() >= *c.MaxUses() {
 		return nil, httpx.ErrConflict("coupon already fully redeemed")
 	}
-	if cart.SubtotalCents < c.MinPurchaseCents {
+	if cart.SubtotalCents < c.MinPurchaseCents() {
 		return nil, httpx.ErrUnprocessable(
-			fmt.Sprintf("minimum purchase of %.2f BRL not reached", float64(c.MinPurchaseCents)/100),
+			fmt.Sprintf("minimum purchase of %.2f BRL not reached", float64(c.MinPurchaseCents())/100),
 		)
 	}
 
@@ -291,13 +277,13 @@ func (s *Service) ApplyToCart(
 		return nil, err
 	}
 
-	if err := s.repo.InsertReservedRedemptionTx(ctx, tx, c.ID, cart.CartID, applied); err != nil {
+	if err := s.repo.InsertReservedRedemptionTx(ctx, tx, c.ID(), cart.CartID, applied); err != nil {
 		return nil, err
 	}
-	if err := s.repo.IncrementUsedCountTx(ctx, tx, c.ID); err != nil {
+	if err := s.repo.IncrementUsedCountTx(ctx, tx, c.ID()); err != nil {
 		return nil, err
 	}
-	if err := s.repo.ApplyCouponToCartTx(ctx, tx, cart.CartID, c.ID, c.Code, applied); err != nil {
+	if err := s.repo.ApplyCouponToCartTx(ctx, tx, cart.CartID, c.ID(), c.Code(), applied); err != nil {
 		return nil, err
 	}
 
@@ -306,8 +292,8 @@ func (s *Service) ApplyToCart(
 	}
 
 	return &ApplyResult{
-		Code:              c.Code,
-		Type:              c.Type,
+		Code:              c.Code(),
+		Type:              c.Type(),
 		AppliedValueCents: applied,
 		MaxDiscountCents:  freeShippingCap(c),
 		SubtotalCents:     cart.SubtotalCents,
@@ -319,14 +305,14 @@ func (s *Service) ApplyToCart(
 // freeShippingCap exposes the merchant-set discount ceiling for a coupon.
 // Reuses ValueCents — only meaningful for free_shipping (percent and fixed
 // have their own usage of that column). Returns 0 for "no cap".
-func freeShippingCap(c *Coupon) int64 {
-	if c.Type != TypeFreeShipping {
+func freeShippingCap(c *domain.Coupon) int64 {
+	if c.Type() != TypeFreeShipping {
 		return 0
 	}
-	if c.ValueCents < 0 {
+	if c.ValueCents() < 0 {
 		return 0
 	}
-	return c.ValueCents
+	return c.ValueCents()
 }
 
 // RemoveFromCart undoes ApplyToCart. Idempotent — calling on a cart with no
@@ -362,7 +348,7 @@ func (s *Service) RemoveFromCart(ctx context.Context, cartToken string) error {
 	if c != nil {
 		// Coupon may have been hard-deleted between apply and remove; if so,
 		// we just clear the cart side.
-		if err := s.repo.DecrementUsedCountTx(ctx, tx, c.ID); err != nil {
+		if err := s.repo.DecrementUsedCountTx(ctx, tx, c.ID()); err != nil {
 			return err
 		}
 	}
@@ -402,7 +388,7 @@ func (s *Service) ReevaluateOnShippingChange(ctx context.Context, cartID string)
 	if err != nil {
 		return err
 	}
-	if c == nil || c.Type != TypeFreeShipping {
+	if c == nil || c.Type() != TypeFreeShipping {
 		return nil
 	}
 
@@ -458,19 +444,19 @@ func (s *Service) ReevaluateOnCartMutation(ctx context.Context, cartID string) e
 		return err
 	}
 
-	if c.MinPurchaseCents > 0 && subtotal < c.MinPurchaseCents {
+	if c.MinPurchaseCents() > 0 && subtotal < c.MinPurchaseCents() {
 		return s.removeAppliedCouponByCartID(ctx, cartID)
 	}
 
 	var discount int64
-	switch c.Type {
+	switch c.Type() {
 	case TypePercent:
-		discount = subtotal * int64(c.PercentBPS) / 10000
+		discount = subtotal * int64(c.PercentBPS()) / 10000
 		if discount > subtotal {
 			discount = subtotal
 		}
 	case TypeFixed:
-		discount = c.ValueCents
+		discount = c.ValueCents()
 		if discount > subtotal {
 			discount = subtotal
 		}
@@ -512,7 +498,7 @@ func (s *Service) removeAppliedCouponByCartID(ctx context.Context, cartID string
 		return err
 	}
 	if c != nil {
-		if err := s.repo.DecrementUsedCountTx(ctx, tx, c.ID); err != nil {
+		if err := s.repo.DecrementUsedCountTx(ctx, tx, c.ID()); err != nil {
 			return err
 		}
 	}
@@ -646,16 +632,16 @@ func (s *Service) RefundRedemption(ctx context.Context, cartID string) error {
 // subtotal so a 100% / R$1000 coupon never produces a negative total.
 // free_shipping requires the buyer to have already picked a shipping
 // service so the discount has a stable amount to subtract from.
-func computeAppliedDiscount(c *Coupon, cart *CartCouponSnapshot) (int64, error) {
-	switch c.Type {
+func computeAppliedDiscount(c *domain.Coupon, cart *CartCouponSnapshot) (int64, error) {
+	switch c.Type() {
 	case TypePercent:
-		applied := cart.SubtotalCents * int64(c.PercentBPS) / 10000
+		applied := cart.SubtotalCents * int64(c.PercentBPS()) / 10000
 		if applied > cart.SubtotalCents {
 			applied = cart.SubtotalCents
 		}
 		return applied, nil
 	case TypeFixed:
-		applied := c.ValueCents
+		applied := c.ValueCents()
 		if applied > cart.SubtotalCents {
 			applied = cart.SubtotalCents
 		}

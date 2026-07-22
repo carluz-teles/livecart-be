@@ -98,7 +98,7 @@ func (h *WebhookHandler) handleUserCreated(c *fiber.Ctx, data json.RawMessage) e
 	}
 
 	// Upsert user - will create if doesn't exist
-	_, err := h.service.repo.UpsertUser(c.Context(), userData.ID, email, name, userData.ImageURL)
+	_, err := h.service.repo.UpsertUser(c.UserContext(), userData.ID, email, name, userData.ImageURL)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
@@ -119,11 +119,11 @@ func (h *WebhookHandler) handleUserUpdated(c *fiber.Ctx, data json.RawMessage) e
 	}
 
 	// Update user in users table
-	err := h.service.UpdateUser(c.Context(), userData.ID, email, name, userData.ImageURL)
+	err := h.service.UpdateUser(c.UserContext(), userData.ID, email, name, userData.ImageURL)
 	if err != nil {
 		// If user not found, create it (webhook ordering issue)
 		if httpx.IsNotFound(err) {
-			_, createErr := h.service.repo.UpsertUser(c.Context(), userData.ID, email, name, userData.ImageURL)
+			_, createErr := h.service.repo.UpsertUser(c.UserContext(), userData.ID, email, name, userData.ImageURL)
 			if createErr != nil {
 				return httpx.HandleServiceError(c, createErr)
 			}
@@ -143,7 +143,7 @@ func (h *WebhookHandler) handleUserDeleted(c *fiber.Ctx, data json.RawMessage) e
 		return httpx.BadRequest(c, "invalid user data")
 	}
 
-	err := h.service.DeleteUser(c.Context(), userData.ID)
+	err := h.service.DeleteUser(c.UserContext(), userData.ID)
 	if err != nil {
 		// If user not found, that's OK
 		if httpx.IsNotFound(err) {

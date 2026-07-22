@@ -706,7 +706,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	api.Use(httpx.SubscriptionMiddleware())
 
 	// User routes (not store-scoped)
-	userHandler := user.NewHandler(userSvc, validate, s3Client)
+	userHandler := user.NewHandler(userSvc, s3Client)
 	userHandler.RegisterRoutes(api)
 
 	// Ideas channel + in-app notifications inbox: authenticated but global
@@ -720,7 +720,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	notifInboxWriter := notificationinbox.NewWriter(notifInboxRepo)
 
 	ideaSvc := idea.NewService(ideaRepo, notifInboxWriter, log)
-	ideaHandler := idea.NewHandler(ideaSvc, validate)
+	ideaHandler := idea.NewHandler(ideaSvc)
 	ideaHandler.RegisterRoutes(userScoped)
 
 	notifInboxHandler := notificationinbox.NewHandler(notifInboxSvc)
@@ -732,7 +732,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	storeSvc := store.NewService(storeRepo, membershipCreator, userLookup, log)
 	storeSvc.SetBilling(billingSvc)
 
-	storeHandler := store.NewHandler(storeSvc, validate, s3Client)
+	storeHandler := store.NewHandler(storeSvc, s3Client)
 	storeHandler.RegisterRoutes(api)
 
 	// Store-scoped routes (require store access validation)
@@ -741,7 +741,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// Paywall (PRD 007): 402 para lojas com assinatura bloqueada; endpoints
 	// de billing ficam na allowlist para o lojista conseguir regularizar.
 	storeScoped.Use(billingSvc.AccessGuard())
-	billingHandler := billing.NewHandler(billingSvc, validate)
+	billingHandler := billing.NewHandler(billingSvc)
 	billingHandler.RegisterRoutes(storeScoped)
 
 	// Store cart settings (store-scoped)
@@ -749,12 +749,12 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	productRepo := product.NewRepository(queries, pool)
 	productSvc := product.NewService(productRepo, log)
-	productHandler := product.NewHandler(productSvc, validate)
+	productHandler := product.NewHandler(productSvc)
 	productHandler.RegisterRoutes(storeScoped)
 
 	productGroupRepo := productgroup.NewRepository(queries, pool)
 	productGroupSvc := productgroup.NewService(productGroupRepo, log)
-	productGroupHandler := productgroup.NewHandler(productGroupSvc, validate)
+	productGroupHandler := productgroup.NewHandler(productGroupSvc)
 	productGroupHandler.RegisterRoutes(storeScoped)
 
 // Wire product syncer for ERP webhooks
@@ -780,7 +780,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// Block-status lookup for the order detail page; customerSvc is the
 	// authoritative source for blocked_handles.
 	orderSvc.SetBlockedHandleChecker(customerSvc)
-	orderHandler := order.NewHandler(orderSvc, validate)
+	orderHandler := order.NewHandler(orderSvc)
 	orderHandler.RegisterRoutes(storeScoped)
 
 	// Merchant-side post-checkout actions (Marcar como entregue) live next
@@ -791,7 +791,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	couponRepo := coupon.NewRepository(pool)
 	couponSvc := coupon.NewService(couponRepo, pool, log)
-	couponHandler := coupon.NewHandler(couponSvc, validate)
+	couponHandler := coupon.NewHandler(couponSvc)
 	couponHandler.RegisterRoutes(storeScoped)
 	couponHandler.RegisterPublicRoutes(app)
 
@@ -851,7 +851,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		lifecycle.add("cart-expiry", cartExpiryWorker.Stop)
 	}
 
-	customerHandler := customer.NewHandler(customerSvc, validate)
+	customerHandler := customer.NewHandler(customerSvc)
 	customerHandler.RegisterRoutes(storeScoped)
 
 	dashboardRepo := dashboard.NewRepository(pool)
@@ -881,7 +881,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	memberLookup := member.NewMemberLookupAdapter(memberRepo)
 	membershipLookup := member.NewMembershipLookupAdapter(memberRepo)
 	invitationSvc := invitation.NewService(invitationRepo, emailClient, userLookup, storeLookup, memberLookup, membershipLookup, log)
-	invitationHandler := invitation.NewHandler(invitationSvc, validate)
+	invitationHandler := invitation.NewHandler(invitationSvc)
 
 	// Public invitation routes (viewing invitation by token)
 	// Using /api/public prefix to avoid auth middleware on /api/v1

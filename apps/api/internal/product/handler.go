@@ -3,22 +3,19 @@ package product
 import (
 	"strconv"
 
-	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
-	"livecart/apps/api/internal/product/domain"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/query"
 	vo "livecart/apps/api/lib/valueobject"
 )
 
 type Handler struct {
-	service  *Service
-	validate *validator.Validate
+	service *Service
 }
 
-func NewHandler(service *Service, validate *validator.Validate) *Handler {
-	return &Handler{service: service, validate: validate}
+func NewHandler(service *Service) *Handler {
+	return &Handler{service: service}
 }
 
 func (h *Handler) RegisterRoutes(router fiber.Router) {
@@ -41,30 +38,28 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Product UUID"
 // @Param        request body AddProductImageRequest true "Image payload"
-// @Success      201 {object} httpx.Envelope
+// @Success      201 {object} httpx.Envelope{data=AddProductImageResponse}
+// @Failure      422 {object} httpx.ValidationEnvelope
 // @Router       /api/v1/stores/{storeId}/products/{id}/images [post]
 // @Security     BearerAuth
 func (h *Handler) AddImage(c *fiber.Ctx) error {
 	var req AddProductImageRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
 	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return httpx.ErrUnprocessable("invalid store ID")
 	}
 	id, err := vo.NewProductID(c.Params("id"))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid product ID")
+		return httpx.ErrUnprocessable("invalid product ID")
 	}
-	imageID, err := h.service.AddImage(c.Context(), id, storeID, req.URL, req.Position)
+	imageID, err := h.service.AddImage(c.UserContext(), id, storeID, req.URL, req.Position)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.Created(c, fiber.Map{"id": imageID, "url": req.URL, "position": req.Position})
+	return httpx.Created(c, AddProductImageResponse{ID: imageID, URL: req.URL, Position: req.Position})
 }
 
 // DeleteImage removes one image from a variant gallery.
@@ -79,19 +74,19 @@ func (h *Handler) AddImage(c *fiber.Ctx) error {
 func (h *Handler) DeleteImage(c *fiber.Ctx) error {
 	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return httpx.ErrUnprocessable("invalid store ID")
 	}
 	productID, err := vo.NewProductID(c.Params("id"))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid product ID")
+		return httpx.ErrUnprocessable("invalid product ID")
 	}
 	imageIDStr := c.Params("imageId")
 	imageID, err := vo.NewID(imageIDStr)
 	if err != nil {
-		return httpx.BadRequest(c, "invalid image ID")
+		return httpx.ErrUnprocessable("invalid image ID")
 	}
-	if err := h.service.DeleteImage(c.Context(), productID, storeID, imageID); err != nil {
-		return httpx.HandleServiceError(c, err)
+	if err := h.service.DeleteImage(c.UserContext(), productID, storeID, imageID); err != nil {
+		return err
 	}
 	return httpx.Deleted(c, imageIDStr)
 }
@@ -112,68 +107,18 @@ func (h *Handler) DeleteImage(c *fiber.Ctx) error {
 // @Security     BearerAuth
 func (h *Handler) Create(c *fiber.Ctx) error {
 	var req CreateProductRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
-	}
-
-	storeIDStr := httpx.GetStoreID(c)
-
-	// Convert to value objects
-	storeID, err := vo.NewStoreID(storeIDStr)
+	input, err := req.ToInput(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return err
 	}
-
-	externalSource, err := domain.NewExternalSource(req.ExternalSource)
+	product, err := h.service.Create(c.UserContext(), input)
 	if err != nil {
-		return httpx.BadRequest(c, "invalid external source")
+		return err
 	}
-
-	price, err := vo.NewMoney(req.Price)
-	if err != nil {
-		return httpx.BadRequest(c, "invalid price")
-	}
-
-	shipping, err := shippingDTOToDomain(req.Shipping)
-	if err != nil {
-		return httpx.BadRequest(c, err.Error())
-	}
-
-	var groupID *vo.ID
-	if req.GroupID != "" {
-		gid, err := vo.NewID(req.GroupID)
-		if err != nil {
-			return httpx.BadRequest(c, "invalid groupId")
-		}
-		groupID = &gid
-	}
-
-	output, err := h.service.Create(c.Context(), CreateProductInput{
-		StoreID:        storeID,
-		Name:           req.Name,
-		ExternalID:     req.ExternalID,
-		ExternalSource: externalSource,
-		Keyword:        req.Keyword,
-		Price:          price,
-		ImageURL:       req.ImageURL,
-		Stock:          req.Stock,
-		Shipping:       shipping,
-		GroupID:        groupID,
-		Images:         req.Images,
-	})
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	return httpx.Created(c, CreateProductResponse{
-		ID:        output.ID,
-		Name:      output.Name,
-		Keyword:   output.Keyword,
-		CreatedAt: output.CreatedAt,
-	})
+	return httpx.Created(c, NewCreateProductResponse(product))
 }
 
 // GetByID godoc
@@ -188,25 +133,19 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/products/{id} [get]
 // @Security     BearerAuth
 func (h *Handler) GetByID(c *fiber.Ctx) error {
-	storeIDStr := httpx.GetStoreID(c)
-	idStr := c.Params("id")
-
-	storeID, err := vo.NewStoreID(storeIDStr)
+	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return httpx.ErrUnprocessable("invalid store ID")
 	}
-
-	id, err := vo.NewProductID(idStr)
+	id, err := vo.NewProductID(c.Params("id"))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid product ID")
+		return httpx.ErrUnprocessable("invalid product ID")
 	}
-
-	output, err := h.service.GetByID(c.Context(), id, storeID)
+	view, err := h.service.GetByID(c.UserContext(), id, storeID)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-
-	return httpx.OK(c, toProductResponse(output))
+	return httpx.OK(c, NewProductResponse(view))
 }
 
 // List godoc
@@ -231,14 +170,11 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/products [get]
 // @Security     BearerAuth
 func (h *Handler) List(c *fiber.Ctx) error {
-	storeIDStr := httpx.GetStoreID(c)
-
-	storeID, err := vo.NewStoreID(storeIDStr)
+	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return httpx.ErrUnprocessable("invalid store ID")
 	}
 
-	// Parse query parameters
 	input := ListProductsInput{
 		StoreID: storeID,
 		Search:  c.Query("search"),
@@ -253,20 +189,12 @@ func (h *Handler) List(c *fiber.Ctx) error {
 		Filters: parseProductFilters(c),
 	}
 
-	output, err := h.service.List(c.Context(), input)
+	views, total, err := h.service.List(c.UserContext(), input)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
-	responses := make([]ProductResponse, len(output.Products))
-	for i, o := range output.Products {
-		responses[i] = toProductResponse(o)
-	}
-
-	return httpx.OK(c, ListProductsResponse{
-		Data:       responses,
-		Pagination: query.NewPaginationResponse(output.Pagination, output.Total),
-	})
+	return httpx.OK(c, NewListProductsResponse(views, input.Pagination, total))
 }
 
 func parseProductFilters(c *fiber.Ctx) ProductFilters {
@@ -335,52 +263,19 @@ func parseProductFilters(c *fiber.Ctx) ProductFilters {
 // @Router       /api/v1/stores/{storeId}/products/{id} [put]
 // @Security     BearerAuth
 func (h *Handler) Update(c *fiber.Ctx) error {
-	storeIDStr := httpx.GetStoreID(c)
-	idStr := c.Params("id")
-
 	var req UpdateProductRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
-	}
-
-	storeID, err := vo.NewStoreID(storeIDStr)
+	input, err := req.ToInput(httpx.GetStoreID(c), c.Params("id"))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return err
 	}
-
-	id, err := vo.NewProductID(idStr)
+	view, err := h.service.Update(c.UserContext(), input)
 	if err != nil {
-		return httpx.BadRequest(c, "invalid product ID")
+		return err
 	}
-
-	price, err := vo.NewMoney(req.Price)
-	if err != nil {
-		return httpx.BadRequest(c, "invalid price")
-	}
-
-	shipping, err := shippingDTOToDomain(req.Shipping)
-	if err != nil {
-		return httpx.BadRequest(c, err.Error())
-	}
-
-	output, err := h.service.Update(c.Context(), UpdateProductInput{
-		StoreID:  storeID,
-		ID:       id,
-		Name:     req.Name,
-		Price:    price,
-		ImageURL: req.ImageURL,
-		Stock:    req.Stock,
-		Active:   req.Active,
-		Shipping: shipping,
-	})
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	return httpx.OK(c, toProductResponse(output))
+	return httpx.OK(c, NewProductResponse(view))
 }
 
 // Delete godoc
@@ -394,24 +289,18 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/products/{id} [delete]
 // @Security     BearerAuth
 func (h *Handler) Delete(c *fiber.Ctx) error {
-	storeIDStr := httpx.GetStoreID(c)
-	idStr := c.Params("id")
-
-	storeID, err := vo.NewStoreID(storeIDStr)
+	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return httpx.ErrUnprocessable("invalid store ID")
 	}
-
-	id, err := vo.NewProductID(idStr)
+	id, err := vo.NewProductID(c.Params("id"))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid product ID")
+		return httpx.ErrUnprocessable("invalid product ID")
 	}
-
-	if err := h.service.Delete(c.Context(), id, storeID); err != nil {
-		return httpx.HandleServiceError(c, err)
+	if err := h.service.Delete(c.UserContext(), id, storeID); err != nil {
+		return err
 	}
-
-	return httpx.Deleted(c, idStr)
+	return httpx.Deleted(c, id.String())
 }
 
 // GetStats godoc
@@ -424,85 +313,13 @@ func (h *Handler) Delete(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/products/stats [get]
 // @Security     BearerAuth
 func (h *Handler) GetStats(c *fiber.Ctx) error {
-	storeIDStr := httpx.GetStoreID(c)
-
-	storeID, err := vo.NewStoreID(storeIDStr)
+	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return httpx.ErrUnprocessable("invalid store ID")
 	}
-
-	output, err := h.service.GetStats(c.Context(), storeID)
+	stats, err := h.service.GetStats(c.UserContext(), storeID)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-
-	return httpx.OK(c, ProductStatsResponse{
-		TotalProducts: output.TotalProducts,
-		ActiveCount:   output.ActiveCount,
-		LowStockCount: output.LowStockCount,
-		StockValue:    output.StockValue,
-	})
-}
-
-func toProductResponse(o ProductOutput) ProductResponse {
-	images := o.Images
-	if images == nil {
-		images = []string{}
-	}
-	options := o.OptionValues
-	if options == nil {
-		options = []OptionValueRef{}
-	}
-	return ProductResponse{
-		ID:             o.ID,
-		Name:           o.Name,
-		ExternalID:     o.ExternalID,
-		ExternalSource: o.ExternalSource,
-		Keyword:        o.Keyword,
-		Price:          o.Price,
-		ImageURL:       o.ImageURL,
-		Stock:          o.Stock,
-		Active:         o.Active,
-		Shipping:       shippingDomainToDTO(o.Shipping),
-		Shippable:      o.Shippable,
-		GroupID:        o.GroupID,
-		GroupName:      o.GroupName,
-		OptionValues:   options,
-		Images:         images,
-		CreatedAt:      o.CreatedAt,
-		UpdatedAt:      o.UpdatedAt,
-	}
-}
-
-// shippingDTOToDomain converts the HTTP DTO into the domain shipping profile.
-func shippingDTOToDomain(dto ShippingProfileDTO) (domain.ShippingProfile, error) {
-	format, err := domain.NewPackageFormat(dto.PackageFormat)
-	if err != nil {
-		return domain.ShippingProfile{}, err
-	}
-	return domain.ShippingProfile{
-		WeightGrams:         dto.WeightGrams,
-		HeightCm:            dto.HeightCm,
-		WidthCm:             dto.WidthCm,
-		LengthCm:            dto.LengthCm,
-		SKU:                 dto.SKU,
-		PackageFormat:       format,
-		InsuranceValueCents: dto.InsuranceValueCents,
-	}, nil
-}
-
-func shippingDomainToDTO(s domain.ShippingProfile) ShippingProfileDTO {
-	format := s.PackageFormat.String()
-	if format == "" {
-		format = string(domain.PackageFormatBox)
-	}
-	return ShippingProfileDTO{
-		WeightGrams:         s.WeightGrams,
-		HeightCm:            s.HeightCm,
-		WidthCm:             s.WidthCm,
-		LengthCm:            s.LengthCm,
-		SKU:                 s.SKU,
-		PackageFormat:       format,
-		InsuranceValueCents: s.InsuranceValueCents,
-	}
+	return httpx.OK(c, NewProductStatsResponse(stats))
 }

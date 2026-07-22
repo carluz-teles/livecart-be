@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/billing/domain"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/logger"
 )
@@ -121,8 +122,23 @@ func (s *Service) provisionStripe(ctx context.Context, row *sqlc.Subscription, s
 // =============================================================================
 
 // GetState returns the access snapshot for a store. Missing row (legacy
-// store) returns nil — caller decides whether to lazily ensure.
+// store) returns nil — caller decides whether to lazily ensure. Shared
+// read-model used by the paywall middleware and the /users/sync payload.
 func (s *Service) GetState(ctx context.Context, storeID string) (*SubscriptionState, error) {
+	sub, err := s.GetSubscription(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+	if sub == nil {
+		return nil, nil
+	}
+	state := NewSubscriptionResponse(sub, config.PaywallEnabled.Bool(), time.Now())
+	return &state, nil
+}
+
+// GetSubscription loads the Subscription domain entity for a store. Missing row
+// (legacy store) returns (nil, nil).
+func (s *Service) GetSubscription(ctx context.Context, storeID string) (*domain.Subscription, error) {
 	sid, err := parseUUID(storeID)
 	if err != nil {
 		return nil, err
@@ -134,36 +150,34 @@ func (s *Service) GetState(ctx context.Context, storeID string) (*SubscriptionSt
 		}
 		return nil, err
 	}
-	state := s.toState(&row)
-	return &state, nil
+	return rowToSubscription(&row), nil
 }
 
 func (s *Service) toState(row *sqlc.Subscription) SubscriptionState {
-	now := time.Now()
-	state := SubscriptionState{
-		Status:            row.Status,
-		Plan:              Plan(row.Plan),
-		CancelAtPeriodEnd: row.CancelAtPeriodEnd,
-		HasPaymentMethod:  row.Status == StatusActive || row.Status == StatusPastDue,
+	return NewSubscriptionResponse(rowToSubscription(row), config.PaywallEnabled.Bool(), time.Now())
+}
+
+// rowToSubscription maps a sqlc Subscription row to the domain entity.
+func rowToSubscription(row *sqlc.Subscription) *domain.Subscription {
+	return domain.Reconstruct(
+		uuidToString(row.StoreID),
+		row.Status,
+		row.Plan,
+		timePtr(row.TrialEndsAt),
+		timePtr(row.CurrentPeriodStart),
+		timePtr(row.CurrentPeriodEnd),
+		timePtr(row.GraceUntil),
+		row.CancelAtPeriodEnd,
+		row.ManualOverride,
+	)
+}
+
+func timePtr(ts pgtype.Timestamptz) *time.Time {
+	if !ts.Valid {
+		return nil
 	}
-	if row.TrialEndsAt.Valid {
-		t := row.TrialEndsAt.Time
-		state.TrialEndsAt = &t
-		if days := int(time.Until(t).Hours()/24) + 1; days > 0 && row.Status == StatusTrialing {
-			state.TrialDaysLeft = days
-		}
-	}
-	if row.CurrentPeriodEnd.Valid {
-		t := row.CurrentPeriodEnd.Time
-		state.CurrentPeriodEnd = &t
-	}
-	if row.GraceUntil.Valid {
-		t := row.GraceUntil.Time
-		state.GraceUntil = &t
-	}
-	state.Enforced = config.PaywallEnabled.Bool()
-	state.Blocked = state.Enforced && blocked(row.Status, row.ManualOverride, state.TrialEndsAt, state.GraceUntil, now)
-	return state
+	t := ts.Time
+	return &t
 }
 
 // =============================================================================
@@ -318,7 +332,9 @@ func unixToTimestamptz(ts int64) pgtype.Timestamptz {
 // CreateConversionCheckout opens a hosted Stripe Checkout (setup mode) where
 // the merchant picks... rather: the plan was picked in our UI; the session
 // collects the card. Conversion completes on the webhook.
-func (s *Service) CreateConversionCheckout(ctx context.Context, storeID string, plan Plan) (string, error) {
+func (s *Service) CreateConversionCheckout(ctx context.Context, input CheckoutInput) (string, error) {
+	storeID := input.StoreID
+	plan := input.Plan
 	cfg, ok := Plans()[plan]
 	if !ok || !cfg.SelfService {
 		return "", fmt.Errorf("plano inválido para contratação self-service: %s", plan)
@@ -427,7 +443,9 @@ func (s *Service) CreatePortalSession(ctx context.Context, storeID string) (stri
 // ChangePlan applies an upgrade immediately (prorated) or schedules a
 // downgrade for the period end. Requires an active (converted) subscription —
 // trials convert through the checkout flow instead.
-func (s *Service) ChangePlan(ctx context.Context, storeID string, target Plan) (*SubscriptionState, error) {
+func (s *Service) ChangePlan(ctx context.Context, input ChangePlanInput) (*domain.Subscription, error) {
+	storeID := input.StoreID
+	target := input.Plan
 	cfg, ok := Plans()[target]
 	if !ok || !cfg.SelfService {
 		return nil, fmt.Errorf("plano inválido: %s", target)
@@ -448,8 +466,7 @@ func (s *Service) ChangePlan(ctx context.Context, storeID string, target Plan) (
 		return nil, fmt.Errorf("mudança de plano requer assinatura ativa — finalize a contratação primeiro")
 	}
 	if Plan(row.Plan) == target {
-		state := s.toState(&row)
-		return &state, nil
+		return rowToSubscription(&row), nil
 	}
 
 	sub, err := s.stripe.GetSubscription(ctx, row.StripeSubscriptionID.String)
@@ -479,8 +496,7 @@ func (s *Service) ChangePlan(ctx context.Context, storeID string, target Plan) (
 	if err != nil {
 		return nil, err
 	}
-	state := s.toState(&fresh)
-	return &state, nil
+	return rowToSubscription(&fresh), nil
 }
 
 // =============================================================================

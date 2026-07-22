@@ -1,7 +1,6 @@
 package idea
 
 import (
-	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
 	"livecart/apps/api/lib/httpx"
@@ -9,12 +8,11 @@ import (
 )
 
 type Handler struct {
-	service  *Service
-	validate *validator.Validate
+	service *Service
 }
 
-func NewHandler(service *Service, validate *validator.Validate) *Handler {
-	return &Handler{service: service, validate: validate}
+func NewHandler(service *Service) *Handler {
+	return &Handler{service: service}
 }
 
 // RegisterRoutes mounts the ideas channel under the given (already-authed)
@@ -30,6 +28,14 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Post("/:id/comments", h.CreateComment)
 }
 
+// ListCategories godoc
+// @Summary      List idea categories
+// @Description  Returns the catalog of idea categories (slug + label)
+// @Tags         ideas
+// @Produce      json
+// @Success      200  {object}  httpx.Envelope{data=[]Category}
+// @Security     BearerAuth
+// @Router       /api/v1/idea-categories [get]
 func (h *Handler) ListCategories(c *fiber.Ctx) error {
 	// httpx.OK already wraps the value in {data: ...}; sending the slice
 	// directly avoids the double-nested {data: {data: [...]}} that breaks
@@ -37,6 +43,21 @@ func (h *Handler) ListCategories(c *fiber.Ctx) error {
 	return httpx.OK(c, Categories)
 }
 
+// List godoc
+// @Summary      List ideas feed
+// @Description  Returns a paginated, filterable feed of ideas
+// @Tags         ideas
+// @Produce      json
+// @Param        tab       query     string  false  "Feed tab"
+// @Param        category  query     string  false  "Category slug filter"
+// @Param        q         query     string  false  "Search query"
+// @Param        sort      query     string  false  "Sort order"
+// @Param        page      query     int     false  "Page number"
+// @Param        limit     query     int     false  "Page size"
+// @Success      200       {object}  ListIdeasResponse
+// @Failure      401       {object}  httpx.Envelope
+// @Security     BearerAuth
+// @Router       /api/v1/ideas [get]
 func (h *Handler) List(c *fiber.Ctx) error {
 	userID := httpx.GetInternalUserID(c)
 
@@ -52,123 +73,121 @@ func (h *Handler) List(c *fiber.Ctx) error {
 		},
 	}
 
-	out, err := h.service.List(c.Context(), in)
+	ideas, total, err := h.service.List(c.UserContext(), in)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
-	resp := make([]IdeaListItemResponse, len(out.Items))
-	for i, it := range out.Items {
-		resp[i] = toListItemResponse(it, userID)
-	}
-
-	return httpx.OK(c, ListIdeasResponse{
-		Data:       resp,
-		Pagination: query.NewPaginationResponse(out.Pagination, out.Total),
-	})
+	return httpx.OK(c, NewListIdeasResponse(ideas, userID, in.Pagination, total))
 }
 
+// Create godoc
+// @Summary      Create idea
+// @Description  Proposes a new idea in the ideas channel
+// @Tags         ideas
+// @Accept       json
+// @Produce      json
+// @Param        body  body      CreateIdeaRequest  true  "Idea to create"
+// @Success      201   {object}  httpx.Envelope{data=IdeaResponse}
+// @Failure      400   {object}  httpx.Envelope
+// @Failure      401   {object}  httpx.Envelope
+// @Failure      422   {object}  httpx.ValidationEnvelope
+// @Security     BearerAuth
+// @Router       /api/v1/ideas [post]
 func (h *Handler) Create(c *fiber.Ctx) error {
 	userID := httpx.GetInternalUserID(c)
 
 	var req CreateIdeaRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
-	}
-
-	created, err := h.service.Create(c.Context(), userID, req)
+	input, err := req.ToInput(userID)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
-	return httpx.Created(c, toListItemResponse(*created, userID))
+	created, err := h.service.Create(c.UserContext(), input)
+	if err != nil {
+		return err
+	}
+
+	return httpx.Created(c, NewIdeaResponse(created, userID))
 }
 
+// GetByID godoc
+// @Summary      Get idea detail
+// @Description  Returns a single idea with its threaded comments
+// @Tags         ideas
+// @Produce      json
+// @Param        id   path      string  true  "Idea ID"
+// @Success      200  {object}  httpx.Envelope{data=IdeaDetailResponse}
+// @Failure      401  {object}  httpx.Envelope
+// @Failure      404  {object}  httpx.Envelope
+// @Security     BearerAuth
+// @Router       /api/v1/ideas/{id} [get]
 func (h *Handler) GetByID(c *fiber.Ctx) error {
 	userID := httpx.GetInternalUserID(c)
-	id := c.Params("id")
 
-	detail, err := h.service.GetDetail(c.Context(), id, userID)
+	detail, err := h.service.GetDetail(c.UserContext(), c.Params("id"), userID)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
-	return httpx.OK(c, IdeaDetailResponse{
-		IdeaListItemResponse: toListItemResponse(detail.IdeaListItem, userID),
-		Comments:             toCommentNodes(detail.Comments),
-	})
+	return httpx.OK(c, NewIdeaDetailResponse(detail, userID))
 }
 
+// ToggleVote godoc
+// @Summary      Toggle idea vote
+// @Description  Adds or removes the caller's vote on an idea
+// @Tags         ideas
+// @Produce      json
+// @Param        id   path      string  true  "Idea ID"
+// @Success      200  {object}  httpx.Envelope{data=ToggleVoteResponse}
+// @Failure      401  {object}  httpx.Envelope
+// @Failure      403  {object}  httpx.Envelope
+// @Failure      404  {object}  httpx.Envelope
+// @Security     BearerAuth
+// @Router       /api/v1/ideas/{id}/vote [post]
 func (h *Handler) ToggleVote(c *fiber.Ctx) error {
 	userID := httpx.GetInternalUserID(c)
-	id := c.Params("id")
 
-	out, err := h.service.ToggleVote(c.Context(), id, userID)
+	result, err := h.service.ToggleVote(c.UserContext(), c.Params("id"), userID)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.OK(c, out)
+	return httpx.OK(c, NewToggleVoteResponse(result))
 }
 
+// CreateComment godoc
+// @Summary      Comment on idea
+// @Description  Posts a comment or reply on an idea
+// @Tags         ideas
+// @Accept       json
+// @Produce      json
+// @Param        id    path      string                true  "Idea ID"
+// @Param        body  body      CreateCommentRequest  true  "Comment to create"
+// @Success      201   {object}  httpx.Envelope{data=CommentResponse}
+// @Failure      400   {object}  httpx.Envelope
+// @Failure      401   {object}  httpx.Envelope
+// @Failure      404   {object}  httpx.Envelope
+// @Failure      422   {object}  httpx.ValidationEnvelope
+// @Security     BearerAuth
+// @Router       /api/v1/ideas/{id}/comments [post]
 func (h *Handler) CreateComment(c *fiber.Ctx) error {
 	userID := httpx.GetInternalUserID(c)
-	id := c.Params("id")
 
 	var req CreateCommentRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
-	}
-
-	out, err := h.service.CreateComment(c.Context(), id, userID, req)
+	input, err := req.ToInput(c.Params("id"), userID)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.Created(c, out)
-}
 
-func toListItemResponse(it IdeaListItem, callerID string) IdeaListItemResponse {
-	label := it.Category
-	for _, cat := range Categories {
-		if cat.Slug == it.Category {
-			label = cat.Label
-			break
-		}
+	comment, err := h.service.CreateComment(c.UserContext(), input)
+	if err != nil {
+		return err
 	}
-	return IdeaListItemResponse{
-		ID:            it.ID,
-		Number:        it.Number,
-		Title:         it.Title,
-		Description:   it.Description,
-		Category:      it.Category,
-		CategoryLabel: label,
-		Status:        it.Status,
-		AuthorID:      it.AuthorID,
-		AuthorName:    it.AuthorName,
-		VoteCount:     it.VoteCount,
-		CommentCount:  it.CommentCount,
-		VotedByMe:     it.VotedByMe,
-		IsAuthor:      it.AuthorID == callerID,
-		CreatedAt:     it.CreatedAt,
-	}
-}
-
-func toCommentNodes(in []CommentNode) []CommentNodeResponse {
-	out := make([]CommentNodeResponse, len(in))
-	for i, n := range in {
-		out[i] = CommentNodeResponse{
-			ID:         n.ID,
-			Body:       n.Body,
-			AuthorID:   n.AuthorID,
-			AuthorName: n.AuthorName,
-			CreatedAt:  n.CreatedAt,
-			Replies:    toCommentNodes(n.Replies),
-		}
-	}
-	return out
+	return httpx.Created(c, NewCommentResponse(comment))
 }

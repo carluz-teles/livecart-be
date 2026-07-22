@@ -1,21 +1,20 @@
 package store
 
 import (
-	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
+	storedomain "livecart/apps/api/internal/store/domain"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/storage"
 )
 
 type Handler struct {
 	service  *Service
-	validate *validator.Validate
 	s3Client *storage.S3Client
 }
 
-func NewHandler(service *Service, validate *validator.Validate, s3Client *storage.S3Client) *Handler {
-	return &Handler{service: service, validate: validate, s3Client: s3Client}
+func NewHandler(service *Service, s3Client *storage.S3Client) *Handler {
+	return &Handler{service: service, s3Client: s3Client}
 }
 
 func (h *Handler) RegisterRoutes(router fiber.Router) {
@@ -52,32 +51,20 @@ func (h *Handler) RegisterStoreScopedRoutes(router fiber.Router) {
 func (h *Handler) Create(c *fiber.Ctx) error {
 	clerkUserID := httpx.GetUserID(c)
 	if clerkUserID == "" {
-		return httpx.Unauthorized(c, "unauthorized")
+		return &httpx.ServiceError{Code: 401, Message: "unauthorized"}
 	}
 
 	var req CreateStoreRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
 
-	output, err := h.service.Create(c.Context(), CreateStoreInput{
-		Name:        req.Name,
-		Slug:        req.Slug,
-		ClerkUserID: clerkUserID,
-	})
+	store, err := h.service.Create(c.UserContext(), req.ToInput(clerkUserID))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
-	return httpx.Created(c, CreateStoreResponse{
-		ID:        output.ID,
-		Name:      output.Name,
-		Slug:      output.Slug,
-		CreatedAt: output.CreatedAt,
-	})
+	return httpx.Created(c, NewCreateStoreResponse(store))
 }
 
 // GetCurrent godoc
@@ -92,15 +79,15 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 func (h *Handler) GetCurrent(c *fiber.Ctx) error {
 	clerkUserID := httpx.GetUserID(c)
 	if clerkUserID == "" {
-		return httpx.Unauthorized(c, "unauthorized")
+		return &httpx.ServiceError{Code: 401, Message: "unauthorized"}
 	}
 
-	output, err := h.service.GetByClerkUserID(c.Context(), clerkUserID)
+	store, err := h.service.GetByClerkUserID(c.UserContext(), clerkUserID)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
-	return httpx.OK(c, h.toStoreResponseWithPresignedLogo(c, output))
+	return httpx.OK(c, NewStoreResponse(h.presignLogo(c, store)))
 }
 
 // Update godoc
@@ -117,49 +104,29 @@ func (h *Handler) GetCurrent(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/me [put]
 // @Security     BearerAuth
 func (h *Handler) Update(c *fiber.Ctx) error {
-	// Get clerk user ID and look up store (since /stores/me routes don't have StoreAccessMiddleware)
 	clerkUserID := httpx.GetUserID(c)
 	if clerkUserID == "" {
-		return httpx.Unauthorized(c, "unauthorized")
+		return &httpx.ServiceError{Code: 401, Message: "unauthorized"}
 	}
-
-	// Look up the store for this user
-	storeOutput, err := h.service.GetByClerkUserID(c.Context(), clerkUserID)
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-	storeID := storeOutput.ID
 
 	var req UpdateStoreRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
 
-	merged, err := normalizeUpdateStoreRequest(storeOutput, req)
+	// /stores/me routes don't carry StoreAccessMiddleware, so resolve the store
+	// for this user first.
+	current, err := h.service.GetByClerkUserID(c.UserContext(), clerkUserID)
 	if err != nil {
-		return httpx.BadRequest(c, err.Error())
+		return err
 	}
 
-	output, err := h.service.Update(c.Context(), UpdateStoreInput{
-		StoreID:        storeID,
-		Name:           merged.Name,
-		WhatsappNumber: merged.WhatsappNumber,
-		EmailAddress:   merged.EmailAddress,
-		SMSNumber:      merged.SMSNumber,
-		Description:    merged.Description,
-		Website:        merged.Website,
-		LogoURL:        merged.LogoURL,
-		Address:        merged.Address,
-		CNPJ:           merged.CNPJ,
-	})
+	store, err := h.service.Update(c.UserContext(), req.ToInput(current.ID().String()))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
-	return httpx.OK(c, h.toStoreResponseWithPresignedLogo(c, output))
+	return httpx.OK(c, NewStoreResponse(h.presignLogo(c, store)))
 }
 
 // UpdateCartSettings godoc
@@ -176,47 +143,64 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/me/cart-settings [put]
 // @Security     BearerAuth
 func (h *Handler) UpdateCartSettings(c *fiber.Ctx) error {
-	// Get clerk user ID and look up store (since /stores/me routes don't have StoreAccessMiddleware)
 	clerkUserID := httpx.GetUserID(c)
 	if clerkUserID == "" {
-		return httpx.Unauthorized(c, "unauthorized")
+		return &httpx.ServiceError{Code: 401, Message: "unauthorized"}
 	}
-
-	// Look up the store for this user
-	storeOutput, err := h.service.GetByClerkUserID(c.Context(), clerkUserID)
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-	storeID := storeOutput.ID
 
 	var req UpdateCartSettingsRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
 
-	output, err := h.service.UpdateCartSettings(c.Context(), UpdateCartSettingsInput{
-		StoreID:                   storeID,
-		Enabled:                   req.Enabled,
-		ExpirationMinutes:         req.ExpirationMinutes,
-		ReserveStock:              req.ReserveStock,
-		AllowStorePickup:          req.AllowStorePickup,
-		MaxQuantityPerItem:        req.MaxQuantityPerItem,
-		AllowEdit:                 req.AllowEdit,
-		CheckoutSendMethods:       req.CheckoutSendMethods,
-		RealTimeCart:              req.RealTimeCart,
-		SendOnLiveEnd:             req.SendOnLiveEnd,
-		MessageCooldownSeconds:    req.MessageCooldownSeconds,
-		SendExpirationReminder:    req.SendExpirationReminder,
-		ExpirationReminderMinutes: req.ExpirationReminderMinutes,
-	})
+	current, err := h.service.GetByClerkUserID(c.UserContext(), clerkUserID)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
-	return httpx.OK(c, h.toStoreResponseWithPresignedLogo(c, output))
+	store, err := h.service.UpdateCartSettings(c.UserContext(), req.ToInput(current.ID().String()))
+	if err != nil {
+		return err
+	}
+
+	return httpx.OK(c, NewStoreResponse(h.presignLogo(c, store)))
+}
+
+// UpdateShippingDefaults updates the store shipping defaults (package weight/format) for the authenticated user.
+// @Summary      Update shipping defaults
+// @Description  Updates the store shipping defaults for the authenticated user's store
+// @Tags         stores
+// @Accept       json
+// @Produce      json
+// @Param        request body UpdateShippingDefaultsRequest true "Shipping defaults payload"
+// @Success      200 {object} httpx.Envelope{data=StoreResponse}
+// @Failure      400 {object} httpx.Envelope
+// @Failure      404 {object} httpx.Envelope
+// @Failure      422 {object} httpx.ValidationEnvelope
+// @Router       /api/v1/stores/me/shipping-defaults [put]
+// @Security     BearerAuth
+func (h *Handler) UpdateShippingDefaults(c *fiber.Ctx) error {
+	clerkUserID := httpx.GetUserID(c)
+	if clerkUserID == "" {
+		return &httpx.ServiceError{Code: 401, Message: "unauthorized"}
+	}
+
+	var req UpdateShippingDefaultsRequest
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
+	}
+
+	current, err := h.service.GetByClerkUserID(c.UserContext(), clerkUserID)
+	if err != nil {
+		return err
+	}
+
+	store, err := h.service.UpdateShippingDefaults(c.UserContext(), req.ToInput(current.ID().String()))
+	if err != nil {
+		return err
+	}
+
+	return httpx.OK(c, NewStoreResponse(h.presignLogo(c, store)))
 }
 
 // UploadLogo godoc
@@ -225,7 +209,7 @@ func (h *Handler) UpdateCartSettings(c *fiber.Ctx) error {
 // @Tags         stores
 // @Accept       multipart/form-data
 // @Produce      json
-// @Param        file formance file true "Logo image file (JPG, PNG, GIF, max 2MB)"
+// @Param        file formData file true "Logo image file (JPG, PNG, GIF, max 2MB)"
 // @Success      200 {object} httpx.Envelope{data=UploadLogoResponse}
 // @Failure      400 {object} httpx.Envelope
 // @Failure      403 {object} httpx.Envelope
@@ -233,31 +217,29 @@ func (h *Handler) UpdateCartSettings(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/me/logo [post]
 // @Security     BearerAuth
 func (h *Handler) UploadLogo(c *fiber.Ctx) error {
-	// Get clerk user ID and look up store (since /stores/me routes don't have StoreAccessMiddleware)
 	clerkUserID := httpx.GetUserID(c)
 	if clerkUserID == "" {
-		return httpx.Unauthorized(c, "unauthorized")
+		return &httpx.ServiceError{Code: 401, Message: "unauthorized"}
 	}
 
-	// Look up the store for this user
-	storeOutput, err := h.service.GetByClerkUserID(c.Context(), clerkUserID)
+	current, err := h.service.GetByClerkUserID(c.UserContext(), clerkUserID)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	storeID := storeOutput.ID
+	storeID := current.ID().String()
 
 	if h.s3Client == nil {
-		return httpx.InternalError(c, "storage not configured")
+		return httpx.ErrInternal("storage not configured")
 	}
 
 	file, err := c.FormFile("file")
 	if err != nil {
-		return httpx.BadRequest(c, "file is required")
+		return httpx.ErrBadRequest("file is required")
 	}
 
 	// Validate file size (max 2MB)
 	if file.Size > 2*1024*1024 {
-		return httpx.BadRequest(c, "file too large, maximum size is 2MB")
+		return httpx.ErrBadRequest("file too large, maximum size is 2MB")
 	}
 
 	// Validate content type
@@ -270,39 +252,37 @@ func (h *Handler) UploadLogo(c *fiber.Ctx) error {
 		"image/webp": true,
 	}
 	if !validTypes[contentType] {
-		return httpx.BadRequest(c, "invalid file type, accepted: JPG, PNG, GIF, WebP")
+		return httpx.ErrBadRequest("invalid file type, accepted: JPG, PNG, GIF, WebP")
 	}
 
-	// Open the file
 	src, err := file.Open()
 	if err != nil {
-		return httpx.InternalError(c, "failed to read file")
+		return httpx.ErrInternal("failed to read file")
 	}
 	defer src.Close()
 
-	// Upload to S3
+	// Upload to S3 (returns the S3 key, not a URL)
 	folder := "logos/" + storeID
-	// UploadFile now returns the S3 key (not a URL)
-	key, err := h.s3Client.UploadFile(c.Context(), src, file.Filename, contentType, folder)
+	key, err := h.s3Client.UploadFile(c.UserContext(), src, file.Filename, contentType, folder)
 	if err != nil {
-		return httpx.InternalError(c, "failed to upload file")
+		return httpx.ErrInternal("failed to upload file")
 	}
 
-	// Update store with new logo key
-	output, err := h.service.UpdateLogoURL(c.Context(), storeID, key)
+	store, err := h.service.UpdateLogoURL(c.UserContext(), storeID, key)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
 	// Generate presigned URL for the response
-	presignedURL, err := h.s3Client.GeneratePresignedGetURL(c.Context(), key, 0)
+	presignedURL, err := h.s3Client.GeneratePresignedGetURL(c.UserContext(), key, 0)
 	if err != nil {
-		return httpx.InternalError(c, "failed to generate logo URL")
+		return httpx.ErrInternal("failed to generate logo URL")
 	}
 
+	store.SetLogoURL(&presignedURL)
 	return httpx.OK(c, UploadLogoResponse{
 		LogoURL: presignedURL,
-		Store:   h.toStoreResponseWithPresignedLogo(c, output),
+		Store:   NewStoreResponse(store),
 	})
 }
 
@@ -324,43 +304,20 @@ func (h *Handler) UploadLogo(c *fiber.Ctx) error {
 func (h *Handler) UpdateByID(c *fiber.Ctx) error {
 	storeID := httpx.GetStoreID(c)
 	if storeID == "" {
-		return httpx.Forbidden(c, "no store access")
+		return httpx.ErrForbidden("no store access")
 	}
 
 	var req UpdateStoreRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
 
-	current, err := h.service.GetByID(c.Context(), storeID)
+	store, err := h.service.Update(c.UserContext(), req.ToInput(storeID))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-	merged, err := normalizeUpdateStoreRequest(current, req)
-	if err != nil {
-		return httpx.BadRequest(c, err.Error())
+		return err
 	}
 
-	output, err := h.service.Update(c.Context(), UpdateStoreInput{
-		StoreID:        storeID,
-		Name:           merged.Name,
-		WhatsappNumber: merged.WhatsappNumber,
-		EmailAddress:   merged.EmailAddress,
-		SMSNumber:      merged.SMSNumber,
-		Description:    merged.Description,
-		Website:        merged.Website,
-		LogoURL:        merged.LogoURL,
-		Address:        merged.Address,
-		CNPJ:           merged.CNPJ,
-	})
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	return httpx.OK(c, h.toStoreResponseWithPresignedLogo(c, output))
+	return httpx.OK(c, NewStoreResponse(h.presignLogo(c, store)))
 }
 
 // UpdateCartSettingsByID godoc
@@ -381,135 +338,70 @@ func (h *Handler) UpdateByID(c *fiber.Ctx) error {
 func (h *Handler) UpdateCartSettingsByID(c *fiber.Ctx) error {
 	storeID := httpx.GetStoreID(c)
 	if storeID == "" {
-		return httpx.Forbidden(c, "no store access")
+		return httpx.ErrForbidden("no store access")
 	}
 
 	var req UpdateCartSettingsRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
 
-	output, err := h.service.UpdateCartSettings(c.Context(), UpdateCartSettingsInput{
-		StoreID:                   storeID,
-		Enabled:                   req.Enabled,
-		ExpirationMinutes:         req.ExpirationMinutes,
-		ReserveStock:              req.ReserveStock,
-		AllowStorePickup:          req.AllowStorePickup,
-		MaxQuantityPerItem:        req.MaxQuantityPerItem,
-		AllowEdit:                 req.AllowEdit,
-		CheckoutSendMethods:       req.CheckoutSendMethods,
-		RealTimeCart:              req.RealTimeCart,
-		SendOnLiveEnd:             req.SendOnLiveEnd,
-		MessageCooldownSeconds:    req.MessageCooldownSeconds,
-		SendExpirationReminder:    req.SendExpirationReminder,
-		ExpirationReminderMinutes: req.ExpirationReminderMinutes,
-	})
+	store, err := h.service.UpdateCartSettings(c.UserContext(), req.ToInput(storeID))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
-	return httpx.OK(c, h.toStoreResponseWithPresignedLogo(c, output))
+	return httpx.OK(c, NewStoreResponse(h.presignLogo(c, store)))
 }
 
-// UpdateShippingDefaults updates the store shipping defaults (package weight/format) for the authenticated user.
-func (h *Handler) UpdateShippingDefaults(c *fiber.Ctx) error {
-	clerkUserID := httpx.GetUserID(c)
-	if clerkUserID == "" {
-		return httpx.Unauthorized(c, "unauthorized")
-	}
-
-	storeOutput, err := h.service.GetByClerkUserID(c.Context(), clerkUserID)
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	var req UpdateShippingDefaultsRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
-	}
-
-	output, err := h.service.UpdateShippingDefaults(c.Context(), UpdateShippingDefaultsInput{
-		StoreID:            storeOutput.ID,
-		PackageWeightGrams: req.PackageWeightGrams,
-		PackageFormat:      req.PackageFormat,
-		HeightCm:           req.HeightCm,
-		WidthCm:            req.WidthCm,
-		LengthCm:           req.LengthCm,
-	})
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	return httpx.OK(c, h.toStoreResponseWithPresignedLogo(c, output))
-}
-
-// UpdateShippingDefaultsByID updates the store shipping defaults for a specific store (requires store access).
+// UpdateShippingDefaultsByID godoc
+// @Summary      Update shipping defaults for a store
+// @Description  Updates the store shipping defaults for a specific store (requires store access)
+// @Tags         stores
+// @Accept       json
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        request body UpdateShippingDefaultsRequest true "Shipping defaults payload"
+// @Success      200 {object} httpx.Envelope{data=StoreResponse}
+// @Failure      400 {object} httpx.Envelope
+// @Failure      403 {object} httpx.Envelope
+// @Failure      404 {object} httpx.Envelope
+// @Failure      422 {object} httpx.ValidationEnvelope
+// @Router       /api/v1/stores/{storeId}/shipping-defaults [put]
+// @Security     BearerAuth
 func (h *Handler) UpdateShippingDefaultsByID(c *fiber.Ctx) error {
 	storeID := httpx.GetStoreID(c)
 	if storeID == "" {
-		return httpx.Forbidden(c, "no store access")
+		return httpx.ErrForbidden("no store access")
 	}
 
 	var req UpdateShippingDefaultsRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
 
-	output, err := h.service.UpdateShippingDefaults(c.Context(), UpdateShippingDefaultsInput{
-		StoreID:            storeID,
-		PackageWeightGrams: req.PackageWeightGrams,
-		PackageFormat:      req.PackageFormat,
-		HeightCm:           req.HeightCm,
-		WidthCm:            req.WidthCm,
-		LengthCm:           req.LengthCm,
-	})
+	store, err := h.service.UpdateShippingDefaults(c.UserContext(), req.ToInput(storeID))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 
-	return httpx.OK(c, h.toStoreResponseWithPresignedLogo(c, output))
+	return httpx.OK(c, NewStoreResponse(h.presignLogo(c, store)))
 }
 
-func toStoreResponse(output StoreOutput) StoreResponse {
-	return StoreResponse{
-		ID:               output.ID,
-		Name:             output.Name,
-		Slug:             output.Slug,
-		Active:           output.Active,
-		WhatsappNumber:   output.WhatsappNumber,
-		EmailAddress:     output.EmailAddress,
-		SMSNumber:        output.SMSNumber,
-		Description:      output.Description,
-		Website:          output.Website,
-		LogoURL:          output.LogoURL, // stays nullable: null until logo is uploaded
-		Address:          output.Address,
-		CNPJ:             output.CNPJ,
-		CartSettings:     output.CartSettings,
-		ShippingDefaults: output.ShippingDefaults,
-		CreatedAt:        output.CreatedAt,
+// presignLogo swaps the stored S3 key on the entity for a presigned GET URL so
+// the response carries a usable logo URL. It mutates the entity in-place and
+// returns it for chaining. No-op when S3 is unconfigured or no logo is set.
+func (h *Handler) presignLogo(c *fiber.Ctx, s *storedomain.Store) *storedomain.Store {
+	if h.s3Client == nil {
+		return s
 	}
-}
-
-// toStoreResponseWithPresignedLogo converts output to response and generates presigned URL for logo
-func (h *Handler) toStoreResponseWithPresignedLogo(c *fiber.Ctx, output StoreOutput) StoreResponse {
-	resp := toStoreResponse(output)
-
-	// Generate presigned URL for logo if S3 client is available and logo exists
-	if h.s3Client != nil && output.LogoURL != nil && *output.LogoURL != "" {
-		presignedURL, err := h.s3Client.GeneratePresignedGetURL(c.Context(), *output.LogoURL, 0)
-		if err == nil && presignedURL != "" {
-			resp.LogoURL = &presignedURL
-		}
+	key := s.LogoURL()
+	if key == nil || *key == "" {
+		return s
 	}
-
-	return resp
+	presignedURL, err := h.s3Client.GeneratePresignedGetURL(c.UserContext(), *key, 0)
+	if err == nil && presignedURL != "" {
+		s.SetLogoURL(&presignedURL)
+	}
+	return s
 }

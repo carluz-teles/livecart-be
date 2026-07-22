@@ -24,20 +24,20 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 	}
 }
 
-func (s *Service) Create(ctx context.Context, input CreateProductInput) (CreateProductOutput, error) {
+func (s *Service) Create(ctx context.Context, input CreateProductInput) (*domain.Product, error) {
 	// Resolve keyword: validate if provided, or auto-generate
 	keyword, err := s.resolveKeyword(ctx, input.StoreID, input.Keyword)
 	if err != nil {
-		return CreateProductOutput{}, err
+		return nil, err
 	}
 
 	// Check uniqueness
 	existing, err := s.repo.GetByKeyword(ctx, input.StoreID, keyword)
 	if err != nil && !httpx.IsNotFound(err) {
-		return CreateProductOutput{}, fmt.Errorf("checking keyword uniqueness: %w", err)
+		return nil, fmt.Errorf("checking keyword uniqueness: %w", err)
 	}
 	if existing != nil {
-		return CreateProductOutput{}, httpx.ErrConflict("keyword already in use")
+		return nil, httpx.ErrConflict("keyword already in use")
 	}
 
 	// Create product via domain factory
@@ -53,7 +53,7 @@ func (s *Service) Create(ctx context.Context, input CreateProductInput) (CreateP
 		input.Shipping,
 	)
 	if err != nil {
-		return CreateProductOutput{}, fmt.Errorf("creating product: %w", err)
+		return nil, fmt.Errorf("creating product: %w", err)
 	}
 
 	if input.GroupID != nil {
@@ -62,21 +62,16 @@ func (s *Service) Create(ctx context.Context, input CreateProductInput) (CreateP
 
 	// Save to repository
 	if err := s.repo.Save(ctx, product); err != nil {
-		return CreateProductOutput{}, err
+		return nil, err
 	}
 
 	for i, url := range input.Images {
 		if _, err := s.repo.AddImage(ctx, product.ID(), url, i); err != nil {
-			return CreateProductOutput{}, fmt.Errorf("attaching variant image: %w", err)
+			return nil, fmt.Errorf("attaching variant image: %w", err)
 		}
 	}
 
-	return CreateProductOutput{
-		ID:        product.ID().String(),
-		Name:      product.Name(),
-		Keyword:   product.Keyword().String(),
-		CreatedAt: product.CreatedAt(),
-	}, nil
+	return product, nil
 }
 
 // resolveKeyword validates or auto-generates a keyword for a product.
@@ -103,38 +98,38 @@ func (s *Service) resolveKeyword(ctx context.Context, storeID vo.StoreID, inputK
 	return kw, nil
 }
 
-func (s *Service) GetByID(ctx context.Context, id vo.ProductID, storeID vo.StoreID) (ProductOutput, error) {
+func (s *Service) GetByID(ctx context.Context, id vo.ProductID, storeID vo.StoreID) (*ProductView, error) {
 	product, err := s.repo.GetByID(ctx, id, storeID)
 	if err != nil {
-		return ProductOutput{}, err
+		return nil, err
 	}
-	out := toProductOutput(product)
+	view := &ProductView{Product: product}
 
 	images, err := s.repo.ListImages(ctx, id)
 	if err != nil {
-		return ProductOutput{}, err
+		return nil, err
 	}
-	out.Images = images
+	view.Images = images
 
 	if product.GroupID() != nil {
 		opts, err := s.repo.ListVariantOptions(ctx, id)
 		if err != nil {
-			return ProductOutput{}, err
+			return nil, err
 		}
 		refs := make([]OptionValueRef, len(opts))
 		for i, o := range opts {
 			refs[i] = OptionValueRef{Option: o.OptionName, Value: o.Value}
 		}
-		out.OptionValues = refs
+		view.OptionValues = refs
 		// Group base name for the short title (best-effort).
-		if info, err := s.repo.VariantInfoForProducts(ctx, []string{out.ID}); err == nil {
-			out.GroupName = info[out.ID].GroupName
+		if info, err := s.repo.VariantInfoForProducts(ctx, []string{product.ID().String()}); err == nil {
+			view.GroupName = info[product.ID().String()].GroupName
 		}
 	}
-	return out, nil
+	return view, nil
 }
 
-func (s *Service) List(ctx context.Context, input ListProductsInput) (ListProductsOutput, error) {
+func (s *Service) List(ctx context.Context, input ListProductsInput) ([]*ProductView, int, error) {
 	// Normalize pagination and sorting
 	input.Pagination.Normalize()
 	input.Sorting.Normalize("created_at")
@@ -147,15 +142,15 @@ func (s *Service) List(ctx context.Context, input ListProductsInput) (ListProduc
 		Filters:    input.Filters,
 	})
 	if err != nil {
-		return ListProductsOutput{}, err
+		return nil, 0, err
 	}
 
-	products := make([]ProductOutput, len(result.Products))
+	views := make([]*ProductView, len(result.Products))
 	variantIDs := make([]string, 0)
 	for i, product := range result.Products {
-		products[i] = toProductOutput(product)
-		if products[i].GroupID != "" {
-			variantIDs = append(variantIDs, products[i].ID)
+		views[i] = &ProductView{Product: product}
+		if product.GroupID() != nil {
+			variantIDs = append(variantIDs, product.ID().String())
 		}
 	}
 
@@ -165,40 +160,36 @@ func (s *Service) List(ctx context.Context, input ListProductsInput) (ListProduc
 		if info, err := s.repo.VariantInfoForProducts(ctx, variantIDs); err != nil {
 			logger.From(ctx, s.logger).Warn("failed to load variant info for product list", zap.Error(err))
 		} else {
-			for i := range products {
-				if vi, ok := info[products[i].ID]; ok {
-					products[i].GroupName = vi.GroupName
-					products[i].OptionValues = vi.Options
+			for _, v := range views {
+				if vi, ok := info[v.Product.ID().String()]; ok {
+					v.GroupName = vi.GroupName
+					v.OptionValues = vi.Options
 				}
 			}
 		}
 	}
 
-	return ListProductsOutput{
-		Products:   products,
-		Total:      result.Total,
-		Pagination: input.Pagination,
-	}, nil
+	return views, result.Total, nil
 }
 
-func (s *Service) Update(ctx context.Context, input UpdateProductInput) (ProductOutput, error) {
+func (s *Service) Update(ctx context.Context, input UpdateProductInput) (*ProductView, error) {
 	// Get existing product
 	product, err := s.repo.GetByID(ctx, input.ID, input.StoreID)
 	if err != nil {
-		return ProductOutput{}, err
+		return nil, err
 	}
 
 	// Use domain method to update
 	if err := product.UpdateDetails(input.Name, input.Price, input.ImageURL, input.Stock, input.Active, input.Shipping); err != nil {
-		return ProductOutput{}, httpx.ErrUnprocessable(err.Error())
+		return nil, httpx.ErrUnprocessable(err.Error())
 	}
 
 	// Save changes
 	if err := s.repo.Update(ctx, product); err != nil {
-		return ProductOutput{}, err
+		return nil, err
 	}
 
-	return toProductOutput(product), nil
+	return &ProductView{Product: product}, nil
 }
 
 func (s *Service) Delete(ctx context.Context, id vo.ProductID, storeID vo.StoreID) error {
@@ -282,31 +273,6 @@ func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool
 	return true, nil
 }
 
-func (s *Service) GetStats(ctx context.Context, storeID vo.StoreID) (ProductStatsOutput, error) {
+func (s *Service) GetStats(ctx context.Context, storeID vo.StoreID) (ProductStats, error) {
 	return s.repo.GetStats(ctx, storeID)
-}
-
-func toProductOutput(product *domain.Product) ProductOutput {
-	groupID := ""
-	if g := product.GroupID(); g != nil {
-		groupID = g.String()
-	}
-	return ProductOutput{
-		ID:             product.ID().String(),
-		Name:           product.Name(),
-		ExternalID:     product.ExternalID(),
-		ExternalSource: product.ExternalSource().String(),
-		Keyword:        product.Keyword().String(),
-		Price:          product.Price().Cents(),
-		ImageURL:       product.ImageURL(),
-		Stock:          product.Stock(),
-		Active:         product.Active(),
-		Shipping:       product.Shipping(),
-		Shippable:      product.IsShippable(),
-		GroupID:        groupID,
-		OptionValues:   []OptionValueRef{},
-		Images:         []string{},
-		CreatedAt:      product.CreatedAt(),
-		UpdatedAt:      product.UpdatedAt(),
-	}
 }

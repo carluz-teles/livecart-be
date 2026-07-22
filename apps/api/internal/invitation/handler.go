@@ -1,7 +1,6 @@
 package invitation
 
 import (
-	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
 	"livecart/apps/api/lib/httpx"
@@ -9,12 +8,11 @@ import (
 )
 
 type Handler struct {
-	service  *Service
-	validate *validator.Validate
+	service *Service
 }
 
-func NewHandler(service *Service, validate *validator.Validate) *Handler {
-	return &Handler{service: service, validate: validate}
+func NewHandler(service *Service) *Handler {
+	return &Handler{service: service}
 }
 
 // RegisterRoutes registers invitation routes under /stores/:storeId/invitations
@@ -53,56 +51,19 @@ func (h *Handler) RegisterAcceptRoute(router fiber.Router) {
 // @Router       /api/v1/stores/{storeId}/invitations [post]
 // @Security     BearerAuth
 func (h *Handler) Create(c *fiber.Ctx) error {
-	storeIDStr := httpx.GetStoreID(c)
-	memberIDStr := httpx.GetStoreUserID(c)
-
 	var req CreateInvitationRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
-	}
-
-	// Convert to value objects
-	storeID, err := vo.NewStoreID(storeIDStr)
+	input, err := req.ToInput(httpx.GetStoreID(c), httpx.GetStoreUserID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return err
 	}
-
-	email, err := vo.NewEmail(req.Email)
+	inv, err := h.service.Create(c.UserContext(), input)
 	if err != nil {
-		return httpx.BadRequest(c, "invalid email format")
+		return err
 	}
-
-	role, err := vo.NewRole(req.Role)
-	if err != nil {
-		return httpx.BadRequest(c, "invalid role")
-	}
-
-	inviterID, err := vo.NewMemberID(memberIDStr)
-	if err != nil {
-		return httpx.BadRequest(c, "invalid inviter ID")
-	}
-
-	output, err := h.service.Create(c.Context(), CreateInvitationInput{
-		StoreID:   storeID,
-		InviterID: inviterID,
-		Email:     email,
-		Role:      role,
-	})
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	return httpx.Created(c, InvitationResponse{
-		ID:        output.ID,
-		Email:     output.Email,
-		Role:      output.Role,
-		Status:    output.Status,
-		ExpiresAt: output.ExpiresAt,
-		CreatedAt: output.CreatedAt,
-	})
+	return httpx.Created(c, NewInvitationResponse(inv))
 }
 
 // List godoc
@@ -115,33 +76,15 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/invitations [get]
 // @Security     BearerAuth
 func (h *Handler) List(c *fiber.Ctx) error {
-	storeIDStr := httpx.GetStoreID(c)
-
-	storeID, err := vo.NewStoreID(storeIDStr)
+	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return httpx.ErrUnprocessable("invalid store ID")
 	}
-
-	invitations, err := h.service.List(c.Context(), storeID)
+	invitations, err := h.service.List(c.UserContext(), storeID)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-
-	responses := make([]InvitationResponse, len(invitations))
-	for i, inv := range invitations {
-		responses[i] = InvitationResponse{
-			ID:          inv.ID,
-			Email:       inv.Email,
-			Role:        inv.Role,
-			Status:      inv.Status,
-			InviterName: inv.InviterName,
-			ExpiresAt:   inv.ExpiresAt,
-			AcceptedAt:  inv.AcceptedAt,
-			CreatedAt:   inv.CreatedAt,
-		}
-	}
-
-	return httpx.OK(c, ListInvitationsResponse{Data: responses})
+	return httpx.OK(c, NewListInvitationsResponse(invitations))
 }
 
 // Revoke godoc
@@ -155,23 +98,18 @@ func (h *Handler) List(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/invitations/{id} [delete]
 // @Security     BearerAuth
 func (h *Handler) Revoke(c *fiber.Ctx) error {
-	storeIDStr := httpx.GetStoreID(c)
 	id := c.Params("id")
-
-	storeID, err := vo.NewStoreID(storeIDStr)
+	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return httpx.ErrUnprocessable("invalid store ID")
 	}
-
 	invitationID, err := vo.NewInvitationID(id)
 	if err != nil {
-		return httpx.BadRequest(c, "invalid invitation ID")
+		return httpx.ErrUnprocessable("invalid invitation ID")
 	}
-
-	if err := h.service.Revoke(c.Context(), storeID, invitationID); err != nil {
-		return httpx.HandleServiceError(c, err)
+	if err := h.service.Revoke(c.UserContext(), storeID, invitationID); err != nil {
+		return err
 	}
-
 	return httpx.Deleted(c, id)
 }
 
@@ -188,42 +126,27 @@ func (h *Handler) Revoke(c *fiber.Ctx) error {
 // @Router       /api/v1/stores/{storeId}/invitations/{id}/resend [post]
 // @Security     BearerAuth
 func (h *Handler) Resend(c *fiber.Ctx) error {
-	storeIDStr := httpx.GetStoreID(c)
-	memberIDStr := httpx.GetStoreUserID(c)
-	id := c.Params("id")
-
-	storeID, err := vo.NewStoreID(storeIDStr)
+	storeID, err := vo.NewStoreID(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store ID")
+		return httpx.ErrUnprocessable("invalid store ID")
 	}
-
-	invitationID, err := vo.NewInvitationID(id)
+	invitationID, err := vo.NewInvitationID(c.Params("id"))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid invitation ID")
+		return httpx.ErrUnprocessable("invalid invitation ID")
 	}
-
-	inviterID, err := vo.NewMemberID(memberIDStr)
+	inviterID, err := vo.NewMemberID(httpx.GetStoreUserID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid inviter ID")
+		return httpx.ErrUnprocessable("invalid inviter ID")
 	}
-
-	output, err := h.service.Resend(c.Context(), ResendInvitationInput{
+	inv, err := h.service.Resend(c.UserContext(), ResendInvitationInput{
 		StoreID:      storeID,
 		InvitationID: invitationID,
 		InviterID:    inviterID,
 	})
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-
-	return httpx.OK(c, InvitationResponse{
-		ID:        output.ID,
-		Email:     output.Email,
-		Role:      output.Role,
-		Status:    output.Status,
-		ExpiresAt: output.ExpiresAt,
-		CreatedAt: output.CreatedAt,
-	})
+	return httpx.OK(c, NewInvitationResponse(inv))
 }
 
 // GetByToken godoc
@@ -237,24 +160,11 @@ func (h *Handler) Resend(c *fiber.Ctx) error {
 // @Failure      410 {object} httpx.Envelope
 // @Router       /api/v1/invitations/token/{token} [get]
 func (h *Handler) GetByToken(c *fiber.Ctx) error {
-	token := c.Params("token")
-
-	output, err := h.service.GetByToken(c.Context(), token)
+	inv, err := h.service.GetByToken(c.UserContext(), c.Params("token"))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-
-	return httpx.OK(c, InvitationDetailsResponse{
-		ID:          output.ID,
-		Email:       output.Email,
-		Role:        output.Role,
-		Status:      output.Status,
-		StoreName:   output.StoreName,
-		StoreSlug:   output.StoreSlug,
-		InviterName: output.InviterName,
-		ExpiresAt:   output.ExpiresAt,
-		CreatedAt:   output.CreatedAt,
-	})
+	return httpx.OK(c, NewInvitationDetailsResponse(inv))
 }
 
 // Accept godoc
@@ -264,51 +174,42 @@ func (h *Handler) GetByToken(c *fiber.Ctx) error {
 // @Accept       json
 // @Produce      json
 // @Param        request body AcceptInvitationRequest true "Invitation token"
-// @Success      200 {object} httpx.Envelope{data=AcceptInvitationOutput}
+// @Success      200 {object} httpx.Envelope{data=AcceptInvitationResponse}
 // @Failure      400 {object} httpx.Envelope
 // @Failure      403 {object} httpx.Envelope
 // @Failure      404 {object} httpx.Envelope
 // @Failure      410 {object} httpx.Envelope
+// @Failure      422 {object} httpx.ValidationEnvelope
 // @Router       /api/v1/invitations/accept [post]
 // @Security     BearerAuth
 func (h *Handler) Accept(c *fiber.Ctx) error {
 	clerkUserID := httpx.GetUserID(c)
 	if clerkUserID == "" {
-		return c.Status(fiber.StatusUnauthorized).JSON(httpx.Envelope{Error: "unauthorized"})
+		return &httpx.ServiceError{Code: fiber.StatusUnauthorized, Message: "unauthorized"}
 	}
 
 	var req AcceptInvitationRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
 
-	// Get email from claims
+	// Email comes from the authenticated JWT claims, not the request body.
 	claims := httpx.GetClaims(c)
 	emailStr := ""
 	if claims != nil {
 		emailStr = claims.Email
 	}
-
 	if emailStr == "" {
-		return httpx.BadRequest(c, "email not found in token claims")
+		return httpx.ErrBadRequest("email not found in token claims")
 	}
 
-	email, err := vo.NewEmail(emailStr)
+	input, err := req.ToInput(clerkUserID, emailStr)
 	if err != nil {
-		return httpx.BadRequest(c, "invalid email: "+emailStr)
+		return err
 	}
-
-	output, err := h.service.Accept(c.Context(), AcceptInvitationInput{
-		Token:       req.Token,
-		ClerkUserID: clerkUserID,
-		Email:       email,
-	})
+	inv, err := h.service.Accept(c.UserContext(), input)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-
-	return httpx.OK(c, output)
+	return httpx.OK(c, NewAcceptInvitationResponse(inv))
 }

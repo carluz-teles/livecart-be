@@ -153,13 +153,13 @@ func (a *SyncerAdapter) ImportFromERP(ctx context.Context, storeIDStr, externalS
 
 	// Variants are persisted in input order; map back to ERP external IDs.
 	importedExternalIDs := make([]string, 0, len(variants))
-	for i := range out.Variants {
+	for i := range out.Variants() {
 		if i >= len(variants) {
 			break
 		}
 		importedExternalIDs = append(importedExternalIDs, variants[i].ExternalID)
 	}
-	return out.ID, importedExternalIDs, nil
+	return out.ID(), importedExternalIDs, nil
 }
 
 // buildOptionsFromVariants infers the option/value matrix from the variants when

@@ -35,9 +35,9 @@ func (s *Service) AccessGuard() fiber.Handler {
 			return c.Next()
 		}
 
-		state, err := s.GetState(c.Context(), storeID)
+		state, err := s.GetState(c.UserContext(), storeID)
 		if err != nil {
-			logger.From(c.Context(), s.logger).Warn("billing guard lookup failed (fail-open)",
+			logger.From(c.UserContext(), s.logger).Warn("billing guard lookup failed (fail-open)",
 				zap.Error(err),
 			)
 			return c.Next()

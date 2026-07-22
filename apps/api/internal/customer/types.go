@@ -5,10 +5,14 @@ import (
 
 	"github.com/google/uuid"
 
+	"livecart/apps/api/internal/customer/domain"
 	"livecart/apps/api/lib/query"
 )
 
+// ============================================
 // Handler layer - Filters
+// ============================================
+
 type CustomerFilters struct {
 	HasOrders     *bool `query:"hasOrders"`
 	OrderCountMin *int  `query:"orderCountMin"`
@@ -16,6 +20,10 @@ type CustomerFilters struct {
 	TotalSpentMin *int  `query:"totalSpentMin"`
 	TotalSpentMax *int  `query:"totalSpentMax"`
 }
+
+// ============================================
+// Handler layer - Response types
+// ============================================
 
 // CustomerShippingAddressResponse mirrors the JSON the buyer fills at checkout
 // (zipCode, street, number, complement, neighborhood, city, state). Sent
@@ -31,12 +39,11 @@ type CustomerShippingAddressResponse struct {
 	State        string `json:"state,omitempty"`
 }
 
-// Handler layer - Request/Response types
 type CustomerResponse struct {
-	ID           string     `json:"id"`
-	Handle       string     `json:"handle"`
-	Email        *string    `json:"email,omitempty"`
-	Phone        *string    `json:"phone,omitempty"`
+	ID     string  `json:"id"`
+	Handle string  `json:"handle"`
+	Email  *string `json:"email,omitempty"`
+	Phone  *string `json:"phone,omitempty"`
 	// Identity fields captured at the most recent checkout. Empty until the
 	// buyer fills the public cart form. Surfaced on the detail drawer so the
 	// merchant can address the customer by name and call them via WhatsApp.
@@ -51,9 +58,52 @@ type CustomerResponse struct {
 	LastShippingAddress *CustomerShippingAddressResponse `json:"lastShippingAddress,omitempty"`
 }
 
+// NewCustomerResponse maps a domain Customer to its API response. This is the
+// controller's outbound mapper: presentation knows the domain; the domain never
+// knows the response.
+func NewCustomerResponse(c *domain.Customer) CustomerResponse {
+	resp := CustomerResponse{
+		ID:           c.ID().String(),
+		Handle:       c.Handle(),
+		Email:        c.Email(),
+		Phone:        c.Phone(),
+		Name:         c.Name(),
+		Document:     c.Document(),
+		TotalOrders:  c.TotalOrders(),
+		TotalSpent:   c.TotalSpent(),
+		LastOrderAt:  c.LastOrderAt(),
+		FirstOrderAt: c.FirstOrderAt(),
+	}
+	if addr := c.LastShippingAddress(); addr != nil {
+		resp.LastShippingAddress = &CustomerShippingAddressResponse{
+			ZipCode:      addr.ZipCode(),
+			Street:       addr.Street(),
+			Number:       addr.Number(),
+			Complement:   addr.Complement(),
+			Neighborhood: addr.Neighborhood(),
+			City:         addr.City(),
+			State:        addr.State(),
+		}
+	}
+	return resp
+}
+
 type ListCustomersResponse struct {
 	Data       []CustomerResponse       `json:"data"`
 	Pagination query.PaginationResponse `json:"pagination"`
+}
+
+// NewListCustomersResponse maps a slice of Customer entities to the list
+// response, attaching the pagination envelope.
+func NewListCustomersResponse(customers []*domain.Customer, pagination query.Pagination, total int) ListCustomersResponse {
+	data := make([]CustomerResponse, len(customers))
+	for i, c := range customers {
+		data[i] = NewCustomerResponse(c)
+	}
+	return ListCustomersResponse{
+		Data:       data,
+		Pagination: query.NewPaginationResponse(pagination, total),
+	}
 }
 
 type CustomerStatsResponse struct {
@@ -62,58 +112,18 @@ type CustomerStatsResponse struct {
 	AvgSpentPerCustomer int64 `json:"avgSpentPerCustomer"`
 }
 
-// Service layer - Input types
-type ListCustomersInput struct {
-	StoreID    string
-	Search     string
-	Pagination query.Pagination
-	Sorting    query.Sorting
-	Filters    CustomerFilters
+// NewCustomerStatsResponse maps the aggregated stats entity to its response.
+func NewCustomerStatsResponse(s *domain.CustomerStats) CustomerStatsResponse {
+	return CustomerStatsResponse{
+		TotalCustomers:      s.TotalCustomers(),
+		ActiveCustomers:     s.ActiveCustomers(),
+		AvgSpentPerCustomer: s.AvgSpentPerCustomer(),
+	}
 }
 
-type ListCustomersOutput struct {
-	Customers  []CustomerOutput
-	Total      int
-	Pagination query.Pagination
-}
-
-type CustomerOutput struct {
-	ID                  string
-	Handle              string
-	Email               *string
-	Phone               *string
-	Name                *string
-	Document            *string
-	TotalOrders         int
-	TotalSpent          int64
-	LastOrderAt         *time.Time
-	FirstOrderAt        *time.Time
-	LastShippingAddress *CustomerShippingAddress
-}
-
-// CustomerShippingAddress is the parsed shape of carts.shipping_address.
-// JSON tags mirror the camelCase keys the checkout flow writes via
-// CheckoutShippingAddressInfo so json.Unmarshal in the repository hits the
-// right fields.
-type CustomerShippingAddress struct {
-	ZipCode      string `json:"zipCode,omitempty"`
-	Street       string `json:"street,omitempty"`
-	Number       string `json:"number,omitempty"`
-	Complement   string `json:"complement,omitempty"`
-	Neighborhood string `json:"neighborhood,omitempty"`
-	City         string `json:"city,omitempty"`
-	State        string `json:"state,omitempty"`
-}
-
-type CustomerStatsOutput struct {
-	TotalCustomers      int
-	ActiveCustomers     int
-	AvgSpentPerCustomer int64
-}
-
-// CustomerOrderOutput is a flattened summary of a cart attached to a
+// CustomerOrderResponse is a flattened summary of a cart attached to a
 // customer, optimized for the customer-detail drawer.
-type CustomerOrderOutput struct {
+type CustomerOrderResponse struct {
 	ID            string     `json:"id"`
 	ShortID       int32      `json:"shortId"`
 	Status        string     `json:"status"`
@@ -122,6 +132,36 @@ type CustomerOrderOutput struct {
 	TotalValue    int64      `json:"totalValue"`
 	PaidAt        *time.Time `json:"paidAt"`
 	CreatedAt     *time.Time `json:"createdAt"`
+}
+
+// NewListCustomerOrdersResponse maps a slice of order-summary entities.
+func NewListCustomerOrdersResponse(orders []*domain.OrderSummary) []CustomerOrderResponse {
+	out := make([]CustomerOrderResponse, len(orders))
+	for i, o := range orders {
+		out[i] = CustomerOrderResponse{
+			ID:            o.ID(),
+			ShortID:       o.ShortID(),
+			Status:        o.Status(),
+			PaymentStatus: o.PaymentStatus(),
+			TotalItems:    o.TotalItems(),
+			TotalValue:    o.TotalValue(),
+			PaidAt:        o.PaidAt(),
+			CreatedAt:     o.CreatedAt(),
+		}
+	}
+	return out
+}
+
+// ============================================
+// Service layer - Input types
+// ============================================
+
+type ListCustomersInput struct {
+	StoreID    string
+	Search     string
+	Pagination query.Pagination
+	Sorting    query.Sorting
+	Filters    CustomerFilters
 }
 
 // UpsertCustomerInput is used to create or update a customer
@@ -140,7 +180,10 @@ type UpdateCustomerInput struct {
 	Phone  *string
 }
 
+// ============================================
 // Repository layer types
+// ============================================
+
 type ListCustomersParams struct {
 	StoreID    string
 	Search     string
@@ -149,31 +192,16 @@ type ListCustomersParams struct {
 	Filters    CustomerFilters
 }
 
-type ListCustomersResult struct {
-	Customers []CustomerWithStatsRow
-	Total     int
-}
-
-// CustomerRow represents a customer from the database (basic info)
-type CustomerRow struct {
-	ID             string
-	PlatformUserID string
-	Handle         string
-	Email          *string
-	Phone          *string
-	LastOrderAt    *time.Time
-	FirstOrderAt   *time.Time
-}
-
-// CustomerWithStatsRow includes aggregated order stats
-type CustomerWithStatsRow struct {
-	ID             string
-	PlatformUserID string
-	Handle         string
-	Email          *string
-	Phone          *string
-	TotalOrders    int
-	TotalSpent     int64
-	LastOrderAt    *time.Time
-	FirstOrderAt   *time.Time
+// CustomerShippingAddress is the parsed shape of carts.shipping_address.
+// JSON tags mirror the camelCase keys the checkout flow writes via
+// CheckoutShippingAddressInfo so json.Unmarshal in the repository hits the
+// right fields.
+type CustomerShippingAddress struct {
+	ZipCode      string `json:"zipCode,omitempty"`
+	Street       string `json:"street,omitempty"`
+	Number       string `json:"number,omitempty"`
+	Complement   string `json:"complement,omitempty"`
+	Neighborhood string `json:"neighborhood,omitempty"`
+	City         string `json:"city,omitempty"`
+	State        string `json:"state,omitempty"`
 }

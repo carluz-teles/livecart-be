@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -14,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/customer/domain"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
 )
@@ -53,7 +55,50 @@ type UnblockHandleInput struct {
 	UnblockedByUserID *uuid.UUID
 }
 
-type BlockedHandleOutput struct {
+type ListBlockedHandlesInput struct {
+	StoreID         uuid.UUID
+	IncludeInactive bool
+	Limit           int32
+	Offset          int32
+}
+
+type BlockHandleRequest struct {
+	Handle string `json:"handle"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// Validate is the syntactic gate (ozzo): handle is required.
+func (r BlockHandleRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.Handle, validation.Required, validation.Length(1, 0)),
+	)
+}
+
+// ToInput builds the BlockHandleInput, constructing the store UUID and the
+// optional actor UUID. Returns 422 when the store id is not a valid UUID.
+func (r BlockHandleRequest) ToInput(storeID, actorID string) (BlockHandleInput, error) {
+	storeUUID, err := uuid.Parse(storeID)
+	if err != nil {
+		return BlockHandleInput{}, httpx.ErrUnprocessable("invalid store id")
+	}
+	input := BlockHandleInput{
+		StoreID: storeUUID,
+		Handle:  r.Handle,
+	}
+	if r.Reason != "" {
+		reason := r.Reason
+		input.Reason = &reason
+	}
+	if actorID != "" {
+		if parsed, err := uuid.Parse(actorID); err == nil {
+			input.BlockedByUserID = &parsed
+		}
+	}
+	return input, nil
+}
+
+// BlockedHandleResponse is the API shape for a blocked handle.
+type BlockedHandleResponse struct {
 	ID           string     `json:"id"`
 	Handle       string     `json:"handle"`
 	Reason       *string    `json:"reason,omitempty"`
@@ -63,23 +108,33 @@ type BlockedHandleOutput struct {
 	CartsRemoved int        `json:"cartsRemoved,omitempty"`
 }
 
-type ListBlockedHandlesInput struct {
-	StoreID         uuid.UUID
-	IncludeInactive bool
-	Limit           int32
-	Offset          int32
+// NewBlockedHandleResponse maps a domain BlockedHandle to its API response.
+func NewBlockedHandleResponse(b *domain.BlockedHandle) BlockedHandleResponse {
+	return BlockedHandleResponse{
+		ID:           b.ID(),
+		Handle:       b.Handle(),
+		Reason:       b.Reason(),
+		BlockedAt:    b.BlockedAt(),
+		UnblockedAt:  b.UnblockedAt(),
+		BlockedByID:  b.BlockedByID(),
+		CartsRemoved: b.CartsRemoved(),
+	}
 }
 
-type BlockHandleRequest struct {
-	Handle string `json:"handle" validate:"required,min=1"`
-	Reason string `json:"reason,omitempty"`
+// NewListBlockedHandlesResponse maps a slice of blocked-handle entities.
+func NewListBlockedHandlesResponse(handles []*domain.BlockedHandle) []BlockedHandleResponse {
+	out := make([]BlockedHandleResponse, len(handles))
+	for i, b := range handles {
+		out[i] = NewBlockedHandleResponse(b)
+	}
+	return out
 }
 
 // =============================================================================
 // REPOSITORY
 // =============================================================================
 
-func (r *Repository) BlockHandle(ctx context.Context, input BlockHandleInput) (*sqlc.BlockedHandle, error) {
+func (r *Repository) BlockHandle(ctx context.Context, input BlockHandleInput) (*domain.BlockedHandle, error) {
 	params := sqlc.BlockHandleParams{
 		StoreID:        uuidToPgtype(input.StoreID),
 		PlatformHandle: normalizeHandle(input.Handle),
@@ -94,10 +149,10 @@ func (r *Repository) BlockHandle(ctx context.Context, input BlockHandleInput) (*
 	if err != nil {
 		return nil, fmt.Errorf("blocking handle: %w", err)
 	}
-	return &row, nil
+	return toDomainBlockedHandle(row), nil
 }
 
-func (r *Repository) UnblockHandle(ctx context.Context, input UnblockHandleInput) (*sqlc.BlockedHandle, error) {
+func (r *Repository) UnblockHandle(ctx context.Context, input UnblockHandleInput) (*domain.BlockedHandle, error) {
 	params := sqlc.UnblockHandleParams{
 		StoreID:        uuidToPgtype(input.StoreID),
 		PlatformHandle: normalizeHandle(input.Handle),
@@ -112,7 +167,7 @@ func (r *Repository) UnblockHandle(ctx context.Context, input UnblockHandleInput
 	if err != nil {
 		return nil, fmt.Errorf("unblocking handle: %w", err)
 	}
-	return &row, nil
+	return toDomainBlockedHandle(row), nil
 }
 
 func (r *Repository) IsHandleBlocked(ctx context.Context, storeID uuid.UUID, handle string) (bool, error) {
@@ -122,7 +177,7 @@ func (r *Repository) IsHandleBlocked(ctx context.Context, storeID uuid.UUID, han
 	})
 }
 
-func (r *Repository) ListBlockedHandles(ctx context.Context, input ListBlockedHandlesInput) ([]sqlc.BlockedHandle, int, error) {
+func (r *Repository) ListBlockedHandles(ctx context.Context, input ListBlockedHandlesInput) ([]*domain.BlockedHandle, int, error) {
 	limit := input.Limit
 	if limit <= 0 {
 		limit = 50
@@ -143,7 +198,11 @@ func (r *Repository) ListBlockedHandles(ctx context.Context, input ListBlockedHa
 	if err != nil {
 		return nil, 0, fmt.Errorf("counting blocked handles: %w", err)
 	}
-	return rows, int(total), nil
+	handles := make([]*domain.BlockedHandle, len(rows))
+	for i := range rows {
+		handles[i] = toDomainBlockedHandle(rows[i])
+	}
+	return handles, int(total), nil
 }
 
 // BlockedHandlesFor returns the subset of `handles` that are currently blocked
@@ -181,13 +240,13 @@ func (r *Repository) BlockedHandlesFor(ctx context.Context, storeID uuid.UUID, h
 // triggers cancellation of any of their open (non-paid) carts via the
 // CartCanceler. Idempotent: re-blocking an already-blocked handle just bumps
 // blocked_at and updates the reason.
-func (s *Service) BlockHandle(ctx context.Context, input BlockHandleInput) (*BlockedHandleOutput, error) {
+func (s *Service) BlockHandle(ctx context.Context, input BlockHandleInput) (*domain.BlockedHandle, error) {
 	input.Handle = normalizeHandle(input.Handle)
 	if input.Handle == "" {
 		return nil, httpx.ErrBadRequest("handle is required")
 	}
 
-	row, err := s.repo.BlockHandle(ctx, input)
+	blocked, err := s.repo.BlockHandle(ctx, input)
 	if err != nil {
 		return nil, err
 	}
@@ -212,24 +271,23 @@ func (s *Service) BlockHandle(ctx context.Context, input BlockHandleInput) (*Blo
 		}
 	}
 
-	out := toBlockedHandleOutput(row)
-	out.CartsRemoved = cartsRemoved
-	return out, nil
+	blocked.SetCartsRemoved(cartsRemoved)
+	return blocked, nil
 }
 
 // UnblockHandle reverses a previous block. Returns nil if the handle was never
 // blocked.
-func (s *Service) UnblockHandle(ctx context.Context, input UnblockHandleInput) (*BlockedHandleOutput, error) {
+func (s *Service) UnblockHandle(ctx context.Context, input UnblockHandleInput) (*domain.BlockedHandle, error) {
 	input.Handle = normalizeHandle(input.Handle)
 	if input.Handle == "" {
 		return nil, httpx.ErrBadRequest("handle is required")
 	}
 
-	row, err := s.repo.UnblockHandle(ctx, input)
+	blocked, err := s.repo.UnblockHandle(ctx, input)
 	if err != nil {
 		return nil, err
 	}
-	if row == nil {
+	if blocked == nil {
 		return nil, httpx.ErrNotFound(fmt.Sprintf("handle %q is not blocked", input.Handle))
 	}
 
@@ -238,7 +296,7 @@ func (s *Service) UnblockHandle(ctx context.Context, input UnblockHandleInput) (
 		zap.String("handle", input.Handle),
 	)
 
-	return toBlockedHandleOutput(row), nil
+	return blocked, nil
 }
 
 // IsHandleBlocked is the fast path used by the Instagram comment processor.
@@ -247,17 +305,8 @@ func (s *Service) IsHandleBlocked(ctx context.Context, storeID uuid.UUID, handle
 }
 
 // ListBlockedHandles returns all blocked handles for the given store.
-func (s *Service) ListBlockedHandles(ctx context.Context, input ListBlockedHandlesInput) ([]BlockedHandleOutput, int, error) {
-	rows, total, err := s.repo.ListBlockedHandles(ctx, input)
-	if err != nil {
-		return nil, 0, err
-	}
-	out := make([]BlockedHandleOutput, len(rows))
-	for i, r := range rows {
-		r := r
-		out[i] = *toBlockedHandleOutput(&r)
-	}
-	return out, total, nil
+func (s *Service) ListBlockedHandles(ctx context.Context, input ListBlockedHandlesInput) ([]*domain.BlockedHandle, int, error) {
+	return s.repo.ListBlockedHandles(ctx, input)
 }
 
 // BlockedHandlesFor exposes the batch lookup to other services (e.g. order).
@@ -285,42 +334,24 @@ func (h *Handler) RegisterBlockRoutes(group fiber.Router) {
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
 // @Param        request body BlockHandleRequest true "Handle to block"
-// @Success      200 {object} httpx.Envelope{data=BlockedHandleOutput}
+// @Success      200 {object} httpx.Envelope{data=BlockedHandleResponse}
+// @Failure      422 {object} httpx.ValidationEnvelope
 // @Router       /api/v1/stores/{storeId}/customers/blocks [post]
 // @Security     BearerAuth
 func (h *Handler) Block(c *fiber.Ctx) error {
-	storeIDStr := c.Locals("store_id").(string)
-	storeID, err := uuid.Parse(storeIDStr)
-	if err != nil {
-		return httpx.BadRequest(c, "invalid store id")
-	}
-
 	var req BlockHandleRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
-	if err := h.validate.Struct(&req); err != nil {
-		return httpx.BadRequest(c, err.Error())
-	}
-
-	input := BlockHandleInput{
-		StoreID: storeID,
-		Handle:  req.Handle,
-	}
-	if req.Reason != "" {
-		input.Reason = &req.Reason
-	}
-	if uid := httpx.GetInternalUserID(c); uid != "" {
-		if parsed, err := uuid.Parse(uid); err == nil {
-			input.BlockedByUserID = &parsed
-		}
-	}
-
-	out, err := h.service.BlockHandle(c.Context(), input)
+	input, err := req.ToInput(httpx.GetStoreID(c), httpx.GetInternalUserID(c))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.OK(c, out)
+	blocked, err := h.service.BlockHandle(c.UserContext(), input)
+	if err != nil {
+		return err
+	}
+	return httpx.OK(c, NewBlockedHandleResponse(blocked))
 }
 
 // Unblock godoc
@@ -329,15 +360,14 @@ func (h *Handler) Block(c *fiber.Ctx) error {
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
 // @Param        handle path string true "Instagram handle (without @)"
-// @Success      200 {object} httpx.Envelope{data=BlockedHandleOutput}
+// @Success      200 {object} httpx.Envelope{data=BlockedHandleResponse}
 // @Failure      404 {object} httpx.Envelope
 // @Router       /api/v1/stores/{storeId}/customers/blocks/{handle} [delete]
 // @Security     BearerAuth
 func (h *Handler) Unblock(c *fiber.Ctx) error {
-	storeIDStr := c.Locals("store_id").(string)
-	storeID, err := uuid.Parse(storeIDStr)
+	storeID, err := uuid.Parse(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store id")
+		return httpx.ErrBadRequest("invalid store id")
 	}
 
 	input := UnblockHandleInput{
@@ -350,11 +380,11 @@ func (h *Handler) Unblock(c *fiber.Ctx) error {
 		}
 	}
 
-	out, err := h.service.UnblockHandle(c.Context(), input)
+	blocked, err := h.service.UnblockHandle(c.UserContext(), input)
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-	return httpx.OK(c, out)
+	return httpx.OK(c, NewBlockedHandleResponse(blocked))
 }
 
 // ListBlocked godoc
@@ -365,31 +395,30 @@ func (h *Handler) Unblock(c *fiber.Ctx) error {
 // @Param        includeInactive query bool false "Include previously-unblocked handles"
 // @Param        limit query int false "Items per page" default(50)
 // @Param        offset query int false "Offset" default(0)
-// @Success      200 {object} httpx.Envelope{data=[]BlockedHandleOutput}
+// @Success      200 {object} httpx.Envelope{data=[]BlockedHandleResponse}
 // @Router       /api/v1/stores/{storeId}/customers/blocks [get]
 // @Security     BearerAuth
 func (h *Handler) ListBlocked(c *fiber.Ctx) error {
-	storeIDStr := c.Locals("store_id").(string)
-	storeID, err := uuid.Parse(storeIDStr)
+	storeID, err := uuid.Parse(httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.BadRequest(c, "invalid store id")
+		return httpx.ErrBadRequest("invalid store id")
 	}
 
 	includeInactive := c.QueryBool("includeInactive", false)
 	limit := int32(c.QueryInt("limit", 50))
 	offset := int32(c.QueryInt("offset", 0))
 
-	rows, total, err := h.service.ListBlockedHandles(c.Context(), ListBlockedHandlesInput{
+	handles, total, err := h.service.ListBlockedHandles(c.UserContext(), ListBlockedHandlesInput{
 		StoreID:         storeID,
 		IncludeInactive: includeInactive,
 		Limit:           limit,
 		Offset:          offset,
 	})
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
 	return httpx.OK(c, fiber.Map{
-		"data":  rows,
+		"data":  NewListBlockedHandlesResponse(handles),
 		"total": total,
 	})
 }
@@ -406,23 +435,27 @@ func normalizeHandle(h string) string {
 	return strings.ToLower(h)
 }
 
-func toBlockedHandleOutput(row *sqlc.BlockedHandle) *BlockedHandleOutput {
-	out := &BlockedHandleOutput{
-		ID:        pgtypeToUUID(row.ID).String(),
-		Handle:    row.PlatformHandle,
-		BlockedAt: row.BlockedAt.Time,
-	}
+func toDomainBlockedHandle(row sqlc.BlockedHandle) *domain.BlockedHandle {
+	var reason, blockedByID *string
+	var unblockedAt *time.Time
 	if row.Reason.Valid {
 		s := row.Reason.String
-		out.Reason = &s
+		reason = &s
 	}
 	if row.UnblockedAt.Valid {
 		t := row.UnblockedAt.Time
-		out.UnblockedAt = &t
+		unblockedAt = &t
 	}
 	if row.BlockedByUserID.Valid {
 		id := pgtypeToUUID(row.BlockedByUserID).String()
-		out.BlockedByID = &id
+		blockedByID = &id
 	}
-	return out
+	return domain.ReconstructBlockedHandle(
+		pgtypeToUUID(row.ID).String(),
+		row.PlatformHandle,
+		reason,
+		row.BlockedAt.Time,
+		unblockedAt,
+		blockedByID,
+	)
 }

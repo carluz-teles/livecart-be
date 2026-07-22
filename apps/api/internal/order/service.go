@@ -453,29 +453,24 @@ func (s *Service) GetUpsellSummary(ctx context.Context, id, storeID string) (*Or
 // blocks: order must belong to the store, must not be paid, and must not
 // have a shipment row — once any of those is true editing the address would
 // silently desynchronize with the carrier or the buyer's receipt.
-func (s *Service) UpdateShippingAddress(
-	ctx context.Context,
-	id string,
-	storeID string,
-	address map[string]string,
-) error {
-	row, err := s.repo.GetByID(ctx, id)
+func (s *Service) UpdateShippingAddress(ctx context.Context, input UpdateShippingAddressInput) error {
+	row, err := s.repo.GetByID(ctx, input.ID)
 	if err != nil {
 		return err
 	}
-	if row == nil || row.StoreID != storeID {
-		return httpx.ErrNotFound(fmt.Sprintf("order %s not found", id))
+	if row == nil || row.StoreID != input.StoreID {
+		return httpx.ErrNotFound(fmt.Sprintf("order %s not found", input.ID))
 	}
 	if row.PaymentStatus == "paid" {
 		return httpx.ErrConflict("cannot edit shipping address after payment")
 	}
-	shipment, err := s.repo.GetShipmentForOrder(ctx, id)
+	shipment, err := s.repo.GetShipmentForOrder(ctx, input.ID)
 	if err != nil {
 		logger.From(ctx, s.logger).Warn("failed to load shipment for order", zap.Error(err))
 	} else if shipment != nil {
 		return httpx.ErrConflict("cannot edit shipping address after shipment is created")
 	}
-	return s.repo.UpdateShippingAddress(ctx, id, address)
+	return s.repo.UpdateShippingAddress(ctx, input.ID, input.Address)
 }
 
 // RegenerateCheckout extends the cart's expiration window and resets it to
