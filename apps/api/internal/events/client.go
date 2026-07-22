@@ -17,9 +17,11 @@ type Client struct {
 	inner *asynq.Client
 }
 
-// NewClient builds an event publisher backed by Redis at redisAddr.
-func NewClient(redisAddr string) *Client {
-	return &Client{inner: asynq.NewClient(asynq.RedisClientOpt{Addr: redisAddr})}
+// NewClient builds an event publisher backed by the given Redis connection.
+// Callers pass a RedisConnOpt (not a bare addr) so managed Redis with a
+// password/TLS — e.g. Railway — works, not just local no-auth Redis.
+func NewClient(redisOpt asynq.RedisConnOpt) *Client {
+	return &Client{inner: asynq.NewClient(redisOpt)}
 }
 
 // Enqueue serializes the envelope as an asynq task and enqueues it. The task

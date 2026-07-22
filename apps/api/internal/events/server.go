@@ -27,7 +27,7 @@ type Server struct {
 
 // ServerConfig configures the event server.
 type ServerConfig struct {
-	RedisAddr   string
+	RedisOpt    asynq.RedisConnOpt // carries addr + optional password/TLS (managed Redis)
 	Logger      *zap.Logger
 	Concurrency int // total worker goroutines; default 10
 }
@@ -42,7 +42,7 @@ func NewServer(cfg ServerConfig) *Server {
 	log := cfg.Logger.Named("events-server")
 
 	srv := asynq.NewServer(
-		asynq.RedisClientOpt{Addr: cfg.RedisAddr},
+		cfg.RedisOpt,
 		asynq.Config{
 			Concurrency: concurrency,
 			// Relative queue priorities (weighted, not worker counts).

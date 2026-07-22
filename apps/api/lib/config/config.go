@@ -23,9 +23,10 @@ const (
 	AWSSecretAccessKey Key = "AWS_SECRET_ACCESS_KEY"
 
 	// Async events / telemetry
-	RedisAddr             Key = "REDIS_ADDR"                  // Redis address for the asynq event queue (default localhost:6379)
-	OTELExporterEndpoint  Key = "OTEL_EXPORTER_OTLP_ENDPOINT" // OTLP gRPC endpoint (Jaeger local, Datadog agent in prod); empty = tracing no-op
-	OTELServiceName       Key = "OTEL_SERVICE_NAME"           // service.name resource attr (default livecart-api)
+	RedisURL             Key = "REDIS_URL"                   // Full redis[s]:// connection URL (Railway/managed Redis: carries user/password/TLS). Takes precedence over REDIS_ADDR.
+	RedisAddr            Key = "REDIS_ADDR"                  // Redis host:port for the asynq event queue (local/no-auth; default localhost:6379)
+	OTELExporterEndpoint Key = "OTEL_EXPORTER_OTLP_ENDPOINT" // OTLP gRPC endpoint (Jaeger local, Datadog agent in prod); empty = tracing no-op
+	OTELServiceName      Key = "OTEL_SERVICE_NAME"           // service.name resource attr (default livecart-api)
 
 	// Integration Layer
 	EncryptionKey        Key = "ENCRYPTION_KEY"          // Base64-encoded 32-byte key for AES-GCM
@@ -69,9 +70,9 @@ const (
 	PaywallEnabled          Key = "PAYWALL_ENABLED"        // default false: trial/ledger/meter rodam, mas NADA bloqueia
 
 	// S3 Storage (supports both standard and Railway naming conventions)
-	S3Bucket   Key = "S3_BUCKET"     // S3 bucket name for uploads
-	S3Endpoint Key = "S3_ENDPOINT"   // Custom S3 endpoint (for Tigris, R2, MinIO, etc.)
-	CDNBaseURL Key = "CDN_BASE_URL"  // Optional CDN base URL for uploaded files
+	S3Bucket   Key = "S3_BUCKET"    // S3 bucket name for uploads
+	S3Endpoint Key = "S3_ENDPOINT"  // Custom S3 endpoint (for Tigris, R2, MinIO, etc.)
+	CDNBaseURL Key = "CDN_BASE_URL" // Optional CDN base URL for uploaded files
 
 	// Railway alternative names
 	AWSS3BucketName  Key = "AWS_S3_BUCKET_NAME" // Railway: S3 bucket name

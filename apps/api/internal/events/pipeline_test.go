@@ -36,7 +36,7 @@ func redisAddr(t *testing.T) string {
 func TestPipeline_EnqueueConsume(t *testing.T) {
 	addr := redisAddr(t)
 
-	client := NewClient(addr)
+	client := NewClient(asynq.RedisClientOpt{Addr: addr})
 	defer client.Close()
 
 	got := make(chan Envelope, 1)
@@ -90,7 +90,7 @@ func TestPipeline_TracePropagation(t *testing.T) {
 	// A real SDK provider generates valid trace/span ids (no exporter needed).
 	otel.SetTracerProvider(sdktrace.NewTracerProvider())
 
-	client := NewClient(addr)
+	client := NewClient(asynq.RedisClientOpt{Addr: addr})
 	defer client.Close()
 
 	got := make(chan Envelope, 1)

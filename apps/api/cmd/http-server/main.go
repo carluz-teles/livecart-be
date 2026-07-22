@@ -54,12 +54,12 @@ import (
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/internal/member"
 	"livecart/apps/api/internal/notification"
-	"livecart/apps/api/internal/postcheckout"
 	notificationinbox "livecart/apps/api/internal/notification_inbox"
 	"livecart/apps/api/internal/order"
-	"livecart/apps/api/internal/recovery"
+	"livecart/apps/api/internal/postcheckout"
 	"livecart/apps/api/internal/product"
 	"livecart/apps/api/internal/productgroup"
+	"livecart/apps/api/internal/recovery"
 	"livecart/apps/api/internal/store"
 	"livecart/apps/api/internal/telemetry"
 	"livecart/apps/api/internal/user"
@@ -757,7 +757,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	productGroupHandler := productgroup.NewHandler(productGroupSvc)
 	productGroupHandler.RegisterRoutes(storeScoped)
 
-// Wire product syncer for ERP webhooks
+	// Wire product syncer for ERP webhooks
 	if integrationSvc != nil {
 		integrationSvc.SetProductSyncer(product.NewProductSyncerAdapter(productSvc))
 		integrationSvc.SetProductGroupSyncer(productgroup.NewSyncerAdapter(productGroupSvc, productSvc))
@@ -898,9 +898,19 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// services, so consumer handlers can dispatch to them. Publisher feeds the
 	// outbox relay; server consumes; relay drains the outbox to Redis.
 	// ---------------------------------------------------------------------------
-	redisAddr := config.RedisAddr.StringOr("localhost:6379")
-	eventsClient := events.NewClient(redisAddr)
-	eventsServer := events.NewServer(events.ServerConfig{RedisAddr: redisAddr, Logger: log})
+	// Prefer a full REDIS_URL (managed Redis like Railway carries user/password
+	// and, with rediss://, TLS) and fall back to a bare REDIS_ADDR for local/
+	// no-auth Redis. asynq.ParseRedisURI handles redis:// and rediss://.
+	var redisOpt asynq.RedisConnOpt = asynq.RedisClientOpt{Addr: config.RedisAddr.StringOr("localhost:6379")}
+	if redisURL := config.RedisURL.StringOr(""); redisURL != "" {
+		parsed, err := asynq.ParseRedisURI(redisURL)
+		if err != nil {
+			log.Sugar().Fatalf("parsing REDIS_URL: %v", err)
+		}
+		redisOpt = parsed
+	}
+	eventsClient := events.NewClient(redisOpt)
+	eventsServer := events.NewServer(events.ServerConfig{RedisOpt: redisOpt, Logger: log})
 	if integrationSvc != nil {
 		// Inverted comment flow: the webhook dispatches comment.received; the
 		// domain work (cart/stock/waitlist) runs here, idempotent by comment_id.
