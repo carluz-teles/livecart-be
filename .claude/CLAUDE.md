@@ -82,6 +82,10 @@ Cada domínio (member, invitation, store, etc.) segue a estrutura:
 - `types.go` - DTOs (Input/Output)
 - `domain/` - Domain entities e value objects
 
+**Ao criar/alterar um domínio HTTP (handler, endpoint, Request DTO ou validação),
+seguir a skill `api-domain-convention`** — fluxo `Request→Validate→ToInput→Usecase→Response`,
+as três camadas de validação e o contrato de erro do httpx. Molde de referência: `internal/member`.
+
 ### Tratamento de erros
 
 Usar helpers do `lib/httpx`:
