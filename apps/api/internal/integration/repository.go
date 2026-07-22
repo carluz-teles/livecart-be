@@ -2048,6 +2048,21 @@ func (r *Repository) ExpireCartAndReleaseStock(ctx context.Context, cartID strin
 			return fmt.Errorf("emitting cart.expired: %w", err)
 		}
 
+		// Group E gap: a PIX charge was generated and the payment window closed
+		// unpaid (the guard above already ruled out paid/refunded). This is the
+		// only place pix.expired can fire — the provider has no "pix expired"
+		// webhook. Same-tx so it rides the atomic flip; a failure just defers the
+		// whole expiry to the next sweep. Dedup by the payment id (checkout_id).
+		if cart.PaymentMethod.Valid && cart.PaymentMethod.String == "pix" && cart.CheckoutID.Valid &&
+			(!cart.PaymentStatus.Valid || cart.PaymentStatus.String == "pending") {
+			if err := events.EmitInternal(ctx, q, events.PixExpired, "pix.expired:"+cart.CheckoutID.String, struct {
+				CartID    string `json:"cart_id"`
+				PaymentID string `json:"payment_id"`
+			}{CartID: cartID, PaymentID: cart.CheckoutID.String}); err != nil {
+				return fmt.Errorf("emitting pix.expired: %w", err)
+			}
+		}
+
 		result = ExpireCartResult{Eligible: true, EventID: eventID, FreedProductIDs: freed}
 		return nil
 	})

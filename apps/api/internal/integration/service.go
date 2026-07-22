@@ -3674,6 +3674,17 @@ func (s *Service) StoreWebhookEvent(ctx context.Context, input StoreWebhookInput
 // TODO(refunded): when status == refunded we currently only mark the cart —
 // we should also cancel the Tiny sales order (CancelOrder) which reverses stock
 // and puts the order in "Cancelada". See createFinalERPOrder for the creation side.
+// paymentEventName maps the resolved cart payment status to its canonical
+// group-E domain event. "cancelled" is intentionally absent (covered by
+// order.cancelled); "refunded" carries both merchant refunds and chargebacks
+// until the provider status distinguishes them.
+var paymentEventName = map[string]events.Name{
+	"paid":     events.PaymentSucceeded,
+	"failed":   events.PaymentFailed,
+	"refunded": events.PaymentRefunded,
+	"pending":  events.PaymentProcessing,
+}
+
 func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessPaymentInput) error {
 	// Resolve integration from store_id + provider
 	integration, err := s.repo.GetActiveByProvider(ctx, input.StoreID, "payment", input.Provider)
@@ -3764,6 +3775,31 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		zap.String("payment_status", cartPaymentStatus),
 		zap.String("payment_method", status.PaymentMethod),
 	)
+
+	// Emit the canonical payment.* domain event (group E) right after the guarded
+	// UpdateCartPaymentStatus committed — so it only fires when the transition
+	// actually held (the WHERE status NOT IN ('expired','cancelled') guard and
+	// the ErrCartNotPayable early-return above already filtered the races). The
+	// origin provider travels as Envelope.Source. Best-effort: the money already
+	// moved and the webhook must ACK; dedup by payment_id so MP's at-least-once
+	// burst doesn't double-count downstream. "cancelled" has no group-E event —
+	// it's represented by order.cancelled (group F). Refund vs chargeback stay
+	// conflated as payment.refunded until the provider status exposes the dispute
+	// type (see docs/async-events-analysis.md §4.E).
+	if name, ok := paymentEventName[cartPaymentStatus]; ok {
+		payload, _ := json.Marshal(struct {
+			CartID    string `json:"cart_id"`
+			PaymentID string `json:"payment_id"`
+			Status    string `json:"status"`
+			Method    string `json:"payment_method"`
+		}{status.ExternalReference, status.PaymentID, cartPaymentStatus, status.PaymentMethod})
+		_ = events.Emit(ctx, s.repo.queries, events.Envelope{
+			Name:     name,
+			Source:   events.Source(input.Provider),
+			DedupKey: string(name) + ":" + status.PaymentID,
+			Payload:  payload,
+		})
+	}
 
 	// Coupon redemption lifecycle. We never propagate the error — the money
 	// already moved and the webhook must ACK; we'd rather have an

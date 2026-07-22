@@ -2,6 +2,7 @@ package checkout
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/config"
@@ -466,10 +468,39 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 		zap.Int64("total_amount", totalAmount),
 	)
 
+	// Group E: hosted-checkout link created — the buyer entered the payment
+	// funnel. Dedup by cart_id (regenerating the link is the same initiation).
+	_ = events.EmitInternal(ctx, s.repo.q, events.CheckoutInitiated, "checkout.initiated:"+cart.ID, struct {
+		CartID     string `json:"cart_id"`
+		CheckoutID string `json:"checkout_id"`
+		TotalCents int64  `json:"total_cents"`
+	}{cart.ID, checkoutResult.CheckoutID, totalAmount})
+
 	return &GenerateCheckoutOutput{
 		CheckoutURL: checkoutResult.CheckoutURL,
 		ExpiresAt:   expiresAt,
 	}, nil
+}
+
+// emitPaymentSucceeded publishes the group-E payment.succeeded fact from the
+// synchronous card path. Source is internal (our inline confirmation); the
+// webhook path re-emits with the provider source and the same dedup key, so
+// consumers see it once regardless of which path won the race.
+func (s *Service) emitPaymentSucceeded(ctx context.Context, cartID, paymentID string) {
+	_ = events.EmitInternal(ctx, s.repo.q, events.PaymentSucceeded, "payment.succeeded:"+paymentID, struct {
+		CartID    string `json:"cart_id"`
+		PaymentID string `json:"payment_id"`
+	}{cartID, paymentID})
+}
+
+// jsonOrEmpty marshals v, falling back to an empty JSON object on error so a
+// best-effort emit never carries a nil payload.
+func jsonOrEmpty(v any) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return b
 }
 
 // applyCouponDiscount subtracts the persisted coupon discount from the
@@ -861,6 +892,13 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 			if s.postCheckoutHook != nil {
 				s.postCheckoutHook.OnCartPaid(ctx, cart.ID)
 			}
+
+			// Group E: the transparent-checkout fast path confirms payment inline
+			// (no webhook wait). Same event + dedup key as the webhook emit in
+			// integration.ProcessPaymentNotification, so whichever lands first
+			// wins and the other dedups. Best-effort — the receipt flow above is
+			// the source of truth, this is observability.
+			s.emitPaymentSucceeded(ctx, cart.ID, result.PaymentID)
 		}
 	}
 
@@ -1052,6 +1090,18 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 			zap.Error(err),
 		)
 	}
+
+	// Group E: PIX charge created and awaiting payment. Dedup by payment_id so a
+	// retried GeneratePix (buyer refreshes the QR) doesn't re-emit. Best-effort.
+	_ = events.Emit(ctx, s.repo.q, events.Envelope{
+		Name:     events.PixGenerated,
+		Source:   events.Source(paymentIntegration.ProviderName),
+		DedupKey: "pix.generated:" + result.PaymentID,
+		Payload: jsonOrEmpty(struct {
+			CartID    string `json:"cart_id"`
+			PaymentID string `json:"payment_id"`
+		}{cart.ID, result.PaymentID}),
+	})
 
 	logger.From(ctx, s.logger).Info("pix payment generated",
 		zap.String("cart_id", cart.ID),
