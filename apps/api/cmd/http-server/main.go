@@ -969,6 +969,25 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			}
 			return integrationSvc.RunScheduledExpiry(ctx, p.CartID)
 		})
+
+		// ETA-based timed-event close: schedule event.window_close at ends_at for
+		// post/story events so their window finalizes on time, with the
+		// SweepEndedTimedEvents sweep kept as the backstop.
+		liveSvc.SetEventCloseScheduler(eventCloseScheduler{client: eventsClient})
+		eventsServer.Register(events.EventWindowClose, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				EventID string `json:"event_id"`
+				StoreID string `json:"store_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.EventID == "" || p.StoreID == "" {
+				return asynq.SkipRetry
+			}
+			return liveSvc.RunScheduledEventClose(ctx, p.EventID, p.StoreID)
+		})
 	}
 	eventsRelay := events.NewRelay(events.RelayConfig{Pool: pool, Client: eventsClient, Logger: log})
 
@@ -992,6 +1011,17 @@ func (s cartExpiryScheduler) ScheduleCartExpiry(ctx context.Context, cartID stri
 	return s.client.Schedule(ctx, at, events.CartExpire, "cart-expire:"+cartID, struct {
 		CartID string `json:"cart_id"`
 	}{CartID: cartID})
+}
+
+// eventCloseScheduler adapts the events client to live.EventCloseScheduler,
+// enqueueing an event.window_close ETA task keyed "event-close:<id>" for dedup.
+type eventCloseScheduler struct{ client *events.Client }
+
+func (s eventCloseScheduler) ScheduleEventClose(ctx context.Context, eventID, storeID string, at time.Time) error {
+	return s.client.Schedule(ctx, at, events.EventWindowClose, "event-close:"+eventID, struct {
+		EventID string `json:"event_id"`
+		StoreID string `json:"store_id"`
+	}{EventID: eventID, StoreID: storeID})
 }
 
 // liveNotifierAdapter bridges integration.InstagramNotifier (concrete impl)

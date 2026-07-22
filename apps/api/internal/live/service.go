@@ -6,12 +6,22 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
 )
+
+// EventCloseScheduler arms an ETA task that finalizes a timed post/story event
+// at its ends_at, so the window closes precisely instead of waiting on the
+// SweepEndedTimedEvents sweep (kept as a safety net). Implemented over the asynq
+// client in main.go — the live package must not import events at the service
+// level, so this stays a local interface wired via SetEventCloseScheduler.
+type EventCloseScheduler interface {
+	ScheduleEventClose(ctx context.Context, eventID, storeID string, at time.Time) error
+}
 
 // Notifier is the minimal notification surface this package depends on.
 // The concrete implementation lives in the integration package; we declare
@@ -53,7 +63,12 @@ type Service struct {
 	notifier         Notifier
 	erpFinalizer     ERPFinalizer
 	customerUpserter CustomerUpserter
+	closeScheduler   EventCloseScheduler
 }
+
+// SetEventCloseScheduler wires the ETA scheduler for timed-event window close
+// (optional — when unset, only SweepEndedTimedEvents finalizes timed events).
+func (s *Service) SetEventCloseScheduler(sch EventCloseScheduler) { s.closeScheduler = sch }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {
 	return &Service{
@@ -240,6 +255,14 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 			logger.From(ctx, s.logger).Warn("failed to set post event window",
 				zap.String("event_id", out.ID), zap.Error(err))
 		}
+		// Arm the ETA close task at ends_at so the window finalizes on time.
+		// Best-effort: SweepEndedTimedEvents is the backstop for a lost task.
+		if input.EndsAt != nil && s.closeScheduler != nil {
+			if err := s.closeScheduler.ScheduleEventClose(ctx, out.ID, input.StoreID, *input.EndsAt); err != nil {
+				logger.From(ctx, s.logger).Warn("failed to schedule event window close",
+					zap.String("event_id", out.ID), zap.Error(err))
+			}
+		}
 	}
 
 	// Persist post metadata (raw SQL columns, not in the sqlc INSERT).
@@ -341,6 +364,38 @@ func (s *Service) SweepEndedTimedEvents(ctx context.Context) {
 				zap.Error(err))
 		}
 	}
+}
+
+// RunScheduledEventClose is the event.window_close ETA-task handler: the precise
+// per-event counterpart of SweepEndedTimedEvents. Guard-first — if the window
+// was pushed out it re-arms, if the event is already ended it is a no-op — then
+// runs the same finalization (post.window_closed + End) as the sweep. End is
+// idempotent, so at-least-once redelivery is safe.
+func (s *Service) RunScheduledEventClose(ctx context.Context, eventID, storeID string) error {
+	ev, err := s.repo.GetEventByID(ctx, eventID, storeID)
+	if err != nil || ev == nil {
+		// Not found / unreadable — the sweep is the backstop; don't retry forever.
+		return nil
+	}
+	if ev.EndsAt == nil || ev.Status == "ended" {
+		return nil // window removed, or already finalized
+	}
+	if ev.EndsAt.After(time.Now().UTC()) {
+		// Window extended after the task was armed — re-arm for the new time.
+		if s.closeScheduler != nil {
+			return s.closeScheduler.ScheduleEventClose(ctx, eventID, storeID, *ev.EndsAt)
+		}
+		return nil
+	}
+	// post.window_closed before End (which fires event.ended), mirroring the sweep.
+	if err := s.repo.EmitPostWindowClosed(ctx, eventID); err != nil {
+		logger.From(ctx, s.logger).Error("scheduled close: failed to emit post.window_closed",
+			zap.String("event_id", eventID), zap.Error(err))
+	}
+	if _, err := s.End(ctx, EndLiveInput{ID: eventID, StoreID: storeID}); err != nil {
+		return fmt.Errorf("scheduled close: finalizing event %s: %w", eventID, err)
+	}
+	return nil
 }
 
 // GetEventPulse returns the cheap change-signal used for near-real-time refresh.

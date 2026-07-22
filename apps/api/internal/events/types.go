@@ -81,6 +81,12 @@ const (
 	// instead of waiting for the 5-min sweep. Its handler runs the same guarded
 	// ExpireCart; the sweep stays as a safety net for any lost task.
 	CartExpire Name = "cart.expire"
+
+	// EventWindowClose is an internal SCHEDULED COMMAND: enqueued with
+	// ProcessAt(ends_at) for timed post/story events so they finalize exactly at
+	// their window end (emitting post.window_closed + event.ended) instead of
+	// waiting for the SweepEndedTimedEvents sweep, which stays as the backstop.
+	EventWindowClose Name = "event.window_close"
 )
 
 // Source identifies where an event was dispatched from. It is metadata on the
