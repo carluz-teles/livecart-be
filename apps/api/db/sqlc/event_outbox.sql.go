@@ -16,6 +16,7 @@ const insertOutboxEvent = `-- name: InsertOutboxEvent :exec
 
 INSERT INTO event_outbox (event_id, name, source, metadata, payload, trace_id, span_id, dedup_key, queue)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (dedup_key) WHERE dedup_key <> '' DO NOTHING
 `
 
 type InsertOutboxEventParams struct {
@@ -35,6 +36,9 @@ type InsertOutboxEventParams struct {
 // =============================================================================
 // Transactional outbox for the async event pipeline. Producers insert in the
 // same tx as the state change; the relay drains pending rows to asynq.
+// Emit-time idempotency: a duplicate dedup_key (webhook retry, at-least-once
+// producer) is a no-op. dedup_key = ” opts out (matches the partial unique
+// index event_outbox_dedup_key_uniq).
 func (q *Queries) InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventParams) error {
 	_, err := q.db.Exec(ctx, insertOutboxEvent,
 		arg.EventID,

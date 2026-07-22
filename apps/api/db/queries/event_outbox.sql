@@ -5,8 +5,12 @@
 -- same tx as the state change; the relay drains pending rows to asynq.
 
 -- name: InsertOutboxEvent :exec
+-- Emit-time idempotency: a duplicate dedup_key (webhook retry, at-least-once
+-- producer) is a no-op. dedup_key = '' opts out (matches the partial unique
+-- index event_outbox_dedup_key_uniq).
 INSERT INTO event_outbox (event_id, name, source, metadata, payload, trace_id, span_id, dedup_key, queue)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (dedup_key) WHERE dedup_key <> '' DO NOTHING;
 
 -- name: ListPendingOutbox :many
 -- Oldest-first, row-locked so concurrent relays (or replicas) never grab the
