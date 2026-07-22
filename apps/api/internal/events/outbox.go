@@ -42,6 +42,9 @@ func Emit(ctx context.Context, q *sqlc.Queries, env Envelope) error {
 	if env.EventID == "" {
 		env.EventID = uuid.NewString()
 	}
+	if env.SchemaVersion == 0 {
+		env.SchemaVersion = 1
+	}
 	if env.OccurredAt.IsZero() {
 		env.OccurredAt = time.Now().UTC()
 	}
@@ -69,15 +72,16 @@ func Emit(ctx context.Context, q *sqlc.Queries, env Envelope) error {
 	}
 
 	return q.InsertOutboxEvent(ctx, sqlc.InsertOutboxEventParams{
-		EventID:  eventID,
-		Name:     string(env.Name),
-		Source:   string(env.Source),
-		Metadata: metadata,
-		Payload:  payload,
-		TraceID:  env.TraceID,
-		SpanID:   env.SpanID,
-		DedupKey: env.DedupKey,
-		Queue:    env.Queue(),
+		EventID:       eventID,
+		Name:          string(env.Name),
+		Source:        string(env.Source),
+		Metadata:      metadata,
+		Payload:       payload,
+		TraceID:       env.TraceID,
+		SpanID:        env.SpanID,
+		DedupKey:      env.DedupKey,
+		Queue:         env.Queue(),
+		SchemaVersion: int32(env.SchemaVersion),
 	})
 }
 
@@ -88,14 +92,15 @@ func envelopeFromRow(r sqlc.EventOutbox) Envelope {
 		_ = json.Unmarshal(r.Metadata, &metadata)
 	}
 	env := Envelope{
-		EventID:  fromPgUUID(r.EventID),
-		Name:     Name(r.Name),
-		Source:   Source(r.Source),
-		Metadata: metadata,
-		Payload:  json.RawMessage(r.Payload),
-		TraceID:  r.TraceID,
-		SpanID:   r.SpanID,
-		DedupKey: r.DedupKey,
+		EventID:       fromPgUUID(r.EventID),
+		SchemaVersion: int(r.SchemaVersion),
+		Name:          Name(r.Name),
+		Source:        Source(r.Source),
+		Metadata:      metadata,
+		Payload:       json.RawMessage(r.Payload),
+		TraceID:       r.TraceID,
+		SpanID:        r.SpanID,
+		DedupKey:      r.DedupKey,
 	}
 	if r.CreatedAt.Valid {
 		env.OccurredAt = r.CreatedAt.Time

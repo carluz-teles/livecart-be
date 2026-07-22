@@ -127,6 +127,19 @@ func errorHandler(log *zap.Logger) func(context.Context, *asynq.Task, error) {
 	return func(ctx context.Context, task *asynq.Task, err error) {
 		retried, _ := asynq.GetRetryCount(ctx)
 		maxRetry, _ := asynq.GetMaxRetry(ctx)
+		// When retries are exhausted asynq moves the task to its archived set —
+		// the consumer-side dead-letter queue (inspectable, retained). Log it
+		// distinctly so a dead-lettered event is greppable/alertable, not just
+		// another retry warning.
+		if retried >= maxRetry {
+			log.Error("event handler failed — DEAD-LETTERED (archived)",
+				zap.String("event", task.Type()),
+				zap.Int("retried", retried),
+				zap.Int("max_retry", maxRetry),
+				zap.Error(err),
+			)
+			return
+		}
 		log.Error("event handler failed",
 			zap.String("event", task.Type()),
 			zap.Int("retried", retried),

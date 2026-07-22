@@ -13,6 +13,11 @@ import (
 	"livecart/apps/api/db/sqlc"
 )
 
+// maxOutboxAttempts caps how many times the relay retries enqueuing a poison
+// row before dead-lettering it (status='dead'), so one bad event can't be
+// re-scanned forever.
+const maxOutboxAttempts = 10
+
 // Relay drains the transactional outbox into asynq. It mirrors the Start()/
 // Stop() lifecycle of the other background workers. Each sweep runs in a single
 // transaction: it locks a batch of pending rows (FOR UPDATE SKIP LOCKED),
@@ -115,8 +120,20 @@ func (r *Relay) sweep() {
 		// A duplicate/conflict means a prior crashed sweep already enqueued this
 		// event — treat it as published so we stop re-trying it.
 		if err != nil && !errors.Is(err, asynq.ErrDuplicateTask) && !errors.Is(err, asynq.ErrTaskIDConflict) {
+			// Dead-letter a poison row after maxOutboxAttempts so it stops being
+			// retried every sweep and stays queryable (status='dead', last_error).
+			if int(row.Attempts)+1 >= maxOutboxAttempts {
+				r.logger.Error("outbox sweep: dead-lettering event after max attempts",
+					zap.String("event_id", env.EventID), zap.String("name", string(env.Name)),
+					zap.Int32("attempts", row.Attempts+1), zap.Error(err))
+				if mErr := q.MarkOutboxDead(ctx, sqlc.MarkOutboxDeadParams{ID: row.ID, LastError: err.Error()}); mErr != nil {
+					r.logger.Error("outbox sweep: mark dead", zap.Error(mErr))
+				}
+				continue
+			}
 			r.logger.Warn("outbox sweep: enqueue failed",
-				zap.String("event_id", env.EventID), zap.String("name", string(env.Name)), zap.Error(err))
+				zap.String("event_id", env.EventID), zap.String("name", string(env.Name)),
+				zap.Int32("attempts", row.Attempts+1), zap.Error(err))
 			if mErr := q.MarkOutboxFailed(ctx, sqlc.MarkOutboxFailedParams{ID: row.ID, LastError: err.Error()}); mErr != nil {
 				r.logger.Error("outbox sweep: mark failed", zap.Error(mErr))
 			}

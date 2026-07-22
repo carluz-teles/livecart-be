@@ -14,21 +14,22 @@ import (
 
 const insertOutboxEvent = `-- name: InsertOutboxEvent :exec
 
-INSERT INTO event_outbox (event_id, name, source, metadata, payload, trace_id, span_id, dedup_key, queue)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+INSERT INTO event_outbox (event_id, name, source, metadata, payload, trace_id, span_id, dedup_key, queue, schema_version)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (dedup_key) WHERE dedup_key <> '' DO NOTHING
 `
 
 type InsertOutboxEventParams struct {
-	EventID  pgtype.UUID     `json:"event_id"`
-	Name     string          `json:"name"`
-	Source   string          `json:"source"`
-	Metadata json.RawMessage `json:"metadata"`
-	Payload  json.RawMessage `json:"payload"`
-	TraceID  string          `json:"trace_id"`
-	SpanID   string          `json:"span_id"`
-	DedupKey string          `json:"dedup_key"`
-	Queue    string          `json:"queue"`
+	EventID       pgtype.UUID     `json:"event_id"`
+	Name          string          `json:"name"`
+	Source        string          `json:"source"`
+	Metadata      json.RawMessage `json:"metadata"`
+	Payload       json.RawMessage `json:"payload"`
+	TraceID       string          `json:"trace_id"`
+	SpanID        string          `json:"span_id"`
+	DedupKey      string          `json:"dedup_key"`
+	Queue         string          `json:"queue"`
+	SchemaVersion int32           `json:"schema_version"`
 }
 
 // =============================================================================
@@ -50,12 +51,13 @@ func (q *Queries) InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventPa
 		arg.SpanID,
 		arg.DedupKey,
 		arg.Queue,
+		arg.SchemaVersion,
 	)
 	return err
 }
 
 const listPendingOutbox = `-- name: ListPendingOutbox :many
-SELECT id, event_id, name, source, metadata, payload, trace_id, span_id, dedup_key, queue, status, attempts, last_error, created_at, published_at FROM event_outbox
+SELECT id, event_id, name, source, metadata, payload, trace_id, span_id, dedup_key, queue, status, attempts, last_error, created_at, published_at, schema_version FROM event_outbox
 WHERE status = 'pending'
 ORDER BY created_at
 FOR UPDATE SKIP LOCKED
@@ -89,6 +91,7 @@ func (q *Queries) ListPendingOutbox(ctx context.Context, limit int32) ([]EventOu
 			&i.LastError,
 			&i.CreatedAt,
 			&i.PublishedAt,
+			&i.SchemaVersion,
 		); err != nil {
 			return nil, err
 		}
@@ -98,6 +101,25 @@ func (q *Queries) ListPendingOutbox(ctx context.Context, limit int32) ([]EventOu
 		return nil, err
 	}
 	return items, nil
+}
+
+const markOutboxDead = `-- name: MarkOutboxDead :exec
+UPDATE event_outbox
+SET status = 'dead', attempts = attempts + 1, last_error = $2
+WHERE id = $1
+`
+
+type MarkOutboxDeadParams struct {
+	ID        pgtype.UUID `json:"id"`
+	LastError string      `json:"last_error"`
+}
+
+// Dead-letter for the outbox: a row that could not be enqueued after
+// max attempts is parked in 'dead' so ListPendingOutbox stops retrying it and
+// it stays queryable (status='dead', last_error) for inspection/reprocessing.
+func (q *Queries) MarkOutboxDead(ctx context.Context, arg MarkOutboxDeadParams) error {
+	_, err := q.db.Exec(ctx, markOutboxDead, arg.ID, arg.LastError)
+	return err
 }
 
 const markOutboxFailed = `-- name: MarkOutboxFailed :exec

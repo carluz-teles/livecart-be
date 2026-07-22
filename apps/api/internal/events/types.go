@@ -198,6 +198,9 @@ var DefaultPolicies = map[string]QueuePolicy{
 type Envelope struct {
 	// EventID uniquely identifies this event instance (idempotency + outbox key).
 	EventID string `json:"event_id"`
+	// SchemaVersion versions the payload shape so consumers can evolve without
+	// breaking. Defaults to 1; bump when a payload's fields change incompatibly.
+	SchemaVersion int `json:"schema_version"`
 	// Name is the canonical domain event name.
 	Name Name `json:"name"`
 	// Source is where the event was dispatched from (webhook/provider/internal).

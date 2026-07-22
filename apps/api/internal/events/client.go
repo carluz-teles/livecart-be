@@ -79,7 +79,7 @@ func (c *Client) Schedule(ctx context.Context, processAt time.Time, name Name, t
 	if err != nil {
 		return fmt.Errorf("marshaling %s command payload: %w", name, err)
 	}
-	env := Envelope{Name: name, Source: SourceInternal, Payload: body}
+	env := Envelope{Name: name, Source: SourceInternal, SchemaVersion: 1, Payload: body}
 	if sc := trace.SpanContextFromContext(ctx); sc.HasTraceID() {
 		env.TraceID = sc.TraceID().String()
 		env.SpanID = sc.SpanID().String()
