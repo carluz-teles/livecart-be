@@ -7,6 +7,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/httpx"
 )
@@ -279,10 +280,30 @@ func (h *Handler) CreateShippingShipment(c *fiber.Ctx) error {
 		return httpx.HandleServiceError(c, fmt.Errorf("shipment created at provider but failed to persist locally: %w", err))
 	}
 
+	// Group H fact (best-effort): a shipment was created at the carrier. Dedup
+	// by the LiveCart shipment id.
+	_ = events.EmitInternal(c.Context(), h.service.repo.queries, events.ShipmentCreated, "shipment.created:"+shipment.ID, struct {
+		StoreID         string `json:"store_id"`
+		ShipmentID      string `json:"shipment_id"`
+		OrderID         string `json:"order_id"`
+		Provider        string `json:"provider"`
+		ProviderOrderID string `json:"provider_order_id"`
+		TrackingCode    string `json:"tracking_code"`
+		Status          string `json:"status"`
+	}{StoreID: storeID, ShipmentID: shipment.ID, OrderID: req.ExternalOrderID, Provider: string(providerName), ProviderOrderID: out.ProviderOrderID, TrackingCode: out.TrackingCode, Status: string(out.Status)})
+
 	// Customer-facing notification: if the carrier returned a tracking code
 	// right away, fire the postcheckout shipped flow. Idempotent at the
 	// implementation level (one shipped event per cart).
 	if out.TrackingCode != "" && h.service.postCheckoutHook != nil {
+		// Group H fact (best-effort): tracking code available at creation time.
+		_ = events.EmitInternal(c.Context(), h.service.repo.queries, events.TrackingCodeGenerated, "shipment.tracking_generated:"+out.TrackingCode, struct {
+			StoreID      string `json:"store_id"`
+			ShipmentID   string `json:"shipment_id"`
+			OrderID      string `json:"order_id"`
+			Provider     string `json:"provider"`
+			TrackingCode string `json:"tracking_code"`
+		}{StoreID: storeID, ShipmentID: shipment.ID, OrderID: req.ExternalOrderID, Provider: string(providerName), TrackingCode: out.TrackingCode})
 		h.service.postCheckoutHook.OnShipmentPosted(c.Context(), req.ExternalOrderID, out.TrackingCode)
 	}
 
@@ -482,6 +503,15 @@ func (h *Handler) GenerateShippingLabels(c *fiber.Ctx) error {
 		// lands here, after labels are generated. Idempotent — repeats hit
 		// the order_event unique constraint.
 		if t.TrackingCode != "" && sh.OrderID != "" && h.service.postCheckoutHook != nil {
+			// Group H fact (best-effort): the carrier returned a tracking code
+			// at label generation. Dedup by tracking code.
+			_ = events.EmitInternal(c.Context(), h.service.repo.queries, events.TrackingCodeGenerated, "shipment.tracking_generated:"+t.TrackingCode, struct {
+				StoreID      string `json:"store_id"`
+				ShipmentID   string `json:"shipment_id"`
+				OrderID      string `json:"order_id"`
+				Provider     string `json:"provider"`
+				TrackingCode string `json:"tracking_code"`
+			}{StoreID: storeID, ShipmentID: sh.ID, OrderID: sh.OrderID, Provider: string(providerName), TrackingCode: t.TrackingCode})
 			h.service.postCheckoutHook.OnShipmentPosted(c.Context(), sh.OrderID, t.TrackingCode)
 		}
 	}
@@ -590,9 +620,9 @@ func (h *Handler) TrackShipping(c *fiber.Ctx) error {
 		}
 	}
 
-	events := make([]TrackShippingEvent, 0, len(result.Events))
+	respEvents := make([]TrackShippingEvent, 0, len(result.Events))
 	for _, e := range result.Events {
-		events = append(events, TrackShippingEvent{
+		respEvents = append(respEvents, TrackShippingEvent{
 			Status:      string(e.Status),
 			RawCode:     e.RawCode,
 			RawName:     e.RawName,
@@ -605,6 +635,6 @@ func (h *Handler) TrackShipping(c *fiber.Ctx) error {
 		Carrier:       result.Carrier,
 		Service:       result.Service,
 		CurrentStatus: string(result.CurrentStatus),
-		Events:        events,
+		Events:        respEvents,
 	})
 }

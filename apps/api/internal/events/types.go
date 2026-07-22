@@ -102,6 +102,55 @@ const (
 	ConversionInitiated      Name = "conversion.initiated"
 	GMVRecorded              Name = "gmv.recorded"
 	GMVRefunded              Name = "gmv.refunded"
+
+	// Notifications (group I). One fact per outbound message lifecycle; the
+	// channel (instagram_dm / whatsapp / email) travels in Envelope.Source.
+	NotificationRequested  Name = "notification.requested"
+	NotificationSent       Name = "notification.sent"
+	NotificationFailed     Name = "notification.failed"
+	NotificationSkipped    Name = "notification.skipped"
+	WhatsAppFallbackSent   Name = "whatsapp.fallback_sent"
+	WhatsAppFallbackFailed Name = "whatsapp.fallback_failed"
+	EmailSent              Name = "email.sent"
+
+	// ERP / Tiny (group G). Best-effort facts around the resumable ERP order
+	// state machine and product sync/import.
+	ERPOrderInitiated     Name = "erp.order_initiated"
+	ERPOrderCreated       Name = "erp.order_created"
+	ERPOrderFinalized     Name = "erp.order_finalized"
+	ERPOrderCancelled     Name = "erp.order_cancelled"
+	ERPFinalizationFailed Name = "erp.finalization_failed"
+	ProductSynced         Name = "product.synced"
+	ProductImported       Name = "product.imported"
+
+	// Shipping / delivery (group H). Carrier-level facts, distinct from the
+	// order timeline (order.shipped/delivered are group F).
+	ShipmentCreated       Name = "shipment.created"
+	TrackingCodeGenerated Name = "shipment.tracking_generated"
+	ShipmentStatusUpdated Name = "shipment.status_updated"
+	DeliveryConfirmed     Name = "shipment.delivered"
+
+	// Platform / account (group K). store/member/user/customer/coupon lifecycle.
+	StoreCreated            Name = "store.created"
+	StoreSettingsUpdated    Name = "store.settings_updated"
+	MemberInvited           Name = "member.invited"
+	MemberInviteAccepted    Name = "member.invite_accepted"
+	MemberInviteRevoked     Name = "member.invite_revoked"
+	MemberInviteResent      Name = "member.invite_resent"
+	MemberRoleChanged       Name = "member.role_changed"
+	MemberRemoved           Name = "member.removed"
+	UserSignedUp            Name = "user.signed_up"
+	UserUpdated             Name = "user.updated"
+	UserDeleted             Name = "user.deleted"
+	CustomerUpserted        Name = "customer.upserted"
+	CouponCreated           Name = "coupon.created"
+	CouponUpdated           Name = "coupon.updated"
+	CouponDeleted           Name = "coupon.deleted"
+	CouponApplied           Name = "coupon.applied"
+	CouponRemoved           Name = "coupon.removed"
+	CouponConfirmed         Name = "coupon.confirmed"
+	CouponRefunded          Name = "coupon.refunded"
+	CouponRedemptionExpired Name = "coupon.redemption_expired"
 )
 
 // Source identifies where an event was dispatched from. It is metadata on the

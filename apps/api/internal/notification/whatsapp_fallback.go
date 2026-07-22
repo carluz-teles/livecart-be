@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/lib/logger"
 )
 
@@ -90,6 +91,22 @@ func (s *Service) tryWhatsAppFallback(ctx context.Context, input SendInput) stri
 			zap.String("cart_id", input.CartID),
 			zap.Error(err),
 		)
+		// Group I: WhatsApp fallback attempt failed.
+		waFailKey := logID
+		if waFailKey == "" {
+			waFailKey = input.StoreID + ":" + input.CartID
+		}
+		_ = events.EmitInternal(ctx, s.queries, events.WhatsAppFallbackFailed,
+			"whatsapp.fallback_failed:"+waFailKey,
+			struct {
+				StoreID          string `json:"store_id"`
+				NotificationType string `json:"notification_type"`
+				Channel          string `json:"channel"`
+				Recipient        string `json:"recipient"`
+				CartID           string `json:"cart_id,omitempty"`
+				LogID            string `json:"log_id,omitempty"`
+				Error            string `json:"error"`
+			}{input.StoreID, string(input.NotificationType), string(ChannelWhatsApp), cart.CustomerPhone.String, input.CartID, logID, err.Error()})
 		return ""
 	}
 
@@ -98,6 +115,21 @@ func (s *Service) tryWhatsAppFallback(ctx context.Context, input SendInput) stri
 		zap.String("store_id", input.StoreID),
 		zap.String("cart_id", input.CartID),
 	)
+	// Group I: WhatsApp fallback delivered the reminder.
+	waSentKey := logID
+	if waSentKey == "" {
+		waSentKey = input.StoreID + ":" + input.CartID
+	}
+	_ = events.EmitInternal(ctx, s.queries, events.WhatsAppFallbackSent,
+		"whatsapp.fallback_sent:"+waSentKey,
+		struct {
+			StoreID          string `json:"store_id"`
+			NotificationType string `json:"notification_type"`
+			Channel          string `json:"channel"`
+			Recipient        string `json:"recipient"`
+			CartID           string `json:"cart_id,omitempty"`
+			LogID            string `json:"log_id,omitempty"`
+		}{input.StoreID, string(input.NotificationType), string(ChannelWhatsApp), cart.CustomerPhone.String, input.CartID, logID})
 	return logID
 }
 

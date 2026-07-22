@@ -6,6 +6,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/invitation/domain"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/email"
@@ -83,6 +84,14 @@ func (s *Service) Create(ctx context.Context, input CreateInvitationInput) (*dom
 	if err := s.repo.Save(ctx, inv); err != nil {
 		return nil, err
 	}
+
+	// Group K: member.invited fact (best-effort, observability only).
+	_ = events.EmitInternal(ctx, s.repo.q, events.MemberInvited,
+		"member.invited:"+inv.ID().String(), struct {
+			InvitationID string `json:"invitation_id"`
+			StoreID      string `json:"store_id"`
+			Role         string `json:"role"`
+		}{InvitationID: inv.ID().String(), StoreID: inv.StoreID().String(), Role: inv.Role().String()})
 
 	// Send invitation email via SendGrid
 	acceptURL := fmt.Sprintf("%s/accept-invite?token=%s", config.FrontendURL.StringOr("http://localhost:3000"), inv.Token().String())
@@ -204,6 +213,15 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*dom
 		return nil, err
 	}
 
+	// Group K: member.invite_accepted fact (best-effort, observability only).
+	_ = events.EmitInternal(ctx, s.repo.q, events.MemberInviteAccepted,
+		"member.invite_accepted:"+inv.ID().String(), struct {
+			InvitationID string `json:"invitation_id"`
+			StoreID      string `json:"store_id"`
+			UserID       string `json:"user_id"`
+			Role         string `json:"role"`
+		}{InvitationID: inv.ID().String(), StoreID: inv.StoreID().String(), UserID: userID, Role: inv.Role().String()})
+
 	logger.From(ctx, s.logger).Info("invitation accepted",
 		zap.String("store_id", inv.StoreID().String()),
 		zap.String("email", input.Email.String()),
@@ -219,6 +237,13 @@ func (s *Service) Revoke(ctx context.Context, storeID vo.StoreID, invitationID v
 	if err != nil {
 		return err
 	}
+
+	// Group K: member.invite_revoked fact (best-effort, observability only).
+	_ = events.EmitInternal(ctx, s.repo.q, events.MemberInviteRevoked,
+		"member.invite_revoked:"+invitationID.String(), struct {
+			InvitationID string `json:"invitation_id"`
+			StoreID      string `json:"store_id"`
+		}{InvitationID: invitationID.String(), StoreID: storeID.String()})
 
 	logger.From(ctx, s.logger).Info("invitation revoked",
 		zap.String("invitation_id", invitationID.String()),
@@ -247,10 +272,25 @@ func (s *Service) Resend(ctx context.Context, input ResendInvitationInput) (*dom
 	}
 
 	// Create new invitation with same email/role
-	return s.Create(ctx, CreateInvitationInput{
+	inv, err := s.Create(ctx, CreateInvitationInput{
 		StoreID:   input.StoreID,
 		InviterID: input.InviterID,
 		Email:     existing.Email(),
 		Role:      existing.Role(),
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Group K: member.invite_resent fact (best-effort, observability only).
+	// Keyed on the OLD invitation id — the resend is one logical action even
+	// though Create mints a fresh row/token.
+	_ = events.EmitInternal(ctx, s.repo.q, events.MemberInviteResent,
+		"member.invite_resent:"+input.InvitationID.String(), struct {
+			InvitationID    string `json:"invitation_id"`
+			OldInvitationID string `json:"old_invitation_id"`
+			StoreID         string `json:"store_id"`
+		}{InvitationID: inv.ID().String(), OldInvitationID: input.InvitationID.String(), StoreID: input.StoreID.String()})
+
+	return inv, nil
 }

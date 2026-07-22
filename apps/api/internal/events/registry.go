@@ -75,6 +75,52 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(ConversionInitiated), logEvent(log))
 	mux.HandleFunc(string(GMVRecorded), logEvent(log))
 	mux.HandleFunc(string(GMVRefunded), logEvent(log))
+
+	// Group I — notifications.
+	mux.HandleFunc(string(NotificationRequested), logEvent(log))
+	mux.HandleFunc(string(NotificationSent), logEvent(log))
+	mux.HandleFunc(string(NotificationFailed), logEvent(log))
+	mux.HandleFunc(string(NotificationSkipped), logEvent(log))
+	mux.HandleFunc(string(WhatsAppFallbackSent), logEvent(log))
+	mux.HandleFunc(string(WhatsAppFallbackFailed), logEvent(log))
+	mux.HandleFunc(string(EmailSent), logEvent(log))
+
+	// Group G — ERP / Tiny.
+	mux.HandleFunc(string(ERPOrderInitiated), logEvent(log))
+	mux.HandleFunc(string(ERPOrderCreated), logEvent(log))
+	mux.HandleFunc(string(ERPOrderFinalized), logEvent(log))
+	mux.HandleFunc(string(ERPOrderCancelled), logEvent(log))
+	mux.HandleFunc(string(ERPFinalizationFailed), logEvent(log))
+	mux.HandleFunc(string(ProductSynced), logEvent(log))
+	mux.HandleFunc(string(ProductImported), logEvent(log))
+
+	// Group H — shipping / delivery.
+	mux.HandleFunc(string(ShipmentCreated), logEvent(log))
+	mux.HandleFunc(string(TrackingCodeGenerated), logEvent(log))
+	mux.HandleFunc(string(ShipmentStatusUpdated), logEvent(log))
+	mux.HandleFunc(string(DeliveryConfirmed), logEvent(log))
+
+	// Group K — platform / account.
+	mux.HandleFunc(string(StoreCreated), logEvent(log))
+	mux.HandleFunc(string(StoreSettingsUpdated), logEvent(log))
+	mux.HandleFunc(string(MemberInvited), logEvent(log))
+	mux.HandleFunc(string(MemberInviteAccepted), logEvent(log))
+	mux.HandleFunc(string(MemberInviteRevoked), logEvent(log))
+	mux.HandleFunc(string(MemberInviteResent), logEvent(log))
+	mux.HandleFunc(string(MemberRoleChanged), logEvent(log))
+	mux.HandleFunc(string(MemberRemoved), logEvent(log))
+	mux.HandleFunc(string(UserSignedUp), logEvent(log))
+	mux.HandleFunc(string(UserUpdated), logEvent(log))
+	mux.HandleFunc(string(UserDeleted), logEvent(log))
+	mux.HandleFunc(string(CustomerUpserted), logEvent(log))
+	mux.HandleFunc(string(CouponCreated), logEvent(log))
+	mux.HandleFunc(string(CouponUpdated), logEvent(log))
+	mux.HandleFunc(string(CouponDeleted), logEvent(log))
+	mux.HandleFunc(string(CouponApplied), logEvent(log))
+	mux.HandleFunc(string(CouponRemoved), logEvent(log))
+	mux.HandleFunc(string(CouponConfirmed), logEvent(log))
+	mux.HandleFunc(string(CouponRefunded), logEvent(log))
+	mux.HandleFunc(string(CouponRedemptionExpired), logEvent(log))
 }
 
 // logEvent is a generic observability consumer: it records that a canonical

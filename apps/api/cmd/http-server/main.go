@@ -267,6 +267,21 @@ func emailAuditHook(log *zap.Logger, queries *sqlc.Queries) email.AuditHook {
 				zap.Error(err),
 			)
 		}
+
+		// Group I: email.sent — the single canonical point for every outbound
+		// email (order receipts, invitations, ...). Best-effort observability.
+		if e.Status == email.AuditStatusSent {
+			dedup := e.ProviderMessageID
+			if dedup == "" {
+				dedup = e.StoreID + ":" + e.Kind + ":" + e.ToEmail
+			}
+			_ = events.EmitInternal(ctx, queries, events.EmailSent, "email.sent:"+dedup, struct {
+				StoreID string `json:"store_id"`
+				CartID  string `json:"cart_id,omitempty"`
+				Kind    string `json:"kind"`
+				To      string `json:"to"`
+			}{e.StoreID, e.CartID, e.Kind, e.ToEmail})
+		}
 	}
 }
 

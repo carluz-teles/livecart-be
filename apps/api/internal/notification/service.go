@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/lib/logger"
 )
 
@@ -107,6 +108,18 @@ func (s *Service) UpdateSettings(ctx context.Context, storeID string, settings S
 
 // Send sends a notification based on type and store settings.
 func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error) {
+	// Group I (observability): a DM/notification send was requested. Best-effort;
+	// dedup on store+recipient+type+cart so retries of the same send collapse.
+	_ = events.EmitInternal(ctx, s.queries, events.NotificationRequested,
+		"notification.requested:"+input.StoreID+":"+input.PlatformUserID+":"+string(input.NotificationType)+":"+input.CartID,
+		struct {
+			StoreID          string `json:"store_id"`
+			NotificationType string `json:"notification_type"`
+			Channel          string `json:"channel"`
+			Recipient        string `json:"recipient"`
+			CartID           string `json:"cart_id,omitempty"`
+		}{input.StoreID, string(input.NotificationType), string(ChannelInstagramDM), input.PlatformUserID, input.CartID})
+
 	// Get template settings
 	settings, err := s.GetSettings(ctx, input.StoreID)
 	if err != nil {
@@ -120,6 +133,17 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 			zap.String("store_id", input.StoreID),
 			zap.String("type", string(input.NotificationType)),
 		)
+		// Group I: skipped because the template is disabled in store settings.
+		_ = events.EmitInternal(ctx, s.queries, events.NotificationSkipped,
+			"notification.skipped:"+input.StoreID+":"+input.PlatformUserID+":"+string(input.NotificationType)+":"+input.CartID,
+			struct {
+				StoreID          string `json:"store_id"`
+				NotificationType string `json:"notification_type"`
+				Channel          string `json:"channel"`
+				Recipient        string `json:"recipient"`
+				CartID           string `json:"cart_id,omitempty"`
+				Reason           string `json:"reason"`
+			}{input.StoreID, string(input.NotificationType), string(ChannelInstagramDM), input.PlatformUserID, input.CartID, "template_disabled"})
 		return &SendResult{
 			Status: StatusSkipped,
 		}, nil
@@ -170,6 +194,24 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 			zap.Error(sendErr),
 		)
 
+		// Group I: the Instagram send failed. Dedup on the log id when we have
+		// one (unique per attempt), else on store+recipient+type+cart.
+		failKey := logID
+		if failKey == "" {
+			failKey = input.StoreID + ":" + input.PlatformUserID + ":" + string(input.NotificationType) + ":" + input.CartID
+		}
+		_ = events.EmitInternal(ctx, s.queries, events.NotificationFailed,
+			"notification.failed:"+failKey,
+			struct {
+				StoreID          string `json:"store_id"`
+				NotificationType string `json:"notification_type"`
+				Channel          string `json:"channel"`
+				Recipient        string `json:"recipient"`
+				CartID           string `json:"cart_id,omitempty"`
+				LogID            string `json:"log_id,omitempty"`
+				Error            string `json:"error"`
+			}{input.StoreID, string(input.NotificationType), string(ChannelInstagramDM), input.PlatformUserID, input.CartID, logID, sendErr.Error()})
+
 		// PRD 006: the checkout reminder falls back to WhatsApp when the IG
 		// window is closed and the buyer left phone + consent at checkout.
 		if waLogID := s.tryWhatsAppFallback(ctx, input); waLogID != "" {
@@ -197,6 +239,22 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 		zap.String("type", string(input.NotificationType)),
 		zap.Int("message_length", len(message)),
 	)
+
+	// Group I: the Instagram send succeeded.
+	sentKey := logID
+	if sentKey == "" {
+		sentKey = input.StoreID + ":" + input.PlatformUserID + ":" + string(input.NotificationType) + ":" + input.CartID
+	}
+	_ = events.EmitInternal(ctx, s.queries, events.NotificationSent,
+		"notification.sent:"+sentKey,
+		struct {
+			StoreID          string `json:"store_id"`
+			NotificationType string `json:"notification_type"`
+			Channel          string `json:"channel"`
+			Recipient        string `json:"recipient"`
+			CartID           string `json:"cart_id,omitempty"`
+			LogID            string `json:"log_id,omitempty"`
+		}{input.StoreID, string(input.NotificationType), string(ChannelInstagramDM), input.PlatformUserID, input.CartID, logID})
 
 	return &SendResult{
 		LogID:       logID,

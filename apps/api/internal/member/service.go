@@ -5,6 +5,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/member/domain"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
@@ -54,6 +55,15 @@ func (s *Service) UpdateRole(ctx context.Context, input UpdateMemberRoleInput) (
 		return nil, err
 	}
 
+	// Group K: member.role_changed fact (best-effort, observability only).
+	_ = events.EmitInternal(ctx, s.repo.q, events.MemberRoleChanged,
+		"member.role_changed:"+input.MemberID+":"+input.Role.String(), struct {
+			MemberID string `json:"member_id"`
+			StoreID  string `json:"store_id"`
+			Role     string `json:"role"`
+			ActorID  string `json:"actor_id"`
+		}{MemberID: input.MemberID, StoreID: input.StoreID, Role: input.Role.String(), ActorID: input.ActorID})
+
 	logger.From(ctx, s.logger).Info("member role updated",
 		zap.String("member_id", input.MemberID),
 		zap.String("new_role", input.Role.String()),
@@ -85,6 +95,14 @@ func (s *Service) Remove(ctx context.Context, input RemoveMemberInput) error {
 	if err := s.repo.Remove(ctx, input.StoreID, input.MemberID); err != nil {
 		return err
 	}
+
+	// Group K: member.removed fact (best-effort, observability only).
+	_ = events.EmitInternal(ctx, s.repo.q, events.MemberRemoved,
+		"member.removed:"+input.MemberID, struct {
+			MemberID string `json:"member_id"`
+			StoreID  string `json:"store_id"`
+			ActorID  string `json:"actor_id"`
+		}{MemberID: input.MemberID, StoreID: input.StoreID, ActorID: input.ActorID})
 
 	logger.From(ctx, s.logger).Info("member removed from store",
 		zap.String("member_id", input.MemberID),

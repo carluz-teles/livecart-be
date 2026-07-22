@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/billing"
+	"livecart/apps/api/internal/events"
 	storedomain "livecart/apps/api/internal/store/domain"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
@@ -93,6 +94,13 @@ func (s *Service) Create(ctx context.Context, input CreateStoreInput) (*storedom
 		return nil, fmt.Errorf("creating owner membership: %w", err)
 	}
 
+	// Group K: store.created fact (best-effort, observability only).
+	_ = events.EmitInternal(ctx, s.repo.q, events.StoreCreated, "store.created:"+storeID, struct {
+		StoreID string `json:"store_id"`
+		UserID  string `json:"user_id"`
+		Slug    string `json:"slug"`
+	}{StoreID: storeID, UserID: userID, Slug: store.Slug().String()})
+
 	// 6. Start the 7-day cardless trial (PRD 007). Non-fatal: /users/sync
 	// lazily retries, so a Stripe hiccup never blocks onboarding.
 	if s.billing != nil {
@@ -130,7 +138,7 @@ func (s *Service) Update(ctx context.Context, input UpdateStoreInput) (*storedom
 		return nil, httpx.ErrBadRequest(err.Error())
 	}
 
-	return s.repo.Update(ctx, UpdateStoreParams{
+	updated, err := s.repo.Update(ctx, UpdateStoreParams{
 		ID:                   input.StoreID,
 		Name:                 merged.Name,
 		WhatsappNumber:       merged.WhatsappNumber,
@@ -150,6 +158,22 @@ func (s *Service) Update(ctx context.Context, input UpdateStoreInput) (*storedom
 		AddressStateRegister: merged.Address.StateRegister,
 		CNPJ:                 merged.CNPJ,
 	})
+	if err != nil {
+		return nil, err
+	}
+	s.emitSettingsUpdated(ctx, input.StoreID, "profile")
+	return updated, nil
+}
+
+// emitSettingsUpdated fires the Group K store.settings_updated fact
+// (best-effort, observability only). The dedup key includes the kind so
+// distinct update paths within one store are not collapsed together.
+func (s *Service) emitSettingsUpdated(ctx context.Context, storeID, kind string) {
+	_ = events.EmitInternal(ctx, s.repo.q, events.StoreSettingsUpdated,
+		"store.settings_updated:"+storeID+":"+kind, struct {
+			StoreID string `json:"store_id"`
+			Kind    string `json:"kind"`
+		}{StoreID: storeID, Kind: kind})
 }
 
 func (s *Service) UpdateShippingDefaults(ctx context.Context, input UpdateShippingDefaultsInput) (*storedomain.Store, error) {
@@ -163,7 +187,7 @@ func (s *Service) UpdateShippingDefaults(ctx context.Context, input UpdateShippi
 	if hCm == nil || wCm == nil || lCm == nil {
 		hCm, wCm, lCm = nil, nil, nil
 	}
-	return s.repo.UpdateShippingDefaults(ctx, UpdateShippingDefaultsParams{
+	updated, err := s.repo.UpdateShippingDefaults(ctx, UpdateShippingDefaultsParams{
 		ID:                 input.StoreID,
 		PackageWeightGrams: input.PackageWeightGrams,
 		PackageFormat:      format,
@@ -171,10 +195,15 @@ func (s *Service) UpdateShippingDefaults(ctx context.Context, input UpdateShippi
 		WidthCm:            wCm,
 		LengthCm:           lCm,
 	})
+	if err != nil {
+		return nil, err
+	}
+	s.emitSettingsUpdated(ctx, input.StoreID, "shipping")
+	return updated, nil
 }
 
 func (s *Service) UpdateCartSettings(ctx context.Context, input UpdateCartSettingsInput) (*storedomain.Store, error) {
-	return s.repo.UpdateCartSettings(ctx, UpdateCartSettingsParams{
+	updated, err := s.repo.UpdateCartSettings(ctx, UpdateCartSettingsParams{
 		ID:                        input.StoreID,
 		Enabled:                   input.Enabled,
 		ExpirationMinutes:         input.ExpirationMinutes,
@@ -189,10 +218,20 @@ func (s *Service) UpdateCartSettings(ctx context.Context, input UpdateCartSettin
 		SendExpirationReminder:    input.SendExpirationReminder,
 		ExpirationReminderMinutes: input.ExpirationReminderMinutes,
 	})
+	if err != nil {
+		return nil, err
+	}
+	s.emitSettingsUpdated(ctx, input.StoreID, "cart_settings")
+	return updated, nil
 }
 
 func (s *Service) UpdateLogoURL(ctx context.Context, storeID string, logoURL string) (*storedomain.Store, error) {
-	return s.repo.UpdateLogoURL(ctx, storeID, logoURL)
+	updated, err := s.repo.UpdateLogoURL(ctx, storeID, logoURL)
+	if err != nil {
+		return nil, err
+	}
+	s.emitSettingsUpdated(ctx, storeID, "logo")
+	return updated, nil
 }
 
 func (s *Service) GetByClerkUserID(ctx context.Context, clerkUserID string) (*storedomain.Store, error) {

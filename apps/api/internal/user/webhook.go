@@ -10,6 +10,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/lib/httpx"
 )
 
@@ -103,6 +104,13 @@ func (h *WebhookHandler) handleUserCreated(c *fiber.Ctx, data json.RawMessage) e
 		return httpx.HandleServiceError(c, err)
 	}
 
+	// Group K: user.signed_up fact (best-effort, observability only).
+	_ = events.EmitInternal(c.UserContext(), h.service.repo.q, events.UserSignedUp,
+		"user.signed_up:"+userData.ID, struct {
+			ClerkID string `json:"clerk_id"`
+			Email   string `json:"email"`
+		}{ClerkID: userData.ID, Email: email})
+
 	return httpx.OK(c, fiber.Map{"message": "user created"})
 }
 
@@ -127,10 +135,25 @@ func (h *WebhookHandler) handleUserUpdated(c *fiber.Ctx, data json.RawMessage) e
 			if createErr != nil {
 				return httpx.HandleServiceError(c, createErr)
 			}
+			// Group K: this fallback path is effectively a creation.
+			_ = events.EmitInternal(c.UserContext(), h.service.repo.q, events.UserSignedUp,
+				"user.signed_up:"+userData.ID, struct {
+					ClerkID string `json:"clerk_id"`
+					Email   string `json:"email"`
+				}{ClerkID: userData.ID, Email: email})
 			return httpx.OK(c, fiber.Map{"message": "user created (from update)"})
 		}
 		return httpx.HandleServiceError(c, err)
 	}
+
+	// Group K: user.updated fact (best-effort, observability only). The dedup
+	// key folds in email+name+avatar so identical redeliveries collapse while a
+	// real profile change produces a distinct event.
+	_ = events.EmitInternal(c.UserContext(), h.service.repo.q, events.UserUpdated,
+		"user.updated:"+userData.ID+":"+email+":"+name+":"+userData.ImageURL, struct {
+			ClerkID string `json:"clerk_id"`
+			Email   string `json:"email"`
+		}{ClerkID: userData.ID, Email: email})
 
 	return httpx.OK(c, fiber.Map{"message": "user updated"})
 }
@@ -151,6 +174,12 @@ func (h *WebhookHandler) handleUserDeleted(c *fiber.Ctx, data json.RawMessage) e
 		}
 		return httpx.HandleServiceError(c, err)
 	}
+
+	// Group K: user.deleted fact (best-effort, observability only).
+	_ = events.EmitInternal(c.UserContext(), h.service.repo.q, events.UserDeleted,
+		"user.deleted:"+userData.ID, struct {
+			ClerkID string `json:"clerk_id"`
+		}{ClerkID: userData.ID})
 
 	return httpx.OK(c, fiber.Map{"message": "user deleted"})
 }

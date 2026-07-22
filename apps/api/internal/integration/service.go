@@ -2795,6 +2795,14 @@ func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductIn
 		if err != nil {
 			return nil, fmt.Errorf("importing simple product: %w", err)
 		}
+		// Group G fact (best-effort): a simple product was imported from the ERP.
+		_ = events.EmitInternal(ctx, s.repo.queries, events.ProductImported, "product.imported:"+input.StoreID+":"+detailed.ID, struct {
+			StoreID    string `json:"store_id"`
+			ProductID  string `json:"product_id"`
+			ExternalID string `json:"external_id"`
+			Provider   string `json:"provider"`
+			Variants   int    `json:"variants"`
+		}{StoreID: input.StoreID, ProductID: productID, ExternalID: detailed.ID, Provider: integration.Provider, Variants: 1})
 		return &ImportERPProductOutput{
 			ProductID: productID,
 			IsParent:  false,
@@ -2867,6 +2875,16 @@ func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductIn
 		zap.Int("variants_imported", len(imported)),
 	)
 
+	// Group G fact (best-effort): a product group was imported from the ERP.
+	// Dedup by the ERP external id of the imported parent product.
+	_ = events.EmitInternal(ctx, s.repo.queries, events.ProductImported, "product.imported:"+input.StoreID+":"+input.TinyProductID, struct {
+		StoreID    string `json:"store_id"`
+		GroupID    string `json:"group_id"`
+		ExternalID string `json:"external_id"`
+		Provider   string `json:"provider"`
+		Variants   int    `json:"variants"`
+	}{StoreID: input.StoreID, GroupID: groupID, ExternalID: input.TinyProductID, Provider: integration.Provider, Variants: len(imported)})
+
 	return &ImportERPProductOutput{
 		GroupID:  groupID,
 		IsParent: true,
@@ -2932,6 +2950,17 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 		zap.String("external_id", externalID),
 		zap.String("store_id", input.StoreID),
 	)
+
+	// Group G fact (best-effort): a product was synced from the ERP (manual).
+	// Dedup includes "manual" so it never collides with the webhook-driven sync
+	// of the same product.
+	_ = events.EmitInternal(ctx, s.repo.queries, events.ProductSynced, "product.synced:manual:"+input.StoreID+":"+externalID, struct {
+		StoreID    string `json:"store_id"`
+		ProductID  string `json:"product_id"`
+		ExternalID string `json:"external_id"`
+		Provider   string `json:"provider"`
+		Source     string `json:"source"`
+	}{StoreID: input.StoreID, ProductID: input.ProductID, ExternalID: externalID, Provider: externalSource, Source: "manual"})
 
 	return &SyncProductOutput{
 		ProductID:  input.ProductID,
@@ -3043,6 +3072,14 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		if err := s.productGroupSyncer.SyncFromERP(ctx, integration.StoreID, integration.Provider, *detailed); err != nil {
 			return false, fmt.Errorf("syncing product group: %w", err)
 		}
+		// Group G fact (best-effort): a product group was synced from an ERP
+		// webhook. Dedup by store + external product id under the webhook source.
+		_ = events.EmitInternal(ctx, s.repo.queries, events.ProductSynced, "product.synced:webhook:"+integration.StoreID+":"+externalProductID, struct {
+			StoreID    string `json:"store_id"`
+			ExternalID string `json:"external_id"`
+			Provider   string `json:"provider"`
+			Source     string `json:"source"`
+		}{StoreID: integration.StoreID, ExternalID: externalProductID, Provider: integration.Provider, Source: "webhook"})
 		return true, nil
 	}
 
@@ -3966,6 +4003,15 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 		return fmt.Errorf("loading cart for ERP order: %w", err)
 	}
 
+	// Group G fact (best-effort): legacy finalisation started for a paid cart
+	// (stores not in Design C conversion mode). Dedup by cart; a cart takes
+	// either the conversion path or this legacy path, never both.
+	_ = events.EmitInternal(ctx, s.repo.queries, events.ERPOrderInitiated, "erp.order_initiated:"+cartID, struct {
+		StoreID  string `json:"store_id"`
+		CartID   string `json:"cart_id"`
+		Provider string `json:"provider"`
+	}{StoreID: storeID, CartID: cartID, Provider: "tiny"})
+
 	// [S1] Snapshot + carimbo ANTES de agir. Best-effort: a finalização não
 	// para por falha aqui, mas o retry perde o replay se o snapshot faltar.
 	var snapshot []byte
@@ -4035,6 +4081,7 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 					zap.Error(markErr),
 				)
 			}
+			s.emitERPFinalizationFailed(ctx, cartID, msg)
 			logger.From(ctx, s.logger).Warn("failed to reverse ERP reservation on paid cart, aborting for retry",
 				zap.String("cart_id", cartID),
 				zap.String("reservation_id", r.ID),
@@ -4076,6 +4123,7 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 				zap.Error(markErr),
 			)
 		}
+		s.emitERPFinalizationFailed(ctx, cartID, createErr.Error())
 		return createErr
 	}
 
@@ -4089,7 +4137,26 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 			zap.Error(markErr),
 		)
 	}
+	s.emitERPOrderFinalized(ctx, storeID, cartID)
 	return nil
+}
+
+// emitERPOrderFinalized publishes the group G erp.order_finalized fact for a
+// cart that reached the terminal 'done' state (legacy [S4], inverted, resume or
+// confirm). Best-effort and dedup by cart — the terminal marker is monotonic,
+// so the fact rides the single transition to done. Reloads the external order
+// id best-effort for the payload.
+func (s *Service) emitERPOrderFinalized(ctx context.Context, storeID, cartID string) {
+	externalOrderID := ""
+	if fresh, err := s.repo.GetCartForPaidOrder(ctx, cartID); err == nil {
+		externalOrderID = fresh.ExternalOrderID
+	}
+	_ = events.EmitInternal(ctx, s.repo.queries, events.ERPOrderFinalized, "erp.order_finalized:"+cartID, struct {
+		StoreID         string `json:"store_id"`
+		CartID          string `json:"cart_id"`
+		ExternalOrderID string `json:"external_order_id"`
+		Provider        string `json:"provider"`
+	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: "tiny"})
 }
 
 // resumeCartERPFinalisation finishes a finalisation that was interrupted
@@ -4113,6 +4180,7 @@ func (s *Service) resumeCartERPFinalisation(ctx context.Context, erpProvider pro
 				zap.Error(markErr),
 			)
 		}
+		s.emitERPFinalizationFailed(ctx, cartID, msg)
 		return fmt.Errorf("re-launching stock for order %s: %w", externalOrderID, err)
 	}
 
@@ -4127,6 +4195,18 @@ func (s *Service) resumeCartERPFinalisation(ctx context.Context, erpProvider pro
 			zap.Error(markErr),
 		)
 	}
+	// Group G fact (best-effort): terminal 'done' reached via the resume path.
+	// storeID isn't threaded here; reload it best-effort for the payload.
+	resumeStoreID := ""
+	if fresh, err := s.repo.GetCartForPaidOrder(ctx, cartID); err == nil {
+		resumeStoreID = fresh.StoreID
+	}
+	_ = events.EmitInternal(ctx, s.repo.queries, events.ERPOrderFinalized, "erp.order_finalized:"+cartID, struct {
+		StoreID         string `json:"store_id"`
+		CartID          string `json:"cart_id"`
+		ExternalOrderID string `json:"external_order_id"`
+		Provider        string `json:"provider"`
+	}{StoreID: resumeStoreID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: "tiny"})
 	logger.From(ctx, s.logger).Info("ERP finalisation resumed to done",
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", externalOrderID),
@@ -4173,6 +4253,28 @@ func (s *Service) markFinalisationFailed(ctx context.Context, cartID, msg string
 			zap.Error(markErr),
 		)
 	}
+	s.emitERPFinalizationFailed(ctx, cartID, msg)
+}
+
+// emitERPFinalizationFailed publishes the group G erp.finalization_failed fact
+// for a cart whose ERP finalisation aborted (retryable). Best-effort. Dedup is
+// intentionally coarse (cart-scoped) so a retry-after-failure re-surfaces the
+// signal on the outbox rather than being silently collapsed; storeID is
+// reloaded best-effort for the payload.
+func (s *Service) emitERPFinalizationFailed(ctx context.Context, cartID, reason string) {
+	storeID := ""
+	externalOrderID := ""
+	if fresh, err := s.repo.GetCartForPaidOrder(ctx, cartID); err == nil {
+		storeID = fresh.StoreID
+		externalOrderID = fresh.ExternalOrderID
+	}
+	_ = events.EmitInternal(ctx, s.repo.queries, events.ERPFinalizationFailed, "erp.finalization_failed:"+cartID, struct {
+		StoreID         string `json:"store_id"`
+		CartID          string `json:"cart_id"`
+		ExternalOrderID string `json:"external_order_id"`
+		Provider        string `json:"provider"`
+		Reason          string `json:"reason"`
+	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: "tiny", Reason: reason})
 }
 
 // finalizeCartERPOrderInverted é a Fase 3 do fix: cria o pedido e LANÇA o
@@ -4206,6 +4308,7 @@ func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider 
 				zap.Error(markErr),
 			)
 		}
+		s.emitERPFinalizationFailed(ctx, cartID, createErr.Error())
 		return createErr
 	}
 
@@ -4251,6 +4354,7 @@ func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider 
 					zap.Error(markErr),
 				)
 			}
+			s.emitERPFinalizationFailed(ctx, cartID, msg)
 			// O pedido existe e external_order_id está gravado: o retry entra
 			// pelo RESUME (launch tolerante) e termina o trabalho.
 			return fmt.Errorf("launching stock for order %s after fallback: %w", orderID, retryErr)
@@ -4261,6 +4365,7 @@ func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider 
 				zap.Error(markErr),
 			)
 		}
+		s.emitERPOrderFinalized(ctx, storeID, cartID)
 		return nil
 	}
 
@@ -4278,6 +4383,7 @@ func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider 
 			zap.Error(markErr),
 		)
 	}
+	s.emitERPOrderFinalized(ctx, storeID, cartID)
 	logger.From(ctx, s.logger).Info("inverted ERP finalisation completed",
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", orderID),
@@ -4461,6 +4567,29 @@ func (s *Service) ApplyMelhorEnvioWebhook(ctx context.Context, in ApplyMelhorEnv
 		Source:      "webhook",
 	}}); err != nil {
 		return fmt.Errorf("inserting tracking event: %w", err)
+	}
+
+	// Group H fact (best-effort): carrier-level status transition from a ME
+	// webhook (posted/in_transit/out_for_delivery/returned/etc). Dedup by
+	// shipment + normalised status so redelivered webhooks collapse per state.
+	_ = events.EmitInternal(ctx, s.repo.queries, events.ShipmentStatusUpdated, "shipment.status_updated:"+shipment.ID+":"+string(normalised), struct {
+		StoreID      string `json:"store_id"`
+		ShipmentID   string `json:"shipment_id"`
+		OrderID      string `json:"order_id"`
+		Provider     string `json:"provider"`
+		Status       string `json:"status"`
+		TrackingCode string `json:"tracking_code"`
+	}{StoreID: in.StoreID, ShipmentID: shipment.ID, OrderID: shipment.OrderID, Provider: "melhor_envio", Status: string(normalised), TrackingCode: in.TrackingCode})
+
+	// Group H fact (best-effort): delivery confirmed. Dedup by shipment id.
+	if normalised == providers.TrackingStatusDelivered {
+		_ = events.EmitInternal(ctx, s.repo.queries, events.DeliveryConfirmed, "shipment.delivered:"+shipment.ID, struct {
+			StoreID      string `json:"store_id"`
+			ShipmentID   string `json:"shipment_id"`
+			OrderID      string `json:"order_id"`
+			Provider     string `json:"provider"`
+			TrackingCode string `json:"tracking_code"`
+		}{StoreID: in.StoreID, ShipmentID: shipment.ID, OrderID: shipment.OrderID, Provider: "melhor_envio", TrackingCode: in.TrackingCode})
 	}
 
 	// Customer-facing notification on first dispatch — same hook the manual
@@ -6278,6 +6407,16 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 	if err := s.repo.UpdateCartExternalOrderID(ctx, cart.ID, result.OrderID); err != nil {
 		return fmt.Errorf("saving external order ID: %w", err)
 	}
+
+	// Group G fact (best-effort): the order now exists in the ERP. This is the
+	// single point that creates it (both legacy and Design C conversion paths
+	// funnel through here). Dedup by the ERP external order id.
+	_ = events.EmitInternal(ctx, s.repo.queries, events.ERPOrderCreated, "erp.order_created:"+result.OrderID, struct {
+		StoreID         string `json:"store_id"`
+		CartID          string `json:"cart_id"`
+		ExternalOrderID string `json:"external_order_id"`
+		Provider        string `json:"provider"`
+	}{StoreID: storeID, CartID: cart.ID, ExternalOrderID: result.OrderID, Provider: "tiny"})
 
 	// Launch stock (permanent decrement). O fluxo invertido (Fase 3) passa
 	// launchStock=false e orquestra o launch no caller, com fallback próprio.

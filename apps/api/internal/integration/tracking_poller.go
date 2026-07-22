@@ -7,6 +7,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/logger"
 )
@@ -154,9 +155,9 @@ func (w *TrackingPoller) pollShipment(ctx context.Context, providerName provider
 
 	// Persist new events. InsertTrackingEvents dedupes against
 	// (shipment_id, event_at, raw_code) — re-polling is safe.
-	events := make([]TrackingEventInput, 0, len(result.Events))
+	trackingEvents := make([]TrackingEventInput, 0, len(result.Events))
 	for _, ev := range result.Events {
-		events = append(events, TrackingEventInput{
+		trackingEvents = append(trackingEvents, TrackingEventInput{
 			Status:      string(ev.Status),
 			RawCode:     ev.RawCode,
 			RawName:     ev.RawName,
@@ -165,8 +166,8 @@ func (w *TrackingPoller) pollShipment(ctx context.Context, providerName provider
 			Source:      "poll",
 		})
 	}
-	if len(events) > 0 {
-		if err := w.service.repo.InsertTrackingEvents(ctx, sh.ID, events); err != nil {
+	if len(trackingEvents) > 0 {
+		if err := w.service.repo.InsertTrackingEvents(ctx, sh.ID, trackingEvents); err != nil {
 			logger.From(ctx, w.logger).Warn("failed to persist tracking events",
 				zap.String("shipment_id", sh.ID),
 				zap.Error(err),
@@ -191,12 +192,31 @@ func (w *TrackingPoller) pollShipment(ctx context.Context, providerName provider
 				zap.Error(err),
 			)
 		}
+		// Group H fact (best-effort): carrier status advanced on a poll. Only
+		// emitted on a real change (guard above). Dedup by shipment + status.
+		_ = events.EmitInternal(ctx, w.service.repo.queries, events.ShipmentStatusUpdated, "shipment.status_updated:"+sh.ID+":"+currentStatus, struct {
+			StoreID      string `json:"store_id"`
+			ShipmentID   string `json:"shipment_id"`
+			OrderID      string `json:"order_id"`
+			Provider     string `json:"provider"`
+			Status       string `json:"status"`
+			TrackingCode string `json:"tracking_code"`
+		}{StoreID: sh.StoreID, ShipmentID: sh.ID, OrderID: sh.OrderID, Provider: string(providerName), Status: currentStatus, TrackingCode: sh.TrackingCode})
 	}
 
 	// Fire the delivered hook when the carrier reports terminal delivery.
 	// postcheckoutHook handles its own idempotency (one delivered event per
 	// cart), so re-polling after the first hit is a no-op.
 	if result.CurrentStatus == providers.TrackingStatusDelivered && w.service.postCheckoutHook != nil {
+		// Group H fact (best-effort): delivery confirmed via poll. Dedup by
+		// shipment id.
+		_ = events.EmitInternal(ctx, w.service.repo.queries, events.DeliveryConfirmed, "shipment.delivered:"+sh.ID, struct {
+			StoreID      string `json:"store_id"`
+			ShipmentID   string `json:"shipment_id"`
+			OrderID      string `json:"order_id"`
+			Provider     string `json:"provider"`
+			TrackingCode string `json:"tracking_code"`
+		}{StoreID: sh.StoreID, ShipmentID: sh.ID, OrderID: sh.OrderID, Provider: string(providerName), TrackingCode: sh.TrackingCode})
 		w.service.postCheckoutHook.OnDelivered(ctx, sh.OrderID, "system")
 	}
 }

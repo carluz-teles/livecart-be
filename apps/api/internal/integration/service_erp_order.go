@@ -38,6 +38,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/logger"
 )
@@ -162,6 +163,15 @@ func (s *Service) RefundConvertedCartOrder(ctx context.Context, cartID, storeID 
 			zap.Error(err),
 		)
 	}
+	// Group G fact (best-effort): a confirmed order was cancelled on refund.
+	// Dedup by external order id; the state guard makes this fire once.
+	_ = events.EmitInternal(ctx, s.repo.queries, events.ERPOrderCancelled, "erp.order_cancelled:"+st.ExternalOrderID, struct {
+		StoreID         string `json:"store_id"`
+		CartID          string `json:"cart_id"`
+		ExternalOrderID string `json:"external_order_id"`
+		Provider        string `json:"provider"`
+		Reason          string `json:"reason"`
+	}{StoreID: storeID, CartID: cartID, ExternalOrderID: st.ExternalOrderID, Provider: "tiny", Reason: "refund"})
 	logger.From(ctx, s.logger).Info("refunded ERP order cancelled and stock returned",
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", st.ExternalOrderID),
@@ -304,6 +314,15 @@ func (s *Service) EnsureERPOrderForCart(ctx context.Context, cartID, storeID str
 	if !won {
 		return nil // outra iniciação converteu/está convertendo
 	}
+
+	// Group G fact (best-effort): the cart entered the ERP order state machine
+	// (Design C conversion claimed). Dedup by cart — the CAS makes this fire
+	// exactly once per cart conversion.
+	_ = events.EmitInternal(ctx, s.repo.queries, events.ERPOrderInitiated, "erp.order_initiated:"+cartID, struct {
+		StoreID  string `json:"store_id"`
+		CartID   string `json:"cart_id"`
+		Provider string `json:"provider"`
+	}{StoreID: storeID, CartID: cartID, Provider: "tiny"})
 
 	cart, err := s.repo.GetCartForPaidOrder(ctx, cartID)
 	if err != nil {
@@ -649,6 +668,14 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 			zap.Error(markErr),
 		)
 	}
+	// Group G fact (best-effort): Design C confirm reached the terminal state
+	// (order approved, situação 3). Dedup by cart.
+	_ = events.EmitInternal(ctx, s.repo.queries, events.ERPOrderFinalized, "erp.order_finalized:"+cartID, struct {
+		StoreID         string `json:"store_id"`
+		CartID          string `json:"cart_id"`
+		ExternalOrderID string `json:"external_order_id"`
+		Provider        string `json:"provider"`
+	}{StoreID: storeID, CartID: cartID, ExternalOrderID: fresh.ExternalOrderID, Provider: "tiny"})
 	logger.From(ctx, s.logger).Info("ERP order payment confirmed — two PUTs, zero stock movement",
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", fresh.ExternalOrderID),
@@ -704,6 +731,15 @@ func (s *Service) CancelERPOrderForCart(ctx context.Context, cartID, storeID str
 	if _, err := s.repo.TransitionCartERPOrderState(ctx, cartID, st.State, erpOrderStateCancelled); err != nil {
 		return fmt.Errorf("transitioning cart to cancelled: %w", err)
 	}
+	// Group G fact (best-effort): the order-as-reservation was cancelled (cart
+	// expiry / pre-payment cancel). Dedup by external order id.
+	_ = events.EmitInternal(ctx, s.repo.queries, events.ERPOrderCancelled, "erp.order_cancelled:"+st.ExternalOrderID, struct {
+		StoreID         string `json:"store_id"`
+		CartID          string `json:"cart_id"`
+		ExternalOrderID string `json:"external_order_id"`
+		Provider        string `json:"provider"`
+		Reason          string `json:"reason"`
+	}{StoreID: storeID, CartID: cartID, ExternalOrderID: st.ExternalOrderID, Provider: "tiny", Reason: "cancel"})
 	logger.From(ctx, s.logger).Info("ERP order cancelled and stock returned",
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", st.ExternalOrderID),

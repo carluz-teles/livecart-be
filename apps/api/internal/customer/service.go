@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/customer/domain"
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
 	"livecart/apps/api/lib/query"
@@ -53,6 +54,15 @@ func (s *Service) Upsert(ctx context.Context, input UpsertCustomerInput) (*domai
 	if err != nil {
 		return nil, fmt.Errorf("upserting customer: %w", err)
 	}
+
+	// Group K: customer.upserted fact (best-effort, observability only).
+	// Keyed on customer_id so the fact is emitted once per customer even though
+	// Upsert runs on every cart touch.
+	_ = events.EmitInternal(ctx, s.repo.queries, events.CustomerUpserted,
+		"customer.upserted:"+cust.ID().String(), struct {
+			CustomerID string `json:"customer_id"`
+			StoreID    string `json:"store_id"`
+		}{CustomerID: cust.ID().String(), StoreID: input.StoreID.String()})
 
 	logger.From(ctx, s.logger).Debug("customer upserted",
 		zap.String("customerId", cust.ID().String()),

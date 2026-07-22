@@ -12,7 +12,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/coupon/domain"
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
 )
@@ -26,6 +28,12 @@ type Service struct {
 func NewService(repo *Repository, pool *pgxpool.Pool, logger *zap.Logger) *Service {
 	return &Service{repo: repo, pool: pool, logger: logger}
 }
+
+// eventQueries builds a pool-scoped *sqlc.Queries for emitting Group K facts.
+// The coupon Repository speaks raw pgx, so we mint the queries handle from the
+// same pool. Emits are best-effort (observability only) and run after the
+// state transition has committed, so a plain pool write is fine here.
+func (s *Service) eventQueries() *sqlc.Queries { return sqlc.New(s.pool) }
 
 // List returns every coupon for the event after enforcing tenancy: the
 // event must belong to the caller's store. We do this check on every
@@ -89,6 +97,15 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Coupon, e
 		}
 		return nil, err
 	}
+
+	// Group K: coupon.created fact (best-effort, observability only).
+	_ = events.EmitInternal(ctx, s.eventQueries(), events.CouponCreated,
+		"coupon.created:"+created.ID(), struct {
+			CouponID string `json:"coupon_id"`
+			EventID  string `json:"event_id"`
+			Code     string `json:"code"`
+		}{CouponID: created.ID(), EventID: created.EventID(), Code: created.Code()})
+
 	return created, nil
 }
 
@@ -141,6 +158,16 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (*domain.Coupon, e
 	if updated == nil {
 		return nil, httpx.ErrNotFound("coupon not found")
 	}
+
+	// Group K: coupon.updated fact (best-effort, observability only). The dedup
+	// key folds in updated_at so each distinct edit is a distinct event while a
+	// retried request collapses.
+	_ = events.EmitInternal(ctx, s.eventQueries(), events.CouponUpdated,
+		fmt.Sprintf("coupon.updated:%s:%d", updated.ID(), updated.UpdatedAt().UnixNano()), struct {
+			CouponID string `json:"coupon_id"`
+			EventID  string `json:"event_id"`
+		}{CouponID: updated.ID(), EventID: updated.EventID()})
+
 	return updated, nil
 }
 
@@ -163,6 +190,14 @@ func (s *Service) Delete(ctx context.Context, id, eventID, storeID string) error
 	if !ok {
 		return httpx.ErrNotFound("coupon not found")
 	}
+
+	// Group K: coupon.deleted fact (best-effort, observability only).
+	_ = events.EmitInternal(ctx, s.eventQueries(), events.CouponDeleted,
+		"coupon.deleted:"+id, struct {
+			CouponID string `json:"coupon_id"`
+			EventID  string `json:"event_id"`
+		}{CouponID: id, EventID: eventID})
+
 	return nil
 }
 
@@ -291,6 +326,14 @@ func (s *Service) ApplyToCart(
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 
+	// Group K: coupon.applied fact (best-effort, observability only).
+	_ = events.EmitInternal(ctx, s.eventQueries(), events.CouponApplied,
+		"coupon.applied:"+cart.CartID+":"+c.ID(), struct {
+			CouponID string `json:"coupon_id"`
+			CartID   string `json:"cart_id"`
+			EventID  string `json:"event_id"`
+		}{CouponID: c.ID(), CartID: cart.CartID, EventID: cart.EventID})
+
 	return &ApplyResult{
 		Code:              c.Code(),
 		Type:              c.Type(),
@@ -359,7 +402,19 @@ func (s *Service) RemoveFromCart(ctx context.Context, cartToken string) error {
 		return err
 	}
 
-	return tx.Commit(ctx)
+	removedCouponID := *cart.CouponID
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+
+	// Group K: coupon.removed fact (best-effort, observability only).
+	_ = events.EmitInternal(ctx, s.eventQueries(), events.CouponRemoved,
+		"coupon.removed:"+cart.CartID+":"+removedCouponID, struct {
+			CouponID string `json:"coupon_id"`
+			CartID   string `json:"cart_id"`
+		}{CouponID: removedCouponID, CartID: cart.CartID})
+
+	return nil
 }
 
 // =============================================================================
@@ -565,6 +620,16 @@ func (s *Service) expireOne(ctx context.Context, row StaleRow) (bool, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit: %w", err)
 	}
+
+	// Group K: coupon.redemption_expired fact — one per expired row
+	// (best-effort, observability only).
+	_ = events.EmitInternal(ctx, s.eventQueries(), events.CouponRedemptionExpired,
+		"coupon.redemption_expired:"+row.RedemptionID, struct {
+			RedemptionID string `json:"redemption_id"`
+			CouponID     string `json:"coupon_id"`
+			CartID       string `json:"cart_id"`
+		}{RedemptionID: row.RedemptionID, CouponID: row.CouponID, CartID: row.CartID})
+
 	return true, nil
 }
 
@@ -592,7 +657,19 @@ func (s *Service) ConfirmRedemption(ctx context.Context, cartID string) error {
 		// the same cart, this keeps us idempotent.
 		return nil
 	}
-	return s.repo.MarkRedemptionConfirmed(ctx, r.ID)
+	if err := s.repo.MarkRedemptionConfirmed(ctx, r.ID); err != nil {
+		return err
+	}
+
+	// Group K: coupon.confirmed fact (best-effort, observability only).
+	_ = events.EmitInternal(ctx, s.eventQueries(), events.CouponConfirmed,
+		"coupon.confirmed:"+r.ID, struct {
+			RedemptionID string `json:"redemption_id"`
+			CouponID     string `json:"coupon_id"`
+			CartID       string `json:"cart_id"`
+		}{RedemptionID: r.ID, CouponID: r.CouponID, CartID: cartID})
+
+	return nil
 }
 
 // RefundRedemption flips the redemption to 'refunded' and decrements the
@@ -624,7 +701,19 @@ func (s *Service) RefundRedemption(ctx context.Context, cartID string) error {
 	if err := s.repo.DecrementUsedCountTx(ctx, tx, r.CouponID); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+
+	// Group K: coupon.refunded fact (best-effort, observability only).
+	_ = events.EmitInternal(ctx, s.eventQueries(), events.CouponRefunded,
+		"coupon.refunded:"+r.ID, struct {
+			RedemptionID string `json:"redemption_id"`
+			CouponID     string `json:"coupon_id"`
+			CartID       string `json:"cart_id"`
+		}{RedemptionID: r.ID, CouponID: r.CouponID, CartID: cartID})
+
+	return nil
 }
 
 // computeAppliedDiscount returns the absolute discount in cents for the
