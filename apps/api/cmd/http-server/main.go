@@ -872,7 +872,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// Member routes (store-scoped)
 	memberRepo := member.NewRepository(queries)
 	memberSvc := member.NewService(memberRepo, log)
-	memberHandler := member.NewHandler(memberSvc, validate)
+	memberHandler := member.NewHandler(memberSvc)
 	memberHandler.RegisterRoutes(storeScoped)
 
 	// Invitation routes

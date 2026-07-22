@@ -8,7 +8,6 @@ import (
 	"livecart/apps/api/internal/member/domain"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
-	vo "livecart/apps/api/lib/valueobject"
 )
 
 // Ensure MembershipLookupAdapter implements httpx.MembershipLookup
@@ -26,22 +25,12 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 	}
 }
 
-// List returns all members of a store from local database
-func (s *Service) List(ctx context.Context, storeID string) ([]MemberOutput, error) {
-	members, err := s.repo.List(ctx, storeID)
-	if err != nil {
-		return nil, err
-	}
-
-	outputs := make([]MemberOutput, len(members))
-	for i, m := range members {
-		outputs[i] = toMemberOutput(m)
-	}
-
-	return outputs, nil
+// List returns all members of a store as domain entities.
+func (s *Service) List(ctx context.Context, storeID string) ([]*domain.Member, error) {
+	return s.repo.List(ctx, storeID)
 }
 
-func (s *Service) UpdateRole(ctx context.Context, input UpdateMemberRoleInput) (*MemberOutput, error) {
+func (s *Service) UpdateRole(ctx context.Context, input UpdateMemberRoleInput) (*domain.Member, error) {
 	// Get the member to update
 	member, err := s.repo.GetByID(ctx, input.StoreID, input.MemberID)
 	if err != nil {
@@ -54,31 +43,24 @@ func (s *Service) UpdateRole(ctx context.Context, input UpdateMemberRoleInput) (
 		return nil, err
 	}
 
-	// Parse the new role
-	newRole, err := vo.NewRole(input.Role)
-	if err != nil {
-		return nil, httpx.ErrUnprocessable("invalid role")
-	}
-
-	// Use domain logic to validate
-	if err := member.CanChangeRoleTo(newRole, actor); err != nil {
+	// Use domain logic to validate the transition (the Role VO was built in ToInput).
+	if err := member.CanChangeRoleTo(input.Role, actor); err != nil {
 		return nil, httpx.ErrForbidden(err.Error())
 	}
 
 	// Persist the change
-	updated, err := s.repo.UpdateRole(ctx, input.StoreID, input.MemberID, input.Role)
+	updated, err := s.repo.UpdateRole(ctx, input.StoreID, input.MemberID, input.Role.String())
 	if err != nil {
 		return nil, err
 	}
 
 	logger.From(ctx, s.logger).Info("member role updated",
 		zap.String("member_id", input.MemberID),
-		zap.String("new_role", input.Role),
+		zap.String("new_role", input.Role.String()),
 		zap.String("updated_by", input.ActorID),
 	)
 
-	output := toMemberOutput(updated)
-	return &output, nil
+	return updated, nil
 }
 
 func (s *Service) Remove(ctx context.Context, input RemoveMemberInput) error {
@@ -110,21 +92,6 @@ func (s *Service) Remove(ctx context.Context, input RemoveMemberInput) error {
 	)
 
 	return nil
-}
-
-// toMemberOutput converts a domain Member to a MemberOutput DTO.
-func toMemberOutput(m *domain.Member) MemberOutput {
-	return MemberOutput{
-		ID:        m.ID().String(),
-		UserID:    m.UserID(),
-		Email:     m.Email().String(),
-		Name:      m.Name(),
-		AvatarURL: m.AvatarURL(),
-		Role:      m.Role().String(),
-		Status:    m.Status().String(),
-		JoinedAt:  m.JoinedAt(),
-		InvitedAt: m.InvitedAt(),
-	}
 }
 
 // MemberLookupAdapter implements invitation.MemberLookup interface

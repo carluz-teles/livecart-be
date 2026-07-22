@@ -1,19 +1,17 @@
 package member
 
 import (
-	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
 	"livecart/apps/api/lib/httpx"
 )
 
 type Handler struct {
-	svc      *Service
-	validate *validator.Validate
+	svc *Service
 }
 
-func NewHandler(svc *Service, validate *validator.Validate) *Handler {
-	return &Handler{svc: svc, validate: validate}
+func NewHandler(svc *Service) *Handler {
+	return &Handler{svc: svc}
 }
 
 func (h *Handler) RegisterRoutes(r fiber.Router) {
@@ -36,29 +34,11 @@ func (h *Handler) RegisterRoutes(r fiber.Router) {
 // @Security     BearerAuth
 // @Router       /api/v1/stores/{storeId}/members [get]
 func (h *Handler) List(c *fiber.Ctx) error {
-	storeID := httpx.GetStoreID(c)
-
-	members, err := h.svc.List(c.Context(), storeID)
+	members, err := h.svc.List(c.Context(), httpx.GetStoreID(c))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-
-	resp := make([]MemberResponse, len(members))
-	for i, m := range members {
-		resp[i] = MemberResponse{
-			ID:        m.ID,
-			UserID:    m.UserID,
-			Email:     m.Email,
-			Name:      m.Name,
-			AvatarURL: m.AvatarURL,
-			Role:      m.Role,
-			Status:    m.Status,
-			JoinedAt:  m.JoinedAt,
-			InvitedAt: m.InvitedAt,
-		}
-	}
-
-	return httpx.OK(c, ListMembersResponse{Data: resp})
+	return httpx.OK(c, NewListMembersResponse(members))
 }
 
 // UpdateRole godoc
@@ -75,43 +55,23 @@ func (h *Handler) List(c *fiber.Ctx) error {
 // @Failure      401       {object}  httpx.Envelope
 // @Failure      403       {object}  httpx.Envelope
 // @Failure      404       {object}  httpx.Envelope
+// @Failure      422       {object}  httpx.ValidationEnvelope
 // @Security     BearerAuth
 // @Router       /api/v1/stores/{storeId}/members/{memberId}/role [patch]
 func (h *Handler) UpdateRole(c *fiber.Ctx) error {
-	storeID := httpx.GetStoreID(c)
-	memberID := c.Params("memberId")
-	actorID := httpx.GetStoreUserID(c) // Who is making the change
-
 	var req UpdateMemberRoleRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
 	}
-
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
-	}
-
-	member, err := h.svc.UpdateRole(c.Context(), UpdateMemberRoleInput{
-		StoreID:  storeID,
-		MemberID: memberID,
-		ActorID:  actorID,
-		Role:     req.Role,
-	})
+	input, err := req.ToInput(httpx.GetStoreID(c), c.Params("memberId"), httpx.GetStoreUserID(c))
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-
-	return httpx.OK(c, MemberResponse{
-		ID:        member.ID,
-		UserID:    member.UserID,
-		Email:     member.Email,
-		Name:      member.Name,
-		AvatarURL: member.AvatarURL,
-		Role:      member.Role,
-		Status:    member.Status,
-		JoinedAt:  member.JoinedAt,
-		InvitedAt: member.InvitedAt,
-	})
+	member, err := h.svc.UpdateRole(c.Context(), input)
+	if err != nil {
+		return err
+	}
+	return httpx.OK(c, NewMemberResponse(member))
 }
 
 // Remove godoc
@@ -123,25 +83,19 @@ func (h *Handler) UpdateRole(c *fiber.Ctx) error {
 // @Param        storeId   path  string  true  "Store ID"
 // @Param        memberId  path  string  true  "Member ID"
 // @Success      204
-// @Failure      400       {object}  httpx.Envelope
 // @Failure      401       {object}  httpx.Envelope
 // @Failure      403       {object}  httpx.Envelope
 // @Failure      404       {object}  httpx.Envelope
 // @Security     BearerAuth
 // @Router       /api/v1/stores/{storeId}/members/{memberId} [delete]
 func (h *Handler) Remove(c *fiber.Ctx) error {
-	storeID := httpx.GetStoreID(c)
-	memberID := c.Params("memberId")
-	actorID := httpx.GetStoreUserID(c) // Who is removing
-
 	err := h.svc.Remove(c.Context(), RemoveMemberInput{
-		StoreID:  storeID,
-		MemberID: memberID,
-		ActorID:  actorID,
+		StoreID:  httpx.GetStoreID(c),
+		MemberID: c.Params("memberId"),
+		ActorID:  httpx.GetStoreUserID(c),
 	})
 	if err != nil {
-		return httpx.HandleServiceError(c, err)
+		return err
 	}
-
 	return httpx.NoContent(c)
 }
