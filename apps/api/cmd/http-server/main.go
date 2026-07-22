@@ -925,6 +925,48 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			}
 			return integrationSvc.ProcessInstagramComment(ctx, input)
 		})
+
+		// ETA-based cart expiry: schedule a cart.expire task at the cart's
+		// expires_at (asynq ProcessAt) so it expires on the second, with the
+		// 5-min sweep kept as a safety net. cart.created / cart.reopened are
+		// registered HERE (not in the default logEvent registry) with a handler
+		// that logs AND arms the timer — double registration would panic asynq.
+		integrationSvc.SetCartExpiryScheduler(cartExpiryScheduler{client: eventsClient})
+		armCartExpiry := func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				CartID string `json:"cart_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" {
+				return asynq.SkipRetry
+			}
+			logger.From(ctx, log).Info("event observed",
+				zap.String("event", string(env.Name)),
+				zap.String("event_id", env.EventID),
+			)
+			return integrationSvc.ScheduleExpiry(ctx, p.CartID)
+		}
+		eventsServer.Register(events.CartCreated, armCartExpiry)
+		eventsServer.Register(events.CartReopened, armCartExpiry)
+
+		// The scheduled command itself: run the guarded expiry, or re-arm if the
+		// window was pushed out (waitlist promotion) after the task was armed.
+		eventsServer.Register(events.CartExpire, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				CartID string `json:"cart_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" {
+				return asynq.SkipRetry
+			}
+			return integrationSvc.RunScheduledExpiry(ctx, p.CartID)
+		})
 	}
 	eventsRelay := events.NewRelay(events.RelayConfig{Pool: pool, Client: eventsClient, Logger: log})
 
@@ -938,6 +980,16 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	lifecycle.add("events-relay", eventsRelay.Stop)
 
 	return app, lifecycle
+}
+
+// cartExpiryScheduler adapts the events client to integration.CartExpiryScheduler,
+// enqueueing a cart.expire ETA task keyed "cart-expire:<id>" for dedup.
+type cartExpiryScheduler struct{ client *events.Client }
+
+func (s cartExpiryScheduler) ScheduleCartExpiry(ctx context.Context, cartID string, at time.Time) error {
+	return s.client.Schedule(ctx, at, events.CartExpire, "cart-expire:"+cartID, struct {
+		CartID string `json:"cart_id"`
+	}{CartID: cartID})
 }
 
 // liveNotifierAdapter bridges integration.InstagramNotifier (concrete impl)

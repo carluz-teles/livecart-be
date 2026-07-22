@@ -110,6 +110,7 @@ type Service struct {
 	storage             *storage.S3Client
 	billingGate         BillingGate
 	stock               *StockReservations
+	expiryScheduler     CartExpiryScheduler
 	logger              *zap.Logger
 
 	// erpProviderFactory lets the finalisation state-machine tests inject a
@@ -6448,6 +6449,67 @@ func (s *Service) SweepExpiredCarts(ctx context.Context, limit int32) {
 //  3. ERP (best-effort, fora do tx): design C cancela o pedido (situação 2 +
 //     estorno); senão reverte as reservas saída-manual POR CART.
 //  4. Promove a waitlist de cada produto liberado (pós-commit, fire-and-forget).
+//
+// CartExpiryScheduler arms an ETA task that fires a cart's expiry at its
+// expires_at, so expiration is precise instead of waiting on the 5-min sweep.
+// Implemented over the asynq client in main.go (events package must not import
+// domain packages). The sweep remains as a safety net for any lost task.
+type CartExpiryScheduler interface {
+	ScheduleCartExpiry(ctx context.Context, cartID string, at time.Time) error
+}
+
+// SetCartExpiryScheduler wires the ETA scheduler (optional — when unset, only
+// the sweep expires carts, preserving today's behaviour).
+func (s *Service) SetCartExpiryScheduler(sch CartExpiryScheduler) { s.expiryScheduler = sch }
+
+// ScheduleExpiry arms (or re-arms) the cart.expire ETA task for a cart's current
+// expires_at. Best-effort: a failure or a lost task is caught by the sweep. Skips
+// carts that are already terminal or have no window.
+func (s *Service) ScheduleExpiry(ctx context.Context, cartID string) error {
+	if s.expiryScheduler == nil {
+		return nil
+	}
+	snap, err := s.repo.GetCartExpirySnapshot(ctx, cartID)
+	if err != nil || snap == nil {
+		return err
+	}
+	if snap.ExpiresAt == nil || cartExpiryTerminal(snap) {
+		return nil
+	}
+	return s.expiryScheduler.ScheduleCartExpiry(ctx, cartID, *snap.ExpiresAt)
+}
+
+// RunScheduledExpiry is the cart.expire task handler. It is guard-first against
+// the window-extension case (waitlist promotion pushes expires_at out): if the
+// cart is now terminal it is a no-op; if the window moved into the future it
+// re-arms instead of expiring; otherwise it runs the same guarded ExpireCart as
+// the sweep. Idempotent — safe under asynq at-least-once redelivery.
+func (s *Service) RunScheduledExpiry(ctx context.Context, cartID string) error {
+	snap, err := s.repo.GetCartExpirySnapshot(ctx, cartID)
+	if err != nil {
+		return err
+	}
+	if snap == nil || snap.ExpiresAt == nil || cartExpiryTerminal(snap) {
+		return nil
+	}
+	if snap.ExpiresAt.After(time.Now().UTC()) {
+		// Window extended after the task was armed — re-arm for the new time.
+		if s.expiryScheduler != nil {
+			return s.expiryScheduler.ScheduleCartExpiry(ctx, cartID, *snap.ExpiresAt)
+		}
+		return nil
+	}
+	s.ExpireCart(ctx, cartID, snap.StoreID)
+	return nil
+}
+
+// cartExpiryTerminal reports whether a cart is already in a state where expiry
+// must not run (paid/refunded or already expired/cancelled).
+func cartExpiryTerminal(s *CartExpirySnapshot) bool {
+	return s.Status == "expired" || s.Status == "cancelled" ||
+		s.PaymentStatus == "paid" || s.PaymentStatus == "refunded"
+}
+
 func (s *Service) ExpireCart(ctx context.Context, cartID, storeID string) {
 	ctx = logger.WithStore(ctx, storeID, "")
 	release, acquired, err := s.repo.AcquireCartFinalisationLock(ctx, cartID)

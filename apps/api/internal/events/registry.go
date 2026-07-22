@@ -25,12 +25,14 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(SessionLive), logEvent(log))
 	mux.HandleFunc(string(SessionEnded), logEvent(log))
 	mux.HandleFunc(string(PostWindowClosed), logEvent(log))
-	mux.HandleFunc(string(CartCreated), logEvent(log))
+	// CartCreated and CartReopened are registered by the composition root
+	// (main.newApp) with a handler that logs AND arms the cart.expire ETA timer,
+	// so they are intentionally NOT registered here (asynq panics on a duplicate
+	// pattern).
 	mux.HandleFunc(string(CartItemAdded), logEvent(log))
 	mux.HandleFunc(string(CartItemQtyChanged), logEvent(log))
 	mux.HandleFunc(string(CartItemRemoved), logEvent(log))
 	mux.HandleFunc(string(CartCheckoutArmed), logEvent(log))
-	mux.HandleFunc(string(CartReopened), logEvent(log))
 	mux.HandleFunc(string(CartCancelled), logEvent(log))
 	mux.HandleFunc(string(CartExpired), logEvent(log))
 

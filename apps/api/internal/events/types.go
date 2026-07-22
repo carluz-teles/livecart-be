@@ -75,6 +75,12 @@ const (
 	OrderRefunded         Name = "order.refunded"
 	OrderShipped          Name = "order.shipped"
 	OrderDelivered        Name = "order.delivered"
+
+	// CartExpire is an internal SCHEDULED COMMAND (not a domain fact): enqueued
+	// with asynq.ProcessAt(expires_at) so the cart expires exactly at its window
+	// instead of waiting for the 5-min sweep. Its handler runs the same guarded
+	// ExpireCart; the sweep stays as a safety net for any lost task.
+	CartExpire Name = "cart.expire"
 )
 
 // Source identifies where an event was dispatched from. It is metadata on the

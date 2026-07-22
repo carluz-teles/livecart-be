@@ -2157,6 +2157,49 @@ func (r *Repository) GetCartByID(ctx context.Context, cartID string) (*CartRow, 
 	}, nil
 }
 
+// CartExpirySnapshot is the slim view the scheduled cart.expire handler needs:
+// the store (for ExpireCart), the lifecycle status and the current expires_at.
+// The window matters because ExpireCartAndReleaseStock's guard does NOT check
+// expires_at (the sweep pre-filters by it), so a scheduled task firing on a cart
+// whose window was extended must NOT expire it prematurely.
+type CartExpirySnapshot struct {
+	StoreID       string
+	Status        string
+	PaymentStatus string
+	ExpiresAt     *time.Time
+}
+
+// GetCartExpirySnapshot loads the expiry-relevant fields for a cart, with the
+// store resolved from the event. Returns (nil, nil) when the cart is gone.
+func (r *Repository) GetCartExpirySnapshot(ctx context.Context, cartID string) (*CartExpirySnapshot, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	cart, err := r.queries.GetCartByID(ctx, cID)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("getting cart for expiry snapshot: %w", err)
+	}
+	event, err := r.queries.GetLiveEventByID(ctx, cart.EventID)
+	if err != nil {
+		return nil, fmt.Errorf("getting live event for expiry snapshot: %w", err)
+	}
+	var expiresAt *time.Time
+	if cart.ExpiresAt.Valid {
+		t := cart.ExpiresAt.Time
+		expiresAt = &t
+	}
+	return &CartExpirySnapshot{
+		StoreID:       uuidToString(event.StoreID),
+		Status:        cart.Status,
+		PaymentStatus: cart.PaymentStatus.String,
+		ExpiresAt:     expiresAt,
+	}, nil
+}
+
 // GetCartForPaidOrder loads a cart by ID with customer/shipping data plus the
 // store ID resolved from the event, so the paid-order ERP flow has everything
 // it needs without an extra join.

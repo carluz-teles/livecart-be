@@ -3,7 +3,9 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/hibiken/asynq"
 	"go.opentelemetry.io/otel/trace"
@@ -61,6 +63,44 @@ func (c *Client) Enqueue(ctx context.Context, env Envelope, opts ...asynq.Option
 		return nil, fmt.Errorf("enqueuing event %s: %w", env.Name, err)
 	}
 	return info, nil
+}
+
+// Schedule enqueues an internal command task to run at processAt. asynq stores
+// it in a per-queue scheduled sorted set (scored by the process-at time) and its
+// scheduler forwards it to the ready queue when due — precise ETA execution, not
+// the lossy Redis key-TTL / keyspace-notification pattern.
+//
+// taskID makes scheduling idempotent: a duplicate enqueue while a task with the
+// same id is still pending returns ErrTaskIDConflict, which we swallow ("already
+// armed"). A task that already ran and completed frees its id, so re-arming
+// (self-reschedule on window extension) works.
+func (c *Client) Schedule(ctx context.Context, processAt time.Time, name Name, taskID string, payload any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling %s command payload: %w", name, err)
+	}
+	env := Envelope{Name: name, Source: SourceInternal, Payload: body}
+	if sc := trace.SpanContextFromContext(ctx); sc.HasTraceID() {
+		env.TraceID = sc.TraceID().String()
+		env.SpanID = sc.SpanID().String()
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("marshaling %s command envelope: %w", name, err)
+	}
+	_, err = c.inner.EnqueueContext(ctx, asynq.NewTask(string(name), data),
+		asynq.ProcessAt(processAt.UTC()),
+		asynq.TaskID(taskID),
+		asynq.Queue(QueueNormal),
+		asynq.MaxRetry(5),
+	)
+	if errors.Is(err, asynq.ErrTaskIDConflict) {
+		return nil // already scheduled — the pending task will handle it
+	}
+	if err != nil {
+		return fmt.Errorf("scheduling %s at %s: %w", name, processAt.UTC().Format(time.RFC3339), err)
+	}
+	return nil
 }
 
 // Close releases the underlying Redis connection.
