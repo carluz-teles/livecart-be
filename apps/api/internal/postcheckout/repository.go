@@ -172,7 +172,30 @@ func (r *Repository) InsertOrderEvent(ctx context.Context, cartID, eventType, so
 		}
 		return false, fmt.Errorf("inserting order event: %w", err)
 	}
+
+	// Emit the canonical order.* domain event (group F) at the exact idempotency
+	// boundary: we only get here on a NEW row (ON CONFLICT swallows retries), so
+	// the event fires exactly once per (cart, transition). Best-effort — the
+	// timeline row already committed and this observability event must not fail
+	// the paid/cancelled/refunded flow (mirrors MarkWaitlistFulfilledByCart).
+	if name, ok := orderEventName[eventType]; ok {
+		_ = events.EmitInternal(ctx, r.q, name, "order."+eventType+":"+cartID, struct {
+			CartID    string `json:"cart_id"`
+			EventType string `json:"event_type"`
+			Source    string `json:"source"`
+		}{CartID: cartID, EventType: eventType, Source: source})
+	}
 	return true, nil
+}
+
+// orderEventName maps an order_events.event_type to its canonical group-F domain
+// event. Types absent here (if any) simply don't emit a domain event.
+var orderEventName = map[string]events.Name{
+	"payment_confirmed": events.OrderPaymentConfirmed,
+	"payment_cancelled": events.OrderCancelled,
+	"payment_refunded":  events.OrderRefunded,
+	"shipped":           events.OrderShipped,
+	"delivered":         events.OrderDelivered,
 }
 
 // ListOrderEvents returns the cart's timeline ordered chronologically.
