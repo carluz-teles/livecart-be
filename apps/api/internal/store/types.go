@@ -172,12 +172,20 @@ type UpdateCartSettingsRequest struct {
 }
 
 // Validate is the syntactic gate (ozzo).
+//
+// NOTE on Required + Min: ozzo skips every rule (except Required) for a zero
+// value, so `Min(n)` alone lets an omitted/zero int slip past the floor — a
+// PUT that drops expirationMinutes would persist 0, undercutting the business
+// minimum. Pairing Required with Min closes that: Required treats the value
+// int's 0 as empty and rejects it, so the floor actually holds.
 func (r UpdateCartSettingsRequest) Validate() error {
 	return validation.ValidateStruct(&r,
-		validation.Field(&r.ExpirationMinutes, validation.Min(5), validation.Max(1440)),
-		validation.Field(&r.MaxQuantityPerItem, validation.Min(1)),
+		validation.Field(&r.ExpirationMinutes, validation.Required, validation.Min(5), validation.Max(1440)),
+		validation.Field(&r.MaxQuantityPerItem, validation.Required, validation.Min(1)),
 		validation.Field(&r.MessageCooldownSeconds, validation.Min(0), validation.Max(300)),
-		validation.Field(&r.ExpirationReminderMinutes, validation.Min(1), validation.Max(60)),
+		// Only meaningful when the reminder toggle is on; required only then.
+		validation.Field(&r.ExpirationReminderMinutes,
+			validation.When(r.SendExpirationReminder, validation.Required, validation.Min(1), validation.Max(60))),
 	)
 }
 
