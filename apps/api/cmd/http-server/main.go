@@ -289,9 +289,10 @@ func pgTextFromString(s string) pgtype.Text {
 func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate *validator.Validate, clerkClient *clerk.Client, emailClient *email.Client) (*fiber.App, *appLifecycle) {
 	lifecycle := &appLifecycle{log: log}
 	app := fiber.New(fiber.Config{
-		ErrorHandler: func(c *fiber.Ctx, err error) error {
-			return httpx.HandleServiceError(c, err)
-		},
+		// Single error handler: handlers `return err` and this renders the
+		// FE-facing response (ozzo validation.Errors → 422 {error, fields};
+		// ServiceError/fiber.Error/unexpected → HandleServiceError).
+		ErrorHandler: httpx.ErrorHandler,
 		// Reels can be up to 300MB; stream the request body to disk instead of
 		// buffering it in memory.
 		BodyLimit:         320 * 1024 * 1024,
