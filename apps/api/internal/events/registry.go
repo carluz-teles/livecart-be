@@ -41,6 +41,23 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(WaitlistNotified), logEvent(log))
 	mux.HandleFunc(string(WaitlistFulfilled), logEvent(log))
 	mux.HandleFunc(string(WaitlistExpired), logEvent(log))
+
+	// Groups E/F — payment & order timeline. Observability-only for now;
+	// notifications/GMV stay on their existing guarded paths until later phases
+	// move them behind these consumers.
+	mux.HandleFunc(string(CheckoutInitiated), logEvent(log))
+	mux.HandleFunc(string(PixGenerated), logEvent(log))
+	mux.HandleFunc(string(PixExpired), logEvent(log))
+	mux.HandleFunc(string(PaymentProcessing), logEvent(log))
+	mux.HandleFunc(string(PaymentSucceeded), logEvent(log))
+	mux.HandleFunc(string(PaymentFailed), logEvent(log))
+	mux.HandleFunc(string(PaymentRefunded), logEvent(log))
+	mux.HandleFunc(string(PaymentChargeback), logEvent(log))
+	mux.HandleFunc(string(OrderPaymentConfirmed), logEvent(log))
+	mux.HandleFunc(string(OrderCancelled), logEvent(log))
+	mux.HandleFunc(string(OrderRefunded), logEvent(log))
+	mux.HandleFunc(string(OrderShipped), logEvent(log))
+	mux.HandleFunc(string(OrderDelivered), logEvent(log))
 }
 
 // logEvent is a generic observability consumer: it records that a canonical

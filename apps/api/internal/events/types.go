@@ -56,6 +56,25 @@ const (
 	WaitlistNotified  Name = "waitlist.notified"
 	WaitlistFulfilled Name = "waitlist.fulfilled"
 	WaitlistExpired   Name = "waitlist.expired"
+
+	// Checkout & payment (group E). The provider (pagarme/mercadopago/stripe)
+	// travels as Envelope.Source; these are the canonical payment facts.
+	CheckoutInitiated Name = "checkout.initiated"
+	PixGenerated      Name = "pix.generated"
+	PixExpired        Name = "pix.expired"
+	PaymentProcessing Name = "payment.processing"
+	PaymentSucceeded  Name = "payment.succeeded"
+	PaymentFailed     Name = "payment.failed"
+	PaymentRefunded   Name = "payment.refunded"
+	PaymentChargeback Name = "payment.chargeback"
+
+	// Order timeline (group F). One-to-one with the order_events rows, so the
+	// UNIQUE(cart_id, event_type) guard makes emission idempotent by construction.
+	OrderPaymentConfirmed Name = "order.payment_confirmed"
+	OrderCancelled        Name = "order.cancelled"
+	OrderRefunded         Name = "order.refunded"
+	OrderShipped          Name = "order.shipped"
+	OrderDelivered        Name = "order.delivered"
 )
 
 // Source identifies where an event was dispatched from. It is metadata on the
