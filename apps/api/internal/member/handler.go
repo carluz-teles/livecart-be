@@ -34,7 +34,7 @@ func (h *Handler) RegisterRoutes(r fiber.Router) {
 // @Security     BearerAuth
 // @Router       /api/v1/stores/{storeId}/members [get]
 func (h *Handler) List(c *fiber.Ctx) error {
-	members, err := h.svc.List(c.Context(), httpx.GetStoreID(c))
+	members, err := h.svc.List(c.UserContext(), httpx.GetStoreID(c))
 	if err != nil {
 		return err
 	}
@@ -67,7 +67,7 @@ func (h *Handler) UpdateRole(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	member, err := h.svc.UpdateRole(c.Context(), input)
+	member, err := h.svc.UpdateRole(c.UserContext(), input)
 	if err != nil {
 		return err
 	}
@@ -89,7 +89,7 @@ func (h *Handler) UpdateRole(c *fiber.Ctx) error {
 // @Security     BearerAuth
 // @Router       /api/v1/stores/{storeId}/members/{memberId} [delete]
 func (h *Handler) Remove(c *fiber.Ctx) error {
-	err := h.svc.Remove(c.Context(), RemoveMemberInput{
+	err := h.svc.Remove(c.UserContext(), RemoveMemberInput{
 		StoreID:  httpx.GetStoreID(c),
 		MemberID: c.Params("memberId"),
 		ActorID:  httpx.GetStoreUserID(c),
