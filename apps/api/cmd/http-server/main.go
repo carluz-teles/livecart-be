@@ -989,6 +989,26 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			return liveSvc.RunScheduledEventClose(ctx, p.EventID, p.StoreID)
 		})
 	}
+
+	// Group J: trial-ending reminder ETA task (billing — not gated on the
+	// integration layer). Armed at trial_ends_at - N days in EnsureTrialSubscription;
+	// the handler no-ops if the store already converted, else logs the signal
+	// (phase 08 hooks the merchant notification there).
+	billingSvc.SetTrialReminderScheduler(trialReminderScheduler{client: eventsClient})
+	eventsServer.Register(events.TrialEndingSoon, func(ctx context.Context, t *asynq.Task) error {
+		var env events.Envelope
+		if err := json.Unmarshal(t.Payload(), &env); err != nil {
+			return asynq.SkipRetry
+		}
+		var p struct {
+			StoreID string `json:"store_id"`
+		}
+		if err := json.Unmarshal(env.Payload, &p); err != nil || p.StoreID == "" {
+			return asynq.SkipRetry
+		}
+		return billingSvc.RunTrialEndingSoon(ctx, p.StoreID)
+	})
+
 	eventsRelay := events.NewRelay(events.RelayConfig{Pool: pool, Client: eventsClient, Logger: log})
 
 	if err := eventsServer.Start(); err != nil {
@@ -1022,6 +1042,16 @@ func (s eventCloseScheduler) ScheduleEventClose(ctx context.Context, eventID, st
 		EventID string `json:"event_id"`
 		StoreID string `json:"store_id"`
 	}{EventID: eventID, StoreID: storeID})
+}
+
+// trialReminderScheduler adapts the events client to billing.TrialReminderScheduler,
+// enqueueing a trial.ending_soon ETA task keyed "trial-ending:<store>" for dedup.
+type trialReminderScheduler struct{ client *events.Client }
+
+func (s trialReminderScheduler) ScheduleTrialEndingSoon(ctx context.Context, storeID string, at time.Time) error {
+	return s.client.Schedule(ctx, at, events.TrialEndingSoon, "trial-ending:"+storeID, struct {
+		StoreID string `json:"store_id"`
+	}{StoreID: storeID})
 }
 
 // liveNotifierAdapter bridges integration.InstagramNotifier (concrete impl)

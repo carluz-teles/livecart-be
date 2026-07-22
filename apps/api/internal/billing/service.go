@@ -14,17 +14,34 @@ import (
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/billing/domain"
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/logger"
 )
 
+// TrialReminderScheduler arms an ETA task (trial.ending_soon) at
+// trial_ends_at - N days, so the merchant is reminded precisely instead of
+// polled. Implemented over the asynq client in main.go (billing must not import
+// events at the client level, so this stays a local interface).
+type TrialReminderScheduler interface {
+	ScheduleTrialEndingSoon(ctx context.Context, storeID string, at time.Time) error
+}
+
+// TrialReminderLeadDays is how far before trial_ends_at the reminder fires.
+const TrialReminderLeadDays = 2
+
 // Service owns the subscription lifecycle. The local table is the access
 // source of truth; Stripe webhooks keep it in sync.
 type Service struct {
-	queries *sqlc.Queries
-	stripe  *StripeClient // nil when STRIPE_SECRET_KEY is absent (local-only trials)
-	logger  *zap.Logger
+	queries        *sqlc.Queries
+	stripe         *StripeClient // nil when STRIPE_SECRET_KEY is absent (local-only trials)
+	trialScheduler TrialReminderScheduler
+	logger         *zap.Logger
 }
+
+// SetTrialReminderScheduler wires the ETA scheduler for the trial-ending
+// reminder (optional — unset in tests / when the event pipeline is down).
+func (s *Service) SetTrialReminderScheduler(sch TrialReminderScheduler) { s.trialScheduler = sch }
 
 // NewService builds the billing service.
 func NewService(queries *sqlc.Queries, logger *zap.Logger) *Service {
@@ -57,6 +74,19 @@ func (s *Service) EnsureTrialSubscription(ctx context.Context, storeID, storeNam
 		return nil, fmt.Errorf("ensuring local trial: %w", err)
 	}
 
+	// Arm the trial-ending reminder at trial_ends_at - N days (ETA task). Dedup
+	// by store so the repeated /users/sync calls don't re-arm; skip when the
+	// reminder window is already in the past. Best-effort — no access impact.
+	if s.trialScheduler != nil && row.TrialEndsAt.Valid {
+		remindAt := row.TrialEndsAt.Time.Add(-TrialReminderLeadDays * 24 * time.Hour)
+		if remindAt.After(time.Now()) {
+			if err := s.trialScheduler.ScheduleTrialEndingSoon(ctx, storeID, remindAt); err != nil {
+				logger.From(ctx, s.logger).Warn("failed to schedule trial-ending reminder",
+					zap.String("store_id", storeID), zap.Error(err))
+			}
+		}
+	}
+
 	// Mirror on Stripe when configured and not yet linked. Failures are
 	// non-fatal: the local trial grants access and the next call retries.
 	if s.stripe != nil && !row.StripeSubscriptionID.Valid {
@@ -70,6 +100,31 @@ func (s *Service) EnsureTrialSubscription(ctx context.Context, storeID, storeNam
 
 	state := s.toState(&row)
 	return &state, nil
+}
+
+// RunTrialEndingSoon is the trial.ending_soon ETA-task handler. Guard-first: if
+// the store already converted/canceled by the time it fires, it is a no-op;
+// otherwise it is the "trial ending soon" signal (logged now; phase 08 hooks the
+// merchant reminder here). It does NOT re-emit trial.ending_soon — the scheduled
+// delivery IS the event, so re-emitting would loop.
+func (s *Service) RunTrialEndingSoon(ctx context.Context, storeID string) error {
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return nil
+	}
+	row, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
+	if err != nil {
+		return nil // subscription gone
+	}
+	ctx = logger.WithStore(ctx, storeID, "")
+	if row.Status != StatusTrialing {
+		logger.From(ctx, s.logger).Debug("trial-ending reminder skipped: no longer trialing",
+			zap.String("status", row.Status))
+		return nil
+	}
+	logger.From(ctx, s.logger).Info("trial ending soon",
+		zap.Time("trial_ends_at", row.TrialEndsAt.Time))
+	return nil
 }
 
 func (s *Service) provisionStripe(ctx context.Context, row *sqlc.Subscription, storeID, storeName, email string) error {
@@ -267,12 +322,49 @@ func (s *Service) applySubscription(ctx context.Context, sub *StripeSubscription
 
 	// Store resolvido a partir da subscription do evento — enriquece o ctx
 	// para os logs seguintes do fluxo.
-	ctx = logger.WithStore(ctx, uuidToString(row.StoreID), "")
+	storeID := uuidToString(row.StoreID)
+	ctx = logger.WithStore(ctx, storeID, "")
 	logger.From(ctx, s.logger).Info("subscription updated from stripe",
 		zap.String("status", status),
 		zap.String("plan", row.Plan),
 	)
+
+	// Group J: emit the canonical subscription lifecycle fact. Best-effort — the
+	// webhook must ACK. Dedup by (sub, status, period) so Stripe's repeated
+	// updated webhooks for the same state collapse to one downstream signal.
+	if name, ok := subscriptionEventName(status, eventType); ok {
+		_ = events.EmitInternal(ctx, s.queries, name,
+			string(name)+":"+sub.ID+":"+fmt.Sprint(sub.PeriodEnd()), struct {
+				StoreID        string `json:"store_id"`
+				SubscriptionID string `json:"subscription_id"`
+				Plan           string `json:"plan"`
+				Status         string `json:"status"`
+			}{storeID, sub.ID, row.Plan, status})
+	}
 	return nil
+}
+
+// subscriptionEventName maps the resolved local status (+ the Stripe event type)
+// to its canonical group-J event. trialing/unknown emit nothing (trial creation
+// is trial.started; a trialing webhook update is noise).
+func subscriptionEventName(status, eventType string) (events.Name, bool) {
+	if eventType == "customer.subscription.resumed" {
+		return events.SubscriptionResumed, true
+	}
+	switch status {
+	case StatusActive:
+		return events.SubscriptionActivated, true
+	case StatusPastDue:
+		return events.SubscriptionPastDue, true
+	case StatusPaused:
+		return events.SubscriptionPaused, true
+	case StatusCanceled:
+		return events.SubscriptionCanceled, true
+	case StatusUnpaid:
+		return events.SubscriptionGraceExpired, true
+	default:
+		return "", false
+	}
 }
 
 // mapStripeStatus converts Stripe statuses to our local set.
@@ -373,6 +465,14 @@ func (s *Service) CreateConversionCheckout(ctx context.Context, input CheckoutIn
 	if err != nil {
 		return "", err
 	}
+
+	// Group J: the merchant entered the conversion funnel (hosted Stripe Checkout
+	// opened). Dedup by session id — each attempt is a distinct initiation.
+	_ = events.EmitInternal(ctx, s.queries, events.ConversionInitiated, "conversion.initiated:"+session.ID, struct {
+		StoreID string `json:"store_id"`
+		Plan    string `json:"plan"`
+	}{storeID, string(plan)})
+
 	return session.URL, nil
 }
 
@@ -576,6 +676,16 @@ func (s *Service) ReportPaidGMV(ctx context.Context, storeID, cartID string, amo
 		zap.Int64("amount_cents", amountCents),
 		zap.Bool("billable", billable),
 	)
+
+	// Group J: gmv.recorded fires only on a NEW ledger row (the ErrNoRows path
+	// above is the idempotency guard), so it is exactly-once per sale.
+	_ = events.EmitInternal(ctx, s.queries, events.GMVRecorded, "gmv.recorded:"+cartID, struct {
+		StoreID     string `json:"store_id"`
+		CartID      string `json:"cart_id"`
+		AmountCents int64  `json:"amount_cents"`
+		FeeCents    int64  `json:"fee_cents"`
+		Billable    bool   `json:"billable"`
+	}{storeID, cartID, amountCents, feeCents, billable})
 }
 
 // OnCartRefunded records the refund on the ledger and reimburses the fee via
@@ -623,6 +733,16 @@ func (s *Service) OnCartRefunded(ctx context.Context, storeID, cartID string) {
 			zap.String("cart_id", cartID), zap.Error(err))
 		return
 	}
+
+	// Group J: gmv.refunded on the NEW refund_credit row (exactly-once via the
+	// ErrNoRows guard above). fee_credit_cents > 0 means the success fee is being
+	// reimbursed (billable sale); 0 for trial sales.
+	_ = events.EmitInternal(ctx, s.queries, events.GMVRefunded, "gmv.refunded:"+cartID, struct {
+		StoreID        string `json:"store_id"`
+		CartID         string `json:"cart_id"`
+		AmountCents    int64  `json:"amount_cents"`
+		FeeCreditCents int64  `json:"fee_credit_cents"`
+	}{storeID, cartID, sale.AmountCents, feeCredit})
 
 	if feeCredit > 0 && s.stripe != nil {
 		sub, err := s.queries.GetSubscriptionByStoreID(ctx, sid)

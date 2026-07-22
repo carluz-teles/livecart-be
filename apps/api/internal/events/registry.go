@@ -61,6 +61,20 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(OrderRefunded), logEvent(log))
 	mux.HandleFunc(string(OrderShipped), logEvent(log))
 	mux.HandleFunc(string(OrderDelivered), logEvent(log))
+
+	// Group J — billing/subscription facts. Observability-only for now;
+	// TrialEndingSoon is NOT here — it is a scheduled command registered by the
+	// composition root (main.newApp) with a domain handler.
+	mux.HandleFunc(string(TrialStarted), logEvent(log))
+	mux.HandleFunc(string(SubscriptionActivated), logEvent(log))
+	mux.HandleFunc(string(SubscriptionPastDue), logEvent(log))
+	mux.HandleFunc(string(SubscriptionGraceExpired), logEvent(log))
+	mux.HandleFunc(string(SubscriptionCanceled), logEvent(log))
+	mux.HandleFunc(string(SubscriptionPaused), logEvent(log))
+	mux.HandleFunc(string(SubscriptionResumed), logEvent(log))
+	mux.HandleFunc(string(ConversionInitiated), logEvent(log))
+	mux.HandleFunc(string(GMVRecorded), logEvent(log))
+	mux.HandleFunc(string(GMVRefunded), logEvent(log))
 }
 
 // logEvent is a generic observability consumer: it records that a canonical

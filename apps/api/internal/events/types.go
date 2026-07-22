@@ -87,6 +87,21 @@ const (
 	// their window end (emitting post.window_closed + event.ended) instead of
 	// waiting for the SweepEndedTimedEvents sweep, which stays as the backstop.
 	EventWindowClose Name = "event.window_close"
+
+	// Billing / subscription (group J, PRD 007). The subscription lifecycle
+	// facts are emitted from the Stripe-webhook hub (applySubscription); GMV
+	// facts from the metered-fee ledger.
+	TrialStarted             Name = "trial.started"
+	TrialEndingSoon          Name = "trial.ending_soon" // also the SCHEDULED COMMAND armed at trial_ends_at - N days
+	SubscriptionActivated    Name = "subscription.activated"
+	SubscriptionPastDue      Name = "subscription.past_due"
+	SubscriptionGraceExpired Name = "subscription.grace_expired"
+	SubscriptionCanceled     Name = "subscription.canceled"
+	SubscriptionPaused       Name = "subscription.paused"
+	SubscriptionResumed      Name = "subscription.resumed"
+	ConversionInitiated      Name = "conversion.initiated"
+	GMVRecorded              Name = "gmv.recorded"
+	GMVRefunded              Name = "gmv.refunded"
 )
 
 // Source identifies where an event was dispatched from. It is metadata on the
