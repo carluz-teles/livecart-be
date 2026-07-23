@@ -41,17 +41,11 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(WaitlistFulfilled), logEvent(log))
 	mux.HandleFunc(string(WaitlistExpired), logEvent(log))
 
-	// Groups E/F — payment & order timeline. Observability-only for now;
-	// notifications/GMV stay on their existing guarded paths until later phases
-	// move them behind these consumers. The payment facts are cart.paid /
-	// cart.refunded (fan-out anchors, registered by the composition root) and
-	// payment.failed (terminal); the old funnel/telemetry facts were deprecated.
+	// Group E — payment. The canonical facts are cart.paid / cart.refunded
+	// (fan-out anchors, registered by the composition root) and payment.failed
+	// (terminal). Order timeline (group F) is internal (order_events rows), not on
+	// the bus; the old funnel/telemetry facts were deprecated.
 	mux.HandleFunc(string(PaymentFailed), logEvent(log))
-	mux.HandleFunc(string(OrderPaymentConfirmed), logEvent(log))
-	mux.HandleFunc(string(OrderCancelled), logEvent(log))
-	mux.HandleFunc(string(OrderRefunded), logEvent(log))
-	mux.HandleFunc(string(OrderShipped), logEvent(log))
-	mux.HandleFunc(string(OrderDelivered), logEvent(log))
 
 	// Group J — billing/subscription facts. Observability-only for now;
 	// TrialEndingSoon is NOT here — it is a scheduled command registered by the

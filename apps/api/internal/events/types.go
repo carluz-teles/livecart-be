@@ -66,13 +66,11 @@ const (
 	// payment choreography made cart.paid/cart.refunded the fan-out anchors.
 	PaymentFailed Name = "payment.failed"
 
-	// Order timeline (group F). One-to-one with the order_events rows, so the
-	// UNIQUE(cart_id, event_type) guard makes emission idempotent by construction.
-	OrderPaymentConfirmed Name = "order.payment_confirmed"
-	OrderCancelled        Name = "order.cancelled"
-	OrderRefunded         Name = "order.refunded"
-	OrderShipped          Name = "order.shipped"
-	OrderDelivered        Name = "order.delivered"
+	// Order timeline (group F) is INTERNAL to the Order Service: the transitions
+	// live as order_events rows (UNIQUE(cart_id, event_type)), not as bus events.
+	// Nothing on the bus consumed them (notifications key off cart.* / shipment.*),
+	// so order.payment_confirmed/cancelled/refunded/shipped/delivered were removed
+	// from the vocabulary — InsertOrderEvent just writes the timeline row.
 
 	// CartExpire is an internal SCHEDULED COMMAND (not a domain fact): enqueued
 	// with asynq.ProcessAt(expires_at) so the cart expires exactly at its window
