@@ -941,6 +941,21 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			return integrationSvc.ProcessInstagramComment(ctx, input)
 		})
 
+		// Payment choreography L2: the payment.process command (emitted by the
+		// thin webhook dispatcher) runs the guarded reconciliation, now with
+		// asynq retry + dead-letter instead of a fire-and-forget goroutine.
+		eventsServer.Register(events.PaymentProcess, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var input integration.ProcessPaymentInput
+			if err := json.Unmarshal(env.Payload, &input); err != nil {
+				return asynq.SkipRetry
+			}
+			return integrationSvc.ProcessPaymentNotification(ctx, input)
+		})
+
 		// ETA-based cart expiry: schedule a cart.expire task at the cart's
 		// expires_at (asynq ProcessAt) so it expires on the second, with the
 		// 5-min sweep kept as a safety net. The window is set at checkout-arm

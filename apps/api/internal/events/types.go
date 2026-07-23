@@ -82,6 +82,14 @@ const (
 	// ExpireCart; the sweep stays as a safety net for any lost task.
 	CartExpire Name = "cart.expire"
 
+	// PaymentProcess is a COMMAND (L1→L2 inversion): the payment webhook is a thin
+	// dispatcher that emits it to the outbox; the consumer runs the guarded
+	// ProcessPaymentNotification with retry + DLQ instead of a detached goroutine.
+	// Emitted with an empty dedup_key on purpose — one payment fires several
+	// webhooks (pending→paid, provider bursts) and each must re-reconcile; the
+	// consumer is idempotent (guarded UpdateCartPaymentStatus).
+	PaymentProcess Name = "payment.process"
+
 	// EventWindowClose is an internal SCHEDULED COMMAND: enqueued with
 	// ProcessAt(ends_at) for timed post/story events so they finalize exactly at
 	// their window end (emitting post.window_closed + event.ended) instead of

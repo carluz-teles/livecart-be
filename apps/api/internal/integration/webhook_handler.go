@@ -287,25 +287,21 @@ func (h *WebhookHandler) HandleMercadoPago(c *fiber.Ctx) error {
 
 	// Process payment notifications
 	if webhook.Type == "payment" && webhook.Data.ID != "" {
-		// Process asynchronously to respond quickly. The goroutine outlives
-		// the request, so we MUST detach from c.Context(): in Fiber v2 that
-		// returns the *fasthttp.RequestCtx, which is recycled to a sync.Pool
-		// once the handler returns — using it later panics inside pgxpool
-		// (puddle calls ctx.Done() on the now-zeroed RequestCtx).
+		// Thin dispatcher (L1): emit a payment.process command to the outbox and
+		// return. The command consumer runs the guarded reconciliation with retry
+		// + dead-letter — replacing the old fire-and-forget goroutine that lost
+		// the work on any failure. The emit is a quick sync outbox insert, so the
+		// request context is still valid (no detach needed).
 		paymentID := webhook.Data.ID
-		go func() {
-			ctx := logger.WithStore(context.Background(), storeID, storeSlug)
-			if err := h.service.ProcessPaymentNotification(ctx, ProcessPaymentInput{
-				StoreID:   storeID,
-				Provider:  "mercado_pago",
-				PaymentID: paymentID,
-			}); err != nil {
-				logger.From(ctx, h.logger).Error("failed to process payment notification",
-					zap.String("payment_id", paymentID),
-					zap.Error(err),
-				)
-			}
-		}()
+		ctx := logger.WithStore(c.UserContext(), storeID, storeSlug)
+		if err := h.service.DispatchPaymentProcess(ctx, ProcessPaymentInput{
+			StoreID:   storeID,
+			Provider:  "mercado_pago",
+			PaymentID: paymentID,
+		}); err != nil {
+			logger.From(ctx, h.logger).Error("failed to dispatch payment.process",
+				zap.String("payment_id", paymentID), zap.Error(err))
+		}
 	}
 
 	return httpx.OK(c, fiber.Map{"status": "received"})
@@ -459,20 +455,17 @@ func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 		if webhook.Data.ID != "" {
 			orderID := webhook.Data.ID
 			eventType := webhook.Type
-			go func() {
-				ctx := logger.WithStore(context.Background(), storeID, storeSlug)
-				if err := h.service.ProcessPaymentNotification(ctx, ProcessPaymentInput{
-					StoreID:   storeID,
-					Provider:  "pagarme",
-					PaymentID: orderID,
-				}); err != nil {
-					logger.From(ctx, h.logger).Error("failed to process Pagar.me payment notification",
-						zap.String("order_id", orderID),
-						zap.String("event_type", eventType),
-						zap.Error(err),
-					)
-				}
-			}()
+			// Thin dispatcher (L1): emit payment.process to the outbox; the consumer
+			// runs the guarded reconciliation with retry + dead-letter.
+			ctx := logger.WithStore(c.UserContext(), storeID, storeSlug)
+			if err := h.service.DispatchPaymentProcess(ctx, ProcessPaymentInput{
+				StoreID:   storeID,
+				Provider:  "pagarme",
+				PaymentID: orderID,
+			}); err != nil {
+				logger.From(ctx, h.logger).Error("failed to dispatch Pagar.me payment.process",
+					zap.String("order_id", orderID), zap.String("event_type", eventType), zap.Error(err))
+			}
 		}
 	}
 

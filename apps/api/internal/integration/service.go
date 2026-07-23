@@ -3723,6 +3723,16 @@ var paymentEventName = map[string]events.Name{
 	"pending":  events.PaymentProcessing,
 }
 
+// DispatchPaymentProcess is the thin webhook edge (L1 of the event choreography):
+// it emits a payment.process COMMAND to the transactional outbox instead of
+// running the reconciliation in a detached goroutine. The command consumer
+// (main.newApp) runs ProcessPaymentNotification with asynq retry + dead-letter,
+// and the outbox makes it crash-durable. dedup_key is empty on purpose — see the
+// events.PaymentProcess doc.
+func (s *Service) DispatchPaymentProcess(ctx context.Context, input ProcessPaymentInput) error {
+	return events.EmitInternal(ctx, s.repo.queries, events.PaymentProcess, "", input)
+}
+
 func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessPaymentInput) error {
 	// Resolve integration from store_id + provider
 	integration, err := s.repo.GetActiveByProvider(ctx, input.StoreID, "payment", input.Provider)
