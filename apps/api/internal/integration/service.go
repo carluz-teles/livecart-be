@@ -3796,12 +3796,21 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 	// and retriable — instead of the inline cascade this method used to run.
 	// dedup by payment_id so the provider's at-least-once burst collapses.
 	if name, ok := cartPaymentFact[cartPaymentStatus]; ok {
+		// The paid fact carries the FRESH gateway snapshot (installments, fees,
+		// money-release date) so the ERP finalisation reactor (ReactCartPaidERP) can
+		// record the payment in Tiny without re-fetching — the same data the
+		// resumable state machine persists to carts.erp_payment_snapshot for retry.
+		var snap *providers.PaymentStatus
+		if cartPaymentStatus == "paid" {
+			snap = status
+		}
 		payload, _ := json.Marshal(struct {
-			CartID    string `json:"cart_id"`
-			StoreID   string `json:"store_id"`
-			PaymentID string `json:"payment_id"`
-			Method    string `json:"payment_method"`
-		}{status.ExternalReference, input.StoreID, status.PaymentID, status.PaymentMethod})
+			CartID          string                   `json:"cart_id"`
+			StoreID         string                   `json:"store_id"`
+			PaymentID       string                   `json:"payment_id"`
+			Method          string                   `json:"payment_method"`
+			PaymentSnapshot *providers.PaymentStatus `json:"payment_snapshot,omitempty"`
+		}{status.ExternalReference, input.StoreID, status.PaymentID, status.PaymentMethod, snap})
 		_ = events.Emit(ctx, s.repo.queries, events.Envelope{
 			Name:     name,
 			Source:   events.Source(input.Provider),
@@ -3817,19 +3826,10 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		s.postCheckoutHook.OnCartCancelled(ctx, status.ExternalReference)
 	}
 
-	// ERP refund (Tiny cancel + stock return) moved to the cart.refunded reactor
-	// (ReactCartRefunded): it works from cart_id + store_id, so it gets its own
-	// asynq retry + DLQ instead of the swallowed inline best-effort it used to be.
-	if cartPaymentStatus != "paid" {
-		return nil
-	}
-	// ERP finalisation (paid) stays inline (L2): it needs the FRESH gateway
-	// snapshot. Never propagate ERP errors (money already moved).
-	if err := s.finalizeOrConfirmCartERP(ctx, status.ExternalReference, input.StoreID, status); err != nil {
-		logger.From(ctx, s.logger).Error("failed to finalize ERP order for paid cart",
-			zap.String("cart_id", status.ExternalReference),
-			zap.String("payment_id", status.PaymentID), zap.Error(err))
-	}
+	// ERP now runs entirely as cart.* reactors: finalisation on cart.paid
+	// (ReactCartPaidERP — the gateway snapshot rides the fact payload), refund on
+	// cart.refunded (ReactCartRefunded), reversal on cart.expired. They get asynq
+	// retry + DLQ instead of the swallowed inline best-effort this method used to run.
 	return nil
 }
 
@@ -3837,8 +3837,8 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 // redemption and runs the customer post-payment flow (tracking token, order
 // timeline, GMV, receipt email, waitlist fulfilment via postCheckoutHook.OnCartPaid).
 // Each step is idempotent (tracking_token set-once, order_events/ledger UNIQUE),
-// so asynq redelivery/retry is safe. ERP finalisation is NOT here — it stays
-// inline in ProcessPaymentNotification (needs the gateway snapshot).
+// so asynq redelivery/retry is safe. ERP finalisation is a separate reactor
+// (ReactCartPaidERP) because it needs the gateway snapshot.
 func (s *Service) ReactCartPaid(ctx context.Context, cartID string) error {
 	if s.couponSyncer != nil {
 		if err := s.couponSyncer.OnCartPaid(ctx, cartID); err != nil {
@@ -3849,6 +3849,33 @@ func (s *Service) ReactCartPaid(ctx context.Context, cartID string) error {
 		s.postCheckoutHook.OnCartPaid(ctx, cartID)
 	}
 	return nil
+}
+
+// ReactCartPaidERP is the cart.paid reactor that finalises the ERP (Tiny) order.
+// Unlike the other cart.paid side-effects it needs the FRESH gateway snapshot
+// (installments, fees, money-release date), which rides the fact payload; the
+// resumable state machine also persists it to carts.erp_payment_snapshot for admin
+// retry. Errors are returned so asynq retries + dead-letters (idempotent via the
+// advisory lock + resumable markers). Stores without a Tiny integration no-op so a
+// paid cart never churns retries. A nil snapshot (e.g. an in-flight fact emitted by
+// the pre-inversion binary during rollout) finalises without payment details —
+// admin retry can replay from the persisted snapshot afterwards.
+func (s *Service) ReactCartPaidERP(ctx context.Context, cartID, storeID string, snapshotJSON []byte) error {
+	ctx = logger.WithStore(ctx, storeID, "")
+	if _, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny"); err != nil {
+		return nil // no active ERP integration — nothing to finalise
+	}
+	var status *providers.PaymentStatus
+	if len(snapshotJSON) > 0 {
+		var st providers.PaymentStatus
+		if err := json.Unmarshal(snapshotJSON, &st); err == nil {
+			status = &st
+		} else {
+			logger.From(ctx, s.logger).Warn("cart.paid ERP reactor: bad payment snapshot, finalising without payment details",
+				zap.String("cart_id", cartID), zap.Error(err))
+		}
+	}
+	return s.finalizeOrConfirmCartERP(ctx, cartID, storeID, status)
 }
 
 // ReactCartRefunded is the cart.refunded fan-out reactor (L3): refunds the coupon
