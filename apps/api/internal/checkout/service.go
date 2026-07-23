@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
-	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/config"
@@ -474,19 +473,6 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 	}, nil
 }
 
-// emitCartPaid fires the canonical cart.paid fact from the synchronous card path
-// (transparent checkout). Same fact + dedup key as the webhook producer, so the
-// cart.paid reactors (coupon, order/GMV/email/waitlist) run once regardless of
-// which path lands first. The inline OnCartPaid stays for low-latency receipt;
-// the reactor is idempotent, so the overlap is a no-op.
-func (s *Service) emitCartPaid(ctx context.Context, cartID, storeID, paymentID string) {
-	_ = events.EmitInternal(ctx, s.repo.q, events.CartPaid, "cart.paid:"+paymentID, struct {
-		CartID    string `json:"cart_id"`
-		StoreID   string `json:"store_id"`
-		PaymentID string `json:"payment_id"`
-	}{cartID, storeID, paymentID})
-}
-
 // jsonOrEmpty marshals v, falling back to an empty JSON object on error so a
 // best-effort emit never carries a nil payload.
 func jsonOrEmpty(v any) json.RawMessage {
@@ -880,18 +866,20 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 					zap.Error(err),
 				)
 			}
-			// Customer-facing post-payment flow (tracking token + receipt email).
-			// Idempotent inside the hook, so duplicate invocations from a webhook
-			// retry are a no-op.
+			// Customer-facing post-payment flow (tracking token + receipt email)
+			// runs inline here for low latency on the synchronous card approval.
+			// Idempotent inside the hook, so the webhook's cart.paid reactor
+			// re-running it later is a no-op.
+			//
+			// The canonical cart.paid FACT is emitted only by the payment webhook
+			// consumer (ProcessPaymentNotification) — the single source of truth,
+			// carrying the fresh gateway snapshot the ERP reactor needs. The card
+			// path used to emit its own snapshot-less cart.paid too, which raced the
+			// webhook's and finalised ERP without payment details; centralising on
+			// the webhook fixes that.
 			if s.postCheckoutHook != nil {
 				s.postCheckoutHook.OnCartPaid(ctx, cart.ID)
 			}
-
-			// L3: the transparent-checkout fast path confirms payment inline (no
-			// webhook wait). Emits cart.paid (same fact + dedup key as the webhook
-			// producer) so the fan-out reactors run once regardless of which path
-			// lands first. The inline OnCartPaid above stays for low latency.
-			s.emitCartPaid(ctx, cart.ID, cart.StoreID, result.PaymentID)
 		}
 	}
 
