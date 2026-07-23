@@ -625,15 +625,13 @@ func (r *Repository) RecordMutation(ctx context.Context, pool *pgxpool.Pool, p M
 }
 
 // cartMutationEventName maps a cart_mutations.mutation_type to its canonical
-// group-C event name. Returns "" for types that have no event yet.
+// group-C event name. Only item_added has a live event; the quantity-change and
+// item-removed telemetry facts were deprecated (high-cardinality, no reactor).
+// Returns "" for types with no event.
 func cartMutationEventName(mutationType string) events.Name {
 	switch mutationType {
 	case "item_added":
 		return events.CartItemAdded
-	case "quantity_increased", "quantity_decreased":
-		return events.CartItemQtyChanged
-	case "item_removed":
-		return events.CartItemRemoved
 	default:
 		return ""
 	}

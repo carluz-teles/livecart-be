@@ -468,14 +468,6 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 		zap.Int64("total_amount", totalAmount),
 	)
 
-	// Group E: hosted-checkout link created — the buyer entered the payment
-	// funnel. Dedup by cart_id (regenerating the link is the same initiation).
-	_ = events.EmitInternal(ctx, s.repo.q, events.CheckoutInitiated, "checkout.initiated:"+cart.ID, struct {
-		CartID     string `json:"cart_id"`
-		CheckoutID string `json:"checkout_id"`
-		TotalCents int64  `json:"total_cents"`
-	}{cart.ID, checkoutResult.CheckoutID, totalAmount})
-
 	return &GenerateCheckoutOutput{
 		CheckoutURL: checkoutResult.CheckoutURL,
 		ExpiresAt:   expiresAt,
@@ -1091,18 +1083,6 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 			zap.Error(err),
 		)
 	}
-
-	// Group E: PIX charge created and awaiting payment. Dedup by payment_id so a
-	// retried GeneratePix (buyer refreshes the QR) doesn't re-emit. Best-effort.
-	_ = events.Emit(ctx, s.repo.q, events.Envelope{
-		Name:     events.PixGenerated,
-		Source:   events.Source(paymentIntegration.ProviderName),
-		DedupKey: "pix.generated:" + result.PaymentID,
-		Payload: jsonOrEmpty(struct {
-			CartID    string `json:"cart_id"`
-			PaymentID string `json:"payment_id"`
-		}{cart.ID, result.PaymentID}),
-	})
 
 	logger.From(ctx, s.logger).Info("pix payment generated",
 		zap.String("cart_id", cart.ID),

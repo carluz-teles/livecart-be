@@ -466,13 +466,6 @@ func (s *Service) CreateConversionCheckout(ctx context.Context, input CheckoutIn
 		return "", err
 	}
 
-	// Group J: the merchant entered the conversion funnel (hosted Stripe Checkout
-	// opened). Dedup by session id — each attempt is a distinct initiation.
-	_ = events.EmitInternal(ctx, s.queries, events.ConversionInitiated, "conversion.initiated:"+session.ID, struct {
-		StoreID string `json:"store_id"`
-		Plan    string `json:"plan"`
-	}{storeID, string(plan)})
-
 	return session.URL, nil
 }
 

@@ -842,24 +842,6 @@ func (r *Repository) StartSession(ctx context.Context, id string) (SessionRow, e
 		return SessionRow{}, fmt.Errorf("starting live session: %w", err)
 	}
 
-	// session.live in the same tx (transactional outbox).
-	payload, err := json.Marshal(struct {
-		EventID       string `json:"event_id"`
-		SessionID     string `json:"session_id"`
-		SequenceOrder int32  `json:"sequence_order"`
-	}{EventID: row.EventID.String(), SessionID: row.ID.String(), SequenceOrder: row.SequenceOrder})
-	if err != nil {
-		return SessionRow{}, fmt.Errorf("marshaling session.live payload: %w", err)
-	}
-	if err := events.Emit(ctx, qtx, events.Envelope{
-		Name:     events.SessionLive,
-		Source:   events.SourceInternal,
-		DedupKey: "session.live:" + row.ID.String(),
-		Payload:  payload,
-	}); err != nil {
-		return SessionRow{}, err
-	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return SessionRow{}, fmt.Errorf("commit start-session tx: %w", err)
 	}
@@ -1264,11 +1246,6 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("creating cart: %w", err)
-	}
-
-	// cart.created in the same tx (transactional outbox).
-	if err := emitCartEvent(ctx, qtx, events.CartCreated, created.ID.String(), created.EventID.String(), pgUUIDString(sessionID), "cart.created:"+created.ID.String()); err != nil {
-		return nil, false, err
 	}
 
 	// Commit the transaction

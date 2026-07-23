@@ -5,7 +5,7 @@
 //
 // Design rules (see docs/async-events-analysis.md):
 //   - Event names are canonical DOMAIN facts ("comment.received",
-//     "payment.succeeded"), never implementation details. The origin (which
+//     "cart.paid"), never implementation details. The origin (which
 //     webhook/provider/channel dispatched it) travels as Envelope.Source /
 //     Envelope.Metadata, not as a distinct event type.
 //   - Webhooks are thin adapters: they validate, dedup by the provider event id
@@ -28,10 +28,8 @@ const (
 
 	// Live / session / event lifecycle (group A).
 	EventEventCreated Name = "event.created"
-	EventEventStarted Name = "event.started"
 	EventEventEnded   Name = "event.ended"
 	SessionCreated    Name = "session.created"
-	SessionLive       Name = "session.live"
 	SessionEnded      Name = "session.ended"
 	PostWindowClosed  Name = "post.window_closed"
 
@@ -40,14 +38,11 @@ const (
 	CommentReceived Name = "comment.received"
 
 	// Cart lifecycle (group C).
-	CartCreated        Name = "cart.created"
-	CartItemAdded      Name = "cart.item_added"
-	CartItemQtyChanged Name = "cart.item_qty_changed"
-	CartItemRemoved    Name = "cart.item_removed"
-	CartCheckoutArmed  Name = "cart.checkout_armed"
-	CartExpired        Name = "cart.expired"
-	CartReopened       Name = "cart.reopened"
-	CartCancelled      Name = "cart.cancelled"
+	CartItemAdded     Name = "cart.item_added"
+	CartCheckoutArmed Name = "cart.checkout_armed"
+	CartExpired       Name = "cart.expired"
+	CartReopened      Name = "cart.reopened"
+	CartCancelled     Name = "cart.cancelled"
 	// CartPaid / CartRefunded are the canonical payment facts (specific-fact
 	// strategy): the payment consumer resolves the provider status and emits the
 	// right one; reactors (GMV, order, coupon, ...) subscribe to what they need.
@@ -64,15 +59,12 @@ const (
 	WaitlistExpired   Name = "waitlist.expired"
 
 	// Checkout & payment (group E). The provider (pagarme/mercadopago/stripe)
-	// travels as Envelope.Source; these are the canonical payment facts.
-	CheckoutInitiated Name = "checkout.initiated"
-	PixGenerated      Name = "pix.generated"
-	PixExpired        Name = "pix.expired"
-	PaymentProcessing Name = "payment.processing"
-	PaymentSucceeded  Name = "payment.succeeded"
-	PaymentFailed     Name = "payment.failed"
-	PaymentRefunded   Name = "payment.refunded"
-	PaymentChargeback Name = "payment.chargeback"
+	// travels as Envelope.Source. The canonical payment facts are cart.paid /
+	// cart.refunded (group C); payment.failed is the terminal rejection fact.
+	// The old funnel/telemetry facts (checkout.initiated, pix.generated/expired,
+	// payment.processing/succeeded/refunded/chargeback) were deprecated once the
+	// payment choreography made cart.paid/cart.refunded the fan-out anchors.
+	PaymentFailed Name = "payment.failed"
 
 	// Order timeline (group F). One-to-one with the order_events rows, so the
 	// UNIQUE(cart_id, event_type) guard makes emission idempotent by construction.
@@ -105,7 +97,6 @@ const (
 	// Billing / subscription (group J, PRD 007). The subscription lifecycle
 	// facts are emitted from the Stripe-webhook hub (applySubscription); GMV
 	// facts from the metered-fee ledger.
-	TrialStarted             Name = "trial.started"
 	TrialEndingSoon          Name = "trial.ending_soon" // also the SCHEDULED COMMAND armed at trial_ends_at - N days
 	SubscriptionActivated    Name = "subscription.activated"
 	SubscriptionPastDue      Name = "subscription.past_due"
@@ -113,7 +104,6 @@ const (
 	SubscriptionCanceled     Name = "subscription.canceled"
 	SubscriptionPaused       Name = "subscription.paused"
 	SubscriptionResumed      Name = "subscription.resumed"
-	ConversionInitiated      Name = "conversion.initiated"
 	GMVRecorded              Name = "gmv.recorded"
 	GMVRefunded              Name = "gmv.refunded"
 
@@ -128,14 +118,11 @@ const (
 	EmailSent              Name = "email.sent"
 
 	// ERP / Tiny (group G). Best-effort facts around the resumable ERP order
-	// state machine and product sync/import.
-	ERPOrderInitiated     Name = "erp.order_initiated"
+	// state machine.
 	ERPOrderCreated       Name = "erp.order_created"
 	ERPOrderFinalized     Name = "erp.order_finalized"
 	ERPOrderCancelled     Name = "erp.order_cancelled"
 	ERPFinalizationFailed Name = "erp.finalization_failed"
-	ProductSynced         Name = "product.synced"
-	ProductImported       Name = "product.imported"
 
 	// Shipping / delivery (group H). Carrier-level facts, distinct from the
 	// order timeline (order.shipped/delivered are group F).
@@ -145,26 +132,21 @@ const (
 	DeliveryConfirmed     Name = "shipment.delivered"
 
 	// Platform / account (group K). store/member/user/customer/coupon lifecycle.
-	StoreCreated            Name = "store.created"
-	StoreSettingsUpdated    Name = "store.settings_updated"
-	MemberInvited           Name = "member.invited"
-	MemberInviteAccepted    Name = "member.invite_accepted"
-	MemberInviteRevoked     Name = "member.invite_revoked"
-	MemberInviteResent      Name = "member.invite_resent"
-	MemberRoleChanged       Name = "member.role_changed"
-	MemberRemoved           Name = "member.removed"
-	UserSignedUp            Name = "user.signed_up"
-	UserUpdated             Name = "user.updated"
-	UserDeleted             Name = "user.deleted"
-	CustomerUpserted        Name = "customer.upserted"
-	CouponCreated           Name = "coupon.created"
-	CouponUpdated           Name = "coupon.updated"
-	CouponDeleted           Name = "coupon.deleted"
-	CouponApplied           Name = "coupon.applied"
-	CouponRemoved           Name = "coupon.removed"
-	CouponConfirmed         Name = "coupon.confirmed"
-	CouponRefunded          Name = "coupon.refunded"
-	CouponRedemptionExpired Name = "coupon.redemption_expired"
+	StoreCreated         Name = "store.created"
+	StoreSettingsUpdated Name = "store.settings_updated"
+	MemberInvited        Name = "member.invited"
+	MemberInviteAccepted Name = "member.invite_accepted"
+	MemberInviteRevoked  Name = "member.invite_revoked"
+	MemberInviteResent   Name = "member.invite_resent"
+	MemberRoleChanged    Name = "member.role_changed"
+	MemberRemoved        Name = "member.removed"
+	UserSignedUp         Name = "user.signed_up"
+	UserUpdated          Name = "user.updated"
+	UserDeleted          Name = "user.deleted"
+	CustomerUpserted     Name = "customer.upserted"
+	CouponApplied        Name = "coupon.applied"
+	CouponConfirmed      Name = "coupon.confirmed"
+	CouponRefunded       Name = "coupon.refunded"
 )
 
 // Source identifies where an event was dispatched from. It is metadata on the

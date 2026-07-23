@@ -22,13 +22,9 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(EventEventCreated), logEvent(log))
 	mux.HandleFunc(string(EventEventEnded), logEvent(log))
 	mux.HandleFunc(string(SessionCreated), logEvent(log))
-	mux.HandleFunc(string(SessionLive), logEvent(log))
 	mux.HandleFunc(string(SessionEnded), logEvent(log))
 	mux.HandleFunc(string(PostWindowClosed), logEvent(log))
-	mux.HandleFunc(string(CartCreated), logEvent(log))
 	mux.HandleFunc(string(CartItemAdded), logEvent(log))
-	mux.HandleFunc(string(CartItemQtyChanged), logEvent(log))
-	mux.HandleFunc(string(CartItemRemoved), logEvent(log))
 	// CartCheckoutArmed and CartReopened are registered by the composition root
 	// (main.newApp) with a handler that logs AND arms the cart.expire ETA timer —
 	// those are the points where expires_at is actually set (live carts have NO
@@ -47,15 +43,10 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 
 	// Groups E/F — payment & order timeline. Observability-only for now;
 	// notifications/GMV stay on their existing guarded paths until later phases
-	// move them behind these consumers.
-	mux.HandleFunc(string(CheckoutInitiated), logEvent(log))
-	mux.HandleFunc(string(PixGenerated), logEvent(log))
-	mux.HandleFunc(string(PixExpired), logEvent(log))
-	mux.HandleFunc(string(PaymentProcessing), logEvent(log))
-	mux.HandleFunc(string(PaymentSucceeded), logEvent(log))
+	// move them behind these consumers. The payment facts are cart.paid /
+	// cart.refunded (fan-out anchors, registered by the composition root) and
+	// payment.failed (terminal); the old funnel/telemetry facts were deprecated.
 	mux.HandleFunc(string(PaymentFailed), logEvent(log))
-	mux.HandleFunc(string(PaymentRefunded), logEvent(log))
-	mux.HandleFunc(string(PaymentChargeback), logEvent(log))
 	mux.HandleFunc(string(OrderPaymentConfirmed), logEvent(log))
 	mux.HandleFunc(string(OrderCancelled), logEvent(log))
 	mux.HandleFunc(string(OrderRefunded), logEvent(log))
@@ -65,14 +56,12 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	// Group J — billing/subscription facts. Observability-only for now;
 	// TrialEndingSoon is NOT here — it is a scheduled command registered by the
 	// composition root (main.newApp) with a domain handler.
-	mux.HandleFunc(string(TrialStarted), logEvent(log))
 	mux.HandleFunc(string(SubscriptionActivated), logEvent(log))
 	mux.HandleFunc(string(SubscriptionPastDue), logEvent(log))
 	mux.HandleFunc(string(SubscriptionGraceExpired), logEvent(log))
 	mux.HandleFunc(string(SubscriptionCanceled), logEvent(log))
 	mux.HandleFunc(string(SubscriptionPaused), logEvent(log))
 	mux.HandleFunc(string(SubscriptionResumed), logEvent(log))
-	mux.HandleFunc(string(ConversionInitiated), logEvent(log))
 	mux.HandleFunc(string(GMVRecorded), logEvent(log))
 	mux.HandleFunc(string(GMVRefunded), logEvent(log))
 
@@ -86,13 +75,10 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(EmailSent), logEvent(log))
 
 	// Group G — ERP / Tiny.
-	mux.HandleFunc(string(ERPOrderInitiated), logEvent(log))
 	mux.HandleFunc(string(ERPOrderCreated), logEvent(log))
 	mux.HandleFunc(string(ERPOrderFinalized), logEvent(log))
 	mux.HandleFunc(string(ERPOrderCancelled), logEvent(log))
 	mux.HandleFunc(string(ERPFinalizationFailed), logEvent(log))
-	mux.HandleFunc(string(ProductSynced), logEvent(log))
-	mux.HandleFunc(string(ProductImported), logEvent(log))
 
 	// Group H — shipping / delivery.
 	mux.HandleFunc(string(ShipmentCreated), logEvent(log))
@@ -113,14 +99,9 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(UserUpdated), logEvent(log))
 	mux.HandleFunc(string(UserDeleted), logEvent(log))
 	mux.HandleFunc(string(CustomerUpserted), logEvent(log))
-	mux.HandleFunc(string(CouponCreated), logEvent(log))
-	mux.HandleFunc(string(CouponUpdated), logEvent(log))
-	mux.HandleFunc(string(CouponDeleted), logEvent(log))
 	mux.HandleFunc(string(CouponApplied), logEvent(log))
-	mux.HandleFunc(string(CouponRemoved), logEvent(log))
 	mux.HandleFunc(string(CouponConfirmed), logEvent(log))
 	mux.HandleFunc(string(CouponRefunded), logEvent(log))
-	mux.HandleFunc(string(CouponRedemptionExpired), logEvent(log))
 }
 
 // logEvent is a generic observability consumer: it records that a canonical

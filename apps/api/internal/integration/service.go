@@ -2795,14 +2795,6 @@ func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductIn
 		if err != nil {
 			return nil, fmt.Errorf("importing simple product: %w", err)
 		}
-		// Group G fact (best-effort): a simple product was imported from the ERP.
-		_ = events.EmitInternal(ctx, s.repo.queries, events.ProductImported, "product.imported:"+input.StoreID+":"+detailed.ID, struct {
-			StoreID    string `json:"store_id"`
-			ProductID  string `json:"product_id"`
-			ExternalID string `json:"external_id"`
-			Provider   string `json:"provider"`
-			Variants   int    `json:"variants"`
-		}{StoreID: input.StoreID, ProductID: productID, ExternalID: detailed.ID, Provider: integration.Provider, Variants: 1})
 		return &ImportERPProductOutput{
 			ProductID: productID,
 			IsParent:  false,
@@ -2875,16 +2867,6 @@ func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductIn
 		zap.Int("variants_imported", len(imported)),
 	)
 
-	// Group G fact (best-effort): a product group was imported from the ERP.
-	// Dedup by the ERP external id of the imported parent product.
-	_ = events.EmitInternal(ctx, s.repo.queries, events.ProductImported, "product.imported:"+input.StoreID+":"+input.TinyProductID, struct {
-		StoreID    string `json:"store_id"`
-		GroupID    string `json:"group_id"`
-		ExternalID string `json:"external_id"`
-		Provider   string `json:"provider"`
-		Variants   int    `json:"variants"`
-	}{StoreID: input.StoreID, GroupID: groupID, ExternalID: input.TinyProductID, Provider: integration.Provider, Variants: len(imported)})
-
 	return &ImportERPProductOutput{
 		GroupID:  groupID,
 		IsParent: true,
@@ -2950,17 +2932,6 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 		zap.String("external_id", externalID),
 		zap.String("store_id", input.StoreID),
 	)
-
-	// Group G fact (best-effort): a product was synced from the ERP (manual).
-	// Dedup includes "manual" so it never collides with the webhook-driven sync
-	// of the same product.
-	_ = events.EmitInternal(ctx, s.repo.queries, events.ProductSynced, "product.synced:manual:"+input.StoreID+":"+externalID, struct {
-		StoreID    string `json:"store_id"`
-		ProductID  string `json:"product_id"`
-		ExternalID string `json:"external_id"`
-		Provider   string `json:"provider"`
-		Source     string `json:"source"`
-	}{StoreID: input.StoreID, ProductID: input.ProductID, ExternalID: externalID, Provider: externalSource, Source: "manual"})
 
 	return &SyncProductOutput{
 		ProductID:  input.ProductID,
@@ -3072,14 +3043,6 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		if err := s.productGroupSyncer.SyncFromERP(ctx, integration.StoreID, integration.Provider, *detailed); err != nil {
 			return false, fmt.Errorf("syncing product group: %w", err)
 		}
-		// Group G fact (best-effort): a product group was synced from an ERP
-		// webhook. Dedup by store + external product id under the webhook source.
-		_ = events.EmitInternal(ctx, s.repo.queries, events.ProductSynced, "product.synced:webhook:"+integration.StoreID+":"+externalProductID, struct {
-			StoreID    string `json:"store_id"`
-			ExternalID string `json:"external_id"`
-			Provider   string `json:"provider"`
-			Source     string `json:"source"`
-		}{StoreID: integration.StoreID, ExternalID: externalProductID, Provider: integration.Provider, Source: "webhook"})
 		return true, nil
 	}
 
@@ -3991,15 +3954,6 @@ func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 	if err != nil {
 		return fmt.Errorf("loading cart for ERP order: %w", err)
 	}
-
-	// Group G fact (best-effort): legacy finalisation started for a paid cart
-	// (stores not in Design C conversion mode). Dedup by cart; a cart takes
-	// either the conversion path or this legacy path, never both.
-	_ = events.EmitInternal(ctx, s.repo.queries, events.ERPOrderInitiated, "erp.order_initiated:"+cartID, struct {
-		StoreID  string `json:"store_id"`
-		CartID   string `json:"cart_id"`
-		Provider string `json:"provider"`
-	}{StoreID: storeID, CartID: cartID, Provider: "tiny"})
 
 	// [S1] Snapshot + carimbo ANTES de agir. Best-effort: a finalização não
 	// para por falha aqui, mas o retry perde o replay se o snapshot faltar.

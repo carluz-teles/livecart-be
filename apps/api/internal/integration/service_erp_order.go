@@ -315,15 +315,6 @@ func (s *Service) EnsureERPOrderForCart(ctx context.Context, cartID, storeID str
 		return nil // outra iniciação converteu/está convertendo
 	}
 
-	// Group G fact (best-effort): the cart entered the ERP order state machine
-	// (Design C conversion claimed). Dedup by cart — the CAS makes this fire
-	// exactly once per cart conversion.
-	_ = events.EmitInternal(ctx, s.repo.queries, events.ERPOrderInitiated, "erp.order_initiated:"+cartID, struct {
-		StoreID  string `json:"store_id"`
-		CartID   string `json:"cart_id"`
-		Provider string `json:"provider"`
-	}{StoreID: storeID, CartID: cartID, Provider: "tiny"})
-
 	cart, err := s.repo.GetCartForPaidOrder(ctx, cartID)
 	if err != nil {
 		return fmt.Errorf("loading cart for conversion: %w", err)
