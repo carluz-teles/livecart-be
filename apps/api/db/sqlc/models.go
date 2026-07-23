@@ -216,21 +216,22 @@ type EventConsumed struct {
 }
 
 type EventOutbox struct {
-	ID          pgtype.UUID        `json:"id"`
-	EventID     pgtype.UUID        `json:"event_id"`
-	Name        string             `json:"name"`
-	Source      string             `json:"source"`
-	Metadata    json.RawMessage    `json:"metadata"`
-	Payload     json.RawMessage    `json:"payload"`
-	TraceID     string             `json:"trace_id"`
-	SpanID      string             `json:"span_id"`
-	DedupKey    string             `json:"dedup_key"`
-	Queue       string             `json:"queue"`
-	Status      string             `json:"status"`
-	Attempts    int32              `json:"attempts"`
-	LastError   string             `json:"last_error"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	PublishedAt pgtype.Timestamptz `json:"published_at"`
+	ID            pgtype.UUID        `json:"id"`
+	EventID       pgtype.UUID        `json:"event_id"`
+	Name          string             `json:"name"`
+	Source        string             `json:"source"`
+	Metadata      json.RawMessage    `json:"metadata"`
+	Payload       json.RawMessage    `json:"payload"`
+	TraceID       string             `json:"trace_id"`
+	SpanID        string             `json:"span_id"`
+	DedupKey      string             `json:"dedup_key"`
+	Queue         string             `json:"queue"`
+	Status        string             `json:"status"`
+	Attempts      int32              `json:"attempts"`
+	LastError     string             `json:"last_error"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	PublishedAt   pgtype.Timestamptz `json:"published_at"`
+	SchemaVersion int32              `json:"schema_version"`
 }
 
 // Product whitelist for events. If empty, all store products are available.
