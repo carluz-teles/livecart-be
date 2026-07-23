@@ -482,15 +482,17 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 	}, nil
 }
 
-// emitPaymentSucceeded publishes the group-E payment.succeeded fact from the
-// synchronous card path. Source is internal (our inline confirmation); the
-// webhook path re-emits with the provider source and the same dedup key, so
-// consumers see it once regardless of which path won the race.
-func (s *Service) emitPaymentSucceeded(ctx context.Context, cartID, paymentID string) {
-	_ = events.EmitInternal(ctx, s.repo.q, events.PaymentSucceeded, "payment.succeeded:"+paymentID, struct {
+// emitCartPaid fires the canonical cart.paid fact from the synchronous card path
+// (transparent checkout). Same fact + dedup key as the webhook producer, so the
+// cart.paid reactors (coupon, order/GMV/email/waitlist) run once regardless of
+// which path lands first. The inline OnCartPaid stays for low-latency receipt;
+// the reactor is idempotent, so the overlap is a no-op.
+func (s *Service) emitCartPaid(ctx context.Context, cartID, storeID, paymentID string) {
+	_ = events.EmitInternal(ctx, s.repo.q, events.CartPaid, "cart.paid:"+paymentID, struct {
 		CartID    string `json:"cart_id"`
+		StoreID   string `json:"store_id"`
 		PaymentID string `json:"payment_id"`
-	}{cartID, paymentID})
+	}{cartID, storeID, paymentID})
 }
 
 // jsonOrEmpty marshals v, falling back to an empty JSON object on error so a
@@ -893,12 +895,11 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 				s.postCheckoutHook.OnCartPaid(ctx, cart.ID)
 			}
 
-			// Group E: the transparent-checkout fast path confirms payment inline
-			// (no webhook wait). Same event + dedup key as the webhook emit in
-			// integration.ProcessPaymentNotification, so whichever lands first
-			// wins and the other dedups. Best-effort — the receipt flow above is
-			// the source of truth, this is observability.
-			s.emitPaymentSucceeded(ctx, cart.ID, result.PaymentID)
+			// L3: the transparent-checkout fast path confirms payment inline (no
+			// webhook wait). Emits cart.paid (same fact + dedup key as the webhook
+			// producer) so the fan-out reactors run once regardless of which path
+			// lands first. The inline OnCartPaid above stays for low latency.
+			s.emitCartPaid(ctx, cart.ID, cart.StoreID, result.PaymentID)
 		}
 	}
 

@@ -956,6 +956,39 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			return integrationSvc.ProcessPaymentNotification(ctx, input)
 		})
 
+		// Payment choreography L3: reactors of the cart payment facts. The fan-out
+		// that ProcessPaymentNotification used to run inline (coupon, order/GMV/
+		// email/waitlist, billing) now reacts to cart.paid / cart.refunded, each
+		// idempotent so asynq retry/dead-letter is safe. (ERP finalisation stays
+		// inline in the producer — needs the gateway snapshot.)
+		eventsServer.Register(events.CartPaid, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				CartID string `json:"cart_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" {
+				return asynq.SkipRetry
+			}
+			return integrationSvc.ReactCartPaid(ctx, p.CartID)
+		})
+		eventsServer.Register(events.CartRefunded, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				CartID  string `json:"cart_id"`
+				StoreID string `json:"store_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" || p.StoreID == "" {
+				return asynq.SkipRetry
+			}
+			return integrationSvc.ReactCartRefunded(ctx, p.CartID, p.StoreID)
+		})
+
 		// ETA-based cart expiry: schedule a cart.expire task at the cart's
 		// expires_at (asynq ProcessAt) so it expires on the second, with the
 		// 5-min sweep kept as a safety net. The window is set at checkout-arm

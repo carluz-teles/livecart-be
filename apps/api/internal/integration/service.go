@@ -3712,15 +3712,17 @@ func (s *Service) StoreWebhookEvent(ctx context.Context, input StoreWebhookInput
 // TODO(refunded): when status == refunded we currently only mark the cart —
 // we should also cancel the Tiny sales order (CancelOrder) which reverses stock
 // and puts the order in "Cancelada". See createFinalERPOrder for the creation side.
-// paymentEventName maps the resolved cart payment status to its canonical
-// group-E domain event. "cancelled" is intentionally absent (covered by
-// order.cancelled); "refunded" carries both merchant refunds and chargebacks
-// until the provider status distinguishes them.
-var paymentEventName = map[string]events.Name{
-	"paid":     events.PaymentSucceeded,
-	"failed":   events.PaymentFailed,
-	"refunded": events.PaymentRefunded,
-	"pending":  events.PaymentProcessing,
+// cartPaymentFact is the specific-fact strategy: the resolved cart payment
+// status → the canonical fact the reactors subscribe to. paid/refunded carry the
+// fan-out (cart.paid/cart.refunded reactors); failed/cancelled are terminal facts
+// (cancelled's email stays inline — shared-producer). pending emits nothing
+// (deprecated telemetry). Refund vs chargeback stay conflated in cart.refunded
+// until the provider status exposes the dispute type.
+var cartPaymentFact = map[string]events.Name{
+	"paid":      events.CartPaid,
+	"refunded":  events.CartRefunded,
+	"failed":    events.PaymentFailed,
+	"cancelled": events.CartCancelled,
 }
 
 // DispatchPaymentProcess is the thin webhook edge (L1 of the event choreography):
@@ -3824,23 +3826,19 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		zap.String("payment_method", status.PaymentMethod),
 	)
 
-	// Emit the canonical payment.* domain event (group E) right after the guarded
-	// UpdateCartPaymentStatus committed — so it only fires when the transition
-	// actually held (the WHERE status NOT IN ('expired','cancelled') guard and
-	// the ErrCartNotPayable early-return above already filtered the races). The
-	// origin provider travels as Envelope.Source. Best-effort: the money already
-	// moved and the webhook must ACK; dedup by payment_id so MP's at-least-once
-	// burst doesn't double-count downstream. "cancelled" has no group-E event —
-	// it's represented by order.cancelled (group F). Refund vs chargeback stay
-	// conflated as payment.refunded until the provider status exposes the dispute
-	// type (see docs/async-events-analysis.md §4.E).
-	if name, ok := paymentEventName[cartPaymentStatus]; ok {
+	// Emit the canonical CART payment fact (specific-fact strategy — L3). It only
+	// fires when the guarded UpdateCartPaymentStatus actually held. The fan-out
+	// (coupon, order/GMV/email/waitlist, billing) now lives in REACTORS that
+	// consume cart.paid / cart.refunded (registered in main.newApp) — decoupled
+	// and retriable — instead of the inline cascade this method used to run.
+	// dedup by payment_id so the provider's at-least-once burst collapses.
+	if name, ok := cartPaymentFact[cartPaymentStatus]; ok {
 		payload, _ := json.Marshal(struct {
 			CartID    string `json:"cart_id"`
+			StoreID   string `json:"store_id"`
 			PaymentID string `json:"payment_id"`
-			Status    string `json:"status"`
 			Method    string `json:"payment_method"`
-		}{status.ExternalReference, status.PaymentID, cartPaymentStatus, status.PaymentMethod})
+		}{status.ExternalReference, input.StoreID, status.PaymentID, status.PaymentMethod})
 		_ = events.Emit(ctx, s.repo.queries, events.Envelope{
 			Name:     name,
 			Source:   events.Source(input.Provider),
@@ -3849,84 +3847,65 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		})
 	}
 
-	// Coupon redemption lifecycle. We never propagate the error — the money
-	// already moved and the webhook must ACK; we'd rather have an
-	// inconsistent redemption row that we can reconcile via cron than retry
-	// the webhook indefinitely and have MP back off our endpoint.
-	if s.couponSyncer != nil {
-		switch cartPaymentStatus {
-		case "paid":
-			if err := s.couponSyncer.OnCartPaid(ctx, status.ExternalReference); err != nil {
-				logger.From(ctx, s.logger).Error("coupon redemption confirm failed",
-					zap.String("cart_id", status.ExternalReference),
-					zap.Error(err),
-				)
-			}
-		case "refunded":
-			if err := s.couponSyncer.OnCartRefunded(ctx, status.ExternalReference); err != nil {
-				logger.From(ctx, s.logger).Error("coupon redemption refund failed",
-					zap.String("cart_id", status.ExternalReference),
-					zap.Error(err),
-				)
-			}
-		}
+	// cart.cancelled has a SECOND producer (blocked-handle cancel) with a
+	// different intent, so its reactor can't be shared safely — keep the
+	// payment-cancel email inline here.
+	if cartPaymentStatus == "cancelled" && s.postCheckoutHook != nil {
+		s.postCheckoutHook.OnCartCancelled(ctx, status.ExternalReference)
 	}
 
-	// PRD 007: estorno/chargeback devolve a taxa de sucesso da venda no
-	// ledger + credito de saldo Stripe (fire-and-forget).
-	if cartPaymentStatus == "refunded" && s.billingGate != nil {
-		s.billingGate.OnCartRefunded(ctx, input.StoreID, status.ExternalReference)
-	}
-
-	// E-mails transacionais dos estados negativos (exactly-once via timeline)
-	if s.postCheckoutHook != nil {
-		switch cartPaymentStatus {
-		case "cancelled":
-			s.postCheckoutHook.OnCartCancelled(ctx, status.ExternalReference)
-		case "refunded":
-			s.postCheckoutHook.OnCartRefunded(ctx, status.ExternalReference)
-		}
-	}
-
-	// Refund de cart convertido (design C): pedido confirmado no Tiny é
-	// cancelado e o estoque devolvido — situação 2 → estorno. Carts legados
-	// mantêm o TODO histórico (sem call site de CancelOrder).
+	// ERP stays inline (L2): it needs the FRESH gateway snapshot (its cart-id-only
+	// retry path requires the snapshot persisted first). refund → cancel Tiny +
+	// return stock; paid → finalise. Never propagate ERP errors (money already moved).
 	if cartPaymentStatus == "refunded" {
 		if err := s.RefundConvertedCartOrder(ctx, status.ExternalReference, input.StoreID); err != nil {
 			logger.From(ctx, s.logger).Error("failed to cancel refunded converted cart order",
-				zap.String("cart_id", status.ExternalReference),
-				zap.Error(err),
-			)
+				zap.String("cart_id", status.ExternalReference), zap.Error(err))
 		}
 	}
-
-	// Only the paid path triggers the ERP finalization. Everything else (failed,
-	// cancelled, pending, refunded) just updates the cart status for now — see
-	// the refunded TODO at the top of this method. Pix expirado/cancelado NÃO
-	// cancela o pedido convertido aqui: o comprador pode regenerar o pagamento
-	// (RegenerateCartCheckout) — quem cancela em definitivo é a expiração.
 	if cartPaymentStatus != "paid" {
 		return nil
 	}
-
-	// Customer-facing post-payment flow: receipt email + tracking token. Fired
-	// before ERP finalisation so a slow ERP call doesn't delay the email.
-	// Idempotent inside (skips when tracking_token already set), so webhook
-	// retries are safe.
-	if s.postCheckoutHook != nil {
-		s.postCheckoutHook.OnCartPaid(ctx, status.ExternalReference)
-	}
-
 	if err := s.finalizeOrConfirmCartERP(ctx, status.ExternalReference, input.StoreID, status); err != nil {
-		// Never propagate ERP errors to the payment provider — the money already
-		// moved. Log and fall through so the webhook ACKs.
 		logger.From(ctx, s.logger).Error("failed to finalize ERP order for paid cart",
 			zap.String("cart_id", status.ExternalReference),
-			zap.String("payment_id", status.PaymentID),
-			zap.Error(err),
-		)
+			zap.String("payment_id", status.PaymentID), zap.Error(err))
 	}
+	return nil
+}
 
+// ReactCartPaid is the cart.paid fan-out reactor (L3): confirms the coupon
+// redemption and runs the customer post-payment flow (tracking token, order
+// timeline, GMV, receipt email, waitlist fulfilment via postCheckoutHook.OnCartPaid).
+// Each step is idempotent (tracking_token set-once, order_events/ledger UNIQUE),
+// so asynq redelivery/retry is safe. ERP finalisation is NOT here — it stays
+// inline in ProcessPaymentNotification (needs the gateway snapshot).
+func (s *Service) ReactCartPaid(ctx context.Context, cartID string) error {
+	if s.couponSyncer != nil {
+		if err := s.couponSyncer.OnCartPaid(ctx, cartID); err != nil {
+			return fmt.Errorf("coupon confirm on cart.paid: %w", err)
+		}
+	}
+	if s.postCheckoutHook != nil {
+		s.postCheckoutHook.OnCartPaid(ctx, cartID)
+	}
+	return nil
+}
+
+// ReactCartRefunded is the cart.refunded fan-out reactor (L3): refunds the coupon
+// redemption, credits the success fee (billing), and sends the refund email.
+func (s *Service) ReactCartRefunded(ctx context.Context, cartID, storeID string) error {
+	if s.couponSyncer != nil {
+		if err := s.couponSyncer.OnCartRefunded(ctx, cartID); err != nil {
+			return fmt.Errorf("coupon refund on cart.refunded: %w", err)
+		}
+	}
+	if s.billingGate != nil {
+		s.billingGate.OnCartRefunded(ctx, storeID, cartID)
+	}
+	if s.postCheckoutHook != nil {
+		s.postCheckoutHook.OnCartRefunded(ctx, cartID)
+	}
 	return nil
 }
 

@@ -48,6 +48,12 @@ const (
 	CartExpired        Name = "cart.expired"
 	CartReopened       Name = "cart.reopened"
 	CartCancelled      Name = "cart.cancelled"
+	// CartPaid / CartRefunded are the canonical payment facts (specific-fact
+	// strategy): the payment consumer resolves the provider status and emits the
+	// right one; reactors (GMV, order, coupon, ...) subscribe to what they need.
+	// They replace the payment.succeeded/payment.refunded telemetry facts.
+	CartPaid     Name = "cart.paid"
+	CartRefunded Name = "cart.refunded"
 
 	// Stock & waitlist (group D).
 	StockReserved     Name = "stock.reserved"
