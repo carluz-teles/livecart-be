@@ -59,14 +59,11 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(GMVRecorded), logEvent(log))
 	mux.HandleFunc(string(GMVRefunded), logEvent(log))
 
-	// Group I — notifications.
+	// Group I — notifications (unified across channels; channel in the payload).
 	mux.HandleFunc(string(NotificationRequested), logEvent(log))
 	mux.HandleFunc(string(NotificationSent), logEvent(log))
 	mux.HandleFunc(string(NotificationFailed), logEvent(log))
 	mux.HandleFunc(string(NotificationSkipped), logEvent(log))
-	mux.HandleFunc(string(WhatsAppFallbackSent), logEvent(log))
-	mux.HandleFunc(string(WhatsAppFallbackFailed), logEvent(log))
-	mux.HandleFunc(string(EmailSent), logEvent(log))
 
 	// Group G — ERP / Tiny.
 	mux.HandleFunc(string(ERPOrderCreated), logEvent(log))

@@ -268,19 +268,22 @@ func emailAuditHook(log *zap.Logger, queries *sqlc.Queries) email.AuditHook {
 			)
 		}
 
-		// Group I: email.sent — the single canonical point for every outbound
-		// email (order receipts, invitations, ...). Best-effort observability.
+		// Group I: notification.sent (channel=email) — the single canonical point
+		// for every outbound email (order receipts, invitations, ...). Merged into
+		// the unified notification.* vocabulary (was email.sent); the channel lives
+		// in the payload so analytics has one fact across channels. Best-effort.
 		if e.Status == email.AuditStatusSent {
 			dedup := e.ProviderMessageID
 			if dedup == "" {
 				dedup = e.StoreID + ":" + e.Kind + ":" + e.ToEmail
 			}
-			_ = events.EmitInternal(ctx, queries, events.EmailSent, "email.sent:"+dedup, struct {
-				StoreID string `json:"store_id"`
-				CartID  string `json:"cart_id,omitempty"`
-				Kind    string `json:"kind"`
-				To      string `json:"to"`
-			}{e.StoreID, e.CartID, e.Kind, e.ToEmail})
+			_ = events.EmitInternal(ctx, queries, events.NotificationSent, "notification.sent:email:"+dedup, struct {
+				StoreID          string `json:"store_id"`
+				NotificationType string `json:"notification_type"`
+				Channel          string `json:"channel"`
+				Recipient        string `json:"recipient"`
+				CartID           string `json:"cart_id,omitempty"`
+			}{e.StoreID, e.Kind, "email", e.ToEmail, e.CartID})
 		}
 	}
 }

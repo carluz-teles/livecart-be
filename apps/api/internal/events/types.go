@@ -113,15 +113,15 @@ const (
 	GMVRecorded              Name = "gmv.recorded"
 	GMVRefunded              Name = "gmv.refunded"
 
-	// Notifications (group I). One fact per outbound message lifecycle; the
-	// channel (instagram_dm / whatsapp / email) travels in Envelope.Source.
-	NotificationRequested  Name = "notification.requested"
-	NotificationSent       Name = "notification.sent"
-	NotificationFailed     Name = "notification.failed"
-	NotificationSkipped    Name = "notification.skipped"
-	WhatsAppFallbackSent   Name = "whatsapp.fallback_sent"
-	WhatsAppFallbackFailed Name = "whatsapp.fallback_failed"
-	EmailSent              Name = "email.sent"
+	// Notifications (group I). One canonical fact per outbound message lifecycle
+	// across ALL channels; the channel (instagram_dm / whatsapp / email) travels in
+	// the payload's `channel` field (Source stays internal). email.sent and
+	// whatsapp.fallback_sent/failed were merged into notification.sent/failed so
+	// the analytics exporter sees one vocabulary with channel as a dimension.
+	NotificationRequested Name = "notification.requested"
+	NotificationSent      Name = "notification.sent"
+	NotificationFailed    Name = "notification.failed"
+	NotificationSkipped   Name = "notification.skipped"
 
 	// ERP / Tiny (group G). Best-effort facts around the resumable ERP order
 	// state machine.

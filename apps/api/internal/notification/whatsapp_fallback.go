@@ -91,13 +91,14 @@ func (s *Service) tryWhatsAppFallback(ctx context.Context, input SendInput) stri
 			zap.String("cart_id", input.CartID),
 			zap.Error(err),
 		)
-		// Group I: WhatsApp fallback attempt failed.
+		// Group I: notification.failed (channel=whatsapp) — merged into the unified
+		// notification.* vocabulary (was whatsapp.fallback_failed).
 		waFailKey := logID
 		if waFailKey == "" {
 			waFailKey = input.StoreID + ":" + input.CartID
 		}
-		_ = events.EmitInternal(ctx, s.queries, events.WhatsAppFallbackFailed,
-			"whatsapp.fallback_failed:"+waFailKey,
+		_ = events.EmitInternal(ctx, s.queries, events.NotificationFailed,
+			"notification.failed:whatsapp:"+waFailKey,
 			struct {
 				StoreID          string `json:"store_id"`
 				NotificationType string `json:"notification_type"`
@@ -115,13 +116,14 @@ func (s *Service) tryWhatsAppFallback(ctx context.Context, input SendInput) stri
 		zap.String("store_id", input.StoreID),
 		zap.String("cart_id", input.CartID),
 	)
-	// Group I: WhatsApp fallback delivered the reminder.
+	// Group I: notification.sent (channel=whatsapp) — merged into the unified
+	// notification.* vocabulary (was whatsapp.fallback_sent).
 	waSentKey := logID
 	if waSentKey == "" {
 		waSentKey = input.StoreID + ":" + input.CartID
 	}
-	_ = events.EmitInternal(ctx, s.queries, events.WhatsAppFallbackSent,
-		"whatsapp.fallback_sent:"+waSentKey,
+	_ = events.EmitInternal(ctx, s.queries, events.NotificationSent,
+		"notification.sent:whatsapp:"+waSentKey,
 		struct {
 			StoreID          string `json:"store_id"`
 			NotificationType string `json:"notification_type"`
