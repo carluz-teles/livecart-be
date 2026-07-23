@@ -3817,18 +3817,14 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		s.postCheckoutHook.OnCartCancelled(ctx, status.ExternalReference)
 	}
 
-	// ERP stays inline (L2): it needs the FRESH gateway snapshot (its cart-id-only
-	// retry path requires the snapshot persisted first). refund → cancel Tiny +
-	// return stock; paid → finalise. Never propagate ERP errors (money already moved).
-	if cartPaymentStatus == "refunded" {
-		if err := s.RefundConvertedCartOrder(ctx, status.ExternalReference, input.StoreID); err != nil {
-			logger.From(ctx, s.logger).Error("failed to cancel refunded converted cart order",
-				zap.String("cart_id", status.ExternalReference), zap.Error(err))
-		}
-	}
+	// ERP refund (Tiny cancel + stock return) moved to the cart.refunded reactor
+	// (ReactCartRefunded): it works from cart_id + store_id, so it gets its own
+	// asynq retry + DLQ instead of the swallowed inline best-effort it used to be.
 	if cartPaymentStatus != "paid" {
 		return nil
 	}
+	// ERP finalisation (paid) stays inline (L2): it needs the FRESH gateway
+	// snapshot. Never propagate ERP errors (money already moved).
 	if err := s.finalizeOrConfirmCartERP(ctx, status.ExternalReference, input.StoreID, status); err != nil {
 		logger.From(ctx, s.logger).Error("failed to finalize ERP order for paid cart",
 			zap.String("cart_id", status.ExternalReference),
@@ -3856,7 +3852,11 @@ func (s *Service) ReactCartPaid(ctx context.Context, cartID string) error {
 }
 
 // ReactCartRefunded is the cart.refunded fan-out reactor (L3): refunds the coupon
-// redemption, credits the success fee (billing), and sends the refund email.
+// redemption, credits the success fee (billing), sends the refund email, and
+// cancels the converted ERP order. Each step is idempotent (order_events/ledger
+// UNIQUE, erp_order_state guard), so asynq redelivery/retry is safe. The ERP
+// refund works from cart_id + store_id (no gateway snapshot), unlike the paid
+// finalisation which stays inline in ProcessPaymentNotification.
 func (s *Service) ReactCartRefunded(ctx context.Context, cartID, storeID string) error {
 	if s.couponSyncer != nil {
 		if err := s.couponSyncer.OnCartRefunded(ctx, cartID); err != nil {
@@ -3869,6 +3869,33 @@ func (s *Service) ReactCartRefunded(ctx context.Context, cartID, storeID string)
 	if s.postCheckoutHook != nil {
 		s.postCheckoutHook.OnCartRefunded(ctx, cartID)
 	}
+	// ERP: cancel the converted Tiny order + return stock. Idempotent by
+	// erp_order_state (once cancelled, a re-run no-ops), so returning the error to
+	// get asynq retry + DLQ is safe — this path needs no payment snapshot.
+	if err := s.RefundConvertedCartOrder(ctx, cartID, storeID); err != nil {
+		return fmt.Errorf("erp refund on cart.refunded: %w", err)
+	}
+	return nil
+}
+
+// ReactCartExpiredERP is the cart.expired reactor (L3): it reverses the cart's
+// ERP footprint in Tiny, decoupled from ExpireCart's eligibility flip so it gets
+// its own asynq retry + DLQ. Design-C converted carts get their order cancelled
+// (idempotent by erp_order_state, so the error is returned for retry); non-converted
+// carts have their saída-manual reservations reversed best-effort (the local rows
+// are marked reversed regardless, so that path does not meaningfully retry).
+func (s *Service) ReactCartExpiredERP(ctx context.Context, cartID, storeID string) error {
+	ctx = logger.WithStore(ctx, storeID, "")
+	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
+	if err != nil {
+		return fmt.Errorf("loading cart ERP order state on expiry: %w", err)
+	}
+	if st.State != erpOrderStateNone && st.State != erpOrderStateCancelled {
+		// Design C: cancelling the converted order returns stock in Tiny.
+		return s.CancelERPOrderForCart(ctx, cartID, storeID)
+	}
+	// Legacy (non-converted): reverse the saída-manual reservations per cart.
+	s.reverseCartReservationsInERP(ctx, cartID, storeID)
 	return nil
 }
 
@@ -6606,7 +6633,7 @@ func (s *Service) ExpireCart(ctx context.Context, cartID, storeID string) {
 	}
 	defer release()
 
-	res, err := s.repo.ExpireCartAndReleaseStock(ctx, cartID)
+	res, err := s.repo.ExpireCartAndReleaseStock(ctx, cartID, storeID)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("expiry: failed to expire cart", zap.String("cart_id", cartID), zap.Error(err))
 		return
@@ -6617,18 +6644,10 @@ func (s *Service) ExpireCart(ctx context.Context, cartID, storeID string) {
 		return
 	}
 
-	// ERP: cart convertido (design C) → cancelar o pedido devolve o estoque no
-	// Tiny (situação 2 + estorno). Caso contrário, reverter as reservas
-	// saída-manual POR CART (não por produto — evita o vazamento de D2).
-	if st, stErr := s.repo.GetCartERPOrderState(ctx, cartID); stErr == nil &&
-		st.State != erpOrderStateNone && st.State != erpOrderStateCancelled {
-		if cancelErr := s.CancelERPOrderForCart(ctx, cartID, storeID); cancelErr != nil {
-			logger.From(ctx, s.logger).Error("expiry: failed to cancel converted cart order",
-				zap.String("cart_id", cartID), zap.Error(cancelErr))
-		}
-	} else {
-		s.reverseCartReservationsInERP(ctx, cartID, storeID)
-	}
+	// ERP reversal (Tiny cancel/estorno) now runs in the cart.expired reactor
+	// (ReactCartExpiredERP), decoupled from this eligibility flip so it gets its
+	// own asynq retry + DLQ. The cart.expired fact was emitted transactionally
+	// inside ExpireCartAndReleaseStock above.
 
 	logger.From(ctx, s.logger).Info("expired cart processed",
 		zap.String("cart_id", cartID),

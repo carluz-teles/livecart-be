@@ -1993,7 +1993,7 @@ type ExpireCartResult struct {
 // commitado, o cart sai de ListExpiredCarts e um retry pós-crash não redevolve;
 // um crash antes do commit reverte tudo (o cart segue elegível, sem vazamento).
 // As ações de ERP (best-effort, remotas) ficam FORA deste tx, no Service.
-func (r *Repository) ExpireCartAndReleaseStock(ctx context.Context, cartID string) (ExpireCartResult, error) {
+func (r *Repository) ExpireCartAndReleaseStock(ctx context.Context, cartID, storeID string) (ExpireCartResult, error) {
 	cID, err := parseUUID(cartID)
 	if err != nil {
 		return ExpireCartResult{}, err
@@ -2039,12 +2039,14 @@ func (r *Repository) ExpireCartAndReleaseStock(ctx context.Context, cartID strin
 		}
 
 		// cart.expired in the SAME tx: committed atomically with the flip + stock
-		// release, so it is never lost. Payload carries data only known in-tx.
+		// release, so it is never lost. store_id lets the ERP reversal consumer
+		// (ReactCartExpiredERP) act without a cart→store lookup.
 		if err := events.EmitInternal(ctx, q, events.CartExpired, "cart.expired:"+cartID, struct {
 			CartID          string   `json:"cart_id"`
+			StoreID         string   `json:"store_id"`
 			EventID         string   `json:"event_id"`
 			FreedProductIDs []string `json:"freed_product_ids"`
-		}{CartID: cartID, EventID: eventID, FreedProductIDs: freed}); err != nil {
+		}{CartID: cartID, StoreID: storeID, EventID: eventID, FreedProductIDs: freed}); err != nil {
 			return fmt.Errorf("emitting cart.expired: %w", err)
 		}
 

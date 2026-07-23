@@ -25,13 +25,12 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(SessionEnded), logEvent(log))
 	mux.HandleFunc(string(PostWindowClosed), logEvent(log))
 	mux.HandleFunc(string(CartItemAdded), logEvent(log))
-	// CartCheckoutArmed and CartReopened are registered by the composition root
-	// (main.newApp) with a handler that logs AND arms the cart.expire ETA timer —
-	// those are the points where expires_at is actually set (live carts have NO
-	// window until the event ends). Registering them here too would panic asynq
-	// on a duplicate pattern.
+	// CartCheckoutArmed, CartReopened and CartExpired are registered by the
+	// composition root (main.newApp) with domain handlers: checkout_armed/reopened
+	// arm the cart.expire ETA timer (where expires_at is set — live carts have no
+	// window until the event ends); cart.expired drives the ERP reversal reactor.
+	// Registering them here too would panic asynq on a duplicate pattern.
 	mux.HandleFunc(string(CartCancelled), logEvent(log))
-	mux.HandleFunc(string(CartExpired), logEvent(log))
 
 	// Group D — stock & waitlist. Observability-only for now.
 	mux.HandleFunc(string(StockReserved), logEvent(log))

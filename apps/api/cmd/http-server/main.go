@@ -992,6 +992,30 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			return integrationSvc.ReactCartRefunded(ctx, p.CartID, p.StoreID)
 		})
 
+		// cart.expired reactor: reverse the cart's ERP footprint (Tiny cancel /
+		// reservation estorno). Decoupled from the expiry flip so it retries + DLQs
+		// on its own. store_id rides the fact payload (emitted transactionally in
+		// ExpireCartAndReleaseStock). Registered here — cart.expired is NOT in the
+		// default logEvent registry (double registration would panic asynq).
+		eventsServer.Register(events.CartExpired, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				CartID  string `json:"cart_id"`
+				StoreID string `json:"store_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" || p.StoreID == "" {
+				return asynq.SkipRetry
+			}
+			logger.From(ctx, log).Info("event observed",
+				zap.String("event", string(env.Name)),
+				zap.String("event_id", env.EventID),
+			)
+			return integrationSvc.ReactCartExpiredERP(ctx, p.CartID, p.StoreID)
+		})
+
 		// ETA-based cart expiry: schedule a cart.expire task at the cart's
 		// expires_at (asynq ProcessAt) so it expires on the second, with the
 		// 5-min sweep kept as a safety net. The window is set at checkout-arm
