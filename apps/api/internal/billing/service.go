@@ -239,7 +239,23 @@ func timePtr(ts pgtype.Timestamptz) *time.Time {
 // WEBHOOK PROCESSING
 // =============================================================================
 
-// ProcessWebhookEvent applies a verified Stripe event to the local table.
+// DispatchWebhookEvent is the thin webhook edge (billing L1 of the event
+// choreography): it emits a subscription.process COMMAND carrying the raw Stripe
+// event to the transactional outbox instead of running ProcessWebhookEvent
+// synchronously in the request. The command consumer (main.newApp) runs the
+// guarded processing with asynq retry + dead-letter, and the outbox makes it
+// crash-durable. Dedup by the Stripe event id so at-least-once webhook
+// redelivery collapses to a single command (ProcessWebhookEvent is idempotent
+// besides). Emitting unconditionally keeps this edge free of domain knowledge —
+// the consumer's switch no-ops the event types billing doesn't handle.
+func (s *Service) DispatchWebhookEvent(ctx context.Context, event *StripeEvent) error {
+	return events.EmitInternal(ctx, s.queries, events.SubscriptionProcess,
+		"subscription.process:"+event.ID, event)
+}
+
+// ProcessWebhookEvent applies a verified Stripe event to the local table. It is
+// the billing L2 command executor: run by the subscription.process consumer,
+// guarded + retriable, and it emits the canonical subscription.* facts.
 func (s *Service) ProcessWebhookEvent(ctx context.Context, event *StripeEvent) error {
 	switch event.Type {
 	case "customer.subscription.created",

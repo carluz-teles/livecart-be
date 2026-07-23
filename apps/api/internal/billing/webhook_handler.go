@@ -55,14 +55,17 @@ func (h *WebhookHandler) HandleStripe(c *fiber.Ctx) error {
 		return httpx.ErrBadRequest("invalid event payload")
 	}
 
-	if err := h.service.ProcessWebhookEvent(c.UserContext(), &event); err != nil {
-		// 500 makes Stripe retry — desired for transient DB failures.
-		logger.From(c.UserContext(), h.logger).Error("failed to process stripe event",
+	// L1 dispatch: emit the subscription.process command to the durable outbox and
+	// ACK immediately. The command consumer runs the guarded ProcessWebhookEvent
+	// with asynq retry + DLQ, so the handler no longer blocks the request on the
+	// DB write. 500 (Stripe retries) only when the emit itself fails.
+	if err := h.service.DispatchWebhookEvent(c.UserContext(), &event); err != nil {
+		logger.From(c.UserContext(), h.logger).Error("failed to dispatch stripe event",
 			zap.String("event", event.ID),
 			zap.String("type", event.Type),
 			zap.Error(err),
 		)
-		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "processing failed"})
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "dispatch failed"})
 	}
 
 	return httpx.OK(c, fiber.Map{"received": true})

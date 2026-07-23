@@ -94,6 +94,14 @@ const (
 	// waiting for the SweepEndedTimedEvents sweep, which stays as the backstop.
 	EventWindowClose Name = "event.window_close"
 
+	// SubscriptionProcess is a COMMAND (billing L1→L2 inversion): the Stripe
+	// webhook is a thin dispatcher that emits it to the outbox carrying the raw
+	// event; the consumer runs the guarded ProcessWebhookEvent with asynq retry +
+	// DLQ instead of processing synchronously in the request. Dedup by the Stripe
+	// event id — Stripe redelivers the same id at-least-once, so the constraint
+	// collapses redeliveries (and ProcessWebhookEvent is itself idempotent).
+	SubscriptionProcess Name = "subscription.process"
+
 	// Billing / subscription (group J, PRD 007). The subscription lifecycle
 	// facts are emitted from the Stripe-webhook hub (applySubscription); GMV
 	// facts from the metered-fee ledger.

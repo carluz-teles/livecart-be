@@ -1053,6 +1053,23 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		})
 	}
 
+	// Billing choreography L2: the subscription.process command (emitted by the
+	// thin Stripe webhook dispatcher) runs the guarded ProcessWebhookEvent with
+	// asynq retry + dead-letter instead of processing synchronously in-request.
+	// It reconstructs the raw Stripe event and reconciles the local subscription,
+	// emitting the canonical subscription.* facts.
+	eventsServer.Register(events.SubscriptionProcess, func(ctx context.Context, t *asynq.Task) error {
+		var env events.Envelope
+		if err := json.Unmarshal(t.Payload(), &env); err != nil {
+			return asynq.SkipRetry
+		}
+		var event billing.StripeEvent
+		if err := json.Unmarshal(env.Payload, &event); err != nil {
+			return asynq.SkipRetry
+		}
+		return billingSvc.ProcessWebhookEvent(ctx, &event)
+	})
+
 	// Group J: trial-ending reminder ETA task (billing — not gated on the
 	// integration layer). Armed at trial_ends_at - N days in EnsureTrialSubscription;
 	// the handler no-ops if the store already converted, else logs the signal
