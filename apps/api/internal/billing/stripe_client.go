@@ -25,6 +25,22 @@ import (
 
 const stripeAPIBaseURL = "https://api.stripe.com/v1"
 
+// stripeGateway is the billing package's narrow view of the Stripe API.
+// Defined here so tests can inject a stub without pulling in the concrete client.
+type stripeGateway interface {
+	CreateCustomer(ctx context.Context, storeID, storeName, email string) (*StripeCustomer, error)
+	CreateTrialSubscription(ctx context.Context, customerID string, cfg PlanConfig, trialEnd time.Time) (*StripeSubscription, error)
+	GetSubscription(ctx context.Context, subscriptionID string) (*StripeSubscription, error)
+	CreateSetupCheckoutSession(ctx context.Context, customerID, successURL, cancelURL string, metadata map[string]string) (*CheckoutSession, error)
+	GetSetupIntentPaymentMethod(ctx context.Context, setupIntentID string) (string, error)
+	ActivateSubscription(ctx context.Context, sub *StripeSubscription, cfg PlanConfig, paymentMethodID string) (*StripeSubscription, error)
+	CreatePortalSession(ctx context.Context, customerID, returnURL string) (string, error)
+	UpgradeSubscription(ctx context.Context, sub *StripeSubscription, cfg PlanConfig) (*StripeSubscription, error)
+	ScheduleDowngrade(ctx context.Context, sub *StripeSubscription, cfg PlanConfig) error
+	SendMeterEvent(ctx context.Context, eventName, customerID, identifier string, valueCents int64) error
+	CreateCustomerBalanceCredit(ctx context.Context, customerID string, amountCents int64, description string) error
+}
+
 // StripeClient talks to the Stripe API with the platform secret key.
 type StripeClient struct {
 	secretKey  string

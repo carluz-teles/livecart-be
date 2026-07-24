@@ -1196,6 +1196,22 @@ func (q *Queries) GetCartERPOrderState(ctx context.Context, id pgtype.UUID) (Get
 	return i, err
 }
 
+const getCartGMVCents = `-- name: GetCartGMVCents :one
+SELECT COALESCE(SUM(quantity * unit_price), 0)::bigint AS gmv_cents
+FROM cart_items
+WHERE cart_id = $1
+`
+
+// GMV de um cart: soma de quantity*unit_price dos itens — exclui frete e cupom.
+// Fonte única de verdade usada pelo billing reactor (OnCartPaid) e pelo fallback
+// de rollout quando o payload de cart.paid chega sem gmv_cents.
+func (q *Queries) GetCartGMVCents(ctx context.Context, cartID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, getCartGMVCents, cartID)
+	var gmv_cents int64
+	err := row.Scan(&gmv_cents)
+	return gmv_cents, err
+}
+
 const getCartItem = `-- name: GetCartItem :one
 SELECT id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id FROM cart_items WHERE id = $1
 `

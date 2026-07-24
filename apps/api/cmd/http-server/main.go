@@ -600,8 +600,6 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				log,
 			)
 			postCheckoutSvc.SetNotificationService(notificationSvc)
-			// PRD 007: taxa metered de GMV — pedido pago vira meter event
-			postCheckoutSvc.SetGMVReporter(billingSvc)
 			integrationSvc.SetPostCheckoutHook(postCheckoutSvc)
 
 			// Start background token refresh worker
@@ -972,16 +970,17 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			var p struct {
 				CartID          string          `json:"cart_id"`
 				StoreID         string          `json:"store_id"`
+				GMVCents        int64           `json:"gmv_cents"`
 				PaymentSnapshot json.RawMessage `json:"payment_snapshot"`
 			}
 			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" {
 				return asynq.SkipRetry
 			}
-			// Customer-facing fan-out (coupon, tracking, timeline, GMV, receipt,
-			// waitlist) then ERP finalisation (needs the gateway snapshot). Both run
-			// in this one cart.paid task; an error retries the whole task (each step
-			// is idempotent) and dead-letters after MaxRetry.
-			if err := integrationSvc.ReactCartPaid(ctx, p.CartID); err != nil {
+			// Customer-facing fan-out (coupon, tracking, timeline, GMV ledger,
+			// receipt, waitlist) then ERP finalisation (needs the gateway snapshot).
+			// Both run in this one cart.paid task; an error retries the whole task
+			// (each step is idempotent) and dead-letters after MaxRetry.
+			if err := integrationSvc.ReactCartPaid(ctx, p.CartID, p.StoreID, p.GMVCents); err != nil {
 				return err
 			}
 			return integrationSvc.ReactCartPaidERP(ctx, p.CartID, p.StoreID, p.PaymentSnapshot)

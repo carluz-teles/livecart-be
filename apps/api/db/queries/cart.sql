@@ -764,3 +764,11 @@ FROM carts c
 JOIN live_events le ON le.id = c.event_id
 WHERE c.erp_order_state IN ('converting','mutating')
   AND c.erp_op_started_at < now() - make_interval(secs => sqlc.arg(older_than_seconds)::int);
+
+-- name: GetCartGMVCents :one
+-- GMV de um cart: soma de quantity*unit_price dos itens — exclui frete e cupom.
+-- Fonte única de verdade usada pelo billing reactor (OnCartPaid) e pelo fallback
+-- de rollout quando o payload de cart.paid chega sem gmv_cents.
+SELECT COALESCE(SUM(quantity * unit_price), 0)::bigint AS gmv_cents
+FROM cart_items
+WHERE cart_id = $1;
