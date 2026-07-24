@@ -258,6 +258,13 @@ internal/<dominio>/
   fato de outro domínio (ex.: `billing/listeners` escuta `cart.paid` → grava o ledger;
   `inventory/listeners` escuta `cart.paid` → fulfill waitlist; `notification/listeners`
   escuta `cart.*` → envia).
+- **CONVENÇÃO DE NOME (regra do dono):** todo listener/reactor é nomeado **`On<Fato>`**
+  — `OnCartPaid`, `OnCartRefunded`, `OnCartExpired`, `OnShipmentDelivered`… Um método
+  `On<Fato>` = "este domínio reage ao fato `<fato>`". Retorna `error` (o erro sobe pra
+  task asynq → retry+DLQ); é idempotente. Nada de nomes ad-hoc tipo `RecordCartSale`
+  ou `ReportPaidGMV` para reações a evento — sempre `On<Fato>`. (Handlers síncronos
+  seguem o nome do use case, ex. `ProcessCardPayment`; a regra `On<Fato>` é só para
+  listeners.)
 - O `main.newApp` compõe: registra cada `listener` no `eventsServer` para o fato que
   ele assina. Um fato pode ter N listeners (um por domínio) — hoje eles estão
   amontoados em `ReactCartPaid`; a meta é cada domínio ter o seu.
