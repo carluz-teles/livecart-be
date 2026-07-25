@@ -12,23 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const expireOrderByCartID = `-- name: ExpireOrderByCartID :one
-UPDATE orders
-SET status     = 'expired',
-    updated_at = now()
-WHERE cart_id = $1 AND status = 'pending_payment'
-RETURNING id
-`
-
-// Transiciona Order pending_payment → expired (terminal). Idempotente: se já
-// está expired/paid retorna ErrNoRows (no-op no caller).
-func (q *Queries) ExpireOrderByCartID(ctx context.Context, cartID pgtype.UUID) (pgtype.UUID, error) {
-	row := q.db.QueryRow(ctx, expireOrderByCartID, cartID)
-	var id pgtype.UUID
-	err := row.Scan(&id)
-	return id, err
-}
-
 const getCartItemsForOrderMaterialization = `-- name: GetCartItemsForOrderMaterialization :many
 SELECT
     ci.product_id,
@@ -73,32 +56,12 @@ func (q *Queries) GetCartItemsForOrderMaterialization(ctx context.Context, cartI
 	return items, nil
 }
 
-const getOrderByCartIDForSeal = `-- name: GetOrderByCartIDForSeal :one
-
-SELECT id, status FROM orders WHERE cart_id = $1
-`
-
-type GetOrderByCartIDForSealRow struct {
-	ID     pgtype.UUID `json:"id"`
-	Status string      `json:"status"`
-}
-
-// ── Fatia 2: ciclo de vida DRAFT ─────────────────────────────────────────────
-// Retorna id e status da Order pelo cart_id — usado pelo OnCartPaid para
-// decidir entre seal (draft existente) e insert-on-fly (sem draft).
-func (q *Queries) GetOrderByCartIDForSeal(ctx context.Context, cartID pgtype.UUID) (GetOrderByCartIDForSealRow, error) {
-	row := q.db.QueryRow(ctx, getOrderByCartIDForSeal, cartID)
-	var i GetOrderByCartIDForSealRow
-	err := row.Scan(&i.ID, &i.Status)
-	return i, err
-}
-
 const getOrderIDByCartID = `-- name: GetOrderIDByCartID :one
 
 SELECT id FROM orders WHERE cart_id = $1
 `
 
-// Queries de escrita para materialização da Order (Fatias A e 2).
+// Queries de escrita para materialização da Order (Fatia A).
 // Leitura da Order (read-models) permanece em order.sql até Fase B.
 // Idempotência: verifica se já existe Order para este cart.
 func (q *Queries) GetOrderIDByCartID(ctx context.Context, cartID pgtype.UUID) (pgtype.UUID, error) {
@@ -274,117 +237,6 @@ func (q *Queries) InsertOrderPayment(ctx context.Context, arg InsertOrderPayment
 	_, err := q.db.Exec(ctx, insertOrderPayment,
 		arg.OrderID,
 		arg.PaymentStatus,
-		arg.PaymentMethod,
-		arg.CardSnapshot,
-		arg.GatewaySnapshot,
-		arg.CouponID,
-		arg.CouponCode,
-		arg.CouponDiscountCents,
-	)
-	return err
-}
-
-const sealOrder = `-- name: SealOrder :exec
-UPDATE orders
-SET status          = 'paid',
-    total_cents     = $2,
-    discount_cents  = $3,
-    shipping_cents  = $4,
-    paid_total_cents = $5,
-    paid_at         = $6,
-    updated_at      = now()
-WHERE id = $1
-`
-
-type SealOrderParams struct {
-	ID             pgtype.UUID        `json:"id"`
-	TotalCents     pgtype.Int8        `json:"total_cents"`
-	DiscountCents  int64              `json:"discount_cents"`
-	ShippingCents  int64              `json:"shipping_cents"`
-	PaidTotalCents pgtype.Int8        `json:"paid_total_cents"`
-	PaidAt         pgtype.Timestamptz `json:"paid_at"`
-}
-
-// Congela os totais da Order draft → paid. WHERE guarda contra double-seal.
-func (q *Queries) SealOrder(ctx context.Context, arg SealOrderParams) error {
-	_, err := q.db.Exec(ctx, sealOrder,
-		arg.ID,
-		arg.TotalCents,
-		arg.DiscountCents,
-		arg.ShippingCents,
-		arg.PaidTotalCents,
-		arg.PaidAt,
-	)
-	return err
-}
-
-const sealOrderLogistics = `-- name: SealOrderLogistics :exec
-UPDATE order_logistics
-SET shipping_address       = $2,
-    shipping_service_id    = $3,
-    shipping_service_name  = $4,
-    shipping_carrier       = $5,
-    shipping_cost_cents    = $6,
-    shipping_cost_real_cents = $7,
-    shipping_deadline_days = $8,
-    tracking_token         = $9
-WHERE order_id = $1
-`
-
-type SealOrderLogisticsParams struct {
-	OrderID               pgtype.UUID     `json:"order_id"`
-	ShippingAddress       json.RawMessage `json:"shipping_address"`
-	ShippingServiceID     pgtype.Int4     `json:"shipping_service_id"`
-	ShippingServiceName   pgtype.Text     `json:"shipping_service_name"`
-	ShippingCarrier       pgtype.Text     `json:"shipping_carrier"`
-	ShippingCostCents     pgtype.Int8     `json:"shipping_cost_cents"`
-	ShippingCostRealCents pgtype.Int8     `json:"shipping_cost_real_cents"`
-	ShippingDeadlineDays  pgtype.Int4     `json:"shipping_deadline_days"`
-	TrackingToken         pgtype.Text     `json:"tracking_token"`
-}
-
-// Congela o endereço e frete na order_logistics draft.
-func (q *Queries) SealOrderLogistics(ctx context.Context, arg SealOrderLogisticsParams) error {
-	_, err := q.db.Exec(ctx, sealOrderLogistics,
-		arg.OrderID,
-		arg.ShippingAddress,
-		arg.ShippingServiceID,
-		arg.ShippingServiceName,
-		arg.ShippingCarrier,
-		arg.ShippingCostCents,
-		arg.ShippingCostRealCents,
-		arg.ShippingDeadlineDays,
-		arg.TrackingToken,
-	)
-	return err
-}
-
-const sealOrderPayment = `-- name: SealOrderPayment :exec
-UPDATE order_payments
-SET payment_status       = 'paid',
-    payment_method       = $2,
-    card_snapshot        = $3,
-    gateway_snapshot     = $4,
-    coupon_id            = $5,
-    coupon_code          = $6,
-    coupon_discount_cents = $7
-WHERE order_id = $1
-`
-
-type SealOrderPaymentParams struct {
-	OrderID             pgtype.UUID     `json:"order_id"`
-	PaymentMethod       pgtype.Text     `json:"payment_method"`
-	CardSnapshot        json.RawMessage `json:"card_snapshot"`
-	GatewaySnapshot     json.RawMessage `json:"gateway_snapshot"`
-	CouponID            pgtype.UUID     `json:"coupon_id"`
-	CouponCode          pgtype.Text     `json:"coupon_code"`
-	CouponDiscountCents int64           `json:"coupon_discount_cents"`
-}
-
-// Preenche os campos de pagamento da order_payment draft → paid.
-func (q *Queries) SealOrderPayment(ctx context.Context, arg SealOrderPaymentParams) error {
-	_, err := q.db.Exec(ctx, sealOrderPayment,
-		arg.OrderID,
 		arg.PaymentMethod,
 		arg.CardSnapshot,
 		arg.GatewaySnapshot,

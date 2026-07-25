@@ -48,12 +48,6 @@ type PostCheckoutHook interface {
 	OnDelivered(ctx context.Context, cartID, source string)
 }
 
-// OrderDraftEnsurer creates the Order draft at checkout initiation.
-// Implemented by order/listeners.Listener and wired at boot via SetOrderEnsurer.
-type OrderDraftEnsurer interface {
-	EnsureOrderForCheckout(ctx context.Context, cartID, storeID string)
-}
-
 // Service handles business logic for public checkout.
 type Service struct {
 	repo               *Repository
@@ -61,7 +55,6 @@ type Service struct {
 	integrationService *integration.Service
 	couponLifecycle    CouponLifecycle
 	postCheckoutHook   PostCheckoutHook
-	orderEnsurer       OrderDraftEnsurer
 	logger             *zap.Logger
 }
 
@@ -93,24 +86,13 @@ func (s *Service) SetPostCheckoutHook(hook PostCheckoutHook) {
 	s.postCheckoutHook = hook
 }
 
-// SetOrderEnsurer wires the order draft creator (order/listeners.Listener).
-// Best-effort: when unset, draft creation is skipped and OnCartPaid falls back
-// to creating the order on-the-fly.
-func (s *Service) SetOrderEnsurer(e OrderDraftEnsurer) {
-	s.orderEnsurer = e
-}
-
 // fireCheckoutInitHooks fires the payment-initiation side-effects in a
 // background goroutine so the checkout call never blocks on them.
-// PrepareCartForPayment (ERP Design C) runs for stores with the flag enabled;
-// EnsureOrderForCheckout runs for ALL stores (best-effort draft creation).
+// PrepareCartForPayment (ERP Design C) runs for stores with the flag enabled.
 func (s *Service) fireCheckoutInitHooks(cartID, storeID, storeSlug string) {
 	bgCtx := logger.WithStore(context.Background(), storeID, storeSlug)
 	go func() {
 		s.integrationService.PrepareCartForPayment(bgCtx, cartID, storeID)
-		if s.orderEnsurer != nil {
-			s.orderEnsurer.EnsureOrderForCheckout(bgCtx, cartID, storeID)
-		}
 	}()
 }
 

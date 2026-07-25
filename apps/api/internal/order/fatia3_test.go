@@ -78,10 +78,10 @@ func TestMirrorCartERPToOrder_E1_Logistics(t *testing.T) {
 	ctx := context.Background()
 	l := newListener(t)
 
-	r := seedCheckoutCart(t, 1, 5000)
-	l.EnsureOrderForCheckout(ctx, r.cartID, r.storeID)
-
-	// Cart com reserva ERP criada.
+	r := seedPaidCart(t, 1, 5000, 0, 0)
+	if err := l.OnCartPaid(ctx, r.cartID, r.storeID, 5000, nil); err != nil {
+		t.Fatalf("E1 OnCartPaid: %v", err)
+	}
 	setCartERPOrderState(t, r.cartID, "open", true)
 
 	l.MirrorCartERPToOrder(ctx, r.cartID)
@@ -116,9 +116,10 @@ func TestMirrorCartERPToOrder_E1b_LogisticsCancelled(t *testing.T) {
 	ctx := context.Background()
 	l := newListener(t)
 
-	r := seedCheckoutCart(t, 1, 3000)
-	l.EnsureOrderForCheckout(ctx, r.cartID, r.storeID)
-
+	r := seedPaidCart(t, 1, 3000, 0, 0)
+	if err := l.OnCartPaid(ctx, r.cartID, r.storeID, 3000, nil); err != nil {
+		t.Fatalf("E1b OnCartPaid: %v", err)
+	}
 	setCartERPOrderState(t, r.cartID, "cancelled", false)
 
 	l.MirrorCartERPToOrder(ctx, r.cartID)
@@ -144,9 +145,10 @@ func TestMirrorCartERPToOrder_E2_Payments(t *testing.T) {
 	ctx := context.Background()
 	l := newListener(t)
 
-	r := seedCheckoutCart(t, 2, 10000)
-	l.EnsureOrderForCheckout(ctx, r.cartID, r.storeID)
-
+	r := seedPaidCart(t, 2, 10000, 0, 0)
+	if err := l.OnCartPaid(ctx, r.cartID, r.storeID, 20000, nil); err != nil {
+		t.Fatalf("E2 OnCartPaid: %v", err)
+	}
 	setCartERPFinalisation(t, r.cartID, "tiny-ext-789", "done")
 	invoiceKey := fmt.Sprintf("%044d", time.Now().UnixNano()%10000000000000000)
 	setCartERPInvoice(t, r.cartID, "nf-001", invoiceKey, "authorized")
@@ -196,13 +198,13 @@ func TestMirrorCartERPToOrder_E3_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	l := newListener(t)
 
-	r := seedCheckoutCart(t, 1, 7000)
-	l.EnsureOrderForCheckout(ctx, r.cartID, r.storeID)
-
+	r := seedPaidCart(t, 1, 7000, 0, 0)
+	if err := l.OnCartPaid(ctx, r.cartID, r.storeID, 7000, nil); err != nil {
+		t.Fatalf("E3 OnCartPaid: %v", err)
+	}
 	setCartERPOrderState(t, r.cartID, "open", true)
 	setCartERPFinalisation(t, r.cartID, "ext-idem", "done")
 
-	// Chamar 3 vezes — resultado deve ser o mesmo.
 	for i := 0; i < 3; i++ {
 		l.MirrorCartERPToOrder(ctx, r.cartID)
 	}
@@ -234,8 +236,8 @@ func TestMirrorCartERPToOrder_E4_NoOp_NoOrder(t *testing.T) {
 	ctx := context.Background()
 	l := newListener(t)
 
-	// Cart sem Order associada.
-	r := seedCheckoutCart(t, 1, 4000)
+	// Cart pago mas sem Order materializada.
+	r := seedPaidCart(t, 1, 4000, 0, 0)
 	setCartERPOrderState(t, r.cartID, "open", true)
 
 	// Deve executar sem erro (best-effort).
@@ -255,14 +257,12 @@ func TestOnCartPaid_E5_MirrorsERPState(t *testing.T) {
 	ctx := context.Background()
 	l := newListener(t)
 
-	r := seedCheckoutCart(t, 2, 8000)
-	l.EnsureOrderForCheckout(ctx, r.cartID, r.storeID)
+	r := seedPaidCart(t, 2, 8000, 0, 0)
 
-	// Seta estado ERP ANTES de pagar (simula checkout que iniciou reserva).
+	// Seta estado ERP ANTES de materializar a Order (simula reserva já existente).
 	setCartERPOrderState(t, r.cartID, "open", true)
 	setCartERPFinalisation(t, r.cartID, "tiny-confirm-42", "done")
 
-	markCartPaid(t, r.cartID)
 	if err := l.OnCartPaid(ctx, r.cartID, r.storeID, 16000, nil); err != nil {
 		t.Fatalf("E5 OnCartPaid: %v", err)
 	}
