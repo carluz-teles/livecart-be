@@ -807,6 +807,10 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		// Order for all stores (best-effort; fallback in OnCartPaid is on-the-fly).
 		checkoutSvc.SetOrderEnsurer(orderListener)
 	}
+	// Fatia 3: ERP mirror — projeta estado ERP do cart na Order (best-effort, aditivo).
+	if integrationSvc != nil {
+		integrationSvc.SetERPOrderMirror(orderListener)
+	}
 	orderHandler.RegisterRoutes(storeScoped)
 
 	// Merchant-side post-checkout actions (Marcar como entregue) live next
