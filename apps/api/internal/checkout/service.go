@@ -48,6 +48,12 @@ type PostCheckoutHook interface {
 	OnDelivered(ctx context.Context, cartID, source string)
 }
 
+// OrderDraftEnsurer creates the Order draft at checkout initiation.
+// Implemented by order/listeners.Listener and wired at boot via SetOrderEnsurer.
+type OrderDraftEnsurer interface {
+	EnsureOrderForCheckout(ctx context.Context, cartID, storeID string)
+}
+
 // Service handles business logic for public checkout.
 type Service struct {
 	repo               *Repository
@@ -55,6 +61,7 @@ type Service struct {
 	integrationService *integration.Service
 	couponLifecycle    CouponLifecycle
 	postCheckoutHook   PostCheckoutHook
+	orderEnsurer       OrderDraftEnsurer
 	logger             *zap.Logger
 }
 
@@ -84,6 +91,27 @@ func (s *Service) SetCouponLifecycle(lifecycle CouponLifecycle) {
 // SetPostCheckoutHook wires the customer-facing post-payment flow.
 func (s *Service) SetPostCheckoutHook(hook PostCheckoutHook) {
 	s.postCheckoutHook = hook
+}
+
+// SetOrderEnsurer wires the order draft creator (order/listeners.Listener).
+// Best-effort: when unset, draft creation is skipped and OnCartPaid falls back
+// to creating the order on-the-fly.
+func (s *Service) SetOrderEnsurer(e OrderDraftEnsurer) {
+	s.orderEnsurer = e
+}
+
+// fireCheckoutInitHooks fires the payment-initiation side-effects in a
+// background goroutine so the checkout call never blocks on them.
+// PrepareCartForPayment (ERP Design C) runs for stores with the flag enabled;
+// EnsureOrderForCheckout runs for ALL stores (best-effort draft creation).
+func (s *Service) fireCheckoutInitHooks(cartID, storeID, storeSlug string) {
+	bgCtx := logger.WithStore(context.Background(), storeID, storeSlug)
+	go func() {
+		s.integrationService.PrepareCartForPayment(bgCtx, cartID, storeID)
+		if s.orderEnsurer != nil {
+			s.orderEnsurer.EnsureOrderForCheckout(bgCtx, cartID, storeID)
+		}
+	}()
 }
 
 // GetCartForCheckout retrieves a cart for the public checkout page.
@@ -359,8 +387,8 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 	}
 
 	// Iniciação de pagamento via link hospedado: mesmo gancho de conversão do
-	// pedido-como-reserva (design C, flag por loja).
-	go s.integrationService.PrepareCartForPayment(logger.WithStore(context.Background(), cart.StoreID, cart.StoreSlug), cart.ID, cart.StoreID)
+	// pedido-como-reserva (design C, flag por loja) + draft da Order.
+	s.fireCheckoutInitHooks(cart.ID, cart.StoreID, cart.StoreSlug)
 
 	// Get cart items
 	items, err := s.repo.ListCartItems(ctx, cart.ID)
@@ -722,9 +750,8 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	}
 
 	// Iniciação de pagamento = ponto de conversão do pedido-como-reserva
-	// (design C, flag por loja). Fire-and-forget: o pagamento nunca espera o
-	// ERP — o webhook de pago retoma/adota se a conversão estiver em voo.
-	go s.integrationService.PrepareCartForPayment(logger.WithStore(context.Background(), cart.StoreID, cart.StoreSlug), cart.ID, cart.StoreID)
+	// (design C, flag por loja) + draft da Order (todas as lojas, best-effort).
+	s.fireCheckoutInitHooks(cart.ID, cart.StoreID, cart.StoreSlug)
 
 	// Get cart items
 	items, err := s.repo.ListCartItems(ctx, cart.ID)
@@ -931,9 +958,8 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	}
 
 	// Iniciação de pagamento = ponto de conversão do pedido-como-reserva
-	// (design C, flag por loja). Fire-and-forget: o pagamento nunca espera o
-	// ERP — o webhook de pago retoma/adota se a conversão estiver em voo.
-	go s.integrationService.PrepareCartForPayment(logger.WithStore(context.Background(), cart.StoreID, cart.StoreSlug), cart.ID, cart.StoreID)
+	// (design C, flag por loja) + draft da Order (todas as lojas, best-effort).
+	s.fireCheckoutInitHooks(cart.ID, cart.StoreID, cart.StoreSlug)
 
 	// Get cart items
 	items, err := s.repo.ListCartItems(ctx, cart.ID)
