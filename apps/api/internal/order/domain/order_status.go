@@ -10,30 +10,26 @@ import (
 type OrderStatus struct{ value string }
 
 var (
-	StatusPendingPayment = OrderStatus{value: "pending_payment"} // draft (Fatia 2+)
-	StatusPaid           = OrderStatus{value: "paid"}
-	StatusShipped        = OrderStatus{value: "shipped"}
-	StatusDelivered      = OrderStatus{value: "delivered"}
-	StatusRefunded       = OrderStatus{value: "refunded"}
-	StatusCancelled      = OrderStatus{value: "cancelled"}
-	StatusExpired        = OrderStatus{value: "expired"}
+	StatusPaid      = OrderStatus{value: "paid"}
+	StatusShipped   = OrderStatus{value: "shipped"}
+	StatusDelivered = OrderStatus{value: "delivered"}
+	StatusRefunded  = OrderStatus{value: "refunded"}
+	StatusCancelled = OrderStatus{value: "cancelled"}
 )
 
 var ErrInvalidOrderStatus = errors.New("invalid order status")
 
 var validOrderStatuses = map[string]OrderStatus{
-	"pending_payment": StatusPendingPayment,
-	"paid":            StatusPaid,
-	"shipped":         StatusShipped,
-	"delivered":       StatusDelivered,
-	"refunded":        StatusRefunded,
-	"cancelled":       StatusCancelled,
-	"expired":         StatusExpired,
+	"paid":      StatusPaid,
+	"shipped":   StatusShipped,
+	"delivered": StatusDelivered,
+	"refunded":  StatusRefunded,
+	"cancelled": StatusCancelled,
 }
 
 func NewOrderStatus(raw string) (OrderStatus, error) {
 	if raw == "" {
-		return StatusPendingPayment, nil
+		return OrderStatus{}, ErrInvalidOrderStatus
 	}
 	s, ok := validOrderStatuses[raw]
 	if !ok {
@@ -48,7 +44,7 @@ func (s OrderStatus) IsPaid() bool   { return s.value == StatusPaid.value }
 
 func (s OrderStatus) Value() (driver.Value, error) {
 	if s.IsZero() {
-		return "pending_payment", nil
+		return "paid", nil
 	}
 	return s.value, nil
 }

@@ -799,14 +799,9 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	orderSvc.SetBlockedHandleChecker(customerSvc)
 	orderHandler := order.NewHandler(orderSvc)
 
-	// Order materialisation reactor (Fatias A + 2): listens to cart.paid and
-	// manages the draft lifecycle. Independent of billing/ERP — keyed by cart_id.
+	// Order materialisation reactor: listens to cart.paid and materialises the
+	// immutable Order snapshot. Independent of billing/ERP — keyed by cart_id.
 	orderListener := orderlisteners.New(pool, queries, log)
-	if checkoutSvc != nil {
-		// Wire the draft creator so every checkout initiation creates a pending_payment
-		// Order for all stores (best-effort; fallback in OnCartPaid is on-the-fly).
-		checkoutSvc.SetOrderEnsurer(orderListener)
-	}
 	// Fatia 3: ERP mirror — projeta estado ERP do cart na Order (best-effort, aditivo).
 	if integrationSvc != nil {
 		integrationSvc.SetERPOrderMirror(orderListener)
@@ -1040,10 +1035,6 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				zap.String("event", string(env.Name)),
 				zap.String("event_id", env.EventID),
 			)
-			// Expire the Order draft (pending_payment → expired). Idempotent.
-			if err := orderListener.OnCartExpired(ctx, p.CartID, p.StoreID); err != nil {
-				return err
-			}
 			return integrationSvc.ReactCartExpiredERP(ctx, p.CartID, p.StoreID)
 		})
 

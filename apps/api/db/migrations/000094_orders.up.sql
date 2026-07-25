@@ -5,8 +5,8 @@ CREATE TABLE orders (
   store_id         UUID NOT NULL,
   event_id         UUID NOT NULL,
   customer_id      UUID,
-  status           TEXT NOT NULL DEFAULT 'pending_payment',
-  -- Totais congelados no cart.paid (nulos no draft; imutáveis após paid).
+  status           TEXT NOT NULL DEFAULT 'paid',
+  -- Totais congelados no cart.paid (imutáveis).
   total_cents      BIGINT,
   discount_cents   BIGINT NOT NULL DEFAULT 0,
   shipping_cents   BIGINT NOT NULL DEFAULT 0,
