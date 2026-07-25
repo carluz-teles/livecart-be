@@ -37,6 +37,7 @@ import (
 	"livecart/apps/api/lib/ratelimit"
 
 	"livecart/apps/api/internal/billing"
+	"livecart/apps/api/internal/cart"
 	"livecart/apps/api/internal/checkout"
 	"livecart/apps/api/internal/coupon"
 	"livecart/apps/api/internal/customer"
@@ -807,6 +808,13 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		integrationSvc.SetERPOrderMirror(orderListener)
 	}
 	orderHandler.RegisterRoutes(storeScoped)
+
+	// Carrinhos pendentes (não-pagos) — página de recuperação. Lê carts SEM
+	// order correspondente via cart_product_total_cents (canônico).
+	cartRepo := cart.NewRepository(pool)
+	cartSvc := cart.NewService(cartRepo, log)
+	cartHandler := cart.NewHandler(cartSvc)
+	cartHandler.RegisterRoutes(storeScoped)
 
 	// Merchant-side post-checkout actions (Marcar como entregue) live next
 	// to the read-only orders routes to share the same store_id middleware.
