@@ -56,6 +56,7 @@ import (
 	"livecart/apps/api/internal/notification"
 	notificationinbox "livecart/apps/api/internal/notification_inbox"
 	"livecart/apps/api/internal/order"
+	orderlisteners "livecart/apps/api/internal/order/listeners"
 	"livecart/apps/api/internal/postcheckout"
 	"livecart/apps/api/internal/product"
 	"livecart/apps/api/internal/productgroup"
@@ -797,6 +798,10 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// authoritative source for blocked_handles.
 	orderSvc.SetBlockedHandleChecker(customerSvc)
 	orderHandler := order.NewHandler(orderSvc)
+
+	// Order materialisation reactor (Fase A): listens to cart.paid and writes
+	// the immutable Order snapshot. Independent of billing/ERP — keyed by cart_id.
+	orderListener := orderlisteners.New(pool, queries, log)
 	orderHandler.RegisterRoutes(storeScoped)
 
 	// Merchant-side post-checkout actions (Marcar como entregue) live next
@@ -975,6 +980,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			}
 			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" {
 				return asynq.SkipRetry
+			}
+			// Order materialisation (Fase A): freeze the immutable snapshot.
+			// Runs first — idempotent by cart_id UNIQUE; errors retry the task.
+			if err := orderListener.OnCartPaid(ctx, p.CartID, p.StoreID, p.GMVCents, p.PaymentSnapshot); err != nil {
+				return err
 			}
 			// Customer-facing fan-out (coupon, tracking, timeline, GMV ledger,
 			// receipt, waitlist) then ERP finalisation (needs the gateway snapshot).

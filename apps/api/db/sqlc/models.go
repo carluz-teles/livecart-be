@@ -472,6 +472,23 @@ type OauthState struct {
 	ExpiresAt    pgtype.Timestamptz `json:"expires_at"`
 }
 
+type Order struct {
+	ID             pgtype.UUID        `json:"id"`
+	CartID         pgtype.UUID        `json:"cart_id"`
+	ShortID        int32              `json:"short_id"`
+	StoreID        pgtype.UUID        `json:"store_id"`
+	EventID        pgtype.UUID        `json:"event_id"`
+	CustomerID     pgtype.UUID        `json:"customer_id"`
+	Status         string             `json:"status"`
+	TotalCents     pgtype.Int8        `json:"total_cents"`
+	DiscountCents  int64              `json:"discount_cents"`
+	ShippingCents  int64              `json:"shipping_cents"`
+	PaidTotalCents pgtype.Int8        `json:"paid_total_cents"`
+	PaidAt         pgtype.Timestamptz `json:"paid_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
 type OrderEvent struct {
 	ID         pgtype.UUID        `json:"id"`
 	CartID     pgtype.UUID        `json:"cart_id"`
@@ -480,6 +497,56 @@ type OrderEvent struct {
 	Source     string             `json:"source"`
 	Metadata   json.RawMessage    `json:"metadata"`
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
+type OrderItem struct {
+	ID          pgtype.UUID `json:"id"`
+	OrderID     pgtype.UUID `json:"order_id"`
+	ProductID   pgtype.UUID `json:"product_id"`
+	ProductName string      `json:"product_name"`
+	Quantity    int32       `json:"quantity"`
+	UnitPrice   int64       `json:"unit_price"`
+}
+
+type OrderLogistic struct {
+	OrderID               pgtype.UUID        `json:"order_id"`
+	ShippingAddress       json.RawMessage    `json:"shipping_address"`
+	ShippingServiceID     pgtype.Int4        `json:"shipping_service_id"`
+	ShippingServiceName   pgtype.Text        `json:"shipping_service_name"`
+	ShippingCarrier       pgtype.Text        `json:"shipping_carrier"`
+	ShippingCostCents     pgtype.Int8        `json:"shipping_cost_cents"`
+	ShippingCostRealCents pgtype.Int8        `json:"shipping_cost_real_cents"`
+	ShippingDeadlineDays  pgtype.Int4        `json:"shipping_deadline_days"`
+	TrackingToken         pgtype.Text        `json:"tracking_token"`
+	ShipmentStatus        pgtype.Text        `json:"shipment_status"`
+	ShipmentProvider      pgtype.Text        `json:"shipment_provider"`
+	ProviderOrderID       pgtype.Text        `json:"provider_order_id"`
+	TrackingCode          pgtype.Text        `json:"tracking_code"`
+	PublicTrackingUrl     pgtype.Text        `json:"public_tracking_url"`
+	DeliveredAt           pgtype.Timestamptz `json:"delivered_at"`
+	ErpOrderState         string             `json:"erp_order_state"`
+	ErpStockLaunched      bool               `json:"erp_stock_launched"`
+	ErpOpStartedAt        pgtype.Timestamptz `json:"erp_op_started_at"`
+}
+
+type OrderPayment struct {
+	OrderID               pgtype.UUID        `json:"order_id"`
+	PaymentStatus         string             `json:"payment_status"`
+	PaymentMethod         pgtype.Text        `json:"payment_method"`
+	CardSnapshot          json.RawMessage    `json:"card_snapshot"`
+	GatewaySnapshot       json.RawMessage    `json:"gateway_snapshot"`
+	CouponID              pgtype.UUID        `json:"coupon_id"`
+	CouponCode            pgtype.Text        `json:"coupon_code"`
+	CouponDiscountCents   int64              `json:"coupon_discount_cents"`
+	ExternalOrderID       pgtype.Text        `json:"external_order_id"`
+	ErpFinalisationStatus string             `json:"erp_finalisation_status"`
+	ErpLastError          pgtype.Text        `json:"erp_last_error"`
+	ErpLastAttemptAt      pgtype.Timestamptz `json:"erp_last_attempt_at"`
+	ErpAttemptsCount      int32              `json:"erp_attempts_count"`
+	InvoiceID             pgtype.Text        `json:"invoice_id"`
+	InvoiceKey            pgtype.Text        `json:"invoice_key"`
+	InvoiceStatus         pgtype.Text        `json:"invoice_status"`
+	InvoiceEmittedAt      pgtype.Timestamptz `json:"invoice_emitted_at"`
 }
 
 type Payment struct {
