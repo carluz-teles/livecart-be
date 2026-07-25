@@ -84,6 +84,17 @@ func seedEventAndCarts(t *testing.T, storeID string) (eventID, sessionID string,
 			golden += qty * price
 		}
 
+		// Fatia 4: revenue queries agora lêem de orders; seeia order selada para cada cart pago.
+		shortOrderID := (uid + int64(i) + 500) % 90000
+		if _, err := testPool.Exec(ctx,
+			`INSERT INTO orders (cart_id, short_id, store_id, event_id, status,
+			   total_cents, discount_cents, shipping_cents, paid_total_cents, paid_at)
+			 VALUES ($1, $2, $3, $4, 'paid', $5, 0, 0, $5, now())`,
+			cartID, shortOrderID, storeID, eventID, golden,
+		); err != nil {
+			t.Fatalf("seedEventAndCarts order %d: %v", i, err)
+		}
+
 		cartIDs = append(cartIDs, cartID)
 		goldens = append(goldens, golden)
 	}

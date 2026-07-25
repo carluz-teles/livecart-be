@@ -223,10 +223,9 @@ SELECT
     COUNT(CASE WHEN last_order_at > now() - interval '30 days' THEN 1 END)::INT as active_customers,
     COALESCE(
         (
-            SELECT SUM(cart_product_total_cents(cart.id)) / NULLIF(COUNT(DISTINCT cart.customer_id), 0)
-            FROM carts cart
-            JOIN customers c ON c.id = cart.customer_id
-            WHERE c.store_id = $1
+            SELECT SUM(o.total_cents) / NULLIF(COUNT(DISTINCT o.customer_id), 0)
+            FROM orders o
+            WHERE o.store_id = $1 AND o.status = 'paid'
         ),
         0
     )::BIGINT as avg_spent_per_customer
@@ -240,6 +239,7 @@ type GetCustomerStatsRow struct {
 	AvgSpentPerCustomer int64 `json:"avg_spent_per_customer"`
 }
 
+// Grupo B correction: avg_spent_per_customer was summing ALL carts; now counts only paid orders.
 func (q *Queries) GetCustomerStats(ctx context.Context, storeID pgtype.UUID) (GetCustomerStatsRow, error) {
 	row := q.db.QueryRow(ctx, getCustomerStats, storeID)
 	var i GetCustomerStatsRow
@@ -276,10 +276,10 @@ SELECT
 FROM customers c
 LEFT JOIN LATERAL (
     SELECT
-        COUNT(cart.id)::INT as total_orders,
-        COALESCE(SUM(cart_product_total_cents(cart.id)), 0)::BIGINT as total_spent
-    FROM carts cart
-    WHERE cart.customer_id = c.id
+        COUNT(o.id)::INT as total_orders,
+        COALESCE(SUM(o.total_cents), 0)::BIGINT as total_spent
+    FROM orders o
+    WHERE o.customer_id = c.id AND o.status = 'paid'
 ) stats ON true
 WHERE c.store_id = $1
 ORDER BY c.last_order_at DESC NULLS LAST
@@ -309,6 +309,7 @@ type ListCustomersRow struct {
 }
 
 // List customers with aggregated order stats
+// Grupo B correction: was summing ALL carts (unpaid included); now counts only paid orders.
 func (q *Queries) ListCustomers(ctx context.Context, arg ListCustomersParams) ([]ListCustomersRow, error) {
 	rows, err := q.db.Query(ctx, listCustomers, arg.StoreID, arg.Limit, arg.Offset)
 	if err != nil {
@@ -351,10 +352,10 @@ SELECT
 FROM customers c
 LEFT JOIN LATERAL (
     SELECT
-        COUNT(cart.id)::INT as total_orders,
-        COALESCE(SUM(cart_product_total_cents(cart.id)), 0)::BIGINT as total_spent
-    FROM carts cart
-    WHERE cart.customer_id = c.id
+        COUNT(o.id)::INT as total_orders,
+        COALESCE(SUM(o.total_cents), 0)::BIGINT as total_spent
+    FROM orders o
+    WHERE o.customer_id = c.id AND o.status = 'paid'
 ) stats ON true
 WHERE c.store_id = $1
   AND (c.platform_handle ILIKE $2 OR c.email ILIKE $2)
@@ -385,6 +386,7 @@ type SearchCustomersRow struct {
 	TotalSpent       int64              `json:"total_spent"`
 }
 
+// Grupo B correction: was summing ALL carts (unpaid included); now counts only paid orders.
 func (q *Queries) SearchCustomers(ctx context.Context, arg SearchCustomersParams) ([]SearchCustomersRow, error) {
 	rows, err := q.db.Query(ctx, searchCustomers,
 		arg.StoreID,
