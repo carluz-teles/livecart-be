@@ -2413,12 +2413,12 @@ SELECT
     p.name,
     p.image_url,
     p.keyword,
-    COALESCE(SUM(ci.quantity), 0)::int AS total_quantity,
-    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_revenue
-FROM cart_items ci
-JOIN carts c ON c.id = ci.cart_id
-JOIN products p ON p.id = ci.product_id
-WHERE c.event_id = $1 AND c.status != 'expired'
+    COALESCE(SUM(oi.quantity), 0)::int AS total_quantity,
+    COALESCE(SUM(oi.quantity * oi.unit_price), 0)::bigint AS total_revenue
+FROM order_items oi
+JOIN orders o ON o.id = oi.order_id
+JOIN products p ON p.id = oi.product_id
+WHERE o.event_id = $1 AND o.status = 'paid'
 GROUP BY p.id, p.name, p.image_url, p.keyword
 ORDER BY total_quantity DESC
 `
@@ -2432,9 +2432,7 @@ type ListProductsByEventRow struct {
 	TotalRevenue  int64       `json:"total_revenue"`
 }
 
-// Returns products sold in an event with quantity and revenue
-// TODO(gmv-canonical): total_revenue aqui é por-produto (GROUP BY product), não por-cart;
-// cart_product_total_cents não se aplica diretamente. Requer refactor separado.
+// Returns products sold in an event with quantity and revenue (paid orders only)
 func (q *Queries) ListProductsByEvent(ctx context.Context, eventID pgtype.UUID) ([]ListProductsByEventRow, error) {
 	rows, err := q.db.Query(ctx, listProductsByEvent, eventID)
 	if err != nil {

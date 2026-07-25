@@ -40,19 +40,16 @@ GROUP BY TO_CHAR(o.paid_at, 'Mon'), EXTRACT(MONTH FROM o.paid_at)
 ORDER BY month_num;
 
 -- name: GetTopProducts :many
--- TODO(gmv-canonical): total_revenue aqui é por-produto (GROUP BY product), não por-cart;
--- cart_product_total_cents não se aplica diretamente. Requer refactor separado.
 SELECT
     p.id,
     p.name,
     p.keyword,
-    COALESCE(SUM(ci.quantity), 0)::INT as total_sold,
-    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::BIGINT as total_revenue
-FROM products p
-JOIN cart_items ci ON ci.product_id = p.id
-JOIN carts c ON c.id = ci.cart_id
-JOIN live_events e ON e.id = c.event_id
-WHERE e.store_id = $1
+    COALESCE(SUM(oi.quantity), 0)::INT as total_sold,
+    COALESCE(SUM(oi.quantity * oi.unit_price), 0)::BIGINT as total_revenue
+FROM order_items oi
+JOIN orders o ON o.id = oi.order_id
+JOIN products p ON p.id = oi.product_id
+WHERE o.store_id = $1 AND o.status = 'paid'
 GROUP BY p.id, p.name, p.keyword
 ORDER BY total_sold DESC
 LIMIT 5;
