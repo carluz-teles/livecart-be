@@ -72,6 +72,25 @@ apps/api/
 
 ## Convenções
 
+### ⛔ ANTES de implementar QUALQUER coisa — checar se já existe (OBRIGATÓRIO)
+
+**Regra nº 1, sem exceção:** antes de escrever qualquer código novo (query, função,
+helper, cálculo, componente, endpoint), **verificar se já existe algo que faz aquilo**
+e **reusar / centralizar** em vez de duplicar. Duplicar lógica = múltiplas fontes da
+verdade que divergem (ex.: a fórmula do GMV `SUM(quantity*unit_price)` estava
+reimplementada em ~20 lugares).
+
+Checklist antes de começar:
+1. **Buscar pela responsabilidade/fórmula**, não só pelo nome: `grep`/busca por
+   colunas, tabelas, cálculos e conceitos envolvidos (ex.: antes de somar itens de
+   um cart, `grep -rn "SUM(.*unit_price" db/queries`).
+2. Se já existe → **reusar** (ou extrair para um ponto único e fazer todos apontarem
+   pra lá). Se está duplicado → é bug de design; centralizar (SOLID/DRY, um ponto de manutenção).
+3. Só criar algo novo depois de confirmar que **não há** equivalente.
+
+Isto vale para agents de implementação (dev-qa, etc.) também — é a primeira etapa
+de qualquer tarefa, antes de escrever teste ou código.
+
 ### Camadas por domínio
 
 Cada domínio (member, invitation, store, etc.) segue a estrutura:
