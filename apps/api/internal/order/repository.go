@@ -25,17 +25,14 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrdersResult, error) {
 	var result ListOrdersResult
 
-	// Build dynamic query.
-	//
-	// `is_first_purchase` is true only for paid carts that have no earlier
-	// paid cart from the same buyer in the same store. Anonymous carts
-	// (empty platform_user_id) always evaluate to false because the EXISTS
-	// subquery would match every other anon cart on the store.
+	// Read from `orders` (immutable paid records, Fatia 7).
+	// total_amount comes from o.total_cents — never re-sums cart_items.
+	// is_first_purchase checks the orders table (all rows are paid+).
 	baseQuery := `
 		SELECT
 			c.id,
-			c.short_id,
-			c.event_id,
+			o.short_id,
+			o.event_id,
 			c.platform_user_id,
 			c.platform_handle,
 			c.token,
@@ -55,26 +52,21 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 				 ORDER BY lsp.added_at LIMIT 1),
 				'instagram'
 			) as live_platform,
-			COALESCE(
-				(SELECT SUM(ci.quantity * ci.unit_price)::BIGINT FROM cart_items ci WHERE ci.cart_id = c.id),
-				0
-			) as total_amount,
+			COALESCE(o.total_cents, 0) as total_amount,
 			COALESCE(
 				(SELECT SUM(ci.quantity)::INT FROM cart_items ci WHERE ci.cart_id = c.id),
 				0
 			) as total_items,
 			(
-				c.payment_status = 'paid'
-				AND c.platform_user_id <> ''
+				c.platform_user_id <> ''
 				AND NOT EXISTS (
 					SELECT 1
-					FROM carts c2
-					JOIN live_events e2 ON e2.id = c2.event_id
-					WHERE e2.store_id = e.store_id
+					FROM orders o2
+					JOIN carts c2 ON c2.id = o2.cart_id
+					WHERE o2.store_id = o.store_id
 					  AND c2.platform_user_id = c.platform_user_id
-					  AND c2.payment_status = 'paid'
-					  AND c2.id <> c.id
-					  AND COALESCE(c2.paid_at, c2.created_at) < COALESCE(c.paid_at, c.created_at)
+					  AND o2.id <> o.id
+					  AND o2.created_at < o.created_at
 				)
 			) as is_first_purchase,
 			COALESCE(
@@ -89,16 +81,18 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 				AND c.payment_status NOT IN ('cancelled', 'refunded')
 			) as has_shipping,
 			c.erp_finalisation_status
-		FROM carts c
-		JOIN live_events e ON e.id = c.event_id
-		WHERE e.store_id = $1
+		FROM orders o
+		JOIN carts c ON c.id = o.cart_id
+		JOIN live_events e ON e.id = o.event_id
+		WHERE o.store_id = $1
 	`
 
 	countQuery := `
 		SELECT COUNT(*)
-		FROM carts c
-		JOIN live_events e ON e.id = c.event_id
-		WHERE e.store_id = $1
+		FROM orders o
+		JOIN carts c ON c.id = o.cart_id
+		JOIN live_events e ON e.id = o.event_id
+		WHERE o.store_id = $1
 	`
 
 	conditions, args := buildOrderListConditions(params.StoreID, params.Search, params.Filters)
@@ -117,13 +111,13 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 	}
 
 	// Sorting
-	sortColumn := "c.created_at"
+	sortColumn := "o.created_at"
 	allowedSortColumns := map[string]string{
-		"created_at":     "c.created_at",
+		"created_at":     "o.created_at",
 		"status":         "c.status",
 		"payment_status": "c.payment_status",
 		"total_amount":   "total_amount",
-		"short_id":       "c.short_id",
+		"short_id":       "o.short_id",
 	}
 	if col, ok := allowedSortColumns[params.Sorting.SortBy]; ok {
 		sortColumn = col
@@ -581,24 +575,23 @@ func (r *Repository) GetCustomerComments(ctx context.Context, eventID string, pl
 }
 
 func (r *Repository) GetStats(ctx context.Context, storeID string, search string, filters OrderFilters) (*OrderStatsOutput, error) {
+	// Revenue and ticket use o.total_cents (immutable) — never re-sums cart_items.
 	query := `
 		SELECT
 			COUNT(*)::INT as total_orders,
 			COUNT(*) FILTER (WHERE c.status = 'active')::INT as pending_orders,
-			COALESCE(SUM(
-				(SELECT SUM(ci.quantity * ci.unit_price) FROM cart_items ci WHERE ci.cart_id = c.id)
-			), 0)::BIGINT as total_revenue,
+			COALESCE(SUM(o.total_cents), 0)::BIGINT as total_revenue,
 			COALESCE(
 				CASE
-					WHEN COUNT(*) > 0 THEN
-						SUM((SELECT COALESCE(SUM(ci.quantity * ci.unit_price), 0) FROM cart_items ci WHERE ci.cart_id = c.id)) / COUNT(*)
+					WHEN COUNT(*) > 0 THEN SUM(o.total_cents) / COUNT(*)
 					ELSE 0
 				END,
 				0
 			)::BIGINT as avg_ticket
-		FROM carts c
-		JOIN live_events e ON e.id = c.event_id
-		WHERE e.store_id = $1
+		FROM orders o
+		JOIN carts c ON c.id = o.cart_id
+		JOIN live_events e ON e.id = o.event_id
+		WHERE o.store_id = $1
 	`
 
 	conditions, args := buildOrderListConditions(storeID, search, filters)
