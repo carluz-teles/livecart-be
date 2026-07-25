@@ -173,11 +173,21 @@ func (l *Listener) OnCartPaid(ctx context.Context, cartID, storeID string, gmvCe
 			return nil
 		}
 		// Draft exists (pending_payment) → seal it.
-		return l.sealDraftOrder(ctx, existing.ID, cid, storeID, gmvCents, paymentSnapshot, log)
+		if err := l.sealDraftOrder(ctx, existing.ID, cid, storeID, gmvCents, paymentSnapshot, log); err != nil {
+			return err
+		}
+		// Espelho pós-pagamento: projeta o snapshot ERP do cart na Order. Best-effort.
+		l.MirrorCartERPToOrder(ctx, cartID)
+		return nil
 	}
 
 	// No order yet → create on-the-fly already in paid (best-effort rollout fallback).
-	return l.createPaidOrder(ctx, cid, storeID, gmvCents, paymentSnapshot, log)
+	if err := l.createPaidOrder(ctx, cid, storeID, gmvCents, paymentSnapshot, log); err != nil {
+		return err
+	}
+	// Espelho pós-pagamento: projeta o snapshot ERP do cart na Order. Best-effort.
+	l.MirrorCartERPToOrder(ctx, cartID)
+	return nil
 }
 
 // sealDraftOrder transitions an existing pending_payment Order to paid by

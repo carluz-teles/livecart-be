@@ -231,6 +231,7 @@ func (s *Service) RunERPOrderOpsSweep(ctx context.Context) {
 				logger.From(opCtx, s.logger).Warn("sweep failed to finish conversion",
 					zap.String("cart_id", op.CartID), zap.Error(err))
 			}
+			// mirror já chamado dentro de finishERPOrderConversion
 		case op.State == erpOrderStateConverting:
 			erpIntegration, intErr := s.repo.GetActiveByProvider(opCtx, op.StoreID, "erp", "tiny")
 			if intErr != nil {
@@ -259,6 +260,7 @@ func (s *Service) RunERPOrderOpsSweep(ctx context.Context) {
 				logger.From(opCtx, s.logger).Warn("sweep failed to finish adopted conversion",
 					zap.String("cart_id", op.CartID), zap.Error(err))
 			}
+			// mirror já chamado dentro de finishERPOrderConversion
 		case op.State == erpOrderStateMutating && op.ExternalOrderID != "":
 			if err := s.applyCartGridToOrder(opCtx, op.CartID, op.StoreID, op.ExternalOrderID); err != nil {
 				logger.From(opCtx, s.logger).Warn("sweep failed to reconcile mutating cart",
@@ -269,6 +271,8 @@ func (s *Service) RunERPOrderOpsSweep(ctx context.Context) {
 				logger.From(opCtx, s.logger).Error("sweep failed to return cart to open",
 					zap.String("cart_id", op.CartID), zap.Error(err))
 			}
+			// Espelho: projeta estado reconciliado na Order. Best-effort.
+			s.mirrorToOrder(opCtx, op.CartID)
 		}
 	}
 }
@@ -413,6 +417,8 @@ func (s *Service) finishERPOrderConversion(ctx context.Context, cartID, storeID,
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", orderID),
 	)
+	// Espelho aditivo: projeta o estado da reserva (open) na Order. Best-effort.
+	s.mirrorToOrder(ctx, cartID)
 	return nil
 }
 
@@ -452,6 +458,8 @@ func (s *Service) MutateERPOrderItems(ctx context.Context, cartID, storeID strin
 				zap.Error(backErr),
 			)
 		}
+		// Espelho: projeta o estado final (open) na Order, após a transição. Best-effort.
+		s.mirrorToOrder(ctx, cartID)
 	}()
 
 	return s.applyCartGridToOrder(ctx, cartID, storeID, st.ExternalOrderID)
@@ -671,6 +679,8 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", fresh.ExternalOrderID),
 	)
+	// Espelho: projeta estado confirmado + invoice na Order. Best-effort.
+	s.mirrorToOrder(ctx, cartID)
 	return nil
 }
 
@@ -735,5 +745,7 @@ func (s *Service) CancelERPOrderForCart(ctx context.Context, cartID, storeID str
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", st.ExternalOrderID),
 	)
+	// Espelho: projeta estado cancelled na Order. Best-effort.
+	s.mirrorToOrder(ctx, cartID)
 	return nil
 }

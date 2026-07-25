@@ -96,6 +96,12 @@ type PostCheckoutHook interface {
 	OnDelivered(ctx context.Context, cartID, source string)
 }
 
+// ERPOrderMirror projects ERP state changes into the Order aggregate.
+// Implemented by order/listeners.Listener; wired at boot to break the import cycle.
+type ERPOrderMirror interface {
+	MirrorCartERPToOrder(ctx context.Context, cartID string)
+}
+
 // Service handles business logic for integrations.
 type Service struct {
 	repo                *Repository
@@ -132,6 +138,10 @@ type Service struct {
 	// pagamento). Populado de ERP_ORDER_AT_CHECKOUT_STORE_IDS ("*" = todas).
 	orderAtCheckoutAll      bool
 	orderAtCheckoutStoreIDs map[string]bool
+
+	// erpOrderMirror projects ERP state changes into the Order aggregate.
+	// Wired at boot from main.go; nil = mirror disabled (e.g. order module not yet live).
+	erpOrderMirror ERPOrderMirror
 }
 
 // finalisationInverted reports whether this store runs the launch-first
@@ -240,6 +250,22 @@ func (s *Service) SetPostCheckoutHook(hook PostCheckoutHook) {
 // SetNotificationService sets the notification service for sending DMs.
 func (s *Service) SetNotificationService(svc *notification.Service) {
 	s.notificationService = svc
+}
+
+// SetERPOrderMirror wires the order/listeners.Listener so ERP state changes are
+// projected into the Order aggregate (best-effort). Called once at boot from main.go.
+func (s *Service) SetERPOrderMirror(m ERPOrderMirror) {
+	s.erpOrderMirror = m
+}
+
+// mirrorToOrder projects the current ERP state of a cart into the Order aggregate.
+// Best-effort: mirror failures are swallowed inside MirrorCartERPToOrder and only
+// logged — they never propagate to callers.
+func (s *Service) mirrorToOrder(ctx context.Context, cartID string) {
+	if s.erpOrderMirror == nil {
+		return
+	}
+	s.erpOrderMirror.MirrorCartERPToOrder(ctx, cartID)
 }
 
 // =============================================================================
