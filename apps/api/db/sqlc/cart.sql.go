@@ -1197,14 +1197,10 @@ func (q *Queries) GetCartERPOrderState(ctx context.Context, id pgtype.UUID) (Get
 }
 
 const getCartGMVCents = `-- name: GetCartGMVCents :one
-SELECT COALESCE(SUM(quantity * unit_price), 0)::bigint AS gmv_cents
-FROM cart_items
-WHERE cart_id = $1
+SELECT cart_product_total_cents($1)::bigint AS gmv_cents
 `
 
-// GMV de um cart: soma de quantity*unit_price dos itens — exclui frete e cupom.
-// Fonte única de verdade usada pelo billing reactor (OnCartPaid) e pelo fallback
-// de rollout quando o payload de cart.paid chega sem gmv_cents.
+// GMV de um cart: delega à função canônica cart_product_total_cents (migration 000093).
 func (q *Queries) GetCartGMVCents(ctx context.Context, cartID pgtype.UUID) (int64, error) {
 	row := q.db.QueryRow(ctx, getCartGMVCents, cartID)
 	var gmv_cents int64
@@ -1254,7 +1250,7 @@ func (q *Queries) GetCartItemAvailableQty(ctx context.Context, arg GetCartItemAv
 const getCartTotals = `-- name: GetCartTotals :one
 SELECT
     COALESCE(SUM(ci.quantity), 0)::int AS total_items,
-    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_value
+    cart_product_total_cents($1)::bigint AS total_value
 FROM cart_items ci
 WHERE ci.cart_id = $1
 `
@@ -1265,8 +1261,8 @@ type GetCartTotalsRow struct {
 }
 
 // Returns total items and value for a cart (for notifications)
-func (q *Queries) GetCartTotals(ctx context.Context, cartID pgtype.UUID) (GetCartTotalsRow, error) {
-	row := q.db.QueryRow(ctx, getCartTotals, cartID)
+func (q *Queries) GetCartTotals(ctx context.Context, pCartID pgtype.UUID) (GetCartTotalsRow, error) {
+	row := q.db.QueryRow(ctx, getCartTotals, pCartID)
 	var i GetCartTotalsRow
 	err := row.Scan(&i.TotalItems, &i.TotalValue)
 	return i, err
@@ -1290,15 +1286,13 @@ SELECT
     ), 0)::int AS total_products_sold,
     -- Revenue metrics
     COALESCE((
-        SELECT SUM(ci.quantity * ci.unit_price)
+        SELECT SUM(cart_product_total_cents(ct.id))
         FROM carts ct
-        JOIN cart_items ci ON ci.cart_id = ct.id
         WHERE ct.event_id = $1 AND ct.status IN ('active', 'checkout')
     ), 0)::bigint AS projected_revenue,
     COALESCE((
-        SELECT SUM(ci.quantity * ci.unit_price)
+        SELECT SUM(cart_product_total_cents(ct.id))
         FROM carts ct
-        JOIN cart_items ci ON ci.cart_id = ct.id
         WHERE ct.event_id = $1 AND ct.payment_status = 'paid'
     ), 0)::bigint AS confirmed_revenue
 `
@@ -1361,15 +1355,13 @@ SELECT
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1), 0)::int AS total_carts,
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1 AND ct.payment_status = 'paid'), 0)::int AS paid_carts,
     COALESCE((
-        SELECT SUM(ci.quantity * ci.unit_price)
+        SELECT SUM(cart_product_total_cents(ct.id))
         FROM carts ct
-        JOIN cart_items ci ON ci.cart_id = ct.id
         WHERE ct.session_id = $1 AND ct.status != 'expired'
     ), 0)::bigint AS total_revenue,
     COALESCE((
-        SELECT SUM(ci.quantity * ci.unit_price)
+        SELECT SUM(cart_product_total_cents(ct.id))
         FROM carts ct
-        JOIN cart_items ci ON ci.cart_id = ct.id
         WHERE ct.session_id = $1 AND ct.payment_status = 'paid'
     ), 0)::bigint AS paid_revenue
 `
@@ -1593,7 +1585,7 @@ func (q *Queries) ListCartItemsForCheckout(ctx context.Context, cartID pgtype.UU
 const listCartsByCustomer = `-- name: ListCartsByCustomer :many
 SELECT
     c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, c.shipping_service_id, c.shipping_service_name, c.shipping_carrier, c.shipping_cost_cents, c.shipping_cost_real_cents, c.shipping_deadline_days, c.shipping_quoted_at, c.shipping_provider, c.last_shipping_quote_options, c.last_shipping_quote_at, c.card_brand, c.card_last_four, c.card_installments, c.card_authorization_code, c.initial_snapshot_taken_at, c.initial_subtotal_cents, c.short_id, c.coupon_id, c.coupon_code, c.coupon_discount_cents, c.tracking_token, c.erp_finalisation_status, c.erp_last_error, c.erp_last_attempt_at, c.erp_attempts_count, c.erp_payment_snapshot, c.erp_invoice_id, c.erp_invoice_key, c.erp_invoice_status, c.erp_invoice_emitted_at, c.cancelled_reason, c.whatsapp_consent, c.whatsapp_consent_at, c.erp_order_state, c.erp_stock_launched, c.erp_op_started_at,
-    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_value,
+    cart_product_total_cents(c.id) AS total_value,
     COALESCE(SUM(ci.quantity), 0)::int AS total_items
 FROM carts c
 LEFT JOIN cart_items ci ON ci.cart_id = c.id
@@ -1858,7 +1850,7 @@ SELECT
     c.customer_name,
     c.customer_phone,
     COALESCE(SUM(ci.quantity), 0)::int AS total_items,
-    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_cents,
+    cart_product_total_cents(c.id)::bigint AS total_cents,
     (COALESCE((s.notification_settings->'cart_recovery'->>'quiet_hours_start')::int, 21))::int AS quiet_hours_start,
     (COALESCE((s.notification_settings->'cart_recovery'->>'quiet_hours_end')::int, 8))::int AS quiet_hours_end
 FROM carts c
@@ -2438,6 +2430,8 @@ type ListProductsByEventRow struct {
 }
 
 // Returns products sold in an event with quantity and revenue
+// TODO(gmv-canonical): total_revenue aqui é por-produto (GROUP BY product), não por-cart;
+// cart_product_total_cents não se aplica diretamente. Requer refactor separado.
 func (q *Queries) ListProductsByEvent(ctx context.Context, eventID pgtype.UUID) ([]ListProductsByEventRow, error) {
 	rows, err := q.db.Query(ctx, listProductsByEvent, eventID)
 	if err != nil {

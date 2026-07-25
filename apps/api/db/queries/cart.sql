@@ -119,7 +119,7 @@ SELECT * FROM carts WHERE event_id = $1 AND platform_user_id = $2;
 -- Returns all carts for a specific customer with totals
 SELECT
     c.*,
-    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_value,
+    cart_product_total_cents(c.id) AS total_value,
     COALESCE(SUM(ci.quantity), 0)::int AS total_items
 FROM carts c
 LEFT JOIN cart_items ci ON ci.cart_id = c.id
@@ -135,7 +135,7 @@ UPDATE carts SET customer_id = $2 WHERE id = $1;
 -- Returns total items and value for a cart (for notifications)
 SELECT
     COALESCE(SUM(ci.quantity), 0)::int AS total_items,
-    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_value
+    cart_product_total_cents($1)::bigint AS total_value
 FROM cart_items ci
 WHERE ci.cart_id = $1;
 
@@ -283,15 +283,13 @@ SELECT
     ), 0)::int AS total_products_sold,
     -- Revenue metrics
     COALESCE((
-        SELECT SUM(ci.quantity * ci.unit_price)
+        SELECT SUM(cart_product_total_cents(ct.id))
         FROM carts ct
-        JOIN cart_items ci ON ci.cart_id = ct.id
         WHERE ct.event_id = $1 AND ct.status IN ('active', 'checkout')
     ), 0)::bigint AS projected_revenue,
     COALESCE((
-        SELECT SUM(ci.quantity * ci.unit_price)
+        SELECT SUM(cart_product_total_cents(ct.id))
         FROM carts ct
-        JOIN cart_items ci ON ci.cart_id = ct.id
         WHERE ct.event_id = $1 AND ct.payment_status = 'paid'
     ), 0)::bigint AS confirmed_revenue;
 
@@ -320,6 +318,8 @@ ORDER BY c.created_at DESC;
 
 -- name: ListProductsByEvent :many
 -- Returns products sold in an event with quantity and revenue
+-- TODO(gmv-canonical): total_revenue aqui é por-produto (GROUP BY product), não por-cart;
+-- cart_product_total_cents não se aplica diretamente. Requer refactor separado.
 SELECT
     p.id,
     p.name,
@@ -344,15 +344,13 @@ SELECT
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1), 0)::int AS total_carts,
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1 AND ct.payment_status = 'paid'), 0)::int AS paid_carts,
     COALESCE((
-        SELECT SUM(ci.quantity * ci.unit_price)
+        SELECT SUM(cart_product_total_cents(ct.id))
         FROM carts ct
-        JOIN cart_items ci ON ci.cart_id = ct.id
         WHERE ct.session_id = $1 AND ct.status != 'expired'
     ), 0)::bigint AS total_revenue,
     COALESCE((
-        SELECT SUM(ci.quantity * ci.unit_price)
+        SELECT SUM(cart_product_total_cents(ct.id))
         FROM carts ct
-        JOIN cart_items ci ON ci.cart_id = ct.id
         WHERE ct.session_id = $1 AND ct.payment_status = 'paid'
     ), 0)::bigint AS paid_revenue;
 
@@ -669,7 +667,7 @@ SELECT
     c.customer_name,
     c.customer_phone,
     COALESCE(SUM(ci.quantity), 0)::int AS total_items,
-    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::bigint AS total_cents,
+    cart_product_total_cents(c.id)::bigint AS total_cents,
     (COALESCE((s.notification_settings->'cart_recovery'->>'quiet_hours_start')::int, 21))::int AS quiet_hours_start,
     (COALESCE((s.notification_settings->'cart_recovery'->>'quiet_hours_end')::int, 8))::int AS quiet_hours_end
 FROM carts c
@@ -766,9 +764,5 @@ WHERE c.erp_order_state IN ('converting','mutating')
   AND c.erp_op_started_at < now() - make_interval(secs => sqlc.arg(older_than_seconds)::int);
 
 -- name: GetCartGMVCents :one
--- GMV de um cart: soma de quantity*unit_price dos itens — exclui frete e cupom.
--- Fonte única de verdade usada pelo billing reactor (OnCartPaid) e pelo fallback
--- de rollout quando o payload de cart.paid chega sem gmv_cents.
-SELECT COALESCE(SUM(quantity * unit_price), 0)::bigint AS gmv_cents
-FROM cart_items
-WHERE cart_id = $1;
+-- GMV de um cart: delega à função canônica cart_product_total_cents (migration 000093).
+SELECT cart_product_total_cents(sqlc.arg(cart_id))::bigint AS gmv_cents;

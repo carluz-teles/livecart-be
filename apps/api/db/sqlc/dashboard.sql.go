@@ -47,9 +47,8 @@ SELECT
     ), 0)::int AS paid_carts,
     -- Confirmed revenue (GMV)
     COALESCE((
-        SELECT SUM(ci.quantity * ci.unit_price)
+        SELECT SUM(cart_product_total_cents(c.id))
         FROM carts c
-        JOIN cart_items ci ON ci.cart_id = c.id
         JOIN live_events e ON e.id = c.event_id
         WHERE e.store_id = $1
           AND c.created_at >= NOW() - INTERVAL '1 day' * $2
@@ -57,17 +56,12 @@ SELECT
     ), 0)::bigint AS confirmed_revenue,
     -- Average ticket
     COALESCE((
-        SELECT AVG(cart_total)
-        FROM (
-            SELECT SUM(ci.quantity * ci.unit_price) as cart_total
-            FROM carts c
-            JOIN cart_items ci ON ci.cart_id = c.id
-            JOIN live_events e ON e.id = c.event_id
-            WHERE e.store_id = $1
-              AND c.created_at >= NOW() - INTERVAL '1 day' * $2
-              AND c.payment_status = 'paid'
-            GROUP BY c.id
-        ) sub
+        SELECT AVG(cart_product_total_cents(c.id))
+        FROM carts c
+        JOIN live_events e ON e.id = c.event_id
+        WHERE e.store_id = $1
+          AND c.created_at >= NOW() - INTERVAL '1 day' * $2
+          AND c.payment_status = 'paid'
     ), 0)::bigint AS average_ticket
 `
 
@@ -104,9 +98,8 @@ const getDashboardStats = `-- name: GetDashboardStats :one
 SELECT
     -- Total revenue from orders
     COALESCE((
-        SELECT SUM(ci.quantity * ci.unit_price)
-        FROM cart_items ci
-        JOIN carts c ON c.id = ci.cart_id
+        SELECT SUM(cart_product_total_cents(c.id))
+        FROM carts c
         JOIN live_events e ON e.id = c.event_id
         WHERE e.store_id = $1
     ), 0)::BIGINT as total_revenue,
@@ -161,9 +154,8 @@ SELECT
     COALESCE((SELECT COUNT(*) FROM carts c WHERE c.event_id = e.id), 0)::int AS total_carts,
     COALESCE((SELECT COUNT(*) FROM carts c WHERE c.event_id = e.id AND c.payment_status = 'paid'), 0)::int AS paid_carts,
     COALESCE((
-        SELECT SUM(ci.quantity * ci.unit_price)
+        SELECT SUM(cart_product_total_cents(c.id))
         FROM carts c
-        JOIN cart_items ci ON ci.cart_id = c.id
         WHERE c.event_id = e.id AND c.payment_status = 'paid'
     ), 0)::bigint AS confirmed_revenue
 FROM live_events e
@@ -225,10 +217,9 @@ const getMonthlyRevenue = `-- name: GetMonthlyRevenue :many
 SELECT
     TO_CHAR(c.created_at, 'Mon') as month,
     EXTRACT(MONTH FROM c.created_at)::INT as month_num,
-    COALESCE(SUM(ci.quantity * ci.unit_price), 0)::BIGINT as revenue
+    COALESCE(SUM(cart_product_total_cents(c.id)), 0)::BIGINT as revenue
 FROM carts c
 JOIN live_events e ON e.id = c.event_id
-LEFT JOIN cart_items ci ON ci.cart_id = c.id
 WHERE e.store_id = $1
   AND c.created_at >= date_trunc('year', CURRENT_DATE)
 GROUP BY TO_CHAR(c.created_at, 'Mon'), EXTRACT(MONTH FROM c.created_at)
@@ -286,6 +277,8 @@ type GetTopProductsRow struct {
 	TotalRevenue int64       `json:"total_revenue"`
 }
 
+// TODO(gmv-canonical): total_revenue aqui é por-produto (GROUP BY product), não por-cart;
+// cart_product_total_cents não se aplica diretamente. Requer refactor separado.
 func (q *Queries) GetTopProducts(ctx context.Context, storeID pgtype.UUID) ([]GetTopProductsRow, error) {
 	rows, err := q.db.Query(ctx, getTopProducts, storeID)
 	if err != nil {

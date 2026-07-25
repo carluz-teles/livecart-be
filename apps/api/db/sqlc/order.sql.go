@@ -133,13 +133,11 @@ const getOrderStats = `-- name: GetOrderStats :one
 SELECT
     COUNT(*)::INT as total_orders,
     COUNT(*) FILTER (WHERE c.status = 'pending')::INT as pending_orders,
-    COALESCE(SUM(
-        (SELECT SUM(ci.quantity * ci.unit_price) FROM cart_items ci WHERE ci.cart_id = c.id)
-    ), 0)::BIGINT as total_revenue,
+    COALESCE(SUM(cart_product_total_cents(c.id)), 0)::BIGINT as total_revenue,
     COALESCE(
         CASE
             WHEN COUNT(*) > 0 THEN
-                SUM((SELECT SUM(ci.quantity * ci.unit_price) FROM cart_items ci WHERE ci.cart_id = c.id)) / COUNT(*)
+                SUM(cart_product_total_cents(c.id)) / COUNT(*)
             ELSE 0
         END,
         0
@@ -188,10 +186,7 @@ SELECT
          ORDER BY lsp.added_at LIMIT 1),
         'instagram'
     ) as live_platform,
-    COALESCE(
-        (SELECT SUM(ci.quantity * ci.unit_price)::BIGINT FROM cart_items ci WHERE ci.cart_id = c.id),
-        0
-    ) as total_amount,
+    cart_product_total_cents(c.id) as total_amount,
     COALESCE(
         (SELECT SUM(ci.quantity)::INT FROM cart_items ci WHERE ci.cart_id = c.id),
         0
@@ -215,7 +210,7 @@ type ListOrdersRow struct {
 	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
 	LiveTitle      pgtype.Text        `json:"live_title"`
 	LivePlatform   interface{}        `json:"live_platform"`
-	TotalAmount    interface{}        `json:"total_amount"`
+	TotalAmount    int64              `json:"total_amount"`
 	TotalItems     interface{}        `json:"total_items"`
 }
 

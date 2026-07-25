@@ -68,10 +68,9 @@ SELECT
 FROM customers c
 LEFT JOIN LATERAL (
     SELECT
-        COUNT(DISTINCT cart.id)::INT as total_orders,
-        SUM(ci.quantity * ci.unit_price)::BIGINT as total_spent
+        COUNT(cart.id)::INT as total_orders,
+        COALESCE(SUM(cart_product_total_cents(cart.id)), 0)::BIGINT as total_spent
     FROM carts cart
-    JOIN cart_items ci ON ci.cart_id = cart.id
     WHERE cart.customer_id = c.id
 ) stats ON true
 WHERE c.store_id = $1
@@ -87,9 +86,8 @@ SELECT
     COUNT(CASE WHEN last_order_at > now() - interval '30 days' THEN 1 END)::INT as active_customers,
     COALESCE(
         (
-            SELECT SUM(ci.quantity * ci.unit_price) / NULLIF(COUNT(DISTINCT c.id), 0)
+            SELECT SUM(cart_product_total_cents(cart.id)) / NULLIF(COUNT(DISTINCT cart.customer_id), 0)
             FROM carts cart
-            JOIN cart_items ci ON ci.cart_id = cart.id
             JOIN customers c ON c.id = cart.customer_id
             WHERE c.store_id = $1
         ),
@@ -106,10 +104,9 @@ SELECT
 FROM customers c
 LEFT JOIN LATERAL (
     SELECT
-        COUNT(DISTINCT cart.id)::INT as total_orders,
-        SUM(ci.quantity * ci.unit_price)::BIGINT as total_spent
+        COUNT(cart.id)::INT as total_orders,
+        COALESCE(SUM(cart_product_total_cents(cart.id)), 0)::BIGINT as total_spent
     FROM carts cart
-    JOIN cart_items ci ON ci.cart_id = cart.id
     WHERE cart.customer_id = c.id
 ) stats ON true
 WHERE c.store_id = $1
