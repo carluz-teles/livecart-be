@@ -61,6 +61,7 @@ WHERE id = $1;
 
 -- name: ListCustomers :many
 -- List customers with aggregated order stats
+-- Grupo B correction: was summing ALL carts (unpaid included); now counts only paid orders.
 SELECT
     c.*,
     COALESCE(stats.total_orders, 0)::INT as total_orders,
@@ -68,10 +69,10 @@ SELECT
 FROM customers c
 LEFT JOIN LATERAL (
     SELECT
-        COUNT(cart.id)::INT as total_orders,
-        COALESCE(SUM(cart_product_total_cents(cart.id)), 0)::BIGINT as total_spent
-    FROM carts cart
-    WHERE cart.customer_id = c.id
+        COUNT(o.id)::INT as total_orders,
+        COALESCE(SUM(o.total_cents), 0)::BIGINT as total_spent
+    FROM orders o
+    WHERE o.customer_id = c.id AND o.status = 'paid'
 ) stats ON true
 WHERE c.store_id = $1
 ORDER BY c.last_order_at DESC NULLS LAST
@@ -81,15 +82,15 @@ LIMIT $2 OFFSET $3;
 SELECT COUNT(*)::int FROM customers WHERE store_id = $1;
 
 -- name: GetCustomerStats :one
+-- Grupo B correction: avg_spent_per_customer was summing ALL carts; now counts only paid orders.
 SELECT
     COUNT(*)::INT as total_customers,
     COUNT(CASE WHEN last_order_at > now() - interval '30 days' THEN 1 END)::INT as active_customers,
     COALESCE(
         (
-            SELECT SUM(cart_product_total_cents(cart.id)) / NULLIF(COUNT(DISTINCT cart.customer_id), 0)
-            FROM carts cart
-            JOIN customers c ON c.id = cart.customer_id
-            WHERE c.store_id = $1
+            SELECT SUM(o.total_cents) / NULLIF(COUNT(DISTINCT o.customer_id), 0)
+            FROM orders o
+            WHERE o.store_id = $1 AND o.status = 'paid'
         ),
         0
     )::BIGINT as avg_spent_per_customer
@@ -97,6 +98,7 @@ FROM customers
 WHERE store_id = $1;
 
 -- name: SearchCustomers :many
+-- Grupo B correction: was summing ALL carts (unpaid included); now counts only paid orders.
 SELECT
     c.*,
     COALESCE(stats.total_orders, 0)::INT as total_orders,
@@ -104,10 +106,10 @@ SELECT
 FROM customers c
 LEFT JOIN LATERAL (
     SELECT
-        COUNT(cart.id)::INT as total_orders,
-        COALESCE(SUM(cart_product_total_cents(cart.id)), 0)::BIGINT as total_spent
-    FROM carts cart
-    WHERE cart.customer_id = c.id
+        COUNT(o.id)::INT as total_orders,
+        COALESCE(SUM(o.total_cents), 0)::BIGINT as total_spent
+    FROM orders o
+    WHERE o.customer_id = c.id AND o.status = 'paid'
 ) stats ON true
 WHERE c.store_id = $1
   AND (c.platform_handle ILIKE $2 OR c.email ILIKE $2)

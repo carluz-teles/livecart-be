@@ -314,11 +314,12 @@ SELECT
     CASE WHEN c.payment_status = 'paid'
       AND c.paid_at > nl.created_at
       AND c.paid_at < nl.created_at + INTERVAL '48 hours'
-    THEN cart_product_total_cents(c.id)
+    THEN o.total_cents
     ELSE 0 END
   ), 0)::bigint AS revenue_recovered_cents
 FROM notification_logs nl
 JOIN carts c ON c.id = nl.cart_id
+LEFT JOIN orders o ON o.cart_id = c.id AND o.status = 'paid'
 WHERE nl.store_id = $1
   AND nl.notification_type = 'cart_recovery'
   AND nl.created_at > NOW() - INTERVAL '30 days'
@@ -333,6 +334,7 @@ type GetWhatsAppRecoveryStatsRow struct {
 // PRD 006: last-30-days recovery funnel. A cart counts as recovered when it
 // was paid within 48h of the recovery message (same attribution window as
 // PRD 005).
+// Grupo A: revenue_recovered_cents reads from sealed orders (paid-only was already the intent).
 func (q *Queries) GetWhatsAppRecoveryStats(ctx context.Context, storeID pgtype.UUID) (GetWhatsAppRecoveryStatsRow, error) {
 	row := q.db.QueryRow(ctx, getWhatsAppRecoveryStats, storeID)
 	var i GetWhatsAppRecoveryStatsRow

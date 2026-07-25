@@ -281,16 +281,16 @@ SELECT
         JOIN cart_items ci ON ci.cart_id = ct.id
         WHERE ct.event_id = $1 AND ct.status != 'expired'
     ), 0)::int AS total_products_sold,
-    -- Revenue metrics
+    -- Revenue metrics (Grupo C: projected stays cart-based; Grupo A: confirmed reads from sealed orders)
     COALESCE((
         SELECT SUM(cart_product_total_cents(ct.id))
         FROM carts ct
         WHERE ct.event_id = $1 AND ct.status IN ('active', 'checkout')
     ), 0)::bigint AS projected_revenue,
     COALESCE((
-        SELECT SUM(cart_product_total_cents(ct.id))
-        FROM carts ct
-        WHERE ct.event_id = $1 AND ct.payment_status = 'paid'
+        SELECT SUM(o.total_cents)
+        FROM orders o
+        WHERE o.event_id = $1 AND o.status = 'paid'
     ), 0)::bigint AS confirmed_revenue;
 
 -- name: ListCartsWithTotalByEvent :many
@@ -343,15 +343,18 @@ ORDER BY total_quantity DESC;
 SELECT
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1), 0)::int AS total_carts,
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1 AND ct.payment_status = 'paid'), 0)::int AS paid_carts,
+    -- Grupo C: total_revenue stays cart-based (projection over all non-expired carts)
     COALESCE((
         SELECT SUM(cart_product_total_cents(ct.id))
         FROM carts ct
         WHERE ct.session_id = $1 AND ct.status != 'expired'
     ), 0)::bigint AS total_revenue,
+    -- Grupo A: paid_revenue reads from sealed orders
     COALESCE((
-        SELECT SUM(cart_product_total_cents(ct.id))
-        FROM carts ct
-        WHERE ct.session_id = $1 AND ct.payment_status = 'paid'
+        SELECT SUM(o.total_cents)
+        FROM orders o
+        JOIN carts ct ON ct.id = o.cart_id
+        WHERE ct.session_id = $1 AND o.status = 'paid'
     ), 0)::bigint AS paid_revenue;
 
 -- =============================================================================

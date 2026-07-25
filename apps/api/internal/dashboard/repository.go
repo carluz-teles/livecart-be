@@ -18,13 +18,11 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 func (r *Repository) GetStats(ctx context.Context, storeID string) (*DashboardStatsRow, error) {
 	query := `
 		SELECT
-			-- Total revenue from orders
+			-- Grupo B correction: was summing ALL carts (unpaid + refunded); now counts only paid orders.
 			COALESCE((
-				SELECT SUM(ci.quantity * ci.unit_price)
-				FROM cart_items ci
-				JOIN carts c ON c.id = ci.cart_id
-				JOIN live_events le ON le.id = c.event_id
-				WHERE le.store_id = $1
+				SELECT SUM(o.total_cents)
+				FROM orders o
+				WHERE o.store_id = $1 AND o.status = 'paid'
 			), 0)::BIGINT as total_revenue,
 			-- Total orders
 			COALESCE((
@@ -64,15 +62,14 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (*DashboardSt
 func (r *Repository) GetMonthlyRevenue(ctx context.Context, storeID string) ([]MonthlyRevenueRow, error) {
 	query := `
 		SELECT
-			TO_CHAR(c.created_at, 'Mon') as month,
-			EXTRACT(MONTH FROM c.created_at)::INT as month_num,
-			COALESCE(SUM(ci.quantity * ci.unit_price), 0)::BIGINT as revenue
-		FROM carts c
-		JOIN live_events le ON le.id = c.event_id
-		LEFT JOIN cart_items ci ON ci.cart_id = c.id
-		WHERE le.store_id = $1
-		  AND c.created_at >= date_trunc('year', CURRENT_DATE)
-		GROUP BY TO_CHAR(c.created_at, 'Mon'), EXTRACT(MONTH FROM c.created_at)
+			TO_CHAR(o.paid_at, 'Mon') as month,
+			EXTRACT(MONTH FROM o.paid_at)::INT as month_num,
+			COALESCE(SUM(o.total_cents), 0)::BIGINT as revenue
+		FROM orders o
+		WHERE o.store_id = $1
+		  AND o.status = 'paid'
+		  AND o.paid_at >= date_trunc('year', CURRENT_DATE)
+		GROUP BY TO_CHAR(o.paid_at, 'Mon'), EXTRACT(MONTH FROM o.paid_at)
 		ORDER BY month_num
 	`
 
@@ -147,11 +144,11 @@ func (r *Repository) GetEventsWithRevenue(ctx context.Context, storeID string, l
 			COALESCE((SELECT SUM(ls.total_comments) FROM live_sessions ls WHERE ls.event_id = e.id), 0)::int AS total_comments,
 			COALESCE((SELECT COUNT(*) FROM carts c WHERE c.event_id = e.id), 0)::int AS total_carts,
 			COALESCE((SELECT COUNT(*) FROM carts c WHERE c.event_id = e.id AND c.payment_status = 'paid'), 0)::int AS paid_carts,
+			-- Grupo A: reads from sealed orders (paid-only was already the intent)
 			COALESCE((
-				SELECT SUM(ci.quantity * ci.unit_price)
-				FROM carts c
-				JOIN cart_items ci ON ci.cart_id = c.id
-				WHERE c.event_id = e.id AND c.payment_status = 'paid'
+				SELECT SUM(o.total_cents)
+				FROM orders o
+				WHERE o.event_id = e.id AND o.status = 'paid'
 			), 0)::bigint AS confirmed_revenue
 		FROM live_events e
 		WHERE e.store_id = $1
@@ -228,29 +225,21 @@ func (r *Repository) GetAggregatedFunnel(ctx context.Context, storeID string, da
 				  AND c.created_at >= NOW() - INTERVAL '1 day' * $2
 				  AND c.payment_status = 'paid'
 			), 0)::int AS paid_carts,
-			-- Confirmed revenue (GMV)
+			-- Grupo A: confirmed revenue reads from sealed orders
 			COALESCE((
-				SELECT SUM(ci.quantity * ci.unit_price)
-				FROM carts c
-				JOIN cart_items ci ON ci.cart_id = c.id
-				JOIN live_events e ON e.id = c.event_id
-				WHERE e.store_id = $1
-				  AND c.created_at >= NOW() - INTERVAL '1 day' * $2
-				  AND c.payment_status = 'paid'
+				SELECT SUM(o.total_cents)
+				FROM orders o
+				WHERE o.store_id = $1
+				  AND o.paid_at >= NOW() - INTERVAL '1 day' * $2
+				  AND o.status = 'paid'
 			), 0)::bigint AS confirmed_revenue,
-			-- Average ticket
+			-- Grupo A: average ticket from sealed orders
 			COALESCE((
-				SELECT AVG(cart_total)
-				FROM (
-					SELECT SUM(ci.quantity * ci.unit_price) as cart_total
-					FROM carts c
-					JOIN cart_items ci ON ci.cart_id = c.id
-					JOIN live_events e ON e.id = c.event_id
-					WHERE e.store_id = $1
-					  AND c.created_at >= NOW() - INTERVAL '1 day' * $2
-					  AND c.payment_status = 'paid'
-					GROUP BY c.id
-				) sub
+				SELECT AVG(o.total_cents)
+				FROM orders o
+				WHERE o.store_id = $1
+				  AND o.paid_at >= NOW() - INTERVAL '1 day' * $2
+				  AND o.status = 'paid'
 			), 0)::bigint AS average_ticket
 	`
 
