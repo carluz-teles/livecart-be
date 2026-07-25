@@ -34,7 +34,7 @@ const TrialReminderLeadDays = 2
 // source of truth; Stripe webhooks keep it in sync.
 type Service struct {
 	queries        *sqlc.Queries
-	stripe         *StripeClient // nil when STRIPE_SECRET_KEY is absent (local-only trials)
+	stripe         stripeGateway // nil when STRIPE_SECRET_KEY is absent (local-only trials)
 	trialScheduler TrialReminderScheduler
 	logger         *zap.Logger
 }
@@ -45,9 +45,16 @@ func (s *Service) SetTrialReminderScheduler(sch TrialReminderScheduler) { s.tria
 
 // NewService builds the billing service.
 func NewService(queries *sqlc.Queries, logger *zap.Logger) *Service {
+	// NewStripeClient returns nil when the key is empty; assigning nil *StripeClient
+	// directly to the stripeGateway interface would produce a non-nil interface with
+	// nil value, breaking the `s.stripe != nil` guard. Assign through a typed local.
+	var stripe stripeGateway
+	if sc := NewStripeClient(config.StripeSecretKey.String(), logger); sc != nil {
+		stripe = sc
+	}
 	return &Service{
 		queries: queries,
-		stripe:  NewStripeClient(config.StripeSecretKey.String(), logger),
+		stripe:  stripe,
 		logger:  logger.Named("billing"),
 	}
 }
@@ -612,44 +619,56 @@ func (s *Service) ChangePlan(ctx context.Context, input ChangePlanInput) (*domai
 // LEDGER DE GMV (append-only) + METERING (PRD 007)
 // =============================================================================
 
-// ReportPaidGMV records the paid sale on the local ledger (source of truth
-// for the merchant's Financeiro and platform GMV) and reports it to the
-// Stripe meter. Fire-and-forget: failures are logged, never propagated.
+// OnCartPaid is the billing reactor for cart.paid: records the sale on the
+// ledger and best-effort reports the meter event to Stripe. Errors propagate
+// so asynq retries + DLQ protect against ledger loss (AC2/AC9 symmetry with
+// OnCartRefunded). Idempotent via UNIQUE (cart_id, 'sale') DO NOTHING.
 //
-// Idempotent end to end: the ledger has UNIQUE (cart_id, 'sale') and the
-// meter event carries identifier gmv-<cart_id>.
-func (s *Service) ReportPaidGMV(ctx context.Context, storeID, cartID string, amountCents int64) {
-	if amountCents <= 0 {
-		return
-	}
+// Compat/rollout: gmvCents=0 → fallback to GetCartGMVCents; if still 0 → no-op
+// (preserves current behaviour for carts with no items / pure-frete carts).
+func (s *Service) OnCartPaid(ctx context.Context, storeID, cartID string, gmvCents int64) error {
 	sid, err := parseUUID(storeID)
 	if err != nil {
-		return
+		return fmt.Errorf("billing OnCartPaid: invalid store_id %q: %w", storeID, err)
 	}
 	cid, err := parseUUID(cartID)
 	if err != nil {
-		return
+		return fmt.Errorf("billing OnCartPaid: invalid cart_id %q: %w", cartID, err)
 	}
 
+	// (1) Validate subscription — absent → error (no subscription = DLQ).
 	sub, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
 	if err != nil {
-		logger.From(ctx, s.logger).Warn("gmv not recorded: no subscription row",
-			zap.String("store_id", storeID), zap.Error(err))
-		return
+		return fmt.Errorf("billing OnCartPaid: no subscription for store %q: %w", storeID, err)
+	}
+
+	// (2) Fallback: payload legado sem gmv_cents (ou gmv_cents=0) → computa do banco.
+	if gmvCents <= 0 {
+		gmvCents, err = s.queries.GetCartGMVCents(ctx, cid)
+		if err != nil {
+			logger.From(ctx, s.logger).Warn("OnCartPaid: fallback GetCartGMVCents failed",
+				zap.String("cart_id", cartID), zap.Error(err))
+			gmvCents = 0
+		}
+	}
+
+	// (3) Cart com gmv=0 (sem itens ou puro-frete) → early return, não grava linha.
+	if gmvCents <= 0 {
+		return nil
 	}
 
 	cfg := Plans()[Plan(sub.Plan)]
-	// billable = a taxa deste ciclo sera cobrada (assinatura convertida).
-	// Trial/paused/etc: registramos a venda para visibilidade, com fee
-	// snapshot, mas billable=false (estorno nao gera credito).
+	// billable = taxa cobrada neste ciclo (assinatura convertida).
+	// Trial/paused/etc: grava para visibilidade, fee snapshot, billable=false.
 	billable := sub.Status == StatusActive || sub.Status == StatusPastDue
-	feeCents := amountCents * int64(cfg.GMVBps) / 10000
+	feeCents := gmvCents * int64(cfg.GMVBps) / 10000
 
+	// (4) Insert do ledger — propaga erro real; ErrNoRows = idempotente → nil SEM meter.
 	entry, err := s.queries.InsertLedgerEntry(ctx, sqlc.InsertLedgerEntryParams{
 		StoreID:     sid,
 		CartID:      cid,
 		EntryType:   "sale",
-		AmountCents: amountCents,
+		AmountCents: gmvCents,
 		Plan:        sub.Plan,
 		FeeBps:      int32(cfg.GMVBps),
 		FeeCents:    feeCents,
@@ -657,18 +676,15 @@ func (s *Service) ReportPaidGMV(ctx context.Context, storeID, cartID string, amo
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return // conflito (cart_id, sale) — ja registrado, retry de webhook
+			return nil // conflito (cart_id, 'sale') — já registrado, retry idempotente
 		}
-		logger.From(ctx, s.logger).Error("failed to record gmv ledger entry",
-			zap.String("cart_id", cartID), zap.Error(err))
-		return
+		return fmt.Errorf("billing OnCartPaid: insert ledger entry: %w", err)
 	}
 
-	// Meter na Stripe (melhor esforco; a linha do ledger fica sem stripe_ref
-	// quando falha — visivel para reconciliacao).
+	// (5) Meter na Stripe — melhor esforço: falha só loga, NUNCA retorna erro.
 	if s.stripe != nil && sub.StripeCustomerID.Valid {
 		event := config.StripeGMVMeterEvent.StringOr("gmv_cents")
-		if err := s.stripe.SendMeterEvent(ctx, event, sub.StripeCustomerID.String, "gmv-"+cartID, amountCents); err != nil {
+		if err := s.stripe.SendMeterEvent(ctx, event, sub.StripeCustomerID.String, "gmv-"+cartID, gmvCents); err != nil {
 			logger.From(ctx, s.logger).Warn("failed to report gmv meter event",
 				zap.String("cart_id", cartID), zap.Error(err))
 		} else {
@@ -682,19 +698,20 @@ func (s *Service) ReportPaidGMV(ctx context.Context, storeID, cartID string, amo
 	logger.From(ctx, s.logger).Info("gmv sale recorded",
 		zap.String("store_id", storeID),
 		zap.String("cart_id", cartID),
-		zap.Int64("amount_cents", amountCents),
+		zap.Int64("amount_cents", gmvCents),
 		zap.Bool("billable", billable),
 	)
 
-	// Group J: gmv.recorded fires only on a NEW ledger row (the ErrNoRows path
-	// above is the idempotency guard), so it is exactly-once per sale.
+	// gmv.recorded fires only on a NEW ledger row (ErrNoRows path = idempotency
+	// guard), so it is exactly-once per sale.
 	_ = events.EmitInternal(ctx, s.queries, events.GMVRecorded, "gmv.recorded:"+cartID, struct {
 		StoreID     string `json:"store_id"`
 		CartID      string `json:"cart_id"`
 		AmountCents int64  `json:"amount_cents"`
 		FeeCents    int64  `json:"fee_cents"`
 		Billable    bool   `json:"billable"`
-	}{storeID, cartID, amountCents, feeCents, billable})
+	}{storeID, cartID, gmvCents, feeCents, billable})
+	return nil
 }
 
 // OnCartRefunded records the refund on the ledger and reimburses the fee via
@@ -702,21 +719,23 @@ func (s *Service) ReportPaidGMV(ctx context.Context, storeID, cartID string, amo
 // when the refund lands on a later billing cycle (the credit auto-applies to
 // the next invoice). Trial sales (billable=false) record the entry for
 // visibility but credit nothing (no fee was ever charged).
-func (s *Service) OnCartRefunded(ctx context.Context, storeID, cartID string) {
+// Returns error on ledger insert failure so ReactCartRefunded can DLQ.
+func (s *Service) OnCartRefunded(ctx context.Context, storeID, cartID string) error {
 	sid, err := parseUUID(storeID)
 	if err != nil {
-		return
+		return fmt.Errorf("billing OnCartRefunded: invalid store_id %q: %w", storeID, err)
 	}
 	cid, err := parseUUID(cartID)
 	if err != nil {
-		return
+		return fmt.Errorf("billing OnCartRefunded: invalid cart_id %q: %w", cartID, err)
 	}
 
 	sale, err := s.queries.GetLedgerSaleEntry(ctx, cid)
 	if err != nil {
+		// No sale = nothing to refund (DLQ path não aplicável; retorno nil).
 		logger.From(ctx, s.logger).Debug("refund without a recorded sale — ignored",
 			zap.String("cart_id", cartID))
-		return
+		return nil
 	}
 
 	feeCredit := int64(0)
@@ -736,16 +755,12 @@ func (s *Service) OnCartRefunded(ctx context.Context, storeID, cartID string) {
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return // estorno ja registrado (retry de webhook)
+			return nil // estorno já registrado (retry idempotente)
 		}
-		logger.From(ctx, s.logger).Error("failed to record refund ledger entry",
-			zap.String("cart_id", cartID), zap.Error(err))
-		return
+		return fmt.Errorf("billing OnCartRefunded: insert ledger entry: %w", err)
 	}
 
-	// Group J: gmv.refunded on the NEW refund_credit row (exactly-once via the
-	// ErrNoRows guard above). fee_credit_cents > 0 means the success fee is being
-	// reimbursed (billable sale); 0 for trial sales.
+	// gmv.refunded exactly-once (ErrNoRows guard above).
 	_ = events.EmitInternal(ctx, s.queries, events.GMVRefunded, "gmv.refunded:"+cartID, struct {
 		StoreID        string `json:"store_id"`
 		CartID         string `json:"cart_id"`
@@ -753,6 +768,7 @@ func (s *Service) OnCartRefunded(ctx context.Context, storeID, cartID string) {
 		FeeCreditCents int64  `json:"fee_credit_cents"`
 	}{storeID, cartID, sale.AmountCents, feeCredit})
 
+	// Stripe balance credit — melhor esforço, falha só loga.
 	if feeCredit > 0 && s.stripe != nil {
 		sub, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
 		if err == nil && sub.StripeCustomerID.Valid {
@@ -774,6 +790,7 @@ func (s *Service) OnCartRefunded(ctx context.Context, storeID, cartID string) {
 			}
 		}
 	}
+	return nil
 }
 
 // =============================================================================

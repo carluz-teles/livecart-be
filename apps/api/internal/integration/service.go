@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/events"
@@ -159,9 +160,12 @@ func (s *Service) SetStorage(c *storage.S3Client) {
 // to keep the packages decoupled.
 type BillingGate interface {
 	IsStoreBlocked(ctx context.Context, storeID string) bool
+	// OnCartPaid registra a venda no ledger (GMV) e reporta o meter ao Stripe.
+	// Propaga erro para retry+DLQ (idempotente via ON CONFLICT DO NOTHING).
+	OnCartPaid(ctx context.Context, storeID, cartID string, gmvCents int64) error
 	// OnCartRefunded registra o estorno no ledger e devolve a taxa cobrada
-	// (credito na proxima fatura) — cobre estorno em ciclo posterior.
-	OnCartRefunded(ctx context.Context, storeID, cartID string)
+	// (crédito na próxima fatura). Propaga erro para retry+DLQ.
+	OnCartRefunded(ctx context.Context, storeID, cartID string) error
 }
 
 // SetBillingGate wires the paywall gate (optional — absent means no gating).
@@ -3804,13 +3808,28 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		if cartPaymentStatus == "paid" {
 			snap = status
 		}
+		// gmv_cents = soma pura de itens (exclui frete e cupom) — fonte única de
+		// verdade via GetCartGMVCents. Falha → emite com 0 (receptor usa fallback).
+		var gmvCents int64
+		if cartPaymentStatus == "paid" {
+			if cid, err := uuid.Parse(status.ExternalReference); err == nil {
+				cartUUID := pgtype.UUID{Bytes: cid, Valid: true}
+				if v, err := s.repo.queries.GetCartGMVCents(ctx, cartUUID); err == nil {
+					gmvCents = v
+				} else {
+					logger.From(ctx, s.logger).Warn("cart.paid: GetCartGMVCents failed, emitting gmv_cents=0",
+						zap.String("cart_id", status.ExternalReference), zap.Error(err))
+				}
+			}
+		}
 		payload, _ := json.Marshal(struct {
 			CartID          string                   `json:"cart_id"`
 			StoreID         string                   `json:"store_id"`
 			PaymentID       string                   `json:"payment_id"`
 			Method          string                   `json:"payment_method"`
+			GMVCents        int64                    `json:"gmv_cents,omitempty"`
 			PaymentSnapshot *providers.PaymentStatus `json:"payment_snapshot,omitempty"`
-		}{status.ExternalReference, input.StoreID, status.PaymentID, status.PaymentMethod, snap})
+		}{status.ExternalReference, input.StoreID, status.PaymentID, status.PaymentMethod, gmvCents, snap})
 		_ = events.Emit(ctx, s.repo.queries, events.Envelope{
 			Name:     name,
 			Source:   events.Source(input.Provider),
@@ -3834,12 +3853,13 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 }
 
 // ReactCartPaid is the cart.paid fan-out reactor (L3): confirms the coupon
-// redemption and runs the customer post-payment flow (tracking token, order
-// timeline, GMV, receipt email, waitlist fulfilment via postCheckoutHook.OnCartPaid).
+// redemption, runs the customer post-payment flow (tracking token, order
+// timeline, receipt email, waitlist fulfilment via postCheckoutHook.OnCartPaid),
+// and records GMV on the billing ledger (billingGate.OnCartPaid).
 // Each step is idempotent (tracking_token set-once, order_events/ledger UNIQUE),
 // so asynq redelivery/retry is safe. ERP finalisation is a separate reactor
 // (ReactCartPaidERP) because it needs the gateway snapshot.
-func (s *Service) ReactCartPaid(ctx context.Context, cartID string) error {
+func (s *Service) ReactCartPaid(ctx context.Context, cartID, storeID string, gmvCents int64) error {
 	if s.couponSyncer != nil {
 		if err := s.couponSyncer.OnCartPaid(ctx, cartID); err != nil {
 			return fmt.Errorf("coupon confirm on cart.paid: %w", err)
@@ -3847,6 +3867,11 @@ func (s *Service) ReactCartPaid(ctx context.Context, cartID string) error {
 	}
 	if s.postCheckoutHook != nil {
 		s.postCheckoutHook.OnCartPaid(ctx, cartID)
+	}
+	if s.billingGate != nil {
+		if err := s.billingGate.OnCartPaid(ctx, storeID, cartID, gmvCents); err != nil {
+			return fmt.Errorf("billing ledger on cart.paid: %w", err)
+		}
 	}
 	return nil
 }
@@ -3891,7 +3916,9 @@ func (s *Service) ReactCartRefunded(ctx context.Context, cartID, storeID string)
 		}
 	}
 	if s.billingGate != nil {
-		s.billingGate.OnCartRefunded(ctx, storeID, cartID)
+		if err := s.billingGate.OnCartRefunded(ctx, storeID, cartID); err != nil {
+			return fmt.Errorf("billing ledger on cart.refunded: %w", err)
+		}
 	}
 	if s.postCheckoutHook != nil {
 		s.postCheckoutHook.OnCartRefunded(ctx, cartID)

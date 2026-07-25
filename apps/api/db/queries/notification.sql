@@ -157,7 +157,7 @@ SELECT
     CASE WHEN c.payment_status = 'paid'
       AND c.paid_at > nl.created_at
       AND c.paid_at < nl.created_at + INTERVAL '48 hours'
-    THEN (SELECT COALESCE(SUM(ci.quantity * ci.unit_price), 0) FROM cart_items ci WHERE ci.cart_id = c.id)
+    THEN cart_product_total_cents(c.id)
     ELSE 0 END
   ), 0)::bigint AS revenue_recovered_cents
 FROM notification_logs nl
