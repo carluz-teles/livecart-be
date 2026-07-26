@@ -72,6 +72,16 @@ const (
 	// so order.payment_confirmed/cancelled/refunded/shipped/delivered were removed
 	// from the vocabulary — InsertOrderEvent just writes the timeline row.
 
+	// Order post-payment facts (group O). Emitted by the Order domain AFTER the
+	// immutable Order is materialised (order.paid) or flipped to refunded
+	// (order.refunded), transactionally via the outbox with dedup by order_id
+	// (exactly-once). They are the fan-out anchors for POST-payment consumers:
+	// Fatia 11b wires the ERP finalisation/refund reactors onto them (moving the
+	// ERP off cart.*); no consumer exists yet in 11a. Distinct from group F, which
+	// are internal order_events timeline ROWS — these are first-class BUS facts.
+	OrderPaid     Name = "order.paid"
+	OrderRefunded Name = "order.refunded"
+
 	// CartExpire is an internal SCHEDULED COMMAND (not a domain fact): enqueued
 	// with asynq.ProcessAt(expires_at) so the cart expires exactly at its window
 	// instead of waiting for the 5-min sweep. Its handler runs the same guarded
