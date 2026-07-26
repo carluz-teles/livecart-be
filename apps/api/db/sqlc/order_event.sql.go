@@ -33,13 +33,14 @@ func (q *Queries) HasOrderEvent(ctx context.Context, arg HasOrderEventParams) (b
 
 const insertOrderEvent = `-- name: InsertOrderEvent :one
 
-INSERT INTO order_events (cart_id, event_type, occurred_at, source, metadata)
-VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (cart_id, event_type) DO NOTHING
-RETURNING id, cart_id, event_type, occurred_at, source, metadata, created_at
+INSERT INTO order_events (order_id, cart_id, event_type, occurred_at, source, metadata)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (order_id, event_type) DO NOTHING
+RETURNING id, cart_id, event_type, occurred_at, source, metadata, created_at, order_id
 `
 
 type InsertOrderEventParams struct {
+	OrderID    pgtype.UUID        `json:"order_id"`
 	CartID     pgtype.UUID        `json:"cart_id"`
 	EventType  string             `json:"event_type"`
 	OccurredAt pgtype.Timestamptz `json:"occurred_at"`
@@ -52,11 +53,14 @@ type InsertOrderEventParams struct {
 // =============================================================================
 // Customer-facing timeline. Distinct from shipment_tracking_events (carrier
 // raw codes) — these events are the lifeline the public page reads from.
-// Idempotent insert: ON CONFLICT (cart_id, event_type) DO NOTHING relies on
-// the unique index from migration 000067. Returning xmax = 0 lets the caller
-// distinguish "first emit" from "retry" so duplicate emails are skipped.
+// Idempotent insert: ON CONFLICT (order_id, event_type) DO NOTHING relies on
+// the unique index from migration 000096 (a timeline pertence à Order). cart_id
+// ainda é gravado (dual-key) até a Fase F. A row retornada (ou a ausência dela,
+// ErrNoRows) deixa o caller distinguir "first emit" de "retry" e pular e-mails
+// duplicados.
 func (q *Queries) InsertOrderEvent(ctx context.Context, arg InsertOrderEventParams) (OrderEvent, error) {
 	row := q.db.QueryRow(ctx, insertOrderEvent,
+		arg.OrderID,
 		arg.CartID,
 		arg.EventType,
 		arg.OccurredAt,
@@ -72,12 +76,13 @@ func (q *Queries) InsertOrderEvent(ctx context.Context, arg InsertOrderEventPara
 		&i.Source,
 		&i.Metadata,
 		&i.CreatedAt,
+		&i.OrderID,
 	)
 	return i, err
 }
 
 const listOrderEventsByCart = `-- name: ListOrderEventsByCart :many
-SELECT id, cart_id, event_type, occurred_at, source, metadata, created_at FROM order_events
+SELECT id, cart_id, event_type, occurred_at, source, metadata, created_at, order_id FROM order_events
 WHERE cart_id = $1
 ORDER BY occurred_at ASC
 `
@@ -99,6 +104,7 @@ func (q *Queries) ListOrderEventsByCart(ctx context.Context, cartID pgtype.UUID)
 			&i.Source,
 			&i.Metadata,
 			&i.CreatedAt,
+			&i.OrderID,
 		); err != nil {
 			return nil, err
 		}

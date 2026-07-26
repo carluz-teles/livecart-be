@@ -5,12 +5,14 @@
 -- raw codes) — these events are the lifeline the public page reads from.
 
 -- name: InsertOrderEvent :one
--- Idempotent insert: ON CONFLICT (cart_id, event_type) DO NOTHING relies on
--- the unique index from migration 000067. Returning xmax = 0 lets the caller
--- distinguish "first emit" from "retry" so duplicate emails are skipped.
-INSERT INTO order_events (cart_id, event_type, occurred_at, source, metadata)
-VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (cart_id, event_type) DO NOTHING
+-- Idempotent insert: ON CONFLICT (order_id, event_type) DO NOTHING relies on
+-- the unique index from migration 000096 (a timeline pertence à Order). cart_id
+-- ainda é gravado (dual-key) até a Fase F. A row retornada (ou a ausência dela,
+-- ErrNoRows) deixa o caller distinguir "first emit" de "retry" e pular e-mails
+-- duplicados.
+INSERT INTO order_events (order_id, cart_id, event_type, occurred_at, source, metadata)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (order_id, event_type) DO NOTHING
 RETURNING *;
 
 -- name: ListOrderEventsByCart :many

@@ -81,19 +81,68 @@ func (r *Repository) LoadCart(ctx context.Context, cartID string) (*CartSnapshot
 	}, nil
 }
 
-// GetCartByTrackingToken does a single-shot lookup by token (globally unique
-// after migration 000066). Returns nil cart and nil error when not found, so
-// the public handler can answer 404 without leaking a different signal for
-// "exists but token wrong" vs "doesn't exist".
+// GetCartByTrackingToken resolves a paid cart from its tracking token. The
+// token's fonte da verdade migrou para order_logistics (Fatia C1): tentamos
+// primeiro pela Order e caímos no lookup histórico por carts.tracking_token
+// enquanto durar o dual-write (Fase F remove o do cart). Returns nil cart and
+// nil error when not found, so the public handler can answer 404 without
+// leaking "exists but token wrong" vs "doesn't exist".
 func (r *Repository) GetCartByTrackingToken(ctx context.Context, token string) (*sqlc.Cart, error) {
 	if token == "" {
 		return nil, nil
 	}
-	cart, err := r.q.GetCartByTrackingToken(ctx, pgtype.Text{String: token, Valid: true})
+	tok := pgtype.Text{String: token, Valid: true}
+
+	// Canonical: pela Order (order_logistics.tracking_token).
+	if cart, err := r.q.GetCartByOrderLogisticsTrackingToken(ctx, tok); err == nil {
+		// A Order é a dona do token: garante que o comparativo constant-time do
+		// handler passe mesmo quando carts.tracking_token já foi limpo (Fase F).
+		cart.TrackingToken = tok
+		return &cart, nil
+	}
+
+	// Fallback: pelo cart (histórico / dual-write ainda vigente).
+	cart, err := r.q.GetCartByTrackingToken(ctx, tok)
 	if err != nil {
 		return nil, nil
 	}
 	return &cart, nil
+}
+
+// ResolveOrderID looks up the materialised Order's id for a cart, reusing the
+// canonical GetOrderIDByCartID query (Fatia A). Returns an invalid UUID
+// (Valid=false) with a nil error when the Order isn't materialised yet — o path
+// síncrono do cartão roda o hook post-checkout antes do fato cart.paid
+// materializar a Order —, deixando o caller degradar para um order_id nulo
+// (cart_id ainda registrado) em vez de falhar a timeline best-effort.
+func (r *Repository) ResolveOrderID(ctx context.Context, cartID string) (pgtype.UUID, error) {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return pgtype.UUID{}, fmt.Errorf("parsing cart id: %w", err)
+	}
+	orderID, err := r.q.GetOrderIDByCartID(ctx, pgtype.UUID{Bytes: uid, Valid: true})
+	if err != nil {
+		if isNoRows(err) {
+			return pgtype.UUID{}, nil
+		}
+		return pgtype.UUID{}, fmt.Errorf("resolving order id: %w", err)
+	}
+	return orderID, nil
+}
+
+// SetOrderLogisticsTrackingToken dual-writes the tracking token onto the Order
+// (order_logistics) — a fonte da verdade do rastreamento na Fatia C1. Set-once
+// no nível do banco (grava só quando ainda nulo); no-op silencioso quando a
+// Order ainda não existe (path síncrono do cartão).
+func (r *Repository) SetOrderLogisticsTrackingToken(ctx context.Context, cartID, token string) error {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return fmt.Errorf("parsing cart id: %w", err)
+	}
+	return r.q.SetOrderLogisticsTrackingToken(ctx, sqlc.SetOrderLogisticsTrackingTokenParams{
+		CartID:        pgtype.UUID{Bytes: uid, Valid: true},
+		TrackingToken: pgtype.Text{String: token, Valid: true},
+	})
 }
 
 // SetTrackingToken persists the generated tracking_token. Idempotency lives
@@ -144,11 +193,14 @@ func (r *Repository) MarkWaitlistFulfilledByCart(ctx context.Context, cartID str
 	return nil
 }
 
-// InsertOrderEvent appends an event to the customer-facing timeline.
-// The DB enforces (cart_id, event_type) uniqueness so retried webhooks/hooks
-// don't duplicate emails. Returns true when the row was newly inserted (so
-// the caller can decide whether to fire side effects like emails).
-func (r *Repository) InsertOrderEvent(ctx context.Context, cartID, eventType, source string, metadata json.RawMessage) (bool, error) {
+// InsertOrderEvent appends an event to the customer-facing timeline, keyed pela
+// Order (order_id) desde a Fatia C1. cart_id ainda é gravado (dual-key até a
+// Fase F). O DB enforce (order_id, event_type) uniqueness para retries de
+// webhook/hook não duplicarem e-mails. orderID pode ser inválido (Valid=false)
+// quando a Order ainda não foi materializada — nesse caso grava order_id NULL,
+// com cart_id como âncora. Returns true when the row was newly inserted (so the
+// caller can decide whether to fire side effects like emails).
+func (r *Repository) InsertOrderEvent(ctx context.Context, orderID pgtype.UUID, cartID, eventType, source string, metadata json.RawMessage) (bool, error) {
 	uid, err := uuid.Parse(cartID)
 	if err != nil {
 		return false, fmt.Errorf("parsing cart id: %w", err)
@@ -157,6 +209,7 @@ func (r *Repository) InsertOrderEvent(ctx context.Context, cartID, eventType, so
 		metadata = json.RawMessage(`{}`)
 	}
 	_, err = r.q.InsertOrderEvent(ctx, sqlc.InsertOrderEventParams{
+		OrderID:    orderID,
 		CartID:     pgtype.UUID{Bytes: uid, Valid: true},
 		EventType:  eventType,
 		OccurredAt: pgtype.Timestamptz{Time: timeNow(), Valid: true},
