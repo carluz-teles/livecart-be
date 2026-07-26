@@ -11,7 +11,8 @@ SELECT id FROM orders WHERE cart_id = $1;
 -- idx_order_logistics_tracking garante unicidade global. Keyed por cart_id
 -- (join orders→order_logistics) para o postcheckout não resolver order_id fora.
 -- No-op (0 rows) quando a Order ainda não foi materializada (path síncrono do
--- cartão) — a materialização posterior copia carts.tracking_token adiante.
+-- cartão) — nesse caso o postcheckout adia o fluxo para o reactor async, que
+-- materializa a Order antes de gerar/gravar o token aqui (Fatia 10-a).
 UPDATE order_logistics ol
 SET tracking_token = $2
 FROM orders o
@@ -21,13 +22,26 @@ WHERE o.id = ol.order_id
 
 -- name: GetCartByOrderLogisticsTrackingToken :one
 -- Fatia C1: acha o cart de origem a partir do tracking_token gravado na Order
--- (order_logistics). É o lookup canônico do rastreamento; o lookup por
--- carts.tracking_token vira fallback enquanto durar o dual-write (Fase F remove
--- o do cart).
+-- (order_logistics). É o único lookup do rastreamento público desde a Fatia 10-a
+-- (carts.tracking_token foi dropado); a unicidade global é garantida pelo
+-- idx_order_logistics_tracking.
 SELECT c.* FROM carts c
 JOIN orders o ON o.cart_id = c.id
 JOIN order_logistics ol ON ol.order_id = o.id
 WHERE ol.tracking_token = $1;
+
+-- name: GetOrderLogisticsTrackingTokenByCartID :one
+-- Fatia 10-a: estado do token de rastreio da Order deste cart. É a idempotência
+-- (e a leitura da fonte da verdade) do postcheckout OnCartPaid/OnShipmentPosted:
+--   • ErrNoRows  → a Order ainda não foi materializada (path síncrono do cartão
+--     roda o hook antes do fato cart.paid criar a Order) → o caller adia p/ o
+--     reactor async;
+--   • token NULL → Order materializada, token ainda não gerado → gerar+gravar;
+--   • token set  → já processado → shortcut idempotente (replay não duplica).
+SELECT ol.tracking_token
+FROM order_logistics ol
+JOIN orders o ON o.id = ol.order_id
+WHERE o.cart_id = $1;
 
 -- name: GetOrderStatusByCartID :one
 -- Guarda de transição (Fatia E1): id + status atuais da Order do cart. O listener

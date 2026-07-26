@@ -81,32 +81,49 @@ func (r *Repository) LoadCart(ctx context.Context, cartID string) (*CartSnapshot
 	}, nil
 }
 
-// GetCartByTrackingToken resolves a paid cart from its tracking token. The
-// token's fonte da verdade migrou para order_logistics (Fatia C1): tentamos
-// primeiro pela Order e caímos no lookup histórico por carts.tracking_token
-// enquanto durar o dual-write (Fase F remove o do cart). Returns nil cart and
-// nil error when not found, so the public handler can answer 404 without
-// leaking "exists but token wrong" vs "doesn't exist".
-func (r *Repository) GetCartByTrackingToken(ctx context.Context, token string) (*sqlc.Cart, error) {
+// GetCartByTrackingToken resolves a paid cart from its tracking token. A fonte
+// da verdade do token é order_logistics (Fatia C1); desde a Fatia 10-a esse é o
+// ÚNICO lookup (carts.tracking_token foi dropado). Além do cart, devolve o token
+// que casou na Order para o handler comparar (constant-time) contra o valor
+// resolvido, não contra o próprio input. Returns nil cart / "" token / nil error
+// when not found, so the public handler can answer 404 without leaking
+// "exists but token wrong" vs "doesn't exist".
+func (r *Repository) GetCartByTrackingToken(ctx context.Context, token string) (*sqlc.Cart, string, error) {
 	if token == "" {
-		return nil, nil
+		return nil, "", nil
 	}
 	tok := pgtype.Text{String: token, Valid: true}
 
-	// Canonical: pela Order (order_logistics.tracking_token).
-	if cart, err := r.q.GetCartByOrderLogisticsTrackingToken(ctx, tok); err == nil {
-		// A Order é a dona do token: garante que o comparativo constant-time do
-		// handler passe mesmo quando carts.tracking_token já foi limpo (Fase F).
-		cart.TrackingToken = tok
-		return &cart, nil
-	}
-
-	// Fallback: pelo cart (histórico / dual-write ainda vigente).
-	cart, err := r.q.GetCartByTrackingToken(ctx, tok)
+	cart, err := r.q.GetCartByOrderLogisticsTrackingToken(ctx, tok)
 	if err != nil {
-		return nil, nil
+		return nil, "", nil
 	}
-	return &cart, nil
+	// O WHERE ol.tracking_token = $1 já casou a igualdade contra a fonte da
+	// verdade (order_logistics); o valor resolvido é o token da Order.
+	return &cart, token, nil
+}
+
+// GetOrderLogisticsTrackingToken reads the Order's tracking token for a cart —
+// the source of truth (order_logistics) and the postcheckout idempotency probe.
+// Returns (token, materialised, err):
+//   - materialised=false, token="" → the Order isn't materialised yet (the
+//     synchronous card path runs the hook before cart.paid materialises the
+//     Order); the caller defers the flow to the async reactor;
+//   - materialised=true, token=""  → Order exists, token not generated yet;
+//   - materialised=true, token≠""  → already processed (idempotent shortcut).
+func (r *Repository) GetOrderLogisticsTrackingToken(ctx context.Context, cartID string) (string, bool, error) {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return "", false, fmt.Errorf("parsing cart id: %w", err)
+	}
+	tok, err := r.q.GetOrderLogisticsTrackingTokenByCartID(ctx, pgtype.UUID{Bytes: uid, Valid: true})
+	if err != nil {
+		if isNoRows(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("reading order logistics tracking token: %w", err)
+	}
+	return tok.String, true, nil
 }
 
 // ResolveOrderID looks up the materialised Order's id for a cart, reusing the
@@ -141,20 +158,6 @@ func (r *Repository) SetOrderLogisticsTrackingToken(ctx context.Context, cartID,
 	}
 	return r.q.SetOrderLogisticsTrackingToken(ctx, sqlc.SetOrderLogisticsTrackingTokenParams{
 		CartID:        pgtype.UUID{Bytes: uid, Valid: true},
-		TrackingToken: pgtype.Text{String: token, Valid: true},
-	})
-}
-
-// SetTrackingToken persists the generated tracking_token. Idempotency lives
-// at the call site: the service skips this when cart.TrackingToken is already
-// set.
-func (r *Repository) SetTrackingToken(ctx context.Context, cartID, token string) error {
-	uid, err := uuid.Parse(cartID)
-	if err != nil {
-		return fmt.Errorf("parsing cart id: %w", err)
-	}
-	return r.q.SetCartTrackingToken(ctx, sqlc.SetCartTrackingTokenParams{
-		ID:            pgtype.UUID{Bytes: uid, Valid: true},
 		TrackingToken: pgtype.Text{String: token, Valid: true},
 	})
 }

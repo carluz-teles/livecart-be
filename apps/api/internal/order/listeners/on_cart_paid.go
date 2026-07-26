@@ -163,6 +163,11 @@ func (l *Listener) createPaidOrder(
 
 	// shipping_service_id é um id opaco (int-as-string p/ ME, ObjectId/UUID p/
 	// outros) — congelado como TEXT, igual à fonte carts, sem parse com perda.
+	//
+	// tracking_token NÃO é copiado do cart (Fatia 10-a): order_logistics é a fonte
+	// da verdade e nasce NULL aqui. O postcheckout OnCartPaid o gera e grava
+	// (SetOrderLogisticsTrackingToken) já na mesma task cart.paid — este listener
+	// materializa a Order ANTES do fan-out do postcheckout.
 	logParams := sqlc.InsertOrderLogisticsParams{
 		OrderID:               orderRow.ID,
 		ShippingAddress:       cart.ShippingAddress,
@@ -173,7 +178,6 @@ func (l *Listener) createPaidOrder(
 		ShippingCostCents:     cart.ShippingCostCents,
 		ShippingCostRealCents: cart.ShippingCostRealCents,
 		ShippingDeadlineDays:  pgtype.Int4{Int32: cart.ShippingDeadlineDays.Int32, Valid: cart.ShippingDeadlineDays.Valid},
-		TrackingToken:         cart.TrackingToken,
 	}
 
 	if err := qtx.InsertOrderLogistics(ctx, logParams); err != nil {

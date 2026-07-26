@@ -98,7 +98,6 @@ type Cart struct {
 	CouponID             pgtype.UUID `json:"coupon_id"`
 	CouponCode           pgtype.Text `json:"coupon_code"`
 	CouponDiscountCents  int64       `json:"coupon_discount_cents"`
-	TrackingToken        pgtype.Text `json:"tracking_token"`
 	// pending|done|failed — set on paid carts to track post-payment ERP order creation. failed means stock stays reserved against this cart and the merchant can retry from the admin.
 	ErpFinalisationStatus string `json:"erp_finalisation_status"`
 	// Last error message from a failed ERP finalisation attempt. Surfaced verbatim on the order detail page.

@@ -13,16 +13,16 @@ import (
 )
 
 const getCartByOrderLogisticsTrackingToken = `-- name: GetCartByOrderLogisticsTrackingToken :one
-SELECT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, c.shipping_service_id, c.shipping_service_name, c.shipping_carrier, c.shipping_cost_cents, c.shipping_cost_real_cents, c.shipping_deadline_days, c.shipping_quoted_at, c.shipping_provider, c.last_shipping_quote_options, c.last_shipping_quote_at, c.card_brand, c.card_last_four, c.card_installments, c.card_authorization_code, c.initial_snapshot_taken_at, c.initial_subtotal_cents, c.short_id, c.coupon_id, c.coupon_code, c.coupon_discount_cents, c.tracking_token, c.erp_finalisation_status, c.erp_last_error, c.erp_last_attempt_at, c.erp_attempts_count, c.erp_payment_snapshot, c.erp_invoice_id, c.erp_invoice_key, c.erp_invoice_status, c.erp_invoice_emitted_at, c.cancelled_reason, c.whatsapp_consent, c.whatsapp_consent_at, c.erp_order_state, c.erp_stock_launched, c.erp_op_started_at FROM carts c
+SELECT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, c.shipping_service_id, c.shipping_service_name, c.shipping_carrier, c.shipping_cost_cents, c.shipping_cost_real_cents, c.shipping_deadline_days, c.shipping_quoted_at, c.shipping_provider, c.last_shipping_quote_options, c.last_shipping_quote_at, c.card_brand, c.card_last_four, c.card_installments, c.card_authorization_code, c.initial_snapshot_taken_at, c.initial_subtotal_cents, c.short_id, c.coupon_id, c.coupon_code, c.coupon_discount_cents, c.erp_finalisation_status, c.erp_last_error, c.erp_last_attempt_at, c.erp_attempts_count, c.erp_payment_snapshot, c.erp_invoice_id, c.erp_invoice_key, c.erp_invoice_status, c.erp_invoice_emitted_at, c.cancelled_reason, c.whatsapp_consent, c.whatsapp_consent_at, c.erp_order_state, c.erp_stock_launched, c.erp_op_started_at FROM carts c
 JOIN orders o ON o.cart_id = c.id
 JOIN order_logistics ol ON ol.order_id = o.id
 WHERE ol.tracking_token = $1
 `
 
 // Fatia C1: acha o cart de origem a partir do tracking_token gravado na Order
-// (order_logistics). É o lookup canônico do rastreamento; o lookup por
-// carts.tracking_token vira fallback enquanto durar o dual-write (Fase F remove
-// o do cart).
+// (order_logistics). É o único lookup do rastreamento público desde a Fatia 10-a
+// (carts.tracking_token foi dropado); a unicidade global é garantida pelo
+// idx_order_logistics_tracking.
 func (q *Queries) GetCartByOrderLogisticsTrackingToken(ctx context.Context, trackingToken pgtype.Text) (Cart, error) {
 	row := q.db.QueryRow(ctx, getCartByOrderLogisticsTrackingToken, trackingToken)
 	var i Cart
@@ -73,7 +73,6 @@ func (q *Queries) GetCartByOrderLogisticsTrackingToken(ctx context.Context, trac
 		&i.CouponID,
 		&i.CouponCode,
 		&i.CouponDiscountCents,
-		&i.TrackingToken,
 		&i.ErpFinalisationStatus,
 		&i.ErpLastError,
 		&i.ErpLastAttemptAt,
@@ -227,6 +226,27 @@ func (q *Queries) GetOrderIDByCartID(ctx context.Context, cartID pgtype.UUID) (p
 	var id pgtype.UUID
 	err := row.Scan(&id)
 	return id, err
+}
+
+const getOrderLogisticsTrackingTokenByCartID = `-- name: GetOrderLogisticsTrackingTokenByCartID :one
+SELECT ol.tracking_token
+FROM order_logistics ol
+JOIN orders o ON o.id = ol.order_id
+WHERE o.cart_id = $1
+`
+
+// Fatia 10-a: estado do token de rastreio da Order deste cart. É a idempotência
+// (e a leitura da fonte da verdade) do postcheckout OnCartPaid/OnShipmentPosted:
+//   - ErrNoRows  → a Order ainda não foi materializada (path síncrono do cartão
+//     roda o hook antes do fato cart.paid criar a Order) → o caller adia p/ o
+//     reactor async;
+//   - token NULL → Order materializada, token ainda não gerado → gerar+gravar;
+//   - token set  → já processado → shortcut idempotente (replay não duplica).
+func (q *Queries) GetOrderLogisticsTrackingTokenByCartID(ctx context.Context, cartID pgtype.UUID) (pgtype.Text, error) {
+	row := q.db.QueryRow(ctx, getOrderLogisticsTrackingTokenByCartID, cartID)
+	var tracking_token pgtype.Text
+	err := row.Scan(&tracking_token)
+	return tracking_token, err
 }
 
 const getOrderStatusByCartID = `-- name: GetOrderStatusByCartID :one
@@ -517,7 +537,8 @@ type SetOrderLogisticsTrackingTokenParams struct {
 // idx_order_logistics_tracking garante unicidade global. Keyed por cart_id
 // (join orders→order_logistics) para o postcheckout não resolver order_id fora.
 // No-op (0 rows) quando a Order ainda não foi materializada (path síncrono do
-// cartão) — a materialização posterior copia carts.tracking_token adiante.
+// cartão) — nesse caso o postcheckout adia o fluxo para o reactor async, que
+// materializa a Order antes de gerar/gravar o token aqui (Fatia 10-a).
 func (q *Queries) SetOrderLogisticsTrackingToken(ctx context.Context, arg SetOrderLogisticsTrackingTokenParams) error {
 	_, err := q.db.Exec(ctx, setOrderLogisticsTrackingToken, arg.CartID, arg.TrackingToken)
 	return err
