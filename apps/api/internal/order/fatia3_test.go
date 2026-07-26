@@ -4,7 +4,9 @@ package order_test
 //
 // Invariantes cobertas:
 //   E1 order_logistics reflete erp_order_state e erp_stock_launched do cart
-//   E2 order_payments reflete external_order_id, erp_finalisation_status e invoice
+//   E2 order_payments reflete SÓ o external_order_id (reserva); finalização/NF
+//      NÃO são mais projetadas pelo mirror (Fatia 11b: escrita autoritativa
+//      direta pelos reactors em order_payments — o mirror clobbaria a fonte)
 //   E3 idempotência: 2× mirror = mesmo estado
 //   E4 no-op quando não há Order para o cart (best-effort)
 //   E5 OnCartPaid chama o mirror automaticamente (estado ERP aparece na Order)
@@ -138,8 +140,15 @@ func TestMirrorCartERPToOrder_E1b_LogisticsCancelled(t *testing.T) {
 	}
 }
 
-// ─── E2 order_payments reflete external_order_id + finalisation + invoice ────
-
+// ─── E2 order_payments reflete SÓ o external_order_id (reserva) ──────────────
+//
+// Fatia 11b: a finalização (erp_finalisation_*) e a NF (invoice_*) passaram a
+// ser escritas AUTORITATIVAMENTE em order_payments pelos reactors de ERP. O
+// mirror não pode mais projetá-las do cart — se o fizesse, clobbaria a linha
+// autoritativa com o valor (talvez defasado) do cart no momento da
+// materialização. Este teste trava isso: mesmo com o cart carregando
+// finalização/NF, o mirror projeta APENAS o external_order_id, e as colunas de
+// finalização/NF em order_payments permanecem no default ('pending', 0, NULL).
 func TestMirrorCartERPToOrder_E2_Payments(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
@@ -171,23 +180,20 @@ func TestMirrorCartERPToOrder_E2_Payments(t *testing.T) {
 		t.Fatalf("E2 query payments: %v", err)
 	}
 
+	// external_order_id (reserva) CONTINUA sendo projetado pelo mirror.
 	if extID != "tiny-ext-789" {
 		t.Errorf("E2: external_order_id want 'tiny-ext-789', got %q", extID)
 	}
-	if finStatus != "done" {
-		t.Errorf("E2: erp_finalisation_status want 'done', got %q", finStatus)
+	// Finalização/NF NÃO são mais projetadas — permanecem no default de
+	// order_payments (só os reactors as escrevem, autoritativamente).
+	if finStatus != "pending" {
+		t.Errorf("E2: mirror não deve projetar finalização — erp_finalisation_status want 'pending' (default), got %q", finStatus)
 	}
-	if attemptsCount != 1 {
-		t.Errorf("E2: erp_attempts_count want 1, got %d", attemptsCount)
+	if attemptsCount != 0 {
+		t.Errorf("E2: mirror não deve projetar finalização — erp_attempts_count want 0 (default), got %d", attemptsCount)
 	}
-	if invID != "nf-001" {
-		t.Errorf("E2: invoice_id want 'nf-001', got %q", invID)
-	}
-	if invKey != invoiceKey {
-		t.Errorf("E2: invoice_key want %q, got %q", invoiceKey, invKey)
-	}
-	if invStatus != "authorized" {
-		t.Errorf("E2: invoice_status want 'authorized', got %q", invStatus)
+	if invID != "" || invKey != "" || invStatus != "" {
+		t.Errorf("E2: mirror não deve projetar NF — invoice_* want vazios (default), got id=%q key=%q status=%q", invID, invKey, invStatus)
 	}
 }
 

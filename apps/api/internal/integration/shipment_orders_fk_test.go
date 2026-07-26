@@ -16,16 +16,14 @@ import (
 	"testing"
 )
 
-// materialiseOrder cria uma linha mínima em `orders` para o cart, simulando a
-// materialização do cart.paid (Fatia A). Retorna o orders.id.
+// materialiseOrder devolve o orders.id da Order já materializada pelo seed
+// (seedPaidCart cria orders+order_payments desde a Fatia 11b, simulando a
+// materialização do cart.paid). Mantido como seam nomeado para o teste de FK.
 func materialiseOrder(t *testing.T, fx finFixture) string {
 	t.Helper()
 	var orderID string
-	if err := testPool.QueryRow(context.Background(), `
-		INSERT INTO orders (cart_id, short_id, store_id, event_id, status)
-		VALUES ($1, 1, $2, $3, 'paid')
-		RETURNING id::text`,
-		fx.cartID, fx.storeID, fx.eventID,
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT id::text FROM orders WHERE cart_id = $1`, fx.cartID,
 	).Scan(&orderID); err != nil {
 		t.Fatalf("materialiseOrder: %v", err)
 	}
