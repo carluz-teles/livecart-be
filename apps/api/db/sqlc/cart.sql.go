@@ -231,9 +231,16 @@ func (q *Queries) DeleteCartItemsByCart(ctx context.Context, cartID pgtype.UUID)
 const expireCart = `-- name: ExpireCart :one
 UPDATE carts
 SET status = 'expired', cancelled_reason = 'expired'
-WHERE id = $1
+WHERE carts.id = $1
   AND status IN ('active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND expires_at < now()
+  AND NOT EXISTS (
+      SELECT 1 FROM waitlist_items wi
+      WHERE wi.cart_id = carts.id
+        AND (wi.status = 'waiting'
+             OR (wi.status = 'notified' AND wi.expires_at > now()))
+  )
 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at
 `
 
@@ -243,6 +250,25 @@ RETURNING id, event_id, platform_user_id, platform_handle, token, status, checko
 // sem devolver estoque nem tocar o ERP. Marcar 'expired' é a PRIMEIRA ação (no
 // mesmo tx da devolução de estoque local) — a ação irreversível de ERP só roda
 // depois que o cart está comprovadamente 'expired'.
+//
+// Sem o sweep (expiração 100% via schedule asynq), holder e waitlister do mesmo
+// produto ganham o MESMO expires_at no finalize → duas tasks cart.expire disparam
+// concorrentes. Dois guards adicionais fecham essa corrida:
+//
+//	(a) expires_at < now(): um cart com janela ESTENDIDA no futuro (promovido da
+//	    fila) não pode ser expirado por uma task com snapshot velho — o WHERE
+//	    relê o valor commitado, então a extensão vence a task antiga (MVCC).
+//	(b) NOT EXISTS(...): o ciclo de vida de um cart de waitlister é governado
+//	    PELA FILA, não pelo próprio timer. Abstém-se enquanto o item está
+//	    'waiting' (na fila) OU 'notified' dentro da janela de promoção ainda
+//	    vigente (wi.expires_at > now(), gravada ATOMICAMENTE no claim). Isso
+//	    cobre a sub-janela entre o claim (waiting→notified) e o lock do promotor:
+//	    no instante em que o item vira 'notified' sua janela já é futura, então
+//	    a task do próprio waitlister se abstém — nunca deixa um cart
+//	    notified+expired segurando estoque vazado. Um 'notified' com janela já
+//	    VENCIDA (não pagou no prazo estendido) volta a ser elegível → expira.
+//
+// 0 rows → não-elegível; o caller (ExpireCartAndReleaseStock) trata como skip.
 func (q *Queries) ExpireCart(ctx context.Context, id pgtype.UUID) (Cart, error) {
 	row := q.db.QueryRow(ctx, expireCart, id)
 	var i Cart

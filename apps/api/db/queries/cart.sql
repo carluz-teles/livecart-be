@@ -139,11 +139,35 @@ UPDATE carts SET status = $2 WHERE id = $1 RETURNING *;
 -- sem devolver estoque nem tocar o ERP. Marcar 'expired' é a PRIMEIRA ação (no
 -- mesmo tx da devolução de estoque local) — a ação irreversível de ERP só roda
 -- depois que o cart está comprovadamente 'expired'.
+--
+-- Sem o sweep (expiração 100% via schedule asynq), holder e waitlister do mesmo
+-- produto ganham o MESMO expires_at no finalize → duas tasks cart.expire disparam
+-- concorrentes. Dois guards adicionais fecham essa corrida:
+--   (a) expires_at < now(): um cart com janela ESTENDIDA no futuro (promovido da
+--       fila) não pode ser expirado por uma task com snapshot velho — o WHERE
+--       relê o valor commitado, então a extensão vence a task antiga (MVCC).
+--   (b) NOT EXISTS(...): o ciclo de vida de um cart de waitlister é governado
+--       PELA FILA, não pelo próprio timer. Abstém-se enquanto o item está
+--       'waiting' (na fila) OU 'notified' dentro da janela de promoção ainda
+--       vigente (wi.expires_at > now(), gravada ATOMICAMENTE no claim). Isso
+--       cobre a sub-janela entre o claim (waiting→notified) e o lock do promotor:
+--       no instante em que o item vira 'notified' sua janela já é futura, então
+--       a task do próprio waitlister se abstém — nunca deixa um cart
+--       notified+expired segurando estoque vazado. Um 'notified' com janela já
+--       VENCIDA (não pagou no prazo estendido) volta a ser elegível → expira.
+-- 0 rows → não-elegível; o caller (ExpireCartAndReleaseStock) trata como skip.
 UPDATE carts
 SET status = 'expired', cancelled_reason = 'expired'
-WHERE id = $1
+WHERE carts.id = $1
   AND status IN ('active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND expires_at < now()
+  AND NOT EXISTS (
+      SELECT 1 FROM waitlist_items wi
+      WHERE wi.cart_id = carts.id
+        AND (wi.status = 'waiting'
+             OR (wi.status = 'notified' AND wi.expires_at > now()))
+  )
 RETURNING *;
 
 -- name: UpdateCartPayment :one
