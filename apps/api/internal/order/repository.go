@@ -548,11 +548,13 @@ func (r *Repository) GetStoreCartExpirationMinutes(ctx context.Context, storeID 
 	return minutes
 }
 
-// UpdateStatus writes the order lifecycle status to orders.status (Fatia B1 —
-// antes era carts.status). `id` is the public cart id; resolved via
-// orders.cart_id. No-op (0 rows) for carts without an Order.
+// UpdateStatus writes the CART lifecycle status (active/checkout/completed/
+// expired) to carts.status. This admin endpoint must NOT touch orders.status —
+// the Order aggregate is born immutable (`paid`) at materialisation and only
+// ever transitions to refunded/cancelled via slice E1's reactors. `id` is the
+// public cart id.
 func (r *Repository) UpdateStatus(ctx context.Context, id string, status string) error {
-	query := `UPDATE orders SET status = $2, updated_at = now() WHERE cart_id = $1`
+	query := `UPDATE carts SET status = $2 WHERE id = $1`
 	_, err := r.db.Exec(ctx, query, id, status)
 	if err != nil {
 		return fmt.Errorf("updating order status: %w", err)
@@ -560,40 +562,20 @@ func (r *Repository) UpdateStatus(ctx context.Context, id string, status string)
 	return nil
 }
 
-// UpdatePaymentStatus writes the payment status to order_payments.payment_status
-// and reflects the paid_at instant on orders (Fatia B1 — antes era UPDATE
-// carts). Both writes run in one transaction so the detail never observes a
-// half-applied update. `id` is the public cart id; resolved via orders.cart_id.
-// No-op for carts without an Order.
+// UpdatePaymentStatus writes the CART payment status to carts.payment_status
+// (and carts.paid_at). Like UpdateStatus, this admin endpoint must NOT touch
+// order_payments.payment_status — that column is owned by materialisation and
+// slice E1's reactors. `id` is the public cart id.
 func (r *Repository) UpdatePaymentStatus(ctx context.Context, id string, paymentStatus string) error {
-	tx, err := r.db.Begin(ctx)
+	query := `
+		UPDATE carts
+		SET payment_status = $2::text,
+		    paid_at = CASE WHEN $2::text = 'paid' THEN now() ELSE paid_at END
+		WHERE id = $1
+	`
+	_, err := r.db.Exec(ctx, query, id, paymentStatus)
 	if err != nil {
-		return fmt.Errorf("updating order payment status: begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck
-
-	const payQ = `
-		UPDATE order_payments op
-		SET payment_status = $2::text
-		FROM orders o
-		WHERE op.order_id = o.id AND o.cart_id = $1
-	`
-	if _, err := tx.Exec(ctx, payQ, id, paymentStatus); err != nil {
 		return fmt.Errorf("updating order payment status: %w", err)
-	}
-
-	const paidAtQ = `
-		UPDATE orders
-		SET paid_at = CASE WHEN $2::text = 'paid' THEN now() ELSE paid_at END,
-		    updated_at = now()
-		WHERE cart_id = $1
-	`
-	if _, err := tx.Exec(ctx, paidAtQ, id, paymentStatus); err != nil {
-		return fmt.Errorf("updating order paid_at: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("updating order payment status: commit: %w", err)
 	}
 	return nil
 }

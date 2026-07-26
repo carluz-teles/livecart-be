@@ -9,13 +9,17 @@ package order_test
 //   B1b FONTE: após materializar, mutar o cart NÃO altera o detalhe — GetByID lê
 //       de orders.customer_snapshot / order_logistics / order_payments /
 //       order_items, nunca mais de carts.* (prova o cutover).
-//   B1c ESCRITA: UpdateStatus/UpdatePaymentStatus/UpdateShippingAddress escrevem
-//       no lado Order (orders / order_payments / order_logistics), não em carts,
-//       e o detalhe reflete a escrita (read-after-write consistente).
+//   B1c ESCRITA: o PATCH admin (UpdateStatus/UpdatePaymentStatus) usa o
+//       vocabulário de CART (active/checkout/completed/expired; pending/paid/
+//       failed/refunded) e escreve SÓ em carts.* — nunca em orders.status /
+//       order_payments.payment_status, cujo dono é a materialização + os
+//       reactors da slice E1. UpdateShippingAddress escreve order_logistics.
 
 import (
 	"context"
 	"testing"
+
+	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/order"
 )
@@ -217,44 +221,81 @@ func TestFatiaB1_GetItems_FrozenProductNameFromOrderItems(t *testing.T) {
 	}
 }
 
-// ─── B1c ESCRITA no lado Order ────────────────────────────────────────────────
+// ─── B1c ESCRITA ──────────────────────────────────────────────────────────────
 
-func TestFatiaB1_Updates_WriteToOrderSide(t *testing.T) {
+// REGRESSÃO (finding B1-1): o PATCH admin usa o vocabulário de CART e NÃO pode
+// corromper o agregado Order. UpdateStatus/UpdatePaymentStatus escrevem SÓ em
+// carts.* — orders.status / order_payments.payment_status permanecem no valor da
+// materialização (`paid`), pois seu dono é a materialização + os reactors da E1.
+func TestFatiaB1_AdminUpdate_DoesNotCorruptOrderStatus(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	repo := order.NewRepository(testPool)
+	svc := order.NewService(repo, zap.NewNop())
+
+	// Vocabulário real de UpdateOrderRequest (types.go): status de CART
+	// (active/checkout/completed/expired) e payment (pending/paid/failed/refunded).
+	cases := []struct {
+		name          string
+		status        string
+		paymentStatus string
+	}{
+		{"completed + refunded", "completed", "refunded"},
+		{"expired + failed", "expired", "failed"},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			storeID, cartID := seedFrozenOrder(t, "3")
+
+			// Baseline: o Order nasceu imutável em `paid` na materialização.
+			assertDBString(t, ctx, `SELECT status FROM orders WHERE cart_id = $1`, cartID, "paid")
+			assertDBString(t, ctx,
+				`SELECT op.payment_status FROM order_payments op JOIN orders o ON o.id = op.order_id WHERE o.cart_id = $1`,
+				cartID, "paid")
+
+			status, paymentStatus := tt.status, tt.paymentStatus
+			if _, err := svc.Update(ctx, order.UpdateOrderInput{
+				ID:            cartID,
+				StoreID:       storeID,
+				Status:        &status,
+				PaymentStatus: &paymentStatus,
+			}); err != nil {
+				t.Fatalf("Service.Update: %v", err)
+			}
+
+			// carts.* recebeu a escrita do PATCH admin.
+			assertDBString(t, ctx, `SELECT status FROM carts WHERE id = $1`, cartID, tt.status)
+			assertDBString(t, ctx, `SELECT payment_status FROM carts WHERE id = $1`, cartID, tt.paymentStatus)
+
+			// ...e o agregado Order permanece INTOCADO (paid) — não corrompido.
+			assertDBString(t, ctx, `SELECT status FROM orders WHERE cart_id = $1`, cartID, "paid")
+			assertDBString(t, ctx,
+				`SELECT op.payment_status FROM order_payments op JOIN orders o ON o.id = op.order_id WHERE o.cart_id = $1`,
+				cartID, "paid")
+		})
+	}
+}
+
+// UpdateShippingAddress permanece escrevendo no lado Order (order_logistics) —
+// parte do read cutover B1 já aprovado, fora do escopo do fix B1-1.
+func TestFatiaB1_UpdateShippingAddress_WritesOrderLogistics(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	repo := order.NewRepository(testPool)
 
 	_, cartID := seedFrozenOrder(t, "3")
 
-	// UpdateStatus → orders.status, não carts.status.
-	if err := repo.UpdateStatus(ctx, cartID, "cancelled"); err != nil {
-		t.Fatalf("UpdateStatus: %v", err)
-	}
-	assertDBString(t, ctx, `SELECT status FROM orders WHERE cart_id = $1`, cartID, "cancelled")
-	assertDBString(t, ctx, `SELECT status FROM carts WHERE id = $1`, cartID, "checkout") // carts intocado
-
-	// UpdatePaymentStatus → order_payments.payment_status, não carts.payment_status.
-	if err := repo.UpdatePaymentStatus(ctx, cartID, "refunded"); err != nil {
-		t.Fatalf("UpdatePaymentStatus: %v", err)
-	}
-	assertDBString(t, ctx,
-		`SELECT op.payment_status FROM order_payments op JOIN orders o ON o.id = op.order_id WHERE o.cart_id = $1`,
-		cartID, "refunded")
-	assertDBString(t, ctx, `SELECT payment_status FROM carts WHERE id = $1`, cartID, "paid") // carts intocado
-
-	// UpdateShippingAddress → order_logistics.shipping_address, não carts.
 	newAddr := map[string]string{"zipCode": "22222-000", "street": "Nova Rua", "city": "Rio"}
 	if err := repo.UpdateShippingAddress(ctx, cartID, newAddr); err != nil {
 		t.Fatalf("UpdateShippingAddress: %v", err)
 	}
 
-	// Read-after-write: o detalhe reflete as escritas no lado Order.
+	// Read-after-write: o detalhe reflete a escrita em order_logistics.
 	row, err := repo.GetByID(ctx, cartID)
 	if err != nil {
-		t.Fatalf("GetByID after updates: %v", err)
+		t.Fatalf("GetByID after update: %v", err)
 	}
-	assertEq(t, "status after update", row.Status, "cancelled")
-	assertEq(t, "payment_status after update", row.PaymentStatus, "refunded")
 	assertEq(t, "shipping_address street after update", row.ShippingAddressStreet, "Nova Rua")
 	assertEq(t, "shipping_address city after update", row.ShippingAddressCity, "Rio")
 }
