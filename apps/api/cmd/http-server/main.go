@@ -1000,13 +1000,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				return err
 			}
 			// Customer-facing fan-out (coupon, tracking, timeline, GMV ledger,
-			// receipt, waitlist) then ERP finalisation (needs the gateway snapshot).
-			// Both run in this one cart.paid task; an error retries the whole task
-			// (each step is idempotent) and dead-letters after MaxRetry.
-			if err := integrationSvc.ReactCartPaid(ctx, p.CartID, p.StoreID, p.GMVCents); err != nil {
-				return err
-			}
-			return integrationSvc.ReactCartPaidERP(ctx, p.CartID, p.StoreID, p.PaymentSnapshot)
+			// receipt, waitlist). An error retries the whole task (each step is
+			// idempotent) and dead-letters after MaxRetry. ERP finalisation is NO
+			// LONGER here (Fatia 11b-2): it reacts to the order.paid fact emitted by
+			// OnCartPaid, so its retry loop is decoupled from this fan-out.
+			return integrationSvc.ReactCartPaid(ctx, p.CartID, p.StoreID, p.GMVCents)
 		})
 		eventsServer.Register(events.CartRefunded, func(ctx context.Context, t *asynq.Task) error {
 			var env events.Envelope
@@ -1028,6 +1026,48 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				return err
 			}
 			return integrationSvc.ReactCartRefunded(ctx, p.CartID, p.StoreID)
+		})
+
+		// Order post-payment ERP reactors (Fatia 11b-2): the ERP finalisation/refund
+		// moved off cart.paid/cart.refunded onto the order.* facts, emitted
+		// transactionally by OnCartPaid/OnCartRefunded once the immutable Order exists.
+		// Its asynq retry loop is now isolated from the coupon/billing/customer fan-out
+		// (an ERP hiccup no longer re-runs those). Registered ONLY here — the 11a no-op
+		// logEvent handlers for order.paid/order.refunded were removed from the default
+		// registry, so this is the single registration (double registration panics
+		// asynq), mirroring cart.paid/cart.refunded.
+		eventsServer.Register(events.OrderPaid, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				CartID          string          `json:"cart_id"`
+				StoreID         string          `json:"store_id"`
+				PaymentSnapshot json.RawMessage `json:"payment_snapshot"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" || p.StoreID == "" {
+				return asynq.SkipRetry
+			}
+			// The Order already exists (materialised in the same tx that emitted this
+			// fact), so finalisation resolves order_payments by cart_id. Snapshot rides
+			// the payload (frozen by OnCartPaid); a nil snapshot finalises without
+			// payment details.
+			return integrationSvc.ReactOrderPaidERP(ctx, p.CartID, p.StoreID, p.PaymentSnapshot)
+		})
+		eventsServer.Register(events.OrderRefunded, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				CartID  string `json:"cart_id"`
+				StoreID string `json:"store_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" || p.StoreID == "" {
+				return asynq.SkipRetry
+			}
+			return integrationSvc.ReactOrderRefundedERP(ctx, p.CartID, p.StoreID)
 		})
 
 		// cart.cancelled reactor (Fatia E1): flip the Order to 'cancelled'. Two
