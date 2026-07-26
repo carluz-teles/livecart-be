@@ -2,10 +2,11 @@ package order_test
 
 // Fatia C2 — corrige o acoplamento camuflado da tabela `shipments`.
 //
-// Antes: `shipments.order_id` se chamava "order" mas era FK para carts(id) e
+// Antes: `shipments.cart_id` se chamava "order_id" mas era FK para carts(id) e
 // guardava o UUID do CART; GetShipmentForOrder filtrava por essa coluna tratando
-// o cart id como se fosse order id. Depois: existe a coluna `orders_order_id`
-// com FK correta para orders(id), e GetShipmentForOrder passa a filtrar por ela.
+// o cart id como se fosse order id. Depois: a coluna legada foi renomeada para
+// `cart_id` (migration 000098) e existe `orders_order_id` com FK correta para
+// orders(id); GetShipmentForOrder passa a filtrar por orders_order_id.
 //
 // Invariantes travadas (gated em TEST_DATABASE_URL):
 //   C2a FK CERTA: GetShipmentForOrder(orders.id) retorna o shipment; buscar com
@@ -21,8 +22,9 @@ import (
 )
 
 // seedShipment insere um shipment ligado ao Order via a FK correta
-// (orders_order_id). Mantém order_id = cart id (coluna legada, migration 000052)
-// para espelhar o que o INSERT real de produção faz. Retorna (orderID, shipmentID).
+// (orders_order_id). Mantém cart_id = cart id (coluna legada, migration
+// 000052/000098) para espelhar o que o INSERT real de produção faz. Retorna
+// (orderID, shipmentID).
 func seedShipment(t *testing.T, storeID, cartID string) (orderID, shipmentID string) {
 	t.Helper()
 	ctx := context.Background()
@@ -34,7 +36,7 @@ func seedShipment(t *testing.T, storeID, cartID string) (orderID, shipmentID str
 	}
 
 	if err := testPool.QueryRow(ctx, `
-		INSERT INTO shipments (order_id, orders_order_id, store_id, provider, provider_order_id, status)
+		INSERT INTO shipments (cart_id, orders_order_id, store_id, provider, provider_order_id, status)
 		VALUES ($1, $2, $3, 'melhor_envio', gen_random_uuid()::text, 'pending')
 		RETURNING id::text`,
 		cartID, orderID, storeID,
@@ -77,6 +79,41 @@ func TestFatiaC2_GetShipmentForOrder_KeyedByOrderID(t *testing.T) {
 	}
 	if stale != nil {
 		t.Errorf("GetShipmentForOrder(cartID) retornou shipment %q — deveria ser nil (não pode mais tratar cart id como order id)", stale.ID)
+	}
+}
+
+// TestFatiaC2_ShipmentColumns_NotSwappedByRename prova que o rename
+// order_id→cart_id (migration 000098) não trocou o conteúdo das colunas: a coluna
+// renomeada `cart_id` guarda o cart UUID e `orders_order_id` guarda o orders.id.
+func TestFatiaC2_ShipmentColumns_NotSwappedByRename(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+
+	storeID, cartID := seedFrozenOrder(t, "3")
+	orderID, shipmentID := seedShipment(t, storeID, cartID)
+
+	if cartID == orderID {
+		t.Fatal("pré-condição inválida: cart id == order id (não prova nada)")
+	}
+
+	var gotCartID, gotOrdersOrderID string
+	if err := testPool.QueryRow(ctx,
+		`SELECT cart_id::text, orders_order_id::text FROM shipments WHERE id = $1`,
+		shipmentID,
+	).Scan(&gotCartID, &gotOrdersOrderID); err != nil {
+		t.Fatalf("read shipment columns: %v", err)
+	}
+
+	if gotCartID != cartID {
+		t.Errorf("shipments.cart_id = %q, want cart UUID %q", gotCartID, cartID)
+	}
+	if gotOrdersOrderID != orderID {
+		t.Errorf("shipments.orders_order_id = %q, want orders.id %q", gotOrdersOrderID, orderID)
+	}
+	// Guarda anti-swap: os dois valores são distintos e não invertidos.
+	if gotCartID == orderID || gotOrdersOrderID == cartID {
+		t.Errorf("colunas trocadas no rename: cart_id=%q orders_order_id=%q (cart=%q order=%q)",
+			gotCartID, gotOrdersOrderID, cartID, orderID)
 	}
 }
 

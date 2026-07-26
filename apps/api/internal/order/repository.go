@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"livecart/apps/api/db/sqlc"
 )
 
 type Repository struct {
@@ -71,7 +73,7 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 			) as is_first_purchase,
 			COALESCE(
 				(SELECT sh.status FROM shipments sh
-				 WHERE sh.order_id = c.id
+				 WHERE sh.cart_id = c.id
 				 ORDER BY sh.created_at DESC LIMIT 1),
 				''
 			) as shipment_status,
@@ -716,14 +718,14 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 			argIndex++
 		}
 		conditions = append(conditions, fmt.Sprintf(
-			"EXISTS (SELECT 1 FROM shipments sh WHERE sh.order_id = c.id AND sh.status IN (%s))",
+			"EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s))",
 			strings.Join(placeholders, ","),
 		))
 	} else if filters.HasShipment != nil {
 		if *filters.HasShipment {
-			conditions = append(conditions, "EXISTS (SELECT 1 FROM shipments sh WHERE sh.order_id = c.id)")
+			conditions = append(conditions, "EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id)")
 		} else {
-			conditions = append(conditions, "NOT EXISTS (SELECT 1 FROM shipments sh WHERE sh.order_id = c.id)")
+			conditions = append(conditions, "NOT EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id)")
 		}
 	}
 
@@ -778,7 +780,7 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 			argIndex++
 		}
 		matcher := fmt.Sprintf(
-			"(c.erp_finalisation_status = 'failed' OR c.payment_status IN (%s) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.order_id = c.id AND sh.status IN (%s)))",
+			"(c.erp_finalisation_status = 'failed' OR c.payment_status IN (%s) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s)))",
 			strings.Join(paymentPlaceholders, ","),
 			strings.Join(shipmentPlaceholders, ","),
 		)
@@ -797,8 +799,8 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 // handler exposes that as `shipment: null`.
 //
 // orderID is the real Order id (orders.id). The lookup filters by the correct
-// FK `shipments.orders_order_id` — NOT the legacy `order_id` column, which
-// (despite its name) still holds the cart id (migration 000052 / 000097).
+// FK `shipments.orders_order_id` — NOT the legacy `cart_id` column, which holds
+// the cart id (migration 000052, renamed from `order_id` in 000098 / FK in 000097).
 // Callers that only hold a cart id must resolve it first via GetOrderIDByCartID.
 func (r *Repository) GetShipmentForOrder(ctx context.Context, orderID string) (*OrderShipmentRecord, error) {
 	uid, err := uuid.Parse(orderID)
@@ -854,27 +856,26 @@ func (r *Repository) GetShipmentForOrder(ctx context.Context, orderID string) (*
 
 // GetOrderIDByCartID resolves the materialised Order's id (orders.id) from its
 // source cart id. Returns "" (no error) when the cart has no Order yet — callers
-// treat that as "no shipment possible". Kept as raw SQL to match this read
-// Repository's style (it holds only a *pgxpool.Pool); the canonical write-side
-// lookup lives in sqlc, but wiring sqlc.Queries in here just for one trivial PK
-// lookup would needlessly widen the constructor.
+// treat that as "no shipment possible". Delegates to the canonical sqlc
+// GetOrderIDByCartID query — the single source of truth for this lookup, shared
+// with postcheckout's ResolveOrderID. *pgxpool.Pool already satisfies sqlc.DBTX,
+// so sqlc.New(r.db) needs no constructor change and avoids re-hand-writing SQL.
 func (r *Repository) GetOrderIDByCartID(ctx context.Context, cartID string) (string, error) {
 	uid, err := uuid.Parse(cartID)
 	if err != nil {
 		return "", fmt.Errorf("invalid cart id: %w", err)
 	}
-	var orderID string
-	err = r.db.QueryRow(ctx,
-		`SELECT id::text FROM orders WHERE cart_id = $1`,
-		pgtype.UUID{Bytes: uid, Valid: true},
-	).Scan(&orderID)
+	orderID, err := sqlc.New(r.db).GetOrderIDByCartID(ctx, pgtype.UUID{Bytes: uid, Valid: true})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("resolving order id by cart id: %w", err)
 	}
-	return orderID, nil
+	if !orderID.Valid {
+		return "", nil
+	}
+	return uuid.UUID(orderID.Bytes).String(), nil
 }
 
 // ListShipmentEvents returns the tracking timeline for a shipment, ascending

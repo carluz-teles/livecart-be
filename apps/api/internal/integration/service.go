@@ -4629,7 +4629,7 @@ func (s *Service) ApplyMelhorEnvioWebhook(ctx context.Context, in ApplyMelhorEnv
 		Provider     string `json:"provider"`
 		Status       string `json:"status"`
 		TrackingCode string `json:"tracking_code"`
-	}{StoreID: in.StoreID, ShipmentID: shipment.ID, OrderID: shipment.OrderID, Provider: "melhor_envio", Status: string(normalised), TrackingCode: in.TrackingCode})
+	}{StoreID: in.StoreID, ShipmentID: shipment.ID, OrderID: shipment.CartID, Provider: "melhor_envio", Status: string(normalised), TrackingCode: in.TrackingCode})
 
 	// Group H fact (best-effort): delivery confirmed. Dedup by shipment id.
 	if normalised == providers.TrackingStatusDelivered {
@@ -4639,13 +4639,13 @@ func (s *Service) ApplyMelhorEnvioWebhook(ctx context.Context, in ApplyMelhorEnv
 			OrderID      string `json:"order_id"`
 			Provider     string `json:"provider"`
 			TrackingCode string `json:"tracking_code"`
-		}{StoreID: in.StoreID, ShipmentID: shipment.ID, OrderID: shipment.OrderID, Provider: "melhor_envio", TrackingCode: in.TrackingCode})
+		}{StoreID: in.StoreID, ShipmentID: shipment.ID, OrderID: shipment.CartID, Provider: "melhor_envio", TrackingCode: in.TrackingCode})
 	}
 
 	// Customer-facing notification on first dispatch — same hook the manual
 	// CreateShipment flow uses when the carrier returns the tracking inline.
 	if normalised == providers.TrackingStatusInTransit && in.TrackingCode != "" && s.postCheckoutHook != nil {
-		s.postCheckoutHook.OnShipmentPosted(ctx, shipment.OrderID, in.TrackingCode)
+		s.postCheckoutHook.OnShipmentPosted(ctx, shipment.CartID, in.TrackingCode)
 	}
 	return nil
 }

@@ -366,7 +366,7 @@ func (h *Handler) AttachShippingInvoice(c *fiber.Ctx) error {
 
 	if err := osp.AttachInvoice(c.Context(), providers.AttachInvoiceRequest{
 		ProviderOrderID: shipment.ProviderOrderID,
-		ExternalOrderID: valueOrDefault(req.ExternalOrderID, shipment.OrderID),
+		ExternalOrderID: valueOrDefault(req.ExternalOrderID, shipment.CartID),
 		InvoiceKey:      req.InvoiceKey,
 		InvoiceKind:     kind,
 	}); err != nil {
@@ -502,7 +502,7 @@ func (h *Handler) GenerateShippingLabels(c *fiber.Ctx) error {
 		// carriers don't return a code at CreateShipment time; the code only
 		// lands here, after labels are generated. Idempotent — repeats hit
 		// the order_event unique constraint.
-		if t.TrackingCode != "" && sh.OrderID != "" && h.service.postCheckoutHook != nil {
+		if t.TrackingCode != "" && sh.CartID != "" && h.service.postCheckoutHook != nil {
 			// Group H fact (best-effort): the carrier returned a tracking code
 			// at label generation. Dedup by tracking code.
 			_ = events.EmitInternal(c.Context(), h.service.repo.queries, events.TrackingCodeGenerated, "shipment.tracking_generated:"+t.TrackingCode, struct {
@@ -511,8 +511,8 @@ func (h *Handler) GenerateShippingLabels(c *fiber.Ctx) error {
 				OrderID      string `json:"order_id"`
 				Provider     string `json:"provider"`
 				TrackingCode string `json:"tracking_code"`
-			}{StoreID: storeID, ShipmentID: sh.ID, OrderID: sh.OrderID, Provider: string(providerName), TrackingCode: t.TrackingCode})
-			h.service.postCheckoutHook.OnShipmentPosted(c.Context(), sh.OrderID, t.TrackingCode)
+			}{StoreID: storeID, ShipmentID: sh.ID, OrderID: sh.CartID, Provider: string(providerName), TrackingCode: t.TrackingCode})
+			h.service.postCheckoutHook.OnShipmentPosted(c.Context(), sh.CartID, t.TrackingCode)
 		}
 	}
 

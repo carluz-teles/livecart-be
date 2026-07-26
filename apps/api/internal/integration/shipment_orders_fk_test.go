@@ -5,8 +5,9 @@ package integration
 // O handler de shipping passa `req.ExternalOrderID` (que é o CART id) como
 // OrderID. Antes, esse cart id ia parar na coluna `order_id` (FK camuflada para
 // carts). Agora CreateShipment resolve o order id real (orders.id) via
-// GetOrderIDByCartID e o grava em `orders_order_id`, mantendo `order_id` = cart
-// id (coluna legada) para não quebrar os hooks de postcheckout.
+// GetOrderIDByCartID e o grava em `orders_order_id`, mantendo `cart_id` = cart
+// id (coluna legada, renomeada de order_id na migration 000098) para não quebrar
+// os hooks de postcheckout.
 //
 // Gated em TEST_DATABASE_URL.
 
@@ -50,9 +51,9 @@ func TestFatiaC2_CreateShipment_PopulatesOrdersOrderID(t *testing.T) {
 		t.Fatalf("CreateShipment: %v", err)
 	}
 
-	// order_id (legado) permanece = cart id, para os hooks de postcheckout.
-	if sh.OrderID != fx.cartID {
-		t.Errorf("shipment.order_id (legado) = %q, want cart id %q", sh.OrderID, fx.cartID)
+	// cart_id (legado, ex-order_id) permanece = cart id, para os hooks de postcheckout.
+	if sh.CartID != fx.cartID {
+		t.Errorf("shipment.cart_id (legado) = %q, want cart id %q", sh.CartID, fx.cartID)
 	}
 
 	// orders_order_id foi populado com o orders.id real (não o cart id).
