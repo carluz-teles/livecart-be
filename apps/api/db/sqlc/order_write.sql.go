@@ -137,6 +137,83 @@ func (q *Queries) GetCartItemsForOrderMaterialization(ctx context.Context, cartI
 	return items, nil
 }
 
+const getOrderERPFinalisationStatus = `-- name: GetOrderERPFinalisationStatus :one
+SELECT o.cart_id,
+       op.erp_finalisation_status,
+       op.erp_last_error,
+       op.erp_last_attempt_at,
+       op.erp_attempts_count,
+       op.erp_payment_snapshot,
+       COALESCE(c.external_order_id, '') AS external_order_id
+FROM order_payments op
+JOIN orders o ON o.id = op.order_id
+JOIN carts  c ON c.id = o.cart_id
+WHERE o.cart_id = $1
+`
+
+type GetOrderERPFinalisationStatusRow struct {
+	CartID                pgtype.UUID        `json:"cart_id"`
+	ErpFinalisationStatus string             `json:"erp_finalisation_status"`
+	ErpLastError          pgtype.Text        `json:"erp_last_error"`
+	ErpLastAttemptAt      pgtype.Timestamptz `json:"erp_last_attempt_at"`
+	ErpAttemptsCount      int32              `json:"erp_attempts_count"`
+	ErpPaymentSnapshot    json.RawMessage    `json:"erp_payment_snapshot"`
+	ExternalOrderID       string             `json:"external_order_id"`
+}
+
+// external_order_id continua autoritativo NO CART (coluna de reserva) — lido
+// aqui via join para o retry/idempotência decidirem resume vs. legado.
+func (q *Queries) GetOrderERPFinalisationStatus(ctx context.Context, cartID pgtype.UUID) (GetOrderERPFinalisationStatusRow, error) {
+	row := q.db.QueryRow(ctx, getOrderERPFinalisationStatus, cartID)
+	var i GetOrderERPFinalisationStatusRow
+	err := row.Scan(
+		&i.CartID,
+		&i.ErpFinalisationStatus,
+		&i.ErpLastError,
+		&i.ErpLastAttemptAt,
+		&i.ErpAttemptsCount,
+		&i.ErpPaymentSnapshot,
+		&i.ExternalOrderID,
+	)
+	return i, err
+}
+
+const getOrderERPInvoice = `-- name: GetOrderERPInvoice :one
+SELECT o.cart_id,
+       op.invoice_id,
+       op.invoice_key,
+       op.invoice_status,
+       op.invoice_emitted_at,
+       COALESCE(c.external_order_id, '') AS external_order_id
+FROM order_payments op
+JOIN orders o ON o.id = op.order_id
+JOIN carts  c ON c.id = o.cart_id
+WHERE o.cart_id = $1
+`
+
+type GetOrderERPInvoiceRow struct {
+	CartID           pgtype.UUID        `json:"cart_id"`
+	InvoiceID        pgtype.Text        `json:"invoice_id"`
+	InvoiceKey       pgtype.Text        `json:"invoice_key"`
+	InvoiceStatus    pgtype.Text        `json:"invoice_status"`
+	InvoiceEmittedAt pgtype.Timestamptz `json:"invoice_emitted_at"`
+	ExternalOrderID  string             `json:"external_order_id"`
+}
+
+func (q *Queries) GetOrderERPInvoice(ctx context.Context, cartID pgtype.UUID) (GetOrderERPInvoiceRow, error) {
+	row := q.db.QueryRow(ctx, getOrderERPInvoice, cartID)
+	var i GetOrderERPInvoiceRow
+	err := row.Scan(
+		&i.CartID,
+		&i.InvoiceID,
+		&i.InvoiceKey,
+		&i.InvoiceStatus,
+		&i.InvoiceEmittedAt,
+		&i.ExternalOrderID,
+	)
+	return i, err
+}
+
 const getOrderIDByCartID = `-- name: GetOrderIDByCartID :one
 
 SELECT id FROM orders WHERE cart_id = $1
@@ -352,6 +429,75 @@ func (q *Queries) InsertOrderPayment(ctx context.Context, arg InsertOrderPayment
 	return err
 }
 
+const markOrderERPFinalisationAttempt = `-- name: MarkOrderERPFinalisationAttempt :exec
+UPDATE order_payments op
+SET erp_payment_snapshot = COALESCE(op.erp_payment_snapshot, $2),
+    erp_last_attempt_at  = now()
+FROM orders o
+WHERE o.id = op.order_id AND o.cart_id = $1
+`
+
+type MarkOrderERPFinalisationAttemptParams struct {
+	CartID             pgtype.UUID     `json:"cart_id"`
+	ErpPaymentSnapshot json.RawMessage `json:"erp_payment_snapshot"`
+}
+
+// S1 da finalização retomável: persiste o snapshot ANTES de tocar o ERP e
+// carimba a tentativa. COALESCE preserva o snapshot da primeira tentativa;
+// erp_attempts_count NÃO é incrementado aqui (só registra o INÍCIO).
+func (q *Queries) MarkOrderERPFinalisationAttempt(ctx context.Context, arg MarkOrderERPFinalisationAttemptParams) error {
+	_, err := q.db.Exec(ctx, markOrderERPFinalisationAttempt, arg.CartID, arg.ErpPaymentSnapshot)
+	return err
+}
+
+const markOrderERPFinalisationDone = `-- name: MarkOrderERPFinalisationDone :exec
+
+UPDATE order_payments op
+SET erp_finalisation_status = 'done',
+    erp_last_error          = NULL,
+    erp_last_attempt_at     = now(),
+    erp_attempts_count      = op.erp_attempts_count + 1
+FROM orders o
+WHERE o.id = op.order_id AND o.cart_id = $1
+`
+
+// =============================================================================
+// Fatia 11b — finalização/NF do ERP autoritativas em order_payments.
+// Todas keyed por cart_id (a finalização resolve o cart naturalmente) e
+// resolvem order_id via join orders→order_payments. NÃO tocam o cart: as
+// colunas de finalização/invoice deixam de ser escritas lá (a máquina de
+// reserva — erp_order_state/stock_launched/op_started_at/external_order_id —
+// continua no cart). No-op (0 rows) quando a Order ainda não foi materializada.
+// =============================================================================
+func (q *Queries) MarkOrderERPFinalisationDone(ctx context.Context, cartID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, markOrderERPFinalisationDone, cartID)
+	return err
+}
+
+const markOrderERPFinalisationFailed = `-- name: MarkOrderERPFinalisationFailed :exec
+UPDATE order_payments op
+SET erp_finalisation_status = 'failed',
+    erp_last_error          = $2,
+    erp_last_attempt_at     = now(),
+    erp_attempts_count      = op.erp_attempts_count + 1,
+    erp_payment_snapshot    = COALESCE(op.erp_payment_snapshot, $3)
+FROM orders o
+WHERE o.id = op.order_id AND o.cart_id = $1
+`
+
+type MarkOrderERPFinalisationFailedParams struct {
+	CartID             pgtype.UUID     `json:"cart_id"`
+	ErpLastError       pgtype.Text     `json:"erp_last_error"`
+	ErpPaymentSnapshot json.RawMessage `json:"erp_payment_snapshot"`
+}
+
+// erp_payment_snapshot é COALESCEd: o snapshot só é gravado na PRIMEIRA falha
+// (tentativa inicial), preservando a visão canônica do gateway para os retries.
+func (q *Queries) MarkOrderERPFinalisationFailed(ctx context.Context, arg MarkOrderERPFinalisationFailedParams) error {
+	_, err := q.db.Exec(ctx, markOrderERPFinalisationFailed, arg.CartID, arg.ErpLastError, arg.ErpPaymentSnapshot)
+	return err
+}
+
 const setOrderLogisticsTrackingToken = `-- name: SetOrderLogisticsTrackingToken :exec
 UPDATE order_logistics ol
 SET tracking_token = $2
@@ -409,4 +555,39 @@ type SetOrderStatusByCartIDParams struct {
 func (q *Queries) SetOrderStatusByCartID(ctx context.Context, arg SetOrderStatusByCartIDParams) error {
 	_, err := q.db.Exec(ctx, setOrderStatusByCartID, arg.CartID, arg.Status)
 	return err
+}
+
+const upsertOrderERPInvoice = `-- name: UpsertOrderERPInvoice :execrows
+UPDATE order_payments op
+SET invoice_id         = $1,
+    invoice_key        = $2,
+    invoice_status     = $3,
+    invoice_emitted_at = COALESCE(op.invoice_emitted_at, $4)
+FROM orders o
+WHERE o.id = op.order_id AND o.cart_id = $5
+`
+
+type UpsertOrderERPInvoiceParams struct {
+	InvoiceID     pgtype.Text        `json:"invoice_id"`
+	InvoiceKey    pgtype.Text        `json:"invoice_key"`
+	InvoiceStatus pgtype.Text        `json:"invoice_status"`
+	EmittedAt     pgtype.Timestamptz `json:"emitted_at"`
+	CartID        pgtype.UUID        `json:"cart_id"`
+}
+
+// NF autoritativa em order_payments. emitted_at é COALESCEd (só carimba a
+// primeira emissão autorizada). :execrows para o caller logar o skip benigno
+// quando não há Order para o external_order_id (NF é sempre pós-confirmação).
+func (q *Queries) UpsertOrderERPInvoice(ctx context.Context, arg UpsertOrderERPInvoiceParams) (int64, error) {
+	result, err := q.db.Exec(ctx, upsertOrderERPInvoice,
+		arg.InvoiceID,
+		arg.InvoiceKey,
+		arg.InvoiceStatus,
+		arg.EmittedAt,
+		arg.CartID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

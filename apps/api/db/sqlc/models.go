@@ -550,6 +550,7 @@ type OrderPayment struct {
 	InvoiceKey            pgtype.Text        `json:"invoice_key"`
 	InvoiceStatus         pgtype.Text        `json:"invoice_status"`
 	InvoiceEmittedAt      pgtype.Timestamptz `json:"invoice_emitted_at"`
+	ErpPaymentSnapshot    json.RawMessage    `json:"erp_payment_snapshot"`
 }
 
 type Payment struct {
@@ -655,8 +656,9 @@ type ProductVariantOption struct {
 
 // Provider-agnostic freight orders linked to carts. One row per shipment created at a carrier.
 type Shipment struct {
-	ID                  pgtype.UUID        `json:"id"`
-	OrderID             pgtype.UUID        `json:"order_id"`
+	ID pgtype.UUID `json:"id"`
+	// FK para carts(id) (migration 000052, antes chamada order_id). Guarda o cart id de origem — NÃO a identidade do pedido, que vive em orders_order_id (migration 000097). Consumida pelos hooks de postcheckout que ainda tratam o valor como cart id.
+	CartID              pgtype.UUID        `json:"cart_id"`
 	StoreID             pgtype.UUID        `json:"store_id"`
 	Provider            string             `json:"provider"`
 	ProviderOrderID     string             `json:"provider_order_id"`
@@ -673,6 +675,8 @@ type Shipment struct {
 	ProviderMeta        json.RawMessage    `json:"provider_meta"`
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	// FK correta para orders(id). Substitui o uso camuflado de order_id (que guarda carts(id)). Populada via orders.cart_id = shipments.order_id.
+	OrdersOrderID pgtype.UUID `json:"orders_order_id"`
 }
 
 // Append-only timeline of tracking events per shipment. Source = poll (pull) | webhook (future).

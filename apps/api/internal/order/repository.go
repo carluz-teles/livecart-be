@@ -82,10 +82,11 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 				AND c.shipping_service_id <> ''
 				AND c.payment_status NOT IN ('cancelled', 'refunded')
 			) as has_shipping,
-			c.erp_finalisation_status
+			COALESCE(op.erp_finalisation_status, '')
 		FROM orders o
 		JOIN carts c ON c.id = o.cart_id
 		JOIN live_events e ON e.id = o.event_id
+		LEFT JOIN order_payments op ON op.order_id = o.id
 		WHERE o.store_id = $1
 	`
 
@@ -94,6 +95,7 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 		FROM orders o
 		JOIN carts c ON c.id = o.cart_id
 		JOIN live_events e ON e.id = o.event_id
+		LEFT JOIN order_payments op ON op.order_id = o.id
 		WHERE o.store_id = $1
 	`
 
@@ -626,6 +628,7 @@ func (r *Repository) GetStats(ctx context.Context, storeID string, search string
 		FROM orders o
 		JOIN carts c ON c.id = o.cart_id
 		JOIN live_events e ON e.id = o.event_id
+		LEFT JOIN order_payments op ON op.order_id = o.id
 		WHERE o.store_id = $1
 	`
 
@@ -737,7 +740,7 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 			argIndex++
 		}
 		conditions = append(conditions, fmt.Sprintf(
-			"c.erp_finalisation_status IN (%s)",
+			"op.erp_finalisation_status IN (%s)",
 			strings.Join(placeholders, ","),
 		))
 	}
@@ -780,7 +783,7 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 			argIndex++
 		}
 		matcher := fmt.Sprintf(
-			"(c.erp_finalisation_status = 'failed' OR c.payment_status IN (%s) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s)))",
+			"(op.erp_finalisation_status = 'failed' OR c.payment_status IN (%s) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s)))",
 			strings.Join(paymentPlaceholders, ","),
 			strings.Join(shipmentPlaceholders, ","),
 		)

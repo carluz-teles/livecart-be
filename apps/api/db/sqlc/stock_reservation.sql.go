@@ -128,16 +128,21 @@ SELECT (
           AND sr.status = 'active'
           AND le.status = 'active')
     OR EXISTS(
+        -- Fatia 11b: finalização autoritativa em order_payments (join via Order);
+        -- COALESCE('pending') cobre o cart pago cuja Order ainda materializa. As
+        -- colunas de reserva (erp_order_state/erp_op_started_at) seguem no cart.
         SELECT 1 FROM carts c
         JOIN cart_items ci ON ci.cart_id = c.id
         JOIN products p2 ON p2.id = ci.product_id
+        LEFT JOIN orders o          ON o.cart_id  = c.id
+        LEFT JOIN order_payments op ON op.order_id = o.id
         WHERE p2.store_id = $2
           AND p2.external_source = $3
           AND p2.external_id = $1
           AND ((c.payment_status = 'paid'
-                AND c.erp_finalisation_status <> 'done'
+                AND COALESCE(op.erp_finalisation_status, 'pending') <> 'done'
                 AND (c.paid_at > now() - interval '30 minutes'
-                     OR c.erp_last_attempt_at > now() - interval '30 minutes'))
+                     OR op.erp_last_attempt_at > now() - interval '30 minutes'))
                -- design C: conversão/mutação em voo também movimenta o saldo
                -- transitoriamente (estornos do ciclo) — mesma supressão
                OR (c.erp_order_state IN ('converting','mutating')

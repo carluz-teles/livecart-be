@@ -1650,34 +1650,42 @@ func (r *Repository) UpdateCartExternalOrderID(ctx context.Context, cartID, exte
 	})
 }
 
-// MarkCartERPFinalisationDone flips the cart out of pending/failed and into
-// the terminal "done" state once the Tiny order is successfully created. The
-// attempts counter is bumped so the admin retry UI can show "took N tries".
+// MarkCartERPFinalisationDone flips the Order's payment row out of pending/failed
+// and into the terminal "done" state once the Tiny order is successfully created.
+// The attempts counter is bumped so the admin retry UI can show "took N tries".
+//
+// Fatia 11b: authoritative on order_payments (resolved from cart_id via the Order).
+// The cart's finalisation columns are no longer written — only the reserve-state
+// columns (erp_order_state/…/external_order_id) still live on the cart. A no-op
+// (0 rows) when the Order isn't materialised yet — never happens post-payment,
+// where OnCartPaid always materialises the Order before the ERP reactor runs.
 func (r *Repository) MarkCartERPFinalisationDone(ctx context.Context, cartID string) error {
 	id, err := parseUUID(cartID)
 	if err != nil {
 		return err
 	}
-	return r.queries.MarkCartERPFinalisationDone(ctx, id)
+	return r.queries.MarkOrderERPFinalisationDone(ctx, id)
 }
 
-// MarkCartERPFinalisationFailed records a finalisation failure on the cart
-// so the admin order page can show the error and a retry button. The caller
-// is responsible for re-creating the saída-manual reservations in Tiny BEFORE
-// calling this — the cart row must reach the "failed" state already with the
+// MarkCartERPFinalisationFailed records a finalisation failure on the Order's
+// payment row so the admin order page can show the error and a retry button. The
+// caller is responsible for re-creating the saída-manual reservations in Tiny
+// BEFORE calling this — the row must reach the "failed" state already with the
 // stock held against it, never released.
 //
 // paymentSnapshot is the JSON-serialised providers.PaymentStatus from the
 // initial webhook attempt. It's stored COALESCE-style so the original
 // gateway snapshot is preserved across retries (the SQL guards against
 // overwrite); pass an empty slice on retry calls.
+//
+// Fatia 11b: authoritative on order_payments (resolved from cart_id via the Order).
 func (r *Repository) MarkCartERPFinalisationFailed(ctx context.Context, cartID, errMsg string, paymentSnapshot []byte) error {
 	id, err := parseUUID(cartID)
 	if err != nil {
 		return err
 	}
-	return r.queries.MarkCartERPFinalisationFailed(ctx, sqlc.MarkCartERPFinalisationFailedParams{
-		ID:                 id,
+	return r.queries.MarkOrderERPFinalisationFailed(ctx, sqlc.MarkOrderERPFinalisationFailedParams{
+		CartID:             id,
 		ErpLastError:       pgtype.Text{String: errMsg, Valid: errMsg != ""},
 		ErpPaymentSnapshot: paymentSnapshot,
 	})
@@ -1696,23 +1704,29 @@ type CartERPFinalisationRow struct {
 	PaymentSnapshot []byte
 }
 
-// GetCartERPFinalisationStatus reads the cart's ERP finalisation lifecycle
-// fields. Used by the admin retry endpoint to gate the retry on
+// GetCartERPFinalisationStatus reads the Order payment row's ERP finalisation
+// lifecycle fields. Used by the admin retry endpoint to gate the retry on
 // status='failed' and surface the error verbatim on the order detail page.
+//
+// Fatia 11b: authoritative on order_payments (resolved from cart_id). Returns
+// pgx.ErrNoRows when the Order isn't materialised for the cart — callers treat
+// that as "nothing to finalise/retry". external_order_id stays authoritative on
+// the cart (reserve column) and is joined in for the resume-vs-legacy decision.
 func (r *Repository) GetCartERPFinalisationStatus(ctx context.Context, cartID string) (*CartERPFinalisationRow, error) {
 	id, err := parseUUID(cartID)
 	if err != nil {
 		return nil, err
 	}
-	row, err := r.queries.GetCartERPFinalisationStatus(ctx, id)
+	row, err := r.queries.GetOrderERPFinalisationStatus(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	out := &CartERPFinalisationRow{
-		CartID:          uuidToString(row.ID),
+		CartID:          uuidToString(row.CartID),
 		Status:          row.ErpFinalisationStatus,
 		AttemptsCount:   int(row.ErpAttemptsCount),
 		PaymentSnapshot: row.ErpPaymentSnapshot,
+		ExternalOrderID: row.ExternalOrderID,
 	}
 	if row.ErpLastError.Valid {
 		out.LastError = row.ErpLastError.String
@@ -1720,9 +1734,6 @@ func (r *Repository) GetCartERPFinalisationStatus(ctx context.Context, cartID st
 	if row.ErpLastAttemptAt.Valid {
 		t := row.ErpLastAttemptAt.Time
 		out.LastAttemptAt = &t
-	}
-	if row.ExternalOrderID.Valid {
-		out.ExternalOrderID = row.ExternalOrderID.String
 	}
 	return out, nil
 }
@@ -1738,34 +1749,32 @@ type CartERPInvoiceRow struct {
 	ExternalOrderID string
 }
 
-// GetCartERPInvoice returns the NFe state currently stored on the cart. Used
-// by the order detail handler (to decide whether "Aguardando NFe" or "Criar
-// envio" should be shown) and by the manual sync endpoint.
+// GetCartERPInvoice returns the NFe state stored on the Order's payment row
+// (authoritative since Fatia 11b, resolved from cart_id). Used by the order
+// detail handler (to decide whether "Aguardando NFe" or "Criar envio" should be
+// shown) and by the manual sync endpoint.
 func (r *Repository) GetCartERPInvoice(ctx context.Context, cartID string) (*CartERPInvoiceRow, error) {
 	id, err := parseUUID(cartID)
 	if err != nil {
 		return nil, err
 	}
-	row, err := r.queries.GetCartERPInvoice(ctx, id)
+	row, err := r.queries.GetOrderERPInvoice(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	out := &CartERPInvoiceRow{CartID: uuidToString(row.ID)}
-	if row.ErpInvoiceID.Valid {
-		out.InvoiceID = row.ErpInvoiceID.String
+	out := &CartERPInvoiceRow{CartID: uuidToString(row.CartID), ExternalOrderID: row.ExternalOrderID}
+	if row.InvoiceID.Valid {
+		out.InvoiceID = row.InvoiceID.String
 	}
-	if row.ErpInvoiceKey.Valid {
-		out.InvoiceKey = row.ErpInvoiceKey.String
+	if row.InvoiceKey.Valid {
+		out.InvoiceKey = row.InvoiceKey.String
 	}
-	if row.ErpInvoiceStatus.Valid {
-		out.InvoiceStatus = row.ErpInvoiceStatus.String
+	if row.InvoiceStatus.Valid {
+		out.InvoiceStatus = row.InvoiceStatus.String
 	}
-	if row.ErpInvoiceEmittedAt.Valid {
-		t := row.ErpInvoiceEmittedAt.Time
+	if row.InvoiceEmittedAt.Valid {
+		t := row.InvoiceEmittedAt.Time
 		out.EmittedAt = &t
-	}
-	if row.ExternalOrderID.Valid {
-		out.ExternalOrderID = row.ExternalOrderID.String
 	}
 	return out, nil
 }
@@ -1780,20 +1789,23 @@ type UpsertCartERPInvoiceParams struct {
 	EmittedAt     *time.Time
 }
 
-// UpsertCartERPInvoice persists the NFe pulled from the ERP onto the cart.
-// Idempotent — both the webhook handler and the manual sync endpoint go
-// through it so re-running the same fetch never produces a different state.
-func (r *Repository) UpsertCartERPInvoice(ctx context.Context, p UpsertCartERPInvoiceParams) error {
+// UpsertCartERPInvoice persists the NFe pulled from the ERP onto the Order's
+// payment row (authoritative since Fatia 11b, resolved from cart_id). Idempotent
+// — both the webhook handler and the manual sync endpoint go through it so
+// re-running the same fetch never produces a different state. Returns the number
+// of rows written: 0 means no Order exists for the cart yet (benign skip — NF is
+// always post-confirmation, so the caller logs and moves on).
+func (r *Repository) UpsertCartERPInvoice(ctx context.Context, p UpsertCartERPInvoiceParams) (int64, error) {
 	id, err := parseUUID(p.CartID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var emitted pgtype.Timestamptz
 	if p.EmittedAt != nil && !p.EmittedAt.IsZero() {
 		emitted = pgtype.Timestamptz{Time: *p.EmittedAt, Valid: true}
 	}
-	return r.queries.UpsertCartERPInvoice(ctx, sqlc.UpsertCartERPInvoiceParams{
-		ID:            id,
+	return r.queries.UpsertOrderERPInvoice(ctx, sqlc.UpsertOrderERPInvoiceParams{
+		CartID:        id,
 		InvoiceID:     pgtype.Text{String: p.InvoiceID, Valid: p.InvoiceID != ""},
 		InvoiceKey:    pgtype.Text{String: p.InvoiceKey, Valid: p.InvoiceKey != ""},
 		InvoiceStatus: pgtype.Text{String: p.InvoiceStatus, Valid: p.InvoiceStatus != ""},
@@ -2852,15 +2864,17 @@ func (r *Repository) HasActiveEventForProduct(ctx context.Context, externalProdu
 }
 
 // MarkCartERPFinalisationAttempt persists the gateway snapshot (first write
-// wins) and stamps erp_last_attempt_at/erp_attempts_count BEFORE the
-// finalisation touches the ERP — S1 of the resumable state machine.
+// wins) and stamps erp_last_attempt_at BEFORE the finalisation touches the ERP —
+// S1 of the resumable state machine.
+//
+// Fatia 11b: authoritative on order_payments (resolved from cart_id via the Order).
 func (r *Repository) MarkCartERPFinalisationAttempt(ctx context.Context, cartID string, paymentSnapshot []byte) error {
 	id, err := parseUUID(cartID)
 	if err != nil {
 		return err
 	}
-	return r.queries.MarkCartERPFinalisationAttempt(ctx, sqlc.MarkCartERPFinalisationAttemptParams{
-		ID:                 id,
+	return r.queries.MarkOrderERPFinalisationAttempt(ctx, sqlc.MarkOrderERPFinalisationAttemptParams{
+		CartID:             id,
 		ErpPaymentSnapshot: paymentSnapshot,
 	})
 }
