@@ -13,7 +13,6 @@ package order_test
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 )
@@ -34,42 +33,19 @@ func setCartERPOrderState(t *testing.T, cartID, state string, stockLaunched bool
 	}
 }
 
-// setCartERPFinalisation configura os campos ERP de finalização no cart.
-func setCartERPFinalisation(t *testing.T, cartID, externalOrderID, finalisationStatus string) {
+// setCartExternalOrderID configura o external_order_id (reserva) no cart — o
+// único campo pós-reserva que o mirror ainda projeta para order_payments. As
+// colunas pós-venda de finalização/NF saíram do cart na Fatia 10-b (vivem só em
+// order_payments, escritas autoritativamente pelos reactors), então não há mais
+// estado de finalização/NF a semear no cart.
+func setCartExternalOrderID(t *testing.T, cartID, externalOrderID string) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := testPool.Exec(ctx,
-		`UPDATE carts
-		 SET external_order_id        = $2,
-		     erp_finalisation_status  = $3,
-		     erp_last_error           = 'some-error',
-		     erp_last_attempt_at      = now(),
-		     erp_attempts_count       = 1
-		 WHERE id = $1`,
-		cartID, externalOrderID, finalisationStatus,
+		`UPDATE carts SET external_order_id = $2 WHERE id = $1`,
+		cartID, externalOrderID,
 	); err != nil {
-		t.Fatalf("setCartERPFinalisation: %v", err)
-	}
-}
-
-// setCartERPInvoice configura os campos de NFe no cart.
-func setCartERPInvoice(t *testing.T, cartID, invoiceID, invoiceKey, invoiceStatus string) {
-	t.Helper()
-	ctx := context.Background()
-	// chave NFe de 44 dígitos (formato real)
-	if len(invoiceKey) != 44 {
-		invoiceKey = fmt.Sprintf("%044d", time.Now().UnixNano()%1000000000000)
-	}
-	if _, err := testPool.Exec(ctx,
-		`UPDATE carts
-		 SET erp_invoice_id         = $2,
-		     erp_invoice_key        = $3,
-		     erp_invoice_status     = $4,
-		     erp_invoice_emitted_at = now()
-		 WHERE id = $1`,
-		cartID, invoiceID, invoiceKey, invoiceStatus,
-	); err != nil {
-		t.Fatalf("setCartERPInvoice: %v", err)
+		t.Fatalf("setCartExternalOrderID: %v", err)
 	}
 }
 
@@ -144,11 +120,12 @@ func TestMirrorCartERPToOrder_E1b_LogisticsCancelled(t *testing.T) {
 //
 // Fatia 11b: a finalização (erp_finalisation_*) e a NF (invoice_*) passaram a
 // ser escritas AUTORITATIVAMENTE em order_payments pelos reactors de ERP. O
-// mirror não pode mais projetá-las do cart — se o fizesse, clobbaria a linha
+// mirror não pode projetá-las do cart — se o fizesse, clobbaria a linha
 // autoritativa com o valor (talvez defasado) do cart no momento da
-// materialização. Este teste trava isso: mesmo com o cart carregando
-// finalização/NF, o mirror projeta APENAS o external_order_id, e as colunas de
-// finalização/NF em order_payments permanecem no default ('pending', 0, NULL).
+// materialização. Fatia 10-b: essas colunas foram inclusive DROPADAS do cart, o
+// que torna a garantia estrutural. Este teste trava o mirror: ele projeta APENAS
+// o external_order_id (reserva), e as colunas de finalização/NF em order_payments
+// permanecem no default ('pending', 0, NULL) — só os reactors as escrevem.
 func TestMirrorCartERPToOrder_E2_Payments(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
@@ -158,9 +135,7 @@ func TestMirrorCartERPToOrder_E2_Payments(t *testing.T) {
 	if err := l.OnCartPaid(ctx, r.cartID, r.storeID, 20000, nil); err != nil {
 		t.Fatalf("E2 OnCartPaid: %v", err)
 	}
-	setCartERPFinalisation(t, r.cartID, "tiny-ext-789", "done")
-	invoiceKey := fmt.Sprintf("%044d", time.Now().UnixNano()%10000000000000000)
-	setCartERPInvoice(t, r.cartID, "nf-001", invoiceKey, "authorized")
+	setCartExternalOrderID(t, r.cartID, "tiny-ext-789")
 
 	l.MirrorCartERPToOrder(ctx, r.cartID)
 
@@ -209,7 +184,7 @@ func TestMirrorCartERPToOrder_E3_Idempotent(t *testing.T) {
 		t.Fatalf("E3 OnCartPaid: %v", err)
 	}
 	setCartERPOrderState(t, r.cartID, "open", true)
-	setCartERPFinalisation(t, r.cartID, "ext-idem", "done")
+	setCartExternalOrderID(t, r.cartID, "ext-idem")
 
 	for i := 0; i < 3; i++ {
 		l.MirrorCartERPToOrder(ctx, r.cartID)
@@ -267,7 +242,7 @@ func TestOnCartPaid_E5_MirrorsERPState(t *testing.T) {
 
 	// Seta estado ERP ANTES de materializar a Order (simula reserva já existente).
 	setCartERPOrderState(t, r.cartID, "open", true)
-	setCartERPFinalisation(t, r.cartID, "tiny-confirm-42", "done")
+	setCartExternalOrderID(t, r.cartID, "tiny-confirm-42")
 
 	if err := l.OnCartPaid(ctx, r.cartID, r.storeID, 16000, nil); err != nil {
 		t.Fatalf("E5 OnCartPaid: %v", err)

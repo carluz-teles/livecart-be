@@ -684,20 +684,14 @@ func TestFinalisationWritesToOrderPaymentsNotCart(t *testing.T) {
 		t.Fatalf("reserva external_order_id ausente (=%q)", externalOrderID)
 	}
 
-	// O CART NÃO foi escrito nas colunas de finalização/snapshot: seguem no
-	// default ('pending'/0/NULL). external_order_id (reserva) É gravado no cart.
-	var cartStatus, cartExternalOrderID string
-	var cartAttempts int
-	var cartHasSnapshot bool
+	// O CART não tem estado de finalização/snapshot — essas colunas foram DROPADAS
+	// do cart na Fatia 10-b (a finalização vive só em order_payments), logo o
+	// não-vazamento é estrutural. external_order_id (reserva) segue no cart.
+	var cartExternalOrderID string
 	if err := testPool.QueryRow(ctx,
-		`SELECT erp_finalisation_status, erp_attempts_count, erp_payment_snapshot IS NOT NULL,
-		        COALESCE(external_order_id,'')
-		 FROM carts WHERE id = $1`, fx.cartID).
-		Scan(&cartStatus, &cartAttempts, &cartHasSnapshot, &cartExternalOrderID); err != nil {
+		`SELECT COALESCE(external_order_id,'') FROM carts WHERE id = $1`, fx.cartID).
+		Scan(&cartExternalOrderID); err != nil {
 		t.Fatalf("lendo cart: %v", err)
-	}
-	if cartStatus != "pending" || cartAttempts != 0 || cartHasSnapshot {
-		t.Fatalf("finalização vazou pro cart: status=%q attempts=%d snapshot=%v (esperado pending/0/false)", cartStatus, cartAttempts, cartHasSnapshot)
 	}
 	if cartExternalOrderID != "ORD-1" {
 		t.Fatalf("reserva external_order_id deveria seguir no cart (=%q)", cartExternalOrderID)
@@ -736,15 +730,9 @@ func TestUpsertERPInvoiceAuthoritativeAndBenignSkip(t *testing.T) {
 		t.Fatalf("NF não ficou autoritativa em order_payments: %+v", inv)
 	}
 
-	// O CART não recebeu a NF (coluna erp_invoice_id segue vazia).
-	var cartInvID string
-	if err := testPool.QueryRow(ctx,
-		`SELECT COALESCE(erp_invoice_id,'') FROM carts WHERE id = $1`, fx.cartID).Scan(&cartInvID); err != nil {
-		t.Fatalf("lendo cart invoice: %v", err)
-	}
-	if cartInvID != "" {
-		t.Fatalf("NF vazou pro cart (erp_invoice_id=%q)", cartInvID)
-	}
+	// O CART não recebe a NF — a coluna erp_invoice_id foi DROPADA do cart na
+	// Fatia 10-b, então o não-vazamento é estrutural: a NF só existe em
+	// order_payments (conferido acima via GetCartERPInvoice).
 
 	// Sem Order para o cart: skip benigno — 0 rows, sem erro.
 	bare := seedPaidCart(t, 1, 0)
