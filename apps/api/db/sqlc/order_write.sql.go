@@ -71,6 +71,24 @@ func (q *Queries) GetOrderIDByCartID(ctx context.Context, cartID pgtype.UUID) (p
 	return id, err
 }
 
+const getOrderStatusByCartID = `-- name: GetOrderStatusByCartID :one
+SELECT id, status FROM orders WHERE cart_id = $1
+`
+
+type GetOrderStatusByCartIDRow struct {
+	ID     pgtype.UUID `json:"id"`
+	Status string      `json:"status"`
+}
+
+// Guarda de transição (Fatia E1): id + status atuais da Order do cart. O listener
+// usa o status para decidir idempotência (já terminal) vs transição inválida.
+func (q *Queries) GetOrderStatusByCartID(ctx context.Context, cartID pgtype.UUID) (GetOrderStatusByCartIDRow, error) {
+	row := q.db.QueryRow(ctx, getOrderStatusByCartID, cartID)
+	var i GetOrderStatusByCartIDRow
+	err := row.Scan(&i.ID, &i.Status)
+	return i, err
+}
+
 const getPaidCartsWithoutOrder = `-- name: GetPaidCartsWithoutOrder :many
 SELECT c.id
 FROM carts c
@@ -244,5 +262,39 @@ func (q *Queries) InsertOrderPayment(ctx context.Context, arg InsertOrderPayment
 		arg.CouponCode,
 		arg.CouponDiscountCents,
 	)
+	return err
+}
+
+const setOrderPaymentStatusByCartID = `-- name: SetOrderPaymentStatusByCartID :exec
+UPDATE order_payments op
+SET payment_status = $2
+FROM orders o
+WHERE o.id = op.order_id AND o.cart_id = $1
+`
+
+type SetOrderPaymentStatusByCartIDParams struct {
+	CartID        pgtype.UUID `json:"cart_id"`
+	PaymentStatus string      `json:"payment_status"`
+}
+
+// Espelha o status terminal no order_payments.payment_status, keyed por cart_id.
+func (q *Queries) SetOrderPaymentStatusByCartID(ctx context.Context, arg SetOrderPaymentStatusByCartIDParams) error {
+	_, err := q.db.Exec(ctx, setOrderPaymentStatusByCartID, arg.CartID, arg.PaymentStatus)
+	return err
+}
+
+const setOrderStatusByCartID = `-- name: SetOrderStatusByCartID :exec
+UPDATE orders SET status = $2, updated_at = now() WHERE cart_id = $1
+`
+
+type SetOrderStatusByCartIDParams struct {
+	CartID pgtype.UUID `json:"cart_id"`
+	Status string      `json:"status"`
+}
+
+// Transição terminal da raiz Order (refunded/cancelled). As guardas
+// (idempotência, só-a-partir-de-paid) ficam no listener; aqui só o UPDATE.
+func (q *Queries) SetOrderStatusByCartID(ctx context.Context, arg SetOrderStatusByCartIDParams) error {
+	_, err := q.db.Exec(ctx, setOrderStatusByCartID, arg.CartID, arg.Status)
 	return err
 }

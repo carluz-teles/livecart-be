@@ -5,6 +5,23 @@
 -- Idempotência: verifica se já existe Order para este cart.
 SELECT id FROM orders WHERE cart_id = $1;
 
+-- name: GetOrderStatusByCartID :one
+-- Guarda de transição (Fatia E1): id + status atuais da Order do cart. O listener
+-- usa o status para decidir idempotência (já terminal) vs transição inválida.
+SELECT id, status FROM orders WHERE cart_id = $1;
+
+-- name: SetOrderStatusByCartID :exec
+-- Transição terminal da raiz Order (refunded/cancelled). As guardas
+-- (idempotência, só-a-partir-de-paid) ficam no listener; aqui só o UPDATE.
+UPDATE orders SET status = $2, updated_at = now() WHERE cart_id = $1;
+
+-- name: SetOrderPaymentStatusByCartID :exec
+-- Espelha o status terminal no order_payments.payment_status, keyed por cart_id.
+UPDATE order_payments op
+SET payment_status = $2
+FROM orders o
+WHERE o.id = op.order_id AND o.cart_id = $1;
+
 -- name: InsertOrder :one
 INSERT INTO orders (
     cart_id, short_id, store_id, event_id, customer_id, status,
