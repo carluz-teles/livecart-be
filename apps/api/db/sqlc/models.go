@@ -473,20 +473,21 @@ type OauthState struct {
 }
 
 type Order struct {
-	ID             pgtype.UUID        `json:"id"`
-	CartID         pgtype.UUID        `json:"cart_id"`
-	ShortID        int32              `json:"short_id"`
-	StoreID        pgtype.UUID        `json:"store_id"`
-	EventID        pgtype.UUID        `json:"event_id"`
-	CustomerID     pgtype.UUID        `json:"customer_id"`
-	Status         string             `json:"status"`
-	TotalCents     pgtype.Int8        `json:"total_cents"`
-	DiscountCents  int64              `json:"discount_cents"`
-	ShippingCents  int64              `json:"shipping_cents"`
-	PaidTotalCents pgtype.Int8        `json:"paid_total_cents"`
-	PaidAt         pgtype.Timestamptz `json:"paid_at"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ID               pgtype.UUID        `json:"id"`
+	CartID           pgtype.UUID        `json:"cart_id"`
+	ShortID          int32              `json:"short_id"`
+	StoreID          pgtype.UUID        `json:"store_id"`
+	EventID          pgtype.UUID        `json:"event_id"`
+	CustomerID       pgtype.UUID        `json:"customer_id"`
+	Status           string             `json:"status"`
+	TotalCents       pgtype.Int8        `json:"total_cents"`
+	DiscountCents    int64              `json:"discount_cents"`
+	ShippingCents    int64              `json:"shipping_cents"`
+	PaidTotalCents   pgtype.Int8        `json:"paid_total_cents"`
+	PaidAt           pgtype.Timestamptz `json:"paid_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	CustomerSnapshot json.RawMessage    `json:"customer_snapshot"`
 }
 
 type OrderEvent struct {
@@ -511,7 +512,7 @@ type OrderItem struct {
 type OrderLogistic struct {
 	OrderID               pgtype.UUID        `json:"order_id"`
 	ShippingAddress       json.RawMessage    `json:"shipping_address"`
-	ShippingServiceID     pgtype.Int4        `json:"shipping_service_id"`
+	ShippingServiceID     pgtype.Text        `json:"shipping_service_id"`
 	ShippingServiceName   pgtype.Text        `json:"shipping_service_name"`
 	ShippingCarrier       pgtype.Text        `json:"shipping_carrier"`
 	ShippingCostCents     pgtype.Int8        `json:"shipping_cost_cents"`
@@ -527,6 +528,7 @@ type OrderLogistic struct {
 	ErpOrderState         string             `json:"erp_order_state"`
 	ErpStockLaunched      bool               `json:"erp_stock_launched"`
 	ErpOpStartedAt        pgtype.Timestamptz `json:"erp_op_started_at"`
+	ShippingProvider      pgtype.Text        `json:"shipping_provider"`
 }
 
 type OrderPayment struct {

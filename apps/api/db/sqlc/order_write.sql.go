@@ -103,23 +103,25 @@ func (q *Queries) GetPaidCartsWithoutOrder(ctx context.Context) ([]pgtype.UUID, 
 const insertOrder = `-- name: InsertOrder :one
 INSERT INTO orders (
     cart_id, short_id, store_id, event_id, customer_id, status,
-    total_cents, discount_cents, shipping_cents, paid_total_cents, paid_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-RETURNING id, cart_id, short_id, store_id, event_id, customer_id, status, total_cents, discount_cents, shipping_cents, paid_total_cents, paid_at, created_at, updated_at
+    total_cents, discount_cents, shipping_cents, paid_total_cents, paid_at,
+    customer_snapshot
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+RETURNING id, cart_id, short_id, store_id, event_id, customer_id, status, total_cents, discount_cents, shipping_cents, paid_total_cents, paid_at, created_at, updated_at, customer_snapshot
 `
 
 type InsertOrderParams struct {
-	CartID         pgtype.UUID        `json:"cart_id"`
-	ShortID        int32              `json:"short_id"`
-	StoreID        pgtype.UUID        `json:"store_id"`
-	EventID        pgtype.UUID        `json:"event_id"`
-	CustomerID     pgtype.UUID        `json:"customer_id"`
-	Status         string             `json:"status"`
-	TotalCents     pgtype.Int8        `json:"total_cents"`
-	DiscountCents  int64              `json:"discount_cents"`
-	ShippingCents  int64              `json:"shipping_cents"`
-	PaidTotalCents pgtype.Int8        `json:"paid_total_cents"`
-	PaidAt         pgtype.Timestamptz `json:"paid_at"`
+	CartID           pgtype.UUID        `json:"cart_id"`
+	ShortID          int32              `json:"short_id"`
+	StoreID          pgtype.UUID        `json:"store_id"`
+	EventID          pgtype.UUID        `json:"event_id"`
+	CustomerID       pgtype.UUID        `json:"customer_id"`
+	Status           string             `json:"status"`
+	TotalCents       pgtype.Int8        `json:"total_cents"`
+	DiscountCents    int64              `json:"discount_cents"`
+	ShippingCents    int64              `json:"shipping_cents"`
+	PaidTotalCents   pgtype.Int8        `json:"paid_total_cents"`
+	PaidAt           pgtype.Timestamptz `json:"paid_at"`
+	CustomerSnapshot json.RawMessage    `json:"customer_snapshot"`
 }
 
 func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (Order, error) {
@@ -135,6 +137,7 @@ func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (Order
 		arg.ShippingCents,
 		arg.PaidTotalCents,
 		arg.PaidAt,
+		arg.CustomerSnapshot,
 	)
 	var i Order
 	err := row.Scan(
@@ -152,6 +155,7 @@ func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (Order
 		&i.PaidAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CustomerSnapshot,
 	)
 	return i, err
 }
@@ -182,16 +186,17 @@ func (q *Queries) InsertOrderItem(ctx context.Context, arg InsertOrderItemParams
 
 const insertOrderLogistics = `-- name: InsertOrderLogistics :exec
 INSERT INTO order_logistics (
-    order_id, shipping_address, shipping_service_id, shipping_service_name,
-    shipping_carrier, shipping_cost_cents, shipping_cost_real_cents,
-    shipping_deadline_days, tracking_token
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    order_id, shipping_address, shipping_provider, shipping_service_id,
+    shipping_service_name, shipping_carrier, shipping_cost_cents,
+    shipping_cost_real_cents, shipping_deadline_days, tracking_token
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 `
 
 type InsertOrderLogisticsParams struct {
 	OrderID               pgtype.UUID     `json:"order_id"`
 	ShippingAddress       json.RawMessage `json:"shipping_address"`
-	ShippingServiceID     pgtype.Int4     `json:"shipping_service_id"`
+	ShippingProvider      pgtype.Text     `json:"shipping_provider"`
+	ShippingServiceID     pgtype.Text     `json:"shipping_service_id"`
 	ShippingServiceName   pgtype.Text     `json:"shipping_service_name"`
 	ShippingCarrier       pgtype.Text     `json:"shipping_carrier"`
 	ShippingCostCents     pgtype.Int8     `json:"shipping_cost_cents"`
@@ -204,6 +209,7 @@ func (q *Queries) InsertOrderLogistics(ctx context.Context, arg InsertOrderLogis
 	_, err := q.db.Exec(ctx, insertOrderLogistics,
 		arg.OrderID,
 		arg.ShippingAddress,
+		arg.ShippingProvider,
 		arg.ShippingServiceID,
 		arg.ShippingServiceName,
 		arg.ShippingCarrier,
