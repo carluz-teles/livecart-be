@@ -93,35 +93,17 @@ type Cart struct {
 	// When the initial cart snapshot was frozen (NULL = no checkout view yet).
 	InitialSnapshotTakenAt pgtype.Timestamptz `json:"initial_snapshot_taken_at"`
 	// Cached subtotal of cart_initial_items in cents.
-	InitialSubtotalCents pgtype.Int8 `json:"initial_subtotal_cents"`
-	ShortID              int32       `json:"short_id"`
-	CouponID             pgtype.UUID `json:"coupon_id"`
-	CouponCode           pgtype.Text `json:"coupon_code"`
-	CouponDiscountCents  int64       `json:"coupon_discount_cents"`
-	// pending|done|failed — set on paid carts to track post-payment ERP order creation. failed means stock stays reserved against this cart and the merchant can retry from the admin.
-	ErpFinalisationStatus string `json:"erp_finalisation_status"`
-	// Last error message from a failed ERP finalisation attempt. Surfaced verbatim on the order detail page.
-	ErpLastError pgtype.Text `json:"erp_last_error"`
-	// Timestamp of the most recent ERP finalisation attempt (success or failure).
-	ErpLastAttemptAt pgtype.Timestamptz `json:"erp_last_attempt_at"`
-	// Total number of ERP finalisation attempts on this cart, including the initial one.
-	ErpAttemptsCount int32 `json:"erp_attempts_count"`
-	// JSON snapshot of providers.PaymentStatus captured on first finalisation attempt. Used to replay createFinalERPOrder on retry without re-fetching from the gateway.
-	ErpPaymentSnapshot json.RawMessage `json:"erp_payment_snapshot"`
-	// ERP-side identifier for the issued NFe (e.g. Tiny notafiscal.id). Populated when the merchant emits the NFe in the ERP.
-	ErpInvoiceID pgtype.Text `json:"erp_invoice_id"`
-	// Chave de acesso (44 dígitos) of the issued NFe. Filled in once the NFe is authorised at SEFAZ.
-	ErpInvoiceKey pgtype.Text `json:"erp_invoice_key"`
-	// pending|authorized|cancelled|rejected — normalised across ERPs. The "Criar envio" flow is unlocked when status=authorized.
-	ErpInvoiceStatus pgtype.Text `json:"erp_invoice_status"`
-	// Timestamp from the ERP when the NFe was emitted/authorised. Surfaced on the order detail timeline.
-	ErpInvoiceEmittedAt pgtype.Timestamptz `json:"erp_invoice_emitted_at"`
-	CancelledReason     pgtype.Text        `json:"cancelled_reason"`
-	WhatsappConsent     bool               `json:"whatsapp_consent"`
-	WhatsappConsentAt   pgtype.Timestamptz `json:"whatsapp_consent_at"`
-	ErpOrderState       string             `json:"erp_order_state"`
-	ErpStockLaunched    bool               `json:"erp_stock_launched"`
-	ErpOpStartedAt      pgtype.Timestamptz `json:"erp_op_started_at"`
+	InitialSubtotalCents pgtype.Int8        `json:"initial_subtotal_cents"`
+	ShortID              int32              `json:"short_id"`
+	CouponID             pgtype.UUID        `json:"coupon_id"`
+	CouponCode           pgtype.Text        `json:"coupon_code"`
+	CouponDiscountCents  int64              `json:"coupon_discount_cents"`
+	CancelledReason      pgtype.Text        `json:"cancelled_reason"`
+	WhatsappConsent      bool               `json:"whatsapp_consent"`
+	WhatsappConsentAt    pgtype.Timestamptz `json:"whatsapp_consent_at"`
+	ErpOrderState        string             `json:"erp_order_state"`
+	ErpStockLaunched     bool               `json:"erp_stock_launched"`
+	ErpOpStartedAt       pgtype.Timestamptz `json:"erp_op_started_at"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.

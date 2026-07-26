@@ -37,7 +37,10 @@ func seedFrozenOrder(t *testing.T, serviceID string) (storeID, cartID string) {
 	r := seedPaidCart(t, 2, 5000, 0, 1500) // gmv=10000, shipping=1500
 	storeID, cartID = r.storeID, r.cartID
 
-	// Rich customer + shipping + ERP snapshot on the source cart, BEFORE cart.paid.
+	// Rich customer + shipping on the source cart, BEFORE cart.paid. As colunas
+	// pós-venda do ERP (erp_finalisation_status/erp_invoice_*) foram DROPADAS do
+	// cart na Fatia 10-b — a finalização/NF vivem só em order_payments; ver o
+	// write autoritativo abaixo.
 	if _, err := testPool.Exec(ctx, `
 		UPDATE carts SET
 			customer_name          = 'Alice Frozen',
@@ -51,11 +54,7 @@ func seedFrozenOrder(t *testing.T, serviceID string) (storeID, cartID string) {
 			shipping_cost_cents    = 1500,
 			shipping_cost_real_cents = 1200,
 			shipping_deadline_days = 5,
-			shipping_address       = $3,
-			erp_finalisation_status = 'done',
-			erp_invoice_id         = 'INV-1',
-			erp_invoice_key        = 'KEY-1',
-			erp_invoice_status     = 'authorized'
+			shipping_address       = $3
 		WHERE id = $1`,
 		cartID, serviceID,
 		`{"zipCode":"01000-000","street":"Rua A","number":"10","complement":"apto 1","neighborhood":"Centro","city":"São Paulo","state":"SP"}`,
@@ -69,10 +68,8 @@ func seedFrozenOrder(t *testing.T, serviceID string) (storeID, cartID string) {
 	}
 
 	// Fatia 11b: a finalização/NF do ERP são autoritativas em order_payments,
-	// escritas pelos reactors — NÃO mais copiadas do cart pelo mirror. Simula o
-	// reactor gravando o estado terminal direto na fonte autoritativa, para o
-	// detalhe (que lê de order_payments) refletir. O seed de erp_* no cart acima
-	// segue lá de propósito: B1b prova que mutá-lo NÃO altera o detalhe.
+	// escritas pelos reactors. Simula o reactor gravando o estado terminal direto
+	// na fonte autoritativa, para o detalhe (que lê de order_payments) refletir.
 	if _, err := testPool.Exec(ctx, `
 		UPDATE order_payments op SET
 			erp_finalisation_status = 'done',
@@ -157,7 +154,10 @@ func TestFatiaB1_GetByID_FrozenAgainstCartMutation(t *testing.T) {
 
 	_, cartID := seedFrozenOrder(t, "3")
 
-	// Mutar a fonte carts DEPOIS de materializar: o detalhe deve ignorar.
+	// Mutar a fonte carts DEPOIS de materializar: o detalhe deve ignorar. (As
+	// colunas pós-venda do ERP saíram do cart na Fatia 10-b — a finalização/NF só
+	// vivem em order_payments, garantia ainda mais forte de que o detalhe é
+	// autoritativo nelas; as asserts erp_* abaixo continuam lendo de order_payments.)
 	if _, err := testPool.Exec(ctx, `
 		UPDATE carts SET
 			customer_name           = 'MUTATED NAME',
@@ -168,9 +168,7 @@ func TestFatiaB1_GetByID_FrozenAgainstCartMutation(t *testing.T) {
 			shipping_service_name   = 'MUTATED_SERVICE',
 			shipping_carrier        = 'MUTATED_CARRIER',
 			shipping_cost_cents     = 9999,
-			shipping_address        = '{"zipCode":"99999","street":"MUTATED"}',
-			erp_finalisation_status = 'failed',
-			erp_invoice_id          = 'MUTATED_INV'
+			shipping_address        = '{"zipCode":"99999","street":"MUTATED"}'
 		WHERE id = $1`, cartID,
 	); err != nil {
 		t.Fatalf("mutate cart: %v", err)

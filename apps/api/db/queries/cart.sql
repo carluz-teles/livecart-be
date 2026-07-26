@@ -38,18 +38,17 @@ SET expires_at         = $2,
     checkout_url       = NULL,
     checkout_id        = NULL,
     checkout_expires_at = NULL,
-    -- Reset das colunas de ERP (must-fix C): reabrir um cart design-C sem isto
-    -- deixaria erp_order_state/external_order_id obsoletos e o próximo pagamento
-    -- cairia em "cart pago após cancelamento — reconciliação manual". A
+    -- Reset das colunas de RESERVA do ERP (must-fix C): reabrir um cart design-C
+    -- sem isto deixaria erp_order_state/external_order_id obsoletos e o próximo
+    -- pagamento cairia em "cart pago após cancelamento — reconciliação manual". A
     -- expiração já cancelou/estornou o pedido antigo; o reopen zera para um
-    -- ciclo pagamento→ERP limpo.
+    -- ciclo pagamento→ERP limpo. (As colunas pós-venda de finalização/NF vivem
+    -- em order_payments desde a Fatia 11b — o cart reaberto é pré-pagamento e não
+    -- carrega estado de finalização.)
     erp_order_state         = 'none',
     external_order_id       = NULL,
     erp_stock_launched      = FALSE,
-    erp_finalisation_status = 'pending',
-    erp_op_started_at       = NULL,
-    erp_last_attempt_at     = NULL,
-    erp_payment_snapshot    = NULL
+    erp_op_started_at       = NULL
 WHERE id = $1;
 
 -- name: ReopenExpiredCartForReuse :exec
@@ -76,10 +75,7 @@ SET status                  = 'active',
     erp_order_state         = 'none',
     external_order_id       = NULL,
     erp_stock_launched      = FALSE,
-    erp_finalisation_status = 'pending',
-    erp_op_started_at       = NULL,
-    erp_last_attempt_at     = NULL,
-    erp_payment_snapshot    = NULL
+    erp_op_started_at       = NULL
 WHERE id = $1;
 
 -- name: IssueShortIDForEvent :one
@@ -356,59 +352,13 @@ SELECT
 -- name: UpdateCartExternalOrderID :exec
 UPDATE carts SET external_order_id = $2 WHERE id = $1;
 
--- name: MarkCartERPFinalisationDone :exec
-UPDATE carts
-SET erp_finalisation_status = 'done',
-    erp_last_error           = NULL,
-    erp_last_attempt_at      = now(),
-    erp_attempts_count       = erp_attempts_count + 1
-WHERE id = $1;
-
--- name: MarkCartERPFinalisationFailed :exec
--- erp_payment_snapshot is COALESCEd so the snapshot is only written on the
--- first failure (initial finalisation attempt), preserving the gateway's
--- canonical view of the payment for any number of subsequent retries.
-UPDATE carts
-SET erp_finalisation_status = 'failed',
-    erp_last_error           = $2,
-    erp_last_attempt_at      = now(),
-    erp_attempts_count       = erp_attempts_count + 1,
-    erp_payment_snapshot     = COALESCE(erp_payment_snapshot, $3)
-WHERE id = $1;
-
--- name: GetCartERPFinalisationStatus :one
-SELECT id,
-       erp_finalisation_status,
-       erp_last_error,
-       erp_last_attempt_at,
-       erp_attempts_count,
-       erp_payment_snapshot,
-       external_order_id
-FROM carts
-WHERE id = $1;
-
--- name: UpsertCartERPInvoice :exec
--- Persist the NFe state pulled from the ERP onto the cart. Called from the
--- Tiny webhook (tipo='nota_fiscal') and from the manual "Verificar NFe" sync
--- endpoint. emitted_at is COALESCEd so we only stamp the first authorised
--- transition — re-fetching a cancelled NFe later doesn't blank the original
--- emission timestamp.
-UPDATE carts
-SET erp_invoice_id         = sqlc.narg('invoice_id'),
-    erp_invoice_key        = sqlc.narg('invoice_key'),
-    erp_invoice_status     = sqlc.narg('invoice_status'),
-    erp_invoice_emitted_at = COALESCE(erp_invoice_emitted_at, sqlc.narg('emitted_at'))
-WHERE id = $1;
-
--- name: GetCartERPInvoice :one
-SELECT id,
-       erp_invoice_id,
-       erp_invoice_key,
-       erp_invoice_status,
-       erp_invoice_emitted_at,
-       external_order_id
-FROM carts
-WHERE id = $1;
+-- Fatia 10-b: as queries pós-venda de finalização/NF do ERP saíram daqui. A
+-- Fatia 11b tornou order_payments a fonte autoritativa e repontou os wrappers Go
+-- (MarkCartERPFinalisation*/GetCartERPFinalisationStatus/Get|UpsertCartERPInvoice
+-- em repository.go) para as queries Order* em order_write.sql. As colunas
+-- pós-venda correspondentes foram dropadas do cart (migration 000101). O que fica
+-- no cart é só reserva (erp_order_state/erp_stock_launched/erp_op_started_at) e
+-- external_order_id.
 
 -- name: FindCartByExternalOrderID :one
 -- Resolve a cart from a Tiny pedido id (or any ERP external order id) for a
@@ -720,17 +670,10 @@ SELECT (quantity - waitlisted_quantity)::int AS available
 FROM cart_items
 WHERE cart_id = $1 AND product_id = $2;
 
--- name: MarkCartERPFinalisationAttempt :exec
--- S1 da finalização retomável: persiste o snapshot do gateway ANTES de tocar
--- o ERP (o retry admin depende dele para replay) e carimba a tentativa — o
--- carimbo alimenta o guard de sync e o gate do retry. COALESCE preserva o
--- snapshot da primeira tentativa.
--- (erp_attempts_count NÃO é incrementado aqui — MarkDone/MarkFailed já contam
--- tentativas concluídas; este marker só registra o INÍCIO da tentativa.)
-UPDATE carts
-SET erp_payment_snapshot = COALESCE(erp_payment_snapshot, $2),
-    erp_last_attempt_at  = now()
-WHERE id = $1;
+-- Fatia 10-b: MarkCartERPFinalisationAttempt (S1 da finalização retomável) saiu
+-- daqui — o wrapper Go repontou para MarkOrderERPFinalisationAttempt
+-- (order_write.sql) na Fatia 11b e as colunas erp_payment_snapshot/
+-- erp_last_attempt_at foram dropadas do cart (migration 000101).
 
 -- ============================================================================
 -- DESIGN C — pedido Tiny como reserva a partir da iniciação do pagamento
