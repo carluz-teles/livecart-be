@@ -371,19 +371,26 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 		}
 	}
 
-	// Shipment (may be absent). Events are loaded in a follow-up query.
-	shipment, serr := s.repo.GetShipmentForOrder(ctx, id)
-	if serr != nil {
-		logger.From(ctx, s.logger).Warn("failed to load shipment for order", zap.Error(serr))
-	} else if shipment != nil {
-		events, eerr := s.repo.ListShipmentEvents(ctx, shipment.ID)
-		if eerr != nil {
-			logger.From(ctx, s.logger).Warn("failed to list shipment events", zap.Error(eerr))
-			events = []OrderShipmentEventRecord{}
-		}
-		out.Shipment = &OrderShipmentOutput{
-			OrderShipmentRecord: *shipment,
-			Events:              events,
+	// Shipment (may be absent). Keyed by the real Order id (orders.id) — the
+	// shipments FK was migrated off carts(id) → orders(id) — so resolve the
+	// order id from the cart id first. No order yet (old/unpaid cart) → no
+	// shipment. Events are loaded in a follow-up query.
+	if orderID, rerr := s.repo.GetOrderIDByCartID(ctx, id); rerr != nil {
+		logger.From(ctx, s.logger).Warn("failed to resolve order id for shipment", zap.Error(rerr))
+	} else if orderID != "" {
+		shipment, serr := s.repo.GetShipmentForOrder(ctx, orderID)
+		if serr != nil {
+			logger.From(ctx, s.logger).Warn("failed to load shipment for order", zap.Error(serr))
+		} else if shipment != nil {
+			events, eerr := s.repo.ListShipmentEvents(ctx, shipment.ID)
+			if eerr != nil {
+				logger.From(ctx, s.logger).Warn("failed to list shipment events", zap.Error(eerr))
+				events = []OrderShipmentEventRecord{}
+			}
+			out.Shipment = &OrderShipmentOutput{
+				OrderShipmentRecord: *shipment,
+				Events:              events,
+			}
 		}
 	}
 
@@ -464,11 +471,17 @@ func (s *Service) UpdateShippingAddress(ctx context.Context, input UpdateShippin
 	if row.PaymentStatus == "paid" {
 		return httpx.ErrConflict("cannot edit shipping address after payment")
 	}
-	shipment, err := s.repo.GetShipmentForOrder(ctx, input.ID)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to load shipment for order", zap.Error(err))
-	} else if shipment != nil {
-		return httpx.ErrConflict("cannot edit shipping address after shipment is created")
+	// Shipment guard keyed by the real Order id (orders.id). Resolve from the
+	// cart id first; no order yet → no shipment → editing is allowed.
+	if orderID, rerr := s.repo.GetOrderIDByCartID(ctx, input.ID); rerr != nil {
+		logger.From(ctx, s.logger).Warn("failed to resolve order id for shipment", zap.Error(rerr))
+	} else if orderID != "" {
+		shipment, err := s.repo.GetShipmentForOrder(ctx, orderID)
+		if err != nil {
+			logger.From(ctx, s.logger).Warn("failed to load shipment for order", zap.Error(err))
+		} else if shipment != nil {
+			return httpx.ErrConflict("cannot edit shipping address after shipment is created")
+		}
 	}
 	return s.repo.UpdateShippingAddress(ctx, input.ID, input.Address)
 }
@@ -492,11 +505,17 @@ func (s *Service) RegenerateCheckout(
 	if row.PaymentStatus == "paid" {
 		return "", time.Time{}, httpx.ErrConflict("cannot regenerate checkout for a paid order")
 	}
-	shipment, err := s.repo.GetShipmentForOrder(ctx, id)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to load shipment for order", zap.Error(err))
-	} else if shipment != nil {
-		return "", time.Time{}, httpx.ErrConflict("cannot regenerate checkout after shipment is created")
+	// Shipment guard keyed by the real Order id (orders.id). Resolve from the
+	// cart id first; no order yet → no shipment → regenerating is allowed.
+	if orderID, rerr := s.repo.GetOrderIDByCartID(ctx, id); rerr != nil {
+		logger.From(ctx, s.logger).Warn("failed to resolve order id for shipment", zap.Error(rerr))
+	} else if orderID != "" {
+		shipment, err := s.repo.GetShipmentForOrder(ctx, orderID)
+		if err != nil {
+			logger.From(ctx, s.logger).Warn("failed to load shipment for order", zap.Error(err))
+		} else if shipment != nil {
+			return "", time.Time{}, httpx.ErrConflict("cannot regenerate checkout after shipment is created")
+		}
 	}
 
 	minutes := s.repo.GetStoreCartExpirationMinutes(ctx, storeID)

@@ -89,6 +89,18 @@ func (r *Repository) CreateShipment(ctx context.Context, p CreateShipmentParams)
 		return nil, httpx.ErrBadRequest("invalid store id")
 	}
 
+	// p.OrderID carries the CART id (legacy `order_id` column, migration 000052).
+	// Resolve the real order id (orders.id) so we can populate the correct FK
+	// `orders_order_id`. Best-effort: a cart that hasn't materialised an Order
+	// yet (shouldn't happen post-payment) leaves orders_order_id NULL rather than
+	// failing shipment creation. Reuses the canonical sqlc GetOrderIDByCartID.
+	var ordersOrderID pgtype.UUID
+	if oid, resolveErr := r.queries.GetOrderIDByCartID(ctx, pgtype.UUID{Bytes: orderUID, Valid: true}); resolveErr == nil {
+		ordersOrderID = oid
+	} else if !errors.Is(resolveErr, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("resolving order id for shipment: %w", resolveErr)
+	}
+
 	metaRaw := json.RawMessage("{}")
 	if len(p.ProviderMeta) > 0 {
 		b, err := json.Marshal(p.ProviderMeta)
@@ -100,15 +112,16 @@ func (r *Repository) CreateShipment(ctx context.Context, p CreateShipmentParams)
 
 	const q = `
 		INSERT INTO shipments (
-			order_id, store_id, provider, provider_order_id, provider_order_number,
+			order_id, orders_order_id, store_id, provider, provider_order_id, provider_order_number,
 			tracking_code, invoice_key, invoice_kind, invoice_id,
 			status, status_raw_code, status_raw_name, provider_meta
 		) VALUES (
-			$1, $2, $3, $4, $5,
-			$6, $7, $8, $9,
-			$10, $11, $12, $13
+			$1, $2, $3, $4, $5, $6,
+			$7, $8, $9, $10,
+			$11, $12, $13, $14
 		)
 		ON CONFLICT (provider, provider_order_id) DO UPDATE SET
+			orders_order_id       = COALESCE(EXCLUDED.orders_order_id, shipments.orders_order_id),
 			tracking_code         = COALESCE(NULLIF(EXCLUDED.tracking_code,  ''), shipments.tracking_code),
 			provider_order_number = COALESCE(NULLIF(EXCLUDED.provider_order_number, ''), shipments.provider_order_number),
 			invoice_key           = COALESCE(NULLIF(EXCLUDED.invoice_key,    ''), shipments.invoice_key),
@@ -123,6 +136,7 @@ func (r *Repository) CreateShipment(ctx context.Context, p CreateShipmentParams)
 	`
 	row := r.pool.QueryRow(ctx, q,
 		pgtype.UUID{Bytes: orderUID, Valid: true},
+		ordersOrderID,
 		pgtype.UUID{Bytes: storeUID, Valid: true},
 		p.Provider,
 		p.ProviderOrderID,
