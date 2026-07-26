@@ -798,7 +798,7 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 //
 // orderID is the real Order id (orders.id). The lookup filters by the correct
 // FK `shipments.orders_order_id` — NOT the legacy `order_id` column, which
-// (despite its name) still holds the cart id (migration 000052 / 000096).
+// (despite its name) still holds the cart id (migration 000052 / 000097).
 // Callers that only hold a cart id must resolve it first via GetOrderIDByCartID.
 func (r *Repository) GetShipmentForOrder(ctx context.Context, orderID string) (*OrderShipmentRecord, error) {
 	uid, err := uuid.Parse(orderID)
