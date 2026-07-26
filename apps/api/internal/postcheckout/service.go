@@ -48,6 +48,26 @@ func (s *Service) SetNotificationService(reader NotificationSettingsReader) {
 	s.notificationService = reader
 }
 
+// insertOrderEvent resolves the Order id for the cart (reusando
+// GetOrderIDByCartID via repo.ResolveOrderID) e anexa um evento à timeline,
+// keyed por (order_id, event_type). A resolução é best-effort: se falhar ou a
+// Order ainda não existir (path síncrono do cartão), grava com order_id nulo —
+// cart_id continua como âncora — em vez de perder o evento. Centraliza a
+// resolução para os 5 call sites do post-checkout (paid/cancelled/refunded/
+// shipped/delivered) num único ponto.
+func (s *Service) insertOrderEvent(ctx context.Context, cartID, eventType, source string, metadata json.RawMessage) (bool, error) {
+	orderID, err := s.repo.ResolveOrderID(ctx, cartID)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("could not resolve order id for timeline event",
+			zap.String("cart_id", cartID),
+			zap.String("event_type", eventType),
+			zap.Error(err),
+		)
+		orderID = pgtype.UUID{}
+	}
+	return s.repo.InsertOrderEvent(ctx, orderID, cartID, eventType, source, metadata)
+}
+
 // OnCartPaid is the hook called when a cart's payment_status flips to "paid".
 // It is best-effort: every error is logged but never returned, because the
 // caller is a payment webhook handler that must ACK regardless.
@@ -90,10 +110,22 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 		return
 	}
 
+	// Dual-write: o token também vive em order_logistics (fonte da verdade do
+	// rastreamento na Fatia C1). Set-once no banco; no-op quando a Order ainda
+	// não foi materializada (path síncrono do cartão) — a materialização
+	// posterior copia carts.tracking_token adiante. Best-effort: o token no cart
+	// já garante o rastreio público atual.
+	if err := s.repo.SetOrderLogisticsTrackingToken(ctx, cartID, token); err != nil {
+		logger.From(ctx, s.logger).Warn("failed to persist tracking token on order_logistics",
+			zap.String("cart_id", cartID),
+			zap.Error(err),
+		)
+	}
+
 	// Append `payment_confirmed` to the customer-facing timeline. Insert is
-	// idempotent at the DB level (unique cart_id+event_type) — duplicate
+	// idempotent at the DB level (unique order_id+event_type) — duplicate
 	// hooks are a no-op.
-	if _, err := s.repo.InsertOrderEvent(ctx, cartID, "payment_confirmed", "system", nil); err != nil {
+	if _, err := s.insertOrderEvent(ctx, cartID, "payment_confirmed", "system", nil); err != nil {
 		logger.From(ctx, s.logger).Warn("failed to record payment_confirmed event",
 			zap.String("cart_id", cartID),
 			zap.Error(err),
@@ -139,7 +171,7 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 }
 
 // OnCartCancelled sends the "pedido cancelado" email. Exactly-once via the
-// timeline insert (unique cart_id+event_type) — webhook retries are no-ops.
+// timeline insert (unique order_id+event_type) — webhook retries are no-ops.
 func (s *Service) OnCartCancelled(ctx context.Context, cartID string) {
 	snapshot, err := s.repo.LoadCart(ctx, cartID)
 	if err != nil {
@@ -153,7 +185,7 @@ func (s *Service) OnCartCancelled(ctx context.Context, cartID string) {
 			zap.String("cart_id", cartID))
 		return
 	}
-	inserted, err := s.repo.InsertOrderEvent(ctx, cartID, "payment_cancelled", "system", nil)
+	inserted, err := s.insertOrderEvent(ctx, cartID, "payment_cancelled", "system", nil)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("cancellation email skipped: insert timeline event failed",
 			zap.String("cart_id", cartID), zap.Error(err))
@@ -203,7 +235,7 @@ func (s *Service) OnCartRefunded(ctx context.Context, cartID string) {
 			zap.String("cart_id", cartID))
 		return
 	}
-	inserted, err := s.repo.InsertOrderEvent(ctx, cartID, "payment_refunded", "system", nil)
+	inserted, err := s.insertOrderEvent(ctx, cartID, "payment_refunded", "system", nil)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("refund email skipped: insert timeline event failed",
 			zap.String("cart_id", cartID), zap.Error(err))
@@ -290,7 +322,7 @@ func (s *Service) OnDelivered(ctx context.Context, cartID, source string) {
 	ctx = logger.WithStore(ctx, uuidStr(snapshot.Store.ID), snapshot.Store.Slug)
 
 	metadata := json.RawMessage(fmt.Sprintf(`{"source":%q}`, source))
-	inserted, err := s.repo.InsertOrderEvent(ctx, cartID, "delivered", source, metadata)
+	inserted, err := s.insertOrderEvent(ctx, cartID, "delivered", source, metadata)
 	if err != nil {
 		logger.From(ctx, s.logger).Warn("failed to record delivered event",
 			zap.String("cart_id", cartID),
@@ -381,7 +413,7 @@ func (s *Service) OnShipmentPosted(ctx context.Context, cartID, trackingCode str
 	// Idempotency: one shipped event per cart. Subsequent calls (label re-
 	// generation, webhook retry) become no-ops without ever touching email.
 	metadata := json.RawMessage(fmt.Sprintf(`{"tracking_code":%q}`, trackingCode))
-	inserted, err := s.repo.InsertOrderEvent(ctx, cartID, "shipped", "merchant", metadata)
+	inserted, err := s.insertOrderEvent(ctx, cartID, "shipped", "merchant", metadata)
 	if err != nil {
 		logger.From(ctx, s.logger).Warn("failed to record shipped event",
 			zap.String("cart_id", cartID),

@@ -5,6 +5,30 @@
 -- Idempotência: verifica se já existe Order para este cart.
 SELECT id FROM orders WHERE cart_id = $1;
 
+-- name: SetOrderLogisticsTrackingToken :exec
+-- Fatia C1: grava o tracking_token na Order (order_logistics) — fonte da verdade
+-- do rastreamento. Set-once: só escreve quando ainda nulo, e o UNIQUE INDEX
+-- idx_order_logistics_tracking garante unicidade global. Keyed por cart_id
+-- (join orders→order_logistics) para o postcheckout não resolver order_id fora.
+-- No-op (0 rows) quando a Order ainda não foi materializada (path síncrono do
+-- cartão) — a materialização posterior copia carts.tracking_token adiante.
+UPDATE order_logistics ol
+SET tracking_token = $2
+FROM orders o
+WHERE o.id = ol.order_id
+  AND o.cart_id = $1
+  AND ol.tracking_token IS NULL;
+
+-- name: GetCartByOrderLogisticsTrackingToken :one
+-- Fatia C1: acha o cart de origem a partir do tracking_token gravado na Order
+-- (order_logistics). É o lookup canônico do rastreamento; o lookup por
+-- carts.tracking_token vira fallback enquanto durar o dual-write (Fase F remove
+-- o do cart).
+SELECT c.* FROM carts c
+JOIN orders o ON o.cart_id = c.id
+JOIN order_logistics ol ON ol.order_id = o.id
+WHERE ol.tracking_token = $1;
+
 -- name: GetOrderStatusByCartID :one
 -- Guarda de transição (Fatia E1): id + status atuais da Order do cart. O listener
 -- usa o status para decidir idempotência (já terminal) vs transição inválida.

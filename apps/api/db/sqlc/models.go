@@ -498,6 +498,7 @@ type OrderEvent struct {
 	Source     string             `json:"source"`
 	Metadata   json.RawMessage    `json:"metadata"`
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	OrderID    pgtype.UUID        `json:"order_id"`
 }
 
 type OrderItem struct {
