@@ -154,6 +154,21 @@ func seedPaidCart(t *testing.T, qty, activeReservations int) finFixture {
 		 VALUES ($1, $2, $3, 1000, 0)`, fx.cartID, fx.productID, qty); err != nil {
 		t.Fatalf("seed cart_items: %v", err)
 	}
+	// Fatia 11b: a finalização/NF do ERP são autoritativas em order_payments,
+	// resolvidas via orders.cart_id. Em produção OnCartPaid materializa a Order
+	// (e a order_payments) ANTES do reactor de ERP rodar no mesmo task de
+	// cart.paid; aqui materializamos a linha mínima para que as escritas/leituras
+	// de finalização (Mark*, Get*, guards) tenham alvo. Sem isso todo UPDATE de
+	// finalização seria um no-op silencioso (0 rows) e os guards leriam 'pending'.
+	var orderID string
+	mustScan(&orderID,
+		`INSERT INTO orders (cart_id, short_id, store_id, event_id)
+		 SELECT id, short_id, $2::uuid, event_id FROM carts WHERE id = $1
+		 RETURNING id::text`, fx.cartID, fx.storeID)
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO order_payments (order_id) VALUES ($1::uuid)`, orderID); err != nil {
+		t.Fatalf("seed order_payments: %v", err)
+	}
 	for i := 0; i < activeReservations; i++ {
 		if _, err := testPool.Exec(ctx,
 			`INSERT INTO stock_reservations (event_id, cart_id, product_id, external_product_id, quantity, erp_movement_id, status)
@@ -165,17 +180,36 @@ func seedPaidCart(t *testing.T, qty, activeReservations int) finFixture {
 	return fx
 }
 
+// cartFinalisationState lê o estado de finalização do ERP. Fatia 11b: as colunas
+// de finalização/snapshot passaram a ser autoritativas em order_payments
+// (resolvidas via orders.cart_id); external_order_id continua no cart (reserva).
 func cartFinalisationState(t *testing.T, cartID string) (status, lastError, externalOrderID string, attempts int, hasSnapshot bool) {
 	t.Helper()
 	err := testPool.QueryRow(context.Background(),
-		`SELECT erp_finalisation_status, COALESCE(erp_last_error,''), COALESCE(external_order_id,''),
-		        erp_attempts_count, erp_payment_snapshot IS NOT NULL
-		 FROM carts WHERE id = $1`, cartID).
+		`SELECT op.erp_finalisation_status, COALESCE(op.erp_last_error,''),
+		        COALESCE(c.external_order_id,''),
+		        op.erp_attempts_count, op.erp_payment_snapshot IS NOT NULL
+		 FROM order_payments op
+		 JOIN orders o ON o.id = op.order_id
+		 JOIN carts  c ON c.id = o.cart_id
+		 WHERE o.cart_id = $1`, cartID).
 		Scan(&status, &lastError, &externalOrderID, &attempts, &hasSnapshot)
 	if err != nil {
-		t.Fatalf("lendo estado do cart: %v", err)
+		t.Fatalf("lendo estado de finalização (order_payments): %v", err)
 	}
 	return
+}
+
+// setOrderFinalisationStatus escreve o status de finalização direto na fonte
+// autoritativa (order_payments, resolvida via cart_id) — usado pelos seeds que
+// antes da Fatia 11b faziam `UPDATE carts SET erp_finalisation_status = ...`.
+func setOrderFinalisationStatus(t *testing.T, cartID, status string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE order_payments op SET erp_finalisation_status = $2
+		 FROM orders o WHERE o.id = op.order_id AND o.cart_id = $1`, cartID, status); err != nil {
+		t.Fatalf("setOrderFinalisationStatus: %v", err)
+	}
 }
 
 func activeReservationCount(t *testing.T, cartID string) int {
@@ -539,8 +573,10 @@ func TestFinalisationConcurrentWebhooksSingleOrder(t *testing.T) {
 func TestFinalisationRetryGateFreshPending(t *testing.T) {
 	requireDB(t)
 	fx := seedPaidCart(t, 1, 0)
+	// Fatia 11b: o gate do retry lê erp_last_attempt_at de order_payments.
 	if _, err := testPool.Exec(context.Background(),
-		`UPDATE carts SET erp_last_attempt_at = now() WHERE id = $1`, fx.cartID); err != nil {
+		`UPDATE order_payments op SET erp_last_attempt_at = now()
+		 FROM orders o WHERE o.id = op.order_id AND o.cart_id = $1`, fx.cartID); err != nil {
 		t.Fatalf("seed attempt: %v", err)
 	}
 	svc := newFinalisationService(newScriptedERP())
@@ -619,6 +655,113 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ============================================================================
+// Fatia 11b-1 — autoridade de dados: finalização/NF em order_payments, não cart
+// ============================================================================
+
+// AC2: após a finalização, os dados de finalização/snapshot são autoritativos em
+// order_payments; as colunas homônimas do CART permanecem intactas (a
+// finalização nunca mais as escreve). A coluna de RESERVA external_order_id,
+// por outro lado, CONTINUA sendo escrita no cart (AC5) — é ciclo do carrinho.
+func TestFinalisationWritesToOrderPaymentsNotCart(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	fx := seedPaidCart(t, 1, 1)
+	svc := newFinalisationService(newScriptedERP())
+
+	if err := svc.finalizeCartERPOrder(ctx, fx.cartID, fx.storeID, testPaymentStatus()); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+
+	// order_payments recebeu o estado terminal + snapshot (autoritativo).
+	status, _, externalOrderID, attempts, hasSnapshot := cartFinalisationState(t, fx.cartID)
+	if status != "done" || attempts != 1 || !hasSnapshot {
+		t.Fatalf("order_payments não recebeu a finalização: status=%q attempts=%d snapshot=%v", status, attempts, hasSnapshot)
+	}
+	if externalOrderID != "ORD-1" {
+		t.Fatalf("reserva external_order_id ausente (=%q)", externalOrderID)
+	}
+
+	// O CART NÃO foi escrito nas colunas de finalização/snapshot: seguem no
+	// default ('pending'/0/NULL). external_order_id (reserva) É gravado no cart.
+	var cartStatus, cartExternalOrderID string
+	var cartAttempts int
+	var cartHasSnapshot bool
+	if err := testPool.QueryRow(ctx,
+		`SELECT erp_finalisation_status, erp_attempts_count, erp_payment_snapshot IS NOT NULL,
+		        COALESCE(external_order_id,'')
+		 FROM carts WHERE id = $1`, fx.cartID).
+		Scan(&cartStatus, &cartAttempts, &cartHasSnapshot, &cartExternalOrderID); err != nil {
+		t.Fatalf("lendo cart: %v", err)
+	}
+	if cartStatus != "pending" || cartAttempts != 0 || cartHasSnapshot {
+		t.Fatalf("finalização vazou pro cart: status=%q attempts=%d snapshot=%v (esperado pending/0/false)", cartStatus, cartAttempts, cartHasSnapshot)
+	}
+	if cartExternalOrderID != "ORD-1" {
+		t.Fatalf("reserva external_order_id deveria seguir no cart (=%q)", cartExternalOrderID)
+	}
+}
+
+// AC3: o webhook de NF escreve a nota AUTORITATIVAMENTE em order_payments
+// (resolvido do cart → Order) e faz skip benigno (0 rows, sem erro) quando não
+// há Order para o cart — NF é sempre pós-confirmação, logo a Order já existe;
+// um webhook perdido nunca deve dead-letterar.
+func TestUpsertERPInvoiceAuthoritativeAndBenignSkip(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+
+	// Com Order materializada: a NF é persistida em order_payments (1 row).
+	fx := seedPaidCart(t, 1, 0)
+	emitted := time.Now()
+	rows, err := testRepo.UpsertCartERPInvoice(ctx, UpsertCartERPInvoiceParams{
+		CartID:        fx.cartID,
+		InvoiceID:     "NF-777",
+		InvoiceKey:    "KEY-NF-777",
+		InvoiceStatus: "authorized",
+		EmittedAt:     &emitted,
+	})
+	if err != nil {
+		t.Fatalf("upsert invoice: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("esperava 1 row escrita em order_payments, veio %d", rows)
+	}
+	inv, err := testRepo.GetCartERPInvoice(ctx, fx.cartID)
+	if err != nil {
+		t.Fatalf("get invoice: %v", err)
+	}
+	if inv.InvoiceID != "NF-777" || inv.InvoiceStatus != "authorized" {
+		t.Fatalf("NF não ficou autoritativa em order_payments: %+v", inv)
+	}
+
+	// O CART não recebeu a NF (coluna erp_invoice_id segue vazia).
+	var cartInvID string
+	if err := testPool.QueryRow(ctx,
+		`SELECT COALESCE(erp_invoice_id,'') FROM carts WHERE id = $1`, fx.cartID).Scan(&cartInvID); err != nil {
+		t.Fatalf("lendo cart invoice: %v", err)
+	}
+	if cartInvID != "" {
+		t.Fatalf("NF vazou pro cart (erp_invoice_id=%q)", cartInvID)
+	}
+
+	// Sem Order para o cart: skip benigno — 0 rows, sem erro.
+	bare := seedPaidCart(t, 1, 0)
+	if _, err := testPool.Exec(ctx, `DELETE FROM orders WHERE cart_id = $1`, bare.cartID); err != nil {
+		t.Fatalf("removendo order pro caso sem-order: %v", err)
+	}
+	rows, err = testRepo.UpsertCartERPInvoice(ctx, UpsertCartERPInvoiceParams{
+		CartID:        bare.cartID,
+		InvoiceID:     "NF-000",
+		InvoiceStatus: "authorized",
+	})
+	if err != nil {
+		t.Fatalf("upsert sem order deveria ser skip benigno, veio erro: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("sem Order esperava 0 rows (skip benigno), veio %d", rows)
+	}
 }
 
 // ============================================================================
@@ -1471,11 +1614,14 @@ func TestRaceWaitlistPromotesWhenStockGenuinelyFree(t *testing.T) {
 	ctx := context.Background()
 	fx := seedPaidCart(t, 1, 0)
 	ext := extProductID(t, fx.productID)
-	// Cart A já finalizado (não arma guard) e estoque real devolvido.
+	// Cart A já finalizado (não arma guard) e estoque real devolvido. Fatia 11b:
+	// o status de finalização é autoritativo em order_payments (payment_status
+	// segue no cart).
 	if _, err := testPool.Exec(ctx,
-		`UPDATE carts SET erp_finalisation_status = 'done', payment_status = 'paid' WHERE id = $1`, fx.cartID); err != nil {
-		t.Fatalf("marcando A done: %v", err)
+		`UPDATE carts SET payment_status = 'paid' WHERE id = $1`, fx.cartID); err != nil {
+		t.Fatalf("marcando A paid: %v", err)
 	}
+	setOrderFinalisationStatus(t, fx.cartID, "done")
 	if _, err := testPool.Exec(ctx, `UPDATE products SET stock = 1 WHERE id = $1`, fx.productID); err != nil {
 		t.Fatalf("estoque: %v", err)
 	}
@@ -1503,10 +1649,8 @@ func TestRaceConcurrentWebhooksSinglePromotion(t *testing.T) {
 	ctx := context.Background()
 	fx := seedPaidCart(t, 1, 0)
 	ext := extProductID(t, fx.productID)
-	if _, err := testPool.Exec(ctx,
-		`UPDATE carts SET erp_finalisation_status = 'done' WHERE id = $1`, fx.cartID); err != nil {
-		t.Fatalf("done: %v", err)
-	}
+	// Fatia 11b: finalização autoritativa em order_payments.
+	setOrderFinalisationStatus(t, fx.cartID, "done")
 	if _, err := testPool.Exec(ctx, `UPDATE products SET stock = 1 WHERE id = $1`, fx.productID); err != nil {
 		t.Fatalf("estoque: %v", err)
 	}

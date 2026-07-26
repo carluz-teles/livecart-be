@@ -1428,11 +1428,13 @@ const hasInFlightFinalisationForProduct = `-- name: HasInFlightFinalisationForPr
 SELECT EXISTS(
     SELECT 1 FROM carts c
     JOIN cart_items ci ON ci.cart_id = c.id
+    LEFT JOIN orders o          ON o.cart_id  = c.id
+    LEFT JOIN order_payments op ON op.order_id = o.id
     WHERE ci.product_id = $1
       AND ((c.payment_status = 'paid'
-            AND c.erp_finalisation_status <> 'done'
+            AND COALESCE(op.erp_finalisation_status, 'pending') <> 'done'
             AND (c.paid_at > now() - interval '30 minutes'
-                 OR c.erp_last_attempt_at > now() - interval '30 minutes'))
+                 OR op.erp_last_attempt_at > now() - interval '30 minutes'))
            -- design C: ciclo de conversão/mutação em voo — adia a promoção
            OR (c.erp_order_state IN ('converting','mutating')
                AND c.erp_op_started_at > now() - interval '30 minutes'))
@@ -1443,6 +1445,9 @@ SELECT EXISTS(
 // com finalização ERP em andamento (ou falha recente, ainda retomável via
 // retry) contendo o produto. Enquanto verdadeiro, promoção disparada por
 // webhook de estoque é adiada — a DM de promoção é irreversível.
+// Fatia 11b: o estado de finalização é autoritativo em order_payments (join via
+// Order). COALESCE('pending') cobre o cart pago cuja Order ainda materializa. As
+// colunas de reserva (erp_order_state/erp_op_started_at) seguem no cart.
 func (q *Queries) HasInFlightFinalisationForProduct(ctx context.Context, productID pgtype.UUID) (bool, error) {
 	row := q.db.QueryRow(ctx, hasInFlightFinalisationForProduct, productID)
 	var in_flight bool

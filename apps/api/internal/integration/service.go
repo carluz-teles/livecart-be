@@ -4814,14 +4814,26 @@ func (s *Service) fetchAndPersistCartInvoice(ctx context.Context, storeID, cartI
 		return nil, fmt.Errorf("fetching NFe from ERP: %w", fetchErr)
 	}
 
-	if err := s.repo.UpsertCartERPInvoice(ctx, UpsertCartERPInvoiceParams{
+	// Fatia 11b: the NFe is written authoritatively to order_payments (resolved
+	// from cart_id). 0 rows = no Order for this cart yet — a benign skip (NF is
+	// always post-confirmation, so the Order should already exist; we log rather
+	// than error so a stray webhook never dead-letters).
+	rows, err := s.repo.UpsertCartERPInvoice(ctx, UpsertCartERPInvoiceParams{
 		CartID:        cartID,
 		InvoiceID:     invoice.InvoiceID,
 		InvoiceKey:    invoice.AccessKey,
 		InvoiceStatus: string(invoice.Status),
 		EmittedAt:     invoiceTimePtr(invoice.IssuedAt),
-	}); err != nil {
-		return nil, fmt.Errorf("persisting cart NFe: %w", err)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("persisting order NFe: %w", err)
+	}
+	if rows == 0 {
+		logger.From(ctx, s.logger).Warn("nota fiscal received for cart without a materialised order, skipping invoice persist",
+			zap.String("cart_id", cartID),
+			zap.String("external_order_id", cart.ExternalOrderID),
+			zap.String("invoice_id", invoice.InvoiceID),
+		)
 	}
 
 	// Mirror the chave on any existing shipment so the carrier provider can

@@ -67,6 +67,23 @@ func seedFrozenOrder(t *testing.T, serviceID string) (storeID, cartID string) {
 	if err := l.OnCartPaid(ctx, cartID, storeID, 10000, nil); err != nil {
 		t.Fatalf("seedFrozenOrder OnCartPaid: %v", err)
 	}
+
+	// Fatia 11b: a finalização/NF do ERP são autoritativas em order_payments,
+	// escritas pelos reactors — NÃO mais copiadas do cart pelo mirror. Simula o
+	// reactor gravando o estado terminal direto na fonte autoritativa, para o
+	// detalhe (que lê de order_payments) refletir. O seed de erp_* no cart acima
+	// segue lá de propósito: B1b prova que mutá-lo NÃO altera o detalhe.
+	if _, err := testPool.Exec(ctx, `
+		UPDATE order_payments op SET
+			erp_finalisation_status = 'done',
+			invoice_id              = 'INV-1',
+			invoice_key             = 'KEY-1',
+			invoice_status          = 'authorized'
+		FROM orders o
+		WHERE o.id = op.order_id AND o.cart_id = $1`, cartID,
+	); err != nil {
+		t.Fatalf("seedFrozenOrder order_payments ERP: %v", err)
+	}
 	return storeID, cartID
 }
 
