@@ -344,42 +344,6 @@ func TestDashboardRevenue_GetSessionStats_PaidRevenue(t *testing.T) {
 	}
 }
 
-// ─── Grupo A: GetWhatsAppRecoveryStats.revenue_recovered_cents ───────────────
-
-func TestDashboardRevenue_GetWhatsAppRecoveryStats(t *testing.T) {
-	requireDB(t)
-	ctx := context.Background()
-	seed := seedF4(t)
-
-	// Seed: notification de recuperação enviada 1h antes do pagamento
-	if _, err := testPool.Exec(ctx,
-		`INSERT INTO notification_logs
-		   (store_id, event_id, cart_id, platform_user_id, platform_handle,
-		    notification_type, channel, status, message_text, created_at)
-		 VALUES ($1, $2, $3, 'whatsapp-uid', '@f4paid',
-		   'cart_recovery', 'whatsapp', 'sent', 'Oi, retome seu carrinho',
-		   now() - interval '1 hour')`,
-		seed.storeID, seed.eventID, seed.paidCartID,
-	); err != nil {
-		t.Fatalf("seed notification_log: %v", err)
-	}
-
-	row, err := testQueries.GetWhatsAppRecoveryStats(ctx, parseUUID(t, seed.storeID))
-	if err != nil {
-		t.Fatalf("GetWhatsAppRecoveryStats: %v", err)
-	}
-
-	if row.CartsRecovered != 1 {
-		t.Errorf("GetWhatsAppRecoveryStats carts_recovered: want 1, got %d", row.CartsRecovered)
-	}
-
-	// Grupo A: revenue_recovered_cents lê de orders.total_cents
-	if row.RevenueRecoveredCents != seed.paidGMV {
-		t.Errorf("GetWhatsAppRecoveryStats revenue_recovered_cents: want %d (order total), got %d",
-			seed.paidGMV, row.RevenueRecoveredCents)
-	}
-}
-
 // ─── Grupo B: GetStats.total_revenue — correção do bug ───────────────────────
 
 func TestDashboardRevenue_GetStats_TotalRevenue(t *testing.T) {

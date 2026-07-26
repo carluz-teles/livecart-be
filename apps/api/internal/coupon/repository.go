@@ -230,15 +230,15 @@ func (r *Repository) Delete(ctx context.Context, id, eventID string) (bool, erro
 // and compute the discount. We deliberately fetch it inside the same tx as
 // the coupon lock so the cart's subtotal cannot drift between read and write.
 type CartCouponSnapshot struct {
-	CartID             string
-	EventID            string
-	StoreID            string
-	Status             string
-	PaymentStatus      string
-	SubtotalCents      int64
-	ShippingCostCents  int64
-	HasShippingPicked  bool
-	CouponID           *string // current applied coupon, if any
+	CartID            string
+	EventID           string
+	StoreID           string
+	Status            string
+	PaymentStatus     string
+	SubtotalCents     int64
+	ShippingCostCents int64
+	HasShippingPicked bool
+	CouponID          *string // current applied coupon, if any
 	// Min priceCents across the latest QuoteShipping snapshot for this cart,
 	// considering only options with available=true and priceCents>0. Drives
 	// free-shipping coupon math so the buyer can never game the discount by
@@ -581,61 +581,6 @@ func (r *Repository) GetCheapestQuotedShippingCents(ctx context.Context, cartID 
 		return 0, nil
 	}
 	return cents, err
-}
-
-// StaleRedemption is the projection the expirer worker scans — only the
-// IDs it needs to decrement and update.
-type StaleRedemption struct {
-	RedemptionID string
-	CouponID     string
-	CartID       string
-}
-
-// ListStaleReservedRedemptions returns reserved redemptions whose cart will
-// never be paid: cart is already 'expired'/'cancelled', payment failed/
-// cancelled, or expires_at slipped past with no payment. Cap per call so
-// one slow run doesn't lock up the worker.
-func (r *Repository) ListStaleReservedRedemptions(ctx context.Context, limit int) ([]StaleRedemption, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	const q = `
-		SELECT cr.id, cr.coupon_id, cr.cart_id
-		FROM coupon_redemptions cr
-		JOIN carts c ON c.id = cr.cart_id
-		WHERE cr.status = 'reserved'
-		  AND (
-		    c.status = 'expired'
-		    OR c.payment_status IN ('failed', 'cancelled', 'refunded')
-		    OR (
-		      c.expires_at IS NOT NULL
-		      AND c.expires_at < NOW()
-		      AND COALESCE(c.payment_status, 'pending') NOT IN ('paid', 'refunded')
-		    )
-		  )
-		LIMIT $1
-	`
-	rows, err := r.db.Query(ctx, q, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := make([]StaleRedemption, 0)
-	for rows.Next() {
-		var (
-			redID, couponID, cartID pgtype.UUID
-		)
-		if err := rows.Scan(&redID, &couponID, &cartID); err != nil {
-			return nil, err
-		}
-		out = append(out, StaleRedemption{
-			RedemptionID: uuid.UUID(redID.Bytes).String(),
-			CouponID:     uuid.UUID(couponID.Bytes).String(),
-			CartID:       uuid.UUID(cartID.Bytes).String(),
-		})
-	}
-	return out, rows.Err()
 }
 
 // MarkRedemptionExpiredTx flips a reserved redemption to 'expired' inside

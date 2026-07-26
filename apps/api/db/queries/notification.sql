@@ -142,28 +142,3 @@ SET status = $2,
 WHERE provider_message_id = $1
 RETURNING *;
 
--- name: GetWhatsAppRecoveryStats :one
--- PRD 006: last-30-days recovery funnel. A cart counts as recovered when it
--- was paid within 48h of the recovery message (same attribution window as
--- PRD 005).
--- Grupo A: revenue_recovered_cents reads from sealed orders (paid-only was already the intent).
-SELECT
-  COUNT(*) FILTER (WHERE nl.status IN ('sent', 'delivered', 'read'))::int AS messages_sent,
-  COUNT(*) FILTER (
-    WHERE c.payment_status = 'paid'
-      AND c.paid_at > nl.created_at
-      AND c.paid_at < nl.created_at + INTERVAL '48 hours'
-  )::int AS carts_recovered,
-  COALESCE(SUM(
-    CASE WHEN c.payment_status = 'paid'
-      AND c.paid_at > nl.created_at
-      AND c.paid_at < nl.created_at + INTERVAL '48 hours'
-    THEN o.total_cents
-    ELSE 0 END
-  ), 0)::bigint AS revenue_recovered_cents
-FROM notification_logs nl
-JOIN carts c ON c.id = nl.cart_id
-LEFT JOIN orders o ON o.cart_id = c.id AND o.status = 'paid'
-WHERE nl.store_id = $1
-  AND nl.notification_type = 'cart_recovery'
-  AND nl.created_at > NOW() - INTERVAL '30 days';

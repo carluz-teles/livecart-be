@@ -62,7 +62,6 @@ import (
 	"livecart/apps/api/internal/postcheckout"
 	"livecart/apps/api/internal/product"
 	"livecart/apps/api/internal/productgroup"
-	"livecart/apps/api/internal/recovery"
 	"livecart/apps/api/internal/store"
 	"livecart/apps/api/internal/telemetry"
 	"livecart/apps/api/internal/user"
@@ -841,49 +840,12 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		checkoutSvc.SetCouponLifecycle(couponLifecycle)
 	}
 
-	// Background sweep that returns reserved-redemption slots from carts that
-	// will never be paid (expired / cancelled / failed). Without this, the
-	// merchant's max_uses cap would creep upward across abandoned carts.
-	couponExpirer := coupon.NewRedemptionExpirerWorker(coupon.RedemptionExpirerWorkerConfig{
-		Service:  couponSvc,
-		Logger:   log,
-		Interval: 5 * time.Minute,
-		Limit:    200,
-	})
-	couponExpirer.Start()
-	lifecycle.add("coupon-expirer", couponExpirer.Stop)
-
-	// WhatsApp cart-recovery sweep (PRD 006): expired unpaid carts with phone
-	// + consent get a regenerated checkout link via the store's WhatsApp
-	// number. Only runs when the integration layer is up (Twilio credentials
-	// are checked per store at send time).
-	if integrationSvc != nil {
-		recoveryWorker := recovery.NewWorker(recovery.WorkerConfig{
-			Queries:      queries,
-			Orders:       orderSvc,
-			Integrations: integrationSvc,
-			Billing:      billingSvc,
-			Logger:       log,
-			Interval:     5 * time.Minute,
-			Limit:        100,
-		})
-		recoveryWorker.Start()
-		lifecycle.add("cart-recovery", recoveryWorker.Stop)
-
-		// Global cart-expiration sweep. The missing clock: expires carts whose
-		// payment window elapsed (incl. post-live 'checkout' carts that the old
-		// lazy path never reached), returning local stock + Tiny reservations
-		// and promoting the waitlist. Each cart is expired under a per-cart
-		// advisory lock so it never races the payment webhook.
-		cartExpiryWorker := integration.NewCartExpiryWorker(integration.CartExpiryWorkerConfig{
-			Service:  integrationSvc,
-			Logger:   log,
-			Interval: 5 * time.Minute,
-			Limit:    200,
-		})
-		cartExpiryWorker.Start()
-		lifecycle.add("cart-expiry", cartExpiryWorker.Stop)
-	}
+	// NOTE: the periodic sweep workers (coupon-expirer, cart-recovery,
+	// cart-expiry) were removed — cart expiration is now driven exclusively by
+	// the asynq ETA schedule (cart.expire, armed at cart.checkout_armed /
+	// cart.reopened → RunScheduledExpiry). Coupon-slot reclamation moved to the
+	// cart.expired / cart.cancelled reactors (couponSvc.ExpireRedemptionForCart).
+	// WhatsApp cart-recovery (PRD 006) was retired with its worker.
 
 	customerHandler := customer.NewHandler(customerSvc)
 	customerHandler.RegisterRoutes(storeScoped)
@@ -1090,6 +1052,13 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" {
 				return asynq.SkipRetry
 			}
+			// Return the cart's reserved coupon slot to circulation (replaces the
+			// removed coupon-expirer sweep). Idempotent; retried with the handler.
+			if err := couponSvc.ExpireRedemptionForCart(ctx, p.CartID); err != nil {
+				logger.From(ctx, log).Warn("cart.cancelled: coupon release failed",
+					zap.String("cart_id", p.CartID), zap.Error(err))
+				return err
+			}
 			if err := orderListener.OnCartCancelled(ctx, p.CartID, p.StoreID); err != nil {
 				if errors.Is(err, orderlisteners.ErrOrderNotMaterialised) {
 					// Unpaid cart cancelled → no Order was ever materialised. Expected.
@@ -1121,6 +1090,13 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				zap.String("event", string(env.Name)),
 				zap.String("event_id", env.EventID),
 			)
+			// Return the cart's reserved coupon slot to circulation (replaces the
+			// removed coupon-expirer sweep). Idempotent; retried with the handler.
+			if err := couponSvc.ExpireRedemptionForCart(ctx, p.CartID); err != nil {
+				logger.From(ctx, log).Warn("cart.expired: coupon release failed",
+					zap.String("cart_id", p.CartID), zap.Error(err))
+				return err
+			}
 			return integrationSvc.ReactCartExpiredERP(ctx, p.CartID, p.StoreID)
 		})
 

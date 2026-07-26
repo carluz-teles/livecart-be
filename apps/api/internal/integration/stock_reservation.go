@@ -22,8 +22,6 @@ const (
 	StockOpQtyIncrease     StockOp = "qty_increase"
 	StockOpQtyDecrease     StockOp = "qty_decrease"
 	StockOpWaitlistPromote StockOp = "waitlist_promote"
-	StockOpCartRecovery    StockOp = "cart_recovery"
-	StockOpRecoveryRelease StockOp = "recovery_release"
 	StockOpCartExpiry      StockOp = "cart_expiry"
 	StockOpCancelBlocked   StockOp = "cancel_blocked"
 	StockOpWaitlistCancel  StockOp = "waitlist_cancel"

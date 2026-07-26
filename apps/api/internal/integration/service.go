@@ -5173,8 +5173,9 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 
 	// A expiração de carrinhos deixou de ser lazy (por-comentário, por-produto):
 	// era cega a carts 'checkout' pós-live e corria com o webhook de pagamento
-	// sem lock. Agora um worker global (SweepExpiredCarts → ExpireCart) expira
-	// por-cart, com advisory lock, filtro de pago e devolução de TODOS os itens.
+	// sem lock. Agora a schedule asynq (cart.expire → RunScheduledExpiry →
+	// ExpireCart) expira por-cart, com advisory lock, filtro de pago e devolução
+	// de TODOS os itens.
 	// A promoção de waitlist do produto liberado passou a ser disparada pelo
 	// próprio worker; aqui não é mais necessário nada.
 
@@ -6636,22 +6637,6 @@ func (s *Service) getERPProvider(ctx context.Context, integration *IntegrationRo
 // LAZY EXPIRATION & WAITLIST PROCESSING
 // =============================================================================
 
-// SweepExpiredCarts is the entry point of the global expiration worker. It
-// pulls a batch of eligible expired carts (status active/checkout, unpaid, past
-// expires_at, no design-C op in flight) and expires each one. Runs independent
-// of comment traffic and of the event status — the missing clock that left
-// post-live 'checkout' carts (and their stock + Tiny reservations) stuck forever.
-func (s *Service) SweepExpiredCarts(ctx context.Context, limit int32) {
-	carts, err := s.repo.ListExpiredCarts(ctx, limit)
-	if err != nil {
-		logger.From(ctx, s.logger).Error("expiry sweep: failed to list expired carts", zap.Error(err))
-		return
-	}
-	for _, cart := range carts {
-		s.ExpireCart(ctx, cart.ID, cart.StoreID)
-	}
-}
-
 // ExpireCart expira UM carrinho, com segurança contra a corrida do pagamento.
 // Ordem (crítica):
 //  1. Advisory lock por cart — serializa contra o confirm/finalize do webhook
@@ -6811,76 +6796,9 @@ func (s *Service) reverseCartReservationsInERP(ctx context.Context, cartID, stor
 	}
 }
 
-// TryReSecureCartStock re-decrementa o estoque local de TODOS os itens
-// não-waitlisted de um cart, all-or-nothing. Retorna ok=false (revertendo os
-// itens já garantidos) quando o estoque de algum item não está mais disponível
-// — foi devolvido pela expiração e promovido a um cliente da waitlist (fila
-// vence). Usado pelo recovery worker ANTES de reabrir um cart expirado, para
-// evitar oversell: só reabre se o estoque puder ser re-garantido de fato.
-func (s *Service) TryReSecureCartStock(ctx context.Context, cartID string) (bool, error) {
-	items, err := s.repo.ListNonWaitlistedCartItems(ctx, cartID)
-	if err != nil {
-		return false, fmt.Errorf("listing items to re-secure: %w", err)
-	}
-
-	secured := make([]NonWaitlistedCartItem, 0, len(items))
-	rollback := func() {
-		for _, it := range secured {
-			if incErr := s.repo.IncrementProductStock(ctx, it.ProductID, it.Quantity); incErr != nil {
-				logger.From(ctx, s.logger).Error("recovery: failed to roll back re-secured stock",
-					zap.String("cart_id", cartID),
-					zap.String("product_id", it.ProductID),
-					zap.Error(incErr))
-			}
-		}
-	}
-
-	for _, it := range items {
-		// Provisional take: all-or-nothing, so stock.reserved is emitted only
-		// after the whole batch secures (below), never on the rollback paths.
-		ok, err := s.repo.TryDecrementProductStock(ctx, it.ProductID, it.Quantity)
-		if err != nil {
-			rollback()
-			return false, fmt.Errorf("re-securing stock: %w", err)
-		}
-		if !ok {
-			// Estoque promovido à waitlist — fila vence.
-			rollback()
-			return false, nil
-		}
-		secured = append(secured, it)
-	}
-
-	// Batch secured for good — emit stock.reserved per item.
-	for _, it := range secured {
-		s.stock.NoteReserved(ctx, ReserveParams{Op: StockOpCartRecovery, ProductID: it.ProductID, Quantity: it.Quantity, CartID: cartID})
-	}
-	return true, nil
-}
-
-// ReleaseCartStock devolve ao estoque local a quantidade não-waitlisted de
-// todos os itens de um cart. Contraparte de TryReSecureCartStock: usada para
-// compensar quando a reabertura (RegenerateCheckout) falha depois de o estoque
-// já ter sido re-garantido, evitando vazamento.
-func (s *Service) ReleaseCartStock(ctx context.Context, cartID string) {
-	items, err := s.repo.ListNonWaitlistedCartItems(ctx, cartID)
-	if err != nil {
-		logger.From(ctx, s.logger).Error("failed to list items to release cart stock", zap.String("cart_id", cartID), zap.Error(err))
-		return
-	}
-	for _, it := range items {
-		if err := s.stock.Release(ctx, ReleaseParams{Op: StockOpRecoveryRelease, ProductID: it.ProductID, Quantity: it.Quantity, CartID: cartID}); err != nil {
-			logger.From(ctx, s.logger).Error("failed to release cart stock",
-				zap.String("cart_id", cartID),
-				zap.String("product_id", it.ProductID),
-				zap.Error(err))
-		}
-	}
-}
-
 // ProcessExpiredCartsForProduct handles expired carts that contain the given product.
-// DEPRECATED: substituída pelo worker global (SweepExpiredCarts/ExpireCart). Não
-// é mais chamada em produção — o único caller remanescente é teste. Mantida
+// DEPRECATED: substituída pela expiração por-cart (schedule cart.expire → ExpireCart).
+// Não é mais chamada em produção — o único caller remanescente é teste. Mantida
 // temporariamente para não quebrar o teste de resume; não usar em código novo.
 func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, productID string) {
 	carts, err := s.repo.ListExpiredCartsByEventAndProduct(ctx, eventID, productID)

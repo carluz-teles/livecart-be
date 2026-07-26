@@ -384,29 +384,6 @@ FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1 AND ci.quantity > ci.waitlisted_quantity;
 
--- name: ListExpiredCarts :many
--- Varredura global do worker de expiração. Retorna carts vencidos elegíveis
--- para expirar, com store_id do evento. Diferente da versão antiga (que só
--- pegava 'active' e por isso deixava os carts pós-live em 'checkout' presos
--- para sempre), aqui:
---   * status IN ('active','checkout')  → inclui o pós-live (D1)
---   * payment_status nunca 'paid'/'refunded' → jamais expira uma venda (E2)
---   * exclui design C com ciclo de conversão/mutação em voo (não correr com o
---     sweep de ERP; o mesmo predicado de HasInFlightFinalisationForProduct)
--- NÃO filtra le.status: um evento 'ended' com carts vencidos precisa expirar.
-SELECT c.*, le.store_id
-FROM carts c
-JOIN live_events le ON le.id = c.event_id
-WHERE c.status IN ('active', 'checkout')
-  AND c.payment_status IS DISTINCT FROM 'paid'
-  AND c.payment_status IS DISTINCT FROM 'refunded'
-  AND c.expires_at IS NOT NULL
-  AND c.expires_at < now()
-  AND NOT (c.erp_order_state IN ('converting', 'mutating')
-           AND c.erp_op_started_at > now() - interval '30 minutes')
-ORDER BY c.expires_at ASC
-LIMIT $1;
-
 -- name: ListExpiredCartsByEventAndProduct :many
 -- Returns expired carts for a specific event that contain a specific product (with available qty)
 SELECT DISTINCT c.*, le.store_id
@@ -598,47 +575,6 @@ WHERE i.store_id = $1
   AND i.type = 'payment'
   AND i.status = 'active'
 ORDER BY i.priority ASC, i.created_at ASC;
-
--- name: ListCartsForWhatsAppRecovery :many
--- PRD 006: expired, unpaid carts with phone + consent whose store enabled
--- cart recovery and whose post-expiration delay has elapsed. One attempt per
--- cart (NOT EXISTS on notification_logs) and opted-out customers excluded.
--- The 7-day floor avoids resurrecting ancient carts when the feature ships.
-SELECT
-    c.id,
-    c.token,
-    le.id AS event_id,
-    le.store_id,
-    c.customer_name,
-    c.customer_phone,
-    COALESCE(SUM(ci.quantity), 0)::int AS total_items,
-    cart_product_total_cents(c.id)::bigint AS total_cents,
-    (COALESCE((s.notification_settings->'cart_recovery'->>'quiet_hours_start')::int, 21))::int AS quiet_hours_start,
-    (COALESCE((s.notification_settings->'cart_recovery'->>'quiet_hours_end')::int, 8))::int AS quiet_hours_end
-FROM carts c
-JOIN live_events le ON le.id = c.event_id
-JOIN stores s ON s.id = le.store_id
-LEFT JOIN cart_items ci ON ci.cart_id = c.id
-WHERE c.whatsapp_consent = TRUE
-  AND c.customer_phone IS NOT NULL
-  AND c.payment_status IS DISTINCT FROM 'paid'
-  AND c.expires_at IS NOT NULL
-  AND COALESCE((s.notification_settings->'cart_recovery'->>'enabled')::boolean, FALSE) = TRUE
-  AND c.expires_at < NOW() - (COALESCE((s.notification_settings->'cart_recovery'->>'delay_minutes')::int, 30) * INTERVAL '1 minute')
-  AND c.expires_at > NOW() - INTERVAL '7 days'
-  AND NOT EXISTS (
-    SELECT 1 FROM notification_logs nl
-    WHERE nl.cart_id = c.id AND nl.notification_type = 'cart_recovery'
-  )
-  AND NOT EXISTS (
-    SELECT 1 FROM customers cu
-    WHERE cu.store_id = le.store_id
-      AND cu.phone = c.customer_phone
-      AND cu.whatsapp_opted_out = TRUE
-  )
-GROUP BY c.id, c.token, le.id, le.store_id, c.customer_name, c.customer_phone, c.expires_at, s.notification_settings
-ORDER BY c.expires_at ASC
-LIMIT $1;
 
 -- name: HasInFlightFinalisationForProduct :one
 -- Defesa em profundidade do backstop de waitlist: TRUE se existe cart pago

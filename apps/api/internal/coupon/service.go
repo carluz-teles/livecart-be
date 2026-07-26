@@ -16,7 +16,6 @@ import (
 	"livecart/apps/api/internal/coupon/domain"
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/lib/httpx"
-	"livecart/apps/api/lib/logger"
 )
 
 type Service struct {
@@ -534,68 +533,6 @@ func (s *Service) removeAppliedCouponByCartID(ctx context.Context, cartID string
 	return tx.Commit(ctx)
 }
 
-// ExpireStaleReservedRedemptions sweeps reserved redemptions on carts that
-// will never be paid (expired / failed / cancelled) and returns each slot to
-// circulation. Each row gets its own tx so a single bad coupon can't block
-// the whole batch. Returns counts of expired and skipped (rows whose
-// redemption row had already moved to a terminal state between the SELECT
-// and the UPDATE — a benign race with the public-cart remove flow).
-func (s *Service) ExpireStaleReservedRedemptions(ctx context.Context, limit int) (expired, skipped int, err error) {
-	stale, err := s.repo.ListStaleReservedRedemptions(ctx, limit)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	for _, row := range stale {
-		ok, err := s.expireOne(ctx, row)
-		if err != nil {
-			logger.From(ctx, s.logger).Warn("failed to expire reserved redemption",
-				zap.String("redemption_id", row.RedemptionID),
-				zap.String("coupon_id", row.CouponID),
-				zap.String("cart_id", row.CartID),
-				zap.Error(err),
-			)
-			continue
-		}
-		if ok {
-			expired++
-		} else {
-			skipped++
-		}
-	}
-	return expired, skipped, nil
-}
-
-// expireOne wraps a single row in its own tx + lock. Returns true on a
-// successful flip, false when the redemption was already in a terminal
-// state by the time we acquired the lock.
-func (s *Service) expireOne(ctx context.Context, row StaleRow) (bool, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return false, fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	if _, err := s.repo.LockCouponByIDTx(ctx, tx, row.CouponID); err != nil {
-		return false, err
-	}
-	if err := s.repo.MarkRedemptionExpiredTx(ctx, tx, row.RedemptionID); err != nil {
-		return false, err
-	}
-	if err := s.repo.DecrementUsedCountTx(ctx, tx, row.CouponID); err != nil {
-		return false, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit: %w", err)
-	}
-
-	return true, nil
-}
-
-// StaleRow is re-exported from the repository for the worker — keeps the
-// worker package free of the repo type.
-type StaleRow = StaleRedemption
-
 // =============================================================================
 // REDEMPTION LIFECYCLE — called from the payment webhook.
 // =============================================================================
@@ -673,6 +610,42 @@ func (s *Service) RefundRedemption(ctx context.Context, cartID string) error {
 		}{RedemptionID: r.ID, CouponID: r.CouponID, CartID: cartID})
 
 	return nil
+}
+
+// ExpireRedemptionForCart returns a single cart's RESERVED coupon slot to
+// circulation when the cart will never be paid (expired / cancelled). Per-cart
+// replacement for the removed ExpireStaleReservedRedemptions sweep: the
+// cart.expired and cart.cancelled reactors call this. No-op unless the
+// redemption is still 'reserved' (paid → confirmed, refunded → refunded), so it
+// is idempotent under asynq at-least-once redelivery. Mirrors RefundRedemption
+// but marks the redemption 'expired' instead of 'refunded'.
+func (s *Service) ExpireRedemptionForCart(ctx context.Context, cartID string) error {
+	r, err := s.repo.LoadRedemptionByCart(ctx, cartID)
+	if err != nil {
+		return err
+	}
+	if r == nil || r.Status != "reserved" {
+		return nil
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Re-read under the coupon lock guards a TOCTOU with the public-cart remove
+	// / payment-confirm flows between the load and the flip.
+	if _, err := s.repo.LockCouponByIDTx(ctx, tx, r.CouponID); err != nil {
+		return err
+	}
+	if err := s.repo.MarkRedemptionExpiredTx(ctx, tx, r.ID); err != nil {
+		return err
+	}
+	if err := s.repo.DecrementUsedCountTx(ctx, tx, r.CouponID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // computeAppliedDiscount returns the absolute discount in cents for the

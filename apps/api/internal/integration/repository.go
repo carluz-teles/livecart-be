@@ -1962,31 +1962,6 @@ func (r *Repository) UpdateCartStatus(ctx context.Context, cartID, status string
 	return nil
 }
 
-// ExpiredCartToProcess is a cart eligible for expiration returned by the global
-// sweep (ListExpiredCarts), with the store_id resolved from the event.
-type ExpiredCartToProcess struct {
-	ID      string
-	StoreID string
-}
-
-// ListExpiredCarts returns carts eligible for the global expiration worker:
-// status IN ('active','checkout') (inclui o pós-live), nunca pago/estornado,
-// past expires_at, e sem design C em voo. Ver db/queries/cart.sql.
-func (r *Repository) ListExpiredCarts(ctx context.Context, limit int32) ([]ExpiredCartToProcess, error) {
-	rows, err := r.queries.ListExpiredCarts(ctx, limit)
-	if err != nil {
-		return nil, fmt.Errorf("listing expired carts: %w", err)
-	}
-	out := make([]ExpiredCartToProcess, len(rows))
-	for i, row := range rows {
-		out[i] = ExpiredCartToProcess{
-			ID:      uuidToString(row.ID),
-			StoreID: uuidToString(row.StoreID),
-		}
-	}
-	return out, nil
-}
-
 // ExpireCartResult is the outcome of the atomic flip+local-release transaction.
 type ExpireCartResult struct {
 	// Eligible=false quando o guard do UPDATE devolveu 0 rows (o cart foi pago
@@ -2002,7 +1977,7 @@ type ExpireCartResult struct {
 // do cart para 'expired' (ExpireCart — recusa cart pago/já-terminal) e, só se
 // ele ganhou, (2) devolve ao estoque local a quantidade não-waitlisted de TODOS
 // os itens do cart. Atomicidade é a garantia anti-dupla-devolução: uma vez
-// commitado, o cart sai de ListExpiredCarts e um retry pós-crash não redevolve;
+// commitado, o cart deixa de ser elegível (guard-first) e um retry pós-crash não redevolve;
 // um crash antes do commit reverte tudo (o cart segue elegível, sem vazamento).
 // As ações de ERP (best-effort, remotas) ficam FORA deste tx, no Service.
 func (r *Repository) ExpireCartAndReleaseStock(ctx context.Context, cartID, storeID string) (ExpireCartResult, error) {
