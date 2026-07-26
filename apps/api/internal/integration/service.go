@@ -7077,6 +7077,53 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		return // fila vazia
 	}
 
+	// Serializa esta promoção contra a expiração do PRÓPRIO cart-alvo. Cada cart
+	// carrega uma task asynq cart.expire armada no finalize; sem este lock, a
+	// expiração do waitlister pode virar o cart 'expired' ENQUANTO promovemos
+	// nele — deixando um cart notified+expired segurando estoque vazado. É o
+	// mesmo try-lock que ExpireCart respeita (ele PULA quando não consegue
+	// adquirir), então segurá-lo aqui faz a expiração concorrente se abster.
+	// Nota: mantido via defer até o fim — segura uma conexão do pool através do
+	// ERP/DM abaixo; aceitável pela raridade da promoção (otimização futura:
+	// soltar logo após ExtendCartExpiration).
+	release, acquired, lockErr := s.repo.AcquireCartFinalisationLock(ctx, next.CartID)
+	if lockErr != nil {
+		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
+		logger.From(ctx, s.logger).Warn("waitlist promote: failed to acquire cart lock",
+			zap.String("cart_id", next.CartID), zap.Error(lockErr))
+		return
+	}
+	if !acquired {
+		// O cart está finalizando (a expiração dele venceu a corrida). Não
+		// promover num cart morrendo — cancela esta reivindicação para a unidade
+		// liberada voltar ao estoque geral e a fila não travar na cabeça.
+		if cancelErr := s.repo.CancelWaitlistItem(ctx, next.ID, next.CartID); cancelErr != nil {
+			logger.From(ctx, s.logger).Warn("waitlist promote: failed to cancel claim on finalising cart",
+				zap.String("waitlist_item_id", next.ID), zap.Error(cancelErr))
+		}
+		logger.From(ctx, s.logger).Info("waitlist promote skipped: target cart is finalising",
+			zap.String("cart_id", next.CartID), zap.String("waitlist_item_id", next.ID))
+		return
+	}
+	defer release()
+
+	// Sob o lock, relê o cart: se a expiração dele commitou logo antes de
+	// pegarmos o lock, o cart está terminal — não promover nele.
+	if snap, snapErr := s.repo.GetCartExpirySnapshot(ctx, next.CartID); snapErr != nil {
+		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
+		logger.From(ctx, s.logger).Warn("waitlist promote: failed to read cart snapshot",
+			zap.String("cart_id", next.CartID), zap.Error(snapErr))
+		return
+	} else if snap == nil || cartExpiryTerminal(snap) {
+		if cancelErr := s.repo.CancelWaitlistItem(ctx, next.ID, next.CartID); cancelErr != nil {
+			logger.From(ctx, s.logger).Warn("waitlist promote: failed to cancel claim on terminal cart",
+				zap.String("waitlist_item_id", next.ID), zap.Error(cancelErr))
+		}
+		logger.From(ctx, s.logger).Info("waitlist promote skipped: target cart already terminal",
+			zap.String("cart_id", next.CartID))
+		return
+	}
+
 	// Gate de estoque com promoção PARCIAL: toma ATÉ a quantidade pedida. Uma
 	// unidade livre atende parte de um pedido de N na fila — o cliente recebe
 	// o que houver e continua esperando o restante. Sem unidade nenhuma,
@@ -7198,6 +7245,16 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 			zap.String("cart_id", cartID),
 			zap.Error(extendErr),
 		)
+	}
+
+	// Re-arma a task asynq cart.expire para a NOVA janela estendida. A task
+	// original (armada no finalize) já disparou — ou expirou o cart, ou pulou
+	// por causa do lock acima — então, sem o sweep, nada mais expiraria este
+	// cart quando o prazo estendido vencer. ScheduleExpiry lê o expires_at atual
+	// (já estendido) e agenda no horário novo. Best-effort + idempotente.
+	if armErr := s.ScheduleExpiry(ctx, cartID); armErr != nil {
+		logger.From(ctx, s.logger).Warn("failed to re-arm expiry for promoted cart",
+			zap.String("cart_id", cartID), zap.Error(armErr))
 	}
 
 	// ERP saída — reserva pareada às `taken` unidades recém-liberadas para o
