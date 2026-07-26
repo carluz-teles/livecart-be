@@ -201,7 +201,7 @@ func (w *TrackingPoller) pollShipment(ctx context.Context, providerName provider
 			Provider     string `json:"provider"`
 			Status       string `json:"status"`
 			TrackingCode string `json:"tracking_code"`
-		}{StoreID: sh.StoreID, ShipmentID: sh.ID, OrderID: sh.OrderID, Provider: string(providerName), Status: currentStatus, TrackingCode: sh.TrackingCode})
+		}{StoreID: sh.StoreID, ShipmentID: sh.ID, OrderID: sh.CartID, Provider: string(providerName), Status: currentStatus, TrackingCode: sh.TrackingCode})
 	}
 
 	// Fire the delivered hook when the carrier reports terminal delivery.
@@ -216,7 +216,7 @@ func (w *TrackingPoller) pollShipment(ctx context.Context, providerName provider
 			OrderID      string `json:"order_id"`
 			Provider     string `json:"provider"`
 			TrackingCode string `json:"tracking_code"`
-		}{StoreID: sh.StoreID, ShipmentID: sh.ID, OrderID: sh.OrderID, Provider: string(providerName), TrackingCode: sh.TrackingCode})
-		w.service.postCheckoutHook.OnDelivered(ctx, sh.OrderID, "system")
+		}{StoreID: sh.StoreID, ShipmentID: sh.ID, OrderID: sh.CartID, Provider: string(providerName), TrackingCode: sh.TrackingCode})
+		w.service.postCheckoutHook.OnDelivered(ctx, sh.CartID, "system")
 	}
 }

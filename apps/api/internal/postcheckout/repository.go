@@ -265,7 +265,7 @@ func (r *Repository) GetShipmentSummary(ctx context.Context, runner SQLRunner, c
 		return nil, fmt.Errorf("parsing cart id: %w", err)
 	}
 	row := runner.QueryRow(ctx,
-		`SELECT tracking_code FROM shipments WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`,
+		`SELECT tracking_code FROM shipments WHERE cart_id = $1 ORDER BY created_at DESC LIMIT 1`,
 		uid,
 	)
 	var tracking pgtype.Text

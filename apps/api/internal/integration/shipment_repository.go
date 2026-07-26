@@ -26,8 +26,11 @@ import (
 
 // ShipmentRow mirrors the `shipments` table.
 type ShipmentRow struct {
-	ID                  string
-	OrderID             string
+	ID string
+	// CartID is the source cart id (shipments.cart_id, FK to carts(id) —
+	// migration 000052, renamed from the misleading `order_id` in 000098). It is
+	// NOT the Order identity; that lives in orders_order_id (migration 000097).
+	CartID              string
 	StoreID             string
 	Provider            string
 	ProviderOrderID     string
@@ -89,9 +92,9 @@ func (r *Repository) CreateShipment(ctx context.Context, p CreateShipmentParams)
 		return nil, httpx.ErrBadRequest("invalid store id")
 	}
 
-	// p.OrderID carries the CART id (legacy `order_id` column, migration 000052).
-	// Resolve the real order id (orders.id) so we can populate the correct FK
-	// `orders_order_id`. Best-effort: a cart that hasn't materialised an Order
+	// p.OrderID carries the CART id (persisted to shipments.cart_id, migration
+	// 000052/000098). Resolve the real order id (orders.id) so we can populate the
+	// correct FK `orders_order_id`. Best-effort: a cart that hasn't materialised an Order
 	// yet (shouldn't happen post-payment) leaves orders_order_id NULL rather than
 	// failing shipment creation. Reuses the canonical sqlc GetOrderIDByCartID.
 	var ordersOrderID pgtype.UUID
@@ -112,7 +115,7 @@ func (r *Repository) CreateShipment(ctx context.Context, p CreateShipmentParams)
 
 	const q = `
 		INSERT INTO shipments (
-			order_id, orders_order_id, store_id, provider, provider_order_id, provider_order_number,
+			cart_id, orders_order_id, store_id, provider, provider_order_id, provider_order_number,
 			tracking_code, invoice_key, invoice_kind, invoice_id,
 			status, status_raw_code, status_raw_name, provider_meta
 		) VALUES (
@@ -160,7 +163,7 @@ func (r *Repository) GetShipmentByOrderID(ctx context.Context, orderID string) (
 	if err != nil {
 		return nil, httpx.ErrBadRequest("invalid order id")
 	}
-	const q = `SELECT ` + shipmentColumns + ` FROM shipments WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`
+	const q = `SELECT ` + shipmentColumns + ` FROM shipments WHERE cart_id = $1 ORDER BY created_at DESC LIMIT 1`
 	row := r.pool.QueryRow(ctx, q, pgtype.UUID{Bytes: uid, Valid: true})
 	sh, err := scanShipmentRow(row)
 	if err != nil {
@@ -405,7 +408,7 @@ func (r *Repository) ListTrackingEvents(ctx context.Context, shipmentID string) 
 // =============================================================================
 
 const shipmentColumns = `
-	id::text, order_id::text, store_id::text,
+	id::text, cart_id::text, store_id::text,
 	provider, provider_order_id,
 	COALESCE(provider_order_number, ''),
 	COALESCE(tracking_code, ''),
@@ -424,7 +427,7 @@ const shipmentColumns = `
 func scanShipmentRow(row pgx.Row) (*ShipmentRow, error) {
 	var s ShipmentRow
 	if err := row.Scan(
-		&s.ID, &s.OrderID, &s.StoreID,
+		&s.ID, &s.CartID, &s.StoreID,
 		&s.Provider, &s.ProviderOrderID,
 		&s.ProviderOrderNumber,
 		&s.TrackingCode,
