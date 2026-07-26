@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -1019,7 +1020,44 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" || p.StoreID == "" {
 				return asynq.SkipRetry
 			}
+			// Order state (Fatia E1): flip the immutable Order + its payment row to
+			// 'refunded'. Idempotent; runs first so the authoritative order state is
+			// consistent before the customer-facing fan-out. A missing Order (cart.paid
+			// materialisation still in flight) returns an error → asynq retries.
+			if err := orderListener.OnCartRefunded(ctx, p.CartID, p.StoreID); err != nil {
+				return err
+			}
 			return integrationSvc.ReactCartRefunded(ctx, p.CartID, p.StoreID)
+		})
+
+		// cart.cancelled reactor (Fatia E1): flip the Order to 'cancelled'. Two
+		// producers (payment-cancel webhook + blocked-handle cancel); the latter's
+		// payload has no store_id, so store_id is optional here. Registered in the
+		// composition root (NOT the default logEvent registry) — double registration
+		// would panic asynq. Unpaid carts have no Order → ErrOrderNotMaterialised is
+		// swallowed as a benign skip (the payment-cancel email stays inline in the
+		// producer). The blocked-handle producer's SkipRetry-on-empty-store guard is
+		// relaxed since that fact legitimately omits store_id.
+		eventsServer.Register(events.CartCancelled, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				CartID  string `json:"cart_id"`
+				StoreID string `json:"store_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" {
+				return asynq.SkipRetry
+			}
+			if err := orderListener.OnCartCancelled(ctx, p.CartID, p.StoreID); err != nil {
+				if errors.Is(err, orderlisteners.ErrOrderNotMaterialised) {
+					// Unpaid cart cancelled → no Order was ever materialised. Expected.
+					return nil
+				}
+				return err
+			}
+			return nil
 		})
 
 		// cart.expired reactor: reverse the cart's ERP footprint (Tiny cancel /
