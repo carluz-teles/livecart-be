@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/lib/logger"
 )
 
@@ -177,6 +178,22 @@ func (l *Listener) createPaidOrder(
 
 	if err := qtx.InsertOrderLogistics(ctx, logParams); err != nil {
 		return fmt.Errorf("order OnCartPaid: insert order_logistics: %w", err)
+	}
+
+	// Fatia 11a: emit the canonical order.paid bus fact in the SAME tx as the
+	// materialisation (via the outbox) → exactly-once, never lost between commit
+	// and enqueue. No consumer yet — 11b wires the ERP finalisation reactor onto
+	// it. Dedup by order_id so an at-least-once redelivery of cart.paid collapses.
+	orderID := uuidStr(orderRow.ID)
+	orderPaid := struct {
+		OrderID         string          `json:"order_id"`
+		CartID          string          `json:"cart_id"`
+		StoreID         string          `json:"store_id"`
+		GMVCents        int64           `json:"gmv_cents"`
+		PaymentSnapshot json.RawMessage `json:"payment_snapshot,omitempty"`
+	}{orderID, uuidStr(cid), uuidStr(storeUUID), gmvCents, paymentSnapshot}
+	if err := events.EmitInternal(ctx, qtx, events.OrderPaid, "order.paid:"+orderID, orderPaid); err != nil {
+		return fmt.Errorf("order OnCartPaid: emit order.paid: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

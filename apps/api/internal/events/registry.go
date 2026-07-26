@@ -46,6 +46,16 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	// the bus; the old funnel/telemetry facts were deprecated.
 	mux.HandleFunc(string(PaymentFailed), logEvent(log))
 
+	// Group O — Order post-payment facts (order.paid / order.refunded), emitted by
+	// the Order domain (Fatia 11a). Observability-only no-op for now so asynq does
+	// NOT report "handler not found" and dead-letter the task (an emitted event
+	// with no registered handler fails). Fatia 11b registers the real ERP reactors
+	// from the composition root (main.newApp) — which would panic asynq on a
+	// duplicate pattern, so these two no-ops MUST be removed there, mirroring how
+	// cart.paid/cart.refunded are wired only in main.newApp.
+	mux.HandleFunc(string(OrderPaid), logEvent(log))
+	mux.HandleFunc(string(OrderRefunded), logEvent(log))
+
 	// Group J — billing/subscription facts. Observability-only for now;
 	// TrialEndingSoon is NOT here — it is a scheduled command registered by the
 	// composition root (main.newApp) with a domain handler.

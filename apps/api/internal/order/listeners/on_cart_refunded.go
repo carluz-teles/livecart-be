@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/events"
 	"livecart/apps/api/lib/logger"
 )
 
@@ -102,6 +103,23 @@ func (l *Listener) applyTerminalStatus(ctx context.Context, cartID, storeID, tar
 		PaymentStatus: target,
 	}); err != nil {
 		return fmt.Errorf("order applyTerminalStatus: update order_payments.payment_status: %w", err)
+	}
+
+	// Fatia 11a: emit the canonical order.refunded bus fact in the SAME tx as the
+	// flip (via the outbox) → exactly-once. Only for the refunded transition —
+	// there is no order.cancelled bus fact in scope (this method is shared with
+	// OnCartCancelled). No consumer yet; 11b wires the ERP refund reactor. Dedup
+	// by order_id collapses an at-least-once redelivery of cart.refunded.
+	if target == orderStatusRefunded {
+		orderID := uuidStr(row.ID)
+		orderRefunded := struct {
+			OrderID string `json:"order_id"`
+			CartID  string `json:"cart_id"`
+			StoreID string `json:"store_id"`
+		}{orderID, cartID, storeID}
+		if err := events.EmitInternal(ctx, qtx, events.OrderRefunded, "order.refunded:"+orderID, orderRefunded); err != nil {
+			return fmt.Errorf("order applyTerminalStatus: emit order.refunded: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
