@@ -8,8 +8,9 @@ SELECT id FROM orders WHERE cart_id = $1;
 -- name: InsertOrder :one
 INSERT INTO orders (
     cart_id, short_id, store_id, event_id, customer_id, status,
-    total_cents, discount_cents, shipping_cents, paid_total_cents, paid_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    total_cents, discount_cents, shipping_cents, paid_total_cents, paid_at,
+    customer_snapshot
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 RETURNING *;
 
 -- name: InsertOrderItem :exec
@@ -24,10 +25,10 @@ INSERT INTO order_payments (
 
 -- name: InsertOrderLogistics :exec
 INSERT INTO order_logistics (
-    order_id, shipping_address, shipping_service_id, shipping_service_name,
-    shipping_carrier, shipping_cost_cents, shipping_cost_real_cents,
-    shipping_deadline_days, tracking_token
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+    order_id, shipping_address, shipping_provider, shipping_service_id,
+    shipping_service_name, shipping_carrier, shipping_cost_cents,
+    shipping_cost_real_cents, shipping_deadline_days, tracking_token
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
 
 -- name: GetCartItemsForOrderMaterialization :many
 -- Retorna os itens do cart com o nome do produto denormalizado (snapshot).

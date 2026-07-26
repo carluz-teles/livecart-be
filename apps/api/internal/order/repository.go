@@ -182,6 +182,13 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 }
 
 func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, error) {
+	// Fatia B1: detalhe do pedido lido do agregado Order (imutável), não mais de
+	// carts.*. customer_* vêm de orders.customer_snapshot, shipping_* de
+	// order_logistics, erp_*/payment_status de order_payments, status/paid_at de
+	// orders. LEFT JOIN + COALESCE dá fallback seguro para carts antigos que
+	// nunca viraram Order (order_* ausente → defaults vazios). Os campos de
+	// identidade do carrinho (short_id, token, platform_*, created_at,
+	// expires_at) e o is_first_purchase permanecem na fonte carts.
 	query := `
 		SELECT
 			c.id,
@@ -190,9 +197,9 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 			c.platform_user_id,
 			c.platform_handle,
 			c.token,
-			c.status,
-			c.payment_status,
-			c.paid_at,
+			COALESCE(o.status, c.status),
+			COALESCE(op.payment_status, c.payment_status),
+			COALESCE(o.paid_at, c.paid_at),
 			c.created_at,
 			c.expires_at,
 			COALESCE(e.title, '') as live_title,
@@ -219,20 +226,20 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 				)
 			) as is_first_purchase,
 
-			COALESCE(c.customer_email, ''),
-			COALESCE(c.customer_name, ''),
-			COALESCE(c.customer_document, ''),
-			COALESCE(c.customer_phone, ''),
+			COALESCE(o.customer_snapshot->>'email', ''),
+			COALESCE(o.customer_snapshot->>'name', ''),
+			COALESCE(o.customer_snapshot->>'document', ''),
+			COALESCE(o.customer_snapshot->>'phone', ''),
 
-			c.shipping_address,
+			ol.shipping_address,
 
-			COALESCE(c.shipping_provider, ''),
-			COALESCE(c.shipping_service_id, ''),
-			COALESCE(c.shipping_service_name, ''),
-			COALESCE(c.shipping_carrier, ''),
-			COALESCE(c.shipping_cost_cents, 0),
-			COALESCE(c.shipping_cost_real_cents, 0),
-			COALESCE(c.shipping_deadline_days, 0),
+			COALESCE(ol.shipping_provider, ''),
+			COALESCE(ol.shipping_service_id, ''),
+			COALESCE(ol.shipping_service_name, ''),
+			COALESCE(ol.shipping_carrier, ''),
+			COALESCE(ol.shipping_cost_cents, 0),
+			COALESCE(ol.shipping_cost_real_cents, 0),
+			COALESCE(ol.shipping_deadline_days, 0),
 			COALESCE(e.free_shipping, false),
 
 			s.name,
@@ -250,18 +257,21 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 			COALESCE(s.default_package_weight_grams, 0),
 			COALESCE(s.default_package_format, 'box'),
 
-			c.erp_finalisation_status,
-			COALESCE(c.erp_last_error, ''),
-			c.erp_last_attempt_at,
-			c.erp_attempts_count,
+			COALESCE(op.erp_finalisation_status, ''),
+			COALESCE(op.erp_last_error, ''),
+			op.erp_last_attempt_at,
+			COALESCE(op.erp_attempts_count, 0),
 
-			COALESCE(c.erp_invoice_id, ''),
-			COALESCE(c.erp_invoice_key, ''),
-			COALESCE(c.erp_invoice_status, ''),
-			c.erp_invoice_emitted_at
+			COALESCE(op.invoice_id, ''),
+			COALESCE(op.invoice_key, ''),
+			COALESCE(op.invoice_status, ''),
+			op.invoice_emitted_at
 		FROM carts c
 		JOIN live_events e ON e.id = c.event_id
 		JOIN stores s      ON s.id = e.store_id
+		LEFT JOIN orders o          ON o.cart_id  = c.id
+		LEFT JOIN order_payments op ON op.order_id = o.id
+		LEFT JOIN order_logistics ol ON ol.order_id = o.id
 		WHERE c.id = $1
 	`
 
@@ -362,15 +372,20 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 }
 
 func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRow, error) {
+	// Fatia B1: itens do detalhe vêm de order_items (snapshot imutável). O nome
+	// do produto é o congelado em order_items.product_name — não o vivo de
+	// products (que pode ter sido renomeado). Imagem/keyword/dimensões seguem de
+	// products, pois são dados de apresentação/frete, não valores congelados.
+	// cartID é o identificador público; resolve-se order_id via orders.cart_id.
 	query := `
 		SELECT
-			ci.id,
-			ci.cart_id,
-			ci.product_id,
+			oi.id,
+			o.cart_id,
+			oi.product_id,
 			NULL::TEXT as size,
-			ci.quantity,
-			COALESCE(ci.unit_price, 0)::BIGINT as unit_price,
-			p.name as product_name,
+			oi.quantity,
+			COALESCE(oi.unit_price, 0)::BIGINT as unit_price,
+			oi.product_name,
 			p.image_url as product_image,
 			p.keyword as product_keyword,
 			COALESCE(p.weight_grams, 0),
@@ -378,9 +393,10 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			COALESCE(p.width_cm, 0),
 			COALESCE(p.length_cm, 0),
 			COALESCE(p.package_format, 'box')
-		FROM cart_items ci
-		JOIN products p ON p.id = ci.product_id
-		WHERE ci.cart_id = $1
+		FROM order_items oi
+		JOIN orders o   ON o.id = oi.order_id
+		JOIN products p ON p.id = oi.product_id
+		WHERE o.cart_id = $1
 	`
 
 	rows, err := r.db.Query(ctx, query, cartID)
@@ -451,8 +467,8 @@ func (r *Repository) GetItemsPreviewByCartIDs(ctx context.Context, cartIDs []str
 
 	for rows.Next() {
 		var (
-			cartID  string
-			row     OrderItemPreviewRow
+			cartID string
+			row    OrderItemPreviewRow
 		)
 		if err := rows.Scan(&cartID, &row.ProductName, &row.ProductImage, &row.Quantity); err != nil {
 			return nil, fmt.Errorf("scanning item preview: %w", err)
@@ -462,9 +478,11 @@ func (r *Repository) GetItemsPreviewByCartIDs(ctx context.Context, cartIDs []str
 	return out, rows.Err()
 }
 
-// UpdateShippingAddress overwrites the cart's shipping_address JSONB. The
-// caller is responsible for the upstream invariants (cannot edit after
-// shipment exists, cannot edit a paid order); this is a thin write.
+// UpdateShippingAddress overwrites the order's shipping_address JSONB on
+// order_logistics (Fatia B1 — antes era carts). The caller is responsible for
+// the upstream invariants (cannot edit after shipment exists, cannot edit a
+// paid order); this is a thin write. `id` is the public cart id; the row is
+// resolved via orders.cart_id. No-op (0 rows) for carts without an Order.
 func (r *Repository) UpdateShippingAddress(ctx context.Context, id string, address map[string]string) error {
 	uid, err := uuid.Parse(id)
 	if err != nil {
@@ -474,7 +492,12 @@ func (r *Repository) UpdateShippingAddress(ctx context.Context, id string, addre
 	if err != nil {
 		return fmt.Errorf("encoding shipping address: %w", err)
 	}
-	const q = `UPDATE carts SET shipping_address = $2 WHERE id = $1`
+	const q = `
+		UPDATE order_logistics ol
+		SET shipping_address = $2
+		FROM orders o
+		WHERE ol.order_id = o.id AND o.cart_id = $1
+	`
 	if _, err := r.db.Exec(ctx, q, pgtype.UUID{Bytes: uid, Valid: true}, payload); err != nil {
 		return fmt.Errorf("updating shipping address: %w", err)
 	}
@@ -525,8 +548,11 @@ func (r *Repository) GetStoreCartExpirationMinutes(ctx context.Context, storeID 
 	return minutes
 }
 
+// UpdateStatus writes the order lifecycle status to orders.status (Fatia B1 —
+// antes era carts.status). `id` is the public cart id; resolved via
+// orders.cart_id. No-op (0 rows) for carts without an Order.
 func (r *Repository) UpdateStatus(ctx context.Context, id string, status string) error {
-	query := `UPDATE carts SET status = $2 WHERE id = $1`
+	query := `UPDATE orders SET status = $2, updated_at = now() WHERE cart_id = $1`
 	_, err := r.db.Exec(ctx, query, id, status)
 	if err != nil {
 		return fmt.Errorf("updating order status: %w", err)
@@ -534,15 +560,40 @@ func (r *Repository) UpdateStatus(ctx context.Context, id string, status string)
 	return nil
 }
 
+// UpdatePaymentStatus writes the payment status to order_payments.payment_status
+// and reflects the paid_at instant on orders (Fatia B1 — antes era UPDATE
+// carts). Both writes run in one transaction so the detail never observes a
+// half-applied update. `id` is the public cart id; resolved via orders.cart_id.
+// No-op for carts without an Order.
 func (r *Repository) UpdatePaymentStatus(ctx context.Context, id string, paymentStatus string) error {
-	query := `
-		UPDATE carts
-		SET payment_status = $2, paid_at = CASE WHEN $2 = 'paid' THEN now() ELSE paid_at END
-		WHERE id = $1
-	`
-	_, err := r.db.Exec(ctx, query, id, paymentStatus)
+	tx, err := r.db.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("updating order payment status: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	const payQ = `
+		UPDATE order_payments op
+		SET payment_status = $2::text
+		FROM orders o
+		WHERE op.order_id = o.id AND o.cart_id = $1
+	`
+	if _, err := tx.Exec(ctx, payQ, id, paymentStatus); err != nil {
 		return fmt.Errorf("updating order payment status: %w", err)
+	}
+
+	const paidAtQ = `
+		UPDATE orders
+		SET paid_at = CASE WHEN $2::text = 'paid' THEN now() ELSE paid_at END,
+		    updated_at = now()
+		WHERE cart_id = $1
+	`
+	if _, err := tx.Exec(ctx, paidAtQ, id, paymentStatus); err != nil {
+		return fmt.Errorf("updating order paid_at: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("updating order payment status: commit: %w", err)
 	}
 	return nil
 }
@@ -895,11 +946,11 @@ func (r *Repository) GetUpsellSummary(ctx context.Context, orderID string) (*Ord
 	}
 
 	out := &OrderUpsellOutput{
-		InitialSubtotalCents:   initialCents.Int64,
-		FinalSubtotalCents:     finalCents.Int64,
-		DeltaCents:             finalCents.Int64 - initialCents.Int64,
-		MutationCount:          mutCount,
-		HasSnapshot:            snapAt.Valid,
+		InitialSubtotalCents: initialCents.Int64,
+		FinalSubtotalCents:   finalCents.Int64,
+		DeltaCents:           finalCents.Int64 - initialCents.Int64,
+		MutationCount:        mutCount,
+		HasSnapshot:          snapAt.Valid,
 	}
 	if snapAt.Valid {
 		t := snapAt.Time
@@ -1006,4 +1057,3 @@ func (r *Repository) GetUpsellSummary(ctx context.Context, orderID string) (*Ord
 
 	return out, nil
 }
-

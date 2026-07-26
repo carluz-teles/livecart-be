@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -107,6 +106,7 @@ func (l *Listener) createPaidOrder(
 	}
 
 	cardSnap, _ := buildCardSnapshot(cart)
+	customerSnap, _ := buildCustomerSnapshot(cart)
 
 	tx, err := l.pool.Begin(ctx)
 	if err != nil {
@@ -117,17 +117,18 @@ func (l *Listener) createPaidOrder(
 	qtx := l.queries.WithTx(tx)
 
 	orderRow, err := qtx.InsertOrder(ctx, sqlc.InsertOrderParams{
-		CartID:         cid,
-		ShortID:        cart.ShortID,
-		StoreID:        storeUUID,
-		EventID:        cart.EventID,
-		CustomerID:     cart.CustomerID,
-		Status:         "paid",
-		TotalCents:     pgtype.Int8{Int64: gmvCents, Valid: true},
-		DiscountCents:  discountCents,
-		ShippingCents:  shippingCents,
-		PaidTotalCents: pgtype.Int8{Int64: paidTotal, Valid: true},
-		PaidAt:         cart.PaidAt,
+		CartID:           cid,
+		ShortID:          cart.ShortID,
+		StoreID:          storeUUID,
+		EventID:          cart.EventID,
+		CustomerID:       cart.CustomerID,
+		Status:           "paid",
+		TotalCents:       pgtype.Int8{Int64: gmvCents, Valid: true},
+		DiscountCents:    discountCents,
+		ShippingCents:    shippingCents,
+		PaidTotalCents:   pgtype.Int8{Int64: paidTotal, Valid: true},
+		PaidAt:           cart.PaidAt,
+		CustomerSnapshot: customerSnap,
 	})
 	if err != nil {
 		return fmt.Errorf("order OnCartPaid: insert order: %w", err)
@@ -159,20 +160,19 @@ func (l *Listener) createPaidOrder(
 		return fmt.Errorf("order OnCartPaid: insert order_payment: %w", err)
 	}
 
+	// shipping_service_id é um id opaco (int-as-string p/ ME, ObjectId/UUID p/
+	// outros) — congelado como TEXT, igual à fonte carts, sem parse com perda.
 	logParams := sqlc.InsertOrderLogisticsParams{
 		OrderID:               orderRow.ID,
 		ShippingAddress:       cart.ShippingAddress,
+		ShippingProvider:      cart.ShippingProvider,
+		ShippingServiceID:     cart.ShippingServiceID,
 		ShippingServiceName:   cart.ShippingServiceName,
 		ShippingCarrier:       cart.ShippingCarrier,
 		ShippingCostCents:     cart.ShippingCostCents,
 		ShippingCostRealCents: cart.ShippingCostRealCents,
 		ShippingDeadlineDays:  pgtype.Int4{Int32: cart.ShippingDeadlineDays.Int32, Valid: cart.ShippingDeadlineDays.Valid},
 		TrackingToken:         cart.TrackingToken,
-	}
-	if cart.ShippingServiceID.Valid && cart.ShippingServiceID.String != "" {
-		if n, parseErr := strconv.ParseInt(cart.ShippingServiceID.String, 10, 32); parseErr == nil {
-			logParams.ShippingServiceID = pgtype.Int4{Int32: int32(n), Valid: true}
-		}
 	}
 
 	if err := qtx.InsertOrderLogistics(ctx, logParams); err != nil {
@@ -243,6 +243,19 @@ func buildCardSnapshot(cart sqlc.Cart) (json.RawMessage, error) {
 		"last_four":          cart.CardLastFour.String,
 		"installments":       cart.CardInstallments.Int32,
 		"authorization_code": cart.CardAuthorizationCode.String,
+	}
+	return json.Marshal(snap)
+}
+
+// buildCustomerSnapshot freezes the cart's customer_* columns into an immutable
+// JSONB carried on the Order, so the order detail no longer depends on carts.
+// Always returns an object (never nil) — the order detail reads it by key.
+func buildCustomerSnapshot(cart sqlc.Cart) (json.RawMessage, error) {
+	snap := map[string]string{
+		"name":     cart.CustomerName.String,
+		"email":    cart.CustomerEmail.String,
+		"document": cart.CustomerDocument.String,
+		"phone":    cart.CustomerPhone.String,
 	}
 	return json.Marshal(snap)
 }
