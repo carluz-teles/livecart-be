@@ -62,7 +62,7 @@ func outboxPayload(t *testing.T, dedupKey string) []byte {
 
 // ─── E1 order.paid emitido na materialização ─────────────────────────────────
 
-func TestFatia11a_OnCartPaid_EmitsOrderPaid(t *testing.T) {
+func TestOrderBusEvents_OnCartPaid_EmitsOrderPaid(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)
@@ -95,7 +95,7 @@ func TestFatia11a_OnCartPaid_EmitsOrderPaid(t *testing.T) {
 
 // ─── E2 replay não duplica (exactly-once via short-circuit + dedup) ───────────
 
-func TestFatia11a_OnCartPaid_ExactlyOnceOnReplay(t *testing.T) {
+func TestOrderBusEvents_OnCartPaid_ExactlyOnceOnReplay(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)
@@ -115,7 +115,7 @@ func TestFatia11a_OnCartPaid_ExactlyOnceOnReplay(t *testing.T) {
 
 // ─── E3 order.refunded emitido no flip refunded ──────────────────────────────
 
-func TestFatia11a_OnCartRefunded_EmitsOrderRefunded(t *testing.T) {
+func TestOrderBusEvents_OnCartRefunded_EmitsOrderRefunded(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)
@@ -147,7 +147,7 @@ func TestFatia11a_OnCartRefunded_EmitsOrderRefunded(t *testing.T) {
 
 // ─── E4 replay do refunded não duplica ───────────────────────────────────────
 
-func TestFatia11a_OnCartRefunded_ExactlyOnceOnReplay(t *testing.T) {
+func TestOrderBusEvents_OnCartRefunded_ExactlyOnceOnReplay(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)
@@ -169,7 +169,7 @@ func TestFatia11a_OnCartRefunded_ExactlyOnceOnReplay(t *testing.T) {
 
 // ─── E5 cancelled NÃO emite order.refunded ───────────────────────────────────
 
-func TestFatia11a_OnCartCancelled_DoesNotEmitOrderRefunded(t *testing.T) {
+func TestOrderBusEvents_OnCartCancelled_DoesNotEmitOrderRefunded(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)
@@ -190,7 +190,7 @@ func TestFatia11a_OnCartCancelled_DoesNotEmitOrderRefunded(t *testing.T) {
 
 // ─── E6 dedup do outbox colapsa emissões repetidas (backstop de exactly-once) ─
 
-func TestFatia11a_OutboxDedupCollapsesRepeatEmits(t *testing.T) {
+func TestOrderBusEvents_OutboxDedupCollapsesRepeatEmits(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 

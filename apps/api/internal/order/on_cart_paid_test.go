@@ -161,7 +161,7 @@ func newListener(t *testing.T) *listeners.Listener {
 
 // ─── P1 total_cents == cart_product_total_cents ───────────────────────────────
 
-func TestOnCartPaid_P1_TotalCentsMatchesCanonicalGMV(t *testing.T) {
+func TestOnCartPaid_TotalCentsMatchesCanonicalGMV(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)
@@ -186,7 +186,7 @@ func TestOnCartPaid_P1_TotalCentsMatchesCanonicalGMV(t *testing.T) {
 
 // ─── P2 SUM(order_items.qty*price) == total_cents ───────────────────────────
 
-func TestOnCartPaid_P2_ItemsSumMatchesTotalCents(t *testing.T) {
+func TestOnCartPaid_ItemsSumMatchesTotalCents(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)
@@ -216,7 +216,7 @@ func TestOnCartPaid_P2_ItemsSumMatchesTotalCents(t *testing.T) {
 
 // ─── P3 paid_total_cents == total - discount + shipping ─────────────────────
 
-func TestOnCartPaid_P3_PaidTotalFormula(t *testing.T) {
+func TestOnCartPaid_PaidTotalFormula(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)
@@ -244,7 +244,7 @@ func TestOnCartPaid_P3_PaidTotalFormula(t *testing.T) {
 
 // ─── P4 idempotência: 2ª chamada não duplica ────────────────────────────────
 
-func TestOnCartPaid_P4_Idempotence(t *testing.T) {
+func TestOnCartPaid_Idempotence(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)

@@ -51,7 +51,7 @@ func setCartExternalOrderID(t *testing.T, cartID, externalOrderID string) {
 
 // ─── E1 order_logistics reflete erp_order_state e erp_stock_launched ────────
 
-func TestMirrorCartERPToOrder_E1_Logistics(t *testing.T) {
+func TestMirrorCartERPToOrder_Logistics(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)
@@ -89,7 +89,7 @@ func TestMirrorCartERPToOrder_E1_Logistics(t *testing.T) {
 
 // ─── E1b order_logistics reflete erp_order_state='cancelled' ─────────────────
 
-func TestMirrorCartERPToOrder_E1b_LogisticsCancelled(t *testing.T) {
+func TestMirrorCartERPToOrder_LogisticsCancelled(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)
@@ -126,7 +126,7 @@ func TestMirrorCartERPToOrder_E1b_LogisticsCancelled(t *testing.T) {
 // que torna a garantia estrutural. Este teste trava o mirror: ele projeta APENAS
 // o external_order_id (reserva), e as colunas de finalização/NF em order_payments
 // permanecem no default ('pending', 0, NULL) — só os reactors as escrevem.
-func TestMirrorCartERPToOrder_E2_Payments(t *testing.T) {
+func TestMirrorCartERPToOrder_Payments(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)
@@ -174,7 +174,7 @@ func TestMirrorCartERPToOrder_E2_Payments(t *testing.T) {
 
 // ─── E3 idempotência: 2× mirror = mesmo estado ────────────────────────────────
 
-func TestMirrorCartERPToOrder_E3_Idempotent(t *testing.T) {
+func TestMirrorCartERPToOrder_Idempotent(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)
@@ -212,7 +212,7 @@ func TestMirrorCartERPToOrder_E3_Idempotent(t *testing.T) {
 
 // ─── E4 no-op quando não há Order para o cart ─────────────────────────────────
 
-func TestMirrorCartERPToOrder_E4_NoOp_NoOrder(t *testing.T) {
+func TestMirrorCartERPToOrder_NoOp_NoOrder(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)
@@ -233,7 +233,7 @@ func TestMirrorCartERPToOrder_E4_NoOp_NoOrder(t *testing.T) {
 
 // ─── E5 OnCartPaid chama o mirror automaticamente ────────────────────────────
 
-func TestOnCartPaid_E5_MirrorsERPState(t *testing.T) {
+func TestOnCartPaid_MirrorsERPState(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)

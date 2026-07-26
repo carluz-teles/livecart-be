@@ -243,7 +243,7 @@ func parseUUID(t *testing.T, s string) pgtype.UUID {
 
 // ─── Grupo A: GetEventsWithRevenue ────────────────────────────────────────────
 
-func TestF4_GroupA_GetEventsWithRevenue(t *testing.T) {
+func TestDashboardRevenue_GetEventsWithRevenue(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	seed := seedF4(t)
@@ -275,7 +275,7 @@ func TestF4_GroupA_GetEventsWithRevenue(t *testing.T) {
 
 // ─── Grupo A: GetAggregatedFunnel ─────────────────────────────────────────────
 
-func TestF4_GroupA_GetAggregatedFunnel(t *testing.T) {
+func TestDashboardRevenue_GetAggregatedFunnel(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	seed := seedF4(t)
@@ -299,7 +299,7 @@ func TestF4_GroupA_GetAggregatedFunnel(t *testing.T) {
 
 // ─── Grupo A: GetEventStats.confirmed_revenue ─────────────────────────────────
 
-func TestF4_GroupA_GetEventStats_ConfirmedRevenue(t *testing.T) {
+func TestDashboardRevenue_GetEventStats_ConfirmedRevenue(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	seed := seedF4(t)
@@ -323,7 +323,7 @@ func TestF4_GroupA_GetEventStats_ConfirmedRevenue(t *testing.T) {
 
 // ─── Grupo A: GetSessionStats.paid_revenue ────────────────────────────────────
 
-func TestF4_GroupA_GetSessionStats_PaidRevenue(t *testing.T) {
+func TestDashboardRevenue_GetSessionStats_PaidRevenue(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	seed := seedF4(t)
@@ -346,7 +346,7 @@ func TestF4_GroupA_GetSessionStats_PaidRevenue(t *testing.T) {
 
 // ─── Grupo A: GetWhatsAppRecoveryStats.revenue_recovered_cents ───────────────
 
-func TestF4_GroupA_GetWhatsAppRecoveryStats(t *testing.T) {
+func TestDashboardRevenue_GetWhatsAppRecoveryStats(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	seed := seedF4(t)
@@ -382,7 +382,7 @@ func TestF4_GroupA_GetWhatsAppRecoveryStats(t *testing.T) {
 
 // ─── Grupo B: GetStats.total_revenue — correção do bug ───────────────────────
 
-func TestF4_GroupB_GetStats_TotalRevenue(t *testing.T) {
+func TestDashboardRevenue_GetStats_TotalRevenue(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	seed := seedF4(t)
@@ -408,7 +408,7 @@ func TestF4_GroupB_GetStats_TotalRevenue(t *testing.T) {
 
 // ─── Grupo B: GetMonthlyRevenue — correção do bug ────────────────────────────
 
-func TestF4_GroupB_GetMonthlyRevenue(t *testing.T) {
+func TestDashboardRevenue_GetMonthlyRevenue(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	seed := seedF4(t)

@@ -211,7 +211,7 @@ func parseUUIDf5(t *testing.T, s string) pgtype.UUID {
 
 // ─── P1/P2: GetTopProducts ────────────────────────────────────────────────────
 
-func TestF5_GetTopProducts_PaidOnly(t *testing.T) {
+func TestProductRevenue_GetTopProducts_PaidOnly(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	seed := seedF5(t)
@@ -258,7 +258,7 @@ func TestF5_GetTopProducts_PaidOnly(t *testing.T) {
 
 // ─── P3/P4: ListProductsByEvent ───────────────────────────────────────────────
 
-func TestF5_ListProductsByEvent_PaidOnly(t *testing.T) {
+func TestProductRevenue_ListProductsByEvent_PaidOnly(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	seed := seedF5(t)

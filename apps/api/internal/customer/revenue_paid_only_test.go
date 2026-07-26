@@ -232,7 +232,7 @@ func parseCustUUID(t *testing.T, s string) pgtype.UUID {
 
 // ─── Grupo B: ListCustomers.total_spent — correção do bug ────────────────────
 
-func TestF4_GroupB_ListCustomers_TotalSpent(t *testing.T) {
+func TestCustomerRevenue_ListCustomers_TotalSpent(t *testing.T) {
 	requireCustDB(t)
 	ctx := context.Background()
 	seed := seedF4Cust(t)
@@ -269,7 +269,7 @@ func TestF4_GroupB_ListCustomers_TotalSpent(t *testing.T) {
 
 // ─── Grupo B: GetCustomerStats.avg_spent_per_customer — correção do bug ──────
 
-func TestF4_GroupB_GetCustomerStats_AvgSpent(t *testing.T) {
+func TestCustomerRevenue_GetCustomerStats_AvgSpent(t *testing.T) {
 	requireCustDB(t)
 	ctx := context.Background()
 	seed := seedF4Cust(t)
@@ -295,7 +295,7 @@ func TestF4_GroupB_GetCustomerStats_AvgSpent(t *testing.T) {
 
 // ─── Grupo B: SearchCustomers.total_spent — correção do bug ──────────────────
 
-func TestF4_GroupB_SearchCustomers_TotalSpent(t *testing.T) {
+func TestCustomerRevenue_SearchCustomers_TotalSpent(t *testing.T) {
 	requireCustDB(t)
 	ctx := context.Background()
 	seed := seedF4Cust(t)

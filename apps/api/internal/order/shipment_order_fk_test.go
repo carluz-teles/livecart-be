@@ -48,7 +48,7 @@ func seedShipment(t *testing.T, storeID, cartID string) (orderID, shipmentID str
 
 // ─── C2a FK CERTA ─────────────────────────────────────────────────────────────
 
-func TestFatiaC2_GetShipmentForOrder_KeyedByOrderID(t *testing.T) {
+func TestShipmentOrderFK_GetShipmentForOrder_KeyedByOrderID(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	repo := order.NewRepository(testPool)
@@ -82,10 +82,10 @@ func TestFatiaC2_GetShipmentForOrder_KeyedByOrderID(t *testing.T) {
 	}
 }
 
-// TestFatiaC2_ShipmentColumns_NotSwappedByRename prova que o rename
+// TestShipmentOrderFK_ShipmentColumns_NotSwappedByRename prova que o rename
 // order_id→cart_id (migration 000098) não trocou o conteúdo das colunas: a coluna
 // renomeada `cart_id` guarda o cart UUID e `orders_order_id` guarda o orders.id.
-func TestFatiaC2_ShipmentColumns_NotSwappedByRename(t *testing.T) {
+func TestShipmentOrderFK_ShipmentColumns_NotSwappedByRename(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 
@@ -119,7 +119,7 @@ func TestFatiaC2_ShipmentColumns_NotSwappedByRename(t *testing.T) {
 
 // ─── C2b RESOLVE ──────────────────────────────────────────────────────────────
 
-func TestFatiaC2_GetOrderIDByCartID_Resolves(t *testing.T) {
+func TestShipmentOrderFK_GetOrderIDByCartID_Resolves(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	repo := order.NewRepository(testPool)

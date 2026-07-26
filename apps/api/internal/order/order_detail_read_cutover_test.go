@@ -86,7 +86,7 @@ func seedFrozenOrder(t *testing.T, serviceID string) (storeID, cartID string) {
 
 // ─── B1a PARIDADE ─────────────────────────────────────────────────────────────
 
-func TestFatiaB1_GetByID_ParityWithSourceCart(t *testing.T) {
+func TestOrderDetailReadCutover_GetByID_ParityWithSourceCart(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	repo := order.NewRepository(testPool)
@@ -147,7 +147,7 @@ func TestFatiaB1_GetByID_ParityWithSourceCart(t *testing.T) {
 
 // ─── B1b FONTE (cutover) ──────────────────────────────────────────────────────
 
-func TestFatiaB1_GetByID_FrozenAgainstCartMutation(t *testing.T) {
+func TestOrderDetailReadCutover_GetByID_FrozenAgainstCartMutation(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	repo := order.NewRepository(testPool)
@@ -196,7 +196,7 @@ func TestFatiaB1_GetByID_FrozenAgainstCartMutation(t *testing.T) {
 	assertEq(t, "erp_invoice_id", row.ERPInvoiceID, "INV-1")
 }
 
-func TestFatiaB1_GetItems_FrozenProductNameFromOrderItems(t *testing.T) {
+func TestOrderDetailReadCutover_GetItems_FrozenProductNameFromOrderItems(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	repo := order.NewRepository(testPool)
@@ -242,7 +242,7 @@ func TestFatiaB1_GetItems_FrozenProductNameFromOrderItems(t *testing.T) {
 // corromper o agregado Order. UpdateStatus/UpdatePaymentStatus escrevem SÓ em
 // carts.* — orders.status / order_payments.payment_status permanecem no valor da
 // materialização (`paid`), pois seu dono é a materialização + os reactors da E1.
-func TestFatiaB1_AdminUpdate_DoesNotCorruptOrderStatus(t *testing.T) {
+func TestOrderDetailReadCutover_AdminUpdate_DoesNotCorruptOrderStatus(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	repo := order.NewRepository(testPool)
@@ -294,7 +294,7 @@ func TestFatiaB1_AdminUpdate_DoesNotCorruptOrderStatus(t *testing.T) {
 
 // UpdateShippingAddress permanece escrevendo no lado Order (order_logistics) —
 // parte do read cutover B1 já aprovado, fora do escopo do fix B1-1.
-func TestFatiaB1_UpdateShippingAddress_WritesOrderLogistics(t *testing.T) {
+func TestOrderDetailReadCutover_UpdateShippingAddress_WritesOrderLogistics(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	repo := order.NewRepository(testPool)

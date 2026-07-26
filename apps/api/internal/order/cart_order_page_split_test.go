@@ -107,7 +107,7 @@ func addItem(t *testing.T, cartID, productID string, qty int, price int64) {
 
 // ─── G1/G2/G3/G4 ────────────────────────────────────────────────────────────
 
-func TestFatia7_UnionCoversAllCarts(t *testing.T) {
+func TestCartOrderPageSplit_UnionCoversAllCarts(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	l := newListener(t)
@@ -242,7 +242,7 @@ func TestFatia7_UnionCoversAllCarts(t *testing.T) {
 
 // ─── CartStats ───────────────────────────────────────────────────────────────
 
-func TestFatia7_CartStats(t *testing.T) {
+func TestCartOrderPageSplit_CartStats(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 
