@@ -1,17 +1,19 @@
 package postcheckout_test
 
-// Fatia C1 — order_events keyed pela Order (order_id) + tracking_token com fonte
-// da verdade em order_logistics. Gated em TEST_DATABASE_URL (mesma infra dos
-// testes fatia_b1/on_cart_paid do pacote order).
+// Fatia 10-a — carts.tracking_token dropado; a fonte da verdade do rastreio é
+// order_logistics.tracking_token (Fatia C1). Gated em TEST_DATABASE_URL (mesma
+// infra dos testes fatia_b1/on_cart_paid do pacote order).
 //
 // Invariantes travadas:
-//   C1a DUAL-WRITE: OnCartPaid grava o token no cart E em order_logistics
-//       (iguais), e o payment_confirmed carrega order_id == orders.id.
-//   C1b IDEMPOTÊNCIA (AC5): dupla/tripla execução de OnCartPaid não duplica
-//       eventos nem gera dois tokens (o shortcut do tracking_token continua).
-//   C1c RASTREIO (AC4): o lookup público acha o cart pelo token de
-//       order_logistics mesmo quando carts.tracking_token já foi limpo.
+//   C1a FONTE ÚNICA: OnCartPaid grava o token SÓ em order_logistics (não-nulo),
+//       e o payment_confirmed carrega order_id == orders.id.
+//   C1b IDEMPOTÊNCIA: dupla/tripla execução de OnCartPaid não duplica eventos
+//       nem gera dois tokens (shortcut via order_logistics.tracking_token).
+//   C1c RASTREIO (AC1/AC2): o lookup público acha o cart pelo token de
+//       order_logistics e devolve o token resolvido; token errado → não acha.
 //   C1d UNIQUE POR ORDER: InsertOrderEvent dedupa por (order_id, event_type).
+//   C1e DEFERRAL: OnCartPaid num cart pago SEM Order materializada não grava
+//       token nem evento (adia p/ o reactor async) — replay-safe.
 
 import (
 	"context"
@@ -111,9 +113,26 @@ func newService(t *testing.T) *postcheckout.Service {
 func seedPaidCartWithOrder(t *testing.T) (cartID string) {
 	t.Helper()
 	ctx := context.Background()
+	cartID, storeID := seedPaidCart(t)
+
+	// Materializa a Order (Fase A) — order + order_logistics passam a existir,
+	// tracking_token nasce NULL (Fatia 10-a: order_logistics é a fonte, o cart
+	// nunca carregou token; o postcheckout o gera depois).
+	l := listeners.New(testPool, testQueries, zap.NewNop())
+	if err := l.OnCartPaid(ctx, cartID, storeID, 10000, nil); err != nil {
+		t.Fatalf("materialise order: %v", err)
+	}
+	return cartID
+}
+
+// seedPaidCart cria loja→evento→produto→cart pago SEM materializar a Order —
+// espelha o path síncrono do cartão, onde o post-checkout roda antes do fato
+// cart.paid criar a Order. Retorna (cartID, storeID).
+func seedPaidCart(t *testing.T) (cartID, storeID string) {
+	t.Helper()
+	ctx := context.Background()
 	n := fmt.Sprintf("%d", time.Now().UnixNano())
 
-	var storeID string
 	if err := testPool.QueryRow(ctx,
 		`INSERT INTO stores (name, slug) VALUES ('Loja PC Test', 'pc-'||$1) RETURNING id::text`, n,
 	).Scan(&storeID); err != nil {
@@ -155,18 +174,30 @@ func seedPaidCartWithOrder(t *testing.T) (cartID string) {
 		t.Fatalf("seed cart_items: %v", err)
 	}
 
-	// Materializa a Order (Fase A) — order + order_logistics passam a existir,
-	// tracking_token ainda NULL (o cart não tem token nesse momento).
-	l := listeners.New(testPool, testQueries, zap.NewNop())
-	if err := l.OnCartPaid(ctx, cartID, storeID, 10000, nil); err != nil {
-		t.Fatalf("materialise order: %v", err)
-	}
-	return cartID
+	return cartID, storeID
 }
 
-// ─── C1a DUAL-WRITE ───────────────────────────────────────────────────────────
+// logisticsToken lê o token da fonte da verdade (order_logistics) para um cart.
+func logisticsToken(t *testing.T, ctx context.Context, cartID string) (string, bool) {
+	t.Helper()
+	var tok *string
+	if err := testPool.QueryRow(ctx, `
+		SELECT ol.tracking_token
+		FROM order_logistics ol
+		JOIN orders o ON o.id = ol.order_id
+		WHERE o.cart_id = $1`, cartID,
+	).Scan(&tok); err != nil {
+		t.Fatalf("query logistics token: %v", err)
+	}
+	if tok == nil {
+		return "", false
+	}
+	return *tok, true
+}
 
-func TestOnCartPaid_C1a_DualWritesOrderIDAndTrackingToken(t *testing.T) {
+// ─── C1a FONTE ÚNICA (order_logistics) ────────────────────────────────────────
+
+func TestOnCartPaid_C1a_WritesTokenOnlyOnOrderLogistics(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	cartID := seedPaidCartWithOrder(t)
@@ -196,26 +227,14 @@ func TestOnCartPaid_C1a_DualWritesOrderIDAndTrackingToken(t *testing.T) {
 		t.Errorf("C1a: order_id mismatch: event=%v orders=%v", eventOrderID, ordersID)
 	}
 
-	// Token gravado no cart E em order_logistics, iguais e não-nulos.
-	var cartToken, logisticsToken *string
-	if err := testPool.QueryRow(ctx, `
-		SELECT c.tracking_token, ol.tracking_token
-		FROM carts c
-		JOIN orders o ON o.cart_id = c.id
-		JOIN order_logistics ol ON ol.order_id = o.id
-		WHERE c.id = $1`, cartID,
-	).Scan(&cartToken, &logisticsToken); err != nil {
-		t.Fatalf("query tokens: %v", err)
-	}
-	if cartToken == nil || *cartToken == "" {
-		t.Fatalf("C1a: carts.tracking_token vazio")
-	}
-	if logisticsToken == nil || *logisticsToken != *cartToken {
-		t.Errorf("C1a: order_logistics.tracking_token=%v, want == carts.tracking_token=%v", logisticsToken, cartToken)
+	// Token gravado em order_logistics, não-nulo.
+	tok, ok := logisticsToken(t, ctx, cartID)
+	if !ok || tok == "" {
+		t.Fatalf("C1a: order_logistics.tracking_token vazio")
 	}
 }
 
-// ─── C1b IDEMPOTÊNCIA (AC5) ───────────────────────────────────────────────────
+// ─── C1b IDEMPOTÊNCIA ─────────────────────────────────────────────────────────
 
 func TestOnCartPaid_C1b_IdempotentNoDuplicateEventsOrTokens(t *testing.T) {
 	requireDB(t)
@@ -223,38 +242,32 @@ func TestOnCartPaid_C1b_IdempotentNoDuplicateEventsOrTokens(t *testing.T) {
 	cartID := seedPaidCartWithOrder(t)
 
 	svc := newService(t)
-	for i := 0; i < 3; i++ {
+	svc.OnCartPaid(ctx, cartID)
+	first, _ := logisticsToken(t, ctx, cartID)
+
+	// Re-executa: replay de webhook / mark-as-paid manual.
+	for i := 0; i < 2; i++ {
 		svc.OnCartPaid(ctx, cartID)
 	}
 
-	var eventCount, tokenCount int
+	var eventCount int
 	if err := testPool.QueryRow(ctx,
 		`SELECT COUNT(*) FROM order_events WHERE cart_id = $1 AND event_type = 'payment_confirmed'`, cartID,
 	).Scan(&eventCount); err != nil {
 		t.Fatalf("query events: %v", err)
 	}
 	if eventCount != 1 {
-		t.Errorf("C1b (AC5): expected 1 payment_confirmed event após 3× OnCartPaid, got %d", eventCount)
+		t.Errorf("C1b: expected 1 payment_confirmed event após 3× OnCartPaid, got %d", eventCount)
 	}
 
-	// Um único token, estável, refletido em order_logistics.
-	if err := testPool.QueryRow(ctx, `
-		SELECT COUNT(*)
-		FROM carts c
-		JOIN orders o ON o.cart_id = c.id
-		JOIN order_logistics ol ON ol.order_id = o.id
-		WHERE c.id = $1
-		  AND c.tracking_token IS NOT NULL
-		  AND ol.tracking_token = c.tracking_token`, cartID,
-	).Scan(&tokenCount); err != nil {
-		t.Fatalf("query token: %v", err)
-	}
-	if tokenCount != 1 {
-		t.Errorf("C1b (AC5): expected 1 cart com token consistente em order_logistics, got %d", tokenCount)
+	// Token estável (não rotacionou) e único em order_logistics.
+	after, _ := logisticsToken(t, ctx, cartID)
+	if first == "" || after != first {
+		t.Errorf("C1b: token rotacionou no replay: first=%q after=%q", first, after)
 	}
 }
 
-// ─── C1c RASTREIO via order_logistics (AC4) ───────────────────────────────────
+// ─── C1c RASTREIO via order_logistics (AC1/AC2) ───────────────────────────────
 
 func TestGetCartByTrackingToken_C1c_ResolvesViaOrderLogistics(t *testing.T) {
 	requireDB(t)
@@ -264,36 +277,34 @@ func TestGetCartByTrackingToken_C1c_ResolvesViaOrderLogistics(t *testing.T) {
 	repo := postcheckout.NewRepository(testQueries)
 	newService(t).OnCartPaid(ctx, cartID)
 
-	// Lê o token da FONTE DA VERDADE (order_logistics).
-	var token string
-	if err := testPool.QueryRow(ctx, `
-		SELECT ol.tracking_token
-		FROM order_logistics ol
-		JOIN orders o ON o.id = ol.order_id
-		WHERE o.cart_id = $1`, cartID,
-	).Scan(&token); err != nil {
-		t.Fatalf("query logistics token: %v", err)
+	token, ok := logisticsToken(t, ctx, cartID)
+	if !ok || token == "" {
+		t.Fatalf("C1c: token de order_logistics vazio")
 	}
 
-	// Simula a Fase F: limpa carts.tracking_token para provar que o lookup passa
-	// por order_logistics, não pelo cart.
-	if _, err := testPool.Exec(ctx, `UPDATE carts SET tracking_token = NULL WHERE id = $1`, cartID); err != nil {
-		t.Fatalf("blank cart token: %v", err)
-	}
-
-	cart, err := repo.GetCartByTrackingToken(ctx, token)
+	// Token certo → acha o cart e devolve o token resolvido (que o handler compara
+	// constant-time contra o input).
+	cart, resolved, err := repo.GetCartByTrackingToken(ctx, token)
 	if err != nil {
 		t.Fatalf("GetCartByTrackingToken: %v", err)
 	}
 	if cart == nil {
-		t.Fatalf("C1c (AC4): cart não encontrado via order_logistics após limpar carts.tracking_token")
+		t.Fatalf("C1c (AC1): cart não encontrado via order_logistics")
 	}
 	if cart.ID.String() != cartID {
-		t.Errorf("C1c (AC4): cart errado: got %s want %s", cart.ID.String(), cartID)
+		t.Errorf("C1c (AC1): cart errado: got %s want %s", cart.ID.String(), cartID)
 	}
-	// O comparativo constant-time do handler bate contra cart.TrackingToken.
-	if cart.TrackingToken.String != token {
-		t.Errorf("C1c (AC4): TrackingToken retornado=%q, want %q", cart.TrackingToken.String, token)
+	if resolved != token {
+		t.Errorf("C1c (AC2): token resolvido=%q, want %q", resolved, token)
+	}
+
+	// Token errado → não acha (404 sem vazar existência).
+	cart, resolved, err = repo.GetCartByTrackingToken(ctx, token+"-wrong")
+	if err != nil {
+		t.Fatalf("GetCartByTrackingToken (wrong): %v", err)
+	}
+	if cart != nil || resolved != "" {
+		t.Errorf("C1c (AC1): token errado deveria não achar; got cart=%v resolved=%q", cart, resolved)
 	}
 }
 
@@ -336,4 +347,53 @@ func TestInsertOrderEvent_C1d_UniqueByOrderID(t *testing.T) {
 	if count != 1 {
 		t.Errorf("C1d: expected 1 shipped event, got %d", count)
 	}
+}
+
+// ─── C1e DEFERRAL: sem Order materializada ────────────────────────────────────
+
+// OnCartPaid no path síncrono do cartão (Order ainda não materializada) não pode
+// persistir o token de forma rastreável, então adia TODO o fluxo — não grava
+// token nem evento. O reactor async (que materializa a Order antes) faz o resto.
+func TestOnCartPaid_C1e_DefersWhenOrderNotMaterialised(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	cartID, _ := seedPaidCart(t) // sem materializar a Order
+
+	newService(t).OnCartPaid(ctx, cartID)
+
+	// Nenhuma Order/order_logistics ainda → nada de token.
+	if _, ok := logisticsTokenIfAny(t, ctx, cartID); ok {
+		t.Errorf("C1e: order_logistics não deveria existir/ter token sem materialização")
+	}
+
+	// Nenhum payment_confirmed gravado (fluxo adiado, replay-safe).
+	var eventCount int
+	if err := testPool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM order_events WHERE cart_id = $1 AND event_type = 'payment_confirmed'`, cartID,
+	).Scan(&eventCount); err != nil {
+		t.Fatalf("query events: %v", err)
+	}
+	if eventCount != 0 {
+		t.Errorf("C1e: expected 0 payment_confirmed events (deferred), got %d", eventCount)
+	}
+}
+
+// logisticsTokenIfAny é como logisticsToken, mas não falha quando não há
+// order_logistics (ok=false) — usado no cenário de deferral.
+func logisticsTokenIfAny(t *testing.T, ctx context.Context, cartID string) (string, bool) {
+	t.Helper()
+	var tok *string
+	err := testPool.QueryRow(ctx, `
+		SELECT ol.tracking_token
+		FROM order_logistics ol
+		JOIN orders o ON o.id = ol.order_id
+		WHERE o.cart_id = $1`, cartID,
+	).Scan(&tok)
+	if err != nil {
+		return "", false // sem Order/order_logistics
+	}
+	if tok == nil {
+		return "", false
+	}
+	return *tok, true
 }

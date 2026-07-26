@@ -115,15 +115,16 @@ func (h *Handler) GetOrder(c *fiber.Ctx) error {
 		return httpx.ErrNotFound("Pedido não encontrado")
 	}
 
-	cart, err := h.repo.GetCartByTrackingToken(c.Context(), token)
+	cart, resolvedToken, err := h.repo.GetCartByTrackingToken(c.Context(), token)
 	if err != nil || cart == nil {
 		// 404 instead of 401: don't leak that the token format is correct.
 		return httpx.ErrNotFound("Pedido não encontrado")
 	}
 
 	// Constant-time token comparison defends against timing oracles. Belt and
-	// suspenders — Postgres lookup already gates on equality.
-	if subtle.ConstantTimeCompare([]byte(cart.TrackingToken.String), []byte(token)) != 1 {
+	// suspenders — Postgres lookup already gates on equality against
+	// order_logistics.tracking_token (the source of truth).
+	if subtle.ConstantTimeCompare([]byte(resolvedToken), []byte(token)) != 1 {
 		return httpx.ErrNotFound("Pedido não encontrado")
 	}
 
@@ -193,11 +194,11 @@ func (h *Handler) ConfirmDelivery(c *fiber.Ctx) error {
 		return httpx.ErrNotFound("Pedido não encontrado")
 	}
 
-	cart, err := h.repo.GetCartByTrackingToken(c.Context(), token)
+	cart, resolvedToken, err := h.repo.GetCartByTrackingToken(c.Context(), token)
 	if err != nil || cart == nil {
 		return httpx.ErrNotFound("Pedido não encontrado")
 	}
-	if subtle.ConstantTimeCompare([]byte(cart.TrackingToken.String), []byte(token)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(resolvedToken), []byte(token)) != 1 {
 		return httpx.ErrNotFound("Pedido não encontrado")
 	}
 	if int(cart.ShortID) != shortID {

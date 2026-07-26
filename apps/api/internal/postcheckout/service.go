@@ -72,9 +72,11 @@ func (s *Service) insertOrderEvent(ctx context.Context, cartID, eventType, sourc
 // It is best-effort: every error is logged but never returned, because the
 // caller is a payment webhook handler that must ACK regardless.
 //
-// Idempotency lives in two places: the tracking_token (set once, never
-// rotated) and the order_events unique index. Either is enough to short
-// circuit duplicate runs.
+// Idempotency lives in two places: order_logistics.tracking_token (set once,
+// never rotated — the source of truth since Fatia 10-a) and the order_events
+// unique index. Either is enough to short circuit duplicate runs. Quando a Order
+// ainda não foi materializada (path síncrono do cartão), o fluxo é adiado para o
+// reactor async, que materializa a Order antes de re-rodar este hook.
 func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 	snapshot, err := s.repo.LoadCart(ctx, cartID)
 	if err != nil {
@@ -86,8 +88,32 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 	}
 	ctx = logger.WithStore(ctx, uuidStr(snapshot.Store.ID), snapshot.Store.Slug)
 
-	// Already processed — webhook retry or merchant manual mark-as-paid.
-	if snapshot.Cart.TrackingToken.Valid && snapshot.Cart.TrackingToken.String != "" {
+	// O token de rastreio vive só em order_logistics (fonte da verdade — Fatia
+	// 10-a). Resolve o estado atual da Order deste cart para decidir o fluxo.
+	existing, materialised, err := s.repo.GetOrderLogisticsTrackingToken(ctx, cartID)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("post-checkout could not resolve order tracking token",
+			zap.String("cart_id", cartID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	// Path síncrono do cartão: a Order só é materializada pelo fato cart.paid
+	// (emitido pelo webhook). Sem order_logistics não há onde persistir o token
+	// de forma rastreável, então adiamos o fluxo inteiro para o reactor async —
+	// que materializa a Order e DEPOIS roda este hook, na mesma task. Evita
+	// mandar e-mail com um token que não resolveria na página pública.
+	if !materialised {
+		logger.From(ctx, s.logger).Debug("post-checkout deferred: order not materialised yet",
+			zap.String("cart_id", cartID),
+		)
+		return
+	}
+
+	// Idempotência (replay de webhook / mark-as-paid manual): token já gravado na
+	// Order → já processamos este cart.
+	if existing != "" {
 		logger.From(ctx, s.logger).Debug("post-checkout already ran for cart",
 			zap.String("cart_id", cartID),
 		)
@@ -102,24 +128,15 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 		)
 		return
 	}
-	if err := s.repo.SetTrackingToken(ctx, cartID, token); err != nil {
-		logger.From(ctx, s.logger).Error("failed to persist tracking token",
+
+	// Grava o token na Order (order_logistics) — set-once no banco (WHERE
+	// tracking_token IS NULL), então redeliveries concorrentes não o rotacionam.
+	if err := s.repo.SetOrderLogisticsTrackingToken(ctx, cartID, token); err != nil {
+		logger.From(ctx, s.logger).Error("failed to persist tracking token on order_logistics",
 			zap.String("cart_id", cartID),
 			zap.Error(err),
 		)
 		return
-	}
-
-	// Dual-write: o token também vive em order_logistics (fonte da verdade do
-	// rastreamento na Fatia C1). Set-once no banco; no-op quando a Order ainda
-	// não foi materializada (path síncrono do cartão) — a materialização
-	// posterior copia carts.tracking_token adiante. Best-effort: o token no cart
-	// já garante o rastreio público atual.
-	if err := s.repo.SetOrderLogisticsTrackingToken(ctx, cartID, token); err != nil {
-		logger.From(ctx, s.logger).Warn("failed to persist tracking token on order_logistics",
-			zap.String("cart_id", cartID),
-			zap.Error(err),
-		)
 	}
 
 	// Append `payment_confirmed` to the customer-facing timeline. Insert is
@@ -430,13 +447,16 @@ func (s *Service) OnShipmentPosted(ctx context.Context, cartID, trackingCode str
 	if customerEmail == "" {
 		return
 	}
-	if !snapshot.Cart.TrackingToken.Valid || snapshot.Cart.TrackingToken.String == "" {
-		// Defensive: shipped before paid would mean tracking_token wasn't
-		// set. Skip the email; the order_event row remains as audit.
+	// O link de rastreio do e-mail usa o token da fonte da verdade (order_logistics).
+	trackingToken, materialised, err := s.repo.GetOrderLogisticsTrackingToken(ctx, cartID)
+	if err != nil || !materialised || trackingToken == "" {
+		// Defensive: shipped before paid would mean the tracking token wasn't
+		// generated (Order not materialised / paid hook não rodou). Skip the
+		// email; the order_event row remains as audit.
 		return
 	}
 
-	input := buildShippedEmailInput(snapshot, trackingCode)
+	input := buildShippedEmailInput(snapshot, trackingCode, trackingToken)
 	s.applyShippedOverride(ctx, snapshot, &input, trackingCode)
 	if err := s.email.SendOrderShipped(ctx, input); err != nil {
 		logger.From(ctx, s.logger).Warn("failed to send order shipped email",
@@ -670,7 +690,7 @@ func renderItemsHTML(items []sqlc.ListCartItemsRow) string {
 	return b.String()
 }
 
-func buildShippedEmailInput(s *CartSnapshot, trackingCode string) email.OrderShippedEmailInput {
+func buildShippedEmailInput(s *CartSnapshot, trackingCode, trackingToken string) email.OrderShippedEmailInput {
 	customerName := s.Cart.CustomerName.String
 	if customerName == "" {
 		customerName = s.Cart.PlatformHandle
@@ -696,7 +716,7 @@ func buildShippedEmailInput(s *CartSnapshot, trackingCode string) email.OrderShi
 	trackingURL := fmt.Sprintf("%s/order/%d?key=%s",
 		frontendURL,
 		s.Cart.ShortID,
-		s.Cart.TrackingToken.String,
+		trackingToken,
 	)
 
 	return email.OrderShippedEmailInput{
