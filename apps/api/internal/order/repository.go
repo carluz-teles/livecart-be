@@ -795,6 +795,11 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 // GetShipmentForOrder returns the shipment attached to an order (at most one).
 // Returns nil, nil when no shipment has been created yet — the order detail
 // handler exposes that as `shipment: null`.
+//
+// orderID is the real Order id (orders.id). The lookup filters by the correct
+// FK `shipments.orders_order_id` — NOT the legacy `order_id` column, which
+// (despite its name) still holds the cart id (migration 000052 / 000096).
+// Callers that only hold a cart id must resolve it first via GetOrderIDByCartID.
 func (r *Repository) GetShipmentForOrder(ctx context.Context, orderID string) (*OrderShipmentRecord, error) {
 	uid, err := uuid.Parse(orderID)
 	if err != nil {
@@ -817,7 +822,7 @@ func (r *Repository) GetShipmentForOrder(ctx context.Context, orderID string) (*
 			created_at,
 			updated_at
 		FROM shipments
-		WHERE order_id = $1
+		WHERE orders_order_id = $1
 		ORDER BY created_at DESC
 		LIMIT 1
 	`
@@ -845,6 +850,31 @@ func (r *Repository) GetShipmentForOrder(ctx context.Context, orderID string) (*
 		return nil, fmt.Errorf("getting shipment for order: %w", err)
 	}
 	return &rec, nil
+}
+
+// GetOrderIDByCartID resolves the materialised Order's id (orders.id) from its
+// source cart id. Returns "" (no error) when the cart has no Order yet — callers
+// treat that as "no shipment possible". Kept as raw SQL to match this read
+// Repository's style (it holds only a *pgxpool.Pool); the canonical write-side
+// lookup lives in sqlc, but wiring sqlc.Queries in here just for one trivial PK
+// lookup would needlessly widen the constructor.
+func (r *Repository) GetOrderIDByCartID(ctx context.Context, cartID string) (string, error) {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return "", fmt.Errorf("invalid cart id: %w", err)
+	}
+	var orderID string
+	err = r.db.QueryRow(ctx,
+		`SELECT id::text FROM orders WHERE cart_id = $1`,
+		pgtype.UUID{Bytes: uid, Valid: true},
+	).Scan(&orderID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolving order id by cart id: %w", err)
+	}
+	return orderID, nil
 }
 
 // ListShipmentEvents returns the tracking timeline for a shipment, ascending
