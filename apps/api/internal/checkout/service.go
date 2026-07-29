@@ -42,8 +42,11 @@ type CouponLifecycle interface {
 // PostCheckoutHook mirrors integration.PostCheckoutHook so the synchronous
 // card path in this service can fire the same customer-facing post-payment
 // flow as the asynchronous webhook path.
+//
+// OnCartPaid saiu daqui (Fatia A4): o tracking_token e a timeline
+// `payment_confirmed` nascem na materialização da Order (order/listeners.OnCartPaid),
+// disparada pelo fato cart.paid do webhook — não mais inline no path do cartão.
 type PostCheckoutHook interface {
-	OnCartPaid(ctx context.Context, cartID string)
 	OnShipmentPosted(ctx context.Context, cartID, trackingCode string)
 	OnDelivered(ctx context.Context, cartID, source string)
 }
@@ -875,10 +878,11 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 					zap.Error(err),
 				)
 			}
-			// Customer-facing post-payment flow (tracking token + receipt email)
-			// runs inline here for low latency on the synchronous card approval.
-			// Idempotent inside the hook, so the webhook's cart.paid reactor
-			// re-running it later is a no-op.
+			// Customer-facing post-payment flow (tracking token + timeline +
+			// receipt) NÃO roda mais inline aqui (Fatia A4): o token e a timeline
+			// `payment_confirmed` nascem na materialização da Order, disparada pelo
+			// fato cart.paid do webhook (order/listeners.OnCartPaid), e o recibo é
+			// reactor do domínio Notification. Tudo idempotente e ancorado no fato.
 			//
 			// The canonical cart.paid FACT is emitted only by the payment webhook
 			// consumer (ProcessPaymentNotification) — the single source of truth,
@@ -886,9 +890,6 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 			// path used to emit its own snapshot-less cart.paid too, which raced the
 			// webhook's and finalised ERP without payment details; centralising on
 			// the webhook fixes that.
-			if s.postCheckoutHook != nil {
-				s.postCheckoutHook.OnCartPaid(ctx, cart.ID)
-			}
 		}
 	}
 

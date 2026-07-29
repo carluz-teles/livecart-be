@@ -87,100 +87,19 @@ func (s *Service) insertOrderEvent(ctx context.Context, cartID, eventType, sourc
 	return s.repo.InsertOrderEvent(ctx, orderID, cartID, eventType, source, metadata)
 }
 
-// OnCartPaid is the hook called when a cart's payment_status flips to "paid".
-// It is best-effort: every error is logged but never returned, because the
-// caller is a payment webhook handler that must ACK regardless.
+// OnCartPaid é um no-op desde a Fatia A4. A geração do tracking_token e a
+// timeline `payment_confirmed` mudaram para o dono canônico — a Order — e nascem
+// atômicos com a materialização (order/listeners.OnCartPaid, na mesma tx). A
+// dissolução do fan-out post-checkout se completa aqui: nada mais roda neste hook.
 //
-// Idempotency lives in two places: order_logistics.tracking_token (set once,
-// never rotated — the source of truth since Fatia 10-a) and the order_events
-// unique index. Either is enough to short circuit duplicate runs. Quando a Order
-// ainda não foi materializada (path síncrono do cartão), o fluxo é adiado para o
-// reactor async, que materializa a Order antes de re-rodar este hook.
-func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
-	snapshot, err := s.repo.LoadCart(ctx, cartID)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("post-checkout flow could not load cart",
-			zap.String("cart_id", cartID),
-			zap.Error(err),
-		)
-		return
-	}
-	ctx = logger.WithStore(ctx, uuidStr(snapshot.Store.ID), snapshot.Store.Slug)
-
-	// O token de rastreio vive só em order_logistics (fonte da verdade — Fatia
-	// 10-a). Resolve o estado atual da Order deste cart para decidir o fluxo.
-	existing, materialised, err := s.repo.GetOrderLogisticsTrackingToken(ctx, cartID)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("post-checkout could not resolve order tracking token",
-			zap.String("cart_id", cartID),
-			zap.Error(err),
-		)
-		return
-	}
-
-	// Path síncrono do cartão: a Order só é materializada pelo fato cart.paid
-	// (emitido pelo webhook). Sem order_logistics não há onde persistir o token
-	// de forma rastreável, então adiamos o fluxo inteiro para o reactor async —
-	// que materializa a Order e DEPOIS roda este hook, na mesma task. Evita
-	// mandar e-mail com um token que não resolveria na página pública.
-	if !materialised {
-		logger.From(ctx, s.logger).Debug("post-checkout deferred: order not materialised yet",
-			zap.String("cart_id", cartID),
-		)
-		return
-	}
-
-	// Idempotência (replay de webhook / mark-as-paid manual): token já gravado na
-	// Order → já processamos este cart.
-	if existing != "" {
-		logger.From(ctx, s.logger).Debug("post-checkout already ran for cart",
-			zap.String("cart_id", cartID),
-		)
-		return
-	}
-
-	token, err := generateTrackingToken()
-	if err != nil {
-		logger.From(ctx, s.logger).Error("failed to generate tracking token",
-			zap.String("cart_id", cartID),
-			zap.Error(err),
-		)
-		return
-	}
-
-	// Grava o token na Order (order_logistics) — set-once no banco (WHERE
-	// tracking_token IS NULL), então redeliveries concorrentes não o rotacionam.
-	if err := s.repo.SetOrderLogisticsTrackingToken(ctx, cartID, token); err != nil {
-		logger.From(ctx, s.logger).Error("failed to persist tracking token on order_logistics",
-			zap.String("cart_id", cartID),
-			zap.Error(err),
-		)
-		return
-	}
-
-	// Append `payment_confirmed` to the customer-facing timeline. Insert is
-	// idempotent at the DB level (unique order_id+event_type) — duplicate
-	// hooks are a no-op.
-	if _, err := s.insertOrderEvent(ctx, cartID, "payment_confirmed", "system", nil); err != nil {
-		logger.From(ctx, s.logger).Warn("failed to record payment_confirmed event",
-			zap.String("cart_id", cartID),
-			zap.Error(err),
-		)
-	}
-
-	// A fila de espera NÃO é mais reconciliada aqui: virou um reactor do domínio
-	// Inventory (inventory/listeners.OnCartPaid), que reage ao fato cart.paid
-	// marcando os itens notificados deste cart como atendidos. Itens ainda na fila
-	// permanecem.
-	//
-	// O recibo do comprador NÃO é mais enviado aqui: virou um reactor do domínio
-	// Notification (notification/listeners.OnCartPaid → SendPaidReceipt), que
-	// reage ao fato cart.paid DEPOIS que esta Order + o tracking_token existem.
-	// A materialização do token acima é justamente a garantia de ordenação que o
-	// recibo consome.
-	logger.From(ctx, s.logger).Info("post-checkout flow completed",
-		zap.String("cart_id", cartID),
-	)
+// O método é mantido (fora de qualquer interface de hook) só para os testes que
+// travam que chamá-lo não altera nenhuma tabela. Os workers reais do
+// post-checkout (recibo/estorno) são SendPaidReceipt/SendRefundEmail, reactors do
+// domínio Notification que reagem a cart.paid/cart.refunded depois que a Order +
+// o token já existem — o guard ErrReceiptNotReady em SendPaidReceipt segue como
+// defesa em profundidade.
+func (s *Service) OnCartPaid(_ context.Context, _ string) {
+	// no-op — ver doc acima.
 }
 
 // SendPaidReceipt sends the buyer's "pagamento confirmado" receipt for a paid

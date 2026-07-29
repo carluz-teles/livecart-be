@@ -87,6 +87,31 @@ func countOrderEvents(t *testing.T, ctx context.Context, cartID, eventType strin
 	return n
 }
 
+// countAllOrderEvents conta todas as linhas da timeline do cart (qualquer tipo).
+func countAllOrderEvents(t *testing.T, ctx context.Context, cartID string) int {
+	t.Helper()
+	var n int
+	if err := testPool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM order_events WHERE cart_id = $1`, cartID,
+	).Scan(&n); err != nil {
+		t.Fatalf("count all events: %v", err)
+	}
+	return n
+}
+
+// nullOutTrackingToken zera o tracking_token da Order do cart via SQL direto —
+// usado para semear o cenário "Order existe, token ausente" que o guard defende,
+// já que a materialização (Fatia A4) passou a gerar o token.
+func nullOutTrackingToken(t *testing.T, ctx context.Context, cartID string) {
+	t.Helper()
+	if _, err := testPool.Exec(ctx, `
+		UPDATE order_logistics SET tracking_token = NULL
+		WHERE order_id = (SELECT id FROM orders WHERE cart_id = $1)`, cartID,
+	); err != nil {
+		t.Fatalf("null out tracking_token: %v", err)
+	}
+}
+
 // ─── A: envia 1× só com Order materializada + token ───────────────────────────
 
 func TestSendPaidReceipt_A_SendsOnceWhenOrderAndTokenReady(t *testing.T) {
@@ -134,8 +159,11 @@ func TestSendPaidReceipt_AGuard_NotMaterialisedRetries(t *testing.T) {
 func TestSendPaidReceipt_AGuard_TokenNotSetRetries(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
-	// Order materializada mas OnCartPaid ainda não rodou → tracking_token NULL.
+	// Order materializada COM token (a materialização gera o tracking_token desde a
+	// Fatia A4). Para exercitar o guard (Order existe, token ausente) forçamos o
+	// token de volta a NULL via SQL direto — o cenário que o guard defende.
 	cartID := seedPaidCartWithOrder(t)
+	nullOutTrackingToken(t, ctx, cartID)
 	setCustomerEmail(t, ctx, cartID, "buyer@example.com")
 
 	svc, fake := newServiceWithFake(t)
@@ -213,5 +241,34 @@ func TestOnCartPaid_D_NoLongerSendsReceiptInline(t *testing.T) {
 	// Sem receipt_sent — o marcador é responsabilidade de SendPaidReceipt.
 	if c := countOrderEvents(t, ctx, cartID, "receipt_sent"); c != 0 {
 		t.Errorf("D: OnCartPaid não deveria gravar receipt_sent, got %d", c)
+	}
+}
+
+// ─── AC4: postcheckout.OnCartPaid é no-op (não altera nenhuma tabela) ──────────
+
+// Com Order + tracking_token já materializados (pelo listener, Fatia A4), chamar
+// o hook do postcheckout não pode mudar o token nem a timeline — o método virou
+// no-op; a lógica mudou para o dono canônico (a Order).
+func TestOnCartPaid_AC4_ServiceHookIsNoOp(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	cartID := seedPaidCartWithOrder(t)
+
+	tokenBefore, okBefore := logisticsToken(t, ctx, cartID)
+	eventsBefore := countAllOrderEvents(t, ctx, cartID)
+	if !okBefore || tokenBefore == "" {
+		t.Fatalf("AC4: pré-condição — token deveria existir após materialização")
+	}
+
+	newService(t).OnCartPaid(ctx, cartID)
+
+	tokenAfter, _ := logisticsToken(t, ctx, cartID)
+	eventsAfter := countAllOrderEvents(t, ctx, cartID)
+
+	if tokenBefore != tokenAfter {
+		t.Errorf("AC4: no-op não deveria alterar o token: before=%q after=%q", tokenBefore, tokenAfter)
+	}
+	if eventsBefore != eventsAfter {
+		t.Errorf("AC4: no-op não deveria alterar order_events: before=%d after=%d", eventsBefore, eventsAfter)
 	}
 }

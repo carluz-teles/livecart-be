@@ -1010,9 +1010,10 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			}
 			// Notification reactor (Fatia A1): the buyer receipt reacts to cart.paid
 			// on its own instead of being sent inline in the fan-out above. It runs
-			// after ReactCartPaid materialised the Order + tracking token; its guard
-			// returns ErrReceiptNotReady (→ asynq retry) if they're not yet ready,
-			// and it is idempotent so a redelivery never mails a second receipt.
+			// after orderListener.OnCartPaid materialised the Order + tracking token
+			// (first step above, Fatia A4); its guard returns ErrReceiptNotReady (→
+			// asynq retry) if they're not yet ready, and it is idempotent so a
+			// redelivery never mails a second receipt.
 			if notificationListener != nil {
 				return notificationListener.OnCartPaid(ctx, p.CartID)
 			}

@@ -67,12 +67,14 @@ type ProductGroupSyncer interface {
 	ImportFromERP(ctx context.Context, storeID, externalSource string, parent providers.ERPProduct) (groupID string, importedExternalIDs []string, err error)
 }
 
-// PostCheckoutHook is the customer-facing post-payment flow: tracking token
-// generation + transactional emails. Best-effort by design — implementations
-// must swallow their own errors so the payment webhook ACKs regardless.
-// Wired from the postcheckout package via SetPostCheckoutHook.
+// PostCheckoutHook is the customer-facing post-payment flow: cancellation/
+// shipment/delivery transactional emails + timeline. Best-effort by design —
+// implementations must swallow their own errors so the payment webhook ACKs
+// regardless. Wired from the postcheckout package via SetPostCheckoutHook.
+//
+// OnCartPaid saiu daqui (Fatia A4): o tracking_token e a timeline
+// `payment_confirmed` nascem na materialização da Order (order/listeners.OnCartPaid).
 type PostCheckoutHook interface {
-	OnCartPaid(ctx context.Context, cartID string)
 	// OnCartCancelled envia o e-mail transacional do cancelamento (cobrança não
 	// concluída). Idempotente na implementação (timeline unique). O e-mail de
 	// ESTORNO saiu daqui: virou reactor do domínio Notification
@@ -3866,21 +3868,19 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 	return nil
 }
 
-// ReactCartPaid is the cart.paid fan-out reactor (L3): runs the customer
-// post-payment flow via postCheckoutHook.OnCartPaid (tracking token, order
-// timeline) and records GMV on the billing ledger (billingGate.OnCartPaid). The
-// coupon redemption confirmation is NO LONGER here: it reacts to cart.paid as its
-// own Coupon reactor (coupon/listeners.OnCartPaid → ConfirmRedemption), alongside
-// the buyer receipt (notification/listeners.OnCartPaid → SendPaidReceipt) and the
-// waitlist fulfilment (inventory/listeners.OnCartPaid) reactors that also react to
-// the fact instead of being called inline in this fan-out.
-// Each remaining step is idempotent (tracking_token set-once, order_events/ledger
-// UNIQUE), so asynq redelivery/retry is safe. ERP finalisation is a separate reactor
-// (ReactOrderPaidERP, triggered by order.paid) because it needs the gateway snapshot.
+// ReactCartPaid is the cart.paid fan-out reactor (L3): records GMV on the billing
+// ledger (billingGate.OnCartPaid). The customer post-payment flow no longer runs
+// here — o tracking_token e a timeline `payment_confirmed` nascem na materialização
+// da Order (order/listeners.OnCartPaid, Fatia A4), que roda ANTES deste reactor.
+// The coupon redemption confirmation also reacts to cart.paid as its own Coupon
+// reactor (coupon/listeners.OnCartPaid → ConfirmRedemption), alongside the buyer
+// receipt (notification/listeners.OnCartPaid → SendPaidReceipt) and the waitlist
+// fulfilment (inventory/listeners.OnCartPaid) reactors that react to the fact
+// instead of being called inline in this fan-out.
+// The billing step is idempotent (ledger UNIQUE), so asynq redelivery/retry is safe.
+// ERP finalisation is a separate reactor (ReactOrderPaidERP, triggered by order.paid)
+// because it needs the gateway snapshot.
 func (s *Service) ReactCartPaid(ctx context.Context, cartID, storeID string, gmvCents int64) error {
-	if s.postCheckoutHook != nil {
-		s.postCheckoutHook.OnCartPaid(ctx, cartID)
-	}
 	if s.billingGate != nil {
 		if err := s.billingGate.OnCartPaid(ctx, storeID, cartID, gmvCents); err != nil {
 			return fmt.Errorf("billing ledger on cart.paid: %w", err)
