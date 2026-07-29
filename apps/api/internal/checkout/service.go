@@ -12,6 +12,7 @@ import (
 
 	"livecart/apps/api/internal/integration"
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
@@ -51,11 +52,26 @@ type PostCheckoutHook interface {
 	OnDelivered(ctx context.Context, cartID, source string)
 }
 
+// PaymentService is the slice of payment.Service the checkout flow calls: the
+// stateless payment fast-paths (hosted checkout, transparent card/PIX, and the
+// per-integration checkout config). Declared here — in the consumer package —
+// and implemented by *payment.Service, so checkout depends on the payment
+// domain through a narrow interface instead of the integration monolith
+// (strangler-fig B1e). The non-payment integration calls (waitlist, stock
+// reservation, ERP prewarm) still go through integrationService.
+type PaymentService interface {
+	CreateCheckout(ctx context.Context, input payment.CreateCheckoutInput) (*payment.CreateCheckoutOutput, error)
+	GetCheckoutConfig(ctx context.Context, integrationID, storeID string) (publicKey string, methods []string, err error)
+	ProcessCardPayment(ctx context.Context, input payment.ProcessCardPaymentInput) (*payment.ProcessCardPaymentOutput, error)
+	GeneratePixPayment(ctx context.Context, input payment.GeneratePixPaymentInput) (*payment.GeneratePixPaymentOutput, error)
+}
+
 // Service handles business logic for public checkout.
 type Service struct {
 	repo               *Repository
 	pool               *pgxpool.Pool
 	integrationService *integration.Service
+	paymentService     PaymentService
 	couponLifecycle    CouponLifecycle
 	postCheckoutHook   PostCheckoutHook
 	logger             *zap.Logger
@@ -66,12 +82,14 @@ func NewService(
 	repo *Repository,
 	pool *pgxpool.Pool,
 	integrationService *integration.Service,
+	paymentService PaymentService,
 	logger *zap.Logger,
 ) *Service {
 	return &Service{
 		repo:               repo,
 		pool:               pool,
 		integrationService: integrationService,
+		paymentService:     paymentService,
 		logger:             logger.Named("checkout"),
 	}
 }
@@ -431,7 +449,7 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 	failureURL := fmt.Sprintf("%s/cart/%s?status=failure", baseURL, cart.Token)
 
 	// Create checkout via integration service
-	checkoutResult, err := s.integrationService.CreateCheckout(ctx, integration.CreateCheckoutInput{
+	checkoutResult, err := s.paymentService.CreateCheckout(ctx, payment.CreateCheckoutInput{
 		IntegrationID:  paymentIntegration.ID.String(),
 		StoreID:        cart.StoreID,
 		CartID:         cart.ID,
@@ -619,7 +637,7 @@ func (s *Service) resolveCheckoutIntegration(ctx context.Context, cart *CartRow)
 	if cart.PaymentIntegrationID != nil && *cart.PaymentIntegrationID != "" {
 		bound, err := s.repo.GetIntegrationByID(ctx, *cart.PaymentIntegrationID)
 		if err == nil && bound != nil && bound.Status == "active" {
-			publicKey, methods, configErr := s.integrationService.GetCheckoutConfig(ctx, bound.ID.String(), cart.StoreID)
+			publicKey, methods, configErr := s.paymentService.GetCheckoutConfig(ctx, bound.ID.String(), cart.StoreID)
 			if configErr == nil {
 				return bound, publicKey, methods, nil
 			}
@@ -645,7 +663,7 @@ func (s *Service) resolveCheckoutIntegration(ctx context.Context, cart *CartRow)
 	var lastErr error
 	for i := range candidates {
 		candidate := candidates[i]
-		publicKey, methods, configErr := s.integrationService.GetCheckoutConfig(ctx, candidate.ID.String(), cart.StoreID)
+		publicKey, methods, configErr := s.paymentService.GetCheckoutConfig(ctx, candidate.ID.String(), cart.StoreID)
 		if configErr != nil {
 			logger.From(ctx, s.logger).Warn("payment integration failed checkout config, trying next",
 				zap.String("cart_id", cart.ID),
@@ -797,7 +815,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	)
 
 	// Process payment via integration service
-	result, err := s.integrationService.ProcessCardPayment(ctx, integration.ProcessCardPaymentInput{
+	result, err := s.paymentService.ProcessCardPayment(ctx, payment.ProcessCardPaymentInput{
 		IntegrationID: paymentIntegration.ID.String(),
 		StoreID:       cart.StoreID,
 		CartID:        cart.ID,
@@ -1029,7 +1047,7 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	)
 
 	// Generate PIX via integration service
-	result, err := s.integrationService.GeneratePixPayment(ctx, integration.GeneratePixPaymentInput{
+	result, err := s.paymentService.GeneratePixPayment(ctx, payment.GeneratePixPaymentInput{
 		IntegrationID: paymentIntegration.ID.String(),
 		StoreID:       cart.StoreID,
 		CartID:        cart.ID,

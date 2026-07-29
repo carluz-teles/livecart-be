@@ -587,7 +587,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			paymentSvc.SetCartPaymentGateway(integrationSvc)
 
 			// Create webhook handler
-			integrationWebhookHandler = integration.NewWebhookHandler(integrationSvc, log)
+			integrationWebhookHandler = integration.NewWebhookHandler(integrationSvc, paymentSvc, log)
 
 			// Wire Notifier into liveSvc (lazy injection breaks the dependency
 			// cycle: integration.Service depends on live.Service, and the
@@ -719,7 +719,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	var checkoutSvc *checkout.Service
 	if integrationSvc != nil {
 		checkoutRepo := checkout.NewRepository(queries)
-		checkoutSvc = checkout.NewService(checkoutRepo, pool, integrationSvc, log)
+		checkoutSvc = checkout.NewService(checkoutRepo, pool, integrationSvc, paymentSvc, log)
 		if postCheckoutSvc != nil {
 			checkoutSvc.SetPostCheckoutHook(postCheckoutSvc)
 		}
@@ -888,7 +888,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	// Integration routes (store-scoped)
 	if integrationSvc != nil {
-		integrationHandler := integration.NewHandler(integrationSvc, validate, s3Client)
+		integrationHandler := integration.NewHandler(integrationSvc, paymentSvc, validate, s3Client)
 		integrationHandler.RegisterRoutes(storeScoped)
 
 		// Payment admin routes (Bloco B1c) — Pagar.me connect + webhook

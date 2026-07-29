@@ -3152,16 +3152,6 @@ func isGTIN(s string) bool {
 // payment.Service directly. The provider-specific Pagar.me webhook helpers
 // (GetPagarmeWebhookStatus / Test* / RunPagarmeWebhookLiveTest) stay here.
 
-// CreateCheckout creates a checkout session with idempotency support.
-func (s *Service) CreateCheckout(ctx context.Context, input CreateCheckoutInput) (*CreateCheckoutOutput, error) {
-	return s.paymentService.CreateCheckout(ctx, input)
-}
-
-// GetPaymentStatus retrieves the status of a payment.
-func (s *Service) GetPaymentStatus(ctx context.Context, input GetPaymentStatusInput) (*GetPaymentStatusOutput, error) {
-	return s.paymentService.GetPaymentStatus(ctx, input)
-}
-
 // GetPagarmeWebhookStatus checks whether the merchant has registered our
 // webhook URL on the Pagar.me dashboard by inspecting recent delivery history
 // (GET /hooks). Pagar.me v5 has no public API to list webhook subscriptions,
@@ -3448,30 +3438,6 @@ func (s *Service) RunPagarmeWebhookLiveTest(ctx context.Context, integrationID, 
 	return out, nil
 }
 
-// RefundPayment initiates a refund.
-func (s *Service) RefundPayment(ctx context.Context, input RefundPaymentInput) (*RefundPaymentOutput, error) {
-	return s.paymentService.RefundPayment(ctx, input)
-}
-
-// =============================================================================
-// TRANSPARENT CHECKOUT OPERATIONS
-// =============================================================================
-
-// GetCheckoutConfig retrieves the checkout configuration for a store.
-func (s *Service) GetCheckoutConfig(ctx context.Context, integrationID, storeID string) (string, []string, error) {
-	return s.paymentService.GetCheckoutConfig(ctx, integrationID, storeID)
-}
-
-// ProcessCardPayment processes a card payment with a tokenized card.
-func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPaymentInput) (*ProcessCardPaymentOutput, error) {
-	return s.paymentService.ProcessCardPayment(ctx, input)
-}
-
-// GeneratePixPayment generates a PIX QR code for payment.
-func (s *Service) GeneratePixPayment(ctx context.Context, input GeneratePixPaymentInput) (*GeneratePixPaymentOutput, error) {
-	return s.paymentService.GeneratePixPayment(ctx, input)
-}
-
 // =============================================================================
 // WEBHOOK OPERATIONS
 // =============================================================================
@@ -3509,27 +3475,12 @@ func (s *Service) StoreWebhookEvent(ctx context.Context, input StoreWebhookInput
 }
 
 // DispatchPaymentProcess and ProcessPaymentNotification were extracted to the
-// payment.Service (strangler-fig B1d): the payment webhook consumer now lives in
-// internal/payment. These stay as thin delegations so the public
-// integration.Service API (and the callers in main.newApp / webhook_handler) is
-// unchanged. They run against the SAME repository via the payment.CartPaymentGateway
-// this Service implements (adapters below), so the guarded UpdateCartPaymentStatus
-// and the payment×expiration serialization are untouched.
-func (s *Service) DispatchPaymentProcess(ctx context.Context, input ProcessPaymentInput) error {
-	return s.paymentService.DispatchPaymentProcess(ctx, paymentdomain.ProcessPaymentInput{
-		StoreID:   input.StoreID,
-		Provider:  input.Provider,
-		PaymentID: input.PaymentID,
-	})
-}
-
-func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessPaymentInput) error {
-	return s.paymentService.ProcessPaymentNotification(ctx, paymentdomain.ProcessPaymentInput{
-		StoreID:   input.StoreID,
-		Provider:  input.Provider,
-		PaymentID: input.PaymentID,
-	})
-}
+// payment.Service (strangler-fig B1d) and the call sites now dispatch straight
+// to it (B1e): the webhook edge holds a payment.PaymentDispatcher, and the
+// asynq consumer in main.newApp calls paymentSvc.ProcessPaymentNotification
+// directly. integration.Service keeps only the CartPaymentGateway adapters
+// below, so the consumer still runs against the SAME repository — same guarded
+// UpdateCartPaymentStatus, same payment×expiration serialization.
 
 // --- payment.CartPaymentGateway adapters (B1d) ---
 // These let the extracted payment.Service run the payment webhook consumer

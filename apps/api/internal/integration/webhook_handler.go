@@ -9,21 +9,34 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
 
+	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
 )
 
+// PaymentDispatcher is the slice of payment.Service the webhook edge uses to
+// hand a payment notification off to the async consumer (L1→L2 of the event
+// choreography). Declared here — in the consumer — and implemented by
+// *payment.Service, so the webhook edge dispatches straight to the payment
+// domain instead of routing through the integration.Service delegation
+// (strangler-fig B1e).
+type PaymentDispatcher interface {
+	DispatchPaymentProcess(ctx context.Context, input paymentdomain.ProcessPaymentInput) error
+}
+
 // WebhookHandler handles incoming webhooks from external providers.
 type WebhookHandler struct {
 	service *Service
+	payment PaymentDispatcher
 	logger  *zap.Logger
 }
 
 // NewWebhookHandler creates a new webhook handler.
-func NewWebhookHandler(service *Service, logger *zap.Logger) *WebhookHandler {
+func NewWebhookHandler(service *Service, payment PaymentDispatcher, logger *zap.Logger) *WebhookHandler {
 	return &WebhookHandler{
 		service: service,
+		payment: payment,
 		logger:  logger,
 	}
 }
@@ -294,7 +307,7 @@ func (h *WebhookHandler) HandleMercadoPago(c *fiber.Ctx) error {
 		// request context is still valid (no detach needed).
 		paymentID := webhook.Data.ID
 		ctx := logger.WithStore(c.UserContext(), storeID, storeSlug)
-		if err := h.service.DispatchPaymentProcess(ctx, ProcessPaymentInput{
+		if err := h.payment.DispatchPaymentProcess(ctx, paymentdomain.ProcessPaymentInput{
 			StoreID:   storeID,
 			Provider:  "mercado_pago",
 			PaymentID: paymentID,
@@ -458,7 +471,7 @@ func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 			// Thin dispatcher (L1): emit payment.process to the outbox; the consumer
 			// runs the guarded reconciliation with retry + dead-letter.
 			ctx := logger.WithStore(c.UserContext(), storeID, storeSlug)
-			if err := h.service.DispatchPaymentProcess(ctx, ProcessPaymentInput{
+			if err := h.payment.DispatchPaymentProcess(ctx, paymentdomain.ProcessPaymentInput{
 				StoreID:   storeID,
 				Provider:  "pagarme",
 				PaymentID: orderID,
