@@ -43,6 +43,12 @@ const (
 	CartExpired       Name = "cart.expired"
 	CartReopened      Name = "cart.reopened"
 	CartCancelled     Name = "cart.cancelled"
+	// CartCancellationReverted: o pagamento chegou DEPOIS do cancelamento manual
+	// do lojista e venceu — o cart voltou para pago (regra "pagamento vence").
+	// Fato de auditoria: quem consome o cart.cancelled anterior precisa saber que
+	// ele foi desfeito, e o lojista precisa do rastro de por que o pedido
+	// "cancelado" reapareceu pago.
+	CartCancellationReverted Name = "cart.cancellation_reverted"
 	// CartPaid / CartRefunded are the canonical payment facts (specific-fact
 	// strategy): the payment consumer resolves the provider status and emits the
 	// right one; reactors (GMV, order, coupon, ...) subscribe to what they need.

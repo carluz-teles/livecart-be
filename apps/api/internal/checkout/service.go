@@ -122,6 +122,13 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 	if cart.Status == "cancelled" && cart.CancelledReason == "customer_blocked" {
 		return nil, httpx.ErrNotFound("carrinho não encontrado")
 	}
+	// Cancelado pela loja: nada do carrinho é devolvido (nem itens, nem valores)
+	// — o comprador vê só a mensagem. Ela diz CANCELADO, e não "expirado", que é
+	// justamente a confusão que essa distinção existe para evitar: ninguém
+	// perdeu prazo nenhum aqui.
+	if cart.Status == "cancelled" {
+		return nil, httpx.ErrUnprocessable("Este carrinho foi cancelado pela loja. Fale com a loja para receber um novo link.")
+	}
 	// Note: paid carts are allowed - frontend will show a "paid" dialog
 
 	// Freeze the initial cart on the very first GET (idempotent — subsequent
@@ -1402,6 +1409,12 @@ func (s *Service) loadEditableCart(ctx context.Context, token string) (*CartRow,
 	}
 	if cart.Status == "expired" {
 		return nil, httpx.ErrUnprocessable("carrinho expirado")
+	}
+	// Cart cancelado (pelo lojista ou por bloqueio do comprador) não aceita mais
+	// mutação de item: editar aqui mexeria em estoque e reservas de ERP de um
+	// carrinho morto — o estorno já devolveu tudo.
+	if cart.Status == "cancelled" {
+		return nil, httpx.ErrConflict("carrinho cancelado")
 	}
 	if cart.PaymentStatus == "paid" {
 		return nil, httpx.ErrConflict("carrinho já foi pago")

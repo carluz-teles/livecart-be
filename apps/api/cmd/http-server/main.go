@@ -794,6 +794,10 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		// Same pattern for the manual "Verificar NFe" button: orderSvc is the
 		// HTTP entry point but the ERP fetch lives on the integration service.
 		orderSvc.SetCartInvoiceSyncer(integrationSvc)
+		// Cancelamento de pedido não pago: o botão vive no painel de pedidos, mas
+		// desfazer estoque local, reserva/pedido no Tiny e fila de espera é
+		// orquestração do integration service.
+		orderSvc.SetCartCanceller(integrationSvc)
 	}
 	// Block-status lookup for the order detail page; customerSvc is the
 	// authoritative source for blocked_handles.
@@ -1048,6 +1052,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			var p struct {
 				CartID  string `json:"cart_id"`
 				StoreID string `json:"store_id"`
+				Reason  string `json:"reason"`
 			}
 			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" {
 				return asynq.SkipRetry
@@ -1058,6 +1063,17 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				logger.From(ctx, log).Warn("cart.cancelled: coupon release failed",
 					zap.String("cart_id", p.CartID), zap.Error(err))
 				return err
+			}
+			// Estorno no ERP só para o cancelamento MANUAL do lojista: o
+			// bloqueio de handle já estorna inline no seu próprio sweep, e o
+			// cancelamento de COBRANÇA não mexe em reserva de estoque. Idempotente
+			// por erp_order_state, então retry/DLQ do asynq é seguro.
+			if p.Reason == integration.CancelReasonStore && p.StoreID != "" {
+				if err := integrationSvc.ReactCartCancelledERP(ctx, p.CartID, p.StoreID); err != nil {
+					logger.From(ctx, log).Warn("cart.cancelled: ERP reversal failed",
+						zap.String("cart_id", p.CartID), zap.Error(err))
+					return err
+				}
 			}
 			if err := orderListener.OnCartCancelled(ctx, p.CartID, p.StoreID); err != nil {
 				if errors.Is(err, orderlisteners.ErrOrderNotMaterialised) {
@@ -1098,6 +1114,37 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				return err
 			}
 			return integrationSvc.ReactCartExpiredERP(ctx, p.CartID, p.StoreID)
+		})
+
+		// cart.cancellation_reverted reactor: o lojista cancelou o carrinho e o
+		// pagamento entrou assim mesmo — o pedido voltou e seguiu o fluxo normal
+		// (ERP, GMV, e-mail). Não há nada a corrigir no sistema; o que falta é
+		// AVISAR o lojista, senão ele descobre por acidente que vendeu algo que
+		// julgava cancelado. O estorno do dinheiro, se ele quiser, é por fora.
+		// Idempotente pelo índice único (recipient_id, cart_id, type), então o
+		// retry do asynq não enche o sino.
+		eventsServer.Register(events.CartCancellationReverted, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				CartID         string `json:"cart_id"`
+				StoreID        string `json:"store_id"`
+				ShortID        int    `json:"short_id"`
+				PlatformHandle string `json:"platform_handle"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" || p.StoreID == "" {
+				return asynq.SkipRetry
+			}
+			logger.From(ctx, log).Warn("cart cancellation reverted by payment — notifying store",
+				zap.String("event", string(env.Name)),
+				zap.String("event_id", env.EventID),
+				zap.String("cart_id", p.CartID),
+				zap.Int("short_id", p.ShortID),
+			)
+			return notifInboxWriter.NotifyOrderCancellationReverted(
+				ctx, p.StoreID, p.CartID, p.ShortID, p.PlatformHandle)
 		})
 
 		// ETA-based cart expiry: schedule a cart.expire task at the cart's

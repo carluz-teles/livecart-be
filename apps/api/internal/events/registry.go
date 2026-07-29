@@ -25,6 +25,9 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	mux.HandleFunc(string(SessionEnded), logEvent(log))
 	mux.HandleFunc(string(PostWindowClosed), logEvent(log))
 	mux.HandleFunc(string(CartItemAdded), logEvent(log))
+	// CartCancellationReverted NÃO entra aqui: a composition root (main.newApp)
+	// registra o reactor que avisa o lojista no sino do painel. Registrar nos
+	// dois lugares faria o asynq entrar em pânico por padrão duplicado.
 	// CartCheckoutArmed, CartReopened, CartExpired and CartCancelled are registered
 	// by the composition root (main.newApp) with domain handlers: checkout_armed/
 	// reopened arm the cart.expire ETA timer (where expires_at is set — live carts

@@ -170,6 +170,59 @@ WHERE carts.id = $1
   )
 RETURNING *;
 
+-- name: CancelCart :one
+-- Cancelamento MANUAL pelo lojista (LIV-84). Mesmo desenho guard-first do
+-- ExpireCart: o guard vive DENTRO do UPDATE para fechar a corrida com o webhook
+-- de pagamento — se o cliente pagou no intervalo, 0 rows retornam e o caller
+-- ABORTA sem devolver estoque nem cancelar nada no ERP (o pagamento vence).
+--
+-- Diferenças propositais em relação ao ExpireCart:
+--   • sem guard de expires_at: a intenção do lojista não espera prazo nenhum;
+--   • sem guard de waitlist: o cart morre por decisão humana, então os itens em
+--     fila DESTE cart são cancelados junto (CancelWaitlistItemsByCart) em vez de
+--     manterem o cart vivo.
+-- 'expired'/'cancelled' não são reelegíveis → o flip é idempotente.
+UPDATE carts
+SET status = 'cancelled', cancelled_reason = 'store_cancelled'
+WHERE carts.id = $1
+  AND status IN ('active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+RETURNING *;
+
+-- name: RestoreCancelledCartAsPaid :one
+-- O outro lado da corrida cancelamento × pagamento: o webhook confirmou o
+-- pagamento DEPOIS que o lojista cancelou (PIX pago com o QR já aberto, cartão
+-- em análise, webhook atrasado). Regra de negócio: **pagamento vence** — o
+-- pedido volta e consta como PAGO, nunca como cancelado.
+--
+-- Restaura o cart para 'checkout' + pago e zera as colunas de ERP para que a
+-- finalização pós-pagamento crie um pedido de venda LIMPO no Tiny (o
+-- cancelamento já cancelou/estornou o anterior). O estoque local retomado fica
+-- por conta do caller, na MESMA transação.
+-- Guard: só restaura cart cancelado PELO LOJISTA e ainda não pago — um cart
+-- expirado, bloqueado por handle ou já pago não entra por aqui.
+UPDATE carts
+SET status              = 'checkout',
+    cancelled_reason    = NULL,
+    payment_status      = $2,
+    checkout_id         = $3,
+    paid_at             = $4,
+    payment_method      = $5,
+    expires_at          = NULL,
+    -- Carimbo do caso para o histórico do pedido e para o aviso no sino do
+    -- painel: sem ele o lojista descobriria por acidente que vendeu algo que
+    -- julgava cancelado.
+    cancellation_reverted_at = now(),
+    erp_order_state     = 'none',
+    external_order_id   = NULL,
+    erp_stock_launched  = FALSE,
+    erp_op_started_at   = NULL
+WHERE id = $1
+  AND status = 'cancelled'
+  AND cancelled_reason = 'store_cancelled'
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+RETURNING *;
+
 -- name: UpdateCartPayment :one
 -- $3 = payment-provider ID (MP/Pagar.me). Goes to checkout_id, not
 -- external_order_id — the latter is reserved for the ERP (Tiny) order ID

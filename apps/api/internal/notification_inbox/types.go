@@ -11,6 +11,9 @@ const (
 	TypeIdeaComment      = "idea_comment"
 	TypeIdeaReply        = "idea_reply"
 	TypeIdeaStatusChange = "idea_status_change"
+	// Fato de PEDIDO (não de ideia): o carrinho cancelado pelo lojista acabou
+	// sendo pago e o cancelamento foi revertido. Ancorado em cart_id.
+	TypeOrderCancellationReverted = "order_cancellation_reverted"
 )
 
 // =============================================================================
@@ -18,9 +21,12 @@ const (
 // =============================================================================
 
 type NotificationResponse struct {
-	ID         string          `json:"id"`
-	Type       string          `json:"type"`
-	IdeaID     *string         `json:"ideaId,omitempty"`
+	ID     string  `json:"id"`
+	Type   string  `json:"type"`
+	IdeaID *string `json:"ideaId,omitempty"`
+	// CartID é a âncora dos fatos de PEDIDO (o pedido É o carrinho). O sino usa
+	// para linkar direto em /orders/{cartId}.
+	CartID     *string         `json:"cartId,omitempty"`
 	CommentID  *string         `json:"commentId,omitempty"`
 	ActorID    *string         `json:"actorId,omitempty"`
 	ActorName  *string         `json:"actorName,omitempty"`
@@ -49,6 +55,7 @@ type NotificationRow struct {
 	ID         string
 	Type       string
 	IdeaID     *string
+	CartID     *string
 	CommentID  *string
 	ActorID    *string
 	ActorName  *string

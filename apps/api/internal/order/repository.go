@@ -269,7 +269,9 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 			COALESCE(op.invoice_id, ''),
 			COALESCE(op.invoice_key, ''),
 			COALESCE(op.invoice_status, ''),
-			op.invoice_emitted_at
+			op.invoice_emitted_at,
+
+			c.cancellation_reverted_at
 		FROM carts c
 		JOIN live_events e ON e.id = c.event_id
 		JOIN stores s      ON s.id = e.store_id
@@ -340,6 +342,8 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 		&row.ERPInvoiceKey,
 		&row.ERPInvoiceStatus,
 		&row.ERPInvoiceEmittedAt,
+
+		&row.CancellationRevertedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil

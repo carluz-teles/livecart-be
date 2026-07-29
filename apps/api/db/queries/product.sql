@@ -65,6 +65,19 @@ SET stock = stock + $2, updated_at = now()
 WHERE id = $1
 RETURNING *;
 
+-- name: ForceDecrementProductStock :one
+-- Retoma estoque SEM piso em zero. Único caso de uso: o cart cancelado pelo
+-- lojista que acabou pago (RestoreCancelledCartAsPaid) — a unidade já foi
+-- vendida de verdade, então o saldo tem de refletir isso mesmo que fique
+-- negativo. Saldo negativo é o sinal honesto de "vendi mais do que tinha" e
+-- aparece para o lojista; recusar o decremento esconderia a venda.
+-- NÃO usar em fluxo de compra normal — lá o piso do DecrementProductStock é
+-- justamente o que impede overselling.
+UPDATE products
+SET stock = stock - $2, updated_at = now()
+WHERE id = $1
+RETURNING *;
+
 -- name: DecrementProductStockUpTo :one
 -- Toma ATÉ `want` unidades, nunca abaixo de zero, e retorna quantas foram
 -- de fato tomadas (0 quando o produto já estava esgotado). Habilita a
