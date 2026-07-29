@@ -14,16 +14,12 @@ import (
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/events"
+	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/dbtx"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/idempotency"
 	"livecart/apps/api/lib/query"
 )
-
-// ErrCartNotPayable sinaliza que uma escrita de pagamento foi recusada pelo
-// guard da query (cart 'expired'/'cancelled') — 0 rows. O caller deve tratar
-// como skip benigno (não finalizar), não como falha do webhook.
-var ErrCartNotPayable = errors.New("cart not payable (expired or cancelled)")
 
 // Repository handles database operations for integrations.
 type Repository struct {
@@ -2326,7 +2322,9 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Guard da query recusou: cart expirado/cancelado. Não é falha.
-			return ErrCartNotPayable
+			// Sentinel vive no pacote payment (B1d) — fonte única, consumido pelo
+			// webhook de pagamento que agora mora lá.
+			return paymentdomain.ErrCartNotPayable
 		}
 		return fmt.Errorf("updating cart payment status: %w", err)
 	}

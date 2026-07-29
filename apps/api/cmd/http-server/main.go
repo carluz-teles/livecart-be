@@ -397,6 +397,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	// Integration Layer setup
 	var integrationSvc *integration.Service
+	var paymentSvc *paymentdomain.Service
 	var integrationWebhookHandler *integration.WebhookHandler
 	var notificationSvc *notification.Service
 	var postCheckoutSvc *postcheckout.Service
@@ -578,8 +579,12 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// Payment-provider resolution lives in the extracted payment.Service
 			// (strangler-fig B1a). integrationSvc is its resolver; GetPaymentProvider
 			// delegates back into it.
-			paymentSvc := paymentdomain.NewService(integrationSvc, idempotencySvc, log)
+			paymentSvc = paymentdomain.NewService(integrationSvc, idempotencySvc, log)
 			integrationSvc.SetPaymentService(paymentSvc)
+			// B1d: wire the integration-backed gateway so the payment webhook
+			// consumer (ProcessPaymentNotification) runs against the SAME
+			// integration.Repository — same pool, same guarded write, same outbox.
+			paymentSvc.SetCartPaymentGateway(integrationSvc)
 
 			// Create webhook handler
 			integrationWebhookHandler = integration.NewWebhookHandler(integrationSvc, log)
@@ -963,11 +968,14 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
 				return asynq.SkipRetry
 			}
-			var input integration.ProcessPaymentInput
+			// B1d: the consumer now lives in payment.Service. The command payload
+			// is wire-compatible (payment.ProcessPaymentInput mirrors the
+			// integration one field-for-field), so in-flight tasks decode fine.
+			var input paymentdomain.ProcessPaymentInput
 			if err := json.Unmarshal(env.Payload, &input); err != nil {
 				return asynq.SkipRetry
 			}
-			return integrationSvc.ProcessPaymentNotification(ctx, input)
+			return paymentSvc.ProcessPaymentNotification(ctx, input)
 		})
 
 		// Payment choreography L3: reactors of the cart payment facts. The fan-out

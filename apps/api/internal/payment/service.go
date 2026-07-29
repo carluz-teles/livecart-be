@@ -27,6 +27,12 @@ type Service struct {
 	resolver    IntegrationResolver
 	idempotency *idempotency.Service
 	logger      *zap.Logger
+
+	// gateway backs the payment webhook consumer (ProcessPaymentNotification /
+	// DispatchPaymentProcess, B1d). It is wired at boot via SetCartPaymentGateway
+	// and is implemented by *integration.Service so the consumer runs against the
+	// SAME integration.Repository — no second repo, no second advisory lock.
+	gateway CartPaymentGateway
 }
 
 // NewService builds the payment Service.
