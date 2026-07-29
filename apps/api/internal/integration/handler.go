@@ -86,13 +86,13 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/whatsapp/status", h.GetWhatsAppStatus)
 	g.Post("/whatsapp/test-message", h.SendWhatsAppTestMessage)
 
-	// Payment — provider-specific connect (no OAuth). Pagar.me uses static
-	// API keys (sk_*/pk_*), so the merchant pastes them into a form and we
-	// validate live against the gateway before persisting.
-	g.Post("/payment/pagarme/connect", h.ConnectPagarme)
-	g.Get("/:id/pagarme/webhook-status", h.GetPagarmeWebhookStatus)
-	g.Post("/:id/pagarme/webhook-test", h.TestPagarmeWebhook)
-	g.Post("/:id/pagarme/webhook-live-test", h.RunPagarmeWebhookLiveTest)
+	// Payment — provider-specific connect (no OAuth) + webhook diagnostics now
+	// live in the extracted payment.Handler (Bloco B1c), registered from main.go
+	// on this same /integrations group. Paths/verbs unchanged:
+	//   POST /payment/pagarme/connect
+	//   GET  /:id/pagarme/webhook-status
+	//   POST /:id/pagarme/webhook-test
+	//   POST /:id/pagarme/webhook-live-test
 
 	// Shipping — token-based connect (no OAuth) + order lifecycle helpers.
 	// These are typed at the provider level because each shipping provider

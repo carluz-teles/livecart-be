@@ -153,7 +153,6 @@ var baselineWithoutValidate = map[string]bool{
 	// integration — domínio não migrado (conexões ERP/pagamento/whatsapp)
 	"integration.AddressRequest":                true,
 	"integration.AttachShippingInvoiceRequest":  true,
-	"integration.ConnectPagarmeRequest":         true,
 	"integration.ConnectSmartEnviosRequest":     true,
 	"integration.ConnectWhatsAppRequest":        true,
 	"integration.CreateCheckoutRequest":         true,

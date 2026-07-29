@@ -886,6 +886,13 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		integrationHandler := integration.NewHandler(integrationSvc, validate, s3Client)
 		integrationHandler.RegisterRoutes(storeScoped)
 
+		// Payment admin routes (Bloco B1c) — Pagar.me connect + webhook
+		// diagnostics extracted into payment.Handler. Same /integrations group,
+		// same paths/verbs; the still-integration-owned use cases are reached
+		// through the paymentdomain adapter over integrationSvc.
+		paymentHandler := paymentdomain.NewHandler(integration.NewPaymentAdmin(integrationSvc))
+		paymentHandler.RegisterRoutes(storeScoped)
+
 		// Notification settings routes (depends on integration service)
 		notificationHandler := notification.NewHandler(notificationSvc, log)
 		notificationHandler.RegisterRoutes(storeScoped)
