@@ -534,24 +534,6 @@ type OrderPayment struct {
 	ErpPaymentSnapshot    json.RawMessage    `json:"erp_payment_snapshot"`
 }
 
-type Payment struct {
-	ID                pgtype.UUID        `json:"id"`
-	CartID            pgtype.UUID        `json:"cart_id"`
-	IntegrationID     pgtype.UUID        `json:"integration_id"`
-	ExternalPaymentID pgtype.Text        `json:"external_payment_id"`
-	Provider          string             `json:"provider"`
-	AmountCents       int64              `json:"amount_cents"`
-	Currency          pgtype.Text        `json:"currency"`
-	Method            pgtype.Text        `json:"method"`
-	Status            string             `json:"status"`
-	StatusDetail      pgtype.Text        `json:"status_detail"`
-	ProviderResponse  json.RawMessage    `json:"provider_response"`
-	CreatedAt         pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
-	PaidAt            pgtype.Timestamptz `json:"paid_at"`
-	IdempotencyKey    pgtype.Text        `json:"idempotency_key"`
-}
-
 type Product struct {
 	ID             pgtype.UUID        `json:"id"`
 	StoreID        pgtype.UUID        `json:"store_id"`
