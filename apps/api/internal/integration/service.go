@@ -3145,119 +3145,21 @@ func isGTIN(s string) bool {
 // =============================================================================
 // PAYMENT OPERATIONS
 // =============================================================================
+//
+// These stateless fast-paths were moved to internal/payment (strangler-fig
+// B1b); the methods below are now thin delegations that preserve the public
+// signatures so the existing call sites keep working until B1e repoints them at
+// payment.Service directly. The provider-specific Pagar.me webhook helpers
+// (GetPagarmeWebhookStatus / Test* / RunPagarmeWebhookLiveTest) stay here.
 
 // CreateCheckout creates a checkout session with idempotency support.
 func (s *Service) CreateCheckout(ctx context.Context, input CreateCheckoutInput) (*CreateCheckoutOutput, error) {
-	// Check idempotency
-	idemReq := idempotency.CheckRequest{
-		IdempotencyKey: input.IdempotencyKey,
-		StoreID:        input.StoreID,
-		IntegrationID:  input.IntegrationID,
-		Operation:      "create_checkout",
-		Payload:        input,
-	}
-
-	cached, err := s.idempotency.Check(ctx, idemReq)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("idempotency check failed", zap.Error(err))
-	}
-	if cached != nil && cached.Found {
-		var output CreateCheckoutOutput
-		if err := json.Unmarshal(cached.Response, &output); err == nil {
-			logger.From(ctx, s.logger).Debug("returning cached checkout response",
-				zap.String("idempotency_key", input.IdempotencyKey),
-			)
-			return &output, nil
-		}
-	}
-
-	// Start idempotency tracking
-	var idemRecord *idempotency.Record
-	if input.IdempotencyKey != "" || s.idempotency != nil {
-		idemRecord, err = s.idempotency.Start(ctx, idemReq)
-		if err != nil {
-			logger.From(ctx, s.logger).Warn("idempotency start failed", zap.Error(err))
-		}
-	}
-
-	// Get payment provider
-	paymentProvider, err := s.GetPaymentProvider(ctx, input.IntegrationID, input.StoreID)
-	if err != nil {
-		if idemRecord != nil {
-			_ = s.idempotency.Fail(ctx, idemRecord.ID, err)
-		}
-		return nil, err
-	}
-
-	// Build notify URL
-	notifyURL := input.NotifyURL
-	if notifyURL == "" {
-		baseURL := config.WebhookBaseURL.String()
-		if baseURL != "" {
-			notifyURL = fmt.Sprintf("%s/api/webhooks/%s/%s",
-				baseURL,
-				paymentProvider.Name(),
-				input.StoreID,
-			)
-		}
-	}
-
-	// Create checkout
-	result, err := paymentProvider.CreateCheckout(ctx, providers.CheckoutOrder{
-		ExternalID:  input.CartID,
-		Items:       input.Items,
-		Customer:    input.Customer,
-		TotalAmount: input.TotalAmount,
-		Currency:    input.Currency,
-		NotifyURL:   notifyURL,
-		SuccessURL:  input.SuccessURL,
-		FailureURL:  input.FailureURL,
-		Metadata:    input.Metadata,
-	})
-	if err != nil {
-		s.handleProviderError(ctx, input.IntegrationID, "create_checkout", err)
-		if idemRecord != nil {
-			_ = s.idempotency.Fail(ctx, idemRecord.ID, err)
-		}
-		return nil, fmt.Errorf("creating checkout: %w", err)
-	}
-
-	output := &CreateCheckoutOutput{
-		CheckoutID:  result.CheckoutID,
-		CheckoutURL: result.CheckoutURL,
-		ExpiresAt:   result.ExpiresAt,
-	}
-
-	// Complete idempotency
-	if idemRecord != nil {
-		_ = s.idempotency.Complete(ctx, idemRecord.ID, output)
-	}
-
-	return output, nil
+	return s.paymentService.CreateCheckout(ctx, input)
 }
 
 // GetPaymentStatus retrieves the status of a payment.
 func (s *Service) GetPaymentStatus(ctx context.Context, input GetPaymentStatusInput) (*GetPaymentStatusOutput, error) {
-	paymentProvider, err := s.GetPaymentProvider(ctx, input.IntegrationID, input.StoreID)
-	if err != nil {
-		return nil, err
-	}
-
-	status, err := paymentProvider.GetPaymentStatus(ctx, input.PaymentID)
-	if err != nil {
-		s.handleProviderError(ctx, input.IntegrationID, "get_payment_status", err)
-		return nil, fmt.Errorf("getting payment status: %w", err)
-	}
-
-	return &GetPaymentStatusOutput{
-		PaymentID:     status.PaymentID,
-		Status:        string(status.Status),
-		Amount:        status.Amount,
-		PaidAt:        status.PaidAt,
-		RefundedAt:    status.RefundedAt,
-		FailureReason: status.FailureReason,
-		Metadata:      status.Metadata,
-	}, nil
+	return s.paymentService.GetPaymentStatus(ctx, input)
 }
 
 // GetPagarmeWebhookStatus checks whether the merchant has registered our
@@ -3548,23 +3450,7 @@ func (s *Service) RunPagarmeWebhookLiveTest(ctx context.Context, integrationID, 
 
 // RefundPayment initiates a refund.
 func (s *Service) RefundPayment(ctx context.Context, input RefundPaymentInput) (*RefundPaymentOutput, error) {
-	paymentProvider, err := s.GetPaymentProvider(ctx, input.IntegrationID, input.StoreID)
-	if err != nil {
-		return nil, err
-	}
-
-	result, err := paymentProvider.RefundPayment(ctx, input.PaymentID, input.Amount)
-	if err != nil {
-		s.handleProviderError(ctx, input.IntegrationID, "refund_payment", err)
-		return nil, fmt.Errorf("refunding payment: %w", err)
-	}
-
-	return &RefundPaymentOutput{
-		RefundID:  result.RefundID,
-		Status:    result.Status,
-		Amount:    result.Amount,
-		CreatedAt: result.CreatedAt,
-	}, nil
+	return s.paymentService.RefundPayment(ctx, input)
 }
 
 // =============================================================================
@@ -3573,95 +3459,17 @@ func (s *Service) RefundPayment(ctx context.Context, input RefundPaymentInput) (
 
 // GetCheckoutConfig retrieves the checkout configuration for a store.
 func (s *Service) GetCheckoutConfig(ctx context.Context, integrationID, storeID string) (string, []string, error) {
-	paymentProvider, err := s.GetPaymentProvider(ctx, integrationID, storeID)
-	if err != nil {
-		return "", nil, err
-	}
-
-	publicKey, err := paymentProvider.GetPublicKey(ctx)
-	if err != nil {
-		s.handleProviderError(ctx, integrationID, "get_public_key", err)
-		return "", nil, fmt.Errorf("getting public key: %w", err)
-	}
-
-	methods, err := paymentProvider.GetPaymentMethods(ctx)
-	if err != nil {
-		s.handleProviderError(ctx, integrationID, "get_payment_methods", err)
-		return "", nil, fmt.Errorf("getting payment methods: %w", err)
-	}
-
-	return publicKey, methods, nil
+	return s.paymentService.GetCheckoutConfig(ctx, integrationID, storeID)
 }
 
 // ProcessCardPayment processes a card payment with a tokenized card.
 func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPaymentInput) (*ProcessCardPaymentOutput, error) {
-	paymentProvider, err := s.GetPaymentProvider(ctx, input.IntegrationID, input.StoreID)
-	if err != nil {
-		return nil, err
-	}
-
-	result, err := paymentProvider.ProcessCardPayment(ctx, providers.CardPaymentInput{
-		CartID:          input.CartID,
-		Token:           input.CardToken,
-		Installments:    input.Installments,
-		Customer:        input.Customer,
-		Items:           input.Items,
-		TotalAmount:     input.TotalAmount,
-		Currency:        input.Currency,
-		NotifyURL:       input.NotifyURL,
-		Metadata:        input.Metadata,
-		PaymentMethodID: input.PaymentMethodID,
-		IssuerID:        input.IssuerID,
-		DeviceID:        input.DeviceID,
-	})
-	if err != nil {
-		s.handleProviderError(ctx, input.IntegrationID, "process_card_payment", err)
-		return nil, fmt.Errorf("processing card payment: %w", err)
-	}
-
-	return &ProcessCardPaymentOutput{
-		PaymentID:         result.PaymentID,
-		Status:            string(result.Status),
-		StatusDetail:      result.StatusDetail,
-		Message:           result.Message,
-		Amount:            result.Amount,
-		Installments:      result.Installments,
-		LastFourDigits:    result.LastFourDigits,
-		CardBrand:         result.CardBrand,
-		AuthorizationCode: result.AuthorizationCode,
-		PaidAt:            result.PaidAt,
-	}, nil
+	return s.paymentService.ProcessCardPayment(ctx, input)
 }
 
 // GeneratePixPayment generates a PIX QR code for payment.
 func (s *Service) GeneratePixPayment(ctx context.Context, input GeneratePixPaymentInput) (*GeneratePixPaymentOutput, error) {
-	paymentProvider, err := s.GetPaymentProvider(ctx, input.IntegrationID, input.StoreID)
-	if err != nil {
-		return nil, err
-	}
-
-	result, err := paymentProvider.GeneratePixPayment(ctx, providers.PixPaymentInput{
-		CartID:      input.CartID,
-		Customer:    input.Customer,
-		Items:       input.Items,
-		TotalAmount: input.TotalAmount,
-		Currency:    input.Currency,
-		NotifyURL:   input.NotifyURL,
-		Metadata:    input.Metadata,
-	})
-	if err != nil {
-		s.handleProviderError(ctx, input.IntegrationID, "generate_pix_payment", err)
-		return nil, fmt.Errorf("generating pix payment: %w", err)
-	}
-
-	return &GeneratePixPaymentOutput{
-		PaymentID:  result.PaymentID,
-		QRCode:     result.QRCode,
-		QRCodeText: result.QRCodeText,
-		Amount:     result.Amount,
-		ExpiresAt:  result.ExpiresAt,
-		TicketURL:  result.TicketURL,
-	}, nil
+	return s.paymentService.GeneratePixPayment(ctx, input)
 }
 
 // =============================================================================
@@ -7813,6 +7621,15 @@ func (s *Service) toCreateOutput(row *IntegrationRow) *CreateIntegrationOutput {
 
 // handleProviderError checks if a provider error is rate-limit related and logs accordingly.
 // If the error is an ErrRateLimited, it logs at Error level and marks the integration as 'error'.
+// HandleProviderError implements payment.IntegrationResolver: it lets the
+// extracted payment.Service (B1b fast-paths) report a provider-call failure so
+// the integration is flagged unhealthy on rate-limit errors. It delegates to
+// the unexported handleProviderError, which stays here because the same logic
+// is shared with the ERP/Social fast-paths.
+func (s *Service) HandleProviderError(ctx context.Context, integrationID, operation string, err error) {
+	s.handleProviderError(ctx, integrationID, operation, err)
+}
+
 func (s *Service) handleProviderError(ctx context.Context, integrationID string, operation string, err error) {
 	if err == nil {
 		return

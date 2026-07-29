@@ -578,7 +578,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// Payment-provider resolution lives in the extracted payment.Service
 			// (strangler-fig B1a). integrationSvc is its resolver; GetPaymentProvider
 			// delegates back into it.
-			paymentSvc := paymentdomain.NewService(integrationSvc)
+			paymentSvc := paymentdomain.NewService(integrationSvc, idempotencySvc, log)
 			integrationSvc.SetPaymentService(paymentSvc)
 
 			// Create webhook handler
