@@ -67,15 +67,6 @@ type ProductGroupSyncer interface {
 	ImportFromERP(ctx context.Context, storeID, externalSource string, parent providers.ERPProduct) (groupID string, importedExternalIDs []string, err error)
 }
 
-// CouponSyncer is the post-payment hook that flips the coupon redemption
-// reserved → confirmed (and confirmed → refunded on chargebacks). Wired
-// from the coupon package via SetCouponSyncer to keep this package's
-// import graph free of coupon internals.
-type CouponSyncer interface {
-	OnCartPaid(ctx context.Context, cartID string) error
-	OnCartRefunded(ctx context.Context, cartID string) error
-}
-
 // PostCheckoutHook is the customer-facing post-payment flow: tracking token
 // generation + transactional emails. Best-effort by design — implementations
 // must swallow their own errors so the payment webhook ACKs regardless.
@@ -113,7 +104,6 @@ type Service struct {
 	liveService         *live.Service
 	productSyncer       ProductSyncer
 	productGroupSyncer  ProductGroupSyncer
-	couponSyncer        CouponSyncer
 	postCheckoutHook    PostCheckoutHook
 	notificationService *notification.Service
 	storage             *storage.S3Client
@@ -234,12 +224,6 @@ func (s *Service) SetProductSyncer(syncer ProductSyncer) {
 // variations (Tiny tipo=V, etc.).
 func (s *Service) SetProductGroupSyncer(syncer ProductGroupSyncer) {
 	s.productGroupSyncer = syncer
-}
-
-// SetCouponSyncer wires the redemption lifecycle hook called from
-// ProcessPaymentNotification when a cart's payment status flips.
-func (s *Service) SetCouponSyncer(syncer CouponSyncer) {
-	s.couponSyncer = syncer
 }
 
 // SetPostCheckoutHook wires the customer-facing post-payment flow. The hook
@@ -3882,22 +3866,18 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 	return nil
 }
 
-// ReactCartPaid is the cart.paid fan-out reactor (L3): confirms the coupon
-// redemption, runs the customer post-payment flow (tracking token, order
-// timeline, waitlist fulfilment via postCheckoutHook.OnCartPaid), and records
-// GMV on the billing ledger (billingGate.OnCartPaid). The buyer RECEIPT is NO
-// LONGER sent here (Fatia A1): it reacts to cart.paid as its own Notification
-// reactor (notification/listeners.OnCartPaid → SendPaidReceipt), which runs
-// after the Order + tracking token this flow materialises.
-// Each step is idempotent (tracking_token set-once, order_events/ledger UNIQUE),
-// so asynq redelivery/retry is safe. ERP finalisation is a separate reactor
+// ReactCartPaid is the cart.paid fan-out reactor (L3): runs the customer
+// post-payment flow via postCheckoutHook.OnCartPaid (tracking token, order
+// timeline) and records GMV on the billing ledger (billingGate.OnCartPaid). The
+// coupon redemption confirmation is NO LONGER here: it reacts to cart.paid as its
+// own Coupon reactor (coupon/listeners.OnCartPaid → ConfirmRedemption), alongside
+// the buyer receipt (notification/listeners.OnCartPaid → SendPaidReceipt) and the
+// waitlist fulfilment (inventory/listeners.OnCartPaid) reactors that also react to
+// the fact instead of being called inline in this fan-out.
+// Each remaining step is idempotent (tracking_token set-once, order_events/ledger
+// UNIQUE), so asynq redelivery/retry is safe. ERP finalisation is a separate reactor
 // (ReactOrderPaidERP, triggered by order.paid) because it needs the gateway snapshot.
 func (s *Service) ReactCartPaid(ctx context.Context, cartID, storeID string, gmvCents int64) error {
-	if s.couponSyncer != nil {
-		if err := s.couponSyncer.OnCartPaid(ctx, cartID); err != nil {
-			return fmt.Errorf("coupon confirm on cart.paid: %w", err)
-		}
-	}
 	if s.postCheckoutHook != nil {
 		s.postCheckoutHook.OnCartPaid(ctx, cartID)
 	}
@@ -3939,20 +3919,15 @@ func (s *Service) ReactOrderPaidERP(ctx context.Context, cartID, storeID string,
 	return s.finalizeOrConfirmCartERP(ctx, cartID, storeID, status)
 }
 
-// ReactCartRefunded is the cart.refunded fan-out reactor (L3): refunds the coupon
-// redemption and credits the success fee (billing). Each step is idempotent
-// (ledger UNIQUE), so asynq redelivery/retry is safe. The ERP refund is NOT here
-// — it moved to ReactOrderRefundedERP, triggered by the order.refunded fact
-// (Fatia 11b-2). The refund EMAIL is NO LONGER here either (Fatia A1): it reacts
-// to cart.refunded as its own Notification reactor
-// (notification/listeners.OnCartRefunded), so Notification is a domain that reacts
-// to the fact instead of being called inline in this fan-out.
+// ReactCartRefunded is the cart.refunded fan-out reactor (L3): credits the success
+// fee on the billing ledger (billingGate.OnCartRefunded). The coupon redemption
+// refund is NO LONGER here: it reacts to cart.refunded as its own Coupon reactor
+// (coupon/listeners.OnCartRefunded → RefundRedemption). The billing step is
+// idempotent (ledger UNIQUE), so asynq redelivery/retry is safe. The ERP refund
+// moved to ReactOrderRefundedERP (triggered by the order.refunded fact, Fatia
+// 11b-2), and the refund EMAIL reacts to cart.refunded as its own Notification
+// reactor (notification/listeners.OnCartRefunded) — both decoupled from this fan-out.
 func (s *Service) ReactCartRefunded(ctx context.Context, cartID, storeID string) error {
-	if s.couponSyncer != nil {
-		if err := s.couponSyncer.OnCartRefunded(ctx, cartID); err != nil {
-			return fmt.Errorf("coupon refund on cart.refunded: %w", err)
-		}
-	}
 	if s.billingGate != nil {
 		if err := s.billingGate.OnCartRefunded(ctx, storeID, cartID); err != nil {
 			return fmt.Errorf("billing ledger on cart.refunded: %w", err)

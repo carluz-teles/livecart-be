@@ -41,6 +41,7 @@ import (
 	"livecart/apps/api/internal/cart"
 	"livecart/apps/api/internal/checkout"
 	"livecart/apps/api/internal/coupon"
+	couponlisteners "livecart/apps/api/internal/coupon/listeners"
 	"livecart/apps/api/internal/customer"
 	"livecart/apps/api/internal/dashboard"
 	"livecart/apps/api/internal/events"
@@ -843,17 +844,20 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	couponHandler.RegisterRoutes(storeScoped)
 	couponHandler.RegisterPublicRoutes(app)
 
-	// Wire the redemption lifecycle hook onto the integration service so the
-	// payment webhook flips reserved → confirmed (and confirmed → refunded
-	// on chargebacks). The same syncer also satisfies checkout.CouponLifecycle
-	// so a free-shipping coupon stays in sync across shipping changes.
+	// The redemption confirm/refund on payment facts now reacts to cart.paid /
+	// cart.refunded as its own Coupon reactor (couponListener below) instead of
+	// being wired onto the integration fan-out. couponLifecycle stays for
+	// checkout.CouponLifecycle so a free-shipping / subtotal coupon keeps in sync
+	// across shipping changes and cart mutations.
 	couponLifecycle := coupon.NewRedemptionSyncer(couponSvc)
-	if integrationSvc != nil {
-		integrationSvc.SetCouponSyncer(couponLifecycle)
-	}
 	if checkoutSvc != nil {
 		checkoutSvc.SetCouponLifecycle(couponLifecycle)
 	}
+	// Coupon reactor: confirms the redemption on cart.paid (reserved → confirmed)
+	// and refunds it on cart.refunded (→ refunded, slot back to circulation),
+	// reacting to the facts instead of running inline in integration's fan-out.
+	// couponSvc satisfies its RedemptionConfirmer; idempotent in the service.
+	couponListener := couponlisteners.New(couponSvc, log)
 
 	// NOTE: the periodic sweep workers (coupon-expirer, cart-recovery,
 	// cart-expiry) were removed — cart expiration is now driven exclusively by
@@ -976,11 +980,20 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := orderListener.OnCartPaid(ctx, p.CartID, p.StoreID, p.GMVCents, p.PaymentSnapshot); err != nil {
 				return err
 			}
-			// Customer-facing fan-out (coupon, tracking, timeline, GMV ledger,
-			// waitlist). An error retries the whole task (each step is idempotent)
-			// and dead-letters after MaxRetry. ERP finalisation is NO LONGER here
-			// (Fatia 11b-2): it reacts to the order.paid fact emitted by OnCartPaid,
-			// so its retry loop is decoupled from this fan-out.
+			// Coupon reactor: confirm the redemption (reserved → confirmed) in
+			// reaction to cart.paid, replacing the inline coupon confirm that ran
+			// first in integration's fan-out. Idempotent (no-op unless 'reserved');
+			// error → asynq retry.
+			if couponListener != nil {
+				if err := couponListener.OnCartPaid(ctx, p.CartID); err != nil {
+					return err
+				}
+			}
+			// Customer-facing fan-out (tracking, timeline, GMV ledger). An error
+			// retries the whole task (each step is idempotent) and dead-letters after
+			// MaxRetry. ERP finalisation is NO LONGER here (Fatia 11b-2): it reacts to
+			// the order.paid fact emitted by OnCartPaid, so its retry loop is decoupled
+			// from this fan-out.
 			if err := integrationSvc.ReactCartPaid(ctx, p.CartID, p.StoreID, p.GMVCents); err != nil {
 				return err
 			}
@@ -1023,6 +1036,15 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// materialisation still in flight) returns an error → asynq retries.
 			if err := orderListener.OnCartRefunded(ctx, p.CartID, p.StoreID); err != nil {
 				return err
+			}
+			// Coupon reactor: refund the redemption (→ refunded, slot back to
+			// circulation) in reaction to cart.refunded, replacing the inline coupon
+			// refund from integration's fan-out. Idempotent (no-op if absent / already
+			// refunded); error → asynq retry.
+			if couponListener != nil {
+				if err := couponListener.OnCartRefunded(ctx, p.CartID); err != nil {
+					return err
+				}
 			}
 			if err := integrationSvc.ReactCartRefunded(ctx, p.CartID, p.StoreID); err != nil {
 				return err
