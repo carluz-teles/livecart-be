@@ -38,23 +38,27 @@ import (
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/logger"
 )
 
+// Estado ERP e sentinela vivem agora no pacote canônico internal/erp (Bloco B2a).
+// Mantemos estes aliases in-package enquanto a lógica ERP é extraída, para não
+// churnar os ~30 call sites que já usam os nomes unexported.
 const (
-	erpOrderStateNone       = "none"
-	erpOrderStateConverting = "converting"
-	erpOrderStateOpen       = "open"
-	erpOrderStateMutating   = "mutating"
-	erpOrderStateConfirmed  = "confirmed"
-	erpOrderStateCancelled  = "cancelled"
+	erpOrderStateNone       = erp.OrderStateNone
+	erpOrderStateConverting = erp.OrderStateConverting
+	erpOrderStateOpen       = erp.OrderStateOpen
+	erpOrderStateMutating   = erp.OrderStateMutating
+	erpOrderStateConfirmed  = erp.OrderStateConfirmed
+	erpOrderStateCancelled  = erp.OrderStateCancelled
 )
 
-// ErrCartNotConverted sinaliza ao caller (paid-webhook) que o cart não tem
-// pedido-como-reserva — o fluxo deve cair na finalização legada.
-var ErrCartNotConverted = errors.New("cart não convertido em pedido ERP")
+// ErrCartNotConverted é um alias para o canônico erp.ErrCartNotConverted (mesmo
+// valor, então errors.Is continua funcionando nos call sites legados).
+var ErrCartNotConverted = erp.ErrCartNotConverted
 
 func erpOrderMarker(cartID string) string { return "lc-cart-" + cartID }
 

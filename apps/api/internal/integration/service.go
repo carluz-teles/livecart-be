@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/integration/providers/payment"
@@ -92,11 +93,10 @@ type PostCheckoutHook interface {
 	OnDelivered(ctx context.Context, cartID, source string)
 }
 
-// ERPOrderMirror projects ERP state changes into the Order aggregate.
-// Implemented by order/listeners.Listener; wired at boot to break the import cycle.
-type ERPOrderMirror interface {
-	MirrorCartERPToOrder(ctx context.Context, cartID string)
-}
+// ERPOrderMirror é um alias para o canônico erp.ERPOrderMirror. A interface foi
+// movida para internal/erp (Bloco B2a); o alias mantém o campo, o setter e a
+// fiação de boot (main.go) intactos enquanto a lógica ERP é extraída.
+type ERPOrderMirror = erp.ERPOrderMirror
 
 // Service handles business logic for integrations.
 type Service struct {
