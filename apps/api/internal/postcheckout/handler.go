@@ -167,6 +167,11 @@ func (h *Handler) GetOrder(c *fiber.Ctx) error {
 	resp := toPublicResponse(snapshot)
 	resp.Events = make([]PublicOrderEvent, 0, len(events))
 	for _, ev := range events {
+		// `receipt_sent` is an internal exactly-once marker for the receipt email
+		// (SendPaidReceipt), not a customer-facing milestone — hide it.
+		if ev.EventType == "receipt_sent" {
+			continue
+		}
 		resp.Events = append(resp.Events, eventToResponse(ev.EventType, ev.OccurredAt.Time, ev.Source))
 	}
 	resp.Status = deriveStatusFromEvents(events, snapshot)

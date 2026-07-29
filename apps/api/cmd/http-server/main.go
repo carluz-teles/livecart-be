@@ -56,6 +56,7 @@ import (
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/internal/member"
 	"livecart/apps/api/internal/notification"
+	notiflisteners "livecart/apps/api/internal/notification/listeners"
 	notificationinbox "livecart/apps/api/internal/notification_inbox"
 	"livecart/apps/api/internal/order"
 	orderlisteners "livecart/apps/api/internal/order/listeners"
@@ -803,6 +804,13 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// Order materialisation reactor: listens to cart.paid and materialises the
 	// immutable Order snapshot. Independent of billing/ERP — keyed by cart_id.
 	orderListener := orderlisteners.New(pool, queries, log)
+	// Notification reactor: sends the buyer receipt / refund email in reaction to
+	// cart.paid / cart.refunded — postCheckoutSvc satisfies its ReceiptSender.
+	// Nil when the post-checkout flow isn't wired (same guard as its handlers).
+	var notificationListener *notiflisteners.Listener
+	if postCheckoutSvc != nil {
+		notificationListener = notiflisteners.New(postCheckoutSvc, log)
+	}
 	// Fatia 3: ERP mirror — projeta estado ERP do cart na Order (best-effort, aditivo).
 	if integrationSvc != nil {
 		integrationSvc.SetERPOrderMirror(orderListener)
@@ -962,11 +970,22 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				return err
 			}
 			// Customer-facing fan-out (coupon, tracking, timeline, GMV ledger,
-			// receipt, waitlist). An error retries the whole task (each step is
-			// idempotent) and dead-letters after MaxRetry. ERP finalisation is NO
-			// LONGER here (Fatia 11b-2): it reacts to the order.paid fact emitted by
-			// OnCartPaid, so its retry loop is decoupled from this fan-out.
-			return integrationSvc.ReactCartPaid(ctx, p.CartID, p.StoreID, p.GMVCents)
+			// waitlist). An error retries the whole task (each step is idempotent)
+			// and dead-letters after MaxRetry. ERP finalisation is NO LONGER here
+			// (Fatia 11b-2): it reacts to the order.paid fact emitted by OnCartPaid,
+			// so its retry loop is decoupled from this fan-out.
+			if err := integrationSvc.ReactCartPaid(ctx, p.CartID, p.StoreID, p.GMVCents); err != nil {
+				return err
+			}
+			// Notification reactor (Fatia A1): the buyer receipt reacts to cart.paid
+			// on its own instead of being sent inline in the fan-out above. It runs
+			// after ReactCartPaid materialised the Order + tracking token; its guard
+			// returns ErrReceiptNotReady (→ asynq retry) if they're not yet ready,
+			// and it is idempotent so a redelivery never mails a second receipt.
+			if notificationListener != nil {
+				return notificationListener.OnCartPaid(ctx, p.CartID)
+			}
+			return nil
 		})
 		eventsServer.Register(events.CartRefunded, func(ctx context.Context, t *asynq.Task) error {
 			var env events.Envelope
@@ -987,7 +1006,16 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := orderListener.OnCartRefunded(ctx, p.CartID, p.StoreID); err != nil {
 				return err
 			}
-			return integrationSvc.ReactCartRefunded(ctx, p.CartID, p.StoreID)
+			if err := integrationSvc.ReactCartRefunded(ctx, p.CartID, p.StoreID); err != nil {
+				return err
+			}
+			// Notification reactor (Fatia A1): the refund email reacts to
+			// cart.refunded on its own instead of being sent inline in the fan-out
+			// above. Idempotent via the payment_refunded timeline marker.
+			if notificationListener != nil {
+				return notificationListener.OnCartRefunded(ctx, p.CartID)
+			}
+			return nil
 		})
 
 		// Order post-payment ERP reactors (Fatia 11b-2): the ERP finalisation/refund
