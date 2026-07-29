@@ -28,6 +28,7 @@ import (
 	"livecart/apps/api/internal/integration/providers/payment"
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/internal/notification"
+	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/crypto"
 	"livecart/apps/api/lib/httpx"
@@ -136,6 +137,10 @@ type Service struct {
 	// erpOrderMirror projects ERP state changes into the Order aggregate.
 	// Wired at boot from main.go; nil = mirror disabled (e.g. order module not yet live).
 	erpOrderMirror ERPOrderMirror
+
+	// paymentService owns payment-provider resolution (strangler-fig B1a).
+	// GetPaymentProvider delegates to it. Wired at boot via SetPaymentService.
+	paymentService *paymentdomain.Service
 }
 
 // finalisationInverted reports whether this store runs the launch-first
@@ -238,6 +243,13 @@ func (s *Service) SetPostCheckoutHook(hook PostCheckoutHook) {
 // SetNotificationService sets the notification service for sending DMs.
 func (s *Service) SetNotificationService(svc *notification.Service) {
 	s.notificationService = svc
+}
+
+// SetPaymentService wires the extracted payment.Service so GetPaymentProvider
+// delegates to it (strangler-fig B1a). Called once at boot from main.go, after
+// the integration.Service exists (it is the resolver the payment.Service uses).
+func (s *Service) SetPaymentService(svc *paymentdomain.Service) {
+	s.paymentService = svc
 }
 
 // SetERPOrderMirror wires the order/listeners.Listener so ERP state changes are
@@ -1318,27 +1330,29 @@ func (s *Service) GetProvider(ctx context.Context, integrationID, storeID string
 }
 
 // GetPaymentProvider returns a PaymentProvider for the given integration.
+//
+// The resolution logic now lives in the extracted payment.Service (strangler-fig
+// B1a); this method is a thin delegation kept for the ~8 internal call sites and
+// external callers whose signature must not change.
 func (s *Service) GetPaymentProvider(ctx context.Context, integrationID, storeID string) (providers.PaymentProvider, error) {
+	return s.paymentService.GetProvider(ctx, integrationID, storeID)
+}
+
+// ResolveIntegration implements payment.IntegrationResolver: it fetches the
+// integration and returns its declared type plus a builder that constructs the
+// provider through the shared createProviderFromRow. Returning a builder (rather
+// than the provider) lets payment.Service.GetProvider run the type check before
+// any credential decrypt/refresh, and keeps createProviderFromRow — shared with
+// ERP/Social — inside this package.
+func (s *Service) ResolveIntegration(ctx context.Context, integrationID, storeID string) (string, func() (providers.Provider, error), error) {
 	integration, err := s.repo.GetByID(ctx, integrationID, storeID)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 
-	if integration.Type != string(providers.ProviderTypePayment) {
-		return nil, httpx.ErrUnprocessable("integration is not a payment provider")
-	}
-
-	provider, err := s.createProviderFromRow(ctx, integration)
-	if err != nil {
-		return nil, err
-	}
-
-	paymentProvider, ok := provider.(providers.PaymentProvider)
-	if !ok {
-		return nil, httpx.ErrUnprocessable("failed to cast to payment provider")
-	}
-
-	return paymentProvider, nil
+	return integration.Type, func() (providers.Provider, error) {
+		return s.createProviderFromRow(ctx, integration)
+	}, nil
 }
 
 // GetERPProvider returns an ERPProvider for the given integration.

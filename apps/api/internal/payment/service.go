@@ -1,137 +1,53 @@
+// Package payment owns payment-provider resolution for integrations. It is the
+// first slice (B1a) of the strangler-fig extraction of the payment domain out
+// of the internal/integration monolith. The former CRUD service over the
+// vestigial `payments` table (dead code, 0 imports) has been removed and
+// replaced by this package.
 package payment
 
 import (
 	"context"
-	"fmt"
-	"time"
 
-	"github.com/google/uuid"
-	"go.uber.org/zap"
-
-	"livecart/apps/api/lib/logger"
+	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/httpx"
 )
 
+// Service resolves payment providers for integrations.
 type Service struct {
-	repo   *Repository
-	logger *zap.Logger
+	resolver IntegrationResolver
 }
 
-func NewService(repo *Repository, logger *zap.Logger) *Service {
-	return &Service{
-		repo:   repo,
-		logger: logger.Named("payment"),
-	}
+// NewService builds the payment Service. resolver is implemented by
+// integration.Service, which owns the shared provider-construction logic.
+func NewService(resolver IntegrationResolver) *Service {
+	return &Service{resolver: resolver}
 }
 
-// Create creates a new payment record
-func (s *Service) Create(ctx context.Context, input CreatePaymentInput) (*Payment, error) {
-	// Check for idempotency
-	if input.IdempotencyKey != nil {
-		existing, err := s.repo.GetByIdempotencyKey(ctx, *input.IdempotencyKey)
-		if err != nil {
-			return nil, fmt.Errorf("checking idempotency: %w", err)
-		}
-		if existing != nil {
-			logger.From(ctx, s.logger).Info("returning existing payment due to idempotency key",
-				zap.String("paymentId", existing.ID.String()),
-				zap.String("idempotencyKey", *input.IdempotencyKey))
-			return existing, nil
-		}
-	}
-
-	payment, err := s.repo.Create(ctx, input)
+// GetProvider returns a PaymentProvider for the given integration.
+//
+// It mirrors the former integration.Service.GetPaymentProvider exactly: fetch
+// the integration, reject it if it is not a payment integration, build the
+// provider, then cast it to providers.PaymentProvider — surfacing the same
+// httpx.ErrUnprocessable errors on the not-a-payment and cast-failure paths.
+func (s *Service) GetProvider(ctx context.Context, integrationID, storeID string) (providers.PaymentProvider, error) {
+	integrationType, build, err := s.resolver.ResolveIntegration(ctx, integrationID, storeID)
 	if err != nil {
 		return nil, err
 	}
 
-	logger.From(ctx, s.logger).Info("payment created",
-		zap.String("paymentId", payment.ID.String()),
-		zap.String("cartId", payment.CartID.String()),
-		zap.String("provider", payment.Provider),
-		zap.Int64("amountCents", payment.AmountCents),
-		zap.String("status", string(payment.Status)))
+	if integrationType != string(providers.ProviderTypePayment) {
+		return nil, httpx.ErrUnprocessable("integration is not a payment provider")
+	}
 
-	return payment, nil
-}
-
-// GetByID retrieves a payment by its ID
-func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*Payment, error) {
-	return s.repo.GetByID(ctx, id)
-}
-
-// GetByExternalID retrieves a payment by its external provider ID
-func (s *Service) GetByExternalID(ctx context.Context, externalID string) (*Payment, error) {
-	return s.repo.GetByExternalID(ctx, externalID)
-}
-
-// ListByCart returns all payments for a cart
-func (s *Service) ListByCart(ctx context.Context, cartID uuid.UUID) ([]*Payment, error) {
-	return s.repo.ListByCart(ctx, cartID)
-}
-
-// GetLatestByCart returns the most recent payment for a cart
-func (s *Service) GetLatestByCart(ctx context.Context, cartID uuid.UUID) (*Payment, error) {
-	return s.repo.GetLatestByCart(ctx, cartID)
-}
-
-// UpdateStatus updates the status of a payment
-func (s *Service) UpdateStatus(ctx context.Context, id uuid.UUID, input UpdatePaymentStatusInput) error {
-	err := s.repo.UpdateStatus(ctx, id, input)
+	provider, err := build()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	logger.From(ctx, s.logger).Info("payment status updated",
-		zap.String("paymentId", id.String()),
-		zap.String("status", string(input.Status)))
-
-	return nil
-}
-
-// ProcessWebhook updates a payment based on external webhook notification
-// Returns the updated payment for further processing (e.g., cart status update)
-func (s *Service) ProcessWebhook(ctx context.Context, input UpdatePaymentByExternalIDInput) (*Payment, error) {
-	// Get existing payment
-	existing, err := s.repo.GetByExternalID(ctx, input.ExternalPaymentID)
-	if err != nil {
-		return nil, fmt.Errorf("getting payment: %w", err)
-	}
-	if existing == nil {
-		logger.From(ctx, s.logger).Warn("payment not found for webhook",
-			zap.String("externalPaymentId", input.ExternalPaymentID))
-		return nil, nil
+	paymentProvider, ok := provider.(providers.PaymentProvider)
+	if !ok {
+		return nil, httpx.ErrUnprocessable("failed to cast to payment provider")
 	}
 
-	// Update payment
-	err = s.repo.UpdateByExternalID(ctx, input)
-	if err != nil {
-		return nil, fmt.Errorf("updating payment: %w", err)
-	}
-
-	logger.From(ctx, s.logger).Info("payment updated via webhook",
-		zap.String("paymentId", existing.ID.String()),
-		zap.String("externalPaymentId", input.ExternalPaymentID),
-		zap.String("status", string(input.Status)))
-
-	// Return updated payment
-	return s.repo.GetByID(ctx, existing.ID)
-}
-
-// MarkAsPaid is a convenience method to mark a payment as approved
-func (s *Service) MarkAsPaid(ctx context.Context, id uuid.UUID) error {
-	now := time.Now()
-	return s.UpdateStatus(ctx, id, UpdatePaymentStatusInput{
-		Status: PaymentStatusApproved,
-		PaidAt: &now,
-	})
-}
-
-// GetStats returns payment statistics for a store
-func (s *Service) GetStats(ctx context.Context, storeID uuid.UUID) (*PaymentStats, error) {
-	return s.repo.GetStats(ctx, storeID)
-}
-
-// CountByStatus returns payment counts by status for a store
-func (s *Service) CountByStatus(ctx context.Context, storeID uuid.UUID) ([]PaymentStatusCount, error) {
-	return s.repo.CountByStatus(ctx, storeID)
+	return paymentProvider, nil
 }

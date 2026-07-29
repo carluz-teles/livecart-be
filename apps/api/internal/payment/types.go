@@ -1,83 +1,26 @@
 package payment
 
 import (
-	"encoding/json"
-	"time"
+	"context"
 
-	"github.com/google/uuid"
+	"livecart/apps/api/internal/integration/providers"
 )
 
-// PaymentStatus represents the possible states of a payment
-type PaymentStatus string
-
-const (
-	PaymentStatusPending   PaymentStatus = "pending"
-	PaymentStatusApproved  PaymentStatus = "approved"
-	PaymentStatusRejected  PaymentStatus = "rejected"
-	PaymentStatusRefunded  PaymentStatus = "refunded"
-	PaymentStatusCancelled PaymentStatus = "cancelled"
-)
-
-// Payment represents a payment attempt for a cart
-type Payment struct {
-	ID                uuid.UUID       `json:"id"`
-	CartID            uuid.UUID       `json:"cartId"`
-	IntegrationID     *uuid.UUID      `json:"integrationId,omitempty"`
-	ExternalPaymentID *string         `json:"externalPaymentId,omitempty"`
-	Provider          string          `json:"provider"`
-	AmountCents       int64           `json:"amountCents"`
-	Currency          string          `json:"currency"`
-	Method            *string         `json:"method,omitempty"`
-	Status            PaymentStatus   `json:"status"`
-	StatusDetail      *string         `json:"statusDetail,omitempty"`
-	ProviderResponse  json.RawMessage `json:"providerResponse,omitempty"`
-	CreatedAt         time.Time       `json:"createdAt"`
-	UpdatedAt         time.Time       `json:"updatedAt"`
-	PaidAt            *time.Time      `json:"paidAt,omitempty"`
-	IdempotencyKey    *string         `json:"idempotencyKey,omitempty"`
-}
-
-// CreatePaymentInput is the input for creating a new payment
-type CreatePaymentInput struct {
-	CartID            uuid.UUID
-	IntegrationID     *uuid.UUID
-	ExternalPaymentID *string
-	Provider          string
-	AmountCents       int64
-	Currency          string
-	Method            *string
-	Status            PaymentStatus
-	StatusDetail      *string
-	ProviderResponse  json.RawMessage
-	IdempotencyKey    *string
-}
-
-// UpdatePaymentStatusInput is the input for updating payment status
-type UpdatePaymentStatusInput struct {
-	Status       PaymentStatus
-	StatusDetail *string
-	PaidAt       *time.Time
-}
-
-// UpdatePaymentByExternalIDInput is used by webhooks to update payment
-type UpdatePaymentByExternalIDInput struct {
-	ExternalPaymentID string
-	Status            PaymentStatus
-	StatusDetail      *string
-	PaidAt            *time.Time
-	Method            *string
-	ProviderResponse  json.RawMessage
-}
-
-// PaymentStats represents aggregated payment statistics
-type PaymentStats struct {
-	TotalPayments       int   `json:"totalPayments"`
-	ApprovedPayments    int   `json:"approvedPayments"`
-	TotalApprovedAmount int64 `json:"totalApprovedAmount"`
-}
-
-// PaymentStatusCount represents count per status
-type PaymentStatusCount struct {
-	Status string `json:"status"`
-	Count  int    `json:"count"`
+// IntegrationResolver fetches an integration and lazily builds its provider.
+//
+// It is declared here — in the consumer package — and implemented by
+// integration.Service. Keeping the interface on this side lets the payment
+// package resolve providers without importing integration, so integration can
+// depend on payment (for the GetPaymentProvider delegation) with no import
+// cycle. It intentionally speaks only in terms of the leaf `providers` package.
+type IntegrationResolver interface {
+	// ResolveIntegration fetches the integration identified by (integrationID,
+	// storeID) and returns its declared provider type together with a builder
+	// that constructs the initialized provider on demand.
+	//
+	// The builder is returned rather than the provider itself so the caller can
+	// validate the integration type BEFORE any credential decryption / token
+	// refresh happens — preserving the exact ordering (and error surface) of the
+	// original integration.Service.GetPaymentProvider.
+	ResolveIntegration(ctx context.Context, integrationID, storeID string) (integrationType string, build func() (providers.Provider, error), err error)
 }

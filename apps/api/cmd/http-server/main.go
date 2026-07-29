@@ -63,6 +63,7 @@ import (
 	notificationinbox "livecart/apps/api/internal/notification_inbox"
 	"livecart/apps/api/internal/order"
 	orderlisteners "livecart/apps/api/internal/order/listeners"
+	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/internal/postcheckout"
 	"livecart/apps/api/internal/product"
 	"livecart/apps/api/internal/productgroup"
@@ -573,6 +574,12 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				liveSvc,
 				log,
 			)
+
+			// Payment-provider resolution lives in the extracted payment.Service
+			// (strangler-fig B1a). integrationSvc is its resolver; GetPaymentProvider
+			// delegates back into it.
+			paymentSvc := paymentdomain.NewService(integrationSvc)
+			integrationSvc.SetPaymentService(paymentSvc)
 
 			// Create webhook handler
 			integrationWebhookHandler = integration.NewWebhookHandler(integrationSvc, log)
