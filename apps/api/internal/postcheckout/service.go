@@ -168,16 +168,11 @@ func (s *Service) OnCartPaid(ctx context.Context, cartID string) {
 		)
 	}
 
-	// Marca como 'fulfilled' qualquer waitlist em status='notified' deste
-	// cart — o cliente pagou dentro da janela. Itens em 'waiting' (que ele
-	// optou por deixar na fila) permanecem.
-	if err := s.repo.MarkWaitlistFulfilledByCart(ctx, cartID); err != nil {
-		logger.From(ctx, s.logger).Warn("failed to mark notified waitlist as fulfilled",
-			zap.String("cart_id", cartID),
-			zap.Error(err),
-		)
-	}
-
+	// A fila de espera NÃO é mais reconciliada aqui: virou um reactor do domínio
+	// Inventory (inventory/listeners.OnCartPaid), que reage ao fato cart.paid
+	// marcando os itens notificados deste cart como atendidos. Itens ainda na fila
+	// permanecem.
+	//
 	// O recibo do comprador NÃO é mais enviado aqui: virou um reactor do domínio
 	// Notification (notification/listeners.OnCartPaid → SendPaidReceipt), que
 	// reage ao fato cart.paid DEPOIS que esta Order + o tracking_token existem.

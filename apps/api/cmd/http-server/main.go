@@ -52,6 +52,8 @@ import (
 	"livecart/apps/api/internal/integration/providers/payment"
 	"livecart/apps/api/internal/integration/providers/shipping"
 	"livecart/apps/api/internal/integration/providers/social"
+	"livecart/apps/api/internal/inventory"
+	inventorylisteners "livecart/apps/api/internal/inventory/listeners"
 	"livecart/apps/api/internal/invitation"
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/internal/member"
@@ -811,6 +813,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	if postCheckoutSvc != nil {
 		notificationListener = notiflisteners.New(postCheckoutSvc, log)
 	}
+	// Inventory reactor (Fatia A2): reconciles the waitlist in reaction to
+	// cart.paid ('notified' → 'fulfilled' for the cart's rows), replacing the
+	// inline call that used to live in postcheckout.OnCartPaid. Its repo owns the
+	// canonical MarkWaitlistFulfilledByCart query + the waitlist.fulfilled emission.
+	inventoryListener := inventorylisteners.New(inventory.NewRepository(queries), log)
 	// Fatia 3: ERP mirror — projeta estado ERP do cart na Order (best-effort, aditivo).
 	if integrationSvc != nil {
 		integrationSvc.SetERPOrderMirror(orderListener)
@@ -976,6 +983,17 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// so its retry loop is decoupled from this fan-out.
 			if err := integrationSvc.ReactCartPaid(ctx, p.CartID, p.StoreID, p.GMVCents); err != nil {
 				return err
+			}
+			// Inventory reactor (Fatia A2): the waitlist fulfilment reacts to
+			// cart.paid on its own instead of running inline in the fan-out above
+			// (extracted from postcheckout.OnCartPaid). Marks 'notified'→'fulfilled'
+			// for this cart; idempotent (WHERE status='notified') so a redelivery is
+			// a no-op and never re-emits waitlist.fulfilled. Error → asynq retry. No
+			// ordering dependency with the Order materialisation above.
+			if inventoryListener != nil {
+				if err := inventoryListener.OnCartPaid(ctx, p.CartID); err != nil {
+					return err
+				}
 			}
 			// Notification reactor (Fatia A1): the buyer receipt reacts to cart.paid
 			// on its own instead of being sent inline in the fan-out above. It runs
