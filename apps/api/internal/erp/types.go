@@ -46,6 +46,38 @@ type ERPOrderMirror interface {
 	MirrorCartERPToOrder(ctx context.Context, cartID string)
 }
 
+// StockReservationRow mirrors a stock_reservations row the ERP stock flow reads
+// and writes. Canonical home is this package (Bloco B2b); internal/integration
+// aliases it so the Repository (which owns the SQL) keeps compiling unchanged.
+type StockReservationRow struct {
+	ID                string
+	EventID           string
+	CartID            string
+	ProductID         string
+	ExternalProductID string
+	Quantity          int
+	ERPMovementID     string
+	Status            string
+	CreatedAt         time.Time
+}
+
+// CreateStockReservationParams holds params for creating a stock reservation.
+type CreateStockReservationParams struct {
+	EventID           string
+	CartID            string
+	ProductID         string
+	ExternalProductID string
+	Quantity          int
+	ERPMovementID     string
+}
+
+// CartERPOrderState is the order-as-reservation lifecycle snapshot (design C).
+type CartERPOrderState struct {
+	State           string
+	StockLaunched   bool
+	ExternalOrderID string
+}
+
 // Integration is the ERP-domain view of an active integration row. It is the
 // return type of ERPRepository.GetActiveByProvider so this package never has to
 // import internal/integration (which owns the concrete IntegrationRow). The

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/events"
 	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/dbtx"
@@ -1249,14 +1250,9 @@ func (r *Repository) EmitWaitlistExpired(ctx context.Context, waitlistItemID, ev
 // StockEventParams carries the identifiers for a stock.reserved / stock.released
 // event. ReservationID is the ERP reservation row id when one exists (design-A
 // stores); Op labels the business operation (see StockOp).
-type StockEventParams struct {
-	Op            string
-	ProductID     string
-	Quantity      int
-	CartID        string
-	EventID       string
-	ReservationID string
-}
+// StockEventParams is the stock-event payload; canonical home is internal/erp
+// (Bloco B2b). Aliased here so the Repository emission code stays unchanged.
+type StockEventParams = erp.StockEventParams
 
 // EmitStockReserved publishes stock.reserved best-effort. Keyed by reservation
 // id when present, else by cart+product+op — both stable within one operation.
@@ -2526,27 +2522,13 @@ func (r *Repository) ListCartsByEventForERP(ctx context.Context, eventID string)
 // =============================================================================
 
 // StockReservationRow represents a stock reservation for ERP operations.
-type StockReservationRow struct {
-	ID                string
-	EventID           string
-	CartID            string
-	ProductID         string
-	ExternalProductID string
-	Quantity          int
-	ERPMovementID     string
-	Status            string
-	CreatedAt         time.Time
-}
+// StockReservationRow / CreateStockReservationParams have their canonical home
+// in internal/erp (Bloco B2b). Aliased here so the Repository (which owns the
+// SQL) and the integration call sites keep compiling unchanged.
+type StockReservationRow = erp.StockReservationRow
 
 // CreateStockReservationParams holds params for creating a stock reservation.
-type CreateStockReservationParams struct {
-	EventID           string
-	CartID            string
-	ProductID         string
-	ExternalProductID string
-	Quantity          int
-	ERPMovementID     string
-}
+type CreateStockReservationParams = erp.CreateStockReservationParams
 
 // CreateStockReservation creates a stock reservation record.
 func (r *Repository) CreateStockReservation(ctx context.Context, params CreateStockReservationParams) (*StockReservationRow, error) {
@@ -2864,11 +2846,8 @@ func (r *Repository) ReverseReservationByID(ctx context.Context, reservationID s
 }
 
 // CartERPOrderState is the order-as-reservation lifecycle snapshot (design C).
-type CartERPOrderState struct {
-	State           string
-	StockLaunched   bool
-	ExternalOrderID string
-}
+// Canonical home is internal/erp (Bloco B2b); aliased here for the Repository.
+type CartERPOrderState = erp.CartERPOrderState
 
 // GetCartERPOrderState reads the cart's order-as-reservation state.
 func (r *Repository) GetCartERPOrderState(ctx context.Context, cartID string) (*CartERPOrderState, error) {

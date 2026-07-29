@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/zap"
 
@@ -141,6 +140,22 @@ type Service struct {
 	// paymentService owns payment-provider resolution (strangler-fig B1a).
 	// GetPaymentProvider delegates to it. Wired at boot via SetPaymentService.
 	paymentService *paymentdomain.Service
+
+	// erpStockService owns the cart→ERP stock reservation flow (strangler-fig
+	// B2b). ReserveStockInERP / AdjustStockReservationDelta delegate to it. Built
+	// lazily by erpStock() (production builds it in NewService; direct-literal
+	// tests get it on first use) so it always wraps THIS Service's collaborators.
+	erpStockService *erp.Service
+}
+
+// erpStock returns the delegate erp.Service, building it once over this
+// Service's repo adapter and collaborator methods. Kept lazy so the finalisation
+// tests that construct a Service literal (no NewService) still delegate correctly.
+func (s *Service) erpStock() *erp.Service {
+	if s.erpStockService == nil {
+		s.erpStockService = erp.NewService(erpRepoAdapter{s.repo}, s, s.logger)
+	}
+	return s.erpStockService
 }
 
 // finalisationInverted reports whether this store runs the launch-first
@@ -157,6 +172,86 @@ func (s *Service) erpProviderFor(ctx context.Context, integration *IntegrationRo
 	}
 	return s.getERPProvider(ctx, integration)
 }
+
+// ResolveProvider satisfies erp.StockCollaborators: it maps the neutral
+// erp.Integration back to the integration-owned IntegrationRow (lossless mirror)
+// and resolves the provider through the existing seam-aware path.
+func (s *Service) ResolveProvider(ctx context.Context, integration *erp.Integration) (providers.ERPProvider, error) {
+	return s.erpProviderFor(ctx, integrationRowFromERP(integration))
+}
+
+// ResolveExternalProduct satisfies erp.StockCollaborators. linked=false means
+// there is nothing to move against the ERP (no product syncer wired, product not
+// linked, or lookup failed) — the migrated stock flow treats all three as a
+// silent no-op, matching the pre-migration behaviour.
+func (s *Service) ResolveExternalProduct(ctx context.Context, storeID, productID string) (string, bool) {
+	if s.productSyncer == nil {
+		return "", false
+	}
+	externalID, _, err := s.productSyncer.GetProduct(ctx, storeID, productID)
+	if err != nil || externalID == "" {
+		return "", false
+	}
+	return externalID, true
+}
+
+// integrationRowFromERP copies the neutral erp.Integration back into the
+// integration-owned IntegrationRow. The two are field-for-field mirrors; this
+// exists only because erp must not import the integration package.
+func integrationRowFromERP(i *erp.Integration) *IntegrationRow {
+	if i == nil {
+		return nil
+	}
+	return &IntegrationRow{
+		ID:             i.ID,
+		StoreID:        i.StoreID,
+		Type:           i.Type,
+		Provider:       i.Provider,
+		Status:         i.Status,
+		Credentials:    i.Credentials,
+		TokenExpiresAt: i.TokenExpiresAt,
+		Metadata:       i.Metadata,
+		LastSyncedAt:   i.LastSyncedAt,
+		CreatedAt:      i.CreatedAt,
+		Priority:       i.Priority,
+	}
+}
+
+// erpRepoAdapter adapts *Repository to erp.ERPRepository. Every method is
+// promoted from the embedded *Repository except GetActiveByProvider, whose
+// return type (*IntegrationRow) is mapped into the neutral *erp.Integration so
+// the erp package stays free of the integration import (cycle guard).
+type erpRepoAdapter struct{ *Repository }
+
+func (a erpRepoAdapter) GetActiveByProvider(ctx context.Context, storeID, integrationType, provider string) (*erp.Integration, error) {
+	row, err := a.Repository.GetActiveByProvider(ctx, storeID, integrationType, provider)
+	if err != nil {
+		return nil, err
+	}
+	if row == nil {
+		return nil, nil
+	}
+	return &erp.Integration{
+		ID:             row.ID,
+		StoreID:        row.StoreID,
+		Type:           row.Type,
+		Provider:       row.Provider,
+		Status:         row.Status,
+		Credentials:    row.Credentials,
+		TokenExpiresAt: row.TokenExpiresAt,
+		Metadata:       row.Metadata,
+		LastSyncedAt:   row.LastSyncedAt,
+		CreatedAt:      row.CreatedAt,
+		Priority:       row.Priority,
+	}, nil
+}
+
+// Compile-time guards: integration.Service satisfies the collaborator port and
+// the repo adapter satisfies the persistence port.
+var (
+	_ erp.StockCollaborators = (*Service)(nil)
+	_ erp.ERPRepository      = erpRepoAdapter{}
+)
 
 // SetStorage wires the object storage client (used to delete transient post
 // images after they are published to Instagram).
@@ -207,7 +302,7 @@ func NewService(
 	}
 	invertAll, invertIDs := parseStoreFlag("ERP_FINALISE_INVERTED_STORE_IDS")
 	orderModeAll, orderModeIDs := parseStoreFlag("ERP_ORDER_AT_CHECKOUT_STORE_IDS")
-	return &Service{
+	svc := &Service{
 		repo:                       repo,
 		factory:                    factory,
 		encryptor:                  encryptor,
@@ -220,6 +315,10 @@ func NewService(
 		orderAtCheckoutAll:         orderModeAll,
 		orderAtCheckoutStoreIDs:    orderModeIDs,
 	}
+	// Build the ERP stock delegate eagerly so the production singleton never
+	// races on the lazy init in erpStock() under concurrent request handling.
+	svc.erpStock()
+	return svc
 }
 
 // SetProductSyncer sets the product syncer for webhook processing.
@@ -5677,99 +5776,12 @@ func (s *Service) replyPostChooseProduct(ctx context.Context, event *live.EventO
 // CART → ERP STOCK RESERVATION
 // =============================================================================
 
-// ReserveStockInERP creates a manual stock exit (tipo S) in the ERP for a product
-// added to a cart. The movement is tracked in stock_reservations for later reversal.
+// ReserveStockInERP delega para erp.Service (Bloco B2b — a lógica vive em
+// internal/erp). A assinatura pública é preservada: checkout, waitlist e os
+// call sites internos continuam chamando integration.Service. A troca dos call
+// sites para erp.Service direto é B2e.
 func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventID, productID string, quantity int, unitPrice int64, platformHandle string) error {
-	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
-	if err != nil {
-		logger.From(ctx, s.logger).Debug("no active ERP integration, skipping stock reservation",
-			zap.String("store_id", storeID),
-		)
-		return nil
-	}
-
-	// Cart convertido em pedido-como-reserva (design C): quem segura a peça é
-	// o PEDIDO, não saídas manuais — a grade nova (o caller já gravou o item
-	// no cart) entra pelo ciclo estornar→PUT→lançar. Cobre o live-add pós-pix
-	// e a promoção de waitlist de cart convertido num único ponto.
-	if st, stErr := s.repo.GetCartERPOrderState(ctx, cartID); stErr == nil &&
-		st.State != erpOrderStateNone && st.State != erpOrderStateCancelled {
-		if mutErr := s.MutateERPOrderItems(ctx, cartID, storeID); mutErr != nil {
-			return fmt.Errorf("applying grid to converted cart order: %w", mutErr)
-		}
-		return nil
-	}
-
-	erpProvider, err := s.erpProviderFor(ctx, integration)
-	if err != nil {
-		return fmt.Errorf("creating ERP provider: %w", err)
-	}
-
-	// Get external product ID
-	if s.productSyncer == nil {
-		return nil
-	}
-	externalID, _, err := s.productSyncer.GetProduct(ctx, storeID, productID)
-	if err != nil || externalID == "" {
-		logger.From(ctx, s.logger).Debug("product not linked to ERP, skipping stock reservation",
-			zap.String("product_id", productID),
-		)
-		return nil
-	}
-
-	// Idempotency: check if an active reservation already exists for this cart+product
-	existing, _ := s.repo.ListActiveReservationsByCartAndProduct(ctx, cartID, productID)
-	if len(existing) > 0 {
-		logger.From(ctx, s.logger).Debug("stock reservation already exists for cart+product, skipping",
-			zap.String("cart_id", cartID),
-			zap.String("product_id", productID),
-		)
-		return nil
-	}
-
-	obs := fmt.Sprintf("Reserva LiveCart - @%s - Evento %s", platformHandle, eventID)
-	movementID, err := erpProvider.ReserveStock(ctx, externalID, quantity, float64(unitPrice)/100, obs)
-	if err != nil {
-		return fmt.Errorf("reserving stock in ERP: %w", err)
-	}
-
-	_, err = s.repo.CreateStockReservation(ctx, CreateStockReservationParams{
-		EventID:           eventID,
-		CartID:            cartID,
-		ProductID:         productID,
-		ExternalProductID: externalID,
-		Quantity:          quantity,
-		ERPMovementID:     movementID,
-	})
-	if err != nil {
-		// ERP movement was created but we can't track it locally — attempt compensating reversal
-		logger.From(ctx, s.logger).Error("failed to save stock reservation, attempting ERP reversal",
-			zap.String("cart_id", cartID),
-			zap.String("product_id", productID),
-			zap.String("erp_movement_id", movementID),
-			zap.Error(err),
-		)
-		reverseObs := fmt.Sprintf("Estorno compensatório - falha DB - Cart %s", cartID)
-		if _, reverseErr := erpProvider.ReverseStockReservation(ctx, externalID, quantity, 0, reverseObs); reverseErr != nil {
-			logger.From(ctx, s.logger).Error("CRITICAL: failed to compensate ERP stock after DB failure — manual reconciliation required",
-				zap.String("external_product_id", externalID),
-				zap.Int("quantity", quantity),
-				zap.String("erp_movement_id", movementID),
-				zap.Error(reverseErr),
-			)
-		}
-		return fmt.Errorf("saving stock reservation: %w", err)
-	}
-
-	logger.From(ctx, s.logger).Info("stock reserved in ERP",
-		zap.String("cart_id", cartID),
-		zap.String("product_id", productID),
-		zap.String("external_product_id", externalID),
-		zap.Int("quantity", quantity),
-		zap.String("erp_movement_id", movementID),
-	)
-
-	return nil
+	return s.erpStock().ReserveStockInERP(ctx, storeID, cartID, eventID, productID, quantity, unitPrice, platformHandle)
 }
 
 // AdjustStockReservationDelta applies a quantity delta (positive or negative)
@@ -5794,193 +5806,7 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 // waitlist_cancel / waitlist_expire) when the delta represents a domain action
 // other than a buyer quantity edit.
 func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cartID, eventID, productID string, delta int, unitPrice int64, platformHandle string, op StockOp) (string, error) {
-	if delta == 0 {
-		return "", nil
-	}
-
-	// 1. Local stock mutation — atomic gate for delta>0, mirror of the ERP
-	//    reversal for delta<0. Runs unconditionally so waitlist promotion sees
-	//    freed units immediately, even when the store has no ERP integration.
-	if delta > 0 {
-		if err := s.repo.DecrementProductStock(ctx, productID, delta); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return "", httpx.ErrUnprocessable("estoque insuficiente para esse aumento")
-			}
-			return "", fmt.Errorf("decrementing local stock: %w", err)
-		}
-	} else {
-		if err := s.repo.IncrementProductStock(ctx, productID, -delta); err != nil {
-			return "", fmt.Errorf("releasing local stock: %w", err)
-		}
-	}
-
-	// localCommitted tracks whether the local stock mutation above stands. It is
-	// cleared by rollbackLocal so the deferred emit below fires ONLY on the
-	// definitive success of this operation (every rollback path returns an error).
-	localCommitted := true
-
-	// Rollback helper used when ERP sync fails after local stock already moved.
-	rollbackLocal := func() {
-		localCommitted = false
-		if delta > 0 {
-			if err := s.repo.IncrementProductStock(ctx, productID, delta); err != nil {
-				logger.From(ctx, s.logger).Error("failed to rollback local stock decrement after ERP failure",
-					zap.String("product_id", productID),
-					zap.Int("delta", delta),
-					zap.Error(err),
-				)
-			}
-		} else {
-			if err := s.repo.DecrementProductStock(ctx, productID, -delta); err != nil {
-				logger.From(ctx, s.logger).Error("failed to rollback local stock increment after ERP failure",
-					zap.String("product_id", productID),
-					zap.Int("delta", delta),
-					zap.Error(err),
-				)
-			}
-		}
-	}
-
-	// stock.reserved / stock.released — the single emit point for this operation.
-	// Deferred + guarded so every nil-error return below funnels through here
-	// without instrumenting each one, and rollbacks (which clear localCommitted)
-	// stay silent.
-	defer func() {
-		if !localCommitted {
-			return
-		}
-		if delta > 0 {
-			reserveOp := op
-			if reserveOp == StockOpUnspecified {
-				reserveOp = StockOpQtyIncrease
-			}
-			s.stock.NoteReserved(ctx, ReserveParams{Op: reserveOp, ProductID: productID, Quantity: delta, CartID: cartID, EventID: eventID})
-		} else {
-			releaseOp := op
-			if releaseOp == StockOpUnspecified {
-				releaseOp = StockOpQtyDecrease
-			}
-			s.stock.NoteReleased(ctx, ReleaseParams{Op: releaseOp, ProductID: productID, Quantity: -delta, CartID: cartID, EventID: eventID})
-		}
-	}()
-
-	// Cart convertido (design C): a mutação vai para o PEDIDO via ciclo
-	// estornar→PUT→lançar — a grade final já está no banco (o checkout grava
-	// o cart_item ANTES de chamar este método). Sem movimentação manual e sem
-	// movementID; falha desfaz o estoque local para o comprador ver o erro.
-	if st, stErr := s.repo.GetCartERPOrderState(ctx, cartID); stErr == nil &&
-		st.State != erpOrderStateNone && st.State != erpOrderStateCancelled {
-		if mutErr := s.MutateERPOrderItems(ctx, cartID, storeID); mutErr != nil {
-			rollbackLocal()
-			return "", fmt.Errorf("applying grid to converted cart order: %w", mutErr)
-		}
-		return "", nil
-	}
-
-	// 2. ERP sync — optional. Anything below is best-effort against the ERP;
-	//    any failure rolls back the local change above.
-	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
-	if err != nil {
-		logger.From(ctx, s.logger).Debug("no active ERP integration, skipping reservation delta",
-			zap.String("store_id", storeID),
-		)
-		return "", nil
-	}
-
-	erpProvider, err := s.erpProviderFor(ctx, integration)
-	if err != nil {
-		rollbackLocal()
-		return "", fmt.Errorf("creating ERP provider: %w", err)
-	}
-
-	if s.productSyncer == nil {
-		return "", nil
-	}
-	externalID, _, err := s.productSyncer.GetProduct(ctx, storeID, productID)
-	if err != nil || externalID == "" {
-		logger.From(ctx, s.logger).Debug("product not linked to ERP, skipping reservation delta",
-			zap.String("product_id", productID),
-		)
-		return "", nil
-	}
-
-	existing, _ := s.repo.ListActiveReservationsByCartAndProduct(ctx, cartID, productID)
-
-	if delta > 0 {
-		obs := fmt.Sprintf("Ajuste reserva LiveCart (+%d) - @%s - Cart %s", delta, platformHandle, cartID)
-		movementID, err := erpProvider.ReserveStock(ctx, externalID, delta, float64(unitPrice)/100, obs)
-		if err != nil {
-			rollbackLocal()
-			return "", fmt.Errorf("reserving stock delta in ERP: %w", err)
-		}
-
-		if len(existing) == 0 {
-			if _, err := s.repo.CreateStockReservation(ctx, CreateStockReservationParams{
-				EventID:           eventID,
-				CartID:            cartID,
-				ProductID:         productID,
-				ExternalProductID: externalID,
-				Quantity:          delta,
-				ERPMovementID:     movementID,
-			}); err != nil {
-				return movementID, fmt.Errorf("recording new reservation: %w", err)
-			}
-		} else if _, err := s.repo.AdjustActiveReservationQuantity(ctx, cartID, productID, delta, movementID); err != nil {
-			return movementID, fmt.Errorf("bumping reservation quantity: %w", err)
-		}
-
-		logger.From(ctx, s.logger).Info("ERP reservation increased",
-			zap.String("cart_id", cartID),
-			zap.String("product_id", productID),
-			zap.Int("delta", delta),
-			zap.String("erp_movement_id", movementID),
-		)
-		return movementID, nil
-	}
-
-	// delta < 0
-	if len(existing) == 0 {
-		logger.From(ctx, s.logger).Warn("no active reservation to decrease for cart+product, skipping ERP call",
-			zap.String("cart_id", cartID),
-			zap.String("product_id", productID),
-			zap.Int("delta", delta),
-		)
-		return "", nil
-	}
-
-	// Sum across all active rows (in practice the unique index keeps it to 1).
-	currentQty := 0
-	for _, r := range existing {
-		currentQty += r.Quantity
-	}
-	newQty := currentQty + delta
-
-	obs := fmt.Sprintf("Ajuste reserva LiveCart (%d) - @%s - Cart %s", delta, platformHandle, cartID)
-	movementID, err := erpProvider.ReverseStockReservation(ctx, externalID, -delta, 0, obs)
-	if err != nil {
-		rollbackLocal()
-		return "", fmt.Errorf("reversing stock delta in ERP: %w", err)
-	}
-
-	// Full reversal: skip the UPDATE — stock_reservations.quantity has a
-	// CHECK (quantity > 0) constraint, so we cannot zero the row in place.
-	// Mark it reversed instead.
-	if newQty <= 0 {
-		if err := s.repo.ReverseReservationsByCartAndProduct(ctx, cartID, productID); err != nil {
-			return movementID, fmt.Errorf("marking reservation reversed: %w", err)
-		}
-	} else if _, err := s.repo.AdjustActiveReservationQuantity(ctx, cartID, productID, delta, movementID); err != nil {
-		return movementID, fmt.Errorf("decreasing reservation quantity: %w", err)
-	}
-
-	logger.From(ctx, s.logger).Info("ERP reservation decreased",
-		zap.String("cart_id", cartID),
-		zap.String("product_id", productID),
-		zap.Int("delta", delta),
-		zap.Int("new_qty", newQty),
-		zap.String("erp_movement_id", movementID),
-	)
-	return movementID, nil
+	return s.erpStock().AdjustStockReservationDelta(ctx, storeID, cartID, eventID, productID, delta, unitPrice, platformHandle, op)
 }
 
 // =============================================================================
