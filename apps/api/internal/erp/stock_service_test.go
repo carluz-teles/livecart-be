@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
@@ -25,6 +26,11 @@ type fakeERPProvider struct {
 	reverseErr error
 	reserves   int
 	reverses   int
+
+	// order-as-reservation cycle (used by MutateERPOrderItems, now internal).
+	orderReverses int
+	orderUpdates  int
+	orderLaunches int
 }
 
 func (f *fakeERPProvider) ReserveStock(_ context.Context, _ string, _ int, _ float64, _ string) (string, error) {
@@ -37,6 +43,13 @@ func (f *fakeERPProvider) ReverseStockReservation(_ context.Context, _ string, _
 	return f.reverseID, f.reverseErr
 }
 
+func (f *fakeERPProvider) ReverseOrderStock(context.Context, string) error { f.orderReverses++; return nil }
+func (f *fakeERPProvider) UpdateOrderItems(context.Context, string, []providers.ERPOrderItem) error {
+	f.orderUpdates++
+	return nil
+}
+func (f *fakeERPProvider) LaunchOrderStock(context.Context, string) error { f.orderLaunches++; return nil }
+
 // mockRepo is a controllable ERPRepository recording the calls the assertions care about.
 type mockRepo struct {
 	integration   *Integration
@@ -44,17 +57,19 @@ type mockRepo struct {
 	orderState    *CartERPOrderState
 	orderStateErr error
 	existing      []StockReservationRow
+	items         []NonWaitlistedCartItem
 	decrementErr  error
 	incrementErr  error
 	createErr     error
 
-	reserved   int
-	released   int
-	decrements int
-	increments int
-	creates    int
-	adjusts    int
-	reverses   int
+	reserved    int
+	released    int
+	decrements  int
+	increments  int
+	creates     int
+	adjusts     int
+	reverses    int
+	transitions int
 }
 
 func (m *mockRepo) GetActiveByProvider(context.Context, string, string, string) (*Integration, error) {
@@ -112,6 +127,23 @@ func (m *mockRepo) EmitStockReleased(context.Context, StockEventParams) error {
 	m.released++
 	return nil
 }
+func (m *mockRepo) TransitionCartERPOrderState(context.Context, string, string, string) (bool, error) {
+	m.transitions++
+	return true, nil
+}
+func (m *mockRepo) UpdateCartExternalOrderID(context.Context, string, string) error { return nil }
+func (m *mockRepo) SetCartERPStockLaunched(context.Context, string, bool) error     { return nil }
+func (m *mockRepo) MarkCartERPFinalisationDone(context.Context, string) error       { return nil }
+func (m *mockRepo) ListNonWaitlistedCartItems(context.Context, string) ([]NonWaitlistedCartItem, error) {
+	return m.items, nil
+}
+func (m *mockRepo) ListStuckERPOrderOps(context.Context, time.Duration) ([]StuckERPOrderOp, error) {
+	return nil, nil
+}
+func (m *mockRepo) ListTinyIntegrationsWithStaleStockWebhook(context.Context, time.Duration) ([]StaleStockWebhookIntegration, error) {
+	return nil, nil
+}
+func (m *mockRepo) StampIntegrationStockWebhookAlert(context.Context, string) error { return nil }
 
 // mockCollab is a controllable StockCollaborators.
 type mockCollab struct {
@@ -119,8 +151,6 @@ type mockCollab struct {
 	providerErr error
 	linked      bool
 	externalID  string
-	mutateErr   error
-	mutations   int
 }
 
 func (m *mockCollab) ResolveProvider(context.Context, *Integration) (providers.ERPProvider, error) {
@@ -129,10 +159,20 @@ func (m *mockCollab) ResolveProvider(context.Context, *Integration) (providers.E
 func (m *mockCollab) ResolveExternalProduct(context.Context, string, string) (string, bool) {
 	return m.externalID, m.linked
 }
-func (m *mockCollab) MutateERPOrderItems(context.Context, string, string) error {
-	m.mutations++
-	return m.mutateErr
+func (m *mockCollab) OrderAtCheckoutEnabled(string) bool { return false }
+func (m *mockCollab) ResolveERPContact(context.Context, providers.ERPProvider, *Integration, string, string, string, string, string, string, string) (string, error) {
+	return "", nil
 }
+func (m *mockCollab) CreateFinalERPOrderForConversion(context.Context, providers.ERPProvider, *Integration, string, string) error {
+	return nil
+}
+func (m *mockCollab) ReverseCartReservationsPerRow(context.Context, providers.ERPProvider, string) error {
+	return nil
+}
+func (m *mockCollab) MarkFinalisationFailed(context.Context, string, string)                {}
+func (m *mockCollab) MirrorToOrder(context.Context, string)                                 {}
+func (m *mockCollab) EmitERPOrderFinalized(context.Context, string, string)                 {}
+func (m *mockCollab) EmitERPOrderCancelled(context.Context, string, string, string, string) {}
 
 func newSvc(repo *mockRepo, collab *mockCollab) *Service {
 	return NewService(repo, collab, zap.NewNop())
@@ -149,20 +189,25 @@ func TestService_ReserveStockInERP(t *testing.T) {
 		if err := newSvc(repo, collab).ReserveStockInERP(ctx, "s", "c", "e", "p", 1, 1000, "@h"); err != nil {
 			t.Fatalf("want nil, got %v", err)
 		}
-		if repo.creates != 0 || collab.mutations != 0 {
-			t.Fatalf("no-op should touch nothing: creates=%d mutations=%d", repo.creates, collab.mutations)
+		if repo.creates != 0 || repo.transitions != 0 {
+			t.Fatalf("no-op should touch nothing: creates=%d transitions=%d", repo.creates, repo.transitions)
 		}
 	})
 
 	t.Run("converted cart routes to the order cycle, no manual movement", func(t *testing.T) {
 		fake := &fakeERPProvider{}
-		repo := &mockRepo{orderState: &CartERPOrderState{State: OrderStateOpen}}
+		repo := &mockRepo{
+			orderState: &CartERPOrderState{State: OrderStateOpen, ExternalOrderID: "ORD-1"},
+			items:      []NonWaitlistedCartItem{{ProductExternalID: "ext-1", Quantity: 1, UnitPrice: 1000}},
+		}
 		collab := &mockCollab{provider: fake, linked: true, externalID: "ext-1"}
 		if err := newSvc(repo, collab).ReserveStockInERP(ctx, "s", "c", "e", "p", 1, 1000, "@h"); err != nil {
 			t.Fatalf("want nil, got %v", err)
 		}
-		if collab.mutations != 1 {
-			t.Fatalf("expected one order mutation, got %d", collab.mutations)
+		// The mutation now runs internally (MutateERPOrderItems moved to erp.Service):
+		// it drives the estornar→PUT→lançar cycle on the order, not a manual exit.
+		if fake.orderUpdates != 1 {
+			t.Fatalf("expected one order-items PUT, got %d", fake.orderUpdates)
 		}
 		if fake.reserves != 0 || repo.creates != 0 {
 			t.Fatalf("manual movement leaked into converted cart: reserves=%d creates=%d", fake.reserves, repo.creates)
@@ -295,14 +340,18 @@ func TestService_AdjustStockReservationDelta(t *testing.T) {
 
 	t.Run("converted cart routes to the order cycle", func(t *testing.T) {
 		fake := &fakeERPProvider{}
-		repo := &mockRepo{orderState: &CartERPOrderState{State: OrderStateOpen}}
+		repo := &mockRepo{
+			orderState: &CartERPOrderState{State: OrderStateOpen, ExternalOrderID: "ORD-1"},
+			items:      []NonWaitlistedCartItem{{ProductExternalID: "ext-1", Quantity: 1, UnitPrice: 1000}},
+		}
 		collab := &mockCollab{provider: fake, linked: true, externalID: "ext-1"}
 		mov, err := newSvc(repo, collab).AdjustStockReservationDelta(ctx, "s", "c", "e", "p", 1, 1000, "@h", StockOpUnspecified)
 		if err != nil || mov != "" {
 			t.Fatalf("converted cart yields no manual movement id: mov=%q err=%v", mov, err)
 		}
-		if collab.mutations != 1 {
-			t.Fatalf("expected one order mutation, got %d", collab.mutations)
+		// The mutation now runs internally (MutateERPOrderItems moved to erp.Service).
+		if fake.orderUpdates != 1 {
+			t.Fatalf("expected one order-items PUT, got %d", fake.orderUpdates)
 		}
 		if fake.reserves != 0 {
 			t.Fatalf("manual reserve leaked into converted cart")

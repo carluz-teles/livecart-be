@@ -3,6 +3,7 @@ package erp
 import (
 	"context"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -32,11 +33,29 @@ func (stubERPRepo) CreateStockReservation(context.Context, CreateStockReservatio
 func (stubERPRepo) AdjustActiveReservationQuantity(context.Context, string, string, int, string) (*StockReservationRow, error) {
 	return nil, nil
 }
-func (stubERPRepo) ReverseReservationsByCartAndProduct(context.Context, string, string) error { return nil }
-func (stubERPRepo) DecrementProductStock(context.Context, string, int) error                  { return nil }
-func (stubERPRepo) IncrementProductStock(context.Context, string, int) error                  { return nil }
-func (stubERPRepo) EmitStockReserved(context.Context, StockEventParams) error                 { return nil }
-func (stubERPRepo) EmitStockReleased(context.Context, StockEventParams) error                 { return nil }
+func (stubERPRepo) ReverseReservationsByCartAndProduct(context.Context, string, string) error {
+	return nil
+}
+func (stubERPRepo) DecrementProductStock(context.Context, string, int) error  { return nil }
+func (stubERPRepo) IncrementProductStock(context.Context, string, int) error  { return nil }
+func (stubERPRepo) EmitStockReserved(context.Context, StockEventParams) error { return nil }
+func (stubERPRepo) EmitStockReleased(context.Context, StockEventParams) error { return nil }
+func (stubERPRepo) TransitionCartERPOrderState(context.Context, string, string, string) (bool, error) {
+	return false, nil
+}
+func (stubERPRepo) UpdateCartExternalOrderID(context.Context, string, string) error { return nil }
+func (stubERPRepo) SetCartERPStockLaunched(context.Context, string, bool) error     { return nil }
+func (stubERPRepo) MarkCartERPFinalisationDone(context.Context, string) error       { return nil }
+func (stubERPRepo) ListNonWaitlistedCartItems(context.Context, string) ([]NonWaitlistedCartItem, error) {
+	return nil, nil
+}
+func (stubERPRepo) ListStuckERPOrderOps(context.Context, time.Duration) ([]StuckERPOrderOp, error) {
+	return nil, nil
+}
+func (stubERPRepo) ListTinyIntegrationsWithStaleStockWebhook(context.Context, time.Duration) ([]StaleStockWebhookIntegration, error) {
+	return nil, nil
+}
+func (stubERPRepo) StampIntegrationStockWebhookAlert(context.Context, string) error { return nil }
 
 // stubCollaborators is a no-op StockCollaborators for construction proofs.
 type stubCollaborators struct{}
@@ -47,12 +66,25 @@ func (stubCollaborators) ResolveProvider(context.Context, *Integration) (provide
 func (stubCollaborators) ResolveExternalProduct(context.Context, string, string) (string, bool) {
 	return "", false
 }
-func (stubCollaborators) MutateERPOrderItems(context.Context, string, string) error { return nil }
+func (stubCollaborators) OrderAtCheckoutEnabled(string) bool { return false }
+func (stubCollaborators) ResolveERPContact(context.Context, providers.ERPProvider, *Integration, string, string, string, string, string, string, string) (string, error) {
+	return "", nil
+}
+func (stubCollaborators) CreateFinalERPOrderForConversion(context.Context, providers.ERPProvider, *Integration, string, string) error {
+	return nil
+}
+func (stubCollaborators) ReverseCartReservationsPerRow(context.Context, providers.ERPProvider, string) error {
+	return nil
+}
+func (stubCollaborators) MarkFinalisationFailed(context.Context, string, string)                {}
+func (stubCollaborators) MirrorToOrder(context.Context, string)                                 {}
+func (stubCollaborators) EmitERPOrderFinalized(context.Context, string, string)                 {}
+func (stubCollaborators) EmitERPOrderCancelled(context.Context, string, string, string, string) {}
 
 // Compile-time proofs the stubs satisfy the ports.
 var (
-	_ ERPRepository       = stubERPRepo{}
-	_ StockCollaborators  = stubCollaborators{}
+	_ ERPRepository      = stubERPRepo{}
+	_ StockCollaborators = stubCollaborators{}
 )
 
 func TestNewService(t *testing.T) {

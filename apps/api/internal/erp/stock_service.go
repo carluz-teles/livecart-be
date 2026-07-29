@@ -13,11 +13,11 @@ import (
 	"livecart/apps/api/lib/logger"
 )
 
-// StockCollaborators groups the integration-Service helpers the migrated
-// cart→ERP stock flow still calls back into. It is satisfied by
-// integration.Service (wired when the delegating methods build the erp.Service),
-// so erp stays free of the integration import. The interface shrinks slice by
-// slice as the provider/product/order-mutation logic itself migrates (B2c+).
+// StockCollaborators groups the integration-Service helpers the migrated ERP
+// flow still calls back into. It is satisfied by integration.Service (wired when
+// the delegating methods build the erp.Service), so erp stays free of the
+// integration import. The interface shrinks slice by slice as the
+// provider/contact/order-creation logic itself migrates (B2c-2+).
 type StockCollaborators interface {
 	// ResolveProvider builds the ERP provider client for an active integration,
 	// honouring the finalisation tests' scripted-provider seam.
@@ -27,9 +27,34 @@ type StockCollaborators interface {
 	// syncer wired, the product is not linked, or the lookup failed — and the
 	// caller MUST treat that as a silent no-op (the source semantics).
 	ResolveExternalProduct(ctx context.Context, storeID, productID string) (externalID string, linked bool)
-	// MutateERPOrderItems re-syncs the converted cart's order grid via the
-	// reverse→PUT→launch cycle (design C).
-	MutateERPOrderItems(ctx context.Context, cartID, storeID string) error
+
+	// --- Order-as-reservation lifecycle collaborators (Bloco B2c, Design C) ---
+
+	// OrderAtCheckoutEnabled reports whether the store runs design C (converting
+	// the cart into an ERP order from payment initiation). Reads the
+	// integration-owned per-store rollout flag.
+	OrderAtCheckoutEnabled(storeID string) bool
+	// ResolveERPContact finds/creates and enriches the ERP contact for a platform
+	// user (the recurring-customer prewarm hits the same cache).
+	ResolveERPContact(ctx context.Context, provider providers.ERPProvider, integration *Integration, storeID, platformUserID, platformHandle, name, document, email, phone string) (string, error)
+	// CreateFinalERPOrderForConversion creates the unpaid ERP order (situação
+	// Aberta, no stock launch) for a cart conversion and persists its external id.
+	CreateFinalERPOrderForConversion(ctx context.Context, provider providers.ERPProvider, integration *Integration, storeID, cartID string) error
+	// ReverseCartReservationsPerRow estorna the cart's active manual stock exits,
+	// row by row, marking each only after the ERP confirms the entry.
+	ReverseCartReservationsPerRow(ctx context.Context, provider providers.ERPProvider, cartID string) error
+	// MarkFinalisationFailed records the 'failed' finalisation state with the
+	// error and emits the group G erp.finalization_failed fact (best-effort).
+	MarkFinalisationFailed(ctx context.Context, cartID, msg string)
+	// MirrorToOrder projects the cart's current ERP state into the Order
+	// aggregate (best-effort; no-op when the mirror is not wired).
+	MirrorToOrder(ctx context.Context, cartID string)
+	// EmitERPOrderFinalized publishes the group G erp.order_finalized fact for a
+	// confirmed order-as-reservation (best-effort, dedup by cart).
+	EmitERPOrderFinalized(ctx context.Context, storeID, cartID string)
+	// EmitERPOrderCancelled publishes the group G erp.order_cancelled fact for a
+	// cancelled/refunded order-as-reservation (best-effort, dedup by order id).
+	EmitERPOrderCancelled(ctx context.Context, storeID, cartID, externalOrderID, reason string)
 }
 
 // =============================================================================
@@ -53,7 +78,7 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 	// e a promoção de waitlist de cart convertido num único ponto.
 	if st, stErr := s.repo.GetCartERPOrderState(ctx, cartID); stErr == nil &&
 		st.State != OrderStateNone && st.State != OrderStateCancelled {
-		if mutErr := s.collab.MutateERPOrderItems(ctx, cartID, storeID); mutErr != nil {
+		if mutErr := s.MutateERPOrderItems(ctx, cartID, storeID); mutErr != nil {
 			return fmt.Errorf("applying grid to converted cart order: %w", mutErr)
 		}
 		return nil
@@ -226,7 +251,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 	// movementID; falha desfaz o estoque local para o comprador ver o erro.
 	if st, stErr := s.repo.GetCartERPOrderState(ctx, cartID); stErr == nil &&
 		st.State != OrderStateNone && st.State != OrderStateCancelled {
-		if mutErr := s.collab.MutateERPOrderItems(ctx, cartID, storeID); mutErr != nil {
+		if mutErr := s.MutateERPOrderItems(ctx, cartID, storeID); mutErr != nil {
 			rollbackLocal()
 			return "", fmt.Errorf("applying grid to converted cart order: %w", mutErr)
 		}

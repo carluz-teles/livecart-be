@@ -2,6 +2,7 @@ package erp
 
 import (
 	"context"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -51,6 +52,35 @@ type ERPRepository interface {
 	// (also satisfy stockReservationRepo, so NewStockReservations can take repo).
 	EmitStockReserved(ctx context.Context, p StockEventParams) error
 	EmitStockReleased(ctx context.Context, p StockEventParams) error
+
+	// --- Order-as-reservation lifecycle persistence (Bloco B2c, Design C) ---
+	// Each method below is already implemented verbatim on integration.Repository
+	// and promoted by the erpRepoAdapter (the DTO types are aliases of the erp
+	// ones), so no new adapter code is needed.
+
+	// TransitionCartERPOrderState is the state-machine CAS: it advances the cart
+	// from `from` to `to` and returns false when the current state differs from
+	// `from` (the single-flight primitive of conversion/mutation/confirm).
+	TransitionCartERPOrderState(ctx context.Context, cartID, from, to string) (bool, error)
+	// UpdateCartExternalOrderID persists the ERP order id on the cart (marker
+	// adoption in confirm/sweep).
+	UpdateCartExternalOrderID(ctx context.Context, cartID, externalOrderID string) error
+	// SetCartERPStockLaunched flips the durable "order stock launched" marker.
+	SetCartERPStockLaunched(ctx context.Context, cartID string, launched bool) error
+	// MarkCartERPFinalisationDone stamps the terminal finalisation marker so the
+	// existing telemetry/guards stay coherent (confirmed = done).
+	MarkCartERPFinalisationDone(ctx context.Context, cartID string) error
+	// ListNonWaitlistedCartItems returns the ERP-linked cart grid — input for the
+	// order mutation cycle and the confirm payment total.
+	ListNonWaitlistedCartItems(ctx context.Context, cartID string) ([]NonWaitlistedCartItem, error)
+	// ListStuckERPOrderOps lists converting/mutating carts older than the
+	// threshold — input for the reconciliation sweep.
+	ListStuckERPOrderOps(ctx context.Context, olderThan time.Duration) ([]StuckERPOrderOp, error)
+	// ListTinyIntegrationsWithStaleStockWebhook lists active Tiny integrations
+	// with no stock webhook events in the window (URL likely removed by Tiny).
+	ListTinyIntegrationsWithStaleStockWebhook(ctx context.Context, staleAfter time.Duration) ([]StaleStockWebhookIntegration, error)
+	// StampIntegrationStockWebhookAlert dedupes the stale-webhook alert (24h).
+	StampIntegrationStockWebhookAlert(ctx context.Context, integrationID string) error
 }
 
 // Service handles ERP-domain business logic. B2a laid the foundation (struct +

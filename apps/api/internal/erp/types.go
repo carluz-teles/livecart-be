@@ -78,6 +78,41 @@ type CartERPOrderState struct {
 	ExternalOrderID string
 }
 
+// NonWaitlistedCartItem is a non-waitlisted cart item carrying its ERP external
+// id — the grid input for order mutation (design C) and the base of the payment
+// total. Canonical home is this package (Bloco B2c); internal/integration aliases
+// it so the Repository (which owns the SQL) keeps compiling unchanged.
+type NonWaitlistedCartItem struct {
+	ID                string
+	CartID            string
+	ProductID         string
+	Quantity          int
+	UnitPrice         int64
+	ProductName       string
+	ProductExternalID string
+	ProductKeyword    string
+}
+
+// StuckERPOrderOp is a conversion/mutation stuck in flight (the process died
+// mid-op) — the input to the reconciliation sweep. Canonical home is this
+// package; internal/integration aliases it.
+type StuckERPOrderOp struct {
+	CartID          string
+	State           string
+	ExternalOrderID string
+	StoreID         string
+}
+
+// StaleStockWebhookIntegration is an active Tiny integration that stopped
+// receiving stock webhooks — the Tiny side silently removes the URL after
+// consecutive delivery failures (field lesson, 11/07/2026). Canonical home is
+// this package; internal/integration aliases it.
+type StaleStockWebhookIntegration struct {
+	IntegrationID    string
+	StoreID          string
+	LastStockEventAt *time.Time
+}
+
 // Integration is the ERP-domain view of an active integration row. It is the
 // return type of ERPRepository.GetActiveByProvider so this package never has to
 // import internal/integration (which owns the concrete IntegrationRow). The

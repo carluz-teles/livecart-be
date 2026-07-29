@@ -1824,17 +1824,10 @@ func (r *Repository) FindCartByExternalOrderID(ctx context.Context, externalOrde
 	return uuidToString(row.ID), nil
 }
 
-// NonWaitlistedCartItem represents a cart item that is not waitlisted, with product info.
-type NonWaitlistedCartItem struct {
-	ID                string
-	CartID            string
-	ProductID         string
-	Quantity          int
-	UnitPrice         int64
-	ProductName       string
-	ProductExternalID string
-	ProductKeyword    string
-}
+// NonWaitlistedCartItem represents a cart item that is not waitlisted, with
+// product info. Canonical home is internal/erp (Bloco B2c); aliased here so the
+// Repository (which owns the SQL) and its ~call sites keep compiling unchanged.
+type NonWaitlistedCartItem = erp.NonWaitlistedCartItem
 
 // ListNonWaitlistedCartItems returns non-waitlisted cart items with product external_id for ERP sync.
 func (r *Repository) ListNonWaitlistedCartItems(ctx context.Context, cartID string) ([]NonWaitlistedCartItem, error) {
@@ -2898,12 +2891,8 @@ func (r *Repository) SetCartERPStockLaunched(ctx context.Context, cartID string,
 }
 
 // StuckERPOrderOp is a conversion/mutation stuck in flight (process died).
-type StuckERPOrderOp struct {
-	CartID          string
-	State           string
-	ExternalOrderID string
-	StoreID         string
-}
+// Canonical home is internal/erp (Bloco B2c); aliased here.
+type StuckERPOrderOp = erp.StuckERPOrderOp
 
 // ListStuckERPOrderOps lists carts stuck in converting/mutating older than
 // the threshold — input for the reconciliation sweep.
@@ -2926,12 +2915,9 @@ func (r *Repository) ListStuckERPOrderOps(ctx context.Context, olderThan time.Du
 
 // StaleStockWebhookIntegration is an active Tiny integration that stopped
 // receiving stock webhooks — the Tiny side silently removes the URL after
-// consecutive delivery failures (field lesson, 11/07/2026).
-type StaleStockWebhookIntegration struct {
-	IntegrationID    string
-	StoreID          string
-	LastStockEventAt *time.Time
-}
+// consecutive delivery failures (field lesson, 11/07/2026). Canonical home is
+// internal/erp (Bloco B2c); aliased here.
+type StaleStockWebhookIntegration = erp.StaleStockWebhookIntegration
 
 // ListTinyIntegrationsWithStaleStockWebhook lists active Tiny integrations
 // with zero 'estoque' webhook events in the window and no alert in the last

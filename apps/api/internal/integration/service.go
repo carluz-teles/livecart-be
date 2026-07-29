@@ -4172,7 +4172,7 @@ func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider 
 		logger.From(ctx, s.logger).Warn("launch-first failed, falling back to reverse-first order",
 			zap.String("cart_id", cartID),
 			zap.String("external_order_id", orderID),
-			zap.Bool("insufficient_balance", isTinyInsufficientBalanceErr(launchErr)),
+			zap.Bool("insufficient_balance", erp.IsTinyInsufficientBalanceErr(launchErr)),
 			zap.Error(launchErr),
 		)
 		if err := s.reverseCartReservationsPerRow(ctx, erpProvider, cartID); err != nil {
