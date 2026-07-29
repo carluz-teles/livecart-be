@@ -28,6 +28,15 @@ type CartInvoiceSyncer interface {
 	SyncCartInvoiceFromERP(ctx context.Context, storeID, cartID, invoiceID string) error
 }
 
+// CartCanceller is fulfilled by integration.Service. Cancelar um pedido é, no
+// modelo atual (pedido É o carrinho), cancelar o cart e desfazer tudo que ele
+// segurava — estoque local, reserva/pedido no ERP e fila de espera. Essa
+// orquestração vive no integration (que fala com o Tiny e com a waitlist), então
+// invertemos a dependência para o order não importar integration.
+type CartCanceller interface {
+	CancelCart(ctx context.Context, cartID, storeID string) error
+}
+
 // BlockedHandleChecker reports whether a buyer's handle is currently blocked.
 // Implemented by customer.Service and wired at boot to break the package cycle.
 type BlockedHandleChecker interface {
@@ -40,6 +49,7 @@ type Service struct {
 	erpRetryService ERPFinalisationRetrier
 	invoiceSyncer   CartInvoiceSyncer
 	blockChecker    BlockedHandleChecker
+	cartCanceller   CartCanceller
 }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {
@@ -68,6 +78,39 @@ func (s *Service) SetCartInvoiceSyncer(syncer CartInvoiceSyncer) {
 // never sees a "Cliente bloqueado" badge, which is the right degraded mode.
 func (s *Service) SetBlockedHandleChecker(c BlockedHandleChecker) {
 	s.blockChecker = c
+}
+
+// SetCartCanceller wires integration.Service, que sabe cancelar o cart e
+// desfazer estoque/ERP/fila. Mesma injeção de boot dos demais.
+func (s *Service) SetCartCanceller(c CartCanceller) {
+	s.cartCanceller = c
+}
+
+// Cancel cancela um pedido NÃO PAGO por decisão do lojista.
+//
+// Aqui só moram as regras que o Order conhece: posse da loja (GetByID escopado)
+// e o estado visível do pedido. A corrida de verdade — pagamento chegando no
+// mesmo instante — é resolvida uma camada abaixo, com advisory lock e flip
+// guard-first (integration.CancelCart): esta checagem é apenas o "não" barato e
+// com mensagem boa; ela NÃO é a garantia.
+func (s *Service) Cancel(ctx context.Context, orderID, storeID string) error {
+	if s.cartCanceller == nil {
+		return httpx.ErrUnprocessable("cancelamento indisponível")
+	}
+	order, err := s.GetByID(ctx, orderID, storeID)
+	if err != nil {
+		return err
+	}
+	if order.PaymentStatus == "paid" || order.PaymentStatus == "refunded" {
+		return httpx.ErrConflict("pedido já foi pago — não é possível cancelar")
+	}
+	if order.Status == "cancelled" {
+		return httpx.ErrConflict("pedido já está cancelado")
+	}
+	if order.Status == "expired" {
+		return httpx.ErrConflict("pedido já expirou")
+	}
+	return s.cartCanceller.CancelCart(ctx, orderID, storeID)
 }
 
 // SyncInvoice fetches the NFe state from the ERP and persists it on the
@@ -271,9 +314,10 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 	}
 
 	out := &OrderDetailOutput{
-		OrderOutput: *orderOutput,
-		Token:       row.Token,
-		Comments:    comments,
+		OrderOutput:            *orderOutput,
+		Token:                  row.Token,
+		Comments:               comments,
+		CancellationRevertedAt: row.CancellationRevertedAt,
 	}
 
 	// Customer: only expose when there's any data to surface.
@@ -504,6 +548,13 @@ func (s *Service) RegenerateCheckout(
 	}
 	if row.PaymentStatus == "paid" {
 		return "", time.Time{}, httpx.ErrConflict("cannot regenerate checkout for a paid order")
+	}
+	// Cart cancelado não volta pelo "regerar link": o cancelamento já devolveu
+	// o estoque e estornou a reserva no ERP, e o regenerate só mexe em
+	// status/prazo — reabri-lo criaria um checkout vendendo unidade que não
+	// está mais reservada para ninguém.
+	if row.Status == "cancelled" {
+		return "", time.Time{}, httpx.ErrConflict("pedido cancelado — não é possível regerar o link")
 	}
 	// Shipment guard keyed by the real Order id (orders.id). Resolve from the
 	// cart id first; no order yet → no shipment → regenerating is allowed.

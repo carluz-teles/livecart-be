@@ -92,6 +92,7 @@ func toResponse(n NotificationRow) NotificationResponse {
 		ID:         n.ID,
 		Type:       n.Type,
 		IdeaID:     n.IdeaID,
+		CartID:     n.CartID,
 		CommentID:  n.CommentID,
 		ActorID:    n.ActorID,
 		ActorName:  n.ActorName,

@@ -104,6 +104,8 @@ type Cart struct {
 	ErpOrderState        string             `json:"erp_order_state"`
 	ErpStockLaunched     bool               `json:"erp_stock_launched"`
 	ErpOpStartedAt       pgtype.Timestamptz `json:"erp_op_started_at"`
+	// Quando um cancelamento manual do lojista foi revertido por um pagamento aprovado. NULL = nunca ocorreu.
+	CancellationRevertedAt pgtype.Timestamptz `json:"cancellation_reverted_at"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.
@@ -423,6 +425,7 @@ type Notification struct {
 	Payload     json.RawMessage    `json:"payload"`
 	ReadAt      pgtype.Timestamptz `json:"read_at"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	CartID      pgtype.UUID        `json:"cart_id"`
 }
 
 // Tracks all notification attempts for analytics and preventing duplicates

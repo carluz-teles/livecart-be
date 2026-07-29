@@ -29,6 +29,54 @@ func (q *Queries) CancelWaitlistItem(ctx context.Context, arg CancelWaitlistItem
 	return err
 }
 
+const cancelWaitlistItemsByCart = `-- name: CancelWaitlistItemsByCart :many
+UPDATE waitlist_items
+SET status = 'cancelled', cancelled_at = now()
+WHERE cart_id = $1 AND status IN ('waiting', 'notified')
+RETURNING id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at, cart_id, notification_sent_at, cancelled_at
+`
+
+// Mata a fila do cart inteiro. Usado pelo cancelamento manual do lojista: o
+// carrinho deixa de existir para o comprador, então mantê-lo na fila só geraria
+// promoção (e DM) para um checkout morto — o bug G1 da auditoria, agora fechado
+// na origem. Só toca itens ainda vivos; fulfilled/expired/cancelled ficam como
+// estão, o que torna a chamada idempotente.
+func (q *Queries) CancelWaitlistItemsByCart(ctx context.Context, cartID pgtype.UUID) ([]WaitlistItem, error) {
+	rows, err := q.db.Query(ctx, cancelWaitlistItemsByCart, cartID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WaitlistItem{}
+	for rows.Next() {
+		var i WaitlistItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventID,
+			&i.ProductID,
+			&i.PlatformUserID,
+			&i.PlatformHandle,
+			&i.Quantity,
+			&i.Position,
+			&i.Status,
+			&i.NotifiedAt,
+			&i.FulfilledAt,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.CartID,
+			&i.NotificationSentAt,
+			&i.CancelledAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const claimNextWaitlistItem = `-- name: ClaimNextWaitlistItem :one
 UPDATE waitlist_items
 SET status               = 'notified',

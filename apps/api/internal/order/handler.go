@@ -24,6 +24,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Patch("/:id", h.Update)
 	g.Patch("/:id/shipping-address", h.UpdateShippingAddress)
 	g.Post("/:id/regenerate-checkout", h.RegenerateCheckout)
+	g.Post("/:id/cancel", h.Cancel)
 	g.Post("/:id/retry-erp", h.RetryERPFinalisation)
 	g.Post("/:id/sync-invoice", h.SyncInvoice)
 }
@@ -206,6 +207,41 @@ func (h *Handler) RegenerateCheckout(c *fiber.Ctx) error {
 		return err
 	}
 	return httpx.OK(c, NewRegenerateCheckoutResponse(token, expiresAt))
+}
+
+// Cancel godoc
+// @Summary      Cancelar carrinho/pedido não pago
+// @Description  Cancela um pedido que ainda não foi pago: o carrinho continua
+// @Description  existindo com status 'cancelled', o estoque local é devolvido, a
+// @Description  reserva/pedido no ERP (Tiny) é estornada e a fila de espera do
+// @Description  carrinho é encerrada. O link público passa a mostrar "carrinho
+// @Description  cancelado" (e não "expirado"). Recusa com 409 quando o pedido já
+// @Description  foi pago, já está cancelado/expirado, ou quando um pagamento
+// @Description  está sendo finalizado neste instante — nessa corrida o pagamento
+// @Description  vence e o pedido permanece pago.
+// @Tags         orders
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Order UUID"
+// @Success      200 {object} httpx.Envelope{data=OrderDetailResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Failure      409 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/orders/{id}/cancel [post]
+// @Security     BearerAuth
+func (h *Handler) Cancel(c *fiber.Ctx) error {
+	id := c.Params("id")
+	storeID := httpx.GetStoreID(c)
+
+	if err := h.service.Cancel(c.UserContext(), id, storeID); err != nil {
+		return err
+	}
+
+	// Devolve o pedido já atualizado para o FE trocar o estado in-place.
+	output, err := h.service.GetDetailByID(c.UserContext(), id, storeID)
+	if err != nil {
+		return err
+	}
+	return httpx.OK(c, NewOrderDetailResponse(*output))
 }
 
 // RetryERPFinalisation godoc

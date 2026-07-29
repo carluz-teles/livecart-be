@@ -3794,8 +3794,26 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 	}
 
 	// Update cart payment status and payment method
-	if err := s.repo.UpdateCartPaymentStatus(ctx, status.ExternalReference, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod); err != nil {
-		if errors.Is(err, ErrCartNotPayable) {
+	updateErr := s.repo.UpdateCartPaymentStatus(ctx, status.ExternalReference, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod)
+	if errors.Is(updateErr, ErrCartNotPayable) {
+		// Corrida cancelamento × pagamento, lado inverso: o lojista cancelou o
+		// carrinho e o pagamento foi aprovado assim mesmo (PIX pago com o QR já
+		// aberto, cartão em análise, webhook atrasado). Regra de negócio: **o
+		// pagamento vence** — o pedido volta e consta como PAGO. Só vale para o
+		// cancelamento MANUAL do lojista: expirado, bloqueado por handle ou já
+		// pago não são restaurados por aqui (o guard da query decide).
+		restored := false
+		if cartPaymentStatus == "paid" {
+			var restoreErr error
+			restored, restoreErr = s.repo.RestoreCancelledCartAsPaid(ctx,
+				status.ExternalReference, input.StoreID, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod)
+			if restoreErr != nil {
+				logger.From(ctx, s.logger).Error("failed to restore store-cancelled cart as paid",
+					zap.String("cart_id", status.ExternalReference), zap.Error(restoreErr))
+				return fmt.Errorf("restoring cancelled cart as paid: %w", restoreErr)
+			}
+		}
+		if !restored {
 			// O cart expirou/cancelou entre a cobrança e este webhook. Não
 			// finalizamos (não marca pago, não toca ERP). Se dinheiro entrou
 			// mesmo, fica para a reconciliação (E6). ACK benigno.
@@ -3805,12 +3823,22 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 			)
 			return nil
 		}
+		// Restaurado: o fluxo segue idêntico ao de um pagamento normal — emite
+		// cart.paid e o fan-out (Order, ERP, e-mail, cupom, billing) roda como se
+		// o cancelamento nunca tivesse acontecido. As colunas de ERP foram
+		// zeradas no restore, então a finalização cria um pedido de venda limpo
+		// no Tiny (o cancelamento já cancelou/estornou o anterior).
+		logger.From(ctx, s.logger).Warn("store-cancelled cart was PAID — cancellation reverted, order is paid",
+			zap.String("cart_id", status.ExternalReference),
+			zap.String("payment_id", status.PaymentID),
+		)
+	} else if updateErr != nil {
 		logger.From(ctx, s.logger).Error("failed to update cart payment status",
 			zap.String("cart_id", status.ExternalReference),
 			zap.String("payment_status", cartPaymentStatus),
-			zap.Error(err),
+			zap.Error(updateErr),
 		)
-		return fmt.Errorf("updating cart payment status: %w", err)
+		return fmt.Errorf("updating cart payment status: %w", updateErr)
 	}
 
 	logger.From(ctx, s.logger).Info("cart payment status updated",
@@ -3980,16 +4008,11 @@ func (s *Service) ReactOrderRefundedERP(ctx context.Context, cartID, storeID str
 // are marked reversed regardless, so that path does not meaningfully retry).
 func (s *Service) ReactCartExpiredERP(ctx context.Context, cartID, storeID string) error {
 	ctx = logger.WithStore(ctx, storeID, "")
-	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
-	if err != nil {
-		return fmt.Errorf("loading cart ERP order state on expiry: %w", err)
+	// Mesma pegada de um cart cancelado pelo lojista — a lógica vive em
+	// reverseCartERPFootprint (cart_cancellation.go) e é compartilhada.
+	if err := s.reverseCartERPFootprint(ctx, cartID, storeID); err != nil {
+		return fmt.Errorf("reversing cart ERP footprint on expiry: %w", err)
 	}
-	if st.State != erpOrderStateNone && st.State != erpOrderStateCancelled {
-		// Design C: cancelling the converted order returns stock in Tiny.
-		return s.CancelERPOrderForCart(ctx, cartID, storeID)
-	}
-	// Legacy (non-converted): reverse the saída-manual reservations per cart.
-	s.reverseCartReservationsInERP(ctx, cartID, storeID)
 	return nil
 }
 

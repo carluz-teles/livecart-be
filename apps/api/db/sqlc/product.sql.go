@@ -155,6 +155,53 @@ func (q *Queries) DecrementProductStockUpTo(ctx context.Context, arg DecrementPr
 	return taken, err
 }
 
+const forceDecrementProductStock = `-- name: ForceDecrementProductStock :one
+UPDATE products
+SET stock = stock - $2, updated_at = now()
+WHERE id = $1
+RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id
+`
+
+type ForceDecrementProductStockParams struct {
+	ID    pgtype.UUID `json:"id"`
+	Stock pgtype.Int4 `json:"stock"`
+}
+
+// Retoma estoque SEM piso em zero. Único caso de uso: o cart cancelado pelo
+// lojista que acabou pago (RestoreCancelledCartAsPaid) — a unidade já foi
+// vendida de verdade, então o saldo tem de refletir isso mesmo que fique
+// negativo. Saldo negativo é o sinal honesto de "vendi mais do que tinha" e
+// aparece para o lojista; recusar o decremento esconderia a venda.
+// NÃO usar em fluxo de compra normal — lá o piso do DecrementProductStock é
+// justamente o que impede overselling.
+func (q *Queries) ForceDecrementProductStock(ctx context.Context, arg ForceDecrementProductStockParams) (Product, error) {
+	row := q.db.QueryRow(ctx, forceDecrementProductStock, arg.ID, arg.Stock)
+	var i Product
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.Name,
+		&i.ExternalID,
+		&i.ExternalSource,
+		&i.Keyword,
+		&i.Price,
+		&i.ImageUrl,
+		&i.Stock,
+		&i.Active,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.WeightGrams,
+		&i.HeightCm,
+		&i.WidthCm,
+		&i.LengthCm,
+		&i.Sku,
+		&i.PackageFormat,
+		&i.InsuranceValueCents,
+		&i.GroupID,
+	)
+	return i, err
+}
+
 const getMaxKeyword = `-- name: GetMaxKeyword :one
 SELECT COALESCE(MAX(keyword), '0999') AS max_keyword
 FROM products
