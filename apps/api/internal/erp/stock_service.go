@@ -69,6 +69,17 @@ type StockCollaborators interface {
 	// EmitERPOrderCancelled publishes the group G erp.order_cancelled fact for a
 	// cancelled/refunded order-as-reservation (best-effort, dedup by order id).
 	EmitERPOrderCancelled(ctx context.Context, storeID, cartID, externalOrderID, reason string)
+
+	// --- Cart NFe sync / health-check collaborators (Bloco B2d) ---
+
+	// ResolveERPProviderByID resolves the ERP provider for a specific integration
+	// id (the health-check anchors on the integration, not the store's active
+	// one). Backed by integration.Service.GetERPProvider.
+	ResolveERPProviderByID(ctx context.Context, integrationID, storeID string) (providers.ERPProvider, error)
+	// HandleProviderError records a provider failure into integration telemetry
+	// (integration_logs / status), keeping that ACL concern in the integration
+	// package. Best-effort — it never returns.
+	HandleProviderError(ctx context.Context, integrationID, operation string, err error)
 }
 
 // =============================================================================

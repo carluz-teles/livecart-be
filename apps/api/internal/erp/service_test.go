@@ -28,8 +28,21 @@ func (stubERPRepo) MarkCartERPFinalisationAttempt(context.Context, string, []byt
 func (stubERPRepo) ListActiveReservationsByCart(context.Context, string) ([]StockReservationRow, error) {
 	return nil, nil
 }
-func (stubERPRepo) ReverseReservationByID(context.Context, string) error   { return nil }
+func (stubERPRepo) ReverseReservationByID(context.Context, string) error    { return nil }
 func (stubERPRepo) ReverseReservationsByCart(context.Context, string) error { return nil }
+func (stubERPRepo) GetCartInvoiceAnchor(context.Context, string) (string, string, error) {
+	return "", "", nil
+}
+func (stubERPRepo) UpsertCartERPInvoice(context.Context, UpsertCartERPInvoiceParams) (int64, error) {
+	return 0, nil
+}
+func (stubERPRepo) FindCartByExternalOrderID(context.Context, string, string) (string, error) {
+	return "", nil
+}
+func (stubERPRepo) GetShipmentByOrderID(context.Context, string) (*ShipmentInvoiceRef, error) {
+	return nil, nil
+}
+func (stubERPRepo) UpdateShipmentInvoice(context.Context, string, string, string) error { return nil }
 func (stubERPRepo) AcquireCartFinalisationLock(context.Context, string) (func(), bool, error) {
 	return func() {}, false, nil
 }
@@ -98,6 +111,10 @@ func (stubCollaborators) MarkFinalisationFailed(context.Context, string, string)
 func (stubCollaborators) MirrorToOrder(context.Context, string)                                 {}
 func (stubCollaborators) EmitERPOrderFinalized(context.Context, string, string)                 {}
 func (stubCollaborators) EmitERPOrderCancelled(context.Context, string, string, string, string) {}
+func (stubCollaborators) ResolveERPProviderByID(context.Context, string, string) (providers.ERPProvider, error) {
+	return nil, nil
+}
+func (stubCollaborators) HandleProviderError(context.Context, string, string, error) {}
 
 // Compile-time proofs the stubs satisfy the ports.
 var (

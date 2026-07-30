@@ -110,6 +110,31 @@ type ERPRepository interface {
 	// ReverseReservationsByCart mass-marks a cart's active reservations reversed
 	// (the legacy expiry path, which marks locally regardless of the ERP result).
 	ReverseReservationsByCart(ctx context.Context, cartID string) error
+
+	// --- Cart NFe sync persistence (Bloco B2d) ---
+	// UpsertCartERPInvoice, FindCartByExternalOrderID and UpdateShipmentInvoice are
+	// already implemented verbatim on integration.Repository (DTO types aliased),
+	// so they satisfy this port directly. GetShipmentByOrderID is bridged to the
+	// slim erp.ShipmentInvoiceRef by the erpRepoAdapter (same cycle guard as
+	// GetActiveByProvider), and GetCartInvoiceAnchor is the new enxuto cart reader.
+
+	// GetCartInvoiceAnchor returns just the two cart fields the NFe sync needs —
+	// the owning store and the ERP order id — without dragging the full CartRow
+	// (which stays integration-owned to avoid the import cycle).
+	GetCartInvoiceAnchor(ctx context.Context, cartID string) (storeID, externalOrderID string, err error)
+	// UpsertCartERPInvoice persists the NFe onto the Order's payment row (resolved
+	// from cart_id). Idempotent; returns 0 rows when no Order exists yet (benign
+	// skip — the NF is always post-confirmation).
+	UpsertCartERPInvoice(ctx context.Context, params UpsertCartERPInvoiceParams) (int64, error)
+	// FindCartByExternalOrderID locates the cart linked to an ERP pedido id for a
+	// store — the bridge the Tiny nota_fiscal webhook needs (Tiny only sends the
+	// pedido id).
+	FindCartByExternalOrderID(ctx context.Context, externalOrderID, storeID string) (string, error)
+	// GetShipmentByOrderID returns the slim invoice ref of the (at most one)
+	// shipment attached to the cart, or nil when none exists yet.
+	GetShipmentByOrderID(ctx context.Context, cartID string) (*ShipmentInvoiceRef, error)
+	// UpdateShipmentInvoice mirrors the NFe chave/kind onto an existing shipment.
+	UpdateShipmentInvoice(ctx context.Context, shipmentID, invoiceKey, invoiceKind string) error
 }
 
 // Service handles ERP-domain business logic. B2a laid the foundation (struct +

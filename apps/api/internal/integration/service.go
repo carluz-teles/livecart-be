@@ -180,6 +180,14 @@ func (s *Service) ResolveProvider(ctx context.Context, integration *erp.Integrat
 	return s.erpProviderFor(ctx, integrationRowFromERP(integration))
 }
 
+// ResolveERPProviderByID satisfies erp.StockCollaborators: the ERP health-check
+// anchors on a specific integration id (not the store's active one), so it reuses
+// the existing GetERPProvider path (which loads by id, checks the ERP type, and
+// resolves through the seam).
+func (s *Service) ResolveERPProviderByID(ctx context.Context, integrationID, storeID string) (providers.ERPProvider, error) {
+	return s.GetERPProvider(ctx, integrationID, storeID)
+}
+
 // ResolveExternalProduct satisfies erp.StockCollaborators. linked=false means
 // there is nothing to move against the ERP (no product syncer wired, product not
 // linked, or lookup failed) — the migrated stock flow treats all three as a
@@ -240,6 +248,18 @@ func (a erpRepoAdapter) GetByProvider(ctx context.Context, storeID, integrationT
 		return nil, err
 	}
 	return erpIntegrationFromRow(row), nil
+}
+
+// GetShipmentByOrderID bridges the integration-owned *ShipmentRow into the slim
+// *erp.ShipmentInvoiceRef the NFe sync consumes (same cycle guard as
+// GetActiveByProvider — the full shipment row stays in the shipment/logistics
+// domain). Shadows the method promoted from the embedded *Repository.
+func (a erpRepoAdapter) GetShipmentByOrderID(ctx context.Context, cartID string) (*erp.ShipmentInvoiceRef, error) {
+	sh, err := a.Repository.GetShipmentByOrderID(ctx, cartID)
+	if err != nil || sh == nil {
+		return nil, err
+	}
+	return &erp.ShipmentInvoiceRef{ID: sh.ID, InvoiceKey: sh.InvoiceKey}, nil
 }
 
 // erpIntegrationFromRow copies the integration-owned row into the neutral
@@ -510,31 +530,7 @@ func (s *Service) TestConnection(ctx context.Context, input TestConnectionInput)
 // underlying ERP provider doesn't implement the optional ERPHealthChecker
 // capability, so the FE can hide the section instead of erroring.
 func (s *Service) RunERPHealthCheck(ctx context.Context, integrationID, storeID string) (*ERPHealthCheckResponse, error) {
-	erpProvider, err := s.GetERPProvider(ctx, integrationID, storeID)
-	if err != nil {
-		return nil, err
-	}
-
-	checker, ok := erpProvider.(providers.ERPHealthChecker)
-	if !ok {
-		return &ERPHealthCheckResponse{
-			Supported: false,
-			CheckedAt: time.Now(),
-			Items:     nil,
-		}, nil
-	}
-
-	result, err := checker.HealthCheck(ctx)
-	if err != nil {
-		s.handleProviderError(ctx, integrationID, "erp_health_check", err)
-		return nil, fmt.Errorf("running ERP health check: %w", err)
-	}
-
-	return &ERPHealthCheckResponse{
-		Supported: true,
-		CheckedAt: result.CheckedAt,
-		Items:     result.Items,
-	}, nil
+	return s.erpStock().RunERPHealthCheck(ctx, integrationID, storeID)
 }
 
 // =============================================================================
@@ -4035,159 +4031,24 @@ func meWebhookObservation(event string) string {
 }
 
 // =============================================================================
-// CART NFe SYNC (ERP → carts.erp_invoice_*)
+// CART NFe SYNC (ERP → order NFe) — moved to internal/erp (Bloco B2d). These
+// are thin delegations with identical signatures; the call sites (order,
+// webhook handler) migrate to erp.Service in B2e.
 // =============================================================================
 
-// CartInvoiceState is the normalised view of a cart's NFe used by the order
-// detail handler and the manual-sync response. It mirrors providers.ERPInvoice
-// without exposing provider-specific quirks.
-type CartInvoiceState struct {
-	InvoiceID  string
-	InvoiceKey string
-	Status     string // pending | authorized | cancelled | rejected | "" (none)
-	EmittedAt  *time.Time
-}
+// CartInvoiceState aliases the canonical erp.CartInvoiceState so the delegation
+// signature and its call sites keep compiling unchanged (Bloco B2d).
+type CartInvoiceState = erp.CartInvoiceState
 
-// SyncCartInvoiceFromERP pulls the NFe state for a paid cart from the active
-// ERP integration (today: Tiny) and persists it on carts.erp_invoice_*.
-//
-// invoiceID is optional: when the caller already knows the ERP-side notafiscal
-// id (e.g. from a webhook payload) we fetch by id; otherwise we ask the ERP
-// for whatever NFe is attached to the order. Returns nil error when the
-// merchant hasn't emitted the NFe yet — that's the "Aguardando NFe" branch
-// on the frontend, surfaced via the absence of erp_invoice_* fields.
-//
-// Idempotent: re-running the same sync produces the same row state. Callers
-// can hit it from the Tiny webhook handler, the manual "Verificar NFe" button,
-// or a future poller without coordination.
-//
-// Implements order.CartInvoiceSyncer.
+// SyncCartInvoiceFromERP delega para erp.Service (Bloco B2d). Implements
+// order.CartInvoiceSyncer.
 func (s *Service) SyncCartInvoiceFromERP(ctx context.Context, storeID, cartID, invoiceID string) error {
-	_, err := s.fetchAndPersistCartInvoice(ctx, storeID, cartID, invoiceID)
-	return err
+	return s.erpStock().SyncCartInvoiceFromERP(ctx, storeID, cartID, invoiceID)
 }
 
-// fetchAndPersistCartInvoice is the workhorse used by both the public
-// SyncCartInvoiceFromERP entry point and SyncCartInvoiceByExternalOrder. The
-// state it returns is consumed by the webhook path for logging, but not
-// surfaced past the integration package boundary.
-func (s *Service) fetchAndPersistCartInvoice(ctx context.Context, storeID, cartID, invoiceID string) (*CartInvoiceState, error) {
-	cart, err := s.repo.GetCartForPaidOrder(ctx, cartID)
-	if err != nil {
-		return nil, fmt.Errorf("loading cart for invoice sync: %w", err)
-	}
-	if cart.StoreID != storeID {
-		return nil, httpx.ErrNotFound("cart not found")
-	}
-	// Without an ERP order id we have no anchor on the Tiny side and nothing
-	// to fetch. Returning nil lets the caller render "Aguardando criação no
-	// ERP" without surfacing a generic error.
-	if cart.ExternalOrderID == "" && invoiceID == "" {
-		return nil, nil
-	}
-
-	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
-	if err != nil {
-		return nil, httpx.ErrUnprocessable("ERP integration not active for store")
-	}
-
-	provider, err := s.createProviderFromRow(ctx, integration)
-	if err != nil {
-		return nil, fmt.Errorf("creating ERP provider: %w", err)
-	}
-	invoiceProvider, ok := provider.(providers.ERPInvoiceProvider)
-	if !ok {
-		return nil, httpx.ErrUnprocessable("ERP provider does not expose invoice operations")
-	}
-
-	var (
-		invoice  *providers.ERPInvoice
-		fetchErr error
-	)
-	if invoiceID != "" {
-		invoice, fetchErr = invoiceProvider.GetInvoiceByID(ctx, invoiceID)
-	} else {
-		invoice, fetchErr = invoiceProvider.GetInvoiceByOrder(ctx, cart.ExternalOrderID)
-	}
-	if errors.Is(fetchErr, providers.ErrInvoiceNotFound) {
-		// Tiny knows the order but no NFe is attached yet — merchant still
-		// has to emit it in the ERP. Persist nothing and let the frontend
-		// surface "Aguardando NFe".
-		return nil, nil
-	}
-	if fetchErr != nil {
-		s.handleProviderError(ctx, integration.ID, "sync_cart_invoice", fetchErr)
-		return nil, fmt.Errorf("fetching NFe from ERP: %w", fetchErr)
-	}
-
-	// Fatia 11b: the NFe is written authoritatively to order_payments (resolved
-	// from cart_id). 0 rows = no Order for this cart yet — a benign skip (NF is
-	// always post-confirmation, so the Order should already exist; we log rather
-	// than error so a stray webhook never dead-letters).
-	rows, err := s.repo.UpsertCartERPInvoice(ctx, UpsertCartERPInvoiceParams{
-		CartID:        cartID,
-		InvoiceID:     invoice.InvoiceID,
-		InvoiceKey:    invoice.AccessKey,
-		InvoiceStatus: string(invoice.Status),
-		EmittedAt:     invoiceTimePtr(invoice.IssuedAt),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("persisting order NFe: %w", err)
-	}
-	if rows == 0 {
-		logger.From(ctx, s.logger).Warn("nota fiscal received for cart without a materialised order, skipping invoice persist",
-			zap.String("cart_id", cartID),
-			zap.String("external_order_id", cart.ExternalOrderID),
-			zap.String("invoice_id", invoice.InvoiceID),
-		)
-	}
-
-	// Mirror the chave on any existing shipment so the carrier provider can
-	// pick it up the next time the merchant clicks "Anexar NFe" / generates a
-	// label. We don't auto-call AttachInvoice on the carrier here because the
-	// merchant-driven flow is explicit.
-	if invoice.AccessKey != "" {
-		if sh, _ := s.repo.GetShipmentByOrderID(ctx, cartID); sh != nil && sh.InvoiceKey == "" {
-			if err := s.repo.UpdateShipmentInvoice(ctx, sh.ID, invoice.AccessKey, "nfe"); err != nil {
-				logger.From(ctx, s.logger).Warn("failed to mirror NFe key onto existing shipment",
-					zap.String("cart_id", cartID),
-					zap.String("shipment_id", sh.ID),
-					zap.Error(err),
-				)
-			}
-		}
-	}
-
-	return &CartInvoiceState{
-		InvoiceID:  invoice.InvoiceID,
-		InvoiceKey: invoice.AccessKey,
-		Status:     string(invoice.Status),
-		EmittedAt:  invoiceTimePtr(invoice.IssuedAt),
-	}, nil
-}
-
-// SyncCartInvoiceByExternalOrder is the webhook entry point: Tiny only sends
-// the pedido id (and sometimes the notafiscal id) in nota_fiscal events, so
-// we resolve the cart by external_order_id first, then delegate to the
-// regular sync.
+// SyncCartInvoiceByExternalOrder delega para erp.Service (Bloco B2d).
 func (s *Service) SyncCartInvoiceByExternalOrder(ctx context.Context, storeID, externalOrderID, invoiceID string) (*CartInvoiceState, error) {
-	cartID, err := s.repo.FindCartByExternalOrderID(ctx, externalOrderID, storeID)
-	if err != nil {
-		logger.From(ctx, s.logger).Debug("nota_fiscal webhook for unknown pedido — skipping",
-			zap.String("store_id", storeID),
-			zap.String("external_order_id", externalOrderID),
-			zap.Error(err),
-		)
-		return nil, nil
-	}
-	return s.fetchAndPersistCartInvoice(ctx, storeID, cartID, invoiceID)
-}
-
-func invoiceTimePtr(t time.Time) *time.Time {
-	if t.IsZero() {
-		return nil
-	}
-	return &t
+	return s.erpStock().SyncCartInvoiceByExternalOrder(ctx, storeID, externalOrderID, invoiceID)
 }
 
 // =============================================================================

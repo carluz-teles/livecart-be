@@ -1764,15 +1764,12 @@ func (r *Repository) GetCartERPInvoice(ctx context.Context, cartID string) (*Car
 	return out, nil
 }
 
-// UpsertCartERPInvoiceParams carries the NFe fields written to the cart.
-// EmittedAt nil = preserve previous value (COALESCE on the SQL side).
-type UpsertCartERPInvoiceParams struct {
-	CartID        string
-	InvoiceID     string
-	InvoiceKey    string
-	InvoiceStatus string
-	EmittedAt     *time.Time
-}
+// UpsertCartERPInvoiceParams carries the NFe fields written to the Order's
+// payment row (EmittedAt nil = preserve previous value, COALESCE on the SQL
+// side). Canonical home is internal/erp (Bloco B2d — the invoice sync that
+// builds it lives there); aliased here so the Repository (which owns the SQL)
+// keeps compiling unchanged.
+type UpsertCartERPInvoiceParams = erp.UpsertCartERPInvoiceParams
 
 // UpsertCartERPInvoice persists the NFe pulled from the ERP onto the Order's
 // payment row (authoritative since Fatia 11b, resolved from cart_id). Idempotent
@@ -1815,6 +1812,18 @@ func (r *Repository) FindCartByExternalOrderID(ctx context.Context, externalOrde
 		return "", err
 	}
 	return uuidToString(row.ID), nil
+}
+
+// GetCartInvoiceAnchor returns just the two cart fields the NFe sync needs — the
+// owning store and the ERP order id. It reuses GetCartForPaidOrder (single source
+// for loading a paid cart) so the invoice sync never has to import CartRow; the
+// erp package reaches the cart only through this enxuto port (Bloco B2d).
+func (r *Repository) GetCartInvoiceAnchor(ctx context.Context, cartID string) (string, string, error) {
+	cart, err := r.GetCartForPaidOrder(ctx, cartID)
+	if err != nil {
+		return "", "", err
+	}
+	return cart.StoreID, cart.ExternalOrderID, nil
 }
 
 // NonWaitlistedCartItem represents a cart item that is not waitlisted, with

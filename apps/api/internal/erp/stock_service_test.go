@@ -43,12 +43,18 @@ func (f *fakeERPProvider) ReverseStockReservation(_ context.Context, _ string, _
 	return f.reverseID, f.reverseErr
 }
 
-func (f *fakeERPProvider) ReverseOrderStock(context.Context, string) error { f.orderReverses++; return nil }
+func (f *fakeERPProvider) ReverseOrderStock(context.Context, string) error {
+	f.orderReverses++
+	return nil
+}
 func (f *fakeERPProvider) UpdateOrderItems(context.Context, string, []providers.ERPOrderItem) error {
 	f.orderUpdates++
 	return nil
 }
-func (f *fakeERPProvider) LaunchOrderStock(context.Context, string) error { f.orderLaunches++; return nil }
+func (f *fakeERPProvider) LaunchOrderStock(context.Context, string) error {
+	f.orderLaunches++
+	return nil
+}
 
 // mockRepo is a controllable ERPRepository recording the calls the assertions care about.
 type mockRepo struct {
@@ -70,6 +76,18 @@ type mockRepo struct {
 	adjusts     int
 	reverses    int
 	transitions int
+
+	// Cart NFe sync (Bloco B2d).
+	anchorStoreID  string
+	anchorExtOrder string
+	anchorErr      error
+	upsertRows     int64
+	upsertErr      error
+	findCartID     string
+	findErr        error
+	shipment       *ShipmentInvoiceRef
+	upserts        int
+	invoiceMirrors int
 }
 
 func (m *mockRepo) GetActiveByProvider(context.Context, string, string, string) (*Integration, error) {
@@ -156,6 +174,23 @@ func (m *mockRepo) ListActiveReservationsByCart(context.Context, string) ([]Stoc
 }
 func (m *mockRepo) ReverseReservationByID(context.Context, string) error    { return nil }
 func (m *mockRepo) ReverseReservationsByCart(context.Context, string) error { return nil }
+func (m *mockRepo) GetCartInvoiceAnchor(context.Context, string) (string, string, error) {
+	return m.anchorStoreID, m.anchorExtOrder, m.anchorErr
+}
+func (m *mockRepo) UpsertCartERPInvoice(context.Context, UpsertCartERPInvoiceParams) (int64, error) {
+	m.upserts++
+	return m.upsertRows, m.upsertErr
+}
+func (m *mockRepo) FindCartByExternalOrderID(context.Context, string, string) (string, error) {
+	return m.findCartID, m.findErr
+}
+func (m *mockRepo) GetShipmentByOrderID(context.Context, string) (*ShipmentInvoiceRef, error) {
+	return m.shipment, nil
+}
+func (m *mockRepo) UpdateShipmentInvoice(context.Context, string, string, string) error {
+	m.invoiceMirrors++
+	return nil
+}
 
 // mockCollab is a controllable StockCollaborators.
 type mockCollab struct {
@@ -163,6 +198,11 @@ type mockCollab struct {
 	providerErr error
 	linked      bool
 	externalID  string
+
+	// Cart NFe sync / health-check (Bloco B2d).
+	providerByID    providers.ERPProvider
+	providerByIDErr error
+	handledErrors   int
 }
 
 func (m *mockCollab) ResolveProvider(context.Context, *Integration) (providers.ERPProvider, error) {
@@ -191,6 +231,12 @@ func (m *mockCollab) MarkFinalisationFailed(context.Context, string, string)    
 func (m *mockCollab) MirrorToOrder(context.Context, string)                                 {}
 func (m *mockCollab) EmitERPOrderFinalized(context.Context, string, string)                 {}
 func (m *mockCollab) EmitERPOrderCancelled(context.Context, string, string, string, string) {}
+func (m *mockCollab) ResolveERPProviderByID(context.Context, string, string) (providers.ERPProvider, error) {
+	return m.providerByID, m.providerByIDErr
+}
+func (m *mockCollab) HandleProviderError(context.Context, string, string, error) {
+	m.handledErrors++
+}
 
 func newSvc(repo *mockRepo, collab *mockCollab) *Service {
 	return NewService(repo, collab, zap.NewNop())
