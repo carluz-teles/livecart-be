@@ -144,6 +144,18 @@ func (m *mockRepo) ListTinyIntegrationsWithStaleStockWebhook(context.Context, ti
 	return nil, nil
 }
 func (m *mockRepo) StampIntegrationStockWebhookAlert(context.Context, string) error { return nil }
+func (m *mockRepo) GetByProvider(context.Context, string, string, string) (*Integration, error) {
+	return nil, nil
+}
+func (m *mockRepo) GetCartERPFinalisationStatus(context.Context, string) (*CartFinalisationStatus, error) {
+	return nil, nil
+}
+func (m *mockRepo) MarkCartERPFinalisationAttempt(context.Context, string, []byte) error { return nil }
+func (m *mockRepo) ListActiveReservationsByCart(context.Context, string) ([]StockReservationRow, error) {
+	return nil, nil
+}
+func (m *mockRepo) ReverseReservationByID(context.Context, string) error    { return nil }
+func (m *mockRepo) ReverseReservationsByCart(context.Context, string) error { return nil }
 
 // mockCollab is a controllable StockCollaborators.
 type mockCollab struct {
@@ -165,6 +177,12 @@ func (m *mockCollab) ResolveERPContact(context.Context, providers.ERPProvider, *
 }
 func (m *mockCollab) CreateFinalERPOrderForConversion(context.Context, providers.ERPProvider, *Integration, string, string) error {
 	return nil
+}
+func (m *mockCollab) CreateFinalERPOrder(context.Context, providers.ERPProvider, *Integration, string, string, *providers.PaymentStatus, bool) error {
+	return nil
+}
+func (m *mockCollab) FinalisationInverted(string) bool { return false }
+func (m *mockCollab) ReReserveAfterFailedFinalisation(context.Context, providers.ERPProvider, string, []StockReservationRow) {
 }
 func (m *mockCollab) ReverseCartReservationsPerRow(context.Context, providers.ERPProvider, string) error {
 	return nil

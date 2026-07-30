@@ -93,6 +93,22 @@ type NonWaitlistedCartItem struct {
 	ProductKeyword    string
 }
 
+// CartFinalisationStatus is the slim view of the Order payment row's ERP
+// finalisation lifecycle (status pending|done|failed) plus the cart's reserve
+// external_order_id, joined in for the resume-vs-legacy decision. Canonical home
+// is this package (Bloco B2c-2, when the legacy finalisation moved in);
+// internal/integration aliases it so the Repository (which owns the SQL) keeps
+// compiling unchanged.
+type CartFinalisationStatus struct {
+	CartID          string
+	Status          string
+	LastError       string
+	LastAttemptAt   *time.Time
+	AttemptsCount   int
+	ExternalOrderID string
+	PaymentSnapshot []byte
+}
+
 // StuckERPOrderOp is a conversion/mutation stuck in flight (the process died
 // mid-op) — the input to the reconciliation sweep. Canonical home is this
 // package; internal/integration aliases it.

@@ -19,6 +19,13 @@ type ERPRepository interface {
 	// so this package stays free of the integration import.
 	GetActiveByProvider(ctx context.Context, storeID, integrationType, provider string) (*Integration, error)
 
+	// GetByProvider resolves ANY integration for a store (active or not) so the
+	// legacy finalisation can disambiguate "merchant never set up Tiny" (info)
+	// from "Tiny exists but is in error state" (warn). Returns the neutral
+	// erp.Integration, mapped by the boot-wired adapter (same cycle guard as
+	// GetActiveByProvider).
+	GetByProvider(ctx context.Context, storeID, integrationType, provider string) (*Integration, error)
+
 	// AcquireCartFinalisationLock takes a session-scoped Postgres advisory lock
 	// keyed on the cart id. The lock lives on integration.Repository (which holds
 	// the raw pgxpool — advisory locks are per-connection); erp only consumes it
@@ -81,6 +88,28 @@ type ERPRepository interface {
 	ListTinyIntegrationsWithStaleStockWebhook(ctx context.Context, staleAfter time.Duration) ([]StaleStockWebhookIntegration, error)
 	// StampIntegrationStockWebhookAlert dedupes the stale-webhook alert (24h).
 	StampIntegrationStockWebhookAlert(ctx context.Context, integrationID string) error
+
+	// --- Legacy post-payment finalisation persistence (Bloco B2c-2) ---
+	// Each method below is already implemented verbatim on integration.Repository
+	// (the DTO types are aliases of the erp ones), so it satisfies this port
+	// directly — no new adapter code beyond GetByProvider.
+
+	// GetCartERPFinalisationStatus reads the Order payment row's ERP finalisation
+	// lifecycle (status/attempts/snapshot) plus the cart's reserve
+	// external_order_id. Returns pgx.ErrNoRows when the Order isn't materialised.
+	GetCartERPFinalisationStatus(ctx context.Context, cartID string) (*CartFinalisationStatus, error)
+	// MarkCartERPFinalisationAttempt stamps the attempt (bumps count, COALESCEs
+	// the gateway snapshot) BEFORE the ERP is touched, so an admin retry replays.
+	MarkCartERPFinalisationAttempt(ctx context.Context, cartID string, paymentSnapshot []byte) error
+	// ListActiveReservationsByCart returns the cart's still-active saída-manual
+	// reservations — the input to the post-payment reversal.
+	ListActiveReservationsByCart(ctx context.Context, cartID string) ([]StockReservationRow, error)
+	// ReverseReservationByID marks a single reservation reversed, only after the
+	// ERP confirmed the corresponding entrada E (per-row, resumable).
+	ReverseReservationByID(ctx context.Context, reservationID string) error
+	// ReverseReservationsByCart mass-marks a cart's active reservations reversed
+	// (the legacy expiry path, which marks locally regardless of the ERP result).
+	ReverseReservationsByCart(ctx context.Context, cartID string) error
 }
 
 // Service handles ERP-domain business logic. B2a laid the foundation (struct +

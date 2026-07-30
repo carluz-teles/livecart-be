@@ -1683,18 +1683,11 @@ func (r *Repository) MarkCartERPFinalisationFailed(ctx context.Context, cartID, 
 	})
 }
 
-// CartERPFinalisationRow is the slim view used by the admin retry endpoint
-// and order detail page. Status follows the cart column lifecycle:
-// pending|done|failed.
-type CartERPFinalisationRow struct {
-	CartID          string
-	Status          string
-	LastError       string
-	LastAttemptAt   *time.Time
-	AttemptsCount   int
-	ExternalOrderID string
-	PaymentSnapshot []byte
-}
+// CartERPFinalisationRow is the slim view used by the admin retry endpoint and
+// order detail page (status pending|done|failed). Canonical home is internal/erp
+// (Bloco B2c-2, where the legacy finalisation moved); aliased here so the
+// Repository (which owns the SQL) satisfies erp.ERPRepository directly.
+type CartERPFinalisationRow = erp.CartFinalisationStatus
 
 // GetCartERPFinalisationStatus reads the Order payment row's ERP finalisation
 // lifecycle fields. Used by the admin retry endpoint to gate the retry on

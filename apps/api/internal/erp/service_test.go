@@ -18,6 +18,18 @@ type stubERPRepo struct{}
 func (stubERPRepo) GetActiveByProvider(context.Context, string, string, string) (*Integration, error) {
 	return nil, nil
 }
+func (stubERPRepo) GetByProvider(context.Context, string, string, string) (*Integration, error) {
+	return nil, nil
+}
+func (stubERPRepo) GetCartERPFinalisationStatus(context.Context, string) (*CartFinalisationStatus, error) {
+	return nil, nil
+}
+func (stubERPRepo) MarkCartERPFinalisationAttempt(context.Context, string, []byte) error { return nil }
+func (stubERPRepo) ListActiveReservationsByCart(context.Context, string) ([]StockReservationRow, error) {
+	return nil, nil
+}
+func (stubERPRepo) ReverseReservationByID(context.Context, string) error   { return nil }
+func (stubERPRepo) ReverseReservationsByCart(context.Context, string) error { return nil }
 func (stubERPRepo) AcquireCartFinalisationLock(context.Context, string) (func(), bool, error) {
 	return func() {}, false, nil
 }
@@ -72,6 +84,12 @@ func (stubCollaborators) ResolveERPContact(context.Context, providers.ERPProvide
 }
 func (stubCollaborators) CreateFinalERPOrderForConversion(context.Context, providers.ERPProvider, *Integration, string, string) error {
 	return nil
+}
+func (stubCollaborators) CreateFinalERPOrder(context.Context, providers.ERPProvider, *Integration, string, string, *providers.PaymentStatus, bool) error {
+	return nil
+}
+func (stubCollaborators) FinalisationInverted(string) bool { return false }
+func (stubCollaborators) ReReserveAfterFailedFinalisation(context.Context, providers.ERPProvider, string, []StockReservationRow) {
 }
 func (stubCollaborators) ReverseCartReservationsPerRow(context.Context, providers.ERPProvider, string) error {
 	return nil

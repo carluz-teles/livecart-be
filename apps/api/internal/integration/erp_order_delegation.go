@@ -15,7 +15,6 @@ package integration
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -90,18 +89,39 @@ func (s *Service) CheckTinyStockWebhookDelivery(ctx context.Context, staleAfter 
 	s.erpStock().CheckTinyStockWebhookDelivery(ctx, staleAfter)
 }
 
-// finalizeOrConfirmCartERP é a entrada única do caminho pago: tenta o confirm
-// do pedido-como-reserva (2 PUTs, zero estoque, em erp.Service) e cai na
-// finalização LEGADA (ainda aqui, B2c-2) quando o cart não foi convertido.
+// finalizeOrConfirmCartERP delega para erp.Service (Bloco B2c-2): confirm do
+// pedido-como-reserva com fallback para a finalização legada. Mantido para os
+// testes in-package que exercitam o bridge diretamente.
 func (s *Service) finalizeOrConfirmCartERP(ctx context.Context, cartID, storeID string, status *providers.PaymentStatus) error {
-	err := s.ConfirmERPOrderPayment(ctx, cartID, storeID, status)
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, ErrCartNotConverted) {
-		return s.finalizeCartERPOrder(ctx, cartID, storeID, status)
-	}
-	return err
+	return s.erpStock().FinalizeOrConfirm(ctx, cartID, storeID, status)
+}
+
+// finalizeCartERPOrder delega para erp.Service (Bloco B2c-2). Mantido para os
+// testes in-package que chamam a finalização legada diretamente.
+func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID string, status *providers.PaymentStatus) error {
+	return s.erpStock().FinalizeCartERPOrder(ctx, cartID, storeID, status)
+}
+
+// RetryERPFinalisation delega para erp.Service (Bloco B2c-2). Segue chamado por
+// internal/order (erpRetryService) — a troca do wiring para erpSvc é B2e.
+func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID string) error {
+	return s.erpStock().RetryERPFinalisation(ctx, cartID, storeID)
+}
+
+// ReactOrderPaidERP delega para erp.Service (OnOrderPaid, Bloco B2c-2). Segue
+// chamado no main.go pelo reactor de order.paid — o rename/wiring é B2e.
+func (s *Service) ReactOrderPaidERP(ctx context.Context, cartID, storeID string, snapshotJSON []byte) error {
+	return s.erpStock().OnOrderPaid(ctx, cartID, storeID, snapshotJSON)
+}
+
+// ReactOrderRefundedERP delega para erp.Service (OnOrderRefunded, Bloco B2c-2).
+func (s *Service) ReactOrderRefundedERP(ctx context.Context, cartID, storeID string) error {
+	return s.erpStock().OnOrderRefunded(ctx, cartID, storeID)
+}
+
+// ReactCartExpiredERP delega para erp.Service (OnCartExpired, Bloco B2c-2).
+func (s *Service) ReactCartExpiredERP(ctx context.Context, cartID, storeID string) error {
+	return s.erpStock().OnCartExpired(ctx, cartID, storeID)
 }
 
 // =============================================================================
@@ -130,6 +150,34 @@ func (s *Service) CreateFinalERPOrderForConversion(ctx context.Context, provider
 		return fmt.Errorf("loading cart for conversion: %w", err)
 	}
 	return s.createFinalERPOrder(ctx, provider, integrationRowFromERP(integration), storeID, cart.EventID, *cart, nil, false)
+}
+
+// CreateFinalERPOrder carrega o cart (CartRow segue integration-owned) e reusa
+// createFinalERPOrder para o caminho pago da finalização LEGADA — com pagamento
+// e launch opcional (legado lança inline; invertido lança fora). Grava
+// external_order_id no cart no sucesso.
+func (s *Service) CreateFinalERPOrder(ctx context.Context, provider providers.ERPProvider, integration *erp.Integration, storeID, cartID string, status *providers.PaymentStatus, launchStock bool) error {
+	cart, err := s.repo.GetCartForPaidOrder(ctx, cartID)
+	if err != nil {
+		return fmt.Errorf("loading cart for ERP order: %w", err)
+	}
+	return s.createFinalERPOrder(ctx, provider, integrationRowFromERP(integration), storeID, cart.EventID, *cart, status, launchStock)
+}
+
+// FinalisationInverted reporta se a loja finaliza em ordem invertida
+// (launch-first, Fase 3). Reusa o flag por loja parseado em NewService.
+func (s *Service) FinalisationInverted(storeID string) bool {
+	return s.finalisationInverted(storeID)
+}
+
+// ReReserveAfterFailedFinalisation reusa o helper legado que recria as saídas
+// manuais no Tiny e as rows locais após uma finalização que falhou pós-estorno.
+// O eventID vem das próprias rows do snapshot (todas do mesmo cart).
+func (s *Service) ReReserveAfterFailedFinalisation(ctx context.Context, provider providers.ERPProvider, cartID string, snapshot []StockReservationRow) {
+	if len(snapshot) == 0 {
+		return
+	}
+	s.reReserveAfterFailedFinalisation(ctx, provider, cartID, snapshot[0].EventID, snapshot)
 }
 
 // ReverseCartReservationsPerRow reusa o helper legado de estorno per-row das

@@ -40,6 +40,20 @@ type StockCollaborators interface {
 	// CreateFinalERPOrderForConversion creates the unpaid ERP order (situação
 	// Aberta, no stock launch) for a cart conversion and persists its external id.
 	CreateFinalERPOrderForConversion(ctx context.Context, provider providers.ERPProvider, integration *Integration, storeID, cartID string) error
+	// CreateFinalERPOrder creates the final sales order for the legacy
+	// post-payment finalisation, loading the cart internally (CartRow stays
+	// integration-owned to avoid the import cycle). status carries the gateway
+	// payment; launchStock=true launches the order stock inline (legacy order),
+	// false leaves the launch to the caller (inverted, launch-first).
+	CreateFinalERPOrder(ctx context.Context, provider providers.ERPProvider, integration *Integration, storeID, cartID string, status *providers.PaymentStatus, launchStock bool) error
+	// FinalisationInverted reports whether the store runs the launch-first
+	// finalisation order (Fase 3 rollout flag, integration-owned).
+	FinalisationInverted(storeID string) bool
+	// ReReserveAfterFailedFinalisation re-creates the Tiny saída-manual exits and
+	// local reservation rows we reversed during a finalisation that then failed,
+	// so a paid cart never silently releases stock. Best-effort (logs, never
+	// returns) — the caller's primary signal is the upstream create error.
+	ReReserveAfterFailedFinalisation(ctx context.Context, provider providers.ERPProvider, cartID string, snapshot []StockReservationRow)
 	// ReverseCartReservationsPerRow estorna the cart's active manual stock exits,
 	// row by row, marking each only after the ERP confirms the entry.
 	ReverseCartReservationsPerRow(ctx context.Context, provider providers.ERPProvider, cartID string) error
