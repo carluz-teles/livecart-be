@@ -26,7 +26,7 @@ func TestReactOrderPaidERP_FinalisesAndFindsOrder(t *testing.T) {
 		t.Fatalf("marshal snapshot: %v", err)
 	}
 
-	if err := svc.ReactOrderPaidERP(context.Background(), fx.cartID, fx.storeID, snapshot); err != nil {
+	if err := svc.ERP().OnOrderPaid(context.Background(), fx.cartID, fx.storeID, snapshot); err != nil {
 		t.Fatalf("ReactOrderPaidERP: %v", err)
 	}
 
@@ -61,7 +61,7 @@ func TestReactOrderPaidERP_NoERPIntegrationNoOps(t *testing.T) {
 		t.Fatalf("remove integration: %v", err)
 	}
 
-	if err := svc.ReactOrderPaidERP(context.Background(), fx.cartID, fx.storeID, nil); err != nil {
+	if err := svc.ERP().OnOrderPaid(context.Background(), fx.cartID, fx.storeID, nil); err != nil {
 		t.Fatalf("ReactOrderPaidERP sem integração deveria no-op: %v", err)
 	}
 	if len(fake.calls) != 0 {
@@ -90,7 +90,7 @@ func TestReactOrderRefundedERP_CancelsConvertedOrder(t *testing.T) {
 		t.Fatalf("confirm: %v", err)
 	}
 
-	if err := svc.ReactOrderRefundedERP(context.Background(), fx.cartID, fx.storeID); err != nil {
+	if err := svc.ERP().OnOrderRefunded(context.Background(), fx.cartID, fx.storeID); err != nil {
 		t.Fatalf("ReactOrderRefundedERP: %v", err)
 	}
 

@@ -158,6 +158,12 @@ func (s *Service) erpStock() *erp.Service {
 	return s.erpStockService
 }
 
+// ERP returns the erp.Service singleton owned by this integration.Service, so the
+// composition root can wire ERP reactors/handlers straight to the canonical erp
+// package instead of routing through integration delegations. Reuses erpStock();
+// it never builds a second erp.Service.
+func (s *Service) ERP() *erp.Service { return s.erpStock() }
+
 // finalisationInverted reports whether this store runs the launch-first
 // finalisation order (Fase 3).
 func (s *Service) finalisationInverted(storeID string) bool {
@@ -522,15 +528,6 @@ func (s *Service) TestConnection(ctx context.Context, input TestConnectionInput)
 		AccountInfo: result.AccountInfo,
 		TestedAt:    result.TestedAt,
 	}, nil
-}
-
-// RunERPHealthCheck audits the merchant's cadastros against the canonical
-// names the order-creation flow looks up (formas-pagamento,
-// formas-recebimento, formas-envio). Returns supported=false when the
-// underlying ERP provider doesn't implement the optional ERPHealthChecker
-// capability, so the FE can hide the section instead of erroring.
-func (s *Service) RunERPHealthCheck(ctx context.Context, integrationID, storeID string) (*ERPHealthCheckResponse, error) {
-	return s.erpStock().RunERPHealthCheck(ctx, integrationID, storeID)
 }
 
 // =============================================================================
@@ -4031,27 +4028,6 @@ func meWebhookObservation(event string) string {
 }
 
 // =============================================================================
-// CART NFe SYNC (ERP → order NFe) — moved to internal/erp (Bloco B2d). These
-// are thin delegations with identical signatures; the call sites (order,
-// webhook handler) migrate to erp.Service in B2e.
-// =============================================================================
-
-// CartInvoiceState aliases the canonical erp.CartInvoiceState so the delegation
-// signature and its call sites keep compiling unchanged (Bloco B2d).
-type CartInvoiceState = erp.CartInvoiceState
-
-// SyncCartInvoiceFromERP delega para erp.Service (Bloco B2d). Implements
-// order.CartInvoiceSyncer.
-func (s *Service) SyncCartInvoiceFromERP(ctx context.Context, storeID, cartID, invoiceID string) error {
-	return s.erpStock().SyncCartInvoiceFromERP(ctx, storeID, cartID, invoiceID)
-}
-
-// SyncCartInvoiceByExternalOrder delega para erp.Service (Bloco B2d).
-func (s *Service) SyncCartInvoiceByExternalOrder(ctx context.Context, storeID, externalOrderID, invoiceID string) (*CartInvoiceState, error) {
-	return s.erpStock().SyncCartInvoiceByExternalOrder(ctx, storeID, externalOrderID, invoiceID)
-}
-
-// =============================================================================
 // INSTAGRAM WEBHOOK OPERATIONS
 // =============================================================================
 
@@ -5191,30 +5167,6 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 // other than a buyer quantity edit.
 func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cartID, eventID, productID string, delta int, unitPrice int64, platformHandle string, op StockOp) (string, error) {
 	return s.erpStock().AdjustStockReservationDelta(ctx, storeID, cartID, eventID, productID, delta, unitPrice, platformHandle, op)
-}
-
-// =============================================================================
-// EVENT END → ERP FINALIZATION
-// =============================================================================
-
-// FinalizeEventERP is a no-op in the current flow.
-//
-// Previously, when a live event ended we reversed every active Tiny reservation
-// and created one sales order per cart — regardless of whether the customer had
-// paid. The business rule changed: reservations now live until either the cart
-// expires (ProcessExpiredCartsForProduct reverses them) or the payment is
-// confirmed (ProcessPaymentNotification → finalizeCartERPOrder reverses and
-// creates the paid order).
-//
-// The function is preserved so live.Service can still call it without any
-// behavior change if the rule reverts, and so we have a well-known entry point
-// for future end-of-event ERP work.
-func (s *Service) FinalizeEventERP(ctx context.Context, storeID, eventID string) error {
-	logger.From(ctx, s.logger).Debug("FinalizeEventERP called — no-op under paid-first ERP flow",
-		zap.String("store_id", storeID),
-		zap.String("event_id", eventID),
-	)
-	return nil
 }
 
 // createFinalERPOrder creates a single paid sales order in the ERP for a cart

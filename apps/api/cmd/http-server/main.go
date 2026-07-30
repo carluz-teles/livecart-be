@@ -593,7 +593,6 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// cycle: integration.Service depends on live.Service, and the
 			// notifier impl depends on integration.Service).
 			liveSvc.SetNotifier(newLiveNotifierAdapter(integration.NewInstagramNotifier(integrationSvc, log)))
-			liveSvc.SetERPFinalizer(newERPFinalizerAdapter(integrationSvc))
 
 			// Customer block flow needs the integration service to sweep
 			// open carts (release local + ERP stock, promote waitlist).
@@ -809,7 +808,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		orderSvc.SetERPFinalisationRetrier(integrationSvc)
 		// Same pattern for the manual "Verificar NFe" button: orderSvc is the
 		// HTTP entry point but the ERP fetch lives on the integration service.
-		orderSvc.SetCartInvoiceSyncer(integrationSvc)
+		orderSvc.SetCartInvoiceSyncer(integrationSvc.ERP())
 	}
 	// Block-status lookup for the order detail page; customerSvc is the
 	// authoritative source for blocked_handles.
@@ -1106,7 +1105,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// fact), so finalisation resolves order_payments by cart_id. Snapshot rides
 			// the payload (frozen by OnCartPaid); a nil snapshot finalises without
 			// payment details.
-			return integrationSvc.ReactOrderPaidERP(ctx, p.CartID, p.StoreID, p.PaymentSnapshot)
+			return integrationSvc.ERP().OnOrderPaid(ctx, p.CartID, p.StoreID, p.PaymentSnapshot)
 		})
 		eventsServer.Register(events.OrderRefunded, func(ctx context.Context, t *asynq.Task) error {
 			var env events.Envelope
@@ -1120,7 +1119,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" || p.StoreID == "" {
 				return asynq.SkipRetry
 			}
-			return integrationSvc.ReactOrderRefundedERP(ctx, p.CartID, p.StoreID)
+			return integrationSvc.ERP().OnOrderRefunded(ctx, p.CartID, p.StoreID)
 		})
 
 		// cart.cancelled reactor (Fatia E1): flip the Order to 'cancelled'. Two
@@ -1188,7 +1187,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 					zap.String("cart_id", p.CartID), zap.Error(err))
 				return err
 			}
-			return integrationSvc.ReactCartExpiredERP(ctx, p.CartID, p.StoreID)
+			return integrationSvc.ERP().OnCartExpired(ctx, p.CartID, p.StoreID)
 		})
 
 		// ETA-based cart expiry: schedule a cart.expire task at the cart's
@@ -1363,18 +1362,4 @@ func (a *liveNotifierAdapter) NotifyEventCheckout(ctx context.Context, p live.No
 		TotalItems: p.TotalItems,
 		TotalValue: p.TotalValue,
 	})
-}
-
-// erpFinalizerAdapter bridges integration.Service.FinalizeEventERP to
-// live.ERPFinalizer (local interface), avoiding the import cycle.
-type erpFinalizerAdapter struct {
-	svc *integration.Service
-}
-
-func newERPFinalizerAdapter(svc *integration.Service) *erpFinalizerAdapter {
-	return &erpFinalizerAdapter{svc: svc}
-}
-
-func (a *erpFinalizerAdapter) FinalizeEventERP(ctx context.Context, storeID, eventID string) error {
-	return a.svc.FinalizeEventERP(ctx, storeID, eventID)
 }

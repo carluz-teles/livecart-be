@@ -108,22 +108,6 @@ func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID stri
 	return s.erpStock().RetryERPFinalisation(ctx, cartID, storeID)
 }
 
-// ReactOrderPaidERP delega para erp.Service (OnOrderPaid, Bloco B2c-2). Segue
-// chamado no main.go pelo reactor de order.paid — o rename/wiring é B2e.
-func (s *Service) ReactOrderPaidERP(ctx context.Context, cartID, storeID string, snapshotJSON []byte) error {
-	return s.erpStock().OnOrderPaid(ctx, cartID, storeID, snapshotJSON)
-}
-
-// ReactOrderRefundedERP delega para erp.Service (OnOrderRefunded, Bloco B2c-2).
-func (s *Service) ReactOrderRefundedERP(ctx context.Context, cartID, storeID string) error {
-	return s.erpStock().OnOrderRefunded(ctx, cartID, storeID)
-}
-
-// ReactCartExpiredERP delega para erp.Service (OnCartExpired, Bloco B2c-2).
-func (s *Service) ReactCartExpiredERP(ctx context.Context, cartID, storeID string) error {
-	return s.erpStock().OnCartExpired(ctx, cartID, storeID)
-}
-
 // =============================================================================
 // COLABORADORES (satisfazem erp.StockCollaborators — Bloco B2c-1)
 // =============================================================================

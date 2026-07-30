@@ -341,7 +341,7 @@ func (h *Handler) RunERPHealthCheck(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
 	id := c.Params("id")
 
-	output, err := h.service.RunERPHealthCheck(c.Context(), id, storeID)
+	output, err := h.service.ERP().RunERPHealthCheck(c.Context(), id, storeID)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}

@@ -27,7 +27,7 @@ func TestReactOrderPaidERP_RedeliveryIsIdempotent(t *testing.T) {
 	}
 
 	for i := 0; i < 2; i++ {
-		if err := svc.ReactOrderPaidERP(context.Background(), fx.cartID, fx.storeID, snapshot); err != nil {
+		if err := svc.ERP().OnOrderPaid(context.Background(), fx.cartID, fx.storeID, snapshot); err != nil {
 			t.Fatalf("ReactOrderPaidERP #%d: %v", i+1, err)
 		}
 	}
@@ -60,7 +60,7 @@ func TestReactOrderRefundedERP_RedeliveryIsIdempotent(t *testing.T) {
 	}
 
 	for i := 0; i < 2; i++ {
-		if err := svc.ReactOrderRefundedERP(context.Background(), fx.cartID, fx.storeID); err != nil {
+		if err := svc.ERP().OnOrderRefunded(context.Background(), fx.cartID, fx.storeID); err != nil {
 			t.Fatalf("ReactOrderRefundedERP #%d: %v", i+1, err)
 		}
 	}
@@ -85,7 +85,7 @@ func TestReactCartExpiredERP_RedeliveryIsIdempotent(t *testing.T) {
 	svc := newFinalisationService(fake)
 
 	for i := 0; i < 2; i++ {
-		if err := svc.ReactCartExpiredERP(context.Background(), fx.cartID, fx.storeID); err != nil {
+		if err := svc.ERP().OnCartExpired(context.Background(), fx.cartID, fx.storeID); err != nil {
 			t.Fatalf("ReactCartExpiredERP #%d: %v", i+1, err)
 		}
 	}

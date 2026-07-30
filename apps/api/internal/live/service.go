@@ -44,12 +44,6 @@ type NotifyEventCheckoutParams struct {
 	TotalValue     int64
 }
 
-// ERPFinalizer is called at event end to reverse stock reservations and
-// create final sales orders in the ERP. Local interface to avoid import cycle.
-type ERPFinalizer interface {
-	FinalizeEventERP(ctx context.Context, storeID, eventID string) error
-}
-
 // CustomerUpserter creates or updates a customer record from cart-creation
 // inputs and returns the customer UUID. Wired from the customer package via
 // SetCustomerUpserter to keep this package free of customer internals.
@@ -61,7 +55,6 @@ type Service struct {
 	repo             *Repository
 	logger           *zap.Logger
 	notifier         Notifier
-	erpFinalizer     ERPFinalizer
 	customerUpserter CustomerUpserter
 	closeScheduler   EventCloseScheduler
 }
@@ -83,11 +76,6 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 // depends on integration.Service).
 func (s *Service) SetNotifier(n Notifier) {
 	s.notifier = n
-}
-
-// SetERPFinalizer wires an ERPFinalizer into the service after construction.
-func (s *Service) SetERPFinalizer(f ERPFinalizer) {
-	s.erpFinalizer = f
 }
 
 // SetCustomerUpserter wires a CustomerUpserter into the service. When set,
@@ -734,21 +722,9 @@ func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, e
 		)
 	}
 
-	// 3.5. Reverse ERP stock reservations and create final sales orders (async — never blocks the response).
 	// Capture the slug before spawning detached goroutines: the request ctx is
 	// recycled by fasthttp when the response is sent.
 	storeSlug, _ := ctx.Value(logger.StoreSlugKey).(string)
-	if s.erpFinalizer != nil {
-		go func() {
-			bgCtx := logger.WithStore(context.Background(), input.StoreID, storeSlug)
-			if err := s.erpFinalizer.FinalizeEventERP(bgCtx, input.StoreID, event.ID); err != nil {
-				logger.From(bgCtx, s.logger).Error("failed to finalize ERP for event",
-					zap.String("event_id", event.ID),
-					zap.Error(err),
-				)
-			}
-		}()
-	}
 
 	// 4. Determine if we should auto-send checkout links.
 	// Carts are unique per (event_id, platform_user_id), so multi-session

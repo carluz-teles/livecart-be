@@ -634,7 +634,7 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		if idPedido != "" {
 			go func() {
 				ctx := logger.WithStore(context.Background(), storeID, storeSlug)
-				if _, err := h.service.SyncCartInvoiceByExternalOrder(ctx, storeID, idPedido, idNFe); err != nil {
+				if _, err := h.service.ERP().SyncCartInvoiceByExternalOrder(ctx, storeID, idPedido, idNFe); err != nil {
 					logger.From(ctx, h.logger).Error("failed to process nota_fiscal webhook",
 						zap.String("id_pedido", idPedido),
 						zap.String("id_nfe", idNFe),
