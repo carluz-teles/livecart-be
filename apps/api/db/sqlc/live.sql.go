@@ -59,7 +59,7 @@ const createLiveSession = `-- name: CreateLiveSession :one
 
 INSERT INTO live_sessions (event_id, status, type, sequence_order)
 VALUES ($1, $2, $3, COALESCE((SELECT MAX(sequence_order) FROM live_sessions WHERE event_id = $1), 0) + 1)
-RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused
+RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused, publish_at
 `
 
 type CreateLiveSessionParams struct {
@@ -90,6 +90,7 @@ func (q *Queries) CreateLiveSession(ctx context.Context, arg CreateLiveSessionPa
 		&i.Type,
 		&i.CurrentActiveProductID,
 		&i.ProcessingPaused,
+		&i.PublishAt,
 	)
 	return i, err
 }
@@ -98,7 +99,7 @@ const endLiveSession = `-- name: EndLiveSession :one
 UPDATE live_sessions
 SET status = 'ended', ended_at = now(), updated_at = now()
 WHERE id = $1
-RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused
+RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused, publish_at
 `
 
 func (q *Queries) EndLiveSession(ctx context.Context, id pgtype.UUID) (LiveSession, error) {
@@ -117,12 +118,13 @@ func (q *Queries) EndLiveSession(ctx context.Context, id pgtype.UUID) (LiveSessi
 		&i.Type,
 		&i.CurrentActiveProductID,
 		&i.ProcessingPaused,
+		&i.PublishAt,
 	)
 	return i, err
 }
 
 const getActiveSessionByEvent = `-- name: GetActiveSessionByEvent :one
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused FROM live_sessions
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused, publish_at FROM live_sessions
 WHERE event_id = $1 AND status IN ('active', 'live')
 ORDER BY created_at DESC
 LIMIT 1
@@ -144,6 +146,7 @@ func (q *Queries) GetActiveSessionByEvent(ctx context.Context, eventID pgtype.UU
 		&i.Type,
 		&i.CurrentActiveProductID,
 		&i.ProcessingPaused,
+		&i.PublishAt,
 	)
 	return i, err
 }
@@ -198,7 +201,7 @@ func (q *Queries) GetEventLiveModeStateFromSessions(ctx context.Context, arg Get
 }
 
 const getLiveSessionByID = `-- name: GetLiveSessionByID :one
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused FROM live_sessions WHERE id = $1
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused, publish_at FROM live_sessions WHERE id = $1
 `
 
 func (q *Queries) GetLiveSessionByID(ctx context.Context, id pgtype.UUID) (LiveSession, error) {
@@ -217,12 +220,13 @@ func (q *Queries) GetLiveSessionByID(ctx context.Context, id pgtype.UUID) (LiveS
 		&i.Type,
 		&i.CurrentActiveProductID,
 		&i.ProcessingPaused,
+		&i.PublishAt,
 	)
 	return i, err
 }
 
 const getLiveSessionByIDAndEvent = `-- name: GetLiveSessionByIDAndEvent :one
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused FROM live_sessions WHERE id = $1 AND event_id = $2
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused, publish_at FROM live_sessions WHERE id = $1 AND event_id = $2
 `
 
 type GetLiveSessionByIDAndEventParams struct {
@@ -246,6 +250,7 @@ func (q *Queries) GetLiveSessionByIDAndEvent(ctx context.Context, arg GetLiveSes
 		&i.Type,
 		&i.CurrentActiveProductID,
 		&i.ProcessingPaused,
+		&i.PublishAt,
 	)
 	return i, err
 }
@@ -272,7 +277,7 @@ func (q *Queries) GetPlatformByLiveID(ctx context.Context, platformLiveID string
 }
 
 const getSessionByPlatformLiveID = `-- name: GetSessionByPlatformLiveID :one
-SELECT ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.created_at, ls.updated_at, ls.event_id, ls.sequence_order, ls.type, ls.current_active_product_id, ls.processing_paused
+SELECT ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.created_at, ls.updated_at, ls.event_id, ls.sequence_order, ls.type, ls.current_active_product_id, ls.processing_paused, ls.publish_at
 FROM live_sessions ls
 JOIN live_session_platforms lsp ON lsp.session_id = ls.id
 WHERE lsp.platform_live_id = $1 AND ls.status IN ('active', 'live')
@@ -297,6 +302,7 @@ func (q *Queries) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID
 		&i.Type,
 		&i.CurrentActiveProductID,
 		&i.ProcessingPaused,
+		&i.PublishAt,
 	)
 	return i, err
 }
@@ -456,7 +462,7 @@ func (q *Queries) ListPollableMedia(ctx context.Context) ([]ListPollableMediaRow
 }
 
 const listSessionsByEvent = `-- name: ListSessionsByEvent :many
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused FROM live_sessions
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused, publish_at FROM live_sessions
 WHERE event_id = $1
 ORDER BY created_at DESC
 `
@@ -483,6 +489,7 @@ func (q *Queries) ListSessionsByEvent(ctx context.Context, eventID pgtype.UUID) 
 			&i.Type,
 			&i.CurrentActiveProductID,
 			&i.ProcessingPaused,
+			&i.PublishAt,
 		); err != nil {
 			return nil, err
 		}
@@ -595,7 +602,7 @@ UPDATE live_sessions ls
 SET current_active_product_id = $2, updated_at = now()
 FROM live_events e
 WHERE ls.id = $1 AND e.id = ls.event_id AND e.store_id = $3
-RETURNING ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.created_at, ls.updated_at, ls.event_id, ls.sequence_order, ls.type, ls.current_active_product_id, ls.processing_paused
+RETURNING ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.created_at, ls.updated_at, ls.event_id, ls.sequence_order, ls.type, ls.current_active_product_id, ls.processing_paused, ls.publish_at
 `
 
 type SetSessionActiveProductParams struct {
@@ -628,6 +635,7 @@ func (q *Queries) SetSessionActiveProduct(ctx context.Context, arg SetSessionAct
 		&i.Type,
 		&i.CurrentActiveProductID,
 		&i.ProcessingPaused,
+		&i.PublishAt,
 	)
 	return i, err
 }
@@ -637,7 +645,7 @@ UPDATE live_sessions ls
 SET processing_paused = $2, updated_at = now()
 FROM live_events e
 WHERE ls.id = $1 AND e.id = ls.event_id AND e.store_id = $3
-RETURNING ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.created_at, ls.updated_at, ls.event_id, ls.sequence_order, ls.type, ls.current_active_product_id, ls.processing_paused
+RETURNING ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.created_at, ls.updated_at, ls.event_id, ls.sequence_order, ls.type, ls.current_active_product_id, ls.processing_paused, ls.publish_at
 `
 
 type SetSessionProcessingPausedParams struct {
@@ -662,6 +670,7 @@ func (q *Queries) SetSessionProcessingPaused(ctx context.Context, arg SetSession
 		&i.Type,
 		&i.CurrentActiveProductID,
 		&i.ProcessingPaused,
+		&i.PublishAt,
 	)
 	return i, err
 }
@@ -670,7 +679,7 @@ const startLiveSession = `-- name: StartLiveSession :one
 UPDATE live_sessions
 SET status = 'live', started_at = now(), updated_at = now()
 WHERE id = $1
-RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused
+RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused, publish_at
 `
 
 func (q *Queries) StartLiveSession(ctx context.Context, id pgtype.UUID) (LiveSession, error) {
@@ -689,6 +698,7 @@ func (q *Queries) StartLiveSession(ctx context.Context, id pgtype.UUID) (LiveSes
 		&i.Type,
 		&i.CurrentActiveProductID,
 		&i.ProcessingPaused,
+		&i.PublishAt,
 	)
 	return i, err
 }

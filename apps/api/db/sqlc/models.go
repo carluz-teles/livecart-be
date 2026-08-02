@@ -392,10 +392,12 @@ type LiveEvent struct {
 	MediaCaption      pgtype.Text `json:"media_caption"`
 	// true once a comments webhook arrived for this post event; polling stops
 	WebhookActive bool `json:"webhook_active"`
-	// Optional scheduled end (UTC). NULL = manual end only.
+	// D5: TETO da campanha. Obrigatorio para eventos NOVOS (validado na aplicacao). A obrigatoriedade no banco entra na 000119, depois do backfill dos legados.
 	EndsAt pgtype.Timestamptz `json:"ends_at"`
 	// Override do prazo estendido para este evento. NULL = herda de stores.cart_extended_expiration_minutes.
 	CartExtendedExpirationMinutes pgtype.Int4 `json:"cart_extended_expiration_minutes"`
+	// D21: inicio da JANELA COMERCIAL da campanha. Nao e a data de publicacao da midia (essa e live_sessions.publish_at). Mantido em sincronia com scheduled_at ate a 000119.
+	StartsAt pgtype.Timestamptz `json:"starts_at"`
 }
 
 type LiveSession struct {
@@ -414,6 +416,8 @@ type LiveSession struct {
 	CurrentActiveProductID pgtype.UUID `json:"current_active_product_id"`
 	// D17: quando true, os comentários DESTA transmissão são gravados mas não viram carrinho. Pausar uma sessão não pausa as outras do mesmo evento.
 	ProcessingPaused bool `json:"processing_paused"`
+	// D21: quando o LiveCart deve publicar a midia desta sessao no Instagram. Sessao de live NAO tem publish_at (nao se publica live por API). Antes de publish_at nao existe midia, logo nao existe comentario — e o que remove a ambiguidade do webhook. O agendador em si e a 000120.
+	PublishAt pgtype.Timestamptz `json:"publish_at"`
 }
 
 type LiveSessionPlatform struct {

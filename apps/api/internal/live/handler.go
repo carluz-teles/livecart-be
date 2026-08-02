@@ -1,6 +1,7 @@
 package live
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -17,6 +18,22 @@ type Handler struct {
 
 func NewHandler(service *Service, validate *validator.Validate) *Handler {
 	return &Handler{service: service, validate: validate}
+}
+
+// parseTimestampField converte um campo ISO8601/RFC3339 opcional do corpo.
+// Ponteiro nil ou string vazia devolvem nil sem erro — os dois significam
+// "sem valor" para o chamador, que é quem sabe se isso é "não mexer" (edição)
+// ou "não informado" (criação). Existe para as três rotas de janela não
+// repetirem o mesmo time.Parse com mensagens diferentes.
+func parseTimestampField(raw *string, field string) (*time.Time, error) {
+	if raw == nil || *raw == "" {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339, *raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s format, use ISO8601/RFC3339", field)
+	}
+	return &t, nil
 }
 
 func (h *Handler) RegisterRoutes(router fiber.Router) {
@@ -103,14 +120,17 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 
 	storeID := c.Locals("store_id").(string)
 
-	// Parse scheduling time if provided
-	var scheduledAt *time.Time
-	if req.ScheduledAt != nil && *req.ScheduledAt != "" {
-		t, err := time.Parse(time.RFC3339, *req.ScheduledAt)
-		if err != nil {
-			return httpx.BadRequest(c, "invalid scheduledAt format, use ISO8601/RFC3339")
-		}
-		scheduledAt = &t
+	scheduledAt, err := parseTimestampField(req.ScheduledAt, "scheduledAt")
+	if err != nil {
+		return httpx.BadRequest(c, err.Error())
+	}
+	startsAt, err := parseTimestampField(req.StartsAt, "startsAt")
+	if err != nil {
+		return httpx.BadRequest(c, err.Error())
+	}
+	endsAt, err := parseTimestampField(req.EndsAt, "endsAt")
+	if err != nil {
+		return httpx.BadRequest(c, err.Error())
 	}
 
 	output, err := h.service.Create(c.Context(), CreateLiveInput{
@@ -125,6 +145,8 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		SendOnLiveEnd:          req.SendOnLiveEnd,
 		PixDiscountPercent:     req.PixDiscountPercent,
 		ScheduledAt:            scheduledAt,
+		StartsAt:               startsAt,
+		EndsAt:                 endsAt,
 		Description:            req.Description,
 	})
 	if err != nil {
@@ -165,24 +187,16 @@ func (h *Handler) CreatePost(c *fiber.Ctx) error {
 
 	storeID := c.Locals("store_id").(string)
 
-	var startsAt, endsAt *time.Time
-	if req.StartsAt != nil && *req.StartsAt != "" {
-		t, err := time.Parse(time.RFC3339, *req.StartsAt)
-		if err != nil {
-			return httpx.BadRequest(c, "invalid startsAt format, use ISO8601/RFC3339")
-		}
-		startsAt = &t
+	startsAt, err := parseTimestampField(req.StartsAt, "startsAt")
+	if err != nil {
+		return httpx.BadRequest(c, err.Error())
 	}
-	if req.EndsAt != nil && *req.EndsAt != "" {
-		t, err := time.Parse(time.RFC3339, *req.EndsAt)
-		if err != nil {
-			return httpx.BadRequest(c, "invalid endsAt format, use ISO8601/RFC3339")
-		}
-		endsAt = &t
+	endsAt, err := parseTimestampField(req.EndsAt, "endsAt")
+	if err != nil {
+		return httpx.BadRequest(c, err.Error())
 	}
-	if startsAt != nil && endsAt != nil && !endsAt.After(*startsAt) {
-		return httpx.BadRequest(c, "endsAt must be after startsAt")
-	}
+	// A ordem starts_at < ends_at é validada no service, junto com a
+	// obrigatoriedade de ends_at — uma regra, um lugar.
 
 	output, err := h.service.CreatePostEvent(c.Context(), CreatePostInput{
 		StoreID:                storeID,
@@ -330,11 +344,31 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 		return httpx.ValidationError(c, err)
 	}
 
+	// Janela: presente no corpo = editar; ausente = preservar. É o campo
+	// (ponteiro não-nil) que decide, não o valor — string vazia significa
+	// "limpar", e por isso não dá para inferir a intenção só do time.Time.
+	window := EventWindowUpdate{
+		SetStartsAt: req.StartsAt != nil,
+		SetEndsAt:   req.EndsAt != nil,
+	}
+	var err error
+	if window.SetStartsAt {
+		if window.StartsAt, err = parseTimestampField(req.StartsAt, "startsAt"); err != nil {
+			return httpx.BadRequest(c, err.Error())
+		}
+	}
+	if window.SetEndsAt {
+		if window.EndsAt, err = parseTimestampField(req.EndsAt, "endsAt"); err != nil {
+			return httpx.BadRequest(c, err.Error())
+		}
+	}
+
 	output, err := h.service.Update(c.Context(), UpdateLiveInput{
 		StoreID:            storeID,
 		ID:                 id,
 		Title:              req.Title,
 		PixDiscountPercent: req.PixDiscountPercent,
+		Window:             window,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)

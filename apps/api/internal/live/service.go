@@ -21,6 +21,12 @@ import (
 // level, so this stays a local interface wired via SetEventCloseScheduler.
 type EventCloseScheduler interface {
 	ScheduleEventClose(ctx context.Context, eventID, storeID string, at time.Time) error
+	// RescheduleEventClose MOVE um fechamento já armado. Existe separado porque
+	// ScheduleEventClose é deduplicado por TaskID ("event-close:<id>"): enquanto
+	// a task pendente existir, o horário novo é ignorado. Era por isso que
+	// ANTECIPAR ends_at fechava o evento na hora antiga (CA-05.4) — e, na
+	// prática, estender também não funcionava.
+	RescheduleEventClose(ctx context.Context, eventID, storeID string, at time.Time) error
 }
 
 // Notifier is the minimal notification surface this package depends on.
@@ -105,6 +111,25 @@ func (s *Service) SetCustomerUpserter(u CustomerUpserter) {
 // Create creates a live event with an optional initial session and platform.
 // Uses transactions to ensure atomicity when session/platform are included.
 func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLiveOutput, error) {
+	// RN-05: ends_at é o TETO da campanha e não tem default razoável. A RN-04
+	// deixa expires_at NULL durante o evento inteiro, então um evento sem fim é
+	// um carrinho sem prazo e um estoque reservado para sempre. O banco só
+	// ganha o NOT NULL na 000119 (um CHECK agora quebraria todo UPDATE de
+	// evento legado, inclusive no caminho de pagamento) — a garantia é aqui.
+	if input.EndsAt == nil {
+		return CreateLiveOutput{}, httpx.ErrBadRequest("endsAt é obrigatório: o evento precisa de uma data de encerramento")
+	}
+	// starts_at é a coluna nova (D21); scheduled_at continua sendo o que decide
+	// o status inicial. Quem só manda scheduledAt (o formulário atual) tem os
+	// dois preenchidos com o mesmo valor.
+	startsAt := input.StartsAt
+	if startsAt == nil {
+		startsAt = input.ScheduledAt
+	}
+	if startsAt != nil && !input.EndsAt.After(*startsAt) {
+		return CreateLiveOutput{}, httpx.ErrBadRequest("endsAt precisa ser depois de startsAt")
+	}
+
 	// Default to single type if not specified
 	eventType := input.Type
 	if eventType == "" {
@@ -162,6 +187,13 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 			}
 		}
 
+		if err := s.applyEventWindow(ctx, event.ID, input.StoreID, EventWindowUpdate{
+			SetStartsAt: true, StartsAt: startsAt,
+			SetEndsAt: true, EndsAt: input.EndsAt,
+		}, false); err != nil {
+			return CreateLiveOutput{}, err
+		}
+
 		return CreateLiveOutput{
 			ID:        event.ID,
 			Title:     event.Title,
@@ -198,6 +230,13 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		}
 	}
 
+	if err := s.applyEventWindow(ctx, event.ID, input.StoreID, EventWindowUpdate{
+		SetStartsAt: true, StartsAt: startsAt,
+		SetEndsAt: true, EndsAt: input.EndsAt,
+	}, false); err != nil {
+		return CreateLiveOutput{}, err
+	}
+
 	logger.From(ctx, s.logger).Info("live created without session",
 		zap.String("event_id", event.ID),
 		zap.String("type", eventType),
@@ -211,6 +250,44 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		Status:    event.Status,
 		CreatedAt: event.CreatedAt,
 	}, nil
+}
+
+// applyEventWindow é o ponto ÚNICO onde a janela comercial é gravada e o
+// fechamento por ETA é (re)armado. As três entradas de janela — criar live,
+// criar post/reel/story e editar — passam por aqui para que "gravar ends_at" e
+// "mover a task de fechamento" nunca saiam de sincronia. Era esse desencontro
+// que fazia o lojista antecipar o fim na tela e o evento fechar na hora antiga.
+//
+// move=true quando o evento JÁ existia e o horário pode ter mudado: aí é
+// preciso APAGAR a task pendente antes de re-enfileirar, senão o asynq engole o
+// re-agendamento pelo TaskID repetido (CA-05.3/CA-05.4).
+//
+// Gravar a janela é obrigatório (erro sobe); armar a task é best-effort — o
+// SweepEndedTimedEvents é a rede para uma task perdida.
+func (s *Service) applyEventWindow(ctx context.Context, eventID, storeID string, w EventWindowUpdate, move bool) error {
+	if err := s.repo.SetEventWindow(ctx, eventID, storeID, w); err != nil {
+		return err
+	}
+	if !w.SetEndsAt || s.closeScheduler == nil {
+		return nil
+	}
+	if w.EndsAt == nil {
+		// Janela removida. A task antiga continua pendente, mas
+		// RunScheduledEventClose é guard-first: com ends_at NULL ele sai sem
+		// fechar nada.
+		return nil
+	}
+	var err error
+	if move {
+		err = s.closeScheduler.RescheduleEventClose(ctx, eventID, storeID, *w.EndsAt)
+	} else {
+		err = s.closeScheduler.ScheduleEventClose(ctx, eventID, storeID, *w.EndsAt)
+	}
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("failed to arm event window close",
+			zap.String("event_id", eventID), zap.Bool("move", move), zap.Error(err))
+	}
+	return nil
 }
 
 // CreatePostEvent creates a post-commerce event mapped to a published Instagram
@@ -235,6 +312,9 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 	// status (and comment gating) is derived from the window, so the event is
 	// always resolvable by media id. We do NOT pass ScheduledAt to Create here,
 	// because that would set status='scheduled' and hide it from lookups.
+	// A janela (starts_at/ends_at) e o arm do fechamento agora saem de dentro do
+	// Create — é lá que a obrigatoriedade de ends_at (RN-05) é aplicada para
+	// TODOS os tipos, não só para live.
 	out, err := s.Create(ctx, CreateLiveInput{
 		StoreID:                input.StoreID,
 		Title:                  input.Title,
@@ -244,25 +324,11 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 		CloseCartOnEventEnd:    &closeCart,
 		CartExpirationMinutes:  input.CartExpirationMinutes,
 		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
+		StartsAt:               input.StartsAt,
+		EndsAt:                 input.EndsAt,
 	})
 	if err != nil {
 		return CreateLiveOutput{}, err
-	}
-
-	// Persist the optional start/end window (raw SQL columns).
-	if input.StartsAt != nil || input.EndsAt != nil {
-		if err := s.repo.SetEventWindow(ctx, out.ID, input.StoreID, input.StartsAt, input.EndsAt); err != nil {
-			logger.From(ctx, s.logger).Warn("failed to set post event window",
-				zap.String("event_id", out.ID), zap.Error(err))
-		}
-		// Arm the ETA close task at ends_at so the window finalizes on time.
-		// Best-effort: SweepEndedTimedEvents is the backstop for a lost task.
-		if input.EndsAt != nil && s.closeScheduler != nil {
-			if err := s.closeScheduler.ScheduleEventClose(ctx, out.ID, input.StoreID, *input.EndsAt); err != nil {
-				logger.From(ctx, s.logger).Warn("failed to schedule event window close",
-					zap.String("event_id", out.ID), zap.Error(err))
-			}
-		}
 	}
 
 	// Persist post metadata (raw SQL columns, not in the sqlc INSERT).
@@ -632,9 +698,33 @@ func (s *Service) List(ctx context.Context, input ListLivesInput) (ListLivesOutp
 
 func (s *Service) Update(ctx context.Context, input UpdateLiveInput) (LiveOutput, error) {
 	// Verify event exists and belongs to store
-	_, err := s.repo.GetEventByID(ctx, input.ID, input.StoreID)
+	current, err := s.repo.GetEventByID(ctx, input.ID, input.StoreID)
 	if err != nil {
 		return LiveOutput{}, err
+	}
+
+	// RN-05/CA-05.7: a edição da janela. Antes deste ponto o PUT só trocava
+	// título e desconto PIX — um ends_at errado era permanente.
+	if input.Window.Touches() && current != nil {
+		// O teto não pode ser removido: sem ends_at o carrinho perde o prazo.
+		if input.Window.SetEndsAt && input.Window.EndsAt == nil {
+			return LiveOutput{}, httpx.ErrBadRequest("endsAt não pode ser removido: o evento precisa de uma data de encerramento")
+		}
+		// Coerência com o valor que NÃO está sendo editado.
+		endsAt := input.Window.EndsAt
+		if !input.Window.SetEndsAt {
+			endsAt = current.EndsAt
+		}
+		startsAt := input.Window.StartsAt
+		if !input.Window.SetStartsAt {
+			startsAt = current.ScheduledAt
+		}
+		if startsAt != nil && endsAt != nil && !endsAt.After(*startsAt) {
+			return LiveOutput{}, httpx.ErrBadRequest("endsAt precisa ser depois de startsAt")
+		}
+		if err := s.applyEventWindow(ctx, input.ID, input.StoreID, input.Window, true); err != nil {
+			return LiveOutput{}, err
+		}
 	}
 
 	// Update event title

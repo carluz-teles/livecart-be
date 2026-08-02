@@ -1266,21 +1266,42 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 type cartExpiryScheduler struct{ client *events.Client }
 
 func (s cartExpiryScheduler) ScheduleCartExpiry(ctx context.Context, cartID string, at time.Time) error {
-	return s.client.Schedule(ctx, at, events.CartExpire, "cart-expire:"+cartID, struct {
+	return s.client.Schedule(ctx, at, events.CartExpire, cartExpireTaskID(cartID), struct {
 		CartID string `json:"cart_id"`
 	}{CartID: cartID})
 }
+
+// RescheduleCartExpiry move um cart.expire já armado (extensão de prazo pela
+// fila). Um Schedule com o mesmo TaskID seria engolido como "já armado".
+func (s cartExpiryScheduler) RescheduleCartExpiry(ctx context.Context, cartID string, at time.Time) error {
+	return s.client.Reschedule(ctx, at, events.CartExpire, cartExpireTaskID(cartID), struct {
+		CartID string `json:"cart_id"`
+	}{CartID: cartID})
+}
+
+func cartExpireTaskID(cartID string) string { return "cart-expire:" + cartID }
 
 // eventCloseScheduler adapts the events client to live.EventCloseScheduler,
 // enqueueing an event.window_close ETA task keyed "event-close:<id>" for dedup.
 type eventCloseScheduler struct{ client *events.Client }
 
 func (s eventCloseScheduler) ScheduleEventClose(ctx context.Context, eventID, storeID string, at time.Time) error {
-	return s.client.Schedule(ctx, at, events.EventWindowClose, "event-close:"+eventID, struct {
+	return s.client.Schedule(ctx, at, events.EventWindowClose, eventCloseTaskID(eventID), struct {
 		EventID string `json:"event_id"`
 		StoreID string `json:"store_id"`
 	}{EventID: eventID, StoreID: storeID})
 }
+
+// RescheduleEventClose move o fechamento já armado (edição de ends_at). Sem o
+// delete anterior, ANTECIPAR o fim fecharia o evento na hora antiga (CA-05.4).
+func (s eventCloseScheduler) RescheduleEventClose(ctx context.Context, eventID, storeID string, at time.Time) error {
+	return s.client.Reschedule(ctx, at, events.EventWindowClose, eventCloseTaskID(eventID), struct {
+		EventID string `json:"event_id"`
+		StoreID string `json:"store_id"`
+	}{EventID: eventID, StoreID: storeID})
+}
+
+func eventCloseTaskID(eventID string) string { return "event-close:" + eventID }
 
 // trialReminderScheduler adapts the events client to billing.TrialReminderScheduler,
 // enqueueing a trial.ending_soon ETA task keyed "trial-ending:<store>" for dedup.

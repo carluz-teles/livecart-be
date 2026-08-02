@@ -114,6 +114,10 @@ type EventOutput struct {
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
 	PixDiscountPercent     int
+	// ⚠️ OBSOLETOS desde a 000111: o Modo Live é da SESSÃO. Estes dois campos
+	// carregam o que live_events tinha ANTES do cutover e ninguém mais os
+	// escreve — ler daqui devolve estado congelado. Use SessionOutput. Saem com
+	// a 000119.
 	CurrentActiveProductID *string
 	ProcessingPaused       bool
 	// Scheduling
@@ -176,6 +180,7 @@ type EventRow struct {
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
 	PixDiscountPercent     int
+	// ⚠️ OBSOLETOS desde a 000111 — ver EventOutput. A verdade está na sessão.
 	CurrentActiveProductID *string
 	ProcessingPaused       bool
 	// Scheduling: ScheduledAt is the start; EndsAt is the optional end.
@@ -406,11 +411,15 @@ type CreatePostRequest struct {
 	MediaPermalink         string   `json:"mediaPermalink"`
 	MediaThumbnailURL      string   `json:"mediaThumbnailUrl"`
 	MediaCaption           string   `json:"mediaCaption"`
-	ProductIDs             []string `json:"productIds" validate:"required,min=1"`
-	StartsAt               *string  `json:"startsAt"`
-	EndsAt                 *string  `json:"endsAt"`
-	CartExpirationMinutes  *int     `json:"cartExpirationMinutes"`
-	CartMaxQuantityPerItem *int     `json:"cartMaxQuantityPerItem"`
+	ProductIDs []string `json:"productIds" validate:"required,min=1"`
+	StartsAt   *string  `json:"startsAt"`
+	// EndsAt é OBRIGATÓRIO (RN-05/CA-05.1). Sem teto, a RN-04 (expires_at NULL
+	// durante o evento) deixa o carrinho sem prazo para sempre.
+	EndsAt *string `json:"endsAt" validate:"required"`
+	// min=15 espelha o CHECK da migration 000104; abaixo disso o INSERT vira
+	// 500 em vez de erro de campo (lição E6 da errata).
+	CartExpirationMinutes  *int `json:"cartExpirationMinutes" validate:"omitempty,min=15,max=1440"`
+	CartMaxQuantityPerItem *int `json:"cartMaxQuantityPerItem" validate:"omitempty,min=1,max=100"`
 }
 
 // CreatePostInput is the input to create a post-commerce event.
@@ -451,12 +460,19 @@ type CreateLiveRequest struct {
 	Platform       *string `json:"platform" validate:"omitempty,oneof=instagram"`
 	PlatformLiveID *string `json:"platformLiveId" validate:"omitempty"`
 	// Scheduling
-	ScheduledAt *string `json:"scheduledAt"` // ISO8601 timestamp
+	ScheduledAt *string `json:"scheduledAt"` // ISO8601 timestamp — legado, sinônimo de startsAt
+	// StartsAt/EndsAt são a JANELA COMERCIAL do evento (D21). EndsAt é
+	// OBRIGATÓRIO (RN-05/CA-05.1): é o teto que garante que nenhum carrinho
+	// fica órfão, já que a RN-04 mantém expires_at NULL durante o evento.
+	StartsAt    *string `json:"startsAt"`
+	EndsAt      *string `json:"endsAt" validate:"required"`
 	Description *string `json:"description" validate:"omitempty,max=2000"`
 	// Cart settings (override store defaults)
-	CloseCartOnEventEnd    *bool `json:"closeCartOnEventEnd"`
-	CartExpirationMinutes  *int  `json:"cartExpirationMinutes" validate:"omitempty,min=5,max=1440"`
-	CartMaxQuantityPerItem *int  `json:"cartMaxQuantityPerItem" validate:"omitempty,min=1,max=100"`
+	CloseCartOnEventEnd *bool `json:"closeCartOnEventEnd"`
+	// min=15 espelha o CHECK da migration 000104. Estava em 5 e um valor entre
+	// 5 e 14 passava na validação e estourava no banco como 500 (lição E6).
+	CartExpirationMinutes  *int `json:"cartExpirationMinutes" validate:"omitempty,min=15,max=1440"`
+	CartMaxQuantityPerItem *int `json:"cartMaxQuantityPerItem" validate:"omitempty,min=1,max=100"`
 	SendOnLiveEnd          *bool `json:"sendOnLiveEnd"`
 	// PixDiscountPercent (0-100). 0 disables the feature.
 	PixDiscountPercent *int `json:"pixDiscountPercent" validate:"omitempty,min=0,max=100"`
@@ -475,6 +491,12 @@ type UpdateLiveRequest struct {
 	Title string `json:"title" validate:"required,min=1,max=200"`
 	// Optional fields. When omitted, the existing value is preserved.
 	PixDiscountPercent *int `json:"pixDiscountPercent" validate:"omitempty,min=0,max=100"`
+	// Janela comercial (RN-05/CA-05.7). Ponteiro + omissão = "não mexer"; string
+	// vazia = "limpar". Sem essa distinção, um PUT que só ajusta o fim apagaria
+	// o início. Editar endsAt re-agenda o fechamento — inclusive para MENOS
+	// (CA-05.4), que hoje é no-op por causa do asynq.TaskID.
+	StartsAt *string `json:"startsAt"`
+	EndsAt   *string `json:"endsAt"`
 }
 
 type LiveResponse struct {
@@ -540,6 +562,10 @@ type CreateLiveInput struct {
 	PixDiscountPercent     *int
 	// Scheduling
 	ScheduledAt *time.Time
+	// StartsAt/EndsAt: janela comercial do evento (D21). EndsAt é obrigatório
+	// no create — o service recusa quando vem nil.
+	StartsAt    *time.Time
+	EndsAt      *time.Time
 	Description *string
 }
 
@@ -557,7 +583,25 @@ type UpdateLiveInput struct {
 	StoreID            string
 	Title              string
 	PixDiscountPercent *int
+	// Window carrega a alteração PARCIAL da janela comercial.
+	Window EventWindowUpdate
 }
+
+// EventWindowUpdate descreve uma alteração PARCIAL da janela comercial do
+// evento. Os flags Set* existem porque nil tem DOIS sentidos aqui: "não mexer"
+// (edição que só ajusta o fim) e "limpar" (evento que deixa de ter início
+// agendado). Sem eles, um PUT que só antecipa ends_at apagaria starts_at em
+// silêncio — que é exatamente o que o SetEventWindow antigo fazia, por escrever
+// as duas colunas de uma vez.
+type EventWindowUpdate struct {
+	SetStartsAt bool
+	StartsAt    *time.Time
+	SetEndsAt   bool
+	EndsAt      *time.Time
+}
+
+// Touches informa se há de fato alguma coluna de janela para escrever.
+func (w EventWindowUpdate) Touches() bool { return w.SetStartsAt || w.SetEndsAt }
 
 type EndLiveInput struct {
 	ID       string

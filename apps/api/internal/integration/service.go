@@ -6731,16 +6731,37 @@ func (s *Service) getERPProvider(ctx context.Context, integration *IntegrationRo
 // domain packages). The sweep remains as a safety net for any lost task.
 type CartExpiryScheduler interface {
 	ScheduleCartExpiry(ctx context.Context, cartID string, at time.Time) error
+	// RescheduleCartExpiry MOVE um agendamento já armado. Existe separado
+	// porque ScheduleCartExpiry é deduplicado por TaskID: enquanto a task
+	// pendente existir, um novo agendamento é engolido como "já armado" e o
+	// horário novo é ignorado — em qualquer direção. Sem isto, a extensão de
+	// prazo da fila (RN-10) nunca chegava ao asynq.
+	RescheduleCartExpiry(ctx context.Context, cartID string, at time.Time) error
 }
 
 // SetCartExpiryScheduler wires the ETA scheduler (optional — when unset, only
 // the sweep expires carts, preserving today's behaviour).
 func (s *Service) SetCartExpiryScheduler(sch CartExpiryScheduler) { s.expiryScheduler = sch }
 
-// ScheduleExpiry arms (or re-arms) the cart.expire ETA task for a cart's current
-// expires_at. Best-effort: a failure or a lost task is caught by the sweep. Skips
-// carts that are already terminal or have no window.
+// ScheduleExpiry ARMA a task cart.expire no expires_at atual do carrinho. Usar
+// quando o prazo acabou de nascer (fechamento do evento, regeneração de
+// checkout) — se já houver task armada, o agendamento é deduplicado.
 func (s *Service) ScheduleExpiry(ctx context.Context, cartID string) error {
+	return s.scheduleExpiry(ctx, cartID, false)
+}
+
+// RescheduleExpiry MOVE a task cart.expire para o expires_at atual. Usar quando
+// o prazo MUDOU depois de já ter sido armado (extensão da fila, RN-10). Arm e
+// move não são a mesma operação no asynq: enquanto a task pendente existir, um
+// arm é engolido como "já armado" e o horário novo é perdido.
+func (s *Service) RescheduleExpiry(ctx context.Context, cartID string) error {
+	return s.scheduleExpiry(ctx, cartID, true)
+}
+
+// scheduleExpiry lê o snapshot e delega. Best-effort: falha ou task perdida não
+// deixa o carrinho eterno enquanto houver quem re-arme. Ignora carrinho
+// terminal ou sem janela.
+func (s *Service) scheduleExpiry(ctx context.Context, cartID string, move bool) error {
 	if s.expiryScheduler == nil {
 		return nil
 	}
@@ -6750,6 +6771,9 @@ func (s *Service) ScheduleExpiry(ctx context.Context, cartID string) error {
 	}
 	if snap.ExpiresAt == nil || cartExpiryTerminal(snap) {
 		return nil
+	}
+	if move {
+		return s.expiryScheduler.RescheduleCartExpiry(ctx, cartID, *snap.ExpiresAt)
 	}
 	return s.expiryScheduler.ScheduleCartExpiry(ctx, cartID, *snap.ExpiresAt)
 }
@@ -7360,11 +7384,12 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	}
 
 	// Re-arma a task asynq cart.expire para a NOVA janela estendida. A task
-	// original (armada no finalize) já disparou — ou expirou o cart, ou pulou
-	// por causa do lock acima — então, sem o sweep, nada mais expiraria este
-	// cart quando o prazo estendido vencer. ScheduleExpiry lê o expires_at atual
-	// (já estendido) e agenda no horário novo. Best-effort + idempotente.
-	if armErr := s.ScheduleExpiry(ctx, cartID); armErr != nil {
+	// original (armada no finalize) pode AINDA estar pendente — o carrinho da
+	// frente pode ter sido pago, e aí a task deste cart nunca disparou. Por isso
+	// é RE-agendamento (apaga a pendente e re-enfileira) e não arm: um arm com o
+	// mesmo TaskID seria engolido como "já armado" e o prazo estendido nunca
+	// chegaria ao asynq. Best-effort + idempotente.
+	if armErr := s.RescheduleExpiry(ctx, cartID); armErr != nil {
 		logger.From(ctx, s.logger).Warn("failed to re-arm expiry for promoted cart",
 			zap.String("cart_id", cartID), zap.Error(armErr))
 	}

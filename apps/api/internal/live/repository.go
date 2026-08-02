@@ -394,9 +394,18 @@ func (r *Repository) SetEventMedia(ctx context.Context, eventID, storeID string,
 	return nil
 }
 
-// SetEventWindow persists the optional start (scheduled_at) and end (ends_at)
-// of an event. Either may be nil. Stored via raw SQL.
-func (r *Repository) SetEventWindow(ctx context.Context, eventID, storeID string, startsAt, endsAt *time.Time) error {
+// SetEventWindow persiste a janela comercial do evento (D5/D21) de forma
+// PARCIAL: cada coluna só é escrita quando o flag correspondente estiver
+// ligado. A versão anterior gravava scheduled_at e ends_at juntos e
+// incondicionalmente, o que fazia uma edição só do fim apagar o início.
+//
+// starts_at e scheduled_at são escritos em par: starts_at é a coluna nova
+// (000112) e scheduled_at é a legada que EffectiveStatus, o FE e as leituras
+// ainda consomem. Elas só divergem depois do contract (000119).
+func (r *Repository) SetEventWindow(ctx context.Context, eventID, storeID string, w EventWindowUpdate) error {
+	if !w.Touches() {
+		return nil
+	}
 	uid, err := parseUUID(eventID)
 	if err != nil {
 		return err
@@ -406,17 +415,20 @@ func (r *Repository) SetEventWindow(ctx context.Context, eventID, storeID string
 		return err
 	}
 	var start, end pgtype.Timestamptz
-	if startsAt != nil {
-		start = pgtype.Timestamptz{Time: *startsAt, Valid: true}
+	if w.StartsAt != nil {
+		start = pgtype.Timestamptz{Time: *w.StartsAt, Valid: true}
 	}
-	if endsAt != nil {
-		end = pgtype.Timestamptz{Time: *endsAt, Valid: true}
+	if w.EndsAt != nil {
+		end = pgtype.Timestamptz{Time: *w.EndsAt, Valid: true}
 	}
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE live_events
-		SET scheduled_at = $3, ends_at = $4, updated_at = now()
+		SET starts_at    = CASE WHEN $3::bool THEN $4::timestamptz ELSE starts_at    END,
+		    scheduled_at = CASE WHEN $3::bool THEN $4::timestamptz ELSE scheduled_at END,
+		    ends_at      = CASE WHEN $5::bool THEN $6::timestamptz ELSE ends_at      END,
+		    updated_at   = now()
 		WHERE id = $1 AND store_id = $2
-	`, uid, storeUID, start, end)
+	`, uid, storeUID, w.SetStartsAt, start, w.SetEndsAt, end)
 	if err != nil {
 		return fmt.Errorf("setting event window: %w", err)
 	}
