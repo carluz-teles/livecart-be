@@ -173,10 +173,14 @@ func TestUpdateCartSettingsRequestValidate(t *testing.T) {
 	}{
 		{"valid", func(r *UpdateCartSettingsRequest) {}, false, ""},
 
-		// ExpirationMinutes Required + Min(5) + Max(1440). Required makes the
+		// ExpirationMinutes Required + Min(15) + Max(1440). Required makes the
 		// zero value (omitted field) fail instead of silently slipping the floor.
+		// O piso 15 espelha o CHECK da migration 000104 — antes dela o mínimo
+		// era 5, e 5..14 passavam aqui para estourar no banco.
 		{"expiration zero rejected", func(r *UpdateCartSettingsRequest) { r.ExpirationMinutes = 0 }, true, "expirationMinutes"},
-		{"expiration below min", func(r *UpdateCartSettingsRequest) { r.ExpirationMinutes = 4 }, true, "expirationMinutes"},
+		{"expiration below min", func(r *UpdateCartSettingsRequest) { r.ExpirationMinutes = 14 }, true, "expirationMinutes"},
+		{"expiration at old floor now rejected", func(r *UpdateCartSettingsRequest) { r.ExpirationMinutes = 5 }, true, "expirationMinutes"},
+		{"expiration at new floor accepted", func(r *UpdateCartSettingsRequest) { r.ExpirationMinutes = 15 }, false, ""},
 		{"expiration above max", func(r *UpdateCartSettingsRequest) { r.ExpirationMinutes = 1441 }, true, "expirationMinutes"},
 
 		// MaxQuantityPerItem Required + Min(1): zero is now rejected, not skipped.
