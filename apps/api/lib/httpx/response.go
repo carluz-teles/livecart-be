@@ -93,12 +93,29 @@ func HandleServiceError(c *fiber.Ctx, err error) error {
 	if errors.As(err, &se) {
 		if se.Code >= 500 {
 			logUnhandledError(c, err, reqID)
-		} else if logger != nil {
+			// 5xx is hardened: the client NEVER sees se.Message, se.Reason or the
+			// wrapped cause — those can carry a pgx string, a provider URL or a
+			// driver error. Force a generic body regardless of what the throw site
+			// put on the ServiceError. The rich detail lives only in the log above.
+			return c.Status(se.Code).JSON(Envelope{
+				Error:     "internal server error",
+				RequestID: reqID,
+				Reason:    string(CodeInternal),
+			})
+		}
+		if logger != nil {
 			// Client errors (4xx) are expected — warn keeps the message visible
-			// without paging anyone.
+			// without paging anyone. Tag category/code so every error line is
+			// queryable by category (unclassified 4xx defaults to DOMAIN).
+			category := string(se.Category)
+			if category == "" {
+				category = string(CategoryDomain)
+			}
 			logger.Warn("service error", append([]zap.Field{
 				zap.Int("status", se.Code),
 				zap.String("message", se.Message),
+				zap.String("category", category),
+				zap.String("code", se.Reason),
 				zap.String("request_id", reqID),
 				zap.String("path", c.Path()),
 				zap.String("method", c.Method()),
@@ -138,12 +155,37 @@ func logUnhandledError(c *fiber.Ctx, err error, reqID string) {
 	if logger == nil {
 		return
 	}
+	// Category/code default to INFRASTRUCTURE/INTERNAL: a bare (non-ServiceError)
+	// error reaching here is by definition an uncategorized infra/bug failure.
+	category, code := string(CategoryInfrastructure), string(CodeInternal)
+	var se *ServiceError
+	hasSE := errors.As(err, &se)
+	if hasSE {
+		if se.Category != "" {
+			category = string(se.Category)
+		}
+		if se.Reason != "" {
+			code = se.Reason
+		}
+	}
 	fields := []zap.Field{
 		zap.Error(err),
+		zap.String("category", category),
+		zap.String("code", code),
 		zap.String("request_id", reqID),
 		zap.String("method", c.Method()),
 		zap.String("path", c.Path()),
 		zap.String("ip", c.IP()),
+	}
+	// The wrapped cause/op never reach the client (5xx is forced generic) but are
+	// the actual diagnosis — surface them here, in the log only.
+	if hasSE {
+		if se.cause != nil {
+			fields = append(fields, zap.NamedError("cause", se.cause))
+		}
+		if se.op != "" {
+			fields = append(fields, zap.String("op", se.op))
+		}
 	}
 	if route := c.Route(); route != nil && route.Path != "" {
 		fields = append(fields, zap.String("route", route.Path))
