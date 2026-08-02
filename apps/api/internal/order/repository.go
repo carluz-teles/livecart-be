@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/events"
 )
 
 type Repository struct {
@@ -526,27 +527,66 @@ func (r *Repository) UpdateShippingAddress(ctx context.Context, id string, addre
 	return nil
 }
 
-// RegenerateCheckout pushes expires_at forward and resets the cart back to a
-// state where the buyer can complete payment again. checkout_url is cleared
-// so the next public-checkout call generates a fresh one (avoids reusing a
-// stale Mercado Pago link).
+// RegenerateCheckout empurra o expires_at e devolve o carrinho a um estado em
+// que o comprador pode pagar de novo. checkout_url é limpo para a próxima
+// chamada pública gerar um link fresco (evita reusar link vencido do provedor).
+//
+// RN-06 + A10 — duas correções de invariante que andam juntas:
+//
+//  1. o status volta para 'checkout', não para 'active'. No vocabulário novo
+//     'active' significa "pode pagar, SEM prazo" e 'checkout' significa "prazo
+//     correndo". Devolver para 'active' com expires_at no futuro produzia o
+//     estado impossível — e é o que a tela mostrava como "aguardando
+//     pagamento" sem relógio nenhum.
+//
+//  2. emite cart.checkout_armed DENTRO da transação. Antes era um Exec cru:
+//     nenhum fato era publicado, logo armCartExpiry nunca rodava, logo nenhuma
+//     task cart.expire era agendada. Como o sweep de carrinhos foi removido
+//     (commit 9a0df99), esse carrinho NUNCA expirava — ficava vivo com prazo
+//     vencido segurando o estoque reservado. É o R5 do pacote, confirmado.
+//
+// A dedup key inclui o novo expires_at: 'cart.checkout_armed:<id>' já foi
+// usada pelo fechamento do evento, e reusá-la faria o outbox descartar este
+// fato em silêncio — voltando ao carrinho que nunca expira.
 func (r *Repository) RegenerateCheckout(ctx context.Context, id string, expiresAt time.Time) error {
 	uid, err := uuid.Parse(id)
 	if err != nil {
 		return fmt.Errorf("invalid order id: %w", err)
 	}
+	cartUUID := pgtype.UUID{Bytes: uid, Valid: true}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin regenerate tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op depois do Commit
+
 	const q = `
 		UPDATE carts
 		SET expires_at         = $2,
-		    status             = 'active',
+		    status             = 'checkout',
 		    payment_status     = 'pending',
 		    checkout_url       = NULL,
 		    checkout_id        = NULL,
 		    checkout_expires_at = NULL
 		WHERE id = $1
+		RETURNING event_id::text
 	`
-	if _, err := r.db.Exec(ctx, q, pgtype.UUID{Bytes: uid, Valid: true}, expiresAt); err != nil {
+	var eventID string
+	if err := tx.QueryRow(ctx, q, cartUUID, expiresAt).Scan(&eventID); err != nil {
 		return fmt.Errorf("regenerating checkout: %w", err)
+	}
+
+	dedup := fmt.Sprintf("cart.checkout_armed:%s:regen:%d", id, expiresAt.UTC().Unix())
+	if err := events.EmitInternal(ctx, sqlc.New(tx), events.CartCheckoutArmed, dedup, struct {
+		CartID  string `json:"cart_id"`
+		EventID string `json:"event_id"`
+	}{CartID: id, EventID: eventID}); err != nil {
+		return fmt.Errorf("emitting cart.checkout_armed on regenerate: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit regenerate tx: %w", err)
 	}
 	return nil
 }

@@ -298,22 +298,30 @@ GROUP BY s.id, s.sequence_order
 ORDER BY s.sequence_order;
 
 -- name: FinalizeCartsByEvent :many
--- Ao encerrar a live, move os carrinhos ativos para 'checkout' e arma o prazo
--- de pagamento: expires_at = now() + cart_expiration_minutes (do evento, com
--- fallback para o default da loja). 0 = sem expiração (preserva o que havia).
--- Carrinhos já pagos não recebem prazo — não faz sentido expirar uma venda.
+-- RN-06: ao encerrar o EVENTO, o carrinho sai de 'active' ("pode pagar, sem
+-- prazo") para 'checkout' ("prazo correndo") e ganha expires_at. Encerrar uma
+-- SESSÃO não passa por aqui — sessão não mexe em carrinho.
+--
+-- O carrinho PAGO não transiciona (A10). Antes, o filtro de payment_status
+-- incidia só no CASE do expires_at, nunca no WHERE: o carrinho pago virava
+-- 'checkout' — que no vocabulário novo significa "prazo correndo" — e ainda
+-- gerava um cart.checkout_armed inútil, que virava um ScheduleExpiry no-op.
+-- Com a decisão 7 (pagar durante o evento), isso deixou de ser detalhe.
+--
 -- Retorna os ids finalizados para emitir cart.checkout_armed por carrinho.
 UPDATE carts c
 SET status = 'checkout',
     expires_at = CASE
-        WHEN c.payment_status <> 'paid'
-             AND COALESCE(le.cart_expiration_minutes, s.cart_expiration_minutes, 0) > 0
+        WHEN COALESCE(le.cart_expiration_minutes, s.cart_expiration_minutes, 0) > 0
         THEN now() + make_interval(mins => COALESCE(le.cart_expiration_minutes, s.cart_expiration_minutes))
         ELSE c.expires_at
     END
 FROM live_events le
 JOIN stores s ON s.id = le.store_id
-WHERE c.event_id = $1 AND c.status = 'active' AND le.id = c.event_id
+WHERE c.event_id = $1
+  AND c.status = 'active'
+  AND c.payment_status IS DISTINCT FROM 'paid'
+  AND le.id = c.event_id
 RETURNING c.id;
 
 -- name: CountCartsByEvent :one
