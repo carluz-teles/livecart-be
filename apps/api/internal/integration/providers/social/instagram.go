@@ -18,10 +18,15 @@ import (
 )
 
 const (
-	instagramGraphAPIBaseURL = "https://graph.instagram.com"
 	instagramGraphAPIVersion = "v25.0"
 	instagramDMTextMaxBytes  = 1000
 )
+
+// instagramGraphAPIBaseURL é var, e não const, por UM motivo: a renovação do
+// token tem duas recusas da Meta cuja regressão só aparece 60 dias depois (ver
+// RefreshToken), e testá-las exige apontar para uma Graph falsa. Nada em
+// produção reescreve isto.
+var instagramGraphAPIBaseURL = "https://graph.instagram.com"
 
 // Instagram implements the SocialProvider interface for Instagram.
 type Instagram struct {
@@ -77,11 +82,85 @@ func (i *Instagram) ValidateCredentials(ctx context.Context) error {
 	return err
 }
 
-// RefreshToken refreshes the OAuth token.
+// RefreshToken renova o token de longa duração por mais 60 dias.
+//
+// O Instagram NÃO emite refresh_token: a credencial de renovação é o próprio
+// token de longa duração (GET /refresh_access_token com
+// grant_type=ig_refresh_token). Era por isso que este método era um stub
+// `return nil, nil` e o Instagram nunca renovava — o que só não virou incidente
+// porque a única consequência visível chega 60 dias depois da conexão.
+//
+// Com a publicação agendada (RN-31) isso deixou de ser latente: entre agendar e
+// disparar podem passar semanas, e um disparo com token vencido é uma
+// publicação que simplesmente não sai.
+//
+// Duas condições da Meta estão codificadas aqui, e violá-las devolve erro — que
+// o chamador transforma em integração 'error':
+//   - o token tem de ter ao menos 24h de vida. Não guardamos a data de emissão,
+//     mas ExpiresAt a denuncia: token renovado há pouco vence em ~60 dias.
+//   - o token não pode estar VENCIDO. Aí não há renovação possível: só
+//     reconectar. Devolver erro é o certo — é o estado que o lojista precisa ver.
 func (i *Instagram) RefreshToken(ctx context.Context) (*providers.Credentials, error) {
-	// Instagram long-lived tokens can be refreshed
-	// This would be implemented when needed
-	return nil, nil
+	if i.credentials == nil || i.credentials.AccessToken == "" {
+		return nil, nil
+	}
+	// Vencido: a Graph recusa e a única saída é reconectar a conta.
+	if !i.credentials.ExpiresAt.IsZero() && time.Now().After(i.credentials.ExpiresAt) {
+		return nil, fmt.Errorf("instagram token expired at %s — the account must be reconnected",
+			i.credentials.ExpiresAt.Format(time.RFC3339))
+	}
+	// Renovado há menos de 24h: a Graph recusa. Não é falha — é cedo demais.
+	if !i.credentials.ExpiresAt.IsZero() && time.Until(i.credentials.ExpiresAt) > 59*24*time.Hour {
+		return nil, nil
+	}
+
+	url := fmt.Sprintf("%s/refresh_access_token?grant_type=ig_refresh_token&access_token=%s",
+		instagramGraphAPIBaseURL, neturl.QueryEscape(i.credentials.AccessToken))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating refresh request: %w", err)
+	}
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sending refresh request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("instagram token refresh failed: status %d, body: %s",
+			resp.StatusCode, truncate(string(body), 300))
+	}
+
+	var out struct {
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("decoding refresh response: %w", err)
+	}
+	if out.AccessToken == "" {
+		return nil, fmt.Errorf("instagram token refresh returned no access_token")
+	}
+
+	// Copia as credenciais para preservar o que não vem na resposta (Extra
+	// carrega o instagram_user_id, que a resolução de loja usa).
+	refreshed := *i.credentials
+	refreshed.AccessToken = out.AccessToken
+	if out.TokenType != "" {
+		refreshed.TokenType = out.TokenType
+	}
+	if out.ExpiresIn > 0 {
+		refreshed.ExpiresAt = time.Now().Add(time.Duration(out.ExpiresIn) * time.Second)
+	}
+
+	logger.From(ctx, i.logger).Info("instagram long-lived token refreshed",
+		zap.String("integration_id", i.integrationID),
+		zap.Time("expires_at", refreshed.ExpiresAt),
+	)
+	return &refreshed, nil
 }
 
 // TestConnection tests the connection to Instagram API.

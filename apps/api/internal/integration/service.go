@@ -1277,46 +1277,13 @@ func (s *Service) getInstagramUserProfile(ctx context.Context, accessToken strin
 	return profileResp.Username, nil
 }
 
-// RefreshInstagramToken refreshes a long-lived Instagram token for another 60 days.
-func (s *Service) RefreshInstagramToken(ctx context.Context, accessToken string) (string, int, error) {
-	refreshURL := fmt.Sprintf(
-		"https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=%s",
-		accessToken,
-	)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", refreshURL, nil)
-	if err != nil {
-		return "", 0, fmt.Errorf("creating refresh request: %w", err)
-	}
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", 0, fmt.Errorf("sending refresh request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != http.StatusOK {
-		logger.From(ctx, s.logger).Error("Instagram token refresh failed",
-			zap.Int("status", resp.StatusCode),
-			zap.String("body", string(body)),
-		)
-		return "", 0, fmt.Errorf("token refresh failed: status %d", resp.StatusCode)
-	}
-
-	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-		TokenType   string `json:"token_type"`
-		ExpiresIn   int    `json:"expires_in"`
-	}
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return "", 0, fmt.Errorf("parsing refresh response: %w", err)
-	}
-
-	return tokenResp.AccessToken, tokenResp.ExpiresIn, nil
-}
+// RefreshInstagramToken SAIU: era uma segunda implementacao do
+// GET /refresh_access_token, sem nenhum chamador, ao lado do
+// Instagram.RefreshToken que era um stub `return nil, nil`. Ou seja: existia o
+// codigo que renova e existia o gancho por onde a renovacao passa, e os dois
+// nunca se encontraram. A implementacao vive agora no provider
+// (providers/social/instagram.go), que e onde createProviderFromRow e o
+// TokenRefreshWorker a procuram.
 
 // =============================================================================
 // PROVIDER OPERATIONS

@@ -141,10 +141,19 @@ func (w *TokenRefreshWorker) refreshToken(ctx context.Context, integration *Inte
 		return err
 	}
 
-	// Skip if no refresh token
-	if creds.RefreshToken == "" {
-		logger.From(ctx, w.logger).Debug("skipping integration without refresh token",
+	// Sem credencial de renovação, não há o que fazer aqui.
+	//
+	// O guard olhava SÓ o refresh_token, e isso escondia um buraco: o Instagram
+	// não emite refresh_token — a credencial de renovação é o próprio token de
+	// longa duração. Ou seja, nenhuma integração de Instagram passava por este
+	// worker, e a renovação só acontecia dentro de createProviderFromRow,
+	// quando o token já estava a 5 minutos de vencer, no meio de um request.
+	// Com a publicação agendada (RN-31), entre agendar e disparar podem passar
+	// semanas — a renovação proativa deixou de ser conforto.
+	if creds.RefreshToken == "" && !providerSelfRefreshes(integration.Provider) {
+		logger.From(ctx, w.logger).Debug("skipping integration without refresh credential",
 			zap.String("integration_id", integration.ID),
+			zap.String("provider", integration.Provider),
 		)
 		return nil
 	}
@@ -152,4 +161,16 @@ func (w *TokenRefreshWorker) refreshToken(ctx context.Context, integration *Inte
 	// Attempt refresh
 	_, err = w.service.refreshToken(ctx, integration, creds)
 	return err
+}
+
+// providerSelfRefreshes diz se a renovação do provider usa o PRÓPRIO access
+// token, sem refresh_token. Hoje só o Instagram
+// (GET /refresh_access_token?grant_type=ig_refresh_token).
+//
+// Lista explícita, e não "tenta em todo mundo": os providers que exigem
+// refresh_token devolvem ERRO quando ele falta, e o chamador marca a integração
+// como 'error'. Relaxar o guard para todos transformaria "este provider não
+// renova" em "esta integração está quebrada".
+func providerSelfRefreshes(provider string) bool {
+	return provider == "instagram"
 }
