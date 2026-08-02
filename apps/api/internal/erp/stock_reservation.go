@@ -24,8 +24,13 @@ const (
 	StockOpWaitlistPromote StockOp = "waitlist_promote"
 	StockOpCartExpiry      StockOp = "cart_expiry"
 	StockOpCancelBlocked   StockOp = "cancel_blocked"
-	StockOpWaitlistCancel  StockOp = "waitlist_cancel"
-	StockOpWaitlistExpire  StockOp = "waitlist_expire"
+	// StockOpCartCancelled: cancelamento MANUAL do carrinho pelo lojista.
+	// StockOpCancelReverted: o pagamento venceu esse cancelamento e o estoque
+	// devolvido foi retomado (pode deixar o saldo negativo — venda real).
+	StockOpCartCancelled  StockOp = "cart_cancelled"
+	StockOpCancelReverted StockOp = "cancel_reverted"
+	StockOpWaitlistCancel StockOp = "waitlist_cancel"
+	StockOpWaitlistExpire StockOp = "waitlist_expire"
 )
 
 // StockEventParams is the neutral payload for a stock.reserved / stock.released

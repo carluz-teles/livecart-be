@@ -1986,6 +1986,208 @@ func (r *Repository) ExpireCartAndReleaseStock(ctx context.Context, cartID, stor
 	return result, nil
 }
 
+// CancelCartResult is the outcome of the atomic cancel+local-release transaction.
+type CancelCartResult struct {
+	// Eligible=false quando o guard do UPDATE devolveu 0 rows: o cart foi PAGO
+	// (o pagamento vence o cancelamento) ou já estava expirado/cancelado. O
+	// caller aborta sem devolver estoque nem tocar o ERP.
+	Eligible bool
+	EventID  string
+	// FreedProductIDs: produtos cujo estoque local foi devolvido (para promover
+	// a waitlist depois do commit).
+	FreedProductIDs []string
+}
+
+// CancelCartAndReleaseStock faz, numa ÚNICA transação: (1) o flip guard-first do
+// cart para 'cancelled' com reason='store_cancelled' (CancelCart — recusa cart
+// pago/já-terminal), (2) a devolução ao estoque local da quantidade
+// não-waitlisted de TODOS os itens e (3) o cancelamento dos itens de waitlist
+// deste cart (o carrinho morreu, então ninguém deve ser promovido para ele).
+//
+// Mesmo desenho do ExpireCartAndReleaseStock: a atomicidade é a garantia
+// anti-dupla-devolução (commitado, o cart deixa de ser elegível; um retry não
+// redevolve), e as ações remotas de ERP ficam FORA do tx — no reactor de
+// cart.cancelled, com retry + DLQ próprios.
+func (r *Repository) CancelCartAndReleaseStock(ctx context.Context, cartID, storeID string) (CancelCartResult, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return CancelCartResult{}, err
+	}
+
+	var result CancelCartResult
+	err = dbtx.InTx(ctx, r.pool, r.queries, func(q *sqlc.Queries) error {
+		cart, err := q.CancelCart(ctx, cID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// Guard pegou: cart pago no intervalo ou já terminal.
+				result = CancelCartResult{Eligible: false}
+				return nil
+			}
+			return fmt.Errorf("flip cart to cancelled: %w", err)
+		}
+
+		items, err := q.ListNonWaitlistedCartItems(ctx, cID)
+		if err != nil {
+			return fmt.Errorf("listing items for cancel release: %w", err)
+		}
+		freed := make([]string, 0, len(items))
+		eventID := uuidToString(cart.EventID)
+		for _, item := range items {
+			if _, err := q.IncrementProductStock(ctx, sqlc.IncrementProductStockParams{
+				ID:    item.ProductID,
+				Stock: pgtype.Int4{Int32: item.Quantity, Valid: true},
+			}); err != nil {
+				return fmt.Errorf("release local stock on cancel: %w", err)
+			}
+			productID := uuidToString(item.ProductID)
+			// stock.released na MESMA tx do release (outbox transacional).
+			if err := r.emitStockEvent(ctx, q, events.StockReleased, "stock.released:", StockEventParams{
+				Op:        string(StockOpCartCancelled),
+				ProductID: productID,
+				Quantity:  int(item.Quantity),
+				CartID:    cartID,
+				EventID:   eventID,
+			}); err != nil {
+				return fmt.Errorf("emitting stock.released on cancel: %w", err)
+			}
+			freed = append(freed, productID)
+		}
+
+		// Fila do próprio cart morre junto — sem isso o cliente seria promovido
+		// (e receberia DM) para um checkout que responde cancelado.
+		if _, err := q.CancelWaitlistItemsByCart(ctx, cID); err != nil {
+			return fmt.Errorf("cancelling waitlist items on cancel: %w", err)
+		}
+
+		// cart.cancelled na MESMA tx: commitado atomicamente com o flip e a
+		// devolução, então nunca se perde. reason='store_cancelled' distingue
+		// este produtor dos outros dois (bloqueio de handle e cancelamento de
+		// cobrança) — o reactor de ERP só age neste.
+		//
+		// dedup_key VAZIO de propósito (opt-out do índice único do outbox): o
+		// MESMO cart pode ser cancelado mais de uma vez ao longo da vida — o
+		// comprador comenta de novo, ReopenExpiredCartForReuse reabre a linha e
+		// a loja cancela outra vez. Com a chave "cart.cancelled:<id>" o segundo
+		// cancelamento seria silenciosamente engolido e ficaria sem estorno de
+		// ERP. A emissão já é exatamente-uma-vez por cancelamento: só acontece
+		// dentro do tx do flip guard-first, que um retry não repete.
+		if err := events.EmitInternal(ctx, q, events.CartCancelled, "", struct {
+			CartID          string   `json:"cart_id"`
+			StoreID         string   `json:"store_id"`
+			EventID         string   `json:"event_id"`
+			Reason          string   `json:"reason"`
+			FreedProductIDs []string `json:"freed_product_ids"`
+		}{CartID: cartID, StoreID: storeID, EventID: eventID, Reason: CancelReasonStore, FreedProductIDs: freed}); err != nil {
+			return fmt.Errorf("emitting cart.cancelled: %w", err)
+		}
+
+		result = CancelCartResult{Eligible: true, EventID: eventID, FreedProductIDs: freed}
+		return nil
+	})
+	if err != nil {
+		return CancelCartResult{}, err
+	}
+	return result, nil
+}
+
+// RestoreCancelledCartAsPaid desfaz um cancelamento manual quando o pagamento
+// chega depois: numa ÚNICA transação restaura o cart para 'checkout'+pago,
+// retoma o estoque local devolvido pelo cancelamento (sem piso em zero — a
+// unidade foi vendida de fato; saldo negativo é o sinal honesto de venda a mais)
+// e emite cart.cancellation_reverted para auditoria.
+//
+// Devolve restored=false quando o cart não é um cancelamento de lojista
+// pendente de pagamento — o caller trata como "não aplicável" e segue o fluxo
+// normal (ou o skip benigno de ErrCartNotPayable).
+func (r *Repository) RestoreCancelledCartAsPaid(
+	ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string,
+) (restored bool, err error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return false, err
+	}
+	var paidAtPg pgtype.Timestamptz
+	if paidAt != nil {
+		paidAtPg = pgtype.Timestamptz{Time: *paidAt, Valid: true}
+	}
+
+	err = dbtx.InTx(ctx, r.pool, r.queries, func(q *sqlc.Queries) error {
+		cart, err := q.RestoreCancelledCartAsPaid(ctx, sqlc.RestoreCancelledCartAsPaidParams{
+			ID:            cID,
+			PaymentStatus: pgtype.Text{String: paymentStatus, Valid: true},
+			CheckoutID:    pgtype.Text{String: paymentID, Valid: paymentID != ""},
+			PaidAt:        paidAtPg,
+			PaymentMethod: pgtype.Text{String: paymentMethod, Valid: paymentMethod != ""},
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil // não é um cancelamento de lojista restaurável
+			}
+			return fmt.Errorf("restoring cancelled cart as paid: %w", err)
+		}
+
+		items, err := q.ListNonWaitlistedCartItems(ctx, cID)
+		if err != nil {
+			return fmt.Errorf("listing items for cancel revert: %w", err)
+		}
+		eventID := uuidToString(cart.EventID)
+		retaken := make([]string, 0, len(items))
+		for _, item := range items {
+			if _, err := q.ForceDecrementProductStock(ctx, sqlc.ForceDecrementProductStockParams{
+				ID:    item.ProductID,
+				Stock: pgtype.Int4{Int32: item.Quantity, Valid: true},
+			}); err != nil {
+				return fmt.Errorf("retake local stock on cancel revert: %w", err)
+			}
+			productID := uuidToString(item.ProductID)
+			if err := r.emitStockEvent(ctx, q, events.StockReserved, "stock.reserved:", StockEventParams{
+				Op:        string(StockOpCancelReverted),
+				ProductID: productID,
+				Quantity:  int(item.Quantity),
+				CartID:    cartID,
+				EventID:   eventID,
+			}); err != nil {
+				return fmt.Errorf("emitting stock.reserved on cancel revert: %w", err)
+			}
+			retaken = append(retaken, productID)
+		}
+
+		// dedup_key vazio pelo mesmo motivo do cart.cancelled: um cart reaberto
+		// pode passar pelo ciclo cancelar→pagar mais de uma vez, e o segundo
+		// fato não pode sumir. A emissão é única por restore (roda dentro do tx
+		// guardado que só um vencedor executa).
+		// store_id, short_id e handle viajam no payload porque o consumidor (o
+		// aviso no sino do painel) precisa saber PARA QUEM notificar e COMO
+		// nomear o pedido, sem uma segunda ida ao banco.
+		if err := events.EmitInternal(ctx, q, events.CartCancellationReverted, "", struct {
+			CartID            string   `json:"cart_id"`
+			StoreID           string   `json:"store_id"`
+			EventID           string   `json:"event_id"`
+			ShortID           int32    `json:"short_id"`
+			PlatformHandle    string   `json:"platform_handle"`
+			PaymentID         string   `json:"payment_id"`
+			RetakenProductIDs []string `json:"retaken_product_ids"`
+		}{
+			CartID:            cartID,
+			StoreID:           storeID,
+			EventID:           eventID,
+			ShortID:           cart.ShortID,
+			PlatformHandle:    cart.PlatformHandle,
+			PaymentID:         paymentID,
+			RetakenProductIDs: retaken,
+		}); err != nil {
+			return fmt.Errorf("emitting cart.cancellation_reverted: %w", err)
+		}
+
+		restored = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return restored, nil
+}
+
 // GetCartByEventAndUser gets a cart for a specific event and user.
 func (r *Repository) GetCartByEventAndUser(ctx context.Context, eventID, platformUserID string) (*CartRow, error) {
 	eID, err := parseUUID(eventID)

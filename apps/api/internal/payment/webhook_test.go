@@ -48,6 +48,10 @@ type mockGateway struct {
 	updateErr   error
 	updateCalls []string // captured cart payment statuses passed to the write
 
+	restored     bool // RestoreCancelledCartAsPaid return
+	restoreErr   error
+	restoreCalls int
+
 	gmv    int64
 	gmvErr error
 
@@ -77,6 +81,11 @@ func (m *mockGateway) CartPaymentStatus(_ context.Context, _ string) (string, er
 func (m *mockGateway) UpdateCartPaymentStatus(_ context.Context, _, paymentStatus, _ string, _ *time.Time, _ string) error {
 	m.updateCalls = append(m.updateCalls, paymentStatus)
 	return m.updateErr
+}
+
+func (m *mockGateway) RestoreCancelledCartAsPaid(_ context.Context, _, _, _, _ string, _ *time.Time, _ string) (bool, error) {
+	m.restoreCalls++
+	return m.restored, m.restoreErr
 }
 
 func (m *mockGateway) CartGMVCents(_ context.Context, _ string) (int64, error) {
@@ -187,6 +196,32 @@ func TestService_ProcessPaymentNotification(t *testing.T) {
 		is.noErr(err) // benign ACK
 		is.eq(0, len(gw.emitOrder))
 		is.eq([]string{"paid"}, gw.updateCalls) // the guarded write was attempted
+		is.eq(1, gw.restoreCalls)               // tentou restaurar (paid), mas não era store-cancel → skip
+	})
+
+	t.Run("payment wins a store cancellation → cart restored and paid fact emitted (LIV-84)", func(t *testing.T) {
+		t.Parallel()
+		is := newAssert(t)
+
+		gw := newMockGateway()
+		gw.provider = stubPaymentProvider{statusResult: &providers.PaymentStatus{
+			Status:            providers.PaymentApproved,
+			ExternalReference: cartID,
+			PaymentID:         paymentID,
+		}}
+		gw.updateErr = payment.ErrCartNotPayable // lojista cancelou entre a cobrança e o webhook
+		gw.restored = true                       // ...mas era cancelamento manual do lojista → o pagamento vence
+		svc := newWebhookService(gw)
+
+		err := svc.ProcessPaymentNotification(context.Background(), payment.ProcessPaymentInput{
+			StoreID: "store-1", Provider: "pagarme", PaymentID: paymentID,
+		})
+		is.noErr(err)
+		is.eq(1, gw.restoreCalls)
+		// Restaurado: o fluxo segue como pagamento normal — cart.paid emitido.
+		if _, ok := gw.emittedByKey[string(events.CartPaid)+":"+paymentID]; !ok {
+			t.Fatalf("expected cart.paid emitted after restore; got %v", gw.emitOrder)
+		}
 	})
 
 	t.Run("provider cancel on an already-paid cart is promoted to a refund", func(t *testing.T) {

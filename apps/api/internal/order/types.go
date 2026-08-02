@@ -208,6 +208,10 @@ type OrderDetailResponse struct {
 	// CustomerBlocked is true when the buyer's handle is currently blocked
 	// for this store. The FE uses it to render a "Cliente bloqueado" badge.
 	CustomerBlocked bool                          `json:"customerBlocked"`
+	// CancellationRevertedAt: quando presente, este pedido foi cancelado pela
+	// loja e mesmo assim foi pago — o cancelamento foi revertido e o pedido
+	// seguiu o fluxo normal. O FE mostra isso no histórico do pedido.
+	CancellationRevertedAt *time.Time             `json:"cancellationRevertedAt,omitempty"`
 }
 
 // ERPFinalisationResponse is the FE-visible projection of the cart's ERP
@@ -445,10 +449,11 @@ func NewOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 	}
 
 	resp := OrderDetailResponse{
-		OrderResponse:   NewOrderResponse(o.OrderOutput),
-		Token:           o.Token,
-		Comments:        comments,
-		CustomerBlocked: o.CustomerBlocked,
+		OrderResponse:          NewOrderResponse(o.OrderOutput),
+		Token:                  o.Token,
+		Comments:               comments,
+		CustomerBlocked:        o.CustomerBlocked,
+		CancellationRevertedAt: o.CancellationRevertedAt,
 	}
 
 	if o.Customer != nil {
@@ -832,6 +837,10 @@ type OrderDetailRow struct {
 	ERPInvoiceKey        string
 	ERPInvoiceStatus     string
 	ERPInvoiceEmittedAt  *time.Time
+
+	// Preenchido quando o lojista cancelou este pedido e o pagamento entrou
+	// assim mesmo, revertendo o cancelamento. NULL na esmagadora maioria.
+	CancellationRevertedAt *time.Time
 }
 
 // OrderShipmentRecord is the projection of `shipments` used by order service.
@@ -947,6 +956,11 @@ type OrderDetailOutput struct {
 	// blocked for this store. Drives the "Cliente bloqueado" badge on the
 	// order detail page. Doesn't affect past orders — informational only.
 	CustomerBlocked  bool
+	// CancellationRevertedAt marca o caso em que a loja cancelou este pedido e
+	// o pagamento entrou assim mesmo: o cancelamento foi revertido e o pedido
+	// seguiu o fluxo normal. Vira uma entrada no histórico do pedido para o
+	// lojista entender por que um pedido "cancelado" está pago.
+	CancellationRevertedAt *time.Time
 }
 
 // ERPInvoiceOutput surfaces the persisted erp_invoice_* state on the cart.

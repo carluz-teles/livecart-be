@@ -1,12 +1,21 @@
 package order_test
 
-// Gate de cobertura — Fatia 7.
+// Gate de cobertura da tela de Pedidos.
 //
-// Invariantes:
-//   G1 Pedidos (repo.List) == carts COM order (paid+)
-//   G2 Carrinhos (cart.repo.List) == carts SEM order
-//   G3 Pedidos ∪ Carrinhos == todos os carts (nada some, nada duplica)
-//   G4 total_amount dos Pedidos == orders.total_cents (NÃO re-soma cart_items)
+// A Fatia 7 dividiu a leitura em duas páginas — Pedidos (só carts COM order) e
+// Carrinhos (só carts SEM order) — mas a página "Carrinhos" nunca foi construída
+// no frontend, e as abas de Pedidos ("Aguardando pagamento", "Cancelados"),
+// escritas em maio, sempre falaram de carrinho em aberto. Em campo isso apareceu
+// como pedido gerado pela live que não existia em aba nenhuma do painel
+// (staging 29/07/2026: 16 carrinhos, 0 visíveis). A lista voltou a ser ancorada
+// no CART, com a Order como enriquecimento.
+//
+// Invariantes agora:
+//   G1 Pedidos (repo.List) == TODOS os carts da loja, pagos ou não
+//   G2 total_amount vem de orders.total_cents quando há Order (valor congelado)
+//   G3 total_amount vem do cart quando ainda não há Order (nunca some inline —
+//      usa cart_product_total_cents)
+//   G4 is_first_purchase só é verdadeiro para venda concretizada
 
 import (
 	"context"
@@ -14,9 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
-
-	cartpkg "livecart/apps/api/internal/cart"
 	"livecart/apps/api/internal/order"
 	"livecart/apps/api/lib/query"
 )
@@ -140,7 +146,7 @@ func TestCartOrderPageSplit_UnionCoversAllCarts(t *testing.T) {
 		t.Fatalf("C3 refund: %v", err)
 	}
 
-	// ─── G1: Pedidos contém apenas carts com order ────────────────────────────
+	// ─── G1: Pedidos contém TODOS os carts da loja ────────────────────────────
 
 	orderRepo := order.NewRepository(testPool)
 	orderResult, err := orderRepo.List(ctx, order.ListOrdersParams{
@@ -152,157 +158,74 @@ func TestCartOrderPageSplit_UnionCoversAllCarts(t *testing.T) {
 		t.Fatalf("G1 order list: %v", err)
 	}
 
-	inOrders := make(map[string]bool)
+	byID := make(map[string]order.OrderRow)
 	for _, o := range orderResult.Orders {
-		inOrders[o.ID] = true
+		byID[o.ID] = o
 	}
 
-	if !inOrders[paidCartID] {
-		t.Errorf("G1: paid cart %s deve aparecer em Pedidos", paidCartID)
+	if _, ok := byID[paidCartID]; !ok {
+		t.Errorf("G1: cart pago %s deve aparecer em Pedidos", paidCartID)
 	}
-	if !inOrders[refCartID] {
-		t.Errorf("G1: cart estornado %s deve aparecer em Pedidos (order existe)", refCartID)
+	if _, ok := byID[refCartID]; !ok {
+		t.Errorf("G1: cart estornado %s deve aparecer em Pedidos", refCartID)
 	}
-	if inOrders[unpaidCartID] {
-		t.Errorf("G1: cart não-pago %s NÃO deve aparecer em Pedidos", unpaidCartID)
+	if _, ok := byID[unpaidCartID]; !ok {
+		t.Errorf("G1: cart NÃO pago %s deve aparecer em Pedidos — é ele que o "+
+			"lojista precisa ver e cancelar; era o bug de campo", unpaidCartID)
 	}
-
-	// ─── G2: Carrinhos contém apenas carts sem order ──────────────────────────
-
-	cartRepo := cartpkg.NewRepository(testPool)
-	cartResult, err := cartRepo.List(ctx, cartpkg.ListCartsParams{
-		StoreID:    storeID,
-		Pagination: query.Pagination{Page: 1, Limit: 100},
-		Sorting:    query.Sorting{SortBy: "created_at", SortOrder: "desc"},
-	})
-	if err != nil {
-		t.Fatalf("G2 cart list: %v", err)
-	}
-
-	inCarts := make(map[string]bool)
-	for _, c := range cartResult.Carts {
-		inCarts[c.ID] = true
-	}
-
-	if !inCarts[unpaidCartID] {
-		t.Errorf("G2: cart não-pago %s deve aparecer em Carrinhos", unpaidCartID)
-	}
-	if inCarts[paidCartID] {
-		t.Errorf("G2: cart pago %s NÃO deve aparecer em Carrinhos", paidCartID)
-	}
-	if inCarts[refCartID] {
-		t.Errorf("G2: cart estornado %s NÃO deve aparecer em Carrinhos (tem order)", refCartID)
-	}
-
-	// ─── G3: Pedidos ∪ Carrinhos == todos os carts desta store ────────────────
 
 	rows, err := testPool.Query(ctx,
 		`SELECT c.id::text FROM carts c
 		 JOIN live_events e ON e.id = c.event_id
 		 WHERE e.store_id = $1`, storeID)
 	if err != nil {
-		t.Fatalf("G3 all carts: %v", err)
+		t.Fatalf("G1 all carts: %v", err)
 	}
 	defer rows.Close()
-
-	union := make(map[string]bool)
-	for id := range inOrders {
-		union[id] = true
-	}
-	for id := range inCarts {
-		if union[id] {
-			t.Errorf("G3: cart %s aparece em AMBOS Pedidos e Carrinhos", id)
-		}
-		union[id] = true
-	}
-
 	for rows.Next() {
 		var id string
-		rows.Scan(&id)
-		if !union[id] {
-			t.Errorf("G3: cart %s sumiu — não está em Pedidos nem em Carrinhos", id)
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("G1 scan: %v", err)
+		}
+		if _, ok := byID[id]; !ok {
+			t.Errorf("G1: cart %s sumiu da tela de Pedidos", id)
 		}
 	}
 
-	// ─── G4: total_amount nos Pedidos == orders.total_cents ──────────────────
+	// ─── G2: com Order, o total é o valor CONGELADO na venda ─────────────────
 
-	for _, o := range orderResult.Orders {
+	for _, cartID := range []string{paidCartID, refCartID} {
 		var orderTotalCents int64
 		if err := testPool.QueryRow(ctx,
-			`SELECT COALESCE(total_cents, 0) FROM orders WHERE cart_id = $1`, o.ID,
+			`SELECT COALESCE(total_cents, 0) FROM orders WHERE cart_id = $1`, cartID,
 		).Scan(&orderTotalCents); err != nil {
-			t.Fatalf("G4 query: %v", err)
+			t.Fatalf("G2 query: %v", err)
 		}
-		if o.TotalAmount != orderTotalCents {
-			t.Errorf("G4: cart %s total_amount=%d != orders.total_cents=%d",
-				o.ID, o.TotalAmount, orderTotalCents)
+		if got := byID[cartID].TotalAmount; got != orderTotalCents {
+			t.Errorf("G2: cart %s total_amount=%d != orders.total_cents=%d",
+				cartID, got, orderTotalCents)
 		}
 	}
-}
 
-// ─── CartStats ───────────────────────────────────────────────────────────────
+	// ─── G3: sem Order, o total vem do cart pela função canônica ─────────────
 
-func TestCartOrderPageSplit_CartStats(t *testing.T) {
-	requireDB(t)
-	ctx := context.Background()
-
-	storeID, eventID := seedIsolatedStore(t, "stats7")
-	prodID := seedProduct(t, storeID, 2000)
-
-	// Cart ativo com handle (recuperável)
-	now := time.Now().Add(1 * time.Hour) // expires_at no futuro
-	var c1 string
+	var cartTotalCents int64
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO carts (event_id, platform_user_id, platform_handle, token, short_id,
-		   status, payment_status, expires_at)
-		 VALUES ($1, 'u-s1', '@handle1', 'tok-st1', 88101, 'active', 'pending', $2) RETURNING id::text`,
-		eventID, now,
-	).Scan(&c1); err != nil {
-		t.Fatalf("cart1: %v", err)
+		`SELECT cart_product_total_cents($1)`, unpaidCartID,
+	).Scan(&cartTotalCents); err != nil {
+		t.Fatalf("G3 query: %v", err)
 	}
-	addItem(t, c1, prodID, 3, 2000) // 6000
-
-	// Cart ativo sem handle (não-recuperável)
-	var c2 string
-	if err := testPool.QueryRow(ctx,
-		`INSERT INTO carts (event_id, platform_user_id, platform_handle, token, short_id,
-		   status, payment_status, expires_at)
-		 VALUES ($1, '', '', 'tok-st2', 88102, 'active', 'pending', $2) RETURNING id::text`,
-		eventID, now,
-	).Scan(&c2); err != nil {
-		t.Fatalf("cart2: %v", err)
+	if got := byID[unpaidCartID].TotalAmount; got != cartTotalCents {
+		t.Errorf("G3: cart não pago %s total_amount=%d != cart_product_total_cents=%d",
+			unpaidCartID, got, cartTotalCents)
 	}
-	addItem(t, c2, prodID, 1, 2000) // 2000
-
-	// Cart expirado (não entra em open_carts mas entra no total de Carrinhos)
-	exp := time.Now().Add(-1 * time.Hour)
-	var c3 string
-	if err := testPool.QueryRow(ctx,
-		`INSERT INTO carts (event_id, platform_user_id, platform_handle, token, short_id,
-		   status, payment_status, expires_at)
-		 VALUES ($1, 'u-s3', '@exp3', 'tok-st3', 88103, 'expired', 'pending', $2) RETURNING id::text`,
-		eventID, exp,
-	).Scan(&c3); err != nil {
-		t.Fatalf("cart3: %v", err)
+	if cartTotalCents == 0 {
+		t.Error("G3: o seed deveria dar total > 0 — o teste não está provando nada")
 	}
 
-	cartRepo := cartpkg.NewRepository(testPool)
-	cartSvc := cartpkg.NewService(cartRepo, zap.NewNop())
-	stats, err := cartSvc.GetStats(ctx, storeID)
-	if err != nil {
-		t.Fatalf("GetStats: %v", err)
-	}
+	// ─── G4: primeira compra é atributo de VENDA, não de carrinho aberto ─────
 
-	if stats.OpenCarts != 2 {
-		t.Errorf("open_carts want 2, got %d", stats.OpenCarts)
-	}
-	if stats.OpenValueCents != 6000+2000 {
-		t.Errorf("open_value_cents want 8000, got %d", stats.OpenValueCents)
-	}
-	if stats.AvgTicketCents != 4000 {
-		t.Errorf("avg_ticket_cents want 4000, got %d", stats.AvgTicketCents)
-	}
-	if stats.RecoverableCarts != 1 {
-		t.Errorf("recoverable_carts want 1, got %d", stats.RecoverableCarts)
+	if byID[unpaidCartID].IsFirstPurchase {
+		t.Errorf("G4: cart não pago %s marcado como primeira compra", unpaidCartID)
 	}
 }

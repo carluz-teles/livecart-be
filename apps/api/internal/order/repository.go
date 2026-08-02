@@ -27,14 +27,25 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrdersResult, error) {
 	var result ListOrdersResult
 
-	// Read from `orders` (immutable paid records, Fatia 7).
-	// total_amount comes from o.total_cents — never re-sums cart_items.
-	// is_first_purchase checks the orders table (all rows are paid+).
+	// A lista é ancorada no CART, com a Order como enriquecimento opcional.
+	//
+	// O cutover das Fatias 7-11 ancorou esta query em `orders`, mas a linha em
+	// `orders` só nasce no PAGAMENTO (OnCartPaid). Resultado em campo: pedido
+	// gerado pela live não aparecia em aba nenhuma do painel — e a aba
+	// "Aguardando pagamento" (status=active/checkout + payment=pending) era uma
+	// combinação que a query jamais podia devolver. Ancorar no cart devolve a
+	// promessa das abas sem perder nada: quando a Order existe, ela continua
+	// sendo a fonte dos totais imutáveis e do estado de ERP.
+	//
+	// total_amount: o.total_cents (congelado) para pedido pago; para carrinho em
+	// aberto, a função canônica cart_product_total_cents — nunca soma inline.
+	// is_first_purchase só faz sentido para venda concretizada, então é false
+	// enquanto não há Order.
 	baseQuery := `
 		SELECT
 			c.id,
-			o.short_id,
-			o.event_id,
+			COALESCE(o.short_id, c.short_id) as short_id,
+			c.event_id,
 			c.platform_user_id,
 			c.platform_handle,
 			c.token,
@@ -54,18 +65,19 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 				 ORDER BY lsp.added_at LIMIT 1),
 				'instagram'
 			) as live_platform,
-			COALESCE(o.total_cents, 0) as total_amount,
+			COALESCE(o.total_cents, cart_product_total_cents(c.id), 0) as total_amount,
 			COALESCE(
 				(SELECT SUM(ci.quantity)::INT FROM cart_items ci WHERE ci.cart_id = c.id),
 				0
 			) as total_items,
 			(
-				c.platform_user_id <> ''
+				o.id IS NOT NULL
+				AND c.platform_user_id <> ''
 				AND NOT EXISTS (
 					SELECT 1
 					FROM orders o2
 					JOIN carts c2 ON c2.id = o2.cart_id
-					WHERE o2.store_id = o.store_id
+					WHERE o2.store_id = e.store_id
 					  AND c2.platform_user_id = c.platform_user_id
 					  AND o2.id <> o.id
 					  AND o2.created_at < o.created_at
@@ -83,20 +95,20 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 				AND c.payment_status NOT IN ('cancelled', 'refunded')
 			) as has_shipping,
 			COALESCE(op.erp_finalisation_status, '')
-		FROM orders o
-		JOIN carts c ON c.id = o.cart_id
-		JOIN live_events e ON e.id = o.event_id
+		FROM carts c
+		JOIN live_events e ON e.id = c.event_id
+		LEFT JOIN orders o ON o.cart_id = c.id
 		LEFT JOIN order_payments op ON op.order_id = o.id
-		WHERE o.store_id = $1
+		WHERE e.store_id = $1
 	`
 
 	countQuery := `
 		SELECT COUNT(*)
-		FROM orders o
-		JOIN carts c ON c.id = o.cart_id
-		JOIN live_events e ON e.id = o.event_id
+		FROM carts c
+		JOIN live_events e ON e.id = c.event_id
+		LEFT JOIN orders o ON o.cart_id = c.id
 		LEFT JOIN order_payments op ON op.order_id = o.id
-		WHERE o.store_id = $1
+		WHERE e.store_id = $1
 	`
 
 	conditions, args := buildOrderListConditions(params.StoreID, params.Search, params.Filters)
@@ -115,13 +127,15 @@ func (r *Repository) List(ctx context.Context, params ListOrdersParams) (ListOrd
 	}
 
 	// Sorting
-	sortColumn := "o.created_at"
+	sortColumn := "c.created_at"
+	// Tudo ancorado no cart: o.created_at é NULL para carrinho não pago e jogaria
+	// essas linhas para uma ponta arbitrária da ordenação.
 	allowedSortColumns := map[string]string{
-		"created_at":     "o.created_at",
+		"created_at":     "c.created_at",
 		"status":         "c.status",
 		"payment_status": "c.payment_status",
 		"total_amount":   "total_amount",
-		"short_id":       "o.short_id",
+		"short_id":       "COALESCE(o.short_id, c.short_id)",
 	}
 	if col, ok := allowedSortColumns[params.Sorting.SortBy]; ok {
 		sortColumn = col
@@ -269,7 +283,9 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 			COALESCE(op.invoice_id, ''),
 			COALESCE(op.invoice_key, ''),
 			COALESCE(op.invoice_status, ''),
-			op.invoice_emitted_at
+			op.invoice_emitted_at,
+
+			c.cancellation_reverted_at
 		FROM carts c
 		JOIN live_events e ON e.id = c.event_id
 		JOIN stores s      ON s.id = e.store_id
@@ -340,6 +356,8 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 		&row.ERPInvoiceKey,
 		&row.ERPInvoiceStatus,
 		&row.ERPInvoiceEmittedAt,
+
+		&row.CancellationRevertedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -612,24 +630,30 @@ func (r *Repository) GetCustomerComments(ctx context.Context, eventID string, pl
 }
 
 func (r *Repository) GetStats(ctx context.Context, storeID string, search string, filters OrderFilters) (*OrderStatsOutput, error) {
-	// Revenue and ticket use o.total_cents (immutable) — never re-sums cart_items.
+	// Mesma âncora da lista (cart), para os KPIs baterem com as linhas mostradas:
+	// os contadores falavam de "pedidos" que a lista não conseguia listar.
+	// Faturamento e ticket continuam vindo de o.total_cents (congelado no
+	// pagamento) — carrinho em aberto não é receita e entra como 0 na soma.
 	query := `
 		SELECT
 			COUNT(*)::INT as total_orders,
 			COUNT(*) FILTER (WHERE c.status = 'active')::INT as pending_orders,
 			COALESCE(SUM(o.total_cents), 0)::BIGINT as total_revenue,
+			-- Ticket médio divide pelos pedidos que TÊM receita; incluir carrinho
+			-- em aberto no denominador afundaria o número sem significado nenhum.
 			COALESCE(
 				CASE
-					WHEN COUNT(*) > 0 THEN SUM(o.total_cents) / COUNT(*)
+					WHEN COUNT(*) FILTER (WHERE o.id IS NOT NULL) > 0
+						THEN SUM(o.total_cents) / COUNT(*) FILTER (WHERE o.id IS NOT NULL)
 					ELSE 0
 				END,
 				0
 			)::BIGINT as avg_ticket
-		FROM orders o
-		JOIN carts c ON c.id = o.cart_id
-		JOIN live_events e ON e.id = o.event_id
+		FROM carts c
+		JOIN live_events e ON e.id = c.event_id
+		LEFT JOIN orders o ON o.cart_id = c.id
 		LEFT JOIN order_payments op ON op.order_id = o.id
-		WHERE o.store_id = $1
+		WHERE e.store_id = $1
 	`
 
 	conditions, args := buildOrderListConditions(storeID, search, filters)

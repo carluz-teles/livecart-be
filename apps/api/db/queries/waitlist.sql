@@ -91,6 +91,17 @@ UPDATE waitlist_items
 SET status = 'cancelled', cancelled_at = now()
 WHERE id = $1 AND cart_id = $2 AND status IN ('waiting','notified');
 
+-- name: CancelWaitlistItemsByCart :many
+-- Mata a fila do cart inteiro. Usado pelo cancelamento manual do lojista: o
+-- carrinho deixa de existir para o comprador, então mantê-lo na fila só geraria
+-- promoção (e DM) para um checkout morto — o bug G1 da auditoria, agora fechado
+-- na origem. Só toca itens ainda vivos; fulfilled/expired/cancelled ficam como
+-- estão, o que torna a chamada idempotente.
+UPDATE waitlist_items
+SET status = 'cancelled', cancelled_at = now()
+WHERE cart_id = $1 AND status IN ('waiting', 'notified')
+RETURNING *;
+
 -- name: GetWaitlistItemForCart :one
 SELECT * FROM waitlist_items
 WHERE id = $1 AND cart_id = $2;

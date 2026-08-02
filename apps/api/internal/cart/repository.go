@@ -17,6 +17,9 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 }
 
 // List returns carts that do NOT have a corresponding order (non-paid carts).
+// Carts cancelados ficam de fora: a lista existe para recuperação de carrinho e
+// um carrinho que a loja cancelou (ou que morreu com o bloqueio do comprador)
+// não é recuperável — o estoque já voltou e o link não aceita pagamento.
 // cart_product_total_cents is the canonical GMV function — never re-sums items inline.
 func (r *Repository) List(ctx context.Context, params ListCartsParams) (ListCartsResult, error) {
 	var result ListCartsResult
@@ -36,6 +39,7 @@ func (r *Repository) List(ctx context.Context, params ListCartsParams) (ListCart
 		JOIN live_events e ON e.id = c.event_id
 		WHERE e.store_id = $1
 		  AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.cart_id = c.id)
+		  AND c.status <> 'cancelled'
 	`
 
 	countQuery := `
@@ -44,6 +48,7 @@ func (r *Repository) List(ctx context.Context, params ListCartsParams) (ListCart
 		JOIN live_events e ON e.id = c.event_id
 		WHERE e.store_id = $1
 		  AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.cart_id = c.id)
+		  AND c.status <> 'cancelled'
 	`
 
 	conditions, args := buildCartListConditions(params.StoreID, params.Search, params.Filters)
@@ -111,7 +116,8 @@ func (r *Repository) List(ctx context.Context, params ListCartsParams) (ListCart
 }
 
 // GetStats returns aggregate metrics for non-paid carts.
-// "open" = non-paid AND not yet expired (expires_at > now() OR expires_at IS NULL).
+// "open" = non-paid AND not cancelled AND not yet expired (expires_at > now()
+// OR expires_at IS NULL).
 // Uses cart_product_total_cents for all value computations — never re-sums items inline.
 func (r *Repository) GetStats(ctx context.Context, storeID string) (*CartStatsRow, error) {
 	const q = `
@@ -138,6 +144,7 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (*CartStatsRo
 		JOIN live_events e ON e.id = c.event_id
 		WHERE e.store_id = $1
 		  AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.cart_id = c.id)
+		  AND c.status <> 'cancelled'
 	`
 
 	var row CartStatsRow

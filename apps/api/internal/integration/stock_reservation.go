@@ -27,8 +27,11 @@ const (
 	StockOpWaitlistPromote = erp.StockOpWaitlistPromote
 	StockOpCartExpiry      = erp.StockOpCartExpiry
 	StockOpCancelBlocked   = erp.StockOpCancelBlocked
-	StockOpWaitlistCancel  = erp.StockOpWaitlistCancel
-	StockOpWaitlistExpire  = erp.StockOpWaitlistExpire
+	// Cancelamento manual do carrinho pelo lojista (LIV-84), aliasado do erp.
+	StockOpCartCancelled  = erp.StockOpCartCancelled
+	StockOpCancelReverted = erp.StockOpCancelReverted
+	StockOpWaitlistCancel = erp.StockOpWaitlistCancel
+	StockOpWaitlistExpire = erp.StockOpWaitlistExpire
 )
 
 // NewStockReservations builds the erp stock manager over the Repository. Kept as

@@ -63,6 +63,15 @@ type CartPaymentGateway interface {
 	// webhook — the guard that serializes this consumer against ExpireCart.
 	UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) error
 
+	// RestoreCancelledCartAsPaid handles the inverse race (LIV-84): a MANUAL
+	// store cancellation that a payment then won. When UpdateCartPaymentStatus
+	// rejects a 'paid' write with ErrCartNotPayable, this restores the cancelled
+	// cart to paid in a single tx (retomando o estoque devolvido) so the normal
+	// fan-out runs — o dinheiro manda. Returns restored=false when the cart is
+	// not a store-cancelled cart pending payment (the caller then does the benign
+	// ErrCartNotPayable skip).
+	RestoreCancelledCartAsPaid(ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (restored bool, err error)
+
 	// CartGMVCents returns the pure item sum (excludes shipping and coupon) for
 	// the cart — the single source of truth. A malformed cart id yields (0, nil);
 	// a query failure yields (0, err) so the caller can warn and emit gmv=0.
@@ -184,21 +193,50 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 	// Update cart payment status and payment method
 	if err := s.gateway.UpdateCartPaymentStatus(ctx, status.ExternalReference, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod); err != nil {
 		if errors.Is(err, ErrCartNotPayable) {
-			// O cart expirou/cancelou entre a cobrança e este webhook. Não
-			// finalizamos (não marca pago, não toca ERP). Se dinheiro entrou
-			// mesmo, fica para a reconciliação (E6). ACK benigno.
-			logger.From(ctx, s.logger).Info("payment webhook for cart no longer payable (expired/cancelled), skipping finalization",
+			// Corrida cancelamento × pagamento, lado inverso (LIV-84): o lojista
+			// cancelou o carrinho e o pagamento foi aprovado assim mesmo (PIX pago
+			// com o QR já aberto, cartão em análise, webhook atrasado). Regra de
+			// negócio: **o pagamento vence** — o pedido volta e consta como PAGO.
+			// Só vale para o cancelamento MANUAL do lojista: expirado ou bloqueado
+			// por handle não são restaurados (o guard da query decide).
+			restored := false
+			if cartPaymentStatus == "paid" {
+				var restoreErr error
+				restored, restoreErr = s.gateway.RestoreCancelledCartAsPaid(ctx,
+					status.ExternalReference, input.StoreID, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod)
+				if restoreErr != nil {
+					logger.From(ctx, s.logger).Error("failed to restore store-cancelled cart as paid",
+						zap.String("cart_id", status.ExternalReference), zap.Error(restoreErr))
+					return fmt.Errorf("restoring cancelled cart as paid: %w", restoreErr)
+				}
+			}
+			if !restored {
+				// O cart expirou/cancelou entre a cobrança e este webhook e não é
+				// um cancelamento de lojista restaurável. Não finalizamos (não marca
+				// pago, não toca ERP). Se dinheiro entrou mesmo, fica para a
+				// reconciliação (E6). ACK benigno.
+				logger.From(ctx, s.logger).Info("payment webhook for cart no longer payable (expired/cancelled), skipping finalization",
+					zap.String("cart_id", status.ExternalReference),
+					zap.String("payment_status", cartPaymentStatus),
+				)
+				return nil
+			}
+			// Restaurado: o fluxo segue idêntico ao de um pagamento normal — emite
+			// cart.paid e o fan-out (Order, ERP, e-mail, cupom, billing) roda como se
+			// o cancelamento nunca tivesse acontecido. As colunas de ERP foram
+			// zeradas no restore, então a finalização cria um pedido de venda limpo.
+			logger.From(ctx, s.logger).Warn("store-cancelled cart was PAID — cancellation reverted, order is paid",
+				zap.String("cart_id", status.ExternalReference),
+				zap.String("payment_id", status.PaymentID),
+			)
+		} else {
+			logger.From(ctx, s.logger).Error("failed to update cart payment status",
 				zap.String("cart_id", status.ExternalReference),
 				zap.String("payment_status", cartPaymentStatus),
+				zap.Error(err),
 			)
-			return nil
+			return fmt.Errorf("updating cart payment status: %w", err)
 		}
-		logger.From(ctx, s.logger).Error("failed to update cart payment status",
-			zap.String("cart_id", status.ExternalReference),
-			zap.String("payment_status", cartPaymentStatus),
-			zap.Error(err),
-		)
-		return fmt.Errorf("updating cart payment status: %w", err)
 	}
 
 	logger.From(ctx, s.logger).Info("cart payment status updated",

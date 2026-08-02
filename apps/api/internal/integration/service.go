@@ -3743,6 +3743,14 @@ func (s *Service) ResolvePaymentProvider(ctx context.Context, storeID, provider 
 	return paymentProvider, integration.ID, nil
 }
 
+// RestoreCancelledCartAsPaid satisfies payment.CartPaymentGateway (LIV-84 inverse
+// race): delega ao repo, que numa única tx restaura o cart cancelado pelo lojista
+// para pago e retoma o estoque. Mesmo repo/pool do resto do consumer.
+func (s *Service) RestoreCancelledCartAsPaid(ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (bool, error) {
+	return s.repo.RestoreCancelledCartAsPaid(ctx, cartID, storeID, paymentStatus, paymentID, paidAt, paymentMethod)
+}
+
+
 // CartPaymentStatus returns the cart's current payment status ("" when the cart
 // no longer exists), swallowing the same not-found path GetCartByID does.
 func (s *Service) CartPaymentStatus(ctx context.Context, cartID string) (string, error) {
