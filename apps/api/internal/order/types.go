@@ -12,7 +12,11 @@ import (
 type OrderFilters struct {
 	Status        []string `query:"status"`        // active, checkout, completed, expired
 	PaymentStatus []string `query:"paymentStatus"` // pending, paid, failed, refunded
-	LiveSessionID *string  `query:"liveSessionId"`
+	// EventID filtra por CAMPANHA. O campo se chamava LiveSessionID e o filtro
+	// SQL sempre foi `c.event_id = ?` — nome que ativamente engana quem for
+	// implementar: quem lesse "session" passaria um id de live_sessions e
+	// receberia zero linhas, sem erro. RN-19.
+	EventID *string `query:"eventId"`
 	DateFrom      *string  `query:"dateFrom"`
 	DateTo        *string  `query:"dateTo"`
 
@@ -140,12 +144,18 @@ type OrderResponse struct {
 	ID             string              `json:"id"`
 	// Per-store sequential order number, starts at 1000 in each store. UI shows
 	// "#{shortId}" to merchants and customers — the UUID stays as the URL key.
-	ShortID        int                 `json:"shortId"`
-	LiveSessionID  string              `json:"liveSessionId"`
-	LiveTitle      string              `json:"liveTitle"`
-	LivePlatform   string              `json:"livePlatform"`
-	CustomerHandle string              `json:"customerHandle"`
-	CustomerID     string              `json:"customerId"`
+	ShortID int `json:"shortId"`
+	// EventID é o id da CAMPANHA. liveSessionId sai com o MESMO valor por
+	// compatibilidade com o frontend atual — ele nunca carregou um id de
+	// sessão, sempre foi event_id (RN-19). EventTitle idem: é o título do
+	// evento, não da transmissão.
+	EventID        string `json:"eventId"`
+	EventTitle     string `json:"eventTitle"`
+	LiveSessionID  string `json:"liveSessionId"` // Deprecated: use eventId.
+	LiveTitle      string `json:"liveTitle"`     // Deprecated: use eventTitle.
+	LivePlatform   string `json:"livePlatform"`
+	CustomerHandle string `json:"customerHandle"`
+	CustomerID     string `json:"customerId"`
 	// Customer name/email captured at checkout. Empty until the buyer fills the
 	// checkout form.
 	CustomerName  string `json:"customerName"`
@@ -384,8 +394,10 @@ func NewOrderResponse(o OrderOutput) OrderResponse {
 	return OrderResponse{
 		ID:                    o.ID,
 		ShortID:               o.ShortID,
-		LiveSessionID:         o.LiveSessionID,
-		LiveTitle:             o.LiveTitle,
+		EventID:               o.EventID,
+		EventTitle:            o.EventTitle,
+		LiveSessionID:         o.EventID,
+		LiveTitle:             o.EventTitle,
 		LivePlatform:          o.LivePlatform,
 		CustomerHandle:        o.CustomerHandle,
 		CustomerID:            o.CustomerID,
@@ -621,8 +633,12 @@ type ListOrdersOutput struct {
 type OrderOutput struct {
 	ID                    string
 	ShortID               int
-	LiveSessionID         string
-	LiveTitle             string
+	// EventID/EventTitle são da CAMPANHA. O campo interno se chamava
+	// LiveSessionID e sempre carregou row.EventID — o comentário "keeping
+	// response field name for backwards compatibility" no service justificava o
+	// nome do JSON, mas o campo Go também tinha herdado a mentira (RN-19).
+	EventID    string
+	EventTitle string
 	LivePlatform          string
 	CustomerHandle        string
 	CustomerID            string

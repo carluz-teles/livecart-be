@@ -5,7 +5,10 @@ type DashboardStatsResponse struct {
 	TotalRevenue   int64 `json:"totalRevenue"`
 	TotalOrders    int   `json:"totalOrders"`
 	ActiveProducts int   `json:"activeProducts"`
-	TotalLives     int   `json:"totalLives"`
+	// RN-19: o contador é de EVENTOS. totalLives sai junto, com o mesmo valor,
+	// até o frontend parar de lê-lo.
+	TotalEvents int `json:"totalEvents"`
+	TotalLives  int `json:"totalLives"` // Deprecated: use totalEvents.
 }
 
 type MonthlyRevenueResponse struct {

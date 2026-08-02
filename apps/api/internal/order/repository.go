@@ -763,9 +763,9 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 		conditions = append(conditions, fmt.Sprintf("c.payment_status IN (%s)", strings.Join(placeholders, ",")))
 	}
 
-	if filters.LiveSessionID != nil && *filters.LiveSessionID != "" {
+	if filters.EventID != nil && *filters.EventID != "" {
 		conditions = append(conditions, fmt.Sprintf("c.event_id = $%d", argIndex))
-		args = append(args, *filters.LiveSessionID)
+		args = append(args, *filters.EventID)
 		argIndex++
 	}
 

@@ -186,8 +186,8 @@ func (s *Service) List(ctx context.Context, input ListOrdersInput) (ListOrdersOu
 		orders[i] = OrderOutput{
 			ID:                    row.ID,
 			ShortID:               row.ShortID,
-			LiveSessionID:         row.EventID, // Now using EventID but keeping response field name for backwards compatibility
-			LiveTitle:             row.LiveTitle,
+			EventID:               row.EventID,
+			EventTitle:            row.LiveTitle,
 			LivePlatform:          row.LivePlatform,
 			CustomerHandle:        row.PlatformHandle,
 			CustomerID:            row.PlatformUserID,
@@ -265,8 +265,8 @@ func (s *Service) GetByID(ctx context.Context, id string, storeID string) (*Orde
 	return &OrderOutput{
 		ID:                    row.ID,
 		ShortID:               row.ShortID,
-		LiveSessionID:         row.EventID, // Now using EventID but keeping response field name for backwards compatibility
-		LiveTitle:             row.LiveTitle,
+		EventID:               row.EventID,
+		EventTitle:            row.LiveTitle,
 		LivePlatform:          row.LivePlatform,
 		CustomerHandle:        row.PlatformHandle,
 		CustomerID:            row.PlatformUserID,

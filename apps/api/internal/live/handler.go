@@ -36,8 +36,21 @@ func parseTimestampField(raw *string, field string) (*time.Time, error) {
 	return &t, nil
 }
 
+// RegisterRoutes monta o domínio em DOIS prefixos: /events, que é o
+// vocabulário oficial (RN-19 — "live" significando a campanha é o nome que
+// engana), e /lives, mantido porque o frontend inteiro ainda o chama e uma
+// troca de rota é um deploy acoplado entre dois repositórios.
+//
+// São os MESMOS handlers, não uma cópia: registrar duas árvores independentes
+// criaria dois lugares para corrigir cada rota nova, e a que ninguém lembrasse
+// de atualizar responderia 404 só num dos prefixos.
 func (h *Handler) RegisterRoutes(router fiber.Router) {
-	g := router.Group("/lives")
+	h.registerUnder(router, "/events")
+	h.registerUnder(router, "/lives")
+}
+
+func (h *Handler) registerUnder(router fiber.Router, prefix string) {
+	g := router.Group(prefix)
 	g.Get("/", h.List)
 	g.Get("/stats", h.GetStats)
 	g.Post("/", h.Create)
@@ -448,7 +461,7 @@ func (h *Handler) End(c *fiber.Ctx) error {
 
 // GetStats godoc
 // @Summary      Get live statistics
-// @Description  Returns aggregated statistics for all live events in the store
+// @Description  Returns aggregated statistics for all events in the store
 // @Tags         lives
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
@@ -464,6 +477,8 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, LiveStatsResponse{
+		TotalEvents:  output.TotalLives,
+		ActiveEvents: output.ActiveLives,
 		TotalLives:   output.TotalLives,
 		ActiveLives:  output.ActiveLives,
 		TotalOrders:  output.TotalOrders,

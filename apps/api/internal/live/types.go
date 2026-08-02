@@ -631,9 +631,18 @@ type ListLivesResponse struct {
 	Pagination query.PaginationResponse `json:"pagination"`
 }
 
+// LiveStatsResponse são os contadores do topo de /events.
+//
+// RN-19: totalLives/activeLives sempre contaram EVENTOS, não lives — o rótulo
+// mentia desde antes do guarda-chuva, e agora que uma campanha tem live, post,
+// reel e story ao mesmo tempo ele mente de forma visível. Os nomes novos entram
+// ao lado dos antigos, com o MESMO valor, para que o frontend possa migrar sem
+// deploy acoplado; os antigos saem quando ninguém mais os ler.
 type LiveStatsResponse struct {
-	TotalLives   int   `json:"totalLives"`
-	ActiveLives  int   `json:"activeLives"`
+	TotalEvents  int   `json:"totalEvents"`
+	ActiveEvents int   `json:"activeEvents"`
+	TotalLives   int   `json:"totalLives"`  // Deprecated: use totalEvents.
+	ActiveLives  int   `json:"activeLives"` // Deprecated: use activeEvents.
 	TotalOrders  int   `json:"totalOrders"`
 	TotalRevenue int64 `json:"totalRevenue"`
 }

@@ -42,7 +42,8 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Param        sortOrder query string false "Sort order (asc, desc)" default(desc)
 // @Param        status query []string false "Filter by status"
 // @Param        paymentStatus query []string false "Filter by payment status"
-// @Param        liveSessionId query string false "Filter by live session ID"
+// @Param        eventId query string false "Filter by event (campaign) ID"
+// @Param        liveSessionId query string false "Deprecated: alias of eventId"
 // @Success      200 {object} httpx.Envelope{data=ListOrdersResponse}
 // @Router       /api/v1/stores/{storeId}/orders [get]
 // @Security     BearerAuth
@@ -329,8 +330,13 @@ func parseOrderFilters(c *fiber.Ctx) OrderFilters {
 		}
 	}
 
-	if liveSessionID := c.Query("liveSessionId"); liveSessionID != "" {
-		filters.LiveSessionID = &liveSessionID
+	// eventId é o nome oficial; liveSessionId continua aceito porque é o que o
+	// frontend manda hoje. Os dois sempre filtraram a MESMA coluna
+	// (carts.event_id) — o nome antigo só descrevia errado (RN-19).
+	if eventID := c.Query("eventId"); eventID != "" {
+		filters.EventID = &eventID
+	} else if legacy := c.Query("liveSessionId"); legacy != "" {
+		filters.EventID = &legacy
 	}
 
 	if dateFrom := c.Query("dateFrom"); dateFrom != "" {
