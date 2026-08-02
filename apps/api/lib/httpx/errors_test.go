@@ -400,3 +400,72 @@ func TestOrderDomainCodes_WireUpper(t *testing.T) {
 		})
 	}
 }
+
+// TestLiveErpDomainCodes_WireUpper — D1e-1: the live + erp domain throws migrated
+// from httpx.Err{BadRequest,Unprocessable}(msg) to DomainError(status, Code, msg),
+// preserving each site's EXACT status (400 bad request / 422 unprocessable) and
+// human message byte-for-byte — now also carrying the typed UPPER_SNAKE reason
+// (Category=DOMAIN). This slice spans two statuses, so each row asserts its own.
+// Each row mirrors a real throw site verbatim: internal/live/service.go,
+// internal/erp/{finalisation,stock_service,invoice}.go. The "estado inválido para
+// retry: <status>" site renders row.Status into the message; the row uses one
+// concrete rendering ("estado inválido para retry: pending") to assert the
+// concatenation stays intact. LIVE_EVENT_NOT_ACTIVE is one code reused by two
+// sites (set-active-product / change-processing) with distinct messages, so it
+// appears in two rows. Out of scope (unchanged): the ErrNotFound sites and the
+// repository/infrastructure DB errors (D1e-2).
+func TestLiveErpDomainCodes_WireUpper(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		code       Code
+		msg        string
+		wantReason string
+	}{
+		// 400 bad request — live (internal/live/service.go)
+		{"live media required", 400, CodeLiveMediaRequired, "mediaId is required", "LIVE_MEDIA_REQUIRED"},
+		{"live product required", 400, CodeLiveProductRequired, "select at least one product for the promotion", "LIVE_PRODUCT_REQUIRED"},
+		{"live event not active (set active product)", 400, CodeLiveEventNotActive, "can only set active product on active events", "LIVE_EVENT_NOT_ACTIVE"},
+		{"live event not active (change processing)", 400, CodeLiveEventNotActive, "can only change processing state on active events", "LIVE_EVENT_NOT_ACTIVE"},
+		// 422 unprocessable — instagram messaging (internal/live/service.go)
+		{"ig notify not configured", 422, CodeIgNotifyNotConfigured, "instagram notifications are not configured", "IG_NOTIFY_NOT_CONFIGURED"},
+		{"cart no ig recipient", 422, CodeCartNoIgRecipient, "cart has no Instagram recipient", "CART_NO_IG_RECIPIENT"},
+		{"cart no items to send", 422, CodeCartNoItemsToSend, "cart has no items to send", "CART_NO_ITEMS_TO_SEND"},
+		{"ig message window closed", 422, CodeIgMessageWindowClosed, "O Instagram só permite enviar a mensagem se o comprador comentou recentemente ou mandou uma DM para a loja. Peça para o comprador comentar de novo na live (ou enviar uma DM) e clique em reenviar em seguida.", "IG_MESSAGE_WINDOW_CLOSED"},
+		{"ig message failed", 422, CodeIgMessageFailed, "failed to send Instagram message", "IG_MESSAGE_FAILED"},
+		// 422 unprocessable — erp (internal/erp/{finalisation,stock_service,invoice}.go)
+		{"erp finalisation in progress", 422, CodeErpFinalisationInProgress, "aguarde a finalização inicial concluir antes de tentar de novo", "ERP_FINALISATION_IN_PROGRESS"},
+		{"erp retry invalid state", 422, CodeErpRetryInvalidState, "estado inválido para retry: pending", "ERP_RETRY_INVALID_STATE"},
+		{"erp retry no snapshot", 422, CodeErpRetryNoSnapshot, "snapshot de pagamento ausente — retry não disponível", "ERP_RETRY_NO_SNAPSHOT"},
+		{"stock insufficient", 422, CodeStockInsufficient, "estoque insuficiente para esse aumento", "STOCK_INSUFFICIENT"},
+		{"erp not active", 422, CodeErpNotActive, "ERP integration not active for store", "ERP_NOT_ACTIVE"},
+		{"erp no invoice support", 422, CodeErpNoInvoiceSupport, "ERP provider does not expose invoice operations", "ERP_NO_INVOICE_SUPPORT"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := DomainError(tt.status, tt.code, tt.msg)
+
+			// errors.As + se: DOMAIN category, exact status, exact message, UPPER reason.
+			var se *ServiceError
+			if !errors.As(err, &se) {
+				t.Fatalf("DomainError must produce a *ServiceError")
+			}
+			if se.Code != tt.status || se.Message != tt.msg {
+				t.Fatalf("status/message wrong: %+v", se)
+			}
+			if se.Reason != tt.wantReason {
+				t.Fatalf("reason: want %q, got %q", tt.wantReason, se.Reason)
+			}
+			if se.Category != CategoryDomain {
+				t.Fatalf("category: want DOMAIN, got %q", se.Category)
+			}
+
+			// Wire: exact status + exact message + UPPER reason on the Envelope.
+			code, body := do(t, appReturning(err), "GET", "/x", "")
+			if code != tt.status || body["error"] != tt.msg || body["reason"] != tt.wantReason {
+				t.Fatalf("wire: got %d %v", code, body)
+			}
+		})
+	}
+}

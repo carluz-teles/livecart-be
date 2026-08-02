@@ -210,7 +210,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 	if delta > 0 {
 		if err := s.repo.DecrementProductStock(ctx, productID, delta); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return "", httpx.ErrUnprocessable("estoque insuficiente para esse aumento")
+				return "", httpx.DomainError(422, httpx.CodeStockInsufficient, "estoque insuficiente para esse aumento")
 			}
 			return "", fmt.Errorf("decrementing local stock: %w", err)
 		}

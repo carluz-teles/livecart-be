@@ -250,10 +250,10 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 // post metadata, and whitelists the selected products for the promotion.
 func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (CreateLiveOutput, error) {
 	if input.MediaID == "" {
-		return CreateLiveOutput{}, httpx.ErrBadRequest("mediaId is required")
+		return CreateLiveOutput{}, httpx.DomainError(400, httpx.CodeLiveMediaRequired, "mediaId is required")
 	}
 	if len(input.ProductIDs) == 0 {
-		return CreateLiveOutput{}, httpx.ErrBadRequest("select at least one product for the promotion")
+		return CreateLiveOutput{}, httpx.DomainError(400, httpx.CodeLiveProductRequired, "select at least one product for the promotion")
 	}
 
 	platform := "instagram"
@@ -1211,7 +1211,7 @@ func (s *Service) ListCartsWithTotalByEvent(ctx context.Context, eventID, storeI
 // event detail UI (for example, when the buyer missed the original message).
 func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, storeID string) (CartWithTotalOutput, error) {
 	if s.notifier == nil {
-		return CartWithTotalOutput{}, httpx.ErrUnprocessable("instagram notifications are not configured")
+		return CartWithTotalOutput{}, httpx.DomainError(422, httpx.CodeIgNotifyNotConfigured, "instagram notifications are not configured")
 	}
 
 	// Verify event exists and belongs to store (authorization).
@@ -1250,10 +1250,10 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 		return CartWithTotalOutput{}, httpx.ErrNotFound("cart not found")
 	}
 	if cart.PlatformUserID == "" {
-		return CartWithTotalOutput{}, httpx.ErrUnprocessable("cart has no Instagram recipient")
+		return CartWithTotalOutput{}, httpx.DomainError(422, httpx.CodeCartNoIgRecipient, "cart has no Instagram recipient")
 	}
 	if cart.TotalItems <= 0 {
-		return CartWithTotalOutput{}, httpx.ErrUnprocessable("cart has no items to send")
+		return CartWithTotalOutput{}, httpx.DomainError(422, httpx.CodeCartNoItemsToSend, "cart has no items to send")
 	}
 
 	// Prefer delivering via a private reply to the buyer's last comment (7-day
@@ -1299,10 +1299,10 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 		// Outside-the-window rejection (IG error 2534022): tell the merchant the
 		// concrete fix instead of a generic failure.
 		if strings.Contains(err.Error(), "2534022") {
-			return CartWithTotalOutput{}, httpx.ErrUnprocessable(
+			return CartWithTotalOutput{}, httpx.DomainError(422, httpx.CodeIgMessageWindowClosed,
 				"O Instagram só permite enviar a mensagem se o comprador comentou recentemente ou mandou uma DM para a loja. Peça para o comprador comentar de novo na live (ou enviar uma DM) e clique em reenviar em seguida.")
 		}
-		return CartWithTotalOutput{}, httpx.ErrUnprocessable("failed to send Instagram message")
+		return CartWithTotalOutput{}, httpx.DomainError(422, httpx.CodeIgMessageFailed, "failed to send Instagram message")
 	}
 
 	logger.From(ctx, s.logger).Info("checkout message resent",
@@ -1375,7 +1375,7 @@ func (s *Service) SetActiveProduct(ctx context.Context, eventID, storeID string,
 	}
 
 	if event.Status != "active" {
-		return nil, httpx.ErrBadRequest("can only set active product on active events")
+		return nil, httpx.DomainError(400, httpx.CodeLiveEventNotActive, "can only set active product on active events")
 	}
 
 	// Set or clear active product
@@ -1406,7 +1406,7 @@ func (s *Service) SetProcessingPaused(ctx context.Context, eventID, storeID stri
 	}
 
 	if event.Status != "active" {
-		return nil, httpx.ErrBadRequest("can only change processing state on active events")
+		return nil, httpx.DomainError(400, httpx.CodeLiveEventNotActive, "can only change processing state on active events")
 	}
 
 	_, err = s.repo.SetProcessingPaused(ctx, eventID, storeID, paused)

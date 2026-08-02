@@ -96,7 +96,7 @@ func (s *Service) fetchAndPersistCartInvoice(ctx context.Context, storeID, cartI
 
 	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
 	if err != nil {
-		return nil, httpx.ErrUnprocessable("ERP integration not active for store")
+		return nil, httpx.DomainError(422, httpx.CodeErpNotActive, "ERP integration not active for store")
 	}
 
 	provider, err := s.collab.ResolveProvider(ctx, integration)
@@ -105,7 +105,7 @@ func (s *Service) fetchAndPersistCartInvoice(ctx context.Context, storeID, cartI
 	}
 	invoiceProvider, ok := provider.(providers.ERPInvoiceProvider)
 	if !ok {
-		return nil, httpx.ErrUnprocessable("ERP provider does not expose invoice operations")
+		return nil, httpx.DomainError(422, httpx.CodeErpNoInvoiceSupport, "ERP provider does not expose invoice operations")
 	}
 
 	var (

@@ -367,12 +367,12 @@ func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID stri
 	case "pending":
 		stale := row.LastAttemptAt == nil || time.Since(*row.LastAttemptAt) > 15*time.Minute
 		if row.ExternalOrderID == "" && !stale {
-			return httpx.ErrUnprocessable("aguarde a finalização inicial concluir antes de tentar de novo")
+			return httpx.DomainError(422, httpx.CodeErpFinalisationInProgress, "aguarde a finalização inicial concluir antes de tentar de novo")
 		}
 	case "failed":
 		// proceed
 	default:
-		return httpx.ErrUnprocessable("estado inválido para retry: " + row.Status)
+		return httpx.DomainError(422, httpx.CodeErpRetryInvalidState, "estado inválido para retry: "+row.Status)
 	}
 
 	// Replay the original gateway PaymentStatus snapshot captured on the first
@@ -384,7 +384,7 @@ func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID stri
 			// usam dados de pagamento — dá para terminar sem snapshot.
 			return s.FinalizeCartERPOrder(ctx, cartID, storeID, nil)
 		}
-		return httpx.ErrUnprocessable("snapshot de pagamento ausente — retry não disponível")
+		return httpx.DomainError(422, httpx.CodeErpRetryNoSnapshot, "snapshot de pagamento ausente — retry não disponível")
 	}
 	var status providers.PaymentStatus
 	if err := json.Unmarshal(row.PaymentSnapshot, &status); err != nil {

@@ -74,4 +74,26 @@ const (
 	CodeOrderCheckoutLocked   Code = "ORDER_CHECKOUT_LOCKED"   // order/service.go:550,568 (regenerate on paid/shipped)
 	CodeNfeSyncUnavailable    Code = "NFE_SYNC_UNAVAILABLE"    // order/service.go:126
 	CodeErpRetryUnavailable   Code = "ERP_RETRY_UNAVAILABLE"   // order/service.go:140
+
+	// --- LIVE (internal/live/service.go) ---
+	CodeLiveMediaRequired   Code = "LIVE_MEDIA_REQUIRED"   // live/service.go:253 ("mediaId is required")
+	CodeLiveProductRequired Code = "LIVE_PRODUCT_REQUIRED" // live/service.go:256 ("select at least one product for the promotion")
+	CodeLiveEventNotActive  Code = "LIVE_EVENT_NOT_ACTIVE" // live/service.go:1378,1409 (set active product / change processing on a non-active event)
+
+	// --- INSTAGRAM messaging (internal/live/service.go, ResendCheckoutMessage) ---
+	CodeIgNotifyNotConfigured Code = "IG_NOTIFY_NOT_CONFIGURED" // live/service.go:1214 ("instagram notifications are not configured")
+	CodeCartNoIgRecipient     Code = "CART_NO_IG_RECIPIENT"     // live/service.go:1253 ("cart has no Instagram recipient")
+	CodeCartNoItemsToSend     Code = "CART_NO_ITEMS_TO_SEND"    // live/service.go:1256 ("cart has no items to send")
+	CodeIgMessageWindowClosed Code = "IG_MESSAGE_WINDOW_CLOSED" // live/service.go:1302 (IG error 2534022 — outside the messaging window)
+	CodeIgMessageFailed       Code = "IG_MESSAGE_FAILED"        // live/service.go:1305 ("failed to send Instagram message")
+
+	// --- ERP (internal/erp/{finalisation,invoice}.go) ---
+	CodeErpFinalisationInProgress Code = "ERP_FINALISATION_IN_PROGRESS" // erp/finalisation.go:370 ("aguarde a finalização inicial concluir")
+	CodeErpRetryInvalidState      Code = "ERP_RETRY_INVALID_STATE"      // erp/finalisation.go:375 ("estado inválido para retry: <status>")
+	CodeErpRetryNoSnapshot        Code = "ERP_RETRY_NO_SNAPSHOT"        // erp/finalisation.go:387 ("snapshot de pagamento ausente")
+	CodeErpNotActive              Code = "ERP_NOT_ACTIVE"               // erp/invoice.go:99 ("ERP integration not active for store")
+	CodeErpNoInvoiceSupport       Code = "ERP_NO_INVOICE_SUPPORT"       // erp/invoice.go:108 ("ERP provider does not expose invoice operations")
+
+	// --- STOCK (internal/erp/stock_service.go) ---
+	CodeStockInsufficient Code = "STOCK_INSUFFICIENT" // erp/stock_service.go:213 ("estoque insuficiente para esse aumento")
 )
