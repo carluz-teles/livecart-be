@@ -195,6 +195,23 @@ func TestResolucaoPrefereCampanhaVivaECoerente(t *testing.T) {
 		t.Errorf("sessao veio do evento %s e o evento resolvido foi %s — o comentario ficaria com a sessao de uma campanha e o evento de outra",
 			session.EventID, event.ID)
 	}
+
+	// A TERCEIRA resolução pela mesma chave. É a que roteia "a mídia sumiu do
+	// Instagram" para o End do evento — ou seja, ela decide QUAL campanha vai
+	// ser encerrada, com os carrinhos finalizados e o ERP reconciliado junto.
+	// Elegendo a linha errada, o reuso de mídia encerraria a campanha VIVA
+	// porque uma publicação antiga foi apagada.
+	timed, err := testRepo.GetActiveTimedEventByMediaID(ctx, mediaID)
+	if err != nil || timed == nil {
+		t.Fatalf("GetActiveTimedEventByMediaID: %v (ref %v)", err, timed)
+	}
+	if timed.EventID != nova.eventID {
+		t.Errorf("a resolução de mídia apagada elegeu %s; as outras duas elegeram %s — encerraria a campanha errada",
+			timed.EventID, nova.eventID)
+	}
+	if timed.StoreID != nova.storeID {
+		t.Errorf("store_id %s nao e o da campanha resolvida (%s)", timed.StoreID, nova.storeID)
+	}
 }
 
 // webhook_active continua sendo o desligamento do polling — por MÍDIA.

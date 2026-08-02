@@ -191,6 +191,7 @@ JOIN live_session_platforms lsp ON lsp.session_id = ls.id
 WHERE lsp.platform_live_id = $1
   AND e.status <> 'ended'
   AND ls.type IN ('post', 'reel', 'story')
+ORDER BY (lsp.released_at IS NULL) DESC, lsp.added_at DESC, lsp.id DESC
 LIMIT 1
 `
 
@@ -208,6 +209,16 @@ type GetActiveTimedEventByMediaIDRow struct {
 // que o polling enxerga evento agendado, a mídia apagada de um evento agendado
 // também precisa parar o loop — senão ele martela um media id morto a cada 20s
 // até a data de início chegar.
+//
+// ⚠️ TERCEIRA resolução pela mesma chave (as outras são GetEventByPlatformLiveID
+// e GetSessionByPlatformLiveID) e a única que estava fora da regra combinada.
+// Ela elegia a linha por e.status <> 'ended', que só equivale a
+// lsp.released_at IS NULL por causa do trigger da 000114 — um invariante a DUAS
+// tabelas de distância. Enquanto o trigger valer, as duas regras concordam; o
+// problema é que a concordância não está escrita em lugar nenhum, e a nota das
+// outras duas exige ordenação byte a byte idêntica. Ordenar pelas MESMAS
+// colunas torna o desempate local: as três elegem a mesma linha por construção,
+// e não por um efeito colateral em outra tabela.
 func (q *Queries) GetActiveTimedEventByMediaID(ctx context.Context, platformLiveID string) (GetActiveTimedEventByMediaIDRow, error) {
 	row := q.db.QueryRow(ctx, getActiveTimedEventByMediaID, platformLiveID)
 	var i GetActiveTimedEventByMediaIDRow
