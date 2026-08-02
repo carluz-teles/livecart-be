@@ -187,6 +187,15 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 			}
 		}
 
+		if input.WaitlistNotifiedTTLMinutes != nil {
+			if err := s.repo.SetWaitlistNotifiedTTLMinutes(ctx, event.ID, input.StoreID, *input.WaitlistNotifiedTTLMinutes); err != nil {
+				logger.From(ctx, s.logger).Warn("failed to set waitlist_notified_ttl_minutes on create",
+					zap.String("event_id", event.ID),
+					zap.Error(err),
+				)
+			}
+		}
+
 		if err := s.applyEventWindow(ctx, event.ID, input.StoreID, EventWindowUpdate{
 			SetStartsAt: true, StartsAt: startsAt,
 			SetEndsAt: true, EndsAt: input.EndsAt,
@@ -224,6 +233,15 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 	if input.PixDiscountPercent != nil && *input.PixDiscountPercent > 0 {
 		if err := s.repo.SetPixDiscountPercent(ctx, event.ID, input.StoreID, *input.PixDiscountPercent); err != nil {
 			logger.From(ctx, s.logger).Warn("failed to set pix_discount_percent on create",
+				zap.String("event_id", event.ID),
+				zap.Error(err),
+			)
+		}
+	}
+
+	if input.WaitlistNotifiedTTLMinutes != nil {
+		if err := s.repo.SetWaitlistNotifiedTTLMinutes(ctx, event.ID, input.StoreID, *input.WaitlistNotifiedTTLMinutes); err != nil {
+			logger.From(ctx, s.logger).Warn("failed to set waitlist_notified_ttl_minutes on create",
 				zap.String("event_id", event.ID),
 				zap.Error(err),
 			)
@@ -539,6 +557,8 @@ func (s *Service) GetByID(ctx context.Context, id, storeID string) (LiveOutput, 
 		EndsAt:                 event.EndsAt,
 		CreatedAt:              event.CreatedAt,
 		UpdatedAt:              event.UpdatedAt,
+
+		WaitlistNotifiedTTLMinutes: event.WaitlistNotifiedTTLMinutes,
 	}, nil
 }
 
@@ -665,6 +685,8 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		ProductCount:           productCount,
 		UpsellCount:            upsellCount,
 		Sessions:               sessions,
+
+		WaitlistNotifiedTTLMinutes: event.WaitlistNotifiedTTLMinutes,
 		CreatedAt:              event.CreatedAt,
 		UpdatedAt:              event.UpdatedAt,
 	}, nil
@@ -752,6 +774,14 @@ func (s *Service) Update(ctx context.Context, input UpdateLiveInput) (LiveOutput
 			pct = 100
 		}
 		if err := s.repo.SetPixDiscountPercent(ctx, event.ID, input.StoreID, pct); err != nil {
+			return LiveOutput{}, err
+		}
+	}
+
+	// RN-10: janela extra do promovido da fila. O repo faz o clamp para 5..240,
+	// espelhando o CHECK da 000073.
+	if input.WaitlistNotifiedTTLMinutes != nil {
+		if err := s.repo.SetWaitlistNotifiedTTLMinutes(ctx, event.ID, input.StoreID, *input.WaitlistNotifiedTTLMinutes); err != nil {
 			return LiveOutput{}, err
 		}
 	}

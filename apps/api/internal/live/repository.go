@@ -394,6 +394,40 @@ func (r *Repository) SetEventMedia(ctx context.Context, eventID, storeID string,
 	return nil
 }
 
+// SetWaitlistNotifiedTTLMinutes grava a janela extra do promovido da fila
+// (RN-10). A coluna existe em live_events desde a 000073 com CHECK 5..240 e o
+// runtime já a consome (GetWaitlistNotifiedTTL → notifiedUntil → o expires_at
+// do carrinho é empurrado com GREATEST); faltava só o caminho de escrita.
+// O clamp aqui é o guarda-costas do CHECK: um valor fora da faixa viraria 500.
+func (r *Repository) SetWaitlistNotifiedTTLMinutes(ctx context.Context, eventID, storeID string, minutes int) error {
+	if minutes < 5 {
+		minutes = 5
+	}
+	if minutes > 240 {
+		minutes = 240
+	}
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE live_events
+		SET waitlist_notified_ttl_minutes = $3, updated_at = now()
+		WHERE id = $1 AND store_id = $2
+	`, uid, storeUID, int32(minutes))
+	if err != nil {
+		return fmt.Errorf("setting waitlist_notified_ttl_minutes: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return httpx.ErrNotFound("live event not found")
+	}
+	return nil
+}
+
 // SetEventWindow persiste a janela comercial do evento (D5/D21) de forma
 // PARCIAL: cada coluna só é escrita quando o flag correspondente estiver
 // ligado. A versão anterior gravava scheduled_at e ends_at juntos e
@@ -1752,6 +1786,8 @@ func toEventRow(row sqlc.LiveEvent) EventRow {
 		Description:            description,
 		CreatedAt:              row.CreatedAt.Time,
 		UpdatedAt:              row.UpdatedAt.Time,
+
+		WaitlistNotifiedTTLMinutes: int(row.WaitlistNotifiedTtlMinutes),
 	}
 }
 
@@ -2488,5 +2524,7 @@ func toEventRowFromWithCounts(row sqlc.GetLiveEventWithCountsRow) EventRow {
 		Description:            description,
 		CreatedAt:              row.CreatedAt.Time,
 		UpdatedAt:              row.UpdatedAt.Time,
+
+		WaitlistNotifiedTTLMinutes: int(row.WaitlistNotifiedTtlMinutes),
 	}
 }

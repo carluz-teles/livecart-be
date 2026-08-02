@@ -148,6 +148,8 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		StartsAt:               startsAt,
 		EndsAt:                 endsAt,
 		Description:            req.Description,
+
+		WaitlistNotifiedTTLMinutes: req.WaitlistNotifiedTtlMinutes,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -369,6 +371,8 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 		Title:              req.Title,
 		PixDiscountPercent: req.PixDiscountPercent,
 		Window:             window,
+
+		WaitlistNotifiedTTLMinutes: req.WaitlistNotifiedTtlMinutes,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -726,6 +730,8 @@ func toLiveResponse(o LiveOutput) LiveResponse {
 		UpsellCount:            o.UpsellCount,
 		CreatedAt:              o.CreatedAt,
 		UpdatedAt:              o.UpdatedAt,
+
+		WaitlistNotifiedTtlMinutes: o.WaitlistNotifiedTTLMinutes,
 	}
 }
 
@@ -788,6 +794,8 @@ func toEventResponse(o EventOutput) EventResponse {
 		Sessions:               sessions,
 		CreatedAt:              o.CreatedAt,
 		UpdatedAt:              o.UpdatedAt,
+
+		WaitlistNotifiedTtlMinutes: o.WaitlistNotifiedTTLMinutes,
 	}
 }
 

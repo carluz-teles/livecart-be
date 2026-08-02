@@ -38,6 +38,8 @@ type EventResponse struct {
 	CartMaxQuantityPerItem *int   `json:"cartMaxQuantityPerItem"`
 	SendOnLiveEnd          *bool  `json:"sendOnLiveEnd"`
 	PixDiscountPercent     int    `json:"pixDiscountPercent"`
+	// RN-10 — janela extra do promovido da fila (minutos).
+	WaitlistNotifiedTtlMinutes int `json:"waitlistNotifiedTtlMinutes"`
 	// Scheduling
 	ScheduledAt *time.Time `json:"scheduledAt"`
 	EndsAt      *time.Time `json:"endsAt"`
@@ -120,6 +122,8 @@ type EventOutput struct {
 	// a 000119.
 	CurrentActiveProductID *string
 	ProcessingPaused       bool
+	// RN-10 — janela extra do promovido da fila, em minutos.
+	WaitlistNotifiedTTLMinutes int
 	// Scheduling
 	ScheduledAt *time.Time
 	EndsAt      *time.Time
@@ -180,6 +184,10 @@ type EventRow struct {
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
 	PixDiscountPercent     int
+	// RN-10: janela extra, em minutos, que o promovido da fila ganha a partir
+	// do momento em que o item libera. Vive em live_events desde a 000073
+	// (CHECK 5..240) e o runtime já a aplica — faltava só aparecer na API.
+	WaitlistNotifiedTTLMinutes int
 	// ⚠️ OBSOLETOS desde a 000111 — ver EventOutput. A verdade está na sessão.
 	CurrentActiveProductID *string
 	ProcessingPaused       bool
@@ -476,6 +484,9 @@ type CreateLiveRequest struct {
 	SendOnLiveEnd          *bool `json:"sendOnLiveEnd"`
 	// PixDiscountPercent (0-100). 0 disables the feature.
 	PixDiscountPercent *int `json:"pixDiscountPercent" validate:"omitempty,min=0,max=100"`
+	// RN-10 — janela extra do promovido da fila. O range espelha o CHECK da
+	// migration 000073 (5..240): desalinhar devolveria 500 em vez de 422.
+	WaitlistNotifiedTtlMinutes *int `json:"waitlistNotifiedTtlMinutes" validate:"omitempty,min=5,max=240"`
 }
 
 type CreateLiveResponse struct {
@@ -497,6 +508,8 @@ type UpdateLiveRequest struct {
 	// (CA-05.4), que hoje é no-op por causa do asynq.TaskID.
 	StartsAt *string `json:"startsAt"`
 	EndsAt   *string `json:"endsAt"`
+	// RN-10 — mesmo range do CHECK da 000073.
+	WaitlistNotifiedTtlMinutes *int `json:"waitlistNotifiedTtlMinutes" validate:"omitempty,min=5,max=240"`
 }
 
 type LiveResponse struct {
@@ -515,6 +528,10 @@ type LiveResponse struct {
 	CartMaxQuantityPerItem *int       `json:"cartMaxQuantityPerItem"`
 	SendOnLiveEnd          *bool      `json:"sendOnLiveEnd"`
 	PixDiscountPercent     int        `json:"pixDiscountPercent"`
+	// RN-10 — janela extra do promovido da fila (minutos). Existe no banco
+	// desde a 000073 e o runtime já a aplica; até aqui não aparecia em DTO
+	// nenhum, então o lojista não tinha como ver nem mudar.
+	WaitlistNotifiedTtlMinutes int `json:"waitlistNotifiedTtlMinutes"`
 	// Scheduling
 	ScheduledAt *time.Time `json:"scheduledAt"`
 	EndsAt      *time.Time `json:"endsAt"`
@@ -560,6 +577,8 @@ type CreateLiveInput struct {
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
 	PixDiscountPercent     *int
+	// RN-10 — janela extra do promovido da fila. nil = mantém o default da coluna.
+	WaitlistNotifiedTTLMinutes *int
 	// Scheduling
 	ScheduledAt *time.Time
 	// StartsAt/EndsAt: janela comercial do evento (D21). EndsAt é obrigatório
@@ -583,6 +602,8 @@ type UpdateLiveInput struct {
 	StoreID            string
 	Title              string
 	PixDiscountPercent *int
+	// RN-10 — nil = não mexer.
+	WaitlistNotifiedTTLMinutes *int
 	// Window carrega a alteração PARCIAL da janela comercial.
 	Window EventWindowUpdate
 }
@@ -646,6 +667,8 @@ type LiveOutput struct {
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
 	PixDiscountPercent     int
+	// RN-10 — janela extra do promovido da fila, em minutos (CHECK 5..240).
+	WaitlistNotifiedTTLMinutes int
 	// Scheduling: ScheduledAt is the start, EndsAt the optional scheduled end.
 	ScheduledAt *time.Time
 	EndsAt      *time.Time
