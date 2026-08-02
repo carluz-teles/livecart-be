@@ -1976,7 +1976,7 @@ func (r *Repository) GetWaitlistNotifiedTTL(ctx context.Context, eventID string)
 // devolve os carrinhos afetados (RN-32). Ver o comentário da query
 // ExpireWaitlistByEvent: o predicado poupa quem foi promovido e ainda está
 // dentro da janela de TTL.
-func (r *Repository) ExpireEventWaitlist(ctx context.Context, eventID string) ([]string, error) {
+func (r *Repository) ExpireEventWaitlist(ctx context.Context, eventID string) ([]ExpiredWaitlistEntry, error) {
 	eID, err := parseUUID(eventID)
 	if err != nil {
 		return nil, err
@@ -1985,20 +1985,68 @@ func (r *Repository) ExpireEventWaitlist(ctx context.Context, eventID string) ([
 	if err != nil {
 		return nil, fmt.Errorf("expiring event waitlist: %w", err)
 	}
-	seen := make(map[string]struct{}, len(rows))
-	cartIDs := make([]string, 0, len(rows))
-	for _, id := range rows {
-		if !id.Valid {
-			continue // item de fila sem carrinho vinculado
+	out := make([]ExpiredWaitlistEntry, 0, len(rows))
+	for _, row := range rows {
+		entry := ExpiredWaitlistEntry{
+			PlatformUserID: row.PlatformUserID,
+			PlatformHandle: row.PlatformHandle,
+			ProductName:    row.ProductName,
 		}
-		s := id.String()
-		if _, dup := seen[s]; dup {
-			continue // um carrinho pode ter vários itens na fila
+		if row.CartID.Valid {
+			entry.CartID = row.CartID.String()
 		}
-		seen[s] = struct{}{}
-		cartIDs = append(cartIDs, s)
+		if row.CartToken.Valid {
+			entry.CartToken = row.CartToken.String
+		}
+		out = append(out, entry)
 	}
-	return cartIDs, nil
+	return out, nil
+}
+
+// GetCartTotals devolve itens e valor de um carrinho, pela mesma query nomeada
+// que o painel usa (cart_product_total_cents é a função canônica do GMV).
+func (r *Repository) GetCartTotals(ctx context.Context, cartID string) (int, int64, error) {
+	uid, err := parseUUID(cartID)
+	if err != nil {
+		return 0, 0, err
+	}
+	row, err := r.queries.GetCartTotals(ctx, uid)
+	if err != nil {
+		return 0, 0, fmt.Errorf("getting cart totals: %w", err)
+	}
+	return int(row.TotalItems), row.TotalValue, nil
+}
+
+// GetEventOwner devolve a loja e o título da campanha a partir do id do evento.
+//
+// Existe para os caminhos ASSÍNCRONOS (tasks asynq), que só recebem o eventID:
+// não há request, não há store_id no contexto, e sem a loja não dá para ler as
+// settings de notificação nem montar {loja}/{evento}. Título vem como string
+// vazia quando NULL — live_events.title é nullable e já derrubou uma tela em
+// produção por ser lido direto num string Go.
+func (r *Repository) GetEventOwner(ctx context.Context, eventID string) (storeID, title string, err error) {
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return "", "", err
+	}
+	event, err := r.queries.GetLiveEventByID(ctx, eID)
+	if err != nil {
+		return "", "", fmt.Errorf("getting event owner: %w", err)
+	}
+	return uuidToString(event.StoreID), event.Title.String, nil
+}
+
+// ExpiredWaitlistEntry é um item de fila que morreu com a campanha: um por
+// (comprador, produto). O carrinho pode se repetir entre linhas — o mesmo
+// comprador pode esperar dois produtos —, e por isso a deduplicação de
+// carrinhos para re-armar cart.expire fica no chamador, junto da decisão de
+// quantas DMs mandar.
+type ExpiredWaitlistEntry struct {
+	CartID         string
+	CartToken      string
+	PlatformUserID string
+	PlatformHandle string
+	ProductName    string
 }
 
 // GetEventCartExpirationMinutes devolve o prazo EFETIVO do carrinho para o

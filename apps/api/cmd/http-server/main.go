@@ -1383,10 +1383,11 @@ func newLiveNotifierAdapter(inner *integration.InstagramNotifier) *liveNotifierA
 	return &liveNotifierAdapter{inner: inner}
 }
 
-func (a *liveNotifierAdapter) NotifyEventCheckout(ctx context.Context, p live.NotifyEventCheckoutParams) error {
-	return a.inner.NotifyEventCheckout(ctx, integration.NotifyEventCheckoutParams{
+func (a *liveNotifierAdapter) NotifyEventCheckout(ctx context.Context, p live.NotifyEventCheckoutParams) (live.NotifyEventCheckoutResult, error) {
+	res, err := a.inner.NotifyEventCheckout(ctx, integration.NotifyEventCheckoutParams{
 		StoreID:        p.StoreID,
 		EventID:        p.EventID,
+		EventTitle:     p.EventTitle,
 		CartID:         p.CartID,
 		CartToken:      p.CartToken,
 		PlatformUserID: p.PlatformUserID,
@@ -1395,10 +1396,21 @@ func (a *liveNotifierAdapter) NotifyEventCheckout(ctx context.Context, p live.No
 		// comment). Dropping it here silently forced every resend onto the
 		// direct-message path, which Instagram rejects outside the 24h window
 		// (error 2534022) — a comment alone never opens that window.
-		CommentID:  p.CommentID,
-		TotalItems: p.TotalItems,
-		TotalValue: p.TotalValue,
+		CommentID: p.CommentID,
+		// CommentCreatedAt é o que permite classificar a não entrega (RN-38).
+		// Perder este campo no adapter faria toda janela vencida virar
+		// "instagram_rejected" em vez de "comment_window_expired" — motivo
+		// errado na lista do lojista, e ação errada da parte dele.
+		CommentCreatedAt: p.CommentCreatedAt,
+		DeadlineAt:       p.DeadlineAt,
+		TotalItems:       p.TotalItems,
+		TotalValue:       p.TotalValue,
 	})
+	return live.NotifyEventCheckoutResult{
+		Delivered:  res.Delivered,
+		Reason:     res.Reason,
+		ReasonText: res.ReasonText,
+	}, err
 }
 
 // erpFinalizerAdapter bridges integration.Service.FinalizeEventERP to

@@ -22,7 +22,7 @@ type Notifier interface {
 
 	// NotifyEventCheckout notifies a user that the live event ended and their cart
 	// is ready for checkout.
-	NotifyEventCheckout(ctx context.Context, params NotifyEventCheckoutParams) error
+	NotifyEventCheckout(ctx context.Context, params NotifyEventCheckoutParams) (NotifyEventCheckoutResult, error)
 }
 
 // NotifyWaitlistParams holds data for waitlist notifications.
@@ -46,13 +46,27 @@ type NotifyCartExpiringParams struct {
 type NotifyEventCheckoutParams struct {
 	StoreID        string
 	EventID        string
+	EventTitle     string // variável {evento} da mensagem
 	CartID         string
 	CartToken      string
 	PlatformUserID string
 	PlatformHandle string
 	CommentID      string // optional: buyer's last comment ID, used for private reply
-	TotalItems     int
-	TotalValue     int64 // cents
+	// CommentCreatedAt permite decidir entre tentar e registrar não-entrega com
+	// motivo (RN-38) — o private reply do Instagram vale 7 dias.
+	CommentCreatedAt *time.Time
+	// DeadlineAt é o {prazo_final} anunciado ao comprador.
+	DeadlineAt *time.Time
+	TotalItems int
+	TotalValue int64 // cents
+}
+
+// NotifyEventCheckoutResult espelha live.NotifyEventCheckoutResult: não
+// entregue não é erro, é fato com motivo (RN-38).
+type NotifyEventCheckoutResult struct {
+	Delivered  bool
+	Reason     string
+	ReasonText string
 }
 
 // NoopNotifier is a placeholder that does nothing. Replace with real implementation later.
@@ -64,8 +78,8 @@ func (n *NoopNotifier) NotifyWaitlistAvailable(_ context.Context, _ NotifyWaitli
 func (n *NoopNotifier) NotifyCartExpiring(_ context.Context, _ NotifyCartExpiringParams) error {
 	return nil
 }
-func (n *NoopNotifier) NotifyEventCheckout(_ context.Context, _ NotifyEventCheckoutParams) error {
-	return nil
+func (n *NoopNotifier) NotifyEventCheckout(_ context.Context, _ NotifyEventCheckoutParams) (NotifyEventCheckoutResult, error) {
+	return NotifyEventCheckoutResult{Delivered: true}, nil
 }
 
 // =============================================================================

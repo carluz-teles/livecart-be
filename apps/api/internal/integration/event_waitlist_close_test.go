@@ -112,7 +112,7 @@ func TestExpireEventWaitlistSparesLivePromotion(t *testing.T) {
 	ctx := context.Background()
 	f := seedWaitlistCloseFixture(t)
 
-	cartIDs, err := testRepo.ExpireEventWaitlist(ctx, f.eventID)
+	entries, err := testRepo.ExpireEventWaitlist(ctx, f.eventID)
 	if err != nil {
 		t.Fatalf("ExpireEventWaitlist: %v", err)
 	}
@@ -131,11 +131,17 @@ func TestExpireEventWaitlistSparesLivePromotion(t *testing.T) {
 
 	// Os carrinhos desbloqueados voltam para o chamador re-armar cart.expire.
 	unblocked := map[string]bool{}
-	for _, id := range cartIDs {
-		unblocked[id] = true
+	for _, e := range entries {
+		unblocked[e.CartID] = true
+		// RN-28 gatilho 5: sem comprador e sem nome do produto a fila fechava
+		// muda — o carrinho voltava a poder expirar e o cliente só descobria
+		// pelo silêncio.
+		if e.PlatformHandle == "" || e.ProductName == "" {
+			t.Errorf("entrada sem dados para a DM: %+v", e)
+		}
 	}
 	if !unblocked[f.carts["waiting"]] || !unblocked[f.carts["notified-vencido"]] {
-		t.Errorf("carrinhos desbloqueados não vieram no retorno: %v", cartIDs)
+		t.Errorf("carrinhos desbloqueados não vieram no retorno: %+v", entries)
 	}
 	if unblocked[f.carts["notified-vivo"]] {
 		t.Error("carrinho do promovido veio no retorno — ele não foi desbloqueado")

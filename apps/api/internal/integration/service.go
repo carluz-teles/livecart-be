@@ -5137,11 +5137,11 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	if hasPurchaseIntent {
 		switch live.WindowAt(event.Status, event.ScheduledAt, event.EndsAt, time.Now()) {
 		case live.WindowNotStarted:
-			s.replyEventNotStarted(ctx, event, input)
+			s.replyOutOfWindow(ctx, event, session, input, notification.TypeOutOfWindowScheduled)
 			s.savePostComment(ctx, session.ID, event.ID, input, "event_not_started")
 			return nil
 		case live.WindowEnded:
-			s.replyEventEnded(ctx, event, input)
+			s.replyOutOfWindow(ctx, event, session, input, notification.TypeOutOfWindowEventEnded)
 			s.savePostComment(ctx, session.ID, event.ID, input, "event_ended")
 			return nil
 		default:
@@ -5149,7 +5149,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			// Único dos três casos em que a loja ainda está vendendo, então a
 			// resposta redireciona em vez de negar.
 			if !live.SessionAcceptsPurchase(session.Status) {
-				s.replySessionEnded(ctx, event, input)
+				s.replyOutOfWindow(ctx, event, session, input, notification.TypeOutOfWindowSessionEnded)
 				s.savePostComment(ctx, session.ID, event.ID, input, "session_ended")
 				return nil
 			}
@@ -6006,43 +6006,111 @@ func (s *Service) savePostComment(ctx context.Context, sessionID, eventID string
 	}
 }
 
-// replyEventNotStarted privately tells the buyer the campaign hasn't started and
-// when it will (formatted in Brazil time, UTC-3).
+// replyOutOfWindow responde quem comentou fora da janela de venda (RN-28,
+// gatilho 1). Um funil para os três sub-casos, porque a única coisa que muda
+// entre eles é o template e o conjunto de variáveis que faz sentido preencher.
 //
-// A data é opcional de propósito: um evento com status 'scheduled' e sem
-// scheduled_at também cai aqui (D19), e desreferenciar o ponteiro nesse caso
-// derrubava o worker.
-func (s *Service) replyEventNotStarted(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput) {
-	var msg string
-	if event.ScheduledAt != nil {
-		msg = fmt.Sprintf(
-			"Oi @%s! Esta promoção ainda não começou. 🗓️\nEla começa em %s. Volte lá pra garantir o seu! 💜",
-			input.Username, live.FormatBRT(*event.ScheduledAt),
+// O texto vem das settings da loja, não do código: era exatamente isto que
+// faltava. As três frases viviam hardcoded aqui, fora do subsistema de
+// Comunicações — o lojista não conseguia editar, o envio não consultava
+// ShouldNotify e nada era registrado em notification_logs. Passar pelo
+// notification.Service resolve os três de uma vez e é o que faz a RN-38 ter o
+// que listar: a mensagem que não sai vira linha com motivo, não silêncio.
+//
+// CommentCreatedAt carrega o carimbo do comentário para que o serviço decida
+// entre tentar e registrar não-entrega. DirectOnly marca o caminho de story,
+// em que a resposta é DM porque não existe comentário público para responder.
+func (s *Service) replyOutOfWindow(
+	ctx context.Context,
+	event *live.EventOutput,
+	session *live.SessionOutput,
+	input ProcessInstagramCommentInput,
+	notifType notification.NotificationType,
+) {
+	if s.notificationService == nil {
+		return
+	}
+
+	shouldNotify, err := s.notificationService.ShouldNotify(ctx, event.StoreID, notifType, false)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("failed to check out-of-window notification settings",
+			zap.String("type", string(notifType)),
+			zap.Error(err),
 		)
-	} else {
-		msg = fmt.Sprintf(
-			"Oi @%s! Esta promoção ainda não começou. 🗓️\nFique de olho que eu aviso quando abrir! 💜",
-			input.Username,
+		return
+	}
+	if !shouldNotify {
+		return
+	}
+
+	vars := notification.TemplateVariables{
+		Handle:     "@" + input.Username,
+		LiveTitulo: event.Title,
+	}
+	if storeInfo, err := s.repo.GetStoreInfo(ctx, event.StoreID); err == nil {
+		vars.Loja = storeInfo.Name
+	}
+
+	switch notifType {
+	case notification.TypeOutOfWindowScheduled:
+		// A data é opcional de propósito: um evento 'scheduled' sem instante
+		// marcado também cai aqui (D19). Antes o ponteiro era desreferenciado
+		// só depois de um if; agora o vazio simplesmente não substitui nada, e
+		// é responsabilidade do texto padrão não prometer data que não existe.
+		if event.ScheduledAt != nil {
+			vars.ComecaEm = live.FormatBRT(*event.ScheduledAt)
+		}
+	case notification.TypeOutOfWindowSessionEnded:
+		// Único sub-caso em que a campanha AINDA vende: o texto redireciona, e
+		// para isso precisa do link do carrinho que o comprador já tem.
+		if session != nil {
+			vars.Sessao = live.SessionLabel(session.Type, session.SequenceOrder)
+		}
+		vars.Link = s.existingCartLink(ctx, event.ID, input.UserID)
+	}
+
+	commentAt := time.Time{}
+	if secs := epochSeconds(input.Timestamp); secs > 0 {
+		commentAt = time.Unix(secs, 0)
+	}
+	directOnly := input.Channel == "dm"
+	commentID := input.CommentID
+	if directOnly {
+		commentID = ""
+	}
+
+	if _, err := s.notificationService.Send(ctx, notification.SendInput{
+		StoreID:           event.StoreID,
+		EventID:           event.ID,
+		PlatformUserID:    input.UserID,
+		PlatformHandle:    input.Username,
+		PlatformCommentID: commentID,
+		NotificationType:  notifType,
+		Variables:         vars,
+		CommentCreatedAt:  commentAt,
+		DirectOnly:        directOnly,
+	}); err != nil {
+		logger.From(ctx, s.logger).Warn("out-of-window reply send error",
+			zap.String("event_id", event.ID),
+			zap.String("type", string(notifType)),
+			zap.Error(err),
 		)
 	}
-	s.sendPostReply(ctx, event, input, msg)
 }
 
-// replyEventEnded privately tells the buyer the campaign has ended.
-func (s *Service) replyEventEnded(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput) {
-	msg := fmt.Sprintf("Oi @%s! Esta promoção já foi encerrada. 😕 Fique de olho que logo teremos novidades! 💜", input.Username)
-	s.sendPostReply(ctx, event, input, msg)
-}
-
-// replySessionEnded privately tells the buyer THIS broadcast is over while the
-// campaign keeps running (D18). Não é negativa: é redirecionamento para as
-// publicações novas do mesmo evento, onde o carrinho dele continua somando.
-func (s *Service) replySessionEnded(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput) {
-	msg := fmt.Sprintf(
-		"Oi @%s! ⏱️\nEsta publicação já encerrou, então não consegui anotar seu pedido por aqui.\nMas a promoção continua! Comente nas publicações mais recentes que eu vou somando tudo no seu carrinho. 💜",
-		input.Username,
-	)
-	s.sendPostReply(ctx, event, input, msg)
+// existingCartLink devolve o link do carrinho que o comprador já tem nesta
+// campanha, ou vazio quando não há. Best-effort: a mensagem sem {link} continua
+// fazendo sentido, e uma falha de leitura não pode calar a resposta.
+func (s *Service) existingCartLink(ctx context.Context, eventID, platformUserID string) string {
+	cart, err := s.repo.GetCartByEventAndUser(ctx, eventID, platformUserID)
+	if err != nil || cart == nil {
+		return ""
+	}
+	token, err := s.repo.GetCartTokenByID(ctx, cart.ID)
+	if err != nil || token == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/cart/%s", config.FrontendURL.StringOr("http://localhost:3000"), token)
 }
 
 // replyPostOutOfStock privately tells the buyer the product is sold out and
@@ -6065,7 +6133,12 @@ func (s *Service) replyPostOutOfStock(ctx context.Context, event *live.EventOutp
 // do comentário, e uma única vez por comentário (N9/RN-37). Depois disso a
 // mensagem não sai de qualquer forma — tentar é só gastar chamada de API para
 // receber erro.
-const privateReplyWindow = 7 * 24 * time.Hour
+//
+// O número vive no domínio da notificação, que é quem decide entre "tenta" e
+// "registra não entregue com motivo" (RN-38). Aqui é alias: duas cópias do
+// mesmo prazo divergiriam e a ingestão passaria a descartar num limite e o
+// registro a classificar noutro.
+const privateReplyWindow = notification.PrivateReplyWindow
 
 // commentTooOldToReply reporta se o comentário já passou da janela de private
 // reply. Sem carimbo de tempo (ts <= 0) responde false: erra para o lado de
@@ -6964,17 +7037,41 @@ func (s *Service) ArmEventWaitlistClose(ctx context.Context, eventID string) err
 //
 // Idempotente: a segunda passada não encontra item vivo e não re-arma nada.
 func (s *Service) RunEventWaitlistClose(ctx context.Context, eventID string) error {
-	cartIDs, err := s.repo.ExpireEventWaitlist(ctx, eventID)
+	entries, err := s.repo.ExpireEventWaitlist(ctx, eventID)
 	if err != nil {
 		return err
 	}
-	if len(cartIDs) == 0 {
+	if len(entries) == 0 {
 		return nil
 	}
+
+	// Um carrinho pode ter vários itens na fila: dedup para re-armar cart.expire
+	// uma vez só por carrinho.
+	cartIDs := make([]string, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, e := range entries {
+		if e.CartID == "" {
+			continue // item de fila sem carrinho vinculado
+		}
+		if _, dup := seen[e.CartID]; dup {
+			continue
+		}
+		seen[e.CartID] = struct{}{}
+		cartIDs = append(cartIDs, e.CartID)
+	}
+
 	logger.From(ctx, s.logger).Info("event waitlist closed",
 		zap.String("event_id", eventID),
+		zap.Int("items_expired", len(entries)),
 		zap.Int("carts_unblocked", len(cartIDs)),
 	)
+
+	// A DM vem ANTES do re-arm de propósito. O re-arm devolve ao carrinho a
+	// capacidade de expirar, e o prazo dele já venceu enquanto o guard vetava —
+	// ou seja, a expiração pode disparar em seguida. Avisar depois seria contar
+	// ao comprador que o item não liberou num carrinho que já morreu.
+	s.notifyWaitlistUnfulfilled(ctx, eventID, entries)
+
 	for _, cartID := range cartIDs {
 		if err := s.RescheduleExpiry(ctx, cartID); err != nil {
 			// Best-effort por carrinho: um erro não pode impedir os outros de
@@ -6984,6 +7081,68 @@ func (s *Service) RunEventWaitlistClose(ctx context.Context, eventID string) err
 		}
 	}
 	return nil
+}
+
+// notifyWaitlistUnfulfilled avisa quem esperava na fila que o produto não
+// liberou até o fim da campanha (RN-28, gatilho 5).
+//
+// Uma DM por (comprador, produto): o comprador que esperava duas peças precisa
+// saber quais duas. O texto padrão sempre aponta para o que ainda existe (o
+// resto do carrinho) — é a única mensagem do deck que dá notícia ruim, e
+// terminar no "não deu" perde a venda que sobrou.
+func (s *Service) notifyWaitlistUnfulfilled(ctx context.Context, eventID string, entries []ExpiredWaitlistEntry) {
+	if s.notificationService == nil || len(entries) == 0 {
+		return
+	}
+
+	storeID, eventTitle, err := s.repo.GetEventOwner(ctx, eventID)
+	if err != nil || storeID == "" {
+		logger.From(ctx, s.logger).Warn("waitlist close: could not resolve event for notification",
+			zap.String("event_id", eventID), zap.Error(err))
+		return
+	}
+
+	shouldNotify, err := s.notificationService.ShouldNotify(ctx, storeID, notification.TypeWaitlistUnfulfilled, false)
+	if err != nil || !shouldNotify {
+		return
+	}
+
+	storeName := ""
+	if storeInfo, err := s.repo.GetStoreInfo(ctx, storeID); err == nil {
+		storeName = storeInfo.Name
+	}
+	frontendURL := config.FrontendURL.StringOr("http://localhost:3000")
+
+	for _, e := range entries {
+		vars := notification.TemplateVariables{
+			Handle:     "@" + e.PlatformHandle,
+			Produto:    e.ProductName,
+			Loja:       storeName,
+			LiveTitulo: eventTitle,
+		}
+		if e.CartToken != "" {
+			vars.Link = fmt.Sprintf("%s/cart/%s", frontendURL, e.CartToken)
+		}
+
+		// Sem PlatformCommentID: a fila fechou dias depois do comentário, e
+		// escolher um comentário aqui só para consumir o private reply seria
+		// gastar a única resposta disponível numa mensagem que não vende.
+		if _, err := s.notificationService.Send(ctx, notification.SendInput{
+			StoreID:          storeID,
+			EventID:          eventID,
+			CartID:           e.CartID,
+			CartToken:        e.CartToken,
+			PlatformUserID:   e.PlatformUserID,
+			PlatformHandle:   e.PlatformHandle,
+			NotificationType: notification.TypeWaitlistUnfulfilled,
+			Variables:        vars,
+		}); err != nil {
+			logger.From(ctx, s.logger).Warn("waitlist unfulfilled notification error",
+				zap.String("event_id", eventID),
+				zap.String("platform_user_id", e.PlatformUserID),
+				zap.Error(err))
+		}
+	}
 }
 
 // cartExpiryTerminal reports whether a cart is already in a state where expiry
@@ -7591,10 +7750,15 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	// adicionado via comentário no Instagram, então não temos email
 	// confirmado a essa altura. (Quando ele abrir o checkout e preencher
 	// o email, o cart já vai estar com o item disponível.)
+	// EventTitle e DeadlineAt não são enfeite: a mensagem promete "mais
+	// {tempo_extra}, até {prazo_final}" e é essa promessa que faz a extensão da
+	// RN-10 converter. Sem eles o comprador não tem como saber que ganhou
+	// tempo, e a mecânica — que já funcionava — continuava invisível.
+	_, eventTitle, _ := s.repo.GetEventOwner(ctx, eventID)
 	s.sendWaitlistNotifiedDM(ctx, sendWaitlistNotifiedInput{
 		StoreID:        storeID,
 		EventID:        eventID,
-		EventTitle:     "", // resolved below if needed
+		EventTitle:     eventTitle,
 		CartID:         cartID,
 		CartToken:      cartToken,
 		PlatformUserID: next.PlatformUserID,
@@ -7603,6 +7767,7 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		ProductKeyword: product.Keyword,
 		Quantity:       taken,
 		TTL:            ttl,
+		DeadlineAt:     notifiedUntil,
 	})
 
 	// Definitive success point: every revert path above returns early, so
@@ -7885,6 +8050,9 @@ type sendWaitlistNotifiedInput struct {
 	ProductKeyword string
 	Quantity       int
 	TTL            time.Duration
+	// DeadlineAt é o novo expires_at do carrinho depois da extensão — o
+	// {prazo_final} que a mensagem anuncia.
+	DeadlineAt time.Time
 }
 
 func (s *Service) sendWaitlistNotifiedDM(ctx context.Context, input sendWaitlistNotifiedInput) {
@@ -7924,6 +8092,19 @@ func (s *Service) sendWaitlistNotifiedDM(ctx context.Context, input sendWaitlist
 		Loja:       storeInfo.Name,
 		ExpiraEm:   notification.FormatExpiryMinutes(int(input.TTL.Minutes())),
 		LiveTitulo: input.EventTitle,
+		// {tempo_extra} é o prazo GANHO pela fila, e {expira_em} continua
+		// existindo para não quebrar template já salvo. São o mesmo número com
+		// nomes diferentes de propósito: o texto novo fala de ganho ("ganhei
+		// mais 30 minutos pra você"), o antigo falava de limite.
+		TempoExtra: notification.FormatExpiryMinutes(int(input.TTL.Minutes())),
+	}
+	if !input.DeadlineAt.IsZero() {
+		vars.PrazoFinal = live.FormatBRT(input.DeadlineAt)
+	}
+	if items, cents, err := s.repo.GetCartTotals(ctx, input.CartID); err == nil {
+		vars.TotalItens = items
+		vars.Total = notification.FormatCurrency(cents)
+		vars.TotalCents = cents
 	}
 
 	result, err := s.notificationService.Send(ctx, notification.SendInput{

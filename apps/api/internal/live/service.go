@@ -34,7 +34,7 @@ type EventCloseScheduler interface {
 // The concrete implementation lives in the integration package; we declare
 // a local interface to avoid an import cycle.
 type Notifier interface {
-	NotifyEventCheckout(ctx context.Context, params NotifyEventCheckoutParams) error
+	NotifyEventCheckout(ctx context.Context, params NotifyEventCheckoutParams) (NotifyEventCheckoutResult, error)
 }
 
 // NotifyEventCheckoutParams mirrors the integration package params struct
@@ -42,13 +42,37 @@ type Notifier interface {
 type NotifyEventCheckoutParams struct {
 	StoreID        string
 	EventID        string
+	EventTitle     string
 	CartID         string
 	CartToken      string
 	PlatformUserID string
 	PlatformHandle string
 	CommentID      string
-	TotalItems     int
-	TotalValue     int64
+	// CommentCreatedAt é quando o comentário escolhido foi feito. É o dado que
+	// permite decidir entre TENTAR e registrar não-entrega com motivo (RN-38):
+	// o private reply do Instagram vale 7 dias, e numa campanha longa esta
+	// mensagem dispara dias depois do último comentário do comprador.
+	CommentCreatedAt *time.Time
+	// DeadlineAt é o prazo que a mensagem anuncia ({prazo_final}). Vem do
+	// expires_at que o fechamento acabou de armar no carrinho — os dois ramos
+	// do close_cart_on_event_end (prazo curto e prazo estendido) já chegam aqui
+	// com o valor certo, então a mensagem não precisa saber qual foi.
+	DeadlineAt *time.Time
+	TotalItems int
+	TotalValue int64
+}
+
+// NotifyEventCheckoutResult diz o que aconteceu com a mensagem. Não entregue
+// NÃO é erro: é um fato registrado, com motivo, que o painel mostra ao lojista
+// (RN-38). Devolver isso como error faria o disparo em massa tratar "a janela
+// do Instagram fechou" como falha de infraestrutura e logar ruído; devolver
+// como sucesso mudo seria a ilusão de entrega que a regra proíbe.
+type NotifyEventCheckoutResult struct {
+	Delivered bool
+	// Reason é o motivo canônico (vazio quando entregue).
+	Reason string
+	// ReasonText é a frase pronta para o lojista.
+	ReasonText string
 }
 
 // ERPFinalizer is called at event end to reverse stock reservations and
@@ -998,8 +1022,16 @@ func (s *Service) sendCheckoutLinksForEvent(ctx context.Context, storeID, eventI
 		return
 	}
 
+	// O título da campanha é a variável {evento} da mensagem. Uma leitura só,
+	// fora do laço: é o mesmo evento para todos os carrinhos.
+	eventTitle := ""
+	if ev, err := s.repo.GetEventByID(ctx, eventID, storeID); err == nil && ev != nil {
+		eventTitle = ev.Title
+	}
+
 	sent := 0
 	skipped := 0
+	undelivered := 0
 	for _, c := range carts {
 		if c.TotalItems <= 0 || c.PlatformUserID == "" {
 			skipped++
@@ -1015,24 +1047,36 @@ func (s *Service) sendCheckoutLinksForEvent(ctx context.Context, storeID, eventI
 			skipped++
 			continue
 		}
-		commentID, _ := s.repo.GetLatestCommentIDByUser(ctx, eventID, c.PlatformUserID)
-		if err := s.notifier.NotifyEventCheckout(ctx, NotifyEventCheckoutParams{
-			StoreID:        storeID,
-			EventID:        eventID,
-			CartID:         c.ID,
-			CartToken:      c.Token,
-			PlatformUserID: c.PlatformUserID,
-			PlatformHandle: c.PlatformHandle,
-			CommentID:      commentID,
-			TotalItems:     c.TotalItems,
-			TotalValue:     c.TotalValue,
-		}); err != nil {
+		target, _ := s.repo.GetLatestReplyTarget(ctx, eventID, c.PlatformUserID)
+		res, err := s.notifier.NotifyEventCheckout(ctx, NotifyEventCheckoutParams{
+			StoreID:          storeID,
+			EventID:          eventID,
+			EventTitle:       eventTitle,
+			CartID:           c.ID,
+			CartToken:        c.Token,
+			PlatformUserID:   c.PlatformUserID,
+			PlatformHandle:   c.PlatformHandle,
+			CommentID:        target.CommentID,
+			CommentCreatedAt: target.CreatedAt,
+			DeadlineAt:       c.ExpiresAt,
+			TotalItems:       c.TotalItems,
+			TotalValue:       c.TotalValue,
+		})
+		if err != nil {
 			logger.From(ctx, s.logger).Warn("failed to notify event checkout",
 				zap.String("event_id", eventID),
 				zap.String("cart_id", c.ID),
 				zap.String("platform_user_id", c.PlatformUserID),
 				zap.Error(err),
 			)
+			continue
+		}
+		if !res.Delivered {
+			// RN-38 — a janela do Instagram já tinha fechado para esta pessoa.
+			// Não é falha: está registrado com motivo e aparece na lista de
+			// "compradores não avisados" do evento. Contar como enviado seria
+			// mentir para o próprio log.
+			undelivered++
 			continue
 		}
 		sent++
@@ -1042,6 +1086,7 @@ func (s *Service) sendCheckoutLinksForEvent(ctx context.Context, storeID, eventI
 		zap.String("event_id", eventID),
 		zap.Int("sent", sent),
 		zap.Int("skipped", skipped),
+		zap.Int("undelivered", undelivered),
 		zap.Int("total", len(carts)),
 	)
 }
@@ -1556,7 +1601,7 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 	// window) rather than a direct message by IGSID (24h window opened only by an
 	// inbound DM). A comment does not open the DM window, so without this the
 	// resend is rejected with error 2534022 even moments after the comment.
-	commentID, lookupErr := s.repo.GetLatestCommentIDByUser(ctx, eventID, cart.PlatformUserID)
+	target, lookupErr := s.repo.GetLatestReplyTarget(ctx, eventID, cart.PlatformUserID)
 	if lookupErr != nil {
 		// Don't abort — the DM path may still work — but make the failure visible
 		// instead of silently degrading to DM-only (which fails outside the 24h
@@ -1571,25 +1616,34 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 		zap.String("event_id", eventID),
 		zap.String("cart_id", cartID),
 		zap.String("platform_user_id", cart.PlatformUserID),
-		zap.String("comment_id", commentID),
+		zap.String("comment_id", target.CommentID),
 	)
 
-	if err := s.notifier.NotifyEventCheckout(ctx, NotifyEventCheckoutParams{
-		StoreID:        storeID,
-		EventID:        eventID,
-		CartID:         cart.ID,
-		CartToken:      cart.Token,
-		PlatformUserID: cart.PlatformUserID,
-		PlatformHandle: cart.PlatformHandle,
-		CommentID:      commentID,
-		TotalItems:     cart.TotalItems,
-		TotalValue:     cart.TotalValue,
-	}); err != nil {
+	eventTitle := ""
+	if ev, err := s.repo.GetEventByID(ctx, eventID, storeID); err == nil && ev != nil {
+		eventTitle = ev.Title
+	}
+
+	res, err := s.notifier.NotifyEventCheckout(ctx, NotifyEventCheckoutParams{
+		StoreID:          storeID,
+		EventID:          eventID,
+		EventTitle:       eventTitle,
+		CartID:           cart.ID,
+		CartToken:        cart.Token,
+		PlatformUserID:   cart.PlatformUserID,
+		PlatformHandle:   cart.PlatformHandle,
+		CommentID:        target.CommentID,
+		CommentCreatedAt: target.CreatedAt,
+		DeadlineAt:       cart.ExpiresAt,
+		TotalItems:       cart.TotalItems,
+		TotalValue:       cart.TotalValue,
+	})
+	if err != nil {
 		logger.From(ctx, s.logger).Warn("failed to resend checkout message",
 			zap.String("event_id", eventID),
 			zap.String("cart_id", cartID),
 			zap.String("platform_user_id", cart.PlatformUserID),
-			zap.String("comment_id", commentID),
+			zap.String("comment_id", target.CommentID),
 			zap.Error(err),
 		)
 		// Outside-the-window rejection (IG error 2534022): tell the merchant the
@@ -1599,6 +1653,13 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 				"O Instagram só permite enviar a mensagem se o comprador comentou recentemente ou mandou uma DM para a loja. Peça para o comprador comentar de novo na live (ou enviar uma DM) e clique em reenviar em seguida.")
 		}
 		return CartWithTotalOutput{}, httpx.ErrUnprocessable("failed to send Instagram message")
+	}
+	if !res.Delivered {
+		// RN-38 — no reenvio MANUAL a não entrega tem de virar erro na tela: o
+		// lojista acabou de clicar num botão e precisa saber que nada saiu, com
+		// o motivo. No disparo em massa o mesmo fato é só registro, porque não
+		// há ninguém esperando resposta.
+		return CartWithTotalOutput{}, httpx.ErrUnprocessable(res.ReasonText)
 	}
 
 	logger.From(ctx, s.logger).Info("checkout message resent",

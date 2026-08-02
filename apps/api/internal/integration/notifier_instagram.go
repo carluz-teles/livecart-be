@@ -3,9 +3,12 @@ package integration
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/live"
+	"livecart/apps/api/internal/notification"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/logger"
 )
@@ -36,44 +39,88 @@ func (n *InstagramNotifier) NotifyCartExpiring(_ context.Context, _ NotifyCartEx
 	return nil
 }
 
-// NotifyEventCheckout sends a checkout link DM to the buyer.
-func (n *InstagramNotifier) NotifyEventCheckout(ctx context.Context, params NotifyEventCheckoutParams) error {
-	frontendURL := config.FrontendURL.StringOr("http://localhost:3000")
-	text := fmt.Sprintf(
-		"Olá @%s! Sua compra na live está pronta 🎉\n%d itens • R$ %.2f\nFinalize aqui: %s/cart/%s",
-		params.PlatformHandle,
-		params.TotalItems,
-		float64(params.TotalValue)/100,
-		frontendURL,
-		params.CartToken,
-	)
-
-	// Prefer a private reply to the buyer's last comment. Instagram allows it
-	// within 7 days of the comment without requiring the buyer to have opened a
-	// 24h messaging window via an inbound DM — a comment alone does not open that
-	// window, so a plain direct message by IGSID is rejected (error 2534022).
-	// Fall back to a direct message when no comment is available or the reply fails.
-	if params.CommentID != "" {
-		if err := n.svc.ReplyToInstagramComment(ctx, params.StoreID, params.CommentID, text); err == nil {
-			return nil
-		} else {
-			logger.From(ctx, n.logger).Warn("checkout private reply failed, falling back to direct message",
-				zap.String("store_id", params.StoreID),
-				zap.String("comment_id", params.CommentID),
-				zap.Error(err),
-			)
-		}
+// NotifyEventCheckout envia a mensagem de "a campanha encerrou, o prazo para
+// pagar começou" (RN-28, gatilho 3).
+//
+// O texto era hardcoded aqui — "Sua compra na live está pronta 🎉" — fora do
+// subsistema de Comunicações: o lojista não podia editar, nada consultava as
+// settings e nenhuma linha ia para notification_logs. Justamente a mensagem que
+// o produto chama de "maior impacto em conversão".
+//
+// Agora passa pelo notification.Service, que resolve template, registra e —
+// quando a janela de 7 dias do private reply já venceu — devolve não-entrega
+// COM MOTIVO em vez de tentar um DM que o Instagram recusa (erro 2534022) e
+// registrar isso como falha genérica.
+func (n *InstagramNotifier) NotifyEventCheckout(ctx context.Context, params NotifyEventCheckoutParams) (NotifyEventCheckoutResult, error) {
+	if n.svc.notificationService == nil {
+		return NotifyEventCheckoutResult{}, fmt.Errorf("notification service not configured")
 	}
 
-	if err := n.svc.SendInstagramDM(ctx, params.StoreID, params.PlatformUserID, text); err != nil {
-		logger.From(ctx, n.logger).Warn("notify event checkout failed",
+	shouldNotify, err := n.svc.notificationService.ShouldNotify(ctx, params.StoreID, notification.TypeEventDeadlineStarted, false)
+	if err != nil {
+		return NotifyEventCheckoutResult{}, fmt.Errorf("checking notification settings: %w", err)
+	}
+	if !shouldNotify {
+		// Template desligado pelo lojista. Não é não-entrega: ele escolheu não
+		// mandar. Reportar como entregue evita que a decisão dele apareça na
+		// lista de "não avisados", que é para quem o Instagram barrou.
+		return NotifyEventCheckoutResult{Delivered: true}, nil
+	}
+
+	frontendURL := config.FrontendURL.StringOr("http://localhost:3000")
+	vars := notification.TemplateVariables{
+		Handle:     "@" + params.PlatformHandle,
+		TotalItens: params.TotalItems,
+		Total:      notification.FormatCurrency(params.TotalValue),
+		TotalCents: params.TotalValue,
+		Link:       fmt.Sprintf("%s/cart/%s", frontendURL, params.CartToken),
+		LiveTitulo: params.EventTitle,
+	}
+	if storeInfo, err := n.svc.repo.GetStoreInfo(ctx, params.StoreID); err == nil {
+		vars.Loja = storeInfo.Name
+	}
+	if params.DeadlineAt != nil {
+		vars.PrazoFinal = live.FormatBRT(*params.DeadlineAt)
+	}
+
+	commentAt := time.Time{}
+	if params.CommentCreatedAt != nil {
+		commentAt = *params.CommentCreatedAt
+	}
+
+	result, err := n.svc.notificationService.Send(ctx, notification.SendInput{
+		StoreID:           params.StoreID,
+		EventID:           params.EventID,
+		CartID:            params.CartID,
+		CartToken:         params.CartToken,
+		PlatformUserID:    params.PlatformUserID,
+		PlatformHandle:    params.PlatformHandle,
+		PlatformCommentID: params.CommentID,
+		NotificationType:  notification.TypeEventDeadlineStarted,
+		Variables:         vars,
+		CommentCreatedAt:  commentAt,
+	})
+	if err != nil {
+		return NotifyEventCheckoutResult{}, err
+	}
+
+	switch result.Status {
+	case notification.StatusSent:
+		return NotifyEventCheckoutResult{Delivered: true}, nil
+	case notification.StatusSkipped:
+		return NotifyEventCheckoutResult{Delivered: true}, nil
+	default:
+		logger.From(ctx, n.logger).Info("event checkout message not delivered",
 			zap.String("store_id", params.StoreID),
 			zap.String("event_id", params.EventID),
 			zap.String("cart_id", params.CartID),
 			zap.String("platform_user_id", params.PlatformUserID),
-			zap.Error(err),
+			zap.String("reason", string(result.Reason)),
 		)
-		return err
+		return NotifyEventCheckoutResult{
+			Delivered:  false,
+			Reason:     string(result.Reason),
+			ReasonText: notification.UndeliverableReasonText(result.Reason),
+		}, nil
 	}
-	return nil
 }

@@ -1,5 +1,7 @@
 package live
 
+import "strconv"
+
 // D3 — o tipo da transmissão passa a viver em live_sessions.type, com o CHECK
 // que live_events.type nunca teve. Enquanto a 000119 (contract) não roda,
 // live_events.type continua sendo escrito no vocabulário ANTIGO, porque o
@@ -56,6 +58,34 @@ func IsValidSessionType(t string) bool {
 	default:
 		return false
 	}
+}
+
+// SessionLabel é o nome da transmissão como o COMPRADOR a vê — a variável
+// {sessao} das mensagens automáticas. A sessão não tem título próprio no
+// schema (o título é do evento), então o rótulo é derivado do tipo mais a
+// ordem dentro da campanha: "Live 1", "Post 2", "Story 3".
+//
+// Fica no domínio, e não montado na hora do envio, porque o mesmo rótulo vai
+// aparecer no painel: duas construções do nome dariam "Live 2" numa tela e
+// "live #2" na DM do comprador.
+func SessionLabel(sessionType string, sequenceOrder int) string {
+	var name string
+	switch sessionType {
+	case SessionTypePost:
+		name = "Post"
+	case SessionTypeReel:
+		name = "Reel"
+	case SessionTypeStory:
+		name = "Story"
+	default:
+		name = "Live"
+	}
+	if sequenceOrder <= 0 {
+		// Sessão sem ordem definida (dado antigo): "a Live" ainda é uma frase
+		// correta, "a Live 0" não.
+		return name
+	}
+	return name + " " + strconv.Itoa(sequenceOrder)
 }
 
 // IsPostCommerceSessionType reporta se a sessão segue as regras de

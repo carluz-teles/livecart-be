@@ -976,48 +976,50 @@ func (r *Repository) IncrementSessionComments(ctx context.Context, sessionID str
 	return r.q.IncrementLiveSessionComments(ctx, uid)
 }
 
-// GetLatestCommentIDByUser returns the most recent Instagram comment ID a buyer
-// posted in an event. Used to deliver checkout links via private reply (which
-// works within 7 days of the comment) instead of a direct message by IGSID
-// (which requires an open 24h messaging window). Returns "" when none exists.
-func (r *Repository) GetLatestCommentIDByUser(ctx context.Context, eventID, platformUserID string) (string, error) {
+// ReplyTarget é o comentário que receberá a resposta privada, com a idade dele.
+//
+// A idade viaja junto de propósito: quem decide se ainda dá para responder é o
+// domínio da notificação (7 dias de private reply), e é ele que precisa
+// distinguir "não há comentário nenhum" de "há, mas venceu" — os dois motivos
+// que o lojista vê na lista da RN-38 e que exigem ações diferentes dele.
+type ReplyTarget struct {
+	CommentID string
+	CreatedAt *time.Time
+}
+
+// GetLatestReplyTarget returns the most recent USABLE Instagram comment a buyer
+// posted in an event — one that hasn't consumed its single private reply and
+// isn't hidden/deleted (Instagram rejects replies to those, error 2534066).
+// Returns an empty target (no error) when the buyer has no usable comment.
+//
+// NÃO filtra por idade. O filtro `created_at >= now() - interval '7 days'`
+// morava aqui e escondia a informação de que o chamador precisa: com ele, um
+// comprador cujo único comentário venceu era indistinguível de um comprador que
+// nunca comentou — os dois davam "". A janela continua sendo respeitada, agora
+// no ponto que também REGISTRA a não entrega com o motivo certo, em vez de
+// degradar em silêncio para um DM que o Instagram recusa.
+func (r *Repository) GetLatestReplyTarget(ctx context.Context, eventID, platformUserID string) (ReplyTarget, error) {
 	eventUID, err := parseUUID(eventID)
 	if err != nil {
-		return "", err
+		return ReplyTarget{}, err
 	}
 
-	// Direct, explicit query: newest USABLE Instagram comment id for this buyer
-	// on this event — one that hasn't consumed its single private reply and
-	// isn't hidden/deleted (Instagram rejects replies to those, error 2534066).
-	// Returns "" (no error) when the buyer has no usable comment.
-	//
-	// N9/RN-37 — created_at >= now() - 7 dias. O private reply do Instagram vale
-	// 7 dias e uma única vez por comentário; passado o prazo a mensagem não sai
-	// de qualquer forma, e mandar o link para lá é gastar chamada de API para
-	// receber erro. Este filtro não existia: numa campanha de uma semana, o
-	// disparo em massa do fechamento pegava comentário do primeiro dia.
-	//
-	// Consequência conhecida: sem comentário utilizável a função devolve "" e o
-	// notifier degrada para DM por IGSID, que fora da janela de 24h também
-	// falha. Isso troca um erro do Graph por uma NÃO-ENTREGA silenciosa —
-	// registrar "não entregue com motivo" e mostrar ao lojista é a RN-38, que
-	// não está nesta fatia.
 	var commentID string
+	var createdAt time.Time
 	err = r.pool.QueryRow(ctx, `
-		SELECT platform_comment_id FROM live_comments
+		SELECT platform_comment_id, created_at FROM live_comments
 		WHERE event_id = $1 AND platform_user_id = $2 AND platform_comment_id <> ''
 		  AND NOT private_reply_used AND NOT hidden AND deleted_at IS NULL
-		  AND created_at >= now() - interval '7 days'
 		ORDER BY created_at DESC
 		LIMIT 1
-	`, eventUID, platformUserID).Scan(&commentID)
+	`, eventUID, platformUserID).Scan(&commentID, &createdAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", nil
+			return ReplyTarget{}, nil
 		}
-		return "", fmt.Errorf("getting latest comment id: %w", err)
+		return ReplyTarget{}, fmt.Errorf("getting latest reply target: %w", err)
 	}
-	return commentID, nil
+	return ReplyTarget{CommentID: commentID, CreatedAt: &createdAt}, nil
 }
 
 // ListCommentsBySession returns all comments for a session.

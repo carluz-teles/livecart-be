@@ -65,14 +65,31 @@ WHERE event_id = $1 AND platform_user_id = $2 AND product_id = $3
 -- Devolve os cart_id afetados para o chamador RE-ARMAR cart.expire neles: o
 -- prazo deles já venceu enquanto o guard vetava, então sem o re-arm eles
 -- continuariam vivos mesmo com a fila morta.
-UPDATE waitlist_items
-SET status = 'expired'
-WHERE event_id = $1
-  AND (
-      status = 'waiting'
-      OR (status = 'notified' AND expires_at IS NOT NULL AND expires_at <= now())
-  )
-RETURNING cart_id;
+--
+-- Devolve tambem quem era o comprador e qual produto ele esperava: e a
+-- materia-prima da DM de "nao consegui liberar" (RN-28, gatilho 5). Sem esses
+-- campos o encerramento da fila era mudo — o carrinho voltava a poder expirar e
+-- o comprador so descobria pelo silencio. O CTE existe porque RETURNING nao
+-- faz JOIN, e o nome do produto e a frase inteira da mensagem.
+WITH expired AS (
+    UPDATE waitlist_items
+    SET status = 'expired'
+    WHERE waitlist_items.event_id = $1
+      AND (
+          status = 'waiting'
+          OR (status = 'notified' AND expires_at IS NOT NULL AND expires_at <= now())
+      )
+    RETURNING id, cart_id, platform_user_id, platform_handle, product_id
+)
+SELECT
+    e.cart_id,
+    e.platform_user_id,
+    e.platform_handle,
+    p.name AS product_name,
+    c.token AS cart_token
+FROM expired e
+JOIN products p ON p.id = e.product_id
+LEFT JOIN carts c ON c.id = e.cart_id;
 
 -- name: ListExpiredNotifiedWaitlistItems :many
 SELECT * FROM waitlist_items
