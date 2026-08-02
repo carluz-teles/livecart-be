@@ -431,6 +431,8 @@ type LiveSessionPlatform struct {
 	MediaCaption      pgtype.Text        `json:"media_caption"`
 	// D1/D3: true quando um webhook de comments já chegou para ESTA mídia; o polling daquela mídia para. Substitui live_events.webhook_active, que desligava o polling do EVENTO inteiro — o que cegaria a segunda mídia de um evento guarda-chuva.
 	WebhookActive bool `json:"webhook_active"`
+	// D22: quando esta midia deixou de pertencer a um evento vivo. NULL = em uso. E a denormalizacao de live_events.status na linha da midia — necessaria porque um indice parcial nao enxerga colunas de outra tabela.
+	ReleasedAt pgtype.Timestamptz `json:"released_at"`
 }
 
 type Membership struct {

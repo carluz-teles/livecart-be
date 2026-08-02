@@ -15,7 +15,7 @@ const addPlatformToSession = `-- name: AddPlatformToSession :one
 
 INSERT INTO live_session_platforms (session_id, platform, platform_live_id)
 VALUES ($1, $2, $3)
-RETURNING id, session_id, platform, platform_live_id, added_at, media_permalink, media_thumbnail_url, media_caption, webhook_active
+RETURNING id, session_id, platform, platform_live_id, added_at, media_permalink, media_thumbnail_url, media_caption, webhook_active, released_at
 `
 
 type AddPlatformToSessionParams struct {
@@ -40,6 +40,7 @@ func (q *Queries) AddPlatformToSession(ctx context.Context, arg AddPlatformToSes
 		&i.MediaThumbnailUrl,
 		&i.MediaCaption,
 		&i.WebhookActive,
+		&i.ReleasedAt,
 	)
 	return i, err
 }
@@ -256,7 +257,7 @@ func (q *Queries) GetLiveSessionByIDAndEvent(ctx context.Context, arg GetLiveSes
 }
 
 const getPlatformByLiveID = `-- name: GetPlatformByLiveID :one
-SELECT id, session_id, platform, platform_live_id, added_at, media_permalink, media_thumbnail_url, media_caption, webhook_active FROM live_session_platforms WHERE platform_live_id = $1
+SELECT id, session_id, platform, platform_live_id, added_at, media_permalink, media_thumbnail_url, media_caption, webhook_active, released_at FROM live_session_platforms WHERE platform_live_id = $1
 `
 
 func (q *Queries) GetPlatformByLiveID(ctx context.Context, platformLiveID string) (LiveSessionPlatform, error) {
@@ -272,6 +273,7 @@ func (q *Queries) GetPlatformByLiveID(ctx context.Context, platformLiveID string
 		&i.MediaThumbnailUrl,
 		&i.MediaCaption,
 		&i.WebhookActive,
+		&i.ReleasedAt,
 	)
 	return i, err
 }
@@ -376,7 +378,7 @@ func (q *Queries) IncrementLiveSessionComments(ctx context.Context, id pgtype.UU
 }
 
 const listPlatformsBySession = `-- name: ListPlatformsBySession :many
-SELECT id, session_id, platform, platform_live_id, added_at, media_permalink, media_thumbnail_url, media_caption, webhook_active FROM live_session_platforms
+SELECT id, session_id, platform, platform_live_id, added_at, media_permalink, media_thumbnail_url, media_caption, webhook_active, released_at FROM live_session_platforms
 WHERE session_id = $1
 ORDER BY added_at
 `
@@ -400,6 +402,7 @@ func (q *Queries) ListPlatformsBySession(ctx context.Context, sessionID pgtype.U
 			&i.MediaThumbnailUrl,
 			&i.MediaCaption,
 			&i.WebhookActive,
+			&i.ReleasedAt,
 		); err != nil {
 			return nil, err
 		}
