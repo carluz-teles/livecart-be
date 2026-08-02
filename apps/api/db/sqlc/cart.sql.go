@@ -2208,39 +2208,6 @@ func (q *Queries) RegenerateCartCheckout(ctx context.Context, arg RegenerateCart
 	return err
 }
 
-const reopenExpiredCartForReuse = `-- name: ReopenExpiredCartForReuse :exec
-UPDATE carts
-SET status                  = 'active',
-    payment_status          = 'pending',
-    cancelled_reason        = NULL,
-    expires_at              = NULL,
-    checkout_url            = NULL,
-    checkout_id             = NULL,
-    checkout_expires_at     = NULL,
-    paid_at                 = NULL,
-    payment_method          = NULL,
-    coupon_id               = NULL,
-    coupon_code             = NULL,
-    coupon_discount_cents   = 0,
-    erp_order_state         = 'none',
-    external_order_id       = NULL,
-    erp_stock_launched      = FALSE,
-    erp_op_started_at       = NULL
-WHERE id = $1
-`
-
-// Reabre um cart 'expired'/'cancelled' para reuso pelo MESMO comprador no MESMO
-// evento (a unique (event_id, platform_user_id) impede criar um 2º cart). Reseta
-// TUDO para um estado limpo — inclusive as colunas de ERP: sem isso, um cart
-// design-C reaberto pagaria e cairia em "cart pago após cancelamento —
-// reconciliação manual" (external_order_id/erp_order_state obsoletos). Os
-// cart_items antigos são apagados à parte (DeleteCartItemsByCart) — já tiveram o
-// estoque devolvido pela expiração; o item novo entra fresco pelo fluxo de add.
-func (q *Queries) ReopenExpiredCartForReuse(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, reopenExpiredCartForReuse, id)
-	return err
-}
-
 const restoreCancelledCartAsPaid = `-- name: RestoreCancelledCartAsPaid :one
 UPDATE carts
 SET status              = 'checkout',

@@ -1180,35 +1180,24 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 
 	qtx := r.q.WithTx(tx)
 
-	// Try to get existing cart first. FOR UPDATE trava a row: além de resolver
-	// a corrida de dois comentários simultâneos do mesmo comprador (que antes
-	// colidiam na unique constraint), permite reabrir com segurança um cart
-	// morto sob o lock.
+	// Busca o carrinho ABERTO do comprador neste evento. FOR UPDATE trava a row
+	// e resolve a corrida de dois comentários simultâneos do mesmo comprador.
+	//
+	// Desde a 000105 a query filtra por carrinho aberto, então ela só devolve
+	// linha quando existe um carrinho que ainda pode receber item e ser pago.
+	// Carrinho pago, expirado, cancelado ou estornado cai em ErrNoRows e o
+	// caminho abaixo cria um NOVO — que o índice parcial agora permite.
+	//
+	// Foi isto que acabou com o reopen destrutivo. Antes, a unique TOTAL impedia
+	// um 2º carrinho, então um cart morto era reaberto in-place: os itens do
+	// comprador eram APAGADOS (DeleteCartItemsByCart) para o carrinho poder ser
+	// reusado. Numa campanha de uma semana isso apagaria a compra de dias
+	// (RN-08). Agora o antigo fica arquivado, intacto, e o novo nasce limpo.
 	existing, err := qtx.GetCartByEventAndUserForUpdate(ctx, sqlc.GetCartByEventAndUserForUpdateParams{
 		EventID:        eventID,
 		PlatformUserID: params.PlatformUserID,
 	})
 	if err == nil {
-		// E5: um cart 'expired'/'cancelled' não pode ser reusado como está — o
-		// item novo entraria num cart impagável e os itens antigos (cujo estoque
-		// já voltou na expiração) reivindicariam estoque inexistente. Reabrimos
-		// in-place: purga os itens antigos e reseta tudo (status/pagamento/
-		// checkout/cupom/ERP). A unique (event_id, platform_user_id) impede criar
-		// um 2º cart, por isso reabrir em vez de novo. 'paid' NÃO é reaberto (não
-		// destruir uma venda concluída) — cai no reuso.
-		if existing.Status == "expired" || existing.Status == "cancelled" {
-			if err := qtx.DeleteCartItemsByCart(ctx, existing.ID); err != nil {
-				return nil, false, fmt.Errorf("purging items on cart reopen: %w", err)
-			}
-			if err := qtx.ReopenExpiredCartForReuse(ctx, existing.ID); err != nil {
-				return nil, false, fmt.Errorf("reopening cart for reuse: %w", err)
-			}
-			// cart.reopened: distinct event per reopen (no static dedup key).
-			if err := emitCartEvent(ctx, qtx, events.CartReopened, existing.ID.String(), existing.EventID.String(), pgUUIDString(sessionID), ""); err != nil {
-				return nil, false, err
-			}
-		}
-		// Cart exists (reused or reopened), commit and return
 		if err := tx.Commit(ctx); err != nil {
 			return nil, false, fmt.Errorf("committing transaction: %w", err)
 		}

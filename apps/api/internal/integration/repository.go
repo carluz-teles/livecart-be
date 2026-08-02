@@ -2124,13 +2124,16 @@ func (r *Repository) CancelCartAndReleaseStock(ctx context.Context, cartID, stor
 		// este produtor dos outros dois (bloqueio de handle e cancelamento de
 		// cobrança) — o reactor de ERP só age neste.
 		//
-		// dedup_key VAZIO de propósito (opt-out do índice único do outbox): o
-		// MESMO cart pode ser cancelado mais de uma vez ao longo da vida — o
-		// comprador comenta de novo, ReopenExpiredCartForReuse reabre a linha e
-		// a loja cancela outra vez. Com a chave "cart.cancelled:<id>" o segundo
-		// cancelamento seria silenciosamente engolido e ficaria sem estorno de
-		// ERP. A emissão já é exatamente-uma-vez por cancelamento: só acontece
-		// dentro do tx do flip guard-first, que um retry não repete.
+		// dedup_key VAZIO de propósito (opt-out do índice único do outbox).
+		//
+		// A justificativa original era o reopen: o MESMO cart voltava à vida e
+		// podia ser cancelado outra vez. Isso acabou na 000105 — o carrinho tem
+		// ciclo de vida linear e cada cancelamento é de um cart distinto. A
+		// chave vazia fica assim mesmo por ser o lado seguro: ela permite um
+		// duplicado que não deve acontecer, enquanto "cart.cancelled:<id>"
+		// engoliria em silêncio um cancelamento legítimo, deixando-o sem estorno
+		// de ERP. A emissão já é exatamente-uma-vez por cancelamento: só
+		// acontece dentro do tx do flip guard-first, que um retry não repete.
 		if err := events.EmitInternal(ctx, q, events.CartCancelled, "", struct {
 			CartID          string   `json:"cart_id"`
 			StoreID         string   `json:"store_id"`

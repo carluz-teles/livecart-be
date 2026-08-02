@@ -51,33 +51,6 @@ SET expires_at         = $2,
     erp_op_started_at       = NULL
 WHERE id = $1;
 
--- name: ReopenExpiredCartForReuse :exec
--- Reabre um cart 'expired'/'cancelled' para reuso pelo MESMO comprador no MESMO
--- evento (a unique (event_id, platform_user_id) impede criar um 2º cart). Reseta
--- TUDO para um estado limpo — inclusive as colunas de ERP: sem isso, um cart
--- design-C reaberto pagaria e cairia em "cart pago após cancelamento —
--- reconciliação manual" (external_order_id/erp_order_state obsoletos). Os
--- cart_items antigos são apagados à parte (DeleteCartItemsByCart) — já tiveram o
--- estoque devolvido pela expiração; o item novo entra fresco pelo fluxo de add.
-UPDATE carts
-SET status                  = 'active',
-    payment_status          = 'pending',
-    cancelled_reason        = NULL,
-    expires_at              = NULL,
-    checkout_url            = NULL,
-    checkout_id             = NULL,
-    checkout_expires_at     = NULL,
-    paid_at                 = NULL,
-    payment_method          = NULL,
-    coupon_id               = NULL,
-    coupon_code             = NULL,
-    coupon_discount_cents   = 0,
-    erp_order_state         = 'none',
-    external_order_id       = NULL,
-    erp_stock_launched      = FALSE,
-    erp_op_started_at       = NULL
-WHERE id = $1;
-
 -- name: IssueShortIDForEvent :one
 -- Atomically issues the next short_id for the store that owns the given event.
 -- On first call for a store, INSERT seeds last_value at 1000 (the chosen
