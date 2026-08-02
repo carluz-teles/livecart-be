@@ -5105,6 +5105,32 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	intent := ParsePurchaseIntent(input.Text)
 	hasPurchaseIntent := intent != nil
 
+	// Window gates, para TODO tipo de evento.
+	//
+	// Antes viviam dentro do ramo isPostCommerce logo abaixo, então para live
+	// (type single/multi) não existia checagem nenhuma de janela: a única coisa
+	// que impedia venda fora do horário era o status = 'active' exigido pelas
+	// queries de resolução. Quando esse filtro sair (RN-20, para o sistema
+	// deixar de descartar comentário em silêncio), comentar num evento
+	// encerrado passaria a criar carrinho e reservar estoque de verdade.
+	// Extrair o gate primeiro é o que impede isso — por isso ele vem antes,
+	// numa entrega própria, e não junto da remoção do filtro.
+	//
+	// Só vale quando há intenção de compra: um comentário qualquer numa
+	// campanha encerrada não merece resposta automática.
+	if hasPurchaseIntent {
+		switch eventWindowState(event.Status, event.ScheduledAt, event.EndsAt, time.Now()) {
+		case windowNotStarted:
+			s.replyPostNotStarted(ctx, event, input, *event.ScheduledAt)
+			s.savePostComment(ctx, session.ID, event.ID, input, "event_not_started")
+			return nil
+		case windowEnded:
+			s.replyPostEnded(ctx, event, input)
+			s.savePostComment(ctx, session.ID, event.ID, input, "event_ended")
+			return nil
+		}
+	}
+
 	// Try to match product by keyword
 	var product *ProductRow
 	if hasPurchaseIntent {
@@ -5124,22 +5150,9 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	// the selected products participate, a single-product promotion auto-adds on a
 	// bare "EU QUERO", and an unavailable or ambiguous request gets a private
 	// reply listing what's available. When fully handled here, persist and stop.
+	// Os window gates que ficavam aqui subiram para logo depois do parse de
+	// intenção, valendo para todo tipo de evento.
 	if isPostCommerce(event.Type) && hasPurchaseIntent {
-		// Window gates (no background job): a buyer who comments before the
-		// event starts or after it ends gets a private reply explaining when,
-		// instead of having a cart created.
-		now := time.Now()
-		if event.ScheduledAt != nil && now.Before(*event.ScheduledAt) {
-			s.replyPostNotStarted(ctx, event, input, *event.ScheduledAt)
-			s.savePostComment(ctx, session.ID, event.ID, input, "event_not_started")
-			return nil
-		}
-		if event.Status == "ended" || (event.EndsAt != nil && now.After(*event.EndsAt)) {
-			s.replyPostEnded(ctx, event, input)
-			s.savePostComment(ctx, session.ID, event.ID, input, "event_ended")
-			return nil
-		}
-
 		resolved, handled, resultLabel := s.resolvePostEventProduct(ctx, event, input, intent, product)
 		if handled {
 			s.savePostComment(ctx, session.ID, event.ID, input, resultLabel)
