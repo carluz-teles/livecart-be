@@ -641,14 +641,25 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				webhookTicker := time.NewTicker(1 * time.Hour)
 				defer sweepTicker.Stop()
 				defer webhookTicker.Stop()
-				// Boot run: finaliza post/story cujo ends_at já fechou enquanto o
-				// serviço estava fora do ar (catch-up no deploy), em vez de
-				// esperar o primeiro tick. Mesmo padrão dos demais workers.
+				// Boot run: abre o que já devia estar aberto e finaliza o que já
+				// devia estar fechado enquanto o serviço estava fora do ar
+				// (catch-up no deploy), em vez de esperar o primeiro tick.
+				// Mesmo padrão dos demais workers.
+				//
+				// A ordem ABRIR → FECHAR é decisão explícita (E37): os dois
+				// predicados são disjuntos, então nenhum evento é ativado e
+				// encerrado no mesmo ciclo. Invertê-la não quebraria nada hoje,
+				// mas deixaria a corrida por conta do acaso.
+				liveSvc.SweepScheduledEventsReadyToStart(context.Background())
 				liveSvc.SweepEndedTimedEvents(context.Background())
 				for {
 					select {
 					case <-sweepTicker.C:
 						integrationSvc.RunERPOrderOpsSweep(context.Background())
+						// E37: ativa o evento agendado cuja hora chegou. Sem
+						// isto, post/story publicado por agendamento nunca
+						// vende — não há botão para apertar.
+						liveSvc.SweepScheduledEventsReadyToStart(context.Background())
 						// D5: finaliza post/story cujo ends_at fechou (arma
 						// expires_at nos carts → o expiry worker os alcança).
 						liveSvc.SweepEndedTimedEvents(context.Background())

@@ -394,6 +394,43 @@ func (s *Service) EndEventByMediaID(ctx context.Context, mediaID string) error {
 	return nil
 }
 
+// SweepScheduledEventsReadyToStart ativa os eventos agendados cuja hora marcada
+// já chegou. É a outra metade da E37: o botão "Iniciar live" resolve o evento de
+// live que o lojista acompanha, mas post/reel/story publicados por agendamento
+// não têm ninguém para apertar botão nenhum — sem este sweep eles nasceriam
+// 'scheduled' e morreriam 'ended' sem nunca aceitar um comentário.
+//
+// ORDEM IMPORTA e é decidida aqui, não pelo acaso do agendamento: este sweep
+// roda ANTES de SweepEndedTimedEvents no mesmo tick. Os dois predicados são
+// disjuntos de propósito (ListEventsReadyToStart exige ends_at ainda no futuro),
+// então um evento nunca é ativado e encerrado no mesmo ciclo — quem passou do
+// fim vai direto para 'ended', sem o event.ended extra de um active fantasma.
+//
+// É a REDE do horário, com granularidade do ticker (5 min). Quem quiser abrir na
+// hora exata usa o botão. Não há task ETA de abertura porque a janela não é
+// consumida só pelo status: WindowAt já usa starts_at/ends_at e um atraso de
+// minutos na ativação não vende nada fora do prazo — só adia a abertura.
+func (s *Service) SweepScheduledEventsReadyToStart(ctx context.Context) {
+	events, err := s.repo.ListEventsReadyToStart(ctx, 200)
+	if err != nil {
+		logger.From(ctx, s.logger).Error("activation sweep: failed to list scheduled events", zap.Error(err))
+		return
+	}
+	for _, ev := range events {
+		evCtx := logger.WithStore(ctx, ev.StoreID, "")
+		activated, err := s.repo.ActivateScheduledEvent(evCtx, ev.EventID)
+		if err != nil {
+			logger.From(evCtx, s.logger).Error("activation sweep: failed to activate event",
+				zap.String("event_id", ev.EventID), zap.Error(err))
+			continue
+		}
+		if activated {
+			logger.From(evCtx, s.logger).Info("scheduled event activated by sweep",
+				zap.String("event_id", ev.EventID))
+		}
+	}
+}
+
 // SweepEndedTimedEvents finaliza TODO evento cuja janela (ends_at) fechou —
 // não mais só post/reel/story. D5/RN-05: ends_at deixou de ser "horário
 // nominal" e virou o teto contratual da campanha, então restringir o sweep por
@@ -759,11 +796,67 @@ func (s *Service) Update(ctx context.Context, input UpdateLiveInput) (LiveOutput
 	return s.GetByID(ctx, event.ID, input.StoreID)
 }
 
+// Start é o "Iniciar live" do painel. E37: ele ATIVA o evento, não só a sessão.
+//
+// Antes daqui só saía StartSession, e isso era um no-op de negócio: a sessão já
+// nasce 'active' e todas as queries de resolução aceitam ('active','live'), de
+// modo que o UPDATE só carimbava started_at. O evento continuava 'scheduled', a
+// regra 4 de WindowAt continuava devolvendo WindowNotStarted e a ingestão
+// respondia "a live começa em <data já vencida>" para sempre. O lojista clicava,
+// recebia 200 e o badge não mudava — o botão mentia.
+//
+// Ativar antes de mexer na sessão é de propósito: se a sessão falhar (evento sem
+// sessão, por exemplo) o lojista recebe erro com o evento já ativo, que é o
+// estado que ele pediu; a ordem inversa deixaria a sessão iniciada num evento
+// que não vende.
 func (s *Service) Start(ctx context.Context, id, storeID string) (LiveOutput, error) {
-	// Verify event exists and belongs to store
-	_, err := s.repo.GetEventByID(ctx, id, storeID)
+	// Verify event exists and belongs to store. É esta checagem que autoriza
+	// ActivateScheduledEvent a rodar sem store_id no WHERE.
+	event, err := s.repo.GetEventByID(ctx, id, storeID)
 	if err != nil {
 		return LiveOutput{}, err
+	}
+	if event == nil {
+		return LiveOutput{}, httpx.ErrNotFound("event not found")
+	}
+
+	now := time.Now().UTC()
+	if WindowAt(event.Status, event.ScheduledAt, event.EndsAt, now) == WindowEnded {
+		// Sem este guard o botão ressuscitaria um evento encerrado: o sweep de
+		// ends_at o fecharia de novo no ciclo seguinte e o lojista veria o
+		// estado piscar. Antes daqui o pedido morria adiante com "no active
+		// session found for event", que não explica nada.
+		return LiveOutput{}, httpx.ErrUnprocessable("evento encerrado nao pode ser iniciado")
+	}
+
+	// Flip scheduled → active. Falso = já estava ativo: iniciar duas vezes é
+	// no-op, não erro.
+	activated, err := s.repo.ActivateScheduledEvent(ctx, id)
+	if err != nil {
+		return LiveOutput{}, err
+	}
+	if activated {
+		logger.From(ctx, s.logger).Info("scheduled event activated by merchant",
+			zap.String("event_id", id),
+		)
+	}
+
+	// "Iniciar" com a hora marcada ainda no futuro ANTECIPA a janela. Só flipar
+	// o status deixaria o evento 'active' e mesmo assim sem vender — a regra 2
+	// de WindowAt continua barrando enquanto starts_at não chega —, ou seja, o
+	// botão voltaria a mentir por outro motivo. Reusa applyEventWindow, o ponto
+	// único de escrita da janela; ends_at não é tocado, então não há task de
+	// fechamento para mover.
+	if event.ScheduledAt != nil && event.ScheduledAt.After(now) {
+		if err := s.applyEventWindow(ctx, id, storeID, EventWindowUpdate{
+			SetStartsAt: true, StartsAt: &now,
+		}, false); err != nil {
+			return LiveOutput{}, err
+		}
+		logger.From(ctx, s.logger).Info("event start pulled forward by merchant",
+			zap.String("event_id", id),
+			zap.Time("was_scheduled_at", *event.ScheduledAt),
+		)
 	}
 
 	// Get active session for this event

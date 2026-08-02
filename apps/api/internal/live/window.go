@@ -36,11 +36,26 @@ const (
 //     futuro e fim no passado é configuração incoerente e responder
 //     "começa em X" é mais útil ao comprador do que "acabou";
 //  3. ends_at vencido encerra;
-//  4. status 'scheduled' sem janela futura AINDA é "não começou". Este é o
-//     caso que a ingestão não cobria e que só o filtro status='active' das
-//     queries de resolução estava segurando: ActivateScheduledEvent não tem
-//     chamador nenhum, então um evento agendado NUNCA vira 'active' sozinho e
-//     ficaria vendendo para sempre com a hora marcada já vencida.
+//  4. status 'scheduled' SEM instante de início é "não começou".
+//
+// A regra 4 já foi mais larga: barrava TODO evento 'scheduled', inclusive o de
+// hora marcada já vencida. Isso era necessário enquanto nada ativava o evento —
+// ActivateScheduledEvent não tinha chamador, então um evento agendado nunca
+// virava 'active' e teria vendido para sempre com a hora vencida. O preço é que
+// ele também nunca vendia: o ciclo de vida completo de um evento agendado era
+// "não começou" → "encerrado" (E37).
+//
+// Com a ativação no ar (Service.Start pelo botão do lojista e
+// SweepScheduledEventsReadyToStart pelo horário), quem decide é a JANELA, não o
+// rótulo: starts_at no futuro já barra pela regra 2, e o status 'scheduled' que
+// sobrevive entre a hora marcada e o tick do sweep não deve mudar a resposta ao
+// comprador — se a janela abriu, a campanha vende.
+//
+// O resíduo da regra 4 é o caso sem instante nenhum: 'scheduled' sem starts_at
+// (nem scheduled_at, que é o que a leitura preenche aqui) é um evento que
+// declarou ter hora marcada e não diz qual. Não há como afirmar que começou, e
+// errar para "aberto" venderia antes da hora sem nada segurando. Não deveria
+// existir — Create só grava 'scheduled' quando recebe a data —, mas é barato.
 func WindowAt(storedStatus string, startsAt, endsAt *time.Time, now time.Time) Window {
 	if storedStatus == "ended" {
 		return WindowEnded
@@ -51,7 +66,7 @@ func WindowAt(storedStatus string, startsAt, endsAt *time.Time, now time.Time) W
 	if endsAt != nil && now.After(*endsAt) {
 		return WindowEnded
 	}
-	if storedStatus == "scheduled" {
+	if storedStatus == "scheduled" && startsAt == nil {
 		return WindowNotStarted
 	}
 	return WindowOpen

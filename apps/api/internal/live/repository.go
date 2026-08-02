@@ -489,11 +489,42 @@ func (r *Repository) EndEventByMediaID(ctx context.Context, mediaID string) erro
 	return err
 }
 
-// TimedEventRef identifies a post/story event for the ends_at finalization sweep
-// and the media-gone reroute (D5).
+// TimedEventRef identifies an event for the window sweeps (ready-to-start and
+// past-ends_at) and for the media-gone reroute (D5).
 type TimedEventRef struct {
 	EventID string
 	StoreID string
+}
+
+// ListEventsReadyToStart returns the scheduled events whose start instant has
+// passed and whose window is still open — the ones the activation sweep flips
+// to 'active' (E37).
+func (r *Repository) ListEventsReadyToStart(ctx context.Context, limit int32) ([]TimedEventRef, error) {
+	rows, err := r.q.ListEventsReadyToStart(ctx, limit)
+	if err != nil {
+		return nil, fmt.Errorf("listing events ready to start: %w", err)
+	}
+	out := make([]TimedEventRef, len(rows))
+	for i, row := range rows {
+		out[i] = TimedEventRef{EventID: row.ID.String(), StoreID: row.StoreID.String()}
+	}
+	return out, nil
+}
+
+// ActivateScheduledEvent flips a 'scheduled' event to 'active'. Devolve false
+// quando nada foi escrito — evento inexistente, já ativo ou já encerrado —, que
+// é a resposta esperada e não um erro: o UPDATE é o próprio guard de corrida
+// entre o botão do lojista e o sweep.
+func (r *Repository) ActivateScheduledEvent(ctx context.Context, eventID string) (bool, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.q.ActivateScheduledEvent(ctx, uid)
+	if err != nil {
+		return false, fmt.Errorf("activating scheduled event: %w", err)
+	}
+	return n > 0, nil
 }
 
 // ListEventsPastEndsAt returns active post/story events whose ends_at window has

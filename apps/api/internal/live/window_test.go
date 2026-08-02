@@ -37,13 +37,19 @@ func TestWindowAt(t *testing.T) {
 		{"agendado para daqui a pouco", "active", ptr(30 * time.Minute), nil, WindowNotStarted},
 		{"agendado com status scheduled", "scheduled", ptr(time.Hour), nil, WindowNotStarted},
 
-		// O BURACO que só o filtro status='active' das queries estava tapando:
-		// ActivateScheduledEvent não tem chamador, então um evento agendado
-		// nunca vira 'active' sozinho. Sem este caso, comentário numa campanha
-		// cuja hora marcada já passou criaria carrinho e reservaria estoque.
+		// E37: quem decide é a JANELA, não o rótulo. Um evento 'scheduled' cuja
+		// hora marcada já passou VENDE — ele está no intervalo que o lojista
+		// contratou, e o status só ainda não virou 'active' porque o sweep de 5
+		// em 5 minutos não passou. Antes estes dois casos devolviam
+		// WindowNotStarted e era isso que fazia o evento agendado nunca vender:
+		// o comprador recebia "ela começa em <data já vencida>" para sempre.
+		{"scheduled com a hora marcada ja vencida", "scheduled", ptr(-time.Hour), nil, WindowOpen},
+		{"scheduled vencido mas com ends_at futuro", "scheduled", ptr(-time.Hour), ptr(time.Hour), WindowOpen},
+		// O resíduo da regra 4: 'scheduled' sem instante nenhum diz ter hora
+		// marcada e não diz qual. Sem isto, errar para "aberto" venderia antes
+		// da hora com nada segurando.
 		{"scheduled sem data nenhuma", "scheduled", nil, nil, WindowNotStarted},
-		{"scheduled com a hora marcada ja vencida", "scheduled", ptr(-time.Hour), nil, WindowNotStarted},
-		{"scheduled vencido mas com ends_at futuro", "scheduled", ptr(-time.Hour), ptr(time.Hour), WindowNotStarted},
+		{"scheduled sem inicio mas com fim futuro", "scheduled", nil, ptr(time.Hour), WindowNotStarted},
 
 		// Já acabou — os dois caminhos.
 		{"status ended sem datas", "ended", nil, nil, WindowEnded},
@@ -92,7 +98,10 @@ func TestEffectiveStatusSegueWindowAt(t *testing.T) {
 		{"ends_at vencido", "active", nil, &past, "ended"},
 		{"inicio no futuro", "active", &future, nil, "scheduled"},
 		{"scheduled sem janela", "scheduled", nil, nil, "scheduled"},
-		{"scheduled com hora vencida", "scheduled", &past, nil, "scheduled"},
+		// E37: o painel passa a rotular "ativo" o evento cuja hora marcada
+		// chegou, mesmo antes de o sweep escrever o status. É o mesmo fato que
+		// a ingestão usa para vender — o rótulo e a decisão não podem divergir.
+		{"scheduled com hora vencida", "scheduled", &past, nil, "active"},
 	}
 
 	for _, tc := range cases {

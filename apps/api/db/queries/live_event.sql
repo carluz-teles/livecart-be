@@ -187,22 +187,51 @@ SET
 WHERE id = $1 AND store_id = $2
 RETURNING *;
 
--- name: GetScheduledEvents :many
-SELECT * FROM live_events
-WHERE store_id = $1 AND scheduled_at IS NOT NULL AND status = 'scheduled'
-ORDER BY scheduled_at ASC;
+-- GetScheduledEvents SAIU: era a terceira query sobre "eventos agendados" e a
+-- única sem chamador nenhum, com um predicado diferente das outras duas. Manter
+-- três respostas para a mesma pergunta é o que faz o próximo leitor consertar a
+-- errada (mesmo motivo da remoção de GetPlatformByLiveID).
 
 -- name: ListEventsReadyToStart :many
--- Find scheduled events that should be started (scheduled_at <= now)
-SELECT * FROM live_events
-WHERE status = 'scheduled' AND scheduled_at <= now()
-ORDER BY scheduled_at ASC;
+-- E37: os eventos AGENDADOS cuja hora marcada já passou e cuja janela ainda não
+-- fechou. É o par simétrico de ListEventsPastEndsAt: sem ele nada chama
+-- ActivateScheduledEvent, o evento nunca sai de 'scheduled' e o ciclo de vida
+-- inteiro de um evento agendado é "não começou" → "encerrado". Ele nunca vende.
+--
+-- COALESCE(starts_at, scheduled_at): starts_at é a coluna nova (000112) e
+-- scheduled_at é a legada que ainda decide o status inicial na criação. As duas
+-- são escritas em par por SetEventWindow, mas um evento gravado antes da 000112
+-- (ou por UpdateLiveEventDetails, que só toca a legada) pode ter só uma.
+--
+-- O filtro de ends_at é OBRIGATÓRIO, não higiene: sem ele, um evento cuja janela
+-- inteira passou enquanto o serviço estava fora do ar viraria 'active' agora só
+-- para o sweep de ends_at o encerrar no ciclo seguinte — duas escritas, um
+-- event.ended a mais e, no meio, uma janela em que ele ACEITA compra fora do
+-- prazo contratado. Quem passou do fim vai direto para 'ended' pelo outro sweep.
+--
+-- O LIMIT espelha o de ListEventsPastEndsAt. A versão anterior não tinha nenhum
+-- e carregaria a tabela inteira a cada 5 minutos.
+SELECT e.id, e.store_id
+FROM live_events e
+WHERE e.status = 'scheduled'
+  AND COALESCE(e.starts_at, e.scheduled_at) IS NOT NULL
+  AND COALESCE(e.starts_at, e.scheduled_at) <= now()
+  AND (e.ends_at IS NULL OR e.ends_at > now())
+ORDER BY COALESCE(e.starts_at, e.scheduled_at) ASC
+LIMIT $1;
 
--- name: ActivateScheduledEvent :one
+-- name: ActivateScheduledEvent :execrows
+-- Flip 'scheduled' → 'active'. O `AND status = 'scheduled'` é o guard de
+-- corrida, não decoração: o botão do lojista e o sweep de 5 em 5 minutos podem
+-- cair juntos no mesmo evento (só um escreve), e um evento já encerrado pelo
+-- sweep de ends_at nunca volta a ficar ativo.
+--
+-- Sem store_id de propósito: o sweep é global e não tem loja em mãos. Quem vem
+-- pelo caminho do lojista (Service.Start) já validou a posse com GetEventByID
+-- antes de chegar aqui.
 UPDATE live_events
 SET status = 'active', updated_at = now()
-WHERE id = $1 AND status = 'scheduled'
-RETURNING *;
+WHERE id = $1 AND status = 'scheduled';
 
 -- name: GetLiveEventWithCounts :one
 SELECT
@@ -230,11 +259,12 @@ WHERE e.id = $1 AND e.store_id = $2;
 -- Esta é a REDE. O caminho preciso é a task ETA event.window_close, armada na
 -- criação e re-armada na edição de ends_at.
 --
--- 'active' virou "não encerrado" (D19/D20): um evento AGENDADO que nunca foi
--- ativado — e nada o ativa sozinho, ActivateScheduledEvent não tem chamador —
--- também tem teto, e com o filtro antigo ele ficaria 'scheduled' para sempre
--- com a janela vencida. O status ended continua de fora porque encerrar duas
--- vezes é o que este predicado impede.
+-- 'active' virou "não encerrado" (D19/D20): um evento AGENDADO também tem teto,
+-- e com o filtro antigo ele ficaria 'scheduled' para sempre com a janela
+-- vencida. Continua valendo mesmo com a ativação da E37 no ar — o predicado de
+-- ListEventsReadyToStart recusa de propósito quem já passou do fim, então é
+-- ESTE sweep que encerra o evento agendado que nunca chegou a abrir. O status
+-- ended fica de fora porque encerrar duas vezes é o que este predicado impede.
 SELECT e.id, e.store_id
 FROM live_events e
 WHERE e.status <> 'ended'

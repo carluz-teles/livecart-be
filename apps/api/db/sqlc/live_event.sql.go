@@ -11,46 +11,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const activateScheduledEvent = `-- name: ActivateScheduledEvent :one
+const activateScheduledEvent = `-- name: ActivateScheduledEvent :execrows
 UPDATE live_events
 SET status = 'active', updated_at = now()
 WHERE id = $1 AND status = 'scheduled'
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, current_active_product_id, processing_paused, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active, ends_at, cart_extended_expiration_minutes, starts_at
 `
 
-func (q *Queries) ActivateScheduledEvent(ctx context.Context, id pgtype.UUID) (LiveEvent, error) {
-	row := q.db.QueryRow(ctx, activateScheduledEvent, id)
-	var i LiveEvent
-	err := row.Scan(
-		&i.ID,
-		&i.StoreID,
-		&i.Title,
-		&i.Status,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.TotalOrders,
-		&i.Type,
-		&i.CloseCartOnEventEnd,
-		&i.CartExpirationMinutes,
-		&i.CartMaxQuantityPerItem,
-		&i.SendOnLiveEnd,
-		&i.CurrentActiveProductID,
-		&i.ProcessingPaused,
-		&i.ScheduledAt,
-		&i.Description,
-		&i.FreeShipping,
-		&i.PixDiscountPercent,
-		&i.WaitlistNotifiedTtlMinutes,
-		&i.MediaID,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
-		&i.EndsAt,
-		&i.CartExtendedExpirationMinutes,
-		&i.StartsAt,
-	)
-	return i, err
+// Flip 'scheduled' → 'active'. O `AND status = 'scheduled'` é o guard de
+// corrida, não decoração: o botão do lojista e o sweep de 5 em 5 minutos podem
+// cair juntos no mesmo evento (só um escreve), e um evento já encerrado pelo
+// sweep de ends_at nunca volta a ficar ativo.
+//
+// Sem store_id de propósito: o sweep é global e não tem loja em mãos. Quem vem
+// pelo caminho do lojista (Service.Start) já validou a posse com GetEventByID
+// antes de chegar aqui.
+func (q *Queries) ActivateScheduledEvent(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, activateScheduledEvent, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const clearActiveProduct = `-- name: ClearActiveProduct :one
@@ -766,60 +746,6 @@ func (q *Queries) GetLiveModeState(ctx context.Context, arg GetLiveModeStatePara
 	return i, err
 }
 
-const getScheduledEvents = `-- name: GetScheduledEvents :many
-SELECT id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, current_active_product_id, processing_paused, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active, ends_at, cart_extended_expiration_minutes, starts_at FROM live_events
-WHERE store_id = $1 AND scheduled_at IS NOT NULL AND status = 'scheduled'
-ORDER BY scheduled_at ASC
-`
-
-func (q *Queries) GetScheduledEvents(ctx context.Context, storeID pgtype.UUID) ([]LiveEvent, error) {
-	rows, err := q.db.Query(ctx, getScheduledEvents, storeID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []LiveEvent{}
-	for rows.Next() {
-		var i LiveEvent
-		if err := rows.Scan(
-			&i.ID,
-			&i.StoreID,
-			&i.Title,
-			&i.Status,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.TotalOrders,
-			&i.Type,
-			&i.CloseCartOnEventEnd,
-			&i.CartExpirationMinutes,
-			&i.CartMaxQuantityPerItem,
-			&i.SendOnLiveEnd,
-			&i.CurrentActiveProductID,
-			&i.ProcessingPaused,
-			&i.ScheduledAt,
-			&i.Description,
-			&i.FreeShipping,
-			&i.PixDiscountPercent,
-			&i.WaitlistNotifiedTtlMinutes,
-			&i.MediaID,
-			&i.MediaPermalink,
-			&i.MediaThumbnailUrl,
-			&i.MediaCaption,
-			&i.WebhookActive,
-			&i.EndsAt,
-			&i.CartExtendedExpirationMinutes,
-			&i.StartsAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const getWaitlistNotifiedTTLByEvent = `-- name: GetWaitlistNotifiedTTLByEvent :one
 SELECT waitlist_notified_ttl_minutes FROM live_events WHERE id = $1
 `
@@ -900,50 +826,54 @@ func (q *Queries) ListEventsPastEndsAt(ctx context.Context, limit int32) ([]List
 }
 
 const listEventsReadyToStart = `-- name: ListEventsReadyToStart :many
-SELECT id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, current_active_product_id, processing_paused, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active, ends_at, cart_extended_expiration_minutes, starts_at FROM live_events
-WHERE status = 'scheduled' AND scheduled_at <= now()
-ORDER BY scheduled_at ASC
+
+SELECT e.id, e.store_id
+FROM live_events e
+WHERE e.status = 'scheduled'
+  AND COALESCE(e.starts_at, e.scheduled_at) IS NOT NULL
+  AND COALESCE(e.starts_at, e.scheduled_at) <= now()
+  AND (e.ends_at IS NULL OR e.ends_at > now())
+ORDER BY COALESCE(e.starts_at, e.scheduled_at) ASC
+LIMIT $1
 `
 
-// Find scheduled events that should be started (scheduled_at <= now)
-func (q *Queries) ListEventsReadyToStart(ctx context.Context) ([]LiveEvent, error) {
-	rows, err := q.db.Query(ctx, listEventsReadyToStart)
+type ListEventsReadyToStartRow struct {
+	ID      pgtype.UUID `json:"id"`
+	StoreID pgtype.UUID `json:"store_id"`
+}
+
+// GetScheduledEvents SAIU: era a terceira query sobre "eventos agendados" e a
+// única sem chamador nenhum, com um predicado diferente das outras duas. Manter
+// três respostas para a mesma pergunta é o que faz o próximo leitor consertar a
+// errada (mesmo motivo da remoção de GetPlatformByLiveID).
+// E37: os eventos AGENDADOS cuja hora marcada já passou e cuja janela ainda não
+// fechou. É o par simétrico de ListEventsPastEndsAt: sem ele nada chama
+// ActivateScheduledEvent, o evento nunca sai de 'scheduled' e o ciclo de vida
+// inteiro de um evento agendado é "não começou" → "encerrado". Ele nunca vende.
+//
+// COALESCE(starts_at, scheduled_at): starts_at é a coluna nova (000112) e
+// scheduled_at é a legada que ainda decide o status inicial na criação. As duas
+// são escritas em par por SetEventWindow, mas um evento gravado antes da 000112
+// (ou por UpdateLiveEventDetails, que só toca a legada) pode ter só uma.
+//
+// O filtro de ends_at é OBRIGATÓRIO, não higiene: sem ele, um evento cuja janela
+// inteira passou enquanto o serviço estava fora do ar viraria 'active' agora só
+// para o sweep de ends_at o encerrar no ciclo seguinte — duas escritas, um
+// event.ended a mais e, no meio, uma janela em que ele ACEITA compra fora do
+// prazo contratado. Quem passou do fim vai direto para 'ended' pelo outro sweep.
+//
+// O LIMIT espelha o de ListEventsPastEndsAt. A versão anterior não tinha nenhum
+// e carregaria a tabela inteira a cada 5 minutos.
+func (q *Queries) ListEventsReadyToStart(ctx context.Context, limit int32) ([]ListEventsReadyToStartRow, error) {
+	rows, err := q.db.Query(ctx, listEventsReadyToStart, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []LiveEvent{}
+	items := []ListEventsReadyToStartRow{}
 	for rows.Next() {
-		var i LiveEvent
-		if err := rows.Scan(
-			&i.ID,
-			&i.StoreID,
-			&i.Title,
-			&i.Status,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.TotalOrders,
-			&i.Type,
-			&i.CloseCartOnEventEnd,
-			&i.CartExpirationMinutes,
-			&i.CartMaxQuantityPerItem,
-			&i.SendOnLiveEnd,
-			&i.CurrentActiveProductID,
-			&i.ProcessingPaused,
-			&i.ScheduledAt,
-			&i.Description,
-			&i.FreeShipping,
-			&i.PixDiscountPercent,
-			&i.WaitlistNotifiedTtlMinutes,
-			&i.MediaID,
-			&i.MediaPermalink,
-			&i.MediaThumbnailUrl,
-			&i.MediaCaption,
-			&i.WebhookActive,
-			&i.EndsAt,
-			&i.CartExtendedExpirationMinutes,
-			&i.StartsAt,
-		); err != nil {
+		var i ListEventsReadyToStartRow
+		if err := rows.Scan(&i.ID, &i.StoreID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
