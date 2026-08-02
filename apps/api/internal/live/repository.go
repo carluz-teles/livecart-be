@@ -141,6 +141,14 @@ func emitEventCreated(ctx context.Context, q *sqlc.Queries, e sqlc.LiveEvent) er
 
 // CreateEventWithSessionTx creates an event, session, and platform in a single transaction.
 // This ensures atomicity - either all operations succeed or all are rolled back.
+//
+// platform/platformLiveID VAZIOS são legítimos: a D1 diz que dá para criar a
+// sessão ANTES de a mídia existir (o lojista marca a campanha antes de ter o id
+// da live). Nesse caso a sessão nasce sem plataforma e a mídia entra depois por
+// AddPlatformToSession. O que NÃO pode existir é evento sem sessão nenhuma:
+// desde que a whitelist e o modo live desceram para live_sessions (000110/
+// 000111), um evento sem sessão não tem onde guardar configuração — a whitelist
+// gravava zero linhas e a leitura devolvia 404.
 func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params CreateEventParams, platform, platformLiveID string) (EventRow, SessionRow, *PlatformRow, error) {
 	storeUID, err := parseUUID(params.StoreID)
 	if err != nil {
@@ -216,14 +224,24 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 		return EventRow{}, SessionRow{}, nil, fmt.Errorf("creating live session: %w", err)
 	}
 
-	// 3. Add the platform to the session
-	platformRow, err := qtx.AddPlatformToSession(ctx, sqlc.AddPlatformToSessionParams{
-		SessionID:      sessionRow.ID,
-		Platform:       platform,
-		PlatformLiveID: platformLiveID,
-	})
-	if err != nil {
-		return EventRow{}, SessionRow{}, nil, fmt.Errorf("adding platform to session: %w", err)
+	// 3. Add the platform to the session — só quando a mídia já é conhecida.
+	var platformRow *PlatformRow
+	if platform != "" && platformLiveID != "" {
+		row, err := qtx.AddPlatformToSession(ctx, sqlc.AddPlatformToSessionParams{
+			SessionID:      sessionRow.ID,
+			Platform:       platform,
+			PlatformLiveID: platformLiveID,
+		})
+		if err != nil {
+			return EventRow{}, SessionRow{}, nil, fmt.Errorf("adding platform to session: %w", err)
+		}
+		platformRow = &PlatformRow{
+			ID:             row.ID.String(),
+			SessionID:      row.SessionID.String(),
+			Platform:       row.Platform,
+			PlatformLiveID: row.PlatformLiveID,
+			AddedAt:        row.AddedAt.Time,
+		}
 	}
 
 	// Emit event.created + session.created in the same tx (transactional outbox).
@@ -239,79 +257,18 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 		return EventRow{}, SessionRow{}, nil, fmt.Errorf("committing transaction: %w", err)
 	}
 
-	event := toEventRow(eventRow)
-	session := toSessionRow(sessionRow)
-	platformOut := &PlatformRow{
-		ID:             platformRow.ID.String(),
-		SessionID:      platformRow.SessionID.String(),
-		Platform:       platformRow.Platform,
-		PlatformLiveID: platformRow.PlatformLiveID,
-		AddedAt:        platformRow.AddedAt.Time,
-	}
-
-	return event, session, platformOut, nil
+	return toEventRow(eventRow), toSessionRow(sessionRow), platformRow, nil
 }
 
 // =============================================================================
 // EVENT OPERATIONS
 // =============================================================================
 
-func (r *Repository) CreateEvent(ctx context.Context, params CreateEventParams) (EventRow, error) {
-	storeUID, err := parseUUID(params.StoreID)
-	if err != nil {
-		return EventRow{}, err
-	}
-
-	// Sem sessão aqui: só o rótulo legado do evento (ver CreateEventWithSessionTx).
-	eventType := LegacyEventType(params.Type)
-	if eventType == "" {
-		eventType = "single"
-	}
-
-	// Convert nullable ints to pgtype.Int4
-	var cartExpirationMinutes, cartMaxQuantityPerItem pgtype.Int4
-	if params.CartExpirationMinutes != nil {
-		cartExpirationMinutes = pgtype.Int4{Int32: int32(*params.CartExpirationMinutes), Valid: true}
-	}
-	if params.CartMaxQuantityPerItem != nil {
-		cartMaxQuantityPerItem = pgtype.Int4{Int32: int32(*params.CartMaxQuantityPerItem), Valid: true}
-	}
-
-	// Convert nullable bool to pgtype.Bool
-	var autoSendCheckoutLinks pgtype.Bool
-	if params.SendOnLiveEnd != nil {
-		autoSendCheckoutLinks = pgtype.Bool{Bool: *params.SendOnLiveEnd, Valid: true}
-	}
-
-	// Convert scheduling fields
-	var scheduledAt pgtype.Timestamptz
-	if params.ScheduledAt != nil {
-		scheduledAt = pgtype.Timestamptz{Time: *params.ScheduledAt, Valid: true}
-	}
-	var description pgtype.Text
-	if params.Description != nil {
-		description = pgtype.Text{String: *params.Description, Valid: true}
-	}
-
-	// Use CreateLiveEventFull to include scheduling fields
-	row, err := r.q.CreateLiveEventFull(ctx, sqlc.CreateLiveEventFullParams{
-		StoreID:                storeUID,
-		Title:                  pgtype.Text{String: params.Title, Valid: params.Title != ""},
-		Type:                   eventType,
-		Status:                 params.Status,
-		CloseCartOnEventEnd:    params.CloseCartOnEventEnd,
-		CartExpirationMinutes:  cartExpirationMinutes,
-		CartMaxQuantityPerItem: cartMaxQuantityPerItem,
-		SendOnLiveEnd:          autoSendCheckoutLinks,
-		ScheduledAt:            scheduledAt,
-		Description:            description,
-	})
-	if err != nil {
-		return EventRow{}, fmt.Errorf("creating live event: %w", err)
-	}
-
-	return toEventRow(row), nil
-}
+// CreateEvent (evento SEM sessão) foi removida: era o único caminho capaz de
+// produzir um evento sem sessão nenhuma, e desde que a whitelist (000110) e o
+// modo live (000111) desceram para live_sessions esse evento não tem onde
+// guardar configuração. Toda criação passa por CreateEventWithSessionTx, que
+// aceita mídia vazia.
 
 // GetPixDiscountPercent returns the pix_discount_percent column for an event.
 // Loaded via raw SQL because the field is not yet wired through sqlc.
@@ -1149,8 +1106,8 @@ func (r *Repository) RemovePlatformFromSession(ctx context.Context, sessionID, p
 }
 
 // GetPlatformByLiveID foi removida junto com a query: sem chamador e, depois da
-// 000115, um `:one` sobre uma coluna que deixou de ser unica — devolveria uma
-// campanha arbitraria, em silencio. Ver a nota em db/queries/live.sql.
+// 000115, um `:one` sobre uma coluna que deixou de ser única — devolveria uma
+// campanha arbitrária, em silêncio. Ver a nota em db/queries/live.sql.
 
 // =============================================================================
 // STORE SETTINGS

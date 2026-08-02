@@ -414,13 +414,13 @@ type MediaRef struct {
 // CreatePostRequest is the HTTP payload to create a post-commerce event.
 // StartsAt/EndsAt are optional ISO8601 timestamps (with timezone).
 type CreatePostRequest struct {
-	Title                  string   `json:"title"`
-	MediaID                string   `json:"mediaId" validate:"required"`
-	MediaPermalink         string   `json:"mediaPermalink"`
-	MediaThumbnailURL      string   `json:"mediaThumbnailUrl"`
-	MediaCaption           string   `json:"mediaCaption"`
-	ProductIDs []string `json:"productIds" validate:"required,min=1"`
-	StartsAt   *string  `json:"startsAt"`
+	Title             string   `json:"title"`
+	MediaID           string   `json:"mediaId" validate:"required"`
+	MediaPermalink    string   `json:"mediaPermalink"`
+	MediaThumbnailURL string   `json:"mediaThumbnailUrl"`
+	MediaCaption      string   `json:"mediaCaption"`
+	ProductIDs        []string `json:"productIds" validate:"required,min=1"`
+	StartsAt          *string  `json:"startsAt"`
 	// EndsAt é OBRIGATÓRIO (RN-05/CA-05.1). Sem teto, a RN-04 (expires_at NULL
 	// durante o evento) deixa o carrinho sem prazo para sempre.
 	EndsAt *string `json:"endsAt" validate:"required"`
@@ -479,8 +479,8 @@ type CreateLiveRequest struct {
 	CloseCartOnEventEnd *bool `json:"closeCartOnEventEnd"`
 	// min=15 espelha o CHECK da migration 000104. Estava em 5 e um valor entre
 	// 5 e 14 passava na validação e estourava no banco como 500 (lição E6).
-	CartExpirationMinutes  *int `json:"cartExpirationMinutes" validate:"omitempty,min=15,max=1440"`
-	CartMaxQuantityPerItem *int `json:"cartMaxQuantityPerItem" validate:"omitempty,min=1,max=100"`
+	CartExpirationMinutes  *int  `json:"cartExpirationMinutes" validate:"omitempty,min=15,max=1440"`
+	CartMaxQuantityPerItem *int  `json:"cartMaxQuantityPerItem" validate:"omitempty,min=1,max=100"`
 	SendOnLiveEnd          *bool `json:"sendOnLiveEnd"`
 	// PixDiscountPercent (0-100). 0 disables the feature.
 	PixDiscountPercent *int `json:"pixDiscountPercent" validate:"omitempty,min=0,max=100"`

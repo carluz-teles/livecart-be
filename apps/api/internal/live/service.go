@@ -148,73 +148,35 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		status = "scheduled"
 	}
 
-	// If platform info is provided, create everything in a single transaction
-	if input.Platform != nil && input.PlatformLiveID != nil && *input.Platform != "" && *input.PlatformLiveID != "" {
-		event, session, _, err := s.repo.CreateEventWithSessionTx(ctx, CreateEventParams{
-			StoreID:                input.StoreID,
-			Title:                  input.Title,
-			Type:                   eventType,
-			Status:                 status,
-			CloseCartOnEventEnd:    closeCartOnEventEnd,
-			CartExpirationMinutes:  input.CartExpirationMinutes,
-			CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
-			SendOnLiveEnd:          input.SendOnLiveEnd,
-			ScheduledAt:            input.ScheduledAt,
-			Description:            input.Description,
-		}, *input.Platform, *input.PlatformLiveID)
-		if err != nil {
-			logger.From(ctx, s.logger).Error("failed to create live with session",
-				zap.Error(err),
-			)
-			return CreateLiveOutput{}, err
-		}
-
-		logger.From(ctx, s.logger).Info("live created with session",
-			zap.String("event_id", event.ID),
-			zap.String("session_id", session.ID),
-			zap.String("platform", *input.Platform),
-			zap.String("platform_live_id", *input.PlatformLiveID),
-		)
-
-		// Persist the optional pix discount as a follow-up update — the column
-		// is not yet wired into the sqlc-generated INSERT.
-		if input.PixDiscountPercent != nil && *input.PixDiscountPercent > 0 {
-			if err := s.repo.SetPixDiscountPercent(ctx, event.ID, input.StoreID, *input.PixDiscountPercent); err != nil {
-				logger.From(ctx, s.logger).Warn("failed to set pix_discount_percent on create",
-					zap.String("event_id", event.ID),
-					zap.Error(err),
-				)
-			}
-		}
-
-		if input.WaitlistNotifiedTTLMinutes != nil {
-			if err := s.repo.SetWaitlistNotifiedTTLMinutes(ctx, event.ID, input.StoreID, *input.WaitlistNotifiedTTLMinutes); err != nil {
-				logger.From(ctx, s.logger).Warn("failed to set waitlist_notified_ttl_minutes on create",
-					zap.String("event_id", event.ID),
-					zap.Error(err),
-				)
-			}
-		}
-
-		if err := s.applyEventWindow(ctx, event.ID, input.StoreID, EventWindowUpdate{
-			SetStartsAt: true, StartsAt: startsAt,
-			SetEndsAt: true, EndsAt: input.EndsAt,
-		}, false); err != nil {
-			return CreateLiveOutput{}, err
-		}
-
-		return CreateLiveOutput{
-			ID:        event.ID,
-			Title:     event.Title,
-			Type:      event.Type,
-			Platform:  *input.Platform,
-			Status:    event.Status,
-			CreatedAt: event.CreatedAt,
-		}, nil
+	// A mídia é OPCIONAL na criação; a SESSÃO não é.
+	//
+	// Havia dois caminhos aqui — com plataforma (evento+sessão numa transação) e
+	// sem plataforma (só o evento) — e o segundo produzia um evento SEM SESSÃO
+	// NENHUMA. Isso era inofensivo enquanto whitelist e modo live moravam em
+	// live_events; desde a 000110/000111 eles moram em live_sessions, e o evento
+	// sem sessão deixou de ter onde guardar configuração: POST /lives/:id/whitelist
+	// gravava zero linhas e respondia 404 ("produto nao esta na whitelist"), e
+	// destacar produto virava no-op silencioso. O formulário de evento do painel
+	// só manda platformLiveId quando o lojista já tem o id da live — ou seja, o
+	// caminho quebrado era o CAMINHO PADRÃO de criar um evento.
+	//
+	// A D1 já prevê "criar a sessão antes de a mídia existir": a sessão nasce
+	// aqui e a mídia entra depois por AddPlatformToSession. Os dois ramos viram
+	// um só — a duplicação era o que deixava o ramo sem plataforma para trás a
+	// cada regra nova (a janela e o TTL da fila já tiveram de ser escritos duas
+	// vezes logo abaixo).
+	platform, platformLiveID := "", ""
+	if input.Platform != nil {
+		platform = *input.Platform
+	}
+	if input.PlatformLiveID != nil {
+		platformLiveID = *input.PlatformLiveID
+	}
+	if platform == "" || platformLiveID == "" {
+		platform, platformLiveID = "", ""
 	}
 
-	// No platform info - just create the event
-	event, err := s.repo.CreateEvent(ctx, CreateEventParams{
+	event, session, _, err := s.repo.CreateEventWithSessionTx(ctx, CreateEventParams{
 		StoreID:                input.StoreID,
 		Title:                  input.Title,
 		Type:                   eventType,
@@ -225,11 +187,23 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		SendOnLiveEnd:          input.SendOnLiveEnd,
 		ScheduledAt:            input.ScheduledAt,
 		Description:            input.Description,
-	})
+	}, platform, platformLiveID)
 	if err != nil {
+		logger.From(ctx, s.logger).Error("failed to create live with session",
+			zap.Error(err),
+		)
 		return CreateLiveOutput{}, err
 	}
 
+	logger.From(ctx, s.logger).Info("live created with session",
+		zap.String("event_id", event.ID),
+		zap.String("session_id", session.ID),
+		zap.String("platform", platform),
+		zap.String("platform_live_id", platformLiveID),
+	)
+
+	// Persist the optional pix discount as a follow-up update — the column
+	// is not yet wired into the sqlc-generated INSERT.
 	if input.PixDiscountPercent != nil && *input.PixDiscountPercent > 0 {
 		if err := s.repo.SetPixDiscountPercent(ctx, event.ID, input.StoreID, *input.PixDiscountPercent); err != nil {
 			logger.From(ctx, s.logger).Warn("failed to set pix_discount_percent on create",
@@ -255,16 +229,11 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		return CreateLiveOutput{}, err
 	}
 
-	logger.From(ctx, s.logger).Info("live created without session",
-		zap.String("event_id", event.ID),
-		zap.String("type", eventType),
-	)
-
 	return CreateLiveOutput{
 		ID:        event.ID,
 		Title:     event.Title,
 		Type:      event.Type,
-		Platform:  "",
+		Platform:  platform,
 		Status:    event.Status,
 		CreatedAt: event.CreatedAt,
 	}, nil
@@ -687,8 +656,8 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		Sessions:               sessions,
 
 		WaitlistNotifiedTTLMinutes: event.WaitlistNotifiedTTLMinutes,
-		CreatedAt:              event.CreatedAt,
-		UpdatedAt:              event.UpdatedAt,
+		CreatedAt:                  event.CreatedAt,
+		UpdatedAt:                  event.UpdatedAt,
 	}, nil
 }
 
