@@ -93,18 +93,23 @@ func (r *Repository) GetMonthlyRevenue(ctx context.Context, storeID string) ([]M
 }
 
 func (r *Repository) GetTopProducts(ctx context.Context, storeID string) ([]TopProductRow, error) {
+	// RN-14: lia cart_items de TODO carrinho da loja, sem filtro de pagamento —
+	// "mais vendidos" incluía carrinho aberto, expirado e cancelado. A versão
+	// correta já existia em dois lugares (dashboard.sql:GetTopProducts, com
+	// teste em product_revenue_paid_only_test.go, e GetTopProductsRange), só que
+	// nenhum dos dois era o que a rota servia. Esta query é a de dashboard.sql,
+	// palavra por palavra.
 	query := `
 		SELECT
 			p.id,
 			p.name,
 			p.keyword,
-			COALESCE(SUM(ci.quantity), 0)::INT as total_sold,
-			COALESCE(SUM(ci.quantity * ci.unit_price), 0)::BIGINT as total_revenue
-		FROM products p
-		JOIN cart_items ci ON ci.product_id = p.id
-		JOIN carts c ON c.id = ci.cart_id
-		JOIN live_events le ON le.id = c.event_id
-		WHERE le.store_id = $1
+			COALESCE(SUM(oi.quantity), 0)::INT as total_sold,
+			COALESCE(SUM(oi.quantity * oi.unit_price), 0)::BIGINT as total_revenue
+		FROM order_items oi
+		JOIN orders o ON o.id = oi.order_id
+		JOIN products p ON p.id = oi.product_id
+		WHERE o.store_id = $1 AND o.status = 'paid'
 		GROUP BY p.id, p.name, p.keyword
 		ORDER BY total_sold DESC
 		LIMIT 5
@@ -265,18 +270,21 @@ func (r *Repository) GetAggregatedFunnel(ctx context.Context, storeID string, da
 
 // GetTopBuyers returns the top 5 buyers by total spent
 func (r *Repository) GetTopBuyers(ctx context.Context, storeID string) ([]TopBuyerRow, error) {
+	// RN-14: o valor gasto sai do congelado (orders.total_cents), não de uma
+	// re-soma dos cart_items vivos — um carrinho pago que for editado depois
+	// mudaria o "quanto este cliente já gastou". A identidade do comprador
+	// continua no cart, que é quem guarda platform_user_id/handle. Mesma forma
+	// de GetTopBuyersRange, sem a janela.
 	query := `
 		SELECT
 			c.platform_user_id as id,
 			c.platform_handle as handle,
-			COUNT(DISTINCT c.id)::INT as total_orders,
-			COALESCE(SUM(
-				(SELECT COALESCE(SUM(ci.quantity * ci.unit_price), 0) FROM cart_items ci WHERE ci.cart_id = c.id)
-			), 0)::BIGINT as total_spent,
+			COUNT(*)::INT as total_orders,
+			COALESCE(SUM(o.total_cents), 0)::BIGINT as total_spent,
 			MAX(c.created_at) as last_purchase_at
-		FROM carts c
-		JOIN live_events e ON e.id = c.event_id
-		WHERE e.store_id = $1 AND c.payment_status = 'paid'
+		FROM orders o
+		JOIN carts c ON c.id = o.cart_id
+		WHERE o.store_id = $1 AND o.status = 'paid'
 		GROUP BY c.platform_user_id, c.platform_handle
 		ORDER BY total_spent DESC
 		LIMIT 5
@@ -312,17 +320,22 @@ func (r *Repository) GetTopBuyers(ctx context.Context, storeID string) ([]TopBuy
 
 // GetProductSales returns monthly sales data by product for stacked bar chart
 func (r *Repository) GetProductSales(ctx context.Context, storeID string) (*ProductSalesOutput, error) {
+	// RN-14: "vendas" aqui somava cart_items de qualquer carrinho, então um
+	// produto que ninguém pagou aparecia no gráfico. As duas queries passam a
+	// ler o congelado, e o eixo do tempo vira o paid_at do pedido — a data em
+	// que a venda ACONTECEU — em vez do created_at do carrinho, alinhando com
+	// GetMonthlyRevenue.
+
 	// First, get unique products that have sales
 	productsQuery := `
 		SELECT DISTINCT
 			p.id,
 			p.name,
 			p.keyword
-		FROM products p
-		JOIN cart_items ci ON ci.product_id = p.id
-		JOIN carts c ON c.id = ci.cart_id
-		JOIN live_events le ON le.id = c.event_id
-		WHERE le.store_id = $1
+		FROM order_items oi
+		JOIN orders o ON o.id = oi.order_id
+		JOIN products p ON p.id = oi.product_id
+		WHERE o.store_id = $1 AND o.status = 'paid'
 		ORDER BY p.name
 		LIMIT 10
 	`
@@ -354,17 +367,16 @@ func (r *Repository) GetProductSales(ctx context.Context, storeID string) (*Prod
 	// Get monthly sales by product
 	salesQuery := `
 		SELECT
-			TO_CHAR(c.created_at, 'Mon') as month,
-			EXTRACT(MONTH FROM c.created_at)::INT as month_num,
+			TO_CHAR(o.paid_at, 'Mon') as month,
+			EXTRACT(MONTH FROM o.paid_at)::INT as month_num,
 			p.id as product_id,
-			COALESCE(SUM(ci.quantity * ci.unit_price), 0)::BIGINT as revenue
-		FROM carts c
-		JOIN live_events le ON le.id = c.event_id
-		JOIN cart_items ci ON ci.cart_id = c.id
-		JOIN products p ON p.id = ci.product_id
-		WHERE le.store_id = $1
-		  AND c.created_at >= date_trunc('year', CURRENT_DATE)
-		GROUP BY TO_CHAR(c.created_at, 'Mon'), EXTRACT(MONTH FROM c.created_at), p.id
+			COALESCE(SUM(oi.quantity * oi.unit_price), 0)::BIGINT as revenue
+		FROM order_items oi
+		JOIN orders o ON o.id = oi.order_id
+		JOIN products p ON p.id = oi.product_id
+		WHERE o.store_id = $1 AND o.status = 'paid'
+		  AND o.paid_at >= date_trunc('year', CURRENT_DATE)
+		GROUP BY TO_CHAR(o.paid_at, 'Mon'), EXTRACT(MONTH FROM o.paid_at), p.id
 		ORDER BY month_num, p.id
 	`
 
@@ -416,16 +428,17 @@ func (r *Repository) GetProductSales(ctx context.Context, storeID string) (*Prod
 
 // GetRevenueByPaymentMethod returns revenue grouped by payment method
 func (r *Repository) GetRevenueByPaymentMethod(ctx context.Context, storeID string) ([]RevenueByPaymentRow, error) {
+	// RN-14: a receita vem do congelado. O método de pagamento continua no cart
+	// (é lá que o webhook grava), mas o valor não pode ser re-somado dos
+	// cart_items — a fatia de PIX mudaria se o carrinho pago fosse editado.
 	query := `
 		SELECT
 			COALESCE(c.payment_method, 'other') as payment_method,
-			COALESCE(SUM(ci.quantity * ci.unit_price), 0)::BIGINT as revenue,
-			COUNT(DISTINCT c.id)::INT as count
-		FROM carts c
-		JOIN live_events le ON le.id = c.event_id
-		JOIN cart_items ci ON ci.cart_id = c.id
-		WHERE le.store_id = $1
-		  AND c.payment_status = 'paid'
+			COALESCE(SUM(o.total_cents), 0)::BIGINT as revenue,
+			COUNT(*)::INT as count
+		FROM orders o
+		JOIN carts c ON c.id = o.cart_id
+		WHERE o.store_id = $1 AND o.status = 'paid'
 		GROUP BY c.payment_method
 		ORDER BY revenue DESC
 	`

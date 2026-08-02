@@ -116,7 +116,7 @@ func seedPaidCart(t *testing.T, qty int32, unitPrice int64, discountCents, shipp
 
 	var eventID string
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title) VALUES ($1, 'ended', 'Ev') RETURNING id::text`, storeID,
+		`INSERT INTO live_events (store_id, status, title, ends_at) VALUES ($1, 'ended', 'Ev', now()) RETURNING id::text`, storeID,
 	).Scan(&eventID); err != nil {
 		t.Fatalf("seedPaidCart event: %v", err)
 	}

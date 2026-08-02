@@ -88,7 +88,7 @@ INSERT INTO notification_logs (
     notification_type, channel, status, message_text
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id
+RETURNING id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason
 `
 
 type CreateNotificationLogParams struct {
@@ -134,6 +134,7 @@ func (q *Queries) CreateNotificationLog(ctx context.Context, arg CreateNotificat
 		&i.CreatedAt,
 		&i.SentAt,
 		&i.ProviderMessageID,
+		&i.UndeliveredReason,
 	)
 	return i, err
 }
@@ -157,7 +158,7 @@ func (q *Queries) FindStoreByActiveTestSetupCode(ctx context.Context, notificati
 }
 
 const getLastNotificationForUser = `-- name: GetLastNotificationForUser :one
-SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id FROM notification_logs
+SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason FROM notification_logs
 WHERE store_id = $1 AND platform_user_id = $2 AND status = 'sent'
 ORDER BY created_at DESC
 LIMIT 1
@@ -187,12 +188,13 @@ func (q *Queries) GetLastNotificationForUser(ctx context.Context, arg GetLastNot
 		&i.CreatedAt,
 		&i.SentAt,
 		&i.ProviderMessageID,
+		&i.UndeliveredReason,
 	)
 	return i, err
 }
 
 const getNotificationByCartAndType = `-- name: GetNotificationByCartAndType :one
-SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id FROM notification_logs
+SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason FROM notification_logs
 WHERE cart_id = $1 AND notification_type = $2 AND status = 'sent'
 LIMIT 1
 `
@@ -221,6 +223,7 @@ func (q *Queries) GetNotificationByCartAndType(ctx context.Context, arg GetNotif
 		&i.CreatedAt,
 		&i.SentAt,
 		&i.ProviderMessageID,
+		&i.UndeliveredReason,
 	)
 	return i, err
 }
@@ -303,7 +306,7 @@ func (q *Queries) GetStoreTestRecipient(ctx context.Context, id pgtype.UUID) (Ge
 }
 
 const listNotificationsByEvent = `-- name: ListNotificationsByEvent :many
-SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id FROM notification_logs
+SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason FROM notification_logs
 WHERE event_id = $1
 ORDER BY created_at DESC
 `
@@ -333,6 +336,7 @@ func (q *Queries) ListNotificationsByEvent(ctx context.Context, eventID pgtype.U
 			&i.CreatedAt,
 			&i.SentAt,
 			&i.ProviderMessageID,
+			&i.UndeliveredReason,
 		); err != nil {
 			return nil, err
 		}
@@ -345,7 +349,7 @@ func (q *Queries) ListNotificationsByEvent(ctx context.Context, eventID pgtype.U
 }
 
 const listNotificationsByStore = `-- name: ListNotificationsByStore :many
-SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id FROM notification_logs
+SELECT id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason FROM notification_logs
 WHERE store_id = $1
 ORDER BY created_at DESC
 LIMIT $2
@@ -381,6 +385,7 @@ func (q *Queries) ListNotificationsByStore(ctx context.Context, arg ListNotifica
 			&i.CreatedAt,
 			&i.SentAt,
 			&i.ProviderMessageID,
+			&i.UndeliveredReason,
 		); err != nil {
 			return nil, err
 		}
@@ -390,6 +395,108 @@ func (q *Queries) ListNotificationsByStore(ctx context.Context, arg ListNotifica
 		return nil, err
 	}
 	return items, nil
+}
+
+const listUndeliveredByEvent = `-- name: ListUndeliveredByEvent :many
+SELECT DISTINCT ON (nl.platform_user_id)
+    nl.id,
+    nl.platform_user_id,
+    nl.platform_handle,
+    nl.notification_type,
+    nl.undelivered_reason,
+    nl.created_at,
+    nl.cart_id,
+    c.token AS cart_token,
+    COALESCE(cart_product_total_cents(c.id), 0)::bigint AS cart_total_cents,
+    COALESCE((SELECT SUM(ci.quantity)::int FROM cart_items ci WHERE ci.cart_id = c.id), 0)::int AS cart_total_items
+FROM notification_logs nl
+LEFT JOIN carts c ON c.id = nl.cart_id
+WHERE nl.store_id = $1
+  AND nl.event_id = $2
+  AND nl.undelivered_reason IS NOT NULL
+ORDER BY nl.platform_user_id, nl.created_at DESC
+`
+
+type ListUndeliveredByEventParams struct {
+	StoreID pgtype.UUID `json:"store_id"`
+	EventID pgtype.UUID `json:"event_id"`
+}
+
+type ListUndeliveredByEventRow struct {
+	ID                pgtype.UUID        `json:"id"`
+	PlatformUserID    string             `json:"platform_user_id"`
+	PlatformHandle    pgtype.Text        `json:"platform_handle"`
+	NotificationType  string             `json:"notification_type"`
+	UndeliveredReason pgtype.Text        `json:"undelivered_reason"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	CartID            pgtype.UUID        `json:"cart_id"`
+	CartToken         pgtype.Text        `json:"cart_token"`
+	CartTotalCents    int64              `json:"cart_total_cents"`
+	CartTotalItems    int32              `json:"cart_total_items"`
+}
+
+// RN-38 — os compradores que nao puderam ser avisados nesta campanha, um por
+// linha, com o carrinho e o link para o lojista chamar na mao.
+//
+// O filtro e undelivered_reason IS NOT NULL, e nao status = 'undelivered', de
+// proposito: a lista tem de conter tambem o que foi TENTADO e recusado pelo
+// Instagram (status 'failed' + motivo). O status continua distinguindo
+// "nem tentamos" de "tentamos e recusaram"; quem responde "quem eu preciso
+// chamar na mao" e a coluna de motivo.
+//
+// DISTINCT ON por comprador: uma campanha longa pode ter varias mensagens nao
+// entregues para a MESMA pessoa (o prazo do Instagram fechou para ela, entao
+// fecha para tudo). Listar cada tentativa transformaria a lista de "quem
+// chamar" numa lista de log — o lojista precisa de pessoas, nao de eventos.
+func (q *Queries) ListUndeliveredByEvent(ctx context.Context, arg ListUndeliveredByEventParams) ([]ListUndeliveredByEventRow, error) {
+	rows, err := q.db.Query(ctx, listUndeliveredByEvent, arg.StoreID, arg.EventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListUndeliveredByEventRow{}
+	for rows.Next() {
+		var i ListUndeliveredByEventRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PlatformUserID,
+			&i.PlatformHandle,
+			&i.NotificationType,
+			&i.UndeliveredReason,
+			&i.CreatedAt,
+			&i.CartID,
+			&i.CartToken,
+			&i.CartTotalCents,
+			&i.CartTotalItems,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markNotificationUndelivered = `-- name: MarkNotificationUndelivered :exec
+UPDATE notification_logs
+SET status = 'undelivered',
+    undelivered_reason = $2
+WHERE id = $1
+`
+
+type MarkNotificationUndeliveredParams struct {
+	ID                pgtype.UUID `json:"id"`
+	UndeliveredReason pgtype.Text `json:"undelivered_reason"`
+}
+
+// RN-38 — nem tentamos, porque a regra do Instagram ja fechava a porta.
+// sent_at fica NULL de proposito: nada saiu, e carimbar um horario de envio
+// aqui seria exatamente a ilusao de entrega que a regra proibe.
+func (q *Queries) MarkNotificationUndelivered(ctx context.Context, arg MarkNotificationUndeliveredParams) error {
+	_, err := q.db.Exec(ctx, markNotificationUndelivered, arg.ID, arg.UndeliveredReason)
+	return err
 }
 
 const setNotificationLogProviderMessageID = `-- name: SetNotificationLogProviderMessageID :exec
@@ -411,6 +518,26 @@ type SetNotificationLogProviderMessageIDParams struct {
 // callbacks can be correlated back to this row.
 func (q *Queries) SetNotificationLogProviderMessageID(ctx context.Context, arg SetNotificationLogProviderMessageIDParams) error {
 	_, err := q.db.Exec(ctx, setNotificationLogProviderMessageID, arg.ID, arg.ProviderMessageID)
+	return err
+}
+
+const setNotificationUndeliveredReason = `-- name: SetNotificationUndeliveredReason :exec
+UPDATE notification_logs
+SET undelivered_reason = $2
+WHERE id = $1
+`
+
+type SetNotificationUndeliveredReasonParams struct {
+	ID                pgtype.UUID `json:"id"`
+	UndeliveredReason pgtype.Text `json:"undelivered_reason"`
+}
+
+// RN-38 — tentamos e o Instagram recusou. O status continua 'failed' (foi
+// tentativa real, e o vocabulario de retry depende disso); o que a coluna
+// acrescenta e o motivo legivel, para a linha aparecer na lista do lojista
+// junto com as que nunca foram tentadas.
+func (q *Queries) SetNotificationUndeliveredReason(ctx context.Context, arg SetNotificationUndeliveredReasonParams) error {
+	_, err := q.db.Exec(ctx, setNotificationUndeliveredReason, arg.ID, arg.UndeliveredReason)
 	return err
 }
 
@@ -462,7 +589,7 @@ SET status = $2,
     error_message = $3,
     sent_at = COALESCE(sent_at, $4)
 WHERE provider_message_id = $1
-RETURNING id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id
+RETURNING id, store_id, event_id, cart_id, platform_user_id, platform_handle, notification_type, channel, status, message_text, error_message, created_at, sent_at, provider_message_id, undelivered_reason
 `
 
 type UpdateNotificationLogByProviderMessageIDParams struct {
@@ -497,6 +624,7 @@ func (q *Queries) UpdateNotificationLogByProviderMessageID(ctx context.Context, 
 		&i.CreatedAt,
 		&i.SentAt,
 		&i.ProviderMessageID,
+		&i.UndeliveredReason,
 	)
 	return i, err
 }

@@ -27,11 +27,11 @@ type OverviewRow struct {
 	AverageTicket int64 `json:"averageTicket"` // gmv / pedidos (0-safe)
 
 	// Funil (por created_at do carrinho, exceto pagos/estorno por transição)
-	Lives         int   `json:"lives"`
-	TotalComments int   `json:"totalComments"`
-	TotalCarts    int   `json:"totalCarts"`
-	CheckoutCarts int   `json:"checkoutCarts"`
-	PaidCarts     int   `json:"paidCarts"`
+	Lives         int `json:"lives"`
+	TotalComments int `json:"totalComments"`
+	TotalCarts    int `json:"totalCarts"`
+	CheckoutCarts int `json:"checkoutCarts"`
+	PaidCarts     int `json:"paidCarts"`
 
 	// Estados de saída
 	ExpiredCarts     int   `json:"expiredCarts"`
@@ -56,21 +56,25 @@ type SeriesPoint struct {
 func (r *Repository) GetOverviewRange(ctx context.Context, storeID string, from, to time.Time) (*OverviewRow, error) {
 	query := `
 		SELECT
-			-- KPIs: pedidos PAGOS dentro do período (por paid_at)
+			-- KPIs: receita CONFIRMADA no período, lida de orders.
+			--
+			-- orders.total_cents é congelado no pagamento e imutável; somar
+			-- cart_items recalcula do estado ATUAL do carrinho, então os dois
+			-- divergem assim que um carrinho pago é mutado depois do pagamento.
+			-- A fórmula é a mesma (cart_product_total_cents) — o que muda é o
+			-- momento. Confirmado vem de orders; projetado e risco continuam
+			-- vindo de carts, mais abaixo, porque ali não existe pedido.
 			COALESCE((
-				SELECT SUM(ci.quantity * ci.unit_price)
-				FROM carts c
-				JOIN cart_items ci ON ci.cart_id = c.id
-				JOIN live_events e ON e.id = c.event_id
-				WHERE e.store_id = $1 AND c.payment_status = 'paid'
-				  AND c.paid_at >= $2 AND c.paid_at < $3
+				SELECT SUM(o.total_cents)
+				FROM orders o
+				WHERE o.store_id = $1 AND o.status = 'paid'
+				  AND o.paid_at >= $2 AND o.paid_at < $3
 			), 0)::BIGINT AS gmv_cents,
 			COALESCE((
 				SELECT COUNT(*)
-				FROM carts c
-				JOIN live_events e ON e.id = c.event_id
-				WHERE e.store_id = $1 AND c.payment_status = 'paid'
-				  AND c.paid_at >= $2 AND c.paid_at < $3
+				FROM orders o
+				WHERE o.store_id = $1 AND o.status = 'paid'
+				  AND o.paid_at >= $2 AND o.paid_at < $3
 			), 0)::INT AS paid_orders,
 
 			-- Funil: atividade criada no período
@@ -140,18 +144,18 @@ func (r *Repository) GetOverviewRange(ctx context.Context, storeID string, from,
 					  AND nl.created_at < c.paid_at
 				  )
 			), 0)::INT AS recovered_carts,
+			-- Também é receita confirmada: sai de orders, ligada ao carrinho
+			-- que recebeu a mensagem de recuperação.
 			COALESCE((
-				SELECT SUM(ci.quantity * ci.unit_price)
-				FROM carts c
-				JOIN cart_items ci ON ci.cart_id = c.id
-				JOIN live_events e ON e.id = c.event_id
-				WHERE e.store_id = $1 AND c.payment_status = 'paid'
-				  AND c.paid_at >= $2 AND c.paid_at < $3
+				SELECT SUM(o.total_cents)
+				FROM orders o
+				WHERE o.store_id = $1 AND o.status = 'paid'
+				  AND o.paid_at >= $2 AND o.paid_at < $3
 				  AND EXISTS (
 					SELECT 1 FROM notification_logs nl
-					WHERE nl.cart_id = c.id AND nl.notification_type = 'cart_recovery'
+					WHERE nl.cart_id = o.cart_id AND nl.notification_type = 'cart_recovery'
 					  AND nl.status IN ('sent', 'delivered', 'read')
-					  AND nl.created_at < c.paid_at
+					  AND nl.created_at < o.paid_at
 				  )
 			), 0)::BIGINT AS recovered_revenue,
 
@@ -197,16 +201,15 @@ func (r *Repository) GetRevenueSeriesRange(ctx context.Context, storeID string, 
 		bucket = "day"
 	}
 
+	// Receita confirmada por período: orders, pelo mesmo motivo do gmv_cents.
 	query := `
 		SELECT
-			date_trunc($4, c.paid_at)::date::text AS bucket,
-			COALESCE(SUM(ci.quantity * ci.unit_price), 0)::BIGINT AS revenue,
-			COUNT(DISTINCT c.id)::INT AS orders
-		FROM carts c
-		JOIN cart_items ci ON ci.cart_id = c.id
-		JOIN live_events e ON e.id = c.event_id
-		WHERE e.store_id = $1 AND c.payment_status = 'paid'
-		  AND c.paid_at >= $2 AND c.paid_at < $3
+			date_trunc($4, o.paid_at)::date::text AS bucket,
+			COALESCE(SUM(o.total_cents), 0)::BIGINT AS revenue,
+			COUNT(*)::INT AS orders
+		FROM orders o
+		WHERE o.store_id = $1 AND o.status = 'paid'
+		  AND o.paid_at >= $2 AND o.paid_at < $3
 		GROUP BY 1
 		ORDER BY 1
 	`
@@ -230,17 +233,18 @@ func (r *Repository) GetRevenueSeriesRange(ctx context.Context, storeID string, 
 
 // GetTopProductsRange mirrors GetTopProducts filtered to paid carts in range.
 func (r *Repository) GetTopProductsRange(ctx context.Context, storeID string, from, to time.Time) ([]TopProductRow, error) {
+	// order_items congela quantidade e preço do item vendido; cart_items reflete
+	// o carrinho atual. Mesma razão do gmv_cents, no nível do produto.
 	query := `
 		SELECT
 			p.id, p.name, p.keyword,
-			COALESCE(SUM(ci.quantity), 0)::INT AS total_sold,
-			COALESCE(SUM(ci.quantity * ci.unit_price), 0)::BIGINT AS total_revenue
+			COALESCE(SUM(oi.quantity), 0)::INT AS total_sold,
+			COALESCE(SUM(oi.quantity * oi.unit_price), 0)::BIGINT AS total_revenue
 		FROM products p
-		JOIN cart_items ci ON ci.product_id = p.id
-		JOIN carts c ON c.id = ci.cart_id
-		JOIN live_events le ON le.id = c.event_id
-		WHERE le.store_id = $1 AND c.payment_status = 'paid'
-		  AND c.paid_at >= $2 AND c.paid_at < $3
+		JOIN order_items oi ON oi.product_id = p.id
+		JOIN orders o ON o.id = oi.order_id
+		WHERE o.store_id = $1 AND o.status = 'paid'
+		  AND o.paid_at >= $2 AND o.paid_at < $3
 		GROUP BY p.id, p.name, p.keyword
 		ORDER BY total_sold DESC
 		LIMIT 5
@@ -264,19 +268,19 @@ func (r *Repository) GetTopProductsRange(ctx context.Context, storeID string, fr
 
 // GetTopBuyersRange mirrors GetTopBuyers filtered to paid carts in range.
 func (r *Repository) GetTopBuyersRange(ctx context.Context, storeID string, from, to time.Time) ([]TopBuyerRow, error) {
+	// O valor gasto vem de orders; a identidade do comprador continua no cart,
+	// que é quem guarda platform_user_id/handle.
 	query := `
 		SELECT
 			c.platform_user_id AS id,
 			c.platform_handle AS handle,
-			COUNT(DISTINCT c.id)::INT AS total_orders,
-			COALESCE(SUM(
-				(SELECT COALESCE(SUM(ci.quantity * ci.unit_price), 0) FROM cart_items ci WHERE ci.cart_id = c.id)
-			), 0)::BIGINT AS total_spent,
+			COUNT(*)::INT AS total_orders,
+			COALESCE(SUM(o.total_cents), 0)::BIGINT AS total_spent,
 			MAX(c.created_at) AS last_purchase_at
-		FROM carts c
-		JOIN live_events e ON e.id = c.event_id
-		WHERE e.store_id = $1 AND c.payment_status = 'paid'
-		  AND c.paid_at >= $2 AND c.paid_at < $3
+		FROM orders o
+		JOIN carts c ON c.id = o.cart_id
+		WHERE o.store_id = $1 AND o.status = 'paid'
+		  AND o.paid_at >= $2 AND o.paid_at < $3
 		GROUP BY c.platform_user_id, c.platform_handle
 		ORDER BY total_spent DESC
 		LIMIT 5

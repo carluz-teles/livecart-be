@@ -126,6 +126,18 @@ type CartItem struct {
 	SessionID          pgtype.UUID `json:"session_id"`
 }
 
+// RN-12: uma linha por ADIÇÃO ao carrinho, com a sessão de origem. cart_items diz o que TEM no carrinho; esta tabela diz de onde veio cada unidade. Sem ela, cart_items.session_id é first-touch e credita tudo à primeira transmissão.
+type CartItemEvent struct {
+	ID        pgtype.UUID `json:"id"`
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	SessionID pgtype.UUID `json:"session_id"`
+	// Quantidade ADICIONADA nesta operação (sempre > 0). Remoções não geram linha — a quantidade final vem de cart_items e o selamento aloca sobre o log, tirando das adições mais recentes primeiro.
+	Quantity  int32              `json:"quantity"`
+	UnitPrice int64              `json:"unit_price"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
 // Append-only log of cart item mutations during checkout (buyer or merchant driven).
 type CartMutation struct {
 	ID             pgtype.UUID        `json:"id"`
@@ -165,6 +177,8 @@ type CouponRedemption struct {
 	AppliedValueCents int64              `json:"applied_value_cents"`
 	ReservedAt        pgtype.Timestamptz `json:"reserved_at"`
 	ConfirmedAt       pgtype.Timestamptz `json:"confirmed_at"`
+	// RN-33: comprador do carrinho, denormalizado para o índice único poder travar "um resgate por comprador por cupom". Preenchido a partir de carts no INSERT.
+	PlatformUserID string `json:"platform_user_id"`
 }
 
 type Customer struct {
@@ -215,22 +229,6 @@ type EventOutbox struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	PublishedAt   pgtype.Timestamptz `json:"published_at"`
 	SchemaVersion int32              `json:"schema_version"`
-}
-
-// Product whitelist for events. If empty, all store products are available.
-type EventProduct struct {
-	ID        pgtype.UUID `json:"id"`
-	EventID   pgtype.UUID `json:"event_id"`
-	ProductID pgtype.UUID `json:"product_id"`
-	// Override price for this event in cents (NULL = use product default)
-	SpecialPrice pgtype.Int4 `json:"special_price"`
-	// Max quantity per cart for this product in this event
-	MaxQuantity  pgtype.Int4 `json:"max_quantity"`
-	DisplayOrder int32       `json:"display_order"`
-	// Highlighted product in live mode UI
-	Featured  bool               `json:"featured"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
 }
 
 // Global upsell offers for events, shown after any cart addition.
@@ -347,20 +345,14 @@ type LiveEvent struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 	TotalOrders int32              `json:"total_orders"`
-	// single = one live, auto-end; multi = multiple sessions, manual end
-	Type string `json:"type"`
 	// If true, cart stops accepting items when event ends
 	CloseCartOnEventEnd bool `json:"close_cart_on_event_end"`
-	// Override cart expiration (NULL = use store setting)
+	// Override do prazo curto do carrinho para este evento. NULL = herda de stores.cart_expiration_minutes. Mínimo 15 — o valor 0 foi removido.
 	CartExpirationMinutes pgtype.Int4 `json:"cart_expiration_minutes"`
 	// Override max quantity per item (NULL = use store setting)
 	CartMaxQuantityPerItem pgtype.Int4 `json:"cart_max_quantity_per_item"`
 	// Override send_on_live_end (NULL = use store setting)
 	SendOnLiveEnd pgtype.Bool `json:"send_on_live_end"`
-	// Current highlighted product - used as fallback when user comments without keyword
-	CurrentActiveProductID pgtype.UUID `json:"current_active_product_id"`
-	// When true, comments are stored but not processed into carts
-	ProcessingPaused bool `json:"processing_paused"`
 	// When the event is scheduled to start (NULL = not scheduled)
 	ScheduledAt pgtype.Timestamptz `json:"scheduled_at"`
 	// Internal notes about the event
@@ -371,15 +363,12 @@ type LiveEvent struct {
 	PixDiscountPercent int32 `json:"pix_discount_percent"`
 	// Minutos extras que um cliente promovido da waitlist (status=notified) tem para finalizar o checkout antes de devolver o estoque para o próximo da fila.
 	WaitlistNotifiedTtlMinutes int32 `json:"waitlist_notified_ttl_minutes"`
-	// Instagram media id when type = post
-	MediaID           pgtype.Text `json:"media_id"`
-	MediaPermalink    pgtype.Text `json:"media_permalink"`
-	MediaThumbnailUrl pgtype.Text `json:"media_thumbnail_url"`
-	MediaCaption      pgtype.Text `json:"media_caption"`
-	// true once a comments webhook arrived for this post event; polling stops
-	WebhookActive bool `json:"webhook_active"`
-	// Optional scheduled end (UTC). NULL = manual end only.
+	// D5/RN-05: TETO da campanha, obrigatorio. E ele que garante que nenhum carrinho fica sem prazo — durante o evento expires_at fica NULL por definicao (RN-04) e o relogio so comeca quando a janela fecha.
 	EndsAt pgtype.Timestamptz `json:"ends_at"`
+	// Override do prazo estendido para este evento. NULL = herda de stores.cart_extended_expiration_minutes.
+	CartExtendedExpirationMinutes pgtype.Int4 `json:"cart_extended_expiration_minutes"`
+	// D21: inicio da JANELA COMERCIAL da campanha. Nao e a data de publicacao da midia (essa e live_sessions.publish_at). Escrita SEMPRE em par com scheduled_at, que continua sendo a coluna que EffectiveStatus le.
+	StartsAt pgtype.Timestamptz `json:"starts_at"`
 }
 
 type LiveSession struct {
@@ -392,14 +381,31 @@ type LiveSession struct {
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 	EventID       pgtype.UUID        `json:"event_id"`
 	SequenceOrder int32              `json:"sequence_order"`
+	// D3: natureza da transmissao (live|post|reel|story). UNICA fonte da verdade do tipo — live_events.type foi dropada na 000122. O vocabulario antigo (single|multi) so existe na entrada da API e e traduzido em live.SessionTypeFromEventType.
+	Type string `json:"type"`
+	// D17: produto em destaque DESTA transmissão. Fallback quando o comprador comenta com intenção de compra e nenhuma palavra-chave casa.
+	CurrentActiveProductID pgtype.UUID `json:"current_active_product_id"`
+	// D17: quando true, os comentários DESTA transmissão são gravados mas não viram carrinho. Pausar uma sessão não pausa as outras do mesmo evento.
+	ProcessingPaused bool `json:"processing_paused"`
+	// D21: quando o LiveCart deve publicar a midia desta sessao no Instagram. Sessao de live NAO tem publish_at (nao se publica live por API). Antes de publish_at nao existe midia, logo nao existe comentario — e o que remove a ambiguidade do webhook. O agendador em si e a 000122.
+	PublishAt pgtype.Timestamptz `json:"publish_at"`
+	// D26: first_touch = a sessao existia antes do corte, entao os numeros dela incluem periodo em que a atribuicao era first-touch e a UI precisa avisar. addition_log = a sessao nasceu depois do corte, numeros derivados do log de adicoes. O DEFAULT e addition_log porque toda sessao criada daqui para frente ja nasce correta.
+	AttributionSource string `json:"attribution_source"`
 }
 
 type LiveSessionPlatform struct {
-	ID             pgtype.UUID        `json:"id"`
-	SessionID      pgtype.UUID        `json:"session_id"`
-	Platform       string             `json:"platform"`
-	PlatformLiveID string             `json:"platform_live_id"`
-	AddedAt        pgtype.Timestamptz `json:"added_at"`
+	ID                pgtype.UUID        `json:"id"`
+	SessionID         pgtype.UUID        `json:"session_id"`
+	Platform          string             `json:"platform"`
+	PlatformLiveID    string             `json:"platform_live_id"`
+	AddedAt           pgtype.Timestamptz `json:"added_at"`
+	MediaPermalink    pgtype.Text        `json:"media_permalink"`
+	MediaThumbnailUrl pgtype.Text        `json:"media_thumbnail_url"`
+	MediaCaption      pgtype.Text        `json:"media_caption"`
+	// D1/D3: true quando um webhook de comments já chegou para ESTA mídia; o polling daquela mídia para. Substitui live_events.webhook_active, que desligava o polling do EVENTO inteiro — o que cegaria a segunda mídia de um evento guarda-chuva.
+	WebhookActive bool `json:"webhook_active"`
+	// D22: quando esta midia deixou de pertencer a um evento vivo. NULL = em uso. E a denormalizacao de live_events.status na linha da midia — necessaria porque um indice parcial nao enxerga colunas de outra tabela.
+	ReleasedAt pgtype.Timestamptz `json:"released_at"`
 }
 
 type Membership struct {
@@ -412,6 +418,14 @@ type Membership struct {
 	InvitedBy pgtype.UUID        `json:"invited_by"`
 	InvitedAt pgtype.Timestamptz `json:"invited_at"`
 	UserID    pgtype.UUID        `json:"user_id"`
+}
+
+// D26: registro dos instantes em que uma metrica mudou de definicao ou de fonte. Toda resposta de API que expoe metrica por sessao devolve o effective_at correspondente, para a UI marcar o corte em vez de deixar o leitor concluir que a metrica quebrou.
+type MetricCutover struct {
+	Key         string             `json:"key"`
+	EffectiveAt pgtype.Timestamptz `json:"effective_at"`
+	Note        string             `json:"note"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 // In-app dashboard notifications. Distinct from notification_logs (outbound to buyers).
@@ -444,6 +458,8 @@ type NotificationLog struct {
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	SentAt            pgtype.Timestamptz `json:"sent_at"`
 	ProviderMessageID pgtype.Text        `json:"provider_message_id"`
+	// RN-38: motivo canonico da nao entrega (comment_window_expired, no_eligible_comment, instagram_rejected). Preenchido quando status = undelivered. O texto exibido ao lojista sai de notification.UndeliverableReasonText — a coluna guarda o codigo, nunca a frase.
+	UndeliveredReason pgtype.Text `json:"undelivered_reason"`
 }
 
 // Temporary storage for OAuth PKCE code_verifier during authorization flow
@@ -485,6 +501,7 @@ type OrderEvent struct {
 	OrderID    pgtype.UUID        `json:"order_id"`
 }
 
+// Itens congelados do pedido. Uma linha por (produto, sessão) desde a 000109 — a UI agrupa por produto na exibição. SUM(quantity) por produto continua igual à quantidade do carrinho no pagamento.
 type OrderItem struct {
 	ID          pgtype.UUID `json:"id"`
 	OrderID     pgtype.UUID `json:"order_id"`
@@ -492,6 +509,8 @@ type OrderItem struct {
 	ProductName string      `json:"product_name"`
 	Quantity    int32       `json:"quantity"`
 	UnitPrice   int64       `json:"unit_price"`
+	// RN-13: transmissão que originou ESTAS unidades. NULL = adição sem sessão (item posto pelo painel) ou pedido anterior ao log de atribuição. Um pedido pode ter várias linhas do mesmo produto, uma por sessão.
+	SessionID pgtype.UUID `json:"session_id"`
 }
 
 type OrderLogistic struct {
@@ -620,6 +639,49 @@ type ProductVariantOption struct {
 	OptionValueID pgtype.UUID `json:"option_value_id"`
 }
 
+// D15/N2: whitelist de produtos por SESSÃO. Lista vazia = TODOS os produtos da loja liberados naquela sessão — mesma semântica no checkout e na ingestão, sem exceção. Sessão nova nasce vazia, portanto vende tudo, mesmo que outra sessão do evento tenha whitelist.
+type SessionProduct struct {
+	ID           pgtype.UUID        `json:"id"`
+	SessionID    pgtype.UUID        `json:"session_id"`
+	ProductID    pgtype.UUID        `json:"product_id"`
+	SpecialPrice pgtype.Int4        `json:"special_price"`
+	MaxQuantity  pgtype.Int4        `json:"max_quantity"`
+	DisplayOrder int32              `json:"display_order"`
+	Featured     bool               `json:"featured"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
+// RN-31/N3: agendamento de publicacao no Instagram. O agendador e NOSSO — a API de Content Publishing nao tem scheduled_publish_time e o container expira em 24h, entao ele e criado poucos minutos antes de scheduled_for. asset_path existe porque no caminho sincrono o arquivo e apagado do storage logo apos o publish; aqui ele e retido ate o desfecho do job (publicado, falho ou cancelado).
+type SessionPublishJob struct {
+	ID      pgtype.UUID `json:"id"`
+	StoreID pgtype.UUID `json:"store_id"`
+	// Preenchida NO DISPARO. A sessao so pode nascer depois que a midia existe (CreatePostEvent exige media_id), entao um agendamento vive sem sessao ate publicar.
+	SessionID pgtype.UUID `json:"session_id"`
+	EventID   pgtype.UUID `json:"event_id"`
+	MediaKind string      `json:"media_kind"`
+	// Chave no storage, nunca URL assinada: a presigned GET dura horas e o agendamento dura dias. A URL e gerada no disparo.
+	AssetPath              string             `json:"asset_path"`
+	AssetContentType       string             `json:"asset_content_type"`
+	Caption                string             `json:"caption"`
+	Title                  string             `json:"title"`
+	ProductIds             []pgtype.UUID      `json:"product_ids"`
+	StartsAt               pgtype.Timestamptz `json:"starts_at"`
+	EndsAt                 pgtype.Timestamptz `json:"ends_at"`
+	CartExpirationMinutes  pgtype.Int4        `json:"cart_expiration_minutes"`
+	CartMaxQuantityPerItem pgtype.Int4        `json:"cart_max_quantity_per_item"`
+	ScheduledFor           pgtype.Timestamptz `json:"scheduled_for"`
+	Status                 string             `json:"status"`
+	PublishedMediaID       pgtype.Text        `json:"published_media_id"`
+	Attempts               int32              `json:"attempts"`
+	LastError              pgtype.Text        `json:"last_error"`
+	LastAttemptAt          pgtype.Timestamptz `json:"last_attempt_at"`
+	PublishedAt            pgtype.Timestamptz `json:"published_at"`
+	CancelledAt            pgtype.Timestamptz `json:"cancelled_at"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+}
+
 // Provider-agnostic freight orders linked to carts. One row per shipment created at a carrier.
 type Shipment struct {
 	ID pgtype.UUID `json:"id"`
@@ -682,7 +744,7 @@ type Store struct {
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	// Whether the cart system is enabled for this store
 	CartEnabled bool `json:"cart_enabled"`
-	// Minutes before cart expires (0 = no expiration)
+	// Minutos de prazo do carrinho depois de armado, quando close_cart_on_event_end = true. Mínimo 15. O valor 0 ("sem expiração") foi REMOVIDO — produzia carrinho eterno no fechamento do evento.
 	CartExpirationMinutes int32 `json:"cart_expiration_minutes"`
 	// Reserve stock when item is added to cart
 	CartReserveStock bool `json:"cart_reserve_stock"`
@@ -747,6 +809,8 @@ type Store struct {
 	NotificationTestSetupCode       pgtype.Text        `json:"notification_test_setup_code"`
 	NotificationTestSetupExpiresAt  pgtype.Timestamptz `json:"notification_test_setup_expires_at"`
 	AllowStorePickup                bool               `json:"allow_store_pickup"`
+	// Prazo do carrinho quando close_cart_on_event_end = FALSE. Default 10080 (7 dias). O ramo desligado NÃO é "sem prazo" — é um prazo maior, armado pelo mesmo cart.expire do ramo ligado.
+	CartExtendedExpirationMinutes int32 `json:"cart_extended_expiration_minutes"`
 }
 
 type StoreInvitation struct {

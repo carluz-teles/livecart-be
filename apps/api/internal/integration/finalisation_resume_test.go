@@ -89,7 +89,23 @@ func testMain(m *testing.M) int {
 		return 1
 	}
 
-	pool, err := pgxpool.New(ctx, testURL)
+	// MaxConns EXPLÍCITO, e pequeno de propósito.
+	//
+	// Sem isto o pgxpool usa max(4, NumCPU), então o limiar de exaustão do pool
+	// virava uma propriedade da MÁQUINA: os testes de escala da fila passavam ou
+	// deadlockavam conforme o número de núcleos de quem rodava
+	// (TestScaleMultiProductParallelCascades, com P=20, só passava em máquina de
+	// 20+ CPUs — verde por acidente de hardware). Produção roda com MaxConns=10
+	// (lib/database/postgres.go); 8 aqui deixa o teste MAIS apertado que a
+	// produção e transforma os cenários de escala num detector honesto do
+	// invariante "detentores do advisory lock < MaxConns".
+	poolCfg, err := pgxpool.ParseConfig(testURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "parseando config do pool de teste: %v\n", err)
+		return 1
+	}
+	poolCfg.MaxConns = 8
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "conectando no database de teste: %v\n", err)
 		return 1
@@ -140,7 +156,7 @@ func seedPaidCart(t *testing.T, qty, activeReservations int) finFixture {
 	mustScan(new(string),
 		`INSERT INTO integrations (store_id, type, provider, status) VALUES ($1, 'erp', 'tiny', 'active') RETURNING id::text`, fx.storeID)
 	mustScan(&fx.eventID,
-		`INSERT INTO live_events (store_id, status, title) VALUES ($1, 'ended', 'Live Teste') RETURNING id::text`, fx.storeID)
+		`INSERT INTO live_events (store_id, status, title, ends_at) VALUES ($1, 'ended', 'Live Teste', now()) RETURNING id::text`, fx.storeID)
 	kw := fmt.Sprintf("%d", 1000+seedSeq%9000) // keyword numérica 1000-9999 (regra do domínio)
 	mustScan(&fx.productID,
 		`INSERT INTO products (store_id, name, external_source, external_id, keyword, price, stock)

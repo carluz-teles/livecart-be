@@ -66,6 +66,32 @@ func (h *WebhookHandler) HandleInstagramWebhook(c *fiber.Ctx) error {
 		return httpx.BadRequest(c, "empty body")
 	}
 
+	// Signature check. Deploy 1 runs in observation mode: the outcome is
+	// computed and logged, but the payload is processed regardless — a wrong
+	// INSTAGRAM_APP_SECRET in production would otherwise stop every comment
+	// from becoming a cart, and we would find out from the sales chart instead
+	// of an alert. Flip INSTAGRAM_WEBHOOK_ENFORCE_SIGNATURE once the logs show
+	// only "valid" for real Meta traffic.
+	outcome := verifyInstagramSignature(body, c.Get("X-Hub-Signature-256"), config.InstagramAppSecret.String())
+	enforcing := config.InstagramWebhookEnforceSignature.BoolOr(false)
+
+	if !outcome.ok() {
+		log := logger.From(c.Context(), h.logger).With(
+			zap.String("signature_outcome", string(outcome)),
+			zap.Bool("enforcing", enforcing),
+			zap.Int("body_bytes", len(body)),
+		)
+		if enforcing {
+			log.Warn("instagram webhook rejected: signature check failed")
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid signature"})
+		}
+		log.Warn("instagram webhook accepted with failing signature (observation mode)")
+	}
+	// O resultado desce para o processamento porque é lá que a linha de
+	// auditoria é gravada. Sem descer, o outcome viveria só num log — e o log
+	// não é o que se consulta para decidir ligar o 401 (§5.2, ordem 9).
+	sigValid := outcome.ok()
+
 	// Parse the webhook payload
 	var payload InstagramWebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -82,7 +108,7 @@ func (h *WebhookHandler) HandleInstagramWebhook(c *fiber.Ctx) error {
 	for _, entry := range payload.Entry {
 		// Process changes (live_comments)
 		for _, change := range entry.Changes {
-			if err := h.processInstagramChange(c, entry, change, body); err != nil {
+			if err := h.processInstagramChange(c, entry, change, body, sigValid); err != nil {
 				logger.From(c.Context(), h.logger).Error("failed to process instagram change",
 					zap.String("field", change.Field),
 					zap.Error(err),
@@ -93,7 +119,7 @@ func (h *WebhookHandler) HandleInstagramWebhook(c *fiber.Ctx) error {
 
 		// Process messaging (DMs)
 		for _, msg := range entry.Messaging {
-			if err := h.processInstagramMessage(c, entry, msg, body); err != nil {
+			if err := h.processInstagramMessage(c, entry, msg, body, sigValid); err != nil {
 				logger.From(c.Context(), h.logger).Error("failed to process instagram message",
 					zap.String("sender_id", msg.Sender.ID),
 					zap.Error(err),
@@ -107,7 +133,7 @@ func (h *WebhookHandler) HandleInstagramWebhook(c *fiber.Ctx) error {
 }
 
 // processInstagramChange processes a single change event (like live_comments)
-func (h *WebhookHandler) processInstagramChange(c *fiber.Ctx, entry InstagramEntry, change InstagramChange, rawBody []byte) error {
+func (h *WebhookHandler) processInstagramChange(c *fiber.Ctx, entry InstagramEntry, change InstagramChange, rawBody []byte, sigValid bool) error {
 	logger.From(c.Context(), h.logger).Info("processing instagram change",
 		zap.String("account_id", entry.ID),
 		zap.String("field", change.Field),
@@ -115,12 +141,12 @@ func (h *WebhookHandler) processInstagramChange(c *fiber.Ctx, entry InstagramEnt
 
 	switch change.Field {
 	case "live_comments":
-		return h.processLiveComment(c, entry, change, rawBody, events.SourceInstagramLive)
+		return h.processLiveComment(c, entry, change, rawBody, sigValid, events.SourceInstagramLive)
 	case "comments":
 		// Feed-post comments share the same payload shape as live comments and
 		// the same processing path (the post media id maps to the event). Mark
 		// the post event as webhook-active so the polling capture can stop.
-		return h.processPostComment(c, entry, change, rawBody)
+		return h.processPostComment(c, entry, change, rawBody, sigValid)
 	default:
 		logger.From(c.Context(), h.logger).Info("ignoring unhandled instagram change field",
 			zap.String("field", change.Field),
@@ -131,7 +157,7 @@ func (h *WebhookHandler) processInstagramChange(c *fiber.Ctx, entry InstagramEnt
 
 // processPostComment handles a feed-post comment event. It reuses the live
 // comment path and flags the mapped post event so polling stops.
-func (h *WebhookHandler) processPostComment(c *fiber.Ctx, entry InstagramEntry, change InstagramChange, rawBody []byte) error {
+func (h *WebhookHandler) processPostComment(c *fiber.Ctx, entry InstagramEntry, change InstagramChange, rawBody []byte, sigValid bool) error {
 	valueBytes, err := json.Marshal(change.Value)
 	if err != nil {
 		return err
@@ -141,20 +167,20 @@ func (h *WebhookHandler) processPostComment(c *fiber.Ctx, entry InstagramEntry, 
 		return err
 	}
 	if comment.Media.ID != "" {
-		if mErr := h.service.MarkPostEventWebhookActive(c.Context(), comment.Media.ID); mErr != nil {
+		if mErr := h.service.MarkMediaWebhookActive(c.Context(), comment.Media.ID); mErr != nil {
 			logger.From(c.Context(), h.logger).Warn("failed to mark post event webhook active",
 				zap.String("media_id", comment.Media.ID),
 				zap.Error(mErr),
 			)
 		}
 	}
-	return h.processLiveComment(c, entry, change, rawBody, events.SourceInstagramPost)
+	return h.processLiveComment(c, entry, change, rawBody, sigValid, events.SourceInstagramPost)
 }
 
 // processLiveComment processes a live_comments (or feed-post comments) event.
 // source is the canonical origin stamped on the dispatched comment.received
 // event (instagram_live for live comments, instagram_post for feed posts).
-func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, change InstagramChange, rawBody []byte, source events.Source) error {
+func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, change InstagramChange, rawBody []byte, sigValid bool, source events.Source) error {
 	// Parse the value as LiveCommentValue
 	valueBytes, err := json.Marshal(change.Value)
 	if err != nil {
@@ -187,14 +213,21 @@ func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, 
 	// outbox) and return fast. The domain work (cart/stock/waitlist) runs in the
 	// event consumer via ProcessInstagramComment — idempotent by comment_id.
 	if err := h.service.DispatchCommentReceived(c.Context(), ProcessInstagramCommentInput{
-		AccountID:  entry.ID,
-		MediaID:    comment.Media.ID,
-		CommentID:  comment.CommentID,
-		UserID:     userID,
-		Username:   comment.From.Username,
-		Text:       comment.Text,
-		Timestamp:  entry.Time,
-		RawPayload: rawBody,
+		AccountID: entry.ID,
+		MediaID:   comment.Media.ID,
+		CommentID: comment.CommentID,
+		UserID:    userID,
+		Username:  comment.From.Username,
+		Text:      comment.Text,
+		// E41: era entry.Time cru — o carimbo da ENTREGA do webhook, e em
+		// milissegundos nos produtos de Instagram. time.Unix(ms, 0) aterrissa no
+		// ano ~57000, então a janela de 7 dias do private reply (RN-37) nunca
+		// disparava por este caminho: ela só valia no polling, que já carregava
+		// segundos. CommentedAt prefere o carimbo do próprio comentário e
+		// normaliza ms→s.
+		Timestamp:      comment.CommentedAt(entry.Time),
+		RawPayload:     rawBody,
+		SignatureValid: sigValid,
 	}, source); err != nil {
 		logger.From(c.Context(), h.logger).Error("failed to dispatch instagram comment",
 			zap.String("comment_id", comment.CommentID),
@@ -207,7 +240,7 @@ func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, 
 }
 
 // processInstagramMessage processes a messaging event (DM)
-func (h *WebhookHandler) processInstagramMessage(c *fiber.Ctx, entry InstagramEntry, msg InstagramMessage, rawBody []byte) error {
+func (h *WebhookHandler) processInstagramMessage(c *fiber.Ctx, entry InstagramEntry, msg InstagramMessage, rawBody []byte, sigValid bool) error {
 	logger.From(c.Context(), h.logger).Info("processing instagram message",
 		zap.String("account_id", entry.ID),
 		zap.String("sender_id", msg.Sender.ID),
@@ -223,14 +256,19 @@ func (h *WebhookHandler) processInstagramMessage(c *fiber.Ctx, entry InstagramEn
 
 	// Process the message through the service
 	if err := h.service.ProcessInstagramMessage(c.Context(), ProcessInstagramMessageInput{
-		AccountID:      entry.ID,
-		SenderID:       msg.Sender.ID,
-		MessageID:      msg.Message.MID,
-		Text:           msg.Message.Text,
-		Timestamp:      msg.Timestamp,
+		AccountID: entry.ID,
+		SenderID:  msg.Sender.ID,
+		MessageID: msg.Message.MID,
+		Text:      msg.Message.Text,
+		// A Messaging API carimba em milissegundos. A resposta a um story reply
+		// sai por DM (que não tem a janela de 7 dias do private reply), mas o
+		// valor viaja para ProcessInstagramCommentInput.Timestamp — deixá-lo em
+		// ms seria plantar o mesmo bug para o próximo consumidor.
+		Timestamp:      epochSeconds(msg.Timestamp),
 		ReplyToStoryID: replyToStoryID,
 		IsEcho:         msg.Message.IsEcho,
 		RawPayload:     rawBody,
+		SignatureValid: sigValid,
 	}); err != nil {
 		logger.From(c.Context(), h.logger).Error("failed to process instagram message",
 			zap.String("message_id", msg.Message.MID),

@@ -436,27 +436,53 @@ func (q *Queries) ExtendCartExpiration(ctx context.Context, arg ExtendCartExpira
 }
 
 const finalizeCartsByEvent = `-- name: FinalizeCartsByEvent :many
+
 UPDATE carts c
 SET status = 'checkout',
-    expires_at = CASE
-        WHEN c.payment_status <> 'paid'
-             AND COALESCE(le.cart_expiration_minutes, s.cart_expiration_minutes, 0) > 0
-        THEN now() + make_interval(mins => COALESCE(le.cart_expiration_minutes, s.cart_expiration_minutes))
-        ELSE c.expires_at
-    END
-FROM live_events le
-JOIN stores s ON s.id = le.store_id
-WHERE c.event_id = $1 AND c.status = 'active' AND le.id = c.event_id
+    expires_at = now() + make_interval(mins => $2::int)
+WHERE c.event_id = $1
+  AND c.status = 'active'
+  AND c.payment_status IS DISTINCT FROM 'paid'
 RETURNING c.id
 `
 
-// Ao encerrar a live, move os carrinhos ativos para 'checkout' e arma o prazo
-// de pagamento: expires_at = now() + cart_expiration_minutes (do evento, com
-// fallback para o default da loja). 0 = sem expiração (preserva o que havia).
-// Carrinhos já pagos não recebem prazo — não faz sentido expirar uma venda.
+type FinalizeCartsByEventParams struct {
+	EventID           pgtype.UUID `json:"event_id"`
+	ExpirationMinutes int32       `json:"expiration_minutes"`
+}
+
+// SessionAttributionByEvent foi REMOVIDA (Fatia 5). Nunca teve chamador Go — e
+// não era aproveitável, por três motivos que a métrica em dois níveis proíbe:
+//  1. chaveava por cart_items.session_id, que é FIRST-TOUCH (o COALESCE do
+//     UpsertCartItem): creditava à segunda o que foi vendido na quarta;
+//  2. subtraía waitlisted_quantity, enquanto a receita do evento
+//     (cart_product_total_cents / orders.total_cents) usa quantity CHEIO — a
+//     soma das sessões daria SEMPRE menos que o total do evento;
+//  3. recalculava dos cart_items vivos filtrando payment_status, em vez de ler
+//     o congelado (RN-14).
+//
+// Quem responde "quanto a transmissão de terça faturou" agora é o par
+// ListSessionConfirmedRevenueByEvent (confirmado, de order_items) +
+// ListOpenCartItemsByEvent/ListCartItemEventsByEvent (projetado, alocado sobre
+// o log pelo MESMO AllocateBySession do selamento).
+// RN-06: ao encerrar o EVENTO, o carrinho sai de 'active' ("pode pagar, sem
+// prazo") para 'checkout' ("prazo correndo") e ganha expires_at. Encerrar uma
+// SESSÃO não passa por aqui — sessão não mexe em carrinho.
+//
+// O carrinho PAGO não transiciona (A10). Antes, o filtro de payment_status
+// incidia só no CASE do expires_at, nunca no WHERE: o carrinho pago virava
+// 'checkout' — que no vocabulário novo significa "prazo correndo" — e ainda
+// gerava um cart.checkout_armed inútil, que virava um ScheduleExpiry no-op.
+// Com a decisão 7 (pagar durante o evento), isso deixou de ser detalhe.
+//
+// O prazo NÃO é resolvido aqui: chega pronto em $2, vindo de
+// GetEventCartSettings — a fonte única que já aplica a RN-34 (curto x
+// estendido, conforme close_cart_on_event_end) e o fallback para a loja. O
+// COALESCE inline que existia aqui era a terceira cópia da mesma regra.
+//
 // Retorna os ids finalizados para emitir cart.checkout_armed por carrinho.
-func (q *Queries) FinalizeCartsByEvent(ctx context.Context, eventID pgtype.UUID) ([]pgtype.UUID, error) {
-	rows, err := q.db.Query(ctx, finalizeCartsByEvent, eventID)
+func (q *Queries) FinalizeCartsByEvent(ctx context.Context, arg FinalizeCartsByEventParams) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, finalizeCartsByEvent, arg.EventID, arg.ExpirationMinutes)
 	if err != nil {
 		return nil, err
 	}
@@ -688,7 +714,12 @@ func (q *Queries) GetCartByCheckoutID(ctx context.Context, checkoutID pgtype.Tex
 
 const getCartByEventAndUser = `-- name: GetCartByEventAndUser :one
 
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at FROM carts WHERE event_id = $1 AND platform_user_id = $2
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at FROM carts
+WHERE event_id = $1 AND platform_user_id = $2
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+ORDER BY created_at DESC
+LIMIT 1
 `
 
 type GetCartByEventAndUserParams struct {
@@ -700,6 +731,14 @@ type GetCartByEventAndUserParams struct {
 // order_logistics.tracking_token (Fatia C1); a escrita usa
 // SetOrderLogisticsTrackingToken e o lookup público, GetCartByOrderLogisticsTrackingToken
 // (ambos em order_write.sql).
+// O carrinho ABERTO do comprador neste evento.
+//
+// Desde a 000107 pode existir mais de um carrinho por (evento, comprador): pagar
+// ou expirar libera a vaga e um novo nasce (RN-07/RN-08). Sem o filtro abaixo,
+// `:one` gera QueryRow do pgx, que lê a PRIMEIRA linha e descarta o resto SEM
+// erro — o item do comprador cairia num carrinho arbitrário, possivelmente o já
+// pago. O ORDER BY é a desempate determinística caso o filtro deixe passar mais
+// de um (não deveria: o índice parcial garante no máximo um).
 func (q *Queries) GetCartByEventAndUser(ctx context.Context, arg GetCartByEventAndUserParams) (Cart, error) {
 	row := q.db.QueryRow(ctx, getCartByEventAndUser, arg.EventID, arg.PlatformUserID)
 	var i Cart
@@ -762,7 +801,13 @@ func (q *Queries) GetCartByEventAndUser(ctx context.Context, arg GetCartByEventA
 }
 
 const getCartByEventAndUserForUpdate = `-- name: GetCartByEventAndUserForUpdate :one
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at FROM carts WHERE event_id = $1 AND platform_user_id = $2 FOR UPDATE
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at FROM carts
+WHERE event_id = $1 AND platform_user_id = $2
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+ORDER BY created_at DESC
+LIMIT 1
+FOR UPDATE
 `
 
 type GetCartByEventAndUserForUpdateParams struct {
@@ -770,7 +815,9 @@ type GetCartByEventAndUserForUpdateParams struct {
 	PlatformUserID string      `json:"platform_user_id"`
 }
 
-// Lock the cart row for concurrent safety
+// O carrinho ABERTO, travado para escrita. Esta é a do caminho quente
+// (GetOrCreateCart). Mesmo filtro do GetCartByEventAndUser: sem ele, o FOR
+// UPDATE poderia travar a linha errada — por exemplo a de um carrinho já pago.
 func (q *Queries) GetCartByEventAndUserForUpdate(ctx context.Context, arg GetCartByEventAndUserForUpdateParams) (Cart, error) {
 	row := q.db.QueryRow(ctx, getCartByEventAndUserForUpdate, arg.EventID, arg.PlatformUserID)
 	var i Cart
@@ -1225,6 +1272,10 @@ SELECT COALESCE(ci.quantity, 0)::INT AS quantity
 FROM carts c
 LEFT JOIN cart_items ci ON ci.cart_id = c.id AND ci.product_id = $3
 WHERE c.event_id = $1 AND c.platform_user_id = $2
+  AND c.status IN ('pending', 'active', 'checkout')
+  AND (c.payment_status IS NULL OR c.payment_status NOT IN ('paid', 'refunded'))
+ORDER BY c.created_at DESC
+LIMIT 1
 `
 
 type GetProductQuantityInUserCartParams struct {
@@ -1233,55 +1284,16 @@ type GetProductQuantityInUserCartParams struct {
 	ProductID      pgtype.UUID `json:"product_id"`
 }
 
-// Returns the current quantity of a specific product in a user's cart for an event
+// Quantidade de um produto no carrinho ABERTO do comprador neste evento.
+//
+// Alimenta o teto cart_max_quantity_per_item. Sem o filtro, com mais de um
+// carrinho a leitura vira não-determinística e o teto passa a valer sobre um
+// carrinho arbitrário — inclusive um já pago, o que bloquearia compra legítima.
 func (q *Queries) GetProductQuantityInUserCart(ctx context.Context, arg GetProductQuantityInUserCartParams) (int32, error) {
 	row := q.db.QueryRow(ctx, getProductQuantityInUserCart, arg.EventID, arg.PlatformUserID, arg.ProductID)
 	var quantity int32
 	err := row.Scan(&quantity)
 	return quantity, err
-}
-
-const getSessionStats = `-- name: GetSessionStats :one
-
-SELECT
-    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1), 0)::int AS total_carts,
-    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1 AND ct.payment_status = 'paid'), 0)::int AS paid_carts,
-    -- Grupo C: total_revenue stays cart-based (projection over all non-expired carts)
-    COALESCE((
-        SELECT SUM(cart_product_total_cents(ct.id))
-        FROM carts ct
-        WHERE ct.session_id = $1 AND ct.status != 'expired'
-    ), 0)::bigint AS total_revenue,
-    -- Grupo A: paid_revenue reads from sealed orders
-    COALESCE((
-        SELECT SUM(o.total_cents)
-        FROM orders o
-        JOIN carts ct ON ct.id = o.cart_id
-        WHERE ct.session_id = $1 AND o.status = 'paid'
-    ), 0)::bigint AS paid_revenue
-`
-
-type GetSessionStatsRow struct {
-	TotalCarts   int32 `json:"total_carts"`
-	PaidCarts    int32 `json:"paid_carts"`
-	TotalRevenue int64 `json:"total_revenue"`
-	PaidRevenue  int64 `json:"paid_revenue"`
-}
-
-// =============================================================================
-// SESSION DETAILS - Stats per session
-// =============================================================================
-// Returns stats for a specific session: carts count and revenue
-func (q *Queries) GetSessionStats(ctx context.Context, sessionID pgtype.UUID) (GetSessionStatsRow, error) {
-	row := q.db.QueryRow(ctx, getSessionStats, sessionID)
-	var i GetSessionStatsRow
-	err := row.Scan(
-		&i.TotalCarts,
-		&i.PaidCarts,
-		&i.TotalRevenue,
-		&i.PaidRevenue,
-	)
-	return i, err
 }
 
 const getStorePaymentIntegration = `-- name: GetStorePaymentIntegration :one
@@ -1347,13 +1359,46 @@ func (q *Queries) HasInFlightFinalisationForProduct(ctx context.Context, product
 	return in_flight, err
 }
 
+const insertCartItemEvent = `-- name: InsertCartItemEvent :exec
+INSERT INTO cart_item_events (cart_id, product_id, session_id, quantity, unit_price)
+VALUES ($1, $2, $3, $4, $5)
+`
+
+type InsertCartItemEventParams struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	SessionID pgtype.UUID `json:"session_id"`
+	Quantity  int32       `json:"quantity"`
+	UnitPrice int64       `json:"unit_price"`
+}
+
+// Registra uma ADIÇÃO no log de atribuição (RN-12). Vai no mesmo tx do
+// UpsertCartItem: se um falhar, nenhum grava, e o invariante
+// SUM(log.quantity) >= cart_items.quantity nunca é violado por gravação
+// parcial. Só adições entram — remoção é tratada na alocação do selamento.
+func (q *Queries) InsertCartItemEvent(ctx context.Context, arg InsertCartItemEventParams) error {
+	_, err := q.db.Exec(ctx, insertCartItemEvent,
+		arg.CartID,
+		arg.ProductID,
+		arg.SessionID,
+		arg.Quantity,
+		arg.UnitPrice,
+	)
+	return err
+}
+
 const issueShortIDForEvent = `-- name: IssueShortIDForEvent :one
+
 INSERT INTO store_order_counters (store_id, last_value)
 SELECT e.store_id, 1000 FROM live_events e WHERE e.id = $1
 ON CONFLICT (store_id) DO UPDATE SET last_value = store_order_counters.last_value + 1
 RETURNING last_value
 `
 
+// RegenerateCartCheckout foi REMOVIDA: nunca teve chamador Go (o "regerar link"
+// do painel usa order/repository.RegenerateCheckout) e ainda devolvia o carrinho
+// para status='active' com expires_at no futuro — o estado que a RN-06 declara
+// impossível. Portá-la seria carregar código morto E errado.
 // Atomically issues the next short_id for the store that owns the given event.
 // On first call for a store, INSERT seeds last_value at 1000 (the chosen
 // starting number). On subsequent calls, the ON CONFLICT UPDATE bumps
@@ -1366,6 +1411,102 @@ func (q *Queries) IssueShortIDForEvent(ctx context.Context, id pgtype.UUID) (int
 	var last_value int32
 	err := row.Scan(&last_value)
 	return last_value, err
+}
+
+const listCartItemEventsByEvent = `-- name: ListCartItemEventsByEvent :many
+SELECT
+    cie.cart_id,
+    cie.product_id,
+    cie.session_id,
+    cie.quantity,
+    cie.unit_price
+FROM cart_item_events cie
+JOIN carts ct ON ct.id = cie.cart_id
+WHERE ct.event_id = $1
+  AND ct.status IN ('active', 'checkout')
+ORDER BY cie.cart_id, cie.product_id, cie.created_at, cie.id
+`
+
+type ListCartItemEventsByEventRow struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	SessionID pgtype.UUID `json:"session_id"`
+	Quantity  int32       `json:"quantity"`
+	UnitPrice int64       `json:"unit_price"`
+}
+
+// O log de adições dos MESMOS carrinhos da query acima, na ordem que
+// AllocateBySession exige (cronológica por produto, id desempatando).
+// Ele diz de onde veio cada unidade; a quantidade final continua sendo a de
+// cart_items.
+func (q *Queries) ListCartItemEventsByEvent(ctx context.Context, eventID pgtype.UUID) ([]ListCartItemEventsByEventRow, error) {
+	rows, err := q.db.Query(ctx, listCartItemEventsByEvent, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCartItemEventsByEventRow{}
+	for rows.Next() {
+		var i ListCartItemEventsByEventRow
+		if err := rows.Scan(
+			&i.CartID,
+			&i.ProductID,
+			&i.SessionID,
+			&i.Quantity,
+			&i.UnitPrice,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCartItemEventsForCart = `-- name: ListCartItemEventsForCart :many
+SELECT product_id, session_id, quantity, unit_price, created_at
+FROM cart_item_events
+WHERE cart_id = $1
+ORDER BY product_id, created_at, id
+`
+
+type ListCartItemEventsForCartRow struct {
+	ProductID pgtype.UUID        `json:"product_id"`
+	SessionID pgtype.UUID        `json:"session_id"`
+	Quantity  int32              `json:"quantity"`
+	UnitPrice int64              `json:"unit_price"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// O log de adições de um carrinho, em ordem cronológica. É o que o selamento
+// percorre para repartir a quantidade final entre as sessões (RN-29). O id
+// desempata adições gravadas no mesmo instante, tornando a ordem determinística.
+func (q *Queries) ListCartItemEventsForCart(ctx context.Context, cartID pgtype.UUID) ([]ListCartItemEventsForCartRow, error) {
+	rows, err := q.db.Query(ctx, listCartItemEventsForCart, cartID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCartItemEventsForCartRow{}
+	for rows.Next() {
+		var i ListCartItemEventsForCartRow
+		if err := rows.Scan(
+			&i.ProductID,
+			&i.SessionID,
+			&i.Quantity,
+			&i.UnitPrice,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listCartItems = `-- name: ListCartItems :many
@@ -1998,6 +2139,59 @@ func (q *Queries) ListNonWaitlistedCartItems(ctx context.Context, cartID pgtype.
 	return items, nil
 }
 
+const listOpenCartItemsByEvent = `-- name: ListOpenCartItemsByEvent :many
+SELECT
+    ci.cart_id,
+    ci.product_id,
+    ci.quantity,
+    ci.unit_price
+FROM carts ct
+JOIN cart_items ci ON ci.cart_id = ct.id
+WHERE ct.event_id = $1
+  AND ct.status IN ('active', 'checkout')
+ORDER BY ci.cart_id, ci.product_id
+`
+
+type ListOpenCartItemsByEventRow struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	Quantity  pgtype.Int4 `json:"quantity"`
+	UnitPrice pgtype.Int8 `json:"unit_price"`
+}
+
+// A quantidade FINAL de cada produto nos carrinhos que entram na projeção.
+//
+// O predicado (status IN ('active','checkout')) e a quantidade CHEIA são cópia
+// literal de GetEventStats.projected_revenue — inclusive o fato de que o
+// carrinho PAGO continua entrando (ele permanece em 'checkout' depois do
+// pagamento). Isso é herança da semântica atual de "projetado", e mexer nela é
+// assunto da separação de estados (RN-06), não da métrica: o que a Fatia 5
+// garante é que os dois níveis usem O MESMO predicado, senão a soma não fecha.
+func (q *Queries) ListOpenCartItemsByEvent(ctx context.Context, eventID pgtype.UUID) ([]ListOpenCartItemsByEventRow, error) {
+	rows, err := q.db.Query(ctx, listOpenCartItemsByEvent, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOpenCartItemsByEventRow{}
+	for rows.Next() {
+		var i ListOpenCartItemsByEventRow
+		if err := rows.Scan(
+			&i.CartID,
+			&i.ProductID,
+			&i.Quantity,
+			&i.UnitPrice,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listProductsByEvent = `-- name: ListProductsByEvent :many
 SELECT
     p.id,
@@ -2040,6 +2234,83 @@ func (q *Queries) ListProductsByEvent(ctx context.Context, eventID pgtype.UUID) 
 			&i.Keyword,
 			&i.TotalQuantity,
 			&i.TotalRevenue,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSessionConfirmedRevenueByEvent = `-- name: ListSessionConfirmedRevenueByEvent :many
+
+SELECT
+    oi.session_id,
+    COALESCE(SUM(oi.quantity), 0)::int                    AS sold_units,
+    COALESCE(SUM(oi.quantity * oi.unit_price), 0)::bigint AS revenue_cents,
+    COUNT(DISTINCT o.cart_id)::int                        AS paid_carts
+FROM order_items oi
+JOIN orders o ON o.id = oi.order_id
+WHERE o.event_id = $1 AND o.status = 'paid'
+GROUP BY oi.session_id
+`
+
+type ListSessionConfirmedRevenueByEventRow struct {
+	SessionID    pgtype.UUID `json:"session_id"`
+	SoldUnits    int32       `json:"sold_units"`
+	RevenueCents int64       `json:"revenue_cents"`
+	PaidCarts    int32       `json:"paid_carts"`
+}
+
+// =============================================================================
+// MÉTRICA EM DOIS NÍVEIS — por SESSÃO e agregada por EVENTO (Fatia 5)
+//
+// GetSessionStats foi REMOVIDA. Ela agrupava por carts.session_id, que é a
+// sessão em que o carrinho NASCEU (gravada uma única vez no CreateCart e nunca
+// mais tocada). Com o carrinho unificado da campanha (RN-02) um carrinho vive a
+// semana inteira, então o carrinho INTEIRO — inclusive o que foi comprado na
+// quinta — era creditado à transmissão de segunda. Além disso ela era chamada
+// uma vez POR SESSÃO dentro do laço de GetEventWithSessions (N+1) para alimentar
+// campos que a tela sequer renderizava.
+//
+// No lugar entram três queries de EVENTO (uma chamada, não N):
+//   - confirmado  ← order_items.session_id, o congelado do pedido pago;
+//   - projetado   ← cart_items (quantidade final) + cart_item_events (de onde
+//     veio cada unidade), repartido em Go por AllocateBySession —
+//     a MESMA função que o selamento usa. Duas implementações da
+//     mesma regra seria exatamente a divergência que a métrica em
+//     dois níveis não pode ter.
+//
+// O INVARIANTE (inegociável): a soma das sessões bate exatamente com o total do
+// evento em GetEventStats. Por isso cada query abaixo repete, ao pé da letra, o
+// predicado do seu par lá em cima — e por isso o balde session_id IS NULL ("sem
+// transmissão") é devolvido junto: sem ele a soma não fecha.
+// =============================================================================
+// Receita CONFIRMADA por transmissão: o congelado do pedido, repartido pela
+// sessão que vendeu cada unidade (RN-13). Uma linha por sessão + a linha
+// session_id NULL (adição sem transmissão, ou pedido anterior ao log).
+//
+// Fecha com GetEventStats.confirmed_revenue (SUM(orders.total_cents)) por
+// construção: o selamento grava order_items com o unit_price do carrinho e
+// AllocateBySession garante SUM(order_items.quantity) == cart_items.quantity,
+// logo SUM(quantity*unit_price) == cart_product_total_cents == total_cents.
+func (q *Queries) ListSessionConfirmedRevenueByEvent(ctx context.Context, eventID pgtype.UUID) ([]ListSessionConfirmedRevenueByEventRow, error) {
+	rows, err := q.db.Query(ctx, listSessionConfirmedRevenueByEvent, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSessionConfirmedRevenueByEventRow{}
+	for rows.Next() {
+		var i ListSessionConfirmedRevenueByEventRow
+		if err := rows.Scan(
+			&i.SessionID,
+			&i.SoldUnits,
+			&i.RevenueCents,
+			&i.PaidCarts,
 		); err != nil {
 			return nil, err
 		}
@@ -2141,75 +2412,6 @@ func (q *Queries) ListStuckERPOrderOps(ctx context.Context, olderThanSeconds int
 		return nil, err
 	}
 	return items, nil
-}
-
-const regenerateCartCheckout = `-- name: RegenerateCartCheckout :exec
-UPDATE carts
-SET expires_at         = $2,
-    status             = 'active',
-    payment_status     = 'pending',
-    checkout_url       = NULL,
-    checkout_id        = NULL,
-    checkout_expires_at = NULL,
-    -- Reset das colunas de RESERVA do ERP (must-fix C): reabrir um cart design-C
-    -- sem isto deixaria erp_order_state/external_order_id obsoletos e o próximo
-    -- pagamento cairia em "cart pago após cancelamento — reconciliação manual". A
-    -- expiração já cancelou/estornou o pedido antigo; o reopen zera para um
-    -- ciclo pagamento→ERP limpo. (As colunas pós-venda de finalização/NF vivem
-    -- em order_payments desde a Fatia 11b — o cart reaberto é pré-pagamento e não
-    -- carrega estado de finalização.)
-    erp_order_state         = 'none',
-    external_order_id       = NULL,
-    erp_stock_launched      = FALSE,
-    erp_op_started_at       = NULL
-WHERE id = $1
-`
-
-type RegenerateCartCheckoutParams struct {
-	ID        pgtype.UUID        `json:"id"`
-	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
-}
-
-// Resets the checkout window for a cart so the buyer can pay again. Bumps
-// expires_at, brings status back to 'active' and payment_status to 'pending'
-// (covers expired/failed states), and clears any cached checkout url so the
-// next checkout-side call generates a fresh one.
-func (q *Queries) RegenerateCartCheckout(ctx context.Context, arg RegenerateCartCheckoutParams) error {
-	_, err := q.db.Exec(ctx, regenerateCartCheckout, arg.ID, arg.ExpiresAt)
-	return err
-}
-
-const reopenExpiredCartForReuse = `-- name: ReopenExpiredCartForReuse :exec
-UPDATE carts
-SET status                  = 'active',
-    payment_status          = 'pending',
-    cancelled_reason        = NULL,
-    expires_at              = NULL,
-    checkout_url            = NULL,
-    checkout_id             = NULL,
-    checkout_expires_at     = NULL,
-    paid_at                 = NULL,
-    payment_method          = NULL,
-    coupon_id               = NULL,
-    coupon_code             = NULL,
-    coupon_discount_cents   = 0,
-    erp_order_state         = 'none',
-    external_order_id       = NULL,
-    erp_stock_launched      = FALSE,
-    erp_op_started_at       = NULL
-WHERE id = $1
-`
-
-// Reabre um cart 'expired'/'cancelled' para reuso pelo MESMO comprador no MESMO
-// evento (a unique (event_id, platform_user_id) impede criar um 2º cart). Reseta
-// TUDO para um estado limpo — inclusive as colunas de ERP: sem isso, um cart
-// design-C reaberto pagaria e cairia em "cart pago após cancelamento —
-// reconciliação manual" (external_order_id/erp_order_state obsoletos). Os
-// cart_items antigos são apagados à parte (DeleteCartItemsByCart) — já tiveram o
-// estoque devolvido pela expiração; o item novo entra fresco pelo fluxo de add.
-func (q *Queries) ReopenExpiredCartForReuse(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, reopenExpiredCartForReuse, id)
-	return err
 }
 
 const restoreCancelledCartAsPaid = `-- name: RestoreCancelledCartAsPaid :one
@@ -2320,61 +2522,6 @@ func (q *Queries) RestoreCancelledCartAsPaid(ctx context.Context, arg RestoreCan
 		&i.CancellationRevertedAt,
 	)
 	return i, err
-}
-
-const sessionAttributionByEvent = `-- name: SessionAttributionByEvent :many
-SELECT
-    s.id AS session_id,
-    s.sequence_order,
-    COALESCE(SUM(
-        CASE WHEN c.payment_status = 'paid'
-             THEN GREATEST(ci.quantity - ci.waitlisted_quantity, 0)
-             ELSE 0 END), 0)::bigint AS sold_units,
-    COALESCE(SUM(
-        CASE WHEN c.payment_status = 'paid'
-             THEN GREATEST(ci.quantity - ci.waitlisted_quantity, 0) * ci.unit_price
-             ELSE 0 END), 0)::bigint AS revenue_cents
-FROM live_sessions s
-LEFT JOIN cart_items ci ON ci.session_id = s.id
-LEFT JOIN carts c ON c.id = ci.cart_id
-WHERE s.event_id = $1
-GROUP BY s.id, s.sequence_order
-ORDER BY s.sequence_order
-`
-
-type SessionAttributionByEventRow struct {
-	SessionID     pgtype.UUID `json:"session_id"`
-	SequenceOrder int32       `json:"sequence_order"`
-	SoldUnits     int64       `json:"sold_units"`
-	RevenueCents  int64       `json:"revenue_cents"`
-}
-
-// Per-session attribution within an event (first-touch): sold units and paid
-// revenue in cents, credited to the session each item was first added in.
-// Returns every session of the event, ordered, including zero-revenue ones.
-func (q *Queries) SessionAttributionByEvent(ctx context.Context, eventID pgtype.UUID) ([]SessionAttributionByEventRow, error) {
-	rows, err := q.db.Query(ctx, sessionAttributionByEvent, eventID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []SessionAttributionByEventRow{}
-	for rows.Next() {
-		var i SessionAttributionByEventRow
-		if err := rows.Scan(
-			&i.SessionID,
-			&i.SequenceOrder,
-			&i.SoldUnits,
-			&i.RevenueCents,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const setCartERPStockLaunched = `-- name: SetCartERPStockLaunched :exec

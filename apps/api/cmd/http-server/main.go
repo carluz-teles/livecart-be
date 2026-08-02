@@ -670,17 +670,39 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				webhookTicker := time.NewTicker(1 * time.Hour)
 				defer sweepTicker.Stop()
 				defer webhookTicker.Stop()
-				// Boot run: finaliza post/story cujo ends_at já fechou enquanto o
-				// serviço estava fora do ar (catch-up no deploy), em vez de
-				// esperar o primeiro tick. Mesmo padrão dos demais workers.
+				// Boot run: abre o que já devia estar aberto e finaliza o que já
+				// devia estar fechado enquanto o serviço estava fora do ar
+				// (catch-up no deploy), em vez de esperar o primeiro tick.
+				// Mesmo padrão dos demais workers.
+				//
+				// A ordem ABRIR → FECHAR é decisão explícita (E37): os dois
+				// predicados são disjuntos, então nenhum evento é ativado e
+				// encerrado no mesmo ciclo. Invertê-la não quebraria nada hoje,
+				// mas deixaria a corrida por conta do acaso.
+				liveSvc.SweepScheduledEventsReadyToStart(context.Background())
 				liveSvc.SweepEndedTimedEvents(context.Background())
+				// RN-31: a publicação prometida para uma hora que passou
+				// enquanto o serviço estava fora do ar precisa sair no boot,
+				// não no próximo tick — o atraso de um agendamento é visível
+				// para o público do lojista.
+				integrationSvc.SweepDuePublishJobs(context.Background())
 				for {
 					select {
 					case <-sweepTicker.C:
 						integrationSvc.RunERPOrderOpsSweep(context.Background())
+						// E37: ativa o evento agendado cuja hora chegou. Sem
+						// isto, post/story publicado por agendamento nunca
+						// vende — não há botão para apertar.
+						liveSvc.SweepScheduledEventsReadyToStart(context.Background())
 						// D5: finaliza post/story cujo ends_at fechou (arma
 						// expires_at nos carts → o expiry worker os alcança).
 						liveSvc.SweepEndedTimedEvents(context.Background())
+						// RN-31: rede do agendador ETA. Task perdida (Redis
+						// limpo, deploy no meio) deixaria o agendamento
+						// vencido e ninguém o dispararia — e a falha seria
+						// SILENCIOSA. Também devolve à fila o job preso em
+						// 'publishing' porque o processo morreu no meio.
+						integrationSvc.SweepDuePublishJobs(context.Background())
 					case <-webhookTicker.C:
 						integrationSvc.CheckTinyStockWebhookDelivery(context.Background(), 12*time.Hour)
 					}
@@ -1313,6 +1335,64 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			}
 			return liveSvc.RunScheduledEventClose(ctx, p.EventID, p.StoreID)
 		})
+
+		// RN-32 — a fila não atendida morre com o evento, em "fim + carência".
+		// event.ended é o gancho: é um fato já transacional (emitido dentro do
+		// tx de EndEvent) e ganha retry + dead-letter do asynq, em vez de mais
+		// uma goroutine detached dentro de End(). Até aqui ele só tinha
+		// logEvent — o fechamento do evento era publicado e ninguém consumia.
+		integrationSvc.SetWaitlistCloseScheduler(waitlistCloseScheduler{client: eventsClient})
+		eventsServer.Register(events.EventEventEnded, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				EventID string `json:"event_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.EventID == "" {
+				return asynq.SkipRetry
+			}
+			logger.From(ctx, log).Info("event observed",
+				zap.String("event", string(env.Name)),
+				zap.String("event_id", env.EventID),
+			)
+			return integrationSvc.ArmEventWaitlistClose(ctx, p.EventID)
+		})
+		eventsServer.Register(events.EventWaitlistClose, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				EventID string `json:"event_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.EventID == "" {
+				return asynq.SkipRetry
+			}
+			return integrationSvc.RunEventWaitlistClose(ctx, p.EventID)
+		})
+
+		// RN-31 — publicação agendada no Instagram. O agendador é nosso porque
+		// a Graph não tem scheduled_publish_time e o container de mídia expira
+		// em 24h; a task só abre o container na hora marcada. O erro devolvido
+		// é o que dispara o retry do asynq — RunScheduledPublish devolve nil
+		// para todo desfecho terminal (cancelado, dead-letter, post já no ar),
+		// justamente para que repetir não republique a mídia.
+		integrationSvc.SetPublishScheduler(publishScheduler{client: eventsClient})
+		eventsServer.Register(events.SessionPublish, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				JobID string `json:"job_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.JobID == "" {
+				return asynq.SkipRetry
+			}
+			return integrationSvc.RunScheduledPublish(ctx, p.JobID)
+		})
 	}
 
 	// Billing choreography L2: the subscription.process command (emitted by the
@@ -1370,21 +1450,75 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 type cartExpiryScheduler struct{ client *events.Client }
 
 func (s cartExpiryScheduler) ScheduleCartExpiry(ctx context.Context, cartID string, at time.Time) error {
-	return s.client.Schedule(ctx, at, events.CartExpire, "cart-expire:"+cartID, struct {
+	return s.client.Schedule(ctx, at, events.CartExpire, cartExpireTaskID(cartID), struct {
 		CartID string `json:"cart_id"`
 	}{CartID: cartID})
 }
+
+// RescheduleCartExpiry move um cart.expire já armado (extensão de prazo pela
+// fila). Um Schedule com o mesmo TaskID seria engolido como "já armado".
+func (s cartExpiryScheduler) RescheduleCartExpiry(ctx context.Context, cartID string, at time.Time) error {
+	return s.client.Reschedule(ctx, at, events.CartExpire, cartExpireTaskID(cartID), struct {
+		CartID string `json:"cart_id"`
+	}{CartID: cartID})
+}
+
+func cartExpireTaskID(cartID string) string { return "cart-expire:" + cartID }
 
 // eventCloseScheduler adapts the events client to live.EventCloseScheduler,
 // enqueueing an event.window_close ETA task keyed "event-close:<id>" for dedup.
 type eventCloseScheduler struct{ client *events.Client }
 
 func (s eventCloseScheduler) ScheduleEventClose(ctx context.Context, eventID, storeID string, at time.Time) error {
-	return s.client.Schedule(ctx, at, events.EventWindowClose, "event-close:"+eventID, struct {
+	return s.client.Schedule(ctx, at, events.EventWindowClose, eventCloseTaskID(eventID), struct {
 		EventID string `json:"event_id"`
 		StoreID string `json:"store_id"`
 	}{EventID: eventID, StoreID: storeID})
 }
+
+// RescheduleEventClose move o fechamento já armado (edição de ends_at). Sem o
+// delete anterior, ANTECIPAR o fim fecharia o evento na hora antiga (CA-05.4).
+func (s eventCloseScheduler) RescheduleEventClose(ctx context.Context, eventID, storeID string, at time.Time) error {
+	return s.client.Reschedule(ctx, at, events.EventWindowClose, eventCloseTaskID(eventID), struct {
+		EventID string `json:"event_id"`
+		StoreID string `json:"store_id"`
+	}{EventID: eventID, StoreID: storeID})
+}
+
+func eventCloseTaskID(eventID string) string { return "event-close:" + eventID }
+
+// waitlistCloseScheduler adapta o cliente de eventos para a RN-32: enfileira
+// event.waitlist_close com ETA em "fim do evento + carência", com TaskID
+// "event-waitlist-close:<id>" para dedup.
+type waitlistCloseScheduler struct{ client *events.Client }
+
+func (s waitlistCloseScheduler) ScheduleEventWaitlistClose(ctx context.Context, eventID string, at time.Time) error {
+	return s.client.Schedule(ctx, at, events.EventWaitlistClose, "event-waitlist-close:"+eventID, struct {
+		EventID string `json:"event_id"`
+	}{EventID: eventID})
+}
+
+// publishScheduler adapta o cliente de eventos para integration.PublishScheduler
+// (RN-31): enfileira session.publish com ETA em scheduled_for, TaskID
+// "session-publish:<job>" para dedup.
+//
+// CancelPublish apaga a task pendente, mas NÃO é o cancelamento: quem cancela é
+// o guard no banco (o job sai de 'scheduled'). O asynq recusa apagar task em
+// estado ACTIVE, então sem esse guard um cancelamento no instante do disparo
+// publicaria assim mesmo.
+type publishScheduler struct{ client *events.Client }
+
+func (s publishScheduler) SchedulePublish(ctx context.Context, jobID string, at time.Time) error {
+	return s.client.Schedule(ctx, at, events.SessionPublish, publishTaskID(jobID), struct {
+		JobID string `json:"job_id"`
+	}{JobID: jobID})
+}
+
+func (s publishScheduler) CancelPublish(ctx context.Context, jobID string) error {
+	return s.client.Cancel(ctx, publishTaskID(jobID))
+}
+
+func publishTaskID(jobID string) string { return "session-publish:" + jobID }
 
 // trialReminderScheduler adapts the events client to billing.TrialReminderScheduler,
 // enqueueing a trial.ending_soon ETA task keyed "trial-ending:<store>" for dedup.
@@ -1407,10 +1541,11 @@ func newLiveNotifierAdapter(inner *integration.InstagramNotifier) *liveNotifierA
 	return &liveNotifierAdapter{inner: inner}
 }
 
-func (a *liveNotifierAdapter) NotifyEventCheckout(ctx context.Context, p live.NotifyEventCheckoutParams) error {
-	return a.inner.NotifyEventCheckout(ctx, integration.NotifyEventCheckoutParams{
+func (a *liveNotifierAdapter) NotifyEventCheckout(ctx context.Context, p live.NotifyEventCheckoutParams) (live.NotifyEventCheckoutResult, error) {
+	res, err := a.inner.NotifyEventCheckout(ctx, integration.NotifyEventCheckoutParams{
 		StoreID:        p.StoreID,
 		EventID:        p.EventID,
+		EventTitle:     p.EventTitle,
 		CartID:         p.CartID,
 		CartToken:      p.CartToken,
 		PlatformUserID: p.PlatformUserID,
@@ -1419,8 +1554,19 @@ func (a *liveNotifierAdapter) NotifyEventCheckout(ctx context.Context, p live.No
 		// comment). Dropping it here silently forced every resend onto the
 		// direct-message path, which Instagram rejects outside the 24h window
 		// (error 2534022) — a comment alone never opens that window.
-		CommentID:  p.CommentID,
-		TotalItems: p.TotalItems,
-		TotalValue: p.TotalValue,
+		CommentID: p.CommentID,
+		// CommentCreatedAt é o que permite classificar a não entrega (RN-38).
+		// Perder este campo no adapter faria toda janela vencida virar
+		// "instagram_rejected" em vez de "comment_window_expired" — motivo
+		// errado na lista do lojista, e ação errada da parte dele.
+		CommentCreatedAt: p.CommentCreatedAt,
+		DeadlineAt:       p.DeadlineAt,
+		TotalItems:       p.TotalItems,
+		TotalValue:       p.TotalValue,
 	})
+	return live.NotifyEventCheckoutResult{
+		Delivered:  res.Delivered,
+		Reason:     res.Reason,
+		ReasonText: res.ReasonText,
+	}, err
 }

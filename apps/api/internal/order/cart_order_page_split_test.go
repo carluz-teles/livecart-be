@@ -46,7 +46,7 @@ func seedIsolatedStore(t *testing.T, tag string) (storeID, eventID string) {
 		t.Fatalf("seedIsolatedStore store: %v", err)
 	}
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title) VALUES ($1, 'ended', $2) RETURNING id::text`,
+		`INSERT INTO live_events (store_id, status, title, ends_at) VALUES ($1, 'ended', $2, now()) RETURNING id::text`,
 		storeID, tag+" Ev",
 	).Scan(&eventID); err != nil {
 		t.Fatalf("seedIsolatedStore event: %v", err)

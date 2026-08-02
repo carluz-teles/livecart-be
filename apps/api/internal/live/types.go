@@ -22,15 +22,16 @@ type CreateEventRequest struct {
 type CreateEventResponse struct {
 	ID        string    `json:"id"`
 	Title     string    `json:"title"`
-	Type      string    `json:"type"`
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
 type EventResponse struct {
-	ID                     string `json:"id"`
-	Title                  string `json:"title"`
-	Type                   string `json:"type"`
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	// `type` SAIU do contrato (000122). A espécie da campanha está em
+	// `sessionTypes`, mais abaixo: uma campanha mista não tem tipo único, e
+	// devolver um rótulo derivado seria a mesma mentira em outro lugar.
 	Status                 string `json:"status"`
 	TotalOrders            int    `json:"totalOrders"`
 	CloseCartOnEventEnd    bool   `json:"closeCartOnEventEnd"`
@@ -38,6 +39,8 @@ type EventResponse struct {
 	CartMaxQuantityPerItem *int   `json:"cartMaxQuantityPerItem"`
 	SendOnLiveEnd          *bool  `json:"sendOnLiveEnd"`
 	PixDiscountPercent     int    `json:"pixDiscountPercent"`
+	// RN-10 — janela extra do promovido da fila (minutos).
+	WaitlistNotifiedTtlMinutes int `json:"waitlistNotifiedTtlMinutes"`
 	// Scheduling
 	ScheduledAt *time.Time `json:"scheduledAt"`
 	EndsAt      *time.Time `json:"endsAt"`
@@ -46,8 +49,15 @@ type EventResponse struct {
 	ProductCount int               `json:"productCount"`
 	UpsellCount  int               `json:"upsellCount"`
 	Sessions     []SessionResponse `json:"sessions,omitempty"`
-	CreatedAt    time.Time         `json:"createdAt"`
-	UpdatedAt    time.Time         `json:"updatedAt"`
+	// SessionTypes são os tipos DISTINTOS das transmissões deste evento
+	// ({live, post, reel, story}). É a única fonte de "que espécie de evento é
+	// este" que sobrevive à 000122, que dropou live_events.type: com a campanha
+	// mista o tipo do container deixou de ter resposta única, e quem quiser
+	// rotular a tela tem que olhar as sessões. Nunca nulo — evento sem sessão
+	// devolve lista vazia, e lista vazia é "ainda não sabemos", não "live".
+	SessionTypes []string  `json:"sessionTypes"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 type ListEventsResponse struct {
@@ -85,7 +95,6 @@ type CreateEventInput struct {
 type CreateEventOutput struct {
 	ID        string
 	Title     string
-	Type      string
 	Status    string
 	CreatedAt time.Time
 }
@@ -106,7 +115,6 @@ type EventOutput struct {
 	ID                     string
 	StoreID                string
 	Title                  string
-	Type                   string
 	Status                 string
 	TotalOrders            int
 	CloseCartOnEventEnd    bool
@@ -114,8 +122,8 @@ type EventOutput struct {
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
 	PixDiscountPercent     int
-	CurrentActiveProductID *string
-	ProcessingPaused       bool
+	// RN-10 — janela extra do promovido da fila, em minutos.
+	WaitlistNotifiedTTLMinutes int
 	// Scheduling
 	ScheduledAt *time.Time
 	EndsAt      *time.Time
@@ -150,8 +158,10 @@ type EventFilters struct {
 
 // Repository layer - Event
 type CreateEventParams struct {
-	StoreID                string
-	Title                  string
+	StoreID string
+	Title   string
+	// Type é o tipo da SESSÃO inicial (D3). O evento não guarda tipo desde a
+	// 000122 — aceita o vocabulário legado (single|multi) e traduz.
 	Type                   string
 	Status                 string
 	CloseCartOnEventEnd    bool
@@ -159,8 +169,15 @@ type CreateEventParams struct {
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
 	PixDiscountPercent     int
-	// Scheduling
-	ScheduledAt *time.Time
+	// Janela comercial. StartsAt já chega RESOLVIDO (o Service cai para
+	// scheduledAt quando o formulário só manda o campo legado) — por isso não
+	// há ScheduledAt aqui: duas entradas para as duas colunas que sempre
+	// carregam o mesmo valor é como elas divergiriam.
+	//
+	// EndsAt é OBRIGATÓRIO: a coluna é NOT NULL desde a 000122 e é o teto que
+	// garante que nenhum carrinho fica sem prazo.
+	StartsAt    *time.Time
+	EndsAt      *time.Time
 	Description *string
 }
 
@@ -168,7 +185,6 @@ type EventRow struct {
 	ID                     string
 	StoreID                string
 	Title                  string
-	Type                   string
 	Status                 string
 	TotalOrders            int
 	CloseCartOnEventEnd    bool
@@ -176,8 +192,10 @@ type EventRow struct {
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
 	PixDiscountPercent     int
-	CurrentActiveProductID *string
-	ProcessingPaused       bool
+	// RN-10: janela extra, em minutos, que o promovido da fila ganha a partir
+	// do momento em que o item libera. Vive em live_events desde a 000073
+	// (CHECK 5..240) e o runtime já a aplica — faltava só aparecer na API.
+	WaitlistNotifiedTTLMinutes int
 	// Scheduling: ScheduledAt is the start; EndsAt is the optional end.
 	ScheduledAt *time.Time
 	EndsAt      *time.Time
@@ -194,6 +212,10 @@ type EventRow struct {
 type CreateSessionRequest struct {
 	Platform       string `json:"platform" validate:"required,oneof=instagram tiktok youtube facebook"`
 	PlatformLiveID string `json:"platformLiveId" validate:"required"`
+	// Type é a natureza da transmissão (D3). Vazio = "live". Os valores aqui
+	// espelham o CHECK live_sessions_type_check da 000111: desalinhar os dois
+	// devolve 500 em vez de 422 (lição E6 da errata).
+	Type string `json:"type" validate:"omitempty,oneof=live post reel story"`
 }
 
 // EventPulse is a tiny change-signal for near-real-time dashboard refresh. The
@@ -211,27 +233,91 @@ type CommentResponse struct {
 	Text   string `json:"text"`
 }
 
+// =============================================================================
+// MÉTRICA EM DOIS NÍVEIS (Fatia 5)
+//
+// Dois níveis, dois grupos de números, nunca misturados:
+//   • CONFIRMADO — o congelado do pedido pago (order_items.session_id). É o que
+//     entra em relatório de faturamento.
+//   • PROJETADO  — o que está nos carrinhos abertos, repartido pelo log de
+//     adições. É expectativa, não receita.
+//
+// Ambos em GMV BRUTO. Desconto de cupom é do EVENTO e frete é do CARRINHO —
+// nenhum dos dois tem sessão, então "receita líquida por transmissão" é
+// insolúvel por construção e deliberadamente não existe aqui.
+// =============================================================================
+
+// SessionRevenueResponse são os números de UMA transmissão, nos dois níveis.
+type SessionRevenueResponse struct {
+	// Confirmado
+	PaidCarts        int   `json:"paidCarts"`
+	SoldUnits        int   `json:"soldUnits"`
+	ConfirmedRevenue int64 `json:"confirmedRevenue"`
+	// Projetado
+	OpenCarts        int   `json:"openCarts"`
+	ProjectedUnits   int   `json:"projectedUnits"`
+	ProjectedRevenue int64 `json:"projectedRevenue"`
+}
+
+// SessionMetricsResponse é uma linha do relatório por transmissão. SessionID
+// nulo é o balde "sem transmissão" — adição feita pelo painel, ou carrinho
+// montado antes do log existir. Ele aparece de propósito: escondê-lo faria a
+// soma das linhas não fechar com o total do evento.
+type SessionMetricsResponse struct {
+	SessionID     *string `json:"sessionId"`
+	SequenceOrder int     `json:"sequenceOrder"`
+	Type          string  `json:"type"`
+	Status        string  `json:"status"`
+	// AttributionSource é 'first_touch' quando a transmissão já existia antes
+	// do corte da 000121 — os números dela incluem período em que a atribuição
+	// creditava o produto inteiro à sessão da PRIMEIRA adição. 'addition_log' é
+	// a transmissão nascida depois, 100% derivada do log. A tela precisa disso
+	// para avisar; sem o aviso, quem comparar os dois lados conclui que a
+	// métrica quebrou.
+	AttributionSource string `json:"attributionSource"`
+	SessionRevenueResponse
+}
+
+// EventSessionMetricsResponse é a métrica do evento com a quebra por
+// transmissão. ConfirmedRevenue/ProjectedRevenue são, por construção, a soma
+// exata de sessions + unattributed — e batem com o event-stats do evento.
+type EventSessionMetricsResponse struct {
+	EventID          string                   `json:"eventId"`
+	ConfirmedRevenue int64                    `json:"confirmedRevenue"`
+	ProjectedRevenue int64                    `json:"projectedRevenue"`
+	Sessions         []SessionMetricsResponse `json:"sessions"`
+	Unattributed     *SessionMetricsResponse  `json:"unattributed"`
+	// AttributionCutoverAt é o instante registrado em metric_cutovers (D26).
+	// Nulo só se o marcador não existir no banco — a métrica responde do mesmo
+	// jeito, sem a ressalva.
+	AttributionCutoverAt *time.Time `json:"attributionCutoverAt"`
+	AttributionCutoverNote string   `json:"attributionCutoverNote,omitempty"`
+}
+
 type SessionResponse struct {
-	ID            string             `json:"id"`
-	EventID       string             `json:"eventId"`
-	Status        string             `json:"status"`
-	StartedAt     *time.Time         `json:"startedAt"`
-	EndedAt       *time.Time         `json:"endedAt"`
-	TotalComments int                `json:"totalComments"`
-	TotalCarts    int                `json:"totalCarts"`
-	PaidCarts     int                `json:"paidCarts"`
-	TotalRevenue  int64              `json:"totalRevenue"`
-	PaidRevenue   int64              `json:"paidRevenue"`
-	Platforms     []PlatformResponse `json:"platforms,omitempty"`
-	Comments      []CommentResponse  `json:"comments,omitempty"`
-	CreatedAt     time.Time          `json:"createdAt"`
-	UpdatedAt     time.Time          `json:"updatedAt"`
+	ID            string     `json:"id"`
+	EventID       string     `json:"eventId"`
+	Type          string     `json:"type"`
+	Status        string     `json:"status"`
+	SequenceOrder int        `json:"sequenceOrder"`
+	StartedAt     *time.Time `json:"startedAt"`
+	EndedAt       *time.Time `json:"endedAt"`
+	TotalComments int        `json:"totalComments"`
+	// Métrica desta transmissão (Fatia 5). Os nomes antigos (totalCarts,
+	// totalRevenue, paidRevenue) saíram junto com GetSessionStats: eles falavam
+	// do carrinho INTEIRO creditado à sessão em que ele nasceu.
+	SessionRevenueResponse
+	Platforms []PlatformResponse `json:"platforms,omitempty"`
+	Comments  []CommentResponse  `json:"comments,omitempty"`
+	CreatedAt time.Time          `json:"createdAt"`
+	UpdatedAt time.Time          `json:"updatedAt"`
 }
 
 // Service layer - Session
 type CreateSessionInput struct {
 	EventID        string
 	StoreID        string
+	Type           string
 	Platform       string
 	PlatformLiveID string
 }
@@ -239,6 +325,7 @@ type CreateSessionInput struct {
 type CreateSessionOutput struct {
 	ID        string
 	EventID   string
+	Type      string
 	Status    string
 	Platform  PlatformOutput
 	CreatedAt time.Time
@@ -250,38 +337,85 @@ type CommentOutput struct {
 	Text   string
 }
 
+// SessionRevenueOutput são os números de uma transmissão nos dois níveis
+// (Fatia 5). Zero em tudo é resposta legítima: sessão que ainda não vendeu.
+type SessionRevenueOutput struct {
+	PaidCarts        int
+	SoldUnits        int
+	ConfirmedRevenue int64
+	OpenCarts        int
+	ProjectedUnits   int
+	ProjectedRevenue int64
+}
+
+// SessionMetricsOutput é uma linha do relatório por transmissão. SessionID
+// vazio é o balde "sem transmissão".
+type SessionMetricsOutput struct {
+	SessionID         string
+	SequenceOrder     int
+	Type              string
+	Status            string
+	AttributionSource string
+	SessionRevenueOutput
+}
+
+// EventSessionMetricsOutput é a métrica em dois níveis de um evento.
+type EventSessionMetricsOutput struct {
+	EventID          string
+	ConfirmedRevenue int64
+	ProjectedRevenue int64
+	Sessions         []SessionMetricsOutput
+	// Unattributed é nil quando não há nada sem transmissão.
+	Unattributed *SessionMetricsOutput
+	// Marcador de corte da atribuição (D26). Nulo quando metric_cutovers não
+	// tem a chave — a métrica responde igual, só sem a ressalva.
+	AttributionCutoverAt   *time.Time
+	AttributionCutoverNote string
+}
+
 type SessionOutput struct {
 	ID            string
 	EventID       string
+	Type          string
 	Status        string
-	StartedAt     *time.Time
-	EndedAt       *time.Time
-	TotalComments int
-	TotalCarts    int
-	PaidCarts     int
-	TotalRevenue  int64
-	PaidRevenue   int64
-	Platforms     []PlatformOutput
-	Comments      []CommentOutput
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	SequenceOrder int
+	// Modo Live (D17): estado EFÊMERO de execução DESTA transmissão.
+	CurrentActiveProductID *string
+	ProcessingPaused       bool
+	StartedAt              *time.Time
+	EndedAt                *time.Time
+	TotalComments          int
+	SessionRevenueOutput
+	Platforms []PlatformOutput
+	Comments  []CommentOutput
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
-// Repository layer - Session
-type CreateSessionParams struct {
-	EventID string
-	Status  string
-}
+// CreateSessionParams SAIU junto de Repository.CreateSession: era o parâmetro de
+// um segundo caminho de criação de sessão que não herdava a whitelist do evento.
+// A criação viva é CreateSessionWithPlatformTx, que herda dentro da transação.
 
 type SessionRow struct {
-	ID            string
-	EventID       string
-	Status        string
-	StartedAt     *time.Time
-	EndedAt       *time.Time
-	TotalComments int
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID      string
+	EventID string
+	Type    string
+	Status  string
+	// A ordem da transmissão dentro da campanha (1ª, 2ª, …). É por ela que a
+	// métrica em dois níveis lista as sessões — ListSessionsByEvent devolve por
+	// created_at DESC, que é a ordem da tela, não a do relatório.
+	SequenceOrder int
+	// Modo Live (D17): estado EFÊMERO de execução DESTA transmissão.
+	CurrentActiveProductID *string
+	ProcessingPaused       bool
+	// D26 (000121): 'first_touch' quando a transmissão é anterior ao corte da
+	// atribuição, 'addition_log' quando nasceu depois dele.
+	AttributionSource string
+	StartedAt         *time.Time
+	EndedAt           *time.Time
+	TotalComments     int
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // =============================================================================
@@ -369,44 +503,45 @@ type PostMediaInput struct {
 	Caption      string
 }
 
-// PostMedia is the stored post metadata for an event.
-type PostMedia struct {
-	MediaID       string `json:"mediaId"`
-	Permalink     string `json:"permalink"`
-	ThumbnailURL  string `json:"thumbnailUrl"`
-	Caption       string `json:"caption"`
-	WebhookActive bool   `json:"webhookActive"`
-}
-
-// PostEventRef is a lightweight reference to a post event for capture loops.
-type PostEventRef struct {
+// MediaRef is a lightweight reference to ONE published media for the capture
+// loops. D3/A4: a unidade do polling passou a ser a mídia, não o evento — um
+// evento guarda-chuva tem N mídias e cada uma tem seu próprio webhook_active.
+type MediaRef struct {
+	MediaID       string
+	SessionID     string
+	SessionType   string
 	EventID       string
 	StoreID       string
-	MediaID       string
-	Status        string
+	EventStatus   string
 	WebhookActive bool
 }
 
 // CreatePostRequest is the HTTP payload to create a post-commerce event.
 // StartsAt/EndsAt are optional ISO8601 timestamps (with timezone).
 type CreatePostRequest struct {
-	Title                  string   `json:"title"`
-	MediaID                string   `json:"mediaId" validate:"required"`
-	MediaPermalink         string   `json:"mediaPermalink"`
-	MediaThumbnailURL      string   `json:"mediaThumbnailUrl"`
-	MediaCaption           string   `json:"mediaCaption"`
-	ProductIDs             []string `json:"productIds" validate:"required,min=1"`
-	StartsAt               *string  `json:"startsAt"`
-	EndsAt                 *string  `json:"endsAt"`
-	CartExpirationMinutes  *int     `json:"cartExpirationMinutes"`
-	CartMaxQuantityPerItem *int     `json:"cartMaxQuantityPerItem"`
+	Title             string   `json:"title"`
+	MediaID           string   `json:"mediaId" validate:"required"`
+	MediaPermalink    string   `json:"mediaPermalink"`
+	MediaThumbnailURL string   `json:"mediaThumbnailUrl"`
+	MediaCaption      string   `json:"mediaCaption"`
+	ProductIDs        []string `json:"productIds" validate:"required,min=1"`
+	StartsAt          *string  `json:"startsAt"`
+	// EndsAt é OBRIGATÓRIO (RN-05/CA-05.1). Sem teto, a RN-04 (expires_at NULL
+	// durante o evento) deixa o carrinho sem prazo para sempre.
+	EndsAt *string `json:"endsAt" validate:"required"`
+	// min=15 espelha o CHECK da migration 000106; abaixo disso o INSERT vira
+	// 500 em vez de erro de campo (lição E6 da errata).
+	CartExpirationMinutes  *int `json:"cartExpirationMinutes" validate:"omitempty,min=15,max=1440"`
+	CartMaxQuantityPerItem *int `json:"cartMaxQuantityPerItem" validate:"omitempty,min=1,max=100"`
 }
 
 // CreatePostInput is the input to create a post-commerce event.
 type CreatePostInput struct {
 	StoreID string
-	// Type is the event discriminator: "post" (default) for feed posts/Reels, or
-	// "story" for Stories (24h window, purchase intent captured via DM replies).
+	// Type é o tipo da SESSÃO (D3): "post" (padrão) para post de feed, "reel"
+	// para Reels e "story" para Stories (janela de 24h, intenção capturada por
+	// resposta de DM). É a ÚNICA fonte do tipo: a 000122 dropou
+	// live_events.type, então não há mais rótulo no evento para divergir dela.
 	Type                   string
 	Title                  string
 	MediaID                string
@@ -439,21 +574,30 @@ type CreateLiveRequest struct {
 	Platform       *string `json:"platform" validate:"omitempty,oneof=instagram"`
 	PlatformLiveID *string `json:"platformLiveId" validate:"omitempty"`
 	// Scheduling
-	ScheduledAt *string `json:"scheduledAt"` // ISO8601 timestamp
+	ScheduledAt *string `json:"scheduledAt"` // ISO8601 timestamp — legado, sinônimo de startsAt
+	// StartsAt/EndsAt são a JANELA COMERCIAL do evento (D21). EndsAt é
+	// OBRIGATÓRIO (RN-05/CA-05.1): é o teto que garante que nenhum carrinho
+	// fica órfão, já que a RN-04 mantém expires_at NULL durante o evento.
+	StartsAt    *string `json:"startsAt"`
+	EndsAt      *string `json:"endsAt" validate:"required"`
 	Description *string `json:"description" validate:"omitempty,max=2000"`
 	// Cart settings (override store defaults)
-	CloseCartOnEventEnd    *bool `json:"closeCartOnEventEnd"`
-	CartExpirationMinutes  *int  `json:"cartExpirationMinutes" validate:"omitempty,min=5,max=1440"`
+	CloseCartOnEventEnd *bool `json:"closeCartOnEventEnd"`
+	// min=15 espelha o CHECK da migration 000106. Estava em 5 e um valor entre
+	// 5 e 14 passava na validação e estourava no banco como 500 (lição E6).
+	CartExpirationMinutes  *int  `json:"cartExpirationMinutes" validate:"omitempty,min=15,max=1440"`
 	CartMaxQuantityPerItem *int  `json:"cartMaxQuantityPerItem" validate:"omitempty,min=1,max=100"`
 	SendOnLiveEnd          *bool `json:"sendOnLiveEnd"`
 	// PixDiscountPercent (0-100). 0 disables the feature.
 	PixDiscountPercent *int `json:"pixDiscountPercent" validate:"omitempty,min=0,max=100"`
+	// RN-10 — janela extra do promovido da fila. O range espelha o CHECK da
+	// migration 000073 (5..240): desalinhar devolveria 500 em vez de 422.
+	WaitlistNotifiedTtlMinutes *int `json:"waitlistNotifiedTtlMinutes" validate:"omitempty,min=5,max=240"`
 }
 
 type CreateLiveResponse struct {
 	ID        string    `json:"id"`
 	Title     string    `json:"title"`
-	Type      string    `json:"type"`
 	Platform  string    `json:"platform,omitempty"`
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"createdAt"`
@@ -463,12 +607,22 @@ type UpdateLiveRequest struct {
 	Title string `json:"title" validate:"required,min=1,max=200"`
 	// Optional fields. When omitted, the existing value is preserved.
 	PixDiscountPercent *int `json:"pixDiscountPercent" validate:"omitempty,min=0,max=100"`
+	// Janela comercial (RN-05/CA-05.7). Ponteiro + omissão = "não mexer"; string
+	// vazia = "limpar". Sem essa distinção, um PUT que só ajusta o fim apagaria
+	// o início. Editar endsAt re-agenda o fechamento — inclusive para MENOS
+	// (CA-05.4), que exigiu events.Client.Reschedule: um Schedule com o mesmo
+	// asynq.TaskID devolve ErrTaskIDConflict e é engolido como "já armado", de
+	// modo que antecipar o fim fecharia o evento na hora antiga.
+	StartsAt *string `json:"startsAt"`
+	EndsAt   *string `json:"endsAt"`
+	// RN-10 — mesmo range do CHECK da 000073.
+	WaitlistNotifiedTtlMinutes *int `json:"waitlistNotifiedTtlMinutes" validate:"omitempty,min=5,max=240"`
 }
 
 type LiveResponse struct {
-	ID                     string     `json:"id"`
-	Title                  string     `json:"title"`
-	Type                   string     `json:"type"`
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	// `type` SAIU (000122) — ver `sessionTypes`.
 	Platform               string     `json:"platform"`       // Primary platform (from first session)
 	PlatformLiveID         string     `json:"platformLiveId"` // Primary platform live ID
 	Status                 string     `json:"status"`
@@ -481,13 +635,22 @@ type LiveResponse struct {
 	CartMaxQuantityPerItem *int       `json:"cartMaxQuantityPerItem"`
 	SendOnLiveEnd          *bool      `json:"sendOnLiveEnd"`
 	PixDiscountPercent     int        `json:"pixDiscountPercent"`
+	// RN-10 — janela extra do promovido da fila (minutos). Existe no banco
+	// desde a 000073 e o runtime já a aplica; até aqui não aparecia em DTO
+	// nenhum, então o lojista não tinha como ver nem mudar.
+	WaitlistNotifiedTtlMinutes int `json:"waitlistNotifiedTtlMinutes"`
 	// Scheduling
 	ScheduledAt *time.Time `json:"scheduledAt"`
 	EndsAt      *time.Time `json:"endsAt"`
 	Description *string    `json:"description"`
 	// Counts
-	ProductCount int       `json:"productCount"`
-	UpsellCount  int       `json:"upsellCount"`
+	ProductCount int `json:"productCount"`
+	UpsellCount  int `json:"upsellCount"`
+	// SessionTypes — mesma semântica de EventResponse.SessionTypes. A LISTA
+	// precisa dele tanto quanto o detalhe: ela não carrega sessions[], então
+	// sem este campo a tela de eventos só teria live_events.type para escolher
+	// o rótulo — exatamente a coluna que a 000122 removeu.
+	SessionTypes []string  `json:"sessionTypes"`
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
@@ -497,9 +660,18 @@ type ListLivesResponse struct {
 	Pagination query.PaginationResponse `json:"pagination"`
 }
 
+// LiveStatsResponse são os contadores do topo de /events.
+//
+// RN-19: totalLives/activeLives sempre contaram EVENTOS, não lives — o rótulo
+// mentia desde antes do guarda-chuva, e agora que uma campanha tem live, post,
+// reel e story ao mesmo tempo ele mente de forma visível. Os nomes novos entram
+// ao lado dos antigos, com o MESMO valor, para que o frontend possa migrar sem
+// deploy acoplado; os antigos saem quando ninguém mais os ler.
 type LiveStatsResponse struct {
-	TotalLives   int   `json:"totalLives"`
-	ActiveLives  int   `json:"activeLives"`
+	TotalEvents  int   `json:"totalEvents"`
+	ActiveEvents int   `json:"activeEvents"`
+	TotalLives   int   `json:"totalLives"`  // Deprecated: use totalEvents.
+	ActiveLives  int   `json:"activeLives"` // Deprecated: use activeEvents.
 	TotalOrders  int   `json:"totalOrders"`
 	TotalRevenue int64 `json:"totalRevenue"`
 }
@@ -526,15 +698,20 @@ type CreateLiveInput struct {
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
 	PixDiscountPercent     *int
+	// RN-10 — janela extra do promovido da fila. nil = mantém o default da coluna.
+	WaitlistNotifiedTTLMinutes *int
 	// Scheduling
 	ScheduledAt *time.Time
+	// StartsAt/EndsAt: janela comercial do evento (D21). EndsAt é obrigatório
+	// no create — o service recusa quando vem nil.
+	StartsAt    *time.Time
+	EndsAt      *time.Time
 	Description *string
 }
 
 type CreateLiveOutput struct {
 	ID        string
 	Title     string
-	Type      string
 	Platform  string
 	Status    string
 	CreatedAt time.Time
@@ -545,7 +722,27 @@ type UpdateLiveInput struct {
 	StoreID            string
 	Title              string
 	PixDiscountPercent *int
+	// RN-10 — nil = não mexer.
+	WaitlistNotifiedTTLMinutes *int
+	// Window carrega a alteração PARCIAL da janela comercial.
+	Window EventWindowUpdate
 }
+
+// EventWindowUpdate descreve uma alteração PARCIAL da janela comercial do
+// evento. Os flags Set* existem porque nil tem DOIS sentidos aqui: "não mexer"
+// (edição que só ajusta o fim) e "limpar" (evento que deixa de ter início
+// agendado). Sem eles, um PUT que só antecipa ends_at apagaria starts_at em
+// silêncio — que é exatamente o que o SetEventWindow antigo fazia, por escrever
+// as duas colunas de uma vez.
+type EventWindowUpdate struct {
+	SetStartsAt bool
+	StartsAt    *time.Time
+	SetEndsAt   bool
+	EndsAt      *time.Time
+}
+
+// Touches informa se há de fato alguma coluna de janela para escrever.
+func (w EventWindowUpdate) Touches() bool { return w.SetStartsAt || w.SetEndsAt }
 
 type EndLiveInput struct {
 	ID       string
@@ -577,7 +774,6 @@ type LiveOutput struct {
 	ID                     string
 	StoreID                string
 	Title                  string
-	Type                   string
 	Platform               string // Primary platform
 	PlatformLiveID         string // Primary platform live ID
 	Status                 string
@@ -585,11 +781,16 @@ type LiveOutput struct {
 	EndedAt                *time.Time
 	TotalComments          int
 	TotalOrders            int
+	// SessionTypes são os tipos DISTINTOS das sessões deste evento. É o
+	// substituto de Type, que a 000122 dropou.
+	SessionTypes           []string
 	CloseCartOnEventEnd    bool
 	CartExpirationMinutes  *int
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
 	PixDiscountPercent     int
+	// RN-10 — janela extra do promovido da fila, em minutos (CHECK 5..240).
+	WaitlistNotifiedTTLMinutes int
 	// Scheduling: ScheduledAt is the start, EndsAt the optional scheduled end.
 	ScheduledAt *time.Time
 	EndsAt      *time.Time
@@ -847,6 +1048,7 @@ type SetProcessingPausedRequest struct {
 }
 
 type LiveModeStateResponse struct {
+	SessionID        string                 `json:"sessionId"`
 	ProcessingPaused bool                   `json:"processingPaused"`
 	ActiveProduct    *ActiveProductResponse `json:"activeProduct"`
 }
@@ -861,6 +1063,9 @@ type ActiveProductResponse struct {
 
 // Service layer - Live Mode
 type LiveModeStateOutput struct {
+	// SessionID é a transmissão de onde o estado veio (D17). Na rota legada por
+	// evento ele diz QUAL sessão o painel está de fato controlando.
+	SessionID        string
 	ProcessingPaused bool
 	ActiveProduct    *ActiveProductOutput
 }

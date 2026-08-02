@@ -57,6 +57,7 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 		TotalRevenue:   output.TotalRevenue,
 		TotalOrders:    output.TotalOrders,
 		ActiveProducts: output.ActiveProducts,
+		TotalEvents:    output.TotalLives,
 		TotalLives:     output.TotalLives,
 	})
 }

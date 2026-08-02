@@ -115,6 +115,8 @@ type Service struct {
 	billingGate         BillingGate
 	stock               *StockReservations
 	expiryScheduler     CartExpiryScheduler
+	waitlistCloseSched  WaitlistCloseScheduler
+	publishScheduler    PublishScheduler
 	logger              *zap.Logger
 
 	// erpProviderFactory lets the finalisation state-machine tests inject a
@@ -1508,46 +1510,13 @@ func (s *Service) getInstagramUserProfile(ctx context.Context, accessToken strin
 	return profileResp.Username, nil
 }
 
-// RefreshInstagramToken refreshes a long-lived Instagram token for another 60 days.
-func (s *Service) RefreshInstagramToken(ctx context.Context, accessToken string) (string, int, error) {
-	refreshURL := fmt.Sprintf(
-		"https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=%s",
-		accessToken,
-	)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", refreshURL, nil)
-	if err != nil {
-		return "", 0, fmt.Errorf("creating refresh request: %w", err)
-	}
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", 0, fmt.Errorf("sending refresh request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != http.StatusOK {
-		logger.From(ctx, s.logger).Error("Instagram token refresh failed",
-			zap.Int("status", resp.StatusCode),
-			zap.String("body", string(body)),
-		)
-		return "", 0, fmt.Errorf("token refresh failed: status %d", resp.StatusCode)
-	}
-
-	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-		TokenType   string `json:"token_type"`
-		ExpiresIn   int    `json:"expires_in"`
-	}
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return "", 0, fmt.Errorf("parsing refresh response: %w", err)
-	}
-
-	return tokenResp.AccessToken, tokenResp.ExpiresIn, nil
-}
+// RefreshInstagramToken SAIU: era uma segunda implementacao do
+// GET /refresh_access_token, sem nenhum chamador, ao lado do
+// Instagram.RefreshToken que era um stub `return nil, nil`. Ou seja: existia o
+// codigo que renova e existia o gancho por onde a renovacao passa, e os dois
+// nunca se encontraram. A implementacao vive agora no provider
+// (providers/social/instagram.go), que e onde createProviderFromRow e o
+// TokenRefreshWorker a procuram.
 
 // =============================================================================
 // PROVIDER OPERATIONS
@@ -2512,7 +2481,11 @@ func (s *Service) publishInstagramReelEvent(ctx context.Context, input CreateIns
 	}
 
 	out, err := s.liveService.CreatePostEvent(ctx, live.CreatePostInput{
-		StoreID:                input.StoreID,
+		StoreID: input.StoreID,
+		// D3: até aqui todo Reel era gravado como 'post' e ficava
+		// indistinguível de um post de feed. A sessão passa a dizer 'reel';
+		// o evento continua rotulado 'post' porque o FE não conhece o valor.
+		Type:                   live.SessionTypeReel,
 		Title:                  input.Title,
 		MediaID:                mediaID,
 		MediaPermalink:         permalink,
@@ -4233,7 +4206,7 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 			EventType:      "messaging",
 			EventID:        input.MessageID,
 			Payload:        input.RawPayload,
-			SignatureValid: true,
+			SignatureValid: input.SignatureValid,
 		}); err != nil {
 			logger.From(ctx, s.logger).Error("failed to store instagram dm webhook event",
 				zap.String("message_id", input.MessageID),
@@ -4271,13 +4244,21 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 func (s *Service) processStoryReply(ctx context.Context, input ProcessInstagramMessageInput) error {
 	// Only act on replies to one of our story-commerce events. The event carries
 	// the store, so we don't need the (separate, sometimes-missing) account lookup.
+	//
+	// D3: quem diz que a mídia é um story é a SESSÃO dona dela — o tipo desceu
+	// para live_sessions e este caminho já resolve pela mídia, então é o lookup
+	// mais direto que existe.
+	session, err := s.liveService.GetSessionByPlatformLiveID(ctx, input.ReplyToStoryID)
+	if err != nil {
+		return fmt.Errorf("resolving story session: %w", err)
+	}
 	event, err := s.liveService.GetEventByPlatformLiveID(ctx, input.ReplyToStoryID)
 	if err != nil {
 		return fmt.Errorf("resolving story event: %w", err)
 	}
-	if event == nil || event.Type != "story" {
+	if session == nil || event == nil || session.Type != live.SessionTypeStory {
 		// Reply to a non-commerce story (or unknown) — nothing to do.
-		logger.From(ctx, s.logger).Info("story reply ignored: no matching story event",
+		logger.From(ctx, s.logger).Info("story reply ignored: no matching story session",
 			zap.String("story_id", input.ReplyToStoryID))
 		return nil
 	}
@@ -4312,13 +4293,19 @@ func (s *Service) processStoryReply(ctx context.Context, input ProcessInstagramM
 		Timestamp:  input.Timestamp,
 		Channel:    "dm",
 		RawPayload: input.RawPayload,
+		// A venda por story nasce de um DM: o resultado da assinatura da
+		// requisição que trouxe o DM é o mesmo que vale para o comentário
+		// canônico gerado a partir dele. Não repassar faria a auditoria do
+		// story registrar "assinatura inválida" para tráfego legítimo da Meta —
+		// o erro simétrico, e igualmente capaz de travar o deploy 2.
+		SignatureValid: input.SignatureValid,
 	}, events.SourceInstagramStory)
 }
 
-// MarkPostEventWebhookActive flags the post event mapped to mediaID as
-// webhook-driven, so the polling capture stops. Delegates to the live service.
-func (s *Service) MarkPostEventWebhookActive(ctx context.Context, mediaID string) error {
-	return s.liveService.MarkPostEventWebhookActive(ctx, mediaID)
+// MarkMediaWebhookActive flags THIS media as webhook-driven, so the polling
+// capture stops for ela (e só para ela). Delegates to the live service.
+func (s *Service) MarkMediaWebhookActive(ctx context.Context, mediaID string) error {
+	return s.liveService.MarkMediaWebhookActive(ctx, mediaID)
 }
 
 // StartPostCommentPolling launches a background loop that captures comments on
@@ -4358,17 +4345,17 @@ func isMediaGoneError(err error) bool {
 // are not yet webhook-driven. New comments (deduped by platform_comment_id) are
 // fed into the same ProcessInstagramComment path used by the webhook.
 func (s *Service) pollPostCommentsOnce(ctx context.Context) {
-	events, err := s.liveService.ListActivePostEvents(ctx)
+	medias, err := s.liveService.ListPollableMedia(ctx)
 	if err != nil {
-		logger.From(ctx, s.logger).Warn("post polling: failed to list active post events", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("post polling: failed to list pollable media", zap.Error(err))
 		return
 	}
-	for _, ev := range events {
+	for _, ev := range medias {
 		if ev.MediaID == "" {
 			continue
 		}
 		// The polling loop runs on the app-level ctx (no store): enrich a
-		// per-event ctx with the store each event belongs to.
+		// per-media ctx with the store the media belongs to.
 		evCtx := logger.WithStore(ctx, ev.StoreID, "")
 		provider, err := s.resolveInstagramSocialProvider(evCtx, ev.StoreID)
 		if err != nil {
@@ -4379,7 +4366,7 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 			// Media gone (deleted / no longer accessible): close the event so we
 			// stop hammering a dead media id every tick instead of warning forever.
 			if isMediaGoneError(err) {
-				if endErr := s.liveService.EndPostEventByMediaID(evCtx, ev.MediaID); endErr != nil {
+				if endErr := s.liveService.EndEventByMediaID(evCtx, ev.MediaID); endErr != nil {
 					logger.From(evCtx, s.logger).Warn("post polling: failed to end event for missing media",
 						zap.String("media_id", ev.MediaID), zap.Error(endErr))
 				} else {
@@ -4410,12 +4397,383 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 				UserID:    c.From.ID,
 				Username:  username,
 				Text:      c.Text,
+				// RN-37: sem o carimbo o polling não saberia que o comentário
+				// está fora da janela de 7 dias e tentaria responder — e é
+				// justamente o polling que agora varre campanha encerrada.
+				Timestamp: parseGraphTimestamp(c.Timestamp),
 			}); err != nil {
 				logger.From(evCtx, s.logger).Warn("post polling: failed to process comment",
 					zap.String("comment_id", c.ID), zap.Error(err))
 			}
 		}
 	}
+}
+
+// =============================================================================
+
+// resolvePostEventProduct applies post-event rules. It returns the product to
+// add (resolved from a single-product promotion when the comment is a bare
+// "EU QUERO"), and handled=true when it already answered the commenter (product
+// not in the promotion, or ambiguous request), in which case the caller saves
+// the comment with resultLabel and stops.
+func (s *Service) resolvePostEventProduct(
+	ctx context.Context,
+	event *live.EventOutput,
+	sessionID string,
+	input ProcessInstagramCommentInput,
+	intent *PurchaseIntent,
+	matched *ProductRow,
+) (resolved *ProductRow, handled bool, resultLabel string) {
+	whitelist, err := s.liveService.ListSessionWhitelist(ctx, sessionID)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("failed to load session promotion products", zap.Error(err))
+		return matched, false, ""
+	}
+
+	// N2 — semântica ÚNICA em todo o sistema: lista VAZIA libera TODOS os
+	// produtos da loja. Até aqui a ingestão fazia o oposto do checkout: sem
+	// whitelist, todo produto casado caía em 'not_in_promo' e o comprador
+	// recebia "não está disponível nesta promoção" — o lojista que não
+	// configurava produto nenhum simplesmente não vendia pelo post.
+	openSession := len(whitelist) == 0
+
+	inPromo := func(productID string) bool {
+		if openSession {
+			return true
+		}
+		for _, w := range whitelist {
+			if w.ProductID == productID {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Case A: a code matched a real product.
+	if matched != nil {
+		if inPromo(matched.ID) {
+			if matched.Stock <= 0 {
+				s.replyPostOutOfStock(ctx, event, input, matched.Name, whitelist)
+				return nil, true, "out_of_stock"
+			}
+			return matched, false, "" // proceed to the normal cart flow
+		}
+		s.replyPostUnavailable(ctx, event, input, whitelist)
+		return nil, true, "not_in_promo"
+	}
+
+	// Case B: no product matched. A typed-but-unknown code is "unavailable";
+	// a bare trigger with one promo product auto-adds it, with many it asks.
+	if codes := ExtractPossibleKeywords(input.Text); len(codes) > 0 {
+		s.replyPostUnavailable(ctx, event, input, whitelist)
+		return nil, true, "not_in_promo"
+	}
+
+	// Sessão sem whitelist não tem lista de onde escolher: pedir a palavra-chave
+	// é a única resposta possível. Ficar em silêncio aqui era o caminho que
+	// produzia 'no_product' sem responder nada ao comprador.
+	if openSession {
+		s.replyPostChooseProduct(ctx, event, input, nil)
+		return nil, true, "needs_keyword"
+	}
+
+	available := availablePromoProducts(whitelist)
+	switch len(available) {
+	case 1:
+		p, err := s.repo.GetProductByID(ctx, event.StoreID, available[0].ProductID)
+		if err == nil && p != nil {
+			return p, false, ""
+		}
+		return nil, true, "no_product"
+	case 0:
+		// No available products: if the promotion has products but all are out
+		// of stock, tell the buyer; otherwise stay silent.
+		if len(whitelist) > 0 {
+			s.replyPostOutOfStock(ctx, event, input, "", whitelist)
+			return nil, true, "out_of_stock"
+		}
+		return nil, true, "no_product"
+	default:
+		s.replyPostChooseProduct(ctx, event, input, available)
+		return nil, true, "needs_keyword"
+	}
+}
+
+// savePostComment persists a post comment that was fully handled by the rules.
+func (s *Service) savePostComment(ctx context.Context, sessionID, eventID string, input ProcessInstagramCommentInput, result string) {
+	if _, err := s.repo.CreateLiveComment(ctx, CreateLiveCommentParams{
+		SessionID:         sessionID,
+		EventID:           eventID,
+		Platform:          "instagram",
+		PlatformCommentID: input.CommentID,
+		PlatformUserID:    input.UserID,
+		PlatformHandle:    input.Username,
+		Text:              input.Text,
+		HasPurchaseIntent: true,
+		Result:            result,
+	}); err != nil {
+		logger.From(ctx, s.logger).Error("failed to save post comment", zap.Error(err))
+	}
+}
+
+// replyOutOfWindow responde quem comentou fora da janela de venda (RN-28,
+// gatilho 1). Um funil para os três sub-casos, porque a única coisa que muda
+// entre eles é o template e o conjunto de variáveis que faz sentido preencher.
+//
+// O texto vem das settings da loja, não do código: era exatamente isto que
+// faltava. As três frases viviam hardcoded aqui, fora do subsistema de
+// Comunicações — o lojista não conseguia editar, o envio não consultava
+// ShouldNotify e nada era registrado em notification_logs. Passar pelo
+// notification.Service resolve os três de uma vez e é o que faz a RN-38 ter o
+// que listar: a mensagem que não sai vira linha com motivo, não silêncio.
+//
+// CommentCreatedAt carrega o carimbo do comentário para que o serviço decida
+// entre tentar e registrar não-entrega. DirectOnly marca o caminho de story,
+// em que a resposta é DM porque não existe comentário público para responder.
+func (s *Service) replyOutOfWindow(
+	ctx context.Context,
+	event *live.EventOutput,
+	session *live.SessionOutput,
+	input ProcessInstagramCommentInput,
+	notifType notification.NotificationType,
+) {
+	if s.notificationService == nil {
+		return
+	}
+
+	shouldNotify, err := s.notificationService.ShouldNotify(ctx, event.StoreID, notifType, false)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("failed to check out-of-window notification settings",
+			zap.String("type", string(notifType)),
+			zap.Error(err),
+		)
+		return
+	}
+	if !shouldNotify {
+		return
+	}
+
+	vars := notification.TemplateVariables{
+		Handle:     "@" + input.Username,
+		LiveTitulo: event.Title,
+	}
+	if storeInfo, err := s.repo.GetStoreInfo(ctx, event.StoreID); err == nil {
+		vars.Loja = storeInfo.Name
+	}
+
+	switch notifType {
+	case notification.TypeOutOfWindowScheduled:
+		// A data é opcional de propósito: um evento 'scheduled' sem instante
+		// marcado também cai aqui (D19). Antes o ponteiro era desreferenciado
+		// só depois de um if; agora o vazio simplesmente não substitui nada, e
+		// é responsabilidade do texto padrão não prometer data que não existe.
+		if event.ScheduledAt != nil {
+			vars.ComecaEm = live.FormatBRT(*event.ScheduledAt)
+		}
+	case notification.TypeOutOfWindowSessionEnded:
+		// Único sub-caso em que a campanha AINDA vende: o texto redireciona, e
+		// para isso precisa do link do carrinho que o comprador já tem.
+		if session != nil {
+			vars.Sessao = live.SessionLabel(session.Type, session.SequenceOrder)
+		}
+		vars.Link = s.existingCartLink(ctx, event.ID, input.UserID)
+	}
+
+	commentAt := time.Time{}
+	if secs := epochSeconds(input.Timestamp); secs > 0 {
+		commentAt = time.Unix(secs, 0)
+	}
+	directOnly := input.Channel == "dm"
+	commentID := input.CommentID
+	if directOnly {
+		commentID = ""
+	}
+
+	if _, err := s.notificationService.Send(ctx, notification.SendInput{
+		StoreID:           event.StoreID,
+		EventID:           event.ID,
+		PlatformUserID:    input.UserID,
+		PlatformHandle:    input.Username,
+		PlatformCommentID: commentID,
+		NotificationType:  notifType,
+		Variables:         vars,
+		CommentCreatedAt:  commentAt,
+		DirectOnly:        directOnly,
+	}); err != nil {
+		logger.From(ctx, s.logger).Warn("out-of-window reply send error",
+			zap.String("event_id", event.ID),
+			zap.String("type", string(notifType)),
+			zap.Error(err),
+		)
+	}
+}
+
+// existingCartLink devolve o link do carrinho que o comprador já tem nesta
+// campanha, ou vazio quando não há. Best-effort: a mensagem sem {link} continua
+// fazendo sentido, e uma falha de leitura não pode calar a resposta.
+func (s *Service) existingCartLink(ctx context.Context, eventID, platformUserID string) string {
+	cart, err := s.repo.GetCartByEventAndUser(ctx, eventID, platformUserID)
+	if err != nil || cart == nil {
+		return ""
+	}
+	token, err := s.repo.GetCartTokenByID(ctx, cart.ID)
+	if err != nil || token == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/cart/%s", config.FrontendURL.StringOr("http://localhost:3000"), token)
+}
+
+// replyPostOutOfStock privately tells the buyer the product is sold out and
+// lists what's still available (when there is anything).
+func (s *Service) replyPostOutOfStock(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, productName string, whitelist []live.EventProductOutput) {
+	available := availablePromoProducts(whitelist)
+	var msg string
+	switch {
+	case productName != "" && len(available) > 0:
+		msg = fmt.Sprintf("Oi @%s! O produto %s esgotou. 😕\nAinda temos:\n%s\n\nComente o código do que você quer. 💜", input.Username, productName, promoProductLines(available))
+	case productName != "":
+		msg = fmt.Sprintf("Oi @%s! O produto %s esgotou. 😕", input.Username, productName)
+	default:
+		msg = fmt.Sprintf("Oi @%s! Os produtos desta promoção esgotaram. 😕 Fique de olho nas próximas! 💜", input.Username)
+	}
+	s.sendPostReply(ctx, event, input, msg)
+}
+
+// privateReplyWindow é o limite do private reply do Instagram: 7 dias a contar
+// do comentário, e uma única vez por comentário (N9/RN-37). Depois disso a
+// mensagem não sai de qualquer forma — tentar é só gastar chamada de API para
+// receber erro.
+//
+// O número vive no domínio da notificação, que é quem decide entre "tenta" e
+// "registra não entregue com motivo" (RN-38). Aqui é alias: duas cópias do
+// mesmo prazo divergiriam e a ingestão passaria a descartar num limite e o
+// registro a classificar noutro.
+const privateReplyWindow = notification.PrivateReplyWindow
+
+// commentTooOldToReply reporta se o comentário já passou da janela de private
+// reply. Sem carimbo de tempo (ts <= 0) responde false: erra para o lado de
+// TENTAR enviar — silenciar por falta de dado seria pior do que uma chamada
+// perdida.
+//
+// Normaliza ms→s aqui também, e não só na borda (E41): este é O guard, e o bug
+// que ele deixou passar por meses foi exatamente um carimbo em milissegundos
+// chegando de um chamador. Um caminho novo que esqueça de converter é
+// silenciosamente inofensivo — a diferença aparece como "sempre recente",
+// nunca como erro.
+func commentTooOldToReply(ts int64, now time.Time) bool {
+	secs := epochSeconds(ts)
+	if secs <= 0 {
+		return false
+	}
+	return now.Sub(time.Unix(secs, 0)) > privateReplyWindow
+}
+
+// parseGraphTimestamp converte o timestamp ISO8601 do Graph
+// ("2026-08-01T20:00:00+0000") para unix seconds. Devolve 0 quando não dá.
+func parseGraphTimestamp(v string) int64 {
+	if v == "" {
+		return 0
+	}
+	for _, layout := range []string{"2006-01-02T15:04:05-0700", time.RFC3339} {
+		if t, err := time.Parse(layout, v); err == nil {
+			return t.Unix()
+		}
+	}
+	return 0
+}
+
+// sendPostReply privately answers the buyer. For a comment-channel event it
+// replies on the comment thread (which Instagram delivers as a private reply);
+// for a story (Channel="dm") it messages the buyer's IGSID directly, since a
+// story reply arrives as a DM and has no public comment to answer.
+//
+// É o funil ÚNICO de resposta ao comprador neste pipeline, e por isso é aqui
+// que a janela de 7 dias da RN-37 vale — para todas as respostas, não só a de
+// campanha encerrada. Webhook e polling passam pelos dois pelo mesmo lugar,
+// que é o que faz os dois concordarem no número (hoje o código prometia 2 dias
+// e entregava 0).
+func (s *Service) sendPostReply(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, msg string) {
+	if input.Channel == "dm" {
+		if err := s.SendInstagramDM(ctx, event.StoreID, input.UserID, msg); err != nil {
+			logger.From(ctx, s.logger).Warn("failed to send story DM reply",
+				zap.String("event_id", event.ID),
+				zap.String("user_id", input.UserID),
+				zap.Error(err),
+			)
+		}
+		return
+	}
+	// RN-37: fora da janela de 7 dias o private reply não sai. O comentário já
+	// foi persistido classificado pelo chamador — o que se perde é a tentativa
+	// de envio, não o registro.
+	if commentTooOldToReply(input.Timestamp, time.Now()) {
+		logger.From(ctx, s.logger).Info("post reply skipped: comment past the 7-day private reply window",
+			zap.String("event_id", event.ID),
+			zap.String("comment_id", input.CommentID),
+			zap.Int64("comment_ts", input.Timestamp),
+		)
+		return
+	}
+	if err := s.ReplyToInstagramComment(ctx, event.StoreID, input.CommentID, msg); err != nil {
+		logger.From(ctx, s.logger).Warn("failed to send post reply",
+			zap.String("event_id", event.ID),
+			zap.String("comment_id", input.CommentID),
+			zap.Error(err),
+		)
+	}
+}
+
+// availablePromoProducts filters the promotion to active, in-stock products.
+func availablePromoProducts(whitelist []live.EventProductOutput) []live.EventProductOutput {
+	out := make([]live.EventProductOutput, 0, len(whitelist))
+	for _, w := range whitelist {
+		if w.ProductActive && w.Stock > 0 {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// promoProductLines renders "• CODE — Name" lines for a list of products.
+func promoProductLines(products []live.EventProductOutput) string {
+	var b strings.Builder
+	for _, p := range products {
+		b.WriteString(fmt.Sprintf("• %s — %s\n", p.Keyword, p.Name))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// replyPostUnavailable privately tells the commenter the product isn't in this
+// promotion and lists what is available.
+func (s *Service) replyPostUnavailable(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, whitelist []live.EventProductOutput) {
+	available := availablePromoProducts(whitelist)
+	var msg string
+	if len(available) == 0 {
+		msg = fmt.Sprintf("Oi @%s! Esse produto não está disponível nesta promoção no momento. 😕", input.Username)
+	} else {
+		msg = fmt.Sprintf(
+			"Oi @%s! Esse produto não está disponível nesta promoção. 😕\nDisponíveis nesta publicação:\n%s\n\nComente o código do produto que você quer. 💜",
+			input.Username, promoProductLines(available),
+		)
+	}
+	s.sendPostReply(ctx, event, input, msg)
+}
+
+// replyPostChooseProduct privately asks the commenter to specify which product
+// (used when a bare "EU QUERO" is posted on a multi-product promotion).
+func (s *Service) replyPostChooseProduct(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, available []live.EventProductOutput) {
+	// Sessão sem whitelist (N2): não há lista para oferecer, mas o comprador
+	// precisa de uma resposta — "nunca fica em silêncio".
+	if len(available) == 0 {
+		s.sendPostReply(ctx, event, input,
+			fmt.Sprintf("Oi @%s! Pra adicionar ao carrinho, comente o código do produto que você quer. 💜", input.Username))
+		return
+	}
+	msg := fmt.Sprintf(
+		"Oi @%s! Pra adicionar ao carrinho, comente o código do produto que você quer:\n%s 💜",
+		input.Username, promoProductLines(available),
+	)
+	s.sendPostReply(ctx, event, input, msg)
 }
 
 // =============================================================================
@@ -4769,16 +5127,37 @@ func (s *Service) getERPProvider(ctx context.Context, integration *IntegrationRo
 // domain packages). The sweep remains as a safety net for any lost task.
 type CartExpiryScheduler interface {
 	ScheduleCartExpiry(ctx context.Context, cartID string, at time.Time) error
+	// RescheduleCartExpiry MOVE um agendamento já armado. Existe separado
+	// porque ScheduleCartExpiry é deduplicado por TaskID: enquanto a task
+	// pendente existir, um novo agendamento é engolido como "já armado" e o
+	// horário novo é ignorado — em qualquer direção. Sem isto, a extensão de
+	// prazo da fila (RN-10) nunca chegava ao asynq.
+	RescheduleCartExpiry(ctx context.Context, cartID string, at time.Time) error
 }
 
 // SetCartExpiryScheduler wires the ETA scheduler (optional — when unset, only
 // the sweep expires carts, preserving today's behaviour).
 func (s *Service) SetCartExpiryScheduler(sch CartExpiryScheduler) { s.expiryScheduler = sch }
 
-// ScheduleExpiry arms (or re-arms) the cart.expire ETA task for a cart's current
-// expires_at. Best-effort: a failure or a lost task is caught by the sweep. Skips
-// carts that are already terminal or have no window.
+// ScheduleExpiry ARMA a task cart.expire no expires_at atual do carrinho. Usar
+// quando o prazo acabou de nascer (fechamento do evento, regeneração de
+// checkout) — se já houver task armada, o agendamento é deduplicado.
 func (s *Service) ScheduleExpiry(ctx context.Context, cartID string) error {
+	return s.scheduleExpiry(ctx, cartID, false)
+}
+
+// RescheduleExpiry MOVE a task cart.expire para o expires_at atual. Usar quando
+// o prazo MUDOU depois de já ter sido armado (extensão da fila, RN-10). Arm e
+// move não são a mesma operação no asynq: enquanto a task pendente existir, um
+// arm é engolido como "já armado" e o horário novo é perdido.
+func (s *Service) RescheduleExpiry(ctx context.Context, cartID string) error {
+	return s.scheduleExpiry(ctx, cartID, true)
+}
+
+// scheduleExpiry lê o snapshot e delega. Best-effort: falha ou task perdida não
+// deixa o carrinho eterno enquanto houver quem re-arme. Ignora carrinho
+// terminal ou sem janela.
+func (s *Service) scheduleExpiry(ctx context.Context, cartID string, move bool) error {
 	if s.expiryScheduler == nil {
 		return nil
 	}
@@ -4788,6 +5167,9 @@ func (s *Service) ScheduleExpiry(ctx context.Context, cartID string) error {
 	}
 	if snap.ExpiresAt == nil || cartExpiryTerminal(snap) {
 		return nil
+	}
+	if move {
+		return s.expiryScheduler.RescheduleCartExpiry(ctx, cartID, *snap.ExpiresAt)
 	}
 	return s.expiryScheduler.ScheduleCartExpiry(ctx, cartID, *snap.ExpiresAt)
 }
@@ -4814,6 +5196,171 @@ func (s *Service) RunScheduledExpiry(ctx context.Context, cartID string) error {
 	}
 	s.ExpireCart(ctx, cartID, snap.StoreID)
 	return nil
+}
+
+// WaitlistCloseScheduler arma a task ETA que mata a fila não atendida de um
+// evento em "fim do evento + carência" (RN-32). Implementada sobre o cliente
+// asynq em main.go — o pacote events não pode importar domínio.
+type WaitlistCloseScheduler interface {
+	ScheduleEventWaitlistClose(ctx context.Context, eventID string, at time.Time) error
+}
+
+// SetWaitlistCloseScheduler liga o agendador da RN-32 (opcional — sem ele a
+// fila não atendida simplesmente não é encerrada, que é o comportamento de
+// antes desta fatia).
+func (s *Service) SetWaitlistCloseScheduler(sch WaitlistCloseScheduler) { s.waitlistCloseSched = sch }
+
+// ArmEventWaitlistClose é o reator de event.ended: agenda a morte da fila não
+// atendida para "fim do evento + carência".
+//
+// A carência é o MESMO prazo que os carrinhos acabaram de receber no
+// fechamento (RN-34: curto ou estendido conforme close_cart_on_event_end).
+// Matar a fila antes disso tiraria do comprador um tempo que ele ainda tinha;
+// matar depois deixaria o carrinho vivo além do próprio prazo.
+func (s *Service) ArmEventWaitlistClose(ctx context.Context, eventID string) error {
+	if s.waitlistCloseSched == nil {
+		return nil
+	}
+	minutes, err := s.repo.GetEventCartExpirationMinutes(ctx, eventID)
+	if err != nil {
+		return err
+	}
+	if minutes <= 0 {
+		// A 000106 impede isso (CHECK >= 15 nas duas pontas). Se acontecer,
+		// não agendar seria voltar ao carrinho eterno — 24h é o mesmo piso que
+		// a migration usou ao converter o antigo 0.
+		minutes = 1440
+	}
+	at := time.Now().UTC().Add(time.Duration(minutes) * time.Minute)
+	return s.waitlistCloseSched.ScheduleEventWaitlistClose(ctx, eventID, at)
+}
+
+// RunEventWaitlistClose é o handler da task event.waitlist_close (RN-32).
+//
+// Encerra os itens de fila não atendidos do evento e RE-ARMA cart.expire nos
+// carrinhos que estavam bloqueados. O re-arm é a metade que faz a regra valer:
+// o prazo desses carrinhos já venceu enquanto o guard do ExpireCart vetava, e
+// a task original deles já disparou e saiu sem fazer nada — sem sweep de
+// carrinhos, nada mais os alcançaria.
+//
+// Idempotente: a segunda passada não encontra item vivo e não re-arma nada.
+func (s *Service) RunEventWaitlistClose(ctx context.Context, eventID string) error {
+	entries, err := s.repo.ExpireEventWaitlist(ctx, eventID)
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// Um carrinho pode ter vários itens na fila: dedup para re-armar cart.expire
+	// uma vez só por carrinho.
+	cartIDs := make([]string, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, e := range entries {
+		if e.CartID == "" {
+			continue // item de fila sem carrinho vinculado
+		}
+		if _, dup := seen[e.CartID]; dup {
+			continue
+		}
+		seen[e.CartID] = struct{}{}
+		cartIDs = append(cartIDs, e.CartID)
+	}
+
+	logger.From(ctx, s.logger).Info("event waitlist closed",
+		zap.String("event_id", eventID),
+		zap.Int("items_expired", len(entries)),
+		zap.Int("carts_unblocked", len(cartIDs)),
+	)
+
+	// A DM vem ANTES do re-arm de propósito. O re-arm devolve ao carrinho a
+	// capacidade de expirar, e o prazo dele já venceu enquanto o guard vetava —
+	// ou seja, a expiração pode disparar em seguida. Avisar depois seria contar
+	// ao comprador que o item não liberou num carrinho que já morreu.
+	s.notifyWaitlistUnfulfilled(ctx, eventID, entries)
+
+	for _, cartID := range cartIDs {
+		if err := s.RescheduleExpiry(ctx, cartID); err != nil {
+			// Best-effort por carrinho: um erro não pode impedir os outros de
+			// voltarem a poder expirar.
+			logger.From(ctx, s.logger).Warn("failed to re-arm expiry after waitlist close",
+				zap.String("cart_id", cartID), zap.Error(err))
+		}
+	}
+	return nil
+}
+
+// notifyWaitlistUnfulfilled avisa quem esperava na fila que o produto não
+// liberou até o fim da campanha (RN-28, gatilho 5).
+//
+// Uma DM por (comprador, produto): o comprador que esperava duas peças precisa
+// saber quais duas. O texto padrão sempre aponta para o que ainda existe (o
+// resto do carrinho) — é a única mensagem do deck que dá notícia ruim, e
+// terminar no "não deu" perde a venda que sobrou.
+func (s *Service) notifyWaitlistUnfulfilled(ctx context.Context, eventID string, entries []ExpiredWaitlistEntry) {
+	if s.notificationService == nil || len(entries) == 0 {
+		return
+	}
+
+	storeID, eventTitle, err := s.repo.GetEventOwner(ctx, eventID)
+	if err != nil || storeID == "" {
+		logger.From(ctx, s.logger).Warn("waitlist close: could not resolve event for notification",
+			zap.String("event_id", eventID), zap.Error(err))
+		return
+	}
+
+	shouldNotify, err := s.notificationService.ShouldNotify(ctx, storeID, notification.TypeWaitlistUnfulfilled, false)
+	if err != nil || !shouldNotify {
+		return
+	}
+
+	storeName := ""
+	if storeInfo, err := s.repo.GetStoreInfo(ctx, storeID); err == nil {
+		storeName = storeInfo.Name
+	}
+	frontendURL := config.FrontendURL.StringOr("http://localhost:3000")
+
+	for _, e := range entries {
+		vars := notification.TemplateVariables{
+			Handle:     "@" + e.PlatformHandle,
+			Produto:    e.ProductName,
+			Loja:       storeName,
+			LiveTitulo: eventTitle,
+		}
+		if e.CartToken != "" {
+			vars.Link = fmt.Sprintf("%s/cart/%s", frontendURL, e.CartToken)
+		}
+
+		// A entrega precisa do comentário: a fila fecha por task, dias depois,
+		// e um DM por IGSID sem janela aberta é recusado pelo Instagram
+		// (2534022). Sem o alvo, o gatilho nasceria sem caminho de entrega e
+		// todo envio viraria linha "não entregue". A idade vai junto para
+		// classificar o motivo quando de fato não houver mais janela.
+		target, _ := s.liveService.GetLatestReplyTarget(ctx, eventID, e.PlatformUserID)
+		commentAt := time.Time{}
+		if target.CreatedAt != nil {
+			commentAt = *target.CreatedAt
+		}
+
+		if _, err := s.notificationService.Send(ctx, notification.SendInput{
+			StoreID:           storeID,
+			EventID:           eventID,
+			CartID:            e.CartID,
+			CartToken:         e.CartToken,
+			PlatformUserID:    e.PlatformUserID,
+			PlatformHandle:    e.PlatformHandle,
+			PlatformCommentID: target.CommentID,
+			NotificationType:  notification.TypeWaitlistUnfulfilled,
+			Variables:         vars,
+			CommentCreatedAt:  commentAt,
+		}); err != nil {
+			logger.From(ctx, s.logger).Warn("waitlist unfulfilled notification error",
+				zap.String("event_id", eventID),
+				zap.String("platform_user_id", e.PlatformUserID),
+				zap.Error(err))
+		}
+	}
 }
 
 // cartExpiryTerminal reports whether a cart is already in a state where expiry
@@ -5144,6 +5691,9 @@ type sendWaitlistNotifiedInput struct {
 	ProductKeyword string
 	Quantity       int
 	TTL            time.Duration
+	// DeadlineAt é o novo expires_at do carrinho depois da extensão — o
+	// {prazo_final} que a mensagem anuncia.
+	DeadlineAt time.Time
 }
 
 func (s *Service) sendWaitlistNotifiedDM(ctx context.Context, input sendWaitlistNotifiedInput) {
@@ -5183,6 +5733,19 @@ func (s *Service) sendWaitlistNotifiedDM(ctx context.Context, input sendWaitlist
 		Loja:       storeInfo.Name,
 		ExpiraEm:   notification.FormatExpiryMinutes(int(input.TTL.Minutes())),
 		LiveTitulo: input.EventTitle,
+		// {tempo_extra} é o prazo GANHO pela fila, e {expira_em} continua
+		// existindo para não quebrar template já salvo. São o mesmo número com
+		// nomes diferentes de propósito: o texto novo fala de ganho ("ganhei
+		// mais 30 minutos pra você"), o antigo falava de limite.
+		TempoExtra: notification.FormatExpiryMinutes(int(input.TTL.Minutes())),
+	}
+	if !input.DeadlineAt.IsZero() {
+		vars.PrazoFinal = live.FormatBRT(input.DeadlineAt)
+	}
+	if items, cents, err := s.repo.GetCartTotals(ctx, input.CartID); err == nil {
+		vars.TotalItens = items
+		vars.Total = notification.FormatCurrency(cents)
+		vars.TotalCents = cents
 	}
 
 	result, err := s.notificationService.Send(ctx, notification.SendInput{

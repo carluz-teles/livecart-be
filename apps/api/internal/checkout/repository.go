@@ -64,9 +64,19 @@ func (r *Repository) LoadEventCheckoutFlags(ctx context.Context, pool *pgxpool.P
 	return freeShipping, int(pct), nil
 }
 
-// LoadEventType reads the event type ('single' | 'multi' | 'post') for a cart's
-// event so the checkout UI can use post-appropriate wording instead of "live".
-// Returns "" on a missing event (non-fatal hydration miss).
+// LoadEventType devolve a espécie do evento ('live' | 'post' | 'reel' |
+// 'story') para a tela do comprador escolher o vocabulário — "Live em
+// andamento" contra "Promoção ativa".
+//
+// Lê live_sessions.type, NÃO live_events.type. Duas razões, e a segunda é a que
+// importa: (1) a 000122 dropou live_events.type e este SELECT quebraria a tela
+// do COMPRADOR antes de qualquer painel; (2) com a campanha mista o container
+// não tem espécie única — quem manda é o que existe dentro dele.
+//
+// Precedência: qualquer sessão de live ganha ("Live em andamento" é verdade
+// enquanto UMA estiver no ar, mesmo que a campanha tenha posts); senão, o tipo
+// mais frequente. Evento sem sessão devolve "" — miss de hidratação não fatal,
+// e o chamador cai no texto neutro.
 func (r *Repository) LoadEventType(ctx context.Context, pool *pgxpool.Pool, eventID string) (string, error) {
 	uid, err := uuid.Parse(eventID)
 	if err != nil {
@@ -74,7 +84,12 @@ func (r *Repository) LoadEventType(ctx context.Context, pool *pgxpool.Pool, even
 	}
 	var eventType string
 	err = pool.QueryRow(ctx, `
-		SELECT COALESCE(type, 'single') FROM live_events WHERE id = $1
+		SELECT type
+		FROM live_sessions
+		WHERE event_id = $1
+		GROUP BY type
+		ORDER BY (type = 'live') DESC, count(*) DESC, type ASC
+		LIMIT 1
 	`, pgtype.UUID{Bytes: uid, Valid: true}).Scan(&eventType)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -663,7 +678,11 @@ func (r *Repository) GetEventProductForCart(ctx context.Context, eventID, storeI
 	if err != nil {
 		return nil, httpx.ErrBadRequest("invalid store ID")
 	}
-	cfg, err := r.q.GetEventProductConfig(ctx, sqlc.GetEventProductConfigParams{
+	// D15/N2: a whitelist é da SESSÃO, mas o carrinho é do EVENTO e atravessa N
+	// sessões — não existe "a sessão do checkout". A regra é a união: o produto
+	// é aceito se ALGUMA sessão do evento o aceita, e sessão sem whitelist
+	// aceita tudo.
+	cfg, err := r.q.GetEventProductConfigFromSessions(ctx, sqlc.GetEventProductConfigFromSessionsParams{
 		EventID: pgtype.UUID{Bytes: eID, Valid: true},
 		ID:      pgtype.UUID{Bytes: pID, Valid: true},
 		StoreID: pgtype.UUID{Bytes: sID, Valid: true},
@@ -672,9 +691,9 @@ func (r *Repository) GetEventProductForCart(ctx context.Context, eventID, storeI
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, httpx.ErrNotFound("produto não encontrado")
 		}
-		return nil, fmt.Errorf("getting event product config: %w", err)
+		return nil, fmt.Errorf("getting session product config: %w", err)
 	}
-	maxQty, _ := r.q.GetEffectiveMaxQuantity(ctx, sqlc.GetEffectiveMaxQuantityParams{
+	maxQty, _ := r.q.GetEffectiveMaxQuantityFromSessions(ctx, sqlc.GetEffectiveMaxQuantityFromSessionsParams{
 		ID:        pgtype.UUID{Bytes: eID, Valid: true},
 		ProductID: pgtype.UUID{Bytes: pID, Valid: true},
 	})
@@ -685,7 +704,7 @@ func (r *Repository) GetEventProductForCart(ctx context.Context, eventID, storeI
 		MaxQuantity: int(maxQty),
 		Stock:       int(cfg.ProductStock.Int32),
 		Active:      cfg.ProductActive.Bool,
-		IsAllowed:   cfg.IsAllowed,
+		IsAllowed:   cfg.IsAllowed.Bool,
 	}
 	return out, nil
 }

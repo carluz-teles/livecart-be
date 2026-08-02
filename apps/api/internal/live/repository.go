@@ -26,17 +26,19 @@ func NewRepository(q *sqlc.Queries, pool *pgxpool.Pool) *Repository {
 	return &Repository{q: q, pool: pool}
 }
 
-// CreateSessionWithPlatformTx creates a session and adds a platform in a single transaction.
-// This ensures atomicity - either both operations succeed or both are rolled back.
-func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, platform, platformLiveID string) (SessionRow, *PlatformRow, error) {
+// CreateSessionWithPlatformTx cria a sessão, HERDA a whitelist do evento e
+// registra a mídia — tudo numa transação só. Devolve, além da sessão e da
+// plataforma, quantos produtos foram herdados (o chamador loga).
+// sessionType é o tipo da transmissão (D3): live|post|reel|story.
+func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, sessionType, platform, platformLiveID string) (SessionRow, *PlatformRow, int64, error) {
 	eventUID, err := parseUUID(eventID)
 	if err != nil {
-		return SessionRow{}, nil, err
+		return SessionRow{}, nil, 0, err
 	}
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return SessionRow{}, nil, fmt.Errorf("beginning transaction: %w", err)
+		return SessionRow{}, nil, 0, fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback(ctx) // No-op if already committed
 
@@ -46,9 +48,31 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, p
 	sessionRow, err := qtx.CreateLiveSession(ctx, sqlc.CreateLiveSessionParams{
 		EventID: eventUID,
 		Status:  "active",
+		Type:    SessionTypeFromEventType(sessionType),
 	})
 	if err != nil {
-		return SessionRow{}, nil, fmt.Errorf("creating live session: %w", err)
+		return SessionRow{}, nil, 0, fmt.Errorf("creating live session: %w", err)
+	}
+
+	// A sessão nova HERDA a whitelist do evento, no MESMO tx em que nasce.
+	//
+	// Antes ela nascia vazia, e "lista vazia = libera tudo" (a regra continua
+	// valendo) transformava a barreira em nada no fluxo real do lojista:
+	// configurar os produtos do evento → criar a transmissão de terça → a
+	// sessão nova sem lista libera o catálogo inteiro, porque a união do
+	// checkout aceita o produto se ALGUMA sessão o aceita e uma sessão sem lista
+	// aceita tudo. Herdar é o que faz a configuração do evento continuar
+	// valendo para a transmissão seguinte.
+	//
+	// Dentro do tx de propósito: uma sessão que existe com a lista errada por
+	// uma janela de milissegundos é uma sessão que libera o catálogo inteiro
+	// nessa janela.
+	inherited, err := qtx.InheritEventWhitelistIntoSession(ctx, sqlc.InheritEventWhitelistIntoSessionParams{
+		SessionID: sessionRow.ID,
+		EventID:   eventUID,
+	})
+	if err != nil {
+		return SessionRow{}, nil, 0, fmt.Errorf("inheriting event whitelist into session: %w", err)
 	}
 
 	// Add the platform to the session
@@ -58,18 +82,18 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, p
 		PlatformLiveID: platformLiveID,
 	})
 	if err != nil {
-		return SessionRow{}, nil, fmt.Errorf("adding platform to session: %w", err)
+		return SessionRow{}, nil, 0, fmt.Errorf("adding platform to session: %w", err)
 	}
 
 	// Emit session.created in the same tx (transactional outbox), carrying the
 	// assigned sequence_order so consumers see session ordering.
 	if err := emitSessionCreated(ctx, qtx, sessionRow, platform, platformLiveID); err != nil {
-		return SessionRow{}, nil, err
+		return SessionRow{}, nil, 0, err
 	}
 
 	// Commit the transaction
 	if err := tx.Commit(ctx); err != nil {
-		return SessionRow{}, nil, fmt.Errorf("committing transaction: %w", err)
+		return SessionRow{}, nil, 0, fmt.Errorf("committing transaction: %w", err)
 	}
 
 	session := toSessionRow(sessionRow)
@@ -81,7 +105,7 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, p
 		AddedAt:        platformRow.AddedAt.Time,
 	}
 
-	return session, platformOut, nil
+	return session, platformOut, inherited, nil
 }
 
 // emitSessionCreated writes the canonical session.created event to the outbox
@@ -114,17 +138,21 @@ func emitSessionCreated(ctx context.Context, q *sqlc.Queries, s sqlc.LiveSession
 
 // emitEventCreated writes the canonical event.created event to the outbox
 // within the caller's transaction.
-func emitEventCreated(ctx context.Context, q *sqlc.Queries, e sqlc.LiveEvent) error {
+// sessionType viaja no payload no lugar do antigo live_events.type: o evento
+// deixou de ter tipo na 000122, e um payload com "type" derivado seria a mesma
+// mentira em outro lugar. O que a primeira sessão é continua sendo informação
+// útil para quem lê o log de eventos.
+func emitEventCreated(ctx context.Context, q *sqlc.Queries, e sqlc.LiveEvent, sessionType string) error {
 	payload, err := json.Marshal(struct {
-		EventID string `json:"event_id"`
-		StoreID string `json:"store_id"`
-		Type    string `json:"type"`
-		Status  string `json:"status"`
+		EventID     string `json:"event_id"`
+		StoreID     string `json:"store_id"`
+		SessionType string `json:"session_type"`
+		Status      string `json:"status"`
 	}{
-		EventID: e.ID.String(),
-		StoreID: e.StoreID.String(),
-		Type:    e.Type,
-		Status:  e.Status,
+		EventID:     e.ID.String(),
+		StoreID:     e.StoreID.String(),
+		SessionType: sessionType,
+		Status:      e.Status,
 	})
 	if err != nil {
 		return fmt.Errorf("marshaling event.created payload: %w", err)
@@ -139,16 +167,25 @@ func emitEventCreated(ctx context.Context, q *sqlc.Queries, e sqlc.LiveEvent) er
 
 // CreateEventWithSessionTx creates an event, session, and platform in a single transaction.
 // This ensures atomicity - either all operations succeed or all are rolled back.
+//
+// platform/platformLiveID VAZIOS são legítimos: a D1 diz que dá para criar a
+// sessão ANTES de a mídia existir (o lojista marca a campanha antes de ter o id
+// da live). Nesse caso a sessão nasce sem plataforma e a mídia entra depois por
+// AddPlatformToSession. O que NÃO pode existir é evento sem sessão nenhuma:
+// desde que a whitelist e o modo live desceram para live_sessions (000112/
+// 000113), um evento sem sessão não tem onde guardar configuração — a whitelist
+// gravava zero linhas e a leitura devolvia 404.
 func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params CreateEventParams, platform, platformLiveID string) (EventRow, SessionRow, *PlatformRow, error) {
 	storeUID, err := parseUUID(params.StoreID)
 	if err != nil {
 		return EventRow{}, SessionRow{}, nil, err
 	}
 
-	eventType := params.Type
-	if eventType == "" {
-		eventType = "single"
-	}
+	// D3: params.Type chega no vocabulário da SESSÃO (live|post|reel|story) ou
+	// no legado (single|multi), que os formulários antigos ainda mandam. A
+	// SESSÃO é o único lugar que guarda isso desde a 000122 — o evento não tem
+	// mais coluna de tipo, porque uma campanha mista não tem resposta única.
+	sessionType := SessionTypeFromEventType(params.Type)
 
 	// Convert nullable ints to pgtype.Int4
 	var cartExpirationMinutes, cartMaxQuantityPerItem pgtype.Int4
@@ -165,11 +202,23 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 		autoSendCheckoutLinks = pgtype.Bool{Bool: *params.SendOnLiveEnd, Valid: true}
 	}
 
-	// Convert scheduling fields
-	var scheduledAt pgtype.Timestamptz
-	if params.ScheduledAt != nil {
-		scheduledAt = pgtype.Timestamptz{Time: *params.ScheduledAt, Valid: true}
+	// starts_at e scheduled_at sao escritos EM PAR, com o mesmo valor, pelo
+	// mesmo motivo de SetEventWindow: starts_at e a coluna nova (000114) e
+	// scheduled_at e a legada que EffectiveStatus ainda le. Divergir as duas
+	// aqui faria o evento nascer com um inicio que a leitura nao enxerga — foi
+	// exatamente o que aconteceu quando a janela entrou no INSERT e o par se
+	// perdeu.
+	var startsAt pgtype.Timestamptz
+	if params.StartsAt != nil {
+		startsAt = pgtype.Timestamptz{Time: *params.StartsAt, Valid: true}
 	}
+	// ends_at é NOT NULL desde a 000122. Chegar aqui com nil é bug de chamador,
+	// não entrada de usuário: o Service já recusa com 400 antes. Falhar aqui,
+	// e não no banco, deixa o erro dizer QUEM esqueceu.
+	if params.EndsAt == nil {
+		return EventRow{}, SessionRow{}, nil, fmt.Errorf("creating live event: ends_at is required")
+	}
+	endsAt := pgtype.Timestamptz{Time: *params.EndsAt, Valid: true}
 	var description pgtype.Text
 	if params.Description != nil {
 		description = pgtype.Text{String: *params.Description, Valid: true}
@@ -187,13 +236,14 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 	eventRow, err := qtx.CreateLiveEventFull(ctx, sqlc.CreateLiveEventFullParams{
 		StoreID:                storeUID,
 		Title:                  pgtype.Text{String: params.Title, Valid: params.Title != ""},
-		Type:                   eventType,
 		Status:                 params.Status,
 		CloseCartOnEventEnd:    params.CloseCartOnEventEnd,
 		CartExpirationMinutes:  cartExpirationMinutes,
 		CartMaxQuantityPerItem: cartMaxQuantityPerItem,
 		SendOnLiveEnd:          autoSendCheckoutLinks,
-		ScheduledAt:            scheduledAt,
+		ScheduledAt:            startsAt,
+		StartsAt:               startsAt,
+		EndsAt:                 endsAt,
 		Description:            description,
 	})
 	if err != nil {
@@ -204,23 +254,34 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 	sessionRow, err := qtx.CreateLiveSession(ctx, sqlc.CreateLiveSessionParams{
 		EventID: eventRow.ID,
 		Status:  "active",
+		Type:    sessionType,
 	})
 	if err != nil {
 		return EventRow{}, SessionRow{}, nil, fmt.Errorf("creating live session: %w", err)
 	}
 
-	// 3. Add the platform to the session
-	platformRow, err := qtx.AddPlatformToSession(ctx, sqlc.AddPlatformToSessionParams{
-		SessionID:      sessionRow.ID,
-		Platform:       platform,
-		PlatformLiveID: platformLiveID,
-	})
-	if err != nil {
-		return EventRow{}, SessionRow{}, nil, fmt.Errorf("adding platform to session: %w", err)
+	// 3. Add the platform to the session — só quando a mídia já é conhecida.
+	var platformRow *PlatformRow
+	if platform != "" && platformLiveID != "" {
+		row, err := qtx.AddPlatformToSession(ctx, sqlc.AddPlatformToSessionParams{
+			SessionID:      sessionRow.ID,
+			Platform:       platform,
+			PlatformLiveID: platformLiveID,
+		})
+		if err != nil {
+			return EventRow{}, SessionRow{}, nil, fmt.Errorf("adding platform to session: %w", err)
+		}
+		platformRow = &PlatformRow{
+			ID:             row.ID.String(),
+			SessionID:      row.SessionID.String(),
+			Platform:       row.Platform,
+			PlatformLiveID: row.PlatformLiveID,
+			AddedAt:        row.AddedAt.Time,
+		}
 	}
 
 	// Emit event.created + session.created in the same tx (transactional outbox).
-	if err := emitEventCreated(ctx, qtx, eventRow); err != nil {
+	if err := emitEventCreated(ctx, qtx, eventRow, sessionType); err != nil {
 		return EventRow{}, SessionRow{}, nil, err
 	}
 	if err := emitSessionCreated(ctx, qtx, sessionRow, platform, platformLiveID); err != nil {
@@ -232,78 +293,18 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 		return EventRow{}, SessionRow{}, nil, fmt.Errorf("committing transaction: %w", err)
 	}
 
-	event := toEventRow(eventRow)
-	session := toSessionRow(sessionRow)
-	platformOut := &PlatformRow{
-		ID:             platformRow.ID.String(),
-		SessionID:      platformRow.SessionID.String(),
-		Platform:       platformRow.Platform,
-		PlatformLiveID: platformRow.PlatformLiveID,
-		AddedAt:        platformRow.AddedAt.Time,
-	}
-
-	return event, session, platformOut, nil
+	return toEventRow(eventRow), toSessionRow(sessionRow), platformRow, nil
 }
 
 // =============================================================================
 // EVENT OPERATIONS
 // =============================================================================
 
-func (r *Repository) CreateEvent(ctx context.Context, params CreateEventParams) (EventRow, error) {
-	storeUID, err := parseUUID(params.StoreID)
-	if err != nil {
-		return EventRow{}, err
-	}
-
-	eventType := params.Type
-	if eventType == "" {
-		eventType = "single"
-	}
-
-	// Convert nullable ints to pgtype.Int4
-	var cartExpirationMinutes, cartMaxQuantityPerItem pgtype.Int4
-	if params.CartExpirationMinutes != nil {
-		cartExpirationMinutes = pgtype.Int4{Int32: int32(*params.CartExpirationMinutes), Valid: true}
-	}
-	if params.CartMaxQuantityPerItem != nil {
-		cartMaxQuantityPerItem = pgtype.Int4{Int32: int32(*params.CartMaxQuantityPerItem), Valid: true}
-	}
-
-	// Convert nullable bool to pgtype.Bool
-	var autoSendCheckoutLinks pgtype.Bool
-	if params.SendOnLiveEnd != nil {
-		autoSendCheckoutLinks = pgtype.Bool{Bool: *params.SendOnLiveEnd, Valid: true}
-	}
-
-	// Convert scheduling fields
-	var scheduledAt pgtype.Timestamptz
-	if params.ScheduledAt != nil {
-		scheduledAt = pgtype.Timestamptz{Time: *params.ScheduledAt, Valid: true}
-	}
-	var description pgtype.Text
-	if params.Description != nil {
-		description = pgtype.Text{String: *params.Description, Valid: true}
-	}
-
-	// Use CreateLiveEventFull to include scheduling fields
-	row, err := r.q.CreateLiveEventFull(ctx, sqlc.CreateLiveEventFullParams{
-		StoreID:                storeUID,
-		Title:                  pgtype.Text{String: params.Title, Valid: params.Title != ""},
-		Type:                   eventType,
-		Status:                 params.Status,
-		CloseCartOnEventEnd:    params.CloseCartOnEventEnd,
-		CartExpirationMinutes:  cartExpirationMinutes,
-		CartMaxQuantityPerItem: cartMaxQuantityPerItem,
-		SendOnLiveEnd:          autoSendCheckoutLinks,
-		ScheduledAt:            scheduledAt,
-		Description:            description,
-	})
-	if err != nil {
-		return EventRow{}, fmt.Errorf("creating live event: %w", err)
-	}
-
-	return toEventRow(row), nil
-}
+// CreateEvent (evento SEM sessão) foi removida: era o único caminho capaz de
+// produzir um evento sem sessão nenhuma, e desde que a whitelist (000112) e o
+// modo live (000113) desceram para live_sessions esse evento não tem onde
+// guardar configuração. Toda criação passa por CreateEventWithSessionTx, que
+// aceita mídia vazia.
 
 // GetPixDiscountPercent returns the pix_discount_percent column for an event.
 // Loaded via raw SQL because the field is not yet wired through sqlc.
@@ -349,9 +350,44 @@ func (r *Repository) SetPixDiscountPercent(ctx context.Context, eventID, storeID
 	return nil
 }
 
-// SetEventMedia persists the Instagram post metadata for a post-commerce event.
-// Stored via raw SQL because these columns are not wired into the sqlc INSERT.
-func (r *Repository) SetEventMedia(ctx context.Context, eventID, storeID string, media PostMediaInput) error {
+// SetMedia grava a legenda, o permalink e a thumbnail DA MÍDIA.
+//
+// D1/A4: a verdade é a MÍDIA (live_session_platforms), chaveada pelo
+// platform_live_id — que é o próprio media_id. O dual-write em live_events
+// existiu só para permitir reverter a 000111 sem perder legenda e permalink, e
+// saiu junto com as colunas na 000122.
+//
+// Nome e assinatura mudaram junto (era SetEventMedia, com eventID e storeID):
+// os dois argumentos só serviam ao UPDATE do evento. Manter um parâmetro que a
+// função ignora é o que faz o próximo leitor achar que a escrita é por evento —
+// e um evento guarda-chuva tem N mídias.
+func (r *Repository) SetMedia(ctx context.Context, media PostMediaInput) error {
+	if media.MediaID == "" {
+		return httpx.ErrBadRequest("media id is required")
+	}
+	if err := r.q.SetMediaMetadata(ctx, sqlc.SetMediaMetadataParams{
+		PlatformLiveID:    media.MediaID,
+		MediaPermalink:    pgtype.Text{String: media.Permalink, Valid: media.Permalink != ""},
+		MediaThumbnailUrl: pgtype.Text{String: media.ThumbnailURL, Valid: media.ThumbnailURL != ""},
+		MediaCaption:      pgtype.Text{String: media.Caption, Valid: media.Caption != ""},
+	}); err != nil {
+		return fmt.Errorf("setting media metadata: %w", err)
+	}
+	return nil
+}
+
+// SetWaitlistNotifiedTTLMinutes grava a janela extra do promovido da fila
+// (RN-10). A coluna existe em live_events desde a 000073 com CHECK 5..240 e o
+// runtime já a consome (GetWaitlistNotifiedTTL → notifiedUntil → o expires_at
+// do carrinho é empurrado com GREATEST); faltava só o caminho de escrita.
+// O clamp aqui é o guarda-costas do CHECK: um valor fora da faixa viraria 500.
+func (r *Repository) SetWaitlistNotifiedTTLMinutes(ctx context.Context, eventID, storeID string, minutes int) error {
+	if minutes < 5 {
+		minutes = 5
+	}
+	if minutes > 240 {
+		minutes = 240
+	}
 	uid, err := parseUUID(eventID)
 	if err != nil {
 		return err
@@ -362,21 +398,32 @@ func (r *Repository) SetEventMedia(ctx context.Context, eventID, storeID string,
 	}
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE live_events
-		SET media_id = $3, media_permalink = $4, media_thumbnail_url = $5, media_caption = $6, updated_at = now()
+		SET waitlist_notified_ttl_minutes = $3, updated_at = now()
 		WHERE id = $1 AND store_id = $2
-	`, uid, storeUID, media.MediaID, media.Permalink, media.ThumbnailURL, media.Caption)
+	`, uid, storeUID, int32(minutes))
 	if err != nil {
-		return fmt.Errorf("setting event media: %w", err)
+		return fmt.Errorf("setting waitlist_notified_ttl_minutes: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return httpx.ErrNotFound("event not found")
+		return httpx.ErrNotFound("live event not found")
 	}
 	return nil
 }
 
-// SetEventWindow persists the optional start (scheduled_at) and end (ends_at)
-// of an event. Either may be nil. Stored via raw SQL.
-func (r *Repository) SetEventWindow(ctx context.Context, eventID, storeID string, startsAt, endsAt *time.Time) error {
+// SetEventWindow persiste a janela comercial do evento (D5/D21) de forma
+// PARCIAL: cada coluna só é escrita quando o flag correspondente estiver
+// ligado. A versão anterior gravava scheduled_at e ends_at juntos e
+// incondicionalmente, o que fazia uma edição só do fim apagar o início.
+//
+// starts_at e scheduled_at são escritos em par: starts_at é a coluna nova
+// (000114) e scheduled_at é a legada que EffectiveStatus, o FE e as leituras
+// ainda consomem. O contract (000122) NÃO as separou: escrever só starts_at
+// deixaria EffectiveStatus cego para o início do evento, então o par continua
+// sendo escrito junto — aqui e no INSERT.
+func (r *Repository) SetEventWindow(ctx context.Context, eventID, storeID string, w EventWindowUpdate) error {
+	if !w.Touches() {
+		return nil
+	}
 	uid, err := parseUUID(eventID)
 	if err != nil {
 		return err
@@ -386,17 +433,20 @@ func (r *Repository) SetEventWindow(ctx context.Context, eventID, storeID string
 		return err
 	}
 	var start, end pgtype.Timestamptz
-	if startsAt != nil {
-		start = pgtype.Timestamptz{Time: *startsAt, Valid: true}
+	if w.StartsAt != nil {
+		start = pgtype.Timestamptz{Time: *w.StartsAt, Valid: true}
 	}
-	if endsAt != nil {
-		end = pgtype.Timestamptz{Time: *endsAt, Valid: true}
+	if w.EndsAt != nil {
+		end = pgtype.Timestamptz{Time: *w.EndsAt, Valid: true}
 	}
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE live_events
-		SET scheduled_at = $3, ends_at = $4, updated_at = now()
+		SET starts_at    = CASE WHEN $3::bool THEN $4::timestamptz ELSE starts_at    END,
+		    scheduled_at = CASE WHEN $3::bool THEN $4::timestamptz ELSE scheduled_at END,
+		    ends_at      = CASE WHEN $5::bool THEN $6::timestamptz ELSE ends_at      END,
+		    updated_at   = now()
 		WHERE id = $1 AND store_id = $2
-	`, uid, storeUID, start, end)
+	`, uid, storeUID, w.SetStartsAt, start, w.SetEndsAt, end)
 	if err != nil {
 		return fmt.Errorf("setting event window: %w", err)
 	}
@@ -406,108 +456,102 @@ func (r *Repository) SetEventWindow(ctx context.Context, eventID, storeID string
 	return nil
 }
 
-// GetEventMedia returns the post media metadata for an event.
-func (r *Repository) GetEventMedia(ctx context.Context, eventID string) (*PostMedia, error) {
-	uid, err := parseUUID(eventID)
+// GetEventMedia e GetActivePostEventByMediaID foram REMOVIDAS aqui: as duas não
+// tinham nenhum chamador no repositório inteiro (regra nº 1 — não portar código
+// morto para a estrutura nova). Eram, respectivamente, a única leitura das
+// colunas media_* do evento e a "query nº 1" que o plano dimensionava como viva.
+
+// ListPollableMedia returns the media that still depend on the polling capture
+// loop — post/reel media whose comments webhook has not arrived yet.
+//
+// D3/A4: passou a iterar sobre MÍDIA, não sobre evento. Antes, um evento com
+// duas mídias marcava webhook_active no evento inteiro e a segunda mídia nascia
+// com o polling já desligado, sem nunca capturar comentário.
+func (r *Repository) ListPollableMedia(ctx context.Context) ([]MediaRef, error) {
+	rows, err := r.q.ListPollableMedia(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("listing pollable media: %w", err)
 	}
-	var m PostMedia
-	var mediaID, permalink, thumb, caption pgtype.Text
-	err = r.pool.QueryRow(ctx, `
-		SELECT COALESCE(media_id,''), COALESCE(media_permalink,''), COALESCE(media_thumbnail_url,''), COALESCE(media_caption,''), webhook_active
-		FROM live_events WHERE id = $1
-	`, uid).Scan(&mediaID, &permalink, &thumb, &caption, &m.WebhookActive)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.ErrNotFound("event not found")
+	out := make([]MediaRef, len(rows))
+	for i, row := range rows {
+		out[i] = MediaRef{
+			MediaID:       row.PlatformLiveID,
+			SessionID:     row.SessionID.String(),
+			SessionType:   row.SessionType,
+			EventID:       row.EventID.String(),
+			StoreID:       row.StoreID.String(),
+			EventStatus:   row.EventStatus,
+			WebhookActive: row.WebhookActive,
 		}
-		return nil, fmt.Errorf("getting event media: %w", err)
 	}
-	m.MediaID = mediaID.String
-	m.Permalink = permalink.String
-	m.ThumbnailURL = thumb.String
-	m.Caption = caption.String
-	return &m, nil
+	return out, nil
 }
 
-// GetActivePostEventByMediaID returns the active post event mapped to a media id,
-// used by webhook/polling capture. Returns nil when none exists.
-func (r *Repository) GetActivePostEventByMediaID(ctx context.Context, mediaID string) (*PostEventRef, error) {
-	var ref PostEventRef
-	var id, storeID pgtype.UUID
-	err := r.pool.QueryRow(ctx, `
-		SELECT id, store_id, status FROM live_events
-		WHERE media_id = $1 AND type = 'post' AND status = 'active'
-		ORDER BY created_at DESC LIMIT 1
-	`, mediaID).Scan(&id, &storeID, &ref.Status)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("getting post event by media id: %w", err)
-	}
-	ref.EventID = id.String()
-	ref.StoreID = storeID.String()
-	ref.MediaID = mediaID
-	return &ref, nil
+// MarkMediaWebhookActive flags that a comments webhook arrived for THIS media,
+// so the polling loop stops handling it. Escopo de mídia, não de evento.
+func (r *Repository) MarkMediaWebhookActive(ctx context.Context, mediaID string) error {
+	return r.q.MarkMediaWebhookActive(ctx, mediaID)
 }
 
-// ListActivePostEvents returns active post events for the polling capture loop.
-func (r *Repository) ListActivePostEvents(ctx context.Context) ([]PostEventRef, error) {
-	// Poll post events that aren't manually ended and aren't yet webhook-driven.
-	// We keep polling slightly before the start (so pre-start comments get a
-	// "not started" reply) and up to 2 days after the end (so late comments get
-	// an "ended" reply), then stop to avoid polling stale events forever.
-	rows, err := r.pool.Query(ctx, `
-		SELECT id, store_id, COALESCE(media_id,''), status, webhook_active FROM live_events
-		WHERE type = 'post' AND status = 'active' AND media_id IS NOT NULL AND webhook_active = false
-		  AND (ends_at IS NULL OR ends_at >= now() - interval '2 days')
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("listing active post events: %w", err)
-	}
-	defer rows.Close()
-	var out []PostEventRef
-	for rows.Next() {
-		var ref PostEventRef
-		var id, storeID pgtype.UUID
-		if err := rows.Scan(&id, &storeID, &ref.MediaID, &ref.Status, &ref.WebhookActive); err != nil {
-			return nil, err
-		}
-		ref.EventID = id.String()
-		ref.StoreID = storeID.String()
-		out = append(out, ref)
-	}
-	return out, rows.Err()
-}
-
-// MarkPostEventWebhookActive flags that a comments webhook arrived for the post
-// event mapped to mediaID, so the polling loop stops handling it.
-func (r *Repository) MarkPostEventWebhookActive(ctx context.Context, mediaID string) error {
-	_, err := r.pool.Exec(ctx, `
-		UPDATE live_events SET webhook_active = true, updated_at = now()
-		WHERE media_id = $1 AND type = 'post' AND status = 'active'
-	`, mediaID)
-	return err
-}
-
-// EndPostEventByMediaID closes the active post event mapped to mediaID. Used when
+// EndEventByMediaID closes the not-yet-ended event that owns mediaID. Used when
 // Instagram reports the media is gone (deleted / no longer accessible) so the
 // polling loop stops hammering a dead media id every tick.
-func (r *Repository) EndPostEventByMediaID(ctx context.Context, mediaID string) error {
+//
+// Resolve pela MÍDIA (live_session_platforms → live_sessions), não mais por
+// live_events.media_id.
+func (r *Repository) EndEventByMediaID(ctx context.Context, mediaID string) error {
 	_, err := r.pool.Exec(ctx, `
-		UPDATE live_events SET status = 'ended', updated_at = now()
-		WHERE media_id = $1 AND type IN ('post', 'story') AND status = 'active'
+		UPDATE live_events e
+		SET status = 'ended', updated_at = now()
+		WHERE e.status <> 'ended'
+		  AND EXISTS (
+		      SELECT 1
+		      FROM live_sessions ls
+		      JOIN live_session_platforms lsp ON lsp.session_id = ls.id
+		      WHERE ls.event_id = e.id
+		        AND lsp.platform_live_id = $1
+		        AND ls.type IN ('post', 'reel', 'story')
+		  )
 	`, mediaID)
 	return err
 }
 
-// TimedEventRef identifies a post/story event for the ends_at finalization sweep
-// and the media-gone reroute (D5).
+// TimedEventRef identifies an event for the window sweeps (ready-to-start and
+// past-ends_at) and for the media-gone reroute (D5).
 type TimedEventRef struct {
 	EventID string
 	StoreID string
+}
+
+// ListEventsReadyToStart returns the scheduled events whose start instant has
+// passed and whose window is still open — the ones the activation sweep flips
+// to 'active' (E37).
+func (r *Repository) ListEventsReadyToStart(ctx context.Context, limit int32) ([]TimedEventRef, error) {
+	rows, err := r.q.ListEventsReadyToStart(ctx, limit)
+	if err != nil {
+		return nil, fmt.Errorf("listing events ready to start: %w", err)
+	}
+	out := make([]TimedEventRef, len(rows))
+	for i, row := range rows {
+		out[i] = TimedEventRef{EventID: row.ID.String(), StoreID: row.StoreID.String()}
+	}
+	return out, nil
+}
+
+// ActivateScheduledEvent flips a 'scheduled' event to 'active'. Devolve false
+// quando nada foi escrito — evento inexistente, já ativo ou já encerrado —, que
+// é a resposta esperada e não um erro: o UPDATE é o próprio guard de corrida
+// entre o botão do lojista e o sweep.
+func (r *Repository) ActivateScheduledEvent(ctx context.Context, eventID string) (bool, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.q.ActivateScheduledEvent(ctx, uid)
+	if err != nil {
+		return false, fmt.Errorf("activating scheduled event: %w", err)
+	}
+	return n > 0, nil
 }
 
 // ListEventsPastEndsAt returns active post/story events whose ends_at window has
@@ -529,7 +573,7 @@ func (r *Repository) ListEventsPastEndsAt(ctx context.Context, limit int32) ([]T
 // media_id, so the media-gone path can route through End (finalize) instead of a
 // bare status flip. Returns nil when there is no such event.
 func (r *Repository) GetActiveTimedEventByMediaID(ctx context.Context, mediaID string) (*TimedEventRef, error) {
-	row, err := r.q.GetActiveTimedEventByMediaID(ctx, pgtype.Text{String: mediaID, Valid: true})
+	row, err := r.q.GetActiveTimedEventByMediaID(ctx, mediaID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -606,23 +650,13 @@ func (r *Repository) GetEventByID(ctx context.Context, id, storeID string) (*Eve
 	return &out, nil
 }
 
-func (r *Repository) GetActiveEventByStore(ctx context.Context, storeID string) (*EventRow, error) {
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return nil, err
-	}
-
-	row, err := r.q.GetActiveLiveEventByStore(ctx, storeUID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("getting active live event: %w", err)
-	}
-
-	out := toEventRow(row)
-	return &out, nil
-}
+// GetActiveEventByStore foi REMOVIDA junto da query GetActiveLiveEventByStore.
+// Ela respondia "o evento ativo da loja" — uma pergunta que o guarda-chuva
+// tornou plural. Com campanhas longas e sobrepostas, um LIMIT 1 por created_at
+// DESC devolve a mais recente, que é a resposta errada com a mesma frequência
+// com que é a certa. Não tinha chamador; religá-la traria de volta, junto, o
+// filtro status = 'active' que a D19/D20 tirou de todas as resoluções
+// justamente para o sistema parar de descartar comentário em silêncio.
 
 func (r *Repository) EndEvent(ctx context.Context, id, storeID string) (EventRow, error) {
 	uid, err := parseUUID(id)
@@ -768,22 +802,16 @@ func (r *Repository) DeleteEvent(ctx context.Context, id, storeID string) error 
 // SESSION OPERATIONS
 // =============================================================================
 
-func (r *Repository) CreateSession(ctx context.Context, params CreateSessionParams) (SessionRow, error) {
-	eventUID, err := parseUUID(params.EventID)
-	if err != nil {
-		return SessionRow{}, err
-	}
-
-	row, err := r.q.CreateLiveSession(ctx, sqlc.CreateLiveSessionParams{
-		EventID: eventUID,
-		Status:  params.Status,
-	})
-	if err != nil {
-		return SessionRow{}, fmt.Errorf("creating live session: %w", err)
-	}
-
-	return toSessionRow(row), nil
-}
+// Repository.CreateSession foi REMOVIDA. Era o segundo caminho de criação de
+// sessão e, desde que a herança de whitelist entrou, uma armadilha silenciosa:
+// ela chamava CreateLiveSession direto, fora de transação e sem copiar
+// session_products do evento. Uma sessão nascida por ela ficaria com a lista
+// VAZIA — e "lista vazia libera tudo" (D15) faz disso a derrubada da barreira de
+// produtos da campanha inteira, sem erro nenhum e sem sintoma até a primeira
+// venda de um produto que não devia estar à venda.
+//
+// Não tinha chamador. O ponto único de criação é CreateSessionWithPlatformTx,
+// que cria sessão + plataforma + whitelist herdada na MESMA transação.
 
 func (r *Repository) GetSessionByID(ctx context.Context, id string) (*SessionRow, error) {
 	uid, err := parseUUID(id)
@@ -927,6 +955,19 @@ func (r *Repository) GetSessionByPlatformLiveID(ctx context.Context, platformLiv
 	return &out, nil
 }
 
+// SetSessionPublishAt grava a hora em que a transmissão foi publicada por
+// agendamento (RN-31). Ver MarkSessionPublished no service.
+func (r *Repository) SetSessionPublishAt(ctx context.Context, sessionID string, publishAt time.Time) error {
+	uid, err := parseUUID(sessionID)
+	if err != nil {
+		return err
+	}
+	return r.q.SetSessionPublishAt(ctx, sqlc.SetSessionPublishAtParams{
+		ID:        uid,
+		PublishAt: pgtype.Timestamptz{Time: publishAt, Valid: true},
+	})
+}
+
 func (r *Repository) IncrementSessionComments(ctx context.Context, sessionID string) error {
 	uid, err := parseUUID(sessionID)
 	if err != nil {
@@ -936,35 +977,50 @@ func (r *Repository) IncrementSessionComments(ctx context.Context, sessionID str
 	return r.q.IncrementLiveSessionComments(ctx, uid)
 }
 
-// GetLatestCommentIDByUser returns the most recent Instagram comment ID a buyer
-// posted in an event. Used to deliver checkout links via private reply (which
-// works within 7 days of the comment) instead of a direct message by IGSID
-// (which requires an open 24h messaging window). Returns "" when none exists.
-func (r *Repository) GetLatestCommentIDByUser(ctx context.Context, eventID, platformUserID string) (string, error) {
+// ReplyTarget é o comentário que receberá a resposta privada, com a idade dele.
+//
+// A idade viaja junto de propósito: quem decide se ainda dá para responder é o
+// domínio da notificação (7 dias de private reply), e é ele que precisa
+// distinguir "não há comentário nenhum" de "há, mas venceu" — os dois motivos
+// que o lojista vê na lista da RN-38 e que exigem ações diferentes dele.
+type ReplyTarget struct {
+	CommentID string
+	CreatedAt *time.Time
+}
+
+// GetLatestReplyTarget returns the most recent USABLE Instagram comment a buyer
+// posted in an event — one that hasn't consumed its single private reply and
+// isn't hidden/deleted (Instagram rejects replies to those, error 2534066).
+// Returns an empty target (no error) when the buyer has no usable comment.
+//
+// NÃO filtra por idade. O filtro `created_at >= now() - interval '7 days'`
+// morava aqui e escondia a informação de que o chamador precisa: com ele, um
+// comprador cujo único comentário venceu era indistinguível de um comprador que
+// nunca comentou — os dois davam "". A janela continua sendo respeitada, agora
+// no ponto que também REGISTRA a não entrega com o motivo certo, em vez de
+// degradar em silêncio para um DM que o Instagram recusa.
+func (r *Repository) GetLatestReplyTarget(ctx context.Context, eventID, platformUserID string) (ReplyTarget, error) {
 	eventUID, err := parseUUID(eventID)
 	if err != nil {
-		return "", err
+		return ReplyTarget{}, err
 	}
 
-	// Direct, explicit query: newest USABLE Instagram comment id for this buyer
-	// on this event — one that hasn't consumed its single private reply and
-	// isn't hidden/deleted (Instagram rejects replies to those, error 2534066).
-	// Returns "" (no error) when the buyer has no usable comment.
 	var commentID string
+	var createdAt time.Time
 	err = r.pool.QueryRow(ctx, `
-		SELECT platform_comment_id FROM live_comments
+		SELECT platform_comment_id, created_at FROM live_comments
 		WHERE event_id = $1 AND platform_user_id = $2 AND platform_comment_id <> ''
 		  AND NOT private_reply_used AND NOT hidden AND deleted_at IS NULL
 		ORDER BY created_at DESC
 		LIMIT 1
-	`, eventUID, platformUserID).Scan(&commentID)
+	`, eventUID, platformUserID).Scan(&commentID, &createdAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", nil
+			return ReplyTarget{}, nil
 		}
-		return "", fmt.Errorf("getting latest comment id: %w", err)
+		return ReplyTarget{}, fmt.Errorf("getting latest reply target: %w", err)
 	}
-	return commentID, nil
+	return ReplyTarget{CommentID: commentID, CreatedAt: &createdAt}, nil
 }
 
 // ListCommentsBySession returns all comments for a session.
@@ -1105,23 +1161,9 @@ func (r *Repository) RemovePlatformFromSession(ctx context.Context, sessionID, p
 	})
 }
 
-func (r *Repository) GetPlatformByLiveID(ctx context.Context, platformLiveID string) (*PlatformRow, error) {
-	row, err := r.q.GetPlatformByLiveID(ctx, platformLiveID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("getting platform by live id: %w", err)
-	}
-
-	return &PlatformRow{
-		ID:             row.ID.String(),
-		SessionID:      row.SessionID.String(),
-		Platform:       row.Platform,
-		PlatformLiveID: row.PlatformLiveID,
-		AddedAt:        row.AddedAt.Time,
-	}, nil
-}
+// GetPlatformByLiveID foi removida junto com a query: sem chamador e, depois da
+// 000117, um `:one` sobre uma coluna que deixou de ser única — devolveria uma
+// campanha arbitrária, em silêncio. Ver a nota em db/queries/live.sql.
 
 // =============================================================================
 // STORE SETTINGS
@@ -1180,35 +1222,24 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 
 	qtx := r.q.WithTx(tx)
 
-	// Try to get existing cart first. FOR UPDATE trava a row: além de resolver
-	// a corrida de dois comentários simultâneos do mesmo comprador (que antes
-	// colidiam na unique constraint), permite reabrir com segurança um cart
-	// morto sob o lock.
+	// Busca o carrinho ABERTO do comprador neste evento. FOR UPDATE trava a row
+	// e resolve a corrida de dois comentários simultâneos do mesmo comprador.
+	//
+	// Desde a 000107 a query filtra por carrinho aberto, então ela só devolve
+	// linha quando existe um carrinho que ainda pode receber item e ser pago.
+	// Carrinho pago, expirado, cancelado ou estornado cai em ErrNoRows e o
+	// caminho abaixo cria um NOVO — que o índice parcial agora permite.
+	//
+	// Foi isto que acabou com o reopen destrutivo. Antes, a unique TOTAL impedia
+	// um 2º carrinho, então um cart morto era reaberto in-place: os itens do
+	// comprador eram APAGADOS (DeleteCartItemsByCart) para o carrinho poder ser
+	// reusado. Numa campanha de uma semana isso apagaria a compra de dias
+	// (RN-08). Agora o antigo fica arquivado, intacto, e o novo nasce limpo.
 	existing, err := qtx.GetCartByEventAndUserForUpdate(ctx, sqlc.GetCartByEventAndUserForUpdateParams{
 		EventID:        eventID,
 		PlatformUserID: params.PlatformUserID,
 	})
 	if err == nil {
-		// E5: um cart 'expired'/'cancelled' não pode ser reusado como está — o
-		// item novo entraria num cart impagável e os itens antigos (cujo estoque
-		// já voltou na expiração) reivindicariam estoque inexistente. Reabrimos
-		// in-place: purga os itens antigos e reseta tudo (status/pagamento/
-		// checkout/cupom/ERP). A unique (event_id, platform_user_id) impede criar
-		// um 2º cart, por isso reabrir em vez de novo. 'paid' NÃO é reaberto (não
-		// destruir uma venda concluída) — cai no reuso.
-		if existing.Status == "expired" || existing.Status == "cancelled" {
-			if err := qtx.DeleteCartItemsByCart(ctx, existing.ID); err != nil {
-				return nil, false, fmt.Errorf("purging items on cart reopen: %w", err)
-			}
-			if err := qtx.ReopenExpiredCartForReuse(ctx, existing.ID); err != nil {
-				return nil, false, fmt.Errorf("reopening cart for reuse: %w", err)
-			}
-			// cart.reopened: distinct event per reopen (no static dedup key).
-			if err := emitCartEvent(ctx, qtx, events.CartReopened, existing.ID.String(), existing.EventID.String(), pgUUIDString(sessionID), ""); err != nil {
-				return nil, false, err
-			}
-		}
-		// Cart exists (reused or reopened), commit and return
 		if err := tx.Commit(ctx); err != nil {
 			return nil, false, fmt.Errorf("committing transaction: %w", err)
 		}
@@ -1333,9 +1364,22 @@ func (r *Repository) FinalizeCartsByEvent(ctx context.Context, eventID string) (
 
 	qtx := r.q.WithTx(tx)
 
+	// RN-34: o prazo vem da fonte única (GetEventCartSettings), que já escolhe
+	// entre o curto e o estendido conforme close_cart_on_event_end e já faz o
+	// fallback para a loja. Antes o COALESCE estava inline no UPDATE e o toggle
+	// não era lido por regra nenhuma — o lojista via a opção na tela e ela não
+	// fazia nada.
+	settings, err := qtx.GetEventCartSettings(ctx, uid)
+	if err != nil {
+		return 0, fmt.Errorf("resolving cart deadline for event: %w", err)
+	}
+
 	// Finalize (active carts → checkout). Returns the finalized cart ids so we
 	// can emit cart.checkout_armed per cart in the same tx.
-	ids, err := qtx.FinalizeCartsByEvent(ctx, uid)
+	ids, err := qtx.FinalizeCartsByEvent(ctx, sqlc.FinalizeCartsByEventParams{
+		EventID:           uid,
+		ExpirationMinutes: settings.EffectiveCartExpirationMinutes,
+	})
 	if err != nil {
 		return 0, fmt.Errorf("finalizing carts: %w", err)
 	}
@@ -1390,6 +1434,20 @@ func (r *Repository) AddCartItem(ctx context.Context, params AddCartItemParams) 
 		return fmt.Errorf("upserting cart item: %w", err)
 	}
 
+	// Log de atribuição (RN-12), no MESMO tx do upsert. cart_items soma a
+	// quantidade e guarda só a PRIMEIRA sessão (COALESCE), então sozinho ele
+	// credita à live de segunda uma unidade comprada na de quarta. O log guarda
+	// cada adição com a sessão que a gerou e o preço praticado na hora.
+	if err := qtx.InsertCartItemEvent(ctx, sqlc.InsertCartItemEventParams{
+		CartID:    cartID,
+		ProductID: productID,
+		SessionID: sessionID,
+		Quantity:  int32(params.Quantity),
+		UnitPrice: params.UnitPrice,
+	}); err != nil {
+		return fmt.Errorf("logging cart item addition: %w", err)
+	}
+
 	// cart.item_added in the same tx (can repeat per cart+product, so no dedup key).
 	payload, err := json.Marshal(struct {
 		CartID    string `json:"cart_id"`
@@ -1436,21 +1494,25 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (LiveStatsOut
 		return LiveStatsOutput{}, err
 	}
 
-	// total_revenue mirrors dashboard.Repository.GetStats: sum of every
-	// cart item across every cart attached to this store's events, with no
-	// payment-status filter. Keeping the two surfaces in sync so the card on
-	// /events matches "Faturamento Total" on the dashboard.
+	// total_revenue espelha dashboard.Repository.GetStats — e agora espelha de
+	// verdade. O comentário antigo prometia que as duas superfícies estavam em
+	// sincronia, mas a do dashboard migrou para orders (RN-14, Grupo B) e esta
+	// ficou somando TODO cart_item de TODO carrinho da loja, sem filtro de
+	// pagamento nenhum: carrinho aberto, expirado e cancelado entravam no
+	// "Faturamento" de /events. O lojista via, para a mesma loja, um número
+	// maior aqui do que no dashboard — e um comentário afirmando que eram o
+	// mesmo número.
+	//
+	// A subquery abaixo é literalmente a de dashboard.sql:GetDashboardStats.
 	query := `
 		SELECT
 			COUNT(*) as total_lives,
 			COUNT(*) FILTER (WHERE status = 'active') as active_lives,
 			COALESCE(SUM(total_orders), 0) as total_orders,
 			COALESCE((
-				SELECT SUM(ci.quantity * ci.unit_price)
-				FROM cart_items ci
-				JOIN carts c ON c.id = ci.cart_id
-				JOIN live_events le ON le.id = c.event_id
-				WHERE le.store_id = $1
+				SELECT SUM(o.total_cents)
+				FROM orders o
+				WHERE o.store_id = $1 AND o.status = 'paid'
 			), 0)::BIGINT as total_revenue
 		FROM live_events
 		WHERE store_id = $1
@@ -1554,13 +1616,24 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 	// Join with platforms to get the primary platform
 	query := fmt.Sprintf(`
 		SELECT
-			e.id, e.store_id, e.title, e.type, e.status, e.total_orders, e.created_at, e.updated_at,
+			e.id, e.store_id, e.title, e.status, e.total_orders, e.created_at, e.updated_at,
 			e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end,
 			COALESCE(e.pix_discount_percent, 0),
 			e.scheduled_at, e.ends_at,
 			s.started_at, s.ended_at, COALESCE(s.total_comments, 0),
-			COALESCE(p.platform, ''), COALESCE(p.platform_live_id, '')
+			COALESCE(p.platform, ''), COALESCE(p.platform_live_id, ''),
+			COALESCE(st.types, ARRAY[]::text[])
 		FROM live_events e
+		LEFT JOIN LATERAL (
+			-- Tipos DISTINTOS das sessões: é o que substitui live_events.type
+			-- desde que a 000122 o dropou. Um LATERAL próprio (e não um join na
+			-- lateral da primeira sessão) porque a campanha é MISTA: a
+			-- primeira sessão pode ser a live e a terceira o story, e rotular
+			-- o evento pela primeira sessão seria trocar uma mentira por outra.
+			SELECT array_agg(DISTINCT type ORDER BY type) AS types
+			FROM live_sessions
+			WHERE event_id = e.id
+		) st ON true
 		LEFT JOIN LATERAL (
 			SELECT id, started_at, ended_at, total_comments
 			FROM live_sessions
@@ -1591,7 +1664,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 	lives := make([]LiveOutput, 0)
 	for rows.Next() {
 		var live LiveOutput
-		var title, eventType, platform, platformLiveID pgtype.Text
+		var title, platform, platformLiveID pgtype.Text
 		var startedAt, endedAt, scheduledAt, endsAt pgtype.Timestamptz
 		var cartExpirationMinutes, cartMaxQuantityPerItem pgtype.Int4
 		var autoSendCheckoutLinks pgtype.Bool
@@ -1601,7 +1674,6 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 			&live.ID,
 			&live.StoreID,
 			&title,
-			&eventType,
 			&live.Status,
 			&live.TotalOrders,
 			&live.CreatedAt,
@@ -1618,6 +1690,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 			&live.TotalComments,
 			&platform,
 			&platformLiveID,
+			&live.SessionTypes,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scanning live event: %w", err)
 		}
@@ -1625,11 +1698,6 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 
 		if title.Valid {
 			live.Title = title.String
-		}
-		if eventType.Valid {
-			live.Type = eventType.String
-		} else {
-			live.Type = "single"
 		}
 		if platform.Valid {
 			live.Platform = platform.String
@@ -1683,11 +1751,6 @@ func toEventRow(row sqlc.LiveEvent) EventRow {
 		title = row.Title.String
 	}
 
-	eventType := row.Type
-	if eventType == "" {
-		eventType = "single"
-	}
-
 	// Convert nullable fields
 	var cartExpirationMinutes, cartMaxQuantityPerItem *int
 	if row.CartExpirationMinutes.Valid {
@@ -1702,12 +1765,6 @@ func toEventRow(row sqlc.LiveEvent) EventRow {
 	if row.SendOnLiveEnd.Valid {
 		autoSendCheckoutLinks = &row.SendOnLiveEnd.Bool
 	}
-	var currentActiveProductID *string
-	if row.CurrentActiveProductID.Valid {
-		id := row.CurrentActiveProductID.String()
-		currentActiveProductID = &id
-	}
-
 	// Scheduling fields
 	var scheduledAt *time.Time
 	if row.ScheduledAt.Valid {
@@ -1726,20 +1783,19 @@ func toEventRow(row sqlc.LiveEvent) EventRow {
 		ID:                     row.ID.String(),
 		StoreID:                row.StoreID.String(),
 		Title:                  title,
-		Type:                   eventType,
 		Status:                 row.Status,
 		TotalOrders:            int(row.TotalOrders),
 		CloseCartOnEventEnd:    row.CloseCartOnEventEnd,
 		CartExpirationMinutes:  cartExpirationMinutes,
 		CartMaxQuantityPerItem: cartMaxQuantityPerItem,
 		SendOnLiveEnd:          autoSendCheckoutLinks,
-		CurrentActiveProductID: currentActiveProductID,
-		ProcessingPaused:       row.ProcessingPaused,
 		ScheduledAt:            scheduledAt,
 		EndsAt:                 endsAt,
 		Description:            description,
 		CreatedAt:              row.CreatedAt.Time,
 		UpdatedAt:              row.UpdatedAt.Time,
+
+		WaitlistNotifiedTTLMinutes: int(row.WaitlistNotifiedTtlMinutes),
 	}
 }
 
@@ -1752,15 +1808,26 @@ func toSessionRow(row sqlc.LiveSession) SessionRow {
 		endedAt = &row.EndedAt.Time
 	}
 
+	var activeProductID *string
+	if row.CurrentActiveProductID.Valid {
+		v := row.CurrentActiveProductID.String()
+		activeProductID = &v
+	}
+
 	return SessionRow{
-		ID:            row.ID.String(),
-		EventID:       row.EventID.String(),
-		Status:        row.Status,
-		StartedAt:     startedAt,
-		EndedAt:       endedAt,
-		TotalComments: int(row.TotalComments.Int32),
-		CreatedAt:     row.CreatedAt.Time,
-		UpdatedAt:     row.UpdatedAt.Time,
+		ID:                     row.ID.String(),
+		EventID:                row.EventID.String(),
+		Type:                   row.Type,
+		Status:                 row.Status,
+		SequenceOrder:          int(row.SequenceOrder),
+		CurrentActiveProductID: activeProductID,
+		ProcessingPaused:       row.ProcessingPaused,
+		AttributionSource:      row.AttributionSource,
+		StartedAt:              startedAt,
+		EndedAt:                endedAt,
+		TotalComments:          int(row.TotalComments.Int32),
+		CreatedAt:              row.CreatedAt.Time,
+		UpdatedAt:              row.UpdatedAt.Time,
 	}
 }
 
@@ -1920,119 +1987,267 @@ func (r *Repository) ListProductsByEvent(ctx context.Context, eventID string) ([
 	return products, nil
 }
 
-// SessionStatsRow holds cart statistics for a session
-type SessionStatsRow struct {
-	TotalCarts   int
-	PaidCarts    int
-	TotalRevenue int64
-	PaidRevenue  int64
+// =============================================================================
+// MÉTRICA EM DOIS NÍVEIS (Fatia 5)
+//
+// GetSessionStats saiu daqui: agrupava por carts.session_id (a sessão em que o
+// carrinho NASCEU) e era chamada uma vez por sessão dentro do laço do evento.
+// As três leituras abaixo são POR EVENTO — uma chamada cada, não N.
+// =============================================================================
+
+// MetricCutover é o instante em que uma métrica mudou de definição (D26).
+type MetricCutover struct {
+	Key         string
+	EffectiveAt time.Time
+	Note        string
 }
 
-func (r *Repository) GetSessionStats(ctx context.Context, sessionID string) (*SessionStatsRow, error) {
-	uid, err := parseUUID(sessionID)
+// GetMetricCutover lê o marcador de corte. Marcador AUSENTE não é erro: a
+// métrica continua respondendo, só sem a ressalva. Derrubar o relatório inteiro
+// porque a nota de rodapé sumiu seria trocar um aviso por uma tela em branco.
+func (r *Repository) GetMetricCutover(ctx context.Context, key string) (*MetricCutover, error) {
+	row, err := r.q.GetMetricCutover(ctx, key)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("getting metric cutover %q: %w", key, err)
+	}
+	return &MetricCutover{
+		Key:         row.Key,
+		EffectiveAt: row.EffectiveAt.Time,
+		Note:        row.Note,
+	}, nil
+}
+
+// SessionConfirmedRow é o confirmado de uma transmissão. SessionID vazio é o
+// balde "sem transmissão".
+type SessionConfirmedRow struct {
+	SessionID    string
+	SoldUnits    int
+	RevenueCents int64
+	PaidCarts    int
+}
+
+// ListSessionConfirmedRevenueByEvent devolve a receita CONGELADA repartida por
+// transmissão, direto de order_items (RN-13).
+func (r *Repository) ListSessionConfirmedRevenueByEvent(ctx context.Context, eventID string) ([]SessionConfirmedRow, error) {
+	uid, err := parseUUID(eventID)
 	if err != nil {
 		return nil, err
 	}
 
-	row, err := r.q.GetSessionStats(ctx, uid)
+	rows, err := r.q.ListSessionConfirmedRevenueByEvent(ctx, uid)
 	if err != nil {
-		return nil, fmt.Errorf("getting session stats: %w", err)
+		return nil, fmt.Errorf("listing session confirmed revenue: %w", err)
 	}
 
-	return &SessionStatsRow{
-		TotalCarts:   int(row.TotalCarts),
-		PaidCarts:    int(row.PaidCarts),
-		TotalRevenue: row.TotalRevenue,
-		PaidRevenue:  row.PaidRevenue,
-	}, nil
+	out := make([]SessionConfirmedRow, len(rows))
+	for i, row := range rows {
+		var sessionID string
+		if row.SessionID.Valid {
+			sessionID = row.SessionID.String()
+		}
+		out[i] = SessionConfirmedRow{
+			SessionID:    sessionID,
+			SoldUnits:    int(row.SoldUnits),
+			RevenueCents: row.RevenueCents,
+			PaidCarts:    int(row.PaidCarts),
+		}
+	}
+	return out, nil
+}
+
+// ListProjectionInputByEvent devolve as duas metades do projetado: a quantidade
+// final de cada item dos carrinhos abertos e o log de adições desses mesmos
+// carrinhos. Quem junta é ProjectBySession — o repositório não faz conta.
+func (r *Repository) ListProjectionInputByEvent(ctx context.Context, eventID string) ([]OpenCartItem, []CartItemAdditionRow, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	itemRows, err := r.q.ListOpenCartItemsByEvent(ctx, uid)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listing open cart items: %w", err)
+	}
+	items := make([]OpenCartItem, len(itemRows))
+	for i, row := range itemRows {
+		items[i] = OpenCartItem{
+			CartID:    row.CartID.String(),
+			ProductID: row.ProductID.String(),
+			Quantity:  int(row.Quantity.Int32),
+			UnitPrice: row.UnitPrice.Int64,
+		}
+	}
+
+	logRows, err := r.q.ListCartItemEventsByEvent(ctx, uid)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listing cart item events: %w", err)
+	}
+	additions := make([]CartItemAdditionRow, len(logRows))
+	for i, row := range logRows {
+		var sessionID string
+		if row.SessionID.Valid {
+			sessionID = row.SessionID.String()
+		}
+		additions[i] = CartItemAdditionRow{
+			CartID:    row.CartID.String(),
+			ProductID: row.ProductID.String(),
+			CartItemAddition: CartItemAddition{
+				SessionID: sessionID,
+				Quantity:  int(row.Quantity),
+				UnitPrice: row.UnitPrice,
+			},
+		}
+	}
+
+	return items, additions, nil
 }
 
 // =============================================================================
 // LIVE MODE - Active Product and Processing Control
 // =============================================================================
 
-// SetActiveProduct sets the active product for an event
-func (r *Repository) SetActiveProduct(ctx context.Context, eventID, storeID, productID string) (EventRow, error) {
-	eventUID, err := parseUUID(eventID)
+// =============================================================================
+// MODO LIVE (D17) — estado EFÊMERO de execução, agora na SESSÃO
+//
+// As colunas equivalentes em live_events saíram na 000122: quem manda é a
+// sessão. As funções "…ForEvent" abaixo sustentam a rota legada do painel, que
+// ainda só conhece o eventId, e aplicam o estado em TODAS as sessões vivas do
+// evento.
+// =============================================================================
+
+// SetSessionActiveProduct define (ou limpa, com productID nil) o produto em
+// destaque DAQUELA transmissão.
+func (r *Repository) SetSessionActiveProduct(ctx context.Context, sessionID, storeID string, productID *string) (SessionRow, error) {
+	sessionUID, err := parseUUID(sessionID)
 	if err != nil {
-		return EventRow{}, err
+		return SessionRow{}, err
 	}
 	storeUID, err := parseUUID(storeID)
 	if err != nil {
-		return EventRow{}, err
+		return SessionRow{}, err
 	}
-	productUID, err := parseUUID(productID)
-	if err != nil {
-		return EventRow{}, err
+	var productUID pgtype.UUID
+	if productID != nil && *productID != "" {
+		productUID, err = parseUUID(*productID)
+		if err != nil {
+			return SessionRow{}, err
+		}
 	}
 
-	row, err := r.q.SetActiveProduct(ctx, sqlc.SetActiveProductParams{
-		ID:                     eventUID,
+	row, err := r.q.SetSessionActiveProduct(ctx, sqlc.SetSessionActiveProductParams{
+		ID:                     sessionUID,
 		CurrentActiveProductID: productUID,
 		StoreID:                storeUID,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return EventRow{}, httpx.ErrNotFound("event not found")
+			return SessionRow{}, httpx.ErrNotFound("session not found")
 		}
-		return EventRow{}, fmt.Errorf("setting active product: %w", err)
+		return SessionRow{}, fmt.Errorf("setting session active product: %w", err)
 	}
-
-	return toEventRow(row), nil
+	return toSessionRow(row), nil
 }
 
-// ClearActiveProduct clears the active product for an event
-func (r *Repository) ClearActiveProduct(ctx context.Context, eventID, storeID string) (EventRow, error) {
-	eventUID, err := parseUUID(eventID)
+// SetSessionProcessingPaused pausa ou retoma o processamento DAQUELA transmissão.
+func (r *Repository) SetSessionProcessingPaused(ctx context.Context, sessionID, storeID string, paused bool) (SessionRow, error) {
+	sessionUID, err := parseUUID(sessionID)
 	if err != nil {
-		return EventRow{}, err
+		return SessionRow{}, err
 	}
 	storeUID, err := parseUUID(storeID)
 	if err != nil {
-		return EventRow{}, err
+		return SessionRow{}, err
 	}
 
-	row, err := r.q.ClearActiveProduct(ctx, sqlc.ClearActiveProductParams{
-		ID:      eventUID,
-		StoreID: storeUID,
-	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return EventRow{}, httpx.ErrNotFound("event not found")
-		}
-		return EventRow{}, fmt.Errorf("clearing active product: %w", err)
-	}
-
-	return toEventRow(row), nil
-}
-
-// SetProcessingPaused sets the processing paused state for an event
-func (r *Repository) SetProcessingPaused(ctx context.Context, eventID, storeID string, paused bool) (EventRow, error) {
-	eventUID, err := parseUUID(eventID)
-	if err != nil {
-		return EventRow{}, err
-	}
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return EventRow{}, err
-	}
-
-	row, err := r.q.SetProcessingPaused(ctx, sqlc.SetProcessingPausedParams{
-		ID:               eventUID,
+	row, err := r.q.SetSessionProcessingPaused(ctx, sqlc.SetSessionProcessingPausedParams{
+		ID:               sessionUID,
 		ProcessingPaused: paused,
 		StoreID:          storeUID,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return EventRow{}, httpx.ErrNotFound("event not found")
+			return SessionRow{}, httpx.ErrNotFound("session not found")
 		}
-		return EventRow{}, fmt.Errorf("setting processing paused: %w", err)
+		return SessionRow{}, fmt.Errorf("setting session processing paused: %w", err)
 	}
-
-	return toEventRow(row), nil
+	return toSessionRow(row), nil
 }
 
-// GetLiveModeState returns the live mode state for an event
+// GetSessionLiveModeState devolve o estado do modo live DAQUELA transmissão.
+func (r *Repository) GetSessionLiveModeState(ctx context.Context, sessionID, storeID string) (*LiveModeStateOutput, error) {
+	sessionUID, err := parseUUID(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := r.q.GetSessionLiveModeState(ctx, sqlc.GetSessionLiveModeStateParams{
+		ID:      sessionUID,
+		StoreID: storeUID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.ErrNotFound("session not found")
+		}
+		return nil, fmt.Errorf("getting session live mode state: %w", err)
+	}
+
+	return buildLiveModeState(
+		row.ID.String(), row.ProcessingPaused, row.CurrentActiveProductID,
+		row.ActiveProductName, row.ActiveProductKeyword,
+		row.ActiveProductPrice, row.ActiveProductImageUrl,
+	), nil
+}
+
+// SetActiveProductForEventSessions é a rota LEGADA: aplica o produto em
+// destaque em todas as sessões VIVAS do evento.
+func (r *Repository) SetActiveProductForEventSessions(ctx context.Context, eventID, storeID string, productID *string) error {
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+	var productUID pgtype.UUID
+	if productID != nil && *productID != "" {
+		productUID, err = parseUUID(*productID)
+		if err != nil {
+			return err
+		}
+	}
+	return r.q.SetLiveModeForEventSessions(ctx, sqlc.SetLiveModeForEventSessionsParams{
+		ID:                     eventUID,
+		CurrentActiveProductID: productUID,
+		StoreID:                storeUID,
+	})
+}
+
+// SetProcessingPausedForEventSessions é a rota LEGADA da pausa.
+func (r *Repository) SetProcessingPausedForEventSessions(ctx context.Context, eventID, storeID string, paused bool) error {
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+	return r.q.SetProcessingPausedForEventSessions(ctx, sqlc.SetProcessingPausedForEventSessionsParams{
+		ID:               eventUID,
+		ProcessingPaused: paused,
+		StoreID:          storeUID,
+	})
+}
+
+// GetLiveModeState devolve o estado do EVENTO lido da sessão viva mais recente.
 func (r *Repository) GetLiveModeState(ctx context.Context, eventID, storeID string) (*LiveModeStateOutput, error) {
 	eventUID, err := parseUUID(eventID)
 	if err != nil {
@@ -2043,264 +2258,61 @@ func (r *Repository) GetLiveModeState(ctx context.Context, eventID, storeID stri
 		return nil, err
 	}
 
-	row, err := r.q.GetLiveModeState(ctx, sqlc.GetLiveModeStateParams{
+	row, err := r.q.GetEventLiveModeStateFromSessions(ctx, sqlc.GetEventLiveModeStateFromSessionsParams{
 		ID:      eventUID,
 		StoreID: storeUID,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.ErrNotFound("event not found")
+			// Evento sem sessão nenhuma: estado neutro, não 404 — o painel não
+			// deve quebrar por causa de um evento que ainda não tem transmissão.
+			return &LiveModeStateOutput{}, nil
 		}
 		return nil, fmt.Errorf("getting live mode state: %w", err)
 	}
 
-	output := &LiveModeStateOutput{
-		ProcessingPaused: row.ProcessingPaused,
-	}
+	return buildLiveModeState(
+		row.SessionID.String(), row.ProcessingPaused, row.CurrentActiveProductID,
+		row.ActiveProductName, row.ActiveProductKeyword,
+		row.ActiveProductPrice, row.ActiveProductImageUrl,
+	), nil
+}
 
-	// Include active product if set
-	if row.CurrentActiveProductID.Valid && row.ActiveProductName.Valid {
-		var imageURL *string
-		if row.ActiveProductImageUrl.Valid {
-			imageURL = &row.ActiveProductImageUrl.String
+// buildLiveModeState centraliza a montagem do estado a partir das duas leituras
+// (por sessão e a legada por evento) — elas devolvem exatamente as mesmas
+// colunas.
+func buildLiveModeState(
+	sessionID string,
+	paused bool,
+	productID pgtype.UUID,
+	name, keyword pgtype.Text,
+	price pgtype.Int8,
+	imageURL pgtype.Text,
+) *LiveModeStateOutput {
+	out := &LiveModeStateOutput{SessionID: sessionID, ProcessingPaused: paused}
+	// name inválido = produto apagado depois de destacado; sem ele não há o que
+	// mostrar, e devolver só o id enganaria o painel.
+	if productID.Valid && name.Valid {
+		var image *string
+		if imageURL.Valid {
+			image = &imageURL.String
 		}
-
-		output.ActiveProduct = &ActiveProductOutput{
-			ID:       row.CurrentActiveProductID.String(),
-			Name:     row.ActiveProductName.String,
-			Keyword:  row.ActiveProductKeyword.String,
-			Price:    row.ActiveProductPrice.Int64,
-			ImageURL: imageURL,
+		out.ActiveProduct = &ActiveProductOutput{
+			ID:       productID.String(),
+			Name:     name.String,
+			Keyword:  keyword.String,
+			Price:    price.Int64,
+			ImageURL: image,
 		}
 	}
-
-	return output, nil
+	return out
 }
 
-// =============================================================================
-// EVENT PRODUCTS (Whitelist)
-// =============================================================================
-
-// AddEventProduct adds a product to an event's whitelist
-func (r *Repository) AddEventProduct(ctx context.Context, input AddEventProductInput) (EventProductOutput, error) {
-	eventUID, err := parseUUID(input.EventID)
-	if err != nil {
-		return EventProductOutput{}, err
-	}
-	productUID, err := parseUUID(input.ProductID)
-	if err != nil {
-		return EventProductOutput{}, err
-	}
-
-	// Convert nullable fields
-	var specialPrice pgtype.Int4
-	if input.SpecialPrice != nil {
-		specialPrice = pgtype.Int4{Int32: int32(*input.SpecialPrice), Valid: true}
-	}
-	var maxQuantity pgtype.Int4
-	if input.MaxQuantity != nil {
-		maxQuantity = pgtype.Int4{Int32: *input.MaxQuantity, Valid: true}
-	}
-
-	// Use transaction to ensure atomicity (INSERT + SELECT)
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return EventProductOutput{}, fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // No-op if already committed
-
-	qtx := r.q.WithTx(tx)
-
-	_, err = qtx.CreateEventProduct(ctx, sqlc.CreateEventProductParams{
-		EventID:      eventUID,
-		ProductID:    productUID,
-		SpecialPrice: specialPrice,
-		MaxQuantity:  maxQuantity,
-		DisplayOrder: input.DisplayOrder,
-		Featured:     input.Featured,
-	})
-	if err != nil {
-		return EventProductOutput{}, fmt.Errorf("adding event product: %w", err)
-	}
-
-	// Get the created product with joined product data
-	row, err := qtx.GetEventProductByProductID(ctx, sqlc.GetEventProductByProductIDParams{
-		EventID:   eventUID,
-		ProductID: productUID,
-	})
-	if err != nil {
-		return EventProductOutput{}, fmt.Errorf("getting created event product: %w", err)
-	}
-
-	// Commit the transaction
-	if err := tx.Commit(ctx); err != nil {
-		return EventProductOutput{}, fmt.Errorf("committing transaction: %w", err)
-	}
-
-	return toEventProductOutput(row), nil
-}
-
-// ListEventProducts returns all products in an event's whitelist
-func (r *Repository) ListEventProducts(ctx context.Context, eventID string) ([]EventProductOutput, error) {
-	uid, err := parseUUID(eventID)
-	if err != nil {
-		return nil, err
-	}
-
-	rows, err := r.q.ListEventProducts(ctx, uid)
-	if err != nil {
-		return nil, fmt.Errorf("listing event products: %w", err)
-	}
-
-	products := make([]EventProductOutput, len(rows))
-	for i, row := range rows {
-		products[i] = toEventProductOutputFromList(row)
-	}
-
-	return products, nil
-}
-
-// UpdateEventProduct updates a product's configuration in an event
-func (r *Repository) UpdateEventProduct(ctx context.Context, input UpdateEventProductInput) (EventProductOutput, error) {
-	uid, err := parseUUID(input.ID)
-	if err != nil {
-		return EventProductOutput{}, err
-	}
-	eventUID, err := parseUUID(input.EventID)
-	if err != nil {
-		return EventProductOutput{}, err
-	}
-
-	// Convert nullable fields
-	var specialPrice pgtype.Int4
-	if input.SpecialPrice != nil {
-		specialPrice = pgtype.Int4{Int32: int32(*input.SpecialPrice), Valid: true}
-	}
-	var maxQuantity pgtype.Int4
-	if input.MaxQuantity != nil {
-		maxQuantity = pgtype.Int4{Int32: *input.MaxQuantity, Valid: true}
-	}
-
-	// Use transaction to ensure atomicity (UPDATE + SELECT)
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return EventProductOutput{}, fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback(ctx) // No-op if already committed
-
-	qtx := r.q.WithTx(tx)
-
-	updated, err := qtx.UpdateEventProduct(ctx, sqlc.UpdateEventProductParams{
-		ID:           uid,
-		EventID:      eventUID,
-		SpecialPrice: specialPrice,
-		MaxQuantity:  maxQuantity,
-		DisplayOrder: input.DisplayOrder,
-		Featured:     input.Featured,
-	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return EventProductOutput{}, httpx.ErrNotFound("event product not found")
-		}
-		return EventProductOutput{}, fmt.Errorf("updating event product: %w", err)
-	}
-
-	// Get with joined product data
-	row, err := qtx.GetEventProductByID(ctx, updated.ID)
-	if err != nil {
-		return EventProductOutput{}, fmt.Errorf("getting updated event product: %w", err)
-	}
-
-	// Commit the transaction
-	if err := tx.Commit(ctx); err != nil {
-		return EventProductOutput{}, fmt.Errorf("committing transaction: %w", err)
-	}
-
-	return toEventProductOutputFromGet(row), nil
-}
-
-// DeleteEventProduct removes a product from an event's whitelist
-func (r *Repository) DeleteEventProduct(ctx context.Context, id, eventID string) error {
-	uid, err := parseUUID(id)
-	if err != nil {
-		return err
-	}
-	eventUID, err := parseUUID(eventID)
-	if err != nil {
-		return err
-	}
-
-	return r.q.DeleteEventProduct(ctx, sqlc.DeleteEventProductParams{
-		ID:      uid,
-		EventID: eventUID,
-	})
-}
-
-// CountEventProducts returns the number of products in an event's whitelist
-func (r *Repository) CountEventProducts(ctx context.Context, eventID string) (int, error) {
-	uid, err := parseUUID(eventID)
-	if err != nil {
-		return 0, err
-	}
-
-	count, err := r.q.CountEventProducts(ctx, uid)
-	if err != nil {
-		return 0, fmt.Errorf("counting event products: %w", err)
-	}
-
-	return int(count), nil
-}
-
-// GetEventProductConfig returns product config for cart validation
-func (r *Repository) GetEventProductConfig(ctx context.Context, eventID, productID, storeID string) (*ProductValidationResult, error) {
-	eventUID, err := parseUUID(eventID)
-	if err != nil {
-		return nil, err
-	}
-	productUID, err := parseUUID(productID)
-	if err != nil {
-		return nil, err
-	}
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return nil, err
-	}
-
-	row, err := r.q.GetEventProductConfig(ctx, sqlc.GetEventProductConfigParams{
-		EventID: eventUID,
-		ID:      productUID,
-		StoreID: storeUID,
-	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.ErrNotFound("product not found")
-		}
-		return nil, fmt.Errorf("getting event product config: %w", err)
-	}
-
-	var specialPrice *int64
-	if row.SpecialPrice.Valid {
-		v := int64(row.SpecialPrice.Int32)
-		specialPrice = &v
-	}
-	var maxQuantity *int32
-	if row.MaxQuantity.Valid {
-		maxQuantity = &row.MaxQuantity.Int32
-	}
-
-	return &ProductValidationResult{
-		ProductID:      row.ProductID.String(),
-		ProductName:    row.ProductName,
-		Keyword:        row.ProductKeyword,
-		OriginalPrice:  row.OriginalPrice.Int64,
-		EffectivePrice: row.EffectivePrice,
-		SpecialPrice:   specialPrice,
-		MaxQuantity:    maxQuantity,
-		Stock:          row.ProductStock.Int32,
-		IsAllowed:      row.IsAllowed,
-		IsActive:       row.ProductActive.Bool,
-	}, nil
-}
+// A camada de event_products saiu daqui: a whitelist passou a ser da SESSÃO
+// (000112). As operações equivalentes estão em session_product_repository.go, e
+// as rotas legadas por evento são traduzidas para todas as sessões do evento.
+// A tabela event_products saiu do banco na 000122: ela sobrevivia só como
+// instantâneo de rollback e ninguém mais a lia nem escrevia.
 
 // =============================================================================
 // EVENT UPSELLS
@@ -2493,123 +2505,6 @@ func (r *Repository) GetEventWithCounts(ctx context.Context, eventID, storeID st
 // EVENT PRODUCT/UPSELL HELPERS
 // =============================================================================
 
-func toEventProductOutput(row sqlc.GetEventProductByProductIDRow) EventProductOutput {
-	var specialPrice *int64
-	if row.SpecialPrice.Valid {
-		v := int64(row.SpecialPrice.Int32)
-		specialPrice = &v
-	}
-	var maxQuantity *int32
-	if row.MaxQuantity.Valid {
-		maxQuantity = &row.MaxQuantity.Int32
-	}
-	var imageURL *string
-	if row.ProductImageUrl.Valid {
-		imageURL = &row.ProductImageUrl.String
-	}
-
-	effectivePrice := row.OriginalPrice.Int64
-	if specialPrice != nil {
-		effectivePrice = *specialPrice
-	}
-
-	return EventProductOutput{
-		ID:             row.ID.String(),
-		ProductID:      row.ProductID.String(),
-		Name:           row.ProductName,
-		Keyword:        row.ProductKeyword,
-		ImageURL:       imageURL,
-		OriginalPrice:  row.OriginalPrice.Int64,
-		SpecialPrice:   specialPrice,
-		EffectivePrice: effectivePrice,
-		MaxQuantity:    maxQuantity,
-		DisplayOrder:   row.DisplayOrder,
-		Featured:       row.Featured,
-		Stock:          row.ProductStock.Int32,
-		ProductActive:  row.ProductActive.Bool,
-		CreatedAt:      row.CreatedAt.Time,
-		UpdatedAt:      row.UpdatedAt.Time,
-	}
-}
-
-func toEventProductOutputFromList(row sqlc.ListEventProductsRow) EventProductOutput {
-	var specialPrice *int64
-	if row.SpecialPrice.Valid {
-		v := int64(row.SpecialPrice.Int32)
-		specialPrice = &v
-	}
-	var maxQuantity *int32
-	if row.MaxQuantity.Valid {
-		maxQuantity = &row.MaxQuantity.Int32
-	}
-	var imageURL *string
-	if row.ProductImageUrl.Valid {
-		imageURL = &row.ProductImageUrl.String
-	}
-
-	effectivePrice := row.OriginalPrice.Int64
-	if specialPrice != nil {
-		effectivePrice = *specialPrice
-	}
-
-	return EventProductOutput{
-		ID:             row.ID.String(),
-		ProductID:      row.ProductID.String(),
-		Name:           row.ProductName,
-		Keyword:        row.ProductKeyword,
-		ImageURL:       imageURL,
-		OriginalPrice:  row.OriginalPrice.Int64,
-		SpecialPrice:   specialPrice,
-		EffectivePrice: effectivePrice,
-		MaxQuantity:    maxQuantity,
-		DisplayOrder:   row.DisplayOrder,
-		Featured:       row.Featured,
-		Stock:          row.ProductStock.Int32,
-		ProductActive:  row.ProductActive.Bool,
-		CreatedAt:      row.CreatedAt.Time,
-		UpdatedAt:      row.UpdatedAt.Time,
-	}
-}
-
-func toEventProductOutputFromGet(row sqlc.GetEventProductByIDRow) EventProductOutput {
-	var specialPrice *int64
-	if row.SpecialPrice.Valid {
-		v := int64(row.SpecialPrice.Int32)
-		specialPrice = &v
-	}
-	var maxQuantity *int32
-	if row.MaxQuantity.Valid {
-		maxQuantity = &row.MaxQuantity.Int32
-	}
-	var imageURL *string
-	if row.ProductImageUrl.Valid {
-		imageURL = &row.ProductImageUrl.String
-	}
-
-	effectivePrice := row.OriginalPrice.Int64
-	if specialPrice != nil {
-		effectivePrice = *specialPrice
-	}
-
-	return EventProductOutput{
-		ID:             row.ID.String(),
-		ProductID:      row.ProductID.String(),
-		Name:           row.ProductName,
-		Keyword:        row.ProductKeyword,
-		ImageURL:       imageURL,
-		OriginalPrice:  row.OriginalPrice.Int64,
-		SpecialPrice:   specialPrice,
-		EffectivePrice: effectivePrice,
-		MaxQuantity:    maxQuantity,
-		DisplayOrder:   row.DisplayOrder,
-		Featured:       row.Featured,
-		Stock:          row.ProductStock.Int32,
-		ProductActive:  row.ProductActive.Bool,
-		CreatedAt:      row.CreatedAt.Time,
-		UpdatedAt:      row.UpdatedAt.Time,
-	}
-}
-
 func toEventUpsellOutputFromGet(row sqlc.GetEventUpsellByIDRow) EventUpsellOutput {
 	var messageTemplate *string
 	if row.MessageTemplate.Valid {
@@ -2676,11 +2571,6 @@ func toEventRowFromWithCounts(row sqlc.GetLiveEventWithCountsRow) EventRow {
 		title = row.Title.String
 	}
 
-	eventType := row.Type
-	if eventType == "" {
-		eventType = "single"
-	}
-
 	var cartExpirationMinutes, cartMaxQuantityPerItem *int
 	if row.CartExpirationMinutes.Valid {
 		v := int(row.CartExpirationMinutes.Int32)
@@ -2693,11 +2583,6 @@ func toEventRowFromWithCounts(row sqlc.GetLiveEventWithCountsRow) EventRow {
 	var autoSendCheckoutLinks *bool
 	if row.SendOnLiveEnd.Valid {
 		autoSendCheckoutLinks = &row.SendOnLiveEnd.Bool
-	}
-	var currentActiveProductID *string
-	if row.CurrentActiveProductID.Valid {
-		id := row.CurrentActiveProductID.String()
-		currentActiveProductID = &id
 	}
 	var scheduledAt *time.Time
 	if row.ScheduledAt.Valid {
@@ -2716,19 +2601,18 @@ func toEventRowFromWithCounts(row sqlc.GetLiveEventWithCountsRow) EventRow {
 		ID:                     row.ID.String(),
 		StoreID:                row.StoreID.String(),
 		Title:                  title,
-		Type:                   eventType,
 		Status:                 row.Status,
 		TotalOrders:            int(row.TotalOrders),
 		CloseCartOnEventEnd:    row.CloseCartOnEventEnd,
 		CartExpirationMinutes:  cartExpirationMinutes,
 		CartMaxQuantityPerItem: cartMaxQuantityPerItem,
 		SendOnLiveEnd:          autoSendCheckoutLinks,
-		CurrentActiveProductID: currentActiveProductID,
-		ProcessingPaused:       row.ProcessingPaused,
 		ScheduledAt:            scheduledAt,
 		EndsAt:                 endsAt,
 		Description:            description,
 		CreatedAt:              row.CreatedAt.Time,
 		UpdatedAt:              row.UpdatedAt.Time,
+
+		WaitlistNotifiedTTLMinutes: int(row.WaitlistNotifiedTtlMinutes),
 	}
 }

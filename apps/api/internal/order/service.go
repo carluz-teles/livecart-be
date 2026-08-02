@@ -186,8 +186,8 @@ func (s *Service) List(ctx context.Context, input ListOrdersInput) (ListOrdersOu
 		orders[i] = OrderOutput{
 			ID:                    row.ID,
 			ShortID:               row.ShortID,
-			LiveSessionID:         row.EventID, // Now using EventID but keeping response field name for backwards compatibility
-			LiveTitle:             row.LiveTitle,
+			EventID:               row.EventID,
+			EventTitle:            row.LiveTitle,
 			LivePlatform:          row.LivePlatform,
 			CustomerHandle:        row.PlatformHandle,
 			CustomerID:            row.PlatformUserID,
@@ -265,8 +265,8 @@ func (s *Service) GetByID(ctx context.Context, id string, storeID string) (*Orde
 	return &OrderOutput{
 		ID:                    row.ID,
 		ShortID:               row.ShortID,
-		LiveSessionID:         row.EventID, // Now using EventID but keeping response field name for backwards compatibility
-		LiveTitle:             row.LiveTitle,
+		EventID:               row.EventID,
+		EventTitle:            row.LiveTitle,
 		LivePlatform:          row.LivePlatform,
 		CustomerHandle:        row.PlatformHandle,
 		CustomerID:            row.PlatformUserID,
@@ -569,7 +569,11 @@ func (s *Service) RegenerateCheckout(
 		}
 	}
 
-	minutes := s.repo.GetStoreCartExpirationMinutes(ctx, storeID)
+	// RN-34: o prazo é o do EVENTO (curto ou estendido conforme
+	// close_cart_on_event_end), com fallback para a loja. Antes lia só
+	// stores.cart_expiration_minutes: um evento configurado com prazo estendido
+	// de 7 dias dava 30 minutos ao comprador quando o lojista regerava o link.
+	minutes := s.repo.GetEventCartExpirationMinutes(ctx, row.EventID)
 	expiresAt := time.Now().Add(time.Duration(minutes) * time.Minute)
 
 	if err := s.repo.RegenerateCheckout(ctx, id, expiresAt); err != nil {

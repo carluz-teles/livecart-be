@@ -117,7 +117,7 @@ func seedCartWithItems(t *testing.T, storeID string, qty int32, unitPrice int64)
 
 	var eventID string
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title) VALUES ($1, 'ended', 'Ev WS5') RETURNING id::text`,
+		`INSERT INTO live_events (store_id, status, title, ends_at) VALUES ($1, 'ended', 'Ev WS5', now()) RETURNING id::text`,
 		storeID,
 	).Scan(&eventID); err != nil {
 		t.Fatalf("seedCartWithItems event: %v", err)
@@ -431,7 +431,7 @@ func TestOnCartPaid_AC13_CouponAndShippingExcluded(t *testing.T) {
 	n := fmt.Sprintf("%d", time.Now().UnixNano())
 	var eventID string
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title) VALUES ($1, 'ended', 'Ev AC13') RETURNING id::text`, storeID,
+		`INSERT INTO live_events (store_id, status, title, ends_at) VALUES ($1, 'ended', 'Ev AC13', now()) RETURNING id::text`, storeID,
 	).Scan(&eventID); err != nil {
 		t.Fatalf("event: %v", err)
 	}

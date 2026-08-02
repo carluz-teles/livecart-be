@@ -1,0 +1,15 @@
+-- SEM ROLLBACK, de proposito — mesmo padrao da 000103.
+--
+-- Recriar as colunas e trivial; recuperar o CONTEUDO nao e. live_events.type,
+-- media_* e a tabela event_products foram a ORIGEM dos backfills das 000111 e
+-- 000112, e desde entao o codigo novo escreve APENAS no destino. Um rollback
+-- devolveria colunas vazias e uma whitelist vazia — que, pela semantica de
+-- "lista vazia libera tudo" (D15), e PIOR que o erro: derrubaria em silencio a
+-- barreira de produtos de todas as lojas, sem nenhum sintoma ate a primeira
+-- venda de um produto que nao devia estar a venda.
+--
+-- O ends_at NOT NULL tambem nao volta: as linhas backfilladas no passo 1 nao
+-- tem como ser distinguidas das que ja tinham teto.
+--
+-- O caminho de volta a partir daqui e restore de backup, nao migration.
+SELECT 1;

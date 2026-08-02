@@ -29,6 +29,21 @@ type ProcessInstagramCommentInput struct {
 	// story replies, which arrive as DMs and have no public comment to answer.
 	Channel    string
 	RawPayload []byte // Original webhook payload for audit storage
+	// SignatureValid é o RESULTADO REAL do X-Hub-Signature-256 desta requisição,
+	// e viaja colado ao RawPayload de propósito: os dois alimentam a MESMA linha
+	// de webhook_events, e uma linha que grava "assinatura válida" sobre um
+	// payload cuja checagem falhou é pior que linha nenhuma.
+	//
+	// É esta coluna que decide o deploy 2 do modo observação: o 401 só entra
+	// depois de dias de tráfego 100% válido. Com o `true` fixo que vivia no
+	// service, a consulta respondia 100% válido POR CONSTRUÇÃO — inclusive para
+	// as requisições que o handler acabara de reprovar e aceitar mesmo assim.
+	// Quem lesse o painel ligaria a exigência e derrubaria a captura de
+	// comentários da base inteira.
+	//
+	// Falso por padrão sem consequência: o polling não tem assinatura e também
+	// não tem RawPayload, então nem chega a gravar auditoria.
+	SignatureValid bool
 }
 
 // StoreWebhookInput is the audit-trail record for an inbound webhook event.
@@ -186,8 +201,11 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		)
 	}
 
-	// Check if processing is paused
-	if event.ProcessingPaused {
+	// Modo Live é estado EFÊMERO de execução da TRANSMISSÃO, não da campanha
+	// (D17, migration 000113). Ler do evento faria duas sessões simultâneas
+	// compartilharem a mesma pausa, e o estado residual de segunda contaminaria
+	// a live de quarta.
+	if session.ProcessingPaused {
 		logger.From(ctx, s.logger).Info("processing paused, storing comment only",
 			zap.String("event_id", event.ID),
 			zap.String("comment_id", input.CommentID),
@@ -255,35 +273,51 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		product = s.FindProductByKeyword(ctx, event.StoreID, input.Text)
 
 		// If no keyword match but has purchase intent, try active product as fallback
-		if product == nil && event.CurrentActiveProductID != nil && *event.CurrentActiveProductID != "" {
+		// Produto em destaque também é da sessão (D17).
+		if product == nil && session.CurrentActiveProductID != nil && *session.CurrentActiveProductID != "" {
 			logger.From(ctx, s.logger).Info("no keyword match, trying active product fallback",
-				zap.String("event_id", event.ID),
-				zap.String("active_product_id", *event.CurrentActiveProductID),
+				zap.String("session_id", session.ID),
+				zap.String("active_product_id", *session.CurrentActiveProductID),
 			)
-			product, _ = s.ingestRepo.GetProductByID(ctx, event.StoreID, *event.CurrentActiveProductID)
+			product, _ = s.ingestRepo.GetProductByID(ctx, event.StoreID, *session.CurrentActiveProductID)
 		}
 	}
 
-	// Post-commerce events (feed posts and Stories) apply their own rules: only
-	// the selected products participate, a single-product promotion auto-adds on a
-	// bare "EU QUERO", and an unavailable or ambiguous request gets a private
-	// reply listing what's available. When fully handled here, persist and stop.
-	if isPostCommerce(event.Type) && hasPurchaseIntent {
-		// Window gates (no background job): a buyer who comments before the
-		// event starts or after it ends gets a private reply explaining when,
-		// instead of having a cart created.
-		now := time.Now()
-		if event.ScheduledAt != nil && now.Before(*event.ScheduledAt) {
-			s.replyPostNotStarted(ctx, event, input, *event.ScheduledAt)
+	// Gate de janela, para TODO tipo de evento (RN-18/19/20).
+	//
+	// Ele vivia dentro do ramo isPostCommerce, então para live (single/multi)
+	// não existia checagem nenhuma de janela: a única proteção era o
+	// status='active' exigido pelas queries de resolução — e esse filtro saiu,
+	// para o sistema parar de descartar comentário em silêncio. Sem o gate aqui,
+	// comentar numa campanha encerrada criaria carrinho e reservaria estoque.
+	//
+	// Só vale com intenção de compra: comentário qualquer em campanha encerrada
+	// não merece resposta automática.
+	if hasPurchaseIntent {
+		switch WindowAt(event.Status, event.ScheduledAt, event.EndsAt, time.Now()) {
+		case WindowNotStarted:
+			s.replyOutOfWindow(ctx, event, input, notification.TypeOutOfWindowScheduled)
 			s.savePostComment(ctx, session.ID, event.ID, input, "event_not_started")
 			return nil
-		}
-		if event.Status == "ended" || (event.EndsAt != nil && now.After(*event.EndsAt)) {
-			s.replyPostEnded(ctx, event, input)
+		case WindowEnded:
+			s.replyOutOfWindow(ctx, event, input, notification.TypeOutOfWindowEventEnded)
 			s.savePostComment(ctx, session.ID, event.ID, input, "event_ended")
 			return nil
 		}
+		// A transmissão pode ter acabado com a campanha ainda aberta — a venda
+		// não entra, mas o comprador é avisado (RN-18).
+		if !SessionAcceptsPurchase(session.Status) {
+			s.replyOutOfWindow(ctx, event, input, notification.TypeOutOfWindowSessionEnded)
+			s.savePostComment(ctx, session.ID, event.ID, input, "session_ended")
+			return nil
+		}
+	}
 
+	// Regras de post-commerce: só os produtos selecionados participam, promoção
+	// de produto único auto-adiciona num "EU QUERO" pelado, e pedido indisponível
+	// ou ambíguo recebe resposta privada. A espécie agora vem da SESSÃO (D3), não
+	// de live_events.type, que a 000122 dropou.
+	if isPostCommerce(session.Type) && hasPurchaseIntent {
 		resolved, handled, resultLabel := s.resolvePostEventProduct(ctx, event, input, intent, product)
 		if handled {
 			s.savePostComment(ctx, session.ID, event.ID, input, resultLabel)
@@ -913,4 +947,75 @@ func (s *Service) replyPostChooseProduct(ctx context.Context, event *EventOutput
 		input.Username, promoProductLines(available),
 	)
 	s.sendPostReply(ctx, event, input, msg)
+}
+
+// replyOutOfWindow responde ao comprador que comentou fora da janela — campanha
+// agendada, transmissão encerrada ou campanha encerrada (RN-18/19/20).
+//
+// O texto é configurável pelo lojista (RN-28). Se o serviço de notificação não
+// estiver ligado, cai no texto fixo em vez de ficar em SILÊNCIO: descartar
+// comentário sem resposta é o achado mais caro da análise de produção, e um
+// texto genérico é melhor que nenhum.
+func (s *Service) replyOutOfWindow(
+	ctx context.Context,
+	event *EventOutput,
+	input ProcessInstagramCommentInput,
+	notifType notification.NotificationType,
+) {
+	if s.notificationSvc != nil {
+		if ok, err := s.notificationSvc.ShouldNotify(ctx, event.StoreID, notifType, false); err == nil && ok {
+			vars := notification.TemplateVariables{
+				Handle:     "@" + input.Username,
+				LiveTitulo: event.Title,
+			}
+			if notifType == notification.TypeOutOfWindowScheduled && event.ScheduledAt != nil {
+				vars.ComecaEm = FormatBRT(*event.ScheduledAt)
+			}
+
+			// Story chega como DM e não tem comentário público para responder.
+			directOnly := input.Channel == "dm"
+			commentID := input.CommentID
+			if directOnly {
+				commentID = ""
+			}
+
+			commentAt := time.Time{}
+			if input.Timestamp > 0 {
+				commentAt = time.Unix(input.Timestamp, 0)
+			}
+
+			if _, err := s.notificationSvc.Send(ctx, notification.SendInput{
+				StoreID:           event.StoreID,
+				EventID:           event.ID,
+				PlatformUserID:    input.UserID,
+				PlatformHandle:    input.Username,
+				PlatformCommentID: commentID,
+				NotificationType:  notifType,
+				Variables:         vars,
+				CommentCreatedAt:  commentAt,
+				DirectOnly:        directOnly,
+			}); err != nil {
+				logger.From(ctx, s.logger).Warn("out-of-window reply send error",
+					zap.String("event_id", event.ID),
+					zap.String("type", string(notifType)),
+					zap.Error(err),
+				)
+			}
+			return
+		}
+	}
+
+	switch notifType {
+	case notification.TypeOutOfWindowScheduled:
+		if event.ScheduledAt != nil {
+			s.replyPostNotStarted(ctx, event, input, *event.ScheduledAt)
+			return
+		}
+	case notification.TypeOutOfWindowSessionEnded:
+		s.sendPostReply(ctx, event, input, fmt.Sprintf(
+			"Oi @%s! Esta transmissão já encerrou, mas a campanha %s continua. Fica de olho na próxima! 💜",
+			input.Username, event.Title))
+		return
+	}
+	s.replyPostEnded(ctx, event, input)
 }

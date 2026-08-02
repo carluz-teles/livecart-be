@@ -5,7 +5,10 @@ type DashboardStatsResponse struct {
 	TotalRevenue   int64 `json:"totalRevenue"`
 	TotalOrders    int   `json:"totalOrders"`
 	ActiveProducts int   `json:"activeProducts"`
-	TotalLives     int   `json:"totalLives"`
+	// RN-19: o contador é de EVENTOS. totalLives sai junto, com o mesmo valor,
+	// até o frontend parar de lê-lo.
+	TotalEvents int `json:"totalEvents"`
+	TotalLives  int `json:"totalLives"` // Deprecated: use totalEvents.
 }
 
 type MonthlyRevenueResponse struct {
@@ -78,28 +81,28 @@ type EventsWithRevenueResponse struct {
 }
 
 type EventWithRevenueItem struct {
-	ID               string `json:"id"`
-	Title            string `json:"title"`
-	Status           string `json:"status"`
-	CreatedAt        string `json:"createdAt"`
-	TotalComments    int    `json:"totalComments"`
-	TotalCarts       int    `json:"totalCarts"`
-	PaidCarts        int    `json:"paidCarts"`
-	ConfirmedRevenue int64  `json:"confirmedRevenue"`
+	ID               string  `json:"id"`
+	Title            string  `json:"title"`
+	Status           string  `json:"status"`
+	CreatedAt        string  `json:"createdAt"`
+	TotalComments    int     `json:"totalComments"`
+	TotalCarts       int     `json:"totalCarts"`
+	PaidCarts        int     `json:"paidCarts"`
+	ConfirmedRevenue int64   `json:"confirmedRevenue"`
 	ConversionRate   float64 `json:"conversionRate"` // Calculated: paidCarts/totalComments * 100
 }
 
 type AggregatedFunnelResponse struct {
-	TotalComments    int     `json:"totalComments"`
-	TotalCarts       int     `json:"totalCarts"`
-	CheckoutCarts    int     `json:"checkoutCarts"`
-	PaidCarts        int     `json:"paidCarts"`
-	ConfirmedRevenue int64   `json:"confirmedRevenue"`
-	AverageTicket    int64   `json:"averageTicket"`
+	TotalComments    int   `json:"totalComments"`
+	TotalCarts       int   `json:"totalCarts"`
+	CheckoutCarts    int   `json:"checkoutCarts"`
+	PaidCarts        int   `json:"paidCarts"`
+	ConfirmedRevenue int64 `json:"confirmedRevenue"`
+	AverageTicket    int64 `json:"averageTicket"`
 	// Conversion rates (percentages)
-	CommentsToCartsRate  float64 `json:"commentsToCartsRate"`
-	CartsToCheckoutRate  float64 `json:"cartsToCheckoutRate"`
-	CheckoutToPaidRate   float64 `json:"checkoutToPaidRate"`
+	CommentsToCartsRate   float64 `json:"commentsToCartsRate"`
+	CartsToCheckoutRate   float64 `json:"cartsToCheckoutRate"`
+	CheckoutToPaidRate    float64 `json:"checkoutToPaidRate"`
 	OverallConversionRate float64 `json:"overallConversionRate"`
 }
 
@@ -251,13 +254,13 @@ type RevenueByPaymentRow struct {
 // CheckoutUpsellResponse is the wire-level payload for the metric. Cents
 // fields stay as int64 — UI formats them locally.
 type CheckoutUpsellResponse struct {
-	CartsWithMutations int                      `json:"cartsWithMutations"`
-	TotalPaidCarts     int                      `json:"totalPaidCarts"`
-	UpsellCents        int64                    `json:"upsellCents"`
-	DownsellCents      int64                    `json:"downsellCents"`
-	NetCents           int64                    `json:"netCents"`
-	TopAdded           []CheckoutUpsellProduct  `json:"topAdded"`
-	TopRemoved         []CheckoutUpsellProduct  `json:"topRemoved"`
+	CartsWithMutations int                     `json:"cartsWithMutations"`
+	TotalPaidCarts     int                     `json:"totalPaidCarts"`
+	UpsellCents        int64                   `json:"upsellCents"`
+	DownsellCents      int64                   `json:"downsellCents"`
+	NetCents           int64                   `json:"netCents"`
+	TopAdded           []CheckoutUpsellProduct `json:"topAdded"`
+	TopRemoved         []CheckoutUpsellProduct `json:"topRemoved"`
 }
 
 type CheckoutUpsellProduct struct {

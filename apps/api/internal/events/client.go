@@ -17,13 +17,19 @@ import (
 // commit and the enqueue.
 type Client struct {
 	inner *asynq.Client
+	// inspector existe só para Reschedule: mover um agendamento ETA exige
+	// APAGAR a task pendente antes de re-enfileirar (ver Reschedule).
+	inspector *asynq.Inspector
 }
 
 // NewClient builds an event publisher backed by the given Redis connection.
 // Callers pass a RedisConnOpt (not a bare addr) so managed Redis with a
 // password/TLS — e.g. Railway — works, not just local no-auth Redis.
 func NewClient(redisOpt asynq.RedisConnOpt) *Client {
-	return &Client{inner: asynq.NewClient(redisOpt)}
+	return &Client{
+		inner:     asynq.NewClient(redisOpt),
+		inspector: asynq.NewInspector(redisOpt),
+	}
 }
 
 // Enqueue serializes the envelope as an asynq task and enqueues it. The task
@@ -103,7 +109,59 @@ func (c *Client) Schedule(ctx context.Context, processAt time.Time, name Name, t
 	return nil
 }
 
+// Reschedule MOVE um agendamento ETA já armado para um novo horário.
+//
+// Schedule sozinho não faz isso, e essa era a raiz de três bugs: o asynq guarda
+// uma chave por TaskID enquanto a task existe (scheduled OU active), e um
+// enqueue com id repetido devolve ErrTaskIDConflict — que Schedule engole como
+// "já agendado". Resultado: antecipar o fim do evento fechava na hora antiga
+// (CA-05.4) e estender o prazo do carrinho pela fila (RN-10) também não movia
+// nada. Não era só "não dá para encurtar": não dava para mover em direção
+// nenhuma.
+//
+// Apagar antes de re-enfileirar resolve para a task PENDENTE, que é o caso de
+// todo re-agendamento vindo de fora (edição do evento, promoção da fila).
+//
+// LIMITE CONHECIDO: o asynq recusa apagar uma task em estado ACTIVE, então um
+// handler que tente re-agendar a si mesmo continua caindo no conflito. Os dois
+// handlers que fazem isso (RunScheduledExpiry, RunScheduledEventClose) são
+// guard-first e nunca executam a ação fora de hora, e o sweep de eventos é a
+// rede — mas o re-arm de dentro do handler segue sendo best-effort.
+func (c *Client) Reschedule(ctx context.Context, processAt time.Time, name Name, taskID string, payload any) error {
+	if err := c.inspector.DeleteTask(QueueNormal, taskID); err != nil {
+		// "não existe" é o caso normal: primeira vez, ou a task já rodou.
+		if !errors.Is(err, asynq.ErrTaskNotFound) && !errors.Is(err, asynq.ErrQueueNotFound) {
+			return fmt.Errorf("rescheduling %s (%s): deleting pending task: %w", name, taskID, err)
+		}
+	}
+	return c.Schedule(ctx, processAt, name, taskID, payload)
+}
+
+// Cancel APAGA um agendamento ETA ainda pendente.
+//
+// Existe porque cancelar não é reagendar: Reschedule sempre re-enfileira, e não
+// havia como simplesmente desistir de uma task já armada. "Não existe" é
+// desfecho normal (a task já rodou, ou nunca chegou a ser armada), então não
+// vira erro.
+//
+// MESMO LIMITE do Reschedule: o asynq recusa apagar uma task em estado ACTIVE.
+// Por isso o cancelamento de verdade tem de ser o guard no banco — quem
+// cancela move a linha para fora de 'scheduled', e a task que dispare mesmo
+// assim não encontra nada para reivindicar. Esta chamada é a limpeza, não a
+// garantia.
+func (c *Client) Cancel(ctx context.Context, taskID string) error {
+	err := c.inspector.DeleteTask(QueueNormal, taskID)
+	if err == nil || errors.Is(err, asynq.ErrTaskNotFound) || errors.Is(err, asynq.ErrQueueNotFound) {
+		return nil
+	}
+	return fmt.Errorf("cancelling scheduled task %s: %w", taskID, err)
+}
+
 // Close releases the underlying Redis connection.
 func (c *Client) Close() error {
+	if err := c.inspector.Close(); err != nil {
+		_ = c.inner.Close()
+		return err
+	}
 	return c.inner.Close()
 }

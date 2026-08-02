@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,13 +23,19 @@ import (
 // level, so this stays a local interface wired via SetEventCloseScheduler.
 type EventCloseScheduler interface {
 	ScheduleEventClose(ctx context.Context, eventID, storeID string, at time.Time) error
+	// RescheduleEventClose MOVE um fechamento já armado. Existe separado porque
+	// ScheduleEventClose é deduplicado por TaskID ("event-close:<id>"): enquanto
+	// a task pendente existir, o horário novo é ignorado. Era por isso que
+	// ANTECIPAR ends_at fechava o evento na hora antiga (CA-05.4) — e, na
+	// prática, estender também não funcionava.
+	RescheduleEventClose(ctx context.Context, eventID, storeID string, at time.Time) error
 }
 
 // Notifier is the minimal notification surface this package depends on.
 // The concrete implementation lives in the integration package; we declare
 // a local interface to avoid an import cycle.
 type Notifier interface {
-	NotifyEventCheckout(ctx context.Context, params NotifyEventCheckoutParams) error
+	NotifyEventCheckout(ctx context.Context, params NotifyEventCheckoutParams) (NotifyEventCheckoutResult, error)
 }
 
 // NotifyEventCheckoutParams mirrors the integration package params struct
@@ -36,13 +43,37 @@ type Notifier interface {
 type NotifyEventCheckoutParams struct {
 	StoreID        string
 	EventID        string
+	EventTitle     string
 	CartID         string
 	CartToken      string
 	PlatformUserID string
 	PlatformHandle string
 	CommentID      string
-	TotalItems     int
-	TotalValue     int64
+	// CommentCreatedAt é quando o comentário escolhido foi feito. É o dado que
+	// permite decidir entre TENTAR e registrar não-entrega com motivo (RN-38):
+	// o private reply do Instagram vale 7 dias, e numa campanha longa esta
+	// mensagem dispara dias depois do último comentário do comprador.
+	CommentCreatedAt *time.Time
+	// DeadlineAt é o prazo que a mensagem anuncia ({prazo_final}). Vem do
+	// expires_at que o fechamento acabou de armar no carrinho — os dois ramos
+	// do close_cart_on_event_end (prazo curto e prazo estendido) já chegam aqui
+	// com o valor certo, então a mensagem não precisa saber qual foi.
+	DeadlineAt *time.Time
+	TotalItems int
+	TotalValue int64
+}
+
+// NotifyEventCheckoutResult diz o que aconteceu com a mensagem. Não entregue
+// NÃO é erro: é um fato registrado, com motivo, que o painel mostra ao lojista
+// (RN-38). Devolver isso como error faria o disparo em massa tratar "a janela
+// do Instagram fechou" como falha de infraestrutura e logar ruído; devolver
+// como sucesso mudo seria a ilusão de entrega que a regra proíbe.
+type NotifyEventCheckoutResult struct {
+	Delivered bool
+	// Reason é o motivo canônico (vazio quando entregue).
+	Reason string
+	// ReasonText é a frase pronta para o lojista.
+	ReasonText string
 }
 
 // CustomerUpserter creates or updates a customer record from cart-creation
@@ -136,10 +167,23 @@ func (s *Service) SetCustomerUpserter(u CustomerUpserter) {
 // Create creates a live event with an optional initial session and platform.
 // Uses transactions to ensure atomicity when session/platform are included.
 func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLiveOutput, error) {
-	// Default to single type if not specified
-	eventType := input.Type
-	if eventType == "" {
-		eventType = "single"
+	// RN-05: ends_at é o TETO da campanha e não tem default razoável. A RN-04
+	// deixa expires_at NULL durante o evento inteiro, então um evento sem fim é
+	// um carrinho sem prazo e um estoque reservado para sempre. O banco reforça
+	// com NOT NULL desde a 000122; esta checagem existe para a resposta ser 400
+	// com texto, e não 500 vindo de uma constraint.
+	if input.EndsAt == nil {
+		return CreateLiveOutput{}, httpx.ErrBadRequest("endsAt é obrigatório: o evento precisa de uma data de encerramento")
+	}
+	// starts_at é a coluna nova (D21); scheduled_at continua sendo o que decide
+	// o status inicial. Quem só manda scheduledAt (o formulário atual) tem os
+	// dois preenchidos com o mesmo valor.
+	startsAt := input.StartsAt
+	if startsAt == nil {
+		startsAt = input.ScheduledAt
+	}
+	if startsAt != nil && !input.EndsAt.After(*startsAt) {
+		return CreateLiveOutput{}, httpx.ErrBadRequest("endsAt precisa ser depois de startsAt")
 	}
 
 	// Default close_cart_on_event_end to true if not specified
@@ -154,72 +198,68 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		status = "scheduled"
 	}
 
-	// If platform info is provided, create everything in a single transaction
-	if input.Platform != nil && input.PlatformLiveID != nil && *input.Platform != "" && *input.PlatformLiveID != "" {
-		event, session, _, err := s.repo.CreateEventWithSessionTx(ctx, CreateEventParams{
-			StoreID:                input.StoreID,
-			Title:                  input.Title,
-			Type:                   eventType,
-			Status:                 status,
-			CloseCartOnEventEnd:    closeCartOnEventEnd,
-			CartExpirationMinutes:  input.CartExpirationMinutes,
-			CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
-			SendOnLiveEnd:          input.SendOnLiveEnd,
-			ScheduledAt:            input.ScheduledAt,
-			Description:            input.Description,
-		}, *input.Platform, *input.PlatformLiveID)
-		if err != nil {
-			logger.From(ctx, s.logger).Error("failed to create live with session",
-				zap.Error(err),
-			)
-			return CreateLiveOutput{}, err
-		}
-
-		logger.From(ctx, s.logger).Info("live created with session",
-			zap.String("event_id", event.ID),
-			zap.String("session_id", session.ID),
-			zap.String("platform", *input.Platform),
-			zap.String("platform_live_id", *input.PlatformLiveID),
-		)
-
-		// Persist the optional pix discount as a follow-up update — the column
-		// is not yet wired into the sqlc-generated INSERT.
-		if input.PixDiscountPercent != nil && *input.PixDiscountPercent > 0 {
-			if err := s.repo.SetPixDiscountPercent(ctx, event.ID, input.StoreID, *input.PixDiscountPercent); err != nil {
-				logger.From(ctx, s.logger).Warn("failed to set pix_discount_percent on create",
-					zap.String("event_id", event.ID),
-					zap.Error(err),
-				)
-			}
-		}
-
-		return CreateLiveOutput{
-			ID:        event.ID,
-			Title:     event.Title,
-			Type:      event.Type,
-			Platform:  *input.Platform,
-			Status:    event.Status,
-			CreatedAt: event.CreatedAt,
-		}, nil
+	// A mídia é OPCIONAL na criação; a SESSÃO não é.
+	//
+	// Havia dois caminhos aqui — com plataforma (evento+sessão numa transação) e
+	// sem plataforma (só o evento) — e o segundo produzia um evento SEM SESSÃO
+	// NENHUMA. Isso era inofensivo enquanto whitelist e modo live moravam em
+	// live_events; desde a 000112/000113 eles moram em live_sessions, e o evento
+	// sem sessão deixou de ter onde guardar configuração: POST /lives/:id/whitelist
+	// gravava zero linhas e respondia 404 ("produto nao esta na whitelist"), e
+	// destacar produto virava no-op silencioso. O formulário de evento do painel
+	// só manda platformLiveId quando o lojista já tem o id da live — ou seja, o
+	// caminho quebrado era o CAMINHO PADRÃO de criar um evento.
+	//
+	// A D1 já prevê "criar a sessão antes de a mídia existir": a sessão nasce
+	// aqui e a mídia entra depois por AddPlatformToSession. Os dois ramos viram
+	// um só — a duplicação era o que deixava o ramo sem plataforma para trás a
+	// cada regra nova (a janela e o TTL da fila já tiveram de ser escritos duas
+	// vezes logo abaixo).
+	platform, platformLiveID := "", ""
+	if input.Platform != nil {
+		platform = *input.Platform
+	}
+	if input.PlatformLiveID != nil {
+		platformLiveID = *input.PlatformLiveID
+	}
+	if platform == "" || platformLiveID == "" {
+		platform, platformLiveID = "", ""
 	}
 
-	// No platform info - just create the event
-	event, err := s.repo.CreateEvent(ctx, CreateEventParams{
+	// A janela vai DENTRO da transação de criação. Antes ela era um UPDATE
+	// posterior (applyEventWindow), e um evento cujo UPDATE falhasse ficava
+	// commitado sem teto — exatamente o estado que a RN-05 existe para impedir.
+	// Aqui embaixo applyEventWindow continua sendo chamado, mas só para ARMAR o
+	// fechamento por ETA; a escrita já aconteceu.
+	event, session, _, err := s.repo.CreateEventWithSessionTx(ctx, CreateEventParams{
 		StoreID:                input.StoreID,
 		Title:                  input.Title,
-		Type:                   eventType,
+		Type:                   input.Type,
 		Status:                 status,
 		CloseCartOnEventEnd:    closeCartOnEventEnd,
 		CartExpirationMinutes:  input.CartExpirationMinutes,
 		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
 		SendOnLiveEnd:          input.SendOnLiveEnd,
-		ScheduledAt:            input.ScheduledAt,
+		StartsAt:               startsAt,
+		EndsAt:                 input.EndsAt,
 		Description:            input.Description,
-	})
+	}, platform, platformLiveID)
 	if err != nil {
+		logger.From(ctx, s.logger).Error("failed to create live with session",
+			zap.Error(err),
+		)
 		return CreateLiveOutput{}, err
 	}
 
+	logger.From(ctx, s.logger).Info("live created with session",
+		zap.String("event_id", event.ID),
+		zap.String("session_id", session.ID),
+		zap.String("platform", platform),
+		zap.String("platform_live_id", platformLiveID),
+	)
+
+	// Persist the optional pix discount as a follow-up update — the column
+	// is not yet wired into the sqlc-generated INSERT.
 	if input.PixDiscountPercent != nil && *input.PixDiscountPercent > 0 {
 		if err := s.repo.SetPixDiscountPercent(ctx, event.ID, input.StoreID, *input.PixDiscountPercent); err != nil {
 			logger.From(ctx, s.logger).Warn("failed to set pix_discount_percent on create",
@@ -229,19 +269,75 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		}
 	}
 
-	logger.From(ctx, s.logger).Info("live created without session",
-		zap.String("event_id", event.ID),
-		zap.String("type", eventType),
-	)
+	if input.WaitlistNotifiedTTLMinutes != nil {
+		if err := s.repo.SetWaitlistNotifiedTTLMinutes(ctx, event.ID, input.StoreID, *input.WaitlistNotifiedTTLMinutes); err != nil {
+			logger.From(ctx, s.logger).Warn("failed to set waitlist_notified_ttl_minutes on create",
+				zap.String("event_id", event.ID),
+				zap.Error(err),
+			)
+		}
+	}
+
+	// A janela já foi gravada pelo INSERT; aqui só arma o fechamento por ETA.
+	s.armEventClose(ctx, event.ID, input.StoreID, input.EndsAt, false)
 
 	return CreateLiveOutput{
 		ID:        event.ID,
 		Title:     event.Title,
-		Type:      event.Type,
-		Platform:  "",
+		Platform:  platform,
 		Status:    event.Status,
 		CreatedAt: event.CreatedAt,
 	}, nil
+}
+
+// applyEventWindow é o ponto ÚNICO onde a janela comercial é gravada e o
+// fechamento por ETA é (re)armado. As três entradas de janela — criar live,
+// criar post/reel/story e editar — passam por aqui para que "gravar ends_at" e
+// "mover a task de fechamento" nunca saiam de sincronia. Era esse desencontro
+// que fazia o lojista antecipar o fim na tela e o evento fechar na hora antiga.
+//
+// move=true quando o evento JÁ existia e o horário pode ter mudado: aí é
+// preciso APAGAR a task pendente antes de re-enfileirar, senão o asynq engole o
+// re-agendamento pelo TaskID repetido (CA-05.3/CA-05.4).
+//
+// Gravar a janela é obrigatório (erro sobe); armar a task é best-effort — o
+// SweepEndedTimedEvents é a rede para uma task perdida.
+func (s *Service) applyEventWindow(ctx context.Context, eventID, storeID string, w EventWindowUpdate, move bool) error {
+	if err := s.repo.SetEventWindow(ctx, eventID, storeID, w); err != nil {
+		return err
+	}
+	if !w.SetEndsAt {
+		return nil
+	}
+	s.armEventClose(ctx, eventID, storeID, w.EndsAt, move)
+	return nil
+}
+
+// armEventClose (re)agenda a task ETA de fechamento. Separado de
+// applyEventWindow porque a CRIAÇÃO já grava a janela dentro da transação do
+// INSERT: reescrever as mesmas colunas logo depois seria um UPDATE que não muda
+// nada e uma segunda chance de a janela divergir do que foi commitado.
+//
+// Best-effort de propósito: o SweepEndedTimedEvents é a rede para uma task
+// perdida. Falhar a criação do evento porque o agendador está fora do ar seria
+// trocar um atraso de até 5 minutos por uma venda que não acontece.
+func (s *Service) armEventClose(ctx context.Context, eventID, storeID string, endsAt *time.Time, move bool) {
+	if s.closeScheduler == nil || endsAt == nil {
+		// endsAt nil = janela removida. A task antiga continua pendente, mas
+		// RunScheduledEventClose é guard-first: com ends_at NULL ele sai sem
+		// fechar nada.
+		return
+	}
+	var err error
+	if move {
+		err = s.closeScheduler.RescheduleEventClose(ctx, eventID, storeID, *endsAt)
+	} else {
+		err = s.closeScheduler.ScheduleEventClose(ctx, eventID, storeID, *endsAt)
+	}
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("failed to arm event window close",
+			zap.String("event_id", eventID), zap.Bool("move", move), zap.Error(err))
+	}
 }
 
 // CreatePostEvent creates a post-commerce event mapped to a published Instagram
@@ -266,6 +362,9 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 	// status (and comment gating) is derived from the window, so the event is
 	// always resolvable by media id. We do NOT pass ScheduledAt to Create here,
 	// because that would set status='scheduled' and hide it from lookups.
+	// A janela (starts_at/ends_at) e o arm do fechamento agora saem de dentro do
+	// Create — é lá que a obrigatoriedade de ends_at (RN-05) é aplicada para
+	// TODOS os tipos, não só para live.
 	out, err := s.Create(ctx, CreateLiveInput{
 		StoreID:                input.StoreID,
 		Title:                  input.Title,
@@ -275,29 +374,15 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 		CloseCartOnEventEnd:    &closeCart,
 		CartExpirationMinutes:  input.CartExpirationMinutes,
 		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
+		StartsAt:               input.StartsAt,
+		EndsAt:                 input.EndsAt,
 	})
 	if err != nil {
 		return CreateLiveOutput{}, err
 	}
 
-	// Persist the optional start/end window (raw SQL columns).
-	if input.StartsAt != nil || input.EndsAt != nil {
-		if err := s.repo.SetEventWindow(ctx, out.ID, input.StoreID, input.StartsAt, input.EndsAt); err != nil {
-			logger.From(ctx, s.logger).Warn("failed to set post event window",
-				zap.String("event_id", out.ID), zap.Error(err))
-		}
-		// Arm the ETA close task at ends_at so the window finalizes on time.
-		// Best-effort: SweepEndedTimedEvents is the backstop for a lost task.
-		if input.EndsAt != nil && s.closeScheduler != nil {
-			if err := s.closeScheduler.ScheduleEventClose(ctx, out.ID, input.StoreID, *input.EndsAt); err != nil {
-				logger.From(ctx, s.logger).Warn("failed to schedule event window close",
-					zap.String("event_id", out.ID), zap.Error(err))
-			}
-		}
-	}
-
-	// Persist post metadata (raw SQL columns, not in the sqlc INSERT).
-	if err := s.repo.SetEventMedia(ctx, out.ID, input.StoreID, PostMediaInput{
+	// Metadados da publicação: gravados NA MÍDIA, não no evento.
+	if err := s.repo.SetMedia(ctx, PostMediaInput{
 		MediaID:      input.MediaID,
 		Permalink:    input.MediaPermalink,
 		ThumbnailURL: input.MediaThumbnailURL,
@@ -332,31 +417,33 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 	return out, nil
 }
 
-// MarkPostEventWebhookActive flags that a comments webhook arrived for the post
-// event mapped to mediaID, so the polling capture stops handling it.
-func (s *Service) MarkPostEventWebhookActive(ctx context.Context, mediaID string) error {
-	return s.repo.MarkPostEventWebhookActive(ctx, mediaID)
+// MarkMediaWebhookActive flags that a comments webhook arrived for THIS media,
+// so the polling capture stops handling it. Escopo de mídia, não de evento: um
+// evento guarda-chuva tem N mídias e cada uma migra do polling para o webhook
+// no seu próprio tempo.
+func (s *Service) MarkMediaWebhookActive(ctx context.Context, mediaID string) error {
+	return s.repo.MarkMediaWebhookActive(ctx, mediaID)
 }
 
-// ListActivePostEvents returns active post events still served by polling.
-func (s *Service) ListActivePostEvents(ctx context.Context) ([]PostEventRef, error) {
-	return s.repo.ListActivePostEvents(ctx)
+// ListPollableMedia returns the media still served by the polling capture.
+func (s *Service) ListPollableMedia(ctx context.Context) ([]MediaRef, error) {
+	return s.repo.ListPollableMedia(ctx)
 }
 
-// EndPostEventByMediaID closes the post/story event mapped to mediaID when its
+// EndEventByMediaID closes the post/reel/story event that owns mediaID when its
 // media is gone on Instagram. D5: routes through End so the carts are finalized
 // (moved to 'checkout' with expires_at armed → eligible for the expiry worker)
 // and the ERP is reconciled — not just a bare status flip that left carts
 // 'active' without a deadline forever. Falls back to the raw flip if the event
 // can't be resolved.
-func (s *Service) EndPostEventByMediaID(ctx context.Context, mediaID string) error {
+func (s *Service) EndEventByMediaID(ctx context.Context, mediaID string) error {
 	ref, err := s.repo.GetActiveTimedEventByMediaID(ctx, mediaID)
 	if err != nil {
 		return err
 	}
 	if ref == nil {
 		// Nothing active to finalize; ensure polling stops anyway.
-		return s.repo.EndPostEventByMediaID(ctx, mediaID)
+		return s.repo.EndEventByMediaID(ctx, mediaID)
 	}
 	// post.window_closed: the media was deleted / window closed (distinct from a
 	// manual live end). Emitted before End (which fires event.ended).
@@ -370,11 +457,52 @@ func (s *Service) EndPostEventByMediaID(ctx context.Context, mediaID string) err
 	return nil
 }
 
-// SweepEndedTimedEvents finalizes post/story events whose ends_at window has
-// closed. D5: without it, a story (ends_at = now()+24h) or a scheduled-window
-// post just changes its *effective* status on read while its carts stay
-// 'active' without a deadline — the expiry worker never reaches them. End() is
-// idempotent, so re-sweeping an already-ended event is a no-op.
+// SweepScheduledEventsReadyToStart ativa os eventos agendados cuja hora marcada
+// já chegou. É a outra metade da E37: o botão "Iniciar live" resolve o evento de
+// live que o lojista acompanha, mas post/reel/story publicados por agendamento
+// não têm ninguém para apertar botão nenhum — sem este sweep eles nasceriam
+// 'scheduled' e morreriam 'ended' sem nunca aceitar um comentário.
+//
+// ORDEM IMPORTA e é decidida aqui, não pelo acaso do agendamento: este sweep
+// roda ANTES de SweepEndedTimedEvents no mesmo tick. Os dois predicados são
+// disjuntos de propósito (ListEventsReadyToStart exige ends_at ainda no futuro),
+// então um evento nunca é ativado e encerrado no mesmo ciclo — quem passou do
+// fim vai direto para 'ended', sem o event.ended extra de um active fantasma.
+//
+// É a REDE do horário, com granularidade do ticker (5 min). Quem quiser abrir na
+// hora exata usa o botão. Não há task ETA de abertura porque a janela não é
+// consumida só pelo status: WindowAt já usa starts_at/ends_at e um atraso de
+// minutos na ativação não vende nada fora do prazo — só adia a abertura.
+func (s *Service) SweepScheduledEventsReadyToStart(ctx context.Context) {
+	events, err := s.repo.ListEventsReadyToStart(ctx, 200)
+	if err != nil {
+		logger.From(ctx, s.logger).Error("activation sweep: failed to list scheduled events", zap.Error(err))
+		return
+	}
+	for _, ev := range events {
+		evCtx := logger.WithStore(ctx, ev.StoreID, "")
+		activated, err := s.repo.ActivateScheduledEvent(evCtx, ev.EventID)
+		if err != nil {
+			logger.From(evCtx, s.logger).Error("activation sweep: failed to activate event",
+				zap.String("event_id", ev.EventID), zap.Error(err))
+			continue
+		}
+		if activated {
+			logger.From(evCtx, s.logger).Info("scheduled event activated by sweep",
+				zap.String("event_id", ev.EventID))
+		}
+	}
+}
+
+// SweepEndedTimedEvents finaliza TODO evento cuja janela (ends_at) fechou —
+// não mais só post/reel/story. D5/RN-05: ends_at deixou de ser "horário
+// nominal" e virou o teto contratual da campanha, então restringir o sweep por
+// tipo deixava o evento de live com ends_at vencido aberto para sempre e seus
+// carrinhos sem prazo (a RN-04 mantém expires_at NULL enquanto o evento está
+// aberto). Sem isto, o evento só mudava de status *efetivo* na leitura.
+//
+// É a REDE, não o caminho principal: o preciso é a task ETA event.window_close.
+// End() é idempotente, então varrer um evento já encerrado é no-op.
 func (s *Service) SweepEndedTimedEvents(ctx context.Context) {
 	events, err := s.repo.ListEventsPastEndsAt(ctx, 200)
 	if err != nil {
@@ -412,7 +540,11 @@ func (s *Service) RunScheduledEventClose(ctx context.Context, eventID, storeID s
 		return nil // window removed, or already finalized
 	}
 	if ev.EndsAt.After(time.Now().UTC()) {
-		// Window extended after the task was armed — re-arm for the new time.
+		// A janela mudou depois que a task foi armada e o caminho de edição não
+		// re-agendou (edição direta no banco, task duplicada). Tentativa
+		// best-effort: como ESTA task está ACTIVE agora, o asynq recusa apagá-la
+		// e o TaskID em conflito engole o novo horário. Quem garante o
+		// fechamento nesse caso é o sweep de ends_at.
 		if s.closeScheduler != nil {
 			return s.closeScheduler.ScheduleEventClose(ctx, eventID, storeID, *ev.EndsAt)
 		}
@@ -477,7 +609,6 @@ func (s *Service) GetByID(ctx context.Context, id, storeID string) (LiveOutput, 
 		ID:                     event.ID,
 		StoreID:                event.StoreID,
 		Title:                  event.Title,
-		Type:                   event.Type,
 		Platform:               platform,
 		PlatformLiveID:         platformLiveID,
 		Status:                 EffectiveStatus(event.Status, event.ScheduledAt, event.EndsAt),
@@ -494,6 +625,8 @@ func (s *Service) GetByID(ctx context.Context, id, storeID string) (LiveOutput, 
 		EndsAt:                 event.EndsAt,
 		CreatedAt:              event.CreatedAt,
 		UpdatedAt:              event.UpdatedAt,
+
+		WaitlistNotifiedTTLMinutes: event.WaitlistNotifiedTTLMinutes,
 	}, nil
 }
 
@@ -512,6 +645,22 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 	sessionRows, err := s.repo.ListSessionsByEvent(ctx, event.ID)
 	if err != nil {
 		return EventOutput{}, err
+	}
+
+	// Métrica das transmissões: UMA leitura por evento, não uma por sessão. A
+	// GetSessionStats que morava aqui rodava dentro do laço (N+1) e ainda
+	// creditava o carrinho inteiro à sessão em que ele nasceu.
+	//
+	// Falha aqui não derruba a tela do evento: o painel volta com os números
+	// zerados, que é muito melhor que 500 no detalhe do evento inteiro.
+	revenueBySession := map[string]SessionRevenueOutput{}
+	if metrics, merr := s.GetSessionMetrics(ctx, event.ID, storeID); merr != nil {
+		logger.From(ctx, s.logger).Warn("failed to get session metrics",
+			zap.String("event_id", event.ID), zap.Error(merr))
+	} else {
+		for _, m := range metrics.Sessions {
+			revenueBySession[m.SessionID] = m.SessionRevenueOutput
+		}
 	}
 
 	// Build session outputs with platforms and stats
@@ -537,22 +686,6 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 			}
 		}
 
-		// Get session stats (carts and revenue)
-		var totalCarts, paidCarts int
-		var totalRevenue, paidRevenue int64
-		stats, err := s.repo.GetSessionStats(ctx, sessionRow.ID)
-		if err != nil {
-			logger.From(ctx, s.logger).Warn("failed to get session stats",
-				zap.String("session_id", sessionRow.ID),
-				zap.Error(err),
-			)
-		} else {
-			totalCarts = stats.TotalCarts
-			paidCarts = stats.PaidCarts
-			totalRevenue = stats.TotalRevenue
-			paidRevenue = stats.PaidRevenue
-		}
-
 		// Get comments for this session (limit 100 for performance)
 		var commentOutputs []CommentOutput
 		commentRows, err := s.repo.ListCommentsBySession(ctx, sessionRow.ID, 100, 0)
@@ -572,25 +705,26 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		}
 
 		sessions[i] = SessionOutput{
-			ID:            sessionRow.ID,
-			EventID:       sessionRow.EventID,
-			Status:        sessionRow.Status,
-			StartedAt:     sessionRow.StartedAt,
-			EndedAt:       sessionRow.EndedAt,
-			TotalComments: sessionRow.TotalComments,
-			TotalCarts:    totalCarts,
-			PaidCarts:     paidCarts,
-			TotalRevenue:  totalRevenue,
-			PaidRevenue:   paidRevenue,
-			Platforms:     platformOutputs,
-			Comments:      commentOutputs,
-			CreatedAt:     sessionRow.CreatedAt,
-			UpdatedAt:     sessionRow.UpdatedAt,
+			ID:                     sessionRow.ID,
+			EventID:                sessionRow.EventID,
+			Type:                   sessionRow.Type,
+			Status:                 sessionRow.Status,
+			SequenceOrder:          sessionRow.SequenceOrder,
+			CurrentActiveProductID: sessionRow.CurrentActiveProductID,
+			ProcessingPaused:       sessionRow.ProcessingPaused,
+			StartedAt:              sessionRow.StartedAt,
+			EndedAt:                sessionRow.EndedAt,
+			TotalComments:          sessionRow.TotalComments,
+			SessionRevenueOutput:   revenueBySession[sessionRow.ID],
+			Platforms:              platformOutputs,
+			Comments:               commentOutputs,
+			CreatedAt:              sessionRow.CreatedAt,
+			UpdatedAt:              sessionRow.UpdatedAt,
 		}
 	}
 
 	// Get product and upsell counts
-	productCount, err := s.repo.CountEventProducts(ctx, event.ID)
+	productCount, err := s.repo.CountEventWhitelist(ctx, event.ID)
 	if err != nil {
 		logger.From(ctx, s.logger).Warn("failed to count event products", zap.String("event_id", event.ID), zap.Error(err))
 	}
@@ -603,7 +737,6 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		ID:                     event.ID,
 		StoreID:                event.StoreID,
 		Title:                  event.Title,
-		Type:                   event.Type,
 		Status:                 event.Status,
 		TotalOrders:            event.TotalOrders,
 		CloseCartOnEventEnd:    event.CloseCartOnEventEnd,
@@ -617,8 +750,10 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		ProductCount:           productCount,
 		UpsellCount:            upsellCount,
 		Sessions:               sessions,
-		CreatedAt:              event.CreatedAt,
-		UpdatedAt:              event.UpdatedAt,
+
+		WaitlistNotifiedTTLMinutes: event.WaitlistNotifiedTTLMinutes,
+		CreatedAt:                  event.CreatedAt,
+		UpdatedAt:                  event.UpdatedAt,
 	}, nil
 }
 
@@ -658,9 +793,33 @@ func (s *Service) List(ctx context.Context, input ListLivesInput) (ListLivesOutp
 
 func (s *Service) Update(ctx context.Context, input UpdateLiveInput) (LiveOutput, error) {
 	// Verify event exists and belongs to store
-	_, err := s.repo.GetEventByID(ctx, input.ID, input.StoreID)
+	current, err := s.repo.GetEventByID(ctx, input.ID, input.StoreID)
 	if err != nil {
 		return LiveOutput{}, err
+	}
+
+	// RN-05/CA-05.7: a edição da janela. Antes deste ponto o PUT só trocava
+	// título e desconto PIX — um ends_at errado era permanente.
+	if input.Window.Touches() && current != nil {
+		// O teto não pode ser removido: sem ends_at o carrinho perde o prazo.
+		if input.Window.SetEndsAt && input.Window.EndsAt == nil {
+			return LiveOutput{}, httpx.ErrBadRequest("endsAt não pode ser removido: o evento precisa de uma data de encerramento")
+		}
+		// Coerência com o valor que NÃO está sendo editado.
+		endsAt := input.Window.EndsAt
+		if !input.Window.SetEndsAt {
+			endsAt = current.EndsAt
+		}
+		startsAt := input.Window.StartsAt
+		if !input.Window.SetStartsAt {
+			startsAt = current.ScheduledAt
+		}
+		if startsAt != nil && endsAt != nil && !endsAt.After(*startsAt) {
+			return LiveOutput{}, httpx.ErrBadRequest("endsAt precisa ser depois de startsAt")
+		}
+		if err := s.applyEventWindow(ctx, input.ID, input.StoreID, input.Window, true); err != nil {
+			return LiveOutput{}, err
+		}
 	}
 
 	// Update event title
@@ -684,15 +843,79 @@ func (s *Service) Update(ctx context.Context, input UpdateLiveInput) (LiveOutput
 		}
 	}
 
+	// RN-10: janela extra do promovido da fila. O repo faz o clamp para 5..240,
+	// espelhando o CHECK da 000073.
+	if input.WaitlistNotifiedTTLMinutes != nil {
+		if err := s.repo.SetWaitlistNotifiedTTLMinutes(ctx, event.ID, input.StoreID, *input.WaitlistNotifiedTTLMinutes); err != nil {
+			return LiveOutput{}, err
+		}
+	}
+
 	// Get full live output
 	return s.GetByID(ctx, event.ID, input.StoreID)
 }
 
+// Start é o "Iniciar live" do painel. E37: ele ATIVA o evento, não só a sessão.
+//
+// Antes daqui só saía StartSession, e isso era um no-op de negócio: a sessão já
+// nasce 'active' e todas as queries de resolução aceitam ('active','live'), de
+// modo que o UPDATE só carimbava started_at. O evento continuava 'scheduled', a
+// regra 4 de WindowAt continuava devolvendo WindowNotStarted e a ingestão
+// respondia "a live começa em <data já vencida>" para sempre. O lojista clicava,
+// recebia 200 e o badge não mudava — o botão mentia.
+//
+// Ativar antes de mexer na sessão é de propósito: se a sessão falhar (evento sem
+// sessão, por exemplo) o lojista recebe erro com o evento já ativo, que é o
+// estado que ele pediu; a ordem inversa deixaria a sessão iniciada num evento
+// que não vende.
 func (s *Service) Start(ctx context.Context, id, storeID string) (LiveOutput, error) {
-	// Verify event exists and belongs to store
-	_, err := s.repo.GetEventByID(ctx, id, storeID)
+	// Verify event exists and belongs to store. É esta checagem que autoriza
+	// ActivateScheduledEvent a rodar sem store_id no WHERE.
+	event, err := s.repo.GetEventByID(ctx, id, storeID)
 	if err != nil {
 		return LiveOutput{}, err
+	}
+	if event == nil {
+		return LiveOutput{}, httpx.ErrNotFound("event not found")
+	}
+
+	now := time.Now().UTC()
+	if WindowAt(event.Status, event.ScheduledAt, event.EndsAt, now) == WindowEnded {
+		// Sem este guard o botão ressuscitaria um evento encerrado: o sweep de
+		// ends_at o fecharia de novo no ciclo seguinte e o lojista veria o
+		// estado piscar. Antes daqui o pedido morria adiante com "no active
+		// session found for event", que não explica nada.
+		return LiveOutput{}, httpx.ErrUnprocessable("evento encerrado nao pode ser iniciado")
+	}
+
+	// Flip scheduled → active. Falso = já estava ativo: iniciar duas vezes é
+	// no-op, não erro.
+	activated, err := s.repo.ActivateScheduledEvent(ctx, id)
+	if err != nil {
+		return LiveOutput{}, err
+	}
+	if activated {
+		logger.From(ctx, s.logger).Info("scheduled event activated by merchant",
+			zap.String("event_id", id),
+		)
+	}
+
+	// "Iniciar" com a hora marcada ainda no futuro ANTECIPA a janela. Só flipar
+	// o status deixaria o evento 'active' e mesmo assim sem vender — a regra 2
+	// de WindowAt continua barrando enquanto starts_at não chega —, ou seja, o
+	// botão voltaria a mentir por outro motivo. Reusa applyEventWindow, o ponto
+	// único de escrita da janela; ends_at não é tocado, então não há task de
+	// fechamento para mover.
+	if event.ScheduledAt != nil && event.ScheduledAt.After(now) {
+		if err := s.applyEventWindow(ctx, id, storeID, EventWindowUpdate{
+			SetStartsAt: true, StartsAt: &now,
+		}, false); err != nil {
+			return LiveOutput{}, err
+		}
+		logger.From(ctx, s.logger).Info("event start pulled forward by merchant",
+			zap.String("event_id", id),
+			zap.Time("was_scheduled_at", *event.ScheduledAt),
+		)
 	}
 
 	// Get active session for this event
@@ -823,8 +1046,16 @@ func (s *Service) sendCheckoutLinksForEvent(ctx context.Context, storeID, eventI
 		return
 	}
 
+	// O título da campanha é a variável {evento} da mensagem. Uma leitura só,
+	// fora do laço: é o mesmo evento para todos os carrinhos.
+	eventTitle := ""
+	if ev, err := s.repo.GetEventByID(ctx, eventID, storeID); err == nil && ev != nil {
+		eventTitle = ev.Title
+	}
+
 	sent := 0
 	skipped := 0
+	undelivered := 0
 	for _, c := range carts {
 		if c.TotalItems <= 0 || c.PlatformUserID == "" {
 			skipped++
@@ -840,24 +1071,36 @@ func (s *Service) sendCheckoutLinksForEvent(ctx context.Context, storeID, eventI
 			skipped++
 			continue
 		}
-		commentID, _ := s.repo.GetLatestCommentIDByUser(ctx, eventID, c.PlatformUserID)
-		if err := s.notifier.NotifyEventCheckout(ctx, NotifyEventCheckoutParams{
-			StoreID:        storeID,
-			EventID:        eventID,
-			CartID:         c.ID,
-			CartToken:      c.Token,
-			PlatformUserID: c.PlatformUserID,
-			PlatformHandle: c.PlatformHandle,
-			CommentID:      commentID,
-			TotalItems:     c.TotalItems,
-			TotalValue:     c.TotalValue,
-		}); err != nil {
+		target, _ := s.repo.GetLatestReplyTarget(ctx, eventID, c.PlatformUserID)
+		res, err := s.notifier.NotifyEventCheckout(ctx, NotifyEventCheckoutParams{
+			StoreID:          storeID,
+			EventID:          eventID,
+			EventTitle:       eventTitle,
+			CartID:           c.ID,
+			CartToken:        c.Token,
+			PlatformUserID:   c.PlatformUserID,
+			PlatformHandle:   c.PlatformHandle,
+			CommentID:        target.CommentID,
+			CommentCreatedAt: target.CreatedAt,
+			DeadlineAt:       c.ExpiresAt,
+			TotalItems:       c.TotalItems,
+			TotalValue:       c.TotalValue,
+		})
+		if err != nil {
 			logger.From(ctx, s.logger).Warn("failed to notify event checkout",
 				zap.String("event_id", eventID),
 				zap.String("cart_id", c.ID),
 				zap.String("platform_user_id", c.PlatformUserID),
 				zap.Error(err),
 			)
+			continue
+		}
+		if !res.Delivered {
+			// RN-38 — a janela do Instagram já tinha fechado para esta pessoa.
+			// Não é falha: está registrado com motivo e aparece na lista de
+			// "compradores não avisados" do evento. Contar como enviado seria
+			// mentir para o próprio log.
+			undelivered++
 			continue
 		}
 		sent++
@@ -867,6 +1110,7 @@ func (s *Service) sendCheckoutLinksForEvent(ctx context.Context, storeID, eventI
 		zap.String("event_id", eventID),
 		zap.Int("sent", sent),
 		zap.Int("skipped", skipped),
+		zap.Int("undelivered", undelivered),
 		zap.Int("total", len(carts)),
 	)
 }
@@ -892,8 +1136,9 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		return CreateSessionOutput{}, err
 	}
 
-	// Create the session and add platform in a single transaction
-	session, platform, err := s.repo.CreateSessionWithPlatformTx(ctx, input.EventID, input.Platform, input.PlatformLiveID)
+	// Create the session, inherit the event whitelist and add the platform in a
+	// single transaction.
+	session, platform, inherited, err := s.repo.CreateSessionWithPlatformTx(ctx, input.EventID, SessionTypeFromEventType(input.Type), input.Platform, input.PlatformLiveID)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("failed to create session with platform",
 			zap.String("event_id", input.EventID),
@@ -902,15 +1147,21 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		return CreateSessionOutput{}, err
 	}
 
+	// inherited_products é o número que responde "por que meu produto está
+	// liberado/bloqueado nesta transmissão?" sem abrir o banco. Zero é legítimo
+	// (evento sem whitelist = tudo liberado) e é exatamente o caso que o
+	// suporte confunde com bug.
 	logger.From(ctx, s.logger).Info("session created",
 		zap.String("event_id", input.EventID),
 		zap.String("session_id", session.ID),
 		zap.String("platform", input.Platform),
+		zap.Int64("inherited_products", inherited),
 	)
 
 	return CreateSessionOutput{
 		ID:      session.ID,
 		EventID: session.EventID,
+		Type:    session.Type,
 		Status:  session.Status,
 		Platform: PlatformOutput{
 			ID:             platform.ID,
@@ -923,7 +1174,45 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 	}, nil
 }
 
-// GetSessionByPlatformLiveID finds an active session by platform live ID.
+// GetSessionByPlatformLiveID resolves the session that owns a media id.
+//
+// D18/D20: deixou de filtrar por status. Devolver a sessão encerrada é o que
+// permite responder ao comprador em vez de descartar o comentário em silêncio;
+// quem decide se ela ainda vende é SessionAcceptsPurchase.
+// GetLatestReplyTarget expõe o comentário respondível de um comprador para os
+// caminhos ASSÍNCRONOS de fora deste pacote (fim da fila, por exemplo).
+//
+// Sem ele, uma mensagem disparada por task só teria o IGSID — e um DM por IGSID
+// sem janela aberta é recusado pelo Instagram (2534022). Ou seja: o gatilho
+// nasceria sem caminho de entrega e todo envio viraria linha "não entregue".
+func (s *Service) GetLatestReplyTarget(ctx context.Context, eventID, platformUserID string) (ReplyTarget, error) {
+	return s.repo.GetLatestReplyTarget(ctx, eventID, platformUserID)
+}
+
+// MarkSessionPublished amarra a transmissão recém-criada ao agendamento que a
+// publicou (RN-31): resolve a sessão pela mídia e grava live_sessions.publish_at.
+//
+// Devolve o id da sessão porque quem chama (o disparo do agendamento) precisa
+// dele para fechar o job — e é a mesma resolução, feita uma vez só.
+//
+// A escrita de publish_at existe para não haver duas fontes da verdade sobre
+// "quando publica". A coluna entrou na 000114 e passou o épico inteiro sem
+// escritor; se o agendador guardasse a hora apenas em session_publish_jobs, a
+// sessão continuaria mentindo que nunca foi agendada.
+func (s *Service) MarkSessionPublished(ctx context.Context, mediaID string, publishAt time.Time) (string, error) {
+	session, err := s.repo.GetSessionByPlatformLiveID(ctx, mediaID)
+	if err != nil {
+		return "", err
+	}
+	if session == nil {
+		return "", nil
+	}
+	if err := s.repo.SetSessionPublishAt(ctx, session.ID, publishAt); err != nil {
+		return session.ID, err
+	}
+	return session.ID, nil
+}
+
 func (s *Service) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID string) (*SessionOutput, error) {
 	session, err := s.repo.GetSessionByPlatformLiveID(ctx, platformLiveID)
 	if err != nil {
@@ -951,19 +1240,25 @@ func (s *Service) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID
 	}
 
 	return &SessionOutput{
-		ID:            session.ID,
-		EventID:       session.EventID,
-		Status:        session.Status,
-		StartedAt:     session.StartedAt,
-		EndedAt:       session.EndedAt,
-		TotalComments: session.TotalComments,
-		Platforms:     platformOutputs,
-		CreatedAt:     session.CreatedAt,
-		UpdatedAt:     session.UpdatedAt,
+		ID:                     session.ID,
+		EventID:                session.EventID,
+		Type:                   session.Type,
+		Status:                 session.Status,
+		CurrentActiveProductID: session.CurrentActiveProductID,
+		ProcessingPaused:       session.ProcessingPaused,
+		StartedAt:              session.StartedAt,
+		EndedAt:                session.EndedAt,
+		TotalComments:          session.TotalComments,
+		Platforms:              platformOutputs,
+		CreatedAt:              session.CreatedAt,
+		UpdatedAt:              session.UpdatedAt,
 	}, nil
 }
 
-// GetEventByPlatformLiveID finds an active event by any associated platform live ID.
+// GetEventByPlatformLiveID resolves the event that owns a media id.
+//
+// D19/D20: deixou de filtrar por status — campanha agendada e campanha
+// encerrada agora resolvem. O gate de janela (WindowAt) decide o resto.
 func (s *Service) GetEventByPlatformLiveID(ctx context.Context, platformLiveID string) (*EventOutput, error) {
 	event, err := s.repo.GetEventByPlatformLiveID(ctx, platformLiveID)
 	if err != nil {
@@ -977,15 +1272,12 @@ func (s *Service) GetEventByPlatformLiveID(ctx context.Context, platformLiveID s
 		ID:                     event.ID,
 		StoreID:                event.StoreID,
 		Title:                  event.Title,
-		Type:                   event.Type,
 		Status:                 event.Status,
 		TotalOrders:            event.TotalOrders,
 		CloseCartOnEventEnd:    event.CloseCartOnEventEnd,
 		CartExpirationMinutes:  event.CartExpirationMinutes,
 		CartMaxQuantityPerItem: event.CartMaxQuantityPerItem,
 		SendOnLiveEnd:          event.SendOnLiveEnd,
-		CurrentActiveProductID: event.CurrentActiveProductID,
-		ProcessingPaused:       event.ProcessingPaused,
 		ScheduledAt:            event.ScheduledAt,
 		EndsAt:                 event.EndsAt,
 		Description:            event.Description,
@@ -1171,6 +1463,124 @@ func (s *Service) GetEventStats(ctx context.Context, eventID, storeID string) (E
 	}, nil
 }
 
+// GetSessionMetrics devolve a métrica do evento quebrada por transmissão —
+// a Fatia 5 (RN-12/RN-13/RN-29).
+//
+// Contrato que o consumidor pode confiar: a soma de Sessions + Unattributed é
+// EXATAMENTE ConfirmedRevenue e ProjectedRevenue, e esses dois batem com o
+// confirmed/projected de GetEventStats. Não é coincidência nem arredondamento:
+//   • confirmado — order_items é materializado por AllocateBySession com o
+//     unit_price do carrinho, logo SUM(qty*price) por sessão reconstrói
+//     orders.total_cents;
+//   • projetado  — a mesma AllocateBySession roda aqui sobre os mesmos carrinhos
+//     que GetEventStats.projected_revenue soma.
+//
+// Toda sessão do evento aparece, inclusive as que não venderam nada — "a live de
+// terça faturou zero" é uma resposta, sumir da lista não é.
+func (s *Service) GetSessionMetrics(ctx context.Context, eventID, storeID string) (EventSessionMetricsOutput, error) {
+	if _, err := s.repo.GetEventByID(ctx, eventID, storeID); err != nil {
+		return EventSessionMetricsOutput{}, err
+	}
+
+	sessions, err := s.repo.ListSessionsByEvent(ctx, eventID)
+	if err != nil {
+		return EventSessionMetricsOutput{}, err
+	}
+
+	confirmed, err := s.repo.ListSessionConfirmedRevenueByEvent(ctx, eventID)
+	if err != nil {
+		return EventSessionMetricsOutput{}, err
+	}
+
+	items, additions, err := s.repo.ListProjectionInputByEvent(ctx, eventID)
+	if err != nil {
+		return EventSessionMetricsOutput{}, err
+	}
+	projected := ProjectBySession(items, additions)
+
+	revenue := map[string]*SessionRevenueOutput{}
+	pick := func(sessionID string) *SessionRevenueOutput {
+		r := revenue[sessionID]
+		if r == nil {
+			r = &SessionRevenueOutput{}
+			revenue[sessionID] = r
+		}
+		return r
+	}
+	for _, c := range confirmed {
+		r := pick(c.SessionID)
+		r.PaidCarts, r.SoldUnits, r.ConfirmedRevenue = c.PaidCarts, c.SoldUnits, c.RevenueCents
+	}
+	for _, p := range projected {
+		r := pick(p.SessionID)
+		r.OpenCarts, r.ProjectedUnits, r.ProjectedRevenue = p.OpenCarts, p.Units, p.RevenueCents
+	}
+
+	out := EventSessionMetricsOutput{EventID: eventID}
+
+	// O marcador de corte (D26). Ele não participa de nenhuma soma: existe para
+	// a tela conseguir dizer "antes desta data, 'receita da live de terça'
+	// significava outra coisa". Sem ele, a primeira comparação entre os dois
+	// lados do corte vira um chamado de bug.
+	if cut, err := s.repo.GetMetricCutover(ctx, MetricCutoverSessionAttribution); err != nil {
+		logger.From(ctx, s.logger).Warn("failed to read attribution cutover marker",
+			zap.String("event_id", eventID), zap.Error(err))
+	} else if cut != nil {
+		at := cut.EffectiveAt
+		out.AttributionCutoverAt = &at
+		out.AttributionCutoverNote = cut.Note
+	}
+
+	// As sessões, na ordem da campanha. ListSessionsByEvent devolve por
+	// created_at DESC (a ordem da tela); relatório se lê da 1ª para a última.
+	rows := make([]SessionMetricsOutput, 0, len(sessions))
+	for _, sess := range sessions {
+		row := SessionMetricsOutput{
+			SessionID:         sess.ID,
+			SequenceOrder:     sess.SequenceOrder,
+			Type:              sess.Type,
+			Status:            sess.Status,
+			AttributionSource: sess.AttributionSource,
+		}
+		if r := revenue[sess.ID]; r != nil {
+			row.SessionRevenueOutput = *r
+		}
+		rows = append(rows, row)
+		delete(revenue, sess.ID)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].SequenceOrder < rows[j].SequenceOrder })
+	out.Sessions = rows
+
+	// O que sobrou no mapa é receita sem sessão viva. O balde "" é o caso
+	// normal (adição pelo painel, ou carrinho anterior ao log). Um id que não
+	// está mais em live_sessions só apareceria se a sessão fosse apagada com
+	// pedido selado — o ON DELETE SET NULL das FKs impede, mas se acontecer o
+	// valor cai aqui em vez de sumir da soma.
+	var unattributed SessionMetricsOutput
+	var hasUnattributed bool
+	for _, r := range revenue {
+		hasUnattributed = true
+		unattributed.PaidCarts += r.PaidCarts
+		unattributed.SoldUnits += r.SoldUnits
+		unattributed.ConfirmedRevenue += r.ConfirmedRevenue
+		unattributed.OpenCarts += r.OpenCarts
+		unattributed.ProjectedUnits += r.ProjectedUnits
+		unattributed.ProjectedRevenue += r.ProjectedRevenue
+	}
+	if hasUnattributed {
+		out.Unattributed = &unattributed
+	}
+
+	for _, row := range out.Sessions {
+		out.ConfirmedRevenue += row.ConfirmedRevenue
+		out.ProjectedRevenue += row.ProjectedRevenue
+	}
+	out.ConfirmedRevenue += unattributed.ConfirmedRevenue
+	out.ProjectedRevenue += unattributed.ProjectedRevenue
+
+	return out, nil
+}
+
 // ListCartsWithTotalByEvent returns all carts for an event with total value and item count.
 func (s *Service) ListCartsWithTotalByEvent(ctx context.Context, eventID, storeID string) ([]CartWithTotalOutput, error) {
 	// Verify event exists and belongs to store
@@ -1260,7 +1670,7 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 	// window) rather than a direct message by IGSID (24h window opened only by an
 	// inbound DM). A comment does not open the DM window, so without this the
 	// resend is rejected with error 2534022 even moments after the comment.
-	commentID, lookupErr := s.repo.GetLatestCommentIDByUser(ctx, eventID, cart.PlatformUserID)
+	target, lookupErr := s.repo.GetLatestReplyTarget(ctx, eventID, cart.PlatformUserID)
 	if lookupErr != nil {
 		// Don't abort — the DM path may still work — but make the failure visible
 		// instead of silently degrading to DM-only (which fails outside the 24h
@@ -1275,25 +1685,34 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 		zap.String("event_id", eventID),
 		zap.String("cart_id", cartID),
 		zap.String("platform_user_id", cart.PlatformUserID),
-		zap.String("comment_id", commentID),
+		zap.String("comment_id", target.CommentID),
 	)
 
-	if err := s.notifier.NotifyEventCheckout(ctx, NotifyEventCheckoutParams{
-		StoreID:        storeID,
-		EventID:        eventID,
-		CartID:         cart.ID,
-		CartToken:      cart.Token,
-		PlatformUserID: cart.PlatformUserID,
-		PlatformHandle: cart.PlatformHandle,
-		CommentID:      commentID,
-		TotalItems:     cart.TotalItems,
-		TotalValue:     cart.TotalValue,
-	}); err != nil {
+	eventTitle := ""
+	if ev, err := s.repo.GetEventByID(ctx, eventID, storeID); err == nil && ev != nil {
+		eventTitle = ev.Title
+	}
+
+	res, err := s.notifier.NotifyEventCheckout(ctx, NotifyEventCheckoutParams{
+		StoreID:          storeID,
+		EventID:          eventID,
+		EventTitle:       eventTitle,
+		CartID:           cart.ID,
+		CartToken:        cart.Token,
+		PlatformUserID:   cart.PlatformUserID,
+		PlatformHandle:   cart.PlatformHandle,
+		CommentID:        target.CommentID,
+		CommentCreatedAt: target.CreatedAt,
+		DeadlineAt:       cart.ExpiresAt,
+		TotalItems:       cart.TotalItems,
+		TotalValue:       cart.TotalValue,
+	})
+	if err != nil {
 		logger.From(ctx, s.logger).Warn("failed to resend checkout message",
 			zap.String("event_id", eventID),
 			zap.String("cart_id", cartID),
 			zap.String("platform_user_id", cart.PlatformUserID),
-			zap.String("comment_id", commentID),
+			zap.String("comment_id", target.CommentID),
 			zap.Error(err),
 		)
 		// Outside-the-window rejection (IG error 2534022): tell the merchant the
@@ -1303,6 +1722,13 @@ func (s *Service) ResendCheckoutMessage(ctx context.Context, eventID, cartID, st
 				"O Instagram só permite enviar a mensagem se o comprador comentou recentemente ou mandou uma DM para a loja. Peça para o comprador comentar de novo na live (ou enviar uma DM) e clique em reenviar em seguida.")
 		}
 		return CartWithTotalOutput{}, httpx.DomainError(422, httpx.CodeIgMessageFailed, "failed to send Instagram message")
+	}
+	if !res.Delivered {
+		// RN-38 — no reenvio MANUAL a não entrega tem de virar erro na tela: o
+		// lojista acabou de clicar num botão e precisa saber que nada saiu, com
+		// o motivo. No disparo em massa o mesmo fato é só registro, porque não
+		// há ninguém esperando resposta.
+		return CartWithTotalOutput{}, httpx.ErrUnprocessable(res.ReasonText)
 	}
 
 	logger.From(ctx, s.logger).Info("checkout message resent",
@@ -1366,7 +1792,12 @@ func (s *Service) ListProductsByEvent(ctx context.Context, eventID, storeID stri
 // LIVE MODE - Active Product and Processing Control
 // =============================================================================
 
-// SetActiveProduct sets or clears the active product for an event
+// O Modo Live é da SESSÃO (D17). As funções por EVENTO abaixo mantêm o painel
+// atual de pé — ele só conhece o eventId — aplicando o estado em todas as
+// sessões vivas do evento e lendo da sessão viva mais recente.
+
+// SetActiveProduct define ou limpa o produto em destaque das sessões vivas do
+// evento.
 func (s *Service) SetActiveProduct(ctx context.Context, eventID, storeID string, productID *string) (*LiveModeStateOutput, error) {
 	// Verify event exists and is active
 	event, err := s.repo.GetEventByID(ctx, eventID, storeID)
@@ -1378,13 +1809,7 @@ func (s *Service) SetActiveProduct(ctx context.Context, eventID, storeID string,
 		return nil, httpx.DomainError(400, httpx.CodeLiveEventNotActive, "can only set active product on active events")
 	}
 
-	// Set or clear active product
-	if productID != nil && *productID != "" {
-		_, err = s.repo.SetActiveProduct(ctx, eventID, storeID, *productID)
-	} else {
-		_, err = s.repo.ClearActiveProduct(ctx, eventID, storeID)
-	}
-	if err != nil {
+	if err := s.repo.SetActiveProductForEventSessions(ctx, eventID, storeID, productID); err != nil {
 		return nil, err
 	}
 
@@ -1393,11 +1818,11 @@ func (s *Service) SetActiveProduct(ctx context.Context, eventID, storeID string,
 		zap.Stringp("product_id", productID),
 	)
 
-	// Return updated state
 	return s.GetLiveModeState(ctx, eventID, storeID)
 }
 
-// SetProcessingPaused pauses or resumes comment processing for an event
+// SetProcessingPaused pausa ou retoma o processamento das sessões vivas do
+// evento.
 func (s *Service) SetProcessingPaused(ctx context.Context, eventID, storeID string, paused bool) (*LiveModeStateOutput, error) {
 	// Verify event exists and is active
 	event, err := s.repo.GetEventByID(ctx, eventID, storeID)
@@ -1409,8 +1834,7 @@ func (s *Service) SetProcessingPaused(ctx context.Context, eventID, storeID stri
 		return nil, httpx.DomainError(400, httpx.CodeLiveEventNotActive, "can only change processing state on active events")
 	}
 
-	_, err = s.repo.SetProcessingPaused(ctx, eventID, storeID, paused)
-	if err != nil {
+	if err := s.repo.SetProcessingPausedForEventSessions(ctx, eventID, storeID, paused); err != nil {
 		return nil, err
 	}
 
@@ -1419,28 +1843,105 @@ func (s *Service) SetProcessingPaused(ctx context.Context, eventID, storeID stri
 		zap.Bool("paused", paused),
 	)
 
-	// Return updated state
 	return s.GetLiveModeState(ctx, eventID, storeID)
 }
 
-// GetLiveModeState returns the current live mode state for an event
+// GetLiveModeState devolve o estado do evento lido da sessão viva mais recente.
 func (s *Service) GetLiveModeState(ctx context.Context, eventID, storeID string) (*LiveModeStateOutput, error) {
 	return s.repo.GetLiveModeState(ctx, eventID, storeID)
 }
 
 // =============================================================================
-// EVENT PRODUCTS (Whitelist)
+// MODO LIVE POR SESSÃO (D17)
 // =============================================================================
 
-// AddEventProduct adds a product to an event's whitelist
+// SetSessionActiveProduct define ou limpa o produto em destaque DAQUELA
+// transmissão.
+//
+// O guard é o status da SESSÃO, não o do evento: num evento guarda-chuva de uma
+// semana, exigir evento 'active' é justamente o acoplamento que a D17 desfaz.
+func (s *Service) SetSessionActiveProduct(ctx context.Context, sessionID, eventID, storeID string, productID *string) (*LiveModeStateOutput, error) {
+	if err := s.requireLiveSession(ctx, sessionID, eventID, storeID); err != nil {
+		return nil, err
+	}
+	if _, err := s.repo.SetSessionActiveProduct(ctx, sessionID, storeID, productID); err != nil {
+		return nil, err
+	}
+	logger.From(ctx, s.logger).Info("session active product updated",
+		zap.String("session_id", sessionID),
+		zap.Stringp("product_id", productID),
+	)
+	return s.repo.GetSessionLiveModeState(ctx, sessionID, storeID)
+}
+
+// SetSessionProcessingPaused pausa ou retoma o processamento DAQUELA
+// transmissão — sem tocar nas outras sessões do mesmo evento.
+func (s *Service) SetSessionProcessingPaused(ctx context.Context, sessionID, eventID, storeID string, paused bool) (*LiveModeStateOutput, error) {
+	if err := s.requireLiveSession(ctx, sessionID, eventID, storeID); err != nil {
+		return nil, err
+	}
+	if _, err := s.repo.SetSessionProcessingPaused(ctx, sessionID, storeID, paused); err != nil {
+		return nil, err
+	}
+	logger.From(ctx, s.logger).Info("session processing paused state updated",
+		zap.String("session_id", sessionID),
+		zap.Bool("paused", paused),
+	)
+	return s.repo.GetSessionLiveModeState(ctx, sessionID, storeID)
+}
+
+// GetSessionLiveModeState devolve o estado do modo live DAQUELA transmissão.
+func (s *Service) GetSessionLiveModeState(ctx context.Context, sessionID, eventID, storeID string) (*LiveModeStateOutput, error) {
+	if err := s.resolveSessionOfEvent(ctx, sessionID, eventID, storeID); err != nil {
+		return nil, err
+	}
+	return s.repo.GetSessionLiveModeState(ctx, sessionID, storeID)
+}
+
+// requireLiveSession confirma posse e exige que a transmissão esteja no ar —
+// destacar produto ou pausar uma sessão encerrada não significa nada.
+func (s *Service) requireLiveSession(ctx context.Context, sessionID, eventID, storeID string) error {
+	if err := s.resolveSessionOfEvent(ctx, sessionID, eventID, storeID); err != nil {
+		return err
+	}
+	session, err := s.repo.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if session.Status != "active" && session.Status != "live" {
+		return httpx.ErrBadRequest("só é possível controlar o modo live de uma sessão em andamento")
+	}
+	return nil
+}
+
+// A whitelist é da SESSÃO (D15/N2). As funções abaixo mantêm de pé as rotas
+// legadas por EVENTO — que o frontend ainda usa — traduzindo cada operação para
+// TODAS as sessões daquele evento. Ler pelo evento devolve a UNIÃO.
+//
+// Sessão criada DEPOIS de uma configuração por evento NASCE VAZIA (N2, decisão
+// explícita do dono) — e vazia vende tudo. Não há herança.
+
+// AddEventProduct aplica o produto na whitelist de todas as sessões do evento.
 func (s *Service) AddEventProduct(ctx context.Context, input AddEventProductInput) (EventProductOutput, error) {
 	// Verify event exists and belongs to store
-	_, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID)
-	if err != nil {
+	if _, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID); err != nil {
 		return EventProductOutput{}, err
 	}
 
-	output, err := s.repo.AddEventProduct(ctx, input)
+	in := SessionProductInput{
+		StoreID:      input.StoreID,
+		EventID:      input.EventID,
+		ProductID:    input.ProductID,
+		SpecialPrice: input.SpecialPrice,
+		MaxQuantity:  input.MaxQuantity,
+		DisplayOrder: input.DisplayOrder,
+		Featured:     input.Featured,
+	}
+	if err := s.repo.UpsertProductInAllEventSessions(ctx, in); err != nil {
+		return EventProductOutput{}, err
+	}
+
+	output, err := s.repo.GetEventWhitelistProduct(ctx, input.EventID, input.ProductID)
 	if err != nil {
 		return EventProductOutput{}, err
 	}
@@ -1453,61 +1954,144 @@ func (s *Service) AddEventProduct(ctx context.Context, input AddEventProductInpu
 	return output, nil
 }
 
-// ListEventProducts returns all products in an event's whitelist
+// ListEventProducts devolve a união das whitelists das sessões do evento.
 func (s *Service) ListEventProducts(ctx context.Context, eventID, storeID string) ([]EventProductOutput, error) {
 	// Verify event exists and belongs to store
-	_, err := s.repo.GetEventByID(ctx, eventID, storeID)
-	if err != nil {
+	if _, err := s.repo.GetEventByID(ctx, eventID, storeID); err != nil {
 		return nil, err
 	}
 
-	return s.repo.ListEventProducts(ctx, eventID)
+	return s.repo.ListEventWhitelist(ctx, eventID)
 }
 
-// UpdateEventProduct updates a product's configuration in an event
+// UpdateEventProduct regrava a configuração do produto em todas as sessões.
+//
+// A chave é o PRODUTO, não o id da linha. Chavear pelo id da linha é o bug que
+// o par FE/BE carrega hoje: o frontend manda products.id no path onde a API
+// esperava event_products.id, então editar preço especial devolvia 404 e
+// remover era um no-op que ainda exibia "removido com sucesso".
 func (s *Service) UpdateEventProduct(ctx context.Context, input UpdateEventProductInput) (EventProductOutput, error) {
 	// Verify event exists and belongs to store
-	_, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID)
-	if err != nil {
+	if _, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID); err != nil {
 		return EventProductOutput{}, err
 	}
 
-	output, err := s.repo.UpdateEventProduct(ctx, input)
+	// Só regrava o que já está na whitelist: um PUT em produto ausente é 404,
+	// não uma inclusão silenciosa.
+	if _, err := s.repo.GetEventWhitelistProduct(ctx, input.EventID, input.ProductID); err != nil {
+		return EventProductOutput{}, err
+	}
+
+	if err := s.repo.UpsertProductInAllEventSessions(ctx, SessionProductInput{
+		StoreID:      input.StoreID,
+		EventID:      input.EventID,
+		ProductID:    input.ProductID,
+		SpecialPrice: input.SpecialPrice,
+		MaxQuantity:  input.MaxQuantity,
+		DisplayOrder: input.DisplayOrder,
+		Featured:     input.Featured,
+	}); err != nil {
+		return EventProductOutput{}, err
+	}
+
+	output, err := s.repo.GetEventWhitelistProduct(ctx, input.EventID, input.ProductID)
 	if err != nil {
 		return EventProductOutput{}, err
 	}
 
 	logger.From(ctx, s.logger).Info("updated event product",
 		zap.String("event_id", input.EventID),
-		zap.String("product_id", input.ID),
+		zap.String("product_id", input.ProductID),
 	)
 
 	return output, nil
 }
 
-// DeleteEventProduct removes a product from an event's whitelist
-func (s *Service) DeleteEventProduct(ctx context.Context, id, eventID, storeID string) error {
+// DeleteEventProduct remove o produto da whitelist de todas as sessões.
+func (s *Service) DeleteEventProduct(ctx context.Context, productID, eventID, storeID string) error {
 	// Verify event exists and belongs to store
-	_, err := s.repo.GetEventByID(ctx, eventID, storeID)
-	if err != nil {
+	if _, err := s.repo.GetEventByID(ctx, eventID, storeID); err != nil {
 		return err
 	}
 
-	if err := s.repo.DeleteEventProduct(ctx, id, eventID); err != nil {
+	if err := s.repo.DeleteProductFromAllEventSessions(ctx, eventID, productID); err != nil {
 		return err
 	}
 
 	logger.From(ctx, s.logger).Info("deleted event product",
 		zap.String("event_id", eventID),
-		zap.String("product_id", id),
+		zap.String("product_id", productID),
 	)
 
 	return nil
 }
 
-// ValidateProductForEvent checks if a product can be sold in an event
-func (s *Service) ValidateProductForEvent(ctx context.Context, eventID, productID, storeID string) (*ProductValidationResult, error) {
-	return s.repo.GetEventProductConfig(ctx, eventID, productID, storeID)
+// =============================================================================
+// SESSION PRODUCTS (Whitelist da SESSÃO)
+// =============================================================================
+
+// resolveSessionOfEvent confirma que a sessão pertence ao evento e que o evento
+// pertence à loja. É a checagem de posse que o CRUD por sessão precisa e que o
+// CRUD por evento fazia com um GetEventByID só.
+func (s *Service) resolveSessionOfEvent(ctx context.Context, sessionID, eventID, storeID string) error {
+	if _, err := s.repo.GetEventByID(ctx, eventID, storeID); err != nil {
+		return err
+	}
+	session, err := s.repo.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if session == nil || session.EventID != eventID {
+		return httpx.ErrNotFound("session not found")
+	}
+	return nil
+}
+
+// ListSessionProducts devolve a whitelist DAQUELA sessão. Vazia = vende tudo.
+func (s *Service) ListSessionProducts(ctx context.Context, sessionID, eventID, storeID string) ([]SessionProductOutput, error) {
+	if err := s.resolveSessionOfEvent(ctx, sessionID, eventID, storeID); err != nil {
+		return nil, err
+	}
+	return s.repo.ListSessionProducts(ctx, sessionID)
+}
+
+// ListSessionWhitelist devolve a whitelist da sessão sem checagem de posse — é
+// o caminho de INGESTÃO, onde a sessão já foi resolvida pela mídia que chegou
+// no webhook.
+func (s *Service) ListSessionWhitelist(ctx context.Context, sessionID string) ([]SessionProductOutput, error) {
+	return s.repo.ListSessionProducts(ctx, sessionID)
+}
+
+// UpsertSessionProduct grava o produto na whitelist da sessão (POST e PUT são a
+// mesma operação: a chave natural é (sessão, produto)).
+func (s *Service) UpsertSessionProduct(ctx context.Context, input SessionProductInput) (SessionProductOutput, error) {
+	if err := s.resolveSessionOfEvent(ctx, input.SessionID, input.EventID, input.StoreID); err != nil {
+		return SessionProductOutput{}, err
+	}
+	output, err := s.repo.UpsertSessionProduct(ctx, input)
+	if err != nil {
+		return SessionProductOutput{}, err
+	}
+	logger.From(ctx, s.logger).Info("session whitelist product upserted",
+		zap.String("session_id", input.SessionID),
+		zap.String("product_id", input.ProductID),
+	)
+	return output, nil
+}
+
+// DeleteSessionProduct remove o produto da whitelist da sessão.
+func (s *Service) DeleteSessionProduct(ctx context.Context, sessionID, eventID, storeID, productID string) error {
+	if err := s.resolveSessionOfEvent(ctx, sessionID, eventID, storeID); err != nil {
+		return err
+	}
+	if err := s.repo.DeleteSessionProduct(ctx, sessionID, productID); err != nil {
+		return err
+	}
+	logger.From(ctx, s.logger).Info("session whitelist product removed",
+		zap.String("session_id", sessionID),
+		zap.String("product_id", productID),
+	)
+	return nil
 }
 
 // =============================================================================

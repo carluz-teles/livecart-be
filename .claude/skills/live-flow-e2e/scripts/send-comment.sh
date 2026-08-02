@@ -10,6 +10,12 @@
 #
 # comment_id é gerado único por padrão (guard de idempotência no backend);
 # passe o quinto argumento apenas para testar a idempotência.
+#
+# Assinatura do webhook: exporte INSTAGRAM_APP_SECRET com o MESMO valor que a
+# API usa e o script assina o corpo em X-Hub-Signature-256. Sem a variável ele
+# envia sem assinar, o que só funciona enquanto a API estiver em modo
+# observação (INSTAGRAM_WEBHOOK_ENFORCE_SIGNATURE != true). Com a aplicação
+# ligada, comentário sem assinatura recebe 401.
 set -euo pipefail
 
 API_BASE="${API_BASE:-http://localhost:3001}"
@@ -50,8 +56,19 @@ PAYLOAD=$(cat <<JSON
 JSON
 )
 
+SIG_HEADER=()
+if [[ -n "${INSTAGRAM_APP_SECRET:-}" ]]; then
+  # Precisa ser o HMAC do corpo EXATO que vai no -d, byte a byte.
+  DIGEST=$(printf '%s' "${PAYLOAD}" | openssl dgst -sha256 -hmac "${INSTAGRAM_APP_SECRET}" -r | cut -d' ' -f1)
+  SIG_HEADER=(-H "X-Hub-Signature-256: sha256=${DIGEST}")
+  echo "→ assinado (X-Hub-Signature-256)"
+else
+  echo "→ SEM assinatura — só funciona com a API em modo observação"
+fi
+
 echo "→ comment_id=${COMMENT_ID} user=@${USERNAME} text=\"${TEXT}\" media=${MEDIA_ID}"
 curl -sS -X POST "${API_BASE}/api/webhooks/instagram" \
   -H "Content-Type: application/json" \
+  "${SIG_HEADER[@]}" \
   -d "${PAYLOAD}"
 echo

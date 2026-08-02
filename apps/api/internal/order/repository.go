@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/events"
 )
 
 type Repository struct {
@@ -526,48 +527,93 @@ func (r *Repository) UpdateShippingAddress(ctx context.Context, id string, addre
 	return nil
 }
 
-// RegenerateCheckout pushes expires_at forward and resets the cart back to a
-// state where the buyer can complete payment again. checkout_url is cleared
-// so the next public-checkout call generates a fresh one (avoids reusing a
-// stale Mercado Pago link).
+// RegenerateCheckout empurra o expires_at e devolve o carrinho a um estado em
+// que o comprador pode pagar de novo. checkout_url é limpo para a próxima
+// chamada pública gerar um link fresco (evita reusar link vencido do provedor).
+//
+// RN-06 + A10 — duas correções de invariante que andam juntas:
+//
+//  1. o status volta para 'checkout', não para 'active'. No vocabulário novo
+//     'active' significa "pode pagar, SEM prazo" e 'checkout' significa "prazo
+//     correndo". Devolver para 'active' com expires_at no futuro produzia o
+//     estado impossível — e é o que a tela mostrava como "aguardando
+//     pagamento" sem relógio nenhum.
+//
+//  2. emite cart.checkout_armed DENTRO da transação. Antes era um Exec cru:
+//     nenhum fato era publicado, logo armCartExpiry nunca rodava, logo nenhuma
+//     task cart.expire era agendada. Como o sweep de carrinhos foi removido
+//     (commit 9a0df99), esse carrinho NUNCA expirava — ficava vivo com prazo
+//     vencido segurando o estoque reservado. É o R5 do pacote, confirmado.
+//
+// A dedup key inclui o novo expires_at: 'cart.checkout_armed:<id>' já foi
+// usada pelo fechamento do evento, e reusá-la faria o outbox descartar este
+// fato em silêncio — voltando ao carrinho que nunca expira.
 func (r *Repository) RegenerateCheckout(ctx context.Context, id string, expiresAt time.Time) error {
 	uid, err := uuid.Parse(id)
 	if err != nil {
 		return fmt.Errorf("invalid order id: %w", err)
 	}
+	cartUUID := pgtype.UUID{Bytes: uid, Valid: true}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin regenerate tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op depois do Commit
+
 	const q = `
 		UPDATE carts
 		SET expires_at         = $2,
-		    status             = 'active',
+		    status             = 'checkout',
 		    payment_status     = 'pending',
 		    checkout_url       = NULL,
 		    checkout_id        = NULL,
 		    checkout_expires_at = NULL
 		WHERE id = $1
+		RETURNING event_id::text
 	`
-	if _, err := r.db.Exec(ctx, q, pgtype.UUID{Bytes: uid, Valid: true}, expiresAt); err != nil {
+	var eventID string
+	if err := tx.QueryRow(ctx, q, cartUUID, expiresAt).Scan(&eventID); err != nil {
 		return fmt.Errorf("regenerating checkout: %w", err)
+	}
+
+	dedup := fmt.Sprintf("cart.checkout_armed:%s:regen:%d", id, expiresAt.UTC().Unix())
+	if err := events.EmitInternal(ctx, sqlc.New(tx), events.CartCheckoutArmed, dedup, struct {
+		CartID  string `json:"cart_id"`
+		EventID string `json:"event_id"`
+	}{CartID: id, EventID: eventID}); err != nil {
+		return fmt.Errorf("emitting cart.checkout_armed on regenerate: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit regenerate tx: %w", err)
 	}
 	return nil
 }
 
-// GetStoreCartExpirationMinutes returns the merchant-configured cart TTL
-// (used to compute new expires_at when regenerating). Falls back to 30 if
-// the lookup fails — same default the checkout package uses.
-func (r *Repository) GetStoreCartExpirationMinutes(ctx context.Context, storeID string) int {
-	uid, err := uuid.Parse(storeID)
+// GetEventCartExpirationMinutes devolve o prazo do carrinho resolvido pelo
+// EVENTO (RN-34): curto ou estendido conforme close_cart_on_event_end, com
+// fallback para o default da loja. Reusa GetEventCartSettings — a mesma query
+// que o fechamento do evento usa.
+//
+// Substitui GetStoreCartExpirationMinutes, que lia SÓ stores.cart_expiration_minutes
+// e ignorava tanto o override do evento quanto o toggle: um evento configurado
+// com 7 dias de prazo estendido dava 30 minutos ao clicar em "regerar link".
+//
+// Fallback de 1440 (24h) quando o evento não resolve — o antigo era 30 min, o
+// que sob a RN-04 (evento longo, expires_at NULL até o fechamento) é curto
+// demais para um link que o lojista acabou de mandar ao comprador.
+func (r *Repository) GetEventCartExpirationMinutes(ctx context.Context, eventID string) int {
+	const fallback = 1440
+	uid, err := uuid.Parse(eventID)
 	if err != nil {
-		return 30
+		return fallback
 	}
-	var minutes int
-	const q = `SELECT cart_expiration_minutes FROM stores WHERE id = $1`
-	if err := r.db.QueryRow(ctx, q, pgtype.UUID{Bytes: uid, Valid: true}).Scan(&minutes); err != nil {
-		return 30
+	settings, err := sqlc.New(r.db).GetEventCartSettings(ctx, pgtype.UUID{Bytes: uid, Valid: true})
+	if err != nil || settings.EffectiveCartExpirationMinutes <= 0 {
+		return fallback
 	}
-	if minutes <= 0 {
-		return 30
-	}
-	return minutes
+	return int(settings.EffectiveCartExpirationMinutes)
 }
 
 // UpdateStatus writes the CART lifecycle status (active/checkout/completed/
@@ -717,9 +763,9 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 		conditions = append(conditions, fmt.Sprintf("c.payment_status IN (%s)", strings.Join(placeholders, ",")))
 	}
 
-	if filters.LiveSessionID != nil && *filters.LiveSessionID != "" {
+	if filters.EventID != nil && *filters.EventID != "" {
 		conditions = append(conditions, fmt.Sprintf("c.event_id = $%d", argIndex))
-		args = append(args, *filters.LiveSessionID)
+		args = append(args, *filters.EventID)
 		argIndex++
 	}
 

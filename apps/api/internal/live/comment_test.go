@@ -107,7 +107,7 @@ func newCommentTestService(repo IngestRepository, core commentCore) *Service {
 
 // liveEvent returns an active live event (post-commerce rules off).
 func liveEvent() *EventOutput {
-	return &EventOutput{ID: "ev1", StoreID: "store1", Title: "Live", Type: "single", Status: "active"}
+	return &EventOutput{ID: "ev1", StoreID: "store1", Title: "Live", Status: "active"}
 }
 
 func TestService_ProcessInstagramComment_Dedup(t *testing.T) {
@@ -297,14 +297,14 @@ func TestService_ProcessInstagramComment_PostRules(t *testing.T) {
 	ctx := context.Background()
 
 	postEvent := func() *EventOutput {
-		return &EventOutput{ID: "ev1", StoreID: "store1", Title: "Post", Type: "post", Status: "active"}
+		return &EventOutput{ID: "ev1", StoreID: "store1", Title: "Post", Status: "active"}
 	}
 
 	t.Run("not in promo: replies and does not add", func(t *testing.T) {
 		repo := newFakeIngestRepo()
 		repo.products["1001"] = &ProductRow{ID: "p1", Keyword: "1001", Stock: 5, Name: "Boné"}
 		core := &fakeCommentCore{
-			session:   &SessionOutput{ID: "sess1"},
+			session:   &SessionOutput{ID: "sess1", Type: "post"},
 			event:     postEvent(),
 			whitelist: []EventProductOutput{{ProductID: "other", ProductActive: true, Stock: 5, Keyword: "2002", Name: "Caneca"}},
 		}
@@ -330,7 +330,7 @@ func TestService_ProcessInstagramComment_PostRules(t *testing.T) {
 		repo := newFakeIngestRepo()
 		repo.productsByID["p1"] = &ProductRow{ID: "p1", Keyword: "1001", Stock: 5, Price: 300, Name: "Boné"}
 		core := &fakeCommentCore{
-			session:   &SessionOutput{ID: "sess1"},
+			session:   &SessionOutput{ID: "sess1", Type: "post"},
 			event:     postEvent(),
 			whitelist: []EventProductOutput{{ProductID: "p1", ProductActive: true, Stock: 5, Keyword: "1001", Name: "Boné"}},
 			addResult: AddToCartOutput{CartID: "cart1", IsNewCart: true},
@@ -350,7 +350,7 @@ func TestService_ProcessInstagramComment_PostRules(t *testing.T) {
 	t.Run("multi-promo bare trigger asks for a keyword", func(t *testing.T) {
 		repo := newFakeIngestRepo()
 		core := &fakeCommentCore{
-			session: &SessionOutput{ID: "sess1"},
+			session: &SessionOutput{ID: "sess1", Type: "post"},
 			event:   postEvent(),
 			whitelist: []EventProductOutput{
 				{ProductID: "p1", ProductActive: true, Stock: 5, Keyword: "1001", Name: "Boné"},
@@ -379,7 +379,7 @@ func TestService_ProcessInstagramComment_PostRules(t *testing.T) {
 		repo := newFakeIngestRepo()
 		repo.products["1001"] = &ProductRow{ID: "p1", Keyword: "1001", Stock: 0, Name: "Boné"}
 		core := &fakeCommentCore{
-			session:   &SessionOutput{ID: "sess1"},
+			session:   &SessionOutput{ID: "sess1", Type: "post"},
 			event:     postEvent(),
 			whitelist: []EventProductOutput{{ProductID: "p1", ProductActive: true, Stock: 0, Keyword: "1001", Name: "Boné"}},
 		}
@@ -405,8 +405,8 @@ func TestService_ProcessInstagramComment_PostRules(t *testing.T) {
 		repo := newFakeIngestRepo()
 		repo.products["1001"] = &ProductRow{ID: "p1", Keyword: "1001", Stock: 5, Name: "Boné"}
 		core := &fakeCommentCore{
-			session:   &SessionOutput{ID: "sess1"},
-			event:     &EventOutput{ID: "ev1", StoreID: "store1", Type: "story", Status: "active"},
+			session:   &SessionOutput{ID: "sess1", Type: "story"},
+			event:     &EventOutput{ID: "ev1", StoreID: "store1", Status: "active"},
 			whitelist: []EventProductOutput{{ProductID: "other", ProductActive: true, Stock: 5, Keyword: "2002", Name: "Caneca"}},
 		}
 		s := newCommentTestService(repo, core)

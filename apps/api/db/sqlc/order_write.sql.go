@@ -349,8 +349,8 @@ func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (Order
 }
 
 const insertOrderItem = `-- name: InsertOrderItem :exec
-INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price, session_id)
+VALUES ($1, $2, $3, $4, $5, $6)
 `
 
 type InsertOrderItemParams struct {
@@ -359,8 +359,11 @@ type InsertOrderItemParams struct {
 	ProductName string      `json:"product_name"`
 	Quantity    int32       `json:"quantity"`
 	UnitPrice   int64       `json:"unit_price"`
+	SessionID   pgtype.UUID `json:"session_id"`
 }
 
+// Uma linha por (produto, sessão) — RN-29. session_id NULL quando a adição não
+// veio de uma transmissão.
 func (q *Queries) InsertOrderItem(ctx context.Context, arg InsertOrderItemParams) error {
 	_, err := q.db.Exec(ctx, insertOrderItem,
 		arg.OrderID,
@@ -368,6 +371,7 @@ func (q *Queries) InsertOrderItem(ctx context.Context, arg InsertOrderItemParams
 		arg.ProductName,
 		arg.Quantity,
 		arg.UnitPrice,
+		arg.SessionID,
 	)
 	return err
 }

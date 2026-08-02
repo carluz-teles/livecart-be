@@ -1,6 +1,7 @@
 package live
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -19,8 +20,37 @@ func NewHandler(service *Service, validate *validator.Validate) *Handler {
 	return &Handler{service: service, validate: validate}
 }
 
+// parseTimestampField converte um campo ISO8601/RFC3339 opcional do corpo.
+// Ponteiro nil ou string vazia devolvem nil sem erro — os dois significam
+// "sem valor" para o chamador, que é quem sabe se isso é "não mexer" (edição)
+// ou "não informado" (criação). Existe para as três rotas de janela não
+// repetirem o mesmo time.Parse com mensagens diferentes.
+func parseTimestampField(raw *string, field string) (*time.Time, error) {
+	if raw == nil || *raw == "" {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339, *raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s format, use ISO8601/RFC3339", field)
+	}
+	return &t, nil
+}
+
+// RegisterRoutes monta o domínio em DOIS prefixos: /events, que é o
+// vocabulário oficial (RN-19 — "live" significando a campanha é o nome que
+// engana), e /lives, mantido porque o frontend inteiro ainda o chama e uma
+// troca de rota é um deploy acoplado entre dois repositórios.
+//
+// São os MESMOS handlers, não uma cópia: registrar duas árvores independentes
+// criaria dois lugares para corrigir cada rota nova, e a que ninguém lembrasse
+// de atualizar responderia 404 só num dos prefixos.
 func (h *Handler) RegisterRoutes(router fiber.Router) {
-	g := router.Group("/lives")
+	h.registerUnder(router, "/events")
+	h.registerUnder(router, "/lives")
+}
+
+func (h *Handler) registerUnder(router fiber.Router, prefix string) {
+	g := router.Group(prefix)
 	g.Get("/", h.List)
 	g.Get("/stats", h.GetStats)
 	g.Post("/", h.Create)
@@ -33,6 +63,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 
 	// Event details endpoints
 	g.Get("/:id/event-stats", h.GetEventStats)
+	g.Get("/:id/session-metrics", h.GetSessionMetrics)
 	g.Get("/:id/pulse", h.GetPulse)
 	g.Get("/:id/carts", h.ListCarts)
 	g.Get("/:id/comments", h.ListComments)
@@ -48,12 +79,25 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Post("/:id/platforms", h.AddPlatform)
 	g.Delete("/:id/platforms/:platformLiveId", h.RemovePlatform)
 
-	// Live Mode - Active Product and Processing Control
+	// Modo Live POR SESSÃO (D17) — a unidade nova.
+	g.Get("/:id/sessions/:sessionId/live-mode", h.GetSessionLiveModeState)
+	g.Patch("/:id/sessions/:sessionId/active-product", h.SetSessionActiveProduct)
+	g.Patch("/:id/sessions/:sessionId/pause-processing", h.SetSessionProcessingPaused)
+
+	// Modo Live por EVENTO — rota legada do painel atual, que só conhece o
+	// eventId. Aplica em todas as sessões vivas e lê da mais recente.
 	g.Get("/:id/live-mode", h.GetLiveModeState)
 	g.Patch("/:id/active-product", h.SetActiveProduct)
 	g.Patch("/:id/pause-processing", h.SetProcessingPaused)
 
-	// Event Products (Whitelist)
+	// Whitelist da SESSÃO (D15/N2) — a unidade nova. Chaveada por productId.
+	g.Get("/:id/sessions/:sessionId/whitelist", h.ListSessionProducts)
+	g.Post("/:id/sessions/:sessionId/whitelist", h.AddSessionProduct)
+	g.Put("/:id/sessions/:sessionId/whitelist/:productId", h.UpdateSessionProduct)
+	g.Delete("/:id/sessions/:sessionId/whitelist/:productId", h.DeleteSessionProduct)
+
+	// Whitelist por EVENTO — rota legada mantida para o frontend atual. Cada
+	// operação é aplicada em TODAS as sessões do evento; a leitura é a união.
 	g.Get("/:id/whitelist", h.ListEventProducts)
 	g.Post("/:id/whitelist", h.AddEventProduct)
 	g.Put("/:id/whitelist/:productId", h.UpdateEventProduct)
@@ -90,14 +134,17 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 
 	storeID := c.Locals("store_id").(string)
 
-	// Parse scheduling time if provided
-	var scheduledAt *time.Time
-	if req.ScheduledAt != nil && *req.ScheduledAt != "" {
-		t, err := time.Parse(time.RFC3339, *req.ScheduledAt)
-		if err != nil {
-			return httpx.BadRequest(c, "invalid scheduledAt format, use ISO8601/RFC3339")
-		}
-		scheduledAt = &t
+	scheduledAt, err := parseTimestampField(req.ScheduledAt, "scheduledAt")
+	if err != nil {
+		return httpx.BadRequest(c, err.Error())
+	}
+	startsAt, err := parseTimestampField(req.StartsAt, "startsAt")
+	if err != nil {
+		return httpx.BadRequest(c, err.Error())
+	}
+	endsAt, err := parseTimestampField(req.EndsAt, "endsAt")
+	if err != nil {
+		return httpx.BadRequest(c, err.Error())
 	}
 
 	output, err := h.service.Create(c.Context(), CreateLiveInput{
@@ -112,7 +159,11 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		SendOnLiveEnd:          req.SendOnLiveEnd,
 		PixDiscountPercent:     req.PixDiscountPercent,
 		ScheduledAt:            scheduledAt,
+		StartsAt:               startsAt,
+		EndsAt:                 endsAt,
 		Description:            req.Description,
+
+		WaitlistNotifiedTTLMinutes: req.WaitlistNotifiedTtlMinutes,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -121,7 +172,6 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 	return httpx.Created(c, CreateLiveResponse{
 		ID:        output.ID,
 		Title:     output.Title,
-		Type:      output.Type,
 		Platform:  output.Platform,
 		Status:    output.Status,
 		CreatedAt: output.CreatedAt,
@@ -152,24 +202,16 @@ func (h *Handler) CreatePost(c *fiber.Ctx) error {
 
 	storeID := c.Locals("store_id").(string)
 
-	var startsAt, endsAt *time.Time
-	if req.StartsAt != nil && *req.StartsAt != "" {
-		t, err := time.Parse(time.RFC3339, *req.StartsAt)
-		if err != nil {
-			return httpx.BadRequest(c, "invalid startsAt format, use ISO8601/RFC3339")
-		}
-		startsAt = &t
+	startsAt, err := parseTimestampField(req.StartsAt, "startsAt")
+	if err != nil {
+		return httpx.BadRequest(c, err.Error())
 	}
-	if req.EndsAt != nil && *req.EndsAt != "" {
-		t, err := time.Parse(time.RFC3339, *req.EndsAt)
-		if err != nil {
-			return httpx.BadRequest(c, "invalid endsAt format, use ISO8601/RFC3339")
-		}
-		endsAt = &t
+	endsAt, err := parseTimestampField(req.EndsAt, "endsAt")
+	if err != nil {
+		return httpx.BadRequest(c, err.Error())
 	}
-	if startsAt != nil && endsAt != nil && !endsAt.After(*startsAt) {
-		return httpx.BadRequest(c, "endsAt must be after startsAt")
-	}
+	// A ordem starts_at < ends_at é validada no service, junto com a
+	// obrigatoriedade de ends_at — uma regra, um lugar.
 
 	output, err := h.service.CreatePostEvent(c.Context(), CreatePostInput{
 		StoreID:                storeID,
@@ -191,7 +233,6 @@ func (h *Handler) CreatePost(c *fiber.Ctx) error {
 	return httpx.Created(c, CreateLiveResponse{
 		ID:        output.ID,
 		Title:     output.Title,
-		Type:      output.Type,
 		Platform:  output.Platform,
 		Status:    output.Status,
 		CreatedAt: output.CreatedAt,
@@ -317,11 +358,33 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 		return httpx.ValidationError(c, err)
 	}
 
+	// Janela: presente no corpo = editar; ausente = preservar. É o campo
+	// (ponteiro não-nil) que decide, não o valor — string vazia significa
+	// "limpar", e por isso não dá para inferir a intenção só do time.Time.
+	window := EventWindowUpdate{
+		SetStartsAt: req.StartsAt != nil,
+		SetEndsAt:   req.EndsAt != nil,
+	}
+	var err error
+	if window.SetStartsAt {
+		if window.StartsAt, err = parseTimestampField(req.StartsAt, "startsAt"); err != nil {
+			return httpx.BadRequest(c, err.Error())
+		}
+	}
+	if window.SetEndsAt {
+		if window.EndsAt, err = parseTimestampField(req.EndsAt, "endsAt"); err != nil {
+			return httpx.BadRequest(c, err.Error())
+		}
+	}
+
 	output, err := h.service.Update(c.Context(), UpdateLiveInput{
 		StoreID:            storeID,
 		ID:                 id,
 		Title:              req.Title,
 		PixDiscountPercent: req.PixDiscountPercent,
+		Window:             window,
+
+		WaitlistNotifiedTTLMinutes: req.WaitlistNotifiedTtlMinutes,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
@@ -396,7 +459,7 @@ func (h *Handler) End(c *fiber.Ctx) error {
 
 // GetStats godoc
 // @Summary      Get live statistics
-// @Description  Returns aggregated statistics for all live events in the store
+// @Description  Returns aggregated statistics for all events in the store
 // @Tags         lives
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
@@ -412,6 +475,8 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, LiveStatsResponse{
+		TotalEvents:  output.TotalLives,
+		ActiveEvents: output.ActiveLives,
 		TotalLives:   output.TotalLives,
 		ActiveLives:  output.ActiveLives,
 		TotalOrders:  output.TotalOrders,
@@ -453,6 +518,7 @@ func (h *Handler) CreateSession(c *fiber.Ctx) error {
 	output, err := h.service.CreateSession(c.Context(), CreateSessionInput{
 		EventID:        eventID,
 		StoreID:        storeID,
+		Type:           req.Type,
 		Platform:       req.Platform,
 		PlatformLiveID: req.PlatformLiveID,
 	})
@@ -463,6 +529,7 @@ func (h *Handler) CreateSession(c *fiber.Ctx) error {
 	return httpx.Created(c, SessionResponse{
 		ID:        output.ID,
 		EventID:   output.EventID,
+		Type:      output.Type,
 		Status:    output.Status,
 		CreatedAt: output.CreatedAt,
 		UpdatedAt: output.CreatedAt,
@@ -657,7 +724,6 @@ func toLiveResponse(o LiveOutput) LiveResponse {
 	return LiveResponse{
 		ID:                     o.ID,
 		Title:                  o.Title,
-		Type:                   o.Type,
 		Platform:               o.Platform,
 		PlatformLiveID:         o.PlatformLiveID,
 		Status:                 o.Status,
@@ -675,9 +741,42 @@ func toLiveResponse(o LiveOutput) LiveResponse {
 		Description:            o.Description,
 		ProductCount:           o.ProductCount,
 		UpsellCount:            o.UpsellCount,
+		SessionTypes:           nonNilStrings(o.SessionTypes),
 		CreatedAt:              o.CreatedAt,
 		UpdatedAt:              o.UpdatedAt,
+
+		WaitlistNotifiedTtlMinutes: o.WaitlistNotifiedTTLMinutes,
 	}
+}
+
+// nonNilStrings troca nil por lista vazia. O consumidor é o frontend, e em
+// JSON `null` e `[]` levam a caminhos diferentes: `[]` é "este evento não tem
+// sessão", `null` seria "o backend não sabe". A tela precisa distinguir os
+// dois, então nunca emitimos null.
+func nonNilStrings(in []string) []string {
+	if in == nil {
+		return []string{}
+	}
+	return in
+}
+
+// distinctSessionTypes extrai os tipos distintos das sessões já carregadas,
+// preservando a ordem de primeira aparição. Existe para o DETALHE não precisar
+// de uma segunda consulta: as sessões já vieram, o tipo já está em cada uma.
+func distinctSessionTypes(sessions []SessionOutput) []string {
+	seen := make(map[string]struct{}, len(sessions))
+	out := make([]string, 0, len(sessions))
+	for _, s := range sessions {
+		if s.Type == "" {
+			continue
+		}
+		if _, dup := seen[s.Type]; dup {
+			continue
+		}
+		seen[s.Type] = struct{}{}
+		out = append(out, s.Type)
+	}
+	return out
 }
 
 func toEventResponse(o EventOutput) EventResponse {
@@ -702,27 +801,25 @@ func toEventResponse(o EventOutput) EventResponse {
 		}
 
 		sessions[i] = SessionResponse{
-			ID:            s.ID,
-			EventID:       s.EventID,
-			Status:        s.Status,
-			StartedAt:     s.StartedAt,
-			EndedAt:       s.EndedAt,
-			TotalComments: s.TotalComments,
-			TotalCarts:    s.TotalCarts,
-			PaidCarts:     s.PaidCarts,
-			TotalRevenue:  s.TotalRevenue,
-			PaidRevenue:   s.PaidRevenue,
-			Platforms:     platforms,
-			Comments:      comments,
-			CreatedAt:     s.CreatedAt,
-			UpdatedAt:     s.UpdatedAt,
+			ID:                     s.ID,
+			EventID:                s.EventID,
+			Type:                   s.Type,
+			Status:                 s.Status,
+			SequenceOrder:          s.SequenceOrder,
+			StartedAt:              s.StartedAt,
+			EndedAt:                s.EndedAt,
+			TotalComments:          s.TotalComments,
+			SessionRevenueResponse: newSessionRevenueResponse(s.SessionRevenueOutput),
+			Platforms:              platforms,
+			Comments:               comments,
+			CreatedAt:              s.CreatedAt,
+			UpdatedAt:              s.UpdatedAt,
 		}
 	}
 
 	return EventResponse{
 		ID:                     o.ID,
 		Title:                  o.Title,
-		Type:                   o.Type,
 		Status:                 EffectiveStatus(o.Status, o.ScheduledAt, o.EndsAt),
 		TotalOrders:            o.TotalOrders,
 		CloseCartOnEventEnd:    o.CloseCartOnEventEnd,
@@ -736,8 +833,11 @@ func toEventResponse(o EventOutput) EventResponse {
 		ProductCount:           o.ProductCount,
 		UpsellCount:            o.UpsellCount,
 		Sessions:               sessions,
+		SessionTypes:           distinctSessionTypes(o.Sessions),
 		CreatedAt:              o.CreatedAt,
 		UpdatedAt:              o.UpdatedAt,
+
+		WaitlistNotifiedTtlMinutes: o.WaitlistNotifiedTTLMinutes,
 	}
 }
 
@@ -775,6 +875,71 @@ func (h *Handler) GetEventStats(c *fiber.Ctx) error {
 		ProjectedRevenue:  output.ProjectedRevenue,
 		ConfirmedRevenue:  output.ConfirmedRevenue,
 	})
+}
+
+// GetSessionMetrics godoc
+// @Summary      Get per-session metrics for an event
+// @Description  Métrica em dois níveis (Fatia 5): receita confirmada (pedidos selados) e projetada (carrinhos abertos) quebrada por transmissão, mais o balde "sem transmissão". A soma de sessions + unattributed bate exatamente com o confirmed/projected de event-stats.
+// @Tags         lives
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live event UUID"
+// @Success      200 {object} httpx.Envelope{data=EventSessionMetricsResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/session-metrics [get]
+// @Security     BearerAuth
+func (h *Handler) GetSessionMetrics(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	output, err := h.service.GetSessionMetrics(c.UserContext(), eventID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, newEventSessionMetricsResponse(output))
+}
+
+func newEventSessionMetricsResponse(o EventSessionMetricsOutput) EventSessionMetricsResponse {
+	sessions := make([]SessionMetricsResponse, len(o.Sessions))
+	for i, s := range o.Sessions {
+		id := s.SessionID
+		sessions[i] = SessionMetricsResponse{
+			SessionID:              &id,
+			SequenceOrder:          s.SequenceOrder,
+			Type:                   s.Type,
+			Status:                 s.Status,
+			AttributionSource:      s.AttributionSource,
+			SessionRevenueResponse: newSessionRevenueResponse(s.SessionRevenueOutput),
+		}
+	}
+
+	resp := EventSessionMetricsResponse{
+		EventID:                o.EventID,
+		ConfirmedRevenue:       o.ConfirmedRevenue,
+		ProjectedRevenue:       o.ProjectedRevenue,
+		Sessions:               sessions,
+		AttributionCutoverAt:   o.AttributionCutoverAt,
+		AttributionCutoverNote: o.AttributionCutoverNote,
+	}
+	if o.Unattributed != nil {
+		// sessionId nulo é o sinal de "sem transmissão" para o painel.
+		resp.Unattributed = &SessionMetricsResponse{
+			SessionRevenueResponse: newSessionRevenueResponse(o.Unattributed.SessionRevenueOutput),
+		}
+	}
+	return resp
+}
+
+func newSessionRevenueResponse(o SessionRevenueOutput) SessionRevenueResponse {
+	return SessionRevenueResponse{
+		PaidCarts:        o.PaidCarts,
+		SoldUnits:        o.SoldUnits,
+		ConfirmedRevenue: o.ConfirmedRevenue,
+		OpenCarts:        o.OpenCarts,
+		ProjectedUnits:   o.ProjectedUnits,
+		ProjectedRevenue: o.ProjectedRevenue,
+	}
 }
 
 // ListCarts godoc
@@ -1074,6 +1239,7 @@ func (h *Handler) SetProcessingPaused(c *fiber.Ctx) error {
 
 func toLiveModeStateResponse(state *LiveModeStateOutput) LiveModeStateResponse {
 	resp := LiveModeStateResponse{
+		SessionID:        state.SessionID,
 		ProcessingPaused: state.ProcessingPaused,
 	}
 
@@ -1192,7 +1358,7 @@ func (h *Handler) UpdateEventProduct(c *fiber.Ctx) error {
 	}
 
 	output, err := h.service.UpdateEventProduct(c.Context(), UpdateEventProductInput{
-		ID:           productID,
+		ProductID:    productID,
 		EventID:      eventID,
 		StoreID:      storeID,
 		SpecialPrice: req.SpecialPrice,

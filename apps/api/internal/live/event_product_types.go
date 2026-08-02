@@ -57,9 +57,11 @@ type AddEventProductInput struct {
 	Featured     bool
 }
 
-// UpdateEventProductInput is the input for updating an event product
+// UpdateEventProductInput is the input for updating an event product.
+// A chave é o PRODUTO, não o id da linha da whitelist — ver o comentário em
+// Service.UpdateEventProduct.
 type UpdateEventProductInput struct {
-	ID           string
+	ProductID    string
 	EventID      string
 	StoreID      string
 	SpecialPrice *int64
@@ -163,22 +165,4 @@ type EventUpsellOutput struct {
 	Stock           int32
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
-}
-
-// =============================================================================
-// PRODUCT VALIDATION
-// =============================================================================
-
-// ProductValidationResult contains the result of validating a product for an event
-type ProductValidationResult struct {
-	ProductID      string
-	ProductName    string
-	Keyword        string
-	OriginalPrice  int64
-	EffectivePrice int64
-	SpecialPrice   *int64
-	MaxQuantity    *int32
-	Stock          int32
-	IsAllowed      bool
-	IsActive       bool
 }

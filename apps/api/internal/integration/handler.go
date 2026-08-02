@@ -87,6 +87,13 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Post("/instagram/reels", h.CreateInstagramReel)
 	g.Post("/instagram/stories", h.CreateInstagramStory)
 
+	// Publicacao AGENDADA (RN-31). A Graph nao tem agendamento nativo, entao o
+	// agendador e nosso: o asset fica retido e o container so e aberto no
+	// disparo, porque ele expira em 24h.
+	g.Post("/instagram/scheduled-publications", h.ScheduleInstagramPublish)
+	g.Get("/instagram/scheduled-publications", h.ListInstagramScheduledPublications)
+	g.Delete("/instagram/scheduled-publications/:jobId", h.CancelInstagramScheduledPublication)
+
 	// Instagram comment moderation (reply / hide / delete)
 	g.Post("/instagram/comments/:commentId/reply", h.ReplyInstagramComment)
 	g.Post("/instagram/comments/:commentId/hide", h.HideInstagramComment)
@@ -483,13 +490,11 @@ func (h *Handler) UploadInstagramMedia(c *fiber.Ctx) error {
 	if err != nil {
 		return httpx.BadRequest(c, "file is required")
 	}
-	// Instagram content publishing accepts JPEG images up to 8MB.
-	if file.Size > 8*1024*1024 {
-		return httpx.BadRequest(c, "file too large, maximum size is 8MB")
-	}
 	contentType := file.Header.Get("Content-Type")
-	if contentType != "image/jpeg" && contentType != "image/jpg" {
-		return httpx.BadRequest(c, "invalid file type — Instagram requires a JPEG image")
+	// Limites da Meta centralizados em validateInstagramAsset: estavam
+	// repetidos aqui e nos tres publishers, com numeros diferentes por especie.
+	if err := validateInstagramAsset("post", contentType, file.Size); err != nil {
+		return err
 	}
 
 	src, err := file.Open()
@@ -594,12 +599,9 @@ func (h *Handler) CreateInstagramReel(c *fiber.Ctx) error {
 	if err != nil {
 		return httpx.BadRequest(c, "file is required")
 	}
-	if file.Size > 300*1024*1024 {
-		return httpx.BadRequest(c, "video too large, maximum size is 300MB")
-	}
 	ct := file.Header.Get("Content-Type")
-	if ct != "video/mp4" && ct != "video/quicktime" {
-		return httpx.BadRequest(c, "invalid file type — Instagram Reels require an MP4 video")
+	if err := validateInstagramAsset("reel", ct, file.Size); err != nil {
+		return err
 	}
 
 	// productIds is sent as a JSON array string in the multipart form.
@@ -691,21 +693,10 @@ func (h *Handler) CreateInstagramStory(c *fiber.Ctx) error {
 		return httpx.BadRequest(c, "file is required")
 	}
 	ct := file.Header.Get("Content-Type")
-	var isVideo bool
-	switch ct {
-	case "image/jpeg":
-		isVideo = false
-		if file.Size > 8*1024*1024 {
-			return httpx.BadRequest(c, "image too large, maximum size is 8MB")
-		}
-	case "video/mp4", "video/quicktime":
-		isVideo = true
-		if file.Size > 100*1024*1024 {
-			return httpx.BadRequest(c, "video too large, maximum size is 100MB")
-		}
-	default:
-		return httpx.BadRequest(c, "invalid file type — send a JPEG photo or an MP4 video")
+	if err := validateInstagramAsset("story", ct, file.Size); err != nil {
+		return err
 	}
+	isVideo := instagramAssetIsVideo(ct)
 
 	var productIDs []string
 	if raw := c.FormValue("productIds"); raw != "" {

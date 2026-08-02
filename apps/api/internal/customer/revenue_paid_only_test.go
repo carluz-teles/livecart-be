@@ -123,7 +123,7 @@ func seedF4Cust(t *testing.T) f4CustSeed {
 
 	var eventID string
 	if err := custTestPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title) VALUES ($1, 'ended', 'F4C Event') RETURNING id::text`, storeID,
+		`INSERT INTO live_events (store_id, status, title, ends_at) VALUES ($1, 'ended', 'F4C Event', now()) RETURNING id::text`, storeID,
 	).Scan(&eventID); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}

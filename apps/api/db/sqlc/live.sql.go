@@ -15,7 +15,7 @@ const addPlatformToSession = `-- name: AddPlatformToSession :one
 
 INSERT INTO live_session_platforms (session_id, platform, platform_live_id)
 VALUES ($1, $2, $3)
-RETURNING id, session_id, platform, platform_live_id, added_at
+RETURNING id, session_id, platform, platform_live_id, added_at, media_permalink, media_thumbnail_url, media_caption, webhook_active, released_at
 `
 
 type AddPlatformToSessionParams struct {
@@ -36,6 +36,11 @@ func (q *Queries) AddPlatformToSession(ctx context.Context, arg AddPlatformToSes
 		&i.Platform,
 		&i.PlatformLiveID,
 		&i.AddedAt,
+		&i.MediaPermalink,
+		&i.MediaThumbnailUrl,
+		&i.MediaCaption,
+		&i.WebhookActive,
+		&i.ReleasedAt,
 	)
 	return i, err
 }
@@ -53,14 +58,15 @@ func (q *Queries) CountPlatformsBySession(ctx context.Context, sessionID pgtype.
 
 const createLiveSession = `-- name: CreateLiveSession :one
 
-INSERT INTO live_sessions (event_id, status, sequence_order)
-VALUES ($1, $2, COALESCE((SELECT MAX(sequence_order) FROM live_sessions WHERE event_id = $1), 0) + 1)
-RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order
+INSERT INTO live_sessions (event_id, status, type, sequence_order)
+VALUES ($1, $2, $3, COALESCE((SELECT MAX(sequence_order) FROM live_sessions WHERE event_id = $1), 0) + 1)
+RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused, publish_at, attribution_source
 `
 
 type CreateLiveSessionParams struct {
 	EventID pgtype.UUID `json:"event_id"`
 	Status  string      `json:"status"`
+	Type    string      `json:"type"`
 }
 
 // =============================================================================
@@ -68,8 +74,9 @@ type CreateLiveSessionParams struct {
 // =============================================================================
 // sequence_order is MAX+1 per event, computed atomically. The unique index
 // (event_id, sequence_order) catches the rare concurrent-create race.
+// type (D3) é a natureza da transmissão: live|post|reel|story.
 func (q *Queries) CreateLiveSession(ctx context.Context, arg CreateLiveSessionParams) (LiveSession, error) {
-	row := q.db.QueryRow(ctx, createLiveSession, arg.EventID, arg.Status)
+	row := q.db.QueryRow(ctx, createLiveSession, arg.EventID, arg.Status, arg.Type)
 	var i LiveSession
 	err := row.Scan(
 		&i.ID,
@@ -81,6 +88,11 @@ func (q *Queries) CreateLiveSession(ctx context.Context, arg CreateLiveSessionPa
 		&i.UpdatedAt,
 		&i.EventID,
 		&i.SequenceOrder,
+		&i.Type,
+		&i.CurrentActiveProductID,
+		&i.ProcessingPaused,
+		&i.PublishAt,
+		&i.AttributionSource,
 	)
 	return i, err
 }
@@ -89,7 +101,7 @@ const endLiveSession = `-- name: EndLiveSession :one
 UPDATE live_sessions
 SET status = 'ended', ended_at = now(), updated_at = now()
 WHERE id = $1
-RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order
+RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused, publish_at, attribution_source
 `
 
 func (q *Queries) EndLiveSession(ctx context.Context, id pgtype.UUID) (LiveSession, error) {
@@ -105,12 +117,17 @@ func (q *Queries) EndLiveSession(ctx context.Context, id pgtype.UUID) (LiveSessi
 		&i.UpdatedAt,
 		&i.EventID,
 		&i.SequenceOrder,
+		&i.Type,
+		&i.CurrentActiveProductID,
+		&i.ProcessingPaused,
+		&i.PublishAt,
+		&i.AttributionSource,
 	)
 	return i, err
 }
 
 const getActiveSessionByEvent = `-- name: GetActiveSessionByEvent :one
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order FROM live_sessions
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused, publish_at, attribution_source FROM live_sessions
 WHERE event_id = $1 AND status IN ('active', 'live')
 ORDER BY created_at DESC
 LIMIT 1
@@ -129,12 +146,66 @@ func (q *Queries) GetActiveSessionByEvent(ctx context.Context, eventID pgtype.UU
 		&i.UpdatedAt,
 		&i.EventID,
 		&i.SequenceOrder,
+		&i.Type,
+		&i.CurrentActiveProductID,
+		&i.ProcessingPaused,
+		&i.PublishAt,
+		&i.AttributionSource,
+	)
+	return i, err
+}
+
+const getEventLiveModeStateFromSessions = `-- name: GetEventLiveModeStateFromSessions :one
+SELECT
+    ls.id AS session_id,
+    ls.processing_paused,
+    ls.current_active_product_id,
+    p.name AS active_product_name,
+    p.keyword AS active_product_keyword,
+    p.price AS active_product_price,
+    p.image_url AS active_product_image_url
+FROM live_sessions ls
+JOIN live_events e ON e.id = ls.event_id
+LEFT JOIN products p ON p.id = ls.current_active_product_id
+WHERE e.id = $1 AND e.store_id = $2
+ORDER BY (ls.status IN ('active', 'live')) DESC, ls.sequence_order DESC
+LIMIT 1
+`
+
+type GetEventLiveModeStateFromSessionsParams struct {
+	ID      pgtype.UUID `json:"id"`
+	StoreID pgtype.UUID `json:"store_id"`
+}
+
+type GetEventLiveModeStateFromSessionsRow struct {
+	SessionID              pgtype.UUID `json:"session_id"`
+	ProcessingPaused       bool        `json:"processing_paused"`
+	CurrentActiveProductID pgtype.UUID `json:"current_active_product_id"`
+	ActiveProductName      pgtype.Text `json:"active_product_name"`
+	ActiveProductKeyword   pgtype.Text `json:"active_product_keyword"`
+	ActiveProductPrice     pgtype.Int8 `json:"active_product_price"`
+	ActiveProductImageUrl  pgtype.Text `json:"active_product_image_url"`
+}
+
+// Estado do modo live do EVENTO, lido da sessão viva mais recente. É o que a
+// rota legada devolve enquanto o painel ainda não é por sessão.
+func (q *Queries) GetEventLiveModeStateFromSessions(ctx context.Context, arg GetEventLiveModeStateFromSessionsParams) (GetEventLiveModeStateFromSessionsRow, error) {
+	row := q.db.QueryRow(ctx, getEventLiveModeStateFromSessions, arg.ID, arg.StoreID)
+	var i GetEventLiveModeStateFromSessionsRow
+	err := row.Scan(
+		&i.SessionID,
+		&i.ProcessingPaused,
+		&i.CurrentActiveProductID,
+		&i.ActiveProductName,
+		&i.ActiveProductKeyword,
+		&i.ActiveProductPrice,
+		&i.ActiveProductImageUrl,
 	)
 	return i, err
 }
 
 const getLiveSessionByID = `-- name: GetLiveSessionByID :one
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order FROM live_sessions WHERE id = $1
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused, publish_at, attribution_source FROM live_sessions WHERE id = $1
 `
 
 func (q *Queries) GetLiveSessionByID(ctx context.Context, id pgtype.UUID) (LiveSession, error) {
@@ -150,12 +221,17 @@ func (q *Queries) GetLiveSessionByID(ctx context.Context, id pgtype.UUID) (LiveS
 		&i.UpdatedAt,
 		&i.EventID,
 		&i.SequenceOrder,
+		&i.Type,
+		&i.CurrentActiveProductID,
+		&i.ProcessingPaused,
+		&i.PublishAt,
+		&i.AttributionSource,
 	)
 	return i, err
 }
 
 const getLiveSessionByIDAndEvent = `-- name: GetLiveSessionByIDAndEvent :one
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order FROM live_sessions WHERE id = $1 AND event_id = $2
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused, publish_at, attribution_source FROM live_sessions WHERE id = $1 AND event_id = $2
 `
 
 type GetLiveSessionByIDAndEventParams struct {
@@ -176,37 +252,70 @@ func (q *Queries) GetLiveSessionByIDAndEvent(ctx context.Context, arg GetLiveSes
 		&i.UpdatedAt,
 		&i.EventID,
 		&i.SequenceOrder,
+		&i.Type,
+		&i.CurrentActiveProductID,
+		&i.ProcessingPaused,
+		&i.PublishAt,
+		&i.AttributionSource,
 	)
 	return i, err
 }
 
-const getPlatformByLiveID = `-- name: GetPlatformByLiveID :one
-SELECT id, session_id, platform, platform_live_id, added_at FROM live_session_platforms WHERE platform_live_id = $1
+const getMetricCutover = `-- name: GetMetricCutover :one
+
+SELECT key, effective_at, note
+FROM metric_cutovers
+WHERE key = $1
 `
 
-func (q *Queries) GetPlatformByLiveID(ctx context.Context, platformLiveID string) (LiveSessionPlatform, error) {
-	row := q.db.QueryRow(ctx, getPlatformByLiveID, platformLiveID)
-	var i LiveSessionPlatform
-	err := row.Scan(
-		&i.ID,
-		&i.SessionID,
-		&i.Platform,
-		&i.PlatformLiveID,
-		&i.AddedAt,
-	)
+type GetMetricCutoverRow struct {
+	Key         string             `json:"key"`
+	EffectiveAt pgtype.Timestamptz `json:"effective_at"`
+	Note        string             `json:"note"`
+}
+
+// =============================================================================
+// MARCADOR DE CORTE DA ATRIBUIÇÃO (D26 / 000121)
+// =============================================================================
+// O instante em que uma métrica mudou de definição. Sem chave conhecida a query
+// devolve pgx.ErrNoRows e o chamador segue sem marcador — a métrica continua
+// respondendo, só sem a ressalva. Falhar aqui derrubaria o relatório inteiro
+// por causa de uma nota de rodapé.
+func (q *Queries) GetMetricCutover(ctx context.Context, key string) (GetMetricCutoverRow, error) {
+	row := q.db.QueryRow(ctx, getMetricCutover, key)
+	var i GetMetricCutoverRow
+	err := row.Scan(&i.Key, &i.EffectiveAt, &i.Note)
 	return i, err
 }
 
 const getSessionByPlatformLiveID = `-- name: GetSessionByPlatformLiveID :one
-SELECT ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.created_at, ls.updated_at, ls.event_id, ls.sequence_order
+SELECT ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.created_at, ls.updated_at, ls.event_id, ls.sequence_order, ls.type, ls.current_active_product_id, ls.processing_paused, ls.publish_at, ls.attribution_source
 FROM live_sessions ls
 JOIN live_session_platforms lsp ON lsp.session_id = ls.id
-WHERE lsp.platform_live_id = $1 AND ls.status IN ('active', 'live')
-ORDER BY ls.created_at DESC
+WHERE lsp.platform_live_id = $1
+ORDER BY (lsp.released_at IS NULL) DESC, lsp.added_at DESC, lsp.id DESC
 LIMIT 1
 `
 
-// Find active live session by any associated platform_live_id
+// Resolve a sessão dona de uma mídia. SEM filtro de status (D18/D20).
+//
+// O filtro ls.status IN ('active','live') que vivia aqui era a única coisa que
+// impedia venda em transmissão encerrada — e, ao mesmo tempo, a causa do
+// descarte SILENCIOSO que é o achado mais caro do ANALISE_LOGS_PRODUCAO: sem
+// linha, ProcessInstagramComment logava um Warn e sumia com o comentário, sem
+// registro para o lojista e sem resposta ao comprador.
+//
+// A decisão saiu daqui e virou live.SessionAcceptsPurchase, aplicada depois da
+// resolução. Resolver SEMPRE é o que permite responder.
+//
+// ⚠️ A ordenação tem de ser BYTE A BYTE a mesma de GetEventByPlatformLiveID.
+// São duas resoluções independentes pela MESMA chave, e o comentário é gravado
+// com o session_id de uma e o event_id da outra: se elegerem linhas de
+// live_session_platforms diferentes, o comentário fica com a sessão de uma
+// campanha e o evento de outra. Ordenando pelas mesmas colunas de lsp — e
+// desempatando por lsp.id, que é único — as duas elegem a mesma linha por
+// construção. Hoje isso é inócuo (a UNIQUE global garante uma linha só); a
+// ambiguidade nasce com a unique parcial da 000117.
 func (q *Queries) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID string) (LiveSession, error) {
 	row := q.db.QueryRow(ctx, getSessionByPlatformLiveID, platformLiveID)
 	var i LiveSession
@@ -220,6 +329,59 @@ func (q *Queries) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID
 		&i.UpdatedAt,
 		&i.EventID,
 		&i.SequenceOrder,
+		&i.Type,
+		&i.CurrentActiveProductID,
+		&i.ProcessingPaused,
+		&i.PublishAt,
+		&i.AttributionSource,
+	)
+	return i, err
+}
+
+const getSessionLiveModeState = `-- name: GetSessionLiveModeState :one
+SELECT
+    ls.id,
+    ls.event_id,
+    ls.processing_paused,
+    ls.current_active_product_id,
+    p.name AS active_product_name,
+    p.keyword AS active_product_keyword,
+    p.price AS active_product_price,
+    p.image_url AS active_product_image_url
+FROM live_sessions ls
+JOIN live_events e ON e.id = ls.event_id
+LEFT JOIN products p ON p.id = ls.current_active_product_id
+WHERE ls.id = $1 AND e.store_id = $2
+`
+
+type GetSessionLiveModeStateParams struct {
+	ID      pgtype.UUID `json:"id"`
+	StoreID pgtype.UUID `json:"store_id"`
+}
+
+type GetSessionLiveModeStateRow struct {
+	ID                     pgtype.UUID `json:"id"`
+	EventID                pgtype.UUID `json:"event_id"`
+	ProcessingPaused       bool        `json:"processing_paused"`
+	CurrentActiveProductID pgtype.UUID `json:"current_active_product_id"`
+	ActiveProductName      pgtype.Text `json:"active_product_name"`
+	ActiveProductKeyword   pgtype.Text `json:"active_product_keyword"`
+	ActiveProductPrice     pgtype.Int8 `json:"active_product_price"`
+	ActiveProductImageUrl  pgtype.Text `json:"active_product_image_url"`
+}
+
+func (q *Queries) GetSessionLiveModeState(ctx context.Context, arg GetSessionLiveModeStateParams) (GetSessionLiveModeStateRow, error) {
+	row := q.db.QueryRow(ctx, getSessionLiveModeState, arg.ID, arg.StoreID)
+	var i GetSessionLiveModeStateRow
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.ProcessingPaused,
+		&i.CurrentActiveProductID,
+		&i.ActiveProductName,
+		&i.ActiveProductKeyword,
+		&i.ActiveProductPrice,
+		&i.ActiveProductImageUrl,
 	)
 	return i, err
 }
@@ -236,7 +398,7 @@ func (q *Queries) IncrementLiveSessionComments(ctx context.Context, id pgtype.UU
 }
 
 const listPlatformsBySession = `-- name: ListPlatformsBySession :many
-SELECT id, session_id, platform, platform_live_id, added_at FROM live_session_platforms
+SELECT id, session_id, platform, platform_live_id, added_at, media_permalink, media_thumbnail_url, media_caption, webhook_active, released_at FROM live_session_platforms
 WHERE session_id = $1
 ORDER BY added_at
 `
@@ -256,6 +418,91 @@ func (q *Queries) ListPlatformsBySession(ctx context.Context, sessionID pgtype.U
 			&i.Platform,
 			&i.PlatformLiveID,
 			&i.AddedAt,
+			&i.MediaPermalink,
+			&i.MediaThumbnailUrl,
+			&i.MediaCaption,
+			&i.WebhookActive,
+			&i.ReleasedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPollableMedia = `-- name: ListPollableMedia :many
+SELECT
+    lsp.platform_live_id,
+    lsp.webhook_active,
+    ls.id   AS session_id,
+    ls.type AS session_type,
+    e.id    AS event_id,
+    e.store_id,
+    e.status AS event_status
+FROM live_session_platforms lsp
+JOIN live_sessions ls ON ls.id = lsp.session_id
+JOIN live_events e ON e.id = ls.event_id
+WHERE ls.type IN ('post', 'reel')
+  AND lsp.webhook_active = false
+  AND (
+        e.status <> 'ended'
+     OR COALESCE(e.ends_at, e.updated_at) >= now() - interval '7 days'
+  )
+`
+
+type ListPollableMediaRow struct {
+	PlatformLiveID string      `json:"platform_live_id"`
+	WebhookActive  bool        `json:"webhook_active"`
+	SessionID      pgtype.UUID `json:"session_id"`
+	SessionType    string      `json:"session_type"`
+	EventID        pgtype.UUID `json:"event_id"`
+	StoreID        pgtype.UUID `json:"store_id"`
+	EventStatus    string      `json:"event_status"`
+}
+
+// Mídias de post/reel que ainda não receberam webhook de comments e por isso
+// dependem do polling — o único caminho de captura para post sem webhook.
+// Story não entra: resposta de story chega por DM, não por comentário.
+//
+// O filtro e.status='active' SAIU (D19/D20/A3). Ele era o motivo pelo qual a
+// promessa "nunca fica em silêncio" viraria silêncio TOTAL justamente no
+// evento agendado: sem webhook, esta lista é o único caminho de captura, e um
+// evento que nasce 'scheduled' nunca aparecia nela. Quem decide se vende é o
+// gate de janela (live.WindowAt), depois da captura — a captura precisa ver o
+// comentário para poder respondê-lo.
+//
+// A carência para resposta tardia virou 7 dias (N9/RN-37): é o limite do
+// private reply do Instagram, e webhook e polling têm de concordar no número.
+// A carência de 2 dias que estava aqui era inalcançável — o mesmo WHERE exigia
+// status='active' e SweepEndedTimedEvents flipa o evento para 'ended' assim
+// que ends_at vence, então prometia 2 dias e entregava 0.
+//
+// live_events não tem ended_at: o carimbo de encerramento é ends_at (que a
+// RN-05 tornou obrigatório e a 000114 backfillou nos legados encerrados), com
+// updated_at como último recurso. Encerramento manual antes do ends_at deixa a
+// janela mais LARGA que 7 dias, nunca mais estreita — erra para o lado de
+// responder.
+func (q *Queries) ListPollableMedia(ctx context.Context) ([]ListPollableMediaRow, error) {
+	rows, err := q.db.Query(ctx, listPollableMedia)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPollableMediaRow{}
+	for rows.Next() {
+		var i ListPollableMediaRow
+		if err := rows.Scan(
+			&i.PlatformLiveID,
+			&i.WebhookActive,
+			&i.SessionID,
+			&i.SessionType,
+			&i.EventID,
+			&i.StoreID,
+			&i.EventStatus,
 		); err != nil {
 			return nil, err
 		}
@@ -268,7 +515,7 @@ func (q *Queries) ListPlatformsBySession(ctx context.Context, sessionID pgtype.U
 }
 
 const listSessionsByEvent = `-- name: ListSessionsByEvent :many
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order FROM live_sessions
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused, publish_at, attribution_source FROM live_sessions
 WHERE event_id = $1
 ORDER BY created_at DESC
 `
@@ -292,6 +539,11 @@ func (q *Queries) ListSessionsByEvent(ctx context.Context, eventID pgtype.UUID) 
 			&i.UpdatedAt,
 			&i.EventID,
 			&i.SequenceOrder,
+			&i.Type,
+			&i.CurrentActiveProductID,
+			&i.ProcessingPaused,
+			&i.PublishAt,
+			&i.AttributionSource,
 		); err != nil {
 			return nil, err
 		}
@@ -301,6 +553,20 @@ func (q *Queries) ListSessionsByEvent(ctx context.Context, eventID pgtype.UUID) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const markMediaWebhookActive = `-- name: MarkMediaWebhookActive :exec
+UPDATE live_session_platforms
+SET webhook_active = true
+WHERE platform_live_id = $1 AND released_at IS NULL
+`
+
+// Desliga o polling DESTA mídia (antes desligava o do evento inteiro, cegando a
+// segunda mídia de um evento guarda-chuva) e só na campanha VIVA — a linha de
+// uma campanha encerrada não é polada e não deve ser tocada.
+func (q *Queries) MarkMediaWebhookActive(ctx context.Context, platformLiveID string) error {
+	_, err := q.db.Exec(ctx, markMediaWebhookActive, platformLiveID)
+	return err
 }
 
 const removePlatformFromSession = `-- name: RemovePlatformFromSession :exec
@@ -318,11 +584,197 @@ func (q *Queries) RemovePlatformFromSession(ctx context.Context, arg RemovePlatf
 	return err
 }
 
+const setLiveModeForEventSessions = `-- name: SetLiveModeForEventSessions :exec
+UPDATE live_sessions ls
+SET current_active_product_id = $2, updated_at = now()
+FROM live_events e
+WHERE e.id = ls.event_id AND e.id = $1 AND e.store_id = $3
+  AND ls.status IN ('active', 'live')
+`
+
+type SetLiveModeForEventSessionsParams struct {
+	ID                     pgtype.UUID `json:"id"`
+	CurrentActiveProductID pgtype.UUID `json:"current_active_product_id"`
+	StoreID                pgtype.UUID `json:"store_id"`
+}
+
+// Rota LEGADA por evento: aplica o produto em destaque em todas as sessões
+// vivas do evento. Mantém o painel atual (que só conhece eventId) funcionando
+// enquanto o frontend não passa a mandar sessionId.
+func (q *Queries) SetLiveModeForEventSessions(ctx context.Context, arg SetLiveModeForEventSessionsParams) error {
+	_, err := q.db.Exec(ctx, setLiveModeForEventSessions, arg.ID, arg.CurrentActiveProductID, arg.StoreID)
+	return err
+}
+
+const setMediaMetadata = `-- name: SetMediaMetadata :exec
+
+UPDATE live_session_platforms
+SET media_permalink = $2, media_thumbnail_url = $3, media_caption = $4
+WHERE platform_live_id = $1 AND released_at IS NULL
+`
+
+type SetMediaMetadataParams struct {
+	PlatformLiveID    string      `json:"platform_live_id"`
+	MediaPermalink    pgtype.Text `json:"media_permalink"`
+	MediaThumbnailUrl pgtype.Text `json:"media_thumbnail_url"`
+	MediaCaption      pgtype.Text `json:"media_caption"`
+}
+
+// GetPlatformByLiveID foi REMOVIDA: não tinha nenhum chamador (só o wrapper de
+// repositório, que também não tinha) e era um `:one` sem ORDER BY sobre
+// platform_live_id — a coluna que a 000117 deixou de ter UNIQUE global. Quem a
+// ligasse teria o mesmo bug silencioso das duas queries de resolução: pgx lê a
+// primeira linha e descarta o resto sem erro, então o reuso de um post fixado
+// devolveria uma campanha ARBITRÁRIA. As duas resoluções vivas
+// (GetSessionByPlatformLiveID e GetEventByPlatformLiveID) já ordenam por
+// (released_at IS NULL) DESC, lsp.added_at DESC, lsp.id DESC.
+// D1/A4: a legenda/permalink/thumb pertencem à MÍDIA, não ao evento. Chaveado
+// por platform_live_id, que é o media_id do Instagram.
+//
+// released_at IS NULL (D22): com a mídia reaproveitável entre campanhas, o
+// platform_live_id deixa de ser único e sem este filtro a legenda da campanha
+// nova sobrescreveria a das campanhas antigas — que é o histórico do lojista.
+func (q *Queries) SetMediaMetadata(ctx context.Context, arg SetMediaMetadataParams) error {
+	_, err := q.db.Exec(ctx, setMediaMetadata,
+		arg.PlatformLiveID,
+		arg.MediaPermalink,
+		arg.MediaThumbnailUrl,
+		arg.MediaCaption,
+	)
+	return err
+}
+
+const setProcessingPausedForEventSessions = `-- name: SetProcessingPausedForEventSessions :exec
+UPDATE live_sessions ls
+SET processing_paused = $2, updated_at = now()
+FROM live_events e
+WHERE e.id = ls.event_id AND e.id = $1 AND e.store_id = $3
+  AND ls.status IN ('active', 'live')
+`
+
+type SetProcessingPausedForEventSessionsParams struct {
+	ID               pgtype.UUID `json:"id"`
+	ProcessingPaused bool        `json:"processing_paused"`
+	StoreID          pgtype.UUID `json:"store_id"`
+}
+
+// Idem para a pausa do processamento.
+func (q *Queries) SetProcessingPausedForEventSessions(ctx context.Context, arg SetProcessingPausedForEventSessionsParams) error {
+	_, err := q.db.Exec(ctx, setProcessingPausedForEventSessions, arg.ID, arg.ProcessingPaused, arg.StoreID)
+	return err
+}
+
+const setSessionActiveProduct = `-- name: SetSessionActiveProduct :one
+
+UPDATE live_sessions ls
+SET current_active_product_id = $2, updated_at = now()
+FROM live_events e
+WHERE ls.id = $1 AND e.id = ls.event_id AND e.store_id = $3
+RETURNING ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.created_at, ls.updated_at, ls.event_id, ls.sequence_order, ls.type, ls.current_active_product_id, ls.processing_paused, ls.publish_at, ls.attribution_source
+`
+
+type SetSessionActiveProductParams struct {
+	ID                     pgtype.UUID `json:"id"`
+	CurrentActiveProductID pgtype.UUID `json:"current_active_product_id"`
+	StoreID                pgtype.UUID `json:"store_id"`
+}
+
+// =============================================================================
+// MODO LIVE NA SESSÃO (D17) — estado EFÊMERO de execução
+//
+// A checagem de posse é loja → evento → sessão: as queries equivalentes no
+// evento casavam (id, store_id) na mesma linha; aqui a loja está a duas tabelas
+// de distância e o JOIN é obrigatório, senão qualquer lojista mexe na sessão de
+// qualquer outro.
+// =============================================================================
+func (q *Queries) SetSessionActiveProduct(ctx context.Context, arg SetSessionActiveProductParams) (LiveSession, error) {
+	row := q.db.QueryRow(ctx, setSessionActiveProduct, arg.ID, arg.CurrentActiveProductID, arg.StoreID)
+	var i LiveSession
+	err := row.Scan(
+		&i.ID,
+		&i.Status,
+		&i.StartedAt,
+		&i.EndedAt,
+		&i.TotalComments,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.EventID,
+		&i.SequenceOrder,
+		&i.Type,
+		&i.CurrentActiveProductID,
+		&i.ProcessingPaused,
+		&i.PublishAt,
+		&i.AttributionSource,
+	)
+	return i, err
+}
+
+const setSessionProcessingPaused = `-- name: SetSessionProcessingPaused :one
+UPDATE live_sessions ls
+SET processing_paused = $2, updated_at = now()
+FROM live_events e
+WHERE ls.id = $1 AND e.id = ls.event_id AND e.store_id = $3
+RETURNING ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.created_at, ls.updated_at, ls.event_id, ls.sequence_order, ls.type, ls.current_active_product_id, ls.processing_paused, ls.publish_at, ls.attribution_source
+`
+
+type SetSessionProcessingPausedParams struct {
+	ID               pgtype.UUID `json:"id"`
+	ProcessingPaused bool        `json:"processing_paused"`
+	StoreID          pgtype.UUID `json:"store_id"`
+}
+
+func (q *Queries) SetSessionProcessingPaused(ctx context.Context, arg SetSessionProcessingPausedParams) (LiveSession, error) {
+	row := q.db.QueryRow(ctx, setSessionProcessingPaused, arg.ID, arg.ProcessingPaused, arg.StoreID)
+	var i LiveSession
+	err := row.Scan(
+		&i.ID,
+		&i.Status,
+		&i.StartedAt,
+		&i.EndedAt,
+		&i.TotalComments,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.EventID,
+		&i.SequenceOrder,
+		&i.Type,
+		&i.CurrentActiveProductID,
+		&i.ProcessingPaused,
+		&i.PublishAt,
+		&i.AttributionSource,
+	)
+	return i, err
+}
+
+const setSessionPublishAt = `-- name: SetSessionPublishAt :exec
+
+UPDATE live_sessions
+SET publish_at = $2, updated_at = now()
+WHERE id = $1
+`
+
+type SetSessionPublishAtParams struct {
+	ID        pgtype.UUID        `json:"id"`
+	PublishAt pgtype.Timestamptz `json:"publish_at"`
+}
+
+// =============================================================================
+// PUBLICAÇÃO AGENDADA (RN-31 / 000123)
+// =============================================================================
+// Registra em live_sessions.publish_at QUANDO esta transmissão foi publicada
+// por agendamento. A coluna existe desde a 000114 e até aqui não tinha
+// escritor nenhum: o agendador é o motivo pelo qual ela foi criada, e sem esta
+// escrita "quando publica" passaria a viver só em session_publish_jobs — duas
+// fontes da verdade para a mesma pergunta, que é o erro que o épico desfaz.
+func (q *Queries) SetSessionPublishAt(ctx context.Context, arg SetSessionPublishAtParams) error {
+	_, err := q.db.Exec(ctx, setSessionPublishAt, arg.ID, arg.PublishAt)
+	return err
+}
+
 const startLiveSession = `-- name: StartLiveSession :one
 UPDATE live_sessions
 SET status = 'live', started_at = now(), updated_at = now()
 WHERE id = $1
-RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order
+RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type, current_active_product_id, processing_paused, publish_at, attribution_source
 `
 
 func (q *Queries) StartLiveSession(ctx context.Context, id pgtype.UUID) (LiveSession, error) {
@@ -338,6 +790,11 @@ func (q *Queries) StartLiveSession(ctx context.Context, id pgtype.UUID) (LiveSes
 		&i.UpdatedAt,
 		&i.EventID,
 		&i.SequenceOrder,
+		&i.Type,
+		&i.CurrentActiveProductID,
+		&i.ProcessingPaused,
+		&i.PublishAt,
+		&i.AttributionSource,
 	)
 	return i, err
 }

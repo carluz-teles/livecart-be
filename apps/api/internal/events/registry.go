@@ -20,7 +20,10 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	// richer consumers (notifications, analytics) arrive in later phases. Every
 	// emitted event needs a handler or asynq reports "handler not found".
 	mux.HandleFunc(string(EventEventCreated), logEvent(log))
-	mux.HandleFunc(string(EventEventEnded), logEvent(log))
+	// EventEventEnded NÃO entra aqui: a composition root (main.newApp) registra
+	// o reator que arma a morte da fila não atendida (RN-32) em "fim do evento
+	// + carência". Registrar nos dois lugares faria o asynq entrar em pânico
+	// por padrão duplicado.
 	mux.HandleFunc(string(SessionCreated), logEvent(log))
 	mux.HandleFunc(string(SessionEnded), logEvent(log))
 	mux.HandleFunc(string(PostWindowClosed), logEvent(log))
