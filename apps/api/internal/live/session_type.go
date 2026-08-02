@@ -9,6 +9,14 @@ package live
 // Duplicá-los é o caminho mais curto para o CHECK estourar como 500 no INSERT
 // (a lição E6 da errata: validação de aplicação desalinhada do CHECK).
 
+// Status de sessão. 'active' e 'live' são ambos "no ar" — 'live' é o que
+// StartSession grava; 'active' é o default da coluna.
+const (
+	SessionStatusActive = "active"
+	SessionStatusLive   = "live"
+	SessionStatusEnded  = "ended"
+)
+
 const (
 	SessionTypeLive  = "live"
 	SessionTypePost  = "post"

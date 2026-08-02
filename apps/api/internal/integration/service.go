@@ -5124,18 +5124,31 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	// Extrair o gate primeiro é o que impede isso — por isso ele vem antes,
 	// numa entrega própria, e não junto da remoção do filtro.
 	//
+	// A decisão em si mora no domínio (live.WindowAt), fonte única com o rótulo
+	// que o painel mostra. Três casos, um padrão só: nunca vende fora da
+	// janela, nunca fica em silêncio.
+	//
 	// Só vale quando há intenção de compra: um comentário qualquer numa
 	// campanha encerrada não merece resposta automática.
 	if hasPurchaseIntent {
-		switch eventWindowState(event.Status, event.ScheduledAt, event.EndsAt, time.Now()) {
-		case windowNotStarted:
-			s.replyPostNotStarted(ctx, event, input, *event.ScheduledAt)
+		switch live.WindowAt(event.Status, event.ScheduledAt, event.EndsAt, time.Now()) {
+		case live.WindowNotStarted:
+			s.replyEventNotStarted(ctx, event, input)
 			s.savePostComment(ctx, session.ID, event.ID, input, "event_not_started")
 			return nil
-		case windowEnded:
-			s.replyPostEnded(ctx, event, input)
+		case live.WindowEnded:
+			s.replyEventEnded(ctx, event, input)
 			s.savePostComment(ctx, session.ID, event.ID, input, "event_ended")
 			return nil
+		default:
+			// D18 — a campanha continua viva, só ESTA transmissão acabou.
+			// Único dos três casos em que a loja ainda está vendendo, então a
+			// resposta redireciona em vez de negar.
+			if !live.SessionAcceptsPurchase(session.Status) {
+				s.replySessionEnded(ctx, event, input)
+				s.savePostComment(ctx, session.ID, event.ID, input, "session_ended")
+				return nil
+			}
 		}
 	}
 
@@ -5985,19 +5998,42 @@ func (s *Service) savePostComment(ctx context.Context, sessionID, eventID string
 	}
 }
 
-// replyPostNotStarted privately tells the buyer the promotion hasn't started and
+// replyEventNotStarted privately tells the buyer the campaign hasn't started and
 // when it will (formatted in Brazil time, UTC-3).
-func (s *Service) replyPostNotStarted(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, startsAt time.Time) {
-	msg := fmt.Sprintf(
-		"Oi @%s! Esta promoção ainda não começou. 🗓️\nEla começa em %s. Volte lá pra garantir o seu! 💜",
-		input.Username, live.FormatBRT(startsAt),
-	)
+//
+// A data é opcional de propósito: um evento com status 'scheduled' e sem
+// scheduled_at também cai aqui (D19), e desreferenciar o ponteiro nesse caso
+// derrubava o worker.
+func (s *Service) replyEventNotStarted(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput) {
+	var msg string
+	if event.ScheduledAt != nil {
+		msg = fmt.Sprintf(
+			"Oi @%s! Esta promoção ainda não começou. 🗓️\nEla começa em %s. Volte lá pra garantir o seu! 💜",
+			input.Username, live.FormatBRT(*event.ScheduledAt),
+		)
+	} else {
+		msg = fmt.Sprintf(
+			"Oi @%s! Esta promoção ainda não começou. 🗓️\nFique de olho que eu aviso quando abrir! 💜",
+			input.Username,
+		)
+	}
 	s.sendPostReply(ctx, event, input, msg)
 }
 
-// replyPostEnded privately tells the buyer the promotion has ended.
-func (s *Service) replyPostEnded(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput) {
+// replyEventEnded privately tells the buyer the campaign has ended.
+func (s *Service) replyEventEnded(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput) {
 	msg := fmt.Sprintf("Oi @%s! Esta promoção já foi encerrada. 😕 Fique de olho que logo teremos novidades! 💜", input.Username)
+	s.sendPostReply(ctx, event, input, msg)
+}
+
+// replySessionEnded privately tells the buyer THIS broadcast is over while the
+// campaign keeps running (D18). Não é negativa: é redirecionamento para as
+// publicações novas do mesmo evento, onde o carrinho dele continua somando.
+func (s *Service) replySessionEnded(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput) {
+	msg := fmt.Sprintf(
+		"Oi @%s! ⏱️\nEsta publicação já encerrou, então não consegui anotar seu pedido por aqui.\nMas a promoção continua! Comente nas publicações mais recentes que eu vou somando tudo no seu carrinho. 💜",
+		input.Username,
+	)
 	s.sendPostReply(ctx, event, input, msg)
 }
 
