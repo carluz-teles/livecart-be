@@ -95,20 +95,20 @@ func (s *Service) SetCartCanceller(c CartCanceller) {
 // com mensagem boa; ela NÃO é a garantia.
 func (s *Service) Cancel(ctx context.Context, orderID, storeID string) error {
 	if s.cartCanceller == nil {
-		return httpx.ErrUnprocessable("cancelamento indisponível")
+		return httpx.DomainError(422, httpx.CodeCancelUnavailable, "cancelamento indisponível")
 	}
 	order, err := s.GetByID(ctx, orderID, storeID)
 	if err != nil {
 		return err
 	}
 	if order.PaymentStatus == "paid" || order.PaymentStatus == "refunded" {
-		return httpx.ErrConflict("pedido já foi pago — não é possível cancelar")
+		return httpx.DomainError(409, httpx.CodeOrderAlreadyPaid, "pedido já foi pago — não é possível cancelar")
 	}
 	if order.Status == "cancelled" {
-		return httpx.ErrConflict("pedido já está cancelado")
+		return httpx.DomainError(409, httpx.CodeOrderAlreadyCancelled, "pedido já está cancelado")
 	}
 	if order.Status == "expired" {
-		return httpx.ErrConflict("pedido já expirou")
+		return httpx.DomainError(409, httpx.CodeOrderExpired, "pedido já expirou")
 	}
 	return s.cartCanceller.CancelCart(ctx, orderID, storeID)
 }
@@ -123,7 +123,7 @@ func (s *Service) Cancel(ctx context.Context, orderID, storeID string) error {
 // the erp_invoice_* fields, without treating it as an error.
 func (s *Service) SyncInvoice(ctx context.Context, orderID, storeID string) error {
 	if s.invoiceSyncer == nil {
-		return httpx.ErrUnprocessable("sync de NFe indisponível")
+		return httpx.DomainError(422, httpx.CodeNfeSyncUnavailable, "sync de NFe indisponível")
 	}
 	if _, err := s.GetByID(ctx, orderID, storeID); err != nil {
 		return err
@@ -137,7 +137,7 @@ func (s *Service) SyncInvoice(ctx context.Context, orderID, storeID string) erro
 // its callers to have done the storeID check.
 func (s *Service) RetryERPFinalisation(ctx context.Context, orderID, storeID string) error {
 	if s.erpRetryService == nil {
-		return httpx.ErrUnprocessable("retry de ERP indisponível")
+		return httpx.DomainError(422, httpx.CodeErpRetryUnavailable, "retry de ERP indisponível")
 	}
 	// Reuse the existing scoped lookup so a hostile storeID can't trigger a
 	// retry on someone else's cart.
@@ -513,7 +513,7 @@ func (s *Service) UpdateShippingAddress(ctx context.Context, input UpdateShippin
 		return httpx.ErrNotFound(fmt.Sprintf("order %s not found", input.ID))
 	}
 	if row.PaymentStatus == "paid" {
-		return httpx.ErrConflict("cannot edit shipping address after payment")
+		return httpx.DomainError(409, httpx.CodeOrderAddressLocked, "cannot edit shipping address after payment")
 	}
 	// Shipment guard keyed by the real Order id (orders.id). Resolve from the
 	// cart id first; no order yet → no shipment → editing is allowed.
@@ -524,7 +524,7 @@ func (s *Service) UpdateShippingAddress(ctx context.Context, input UpdateShippin
 		if err != nil {
 			logger.From(ctx, s.logger).Warn("failed to load shipment for order", zap.Error(err))
 		} else if shipment != nil {
-			return httpx.ErrConflict("cannot edit shipping address after shipment is created")
+			return httpx.DomainError(409, httpx.CodeOrderAddressLocked, "cannot edit shipping address after shipment is created")
 		}
 	}
 	return s.repo.UpdateShippingAddress(ctx, input.ID, input.Address)
@@ -547,14 +547,14 @@ func (s *Service) RegenerateCheckout(
 		return "", time.Time{}, httpx.ErrNotFound(fmt.Sprintf("order %s not found", id))
 	}
 	if row.PaymentStatus == "paid" {
-		return "", time.Time{}, httpx.ErrConflict("cannot regenerate checkout for a paid order")
+		return "", time.Time{}, httpx.DomainError(409, httpx.CodeOrderCheckoutLocked, "cannot regenerate checkout for a paid order")
 	}
 	// Cart cancelado não volta pelo "regerar link": o cancelamento já devolveu
 	// o estoque e estornou a reserva no ERP, e o regenerate só mexe em
 	// status/prazo — reabri-lo criaria um checkout vendendo unidade que não
 	// está mais reservada para ninguém.
 	if row.Status == "cancelled" {
-		return "", time.Time{}, httpx.ErrConflict("pedido cancelado — não é possível regerar o link")
+		return "", time.Time{}, httpx.DomainError(409, httpx.CodeOrderRegenCancelled, "pedido cancelado — não é possível regerar o link")
 	}
 	// Shipment guard keyed by the real Order id (orders.id). Resolve from the
 	// cart id first; no order yet → no shipment → regenerating is allowed.
@@ -565,7 +565,7 @@ func (s *Service) RegenerateCheckout(
 		if err != nil {
 			logger.From(ctx, s.logger).Warn("failed to load shipment for order", zap.Error(err))
 		} else if shipment != nil {
-			return "", time.Time{}, httpx.ErrConflict("cannot regenerate checkout after shipment is created")
+			return "", time.Time{}, httpx.DomainError(409, httpx.CodeOrderCheckoutLocked, "cannot regenerate checkout after shipment is created")
 		}
 	}
 

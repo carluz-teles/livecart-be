@@ -277,3 +277,63 @@ func TestCouponDomainCodes_WireUpper(t *testing.T) {
 		})
 	}
 }
+
+// TestOrderDomainCodes_WireUpper — D1d-2: the order domain throws migrated from
+// httpx.Err{Conflict,Unprocessable}(msg) to DomainError(status, Code, msg),
+// preserving each site's EXACT status (409/422) and human message — now also
+// carrying the typed UPPER_SNAKE reason (Category=DOMAIN). Like coupon, order
+// spans more than one status, so each row asserts its own. Each row mirrors a
+// real throw site in internal/order/service.go verbatim (message byte-for-byte).
+// The not-found sites ("order %s not found") stay on ErrNotFound and are out of
+// scope for this slice.
+func TestOrderDomainCodes_WireUpper(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		code       Code
+		msg        string
+		wantReason string
+	}{
+		// 422 unprocessable — capability unavailable
+		{"cancel unavailable", 422, CodeCancelUnavailable, "cancelamento indisponível", "CANCEL_UNAVAILABLE"},
+		{"nfe sync unavailable", 422, CodeNfeSyncUnavailable, "sync de NFe indisponível", "NFE_SYNC_UNAVAILABLE"},
+		{"erp retry unavailable", 422, CodeErpRetryUnavailable, "retry de ERP indisponível", "ERP_RETRY_UNAVAILABLE"},
+		// 409 conflict — cancel guards
+		{"order already paid", 409, CodeOrderAlreadyPaid, "pedido já foi pago — não é possível cancelar", "ORDER_ALREADY_PAID"},
+		{"order already cancelled", 409, CodeOrderAlreadyCancelled, "pedido já está cancelado", "ORDER_ALREADY_CANCELLED"},
+		{"order expired", 409, CodeOrderExpired, "pedido já expirou", "ORDER_EXPIRED"},
+		// 409 conflict — address/checkout locks
+		{"address locked after payment", 409, CodeOrderAddressLocked, "cannot edit shipping address after payment", "ORDER_ADDRESS_LOCKED"},
+		{"address locked after shipment", 409, CodeOrderAddressLocked, "cannot edit shipping address after shipment is created", "ORDER_ADDRESS_LOCKED"},
+		{"checkout locked on paid", 409, CodeOrderCheckoutLocked, "cannot regenerate checkout for a paid order", "ORDER_CHECKOUT_LOCKED"},
+		{"checkout locked after shipment", 409, CodeOrderCheckoutLocked, "cannot regenerate checkout after shipment is created", "ORDER_CHECKOUT_LOCKED"},
+		{"regenerate on cancelled", 409, CodeOrderRegenCancelled, "pedido cancelado — não é possível regerar o link", "ORDER_REGEN_CANCELLED"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := DomainError(tt.status, tt.code, tt.msg)
+
+			// errors.As + se: DOMAIN category, exact status, exact message, UPPER reason.
+			var se *ServiceError
+			if !errors.As(err, &se) {
+				t.Fatalf("DomainError must produce a *ServiceError")
+			}
+			if se.Code != tt.status || se.Message != tt.msg {
+				t.Fatalf("status/message wrong: %+v", se)
+			}
+			if se.Reason != tt.wantReason {
+				t.Fatalf("reason: want %q, got %q", tt.wantReason, se.Reason)
+			}
+			if se.Category != CategoryDomain {
+				t.Fatalf("category: want DOMAIN, got %q", se.Category)
+			}
+
+			// Wire: exact status + exact message + UPPER reason on the Envelope.
+			code, body := do(t, appReturning(err), "GET", "/x", "")
+			if code != tt.status || body["error"] != tt.msg || body["reason"] != tt.wantReason {
+				t.Fatalf("wire: got %d %v", code, body)
+			}
+		})
+	}
+}

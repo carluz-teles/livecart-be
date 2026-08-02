@@ -63,8 +63,13 @@ const (
 	CodeOwnerOfOtherStore    Code = "OWNER_OF_OTHER_STORE"      // invitation/service.go:197
 
 	// --- ORDER (internal/order/service.go) ---
-	CodeOrderAddressLocked  Code = "ORDER_ADDRESS_LOCKED"  // order/service.go:516,527 (after payment/shipment)
-	CodeOrderCheckoutLocked Code = "ORDER_CHECKOUT_LOCKED" // order/service.go:550,568 (regenerate on paid/shipped)
-	CodeNfeSyncUnavailable  Code = "NFE_SYNC_UNAVAILABLE"  // order/service.go:126
-	CodeErpRetryUnavailable Code = "ERP_RETRY_UNAVAILABLE" // order/service.go:140
+	CodeCancelUnavailable     Code = "CANCEL_UNAVAILABLE"      // order/service.go:98 (cancel not allowed in current status)
+	CodeOrderAlreadyPaid      Code = "ORDER_ALREADY_PAID"      // order/service.go:105
+	CodeOrderAlreadyCancelled Code = "ORDER_ALREADY_CANCELLED" // order/service.go:108
+	CodeOrderExpired          Code = "ORDER_EXPIRED"           // order/service.go:111
+	CodeOrderRegenCancelled   Code = "ORDER_REGEN_CANCELLED"   // order/service.go:557 (regenerate link on cancelled)
+	CodeOrderAddressLocked    Code = "ORDER_ADDRESS_LOCKED"    // order/service.go:516,527 (after payment/shipment)
+	CodeOrderCheckoutLocked   Code = "ORDER_CHECKOUT_LOCKED"   // order/service.go:550,568 (regenerate on paid/shipped)
+	CodeNfeSyncUnavailable    Code = "NFE_SYNC_UNAVAILABLE"    // order/service.go:126
+	CodeErpRetryUnavailable   Code = "ERP_RETRY_UNAVAILABLE"   // order/service.go:140
 )
