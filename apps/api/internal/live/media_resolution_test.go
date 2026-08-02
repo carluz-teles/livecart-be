@@ -155,6 +155,45 @@ func TestPollingEnxergaAgendadoEEncerradoRecente(t *testing.T) {
 	}
 }
 
+// A5/D22 — com a mídia reaproveitável, o mesmo platform_live_id passa a ter N
+// linhas e o `:one` do sqlc escolheria uma em silêncio. A resolução tem de
+// preferir a campanha VIVA, e sessão e evento têm de sair da MESMA linha: são
+// duas queries independentes e o comentário é gravado com o session_id de uma e
+// o event_id da outra.
+func TestResolucaoPrefereCampanhaVivaECoerente(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	const mediaID = "media-reuso"
+
+	antiga := seedMedia(t, ctx, "reuso-antiga", "ended", SessionStatusEnded, SessionTypePost, 1)
+	// A mídia da campanha antiga foi liberada pelo trigger da 000114; a nova
+	// campanha toma o mesmo media id.
+	nova := seedMedia(t, ctx, "reuso-nova", "active", SessionStatusActive, SessionTypePost, 0)
+	if _, err := testPool.Exec(ctx,
+		`UPDATE live_session_platforms SET platform_live_id = $1 WHERE platform_live_id IN ($2,$3)`,
+		mediaID, antiga.mediaID, nova.mediaID,
+	); err != nil {
+		t.Fatalf("reuso de midia barrado — a 000115 deveria permiti-lo: %v", err)
+	}
+
+	event, err := testRepo.GetEventByPlatformLiveID(ctx, mediaID)
+	if err != nil || event == nil {
+		t.Fatalf("GetEventByPlatformLiveID: %v (evento %v)", err, event)
+	}
+	if event.ID != nova.eventID {
+		t.Errorf("resolveu a campanha %s, queria a VIVA %s", event.ID, nova.eventID)
+	}
+
+	session, err := testRepo.GetSessionByPlatformLiveID(ctx, mediaID)
+	if err != nil || session == nil {
+		t.Fatalf("GetSessionByPlatformLiveID: %v (sessao %v)", err, session)
+	}
+	if session.EventID != event.ID {
+		t.Errorf("sessao veio do evento %s e o evento resolvido foi %s — o comentario ficaria com a sessao de uma campanha e o evento de outra",
+			session.EventID, event.ID)
+	}
+}
+
 // webhook_active continua sendo o desligamento do polling — por MÍDIA.
 func TestPollingParaQuandoOWebhookChega(t *testing.T) {
 	requireDB(t)
