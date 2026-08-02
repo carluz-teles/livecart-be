@@ -270,6 +270,13 @@ type SessionMetricsResponse struct {
 	SequenceOrder int     `json:"sequenceOrder"`
 	Type          string  `json:"type"`
 	Status        string  `json:"status"`
+	// AttributionSource é 'first_touch' quando a transmissão já existia antes
+	// do corte da 000119 — os números dela incluem período em que a atribuição
+	// creditava o produto inteiro à sessão da PRIMEIRA adição. 'addition_log' é
+	// a transmissão nascida depois, 100% derivada do log. A tela precisa disso
+	// para avisar; sem o aviso, quem comparar os dois lados conclui que a
+	// métrica quebrou.
+	AttributionSource string `json:"attributionSource"`
 	SessionRevenueResponse
 }
 
@@ -282,6 +289,11 @@ type EventSessionMetricsResponse struct {
 	ProjectedRevenue int64                    `json:"projectedRevenue"`
 	Sessions         []SessionMetricsResponse `json:"sessions"`
 	Unattributed     *SessionMetricsResponse  `json:"unattributed"`
+	// AttributionCutoverAt é o instante registrado em metric_cutovers (D26).
+	// Nulo só se o marcador não existir no banco — a métrica responde do mesmo
+	// jeito, sem a ressalva.
+	AttributionCutoverAt *time.Time `json:"attributionCutoverAt"`
+	AttributionCutoverNote string   `json:"attributionCutoverNote,omitempty"`
 }
 
 type SessionResponse struct {
@@ -341,10 +353,11 @@ type SessionRevenueOutput struct {
 // SessionMetricsOutput é uma linha do relatório por transmissão. SessionID
 // vazio é o balde "sem transmissão".
 type SessionMetricsOutput struct {
-	SessionID     string
-	SequenceOrder int
-	Type          string
-	Status        string
+	SessionID         string
+	SequenceOrder     int
+	Type              string
+	Status            string
+	AttributionSource string
 	SessionRevenueOutput
 }
 
@@ -356,6 +369,10 @@ type EventSessionMetricsOutput struct {
 	Sessions         []SessionMetricsOutput
 	// Unattributed é nil quando não há nada sem transmissão.
 	Unattributed *SessionMetricsOutput
+	// Marcador de corte da atribuição (D26). Nulo quando metric_cutovers não
+	// tem a chave — a métrica responde igual, só sem a ressalva.
+	AttributionCutoverAt   *time.Time
+	AttributionCutoverNote string
 }
 
 type SessionOutput struct {
@@ -396,11 +413,14 @@ type SessionRow struct {
 	// Modo Live (D17): estado EFÊMERO de execução DESTA transmissão.
 	CurrentActiveProductID *string
 	ProcessingPaused       bool
-	StartedAt              *time.Time
-	EndedAt                *time.Time
-	TotalComments          int
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
+	// D26 (000119): 'first_touch' quando a transmissão é anterior ao corte da
+	// atribuição, 'addition_log' quando nasceu depois dele.
+	AttributionSource string
+	StartedAt         *time.Time
+	EndedAt           *time.Time
+	TotalComments     int
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // =============================================================================

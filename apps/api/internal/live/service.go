@@ -1473,15 +1473,29 @@ func (s *Service) GetSessionMetrics(ctx context.Context, eventID, storeID string
 
 	out := EventSessionMetricsOutput{EventID: eventID}
 
+	// O marcador de corte (D26). Ele não participa de nenhuma soma: existe para
+	// a tela conseguir dizer "antes desta data, 'receita da live de terça'
+	// significava outra coisa". Sem ele, a primeira comparação entre os dois
+	// lados do corte vira um chamado de bug.
+	if cut, err := s.repo.GetMetricCutover(ctx, MetricCutoverSessionAttribution); err != nil {
+		logger.From(ctx, s.logger).Warn("failed to read attribution cutover marker",
+			zap.String("event_id", eventID), zap.Error(err))
+	} else if cut != nil {
+		at := cut.EffectiveAt
+		out.AttributionCutoverAt = &at
+		out.AttributionCutoverNote = cut.Note
+	}
+
 	// As sessões, na ordem da campanha. ListSessionsByEvent devolve por
 	// created_at DESC (a ordem da tela); relatório se lê da 1ª para a última.
 	rows := make([]SessionMetricsOutput, 0, len(sessions))
 	for _, sess := range sessions {
 		row := SessionMetricsOutput{
-			SessionID:     sess.ID,
-			SequenceOrder: sess.SequenceOrder,
-			Type:          sess.Type,
-			Status:        sess.Status,
+			SessionID:         sess.ID,
+			SequenceOrder:     sess.SequenceOrder,
+			Type:              sess.Type,
+			Status:            sess.Status,
+			AttributionSource: sess.AttributionSource,
 		}
 		if r := revenue[sess.ID]; r != nil {
 			row.SessionRevenueOutput = *r

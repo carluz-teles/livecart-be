@@ -1841,6 +1841,7 @@ func toSessionRow(row sqlc.LiveSession) SessionRow {
 		SequenceOrder:          int(row.SequenceOrder),
 		CurrentActiveProductID: activeProductID,
 		ProcessingPaused:       row.ProcessingPaused,
+		AttributionSource:      row.AttributionSource,
 		StartedAt:              startedAt,
 		EndedAt:                endedAt,
 		TotalComments:          int(row.TotalComments.Int32),
@@ -2012,6 +2013,31 @@ func (r *Repository) ListProductsByEvent(ctx context.Context, eventID string) ([
 // carrinho NASCEU) e era chamada uma vez por sessão dentro do laço do evento.
 // As três leituras abaixo são POR EVENTO — uma chamada cada, não N.
 // =============================================================================
+
+// MetricCutover é o instante em que uma métrica mudou de definição (D26).
+type MetricCutover struct {
+	Key         string
+	EffectiveAt time.Time
+	Note        string
+}
+
+// GetMetricCutover lê o marcador de corte. Marcador AUSENTE não é erro: a
+// métrica continua respondendo, só sem a ressalva. Derrubar o relatório inteiro
+// porque a nota de rodapé sumiu seria trocar um aviso por uma tela em branco.
+func (r *Repository) GetMetricCutover(ctx context.Context, key string) (*MetricCutover, error) {
+	row, err := r.q.GetMetricCutover(ctx, key)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("getting metric cutover %q: %w", key, err)
+	}
+	return &MetricCutover{
+		Key:         row.Key,
+		EffectiveAt: row.EffectiveAt.Time,
+		Note:        row.Note,
+	}, nil
+}
 
 // SessionConfirmedRow é o confirmado de uma transmissão. SessionID vazio é o
 // balde "sem transmissão".

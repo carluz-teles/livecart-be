@@ -235,3 +235,16 @@ LEFT JOIN products p ON p.id = ls.current_active_product_id
 WHERE e.id = $1 AND e.store_id = $2
 ORDER BY (ls.status IN ('active', 'live')) DESC, ls.sequence_order DESC
 LIMIT 1;
+
+-- =============================================================================
+-- MARCADOR DE CORTE DA ATRIBUIÇÃO (D26 / 000119)
+-- =============================================================================
+
+-- name: GetMetricCutover :one
+-- O instante em que uma métrica mudou de definição. Sem chave conhecida a query
+-- devolve pgx.ErrNoRows e o chamador segue sem marcador — a métrica continua
+-- respondendo, só sem a ressalva. Falhar aqui derrubaria o relatório inteiro
+-- por causa de uma nota de rodapé.
+SELECT key, effective_at, note
+FROM metric_cutovers
+WHERE key = $1;

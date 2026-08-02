@@ -95,3 +95,9 @@ func SessionLabel(sessionType string, sequenceOrder int) string {
 func IsPostCommerceSessionType(t string) bool {
 	return t == SessionTypePost || t == SessionTypeReel || t == SessionTypeStory
 }
+
+// MetricCutoverSessionAttribution é a chave do marcador gravado pela 000119.
+// Uma constante e não a string solta: o valor tem de casar EXATAMENTE com o do
+// INSERT da migration, e um typo aqui não dá erro nenhum — só faz o marcador
+// sumir da resposta, que é o modo de falha que ele existe para evitar.
+const MetricCutoverSessionAttribution = "session_attribution"

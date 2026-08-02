@@ -418,6 +418,8 @@ type LiveSession struct {
 	ProcessingPaused bool `json:"processing_paused"`
 	// D21: quando o LiveCart deve publicar a midia desta sessao no Instagram. Sessao de live NAO tem publish_at (nao se publica live por API). Antes de publish_at nao existe midia, logo nao existe comentario — e o que remove a ambiguidade do webhook. O agendador em si e a 000120.
 	PublishAt pgtype.Timestamptz `json:"publish_at"`
+	// D26: first_touch = a sessao existia antes do corte, entao os numeros dela incluem periodo em que a atribuicao era first-touch e a UI precisa avisar. addition_log = a sessao nasceu depois do corte, numeros derivados do log de adicoes. O DEFAULT e addition_log porque toda sessao criada daqui para frente ja nasce correta.
+	AttributionSource string `json:"attribution_source"`
 }
 
 type LiveSessionPlatform struct {
@@ -445,6 +447,14 @@ type Membership struct {
 	InvitedBy pgtype.UUID        `json:"invited_by"`
 	InvitedAt pgtype.Timestamptz `json:"invited_at"`
 	UserID    pgtype.UUID        `json:"user_id"`
+}
+
+// D26: registro dos instantes em que uma metrica mudou de definicao ou de fonte. Toda resposta de API que expoe metrica por sessao devolve o effective_at correspondente, para a UI marcar o corte em vez de deixar o leitor concluir que a metrica quebrou.
+type MetricCutover struct {
+	Key         string             `json:"key"`
+	EffectiveAt pgtype.Timestamptz `json:"effective_at"`
+	Note        string             `json:"note"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 // In-app dashboard notifications. Distinct from notification_logs (outbound to buyers).

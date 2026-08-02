@@ -913,15 +913,18 @@ func newEventSessionMetricsResponse(o EventSessionMetricsOutput) EventSessionMet
 			SequenceOrder:          s.SequenceOrder,
 			Type:                   s.Type,
 			Status:                 s.Status,
+			AttributionSource:      s.AttributionSource,
 			SessionRevenueResponse: newSessionRevenueResponse(s.SessionRevenueOutput),
 		}
 	}
 
 	resp := EventSessionMetricsResponse{
-		EventID:          o.EventID,
-		ConfirmedRevenue: o.ConfirmedRevenue,
-		ProjectedRevenue: o.ProjectedRevenue,
-		Sessions:         sessions,
+		EventID:                o.EventID,
+		ConfirmedRevenue:       o.ConfirmedRevenue,
+		ProjectedRevenue:       o.ProjectedRevenue,
+		Sessions:               sessions,
+		AttributionCutoverAt:   o.AttributionCutoverAt,
+		AttributionCutoverNote: o.AttributionCutoverNote,
 	}
 	if o.Unattributed != nil {
 		// sessionId nulo é o sinal de "sem transmissão" para o painel.
