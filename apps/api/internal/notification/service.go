@@ -114,6 +114,21 @@ func mergeSettings(current, incoming Settings) Settings {
 	if incoming.WaitlistNotified != nil {
 		merged.WaitlistNotified = incoming.WaitlistNotified
 	}
+	if incoming.OutOfWindowScheduled != nil {
+		merged.OutOfWindowScheduled = incoming.OutOfWindowScheduled
+	}
+	if incoming.OutOfWindowSessionEnded != nil {
+		merged.OutOfWindowSessionEnded = incoming.OutOfWindowSessionEnded
+	}
+	if incoming.OutOfWindowEventEnded != nil {
+		merged.OutOfWindowEventEnded = incoming.OutOfWindowEventEnded
+	}
+	if incoming.EventDeadlineStarted != nil {
+		merged.EventDeadlineStarted = incoming.EventDeadlineStarted
+	}
+	if incoming.WaitlistUnfulfilled != nil {
+		merged.WaitlistUnfulfilled = incoming.WaitlistUnfulfilled
+	}
 	if incoming.PaymentConfirmed != nil {
 		merged.PaymentConfirmed = incoming.PaymentConfirmed
 	}
@@ -160,6 +175,67 @@ func (s *Service) UpdateSettings(ctx context.Context, storeID string, settings S
 		ID:                   uid,
 		NotificationSettings: settingsJSON,
 	})
+}
+
+// UndeliveredEntry é uma pessoa que não pôde ser avisada nesta campanha —
+// não uma tentativa. Ver ListUndeliveredByEvent: a query colapsa por
+// comprador, porque o lojista precisa de "quem eu chamo na mão", não do log.
+type UndeliveredEntry struct {
+	PlatformUserID   string              `json:"platformUserId"`
+	PlatformHandle   string              `json:"platformHandle"`
+	NotificationType NotificationType    `json:"notificationType"`
+	Reason           UndeliverableReason `json:"reason"`
+	// ReasonText é a frase pronta para o painel. Vem do domínio para que a
+	// lista, o e-mail de aviso e qualquer outra superfície digam a mesma coisa.
+	ReasonText     string    `json:"reasonText"`
+	CartID         string    `json:"cartId,omitempty"`
+	CartToken      string    `json:"cartToken,omitempty"`
+	CartTotalCents int64     `json:"cartTotalCents"`
+	CartTotalItems int       `json:"cartTotalItems"`
+	CreatedAt      time.Time `json:"createdAt"`
+}
+
+// ListUndelivered devolve os compradores não avisados de um evento (RN-38).
+func (s *Service) ListUndelivered(ctx context.Context, storeID, eventID string) ([]UndeliveredEntry, error) {
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.queries.ListUndeliveredByEvent(ctx, sqlc.ListUndeliveredByEventParams{
+		StoreID: storeUID,
+		EventID: eventUID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing undelivered notifications: %w", err)
+	}
+
+	out := make([]UndeliveredEntry, 0, len(rows))
+	for _, r := range rows {
+		reason := UndeliverableReason(r.UndeliveredReason.String)
+		entry := UndeliveredEntry{
+			PlatformUserID:   r.PlatformUserID,
+			PlatformHandle:   r.PlatformHandle.String,
+			NotificationType: NotificationType(r.NotificationType),
+			Reason:           reason,
+			ReasonText:       UndeliverableReasonText(reason),
+			CartTotalCents:   r.CartTotalCents,
+			CartTotalItems:   int(r.CartTotalItems),
+			CreatedAt:        r.CreatedAt.Time,
+		}
+		if r.CartID.Valid {
+			entry.CartID = r.CartID.String()
+		}
+		if r.CartToken.Valid {
+			entry.CartToken = r.CartToken.String
+		}
+		out = append(out, entry)
+	}
+	return out, nil
 }
 
 // Send sends a notification based on type and store settings.
@@ -219,6 +295,39 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 		logger.From(ctx, s.logger).Warn("failed to create notification log", zap.Error(err))
 	}
 
+	// RN-38 — a porta pode já estar fechada ANTES da tentativa.
+	//
+	// O private reply do Instagram vale 7 dias a contar do comentário. Numa
+	// campanha de uma semana, a mensagem de maior conversão (o prazo começou)
+	// dispara dias depois do último comentário do comprador, e para parte deles
+	// a janela já venceu. Um comentário sozinho NÃO abre a janela de 24h de DM
+	// (erro 2534022), então nesse estado não há caminho de entrega nenhum.
+	//
+	// Não tentar é deliberado: o que a regra proíbe é a ILUSÃO de entrega, e um
+	// 'failed' com o erro cru do Graph não diz ao lojista que ele precisa
+	// chamar essa pessoa na mão. A linha fica registrada com o motivo e a
+	// pessoa aparece na lista.
+	//
+	// Só vale para o canal de comentário: DirectOnly é a entrega por DM de
+	// story, que existe justamente porque o comprador mandou mensagem — ali a
+	// janela é outra e a tentativa é legítima.
+	if !input.DirectOnly && !input.CommentCreatedAt.IsZero() &&
+		time.Since(input.CommentCreatedAt) > PrivateReplyWindow {
+		s.markUndelivered(ctx, logID, ReasonCommentWindowExpired)
+		logger.From(ctx, s.logger).Info("notification not delivered: private reply window closed",
+			zap.String("store_id", input.StoreID),
+			zap.String("platform_user_id", input.PlatformUserID),
+			zap.String("type", string(input.NotificationType)),
+			zap.Time("comment_created_at", input.CommentCreatedAt),
+		)
+		return &SendResult{
+			LogID:       logID,
+			Status:      StatusUndelivered,
+			MessageText: message,
+			Reason:      ReasonCommentWindowExpired,
+		}, nil
+	}
+
 	// Try to reply to comment first (no 24h window restriction), then fallback to DM
 	var sendErr error
 	if input.PlatformCommentID != "" {
@@ -242,6 +351,19 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 	if sendErr != nil {
 		// Update log as failed
 		s.updateLogStatus(ctx, logID, StatusFailed, sendErr.Error())
+
+		// RN-38 — o status continua 'failed' (foi tentativa real, e é isso que
+		// distingue "o Instagram recusou" de "nem tentamos"), mas a linha ganha
+		// motivo legível para aparecer na lista do lojista. Sem isso, uma
+		// recusa do Graph some num error_message que ninguém lê.
+		reason := ReasonInstagramRejected
+		if input.PlatformCommentID == "" && !input.DirectOnly {
+			// Não havia comentário para responder e o DM direto não passou: é
+			// o caso "comprou por story/DM" ou "comentário apagado", que tem
+			// texto próprio para o lojista.
+			reason = ReasonNoEligibleComment
+		}
+		s.stampUndeliveredReason(ctx, logID, reason)
 
 		logger.From(ctx, s.logger).Warn("failed to send notification",
 			zap.String("store_id", input.StoreID),
@@ -283,6 +405,7 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 			Status:      StatusFailed,
 			MessageText: message,
 			Error:       sendErr,
+			Reason:      reason,
 		}, nil // Don't return error - notification failures shouldn't break the flow
 	}
 
@@ -357,15 +480,23 @@ func (s *Service) ShouldNotify(ctx context.Context, storeID string, notifType No
 		// Use cart_settings trigger for expiration reminder
 		return templateSettings.CheckoutReminder.Enabled && cartSettings.SendExpirationReminder, nil
 
-	case TypeWaitlistNotified:
-		// No cart_settings trigger here — waitlist promotion is always
-		// sent (the merchant only opts out by disabling the template).
-		// Customer is implicitly opted-in: they explicitly asked to be
-		// queued for an out-of-stock item.
-		if templateSettings.WaitlistNotified == nil {
-			return true, nil // default-on when merchant hasn't customized
+	case TypeWaitlistNotified,
+		TypeOutOfWindowScheduled, TypeOutOfWindowSessionEnded, TypeOutOfWindowEventEnded,
+		TypeEventDeadlineStarted, TypeWaitlistUnfulfilled:
+		// Sem gatilho em cart_settings: estes momentos não são "mensagem de
+		// marketing em tempo real", são resposta a um fato do ciclo de vida
+		// (comentou fora da janela, a campanha fechou, o item não liberou). O
+		// lojista só opta por fora desligando o próprio template.
+		//
+		// Amarrá-los a cart_real_time seria pior do que inútil: quem desliga
+		// "carrinho em tempo real" quer parar a DM de cada item adicionado, e
+		// acabaria silenciando também o aviso de prazo — a mensagem que mais
+		// converte — sem nunca ter pedido isso.
+		section := s.getTemplateSettings(templateSettings, notifType)
+		if section == nil {
+			return false, nil
 		}
-		return templateSettings.WaitlistNotified.Enabled, nil
+		return section.Enabled, nil
 
 	default:
 		return false, nil
@@ -468,30 +599,52 @@ func (s *Service) PreviewTemplate(template string) (string, int, error) {
 
 // Helper methods
 
-func (s *Service) getTemplateSettings(settings *Settings, notifType NotificationType) *TemplateSettings {
-	if settings == nil {
+// templateSection devolve o ponteiro para a seção de UM tipo dentro de
+// Settings. Ponto único: mergeSettings, getTemplateSettings, o DTO do handler e
+// os testes falam do mesmo mapeamento. Antes cada um repetia o seu switch, e
+// foi assim que waitlist_notified existiu por meses no domínio sem existir no
+// HTTP — inconfigurável, sem ninguém perceber.
+func templateSection(s *Settings, t NotificationType) *TemplateSettings {
+	if s == nil {
 		return nil
 	}
-
-	switch notifType {
+	switch t {
 	case TypeCheckoutImmediate:
-		return settings.CheckoutImmediate
+		return s.CheckoutImmediate
 	case TypeItemAdded:
-		return settings.ItemAdded
+		return s.ItemAdded
 	case TypeCheckoutReminder:
-		return settings.CheckoutReminder
+		return s.CheckoutReminder
 	case TypeWaitlistNotified:
-		// Existing stores' notification_settings JSON pré-data esse
-		// campo, então quando vier nil caímos no default (em vez de
-		// retornar nil e pular a notificação inteira).
-		if settings.WaitlistNotified != nil {
-			return settings.WaitlistNotified
-		}
-		def := DefaultSettings().WaitlistNotified
-		return def
+		return s.WaitlistNotified
+	case TypeOutOfWindowScheduled:
+		return s.OutOfWindowScheduled
+	case TypeOutOfWindowSessionEnded:
+		return s.OutOfWindowSessionEnded
+	case TypeOutOfWindowEventEnded:
+		return s.OutOfWindowEventEnded
+	case TypeEventDeadlineStarted:
+		return s.EventDeadlineStarted
+	case TypeWaitlistUnfulfilled:
+		return s.WaitlistUnfulfilled
 	default:
 		return nil
 	}
+}
+
+// getTemplateSettings resolve o template efetivo de um tipo, caindo no default
+// quando a loja nunca o customizou.
+//
+// O fallback vale para TODA chave, não só para waitlist_notified: o JSONB de
+// toda loja existente antecede os cinco gatilhos novos, e sem o fallback eles
+// nasceriam desligados em silêncio em 100% da base — um gatilho que "existe"
+// mas nunca dispara é pior do que um que não existe.
+func (s *Service) getTemplateSettings(settings *Settings, notifType NotificationType) *TemplateSettings {
+	if section := templateSection(settings, notifType); section != nil {
+		return section
+	}
+	defaults := DefaultSettings()
+	return templateSection(&defaults, notifType)
 }
 
 func (s *Service) createLog(ctx context.Context, input SendInput, status NotificationStatus, message string, errMsg *string) (string, error) {
@@ -564,6 +717,50 @@ func (s *Service) updateLogStatus(ctx context.Context, logID string, status Noti
 		SentAt:       sentAt,
 		ErrorMessage: errorMessage,
 	})
+}
+
+// markUndelivered carimba "nem tentamos, e este é o motivo" (RN-38).
+func (s *Service) markUndelivered(ctx context.Context, logID string, reason UndeliverableReason) {
+	uid, ok := logUUID(logID)
+	if !ok {
+		return
+	}
+	if err := s.queries.MarkNotificationUndelivered(ctx, sqlc.MarkNotificationUndeliveredParams{
+		ID:                uid,
+		UndeliveredReason: pgtype.Text{String: string(reason), Valid: true},
+	}); err != nil {
+		logger.From(ctx, s.logger).Warn("failed to mark notification undelivered",
+			zap.String("log_id", logID), zap.Error(err))
+	}
+}
+
+// stampUndeliveredReason acrescenta o motivo a uma linha que JÁ foi tentada e
+// recusada — o status dela continua 'failed'.
+func (s *Service) stampUndeliveredReason(ctx context.Context, logID string, reason UndeliverableReason) {
+	uid, ok := logUUID(logID)
+	if !ok {
+		return
+	}
+	if err := s.queries.SetNotificationUndeliveredReason(ctx, sqlc.SetNotificationUndeliveredReasonParams{
+		ID:                uid,
+		UndeliveredReason: pgtype.Text{String: string(reason), Valid: true},
+	}); err != nil {
+		logger.From(ctx, s.logger).Warn("failed to stamp undelivered reason",
+			zap.String("log_id", logID), zap.Error(err))
+	}
+}
+
+// logUUID converte o id do log, tolerando o vazio: createLog pode ter falhado
+// (best-effort), e nesse caso não há linha para atualizar.
+func logUUID(logID string) (pgtype.UUID, bool) {
+	if logID == "" {
+		return pgtype.UUID{}, false
+	}
+	uid, err := parseUUID(logID)
+	if err != nil {
+		return pgtype.UUID{}, false
+	}
+	return uid, true
 }
 
 func parseUUID(s string) (pgtype.UUID, error) {

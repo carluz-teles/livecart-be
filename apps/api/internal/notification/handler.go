@@ -32,6 +32,7 @@ func (h *Handler) RegisterRoutes(api fiber.Router) {
 	notifications.Put("/settings", h.UpdateSettings)
 	notifications.Post("/preview", h.PreviewTemplate)
 	notifications.Get("/variables", h.GetAvailableVariables)
+	notifications.Get("/undelivered", h.ListUndelivered)
 	notifications.Get("/test/recipient", h.GetTestRecipient)
 	notifications.Post("/test/setup", h.StartTestSetup)
 	notifications.Post("/test", h.SendTest)
@@ -41,10 +42,22 @@ func (h *Handler) RegisterRoutes(api fiber.Router) {
 // GetSettingsResponse represents the response for getting notification settings.
 // NOTE: Triggers (when to send) are now in cart_settings, not here.
 type GetSettingsResponse struct {
-	CheckoutImmediate *TemplateSettingsResponse      `json:"checkout_immediate"`
-	ItemAdded         *TemplateSettingsResponse      `json:"item_added"`
-	CheckoutReminder  *TemplateSettingsResponse      `json:"checkout_reminder"`
-	PaymentConfirmed  *EmailTemplateSettingsResponse `json:"payment_confirmed,omitempty"`
+	CheckoutImmediate *TemplateSettingsResponse `json:"checkout_immediate"`
+	ItemAdded         *TemplateSettingsResponse `json:"item_added"`
+	CheckoutReminder  *TemplateSettingsResponse `json:"checkout_reminder"`
+
+	// Os cinco gatilhos da RN-28 mais waitlist_notified. Este DTO é o motivo
+	// pelo qual waitlist_notified existiu por meses sem ser configurável: o
+	// domínio tinha a chave, o HTTP não, e nenhuma UI conseguia nem ler nem
+	// escrever. Chave nova sem entrada aqui é chave morta.
+	WaitlistNotified        *TemplateSettingsResponse `json:"waitlist_notified,omitempty"`
+	OutOfWindowScheduled    *TemplateSettingsResponse `json:"out_of_window_scheduled,omitempty"`
+	OutOfWindowSessionEnded *TemplateSettingsResponse `json:"out_of_window_session_ended,omitempty"`
+	OutOfWindowEventEnded   *TemplateSettingsResponse `json:"out_of_window_event_ended,omitempty"`
+	EventDeadlineStarted    *TemplateSettingsResponse `json:"event_deadline_started,omitempty"`
+	WaitlistUnfulfilled     *TemplateSettingsResponse `json:"waitlist_unfulfilled,omitempty"`
+
+	PaymentConfirmed *EmailTemplateSettingsResponse `json:"payment_confirmed,omitempty"`
 	Shipped           *EmailTemplateSettingsResponse `json:"shipped,omitempty"`
 	Delivered         *EmailTemplateSettingsResponse `json:"delivered,omitempty"`
 	PaymentCancelled  *EmailTemplateSettingsResponse `json:"payment_cancelled,omitempty"`
@@ -95,10 +108,18 @@ func (h *Handler) GetSettings(c *fiber.Ctx) error {
 // UpdateSettingsRequest represents the request for updating notification settings.
 // NOTE: Triggers (when to send) are now in cart_settings, not here.
 type UpdateSettingsRequest struct {
-	CheckoutImmediate *UpdateTemplateSettingsRequest      `json:"checkout_immediate"`
-	ItemAdded         *UpdateTemplateSettingsRequest      `json:"item_added"`
-	CheckoutReminder  *UpdateTemplateSettingsRequest      `json:"checkout_reminder"`
-	PaymentConfirmed  *UpdateEmailTemplateSettingsRequest `json:"payment_confirmed,omitempty"`
+	CheckoutImmediate *UpdateTemplateSettingsRequest `json:"checkout_immediate"`
+	ItemAdded         *UpdateTemplateSettingsRequest `json:"item_added"`
+	CheckoutReminder  *UpdateTemplateSettingsRequest `json:"checkout_reminder"`
+
+	WaitlistNotified        *UpdateTemplateSettingsRequest `json:"waitlist_notified,omitempty"`
+	OutOfWindowScheduled    *UpdateTemplateSettingsRequest `json:"out_of_window_scheduled,omitempty"`
+	OutOfWindowSessionEnded *UpdateTemplateSettingsRequest `json:"out_of_window_session_ended,omitempty"`
+	OutOfWindowEventEnded   *UpdateTemplateSettingsRequest `json:"out_of_window_event_ended,omitempty"`
+	EventDeadlineStarted    *UpdateTemplateSettingsRequest `json:"event_deadline_started,omitempty"`
+	WaitlistUnfulfilled     *UpdateTemplateSettingsRequest `json:"waitlist_unfulfilled,omitempty"`
+
+	PaymentConfirmed *UpdateEmailTemplateSettingsRequest `json:"payment_confirmed,omitempty"`
 	Shipped           *UpdateEmailTemplateSettingsRequest `json:"shipped,omitempty"`
 	Delivered         *UpdateEmailTemplateSettingsRequest `json:"delivered,omitempty"`
 	PaymentCancelled  *UpdateEmailTemplateSettingsRequest `json:"payment_cancelled,omitempty"`
@@ -145,20 +166,17 @@ func (h *Handler) UpdateSettings(c *fiber.Ctx) error {
 	// Convert request to domain settings
 	settings := toSettingsFromRequest(&req)
 
-	// Validate templates
-	if settings.CheckoutImmediate != nil && settings.CheckoutImmediate.Enabled {
-		if _, err := ValidateTemplate(settings.CheckoutImmediate.Template, SampleVariables()); err != nil {
-			return httpx.ErrUnprocessable("Template checkout_immediate: " + err.Error())
+	// Valida todo template enviado E habilitado, pela mesma tabela que fez a
+	// conversão. Antes eram três `if` copiados; uma chave nova entrava sem
+	// validação de tamanho e só estourava na hora do envio, quando o
+	// comprador é quem paga pela mensagem truncada.
+	for _, sec := range dmSections {
+		section := templateSection(&settings, sec.Type)
+		if section == nil || !section.Enabled {
+			continue
 		}
-	}
-	if settings.ItemAdded != nil && settings.ItemAdded.Enabled {
-		if _, err := ValidateTemplate(settings.ItemAdded.Template, SampleVariables()); err != nil {
-			return httpx.ErrUnprocessable("Template item_added: " + err.Error())
-		}
-	}
-	if settings.CheckoutReminder != nil && settings.CheckoutReminder.Enabled {
-		if _, err := ValidateTemplate(settings.CheckoutReminder.Template, SampleVariables()); err != nil {
-			return httpx.ErrUnprocessable("Template checkout_reminder: " + err.Error())
+		if _, err := ValidateTemplate(section.Template, SampleVariables()); err != nil {
+			return httpx.ErrUnprocessable("Template " + string(sec.Type) + ": " + err.Error())
 		}
 	}
 
@@ -264,30 +282,128 @@ func (h *Handler) GetAvailableVariables(c *fiber.Ctx) error {
 	return httpx.OK(c, GetAvailableVariablesResponse{Variables: variables})
 }
 
+// ListUndeliveredResponse é o payload do painel "compradores não avisados".
+// Traz o total junto com a lista porque as duas perguntas do copy deck ("{n}
+// compradores não puderam ser avisados" e a lista em si) são a mesma consulta —
+// dois endpoints seriam duas fontes que podem discordar entre um render e outro.
+type ListUndeliveredResponse struct {
+	Total   int                `json:"total"`
+	Entries []UndeliveredEntry `json:"entries"`
+}
+
+// ListUndelivered returns the buyers that could not be notified for an event.
+// @Summary      List undelivered notifications for an event
+// @Description  RN-38: buyers whose Instagram reply window had already closed
+// @Tags         Notifications
+// @Produce      json
+// @Security     BearerAuth
+// @Param        storeId path string true "Store UUID"
+// @Param        eventId query string true "Event UUID"
+// @Success      200 {object} httpx.Envelope{data=ListUndeliveredResponse}
+// @Failure      400 {object} httpx.Envelope
+// @Router       /stores/{storeId}/notifications/undelivered [get]
+func (h *Handler) ListUndelivered(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	eventID := c.Query("eventId")
+	if eventID == "" {
+		return httpx.ErrBadRequest("eventId é obrigatório")
+	}
+
+	entries, err := h.service.ListUndelivered(c.UserContext(), storeID, eventID)
+	if err != nil {
+		logger.From(c.UserContext(), h.logger).Error("failed to list undelivered notifications",
+			zap.String("event_id", eventID),
+			zap.Error(err),
+		)
+		return httpx.ErrInternal("Erro ao listar mensagens não entregues")
+	}
+
+	// O total sai do tamanho da lista, e não de uma segunda consulta: a lista
+	// já é por comprador (DISTINCT ON), então contar linhas aqui e contar
+	// pessoas no banco são o mesmo número por construção — e um número só não
+	// pode divergir de si mesmo.
+	return httpx.OK(c, ListUndeliveredResponse{
+		Total:   len(entries),
+		Entries: entries,
+	})
+}
+
 // Helper functions
+
+// dmSection amarra, num lugar só, as três representações de uma chave de
+// template de DM: o campo do Request, o campo do Settings e o campo da
+// Response. É a tabela que impede o buraco do waitlist_notified de se repetir —
+// acrescentar uma linha aqui liga a chave nova nos três lados de uma vez, e
+// esquecer de acrescentá-la deixa de ser um erro silencioso porque o
+// arquivo não tem mais nenhum outro lugar onde a chave apareceria.
+type dmSection struct {
+	Type    NotificationType
+	fromReq func(*UpdateSettingsRequest) *UpdateTemplateSettingsRequest
+	set     func(*Settings, *TemplateSettings)
+	setResp func(*GetSettingsResponse, *TemplateSettingsResponse)
+}
+
+var dmSections = []dmSection{
+	{TypeCheckoutImmediate,
+		func(r *UpdateSettingsRequest) *UpdateTemplateSettingsRequest { return r.CheckoutImmediate },
+		func(s *Settings, t *TemplateSettings) { s.CheckoutImmediate = t },
+		func(r *GetSettingsResponse, t *TemplateSettingsResponse) { r.CheckoutImmediate = t }},
+	{TypeItemAdded,
+		func(r *UpdateSettingsRequest) *UpdateTemplateSettingsRequest { return r.ItemAdded },
+		func(s *Settings, t *TemplateSettings) { s.ItemAdded = t },
+		func(r *GetSettingsResponse, t *TemplateSettingsResponse) { r.ItemAdded = t }},
+	{TypeCheckoutReminder,
+		func(r *UpdateSettingsRequest) *UpdateTemplateSettingsRequest { return r.CheckoutReminder },
+		func(s *Settings, t *TemplateSettings) { s.CheckoutReminder = t },
+		func(r *GetSettingsResponse, t *TemplateSettingsResponse) { r.CheckoutReminder = t }},
+	{TypeWaitlistNotified,
+		func(r *UpdateSettingsRequest) *UpdateTemplateSettingsRequest { return r.WaitlistNotified },
+		func(s *Settings, t *TemplateSettings) { s.WaitlistNotified = t },
+		func(r *GetSettingsResponse, t *TemplateSettingsResponse) { r.WaitlistNotified = t }},
+	{TypeOutOfWindowScheduled,
+		func(r *UpdateSettingsRequest) *UpdateTemplateSettingsRequest { return r.OutOfWindowScheduled },
+		func(s *Settings, t *TemplateSettings) { s.OutOfWindowScheduled = t },
+		func(r *GetSettingsResponse, t *TemplateSettingsResponse) { r.OutOfWindowScheduled = t }},
+	{TypeOutOfWindowSessionEnded,
+		func(r *UpdateSettingsRequest) *UpdateTemplateSettingsRequest { return r.OutOfWindowSessionEnded },
+		func(s *Settings, t *TemplateSettings) { s.OutOfWindowSessionEnded = t },
+		func(r *GetSettingsResponse, t *TemplateSettingsResponse) { r.OutOfWindowSessionEnded = t }},
+	{TypeOutOfWindowEventEnded,
+		func(r *UpdateSettingsRequest) *UpdateTemplateSettingsRequest { return r.OutOfWindowEventEnded },
+		func(s *Settings, t *TemplateSettings) { s.OutOfWindowEventEnded = t },
+		func(r *GetSettingsResponse, t *TemplateSettingsResponse) { r.OutOfWindowEventEnded = t }},
+	{TypeEventDeadlineStarted,
+		func(r *UpdateSettingsRequest) *UpdateTemplateSettingsRequest { return r.EventDeadlineStarted },
+		func(s *Settings, t *TemplateSettings) { s.EventDeadlineStarted = t },
+		func(r *GetSettingsResponse, t *TemplateSettingsResponse) { r.EventDeadlineStarted = t }},
+	{TypeWaitlistUnfulfilled,
+		func(r *UpdateSettingsRequest) *UpdateTemplateSettingsRequest { return r.WaitlistUnfulfilled },
+		func(s *Settings, t *TemplateSettings) { s.WaitlistUnfulfilled = t },
+		func(r *GetSettingsResponse, t *TemplateSettingsResponse) { r.WaitlistUnfulfilled = t }},
+}
 
 func toSettingsResponse(s *Settings) GetSettingsResponse {
 	resp := GetSettingsResponse{}
 
-	if s.CheckoutImmediate != nil {
-		resp.CheckoutImmediate = &TemplateSettingsResponse{
-			Enabled:  s.CheckoutImmediate.Enabled,
-			Template: s.CheckoutImmediate.Template,
+	for _, sec := range dmSections {
+		section := templateSection(s, sec.Type)
+		if section == nil {
+			// A loja nunca customizou esta chave. Devolver o DEFAULT, e não
+			// nil, é o que faz o card aparecer na aba de Comunicações já
+			// preenchido com o texto que o comprador de fato recebe — nil
+			// deixaria o lojista editando um campo vazio que não corresponde
+			// ao envio real.
+			defaults := DefaultSettings()
+			section = templateSection(&defaults, sec.Type)
 		}
-	}
-
-	if s.ItemAdded != nil {
-		resp.ItemAdded = &TemplateSettingsResponse{
-			Enabled:  s.ItemAdded.Enabled,
-			Template: s.ItemAdded.Template,
+		if section == nil {
+			continue
 		}
-	}
-
-	if s.CheckoutReminder != nil {
-		resp.CheckoutReminder = &TemplateSettingsResponse{
-			Enabled:  s.CheckoutReminder.Enabled,
-			Template: s.CheckoutReminder.Template,
-		}
+		sec.setResp(&resp, &TemplateSettingsResponse{
+			Enabled:  section.Enabled,
+			Template: section.Template,
+		})
 	}
 
 	resp.PaymentConfirmed = toEmailResponse(s.PaymentConfirmed)
@@ -313,25 +429,17 @@ func toEmailResponse(e *EmailTemplateSettings) *EmailTemplateSettingsResponse {
 func toSettingsFromRequest(req *UpdateSettingsRequest) Settings {
 	settings := Settings{}
 
-	if req.CheckoutImmediate != nil {
-		settings.CheckoutImmediate = &TemplateSettings{
-			Enabled:  req.CheckoutImmediate.Enabled,
-			Template: req.CheckoutImmediate.Template,
+	for _, sec := range dmSections {
+		in := sec.fromReq(req)
+		if in == nil {
+			// nil = "não enviado". Fica nil no Settings para que mergeSettings
+			// preserve o que está gravado.
+			continue
 		}
-	}
-
-	if req.ItemAdded != nil {
-		settings.ItemAdded = &TemplateSettings{
-			Enabled:  req.ItemAdded.Enabled,
-			Template: req.ItemAdded.Template,
-		}
-	}
-
-	if req.CheckoutReminder != nil {
-		settings.CheckoutReminder = &TemplateSettings{
-			Enabled:  req.CheckoutReminder.Enabled,
-			Template: req.CheckoutReminder.Template,
-		}
+		sec.set(&settings, &TemplateSettings{
+			Enabled:  in.Enabled,
+			Template: in.Template,
+		})
 	}
 
 	settings.PaymentConfirmed = fromEmailRequest(req.PaymentConfirmed)

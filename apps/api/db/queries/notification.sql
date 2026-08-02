@@ -26,6 +26,56 @@ UPDATE notification_logs
 SET status = $2, sent_at = $3, error_message = $4
 WHERE id = $1;
 
+-- name: MarkNotificationUndelivered :exec
+-- RN-38 — nem tentamos, porque a regra do Instagram ja fechava a porta.
+-- sent_at fica NULL de proposito: nada saiu, e carimbar um horario de envio
+-- aqui seria exatamente a ilusao de entrega que a regra proibe.
+UPDATE notification_logs
+SET status = 'undelivered',
+    undelivered_reason = $2
+WHERE id = $1;
+
+-- name: SetNotificationUndeliveredReason :exec
+-- RN-38 — tentamos e o Instagram recusou. O status continua 'failed' (foi
+-- tentativa real, e o vocabulario de retry depende disso); o que a coluna
+-- acrescenta e o motivo legivel, para a linha aparecer na lista do lojista
+-- junto com as que nunca foram tentadas.
+UPDATE notification_logs
+SET undelivered_reason = $2
+WHERE id = $1;
+
+-- name: ListUndeliveredByEvent :many
+-- RN-38 — os compradores que nao puderam ser avisados nesta campanha, um por
+-- linha, com o carrinho e o link para o lojista chamar na mao.
+--
+-- O filtro e undelivered_reason IS NOT NULL, e nao status = 'undelivered', de
+-- proposito: a lista tem de conter tambem o que foi TENTADO e recusado pelo
+-- Instagram (status 'failed' + motivo). O status continua distinguindo
+-- "nem tentamos" de "tentamos e recusaram"; quem responde "quem eu preciso
+-- chamar na mao" e a coluna de motivo.
+--
+-- DISTINCT ON por comprador: uma campanha longa pode ter varias mensagens nao
+-- entregues para a MESMA pessoa (o prazo do Instagram fechou para ela, entao
+-- fecha para tudo). Listar cada tentativa transformaria a lista de "quem
+-- chamar" numa lista de log — o lojista precisa de pessoas, nao de eventos.
+SELECT DISTINCT ON (nl.platform_user_id)
+    nl.id,
+    nl.platform_user_id,
+    nl.platform_handle,
+    nl.notification_type,
+    nl.undelivered_reason,
+    nl.created_at,
+    nl.cart_id,
+    c.token AS cart_token,
+    COALESCE(cart_product_total_cents(c.id), 0)::bigint AS cart_total_cents,
+    COALESCE((SELECT SUM(ci.quantity)::int FROM cart_items ci WHERE ci.cart_id = c.id), 0)::int AS cart_total_items
+FROM notification_logs nl
+LEFT JOIN carts c ON c.id = nl.cart_id
+WHERE nl.store_id = $1
+  AND nl.event_id = $2
+  AND nl.undelivered_reason IS NOT NULL
+ORDER BY nl.platform_user_id, nl.created_at DESC;
+
 -- name: GetLastNotificationForUser :one
 -- Returns the most recent notification for a user in a store (for cooldown check)
 SELECT * FROM notification_logs

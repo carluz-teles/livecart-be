@@ -477,6 +477,8 @@ type NotificationLog struct {
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	SentAt            pgtype.Timestamptz `json:"sent_at"`
 	ProviderMessageID pgtype.Text        `json:"provider_message_id"`
+	// RN-38: motivo canonico da nao entrega (comment_window_expired, no_eligible_comment, instagram_rejected). Preenchido quando status = undelivered. O texto exibido ao lojista sai de notification.UndeliverableReasonText — a coluna guarda o codigo, nunca a frase.
+	UndeliveredReason pgtype.Text `json:"undelivered_reason"`
 }
 
 // Temporary storage for OAuth PKCE code_verifier during authorization flow
