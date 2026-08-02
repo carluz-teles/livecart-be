@@ -594,6 +594,17 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// notifier impl depends on integration.Service).
 			liveSvc.SetNotifier(newLiveNotifierAdapter(integration.NewInstagramNotifier(integrationSvc, log)))
 
+			// Wire the comment-ingestion core collaborators into liveSvc (Bloco
+			// B4b). The comment.received consumer now runs in live.Service; these
+			// setters must land BEFORE the consumer is registered (:eventsServer
+			// below). StockReserver goes through an adapter that maps the neutral
+			// live.ReserveParams to erp.ReserveParams (breaks the erp cycle); the
+			// billing/webhook/social ports are satisfied by integrationSvc directly.
+			liveSvc.SetStockReserver(integration.NewLiveStockReserverAdapter(integrationSvc))
+			liveSvc.SetBillingGate(integrationSvc)
+			liveSvc.SetWebhookAuditor(integrationSvc)
+			liveSvc.SetSocialReplier(integrationSvc)
+
 			// Customer block flow needs the integration service to sweep
 			// open carts (release local + ERP stock, promote waitlist).
 			customerSvc.SetCartCanceler(integrationSvc)
@@ -607,6 +618,9 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// PRD 007: paywall gate — lojas bloqueadas param de criar carrinhos
 			integrationSvc.SetBillingGate(billingSvc)
 			integrationSvc.SetNotificationService(notificationSvc)
+			// Bloco B4b: the immediate-checkout notification now runs in the live
+			// comment core, so it needs its own handle on the notification service.
+			liveSvc.SetNotificationService(notificationSvc)
 
 			// Customer-facing post-payment flow (tracking token + receipt
 			// email). Plugged into both the webhook path on integrationSvc
@@ -952,11 +966,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
 				return asynq.SkipRetry
 			}
-			var input integration.ProcessInstagramCommentInput
+			var input live.ProcessInstagramCommentInput
 			if err := json.Unmarshal(env.Payload, &input); err != nil {
 				return asynq.SkipRetry
 			}
-			return integrationSvc.ProcessInstagramComment(ctx, input)
+			return liveSvc.ProcessInstagramComment(ctx, input)
 		})
 
 		// Payment choreography L2: the payment.process command (emitted by the
