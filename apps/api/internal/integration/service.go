@@ -149,21 +149,25 @@ type Service struct {
 	// lazily by erpStock() (production builds it in NewService; direct-literal
 	// tests get it on first use) so it always wraps THIS Service's collaborators.
 	erpStockService *erp.Service
+	erpStockOnce    sync.Once
 
 	// inventoryService owns the waitlist/fila flow (strangler-fig B3a).
 	// ListActiveWaitlistByCart / CancelWaitlistItem delegate to it. Built lazily
 	// by inventory() (production builds it in NewService; direct-literal tests get
 	// it on first use) so it always wraps THIS Service's repo/collaborators/stock.
 	inventoryService *inventory.Service
+	inventoryOnce    sync.Once
 }
 
 // erpStock returns the delegate erp.Service, building it once over this
 // Service's repo adapter and collaborator methods. Kept lazy so the finalisation
 // tests that construct a Service literal (no NewService) still delegate correctly.
+// sync.Once makes the lazy build safe when concurrent goroutines hit it before
+// the eager NewService warm-up ran (direct-literal tests under -race).
 func (s *Service) erpStock() *erp.Service {
-	if s.erpStockService == nil {
+	s.erpStockOnce.Do(func() {
 		s.erpStockService = erp.NewService(erpRepoAdapter{s.repo}, s, s.logger)
-	}
+	})
 	return s.erpStockService
 }
 
@@ -178,9 +182,9 @@ func (s *Service) ERP() *erp.Service { return s.erpStock() }
 // tests that construct a Service literal (no NewService) still delegate correctly
 // — mirrors erpStock().
 func (s *Service) inventory() *inventory.Service {
-	if s.inventoryService == nil {
+	s.inventoryOnce.Do(func() {
 		s.inventoryService = inventory.NewService(inventoryRepoAdapter{s.repo}, s, s.stock, s.liveService, s.logger)
-	}
+	})
 	return s.inventoryService
 }
 
