@@ -72,7 +72,7 @@ RETURNING *;
 -- campanha e o evento de outra. Ordenando pelas mesmas colunas de lsp — e
 -- desempatando por lsp.id, que é único — as duas elegem a mesma linha por
 -- construção. Hoje isso é inócuo (a UNIQUE global garante uma linha só); a
--- ambiguidade nasce com a unique parcial da 000115.
+-- ambiguidade nasce com a unique parcial da 000117.
 SELECT ls.*
 FROM live_sessions ls
 JOIN live_session_platforms lsp ON lsp.session_id = ls.id
@@ -94,7 +94,7 @@ SELECT COUNT(*)::int FROM live_session_platforms WHERE session_id = $1;
 
 -- GetPlatformByLiveID foi REMOVIDA: não tinha nenhum chamador (só o wrapper de
 -- repositório, que também não tinha) e era um `:one` sem ORDER BY sobre
--- platform_live_id — a coluna que a 000115 deixou de ter UNIQUE global. Quem a
+-- platform_live_id — a coluna que a 000117 deixou de ter UNIQUE global. Quem a
 -- ligasse teria o mesmo bug silencioso das duas queries de resolução: pgx lê a
 -- primeira linha e descarta o resto sem erro, então o reuso de um post fixado
 -- devolveria uma campanha ARBITRÁRIA. As duas resoluções vivas
@@ -139,7 +139,7 @@ WHERE platform_live_id = $1 AND released_at IS NULL;
 -- que ends_at vence, então prometia 2 dias e entregava 0.
 --
 -- live_events não tem ended_at: o carimbo de encerramento é ends_at (que a
--- RN-05 tornou obrigatório e a 000112 backfillou nos legados encerrados), com
+-- RN-05 tornou obrigatório e a 000114 backfillou nos legados encerrados), com
 -- updated_at como último recurso. Encerramento manual antes do ends_at deixa a
 -- janela mais LARGA que 7 dias, nunca mais estreita — erra para o lado de
 -- responder.
@@ -237,7 +237,7 @@ ORDER BY (ls.status IN ('active', 'live')) DESC, ls.sequence_order DESC
 LIMIT 1;
 
 -- =============================================================================
--- MARCADOR DE CORTE DA ATRIBUIÇÃO (D26 / 000119)
+-- MARCADOR DE CORTE DA ATRIBUIÇÃO (D26 / 000121)
 -- =============================================================================
 
 -- name: GetMetricCutover :one
@@ -250,12 +250,12 @@ FROM metric_cutovers
 WHERE key = $1;
 
 -- =============================================================================
--- PUBLICAÇÃO AGENDADA (RN-31 / 000121)
+-- PUBLICAÇÃO AGENDADA (RN-31 / 000123)
 -- =============================================================================
 
 -- name: SetSessionPublishAt :exec
 -- Registra em live_sessions.publish_at QUANDO esta transmissão foi publicada
--- por agendamento. A coluna existe desde a 000112 e até aqui não tinha
+-- por agendamento. A coluna existe desde a 000114 e até aqui não tinha
 -- escritor nenhum: o agendador é o motivo pelo qual ela foi criada, e sem esta
 -- escrita "quando publica" passaria a viver só em session_publish_jobs — duas
 -- fontes da verdade para a mesma pergunta, que é o erro que o épico desfaz.

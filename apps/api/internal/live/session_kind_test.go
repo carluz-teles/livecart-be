@@ -2,7 +2,7 @@ package live
 
 // A espécie do evento sai das SESSÕES, nunca de live_events.type.
 //
-// Por que este teste existe: a 000120 dropou live_events.type, e a tela de
+// Por que este teste existe: a 000122 dropou live_events.type, e a tela de
 // eventos (lista, detalhe e o checkout do COMPRADOR) escolhe o vocabulário
 // — "Live em andamento" contra "Promoção ativa" — a partir dessa espécie.
 // Enquanto a fonte for a coluna do container, o drop derruba as três telas de

@@ -41,6 +41,7 @@ import (
 	"livecart/apps/api/internal/cart"
 	"livecart/apps/api/internal/checkout"
 	"livecart/apps/api/internal/coupon"
+	couponlisteners "livecart/apps/api/internal/coupon/listeners"
 	"livecart/apps/api/internal/customer"
 	"livecart/apps/api/internal/dashboard"
 	"livecart/apps/api/internal/events"
@@ -52,13 +53,17 @@ import (
 	"livecart/apps/api/internal/integration/providers/payment"
 	"livecart/apps/api/internal/integration/providers/shipping"
 	"livecart/apps/api/internal/integration/providers/social"
+	"livecart/apps/api/internal/inventory"
+	inventorylisteners "livecart/apps/api/internal/inventory/listeners"
 	"livecart/apps/api/internal/invitation"
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/internal/member"
 	"livecart/apps/api/internal/notification"
+	notiflisteners "livecart/apps/api/internal/notification/listeners"
 	notificationinbox "livecart/apps/api/internal/notification_inbox"
 	"livecart/apps/api/internal/order"
 	orderlisteners "livecart/apps/api/internal/order/listeners"
+	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/internal/postcheckout"
 	"livecart/apps/api/internal/product"
 	"livecart/apps/api/internal/productgroup"
@@ -392,6 +397,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	// Integration Layer setup
 	var integrationSvc *integration.Service
+	var paymentSvc *paymentdomain.Service
 	var integrationWebhookHandler *integration.WebhookHandler
 	var notificationSvc *notification.Service
 	var postCheckoutSvc *postcheckout.Service
@@ -570,14 +576,34 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				log,
 			)
 
+			// Payment-provider resolution lives in the extracted payment.Service
+			// (strangler-fig B1a). integrationSvc is its resolver; GetPaymentProvider
+			// delegates back into it.
+			paymentSvc = paymentdomain.NewService(integrationSvc, idempotencySvc, log)
+			integrationSvc.SetPaymentService(paymentSvc)
+			// B1d: wire the integration-backed gateway so the payment webhook
+			// consumer (ProcessPaymentNotification) runs against the SAME
+			// integration.Repository — same pool, same guarded write, same outbox.
+			paymentSvc.SetCartPaymentGateway(integrationSvc)
+
 			// Create webhook handler
-			integrationWebhookHandler = integration.NewWebhookHandler(integrationSvc, log)
+			integrationWebhookHandler = integration.NewWebhookHandler(integrationSvc, paymentSvc, log)
 
 			// Wire Notifier into liveSvc (lazy injection breaks the dependency
 			// cycle: integration.Service depends on live.Service, and the
 			// notifier impl depends on integration.Service).
 			liveSvc.SetNotifier(newLiveNotifierAdapter(integration.NewInstagramNotifier(integrationSvc, log)))
-			liveSvc.SetERPFinalizer(newERPFinalizerAdapter(integrationSvc))
+
+			// Wire the comment-ingestion core collaborators into liveSvc (Bloco
+			// B4b). The comment.received consumer now runs in live.Service; these
+			// setters must land BEFORE the consumer is registered (:eventsServer
+			// below). StockReserver goes through an adapter that maps the neutral
+			// live.ReserveParams to erp.ReserveParams (breaks the erp cycle); the
+			// billing/webhook/social ports are satisfied by integrationSvc directly.
+			liveSvc.SetStockReserver(integration.NewLiveStockReserverAdapter(integrationSvc))
+			liveSvc.SetBillingGate(integrationSvc)
+			liveSvc.SetWebhookAuditor(integrationSvc)
+			liveSvc.SetSocialReplier(integrationSvc)
 
 			// Customer block flow needs the integration service to sweep
 			// open carts (release local + ERP stock, promote waitlist).
@@ -592,6 +618,9 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// PRD 007: paywall gate — lojas bloqueadas param de criar carrinhos
 			integrationSvc.SetBillingGate(billingSvc)
 			integrationSvc.SetNotificationService(notificationSvc)
+			// Bloco B4b: the immediate-checkout notification now runs in the live
+			// comment core, so it needs its own handle on the notification service.
+			liveSvc.SetNotificationService(notificationSvc)
 
 			// Customer-facing post-payment flow (tracking token + receipt
 			// email). Plugged into both the webhook path on integrationSvc
@@ -725,7 +754,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	var checkoutSvc *checkout.Service
 	if integrationSvc != nil {
 		checkoutRepo := checkout.NewRepository(queries)
-		checkoutSvc = checkout.NewService(checkoutRepo, pool, integrationSvc, log)
+		checkoutSvc = checkout.NewService(checkoutRepo, pool, integrationSvc, paymentSvc, log)
 		if postCheckoutSvc != nil {
 			checkoutSvc.SetPostCheckoutHook(postCheckoutSvc)
 		}
@@ -815,7 +844,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		orderSvc.SetERPFinalisationRetrier(integrationSvc)
 		// Same pattern for the manual "Verificar NFe" button: orderSvc is the
 		// HTTP entry point but the ERP fetch lives on the integration service.
-		orderSvc.SetCartInvoiceSyncer(integrationSvc)
+		orderSvc.SetCartInvoiceSyncer(integrationSvc.ERP())
 		// Cancelamento de pedido não pago: o botão vive no painel de pedidos, mas
 		// desfazer estoque local, reserva/pedido no Tiny e fila de espera é
 		// orquestração do integration service.
@@ -829,6 +858,18 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	// Order materialisation reactor: listens to cart.paid and materialises the
 	// immutable Order snapshot. Independent of billing/ERP — keyed by cart_id.
 	orderListener := orderlisteners.New(pool, queries, log)
+	// Notification reactor: sends the buyer receipt / refund email in reaction to
+	// cart.paid / cart.refunded — postCheckoutSvc satisfies its ReceiptSender.
+	// Nil when the post-checkout flow isn't wired (same guard as its handlers).
+	var notificationListener *notiflisteners.Listener
+	if postCheckoutSvc != nil {
+		notificationListener = notiflisteners.New(postCheckoutSvc, log)
+	}
+	// Inventory reactor (Fatia A2): reconciles the waitlist in reaction to
+	// cart.paid ('notified' → 'fulfilled' for the cart's rows), replacing the
+	// inline call that used to live in postcheckout.OnCartPaid. Its repo owns the
+	// canonical MarkWaitlistFulfilledByCart query + the waitlist.fulfilled emission.
+	inventoryListener := inventorylisteners.New(inventory.NewRepository(queries), log)
 	// Fatia 3: ERP mirror — projeta estado ERP do cart na Order (best-effort, aditivo).
 	if integrationSvc != nil {
 		integrationSvc.SetERPOrderMirror(orderListener)
@@ -854,17 +895,20 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	couponHandler.RegisterRoutes(storeScoped)
 	couponHandler.RegisterPublicRoutes(app)
 
-	// Wire the redemption lifecycle hook onto the integration service so the
-	// payment webhook flips reserved → confirmed (and confirmed → refunded
-	// on chargebacks). The same syncer also satisfies checkout.CouponLifecycle
-	// so a free-shipping coupon stays in sync across shipping changes.
+	// The redemption confirm/refund on payment facts now reacts to cart.paid /
+	// cart.refunded as its own Coupon reactor (couponListener below) instead of
+	// being wired onto the integration fan-out. couponLifecycle stays for
+	// checkout.CouponLifecycle so a free-shipping / subtotal coupon keeps in sync
+	// across shipping changes and cart mutations.
 	couponLifecycle := coupon.NewRedemptionSyncer(couponSvc)
-	if integrationSvc != nil {
-		integrationSvc.SetCouponSyncer(couponLifecycle)
-	}
 	if checkoutSvc != nil {
 		checkoutSvc.SetCouponLifecycle(couponLifecycle)
 	}
+	// Coupon reactor: confirms the redemption on cart.paid (reserved → confirmed)
+	// and refunds it on cart.refunded (→ refunded, slot back to circulation),
+	// reacting to the facts instead of running inline in integration's fan-out.
+	// couponSvc satisfies its RedemptionConfirmer; idempotent in the service.
+	couponListener := couponlisteners.New(couponSvc, log)
 
 	// NOTE: the periodic sweep workers (coupon-expirer, cart-recovery,
 	// cart-expiry) were removed — cart expiration is now driven exclusively by
@@ -883,8 +927,15 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	// Integration routes (store-scoped)
 	if integrationSvc != nil {
-		integrationHandler := integration.NewHandler(integrationSvc, validate, s3Client)
+		integrationHandler := integration.NewHandler(integrationSvc, paymentSvc, validate, s3Client)
 		integrationHandler.RegisterRoutes(storeScoped)
+
+		// Payment admin routes (Bloco B1c) — Pagar.me connect + webhook
+		// diagnostics extracted into payment.Handler. Same /integrations group,
+		// same paths/verbs; the still-integration-owned use cases are reached
+		// through the paymentdomain adapter over integrationSvc.
+		paymentHandler := paymentdomain.NewHandler(integration.NewPaymentAdmin(integrationSvc))
+		paymentHandler.RegisterRoutes(storeScoped)
 
 		// Notification settings routes (depends on integration service)
 		notificationHandler := notification.NewHandler(notificationSvc, log)
@@ -941,11 +992,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
 				return asynq.SkipRetry
 			}
-			var input integration.ProcessInstagramCommentInput
+			var input live.ProcessInstagramCommentInput
 			if err := json.Unmarshal(env.Payload, &input); err != nil {
 				return asynq.SkipRetry
 			}
-			return integrationSvc.ProcessInstagramComment(ctx, input)
+			return liveSvc.ProcessInstagramComment(ctx, input)
 		})
 
 		// Payment choreography L2: the payment.process command (emitted by the
@@ -956,11 +1007,14 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
 				return asynq.SkipRetry
 			}
-			var input integration.ProcessPaymentInput
+			// B1d: the consumer now lives in payment.Service. The command payload
+			// is wire-compatible (payment.ProcessPaymentInput mirrors the
+			// integration one field-for-field), so in-flight tasks decode fine.
+			var input paymentdomain.ProcessPaymentInput
 			if err := json.Unmarshal(env.Payload, &input); err != nil {
 				return asynq.SkipRetry
 			}
-			return integrationSvc.ProcessPaymentNotification(ctx, input)
+			return paymentSvc.ProcessPaymentNotification(ctx, input)
 		})
 
 		// Payment choreography L3: reactors of the cart payment facts. The fan-out
@@ -987,12 +1041,44 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := orderListener.OnCartPaid(ctx, p.CartID, p.StoreID, p.GMVCents, p.PaymentSnapshot); err != nil {
 				return err
 			}
-			// Customer-facing fan-out (coupon, tracking, timeline, GMV ledger,
-			// receipt, waitlist). An error retries the whole task (each step is
-			// idempotent) and dead-letters after MaxRetry. ERP finalisation is NO
-			// LONGER here (Fatia 11b-2): it reacts to the order.paid fact emitted by
-			// OnCartPaid, so its retry loop is decoupled from this fan-out.
-			return integrationSvc.ReactCartPaid(ctx, p.CartID, p.StoreID, p.GMVCents)
+			// Coupon reactor: confirm the redemption (reserved → confirmed) in
+			// reaction to cart.paid, replacing the inline coupon confirm that ran
+			// first in integration's fan-out. Idempotent (no-op unless 'reserved');
+			// error → asynq retry.
+			if couponListener != nil {
+				if err := couponListener.OnCartPaid(ctx, p.CartID); err != nil {
+					return err
+				}
+			}
+			// Customer-facing fan-out (tracking, timeline, GMV ledger). An error
+			// retries the whole task (each step is idempotent) and dead-letters after
+			// MaxRetry. ERP finalisation is NO LONGER here (Fatia 11b-2): it reacts to
+			// the order.paid fact emitted by OnCartPaid, so its retry loop is decoupled
+			// from this fan-out.
+			if err := integrationSvc.ReactCartPaid(ctx, p.CartID, p.StoreID, p.GMVCents); err != nil {
+				return err
+			}
+			// Inventory reactor (Fatia A2): the waitlist fulfilment reacts to
+			// cart.paid on its own instead of running inline in the fan-out above
+			// (extracted from postcheckout.OnCartPaid). Marks 'notified'→'fulfilled'
+			// for this cart; idempotent (WHERE status='notified') so a redelivery is
+			// a no-op and never re-emits waitlist.fulfilled. Error → asynq retry. No
+			// ordering dependency with the Order materialisation above.
+			if inventoryListener != nil {
+				if err := inventoryListener.OnCartPaid(ctx, p.CartID); err != nil {
+					return err
+				}
+			}
+			// Notification reactor (Fatia A1): the buyer receipt reacts to cart.paid
+			// on its own instead of being sent inline in the fan-out above. It runs
+			// after orderListener.OnCartPaid materialised the Order + tracking token
+			// (first step above, Fatia A4); its guard returns ErrReceiptNotReady (→
+			// asynq retry) if they're not yet ready, and it is idempotent so a
+			// redelivery never mails a second receipt.
+			if notificationListener != nil {
+				return notificationListener.OnCartPaid(ctx, p.CartID)
+			}
+			return nil
 		})
 		eventsServer.Register(events.CartRefunded, func(ctx context.Context, t *asynq.Task) error {
 			var env events.Envelope
@@ -1013,7 +1099,25 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := orderListener.OnCartRefunded(ctx, p.CartID, p.StoreID); err != nil {
 				return err
 			}
-			return integrationSvc.ReactCartRefunded(ctx, p.CartID, p.StoreID)
+			// Coupon reactor: refund the redemption (→ refunded, slot back to
+			// circulation) in reaction to cart.refunded, replacing the inline coupon
+			// refund from integration's fan-out. Idempotent (no-op if absent / already
+			// refunded); error → asynq retry.
+			if couponListener != nil {
+				if err := couponListener.OnCartRefunded(ctx, p.CartID); err != nil {
+					return err
+				}
+			}
+			if err := integrationSvc.ReactCartRefunded(ctx, p.CartID, p.StoreID); err != nil {
+				return err
+			}
+			// Notification reactor (Fatia A1): the refund email reacts to
+			// cart.refunded on its own instead of being sent inline in the fan-out
+			// above. Idempotent via the payment_refunded timeline marker.
+			if notificationListener != nil {
+				return notificationListener.OnCartRefunded(ctx, p.CartID)
+			}
+			return nil
 		})
 
 		// Order post-payment ERP reactors (Fatia 11b-2): the ERP finalisation/refund
@@ -1041,7 +1145,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// fact), so finalisation resolves order_payments by cart_id. Snapshot rides
 			// the payload (frozen by OnCartPaid); a nil snapshot finalises without
 			// payment details.
-			return integrationSvc.ReactOrderPaidERP(ctx, p.CartID, p.StoreID, p.PaymentSnapshot)
+			return integrationSvc.ERP().OnOrderPaid(ctx, p.CartID, p.StoreID, p.PaymentSnapshot)
 		})
 		eventsServer.Register(events.OrderRefunded, func(ctx context.Context, t *asynq.Task) error {
 			var env events.Envelope
@@ -1055,7 +1159,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(env.Payload, &p); err != nil || p.CartID == "" || p.StoreID == "" {
 				return asynq.SkipRetry
 			}
-			return integrationSvc.ReactOrderRefundedERP(ctx, p.CartID, p.StoreID)
+			return integrationSvc.ERP().OnOrderRefunded(ctx, p.CartID, p.StoreID)
 		})
 
 		// cart.cancelled reactor (Fatia E1): flip the Order to 'cancelled'. Two
@@ -1135,7 +1239,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 					zap.String("cart_id", p.CartID), zap.Error(err))
 				return err
 			}
-			return integrationSvc.ReactCartExpiredERP(ctx, p.CartID, p.StoreID)
+			return integrationSvc.ERP().OnCartExpired(ctx, p.CartID, p.StoreID)
 		})
 
 		// cart.cancellation_reverted reactor: o lojista cancelou o carrinho e o
@@ -1465,18 +1569,4 @@ func (a *liveNotifierAdapter) NotifyEventCheckout(ctx context.Context, p live.No
 		Reason:     res.Reason,
 		ReasonText: res.ReasonText,
 	}, err
-}
-
-// erpFinalizerAdapter bridges integration.Service.FinalizeEventERP to
-// live.ERPFinalizer (local interface), avoiding the import cycle.
-type erpFinalizerAdapter struct {
-	svc *integration.Service
-}
-
-func newERPFinalizerAdapter(svc *integration.Service) *erpFinalizerAdapter {
-	return &erpFinalizerAdapter{svc: svc}
-}
-
-func (a *erpFinalizerAdapter) FinalizeEventERP(ctx context.Context, storeID, eventID string) error {
-	return a.svc.FinalizeEventERP(ctx, storeID, eventID)
 }

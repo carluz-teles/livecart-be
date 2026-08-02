@@ -1,31 +1,31 @@
 package migrationtest
 
-// Teste da migration 000119: reparo 1:1 (D26) e marcador de corte (D12/D26).
+// Teste das migrations 000119 e 000120: as FKs que orders nunca teve (D23).
 //
 // O que precisa ficar provado:
-//  1. evento SEM sessao ganha exatamente uma, com type traduzido do
-//     vocabulario do evento e status coerente com o do evento;
-//  2. evento que JA tem sessao nao ganha nenhuma — o reparo nao pode duplicar
-//     transmissao, senao a metrica por sessao nasce contando duas vezes;
-//  3. o marcador global existe com a chave 'session_attribution' e e
-//     idempotente (rodar de novo nao reescreve o instante do corte);
-//  4. toda sessao que existia ANTES do corte fica marcada 'first_touch', e a
-//     que nasce DEPOIS nasce 'addition_log' pelo DEFAULT — e isso que permite
-//     a tela avisar em qual transmissao o numero mudou de definicao;
-//  5. o CHECK recusa um terceiro valor;
-//  6. o down remove tabela, coluna e constraint, mas MANTEM as sessoes do
-//     reparo (apaga-las deixaria carrinho e comentario sem origem).
+//  1. antes da 000119 o banco ACEITA pedido apontando para evento inexistente —
+//     e a linha de base, e e o que torna a FK necessaria;
+//  2. depois da 000119 esse mesmo INSERT e recusado (NOT VALID vale para linha
+//     NOVA desde o primeiro instante);
+//  3. a constraint entra NOT VALID e a 000120 e quem a valida — se as duas
+//     virassem uma so, a varredura rodaria sob o lock forte do ADD;
+//  4. RESTRICT: apagar um evento COM pedido falha, e a violacao aponta para
+//     orders_event_id_fkey (live_events), nao para carts. Era esse o ganho
+//     inteiro da D23 — a integridade ja existia por tabela;
+//  5. apagar um evento SEM pedido continua funcionando, com o CASCADE
+//     levando carrinho e sessao. A D23 bloqueia venda, nao rascunho;
+//  6. o down devolve o banco ao estado permissivo.
 
 import (
 	"context"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestMigration000119AttributionCutover(t *testing.T) {
+func TestMigration000119OrdersEventStoreFK(t *testing.T) {
 	adminURL := mustEnv(t)
 	url, cleanup := freshDB(t, adminURL)
 	defer cleanup()
@@ -37,7 +37,7 @@ func TestMigration000119AttributionCutover(t *testing.T) {
 	defer m.Close()
 
 	if err := m.Migrate(118); err != nil {
-		t.Fatalf("migrate ate 118: %v", err)
+		t.Fatalf("migrate ate 116: %v", err)
 	}
 
 	pool, err := pgxpool.New(context.Background(), url)
@@ -49,176 +49,172 @@ func TestMigration000119AttributionCutover(t *testing.T) {
 
 	var storeID string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO stores (name, slug) VALUES ('D26','d26-119') RETURNING id::text`,
+		`INSERT INTO stores (name, slug) VALUES ('D23','d23-117') RETURNING id::text`,
 	).Scan(&storeID); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
 
-	seedEvent := func(title, evType, status string) string {
-		t.Helper()
-		var id string
-		if err := pool.QueryRow(ctx,
-			`INSERT INTO live_events (store_id, status, title, type, ends_at)
-			 VALUES ($1::uuid, $2, $3, $4, now()) RETURNING id::text`,
-			storeID, status, title, evType,
-		).Scan(&id); err != nil {
-			t.Fatalf("seed evento %s: %v", title, err)
-		}
-		return id
-	}
-
-	// Orfaos de sessao, um por vocabulario do evento.
-	orphanPost := seedEvent("Post orfao", "post", "ended")
-	orphanStory := seedEvent("Story orfao", "story", "active")
-	orphanMulti := seedEvent("Live orfa", "multi", "active")
-
-	// Evento COM sessao: o reparo nao pode encostar nele.
-	withSession := seedEvent("Ja tem sessao", "single", "active")
-	var existingSessionID string
+	// carts.event_id e NOT NULL desde a 000020, entao o carrinho sempre tem
+	// evento. O orfao possivel e o do PEDIDO: orders.event_id e um uuid solto.
+	var baseEventID string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO live_sessions (event_id, status, sequence_order, type)
-		 VALUES ($1::uuid, 'live', 1, 'live') RETURNING id::text`, withSession,
-	).Scan(&existingSessionID); err != nil {
-		t.Fatalf("seed sessao existente: %v", err)
+		`INSERT INTO live_events (store_id, status, title, type, ends_at)
+		 VALUES ($1::uuid, 'ended', 'Base', 'single', now()) RETURNING id::text`, storeID,
+	).Scan(&baseEventID); err != nil {
+		t.Fatalf("seed evento base: %v", err)
 	}
 
-	if err := m.Migrate(119); err != nil {
-		t.Fatalf("migrate 119: %v", err)
-	}
-
-	// 1: cada orfao ganhou UMA sessao, com o type traduzido.
-	for _, tc := range []struct {
-		eventID    string
-		wantType   string
-		wantStatus string
-		label      string
-	}{
-		{orphanPost, "post", "ended", "post encerrado"},
-		{orphanStory, "story", "active", "story ativo"},
-		{orphanMulti, "live", "active", "multi vira live"},
-	} {
-		var n int
-		var gotType, gotStatus string
-		if err := pool.QueryRow(ctx,
-			`SELECT count(*), max(type), max(status) FROM live_sessions WHERE event_id = $1::uuid`, tc.eventID,
-		).Scan(&n, &gotType, &gotStatus); err != nil {
-			t.Fatalf("%s: ler sessao: %v", tc.label, err)
-		}
-		if n != 1 {
-			t.Errorf("%s: %d sessoes apos o reparo, quero 1", tc.label, n)
-			continue
-		}
-		if gotType != tc.wantType {
-			t.Errorf("%s: type = %q, quero %q", tc.label, gotType, tc.wantType)
-		}
-		if gotStatus != tc.wantStatus {
-			t.Errorf("%s: status = %q, quero %q", tc.label, gotStatus, tc.wantStatus)
-		}
-	}
-
-	// 2: o evento que ja tinha sessao continua com UMA, e e a mesma.
-	var sessions int
-	var stillThere string
+	// Um pedido APONTANDO PARA O NADA. So passa porque a FK nao existe.
+	//
+	// Ele e semeado ANTES da 000119 de proposito: a 000119 e NOT VALID, entao
+	// ela nao o rejeita — quem rejeitaria e a 000120. Isso deixa o teste provar
+	// as duas metades separadamente, que e a razao de as migrations serem duas.
+	var orphanCartID string
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*), max(id::text) FROM live_sessions WHERE event_id = $1::uuid`, withSession,
-	).Scan(&sessions, &stillThere); err != nil {
-		t.Fatalf("ler sessoes do evento ja povoado: %v", err)
+		`INSERT INTO carts (event_id, platform_user_id, platform_handle, token, short_id, status, payment_status)
+		 VALUES ($1::uuid, 'orfao', '@orfao', 'tok-orfao-117', 1171, 'checkout', 'paid') RETURNING id::text`, baseEventID,
+	).Scan(&orphanCartID); err != nil {
+		t.Fatalf("seed cart orfao: %v", err)
 	}
-	if sessions != 1 || stillThere != existingSessionID {
-		t.Errorf("o reparo duplicou transmissao: %d sessoes, id %q (quero 1 e %q)", sessions, stillThere, existingSessionID)
-	}
-
-	// 3: o marcador global.
-	var effectiveAt time.Time
-	var note string
-	if err := pool.QueryRow(ctx,
-		`SELECT effective_at, note FROM metric_cutovers WHERE key = 'session_attribution'`,
-	).Scan(&effectiveAt, &note); err != nil {
-		t.Fatalf("marcador 'session_attribution' nao existe: %v", err)
-	}
-	if note == "" {
-		t.Error("o marcador sem nota nao explica nada — a nota E o produto aqui")
-	}
-
-	// Idempotencia: reaplicar o INSERT nao pode mover o instante do corte, ou
-	// o "antes" e o "depois" mudam de lugar a cada deploy.
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO metric_cutovers (key, effective_at, note)
-		 VALUES ('session_attribution', now(), 'nova tentativa') ON CONFLICT (key) DO NOTHING`,
+		`INSERT INTO orders (cart_id, short_id, store_id, event_id, status)
+		 VALUES ($1::uuid, 1, $2::uuid, gen_random_uuid(), 'paid')`, orphanCartID, storeID,
 	); err != nil {
-		t.Fatalf("reinserir marcador: %v", err)
-	}
-	var again time.Time
-	if err := pool.QueryRow(ctx,
-		`SELECT effective_at FROM metric_cutovers WHERE key = 'session_attribution'`,
-	).Scan(&again); err != nil {
-		t.Fatalf("reler marcador: %v", err)
-	}
-	if !again.Equal(effectiveAt) {
-		t.Errorf("o instante do corte mudou de %v para %v — o ON CONFLICT DO NOTHING nao esta protegendo", effectiveAt, again)
+		t.Fatalf("1: sem a FK, pedido orfao TEM de entrar (linha de base): %v", err)
 	}
 
-	// 4: tudo que existia antes do corte esta marcado first_touch.
-	var notMarked int
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM live_sessions WHERE attribution_source <> 'first_touch'`,
-	).Scan(&notMarked); err != nil {
-		t.Fatalf("contar sessoes marcadas: %v", err)
-	}
-	if notMarked != 0 {
-		t.Errorf("%d sessoes anteriores ao corte ficaram sem a marca first_touch", notMarked)
+	// A 000119 sozinha nao pode falhar por causa dele — e esse o ponto do NOT VALID.
+	if err := m.Migrate(119); err != nil {
+		t.Fatalf("3: a 000119 nao pode varrer a tabela (NOT VALID), mas falhou: %v", err)
 	}
 
-	// E a sessao nova nasce addition_log pelo DEFAULT, sem ninguem escrever.
-	var born string
+	// 3: e ela entra NOT VALID, nao validada.
+	var convalidated bool
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO live_sessions (event_id, status, sequence_order, type)
-		 VALUES ($1::uuid, 'active', 2, 'post') RETURNING attribution_source`, withSession,
-	).Scan(&born); err != nil {
-		t.Fatalf("seed sessao pos-corte: %v", err)
+		`SELECT convalidated FROM pg_constraint WHERE conname = 'orders_event_id_fkey'`,
+	).Scan(&convalidated); err != nil {
+		t.Fatalf("constraint orders_event_id_fkey nao existe: %v", err)
 	}
-	if born != "addition_log" {
-		t.Errorf("sessao criada depois do corte nasceu %q, quero addition_log", born)
+	if convalidated {
+		t.Error("3: a constraint entrou VALIDADA na 000119 — a varredura tem de ficar na 000120, fora do lock forte do ADD")
 	}
 
-	// 5: o CHECK recusa valor fora do vocabulario.
+	// 2: linha NOVA ja e recusada, mesmo com a constraint ainda NOT VALID.
+	var newCartID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO carts (event_id, platform_user_id, platform_handle, token, short_id, status, payment_status)
+		 VALUES ($1::uuid, 'novo', '@novo', 'tok-novo-117', 1172, 'checkout', 'paid') RETURNING id::text`, baseEventID,
+	).Scan(&newCartID); err != nil {
+		t.Fatalf("seed cart novo: %v", err)
+	}
+	_, err = pool.Exec(ctx,
+		`INSERT INTO orders (cart_id, short_id, store_id, event_id, status)
+		 VALUES ($1::uuid, 2, $2::uuid, gen_random_uuid(), 'paid')`, newCartID, storeID,
+	)
+	if err == nil {
+		t.Error("2: pedido com event_id inexistente entrou DEPOIS da 000119 — NOT VALID tem de valer para linha nova")
+	}
+
+	// A 000120 varre a tabela e TEM de encontrar o orfao semeado no passo 1.
+	// Este e o comportamento que protege producao: a validacao falha alto, com
+	// a tabela intacta, em vez de o orfao seguir vivo debaixo de uma FK que
+	// jura estar valendo.
+	if err := m.Migrate(120); err == nil {
+		t.Error("a 000120 passou com pedido orfao na tabela — a varredura nao esta acontecendo")
+	} else if !strings.Contains(err.Error(), "orders_event_id_fkey") {
+		t.Errorf("a 000120 falhou por outro motivo: %v", err)
+	}
+
+	// migrate marca a versao como dirty quando o up falha; limpar para seguir.
+	if err := m.Force(119); err != nil {
+		t.Fatalf("force 117: %v", err)
+	}
+
+	// Removido o orfao, a validacao passa.
+	if _, err := pool.Exec(ctx, `DELETE FROM orders WHERE cart_id = $1::uuid`, orphanCartID); err != nil {
+		t.Fatalf("limpar orfao: %v", err)
+	}
+	if err := m.Migrate(120); err != nil {
+		t.Fatalf("000120 com a tabela limpa: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT convalidated FROM pg_constraint WHERE conname = 'orders_event_id_fkey'`,
+	).Scan(&convalidated); err != nil {
+		t.Fatalf("reler constraint: %v", err)
+	}
+	if !convalidated {
+		t.Error("depois da 000120 a constraint continua NOT VALID")
+	}
+
+	// 4 e 5: o comportamento de DELETE, que e o motivo de a D23 existir.
+	var eventID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO live_events (store_id, status, title, type, ends_at)
+		 VALUES ($1::uuid, 'ended', 'Semana Black', 'single', now()) RETURNING id::text`, storeID,
+	).Scan(&eventID); err != nil {
+		t.Fatalf("seed evento: %v", err)
+	}
+	var soldCartID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO carts (event_id, platform_user_id, platform_handle, token, short_id, status, payment_status)
+		 VALUES ($1::uuid, 'comprou', '@comprou', 'tok-comprou-117', 1173, 'checkout', 'paid') RETURNING id::text`, eventID,
+	).Scan(&soldCartID); err != nil {
+		t.Fatalf("seed cart vendido: %v", err)
+	}
 	if _, err := pool.Exec(ctx,
-		`UPDATE live_sessions SET attribution_source = 'chute' WHERE event_id = $1::uuid`, withSession,
-	); err == nil {
-		t.Error("o CHECK de attribution_source nao esta valendo")
+		`INSERT INTO orders (cart_id, short_id, store_id, event_id, status)
+		 VALUES ($1::uuid, 3, $2::uuid, $3::uuid, 'paid')`, soldCartID, storeID, eventID,
+	); err != nil {
+		t.Fatalf("seed pedido: %v", err)
 	}
 
-	// 6: down.
+	_, err = pool.Exec(ctx, `DELETE FROM live_events WHERE id = $1::uuid`, eventID)
+	if err == nil {
+		t.Fatal("4: evento COM pedido foi apagado — o RESTRICT nao esta valendo")
+	}
+	// O ganho da D23: a violacao fala de live_events, nao de carts. Antes, o
+	// unico bloqueio era orders.cart_id (NO ACTION) e o erro citava uma tabela
+	// que o lojista nunca ouviu falar.
+	if !strings.Contains(err.Error(), "orders_event_id_fkey") {
+		t.Errorf("4: o DELETE foi barrado por %v — precisa ser barrado por orders_event_id_fkey, que e o que da mensagem util ao lojista", err)
+	}
+
+	// 5: evento SEM pedido continua apagavel, com o CASCADE levando o carrinho.
+	var draftID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO live_events (store_id, status, title, type, ends_at)
+		 VALUES ($1::uuid, 'active', 'Rascunho', 'single', now() + interval '1 day') RETURNING id::text`, storeID,
+	).Scan(&draftID); err != nil {
+		t.Fatalf("seed rascunho: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO carts (event_id, platform_user_id, platform_handle, token, short_id, status)
+		 VALUES ($1::uuid, 'so-olhou', '@so-olhou', 'tok-rascunho-117', 1174, 'active')`, draftID,
+	); err != nil {
+		t.Fatalf("seed cart do rascunho: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM live_events WHERE id = $1::uuid`, draftID); err != nil {
+		t.Errorf("5: evento SEM pedido tem de continuar apagavel: %v", err)
+	}
+
+	// 6: down devolve o estado permissivo.
 	if err := m.Migrate(118); err != nil {
-		t.Fatalf("down para 118: %v", err)
+		t.Fatalf("down para 116: %v", err)
 	}
-	var tbl, col int
+	var left int
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM information_schema.tables WHERE table_name = 'metric_cutovers'`,
-	).Scan(&tbl); err != nil {
-		t.Fatalf("checar tabela apos down: %v", err)
+		`SELECT count(*) FROM pg_constraint WHERE conname IN ('orders_event_id_fkey','orders_store_id_fkey')`,
+	).Scan(&left); err != nil {
+		t.Fatalf("contar constraints apos down: %v", err)
 	}
-	if tbl != 0 {
-		t.Error("down deixou metric_cutovers para tras")
+	if left != 0 {
+		t.Errorf("down deixou %d constraint(s) para tras", left)
 	}
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM information_schema.columns
-		 WHERE table_name = 'live_sessions' AND column_name = 'attribution_source'`,
-	).Scan(&col); err != nil {
-		t.Fatalf("checar coluna apos down: %v", err)
-	}
-	if col != 0 {
-		t.Error("down deixou attribution_source para tras")
-	}
-	// As sessoes do reparo continuam la: e o comportamento declarado no down.
-	var repaired int
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM live_sessions WHERE event_id IN ($1::uuid, $2::uuid, $3::uuid)`,
-		orphanPost, orphanStory, orphanMulti,
-	).Scan(&repaired); err != nil {
-		t.Fatalf("contar sessoes reparadas apos down: %v", err)
-	}
-	if repaired != 3 {
-		t.Errorf("sessoes do reparo apos down = %d, quero 3 — apaga-las deixaria carrinho e comentario sem origem", repaired)
+	if _, err := pool.Exec(ctx, `DELETE FROM live_events WHERE id = $1::uuid`, eventID); err != nil {
+		// Continua barrado por orders.cart_id (NO ACTION), que e o estado
+		// pre-D23. O que NAO pode e a mensagem citar a constraint dropada.
+		if strings.Contains(err.Error(), "orders_event_id_fkey") {
+			t.Errorf("6: a constraint dropada ainda esta sendo aplicada: %v", err)
+		}
 	}
 }

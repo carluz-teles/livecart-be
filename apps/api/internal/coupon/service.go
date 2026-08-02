@@ -293,7 +293,7 @@ func (s *Service) ApplyToCart(
 		//   - coupon_redemptions_cart_id_key: já aplicado NESTE carrinho;
 		//   - coupon_redemptions_one_per_buyer (RN-33): já usado por este
 		//     comprador em outro carrinho da mesma campanha — o caso que a
-		//     000105 tornou possível ao permitir um 2º carrinho por evento.
+		//     000107 tornou possível ao permitir um 2º carrinho por evento.
 		// Sem esta tradução o comprador receberia 500 no checkout.
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {

@@ -3,7 +3,7 @@ package live
 // Métrica em dois níveis — a metade PROJETADA (Fatia 5).
 //
 // A metade confirmada já vem pronta do banco: order_items tem session_id desde a
-// 000107, então "quanto a transmissão de terça faturou" é um GROUP BY. A metade
+// 000109, então "quanto a transmissão de terça faturou" é um GROUP BY. A metade
 // projetada não tem equivalente: cart_items sabe QUANTO o carrinho tem, e
 // cart_item_events sabe DE ONDE veio cada unidade — juntar os dois é a mesma
 // repartição que o selamento faz.

@@ -1,17 +1,19 @@
 package migrationtest
 
-// Teste da migration 000111: o Modo Live (produto em destaque + pausa) desce
-// para a sessão.
+// Teste da migration 000111: o TIPO e a MÍDIA descem do evento para a
+// sessão/mídia.
 //
 // O que precisa ficar provado:
-//  1. sessão VIVA herda o estado do evento — senão o painel de uma live em
-//     andamento perde o destaque no deploy;
-//  2. sessão ENCERRADA não herda: copiar estado efêmero para lá ressuscitaria
-//     um "produto em destaque" que já não existe;
-//  3. a FK do produto é ON DELETE SET NULL (apagar o produto não derruba a
-//     sessão);
-//  4. live_events continua com as colunas (expand — o DROP é a 000119);
-//  5. o down desfaz tudo.
+//  1. o vocabulário do evento (single|multi|post|story) é traduzido para o da
+//     sessão (live|post|story) — 'single' e 'multi' são ambos live;
+//  2. o CHECK novo REJEITA o vocabulário antigo em live_sessions.type — é a
+//     armadilha da errata E6: validação de aplicação desalinhada do CHECK vira
+//     500 no INSERT em vez de 422;
+//  3. 'reel' passa a ser um valor legal (não existia em lugar nenhum antes);
+//  4. legenda/permalink/thumb migram para a linha de mídia casando
+//     platform_live_id = live_events.media_id, e webhook_active vem junto;
+//  5. live_events continua intacto (expand — o DROP é a 000121);
+//  6. o down desfaz tudo.
 
 import (
 	"context"
@@ -21,7 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestMigration000111SessionLiveMode(t *testing.T) {
+func TestMigration000111SessionTypeAndMedia(t *testing.T) {
 	adminURL := mustEnv(t)
 	url, cleanup := freshDB(t, adminURL)
 	defer cleanup()
@@ -33,7 +35,7 @@ func TestMigration000111SessionLiveMode(t *testing.T) {
 	defer m.Close()
 
 	if err := m.Migrate(110); err != nil {
-		t.Fatalf("migrate ate 110: %v", err)
+		t.Fatalf("migrate ate 108: %v", err)
 	}
 
 	pool, err := pgxpool.New(context.Background(), url)
@@ -43,107 +45,139 @@ func TestMigration000111SessionLiveMode(t *testing.T) {
 	defer pool.Close()
 	ctx := context.Background()
 
-	var storeID, productID string
+	var storeID string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO stores (name, slug) VALUES ('Live Mode Test','lm-111') RETURNING id::text`,
+		`INSERT INTO stores (name, slug) VALUES ('Tipo Test','tipo-109') RETURNING id::text`,
 	).Scan(&storeID); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO products (store_id, name, keyword, external_source, price, stock, active)
-		 VALUES ($1,'Vestido','VST1','manual',1000,10,true) RETURNING id::text`, storeID,
-	).Scan(&productID); err != nil {
-		t.Fatalf("seed produto: %v", err)
-	}
 
-	// Evento com destaque e processamento pausado, uma sessão viva e uma
-	// encerrada.
-	var eventID string
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title, type, current_active_product_id, processing_paused)
-		 VALUES ($1,'active','Modo live','multi',$2,true) RETURNING id::text`, storeID, productID,
-	).Scan(&eventID); err != nil {
-		t.Fatalf("seed evento: %v", err)
+	// Um evento de cada tipo do vocabulário antigo, cada um com uma sessão e uma
+	// mídia. Só o de post carrega os metadados de mídia (é assim na produção:
+	// media_* só é escrito por CreatePostEvent).
+	type seed struct {
+		eventType string
+		mediaID   string
+		wantType  string
 	}
-	var liveSession, endedSession string
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO live_sessions (event_id, status, sequence_order) VALUES ($1,'live',1) RETURNING id::text`, eventID,
-	).Scan(&liveSession); err != nil {
-		t.Fatalf("seed sessao viva: %v", err)
+	seeds := []seed{
+		{"single", "media-single-109", "live"},
+		{"multi", "media-multi-109", "live"},
+		{"post", "media-post-109", "post"},
+		{"story", "media-story-109", "story"},
 	}
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO live_sessions (event_id, status, sequence_order) VALUES ($1,'ended',2) RETURNING id::text`, eventID,
-	).Scan(&endedSession); err != nil {
-		t.Fatalf("seed sessao encerrada: %v", err)
+	sessionIDs := map[string]string{}
+	for _, sd := range seeds {
+		var eventID, sessionID string
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO live_events (store_id, status, title, type, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active)
+			 VALUES ($1,'active',$2,$2,$3,$4,$5,$6,true) RETURNING id::text`,
+			storeID, sd.eventType, sd.mediaID,
+			"https://instagram.com/p/"+sd.mediaID,
+			"https://cdn/"+sd.mediaID+".jpg",
+			"legenda de "+sd.mediaID,
+		).Scan(&eventID); err != nil {
+			t.Fatalf("seed evento %s: %v", sd.eventType, err)
+		}
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO live_sessions (event_id, status, sequence_order) VALUES ($1,'active',1) RETURNING id::text`,
+			eventID,
+		).Scan(&sessionID); err != nil {
+			t.Fatalf("seed sessao %s: %v", sd.eventType, err)
+		}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO live_session_platforms (session_id, platform, platform_live_id) VALUES ($1,'instagram',$2)`,
+			sessionID, sd.mediaID,
+		); err != nil {
+			t.Fatalf("seed midia %s: %v", sd.eventType, err)
+		}
+		sessionIDs[sd.eventType] = sessionID
 	}
 
 	// --- aplica a 000111 ---------------------------------------------------
 	if err := m.Migrate(111); err != nil {
-		t.Fatalf("migrate ate 111: %v", err)
+		t.Fatalf("migrate ate 109: %v", err)
 	}
 
-	// 1. Sessão viva herdou.
-	var gotProduct *string
-	var gotPaused bool
+	// 1. Tradução do vocabulário.
+	for _, sd := range seeds {
+		var got string
+		if err := pool.QueryRow(ctx,
+			`SELECT type FROM live_sessions WHERE id = $1::uuid`, sessionIDs[sd.eventType],
+		).Scan(&got); err != nil {
+			t.Fatalf("ler tipo da sessao %s: %v", sd.eventType, err)
+		}
+		if got != sd.wantType {
+			t.Errorf("evento type=%q: sessao ficou %q, quero %q", sd.eventType, got, sd.wantType)
+		}
+	}
+
+	// 2. O CHECK rejeita o vocabulário ANTIGO — se a aplicação continuar
+	//    mandando 'single'/'multi' para live_sessions, estoura como 500.
+	for _, bad := range []string{"single", "multi", "", "video"} {
+		if _, err := pool.Exec(ctx,
+			`UPDATE live_sessions SET type = $2 WHERE id = $1::uuid`, sessionIDs["single"], bad,
+		); err == nil {
+			t.Errorf("o CHECK deixou passar type=%q em live_sessions", bad)
+		}
+	}
+
+	// 3. 'reel' é valor legal agora (não existia no vocabulário do evento).
+	if _, err := pool.Exec(ctx,
+		`UPDATE live_sessions SET type = 'reel' WHERE id = $1::uuid`, sessionIDs["post"],
+	); err != nil {
+		t.Errorf("'reel' devia ser aceito em live_sessions.type: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE live_sessions SET type = 'post' WHERE id = $1::uuid`, sessionIDs["post"],
+	); err != nil {
+		t.Fatalf("restaurar type=post: %v", err)
+	}
+
+	// 4. Metadados de mídia migraram casando platform_live_id = media_id.
+	var permalink, thumb, caption string
+	var webhookActive bool
 	if err := pool.QueryRow(ctx,
-		`SELECT current_active_product_id::text, processing_paused FROM live_sessions WHERE id = $1::uuid`, liveSession,
-	).Scan(&gotProduct, &gotPaused); err != nil {
-		t.Fatalf("ler sessao viva: %v", err)
+		`SELECT media_permalink, media_thumbnail_url, media_caption, webhook_active
+		 FROM live_session_platforms WHERE platform_live_id = 'media-post-109'`,
+	).Scan(&permalink, &thumb, &caption, &webhookActive); err != nil {
+		t.Fatalf("ler metadados da midia: %v", err)
 	}
-	if gotProduct == nil || *gotProduct != productID {
-		t.Errorf("sessao viva nao herdou o produto em destaque: %v", gotProduct)
+	if permalink != "https://instagram.com/p/media-post-109" {
+		t.Errorf("permalink = %q", permalink)
 	}
-	if !gotPaused {
-		t.Error("sessao viva nao herdou a pausa — o processamento voltaria sozinho no deploy")
+	if thumb != "https://cdn/media-post-109.jpg" {
+		t.Errorf("thumbnail = %q", thumb)
 	}
-
-	// 2. Sessão encerrada NÃO herdou.
-	if err := pool.QueryRow(ctx,
-		`SELECT current_active_product_id::text, processing_paused FROM live_sessions WHERE id = $1::uuid`, endedSession,
-	).Scan(&gotProduct, &gotPaused); err != nil {
-		t.Fatalf("ler sessao encerrada: %v", err)
+	if caption != "legenda de media-post-109" {
+		t.Errorf("caption = %q", caption)
 	}
-	if gotProduct != nil {
-		t.Errorf("sessao encerrada herdou destaque (%v) — estado efemero nao ressuscita", *gotProduct)
-	}
-	if gotPaused {
-		t.Error("sessao encerrada herdou a pausa")
+	if !webhookActive {
+		t.Error("webhook_active nao veio do evento — a midia nasceria em polling de novo")
 	}
 
-	// 3. FK ON DELETE SET NULL.
-	if _, err := pool.Exec(ctx, `DELETE FROM products WHERE id = $1::uuid`, productID); err != nil {
-		t.Fatalf("apagar produto: %v", err)
-	}
-	if err := pool.QueryRow(ctx,
-		`SELECT current_active_product_id::text FROM live_sessions WHERE id = $1::uuid`, liveSession,
-	).Scan(&gotProduct); err != nil {
-		t.Fatalf("reler sessao viva: %v", err)
-	}
-	if gotProduct != nil {
-		t.Errorf("apagar o produto devia zerar o destaque, veio %v", *gotProduct)
-	}
-
-	// 4. EXPAND: as colunas do evento continuam lá.
+	// 5. EXPAND: live_events continua com tudo. Dropar aqui quebraria o FE.
 	var n int
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM information_schema.columns
 		 WHERE table_name = 'live_events'
-		   AND column_name IN ('current_active_product_id','processing_paused')`,
+		   AND column_name IN ('type','media_id','media_permalink','media_thumbnail_url','media_caption','webhook_active')`,
 	).Scan(&n); err != nil {
 		t.Fatalf("checar colunas do evento: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("live_events perdeu colunas na 000111 (%d de 2) — o contract e a 000119", n)
+	if n != 6 {
+		t.Errorf("live_events perdeu colunas na 000111 (%d de 6 presentes) — o contract e a 000121", n)
 	}
 
-	// 5. Down.
+	// 6. Down.
 	if err := m.Migrate(110); err != nil {
-		t.Fatalf("down para 110: %v", err)
+		t.Fatalf("down para 108: %v", err)
 	}
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM information_schema.columns
-		 WHERE table_name = 'live_sessions'
-		   AND column_name IN ('current_active_product_id','processing_paused')`,
+		 WHERE (table_name = 'live_sessions' AND column_name = 'type')
+		    OR (table_name = 'live_session_platforms'
+		        AND column_name IN ('media_permalink','media_thumbnail_url','media_caption','webhook_active'))`,
 	).Scan(&n); err != nil {
 		t.Fatalf("checar colunas apos down: %v", err)
 	}

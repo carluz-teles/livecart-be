@@ -6,12 +6,12 @@ package migrationtest
 // so a ultima. Isso nao prova que a cadeia inteira aplica do zero, nem que o
 // down de uma nao deixa o schema num estado que impede a proxima subida.
 //
-// A 000120 (CONTRACT) mudou o que da para provar aqui, e a mudanca E o ponto:
+// A 000122 (CONTRACT) mudou o que da para provar aqui, e a mudanca E o ponto:
 // a partir dela o caminho de volta DEIXA DE EXISTIR. Ela dropa live_events.type
-// e event_products, que sao a ORIGEM dos backfills da 000109 e da 000110 — e a
+// e event_products, que sao a ORIGEM dos backfills da 000111 e da 000112 — e a
 // down dela e um no-op DECLARADO, nao um esquecimento. Consequencia direta:
-// descer abaixo da 000120 e subir de novo falha em "column e.type does not
-// exist", porque a 000109 tentaria reler uma coluna que nao existe mais.
+// descer abaixo da 000122 e subir de novo falha em "column e.type does not
+// exist", porque a 000111 tentaria reler uma coluna que nao existe mais.
 //
 // Um teste que exigisse esse replay estaria exigindo do banco algo que o plano
 // decidiu conscientemente nao ter. Entao o up/down/up passou a ser exercido
@@ -29,8 +29,8 @@ import (
 const (
 	epicBaseVersion = 103
 	// A ultima versao a partir da qual ainda se volta.
-	lastReversibleVersion = 119
-	contractVersion       = 120
+	lastReversibleVersion = 121
+	contractVersion       = 122
 )
 
 // A cadeia inteira aplica do zero e termina limpa.
@@ -191,14 +191,14 @@ func TestContractNaoTemVolta(t *testing.T) {
 
 	// Subir de novo a partir da base do epico e IMPOSSIVEL, e o teste registra
 	// isso explicitamente em vez de deixar alguem descobrir num incidente: a
-	// 000109 rele live_events.type para backfillar a sessao, e essa coluna nao
+	// 000111 rele live_events.type para backfillar a sessao, e essa coluna nao
 	// existe mais.
 	if err := m.Migrate(epicBaseVersion); err != nil {
 		t.Fatalf("down ate a base: %v", err)
 	}
 	err = m.Up()
 	if err == nil {
-		t.Fatal("o replay completo passou — se isso mudar, o que a 000120 diz sobre irreversibilidade ficou obsoleto e o plano de rollback do epico precisa ser reescrito")
+		t.Fatal("o replay completo passou — se isso mudar, o que a 000122 diz sobre irreversibilidade ficou obsoleto e o plano de rollback do epico precisa ser reescrito")
 	}
 	if !strings.Contains(err.Error(), "e.type does not exist") {
 		t.Errorf("o replay falhou por outro motivo: %v", err)

@@ -19,18 +19,21 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/integration/providers/payment"
+	"livecart/apps/api/internal/inventory"
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/internal/notification"
+	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/crypto"
+	"livecart/apps/api/lib/dbtx"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/idempotency"
 	"livecart/apps/api/lib/logger"
@@ -68,25 +71,20 @@ type ProductGroupSyncer interface {
 	ImportFromERP(ctx context.Context, storeID, externalSource string, parent providers.ERPProduct) (groupID string, importedExternalIDs []string, err error)
 }
 
-// CouponSyncer is the post-payment hook that flips the coupon redemption
-// reserved → confirmed (and confirmed → refunded on chargebacks). Wired
-// from the coupon package via SetCouponSyncer to keep this package's
-// import graph free of coupon internals.
-type CouponSyncer interface {
-	OnCartPaid(ctx context.Context, cartID string) error
-	OnCartRefunded(ctx context.Context, cartID string) error
-}
-
-// PostCheckoutHook is the customer-facing post-payment flow: tracking token
-// generation + transactional emails. Best-effort by design — implementations
-// must swallow their own errors so the payment webhook ACKs regardless.
-// Wired from the postcheckout package via SetPostCheckoutHook.
+// PostCheckoutHook is the customer-facing post-payment flow: cancellation/
+// shipment/delivery transactional emails + timeline. Best-effort by design —
+// implementations must swallow their own errors so the payment webhook ACKs
+// regardless. Wired from the postcheckout package via SetPostCheckoutHook.
+//
+// OnCartPaid saiu daqui (Fatia A4): o tracking_token e a timeline
+// `payment_confirmed` nascem na materialização da Order (order/listeners.OnCartPaid).
 type PostCheckoutHook interface {
-	OnCartPaid(ctx context.Context, cartID string)
-	// OnCartCancelled/OnCartRefunded enviam os e-mails transacionais dos
-	// estados negativos. Idempotentes na implementação (timeline unique).
+	// OnCartCancelled envia o e-mail transacional do cancelamento (cobrança não
+	// concluída). Idempotente na implementação (timeline unique). O e-mail de
+	// ESTORNO saiu daqui: virou reactor do domínio Notification
+	// (notification/listeners.OnCartRefunded → SendRefundEmail), que reage ao
+	// fato cart.refunded em vez de ser chamado inline neste fan-out.
 	OnCartCancelled(ctx context.Context, cartID string)
-	OnCartRefunded(ctx context.Context, cartID string)
 	// OnShipmentPosted fires after a shipment is created or has a
 	// tracking_code attached. Idempotent at the implementation: subsequent
 	// calls for the same cart are no-ops.
@@ -97,11 +95,10 @@ type PostCheckoutHook interface {
 	OnDelivered(ctx context.Context, cartID, source string)
 }
 
-// ERPOrderMirror projects ERP state changes into the Order aggregate.
-// Implemented by order/listeners.Listener; wired at boot to break the import cycle.
-type ERPOrderMirror interface {
-	MirrorCartERPToOrder(ctx context.Context, cartID string)
-}
+// ERPOrderMirror é um alias para o canônico erp.ERPOrderMirror. A interface foi
+// movida para internal/erp (Bloco B2a); o alias mantém o campo, o setter e a
+// fiação de boot (main.go) intactos enquanto a lógica ERP é extraída.
+type ERPOrderMirror = erp.ERPOrderMirror
 
 // Service handles business logic for integrations.
 type Service struct {
@@ -112,7 +109,6 @@ type Service struct {
 	liveService         *live.Service
 	productSyncer       ProductSyncer
 	productGroupSyncer  ProductGroupSyncer
-	couponSyncer        CouponSyncer
 	postCheckoutHook    PostCheckoutHook
 	notificationService *notification.Service
 	storage             *storage.S3Client
@@ -145,6 +141,53 @@ type Service struct {
 	// erpOrderMirror projects ERP state changes into the Order aggregate.
 	// Wired at boot from main.go; nil = mirror disabled (e.g. order module not yet live).
 	erpOrderMirror ERPOrderMirror
+
+	// paymentService owns payment-provider resolution (strangler-fig B1a).
+	// GetPaymentProvider delegates to it. Wired at boot via SetPaymentService.
+	paymentService *paymentdomain.Service
+
+	// erpStockService owns the cart→ERP stock reservation flow (strangler-fig
+	// B2b). ReserveStockInERP / AdjustStockReservationDelta delegate to it. Built
+	// lazily by erpStock() (production builds it in NewService; direct-literal
+	// tests get it on first use) so it always wraps THIS Service's collaborators.
+	erpStockService *erp.Service
+	erpStockOnce    sync.Once
+
+	// inventoryService owns the waitlist/fila flow (strangler-fig B3a).
+	// ListActiveWaitlistByCart / CancelWaitlistItem delegate to it. Built lazily
+	// by inventory() (production builds it in NewService; direct-literal tests get
+	// it on first use) so it always wraps THIS Service's repo/collaborators/stock.
+	inventoryService *inventory.Service
+	inventoryOnce    sync.Once
+}
+
+// erpStock returns the delegate erp.Service, building it once over this
+// Service's repo adapter and collaborator methods. Kept lazy so the finalisation
+// tests that construct a Service literal (no NewService) still delegate correctly.
+// sync.Once makes the lazy build safe when concurrent goroutines hit it before
+// the eager NewService warm-up ran (direct-literal tests under -race).
+func (s *Service) erpStock() *erp.Service {
+	s.erpStockOnce.Do(func() {
+		s.erpStockService = erp.NewService(erpRepoAdapter{s.repo}, s, s.logger)
+	})
+	return s.erpStockService
+}
+
+// ERP returns the erp.Service singleton owned by this integration.Service, so the
+// composition root can wire ERP reactors/handlers straight to the canonical erp
+// package instead of routing through integration delegations. Reuses erpStock();
+// it never builds a second erp.Service.
+func (s *Service) ERP() *erp.Service { return s.erpStock() }
+
+// inventory returns the delegate inventory.Service, building it once over this
+// Service's repo adapter, collaborator methods and stock manager. Kept lazy so
+// tests that construct a Service literal (no NewService) still delegate correctly
+// — mirrors erpStock().
+func (s *Service) inventory() *inventory.Service {
+	s.inventoryOnce.Do(func() {
+		s.inventoryService = inventory.NewService(inventoryRepoAdapter{s.repo}, s, s.stock, s.liveService, s.logger)
+	})
+	return s.inventoryService
 }
 
 // finalisationInverted reports whether this store runs the launch-first
@@ -161,6 +204,215 @@ func (s *Service) erpProviderFor(ctx context.Context, integration *IntegrationRo
 	}
 	return s.getERPProvider(ctx, integration)
 }
+
+// ResolveProvider satisfies erp.StockCollaborators: it maps the neutral
+// erp.Integration back to the integration-owned IntegrationRow (lossless mirror)
+// and resolves the provider through the existing seam-aware path.
+func (s *Service) ResolveProvider(ctx context.Context, integration *erp.Integration) (providers.ERPProvider, error) {
+	return s.erpProviderFor(ctx, integrationRowFromERP(integration))
+}
+
+// ResolveERPProviderByID satisfies erp.StockCollaborators: the ERP health-check
+// anchors on a specific integration id (not the store's active one), so it reuses
+// the existing GetERPProvider path (which loads by id, checks the ERP type, and
+// resolves through the seam).
+func (s *Service) ResolveERPProviderByID(ctx context.Context, integrationID, storeID string) (providers.ERPProvider, error) {
+	return s.GetERPProvider(ctx, integrationID, storeID)
+}
+
+// ResolveExternalProduct satisfies erp.StockCollaborators. linked=false means
+// there is nothing to move against the ERP (no product syncer wired, product not
+// linked, or lookup failed) — the migrated stock flow treats all three as a
+// silent no-op, matching the pre-migration behaviour.
+func (s *Service) ResolveExternalProduct(ctx context.Context, storeID, productID string) (string, bool) {
+	if s.productSyncer == nil {
+		return "", false
+	}
+	externalID, _, err := s.productSyncer.GetProduct(ctx, storeID, productID)
+	if err != nil || externalID == "" {
+		return "", false
+	}
+	return externalID, true
+}
+
+// integrationRowFromERP copies the neutral erp.Integration back into the
+// integration-owned IntegrationRow. The two are field-for-field mirrors; this
+// exists only because erp must not import the integration package.
+func integrationRowFromERP(i *erp.Integration) *IntegrationRow {
+	if i == nil {
+		return nil
+	}
+	return &IntegrationRow{
+		ID:             i.ID,
+		StoreID:        i.StoreID,
+		Type:           i.Type,
+		Provider:       i.Provider,
+		Status:         i.Status,
+		Credentials:    i.Credentials,
+		TokenExpiresAt: i.TokenExpiresAt,
+		Metadata:       i.Metadata,
+		LastSyncedAt:   i.LastSyncedAt,
+		CreatedAt:      i.CreatedAt,
+		Priority:       i.Priority,
+	}
+}
+
+// erpRepoAdapter adapts *Repository to erp.ERPRepository. Every method is
+// promoted from the embedded *Repository except GetActiveByProvider, whose
+// return type (*IntegrationRow) is mapped into the neutral *erp.Integration so
+// the erp package stays free of the integration import (cycle guard).
+type erpRepoAdapter struct{ *Repository }
+
+func (a erpRepoAdapter) GetActiveByProvider(ctx context.Context, storeID, integrationType, provider string) (*erp.Integration, error) {
+	row, err := a.Repository.GetActiveByProvider(ctx, storeID, integrationType, provider)
+	if err != nil {
+		return nil, err
+	}
+	return erpIntegrationFromRow(row), nil
+}
+
+// GetByProvider maps the integration-owned *IntegrationRow into the neutral
+// *erp.Integration (same cycle guard as GetActiveByProvider) so the legacy
+// finalisation can disambiguate a never-configured Tiny from an errored one.
+func (a erpRepoAdapter) GetByProvider(ctx context.Context, storeID, integrationType, provider string) (*erp.Integration, error) {
+	row, err := a.Repository.GetByProvider(ctx, storeID, integrationType, provider)
+	if err != nil {
+		return nil, err
+	}
+	return erpIntegrationFromRow(row), nil
+}
+
+// GetShipmentByOrderID bridges the integration-owned *ShipmentRow into the slim
+// *erp.ShipmentInvoiceRef the NFe sync consumes (same cycle guard as
+// GetActiveByProvider — the full shipment row stays in the shipment/logistics
+// domain). Shadows the method promoted from the embedded *Repository.
+func (a erpRepoAdapter) GetShipmentByOrderID(ctx context.Context, cartID string) (*erp.ShipmentInvoiceRef, error) {
+	sh, err := a.Repository.GetShipmentByOrderID(ctx, cartID)
+	if err != nil || sh == nil {
+		return nil, err
+	}
+	return &erp.ShipmentInvoiceRef{ID: sh.ID, InvoiceKey: sh.InvoiceKey}, nil
+}
+
+// erpIntegrationFromRow copies the integration-owned row into the neutral
+// erp.Integration port DTO (nil-safe). Inverse of integrationRowFromERP.
+func erpIntegrationFromRow(row *IntegrationRow) *erp.Integration {
+	if row == nil {
+		return nil
+	}
+	return &erp.Integration{
+		ID:             row.ID,
+		StoreID:        row.StoreID,
+		Type:           row.Type,
+		Provider:       row.Provider,
+		Status:         row.Status,
+		Credentials:    row.Credentials,
+		TokenExpiresAt: row.TokenExpiresAt,
+		Metadata:       row.Metadata,
+		LastSyncedAt:   row.LastSyncedAt,
+		CreatedAt:      row.CreatedAt,
+		Priority:       row.Priority,
+	}
+}
+
+// inventoryRepoAdapter adapts *Repository to inventory.InventoryRepository. Every
+// method is promoted from the embedded *Repository except GetCartByID, whose
+// return type (*CartRow) is mapped into the slim *inventory.CartRef so the
+// inventory package stays free of the full cart struct (and the integration
+// import — cycle guard). The waitlist DTOs the other methods return are already
+// aliases of the inventory ones, so they satisfy the port directly.
+type inventoryRepoAdapter struct{ *Repository }
+
+// GetCartByID bridges the integration-owned *CartRow into the slim
+// *inventory.CartRef the waitlist-cancel flow consumes (same cycle guard as the
+// erp adapter — the full cart row stays integration-owned). Shadows the method
+// promoted from the embedded *Repository.
+func (a inventoryRepoAdapter) GetCartByID(ctx context.Context, cartID string) (*inventory.CartRef, error) {
+	cart, err := a.Repository.GetCartByID(ctx, cartID)
+	if err != nil || cart == nil {
+		return nil, err
+	}
+	return &inventory.CartRef{StoreID: cart.StoreID, PlatformHandle: cart.PlatformHandle}, nil
+}
+
+// GetProductByID bridges the integration-owned *ProductRow into the enxuto
+// *inventory.ProductRef the waitlist promotion consumes (same cycle guard as
+// GetCartByID — ID/Stock/ExternalID stay integration-owned). Shadows the method
+// promoted from the embedded *Repository.
+func (a inventoryRepoAdapter) GetProductByID(ctx context.Context, storeID, productID string) (*inventory.ProductRef, error) {
+	p, err := a.Repository.GetProductByID(ctx, storeID, productID)
+	if err != nil || p == nil {
+		return nil, err
+	}
+	return &inventory.ProductRef{Price: p.Price, Name: p.Name, Keyword: p.Keyword}, nil
+}
+
+// liveIngestRepoAdapter adapts *Repository to live.IngestRepository (Bloco B4a).
+// GetProductByKeyword is promoted from the embedded *Repository verbatim — its
+// *ProductRow return is a type alias of *live.ProductRow, so it satisfies the
+// port directly. EmitCommentReceived wraps the outbox write in one transaction
+// via dbtx.InTx, keeping the pool/queries behind the port (live never sees them).
+type liveIngestRepoAdapter struct{ *Repository }
+
+// EmitCommentReceived writes the comment.received envelope to the outbox in a
+// single transaction, so the state-free dispatch commits atomically and the
+// envelope DedupKey dedups at-least-once redelivery.
+func (a liveIngestRepoAdapter) EmitCommentReceived(ctx context.Context, env events.Envelope) error {
+	return dbtx.InTx(ctx, a.pool, a.queries, func(q *sqlc.Queries) error {
+		return events.Emit(ctx, q, env)
+	})
+}
+
+// liveStockReserverAdapter adapts *Service to live.StockReserver (Bloco B4b),
+// breaking the erp import cycle: the comment core (now in live) declares a NEUTRAL
+// live.ReserveParams and this maps it to the erp.ReserveParams the in-package
+// stock manager expects. NoteReserved is best-effort (void) upstream, so it
+// always returns nil; ReserveStockInERP delegates to the preserved public method.
+type liveStockReserverAdapter struct{ s *Service }
+
+// NewLiveStockReserverAdapter builds the adapter over the integration service so
+// main.go can wire it into the live.Service via SetStockReserver.
+func NewLiveStockReserverAdapter(s *Service) live.StockReserver {
+	return liveStockReserverAdapter{s: s}
+}
+
+func (a liveStockReserverAdapter) NoteReserved(ctx context.Context, p live.ReserveParams) error {
+	a.s.stock.NoteReserved(ctx, ReserveParams{
+		Op:        StockOp(p.Op),
+		ProductID: p.ProductID,
+		CartID:    p.CartID,
+		EventID:   p.EventID,
+		Quantity:  p.Quantity,
+	})
+	return nil
+}
+
+func (a liveStockReserverAdapter) ReserveStockInERP(ctx context.Context, storeID, cartID, eventID, productID string, quantity int, unitPrice int64, platformHandle string) error {
+	return a.s.ReserveStockInERP(ctx, storeID, cartID, eventID, productID, quantity, unitPrice, platformHandle)
+}
+
+// IsStoreBlocked satisfies live.BillingGate: the comment core (in live) reads the
+// paywall gate through it. Delegates to the wired billing gate (nil = not blocked).
+func (s *Service) IsStoreBlocked(ctx context.Context, storeID string) bool {
+	if s.billingGate == nil {
+		return false
+	}
+	return s.billingGate.IsStoreBlocked(ctx, storeID)
+}
+
+// Compile-time guards: integration.Service satisfies the collaborator ports and
+// the repo adapters satisfy the persistence ports.
+var (
+	_ erp.StockCollaborators          = (*Service)(nil)
+	_ erp.ERPRepository               = erpRepoAdapter{}
+	_ inventory.WaitlistCollaborators = (*Service)(nil)
+	_ inventory.InventoryRepository   = inventoryRepoAdapter{}
+	_ live.IngestRepository           = liveIngestRepoAdapter{}
+	_ live.StockReserver              = liveStockReserverAdapter{}
+	_ live.BillingGate                = (*Service)(nil)
+	_ live.WebhookAuditor             = (*Service)(nil)
+	_ live.SocialReplier              = (*Service)(nil)
+)
 
 // SetStorage wires the object storage client (used to delete transient post
 // images after they are published to Instagram).
@@ -211,7 +463,7 @@ func NewService(
 	}
 	invertAll, invertIDs := parseStoreFlag("ERP_FINALISE_INVERTED_STORE_IDS")
 	orderModeAll, orderModeIDs := parseStoreFlag("ERP_ORDER_AT_CHECKOUT_STORE_IDS")
-	return &Service{
+	svc := &Service{
 		repo:                       repo,
 		factory:                    factory,
 		encryptor:                  encryptor,
@@ -224,6 +476,19 @@ func NewService(
 		orderAtCheckoutAll:         orderModeAll,
 		orderAtCheckoutStoreIDs:    orderModeIDs,
 	}
+	// Build the ERP stock and Inventory delegates eagerly so the production
+	// singletons never race on the lazy init in erpStock() / inventory() under
+	// concurrent request handling.
+	svc.erpStock()
+	svc.inventory()
+	// Wire the ingest persistence port into the shared live.Service (Bloco B4a):
+	// FindProductByKeyword / DispatchCommentReceived delegate to live, which
+	// reaches back into this Repository through the adapter. Done eagerly here so
+	// it is set before any webhook is served.
+	if liveService != nil {
+		liveService.SetIngestRepository(liveIngestRepoAdapter{repo})
+	}
+	return svc
 }
 
 // SetProductSyncer sets the product syncer for webhook processing.
@@ -237,12 +502,6 @@ func (s *Service) SetProductGroupSyncer(syncer ProductGroupSyncer) {
 	s.productGroupSyncer = syncer
 }
 
-// SetCouponSyncer wires the redemption lifecycle hook called from
-// ProcessPaymentNotification when a cart's payment status flips.
-func (s *Service) SetCouponSyncer(syncer CouponSyncer) {
-	s.couponSyncer = syncer
-}
-
 // SetPostCheckoutHook wires the customer-facing post-payment flow. The hook
 // fires after the cart is marked paid and is responsible for tracking-token
 // generation and email receipts.
@@ -253,6 +512,13 @@ func (s *Service) SetPostCheckoutHook(hook PostCheckoutHook) {
 // SetNotificationService sets the notification service for sending DMs.
 func (s *Service) SetNotificationService(svc *notification.Service) {
 	s.notificationService = svc
+}
+
+// SetPaymentService wires the extracted payment.Service so GetPaymentProvider
+// delegates to it (strangler-fig B1a). Called once at boot from main.go, after
+// the integration.Service exists (it is the resolver the payment.Service uses).
+func (s *Service) SetPaymentService(svc *paymentdomain.Service) {
+	s.paymentService = svc
 }
 
 // SetERPOrderMirror wires the order/listeners.Listener so ERP state changes are
@@ -388,39 +654,6 @@ func (s *Service) TestConnection(ctx context.Context, input TestConnectionInput)
 		Latency:     result.Latency,
 		AccountInfo: result.AccountInfo,
 		TestedAt:    result.TestedAt,
-	}, nil
-}
-
-// RunERPHealthCheck audits the merchant's cadastros against the canonical
-// names the order-creation flow looks up (formas-pagamento,
-// formas-recebimento, formas-envio). Returns supported=false when the
-// underlying ERP provider doesn't implement the optional ERPHealthChecker
-// capability, so the FE can hide the section instead of erroring.
-func (s *Service) RunERPHealthCheck(ctx context.Context, integrationID, storeID string) (*ERPHealthCheckResponse, error) {
-	erpProvider, err := s.GetERPProvider(ctx, integrationID, storeID)
-	if err != nil {
-		return nil, err
-	}
-
-	checker, ok := erpProvider.(providers.ERPHealthChecker)
-	if !ok {
-		return &ERPHealthCheckResponse{
-			Supported: false,
-			CheckedAt: time.Now(),
-			Items:     nil,
-		}, nil
-	}
-
-	result, err := checker.HealthCheck(ctx)
-	if err != nil {
-		s.handleProviderError(ctx, integrationID, "erp_health_check", err)
-		return nil, fmt.Errorf("running ERP health check: %w", err)
-	}
-
-	return &ERPHealthCheckResponse{
-		Supported: true,
-		CheckedAt: result.CheckedAt,
-		Items:     result.Items,
 	}, nil
 }
 
@@ -1300,27 +1533,29 @@ func (s *Service) GetProvider(ctx context.Context, integrationID, storeID string
 }
 
 // GetPaymentProvider returns a PaymentProvider for the given integration.
+//
+// The resolution logic now lives in the extracted payment.Service (strangler-fig
+// B1a); this method is a thin delegation kept for the ~8 internal call sites and
+// external callers whose signature must not change.
 func (s *Service) GetPaymentProvider(ctx context.Context, integrationID, storeID string) (providers.PaymentProvider, error) {
+	return s.paymentService.GetProvider(ctx, integrationID, storeID)
+}
+
+// ResolveIntegration implements payment.IntegrationResolver: it fetches the
+// integration and returns its declared type plus a builder that constructs the
+// provider through the shared createProviderFromRow. Returning a builder (rather
+// than the provider) lets payment.Service.GetProvider run the type check before
+// any credential decrypt/refresh, and keeps createProviderFromRow — shared with
+// ERP/Social — inside this package.
+func (s *Service) ResolveIntegration(ctx context.Context, integrationID, storeID string) (string, func() (providers.Provider, error), error) {
 	integration, err := s.repo.GetByID(ctx, integrationID, storeID)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 
-	if integration.Type != string(providers.ProviderTypePayment) {
-		return nil, httpx.ErrUnprocessable("integration is not a payment provider")
-	}
-
-	provider, err := s.createProviderFromRow(ctx, integration)
-	if err != nil {
-		return nil, err
-	}
-
-	paymentProvider, ok := provider.(providers.PaymentProvider)
-	if !ok {
-		return nil, httpx.ErrUnprocessable("failed to cast to payment provider")
-	}
-
-	return paymentProvider, nil
+	return integration.Type, func() (providers.Provider, error) {
+		return s.createProviderFromRow(ctx, integration)
+	}, nil
 }
 
 // GetERPProvider returns an ERPProvider for the given integration.
@@ -3117,120 +3352,12 @@ func isGTIN(s string) bool {
 // =============================================================================
 // PAYMENT OPERATIONS
 // =============================================================================
-
-// CreateCheckout creates a checkout session with idempotency support.
-func (s *Service) CreateCheckout(ctx context.Context, input CreateCheckoutInput) (*CreateCheckoutOutput, error) {
-	// Check idempotency
-	idemReq := idempotency.CheckRequest{
-		IdempotencyKey: input.IdempotencyKey,
-		StoreID:        input.StoreID,
-		IntegrationID:  input.IntegrationID,
-		Operation:      "create_checkout",
-		Payload:        input,
-	}
-
-	cached, err := s.idempotency.Check(ctx, idemReq)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("idempotency check failed", zap.Error(err))
-	}
-	if cached != nil && cached.Found {
-		var output CreateCheckoutOutput
-		if err := json.Unmarshal(cached.Response, &output); err == nil {
-			logger.From(ctx, s.logger).Debug("returning cached checkout response",
-				zap.String("idempotency_key", input.IdempotencyKey),
-			)
-			return &output, nil
-		}
-	}
-
-	// Start idempotency tracking
-	var idemRecord *idempotency.Record
-	if input.IdempotencyKey != "" || s.idempotency != nil {
-		idemRecord, err = s.idempotency.Start(ctx, idemReq)
-		if err != nil {
-			logger.From(ctx, s.logger).Warn("idempotency start failed", zap.Error(err))
-		}
-	}
-
-	// Get payment provider
-	paymentProvider, err := s.GetPaymentProvider(ctx, input.IntegrationID, input.StoreID)
-	if err != nil {
-		if idemRecord != nil {
-			_ = s.idempotency.Fail(ctx, idemRecord.ID, err)
-		}
-		return nil, err
-	}
-
-	// Build notify URL
-	notifyURL := input.NotifyURL
-	if notifyURL == "" {
-		baseURL := config.WebhookBaseURL.String()
-		if baseURL != "" {
-			notifyURL = fmt.Sprintf("%s/api/webhooks/%s/%s",
-				baseURL,
-				paymentProvider.Name(),
-				input.StoreID,
-			)
-		}
-	}
-
-	// Create checkout
-	result, err := paymentProvider.CreateCheckout(ctx, providers.CheckoutOrder{
-		ExternalID:  input.CartID,
-		Items:       input.Items,
-		Customer:    input.Customer,
-		TotalAmount: input.TotalAmount,
-		Currency:    input.Currency,
-		NotifyURL:   notifyURL,
-		SuccessURL:  input.SuccessURL,
-		FailureURL:  input.FailureURL,
-		Metadata:    input.Metadata,
-	})
-	if err != nil {
-		s.handleProviderError(ctx, input.IntegrationID, "create_checkout", err)
-		if idemRecord != nil {
-			_ = s.idempotency.Fail(ctx, idemRecord.ID, err)
-		}
-		return nil, fmt.Errorf("creating checkout: %w", err)
-	}
-
-	output := &CreateCheckoutOutput{
-		CheckoutID:  result.CheckoutID,
-		CheckoutURL: result.CheckoutURL,
-		ExpiresAt:   result.ExpiresAt,
-	}
-
-	// Complete idempotency
-	if idemRecord != nil {
-		_ = s.idempotency.Complete(ctx, idemRecord.ID, output)
-	}
-
-	return output, nil
-}
-
-// GetPaymentStatus retrieves the status of a payment.
-func (s *Service) GetPaymentStatus(ctx context.Context, input GetPaymentStatusInput) (*GetPaymentStatusOutput, error) {
-	paymentProvider, err := s.GetPaymentProvider(ctx, input.IntegrationID, input.StoreID)
-	if err != nil {
-		return nil, err
-	}
-
-	status, err := paymentProvider.GetPaymentStatus(ctx, input.PaymentID)
-	if err != nil {
-		s.handleProviderError(ctx, input.IntegrationID, "get_payment_status", err)
-		return nil, fmt.Errorf("getting payment status: %w", err)
-	}
-
-	return &GetPaymentStatusOutput{
-		PaymentID:     status.PaymentID,
-		Status:        string(status.Status),
-		Amount:        status.Amount,
-		PaidAt:        status.PaidAt,
-		RefundedAt:    status.RefundedAt,
-		FailureReason: status.FailureReason,
-		Metadata:      status.Metadata,
-	}, nil
-}
+//
+// These stateless fast-paths were moved to internal/payment (strangler-fig
+// B1b); the methods below are now thin delegations that preserve the public
+// signatures so the existing call sites keep working until B1e repoints them at
+// payment.Service directly. The provider-specific Pagar.me webhook helpers
+// (GetPagarmeWebhookStatus / Test* / RunPagarmeWebhookLiveTest) stay here.
 
 // GetPagarmeWebhookStatus checks whether the merchant has registered our
 // webhook URL on the Pagar.me dashboard by inspecting recent delivery history
@@ -3518,124 +3645,6 @@ func (s *Service) RunPagarmeWebhookLiveTest(ctx context.Context, integrationID, 
 	return out, nil
 }
 
-// RefundPayment initiates a refund.
-func (s *Service) RefundPayment(ctx context.Context, input RefundPaymentInput) (*RefundPaymentOutput, error) {
-	paymentProvider, err := s.GetPaymentProvider(ctx, input.IntegrationID, input.StoreID)
-	if err != nil {
-		return nil, err
-	}
-
-	result, err := paymentProvider.RefundPayment(ctx, input.PaymentID, input.Amount)
-	if err != nil {
-		s.handleProviderError(ctx, input.IntegrationID, "refund_payment", err)
-		return nil, fmt.Errorf("refunding payment: %w", err)
-	}
-
-	return &RefundPaymentOutput{
-		RefundID:  result.RefundID,
-		Status:    result.Status,
-		Amount:    result.Amount,
-		CreatedAt: result.CreatedAt,
-	}, nil
-}
-
-// =============================================================================
-// TRANSPARENT CHECKOUT OPERATIONS
-// =============================================================================
-
-// GetCheckoutConfig retrieves the checkout configuration for a store.
-func (s *Service) GetCheckoutConfig(ctx context.Context, integrationID, storeID string) (string, []string, error) {
-	paymentProvider, err := s.GetPaymentProvider(ctx, integrationID, storeID)
-	if err != nil {
-		return "", nil, err
-	}
-
-	publicKey, err := paymentProvider.GetPublicKey(ctx)
-	if err != nil {
-		s.handleProviderError(ctx, integrationID, "get_public_key", err)
-		return "", nil, fmt.Errorf("getting public key: %w", err)
-	}
-
-	methods, err := paymentProvider.GetPaymentMethods(ctx)
-	if err != nil {
-		s.handleProviderError(ctx, integrationID, "get_payment_methods", err)
-		return "", nil, fmt.Errorf("getting payment methods: %w", err)
-	}
-
-	return publicKey, methods, nil
-}
-
-// ProcessCardPayment processes a card payment with a tokenized card.
-func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPaymentInput) (*ProcessCardPaymentOutput, error) {
-	paymentProvider, err := s.GetPaymentProvider(ctx, input.IntegrationID, input.StoreID)
-	if err != nil {
-		return nil, err
-	}
-
-	result, err := paymentProvider.ProcessCardPayment(ctx, providers.CardPaymentInput{
-		CartID:          input.CartID,
-		Token:           input.CardToken,
-		Installments:    input.Installments,
-		Customer:        input.Customer,
-		Items:           input.Items,
-		TotalAmount:     input.TotalAmount,
-		Currency:        input.Currency,
-		NotifyURL:       input.NotifyURL,
-		Metadata:        input.Metadata,
-		PaymentMethodID: input.PaymentMethodID,
-		IssuerID:        input.IssuerID,
-		DeviceID:        input.DeviceID,
-	})
-	if err != nil {
-		s.handleProviderError(ctx, input.IntegrationID, "process_card_payment", err)
-		return nil, fmt.Errorf("processing card payment: %w", err)
-	}
-
-	return &ProcessCardPaymentOutput{
-		PaymentID:         result.PaymentID,
-		Status:            string(result.Status),
-		StatusDetail:      result.StatusDetail,
-		Message:           result.Message,
-		Amount:            result.Amount,
-		Installments:      result.Installments,
-		LastFourDigits:    result.LastFourDigits,
-		CardBrand:         result.CardBrand,
-		AuthorizationCode: result.AuthorizationCode,
-		PaidAt:            result.PaidAt,
-	}, nil
-}
-
-// GeneratePixPayment generates a PIX QR code for payment.
-func (s *Service) GeneratePixPayment(ctx context.Context, input GeneratePixPaymentInput) (*GeneratePixPaymentOutput, error) {
-	paymentProvider, err := s.GetPaymentProvider(ctx, input.IntegrationID, input.StoreID)
-	if err != nil {
-		return nil, err
-	}
-
-	result, err := paymentProvider.GeneratePixPayment(ctx, providers.PixPaymentInput{
-		CartID:      input.CartID,
-		Customer:    input.Customer,
-		Items:       input.Items,
-		TotalAmount: input.TotalAmount,
-		Currency:    input.Currency,
-		NotifyURL:   input.NotifyURL,
-		Metadata:    input.Metadata,
-	})
-	if err != nil {
-		s.handleProviderError(ctx, input.IntegrationID, "generate_pix_payment", err)
-		return nil, fmt.Errorf("generating pix payment: %w", err)
-	}
-
-	return &GeneratePixPaymentOutput{
-		PaymentID:  result.PaymentID,
-		QRCode:     result.QRCode,
-		QRCodeText: result.QRCodeText,
-		Amount:     result.Amount,
-		ExpiresAt:  result.ExpiresAt,
-		TicketURL:  result.TicketURL,
-	}, nil
-}
-
 // =============================================================================
 // WEBHOOK OPERATIONS
 // =============================================================================
@@ -3672,232 +3681,112 @@ func (s *Service) StoreWebhookEvent(ctx context.Context, input StoreWebhookInput
 	return err
 }
 
-// ProcessPaymentNotification processes a payment webhook notification.
-// On paid, it also reverses the cart's stock reservations in the ERP and creates
-// one final sales order already marked as paid (with customer + shipping data).
-//
-// TODO(refunded): when status == refunded we currently only mark the cart —
-// we should also cancel the Tiny sales order (CancelOrder) which reverses stock
-// and puts the order in "Cancelada". See createFinalERPOrder for the creation side.
-// cartPaymentFact is the specific-fact strategy: the resolved cart payment
-// status → the canonical fact the reactors subscribe to. paid/refunded carry the
-// fan-out (cart.paid/cart.refunded reactors); failed/cancelled are terminal facts
-// (cancelled's email stays inline — shared-producer). pending emits nothing
-// (deprecated telemetry). Refund vs chargeback stay conflated in cart.refunded
-// until the provider status exposes the dispute type.
-var cartPaymentFact = map[string]events.Name{
-	"paid":      events.CartPaid,
-	"refunded":  events.CartRefunded,
-	"failed":    events.PaymentFailed,
-	"cancelled": events.CartCancelled,
-}
+// DispatchPaymentProcess and ProcessPaymentNotification were extracted to the
+// payment.Service (strangler-fig B1d) and the call sites now dispatch straight
+// to it (B1e): the webhook edge holds a payment.PaymentDispatcher, and the
+// asynq consumer in main.newApp calls paymentSvc.ProcessPaymentNotification
+// directly. integration.Service keeps only the CartPaymentGateway adapters
+// below, so the consumer still runs against the SAME repository — same guarded
+// UpdateCartPaymentStatus, same payment×expiration serialization.
 
-// DispatchPaymentProcess is the thin webhook edge (L1 of the event choreography):
-// it emits a payment.process COMMAND to the transactional outbox instead of
-// running the reconciliation in a detached goroutine. The command consumer
-// (main.newApp) runs ProcessPaymentNotification with asynq retry + dead-letter,
-// and the outbox makes it crash-durable. dedup_key is empty on purpose — see the
-// events.PaymentProcess doc.
-func (s *Service) DispatchPaymentProcess(ctx context.Context, input ProcessPaymentInput) error {
-	return events.EmitInternal(ctx, s.repo.queries, events.PaymentProcess, "", input)
-}
+// --- payment.CartPaymentGateway adapters (B1d) ---
+// These let the extracted payment.Service run the payment webhook consumer
+// against the SAME integration.Repository — same pool, same guarded
+// UpdateCartPaymentStatus, same outbox. Declared in the payment package,
+// implemented here. No new repo, no new advisory lock.
+var _ paymentdomain.CartPaymentGateway = (*Service)(nil)
 
-func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessPaymentInput) error {
-	// Resolve integration from store_id + provider
-	integration, err := s.repo.GetActiveByProvider(ctx, input.StoreID, "payment", input.Provider)
+// ResolvePaymentProvider resolves the store's active payment provider for the
+// webhook path (by store + provider name), returning it with the integration id
+// used for provider-error reporting. Mirrors the resolution the inline
+// ProcessPaymentNotification used to run.
+func (s *Service) ResolvePaymentProvider(ctx context.Context, storeID, provider string) (providers.PaymentProvider, string, error) {
+	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "payment", provider)
 	if err != nil {
-		return fmt.Errorf("no active payment integration found for store %s provider %s: %w", input.StoreID, input.Provider, err)
+		return nil, "", fmt.Errorf("no active payment integration found for store %s provider %s: %w", storeID, provider, err)
 	}
-
-	provider, err := s.createProviderFromRow(ctx, integration)
+	prov, err := s.createProviderFromRow(ctx, integration)
 	if err != nil {
-		return err
+		return nil, "", err
 	}
-
-	paymentProvider, ok := provider.(providers.PaymentProvider)
+	paymentProvider, ok := prov.(providers.PaymentProvider)
 	if !ok {
-		return fmt.Errorf("integration is not a payment provider")
+		return nil, integration.ID, fmt.Errorf("integration is not a payment provider")
 	}
-
-	status, err := paymentProvider.GetPaymentStatus(ctx, input.PaymentID)
-	if err != nil {
-		s.handleProviderError(ctx, integration.ID, "process_payment_notification", err)
-		return fmt.Errorf("getting payment status: %w", err)
-	}
-
-	logger.From(ctx, s.logger).Info("payment notification processed",
-		zap.String("payment_id", input.PaymentID),
-		zap.String("status", string(status.Status)),
-		zap.String("external_reference", status.ExternalReference),
-	)
-
-	// ExternalReference contains the cart ID (set when creating checkout)
-	if status.ExternalReference == "" {
-		logger.From(ctx, s.logger).Warn("payment notification has no external reference, cannot update cart",
-			zap.String("payment_id", input.PaymentID),
-		)
-		return nil
-	}
-
-	// Map payment status to cart payment status
-	var cartPaymentStatus string
-	switch status.Status {
-	case providers.PaymentApproved:
-		cartPaymentStatus = "paid"
-	case providers.PaymentRejected:
-		cartPaymentStatus = "failed"
-	case providers.PaymentCancelled:
-		cartPaymentStatus = "cancelled"
-		// Cart JÁ PAGO cuja cobrança foi cancelada = dinheiro devolvido =
-		// estorno. O Pagar.me responde "canceled" ao refund de charge não
-		// liquidada (praticamente todo estorno same-day) — sem esta
-		// transição os hooks de estorno (devolução da taxa de sucesso,
-		// e-mail, ERP) nunca rodam nesses casos. "refunded" é terminal: o
-		// estorno dispara uma rajada de webhooks (charge.refunded +
-		// order.canceled) e o segundo não pode rebaixar o estado.
-		if cart, cErr := s.repo.GetCartByID(ctx, status.ExternalReference); cErr == nil &&
-			cart != nil && (cart.PaymentStatus == "paid" || cart.PaymentStatus == "refunded") {
-			cartPaymentStatus = "refunded"
-		}
-	case providers.PaymentRefunded:
-		cartPaymentStatus = "refunded"
-	case providers.PaymentPending, providers.PaymentInProcess:
-		cartPaymentStatus = "pending"
-	default:
-		cartPaymentStatus = "pending"
-	}
-
-	// Update cart payment status and payment method
-	updateErr := s.repo.UpdateCartPaymentStatus(ctx, status.ExternalReference, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod)
-	if errors.Is(updateErr, ErrCartNotPayable) {
-		// Corrida cancelamento × pagamento, lado inverso: o lojista cancelou o
-		// carrinho e o pagamento foi aprovado assim mesmo (PIX pago com o QR já
-		// aberto, cartão em análise, webhook atrasado). Regra de negócio: **o
-		// pagamento vence** — o pedido volta e consta como PAGO. Só vale para o
-		// cancelamento MANUAL do lojista: expirado, bloqueado por handle ou já
-		// pago não são restaurados por aqui (o guard da query decide).
-		restored := false
-		if cartPaymentStatus == "paid" {
-			var restoreErr error
-			restored, restoreErr = s.repo.RestoreCancelledCartAsPaid(ctx,
-				status.ExternalReference, input.StoreID, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod)
-			if restoreErr != nil {
-				logger.From(ctx, s.logger).Error("failed to restore store-cancelled cart as paid",
-					zap.String("cart_id", status.ExternalReference), zap.Error(restoreErr))
-				return fmt.Errorf("restoring cancelled cart as paid: %w", restoreErr)
-			}
-		}
-		if !restored {
-			// O cart expirou/cancelou entre a cobrança e este webhook. Não
-			// finalizamos (não marca pago, não toca ERP). Se dinheiro entrou
-			// mesmo, fica para a reconciliação (E6). ACK benigno.
-			logger.From(ctx, s.logger).Info("payment webhook for cart no longer payable (expired/cancelled), skipping finalization",
-				zap.String("cart_id", status.ExternalReference),
-				zap.String("payment_status", cartPaymentStatus),
-			)
-			return nil
-		}
-		// Restaurado: o fluxo segue idêntico ao de um pagamento normal — emite
-		// cart.paid e o fan-out (Order, ERP, e-mail, cupom, billing) roda como se
-		// o cancelamento nunca tivesse acontecido. As colunas de ERP foram
-		// zeradas no restore, então a finalização cria um pedido de venda limpo
-		// no Tiny (o cancelamento já cancelou/estornou o anterior).
-		logger.From(ctx, s.logger).Warn("store-cancelled cart was PAID — cancellation reverted, order is paid",
-			zap.String("cart_id", status.ExternalReference),
-			zap.String("payment_id", status.PaymentID),
-		)
-	} else if updateErr != nil {
-		logger.From(ctx, s.logger).Error("failed to update cart payment status",
-			zap.String("cart_id", status.ExternalReference),
-			zap.String("payment_status", cartPaymentStatus),
-			zap.Error(updateErr),
-		)
-		return fmt.Errorf("updating cart payment status: %w", updateErr)
-	}
-
-	logger.From(ctx, s.logger).Info("cart payment status updated",
-		zap.String("cart_id", status.ExternalReference),
-		zap.String("payment_status", cartPaymentStatus),
-		zap.String("payment_method", status.PaymentMethod),
-	)
-
-	// Emit the canonical CART payment fact (specific-fact strategy — L3). It only
-	// fires when the guarded UpdateCartPaymentStatus actually held. The fan-out
-	// (coupon, order/GMV/email/waitlist, billing) now lives in REACTORS that
-	// consume cart.paid / cart.refunded (registered in main.newApp) — decoupled
-	// and retriable — instead of the inline cascade this method used to run.
-	// dedup by payment_id so the provider's at-least-once burst collapses.
-	if name, ok := cartPaymentFact[cartPaymentStatus]; ok {
-		// The paid fact carries the FRESH gateway snapshot (installments, fees,
-		// money-release date); OnCartPaid freezes it into the order.paid payload so
-		// record the payment in Tiny without re-fetching — the same data the
-		// resumable state machine persists to carts.erp_payment_snapshot for retry.
-		var snap *providers.PaymentStatus
-		if cartPaymentStatus == "paid" {
-			snap = status
-		}
-		// gmv_cents = soma pura de itens (exclui frete e cupom) — fonte única de
-		// verdade via GetCartGMVCents. Falha → emite com 0 (receptor usa fallback).
-		var gmvCents int64
-		if cartPaymentStatus == "paid" {
-			if cid, err := uuid.Parse(status.ExternalReference); err == nil {
-				cartUUID := pgtype.UUID{Bytes: cid, Valid: true}
-				if v, err := s.repo.queries.GetCartGMVCents(ctx, cartUUID); err == nil {
-					gmvCents = v
-				} else {
-					logger.From(ctx, s.logger).Warn("cart.paid: GetCartGMVCents failed, emitting gmv_cents=0",
-						zap.String("cart_id", status.ExternalReference), zap.Error(err))
-				}
-			}
-		}
-		payload, _ := json.Marshal(struct {
-			CartID          string                   `json:"cart_id"`
-			StoreID         string                   `json:"store_id"`
-			PaymentID       string                   `json:"payment_id"`
-			Method          string                   `json:"payment_method"`
-			GMVCents        int64                    `json:"gmv_cents,omitempty"`
-			PaymentSnapshot *providers.PaymentStatus `json:"payment_snapshot,omitempty"`
-		}{status.ExternalReference, input.StoreID, status.PaymentID, status.PaymentMethod, gmvCents, snap})
-		_ = events.Emit(ctx, s.repo.queries, events.Envelope{
-			Name:     name,
-			Source:   events.Source(input.Provider),
-			DedupKey: string(name) + ":" + status.PaymentID,
-			Payload:  payload,
-		})
-	}
-
-	// cart.cancelled has a SECOND producer (blocked-handle cancel) with a
-	// different intent, so its reactor can't be shared safely — keep the
-	// payment-cancel email inline here.
-	if cartPaymentStatus == "cancelled" && s.postCheckoutHook != nil {
-		s.postCheckoutHook.OnCartCancelled(ctx, status.ExternalReference)
-	}
-
-	// ERP now runs entirely as event reactors: finalisation on order.paid
-	// (ReactOrderPaidERP — the gateway snapshot rides the order.paid payload frozen
-	// by OnCartPaid), refund on order.refunded (ReactOrderRefundedERP), reversal on
-	// cart.expired (ReactCartExpiredERP — pre-payment reservation, no Order). They
-	// get asynq retry + DLQ instead of the swallowed inline best-effort this method
-	// used to run.
-	return nil
+	return paymentProvider, integration.ID, nil
 }
 
-// ReactCartPaid is the cart.paid fan-out reactor (L3): confirms the coupon
-// redemption, runs the customer post-payment flow (tracking token, order
-// timeline, receipt email, waitlist fulfilment via postCheckoutHook.OnCartPaid),
-// and records GMV on the billing ledger (billingGate.OnCartPaid).
-// Each step is idempotent (tracking_token set-once, order_events/ledger UNIQUE),
-// so asynq redelivery/retry is safe. ERP finalisation is a separate reactor
-// (ReactOrderPaidERP, triggered by order.paid) because it needs the gateway snapshot.
-func (s *Service) ReactCartPaid(ctx context.Context, cartID, storeID string, gmvCents int64) error {
-	if s.couponSyncer != nil {
-		if err := s.couponSyncer.OnCartPaid(ctx, cartID); err != nil {
-			return fmt.Errorf("coupon confirm on cart.paid: %w", err)
-		}
+// RestoreCancelledCartAsPaid satisfies payment.CartPaymentGateway (LIV-84 inverse
+// race): delega ao repo, que numa única tx restaura o cart cancelado pelo lojista
+// para pago e retoma o estoque. Mesmo repo/pool do resto do consumer.
+func (s *Service) RestoreCancelledCartAsPaid(ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (bool, error) {
+	return s.repo.RestoreCancelledCartAsPaid(ctx, cartID, storeID, paymentStatus, paymentID, paidAt, paymentMethod)
+}
+
+
+// CartPaymentStatus returns the cart's current payment status ("" when the cart
+// no longer exists), swallowing the same not-found path GetCartByID does.
+func (s *Service) CartPaymentStatus(ctx context.Context, cartID string) (string, error) {
+	cart, err := s.repo.GetCartByID(ctx, cartID)
+	if err != nil {
+		return "", err
 	}
+	if cart == nil {
+		return "", nil
+	}
+	return cart.PaymentStatus, nil
+}
+
+// UpdateCartPaymentStatus applies the guarded cart payment write. It returns
+// paymentdomain.ErrCartNotPayable (the sentinel the repo now returns) when the
+// cart expired/cancelled between the charge and the webhook.
+func (s *Service) UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) error {
+	return s.repo.UpdateCartPaymentStatus(ctx, cartID, paymentStatus, paymentID, paidAt, paymentMethod)
+}
+
+// CartGMVCents returns the pure item sum (excludes shipping and coupon) via the
+// canonical GetCartGMVCents. It preserves the original two-tier behaviour: a
+// malformed cart id yields (0, nil) (skip, no warn); a query failure yields
+// (0, err) so the caller warns and emits gmv=0.
+func (s *Service) CartGMVCents(ctx context.Context, cartID string) (int64, error) {
+	cid, err := uuid.Parse(cartID)
+	if err != nil {
+		return 0, nil
+	}
+	return s.repo.queries.GetCartGMVCents(ctx, pgtype.UUID{Bytes: cid, Valid: true})
+}
+
+// EmitEvent emits a domain fact on the transactional outbox (events.Emit) using
+// the repository's queries — the same outbox ProcessPaymentNotification used.
+func (s *Service) EmitEvent(ctx context.Context, env events.Envelope) error {
+	return events.Emit(ctx, s.repo.queries, env)
+}
+
+// EmitInternalCommand emits an internal command on the outbox (events.EmitInternal).
+func (s *Service) EmitInternalCommand(ctx context.Context, name events.Name, dedupKey string, payload any) error {
+	return events.EmitInternal(ctx, s.repo.queries, name, dedupKey, payload)
+}
+
+// OnCartCancelled runs the inline payment-cancel email hook, no-op when unwired.
+func (s *Service) OnCartCancelled(ctx context.Context, cartID string) {
 	if s.postCheckoutHook != nil {
-		s.postCheckoutHook.OnCartPaid(ctx, cartID)
+		s.postCheckoutHook.OnCartCancelled(ctx, cartID)
 	}
+}
+
+// ReactCartPaid is the cart.paid fan-out reactor (L3): records GMV on the billing
+// ledger (billingGate.OnCartPaid). The customer post-payment flow no longer runs
+// here — o tracking_token e a timeline `payment_confirmed` nascem na materialização
+// da Order (order/listeners.OnCartPaid, Fatia A4), que roda ANTES deste reactor.
+// The coupon redemption confirmation also reacts to cart.paid as its own Coupon
+// reactor (coupon/listeners.OnCartPaid → ConfirmRedemption), alongside the buyer
+// receipt (notification/listeners.OnCartPaid → SendPaidReceipt) and the waitlist
+// fulfilment (inventory/listeners.OnCartPaid) reactors that react to the fact
+// instead of being called inline in this fan-out.
+// The billing step is idempotent (ledger UNIQUE), so asynq redelivery/retry is safe.
+// ERP finalisation is a separate reactor (ReactOrderPaidERP, triggered by order.paid)
+// because it needs the gateway snapshot.
+func (s *Service) ReactCartPaid(ctx context.Context, cartID, storeID string, gmvCents int64) error {
 	if s.billingGate != nil {
 		if err := s.billingGate.OnCartPaid(ctx, storeID, cartID, gmvCents); err != nil {
 			return fmt.Errorf("billing ledger on cart.paid: %w", err)
@@ -3906,299 +3795,20 @@ func (s *Service) ReactCartPaid(ctx context.Context, cartID, storeID string, gmv
 	return nil
 }
 
-// ReactOrderPaidERP is the order.paid reactor that finalises the ERP (Tiny) order.
-// It is triggered by the order.paid fact (emitted transactionally by OnCartPaid
-// once the immutable Order exists), NOT by cart.paid directly — decoupling the ERP
-// retry loop from the customer-facing cart.paid fan-out. It needs the FRESH gateway
-// snapshot (installments, fees, money-release date), which OnCartPaid froze into the
-// order.paid payload; the resumable state machine also persists it to
-// carts.erp_payment_snapshot for admin retry. The finalisation markers are
-// authoritative in order_payments (resolved by cart_id, Fatia 11b-1). Errors are
-// returned so asynq retries + dead-letters (idempotent via the advisory lock +
-// resumable markers). Stores without a Tiny integration no-op so a paid order never
-// churns retries. A nil snapshot finalises without payment details — admin retry can
-// replay from the persisted snapshot afterwards.
-func (s *Service) ReactOrderPaidERP(ctx context.Context, cartID, storeID string, snapshotJSON []byte) error {
-	ctx = logger.WithStore(ctx, storeID, "")
-	if _, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny"); err != nil {
-		return nil // no active ERP integration — nothing to finalise
-	}
-	var status *providers.PaymentStatus
-	if len(snapshotJSON) > 0 {
-		var st providers.PaymentStatus
-		if err := json.Unmarshal(snapshotJSON, &st); err == nil {
-			status = &st
-		} else {
-			logger.From(ctx, s.logger).Warn("order.paid ERP reactor: bad payment snapshot, finalising without payment details",
-				zap.String("cart_id", cartID), zap.Error(err))
-		}
-	}
-	return s.finalizeOrConfirmCartERP(ctx, cartID, storeID, status)
-}
-
-// ReactCartRefunded is the cart.refunded fan-out reactor (L3): refunds the coupon
-// redemption, credits the success fee (billing), and sends the refund email. Each
-// step is idempotent (order_events/ledger UNIQUE), so asynq redelivery/retry is
-// safe. The ERP refund is NOT here — it moved to ReactOrderRefundedERP, triggered
-// by the order.refunded fact (Fatia 11b-2), so the ERP retry loop is decoupled from
-// the customer-facing cart.refunded fan-out.
+// ReactCartRefunded is the cart.refunded fan-out reactor (L3): credits the success
+// fee on the billing ledger (billingGate.OnCartRefunded). The coupon redemption
+// refund is NO LONGER here: it reacts to cart.refunded as its own Coupon reactor
+// (coupon/listeners.OnCartRefunded → RefundRedemption). The billing step is
+// idempotent (ledger UNIQUE), so asynq redelivery/retry is safe. The ERP refund
+// moved to ReactOrderRefundedERP (triggered by the order.refunded fact, Fatia
+// 11b-2), and the refund EMAIL reacts to cart.refunded as its own Notification
+// reactor (notification/listeners.OnCartRefunded) — both decoupled from this fan-out.
 func (s *Service) ReactCartRefunded(ctx context.Context, cartID, storeID string) error {
-	if s.couponSyncer != nil {
-		if err := s.couponSyncer.OnCartRefunded(ctx, cartID); err != nil {
-			return fmt.Errorf("coupon refund on cart.refunded: %w", err)
-		}
-	}
 	if s.billingGate != nil {
 		if err := s.billingGate.OnCartRefunded(ctx, storeID, cartID); err != nil {
 			return fmt.Errorf("billing ledger on cart.refunded: %w", err)
 		}
 	}
-	if s.postCheckoutHook != nil {
-		s.postCheckoutHook.OnCartRefunded(ctx, cartID)
-	}
-	return nil
-}
-
-// ReactOrderRefundedERP is the order.refunded reactor that cancels the converted
-// ERP (Tiny) order and returns its stock. It is triggered by the order.refunded
-// fact (emitted transactionally by OnCartRefunded once the Order is flipped to
-// 'refunded'), NOT by cart.refunded directly — decoupling the ERP retry loop from
-// the coupon/billing fan-out. Idempotent by erp_order_state (once cancelled, a
-// re-run no-ops), so returning the error to get asynq retry + DLQ is safe — this
-// path needs no payment snapshot.
-func (s *Service) ReactOrderRefundedERP(ctx context.Context, cartID, storeID string) error {
-	ctx = logger.WithStore(ctx, storeID, "")
-	if err := s.RefundConvertedCartOrder(ctx, cartID, storeID); err != nil {
-		return fmt.Errorf("erp refund on order.refunded: %w", err)
-	}
-	return nil
-}
-
-// ReactCartExpiredERP is the cart.expired reactor (L3): it reverses the cart's
-// ERP footprint in Tiny, decoupled from ExpireCart's eligibility flip so it gets
-// its own asynq retry + DLQ. Design-C converted carts get their order cancelled
-// (idempotent by erp_order_state, so the error is returned for retry); non-converted
-// carts have their saída-manual reservations reversed best-effort (the local rows
-// are marked reversed regardless, so that path does not meaningfully retry).
-func (s *Service) ReactCartExpiredERP(ctx context.Context, cartID, storeID string) error {
-	ctx = logger.WithStore(ctx, storeID, "")
-	// Mesma pegada de um cart cancelado pelo lojista — a lógica vive em
-	// reverseCartERPFootprint (cart_cancellation.go) e é compartilhada.
-	if err := s.reverseCartERPFootprint(ctx, cartID, storeID); err != nil {
-		return fmt.Errorf("reversing cart ERP footprint on expiry: %w", err)
-	}
-	return nil
-}
-
-// finalizeCartERPOrder is the post-payment ERP workflow: reverse the Tiny
-// saída-manual reservations held during the live, then create a single sales
-// order already marked as paid, with customer identity and delivery address.
-//
-// Resumable state machine (Fase 2): every step leaves a durable marker and
-// re-entry only moves FORWARD — no compensation on retry:
-//
-//	[L]  advisory lock por cart — webhooks de gateway duplicados perdem o
-//	     lock e retornam cedo; o vencedor termina o trabalho
-//	[S1] snapshot do gateway + carimbo da tentativa persistidos ANTES de
-//	     tocar o ERP (retry admin faz replay sem novo webhook)
-//	[S0] external_order_id já gravado ⇒ RESUME: re-lança o estoque
-//	     (tolerante a "Estoque já lançado." — validado em sandbox 11/07) e
-//	     estorna só as reservas ainda 'active'. Mata os Gaps A e B (carts
-//	     zumbis presos em 'pending' que o retry recusava).
-//	[S2] estornos per-row: cada reserva só é marcada 'reversed' após o Tiny
-//	     confirmar a entrada E; falha aborta com 'failed' retomável (antes:
-//	     marcação em massa mesmo com Tiny falho ⇒ saída órfã)
-//	[S3] createFinalERPOrder (grava external_order_id antes do launch)
-//	[S4] done
-//
-// Failure recovery: if the order creation throws AFTER we have already
-// reversed reservations, we re-create the saída-manual exits in Tiny and
-// new active reservation rows in the DB so the unit stays held against this
-// cart — stock is never silently released against a paid cart. The retry
-// then resumes via [S0] (order exists) or re-runs from [S2] (it doesn't).
-func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID string, status *providers.PaymentStatus) error {
-	logger.From(ctx, s.logger).Info("starting ERP finalisation for paid cart",
-		zap.String("store_id", storeID),
-		zap.String("cart_id", cartID),
-	)
-
-	// [L] Claim único por cart. Perder o lock significa que outra entrega do
-	// mesmo webhook está finalizando AGORA — sem isso, duas goroutines listam
-	// as mesmas reservas 'active' e cada uma aplica sua entrada E (saldo do
-	// Tiny acima do real: a invariante central do fix quebraria).
-	release, acquired, lockErr := s.repo.AcquireCartFinalisationLock(ctx, cartID)
-	if lockErr != nil {
-		return fmt.Errorf("acquiring finalisation lock: %w", lockErr)
-	}
-	if !acquired {
-		logger.From(ctx, s.logger).Info("ERP finalisation already in flight for cart, skipping duplicate trigger",
-			zap.String("cart_id", cartID),
-		)
-		return nil
-	}
-	defer release()
-
-	// Idempotência dura: um trigger tardio (redelivery de horas depois) sobre
-	// cart já finalizado não deve custar nem uma chamada ao Tiny.
-	if stRow, stErr := s.repo.GetCartERPFinalisationStatus(ctx, cartID); stErr == nil && stRow.Status == "done" {
-		logger.From(ctx, s.logger).Info("cart ERP finalisation already done, skipping",
-			zap.String("cart_id", cartID),
-		)
-		return nil
-	}
-
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
-	if err != nil {
-		// Disambiguate "merchant never set up Tiny" (info, expected) from
-		// "Tiny exists but is in error state" (warn, recoverable) so we don't
-		// keep losing paid carts under a silent debug log.
-		if any, _ := s.repo.GetByProvider(ctx, storeID, "erp", "tiny"); any != nil {
-			logger.From(ctx, s.logger).Warn("Tiny integration is not active, skipping paid-order creation",
-				zap.String("store_id", storeID),
-				zap.String("cart_id", cartID),
-				zap.String("integration_id", any.ID),
-				zap.String("status", any.Status),
-			)
-		} else {
-			logger.From(ctx, s.logger).Info("no Tiny integration configured, skipping paid-order creation",
-				zap.String("store_id", storeID),
-				zap.String("cart_id", cartID),
-			)
-		}
-		return nil
-	}
-
-	cart, err := s.repo.GetCartForPaidOrder(ctx, cartID)
-	if err != nil {
-		return fmt.Errorf("loading cart for ERP order: %w", err)
-	}
-
-	// [S1] Snapshot + carimbo ANTES de agir. Best-effort: a finalização não
-	// para por falha aqui, mas o retry perde o replay se o snapshot faltar.
-	var snapshot []byte
-	if status != nil {
-		if b, encErr := json.Marshal(status); encErr == nil {
-			snapshot = b
-		} else {
-			logger.From(ctx, s.logger).Warn("failed to encode payment status snapshot",
-				zap.String("cart_id", cartID),
-				zap.Error(encErr),
-			)
-		}
-	}
-	if markErr := s.repo.MarkCartERPFinalisationAttempt(ctx, cartID, snapshot); markErr != nil {
-		logger.From(ctx, s.logger).Warn("failed to mark ERP finalisation attempt",
-			zap.String("cart_id", cartID),
-			zap.Error(markErr),
-		)
-	}
-
-	erpProvider, err := s.erpProviderFor(ctx, erpIntegration)
-	if err != nil {
-		return fmt.Errorf("creating ERP provider: %w", err)
-	}
-
-	// [S0] RESUME: o pedido já existe no Tiny — crash ou falha após o
-	// CreateOrder de uma tentativa anterior (Gaps A/B). Nunca pular o launch:
-	// ele é tolerante a "já lançado", e pulá-lo devolveria as reservas sem o
-	// pedido ter baixado estoque (oversell contra cart pago).
-	if cart.ExternalOrderID != "" {
-		return s.resumeCartERPFinalisation(ctx, erpProvider, cartID, cart.ExternalOrderID, snapshot)
-	}
-
-	// Fase 3: lojas com a flag ligada finalizam em ordem invertida
-	// (launch-first) — a perna de oferta do race morre na origem.
-	if s.finalisationInverted(storeID) {
-		return s.finalizeCartERPOrderInverted(ctx, erpProvider, erpIntegration, storeID, cart, status, snapshot)
-	}
-
-	// [S2] Reverse all active saída-manual reservations for this cart — the
-	// final order will decrement stock itself via LaunchOrderStock, so keeping
-	// the reservations would double-count. Per-row: a row only flips to
-	// 'reversed' after Tiny confirmed the entrada E; on failure we abort with
-	// a RESUMABLE 'failed' instead of proceeding (the old behaviour created
-	// the order anyway, leaving an orphan saída holding phantom stock).
-	reservations, err := s.repo.ListActiveReservationsByCart(ctx, cartID)
-	if err != nil {
-		return fmt.Errorf("listing cart reservations: %w", err)
-	}
-	logger.From(ctx, s.logger).Info("reversing ERP stock reservations before creating paid order",
-		zap.String("cart_id", cartID),
-		zap.Int("reservations_count", len(reservations)),
-	)
-
-	// Track which reservations actually made it through the Tiny reversal so
-	// we know which ones to re-create in the failure path. A reservation that
-	// failed to reverse is still "active" on Tiny's side — re-creating it
-	// would double-deduct stock.
-	reversedSnapshot := make([]StockReservationRow, 0, len(reservations))
-	for _, r := range reservations {
-		obs := fmt.Sprintf("Estorno reserva pós-pagamento - Cart %s", cartID)
-		if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
-			msg := fmt.Sprintf("estorno de reserva pendente (produto %s): %v", r.ExternalProductID, reverseErr)
-			if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, msg, snapshot); markErr != nil {
-				logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation failed",
-					zap.String("cart_id", cartID),
-					zap.Error(markErr),
-				)
-			}
-			s.emitERPFinalizationFailed(ctx, cartID, msg)
-			logger.From(ctx, s.logger).Warn("failed to reverse ERP reservation on paid cart, aborting for retry",
-				zap.String("cart_id", cartID),
-				zap.String("reservation_id", r.ID),
-				zap.String("external_product_id", r.ExternalProductID),
-				zap.Int("quantity", r.Quantity),
-				zap.Error(reverseErr),
-			)
-			return fmt.Errorf("reversing reservation %s: %w", r.ID, reverseErr)
-		}
-		if dbErr := s.repo.ReverseReservationByID(ctx, r.ID); dbErr != nil {
-			// Tiny estornou mas a marcação local falhou: um retry re-estornaria
-			// esta row e DUPLICARIA a entrada E (sandbox T10: o Tiny aceita e
-			// infla o saldo em silêncio). Loga alto com o movementID para
-			// reconciliação manual e segue — a direção do erro é estoque
-			// segurado a mais, nunca oferta falsa.
-			logger.From(ctx, s.logger).Error("reservation reversed on Tiny but local mark failed — reconcile manually",
-				zap.String("cart_id", cartID),
-				zap.String("reservation_id", r.ID),
-				zap.String("erp_movement_id", r.ERPMovementID),
-				zap.Error(dbErr),
-			)
-		}
-		reversedSnapshot = append(reversedSnapshot, r)
-	}
-	logger.From(ctx, s.logger).Info("ERP stock reservations reversed",
-		zap.String("cart_id", cartID),
-		zap.Int("requested", len(reservations)),
-		zap.Int("succeeded", len(reversedSnapshot)),
-	)
-
-	// [S3] Create the paid sales order. On failure, re-reserve and surface
-	//     the error to the merchant via cart.erp_finalisation_status='failed'.
-	createErr := s.createFinalERPOrder(ctx, erpProvider, erpIntegration, storeID, cart.EventID, *cart, status, true)
-	if createErr != nil {
-		s.reReserveAfterFailedFinalisation(ctx, erpProvider, cartID, cart.EventID, reversedSnapshot)
-		if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, createErr.Error(), snapshot); markErr != nil {
-			logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation failed",
-				zap.String("cart_id", cartID),
-				zap.Error(markErr),
-			)
-		}
-		s.emitERPFinalizationFailed(ctx, cartID, createErr.Error())
-		return createErr
-	}
-
-	// [S4]
-	if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
-		// The order is in Tiny — don't propagate. Just log so the cart
-		// shows up in the admin "stuck pending" view if the column ever
-		// drifts from reality.
-		logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation done",
-			zap.String("cart_id", cartID),
-			zap.Error(markErr),
-		)
-	}
-	s.emitERPOrderFinalized(ctx, storeID, cartID)
 	return nil
 }
 
@@ -4218,61 +3828,6 @@ func (s *Service) emitERPOrderFinalized(ctx context.Context, storeID, cartID str
 		ExternalOrderID string `json:"external_order_id"`
 		Provider        string `json:"provider"`
 	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: "tiny"})
-}
-
-// resumeCartERPFinalisation finishes a finalisation that was interrupted
-// AFTER the Tiny order already existed (Gaps A/B): re-launches the order
-// stock — LaunchOrderStock treats "Estoque já lançado." as success, validated
-// against the real API in the 11/07 sandbox battery — then reverses only the
-// reservations still 'active' (per-row marks from the first attempt survive),
-// and marks the cart done. Monotonic: it only ever moves forward; running it
-// twice is a no-op beyond one tolerated launch call.
-func (s *Service) resumeCartERPFinalisation(ctx context.Context, erpProvider providers.ERPProvider, cartID, externalOrderID string, snapshot []byte) error {
-	logger.From(ctx, s.logger).Info("resuming ERP finalisation for cart with existing order",
-		zap.String("cart_id", cartID),
-		zap.String("external_order_id", externalOrderID),
-	)
-
-	if err := erpProvider.LaunchOrderStock(ctx, externalOrderID); err != nil {
-		msg := fmt.Sprintf("relançamento de estoque do pedido %s falhou: %v", externalOrderID, err)
-		if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, msg, snapshot); markErr != nil {
-			logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation failed",
-				zap.String("cart_id", cartID),
-				zap.Error(markErr),
-			)
-		}
-		s.emitERPFinalizationFailed(ctx, cartID, msg)
-		return fmt.Errorf("re-launching stock for order %s: %w", externalOrderID, err)
-	}
-
-	if err := s.reverseCartReservationsPerRow(ctx, erpProvider, cartID); err != nil {
-		s.markFinalisationFailed(ctx, cartID, err.Error(), snapshot)
-		return fmt.Errorf("reversing reservations on resume: %w", err)
-	}
-
-	if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
-		logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation done after resume",
-			zap.String("cart_id", cartID),
-			zap.Error(markErr),
-		)
-	}
-	// Group G fact (best-effort): terminal 'done' reached via the resume path.
-	// storeID isn't threaded here; reload it best-effort for the payload.
-	resumeStoreID := ""
-	if fresh, err := s.repo.GetCartForPaidOrder(ctx, cartID); err == nil {
-		resumeStoreID = fresh.StoreID
-	}
-	_ = events.EmitInternal(ctx, s.repo.queries, events.ERPOrderFinalized, "erp.order_finalized:"+cartID, struct {
-		StoreID         string `json:"store_id"`
-		CartID          string `json:"cart_id"`
-		ExternalOrderID string `json:"external_order_id"`
-		Provider        string `json:"provider"`
-	}{StoreID: resumeStoreID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: "tiny"})
-	logger.From(ctx, s.logger).Info("ERP finalisation resumed to done",
-		zap.String("cart_id", cartID),
-		zap.String("external_order_id", externalOrderID),
-	)
-	return nil
 }
 
 // reverseCartReservationsPerRow estorna todas as reservas 'active' do cart,
@@ -4338,120 +3893,6 @@ func (s *Service) emitERPFinalizationFailed(ctx context.Context, cartID, reason 
 	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: "tiny", Reason: reason})
 }
 
-// finalizeCartERPOrderInverted é a Fase 3 do fix: cria o pedido e LANÇA o
-// estoque ANTES de estornar as reservas. O saldo do Tiny nunca sobe acima do
-// valor real durante a finalização — o perfil vira um mergulho transitório
-// (desce no launch, volta ao real nos estornos), e mergulho não gera oferta
-// falsa: a perna de oferta do race morre na origem, sem depender do guard.
-// Bônus estrutural: falha de CreateOrder não compensa NADA (as reservas nunca
-// foram tocadas) — reReserveAfterFailedFinalisation é exclusiva do legado.
-//
-// Fallback: se o launch falhar (ex.: conta com "estoque negativo = Não" e o
-// saldo preso nas próprias saídas manuais das reservas — o caso típico de
-// live esgotada), estorna as reservas PRIMEIRO e re-tenta o launch uma vez,
-// degradando para a ordem legada sob a proteção dos guards da Fase 1. Não há
-// matcher confiável de "saldo insuficiente" (mensagem não documentada), então
-// o fallback dispara para qualquer erro de launch — inofensivo quando a falha
-// era transiente, e o resume cobre se o re-launch também falhar.
-func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider providers.ERPProvider, erpIntegration *IntegrationRow, storeID string, cart *CartRow, status *providers.PaymentStatus, snapshot []byte) error {
-	cartID := cart.ID
-	logger.From(ctx, s.logger).Info("finalising cart with inverted order (launch-first)",
-		zap.String("cart_id", cartID),
-		zap.String("store_id", storeID),
-	)
-
-	// [I1] Cria o pedido SEM lançar — o launch é orquestrado aqui fora para
-	// permitir o fallback.
-	if createErr := s.createFinalERPOrder(ctx, erpProvider, erpIntegration, storeID, cart.EventID, *cart, status, false); createErr != nil {
-		if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, createErr.Error(), snapshot); markErr != nil {
-			logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation failed",
-				zap.String("cart_id", cartID),
-				zap.Error(markErr),
-			)
-		}
-		s.emitERPFinalizationFailed(ctx, cartID, createErr.Error())
-		return createErr
-	}
-
-	// createFinalERPOrder grava external_order_id no sucesso; recarrega para
-	// obtê-lo. Vazio = cart sem itens vinculados ao ERP (create pulou): não há
-	// pedido para lançar — só devolve as reservas e encerra.
-	fresh, err := s.repo.GetCartForPaidOrder(ctx, cartID)
-	if err != nil {
-		return fmt.Errorf("reloading cart after order creation: %w", err)
-	}
-	orderID := fresh.ExternalOrderID
-	if orderID == "" {
-		if err := s.reverseCartReservationsPerRow(ctx, erpProvider, cartID); err != nil {
-			s.markFinalisationFailed(ctx, cartID, err.Error(), snapshot)
-			return err
-		}
-		if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
-			logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation done",
-				zap.String("cart_id", cartID),
-				zap.Error(markErr),
-			)
-		}
-		return nil
-	}
-
-	// [I2] Launch-first, com fallback reverse-first.
-	if launchErr := erpProvider.LaunchOrderStock(ctx, orderID); launchErr != nil {
-		logger.From(ctx, s.logger).Warn("launch-first failed, falling back to reverse-first order",
-			zap.String("cart_id", cartID),
-			zap.String("external_order_id", orderID),
-			zap.Bool("insufficient_balance", isTinyInsufficientBalanceErr(launchErr)),
-			zap.Error(launchErr),
-		)
-		if err := s.reverseCartReservationsPerRow(ctx, erpProvider, cartID); err != nil {
-			s.markFinalisationFailed(ctx, cartID, err.Error(), snapshot)
-			return err
-		}
-		if retryErr := erpProvider.LaunchOrderStock(ctx, orderID); retryErr != nil {
-			msg := fmt.Sprintf("lançamento de estoque do pedido %s falhou após fallback: %v", orderID, retryErr)
-			if markErr := s.repo.MarkCartERPFinalisationFailed(ctx, cartID, msg, snapshot); markErr != nil {
-				logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation failed",
-					zap.String("cart_id", cartID),
-					zap.Error(markErr),
-				)
-			}
-			s.emitERPFinalizationFailed(ctx, cartID, msg)
-			// O pedido existe e external_order_id está gravado: o retry entra
-			// pelo RESUME (launch tolerante) e termina o trabalho.
-			return fmt.Errorf("launching stock for order %s after fallback: %w", orderID, retryErr)
-		}
-		if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
-			logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation done",
-				zap.String("cart_id", cartID),
-				zap.Error(markErr),
-			)
-		}
-		s.emitERPOrderFinalized(ctx, storeID, cartID)
-		return nil
-	}
-
-	// [I3] Estornos per-row: o saldo do Tiny volta ao valor real. Falha aqui é
-	// retomável — o resume re-lança (no-op tolerado) e estorna o restante.
-	if err := s.reverseCartReservationsPerRow(ctx, erpProvider, cartID); err != nil {
-		s.markFinalisationFailed(ctx, cartID, err.Error(), snapshot)
-		return err
-	}
-
-	// [I4]
-	if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
-		logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation done",
-			zap.String("cart_id", cartID),
-			zap.Error(markErr),
-		)
-	}
-	s.emitERPOrderFinalized(ctx, storeID, cartID)
-	logger.From(ctx, s.logger).Info("inverted ERP finalisation completed",
-		zap.String("cart_id", cartID),
-		zap.String("external_order_id", orderID),
-	)
-	return nil
-}
-
 // reReserveAfterFailedFinalisation re-creates Tiny saída-manual exits for the
 // reservations we reversed during the failed finalisation, and inserts new
 // active rows in stock_reservations so the cart still owns the units. Errors
@@ -4507,53 +3948,6 @@ func (s *Service) reReserveAfterFailedFinalisation(ctx context.Context, erpProvi
 		zap.Int("requested", len(snapshot)),
 		zap.Int("succeeded", restored),
 	)
-}
-
-// RetryERPFinalisation is the admin-triggered retry of the post-payment ERP
-// flow. Runs on 'failed' carts (replaying the persisted gateway snapshot) and
-// — Fase 2 — also on 'pending' zombies: carts whose finalisation crashed
-// mid-flight (Gap A/B). A pending cart is retryable when the Tiny order
-// already exists (resume path) or when the last attempt is old/absent; a
-// FRESH pending still gets a 422 because the initial flow is running right
-// now (and the advisory lock would make this retry a no-op anyway).
-func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID string) error {
-	row, err := s.repo.GetCartERPFinalisationStatus(ctx, cartID)
-	if err != nil {
-		return fmt.Errorf("loading cart ERP status: %w", err)
-	}
-	switch row.Status {
-	case "done":
-		return nil
-	case "pending":
-		stale := row.LastAttemptAt == nil || time.Since(*row.LastAttemptAt) > 15*time.Minute
-		if row.ExternalOrderID == "" && !stale {
-			return httpx.ErrUnprocessable("aguarde a finalização inicial concluir antes de tentar de novo")
-		}
-	case "failed":
-		// proceed
-	default:
-		return httpx.ErrUnprocessable("estado inválido para retry: " + row.Status)
-	}
-
-	// Replay the original gateway PaymentStatus snapshot we captured on the
-	// first attempt (S1). The snapshot has the canonical fee/net/installments/
-	// money-release values the order needs — re-fetching from the gateway
-	// would work too but adds an external dependency to a manual action.
-	if len(row.PaymentSnapshot) == 0 {
-		if row.ExternalOrderID != "" {
-			// Resume puro: o pedido já existe no Tiny, e launch + estornos não
-			// usam dados de pagamento — dá para terminar sem snapshot (carts
-			// zumbis pré-deploy caem aqui).
-			return s.finalizeCartERPOrder(ctx, cartID, storeID, nil)
-		}
-		return httpx.ErrUnprocessable("snapshot de pagamento ausente — retry não disponível")
-	}
-	var status providers.PaymentStatus
-	if err := json.Unmarshal(row.PaymentSnapshot, &status); err != nil {
-		return fmt.Errorf("decoding payment snapshot: %w", err)
-	}
-
-	return s.finalizeCartERPOrder(ctx, cartID, storeID, &status)
 }
 
 // =============================================================================
@@ -4740,162 +4134,6 @@ func meWebhookObservation(event string) string {
 }
 
 // =============================================================================
-// CART NFe SYNC (ERP → carts.erp_invoice_*)
-// =============================================================================
-
-// CartInvoiceState is the normalised view of a cart's NFe used by the order
-// detail handler and the manual-sync response. It mirrors providers.ERPInvoice
-// without exposing provider-specific quirks.
-type CartInvoiceState struct {
-	InvoiceID  string
-	InvoiceKey string
-	Status     string // pending | authorized | cancelled | rejected | "" (none)
-	EmittedAt  *time.Time
-}
-
-// SyncCartInvoiceFromERP pulls the NFe state for a paid cart from the active
-// ERP integration (today: Tiny) and persists it on carts.erp_invoice_*.
-//
-// invoiceID is optional: when the caller already knows the ERP-side notafiscal
-// id (e.g. from a webhook payload) we fetch by id; otherwise we ask the ERP
-// for whatever NFe is attached to the order. Returns nil error when the
-// merchant hasn't emitted the NFe yet — that's the "Aguardando NFe" branch
-// on the frontend, surfaced via the absence of erp_invoice_* fields.
-//
-// Idempotent: re-running the same sync produces the same row state. Callers
-// can hit it from the Tiny webhook handler, the manual "Verificar NFe" button,
-// or a future poller without coordination.
-//
-// Implements order.CartInvoiceSyncer.
-func (s *Service) SyncCartInvoiceFromERP(ctx context.Context, storeID, cartID, invoiceID string) error {
-	_, err := s.fetchAndPersistCartInvoice(ctx, storeID, cartID, invoiceID)
-	return err
-}
-
-// fetchAndPersistCartInvoice is the workhorse used by both the public
-// SyncCartInvoiceFromERP entry point and SyncCartInvoiceByExternalOrder. The
-// state it returns is consumed by the webhook path for logging, but not
-// surfaced past the integration package boundary.
-func (s *Service) fetchAndPersistCartInvoice(ctx context.Context, storeID, cartID, invoiceID string) (*CartInvoiceState, error) {
-	cart, err := s.repo.GetCartForPaidOrder(ctx, cartID)
-	if err != nil {
-		return nil, fmt.Errorf("loading cart for invoice sync: %w", err)
-	}
-	if cart.StoreID != storeID {
-		return nil, httpx.ErrNotFound("cart not found")
-	}
-	// Without an ERP order id we have no anchor on the Tiny side and nothing
-	// to fetch. Returning nil lets the caller render "Aguardando criação no
-	// ERP" without surfacing a generic error.
-	if cart.ExternalOrderID == "" && invoiceID == "" {
-		return nil, nil
-	}
-
-	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
-	if err != nil {
-		return nil, httpx.ErrUnprocessable("ERP integration not active for store")
-	}
-
-	provider, err := s.createProviderFromRow(ctx, integration)
-	if err != nil {
-		return nil, fmt.Errorf("creating ERP provider: %w", err)
-	}
-	invoiceProvider, ok := provider.(providers.ERPInvoiceProvider)
-	if !ok {
-		return nil, httpx.ErrUnprocessable("ERP provider does not expose invoice operations")
-	}
-
-	var (
-		invoice  *providers.ERPInvoice
-		fetchErr error
-	)
-	if invoiceID != "" {
-		invoice, fetchErr = invoiceProvider.GetInvoiceByID(ctx, invoiceID)
-	} else {
-		invoice, fetchErr = invoiceProvider.GetInvoiceByOrder(ctx, cart.ExternalOrderID)
-	}
-	if errors.Is(fetchErr, providers.ErrInvoiceNotFound) {
-		// Tiny knows the order but no NFe is attached yet — merchant still
-		// has to emit it in the ERP. Persist nothing and let the frontend
-		// surface "Aguardando NFe".
-		return nil, nil
-	}
-	if fetchErr != nil {
-		s.handleProviderError(ctx, integration.ID, "sync_cart_invoice", fetchErr)
-		return nil, fmt.Errorf("fetching NFe from ERP: %w", fetchErr)
-	}
-
-	// Fatia 11b: the NFe is written authoritatively to order_payments (resolved
-	// from cart_id). 0 rows = no Order for this cart yet — a benign skip (NF is
-	// always post-confirmation, so the Order should already exist; we log rather
-	// than error so a stray webhook never dead-letters).
-	rows, err := s.repo.UpsertCartERPInvoice(ctx, UpsertCartERPInvoiceParams{
-		CartID:        cartID,
-		InvoiceID:     invoice.InvoiceID,
-		InvoiceKey:    invoice.AccessKey,
-		InvoiceStatus: string(invoice.Status),
-		EmittedAt:     invoiceTimePtr(invoice.IssuedAt),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("persisting order NFe: %w", err)
-	}
-	if rows == 0 {
-		logger.From(ctx, s.logger).Warn("nota fiscal received for cart without a materialised order, skipping invoice persist",
-			zap.String("cart_id", cartID),
-			zap.String("external_order_id", cart.ExternalOrderID),
-			zap.String("invoice_id", invoice.InvoiceID),
-		)
-	}
-
-	// Mirror the chave on any existing shipment so the carrier provider can
-	// pick it up the next time the merchant clicks "Anexar NFe" / generates a
-	// label. We don't auto-call AttachInvoice on the carrier here because the
-	// merchant-driven flow is explicit.
-	if invoice.AccessKey != "" {
-		if sh, _ := s.repo.GetShipmentByOrderID(ctx, cartID); sh != nil && sh.InvoiceKey == "" {
-			if err := s.repo.UpdateShipmentInvoice(ctx, sh.ID, invoice.AccessKey, "nfe"); err != nil {
-				logger.From(ctx, s.logger).Warn("failed to mirror NFe key onto existing shipment",
-					zap.String("cart_id", cartID),
-					zap.String("shipment_id", sh.ID),
-					zap.Error(err),
-				)
-			}
-		}
-	}
-
-	return &CartInvoiceState{
-		InvoiceID:  invoice.InvoiceID,
-		InvoiceKey: invoice.AccessKey,
-		Status:     string(invoice.Status),
-		EmittedAt:  invoiceTimePtr(invoice.IssuedAt),
-	}, nil
-}
-
-// SyncCartInvoiceByExternalOrder is the webhook entry point: Tiny only sends
-// the pedido id (and sometimes the notafiscal id) in nota_fiscal events, so
-// we resolve the cart by external_order_id first, then delegate to the
-// regular sync.
-func (s *Service) SyncCartInvoiceByExternalOrder(ctx context.Context, storeID, externalOrderID, invoiceID string) (*CartInvoiceState, error) {
-	cartID, err := s.repo.FindCartByExternalOrderID(ctx, externalOrderID, storeID)
-	if err != nil {
-		logger.From(ctx, s.logger).Debug("nota_fiscal webhook for unknown pedido — skipping",
-			zap.String("store_id", storeID),
-			zap.String("external_order_id", externalOrderID),
-			zap.Error(err),
-		)
-		return nil, nil
-	}
-	return s.fetchAndPersistCartInvoice(ctx, storeID, cartID, invoiceID)
-}
-
-func invoiceTimePtr(t time.Time) *time.Time {
-	if t.IsZero() {
-		return nil
-	}
-	return &t
-}
-
-// =============================================================================
 // INSTAGRAM WEBHOOK OPERATIONS
 // =============================================================================
 
@@ -4908,706 +4146,7 @@ func invoiceTimePtr(t time.Time) *time.Time {
 // Idempotency: ProcessInstagramComment already dedups by platform_comment_id,
 // so at-least-once redelivery is safe. dedup_key mirrors that for visibility.
 func (s *Service) DispatchCommentReceived(ctx context.Context, input ProcessInstagramCommentInput, source events.Source) error {
-	payload, err := json.Marshal(input)
-	if err != nil {
-		return fmt.Errorf("marshaling comment.received payload: %w", err)
-	}
-	tx, err := s.repo.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin comment.received tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
-	if err := events.Emit(ctx, s.repo.queries.WithTx(tx), events.Envelope{
-		Name:     events.CommentReceived,
-		Source:   source,
-		DedupKey: "comment.received:" + input.CommentID,
-		Metadata: map[string]string{"comment_id": input.CommentID, "media_id": input.MediaID},
-		Payload:  payload,
-	}); err != nil {
-		return fmt.Errorf("emitting comment.received: %w", err)
-	}
-	return tx.Commit(ctx)
-}
-
-// ProcessInstagramComment processes a live comment from Instagram webhook.
-// All comments are saved to DB. Purchase intents trigger stock check → cart or waitlist.
-func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInstagramCommentInput) error {
-	logger.From(ctx, s.logger).Info("processing instagram comment",
-		zap.String("account_id", input.AccountID),
-		zap.String("media_id", input.MediaID),
-		zap.String("comment_id", input.CommentID),
-		zap.String("user_id", input.UserID),
-		zap.String("username", input.Username),
-		zap.String("text", input.Text),
-	)
-
-	// Idempotency guard: a comment can reach us from BOTH the real-time webhook
-	// and the polling capture. Skip if we've already stored this comment id, so
-	// we never create a duplicate cart for the same comment.
-	if input.CommentID != "" {
-		if exists, _ := s.repo.LiveCommentExistsByPlatformID(ctx, input.CommentID); exists {
-			logger.From(ctx, s.logger).Info("comment already processed, skipping",
-				zap.String("comment_id", input.CommentID),
-			)
-			return nil
-		}
-	}
-
-	// Resolve a mídia → sessão → evento. Nenhuma das duas queries filtra status
-	// (D18/D19/D20): campanha agendada, transmissão encerrada e campanha
-	// encerrada TÊM de resolver, porque é o evento que carrega a loja e sem
-	// loja não há como responder nem registrar. Chegar aqui com nil agora
-	// significa uma coisa só: a mídia não é nossa.
-	session, err := s.liveService.GetSessionByPlatformLiveID(ctx, input.MediaID)
-	if err != nil {
-		return fmt.Errorf("finding live session: %w", err)
-	}
-	if session == nil {
-		logger.From(ctx, s.logger).Warn("no live session bound to media_id",
-			zap.String("media_id", input.MediaID),
-		)
-		return nil
-	}
-
-	// Get the event (which has store_id) from the session
-	event, err := s.liveService.GetEventByPlatformLiveID(ctx, input.MediaID)
-	if err != nil {
-		return fmt.Errorf("finding live event: %w", err)
-	}
-	if event == nil {
-		logger.From(ctx, s.logger).Warn("no live event bound to media_id",
-			zap.String("media_id", input.MediaID),
-		)
-		return nil
-	}
-
-	// Store resolved (media_id → event): carry it on the ctx so every log below
-	// gets store_id without manual fields. Slug lookup skipped on this hot path.
-	ctx = logger.WithStore(ctx, event.StoreID, "")
-
-	// Paywall (PRD 007): blocked stores stop creating carts from comments.
-	// Existing checkouts and payment webhooks keep working elsewhere.
-	if s.billingGate != nil && s.billingGate.IsStoreBlocked(ctx, event.StoreID) {
-		logger.From(ctx, s.logger).Info("comment ignored: store subscription blocked",
-			zap.String("comment_id", input.CommentID),
-		)
-		return nil
-	}
-
-	// Store webhook event for audit trail (only if we have payload and store context)
-	if len(input.RawPayload) > 0 {
-		if err := s.StoreWebhookEvent(ctx, StoreWebhookInput{
-			StoreID:        event.StoreID,
-			Provider:       "instagram",
-			EventType:      "live_comments",
-			EventID:        input.CommentID,
-			Payload:        input.RawPayload,
-			SignatureValid: input.SignatureValid,
-		}); err != nil {
-			logger.From(ctx, s.logger).Error("failed to store instagram webhook event",
-				zap.String("comment_id", input.CommentID),
-				zap.Error(err),
-			)
-			// Don't return error - continue processing the comment
-		}
-	}
-
-	// Increment comment counter on session
-	if err := s.repo.IncrementLiveSessionComments(ctx, session.ID); err != nil {
-		logger.From(ctx, s.logger).Error("failed to increment comment counter",
-			zap.String("session_id", session.ID),
-			zap.Error(err),
-		)
-	}
-
-	// D17: a pausa é DESTA transmissão. No evento, pausar a live de segunda
-	// deixava a live de quarta do mesmo evento parada junto.
-	if session.ProcessingPaused {
-		logger.From(ctx, s.logger).Info("processing paused, storing comment only",
-			zap.String("session_id", session.ID),
-			zap.String("event_id", event.ID),
-			zap.String("comment_id", input.CommentID),
-			zap.String("username", input.Username),
-		)
-
-		// Save comment with "paused" result but don't process cart
-		_, err := s.repo.CreateLiveComment(ctx, CreateLiveCommentParams{
-			SessionID:         session.ID,
-			EventID:           event.ID,
-			Platform:          "instagram",
-			PlatformCommentID: input.CommentID,
-			PlatformUserID:    input.UserID,
-			PlatformHandle:    input.Username,
-			Text:              input.Text,
-			HasPurchaseIntent: false, // Don't parse when paused
-			Result:            "paused",
-		})
-		if err != nil {
-			logger.From(ctx, s.logger).Error("failed to save paused comment", zap.Error(err))
-		}
-		return nil
-	}
-
-	// Block list: if the merchant has blocked this handle, drop the comment
-	// from the purchase flow. Still persist it with result='blocked' so the
-	// live feed can show "ignorado" badge and the merchant can see that the
-	// person is still trying to buy.
-	blocked, blockErr := s.repo.IsHandleBlocked(ctx, event.StoreID, strings.ToLower(strings.TrimPrefix(strings.TrimSpace(input.Username), "@")))
-	if blockErr != nil {
-		logger.From(ctx, s.logger).Error("failed to check blocked handle, proceeding",
-			zap.String("username", input.Username),
-			zap.Error(blockErr),
-		)
-	} else if blocked {
-		logger.From(ctx, s.logger).Info("comment from blocked handle ignored",
-			zap.String("event_id", event.ID),
-			zap.String("username", input.Username),
-			zap.String("comment_id", input.CommentID),
-		)
-		_, err := s.repo.CreateLiveComment(ctx, CreateLiveCommentParams{
-			SessionID:         session.ID,
-			EventID:           event.ID,
-			Platform:          "instagram",
-			PlatformCommentID: input.CommentID,
-			PlatformUserID:    input.UserID,
-			PlatformHandle:    input.Username,
-			Text:              input.Text,
-			HasPurchaseIntent: false,
-			Result:            "blocked",
-		})
-		if err != nil {
-			logger.From(ctx, s.logger).Error("failed to save blocked comment", zap.Error(err))
-		}
-		return nil
-	}
-
-	// Parse purchase intent
-	intent := ParsePurchaseIntent(input.Text)
-	hasPurchaseIntent := intent != nil
-
-	// Window gates, para TODO tipo de evento.
-	//
-	// Antes viviam dentro do ramo isPostCommerce logo abaixo, então para live
-	// (type single/multi) não existia checagem nenhuma de janela: a única coisa
-	// que impedia venda fora do horário era o status = 'active' exigido pelas
-	// queries de resolução. Quando esse filtro sair (RN-20, para o sistema
-	// deixar de descartar comentário em silêncio), comentar num evento
-	// encerrado passaria a criar carrinho e reservar estoque de verdade.
-	// Extrair o gate primeiro é o que impede isso — por isso ele vem antes,
-	// numa entrega própria, e não junto da remoção do filtro.
-	//
-	// A decisão em si mora no domínio (live.WindowAt), fonte única com o rótulo
-	// que o painel mostra. Três casos, um padrão só: nunca vende fora da
-	// janela, nunca fica em silêncio.
-	//
-	// Só vale quando há intenção de compra: um comentário qualquer numa
-	// campanha encerrada não merece resposta automática.
-	if hasPurchaseIntent {
-		switch live.WindowAt(event.Status, event.ScheduledAt, event.EndsAt, time.Now()) {
-		case live.WindowNotStarted:
-			s.replyOutOfWindow(ctx, event, session, input, notification.TypeOutOfWindowScheduled)
-			s.savePostComment(ctx, session.ID, event.ID, input, "event_not_started")
-			return nil
-		case live.WindowEnded:
-			s.replyOutOfWindow(ctx, event, session, input, notification.TypeOutOfWindowEventEnded)
-			s.savePostComment(ctx, session.ID, event.ID, input, "event_ended")
-			return nil
-		default:
-			// D18 — a campanha continua viva, só ESTA transmissão acabou.
-			// Único dos três casos em que a loja ainda está vendendo, então a
-			// resposta redireciona em vez de negar.
-			if !live.SessionAcceptsPurchase(session.Status) {
-				s.replyOutOfWindow(ctx, event, session, input, notification.TypeOutOfWindowSessionEnded)
-				s.savePostComment(ctx, session.ID, event.ID, input, "session_ended")
-				return nil
-			}
-		}
-	}
-
-	// Try to match product by keyword
-	var product *ProductRow
-	if hasPurchaseIntent {
-		product = s.findProductByKeyword(ctx, event.StoreID, input.Text)
-
-		// D17: o produto em destaque é DESTA transmissão. Duas sessões
-		// simultâneas do mesmo evento deixam de compartilhar o destaque.
-		if product == nil && session.CurrentActiveProductID != nil && *session.CurrentActiveProductID != "" {
-			logger.From(ctx, s.logger).Info("no keyword match, trying active product fallback",
-				zap.String("session_id", session.ID),
-				zap.String("active_product_id", *session.CurrentActiveProductID),
-			)
-			product, _ = s.repo.GetProductByID(ctx, event.StoreID, *session.CurrentActiveProductID)
-		}
-	}
-
-	// Post-commerce (post, reel e story) aplica regras próprias: só
-	// os produtos selecionados participam, uma promoção de produto único
-	// auto-adiciona num "EU QUERO" pelado, e um pedido indisponível ou ambíguo
-	// recebe resposta privada. Quando resolvido aqui, persiste e para.
-	//
-	// D3: o discriminador é o tipo da SESSÃO, não do evento — um evento
-	// guarda-chuva tem live e post ao mesmo tempo, e 'reel' nem existe no
-	// vocabulário do evento.
-	// Os window gates que ficavam aqui subiram para logo depois do parse de
-	// intenção, valendo para todo tipo de evento.
-	if live.IsPostCommerceSessionType(session.Type) && hasPurchaseIntent {
-		resolved, handled, resultLabel := s.resolvePostEventProduct(ctx, event, session.ID, input, intent, product)
-		if handled {
-			s.savePostComment(ctx, session.ID, event.ID, input, resultLabel)
-			return nil
-		}
-		product = resolved
-	}
-
-	// Determine result for the comment record
-	var commentResult string
-	var matchedProductID string
-	var matchedQuantity int
-	if !hasPurchaseIntent {
-		commentResult = "no_intent"
-	} else if product == nil {
-		commentResult = "no_product"
-	}
-	if product != nil && intent != nil {
-		matchedProductID = product.ID
-		matchedQuantity = intent.Quantity
-	}
-
-	// Save ALL comments to DB
-	commentID, err := s.repo.CreateLiveComment(ctx, CreateLiveCommentParams{
-		SessionID:         session.ID,
-		EventID:           event.ID,
-		Platform:          "instagram",
-		PlatformCommentID: input.CommentID,
-		PlatformUserID:    input.UserID,
-		PlatformHandle:    input.Username,
-		Text:              input.Text,
-		HasPurchaseIntent: hasPurchaseIntent,
-		MatchedProductID:  matchedProductID,
-		MatchedQuantity:   matchedQuantity,
-		Result:            commentResult,
-	})
-	if err != nil {
-		logger.From(ctx, s.logger).Error("failed to save live comment", zap.Error(err))
-		// Continue processing even if save fails
-	}
-
-	// If no purchase intent or no product match, we're done
-	if !hasPurchaseIntent || product == nil {
-		return nil
-	}
-
-	logger.From(ctx, s.logger).Info("purchase intent detected with product match",
-		zap.String("username", input.Username),
-		zap.String("product_id", product.ID),
-		zap.String("keyword", product.Keyword),
-		zap.Int("quantity", intent.Quantity),
-		zap.Int("stock", product.Stock),
-	)
-
-	// A expiração de carrinhos deixou de ser lazy (por-comentário, por-produto):
-	// era cega a carts 'checkout' pós-live e corria com o webhook de pagamento
-	// sem lock. Agora a schedule asynq (cart.expire → RunScheduledExpiry →
-	// ExpireCart) expira por-cart, com advisory lock, filtro de pago e devolução
-	// de TODOS os itens.
-	// A promoção de waitlist do produto liberado passou a ser disparada pelo
-	// próprio worker; aqui não é mais necessário nada.
-
-	// Validate maxQuantityPerItem limit
-	storeInfo, _ := s.repo.GetStoreInfo(ctx, event.StoreID)
-	if storeInfo != nil && storeInfo.MaxQuantityPerItem > 0 {
-		currentQty, _ := s.repo.GetProductQuantityInUserCart(ctx, event.ID, input.UserID, product.ID)
-		maxAllowed := storeInfo.MaxQuantityPerItem
-
-		if currentQty >= maxAllowed {
-			// User already has max quantity, ignore this request
-			logger.From(ctx, s.logger).Info("user already at max quantity for product, ignoring",
-				zap.String("username", input.Username),
-				zap.String("product_id", product.ID),
-				zap.Int("current_qty", currentQty),
-				zap.Int("max_allowed", maxAllowed),
-			)
-			if commentID != "" {
-				_ = s.repo.UpdateLiveCommentResult(ctx, commentID, false, product.ID, intent.Quantity, "max_quantity_reached")
-			}
-			// Send reply notifying user they've reached the limit.
-			// Detached goroutine: never carry the (recyclable) request ctx —
-			// hand it a Background ctx enriched with the store instead.
-			go s.sendMaxQuantityReply(logger.WithStore(context.Background(), event.StoreID, ""), event.StoreID, input.Channel, input.CommentID, input.UserID, input.Username, product.Name, maxAllowed, true)
-			return nil
-		}
-
-		// Cap quantity to remaining allowed
-		remaining := maxAllowed - currentQty
-		if intent.Quantity > remaining {
-			logger.From(ctx, s.logger).Info("capping quantity to max allowed",
-				zap.String("username", input.Username),
-				zap.String("product_id", product.ID),
-				zap.Int("requested", intent.Quantity),
-				zap.Int("capped_to", remaining),
-			)
-			// Send reply notifying user their quantity was capped.
-			// Detached goroutine: same ctx rule as above.
-			go s.sendMaxQuantityReply(logger.WithStore(context.Background(), event.StoreID, ""), event.StoreID, input.Channel, input.CommentID, input.UserID, input.Username, product.Name, maxAllowed, false)
-			intent.Quantity = remaining
-		}
-	}
-
-	// Calculate partial fulfillment: how many available vs waitlisted
-	availableQty := intent.Quantity
-	if product.Stock < intent.Quantity {
-		availableQty = product.Stock
-	}
-	if availableQty < 0 {
-		availableQty = 0
-	}
-	waitlistQty := intent.Quantity - availableQty
-
-	// Reserve available stock (provisional: rolled back below if AddToCart
-	// fails). stock.reserved is emitted only after the add succeeds, with the
-	// real cart_id — see NoteReserved after AddToCart.
-	if availableQty > 0 {
-		if stockErr := s.repo.DecrementProductStock(ctx, product.ID, availableQty); stockErr != nil {
-			// Failed to reserve even available stock - put all in waitlist
-			logger.From(ctx, s.logger).Warn("failed to decrement stock, putting all in waitlist",
-				zap.Error(stockErr),
-				zap.Int("attempted", availableQty),
-			)
-			availableQty = 0
-			waitlistQty = intent.Quantity
-		}
-	}
-
-	// Handle waitlist gating: if user already has a row, skip the waitlist
-	// portion (we don't double-queue) and either return early or fall back
-	// to adding only the available portion to the cart.
-	createWaitlistRow := false
-	var waitlistPosition int
-	if waitlistQty > 0 {
-		alreadyWaiting, _ := s.repo.GetWaitlistItemByEventUserProduct(ctx, event.ID, input.UserID, product.ID)
-		if alreadyWaiting {
-			logger.From(ctx, s.logger).Info("user already on waitlist, ignoring waitlist portion",
-				zap.String("username", input.Username),
-				zap.String("product_id", product.ID),
-				zap.Int("waitlist_qty", waitlistQty),
-			)
-			if availableQty == 0 {
-				if commentID != "" {
-					_ = s.repo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "already_waitlisted")
-				}
-				return nil
-			}
-			waitlistQty = 0
-		} else {
-			// Defer the actual INSERT to after AddToCart so we can stamp
-			// cart_id on the row (the public checkout lists waitlist items
-			// by cart_id). Position is read here to keep ordering stable
-			// even if two intents race on the same event+product.
-			waitlistPosition, _ = s.repo.GetNextWaitlistPosition(ctx, event.ID, product.ID)
-			createWaitlistRow = true
-		}
-	}
-
-	// Determine total quantity to add to cart
-	totalQtyToAdd := availableQty + waitlistQty
-	if totalQtyToAdd == 0 {
-		// Nothing to add
-		return nil
-	}
-
-	// Add product to cart with partial fulfillment
-	result, err := s.liveService.AddToCart(ctx, live.AddToCartInput{
-		StoreID:            event.StoreID,
-		EventID:            event.ID,
-		SessionID:          session.ID,
-		PlatformUserID:     input.UserID,
-		PlatformHandle:     input.Username,
-		ProductID:          product.ID,
-		ProductPrice:       product.Price,
-		Quantity:           totalQtyToAdd,
-		WaitlistedQuantity: waitlistQty,
-	})
-	if err != nil {
-		// If we reserved stock but failed to add to cart, release it
-		if availableQty > 0 {
-			_ = s.repo.IncrementProductStock(ctx, product.ID, availableQty)
-		}
-		return fmt.Errorf("adding to cart: %w", err)
-	}
-
-	// Reservation is now definitive — emit stock.reserved keyed by the real cart.
-	if availableQty > 0 {
-		s.stock.NoteReserved(ctx, ReserveParams{Op: StockOpCartAdd, ProductID: product.ID, Quantity: availableQty, CartID: result.CartID, EventID: event.ID})
-	}
-
-	// Persist the waitlist row now that we have the cart_id from AddToCart.
-	if createWaitlistRow {
-		if _, wlErr := s.repo.CreateWaitlistItem(ctx, CreateWaitlistItemParams{
-			EventID:        event.ID,
-			ProductID:      product.ID,
-			PlatformUserID: input.UserID,
-			PlatformHandle: input.Username,
-			Quantity:       waitlistQty,
-			Position:       waitlistPosition,
-			CartID:         result.CartID,
-		}); wlErr != nil {
-			// D11/000113: uq_waitlist_live_entry é a trava REAL contra fila
-			// dupla. A checagem acima (GetWaitlistItemByEventUserProduct) é uma
-			// leitura fora de transação e sem lock — dois comentários
-			// simultâneos do mesmo comprador passam pelos dois lados dela. Quem
-			// perde a corrida agora bate no índice, e isso é a trava
-			// funcionando, não uma falha: o comprador já está na fila.
-			var pgErr *pgconn.PgError
-			if errors.As(wlErr, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "uq_waitlist_live_entry" {
-				logger.From(ctx, s.logger).Info("waitlist duplicate blocked by uq_waitlist_live_entry (race)",
-					zap.String("username", input.Username),
-					zap.String("product_id", product.ID),
-				)
-			} else {
-				logger.From(ctx, s.logger).Error("failed to create waitlist item", zap.Error(wlErr))
-			}
-		} else {
-			logger.From(ctx, s.logger).Info("user added to waitlist (partial fulfillment)",
-				zap.String("username", input.Username),
-				zap.String("product_id", product.ID),
-				zap.String("cart_id", result.CartID),
-				zap.Int("available_qty", availableQty),
-				zap.Int("waitlist_qty", waitlistQty),
-				zap.Int("position", waitlistPosition),
-			)
-		}
-	}
-
-	// Update comment result
-	if commentID != "" {
-		if waitlistQty > 0 && availableQty > 0 {
-			_ = s.repo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "partial_fulfillment")
-		} else if waitlistQty > 0 {
-			_ = s.repo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "waitlisted")
-		} else {
-			_ = s.repo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "added_to_cart")
-		}
-	}
-
-	// Increment order counter on event only for new carts
-	if result.IsNewCart {
-		if err := s.repo.IncrementLiveEventOrders(ctx, event.ID); err != nil {
-			logger.From(ctx, s.logger).Error("failed to increment order counter",
-				zap.String("event_id", event.ID),
-				zap.Error(err),
-			)
-		}
-	}
-
-	// Reserve stock in ERP (only for available items)
-	if availableQty > 0 {
-		if syncErr := s.ReserveStockInERP(ctx, event.StoreID, result.CartID, event.ID, product.ID, availableQty, product.Price, input.Username); syncErr != nil {
-			logger.From(ctx, s.logger).Warn("failed to reserve stock in ERP",
-				zap.String("cart_id", result.CartID),
-				zap.Error(syncErr),
-			)
-		}
-	}
-
-	// Send immediate notification (fire-and-forget, doesn't block the flow). For
-	// story replies (Channel="dm") there is no comment to reply on, so we clear
-	// the comment id — the notification service then delivers straight via DM to
-	// the buyer's IGSID.
-	notifyCommentID := input.CommentID
-	if input.Channel == "dm" {
-		notifyCommentID = ""
-	}
-	s.sendImmediateNotification(ctx, sendNotificationInput{
-		StoreID:           event.StoreID,
-		EventID:           event.ID,
-		EventTitle:        event.Title,
-		CartID:            result.CartID,
-		CartToken:         result.CartToken,
-		PlatformUserID:    input.UserID,
-		PlatformHandle:    input.Username,
-		PlatformCommentID: notifyCommentID,
-		ProductName:       product.Name,
-		ProductKeyword:    product.Keyword,
-		Quantity:          intent.Quantity,
-		TotalItems:        result.TotalItems,
-		TotalCents:        result.TotalCents,
-		IsNewCart:         result.IsNewCart,
-	})
-
-	return nil
-}
-
-// sendNotificationInput contains all data needed for immediate notifications.
-type sendNotificationInput struct {
-	StoreID           string
-	EventID           string
-	EventTitle        string
-	CartID            string
-	CartToken         string
-	PlatformUserID    string
-	PlatformHandle    string
-	PlatformCommentID string // Instagram comment ID for reply
-	ProductName       string
-	ProductKeyword    string
-	Quantity          int
-	TotalItems        int
-	TotalCents        int64
-	IsNewCart         bool
-}
-
-// sendImmediateNotification sends an immediate checkout notification via the notification service.
-// This is fire-and-forget - errors are logged but don't affect the main flow.
-func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotificationInput) {
-	// Skip if notification service not configured
-	if s.notificationService == nil {
-		return
-	}
-
-	// Determine notification type based on whether this is a new cart or adding to existing
-	notifType := notification.TypeCheckoutImmediate
-	if !input.IsNewCart {
-		notifType = notification.TypeItemAdded
-	}
-
-	// Check if we should notify based on store settings
-	shouldNotify, err := s.notificationService.ShouldNotify(ctx, input.StoreID, notifType, input.IsNewCart)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to check notification settings",
-			zap.Error(err),
-		)
-		return
-	}
-	if !shouldNotify {
-		return
-	}
-
-	// Get store info for notification
-	storeInfo, err := s.repo.GetStoreInfo(ctx, input.StoreID)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to get store info for notification",
-			zap.Error(err),
-		)
-		return
-	}
-
-	// Build checkout URL
-	frontendURL := config.FrontendURL.StringOr("http://localhost:3000")
-	checkoutURL := fmt.Sprintf("%s/cart/%s", frontendURL, input.CartToken)
-
-	// Build template variables
-	vars := notification.TemplateVariables{
-		Handle:     "@" + input.PlatformHandle,
-		Produto:    input.ProductName,
-		Keyword:    input.ProductKeyword,
-		Quantidade: input.Quantity,
-		TotalItens: input.TotalItems,
-		Total:      notification.FormatCurrency(input.TotalCents),
-		TotalCents: input.TotalCents,
-		Link:       checkoutURL,
-		Loja:       storeInfo.Name,
-		ExpiraEm:   notification.FormatExpiryMinutes(storeInfo.CartExpirationMinutes),
-		LiveTitulo: input.EventTitle,
-	}
-
-	// Send notification
-	result, err := s.notificationService.Send(ctx, notification.SendInput{
-		StoreID:           input.StoreID,
-		EventID:           input.EventID,
-		CartID:            input.CartID,
-		CartToken:         input.CartToken,
-		PlatformUserID:    input.PlatformUserID,
-		PlatformHandle:    input.PlatformHandle,
-		PlatformCommentID: input.PlatformCommentID,
-		NotificationType:  notifType,
-		Variables:         vars,
-	})
-
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("notification send error",
-			zap.String("cart_id", input.CartID),
-			zap.Error(err),
-		)
-		return
-	}
-
-	logger.From(ctx, s.logger).Info("immediate notification processed",
-		zap.String("cart_id", input.CartID),
-		zap.String("status", string(result.Status)),
-		zap.Bool("is_new_cart", input.IsNewCart),
-	)
-}
-
-// sendMaxQuantityReply sends a reply to the user when they've reached or exceeded the max quantity limit.
-// This is fire-and-forget - errors are logged but don't affect the main flow.
-// isAtLimit: true = already at limit (rejected), false = quantity was capped
-func (s *Service) sendMaxQuantityReply(ctx context.Context, storeID, channel, commentID, userID, username, productName string, maxAllowed int, isAtLimit bool) {
-	var message string
-	if isAtLimit {
-		message = fmt.Sprintf("Oi @%s! Você já atingiu o limite de %d unidades de %s. 🛒", username, maxAllowed, productName)
-	} else {
-		message = fmt.Sprintf("Oi @%s! Adicionei o máximo permitido (%d unidades) de %s ao seu carrinho. 🛒", username, maxAllowed, productName)
-	}
-
-	// Story replies have no comment to answer — DM the buyer directly.
-	if channel == "dm" {
-		if dmErr := s.SendInstagramDM(ctx, storeID, userID, message); dmErr != nil {
-			logger.From(ctx, s.logger).Warn("failed to send max quantity DM",
-				zap.String("user_id", userID), zap.Error(dmErr))
-		}
-		return
-	}
-
-	if commentID == "" {
-		return
-	}
-
-	// Try comment reply first, then DM fallback
-	err := s.ReplyToInstagramComment(ctx, storeID, commentID, message)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to send max quantity reply via comment, trying DM",
-			zap.String("comment_id", commentID),
-			zap.Error(err),
-		)
-		// Fallback to DM
-		if dmErr := s.SendInstagramDM(ctx, storeID, userID, message); dmErr != nil {
-			logger.From(ctx, s.logger).Warn("failed to send max quantity DM",
-				zap.String("user_id", userID),
-				zap.Error(dmErr),
-			)
-		}
-	}
-
-	logger.From(ctx, s.logger).Info("max quantity reply sent",
-		zap.String("username", username),
-		zap.String("product", productName),
-		zap.Int("max_allowed", maxAllowed),
-		zap.Bool("is_at_limit", isAtLimit),
-	)
-}
-
-// findProductByKeyword extracts possible keywords from text and tries to match with products.
-func (s *Service) findProductByKeyword(ctx context.Context, storeID, text string) *ProductRow {
-	keywords := ExtractPossibleKeywords(text)
-	if len(keywords) == 0 {
-		return nil
-	}
-
-	// Try each possible keyword until we find a match
-	for _, keyword := range keywords {
-		product, err := s.repo.GetProductByKeyword(ctx, storeID, keyword)
-		if err != nil {
-			logger.From(ctx, s.logger).Error("failed to lookup product by keyword",
-				zap.String("keyword", keyword),
-				zap.Error(err),
-			)
-			continue
-		}
-		if product != nil {
-			return product
-		}
-	}
-
-	return nil
+	return s.liveService.DispatchCommentReceived(ctx, input.CommentID, input.MediaID, source, input)
 }
 
 // ProcessInstagramMessage processes a DM from Instagram webhook.
@@ -5793,7 +4332,6 @@ func (s *Service) StartPostCommentPolling(ctx context.Context) {
 // permanently unreachable for us (deleted or no longer accessible) rather than a
 // transient failure. Graph signals this with code 100 / subcode 33 and the
 // "does not exist, cannot be loaded due to missing permissions" message.
-
 func isMediaGoneError(err error) bool {
 	if err == nil {
 		return false
@@ -5853,7 +4391,7 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 			if username == "" {
 				username = c.Username
 			}
-			if err := s.ProcessInstagramComment(evCtx, ProcessInstagramCommentInput{
+			if err := s.liveService.ProcessInstagramComment(evCtx, ProcessInstagramCommentInput{
 				MediaID:   ev.MediaID,
 				CommentID: c.ID,
 				UserID:    c.From.ID,
@@ -5871,8 +4409,6 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 	}
 }
 
-// =============================================================================
-// POST-COMMERCE COMMENT RULES
 // =============================================================================
 
 // resolvePostEventProduct applies post-event rules. It returns the product to
@@ -6244,99 +4780,12 @@ func (s *Service) replyPostChooseProduct(ctx context.Context, event *live.EventO
 // CART → ERP STOCK RESERVATION
 // =============================================================================
 
-// ReserveStockInERP creates a manual stock exit (tipo S) in the ERP for a product
-// added to a cart. The movement is tracked in stock_reservations for later reversal.
+// ReserveStockInERP delega para erp.Service (Bloco B2b — a lógica vive em
+// internal/erp). A assinatura pública é preservada: checkout, waitlist e os
+// call sites internos continuam chamando integration.Service. A troca dos call
+// sites para erp.Service direto é B2e.
 func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventID, productID string, quantity int, unitPrice int64, platformHandle string) error {
-	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
-	if err != nil {
-		logger.From(ctx, s.logger).Debug("no active ERP integration, skipping stock reservation",
-			zap.String("store_id", storeID),
-		)
-		return nil
-	}
-
-	// Cart convertido em pedido-como-reserva (design C): quem segura a peça é
-	// o PEDIDO, não saídas manuais — a grade nova (o caller já gravou o item
-	// no cart) entra pelo ciclo estornar→PUT→lançar. Cobre o live-add pós-pix
-	// e a promoção de waitlist de cart convertido num único ponto.
-	if st, stErr := s.repo.GetCartERPOrderState(ctx, cartID); stErr == nil &&
-		st.State != erpOrderStateNone && st.State != erpOrderStateCancelled {
-		if mutErr := s.MutateERPOrderItems(ctx, cartID, storeID); mutErr != nil {
-			return fmt.Errorf("applying grid to converted cart order: %w", mutErr)
-		}
-		return nil
-	}
-
-	erpProvider, err := s.erpProviderFor(ctx, integration)
-	if err != nil {
-		return fmt.Errorf("creating ERP provider: %w", err)
-	}
-
-	// Get external product ID
-	if s.productSyncer == nil {
-		return nil
-	}
-	externalID, _, err := s.productSyncer.GetProduct(ctx, storeID, productID)
-	if err != nil || externalID == "" {
-		logger.From(ctx, s.logger).Debug("product not linked to ERP, skipping stock reservation",
-			zap.String("product_id", productID),
-		)
-		return nil
-	}
-
-	// Idempotency: check if an active reservation already exists for this cart+product
-	existing, _ := s.repo.ListActiveReservationsByCartAndProduct(ctx, cartID, productID)
-	if len(existing) > 0 {
-		logger.From(ctx, s.logger).Debug("stock reservation already exists for cart+product, skipping",
-			zap.String("cart_id", cartID),
-			zap.String("product_id", productID),
-		)
-		return nil
-	}
-
-	obs := fmt.Sprintf("Reserva LiveCart - @%s - Evento %s", platformHandle, eventID)
-	movementID, err := erpProvider.ReserveStock(ctx, externalID, quantity, float64(unitPrice)/100, obs)
-	if err != nil {
-		return fmt.Errorf("reserving stock in ERP: %w", err)
-	}
-
-	_, err = s.repo.CreateStockReservation(ctx, CreateStockReservationParams{
-		EventID:           eventID,
-		CartID:            cartID,
-		ProductID:         productID,
-		ExternalProductID: externalID,
-		Quantity:          quantity,
-		ERPMovementID:     movementID,
-	})
-	if err != nil {
-		// ERP movement was created but we can't track it locally — attempt compensating reversal
-		logger.From(ctx, s.logger).Error("failed to save stock reservation, attempting ERP reversal",
-			zap.String("cart_id", cartID),
-			zap.String("product_id", productID),
-			zap.String("erp_movement_id", movementID),
-			zap.Error(err),
-		)
-		reverseObs := fmt.Sprintf("Estorno compensatório - falha DB - Cart %s", cartID)
-		if _, reverseErr := erpProvider.ReverseStockReservation(ctx, externalID, quantity, 0, reverseObs); reverseErr != nil {
-			logger.From(ctx, s.logger).Error("CRITICAL: failed to compensate ERP stock after DB failure — manual reconciliation required",
-				zap.String("external_product_id", externalID),
-				zap.Int("quantity", quantity),
-				zap.String("erp_movement_id", movementID),
-				zap.Error(reverseErr),
-			)
-		}
-		return fmt.Errorf("saving stock reservation: %w", err)
-	}
-
-	logger.From(ctx, s.logger).Info("stock reserved in ERP",
-		zap.String("cart_id", cartID),
-		zap.String("product_id", productID),
-		zap.String("external_product_id", externalID),
-		zap.Int("quantity", quantity),
-		zap.String("erp_movement_id", movementID),
-	)
-
-	return nil
+	return s.erpStock().ReserveStockInERP(ctx, storeID, cartID, eventID, productID, quantity, unitPrice, platformHandle)
 }
 
 // AdjustStockReservationDelta applies a quantity delta (positive or negative)
@@ -6361,217 +4810,7 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 // waitlist_cancel / waitlist_expire) when the delta represents a domain action
 // other than a buyer quantity edit.
 func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cartID, eventID, productID string, delta int, unitPrice int64, platformHandle string, op StockOp) (string, error) {
-	if delta == 0 {
-		return "", nil
-	}
-
-	// 1. Local stock mutation — atomic gate for delta>0, mirror of the ERP
-	//    reversal for delta<0. Runs unconditionally so waitlist promotion sees
-	//    freed units immediately, even when the store has no ERP integration.
-	if delta > 0 {
-		if err := s.repo.DecrementProductStock(ctx, productID, delta); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return "", httpx.ErrUnprocessable("estoque insuficiente para esse aumento")
-			}
-			return "", fmt.Errorf("decrementing local stock: %w", err)
-		}
-	} else {
-		if err := s.repo.IncrementProductStock(ctx, productID, -delta); err != nil {
-			return "", fmt.Errorf("releasing local stock: %w", err)
-		}
-	}
-
-	// localCommitted tracks whether the local stock mutation above stands. It is
-	// cleared by rollbackLocal so the deferred emit below fires ONLY on the
-	// definitive success of this operation (every rollback path returns an error).
-	localCommitted := true
-
-	// Rollback helper used when ERP sync fails after local stock already moved.
-	rollbackLocal := func() {
-		localCommitted = false
-		if delta > 0 {
-			if err := s.repo.IncrementProductStock(ctx, productID, delta); err != nil {
-				logger.From(ctx, s.logger).Error("failed to rollback local stock decrement after ERP failure",
-					zap.String("product_id", productID),
-					zap.Int("delta", delta),
-					zap.Error(err),
-				)
-			}
-		} else {
-			if err := s.repo.DecrementProductStock(ctx, productID, -delta); err != nil {
-				logger.From(ctx, s.logger).Error("failed to rollback local stock increment after ERP failure",
-					zap.String("product_id", productID),
-					zap.Int("delta", delta),
-					zap.Error(err),
-				)
-			}
-		}
-	}
-
-	// stock.reserved / stock.released — the single emit point for this operation.
-	// Deferred + guarded so every nil-error return below funnels through here
-	// without instrumenting each one, and rollbacks (which clear localCommitted)
-	// stay silent.
-	defer func() {
-		if !localCommitted {
-			return
-		}
-		if delta > 0 {
-			reserveOp := op
-			if reserveOp == StockOpUnspecified {
-				reserveOp = StockOpQtyIncrease
-			}
-			s.stock.NoteReserved(ctx, ReserveParams{Op: reserveOp, ProductID: productID, Quantity: delta, CartID: cartID, EventID: eventID})
-		} else {
-			releaseOp := op
-			if releaseOp == StockOpUnspecified {
-				releaseOp = StockOpQtyDecrease
-			}
-			s.stock.NoteReleased(ctx, ReleaseParams{Op: releaseOp, ProductID: productID, Quantity: -delta, CartID: cartID, EventID: eventID})
-		}
-	}()
-
-	// Cart convertido (design C): a mutação vai para o PEDIDO via ciclo
-	// estornar→PUT→lançar — a grade final já está no banco (o checkout grava
-	// o cart_item ANTES de chamar este método). Sem movimentação manual e sem
-	// movementID; falha desfaz o estoque local para o comprador ver o erro.
-	if st, stErr := s.repo.GetCartERPOrderState(ctx, cartID); stErr == nil &&
-		st.State != erpOrderStateNone && st.State != erpOrderStateCancelled {
-		if mutErr := s.MutateERPOrderItems(ctx, cartID, storeID); mutErr != nil {
-			rollbackLocal()
-			return "", fmt.Errorf("applying grid to converted cart order: %w", mutErr)
-		}
-		return "", nil
-	}
-
-	// 2. ERP sync — optional. Anything below is best-effort against the ERP;
-	//    any failure rolls back the local change above.
-	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
-	if err != nil {
-		logger.From(ctx, s.logger).Debug("no active ERP integration, skipping reservation delta",
-			zap.String("store_id", storeID),
-		)
-		return "", nil
-	}
-
-	erpProvider, err := s.erpProviderFor(ctx, integration)
-	if err != nil {
-		rollbackLocal()
-		return "", fmt.Errorf("creating ERP provider: %w", err)
-	}
-
-	if s.productSyncer == nil {
-		return "", nil
-	}
-	externalID, _, err := s.productSyncer.GetProduct(ctx, storeID, productID)
-	if err != nil || externalID == "" {
-		logger.From(ctx, s.logger).Debug("product not linked to ERP, skipping reservation delta",
-			zap.String("product_id", productID),
-		)
-		return "", nil
-	}
-
-	existing, _ := s.repo.ListActiveReservationsByCartAndProduct(ctx, cartID, productID)
-
-	if delta > 0 {
-		obs := fmt.Sprintf("Ajuste reserva LiveCart (+%d) - @%s - Cart %s", delta, platformHandle, cartID)
-		movementID, err := erpProvider.ReserveStock(ctx, externalID, delta, float64(unitPrice)/100, obs)
-		if err != nil {
-			rollbackLocal()
-			return "", fmt.Errorf("reserving stock delta in ERP: %w", err)
-		}
-
-		if len(existing) == 0 {
-			if _, err := s.repo.CreateStockReservation(ctx, CreateStockReservationParams{
-				EventID:           eventID,
-				CartID:            cartID,
-				ProductID:         productID,
-				ExternalProductID: externalID,
-				Quantity:          delta,
-				ERPMovementID:     movementID,
-			}); err != nil {
-				return movementID, fmt.Errorf("recording new reservation: %w", err)
-			}
-		} else if _, err := s.repo.AdjustActiveReservationQuantity(ctx, cartID, productID, delta, movementID); err != nil {
-			return movementID, fmt.Errorf("bumping reservation quantity: %w", err)
-		}
-
-		logger.From(ctx, s.logger).Info("ERP reservation increased",
-			zap.String("cart_id", cartID),
-			zap.String("product_id", productID),
-			zap.Int("delta", delta),
-			zap.String("erp_movement_id", movementID),
-		)
-		return movementID, nil
-	}
-
-	// delta < 0
-	if len(existing) == 0 {
-		logger.From(ctx, s.logger).Warn("no active reservation to decrease for cart+product, skipping ERP call",
-			zap.String("cart_id", cartID),
-			zap.String("product_id", productID),
-			zap.Int("delta", delta),
-		)
-		return "", nil
-	}
-
-	// Sum across all active rows (in practice the unique index keeps it to 1).
-	currentQty := 0
-	for _, r := range existing {
-		currentQty += r.Quantity
-	}
-	newQty := currentQty + delta
-
-	obs := fmt.Sprintf("Ajuste reserva LiveCart (%d) - @%s - Cart %s", delta, platformHandle, cartID)
-	movementID, err := erpProvider.ReverseStockReservation(ctx, externalID, -delta, 0, obs)
-	if err != nil {
-		rollbackLocal()
-		return "", fmt.Errorf("reversing stock delta in ERP: %w", err)
-	}
-
-	// Full reversal: skip the UPDATE — stock_reservations.quantity has a
-	// CHECK (quantity > 0) constraint, so we cannot zero the row in place.
-	// Mark it reversed instead.
-	if newQty <= 0 {
-		if err := s.repo.ReverseReservationsByCartAndProduct(ctx, cartID, productID); err != nil {
-			return movementID, fmt.Errorf("marking reservation reversed: %w", err)
-		}
-	} else if _, err := s.repo.AdjustActiveReservationQuantity(ctx, cartID, productID, delta, movementID); err != nil {
-		return movementID, fmt.Errorf("decreasing reservation quantity: %w", err)
-	}
-
-	logger.From(ctx, s.logger).Info("ERP reservation decreased",
-		zap.String("cart_id", cartID),
-		zap.String("product_id", productID),
-		zap.Int("delta", delta),
-		zap.Int("new_qty", newQty),
-		zap.String("erp_movement_id", movementID),
-	)
-	return movementID, nil
-}
-
-// =============================================================================
-// EVENT END → ERP FINALIZATION
-// =============================================================================
-
-// FinalizeEventERP is a no-op in the current flow.
-//
-// Previously, when a live event ended we reversed every active Tiny reservation
-// and created one sales order per cart — regardless of whether the customer had
-// paid. The business rule changed: reservations now live until either the cart
-// expires (ProcessExpiredCartsForProduct reverses them) or the payment is
-// confirmed (ProcessPaymentNotification → finalizeCartERPOrder reverses and
-// creates the paid order).
-//
-// The function is preserved so live.Service can still call it without any
-// behavior change if the rule reverts, and so we have a well-known entry point
-// for future end-of-event ERP work.
-func (s *Service) FinalizeEventERP(ctx context.Context, storeID, eventID string) error {
-	logger.From(ctx, s.logger).Debug("FinalizeEventERP called — no-op under paid-first ERP flow",
-		zap.String("store_id", storeID),
-		zap.String("event_id", eventID),
-	)
-	return nil
+	return s.erpStock().AdjustStockReservationDelta(ctx, storeID, cartID, eventID, productID, delta, unitPrice, platformHandle, op)
 }
 
 // createFinalERPOrder creates a single paid sales order in the ERP for a cart
@@ -6873,20 +5112,15 @@ func (s *Service) getERPProvider(ctx context.Context, integration *IntegrationRo
 // =============================================================================
 // LAZY EXPIRATION & WAITLIST PROCESSING
 // =============================================================================
-
-// ExpireCart expira UM carrinho, com segurança contra a corrida do pagamento.
-// Ordem (crítica):
-//  1. Advisory lock por cart — serializa contra o confirm/finalize do webhook
-//     de pagamento (ConfirmERPOrderPayment/finalizeCartERPOrder tomam o mesmo
-//     lock). !acquired = pagamento finalizando; sai.
-//  2. Flip 'expired' + devolução de estoque local de TODOS os itens numa única
-//     transação (ExpireCartAndReleaseStock). O flip é guard-first: se o cart
-//     foi pago/expirado no intervalo, 0 rows → NÃO elegível → aborta sem tocar
-//     ERP (a ação irreversível de cancelar pedido só roda com o cart já 'expired').
-//  3. ERP (best-effort, fora do tx): design C cancela o pedido (situação 2 +
-//     estorno); senão reverte as reservas saída-manual POR CART.
-//  4. Promove a waitlist de cada produto liberado (pós-commit, fire-and-forget).
 //
+// O núcleo concorrente da waitlist (ExpireCart, ProcessWaitlistForProduct, o
+// sweep de 'notified' e o backstop do webhook de estoque) migrou para
+// internal/inventory (Bloco B3b). Os métodos públicos abaixo permanecem como
+// delegações finas (assinatura preservada) para os call sites de checkout/
+// webhook/testes; o advisory lock, o gate atômico e a ordem de operações que
+// seguram a corrida vivem agora na inventory.Service. ScheduleExpiry/
+// RunScheduledExpiry (a ponte asynq) e cartExpiryTerminal ficam aqui.
+
 // CartExpiryScheduler arms an ETA task that fires a cart's expiry at its
 // expires_at, so expiration is precise instead of waiting on the 5-min sweep.
 // Implemented over the asynq client in main.go (events package must not import
@@ -6992,7 +5226,7 @@ func (s *Service) ArmEventWaitlistClose(ctx context.Context, eventID string) err
 		return err
 	}
 	if minutes <= 0 {
-		// A 000104 impede isso (CHECK >= 15 nas duas pontas). Se acontecer,
+		// A 000106 impede isso (CHECK >= 15 nas duas pontas). Se acontecer,
 		// não agendar seria voltar ao carrinho eterno — 24h é o mesmo piso que
 		// a migration usou ao converter o antigo 0.
 		minutes = 1440
@@ -7136,90 +5370,11 @@ func cartExpiryTerminal(s *CartExpirySnapshot) bool {
 		s.PaymentStatus == "paid" || s.PaymentStatus == "refunded"
 }
 
+// ExpireCart delega para inventory.Service (Bloco B3b — o núcleo concorrente vive
+// em internal/inventory). Assinatura pública preservada: RunScheduledExpiry, o
+// sweep e os testes de corrida continuam chamando integration.Service.
 func (s *Service) ExpireCart(ctx context.Context, cartID, storeID string) {
-	ctx = logger.WithStore(ctx, storeID, "")
-	release, acquired, err := s.repo.AcquireCartFinalisationLock(ctx, cartID)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("expiry: failed to acquire cart lock", zap.String("cart_id", cartID), zap.Error(err))
-		return
-	}
-	if !acquired {
-		// Webhook de pagamento está finalizando este mesmo cart. Ele decide.
-		logger.From(ctx, s.logger).Info("expiry: skip, finalisation in progress", zap.String("cart_id", cartID))
-		return
-	}
-	defer release()
-
-	res, err := s.repo.ExpireCartAndReleaseStock(ctx, cartID, storeID)
-	if err != nil {
-		logger.From(ctx, s.logger).Error("expiry: failed to expire cart", zap.String("cart_id", cartID), zap.Error(err))
-		return
-	}
-	if !res.Eligible {
-		// Pago ou já expirado/cancelado entre a seleção e o flip. Nada a fazer.
-		logger.From(ctx, s.logger).Info("expiry: cart no longer eligible (paid/terminal in gap)", zap.String("cart_id", cartID))
-		return
-	}
-
-	// ERP reversal (Tiny cancel/estorno) now runs in the cart.expired reactor
-	// (ReactCartExpiredERP), decoupled from this eligibility flip so it gets its
-	// own asynq retry + DLQ. The cart.expired fact was emitted transactionally
-	// inside ExpireCartAndReleaseStock above.
-
-	logger.From(ctx, s.logger).Info("expired cart processed",
-		zap.String("cart_id", cartID),
-		zap.Int("items_released", len(res.FreedProductIDs)),
-	)
-
-	// Promove o próximo da fila para cada produto liberado. Idempotente.
-	for _, productID := range res.FreedProductIDs {
-		s.ProcessWaitlistForProduct(ctx, res.EventID, productID, storeID)
-	}
-}
-
-// reverseCartReservationsInERP estorna todas as reservas saída-manual ativas de
-// um cart no Tiny e marca as rows como revertidas. Best-effort: espelha o passo
-// do block-sweep (CancelOpenCartsForBlockedHandle) mas por cart único.
-func (s *Service) reverseCartReservationsInERP(ctx context.Context, cartID, storeID string) {
-	reservations, resErr := s.repo.ListActiveReservationsByCart(ctx, cartID)
-	if resErr != nil {
-		logger.From(ctx, s.logger).Error("expiry: failed to list reservations", zap.String("cart_id", cartID), zap.Error(resErr))
-		return
-	}
-	if len(reservations) == 0 {
-		return
-	}
-
-	erpReversed := true
-	if integration, intErr := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny"); intErr == nil {
-		if erpProvider, provErr := s.erpProviderFor(ctx, integration); provErr == nil {
-			for _, r := range reservations {
-				obs := fmt.Sprintf("Estorno expiração carrinho LiveCart - Cart %s", cartID)
-				if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
-					erpReversed = false
-					logger.From(ctx, s.logger).Warn("expiry: failed to reverse ERP reservation",
-						zap.String("cart_id", cartID),
-						zap.String("external_product_id", r.ExternalProductID),
-						zap.Error(reverseErr))
-				}
-			}
-		} else {
-			erpReversed = false
-			logger.From(ctx, s.logger).Error("expiry: failed to build ERP provider", zap.String("cart_id", cartID), zap.Error(provErr))
-		}
-	} else {
-		erpReversed = false
-		logger.From(ctx, s.logger).Warn("expiry: no active ERP integration, marking reservations reversed locally only",
-			zap.String("store_id", storeID))
-	}
-
-	if markErr := s.repo.ReverseReservationsByCart(ctx, cartID); markErr != nil {
-		logger.From(ctx, s.logger).Error("expiry: failed to mark reservations reversed", zap.String("cart_id", cartID), zap.Error(markErr))
-	}
-	if !erpReversed {
-		logger.From(ctx, s.logger).Warn("expiry: ERP reservations NOT fully reversed — manual reconciliation may be needed",
-			zap.String("cart_id", cartID))
-	}
+	s.inventory().ExpireCart(ctx, cartID, storeID)
 }
 
 // ProcessExpiredCartsForProduct handles expired carts that contain the given product.
@@ -7461,564 +5616,66 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 	return nil
 }
 
-// acquireCartFinalisationLockRetry tenta o try-lock de finalização do cart com
-// algumas tentativas curtas. Um lock momentaneamente retido por uma expiração
-// concorrente (que agora se abstém e o solta rápido, graças ao guard de
-// ExpireCart) é liberado entre as tentativas, então o promotor quase sempre o
-// adquire sem perder a vez do cliente. Respeita o cancelamento do ctx no backoff.
-func (s *Service) acquireCartFinalisationLockRetry(ctx context.Context, cartID string) (release func(), acquired bool, err error) {
-	const attempts = 3
-	const backoff = 25 * time.Millisecond
-	for i := 0; i < attempts; i++ {
-		release, acquired, err = s.repo.AcquireCartFinalisationLock(ctx, cartID)
-		if err != nil || acquired {
-			return release, acquired, err
-		}
-		if i == attempts-1 {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return nil, false, ctx.Err()
-		case <-time.After(backoff):
-		}
-	}
-	return nil, false, nil
-}
-
-// ProcessWaitlistForProduct promotes the next waiting customer to "notified"
-// when stock is available. Called after any stock release (cart expired,
-// cart paid, item removed, ERP webhook). Idempotent: if no one is waiting,
-// or DecrementProductStock fails (race with another caller), it no-ops.
-//
-// Flow:
-//  1. Decrement local stock (this is the gate — atomic, prevents double-promote)
-//  2. Promote item to the next person's cart (WaitlistedQuantity=0)
-//  3. Push the cart's expires_at by event.waitlist_notified_ttl_minutes (the
-//     "gordura" the customer asked for)
-//  4. Mark waitlist row as 'notified' with expires_at
-//  5. Reserve stock in the ERP (Tiny saída)
-//  6. Fire-and-forget DM via the notification service
-//
-// If anything in steps 2-3 fails we roll back the local stock decrement so
-// nobody else loses the slot. Steps 4-6 are best-effort post-promotion.
+// ProcessWaitlistForProduct delega para inventory.Service (Bloco B3b — o núcleo
+// concorrente de promoção da fila vive em internal/inventory). Assinatura pública
+// preservada: checkout, expiração e o backstop do webhook continuam chamando
+// integration.Service. (acquireCartFinalisationLockRetry moveu junto para lá.)
 func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, productID, storeID string) {
-	// TTL primeiro: a reivindicação atômica já grava a janela de notificação
-	// na row da fila, então precisamos de notifiedUntil antes do claim.
-	ttl, ttlErr := s.repo.GetWaitlistNotifiedTTL(ctx, eventID)
-	if ttlErr != nil {
-		logger.From(ctx, s.logger).Warn("failed to read waitlist TTL, defaulting to 30min",
-			zap.String("event_id", eventID),
-			zap.Error(ttlErr),
-		)
-		ttl = 30 * time.Minute
-	}
-	notifiedUntil := time.Now().Add(ttl)
+	s.inventory().ProcessWaitlistForProduct(ctx, eventID, productID, storeID)
+}
 
-	// Reivindica ATOMICAMENTE o próximo da fila (FOR UPDATE SKIP LOCKED):
-	// callers concorrentes pegam clientes DISTINTOS. Sem isso, duas
-	// liberações simultâneas selecionavam o MESMO W1 e consumiam 2 unidades
-	// avançando a fila só 1 — o próximo ficava preso com uma unidade perdida.
-	next, err := s.repo.ClaimNextWaitlistItem(ctx, eventID, productID, notifiedUntil)
-	if err != nil {
-		logger.From(ctx, s.logger).Error("failed to claim next waitlist item", zap.Error(err))
-		return
-	}
-	if next == nil {
-		return // fila vazia
-	}
-
-	// Gate de estoque PRIMEIRO (gate atômico no contador do produto), ANTES do
-	// advisory-lock. Callers concorrentes reivindicam carts DISTINTOS (SKIP
-	// LOCKED), então cada um pegaria o lock do SEU cart e o seguraria (via defer)
-	// enquanto abre uma 2ª conexão para as queries seguintes — sob uma multidão
-	// de promoções simultâneas isso é hold-and-wait e esgota o pool (deadlock).
-	// Passando o gate antes, só o(s) goroutine(s) que REALMENTE tomam unidade
-	// seguem para o lock; os demais revertem para 'waiting' sem nunca prendê-lo.
-	// Promoção PARCIAL: toma ATÉ a quantidade pedida — o cliente recebe o que
-	// houver e continua na fila pelo restante. Take provisório: revertido +
-	// estoque devolvido em qualquer falha abaixo, então stock.reserved só sai no
-	// ponto de sucesso definitivo.
-	taken, err := s.repo.DecrementProductStockUpTo(ctx, productID, next.Quantity)
-	if err != nil {
-		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
-		logger.From(ctx, s.logger).Error("failed to take stock for waitlist promotion",
-			zap.String("product_id", productID),
-			zap.String("waitlist_item_id", next.ID),
-			zap.Error(err),
-		)
-		return
-	}
-	if taken <= 0 {
-		if revErr := s.repo.RevertWaitlistToWaiting(ctx, next.ID); revErr != nil {
-			logger.From(ctx, s.logger).Error("failed to revert waitlist claim after stock gate miss",
-				zap.String("waitlist_item_id", next.ID),
-				zap.Error(revErr),
-			)
-		}
-		logger.From(ctx, s.logger).Debug("waitlist promote skipped: stock not available",
-			zap.String("product_id", productID),
-			zap.String("waitlist_item_id", next.ID),
-		)
-		return
-	}
-
-	// Tomou a unidade → serializa a MUTAÇÃO do cart contra uma finalização de
-	// PAGAMENTO concorrente do MESMO cart sob o advisory-lock que ExpireCart
-	// também respeita. O guard de ExpireCart já abstém-se de um cart de
-	// waitlister enquanto o item está 'waiting' ou 'notified' dentro da janela
-	// (a reivindicação atômica grava wi.expires_at no futuro no MESMO passo em
-	// que vira 'notified'), então a corrida com a EXPIRAÇÃO está fechada sem o
-	// lock — ele é a 2ª linha, só contra o pagamento. Uma expiração concorrente
-	// que porventura o segure abstém-se e o solta rápido, então um RETRY curto
-	// quase sempre o adquire. Falha após as tentativas OU cart terminal (pago) →
-	// DEVOLVE a unidade ao estoque e REVERTE a reivindicação para 'waiting' (NÃO
-	// cancela): o cliente não perde a vez e é promovido no próximo ciclo.
-	release, acquired, lockErr := s.acquireCartFinalisationLockRetry(ctx, next.CartID)
-	if lockErr != nil {
-		_ = s.repo.IncrementProductStock(ctx, productID, taken)
-		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
-		logger.From(ctx, s.logger).Warn("waitlist promote: failed to acquire cart lock",
-			zap.String("cart_id", next.CartID), zap.Error(lockErr))
-		return
-	}
-	if !acquired {
-		// Pagamento/finalização do cart segurou o lock além do retry. Devolve a
-		// unidade ao estoque e o cliente ao TOPO da fila (não cancela) — ele é
-		// promovido no próximo release. Garante que ninguém perde a vez.
-		_ = s.repo.IncrementProductStock(ctx, productID, taken)
-		if revErr := s.repo.RevertWaitlistToWaiting(ctx, next.ID); revErr != nil {
-			logger.From(ctx, s.logger).Warn("waitlist promote: failed to revert claim after lock contention",
-				zap.String("waitlist_item_id", next.ID), zap.Error(revErr))
-		}
-		logger.From(ctx, s.logger).Info("waitlist promote deferred: cart lock held, buyer kept in queue",
-			zap.String("cart_id", next.CartID), zap.String("waitlist_item_id", next.ID))
-		return
-	}
-	defer release()
-
-	// Sob o lock, relê o cart: se ele foi PAGO/cancelado logo antes de pegarmos o
-	// lock, está terminal — não promover nele. Devolve a unidade e reverte a
-	// reivindicação para 'waiting' (mantém o cliente na fila para a próxima).
-	if snap, snapErr := s.repo.GetCartExpirySnapshot(ctx, next.CartID); snapErr != nil {
-		_ = s.repo.IncrementProductStock(ctx, productID, taken)
-		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
-		logger.From(ctx, s.logger).Warn("waitlist promote: failed to read cart snapshot",
-			zap.String("cart_id", next.CartID), zap.Error(snapErr))
-		return
-	} else if snap == nil || cartExpiryTerminal(snap) {
-		_ = s.repo.IncrementProductStock(ctx, productID, taken)
-		if revErr := s.repo.RevertWaitlistToWaiting(ctx, next.ID); revErr != nil {
-			logger.From(ctx, s.logger).Warn("waitlist promote: failed to revert claim on terminal cart",
-				zap.String("waitlist_item_id", next.ID), zap.Error(revErr))
-		}
-		logger.From(ctx, s.logger).Info("waitlist promote deferred: target cart terminal, buyer kept in queue",
-			zap.String("cart_id", next.CartID))
-		return
-	}
-
-	product, err := s.repo.GetProductByID(ctx, storeID, productID)
-	if err != nil || product == nil {
-		_ = s.repo.IncrementProductStock(ctx, productID, taken)
-		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
-		logger.From(ctx, s.logger).Error("failed to get product for waitlist promotion",
-			zap.String("product_id", productID),
-			zap.String("store_id", storeID),
-			zap.Error(err),
-		)
-		return
-	}
-
-	// Promote: the cart_items row was created at waitlist signup with
-	// quantity == waitlisted_quantity. Flip it to "available" by decrementing
-	// waitlisted_quantity in place — re-running AddToCart here would hit
-	// UpsertCartItem's ON CONFLICT branch and add both columns again, ending
-	// up with quantity=2N, waitlisted=N (the shipping query then computes
-	// available=N but the cart visibly carries phantom items, and a later
-	// quantity edit on the inflated row leaves available <= 0, which makes
-	// /shipping-quote return "nenhum item no carrinho para cotar" on a cart
-	// that the FE still renders as non-empty).
-	cartID := next.CartID
-	found, err := s.repo.DecrementCartItemWaitlistedQuantity(ctx, cartID, productID, taken)
-	if err != nil {
-		_ = s.repo.IncrementProductStock(ctx, productID, taken)
-		_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
-		logger.From(ctx, s.logger).Error("failed to decrement waitlisted quantity on promotion",
-			zap.String("waitlist_item_id", next.ID),
-			zap.String("cart_id", cartID),
-			zap.Error(err),
-		)
-		return
-	}
-	if !found {
-		// Edge case: the cart_items row was deleted between waitlist signup
-		// and promotion (manual remove from the dashboard, expiration sweep,
-		// etc.). Recreate it via the standard AddToCart path — no existing
-		// row, no upsert inflation.
-		fbResult, fbErr := s.liveService.AddToCart(ctx, live.AddToCartInput{
-			StoreID:            storeID,
-			EventID:            eventID,
-			PlatformUserID:     next.PlatformUserID,
-			PlatformHandle:     next.PlatformHandle,
-			ProductID:          productID,
-			ProductPrice:       product.Price,
-			Quantity:           taken,
-			WaitlistedQuantity: 0,
-		})
-		if fbErr != nil {
-			_ = s.repo.IncrementProductStock(ctx, productID, taken)
-			_ = s.repo.RevertWaitlistToWaiting(ctx, next.ID)
-			logger.From(ctx, s.logger).Error("failed to recreate cart item on promotion",
-				zap.String("waitlist_item_id", next.ID),
-				zap.Error(fbErr),
-			)
-			return
-		}
-		cartID = fbResult.CartID
-	}
-
-	// Promoção PARCIAL: se demos menos que o pedido, re-enfileira o restante
-	// (o cliente ganhou `taken` no carrinho e continua na fila pelo resto). Se
-	// atendemos tudo, a row já está 'notified' pela reivindicação atômica.
-	remaining := next.Quantity - taken
-	if remaining > 0 {
-		if err := s.repo.RequeueWaitlistItemPartial(ctx, next.ID, remaining); err != nil {
-			logger.From(ctx, s.logger).Warn("failed to requeue partial waitlist remainder",
-				zap.String("waitlist_item_id", next.ID),
-				zap.Int("remaining", remaining),
-				zap.Error(err),
-			)
-		}
-	}
-
-	cartToken, tokenErr := s.repo.GetCartTokenByID(ctx, cartID)
-	if tokenErr != nil {
-		logger.From(ctx, s.logger).Warn("failed to read cart token after waitlist promotion",
-			zap.String("cart_id", cartID),
-			zap.Error(tokenErr),
-		)
-	}
-
-	// "Gordura": empurra o cart.expires_at para garantir que o cliente tem
-	// o TTL configurado para finalizar. Usa GREATEST no banco — não encolhe
-	// um cart que já tinha um expires_at maior. (A row da fila já foi marcada
-	// 'notified' com notifiedUntil pela reivindicação atômica no topo.)
-	if extendErr := s.repo.ExtendCartExpiration(ctx, cartID, notifiedUntil); extendErr != nil {
-		logger.From(ctx, s.logger).Warn("failed to extend cart expiration for notified waitlist",
-			zap.String("cart_id", cartID),
-			zap.Error(extendErr),
-		)
-	}
-
-	// Re-arma a task asynq cart.expire para a NOVA janela estendida. A task
-	// original (armada no finalize) pode AINDA estar pendente — o carrinho da
-	// frente pode ter sido pago, e aí a task deste cart nunca disparou. Por isso
-	// é RE-agendamento (apaga a pendente e re-enfileira) e não arm: um arm com o
-	// mesmo TaskID seria engolido como "já armado" e o prazo estendido nunca
-	// chegaria ao asynq. Best-effort + idempotente.
-	if armErr := s.RescheduleExpiry(ctx, cartID); armErr != nil {
-		logger.From(ctx, s.logger).Warn("failed to re-arm expiry for promoted cart",
-			zap.String("cart_id", cartID), zap.Error(armErr))
-	}
-
-	// ERP saída — reserva pareada às `taken` unidades recém-liberadas para o
-	// cart. Falha aqui não bloqueia: o worker de reconciliação pega depois.
-	if syncErr := s.ReserveStockInERP(ctx, storeID, cartID, eventID, productID, taken, product.Price, next.PlatformHandle); syncErr != nil {
-		logger.From(ctx, s.logger).Warn("failed to reserve stock in ERP for promoted waitlist item",
-			zap.String("cart_id", cartID),
-			zap.Error(syncErr),
-		)
-	}
-
-	// Fire-and-forget DM. Email é desnecessário aqui — o cliente foi
-	// adicionado via comentário no Instagram, então não temos email
-	// confirmado a essa altura. (Quando ele abrir o checkout e preencher
-	// o email, o cart já vai estar com o item disponível.)
-	// EventTitle e DeadlineAt não são enfeite: a mensagem promete "mais
-	// {tempo_extra}, até {prazo_final}" e é essa promessa que faz a extensão da
-	// RN-10 converter. Sem eles o comprador não tem como saber que ganhou
-	// tempo, e a mecânica — que já funcionava — continuava invisível.
-	_, eventTitle, _ := s.repo.GetEventOwner(ctx, eventID)
+// NotifyWaitlistPromoted satisfies inventory.WaitlistCollaborators: it maps the
+// neutral DTO back to the integration DM payload and sends the "produto liberou"
+// DM through sendWaitlistNotifiedDM (which stays here — it reads
+// s.notificationService LAZILY, so the setter-wired service is picked up at call
+// time; NIL-GUARD LAZY). No-op when the notification service is unwired.
+func (s *Service) NotifyWaitlistPromoted(ctx context.Context, in inventory.WaitlistNotifiedInput) {
 	s.sendWaitlistNotifiedDM(ctx, sendWaitlistNotifiedInput{
-		StoreID:        storeID,
-		EventID:        eventID,
-		EventTitle:     eventTitle,
-		CartID:         cartID,
-		CartToken:      cartToken,
-		PlatformUserID: next.PlatformUserID,
-		PlatformHandle: next.PlatformHandle,
-		ProductName:    product.Name,
-		ProductKeyword: product.Keyword,
-		Quantity:       taken,
-		TTL:            ttl,
-		DeadlineAt:     notifiedUntil,
+		StoreID:        in.StoreID,
+		EventID:        in.EventID,
+		EventTitle:     in.EventTitle,
+		CartID:         in.CartID,
+		CartToken:      in.CartToken,
+		PlatformUserID: in.PlatformUserID,
+		PlatformHandle: in.PlatformHandle,
+		ProductName:    in.ProductName,
+		ProductKeyword: in.ProductKeyword,
+		Quantity:       in.Quantity,
+		TTL:            in.TTL,
 	})
-
-	// Definitive success point: every revert path above returns early, so
-	// reaching this line means the buyer was actually promoted. Emit the
-	// provisional stock.reserved (op waitlist_promote) here, keyed by the cart.
-	s.stock.NoteReserved(ctx, ReserveParams{Op: StockOpWaitlistPromote, ProductID: productID, Quantity: taken, CartID: cartID, EventID: eventID})
-
-	// waitlist.notified — emitted only here, at the definitive success point:
-	// every revert path above returns early, so reaching this line means the
-	// buyer was actually promoted and notified. Best-effort (the promotion state
-	// is already committed across several steps).
-	if emitErr := s.repo.EmitWaitlistNotified(ctx, EmitWaitlistNotifiedParams{
-		WaitlistItemID: next.ID,
-		EventID:        eventID,
-		ProductID:      productID,
-		CartID:         cartID,
-		Quantity:       taken,
-		Remaining:      remaining,
-	}); emitErr != nil {
-		logger.From(ctx, s.logger).Warn("failed to emit waitlist.notified",
-			zap.String("waitlist_item_id", next.ID),
-			zap.Error(emitErr),
-		)
-	}
-
-	logger.From(ctx, s.logger).Info("waitlist promoted",
-		zap.String("user", next.PlatformHandle),
-		zap.String("waitlist_item_id", next.ID),
-		zap.String("cart_id", cartID),
-		zap.String("product_id", productID),
-		zap.Int("requested", next.Quantity),
-		zap.Int("promoted", taken),
-		zap.Int("still_waiting", remaining),
-		zap.Bool("partial", remaining > 0),
-		zap.Duration("ttl", ttl),
-		zap.Time("notified_until", notifiedUntil),
-	)
 }
 
-// ListActiveWaitlistByCart é a leitura usada pelo checkout para popular a
-// seção "produtos em fila". Retorna apenas waiting/notified.
+// ListActiveWaitlistByCart delega para inventory.Service (Bloco B3a — a lógica
+// vive em internal/inventory). Assinatura pública preservada: o checkout continua
+// chamando integration.Service.
 func (s *Service) ListActiveWaitlistByCart(ctx context.Context, cartID string) ([]ListActiveByCartRow, error) {
-	return s.repo.ListActiveByCart(ctx, cartID)
+	return s.inventory().ListActiveWaitlistByCart(ctx, cartID)
 }
 
-// CancelWaitlistItem é a operação pública "sair da fila": cliente desiste
-// de uma entry. Quando estava 'notified' (já promovido para o cart), o
-// stock volta para o próximo da fila — mesmo fluxo do worker de expiração.
-// Quando estava 'waiting', apenas marca como 'cancelled'.
-//
-// Ownership é validada pela query (cart_id no WHERE de CancelWaitlistItem).
-// Retorna (true) se algo foi alterado, (false) se a row não existia ou já
-// estava em estado terminal.
+// CancelWaitlistItem delega para inventory.Service (Bloco B3a). Assinatura
+// pública preservada: o endpoint "sair da fila" continua chamando
+// integration.Service.
 func (s *Service) CancelWaitlistItem(ctx context.Context, waitlistItemID, cartID string) (bool, error) {
-	// Carrega antes do UPDATE para saber se precisamos disparar a
-	// devolução de estoque (status='notified').
-	item, err := s.repo.GetWaitlistItemForCart(ctx, waitlistItemID, cartID)
-	if err != nil {
-		return false, fmt.Errorf("loading waitlist item: %w", err)
-	}
-	if item == nil {
-		return false, nil
-	}
-	if item.Status != "waiting" && item.Status != "notified" {
-		// Já fulfilled / expired / cancelled — no-op.
-		return false, nil
-	}
-	if err := s.repo.CancelWaitlistItem(ctx, waitlistItemID, cartID); err != nil {
-		return false, fmt.Errorf("cancelling waitlist item: %w", err)
-	}
-
-	if item.Status == "notified" {
-		// O cliente já tinha o item reservado no cart + ERP. Devolve
-		// tudo via mesmo fluxo do worker de expiração.
-		if _, err := s.repo.DecrementCartItem(ctx, cartID, item.ProductID, item.Quantity); err != nil {
-			logger.From(ctx, s.logger).Warn("failed to decrement cart item on waitlist cancel",
-				zap.String("waitlist_item_id", waitlistItemID),
-				zap.Error(err),
-			)
-		}
-		cart, _ := s.repo.GetCartByID(ctx, cartID)
-		if cart != nil {
-			// AdjustStockReservationDelta also bumps products.stock for delta<0,
-			// so no separate IncrementProductStock call is needed here.
-			if _, err := s.AdjustStockReservationDelta(ctx, cart.StoreID, cartID, item.EventID, item.ProductID, -item.Quantity, 0, cart.PlatformHandle, StockOpWaitlistCancel); err != nil {
-				logger.From(ctx, s.logger).Warn("failed to reverse reservation on waitlist cancel",
-					zap.String("waitlist_item_id", waitlistItemID),
-					zap.Error(err),
-				)
-			}
-		} else {
-			// Cart desapareceu: ainda precisamos devolver o estoque local que
-			// o promote consumiu, para a próxima entry da fila ser promovível.
-			if err := s.stock.Release(ctx, ReleaseParams{Op: StockOpWaitlistCancel, ProductID: item.ProductID, Quantity: item.Quantity, CartID: cartID, EventID: item.EventID}); err != nil {
-				logger.From(ctx, s.logger).Warn("failed to increment local stock on waitlist cancel (cart missing)",
-					zap.String("waitlist_item_id", waitlistItemID),
-					zap.Error(err),
-				)
-			}
-		}
-		// Promove o próximo da fila — best-effort.
-		if cart != nil {
-			s.ProcessWaitlistForProduct(ctx, item.EventID, item.ProductID, cart.StoreID)
-		}
-	}
-	return true, nil
+	return s.inventory().CancelWaitlistItem(ctx, waitlistItemID, cartID)
 }
 
-// ExpireNotifiedWaitlistItem expira uma entrada 'notified' cujo TTL passou:
-// devolve o item ao estoque, reverte a reserva no ERP, marca como
-// 'expired' e tenta promover o próximo da fila. Best-effort em todos os
-// passos secundários — só falha se a marcação de status falhar (que é o
-// gate de idempotência: enquanto status='notified' a row reaparece no
-// próximo sweep).
+// ExpireNotifiedWaitlistItem delega para inventory.Service (Bloco B3b).
+// Assinatura pública preservada.
 func (s *Service) ExpireNotifiedWaitlistItem(ctx context.Context, item WaitlistItemRow) error {
-	cartID := item.CartID
-	productID := item.ProductID
-	eventID := item.EventID
-
-	if cartID != "" {
-		// Devolve o item do carrinho. DecrementCartItem deleta a row se
-		// zerar — mantém a invariante quantity>0.
-		if _, err := s.repo.DecrementCartItem(ctx, cartID, productID, item.Quantity); err != nil {
-			logger.From(ctx, s.logger).Warn("failed to decrement cart item on waitlist expire",
-				zap.String("waitlist_item_id", item.ID),
-				zap.String("cart_id", cartID),
-				zap.String("product_id", productID),
-				zap.Error(err),
-			)
-		}
-
-		// Reverte a reserva no ERP e devolve o estoque local em uma única
-		// chamada (AdjustStockReservationDelta lida com ambos para delta<0).
-		// Falha aqui não bloqueia — o sweep tenta de novo no próximo tick.
-		cart, _ := s.repo.GetCartByID(ctx, cartID)
-		if cart != nil {
-			if _, err := s.AdjustStockReservationDelta(ctx, cart.StoreID, cartID, eventID, productID, -item.Quantity, 0, cart.PlatformHandle, StockOpWaitlistExpire); err != nil {
-				logger.From(ctx, s.logger).Warn("failed to reverse reservation on waitlist expire",
-					zap.String("waitlist_item_id", item.ID),
-					zap.String("cart_id", cartID),
-					zap.Error(err),
-				)
-			}
-		} else {
-			// Cart desapareceu (raro): nada para reverter no ERP, mas ainda
-			// precisamos devolver o estoque local que o promote consumiu.
-			if err := s.stock.Release(ctx, ReleaseParams{Op: StockOpWaitlistExpire, ProductID: productID, Quantity: item.Quantity, CartID: cartID, EventID: eventID}); err != nil {
-				logger.From(ctx, s.logger).Warn("failed to increment local stock on waitlist expire (cart missing)",
-					zap.String("waitlist_item_id", item.ID),
-					zap.Error(err),
-				)
-			}
-		}
-	}
-
-	// Marca como expired — esse é o gate de idempotência. Se isso falhar,
-	// a próxima varredura tenta de novo.
-	now := time.Now()
-	if err := s.repo.UpdateWaitlistItemStatus(ctx, item.ID, "expired", nil, nil, &now); err != nil {
-		return fmt.Errorf("marking waitlist item expired: %w", err)
-	}
-
-	// waitlist.expired — emitido best-effort logo após o gate de idempotência
-	// (o flip para 'expired'). Só chega aqui uma vez por item graças ao gate.
-	if emitErr := s.repo.EmitWaitlistExpired(ctx, item.ID, eventID, productID, cartID); emitErr != nil {
-		logger.From(ctx, s.logger).Warn("failed to emit waitlist.expired",
-			zap.String("waitlist_item_id", item.ID),
-			zap.Error(emitErr),
-		)
-	}
-
-	// Tenta promover o próximo da fila para esse evento+produto.
-	storeID := ""
-	if item.CartID != "" {
-		if cart, _ := s.repo.GetCartByID(ctx, item.CartID); cart != nil {
-			storeID = cart.StoreID
-		}
-	}
-	if storeID == "" {
-		// Fallback: resolve via evento (se cart sumiu por algum motivo).
-		// ProcessWaitlistForProduct tolera storeID vazio na lookup do
-		// produto? Não — então só pulamos a promoção. O Tiny webhook
-		// pega depois.
-		logger.From(ctx, s.logger).Info("waitlist expired but storeID unresolved, skipping next-promotion",
-			zap.String("waitlist_item_id", item.ID),
-			zap.String("event_id", eventID),
-		)
-		return nil
-	}
-	s.ProcessWaitlistForProduct(ctx, eventID, productID, storeID)
-	return nil
+	return s.inventory().ExpireNotifiedWaitlistItem(ctx, item)
 }
 
-// ExpireNotifiedWaitlistSweep busca todos os 'notified' vencidos e chama
-// ExpireNotifiedWaitlistItem em cada um. Retorna a contagem de processados
-// e o primeiro erro encontrado (não interrompe — best-effort).
+// ExpireNotifiedWaitlistSweep delega para inventory.Service (Bloco B3b).
+// Assinatura pública preservada: o checkout continua chamando integration.Service.
 func (s *Service) ExpireNotifiedWaitlistSweep(ctx context.Context) (int, error) {
-	items, err := s.repo.ListExpiredNotifiedWaitlist(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("listing expired notified waitlist: %w", err)
-	}
-	processed := 0
-	var firstErr error
-	for _, item := range items {
-		if err := s.ExpireNotifiedWaitlistItem(ctx, item); err != nil {
-			logger.From(ctx, s.logger).Warn("failed to expire notified waitlist item",
-				zap.String("waitlist_item_id", item.ID),
-				zap.Error(err),
-			)
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		processed++
-	}
-	return processed, firstErr
+	return s.inventory().ExpireNotifiedWaitlistSweep(ctx)
 }
 
-// ProcessWaitlistAfterStockWebhook é o backstop para mudanças de estoque
-// vindas do ERP que não foram disparadas por uma operação local (ex.:
-// merchant ajusta saldo manualmente no Tiny, devolução, importação).
-// Resolve o produto local pelo external_id e tenta promover o próximo da
-// fila em cada evento ativo. ProcessWaitlistForProduct é idempotente e
-// gateado por DecrementProductStock — chamadas concorrentes não causam
-// over-promotion.
+// ProcessWaitlistAfterStockWebhook delega para inventory.Service (Bloco B3b).
+// Assinatura pública preservada: o webhook handler continua chamando
+// integration.Service.
 func (s *Service) ProcessWaitlistAfterStockWebhook(ctx context.Context, storeID, externalSource, externalProductID string) error {
-	productID, err := s.repo.GetProductIDByExternalID(ctx, storeID, externalSource, externalProductID)
-	if err != nil {
-		return fmt.Errorf("resolving product by external id: %w", err)
-	}
-	if productID == "" {
-		// Produto não cadastrado no LiveCart — não temos fila para ele.
-		return nil
-	}
-
-	// Defesa em profundidade: com finalização ERP em voo para algum cart pago
-	// contendo o produto, o saldo reportado pelo webhook pode ser a inflação
-	// transitória da reversão de reservas — promover agora enviaria a DM
-	// (irreversível) contra unidades já vendidas. A promoção não é perdida:
-	// o LaunchOrderStock/estornos subsequentes disparam novos webhooks e o
-	// backstop roda de novo com o guard já desarmado. Fail-safe: em erro de
-	// DB, adia a promoção (direção conservadora).
-	inFlight, guardErr := s.repo.HasInFlightFinalisationForProduct(ctx, productID)
-	if guardErr != nil {
-		logger.From(ctx, s.logger).Warn("failed to check in-flight finalisation, deferring waitlist backstop",
-			zap.String("product_id", productID),
-			zap.Error(guardErr),
-		)
-		return nil
-	}
-	if inFlight {
-		logger.From(ctx, s.logger).Info("deferring waitlist backstop: ERP finalisation in flight for product",
-			zap.String("product_id", productID),
-			zap.String("store_id", storeID),
-		)
-		return nil
-	}
-
-	eventIDs, err := s.repo.ListEventsWithWaitingByProduct(ctx, productID)
-	if err != nil {
-		return fmt.Errorf("listing events with waiting waitlist: %w", err)
-	}
-	for _, eventID := range eventIDs {
-		s.ProcessWaitlistForProduct(ctx, eventID, productID, storeID)
-	}
-	return nil
+	return s.inventory().ProcessWaitlistAfterStockWebhook(ctx, storeID, externalSource, externalProductID)
 }
 
 // sendWaitlistNotifiedInput é o payload da DM "produto liberou".
@@ -8269,6 +5926,15 @@ func (s *Service) toCreateOutput(row *IntegrationRow) *CreateIntegrationOutput {
 
 // handleProviderError checks if a provider error is rate-limit related and logs accordingly.
 // If the error is an ErrRateLimited, it logs at Error level and marks the integration as 'error'.
+// HandleProviderError implements payment.IntegrationResolver: it lets the
+// extracted payment.Service (B1b fast-paths) report a provider-call failure so
+// the integration is flagged unhealthy on rate-limit errors. It delegates to
+// the unexported handleProviderError, which stays here because the same logic
+// is shared with the ERP/Social fast-paths.
+func (s *Service) HandleProviderError(ctx context.Context, integrationID, operation string, err error) {
+	s.handleProviderError(ctx, integrationID, operation, err)
+}
+
 func (s *Service) handleProviderError(ctx context.Context, integrationID string, operation string, err error) {
 	if err == nil {
 		return

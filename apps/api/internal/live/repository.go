@@ -139,7 +139,7 @@ func emitSessionCreated(ctx context.Context, q *sqlc.Queries, s sqlc.LiveSession
 // emitEventCreated writes the canonical event.created event to the outbox
 // within the caller's transaction.
 // sessionType viaja no payload no lugar do antigo live_events.type: o evento
-// deixou de ter tipo na 000120, e um payload com "type" derivado seria a mesma
+// deixou de ter tipo na 000122, e um payload com "type" derivado seria a mesma
 // mentira em outro lugar. O que a primeira sessão é continua sendo informação
 // útil para quem lê o log de eventos.
 func emitEventCreated(ctx context.Context, q *sqlc.Queries, e sqlc.LiveEvent, sessionType string) error {
@@ -172,8 +172,8 @@ func emitEventCreated(ctx context.Context, q *sqlc.Queries, e sqlc.LiveEvent, se
 // sessão ANTES de a mídia existir (o lojista marca a campanha antes de ter o id
 // da live). Nesse caso a sessão nasce sem plataforma e a mídia entra depois por
 // AddPlatformToSession. O que NÃO pode existir é evento sem sessão nenhuma:
-// desde que a whitelist e o modo live desceram para live_sessions (000110/
-// 000111), um evento sem sessão não tem onde guardar configuração — a whitelist
+// desde que a whitelist e o modo live desceram para live_sessions (000112/
+// 000113), um evento sem sessão não tem onde guardar configuração — a whitelist
 // gravava zero linhas e a leitura devolvia 404.
 func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params CreateEventParams, platform, platformLiveID string) (EventRow, SessionRow, *PlatformRow, error) {
 	storeUID, err := parseUUID(params.StoreID)
@@ -183,7 +183,7 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 
 	// D3: params.Type chega no vocabulário da SESSÃO (live|post|reel|story) ou
 	// no legado (single|multi), que os formulários antigos ainda mandam. A
-	// SESSÃO é o único lugar que guarda isso desde a 000120 — o evento não tem
+	// SESSÃO é o único lugar que guarda isso desde a 000122 — o evento não tem
 	// mais coluna de tipo, porque uma campanha mista não tem resposta única.
 	sessionType := SessionTypeFromEventType(params.Type)
 
@@ -203,7 +203,7 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 	}
 
 	// starts_at e scheduled_at sao escritos EM PAR, com o mesmo valor, pelo
-	// mesmo motivo de SetEventWindow: starts_at e a coluna nova (000112) e
+	// mesmo motivo de SetEventWindow: starts_at e a coluna nova (000114) e
 	// scheduled_at e a legada que EffectiveStatus ainda le. Divergir as duas
 	// aqui faria o evento nascer com um inicio que a leitura nao enxerga — foi
 	// exatamente o que aconteceu quando a janela entrou no INSERT e o par se
@@ -212,7 +212,7 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 	if params.StartsAt != nil {
 		startsAt = pgtype.Timestamptz{Time: *params.StartsAt, Valid: true}
 	}
-	// ends_at é NOT NULL desde a 000120. Chegar aqui com nil é bug de chamador,
+	// ends_at é NOT NULL desde a 000122. Chegar aqui com nil é bug de chamador,
 	// não entrada de usuário: o Service já recusa com 400 antes. Falhar aqui,
 	// e não no banco, deixa o erro dizer QUEM esqueceu.
 	if params.EndsAt == nil {
@@ -301,8 +301,8 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 // =============================================================================
 
 // CreateEvent (evento SEM sessão) foi removida: era o único caminho capaz de
-// produzir um evento sem sessão nenhuma, e desde que a whitelist (000110) e o
-// modo live (000111) desceram para live_sessions esse evento não tem onde
+// produzir um evento sem sessão nenhuma, e desde que a whitelist (000112) e o
+// modo live (000113) desceram para live_sessions esse evento não tem onde
 // guardar configuração. Toda criação passa por CreateEventWithSessionTx, que
 // aceita mídia vazia.
 
@@ -354,8 +354,8 @@ func (r *Repository) SetPixDiscountPercent(ctx context.Context, eventID, storeID
 //
 // D1/A4: a verdade é a MÍDIA (live_session_platforms), chaveada pelo
 // platform_live_id — que é o próprio media_id. O dual-write em live_events
-// existiu só para permitir reverter a 000109 sem perder legenda e permalink, e
-// saiu junto com as colunas na 000120.
+// existiu só para permitir reverter a 000111 sem perder legenda e permalink, e
+// saiu junto com as colunas na 000122.
 //
 // Nome e assinatura mudaram junto (era SetEventMedia, com eventID e storeID):
 // os dois argumentos só serviam ao UPDATE do evento. Manter um parâmetro que a
@@ -416,8 +416,8 @@ func (r *Repository) SetWaitlistNotifiedTTLMinutes(ctx context.Context, eventID,
 // incondicionalmente, o que fazia uma edição só do fim apagar o início.
 //
 // starts_at e scheduled_at são escritos em par: starts_at é a coluna nova
-// (000112) e scheduled_at é a legada que EffectiveStatus, o FE e as leituras
-// ainda consomem. O contract (000120) NÃO as separou: escrever só starts_at
+// (000114) e scheduled_at é a legada que EffectiveStatus, o FE e as leituras
+// ainda consomem. O contract (000122) NÃO as separou: escrever só starts_at
 // deixaria EffectiveStatus cego para o início do evento, então o par continua
 // sendo escrito junto — aqui e no INSERT.
 func (r *Repository) SetEventWindow(ctx context.Context, eventID, storeID string, w EventWindowUpdate) error {
@@ -1162,7 +1162,7 @@ func (r *Repository) RemovePlatformFromSession(ctx context.Context, sessionID, p
 }
 
 // GetPlatformByLiveID foi removida junto com a query: sem chamador e, depois da
-// 000115, um `:one` sobre uma coluna que deixou de ser única — devolveria uma
+// 000117, um `:one` sobre uma coluna que deixou de ser única — devolveria uma
 // campanha arbitrária, em silêncio. Ver a nota em db/queries/live.sql.
 
 // =============================================================================
@@ -1225,7 +1225,7 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 	// Busca o carrinho ABERTO do comprador neste evento. FOR UPDATE trava a row
 	// e resolve a corrida de dois comentários simultâneos do mesmo comprador.
 	//
-	// Desde a 000105 a query filtra por carrinho aberto, então ela só devolve
+	// Desde a 000107 a query filtra por carrinho aberto, então ela só devolve
 	// linha quando existe um carrinho que ainda pode receber item e ser pago.
 	// Carrinho pago, expirado, cancelado ou estornado cai em ErrNoRows e o
 	// caminho abaixo cria um NOVO — que o índice parcial agora permite.
@@ -1626,7 +1626,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 		FROM live_events e
 		LEFT JOIN LATERAL (
 			-- Tipos DISTINTOS das sessões: é o que substitui live_events.type
-			-- desde que a 000120 o dropou. Um LATERAL próprio (e não um join na
+			-- desde que a 000122 o dropou. Um LATERAL próprio (e não um join na
 			-- lateral da primeira sessão) porque a campanha é MISTA: a
 			-- primeira sessão pode ser a live e a terceira o story, e rotular
 			-- o evento pela primeira sessão seria trocar uma mentira por outra.
@@ -2112,7 +2112,7 @@ func (r *Repository) ListProjectionInputByEvent(ctx context.Context, eventID str
 // =============================================================================
 // MODO LIVE (D17) — estado EFÊMERO de execução, agora na SESSÃO
 //
-// As colunas equivalentes em live_events saíram na 000120: quem manda é a
+// As colunas equivalentes em live_events saíram na 000122: quem manda é a
 // sessão. As funções "…ForEvent" abaixo sustentam a rota legada do painel, que
 // ainda só conhece o eventId, e aplicam o estado em TODAS as sessões vivas do
 // evento.
@@ -2309,9 +2309,9 @@ func buildLiveModeState(
 }
 
 // A camada de event_products saiu daqui: a whitelist passou a ser da SESSÃO
-// (000110). As operações equivalentes estão em session_product_repository.go, e
+// (000112). As operações equivalentes estão em session_product_repository.go, e
 // as rotas legadas por evento são traduzidas para todas as sessões do evento.
-// A tabela event_products saiu do banco na 000120: ela sobrevivia só como
+// A tabela event_products saiu do banco na 000122: ela sobrevivia só como
 // instantâneo de rollback e ninguém mais a lia nem escrevia.
 
 // =============================================================================

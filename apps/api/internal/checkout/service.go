@@ -12,6 +12,7 @@ import (
 
 	"livecart/apps/api/internal/integration"
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
@@ -42,10 +43,27 @@ type CouponLifecycle interface {
 // PostCheckoutHook mirrors integration.PostCheckoutHook so the synchronous
 // card path in this service can fire the same customer-facing post-payment
 // flow as the asynchronous webhook path.
+//
+// OnCartPaid saiu daqui (Fatia A4): o tracking_token e a timeline
+// `payment_confirmed` nascem na materialização da Order (order/listeners.OnCartPaid),
+// disparada pelo fato cart.paid do webhook — não mais inline no path do cartão.
 type PostCheckoutHook interface {
-	OnCartPaid(ctx context.Context, cartID string)
 	OnShipmentPosted(ctx context.Context, cartID, trackingCode string)
 	OnDelivered(ctx context.Context, cartID, source string)
+}
+
+// PaymentService is the slice of payment.Service the checkout flow calls: the
+// stateless payment fast-paths (hosted checkout, transparent card/PIX, and the
+// per-integration checkout config). Declared here — in the consumer package —
+// and implemented by *payment.Service, so checkout depends on the payment
+// domain through a narrow interface instead of the integration monolith
+// (strangler-fig B1e). The non-payment integration calls (waitlist, stock
+// reservation, ERP prewarm) still go through integrationService.
+type PaymentService interface {
+	CreateCheckout(ctx context.Context, input payment.CreateCheckoutInput) (*payment.CreateCheckoutOutput, error)
+	GetCheckoutConfig(ctx context.Context, integrationID, storeID string) (publicKey string, methods []string, err error)
+	ProcessCardPayment(ctx context.Context, input payment.ProcessCardPaymentInput) (*payment.ProcessCardPaymentOutput, error)
+	GeneratePixPayment(ctx context.Context, input payment.GeneratePixPaymentInput) (*payment.GeneratePixPaymentOutput, error)
 }
 
 // Service handles business logic for public checkout.
@@ -53,6 +71,7 @@ type Service struct {
 	repo               *Repository
 	pool               *pgxpool.Pool
 	integrationService *integration.Service
+	paymentService     PaymentService
 	couponLifecycle    CouponLifecycle
 	postCheckoutHook   PostCheckoutHook
 	logger             *zap.Logger
@@ -63,12 +82,14 @@ func NewService(
 	repo *Repository,
 	pool *pgxpool.Pool,
 	integrationService *integration.Service,
+	paymentService PaymentService,
 	logger *zap.Logger,
 ) *Service {
 	return &Service{
 		repo:               repo,
 		pool:               pool,
 		integrationService: integrationService,
+		paymentService:     paymentService,
 		logger:             logger.Named("checkout"),
 	}
 }
@@ -108,13 +129,13 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 
 	// Validate cart status (allow viewing paid carts so frontend can show "paid" message)
 	if cart.Status == "expired" {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	// Prazo de pagamento vencido (armado ao encerrar a live). Só bloqueia
 	// carts não pagos — quem pagou dentro do prazo continua vendo o pedido
 	// mesmo depois que o expires_at passa.
 	if cart.PaymentStatus != "paid" && cart.ExpiresAt != nil && cart.ExpiresAt.Before(time.Now()) {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	// Carts cancelled because the buyer was blocked should look like they
 	// never existed — return 404 so the public /cart/[token] page hits the
@@ -360,14 +381,14 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 
 	// Validate cart status
 	if cart.Status == "expired" {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	if cart.PaymentStatus == "paid" {
-		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
+		return nil, httpx.DomainError(422, httpx.CodeCartAlreadyPaid, "carrinho já foi pago")
 	}
 	// Allow checkout for both 'active' (live ongoing) and 'checkout' (live ended) status
 	if cart.Status != "checkout" && cart.Status != "active" {
-		return nil, httpx.ErrUnprocessable("carrinho não está disponível para checkout")
+		return nil, httpx.DomainError(422, httpx.CodeCartNotPayable, "carrinho não está disponível para checkout")
 	}
 
 	// Update customer email
@@ -405,7 +426,7 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 	}
 
 	if len(checkoutItems) == 0 {
-		return nil, httpx.ErrUnprocessable("carrinho não tem itens disponíveis para pagamento")
+		return nil, httpx.DomainError(422, httpx.CodeCartNoItemsPayable, "carrinho não tem itens disponíveis para pagamento")
 	}
 
 	// Add selected shipping cost to the total charged at the gateway.
@@ -435,7 +456,7 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 	failureURL := fmt.Sprintf("%s/cart/%s?status=failure", baseURL, cart.Token)
 
 	// Create checkout via integration service
-	checkoutResult, err := s.integrationService.CreateCheckout(ctx, integration.CreateCheckoutInput{
+	checkoutResult, err := s.paymentService.CreateCheckout(ctx, payment.CreateCheckoutInput{
 		IntegrationID:  paymentIntegration.ID.String(),
 		StoreID:        cart.StoreID,
 		CartID:         cart.ID,
@@ -461,7 +482,7 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 			zap.String("cart_id", cart.ID),
 			zap.Error(err),
 		)
-		return nil, httpx.ErrUnprocessable("erro ao gerar link de pagamento. Tente novamente.")
+		return nil, httpx.DomainError(422, httpx.CodePaymentLinkFailed, "erro ao gerar link de pagamento. Tente novamente.")
 	}
 
 	// Update cart with checkout info
@@ -555,14 +576,14 @@ func (s *Service) GetCheckoutConfig(ctx context.Context, input GetCheckoutConfig
 
 	// Validate cart status
 	if cart.Status == "expired" {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	if cart.PaymentStatus == "paid" {
-		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
+		return nil, httpx.DomainError(422, httpx.CodeCartAlreadyPaid, "carrinho já foi pago")
 	}
 	// Allow checkout for both 'active' (live ongoing) and 'checkout' (live ended) status
 	if cart.Status != "checkout" && cart.Status != "active" {
-		return nil, httpx.ErrUnprocessable("carrinho não está disponível para checkout")
+		return nil, httpx.DomainError(422, httpx.CodeCartNotPayable, "carrinho não está disponível para checkout")
 	}
 
 	// Get cart items to calculate total
@@ -581,7 +602,7 @@ func (s *Service) GetCheckoutConfig(ctx context.Context, input GetCheckoutConfig
 	}
 
 	if totalAmount == 0 {
-		return nil, httpx.ErrUnprocessable("carrinho não tem itens disponíveis para pagamento")
+		return nil, httpx.DomainError(422, httpx.CodeCartNoItemsPayable, "carrinho não tem itens disponíveis para pagamento")
 	}
 
 	// Add selected shipping cost to the total for the gateway config.
@@ -623,7 +644,7 @@ func (s *Service) resolveCheckoutIntegration(ctx context.Context, cart *CartRow)
 	if cart.PaymentIntegrationID != nil && *cart.PaymentIntegrationID != "" {
 		bound, err := s.repo.GetIntegrationByID(ctx, *cart.PaymentIntegrationID)
 		if err == nil && bound != nil && bound.Status == "active" {
-			publicKey, methods, configErr := s.integrationService.GetCheckoutConfig(ctx, bound.ID.String(), cart.StoreID)
+			publicKey, methods, configErr := s.paymentService.GetCheckoutConfig(ctx, bound.ID.String(), cart.StoreID)
 			if configErr == nil {
 				return bound, publicKey, methods, nil
 			}
@@ -640,16 +661,13 @@ func (s *Service) resolveCheckoutIntegration(ctx context.Context, cart *CartRow)
 		return nil, "", nil, err
 	}
 	if len(candidates) == 0 {
-		return nil, "", nil, httpx.WithReason(
-			httpx.ErrUnprocessable("loja não possui integração de pagamento configurada"),
-			"payment_not_configured",
-		)
+		return nil, "", nil, httpx.DomainError(422, httpx.CodePaymentNotConfigured, "loja não possui integração de pagamento configurada")
 	}
 
 	var lastErr error
 	for i := range candidates {
 		candidate := candidates[i]
-		publicKey, methods, configErr := s.integrationService.GetCheckoutConfig(ctx, candidate.ID.String(), cart.StoreID)
+		publicKey, methods, configErr := s.paymentService.GetCheckoutConfig(ctx, candidate.ID.String(), cart.StoreID)
 		if configErr != nil {
 			logger.From(ctx, s.logger).Warn("payment integration failed checkout config, trying next",
 				zap.String("cart_id", cart.ID),
@@ -680,10 +698,7 @@ func (s *Service) resolveCheckoutIntegration(ctx context.Context, cart *CartRow)
 			zap.Error(lastErr),
 		)
 	}
-	return nil, "", nil, httpx.WithReason(
-		httpx.ErrUnprocessable("nenhuma integração de pagamento está respondendo agora"),
-		"payment_unavailable",
-	)
+	return nil, "", nil, httpx.DomainError(422, httpx.CodePaymentUnavailable, "nenhuma integração de pagamento está respondendo agora")
 }
 
 // resolvePaymentIntegration returns the integration that should process this
@@ -703,10 +718,7 @@ func (s *Service) resolvePaymentIntegration(ctx context.Context, cart *CartRow) 
 		return nil, err
 	}
 	if primary == nil {
-		return nil, httpx.WithReason(
-			httpx.ErrUnprocessable("loja não possui integração de pagamento configurada"),
-			"payment_not_configured",
-		)
+		return nil, httpx.DomainError(422, httpx.CodePaymentNotConfigured, "loja não possui integração de pagamento configurada")
 	}
 	return primary, nil
 }
@@ -722,14 +734,14 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 
 	// Validate cart status
 	if cart.Status == "expired" {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	if cart.PaymentStatus == "paid" {
-		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
+		return nil, httpx.DomainError(422, httpx.CodeCartAlreadyPaid, "carrinho já foi pago")
 	}
 	// Allow checkout for both 'active' (live ongoing) and 'checkout' (live ended) status
 	if cart.Status != "checkout" && cart.Status != "active" {
-		return nil, httpx.ErrUnprocessable("carrinho não está disponível para checkout")
+		return nil, httpx.DomainError(422, httpx.CodeCartNotPayable, "carrinho não está disponível para checkout")
 	}
 
 	// Persist customer identity + shipping address before requesting payment —
@@ -768,7 +780,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	}
 
 	if len(checkoutItems) == 0 {
-		return nil, httpx.ErrUnprocessable("carrinho não tem itens disponíveis para pagamento")
+		return nil, httpx.DomainError(422, httpx.CodeCartNoItemsPayable, "carrinho não tem itens disponíveis para pagamento")
 	}
 
 	// Add selected shipping cost to the total charged at the gateway.
@@ -801,7 +813,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	)
 
 	// Process payment via integration service
-	result, err := s.integrationService.ProcessCardPayment(ctx, integration.ProcessCardPaymentInput{
+	result, err := s.paymentService.ProcessCardPayment(ctx, payment.ProcessCardPaymentInput{
 		IntegrationID: paymentIntegration.ID.String(),
 		StoreID:       cart.StoreID,
 		CartID:        cart.ID,
@@ -882,10 +894,11 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 					zap.Error(err),
 				)
 			}
-			// Customer-facing post-payment flow (tracking token + receipt email)
-			// runs inline here for low latency on the synchronous card approval.
-			// Idempotent inside the hook, so the webhook's cart.paid reactor
-			// re-running it later is a no-op.
+			// Customer-facing post-payment flow (tracking token + timeline +
+			// receipt) NÃO roda mais inline aqui (Fatia A4): o token e a timeline
+			// `payment_confirmed` nascem na materialização da Order, disparada pelo
+			// fato cart.paid do webhook (order/listeners.OnCartPaid), e o recibo é
+			// reactor do domínio Notification. Tudo idempotente e ancorado no fato.
 			//
 			// The canonical cart.paid FACT is emitted only by the payment webhook
 			// consumer (ProcessPaymentNotification) — the single source of truth,
@@ -893,9 +906,6 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 			// path used to emit its own snapshot-less cart.paid too, which raced the
 			// webhook's and finalised ERP without payment details; centralising on
 			// the webhook fixes that.
-			if s.postCheckoutHook != nil {
-				s.postCheckoutHook.OnCartPaid(ctx, cart.ID)
-			}
 		}
 	}
 
@@ -930,14 +940,14 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 
 	// Validate cart status
 	if cart.Status == "expired" {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	if cart.PaymentStatus == "paid" {
-		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
+		return nil, httpx.DomainError(422, httpx.CodeCartAlreadyPaid, "carrinho já foi pago")
 	}
 	// Allow checkout for both 'active' (live ongoing) and 'checkout' (live ended) status
 	if cart.Status != "checkout" && cart.Status != "active" {
-		return nil, httpx.ErrUnprocessable("carrinho não está disponível para checkout")
+		return nil, httpx.DomainError(422, httpx.CodeCartNotPayable, "carrinho não está disponível para checkout")
 	}
 
 	// Persist customer identity + shipping address before requesting payment —
@@ -976,7 +986,7 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	}
 
 	if len(checkoutItems) == 0 {
-		return nil, httpx.ErrUnprocessable("carrinho não tem itens disponíveis para pagamento")
+		return nil, httpx.DomainError(422, httpx.CodeCartNoItemsPayable, "carrinho não tem itens disponíveis para pagamento")
 	}
 
 	// Add selected shipping cost to the total charged at the gateway.
@@ -1035,7 +1045,7 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	)
 
 	// Generate PIX via integration service
-	result, err := s.integrationService.GeneratePixPayment(ctx, integration.GeneratePixPaymentInput{
+	result, err := s.paymentService.GeneratePixPayment(ctx, payment.GeneratePixPaymentInput{
 		IntegrationID: paymentIntegration.ID.String(),
 		StoreID:       cart.StoreID,
 		CartID:        cart.ID,
@@ -1408,7 +1418,7 @@ func (s *Service) loadEditableCart(ctx context.Context, token string) (*CartRow,
 		return nil, err
 	}
 	if cart.Status == "expired" {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	// Cart cancelado (pelo lojista ou por bloqueio do comprador) não aceita mais
 	// mutação de item: editar aqui mexeria em estoque e reservas de ERP de um
@@ -1423,7 +1433,7 @@ func (s *Service) loadEditableCart(ctx context.Context, token string) (*CartRow,
 		return nil, httpx.ErrConflict("edição do carrinho desabilitada para esta loja")
 	}
 	if cart.ExpiresAt != nil && cart.ExpiresAt.Before(time.Now()) {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	return cart, nil
 }

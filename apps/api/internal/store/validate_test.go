@@ -175,7 +175,7 @@ func TestUpdateCartSettingsRequestValidate(t *testing.T) {
 
 		// ExpirationMinutes Required + Min(15) + Max(1440). Required makes the
 		// zero value (omitted field) fail instead of silently slipping the floor.
-		// O piso 15 espelha o CHECK da migration 000104 — antes dela o mínimo
+		// O piso 15 espelha o CHECK da migration 000106 — antes dela o mínimo
 		// era 5, e 5..14 passavam aqui para estourar no banco.
 		{"expiration zero rejected", func(r *UpdateCartSettingsRequest) { r.ExpirationMinutes = 0 }, true, "expirationMinutes"},
 		{"expiration below min", func(r *UpdateCartSettingsRequest) { r.ExpirationMinutes = 14 }, true, "expirationMinutes"},

@@ -1,19 +1,17 @@
 package migrationtest
 
-// Teste da migration 000112: janela comercial do evento (starts_at/ends_at) e
-// agendamento de publicacao da sessao (publish_at).
+// Teste da migration 000112: event_products vira session_products.
 //
 // O que precisa ficar provado:
-//  1. starts_at herda scheduled_at quando havia intencao explicita de inicio, e
-//     fica NULL quando nao havia — inventar data mudaria rotulo ja visto;
-//  2. evento ENCERRADO sem ends_at ganha o carimbo do fim (MAX(ended_at) das
-//     sessoes, senao updated_at);
-//  3. evento VIVO sem ends_at NAO e tocado: gravar ends_at nele o fecharia no
-//     primeiro sweep;
-//  4. ends_at continua NULLABLE e SEM CHECK — um CHECK aqui quebraria todo
-//     UPDATE de evento legado, inclusive o do caminho de pagamento;
-//  5. publish_at nasce na sessao;
-//  6. o down desfaz o que e reversivel.
+//  1. a whitelist do evento é copiada para TODAS as sessões dele — sem isso,
+//     pela semântica nova ("vazia = libera tudo"), toda barreira configurada
+//     sumiria em silêncio no dia do deploy;
+//  2. evento SEM sessão perde a lista (estado alcançável hoje: existe caminho
+//     de criação que registra "live created without session"). É perda
+//     consciente, e o teste a documenta;
+//  3. a UNIQUE (session_id, product_id) segura duplicata;
+//  4. event_products continua intacta (expand — o DROP é a 000121);
+//  5. o down descarta só a cópia.
 
 import (
 	"context"
@@ -23,7 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestMigration000112EventWindowAndPublishAt(t *testing.T) {
+func TestMigration000112SessionProducts(t *testing.T) {
 	adminURL := mustEnv(t)
 	url, cleanup := freshDB(t, adminURL)
 	defer cleanup()
@@ -35,7 +33,7 @@ func TestMigration000112EventWindowAndPublishAt(t *testing.T) {
 	defer m.Close()
 
 	if err := m.Migrate(111); err != nil {
-		t.Fatalf("migrate ate 111: %v", err)
+		t.Fatalf("migrate ate 109: %v", err)
 	}
 
 	pool, err := pgxpool.New(context.Background(), url)
@@ -47,159 +45,138 @@ func TestMigration000112EventWindowAndPublishAt(t *testing.T) {
 
 	var storeID string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO stores (name, slug) VALUES ('Janela Test','win-112') RETURNING id::text`,
+		`INSERT INTO stores (name, slug) VALUES ('Whitelist Test','wl-110') RETURNING id::text`,
 	).Scan(&storeID); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
 
-	// (a) evento agendado: tem scheduled_at, deve virar starts_at.
-	var scheduledEvent string
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title, type, scheduled_at)
-		 VALUES ($1,'scheduled','Agendado','multi', now() + interval '2 days')
-		 RETURNING id::text`, storeID,
-	).Scan(&scheduledEvent); err != nil {
-		t.Fatalf("seed evento agendado: %v", err)
+	var productA, productB string
+	for i, target := range []*string{&productA, &productB} {
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO products (store_id, name, keyword, external_source, price, stock, active)
+			 VALUES ($1, $2, $3, 'manual', 1000, 10, true) RETURNING id::text`,
+			storeID, []string{"Vestido", "Bolsa"}[i], []string{"VST1", "BLS1"}[i],
+		).Scan(target); err != nil {
+			t.Fatalf("seed produto %d: %v", i, err)
+		}
 	}
 
-	// (b) evento vivo sem janela nenhuma: nao pode ganhar ends_at.
-	var liveEvent string
+	// Evento com DUAS sessões e whitelist de dois produtos.
+	var eventTwo string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title, type)
-		 VALUES ($1,'active','Ao vivo','multi') RETURNING id::text`, storeID,
-	).Scan(&liveEvent); err != nil {
-		t.Fatalf("seed evento vivo: %v", err)
+		`INSERT INTO live_events (store_id, status, title, type) VALUES ($1,'active','Duas sessoes','multi') RETURNING id::text`,
+		storeID,
+	).Scan(&eventTwo); err != nil {
+		t.Fatalf("seed evento: %v", err)
+	}
+	for seq := 1; seq <= 2; seq++ {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO live_sessions (event_id, status, sequence_order) VALUES ($1,'active',$2)`,
+			eventTwo, seq,
+		); err != nil {
+			t.Fatalf("seed sessao %d: %v", seq, err)
+		}
+	}
+	for _, p := range []string{productA, productB} {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO event_products (event_id, product_id, special_price, max_quantity, display_order, featured)
+			 VALUES ($1,$2,800,3,0,true)`, eventTwo, p,
+		); err != nil {
+			t.Fatalf("seed event_product: %v", err)
+		}
 	}
 
-	// (c) evento encerrado com sessao encerrada: ends_at = MAX(ended_at).
-	var endedWithSession string
+	// Evento SEM sessão nenhuma, mas com whitelist.
+	var eventOrphan string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title, type)
-		 VALUES ($1,'ended','Encerrado com sessao','multi') RETURNING id::text`, storeID,
-	).Scan(&endedWithSession); err != nil {
-		t.Fatalf("seed evento encerrado: %v", err)
+		`INSERT INTO live_events (store_id, status, title, type) VALUES ($1,'active','Sem sessao','single') RETURNING id::text`,
+		storeID,
+	).Scan(&eventOrphan); err != nil {
+		t.Fatalf("seed evento orfao: %v", err)
 	}
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO live_sessions (event_id, status, sequence_order, ended_at)
-		 VALUES ($1,'ended',1, now() - interval '3 days'),
-		        ($1,'ended',2, now() - interval '1 day')`, endedWithSession,
+		`INSERT INTO event_products (event_id, product_id) VALUES ($1,$2)`, eventOrphan, productA,
 	); err != nil {
-		t.Fatalf("seed sessoes encerradas: %v", err)
-	}
-
-	// (d) evento encerrado SEM sessao: cai no updated_at.
-	var endedNoSession string
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title, type)
-		 VALUES ($1,'ended','Encerrado sem sessao','multi') RETURNING id::text`, storeID,
-	).Scan(&endedNoSession); err != nil {
-		t.Fatalf("seed evento encerrado sem sessao: %v", err)
+		t.Fatalf("seed event_product orfao: %v", err)
 	}
 
 	// --- aplica a 000112 ---------------------------------------------------
 	if err := m.Migrate(112); err != nil {
-		t.Fatalf("migrate ate 112: %v", err)
+		t.Fatalf("migrate ate 110: %v", err)
 	}
 
-	// 1. starts_at copiado de scheduled_at.
-	var sameStart bool
-	if err := pool.QueryRow(ctx,
-		`SELECT starts_at IS NOT NULL AND starts_at = scheduled_at
-		 FROM live_events WHERE id = $1::uuid`, scheduledEvent,
-	).Scan(&sameStart); err != nil {
-		t.Fatalf("ler starts_at do agendado: %v", err)
-	}
-	if !sameStart {
-		t.Error("evento agendado nao herdou starts_at de scheduled_at")
-	}
-
-	// ... e NULL quando nao havia intencao.
-	var startNull bool
-	if err := pool.QueryRow(ctx,
-		`SELECT starts_at IS NULL FROM live_events WHERE id = $1::uuid`, liveEvent,
-	).Scan(&startNull); err != nil {
-		t.Fatalf("ler starts_at do vivo: %v", err)
-	}
-	if !startNull {
-		t.Error("evento sem scheduled_at ganhou starts_at inventado")
-	}
-
-	// 2. Encerrado com sessao: ends_at = maior ended_at das sessoes.
-	var matchesMaxEnded bool
-	if err := pool.QueryRow(ctx,
-		`SELECT e.ends_at IS NOT NULL
-		        AND e.ends_at = (SELECT MAX(ls.ended_at) FROM live_sessions ls WHERE ls.event_id = e.id)
-		 FROM live_events e WHERE e.id = $1::uuid`, endedWithSession,
-	).Scan(&matchesMaxEnded); err != nil {
-		t.Fatalf("ler ends_at do encerrado: %v", err)
-	}
-	if !matchesMaxEnded {
-		t.Error("evento encerrado nao recebeu ends_at = MAX(ended_at) das sessoes")
-	}
-
-	// ... e o sem sessao cai no updated_at.
-	var matchesUpdated bool
-	if err := pool.QueryRow(ctx,
-		`SELECT ends_at IS NOT NULL AND ends_at = updated_at
-		 FROM live_events WHERE id = $1::uuid`, endedNoSession,
-	).Scan(&matchesUpdated); err != nil {
-		t.Fatalf("ler ends_at do encerrado sem sessao: %v", err)
-	}
-	if !matchesUpdated {
-		t.Error("evento encerrado sem sessao nao caiu no updated_at")
-	}
-
-	// 3. Evento VIVO nao foi tocado — este e o teste que impede o backfill de
-	//    fechar campanha em andamento.
-	var liveEndsAtNull bool
-	if err := pool.QueryRow(ctx,
-		`SELECT ends_at IS NULL FROM live_events WHERE id = $1::uuid`, liveEvent,
-	).Scan(&liveEndsAtNull); err != nil {
-		t.Fatalf("ler ends_at do vivo: %v", err)
-	}
-	if !liveEndsAtNull {
-		t.Error("backfill gravou ends_at num evento ATIVO — ele fecharia no primeiro sweep")
-	}
-
-	// 4. ends_at segue nullable e sem CHECK: UPDATE em evento legado sem janela
-	//    tem de continuar passando (o caminho de pagamento faz isso).
-	if _, err := pool.Exec(ctx,
-		`UPDATE live_events SET total_orders = total_orders + 1 WHERE id = $1::uuid`, liveEvent,
-	); err != nil {
-		t.Fatalf("UPDATE em evento sem ends_at falhou — a obrigatoriedade nao pode estar no banco ainda: %v", err)
-	}
-
-	// 5. publish_at existe na sessao e aceita NULL e valor.
-	var publishSession string
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO live_sessions (event_id, status, sequence_order, publish_at)
-		 VALUES ($1,'scheduled',9, now() + interval '1 day') RETURNING id::text`, liveEvent,
-	).Scan(&publishSession); err != nil {
-		t.Fatalf("inserir sessao com publish_at: %v", err)
-	}
-
-	// 6. Down.
-	if err := m.Migrate(111); err != nil {
-		t.Fatalf("down para 111: %v", err)
-	}
+	// 1. Duas sessões × dois produtos = quatro linhas, com os valores preservados.
 	var n int
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM information_schema.columns
-		 WHERE (table_name = 'live_events'   AND column_name = 'starts_at')
-		    OR (table_name = 'live_sessions' AND column_name = 'publish_at')`,
+		`SELECT count(*) FROM session_products sp
+		 JOIN live_sessions ls ON ls.id = sp.session_id
+		 WHERE ls.event_id = $1::uuid`, eventTwo,
 	).Scan(&n); err != nil {
-		t.Fatalf("checar colunas apos down: %v", err)
+		t.Fatalf("contar copia: %v", err)
+	}
+	if n != 4 {
+		t.Errorf("whitelist copiada para %d linhas, quero 4 (2 sessoes x 2 produtos)", n)
+	}
+
+	var specialPrice, maxQuantity int
+	var featured bool
+	if err := pool.QueryRow(ctx,
+		`SELECT sp.special_price, sp.max_quantity, sp.featured
+		 FROM session_products sp
+		 JOIN live_sessions ls ON ls.id = sp.session_id
+		 WHERE ls.event_id = $1::uuid AND sp.product_id = $2::uuid
+		 LIMIT 1`, eventTwo, productA,
+	).Scan(&specialPrice, &maxQuantity, &featured); err != nil {
+		t.Fatalf("ler copia: %v", err)
+	}
+	if specialPrice != 800 || maxQuantity != 3 || !featured {
+		t.Errorf("valores nao vieram junto: special=%d max=%d featured=%v", specialPrice, maxQuantity, featured)
+	}
+
+	// 2. Evento sem sessão perde a lista — e, pela semântica nova, passa a
+	//    vender tudo. Perda consciente, registrada aqui.
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM session_products sp
+		 JOIN live_sessions ls ON ls.id = sp.session_id
+		 WHERE ls.event_id = $1::uuid`, eventOrphan,
+	).Scan(&n); err != nil {
+		t.Fatalf("contar orfao: %v", err)
 	}
 	if n != 0 {
-		t.Errorf("down deixou %d coluna(s) para tras", n)
+		t.Errorf("evento sem sessao gerou %d linha(s) — o backfill precisa de sessao para ancorar", n)
 	}
-	// O ends_at dos encerrados fica de proposito (dado derivado e correto).
+
+	// 3. UNIQUE (session_id, product_id).
+	var anySession string
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM live_events WHERE status = 'ended' AND ends_at IS NOT NULL`,
-	).Scan(&n); err != nil {
-		t.Fatalf("checar ends_at apos down: %v", err)
+		`SELECT id::text FROM live_sessions WHERE event_id = $1::uuid ORDER BY sequence_order LIMIT 1`, eventTwo,
+	).Scan(&anySession); err != nil {
+		t.Fatalf("ler sessao: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("down apagou o ends_at dos encerrados (%d de 2 restantes)", n)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO session_products (session_id, product_id) VALUES ($1::uuid, $2::uuid)`, anySession, productA,
+	); err == nil {
+		t.Error("a UNIQUE (session_id, product_id) deixou passar duplicata")
+	}
+
+	// 4. EXPAND: event_products intacta.
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM event_products`).Scan(&n); err != nil {
+		t.Fatalf("contar event_products: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("event_products tem %d linhas, quero 3 — a origem tem de sobreviver ate a 000121", n)
+	}
+
+	// 5. Down.
+	if err := m.Migrate(111); err != nil {
+		t.Fatalf("down para 109: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM information_schema.tables WHERE table_name = 'session_products'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("checar tabela apos down: %v", err)
+	}
+	if n != 0 {
+		t.Error("down deixou session_products para tras")
 	}
 }

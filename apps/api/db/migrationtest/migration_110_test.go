@@ -1,17 +1,18 @@
 package migrationtest
 
-// Teste da migration 000110: event_products vira session_products.
+// Teste da migration 000110: o log de adições ao carrinho.
 //
 // O que precisa ficar provado:
-//  1. a whitelist do evento é copiada para TODAS as sessões dele — sem isso,
-//     pela semântica nova ("vazia = libera tudo"), toda barreira configurada
-//     sumiria em silêncio no dia do deploy;
-//  2. evento SEM sessão perde a lista (estado alcançável hoje: existe caminho
-//     de criação que registra "live created without session"). É perda
-//     consciente, e o teste a documenta;
-//  3. a UNIQUE (session_id, product_id) segura duplicata;
-//  4. event_products continua intacta (expand — o DROP é a 000119);
-//  5. o down descarta só a cópia.
+//  1. a tabela existe com as colunas que a alocação consome;
+//  2. quantity > 0 é CHECK — remoção NÃO é linha negativa. Se o banco aceitasse
+//     quantidade negativa, alguém "corrigiria" uma remoção assim e o alocador,
+//     que só soma adições, passaria a mentir sem erro nenhum;
+//  3. session_id é nullable (adição pelo painel não tem transmissão);
+//  4. apagar a sessão preserva a linha e zera a sessão (SET NULL); apagar o
+//     CARRINHO leva o log junto (CASCADE) — o log não sobrevive ao seu dono;
+//  5. os dois índices existem: o do selamento (cart, produto, cronologia) e o
+//     da métrica (sessão);
+//  6. o down desfaz.
 
 import (
 	"context"
@@ -21,7 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestMigration000110SessionProducts(t *testing.T) {
+func TestMigration000110CartItemEvents(t *testing.T) {
 	adminURL := mustEnv(t)
 	url, cleanup := freshDB(t, adminURL)
 	defer cleanup()
@@ -32,8 +33,8 @@ func TestMigration000110SessionProducts(t *testing.T) {
 	}
 	defer m.Close()
 
-	if err := m.Migrate(109); err != nil {
-		t.Fatalf("migrate ate 109: %v", err)
+	if err := m.Migrate(110); err != nil {
+		t.Fatalf("migrate ate 108: %v", err)
 	}
 
 	pool, err := pgxpool.New(context.Background(), url)
@@ -43,140 +44,145 @@ func TestMigration000110SessionProducts(t *testing.T) {
 	defer pool.Close()
 	ctx := context.Background()
 
-	var storeID string
+	// 1. Colunas.
+	var cols int
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO stores (name, slug) VALUES ('Whitelist Test','wl-110') RETURNING id::text`,
+		`SELECT count(*) FROM information_schema.columns
+		 WHERE table_name = 'cart_item_events'
+		   AND column_name IN ('id','cart_id','product_id','session_id','quantity','unit_price','created_at')`,
+	).Scan(&cols); err != nil {
+		t.Fatalf("checar colunas: %v", err)
+	}
+	if cols != 7 {
+		t.Fatalf("cart_item_events tem %d das 7 colunas esperadas", cols)
+	}
+
+	// 3. session_id nullable.
+	var isNullable string
+	if err := pool.QueryRow(ctx,
+		`SELECT is_nullable FROM information_schema.columns
+		 WHERE table_name = 'cart_item_events' AND column_name = 'session_id'`,
+	).Scan(&isNullable); err != nil {
+		t.Fatalf("checar nullability: %v", err)
+	}
+	if isNullable != "YES" {
+		t.Errorf("session_id deveria ser nullable, got %q", isNullable)
+	}
+
+	// 5. Índices.
+	for _, name := range []string{"idx_cart_item_events_cart_product", "idx_cart_item_events_session"} {
+		var n int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM pg_indexes WHERE tablename = 'cart_item_events' AND indexname = $1`, name,
+		).Scan(&n); err != nil {
+			t.Fatalf("checar indice %s: %v", name, err)
+		}
+		if n != 1 {
+			t.Errorf("indice %s ausente", name)
+		}
+	}
+
+	// Seed para os testes de comportamento.
+	var storeID, eventID, sessionID, productID, cartID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO stores (name, slug) VALUES ('Log 108','log-108') RETURNING id::text`,
 	).Scan(&storeID); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
-
-	var productA, productB string
-	for i, target := range []*string{&productA, &productB} {
-		if err := pool.QueryRow(ctx,
-			`INSERT INTO products (store_id, name, keyword, external_source, price, stock, active)
-			 VALUES ($1, $2, $3, 'manual', 1000, 10, true) RETURNING id::text`,
-			storeID, []string{"Vestido", "Bolsa"}[i], []string{"VST1", "BLS1"}[i],
-		).Scan(target); err != nil {
-			t.Fatalf("seed produto %d: %v", i, err)
-		}
-	}
-
-	// Evento com DUAS sessões e whitelist de dois produtos.
-	var eventTwo string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title, type) VALUES ($1,'active','Duas sessoes','multi') RETURNING id::text`,
+		`INSERT INTO live_events (store_id, status, title) VALUES ($1,'active','Semana') RETURNING id::text`,
 		storeID,
-	).Scan(&eventTwo); err != nil {
-		t.Fatalf("seed evento: %v", err)
+	).Scan(&eventID); err != nil {
+		t.Fatalf("seed event: %v", err)
 	}
-	for seq := 1; seq <= 2; seq++ {
-		if _, err := pool.Exec(ctx,
-			`INSERT INTO live_sessions (event_id, status, sequence_order) VALUES ($1,'active',$2)`,
-			eventTwo, seq,
-		); err != nil {
-			t.Fatalf("seed sessao %d: %v", seq, err)
-		}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO live_sessions (event_id, status, sequence_order) VALUES ($1,'active',1) RETURNING id::text`,
+		eventID,
+	).Scan(&sessionID); err != nil {
+		t.Fatalf("seed session: %v", err)
 	}
-	for _, p := range []string{productA, productB} {
-		if _, err := pool.Exec(ctx,
-			`INSERT INTO event_products (event_id, product_id, special_price, max_quantity, display_order, featured)
-			 VALUES ($1,$2,800,3,0,true)`, eventTwo, p,
-		); err != nil {
-			t.Fatalf("seed event_product: %v", err)
-		}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO products (store_id, name, external_source, external_id, keyword, price, stock)
+		 VALUES ($1,'Vestido','none','ext-108','1080',2500,100) RETURNING id::text`,
+		storeID,
+	).Scan(&productID); err != nil {
+		t.Fatalf("seed product: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO carts (event_id, platform_user_id, platform_handle, token, short_id, status)
+		 VALUES ($1,'u108','@u108','tok108',1080,'active') RETURNING id::text`,
+		eventID,
+	).Scan(&cartID); err != nil {
+		t.Fatalf("seed cart: %v", err)
 	}
 
-	// Evento SEM sessão nenhuma, mas com whitelist.
-	var eventOrphan string
-	if err := pool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title, type) VALUES ($1,'active','Sem sessao','single') RETURNING id::text`,
-		storeID,
-	).Scan(&eventOrphan); err != nil {
-		t.Fatalf("seed evento orfao: %v", err)
+	// 2. Remoção não é linha negativa — nem zero.
+	for _, bad := range []int{0, -1} {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO cart_item_events (cart_id, product_id, session_id, quantity, unit_price)
+			 VALUES ($1,$2,$3,$4,2500)`,
+			cartID, productID, sessionID, bad,
+		); err == nil {
+			t.Errorf("o CHECK deixou passar quantity=%d — o alocador so soma adicoes", bad)
+		}
 	}
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO event_products (event_id, product_id) VALUES ($1,$2)`, eventOrphan, productA,
+		`INSERT INTO cart_item_events (cart_id, product_id, session_id, quantity, unit_price)
+		 VALUES ($1,$2,$3,1,-1)`,
+		cartID, productID, sessionID,
+	); err == nil {
+		t.Error("o CHECK deixou passar unit_price negativo")
+	}
+
+	// Duas adições legítimas: uma com sessão, uma sem.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO cart_item_events (cart_id, product_id, session_id, quantity, unit_price)
+		 VALUES ($1,$2,$3,1,2500), ($1,$2,NULL,1,2500)`,
+		cartID, productID, sessionID,
 	); err != nil {
-		t.Fatalf("seed event_product orfao: %v", err)
+		t.Fatalf("seed log: %v", err)
 	}
 
-	// --- aplica a 000110 ---------------------------------------------------
-	if err := m.Migrate(110); err != nil {
-		t.Fatalf("migrate ate 110: %v", err)
+	// 4a. Apagar a sessão preserva o log.
+	if _, err := pool.Exec(ctx, `DELETE FROM live_sessions WHERE id = $1::uuid`, sessionID); err != nil {
+		t.Fatalf("apagar sessao: %v", err)
+	}
+	var linhas, semSessao int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*), count(*) FILTER (WHERE session_id IS NULL)
+		 FROM cart_item_events WHERE cart_id = $1::uuid`, cartID,
+	).Scan(&linhas, &semSessao); err != nil {
+		t.Fatalf("reler log: %v", err)
+	}
+	if linhas != 2 || semSessao != 2 {
+		t.Errorf("apagar a sessao devia zerar session_id e manter as 2 linhas; got linhas=%d semSessao=%d",
+			linhas, semSessao)
 	}
 
-	// 1. Duas sessões × dois produtos = quatro linhas, com os valores preservados.
+	// 4b. Apagar o carrinho leva o log junto.
+	if _, err := pool.Exec(ctx, `DELETE FROM carts WHERE id = $1::uuid`, cartID); err != nil {
+		t.Fatalf("apagar cart: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM cart_item_events WHERE cart_id = $1::uuid`, cartID,
+	).Scan(&linhas); err != nil {
+		t.Fatalf("reler log apos delete do cart: %v", err)
+	}
+	if linhas != 0 {
+		t.Errorf("log sobreviveu ao carrinho: %d linha(s) orfa(s)", linhas)
+	}
+
+	// 6. Down.
+	if err := m.Migrate(109); err != nil {
+		t.Fatalf("down para 107: %v", err)
+	}
 	var n int
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM session_products sp
-		 JOIN live_sessions ls ON ls.id = sp.session_id
-		 WHERE ls.event_id = $1::uuid`, eventTwo,
-	).Scan(&n); err != nil {
-		t.Fatalf("contar copia: %v", err)
-	}
-	if n != 4 {
-		t.Errorf("whitelist copiada para %d linhas, quero 4 (2 sessoes x 2 produtos)", n)
-	}
-
-	var specialPrice, maxQuantity int
-	var featured bool
-	if err := pool.QueryRow(ctx,
-		`SELECT sp.special_price, sp.max_quantity, sp.featured
-		 FROM session_products sp
-		 JOIN live_sessions ls ON ls.id = sp.session_id
-		 WHERE ls.event_id = $1::uuid AND sp.product_id = $2::uuid
-		 LIMIT 1`, eventTwo, productA,
-	).Scan(&specialPrice, &maxQuantity, &featured); err != nil {
-		t.Fatalf("ler copia: %v", err)
-	}
-	if specialPrice != 800 || maxQuantity != 3 || !featured {
-		t.Errorf("valores nao vieram junto: special=%d max=%d featured=%v", specialPrice, maxQuantity, featured)
-	}
-
-	// 2. Evento sem sessão perde a lista — e, pela semântica nova, passa a
-	//    vender tudo. Perda consciente, registrada aqui.
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM session_products sp
-		 JOIN live_sessions ls ON ls.id = sp.session_id
-		 WHERE ls.event_id = $1::uuid`, eventOrphan,
-	).Scan(&n); err != nil {
-		t.Fatalf("contar orfao: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("evento sem sessao gerou %d linha(s) — o backfill precisa de sessao para ancorar", n)
-	}
-
-	// 3. UNIQUE (session_id, product_id).
-	var anySession string
-	if err := pool.QueryRow(ctx,
-		`SELECT id::text FROM live_sessions WHERE event_id = $1::uuid ORDER BY sequence_order LIMIT 1`, eventTwo,
-	).Scan(&anySession); err != nil {
-		t.Fatalf("ler sessao: %v", err)
-	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO session_products (session_id, product_id) VALUES ($1::uuid, $2::uuid)`, anySession, productA,
-	); err == nil {
-		t.Error("a UNIQUE (session_id, product_id) deixou passar duplicata")
-	}
-
-	// 4. EXPAND: event_products intacta.
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM event_products`).Scan(&n); err != nil {
-		t.Fatalf("contar event_products: %v", err)
-	}
-	if n != 3 {
-		t.Errorf("event_products tem %d linhas, quero 3 — a origem tem de sobreviver ate a 000119", n)
-	}
-
-	// 5. Down.
-	if err := m.Migrate(109); err != nil {
-		t.Fatalf("down para 109: %v", err)
-	}
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM information_schema.tables WHERE table_name = 'session_products'`,
+		`SELECT count(*) FROM information_schema.tables WHERE table_name = 'cart_item_events'`,
 	).Scan(&n); err != nil {
 		t.Fatalf("checar tabela apos down: %v", err)
 	}
 	if n != 0 {
-		t.Error("down deixou session_products para tras")
+		t.Error("down deixou cart_item_events para tras")
 	}
 }

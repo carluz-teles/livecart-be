@@ -13,17 +13,16 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/events"
+	"livecart/apps/api/internal/inventory"
+	"livecart/apps/api/internal/live"
+	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/dbtx"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/idempotency"
 	"livecart/apps/api/lib/query"
 )
-
-// ErrCartNotPayable sinaliza que uma escrita de pagamento foi recusada pelo
-// guard da query (cart 'expired'/'cancelled') — 0 rows. O caller deve tratar
-// como skip benigno (não finalizar), não como falha do webhook.
-var ErrCartNotPayable = errors.New("cart not payable (expired or cancelled)")
 
 // Repository handles database operations for integrations.
 type Repository struct {
@@ -705,14 +704,11 @@ func (r *Repository) IncrementLiveEventOrders(ctx context.Context, eventID strin
 }
 
 // ProductRow represents a product for keyword matching and stock operations.
-type ProductRow struct {
-	ID         string
-	Keyword    string
-	Price      int64
-	Stock      int
-	ExternalID string
-	Name       string
-}
+// ProductRow is an alias of live.ProductRow (moved to internal/live with the
+// comment-ingest flow, Bloco B4a). The repository keeps building the same value
+// and every existing caller — plus the live.IngestRepository port — sees one
+// identical type, so no conversion is needed at the seam.
+type ProductRow = live.ProductRow
 
 // GetProductByKeyword finds an active product by keyword in a store.
 func (r *Repository) GetProductByKeyword(ctx context.Context, storeID, keyword string) (*ProductRow, error) {
@@ -1006,19 +1002,10 @@ func (r *Repository) UpdateLiveCommentResult(ctx context.Context, commentID stri
 }
 
 // CreateLiveCommentParams holds parameters for creating a live comment.
-type CreateLiveCommentParams struct {
-	SessionID         string
-	EventID           string
-	Platform          string
-	PlatformCommentID string
-	PlatformUserID    string
-	PlatformHandle    string
-	Text              string
-	HasPurchaseIntent bool
-	MatchedProductID  string
-	MatchedQuantity   int
-	Result            string
-}
+// CreateLiveCommentParams's canonical home moved to internal/live (Bloco B4b);
+// this alias keeps the Repository builder and the remaining integration call
+// sites compiling unchanged while the ingest core owns the shape.
+type CreateLiveCommentParams = live.CreateLiveCommentParams
 
 // =============================================================================
 // WAITLIST OPERATIONS
@@ -1225,14 +1212,10 @@ func (r *Repository) MarkWaitlistNotified(ctx context.Context, id string, expire
 }
 
 // EmitWaitlistNotifiedParams carries the identifiers for a waitlist.notified event.
-type EmitWaitlistNotifiedParams struct {
-	WaitlistItemID string
-	EventID        string
-	ProductID      string
-	CartID         string
-	Quantity       int
-	Remaining      int
-}
+// EmitWaitlistNotifiedParams is the payload of the waitlist.notified fact. Its
+// canonical home moved to internal/inventory (Bloco B3b); this alias keeps the
+// repository emitter compiling unchanged.
+type EmitWaitlistNotifiedParams = inventory.EmitWaitlistNotifiedParams
 
 // EmitWaitlistNotified publishes waitlist.notified best-effort (non-transactional
 // outbox insert). Unlike waitlist.queued, the "notified" transition is a multi-step
@@ -1278,14 +1261,9 @@ func (r *Repository) EmitWaitlistExpired(ctx context.Context, waitlistItemID, ev
 // StockEventParams carries the identifiers for a stock.reserved / stock.released
 // event. ReservationID is the ERP reservation row id when one exists (design-A
 // stores); Op labels the business operation (see StockOp).
-type StockEventParams struct {
-	Op            string
-	ProductID     string
-	Quantity      int
-	CartID        string
-	EventID       string
-	ReservationID string
-}
+// StockEventParams is the stock-event payload; canonical home is internal/erp
+// (Bloco B2b). Aliased here so the Repository emission code stays unchanged.
+type StockEventParams = erp.StockEventParams
 
 // EmitStockReserved publishes stock.reserved best-effort. Keyed by reservation
 // id when present, else by cart+product+op — both stable within one operation.
@@ -1406,22 +1384,10 @@ func (r *Repository) CountActiveByEventProduct(ctx context.Context, eventID, pro
 	return int(count), err
 }
 
-// ListActiveByCartRow is the projection returned to the public checkout.
-type ListActiveByCartRow struct {
-	ID              string
-	EventID         string
-	ProductID       string
-	ProductName     string
-	ProductKeyword  string
-	ProductImageURL string
-	ProductPrice    int64
-	Quantity        int
-	Position        int
-	Status          string
-	NotifiedAt      *time.Time
-	ExpiresAt       *time.Time
-	CreatedAt       *time.Time
-}
+// ListActiveByCartRow is the projection returned to the public checkout. Its
+// canonical home moved to internal/inventory (Bloco B3a); this alias keeps the
+// repository builder and the checkout call sites compiling unchanged.
+type ListActiveByCartRow = inventory.ListActiveByCartRow
 
 // DecrementCartItem reduz a quantidade do (cart, product) por @delta. Se
 // chegar a zero, executa o DELETE numa segunda chamada para manter a
@@ -1584,32 +1550,16 @@ func (r *Repository) UpdateWaitlistItemStatus(ctx context.Context, id, status st
 }
 
 // CreateWaitlistItemParams holds parameters for creating a waitlist item.
-type CreateWaitlistItemParams struct {
-	EventID        string
-	ProductID      string
-	PlatformUserID string
-	PlatformHandle string
-	Quantity       int
-	Position       int
-	// CartID is optional — populated when a waitlist row is created against
-	// an existing cart so the public checkout (/cart/:token) can list it.
-	CartID string
-}
+// CreateWaitlistItemParams's canonical home moved to internal/live (Bloco B4b);
+// this alias keeps the Repository builder and the remaining integration call
+// sites compiling unchanged.
+type CreateWaitlistItemParams = live.CreateWaitlistItemParams
 
 // WaitlistItemRow represents a waitlist item.
-type WaitlistItemRow struct {
-	ID             string
-	EventID        string
-	ProductID      string
-	PlatformUserID string
-	PlatformHandle string
-	Quantity       int
-	Position       int
-	Status         string
-	CartID         string
-	NotifiedAt     *time.Time
-	ExpiresAt      *time.Time
-}
+// WaitlistItemRow's canonical home moved to internal/inventory (Bloco B3a); this
+// alias keeps the repository builder and the B3b flows still in integration
+// compiling unchanged.
+type WaitlistItemRow = inventory.WaitlistItemRow
 
 // =============================================================================
 // ERP CONTACTS
@@ -1716,18 +1666,11 @@ func (r *Repository) MarkCartERPFinalisationFailed(ctx context.Context, cartID, 
 	})
 }
 
-// CartERPFinalisationRow is the slim view used by the admin retry endpoint
-// and order detail page. Status follows the cart column lifecycle:
-// pending|done|failed.
-type CartERPFinalisationRow struct {
-	CartID          string
-	Status          string
-	LastError       string
-	LastAttemptAt   *time.Time
-	AttemptsCount   int
-	ExternalOrderID string
-	PaymentSnapshot []byte
-}
+// CartERPFinalisationRow is the slim view used by the admin retry endpoint and
+// order detail page (status pending|done|failed). Canonical home is internal/erp
+// (Bloco B2c-2, where the legacy finalisation moved); aliased here so the
+// Repository (which owns the SQL) satisfies erp.ERPRepository directly.
+type CartERPFinalisationRow = erp.CartFinalisationStatus
 
 // GetCartERPFinalisationStatus reads the Order payment row's ERP finalisation
 // lifecycle fields. Used by the admin retry endpoint to gate the retry on
@@ -1804,15 +1747,12 @@ func (r *Repository) GetCartERPInvoice(ctx context.Context, cartID string) (*Car
 	return out, nil
 }
 
-// UpsertCartERPInvoiceParams carries the NFe fields written to the cart.
-// EmittedAt nil = preserve previous value (COALESCE on the SQL side).
-type UpsertCartERPInvoiceParams struct {
-	CartID        string
-	InvoiceID     string
-	InvoiceKey    string
-	InvoiceStatus string
-	EmittedAt     *time.Time
-}
+// UpsertCartERPInvoiceParams carries the NFe fields written to the Order's
+// payment row (EmittedAt nil = preserve previous value, COALESCE on the SQL
+// side). Canonical home is internal/erp (Bloco B2d — the invoice sync that
+// builds it lives there); aliased here so the Repository (which owns the SQL)
+// keeps compiling unchanged.
+type UpsertCartERPInvoiceParams = erp.UpsertCartERPInvoiceParams
 
 // UpsertCartERPInvoice persists the NFe pulled from the ERP onto the Order's
 // payment row (authoritative since Fatia 11b, resolved from cart_id). Idempotent
@@ -1857,17 +1797,22 @@ func (r *Repository) FindCartByExternalOrderID(ctx context.Context, externalOrde
 	return uuidToString(row.ID), nil
 }
 
-// NonWaitlistedCartItem represents a cart item that is not waitlisted, with product info.
-type NonWaitlistedCartItem struct {
-	ID                string
-	CartID            string
-	ProductID         string
-	Quantity          int
-	UnitPrice         int64
-	ProductName       string
-	ProductExternalID string
-	ProductKeyword    string
+// GetCartInvoiceAnchor returns just the two cart fields the NFe sync needs — the
+// owning store and the ERP order id. It reuses GetCartForPaidOrder (single source
+// for loading a paid cart) so the invoice sync never has to import CartRow; the
+// erp package reaches the cart only through this enxuto port (Bloco B2d).
+func (r *Repository) GetCartInvoiceAnchor(ctx context.Context, cartID string) (string, string, error) {
+	cart, err := r.GetCartForPaidOrder(ctx, cartID)
+	if err != nil {
+		return "", "", err
+	}
+	return cart.StoreID, cart.ExternalOrderID, nil
 }
+
+// NonWaitlistedCartItem represents a cart item that is not waitlisted, with
+// product info. Canonical home is internal/erp (Bloco B2c); aliased here so the
+// Repository (which owns the SQL) and its ~call sites keep compiling unchanged.
+type NonWaitlistedCartItem = erp.NonWaitlistedCartItem
 
 // ListNonWaitlistedCartItems returns non-waitlisted cart items with product external_id for ERP sync.
 func (r *Repository) ListNonWaitlistedCartItems(ctx context.Context, cartID string) ([]NonWaitlistedCartItem, error) {
@@ -2080,15 +2025,10 @@ func (r *Repository) UpdateCartStatus(ctx context.Context, cartID, status string
 }
 
 // ExpireCartResult is the outcome of the atomic flip+local-release transaction.
-type ExpireCartResult struct {
-	// Eligible=false quando o guard do UPDATE devolveu 0 rows (o cart foi pago
-	// ou já expirado/cancelado no intervalo) — o caller ABORTA sem tocar ERP.
-	Eligible bool
-	EventID  string
-	// FreedProductIDs: produtos cujo estoque local foi devolvido (para promover
-	// a waitlist depois do commit).
-	FreedProductIDs []string
-}
+// ExpireCartResult is the outcome of ExpireCartAndReleaseStock. Its canonical
+// home moved to internal/inventory (Bloco B3b); this alias keeps the repository
+// transaction compiling unchanged.
+type ExpireCartResult = inventory.ExpireCartResult
 
 // ExpireCartAndReleaseStock faz, numa ÚNICA transação: (1) o flip guard-first
 // do cart para 'expired' (ExpireCart — recusa cart pago/já-terminal) e, só se
@@ -2244,7 +2184,7 @@ func (r *Repository) CancelCartAndReleaseStock(ctx context.Context, cartID, stor
 		// dedup_key VAZIO de propósito (opt-out do índice único do outbox).
 		//
 		// A justificativa original era o reopen: o MESMO cart voltava à vida e
-		// podia ser cancelado outra vez. Isso acabou na 000105 — o carrinho tem
+		// podia ser cancelado outra vez. Isso acabou na 000107 — o carrinho tem
 		// ciclo de vida linear e cada cancelamento é de um cart distinto. A
 		// chave vazia fica assim mesmo por ser o lado seguro: ela permite um
 		// duplicado que não deve acontecer, enquanto "cart.cancelled:<id>"
@@ -2458,12 +2398,10 @@ func (r *Repository) GetCartByID(ctx context.Context, cartID string) (*CartRow, 
 // The window matters because ExpireCartAndReleaseStock's guard does NOT check
 // expires_at (the sweep pre-filters by it), so a scheduled task firing on a cart
 // whose window was extended must NOT expire it prematurely.
-type CartExpirySnapshot struct {
-	StoreID       string
-	Status        string
-	PaymentStatus string
-	ExpiresAt     *time.Time
-}
+// CartExpirySnapshot holds a cart's expiry-relevant fields. Its canonical home
+// moved to internal/inventory (Bloco B3b); this alias keeps the repository
+// builder and the ScheduleExpiry/RunScheduledExpiry bridge compiling unchanged.
+type CartExpirySnapshot = inventory.CartExpirySnapshot
 
 // GetCartExpirySnapshot loads the expiry-relevant fields for a cart, with the
 // store resolved from the event. Returns (nil, nil) when the cart is gone.
@@ -2648,7 +2586,9 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Guard da query recusou: cart expirado/cancelado. Não é falha.
-			return ErrCartNotPayable
+			// Sentinel vive no pacote payment (B1d) — fonte única, consumido pelo
+			// webhook de pagamento que agora mora lá.
+			return paymentdomain.ErrCartNotPayable
 		}
 		return fmt.Errorf("updating cart payment status: %w", err)
 	}
@@ -2850,27 +2790,13 @@ func (r *Repository) ListCartsByEventForERP(ctx context.Context, eventID string)
 // =============================================================================
 
 // StockReservationRow represents a stock reservation for ERP operations.
-type StockReservationRow struct {
-	ID                string
-	EventID           string
-	CartID            string
-	ProductID         string
-	ExternalProductID string
-	Quantity          int
-	ERPMovementID     string
-	Status            string
-	CreatedAt         time.Time
-}
+// StockReservationRow / CreateStockReservationParams have their canonical home
+// in internal/erp (Bloco B2b). Aliased here so the Repository (which owns the
+// SQL) and the integration call sites keep compiling unchanged.
+type StockReservationRow = erp.StockReservationRow
 
 // CreateStockReservationParams holds params for creating a stock reservation.
-type CreateStockReservationParams struct {
-	EventID           string
-	CartID            string
-	ProductID         string
-	ExternalProductID string
-	Quantity          int
-	ERPMovementID     string
-}
+type CreateStockReservationParams = erp.CreateStockReservationParams
 
 // CreateStockReservation creates a stock reservation record.
 func (r *Repository) CreateStockReservation(ctx context.Context, params CreateStockReservationParams) (*StockReservationRow, error) {
@@ -3188,11 +3114,8 @@ func (r *Repository) ReverseReservationByID(ctx context.Context, reservationID s
 }
 
 // CartERPOrderState is the order-as-reservation lifecycle snapshot (design C).
-type CartERPOrderState struct {
-	State           string
-	StockLaunched   bool
-	ExternalOrderID string
-}
+// Canonical home is internal/erp (Bloco B2b); aliased here for the Repository.
+type CartERPOrderState = erp.CartERPOrderState
 
 // GetCartERPOrderState reads the cart's order-as-reservation state.
 func (r *Repository) GetCartERPOrderState(ctx context.Context, cartID string) (*CartERPOrderState, error) {
@@ -3243,12 +3166,8 @@ func (r *Repository) SetCartERPStockLaunched(ctx context.Context, cartID string,
 }
 
 // StuckERPOrderOp is a conversion/mutation stuck in flight (process died).
-type StuckERPOrderOp struct {
-	CartID          string
-	State           string
-	ExternalOrderID string
-	StoreID         string
-}
+// Canonical home is internal/erp (Bloco B2c); aliased here.
+type StuckERPOrderOp = erp.StuckERPOrderOp
 
 // ListStuckERPOrderOps lists carts stuck in converting/mutating older than
 // the threshold — input for the reconciliation sweep.
@@ -3271,12 +3190,9 @@ func (r *Repository) ListStuckERPOrderOps(ctx context.Context, olderThan time.Du
 
 // StaleStockWebhookIntegration is an active Tiny integration that stopped
 // receiving stock webhooks — the Tiny side silently removes the URL after
-// consecutive delivery failures (field lesson, 11/07/2026).
-type StaleStockWebhookIntegration struct {
-	IntegrationID    string
-	StoreID          string
-	LastStockEventAt *time.Time
-}
+// consecutive delivery failures (field lesson, 11/07/2026). Canonical home is
+// internal/erp (Bloco B2c); aliased here.
+type StaleStockWebhookIntegration = erp.StaleStockWebhookIntegration
 
 // ListTinyIntegrationsWithStaleStockWebhook lists active Tiny integrations
 // with zero 'estoque' webhook events in the window and no alert in the last
@@ -3453,11 +3369,9 @@ func (r *Repository) GetCartItemAvailableQty(ctx context.Context, cartID, produc
 }
 
 // StoreInfo contains minimal store information needed for notifications.
-type StoreInfo struct {
-	Name                  string
-	CartExpirationMinutes int
-	MaxQuantityPerItem    int
-}
+// StoreInfo's canonical home moved to internal/live (Bloco B4b); this alias
+// keeps GetStoreInfo and its callers compiling unchanged.
+type StoreInfo = live.StoreInfo
 
 // StoreShippingDefaults are the merchant-configured fallback dimensions used
 // when an ERP-imported product carries weight only (e.g. Tiny camisetas).

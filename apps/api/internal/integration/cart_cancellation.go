@@ -106,14 +106,12 @@ func (s *Service) ReactCartCancelledERP(ctx context.Context, cartID, storeID str
 // carts convertidos (design C) têm o PEDIDO cancelado — é o cancelamento que
 // devolve o estoque no Tiny — e carts não convertidos têm as reservas
 // saída-manual estornadas. Idempotente por erp_order_state.
+//
+// Um cart cancelado pelo lojista e um expirado deixam EXATAMENTE a mesma pegada
+// pré-pagamento, então reusamos o reactor canônico do pacote erp (OnCartExpired)
+// — DRY, um único ponto de verdade para a reversão (Regra nº1). A extração do
+// ERP (Bloco B2) tornou reverseCartReservationsInERP privado ao erp; OnCartExpired
+// é a superfície pública equivalente.
 func (s *Service) reverseCartERPFootprint(ctx context.Context, cartID, storeID string) error {
-	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
-	if err != nil {
-		return err
-	}
-	if st.State != erpOrderStateNone && st.State != erpOrderStateCancelled {
-		return s.CancelERPOrderForCart(ctx, cartID, storeID)
-	}
-	s.reverseCartReservationsInERP(ctx, cartID, storeID)
-	return nil
+	return s.ERP().OnCartExpired(ctx, cartID, storeID)
 }

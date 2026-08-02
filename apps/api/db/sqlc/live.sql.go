@@ -275,7 +275,7 @@ type GetMetricCutoverRow struct {
 }
 
 // =============================================================================
-// MARCADOR DE CORTE DA ATRIBUIÇÃO (D26 / 000119)
+// MARCADOR DE CORTE DA ATRIBUIÇÃO (D26 / 000121)
 // =============================================================================
 // O instante em que uma métrica mudou de definição. Sem chave conhecida a query
 // devolve pgx.ErrNoRows e o chamador segue sem marcador — a métrica continua
@@ -315,7 +315,7 @@ LIMIT 1
 // campanha e o evento de outra. Ordenando pelas mesmas colunas de lsp — e
 // desempatando por lsp.id, que é único — as duas elegem a mesma linha por
 // construção. Hoje isso é inócuo (a UNIQUE global garante uma linha só); a
-// ambiguidade nasce com a unique parcial da 000115.
+// ambiguidade nasce com a unique parcial da 000117.
 func (q *Queries) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID string) (LiveSession, error) {
 	row := q.db.QueryRow(ctx, getSessionByPlatformLiveID, platformLiveID)
 	var i LiveSession
@@ -482,7 +482,7 @@ type ListPollableMediaRow struct {
 // que ends_at vence, então prometia 2 dias e entregava 0.
 //
 // live_events não tem ended_at: o carimbo de encerramento é ends_at (que a
-// RN-05 tornou obrigatório e a 000112 backfillou nos legados encerrados), com
+// RN-05 tornou obrigatório e a 000114 backfillou nos legados encerrados), com
 // updated_at como último recurso. Encerramento manual antes do ends_at deixa a
 // janela mais LARGA que 7 dias, nunca mais estreita — erra para o lado de
 // responder.
@@ -622,7 +622,7 @@ type SetMediaMetadataParams struct {
 
 // GetPlatformByLiveID foi REMOVIDA: não tinha nenhum chamador (só o wrapper de
 // repositório, que também não tinha) e era um `:one` sem ORDER BY sobre
-// platform_live_id — a coluna que a 000115 deixou de ter UNIQUE global. Quem a
+// platform_live_id — a coluna que a 000117 deixou de ter UNIQUE global. Quem a
 // ligasse teria o mesmo bug silencioso das duas queries de resolução: pgx lê a
 // primeira linha e descarta o resto sem erro, então o reuso de um post fixado
 // devolveria uma campanha ARBITRÁRIA. As duas resoluções vivas
@@ -758,10 +758,10 @@ type SetSessionPublishAtParams struct {
 }
 
 // =============================================================================
-// PUBLICAÇÃO AGENDADA (RN-31 / 000121)
+// PUBLICAÇÃO AGENDADA (RN-31 / 000123)
 // =============================================================================
 // Registra em live_sessions.publish_at QUANDO esta transmissão foi publicada
-// por agendamento. A coluna existe desde a 000112 e até aqui não tinha
+// por agendamento. A coluna existe desde a 000114 e até aqui não tinha
 // escritor nenhum: o agendador é o motivo pelo qual ela foi criada, e sem esta
 // escrita "quando publica" passaria a viver só em session_publish_jobs — duas
 // fontes da verdade para a mesma pergunta, que é o erro que o épico desfaz.

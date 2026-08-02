@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -217,10 +218,15 @@ func (l *Listener) createPaidOrder(
 	// shipping_service_id é um id opaco (int-as-string p/ ME, ObjectId/UUID p/
 	// outros) — congelado como TEXT, igual à fonte carts, sem parse com perda.
 	//
-	// tracking_token NÃO é copiado do cart (Fatia 10-a): order_logistics é a fonte
-	// da verdade e nasce NULL aqui. O postcheckout OnCartPaid o gera e grava
-	// (SetOrderLogisticsTrackingToken) já na mesma task cart.paid — este listener
-	// materializa a Order ANTES do fan-out do postcheckout.
+	// tracking_token nasce AQUI (Fatia A4): a Order é o dono canônico do rastreio
+	// (order_logistics é a fonte da verdade — Fatia 10-a), então o token é gerado
+	// na própria materialização, atômico com a Order. O postcheckout não o gera
+	// mais. Como esta materialização só roda quando a Order ainda não existe (early
+	// return em OnCartPaid), o token é set-once por construção.
+	trackingToken, err := generateTrackingToken()
+	if err != nil {
+		return fmt.Errorf("order OnCartPaid: generate tracking token: %w", err)
+	}
 	logParams := sqlc.InsertOrderLogisticsParams{
 		OrderID:               orderRow.ID,
 		ShippingAddress:       cart.ShippingAddress,
@@ -231,10 +237,26 @@ func (l *Listener) createPaidOrder(
 		ShippingCostCents:     cart.ShippingCostCents,
 		ShippingCostRealCents: cart.ShippingCostRealCents,
 		ShippingDeadlineDays:  pgtype.Int4{Int32: cart.ShippingDeadlineDays.Int32, Valid: cart.ShippingDeadlineDays.Valid},
+		TrackingToken:         pgtype.Text{String: trackingToken, Valid: true},
 	}
 
 	if err := qtx.InsertOrderLogistics(ctx, logParams); err != nil {
 		return fmt.Errorf("order OnCartPaid: insert order_logistics: %w", err)
+	}
+
+	// Timeline `payment_confirmed` nasce na MESMA tx da Order (Fatia A4): token +
+	// timeline são atômicos com a materialização. Idempotente via ON CONFLICT
+	// (order_id, event_type) DO NOTHING — o insert :one devolve pgx.ErrNoRows
+	// quando a linha já existe, que aqui é o caminho de dedup, não um erro.
+	if _, err := qtx.InsertOrderEvent(ctx, sqlc.InsertOrderEventParams{
+		OrderID:    orderRow.ID,
+		CartID:     cid,
+		EventType:  "payment_confirmed",
+		OccurredAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		Source:     "system",
+		Metadata:   json.RawMessage("{}"),
+	}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("order OnCartPaid: insert payment_confirmed event: %w", err)
 	}
 
 	// Fatia 11a: emit the canonical order.paid bus fact in the SAME tx as the

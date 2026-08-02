@@ -11,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/notification"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
 )
@@ -75,12 +76,6 @@ type NotifyEventCheckoutResult struct {
 	ReasonText string
 }
 
-// ERPFinalizer is called at event end to reverse stock reservations and
-// create final sales orders in the ERP. Local interface to avoid import cycle.
-type ERPFinalizer interface {
-	FinalizeEventERP(ctx context.Context, storeID, eventID string) error
-}
-
 // CustomerUpserter creates or updates a customer record from cart-creation
 // inputs and returns the customer UUID. Wired from the customer package via
 // SetCustomerUpserter to keep this package free of customer internals.
@@ -92,9 +87,28 @@ type Service struct {
 	repo             *Repository
 	logger           *zap.Logger
 	notifier         Notifier
-	erpFinalizer     ERPFinalizer
 	customerUpserter CustomerUpserter
 	closeScheduler   EventCloseScheduler
+	ingestRepo       IngestRepository
+
+	// Comment ingestion core collaborators (Bloco B4b). All five are wired via
+	// setters AFTER the services are built (integration.Service is the concrete
+	// impl and depends on live.Service), so every use is nil-guarded lazily.
+	// stockReserver breaks the erp import cycle (neutral ReserveParams);
+	// billingGate/webhookAuditor/socialReplier are satisfied by integration.Service
+	// directly; notificationSvc is imported directly (notification has no cycle).
+	stockReserver   StockReserver
+	billingGate     BillingGate
+	webhookAuditor  WebhookAuditor
+	socialReplier   SocialReplier
+	notificationSvc *notification.Service
+
+	// core is the slice of this Service's own behaviour the comment consumer
+	// reuses (session/event lookups, AddToCart, event-product whitelist). It
+	// defaults to the Service itself (wired in NewService) so production is a
+	// plain self-call; unit tests swap in a fake to exercise the core without a
+	// database. See the commentCore interface in comment.go.
+	core commentCore
 }
 
 // SetEventCloseScheduler wires the ETA scheduler for timed-event window close
@@ -102,11 +116,33 @@ type Service struct {
 func (s *Service) SetEventCloseScheduler(sch EventCloseScheduler) { s.closeScheduler = sch }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {
-	return &Service{
+	s := &Service{
 		repo:   repo,
 		logger: logger.Named("live"),
 	}
+	// The comment core reuses this Service's own methods through the commentCore
+	// seam; in production that is the Service itself.
+	s.core = s
+	return s
 }
+
+// SetStockReserver wires the local+ERP stock reservation collaborator used by the
+// comment ingestion core. Optional — nil means stock reservations are skipped.
+func (s *Service) SetStockReserver(r StockReserver) { s.stockReserver = r }
+
+// SetBillingGate wires the paywall gate (PRD 007). Optional — nil means no gating.
+func (s *Service) SetBillingGate(g BillingGate) { s.billingGate = g }
+
+// SetWebhookAuditor wires the webhook-event audit sink. Optional — nil skips audit.
+func (s *Service) SetWebhookAuditor(a WebhookAuditor) { s.webhookAuditor = a }
+
+// SetSocialReplier wires the Instagram DM / comment-reply ACL. Optional — nil
+// skips replies (max-quantity and post-commerce answers).
+func (s *Service) SetSocialReplier(r SocialReplier) { s.socialReplier = r }
+
+// SetNotificationService wires the notification service used for the immediate
+// checkout DM/email. Optional — nil skips immediate notifications.
+func (s *Service) SetNotificationService(svc *notification.Service) { s.notificationSvc = svc }
 
 // SetNotifier wires a Notifier into the service after construction. This
 // breaks the dependency cycle between live and integration packages
@@ -114,11 +150,6 @@ func NewService(repo *Repository, logger *zap.Logger) *Service {
 // depends on integration.Service).
 func (s *Service) SetNotifier(n Notifier) {
 	s.notifier = n
-}
-
-// SetERPFinalizer wires an ERPFinalizer into the service after construction.
-func (s *Service) SetERPFinalizer(f ERPFinalizer) {
-	s.erpFinalizer = f
 }
 
 // SetCustomerUpserter wires a CustomerUpserter into the service. When set,
@@ -139,7 +170,7 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 	// RN-05: ends_at é o TETO da campanha e não tem default razoável. A RN-04
 	// deixa expires_at NULL durante o evento inteiro, então um evento sem fim é
 	// um carrinho sem prazo e um estoque reservado para sempre. O banco reforça
-	// com NOT NULL desde a 000120; esta checagem existe para a resposta ser 400
+	// com NOT NULL desde a 000122; esta checagem existe para a resposta ser 400
 	// com texto, e não 500 vindo de uma constraint.
 	if input.EndsAt == nil {
 		return CreateLiveOutput{}, httpx.ErrBadRequest("endsAt é obrigatório: o evento precisa de uma data de encerramento")
@@ -172,7 +203,7 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 	// Havia dois caminhos aqui — com plataforma (evento+sessão numa transação) e
 	// sem plataforma (só o evento) — e o segundo produzia um evento SEM SESSÃO
 	// NENHUMA. Isso era inofensivo enquanto whitelist e modo live moravam em
-	// live_events; desde a 000110/000111 eles moram em live_sessions, e o evento
+	// live_events; desde a 000112/000113 eles moram em live_sessions, e o evento
 	// sem sessão deixou de ter onde guardar configuração: POST /lives/:id/whitelist
 	// gravava zero linhas e respondia 404 ("produto nao esta na whitelist"), e
 	// destacar produto virava no-op silencioso. O formulário de evento do painel
@@ -957,21 +988,9 @@ func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, e
 		)
 	}
 
-	// 3.5. Reverse ERP stock reservations and create final sales orders (async — never blocks the response).
 	// Capture the slug before spawning detached goroutines: the request ctx is
 	// recycled by fasthttp when the response is sent.
 	storeSlug, _ := ctx.Value(logger.StoreSlugKey).(string)
-	if s.erpFinalizer != nil {
-		go func() {
-			bgCtx := logger.WithStore(context.Background(), input.StoreID, storeSlug)
-			if err := s.erpFinalizer.FinalizeEventERP(bgCtx, input.StoreID, event.ID); err != nil {
-				logger.From(bgCtx, s.logger).Error("failed to finalize ERP for event",
-					zap.String("event_id", event.ID),
-					zap.Error(err),
-				)
-			}
-		}()
-	}
 
 	// 4. Determine if we should auto-send checkout links.
 	// Carts are unique per (event_id, platform_user_id), so multi-session
@@ -1177,7 +1196,7 @@ func (s *Service) GetLatestReplyTarget(ctx context.Context, eventID, platformUse
 // dele para fechar o job — e é a mesma resolução, feita uma vez só.
 //
 // A escrita de publish_at existe para não haver duas fontes da verdade sobre
-// "quando publica". A coluna entrou na 000112 e passou o épico inteiro sem
+// "quando publica". A coluna entrou na 000114 e passou o épico inteiro sem
 // escritor; se o agendador guardasse a hora apenas em session_publish_jobs, a
 // sessão continuaria mentindo que nunca foi agendada.
 func (s *Service) MarkSessionPublished(ctx context.Context, mediaID string, publishAt time.Time) (string, error) {

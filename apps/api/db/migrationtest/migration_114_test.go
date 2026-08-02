@@ -1,29 +1,29 @@
 package migrationtest
 
-// Teste da migration 000114: released_at + os dois triggers que a mantem.
+// Teste da migration 000114: janela comercial do evento (starts_at/ends_at) e
+// agendamento de publicacao da sessao (publish_at).
 //
-// O trigger E CODIGO, e codigo sem teste e suposicao. O que precisa ficar
-// provado — e cada item corresponde a um caminho real de encerramento que o Go
-// NAO cobriria se a coluna fosse mantida em EndLiveEvent:
-//  1. backfill libera a midia de evento ja encerrado antes da migration;
-//  2. encerrar pelo caminho do sqlc (EndLiveEvent / botao manual) libera;
-//  3. encerrar por UPDATE cru — o que EndEventByMediaID faz, fora do sqlc, e o
-//     que um incidente faz na mao — libera igual;
-//  4. reabrir a campanha volta a midia para "em uso";
-//  5. midia INSERIDA numa sessao de evento ja encerrado nasce liberada;
-//  6. transicao de status que nao envolve 'ended' nao mexe em nada;
-//  7. o down remove coluna, triggers e funcoes.
+// O que precisa ficar provado:
+//  1. starts_at herda scheduled_at quando havia intencao explicita de inicio, e
+//     fica NULL quando nao havia — inventar data mudaria rotulo ja visto;
+//  2. evento ENCERRADO sem ends_at ganha o carimbo do fim (MAX(ended_at) das
+//     sessoes, senao updated_at);
+//  3. evento VIVO sem ends_at NAO e tocado: gravar ends_at nele o fecharia no
+//     primeiro sweep;
+//  4. ends_at continua NULLABLE e SEM CHECK — um CHECK aqui quebraria todo
+//     UPDATE de evento legado, inclusive o do caminho de pagamento;
+//  5. publish_at nasce na sessao;
+//  6. o down desfaz o que e reversivel.
 
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestMigration000114LspReleasedAt(t *testing.T) {
+func TestMigration000114EventWindowAndPublishAt(t *testing.T) {
 	adminURL := mustEnv(t)
 	url, cleanup := freshDB(t, adminURL)
 	defer cleanup()
@@ -35,7 +35,7 @@ func TestMigration000114LspReleasedAt(t *testing.T) {
 	defer m.Close()
 
 	if err := m.Migrate(113); err != nil {
-		t.Fatalf("migrate ate 113: %v", err)
+		t.Fatalf("migrate ate 111: %v", err)
 	}
 
 	pool, err := pgxpool.New(context.Background(), url)
@@ -47,151 +47,159 @@ func TestMigration000114LspReleasedAt(t *testing.T) {
 
 	var storeID string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO stores (name, slug) VALUES ('Midia','midia-114') RETURNING id::text`,
+		`INSERT INTO stores (name, slug) VALUES ('Janela Test','win-112') RETURNING id::text`,
 	).Scan(&storeID); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
 
-	// seedEvent cria evento + sessao + midia e devolve (eventID, sessionID).
-	seedEvent := func(title, status, mediaID string) (string, string) {
-		t.Helper()
-		var eventID, sessionID string
-		if err := pool.QueryRow(ctx,
-			`INSERT INTO live_events (store_id, status, title, type) VALUES ($1,$2,$3,'post') RETURNING id::text`,
-			storeID, status, title,
-		).Scan(&eventID); err != nil {
-			t.Fatalf("seed evento %s: %v", title, err)
-		}
-		var endedAt any
-		if status == "ended" {
-			endedAt = time.Now()
-		}
-		if err := pool.QueryRow(ctx,
-			`INSERT INTO live_sessions (event_id, status, type, sequence_order, ended_at)
-			 VALUES ($1,$2,'post',1,$3) RETURNING id::text`,
-			eventID, status, endedAt,
-		).Scan(&sessionID); err != nil {
-			t.Fatalf("seed sessao %s: %v", title, err)
-		}
-		if mediaID != "" {
-			if _, err := pool.Exec(ctx,
-				`INSERT INTO live_session_platforms (session_id, platform, platform_live_id)
-				 VALUES ($1,'instagram',$2)`, sessionID, mediaID,
-			); err != nil {
-				t.Fatalf("seed midia %s: %v", mediaID, err)
-			}
-		}
-		return eventID, sessionID
+	// (a) evento agendado: tem scheduled_at, deve virar starts_at.
+	var scheduledEvent string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO live_events (store_id, status, title, type, scheduled_at)
+		 VALUES ($1,'scheduled','Agendado','multi', now() + interval '2 days')
+		 RETURNING id::text`, storeID,
+	).Scan(&scheduledEvent); err != nil {
+		t.Fatalf("seed evento agendado: %v", err)
 	}
 
-	released := func(mediaID string) bool {
-		t.Helper()
-		var n int
-		if err := pool.QueryRow(ctx,
-			`SELECT count(*) FROM live_session_platforms WHERE platform_live_id = $1 AND released_at IS NOT NULL`,
-			mediaID,
-		).Scan(&n); err != nil {
-			t.Fatalf("ler released_at de %s: %v", mediaID, err)
-		}
-		return n == 1
+	// (b) evento vivo sem janela nenhuma: nao pode ganhar ends_at.
+	var liveEvent string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO live_events (store_id, status, title, type)
+		 VALUES ($1,'active','Ao vivo','multi') RETURNING id::text`, storeID,
+	).Scan(&liveEvent); err != nil {
+		t.Fatalf("seed evento vivo: %v", err)
 	}
 
-	// Legado: uma campanha ja encerrada e uma viva, ambas com midia.
-	endedID, _ := seedEvent("Encerrada", "ended", "media-legado")
-	seedEvent("Viva", "active", "media-viva")
+	// (c) evento encerrado com sessao encerrada: ends_at = MAX(ended_at).
+	var endedWithSession string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO live_events (store_id, status, title, type)
+		 VALUES ($1,'ended','Encerrado com sessao','multi') RETURNING id::text`, storeID,
+	).Scan(&endedWithSession); err != nil {
+		t.Fatalf("seed evento encerrado: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO live_sessions (event_id, status, sequence_order, ended_at)
+		 VALUES ($1,'ended',1, now() - interval '3 days'),
+		        ($1,'ended',2, now() - interval '1 day')`, endedWithSession,
+	); err != nil {
+		t.Fatalf("seed sessoes encerradas: %v", err)
+	}
+
+	// (d) evento encerrado SEM sessao: cai no updated_at.
+	var endedNoSession string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO live_events (store_id, status, title, type)
+		 VALUES ($1,'ended','Encerrado sem sessao','multi') RETURNING id::text`, storeID,
+	).Scan(&endedNoSession); err != nil {
+		t.Fatalf("seed evento encerrado sem sessao: %v", err)
+	}
 
 	// --- aplica a 000114 ---------------------------------------------------
 	if err := m.Migrate(114); err != nil {
-		t.Fatalf("migrate ate 114: %v", err)
+		t.Fatalf("migrate ate 112: %v", err)
 	}
 
-	// 1: backfill.
-	if !released("media-legado") {
-		t.Error("backfill nao liberou a midia de evento ja encerrado — ela ficaria presa e o reuso nunca aconteceria")
+	// 1. starts_at copiado de scheduled_at.
+	var sameStart bool
+	if err := pool.QueryRow(ctx,
+		`SELECT starts_at IS NOT NULL AND starts_at = scheduled_at
+		 FROM live_events WHERE id = $1::uuid`, scheduledEvent,
+	).Scan(&sameStart); err != nil {
+		t.Fatalf("ler starts_at do agendado: %v", err)
 	}
-	if released("media-viva") {
-		t.Error("backfill liberou midia de evento VIVO")
+	if !sameStart {
+		t.Error("evento agendado nao herdou starts_at de scheduled_at")
 	}
 
-	// 2: encerrar pelo caminho do sqlc (o mesmo UPDATE que EndLiveEvent faz).
-	sqlcEventID, _ := seedEvent("Botao", "active", "media-botao")
+	// ... e NULL quando nao havia intencao.
+	var startNull bool
+	if err := pool.QueryRow(ctx,
+		`SELECT starts_at IS NULL FROM live_events WHERE id = $1::uuid`, liveEvent,
+	).Scan(&startNull); err != nil {
+		t.Fatalf("ler starts_at do vivo: %v", err)
+	}
+	if !startNull {
+		t.Error("evento sem scheduled_at ganhou starts_at inventado")
+	}
+
+	// 2. Encerrado com sessao: ends_at = maior ended_at das sessoes.
+	var matchesMaxEnded bool
+	if err := pool.QueryRow(ctx,
+		`SELECT e.ends_at IS NOT NULL
+		        AND e.ends_at = (SELECT MAX(ls.ended_at) FROM live_sessions ls WHERE ls.event_id = e.id)
+		 FROM live_events e WHERE e.id = $1::uuid`, endedWithSession,
+	).Scan(&matchesMaxEnded); err != nil {
+		t.Fatalf("ler ends_at do encerrado: %v", err)
+	}
+	if !matchesMaxEnded {
+		t.Error("evento encerrado nao recebeu ends_at = MAX(ended_at) das sessoes")
+	}
+
+	// ... e o sem sessao cai no updated_at.
+	var matchesUpdated bool
+	if err := pool.QueryRow(ctx,
+		`SELECT ends_at IS NOT NULL AND ends_at = updated_at
+		 FROM live_events WHERE id = $1::uuid`, endedNoSession,
+	).Scan(&matchesUpdated); err != nil {
+		t.Fatalf("ler ends_at do encerrado sem sessao: %v", err)
+	}
+	if !matchesUpdated {
+		t.Error("evento encerrado sem sessao nao caiu no updated_at")
+	}
+
+	// 3. Evento VIVO nao foi tocado — este e o teste que impede o backfill de
+	//    fechar campanha em andamento.
+	var liveEndsAtNull bool
+	if err := pool.QueryRow(ctx,
+		`SELECT ends_at IS NULL FROM live_events WHERE id = $1::uuid`, liveEvent,
+	).Scan(&liveEndsAtNull); err != nil {
+		t.Fatalf("ler ends_at do vivo: %v", err)
+	}
+	if !liveEndsAtNull {
+		t.Error("backfill gravou ends_at num evento ATIVO — ele fecharia no primeiro sweep")
+	}
+
+	// 4. ends_at segue nullable e sem CHECK: UPDATE em evento legado sem janela
+	//    tem de continuar passando (o caminho de pagamento faz isso).
 	if _, err := pool.Exec(ctx,
-		`UPDATE live_events SET status = 'ended', updated_at = now() WHERE id = $1::uuid`, sqlcEventID,
+		`UPDATE live_events SET total_orders = total_orders + 1 WHERE id = $1::uuid`, liveEvent,
 	); err != nil {
-		t.Fatalf("encerrar pelo sqlc: %v", err)
-	}
-	if !released("media-botao") {
-		t.Error("encerramento pelo caminho do sqlc nao liberou a midia")
+		t.Fatalf("UPDATE em evento sem ends_at falhou — a obrigatoriedade nao pode estar no banco ainda: %v", err)
 	}
 
-	// 3: encerrar por UPDATE cru com WHERE por EXISTS — a forma exata do
-	// EndEventByMediaID, que vive fora do sqlc e por isso nunca seria coberto
-	// se released_at fosse mantido no Go.
-	seedEvent("MidiaSumiu", "active", "media-sumiu")
-	if _, err := pool.Exec(ctx, `
-		UPDATE live_events e
-		SET status = 'ended', updated_at = now()
-		WHERE e.status <> 'ended'
-		  AND EXISTS (
-		      SELECT 1 FROM live_sessions ls
-		      JOIN live_session_platforms lsp ON lsp.session_id = ls.id
-		      WHERE ls.event_id = e.id AND lsp.platform_live_id = 'media-sumiu')`,
-	); err != nil {
-		t.Fatalf("encerrar por UPDATE cru: %v", err)
-	}
-	if !released("media-sumiu") {
-		t.Error("encerramento em SQL cru nao liberou a midia — e o caminho que o codigo Go nao cobriria")
+	// 5. publish_at existe na sessao e aceita NULL e valor.
+	var publishSession string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO live_sessions (event_id, status, sequence_order, publish_at)
+		 VALUES ($1,'scheduled',9, now() + interval '1 day') RETURNING id::text`, liveEvent,
+	).Scan(&publishSession); err != nil {
+		t.Fatalf("inserir sessao com publish_at: %v", err)
 	}
 
-	// 4: reabrir devolve a midia para "em uso".
-	if _, err := pool.Exec(ctx,
-		`UPDATE live_events SET status = 'active' WHERE id = $1::uuid`, endedID,
-	); err != nil {
-		t.Fatalf("reabrir: %v", err)
-	}
-	if released("media-legado") {
-		t.Error("campanha reaberta deixou a midia liberada — outra campanha poderia toma-la")
-	}
-
-	// 5: midia vinculada a uma sessao de evento ja encerrado nasce liberada.
-	_, encerradoSessionID := seedEvent("Reparo", "ended", "")
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO live_session_platforms (session_id, platform, platform_live_id)
-		 VALUES ($1,'instagram','media-tardia')`, encerradoSessionID,
-	); err != nil {
-		t.Fatalf("inserir midia tardia: %v", err)
-	}
-	if !released("media-tardia") {
-		t.Error("midia inserida em evento ja encerrado nasceu 'em uso' — o trigger de UPDATE nao a alcanca")
-	}
-
-	// 6: transicao que nao envolve 'ended' nao mexe em nada.
-	naoEndedID, _ := seedEvent("Agendada", "scheduled", "media-agendada")
-	if _, err := pool.Exec(ctx,
-		`UPDATE live_events SET status = 'active' WHERE id = $1::uuid`, naoEndedID,
-	); err != nil {
-		t.Fatalf("scheduled -> active: %v", err)
-	}
-	if released("media-agendada") {
-		t.Error("transicao scheduled->active liberou midia")
-	}
-
-	// 7: down limpa coluna, triggers e funcoes.
+	// 6. Down.
 	if err := m.Migrate(113); err != nil {
-		t.Fatalf("down para 113: %v", err)
+		t.Fatalf("down para 111: %v", err)
 	}
 	var n int
-	if err := pool.QueryRow(ctx, `
-		SELECT (SELECT count(*) FROM information_schema.columns
-		         WHERE table_name = 'live_session_platforms' AND column_name = 'released_at')
-		     + (SELECT count(*) FROM pg_trigger
-		         WHERE tgname IN ('trg_sync_lsp_released_at','trg_set_lsp_released_at_on_insert'))
-		     + (SELECT count(*) FROM pg_proc
-		         WHERE proname IN ('sync_lsp_released_at','set_lsp_released_at_on_insert'))`,
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM information_schema.columns
+		 WHERE (table_name = 'live_events'   AND column_name = 'starts_at')
+		    OR (table_name = 'live_sessions' AND column_name = 'publish_at')`,
 	).Scan(&n); err != nil {
-		t.Fatalf("checar residuo apos down: %v", err)
+		t.Fatalf("checar colunas apos down: %v", err)
 	}
 	if n != 0 {
-		t.Errorf("down deixou %d objetos para tras (coluna/trigger/funcao)", n)
+		t.Errorf("down deixou %d coluna(s) para tras", n)
+	}
+	// O ends_at dos encerrados fica de proposito (dado derivado e correto).
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM live_events WHERE status = 'ended' AND ends_at IS NOT NULL`,
+	).Scan(&n); err != nil {
+		t.Fatalf("checar ends_at apos down: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("down apagou o ends_at dos encerrados (%d de 2 restantes)", n)
 	}
 }

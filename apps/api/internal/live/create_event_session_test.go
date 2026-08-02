@@ -2,7 +2,7 @@ package live
 
 // D1 — todo evento nasce com pelo menos UMA sessão, mesmo sem mídia.
 //
-// Por que este teste existe: a whitelist (000110) e o modo live (000111)
+// Por que este teste existe: a whitelist (000112) e o modo live (000113)
 // desceram de live_events para live_sessions. A criação de evento tinha DOIS
 // caminhos, e o caminho sem platformLiveId — que é o padrão do formulário do
 // painel, porque o lojista raramente já tem o id da live na hora de marcar a

@@ -2,7 +2,7 @@ package live
 
 // RN-08: carrinho expirado + comprador volta = carrinho NOVO, antigo arquivado.
 //
-// Antes da 000105 a unique era total, então GetOrCreateCart não conseguia criar
+// Antes da 000107 a unique era total, então GetOrCreateCart não conseguia criar
 // um 2º carrinho e reabria o morto in-place — APAGANDO os itens do comprador
 // (DeleteCartItemsByCart). Numa campanha de uma semana isso apagaria a compra de
 // dias. Estes testes provam que nada mais é destruído.

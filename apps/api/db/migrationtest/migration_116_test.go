@@ -1,29 +1,29 @@
 package migrationtest
 
-// Teste da migration 000116: motivo de nao entrega em notification_logs (RN-38).
+// Teste da migration 000116: released_at + os dois triggers que a mantem.
 //
-// O que precisa ficar provado:
-//  1. a coluna nasce NULLABLE — todo historico de envio ja gravado continua
-//     valido, e "sem motivo" e o estado normal de uma mensagem entregue;
-//  2. status aceita 'undelivered' — a coluna nao tem CHECK (000033), entao o
-//     valor novo e aditivo puro; se alguem acrescentar um CHECK depois, este
-//     teste avisa antes do primeiro envio nao entregue em producao;
-//  3. o indice parcial e sobre undelivered_reason IS NOT NULL, e NAO sobre
-//     status = 'undelivered'. E a diferenca que decide se a linha RECUSADA
-//     pelo Instagram (que continua 'failed', porque houve tentativa real)
-//     aparece ou nao na lista do lojista;
-//  4. o down remove coluna e indice sem derrubar a tabela.
+// O trigger E CODIGO, e codigo sem teste e suposicao. O que precisa ficar
+// provado — e cada item corresponde a um caminho real de encerramento que o Go
+// NAO cobriria se a coluna fosse mantida em EndLiveEvent:
+//  1. backfill libera a midia de evento ja encerrado antes da migration;
+//  2. encerrar pelo caminho do sqlc (EndLiveEvent / botao manual) libera;
+//  3. encerrar por UPDATE cru — o que EndEventByMediaID faz, fora do sqlc, e o
+//     que um incidente faz na mao — libera igual;
+//  4. reabrir a campanha volta a midia para "em uso";
+//  5. midia INSERIDA numa sessao de evento ja encerrado nasce liberada;
+//  6. transicao de status que nao envolve 'ended' nao mexe em nada;
+//  7. o down remove coluna, triggers e funcoes.
 
 import (
 	"context"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestMigration000116NotificationUndeliveredReason(t *testing.T) {
+func TestMigration000116LspReleasedAt(t *testing.T) {
 	adminURL := mustEnv(t)
 	url, cleanup := freshDB(t, adminURL)
 	defer cleanup()
@@ -35,7 +35,7 @@ func TestMigration000116NotificationUndeliveredReason(t *testing.T) {
 	defer m.Close()
 
 	if err := m.Migrate(115); err != nil {
-		t.Fatalf("migrate ate 115: %v", err)
+		t.Fatalf("migrate ate 113: %v", err)
 	}
 
 	pool, err := pgxpool.New(context.Background(), url)
@@ -47,102 +47,151 @@ func TestMigration000116NotificationUndeliveredReason(t *testing.T) {
 
 	var storeID string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO stores (name, slug) VALUES ('RN38','rn38-116') RETURNING id::text`,
+		`INSERT INTO stores (name, slug) VALUES ('Midia','midia-114') RETURNING id::text`,
 	).Scan(&storeID); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
 
-	// Linha ANTERIOR a migration: prova que a coluna nova nao pode ser NOT NULL.
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO notification_logs (store_id, platform_user_id, notification_type, channel, status)
-		 VALUES ($1::uuid, 'ig-1', 'checkout_immediate', 'instagram_dm', 'sent')`, storeID,
-	); err != nil {
-		t.Fatalf("seed log antigo: %v", err)
+	// seedEvent cria evento + sessao + midia e devolve (eventID, sessionID).
+	seedEvent := func(title, status, mediaID string) (string, string) {
+		t.Helper()
+		var eventID, sessionID string
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO live_events (store_id, status, title, type) VALUES ($1,$2,$3,'post') RETURNING id::text`,
+			storeID, status, title,
+		).Scan(&eventID); err != nil {
+			t.Fatalf("seed evento %s: %v", title, err)
+		}
+		var endedAt any
+		if status == "ended" {
+			endedAt = time.Now()
+		}
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO live_sessions (event_id, status, type, sequence_order, ended_at)
+			 VALUES ($1,$2,'post',1,$3) RETURNING id::text`,
+			eventID, status, endedAt,
+		).Scan(&sessionID); err != nil {
+			t.Fatalf("seed sessao %s: %v", title, err)
+		}
+		if mediaID != "" {
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO live_session_platforms (session_id, platform, platform_live_id)
+				 VALUES ($1,'instagram',$2)`, sessionID, mediaID,
+			); err != nil {
+				t.Fatalf("seed midia %s: %v", mediaID, err)
+			}
+		}
+		return eventID, sessionID
 	}
 
+	released := func(mediaID string) bool {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM live_session_platforms WHERE platform_live_id = $1 AND released_at IS NOT NULL`,
+			mediaID,
+		).Scan(&n); err != nil {
+			t.Fatalf("ler released_at de %s: %v", mediaID, err)
+		}
+		return n == 1
+	}
+
+	// Legado: uma campanha ja encerrada e uma viva, ambas com midia.
+	endedID, _ := seedEvent("Encerrada", "ended", "media-legado")
+	seedEvent("Viva", "active", "media-viva")
+
+	// --- aplica a 000116 ---------------------------------------------------
 	if err := m.Migrate(116); err != nil {
-		t.Fatalf("migrate 116: %v", err)
+		t.Fatalf("migrate ate 114: %v", err)
 	}
 
-	// 1: a linha antiga sobreviveu, com motivo NULL.
-	var nullReasons int
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM notification_logs WHERE undelivered_reason IS NULL`,
-	).Scan(&nullReasons); err != nil {
-		t.Fatalf("contar motivos nulos: %v", err)
+	// 1: backfill.
+	if !released("media-legado") {
+		t.Error("backfill nao liberou a midia de evento ja encerrado — ela ficaria presa e o reuso nunca aconteceria")
 	}
-	if nullReasons != 1 {
-		t.Errorf("linhas com motivo NULL = %d, quero 1 (a coluna precisa ser nullable)", nullReasons)
+	if released("media-viva") {
+		t.Error("backfill liberou midia de evento VIVO")
 	}
 
-	// 2: o status novo entra.
+	// 2: encerrar pelo caminho do sqlc (o mesmo UPDATE que EndLiveEvent faz).
+	sqlcEventID, _ := seedEvent("Botao", "active", "media-botao")
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO notification_logs (store_id, platform_user_id, notification_type, channel, status, undelivered_reason)
-		 VALUES ($1::uuid, 'ig-2', 'event_deadline_started', 'instagram_dm', 'undelivered', 'comment_window_expired')`,
-		storeID,
+		`UPDATE live_events SET status = 'ended', updated_at = now() WHERE id = $1::uuid`, sqlcEventID,
 	); err != nil {
-		t.Fatalf("status 'undelivered' foi rejeitado — algum CHECK novo em status: %v", err)
+		t.Fatalf("encerrar pelo sqlc: %v", err)
+	}
+	if !released("media-botao") {
+		t.Error("encerramento pelo caminho do sqlc nao liberou a midia")
 	}
 
-	// 3: a recusa do Instagram fica 'failed' COM motivo, e o predicado do
-	// indice tem de alcanca-la. Um indice sobre status = 'undelivered' deixaria
-	// justamente esta linha de fora da lista do lojista.
+	// 3: encerrar por UPDATE cru com WHERE por EXISTS — a forma exata do
+	// EndEventByMediaID, que vive fora do sqlc e por isso nunca seria coberto
+	// se released_at fosse mantido no Go.
+	seedEvent("MidiaSumiu", "active", "media-sumiu")
+	if _, err := pool.Exec(ctx, `
+		UPDATE live_events e
+		SET status = 'ended', updated_at = now()
+		WHERE e.status <> 'ended'
+		  AND EXISTS (
+		      SELECT 1 FROM live_sessions ls
+		      JOIN live_session_platforms lsp ON lsp.session_id = ls.id
+		      WHERE ls.event_id = e.id AND lsp.platform_live_id = 'media-sumiu')`,
+	); err != nil {
+		t.Fatalf("encerrar por UPDATE cru: %v", err)
+	}
+	if !released("media-sumiu") {
+		t.Error("encerramento em SQL cru nao liberou a midia — e o caminho que o codigo Go nao cobriria")
+	}
+
+	// 4: reabrir devolve a midia para "em uso".
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO notification_logs (store_id, platform_user_id, notification_type, channel, status, undelivered_reason, error_message)
-		 VALUES ($1::uuid, 'ig-3', 'event_deadline_started', 'instagram_dm', 'failed', 'instagram_rejected', 'status 400, body: (#2534022)')`,
-		storeID,
+		`UPDATE live_events SET status = 'active' WHERE id = $1::uuid`, endedID,
 	); err != nil {
-		t.Fatalf("seed log recusado: %v", err)
+		t.Fatalf("reabrir: %v", err)
+	}
+	if released("media-legado") {
+		t.Error("campanha reaberta deixou a midia liberada — outra campanha poderia toma-la")
 	}
 
-	var pred string
-	if err := pool.QueryRow(ctx,
-		`SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_notification_logs_undelivered'`,
-	).Scan(&pred); err != nil {
-		t.Fatalf("indice nao existe: %v", err)
+	// 5: midia vinculada a uma sessao de evento ja encerrado nasce liberada.
+	_, encerradoSessionID := seedEvent("Reparo", "ended", "")
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO live_session_platforms (session_id, platform, platform_live_id)
+		 VALUES ($1,'instagram','media-tardia')`, encerradoSessionID,
+	); err != nil {
+		t.Fatalf("inserir midia tardia: %v", err)
 	}
-	if !strings.Contains(pred, "undelivered_reason IS NOT NULL") {
-		t.Errorf("predicado do indice = %q; precisa ser sobre undelivered_reason IS NOT NULL, senao a linha recusada pelo Instagram sai da lista", pred)
-	}
-
-	var listable int
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM notification_logs WHERE undelivered_reason IS NOT NULL`,
-	).Scan(&listable); err != nil {
-		t.Fatalf("contar listaveis: %v", err)
-	}
-	if listable != 2 {
-		t.Errorf("linhas com motivo = %d, quero 2 (a nao tentada E a recusada)", listable)
+	if !released("media-tardia") {
+		t.Error("midia inserida em evento ja encerrado nasceu 'em uso' — o trigger de UPDATE nao a alcanca")
 	}
 
-	// 4: down.
+	// 6: transicao que nao envolve 'ended' nao mexe em nada.
+	naoEndedID, _ := seedEvent("Agendada", "scheduled", "media-agendada")
+	if _, err := pool.Exec(ctx,
+		`UPDATE live_events SET status = 'active' WHERE id = $1::uuid`, naoEndedID,
+	); err != nil {
+		t.Fatalf("scheduled -> active: %v", err)
+	}
+	if released("media-agendada") {
+		t.Error("transicao scheduled->active liberou midia")
+	}
+
+	// 7: down limpa coluna, triggers e funcoes.
 	if err := m.Migrate(115); err != nil {
-		t.Fatalf("down para 115: %v", err)
+		t.Fatalf("down para 113: %v", err)
 	}
-	var cols, idx int
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM information_schema.columns
-		 WHERE table_name = 'notification_logs' AND column_name = 'undelivered_reason'`,
-	).Scan(&cols); err != nil {
-		t.Fatalf("checar coluna apos down: %v", err)
+	var n int
+	if err := pool.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM information_schema.columns
+		         WHERE table_name = 'live_session_platforms' AND column_name = 'released_at')
+		     + (SELECT count(*) FROM pg_trigger
+		         WHERE tgname IN ('trg_sync_lsp_released_at','trg_set_lsp_released_at_on_insert'))
+		     + (SELECT count(*) FROM pg_proc
+		         WHERE proname IN ('sync_lsp_released_at','set_lsp_released_at_on_insert'))`,
+	).Scan(&n); err != nil {
+		t.Fatalf("checar residuo apos down: %v", err)
 	}
-	if cols != 0 {
-		t.Error("down deixou a coluna para tras")
-	}
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM pg_indexes WHERE indexname = 'idx_notification_logs_undelivered'`,
-	).Scan(&idx); err != nil {
-		t.Fatalf("checar indice apos down: %v", err)
-	}
-	if idx != 0 {
-		t.Error("down deixou o indice para tras")
-	}
-	// A tabela continua de pe com o historico.
-	var rows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM notification_logs`).Scan(&rows); err != nil {
-		t.Fatalf("tabela apos down: %v", err)
-	}
-	if rows != 3 {
-		t.Errorf("linhas apos down = %d, quero 3 — o rollback nao reescreve historico de envio", rows)
+	if n != 0 {
+		t.Errorf("down deixou %d objetos para tras (coluna/trigger/funcao)", n)
 	}
 }

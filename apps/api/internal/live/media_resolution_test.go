@@ -37,7 +37,7 @@ func seedMedia(t *testing.T, ctx context.Context, slug, eventStatus, sessionStat
 	).Scan(&f.storeID); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
-	// ends_at e NOT NULL desde a 000120: um evento sem teto deixou de existir.
+	// ends_at e NOT NULL desde a 000122: um evento sem teto deixou de existir.
 	// O caso "ainda aberto" vira uma janela no futuro, que e o que ele sempre
 	// significou de verdade.
 	endsAt := "now() + interval '7 days'"
@@ -169,14 +169,14 @@ func TestResolucaoPrefereCampanhaVivaECoerente(t *testing.T) {
 	const mediaID = "media-reuso"
 
 	antiga := seedMedia(t, ctx, "reuso-antiga", "ended", SessionStatusEnded, SessionTypePost, 1)
-	// A mídia da campanha antiga foi liberada pelo trigger da 000114; a nova
+	// A mídia da campanha antiga foi liberada pelo trigger da 000116; a nova
 	// campanha toma o mesmo media id.
 	nova := seedMedia(t, ctx, "reuso-nova", "active", SessionStatusActive, SessionTypePost, 0)
 	if _, err := testPool.Exec(ctx,
 		`UPDATE live_session_platforms SET platform_live_id = $1 WHERE platform_live_id IN ($2,$3)`,
 		mediaID, antiga.mediaID, nova.mediaID,
 	); err != nil {
-		t.Fatalf("reuso de midia barrado — a 000115 deveria permiti-lo: %v", err)
+		t.Fatalf("reuso de midia barrado — a 000117 deveria permiti-lo: %v", err)
 	}
 
 	event, err := testRepo.GetEventByPlatformLiveID(ctx, mediaID)

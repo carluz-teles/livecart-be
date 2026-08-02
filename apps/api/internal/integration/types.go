@@ -4,7 +4,10 @@ import (
 	"context"
 	"time"
 
+	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/internal/live"
+	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/query"
 )
 
@@ -219,14 +222,10 @@ type TestConnectionResponse struct {
 	TestedAt    time.Time      `json:"testedAt"`
 }
 
-// ERPHealthCheckResponse mirrors providers.ERPHealthCheckResult shaped for
-// the JSON envelope. Items are flattened so the FE can group by category
-// without re-traversing.
-type ERPHealthCheckResponse struct {
-	Supported bool                           `json:"supported"`
-	CheckedAt time.Time                      `json:"checkedAt"`
-	Items     []providers.ERPHealthCheckItem `json:"items"`
-}
+// ERPHealthCheckResponse aliases the canonical erp.ERPHealthCheckResponse
+// (moved with RunERPHealthCheck in Bloco B2d) so the handler's swagger doc and
+// the delegation signature keep compiling unchanged.
+type ERPHealthCheckResponse = erp.ERPHealthCheckResponse
 
 // =============================================================================
 // INPUT/OUTPUT TYPES (Service Layer)
@@ -286,61 +285,27 @@ type GetProviderURLsOutput struct {
 }
 
 // CreateCheckoutInput is the service input for creating a checkout.
-type CreateCheckoutInput struct {
-	StoreID        string
-	IntegrationID  string
-	IdempotencyKey string
-	CartID         string
-	Items          []providers.CheckoutItem
-	Customer       providers.CheckoutCustomer
-	TotalAmount    int64
-	Currency       string
-	NotifyURL      string
-	SuccessURL     string
-	FailureURL     string
-	Metadata       map[string]any
-}
+// The payment fast-path DTOs now live in internal/payment (strangler-fig B1b).
+// These aliases keep the integration.* names valid for the existing call sites
+// (checkout/handler/integration.handler) until B1e repoints them directly at
+// the payment package. Aliases (not new types) so a value flows through the
+// integration.Service delegations into payment.Service with no conversion.
+type CreateCheckoutInput = paymentdomain.CreateCheckoutInput
 
 // CreateCheckoutOutput is the service output for creating a checkout.
-type CreateCheckoutOutput struct {
-	CheckoutID  string
-	CheckoutURL string
-	ExpiresAt   *time.Time
-}
+type CreateCheckoutOutput = paymentdomain.CreateCheckoutOutput
 
 // GetPaymentStatusInput is the service input for getting payment status.
-type GetPaymentStatusInput struct {
-	StoreID       string
-	IntegrationID string
-	PaymentID     string
-}
+type GetPaymentStatusInput = paymentdomain.GetPaymentStatusInput
 
 // GetPaymentStatusOutput is the service output for getting payment status.
-type GetPaymentStatusOutput struct {
-	PaymentID     string
-	Status        string
-	Amount        int64
-	PaidAt        *time.Time
-	RefundedAt    *time.Time
-	FailureReason string
-	Metadata      map[string]any
-}
+type GetPaymentStatusOutput = paymentdomain.GetPaymentStatusOutput
 
 // RefundPaymentInput is the service input for refunding a payment.
-type RefundPaymentInput struct {
-	StoreID       string
-	IntegrationID string
-	PaymentID     string
-	Amount        *int64
-}
+type RefundPaymentInput = paymentdomain.RefundPaymentInput
 
 // RefundPaymentOutput is the service output for refunding a payment.
-type RefundPaymentOutput struct {
-	RefundID  string
-	Status    string
-	Amount    int64
-	CreatedAt time.Time
-}
+type RefundPaymentOutput = paymentdomain.RefundPaymentOutput
 
 // PagarmeWebhookStatusOutput surfaces whether the merchant has registered our
 // webhook URL on the Pagar.me dashboard, inferred from recent delivery
@@ -575,59 +540,19 @@ type TestConnectionOutput struct {
 // =============================================================================
 
 // ProcessCardPaymentInput is the service input for processing a card payment.
-type ProcessCardPaymentInput struct {
-	StoreID         string
-	IntegrationID   string
-	CartID          string
-	CardToken       string
-	Installments    int
-	Customer        providers.CheckoutCustomer
-	Items           []providers.CheckoutItem
-	TotalAmount     int64
-	Currency        string
-	NotifyURL       string
-	PaymentMethodID string
-	IssuerID        string
-	DeviceID        string
-	Metadata        map[string]any
-}
+// ProcessCardPaymentInput/Output and GeneratePixPayment* also moved to
+// internal/payment (B1b); aliased here for the same call-site-compat reason as
+// the checkout DTOs above.
+type ProcessCardPaymentInput = paymentdomain.ProcessCardPaymentInput
 
 // ProcessCardPaymentOutput is the service output for processing a card payment.
-type ProcessCardPaymentOutput struct {
-	PaymentID         string
-	Status            string
-	StatusDetail      string
-	Message           string
-	Amount            int64
-	Installments      int
-	LastFourDigits    string
-	CardBrand         string
-	AuthorizationCode string
-	PaidAt            *time.Time
-}
+type ProcessCardPaymentOutput = paymentdomain.ProcessCardPaymentOutput
 
 // GeneratePixPaymentInput is the service input for generating a PIX payment.
-type GeneratePixPaymentInput struct {
-	StoreID       string
-	IntegrationID string
-	CartID        string
-	Customer      providers.CheckoutCustomer
-	Items         []providers.CheckoutItem
-	TotalAmount   int64
-	Currency      string
-	NotifyURL     string
-	Metadata      map[string]any
-}
+type GeneratePixPaymentInput = paymentdomain.GeneratePixPaymentInput
 
 // GeneratePixPaymentOutput is the service output for generating a PIX payment.
-type GeneratePixPaymentOutput struct {
-	PaymentID  string
-	QRCode     string
-	QRCodeText string
-	Amount     int64
-	ExpiresAt  time.Time
-	TicketURL  string
-}
+type GeneratePixPaymentOutput = paymentdomain.GeneratePixPaymentOutput
 
 // =============================================================================
 // REPOSITORY TYPES (Data Layer)
@@ -672,15 +597,10 @@ type UpdateIntegrationParams struct {
 // =============================================================================
 
 // StoreWebhookInput is the input for storing a webhook event.
-type StoreWebhookInput struct {
-	StoreID        string // From URL parameter
-	Provider       string
-	IntegrationID  string // Resolved by service layer before storing
-	EventType      string
-	EventID        string
-	Payload        []byte
-	SignatureValid bool
-}
+// StoreWebhookInput's canonical home moved to internal/live (Bloco B4b): the
+// WebhookAuditor port (satisfied by *integration.Service) is declared in terms
+// of it. This alias keeps StoreWebhookEvent and its callers compiling unchanged.
+type StoreWebhookInput = live.StoreWebhookInput
 
 // ProcessPaymentInput is the input for processing a payment notification.
 type ProcessPaymentInput struct {

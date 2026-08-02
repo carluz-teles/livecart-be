@@ -1,19 +1,22 @@
 package migrationtest
 
-// Teste da migration 000109: o TIPO e a MÍDIA descem do evento para a
-// sessão/mídia.
+// Teste da migration 000109: order_items ganha session_id, e com ele a
+// CARDINALIDADE muda — o pedido passa a ter uma linha por (produto, sessão).
+//
+// Ela e a 000110 eram as únicas da leva 104-115 sem teste de schema, e são
+// justamente as duas em que a métrica em dois níveis se apoia.
 //
 // O que precisa ficar provado:
-//  1. o vocabulário do evento (single|multi|post|story) é traduzido para o da
-//     sessão (live|post|story) — 'single' e 'multi' são ambos live;
-//  2. o CHECK novo REJEITA o vocabulário antigo em live_sessions.type — é a
-//     armadilha da errata E6: validação de aplicação desalinhada do CHECK vira
-//     500 no INSERT em vez de 422;
-//  3. 'reel' passa a ser um valor legal (não existia em lugar nenhum antes);
-//  4. legenda/permalink/thumb migram para a linha de mídia casando
-//     platform_live_id = live_events.media_id, e webhook_active vem junto;
-//  5. live_events continua intacto (expand — o DROP é a 000119);
-//  6. o down desfaz tudo.
+//  1. a coluna existe, é nullable e referencia live_sessions;
+//  2. NÃO existe unique em (order_id, product_id) — se existisse, a
+//     cardinalidade nova seria impossível e o selamento estouraria em produção
+//     no primeiro pedido com o mesmo produto vindo de duas transmissões;
+//  3. o índice de leitura por sessão existe (é o que sustenta "quanto a live de
+//     terça faturou");
+//  4. apagar a sessão NÃO apaga a linha do pedido — ON DELETE SET NULL. Um
+//     pedido pago não pode perder receita porque alguém removeu a transmissão;
+//     ele cai no balde "sem transmissão";
+//  5. o down desfaz.
 
 import (
 	"context"
@@ -23,7 +26,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestMigration000109SessionTypeAndMedia(t *testing.T) {
+func TestMigration000109OrderItemsSessionSplit(t *testing.T) {
 	adminURL := mustEnv(t)
 	url, cleanup := freshDB(t, adminURL)
 	defer cleanup()
@@ -34,8 +37,8 @@ func TestMigration000109SessionTypeAndMedia(t *testing.T) {
 	}
 	defer m.Close()
 
-	if err := m.Migrate(108); err != nil {
-		t.Fatalf("migrate ate 108: %v", err)
+	if err := m.Migrate(109); err != nil {
+		t.Fatalf("migrate ate 107: %v", err)
 	}
 
 	pool, err := pgxpool.New(context.Background(), url)
@@ -45,143 +48,127 @@ func TestMigration000109SessionTypeAndMedia(t *testing.T) {
 	defer pool.Close()
 	ctx := context.Background()
 
-	var storeID string
+	// 1. A coluna.
+	var isNullable, dataType string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO stores (name, slug) VALUES ('Tipo Test','tipo-109') RETURNING id::text`,
+		`SELECT is_nullable, data_type FROM information_schema.columns
+		 WHERE table_name = 'order_items' AND column_name = 'session_id'`,
+	).Scan(&isNullable, &dataType); err != nil {
+		t.Fatalf("order_items.session_id nao existe: %v", err)
+	}
+	if isNullable != "YES" {
+		t.Errorf("session_id deveria ser nullable (adição pelo painel não tem sessão), got %q", isNullable)
+	}
+	if dataType != "uuid" {
+		t.Errorf("session_id data_type = %q, quero uuid", dataType)
+	}
+
+	// 2. Nenhuma unique em (order_id, product_id).
+	var uniques int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM pg_indexes
+		 WHERE tablename = 'order_items'
+		   AND indexdef ILIKE '%UNIQUE%'
+		   AND indexdef ILIKE '%order_id%'
+		   AND indexdef ILIKE '%product_id%'`,
+	).Scan(&uniques); err != nil {
+		t.Fatalf("checar uniques: %v", err)
+	}
+	if uniques != 0 {
+		t.Errorf("existe unique (order_id, product_id): a linha por (produto, sessao) seria impossivel")
+	}
+
+	// 3. O índice de leitura por sessão.
+	var idx int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM pg_indexes
+		 WHERE tablename = 'order_items' AND indexname = 'idx_order_items_session'`,
+	).Scan(&idx); err != nil {
+		t.Fatalf("checar indice: %v", err)
+	}
+	if idx != 1 {
+		t.Error("idx_order_items_session ausente — a metrica por transmissao varreria a tabela")
+	}
+
+	// 4. ON DELETE SET NULL, provado com dado.
+	var storeID, eventID, sessionID, productID, cartID, orderID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO stores (name, slug) VALUES ('Split 107','split-107') RETURNING id::text`,
 	).Scan(&storeID); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
-
-	// Um evento de cada tipo do vocabulário antigo, cada um com uma sessão e uma
-	// mídia. Só o de post carrega os metadados de mídia (é assim na produção:
-	// media_* só é escrito por CreatePostEvent).
-	type seed struct {
-		eventType string
-		mediaID   string
-		wantType  string
-	}
-	seeds := []seed{
-		{"single", "media-single-109", "live"},
-		{"multi", "media-multi-109", "live"},
-		{"post", "media-post-109", "post"},
-		{"story", "media-story-109", "story"},
-	}
-	sessionIDs := map[string]string{}
-	for _, sd := range seeds {
-		var eventID, sessionID string
-		if err := pool.QueryRow(ctx,
-			`INSERT INTO live_events (store_id, status, title, type, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active)
-			 VALUES ($1,'active',$2,$2,$3,$4,$5,$6,true) RETURNING id::text`,
-			storeID, sd.eventType, sd.mediaID,
-			"https://instagram.com/p/"+sd.mediaID,
-			"https://cdn/"+sd.mediaID+".jpg",
-			"legenda de "+sd.mediaID,
-		).Scan(&eventID); err != nil {
-			t.Fatalf("seed evento %s: %v", sd.eventType, err)
-		}
-		if err := pool.QueryRow(ctx,
-			`INSERT INTO live_sessions (event_id, status, sequence_order) VALUES ($1,'active',1) RETURNING id::text`,
-			eventID,
-		).Scan(&sessionID); err != nil {
-			t.Fatalf("seed sessao %s: %v", sd.eventType, err)
-		}
-		if _, err := pool.Exec(ctx,
-			`INSERT INTO live_session_platforms (session_id, platform, platform_live_id) VALUES ($1,'instagram',$2)`,
-			sessionID, sd.mediaID,
-		); err != nil {
-			t.Fatalf("seed midia %s: %v", sd.eventType, err)
-		}
-		sessionIDs[sd.eventType] = sessionID
-	}
-
-	// --- aplica a 000109 ---------------------------------------------------
-	if err := m.Migrate(109); err != nil {
-		t.Fatalf("migrate ate 109: %v", err)
-	}
-
-	// 1. Tradução do vocabulário.
-	for _, sd := range seeds {
-		var got string
-		if err := pool.QueryRow(ctx,
-			`SELECT type FROM live_sessions WHERE id = $1::uuid`, sessionIDs[sd.eventType],
-		).Scan(&got); err != nil {
-			t.Fatalf("ler tipo da sessao %s: %v", sd.eventType, err)
-		}
-		if got != sd.wantType {
-			t.Errorf("evento type=%q: sessao ficou %q, quero %q", sd.eventType, got, sd.wantType)
-		}
-	}
-
-	// 2. O CHECK rejeita o vocabulário ANTIGO — se a aplicação continuar
-	//    mandando 'single'/'multi' para live_sessions, estoura como 500.
-	for _, bad := range []string{"single", "multi", "", "video"} {
-		if _, err := pool.Exec(ctx,
-			`UPDATE live_sessions SET type = $2 WHERE id = $1::uuid`, sessionIDs["single"], bad,
-		); err == nil {
-			t.Errorf("o CHECK deixou passar type=%q em live_sessions", bad)
-		}
-	}
-
-	// 3. 'reel' é valor legal agora (não existia no vocabulário do evento).
-	if _, err := pool.Exec(ctx,
-		`UPDATE live_sessions SET type = 'reel' WHERE id = $1::uuid`, sessionIDs["post"],
-	); err != nil {
-		t.Errorf("'reel' devia ser aceito em live_sessions.type: %v", err)
-	}
-	if _, err := pool.Exec(ctx,
-		`UPDATE live_sessions SET type = 'post' WHERE id = $1::uuid`, sessionIDs["post"],
-	); err != nil {
-		t.Fatalf("restaurar type=post: %v", err)
-	}
-
-	// 4. Metadados de mídia migraram casando platform_live_id = media_id.
-	var permalink, thumb, caption string
-	var webhookActive bool
 	if err := pool.QueryRow(ctx,
-		`SELECT media_permalink, media_thumbnail_url, media_caption, webhook_active
-		 FROM live_session_platforms WHERE platform_live_id = 'media-post-109'`,
-	).Scan(&permalink, &thumb, &caption, &webhookActive); err != nil {
-		t.Fatalf("ler metadados da midia: %v", err)
+		`INSERT INTO live_events (store_id, status, title) VALUES ($1,'ended','Semana') RETURNING id::text`,
+		storeID,
+	).Scan(&eventID); err != nil {
+		t.Fatalf("seed event: %v", err)
 	}
-	if permalink != "https://instagram.com/p/media-post-109" {
-		t.Errorf("permalink = %q", permalink)
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO live_sessions (event_id, status, sequence_order) VALUES ($1,'ended',1) RETURNING id::text`,
+		eventID,
+	).Scan(&sessionID); err != nil {
+		t.Fatalf("seed session: %v", err)
 	}
-	if thumb != "https://cdn/media-post-109.jpg" {
-		t.Errorf("thumbnail = %q", thumb)
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO products (store_id, name, external_source, external_id, keyword, price, stock)
+		 VALUES ($1,'Vestido','none','ext-107','1070',2500,100) RETURNING id::text`,
+		storeID,
+	).Scan(&productID); err != nil {
+		t.Fatalf("seed product: %v", err)
 	}
-	if caption != "legenda de media-post-109" {
-		t.Errorf("caption = %q", caption)
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO carts (event_id, platform_user_id, platform_handle, token, short_id, status, payment_status, paid_at)
+		 VALUES ($1,'u107','@u107','tok107',1070,'checkout','paid',now()) RETURNING id::text`,
+		eventID,
+	).Scan(&cartID); err != nil {
+		t.Fatalf("seed cart: %v", err)
 	}
-	if !webhookActive {
-		t.Error("webhook_active nao veio do evento — a midia nasceria em polling de novo")
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO orders (cart_id, short_id, store_id, event_id, status, total_cents, discount_cents, shipping_cents, paid_total_cents, paid_at)
+		 VALUES ($1,10700,$2,$3,'paid',5000,0,0,5000,now()) RETURNING id::text`,
+		cartID, storeID, eventID,
+	).Scan(&orderID); err != nil {
+		t.Fatalf("seed order: %v", err)
+	}
+	// Duas linhas do MESMO produto, uma por transmissão — o caso que a 000109
+	// existe para permitir. Uma delas sem sessão.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price, session_id)
+		 VALUES ($1,$2,'Vestido',1,2500,$3), ($1,$2,'Vestido',1,2500,NULL)`,
+		orderID, productID, sessionID,
+	); err != nil {
+		t.Fatalf("o mesmo produto em duas linhas foi recusado: %v", err)
 	}
 
-	// 5. EXPAND: live_events continua com tudo. Dropar aqui quebraria o FE.
+	if _, err := pool.Exec(ctx, `DELETE FROM live_sessions WHERE id = $1::uuid`, sessionID); err != nil {
+		t.Fatalf("apagar sessao: %v", err)
+	}
+	var linhas, semSessao int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*), count(*) FILTER (WHERE session_id IS NULL)
+		 FROM order_items WHERE order_id = $1::uuid`, orderID,
+	).Scan(&linhas, &semSessao); err != nil {
+		t.Fatalf("reler order_items: %v", err)
+	}
+	if linhas != 2 {
+		t.Errorf("apagar a sessao levou linha de pedido junto: sobraram %d de 2", linhas)
+	}
+	if semSessao != 2 {
+		t.Errorf("session_id nao virou NULL no delete: %d de 2 sem sessao", semSessao)
+	}
+
+	// 5. Down.
+	if err := m.Migrate(108); err != nil {
+		t.Fatalf("down para 106: %v", err)
+	}
 	var n int
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM information_schema.columns
-		 WHERE table_name = 'live_events'
-		   AND column_name IN ('type','media_id','media_permalink','media_thumbnail_url','media_caption','webhook_active')`,
+		 WHERE table_name = 'order_items' AND column_name = 'session_id'`,
 	).Scan(&n); err != nil {
-		t.Fatalf("checar colunas do evento: %v", err)
-	}
-	if n != 6 {
-		t.Errorf("live_events perdeu colunas na 000109 (%d de 6 presentes) — o contract e a 000119", n)
-	}
-
-	// 6. Down.
-	if err := m.Migrate(108); err != nil {
-		t.Fatalf("down para 108: %v", err)
-	}
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM information_schema.columns
-		 WHERE (table_name = 'live_sessions' AND column_name = 'type')
-		    OR (table_name = 'live_session_platforms'
-		        AND column_name IN ('media_permalink','media_thumbnail_url','media_caption','webhook_active'))`,
-	).Scan(&n); err != nil {
-		t.Fatalf("checar colunas apos down: %v", err)
+		t.Fatalf("checar coluna apos down: %v", err)
 	}
 	if n != 0 {
-		t.Errorf("down deixou %d coluna(s) para tras", n)
+		t.Error("down deixou order_items.session_id para tras")
 	}
 }

@@ -58,7 +58,7 @@ SELECT * FROM carts WHERE token = $1;
 -- name: GetCartByEventAndUser :one
 -- O carrinho ABERTO do comprador neste evento.
 --
--- Desde a 000105 pode existir mais de um carrinho por (evento, comprador): pagar
+-- Desde a 000107 pode existir mais de um carrinho por (evento, comprador): pagar
 -- ou expirar libera a vaga e um novo nasce (RN-07/RN-08). Sem o filtro abaixo,
 -- `:one` gera QueryRow do pgx, que lê a PRIMEIRA linha e descarta o resto SEM
 -- erro — o item do comprador cairia num carrinho arbitrário, possivelmente o já

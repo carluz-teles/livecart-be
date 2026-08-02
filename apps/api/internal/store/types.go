@@ -180,7 +180,7 @@ type UpdateCartSettingsRequest struct {
 // int's 0 as empty and rejects it, so the floor actually holds.
 func (r UpdateCartSettingsRequest) Validate() error {
 	return validation.ValidateStruct(&r,
-		// Piso 15: o CHECK stores_cart_expiration_minutes_check (000104) rejeita
+		// Piso 15: o CHECK stores_cart_expiration_minutes_check (000106) rejeita
 		// abaixo disso. Sem alinhar aqui, um 5 passaria a validação e estouraria
 		// no banco como 500 em vez de 422 com a mensagem de campo.
 		validation.Field(&r.ExpirationMinutes, validation.Required, validation.Min(15), validation.Max(1440)),

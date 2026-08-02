@@ -35,7 +35,7 @@ func TestScheduleInstagramPublishRequestValidate(t *testing.T) {
 		{"especie desconhecida", func(r *ScheduleInstagramPublishRequest) { r.MediaKind = "carousel" }, "mediaKind"},
 		{"sem data", func(r *ScheduleInstagramPublishRequest) { r.ScheduledFor = nil }, "scheduledFor"},
 		{"sem produto", func(r *ScheduleInstagramPublishRequest) { r.ProductIDs = nil }, "productIds"},
-		// O piso de 15 min do prazo do carrinho (000104) vale aqui também: o
+		// O piso de 15 min do prazo do carrinho (000106) vale aqui também: o
 		// evento nasce no disparo com este valor e o CHECK do banco o recusaria
 		// como 500 em vez de 422 com campo.
 		{"prazo abaixo do piso", func(r *ScheduleInstagramPublishRequest) { r.CartExpirationMinutes = minutes(5) }, "cartExpirationMinutes"},

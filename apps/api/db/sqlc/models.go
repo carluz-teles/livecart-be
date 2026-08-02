@@ -381,13 +381,13 @@ type LiveSession struct {
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 	EventID       pgtype.UUID        `json:"event_id"`
 	SequenceOrder int32              `json:"sequence_order"`
-	// D3: natureza da transmissao (live|post|reel|story). UNICA fonte da verdade do tipo — live_events.type foi dropada na 000120. O vocabulario antigo (single|multi) so existe na entrada da API e e traduzido em live.SessionTypeFromEventType.
+	// D3: natureza da transmissao (live|post|reel|story). UNICA fonte da verdade do tipo — live_events.type foi dropada na 000122. O vocabulario antigo (single|multi) so existe na entrada da API e e traduzido em live.SessionTypeFromEventType.
 	Type string `json:"type"`
 	// D17: produto em destaque DESTA transmissão. Fallback quando o comprador comenta com intenção de compra e nenhuma palavra-chave casa.
 	CurrentActiveProductID pgtype.UUID `json:"current_active_product_id"`
 	// D17: quando true, os comentários DESTA transmissão são gravados mas não viram carrinho. Pausar uma sessão não pausa as outras do mesmo evento.
 	ProcessingPaused bool `json:"processing_paused"`
-	// D21: quando o LiveCart deve publicar a midia desta sessao no Instagram. Sessao de live NAO tem publish_at (nao se publica live por API). Antes de publish_at nao existe midia, logo nao existe comentario — e o que remove a ambiguidade do webhook. O agendador em si e a 000120.
+	// D21: quando o LiveCart deve publicar a midia desta sessao no Instagram. Sessao de live NAO tem publish_at (nao se publica live por API). Antes de publish_at nao existe midia, logo nao existe comentario — e o que remove a ambiguidade do webhook. O agendador em si e a 000122.
 	PublishAt pgtype.Timestamptz `json:"publish_at"`
 	// D26: first_touch = a sessao existia antes do corte, entao os numeros dela incluem periodo em que a atribuicao era first-touch e a UI precisa avisar. addition_log = a sessao nasceu depois do corte, numeros derivados do log de adicoes. O DEFAULT e addition_log porque toda sessao criada daqui para frente ja nasce correta.
 	AttributionSource string `json:"attribution_source"`
@@ -501,7 +501,7 @@ type OrderEvent struct {
 	OrderID    pgtype.UUID        `json:"order_id"`
 }
 
-// Itens congelados do pedido. Uma linha por (produto, sessão) desde a 000107 — a UI agrupa por produto na exibição. SUM(quantity) por produto continua igual à quantidade do carrinho no pagamento.
+// Itens congelados do pedido. Uma linha por (produto, sessão) desde a 000109 — a UI agrupa por produto na exibição. SUM(quantity) por produto continua igual à quantidade do carrinho no pagamento.
 type OrderItem struct {
 	ID          pgtype.UUID `json:"id"`
 	OrderID     pgtype.UUID `json:"order_id"`
@@ -554,24 +554,6 @@ type OrderPayment struct {
 	InvoiceStatus         pgtype.Text        `json:"invoice_status"`
 	InvoiceEmittedAt      pgtype.Timestamptz `json:"invoice_emitted_at"`
 	ErpPaymentSnapshot    json.RawMessage    `json:"erp_payment_snapshot"`
-}
-
-type Payment struct {
-	ID                pgtype.UUID        `json:"id"`
-	CartID            pgtype.UUID        `json:"cart_id"`
-	IntegrationID     pgtype.UUID        `json:"integration_id"`
-	ExternalPaymentID pgtype.Text        `json:"external_payment_id"`
-	Provider          string             `json:"provider"`
-	AmountCents       int64              `json:"amount_cents"`
-	Currency          pgtype.Text        `json:"currency"`
-	Method            pgtype.Text        `json:"method"`
-	Status            string             `json:"status"`
-	StatusDetail      pgtype.Text        `json:"status_detail"`
-	ProviderResponse  json.RawMessage    `json:"provider_response"`
-	CreatedAt         pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
-	PaidAt            pgtype.Timestamptz `json:"paid_at"`
-	IdempotencyKey    pgtype.Text        `json:"idempotency_key"`
 }
 
 type Product struct {

@@ -115,9 +115,11 @@ func seedPaidCartWithOrder(t *testing.T) (cartID string) {
 	ctx := context.Background()
 	cartID, storeID := seedPaidCart(t)
 
-	// Materializa a Order (Fase A) — order + order_logistics passam a existir,
-	// tracking_token nasce NULL (Fatia 10-a: order_logistics é a fonte, o cart
-	// nunca carregou token; o postcheckout o gera depois).
+	// Materializa a Order (Fase A) — order + order_logistics passam a existir. Desde
+	// a Fatia A4 a materialização também gera o tracking_token e a timeline
+	// `payment_confirmed`, atômicos com a Order (order_logistics é a fonte da verdade
+	// do rastreio — Fatia 10-a). Testes que precisam do cenário token-NULL zeram o
+	// token via SQL direto (nullOutTrackingToken).
 	l := listeners.New(testPool, testQueries, zap.NewNop())
 	if err := l.OnCartPaid(ctx, cartID, storeID, 10000, nil); err != nil {
 		t.Fatalf("materialise order: %v", err)

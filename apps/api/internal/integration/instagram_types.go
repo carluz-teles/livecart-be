@@ -3,6 +3,8 @@ package integration
 import (
 	"encoding/json"
 	"strings"
+
+	"livecart/apps/api/internal/live"
 )
 
 // InstagramWebhookPayload represents the root payload sent by Meta webhooks
@@ -164,39 +166,11 @@ type InstagramReplyStory struct {
 }
 
 // ProcessInstagramCommentInput represents input for processing a live comment
-type ProcessInstagramCommentInput struct {
-	AccountID string
-	MediaID   string
-	CommentID string
-	UserID    string
-	Username  string
-	Text      string
-	// Timestamp é quando o COMENTÁRIO foi escrito, em unix SECONDS. 0 = não
-	// sabemos. Quem preenche normaliza (ms vem do webhook, ISO8601 vem do
-	// Graph): daqui para baixo ninguém mais converte nada.
-	Timestamp int64
-	// Channel is the reply channel: "" / "comment" (default) replies on the
-	// comment thread with a DM fallback; "dm" replies straight via DM — used by
-	// story replies, which arrive as DMs and have no public comment to answer.
-	Channel    string
-	RawPayload []byte // Original webhook payload for audit storage
-	// SignatureValid é o RESULTADO REAL do X-Hub-Signature-256 desta requisição,
-	// e viaja colado ao RawPayload de propósito: os dois alimentam a MESMA linha
-	// de webhook_events, e uma linha que grava "assinatura válida" sobre um
-	// payload cuja checagem falhou é pior que linha nenhuma.
-	//
-	// É esta coluna que decide o deploy 2 do modo observação (§5.2, ordem 9): o
-	// 401 só entra depois de dias de tráfego 100% válido. Com o `true` fixo que
-	// vivia aqui, a consulta respondia 100% válido POR CONSTRUÇÃO — inclusive
-	// para as requisições que o handler acabara de reprovar e aceitar mesmo
-	// assim. Quem lesse o painel ligaria a exigência e derrubaria a captura de
-	// comentários da base inteira, que é exatamente o desastre que o modo
-	// observação existe para evitar.
-	//
-	// Falso por padrão sem consequência: o polling não tem assinatura e também
-	// não tem RawPayload, então nem chega a gravar auditoria.
-	SignatureValid bool
-}
+// ProcessInstagramCommentInput's canonical home moved to internal/live (Bloco
+// B4b): the comment.received consumer now lives in live.Service and deserializes
+// into it. This alias keeps the webhook edge (ProcessInstagramMessage /
+// processStoryReply / pollPostCommentsOnce) and the wire contract unchanged.
+type ProcessInstagramCommentInput = live.ProcessInstagramCommentInput
 
 // ProcessInstagramMessageInput represents input for processing a DM
 type ProcessInstagramMessageInput struct {

@@ -29,7 +29,7 @@ type CreateEventResponse struct {
 type EventResponse struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
-	// `type` SAIU do contrato (000120). A espécie da campanha está em
+	// `type` SAIU do contrato (000122). A espécie da campanha está em
 	// `sessionTypes`, mais abaixo: uma campanha mista não tem tipo único, e
 	// devolver um rótulo derivado seria a mesma mentira em outro lugar.
 	Status                 string `json:"status"`
@@ -51,7 +51,7 @@ type EventResponse struct {
 	Sessions     []SessionResponse `json:"sessions,omitempty"`
 	// SessionTypes são os tipos DISTINTOS das transmissões deste evento
 	// ({live, post, reel, story}). É a única fonte de "que espécie de evento é
-	// este" que sobrevive à 000120, que dropou live_events.type: com a campanha
+	// este" que sobrevive à 000122, que dropou live_events.type: com a campanha
 	// mista o tipo do container deixou de ter resposta única, e quem quiser
 	// rotular a tela tem que olhar as sessões. Nunca nulo — evento sem sessão
 	// devolve lista vazia, e lista vazia é "ainda não sabemos", não "live".
@@ -161,7 +161,7 @@ type CreateEventParams struct {
 	StoreID string
 	Title   string
 	// Type é o tipo da SESSÃO inicial (D3). O evento não guarda tipo desde a
-	// 000120 — aceita o vocabulário legado (single|multi) e traduz.
+	// 000122 — aceita o vocabulário legado (single|multi) e traduz.
 	Type                   string
 	Status                 string
 	CloseCartOnEventEnd    bool
@@ -174,7 +174,7 @@ type CreateEventParams struct {
 	// há ScheduledAt aqui: duas entradas para as duas colunas que sempre
 	// carregam o mesmo valor é como elas divergiriam.
 	//
-	// EndsAt é OBRIGATÓRIO: a coluna é NOT NULL desde a 000120 e é o teto que
+	// EndsAt é OBRIGATÓRIO: a coluna é NOT NULL desde a 000122 e é o teto que
 	// garante que nenhum carrinho fica sem prazo.
 	StartsAt    *time.Time
 	EndsAt      *time.Time
@@ -213,7 +213,7 @@ type CreateSessionRequest struct {
 	Platform       string `json:"platform" validate:"required,oneof=instagram tiktok youtube facebook"`
 	PlatformLiveID string `json:"platformLiveId" validate:"required"`
 	// Type é a natureza da transmissão (D3). Vazio = "live". Os valores aqui
-	// espelham o CHECK live_sessions_type_check da 000109: desalinhar os dois
+	// espelham o CHECK live_sessions_type_check da 000111: desalinhar os dois
 	// devolve 500 em vez de 422 (lição E6 da errata).
 	Type string `json:"type" validate:"omitempty,oneof=live post reel story"`
 }
@@ -269,7 +269,7 @@ type SessionMetricsResponse struct {
 	Type          string  `json:"type"`
 	Status        string  `json:"status"`
 	// AttributionSource é 'first_touch' quando a transmissão já existia antes
-	// do corte da 000119 — os números dela incluem período em que a atribuição
+	// do corte da 000121 — os números dela incluem período em que a atribuição
 	// creditava o produto inteiro à sessão da PRIMEIRA adição. 'addition_log' é
 	// a transmissão nascida depois, 100% derivada do log. A tela precisa disso
 	// para avisar; sem o aviso, quem comparar os dois lados conclui que a
@@ -408,7 +408,7 @@ type SessionRow struct {
 	// Modo Live (D17): estado EFÊMERO de execução DESTA transmissão.
 	CurrentActiveProductID *string
 	ProcessingPaused       bool
-	// D26 (000119): 'first_touch' quando a transmissão é anterior ao corte da
+	// D26 (000121): 'first_touch' quando a transmissão é anterior ao corte da
 	// atribuição, 'addition_log' quando nasceu depois dele.
 	AttributionSource string
 	StartedAt         *time.Time
@@ -529,7 +529,7 @@ type CreatePostRequest struct {
 	// EndsAt é OBRIGATÓRIO (RN-05/CA-05.1). Sem teto, a RN-04 (expires_at NULL
 	// durante o evento) deixa o carrinho sem prazo para sempre.
 	EndsAt *string `json:"endsAt" validate:"required"`
-	// min=15 espelha o CHECK da migration 000104; abaixo disso o INSERT vira
+	// min=15 espelha o CHECK da migration 000106; abaixo disso o INSERT vira
 	// 500 em vez de erro de campo (lição E6 da errata).
 	CartExpirationMinutes  *int `json:"cartExpirationMinutes" validate:"omitempty,min=15,max=1440"`
 	CartMaxQuantityPerItem *int `json:"cartMaxQuantityPerItem" validate:"omitempty,min=1,max=100"`
@@ -540,7 +540,7 @@ type CreatePostInput struct {
 	StoreID string
 	// Type é o tipo da SESSÃO (D3): "post" (padrão) para post de feed, "reel"
 	// para Reels e "story" para Stories (janela de 24h, intenção capturada por
-	// resposta de DM). É a ÚNICA fonte do tipo: a 000120 dropou
+	// resposta de DM). É a ÚNICA fonte do tipo: a 000122 dropou
 	// live_events.type, então não há mais rótulo no evento para divergir dela.
 	Type                   string
 	Title                  string
@@ -583,7 +583,7 @@ type CreateLiveRequest struct {
 	Description *string `json:"description" validate:"omitempty,max=2000"`
 	// Cart settings (override store defaults)
 	CloseCartOnEventEnd *bool `json:"closeCartOnEventEnd"`
-	// min=15 espelha o CHECK da migration 000104. Estava em 5 e um valor entre
+	// min=15 espelha o CHECK da migration 000106. Estava em 5 e um valor entre
 	// 5 e 14 passava na validação e estourava no banco como 500 (lição E6).
 	CartExpirationMinutes  *int  `json:"cartExpirationMinutes" validate:"omitempty,min=15,max=1440"`
 	CartMaxQuantityPerItem *int  `json:"cartMaxQuantityPerItem" validate:"omitempty,min=1,max=100"`
@@ -622,7 +622,7 @@ type UpdateLiveRequest struct {
 type LiveResponse struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
-	// `type` SAIU (000120) — ver `sessionTypes`.
+	// `type` SAIU (000122) — ver `sessionTypes`.
 	Platform               string     `json:"platform"`       // Primary platform (from first session)
 	PlatformLiveID         string     `json:"platformLiveId"` // Primary platform live ID
 	Status                 string     `json:"status"`
@@ -649,7 +649,7 @@ type LiveResponse struct {
 	// SessionTypes — mesma semântica de EventResponse.SessionTypes. A LISTA
 	// precisa dele tanto quanto o detalhe: ela não carrega sessions[], então
 	// sem este campo a tela de eventos só teria live_events.type para escolher
-	// o rótulo — exatamente a coluna que a 000120 removeu.
+	// o rótulo — exatamente a coluna que a 000122 removeu.
 	SessionTypes []string  `json:"sessionTypes"`
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`
@@ -782,7 +782,7 @@ type LiveOutput struct {
 	TotalComments          int
 	TotalOrders            int
 	// SessionTypes são os tipos DISTINTOS das sessões deste evento. É o
-	// substituto de Type, que a 000120 dropou.
+	// substituto de Type, que a 000122 dropou.
 	SessionTypes           []string
 	CloseCartOnEventEnd    bool
 	CartExpirationMinutes  *int

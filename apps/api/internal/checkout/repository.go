@@ -69,7 +69,7 @@ func (r *Repository) LoadEventCheckoutFlags(ctx context.Context, pool *pgxpool.P
 // andamento" contra "Promoção ativa".
 //
 // Lê live_sessions.type, NÃO live_events.type. Duas razões, e a segunda é a que
-// importa: (1) a 000120 dropou live_events.type e este SELECT quebraria a tela
+// importa: (1) a 000122 dropou live_events.type e este SELECT quebraria a tela
 // do COMPRADOR antes de qualquer painel; (2) com a campanha mista o container
 // não tem espécie única — quem manda é o que existe dentro dele.
 //

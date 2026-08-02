@@ -59,7 +59,7 @@ WHERE s.id = $1;
 -- resolve sempre, decide depois (live.WindowAt), nunca fica em silêncio.
 --
 -- PREFERE O EVENTO VIVO (A5/D22). Com a mídia podendo ser reaproveitada em
--- campanhas diferentes ao longo do tempo (unique parcial da 000115), o mesmo
+-- campanhas diferentes ao longo do tempo (unique parcial da 000117), o mesmo
 -- platform_live_id passa a ter N linhas em live_session_platforms e o
 -- `:one` do sqlc escolheria uma em SILÊNCIO — pgx lê a primeira e descarta o
 -- resto sem erro. released_at IS NULL é exatamente "pertence a um evento vivo",
@@ -86,10 +86,10 @@ LIMIT 1;
 -- RN-34 — close_cart_on_event_end deixa de ser "ter x não ter prazo" e passa a
 -- escolher QUAL dos dois prazos vale:
 --   ligado    → prazo curto (cart_expiration_minutes)
---   desligado → prazo estendido (cart_extended_expiration_minutes, 000104)
+--   desligado → prazo estendido (cart_extended_expiration_minutes, 000106)
 -- Os DOIS ramos armam cart.expire pelo mesmo mecanismo. Nada fica eterno e
 -- nenhum sweep de carrinhos precisa voltar. O ramo antigo "0 = preserva o
--- expires_at que havia" saiu: a 000104 pôs CHECK >= 15 nas duas pontas, então
+-- expires_at que havia" saiu: a 000106 pôs CHECK >= 15 nas duas pontas, então
 -- o valor efetivo nunca é 0 — e sob a RN-04 o expires_at preservado seria NULL
 -- por definição, ou seja, carrinho eterno exatamente no fechamento.
 SELECT
@@ -116,7 +116,7 @@ SELECT waitlist_notified_ttl_minutes FROM live_events WHERE id = $1;
 -- LIVE MODE
 -- =============================================================================
 -- SetActiveProduct, ClearActiveProduct, SetProcessingPaused e GetLiveModeState
--- SAIRAM daqui. O Modo Live desceu para live_sessions na 000111 (D17) e desde
+-- SAIRAM daqui. O Modo Live desceu para live_sessions na 000113 (D17) e desde
 -- entao estas quatro nao tinham chamador nenhum: escreviam e liam colunas de
 -- live_events que ninguem mais mantinha, entao ler delas devolvia estado
 -- CONGELADO no momento do cutover. Os substitutos vivem em live.sql
@@ -128,14 +128,14 @@ SELECT waitlist_notified_ttl_minutes FROM live_events WHERE id = $1;
 -- =============================================================================
 
 -- name: CreateLiveEventFull :one
--- type SAIU (D3/000120): a especie da campanha e das SESSOES dela, e uma
+-- type SAIU (D3/000122): a especie da campanha e das SESSOES dela, e uma
 -- campanha mista nao tem resposta unica no container.
 --
 -- starts_at/scheduled_at/ends_at ENTRARAM. Antes o evento nascia sem janela e
 -- ganhava ends_at num UPDATE posterior, FORA da transacao: se aquele UPDATE
 -- falhasse, o evento ja estava commitado sem teto — e evento sem teto e
 -- carrinho sem prazo (RN-04 deixa expires_at NULL durante a campanha) e estoque
--- reservado para sempre. Com a coluna NOT NULL desde a 000120, esse buraco
+-- reservado para sempre. Com a coluna NOT NULL desde a 000122, esse buraco
 -- deixa de ser possivel: o INSERT falha em vez de o evento nascer torto.
 INSERT INTO live_events (
     store_id,
@@ -174,9 +174,9 @@ RETURNING *;
 -- ActivateScheduledEvent, o evento nunca sai de 'scheduled' e o ciclo de vida
 -- inteiro de um evento agendado é "não começou" → "encerrado". Ele nunca vende.
 --
--- COALESCE(starts_at, scheduled_at): starts_at é a coluna nova (000112) e
+-- COALESCE(starts_at, scheduled_at): starts_at é a coluna nova (000114) e
 -- scheduled_at é a legada que ainda decide o status inicial na criação. As duas
--- são escritas em par por SetEventWindow, mas um evento gravado antes da 000112
+-- são escritas em par por SetEventWindow, mas um evento gravado antes da 000114
 -- (ou por UpdateLiveEventDetails, que só toca a legada) pode ter só uma.
 --
 -- O filtro de ends_at é OBRIGATÓRIO, não higiene: sem ele, um evento cuja janela
@@ -210,8 +210,8 @@ SET status = 'active', updated_at = now()
 WHERE id = $1 AND status = 'scheduled';
 
 -- name: GetLiveEventWithCounts :one
--- product_count conta produtos DISTINTOS nas whitelists das SESSOES (000110):
--- event_products deixa de existir na 000120. DISTINCT e nao COUNT(*) porque o
+-- product_count conta produtos DISTINTOS nas whitelists das SESSOES (000112):
+-- event_products deixa de existir na 000122. DISTINCT e nao COUNT(*) porque o
 -- mesmo produto pode estar barrado em varias transmissoes da campanha e o badge
 -- responde "quantos produtos", nao "quantas linhas" — a mesma regra de
 -- CountEventWhitelistFromSessions, que ja e a fonte da aba Produtos.
@@ -271,7 +271,7 @@ LIMIT $1;
 -- ⚠️ TERCEIRA resolução pela mesma chave (as outras são GetEventByPlatformLiveID
 -- e GetSessionByPlatformLiveID) e a única que estava fora da regra combinada.
 -- Ela elegia a linha por e.status <> 'ended', que só equivale a
--- lsp.released_at IS NULL por causa do trigger da 000114 — um invariante a DUAS
+-- lsp.released_at IS NULL por causa do trigger da 000116 — um invariante a DUAS
 -- tabelas de distância. Enquanto o trigger valer, as duas regras concordam; o
 -- problema é que a concordância não está escrita em lugar nenhum, e a nota das
 -- outras duas exige ordenação byte a byte idêntica. Ordenar pelas MESMAS

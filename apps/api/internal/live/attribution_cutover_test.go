@@ -1,6 +1,6 @@
 package live
 
-// O marcador de corte da atribuicao (D26 / migration 000119) tem de CHEGAR na
+// O marcador de corte da atribuicao (D26 / migration 000121) tem de CHEGAR na
 // resposta da metrica.
 //
 // Por que este teste existe: um marcador que so e gravado no banco e nunca lido
@@ -31,7 +31,7 @@ func TestSessionMetricsCarregaOMarcadorDeCorte(t *testing.T) {
 	}
 
 	if out.AttributionCutoverAt == nil {
-		t.Fatal("a resposta veio sem o instante do corte — a 000119 grava metric_cutovers e ninguem le")
+		t.Fatal("a resposta veio sem o instante do corte — a 000121 grava metric_cutovers e ninguem le")
 	}
 	if out.AttributionCutoverNote == "" {
 		t.Error("o corte veio sem nota; a nota E o produto aqui, o timestamp sozinho nao explica nada")
@@ -57,7 +57,7 @@ func TestSessionAnteriorAoCorteSaiMarcadaFirstTouch(t *testing.T) {
 	storeID := storeOf(t, eventID)
 	sessionID := seedSession(t, eventID, 1)
 
-	// A 000119 marca por created_at. Envelhecer a linha reproduz exatamente o
+	// A 000121 marca por created_at. Envelhecer a linha reproduz exatamente o
 	// que a migration faria com uma transmissao legada.
 	if _, err := testPool.Exec(ctx,
 		`UPDATE live_sessions SET attribution_source = 'first_touch' WHERE id = $1::uuid`, sessionID,

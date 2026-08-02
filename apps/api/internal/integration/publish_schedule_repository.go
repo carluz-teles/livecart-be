@@ -12,7 +12,7 @@ import (
 	"livecart/apps/api/db/sqlc"
 )
 
-// Persistência do agendamento de publicação (RN-31 / 000121).
+// Persistência do agendamento de publicação (RN-31 / 000123).
 //
 // Tudo aqui converte a linha crua num PublishJob de domínio: o resto do pacote
 // não conhece pgtype, e o disparo trabalha com []string de produto porque é

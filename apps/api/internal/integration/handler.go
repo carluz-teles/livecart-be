@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -15,17 +16,32 @@ import (
 	"livecart/apps/api/lib/storage"
 )
 
+// PaymentService is the slice of payment.Service the admin payment routes call
+// (hosted checkout create, payment-status lookup, refund). Declared here — in
+// the consumer — and implemented by *payment.Service, so these admin endpoints
+// call the payment domain directly instead of the integration.Service
+// delegation (strangler-fig B1e). The input/output types are the aliases in
+// this package's types.go, which resolve to the payment package's types, so
+// *payment.Service satisfies this without any conversion.
+type PaymentService interface {
+	CreateCheckout(ctx context.Context, input CreateCheckoutInput) (*CreateCheckoutOutput, error)
+	GetPaymentStatus(ctx context.Context, input GetPaymentStatusInput) (*GetPaymentStatusOutput, error)
+	RefundPayment(ctx context.Context, input RefundPaymentInput) (*RefundPaymentOutput, error)
+}
+
 // Handler handles HTTP requests for integrations.
 type Handler struct {
 	service  *Service
+	payment  PaymentService
 	validate *validator.Validate
 	s3Client *storage.S3Client
 }
 
 // NewHandler creates a new integration handler.
-func NewHandler(service *Service, validate *validator.Validate, s3Client *storage.S3Client) *Handler {
+func NewHandler(service *Service, payment PaymentService, validate *validator.Validate, s3Client *storage.S3Client) *Handler {
 	return &Handler{
 		service:  service,
+		payment:  payment,
 		validate: validate,
 		s3Client: s3Client,
 	}
@@ -93,13 +109,13 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/whatsapp/status", h.GetWhatsAppStatus)
 	g.Post("/whatsapp/test-message", h.SendWhatsAppTestMessage)
 
-	// Payment — provider-specific connect (no OAuth). Pagar.me uses static
-	// API keys (sk_*/pk_*), so the merchant pastes them into a form and we
-	// validate live against the gateway before persisting.
-	g.Post("/payment/pagarme/connect", h.ConnectPagarme)
-	g.Get("/:id/pagarme/webhook-status", h.GetPagarmeWebhookStatus)
-	g.Post("/:id/pagarme/webhook-test", h.TestPagarmeWebhook)
-	g.Post("/:id/pagarme/webhook-live-test", h.RunPagarmeWebhookLiveTest)
+	// Payment — provider-specific connect (no OAuth) + webhook diagnostics now
+	// live in the extracted payment.Handler (Bloco B1c), registered from main.go
+	// on this same /integrations group. Paths/verbs unchanged:
+	//   POST /payment/pagarme/connect
+	//   GET  /:id/pagarme/webhook-status
+	//   POST /:id/pagarme/webhook-test
+	//   POST /:id/pagarme/webhook-live-test
 
 	// Shipping — token-based connect (no OAuth) + order lifecycle helpers.
 	// These are typed at the provider level because each shipping provider
@@ -332,7 +348,7 @@ func (h *Handler) RunERPHealthCheck(c *fiber.Ctx) error {
 	storeID := c.Locals("store_id").(string)
 	id := c.Params("id")
 
-	output, err := h.service.RunERPHealthCheck(c.Context(), id, storeID)
+	output, err := h.service.ERP().RunERPHealthCheck(c.Context(), id, storeID)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
@@ -1006,7 +1022,7 @@ func (h *Handler) CreateCheckout(c *fiber.Ctx) error {
 		return httpx.ValidationError(c, err)
 	}
 
-	output, err := h.service.CreateCheckout(c.Context(), CreateCheckoutInput{
+	output, err := h.payment.CreateCheckout(c.Context(), CreateCheckoutInput{
 		StoreID:        storeID,
 		IntegrationID:  id,
 		IdempotencyKey: idempotencyKey,
@@ -1047,7 +1063,7 @@ func (h *Handler) GetPaymentStatus(c *fiber.Ctx) error {
 	id := c.Params("id")
 	paymentID := c.Params("paymentId")
 
-	output, err := h.service.GetPaymentStatus(c.Context(), GetPaymentStatusInput{
+	output, err := h.payment.GetPaymentStatus(c.Context(), GetPaymentStatusInput{
 		StoreID:       storeID,
 		IntegrationID: id,
 		PaymentID:     paymentID,
@@ -1091,7 +1107,7 @@ func (h *Handler) RefundPayment(c *fiber.Ctx) error {
 		return httpx.BadRequest(c, "invalid request body")
 	}
 
-	output, err := h.service.RefundPayment(c.Context(), RefundPaymentInput{
+	output, err := h.payment.RefundPayment(c.Context(), RefundPaymentInput{
 		StoreID:       storeID,
 		IntegrationID: id,
 		PaymentID:     paymentID,

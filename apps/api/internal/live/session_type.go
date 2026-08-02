@@ -3,7 +3,7 @@ package live
 import "strconv"
 
 // D3 — o tipo da transmissão vive em live_sessions.type, com o CHECK que
-// live_events.type nunca teve. A coluna do evento foi dropada na 000120: uma
+// live_events.type nunca teve. A coluna do evento foi dropada na 000122: uma
 // campanha mista (live na segunda, story na quarta) não tem tipo único, e o
 // rótulo derivado que sobrava era uma resposta errada com cara de resposta.
 //
@@ -40,12 +40,12 @@ func SessionTypeFromEventType(eventType string) string {
 	}
 }
 
-// LegacyEventType SAIU com a 000120: ela existia só para achatar 'reel' em
+// LegacyEventType SAIU com a 000122: ela existia só para achatar 'reel' em
 // 'post' na hora de gravar live_events.type, porque o vocabulário antigo não
 // tinha reel. Sem a coluna, não há mais nada a achatar — e era justamente esse
 // achatamento que fazia todo Reel se apresentar como Post no painel.
 
-// IsValidSessionType espelha o CHECK live_sessions_type_check da 000109.
+// IsValidSessionType espelha o CHECK live_sessions_type_check da 000111.
 func IsValidSessionType(t string) bool {
 	switch t {
 	case SessionTypeLive, SessionTypePost, SessionTypeReel, SessionTypeStory:
@@ -91,7 +91,7 @@ func IsPostCommerceSessionType(t string) bool {
 	return t == SessionTypePost || t == SessionTypeReel || t == SessionTypeStory
 }
 
-// MetricCutoverSessionAttribution é a chave do marcador gravado pela 000119.
+// MetricCutoverSessionAttribution é a chave do marcador gravado pela 000121.
 // Uma constante e não a string solta: o valor tem de casar EXATAMENTE com o do
 // INSERT da migration, e um typo aqui não dá erro nenhum — só faz o marcador
 // sumir da resposta, que é o modo de falha que ele existe para evitar.

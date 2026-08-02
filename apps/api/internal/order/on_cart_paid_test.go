@@ -372,3 +372,93 @@ func TestBackfillFromPaidCarts(t *testing.T) {
 		t.Errorf("Backfill replay: expected 0 new orders, got %d", count2)
 	}
 }
+
+// ─── A4: tracking_token + payment_confirmed nascem na materialização ──────────
+//
+// A Order virou o dono canônico do rastreio (Fatia A4): o token e a timeline
+// `payment_confirmed` são gerados na própria materialização, atômicos com a Order,
+// sem depender do postcheckout.
+
+// AC1: tracking_token não-nulo logo após OnCartPaid do listener.
+func TestOnCartPaid_A4_TrackingTokenMaterialisedAtomically(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	l := newListener(t)
+
+	r := seedPaidCart(t, 1, 10000, 0, 0)
+	if err := l.OnCartPaid(ctx, r.cartID, r.storeID, 10000, nil); err != nil {
+		t.Fatalf("OnCartPaid: %v", err)
+	}
+
+	var token *string
+	if err := testPool.QueryRow(ctx, `
+		SELECT ol.tracking_token FROM order_logistics ol
+		JOIN orders o ON o.id = ol.order_id WHERE o.cart_id = $1`, r.cartID,
+	).Scan(&token); err != nil {
+		t.Fatalf("query tracking_token: %v", err)
+	}
+	if token == nil || *token == "" {
+		t.Fatalf("AC1: tracking_token deveria nascer não-nulo na materialização")
+	}
+}
+
+// AC2: exatamente 1 payment_confirmed (com order_id == orders.id) após OnCartPaid.
+func TestOnCartPaid_A4_PaymentConfirmedTimelineAtomically(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	l := newListener(t)
+
+	r := seedPaidCart(t, 1, 10000, 0, 0)
+	if err := l.OnCartPaid(ctx, r.cartID, r.storeID, 10000, nil); err != nil {
+		t.Fatalf("OnCartPaid: %v", err)
+	}
+
+	var count int
+	var eventOrderID, ordersID *string
+	if err := testPool.QueryRow(ctx, `
+		SELECT COUNT(*), MAX(oe.order_id::text), MAX(o.id::text)
+		FROM order_events oe JOIN orders o ON o.cart_id = oe.cart_id
+		WHERE oe.cart_id = $1 AND oe.event_type = 'payment_confirmed'`, r.cartID,
+	).Scan(&count, &eventOrderID, &ordersID); err != nil {
+		t.Fatalf("query payment_confirmed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("AC2: expected exactly 1 payment_confirmed, got %d", count)
+	}
+	if eventOrderID == nil || ordersID == nil || *eventOrderID != *ordersID {
+		t.Errorf("AC2: payment_confirmed.order_id deve == orders.id (event=%v orders=%v)", eventOrderID, ordersID)
+	}
+}
+
+// AC3: 3× OnCartPaid no mesmo cart → 1 order, 1 token, 1 payment_confirmed.
+func TestOnCartPaid_A4_IdempotentTokenAndTimeline(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	l := newListener(t)
+
+	r := seedPaidCart(t, 1, 10000, 0, 0)
+	for i := 0; i < 3; i++ {
+		if err := l.OnCartPaid(ctx, r.cartID, r.storeID, 10000, nil); err != nil {
+			t.Fatalf("call %d: %v", i+1, err)
+		}
+	}
+
+	var orders, tokens, events int
+	testPool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM orders WHERE cart_id = $1`, r.cartID).Scan(&orders)
+	testPool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM order_logistics ol JOIN orders o ON o.id = ol.order_id
+		WHERE o.cart_id = $1 AND ol.tracking_token IS NOT NULL`, r.cartID).Scan(&tokens)
+	testPool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM order_events WHERE cart_id = $1 AND event_type = 'payment_confirmed'`, r.cartID).Scan(&events)
+
+	if orders != 1 {
+		t.Errorf("AC3: expected 1 order, got %d", orders)
+	}
+	if tokens != 1 {
+		t.Errorf("AC3: expected 1 non-null tracking_token, got %d", tokens)
+	}
+	if events != 1 {
+		t.Errorf("AC3: expected 1 payment_confirmed, got %d", events)
+	}
+}
