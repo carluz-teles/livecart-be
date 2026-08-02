@@ -1379,6 +1379,20 @@ func (r *Repository) AddCartItem(ctx context.Context, params AddCartItemParams) 
 		return fmt.Errorf("upserting cart item: %w", err)
 	}
 
+	// Log de atribuição (RN-12), no MESMO tx do upsert. cart_items soma a
+	// quantidade e guarda só a PRIMEIRA sessão (COALESCE), então sozinho ele
+	// credita à live de segunda uma unidade comprada na de quarta. O log guarda
+	// cada adição com a sessão que a gerou e o preço praticado na hora.
+	if err := qtx.InsertCartItemEvent(ctx, sqlc.InsertCartItemEventParams{
+		CartID:    cartID,
+		ProductID: productID,
+		SessionID: sessionID,
+		Quantity:  int32(params.Quantity),
+		UnitPrice: params.UnitPrice,
+	}); err != nil {
+		return fmt.Errorf("logging cart item addition: %w", err)
+	}
+
 	// cart.item_added in the same tx (can repeat per cart+product, so no dedup key).
 	payload, err := json.Marshal(struct {
 		CartID    string `json:"cart_id"`

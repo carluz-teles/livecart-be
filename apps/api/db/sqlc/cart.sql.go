@@ -1376,6 +1376,34 @@ func (q *Queries) HasInFlightFinalisationForProduct(ctx context.Context, product
 	return in_flight, err
 }
 
+const insertCartItemEvent = `-- name: InsertCartItemEvent :exec
+INSERT INTO cart_item_events (cart_id, product_id, session_id, quantity, unit_price)
+VALUES ($1, $2, $3, $4, $5)
+`
+
+type InsertCartItemEventParams struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	SessionID pgtype.UUID `json:"session_id"`
+	Quantity  int32       `json:"quantity"`
+	UnitPrice int64       `json:"unit_price"`
+}
+
+// Registra uma ADIÇÃO no log de atribuição (RN-12). Vai no mesmo tx do
+// UpsertCartItem: se um falhar, nenhum grava, e o invariante
+// SUM(log.quantity) >= cart_items.quantity nunca é violado por gravação
+// parcial. Só adições entram — remoção é tratada na alocação do selamento.
+func (q *Queries) InsertCartItemEvent(ctx context.Context, arg InsertCartItemEventParams) error {
+	_, err := q.db.Exec(ctx, insertCartItemEvent,
+		arg.CartID,
+		arg.ProductID,
+		arg.SessionID,
+		arg.Quantity,
+		arg.UnitPrice,
+	)
+	return err
+}
+
 const issueShortIDForEvent = `-- name: IssueShortIDForEvent :one
 INSERT INTO store_order_counters (store_id, last_value)
 SELECT e.store_id, 1000 FROM live_events e WHERE e.id = $1
@@ -1395,6 +1423,50 @@ func (q *Queries) IssueShortIDForEvent(ctx context.Context, id pgtype.UUID) (int
 	var last_value int32
 	err := row.Scan(&last_value)
 	return last_value, err
+}
+
+const listCartItemEventsForCart = `-- name: ListCartItemEventsForCart :many
+SELECT product_id, session_id, quantity, unit_price, created_at
+FROM cart_item_events
+WHERE cart_id = $1
+ORDER BY product_id, created_at, id
+`
+
+type ListCartItemEventsForCartRow struct {
+	ProductID pgtype.UUID        `json:"product_id"`
+	SessionID pgtype.UUID        `json:"session_id"`
+	Quantity  int32              `json:"quantity"`
+	UnitPrice int64              `json:"unit_price"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// O log de adições de um carrinho, em ordem cronológica. É o que o selamento
+// percorre para repartir a quantidade final entre as sessões (RN-29). O id
+// desempata adições gravadas no mesmo instante, tornando a ordem determinística.
+func (q *Queries) ListCartItemEventsForCart(ctx context.Context, cartID pgtype.UUID) ([]ListCartItemEventsForCartRow, error) {
+	rows, err := q.db.Query(ctx, listCartItemEventsForCart, cartID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCartItemEventsForCartRow{}
+	for rows.Next() {
+		var i ListCartItemEventsForCartRow
+		if err := rows.Scan(
+			&i.ProductID,
+			&i.SessionID,
+			&i.Quantity,
+			&i.UnitPrice,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listCartItems = `-- name: ListCartItems :many

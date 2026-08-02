@@ -126,6 +126,18 @@ type CartItem struct {
 	SessionID          pgtype.UUID `json:"session_id"`
 }
 
+// RN-12: uma linha por ADIÇÃO ao carrinho, com a sessão de origem. cart_items diz o que TEM no carrinho; esta tabela diz de onde veio cada unidade. Sem ela, cart_items.session_id é first-touch e credita tudo à primeira transmissão.
+type CartItemEvent struct {
+	ID        pgtype.UUID `json:"id"`
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	SessionID pgtype.UUID `json:"session_id"`
+	// Quantidade ADICIONADA nesta operação (sempre > 0). Remoções não geram linha — a quantidade final vem de cart_items e o selamento aloca sobre o log, tirando das adições mais recentes primeiro.
+	Quantity  int32              `json:"quantity"`
+	UnitPrice int64              `json:"unit_price"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
 // Append-only log of cart item mutations during checkout (buyer or merchant driven).
 type CartMutation struct {
 	ID             pgtype.UUID        `json:"id"`
@@ -165,6 +177,8 @@ type CouponRedemption struct {
 	AppliedValueCents int64              `json:"applied_value_cents"`
 	ReservedAt        pgtype.Timestamptz `json:"reserved_at"`
 	ConfirmedAt       pgtype.Timestamptz `json:"confirmed_at"`
+	// RN-33: comprador do carrinho, denormalizado para o índice único poder travar "um resgate por comprador por cupom". Preenchido a partir de carts no INSERT.
+	PlatformUserID string `json:"platform_user_id"`
 }
 
 type Customer struct {

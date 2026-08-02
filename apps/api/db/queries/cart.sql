@@ -252,6 +252,23 @@ DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity,
              session_id = COALESCE(cart_items.session_id, EXCLUDED.session_id)
 RETURNING *;
 
+-- name: InsertCartItemEvent :exec
+-- Registra uma ADIÇÃO no log de atribuição (RN-12). Vai no mesmo tx do
+-- UpsertCartItem: se um falhar, nenhum grava, e o invariante
+-- SUM(log.quantity) >= cart_items.quantity nunca é violado por gravação
+-- parcial. Só adições entram — remoção é tratada na alocação do selamento.
+INSERT INTO cart_item_events (cart_id, product_id, session_id, quantity, unit_price)
+VALUES ($1, $2, $3, $4, $5);
+
+-- name: ListCartItemEventsForCart :many
+-- O log de adições de um carrinho, em ordem cronológica. É o que o selamento
+-- percorre para repartir a quantidade final entre as sessões (RN-29). O id
+-- desempata adições gravadas no mesmo instante, tornando a ordem determinística.
+SELECT product_id, session_id, quantity, unit_price, created_at
+FROM cart_item_events
+WHERE cart_id = $1
+ORDER BY product_id, created_at, id;
+
 -- name: ListCartItems :many
 SELECT ci.*, p.name AS product_name, p.image_url AS product_image_url
 FROM cart_items ci
