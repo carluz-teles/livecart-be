@@ -162,8 +162,10 @@ func (h *Handler) UpdateSettings(c *fiber.Ctx) error {
 		}
 	}
 
-	if err := h.service.UpdateSettings(c.Context(), storeID, settings); err != nil {
-		logger.From(c.Context(), h.logger).Error("failed to update notification settings",
+	// UserContext (não Context) mantém o span OTEL e o logger.From — importa mais
+	// agora que UpdateSettings faz uma leitura antes do merge.
+	if err := h.service.UpdateSettings(c.UserContext(), storeID, settings); err != nil {
+		logger.From(c.UserContext(), h.logger).Error("failed to update notification settings",
 			zap.Error(err),
 		)
 		return httpx.ErrInternal("Erro ao atualizar configurações de notificação")

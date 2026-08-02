@@ -88,14 +88,70 @@ func (s *Service) GetCartMessageSettings(ctx context.Context, storeID string) (*
 	}, nil
 }
 
+// mergeSettings overlays onto current only the sections incoming actually
+// carries. A nil pointer in incoming means "not provided", so the stored value
+// survives.
+//
+// This exists because UpdateStoreNotificationSettings replaces the whole JSONB
+// column. Callers build a Settings from an inbound DTO that does not have a
+// field for every section — UpdateSettingsRequest has no waitlist_notified and
+// no cart_recovery at all, and the communications tab does not send
+// payment_cancelled / payment_refunded. Marshaling that partial struct straight
+// into the column dropped those keys on every save, silently resetting the
+// merchant's waitlist and cart-recovery configuration.
+func mergeSettings(current, incoming Settings) Settings {
+	merged := current
+
+	if incoming.CheckoutImmediate != nil {
+		merged.CheckoutImmediate = incoming.CheckoutImmediate
+	}
+	if incoming.ItemAdded != nil {
+		merged.ItemAdded = incoming.ItemAdded
+	}
+	if incoming.CheckoutReminder != nil {
+		merged.CheckoutReminder = incoming.CheckoutReminder
+	}
+	if incoming.WaitlistNotified != nil {
+		merged.WaitlistNotified = incoming.WaitlistNotified
+	}
+	if incoming.PaymentConfirmed != nil {
+		merged.PaymentConfirmed = incoming.PaymentConfirmed
+	}
+	if incoming.Shipped != nil {
+		merged.Shipped = incoming.Shipped
+	}
+	if incoming.Delivered != nil {
+		merged.Delivered = incoming.Delivered
+	}
+	if incoming.PaymentCancelled != nil {
+		merged.PaymentCancelled = incoming.PaymentCancelled
+	}
+	if incoming.PaymentRefunded != nil {
+		merged.PaymentRefunded = incoming.PaymentRefunded
+	}
+	if incoming.CartRecovery != nil {
+		merged.CartRecovery = incoming.CartRecovery
+	}
+
+	return merged
+}
+
 // UpdateSettings updates notification settings for a store.
+//
+// The write is a partial merge, not a replace: sections absent from settings
+// keep whatever is stored today. See mergeSettings.
 func (s *Service) UpdateSettings(ctx context.Context, storeID string, settings Settings) error {
 	uid, err := parseUUID(storeID)
 	if err != nil {
 		return err
 	}
 
-	settingsJSON, err := json.Marshal(settings)
+	current, err := s.GetSettings(ctx, storeID)
+	if err != nil {
+		return fmt.Errorf("loading current settings before merge: %w", err)
+	}
+
+	settingsJSON, err := json.Marshal(mergeSettings(*current, settings))
 	if err != nil {
 		return fmt.Errorf("marshaling settings: %w", err)
 	}
