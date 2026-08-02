@@ -36,7 +36,7 @@ func TestAC4_GMVPayloadCarriesItemSum(t *testing.T) {
 		}
 	}
 	mustScan(&storeID, `INSERT INTO stores (name, slug) VALUES ('AC4 Store', 'ac4-'||$1) RETURNING id::text`, n)
-	mustScan(&eventID, `INSERT INTO live_events (store_id, status, title) VALUES ($1, 'ended', 'AC4') RETURNING id::text`, storeID)
+	mustScan(&eventID, `INSERT INTO live_events (store_id, status, title, ends_at) VALUES ($1, 'ended', 'AC4', now()) RETURNING id::text`, storeID)
 	kw := fmt.Sprintf("%d", time.Now().UnixNano()%8000+1000)
 	mustScan(&productID,
 		`INSERT INTO products (store_id, name, external_source, external_id, keyword, price, stock)

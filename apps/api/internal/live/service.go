@@ -138,9 +138,9 @@ func (s *Service) SetCustomerUpserter(u CustomerUpserter) {
 func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLiveOutput, error) {
 	// RN-05: ends_at é o TETO da campanha e não tem default razoável. A RN-04
 	// deixa expires_at NULL durante o evento inteiro, então um evento sem fim é
-	// um carrinho sem prazo e um estoque reservado para sempre. O banco só
-	// ganha o NOT NULL na 000119 (um CHECK agora quebraria todo UPDATE de
-	// evento legado, inclusive no caminho de pagamento) — a garantia é aqui.
+	// um carrinho sem prazo e um estoque reservado para sempre. O banco reforça
+	// com NOT NULL desde a 000120; esta checagem existe para a resposta ser 400
+	// com texto, e não 500 vindo de uma constraint.
 	if input.EndsAt == nil {
 		return CreateLiveOutput{}, httpx.ErrBadRequest("endsAt é obrigatório: o evento precisa de uma data de encerramento")
 	}
@@ -153,12 +153,6 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 	}
 	if startsAt != nil && !input.EndsAt.After(*startsAt) {
 		return CreateLiveOutput{}, httpx.ErrBadRequest("endsAt precisa ser depois de startsAt")
-	}
-
-	// Default to single type if not specified
-	eventType := input.Type
-	if eventType == "" {
-		eventType = "single"
 	}
 
 	// Default close_cart_on_event_end to true if not specified
@@ -201,16 +195,22 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		platform, platformLiveID = "", ""
 	}
 
+	// A janela vai DENTRO da transação de criação. Antes ela era um UPDATE
+	// posterior (applyEventWindow), e um evento cujo UPDATE falhasse ficava
+	// commitado sem teto — exatamente o estado que a RN-05 existe para impedir.
+	// Aqui embaixo applyEventWindow continua sendo chamado, mas só para ARMAR o
+	// fechamento por ETA; a escrita já aconteceu.
 	event, session, _, err := s.repo.CreateEventWithSessionTx(ctx, CreateEventParams{
 		StoreID:                input.StoreID,
 		Title:                  input.Title,
-		Type:                   eventType,
+		Type:                   input.Type,
 		Status:                 status,
 		CloseCartOnEventEnd:    closeCartOnEventEnd,
 		CartExpirationMinutes:  input.CartExpirationMinutes,
 		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
 		SendOnLiveEnd:          input.SendOnLiveEnd,
-		ScheduledAt:            input.ScheduledAt,
+		StartsAt:               startsAt,
+		EndsAt:                 input.EndsAt,
 		Description:            input.Description,
 	}, platform, platformLiveID)
 	if err != nil {
@@ -247,17 +247,12 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		}
 	}
 
-	if err := s.applyEventWindow(ctx, event.ID, input.StoreID, EventWindowUpdate{
-		SetStartsAt: true, StartsAt: startsAt,
-		SetEndsAt: true, EndsAt: input.EndsAt,
-	}, false); err != nil {
-		return CreateLiveOutput{}, err
-	}
+	// A janela já foi gravada pelo INSERT; aqui só arma o fechamento por ETA.
+	s.armEventClose(ctx, event.ID, input.StoreID, input.EndsAt, false)
 
 	return CreateLiveOutput{
 		ID:        event.ID,
 		Title:     event.Title,
-		Type:      event.Type,
 		Platform:  platform,
 		Status:    event.Status,
 		CreatedAt: event.CreatedAt,
@@ -280,26 +275,38 @@ func (s *Service) applyEventWindow(ctx context.Context, eventID, storeID string,
 	if err := s.repo.SetEventWindow(ctx, eventID, storeID, w); err != nil {
 		return err
 	}
-	if !w.SetEndsAt || s.closeScheduler == nil {
+	if !w.SetEndsAt {
 		return nil
 	}
-	if w.EndsAt == nil {
-		// Janela removida. A task antiga continua pendente, mas
+	s.armEventClose(ctx, eventID, storeID, w.EndsAt, move)
+	return nil
+}
+
+// armEventClose (re)agenda a task ETA de fechamento. Separado de
+// applyEventWindow porque a CRIAÇÃO já grava a janela dentro da transação do
+// INSERT: reescrever as mesmas colunas logo depois seria um UPDATE que não muda
+// nada e uma segunda chance de a janela divergir do que foi commitado.
+//
+// Best-effort de propósito: o SweepEndedTimedEvents é a rede para uma task
+// perdida. Falhar a criação do evento porque o agendador está fora do ar seria
+// trocar um atraso de até 5 minutos por uma venda que não acontece.
+func (s *Service) armEventClose(ctx context.Context, eventID, storeID string, endsAt *time.Time, move bool) {
+	if s.closeScheduler == nil || endsAt == nil {
+		// endsAt nil = janela removida. A task antiga continua pendente, mas
 		// RunScheduledEventClose é guard-first: com ends_at NULL ele sai sem
 		// fechar nada.
-		return nil
+		return
 	}
 	var err error
 	if move {
-		err = s.closeScheduler.RescheduleEventClose(ctx, eventID, storeID, *w.EndsAt)
+		err = s.closeScheduler.RescheduleEventClose(ctx, eventID, storeID, *endsAt)
 	} else {
-		err = s.closeScheduler.ScheduleEventClose(ctx, eventID, storeID, *w.EndsAt)
+		err = s.closeScheduler.ScheduleEventClose(ctx, eventID, storeID, *endsAt)
 	}
 	if err != nil {
 		logger.From(ctx, s.logger).Warn("failed to arm event window close",
 			zap.String("event_id", eventID), zap.Bool("move", move), zap.Error(err))
 	}
-	return nil
 }
 
 // CreatePostEvent creates a post-commerce event mapped to a published Instagram
@@ -343,8 +350,8 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 		return CreateLiveOutput{}, err
 	}
 
-	// Persist post metadata (raw SQL columns, not in the sqlc INSERT).
-	if err := s.repo.SetEventMedia(ctx, out.ID, input.StoreID, PostMediaInput{
+	// Metadados da publicação: gravados NA MÍDIA, não no evento.
+	if err := s.repo.SetMedia(ctx, PostMediaInput{
 		MediaID:      input.MediaID,
 		Permalink:    input.MediaPermalink,
 		ThumbnailURL: input.MediaThumbnailURL,
@@ -571,7 +578,6 @@ func (s *Service) GetByID(ctx context.Context, id, storeID string) (LiveOutput, 
 		ID:                     event.ID,
 		StoreID:                event.StoreID,
 		Title:                  event.Title,
-		Type:                   event.Type,
 		Platform:               platform,
 		PlatformLiveID:         platformLiveID,
 		Status:                 EffectiveStatus(event.Status, event.ScheduledAt, event.EndsAt),
@@ -700,7 +706,6 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		ID:                     event.ID,
 		StoreID:                event.StoreID,
 		Title:                  event.Title,
-		Type:                   event.Type,
 		Status:                 event.Status,
 		TotalOrders:            event.TotalOrders,
 		CloseCartOnEventEnd:    event.CloseCartOnEventEnd,
@@ -1224,15 +1229,12 @@ func (s *Service) GetEventByPlatformLiveID(ctx context.Context, platformLiveID s
 		ID:                     event.ID,
 		StoreID:                event.StoreID,
 		Title:                  event.Title,
-		Type:                   event.Type,
 		Status:                 event.Status,
 		TotalOrders:            event.TotalOrders,
 		CloseCartOnEventEnd:    event.CloseCartOnEventEnd,
 		CartExpirationMinutes:  event.CartExpirationMinutes,
 		CartMaxQuantityPerItem: event.CartMaxQuantityPerItem,
 		SendOnLiveEnd:          event.SendOnLiveEnd,
-		CurrentActiveProductID: event.CurrentActiveProductID,
-		ProcessingPaused:       event.ProcessingPaused,
 		ScheduledAt:            event.ScheduledAt,
 		EndsAt:                 event.EndsAt,
 		Description:            event.Description,

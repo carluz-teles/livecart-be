@@ -51,7 +51,7 @@ func seedPaidOrder(t *testing.T, storeID string, qty int32, unitPrice int64, pai
 
 	var eventID string
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title) VALUES ($1,'ended','Overview RN-14') RETURNING id::text`,
+		`INSERT INTO live_events (store_id, status, title, ends_at) VALUES ($1,'ended','Overview RN-14', now()) RETURNING id::text`,
 		storeID,
 	).Scan(&eventID); err != nil {
 		t.Fatalf("seed event: %v", err)
@@ -207,7 +207,7 @@ func TestOverviewIgnoresPaidCartWithoutOrder(t *testing.T) {
 
 	var eventID string
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title) VALUES ($1,'ended','sem pedido') RETURNING id::text`,
+		`INSERT INTO live_events (store_id, status, title, ends_at) VALUES ($1,'ended','sem pedido', now()) RETURNING id::text`,
 		storeID,
 	).Scan(&eventID); err != nil {
 		t.Fatalf("seed event: %v", err)

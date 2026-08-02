@@ -138,17 +138,21 @@ func emitSessionCreated(ctx context.Context, q *sqlc.Queries, s sqlc.LiveSession
 
 // emitEventCreated writes the canonical event.created event to the outbox
 // within the caller's transaction.
-func emitEventCreated(ctx context.Context, q *sqlc.Queries, e sqlc.LiveEvent) error {
+// sessionType viaja no payload no lugar do antigo live_events.type: o evento
+// deixou de ter tipo na 000120, e um payload com "type" derivado seria a mesma
+// mentira em outro lugar. O que a primeira sessão é continua sendo informação
+// útil para quem lê o log de eventos.
+func emitEventCreated(ctx context.Context, q *sqlc.Queries, e sqlc.LiveEvent, sessionType string) error {
 	payload, err := json.Marshal(struct {
-		EventID string `json:"event_id"`
-		StoreID string `json:"store_id"`
-		Type    string `json:"type"`
-		Status  string `json:"status"`
+		EventID     string `json:"event_id"`
+		StoreID     string `json:"store_id"`
+		SessionType string `json:"session_type"`
+		Status      string `json:"status"`
 	}{
-		EventID: e.ID.String(),
-		StoreID: e.StoreID.String(),
-		Type:    e.Type,
-		Status:  e.Status,
+		EventID:     e.ID.String(),
+		StoreID:     e.StoreID.String(),
+		SessionType: sessionType,
+		Status:      e.Status,
 	})
 	if err != nil {
 		return fmt.Errorf("marshaling event.created payload: %w", err)
@@ -177,14 +181,11 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 		return EventRow{}, SessionRow{}, nil, err
 	}
 
-	// D3: params.Type chega no vocabulário da SESSÃO (live|post|reel|story) ou no
-	// legado (single|multi). A sessão guarda o tipo real — é a fonte da verdade;
-	// o evento guarda o rótulo legado, que o FE ainda lê até a 000119.
+	// D3: params.Type chega no vocabulário da SESSÃO (live|post|reel|story) ou
+	// no legado (single|multi), que os formulários antigos ainda mandam. A
+	// SESSÃO é o único lugar que guarda isso desde a 000120 — o evento não tem
+	// mais coluna de tipo, porque uma campanha mista não tem resposta única.
 	sessionType := SessionTypeFromEventType(params.Type)
-	eventType := LegacyEventType(params.Type)
-	if eventType == "" {
-		eventType = "single"
-	}
 
 	// Convert nullable ints to pgtype.Int4
 	var cartExpirationMinutes, cartMaxQuantityPerItem pgtype.Int4
@@ -201,11 +202,23 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 		autoSendCheckoutLinks = pgtype.Bool{Bool: *params.SendOnLiveEnd, Valid: true}
 	}
 
-	// Convert scheduling fields
-	var scheduledAt pgtype.Timestamptz
-	if params.ScheduledAt != nil {
-		scheduledAt = pgtype.Timestamptz{Time: *params.ScheduledAt, Valid: true}
+	// starts_at e scheduled_at sao escritos EM PAR, com o mesmo valor, pelo
+	// mesmo motivo de SetEventWindow: starts_at e a coluna nova (000112) e
+	// scheduled_at e a legada que EffectiveStatus ainda le. Divergir as duas
+	// aqui faria o evento nascer com um inicio que a leitura nao enxerga — foi
+	// exatamente o que aconteceu quando a janela entrou no INSERT e o par se
+	// perdeu.
+	var startsAt pgtype.Timestamptz
+	if params.StartsAt != nil {
+		startsAt = pgtype.Timestamptz{Time: *params.StartsAt, Valid: true}
 	}
+	// ends_at é NOT NULL desde a 000120. Chegar aqui com nil é bug de chamador,
+	// não entrada de usuário: o Service já recusa com 400 antes. Falhar aqui,
+	// e não no banco, deixa o erro dizer QUEM esqueceu.
+	if params.EndsAt == nil {
+		return EventRow{}, SessionRow{}, nil, fmt.Errorf("creating live event: ends_at is required")
+	}
+	endsAt := pgtype.Timestamptz{Time: *params.EndsAt, Valid: true}
 	var description pgtype.Text
 	if params.Description != nil {
 		description = pgtype.Text{String: *params.Description, Valid: true}
@@ -223,13 +236,14 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 	eventRow, err := qtx.CreateLiveEventFull(ctx, sqlc.CreateLiveEventFullParams{
 		StoreID:                storeUID,
 		Title:                  pgtype.Text{String: params.Title, Valid: params.Title != ""},
-		Type:                   eventType,
 		Status:                 params.Status,
 		CloseCartOnEventEnd:    params.CloseCartOnEventEnd,
 		CartExpirationMinutes:  cartExpirationMinutes,
 		CartMaxQuantityPerItem: cartMaxQuantityPerItem,
 		SendOnLiveEnd:          autoSendCheckoutLinks,
-		ScheduledAt:            scheduledAt,
+		ScheduledAt:            startsAt,
+		StartsAt:               startsAt,
+		EndsAt:                 endsAt,
 		Description:            description,
 	})
 	if err != nil {
@@ -267,7 +281,7 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 	}
 
 	// Emit event.created + session.created in the same tx (transactional outbox).
-	if err := emitEventCreated(ctx, qtx, eventRow); err != nil {
+	if err := emitEventCreated(ctx, qtx, eventRow, sessionType); err != nil {
 		return EventRow{}, SessionRow{}, nil, err
 	}
 	if err := emitSessionCreated(ctx, qtx, sessionRow, platform, platformLiveID); err != nil {
@@ -336,20 +350,20 @@ func (r *Repository) SetPixDiscountPercent(ctx context.Context, eventID, storeID
 	return nil
 }
 
-// SetEventMedia persists the Instagram post metadata.
+// SetMedia grava a legenda, o permalink e a thumbnail DA MÍDIA.
 //
-// D1/A4: a verdade passou a ser a MÍDIA (live_session_platforms), chaveada pelo
-// platform_live_id — que é o próprio media_id. A escrita em live_events é
-// mantida (dual-write) só enquanto a 000119 não roda: é o que permite reverter
-// a 000109 sem perder legenda e permalink.
-func (r *Repository) SetEventMedia(ctx context.Context, eventID, storeID string, media PostMediaInput) error {
-	uid, err := parseUUID(eventID)
-	if err != nil {
-		return err
-	}
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return err
+// D1/A4: a verdade é a MÍDIA (live_session_platforms), chaveada pelo
+// platform_live_id — que é o próprio media_id. O dual-write em live_events
+// existiu só para permitir reverter a 000109 sem perder legenda e permalink, e
+// saiu junto com as colunas na 000120.
+//
+// Nome e assinatura mudaram junto (era SetEventMedia, com eventID e storeID):
+// os dois argumentos só serviam ao UPDATE do evento. Manter um parâmetro que a
+// função ignora é o que faz o próximo leitor achar que a escrita é por evento —
+// e um evento guarda-chuva tem N mídias.
+func (r *Repository) SetMedia(ctx context.Context, media PostMediaInput) error {
+	if media.MediaID == "" {
+		return httpx.ErrBadRequest("media id is required")
 	}
 	if err := r.q.SetMediaMetadata(ctx, sqlc.SetMediaMetadataParams{
 		PlatformLiveID:    media.MediaID,
@@ -358,17 +372,6 @@ func (r *Repository) SetEventMedia(ctx context.Context, eventID, storeID string,
 		MediaCaption:      pgtype.Text{String: media.Caption, Valid: media.Caption != ""},
 	}); err != nil {
 		return fmt.Errorf("setting media metadata: %w", err)
-	}
-	tag, err := r.pool.Exec(ctx, `
-		UPDATE live_events
-		SET media_id = $3, media_permalink = $4, media_thumbnail_url = $5, media_caption = $6, updated_at = now()
-		WHERE id = $1 AND store_id = $2
-	`, uid, storeUID, media.MediaID, media.Permalink, media.ThumbnailURL, media.Caption)
-	if err != nil {
-		return fmt.Errorf("setting event media: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return httpx.ErrNotFound("event not found")
 	}
 	return nil
 }
@@ -414,7 +417,9 @@ func (r *Repository) SetWaitlistNotifiedTTLMinutes(ctx context.Context, eventID,
 //
 // starts_at e scheduled_at são escritos em par: starts_at é a coluna nova
 // (000112) e scheduled_at é a legada que EffectiveStatus, o FE e as leituras
-// ainda consomem. Elas só divergem depois do contract (000119).
+// ainda consomem. O contract (000120) NÃO as separou: escrever só starts_at
+// deixaria EffectiveStatus cego para o início do evento, então o par continua
+// sendo escrito junto — aqui e no INSERT.
 func (r *Repository) SetEventWindow(ctx context.Context, eventID, storeID string, w EventWindowUpdate) error {
 	if !w.Touches() {
 		return nil
@@ -1615,7 +1620,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 	// Join with platforms to get the primary platform
 	query := fmt.Sprintf(`
 		SELECT
-			e.id, e.store_id, e.title, e.type, e.status, e.total_orders, e.created_at, e.updated_at,
+			e.id, e.store_id, e.title, e.status, e.total_orders, e.created_at, e.updated_at,
 			e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end,
 			COALESCE(e.pix_discount_percent, 0),
 			e.scheduled_at, e.ends_at,
@@ -1625,7 +1630,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 		FROM live_events e
 		LEFT JOIN LATERAL (
 			-- Tipos DISTINTOS das sessões: é o que substitui live_events.type
-			-- quando a 000119 o dropar. Um LATERAL próprio (e não um join na
+			-- desde que a 000120 o dropou. Um LATERAL próprio (e não um join na
 			-- lateral da primeira sessão) porque a campanha é MISTA: a
 			-- primeira sessão pode ser a live e a terceira o story, e rotular
 			-- o evento pela primeira sessão seria trocar uma mentira por outra.
@@ -1663,7 +1668,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 	lives := make([]LiveOutput, 0)
 	for rows.Next() {
 		var live LiveOutput
-		var title, eventType, platform, platformLiveID pgtype.Text
+		var title, platform, platformLiveID pgtype.Text
 		var startedAt, endedAt, scheduledAt, endsAt pgtype.Timestamptz
 		var cartExpirationMinutes, cartMaxQuantityPerItem pgtype.Int4
 		var autoSendCheckoutLinks pgtype.Bool
@@ -1673,7 +1678,6 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 			&live.ID,
 			&live.StoreID,
 			&title,
-			&eventType,
 			&live.Status,
 			&live.TotalOrders,
 			&live.CreatedAt,
@@ -1698,11 +1702,6 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 
 		if title.Valid {
 			live.Title = title.String
-		}
-		if eventType.Valid {
-			live.Type = eventType.String
-		} else {
-			live.Type = "single"
 		}
 		if platform.Valid {
 			live.Platform = platform.String
@@ -1756,11 +1755,6 @@ func toEventRow(row sqlc.LiveEvent) EventRow {
 		title = row.Title.String
 	}
 
-	eventType := row.Type
-	if eventType == "" {
-		eventType = "single"
-	}
-
 	// Convert nullable fields
 	var cartExpirationMinutes, cartMaxQuantityPerItem *int
 	if row.CartExpirationMinutes.Valid {
@@ -1775,12 +1769,6 @@ func toEventRow(row sqlc.LiveEvent) EventRow {
 	if row.SendOnLiveEnd.Valid {
 		autoSendCheckoutLinks = &row.SendOnLiveEnd.Bool
 	}
-	var currentActiveProductID *string
-	if row.CurrentActiveProductID.Valid {
-		id := row.CurrentActiveProductID.String()
-		currentActiveProductID = &id
-	}
-
 	// Scheduling fields
 	var scheduledAt *time.Time
 	if row.ScheduledAt.Valid {
@@ -1799,15 +1787,12 @@ func toEventRow(row sqlc.LiveEvent) EventRow {
 		ID:                     row.ID.String(),
 		StoreID:                row.StoreID.String(),
 		Title:                  title,
-		Type:                   eventType,
 		Status:                 row.Status,
 		TotalOrders:            int(row.TotalOrders),
 		CloseCartOnEventEnd:    row.CloseCartOnEventEnd,
 		CartExpirationMinutes:  cartExpirationMinutes,
 		CartMaxQuantityPerItem: cartMaxQuantityPerItem,
 		SendOnLiveEnd:          autoSendCheckoutLinks,
-		CurrentActiveProductID: currentActiveProductID,
-		ProcessingPaused:       row.ProcessingPaused,
 		ScheduledAt:            scheduledAt,
 		EndsAt:                 endsAt,
 		Description:            description,
@@ -2131,10 +2116,10 @@ func (r *Repository) ListProjectionInputByEvent(ctx context.Context, eventID str
 // =============================================================================
 // MODO LIVE (D17) — estado EFÊMERO de execução, agora na SESSÃO
 //
-// As colunas equivalentes em live_events continuam existindo até a 000119, mas
-// não são mais lidas nem escritas: quem manda é a sessão. As funções "…ForEvent"
-// abaixo sustentam a rota legada do painel, que ainda só conhece o eventId, e
-// aplicam o estado em TODAS as sessões vivas do evento.
+// As colunas equivalentes em live_events saíram na 000120: quem manda é a
+// sessão. As funções "…ForEvent" abaixo sustentam a rota legada do painel, que
+// ainda só conhece o eventId, e aplicam o estado em TODAS as sessões vivas do
+// evento.
 // =============================================================================
 
 // SetSessionActiveProduct define (ou limpa, com productID nil) o produto em
@@ -2330,8 +2315,8 @@ func buildLiveModeState(
 // A camada de event_products saiu daqui: a whitelist passou a ser da SESSÃO
 // (000110). As operações equivalentes estão em session_product_repository.go, e
 // as rotas legadas por evento são traduzidas para todas as sessões do evento.
-// event_products continua existindo no banco até a 000119 como instantâneo de
-// rollback — não é mais lida nem escrita por ninguém.
+// A tabela event_products saiu do banco na 000120: ela sobrevivia só como
+// instantâneo de rollback e ninguém mais a lia nem escrevia.
 
 // =============================================================================
 // EVENT UPSELLS
@@ -2590,11 +2575,6 @@ func toEventRowFromWithCounts(row sqlc.GetLiveEventWithCountsRow) EventRow {
 		title = row.Title.String
 	}
 
-	eventType := row.Type
-	if eventType == "" {
-		eventType = "single"
-	}
-
 	var cartExpirationMinutes, cartMaxQuantityPerItem *int
 	if row.CartExpirationMinutes.Valid {
 		v := int(row.CartExpirationMinutes.Int32)
@@ -2607,11 +2587,6 @@ func toEventRowFromWithCounts(row sqlc.GetLiveEventWithCountsRow) EventRow {
 	var autoSendCheckoutLinks *bool
 	if row.SendOnLiveEnd.Valid {
 		autoSendCheckoutLinks = &row.SendOnLiveEnd.Bool
-	}
-	var currentActiveProductID *string
-	if row.CurrentActiveProductID.Valid {
-		id := row.CurrentActiveProductID.String()
-		currentActiveProductID = &id
 	}
 	var scheduledAt *time.Time
 	if row.ScheduledAt.Valid {
@@ -2630,15 +2605,12 @@ func toEventRowFromWithCounts(row sqlc.GetLiveEventWithCountsRow) EventRow {
 		ID:                     row.ID.String(),
 		StoreID:                row.StoreID.String(),
 		Title:                  title,
-		Type:                   eventType,
 		Status:                 row.Status,
 		TotalOrders:            int(row.TotalOrders),
 		CloseCartOnEventEnd:    row.CloseCartOnEventEnd,
 		CartExpirationMinutes:  cartExpirationMinutes,
 		CartMaxQuantityPerItem: cartMaxQuantityPerItem,
 		SendOnLiveEnd:          autoSendCheckoutLinks,
-		CurrentActiveProductID: currentActiveProductID,
-		ProcessingPaused:       row.ProcessingPaused,
 		ScheduledAt:            scheduledAt,
 		EndsAt:                 endsAt,
 		Description:            description,

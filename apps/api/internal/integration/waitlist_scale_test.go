@@ -56,8 +56,8 @@ func seedScaleEvent(t *testing.T) scaleFixture {
 		t.Fatalf("seed store: %v", err)
 	}
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title, waitlist_notified_ttl_minutes)
-		 VALUES ($1, 'active', 'Scale Live', 30) RETURNING id::text`, fx.storeID).Scan(&fx.eventID); err != nil {
+		`INSERT INTO live_events (store_id, status, title, waitlist_notified_ttl_minutes, ends_at)
+		 VALUES ($1, 'active', 'Scale Live', 30, now() + interval '1 day') RETURNING id::text`, fx.storeID).Scan(&fx.eventID); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
 	return fx

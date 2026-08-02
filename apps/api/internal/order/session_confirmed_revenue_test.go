@@ -63,7 +63,7 @@ func seedCartFromTwoSessions(t *testing.T) twoSessionSeed {
 
 	var eventID string
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title) VALUES ($1, 'ended', 'Semana Black') RETURNING id::text`,
+		`INSERT INTO live_events (store_id, status, title, ends_at) VALUES ($1, 'ended', 'Semana Black', now()) RETURNING id::text`,
 		storeID,
 	).Scan(&eventID); err != nil {
 		t.Fatalf("seed event: %v", err)

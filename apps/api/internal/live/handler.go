@@ -172,7 +172,6 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 	return httpx.Created(c, CreateLiveResponse{
 		ID:        output.ID,
 		Title:     output.Title,
-		Type:      output.Type,
 		Platform:  output.Platform,
 		Status:    output.Status,
 		CreatedAt: output.CreatedAt,
@@ -234,7 +233,6 @@ func (h *Handler) CreatePost(c *fiber.Ctx) error {
 	return httpx.Created(c, CreateLiveResponse{
 		ID:        output.ID,
 		Title:     output.Title,
-		Type:      output.Type,
 		Platform:  output.Platform,
 		Status:    output.Status,
 		CreatedAt: output.CreatedAt,
@@ -726,7 +724,6 @@ func toLiveResponse(o LiveOutput) LiveResponse {
 	return LiveResponse{
 		ID:                     o.ID,
 		Title:                  o.Title,
-		Type:                   o.Type,
 		Platform:               o.Platform,
 		PlatformLiveID:         o.PlatformLiveID,
 		Status:                 o.Status,
@@ -823,7 +820,6 @@ func toEventResponse(o EventOutput) EventResponse {
 	return EventResponse{
 		ID:                     o.ID,
 		Title:                  o.Title,
-		Type:                   o.Type,
 		Status:                 EffectiveStatus(o.Status, o.ScheduledAt, o.EndsAt),
 		TotalOrders:            o.TotalOrders,
 		CloseCartOnEventEnd:    o.CloseCartOnEventEnd,

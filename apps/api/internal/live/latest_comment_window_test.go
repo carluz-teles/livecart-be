@@ -27,7 +27,7 @@ func seedCommentsFixture(t *testing.T, ctx context.Context, slug string) (eventI
 		t.Fatalf("seed store: %v", err)
 	}
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title, type) VALUES ($1,'active',$2,'multi') RETURNING id::text`,
+		`INSERT INTO live_events (store_id, status, title, ends_at) VALUES ($1,'active',$2, now() + interval '7 days') RETURNING id::text`,
 		storeID, slug,
 	).Scan(&eventID); err != nil {
 		t.Fatalf("seed event: %v", err)

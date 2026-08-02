@@ -3,19 +3,10 @@
 -- Container for live sessions. Carts are tied to events, not sessions.
 -- =============================================================================
 
--- name: CreateLiveEvent :one
-INSERT INTO live_events (
-    store_id,
-    title,
-    type,
-    status,
-    close_cart_on_event_end,
-    cart_expiration_minutes,
-    cart_max_quantity_per_item,
-    send_on_live_end
-)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING *;
+-- CreateLiveEvent SAIU: era o segundo INSERT em live_events, sem nenhum
+-- chamador Go, e o unico que nao gravava a janela comercial. Manter dois
+-- caminhos de criacao e o que faz a regra nova (ends_at obrigatorio) entrar so
+-- em um deles. Quem cria evento e CreateLiveEventFull.
 
 -- name: GetLiveEventByID :one
 SELECT * FROM live_events WHERE id = $1;
@@ -123,58 +114,44 @@ WHERE e.id = $1;
 SELECT waitlist_notified_ttl_minutes FROM live_events WHERE id = $1;
 
 -- =============================================================================
--- LIVE MODE - Active Product and Processing Control
+-- LIVE MODE
 -- =============================================================================
-
--- name: SetActiveProduct :one
-UPDATE live_events
-SET current_active_product_id = $2, updated_at = now()
-WHERE id = $1 AND store_id = $3
-RETURNING *;
-
--- name: ClearActiveProduct :one
-UPDATE live_events
-SET current_active_product_id = NULL, updated_at = now()
-WHERE id = $1 AND store_id = $2
-RETURNING *;
-
--- name: SetProcessingPaused :one
-UPDATE live_events
-SET processing_paused = $2, updated_at = now()
-WHERE id = $1 AND store_id = $3
-RETURNING *;
-
--- name: GetLiveModeState :one
-SELECT
-    e.id,
-    e.processing_paused,
-    e.current_active_product_id,
-    p.name AS active_product_name,
-    p.keyword AS active_product_keyword,
-    p.price AS active_product_price,
-    p.image_url AS active_product_image_url
-FROM live_events e
-LEFT JOIN products p ON p.id = e.current_active_product_id
-WHERE e.id = $1 AND e.store_id = $2;
+-- SetActiveProduct, ClearActiveProduct, SetProcessingPaused e GetLiveModeState
+-- SAIRAM daqui. O Modo Live desceu para live_sessions na 000111 (D17) e desde
+-- entao estas quatro nao tinham chamador nenhum: escreviam e liam colunas de
+-- live_events que ninguem mais mantinha, entao ler delas devolvia estado
+-- CONGELADO no momento do cutover. Os substitutos vivem em live.sql
+-- (SetActiveProductForEventSessions, SetProcessingPausedForEventSessions,
+-- GetEventLiveModeStateFromSessions, e o par por sessao).
 
 -- =============================================================================
 -- EVENT SCHEDULING & DESCRIPTION
 -- =============================================================================
 
 -- name: CreateLiveEventFull :one
+-- type SAIU (D3/000120): a especie da campanha e das SESSOES dela, e uma
+-- campanha mista nao tem resposta unica no container.
+--
+-- starts_at/scheduled_at/ends_at ENTRARAM. Antes o evento nascia sem janela e
+-- ganhava ends_at num UPDATE posterior, FORA da transacao: se aquele UPDATE
+-- falhasse, o evento ja estava commitado sem teto — e evento sem teto e
+-- carrinho sem prazo (RN-04 deixa expires_at NULL durante a campanha) e estoque
+-- reservado para sempre. Com a coluna NOT NULL desde a 000120, esse buraco
+-- deixa de ser possivel: o INSERT falha em vez de o evento nascer torto.
 INSERT INTO live_events (
     store_id,
     title,
-    type,
     status,
     close_cart_on_event_end,
     cart_expiration_minutes,
     cart_max_quantity_per_item,
     send_on_live_end,
     scheduled_at,
+    starts_at,
+    ends_at,
     description
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 RETURNING *;
 
 -- name: UpdateLiveEventDetails :one
@@ -234,9 +211,17 @@ SET status = 'active', updated_at = now()
 WHERE id = $1 AND status = 'scheduled';
 
 -- name: GetLiveEventWithCounts :one
+-- product_count conta produtos DISTINTOS nas whitelists das SESSOES (000110):
+-- event_products deixa de existir na 000120. DISTINCT e nao COUNT(*) porque o
+-- mesmo produto pode estar barrado em varias transmissoes da campanha e o badge
+-- responde "quantos produtos", nao "quantas linhas" — a mesma regra de
+-- CountEventWhitelistFromSessions, que ja e a fonte da aba Produtos.
 SELECT
     e.*,
-    (SELECT COUNT(*)::int FROM event_products WHERE event_id = e.id) AS product_count,
+    (SELECT COUNT(DISTINCT sp.product_id)::int
+       FROM session_products sp
+       JOIN live_sessions ls ON ls.id = sp.session_id
+      WHERE ls.event_id = e.id) AS product_count,
     (SELECT COUNT(*)::int FROM event_upsells WHERE event_id = e.id) AS upsell_count
 FROM live_events e
 WHERE e.id = $1 AND e.store_id = $2;

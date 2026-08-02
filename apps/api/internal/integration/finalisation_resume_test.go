@@ -156,7 +156,7 @@ func seedPaidCart(t *testing.T, qty, activeReservations int) finFixture {
 	mustScan(new(string),
 		`INSERT INTO integrations (store_id, type, provider, status) VALUES ($1, 'erp', 'tiny', 'active') RETURNING id::text`, fx.storeID)
 	mustScan(&fx.eventID,
-		`INSERT INTO live_events (store_id, status, title) VALUES ($1, 'ended', 'Live Teste') RETURNING id::text`, fx.storeID)
+		`INSERT INTO live_events (store_id, status, title, ends_at) VALUES ($1, 'ended', 'Live Teste', now()) RETURNING id::text`, fx.storeID)
 	kw := fmt.Sprintf("%d", 1000+seedSeq%9000) // keyword numérica 1000-9999 (regra do domínio)
 	mustScan(&fx.productID,
 		`INSERT INTO products (store_id, name, external_source, external_id, keyword, price, stock)

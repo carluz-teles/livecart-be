@@ -112,7 +112,8 @@ func TestCreateEventWritesWindowAndArmsClose(t *testing.T) {
 	if gotStarts == nil || !gotStarts.UTC().Equal(starts) {
 		t.Errorf("starts_at = %v, queria %v", gotStarts, starts)
 	}
-	// scheduled_at segue starts_at até a 000119 — EffectiveStatus e o FE ainda
+	// scheduled_at segue starts_at, e continuou seguindo depois do contract:
+	// EffectiveStatus e o FE ainda
 	// leem a coluna antiga.
 	if gotScheduled == nil || !gotScheduled.UTC().Equal(starts) {
 		t.Errorf("scheduled_at = %v, queria espelhar starts_at (%v)", gotScheduled, starts)

@@ -231,22 +231,6 @@ type EventOutbox struct {
 	SchemaVersion int32              `json:"schema_version"`
 }
 
-// Product whitelist for events. If empty, all store products are available.
-type EventProduct struct {
-	ID        pgtype.UUID `json:"id"`
-	EventID   pgtype.UUID `json:"event_id"`
-	ProductID pgtype.UUID `json:"product_id"`
-	// Override price for this event in cents (NULL = use product default)
-	SpecialPrice pgtype.Int4 `json:"special_price"`
-	// Max quantity per cart for this product in this event
-	MaxQuantity  pgtype.Int4 `json:"max_quantity"`
-	DisplayOrder int32       `json:"display_order"`
-	// Highlighted product in live mode UI
-	Featured  bool               `json:"featured"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
-}
-
 // Global upsell offers for events, shown after any cart addition.
 type EventUpsell struct {
 	ID        pgtype.UUID `json:"id"`
@@ -361,8 +345,6 @@ type LiveEvent struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 	TotalOrders int32              `json:"total_orders"`
-	// single = one live, auto-end; multi = multiple sessions, manual end
-	Type string `json:"type"`
 	// If true, cart stops accepting items when event ends
 	CloseCartOnEventEnd bool `json:"close_cart_on_event_end"`
 	// Override do prazo curto do carrinho para este evento. NULL = herda de stores.cart_expiration_minutes. Mínimo 15 — o valor 0 foi removido.
@@ -371,10 +353,6 @@ type LiveEvent struct {
 	CartMaxQuantityPerItem pgtype.Int4 `json:"cart_max_quantity_per_item"`
 	// Override send_on_live_end (NULL = use store setting)
 	SendOnLiveEnd pgtype.Bool `json:"send_on_live_end"`
-	// Current highlighted product - used as fallback when user comments without keyword
-	CurrentActiveProductID pgtype.UUID `json:"current_active_product_id"`
-	// When true, comments are stored but not processed into carts
-	ProcessingPaused bool `json:"processing_paused"`
 	// When the event is scheduled to start (NULL = not scheduled)
 	ScheduledAt pgtype.Timestamptz `json:"scheduled_at"`
 	// Internal notes about the event
@@ -385,14 +363,7 @@ type LiveEvent struct {
 	PixDiscountPercent int32 `json:"pix_discount_percent"`
 	// Minutos extras que um cliente promovido da waitlist (status=notified) tem para finalizar o checkout antes de devolver o estoque para o próximo da fila.
 	WaitlistNotifiedTtlMinutes int32 `json:"waitlist_notified_ttl_minutes"`
-	// Instagram media id when type = post
-	MediaID           pgtype.Text `json:"media_id"`
-	MediaPermalink    pgtype.Text `json:"media_permalink"`
-	MediaThumbnailUrl pgtype.Text `json:"media_thumbnail_url"`
-	MediaCaption      pgtype.Text `json:"media_caption"`
-	// true once a comments webhook arrived for this post event; polling stops
-	WebhookActive bool `json:"webhook_active"`
-	// D5: TETO da campanha. Obrigatorio para eventos NOVOS (validado na aplicacao). A obrigatoriedade no banco entra na 000119, depois do backfill dos legados.
+	// D5/RN-05: TETO da campanha, obrigatorio. E ele que garante que nenhum carrinho fica sem prazo — durante o evento expires_at fica NULL por definicao (RN-04) e o relogio so comeca quando a janela fecha.
 	EndsAt pgtype.Timestamptz `json:"ends_at"`
 	// Override do prazo estendido para este evento. NULL = herda de stores.cart_extended_expiration_minutes.
 	CartExtendedExpirationMinutes pgtype.Int4 `json:"cart_extended_expiration_minutes"`

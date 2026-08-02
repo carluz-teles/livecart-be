@@ -2,14 +2,15 @@ package live
 
 import "strconv"
 
-// D3 — o tipo da transmissão passa a viver em live_sessions.type, com o CHECK
-// que live_events.type nunca teve. Enquanto a 000119 (contract) não roda,
-// live_events.type continua sendo escrito no vocabulário ANTIGO, porque o
-// frontend ainda lê event.type e só conhece single|multi|post|story.
+// D3 — o tipo da transmissão vive em live_sessions.type, com o CHECK que
+// live_events.type nunca teve. A coluna do evento foi dropada na 000120: uma
+// campanha mista (live na segunda, story na quarta) não tem tipo único, e o
+// rótulo derivado que sobrava era uma resposta errada com cara de resposta.
 //
-// Estes dois mapas são o único ponto de tradução entre os dois vocabulários.
-// Duplicá-los é o caminho mais curto para o CHECK estourar como 500 no INSERT
-// (a lição E6 da errata: validação de aplicação desalinhada do CHECK).
+// SessionTypeFromEventType continua existindo porque o vocabulário ANTIGO
+// (single|multi) ainda chega pelos formulários e pela API pública. Ele é o
+// único ponto de tradução; duplicá-lo é o caminho mais curto para o CHECK
+// estourar como 500 no INSERT (a lição E6 da errata).
 
 // Status de sessão. 'active' e 'live' são ambos "no ar" — 'live' é o que
 // StartSession grava; 'active' é o default da coluna.
@@ -39,16 +40,10 @@ func SessionTypeFromEventType(eventType string) string {
 	}
 }
 
-// LegacyEventType devolve o valor a gravar em live_events.type. Só 'reel'
-// precisa de tradução: ele não existe no vocabulário antigo e o frontend
-// quebraria ao receber um type desconhecido, então um Reel continua sendo
-// rotulado 'post' no evento — a distinção real vive na sessão.
-func LegacyEventType(eventType string) string {
-	if eventType == SessionTypeReel {
-		return SessionTypePost
-	}
-	return eventType
-}
+// LegacyEventType SAIU com a 000120: ela existia só para achatar 'reel' em
+// 'post' na hora de gravar live_events.type, porque o vocabulário antigo não
+// tinha reel. Sem a coluna, não há mais nada a achatar — e era justamente esse
+// achatamento que fazia todo Reel se apresentar como Post no painel.
 
 // IsValidSessionType espelha o CHECK live_sessions_type_check da 000109.
 func IsValidSessionType(t string) bool {

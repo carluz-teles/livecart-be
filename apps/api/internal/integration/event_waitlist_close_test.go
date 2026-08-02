@@ -45,8 +45,8 @@ func seedWaitlistCloseFixture(t *testing.T) waitlistCloseFixture {
 		t.Fatalf("seed store: %v", err)
 	}
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title, type, ends_at)
-		 VALUES ($1,'ended','Semana','multi', now() - interval '1 day') RETURNING id::text`, f.storeID,
+		`INSERT INTO live_events (store_id, status, title, ends_at)
+		 VALUES ($1,'ended','Semana', now() - interval '1 day') RETURNING id::text`, f.storeID,
 	).Scan(&f.eventID); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}

@@ -33,53 +33,6 @@ func (q *Queries) ActivateScheduledEvent(ctx context.Context, id pgtype.UUID) (i
 	return result.RowsAffected(), nil
 }
 
-const clearActiveProduct = `-- name: ClearActiveProduct :one
-UPDATE live_events
-SET current_active_product_id = NULL, updated_at = now()
-WHERE id = $1 AND store_id = $2
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, current_active_product_id, processing_paused, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active, ends_at, cart_extended_expiration_minutes, starts_at
-`
-
-type ClearActiveProductParams struct {
-	ID      pgtype.UUID `json:"id"`
-	StoreID pgtype.UUID `json:"store_id"`
-}
-
-func (q *Queries) ClearActiveProduct(ctx context.Context, arg ClearActiveProductParams) (LiveEvent, error) {
-	row := q.db.QueryRow(ctx, clearActiveProduct, arg.ID, arg.StoreID)
-	var i LiveEvent
-	err := row.Scan(
-		&i.ID,
-		&i.StoreID,
-		&i.Title,
-		&i.Status,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.TotalOrders,
-		&i.Type,
-		&i.CloseCartOnEventEnd,
-		&i.CartExpirationMinutes,
-		&i.CartMaxQuantityPerItem,
-		&i.SendOnLiveEnd,
-		&i.CurrentActiveProductID,
-		&i.ProcessingPaused,
-		&i.ScheduledAt,
-		&i.Description,
-		&i.FreeShipping,
-		&i.PixDiscountPercent,
-		&i.WaitlistNotifiedTtlMinutes,
-		&i.MediaID,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
-		&i.EndsAt,
-		&i.CartExtendedExpirationMinutes,
-		&i.StartsAt,
-	)
-	return i, err
-}
-
 const countSessionsByEvent = `-- name: CountSessionsByEvent :one
 SELECT COUNT(*)::int FROM live_sessions WHERE event_id = $1
 `
@@ -91,126 +44,74 @@ func (q *Queries) CountSessionsByEvent(ctx context.Context, eventID pgtype.UUID)
 	return column_1, err
 }
 
-const createLiveEvent = `-- name: CreateLiveEvent :one
-
-INSERT INTO live_events (
-    store_id,
-    title,
-    type,
-    status,
-    close_cart_on_event_end,
-    cart_expiration_minutes,
-    cart_max_quantity_per_item,
-    send_on_live_end
-)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, current_active_product_id, processing_paused, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active, ends_at, cart_extended_expiration_minutes, starts_at
-`
-
-type CreateLiveEventParams struct {
-	StoreID                pgtype.UUID `json:"store_id"`
-	Title                  pgtype.Text `json:"title"`
-	Type                   string      `json:"type"`
-	Status                 string      `json:"status"`
-	CloseCartOnEventEnd    bool        `json:"close_cart_on_event_end"`
-	CartExpirationMinutes  pgtype.Int4 `json:"cart_expiration_minutes"`
-	CartMaxQuantityPerItem pgtype.Int4 `json:"cart_max_quantity_per_item"`
-	SendOnLiveEnd          pgtype.Bool `json:"send_on_live_end"`
-}
-
-// =============================================================================
-// LIVE EVENTS
-// Container for live sessions. Carts are tied to events, not sessions.
-// =============================================================================
-func (q *Queries) CreateLiveEvent(ctx context.Context, arg CreateLiveEventParams) (LiveEvent, error) {
-	row := q.db.QueryRow(ctx, createLiveEvent,
-		arg.StoreID,
-		arg.Title,
-		arg.Type,
-		arg.Status,
-		arg.CloseCartOnEventEnd,
-		arg.CartExpirationMinutes,
-		arg.CartMaxQuantityPerItem,
-		arg.SendOnLiveEnd,
-	)
-	var i LiveEvent
-	err := row.Scan(
-		&i.ID,
-		&i.StoreID,
-		&i.Title,
-		&i.Status,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.TotalOrders,
-		&i.Type,
-		&i.CloseCartOnEventEnd,
-		&i.CartExpirationMinutes,
-		&i.CartMaxQuantityPerItem,
-		&i.SendOnLiveEnd,
-		&i.CurrentActiveProductID,
-		&i.ProcessingPaused,
-		&i.ScheduledAt,
-		&i.Description,
-		&i.FreeShipping,
-		&i.PixDiscountPercent,
-		&i.WaitlistNotifiedTtlMinutes,
-		&i.MediaID,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
-		&i.EndsAt,
-		&i.CartExtendedExpirationMinutes,
-		&i.StartsAt,
-	)
-	return i, err
-}
-
 const createLiveEventFull = `-- name: CreateLiveEventFull :one
 
+
 INSERT INTO live_events (
     store_id,
     title,
-    type,
     status,
     close_cart_on_event_end,
     cart_expiration_minutes,
     cart_max_quantity_per_item,
     send_on_live_end,
     scheduled_at,
+    starts_at,
+    ends_at,
     description
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, current_active_product_id, processing_paused, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active, ends_at, cart_extended_expiration_minutes, starts_at
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+RETURNING id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at
 `
 
 type CreateLiveEventFullParams struct {
 	StoreID                pgtype.UUID        `json:"store_id"`
 	Title                  pgtype.Text        `json:"title"`
-	Type                   string             `json:"type"`
 	Status                 string             `json:"status"`
 	CloseCartOnEventEnd    bool               `json:"close_cart_on_event_end"`
 	CartExpirationMinutes  pgtype.Int4        `json:"cart_expiration_minutes"`
 	CartMaxQuantityPerItem pgtype.Int4        `json:"cart_max_quantity_per_item"`
 	SendOnLiveEnd          pgtype.Bool        `json:"send_on_live_end"`
 	ScheduledAt            pgtype.Timestamptz `json:"scheduled_at"`
+	StartsAt               pgtype.Timestamptz `json:"starts_at"`
+	EndsAt                 pgtype.Timestamptz `json:"ends_at"`
 	Description            pgtype.Text        `json:"description"`
 }
 
 // =============================================================================
+// LIVE MODE
+// =============================================================================
+// SetActiveProduct, ClearActiveProduct, SetProcessingPaused e GetLiveModeState
+// SAIRAM daqui. O Modo Live desceu para live_sessions na 000111 (D17) e desde
+// entao estas quatro nao tinham chamador nenhum: escreviam e liam colunas de
+// live_events que ninguem mais mantinha, entao ler delas devolvia estado
+// CONGELADO no momento do cutover. Os substitutos vivem em live.sql
+// (SetActiveProductForEventSessions, SetProcessingPausedForEventSessions,
+// GetEventLiveModeStateFromSessions, e o par por sessao).
+// =============================================================================
 // EVENT SCHEDULING & DESCRIPTION
 // =============================================================================
+// type SAIU (D3/000120): a especie da campanha e das SESSOES dela, e uma
+// campanha mista nao tem resposta unica no container.
+//
+// starts_at/scheduled_at/ends_at ENTRARAM. Antes o evento nascia sem janela e
+// ganhava ends_at num UPDATE posterior, FORA da transacao: se aquele UPDATE
+// falhasse, o evento ja estava commitado sem teto — e evento sem teto e
+// carrinho sem prazo (RN-04 deixa expires_at NULL durante a campanha) e estoque
+// reservado para sempre. Com a coluna NOT NULL desde a 000120, esse buraco
+// deixa de ser possivel: o INSERT falha em vez de o evento nascer torto.
 func (q *Queries) CreateLiveEventFull(ctx context.Context, arg CreateLiveEventFullParams) (LiveEvent, error) {
 	row := q.db.QueryRow(ctx, createLiveEventFull,
 		arg.StoreID,
 		arg.Title,
-		arg.Type,
 		arg.Status,
 		arg.CloseCartOnEventEnd,
 		arg.CartExpirationMinutes,
 		arg.CartMaxQuantityPerItem,
 		arg.SendOnLiveEnd,
 		arg.ScheduledAt,
+		arg.StartsAt,
+		arg.EndsAt,
 		arg.Description,
 	)
 	var i LiveEvent
@@ -222,23 +123,15 @@ func (q *Queries) CreateLiveEventFull(ctx context.Context, arg CreateLiveEventFu
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.TotalOrders,
-		&i.Type,
 		&i.CloseCartOnEventEnd,
 		&i.CartExpirationMinutes,
 		&i.CartMaxQuantityPerItem,
 		&i.SendOnLiveEnd,
-		&i.CurrentActiveProductID,
-		&i.ProcessingPaused,
 		&i.ScheduledAt,
 		&i.Description,
 		&i.FreeShipping,
 		&i.PixDiscountPercent,
 		&i.WaitlistNotifiedTtlMinutes,
-		&i.MediaID,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
@@ -250,7 +143,7 @@ const endLiveEvent = `-- name: EndLiveEvent :one
 UPDATE live_events
 SET status = 'ended', updated_at = now()
 WHERE id = $1 AND store_id = $2
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, current_active_product_id, processing_paused, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active, ends_at, cart_extended_expiration_minutes, starts_at
+RETURNING id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at
 `
 
 type EndLiveEventParams struct {
@@ -269,23 +162,15 @@ func (q *Queries) EndLiveEvent(ctx context.Context, arg EndLiveEventParams) (Liv
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.TotalOrders,
-		&i.Type,
 		&i.CloseCartOnEventEnd,
 		&i.CartExpirationMinutes,
 		&i.CartMaxQuantityPerItem,
 		&i.SendOnLiveEnd,
-		&i.CurrentActiveProductID,
-		&i.ProcessingPaused,
 		&i.ScheduledAt,
 		&i.Description,
 		&i.FreeShipping,
 		&i.PixDiscountPercent,
 		&i.WaitlistNotifiedTtlMinutes,
-		&i.MediaID,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
@@ -294,7 +179,7 @@ func (q *Queries) EndLiveEvent(ctx context.Context, arg EndLiveEventParams) (Liv
 }
 
 const getActiveLiveEventByStore = `-- name: GetActiveLiveEventByStore :one
-SELECT id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, current_active_product_id, processing_paused, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active, ends_at, cart_extended_expiration_minutes, starts_at FROM live_events
+SELECT id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at FROM live_events
 WHERE store_id = $1 AND status = 'active'
 ORDER BY created_at DESC
 LIMIT 1
@@ -311,23 +196,15 @@ func (q *Queries) GetActiveLiveEventByStore(ctx context.Context, storeID pgtype.
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.TotalOrders,
-		&i.Type,
 		&i.CloseCartOnEventEnd,
 		&i.CartExpirationMinutes,
 		&i.CartMaxQuantityPerItem,
 		&i.SendOnLiveEnd,
-		&i.CurrentActiveProductID,
-		&i.ProcessingPaused,
 		&i.ScheduledAt,
 		&i.Description,
 		&i.FreeShipping,
 		&i.PixDiscountPercent,
 		&i.WaitlistNotifiedTtlMinutes,
-		&i.MediaID,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
@@ -368,7 +245,7 @@ func (q *Queries) GetActiveTimedEventByMediaID(ctx context.Context, platformLive
 }
 
 const getEventByPlatformLiveID = `-- name: GetEventByPlatformLiveID :one
-SELECT e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.type, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end, e.current_active_product_id, e.processing_paused, e.scheduled_at, e.description, e.free_shipping, e.pix_discount_percent, e.waitlist_notified_ttl_minutes, e.media_id, e.media_permalink, e.media_thumbnail_url, e.media_caption, e.webhook_active, e.ends_at, e.cart_extended_expiration_minutes, e.starts_at
+SELECT e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end, e.scheduled_at, e.description, e.free_shipping, e.pix_discount_percent, e.waitlist_notified_ttl_minutes, e.ends_at, e.cart_extended_expiration_minutes, e.starts_at
 FROM live_events e
 JOIN live_sessions s ON s.event_id = e.id
 JOIN live_session_platforms lsp ON lsp.session_id = s.id
@@ -406,23 +283,15 @@ func (q *Queries) GetEventByPlatformLiveID(ctx context.Context, platformLiveID s
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.TotalOrders,
-		&i.Type,
 		&i.CloseCartOnEventEnd,
 		&i.CartExpirationMinutes,
 		&i.CartMaxQuantityPerItem,
 		&i.SendOnLiveEnd,
-		&i.CurrentActiveProductID,
-		&i.ProcessingPaused,
 		&i.ScheduledAt,
 		&i.Description,
 		&i.FreeShipping,
 		&i.PixDiscountPercent,
 		&i.WaitlistNotifiedTtlMinutes,
-		&i.MediaID,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
@@ -431,7 +300,7 @@ func (q *Queries) GetEventByPlatformLiveID(ctx context.Context, platformLiveID s
 }
 
 const getEventBySessionID = `-- name: GetEventBySessionID :one
-SELECT e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.type, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end, e.current_active_product_id, e.processing_paused, e.scheduled_at, e.description, e.free_shipping, e.pix_discount_percent, e.waitlist_notified_ttl_minutes, e.media_id, e.media_permalink, e.media_thumbnail_url, e.media_caption, e.webhook_active, e.ends_at, e.cart_extended_expiration_minutes, e.starts_at FROM live_events e
+SELECT e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end, e.scheduled_at, e.description, e.free_shipping, e.pix_discount_percent, e.waitlist_notified_ttl_minutes, e.ends_at, e.cart_extended_expiration_minutes, e.starts_at FROM live_events e
 JOIN live_sessions s ON s.event_id = e.id
 WHERE s.id = $1
 `
@@ -447,23 +316,15 @@ func (q *Queries) GetEventBySessionID(ctx context.Context, id pgtype.UUID) (Live
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.TotalOrders,
-		&i.Type,
 		&i.CloseCartOnEventEnd,
 		&i.CartExpirationMinutes,
 		&i.CartMaxQuantityPerItem,
 		&i.SendOnLiveEnd,
-		&i.CurrentActiveProductID,
-		&i.ProcessingPaused,
 		&i.ScheduledAt,
 		&i.Description,
 		&i.FreeShipping,
 		&i.PixDiscountPercent,
 		&i.WaitlistNotifiedTtlMinutes,
-		&i.MediaID,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
@@ -537,9 +398,19 @@ func (q *Queries) GetEventCartSettings(ctx context.Context, id pgtype.UUID) (Get
 }
 
 const getLiveEventByID = `-- name: GetLiveEventByID :one
-SELECT id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, current_active_product_id, processing_paused, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active, ends_at, cart_extended_expiration_minutes, starts_at FROM live_events WHERE id = $1
+
+
+SELECT id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at FROM live_events WHERE id = $1
 `
 
+// =============================================================================
+// LIVE EVENTS
+// Container for live sessions. Carts are tied to events, not sessions.
+// =============================================================================
+// CreateLiveEvent SAIU: era o segundo INSERT em live_events, sem nenhum
+// chamador Go, e o unico que nao gravava a janela comercial. Manter dois
+// caminhos de criacao e o que faz a regra nova (ends_at obrigatorio) entrar so
+// em um deles. Quem cria evento e CreateLiveEventFull.
 func (q *Queries) GetLiveEventByID(ctx context.Context, id pgtype.UUID) (LiveEvent, error) {
 	row := q.db.QueryRow(ctx, getLiveEventByID, id)
 	var i LiveEvent
@@ -551,23 +422,15 @@ func (q *Queries) GetLiveEventByID(ctx context.Context, id pgtype.UUID) (LiveEve
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.TotalOrders,
-		&i.Type,
 		&i.CloseCartOnEventEnd,
 		&i.CartExpirationMinutes,
 		&i.CartMaxQuantityPerItem,
 		&i.SendOnLiveEnd,
-		&i.CurrentActiveProductID,
-		&i.ProcessingPaused,
 		&i.ScheduledAt,
 		&i.Description,
 		&i.FreeShipping,
 		&i.PixDiscountPercent,
 		&i.WaitlistNotifiedTtlMinutes,
-		&i.MediaID,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
@@ -576,7 +439,7 @@ func (q *Queries) GetLiveEventByID(ctx context.Context, id pgtype.UUID) (LiveEve
 }
 
 const getLiveEventByIDAndStore = `-- name: GetLiveEventByIDAndStore :one
-SELECT id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, current_active_product_id, processing_paused, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active, ends_at, cart_extended_expiration_minutes, starts_at FROM live_events WHERE id = $1 AND store_id = $2
+SELECT id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at FROM live_events WHERE id = $1 AND store_id = $2
 `
 
 type GetLiveEventByIDAndStoreParams struct {
@@ -595,23 +458,15 @@ func (q *Queries) GetLiveEventByIDAndStore(ctx context.Context, arg GetLiveEvent
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.TotalOrders,
-		&i.Type,
 		&i.CloseCartOnEventEnd,
 		&i.CartExpirationMinutes,
 		&i.CartMaxQuantityPerItem,
 		&i.SendOnLiveEnd,
-		&i.CurrentActiveProductID,
-		&i.ProcessingPaused,
 		&i.ScheduledAt,
 		&i.Description,
 		&i.FreeShipping,
 		&i.PixDiscountPercent,
 		&i.WaitlistNotifiedTtlMinutes,
-		&i.MediaID,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
@@ -621,8 +476,11 @@ func (q *Queries) GetLiveEventByIDAndStore(ctx context.Context, arg GetLiveEvent
 
 const getLiveEventWithCounts = `-- name: GetLiveEventWithCounts :one
 SELECT
-    e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.type, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end, e.current_active_product_id, e.processing_paused, e.scheduled_at, e.description, e.free_shipping, e.pix_discount_percent, e.waitlist_notified_ttl_minutes, e.media_id, e.media_permalink, e.media_thumbnail_url, e.media_caption, e.webhook_active, e.ends_at, e.cart_extended_expiration_minutes, e.starts_at,
-    (SELECT COUNT(*)::int FROM event_products WHERE event_id = e.id) AS product_count,
+    e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end, e.scheduled_at, e.description, e.free_shipping, e.pix_discount_percent, e.waitlist_notified_ttl_minutes, e.ends_at, e.cart_extended_expiration_minutes, e.starts_at,
+    (SELECT COUNT(DISTINCT sp.product_id)::int
+       FROM session_products sp
+       JOIN live_sessions ls ON ls.id = sp.session_id
+      WHERE ls.event_id = e.id) AS product_count,
     (SELECT COUNT(*)::int FROM event_upsells WHERE event_id = e.id) AS upsell_count
 FROM live_events e
 WHERE e.id = $1 AND e.store_id = $2
@@ -641,23 +499,15 @@ type GetLiveEventWithCountsRow struct {
 	CreatedAt                     pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt                     pgtype.Timestamptz `json:"updated_at"`
 	TotalOrders                   int32              `json:"total_orders"`
-	Type                          string             `json:"type"`
 	CloseCartOnEventEnd           bool               `json:"close_cart_on_event_end"`
 	CartExpirationMinutes         pgtype.Int4        `json:"cart_expiration_minutes"`
 	CartMaxQuantityPerItem        pgtype.Int4        `json:"cart_max_quantity_per_item"`
 	SendOnLiveEnd                 pgtype.Bool        `json:"send_on_live_end"`
-	CurrentActiveProductID        pgtype.UUID        `json:"current_active_product_id"`
-	ProcessingPaused              bool               `json:"processing_paused"`
 	ScheduledAt                   pgtype.Timestamptz `json:"scheduled_at"`
 	Description                   pgtype.Text        `json:"description"`
 	FreeShipping                  bool               `json:"free_shipping"`
 	PixDiscountPercent            int32              `json:"pix_discount_percent"`
 	WaitlistNotifiedTtlMinutes    int32              `json:"waitlist_notified_ttl_minutes"`
-	MediaID                       pgtype.Text        `json:"media_id"`
-	MediaPermalink                pgtype.Text        `json:"media_permalink"`
-	MediaThumbnailUrl             pgtype.Text        `json:"media_thumbnail_url"`
-	MediaCaption                  pgtype.Text        `json:"media_caption"`
-	WebhookActive                 bool               `json:"webhook_active"`
 	EndsAt                        pgtype.Timestamptz `json:"ends_at"`
 	CartExtendedExpirationMinutes pgtype.Int4        `json:"cart_extended_expiration_minutes"`
 	StartsAt                      pgtype.Timestamptz `json:"starts_at"`
@@ -665,6 +515,11 @@ type GetLiveEventWithCountsRow struct {
 	UpsellCount                   int32              `json:"upsell_count"`
 }
 
+// product_count conta produtos DISTINTOS nas whitelists das SESSOES (000110):
+// event_products deixa de existir na 000120. DISTINCT e nao COUNT(*) porque o
+// mesmo produto pode estar barrado em varias transmissoes da campanha e o badge
+// responde "quantos produtos", nao "quantas linhas" — a mesma regra de
+// CountEventWhitelistFromSessions, que ja e a fonte da aba Produtos.
 func (q *Queries) GetLiveEventWithCounts(ctx context.Context, arg GetLiveEventWithCountsParams) (GetLiveEventWithCountsRow, error) {
 	row := q.db.QueryRow(ctx, getLiveEventWithCounts, arg.ID, arg.StoreID)
 	var i GetLiveEventWithCountsRow
@@ -676,72 +531,20 @@ func (q *Queries) GetLiveEventWithCounts(ctx context.Context, arg GetLiveEventWi
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.TotalOrders,
-		&i.Type,
 		&i.CloseCartOnEventEnd,
 		&i.CartExpirationMinutes,
 		&i.CartMaxQuantityPerItem,
 		&i.SendOnLiveEnd,
-		&i.CurrentActiveProductID,
-		&i.ProcessingPaused,
 		&i.ScheduledAt,
 		&i.Description,
 		&i.FreeShipping,
 		&i.PixDiscountPercent,
 		&i.WaitlistNotifiedTtlMinutes,
-		&i.MediaID,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
 		&i.ProductCount,
 		&i.UpsellCount,
-	)
-	return i, err
-}
-
-const getLiveModeState = `-- name: GetLiveModeState :one
-SELECT
-    e.id,
-    e.processing_paused,
-    e.current_active_product_id,
-    p.name AS active_product_name,
-    p.keyword AS active_product_keyword,
-    p.price AS active_product_price,
-    p.image_url AS active_product_image_url
-FROM live_events e
-LEFT JOIN products p ON p.id = e.current_active_product_id
-WHERE e.id = $1 AND e.store_id = $2
-`
-
-type GetLiveModeStateParams struct {
-	ID      pgtype.UUID `json:"id"`
-	StoreID pgtype.UUID `json:"store_id"`
-}
-
-type GetLiveModeStateRow struct {
-	ID                     pgtype.UUID `json:"id"`
-	ProcessingPaused       bool        `json:"processing_paused"`
-	CurrentActiveProductID pgtype.UUID `json:"current_active_product_id"`
-	ActiveProductName      pgtype.Text `json:"active_product_name"`
-	ActiveProductKeyword   pgtype.Text `json:"active_product_keyword"`
-	ActiveProductPrice     pgtype.Int8 `json:"active_product_price"`
-	ActiveProductImageUrl  pgtype.Text `json:"active_product_image_url"`
-}
-
-func (q *Queries) GetLiveModeState(ctx context.Context, arg GetLiveModeStateParams) (GetLiveModeStateRow, error) {
-	row := q.db.QueryRow(ctx, getLiveModeState, arg.ID, arg.StoreID)
-	var i GetLiveModeStateRow
-	err := row.Scan(
-		&i.ID,
-		&i.ProcessingPaused,
-		&i.CurrentActiveProductID,
-		&i.ActiveProductName,
-		&i.ActiveProductKeyword,
-		&i.ActiveProductPrice,
-		&i.ActiveProductImageUrl,
 	)
 	return i, err
 }
@@ -886,7 +689,7 @@ func (q *Queries) ListEventsReadyToStart(ctx context.Context, limit int32) ([]Li
 }
 
 const listLiveEventsByStore = `-- name: ListLiveEventsByStore :many
-SELECT id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, current_active_product_id, processing_paused, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active, ends_at, cart_extended_expiration_minutes, starts_at FROM live_events
+SELECT id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at FROM live_events
 WHERE store_id = $1
 ORDER BY created_at DESC
 `
@@ -908,23 +711,15 @@ func (q *Queries) ListLiveEventsByStore(ctx context.Context, storeID pgtype.UUID
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.TotalOrders,
-			&i.Type,
 			&i.CloseCartOnEventEnd,
 			&i.CartExpirationMinutes,
 			&i.CartMaxQuantityPerItem,
 			&i.SendOnLiveEnd,
-			&i.CurrentActiveProductID,
-			&i.ProcessingPaused,
 			&i.ScheduledAt,
 			&i.Description,
 			&i.FreeShipping,
 			&i.PixDiscountPercent,
 			&i.WaitlistNotifiedTtlMinutes,
-			&i.MediaID,
-			&i.MediaPermalink,
-			&i.MediaThumbnailUrl,
-			&i.MediaCaption,
-			&i.WebhookActive,
 			&i.EndsAt,
 			&i.CartExtendedExpirationMinutes,
 			&i.StartsAt,
@@ -939,106 +734,6 @@ func (q *Queries) ListLiveEventsByStore(ctx context.Context, storeID pgtype.UUID
 	return items, nil
 }
 
-const setActiveProduct = `-- name: SetActiveProduct :one
-
-UPDATE live_events
-SET current_active_product_id = $2, updated_at = now()
-WHERE id = $1 AND store_id = $3
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, current_active_product_id, processing_paused, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active, ends_at, cart_extended_expiration_minutes, starts_at
-`
-
-type SetActiveProductParams struct {
-	ID                     pgtype.UUID `json:"id"`
-	CurrentActiveProductID pgtype.UUID `json:"current_active_product_id"`
-	StoreID                pgtype.UUID `json:"store_id"`
-}
-
-// =============================================================================
-// LIVE MODE - Active Product and Processing Control
-// =============================================================================
-func (q *Queries) SetActiveProduct(ctx context.Context, arg SetActiveProductParams) (LiveEvent, error) {
-	row := q.db.QueryRow(ctx, setActiveProduct, arg.ID, arg.CurrentActiveProductID, arg.StoreID)
-	var i LiveEvent
-	err := row.Scan(
-		&i.ID,
-		&i.StoreID,
-		&i.Title,
-		&i.Status,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.TotalOrders,
-		&i.Type,
-		&i.CloseCartOnEventEnd,
-		&i.CartExpirationMinutes,
-		&i.CartMaxQuantityPerItem,
-		&i.SendOnLiveEnd,
-		&i.CurrentActiveProductID,
-		&i.ProcessingPaused,
-		&i.ScheduledAt,
-		&i.Description,
-		&i.FreeShipping,
-		&i.PixDiscountPercent,
-		&i.WaitlistNotifiedTtlMinutes,
-		&i.MediaID,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
-		&i.EndsAt,
-		&i.CartExtendedExpirationMinutes,
-		&i.StartsAt,
-	)
-	return i, err
-}
-
-const setProcessingPaused = `-- name: SetProcessingPaused :one
-UPDATE live_events
-SET processing_paused = $2, updated_at = now()
-WHERE id = $1 AND store_id = $3
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, current_active_product_id, processing_paused, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active, ends_at, cart_extended_expiration_minutes, starts_at
-`
-
-type SetProcessingPausedParams struct {
-	ID               pgtype.UUID `json:"id"`
-	ProcessingPaused bool        `json:"processing_paused"`
-	StoreID          pgtype.UUID `json:"store_id"`
-}
-
-func (q *Queries) SetProcessingPaused(ctx context.Context, arg SetProcessingPausedParams) (LiveEvent, error) {
-	row := q.db.QueryRow(ctx, setProcessingPaused, arg.ID, arg.ProcessingPaused, arg.StoreID)
-	var i LiveEvent
-	err := row.Scan(
-		&i.ID,
-		&i.StoreID,
-		&i.Title,
-		&i.Status,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.TotalOrders,
-		&i.Type,
-		&i.CloseCartOnEventEnd,
-		&i.CartExpirationMinutes,
-		&i.CartMaxQuantityPerItem,
-		&i.SendOnLiveEnd,
-		&i.CurrentActiveProductID,
-		&i.ProcessingPaused,
-		&i.ScheduledAt,
-		&i.Description,
-		&i.FreeShipping,
-		&i.PixDiscountPercent,
-		&i.WaitlistNotifiedTtlMinutes,
-		&i.MediaID,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
-		&i.EndsAt,
-		&i.CartExtendedExpirationMinutes,
-		&i.StartsAt,
-	)
-	return i, err
-}
-
 const updateLiveEventDetails = `-- name: UpdateLiveEventDetails :one
 UPDATE live_events
 SET
@@ -1047,7 +742,7 @@ SET
     scheduled_at = $5,
     updated_at = now()
 WHERE id = $1 AND store_id = $2
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, current_active_product_id, processing_paused, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active, ends_at, cart_extended_expiration_minutes, starts_at
+RETURNING id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at
 `
 
 type UpdateLiveEventDetailsParams struct {
@@ -1075,23 +770,15 @@ func (q *Queries) UpdateLiveEventDetails(ctx context.Context, arg UpdateLiveEven
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.TotalOrders,
-		&i.Type,
 		&i.CloseCartOnEventEnd,
 		&i.CartExpirationMinutes,
 		&i.CartMaxQuantityPerItem,
 		&i.SendOnLiveEnd,
-		&i.CurrentActiveProductID,
-		&i.ProcessingPaused,
 		&i.ScheduledAt,
 		&i.Description,
 		&i.FreeShipping,
 		&i.PixDiscountPercent,
 		&i.WaitlistNotifiedTtlMinutes,
-		&i.MediaID,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
@@ -1103,7 +790,7 @@ const updateLiveEventTitle = `-- name: UpdateLiveEventTitle :one
 UPDATE live_events
 SET title = $2, updated_at = now()
 WHERE id = $1
-RETURNING id, store_id, title, status, created_at, updated_at, total_orders, type, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, current_active_product_id, processing_paused, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, media_id, media_permalink, media_thumbnail_url, media_caption, webhook_active, ends_at, cart_extended_expiration_minutes, starts_at
+RETURNING id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at
 `
 
 type UpdateLiveEventTitleParams struct {
@@ -1122,23 +809,15 @@ func (q *Queries) UpdateLiveEventTitle(ctx context.Context, arg UpdateLiveEventT
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.TotalOrders,
-		&i.Type,
 		&i.CloseCartOnEventEnd,
 		&i.CartExpirationMinutes,
 		&i.CartMaxQuantityPerItem,
 		&i.SendOnLiveEnd,
-		&i.CurrentActiveProductID,
-		&i.ProcessingPaused,
 		&i.ScheduledAt,
 		&i.Description,
 		&i.FreeShipping,
 		&i.PixDiscountPercent,
 		&i.WaitlistNotifiedTtlMinutes,
-		&i.MediaID,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,

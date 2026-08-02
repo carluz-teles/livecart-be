@@ -37,13 +37,16 @@ func seedMedia(t *testing.T, ctx context.Context, slug, eventStatus, sessionStat
 	).Scan(&f.storeID); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
-	endsAt := "NULL"
+	// ends_at e NOT NULL desde a 000120: um evento sem teto deixou de existir.
+	// O caso "ainda aberto" vira uma janela no futuro, que e o que ele sempre
+	// significou de verdade.
+	endsAt := "now() + interval '7 days'"
 	if endedDaysAgo != 0 {
 		endsAt = fmt.Sprintf("now() - interval '%f days'", endedDaysAgo)
 	}
 	if err := testPool.QueryRow(ctx, fmt.Sprintf(
-		`INSERT INTO live_events (store_id, status, title, type, ends_at)
-		 VALUES ($1,$2,$3,'post',%s) RETURNING id::text`, endsAt),
+		`INSERT INTO live_events (store_id, status, title, ends_at)
+		 VALUES ($1,$2,$3,%s) RETURNING id::text`, endsAt),
 		f.storeID, eventStatus, slug,
 	).Scan(&f.eventID); err != nil {
 		t.Fatalf("seed event: %v", err)

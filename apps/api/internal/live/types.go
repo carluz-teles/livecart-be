@@ -22,15 +22,16 @@ type CreateEventRequest struct {
 type CreateEventResponse struct {
 	ID        string    `json:"id"`
 	Title     string    `json:"title"`
-	Type      string    `json:"type"`
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
 type EventResponse struct {
-	ID                     string `json:"id"`
-	Title                  string `json:"title"`
-	Type                   string `json:"type"`
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	// `type` SAIU do contrato (000120). A espécie da campanha está em
+	// `sessionTypes`, mais abaixo: uma campanha mista não tem tipo único, e
+	// devolver um rótulo derivado seria a mesma mentira em outro lugar.
 	Status                 string `json:"status"`
 	TotalOrders            int    `json:"totalOrders"`
 	CloseCartOnEventEnd    bool   `json:"closeCartOnEventEnd"`
@@ -50,7 +51,7 @@ type EventResponse struct {
 	Sessions     []SessionResponse `json:"sessions,omitempty"`
 	// SessionTypes são os tipos DISTINTOS das transmissões deste evento
 	// ({live, post, reel, story}). É a única fonte de "que espécie de evento é
-	// este" que sobrevive à 000119, que dropa live_events.type: com a campanha
+	// este" que sobrevive à 000120, que dropou live_events.type: com a campanha
 	// mista o tipo do container deixou de ter resposta única, e quem quiser
 	// rotular a tela tem que olhar as sessões. Nunca nulo — evento sem sessão
 	// devolve lista vazia, e lista vazia é "ainda não sabemos", não "live".
@@ -94,7 +95,6 @@ type CreateEventInput struct {
 type CreateEventOutput struct {
 	ID        string
 	Title     string
-	Type      string
 	Status    string
 	CreatedAt time.Time
 }
@@ -115,7 +115,6 @@ type EventOutput struct {
 	ID                     string
 	StoreID                string
 	Title                  string
-	Type                   string
 	Status                 string
 	TotalOrders            int
 	CloseCartOnEventEnd    bool
@@ -123,12 +122,6 @@ type EventOutput struct {
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
 	PixDiscountPercent     int
-	// ⚠️ OBSOLETOS desde a 000111: o Modo Live é da SESSÃO. Estes dois campos
-	// carregam o que live_events tinha ANTES do cutover e ninguém mais os
-	// escreve — ler daqui devolve estado congelado. Use SessionOutput. Saem com
-	// a 000119.
-	CurrentActiveProductID *string
-	ProcessingPaused       bool
 	// RN-10 — janela extra do promovido da fila, em minutos.
 	WaitlistNotifiedTTLMinutes int
 	// Scheduling
@@ -165,8 +158,10 @@ type EventFilters struct {
 
 // Repository layer - Event
 type CreateEventParams struct {
-	StoreID                string
-	Title                  string
+	StoreID string
+	Title   string
+	// Type é o tipo da SESSÃO inicial (D3). O evento não guarda tipo desde a
+	// 000120 — aceita o vocabulário legado (single|multi) e traduz.
 	Type                   string
 	Status                 string
 	CloseCartOnEventEnd    bool
@@ -174,8 +169,15 @@ type CreateEventParams struct {
 	CartMaxQuantityPerItem *int
 	SendOnLiveEnd          *bool
 	PixDiscountPercent     int
-	// Scheduling
-	ScheduledAt *time.Time
+	// Janela comercial. StartsAt já chega RESOLVIDO (o Service cai para
+	// scheduledAt quando o formulário só manda o campo legado) — por isso não
+	// há ScheduledAt aqui: duas entradas para as duas colunas que sempre
+	// carregam o mesmo valor é como elas divergiriam.
+	//
+	// EndsAt é OBRIGATÓRIO: a coluna é NOT NULL desde a 000120 e é o teto que
+	// garante que nenhum carrinho fica sem prazo.
+	StartsAt    *time.Time
+	EndsAt      *time.Time
 	Description *string
 }
 
@@ -183,7 +185,6 @@ type EventRow struct {
 	ID                     string
 	StoreID                string
 	Title                  string
-	Type                   string
 	Status                 string
 	TotalOrders            int
 	CloseCartOnEventEnd    bool
@@ -195,9 +196,6 @@ type EventRow struct {
 	// do momento em que o item libera. Vive em live_events desde a 000073
 	// (CHECK 5..240) e o runtime já a aplica — faltava só aparecer na API.
 	WaitlistNotifiedTTLMinutes int
-	// ⚠️ OBSOLETOS desde a 000111 — ver EventOutput. A verdade está na sessão.
-	CurrentActiveProductID *string
-	ProcessingPaused       bool
 	// Scheduling: ScheduledAt is the start; EndsAt is the optional end.
 	ScheduledAt *time.Time
 	EndsAt      *time.Time
@@ -602,7 +600,6 @@ type CreateLiveRequest struct {
 type CreateLiveResponse struct {
 	ID        string    `json:"id"`
 	Title     string    `json:"title"`
-	Type      string    `json:"type"`
 	Platform  string    `json:"platform,omitempty"`
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"createdAt"`
@@ -623,9 +620,9 @@ type UpdateLiveRequest struct {
 }
 
 type LiveResponse struct {
-	ID                     string     `json:"id"`
-	Title                  string     `json:"title"`
-	Type                   string     `json:"type"`
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	// `type` SAIU (000120) — ver `sessionTypes`.
 	Platform               string     `json:"platform"`       // Primary platform (from first session)
 	PlatformLiveID         string     `json:"platformLiveId"` // Primary platform live ID
 	Status                 string     `json:"status"`
@@ -652,7 +649,7 @@ type LiveResponse struct {
 	// SessionTypes — mesma semântica de EventResponse.SessionTypes. A LISTA
 	// precisa dele tanto quanto o detalhe: ela não carrega sessions[], então
 	// sem este campo a tela de eventos só teria live_events.type para escolher
-	// o rótulo — exatamente a coluna que a 000119 remove.
+	// o rótulo — exatamente a coluna que a 000120 removeu.
 	SessionTypes []string  `json:"sessionTypes"`
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`
@@ -715,7 +712,6 @@ type CreateLiveInput struct {
 type CreateLiveOutput struct {
 	ID        string
 	Title     string
-	Type      string
 	Platform  string
 	Status    string
 	CreatedAt time.Time
@@ -778,7 +774,6 @@ type LiveOutput struct {
 	ID                     string
 	StoreID                string
 	Title                  string
-	Type                   string
 	Platform               string // Primary platform
 	PlatformLiveID         string // Primary platform live ID
 	Status                 string
@@ -786,8 +781,8 @@ type LiveOutput struct {
 	EndedAt                *time.Time
 	TotalComments          int
 	TotalOrders            int
-	// SessionTypes são os tipos DISTINTOS das sessões deste evento. Sai da
-	// listagem porque é o substituto de Type quando a 000119 dropar a coluna.
+	// SessionTypes são os tipos DISTINTOS das sessões deste evento. É o
+	// substituto de Type, que a 000120 dropou.
 	SessionTypes           []string
 	CloseCartOnEventEnd    bool
 	CartExpirationMinutes  *int

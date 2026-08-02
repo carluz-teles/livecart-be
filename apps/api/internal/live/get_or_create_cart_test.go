@@ -25,7 +25,7 @@ func seedEvent(t *testing.T) string {
 		t.Fatalf("seed store: %v", err)
 	}
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title) VALUES ($1,'active','Semana Teste') RETURNING id::text`,
+		`INSERT INTO live_events (store_id, status, title, ends_at) VALUES ($1,'active','Semana Teste', now() + interval '7 days') RETURNING id::text`,
 		storeID,
 	).Scan(&eventID); err != nil {
 		t.Fatalf("seed event: %v", err)

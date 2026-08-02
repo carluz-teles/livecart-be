@@ -23,7 +23,7 @@ func seedEventAndCarts(t *testing.T, storeID string) (eventID, sessionID string,
 	base := time.Now().UnixNano() // int64, cabe em bigint
 
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title) VALUES ($1, 'ended', 'GMV Canonical Test') RETURNING id::text`,
+		`INSERT INTO live_events (store_id, status, title, ends_at) VALUES ($1, 'ended', 'GMV Canonical Test', now()) RETURNING id::text`,
 		storeID,
 	).Scan(&eventID); err != nil {
 		t.Fatalf("seedEventAndCarts event: %v", err)

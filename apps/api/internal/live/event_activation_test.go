@@ -98,7 +98,7 @@ func TestStartPullsFutureWindowForward(t *testing.T) {
 	if starts == nil || starts.UTC().Before(before) {
 		t.Fatalf("starts_at = %v, queria ter sido puxado para agora (>= %v)", starts, before)
 	}
-	// scheduled_at anda junto até a 000119 — é a coluna que EffectiveStatus e o
+	// scheduled_at anda junto com starts_at — é a coluna que EffectiveStatus e o
 	// FE ainda leem; deixá-la no futuro manteria o painel rotulando "agendado".
 	if scheduled == nil || !scheduled.UTC().Equal(starts.UTC()) {
 		t.Errorf("scheduled_at = %v, queria espelhar starts_at (%v)", scheduled, starts)

@@ -19,8 +19,8 @@ func seedEventPastEndsAt(t *testing.T, ctx context.Context, storeID, title strin
 	t.Helper()
 	var eventID string
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title, type, ends_at)
-		 VALUES ($1,'active',$2,'multi', now() - interval '1 hour') RETURNING id::text`,
+		`INSERT INTO live_events (store_id, status, title, ends_at)
+		 VALUES ($1,'active',$2, now() - interval '1 hour') RETURNING id::text`,
 		storeID, title,
 	).Scan(&eventID); err != nil {
 		t.Fatalf("seed evento vencido: %v", err)
@@ -52,8 +52,8 @@ func TestListEventsPastEndsAtCoversEveryType(t *testing.T) {
 	// Um evento ainda dentro da janela não pode aparecer.
 	var futureEvent string
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title, type, ends_at)
-		 VALUES ($1,'active','Ainda aberto','multi', now() + interval '2 days') RETURNING id::text`,
+		`INSERT INTO live_events (store_id, status, title, ends_at)
+		 VALUES ($1,'active','Ainda aberto', now() + interval '2 days') RETURNING id::text`,
 		storeID,
 	).Scan(&futureEvent); err != nil {
 		t.Fatalf("seed evento futuro: %v", err)

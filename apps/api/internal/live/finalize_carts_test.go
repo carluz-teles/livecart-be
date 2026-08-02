@@ -31,8 +31,8 @@ func TestFinalizeCartsSkipsPaidCart(t *testing.T) {
 		t.Fatalf("seed store: %v", err)
 	}
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title, type, cart_expiration_minutes)
-		 VALUES ($1,'active','Semana','multi',60) RETURNING id::text`, storeID,
+		`INSERT INTO live_events (store_id, status, title, cart_expiration_minutes, ends_at)
+		 VALUES ($1,'active','Semana',60, now() + interval '7 days') RETURNING id::text`, storeID,
 	).Scan(&eventID); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
@@ -124,9 +124,9 @@ func TestFinalizeCartsPicksShortOrExtendedDeadline(t *testing.T) {
 				t.Fatalf("seed store: %v", err)
 			}
 			if err := testPool.QueryRow(ctx,
-				`INSERT INTO live_events (store_id, status, title, type,
-				     close_cart_on_event_end, cart_expiration_minutes, cart_extended_expiration_minutes)
-				 VALUES ($1,'active','Semana','multi',$2,60,10080) RETURNING id::text`, storeID, tc.closeOnEnd,
+				`INSERT INTO live_events (store_id, status, title,
+				     close_cart_on_event_end, cart_expiration_minutes, cart_extended_expiration_minutes, ends_at)
+				 VALUES ($1,'active','Semana',$2,60,10080, now() + interval '7 days') RETURNING id::text`, storeID, tc.closeOnEnd,
 			).Scan(&eventID); err != nil {
 				t.Fatalf("seed event: %v", err)
 			}
