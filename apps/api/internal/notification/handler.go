@@ -189,7 +189,21 @@ func (h *Handler) UpdateSettings(c *fiber.Ctx) error {
 		return httpx.ErrInternal("Erro ao atualizar configurações de notificação")
 	}
 
-	return httpx.OK(c, toSettingsResponse(&settings))
+	// Relê depois de gravar em vez de devolver o que veio no corpo. O corpo é
+	// PARCIAL por natureza (é o que o merge existe para tratar), então
+	// devolvê-lo faria a resposta afirmar que as chaves não enviadas estão no
+	// default — quando o que está gravado é a customização do lojista. O FE que
+	// usasse a resposta para repopular o formulário apagaria a configuração
+	// dele no save seguinte.
+	saved, err := h.service.GetSettings(c.UserContext(), storeID)
+	if err != nil {
+		logger.From(c.UserContext(), h.logger).Error("failed to reload notification settings after update",
+			zap.Error(err),
+		)
+		return httpx.ErrInternal("Erro ao atualizar configurações de notificação")
+	}
+
+	return httpx.OK(c, toSettingsResponse(saved))
 }
 
 // PreviewTemplateRequest represents the request for previewing a template.
