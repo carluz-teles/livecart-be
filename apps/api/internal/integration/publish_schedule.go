@@ -51,6 +51,12 @@ const (
 	// Validade da URL assinada gerada no disparo. Só precisa cobrir a janela
 	// entre criar o container e o Instagram terminar de buscar a mídia.
 	publishAssetURLTTL = 6 * time.Hour
+
+	// Tamanho do lote do backstop. Pequeno de propósito: ele roda a cada 5
+	// minutos e o que sobrar sai no ciclo seguinte — represar é preferível a
+	// despejar um lote inteiro de publicações na fila de uma vez, porque a Meta
+	// limita posts por API numa janela móvel de 24h.
+	publishSweepBatch = 25
 )
 
 // PublishScheduler enfileira o disparo da publicação com ETA. Interface no
@@ -431,15 +437,26 @@ func (s *Service) handlePublishFailure(ctx context.Context, job *PublishJob, pub
 	return pubErr
 }
 
-// SweepDuePublishJobs é a rede do agendador ETA, no mesmo desenho do
+// SweepDuePublishJobs é a rede do agendador ETA, no mesmo papel do
 // SweepEndedTimedEvents: task perdida (Redis limpo, deploy no meio da janela)
 // deixaria o agendamento vencido e ninguém o dispararia — e a falha seria
 // silenciosa, que é o pior desfecho possível para uma publicação prometida.
 //
-// Faz duas coisas: dispara o que venceu e devolve à fila o que ficou preso em
-// 'publishing' porque o processo morreu no meio.
+// Faz duas coisas: devolve à fila o que ficou preso em 'publishing' porque o
+// processo morreu no meio, e RE-ARMA o que venceu.
+//
+// Re-armar, e não publicar aqui dentro, é decisão deliberada. Este sweep roda
+// no mesmo goroutine do ticker de 5 minutos que carrega o sweep do ERP e os de
+// evento, e publicar um Reel BLOQUEIA por até 5 minutos por job — o provider
+// espera o Instagram terminar de processar o vídeo. Um lote de agendamentos
+// vencidos travaria os outros sweeps por horas. O trabalho pesado tem de rodar
+// no pool do asynq, que é onde ele já roda no caminho normal.
+//
+// De brinde, o TaskID dedupe melhor que qualquer guard nosso: se a task ainda
+// existe pendente, o Schedule devolve ErrTaskIDConflict e o sweep não cria uma
+// segunda.
 func (s *Service) SweepDuePublishJobs(ctx context.Context) {
-	stuck, err := s.repo.ListStuckPublishJobs(ctx, time.Now().Add(-stuckPublishAfter), 50)
+	stuck, err := s.repo.ListStuckPublishJobs(ctx, time.Now().Add(-stuckPublishAfter), publishSweepBatch)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("failed to list stuck publish jobs", zap.Error(err))
 	}
@@ -453,17 +470,35 @@ func (s *Service) SweepDuePublishJobs(ctx context.Context) {
 			zap.String("job_id", job.ID), zap.Int("attempts", job.Attempts))
 	}
 
-	due, err := s.repo.ListDuePublishJobs(ctx, 50)
+	// O lote inclui os que acabaram de ser soltos acima: o scheduled_for deles
+	// já passou, então eles saem no mesmo ciclo em vez de esperar o próximo.
+	due, err := s.repo.ListDuePublishJobs(ctx, publishSweepBatch)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("failed to list due publish jobs", zap.Error(err))
 		return
 	}
 	for _, job := range due {
 		jobCtx := logger.WithStore(ctx, job.StoreID, "")
-		if err := s.RunScheduledPublish(jobCtx, job.ID); err != nil {
-			logger.From(jobCtx, s.logger).Warn("sweep run of a scheduled publication failed",
-				zap.String("job_id", job.ID), zap.Error(err))
+		if s.publishScheduler == nil {
+			// Sem agendador não há para onde empurrar. Publicar aqui é ruim
+			// (bloqueia o ticker), mas é menos ruim que a publicação nunca
+			// sair — e este ramo só existe em instalação sem fila.
+			logger.From(jobCtx, s.logger).Warn("publishing inline: no scheduler wired",
+				zap.String("job_id", job.ID))
+			if err := s.RunScheduledPublish(jobCtx, job.ID); err != nil {
+				logger.From(jobCtx, s.logger).Warn("inline run of a scheduled publication failed",
+					zap.String("job_id", job.ID), zap.Error(err))
+			}
+			continue
 		}
+		// ProcessAt = agora: o pool do asynq pega na sequência.
+		if err := s.publishScheduler.SchedulePublish(jobCtx, job.ID, time.Now()); err != nil {
+			logger.From(jobCtx, s.logger).Error("failed to re-arm an overdue publication",
+				zap.String("job_id", job.ID), zap.Error(err))
+			continue
+		}
+		logger.From(jobCtx, s.logger).Warn("overdue publication re-armed by the sweep",
+			zap.String("job_id", job.ID), zap.Time("scheduled_for", job.ScheduledFor))
 	}
 }
 

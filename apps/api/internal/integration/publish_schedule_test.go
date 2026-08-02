@@ -230,6 +230,15 @@ func TestSweepSeesDueAndStuckJobs(t *testing.T) {
 	}
 
 	stuck := seedPublishJob(t, svc, "post")
+	// Um job so chega a 'publishing' na hora marcada (a task dispara em
+	// scheduled_for, e o sweep so pega o que ja venceu), entao o preso REAL tem
+	// scheduled_for no passado. O teste reproduz isso — sem essa parte, o
+	// re-arm do liberado nao seria exercitado.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE session_publish_jobs SET scheduled_for = now() - interval '5 minutes' WHERE id=$1::uuid`, stuck.ID,
+	); err != nil {
+		t.Fatalf("vencer o job preso: %v", err)
+	}
 	if _, err := testRepo.ClaimPublishJob(ctx, stuck.ID); err != nil {
 		t.Fatalf("reivindicar: %v", err)
 	}
@@ -255,11 +264,41 @@ func TestSweepSeesDueAndStuckJobs(t *testing.T) {
 		t.Fatal("o job abandonado em 'publishing' nunca mais seria reivindicado")
 	}
 
-	// O sweep devolve o preso para a fila.
+	// Com agendador ligado, o sweep RE-ARMA em vez de publicar aqui dentro:
+	// ele roda no goroutine do ticker de 5 min e publicar um Reel bloqueia por
+	// minutos. O preso volta para a fila e sai re-armado no mesmo ciclo.
+	sched := &fakePublishScheduler{}
+	svc.SetPublishScheduler(sched)
 	svc.SweepDuePublishJobs(ctx)
-	if status, _, _ := publishJobStatus(t, stuck.ID); status != "scheduled" && status != "publishing" {
-		t.Fatalf("o preso devia voltar para a fila (e ser retentado), veio %q", status)
+
+	if status, _, _ := publishJobStatus(t, stuck.ID); status != "scheduled" {
+		t.Fatalf("o preso devia voltar para 'scheduled', veio %q", status)
 	}
+	if !sched.armed(due.ID) {
+		t.Fatal("o vencido nao foi re-armado — a publicacao ficaria esperando o proximo tick para sempre")
+	}
+	if !sched.armed(stuck.ID) {
+		t.Fatal("o preso foi solto e nao re-armado — ele so sairia no ciclo seguinte")
+	}
+}
+
+// fakePublishScheduler registra o que o sweep empurrou para a fila.
+type fakePublishScheduler struct{ ids []string }
+
+func (f *fakePublishScheduler) SchedulePublish(_ context.Context, jobID string, _ time.Time) error {
+	f.ids = append(f.ids, jobID)
+	return nil
+}
+
+func (f *fakePublishScheduler) CancelPublish(_ context.Context, _ string) error { return nil }
+
+func (f *fakePublishScheduler) armed(jobID string) bool {
+	for _, id := range f.ids {
+		if id == jobID {
+			return true
+		}
+	}
+	return false
 }
 
 // As regras de agendamento recusam ANTES de o asset ficar retido por dias.
