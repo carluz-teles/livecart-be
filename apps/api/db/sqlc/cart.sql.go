@@ -688,7 +688,12 @@ func (q *Queries) GetCartByCheckoutID(ctx context.Context, checkoutID pgtype.Tex
 
 const getCartByEventAndUser = `-- name: GetCartByEventAndUser :one
 
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at FROM carts WHERE event_id = $1 AND platform_user_id = $2
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at FROM carts
+WHERE event_id = $1 AND platform_user_id = $2
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+ORDER BY created_at DESC
+LIMIT 1
 `
 
 type GetCartByEventAndUserParams struct {
@@ -700,6 +705,14 @@ type GetCartByEventAndUserParams struct {
 // order_logistics.tracking_token (Fatia C1); a escrita usa
 // SetOrderLogisticsTrackingToken e o lookup público, GetCartByOrderLogisticsTrackingToken
 // (ambos em order_write.sql).
+// O carrinho ABERTO do comprador neste evento.
+//
+// Desde a 000105 pode existir mais de um carrinho por (evento, comprador): pagar
+// ou expirar libera a vaga e um novo nasce (RN-07/RN-08). Sem o filtro abaixo,
+// `:one` gera QueryRow do pgx, que lê a PRIMEIRA linha e descarta o resto SEM
+// erro — o item do comprador cairia num carrinho arbitrário, possivelmente o já
+// pago. O ORDER BY é a desempate determinística caso o filtro deixe passar mais
+// de um (não deveria: o índice parcial garante no máximo um).
 func (q *Queries) GetCartByEventAndUser(ctx context.Context, arg GetCartByEventAndUserParams) (Cart, error) {
 	row := q.db.QueryRow(ctx, getCartByEventAndUser, arg.EventID, arg.PlatformUserID)
 	var i Cart
@@ -762,7 +775,13 @@ func (q *Queries) GetCartByEventAndUser(ctx context.Context, arg GetCartByEventA
 }
 
 const getCartByEventAndUserForUpdate = `-- name: GetCartByEventAndUserForUpdate :one
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at FROM carts WHERE event_id = $1 AND platform_user_id = $2 FOR UPDATE
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at FROM carts
+WHERE event_id = $1 AND platform_user_id = $2
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+ORDER BY created_at DESC
+LIMIT 1
+FOR UPDATE
 `
 
 type GetCartByEventAndUserForUpdateParams struct {
@@ -770,7 +789,9 @@ type GetCartByEventAndUserForUpdateParams struct {
 	PlatformUserID string      `json:"platform_user_id"`
 }
 
-// Lock the cart row for concurrent safety
+// O carrinho ABERTO, travado para escrita. Esta é a do caminho quente
+// (GetOrCreateCart). Mesmo filtro do GetCartByEventAndUser: sem ele, o FOR
+// UPDATE poderia travar a linha errada — por exemplo a de um carrinho já pago.
 func (q *Queries) GetCartByEventAndUserForUpdate(ctx context.Context, arg GetCartByEventAndUserForUpdateParams) (Cart, error) {
 	row := q.db.QueryRow(ctx, getCartByEventAndUserForUpdate, arg.EventID, arg.PlatformUserID)
 	var i Cart
@@ -1225,6 +1246,10 @@ SELECT COALESCE(ci.quantity, 0)::INT AS quantity
 FROM carts c
 LEFT JOIN cart_items ci ON ci.cart_id = c.id AND ci.product_id = $3
 WHERE c.event_id = $1 AND c.platform_user_id = $2
+  AND c.status IN ('pending', 'active', 'checkout')
+  AND (c.payment_status IS NULL OR c.payment_status NOT IN ('paid', 'refunded'))
+ORDER BY c.created_at DESC
+LIMIT 1
 `
 
 type GetProductQuantityInUserCartParams struct {
@@ -1233,7 +1258,11 @@ type GetProductQuantityInUserCartParams struct {
 	ProductID      pgtype.UUID `json:"product_id"`
 }
 
-// Returns the current quantity of a specific product in a user's cart for an event
+// Quantidade de um produto no carrinho ABERTO do comprador neste evento.
+//
+// Alimenta o teto cart_max_quantity_per_item. Sem o filtro, com mais de um
+// carrinho a leitura vira não-determinística e o teto passa a valer sobre um
+// carrinho arbitrário — inclusive um já pago, o que bloquearia compra legítima.
 func (q *Queries) GetProductQuantityInUserCart(ctx context.Context, arg GetProductQuantityInUserCartParams) (int32, error) {
 	row := q.db.QueryRow(ctx, getProductQuantityInUserCart, arg.EventID, arg.PlatformUserID, arg.ProductID)
 	var quantity int32

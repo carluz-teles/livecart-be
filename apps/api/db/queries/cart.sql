@@ -103,7 +103,20 @@ SELECT * FROM carts WHERE token = $1;
 -- (ambos em order_write.sql).
 
 -- name: GetCartByEventAndUser :one
-SELECT * FROM carts WHERE event_id = $1 AND platform_user_id = $2;
+-- O carrinho ABERTO do comprador neste evento.
+--
+-- Desde a 000105 pode existir mais de um carrinho por (evento, comprador): pagar
+-- ou expirar libera a vaga e um novo nasce (RN-07/RN-08). Sem o filtro abaixo,
+-- `:one` gera QueryRow do pgx, que lê a PRIMEIRA linha e descarta o resto SEM
+-- erro — o item do comprador cairia num carrinho arbitrário, possivelmente o já
+-- pago. O ORDER BY é a desempate determinística caso o filtro deixe passar mais
+-- de um (não deveria: o índice parcial garante no máximo um).
+SELECT * FROM carts
+WHERE event_id = $1 AND platform_user_id = $2
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+ORDER BY created_at DESC
+LIMIT 1;
 
 -- name: ListCartsByCustomer :many
 -- Returns all carts for a specific customer with totals
@@ -495,15 +508,31 @@ RETURNING quantity;
 UPDATE cart_items SET waitlisted_quantity = $3 WHERE cart_id = $1 AND product_id = $2;
 
 -- name: GetCartByEventAndUserForUpdate :one
--- Lock the cart row for concurrent safety
-SELECT * FROM carts WHERE event_id = $1 AND platform_user_id = $2 FOR UPDATE;
+-- O carrinho ABERTO, travado para escrita. Esta é a do caminho quente
+-- (GetOrCreateCart). Mesmo filtro do GetCartByEventAndUser: sem ele, o FOR
+-- UPDATE poderia travar a linha errada — por exemplo a de um carrinho já pago.
+SELECT * FROM carts
+WHERE event_id = $1 AND platform_user_id = $2
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+ORDER BY created_at DESC
+LIMIT 1
+FOR UPDATE;
 
 -- name: GetProductQuantityInUserCart :one
--- Returns the current quantity of a specific product in a user's cart for an event
+-- Quantidade de um produto no carrinho ABERTO do comprador neste evento.
+--
+-- Alimenta o teto cart_max_quantity_per_item. Sem o filtro, com mais de um
+-- carrinho a leitura vira não-determinística e o teto passa a valer sobre um
+-- carrinho arbitrário — inclusive um já pago, o que bloquearia compra legítima.
 SELECT COALESCE(ci.quantity, 0)::INT AS quantity
 FROM carts c
 LEFT JOIN cart_items ci ON ci.cart_id = c.id AND ci.product_id = $3
-WHERE c.event_id = $1 AND c.platform_user_id = $2;
+WHERE c.event_id = $1 AND c.platform_user_id = $2
+  AND c.status IN ('pending', 'active', 'checkout')
+  AND (c.payment_status IS NULL OR c.payment_status NOT IN ('paid', 'refunded'))
+ORDER BY c.created_at DESC
+LIMIT 1;
 
 -- =============================================================================
 -- PUBLIC CHECKOUT - Cart page for customers

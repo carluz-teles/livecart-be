@@ -351,7 +351,7 @@ type LiveEvent struct {
 	Type string `json:"type"`
 	// If true, cart stops accepting items when event ends
 	CloseCartOnEventEnd bool `json:"close_cart_on_event_end"`
-	// Override cart expiration (NULL = use store setting)
+	// Override do prazo curto do carrinho para este evento. NULL = herda de stores.cart_expiration_minutes. Mínimo 15 — o valor 0 foi removido.
 	CartExpirationMinutes pgtype.Int4 `json:"cart_expiration_minutes"`
 	// Override max quantity per item (NULL = use store setting)
 	CartMaxQuantityPerItem pgtype.Int4 `json:"cart_max_quantity_per_item"`
@@ -380,6 +380,8 @@ type LiveEvent struct {
 	WebhookActive bool `json:"webhook_active"`
 	// Optional scheduled end (UTC). NULL = manual end only.
 	EndsAt pgtype.Timestamptz `json:"ends_at"`
+	// Override do prazo estendido para este evento. NULL = herda de stores.cart_extended_expiration_minutes.
+	CartExtendedExpirationMinutes pgtype.Int4 `json:"cart_extended_expiration_minutes"`
 }
 
 type LiveSession struct {
@@ -700,7 +702,7 @@ type Store struct {
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	// Whether the cart system is enabled for this store
 	CartEnabled bool `json:"cart_enabled"`
-	// Minutes before cart expires (0 = no expiration)
+	// Minutos de prazo do carrinho depois de armado, quando close_cart_on_event_end = true. Mínimo 15. O valor 0 ("sem expiração") foi REMOVIDO — produzia carrinho eterno no fechamento do evento.
 	CartExpirationMinutes int32 `json:"cart_expiration_minutes"`
 	// Reserve stock when item is added to cart
 	CartReserveStock bool `json:"cart_reserve_stock"`
@@ -765,6 +767,8 @@ type Store struct {
 	NotificationTestSetupCode       pgtype.Text        `json:"notification_test_setup_code"`
 	NotificationTestSetupExpiresAt  pgtype.Timestamptz `json:"notification_test_setup_expires_at"`
 	AllowStorePickup                bool               `json:"allow_store_pickup"`
+	// Prazo do carrinho quando close_cart_on_event_end = FALSE. Default 10080 (7 dias). O ramo desligado NÃO é "sem prazo" — é um prazo maior, armado pelo mesmo cart.expire do ramo ligado.
+	CartExtendedExpirationMinutes int32 `json:"cart_extended_expiration_minutes"`
 }
 
 type StoreInvitation struct {
