@@ -66,6 +66,28 @@ func (h *WebhookHandler) HandleInstagramWebhook(c *fiber.Ctx) error {
 		return httpx.BadRequest(c, "empty body")
 	}
 
+	// Signature check. Deploy 1 runs in observation mode: the outcome is
+	// computed and logged, but the payload is processed regardless — a wrong
+	// INSTAGRAM_APP_SECRET in production would otherwise stop every comment
+	// from becoming a cart, and we would find out from the sales chart instead
+	// of an alert. Flip INSTAGRAM_WEBHOOK_ENFORCE_SIGNATURE once the logs show
+	// only "valid" for real Meta traffic.
+	outcome := verifyInstagramSignature(body, c.Get("X-Hub-Signature-256"), config.InstagramAppSecret.String())
+	enforcing := config.InstagramWebhookEnforceSignature.BoolOr(false)
+
+	if !outcome.ok() {
+		log := logger.From(c.Context(), h.logger).With(
+			zap.String("signature_outcome", string(outcome)),
+			zap.Bool("enforcing", enforcing),
+			zap.Int("body_bytes", len(body)),
+		)
+		if enforcing {
+			log.Warn("instagram webhook rejected: signature check failed")
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid signature"})
+		}
+		log.Warn("instagram webhook accepted with failing signature (observation mode)")
+	}
+
 	// Parse the webhook payload
 	var payload InstagramWebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {

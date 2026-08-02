@@ -40,6 +40,12 @@ const (
 	InstagramVerifyToken Key = "INSTAGRAM_VERIFY_TOKEN" // Token for Meta webhook verification
 	InstagramAppID       Key = "INSTAGRAM_APP_ID"       // Instagram OAuth App ID (from Meta for Developers)
 	InstagramAppSecret   Key = "INSTAGRAM_APP_SECRET"   // Instagram OAuth App Secret
+	// InstagramWebhookEnforceSignature gates the X-Hub-Signature-256 check on
+	// POST /api/webhooks/instagram. Left false (deploy 1) the signature is
+	// verified and logged but the payload is still processed, so a misconfigured
+	// secret cannot silently stop every comment from becoming a cart. Flip to
+	// true (deploy 2) only after the logs show no valid traffic being rejected.
+	InstagramWebhookEnforceSignature Key = "INSTAGRAM_WEBHOOK_ENFORCE_SIGNATURE"
 
 	// Melhor Envio (shipping provider)
 	MelhorEnvioClientID     Key = "MELHOR_ENVIO_CLIENT_ID"     // OAuth App ID from Melhor Envio panel
