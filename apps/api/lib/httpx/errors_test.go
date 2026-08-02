@@ -157,21 +157,60 @@ func TestWithCode_TypedSibling(t *testing.T) {
 	}
 }
 
-// TestExistingWithReasonSitesUnaffected — AC 5: the three existing checkout
-// WithReason sites emit lower_snake reasons; that path is untouched by this slice
-// (the UPPER rename is D1c). Guards the wire behavior those sites depend on.
-func TestExistingWithReasonSitesUnaffected(t *testing.T) {
-	for _, reason := range []string{"payment_not_configured", "payment_unavailable"} {
-		err := WithReason(ErrUnprocessable("pagamento indisponível"), reason)
+// TestCheckoutDomainCodes_WireUpper — D1c: the checkout domain throws migrated
+// from ErrUnprocessable(+WithReason lower_snake) to DomainError(422, Code, msg).
+// This guards the exact wire contract those sites now emit — status 422, the
+// EXACT human message, and an UPPER_SNAKE reason — including the three payment
+// sites renamed from the old lower_snake reasons. Each row mirrors a real throw
+// site (checkout/service.go + checkout/shipping.go) verbatim.
+func TestCheckoutDomainCodes_WireUpper(t *testing.T) {
+	tests := []struct {
+		name       string
+		code       Code
+		msg        string
+		wantReason string
+	}{
+		// payment (renamed lower→UPPER)
+		{"payment not configured", CodePaymentNotConfigured, "loja não possui integração de pagamento configurada", "PAYMENT_NOT_CONFIGURED"},
+		{"payment unavailable", CodePaymentUnavailable, "nenhuma integração de pagamento está respondendo agora", "PAYMENT_UNAVAILABLE"},
+		{"payment link failed", CodePaymentLinkFailed, "erro ao gerar link de pagamento. Tente novamente.", "PAYMENT_LINK_FAILED"},
+		// cart
+		{"cart expired", CodeCartExpired, "carrinho expirado", "CART_EXPIRED"},
+		{"cart already paid", CodeCartAlreadyPaid, "carrinho já foi pago", "CART_ALREADY_PAID"},
+		{"cart not payable", CodeCartNotPayable, "carrinho não está disponível para checkout", "CART_NOT_PAYABLE"},
+		{"cart no items payable", CodeCartNoItemsPayable, "carrinho não tem itens disponíveis para pagamento", "CART_NO_ITEMS_PAYABLE"},
+		// shipping
+		{"shipping cart empty", CodeShippingCartEmpty, "nenhum item no carrinho para cotar", "SHIPPING_CART_EMPTY"},
+		{"shipping cep required", CodeShippingCepRequired, "CEP é obrigatório para confirmar o frete", "SHIPPING_CEP_REQUIRED"},
+		{"shipping not quoted", CodeShippingNotQuoted, "primeiro cote o frete antes de selecionar", "SHIPPING_NOT_QUOTED"},
+		{"shipping quote expired", CodeShippingQuoteExpired, "cotação expirou — refaça a cotação", "SHIPPING_QUOTE_EXPIRED"},
+		{"shipping option missing", CodeShippingOptionMissing, "opção de frete não encontrada na cotação atual — refaça a cotação", "SHIPPING_OPTION_MISSING"},
+	}
 
-		var se *ServiceError
-		if !errors.As(err, &se) || se.Reason != reason {
-			t.Fatalf("WithReason must preserve %q, got %+v", reason, se)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := DomainError(422, tt.code, tt.msg)
 
-		_, body := do(t, appReturning(err), "GET", "/x", "")
-		if body["reason"] != reason {
-			t.Fatalf("wire reason: want %q, got %v", reason, body["reason"])
-		}
+			// errors.As + se.Reason: DOMAIN category, 422, exact message, UPPER reason.
+			var se *ServiceError
+			if !errors.As(err, &se) {
+				t.Fatalf("DomainError must produce a *ServiceError")
+			}
+			if se.Code != 422 || se.Message != tt.msg {
+				t.Fatalf("status/message wrong: %+v", se)
+			}
+			if se.Reason != tt.wantReason {
+				t.Fatalf("reason: want %q, got %q", tt.wantReason, se.Reason)
+			}
+			if se.Category != CategoryDomain {
+				t.Fatalf("category: want DOMAIN, got %q", se.Category)
+			}
+
+			// Wire: status 422 + exact message + UPPER reason on the Envelope.
+			code, body := do(t, appReturning(err), "GET", "/x", "")
+			if code != 422 || body["error"] != tt.msg || body["reason"] != tt.wantReason {
+				t.Fatalf("wire: got %d %v", code, body)
+			}
+		})
 	}
 }

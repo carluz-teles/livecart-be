@@ -129,13 +129,13 @@ func (s *Service) GetCartForCheckout(ctx context.Context, input GetCartForChecko
 
 	// Validate cart status (allow viewing paid carts so frontend can show "paid" message)
 	if cart.Status == "expired" {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	// Prazo de pagamento vencido (armado ao encerrar a live). Só bloqueia
 	// carts não pagos — quem pagou dentro do prazo continua vendo o pedido
 	// mesmo depois que o expires_at passa.
 	if cart.PaymentStatus != "paid" && cart.ExpiresAt != nil && cart.ExpiresAt.Before(time.Now()) {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	// Carts cancelled because the buyer was blocked should look like they
 	// never existed — return 404 so the public /cart/[token] page hits the
@@ -381,14 +381,14 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 
 	// Validate cart status
 	if cart.Status == "expired" {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	if cart.PaymentStatus == "paid" {
-		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
+		return nil, httpx.DomainError(422, httpx.CodeCartAlreadyPaid, "carrinho já foi pago")
 	}
 	// Allow checkout for both 'active' (live ongoing) and 'checkout' (live ended) status
 	if cart.Status != "checkout" && cart.Status != "active" {
-		return nil, httpx.ErrUnprocessable("carrinho não está disponível para checkout")
+		return nil, httpx.DomainError(422, httpx.CodeCartNotPayable, "carrinho não está disponível para checkout")
 	}
 
 	// Update customer email
@@ -426,7 +426,7 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 	}
 
 	if len(checkoutItems) == 0 {
-		return nil, httpx.ErrUnprocessable("carrinho não tem itens disponíveis para pagamento")
+		return nil, httpx.DomainError(422, httpx.CodeCartNoItemsPayable, "carrinho não tem itens disponíveis para pagamento")
 	}
 
 	// Add selected shipping cost to the total charged at the gateway.
@@ -482,7 +482,7 @@ func (s *Service) GenerateCheckout(ctx context.Context, input GenerateCheckoutIn
 			zap.String("cart_id", cart.ID),
 			zap.Error(err),
 		)
-		return nil, httpx.ErrUnprocessable("erro ao gerar link de pagamento. Tente novamente.")
+		return nil, httpx.DomainError(422, httpx.CodePaymentLinkFailed, "erro ao gerar link de pagamento. Tente novamente.")
 	}
 
 	// Update cart with checkout info
@@ -576,14 +576,14 @@ func (s *Service) GetCheckoutConfig(ctx context.Context, input GetCheckoutConfig
 
 	// Validate cart status
 	if cart.Status == "expired" {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	if cart.PaymentStatus == "paid" {
-		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
+		return nil, httpx.DomainError(422, httpx.CodeCartAlreadyPaid, "carrinho já foi pago")
 	}
 	// Allow checkout for both 'active' (live ongoing) and 'checkout' (live ended) status
 	if cart.Status != "checkout" && cart.Status != "active" {
-		return nil, httpx.ErrUnprocessable("carrinho não está disponível para checkout")
+		return nil, httpx.DomainError(422, httpx.CodeCartNotPayable, "carrinho não está disponível para checkout")
 	}
 
 	// Get cart items to calculate total
@@ -602,7 +602,7 @@ func (s *Service) GetCheckoutConfig(ctx context.Context, input GetCheckoutConfig
 	}
 
 	if totalAmount == 0 {
-		return nil, httpx.ErrUnprocessable("carrinho não tem itens disponíveis para pagamento")
+		return nil, httpx.DomainError(422, httpx.CodeCartNoItemsPayable, "carrinho não tem itens disponíveis para pagamento")
 	}
 
 	// Add selected shipping cost to the total for the gateway config.
@@ -661,10 +661,7 @@ func (s *Service) resolveCheckoutIntegration(ctx context.Context, cart *CartRow)
 		return nil, "", nil, err
 	}
 	if len(candidates) == 0 {
-		return nil, "", nil, httpx.WithReason(
-			httpx.ErrUnprocessable("loja não possui integração de pagamento configurada"),
-			"payment_not_configured",
-		)
+		return nil, "", nil, httpx.DomainError(422, httpx.CodePaymentNotConfigured, "loja não possui integração de pagamento configurada")
 	}
 
 	var lastErr error
@@ -701,10 +698,7 @@ func (s *Service) resolveCheckoutIntegration(ctx context.Context, cart *CartRow)
 			zap.Error(lastErr),
 		)
 	}
-	return nil, "", nil, httpx.WithReason(
-		httpx.ErrUnprocessable("nenhuma integração de pagamento está respondendo agora"),
-		"payment_unavailable",
-	)
+	return nil, "", nil, httpx.DomainError(422, httpx.CodePaymentUnavailable, "nenhuma integração de pagamento está respondendo agora")
 }
 
 // resolvePaymentIntegration returns the integration that should process this
@@ -724,10 +718,7 @@ func (s *Service) resolvePaymentIntegration(ctx context.Context, cart *CartRow) 
 		return nil, err
 	}
 	if primary == nil {
-		return nil, httpx.WithReason(
-			httpx.ErrUnprocessable("loja não possui integração de pagamento configurada"),
-			"payment_not_configured",
-		)
+		return nil, httpx.DomainError(422, httpx.CodePaymentNotConfigured, "loja não possui integração de pagamento configurada")
 	}
 	return primary, nil
 }
@@ -743,14 +734,14 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 
 	// Validate cart status
 	if cart.Status == "expired" {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	if cart.PaymentStatus == "paid" {
-		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
+		return nil, httpx.DomainError(422, httpx.CodeCartAlreadyPaid, "carrinho já foi pago")
 	}
 	// Allow checkout for both 'active' (live ongoing) and 'checkout' (live ended) status
 	if cart.Status != "checkout" && cart.Status != "active" {
-		return nil, httpx.ErrUnprocessable("carrinho não está disponível para checkout")
+		return nil, httpx.DomainError(422, httpx.CodeCartNotPayable, "carrinho não está disponível para checkout")
 	}
 
 	// Persist customer identity + shipping address before requesting payment —
@@ -789,7 +780,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	}
 
 	if len(checkoutItems) == 0 {
-		return nil, httpx.ErrUnprocessable("carrinho não tem itens disponíveis para pagamento")
+		return nil, httpx.DomainError(422, httpx.CodeCartNoItemsPayable, "carrinho não tem itens disponíveis para pagamento")
 	}
 
 	// Add selected shipping cost to the total charged at the gateway.
@@ -949,14 +940,14 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 
 	// Validate cart status
 	if cart.Status == "expired" {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	if cart.PaymentStatus == "paid" {
-		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
+		return nil, httpx.DomainError(422, httpx.CodeCartAlreadyPaid, "carrinho já foi pago")
 	}
 	// Allow checkout for both 'active' (live ongoing) and 'checkout' (live ended) status
 	if cart.Status != "checkout" && cart.Status != "active" {
-		return nil, httpx.ErrUnprocessable("carrinho não está disponível para checkout")
+		return nil, httpx.DomainError(422, httpx.CodeCartNotPayable, "carrinho não está disponível para checkout")
 	}
 
 	// Persist customer identity + shipping address before requesting payment —
@@ -995,7 +986,7 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	}
 
 	if len(checkoutItems) == 0 {
-		return nil, httpx.ErrUnprocessable("carrinho não tem itens disponíveis para pagamento")
+		return nil, httpx.DomainError(422, httpx.CodeCartNoItemsPayable, "carrinho não tem itens disponíveis para pagamento")
 	}
 
 	// Add selected shipping cost to the total charged at the gateway.
@@ -1427,7 +1418,7 @@ func (s *Service) loadEditableCart(ctx context.Context, token string) (*CartRow,
 		return nil, err
 	}
 	if cart.Status == "expired" {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	// Cart cancelado (pelo lojista ou por bloqueio do comprador) não aceita mais
 	// mutação de item: editar aqui mexeria em estoque e reservas de ERP de um
@@ -1442,7 +1433,7 @@ func (s *Service) loadEditableCart(ctx context.Context, token string) (*CartRow,
 		return nil, httpx.ErrConflict("edição do carrinho desabilitada para esta loja")
 	}
 	if cart.ExpiresAt != nil && cart.ExpiresAt.Before(time.Now()) {
-		return nil, httpx.ErrUnprocessable("carrinho expirado")
+		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	return cart, nil
 }

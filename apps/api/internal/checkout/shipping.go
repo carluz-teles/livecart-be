@@ -398,7 +398,7 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 	}
 	ctx = logger.WithStore(ctx, shipCtx.StoreID, "")
 	if len(shipCtx.Items) == 0 {
-		return nil, httpx.ErrUnprocessable("nenhum item no carrinho para cotar")
+		return nil, httpx.DomainError(422, httpx.CodeShippingCartEmpty, "nenhum item no carrinho para cotar")
 	}
 
 	out := &QuoteShippingOutput{
@@ -595,10 +595,10 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 	}
 	ctx = logger.WithStore(ctx, cart.StoreID, cart.StoreSlug)
 	if cart.PaymentStatus == "paid" {
-		return nil, httpx.ErrUnprocessable("carrinho já foi pago")
+		return nil, httpx.DomainError(422, httpx.CodeCartAlreadyPaid, "carrinho já foi pago")
 	}
 	if input.ZipCode == "" {
-		return nil, httpx.ErrUnprocessable("CEP é obrigatório para confirmar o frete")
+		return nil, httpx.DomainError(422, httpx.CodeShippingCepRequired, "CEP é obrigatório para confirmar o frete")
 	}
 
 	options, quotedAt, err := s.repo.ReadShippingQuoteCache(ctx, s.pool, cart.ID)
@@ -606,10 +606,10 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 		return nil, err
 	}
 	if len(options) == 0 {
-		return nil, httpx.ErrUnprocessable("primeiro cote o frete antes de selecionar")
+		return nil, httpx.DomainError(422, httpx.CodeShippingNotQuoted, "primeiro cote o frete antes de selecionar")
 	}
 	if !quotedAt.IsZero() && time.Since(quotedAt) > shippingQuoteCacheTTL {
-		return nil, httpx.ErrUnprocessable("cotação expirou — refaça a cotação")
+		return nil, httpx.DomainError(422, httpx.CodeShippingQuoteExpired, "cotação expirou — refaça a cotação")
 	}
 
 	var chosen *ShippingQuoteOptionResponse
@@ -625,7 +625,7 @@ func (s *Service) SelectShippingMethod(ctx context.Context, input SelectShipping
 		break
 	}
 	if chosen == nil {
-		return nil, httpx.ErrUnprocessable("opção de frete não encontrada na cotação atual — refaça a cotação")
+		return nil, httpx.DomainError(422, httpx.CodeShippingOptionMissing, "opção de frete não encontrada na cotação atual — refaça a cotação")
 	}
 
 	freeShipping := chosen.PriceCents == 0 && chosen.RealPriceCents > 0
