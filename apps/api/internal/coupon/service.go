@@ -288,6 +288,17 @@ func (s *Service) ApplyToCart(
 	}
 
 	if err := s.repo.InsertReservedRedemptionTx(ctx, tx, c.ID(), cart.CartID, applied); err != nil {
+		// 23505 = unique_violation. Duas travas podem disparar aqui, e as duas
+		// significam a mesma coisa para o comprador: este cupom já foi usado.
+		//   - coupon_redemptions_cart_id_key: já aplicado NESTE carrinho;
+		//   - coupon_redemptions_one_per_buyer (RN-33): já usado por este
+		//     comprador em outro carrinho da mesma campanha — o caso que a
+		//     000105 tornou possível ao permitir um 2º carrinho por evento.
+		// Sem esta tradução o comprador receberia 500 no checkout.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return nil, httpx.ErrConflict("this coupon has already been used")
+		}
 		return nil, err
 	}
 	if err := s.repo.IncrementUsedCountTx(ctx, tx, c.ID()); err != nil {

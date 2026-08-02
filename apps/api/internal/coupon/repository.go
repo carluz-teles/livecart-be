@@ -375,9 +375,15 @@ func (r *Repository) InsertReservedRedemptionTx(
 	couponID, cartID string,
 	appliedValueCents int64,
 ) error {
+	// platform_user_id sai do próprio carrinho (RN-33): derivar aqui em vez de
+	// receber por parâmetro garante que a coluna denormalizada nunca diverge do
+	// cart. O índice parcial coupon_redemptions_one_per_buyer usa essa coluna
+	// para travar um resgate vivo por (cupom, comprador) — sem ele, cada
+	// carrinho novo da campanha poderia resgatar o mesmo cupom de novo.
 	const q = `
-		INSERT INTO coupon_redemptions (coupon_id, cart_id, status, applied_value_cents)
-		VALUES ($1, $2, 'reserved', $3)
+		INSERT INTO coupon_redemptions (coupon_id, cart_id, platform_user_id, status, applied_value_cents)
+		SELECT $1, $2, c.platform_user_id, 'reserved', $3
+		FROM carts c WHERE c.id = $2
 	`
 	_, err := tx.Exec(ctx, q, couponID, cartID, appliedValueCents)
 	if err != nil {
