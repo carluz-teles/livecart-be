@@ -180,6 +180,22 @@ type ProcessInstagramCommentInput struct {
 	// story replies, which arrive as DMs and have no public comment to answer.
 	Channel    string
 	RawPayload []byte // Original webhook payload for audit storage
+	// SignatureValid é o RESULTADO REAL do X-Hub-Signature-256 desta requisição,
+	// e viaja colado ao RawPayload de propósito: os dois alimentam a MESMA linha
+	// de webhook_events, e uma linha que grava "assinatura válida" sobre um
+	// payload cuja checagem falhou é pior que linha nenhuma.
+	//
+	// É esta coluna que decide o deploy 2 do modo observação (§5.2, ordem 9): o
+	// 401 só entra depois de dias de tráfego 100% válido. Com o `true` fixo que
+	// vivia aqui, a consulta respondia 100% válido POR CONSTRUÇÃO — inclusive
+	// para as requisições que o handler acabara de reprovar e aceitar mesmo
+	// assim. Quem lesse o painel ligaria a exigência e derrubaria a captura de
+	// comentários da base inteira, que é exatamente o desastre que o modo
+	// observação existe para evitar.
+	//
+	// Falso por padrão sem consequência: o polling não tem assinatura e também
+	// não tem RawPayload, então nem chega a gravar auditoria.
+	SignatureValid bool
 }
 
 // ProcessInstagramMessageInput represents input for processing a DM
@@ -195,4 +211,8 @@ type ProcessInstagramMessageInput struct {
 	// IsEcho is true for echoes of our own outbound messages — skip those.
 	IsEcho     bool
 	RawPayload []byte // Original webhook payload for audit storage
+	// SignatureValid — mesma razão de ProcessInstagramCommentInput. O DM tem
+	// caminho de auditoria próprio (EventType "messaging") e gravava o mesmo
+	// `true` fixo.
+	SignatureValid bool
 }

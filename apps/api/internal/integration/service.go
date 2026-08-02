@@ -5002,7 +5002,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			EventType:      "live_comments",
 			EventID:        input.CommentID,
 			Payload:        input.RawPayload,
-			SignatureValid: true, // Instagram webhook signature validation could be added
+			SignatureValid: input.SignatureValid,
 		}); err != nil {
 			logger.From(ctx, s.logger).Error("failed to store instagram webhook event",
 				zap.String("comment_id", input.CommentID),
@@ -5667,7 +5667,7 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 			EventType:      "messaging",
 			EventID:        input.MessageID,
 			Payload:        input.RawPayload,
-			SignatureValid: true,
+			SignatureValid: input.SignatureValid,
 		}); err != nil {
 			logger.From(ctx, s.logger).Error("failed to store instagram dm webhook event",
 				zap.String("message_id", input.MessageID),
@@ -5754,6 +5754,12 @@ func (s *Service) processStoryReply(ctx context.Context, input ProcessInstagramM
 		Timestamp:  input.Timestamp,
 		Channel:    "dm",
 		RawPayload: input.RawPayload,
+		// A venda por story nasce de um DM: o resultado da assinatura da
+		// requisição que trouxe o DM é o mesmo que vale para o comentário
+		// canônico gerado a partir dele. Não repassar faria a auditoria do
+		// story registrar "assinatura inválida" para tráfego legítimo da Meta —
+		// o erro simétrico, e igualmente capaz de travar o deploy 2.
+		SignatureValid: input.SignatureValid,
 	}, events.SourceInstagramStory)
 }
 
