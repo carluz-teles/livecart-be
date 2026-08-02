@@ -22,7 +22,11 @@ func TestRegisterHandlers_LeavesCompositionRootFactsFree(t *testing.T) {
 
 	noop := func(context.Context, *asynq.Task) error { return nil }
 
-	for _, name := range []Name{CartCancelled, CartRefunded, OrderPaid, OrderRefunded} {
+	// event.ended entrou nesta lista na RN-32: ele tinha logEvent aqui e passou a
+	// ser o gancho que arma a morte da fila não atendida. Se alguém devolver o
+	// logEvent para o registro, o servidor inteiro passa a entrar em pânico no
+	// boot por padrão duplicado — este teste é o que avisa antes.
+	for _, name := range []Name{CartCancelled, CartRefunded, OrderPaid, OrderRefunded, EventEventEnded, EventWaitlistClose} {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
