@@ -57,10 +57,12 @@ const (
 	CodeUserNotSynced      Code = "USER_NOT_SYNCED"      // store/service.go:57; invitation/service.go:178
 
 	// --- INVITATION (internal/invitation/{service,repository}.go) ---
-	CodeInvitationExists     Code = "INVITATION_ALREADY_EXISTS" // invitation/service.go:61
-	CodeInvitationExpired    Code = "INVITATION_EXPIRED"        // invitation/service.go:136,164
-	CodeInvitationNotPending Code = "INVITATION_NOT_PENDING"    // invitation/repository.go:65; service.go:265
-	CodeOwnerOfOtherStore    Code = "OWNER_OF_OTHER_STORE"      // invitation/service.go:197
+	CodeInvitationExists        Code = "INVITATION_ALREADY_EXISTS" // invitation/service.go:61
+	CodeInvitationExpired       Code = "INVITATION_EXPIRED"        // invitation/service.go:136,164
+	CodeInvitationNotAcceptable Code = "INVITATION_NOT_ACCEPTABLE" // invitation/service.go:138,166 ("invitation is <status>")
+	CodeInvitationEmailMismatch Code = "INVITATION_EMAIL_MISMATCH" // invitation/service.go:168
+	CodeInvitationNotPending    Code = "INVITATION_NOT_PENDING"    // invitation/repository.go:65; service.go:265
+	CodeOwnerOfOtherStore       Code = "OWNER_OF_OTHER_STORE"      // invitation/service.go:197
 
 	// --- ORDER (internal/order/service.go) ---
 	CodeCancelUnavailable     Code = "CANCEL_UNAVAILABLE"      // order/service.go:98 (cancel not allowed in current status)

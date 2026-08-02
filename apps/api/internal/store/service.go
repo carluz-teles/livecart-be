@@ -54,7 +54,7 @@ func (s *Service) Create(ctx context.Context, input CreateStoreInput) (*storedom
 	userID, err := s.userLookup.GetUserIDByClerkID(ctx, input.ClerkUserID)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("failed to look up user", zap.Error(err), zap.String("clerk_user_id", input.ClerkUserID))
-		return nil, httpx.ErrUnprocessable("user not found - please sync your account first")
+		return nil, httpx.DomainError(422, httpx.CodeUserNotSynced, "user not found - please sync your account first")
 	}
 
 	// 2. Check if user already has a store (1 user = 1 store rule)
@@ -64,7 +64,7 @@ func (s *Service) Create(ctx context.Context, input CreateStoreInput) (*storedom
 		return nil, fmt.Errorf("checking existing membership: %w", err)
 	}
 	if hasMembership {
-		return nil, httpx.ErrConflict("you already have a store - delete your current store first to create a new one")
+		return nil, httpx.DomainError(409, httpx.CodeStoreAlreadyExists, "you already have a store - delete your current store first to create a new one")
 	}
 
 	// 3. Check slug uniqueness
@@ -73,7 +73,7 @@ func (s *Service) Create(ctx context.Context, input CreateStoreInput) (*storedom
 		return nil, fmt.Errorf("checking slug uniqueness: %w", err)
 	}
 	if existing != nil {
-		return nil, httpx.ErrConflict("slug already in use")
+		return nil, httpx.DomainError(409, httpx.CodeStoreSlugInUse, "slug already in use")
 	}
 
 	// 4. Create store

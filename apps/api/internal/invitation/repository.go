@@ -62,7 +62,7 @@ func (r *Repository) AcceptAtomically(ctx context.Context, invID vo.InvitationID
 
 	if _, err := qtx.AcceptInvitation(ctx, invID.ToPgUUID()); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return httpx.ErrGone("invitation is no longer pending")
+			return httpx.DomainError(410, httpx.CodeInvitationNotPending, "invitation is no longer pending")
 		}
 		return fmt.Errorf("marking invitation accepted: %w", err)
 	}

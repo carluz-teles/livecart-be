@@ -278,6 +278,69 @@ func TestCouponDomainCodes_WireUpper(t *testing.T) {
 	}
 }
 
+// TestStoreInvitationDomainCodes_WireUpper — D1d-3: the store + invitation domain
+// throws migrated from httpx.Err{Conflict,Unprocessable,Gone,Forbidden}(msg) to
+// DomainError(status, Code, msg), preserving each site's EXACT status — this slice
+// spans FOUR statuses (409 conflict, 422 unprocessable, 410 gone, 403 forbidden) —
+// and its human message byte-for-byte, now also carrying the typed UPPER_SNAKE
+// reason (Category=DOMAIN). Each row mirrors a real throw site in
+// internal/store/service.go or internal/invitation/{service,repository}.go verbatim.
+// The "invitation is %s" sites render a status into the message; the row uses one
+// concrete rendering ("invitation is revoked") to assert the format string stays
+// intact. Out of scope (unchanged): the ErrGone(err.Error()) default arms, the
+// ErrInternal membership-check failure, the not-found and validation sites.
+func TestStoreInvitationDomainCodes_WireUpper(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		code       Code
+		msg        string
+		wantReason string
+	}{
+		// 409 conflict
+		{"store already exists", 409, CodeStoreAlreadyExists, "you already have a store - delete your current store first to create a new one", "STORE_ALREADY_EXISTS"},
+		{"store slug in use", 409, CodeStoreSlugInUse, "slug already in use", "STORE_SLUG_IN_USE"},
+		{"invitation already exists", 409, CodeInvitationExists, "invitation already exists for this email", "INVITATION_ALREADY_EXISTS"},
+		{"owner of other store", 409, CodeOwnerOfOtherStore, "you are the owner of another store - delete your store first to accept this invitation", "OWNER_OF_OTHER_STORE"},
+		// 422 unprocessable
+		{"user not synced (store create)", 422, CodeUserNotSynced, "user not found - please sync your account first", "USER_NOT_SYNCED"},
+		{"resend not pending", 422, CodeInvitationNotPending, "can only resend pending invitations", "INVITATION_NOT_PENDING"},
+		// 410 gone
+		{"invitation expired", 410, CodeInvitationExpired, "invitation has expired", "INVITATION_EXPIRED"},
+		{"invitation not acceptable", 410, CodeInvitationNotAcceptable, "invitation is revoked", "INVITATION_NOT_ACCEPTABLE"},
+		{"accept no longer pending", 410, CodeInvitationNotPending, "invitation is no longer pending", "INVITATION_NOT_PENDING"},
+		// 403 forbidden
+		{"invitation email mismatch", 403, CodeInvitationEmailMismatch, "invitation email does not match your account", "INVITATION_EMAIL_MISMATCH"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := DomainError(tt.status, tt.code, tt.msg)
+
+			// errors.As + se: DOMAIN category, exact status, exact message, UPPER reason.
+			var se *ServiceError
+			if !errors.As(err, &se) {
+				t.Fatalf("DomainError must produce a *ServiceError")
+			}
+			if se.Code != tt.status || se.Message != tt.msg {
+				t.Fatalf("status/message wrong: %+v", se)
+			}
+			if se.Reason != tt.wantReason {
+				t.Fatalf("reason: want %q, got %q", tt.wantReason, se.Reason)
+			}
+			if se.Category != CategoryDomain {
+				t.Fatalf("category: want DOMAIN, got %q", se.Category)
+			}
+
+			// Wire: exact status + exact message + UPPER reason on the Envelope.
+			code, body := do(t, appReturning(err), "GET", "/x", "")
+			if code != tt.status || body["error"] != tt.msg || body["reason"] != tt.wantReason {
+				t.Fatalf("wire: got %d %v", code, body)
+			}
+		})
+	}
+}
+
 // TestOrderDomainCodes_WireUpper — D1d-2: the order domain throws migrated from
 // httpx.Err{Conflict,Unprocessable}(msg) to DomainError(status, Code, msg),
 // preserving each site's EXACT status (409/422) and human message — now also

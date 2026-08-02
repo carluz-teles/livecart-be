@@ -58,7 +58,7 @@ func (s *Service) Create(ctx context.Context, input CreateInvitationInput) (*dom
 	// Check if invitation already exists
 	existing, err := s.repo.GetByEmail(ctx, input.StoreID, input.Email)
 	if err == nil && existing.IsPending() {
-		return nil, httpx.ErrConflict("invitation already exists for this email")
+		return nil, httpx.DomainError(409, httpx.CodeInvitationExists, "invitation already exists for this email")
 	}
 
 	// Look up store name and inviter name for email template
@@ -133,9 +133,9 @@ func (s *Service) GetByToken(ctx context.Context, token string) (*domain.Invitat
 	if err := inv.CanBeAccepted(); err != nil {
 		switch err {
 		case domain.ErrInvitationExpired:
-			return nil, httpx.ErrGone("invitation has expired")
+			return nil, httpx.DomainError(410, httpx.CodeInvitationExpired, "invitation has expired")
 		case domain.ErrInvitationNotPending:
-			return nil, httpx.ErrGone(fmt.Sprintf("invitation is %s", inv.Status().String()))
+			return nil, httpx.DomainError(410, httpx.CodeInvitationNotAcceptable, fmt.Sprintf("invitation is %s", inv.Status().String()))
 		default:
 			return nil, httpx.ErrGone(err.Error())
 		}
@@ -161,11 +161,11 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*dom
 	if err := inv.CanBeAcceptedBy(input.Email); err != nil {
 		switch err {
 		case domain.ErrInvitationExpired:
-			return nil, httpx.ErrGone("invitation has expired")
+			return nil, httpx.DomainError(410, httpx.CodeInvitationExpired, "invitation has expired")
 		case domain.ErrInvitationNotPending:
-			return nil, httpx.ErrGone(fmt.Sprintf("invitation is %s", inv.Status().String()))
+			return nil, httpx.DomainError(410, httpx.CodeInvitationNotAcceptable, fmt.Sprintf("invitation is %s", inv.Status().String()))
 		case domain.ErrEmailMismatch:
-			return nil, httpx.ErrForbidden("invitation email does not match your account")
+			return nil, httpx.DomainError(403, httpx.CodeInvitationEmailMismatch, "invitation email does not match your account")
 		default:
 			return nil, httpx.ErrGone(err.Error())
 		}
@@ -175,7 +175,7 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*dom
 	userID, err := s.userLookup.GetUserIDByClerkID(ctx, input.ClerkUserID)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("failed to look up user", zap.Error(err), zap.String("clerk_user_id", input.ClerkUserID))
-		return nil, httpx.ErrUnprocessable("user not found - please sync your account first")
+		return nil, httpx.DomainError(422, httpx.CodeUserNotSynced, "user not found - please sync your account first")
 	}
 
 	// Check if user already has a membership (1 user = 1 store rule).
@@ -194,7 +194,7 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*dom
 				zap.String("user_id", userID),
 				zap.String("current_store", existingMembership.GetStoreName()),
 			)
-			return nil, httpx.ErrConflict("you are the owner of another store - delete your store first to accept this invitation")
+			return nil, httpx.DomainError(409, httpx.CodeOwnerOfOtherStore, "you are the owner of another store - delete your store first to accept this invitation")
 		}
 
 		// User is a member of another store — the swap happens inside the
@@ -262,7 +262,7 @@ func (s *Service) Resend(ctx context.Context, input ResendInvitationInput) (*dom
 
 	// Use domain method to validate
 	if err := existing.CanBeResent(); err != nil {
-		return nil, httpx.ErrUnprocessable("can only resend pending invitations")
+		return nil, httpx.DomainError(422, httpx.CodeInvitationNotPending, "can only resend pending invitations")
 	}
 
 	// Delete old invitation
