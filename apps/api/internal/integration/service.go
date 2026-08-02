@@ -7124,18 +7124,28 @@ func (s *Service) notifyWaitlistUnfulfilled(ctx context.Context, eventID string,
 			vars.Link = fmt.Sprintf("%s/cart/%s", frontendURL, e.CartToken)
 		}
 
-		// Sem PlatformCommentID: a fila fechou dias depois do comentário, e
-		// escolher um comentário aqui só para consumir o private reply seria
-		// gastar a única resposta disponível numa mensagem que não vende.
+		// A entrega precisa do comentário: a fila fecha por task, dias depois,
+		// e um DM por IGSID sem janela aberta é recusado pelo Instagram
+		// (2534022). Sem o alvo, o gatilho nasceria sem caminho de entrega e
+		// todo envio viraria linha "não entregue". A idade vai junto para
+		// classificar o motivo quando de fato não houver mais janela.
+		target, _ := s.liveService.GetLatestReplyTarget(ctx, eventID, e.PlatformUserID)
+		commentAt := time.Time{}
+		if target.CreatedAt != nil {
+			commentAt = *target.CreatedAt
+		}
+
 		if _, err := s.notificationService.Send(ctx, notification.SendInput{
-			StoreID:          storeID,
-			EventID:          eventID,
-			CartID:           e.CartID,
-			CartToken:        e.CartToken,
-			PlatformUserID:   e.PlatformUserID,
-			PlatformHandle:   e.PlatformHandle,
-			NotificationType: notification.TypeWaitlistUnfulfilled,
-			Variables:        vars,
+			StoreID:           storeID,
+			EventID:           eventID,
+			CartID:            e.CartID,
+			CartToken:         e.CartToken,
+			PlatformUserID:    e.PlatformUserID,
+			PlatformHandle:    e.PlatformHandle,
+			PlatformCommentID: target.CommentID,
+			NotificationType:  notification.TypeWaitlistUnfulfilled,
+			Variables:         vars,
+			CommentCreatedAt:  commentAt,
 		}); err != nil {
 			logger.From(ctx, s.logger).Warn("waitlist unfulfilled notification error",
 				zap.String("event_id", eventID),

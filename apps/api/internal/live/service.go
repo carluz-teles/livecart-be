@@ -1155,6 +1155,16 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 // D18/D20: deixou de filtrar por status. Devolver a sessão encerrada é o que
 // permite responder ao comprador em vez de descartar o comentário em silêncio;
 // quem decide se ela ainda vende é SessionAcceptsPurchase.
+// GetLatestReplyTarget expõe o comentário respondível de um comprador para os
+// caminhos ASSÍNCRONOS de fora deste pacote (fim da fila, por exemplo).
+//
+// Sem ele, uma mensagem disparada por task só teria o IGSID — e um DM por IGSID
+// sem janela aberta é recusado pelo Instagram (2534022). Ou seja: o gatilho
+// nasceria sem caminho de entrega e todo envio viraria linha "não entregue".
+func (s *Service) GetLatestReplyTarget(ctx context.Context, eventID, platformUserID string) (ReplyTarget, error) {
+	return s.repo.GetLatestReplyTarget(ctx, eventID, platformUserID)
+}
+
 func (s *Service) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID string) (*SessionOutput, error) {
 	session, err := s.repo.GetSessionByPlatformLiveID(ctx, platformLiveID)
 	if err != nil {
