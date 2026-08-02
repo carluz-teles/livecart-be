@@ -283,7 +283,7 @@ SELECT ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.creat
 FROM live_sessions ls
 JOIN live_session_platforms lsp ON lsp.session_id = ls.id
 WHERE lsp.platform_live_id = $1
-ORDER BY ls.created_at DESC
+ORDER BY (lsp.released_at IS NULL) DESC, lsp.added_at DESC, lsp.id DESC
 LIMIT 1
 `
 
@@ -297,6 +297,15 @@ LIMIT 1
 //
 // A decisão saiu daqui e virou live.SessionAcceptsPurchase, aplicada depois da
 // resolução. Resolver SEMPRE é o que permite responder.
+//
+// ⚠️ A ordenação tem de ser BYTE A BYTE a mesma de GetEventByPlatformLiveID.
+// São duas resoluções independentes pela MESMA chave, e o comentário é gravado
+// com o session_id de uma e o event_id da outra: se elegerem linhas de
+// live_session_platforms diferentes, o comentário fica com a sessão de uma
+// campanha e o evento de outra. Ordenando pelas mesmas colunas de lsp — e
+// desempatando por lsp.id, que é único — as duas elegem a mesma linha por
+// construção. Hoje isso é inócuo (a UNIQUE global garante uma linha só); a
+// ambiguidade nasce com a unique parcial da 000115.
 func (q *Queries) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID string) (LiveSession, error) {
 	row := q.db.QueryRow(ctx, getSessionByPlatformLiveID, platformLiveID)
 	var i LiveSession
@@ -537,11 +546,12 @@ func (q *Queries) ListSessionsByEvent(ctx context.Context, eventID pgtype.UUID) 
 const markMediaWebhookActive = `-- name: MarkMediaWebhookActive :exec
 UPDATE live_session_platforms
 SET webhook_active = true
-WHERE platform_live_id = $1
+WHERE platform_live_id = $1 AND released_at IS NULL
 `
 
 // Desliga o polling DESTA mídia (antes desligava o do evento inteiro, cegando a
-// segunda mídia de um evento guarda-chuva).
+// segunda mídia de um evento guarda-chuva) e só na campanha VIVA — a linha de
+// uma campanha encerrada não é polada e não deve ser tocada.
 func (q *Queries) MarkMediaWebhookActive(ctx context.Context, platformLiveID string) error {
 	_, err := q.db.Exec(ctx, markMediaWebhookActive, platformLiveID)
 	return err
@@ -587,7 +597,7 @@ func (q *Queries) SetLiveModeForEventSessions(ctx context.Context, arg SetLiveMo
 const setMediaMetadata = `-- name: SetMediaMetadata :exec
 UPDATE live_session_platforms
 SET media_permalink = $2, media_thumbnail_url = $3, media_caption = $4
-WHERE platform_live_id = $1
+WHERE platform_live_id = $1 AND released_at IS NULL
 `
 
 type SetMediaMetadataParams struct {
@@ -599,6 +609,10 @@ type SetMediaMetadataParams struct {
 
 // D1/A4: a legenda/permalink/thumb pertencem à MÍDIA, não ao evento. Chaveado
 // por platform_live_id, que é o media_id do Instagram.
+//
+// released_at IS NULL (D22): com a mídia reaproveitável entre campanhas, o
+// platform_live_id deixa de ser único e sem este filtro a legenda da campanha
+// nova sobrescreveria a das campanhas antigas — que é o histórico do lojista.
 func (q *Queries) SetMediaMetadata(ctx context.Context, arg SetMediaMetadataParams) error {
 	_, err := q.db.Exec(ctx, setMediaMetadata,
 		arg.PlatformLiveID,

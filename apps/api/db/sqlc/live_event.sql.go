@@ -393,7 +393,7 @@ FROM live_events e
 JOIN live_sessions s ON s.event_id = e.id
 JOIN live_session_platforms lsp ON lsp.session_id = s.id
 WHERE lsp.platform_live_id = $1
-ORDER BY e.created_at DESC
+ORDER BY (lsp.released_at IS NULL) DESC, lsp.added_at DESC, lsp.id DESC
 LIMIT 1
 `
 
@@ -404,6 +404,17 @@ LIMIT 1
 // agendada ou encerrada virar um Warn e sumir: sem evento não há store_id, não
 // há como responder e não há como registrar. Três casos, um padrão só —
 // resolve sempre, decide depois (live.WindowAt), nunca fica em silêncio.
+//
+// PREFERE O EVENTO VIVO (A5/D22). Com a mídia podendo ser reaproveitada em
+// campanhas diferentes ao longo do tempo (unique parcial da 000115), o mesmo
+// platform_live_id passa a ter N linhas em live_session_platforms e o
+// `:one` do sqlc escolheria uma em SILÊNCIO — pgx lê a primeira e descarta o
+// resto sem erro. released_at IS NULL é exatamente "pertence a um evento vivo",
+// então ordenar por ele é a preferência pedida pelo A5; empatando, a mídia mais
+// recente, e lsp.id (único) fecha o determinismo.
+//
+// ⚠️ Esta ordenação é a MESMA de GetSessionByPlatformLiveID, e tem de continuar
+// sendo: ver a nota lá.
 func (q *Queries) GetEventByPlatformLiveID(ctx context.Context, platformLiveID string) (LiveEvent, error) {
 	row := q.db.QueryRow(ctx, getEventByPlatformLiveID, platformLiveID)
 	var i LiveEvent

@@ -64,11 +64,20 @@ RETURNING *;
 --
 -- A decisão saiu daqui e virou live.SessionAcceptsPurchase, aplicada depois da
 -- resolução. Resolver SEMPRE é o que permite responder.
+--
+-- ⚠️ A ordenação tem de ser BYTE A BYTE a mesma de GetEventByPlatformLiveID.
+-- São duas resoluções independentes pela MESMA chave, e o comentário é gravado
+-- com o session_id de uma e o event_id da outra: se elegerem linhas de
+-- live_session_platforms diferentes, o comentário fica com a sessão de uma
+-- campanha e o evento de outra. Ordenando pelas mesmas colunas de lsp — e
+-- desempatando por lsp.id, que é único — as duas elegem a mesma linha por
+-- construção. Hoje isso é inócuo (a UNIQUE global garante uma linha só); a
+-- ambiguidade nasce com a unique parcial da 000115.
 SELECT ls.*
 FROM live_sessions ls
 JOIN live_session_platforms lsp ON lsp.session_id = ls.id
 WHERE lsp.platform_live_id = $1
-ORDER BY ls.created_at DESC
+ORDER BY (lsp.released_at IS NULL) DESC, lsp.added_at DESC, lsp.id DESC
 LIMIT 1;
 
 -- name: ListPlatformsBySession :many
@@ -89,16 +98,21 @@ SELECT * FROM live_session_platforms WHERE platform_live_id = $1;
 -- name: SetMediaMetadata :exec
 -- D1/A4: a legenda/permalink/thumb pertencem à MÍDIA, não ao evento. Chaveado
 -- por platform_live_id, que é o media_id do Instagram.
+--
+-- released_at IS NULL (D22): com a mídia reaproveitável entre campanhas, o
+-- platform_live_id deixa de ser único e sem este filtro a legenda da campanha
+-- nova sobrescreveria a das campanhas antigas — que é o histórico do lojista.
 UPDATE live_session_platforms
 SET media_permalink = $2, media_thumbnail_url = $3, media_caption = $4
-WHERE platform_live_id = $1;
+WHERE platform_live_id = $1 AND released_at IS NULL;
 
 -- name: MarkMediaWebhookActive :exec
 -- Desliga o polling DESTA mídia (antes desligava o do evento inteiro, cegando a
--- segunda mídia de um evento guarda-chuva).
+-- segunda mídia de um evento guarda-chuva) e só na campanha VIVA — a linha de
+-- uma campanha encerrada não é polada e não deve ser tocada.
 UPDATE live_session_platforms
 SET webhook_active = true
-WHERE platform_live_id = $1;
+WHERE platform_live_id = $1 AND released_at IS NULL;
 
 -- name: ListPollableMedia :many
 -- Mídias de post/reel que ainda não receberam webhook de comments e por isso
