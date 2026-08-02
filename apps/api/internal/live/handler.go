@@ -169,6 +169,9 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		StartsAt:               startsAt,
 		EndsAt:                 endsAt,
 		Description:            req.Description,
+		MediaPermalink:         req.MediaPermalink,
+		MediaThumbnailURL:      req.MediaThumbnailURL,
+		MediaCaption:           req.MediaCaption,
 
 		WaitlistNotifiedTTLMinutes: req.WaitlistNotifiedTtlMinutes,
 	})

@@ -484,3 +484,53 @@ func TestLinkSessionMediaRequestRequiresTheMediaID(t *testing.T) {
 		t.Errorf("plataforma default = %q, quero instagram", got)
 	}
 }
+
+// TestCreateEventStoresFirstSessionMediaMetadata — a publicação escolhida como
+// PRIMEIRA transmissão pelo formulário de campanha tem de ficar igual à que
+// entra pelo caminho de evento-de-post.
+//
+// CreatePostEvent chamava SetMedia; Create não. Resultado: a MESMA publicação
+// nascia com permalink, capa e legenda por uma porta e sem nada pela outra. A
+// captura funcionava nos dois (quem resolve o comentário é o platform_live_id),
+// só a tela ficava mais pobre conforme a porta — e "conforme a porta" é
+// exatamente o que o épico existe para acabar.
+func TestCreateEventStoresFirstSessionMediaMetadata(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	storeID := seedWindowStore(t, ctx, "primeira-sessao-metadados")
+	svc := newWindowService(nil)
+	endsAt := time.Now().Add(48 * time.Hour)
+
+	mediaID := "media-da-primeira-sessao"
+	plataforma := "instagram"
+	if _, err := svc.Create(ctx, CreateLiveInput{
+		StoreID:           storeID,
+		Title:             "Semana Black",
+		Type:              SessionTypeReel,
+		Platform:          &plataforma,
+		PlatformLiveID:    &mediaID,
+		EndsAt:            &endsAt,
+		MediaPermalink:    "https://instagram.com/reel/primeira",
+		MediaThumbnailURL: "https://cdn.example/primeira.jpg",
+		MediaCaption:      "Reel de abertura",
+	}); err != nil {
+		t.Fatalf("criar campanha com publicacao na primeira transmissao: %v", err)
+	}
+
+	var permalink, thumb, caption *string
+	if err := testPool.QueryRow(ctx,
+		`SELECT media_permalink, media_thumbnail_url, media_caption
+		   FROM live_session_platforms WHERE platform_live_id = $1`, mediaID,
+	).Scan(&permalink, &thumb, &caption); err != nil {
+		t.Fatalf("ler metadados da midia: %v", err)
+	}
+	if permalink == nil || *permalink != "https://instagram.com/reel/primeira" {
+		t.Errorf("permalink = %v, quero o do payload", permalink)
+	}
+	if thumb == nil || *thumb != "https://cdn.example/primeira.jpg" {
+		t.Errorf("thumbnail = %v, quero a do payload", thumb)
+	}
+	if caption == nil || *caption != "Reel de abertura" {
+		t.Errorf("legenda = %v, quero a do payload", caption)
+	}
+}

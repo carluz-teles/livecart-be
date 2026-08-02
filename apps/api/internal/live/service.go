@@ -251,6 +251,27 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		return CreateLiveOutput{}, err
 	}
 
+	// Metadados da publicação escolhida como PRIMEIRA transmissão. Sem isto, a
+	// MESMA publicação nascia rica pelo caminho de evento-de-post (CreatePostEvent
+	// chama SetMedia) e pobre pelo formulário de campanha — sem permalink, sem
+	// capa, sem legenda. A captura funcionava nos dois (quem resolve o comentário
+	// é o platform_live_id), só a tela ficava mais pobre conforme a porta.
+	//
+	// Best-effort pelo mesmo motivo dos outros dois pontos: metadado é enfeite,
+	// e derrubar a criação da campanha por causa da miniatura seria trocar a
+	// venda pela capa.
+	if platformLiveID != "" && (input.MediaPermalink != "" || input.MediaThumbnailURL != "" || input.MediaCaption != "") {
+		if err := s.repo.SetMedia(ctx, PostMediaInput{
+			MediaID:      platformLiveID,
+			Permalink:    input.MediaPermalink,
+			ThumbnailURL: input.MediaThumbnailURL,
+			Caption:      input.MediaCaption,
+		}); err != nil {
+			logger.From(ctx, s.logger).Warn("failed to set first session media metadata",
+				zap.String("event_id", event.ID), zap.Error(err))
+		}
+	}
+
 	logger.From(ctx, s.logger).Info("live created with session",
 		zap.String("event_id", event.ID),
 		zap.String("session_id", session.ID),

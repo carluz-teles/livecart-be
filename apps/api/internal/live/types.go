@@ -607,6 +607,14 @@ type CreateLiveRequest struct {
 	Type           string  `json:"type" validate:"omitempty,oneof=single multi live post reel story"`
 	Platform       *string `json:"platform" validate:"omitempty,oneof=instagram"`
 	PlatformLiveID *string `json:"platformLiveId" validate:"omitempty"`
+	// Metadados da publicação escolhida como PRIMEIRA transmissão, no mesmo
+	// formato de CreatePostRequest e CreateSessionRequest. Sem eles, a MESMA
+	// publicação ficava com permalink/capa/legenda quando entrava pelo caminho
+	// de evento-de-post e sem nada quando entrava pelo formulário de campanha —
+	// duas portas para o mesmo dado, só uma alimentando a tela.
+	MediaPermalink    string `json:"mediaPermalink"`
+	MediaThumbnailURL string `json:"mediaThumbnailUrl"`
+	MediaCaption      string `json:"mediaCaption"`
 	// Scheduling
 	ScheduledAt *string `json:"scheduledAt"` // ISO8601 timestamp — legado, sinônimo de startsAt
 	// StartsAt/EndsAt são a JANELA COMERCIAL do evento (D21). EndsAt é
@@ -744,6 +752,10 @@ type CreateLiveInput struct {
 	StartsAt    *time.Time
 	EndsAt      *time.Time
 	Description *string
+	// Metadados da publicação da primeira transmissão (gravados na MÍDIA).
+	MediaPermalink    string
+	MediaThumbnailURL string
+	MediaCaption      string
 }
 
 type CreateLiveOutput struct {
