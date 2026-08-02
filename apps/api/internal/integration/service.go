@@ -5885,6 +5885,10 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 				UserID:    c.From.ID,
 				Username:  username,
 				Text:      c.Text,
+				// RN-37: sem o carimbo o polling não saberia que o comentário
+				// está fora da janela de 7 dias e tentaria responder — e é
+				// justamente o polling que agora varre campanha encerrada.
+				Timestamp: parseGraphTimestamp(c.Timestamp),
 			}); err != nil {
 				logger.From(evCtx, s.logger).Warn("post polling: failed to process comment",
 					zap.String("comment_id", c.ID), zap.Error(err))
@@ -6057,10 +6061,46 @@ func (s *Service) replyPostOutOfStock(ctx context.Context, event *live.EventOutp
 	s.sendPostReply(ctx, event, input, msg)
 }
 
+// privateReplyWindow é o limite do private reply do Instagram: 7 dias a contar
+// do comentário, e uma única vez por comentário (N9/RN-37). Depois disso a
+// mensagem não sai de qualquer forma — tentar é só gastar chamada de API para
+// receber erro.
+const privateReplyWindow = 7 * 24 * time.Hour
+
+// commentTooOldToReply reporta se o comentário já passou da janela de private
+// reply. Sem carimbo de tempo (ts <= 0) responde false: erra para o lado de
+// TENTAR enviar, que é o comportamento de hoje.
+func commentTooOldToReply(ts int64, now time.Time) bool {
+	if ts <= 0 {
+		return false
+	}
+	return now.Sub(time.Unix(ts, 0)) > privateReplyWindow
+}
+
+// parseGraphTimestamp converte o timestamp ISO8601 do Graph
+// ("2026-08-01T20:00:00+0000") para unix seconds. Devolve 0 quando não dá.
+func parseGraphTimestamp(v string) int64 {
+	if v == "" {
+		return 0
+	}
+	for _, layout := range []string{"2006-01-02T15:04:05-0700", time.RFC3339} {
+		if t, err := time.Parse(layout, v); err == nil {
+			return t.Unix()
+		}
+	}
+	return 0
+}
+
 // sendPostReply privately answers the buyer. For a comment-channel event it
 // replies on the comment thread (which Instagram delivers as a private reply);
 // for a story (Channel="dm") it messages the buyer's IGSID directly, since a
 // story reply arrives as a DM and has no public comment to answer.
+//
+// É o funil ÚNICO de resposta ao comprador neste pipeline, e por isso é aqui
+// que a janela de 7 dias da RN-37 vale — para todas as respostas, não só a de
+// campanha encerrada. Webhook e polling passam pelos dois pelo mesmo lugar,
+// que é o que faz os dois concordarem no número (hoje o código prometia 2 dias
+// e entregava 0).
 func (s *Service) sendPostReply(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, msg string) {
 	if input.Channel == "dm" {
 		if err := s.SendInstagramDM(ctx, event.StoreID, input.UserID, msg); err != nil {
@@ -6070,6 +6110,17 @@ func (s *Service) sendPostReply(ctx context.Context, event *live.EventOutput, in
 				zap.Error(err),
 			)
 		}
+		return
+	}
+	// RN-37: fora da janela de 7 dias o private reply não sai. O comentário já
+	// foi persistido classificado pelo chamador — o que se perde é a tentativa
+	// de envio, não o registro.
+	if commentTooOldToReply(input.Timestamp, time.Now()) {
+		logger.From(ctx, s.logger).Info("post reply skipped: comment past the 7-day private reply window",
+			zap.String("event_id", event.ID),
+			zap.String("comment_id", input.CommentID),
+			zap.Int64("comment_ts", input.Timestamp),
+		)
 		return
 	}
 	if err := s.ReplyToInstagramComment(ctx, event.StoreID, input.CommentID, msg); err != nil {

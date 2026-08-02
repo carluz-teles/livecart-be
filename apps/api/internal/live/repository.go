@@ -980,11 +980,24 @@ func (r *Repository) GetLatestCommentIDByUser(ctx context.Context, eventID, plat
 	// on this event — one that hasn't consumed its single private reply and
 	// isn't hidden/deleted (Instagram rejects replies to those, error 2534066).
 	// Returns "" (no error) when the buyer has no usable comment.
+	//
+	// N9/RN-37 — created_at >= now() - 7 dias. O private reply do Instagram vale
+	// 7 dias e uma única vez por comentário; passado o prazo a mensagem não sai
+	// de qualquer forma, e mandar o link para lá é gastar chamada de API para
+	// receber erro. Este filtro não existia: numa campanha de uma semana, o
+	// disparo em massa do fechamento pegava comentário do primeiro dia.
+	//
+	// Consequência conhecida: sem comentário utilizável a função devolve "" e o
+	// notifier degrada para DM por IGSID, que fora da janela de 24h também
+	// falha. Isso troca um erro do Graph por uma NÃO-ENTREGA silenciosa —
+	// registrar "não entregue com motivo" e mostrar ao lojista é a RN-38, que
+	// não está nesta fatia.
 	var commentID string
 	err = r.pool.QueryRow(ctx, `
 		SELECT platform_comment_id FROM live_comments
 		WHERE event_id = $1 AND platform_user_id = $2 AND platform_comment_id <> ''
 		  AND NOT private_reply_used AND NOT hidden AND deleted_at IS NULL
+		  AND created_at >= now() - interval '7 days'
 		ORDER BY created_at DESC
 		LIMIT 1
 	`, eventUID, platformUserID).Scan(&commentID)
