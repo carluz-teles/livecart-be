@@ -5161,7 +5161,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	// Os window gates que ficavam aqui subiram para logo depois do parse de
 	// intenção, valendo para todo tipo de evento.
 	if live.IsPostCommerceSessionType(session.Type) && hasPurchaseIntent {
-		resolved, handled, resultLabel := s.resolvePostEventProduct(ctx, event, input, intent, product)
+		resolved, handled, resultLabel := s.resolvePostEventProduct(ctx, event, session.ID, input, intent, product)
 		if handled {
 			s.savePostComment(ctx, session.ID, event.ID, input, resultLabel)
 			return nil
@@ -5869,17 +5869,28 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 func (s *Service) resolvePostEventProduct(
 	ctx context.Context,
 	event *live.EventOutput,
+	sessionID string,
 	input ProcessInstagramCommentInput,
 	intent *PurchaseIntent,
 	matched *ProductRow,
 ) (resolved *ProductRow, handled bool, resultLabel string) {
-	whitelist, err := s.liveService.ListEventProducts(ctx, event.ID, event.StoreID)
+	whitelist, err := s.liveService.ListSessionWhitelist(ctx, sessionID)
 	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to load post promotion products", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("failed to load session promotion products", zap.Error(err))
 		return matched, false, ""
 	}
 
+	// N2 — semântica ÚNICA em todo o sistema: lista VAZIA libera TODOS os
+	// produtos da loja. Até aqui a ingestão fazia o oposto do checkout: sem
+	// whitelist, todo produto casado caía em 'not_in_promo' e o comprador
+	// recebia "não está disponível nesta promoção" — o lojista que não
+	// configurava produto nenhum simplesmente não vendia pelo post.
+	openSession := len(whitelist) == 0
+
 	inPromo := func(productID string) bool {
+		if openSession {
+			return true
+		}
 		for _, w := range whitelist {
 			if w.ProductID == productID {
 				return true
@@ -5906,6 +5917,14 @@ func (s *Service) resolvePostEventProduct(
 	if codes := ExtractPossibleKeywords(input.Text); len(codes) > 0 {
 		s.replyPostUnavailable(ctx, event, input, whitelist)
 		return nil, true, "not_in_promo"
+	}
+
+	// Sessão sem whitelist não tem lista de onde escolher: pedir a palavra-chave
+	// é a única resposta possível. Ficar em silêncio aqui era o caminho que
+	// produzia 'no_product' sem responder nada ao comprador.
+	if openSession {
+		s.replyPostChooseProduct(ctx, event, input, nil)
+		return nil, true, "needs_keyword"
 	}
 
 	available := availablePromoProducts(whitelist)
@@ -6042,6 +6061,13 @@ func (s *Service) replyPostUnavailable(ctx context.Context, event *live.EventOut
 // replyPostChooseProduct privately asks the commenter to specify which product
 // (used when a bare "EU QUERO" is posted on a multi-product promotion).
 func (s *Service) replyPostChooseProduct(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, available []live.EventProductOutput) {
+	// Sessão sem whitelist (N2): não há lista para oferecer, mas o comprador
+	// precisa de uma resposta — "nunca fica em silêncio".
+	if len(available) == 0 {
+		s.sendPostReply(ctx, event, input,
+			fmt.Sprintf("Oi @%s! Pra adicionar ao carrinho, comente o código do produto que você quer. 💜", input.Username))
+		return
+	}
 	msg := fmt.Sprintf(
 		"Oi @%s! Pra adicionar ao carrinho, comente o código do produto que você quer:\n%s 💜",
 		input.Username, promoProductLines(available),

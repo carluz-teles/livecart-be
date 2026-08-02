@@ -53,7 +53,14 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Patch("/:id/active-product", h.SetActiveProduct)
 	g.Patch("/:id/pause-processing", h.SetProcessingPaused)
 
-	// Event Products (Whitelist)
+	// Whitelist da SESSÃO (D15/N2) — a unidade nova. Chaveada por productId.
+	g.Get("/:id/sessions/:sessionId/whitelist", h.ListSessionProducts)
+	g.Post("/:id/sessions/:sessionId/whitelist", h.AddSessionProduct)
+	g.Put("/:id/sessions/:sessionId/whitelist/:productId", h.UpdateSessionProduct)
+	g.Delete("/:id/sessions/:sessionId/whitelist/:productId", h.DeleteSessionProduct)
+
+	// Whitelist por EVENTO — rota legada mantida para o frontend atual. Cada
+	// operação é aplicada em TODAS as sessões do evento; a leitura é a união.
 	g.Get("/:id/whitelist", h.ListEventProducts)
 	g.Post("/:id/whitelist", h.AddEventProduct)
 	g.Put("/:id/whitelist/:productId", h.UpdateEventProduct)
@@ -1195,7 +1202,7 @@ func (h *Handler) UpdateEventProduct(c *fiber.Ctx) error {
 	}
 
 	output, err := h.service.UpdateEventProduct(c.Context(), UpdateEventProductInput{
-		ID:           productID,
+		ProductID:    productID,
 		EventID:      eventID,
 		StoreID:      storeID,
 		SpecialPrice: req.SpecialPrice,

@@ -562,7 +562,7 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 	}
 
 	// Get product and upsell counts
-	productCount, err := s.repo.CountEventProducts(ctx, event.ID)
+	productCount, err := s.repo.CountEventWhitelist(ctx, event.ID)
 	if err != nil {
 		logger.From(ctx, s.logger).Warn("failed to count event products", zap.String("event_id", event.ID), zap.Error(err))
 	}
@@ -1418,15 +1418,34 @@ func (s *Service) GetLiveModeState(ctx context.Context, eventID, storeID string)
 // EVENT PRODUCTS (Whitelist)
 // =============================================================================
 
-// AddEventProduct adds a product to an event's whitelist
+// A whitelist é da SESSÃO (D15/N2). As funções abaixo mantêm de pé as rotas
+// legadas por EVENTO — que o frontend ainda usa — traduzindo cada operação para
+// TODAS as sessões daquele evento. Ler pelo evento devolve a UNIÃO.
+//
+// Sessão criada DEPOIS de uma configuração por evento NASCE VAZIA (N2, decisão
+// explícita do dono) — e vazia vende tudo. Não há herança.
+
+// AddEventProduct aplica o produto na whitelist de todas as sessões do evento.
 func (s *Service) AddEventProduct(ctx context.Context, input AddEventProductInput) (EventProductOutput, error) {
 	// Verify event exists and belongs to store
-	_, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID)
-	if err != nil {
+	if _, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID); err != nil {
 		return EventProductOutput{}, err
 	}
 
-	output, err := s.repo.AddEventProduct(ctx, input)
+	in := SessionProductInput{
+		StoreID:      input.StoreID,
+		EventID:      input.EventID,
+		ProductID:    input.ProductID,
+		SpecialPrice: input.SpecialPrice,
+		MaxQuantity:  input.MaxQuantity,
+		DisplayOrder: input.DisplayOrder,
+		Featured:     input.Featured,
+	}
+	if err := s.repo.UpsertProductInAllEventSessions(ctx, in); err != nil {
+		return EventProductOutput{}, err
+	}
+
+	output, err := s.repo.GetEventWhitelistProduct(ctx, input.EventID, input.ProductID)
 	if err != nil {
 		return EventProductOutput{}, err
 	}
@@ -1439,61 +1458,144 @@ func (s *Service) AddEventProduct(ctx context.Context, input AddEventProductInpu
 	return output, nil
 }
 
-// ListEventProducts returns all products in an event's whitelist
+// ListEventProducts devolve a união das whitelists das sessões do evento.
 func (s *Service) ListEventProducts(ctx context.Context, eventID, storeID string) ([]EventProductOutput, error) {
 	// Verify event exists and belongs to store
-	_, err := s.repo.GetEventByID(ctx, eventID, storeID)
-	if err != nil {
+	if _, err := s.repo.GetEventByID(ctx, eventID, storeID); err != nil {
 		return nil, err
 	}
 
-	return s.repo.ListEventProducts(ctx, eventID)
+	return s.repo.ListEventWhitelist(ctx, eventID)
 }
 
-// UpdateEventProduct updates a product's configuration in an event
+// UpdateEventProduct regrava a configuração do produto em todas as sessões.
+//
+// A chave é o PRODUTO, não o id da linha. Chavear pelo id da linha é o bug que
+// o par FE/BE carrega hoje: o frontend manda products.id no path onde a API
+// esperava event_products.id, então editar preço especial devolvia 404 e
+// remover era um no-op que ainda exibia "removido com sucesso".
 func (s *Service) UpdateEventProduct(ctx context.Context, input UpdateEventProductInput) (EventProductOutput, error) {
 	// Verify event exists and belongs to store
-	_, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID)
-	if err != nil {
+	if _, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID); err != nil {
 		return EventProductOutput{}, err
 	}
 
-	output, err := s.repo.UpdateEventProduct(ctx, input)
+	// Só regrava o que já está na whitelist: um PUT em produto ausente é 404,
+	// não uma inclusão silenciosa.
+	if _, err := s.repo.GetEventWhitelistProduct(ctx, input.EventID, input.ProductID); err != nil {
+		return EventProductOutput{}, err
+	}
+
+	if err := s.repo.UpsertProductInAllEventSessions(ctx, SessionProductInput{
+		StoreID:      input.StoreID,
+		EventID:      input.EventID,
+		ProductID:    input.ProductID,
+		SpecialPrice: input.SpecialPrice,
+		MaxQuantity:  input.MaxQuantity,
+		DisplayOrder: input.DisplayOrder,
+		Featured:     input.Featured,
+	}); err != nil {
+		return EventProductOutput{}, err
+	}
+
+	output, err := s.repo.GetEventWhitelistProduct(ctx, input.EventID, input.ProductID)
 	if err != nil {
 		return EventProductOutput{}, err
 	}
 
 	logger.From(ctx, s.logger).Info("updated event product",
 		zap.String("event_id", input.EventID),
-		zap.String("product_id", input.ID),
+		zap.String("product_id", input.ProductID),
 	)
 
 	return output, nil
 }
 
-// DeleteEventProduct removes a product from an event's whitelist
-func (s *Service) DeleteEventProduct(ctx context.Context, id, eventID, storeID string) error {
+// DeleteEventProduct remove o produto da whitelist de todas as sessões.
+func (s *Service) DeleteEventProduct(ctx context.Context, productID, eventID, storeID string) error {
 	// Verify event exists and belongs to store
-	_, err := s.repo.GetEventByID(ctx, eventID, storeID)
-	if err != nil {
+	if _, err := s.repo.GetEventByID(ctx, eventID, storeID); err != nil {
 		return err
 	}
 
-	if err := s.repo.DeleteEventProduct(ctx, id, eventID); err != nil {
+	if err := s.repo.DeleteProductFromAllEventSessions(ctx, eventID, productID); err != nil {
 		return err
 	}
 
 	logger.From(ctx, s.logger).Info("deleted event product",
 		zap.String("event_id", eventID),
-		zap.String("product_id", id),
+		zap.String("product_id", productID),
 	)
 
 	return nil
 }
 
-// ValidateProductForEvent checks if a product can be sold in an event
-func (s *Service) ValidateProductForEvent(ctx context.Context, eventID, productID, storeID string) (*ProductValidationResult, error) {
-	return s.repo.GetEventProductConfig(ctx, eventID, productID, storeID)
+// =============================================================================
+// SESSION PRODUCTS (Whitelist da SESSÃO)
+// =============================================================================
+
+// resolveSessionOfEvent confirma que a sessão pertence ao evento e que o evento
+// pertence à loja. É a checagem de posse que o CRUD por sessão precisa e que o
+// CRUD por evento fazia com um GetEventByID só.
+func (s *Service) resolveSessionOfEvent(ctx context.Context, sessionID, eventID, storeID string) error {
+	if _, err := s.repo.GetEventByID(ctx, eventID, storeID); err != nil {
+		return err
+	}
+	session, err := s.repo.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if session == nil || session.EventID != eventID {
+		return httpx.ErrNotFound("session not found")
+	}
+	return nil
+}
+
+// ListSessionProducts devolve a whitelist DAQUELA sessão. Vazia = vende tudo.
+func (s *Service) ListSessionProducts(ctx context.Context, sessionID, eventID, storeID string) ([]SessionProductOutput, error) {
+	if err := s.resolveSessionOfEvent(ctx, sessionID, eventID, storeID); err != nil {
+		return nil, err
+	}
+	return s.repo.ListSessionProducts(ctx, sessionID)
+}
+
+// ListSessionWhitelist devolve a whitelist da sessão sem checagem de posse — é
+// o caminho de INGESTÃO, onde a sessão já foi resolvida pela mídia que chegou
+// no webhook.
+func (s *Service) ListSessionWhitelist(ctx context.Context, sessionID string) ([]SessionProductOutput, error) {
+	return s.repo.ListSessionProducts(ctx, sessionID)
+}
+
+// UpsertSessionProduct grava o produto na whitelist da sessão (POST e PUT são a
+// mesma operação: a chave natural é (sessão, produto)).
+func (s *Service) UpsertSessionProduct(ctx context.Context, input SessionProductInput) (SessionProductOutput, error) {
+	if err := s.resolveSessionOfEvent(ctx, input.SessionID, input.EventID, input.StoreID); err != nil {
+		return SessionProductOutput{}, err
+	}
+	output, err := s.repo.UpsertSessionProduct(ctx, input)
+	if err != nil {
+		return SessionProductOutput{}, err
+	}
+	logger.From(ctx, s.logger).Info("session whitelist product upserted",
+		zap.String("session_id", input.SessionID),
+		zap.String("product_id", input.ProductID),
+	)
+	return output, nil
+}
+
+// DeleteSessionProduct remove o produto da whitelist da sessão.
+func (s *Service) DeleteSessionProduct(ctx context.Context, sessionID, eventID, storeID, productID string) error {
+	if err := s.resolveSessionOfEvent(ctx, sessionID, eventID, storeID); err != nil {
+		return err
+	}
+	if err := s.repo.DeleteSessionProduct(ctx, sessionID, productID); err != nil {
+		return err
+	}
+	logger.From(ctx, s.logger).Info("session whitelist product removed",
+		zap.String("session_id", sessionID),
+		zap.String("product_id", productID),
+	)
+	return nil
 }
 
 // =============================================================================

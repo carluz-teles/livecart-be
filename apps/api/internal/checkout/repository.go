@@ -663,7 +663,11 @@ func (r *Repository) GetEventProductForCart(ctx context.Context, eventID, storeI
 	if err != nil {
 		return nil, httpx.ErrBadRequest("invalid store ID")
 	}
-	cfg, err := r.q.GetEventProductConfig(ctx, sqlc.GetEventProductConfigParams{
+	// D15/N2: a whitelist é da SESSÃO, mas o carrinho é do EVENTO e atravessa N
+	// sessões — não existe "a sessão do checkout". A regra é a união: o produto
+	// é aceito se ALGUMA sessão do evento o aceita, e sessão sem whitelist
+	// aceita tudo.
+	cfg, err := r.q.GetEventProductConfigFromSessions(ctx, sqlc.GetEventProductConfigFromSessionsParams{
 		EventID: pgtype.UUID{Bytes: eID, Valid: true},
 		ID:      pgtype.UUID{Bytes: pID, Valid: true},
 		StoreID: pgtype.UUID{Bytes: sID, Valid: true},
@@ -672,9 +676,9 @@ func (r *Repository) GetEventProductForCart(ctx context.Context, eventID, storeI
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, httpx.ErrNotFound("produto não encontrado")
 		}
-		return nil, fmt.Errorf("getting event product config: %w", err)
+		return nil, fmt.Errorf("getting session product config: %w", err)
 	}
-	maxQty, _ := r.q.GetEffectiveMaxQuantity(ctx, sqlc.GetEffectiveMaxQuantityParams{
+	maxQty, _ := r.q.GetEffectiveMaxQuantityFromSessions(ctx, sqlc.GetEffectiveMaxQuantityFromSessionsParams{
 		ID:        pgtype.UUID{Bytes: eID, Valid: true},
 		ProductID: pgtype.UUID{Bytes: pID, Valid: true},
 	})
@@ -685,7 +689,7 @@ func (r *Repository) GetEventProductForCart(ctx context.Context, eventID, storeI
 		MaxQuantity: int(maxQty),
 		Stock:       int(cfg.ProductStock.Int32),
 		Active:      cfg.ProductActive.Bool,
-		IsAllowed:   cfg.IsAllowed,
+		IsAllowed:   cfg.IsAllowed.Bool,
 	}
 	return out, nil
 }

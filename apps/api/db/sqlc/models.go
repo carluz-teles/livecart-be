@@ -664,6 +664,19 @@ type ProductVariantOption struct {
 	OptionValueID pgtype.UUID `json:"option_value_id"`
 }
 
+// D15/N2: whitelist de produtos por SESSÃO. Lista vazia = TODOS os produtos da loja liberados naquela sessão — mesma semântica no checkout e na ingestão, sem exceção. Sessão nova nasce vazia, portanto vende tudo, mesmo que outra sessão do evento tenha whitelist.
+type SessionProduct struct {
+	ID           pgtype.UUID        `json:"id"`
+	SessionID    pgtype.UUID        `json:"session_id"`
+	ProductID    pgtype.UUID        `json:"product_id"`
+	SpecialPrice pgtype.Int4        `json:"special_price"`
+	MaxQuantity  pgtype.Int4        `json:"max_quantity"`
+	DisplayOrder int32              `json:"display_order"`
+	Featured     bool               `json:"featured"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
 // Provider-agnostic freight orders linked to carts. One row per shipment created at a carrier.
 type Shipment struct {
 	ID pgtype.UUID `json:"id"`
