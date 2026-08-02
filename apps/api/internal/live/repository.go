@@ -650,23 +650,13 @@ func (r *Repository) GetEventByID(ctx context.Context, id, storeID string) (*Eve
 	return &out, nil
 }
 
-func (r *Repository) GetActiveEventByStore(ctx context.Context, storeID string) (*EventRow, error) {
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return nil, err
-	}
-
-	row, err := r.q.GetActiveLiveEventByStore(ctx, storeUID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("getting active live event: %w", err)
-	}
-
-	out := toEventRow(row)
-	return &out, nil
-}
+// GetActiveEventByStore foi REMOVIDA junto da query GetActiveLiveEventByStore.
+// Ela respondia "o evento ativo da loja" — uma pergunta que o guarda-chuva
+// tornou plural. Com campanhas longas e sobrepostas, um LIMIT 1 por created_at
+// DESC devolve a mais recente, que é a resposta errada com a mesma frequência
+// com que é a certa. Não tinha chamador; religá-la traria de volta, junto, o
+// filtro status = 'active' que a D19/D20 tirou de todas as resoluções
+// justamente para o sistema parar de descartar comentário em silêncio.
 
 func (r *Repository) EndEvent(ctx context.Context, id, storeID string) (EventRow, error) {
 	uid, err := parseUUID(id)
@@ -812,23 +802,16 @@ func (r *Repository) DeleteEvent(ctx context.Context, id, storeID string) error 
 // SESSION OPERATIONS
 // =============================================================================
 
-func (r *Repository) CreateSession(ctx context.Context, params CreateSessionParams) (SessionRow, error) {
-	eventUID, err := parseUUID(params.EventID)
-	if err != nil {
-		return SessionRow{}, err
-	}
-
-	row, err := r.q.CreateLiveSession(ctx, sqlc.CreateLiveSessionParams{
-		EventID: eventUID,
-		Status:  params.Status,
-		Type:    SessionTypeFromEventType(params.Type),
-	})
-	if err != nil {
-		return SessionRow{}, fmt.Errorf("creating live session: %w", err)
-	}
-
-	return toSessionRow(row), nil
-}
+// Repository.CreateSession foi REMOVIDA. Era o segundo caminho de criação de
+// sessão e, desde que a herança de whitelist entrou, uma armadilha silenciosa:
+// ela chamava CreateLiveSession direto, fora de transação e sem copiar
+// session_products do evento. Uma sessão nascida por ela ficaria com a lista
+// VAZIA — e "lista vazia libera tudo" (D15) faz disso a derrubada da barreira de
+// produtos da campanha inteira, sem erro nenhum e sem sintoma até a primeira
+// venda de um produto que não devia estar à venda.
+//
+// Não tinha chamador. O ponto único de criação é CreateSessionWithPlatformTx,
+// que cria sessão + plataforma + whitelist herdada na MESMA transação.
 
 func (r *Repository) GetSessionByID(ctx context.Context, id string) (*SessionRow, error) {
 	uid, err := parseUUID(id)

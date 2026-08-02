@@ -392,12 +392,9 @@ type SessionOutput struct {
 	UpdatedAt time.Time
 }
 
-// Repository layer - Session
-type CreateSessionParams struct {
-	EventID string
-	Status  string
-	Type    string
-}
+// CreateSessionParams SAIU junto de Repository.CreateSession: era o parâmetro de
+// um segundo caminho de criação de sessão que não herdava a whitelist do evento.
+// A criação viva é CreateSessionWithPlatformTx, que herda dentro da transação.
 
 type SessionRow struct {
 	ID      string

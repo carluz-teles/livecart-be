@@ -140,6 +140,7 @@ func (q *Queries) CreateLiveEventFull(ctx context.Context, arg CreateLiveEventFu
 }
 
 const endLiveEvent = `-- name: EndLiveEvent :one
+
 UPDATE live_events
 SET status = 'ended', updated_at = now()
 WHERE id = $1 AND store_id = $2
@@ -151,42 +152,12 @@ type EndLiveEventParams struct {
 	StoreID pgtype.UUID `json:"store_id"`
 }
 
+// GetActiveLiveEventByStore foi REMOVIDA: "o evento ativo da loja" deixou de ser
+// uma pergunta com resposta única quando a campanha virou guarda-chuva e passou
+// a durar dias, podendo se sobrepor a outra. Estava sem chamador, e o predicado
+// carregava o status = 'active' que a D19/D20 tirou das resoluções.
 func (q *Queries) EndLiveEvent(ctx context.Context, arg EndLiveEventParams) (LiveEvent, error) {
 	row := q.db.QueryRow(ctx, endLiveEvent, arg.ID, arg.StoreID)
-	var i LiveEvent
-	err := row.Scan(
-		&i.ID,
-		&i.StoreID,
-		&i.Title,
-		&i.Status,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.TotalOrders,
-		&i.CloseCartOnEventEnd,
-		&i.CartExpirationMinutes,
-		&i.CartMaxQuantityPerItem,
-		&i.SendOnLiveEnd,
-		&i.ScheduledAt,
-		&i.Description,
-		&i.FreeShipping,
-		&i.PixDiscountPercent,
-		&i.WaitlistNotifiedTtlMinutes,
-		&i.EndsAt,
-		&i.CartExtendedExpirationMinutes,
-		&i.StartsAt,
-	)
-	return i, err
-}
-
-const getActiveLiveEventByStore = `-- name: GetActiveLiveEventByStore :one
-SELECT id, store_id, title, status, created_at, updated_at, total_orders, close_cart_on_event_end, cart_expiration_minutes, cart_max_quantity_per_item, send_on_live_end, scheduled_at, description, free_shipping, pix_discount_percent, waitlist_notified_ttl_minutes, ends_at, cart_extended_expiration_minutes, starts_at FROM live_events
-WHERE store_id = $1 AND status = 'active'
-ORDER BY created_at DESC
-LIMIT 1
-`
-
-func (q *Queries) GetActiveLiveEventByStore(ctx context.Context, storeID pgtype.UUID) (LiveEvent, error) {
-	row := q.db.QueryRow(ctx, getActiveLiveEventByStore, storeID)
 	var i LiveEvent
 	err := row.Scan(
 		&i.ID,

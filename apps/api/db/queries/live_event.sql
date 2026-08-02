@@ -14,11 +14,10 @@ SELECT * FROM live_events WHERE id = $1;
 -- name: GetLiveEventByIDAndStore :one
 SELECT * FROM live_events WHERE id = $1 AND store_id = $2;
 
--- name: GetActiveLiveEventByStore :one
-SELECT * FROM live_events
-WHERE store_id = $1 AND status = 'active'
-ORDER BY created_at DESC
-LIMIT 1;
+-- GetActiveLiveEventByStore foi REMOVIDA: "o evento ativo da loja" deixou de ser
+-- uma pergunta com resposta única quando a campanha virou guarda-chuva e passou
+-- a durar dias, podendo se sobrepor a outra. Estava sem chamador, e o predicado
+-- carregava o status = 'active' que a D19/D20 tirou das resoluções.
 
 -- name: EndLiveEvent :one
 UPDATE live_events
