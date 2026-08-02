@@ -16,6 +16,7 @@ import (
 	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/inventory"
+	"livecart/apps/api/internal/live"
 	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/dbtx"
 	"livecart/apps/api/lib/httpx"
@@ -678,14 +679,11 @@ func (r *Repository) IncrementLiveEventOrders(ctx context.Context, eventID strin
 }
 
 // ProductRow represents a product for keyword matching and stock operations.
-type ProductRow struct {
-	ID         string
-	Keyword    string
-	Price      int64
-	Stock      int
-	ExternalID string
-	Name       string
-}
+// ProductRow is an alias of live.ProductRow (moved to internal/live with the
+// comment-ingest flow, Bloco B4a). The repository keeps building the same value
+// and every existing caller — plus the live.IngestRepository port — sees one
+// identical type, so no conversion is needed at the seam.
+type ProductRow = live.ProductRow
 
 // GetProductByKeyword finds an active product by keyword in a store.
 func (r *Repository) GetProductByKeyword(ctx context.Context, storeID, keyword string) (*ProductRow, error) {

@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration/providers"
@@ -32,6 +33,7 @@ import (
 	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/crypto"
+	"livecart/apps/api/lib/dbtx"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/idempotency"
 	"livecart/apps/api/lib/logger"
@@ -339,6 +341,22 @@ func (a inventoryRepoAdapter) GetProductByID(ctx context.Context, storeID, produ
 	return &inventory.ProductRef{Price: p.Price, Name: p.Name, Keyword: p.Keyword}, nil
 }
 
+// liveIngestRepoAdapter adapts *Repository to live.IngestRepository (Bloco B4a).
+// GetProductByKeyword is promoted from the embedded *Repository verbatim — its
+// *ProductRow return is a type alias of *live.ProductRow, so it satisfies the
+// port directly. EmitCommentReceived wraps the outbox write in one transaction
+// via dbtx.InTx, keeping the pool/queries behind the port (live never sees them).
+type liveIngestRepoAdapter struct{ *Repository }
+
+// EmitCommentReceived writes the comment.received envelope to the outbox in a
+// single transaction, so the state-free dispatch commits atomically and the
+// envelope DedupKey dedups at-least-once redelivery.
+func (a liveIngestRepoAdapter) EmitCommentReceived(ctx context.Context, env events.Envelope) error {
+	return dbtx.InTx(ctx, a.pool, a.queries, func(q *sqlc.Queries) error {
+		return events.Emit(ctx, q, env)
+	})
+}
+
 // Compile-time guards: integration.Service satisfies the collaborator ports and
 // the repo adapters satisfy the persistence ports.
 var (
@@ -346,6 +364,7 @@ var (
 	_ erp.ERPRepository               = erpRepoAdapter{}
 	_ inventory.WaitlistCollaborators = (*Service)(nil)
 	_ inventory.InventoryRepository   = inventoryRepoAdapter{}
+	_ live.IngestRepository           = liveIngestRepoAdapter{}
 )
 
 // SetStorage wires the object storage client (used to delete transient post
@@ -415,6 +434,13 @@ func NewService(
 	// concurrent request handling.
 	svc.erpStock()
 	svc.inventory()
+	// Wire the ingest persistence port into the shared live.Service (Bloco B4a):
+	// FindProductByKeyword / DispatchCommentReceived delegate to live, which
+	// reaches back into this Repository through the adapter. Done eagerly here so
+	// it is set before any webhook is served.
+	if liveService != nil {
+		liveService.SetIngestRepository(liveIngestRepoAdapter{repo})
+	}
 	return svc
 }
 
@@ -4094,25 +4120,7 @@ func meWebhookObservation(event string) string {
 // Idempotency: ProcessInstagramComment already dedups by platform_comment_id,
 // so at-least-once redelivery is safe. dedup_key mirrors that for visibility.
 func (s *Service) DispatchCommentReceived(ctx context.Context, input ProcessInstagramCommentInput, source events.Source) error {
-	payload, err := json.Marshal(input)
-	if err != nil {
-		return fmt.Errorf("marshaling comment.received payload: %w", err)
-	}
-	tx, err := s.repo.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin comment.received tx: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
-	if err := events.Emit(ctx, s.repo.queries.WithTx(tx), events.Envelope{
-		Name:     events.CommentReceived,
-		Source:   source,
-		DedupKey: "comment.received:" + input.CommentID,
-		Metadata: map[string]string{"comment_id": input.CommentID, "media_id": input.MediaID},
-		Payload:  payload,
-	}); err != nil {
-		return fmt.Errorf("emitting comment.received: %w", err)
-	}
-	return tx.Commit(ctx)
+	return s.liveService.DispatchCommentReceived(ctx, input.CommentID, input.MediaID, source, input)
 }
 
 // ProcessInstagramComment processes a live comment from Instagram webhook.
@@ -4720,29 +4728,10 @@ func (s *Service) sendMaxQuantityReply(ctx context.Context, storeID, channel, co
 	)
 }
 
-// findProductByKeyword extracts possible keywords from text and tries to match with products.
+// findProductByKeyword extracts possible keywords from text and tries to match
+// with products. Delegates to live.FindProductByKeyword (Bloco B4a).
 func (s *Service) findProductByKeyword(ctx context.Context, storeID, text string) *ProductRow {
-	keywords := ExtractPossibleKeywords(text)
-	if len(keywords) == 0 {
-		return nil
-	}
-
-	// Try each possible keyword until we find a match
-	for _, keyword := range keywords {
-		product, err := s.repo.GetProductByKeyword(ctx, storeID, keyword)
-		if err != nil {
-			logger.From(ctx, s.logger).Error("failed to lookup product by keyword",
-				zap.String("keyword", keyword),
-				zap.Error(err),
-			)
-			continue
-		}
-		if product != nil {
-			return product
-		}
-	}
-
-	return nil
+	return s.liveService.FindProductByKeyword(ctx, storeID, text)
 }
 
 // ProcessInstagramMessage processes a DM from Instagram webhook.

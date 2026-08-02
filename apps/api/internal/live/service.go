@@ -57,6 +57,7 @@ type Service struct {
 	notifier         Notifier
 	customerUpserter CustomerUpserter
 	closeScheduler   EventCloseScheduler
+	ingestRepo       IngestRepository
 }
 
 // SetEventCloseScheduler wires the ETA scheduler for timed-event window close
