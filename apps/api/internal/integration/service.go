@@ -4985,13 +4985,17 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		}
 	}
 
-	// Find live session by platform_live_id (media_id)
+	// Resolve a mídia → sessão → evento. Nenhuma das duas queries filtra status
+	// (D18/D19/D20): campanha agendada, transmissão encerrada e campanha
+	// encerrada TÊM de resolver, porque é o evento que carrega a loja e sem
+	// loja não há como responder nem registrar. Chegar aqui com nil agora
+	// significa uma coisa só: a mídia não é nossa.
 	session, err := s.liveService.GetSessionByPlatformLiveID(ctx, input.MediaID)
 	if err != nil {
 		return fmt.Errorf("finding live session: %w", err)
 	}
 	if session == nil {
-		logger.From(ctx, s.logger).Warn("no active live session found for media_id",
+		logger.From(ctx, s.logger).Warn("no live session bound to media_id",
 			zap.String("media_id", input.MediaID),
 		)
 		return nil
@@ -5003,7 +5007,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		return fmt.Errorf("finding live event: %w", err)
 	}
 	if event == nil {
-		logger.From(ctx, s.logger).Warn("no active live event found for media_id",
+		logger.From(ctx, s.logger).Warn("no live event bound to media_id",
 			zap.String("media_id", input.MediaID),
 		)
 		return nil

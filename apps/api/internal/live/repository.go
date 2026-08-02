@@ -509,7 +509,7 @@ func (r *Repository) MarkMediaWebhookActive(ctx context.Context, mediaID string)
 	return r.q.MarkMediaWebhookActive(ctx, mediaID)
 }
 
-// EndEventByMediaID closes the active event that owns mediaID. Used when
+// EndEventByMediaID closes the not-yet-ended event that owns mediaID. Used when
 // Instagram reports the media is gone (deleted / no longer accessible) so the
 // polling loop stops hammering a dead media id every tick.
 //
@@ -519,7 +519,7 @@ func (r *Repository) EndEventByMediaID(ctx context.Context, mediaID string) erro
 	_, err := r.pool.Exec(ctx, `
 		UPDATE live_events e
 		SET status = 'ended', updated_at = now()
-		WHERE e.status = 'active'
+		WHERE e.status <> 'ended'
 		  AND EXISTS (
 		      SELECT 1
 		      FROM live_sessions ls

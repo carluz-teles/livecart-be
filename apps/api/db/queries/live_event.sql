@@ -60,12 +60,18 @@ JOIN live_sessions s ON s.event_id = e.id
 WHERE s.id = $1;
 
 -- name: GetEventByPlatformLiveID :one
--- Find active event by any associated platform_live_id (via session)
+-- Resolve o evento dono de uma mídia (via sessão). SEM filtro de status
+-- (D19/D20).
+--
+-- O e.status='active' que vivia aqui era o que fazia o comentário em campanha
+-- agendada ou encerrada virar um Warn e sumir: sem evento não há store_id, não
+-- há como responder e não há como registrar. Três casos, um padrão só —
+-- resolve sempre, decide depois (live.WindowAt), nunca fica em silêncio.
 SELECT e.*
 FROM live_events e
 JOIN live_sessions s ON s.event_id = e.id
 JOIN live_session_platforms lsp ON lsp.session_id = s.id
-WHERE lsp.platform_live_id = $1 AND e.status = 'active'
+WHERE lsp.platform_live_id = $1
 ORDER BY e.created_at DESC
 LIMIT 1;
 
@@ -212,23 +218,35 @@ WHERE e.id = $1 AND e.store_id = $2;
 --
 -- Esta é a REDE. O caminho preciso é a task ETA event.window_close, armada na
 -- criação e re-armada na edição de ends_at.
+--
+-- 'active' virou "não encerrado" (D19/D20): um evento AGENDADO que nunca foi
+-- ativado — e nada o ativa sozinho, ActivateScheduledEvent não tem chamador —
+-- também tem teto, e com o filtro antigo ele ficaria 'scheduled' para sempre
+-- com a janela vencida. O status ended continua de fora porque encerrar duas
+-- vezes é o que este predicado impede.
 SELECT e.id, e.store_id
 FROM live_events e
-WHERE e.status = 'active'
+WHERE e.status <> 'ended'
   AND e.ends_at IS NOT NULL
   AND e.ends_at < now()
 ORDER BY e.ends_at ASC
 LIMIT $1;
 
 -- name: GetActiveTimedEventByMediaID :one
--- Resolve o evento ativo dono de uma mídia de post/reel/story (mídia apagada no
--- Instagram) para roteá-lo por End (finaliza carts + ERP), não só flipar status.
+-- Resolve o evento AINDA NÃO ENCERRADO dono de uma mídia de post/reel/story
+-- (mídia apagada no Instagram) para roteá-lo por End (finaliza carts + ERP),
+-- não só flipar status.
 -- Resolve pela MÍDIA (live_session_platforms), não mais por live_events.media_id.
+--
+-- 'active' virou "não encerrado" pelo mesmo motivo do ListPollableMedia: agora
+-- que o polling enxerga evento agendado, a mídia apagada de um evento agendado
+-- também precisa parar o loop — senão ele martela um media id morto a cada 20s
+-- até a data de início chegar.
 SELECT e.id, e.store_id
 FROM live_events e
 JOIN live_sessions ls ON ls.event_id = e.id
 JOIN live_session_platforms lsp ON lsp.session_id = ls.id
 WHERE lsp.platform_live_id = $1
-  AND e.status = 'active'
+  AND e.status <> 'ended'
   AND ls.type IN ('post', 'reel', 'story')
 LIMIT 1;

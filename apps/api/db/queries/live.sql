@@ -54,11 +54,20 @@ VALUES ($1, $2, $3)
 RETURNING *;
 
 -- name: GetSessionByPlatformLiveID :one
--- Find active live session by any associated platform_live_id
+-- Resolve a sessão dona de uma mídia. SEM filtro de status (D18/D20).
+--
+-- O filtro ls.status IN ('active','live') que vivia aqui era a única coisa que
+-- impedia venda em transmissão encerrada — e, ao mesmo tempo, a causa do
+-- descarte SILENCIOSO que é o achado mais caro do ANALISE_LOGS_PRODUCAO: sem
+-- linha, ProcessInstagramComment logava um Warn e sumia com o comentário, sem
+-- registro para o lojista e sem resposta ao comprador.
+--
+-- A decisão saiu daqui e virou live.SessionAcceptsPurchase, aplicada depois da
+-- resolução. Resolver SEMPRE é o que permite responder.
 SELECT ls.*
 FROM live_sessions ls
 JOIN live_session_platforms lsp ON lsp.session_id = ls.id
-WHERE lsp.platform_live_id = $1 AND ls.status IN ('active', 'live')
+WHERE lsp.platform_live_id = $1
 ORDER BY ls.created_at DESC
 LIMIT 1;
 
@@ -95,6 +104,25 @@ WHERE platform_live_id = $1;
 -- Mídias de post/reel que ainda não receberam webhook de comments e por isso
 -- dependem do polling — o único caminho de captura para post sem webhook.
 -- Story não entra: resposta de story chega por DM, não por comentário.
+--
+-- O filtro e.status='active' SAIU (D19/D20/A3). Ele era o motivo pelo qual a
+-- promessa "nunca fica em silêncio" viraria silêncio TOTAL justamente no
+-- evento agendado: sem webhook, esta lista é o único caminho de captura, e um
+-- evento que nasce 'scheduled' nunca aparecia nela. Quem decide se vende é o
+-- gate de janela (live.WindowAt), depois da captura — a captura precisa ver o
+-- comentário para poder respondê-lo.
+--
+-- A carência para resposta tardia virou 7 dias (N9/RN-37): é o limite do
+-- private reply do Instagram, e webhook e polling têm de concordar no número.
+-- A carência de 2 dias que estava aqui era inalcançável — o mesmo WHERE exigia
+-- status='active' e SweepEndedTimedEvents flipa o evento para 'ended' assim
+-- que ends_at vence, então prometia 2 dias e entregava 0.
+--
+-- live_events não tem ended_at: o carimbo de encerramento é ends_at (que a
+-- RN-05 tornou obrigatório e a 000112 backfillou nos legados encerrados), com
+-- updated_at como último recurso. Encerramento manual antes do ends_at deixa a
+-- janela mais LARGA que 7 dias, nunca mais estreita — erra para o lado de
+-- responder.
 SELECT
     lsp.platform_live_id,
     lsp.webhook_active,
@@ -107,9 +135,11 @@ FROM live_session_platforms lsp
 JOIN live_sessions ls ON ls.id = lsp.session_id
 JOIN live_events e ON e.id = ls.event_id
 WHERE ls.type IN ('post', 'reel')
-  AND e.status = 'active'
   AND lsp.webhook_active = false
-  AND (e.ends_at IS NULL OR e.ends_at >= now() - interval '2 days');
+  AND (
+        e.status <> 'ended'
+     OR COALESCE(e.ends_at, e.updated_at) >= now() - interval '7 days'
+  );
 
 
 -- =============================================================================

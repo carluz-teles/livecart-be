@@ -1038,7 +1038,11 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 	}, nil
 }
 
-// GetSessionByPlatformLiveID finds an active session by platform live ID.
+// GetSessionByPlatformLiveID resolves the session that owns a media id.
+//
+// D18/D20: deixou de filtrar por status. Devolver a sessão encerrada é o que
+// permite responder ao comprador em vez de descartar o comentário em silêncio;
+// quem decide se ela ainda vende é SessionAcceptsPurchase.
 func (s *Service) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID string) (*SessionOutput, error) {
 	session, err := s.repo.GetSessionByPlatformLiveID(ctx, platformLiveID)
 	if err != nil {
@@ -1081,7 +1085,10 @@ func (s *Service) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID
 	}, nil
 }
 
-// GetEventByPlatformLiveID finds an active event by any associated platform live ID.
+// GetEventByPlatformLiveID resolves the event that owns a media id.
+//
+// D19/D20: deixou de filtrar por status — campanha agendada e campanha
+// encerrada agora resolvem. O gate de janela (WindowAt) decide o resto.
 func (s *Service) GetEventByPlatformLiveID(ctx context.Context, platformLiveID string) (*EventOutput, error) {
 	event, err := s.repo.GetEventByPlatformLiveID(ctx, platformLiveID)
 	if err != nil {
