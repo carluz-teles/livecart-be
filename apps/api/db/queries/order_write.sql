@@ -69,8 +69,10 @@ INSERT INTO orders (
 RETURNING *;
 
 -- name: InsertOrderItem :exec
-INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price)
-VALUES ($1, $2, $3, $4, $5);
+-- Uma linha por (produto, sessão) — RN-29. session_id NULL quando a adição não
+-- veio de uma transmissão.
+INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price, session_id)
+VALUES ($1, $2, $3, $4, $5, $6);
 
 -- name: InsertOrderPayment :exec
 INSERT INTO order_payments (

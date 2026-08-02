@@ -17,6 +17,7 @@ import (
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/events"
+	"livecart/apps/api/internal/live"
 	"livecart/apps/api/lib/logger"
 )
 
@@ -106,6 +107,32 @@ func (l *Listener) createPaidOrder(
 		return fmt.Errorf("order OnCartPaid: loading cart items: %w", err)
 	}
 
+	// Log de atribuição (RN-12), agrupado por produto. É o que permite repartir
+	// a quantidade final de cada item entre as transmissões que a venderam —
+	// sem ele o pedido herdaria o first-touch de cart_items e "quanto a live de
+	// terça faturou" seria sempre creditado à primeira transmissão.
+	//
+	// Falha aqui NÃO derruba o selamento: um pedido sem atribuição é muito
+	// melhor que uma venda paga que não vira pedido. Cai para uma linha por
+	// produto com session_id NULL, que é exatamente o comportamento anterior.
+	additionsByProduct := map[uuid.UUID][]live.CartItemAddition{}
+	if additions, aerr := l.queries.ListCartItemEventsForCart(ctx, cid); aerr != nil {
+		log.Warn("OnCartPaid: log de atribuicao indisponivel, selando sem sessao", zap.Error(aerr))
+	} else {
+		for _, a := range additions {
+			var sessionID string
+			if a.SessionID.Valid {
+				sessionID = uuidStr(a.SessionID)
+			}
+			additionsByProduct[a.ProductID.Bytes] = append(additionsByProduct[a.ProductID.Bytes],
+				live.CartItemAddition{
+					SessionID: sessionID,
+					Quantity:  int(a.Quantity),
+					UnitPrice: a.UnitPrice,
+				})
+		}
+	}
+
 	cardSnap, _ := buildCardSnapshot(cart)
 	customerSnap, _ := buildCustomerSnapshot(cart)
 
@@ -136,15 +163,41 @@ func (l *Listener) createPaidOrder(
 	}
 
 	for _, item := range items {
-		if err := qtx.InsertOrderItem(ctx, sqlc.InsertOrderItemParams{
-			OrderID:     orderRow.ID,
-			ProductID:   item.ProductID,
-			ProductName: item.ProductName,
-			Quantity:    item.Quantity,
-			UnitPrice:   item.UnitPrice,
-		}); err != nil {
-			return fmt.Errorf("order OnCartPaid: insert order_item product=%s: %w",
-				uuidStr(item.ProductID), err)
+		// A quantidade do carrinho é a verdade; o log só diz de ONDE ela veio.
+		// AllocateBySession garante que a soma das linhas geradas é exatamente
+		// item.Quantity — é isso que faz a receita por sessão fechar com o
+		// total do pedido (RN-29).
+		allocations := live.AllocateBySession(int(item.Quantity), additionsByProduct[item.ProductID.Bytes])
+		if len(allocations) == 0 {
+			// Sem log e sem quantidade não há o que selar; com quantidade mas
+			// sem log o alocador já devolve uma linha sem sessão.
+			continue
+		}
+
+		for _, alloc := range allocations {
+			var sessionID pgtype.UUID
+			if alloc.SessionID != "" {
+				parsed, perr := uuid.Parse(alloc.SessionID)
+				if perr != nil {
+					return fmt.Errorf("order OnCartPaid: session id invalido %q: %w", alloc.SessionID, perr)
+				}
+				sessionID = pgtype.UUID{Bytes: parsed, Valid: true}
+			}
+
+			if err := qtx.InsertOrderItem(ctx, sqlc.InsertOrderItemParams{
+				OrderID:     orderRow.ID,
+				ProductID:   item.ProductID,
+				ProductName: item.ProductName,
+				Quantity:    int32(alloc.Quantity),
+				// O preço do pedido é o do carrinho no pagamento. O do log
+				// serve só para separar linhas quando o preço mudou entre as
+				// adições; usá-lo aqui mudaria o total do pedido.
+				UnitPrice: item.UnitPrice,
+				SessionID: sessionID,
+			}); err != nil {
+				return fmt.Errorf("order OnCartPaid: insert order_item product=%s: %w",
+					uuidStr(item.ProductID), err)
+			}
 		}
 	}
 

@@ -501,6 +501,7 @@ type OrderEvent struct {
 	OrderID    pgtype.UUID        `json:"order_id"`
 }
 
+// Itens congelados do pedido. Uma linha por (produto, sessão) desde a 000107 — a UI agrupa por produto na exibição. SUM(quantity) por produto continua igual à quantidade do carrinho no pagamento.
 type OrderItem struct {
 	ID          pgtype.UUID `json:"id"`
 	OrderID     pgtype.UUID `json:"order_id"`
@@ -508,6 +509,8 @@ type OrderItem struct {
 	ProductName string      `json:"product_name"`
 	Quantity    int32       `json:"quantity"`
 	UnitPrice   int64       `json:"unit_price"`
+	// RN-13: transmissão que originou ESTAS unidades. NULL = adição sem sessão (item posto pelo painel) ou pedido anterior ao log de atribuição. Um pedido pode ter várias linhas do mesmo produto, uma por sessão.
+	SessionID pgtype.UUID `json:"session_id"`
 }
 
 type OrderLogistic struct {
