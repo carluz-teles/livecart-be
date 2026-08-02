@@ -9,6 +9,8 @@ import (
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/gofiber/fiber/v2"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // sampleReq is a stand-in for a domain *Request: it validates itself via ozzo.
@@ -87,6 +89,54 @@ func TestErrorHandler_ValidationErrorsRenderAs422WithJSONKeys(t *testing.T) {
 	}
 	if _, ok := fields["email"]; !ok {
 		t.Fatalf("want field 'email' (json tag) in %v", fields)
+	}
+}
+
+// TestErrorHandler_ValidationEmitsCategoryTaggedLog — AC 8: a body failing ozzo
+// (a) still returns the byte-identical 422 {error, fields} wire, and (b) emits
+// exactly one log line tagged category=VALIDATION with field_count==len(fields)
+// and status 422, carrying NO field content (PII-safe).
+func TestErrorHandler_ValidationEmitsCategoryTaggedLog(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	SetLogger(zap.New(core))
+	t.Cleanup(func() { SetLogger(nil) })
+
+	app := newTestApp()
+
+	// {} fails both Required fields → 2 field errors.
+	code, body := do(t, app, "POST", "/bind", `{}`)
+
+	// (a) wire unchanged.
+	if code != fiber.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d", code)
+	}
+	if body["error"] != "validation failed" {
+		t.Fatalf("want error 'validation failed', got %v", body["error"])
+	}
+	fields, ok := body["fields"].(map[string]any)
+	if !ok || len(fields) != 2 {
+		t.Fatalf("want 2 validation fields, got %v", body["fields"])
+	}
+
+	// (b) exactly one VALIDATION-tagged log line, PII-safe.
+	entries := logs.FilterMessage("validation error").All()
+	if len(entries) != 1 {
+		t.Fatalf("want 1 'validation error' log line, got %d", len(entries))
+	}
+	m := entries[0].ContextMap()
+	if m["category"] != "VALIDATION" {
+		t.Fatalf("category: want VALIDATION, got %v", m["category"])
+	}
+	if m["field_count"] != int64(2) {
+		t.Fatalf("field_count: want 2, got %v", m["field_count"])
+	}
+	if m["status"] != int64(422) {
+		t.Fatalf("status: want 422, got %v", m["status"])
+	}
+	// The offending field messages (which can carry user input) must never reach
+	// the log line.
+	if _, leaked := m["fields"]; leaked {
+		t.Fatalf("log must not carry the fields bag (PII), got %v", m["fields"])
 	}
 }
 
