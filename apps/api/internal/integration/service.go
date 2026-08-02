@@ -120,6 +120,7 @@ type Service struct {
 	stock               *StockReservations
 	expiryScheduler     CartExpiryScheduler
 	waitlistCloseSched  WaitlistCloseScheduler
+	publishScheduler    PublishScheduler
 	logger              *zap.Logger
 
 	// erpProviderFactory lets the finalisation state-machine tests inject a

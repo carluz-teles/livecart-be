@@ -367,7 +367,7 @@ type LiveEvent struct {
 	EndsAt pgtype.Timestamptz `json:"ends_at"`
 	// Override do prazo estendido para este evento. NULL = herda de stores.cart_extended_expiration_minutes.
 	CartExtendedExpirationMinutes pgtype.Int4 `json:"cart_extended_expiration_minutes"`
-	// D21: inicio da JANELA COMERCIAL da campanha. Nao e a data de publicacao da midia (essa e live_sessions.publish_at). Mantido em sincronia com scheduled_at ate a 000119.
+	// D21: inicio da JANELA COMERCIAL da campanha. Nao e a data de publicacao da midia (essa e live_sessions.publish_at). Escrita SEMPRE em par com scheduled_at, que continua sendo a coluna que EffectiveStatus le.
 	StartsAt pgtype.Timestamptz `json:"starts_at"`
 }
 
@@ -381,7 +381,7 @@ type LiveSession struct {
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 	EventID       pgtype.UUID        `json:"event_id"`
 	SequenceOrder int32              `json:"sequence_order"`
-	// D3: natureza da transmissão (live|post|reel|story). Fonte da verdade do tipo. live_events.type sobrevive como rótulo legado do vocabulário antigo (single|multi|post|story) até a 000119; 'reel' é gravado lá como 'post' para não quebrar o FE.
+	// D3: natureza da transmissao (live|post|reel|story). UNICA fonte da verdade do tipo — live_events.type foi dropada na 000120. O vocabulario antigo (single|multi) so existe na entrada da API e e traduzido em live.SessionTypeFromEventType.
 	Type string `json:"type"`
 	// D17: produto em destaque DESTA transmissão. Fallback quando o comprador comenta com intenção de compra e nenhuma palavra-chave casa.
 	CurrentActiveProductID pgtype.UUID `json:"current_active_product_id"`
@@ -668,6 +668,36 @@ type SessionProduct struct {
 	Featured     bool               `json:"featured"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
+// RN-31/N3: agendamento de publicacao no Instagram. O agendador e NOSSO — a API de Content Publishing nao tem scheduled_publish_time e o container expira em 24h, entao ele e criado poucos minutos antes de scheduled_for. asset_path existe porque no caminho sincrono o arquivo e apagado do storage logo apos o publish; aqui ele e retido ate o desfecho do job (publicado, falho ou cancelado).
+type SessionPublishJob struct {
+	ID      pgtype.UUID `json:"id"`
+	StoreID pgtype.UUID `json:"store_id"`
+	// Preenchida NO DISPARO. A sessao so pode nascer depois que a midia existe (CreatePostEvent exige media_id), entao um agendamento vive sem sessao ate publicar.
+	SessionID pgtype.UUID `json:"session_id"`
+	EventID   pgtype.UUID `json:"event_id"`
+	MediaKind string      `json:"media_kind"`
+	// Chave no storage, nunca URL assinada: a presigned GET dura horas e o agendamento dura dias. A URL e gerada no disparo.
+	AssetPath              string             `json:"asset_path"`
+	AssetContentType       string             `json:"asset_content_type"`
+	Caption                string             `json:"caption"`
+	Title                  string             `json:"title"`
+	ProductIds             []pgtype.UUID      `json:"product_ids"`
+	StartsAt               pgtype.Timestamptz `json:"starts_at"`
+	EndsAt                 pgtype.Timestamptz `json:"ends_at"`
+	CartExpirationMinutes  pgtype.Int4        `json:"cart_expiration_minutes"`
+	CartMaxQuantityPerItem pgtype.Int4        `json:"cart_max_quantity_per_item"`
+	ScheduledFor           pgtype.Timestamptz `json:"scheduled_for"`
+	Status                 string             `json:"status"`
+	PublishedMediaID       pgtype.Text        `json:"published_media_id"`
+	Attempts               int32              `json:"attempts"`
+	LastError              pgtype.Text        `json:"last_error"`
+	LastAttemptAt          pgtype.Timestamptz `json:"last_attempt_at"`
+	PublishedAt            pgtype.Timestamptz `json:"published_at"`
+	CancelledAt            pgtype.Timestamptz `json:"cancelled_at"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
 }
 
 // Provider-agnostic freight orders linked to carts. One row per shipment created at a carrier.

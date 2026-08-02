@@ -745,6 +745,31 @@ func (q *Queries) SetSessionProcessingPaused(ctx context.Context, arg SetSession
 	return i, err
 }
 
+const setSessionPublishAt = `-- name: SetSessionPublishAt :exec
+
+UPDATE live_sessions
+SET publish_at = $2, updated_at = now()
+WHERE id = $1
+`
+
+type SetSessionPublishAtParams struct {
+	ID        pgtype.UUID        `json:"id"`
+	PublishAt pgtype.Timestamptz `json:"publish_at"`
+}
+
+// =============================================================================
+// PUBLICAÇÃO AGENDADA (RN-31 / 000121)
+// =============================================================================
+// Registra em live_sessions.publish_at QUANDO esta transmissão foi publicada
+// por agendamento. A coluna existe desde a 000112 e até aqui não tinha
+// escritor nenhum: o agendador é o motivo pelo qual ela foi criada, e sem esta
+// escrita "quando publica" passaria a viver só em session_publish_jobs — duas
+// fontes da verdade para a mesma pergunta, que é o erro que o épico desfaz.
+func (q *Queries) SetSessionPublishAt(ctx context.Context, arg SetSessionPublishAtParams) error {
+	_, err := q.db.Exec(ctx, setSessionPublishAt, arg.ID, arg.PublishAt)
+	return err
+}
+
 const startLiveSession = `-- name: StartLiveSession :one
 UPDATE live_sessions
 SET status = 'live', started_at = now(), updated_at = now()

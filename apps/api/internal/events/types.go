@@ -117,6 +117,16 @@ const (
 	// stock of its non-waitlisted items reserved forever.
 	EventWaitlistClose Name = "event.waitlist_close"
 
+	// SessionPublish is an internal SCHEDULED COMMAND (RN-31): enqueued with
+	// ProcessAt(scheduled_for) so an Instagram post/reel/story goes live at the
+	// hour the merchant chose. The scheduler HAS to be ours — the Content
+	// Publishing API has no scheduled_publish_time and its media container
+	// expires in 24h, so the container is only opened when the task fires.
+	// Guard-first like every other ETA command: the handler CLAIMS the job row
+	// (status 'scheduled' → 'publishing') and a cancelled job simply finds
+	// nothing to claim. SweepDuePublishJobs is the backstop for a lost task.
+	SessionPublish Name = "session.publish"
+
 	// SubscriptionProcess is a COMMAND (billing L1→L2 inversion): the Stripe
 	// webhook is a thin dispatcher that emits it to the outbox carrying the raw
 	// event; the consumer runs the guarded ProcessWebhookEvent with asynq retry +

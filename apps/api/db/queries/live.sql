@@ -248,3 +248,17 @@ LIMIT 1;
 SELECT key, effective_at, note
 FROM metric_cutovers
 WHERE key = $1;
+
+-- =============================================================================
+-- PUBLICAÇÃO AGENDADA (RN-31 / 000121)
+-- =============================================================================
+
+-- name: SetSessionPublishAt :exec
+-- Registra em live_sessions.publish_at QUANDO esta transmissão foi publicada
+-- por agendamento. A coluna existe desde a 000112 e até aqui não tinha
+-- escritor nenhum: o agendador é o motivo pelo qual ela foi criada, e sem esta
+-- escrita "quando publica" passaria a viver só em session_publish_jobs — duas
+-- fontes da verdade para a mesma pergunta, que é o erro que o épico desfaz.
+UPDATE live_sessions
+SET publish_at = $2, updated_at = now()
+WHERE id = $1;

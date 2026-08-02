@@ -1170,6 +1170,30 @@ func (s *Service) GetLatestReplyTarget(ctx context.Context, eventID, platformUse
 	return s.repo.GetLatestReplyTarget(ctx, eventID, platformUserID)
 }
 
+// MarkSessionPublished amarra a transmissão recém-criada ao agendamento que a
+// publicou (RN-31): resolve a sessão pela mídia e grava live_sessions.publish_at.
+//
+// Devolve o id da sessão porque quem chama (o disparo do agendamento) precisa
+// dele para fechar o job — e é a mesma resolução, feita uma vez só.
+//
+// A escrita de publish_at existe para não haver duas fontes da verdade sobre
+// "quando publica". A coluna entrou na 000112 e passou o épico inteiro sem
+// escritor; se o agendador guardasse a hora apenas em session_publish_jobs, a
+// sessão continuaria mentindo que nunca foi agendada.
+func (s *Service) MarkSessionPublished(ctx context.Context, mediaID string, publishAt time.Time) (string, error) {
+	session, err := s.repo.GetSessionByPlatformLiveID(ctx, mediaID)
+	if err != nil {
+		return "", err
+	}
+	if session == nil {
+		return "", nil
+	}
+	if err := s.repo.SetSessionPublishAt(ctx, session.ID, publishAt); err != nil {
+		return session.ID, err
+	}
+	return session.ID, nil
+}
+
 func (s *Service) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID string) (*SessionOutput, error) {
 	session, err := s.repo.GetSessionByPlatformLiveID(ctx, platformLiveID)
 	if err != nil {

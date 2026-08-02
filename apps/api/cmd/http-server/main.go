@@ -652,6 +652,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				// mas deixaria a corrida por conta do acaso.
 				liveSvc.SweepScheduledEventsReadyToStart(context.Background())
 				liveSvc.SweepEndedTimedEvents(context.Background())
+				// RN-31: a publicação prometida para uma hora que passou
+				// enquanto o serviço estava fora do ar precisa sair no boot,
+				// não no próximo tick — o atraso de um agendamento é visível
+				// para o público do lojista.
+				integrationSvc.SweepDuePublishJobs(context.Background())
 				for {
 					select {
 					case <-sweepTicker.C:
@@ -663,6 +668,12 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						// D5: finaliza post/story cujo ends_at fechou (arma
 						// expires_at nos carts → o expiry worker os alcança).
 						liveSvc.SweepEndedTimedEvents(context.Background())
+						// RN-31: rede do agendador ETA. Task perdida (Redis
+						// limpo, deploy no meio) deixaria o agendamento
+						// vencido e ninguém o dispararia — e a falha seria
+						// SILENCIOSA. Também devolve à fila o job preso em
+						// 'publishing' porque o processo morreu no meio.
+						integrationSvc.SweepDuePublishJobs(context.Background())
 					case <-webhookTicker.C:
 						integrationSvc.CheckTinyStockWebhookDelivery(context.Background(), 12*time.Hour)
 					}
@@ -1257,6 +1268,27 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			}
 			return integrationSvc.RunEventWaitlistClose(ctx, p.EventID)
 		})
+
+		// RN-31 — publicação agendada no Instagram. O agendador é nosso porque
+		// a Graph não tem scheduled_publish_time e o container de mídia expira
+		// em 24h; a task só abre o container na hora marcada. O erro devolvido
+		// é o que dispara o retry do asynq — RunScheduledPublish devolve nil
+		// para todo desfecho terminal (cancelado, dead-letter, post já no ar),
+		// justamente para que repetir não republique a mídia.
+		integrationSvc.SetPublishScheduler(publishScheduler{client: eventsClient})
+		eventsServer.Register(events.SessionPublish, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				JobID string `json:"job_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.JobID == "" {
+				return asynq.SkipRetry
+			}
+			return integrationSvc.RunScheduledPublish(ctx, p.JobID)
+		})
 	}
 
 	// Billing choreography L2: the subscription.process command (emitted by the
@@ -1361,6 +1393,28 @@ func (s waitlistCloseScheduler) ScheduleEventWaitlistClose(ctx context.Context, 
 		EventID string `json:"event_id"`
 	}{EventID: eventID})
 }
+
+// publishScheduler adapta o cliente de eventos para integration.PublishScheduler
+// (RN-31): enfileira session.publish com ETA em scheduled_for, TaskID
+// "session-publish:<job>" para dedup.
+//
+// CancelPublish apaga a task pendente, mas NÃO é o cancelamento: quem cancela é
+// o guard no banco (o job sai de 'scheduled'). O asynq recusa apagar task em
+// estado ACTIVE, então sem esse guard um cancelamento no instante do disparo
+// publicaria assim mesmo.
+type publishScheduler struct{ client *events.Client }
+
+func (s publishScheduler) SchedulePublish(ctx context.Context, jobID string, at time.Time) error {
+	return s.client.Schedule(ctx, at, events.SessionPublish, publishTaskID(jobID), struct {
+		JobID string `json:"job_id"`
+	}{JobID: jobID})
+}
+
+func (s publishScheduler) CancelPublish(ctx context.Context, jobID string) error {
+	return s.client.Cancel(ctx, publishTaskID(jobID))
+}
+
+func publishTaskID(jobID string) string { return "session-publish:" + jobID }
 
 // trialReminderScheduler adapts the events client to billing.TrialReminderScheduler,
 // enqueueing a trial.ending_soon ETA task keyed "trial-ending:<store>" for dedup.

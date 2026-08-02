@@ -972,6 +972,19 @@ func (r *Repository) GetSessionByPlatformLiveID(ctx context.Context, platformLiv
 	return &out, nil
 }
 
+// SetSessionPublishAt grava a hora em que a transmissão foi publicada por
+// agendamento (RN-31). Ver MarkSessionPublished no service.
+func (r *Repository) SetSessionPublishAt(ctx context.Context, sessionID string, publishAt time.Time) error {
+	uid, err := parseUUID(sessionID)
+	if err != nil {
+		return err
+	}
+	return r.q.SetSessionPublishAt(ctx, sqlc.SetSessionPublishAtParams{
+		ID:        uid,
+		PublishAt: pgtype.Timestamptz{Time: publishAt, Valid: true},
+	})
+}
+
 func (r *Repository) IncrementSessionComments(ctx context.Context, sessionID string) error {
 	uid, err := parseUUID(sessionID)
 	if err != nil {

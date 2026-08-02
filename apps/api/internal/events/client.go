@@ -137,6 +137,26 @@ func (c *Client) Reschedule(ctx context.Context, processAt time.Time, name Name,
 	return c.Schedule(ctx, processAt, name, taskID, payload)
 }
 
+// Cancel APAGA um agendamento ETA ainda pendente.
+//
+// Existe porque cancelar não é reagendar: Reschedule sempre re-enfileira, e não
+// havia como simplesmente desistir de uma task já armada. "Não existe" é
+// desfecho normal (a task já rodou, ou nunca chegou a ser armada), então não
+// vira erro.
+//
+// MESMO LIMITE do Reschedule: o asynq recusa apagar uma task em estado ACTIVE.
+// Por isso o cancelamento de verdade tem de ser o guard no banco — quem
+// cancela move a linha para fora de 'scheduled', e a task que dispare mesmo
+// assim não encontra nada para reivindicar. Esta chamada é a limpeza, não a
+// garantia.
+func (c *Client) Cancel(ctx context.Context, taskID string) error {
+	err := c.inspector.DeleteTask(QueueNormal, taskID)
+	if err == nil || errors.Is(err, asynq.ErrTaskNotFound) || errors.Is(err, asynq.ErrQueueNotFound) {
+		return nil
+	}
+	return fmt.Errorf("cancelling scheduled task %s: %w", taskID, err)
+}
+
 // Close releases the underlying Redis connection.
 func (c *Client) Close() error {
 	if err := c.inspector.Close(); err != nil {
