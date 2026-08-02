@@ -48,8 +48,15 @@ type EventResponse struct {
 	ProductCount int               `json:"productCount"`
 	UpsellCount  int               `json:"upsellCount"`
 	Sessions     []SessionResponse `json:"sessions,omitempty"`
-	CreatedAt    time.Time         `json:"createdAt"`
-	UpdatedAt    time.Time         `json:"updatedAt"`
+	// SessionTypes são os tipos DISTINTOS das transmissões deste evento
+	// ({live, post, reel, story}). É a única fonte de "que espécie de evento é
+	// este" que sobrevive à 000119, que dropa live_events.type: com a campanha
+	// mista o tipo do container deixou de ter resposta única, e quem quiser
+	// rotular a tela tem que olhar as sessões. Nunca nulo — evento sem sessão
+	// devolve lista vazia, e lista vazia é "ainda não sabemos", não "live".
+	SessionTypes []string  `json:"sessionTypes"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 type ListEventsResponse struct {
@@ -620,8 +627,13 @@ type LiveResponse struct {
 	EndsAt      *time.Time `json:"endsAt"`
 	Description *string    `json:"description"`
 	// Counts
-	ProductCount int       `json:"productCount"`
-	UpsellCount  int       `json:"upsellCount"`
+	ProductCount int `json:"productCount"`
+	UpsellCount  int `json:"upsellCount"`
+	// SessionTypes — mesma semântica de EventResponse.SessionTypes. A LISTA
+	// precisa dele tanto quanto o detalhe: ela não carrega sessions[], então
+	// sem este campo a tela de eventos só teria live_events.type para escolher
+	// o rótulo — exatamente a coluna que a 000119 remove.
+	SessionTypes []string  `json:"sessionTypes"`
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
@@ -754,6 +766,9 @@ type LiveOutput struct {
 	EndedAt                *time.Time
 	TotalComments          int
 	TotalOrders            int
+	// SessionTypes são os tipos DISTINTOS das sessões deste evento. Sai da
+	// listagem porque é o substituto de Type quando a 000119 dropar a coluna.
+	SessionTypes           []string
 	CloseCartOnEventEnd    bool
 	CartExpirationMinutes  *int
 	CartMaxQuantityPerItem *int

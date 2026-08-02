@@ -744,11 +744,42 @@ func toLiveResponse(o LiveOutput) LiveResponse {
 		Description:            o.Description,
 		ProductCount:           o.ProductCount,
 		UpsellCount:            o.UpsellCount,
+		SessionTypes:           nonNilStrings(o.SessionTypes),
 		CreatedAt:              o.CreatedAt,
 		UpdatedAt:              o.UpdatedAt,
 
 		WaitlistNotifiedTtlMinutes: o.WaitlistNotifiedTTLMinutes,
 	}
+}
+
+// nonNilStrings troca nil por lista vazia. O consumidor é o frontend, e em
+// JSON `null` e `[]` levam a caminhos diferentes: `[]` é "este evento não tem
+// sessão", `null` seria "o backend não sabe". A tela precisa distinguir os
+// dois, então nunca emitimos null.
+func nonNilStrings(in []string) []string {
+	if in == nil {
+		return []string{}
+	}
+	return in
+}
+
+// distinctSessionTypes extrai os tipos distintos das sessões já carregadas,
+// preservando a ordem de primeira aparição. Existe para o DETALHE não precisar
+// de uma segunda consulta: as sessões já vieram, o tipo já está em cada uma.
+func distinctSessionTypes(sessions []SessionOutput) []string {
+	seen := make(map[string]struct{}, len(sessions))
+	out := make([]string, 0, len(sessions))
+	for _, s := range sessions {
+		if s.Type == "" {
+			continue
+		}
+		if _, dup := seen[s.Type]; dup {
+			continue
+		}
+		seen[s.Type] = struct{}{}
+		out = append(out, s.Type)
+	}
+	return out
 }
 
 func toEventResponse(o EventOutput) EventResponse {
@@ -806,6 +837,7 @@ func toEventResponse(o EventOutput) EventResponse {
 		ProductCount:           o.ProductCount,
 		UpsellCount:            o.UpsellCount,
 		Sessions:               sessions,
+		SessionTypes:           distinctSessionTypes(o.Sessions),
 		CreatedAt:              o.CreatedAt,
 		UpdatedAt:              o.UpdatedAt,
 

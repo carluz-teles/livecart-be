@@ -1620,8 +1620,19 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 			COALESCE(e.pix_discount_percent, 0),
 			e.scheduled_at, e.ends_at,
 			s.started_at, s.ended_at, COALESCE(s.total_comments, 0),
-			COALESCE(p.platform, ''), COALESCE(p.platform_live_id, '')
+			COALESCE(p.platform, ''), COALESCE(p.platform_live_id, ''),
+			COALESCE(st.types, ARRAY[]::text[])
 		FROM live_events e
+		LEFT JOIN LATERAL (
+			-- Tipos DISTINTOS das sessões: é o que substitui live_events.type
+			-- quando a 000119 o dropar. Um LATERAL próprio (e não um join na
+			-- lateral da primeira sessão) porque a campanha é MISTA: a
+			-- primeira sessão pode ser a live e a terceira o story, e rotular
+			-- o evento pela primeira sessão seria trocar uma mentira por outra.
+			SELECT array_agg(DISTINCT type ORDER BY type) AS types
+			FROM live_sessions
+			WHERE event_id = e.id
+		) st ON true
 		LEFT JOIN LATERAL (
 			SELECT id, started_at, ended_at, total_comments
 			FROM live_sessions
@@ -1679,6 +1690,7 @@ func (r *Repository) ListLives(ctx context.Context, params ListLivesParams) ([]L
 			&live.TotalComments,
 			&platform,
 			&platformLiveID,
+			&live.SessionTypes,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scanning live event: %w", err)
 		}
