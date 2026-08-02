@@ -1947,6 +1947,50 @@ func (r *Repository) GetWaitlistNotifiedTTL(ctx context.Context, eventID string)
 	return time.Duration(mins) * time.Minute, nil
 }
 
+// ExpireEventWaitlist encerra os itens de fila NÃO ATENDIDOS do evento e
+// devolve os carrinhos afetados (RN-32). Ver o comentário da query
+// ExpireWaitlistByEvent: o predicado poupa quem foi promovido e ainda está
+// dentro da janela de TTL.
+func (r *Repository) ExpireEventWaitlist(ctx context.Context, eventID string) ([]string, error) {
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ExpireWaitlistByEvent(ctx, eID)
+	if err != nil {
+		return nil, fmt.Errorf("expiring event waitlist: %w", err)
+	}
+	seen := make(map[string]struct{}, len(rows))
+	cartIDs := make([]string, 0, len(rows))
+	for _, id := range rows {
+		if !id.Valid {
+			continue // item de fila sem carrinho vinculado
+		}
+		s := id.String()
+		if _, dup := seen[s]; dup {
+			continue // um carrinho pode ter vários itens na fila
+		}
+		seen[s] = struct{}{}
+		cartIDs = append(cartIDs, s)
+	}
+	return cartIDs, nil
+}
+
+// GetEventCartExpirationMinutes devolve o prazo EFETIVO do carrinho para o
+// evento (RN-34: curto ou estendido conforme close_cart_on_event_end, com
+// fallback para a loja), lendo da fonte única GetEventCartSettings.
+func (r *Repository) GetEventCartExpirationMinutes(ctx context.Context, eventID string) (int, error) {
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return 0, err
+	}
+	settings, err := r.queries.GetEventCartSettings(ctx, eID)
+	if err != nil {
+		return 0, fmt.Errorf("reading event cart settings: %w", err)
+	}
+	return int(settings.EffectiveCartExpirationMinutes), nil
+}
+
 // UpdateCartStatus updates a cart's status (e.g., "expired").
 func (r *Repository) UpdateCartStatus(ctx context.Context, cartID, status string) error {
 	id, err := parseUUID(cartID)

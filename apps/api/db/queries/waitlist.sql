@@ -43,10 +43,36 @@ SELECT * FROM waitlist_items
 WHERE event_id = $1 AND platform_user_id = $2 AND product_id = $3
   AND status IN ('waiting', 'notified');
 
--- name: ExpireWaitlistByEvent :exec
+-- name: ExpireWaitlistByEvent :many
+-- RN-32 — no fim do evento + carência, o item de fila NÃO ATENDIDO morre.
+--
+-- Sem isto o carrinho do waitlister é ETERNO. O guard do ExpireCart se abstém
+-- de expirar qualquer carrinho com item 'waiting', e o ramo 'waiting' não tem
+-- prazo nenhum: enquanto o item estiver na fila o carrinho inteiro é
+-- inexpirável, segurando o estoque reservado dos seus itens NÃO-waitlisted. E
+-- como não existe mais sweep de carrinhos, a task cart.expire dispara uma vez,
+-- encontra 0 rows e encerra — nada mais a re-arma, exceto uma promoção que por
+-- definição não vem (o carrinho da frente foi PAGO em vez de expirar).
+--
+-- O predicado é mais estreito do que o desta query antes desta mudança. Ela
+-- existia desde a 000026 sem nenhum chamador Go, com
+-- `status IN ('waiting','notified')` — matando também quem acabou de ser
+-- promovido e ainda está DENTRO da janela de TTL válida, o que o PRD proíbe
+-- explicitamente. Quem está 'notified' com janela futura tem o expires_at do
+-- carrinho estendido e é governado pelo próprio cart.expire: quando a janela
+-- vencer, o guard do ExpireCart deixa de vetar e o carrinho expira sozinho.
+--
+-- Devolve os cart_id afetados para o chamador RE-ARMAR cart.expire neles: o
+-- prazo deles já venceu enquanto o guard vetava, então sem o re-arm eles
+-- continuariam vivos mesmo com a fila morta.
 UPDATE waitlist_items
 SET status = 'expired'
-WHERE event_id = $1 AND status IN ('waiting', 'notified');
+WHERE event_id = $1
+  AND (
+      status = 'waiting'
+      OR (status = 'notified' AND expires_at IS NOT NULL AND expires_at <= now())
+  )
+RETURNING cart_id;
 
 -- name: ListExpiredNotifiedWaitlistItems :many
 SELECT * FROM waitlist_items

@@ -1209,6 +1209,43 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			}
 			return liveSvc.RunScheduledEventClose(ctx, p.EventID, p.StoreID)
 		})
+
+		// RN-32 — a fila não atendida morre com o evento, em "fim + carência".
+		// event.ended é o gancho: é um fato já transacional (emitido dentro do
+		// tx de EndEvent) e ganha retry + dead-letter do asynq, em vez de mais
+		// uma goroutine detached dentro de End(). Até aqui ele só tinha
+		// logEvent — o fechamento do evento era publicado e ninguém consumia.
+		integrationSvc.SetWaitlistCloseScheduler(waitlistCloseScheduler{client: eventsClient})
+		eventsServer.Register(events.EventEventEnded, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				EventID string `json:"event_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.EventID == "" {
+				return asynq.SkipRetry
+			}
+			logger.From(ctx, log).Info("event observed",
+				zap.String("event", string(env.Name)),
+				zap.String("event_id", env.EventID),
+			)
+			return integrationSvc.ArmEventWaitlistClose(ctx, p.EventID)
+		})
+		eventsServer.Register(events.EventWaitlistClose, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				EventID string `json:"event_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.EventID == "" {
+				return asynq.SkipRetry
+			}
+			return integrationSvc.RunEventWaitlistClose(ctx, p.EventID)
+		})
 	}
 
 	// Billing choreography L2: the subscription.process command (emitted by the
@@ -1302,6 +1339,17 @@ func (s eventCloseScheduler) RescheduleEventClose(ctx context.Context, eventID, 
 }
 
 func eventCloseTaskID(eventID string) string { return "event-close:" + eventID }
+
+// waitlistCloseScheduler adapta o cliente de eventos para a RN-32: enfileira
+// event.waitlist_close com ETA em "fim do evento + carência", com TaskID
+// "event-waitlist-close:<id>" para dedup.
+type waitlistCloseScheduler struct{ client *events.Client }
+
+func (s waitlistCloseScheduler) ScheduleEventWaitlistClose(ctx context.Context, eventID string, at time.Time) error {
+	return s.client.Schedule(ctx, at, events.EventWaitlistClose, "event-waitlist-close:"+eventID, struct {
+		EventID string `json:"event_id"`
+	}{EventID: eventID})
+}
 
 // trialReminderScheduler adapts the events client to billing.TrialReminderScheduler,
 // enqueueing a trial.ending_soon ETA task keyed "trial-ending:<store>" for dedup.
