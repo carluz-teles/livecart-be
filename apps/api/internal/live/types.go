@@ -228,22 +228,72 @@ type CommentResponse struct {
 	Text   string `json:"text"`
 }
 
+// =============================================================================
+// MÉTRICA EM DOIS NÍVEIS (Fatia 5)
+//
+// Dois níveis, dois grupos de números, nunca misturados:
+//   • CONFIRMADO — o congelado do pedido pago (order_items.session_id). É o que
+//     entra em relatório de faturamento.
+//   • PROJETADO  — o que está nos carrinhos abertos, repartido pelo log de
+//     adições. É expectativa, não receita.
+//
+// Ambos em GMV BRUTO. Desconto de cupom é do EVENTO e frete é do CARRINHO —
+// nenhum dos dois tem sessão, então "receita líquida por transmissão" é
+// insolúvel por construção e deliberadamente não existe aqui.
+// =============================================================================
+
+// SessionRevenueResponse são os números de UMA transmissão, nos dois níveis.
+type SessionRevenueResponse struct {
+	// Confirmado
+	PaidCarts        int   `json:"paidCarts"`
+	SoldUnits        int   `json:"soldUnits"`
+	ConfirmedRevenue int64 `json:"confirmedRevenue"`
+	// Projetado
+	OpenCarts        int   `json:"openCarts"`
+	ProjectedUnits   int   `json:"projectedUnits"`
+	ProjectedRevenue int64 `json:"projectedRevenue"`
+}
+
+// SessionMetricsResponse é uma linha do relatório por transmissão. SessionID
+// nulo é o balde "sem transmissão" — adição feita pelo painel, ou carrinho
+// montado antes do log existir. Ele aparece de propósito: escondê-lo faria a
+// soma das linhas não fechar com o total do evento.
+type SessionMetricsResponse struct {
+	SessionID     *string `json:"sessionId"`
+	SequenceOrder int     `json:"sequenceOrder"`
+	Type          string  `json:"type"`
+	Status        string  `json:"status"`
+	SessionRevenueResponse
+}
+
+// EventSessionMetricsResponse é a métrica do evento com a quebra por
+// transmissão. ConfirmedRevenue/ProjectedRevenue são, por construção, a soma
+// exata de sessions + unattributed — e batem com o event-stats do evento.
+type EventSessionMetricsResponse struct {
+	EventID          string                   `json:"eventId"`
+	ConfirmedRevenue int64                    `json:"confirmedRevenue"`
+	ProjectedRevenue int64                    `json:"projectedRevenue"`
+	Sessions         []SessionMetricsResponse `json:"sessions"`
+	Unattributed     *SessionMetricsResponse  `json:"unattributed"`
+}
+
 type SessionResponse struct {
-	ID            string             `json:"id"`
-	EventID       string             `json:"eventId"`
-	Type          string             `json:"type"`
-	Status        string             `json:"status"`
-	StartedAt     *time.Time         `json:"startedAt"`
-	EndedAt       *time.Time         `json:"endedAt"`
-	TotalComments int                `json:"totalComments"`
-	TotalCarts    int                `json:"totalCarts"`
-	PaidCarts     int                `json:"paidCarts"`
-	TotalRevenue  int64              `json:"totalRevenue"`
-	PaidRevenue   int64              `json:"paidRevenue"`
-	Platforms     []PlatformResponse `json:"platforms,omitempty"`
-	Comments      []CommentResponse  `json:"comments,omitempty"`
-	CreatedAt     time.Time          `json:"createdAt"`
-	UpdatedAt     time.Time          `json:"updatedAt"`
+	ID            string     `json:"id"`
+	EventID       string     `json:"eventId"`
+	Type          string     `json:"type"`
+	Status        string     `json:"status"`
+	SequenceOrder int        `json:"sequenceOrder"`
+	StartedAt     *time.Time `json:"startedAt"`
+	EndedAt       *time.Time `json:"endedAt"`
+	TotalComments int        `json:"totalComments"`
+	// Métrica desta transmissão (Fatia 5). Os nomes antigos (totalCarts,
+	// totalRevenue, paidRevenue) saíram junto com GetSessionStats: eles falavam
+	// do carrinho INTEIRO creditado à sessão em que ele nasceu.
+	SessionRevenueResponse
+	Platforms []PlatformResponse `json:"platforms,omitempty"`
+	Comments  []CommentResponse  `json:"comments,omitempty"`
+	CreatedAt time.Time          `json:"createdAt"`
+	UpdatedAt time.Time          `json:"updatedAt"`
 }
 
 // Service layer - Session
@@ -270,25 +320,54 @@ type CommentOutput struct {
 	Text   string
 }
 
+// SessionRevenueOutput são os números de uma transmissão nos dois níveis
+// (Fatia 5). Zero em tudo é resposta legítima: sessão que ainda não vendeu.
+type SessionRevenueOutput struct {
+	PaidCarts        int
+	SoldUnits        int
+	ConfirmedRevenue int64
+	OpenCarts        int
+	ProjectedUnits   int
+	ProjectedRevenue int64
+}
+
+// SessionMetricsOutput é uma linha do relatório por transmissão. SessionID
+// vazio é o balde "sem transmissão".
+type SessionMetricsOutput struct {
+	SessionID     string
+	SequenceOrder int
+	Type          string
+	Status        string
+	SessionRevenueOutput
+}
+
+// EventSessionMetricsOutput é a métrica em dois níveis de um evento.
+type EventSessionMetricsOutput struct {
+	EventID          string
+	ConfirmedRevenue int64
+	ProjectedRevenue int64
+	Sessions         []SessionMetricsOutput
+	// Unattributed é nil quando não há nada sem transmissão.
+	Unattributed *SessionMetricsOutput
+}
+
 type SessionOutput struct {
-	ID      string
-	EventID string
-	Type    string
-	Status  string
+	ID            string
+	EventID       string
+	Type          string
+	Status        string
+	SequenceOrder int
 	// Modo Live (D17): estado EFÊMERO de execução DESTA transmissão.
 	CurrentActiveProductID *string
 	ProcessingPaused       bool
 	StartedAt              *time.Time
 	EndedAt                *time.Time
 	TotalComments          int
-	TotalCarts             int
-	PaidCarts              int
-	TotalRevenue           int64
-	PaidRevenue            int64
-	Platforms              []PlatformOutput
-	Comments               []CommentOutput
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
+	SessionRevenueOutput
+	Platforms []PlatformOutput
+	Comments  []CommentOutput
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // Repository layer - Session
@@ -303,6 +382,10 @@ type SessionRow struct {
 	EventID string
 	Type    string
 	Status  string
+	// A ordem da transmissão dentro da campanha (1ª, 2ª, …). É por ela que a
+	// métrica em dois níveis lista as sessões — ListSessionsByEvent devolve por
+	// created_at DESC, que é a ordem da tela, não a do relatório.
+	SequenceOrder int
 	// Modo Live (D17): estado EFÊMERO de execução DESTA transmissão.
 	CurrentActiveProductID *string
 	ProcessingPaused       bool

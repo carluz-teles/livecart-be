@@ -7,7 +7,8 @@ package dashboard_test
 //   Grupo B — bug latente (somavam não-pagos); asserte NOVO == só-pago E NOVO != antigo
 //
 // Queries cobertas (dashboard/repository.go inline + SQLC cart/notification):
-//   Grupo A: GetEventsWithRevenue, GetAggregatedFunnel, GetEventStats, GetSessionStats,
+//   Grupo A: GetEventsWithRevenue, GetAggregatedFunnel, GetEventStats,
+//            ListSessionConfirmedRevenueByEvent (era GetSessionStats, ver Fatia 5),
 //            GetWhatsAppRecoveryStats
 //   Grupo B: GetStats (total_revenue), GetMonthlyRevenue
 
@@ -187,6 +188,17 @@ func seedF4(t *testing.T) f4Seed {
 		t.Fatalf("seed order: %v", err)
 	}
 
+	// Fatia 5: a linha selada carrega a transmissão que vendeu estas unidades.
+	// É daqui que sai a receita confirmada POR SESSÃO — e a soma das linhas tem
+	// de reconstruir orders.total_cents.
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price, session_id)
+		 VALUES ($1, $2, 'F4ProdA', 3, 10000, $3)`,
+		orderID, prodAID, sessionID,
+	); err != nil {
+		t.Fatalf("seed order items: %v", err)
+	}
+
 	// Produto B (para o cart NÃO-pago) — keyword CHAR(4): diferente do A
 	kwB := fmt.Sprintf("%04d", (nRaw+1)%9000+1000)
 	var prodBID string
@@ -321,26 +333,46 @@ func TestDashboardRevenue_GetEventStats_ConfirmedRevenue(t *testing.T) {
 	}
 }
 
-// ─── Grupo A: GetSessionStats.paid_revenue ────────────────────────────────────
+// ─── Grupo A: receita confirmada por SESSÃO (Fatia 5) ─────────────────────────
+//
+// Substitui o teste de GetSessionStats.paid_revenue. Aquele somava orders
+// inteiras casando por carts.session_id — a transmissão em que o CARRINHO
+// nasceu. Com carrinho unificado da campanha, isso credita a semana toda à
+// primeira live. A fonte agora é order_items.session_id.
 
-func TestDashboardRevenue_GetSessionStats_PaidRevenue(t *testing.T) {
+func TestDashboardRevenue_SessionConfirmedRevenue(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	seed := seedF4(t)
 
-	row, err := testQueries.GetSessionStats(ctx, parseUUID(t, seed.sessionID))
+	rows, err := testQueries.ListSessionConfirmedRevenueByEvent(ctx, parseUUID(t, seed.eventID))
 	if err != nil {
-		t.Fatalf("GetSessionStats: %v", err)
+		t.Fatalf("ListSessionConfirmedRevenueByEvent: %v", err)
 	}
 
-	// Grupo A: paid_revenue lê de orders.total_cents JOIN carts.session_id
-	if row.PaidRevenue != seed.paidGMV {
-		t.Errorf("GetSessionStats paid_revenue: want %d, got %d", seed.paidGMV, row.PaidRevenue)
+	var sum, daSessao int64
+	for _, row := range rows {
+		sum += row.RevenueCents
+		if row.SessionID.Valid && row.SessionID.String() == seed.sessionID {
+			daSessao = row.RevenueCents
+		}
 	}
 
-	// Grupo C intacto: total_revenue é cart-based (todos os carts não-expirados da sessão)
-	if row.TotalRevenue == 0 {
-		t.Errorf("GetSessionStats total_revenue: expected cart-based value > 0, got 0")
+	if daSessao != seed.paidGMV {
+		t.Errorf("receita confirmada da sessão: want %d, got %d", seed.paidGMV, daSessao)
+	}
+
+	// O invariante: a soma por sessão é o confirmed_revenue do evento. O cart
+	// NÃO-pago (que não tem order) não pode vazar para cá.
+	stats, err := testQueries.GetEventStats(ctx, parseUUID(t, seed.eventID))
+	if err != nil {
+		t.Fatalf("GetEventStats: %v", err)
+	}
+	if sum != stats.ConfirmedRevenue {
+		t.Errorf("soma das sessões (%d) != confirmed_revenue do evento (%d)", sum, stats.ConfirmedRevenue)
+	}
+	if sum == seed.paidGMV+seed.unpaidGMV {
+		t.Errorf("cart não-pago vazou para a receita confirmada por sessão: %d", sum)
 	}
 }
 

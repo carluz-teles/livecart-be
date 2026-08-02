@@ -61,6 +61,11 @@ func seedEventAndCarts(t *testing.T, storeID string) (eventID, sessionID string,
 		}
 
 		var golden int64
+		type sealedItem struct {
+			productID  string
+			qty, price int64
+		}
+		var sealed []sealedItem
 		for j, item := range spec.items {
 			qty, price := item[0], item[1]
 			extID := fmt.Sprintf("gmv-%d-%d-%d", base, i, j)
@@ -81,18 +86,33 @@ func seedEventAndCarts(t *testing.T, storeID string) (eventID, sessionID string,
 			); err != nil {
 				t.Fatalf("seedEventAndCarts cart_item [%d,%d]: %v", i, j, err)
 			}
+			sealed = append(sealed, sealedItem{productID, qty, price})
 			golden += qty * price
 		}
 
 		// Fatia 4: revenue queries agora lêem de orders; seeia order selada para cada cart pago.
 		shortOrderID := (uid + int64(i) + 500) % 90000
-		if _, err := testPool.Exec(ctx,
+		var orderID string
+		if err := testPool.QueryRow(ctx,
 			`INSERT INTO orders (cart_id, short_id, store_id, event_id, status,
 			   total_cents, discount_cents, shipping_cents, paid_total_cents, paid_at)
-			 VALUES ($1, $2, $3, $4, 'paid', $5, 0, 0, $5, now())`,
+			 VALUES ($1, $2, $3, $4, 'paid', $5, 0, 0, $5, now()) RETURNING id::text`,
 			cartID, shortOrderID, storeID, eventID, golden,
-		); err != nil {
+		).Scan(&orderID); err != nil {
 			t.Fatalf("seedEventAndCarts order %d: %v", i, err)
+		}
+
+		// Fatia 5: o pedido selado carrega a transmissão em CADA linha — é dela
+		// que sai "quanto esta live faturou". Sem order_items o pedido continua
+		// com o total certo e a quebra por sessão simplesmente não existe.
+		for j, s := range sealed {
+			if _, err := testPool.Exec(ctx,
+				`INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price, session_id)
+				 VALUES ($1, $2, 'ProdGMV', $3, $4, $5)`,
+				orderID, s.productID, s.qty, s.price, sessionID,
+			); err != nil {
+				t.Fatalf("seedEventAndCarts order_item [%d,%d]: %v", i, j, err)
+			}
 		}
 
 		cartIDs = append(cartIDs, cartID)
@@ -195,23 +215,43 @@ func TestGMVCanonical_EventStats(t *testing.T) {
 	_ = cartIDs
 }
 
-// TestGMVCanonical_SessionStats verifica paid_revenue de GetSessionStats.
-func TestGMVCanonical_SessionStats(t *testing.T) {
+// TestGMVCanonical_SessionConfirmedRevenue verifica a receita confirmada por
+// transmissão (Fatia 5). Substitui o teste de GetSessionStats.paid_revenue, que
+// somava orders inteiras pelo carts.session_id — a sessão em que o CARRINHO
+// nasceu, não a que vendeu cada unidade.
+func TestGMVCanonical_SessionConfirmedRevenue(t *testing.T) {
 	requireDB(t)
 	storeID := seedStore(t)
-	_, sessionID, cartIDs, goldens := seedEventAndCarts(t, storeID)
+	eventID, sessionID, cartIDs, goldens := seedEventAndCarts(t, storeID)
 
 	var expected int64
 	for _, g := range goldens {
 		expected += g
 	}
 
-	row, err := testQueries.GetSessionStats(context.Background(), mustParseUUIDStr(t, sessionID))
+	rows, err := testQueries.ListSessionConfirmedRevenueByEvent(
+		context.Background(), mustParseUUIDStr(t, eventID))
 	if err != nil {
-		t.Fatalf("GetSessionStats: %v", err)
+		t.Fatalf("ListSessionConfirmedRevenueByEvent: %v", err)
 	}
-	if row.PaidRevenue != expected {
-		t.Errorf("GetSessionStats.PaidRevenue: got %d, want %d", row.PaidRevenue, expected)
+
+	var sum int64
+	var daSessao int64
+	for _, row := range rows {
+		sum += row.RevenueCents
+		if row.SessionID.Valid && row.SessionID.String() == sessionID {
+			daSessao = row.RevenueCents
+		}
+	}
+
+	// Toda venda deste evento veio de uma única transmissão: ela leva tudo.
+	if daSessao != expected {
+		t.Errorf("receita da sessão: got %d, want %d (golden inline SUM)", daSessao, expected)
+	}
+	// E a soma das linhas por sessão é a receita confirmada do evento — o
+	// invariante da métrica em dois níveis, sobre a fórmula canônica.
+	if sum != expected {
+		t.Errorf("soma das sessões: got %d, want %d", sum, expected)
 	}
 
 	_ = cartIDs

@@ -436,6 +436,7 @@ func (q *Queries) ExtendCartExpiration(ctx context.Context, arg ExtendCartExpira
 }
 
 const finalizeCartsByEvent = `-- name: FinalizeCartsByEvent :many
+
 UPDATE carts c
 SET status = 'checkout',
     expires_at = now() + make_interval(mins => $2::int)
@@ -450,6 +451,20 @@ type FinalizeCartsByEventParams struct {
 	ExpirationMinutes int32       `json:"expiration_minutes"`
 }
 
+// SessionAttributionByEvent foi REMOVIDA (Fatia 5). Nunca teve chamador Go — e
+// não era aproveitável, por três motivos que a métrica em dois níveis proíbe:
+//  1. chaveava por cart_items.session_id, que é FIRST-TOUCH (o COALESCE do
+//     UpsertCartItem): creditava à segunda o que foi vendido na quarta;
+//  2. subtraía waitlisted_quantity, enquanto a receita do evento
+//     (cart_product_total_cents / orders.total_cents) usa quantity CHEIO — a
+//     soma das sessões daria SEMPRE menos que o total do evento;
+//  3. recalculava dos cart_items vivos filtrando payment_status, em vez de ler
+//     o congelado (RN-14).
+//
+// Quem responde "quanto a transmissão de terça faturou" agora é o par
+// ListSessionConfirmedRevenueByEvent (confirmado, de order_items) +
+// ListOpenCartItemsByEvent/ListCartItemEventsByEvent (projetado, alocado sobre
+// o log pelo MESMO AllocateBySession do selamento).
 // RN-06: ao encerrar o EVENTO, o carrinho sai de 'active' ("pode pagar, sem
 // prazo") para 'checkout' ("prazo correndo") e ganha expires_at. Encerrar uma
 // SESSÃO não passa por aqui — sessão não mexe em carrinho.
@@ -1281,49 +1296,6 @@ func (q *Queries) GetProductQuantityInUserCart(ctx context.Context, arg GetProdu
 	return quantity, err
 }
 
-const getSessionStats = `-- name: GetSessionStats :one
-
-SELECT
-    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1), 0)::int AS total_carts,
-    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1 AND ct.payment_status = 'paid'), 0)::int AS paid_carts,
-    -- Grupo C: total_revenue stays cart-based (projection over all non-expired carts)
-    COALESCE((
-        SELECT SUM(cart_product_total_cents(ct.id))
-        FROM carts ct
-        WHERE ct.session_id = $1 AND ct.status != 'expired'
-    ), 0)::bigint AS total_revenue,
-    -- Grupo A: paid_revenue reads from sealed orders
-    COALESCE((
-        SELECT SUM(o.total_cents)
-        FROM orders o
-        JOIN carts ct ON ct.id = o.cart_id
-        WHERE ct.session_id = $1 AND o.status = 'paid'
-    ), 0)::bigint AS paid_revenue
-`
-
-type GetSessionStatsRow struct {
-	TotalCarts   int32 `json:"total_carts"`
-	PaidCarts    int32 `json:"paid_carts"`
-	TotalRevenue int64 `json:"total_revenue"`
-	PaidRevenue  int64 `json:"paid_revenue"`
-}
-
-// =============================================================================
-// SESSION DETAILS - Stats per session
-// =============================================================================
-// Returns stats for a specific session: carts count and revenue
-func (q *Queries) GetSessionStats(ctx context.Context, sessionID pgtype.UUID) (GetSessionStatsRow, error) {
-	row := q.db.QueryRow(ctx, getSessionStats, sessionID)
-	var i GetSessionStatsRow
-	err := row.Scan(
-		&i.TotalCarts,
-		&i.PaidCarts,
-		&i.TotalRevenue,
-		&i.PaidRevenue,
-	)
-	return i, err
-}
-
 const getStorePaymentIntegration = `-- name: GetStorePaymentIntegration :one
 SELECT i.id, i.store_id, i.type, i.provider, i.status, i.token_expires_at, i.last_synced_at, i.created_at, i.credentials, i.metadata, i.priority
 FROM integrations i
@@ -1439,6 +1411,58 @@ func (q *Queries) IssueShortIDForEvent(ctx context.Context, id pgtype.UUID) (int
 	var last_value int32
 	err := row.Scan(&last_value)
 	return last_value, err
+}
+
+const listCartItemEventsByEvent = `-- name: ListCartItemEventsByEvent :many
+SELECT
+    cie.cart_id,
+    cie.product_id,
+    cie.session_id,
+    cie.quantity,
+    cie.unit_price
+FROM cart_item_events cie
+JOIN carts ct ON ct.id = cie.cart_id
+WHERE ct.event_id = $1
+  AND ct.status IN ('active', 'checkout')
+ORDER BY cie.cart_id, cie.product_id, cie.created_at, cie.id
+`
+
+type ListCartItemEventsByEventRow struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	SessionID pgtype.UUID `json:"session_id"`
+	Quantity  int32       `json:"quantity"`
+	UnitPrice int64       `json:"unit_price"`
+}
+
+// O log de adições dos MESMOS carrinhos da query acima, na ordem que
+// AllocateBySession exige (cronológica por produto, id desempatando).
+// Ele diz de onde veio cada unidade; a quantidade final continua sendo a de
+// cart_items.
+func (q *Queries) ListCartItemEventsByEvent(ctx context.Context, eventID pgtype.UUID) ([]ListCartItemEventsByEventRow, error) {
+	rows, err := q.db.Query(ctx, listCartItemEventsByEvent, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCartItemEventsByEventRow{}
+	for rows.Next() {
+		var i ListCartItemEventsByEventRow
+		if err := rows.Scan(
+			&i.CartID,
+			&i.ProductID,
+			&i.SessionID,
+			&i.Quantity,
+			&i.UnitPrice,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listCartItemEventsForCart = `-- name: ListCartItemEventsForCart :many
@@ -2115,6 +2139,59 @@ func (q *Queries) ListNonWaitlistedCartItems(ctx context.Context, cartID pgtype.
 	return items, nil
 }
 
+const listOpenCartItemsByEvent = `-- name: ListOpenCartItemsByEvent :many
+SELECT
+    ci.cart_id,
+    ci.product_id,
+    ci.quantity,
+    ci.unit_price
+FROM carts ct
+JOIN cart_items ci ON ci.cart_id = ct.id
+WHERE ct.event_id = $1
+  AND ct.status IN ('active', 'checkout')
+ORDER BY ci.cart_id, ci.product_id
+`
+
+type ListOpenCartItemsByEventRow struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	Quantity  pgtype.Int4 `json:"quantity"`
+	UnitPrice pgtype.Int8 `json:"unit_price"`
+}
+
+// A quantidade FINAL de cada produto nos carrinhos que entram na projeção.
+//
+// O predicado (status IN ('active','checkout')) e a quantidade CHEIA são cópia
+// literal de GetEventStats.projected_revenue — inclusive o fato de que o
+// carrinho PAGO continua entrando (ele permanece em 'checkout' depois do
+// pagamento). Isso é herança da semântica atual de "projetado", e mexer nela é
+// assunto da separação de estados (RN-06), não da métrica: o que a Fatia 5
+// garante é que os dois níveis usem O MESMO predicado, senão a soma não fecha.
+func (q *Queries) ListOpenCartItemsByEvent(ctx context.Context, eventID pgtype.UUID) ([]ListOpenCartItemsByEventRow, error) {
+	rows, err := q.db.Query(ctx, listOpenCartItemsByEvent, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOpenCartItemsByEventRow{}
+	for rows.Next() {
+		var i ListOpenCartItemsByEventRow
+		if err := rows.Scan(
+			&i.CartID,
+			&i.ProductID,
+			&i.Quantity,
+			&i.UnitPrice,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listProductsByEvent = `-- name: ListProductsByEvent :many
 SELECT
     p.id,
@@ -2157,6 +2234,83 @@ func (q *Queries) ListProductsByEvent(ctx context.Context, eventID pgtype.UUID) 
 			&i.Keyword,
 			&i.TotalQuantity,
 			&i.TotalRevenue,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSessionConfirmedRevenueByEvent = `-- name: ListSessionConfirmedRevenueByEvent :many
+
+SELECT
+    oi.session_id,
+    COALESCE(SUM(oi.quantity), 0)::int                    AS sold_units,
+    COALESCE(SUM(oi.quantity * oi.unit_price), 0)::bigint AS revenue_cents,
+    COUNT(DISTINCT o.cart_id)::int                        AS paid_carts
+FROM order_items oi
+JOIN orders o ON o.id = oi.order_id
+WHERE o.event_id = $1 AND o.status = 'paid'
+GROUP BY oi.session_id
+`
+
+type ListSessionConfirmedRevenueByEventRow struct {
+	SessionID    pgtype.UUID `json:"session_id"`
+	SoldUnits    int32       `json:"sold_units"`
+	RevenueCents int64       `json:"revenue_cents"`
+	PaidCarts    int32       `json:"paid_carts"`
+}
+
+// =============================================================================
+// MÉTRICA EM DOIS NÍVEIS — por SESSÃO e agregada por EVENTO (Fatia 5)
+//
+// GetSessionStats foi REMOVIDA. Ela agrupava por carts.session_id, que é a
+// sessão em que o carrinho NASCEU (gravada uma única vez no CreateCart e nunca
+// mais tocada). Com o carrinho unificado da campanha (RN-02) um carrinho vive a
+// semana inteira, então o carrinho INTEIRO — inclusive o que foi comprado na
+// quinta — era creditado à transmissão de segunda. Além disso ela era chamada
+// uma vez POR SESSÃO dentro do laço de GetEventWithSessions (N+1) para alimentar
+// campos que a tela sequer renderizava.
+//
+// No lugar entram três queries de EVENTO (uma chamada, não N):
+//   - confirmado  ← order_items.session_id, o congelado do pedido pago;
+//   - projetado   ← cart_items (quantidade final) + cart_item_events (de onde
+//     veio cada unidade), repartido em Go por AllocateBySession —
+//     a MESMA função que o selamento usa. Duas implementações da
+//     mesma regra seria exatamente a divergência que a métrica em
+//     dois níveis não pode ter.
+//
+// O INVARIANTE (inegociável): a soma das sessões bate exatamente com o total do
+// evento em GetEventStats. Por isso cada query abaixo repete, ao pé da letra, o
+// predicado do seu par lá em cima — e por isso o balde session_id IS NULL ("sem
+// transmissão") é devolvido junto: sem ele a soma não fecha.
+// =============================================================================
+// Receita CONFIRMADA por transmissão: o congelado do pedido, repartido pela
+// sessão que vendeu cada unidade (RN-13). Uma linha por sessão + a linha
+// session_id NULL (adição sem transmissão, ou pedido anterior ao log).
+//
+// Fecha com GetEventStats.confirmed_revenue (SUM(orders.total_cents)) por
+// construção: o selamento grava order_items com o unit_price do carrinho e
+// AllocateBySession garante SUM(order_items.quantity) == cart_items.quantity,
+// logo SUM(quantity*unit_price) == cart_product_total_cents == total_cents.
+func (q *Queries) ListSessionConfirmedRevenueByEvent(ctx context.Context, eventID pgtype.UUID) ([]ListSessionConfirmedRevenueByEventRow, error) {
+	rows, err := q.db.Query(ctx, listSessionConfirmedRevenueByEvent, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSessionConfirmedRevenueByEventRow{}
+	for rows.Next() {
+		var i ListSessionConfirmedRevenueByEventRow
+		if err := rows.Scan(
+			&i.SessionID,
+			&i.SoldUnits,
+			&i.RevenueCents,
+			&i.PaidCarts,
 		); err != nil {
 			return nil, err
 		}
@@ -2368,61 +2522,6 @@ func (q *Queries) RestoreCancelledCartAsPaid(ctx context.Context, arg RestoreCan
 		&i.CancellationRevertedAt,
 	)
 	return i, err
-}
-
-const sessionAttributionByEvent = `-- name: SessionAttributionByEvent :many
-SELECT
-    s.id AS session_id,
-    s.sequence_order,
-    COALESCE(SUM(
-        CASE WHEN c.payment_status = 'paid'
-             THEN GREATEST(ci.quantity - ci.waitlisted_quantity, 0)
-             ELSE 0 END), 0)::bigint AS sold_units,
-    COALESCE(SUM(
-        CASE WHEN c.payment_status = 'paid'
-             THEN GREATEST(ci.quantity - ci.waitlisted_quantity, 0) * ci.unit_price
-             ELSE 0 END), 0)::bigint AS revenue_cents
-FROM live_sessions s
-LEFT JOIN cart_items ci ON ci.session_id = s.id
-LEFT JOIN carts c ON c.id = ci.cart_id
-WHERE s.event_id = $1
-GROUP BY s.id, s.sequence_order
-ORDER BY s.sequence_order
-`
-
-type SessionAttributionByEventRow struct {
-	SessionID     pgtype.UUID `json:"session_id"`
-	SequenceOrder int32       `json:"sequence_order"`
-	SoldUnits     int64       `json:"sold_units"`
-	RevenueCents  int64       `json:"revenue_cents"`
-}
-
-// Per-session attribution within an event (first-touch): sold units and paid
-// revenue in cents, credited to the session each item was first added in.
-// Returns every session of the event, ordered, including zero-revenue ones.
-func (q *Queries) SessionAttributionByEvent(ctx context.Context, eventID pgtype.UUID) ([]SessionAttributionByEventRow, error) {
-	rows, err := q.db.Query(ctx, sessionAttributionByEvent, eventID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []SessionAttributionByEventRow{}
-	for rows.Next() {
-		var i SessionAttributionByEventRow
-		if err := rows.Scan(
-			&i.SessionID,
-			&i.SequenceOrder,
-			&i.SoldUnits,
-			&i.RevenueCents,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const setCartERPStockLaunched = `-- name: SetCartERPStockLaunched :exec

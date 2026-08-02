@@ -255,27 +255,19 @@ FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1;
 
--- name: SessionAttributionByEvent :many
--- Per-session attribution within an event (first-touch): sold units and paid
--- revenue in cents, credited to the session each item was first added in.
--- Returns every session of the event, ordered, including zero-revenue ones.
-SELECT
-    s.id AS session_id,
-    s.sequence_order,
-    COALESCE(SUM(
-        CASE WHEN c.payment_status = 'paid'
-             THEN GREATEST(ci.quantity - ci.waitlisted_quantity, 0)
-             ELSE 0 END), 0)::bigint AS sold_units,
-    COALESCE(SUM(
-        CASE WHEN c.payment_status = 'paid'
-             THEN GREATEST(ci.quantity - ci.waitlisted_quantity, 0) * ci.unit_price
-             ELSE 0 END), 0)::bigint AS revenue_cents
-FROM live_sessions s
-LEFT JOIN cart_items ci ON ci.session_id = s.id
-LEFT JOIN carts c ON c.id = ci.cart_id
-WHERE s.event_id = $1
-GROUP BY s.id, s.sequence_order
-ORDER BY s.sequence_order;
+-- SessionAttributionByEvent foi REMOVIDA (Fatia 5). Nunca teve chamador Go — e
+-- não era aproveitável, por três motivos que a métrica em dois níveis proíbe:
+--   1. chaveava por cart_items.session_id, que é FIRST-TOUCH (o COALESCE do
+--      UpsertCartItem): creditava à segunda o que foi vendido na quarta;
+--   2. subtraía waitlisted_quantity, enquanto a receita do evento
+--      (cart_product_total_cents / orders.total_cents) usa quantity CHEIO — a
+--      soma das sessões daria SEMPRE menos que o total do evento;
+--   3. recalculava dos cart_items vivos filtrando payment_status, em vez de ler
+--      o congelado (RN-14).
+-- Quem responde "quanto a transmissão de terça faturou" agora é o par
+-- ListSessionConfirmedRevenueByEvent (confirmado, de order_items) +
+-- ListOpenCartItemsByEvent/ListCartItemEventsByEvent (projetado, alocado sobre
+-- o log pelo MESMO AllocateBySession do selamento).
 
 -- name: FinalizeCartsByEvent :many
 -- RN-06: ao encerrar o EVENTO, o carrinho sai de 'active' ("pode pagar, sem
@@ -389,27 +381,85 @@ GROUP BY p.id, p.name, p.image_url, p.keyword
 ORDER BY total_quantity DESC;
 
 -- =============================================================================
--- SESSION DETAILS - Stats per session
+-- MÉTRICA EM DOIS NÍVEIS — por SESSÃO e agregada por EVENTO (Fatia 5)
+--
+-- GetSessionStats foi REMOVIDA. Ela agrupava por carts.session_id, que é a
+-- sessão em que o carrinho NASCEU (gravada uma única vez no CreateCart e nunca
+-- mais tocada). Com o carrinho unificado da campanha (RN-02) um carrinho vive a
+-- semana inteira, então o carrinho INTEIRO — inclusive o que foi comprado na
+-- quinta — era creditado à transmissão de segunda. Além disso ela era chamada
+-- uma vez POR SESSÃO dentro do laço de GetEventWithSessions (N+1) para alimentar
+-- campos que a tela sequer renderizava.
+--
+-- No lugar entram três queries de EVENTO (uma chamada, não N):
+--   • confirmado  ← order_items.session_id, o congelado do pedido pago;
+--   • projetado   ← cart_items (quantidade final) + cart_item_events (de onde
+--                   veio cada unidade), repartido em Go por AllocateBySession —
+--                   a MESMA função que o selamento usa. Duas implementações da
+--                   mesma regra seria exatamente a divergência que a métrica em
+--                   dois níveis não pode ter.
+--
+-- O INVARIANTE (inegociável): a soma das sessões bate exatamente com o total do
+-- evento em GetEventStats. Por isso cada query abaixo repete, ao pé da letra, o
+-- predicado do seu par lá em cima — e por isso o balde session_id IS NULL ("sem
+-- transmissão") é devolvido junto: sem ele a soma não fecha.
 -- =============================================================================
 
--- name: GetSessionStats :one
--- Returns stats for a specific session: carts count and revenue
+-- name: ListSessionConfirmedRevenueByEvent :many
+-- Receita CONFIRMADA por transmissão: o congelado do pedido, repartido pela
+-- sessão que vendeu cada unidade (RN-13). Uma linha por sessão + a linha
+-- session_id NULL (adição sem transmissão, ou pedido anterior ao log).
+--
+-- Fecha com GetEventStats.confirmed_revenue (SUM(orders.total_cents)) por
+-- construção: o selamento grava order_items com o unit_price do carrinho e
+-- AllocateBySession garante SUM(order_items.quantity) == cart_items.quantity,
+-- logo SUM(quantity*unit_price) == cart_product_total_cents == total_cents.
 SELECT
-    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1), 0)::int AS total_carts,
-    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.session_id = $1 AND ct.payment_status = 'paid'), 0)::int AS paid_carts,
-    -- Grupo C: total_revenue stays cart-based (projection over all non-expired carts)
-    COALESCE((
-        SELECT SUM(cart_product_total_cents(ct.id))
-        FROM carts ct
-        WHERE ct.session_id = $1 AND ct.status != 'expired'
-    ), 0)::bigint AS total_revenue,
-    -- Grupo A: paid_revenue reads from sealed orders
-    COALESCE((
-        SELECT SUM(o.total_cents)
-        FROM orders o
-        JOIN carts ct ON ct.id = o.cart_id
-        WHERE ct.session_id = $1 AND o.status = 'paid'
-    ), 0)::bigint AS paid_revenue;
+    oi.session_id,
+    COALESCE(SUM(oi.quantity), 0)::int                    AS sold_units,
+    COALESCE(SUM(oi.quantity * oi.unit_price), 0)::bigint AS revenue_cents,
+    COUNT(DISTINCT o.cart_id)::int                        AS paid_carts
+FROM order_items oi
+JOIN orders o ON o.id = oi.order_id
+WHERE o.event_id = $1 AND o.status = 'paid'
+GROUP BY oi.session_id;
+
+-- name: ListOpenCartItemsByEvent :many
+-- A quantidade FINAL de cada produto nos carrinhos que entram na projeção.
+--
+-- O predicado (status IN ('active','checkout')) e a quantidade CHEIA são cópia
+-- literal de GetEventStats.projected_revenue — inclusive o fato de que o
+-- carrinho PAGO continua entrando (ele permanece em 'checkout' depois do
+-- pagamento). Isso é herança da semântica atual de "projetado", e mexer nela é
+-- assunto da separação de estados (RN-06), não da métrica: o que a Fatia 5
+-- garante é que os dois níveis usem O MESMO predicado, senão a soma não fecha.
+SELECT
+    ci.cart_id,
+    ci.product_id,
+    ci.quantity,
+    ci.unit_price
+FROM carts ct
+JOIN cart_items ci ON ci.cart_id = ct.id
+WHERE ct.event_id = $1
+  AND ct.status IN ('active', 'checkout')
+ORDER BY ci.cart_id, ci.product_id;
+
+-- name: ListCartItemEventsByEvent :many
+-- O log de adições dos MESMOS carrinhos da query acima, na ordem que
+-- AllocateBySession exige (cronológica por produto, id desempatando).
+-- Ele diz de onde veio cada unidade; a quantidade final continua sendo a de
+-- cart_items.
+SELECT
+    cie.cart_id,
+    cie.product_id,
+    cie.session_id,
+    cie.quantity,
+    cie.unit_price
+FROM cart_item_events cie
+JOIN carts ct ON ct.id = cie.cart_id
+WHERE ct.event_id = $1
+  AND ct.status IN ('active', 'checkout')
+ORDER BY cie.cart_id, cie.product_id, cie.created_at, cie.id;
 
 -- =============================================================================
 -- ERP SYNC & EXPIRATION

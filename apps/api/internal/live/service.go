@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -585,6 +586,22 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		return EventOutput{}, err
 	}
 
+	// Métrica das transmissões: UMA leitura por evento, não uma por sessão. A
+	// GetSessionStats que morava aqui rodava dentro do laço (N+1) e ainda
+	// creditava o carrinho inteiro à sessão em que ele nasceu.
+	//
+	// Falha aqui não derruba a tela do evento: o painel volta com os números
+	// zerados, que é muito melhor que 500 no detalhe do evento inteiro.
+	revenueBySession := map[string]SessionRevenueOutput{}
+	if metrics, merr := s.GetSessionMetrics(ctx, event.ID, storeID); merr != nil {
+		logger.From(ctx, s.logger).Warn("failed to get session metrics",
+			zap.String("event_id", event.ID), zap.Error(merr))
+	} else {
+		for _, m := range metrics.Sessions {
+			revenueBySession[m.SessionID] = m.SessionRevenueOutput
+		}
+	}
+
 	// Build session outputs with platforms and stats
 	sessions := make([]SessionOutput, len(sessionRows))
 	for i, sessionRow := range sessionRows {
@@ -606,22 +623,6 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 				PlatformLiveID: p.PlatformLiveID,
 				AddedAt:        p.AddedAt,
 			}
-		}
-
-		// Get session stats (carts and revenue)
-		var totalCarts, paidCarts int
-		var totalRevenue, paidRevenue int64
-		stats, err := s.repo.GetSessionStats(ctx, sessionRow.ID)
-		if err != nil {
-			logger.From(ctx, s.logger).Warn("failed to get session stats",
-				zap.String("session_id", sessionRow.ID),
-				zap.Error(err),
-			)
-		} else {
-			totalCarts = stats.TotalCarts
-			paidCarts = stats.PaidCarts
-			totalRevenue = stats.TotalRevenue
-			paidRevenue = stats.PaidRevenue
 		}
 
 		// Get comments for this session (limit 100 for performance)
@@ -647,15 +648,13 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 			EventID:                sessionRow.EventID,
 			Type:                   sessionRow.Type,
 			Status:                 sessionRow.Status,
+			SequenceOrder:          sessionRow.SequenceOrder,
 			CurrentActiveProductID: sessionRow.CurrentActiveProductID,
 			ProcessingPaused:       sessionRow.ProcessingPaused,
 			StartedAt:              sessionRow.StartedAt,
 			EndedAt:                sessionRow.EndedAt,
 			TotalComments:          sessionRow.TotalComments,
-			TotalCarts:             totalCarts,
-			PaidCarts:              paidCarts,
-			TotalRevenue:           totalRevenue,
-			PaidRevenue:            paidRevenue,
+			SessionRevenueOutput:   revenueBySession[sessionRow.ID],
 			Platforms:              platformOutputs,
 			Comments:               commentOutputs,
 			CreatedAt:              sessionRow.CreatedAt,
@@ -1362,6 +1361,110 @@ func (s *Service) GetEventStats(ctx context.Context, eventID, storeID string) (E
 		ProjectedRevenue:  stats.ProjectedRevenue,
 		ConfirmedRevenue:  stats.ConfirmedRevenue,
 	}, nil
+}
+
+// GetSessionMetrics devolve a métrica do evento quebrada por transmissão —
+// a Fatia 5 (RN-12/RN-13/RN-29).
+//
+// Contrato que o consumidor pode confiar: a soma de Sessions + Unattributed é
+// EXATAMENTE ConfirmedRevenue e ProjectedRevenue, e esses dois batem com o
+// confirmed/projected de GetEventStats. Não é coincidência nem arredondamento:
+//   • confirmado — order_items é materializado por AllocateBySession com o
+//     unit_price do carrinho, logo SUM(qty*price) por sessão reconstrói
+//     orders.total_cents;
+//   • projetado  — a mesma AllocateBySession roda aqui sobre os mesmos carrinhos
+//     que GetEventStats.projected_revenue soma.
+//
+// Toda sessão do evento aparece, inclusive as que não venderam nada — "a live de
+// terça faturou zero" é uma resposta, sumir da lista não é.
+func (s *Service) GetSessionMetrics(ctx context.Context, eventID, storeID string) (EventSessionMetricsOutput, error) {
+	if _, err := s.repo.GetEventByID(ctx, eventID, storeID); err != nil {
+		return EventSessionMetricsOutput{}, err
+	}
+
+	sessions, err := s.repo.ListSessionsByEvent(ctx, eventID)
+	if err != nil {
+		return EventSessionMetricsOutput{}, err
+	}
+
+	confirmed, err := s.repo.ListSessionConfirmedRevenueByEvent(ctx, eventID)
+	if err != nil {
+		return EventSessionMetricsOutput{}, err
+	}
+
+	items, additions, err := s.repo.ListProjectionInputByEvent(ctx, eventID)
+	if err != nil {
+		return EventSessionMetricsOutput{}, err
+	}
+	projected := ProjectBySession(items, additions)
+
+	revenue := map[string]*SessionRevenueOutput{}
+	pick := func(sessionID string) *SessionRevenueOutput {
+		r := revenue[sessionID]
+		if r == nil {
+			r = &SessionRevenueOutput{}
+			revenue[sessionID] = r
+		}
+		return r
+	}
+	for _, c := range confirmed {
+		r := pick(c.SessionID)
+		r.PaidCarts, r.SoldUnits, r.ConfirmedRevenue = c.PaidCarts, c.SoldUnits, c.RevenueCents
+	}
+	for _, p := range projected {
+		r := pick(p.SessionID)
+		r.OpenCarts, r.ProjectedUnits, r.ProjectedRevenue = p.OpenCarts, p.Units, p.RevenueCents
+	}
+
+	out := EventSessionMetricsOutput{EventID: eventID}
+
+	// As sessões, na ordem da campanha. ListSessionsByEvent devolve por
+	// created_at DESC (a ordem da tela); relatório se lê da 1ª para a última.
+	rows := make([]SessionMetricsOutput, 0, len(sessions))
+	for _, sess := range sessions {
+		row := SessionMetricsOutput{
+			SessionID:     sess.ID,
+			SequenceOrder: sess.SequenceOrder,
+			Type:          sess.Type,
+			Status:        sess.Status,
+		}
+		if r := revenue[sess.ID]; r != nil {
+			row.SessionRevenueOutput = *r
+		}
+		rows = append(rows, row)
+		delete(revenue, sess.ID)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].SequenceOrder < rows[j].SequenceOrder })
+	out.Sessions = rows
+
+	// O que sobrou no mapa é receita sem sessão viva. O balde "" é o caso
+	// normal (adição pelo painel, ou carrinho anterior ao log). Um id que não
+	// está mais em live_sessions só apareceria se a sessão fosse apagada com
+	// pedido selado — o ON DELETE SET NULL das FKs impede, mas se acontecer o
+	// valor cai aqui em vez de sumir da soma.
+	var unattributed SessionMetricsOutput
+	var hasUnattributed bool
+	for _, r := range revenue {
+		hasUnattributed = true
+		unattributed.PaidCarts += r.PaidCarts
+		unattributed.SoldUnits += r.SoldUnits
+		unattributed.ConfirmedRevenue += r.ConfirmedRevenue
+		unattributed.OpenCarts += r.OpenCarts
+		unattributed.ProjectedUnits += r.ProjectedUnits
+		unattributed.ProjectedRevenue += r.ProjectedRevenue
+	}
+	if hasUnattributed {
+		out.Unattributed = &unattributed
+	}
+
+	for _, row := range out.Sessions {
+		out.ConfirmedRevenue += row.ConfirmedRevenue
+		out.ProjectedRevenue += row.ProjectedRevenue
+	}
+	out.ConfirmedRevenue += unattributed.ConfirmedRevenue
+	out.ProjectedRevenue += unattributed.ProjectedRevenue
+
+	return out, nil
 }
 
 // ListCartsWithTotalByEvent returns all carts for an event with total value and item count.

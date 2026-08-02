@@ -1820,6 +1820,7 @@ func toSessionRow(row sqlc.LiveSession) SessionRow {
 		EventID:                row.EventID.String(),
 		Type:                   row.Type,
 		Status:                 row.Status,
+		SequenceOrder:          int(row.SequenceOrder),
 		CurrentActiveProductID: activeProductID,
 		ProcessingPaused:       row.ProcessingPaused,
 		StartedAt:              startedAt,
@@ -1986,31 +1987,97 @@ func (r *Repository) ListProductsByEvent(ctx context.Context, eventID string) ([
 	return products, nil
 }
 
-// SessionStatsRow holds cart statistics for a session
-type SessionStatsRow struct {
-	TotalCarts   int
+// =============================================================================
+// MÉTRICA EM DOIS NÍVEIS (Fatia 5)
+//
+// GetSessionStats saiu daqui: agrupava por carts.session_id (a sessão em que o
+// carrinho NASCEU) e era chamada uma vez por sessão dentro do laço do evento.
+// As três leituras abaixo são POR EVENTO — uma chamada cada, não N.
+// =============================================================================
+
+// SessionConfirmedRow é o confirmado de uma transmissão. SessionID vazio é o
+// balde "sem transmissão".
+type SessionConfirmedRow struct {
+	SessionID    string
+	SoldUnits    int
+	RevenueCents int64
 	PaidCarts    int
-	TotalRevenue int64
-	PaidRevenue  int64
 }
 
-func (r *Repository) GetSessionStats(ctx context.Context, sessionID string) (*SessionStatsRow, error) {
-	uid, err := parseUUID(sessionID)
+// ListSessionConfirmedRevenueByEvent devolve a receita CONGELADA repartida por
+// transmissão, direto de order_items (RN-13).
+func (r *Repository) ListSessionConfirmedRevenueByEvent(ctx context.Context, eventID string) ([]SessionConfirmedRow, error) {
+	uid, err := parseUUID(eventID)
 	if err != nil {
 		return nil, err
 	}
 
-	row, err := r.q.GetSessionStats(ctx, uid)
+	rows, err := r.q.ListSessionConfirmedRevenueByEvent(ctx, uid)
 	if err != nil {
-		return nil, fmt.Errorf("getting session stats: %w", err)
+		return nil, fmt.Errorf("listing session confirmed revenue: %w", err)
 	}
 
-	return &SessionStatsRow{
-		TotalCarts:   int(row.TotalCarts),
-		PaidCarts:    int(row.PaidCarts),
-		TotalRevenue: row.TotalRevenue,
-		PaidRevenue:  row.PaidRevenue,
-	}, nil
+	out := make([]SessionConfirmedRow, len(rows))
+	for i, row := range rows {
+		var sessionID string
+		if row.SessionID.Valid {
+			sessionID = row.SessionID.String()
+		}
+		out[i] = SessionConfirmedRow{
+			SessionID:    sessionID,
+			SoldUnits:    int(row.SoldUnits),
+			RevenueCents: row.RevenueCents,
+			PaidCarts:    int(row.PaidCarts),
+		}
+	}
+	return out, nil
+}
+
+// ListProjectionInputByEvent devolve as duas metades do projetado: a quantidade
+// final de cada item dos carrinhos abertos e o log de adições desses mesmos
+// carrinhos. Quem junta é ProjectBySession — o repositório não faz conta.
+func (r *Repository) ListProjectionInputByEvent(ctx context.Context, eventID string) ([]OpenCartItem, []CartItemAdditionRow, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	itemRows, err := r.q.ListOpenCartItemsByEvent(ctx, uid)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listing open cart items: %w", err)
+	}
+	items := make([]OpenCartItem, len(itemRows))
+	for i, row := range itemRows {
+		items[i] = OpenCartItem{
+			CartID:    row.CartID.String(),
+			ProductID: row.ProductID.String(),
+			Quantity:  int(row.Quantity.Int32),
+			UnitPrice: row.UnitPrice.Int64,
+		}
+	}
+
+	logRows, err := r.q.ListCartItemEventsByEvent(ctx, uid)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listing cart item events: %w", err)
+	}
+	additions := make([]CartItemAdditionRow, len(logRows))
+	for i, row := range logRows {
+		var sessionID string
+		if row.SessionID.Valid {
+			sessionID = row.SessionID.String()
+		}
+		additions[i] = CartItemAdditionRow{
+			CartID:    row.CartID.String(),
+			ProductID: row.ProductID.String(),
+			CartItemAddition: CartItemAddition{
+				SessionID: sessionID,
+				Quantity:  int(row.Quantity),
+				UnitPrice: row.UnitPrice,
+			},
+		}
+	}
+
+	return items, additions, nil
 }
 
 // =============================================================================

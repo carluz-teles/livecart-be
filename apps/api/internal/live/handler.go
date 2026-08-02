@@ -50,6 +50,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 
 	// Event details endpoints
 	g.Get("/:id/event-stats", h.GetEventStats)
+	g.Get("/:id/session-metrics", h.GetSessionMetrics)
 	g.Get("/:id/pulse", h.GetPulse)
 	g.Get("/:id/carts", h.ListCarts)
 	g.Get("/:id/comments", h.ListComments)
@@ -757,21 +758,19 @@ func toEventResponse(o EventOutput) EventResponse {
 		}
 
 		sessions[i] = SessionResponse{
-			ID:            s.ID,
-			EventID:       s.EventID,
-			Type:          s.Type,
-			Status:        s.Status,
-			StartedAt:     s.StartedAt,
-			EndedAt:       s.EndedAt,
-			TotalComments: s.TotalComments,
-			TotalCarts:    s.TotalCarts,
-			PaidCarts:     s.PaidCarts,
-			TotalRevenue:  s.TotalRevenue,
-			PaidRevenue:   s.PaidRevenue,
-			Platforms:     platforms,
-			Comments:      comments,
-			CreatedAt:     s.CreatedAt,
-			UpdatedAt:     s.UpdatedAt,
+			ID:                     s.ID,
+			EventID:                s.EventID,
+			Type:                   s.Type,
+			Status:                 s.Status,
+			SequenceOrder:          s.SequenceOrder,
+			StartedAt:              s.StartedAt,
+			EndedAt:                s.EndedAt,
+			TotalComments:          s.TotalComments,
+			SessionRevenueResponse: newSessionRevenueResponse(s.SessionRevenueOutput),
+			Platforms:              platforms,
+			Comments:               comments,
+			CreatedAt:              s.CreatedAt,
+			UpdatedAt:              s.UpdatedAt,
 		}
 	}
 
@@ -833,6 +832,68 @@ func (h *Handler) GetEventStats(c *fiber.Ctx) error {
 		ProjectedRevenue:  output.ProjectedRevenue,
 		ConfirmedRevenue:  output.ConfirmedRevenue,
 	})
+}
+
+// GetSessionMetrics godoc
+// @Summary      Get per-session metrics for an event
+// @Description  Métrica em dois níveis (Fatia 5): receita confirmada (pedidos selados) e projetada (carrinhos abertos) quebrada por transmissão, mais o balde "sem transmissão". A soma de sessions + unattributed bate exatamente com o confirmed/projected de event-stats.
+// @Tags         lives
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Live event UUID"
+// @Success      200 {object} httpx.Envelope{data=EventSessionMetricsResponse}
+// @Failure      404 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/lives/{id}/session-metrics [get]
+// @Security     BearerAuth
+func (h *Handler) GetSessionMetrics(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	eventID := c.Params("id")
+
+	output, err := h.service.GetSessionMetrics(c.UserContext(), eventID, storeID)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+
+	return httpx.OK(c, newEventSessionMetricsResponse(output))
+}
+
+func newEventSessionMetricsResponse(o EventSessionMetricsOutput) EventSessionMetricsResponse {
+	sessions := make([]SessionMetricsResponse, len(o.Sessions))
+	for i, s := range o.Sessions {
+		id := s.SessionID
+		sessions[i] = SessionMetricsResponse{
+			SessionID:              &id,
+			SequenceOrder:          s.SequenceOrder,
+			Type:                   s.Type,
+			Status:                 s.Status,
+			SessionRevenueResponse: newSessionRevenueResponse(s.SessionRevenueOutput),
+		}
+	}
+
+	resp := EventSessionMetricsResponse{
+		EventID:          o.EventID,
+		ConfirmedRevenue: o.ConfirmedRevenue,
+		ProjectedRevenue: o.ProjectedRevenue,
+		Sessions:         sessions,
+	}
+	if o.Unattributed != nil {
+		// sessionId nulo é o sinal de "sem transmissão" para o painel.
+		resp.Unattributed = &SessionMetricsResponse{
+			SessionRevenueResponse: newSessionRevenueResponse(o.Unattributed.SessionRevenueOutput),
+		}
+	}
+	return resp
+}
+
+func newSessionRevenueResponse(o SessionRevenueOutput) SessionRevenueResponse {
+	return SessionRevenueResponse{
+		PaidCarts:        o.PaidCarts,
+		SoldUnits:        o.SoldUnits,
+		ConfirmedRevenue: o.ConfirmedRevenue,
+		OpenCarts:        o.OpenCarts,
+		ProjectedUnits:   o.ProjectedUnits,
+		ProjectedRevenue: o.ProjectedRevenue,
+	}
 }
 
 // ListCarts godoc
