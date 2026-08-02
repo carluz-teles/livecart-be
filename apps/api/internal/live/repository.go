@@ -1491,21 +1491,25 @@ func (r *Repository) GetStats(ctx context.Context, storeID string) (LiveStatsOut
 		return LiveStatsOutput{}, err
 	}
 
-	// total_revenue mirrors dashboard.Repository.GetStats: sum of every
-	// cart item across every cart attached to this store's events, with no
-	// payment-status filter. Keeping the two surfaces in sync so the card on
-	// /events matches "Faturamento Total" on the dashboard.
+	// total_revenue espelha dashboard.Repository.GetStats — e agora espelha de
+	// verdade. O comentário antigo prometia que as duas superfícies estavam em
+	// sincronia, mas a do dashboard migrou para orders (RN-14, Grupo B) e esta
+	// ficou somando TODO cart_item de TODO carrinho da loja, sem filtro de
+	// pagamento nenhum: carrinho aberto, expirado e cancelado entravam no
+	// "Faturamento" de /events. O lojista via, para a mesma loja, um número
+	// maior aqui do que no dashboard — e um comentário afirmando que eram o
+	// mesmo número.
+	//
+	// A subquery abaixo é literalmente a de dashboard.sql:GetDashboardStats.
 	query := `
 		SELECT
 			COUNT(*) as total_lives,
 			COUNT(*) FILTER (WHERE status = 'active') as active_lives,
 			COALESCE(SUM(total_orders), 0) as total_orders,
 			COALESCE((
-				SELECT SUM(ci.quantity * ci.unit_price)
-				FROM cart_items ci
-				JOIN carts c ON c.id = ci.cart_id
-				JOIN live_events le ON le.id = c.event_id
-				WHERE le.store_id = $1
+				SELECT SUM(o.total_cents)
+				FROM orders o
+				WHERE o.store_id = $1 AND o.status = 'paid'
 			), 0)::BIGINT as total_revenue
 		FROM live_events
 		WHERE store_id = $1
