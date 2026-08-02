@@ -79,6 +79,10 @@ const (
 	CodeLiveMediaRequired   Code = "LIVE_MEDIA_REQUIRED"   // live/service.go:253 ("mediaId is required")
 	CodeLiveProductRequired Code = "LIVE_PRODUCT_REQUIRED" // live/service.go:256 ("select at least one product for the promotion")
 	CodeLiveEventNotActive  Code = "LIVE_EVENT_NOT_ACTIVE" // live/service.go:1378,1409 (set active product / change processing on a non-active event)
+	// CreateSession com metade da mídia (platform sem platformLiveId, ou o
+	// inverso). Código próprio porque a tela do painel precisa distinguir "erro
+	// no seletor de publicação" de qualquer outro 400 da criação de sessão.
+	CodeSessionMediaIncomplete Code = "SESSION_MEDIA_INCOMPLETE" // live/service.go (CreateSession)
 
 	// --- INSTAGRAM messaging (internal/live/service.go, ResendCheckoutMessage) ---
 	CodeIgNotifyNotConfigured Code = "IG_NOTIFY_NOT_CONFIGURED" // live/service.go:1214 ("instagram notifications are not configured")

@@ -211,6 +211,56 @@ func TestSessionConfirmedRevenueMatchesOrderTotal(t *testing.T) {
 	}
 }
 
+// "Unidades vendidas" do evento sai da MESMA fonte da quebra por transmissão.
+//
+// O KPI somava cart_items.quantity de todo carrinho não expirado: carrinho
+// aberto, pendente, cancelado e até a fila de espera contavam como venda. Isso
+// deixava três definições de "vendido" na mesma tela — o KPI, o Top Produtos
+// (order_items pago) e a soma das transmissões (order_items pago) — com a
+// tooltip prometendo a mais restrita. Agora as três leem order_items de pedido
+// pago, e este teste prova que fecham sobre o selamento REAL.
+func TestEventUnitsSoldMatchesSessionBreakdown(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+
+	seed := seedCartFromTwoSessions(t)
+	if err := newListener(t).OnCartPaid(ctx, seed.cartID, seed.storeID, seed.gmv, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("OnCartPaid: %v", err)
+	}
+
+	rows, err := testQueries.ListSessionConfirmedRevenueByEvent(ctx, parseUUIDT(t, seed.eventID))
+	if err != nil {
+		t.Fatalf("ListSessionConfirmedRevenueByEvent: %v", err)
+	}
+	var unidadesPorSessao int32
+	for _, r := range rows {
+		unidadesPorSessao += r.SoldUnits
+	}
+
+	stats, err := testQueries.GetEventStats(ctx, parseUUIDT(t, seed.eventID))
+	if err != nil {
+		t.Fatalf("GetEventStats: %v", err)
+	}
+
+	// 3 vestidos (1 na segunda + 2 na quarta) + 1 brinde sem transmissão.
+	if unidadesPorSessao != 4 {
+		t.Errorf("soma das transmissões = %d unidades, quero 4", unidadesPorSessao)
+	}
+	if stats.TotalProductsSold != unidadesPorSessao {
+		t.Errorf("total_products_sold do evento (%d) != soma das transmissões (%d)",
+			stats.TotalProductsSold, unidadesPorSessao)
+	}
+
+	// E o carrinho pago sai do projetado: ele já é receita confirmada, contá-lo
+	// de novo como "expectativa" era exibir o mesmo dinheiro duas vezes.
+	if stats.ProjectedRevenue != 0 {
+		t.Errorf("projetado = %d, quero 0 — o único carrinho da campanha está pago", stats.ProjectedRevenue)
+	}
+	if stats.ConfirmedRevenue != seed.gmv {
+		t.Errorf("confirmado = %d, quero %d", stats.ConfirmedRevenue, seed.gmv)
+	}
+}
+
 func TestSessionConfirmedRevenueIsNotFirstTouch(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()

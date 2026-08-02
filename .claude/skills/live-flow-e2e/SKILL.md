@@ -91,9 +91,11 @@ Na UI, live de Instagram exige **selecionar uma live real** da integração (dro
 ```bash
 curl -s -X POST $API_BASE/api/v1/stores/$STORE_ID/lives \
   -H "Authorization: Bearer dev" -H "X-Dev-User-ID: $CLERK_ID" -H "Content-Type: application/json" \
-  -d '{"title":"[E2E] Live Teste","type":"single","platform":"instagram","platformLiveId":"SIM-'$(date +%s)'","cartExpirationMinutes":15}'
+  -d '{"title":"[E2E] Live Teste","type":"live","platform":"instagram","platformLiveId":"SIM-'$(date +%s)'","endsAt":"'$(date -u -d '+2 hours' +%Y-%m-%dT%H:%M:%SZ)'","cartExpirationMinutes":15}'
 ```
 
+- `type` é o tipo da **primeira sessão** (`live|post|reel|story`), não do evento — o evento é a campanha e não tem espécie desde a 000122. O legado `single`/`multi` ainda é aceito e cai em `live`.
+- `endsAt` é **obrigatório** (RN-05): sem teto da janela o carrinho fica sem prazo para sempre.
 - Sem `scheduledAt` o evento nasce `active`, já com sessão ativa e plataforma anexada — não precisa de `/start`.
 - `platformLiveId` é o `media.id` que roteará o webhook. Guardar `EVENT_ID` e `MEDIA_ID`. Usar `cartExpirationMinutes` ≥ 15 quando for pagar pela UI (o preenchimento leva tempo).
 

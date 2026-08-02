@@ -214,7 +214,10 @@ func (h *Handler) CreatePost(c *fiber.Ctx) error {
 	// obrigatoriedade de ends_at — uma regra, um lugar.
 
 	output, err := h.service.CreatePostEvent(c.Context(), CreatePostInput{
-		StoreID:                storeID,
+		StoreID: storeID,
+		// Type vazio continua caindo em 'post' no service — o default histórico
+		// desta rota, preservado para o chamador antigo.
+		Type:                   req.Type,
 		Title:                  req.Title,
 		MediaID:                req.MediaID,
 		MediaPermalink:         req.MediaPermalink,
@@ -516,30 +519,39 @@ func (h *Handler) CreateSession(c *fiber.Ctx) error {
 	}
 
 	output, err := h.service.CreateSession(c.Context(), CreateSessionInput{
-		EventID:        eventID,
-		StoreID:        storeID,
-		Type:           req.Type,
-		Platform:       req.Platform,
-		PlatformLiveID: req.PlatformLiveID,
+		EventID:           eventID,
+		StoreID:           storeID,
+		Type:              req.Type,
+		Platform:          req.Platform,
+		PlatformLiveID:    req.PlatformLiveID,
+		MediaPermalink:    req.MediaPermalink,
+		MediaThumbnailURL: req.MediaThumbnailURL,
+		MediaCaption:      req.MediaCaption,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	return httpx.Created(c, SessionResponse{
+	resp := SessionResponse{
 		ID:        output.ID,
 		EventID:   output.EventID,
 		Type:      output.Type,
 		Status:    output.Status,
 		CreatedAt: output.CreatedAt,
 		UpdatedAt: output.CreatedAt,
-		Platforms: []PlatformResponse{{
+	}
+	// `platforms` só existe quando há mídia. A sessão criada sem publicação
+	// devolve a lista ausente (omitempty), e não uma linha de plataforma
+	// zerada — é assim que o painel sabe pintar "sem publicação vinculada".
+	if output.Platform != nil {
+		resp.Platforms = []PlatformResponse{{
 			ID:             output.Platform.ID,
 			Platform:       output.Platform.Platform,
 			PlatformLiveID: output.Platform.PlatformLiveID,
 			AddedAt:        output.Platform.AddedAt,
-		}},
-	})
+		}}
+	}
+	return httpx.Created(c, resp)
 }
 
 // =============================================================================

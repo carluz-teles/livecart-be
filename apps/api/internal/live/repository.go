@@ -75,14 +75,27 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, s
 		return SessionRow{}, nil, 0, fmt.Errorf("inheriting event whitelist into session: %w", err)
 	}
 
-	// Add the platform to the session
-	platformRow, err := qtx.AddPlatformToSession(ctx, sqlc.AddPlatformToSessionParams{
-		SessionID:      sessionRow.ID,
-		Platform:       platform,
-		PlatformLiveID: platformLiveID,
-	})
-	if err != nil {
-		return SessionRow{}, nil, 0, fmt.Errorf("adding platform to session: %w", err)
+	// Add the platform to the session — só quando a mídia já é conhecida, o
+	// mesmo ramo que CreateEventWithSessionTx tem desde sempre. Sessão sem
+	// plataforma é estado legítimo (D1: dá para criar a transmissão ANTES de a
+	// mídia existir); ela simplesmente não captura nada até ser vinculada.
+	var platformOut *PlatformRow
+	if platform != "" && platformLiveID != "" {
+		platformRow, err := qtx.AddPlatformToSession(ctx, sqlc.AddPlatformToSessionParams{
+			SessionID:      sessionRow.ID,
+			Platform:       platform,
+			PlatformLiveID: platformLiveID,
+		})
+		if err != nil {
+			return SessionRow{}, nil, 0, fmt.Errorf("adding platform to session: %w", err)
+		}
+		platformOut = &PlatformRow{
+			ID:             platformRow.ID.String(),
+			SessionID:      platformRow.SessionID.String(),
+			Platform:       platformRow.Platform,
+			PlatformLiveID: platformRow.PlatformLiveID,
+			AddedAt:        platformRow.AddedAt.Time,
+		}
 	}
 
 	// Emit session.created in the same tx (transactional outbox), carrying the
@@ -96,16 +109,7 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, s
 		return SessionRow{}, nil, 0, fmt.Errorf("committing transaction: %w", err)
 	}
 
-	session := toSessionRow(sessionRow)
-	platformOut := &PlatformRow{
-		ID:             platformRow.ID.String(),
-		SessionID:      platformRow.SessionID.String(),
-		Platform:       platformRow.Platform,
-		PlatformLiveID: platformRow.PlatformLiveID,
-		AddedAt:        platformRow.AddedAt.Time,
-	}
-
-	return session, platformOut, inherited, nil
+	return toSessionRow(sessionRow), platformOut, inherited, nil
 }
 
 // emitSessionCreated writes the canonical session.created event to the outbox

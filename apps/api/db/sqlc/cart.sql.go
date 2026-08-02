@@ -1213,21 +1213,34 @@ SELECT
     -- Funnel metrics
     COALESCE((SELECT SUM(ls.total_comments) FROM live_sessions ls WHERE ls.event_id = $1), 0)::int AS total_comments,
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1), 0)::int AS total_carts,
-    COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.status IN ('active', 'checkout')), 0)::int AS open_carts,
+    COALESCE((
+        SELECT COUNT(*) FROM carts ct
+        WHERE ct.event_id = $1
+          AND ct.status IN ('active', 'checkout')
+          AND COALESCE(ct.payment_status, '') NOT IN ('paid', 'refunded')
+    ), 0)::int AS open_carts,
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND (ct.status = 'checkout' OR ct.checkout_url IS NOT NULL)), 0)::int AS checkout_carts,
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.payment_status = 'paid'), 0)::int AS paid_carts,
-    -- Product metrics
+    -- Product metrics — "unidades vendidas" sai de order_items de pedido PAGO,
+    -- a MESMA fonte de ListProductsByEvent (Top Produtos) e de
+    -- ListSessionConfirmedRevenueByEvent (a quebra por transmissão). Antes era
+    -- SUM(cart_items.quantity) de todo carrinho não expirado, ou seja: carrinho
+    -- aberto, pendente, cancelado e até a fila de espera contavam como venda —
+    -- três definições de "vendido" na mesma tela, e a tooltip prometia a mais
+    -- restrita ("unidades efetivamente vendidas").
     COALESCE((
-        SELECT SUM(ci.quantity)
-        FROM carts ct
-        JOIN cart_items ci ON ci.cart_id = ct.id
-        WHERE ct.event_id = $1 AND ct.status != 'expired'
+        SELECT SUM(oi.quantity)
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        WHERE o.event_id = $1 AND o.status = 'paid'
     ), 0)::int AS total_products_sold,
     -- Revenue metrics (Grupo C: projected stays cart-based; Grupo A: confirmed reads from sealed orders)
     COALESCE((
         SELECT SUM(cart_product_total_cents(ct.id))
         FROM carts ct
-        WHERE ct.event_id = $1 AND ct.status IN ('active', 'checkout')
+        WHERE ct.event_id = $1
+          AND ct.status IN ('active', 'checkout')
+          AND COALESCE(ct.payment_status, '') NOT IN ('paid', 'refunded')
     ), 0)::bigint AS projected_revenue,
     COALESCE((
         SELECT SUM(o.total_cents)
@@ -1251,6 +1264,22 @@ type GetEventStatsRow struct {
 // EVENT DETAILS - Stats and Cart Listing
 // =============================================================================
 // Returns stats for an event: comments, carts, revenue, products sold, funnel metrics
+//
+// ⚠️ O PREDICADO DO CARRINHO ABERTO ("ainda em aberto") aparece aqui em
+// open_carts e projected_revenue e é repetido, ao pé da letra, em
+// ListOpenCartItemsByEvent e ListCartItemEventsByEvent. É esse par que faz a
+// soma das transmissões fechar com o total do evento; mudar um lado só quebra
+// o invariante da Fatia 5 em silêncio.
+//
+// Ele exclui o carrinho JÁ PAGO. O carrinho não muda de status ao ser pago
+// (UpdateCartPayment mexe só em payment_status), então ele fica em 'checkout'
+// para sempre — e sem esta exclusão o mesmo dinheiro era contado duas vezes na
+// mesma tela: uma em confirmed_revenue (a venda) e outra em projected_revenue
+// ("expectativa"). A tooltip do painel promete o contrário ("carrinhos abertos
+// que ainda não foram pagos"). 'refunded' entra na exclusão pelo mesmo motivo:
+// estorno não devolve o carrinho para a expectativa de venda.
+// COALESCE porque payment_status é NULLable desde a 000001 e `NULL NOT IN (…)`
+// é NULL — sem ele o carrinho antigo sumiria do projetado.
 func (q *Queries) GetEventStats(ctx context.Context, eventID pgtype.UUID) (GetEventStatsRow, error) {
 	row := q.db.QueryRow(ctx, getEventStats, eventID)
 	var i GetEventStatsRow
@@ -1424,6 +1453,7 @@ FROM cart_item_events cie
 JOIN carts ct ON ct.id = cie.cart_id
 WHERE ct.event_id = $1
   AND ct.status IN ('active', 'checkout')
+  AND COALESCE(ct.payment_status, '') NOT IN ('paid', 'refunded')
 ORDER BY cie.cart_id, cie.product_id, cie.created_at, cie.id
 `
 
@@ -2149,6 +2179,7 @@ FROM carts ct
 JOIN cart_items ci ON ci.cart_id = ct.id
 WHERE ct.event_id = $1
   AND ct.status IN ('active', 'checkout')
+  AND COALESCE(ct.payment_status, '') NOT IN ('paid', 'refunded')
 ORDER BY ci.cart_id, ci.product_id
 `
 
@@ -2161,12 +2192,11 @@ type ListOpenCartItemsByEventRow struct {
 
 // A quantidade FINAL de cada produto nos carrinhos que entram na projeção.
 //
-// O predicado (status IN ('active','checkout')) e a quantidade CHEIA são cópia
-// literal de GetEventStats.projected_revenue — inclusive o fato de que o
-// carrinho PAGO continua entrando (ele permanece em 'checkout' depois do
-// pagamento). Isso é herança da semântica atual de "projetado", e mexer nela é
-// assunto da separação de estados (RN-06), não da métrica: o que a Fatia 5
-// garante é que os dois níveis usem O MESMO predicado, senão a soma não fecha.
+// O predicado e a quantidade CHEIA são cópia literal de
+// GetEventStats.projected_revenue — inclusive a exclusão do carrinho já pago
+// ou estornado, que entrou junto nos dois lados. O que a Fatia 5 garante é que
+// os dois níveis usem O MESMO predicado; qualquer mudança aqui tem de acontecer
+// lá em cima na mesma edição, senão a soma das sessões deixa de fechar.
 func (q *Queries) ListOpenCartItemsByEvent(ctx context.Context, eventID pgtype.UUID) ([]ListOpenCartItemsByEventRow, error) {
 	rows, err := q.db.Query(ctx, listOpenCartItemsByEvent, eventID)
 	if err != nil {
