@@ -15,6 +15,7 @@ import (
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/events"
+	"livecart/apps/api/internal/inventory"
 	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/dbtx"
 	"livecart/apps/api/lib/httpx"
@@ -1373,22 +1374,10 @@ func (r *Repository) CountActiveByEventProduct(ctx context.Context, eventID, pro
 	return int(count), err
 }
 
-// ListActiveByCartRow is the projection returned to the public checkout.
-type ListActiveByCartRow struct {
-	ID              string
-	EventID         string
-	ProductID       string
-	ProductName     string
-	ProductKeyword  string
-	ProductImageURL string
-	ProductPrice    int64
-	Quantity        int
-	Position        int
-	Status          string
-	NotifiedAt      *time.Time
-	ExpiresAt       *time.Time
-	CreatedAt       *time.Time
-}
+// ListActiveByCartRow is the projection returned to the public checkout. Its
+// canonical home moved to internal/inventory (Bloco B3a); this alias keeps the
+// repository builder and the checkout call sites compiling unchanged.
+type ListActiveByCartRow = inventory.ListActiveByCartRow
 
 // DecrementCartItem reduz a quantidade do (cart, product) por @delta. Se
 // chegar a zero, executa o DELETE numa segunda chamada para manter a
@@ -1564,19 +1553,10 @@ type CreateWaitlistItemParams struct {
 }
 
 // WaitlistItemRow represents a waitlist item.
-type WaitlistItemRow struct {
-	ID             string
-	EventID        string
-	ProductID      string
-	PlatformUserID string
-	PlatformHandle string
-	Quantity       int
-	Position       int
-	Status         string
-	CartID         string
-	NotifiedAt     *time.Time
-	ExpiresAt      *time.Time
-}
+// WaitlistItemRow's canonical home moved to internal/inventory (Bloco B3a); this
+// alias keeps the repository builder and the B3b flows still in integration
+// compiling unchanged.
+type WaitlistItemRow = inventory.WaitlistItemRow
 
 // =============================================================================
 // ERP CONTACTS

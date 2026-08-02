@@ -26,6 +26,7 @@ import (
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/integration/providers/payment"
+	"livecart/apps/api/internal/inventory"
 	"livecart/apps/api/internal/live"
 	"livecart/apps/api/internal/notification"
 	paymentdomain "livecart/apps/api/internal/payment"
@@ -146,6 +147,12 @@ type Service struct {
 	// lazily by erpStock() (production builds it in NewService; direct-literal
 	// tests get it on first use) so it always wraps THIS Service's collaborators.
 	erpStockService *erp.Service
+
+	// inventoryService owns the waitlist/fila flow (strangler-fig B3a).
+	// ListActiveWaitlistByCart / CancelWaitlistItem delegate to it. Built lazily
+	// by inventory() (production builds it in NewService; direct-literal tests get
+	// it on first use) so it always wraps THIS Service's repo/collaborators/stock.
+	inventoryService *inventory.Service
 }
 
 // erpStock returns the delegate erp.Service, building it once over this
@@ -163,6 +170,17 @@ func (s *Service) erpStock() *erp.Service {
 // package instead of routing through integration delegations. Reuses erpStock();
 // it never builds a second erp.Service.
 func (s *Service) ERP() *erp.Service { return s.erpStock() }
+
+// inventory returns the delegate inventory.Service, building it once over this
+// Service's repo adapter, collaborator methods and stock manager. Kept lazy so
+// tests that construct a Service literal (no NewService) still delegate correctly
+// — mirrors erpStock().
+func (s *Service) inventory() *inventory.Service {
+	if s.inventoryService == nil {
+		s.inventoryService = inventory.NewService(inventoryRepoAdapter{s.repo}, s, s.stock, s.logger)
+	}
+	return s.inventoryService
+}
 
 // finalisationInverted reports whether this store runs the launch-first
 // finalisation order (Fase 3).
@@ -289,11 +307,33 @@ func erpIntegrationFromRow(row *IntegrationRow) *erp.Integration {
 	}
 }
 
-// Compile-time guards: integration.Service satisfies the collaborator port and
-// the repo adapter satisfies the persistence port.
+// inventoryRepoAdapter adapts *Repository to inventory.InventoryRepository. Every
+// method is promoted from the embedded *Repository except GetCartByID, whose
+// return type (*CartRow) is mapped into the slim *inventory.CartRef so the
+// inventory package stays free of the full cart struct (and the integration
+// import — cycle guard). The waitlist DTOs the other methods return are already
+// aliases of the inventory ones, so they satisfy the port directly.
+type inventoryRepoAdapter struct{ *Repository }
+
+// GetCartByID bridges the integration-owned *CartRow into the slim
+// *inventory.CartRef the waitlist-cancel flow consumes (same cycle guard as the
+// erp adapter — the full cart row stays integration-owned). Shadows the method
+// promoted from the embedded *Repository.
+func (a inventoryRepoAdapter) GetCartByID(ctx context.Context, cartID string) (*inventory.CartRef, error) {
+	cart, err := a.Repository.GetCartByID(ctx, cartID)
+	if err != nil || cart == nil {
+		return nil, err
+	}
+	return &inventory.CartRef{StoreID: cart.StoreID, PlatformHandle: cart.PlatformHandle}, nil
+}
+
+// Compile-time guards: integration.Service satisfies the collaborator ports and
+// the repo adapters satisfy the persistence ports.
 var (
-	_ erp.StockCollaborators = (*Service)(nil)
-	_ erp.ERPRepository      = erpRepoAdapter{}
+	_ erp.StockCollaborators          = (*Service)(nil)
+	_ erp.ERPRepository               = erpRepoAdapter{}
+	_ inventory.WaitlistCollaborators = (*Service)(nil)
+	_ inventory.InventoryRepository   = inventoryRepoAdapter{}
 )
 
 // SetStorage wires the object storage client (used to delete transient post
@@ -358,9 +398,11 @@ func NewService(
 		orderAtCheckoutAll:         orderModeAll,
 		orderAtCheckoutStoreIDs:    orderModeIDs,
 	}
-	// Build the ERP stock delegate eagerly so the production singleton never
-	// races on the lazy init in erpStock() under concurrent request handling.
+	// Build the ERP stock and Inventory delegates eagerly so the production
+	// singletons never race on the lazy init in erpStock() / inventory() under
+	// concurrent request handling.
 	svc.erpStock()
+	svc.inventory()
 	return svc
 }
 
@@ -6145,73 +6187,18 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	)
 }
 
-// ListActiveWaitlistByCart é a leitura usada pelo checkout para popular a
-// seção "produtos em fila". Retorna apenas waiting/notified.
+// ListActiveWaitlistByCart delega para inventory.Service (Bloco B3a — a lógica
+// vive em internal/inventory). Assinatura pública preservada: o checkout continua
+// chamando integration.Service.
 func (s *Service) ListActiveWaitlistByCart(ctx context.Context, cartID string) ([]ListActiveByCartRow, error) {
-	return s.repo.ListActiveByCart(ctx, cartID)
+	return s.inventory().ListActiveWaitlistByCart(ctx, cartID)
 }
 
-// CancelWaitlistItem é a operação pública "sair da fila": cliente desiste
-// de uma entry. Quando estava 'notified' (já promovido para o cart), o
-// stock volta para o próximo da fila — mesmo fluxo do worker de expiração.
-// Quando estava 'waiting', apenas marca como 'cancelled'.
-//
-// Ownership é validada pela query (cart_id no WHERE de CancelWaitlistItem).
-// Retorna (true) se algo foi alterado, (false) se a row não existia ou já
-// estava em estado terminal.
+// CancelWaitlistItem delega para inventory.Service (Bloco B3a). Assinatura
+// pública preservada: o endpoint "sair da fila" continua chamando
+// integration.Service.
 func (s *Service) CancelWaitlistItem(ctx context.Context, waitlistItemID, cartID string) (bool, error) {
-	// Carrega antes do UPDATE para saber se precisamos disparar a
-	// devolução de estoque (status='notified').
-	item, err := s.repo.GetWaitlistItemForCart(ctx, waitlistItemID, cartID)
-	if err != nil {
-		return false, fmt.Errorf("loading waitlist item: %w", err)
-	}
-	if item == nil {
-		return false, nil
-	}
-	if item.Status != "waiting" && item.Status != "notified" {
-		// Já fulfilled / expired / cancelled — no-op.
-		return false, nil
-	}
-	if err := s.repo.CancelWaitlistItem(ctx, waitlistItemID, cartID); err != nil {
-		return false, fmt.Errorf("cancelling waitlist item: %w", err)
-	}
-
-	if item.Status == "notified" {
-		// O cliente já tinha o item reservado no cart + ERP. Devolve
-		// tudo via mesmo fluxo do worker de expiração.
-		if _, err := s.repo.DecrementCartItem(ctx, cartID, item.ProductID, item.Quantity); err != nil {
-			logger.From(ctx, s.logger).Warn("failed to decrement cart item on waitlist cancel",
-				zap.String("waitlist_item_id", waitlistItemID),
-				zap.Error(err),
-			)
-		}
-		cart, _ := s.repo.GetCartByID(ctx, cartID)
-		if cart != nil {
-			// AdjustStockReservationDelta also bumps products.stock for delta<0,
-			// so no separate IncrementProductStock call is needed here.
-			if _, err := s.AdjustStockReservationDelta(ctx, cart.StoreID, cartID, item.EventID, item.ProductID, -item.Quantity, 0, cart.PlatformHandle, StockOpWaitlistCancel); err != nil {
-				logger.From(ctx, s.logger).Warn("failed to reverse reservation on waitlist cancel",
-					zap.String("waitlist_item_id", waitlistItemID),
-					zap.Error(err),
-				)
-			}
-		} else {
-			// Cart desapareceu: ainda precisamos devolver o estoque local que
-			// o promote consumiu, para a próxima entry da fila ser promovível.
-			if err := s.stock.Release(ctx, ReleaseParams{Op: StockOpWaitlistCancel, ProductID: item.ProductID, Quantity: item.Quantity, CartID: cartID, EventID: item.EventID}); err != nil {
-				logger.From(ctx, s.logger).Warn("failed to increment local stock on waitlist cancel (cart missing)",
-					zap.String("waitlist_item_id", waitlistItemID),
-					zap.Error(err),
-				)
-			}
-		}
-		// Promove o próximo da fila — best-effort.
-		if cart != nil {
-			s.ProcessWaitlistForProduct(ctx, item.EventID, item.ProductID, cart.StoreID)
-		}
-	}
-	return true, nil
+	return s.inventory().CancelWaitlistItem(ctx, waitlistItemID, cartID)
 }
 
 // ExpireNotifiedWaitlistItem expira uma entrada 'notified' cujo TTL passou:
