@@ -348,3 +348,139 @@ func TestCreationRequestsAcceptTheSessionVocabulary(t *testing.T) {
 		}
 	})
 }
+
+// TestLinkSessionMediaClosesTheLaterPromise — "crie a transmissão agora e
+// vincule a publicação depois" só é verdade se o depois existir.
+//
+// Criar sessão sem mídia já funcionava, e o painel passou a anunciar isso com o
+// badge "Sem publicação vinculada" e a ajuda "vincule quando a publicação
+// existir". Só que o único vínculo posterior era POST /lives/:id/platforms, que
+// escolhe a sessão sozinha (a mais recente no ar): numa campanha com duas
+// transmissões ele grava na errada e ninguém percebe, porque o comentário
+// simplesmente continua não virando carrinho.
+//
+// Este teste prende as duas metades: o vínculo cai na sessão NOMEADA, com os
+// metadados da publicação, e sessão de outro evento é recusada.
+func TestLinkSessionMediaClosesTheLaterPromise(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	storeID := seedWindowStore(t, ctx, "vincular-midia-depois")
+	svc := newWindowService(nil)
+	endsAt := time.Now().Add(48 * time.Hour)
+
+	campanha, err := svc.Create(ctx, CreateLiveInput{
+		StoreID: storeID, Title: "Semana Black", EndsAt: &endsAt,
+	})
+	if err != nil {
+		t.Fatalf("criar campanha: %v", err)
+	}
+
+	// Duas transmissões sem mídia: é justamente o caso em que a rota por evento
+	// não tem como acertar qual delas o lojista quis vincular.
+	primeira, err := svc.CreateSession(ctx, CreateSessionInput{
+		EventID: campanha.ID, StoreID: storeID, Type: SessionTypeLive,
+	})
+	if err != nil {
+		t.Fatalf("criar primeira transmissao: %v", err)
+	}
+	segunda, err := svc.CreateSession(ctx, CreateSessionInput{
+		EventID: campanha.ID, StoreID: storeID, Type: SessionTypePost,
+	})
+	if err != nil {
+		t.Fatalf("criar segunda transmissao: %v", err)
+	}
+
+	const mediaID = "media-vinculada-depois"
+	out, err := svc.LinkSessionMedia(ctx, LinkSessionMediaInput{
+		StoreID:           storeID,
+		EventID:           campanha.ID,
+		SessionID:         primeira.ID,
+		Platform:          "instagram",
+		PlatformLiveID:    mediaID,
+		MediaPermalink:    "https://instagram.com/p/xyz",
+		MediaThumbnailURL: "https://cdn.example/capa.jpg",
+		MediaCaption:      "Post de quarta",
+	})
+	if err != nil {
+		t.Fatalf("vincular midia na sessao: %v", err)
+	}
+	if out.SessionID != primeira.ID {
+		t.Errorf("vinculo caiu na sessao %s, quero %s", out.SessionID, primeira.ID)
+	}
+
+	var sessaoDoVinculo string
+	var permalink, thumb, caption *string
+	if err := testPool.QueryRow(ctx,
+		`SELECT session_id::text, media_permalink, media_thumbnail_url, media_caption
+		   FROM live_session_platforms WHERE platform_live_id = $1`, mediaID,
+	).Scan(&sessaoDoVinculo, &permalink, &thumb, &caption); err != nil {
+		t.Fatalf("ler vinculo: %v", err)
+	}
+	if sessaoDoVinculo != primeira.ID {
+		t.Errorf("banco gravou o vinculo na sessao %s, quero %s", sessaoDoVinculo, primeira.ID)
+	}
+	if permalink == nil || *permalink != "https://instagram.com/p/xyz" {
+		t.Errorf("permalink = %v, quero o do payload — a publicacao vinculada depois "+
+			"tem de ficar igual a que entrou na criacao", permalink)
+	}
+	if thumb == nil || *thumb != "https://cdn.example/capa.jpg" {
+		t.Errorf("thumbnail = %v, quero a do payload", thumb)
+	}
+	if caption == nil || *caption != "Post de quarta" {
+		t.Errorf("legenda = %v, quero a do payload", caption)
+	}
+
+	// A outra transmissão continua sem mídia — vincular uma não pode "resolver"
+	// a campanha inteira.
+	var vinculosDaSegunda int
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*) FROM live_session_platforms WHERE session_id = $1::uuid`, segunda.ID,
+	).Scan(&vinculosDaSegunda); err != nil {
+		t.Fatalf("contar vinculos da segunda: %v", err)
+	}
+	if vinculosDaSegunda != 0 {
+		t.Errorf("segunda transmissao ganhou %d vinculo(s) sem ninguem pedir", vinculosDaSegunda)
+	}
+
+	// Posse: sessão de OUTRA campanha não pode ser vinculada por este evento.
+	outra, err := svc.Create(ctx, CreateLiveInput{
+		StoreID: storeID, Title: "Outra campanha", EndsAt: &endsAt,
+	})
+	if err != nil {
+		t.Fatalf("criar outra campanha: %v", err)
+	}
+	sessaoAlheia, err := svc.CreateSession(ctx, CreateSessionInput{
+		EventID: outra.ID, StoreID: storeID, Type: SessionTypeLive,
+	})
+	if err != nil {
+		t.Fatalf("criar sessao da outra campanha: %v", err)
+	}
+	if _, err := svc.LinkSessionMedia(ctx, LinkSessionMediaInput{
+		StoreID: storeID, EventID: campanha.ID, SessionID: sessaoAlheia.ID,
+		Platform: "instagram", PlatformLiveID: "media-de-outro-evento",
+	}); err == nil {
+		t.Error("vinculo aceitou sessao de outra campanha")
+	}
+}
+
+// TestLinkSessionMediaRequestRequiresTheMediaID — nesta rota a mídia é o
+// assunto. Diferente de CreateSession, onde a ausência dos dois campos é um
+// caminho legítimo ("decidir depois"), aqui um corpo sem platformLiveId não tem
+// o que fazer e precisa morrer em 422, não gravar um vínculo vazio.
+func TestLinkSessionMediaRequestRequiresTheMediaID(t *testing.T) {
+	if err := (LinkSessionMediaRequest{Platform: "instagram"}).Validate(); err == nil {
+		t.Error("corpo sem platformLiveId passou na validacao")
+	}
+	if err := (LinkSessionMediaRequest{PlatformLiveID: "media-1"}).Validate(); err != nil {
+		t.Errorf("plataforma omitida recusada (%v) — o painel so tem Instagram e "+
+			"o ToInput preenche o default", err)
+	}
+	if err := (LinkSessionMediaRequest{Platform: "tiktok", PlatformLiveID: "m"}).Validate(); err == nil {
+		t.Error("plataforma nao suportada passou na validacao")
+	}
+	// O default do ToInput é o que evita exigir do painel um campo com um valor
+	// possível só.
+	if got := (LinkSessionMediaRequest{PlatformLiveID: "m"}).ToInput("s", "e", "sess").Platform; got != "instagram" {
+		t.Errorf("plataforma default = %q, quero instagram", got)
+	}
+}

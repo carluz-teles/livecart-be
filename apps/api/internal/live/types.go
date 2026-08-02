@@ -199,7 +199,10 @@ type CreateSessionRequest struct {
 	// sempre tenha aceitado sessão sem plataforma (é o mesmo caminho que
 	// CreateEventWithSessionTx já usa quando o lojista ainda não tem o id).
 	// A sessão nasce sem captura nenhuma e passa a capturar quando a mídia for
-	// vinculada por POST /sessions/:sessionId/platforms.
+	// vinculada por POST /lives/:id/sessions/:sessionId/platforms
+	// (LinkSessionMedia) — a rota ancorada na SESSÃO. Não use
+	// POST /lives/:id/platforms para isso: ela escolhe a sessão sozinha e, em
+	// campanha com mais de uma transmissão, vincula a errada em silêncio.
 	Platform       string `json:"platform" validate:"omitempty,oneof=instagram tiktok youtube facebook"`
 	PlatformLiveID string `json:"platformLiveId" validate:"omitempty"`
 	// Type é a natureza da transmissão (D3). Vazio = "live". Os valores aqui

@@ -1350,6 +1350,57 @@ func (s *Service) AddPlatform(ctx context.Context, input AddPlatformInput) (Plat
 	}, nil
 }
 
+// LinkSessionMedia vincula a publicação a UMA sessão nomeada.
+//
+// AddPlatform (acima) resolve a sessão sozinho, pela mais recente que estiver no
+// ar. Isso bastava quando um evento era uma transmissão só — é a rota de crash
+// recovery de live. Numa campanha guarda-chuva ela escreveria a mídia na sessão
+// errada em silêncio, que é o pior desfecho possível: o comentário continua sem
+// virar carrinho e o painel jura que está vinculado.
+//
+// Esta versão exige o sessionId e checa a posse (sessão → evento → loja) antes
+// de gravar. É o "vincular depois" que a criação de sessão sem mídia prometia.
+func (s *Service) LinkSessionMedia(ctx context.Context, input LinkSessionMediaInput) (PlatformOutput, error) {
+	if err := s.resolveSessionOfEvent(ctx, input.SessionID, input.EventID, input.StoreID); err != nil {
+		return PlatformOutput{}, err
+	}
+
+	row, err := s.repo.AddPlatformToSession(ctx, input.SessionID, input.Platform, input.PlatformLiveID)
+	if err != nil {
+		return PlatformOutput{}, err
+	}
+
+	// Best-effort, como em CreateSession e CreatePostEvent: metadado é enfeite
+	// de tela, e derrubar o vínculo por causa da miniatura trocaria a venda
+	// pela capa.
+	if input.MediaPermalink != "" || input.MediaThumbnailURL != "" || input.MediaCaption != "" {
+		if err := s.repo.SetMedia(ctx, PostMediaInput{
+			MediaID:      input.PlatformLiveID,
+			Permalink:    input.MediaPermalink,
+			ThumbnailURL: input.MediaThumbnailURL,
+			Caption:      input.MediaCaption,
+		}); err != nil {
+			logger.From(ctx, s.logger).Warn("failed to set linked media metadata",
+				zap.String("session_id", input.SessionID), zap.Error(err))
+		}
+	}
+
+	logger.From(ctx, s.logger).Info("media linked to session",
+		zap.String("event_id", input.EventID),
+		zap.String("session_id", input.SessionID),
+		zap.String("platform", input.Platform),
+		zap.String("platform_live_id", input.PlatformLiveID),
+	)
+
+	return PlatformOutput{
+		ID:             row.ID,
+		SessionID:      row.SessionID,
+		Platform:       row.Platform,
+		PlatformLiveID: row.PlatformLiveID,
+		AddedAt:        row.AddedAt,
+	}, nil
+}
+
 // ListPlatforms returns all platforms for a session.
 func (s *Service) ListPlatforms(ctx context.Context, sessionID string) ([]PlatformOutput, error) {
 	platforms, err := s.repo.ListPlatformsBySession(ctx, sessionID)

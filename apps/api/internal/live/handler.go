@@ -74,7 +74,14 @@ func (h *Handler) registerUnder(router fiber.Router, prefix string) {
 	// Session management within an event
 	g.Post("/:id/sessions", h.CreateSession)
 
-	// Platform aggregation (on sessions)
+	// Mídia POR SESSÃO — a unidade que de fato tem publicação. É o "vincular
+	// depois" que a sessão criada sem mídia prometia, e a única forma correta
+	// numa campanha com mais de uma transmissão.
+	g.Post("/:id/sessions/:sessionId/platforms", h.LinkSessionMedia)
+
+	// Platform aggregation (on sessions) — rota LEGADA por evento: resolve a
+	// sessão sozinha (a mais recente no ar). É o crash recovery de live; numa
+	// campanha mista ela escreveria na sessão errada.
 	g.Get("/:id/platforms", h.ListPlatforms)
 	g.Post("/:id/platforms", h.AddPlatform)
 	g.Delete("/:id/platforms/:platformLiveId", h.RemovePlatform)
