@@ -797,11 +797,7 @@ func (q *Queries) IncrementLiveEventOrders(ctx context.Context, id pgtype.UUID) 
 const listEventsPastEndsAt = `-- name: ListEventsPastEndsAt :many
 SELECT e.id, e.store_id
 FROM live_events e
-WHERE EXISTS (
-        SELECT 1 FROM live_sessions ls
-        WHERE ls.event_id = e.id AND ls.type IN ('post', 'reel', 'story')
-      )
-  AND e.status = 'active'
+WHERE e.status = 'active'
   AND e.ends_at IS NOT NULL
   AND e.ends_at < now()
 ORDER BY e.ends_at ASC
@@ -813,15 +809,22 @@ type ListEventsPastEndsAtRow struct {
 	StoreID pgtype.UUID `json:"store_id"`
 }
 
-// D5: eventos com sessão de post/reel/story cuja janela (ends_at) já fechou mas
-// que continuam 'active' porque nada dispara o encerramento (EffectiveStatus é
-// só derivado em leitura). O sweep chama live.Service.End em cada um para
-// finalizar carts (armar expires_at) e o ERP. Restrito a post/reel/story para
-// NÃO auto-encerrar lives agendadas que o lojista quer manter rodando além do
-// horário nominal.
+// D5/RN-05: TODO evento cuja janela (ends_at) já fechou mas que continua
+// 'active' porque nada dispara o encerramento (EffectiveStatus é só derivado em
+// leitura). O sweep chama live.Service.End em cada um para finalizar carts
+// (armar expires_at) e o ERP.
 //
-// EXISTS, não JOIN: o consumidor (End) é por EVENTO; um JOIN devolveria uma
-// linha por sessão e o evento seria encerrado N vezes.
+// O filtro por tipo SAIU. O comentário anterior justificava restringir a
+// post/reel/story para "não auto-encerrar lives agendadas que o lojista quer
+// manter rodando além do horário nominal" — essa decisão de produto foi
+// REVOGADA pela RN-05: ends_at deixou de ser horário nominal e virou o TETO
+// contratual da campanha. É ele que garante que nenhum carrinho fica órfão,
+// porque a RN-04 mantém expires_at NULL enquanto o evento está aberto. Com o
+// filtro no lugar, um evento de live com ends_at vencido nunca fechava e seus
+// carrinhos nunca ganhavam prazo.
+//
+// Esta é a REDE. O caminho preciso é a task ETA event.window_close, armada na
+// criação e re-armada na edição de ends_at.
 func (q *Queries) ListEventsPastEndsAt(ctx context.Context, limit int32) ([]ListEventsPastEndsAtRow, error) {
 	rows, err := q.db.Query(ctx, listEventsPastEndsAt, limit)
 	if err != nil {

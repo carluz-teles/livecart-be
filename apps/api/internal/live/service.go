@@ -407,11 +407,15 @@ func (s *Service) EndEventByMediaID(ctx context.Context, mediaID string) error {
 	return nil
 }
 
-// SweepEndedTimedEvents finalizes post/story events whose ends_at window has
-// closed. D5: without it, a story (ends_at = now()+24h) or a scheduled-window
-// post just changes its *effective* status on read while its carts stay
-// 'active' without a deadline — the expiry worker never reaches them. End() is
-// idempotent, so re-sweeping an already-ended event is a no-op.
+// SweepEndedTimedEvents finaliza TODO evento cuja janela (ends_at) fechou —
+// não mais só post/reel/story. D5/RN-05: ends_at deixou de ser "horário
+// nominal" e virou o teto contratual da campanha, então restringir o sweep por
+// tipo deixava o evento de live com ends_at vencido aberto para sempre e seus
+// carrinhos sem prazo (a RN-04 mantém expires_at NULL enquanto o evento está
+// aberto). Sem isto, o evento só mudava de status *efetivo* na leitura.
+//
+// É a REDE, não o caminho principal: o preciso é a task ETA event.window_close.
+// End() é idempotente, então varrer um evento já encerrado é no-op.
 func (s *Service) SweepEndedTimedEvents(ctx context.Context) {
 	events, err := s.repo.ListEventsPastEndsAt(ctx, 200)
 	if err != nil {
@@ -449,7 +453,11 @@ func (s *Service) RunScheduledEventClose(ctx context.Context, eventID, storeID s
 		return nil // window removed, or already finalized
 	}
 	if ev.EndsAt.After(time.Now().UTC()) {
-		// Window extended after the task was armed — re-arm for the new time.
+		// A janela mudou depois que a task foi armada e o caminho de edição não
+		// re-agendou (edição direta no banco, task duplicada). Tentativa
+		// best-effort: como ESTA task está ACTIVE agora, o asynq recusa apagá-la
+		// e o TaskID em conflito engole o novo horário. Quem garante o
+		// fechamento nesse caso é o sweep de ends_at.
 		if s.closeScheduler != nil {
 			return s.closeScheduler.ScheduleEventClose(ctx, eventID, storeID, *ev.EndsAt)
 		}
