@@ -540,7 +540,8 @@ type CreatePostInput struct {
 	StoreID string
 	// Type é o tipo da SESSÃO (D3): "post" (padrão) para post de feed, "reel"
 	// para Reels e "story" para Stories (janela de 24h, intenção capturada por
-	// resposta de DM). O evento continua rotulado no vocabulário legado.
+	// resposta de DM). É a ÚNICA fonte do tipo: a 000120 dropou
+	// live_events.type, então não há mais rótulo no evento para divergir dela.
 	Type                   string
 	Title                  string
 	MediaID                string
@@ -609,7 +610,9 @@ type UpdateLiveRequest struct {
 	// Janela comercial (RN-05/CA-05.7). Ponteiro + omissão = "não mexer"; string
 	// vazia = "limpar". Sem essa distinção, um PUT que só ajusta o fim apagaria
 	// o início. Editar endsAt re-agenda o fechamento — inclusive para MENOS
-	// (CA-05.4), que hoje é no-op por causa do asynq.TaskID.
+	// (CA-05.4), que exigiu events.Client.Reschedule: um Schedule com o mesmo
+	// asynq.TaskID devolve ErrTaskIDConflict e é engolido como "já armado", de
+	// modo que antecipar o fim fecharia o evento na hora antiga.
 	StartsAt *string `json:"startsAt"`
 	EndsAt   *string `json:"endsAt"`
 	// RN-10 — mesmo range do CHECK da 000073.
