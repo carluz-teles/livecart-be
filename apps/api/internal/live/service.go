@@ -301,31 +301,33 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 	return out, nil
 }
 
-// MarkPostEventWebhookActive flags that a comments webhook arrived for the post
-// event mapped to mediaID, so the polling capture stops handling it.
-func (s *Service) MarkPostEventWebhookActive(ctx context.Context, mediaID string) error {
-	return s.repo.MarkPostEventWebhookActive(ctx, mediaID)
+// MarkMediaWebhookActive flags that a comments webhook arrived for THIS media,
+// so the polling capture stops handling it. Escopo de mídia, não de evento: um
+// evento guarda-chuva tem N mídias e cada uma migra do polling para o webhook
+// no seu próprio tempo.
+func (s *Service) MarkMediaWebhookActive(ctx context.Context, mediaID string) error {
+	return s.repo.MarkMediaWebhookActive(ctx, mediaID)
 }
 
-// ListActivePostEvents returns active post events still served by polling.
-func (s *Service) ListActivePostEvents(ctx context.Context) ([]PostEventRef, error) {
-	return s.repo.ListActivePostEvents(ctx)
+// ListPollableMedia returns the media still served by the polling capture.
+func (s *Service) ListPollableMedia(ctx context.Context) ([]MediaRef, error) {
+	return s.repo.ListPollableMedia(ctx)
 }
 
-// EndPostEventByMediaID closes the post/story event mapped to mediaID when its
+// EndEventByMediaID closes the post/reel/story event that owns mediaID when its
 // media is gone on Instagram. D5: routes through End so the carts are finalized
 // (moved to 'checkout' with expires_at armed → eligible for the expiry worker)
 // and the ERP is reconciled — not just a bare status flip that left carts
 // 'active' without a deadline forever. Falls back to the raw flip if the event
 // can't be resolved.
-func (s *Service) EndPostEventByMediaID(ctx context.Context, mediaID string) error {
+func (s *Service) EndEventByMediaID(ctx context.Context, mediaID string) error {
 	ref, err := s.repo.GetActiveTimedEventByMediaID(ctx, mediaID)
 	if err != nil {
 		return err
 	}
 	if ref == nil {
 		// Nothing active to finalize; ensure polling stops anyway.
-		return s.repo.EndPostEventByMediaID(ctx, mediaID)
+		return s.repo.EndEventByMediaID(ctx, mediaID)
 	}
 	// post.window_closed: the media was deleted / window closed (distinct from a
 	// manual live end). Emitted before End (which fires event.ended).
@@ -543,6 +545,7 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		sessions[i] = SessionOutput{
 			ID:            sessionRow.ID,
 			EventID:       sessionRow.EventID,
+			Type:          sessionRow.Type,
 			Status:        sessionRow.Status,
 			StartedAt:     sessionRow.StartedAt,
 			EndedAt:       sessionRow.EndedAt,
@@ -874,7 +877,7 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 	}
 
 	// Create the session and add platform in a single transaction
-	session, platform, err := s.repo.CreateSessionWithPlatformTx(ctx, input.EventID, input.Platform, input.PlatformLiveID)
+	session, platform, err := s.repo.CreateSessionWithPlatformTx(ctx, input.EventID, SessionTypeFromEventType(input.Type), input.Platform, input.PlatformLiveID)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("failed to create session with platform",
 			zap.String("event_id", input.EventID),
@@ -892,6 +895,7 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 	return CreateSessionOutput{
 		ID:      session.ID,
 		EventID: session.EventID,
+		Type:    session.Type,
 		Status:  session.Status,
 		Platform: PlatformOutput{
 			ID:             platform.ID,
@@ -934,6 +938,7 @@ func (s *Service) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID
 	return &SessionOutput{
 		ID:            session.ID,
 		EventID:       session.EventID,
+		Type:          session.Type,
 		Status:        session.Status,
 		StartedAt:     session.StartedAt,
 		EndedAt:       session.EndedAt,

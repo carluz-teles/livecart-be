@@ -408,14 +408,21 @@ type LiveSession struct {
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 	EventID       pgtype.UUID        `json:"event_id"`
 	SequenceOrder int32              `json:"sequence_order"`
+	// D3: natureza da transmissão (live|post|reel|story). Fonte da verdade do tipo. live_events.type sobrevive como rótulo legado do vocabulário antigo (single|multi|post|story) até a 000119; 'reel' é gravado lá como 'post' para não quebrar o FE.
+	Type string `json:"type"`
 }
 
 type LiveSessionPlatform struct {
-	ID             pgtype.UUID        `json:"id"`
-	SessionID      pgtype.UUID        `json:"session_id"`
-	Platform       string             `json:"platform"`
-	PlatformLiveID string             `json:"platform_live_id"`
-	AddedAt        pgtype.Timestamptz `json:"added_at"`
+	ID                pgtype.UUID        `json:"id"`
+	SessionID         pgtype.UUID        `json:"session_id"`
+	Platform          string             `json:"platform"`
+	PlatformLiveID    string             `json:"platform_live_id"`
+	AddedAt           pgtype.Timestamptz `json:"added_at"`
+	MediaPermalink    pgtype.Text        `json:"media_permalink"`
+	MediaThumbnailUrl pgtype.Text        `json:"media_thumbnail_url"`
+	MediaCaption      pgtype.Text        `json:"media_caption"`
+	// D1/D3: true quando um webhook de comments já chegou para ESTA mídia; o polling daquela mídia para. Substitui live_events.webhook_active, que desligava o polling do EVENTO inteiro — o que cegaria a segunda mídia de um evento guarda-chuva.
+	WebhookActive bool `json:"webhook_active"`
 }
 
 type Membership struct {

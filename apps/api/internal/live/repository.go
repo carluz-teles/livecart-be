@@ -28,7 +28,8 @@ func NewRepository(q *sqlc.Queries, pool *pgxpool.Pool) *Repository {
 
 // CreateSessionWithPlatformTx creates a session and adds a platform in a single transaction.
 // This ensures atomicity - either both operations succeed or both are rolled back.
-func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, platform, platformLiveID string) (SessionRow, *PlatformRow, error) {
+// sessionType é o tipo da transmissão (D3): live|post|reel|story.
+func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, sessionType, platform, platformLiveID string) (SessionRow, *PlatformRow, error) {
 	eventUID, err := parseUUID(eventID)
 	if err != nil {
 		return SessionRow{}, nil, err
@@ -46,6 +47,7 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, p
 	sessionRow, err := qtx.CreateLiveSession(ctx, sqlc.CreateLiveSessionParams{
 		EventID: eventUID,
 		Status:  "active",
+		Type:    SessionTypeFromEventType(sessionType),
 	})
 	if err != nil {
 		return SessionRow{}, nil, fmt.Errorf("creating live session: %w", err)
@@ -145,7 +147,11 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 		return EventRow{}, SessionRow{}, nil, err
 	}
 
-	eventType := params.Type
+	// D3: params.Type chega no vocabulário da SESSÃO (live|post|reel|story) ou no
+	// legado (single|multi). A sessão guarda o tipo real — é a fonte da verdade;
+	// o evento guarda o rótulo legado, que o FE ainda lê até a 000119.
+	sessionType := SessionTypeFromEventType(params.Type)
+	eventType := LegacyEventType(params.Type)
 	if eventType == "" {
 		eventType = "single"
 	}
@@ -204,6 +210,7 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 	sessionRow, err := qtx.CreateLiveSession(ctx, sqlc.CreateLiveSessionParams{
 		EventID: eventRow.ID,
 		Status:  "active",
+		Type:    sessionType,
 	})
 	if err != nil {
 		return EventRow{}, SessionRow{}, nil, fmt.Errorf("creating live session: %w", err)
@@ -255,7 +262,8 @@ func (r *Repository) CreateEvent(ctx context.Context, params CreateEventParams) 
 		return EventRow{}, err
 	}
 
-	eventType := params.Type
+	// Sem sessão aqui: só o rótulo legado do evento (ver CreateEventWithSessionTx).
+	eventType := LegacyEventType(params.Type)
 	if eventType == "" {
 		eventType = "single"
 	}
@@ -349,8 +357,12 @@ func (r *Repository) SetPixDiscountPercent(ctx context.Context, eventID, storeID
 	return nil
 }
 
-// SetEventMedia persists the Instagram post metadata for a post-commerce event.
-// Stored via raw SQL because these columns are not wired into the sqlc INSERT.
+// SetEventMedia persists the Instagram post metadata.
+//
+// D1/A4: a verdade passou a ser a MÍDIA (live_session_platforms), chaveada pelo
+// platform_live_id — que é o próprio media_id. A escrita em live_events é
+// mantida (dual-write) só enquanto a 000119 não roda: é o que permite reverter
+// a 000109 sem perder legenda e permalink.
 func (r *Repository) SetEventMedia(ctx context.Context, eventID, storeID string, media PostMediaInput) error {
 	uid, err := parseUUID(eventID)
 	if err != nil {
@@ -359,6 +371,14 @@ func (r *Repository) SetEventMedia(ctx context.Context, eventID, storeID string,
 	storeUID, err := parseUUID(storeID)
 	if err != nil {
 		return err
+	}
+	if err := r.q.SetMediaMetadata(ctx, sqlc.SetMediaMetadataParams{
+		PlatformLiveID:    media.MediaID,
+		MediaPermalink:    pgtype.Text{String: media.Permalink, Valid: media.Permalink != ""},
+		MediaThumbnailUrl: pgtype.Text{String: media.ThumbnailURL, Valid: media.ThumbnailURL != ""},
+		MediaCaption:      pgtype.Text{String: media.Caption, Valid: media.Caption != ""},
+	}); err != nil {
+		return fmt.Errorf("setting media metadata: %w", err)
 	}
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE live_events
@@ -406,99 +426,62 @@ func (r *Repository) SetEventWindow(ctx context.Context, eventID, storeID string
 	return nil
 }
 
-// GetEventMedia returns the post media metadata for an event.
-func (r *Repository) GetEventMedia(ctx context.Context, eventID string) (*PostMedia, error) {
-	uid, err := parseUUID(eventID)
+// GetEventMedia e GetActivePostEventByMediaID foram REMOVIDAS aqui: as duas não
+// tinham nenhum chamador no repositório inteiro (regra nº 1 — não portar código
+// morto para a estrutura nova). Eram, respectivamente, a única leitura das
+// colunas media_* do evento e a "query nº 1" que o plano dimensionava como viva.
+
+// ListPollableMedia returns the media that still depend on the polling capture
+// loop — post/reel media whose comments webhook has not arrived yet.
+//
+// D3/A4: passou a iterar sobre MÍDIA, não sobre evento. Antes, um evento com
+// duas mídias marcava webhook_active no evento inteiro e a segunda mídia nascia
+// com o polling já desligado, sem nunca capturar comentário.
+func (r *Repository) ListPollableMedia(ctx context.Context) ([]MediaRef, error) {
+	rows, err := r.q.ListPollableMedia(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("listing pollable media: %w", err)
 	}
-	var m PostMedia
-	var mediaID, permalink, thumb, caption pgtype.Text
-	err = r.pool.QueryRow(ctx, `
-		SELECT COALESCE(media_id,''), COALESCE(media_permalink,''), COALESCE(media_thumbnail_url,''), COALESCE(media_caption,''), webhook_active
-		FROM live_events WHERE id = $1
-	`, uid).Scan(&mediaID, &permalink, &thumb, &caption, &m.WebhookActive)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.ErrNotFound("event not found")
+	out := make([]MediaRef, len(rows))
+	for i, row := range rows {
+		out[i] = MediaRef{
+			MediaID:       row.PlatformLiveID,
+			SessionID:     row.SessionID.String(),
+			SessionType:   row.SessionType,
+			EventID:       row.EventID.String(),
+			StoreID:       row.StoreID.String(),
+			EventStatus:   row.EventStatus,
+			WebhookActive: row.WebhookActive,
 		}
-		return nil, fmt.Errorf("getting event media: %w", err)
 	}
-	m.MediaID = mediaID.String
-	m.Permalink = permalink.String
-	m.ThumbnailURL = thumb.String
-	m.Caption = caption.String
-	return &m, nil
+	return out, nil
 }
 
-// GetActivePostEventByMediaID returns the active post event mapped to a media id,
-// used by webhook/polling capture. Returns nil when none exists.
-func (r *Repository) GetActivePostEventByMediaID(ctx context.Context, mediaID string) (*PostEventRef, error) {
-	var ref PostEventRef
-	var id, storeID pgtype.UUID
-	err := r.pool.QueryRow(ctx, `
-		SELECT id, store_id, status FROM live_events
-		WHERE media_id = $1 AND type = 'post' AND status = 'active'
-		ORDER BY created_at DESC LIMIT 1
-	`, mediaID).Scan(&id, &storeID, &ref.Status)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("getting post event by media id: %w", err)
-	}
-	ref.EventID = id.String()
-	ref.StoreID = storeID.String()
-	ref.MediaID = mediaID
-	return &ref, nil
+// MarkMediaWebhookActive flags that a comments webhook arrived for THIS media,
+// so the polling loop stops handling it. Escopo de mídia, não de evento.
+func (r *Repository) MarkMediaWebhookActive(ctx context.Context, mediaID string) error {
+	return r.q.MarkMediaWebhookActive(ctx, mediaID)
 }
 
-// ListActivePostEvents returns active post events for the polling capture loop.
-func (r *Repository) ListActivePostEvents(ctx context.Context) ([]PostEventRef, error) {
-	// Poll post events that aren't manually ended and aren't yet webhook-driven.
-	// We keep polling slightly before the start (so pre-start comments get a
-	// "not started" reply) and up to 2 days after the end (so late comments get
-	// an "ended" reply), then stop to avoid polling stale events forever.
-	rows, err := r.pool.Query(ctx, `
-		SELECT id, store_id, COALESCE(media_id,''), status, webhook_active FROM live_events
-		WHERE type = 'post' AND status = 'active' AND media_id IS NOT NULL AND webhook_active = false
-		  AND (ends_at IS NULL OR ends_at >= now() - interval '2 days')
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("listing active post events: %w", err)
-	}
-	defer rows.Close()
-	var out []PostEventRef
-	for rows.Next() {
-		var ref PostEventRef
-		var id, storeID pgtype.UUID
-		if err := rows.Scan(&id, &storeID, &ref.MediaID, &ref.Status, &ref.WebhookActive); err != nil {
-			return nil, err
-		}
-		ref.EventID = id.String()
-		ref.StoreID = storeID.String()
-		out = append(out, ref)
-	}
-	return out, rows.Err()
-}
-
-// MarkPostEventWebhookActive flags that a comments webhook arrived for the post
-// event mapped to mediaID, so the polling loop stops handling it.
-func (r *Repository) MarkPostEventWebhookActive(ctx context.Context, mediaID string) error {
-	_, err := r.pool.Exec(ctx, `
-		UPDATE live_events SET webhook_active = true, updated_at = now()
-		WHERE media_id = $1 AND type = 'post' AND status = 'active'
-	`, mediaID)
-	return err
-}
-
-// EndPostEventByMediaID closes the active post event mapped to mediaID. Used when
+// EndEventByMediaID closes the active event that owns mediaID. Used when
 // Instagram reports the media is gone (deleted / no longer accessible) so the
 // polling loop stops hammering a dead media id every tick.
-func (r *Repository) EndPostEventByMediaID(ctx context.Context, mediaID string) error {
+//
+// Resolve pela MÍDIA (live_session_platforms → live_sessions), não mais por
+// live_events.media_id.
+func (r *Repository) EndEventByMediaID(ctx context.Context, mediaID string) error {
 	_, err := r.pool.Exec(ctx, `
-		UPDATE live_events SET status = 'ended', updated_at = now()
-		WHERE media_id = $1 AND type IN ('post', 'story') AND status = 'active'
+		UPDATE live_events e
+		SET status = 'ended', updated_at = now()
+		WHERE e.status = 'active'
+		  AND EXISTS (
+		      SELECT 1
+		      FROM live_sessions ls
+		      JOIN live_session_platforms lsp ON lsp.session_id = ls.id
+		      WHERE ls.event_id = e.id
+		        AND lsp.platform_live_id = $1
+		        AND ls.type IN ('post', 'reel', 'story')
+		  )
 	`, mediaID)
 	return err
 }
@@ -529,7 +512,7 @@ func (r *Repository) ListEventsPastEndsAt(ctx context.Context, limit int32) ([]T
 // media_id, so the media-gone path can route through End (finalize) instead of a
 // bare status flip. Returns nil when there is no such event.
 func (r *Repository) GetActiveTimedEventByMediaID(ctx context.Context, mediaID string) (*TimedEventRef, error) {
-	row, err := r.q.GetActiveTimedEventByMediaID(ctx, pgtype.Text{String: mediaID, Valid: true})
+	row, err := r.q.GetActiveTimedEventByMediaID(ctx, mediaID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -777,6 +760,7 @@ func (r *Repository) CreateSession(ctx context.Context, params CreateSessionPara
 	row, err := r.q.CreateLiveSession(ctx, sqlc.CreateLiveSessionParams{
 		EventID: eventUID,
 		Status:  params.Status,
+		Type:    SessionTypeFromEventType(params.Type),
 	})
 	if err != nil {
 		return SessionRow{}, fmt.Errorf("creating live session: %w", err)
@@ -1758,6 +1742,7 @@ func toSessionRow(row sqlc.LiveSession) SessionRow {
 	return SessionRow{
 		ID:            row.ID.String(),
 		EventID:       row.EventID.String(),
+		Type:          row.Type,
 		Status:        row.Status,
 		StartedAt:     startedAt,
 		EndedAt:       endedAt,

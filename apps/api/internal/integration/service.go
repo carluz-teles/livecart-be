@@ -2276,7 +2276,11 @@ func (s *Service) publishInstagramReelEvent(ctx context.Context, input CreateIns
 	}
 
 	out, err := s.liveService.CreatePostEvent(ctx, live.CreatePostInput{
-		StoreID:                input.StoreID,
+		StoreID: input.StoreID,
+		// D3: até aqui todo Reel era gravado como 'post' e ficava
+		// indistinguível de um post de feed. A sessão passa a dizer 'reel';
+		// o evento continua rotulado 'post' porque o FE não conhece o valor.
+		Type:                   live.SessionTypeReel,
 		Title:                  input.Title,
 		MediaID:                mediaID,
 		MediaPermalink:         permalink,
@@ -5146,13 +5150,17 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		}
 	}
 
-	// Post-commerce events (feed posts and Stories) apply their own rules: only
-	// the selected products participate, a single-product promotion auto-adds on a
-	// bare "EU QUERO", and an unavailable or ambiguous request gets a private
-	// reply listing what's available. When fully handled here, persist and stop.
+	// Post-commerce (post, reel e story) aplica regras próprias: só
+	// os produtos selecionados participam, uma promoção de produto único
+	// auto-adiciona num "EU QUERO" pelado, e um pedido indisponível ou ambíguo
+	// recebe resposta privada. Quando resolvido aqui, persiste e para.
+	//
+	// D3: o discriminador é o tipo da SESSÃO, não do evento — um evento
+	// guarda-chuva tem live e post ao mesmo tempo, e 'reel' nem existe no
+	// vocabulário do evento.
 	// Os window gates que ficavam aqui subiram para logo depois do parse de
 	// intenção, valendo para todo tipo de evento.
-	if isPostCommerce(event.Type) && hasPurchaseIntent {
+	if live.IsPostCommerceSessionType(session.Type) && hasPurchaseIntent {
 		resolved, handled, resultLabel := s.resolvePostEventProduct(ctx, event, input, intent, product)
 		if handled {
 			s.savePostComment(ctx, session.ID, event.ID, input, resultLabel)
@@ -5693,13 +5701,21 @@ func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInst
 func (s *Service) processStoryReply(ctx context.Context, input ProcessInstagramMessageInput) error {
 	// Only act on replies to one of our story-commerce events. The event carries
 	// the store, so we don't need the (separate, sometimes-missing) account lookup.
+	//
+	// D3: quem diz que a mídia é um story é a SESSÃO dona dela — o tipo desceu
+	// para live_sessions e este caminho já resolve pela mídia, então é o lookup
+	// mais direto que existe.
+	session, err := s.liveService.GetSessionByPlatformLiveID(ctx, input.ReplyToStoryID)
+	if err != nil {
+		return fmt.Errorf("resolving story session: %w", err)
+	}
 	event, err := s.liveService.GetEventByPlatformLiveID(ctx, input.ReplyToStoryID)
 	if err != nil {
 		return fmt.Errorf("resolving story event: %w", err)
 	}
-	if event == nil || event.Type != "story" {
+	if session == nil || event == nil || session.Type != live.SessionTypeStory {
 		// Reply to a non-commerce story (or unknown) — nothing to do.
-		logger.From(ctx, s.logger).Info("story reply ignored: no matching story event",
+		logger.From(ctx, s.logger).Info("story reply ignored: no matching story session",
 			zap.String("story_id", input.ReplyToStoryID))
 		return nil
 	}
@@ -5737,10 +5753,10 @@ func (s *Service) processStoryReply(ctx context.Context, input ProcessInstagramM
 	}, events.SourceInstagramStory)
 }
 
-// MarkPostEventWebhookActive flags the post event mapped to mediaID as
-// webhook-driven, so the polling capture stops. Delegates to the live service.
-func (s *Service) MarkPostEventWebhookActive(ctx context.Context, mediaID string) error {
-	return s.liveService.MarkPostEventWebhookActive(ctx, mediaID)
+// MarkMediaWebhookActive flags THIS media as webhook-driven, so the polling
+// capture stops for ela (e só para ela). Delegates to the live service.
+func (s *Service) MarkMediaWebhookActive(ctx context.Context, mediaID string) error {
+	return s.liveService.MarkMediaWebhookActive(ctx, mediaID)
 }
 
 // StartPostCommentPolling launches a background loop that captures comments on
@@ -5767,12 +5783,6 @@ func (s *Service) StartPostCommentPolling(ctx context.Context) {
 // permanently unreachable for us (deleted or no longer accessible) rather than a
 // transient failure. Graph signals this with code 100 / subcode 33 and the
 // "does not exist, cannot be loaded due to missing permissions" message.
-// isPostCommerce reports whether an event type uses the post-commerce intent
-// rules (whitelisted products, single-product auto-add, window gates). Both feed
-// posts and Stories share these rules — only the reply channel differs.
-func isPostCommerce(eventType string) bool {
-	return eventType == "post" || eventType == "story"
-}
 
 func isMediaGoneError(err error) bool {
 	if err == nil {
@@ -5787,17 +5797,17 @@ func isMediaGoneError(err error) bool {
 // are not yet webhook-driven. New comments (deduped by platform_comment_id) are
 // fed into the same ProcessInstagramComment path used by the webhook.
 func (s *Service) pollPostCommentsOnce(ctx context.Context) {
-	events, err := s.liveService.ListActivePostEvents(ctx)
+	medias, err := s.liveService.ListPollableMedia(ctx)
 	if err != nil {
-		logger.From(ctx, s.logger).Warn("post polling: failed to list active post events", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("post polling: failed to list pollable media", zap.Error(err))
 		return
 	}
-	for _, ev := range events {
+	for _, ev := range medias {
 		if ev.MediaID == "" {
 			continue
 		}
 		// The polling loop runs on the app-level ctx (no store): enrich a
-		// per-event ctx with the store each event belongs to.
+		// per-media ctx with the store the media belongs to.
 		evCtx := logger.WithStore(ctx, ev.StoreID, "")
 		provider, err := s.resolveInstagramSocialProvider(evCtx, ev.StoreID)
 		if err != nil {
@@ -5808,7 +5818,7 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 			// Media gone (deleted / no longer accessible): close the event so we
 			// stop hammering a dead media id every tick instead of warning forever.
 			if isMediaGoneError(err) {
-				if endErr := s.liveService.EndPostEventByMediaID(evCtx, ev.MediaID); endErr != nil {
+				if endErr := s.liveService.EndEventByMediaID(evCtx, ev.MediaID); endErr != nil {
 					logger.From(evCtx, s.logger).Warn("post polling: failed to end event for missing media",
 						zap.String("media_id", ev.MediaID), zap.Error(endErr))
 				} else {

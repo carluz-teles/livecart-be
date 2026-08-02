@@ -453,6 +453,7 @@ func (h *Handler) CreateSession(c *fiber.Ctx) error {
 	output, err := h.service.CreateSession(c.Context(), CreateSessionInput{
 		EventID:        eventID,
 		StoreID:        storeID,
+		Type:           req.Type,
 		Platform:       req.Platform,
 		PlatformLiveID: req.PlatformLiveID,
 	})
@@ -463,6 +464,7 @@ func (h *Handler) CreateSession(c *fiber.Ctx) error {
 	return httpx.Created(c, SessionResponse{
 		ID:        output.ID,
 		EventID:   output.EventID,
+		Type:      output.Type,
 		Status:    output.Status,
 		CreatedAt: output.CreatedAt,
 		UpdatedAt: output.CreatedAt,
@@ -704,6 +706,7 @@ func toEventResponse(o EventOutput) EventResponse {
 		sessions[i] = SessionResponse{
 			ID:            s.ID,
 			EventID:       s.EventID,
+			Type:          s.Type,
 			Status:        s.Status,
 			StartedAt:     s.StartedAt,
 			EndedAt:       s.EndedAt,

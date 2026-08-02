@@ -177,26 +177,36 @@ FROM live_events e
 WHERE e.id = $1 AND e.store_id = $2;
 
 -- name: ListEventsPastEndsAt :many
--- D5: eventos post/story cuja janela (ends_at) já fechou mas que continuam
--- 'active' porque nada dispara o encerramento (EffectiveStatus é só derivado em
--- leitura). O sweep chama live.Service.End em cada um para finalizar carts
--- (armar expires_at) e o ERP. Restrito a post/story para NÃO auto-encerrar
--- lives agendadas que o lojista quer manter rodando além do horário nominal.
-SELECT id, store_id
-FROM live_events
-WHERE type IN ('post', 'story')
-  AND status = 'active'
-  AND ends_at IS NOT NULL
-  AND ends_at < now()
-ORDER BY ends_at ASC
+-- D5: eventos com sessão de post/reel/story cuja janela (ends_at) já fechou mas
+-- que continuam 'active' porque nada dispara o encerramento (EffectiveStatus é
+-- só derivado em leitura). O sweep chama live.Service.End em cada um para
+-- finalizar carts (armar expires_at) e o ERP. Restrito a post/reel/story para
+-- NÃO auto-encerrar lives agendadas que o lojista quer manter rodando além do
+-- horário nominal.
+--
+-- EXISTS, não JOIN: o consumidor (End) é por EVENTO; um JOIN devolveria uma
+-- linha por sessão e o evento seria encerrado N vezes.
+SELECT e.id, e.store_id
+FROM live_events e
+WHERE EXISTS (
+        SELECT 1 FROM live_sessions ls
+        WHERE ls.event_id = e.id AND ls.type IN ('post', 'reel', 'story')
+      )
+  AND e.status = 'active'
+  AND e.ends_at IS NOT NULL
+  AND e.ends_at < now()
+ORDER BY e.ends_at ASC
 LIMIT $1;
 
 -- name: GetActiveTimedEventByMediaID :one
--- Resolve o evento post/story ativo mapeado a uma media_id (mídia apagada no
+-- Resolve o evento ativo dono de uma mídia de post/reel/story (mídia apagada no
 -- Instagram) para roteá-lo por End (finaliza carts + ERP), não só flipar status.
-SELECT id, store_id
-FROM live_events
-WHERE media_id = $1
-  AND status = 'active'
-  AND type IN ('post', 'story')
+-- Resolve pela MÍDIA (live_session_platforms), não mais por live_events.media_id.
+SELECT e.id, e.store_id
+FROM live_events e
+JOIN live_sessions ls ON ls.event_id = e.id
+JOIN live_session_platforms lsp ON lsp.session_id = ls.id
+WHERE lsp.platform_live_id = $1
+  AND e.status = 'active'
+  AND ls.type IN ('post', 'reel', 'story')
 LIMIT 1;

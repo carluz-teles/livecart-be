@@ -5,8 +5,9 @@
 -- name: CreateLiveSession :one
 -- sequence_order is MAX+1 per event, computed atomically. The unique index
 -- (event_id, sequence_order) catches the rare concurrent-create race.
-INSERT INTO live_sessions (event_id, status, sequence_order)
-VALUES ($1, $2, COALESCE((SELECT MAX(sequence_order) FROM live_sessions WHERE event_id = $1), 0) + 1)
+-- type (D3) é a natureza da transmissão: live|post|reel|story.
+INSERT INTO live_sessions (event_id, status, type, sequence_order)
+VALUES ($1, $2, $3, COALESCE((SELECT MAX(sequence_order) FROM live_sessions WHERE event_id = $1), 0) + 1)
 RETURNING *;
 
 -- name: GetLiveSessionByID :one
@@ -75,4 +76,38 @@ SELECT COUNT(*)::int FROM live_session_platforms WHERE session_id = $1;
 
 -- name: GetPlatformByLiveID :one
 SELECT * FROM live_session_platforms WHERE platform_live_id = $1;
+
+-- name: SetMediaMetadata :exec
+-- D1/A4: a legenda/permalink/thumb pertencem à MÍDIA, não ao evento. Chaveado
+-- por platform_live_id, que é o media_id do Instagram.
+UPDATE live_session_platforms
+SET media_permalink = $2, media_thumbnail_url = $3, media_caption = $4
+WHERE platform_live_id = $1;
+
+-- name: MarkMediaWebhookActive :exec
+-- Desliga o polling DESTA mídia (antes desligava o do evento inteiro, cegando a
+-- segunda mídia de um evento guarda-chuva).
+UPDATE live_session_platforms
+SET webhook_active = true
+WHERE platform_live_id = $1;
+
+-- name: ListPollableMedia :many
+-- Mídias de post/reel que ainda não receberam webhook de comments e por isso
+-- dependem do polling — o único caminho de captura para post sem webhook.
+-- Story não entra: resposta de story chega por DM, não por comentário.
+SELECT
+    lsp.platform_live_id,
+    lsp.webhook_active,
+    ls.id   AS session_id,
+    ls.type AS session_type,
+    e.id    AS event_id,
+    e.store_id,
+    e.status AS event_status
+FROM live_session_platforms lsp
+JOIN live_sessions ls ON ls.id = lsp.session_id
+JOIN live_events e ON e.id = ls.event_id
+WHERE ls.type IN ('post', 'reel')
+  AND e.status = 'active'
+  AND lsp.webhook_active = false
+  AND (e.ends_at IS NULL OR e.ends_at >= now() - interval '2 days');
 

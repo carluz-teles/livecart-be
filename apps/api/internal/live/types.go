@@ -194,6 +194,10 @@ type EventRow struct {
 type CreateSessionRequest struct {
 	Platform       string `json:"platform" validate:"required,oneof=instagram tiktok youtube facebook"`
 	PlatformLiveID string `json:"platformLiveId" validate:"required"`
+	// Type é a natureza da transmissão (D3). Vazio = "live". Os valores aqui
+	// espelham o CHECK live_sessions_type_check da 000109: desalinhar os dois
+	// devolve 500 em vez de 422 (lição E6 da errata).
+	Type string `json:"type" validate:"omitempty,oneof=live post reel story"`
 }
 
 // EventPulse is a tiny change-signal for near-real-time dashboard refresh. The
@@ -214,6 +218,7 @@ type CommentResponse struct {
 type SessionResponse struct {
 	ID            string             `json:"id"`
 	EventID       string             `json:"eventId"`
+	Type          string             `json:"type"`
 	Status        string             `json:"status"`
 	StartedAt     *time.Time         `json:"startedAt"`
 	EndedAt       *time.Time         `json:"endedAt"`
@@ -232,6 +237,7 @@ type SessionResponse struct {
 type CreateSessionInput struct {
 	EventID        string
 	StoreID        string
+	Type           string
 	Platform       string
 	PlatformLiveID string
 }
@@ -239,6 +245,7 @@ type CreateSessionInput struct {
 type CreateSessionOutput struct {
 	ID        string
 	EventID   string
+	Type      string
 	Status    string
 	Platform  PlatformOutput
 	CreatedAt time.Time
@@ -253,6 +260,7 @@ type CommentOutput struct {
 type SessionOutput struct {
 	ID            string
 	EventID       string
+	Type          string
 	Status        string
 	StartedAt     *time.Time
 	EndedAt       *time.Time
@@ -271,11 +279,13 @@ type SessionOutput struct {
 type CreateSessionParams struct {
 	EventID string
 	Status  string
+	Type    string
 }
 
 type SessionRow struct {
 	ID            string
 	EventID       string
+	Type          string
 	Status        string
 	StartedAt     *time.Time
 	EndedAt       *time.Time
@@ -369,21 +379,16 @@ type PostMediaInput struct {
 	Caption      string
 }
 
-// PostMedia is the stored post metadata for an event.
-type PostMedia struct {
-	MediaID       string `json:"mediaId"`
-	Permalink     string `json:"permalink"`
-	ThumbnailURL  string `json:"thumbnailUrl"`
-	Caption       string `json:"caption"`
-	WebhookActive bool   `json:"webhookActive"`
-}
-
-// PostEventRef is a lightweight reference to a post event for capture loops.
-type PostEventRef struct {
+// MediaRef is a lightweight reference to ONE published media for the capture
+// loops. D3/A4: a unidade do polling passou a ser a mídia, não o evento — um
+// evento guarda-chuva tem N mídias e cada uma tem seu próprio webhook_active.
+type MediaRef struct {
+	MediaID       string
+	SessionID     string
+	SessionType   string
 	EventID       string
 	StoreID       string
-	MediaID       string
-	Status        string
+	EventStatus   string
 	WebhookActive bool
 }
 
@@ -405,8 +410,9 @@ type CreatePostRequest struct {
 // CreatePostInput is the input to create a post-commerce event.
 type CreatePostInput struct {
 	StoreID string
-	// Type is the event discriminator: "post" (default) for feed posts/Reels, or
-	// "story" for Stories (24h window, purchase intent captured via DM replies).
+	// Type é o tipo da SESSÃO (D3): "post" (padrão) para post de feed, "reel"
+	// para Reels e "story" para Stories (janela de 24h, intenção capturada por
+	// resposta de DM). O evento continua rotulado no vocabulário legado.
 	Type                   string
 	Title                  string
 	MediaID                string

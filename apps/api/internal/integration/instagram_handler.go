@@ -163,7 +163,7 @@ func (h *WebhookHandler) processPostComment(c *fiber.Ctx, entry InstagramEntry, 
 		return err
 	}
 	if comment.Media.ID != "" {
-		if mErr := h.service.MarkPostEventWebhookActive(c.Context(), comment.Media.ID); mErr != nil {
+		if mErr := h.service.MarkMediaWebhookActive(c.Context(), comment.Media.ID); mErr != nil {
 			logger.From(c.Context(), h.logger).Warn("failed to mark post event webhook active",
 				zap.String("media_id", comment.Media.ID),
 				zap.Error(mErr),

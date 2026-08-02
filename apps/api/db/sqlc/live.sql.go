@@ -15,7 +15,7 @@ const addPlatformToSession = `-- name: AddPlatformToSession :one
 
 INSERT INTO live_session_platforms (session_id, platform, platform_live_id)
 VALUES ($1, $2, $3)
-RETURNING id, session_id, platform, platform_live_id, added_at
+RETURNING id, session_id, platform, platform_live_id, added_at, media_permalink, media_thumbnail_url, media_caption, webhook_active
 `
 
 type AddPlatformToSessionParams struct {
@@ -36,6 +36,10 @@ func (q *Queries) AddPlatformToSession(ctx context.Context, arg AddPlatformToSes
 		&i.Platform,
 		&i.PlatformLiveID,
 		&i.AddedAt,
+		&i.MediaPermalink,
+		&i.MediaThumbnailUrl,
+		&i.MediaCaption,
+		&i.WebhookActive,
 	)
 	return i, err
 }
@@ -53,14 +57,15 @@ func (q *Queries) CountPlatformsBySession(ctx context.Context, sessionID pgtype.
 
 const createLiveSession = `-- name: CreateLiveSession :one
 
-INSERT INTO live_sessions (event_id, status, sequence_order)
-VALUES ($1, $2, COALESCE((SELECT MAX(sequence_order) FROM live_sessions WHERE event_id = $1), 0) + 1)
-RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order
+INSERT INTO live_sessions (event_id, status, type, sequence_order)
+VALUES ($1, $2, $3, COALESCE((SELECT MAX(sequence_order) FROM live_sessions WHERE event_id = $1), 0) + 1)
+RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type
 `
 
 type CreateLiveSessionParams struct {
 	EventID pgtype.UUID `json:"event_id"`
 	Status  string      `json:"status"`
+	Type    string      `json:"type"`
 }
 
 // =============================================================================
@@ -68,8 +73,9 @@ type CreateLiveSessionParams struct {
 // =============================================================================
 // sequence_order is MAX+1 per event, computed atomically. The unique index
 // (event_id, sequence_order) catches the rare concurrent-create race.
+// type (D3) é a natureza da transmissão: live|post|reel|story.
 func (q *Queries) CreateLiveSession(ctx context.Context, arg CreateLiveSessionParams) (LiveSession, error) {
-	row := q.db.QueryRow(ctx, createLiveSession, arg.EventID, arg.Status)
+	row := q.db.QueryRow(ctx, createLiveSession, arg.EventID, arg.Status, arg.Type)
 	var i LiveSession
 	err := row.Scan(
 		&i.ID,
@@ -81,6 +87,7 @@ func (q *Queries) CreateLiveSession(ctx context.Context, arg CreateLiveSessionPa
 		&i.UpdatedAt,
 		&i.EventID,
 		&i.SequenceOrder,
+		&i.Type,
 	)
 	return i, err
 }
@@ -89,7 +96,7 @@ const endLiveSession = `-- name: EndLiveSession :one
 UPDATE live_sessions
 SET status = 'ended', ended_at = now(), updated_at = now()
 WHERE id = $1
-RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order
+RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type
 `
 
 func (q *Queries) EndLiveSession(ctx context.Context, id pgtype.UUID) (LiveSession, error) {
@@ -105,12 +112,13 @@ func (q *Queries) EndLiveSession(ctx context.Context, id pgtype.UUID) (LiveSessi
 		&i.UpdatedAt,
 		&i.EventID,
 		&i.SequenceOrder,
+		&i.Type,
 	)
 	return i, err
 }
 
 const getActiveSessionByEvent = `-- name: GetActiveSessionByEvent :one
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order FROM live_sessions
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type FROM live_sessions
 WHERE event_id = $1 AND status IN ('active', 'live')
 ORDER BY created_at DESC
 LIMIT 1
@@ -129,12 +137,13 @@ func (q *Queries) GetActiveSessionByEvent(ctx context.Context, eventID pgtype.UU
 		&i.UpdatedAt,
 		&i.EventID,
 		&i.SequenceOrder,
+		&i.Type,
 	)
 	return i, err
 }
 
 const getLiveSessionByID = `-- name: GetLiveSessionByID :one
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order FROM live_sessions WHERE id = $1
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type FROM live_sessions WHERE id = $1
 `
 
 func (q *Queries) GetLiveSessionByID(ctx context.Context, id pgtype.UUID) (LiveSession, error) {
@@ -150,12 +159,13 @@ func (q *Queries) GetLiveSessionByID(ctx context.Context, id pgtype.UUID) (LiveS
 		&i.UpdatedAt,
 		&i.EventID,
 		&i.SequenceOrder,
+		&i.Type,
 	)
 	return i, err
 }
 
 const getLiveSessionByIDAndEvent = `-- name: GetLiveSessionByIDAndEvent :one
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order FROM live_sessions WHERE id = $1 AND event_id = $2
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type FROM live_sessions WHERE id = $1 AND event_id = $2
 `
 
 type GetLiveSessionByIDAndEventParams struct {
@@ -176,12 +186,13 @@ func (q *Queries) GetLiveSessionByIDAndEvent(ctx context.Context, arg GetLiveSes
 		&i.UpdatedAt,
 		&i.EventID,
 		&i.SequenceOrder,
+		&i.Type,
 	)
 	return i, err
 }
 
 const getPlatformByLiveID = `-- name: GetPlatformByLiveID :one
-SELECT id, session_id, platform, platform_live_id, added_at FROM live_session_platforms WHERE platform_live_id = $1
+SELECT id, session_id, platform, platform_live_id, added_at, media_permalink, media_thumbnail_url, media_caption, webhook_active FROM live_session_platforms WHERE platform_live_id = $1
 `
 
 func (q *Queries) GetPlatformByLiveID(ctx context.Context, platformLiveID string) (LiveSessionPlatform, error) {
@@ -193,12 +204,16 @@ func (q *Queries) GetPlatformByLiveID(ctx context.Context, platformLiveID string
 		&i.Platform,
 		&i.PlatformLiveID,
 		&i.AddedAt,
+		&i.MediaPermalink,
+		&i.MediaThumbnailUrl,
+		&i.MediaCaption,
+		&i.WebhookActive,
 	)
 	return i, err
 }
 
 const getSessionByPlatformLiveID = `-- name: GetSessionByPlatformLiveID :one
-SELECT ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.created_at, ls.updated_at, ls.event_id, ls.sequence_order
+SELECT ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.created_at, ls.updated_at, ls.event_id, ls.sequence_order, ls.type
 FROM live_sessions ls
 JOIN live_session_platforms lsp ON lsp.session_id = ls.id
 WHERE lsp.platform_live_id = $1 AND ls.status IN ('active', 'live')
@@ -220,6 +235,7 @@ func (q *Queries) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID
 		&i.UpdatedAt,
 		&i.EventID,
 		&i.SequenceOrder,
+		&i.Type,
 	)
 	return i, err
 }
@@ -236,7 +252,7 @@ func (q *Queries) IncrementLiveSessionComments(ctx context.Context, id pgtype.UU
 }
 
 const listPlatformsBySession = `-- name: ListPlatformsBySession :many
-SELECT id, session_id, platform, platform_live_id, added_at FROM live_session_platforms
+SELECT id, session_id, platform, platform_live_id, added_at, media_permalink, media_thumbnail_url, media_caption, webhook_active FROM live_session_platforms
 WHERE session_id = $1
 ORDER BY added_at
 `
@@ -256,6 +272,69 @@ func (q *Queries) ListPlatformsBySession(ctx context.Context, sessionID pgtype.U
 			&i.Platform,
 			&i.PlatformLiveID,
 			&i.AddedAt,
+			&i.MediaPermalink,
+			&i.MediaThumbnailUrl,
+			&i.MediaCaption,
+			&i.WebhookActive,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPollableMedia = `-- name: ListPollableMedia :many
+SELECT
+    lsp.platform_live_id,
+    lsp.webhook_active,
+    ls.id   AS session_id,
+    ls.type AS session_type,
+    e.id    AS event_id,
+    e.store_id,
+    e.status AS event_status
+FROM live_session_platforms lsp
+JOIN live_sessions ls ON ls.id = lsp.session_id
+JOIN live_events e ON e.id = ls.event_id
+WHERE ls.type IN ('post', 'reel')
+  AND e.status = 'active'
+  AND lsp.webhook_active = false
+  AND (e.ends_at IS NULL OR e.ends_at >= now() - interval '2 days')
+`
+
+type ListPollableMediaRow struct {
+	PlatformLiveID string      `json:"platform_live_id"`
+	WebhookActive  bool        `json:"webhook_active"`
+	SessionID      pgtype.UUID `json:"session_id"`
+	SessionType    string      `json:"session_type"`
+	EventID        pgtype.UUID `json:"event_id"`
+	StoreID        pgtype.UUID `json:"store_id"`
+	EventStatus    string      `json:"event_status"`
+}
+
+// Mídias de post/reel que ainda não receberam webhook de comments e por isso
+// dependem do polling — o único caminho de captura para post sem webhook.
+// Story não entra: resposta de story chega por DM, não por comentário.
+func (q *Queries) ListPollableMedia(ctx context.Context) ([]ListPollableMediaRow, error) {
+	rows, err := q.db.Query(ctx, listPollableMedia)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPollableMediaRow{}
+	for rows.Next() {
+		var i ListPollableMediaRow
+		if err := rows.Scan(
+			&i.PlatformLiveID,
+			&i.WebhookActive,
+			&i.SessionID,
+			&i.SessionType,
+			&i.EventID,
+			&i.StoreID,
+			&i.EventStatus,
 		); err != nil {
 			return nil, err
 		}
@@ -268,7 +347,7 @@ func (q *Queries) ListPlatformsBySession(ctx context.Context, sessionID pgtype.U
 }
 
 const listSessionsByEvent = `-- name: ListSessionsByEvent :many
-SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order FROM live_sessions
+SELECT id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type FROM live_sessions
 WHERE event_id = $1
 ORDER BY created_at DESC
 `
@@ -292,6 +371,7 @@ func (q *Queries) ListSessionsByEvent(ctx context.Context, eventID pgtype.UUID) 
 			&i.UpdatedAt,
 			&i.EventID,
 			&i.SequenceOrder,
+			&i.Type,
 		); err != nil {
 			return nil, err
 		}
@@ -301,6 +381,19 @@ func (q *Queries) ListSessionsByEvent(ctx context.Context, eventID pgtype.UUID) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const markMediaWebhookActive = `-- name: MarkMediaWebhookActive :exec
+UPDATE live_session_platforms
+SET webhook_active = true
+WHERE platform_live_id = $1
+`
+
+// Desliga o polling DESTA mídia (antes desligava o do evento inteiro, cegando a
+// segunda mídia de um evento guarda-chuva).
+func (q *Queries) MarkMediaWebhookActive(ctx context.Context, platformLiveID string) error {
+	_, err := q.db.Exec(ctx, markMediaWebhookActive, platformLiveID)
+	return err
 }
 
 const removePlatformFromSession = `-- name: RemovePlatformFromSession :exec
@@ -318,11 +411,36 @@ func (q *Queries) RemovePlatformFromSession(ctx context.Context, arg RemovePlatf
 	return err
 }
 
+const setMediaMetadata = `-- name: SetMediaMetadata :exec
+UPDATE live_session_platforms
+SET media_permalink = $2, media_thumbnail_url = $3, media_caption = $4
+WHERE platform_live_id = $1
+`
+
+type SetMediaMetadataParams struct {
+	PlatformLiveID    string      `json:"platform_live_id"`
+	MediaPermalink    pgtype.Text `json:"media_permalink"`
+	MediaThumbnailUrl pgtype.Text `json:"media_thumbnail_url"`
+	MediaCaption      pgtype.Text `json:"media_caption"`
+}
+
+// D1/A4: a legenda/permalink/thumb pertencem à MÍDIA, não ao evento. Chaveado
+// por platform_live_id, que é o media_id do Instagram.
+func (q *Queries) SetMediaMetadata(ctx context.Context, arg SetMediaMetadataParams) error {
+	_, err := q.db.Exec(ctx, setMediaMetadata,
+		arg.PlatformLiveID,
+		arg.MediaPermalink,
+		arg.MediaThumbnailUrl,
+		arg.MediaCaption,
+	)
+	return err
+}
+
 const startLiveSession = `-- name: StartLiveSession :one
 UPDATE live_sessions
 SET status = 'live', started_at = now(), updated_at = now()
 WHERE id = $1
-RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order
+RETURNING id, status, started_at, ended_at, total_comments, created_at, updated_at, event_id, sequence_order, type
 `
 
 func (q *Queries) StartLiveSession(ctx context.Context, id pgtype.UUID) (LiveSession, error) {
@@ -338,6 +456,7 @@ func (q *Queries) StartLiveSession(ctx context.Context, id pgtype.UUID) (LiveSes
 		&i.UpdatedAt,
 		&i.EventID,
 		&i.SequenceOrder,
+		&i.Type,
 	)
 	return i, err
 }
