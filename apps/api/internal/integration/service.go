@@ -6069,12 +6069,20 @@ const privateReplyWindow = 7 * 24 * time.Hour
 
 // commentTooOldToReply reporta se o comentário já passou da janela de private
 // reply. Sem carimbo de tempo (ts <= 0) responde false: erra para o lado de
-// TENTAR enviar, que é o comportamento de hoje.
+// TENTAR enviar — silenciar por falta de dado seria pior do que uma chamada
+// perdida.
+//
+// Normaliza ms→s aqui também, e não só na borda (E41): este é O guard, e o bug
+// que ele deixou passar por meses foi exatamente um carimbo em milissegundos
+// chegando de um chamador. Um caminho novo que esqueça de converter é
+// silenciosamente inofensivo — a diferença aparece como "sempre recente",
+// nunca como erro.
 func commentTooOldToReply(ts int64, now time.Time) bool {
-	if ts <= 0 {
+	secs := epochSeconds(ts)
+	if secs <= 0 {
 		return false
 	}
-	return now.Sub(time.Unix(ts, 0)) > privateReplyWindow
+	return now.Sub(time.Unix(secs, 0)) > privateReplyWindow
 }
 
 // parseGraphTimestamp converte o timestamp ISO8601 do Graph

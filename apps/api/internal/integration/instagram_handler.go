@@ -209,13 +209,19 @@ func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, 
 	// outbox) and return fast. The domain work (cart/stock/waitlist) runs in the
 	// event consumer via ProcessInstagramComment — idempotent by comment_id.
 	if err := h.service.DispatchCommentReceived(c.Context(), ProcessInstagramCommentInput{
-		AccountID:  entry.ID,
-		MediaID:    comment.Media.ID,
-		CommentID:  comment.CommentID,
-		UserID:     userID,
-		Username:   comment.From.Username,
-		Text:       comment.Text,
-		Timestamp:  entry.Time,
+		AccountID: entry.ID,
+		MediaID:   comment.Media.ID,
+		CommentID: comment.CommentID,
+		UserID:    userID,
+		Username:  comment.From.Username,
+		Text:      comment.Text,
+		// E41: era entry.Time cru — o carimbo da ENTREGA do webhook, e em
+		// milissegundos nos produtos de Instagram. time.Unix(ms, 0) aterrissa no
+		// ano ~57000, então a janela de 7 dias do private reply (RN-37) nunca
+		// disparava por este caminho: ela só valia no polling, que já carregava
+		// segundos. CommentedAt prefere o carimbo do próprio comentário e
+		// normaliza ms→s.
+		Timestamp:  comment.CommentedAt(entry.Time),
 		RawPayload: rawBody,
 	}, source); err != nil {
 		logger.From(c.Context(), h.logger).Error("failed to dispatch instagram comment",
@@ -245,11 +251,15 @@ func (h *WebhookHandler) processInstagramMessage(c *fiber.Ctx, entry InstagramEn
 
 	// Process the message through the service
 	if err := h.service.ProcessInstagramMessage(c.Context(), ProcessInstagramMessageInput{
-		AccountID:      entry.ID,
-		SenderID:       msg.Sender.ID,
-		MessageID:      msg.Message.MID,
-		Text:           msg.Message.Text,
-		Timestamp:      msg.Timestamp,
+		AccountID: entry.ID,
+		SenderID:  msg.Sender.ID,
+		MessageID: msg.Message.MID,
+		Text:      msg.Message.Text,
+		// A Messaging API carimba em milissegundos. A resposta a um story reply
+		// sai por DM (que não tem a janela de 7 dias do private reply), mas o
+		// valor viaja para ProcessInstagramCommentInput.Timestamp — deixá-lo em
+		// ms seria plantar o mesmo bug para o próximo consumidor.
+		Timestamp:      epochSeconds(msg.Timestamp),
 		ReplyToStoryID: replyToStoryID,
 		IsEcho:         msg.Message.IsEcho,
 		RawPayload:     rawBody,
