@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.uber.org/zap"
 
@@ -5364,7 +5365,21 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			Position:       waitlistPosition,
 			CartID:         result.CartID,
 		}); wlErr != nil {
-			logger.From(ctx, s.logger).Error("failed to create waitlist item", zap.Error(wlErr))
+			// D11/000113: uq_waitlist_live_entry é a trava REAL contra fila
+			// dupla. A checagem acima (GetWaitlistItemByEventUserProduct) é uma
+			// leitura fora de transação e sem lock — dois comentários
+			// simultâneos do mesmo comprador passam pelos dois lados dela. Quem
+			// perde a corrida agora bate no índice, e isso é a trava
+			// funcionando, não uma falha: o comprador já está na fila.
+			var pgErr *pgconn.PgError
+			if errors.As(wlErr, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "uq_waitlist_live_entry" {
+				logger.From(ctx, s.logger).Info("waitlist duplicate blocked by uq_waitlist_live_entry (race)",
+					zap.String("username", input.Username),
+					zap.String("product_id", product.ID),
+				)
+			} else {
+				logger.From(ctx, s.logger).Error("failed to create waitlist item", zap.Error(wlErr))
+			}
 		} else {
 			logger.From(ctx, s.logger).Info("user added to waitlist (partial fulfillment)",
 				zap.String("username", input.Username),
