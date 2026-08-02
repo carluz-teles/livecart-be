@@ -39,14 +39,17 @@ const (
 	CodeShippingCartEmpty     Code = "SHIPPING_CART_EMPTY"     // shipping.go:401 ("nenhum item no carrinho para cotar")
 
 	// --- COUPON (internal/coupon/service.go) ---
-	CodeCouponAlreadyExists Code = "COUPON_ALREADY_EXISTS" // coupon/service.go:95
-	CodeCouponHasCoupon     Code = "CART_HAS_COUPON"       // coupon/service.go:253 ("cart already has a coupon")
-	CodeCouponNotActive     Code = "COUPON_NOT_ACTIVE"     // coupon/service.go:267
-	CodeCouponNotYetValid   Code = "COUPON_NOT_YET_VALID"  // coupon/service.go:271 ("coupon is not valid yet")
-	CodeCouponExpired       Code = "COUPON_EXPIRED"        // coupon/service.go:274
-	CodeCouponFullyRedeemed Code = "COUPON_FULLY_REDEEMED" // coupon/service.go:277
-	CodeCouponRedeemed      Code = "COUPON_REDEEMED"       // coupon/service.go:168 (delete guard)
-	CodeCouponCodeRequired  Code = "COUPON_CODE_REQUIRED"  // coupon/service.go:230
+	CodeCouponAlreadyExists    Code = "COUPON_ALREADY_EXISTS"    // coupon/service.go:95
+	CodeCouponHasCoupon        Code = "CART_HAS_COUPON"          // coupon/service.go:253 ("cart already has a coupon")
+	CodeCouponNotActive        Code = "COUPON_NOT_ACTIVE"        // coupon/service.go:267
+	CodeCouponNotYetValid      Code = "COUPON_NOT_YET_VALID"     // coupon/service.go:271 ("coupon is not valid yet")
+	CodeCouponExpired          Code = "COUPON_EXPIRED"           // coupon/service.go:274
+	CodeCouponFullyRedeemed    Code = "COUPON_FULLY_REDEEMED"    // coupon/service.go:277
+	CodeCouponRedeemed         Code = "COUPON_REDEEMED"          // coupon/service.go:168 (delete guard)
+	CodeCouponCodeRequired     Code = "COUPON_CODE_REQUIRED"     // coupon/service.go:230
+	CodeCouponInvalidCode      Code = "COUPON_INVALID_CODE"      // coupon/service.go:264 ("invalid coupon code")
+	CodeCouponMinPurchase      Code = "COUPON_MIN_PURCHASE"      // coupon/service.go:280 ("minimum purchase ... not reached")
+	CodeCouponShippingRequired Code = "COUPON_SHIPPING_REQUIRED" // coupon/service.go:672 ("select shipping before applying a free-shipping coupon")
 
 	// --- STORE (internal/store/service.go) ---
 	CodeStoreAlreadyExists Code = "STORE_ALREADY_EXISTS" // store/service.go:67 (1 user = 1 store)

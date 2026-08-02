@@ -214,3 +214,66 @@ func TestCheckoutDomainCodes_WireUpper(t *testing.T) {
 		})
 	}
 }
+
+// TestCouponDomainCodes_WireUpper — D1d-1: the coupon domain throws migrated
+// from httpx.Err{Conflict,Unprocessable,NotFound}(msg) to
+// DomainError(status, Code, msg), preserving each site's EXACT status
+// (409/422/404) and human message — now also carrying the typed UPPER_SNAKE
+// reason (Category=DOMAIN). Unlike checkout (all 422), coupon spans three
+// statuses, so each row asserts its own. Each row mirrors a real throw site in
+// internal/coupon/service.go verbatim (message byte-for-byte, format strings
+// filled in).
+func TestCouponDomainCodes_WireUpper(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		code       Code
+		msg        string
+		wantReason string
+	}{
+		// 409 conflict
+		{"coupon already exists", 409, CodeCouponAlreadyExists, `coupon code "SAVE10" already exists for this event`, "COUPON_ALREADY_EXISTS"},
+		{"coupon redeemed (delete guard)", 409, CodeCouponRedeemed, "coupon already redeemed by a customer; disable it instead of deleting", "COUPON_REDEEMED"},
+		{"cart already paid", 409, CodeCartAlreadyPaid, "cart already paid", "CART_ALREADY_PAID"},
+		{"cart expired", 409, CodeCartExpired, "cart expired", "CART_EXPIRED"},
+		{"cart already has a coupon", 409, CodeCouponHasCoupon, "cart already has a coupon — remove it first", "CART_HAS_COUPON"},
+		{"coupon fully redeemed", 409, CodeCouponFullyRedeemed, "coupon already fully redeemed", "COUPON_FULLY_REDEEMED"},
+		// 422 unprocessable
+		{"coupon code required", 422, CodeCouponCodeRequired, "coupon code is required", "COUPON_CODE_REQUIRED"},
+		{"cart empty", 422, CodeCartEmpty, "cart is empty", "CART_EMPTY"},
+		{"coupon not active", 422, CodeCouponNotActive, "coupon is not active", "COUPON_NOT_ACTIVE"},
+		{"coupon not yet valid", 422, CodeCouponNotYetValid, "coupon is not valid yet", "COUPON_NOT_YET_VALID"},
+		{"coupon expired", 422, CodeCouponExpired, "coupon expired", "COUPON_EXPIRED"},
+		{"coupon min purchase", 422, CodeCouponMinPurchase, "minimum purchase of 50.00 BRL not reached", "COUPON_MIN_PURCHASE"},
+		{"coupon shipping required", 422, CodeCouponShippingRequired, "select shipping before applying a free-shipping coupon", "COUPON_SHIPPING_REQUIRED"},
+		// 404 not found
+		{"invalid coupon code", 404, CodeCouponInvalidCode, "invalid coupon code", "COUPON_INVALID_CODE"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := DomainError(tt.status, tt.code, tt.msg)
+
+			// errors.As + se: DOMAIN category, exact status, exact message, UPPER reason.
+			var se *ServiceError
+			if !errors.As(err, &se) {
+				t.Fatalf("DomainError must produce a *ServiceError")
+			}
+			if se.Code != tt.status || se.Message != tt.msg {
+				t.Fatalf("status/message wrong: %+v", se)
+			}
+			if se.Reason != tt.wantReason {
+				t.Fatalf("reason: want %q, got %q", tt.wantReason, se.Reason)
+			}
+			if se.Category != CategoryDomain {
+				t.Fatalf("category: want DOMAIN, got %q", se.Category)
+			}
+
+			// Wire: exact status + exact message + UPPER reason on the Envelope.
+			code, body := do(t, appReturning(err), "GET", "/x", "")
+			if code != tt.status || body["error"] != tt.msg || body["reason"] != tt.wantReason {
+				t.Fatalf("wire: got %d %v", code, body)
+			}
+		})
+	}
+}

@@ -92,7 +92,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*domain.Coupon, e
 		// to avoid a TOCTOU race with concurrent creates.
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return nil, httpx.ErrConflict(fmt.Sprintf("coupon code %q already exists for this event", code))
+			return nil, httpx.DomainError(409, httpx.CodeCouponAlreadyExists, fmt.Sprintf("coupon code %q already exists for this event", code))
 		}
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func (s *Service) Delete(ctx context.Context, id, eventID, storeID string) error
 		// disable instead.
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
-			return httpx.ErrConflict("coupon already redeemed by a customer; disable it instead of deleting")
+			return httpx.DomainError(409, httpx.CodeCouponRedeemed, "coupon already redeemed by a customer; disable it instead of deleting")
 		}
 		return err
 	}
@@ -227,7 +227,7 @@ func (s *Service) ApplyToCart(
 ) (*ApplyResult, error) {
 	code = strings.TrimSpace(code)
 	if code == "" {
-		return nil, httpx.ErrUnprocessable("coupon code is required")
+		return nil, httpx.DomainError(422, httpx.CodeCouponCodeRequired, "coupon code is required")
 	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -244,16 +244,16 @@ func (s *Service) ApplyToCart(
 		return nil, httpx.ErrNotFound("cart not found")
 	}
 	if cart.PaymentStatus == "paid" {
-		return nil, httpx.ErrConflict("cart already paid")
+		return nil, httpx.DomainError(409, httpx.CodeCartAlreadyPaid, "cart already paid")
 	}
 	if cart.Status == "expired" {
-		return nil, httpx.ErrConflict("cart expired")
+		return nil, httpx.DomainError(409, httpx.CodeCartExpired, "cart expired")
 	}
 	if cart.CouponID != nil {
-		return nil, httpx.ErrConflict("cart already has a coupon — remove it first")
+		return nil, httpx.DomainError(409, httpx.CodeCouponHasCoupon, "cart already has a coupon — remove it first")
 	}
 	if cart.SubtotalCents <= 0 {
-		return nil, httpx.ErrUnprocessable("cart is empty")
+		return nil, httpx.DomainError(422, httpx.CodeCartEmpty, "cart is empty")
 	}
 
 	c, err := s.repo.LockCouponByEventCodeTx(ctx, tx, cart.EventID, code)
@@ -261,23 +261,23 @@ func (s *Service) ApplyToCart(
 		return nil, err
 	}
 	if c == nil {
-		return nil, httpx.ErrNotFound("invalid coupon code")
+		return nil, httpx.DomainError(404, httpx.CodeCouponInvalidCode, "invalid coupon code")
 	}
 	if !c.Active() {
-		return nil, httpx.ErrUnprocessable("coupon is not active")
+		return nil, httpx.DomainError(422, httpx.CodeCouponNotActive, "coupon is not active")
 	}
 	now := time.Now()
 	if c.ValidFrom() != nil && now.Before(*c.ValidFrom()) {
-		return nil, httpx.ErrUnprocessable("coupon is not valid yet")
+		return nil, httpx.DomainError(422, httpx.CodeCouponNotYetValid, "coupon is not valid yet")
 	}
 	if c.ValidUntil() != nil && now.After(*c.ValidUntil()) {
-		return nil, httpx.ErrUnprocessable("coupon expired")
+		return nil, httpx.DomainError(422, httpx.CodeCouponExpired, "coupon expired")
 	}
 	if c.MaxUses() != nil && c.UsedCount() >= *c.MaxUses() {
-		return nil, httpx.ErrConflict("coupon already fully redeemed")
+		return nil, httpx.DomainError(409, httpx.CodeCouponFullyRedeemed, "coupon already fully redeemed")
 	}
 	if cart.SubtotalCents < c.MinPurchaseCents() {
-		return nil, httpx.ErrUnprocessable(
+		return nil, httpx.DomainError(422, httpx.CodeCouponMinPurchase,
 			fmt.Sprintf("minimum purchase of %.2f BRL not reached", float64(c.MinPurchaseCents())/100),
 		)
 	}
@@ -351,7 +351,7 @@ func (s *Service) RemoveFromCart(ctx context.Context, cartToken string) error {
 		return httpx.ErrNotFound("cart not found")
 	}
 	if cart.PaymentStatus == "paid" {
-		return httpx.ErrConflict("cart already paid")
+		return httpx.DomainError(409, httpx.CodeCartAlreadyPaid, "cart already paid")
 	}
 	if cart.CouponID == nil {
 		// No-op: nothing to remove. Don't 404 — keeps the FE safe to call this
@@ -669,7 +669,7 @@ func computeAppliedDiscount(c *domain.Coupon, cart *CartCouponSnapshot) (int64, 
 		return applied, nil
 	case TypeFreeShipping:
 		if !cart.HasShippingPicked {
-			return 0, httpx.ErrUnprocessable(
+			return 0, httpx.DomainError(422, httpx.CodeCouponShippingRequired,
 				"select shipping before applying a free-shipping coupon",
 			)
 		}
