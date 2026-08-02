@@ -256,28 +256,6 @@ func (q *Queries) GetLiveSessionByIDAndEvent(ctx context.Context, arg GetLiveSes
 	return i, err
 }
 
-const getPlatformByLiveID = `-- name: GetPlatformByLiveID :one
-SELECT id, session_id, platform, platform_live_id, added_at, media_permalink, media_thumbnail_url, media_caption, webhook_active, released_at FROM live_session_platforms WHERE platform_live_id = $1
-`
-
-func (q *Queries) GetPlatformByLiveID(ctx context.Context, platformLiveID string) (LiveSessionPlatform, error) {
-	row := q.db.QueryRow(ctx, getPlatformByLiveID, platformLiveID)
-	var i LiveSessionPlatform
-	err := row.Scan(
-		&i.ID,
-		&i.SessionID,
-		&i.Platform,
-		&i.PlatformLiveID,
-		&i.AddedAt,
-		&i.MediaPermalink,
-		&i.MediaThumbnailUrl,
-		&i.MediaCaption,
-		&i.WebhookActive,
-		&i.ReleasedAt,
-	)
-	return i, err
-}
-
 const getSessionByPlatformLiveID = `-- name: GetSessionByPlatformLiveID :one
 SELECT ls.id, ls.status, ls.started_at, ls.ended_at, ls.total_comments, ls.created_at, ls.updated_at, ls.event_id, ls.sequence_order, ls.type, ls.current_active_product_id, ls.processing_paused, ls.publish_at
 FROM live_sessions ls
@@ -595,6 +573,7 @@ func (q *Queries) SetLiveModeForEventSessions(ctx context.Context, arg SetLiveMo
 }
 
 const setMediaMetadata = `-- name: SetMediaMetadata :exec
+
 UPDATE live_session_platforms
 SET media_permalink = $2, media_thumbnail_url = $3, media_caption = $4
 WHERE platform_live_id = $1 AND released_at IS NULL
@@ -607,6 +586,14 @@ type SetMediaMetadataParams struct {
 	MediaCaption      pgtype.Text `json:"media_caption"`
 }
 
+// GetPlatformByLiveID foi REMOVIDA: não tinha nenhum chamador (só o wrapper de
+// repositório, que também não tinha) e era um `:one` sem ORDER BY sobre
+// platform_live_id — a coluna que a 000115 deixou de ter UNIQUE global. Quem a
+// ligasse teria o mesmo bug silencioso das duas queries de resolução: pgx lê a
+// primeira linha e descarta o resto sem erro, então o reuso de um post fixado
+// devolveria uma campanha ARBITRÁRIA. As duas resoluções vivas
+// (GetSessionByPlatformLiveID e GetEventByPlatformLiveID) já ordenam por
+// (released_at IS NULL) DESC, lsp.added_at DESC, lsp.id DESC.
 // D1/A4: a legenda/permalink/thumb pertencem à MÍDIA, não ao evento. Chaveado
 // por platform_live_id, que é o media_id do Instagram.
 //

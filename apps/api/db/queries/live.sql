@@ -92,8 +92,14 @@ WHERE session_id = $1 AND platform_live_id = $2;
 -- name: CountPlatformsBySession :one
 SELECT COUNT(*)::int FROM live_session_platforms WHERE session_id = $1;
 
--- name: GetPlatformByLiveID :one
-SELECT * FROM live_session_platforms WHERE platform_live_id = $1;
+-- GetPlatformByLiveID foi REMOVIDA: não tinha nenhum chamador (só o wrapper de
+-- repositório, que também não tinha) e era um `:one` sem ORDER BY sobre
+-- platform_live_id — a coluna que a 000115 deixou de ter UNIQUE global. Quem a
+-- ligasse teria o mesmo bug silencioso das duas queries de resolução: pgx lê a
+-- primeira linha e descarta o resto sem erro, então o reuso de um post fixado
+-- devolveria uma campanha ARBITRÁRIA. As duas resoluções vivas
+-- (GetSessionByPlatformLiveID e GetEventByPlatformLiveID) já ordenam por
+-- (released_at IS NULL) DESC, lsp.added_at DESC, lsp.id DESC.
 
 -- name: SetMediaMetadata :exec
 -- D1/A4: a legenda/permalink/thumb pertencem à MÍDIA, não ao evento. Chaveado

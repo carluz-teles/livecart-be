@@ -1148,23 +1148,9 @@ func (r *Repository) RemovePlatformFromSession(ctx context.Context, sessionID, p
 	})
 }
 
-func (r *Repository) GetPlatformByLiveID(ctx context.Context, platformLiveID string) (*PlatformRow, error) {
-	row, err := r.q.GetPlatformByLiveID(ctx, platformLiveID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("getting platform by live id: %w", err)
-	}
-
-	return &PlatformRow{
-		ID:             row.ID.String(),
-		SessionID:      row.SessionID.String(),
-		Platform:       row.Platform,
-		PlatformLiveID: row.PlatformLiveID,
-		AddedAt:        row.AddedAt.Time,
-	}, nil
-}
+// GetPlatformByLiveID foi removida junto com a query: sem chamador e, depois da
+// 000115, um `:one` sobre uma coluna que deixou de ser unica — devolveria uma
+// campanha arbitraria, em silencio. Ver a nota em db/queries/live.sql.
 
 // =============================================================================
 // STORE SETTINGS
