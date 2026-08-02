@@ -315,6 +315,53 @@ func (q *Queries) GetSessionProductByProductID(ctx context.Context, arg GetSessi
 	return i, err
 }
 
+const inheritEventWhitelistIntoSession = `-- name: InheritEventWhitelistIntoSession :execrows
+INSERT INTO session_products (session_id, product_id, special_price, max_quantity, display_order, featured)
+SELECT $1, w.product_id, w.special_price, w.max_quantity, w.display_order, w.featured
+FROM (
+    SELECT DISTINCT ON (sp.product_id)
+        sp.product_id,
+        sp.special_price,
+        sp.max_quantity,
+        sp.display_order,
+        sp.featured,
+        sp.created_at
+    FROM session_products sp
+    JOIN live_sessions ls ON ls.id = sp.session_id
+    WHERE ls.event_id = $2 AND ls.id <> $1
+    ORDER BY sp.product_id, sp.special_price ASC NULLS LAST, sp.display_order ASC, sp.created_at ASC
+) w
+ON CONFLICT (session_id, product_id) DO NOTHING
+`
+
+type InheritEventWhitelistIntoSessionParams struct {
+	SessionID pgtype.UUID `json:"session_id"`
+	EventID   pgtype.UUID `json:"event_id"`
+}
+
+// Sessão nova NASCE com a whitelist do evento (decisão do dono, revoga a nota
+// "sessão criada depois nasce vazia" que estava logo abaixo).
+//
+// Sem isto a barreira era inútil no fluxo real: o lojista configura os produtos
+// do evento, cria a transmissão de terça e essa sessão nasce VAZIA — e "lista
+// vazia = libera tudo" (regra que continua valendo) faz a sessão nova liberar o
+// catálogo inteiro. A união de GetEventProductConfigFromSessions então aceita
+// qualquer produto no evento, porque basta UMA sessão sem lista.
+//
+// Herda a mesma linha que a leitura por evento já considera canônica: DISTINCT
+// ON (product_id) com o MENOR preço especial, igual a ListEventWhitelistFromSessions.
+//
+// ls.id <> $1 exclui a própria sessão (que está vazia neste ponto, mas o filtro
+// deixa a query segura para um re-run) e o ON CONFLICT torna a herança
+// idempotente.
+func (q *Queries) InheritEventWhitelistIntoSession(ctx context.Context, arg InheritEventWhitelistIntoSessionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, inheritEventWhitelistIntoSession, arg.SessionID, arg.EventID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const listEventWhitelistFromSessions = `-- name: ListEventWhitelistFromSessions :many
 SELECT id, session_id, product_id, special_price, max_quantity, display_order, featured, created_at, updated_at, product_name, product_keyword, original_price, product_image_url, product_stock, product_active FROM (
     SELECT DISTINCT ON (sp.product_id)
@@ -553,8 +600,8 @@ type UpsertSessionProductForEventParams struct {
 }
 
 // Aplica a whitelist do EVENTO em todas as sessões existentes dele. É a
-// tradução da rota legada por evento para o modelo novo. Sessão criada DEPOIS
-// nasce vazia (N2, decisão explícita do dono) — não há herança.
+// tradução da rota legada por evento para o modelo novo. A sessão criada DEPOIS
+// não fica de fora: ela herda no nascimento, por InheritEventWhitelistIntoSession.
 func (q *Queries) UpsertSessionProductForEvent(ctx context.Context, arg UpsertSessionProductForEventParams) error {
 	_, err := q.db.Exec(ctx, upsertSessionProductForEvent,
 		arg.EventID,

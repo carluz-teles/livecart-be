@@ -26,18 +26,19 @@ func NewRepository(q *sqlc.Queries, pool *pgxpool.Pool) *Repository {
 	return &Repository{q: q, pool: pool}
 }
 
-// CreateSessionWithPlatformTx creates a session and adds a platform in a single transaction.
-// This ensures atomicity - either both operations succeed or both are rolled back.
+// CreateSessionWithPlatformTx cria a sessão, HERDA a whitelist do evento e
+// registra a mídia — tudo numa transação só. Devolve, além da sessão e da
+// plataforma, quantos produtos foram herdados (o chamador loga).
 // sessionType é o tipo da transmissão (D3): live|post|reel|story.
-func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, sessionType, platform, platformLiveID string) (SessionRow, *PlatformRow, error) {
+func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, sessionType, platform, platformLiveID string) (SessionRow, *PlatformRow, int64, error) {
 	eventUID, err := parseUUID(eventID)
 	if err != nil {
-		return SessionRow{}, nil, err
+		return SessionRow{}, nil, 0, err
 	}
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return SessionRow{}, nil, fmt.Errorf("beginning transaction: %w", err)
+		return SessionRow{}, nil, 0, fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback(ctx) // No-op if already committed
 
@@ -50,7 +51,28 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, s
 		Type:    SessionTypeFromEventType(sessionType),
 	})
 	if err != nil {
-		return SessionRow{}, nil, fmt.Errorf("creating live session: %w", err)
+		return SessionRow{}, nil, 0, fmt.Errorf("creating live session: %w", err)
+	}
+
+	// A sessão nova HERDA a whitelist do evento, no MESMO tx em que nasce.
+	//
+	// Antes ela nascia vazia, e "lista vazia = libera tudo" (a regra continua
+	// valendo) transformava a barreira em nada no fluxo real do lojista:
+	// configurar os produtos do evento → criar a transmissão de terça → a
+	// sessão nova sem lista libera o catálogo inteiro, porque a união do
+	// checkout aceita o produto se ALGUMA sessão o aceita e uma sessão sem lista
+	// aceita tudo. Herdar é o que faz a configuração do evento continuar
+	// valendo para a transmissão seguinte.
+	//
+	// Dentro do tx de propósito: uma sessão que existe com a lista errada por
+	// uma janela de milissegundos é uma sessão que libera o catálogo inteiro
+	// nessa janela.
+	inherited, err := qtx.InheritEventWhitelistIntoSession(ctx, sqlc.InheritEventWhitelistIntoSessionParams{
+		SessionID: sessionRow.ID,
+		EventID:   eventUID,
+	})
+	if err != nil {
+		return SessionRow{}, nil, 0, fmt.Errorf("inheriting event whitelist into session: %w", err)
 	}
 
 	// Add the platform to the session
@@ -60,18 +82,18 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, s
 		PlatformLiveID: platformLiveID,
 	})
 	if err != nil {
-		return SessionRow{}, nil, fmt.Errorf("adding platform to session: %w", err)
+		return SessionRow{}, nil, 0, fmt.Errorf("adding platform to session: %w", err)
 	}
 
 	// Emit session.created in the same tx (transactional outbox), carrying the
 	// assigned sequence_order so consumers see session ordering.
 	if err := emitSessionCreated(ctx, qtx, sessionRow, platform, platformLiveID); err != nil {
-		return SessionRow{}, nil, err
+		return SessionRow{}, nil, 0, err
 	}
 
 	// Commit the transaction
 	if err := tx.Commit(ctx); err != nil {
-		return SessionRow{}, nil, fmt.Errorf("committing transaction: %w", err)
+		return SessionRow{}, nil, 0, fmt.Errorf("committing transaction: %w", err)
 	}
 
 	session := toSessionRow(sessionRow)
@@ -83,7 +105,7 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, s
 		AddedAt:        platformRow.AddedAt.Time,
 	}
 
-	return session, platformOut, nil
+	return session, platformOut, inherited, nil
 }
 
 // emitSessionCreated writes the canonical session.created event to the outbox

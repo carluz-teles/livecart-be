@@ -1068,8 +1068,9 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		return CreateSessionOutput{}, err
 	}
 
-	// Create the session and add platform in a single transaction
-	session, platform, err := s.repo.CreateSessionWithPlatformTx(ctx, input.EventID, SessionTypeFromEventType(input.Type), input.Platform, input.PlatformLiveID)
+	// Create the session, inherit the event whitelist and add the platform in a
+	// single transaction.
+	session, platform, inherited, err := s.repo.CreateSessionWithPlatformTx(ctx, input.EventID, SessionTypeFromEventType(input.Type), input.Platform, input.PlatformLiveID)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("failed to create session with platform",
 			zap.String("event_id", input.EventID),
@@ -1078,10 +1079,15 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		return CreateSessionOutput{}, err
 	}
 
+	// inherited_products é o número que responde "por que meu produto está
+	// liberado/bloqueado nesta transmissão?" sem abrir o banco. Zero é legítimo
+	// (evento sem whitelist = tudo liberado) e é exatamente o caso que o
+	// suporte confunde com bug.
 	logger.From(ctx, s.logger).Info("session created",
 		zap.String("event_id", input.EventID),
 		zap.String("session_id", session.ID),
 		zap.String("platform", input.Platform),
+		zap.Int64("inherited_products", inherited),
 	)
 
 	return CreateSessionOutput{

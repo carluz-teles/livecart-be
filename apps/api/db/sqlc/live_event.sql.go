@@ -800,11 +800,12 @@ type ListEventsPastEndsAtRow struct {
 // Esta é a REDE. O caminho preciso é a task ETA event.window_close, armada na
 // criação e re-armada na edição de ends_at.
 //
-// 'active' virou "não encerrado" (D19/D20): um evento AGENDADO que nunca foi
-// ativado — e nada o ativa sozinho, ActivateScheduledEvent não tem chamador —
-// também tem teto, e com o filtro antigo ele ficaria 'scheduled' para sempre
-// com a janela vencida. O status ended continua de fora porque encerrar duas
-// vezes é o que este predicado impede.
+// 'active' virou "não encerrado" (D19/D20): um evento AGENDADO também tem teto,
+// e com o filtro antigo ele ficaria 'scheduled' para sempre com a janela
+// vencida. Continua valendo mesmo com a ativação da E37 no ar — o predicado de
+// ListEventsReadyToStart recusa de propósito quem já passou do fim, então é
+// ESTE sweep que encerra o evento agendado que nunca chegou a abrir. O status
+// ended fica de fora porque encerrar duas vezes é o que este predicado impede.
 func (q *Queries) ListEventsPastEndsAt(ctx context.Context, limit int32) ([]ListEventsPastEndsAtRow, error) {
 	rows, err := q.db.Query(ctx, listEventsPastEndsAt, limit)
 	if err != nil {

@@ -239,3 +239,95 @@ func TestSessionProductRequestValidate(t *testing.T) {
 		})
 	}
 }
+
+// A SESSÃO NOVA HERDA A WHITELIST DO EVENTO (decisão do dono).
+//
+// Sem herança a barreira era inútil no fluxo real: o lojista configura os
+// produtos do evento, cria a transmissão de terça e a sessão nova nasce VAZIA —
+// e "lista vazia = libera tudo" (regra que continua valendo) faz essa sessão
+// sozinha liberar o catálogo inteiro, porque a união do checkout aceita o
+// produto se ALGUMA sessão o aceita. É exatamente o cenário que
+// TestEventWhitelistIsTheUnionOfItsSessions já documentava como consequência
+// esperada — e que, no caminho de criar sessão, virava um buraco.
+func TestNewSessionInheritsEventWhitelist(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	f := seedWhitelistFixture(t, ctx, "wl-heranca", 1)
+
+	price := int64(700)
+	qty := int32(3)
+	if _, err := testRepo.UpsertSessionProduct(ctx, SessionProductInput{
+		SessionID:    f.sessions[0],
+		ProductID:    f.products[0],
+		SpecialPrice: &price,
+		MaxQuantity:  &qty,
+		DisplayOrder: 2,
+		Featured:     true,
+	}); err != nil {
+		t.Fatalf("UpsertSessionProduct: %v", err)
+	}
+	if f.allowed(t, ctx, f.products[1]) {
+		t.Fatal("pré-condição quebrada: com uma sessão só e whitelist, o produto de fora tem de estar barrado")
+	}
+
+	// A transmissão seguinte, criada pelo caminho real do painel.
+	session, _, inherited, err := testRepo.CreateSessionWithPlatformTx(ctx, f.eventID, "live", "instagram", "media-heranca")
+	if err != nil {
+		t.Fatalf("CreateSessionWithPlatformTx: %v", err)
+	}
+	if inherited != 1 {
+		t.Errorf("herdou %d produto(s), quero 1", inherited)
+	}
+
+	products, err := testRepo.ListSessionProducts(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("ListSessionProducts: %v", err)
+	}
+	if len(products) != 1 || products[0].ProductID != f.products[0] {
+		t.Fatalf("sessão nova nasceu com %d produto(s) — vazia, ela libera o catálogo inteiro", len(products))
+	}
+	// A configuração viaja junto: herdar só o id deixaria o preço especial e o
+	// teto para trás e o comprador pagaria outro valor na transmissão nova.
+	if products[0].SpecialPrice == nil || *products[0].SpecialPrice != price {
+		t.Errorf("special_price herdado = %v, quero %d", products[0].SpecialPrice, price)
+	}
+	if products[0].MaxQuantity == nil || *products[0].MaxQuantity != qty {
+		t.Errorf("max_quantity herdado = %v, quero %d", products[0].MaxQuantity, qty)
+	}
+
+	// O que importa de verdade: a barreira do evento continua de pé.
+	if !f.allowed(t, ctx, f.products[0]) {
+		t.Error("produto da whitelist deixou de ser aceito depois da nova sessão")
+	}
+	if f.allowed(t, ctx, f.products[1]) {
+		t.Error("a sessão nova derrubou a barreira do evento — é o bug que a herança fecha")
+	}
+}
+
+// Evento SEM whitelist continua liberando tudo: a herança copia uma lista
+// vazia, não inventa barreira nenhuma.
+func TestNewSessionInheritsNothingFromEmptyEvent(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	f := seedWhitelistFixture(t, ctx, "wl-heranca-vazia", 1)
+
+	session, _, inherited, err := testRepo.CreateSessionWithPlatformTx(ctx, f.eventID, "live", "instagram", "media-vazia")
+	if err != nil {
+		t.Fatalf("CreateSessionWithPlatformTx: %v", err)
+	}
+	if inherited != 0 {
+		t.Errorf("herdou %d produto(s) de um evento sem whitelist", inherited)
+	}
+	products, err := testRepo.ListSessionProducts(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("ListSessionProducts: %v", err)
+	}
+	if len(products) != 0 {
+		t.Errorf("sessão nasceu com %d produto(s) num evento sem whitelist", len(products))
+	}
+	for _, p := range f.products {
+		if !f.allowed(t, ctx, p) {
+			t.Errorf("evento sem whitelist tem de liberar o produto %s", p)
+		}
+	}
+}
