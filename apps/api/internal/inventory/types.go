@@ -59,3 +59,74 @@ type CartRef struct {
 	StoreID        string
 	PlatformHandle string
 }
+
+// ProductRef is the enxuto product view the waitlist promotion needs — just the
+// price, name and keyword the promoted cart item + notification DM require. It
+// deliberately does NOT mirror the full integration ProductRow (ID/Stock/
+// ExternalID stay integration-owned); the boot-wired adapter maps ProductRow →
+// ProductRef, mirroring CartRef / erp.ShipmentInvoiceRef. A nil *ProductRef means
+// the product is gone (the promotion aborts and reverts). Canonical home is this
+// package (Bloco B3b).
+type ProductRef struct {
+	Price   int64
+	Name    string
+	Keyword string
+}
+
+// CartExpirySnapshot holds the expiry-relevant fields of a cart — the store, the
+// cart/payment status and the expires_at window. The waitlist core reads it to
+// decide whether a cart is terminal (paid/expired/cancelled) before promoting or
+// expiring against it. Canonical home is this package (Bloco B3b);
+// internal/integration aliases it so the repository (which builds it from sqlc)
+// and the ScheduleExpiry/RunScheduledExpiry that stay integration-owned keep
+// compiling.
+type CartExpirySnapshot struct {
+	StoreID       string
+	Status        string
+	PaymentStatus string
+	ExpiresAt     *time.Time
+}
+
+// EmitWaitlistNotifiedParams is the payload of the waitlist.notified fact, emitted
+// at the promotion's definitive success point. Canonical home is this package
+// (Bloco B3b); internal/integration aliases it so the repository emitter keeps
+// compiling.
+type EmitWaitlistNotifiedParams struct {
+	WaitlistItemID string
+	EventID        string
+	ProductID      string
+	CartID         string
+	Quantity       int
+	Remaining      int
+}
+
+// ExpireCartResult is the outcome of the atomic expire-and-release transaction.
+// Eligible=false means the guard-first flip returned 0 rows (paid/terminal in the
+// gap) — the caller aborts without touching the ERP. FreedProductIDs are the
+// products whose local stock was returned (waitlist promotion targets, post-
+// commit). Canonical home is this package (Bloco B3b); internal/integration
+// aliases it so the repository transaction keeps compiling.
+type ExpireCartResult struct {
+	Eligible        bool
+	EventID         string
+	FreedProductIDs []string
+}
+
+// WaitlistNotifiedInput is the neutral payload the promotion flow hands to
+// NotifyWaitlistPromoted (the "produto liberou" DM). It mirrors the integration-
+// owned sendWaitlistNotifiedInput field-for-field; the collaborator maps it back
+// and sends the DM (the notification wiring stays integration-owned — NIL-GUARD
+// LAZY, read s.notificationService at call time).
+type WaitlistNotifiedInput struct {
+	StoreID        string
+	EventID        string
+	EventTitle     string
+	CartID         string
+	CartToken      string
+	PlatformUserID string
+	PlatformHandle string
+	ProductName    string
+	ProductKeyword string
+	Quantity       int
+	TTL            time.Duration
+}

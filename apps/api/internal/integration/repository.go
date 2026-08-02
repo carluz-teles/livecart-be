@@ -1198,14 +1198,10 @@ func (r *Repository) MarkWaitlistNotified(ctx context.Context, id string, expire
 }
 
 // EmitWaitlistNotifiedParams carries the identifiers for a waitlist.notified event.
-type EmitWaitlistNotifiedParams struct {
-	WaitlistItemID string
-	EventID        string
-	ProductID      string
-	CartID         string
-	Quantity       int
-	Remaining      int
-}
+// EmitWaitlistNotifiedParams is the payload of the waitlist.notified fact. Its
+// canonical home moved to internal/inventory (Bloco B3b); this alias keeps the
+// repository emitter compiling unchanged.
+type EmitWaitlistNotifiedParams = inventory.EmitWaitlistNotifiedParams
 
 // EmitWaitlistNotified publishes waitlist.notified best-effort (non-transactional
 // outbox insert). Unlike waitlist.queued, the "notified" transition is a multi-step
@@ -1930,15 +1926,10 @@ func (r *Repository) UpdateCartStatus(ctx context.Context, cartID, status string
 }
 
 // ExpireCartResult is the outcome of the atomic flip+local-release transaction.
-type ExpireCartResult struct {
-	// Eligible=false quando o guard do UPDATE devolveu 0 rows (o cart foi pago
-	// ou já expirado/cancelado no intervalo) — o caller ABORTA sem tocar ERP.
-	Eligible bool
-	EventID  string
-	// FreedProductIDs: produtos cujo estoque local foi devolvido (para promover
-	// a waitlist depois do commit).
-	FreedProductIDs []string
-}
+// ExpireCartResult is the outcome of ExpireCartAndReleaseStock. Its canonical
+// home moved to internal/inventory (Bloco B3b); this alias keeps the repository
+// transaction compiling unchanged.
+type ExpireCartResult = inventory.ExpireCartResult
 
 // ExpireCartAndReleaseStock faz, numa ÚNICA transação: (1) o flip guard-first
 // do cart para 'expired' (ExpireCart — recusa cart pago/já-terminal) e, só se
@@ -2103,12 +2094,10 @@ func (r *Repository) GetCartByID(ctx context.Context, cartID string) (*CartRow, 
 // The window matters because ExpireCartAndReleaseStock's guard does NOT check
 // expires_at (the sweep pre-filters by it), so a scheduled task firing on a cart
 // whose window was extended must NOT expire it prematurely.
-type CartExpirySnapshot struct {
-	StoreID       string
-	Status        string
-	PaymentStatus string
-	ExpiresAt     *time.Time
-}
+// CartExpirySnapshot holds a cart's expiry-relevant fields. Its canonical home
+// moved to internal/inventory (Bloco B3b); this alias keeps the repository
+// builder and the ScheduleExpiry/RunScheduledExpiry bridge compiling unchanged.
+type CartExpirySnapshot = inventory.CartExpirySnapshot
 
 // GetCartExpirySnapshot loads the expiry-relevant fields for a cart, with the
 // store resolved from the event. Returns (nil, nil) when the cart is gone.
