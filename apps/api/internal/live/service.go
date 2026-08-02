@@ -543,21 +543,23 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		}
 
 		sessions[i] = SessionOutput{
-			ID:            sessionRow.ID,
-			EventID:       sessionRow.EventID,
-			Type:          sessionRow.Type,
-			Status:        sessionRow.Status,
-			StartedAt:     sessionRow.StartedAt,
-			EndedAt:       sessionRow.EndedAt,
-			TotalComments: sessionRow.TotalComments,
-			TotalCarts:    totalCarts,
-			PaidCarts:     paidCarts,
-			TotalRevenue:  totalRevenue,
-			PaidRevenue:   paidRevenue,
-			Platforms:     platformOutputs,
-			Comments:      commentOutputs,
-			CreatedAt:     sessionRow.CreatedAt,
-			UpdatedAt:     sessionRow.UpdatedAt,
+			ID:                     sessionRow.ID,
+			EventID:                sessionRow.EventID,
+			Type:                   sessionRow.Type,
+			Status:                 sessionRow.Status,
+			CurrentActiveProductID: sessionRow.CurrentActiveProductID,
+			ProcessingPaused:       sessionRow.ProcessingPaused,
+			StartedAt:              sessionRow.StartedAt,
+			EndedAt:                sessionRow.EndedAt,
+			TotalComments:          sessionRow.TotalComments,
+			TotalCarts:             totalCarts,
+			PaidCarts:              paidCarts,
+			TotalRevenue:           totalRevenue,
+			PaidRevenue:            paidRevenue,
+			Platforms:              platformOutputs,
+			Comments:               commentOutputs,
+			CreatedAt:              sessionRow.CreatedAt,
+			UpdatedAt:              sessionRow.UpdatedAt,
 		}
 	}
 
@@ -936,16 +938,18 @@ func (s *Service) GetSessionByPlatformLiveID(ctx context.Context, platformLiveID
 	}
 
 	return &SessionOutput{
-		ID:            session.ID,
-		EventID:       session.EventID,
-		Type:          session.Type,
-		Status:        session.Status,
-		StartedAt:     session.StartedAt,
-		EndedAt:       session.EndedAt,
-		TotalComments: session.TotalComments,
-		Platforms:     platformOutputs,
-		CreatedAt:     session.CreatedAt,
-		UpdatedAt:     session.UpdatedAt,
+		ID:                     session.ID,
+		EventID:                session.EventID,
+		Type:                   session.Type,
+		Status:                 session.Status,
+		CurrentActiveProductID: session.CurrentActiveProductID,
+		ProcessingPaused:       session.ProcessingPaused,
+		StartedAt:              session.StartedAt,
+		EndedAt:                session.EndedAt,
+		TotalComments:          session.TotalComments,
+		Platforms:              platformOutputs,
+		CreatedAt:              session.CreatedAt,
+		UpdatedAt:              session.UpdatedAt,
 	}, nil
 }
 
@@ -1352,7 +1356,12 @@ func (s *Service) ListProductsByEvent(ctx context.Context, eventID, storeID stri
 // LIVE MODE - Active Product and Processing Control
 // =============================================================================
 
-// SetActiveProduct sets or clears the active product for an event
+// O Modo Live é da SESSÃO (D17). As funções por EVENTO abaixo mantêm o painel
+// atual de pé — ele só conhece o eventId — aplicando o estado em todas as
+// sessões vivas do evento e lendo da sessão viva mais recente.
+
+// SetActiveProduct define ou limpa o produto em destaque das sessões vivas do
+// evento.
 func (s *Service) SetActiveProduct(ctx context.Context, eventID, storeID string, productID *string) (*LiveModeStateOutput, error) {
 	// Verify event exists and is active
 	event, err := s.repo.GetEventByID(ctx, eventID, storeID)
@@ -1364,13 +1373,7 @@ func (s *Service) SetActiveProduct(ctx context.Context, eventID, storeID string,
 		return nil, httpx.ErrBadRequest("can only set active product on active events")
 	}
 
-	// Set or clear active product
-	if productID != nil && *productID != "" {
-		_, err = s.repo.SetActiveProduct(ctx, eventID, storeID, *productID)
-	} else {
-		_, err = s.repo.ClearActiveProduct(ctx, eventID, storeID)
-	}
-	if err != nil {
+	if err := s.repo.SetActiveProductForEventSessions(ctx, eventID, storeID, productID); err != nil {
 		return nil, err
 	}
 
@@ -1379,11 +1382,11 @@ func (s *Service) SetActiveProduct(ctx context.Context, eventID, storeID string,
 		zap.Stringp("product_id", productID),
 	)
 
-	// Return updated state
 	return s.GetLiveModeState(ctx, eventID, storeID)
 }
 
-// SetProcessingPaused pauses or resumes comment processing for an event
+// SetProcessingPaused pausa ou retoma o processamento das sessões vivas do
+// evento.
 func (s *Service) SetProcessingPaused(ctx context.Context, eventID, storeID string, paused bool) (*LiveModeStateOutput, error) {
 	// Verify event exists and is active
 	event, err := s.repo.GetEventByID(ctx, eventID, storeID)
@@ -1395,8 +1398,7 @@ func (s *Service) SetProcessingPaused(ctx context.Context, eventID, storeID stri
 		return nil, httpx.ErrBadRequest("can only change processing state on active events")
 	}
 
-	_, err = s.repo.SetProcessingPaused(ctx, eventID, storeID, paused)
-	if err != nil {
+	if err := s.repo.SetProcessingPausedForEventSessions(ctx, eventID, storeID, paused); err != nil {
 		return nil, err
 	}
 
@@ -1405,18 +1407,76 @@ func (s *Service) SetProcessingPaused(ctx context.Context, eventID, storeID stri
 		zap.Bool("paused", paused),
 	)
 
-	// Return updated state
 	return s.GetLiveModeState(ctx, eventID, storeID)
 }
 
-// GetLiveModeState returns the current live mode state for an event
+// GetLiveModeState devolve o estado do evento lido da sessão viva mais recente.
 func (s *Service) GetLiveModeState(ctx context.Context, eventID, storeID string) (*LiveModeStateOutput, error) {
 	return s.repo.GetLiveModeState(ctx, eventID, storeID)
 }
 
 // =============================================================================
-// EVENT PRODUCTS (Whitelist)
+// MODO LIVE POR SESSÃO (D17)
 // =============================================================================
+
+// SetSessionActiveProduct define ou limpa o produto em destaque DAQUELA
+// transmissão.
+//
+// O guard é o status da SESSÃO, não o do evento: num evento guarda-chuva de uma
+// semana, exigir evento 'active' é justamente o acoplamento que a D17 desfaz.
+func (s *Service) SetSessionActiveProduct(ctx context.Context, sessionID, eventID, storeID string, productID *string) (*LiveModeStateOutput, error) {
+	if err := s.requireLiveSession(ctx, sessionID, eventID, storeID); err != nil {
+		return nil, err
+	}
+	if _, err := s.repo.SetSessionActiveProduct(ctx, sessionID, storeID, productID); err != nil {
+		return nil, err
+	}
+	logger.From(ctx, s.logger).Info("session active product updated",
+		zap.String("session_id", sessionID),
+		zap.Stringp("product_id", productID),
+	)
+	return s.repo.GetSessionLiveModeState(ctx, sessionID, storeID)
+}
+
+// SetSessionProcessingPaused pausa ou retoma o processamento DAQUELA
+// transmissão — sem tocar nas outras sessões do mesmo evento.
+func (s *Service) SetSessionProcessingPaused(ctx context.Context, sessionID, eventID, storeID string, paused bool) (*LiveModeStateOutput, error) {
+	if err := s.requireLiveSession(ctx, sessionID, eventID, storeID); err != nil {
+		return nil, err
+	}
+	if _, err := s.repo.SetSessionProcessingPaused(ctx, sessionID, storeID, paused); err != nil {
+		return nil, err
+	}
+	logger.From(ctx, s.logger).Info("session processing paused state updated",
+		zap.String("session_id", sessionID),
+		zap.Bool("paused", paused),
+	)
+	return s.repo.GetSessionLiveModeState(ctx, sessionID, storeID)
+}
+
+// GetSessionLiveModeState devolve o estado do modo live DAQUELA transmissão.
+func (s *Service) GetSessionLiveModeState(ctx context.Context, sessionID, eventID, storeID string) (*LiveModeStateOutput, error) {
+	if err := s.resolveSessionOfEvent(ctx, sessionID, eventID, storeID); err != nil {
+		return nil, err
+	}
+	return s.repo.GetSessionLiveModeState(ctx, sessionID, storeID)
+}
+
+// requireLiveSession confirma posse e exige que a transmissão esteja no ar —
+// destacar produto ou pausar uma sessão encerrada não significa nada.
+func (s *Service) requireLiveSession(ctx context.Context, sessionID, eventID, storeID string) error {
+	if err := s.resolveSessionOfEvent(ctx, sessionID, eventID, storeID); err != nil {
+		return err
+	}
+	session, err := s.repo.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if session.Status != "active" && session.Status != "live" {
+		return httpx.ErrBadRequest("só é possível controlar o modo live de uma sessão em andamento")
+	}
+	return nil
+}
 
 // A whitelist é da SESSÃO (D15/N2). As funções abaixo mantêm de pé as rotas
 // legadas por EVENTO — que o frontend ainda usa — traduzindo cada operação para

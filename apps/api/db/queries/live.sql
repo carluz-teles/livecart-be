@@ -111,3 +111,77 @@ WHERE ls.type IN ('post', 'reel')
   AND lsp.webhook_active = false
   AND (e.ends_at IS NULL OR e.ends_at >= now() - interval '2 days');
 
+
+-- =============================================================================
+-- MODO LIVE NA SESSÃO (D17) — estado EFÊMERO de execução
+--
+-- A checagem de posse é loja → evento → sessão: as queries equivalentes no
+-- evento casavam (id, store_id) na mesma linha; aqui a loja está a duas tabelas
+-- de distância e o JOIN é obrigatório, senão qualquer lojista mexe na sessão de
+-- qualquer outro.
+-- =============================================================================
+
+-- name: SetSessionActiveProduct :one
+UPDATE live_sessions ls
+SET current_active_product_id = $2, updated_at = now()
+FROM live_events e
+WHERE ls.id = $1 AND e.id = ls.event_id AND e.store_id = $3
+RETURNING ls.*;
+
+-- name: SetSessionProcessingPaused :one
+UPDATE live_sessions ls
+SET processing_paused = $2, updated_at = now()
+FROM live_events e
+WHERE ls.id = $1 AND e.id = ls.event_id AND e.store_id = $3
+RETURNING ls.*;
+
+-- name: GetSessionLiveModeState :one
+SELECT
+    ls.id,
+    ls.event_id,
+    ls.processing_paused,
+    ls.current_active_product_id,
+    p.name AS active_product_name,
+    p.keyword AS active_product_keyword,
+    p.price AS active_product_price,
+    p.image_url AS active_product_image_url
+FROM live_sessions ls
+JOIN live_events e ON e.id = ls.event_id
+LEFT JOIN products p ON p.id = ls.current_active_product_id
+WHERE ls.id = $1 AND e.store_id = $2;
+
+-- name: SetLiveModeForEventSessions :exec
+-- Rota LEGADA por evento: aplica o produto em destaque em todas as sessões
+-- vivas do evento. Mantém o painel atual (que só conhece eventId) funcionando
+-- enquanto o frontend não passa a mandar sessionId.
+UPDATE live_sessions ls
+SET current_active_product_id = $2, updated_at = now()
+FROM live_events e
+WHERE e.id = ls.event_id AND e.id = $1 AND e.store_id = $3
+  AND ls.status IN ('active', 'live');
+
+-- name: SetProcessingPausedForEventSessions :exec
+-- Idem para a pausa do processamento.
+UPDATE live_sessions ls
+SET processing_paused = $2, updated_at = now()
+FROM live_events e
+WHERE e.id = ls.event_id AND e.id = $1 AND e.store_id = $3
+  AND ls.status IN ('active', 'live');
+
+-- name: GetEventLiveModeStateFromSessions :one
+-- Estado do modo live do EVENTO, lido da sessão viva mais recente. É o que a
+-- rota legada devolve enquanto o painel ainda não é por sessão.
+SELECT
+    ls.id AS session_id,
+    ls.processing_paused,
+    ls.current_active_product_id,
+    p.name AS active_product_name,
+    p.keyword AS active_product_keyword,
+    p.price AS active_product_price,
+    p.image_url AS active_product_image_url
+FROM live_sessions ls
+JOIN live_events e ON e.id = ls.event_id
+LEFT JOIN products p ON p.id = ls.current_active_product_id
+WHERE e.id = $1 AND e.store_id = $2
+ORDER BY (ls.status IN ('active', 'live')) DESC, ls.sequence_order DESC
+LIMIT 1;

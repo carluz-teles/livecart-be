@@ -410,6 +410,10 @@ type LiveSession struct {
 	SequenceOrder int32              `json:"sequence_order"`
 	// D3: natureza da transmissão (live|post|reel|story). Fonte da verdade do tipo. live_events.type sobrevive como rótulo legado do vocabulário antigo (single|multi|post|story) até a 000119; 'reel' é gravado lá como 'post' para não quebrar o FE.
 	Type string `json:"type"`
+	// D17: produto em destaque DESTA transmissão. Fallback quando o comprador comenta com intenção de compra e nenhuma palavra-chave casa.
+	CurrentActiveProductID pgtype.UUID `json:"current_active_product_id"`
+	// D17: quando true, os comentários DESTA transmissão são gravados mas não viram carrinho. Pausar uma sessão não pausa as outras do mesmo evento.
+	ProcessingPaused bool `json:"processing_paused"`
 }
 
 type LiveSessionPlatform struct {

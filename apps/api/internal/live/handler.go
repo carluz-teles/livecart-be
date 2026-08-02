@@ -48,7 +48,13 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Post("/:id/platforms", h.AddPlatform)
 	g.Delete("/:id/platforms/:platformLiveId", h.RemovePlatform)
 
-	// Live Mode - Active Product and Processing Control
+	// Modo Live POR SESSÃO (D17) — a unidade nova.
+	g.Get("/:id/sessions/:sessionId/live-mode", h.GetSessionLiveModeState)
+	g.Patch("/:id/sessions/:sessionId/active-product", h.SetSessionActiveProduct)
+	g.Patch("/:id/sessions/:sessionId/pause-processing", h.SetSessionProcessingPaused)
+
+	// Modo Live por EVENTO — rota legada do painel atual, que só conhece o
+	// eventId. Aplica em todas as sessões vivas e lê da mais recente.
 	g.Get("/:id/live-mode", h.GetLiveModeState)
 	g.Patch("/:id/active-product", h.SetActiveProduct)
 	g.Patch("/:id/pause-processing", h.SetProcessingPaused)
@@ -1084,6 +1090,7 @@ func (h *Handler) SetProcessingPaused(c *fiber.Ctx) error {
 
 func toLiveModeStateResponse(state *LiveModeStateOutput) LiveModeStateResponse {
 	resp := LiveModeStateResponse{
+		SessionID:        state.SessionID,
 		ProcessingPaused: state.ProcessingPaused,
 	}
 

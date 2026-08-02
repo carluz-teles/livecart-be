@@ -1739,16 +1739,24 @@ func toSessionRow(row sqlc.LiveSession) SessionRow {
 		endedAt = &row.EndedAt.Time
 	}
 
+	var activeProductID *string
+	if row.CurrentActiveProductID.Valid {
+		v := row.CurrentActiveProductID.String()
+		activeProductID = &v
+	}
+
 	return SessionRow{
-		ID:            row.ID.String(),
-		EventID:       row.EventID.String(),
-		Type:          row.Type,
-		Status:        row.Status,
-		StartedAt:     startedAt,
-		EndedAt:       endedAt,
-		TotalComments: int(row.TotalComments.Int32),
-		CreatedAt:     row.CreatedAt.Time,
-		UpdatedAt:     row.UpdatedAt.Time,
+		ID:                     row.ID.String(),
+		EventID:                row.EventID.String(),
+		Type:                   row.Type,
+		Status:                 row.Status,
+		CurrentActiveProductID: activeProductID,
+		ProcessingPaused:       row.ProcessingPaused,
+		StartedAt:              startedAt,
+		EndedAt:                endedAt,
+		TotalComments:          int(row.TotalComments.Int32),
+		CreatedAt:              row.CreatedAt.Time,
+		UpdatedAt:              row.UpdatedAt.Time,
 	}
 }
 
@@ -1939,88 +1947,145 @@ func (r *Repository) GetSessionStats(ctx context.Context, sessionID string) (*Se
 // LIVE MODE - Active Product and Processing Control
 // =============================================================================
 
-// SetActiveProduct sets the active product for an event
-func (r *Repository) SetActiveProduct(ctx context.Context, eventID, storeID, productID string) (EventRow, error) {
-	eventUID, err := parseUUID(eventID)
+// =============================================================================
+// MODO LIVE (D17) — estado EFÊMERO de execução, agora na SESSÃO
+//
+// As colunas equivalentes em live_events continuam existindo até a 000119, mas
+// não são mais lidas nem escritas: quem manda é a sessão. As funções "…ForEvent"
+// abaixo sustentam a rota legada do painel, que ainda só conhece o eventId, e
+// aplicam o estado em TODAS as sessões vivas do evento.
+// =============================================================================
+
+// SetSessionActiveProduct define (ou limpa, com productID nil) o produto em
+// destaque DAQUELA transmissão.
+func (r *Repository) SetSessionActiveProduct(ctx context.Context, sessionID, storeID string, productID *string) (SessionRow, error) {
+	sessionUID, err := parseUUID(sessionID)
 	if err != nil {
-		return EventRow{}, err
+		return SessionRow{}, err
 	}
 	storeUID, err := parseUUID(storeID)
 	if err != nil {
-		return EventRow{}, err
+		return SessionRow{}, err
 	}
-	productUID, err := parseUUID(productID)
-	if err != nil {
-		return EventRow{}, err
+	var productUID pgtype.UUID
+	if productID != nil && *productID != "" {
+		productUID, err = parseUUID(*productID)
+		if err != nil {
+			return SessionRow{}, err
+		}
 	}
 
-	row, err := r.q.SetActiveProduct(ctx, sqlc.SetActiveProductParams{
-		ID:                     eventUID,
+	row, err := r.q.SetSessionActiveProduct(ctx, sqlc.SetSessionActiveProductParams{
+		ID:                     sessionUID,
 		CurrentActiveProductID: productUID,
 		StoreID:                storeUID,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return EventRow{}, httpx.ErrNotFound("event not found")
+			return SessionRow{}, httpx.ErrNotFound("session not found")
 		}
-		return EventRow{}, fmt.Errorf("setting active product: %w", err)
+		return SessionRow{}, fmt.Errorf("setting session active product: %w", err)
 	}
-
-	return toEventRow(row), nil
+	return toSessionRow(row), nil
 }
 
-// ClearActiveProduct clears the active product for an event
-func (r *Repository) ClearActiveProduct(ctx context.Context, eventID, storeID string) (EventRow, error) {
-	eventUID, err := parseUUID(eventID)
+// SetSessionProcessingPaused pausa ou retoma o processamento DAQUELA transmissão.
+func (r *Repository) SetSessionProcessingPaused(ctx context.Context, sessionID, storeID string, paused bool) (SessionRow, error) {
+	sessionUID, err := parseUUID(sessionID)
 	if err != nil {
-		return EventRow{}, err
+		return SessionRow{}, err
 	}
 	storeUID, err := parseUUID(storeID)
 	if err != nil {
-		return EventRow{}, err
+		return SessionRow{}, err
 	}
 
-	row, err := r.q.ClearActiveProduct(ctx, sqlc.ClearActiveProductParams{
-		ID:      eventUID,
-		StoreID: storeUID,
-	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return EventRow{}, httpx.ErrNotFound("event not found")
-		}
-		return EventRow{}, fmt.Errorf("clearing active product: %w", err)
-	}
-
-	return toEventRow(row), nil
-}
-
-// SetProcessingPaused sets the processing paused state for an event
-func (r *Repository) SetProcessingPaused(ctx context.Context, eventID, storeID string, paused bool) (EventRow, error) {
-	eventUID, err := parseUUID(eventID)
-	if err != nil {
-		return EventRow{}, err
-	}
-	storeUID, err := parseUUID(storeID)
-	if err != nil {
-		return EventRow{}, err
-	}
-
-	row, err := r.q.SetProcessingPaused(ctx, sqlc.SetProcessingPausedParams{
-		ID:               eventUID,
+	row, err := r.q.SetSessionProcessingPaused(ctx, sqlc.SetSessionProcessingPausedParams{
+		ID:               sessionUID,
 		ProcessingPaused: paused,
 		StoreID:          storeUID,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return EventRow{}, httpx.ErrNotFound("event not found")
+			return SessionRow{}, httpx.ErrNotFound("session not found")
 		}
-		return EventRow{}, fmt.Errorf("setting processing paused: %w", err)
+		return SessionRow{}, fmt.Errorf("setting session processing paused: %w", err)
 	}
-
-	return toEventRow(row), nil
+	return toSessionRow(row), nil
 }
 
-// GetLiveModeState returns the live mode state for an event
+// GetSessionLiveModeState devolve o estado do modo live DAQUELA transmissão.
+func (r *Repository) GetSessionLiveModeState(ctx context.Context, sessionID, storeID string) (*LiveModeStateOutput, error) {
+	sessionUID, err := parseUUID(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := r.q.GetSessionLiveModeState(ctx, sqlc.GetSessionLiveModeStateParams{
+		ID:      sessionUID,
+		StoreID: storeUID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.ErrNotFound("session not found")
+		}
+		return nil, fmt.Errorf("getting session live mode state: %w", err)
+	}
+
+	return buildLiveModeState(
+		row.ID.String(), row.ProcessingPaused, row.CurrentActiveProductID,
+		row.ActiveProductName, row.ActiveProductKeyword,
+		row.ActiveProductPrice, row.ActiveProductImageUrl,
+	), nil
+}
+
+// SetActiveProductForEventSessions é a rota LEGADA: aplica o produto em
+// destaque em todas as sessões VIVAS do evento.
+func (r *Repository) SetActiveProductForEventSessions(ctx context.Context, eventID, storeID string, productID *string) error {
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+	var productUID pgtype.UUID
+	if productID != nil && *productID != "" {
+		productUID, err = parseUUID(*productID)
+		if err != nil {
+			return err
+		}
+	}
+	return r.q.SetLiveModeForEventSessions(ctx, sqlc.SetLiveModeForEventSessionsParams{
+		ID:                     eventUID,
+		CurrentActiveProductID: productUID,
+		StoreID:                storeUID,
+	})
+}
+
+// SetProcessingPausedForEventSessions é a rota LEGADA da pausa.
+func (r *Repository) SetProcessingPausedForEventSessions(ctx context.Context, eventID, storeID string, paused bool) error {
+	eventUID, err := parseUUID(eventID)
+	if err != nil {
+		return err
+	}
+	storeUID, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+	return r.q.SetProcessingPausedForEventSessions(ctx, sqlc.SetProcessingPausedForEventSessionsParams{
+		ID:               eventUID,
+		ProcessingPaused: paused,
+		StoreID:          storeUID,
+	})
+}
+
+// GetLiveModeState devolve o estado do EVENTO lido da sessão viva mais recente.
 func (r *Repository) GetLiveModeState(ctx context.Context, eventID, storeID string) (*LiveModeStateOutput, error) {
 	eventUID, err := parseUUID(eventID)
 	if err != nil {
@@ -2031,43 +2096,55 @@ func (r *Repository) GetLiveModeState(ctx context.Context, eventID, storeID stri
 		return nil, err
 	}
 
-	row, err := r.q.GetLiveModeState(ctx, sqlc.GetLiveModeStateParams{
+	row, err := r.q.GetEventLiveModeStateFromSessions(ctx, sqlc.GetEventLiveModeStateFromSessionsParams{
 		ID:      eventUID,
 		StoreID: storeUID,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.ErrNotFound("event not found")
+			// Evento sem sessão nenhuma: estado neutro, não 404 — o painel não
+			// deve quebrar por causa de um evento que ainda não tem transmissão.
+			return &LiveModeStateOutput{}, nil
 		}
 		return nil, fmt.Errorf("getting live mode state: %w", err)
 	}
 
-	output := &LiveModeStateOutput{
-		ProcessingPaused: row.ProcessingPaused,
-	}
-
-	// Include active product if set
-	if row.CurrentActiveProductID.Valid && row.ActiveProductName.Valid {
-		var imageURL *string
-		if row.ActiveProductImageUrl.Valid {
-			imageURL = &row.ActiveProductImageUrl.String
-		}
-
-		output.ActiveProduct = &ActiveProductOutput{
-			ID:       row.CurrentActiveProductID.String(),
-			Name:     row.ActiveProductName.String,
-			Keyword:  row.ActiveProductKeyword.String,
-			Price:    row.ActiveProductPrice.Int64,
-			ImageURL: imageURL,
-		}
-	}
-
-	return output, nil
+	return buildLiveModeState(
+		row.SessionID.String(), row.ProcessingPaused, row.CurrentActiveProductID,
+		row.ActiveProductName, row.ActiveProductKeyword,
+		row.ActiveProductPrice, row.ActiveProductImageUrl,
+	), nil
 }
 
-// =============================================================================
-// EVENT PRODUCTS (Whitelist)
-// =============================================================================
+// buildLiveModeState centraliza a montagem do estado a partir das duas leituras
+// (por sessão e a legada por evento) — elas devolvem exatamente as mesmas
+// colunas.
+func buildLiveModeState(
+	sessionID string,
+	paused bool,
+	productID pgtype.UUID,
+	name, keyword pgtype.Text,
+	price pgtype.Int8,
+	imageURL pgtype.Text,
+) *LiveModeStateOutput {
+	out := &LiveModeStateOutput{SessionID: sessionID, ProcessingPaused: paused}
+	// name inválido = produto apagado depois de destacado; sem ele não há o que
+	// mostrar, e devolver só o id enganaria o painel.
+	if productID.Valid && name.Valid {
+		var image *string
+		if imageURL.Valid {
+			image = &imageURL.String
+		}
+		out.ActiveProduct = &ActiveProductOutput{
+			ID:       productID.String(),
+			Name:     name.String,
+			Keyword:  keyword.String,
+			Price:    price.Int64,
+			ImageURL: image,
+		}
+	}
+	return out
+}
 
 // A camada de event_products saiu daqui: a whitelist passou a ser da SESSÃO
 // (000110). As operações equivalentes estão em session_product_repository.go, e
@@ -2265,9 +2342,6 @@ func (r *Repository) GetEventWithCounts(ctx context.Context, eventID, storeID st
 // =============================================================================
 // EVENT PRODUCT/UPSELL HELPERS
 // =============================================================================
-
-
-
 
 func toEventUpsellOutputFromGet(row sqlc.GetEventUpsellByIDRow) EventUpsellOutput {
 	var messageTemplate *string

@@ -5046,9 +5046,11 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		)
 	}
 
-	// Check if processing is paused
-	if event.ProcessingPaused {
+	// D17: a pausa é DESTA transmissão. No evento, pausar a live de segunda
+	// deixava a live de quarta do mesmo evento parada junto.
+	if session.ProcessingPaused {
 		logger.From(ctx, s.logger).Info("processing paused, storing comment only",
+			zap.String("session_id", session.ID),
 			zap.String("event_id", event.ID),
 			zap.String("comment_id", input.CommentID),
 			zap.String("username", input.Username),
@@ -5140,13 +5142,14 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	if hasPurchaseIntent {
 		product = s.findProductByKeyword(ctx, event.StoreID, input.Text)
 
-		// If no keyword match but has purchase intent, try active product as fallback
-		if product == nil && event.CurrentActiveProductID != nil && *event.CurrentActiveProductID != "" {
+		// D17: o produto em destaque é DESTA transmissão. Duas sessões
+		// simultâneas do mesmo evento deixam de compartilhar o destaque.
+		if product == nil && session.CurrentActiveProductID != nil && *session.CurrentActiveProductID != "" {
 			logger.From(ctx, s.logger).Info("no keyword match, trying active product fallback",
-				zap.String("event_id", event.ID),
-				zap.String("active_product_id", *event.CurrentActiveProductID),
+				zap.String("session_id", session.ID),
+				zap.String("active_product_id", *session.CurrentActiveProductID),
 			)
-			product, _ = s.repo.GetProductByID(ctx, event.StoreID, *event.CurrentActiveProductID)
+			product, _ = s.repo.GetProductByID(ctx, event.StoreID, *session.CurrentActiveProductID)
 		}
 	}
 

@@ -258,21 +258,24 @@ type CommentOutput struct {
 }
 
 type SessionOutput struct {
-	ID            string
-	EventID       string
-	Type          string
-	Status        string
-	StartedAt     *time.Time
-	EndedAt       *time.Time
-	TotalComments int
-	TotalCarts    int
-	PaidCarts     int
-	TotalRevenue  int64
-	PaidRevenue   int64
-	Platforms     []PlatformOutput
-	Comments      []CommentOutput
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID      string
+	EventID string
+	Type    string
+	Status  string
+	// Modo Live (D17): estado EFÊMERO de execução DESTA transmissão.
+	CurrentActiveProductID *string
+	ProcessingPaused       bool
+	StartedAt              *time.Time
+	EndedAt                *time.Time
+	TotalComments          int
+	TotalCarts             int
+	PaidCarts              int
+	TotalRevenue           int64
+	PaidRevenue            int64
+	Platforms              []PlatformOutput
+	Comments               []CommentOutput
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 // Repository layer - Session
@@ -283,15 +286,18 @@ type CreateSessionParams struct {
 }
 
 type SessionRow struct {
-	ID            string
-	EventID       string
-	Type          string
-	Status        string
-	StartedAt     *time.Time
-	EndedAt       *time.Time
-	TotalComments int
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID      string
+	EventID string
+	Type    string
+	Status  string
+	// Modo Live (D17): estado EFÊMERO de execução DESTA transmissão.
+	CurrentActiveProductID *string
+	ProcessingPaused       bool
+	StartedAt              *time.Time
+	EndedAt                *time.Time
+	TotalComments          int
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 // =============================================================================
@@ -853,6 +859,7 @@ type SetProcessingPausedRequest struct {
 }
 
 type LiveModeStateResponse struct {
+	SessionID        string                 `json:"sessionId"`
 	ProcessingPaused bool                   `json:"processingPaused"`
 	ActiveProduct    *ActiveProductResponse `json:"activeProduct"`
 }
@@ -867,6 +874,9 @@ type ActiveProductResponse struct {
 
 // Service layer - Live Mode
 type LiveModeStateOutput struct {
+	// SessionID é a transmissão de onde o estado veio (D17). Na rota legada por
+	// evento ele diz QUAL sessão o painel está de fato controlando.
+	SessionID        string
 	ProcessingPaused bool
 	ActiveProduct    *ActiveProductOutput
 }
