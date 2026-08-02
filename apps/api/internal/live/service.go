@@ -251,6 +251,27 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		return CreateLiveOutput{}, err
 	}
 
+	// Metadados da publicação escolhida como PRIMEIRA transmissão. Sem isto, a
+	// MESMA publicação nascia rica pelo caminho de evento-de-post (CreatePostEvent
+	// chama SetMedia) e pobre pelo formulário de campanha — sem permalink, sem
+	// capa, sem legenda. A captura funcionava nos dois (quem resolve o comentário
+	// é o platform_live_id), só a tela ficava mais pobre conforme a porta.
+	//
+	// Best-effort pelo mesmo motivo dos outros dois pontos: metadado é enfeite,
+	// e derrubar a criação da campanha por causa da miniatura seria trocar a
+	// venda pela capa.
+	if platformLiveID != "" && (input.MediaPermalink != "" || input.MediaThumbnailURL != "" || input.MediaCaption != "") {
+		if err := s.repo.SetMedia(ctx, PostMediaInput{
+			MediaID:      platformLiveID,
+			Permalink:    input.MediaPermalink,
+			ThumbnailURL: input.MediaThumbnailURL,
+			Caption:      input.MediaCaption,
+		}); err != nil {
+			logger.From(ctx, s.logger).Warn("failed to set first session media metadata",
+				zap.String("event_id", event.ID), zap.Error(err))
+		}
+	}
+
 	logger.From(ctx, s.logger).Info("live created with session",
 		zap.String("event_id", event.ID),
 		zap.String("session_id", session.ID),
@@ -1129,11 +1150,26 @@ func (s *Service) GetStats(ctx context.Context, storeID string) (LiveStatsOutput
 
 // CreateSession creates a new session within an event.
 // Uses a transaction to ensure atomicity of session + platform creation.
+//
+// NÃO há gate de status do evento aqui, e é de propósito: pendurar a live de
+// segunda numa campanha AGENDADA é o caso de uso central do guarda-chuva
+// ("marco a Semana Black hoje, escolho as transmissões depois"). Encerrado
+// também passa — a sessão nasce sem capturar nada, e recusar seria impedir o
+// lojista de registrar o que já aconteceu.
 func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (CreateSessionOutput, error) {
 	// Verify event exists and belongs to store
 	_, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID)
 	if err != nil {
 		return CreateSessionOutput{}, err
+	}
+
+	// Meia mídia não existe: platform sem id (ou id sem platform) gravaria uma
+	// linha de live_session_platforms que não resolve comentário nenhum e
+	// mentiria na tela dizendo que a sessão está vinculada. Ou vêm os dois, ou
+	// a sessão nasce sem mídia.
+	if (input.Platform == "") != (input.PlatformLiveID == "") {
+		return CreateSessionOutput{}, httpx.DomainError(400, httpx.CodeSessionMediaIncomplete,
+			"platform e platformLiveId precisam vir juntos: mande os dois para vincular a publicação, ou nenhum para criar a transmissão sem publicação")
 	}
 
 	// Create the session, inherit the event whitelist and add the platform in a
@@ -1147,6 +1183,26 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		return CreateSessionOutput{}, err
 	}
 
+	// Os metadados da publicação, gravados na MÍDIA — o mesmo SetMedia que
+	// CreatePostEvent chama. Sem isto, a mesma publicação aparecia com
+	// permalink/capa/legenda quando virava evento novo e sem nada quando virava
+	// sessão de um evento existente.
+	//
+	// Best-effort, como no CreatePostEvent: metadado é enfeite de tela, e
+	// derrubar a criação da transmissão por causa dele seria trocar a venda
+	// pela miniatura.
+	if input.PlatformLiveID != "" && (input.MediaPermalink != "" || input.MediaThumbnailURL != "" || input.MediaCaption != "") {
+		if err := s.repo.SetMedia(ctx, PostMediaInput{
+			MediaID:      input.PlatformLiveID,
+			Permalink:    input.MediaPermalink,
+			ThumbnailURL: input.MediaThumbnailURL,
+			Caption:      input.MediaCaption,
+		}); err != nil {
+			logger.From(ctx, s.logger).Warn("failed to set session media metadata",
+				zap.String("session_id", session.ID), zap.Error(err))
+		}
+	}
+
 	// inherited_products é o número que responde "por que meu produto está
 	// liberado/bloqueado nesta transmissão?" sem abrir o banco. Zero é legítimo
 	// (evento sem whitelist = tudo liberado) e é exatamente o caso que o
@@ -1158,20 +1214,23 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		zap.Int64("inherited_products", inherited),
 	)
 
-	return CreateSessionOutput{
-		ID:      session.ID,
-		EventID: session.EventID,
-		Type:    session.Type,
-		Status:  session.Status,
-		Platform: PlatformOutput{
+	out := CreateSessionOutput{
+		ID:        session.ID,
+		EventID:   session.EventID,
+		Type:      session.Type,
+		Status:    session.Status,
+		CreatedAt: session.CreatedAt,
+	}
+	if platform != nil {
+		out.Platform = &PlatformOutput{
 			ID:             platform.ID,
 			SessionID:      platform.SessionID,
 			Platform:       platform.Platform,
 			PlatformLiveID: platform.PlatformLiveID,
 			AddedAt:        platform.AddedAt,
-		},
-		CreatedAt: session.CreatedAt,
-	}, nil
+		}
+	}
+	return out, nil
 }
 
 // GetSessionByPlatformLiveID resolves the session that owns a media id.
@@ -1298,6 +1357,57 @@ func (s *Service) AddPlatform(ctx context.Context, input AddPlatformInput) (Plat
 	}
 
 	logger.From(ctx, s.logger).Info("platform added to session",
+		zap.String("session_id", input.SessionID),
+		zap.String("platform", input.Platform),
+		zap.String("platform_live_id", input.PlatformLiveID),
+	)
+
+	return PlatformOutput{
+		ID:             row.ID,
+		SessionID:      row.SessionID,
+		Platform:       row.Platform,
+		PlatformLiveID: row.PlatformLiveID,
+		AddedAt:        row.AddedAt,
+	}, nil
+}
+
+// LinkSessionMedia vincula a publicação a UMA sessão nomeada.
+//
+// AddPlatform (acima) resolve a sessão sozinho, pela mais recente que estiver no
+// ar. Isso bastava quando um evento era uma transmissão só — é a rota de crash
+// recovery de live. Numa campanha guarda-chuva ela escreveria a mídia na sessão
+// errada em silêncio, que é o pior desfecho possível: o comentário continua sem
+// virar carrinho e o painel jura que está vinculado.
+//
+// Esta versão exige o sessionId e checa a posse (sessão → evento → loja) antes
+// de gravar. É o "vincular depois" que a criação de sessão sem mídia prometia.
+func (s *Service) LinkSessionMedia(ctx context.Context, input LinkSessionMediaInput) (PlatformOutput, error) {
+	if err := s.resolveSessionOfEvent(ctx, input.SessionID, input.EventID, input.StoreID); err != nil {
+		return PlatformOutput{}, err
+	}
+
+	row, err := s.repo.AddPlatformToSession(ctx, input.SessionID, input.Platform, input.PlatformLiveID)
+	if err != nil {
+		return PlatformOutput{}, err
+	}
+
+	// Best-effort, como em CreateSession e CreatePostEvent: metadado é enfeite
+	// de tela, e derrubar o vínculo por causa da miniatura trocaria a venda
+	// pela capa.
+	if input.MediaPermalink != "" || input.MediaThumbnailURL != "" || input.MediaCaption != "" {
+		if err := s.repo.SetMedia(ctx, PostMediaInput{
+			MediaID:      input.PlatformLiveID,
+			Permalink:    input.MediaPermalink,
+			ThumbnailURL: input.MediaThumbnailURL,
+			Caption:      input.MediaCaption,
+		}); err != nil {
+			logger.From(ctx, s.logger).Warn("failed to set linked media metadata",
+				zap.String("session_id", input.SessionID), zap.Error(err))
+		}
+	}
+
+	logger.From(ctx, s.logger).Info("media linked to session",
+		zap.String("event_id", input.EventID),
 		zap.String("session_id", input.SessionID),
 		zap.String("platform", input.Platform),
 		zap.String("platform_live_id", input.PlatformLiveID),
@@ -1469,10 +1579,10 @@ func (s *Service) GetEventStats(ctx context.Context, eventID, storeID string) (E
 // Contrato que o consumidor pode confiar: a soma de Sessions + Unattributed é
 // EXATAMENTE ConfirmedRevenue e ProjectedRevenue, e esses dois batem com o
 // confirmed/projected de GetEventStats. Não é coincidência nem arredondamento:
-//   • confirmado — order_items é materializado por AllocateBySession com o
+//   - confirmado — order_items é materializado por AllocateBySession com o
 //     unit_price do carrinho, logo SUM(qty*price) por sessão reconstrói
 //     orders.total_cents;
-//   • projetado  — a mesma AllocateBySession roda aqui sobre os mesmos carrinhos
+//   - projetado  — a mesma AllocateBySession roda aqui sobre os mesmos carrinhos
 //     que GetEventStats.projected_revenue soma.
 //
 // Toda sessão do evento aparece, inclusive as que não venderam nada — "a live de

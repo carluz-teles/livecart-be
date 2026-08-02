@@ -159,6 +159,84 @@ func TestSessionMetricsProjectionIgnoresClosedCarts(t *testing.T) {
 	}
 }
 
+// O carrinho PAGO não é expectativa de venda.
+//
+// carts.status nunca vira 'paid' (UpdateCartPayment mexe só em payment_status),
+// então o carrinho pago fica em 'checkout' para sempre. Enquanto o projetado
+// olhava só o status, o MESMO dinheiro aparecia duas vezes na tela do evento:
+// uma como receita confirmada (a venda) e outra como "projetado" — que a
+// tooltip define como "carrinhos abertos que ainda não foram pagos".
+//
+// O teste prende as duas pontas ao mesmo tempo: o número do evento tem de
+// excluir o pago E a soma das transmissões tem de continuar fechando com ele.
+// Excluir só de um lado é o modo de falha que a Fatia 5 existe para impedir.
+func TestSessionMetricsProjectionExcludesPaidCarts(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+
+	eventID := seedEvent(t)
+	storeID := storeOf(t, eventID)
+	segunda := seedSession(t, eventID, 1)
+	vestido := seedProduct(t, eventID, 2500)
+
+	// Maria ainda não pagou: R$ 50 de expectativa legítima.
+	maria, _ := getOrCreate(t, eventID, "maria")
+	if err := testRepo.AddCartItem(ctx, AddCartItemParams{
+		CartID: maria.ID, ProductID: vestido, SessionID: segunda, Quantity: 2, UnitPrice: 2500,
+	}); err != nil {
+		t.Fatalf("AddCartItem: %v", err)
+	}
+
+	// Joana pagou R$ 100. O carrinho dela continua em 'checkout'.
+	joana, _ := getOrCreate(t, eventID, "joana")
+	if err := testRepo.AddCartItem(ctx, AddCartItemParams{
+		CartID: joana.ID, ProductID: vestido, SessionID: segunda, Quantity: 4, UnitPrice: 2500,
+	}); err != nil {
+		t.Fatalf("AddCartItem: %v", err)
+	}
+	if _, err := testPool.Exec(ctx,
+		`UPDATE carts SET status = 'checkout', payment_status = 'paid', paid_at = now()
+		 WHERE id = $1::uuid`, joana.ID,
+	); err != nil {
+		t.Fatalf("pagar cart: %v", err)
+	}
+
+	if got := projectedDoEvento(t, eventID); got != 5000 {
+		t.Errorf("projetado do evento = %d, quero 5000 (só o carrinho da Maria; o pago já é receita confirmada)", got)
+	}
+
+	stats, err := testRepo.GetEventStats(ctx, eventID)
+	if err != nil {
+		t.Fatalf("GetEventStats: %v", err)
+	}
+	if stats.OpenCarts != 1 {
+		t.Errorf("openCarts = %d, quero 1 — carrinho pago não está aberto", stats.OpenCarts)
+	}
+
+	svc := NewService(testRepo, zap.NewNop())
+	metrics, err := svc.GetSessionMetrics(ctx, eventID, storeID)
+	if err != nil {
+		t.Fatalf("GetSessionMetrics: %v", err)
+	}
+
+	got := map[string]SessionMetricsOutput{}
+	for _, s := range metrics.Sessions {
+		got[s.SessionID] = s
+	}
+	if got[segunda].ProjectedRevenue != 5000 || got[segunda].ProjectedUnits != 2 {
+		t.Errorf("segunda = %d cents / %d un, quero 5000/2", got[segunda].ProjectedRevenue, got[segunda].ProjectedUnits)
+	}
+	if got[segunda].OpenCarts != 1 {
+		t.Errorf("segunda openCarts = %d, quero 1", got[segunda].OpenCarts)
+	}
+
+	// O invariante: o predicado dos dois níveis é o MESMO.
+	if metrics.ProjectedRevenue != projectedDoEvento(t, eventID) {
+		t.Errorf("soma das sessões (%d) != projetado do evento (%d)",
+			metrics.ProjectedRevenue, projectedDoEvento(t, eventID))
+	}
+}
+
 func TestSessionMetricsListsSilentSessionsInCampaignOrder(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()

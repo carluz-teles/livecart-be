@@ -93,8 +93,11 @@ type CheckoutPaymentInfo struct {
 type CartEventInfo struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
-	// Type is 'single' | 'multi' | 'post'. The checkout UI uses it to show
-	// post-appropriate wording instead of "live em andamento".
+	// Type é 'live' | 'post' | 'reel' | 'story' — o vocabulário da SESSÃO, que é
+	// de onde LoadEventType lê (o evento não tem tipo desde a 000122). Vazio
+	// quando a campanha ainda não tem sessão nenhuma; a tela do comprador cai no
+	// texto neutro. O comentário antigo dizia 'single' | 'multi' | 'post',
+	// valores que esta resposta nunca mais carregou.
 	Type string `json:"type"`
 	// PixDiscountPercent is the configured Pix discount for the event (0-100).
 	// When > 0 the FE shows a discount preview when Pix is selected and the

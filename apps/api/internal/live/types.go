@@ -10,22 +10,16 @@ import (
 // LIVE EVENT - The container for sessions. Carts are tied to events.
 // =============================================================================
 
-// Handler layer - Request/Response types for Events
-type CreateEventRequest struct {
-	Title string `json:"title" validate:"required,min=1,max=200"`
-	Type  string `json:"type" validate:"required,oneof=single multi"`
-	// Scheduling
-	ScheduledAt *string `json:"scheduledAt"` // ISO8601 timestamp
-	Description *string `json:"description" validate:"omitempty,max=2000"`
-}
+// CreateEventRequest/CreateEventResponse SAÍRAM. Eram DTOs sem rota: nenhum
+// handler fazia parse deles. O problema não era o código morto — era o
+// `type: required,oneof=single multi` que sobrava neles como se o EVENTO ainda
+// tivesse espécie. A 000122 dropou live_events.type justamente porque uma
+// campanha mista (live na segunda, story na quinta) não tem tipo único; deixar
+// o vocabulário morto num DTO é o caminho para alguém religá-lo.
+// A criação de evento é CreateLiveRequest, logo abaixo, onde `type` já está
+// documentado como o tipo da PRIMEIRA SESSÃO.
 
-type CreateEventResponse struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"createdAt"`
-}
-
+// Handler layer - Response types for Events
 type EventResponse struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
@@ -78,26 +72,12 @@ type EndEventResponse struct {
 }
 
 // Service layer - Event
-type CreateEventInput struct {
-	StoreID                string
-	Title                  string
-	Type                   string // single or multi
-	CloseCartOnEventEnd    *bool
-	CartExpirationMinutes  *int
-	CartMaxQuantityPerItem *int
-	SendOnLiveEnd          *bool
-	PixDiscountPercent     *int
-	// Scheduling
-	ScheduledAt *time.Time
-	Description *string
-}
-
-type CreateEventOutput struct {
-	ID        string
-	Title     string
-	Status    string
-	CreatedAt time.Time
-}
+//
+// CreateEventInput/CreateEventOutput saíram junto com CreateEventRequest: eram
+// o par de service da rota que nunca existiu, e carregavam o mesmo
+// `Type string // single or multi` no nível do EVENTO. Quem cria evento é
+// Service.Create(CreateLiveInput), onde Type já está documentado como o tipo da
+// primeira SESSÃO.
 
 type EndEventInput struct {
 	ID       string
@@ -210,12 +190,33 @@ type EventRow struct {
 
 // Handler layer - Request/Response types for Sessions
 type CreateSessionRequest struct {
-	Platform       string `json:"platform" validate:"required,oneof=instagram tiktok youtube facebook"`
-	PlatformLiveID string `json:"platformLiveId" validate:"required"`
+	// Platform/PlatformLiveID são OPCIONAIS — e o par tem de vir junto ou não
+	// vir (o service recusa a metade).
+	//
+	// Eram `required`, e isso fechava o caso central da campanha guarda-chuva:
+	// "marco a Semana Black hoje e penduro a live de segunda quando ela
+	// existir". Sem mídia não havia como criar a transmissão, embora o banco
+	// sempre tenha aceitado sessão sem plataforma (é o mesmo caminho que
+	// CreateEventWithSessionTx já usa quando o lojista ainda não tem o id).
+	// A sessão nasce sem captura nenhuma e passa a capturar quando a mídia for
+	// vinculada por POST /lives/:id/sessions/:sessionId/platforms
+	// (LinkSessionMedia) — a rota ancorada na SESSÃO. Não use
+	// POST /lives/:id/platforms para isso: ela escolhe a sessão sozinha e, em
+	// campanha com mais de uma transmissão, vincula a errada em silêncio.
+	Platform       string `json:"platform" validate:"omitempty,oneof=instagram tiktok youtube facebook"`
+	PlatformLiveID string `json:"platformLiveId" validate:"omitempty"`
 	// Type é a natureza da transmissão (D3). Vazio = "live". Os valores aqui
 	// espelham o CHECK live_sessions_type_check da 000111: desalinhar os dois
 	// devolve 500 em vez de 422 (lição E6 da errata).
 	Type string `json:"type" validate:"omitempty,oneof=live post reel story"`
+	// Metadados da publicação, gravados NA MÍDIA (live_session_platforms), do
+	// mesmo jeito que CreatePostEvent faz. Sem isto, a MESMA publicação ficava
+	// com permalink/thumbnail/legenda quando entrava como evento novo e sem
+	// nada quando entrava como sessão de um evento existente — dois caminhos
+	// paralelos, só um alimentando a tela.
+	MediaPermalink    string `json:"mediaPermalink"`
+	MediaThumbnailURL string `json:"mediaThumbnailUrl"`
+	MediaCaption      string `json:"mediaCaption"`
 }
 
 // EventPulse is a tiny change-signal for near-real-time dashboard refresh. The
@@ -290,8 +291,8 @@ type EventSessionMetricsResponse struct {
 	// AttributionCutoverAt é o instante registrado em metric_cutovers (D26).
 	// Nulo só se o marcador não existir no banco — a métrica responde do mesmo
 	// jeito, sem a ressalva.
-	AttributionCutoverAt *time.Time `json:"attributionCutoverAt"`
-	AttributionCutoverNote string   `json:"attributionCutoverNote,omitempty"`
+	AttributionCutoverAt   *time.Time `json:"attributionCutoverAt"`
+	AttributionCutoverNote string     `json:"attributionCutoverNote,omitempty"`
 }
 
 type SessionResponse struct {
@@ -320,14 +321,21 @@ type CreateSessionInput struct {
 	Type           string
 	Platform       string
 	PlatformLiveID string
+	// Metadados da mídia — best-effort, só usados quando há mídia.
+	MediaPermalink    string
+	MediaThumbnailURL string
+	MediaCaption      string
 }
 
 type CreateSessionOutput struct {
-	ID        string
-	EventID   string
-	Type      string
-	Status    string
-	Platform  PlatformOutput
+	ID      string
+	EventID string
+	Type    string
+	Status  string
+	// Platform é NIL quando a sessão nasceu sem mídia ("decidir depois"). Um
+	// PlatformOutput zerado no lugar de nil faria a resposta anunciar uma
+	// plataforma vazia como se existisse.
+	Platform  *PlatformOutput
 	CreatedAt time.Time
 }
 
@@ -519,7 +527,18 @@ type MediaRef struct {
 // CreatePostRequest is the HTTP payload to create a post-commerce event.
 // StartsAt/EndsAt are optional ISO8601 timestamps (with timezone).
 type CreatePostRequest struct {
-	Title             string   `json:"title"`
+	Title string `json:"title"`
+	// Type é a espécie da MÍDIA escolhida no grid do painel: 'post' (feed),
+	// 'reel' ou 'story'. Omitido = 'post', que era o comportamento fixo até
+	// aqui — e é por isso que todo Reel selecionado no grid nascia como sessão
+	// 'post', enquanto o MESMO Reel publicado pelo LiveCart nascia 'reel'
+	// (integration.publishInstagramReelEvent já manda SessionTypeReel). Duas
+	// mídias idênticas com tipos diferentes conforme a porta de entrada, e o
+	// rótulo errado vazando para a métrica por transmissão e para a DM do
+	// comprador (SessionLabel).
+	// Os valores espelham o CHECK live_sessions_type_check da 000111 menos
+	// 'live': esta rota mapeia publicação já existente, e publicação não é live.
+	Type              string   `json:"type" validate:"omitempty,oneof=post reel story"`
 	MediaID           string   `json:"mediaId" validate:"required"`
 	MediaPermalink    string   `json:"mediaPermalink"`
 	MediaThumbnailURL string   `json:"mediaThumbnailUrl"`
@@ -569,10 +588,33 @@ type LiveFilters struct {
 
 // CreateLiveRequest - Creates an event with a session and platform
 type CreateLiveRequest struct {
-	Title          string  `json:"title" validate:"required,min=1,max=200"`
-	Type           string  `json:"type" validate:"omitempty,oneof=single multi"`
+	Title string `json:"title" validate:"required,min=1,max=200"`
+	// Type é o tipo da PRIMEIRA SESSÃO, não do evento. O evento é a campanha e
+	// não tem espécie desde a 000122 — quem tem live na segunda e story na
+	// quinta não tem resposta única para "que tipo é este evento".
+	//
+	// 'single'/'multi' são o vocabulário LEGADO ("uma live ou várias
+	// plataformas"), que a API pública e a skill de E2E ainda mandam; os dois
+	// caem em 'live' por SessionTypeFromEventType. Continuam aceitos para não
+	// quebrar chamador nenhum.
+	//
+	// live|post|reel|story é o vocabulário REAL da sessão (o CHECK
+	// live_sessions_type_check da 000111). Aceitá-los aqui é o que destrava
+	// "criar a campanha e já pendurar a primeira transmissão do tipo certo" sem
+	// passar pelo formulário de post — antes, um evento criado por esta rota
+	// nascia sempre com sessão 'live', qualquer que fosse a intenção.
+	// Omitido = 'live', o default histórico.
+	Type           string  `json:"type" validate:"omitempty,oneof=single multi live post reel story"`
 	Platform       *string `json:"platform" validate:"omitempty,oneof=instagram"`
 	PlatformLiveID *string `json:"platformLiveId" validate:"omitempty"`
+	// Metadados da publicação escolhida como PRIMEIRA transmissão, no mesmo
+	// formato de CreatePostRequest e CreateSessionRequest. Sem eles, a MESMA
+	// publicação ficava com permalink/capa/legenda quando entrava pelo caminho
+	// de evento-de-post e sem nada quando entrava pelo formulário de campanha —
+	// duas portas para o mesmo dado, só uma alimentando a tela.
+	MediaPermalink    string `json:"mediaPermalink"`
+	MediaThumbnailURL string `json:"mediaThumbnailUrl"`
+	MediaCaption      string `json:"mediaCaption"`
 	// Scheduling
 	ScheduledAt *string `json:"scheduledAt"` // ISO8601 timestamp — legado, sinônimo de startsAt
 	// StartsAt/EndsAt são a JANELA COMERCIAL do evento (D21). EndsAt é
@@ -688,8 +730,11 @@ type EndLiveResponse struct {
 
 // Service layer - Legacy
 type CreateLiveInput struct {
-	StoreID                string
-	Title                  string
+	StoreID string
+	Title   string
+	// Type é o tipo da PRIMEIRA SESSÃO (live|post|reel|story), não do evento —
+	// a 000122 dropou live_events.type. Aceita também o legado single|multi,
+	// que SessionTypeFromEventType achata em 'live'.
 	Type                   string
 	Platform               *string
 	PlatformLiveID         *string
@@ -707,6 +752,10 @@ type CreateLiveInput struct {
 	StartsAt    *time.Time
 	EndsAt      *time.Time
 	Description *string
+	// Metadados da publicação da primeira transmissão (gravados na MÍDIA).
+	MediaPermalink    string
+	MediaThumbnailURL string
+	MediaCaption      string
 }
 
 type CreateLiveOutput struct {
@@ -771,16 +820,16 @@ type ListLivesOutput struct {
 }
 
 type LiveOutput struct {
-	ID                     string
-	StoreID                string
-	Title                  string
-	Platform               string // Primary platform
-	PlatformLiveID         string // Primary platform live ID
-	Status                 string
-	StartedAt              *time.Time
-	EndedAt                *time.Time
-	TotalComments          int
-	TotalOrders            int
+	ID             string
+	StoreID        string
+	Title          string
+	Platform       string // Primary platform
+	PlatformLiveID string // Primary platform live ID
+	Status         string
+	StartedAt      *time.Time
+	EndedAt        *time.Time
+	TotalComments  int
+	TotalOrders    int
 	// SessionTypes são os tipos DISTINTOS das sessões deste evento. É o
 	// substituto de Type, que a 000122 dropou.
 	SessionTypes           []string

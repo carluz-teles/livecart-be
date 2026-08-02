@@ -74,7 +74,14 @@ func (h *Handler) registerUnder(router fiber.Router, prefix string) {
 	// Session management within an event
 	g.Post("/:id/sessions", h.CreateSession)
 
-	// Platform aggregation (on sessions)
+	// Mídia POR SESSÃO — a unidade que de fato tem publicação. É o "vincular
+	// depois" que a sessão criada sem mídia prometia, e a única forma correta
+	// numa campanha com mais de uma transmissão.
+	g.Post("/:id/sessions/:sessionId/platforms", h.LinkSessionMedia)
+
+	// Platform aggregation (on sessions) — rota LEGADA por evento: resolve a
+	// sessão sozinha (a mais recente no ar). É o crash recovery de live; numa
+	// campanha mista ela escreveria na sessão errada.
 	g.Get("/:id/platforms", h.ListPlatforms)
 	g.Post("/:id/platforms", h.AddPlatform)
 	g.Delete("/:id/platforms/:platformLiveId", h.RemovePlatform)
@@ -162,6 +169,9 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 		StartsAt:               startsAt,
 		EndsAt:                 endsAt,
 		Description:            req.Description,
+		MediaPermalink:         req.MediaPermalink,
+		MediaThumbnailURL:      req.MediaThumbnailURL,
+		MediaCaption:           req.MediaCaption,
 
 		WaitlistNotifiedTTLMinutes: req.WaitlistNotifiedTtlMinutes,
 	})
@@ -214,7 +224,10 @@ func (h *Handler) CreatePost(c *fiber.Ctx) error {
 	// obrigatoriedade de ends_at — uma regra, um lugar.
 
 	output, err := h.service.CreatePostEvent(c.Context(), CreatePostInput{
-		StoreID:                storeID,
+		StoreID: storeID,
+		// Type vazio continua caindo em 'post' no service — o default histórico
+		// desta rota, preservado para o chamador antigo.
+		Type:                   req.Type,
 		Title:                  req.Title,
 		MediaID:                req.MediaID,
 		MediaPermalink:         req.MediaPermalink,
@@ -516,30 +529,39 @@ func (h *Handler) CreateSession(c *fiber.Ctx) error {
 	}
 
 	output, err := h.service.CreateSession(c.Context(), CreateSessionInput{
-		EventID:        eventID,
-		StoreID:        storeID,
-		Type:           req.Type,
-		Platform:       req.Platform,
-		PlatformLiveID: req.PlatformLiveID,
+		EventID:           eventID,
+		StoreID:           storeID,
+		Type:              req.Type,
+		Platform:          req.Platform,
+		PlatformLiveID:    req.PlatformLiveID,
+		MediaPermalink:    req.MediaPermalink,
+		MediaThumbnailURL: req.MediaThumbnailURL,
+		MediaCaption:      req.MediaCaption,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
 
-	return httpx.Created(c, SessionResponse{
+	resp := SessionResponse{
 		ID:        output.ID,
 		EventID:   output.EventID,
 		Type:      output.Type,
 		Status:    output.Status,
 		CreatedAt: output.CreatedAt,
 		UpdatedAt: output.CreatedAt,
-		Platforms: []PlatformResponse{{
+	}
+	// `platforms` só existe quando há mídia. A sessão criada sem publicação
+	// devolve a lista ausente (omitempty), e não uma linha de plataforma
+	// zerada — é assim que o painel sabe pintar "sem publicação vinculada".
+	if output.Platform != nil {
+		resp.Platforms = []PlatformResponse{{
 			ID:             output.Platform.ID,
 			Platform:       output.Platform.Platform,
 			PlatformLiveID: output.Platform.PlatformLiveID,
 			AddedAt:        output.Platform.AddedAt,
-		}},
-	})
+		}}
+	}
+	return httpx.Created(c, resp)
 }
 
 // =============================================================================
