@@ -89,7 +89,23 @@ func testMain(m *testing.M) int {
 		return 1
 	}
 
-	pool, err := pgxpool.New(ctx, testURL)
+	// MaxConns EXPLÍCITO, e pequeno de propósito.
+	//
+	// Sem isto o pgxpool usa max(4, NumCPU), então o limiar de exaustão do pool
+	// virava uma propriedade da MÁQUINA: os testes de escala da fila passavam ou
+	// deadlockavam conforme o número de núcleos de quem rodava
+	// (TestScaleMultiProductParallelCascades, com P=20, só passava em máquina de
+	// 20+ CPUs — verde por acidente de hardware). Produção roda com MaxConns=10
+	// (lib/database/postgres.go); 8 aqui deixa o teste MAIS apertado que a
+	// produção e transforma os cenários de escala num detector honesto do
+	// invariante "detentores do advisory lock < MaxConns".
+	poolCfg, err := pgxpool.ParseConfig(testURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "parseando config do pool de teste: %v\n", err)
+		return 1
+	}
+	poolCfg.MaxConns = 8
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "conectando no database de teste: %v\n", err)
 		return 1

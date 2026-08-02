@@ -29,14 +29,39 @@ var ErrCartNotPayable = errors.New("cart not payable (expired or cancelled)")
 type Repository struct {
 	queries *sqlc.Queries
 	pool    *pgxpool.Pool
+	// lockSlots limita quantas goroutines podem SEGURAR o advisory lock de
+	// finalização ao mesmo tempo. Ver AcquireCartFinalisationLock.
+	lockSlots chan struct{}
 }
 
 // NewRepository creates a new integration repository.
 func NewRepository(queries *sqlc.Queries, pool *pgxpool.Pool) *Repository {
 	return &Repository{
-		queries: queries,
-		pool:    pool,
+		queries:   queries,
+		pool:      pool,
+		lockSlots: make(chan struct{}, cartFinalisationLockSlots(pool)),
 	}
+}
+
+// cartFinalisationLockSlots deriva o teto de detentores simultâneos do advisory
+// lock a partir do tamanho do pool: METADE dele.
+//
+// Metade e não "MaxConns-1" porque a conta não é só de deadlock. Cada detentor
+// prende uma conexão e pede no máximo mais UMA por vez (as queries sob o lock
+// são sequenciais; as que abrem transação usam qtx e não o pool). Com N ≤
+// MaxConns/2, os N detentores cabem com folga junto das conexões que estão
+// pedindo — e sobra metade do pool para o resto da API, que compartilha o MESMO
+// pool. Deixar MaxConns-1 também não travaria, mas jogaria todo handler HTTP
+// para cima de uma única conexão livre: deixa de ser deadlock e vira apagão.
+func cartFinalisationLockSlots(pool *pgxpool.Pool) int {
+	maxConns := 4
+	if pool != nil && pool.Config() != nil && pool.Config().MaxConns > 0 {
+		maxConns = int(pool.Config().MaxConns)
+	}
+	if slots := maxConns / 2; slots > 0 {
+		return slots
+	}
+	return 1
 }
 
 // =============================================================================
@@ -3238,28 +3263,90 @@ func (r *Repository) StampIntegrationStockWebhookAlert(ctx context.Context, inte
 	return r.queries.StampIntegrationStockWebhookAlert(ctx, id)
 }
 
+// lockSlotWait é quanto uma finalização espera por uma vaga de detentor antes
+// de desistir. Generoso de propósito: quem espera aqui não segura conexão
+// nenhuma, e desistir cedo transformaria contenção normal em erro. O ctx do
+// chamador continua mandando — este é só o teto de quem tem ctx sem prazo.
+const lockSlotWait = 30 * time.Second
+
 // AcquireCartFinalisationLock takes a session-scoped Postgres advisory lock
 // keyed on the cart id, held on a dedicated pool connection (advisory locks
 // are per-connection). acquired=false means another finalisation of the SAME
 // cart is running right now — gateway webhooks arrive duplicated and each one
 // spawns its own goroutine (webhook_handler.go), so the loser just bails.
 // The caller MUST call release() when acquired.
+//
+// # O DEADLOCK QUE ESTE SEMÁFORO FECHA
+//
+// Segurar a conexão é obrigatório pelo desenho: advisory lock é por SESSÃO de
+// Postgres, então soltar a conexão soltaria o lock. Só que TUDO o que roda sob
+// o lock consulta o mesmo pool — GetCartExpirySnapshot, GetProductByID,
+// DecrementCartItemWaitlistedQuantity, a finalização ERP inteira. Ou seja: o
+// detentor segura uma conexão e pede uma segunda. Isso é hold-and-wait.
+//
+// Quando o número de detentores simultâneos chega a MaxConns, todas as conexões
+// do pool estão nas mãos de goroutines que esperam por mais uma. pgxpool.Acquire
+// bloqueia no semáforo do puddle sem prazo, e o ctx desses caminhos é
+// context.Background(): o travamento é PERMANENTE. E como o pool é único para a
+// API inteira, não trava só a fila — trava todo handler HTTP, porque qualquer
+// query passa pelo mesmo Acquire. Em produção MaxConns é 10
+// (lib/database/postgres.go), então bastam 10 finalizações concorrentes.
+//
+// São cinco caminhos com esse formato, incluindo o de PAGAMENTO
+// (finalizeCartERPOrder, ConfirmERPOrderPayment), ExpireCart, CancelCart e a
+// promoção da fila. O gate de estoque movido para antes do lock em
+// ProcessWaitlistForProduct reduz o número de detentores de "quantos chamaram"
+// para "quantas unidades liberaram" — mas não o limita a nada. Era a única
+// mitigação, e o invariante que faltava ("detentores < MaxConns") não era
+// imposto por lugar nenhum.
+//
+// Agora é. O semáforo é o ponto único onde ele existe, porque é o ponto único
+// por onde os cinco caminhos passam. A correção estrutural — passar ESTA
+// conexão adiante para que o trecho crítico use uma só — continua sendo a
+// melhor, e continua fora de alcance: exigiria um handle de queries em dezenas
+// de assinaturas, atravessando o domínio live (AddToCart) e a finalização ERP
+// inteira. Trocar deadlock por espera limitada no caminho mais quente do
+// produto vale mais do que essa cirurgia agora.
+//
+// Falta de vaga vira ERRO, nunca acquired=false. São coisas diferentes:
+// acquired=false significa "outra finalização DESTE cart está em voo, pode
+// pular", e finalizeCartERPOrder confia nisso para não refazer trabalho —
+// devolver false por contenção faria um cart pago perder a finalização ERP em
+// silêncio. Erro é retentável e os cinco chamadores já o tratam.
 func (r *Repository) AcquireCartFinalisationLock(ctx context.Context, cartID string) (release func(), acquired bool, err error) {
+	slotCtx, cancel := context.WithTimeout(ctx, lockSlotWait)
+	defer cancel()
+	select {
+	case r.lockSlots <- struct{}{}:
+	case <-slotCtx.Done():
+		return nil, false, fmt.Errorf("waiting for a cart finalisation slot: %w", slotCtx.Err())
+	}
+	slotFreed := false
+	freeSlot := func() {
+		if !slotFreed {
+			slotFreed = true
+			<-r.lockSlots
+		}
+	}
+
 	h := fnv.New64a()
 	_, _ = h.Write([]byte("erp_finalisation:" + cartID))
 	key := int64(h.Sum64())
 
 	conn, err := r.pool.Acquire(ctx)
 	if err != nil {
+		freeSlot()
 		return nil, false, fmt.Errorf("acquiring connection for advisory lock: %w", err)
 	}
 	var ok bool
 	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&ok); err != nil {
 		conn.Release()
+		freeSlot()
 		return nil, false, fmt.Errorf("pg_try_advisory_lock: %w", err)
 	}
 	if !ok {
 		conn.Release()
+		freeSlot()
 		return nil, false, nil
 	}
 	release = func() {
@@ -3267,6 +3354,7 @@ func (r *Repository) AcquireCartFinalisationLock(ctx context.Context, cartID str
 		// ctx was cancelled mid-finalisation.
 		_, _ = conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", key)
 		conn.Release()
+		freeSlot()
 	}
 	return release, true, nil
 }
