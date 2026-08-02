@@ -474,6 +474,11 @@ SELECT
     e.store_id,
     e.close_cart_on_event_end,
     COALESCE(e.cart_expiration_minutes, s.cart_expiration_minutes) AS cart_expiration_minutes,
+    COALESCE(e.cart_extended_expiration_minutes, s.cart_extended_expiration_minutes) AS cart_extended_expiration_minutes,
+    (CASE WHEN e.close_cart_on_event_end
+          THEN COALESCE(e.cart_expiration_minutes, s.cart_expiration_minutes)
+          ELSE COALESCE(e.cart_extended_expiration_minutes, s.cart_extended_expiration_minutes)
+     END)::int AS effective_cart_expiration_minutes,
     COALESCE(e.cart_max_quantity_per_item, s.cart_max_quantity_per_item) AS cart_max_quantity_per_item,
     COALESCE(e.send_on_live_end, s.send_on_live_end) AS send_on_live_end,
     e.waitlist_notified_ttl_minutes
@@ -483,16 +488,34 @@ WHERE e.id = $1
 `
 
 type GetEventCartSettingsRow struct {
-	EventID                    pgtype.UUID `json:"event_id"`
-	StoreID                    pgtype.UUID `json:"store_id"`
-	CloseCartOnEventEnd        bool        `json:"close_cart_on_event_end"`
-	CartExpirationMinutes      int32       `json:"cart_expiration_minutes"`
-	CartMaxQuantityPerItem     int32       `json:"cart_max_quantity_per_item"`
-	SendOnLiveEnd              bool        `json:"send_on_live_end"`
-	WaitlistNotifiedTtlMinutes int32       `json:"waitlist_notified_ttl_minutes"`
+	EventID                        pgtype.UUID `json:"event_id"`
+	StoreID                        pgtype.UUID `json:"store_id"`
+	CloseCartOnEventEnd            bool        `json:"close_cart_on_event_end"`
+	CartExpirationMinutes          int32       `json:"cart_expiration_minutes"`
+	CartExtendedExpirationMinutes  int32       `json:"cart_extended_expiration_minutes"`
+	EffectiveCartExpirationMinutes int32       `json:"effective_cart_expiration_minutes"`
+	CartMaxQuantityPerItem         int32       `json:"cart_max_quantity_per_item"`
+	SendOnLiveEnd                  bool        `json:"send_on_live_end"`
+	WaitlistNotifiedTtlMinutes     int32       `json:"waitlist_notified_ttl_minutes"`
 }
 
-// Get cart settings for an event with fallback to store defaults
+// FONTE ÚNICA do prazo do carrinho: override do evento com fallback para o
+// default da loja. Existia desde sempre e nunca teve chamador — enquanto isso o
+// mesmo COALESCE estava inline no FinalizeCartsByEvent e uma versão degradada,
+// só-loja, em order/repository.go (GetStoreCartExpirationMinutes). Agora os dois
+// consomem daqui.
+//
+// RN-34 — close_cart_on_event_end deixa de ser "ter x não ter prazo" e passa a
+// escolher QUAL dos dois prazos vale:
+//
+//	ligado    → prazo curto (cart_expiration_minutes)
+//	desligado → prazo estendido (cart_extended_expiration_minutes, 000104)
+//
+// Os DOIS ramos armam cart.expire pelo mesmo mecanismo. Nada fica eterno e
+// nenhum sweep de carrinhos precisa voltar. O ramo antigo "0 = preserva o
+// expires_at que havia" saiu: a 000104 pôs CHECK >= 15 nas duas pontas, então
+// o valor efetivo nunca é 0 — e sob a RN-04 o expires_at preservado seria NULL
+// por definição, ou seja, carrinho eterno exatamente no fechamento.
 func (q *Queries) GetEventCartSettings(ctx context.Context, id pgtype.UUID) (GetEventCartSettingsRow, error) {
 	row := q.db.QueryRow(ctx, getEventCartSettings, id)
 	var i GetEventCartSettingsRow
@@ -501,6 +524,8 @@ func (q *Queries) GetEventCartSettings(ctx context.Context, id pgtype.UUID) (Get
 		&i.StoreID,
 		&i.CloseCartOnEventEnd,
 		&i.CartExpirationMinutes,
+		&i.CartExtendedExpirationMinutes,
+		&i.EffectiveCartExpirationMinutes,
 		&i.CartMaxQuantityPerItem,
 		&i.SendOnLiveEnd,
 		&i.WaitlistNotifiedTtlMinutes,

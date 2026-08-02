@@ -94,3 +94,74 @@ func TestFinalizeCartsSkipsPaidCart(t *testing.T) {
 		t.Errorf("carrinho pago gerou %d cart.checkout_armed", armed)
 	}
 }
+
+// RN-34 — close_cart_on_event_end deixou de ser "ter x não ter prazo" e passou
+// a escolher QUAL dos dois vale. Antes o toggle era persistido, exposto na API
+// e visível no formulário, e não era lido por regra nenhuma: mentia para o
+// lojista. E o ramo "0 = preserva o expires_at que havia" produzia carrinho
+// ETERNO sob a RN-04, porque o expires_at preservado é NULL por definição
+// durante o evento.
+func TestFinalizeCartsPicksShortOrExtendedDeadline(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+
+	// closeOnEnd=true  → prazo curto  (cart_expiration_minutes = 60)
+	// closeOnEnd=false → prazo estendido (cart_extended_expiration_minutes = 10080 = 7d)
+	for _, tc := range []struct {
+		name       string
+		closeOnEnd bool
+		wantMin    int
+	}{
+		{"ligado usa o prazo curto", true, 60},
+		{"desligado usa o prazo estendido", false, 10080},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := fmt.Sprintf("%d", time.Now().UnixNano())
+			var storeID, eventID, cartID string
+			if err := testPool.QueryRow(ctx,
+				`INSERT INTO stores (name, slug) VALUES ('RN34','rn34-'||$1) RETURNING id::text`, n,
+			).Scan(&storeID); err != nil {
+				t.Fatalf("seed store: %v", err)
+			}
+			if err := testPool.QueryRow(ctx,
+				`INSERT INTO live_events (store_id, status, title, type,
+				     close_cart_on_event_end, cart_expiration_minutes, cart_extended_expiration_minutes)
+				 VALUES ($1,'active','Semana','multi',$2,60,10080) RETURNING id::text`, storeID, tc.closeOnEnd,
+			).Scan(&eventID); err != nil {
+				t.Fatalf("seed event: %v", err)
+			}
+			if err := testPool.QueryRow(ctx,
+				`INSERT INTO carts (event_id, platform_user_id, platform_handle, token, short_id, status, payment_status)
+				 VALUES ($1,'u-'||$2,'@b'||$2,'tok-'||$2, ($2)::bigint % 100000,'active','pending')
+				 RETURNING id::text`, eventID, n,
+			).Scan(&cartID); err != nil {
+				t.Fatalf("seed cart: %v", err)
+			}
+
+			if _, err := testRepo.FinalizeCartsByEvent(ctx, eventID); err != nil {
+				t.Fatalf("FinalizeCartsByEvent: %v", err)
+			}
+
+			// Compara em minutos para não depender do relógio exato.
+			var gotMin float64
+			if err := testPool.QueryRow(ctx,
+				`SELECT EXTRACT(EPOCH FROM (expires_at - now()))/60 FROM carts WHERE id = $1::uuid`, cartID,
+			).Scan(&gotMin); err != nil {
+				t.Fatalf("ler expires_at: %v", err)
+			}
+			if diff := gotMin - float64(tc.wantMin); diff > 2 || diff < -2 {
+				t.Errorf("prazo = %.1f min, queria ~%d min", gotMin, tc.wantMin)
+			}
+			// Os DOIS ramos armam cart.expire pelo mesmo mecanismo: nada eterno.
+			var armed int
+			if err := testPool.QueryRow(ctx,
+				`SELECT count(*) FROM event_outbox WHERE dedup_key = 'cart.checkout_armed:' || $1`, cartID,
+			).Scan(&armed); err != nil {
+				t.Fatalf("contar outbox: %v", err)
+			}
+			if armed != 1 {
+				t.Errorf("ramo %v emitiu %d cart.checkout_armed, queria 1", tc.closeOnEnd, armed)
+			}
+		})
+	}
+}

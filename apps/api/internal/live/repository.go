@@ -1318,9 +1318,22 @@ func (r *Repository) FinalizeCartsByEvent(ctx context.Context, eventID string) (
 
 	qtx := r.q.WithTx(tx)
 
+	// RN-34: o prazo vem da fonte única (GetEventCartSettings), que já escolhe
+	// entre o curto e o estendido conforme close_cart_on_event_end e já faz o
+	// fallback para a loja. Antes o COALESCE estava inline no UPDATE e o toggle
+	// não era lido por regra nenhuma — o lojista via a opção na tela e ela não
+	// fazia nada.
+	settings, err := qtx.GetEventCartSettings(ctx, uid)
+	if err != nil {
+		return 0, fmt.Errorf("resolving cart deadline for event: %w", err)
+	}
+
 	// Finalize (active carts → checkout). Returns the finalized cart ids so we
 	// can emit cart.checkout_armed per cart in the same tx.
-	ids, err := qtx.FinalizeCartsByEvent(ctx, uid)
+	ids, err := qtx.FinalizeCartsByEvent(ctx, sqlc.FinalizeCartsByEventParams{
+		EventID:           uid,
+		ExpirationMinutes: settings.EffectiveCartExpirationMinutes,
+	})
 	if err != nil {
 		return 0, fmt.Errorf("finalizing carts: %w", err)
 	}

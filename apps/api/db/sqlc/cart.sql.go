@@ -438,19 +438,17 @@ func (q *Queries) ExtendCartExpiration(ctx context.Context, arg ExtendCartExpira
 const finalizeCartsByEvent = `-- name: FinalizeCartsByEvent :many
 UPDATE carts c
 SET status = 'checkout',
-    expires_at = CASE
-        WHEN COALESCE(le.cart_expiration_minutes, s.cart_expiration_minutes, 0) > 0
-        THEN now() + make_interval(mins => COALESCE(le.cart_expiration_minutes, s.cart_expiration_minutes))
-        ELSE c.expires_at
-    END
-FROM live_events le
-JOIN stores s ON s.id = le.store_id
+    expires_at = now() + make_interval(mins => $2::int)
 WHERE c.event_id = $1
   AND c.status = 'active'
   AND c.payment_status IS DISTINCT FROM 'paid'
-  AND le.id = c.event_id
 RETURNING c.id
 `
+
+type FinalizeCartsByEventParams struct {
+	EventID           pgtype.UUID `json:"event_id"`
+	ExpirationMinutes int32       `json:"expiration_minutes"`
+}
 
 // RN-06: ao encerrar o EVENTO, o carrinho sai de 'active' ("pode pagar, sem
 // prazo") para 'checkout' ("prazo correndo") e ganha expires_at. Encerrar uma
@@ -462,9 +460,14 @@ RETURNING c.id
 // gerava um cart.checkout_armed inútil, que virava um ScheduleExpiry no-op.
 // Com a decisão 7 (pagar durante o evento), isso deixou de ser detalhe.
 //
+// O prazo NÃO é resolvido aqui: chega pronto em $2, vindo de
+// GetEventCartSettings — a fonte única que já aplica a RN-34 (curto x
+// estendido, conforme close_cart_on_event_end) e o fallback para a loja. O
+// COALESCE inline que existia aqui era a terceira cópia da mesma regra.
+//
 // Retorna os ids finalizados para emitir cart.checkout_armed por carrinho.
-func (q *Queries) FinalizeCartsByEvent(ctx context.Context, eventID pgtype.UUID) ([]pgtype.UUID, error) {
-	rows, err := q.db.Query(ctx, finalizeCartsByEvent, eventID)
+func (q *Queries) FinalizeCartsByEvent(ctx context.Context, arg FinalizeCartsByEventParams) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, finalizeCartsByEvent, arg.EventID, arg.ExpirationMinutes)
 	if err != nil {
 		return nil, err
 	}
@@ -1413,12 +1416,17 @@ func (q *Queries) InsertCartItemEvent(ctx context.Context, arg InsertCartItemEve
 }
 
 const issueShortIDForEvent = `-- name: IssueShortIDForEvent :one
+
 INSERT INTO store_order_counters (store_id, last_value)
 SELECT e.store_id, 1000 FROM live_events e WHERE e.id = $1
 ON CONFLICT (store_id) DO UPDATE SET last_value = store_order_counters.last_value + 1
 RETURNING last_value
 `
 
+// RegenerateCartCheckout foi REMOVIDA: nunca teve chamador Go (o "regerar link"
+// do painel usa order/repository.RegenerateCheckout) e ainda devolvia o carrinho
+// para status='active' com expires_at no futuro — o estado que a RN-06 declara
+// impossível. Portá-la seria carregar código morto E errado.
 // Atomically issues the next short_id for the store that owns the given event.
 // On first call for a store, INSERT seeds last_value at 1000 (the chosen
 // starting number). On subsequent calls, the ON CONFLICT UPDATE bumps
@@ -2250,42 +2258,6 @@ func (q *Queries) ListStuckERPOrderOps(ctx context.Context, olderThanSeconds int
 		return nil, err
 	}
 	return items, nil
-}
-
-const regenerateCartCheckout = `-- name: RegenerateCartCheckout :exec
-UPDATE carts
-SET expires_at         = $2,
-    status             = 'active',
-    payment_status     = 'pending',
-    checkout_url       = NULL,
-    checkout_id        = NULL,
-    checkout_expires_at = NULL,
-    -- Reset das colunas de RESERVA do ERP (must-fix C): reabrir um cart design-C
-    -- sem isto deixaria erp_order_state/external_order_id obsoletos e o próximo
-    -- pagamento cairia em "cart pago após cancelamento — reconciliação manual". A
-    -- expiração já cancelou/estornou o pedido antigo; o reopen zera para um
-    -- ciclo pagamento→ERP limpo. (As colunas pós-venda de finalização/NF vivem
-    -- em order_payments desde a Fatia 11b — o cart reaberto é pré-pagamento e não
-    -- carrega estado de finalização.)
-    erp_order_state         = 'none',
-    external_order_id       = NULL,
-    erp_stock_launched      = FALSE,
-    erp_op_started_at       = NULL
-WHERE id = $1
-`
-
-type RegenerateCartCheckoutParams struct {
-	ID        pgtype.UUID        `json:"id"`
-	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
-}
-
-// Resets the checkout window for a cart so the buyer can pay again. Bumps
-// expires_at, brings status back to 'active' and payment_status to 'pending'
-// (covers expired/failed states), and clears any cached checkout url so the
-// next checkout-side call generates a fresh one.
-func (q *Queries) RegenerateCartCheckout(ctx context.Context, arg RegenerateCartCheckoutParams) error {
-	_, err := q.db.Exec(ctx, regenerateCartCheckout, arg.ID, arg.ExpiresAt)
-	return err
 }
 
 const restoreCancelledCartAsPaid = `-- name: RestoreCancelledCartAsPaid :one

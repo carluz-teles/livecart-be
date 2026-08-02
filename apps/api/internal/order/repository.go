@@ -591,23 +591,29 @@ func (r *Repository) RegenerateCheckout(ctx context.Context, id string, expiresA
 	return nil
 }
 
-// GetStoreCartExpirationMinutes returns the merchant-configured cart TTL
-// (used to compute new expires_at when regenerating). Falls back to 30 if
-// the lookup fails — same default the checkout package uses.
-func (r *Repository) GetStoreCartExpirationMinutes(ctx context.Context, storeID string) int {
-	uid, err := uuid.Parse(storeID)
+// GetEventCartExpirationMinutes devolve o prazo do carrinho resolvido pelo
+// EVENTO (RN-34): curto ou estendido conforme close_cart_on_event_end, com
+// fallback para o default da loja. Reusa GetEventCartSettings — a mesma query
+// que o fechamento do evento usa.
+//
+// Substitui GetStoreCartExpirationMinutes, que lia SÓ stores.cart_expiration_minutes
+// e ignorava tanto o override do evento quanto o toggle: um evento configurado
+// com 7 dias de prazo estendido dava 30 minutos ao clicar em "regerar link".
+//
+// Fallback de 1440 (24h) quando o evento não resolve — o antigo era 30 min, o
+// que sob a RN-04 (evento longo, expires_at NULL até o fechamento) é curto
+// demais para um link que o lojista acabou de mandar ao comprador.
+func (r *Repository) GetEventCartExpirationMinutes(ctx context.Context, eventID string) int {
+	const fallback = 1440
+	uid, err := uuid.Parse(eventID)
 	if err != nil {
-		return 30
+		return fallback
 	}
-	var minutes int
-	const q = `SELECT cart_expiration_minutes FROM stores WHERE id = $1`
-	if err := r.db.QueryRow(ctx, q, pgtype.UUID{Bytes: uid, Valid: true}).Scan(&minutes); err != nil {
-		return 30
+	settings, err := sqlc.New(r.db).GetEventCartSettings(ctx, pgtype.UUID{Bytes: uid, Valid: true})
+	if err != nil || settings.EffectiveCartExpirationMinutes <= 0 {
+		return fallback
 	}
-	if minutes <= 0 {
-		return 30
-	}
-	return minutes
+	return int(settings.EffectiveCartExpirationMinutes)
 }
 
 // UpdateStatus writes the CART lifecycle status (active/checkout/completed/

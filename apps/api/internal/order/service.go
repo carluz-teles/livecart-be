@@ -569,7 +569,11 @@ func (s *Service) RegenerateCheckout(
 		}
 	}
 
-	minutes := s.repo.GetStoreCartExpirationMinutes(ctx, storeID)
+	// RN-34: o prazo é o do EVENTO (curto ou estendido conforme
+	// close_cart_on_event_end), com fallback para a loja. Antes lia só
+	// stores.cart_expiration_minutes: um evento configurado com prazo estendido
+	// de 7 dias dava 30 minutos ao comprador quando o lojista regerava o link.
+	minutes := s.repo.GetEventCartExpirationMinutes(ctx, row.EventID)
 	expiresAt := time.Now().Add(time.Duration(minutes) * time.Minute)
 
 	if err := s.repo.RegenerateCheckout(ctx, id, expiresAt); err != nil {
