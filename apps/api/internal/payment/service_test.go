@@ -408,8 +408,17 @@ func TestService_GetPaymentStatus(t *testing.T) {
 					t.Fatalf("GetPaymentStatus() error = %v, want %v", err, tt.wantErrIs)
 				}
 			case tt.wantErrMsg != "":
-				if err == nil || !strings.Contains(err.Error(), tt.wantErrMsg) {
-					t.Fatalf("GetPaymentStatus() error = %v, want message containing %q", err, tt.wantErrMsg)
+				// D1e-2: the provider failure is now wrapped in
+				// httpx.InfrastructureError (generic 500, category INFRASTRUCTURE)
+				// instead of a descriptive fmt.Errorf — Error() is the client-safe
+				// "internal server error" and never leaks the provider detail, while
+				// the original provider error stays recoverable via the chain.
+				var se *httpx.ServiceError
+				if !errors.As(err, &se) || se.Category != httpx.CategoryInfrastructure {
+					t.Fatalf("GetPaymentStatus() error = %v, want an INFRASTRUCTURE ServiceError", err)
+				}
+				if !errors.Is(err, statusErr) {
+					t.Fatalf("GetPaymentStatus() error = %v, want the provider cause recoverable", err)
 				}
 			default:
 				if err != nil {
@@ -490,8 +499,15 @@ func TestService_RefundPayment(t *testing.T) {
 					t.Fatalf("RefundPayment() error = %v, want %v", err, tt.wantErrIs)
 				}
 			case tt.wantErrMsg != "":
-				if err == nil || !strings.Contains(err.Error(), tt.wantErrMsg) {
-					t.Fatalf("RefundPayment() error = %v, want message containing %q", err, tt.wantErrMsg)
+				// D1e-2: provider failure wrapped in httpx.InfrastructureError —
+				// generic 500 (category INFRASTRUCTURE), provider detail never
+				// leaked via Error(), original cause recoverable via the chain.
+				var se *httpx.ServiceError
+				if !errors.As(err, &se) || se.Category != httpx.CategoryInfrastructure {
+					t.Fatalf("RefundPayment() error = %v, want an INFRASTRUCTURE ServiceError", err)
+				}
+				if !errors.Is(err, refundErr) {
+					t.Fatalf("RefundPayment() error = %v, want the provider cause recoverable", err)
 				}
 			default:
 				if err != nil {
@@ -554,8 +570,15 @@ func TestService_GetCheckoutConfig(t *testing.T) {
 			key, methods, err := svc.GetCheckoutConfig(context.Background(), "integration-id", "store-id")
 
 			if tt.wantErrMsg != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErrMsg) {
-					t.Fatalf("GetCheckoutConfig() error = %v, want message containing %q", err, tt.wantErrMsg)
+				// D1e-2: provider failure wrapped in httpx.InfrastructureError —
+				// generic 500 (category INFRASTRUCTURE), provider detail never
+				// leaked via Error(), original cause recoverable via the chain.
+				var se *httpx.ServiceError
+				if !errors.As(err, &se) || se.Category != httpx.CategoryInfrastructure {
+					t.Fatalf("GetCheckoutConfig() error = %v, want an INFRASTRUCTURE ServiceError", err)
+				}
+				if !errors.Is(err, keyErr) {
+					t.Fatalf("GetCheckoutConfig() error = %v, want the provider cause recoverable", err)
 				}
 			} else {
 				if err != nil {
@@ -658,8 +681,15 @@ func TestService_ProcessCardPayment(t *testing.T) {
 					t.Fatalf("ProcessCardPayment() error = %v, want %v", err, tt.wantErrIs)
 				}
 			case tt.wantErrMsg != "":
-				if err == nil || !strings.Contains(err.Error(), tt.wantErrMsg) {
-					t.Fatalf("ProcessCardPayment() error = %v, want message containing %q", err, tt.wantErrMsg)
+				// D1e-2: provider failure wrapped in httpx.InfrastructureError —
+				// generic 500 (category INFRASTRUCTURE), provider detail never
+				// leaked via Error(), original cause recoverable via the chain.
+				var se *httpx.ServiceError
+				if !errors.As(err, &se) || se.Category != httpx.CategoryInfrastructure {
+					t.Fatalf("ProcessCardPayment() error = %v, want an INFRASTRUCTURE ServiceError", err)
+				}
+				if !errors.Is(err, processErr) {
+					t.Fatalf("ProcessCardPayment() error = %v, want the provider cause recoverable", err)
 				}
 			default:
 				if err != nil {
@@ -764,8 +794,15 @@ func TestService_GeneratePixPayment(t *testing.T) {
 					t.Fatalf("GeneratePixPayment() error = %v, want %v", err, tt.wantErrIs)
 				}
 			case tt.wantErrMsg != "":
-				if err == nil || !strings.Contains(err.Error(), tt.wantErrMsg) {
-					t.Fatalf("GeneratePixPayment() error = %v, want message containing %q", err, tt.wantErrMsg)
+				// D1e-2: provider failure wrapped in httpx.InfrastructureError —
+				// generic 500 (category INFRASTRUCTURE), provider detail never
+				// leaked via Error(), original cause recoverable via the chain.
+				var se *httpx.ServiceError
+				if !errors.As(err, &se) || se.Category != httpx.CategoryInfrastructure {
+					t.Fatalf("GeneratePixPayment() error = %v, want an INFRASTRUCTURE ServiceError", err)
+				}
+				if !errors.Is(err, pixErr) {
+					t.Fatalf("GeneratePixPayment() error = %v, want the provider cause recoverable", err)
 				}
 			default:
 				if err != nil {

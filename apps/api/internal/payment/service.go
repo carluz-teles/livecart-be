@@ -153,7 +153,7 @@ func (s *Service) CreateCheckout(ctx context.Context, input CreateCheckoutInput)
 		if idemRecord != nil {
 			_ = s.idempotency.Fail(ctx, idemRecord.ID, err)
 		}
-		return nil, fmt.Errorf("creating checkout: %w", err)
+		return nil, httpx.InfrastructureError(err, "create_checkout")
 	}
 
 	output := &CreateCheckoutOutput{
@@ -180,7 +180,7 @@ func (s *Service) GetPaymentStatus(ctx context.Context, input GetPaymentStatusIn
 	status, err := paymentProvider.GetPaymentStatus(ctx, input.PaymentID)
 	if err != nil {
 		s.resolver.HandleProviderError(ctx, input.IntegrationID, "get_payment_status", err)
-		return nil, fmt.Errorf("getting payment status: %w", err)
+		return nil, httpx.InfrastructureError(err, "get_payment_status")
 	}
 
 	return &GetPaymentStatusOutput{
@@ -204,7 +204,7 @@ func (s *Service) RefundPayment(ctx context.Context, input RefundPaymentInput) (
 	result, err := paymentProvider.RefundPayment(ctx, input.PaymentID, input.Amount)
 	if err != nil {
 		s.resolver.HandleProviderError(ctx, input.IntegrationID, "refund_payment", err)
-		return nil, fmt.Errorf("refunding payment: %w", err)
+		return nil, httpx.InfrastructureError(err, "refund_payment")
 	}
 
 	return &RefundPaymentOutput{
@@ -226,13 +226,13 @@ func (s *Service) GetCheckoutConfig(ctx context.Context, integrationID, storeID 
 	publicKey, err := paymentProvider.GetPublicKey(ctx)
 	if err != nil {
 		s.resolver.HandleProviderError(ctx, integrationID, "get_public_key", err)
-		return "", nil, fmt.Errorf("getting public key: %w", err)
+		return "", nil, httpx.InfrastructureError(err, "get_public_key")
 	}
 
 	methods, err := paymentProvider.GetPaymentMethods(ctx)
 	if err != nil {
 		s.resolver.HandleProviderError(ctx, integrationID, "get_payment_methods", err)
-		return "", nil, fmt.Errorf("getting payment methods: %w", err)
+		return "", nil, httpx.InfrastructureError(err, "get_payment_methods")
 	}
 
 	return publicKey, methods, nil
@@ -261,7 +261,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 	})
 	if err != nil {
 		s.resolver.HandleProviderError(ctx, input.IntegrationID, "process_card_payment", err)
-		return nil, fmt.Errorf("processing card payment: %w", err)
+		return nil, httpx.InfrastructureError(err, "process_card_payment")
 	}
 
 	return &ProcessCardPaymentOutput{
@@ -296,7 +296,7 @@ func (s *Service) GeneratePixPayment(ctx context.Context, input GeneratePixPayme
 	})
 	if err != nil {
 		s.resolver.HandleProviderError(ctx, input.IntegrationID, "generate_pix_payment", err)
-		return nil, fmt.Errorf("generating pix payment: %w", err)
+		return nil, httpx.InfrastructureError(err, "generate_pix_payment")
 	}
 
 	return &GeneratePixPaymentOutput{

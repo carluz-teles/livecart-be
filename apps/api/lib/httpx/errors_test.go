@@ -117,6 +117,92 @@ func TestServiceError_5xxHardened(t *testing.T) {
 	}
 }
 
+// providerError is a typed external-provider failure (network/HTTP), used to
+// prove errors.As walks the InfrastructureError chain to the ORIGINAL provider
+// error server-side even though the client only ever sees a generic 500.
+type providerError struct{ msg string }
+
+func (e *providerError) Error() string { return e.msg }
+
+// TestInfrastructureError_5xxHardened — D1e-2: the payment/erp provider edges now
+// wrap the provider failure in httpx.InfrastructureError(err, "op") (alongside the
+// existing HandleProviderError telemetry) instead of fmt.Errorf. The client
+// contract is UNCHANGED — still a generic 500 {error:"internal server error",
+// reason:"INTERNAL"} that NEVER leaks the provider cause/URL — while the wrapped
+// provider error is recoverable server-side (errors.Is/As/Unwrap), the category is
+// INFRASTRUCTURE, and the op reaches the log for grouping. Mirrors the
+// RepositoryError hardening test with a provider-shaped cause.
+func TestInfrastructureError_5xxHardened(t *testing.T) {
+	// A provider-shaped cause carrying a network detail + the provider URL — the
+	// exact kind of string that must NEVER reach the client.
+	cause := &providerError{msg: "Post \"https://api.pagar.me/1/charges\": dial tcp: connection refused"}
+
+	// Server-side: the chain recovers the ORIGINAL provider error for the log.
+	err := InfrastructureError(cause, "create_checkout")
+	if !errors.Is(err, cause) {
+		t.Fatalf("errors.Is must find the wrapped provider cause")
+	}
+	var pe *providerError
+	if !errors.As(err, &pe) || pe != cause {
+		t.Fatalf("errors.As must recover the typed provider error, got %v", pe)
+	}
+	if errors.Unwrap(err) != cause {
+		t.Fatalf("errors.Unwrap must return the wrapped provider cause")
+	}
+	// Category is INFRASTRUCTURE (not REPOSITORY/DOMAIN) so infra failures are
+	// queryable apart from DB and business errors; op is carried for the log.
+	var se *ServiceError
+	if !errors.As(err, &se) {
+		t.Fatalf("InfrastructureError must produce a *ServiceError")
+	}
+	if se.Category != CategoryInfrastructure {
+		t.Fatalf("category: want INFRASTRUCTURE, got %q", se.Category)
+	}
+
+	// Wire: generic 500, no leak of the provider detail/URL/op.
+	code, raw := rawBody(t, appReturning(InfrastructureError(cause, "create_checkout")))
+	if code != fiber.StatusInternalServerError {
+		t.Fatalf("want 500, got %d", code)
+	}
+	if !strings.Contains(raw, `"error":"internal server error"`) {
+		t.Fatalf("want generic error message, got %s", raw)
+	}
+	if !strings.Contains(raw, `"reason":"INTERNAL"`) {
+		t.Fatalf("want reason INTERNAL, got %s", raw)
+	}
+	if strings.Contains(raw, "connection refused") ||
+		strings.Contains(raw, "pagar.me") ||
+		strings.Contains(raw, "create_checkout") {
+		t.Fatalf("5xx body leaked the provider cause/URL/op: %s", raw)
+	}
+
+	// Log: rich — category=INFRASTRUCTURE, code=INTERNAL, op + wrapped cause present.
+	core, logs := observer.New(zap.InfoLevel)
+	SetLogger(zap.New(core))
+	t.Cleanup(func() { SetLogger(nil) })
+
+	if _, raw := rawBody(t, appReturning(InfrastructureError(cause, "create_checkout"))); strings.Contains(raw, "connection refused") {
+		t.Fatalf("5xx body leaked the provider cause: %s", raw)
+	}
+	entries := logs.FilterMessage("internal error").All()
+	if len(entries) != 1 {
+		t.Fatalf("want 1 'internal error' log line, got %d", len(entries))
+	}
+	m := entries[0].ContextMap()
+	if m["category"] != "INFRASTRUCTURE" {
+		t.Fatalf("log category: want INFRASTRUCTURE, got %v", m["category"])
+	}
+	if m["code"] != "INTERNAL" {
+		t.Fatalf("log code: want INTERNAL, got %v", m["code"])
+	}
+	if m["op"] != "create_checkout" {
+		t.Fatalf("log op: want create_checkout, got %v", m["op"])
+	}
+	if c, ok := m["cause"].(string); !ok || !strings.Contains(c, "connection refused") {
+		t.Fatalf("log must carry the wrapped provider cause, got %v", m["cause"])
+	}
+}
+
 // TestDomainError_SetsReasonAndCategory — AC (DomainError): sets status, message,
 // reason (from Code) and DOMAIN category, and round-trips on the wire.
 func TestDomainError_SetsReasonAndCategory(t *testing.T) {

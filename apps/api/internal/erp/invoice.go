@@ -125,7 +125,7 @@ func (s *Service) fetchAndPersistCartInvoice(ctx context.Context, storeID, cartI
 	}
 	if fetchErr != nil {
 		s.collab.HandleProviderError(ctx, integration.ID, "sync_cart_invoice", fetchErr)
-		return nil, fmt.Errorf("fetching NFe from ERP: %w", fetchErr)
+		return nil, httpx.InfrastructureError(fetchErr, "sync_cart_invoice")
 	}
 
 	// Fatia 11b: the NFe is written authoritatively to order_payments (resolved
