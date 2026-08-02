@@ -977,19 +977,10 @@ func (r *Repository) UpdateLiveCommentResult(ctx context.Context, commentID stri
 }
 
 // CreateLiveCommentParams holds parameters for creating a live comment.
-type CreateLiveCommentParams struct {
-	SessionID         string
-	EventID           string
-	Platform          string
-	PlatformCommentID string
-	PlatformUserID    string
-	PlatformHandle    string
-	Text              string
-	HasPurchaseIntent bool
-	MatchedProductID  string
-	MatchedQuantity   int
-	Result            string
-}
+// CreateLiveCommentParams's canonical home moved to internal/live (Bloco B4b);
+// this alias keeps the Repository builder and the remaining integration call
+// sites compiling unchanged while the ingest core owns the shape.
+type CreateLiveCommentParams = live.CreateLiveCommentParams
 
 // =============================================================================
 // WAITLIST OPERATIONS
@@ -1534,17 +1525,10 @@ func (r *Repository) UpdateWaitlistItemStatus(ctx context.Context, id, status st
 }
 
 // CreateWaitlistItemParams holds parameters for creating a waitlist item.
-type CreateWaitlistItemParams struct {
-	EventID        string
-	ProductID      string
-	PlatformUserID string
-	PlatformHandle string
-	Quantity       int
-	Position       int
-	// CartID is optional — populated when a waitlist row is created against
-	// an existing cart so the public checkout (/cart/:token) can list it.
-	CartID string
-}
+// CreateWaitlistItemParams's canonical home moved to internal/live (Bloco B4b);
+// this alias keeps the Repository builder and the remaining integration call
+// sites compiling unchanged.
+type CreateWaitlistItemParams = live.CreateWaitlistItemParams
 
 // WaitlistItemRow represents a waitlist item.
 // WaitlistItemRow's canonical home moved to internal/inventory (Bloco B3a); this
@@ -3000,11 +2984,9 @@ func (r *Repository) GetCartItemAvailableQty(ctx context.Context, cartID, produc
 }
 
 // StoreInfo contains minimal store information needed for notifications.
-type StoreInfo struct {
-	Name                  string
-	CartExpirationMinutes int
-	MaxQuantityPerItem    int
-}
+// StoreInfo's canonical home moved to internal/live (Bloco B4b); this alias
+// keeps GetStoreInfo and its callers compiling unchanged.
+type StoreInfo = live.StoreInfo
 
 // StoreShippingDefaults are the merchant-configured fallback dimensions used
 // when an ERP-imported product carries weight only (e.g. Tiny camisetas).

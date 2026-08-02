@@ -41,6 +41,86 @@ type IngestRepository interface {
 	// a single transaction (begin/emit/commit), so at-least-once redelivery is
 	// deduped by the envelope DedupKey. The tx mechanics stay behind this port.
 	EmitCommentReceived(ctx context.Context, env events.Envelope) error
+
+	// --- Comment ingestion core (Bloco B4b) ---
+	// Every method below is already implemented verbatim on integration.Repository;
+	// it satisfies this port directly (the param/return DTOs are type aliases of
+	// the live ones), so the boot-wired liveIngestRepoAdapter promotes them from
+	// the embedded *Repository with no extra glue.
+
+	// LiveCommentExistsByPlatformID reports whether a comment with this platform
+	// id was already stored — the idempotency gate (first op of the core).
+	LiveCommentExistsByPlatformID(ctx context.Context, platformCommentID string) (bool, error)
+	// CreateLiveComment persists a live comment and returns its id.
+	CreateLiveComment(ctx context.Context, params CreateLiveCommentParams) (string, error)
+	// UpdateLiveCommentResult stamps the processing outcome onto a stored comment.
+	UpdateLiveCommentResult(ctx context.Context, commentID string, hasPurchaseIntent bool, matchedProductID string, matchedQuantity int, result string) error
+	// GetProductByID returns the enxuto product view by id (active-product
+	// fallback and single-promo resolution), or nil when absent.
+	GetProductByID(ctx context.Context, storeID, productID string) (*ProductRow, error)
+	// IncrementLiveSessionComments bumps the session's comment counter.
+	IncrementLiveSessionComments(ctx context.Context, sessionID string) error
+	// IncrementLiveEventOrders bumps the event's order counter (new carts only).
+	IncrementLiveEventOrders(ctx context.Context, eventID string) error
+	// IsHandleBlocked reports whether the merchant blocked a buyer handle.
+	IsHandleBlocked(ctx context.Context, storeID, handle string) (bool, error)
+	// GetStoreInfo returns the store display/limits used by the flow, or nil.
+	GetStoreInfo(ctx context.Context, storeID string) (*StoreInfo, error)
+	// GetProductQuantityInUserCart returns how many units of a product a buyer
+	// already has in their event cart (the max-quantity gate).
+	GetProductQuantityInUserCart(ctx context.Context, eventID, platformUserID, productID string) (int, error)
+	// DecrementProductStock provisionally reserves local stock (rolled back by
+	// IncrementProductStock if the subsequent AddToCart fails).
+	DecrementProductStock(ctx context.Context, productID string, quantity int) error
+	// IncrementProductStock returns provisionally-reserved local stock.
+	IncrementProductStock(ctx context.Context, productID string, quantity int) error
+	// GetWaitlistItemByEventUserProduct reports whether the buyer already has a
+	// waitlist row for this event+product (no double-queue).
+	GetWaitlistItemByEventUserProduct(ctx context.Context, eventID, platformUserID, productID string) (bool, error)
+	// GetNextWaitlistPosition reads the next stable queue position.
+	GetNextWaitlistPosition(ctx context.Context, eventID, productID string) (int, error)
+	// CreateWaitlistItem persists a waitlist row (stamped with the real cart id).
+	CreateWaitlistItem(ctx context.Context, params CreateWaitlistItemParams) (string, error)
+}
+
+// CreateLiveCommentParams is the persistence DTO for a stored live comment. Its
+// canonical home is this package (the ingest core owns the shape); integration
+// aliases it (type CreateLiveCommentParams = live.CreateLiveCommentParams) so its
+// Repository keeps building the same value and every existing caller is unchanged.
+type CreateLiveCommentParams struct {
+	SessionID         string
+	EventID           string
+	Platform          string
+	PlatformCommentID string
+	PlatformUserID    string
+	PlatformHandle    string
+	Text              string
+	HasPurchaseIntent bool
+	MatchedProductID  string
+	MatchedQuantity   int
+	Result            string
+}
+
+// CreateWaitlistItemParams is the persistence DTO for a waitlist row. Canonical
+// home here; integration aliases it (same rationale as CreateLiveCommentParams).
+type CreateWaitlistItemParams struct {
+	EventID        string
+	ProductID      string
+	PlatformUserID string
+	PlatformHandle string
+	Quantity       int
+	Position       int
+	// CartID is optional — populated when a waitlist row is created against
+	// an existing cart so the public checkout (/cart/:token) can list it.
+	CartID string
+}
+
+// StoreInfo is the store display/limits view the ingest + notification flow
+// reads. Canonical home here; integration aliases it.
+type StoreInfo struct {
+	Name                  string
+	CartExpirationMinutes int
+	MaxQuantityPerItem    int
 }
 
 // SetIngestRepository wires the ingest persistence port after construction. Like

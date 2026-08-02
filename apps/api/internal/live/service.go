@@ -10,6 +10,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/notification"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
 )
@@ -58,6 +59,25 @@ type Service struct {
 	customerUpserter CustomerUpserter
 	closeScheduler   EventCloseScheduler
 	ingestRepo       IngestRepository
+
+	// Comment ingestion core collaborators (Bloco B4b). All five are wired via
+	// setters AFTER the services are built (integration.Service is the concrete
+	// impl and depends on live.Service), so every use is nil-guarded lazily.
+	// stockReserver breaks the erp import cycle (neutral ReserveParams);
+	// billingGate/webhookAuditor/socialReplier are satisfied by integration.Service
+	// directly; notificationSvc is imported directly (notification has no cycle).
+	stockReserver   StockReserver
+	billingGate     BillingGate
+	webhookAuditor  WebhookAuditor
+	socialReplier   SocialReplier
+	notificationSvc *notification.Service
+
+	// core is the slice of this Service's own behaviour the comment consumer
+	// reuses (session/event lookups, AddToCart, event-product whitelist). It
+	// defaults to the Service itself (wired in NewService) so production is a
+	// plain self-call; unit tests swap in a fake to exercise the core without a
+	// database. See the commentCore interface in comment.go.
+	core commentCore
 }
 
 // SetEventCloseScheduler wires the ETA scheduler for timed-event window close
@@ -65,11 +85,33 @@ type Service struct {
 func (s *Service) SetEventCloseScheduler(sch EventCloseScheduler) { s.closeScheduler = sch }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {
-	return &Service{
+	s := &Service{
 		repo:   repo,
 		logger: logger.Named("live"),
 	}
+	// The comment core reuses this Service's own methods through the commentCore
+	// seam; in production that is the Service itself.
+	s.core = s
+	return s
 }
+
+// SetStockReserver wires the local+ERP stock reservation collaborator used by the
+// comment ingestion core. Optional — nil means stock reservations are skipped.
+func (s *Service) SetStockReserver(r StockReserver) { s.stockReserver = r }
+
+// SetBillingGate wires the paywall gate (PRD 007). Optional — nil means no gating.
+func (s *Service) SetBillingGate(g BillingGate) { s.billingGate = g }
+
+// SetWebhookAuditor wires the webhook-event audit sink. Optional — nil skips audit.
+func (s *Service) SetWebhookAuditor(a WebhookAuditor) { s.webhookAuditor = a }
+
+// SetSocialReplier wires the Instagram DM / comment-reply ACL. Optional — nil
+// skips replies (max-quantity and post-commerce answers).
+func (s *Service) SetSocialReplier(r SocialReplier) { s.socialReplier = r }
+
+// SetNotificationService wires the notification service used for the immediate
+// checkout DM/email. Optional — nil skips immediate notifications.
+func (s *Service) SetNotificationService(svc *notification.Service) { s.notificationSvc = svc }
 
 // SetNotifier wires a Notifier into the service after construction. This
 // breaks the dependency cycle between live and integration packages

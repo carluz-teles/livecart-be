@@ -6,6 +6,7 @@ import (
 
 	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/internal/live"
 	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/query"
 )
@@ -582,15 +583,10 @@ type UpdateIntegrationParams struct {
 // =============================================================================
 
 // StoreWebhookInput is the input for storing a webhook event.
-type StoreWebhookInput struct {
-	StoreID        string // From URL parameter
-	Provider       string
-	IntegrationID  string // Resolved by service layer before storing
-	EventType      string
-	EventID        string
-	Payload        []byte
-	SignatureValid bool
-}
+// StoreWebhookInput's canonical home moved to internal/live (Bloco B4b): the
+// WebhookAuditor port (satisfied by *integration.Service) is declared in terms
+// of it. This alias keeps StoreWebhookEvent and its callers compiling unchanged.
+type StoreWebhookInput = live.StoreWebhookInput
 
 // ProcessPaymentInput is the input for processing a payment notification.
 type ProcessPaymentInput struct {

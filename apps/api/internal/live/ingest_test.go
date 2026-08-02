@@ -3,6 +3,7 @@ package live
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"go.uber.org/zap"
@@ -20,14 +21,115 @@ type fakeIngestRepo struct {
 	emitted      []events.Envelope
 	dedupSeen    map[string]bool
 	getCallCount int
+
+	// --- Comment ingestion core state (Bloco B4b) ---
+	existingComments map[string]bool        // platform_comment_id → already stored (dedup gate)
+	productsByID     map[string]*ProductRow // product id → product (fallback + single-promo resolve)
+	blockedHandles   map[string]bool        // normalized handle → blocked
+	storeInfo        *StoreInfo             // nil → no max-quantity gate
+	cartQty          map[string]int         // "event|user|product" → qty already in cart
+	waitlistExists   map[string]bool        // "event|user|product" → already queued
+	nextPos          int                    // GetNextWaitlistPosition return
+	decrementErr     error                  // forced DecrementProductStock failure
+
+	createdComments    []CreateLiveCommentParams
+	commentResults     []string // result labels stamped via UpdateLiveCommentResult
+	createdWaitlist    []CreateWaitlistItemParams
+	decremented        []stockMove
+	incremented        []stockMove
+	sessionCommentIncs int
+	eventOrderIncs     int
+	commentSeq         int
+}
+
+type stockMove struct {
+	productID string
+	quantity  int
+}
+
+func cartKey(eventID, userID, productID string) string {
+	return eventID + "|" + userID + "|" + productID
 }
 
 func newFakeIngestRepo() *fakeIngestRepo {
 	return &fakeIngestRepo{
-		products:  map[string]*ProductRow{},
-		lookupErr: map[string]error{},
-		dedupSeen: map[string]bool{},
+		products:         map[string]*ProductRow{},
+		lookupErr:        map[string]error{},
+		dedupSeen:        map[string]bool{},
+		existingComments: map[string]bool{},
+		productsByID:     map[string]*ProductRow{},
+		blockedHandles:   map[string]bool{},
+		cartQty:          map[string]int{},
+		waitlistExists:   map[string]bool{},
 	}
+}
+
+func (f *fakeIngestRepo) LiveCommentExistsByPlatformID(_ context.Context, platformCommentID string) (bool, error) {
+	return f.existingComments[platformCommentID], nil
+}
+
+func (f *fakeIngestRepo) CreateLiveComment(_ context.Context, params CreateLiveCommentParams) (string, error) {
+	f.createdComments = append(f.createdComments, params)
+	f.commentSeq++
+	return fmt.Sprintf("comment-%d", f.commentSeq), nil
+}
+
+func (f *fakeIngestRepo) UpdateLiveCommentResult(_ context.Context, _ string, _ bool, _ string, _ int, result string) error {
+	f.commentResults = append(f.commentResults, result)
+	return nil
+}
+
+func (f *fakeIngestRepo) GetProductByID(_ context.Context, _, productID string) (*ProductRow, error) {
+	return f.productsByID[productID], nil
+}
+
+func (f *fakeIngestRepo) IncrementLiveSessionComments(_ context.Context, _ string) error {
+	f.sessionCommentIncs++
+	return nil
+}
+
+func (f *fakeIngestRepo) IncrementLiveEventOrders(_ context.Context, _ string) error {
+	f.eventOrderIncs++
+	return nil
+}
+
+func (f *fakeIngestRepo) IsHandleBlocked(_ context.Context, _, handle string) (bool, error) {
+	return f.blockedHandles[handle], nil
+}
+
+func (f *fakeIngestRepo) GetStoreInfo(_ context.Context, _ string) (*StoreInfo, error) {
+	return f.storeInfo, nil
+}
+
+func (f *fakeIngestRepo) GetProductQuantityInUserCart(_ context.Context, eventID, userID, productID string) (int, error) {
+	return f.cartQty[cartKey(eventID, userID, productID)], nil
+}
+
+func (f *fakeIngestRepo) DecrementProductStock(_ context.Context, productID string, quantity int) error {
+	if f.decrementErr != nil {
+		return f.decrementErr
+	}
+	f.decremented = append(f.decremented, stockMove{productID, quantity})
+	return nil
+}
+
+func (f *fakeIngestRepo) IncrementProductStock(_ context.Context, productID string, quantity int) error {
+	f.incremented = append(f.incremented, stockMove{productID, quantity})
+	return nil
+}
+
+func (f *fakeIngestRepo) GetWaitlistItemByEventUserProduct(_ context.Context, eventID, userID, productID string) (bool, error) {
+	return f.waitlistExists[cartKey(eventID, userID, productID)], nil
+}
+
+func (f *fakeIngestRepo) GetNextWaitlistPosition(_ context.Context, _, _ string) (int, error) {
+	return f.nextPos, nil
+}
+
+func (f *fakeIngestRepo) CreateWaitlistItem(_ context.Context, params CreateWaitlistItemParams) (string, error) {
+	f.createdWaitlist = append(f.createdWaitlist, params)
+	f.commentSeq++
+	return fmt.Sprintf("waitlist-%d", f.commentSeq), nil
 }
 
 func (f *fakeIngestRepo) GetProductByKeyword(_ context.Context, _, keyword string) (*ProductRow, error) {

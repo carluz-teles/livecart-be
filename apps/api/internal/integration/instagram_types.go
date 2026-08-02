@@ -1,5 +1,7 @@
 package integration
 
+import "livecart/apps/api/internal/live"
+
 // InstagramWebhookPayload represents the root payload sent by Meta webhooks
 type InstagramWebhookPayload struct {
 	Object string           `json:"object"`
@@ -78,20 +80,11 @@ type InstagramReplyStory struct {
 }
 
 // ProcessInstagramCommentInput represents input for processing a live comment
-type ProcessInstagramCommentInput struct {
-	AccountID string
-	MediaID   string
-	CommentID string
-	UserID    string
-	Username  string
-	Text      string
-	Timestamp int64
-	// Channel is the reply channel: "" / "comment" (default) replies on the
-	// comment thread with a DM fallback; "dm" replies straight via DM — used by
-	// story replies, which arrive as DMs and have no public comment to answer.
-	Channel    string
-	RawPayload []byte // Original webhook payload for audit storage
-}
+// ProcessInstagramCommentInput's canonical home moved to internal/live (Bloco
+// B4b): the comment.received consumer now lives in live.Service and deserializes
+// into it. This alias keeps the webhook edge (ProcessInstagramMessage /
+// processStoryReply / pollPostCommentsOnce) and the wire contract unchanged.
+type ProcessInstagramCommentInput = live.ProcessInstagramCommentInput
 
 // ProcessInstagramMessageInput represents input for processing a DM
 type ProcessInstagramMessageInput struct {

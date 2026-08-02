@@ -357,6 +357,41 @@ func (a liveIngestRepoAdapter) EmitCommentReceived(ctx context.Context, env even
 	})
 }
 
+// liveStockReserverAdapter adapts *Service to live.StockReserver (Bloco B4b),
+// breaking the erp import cycle: the comment core (now in live) declares a NEUTRAL
+// live.ReserveParams and this maps it to the erp.ReserveParams the in-package
+// stock manager expects. NoteReserved is best-effort (void) upstream, so it
+// always returns nil; ReserveStockInERP delegates to the preserved public method.
+type liveStockReserverAdapter struct{ s *Service }
+
+// NewLiveStockReserverAdapter builds the adapter over the integration service so
+// main.go can wire it into the live.Service via SetStockReserver.
+func NewLiveStockReserverAdapter(s *Service) live.StockReserver { return liveStockReserverAdapter{s: s} }
+
+func (a liveStockReserverAdapter) NoteReserved(ctx context.Context, p live.ReserveParams) error {
+	a.s.stock.NoteReserved(ctx, ReserveParams{
+		Op:        StockOp(p.Op),
+		ProductID: p.ProductID,
+		CartID:    p.CartID,
+		EventID:   p.EventID,
+		Quantity:  p.Quantity,
+	})
+	return nil
+}
+
+func (a liveStockReserverAdapter) ReserveStockInERP(ctx context.Context, storeID, cartID, eventID, productID string, quantity int, unitPrice int64, platformHandle string) error {
+	return a.s.ReserveStockInERP(ctx, storeID, cartID, eventID, productID, quantity, unitPrice, platformHandle)
+}
+
+// IsStoreBlocked satisfies live.BillingGate: the comment core (in live) reads the
+// paywall gate through it. Delegates to the wired billing gate (nil = not blocked).
+func (s *Service) IsStoreBlocked(ctx context.Context, storeID string) bool {
+	if s.billingGate == nil {
+		return false
+	}
+	return s.billingGate.IsStoreBlocked(ctx, storeID)
+}
+
 // Compile-time guards: integration.Service satisfies the collaborator ports and
 // the repo adapters satisfy the persistence ports.
 var (
@@ -365,6 +400,10 @@ var (
 	_ inventory.WaitlistCollaborators = (*Service)(nil)
 	_ inventory.InventoryRepository   = inventoryRepoAdapter{}
 	_ live.IngestRepository           = liveIngestRepoAdapter{}
+	_ live.StockReserver              = liveStockReserverAdapter{}
+	_ live.BillingGate                = (*Service)(nil)
+	_ live.WebhookAuditor             = (*Service)(nil)
+	_ live.SocialReplier              = (*Service)(nil)
 )
 
 // SetStorage wires the object storage client (used to delete transient post
