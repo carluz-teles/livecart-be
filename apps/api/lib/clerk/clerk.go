@@ -204,7 +204,19 @@ func (c *Client) ValidateToken(ctx context.Context, tokenString string) (*Claims
 
 		// Convert JWK to RSA public key
 		return jwkToRSAPublicKey(jwk)
-	})
+	},
+		// Tolerância de relógio na validação do `exp`.
+		//
+		// O token do Clerk vale ~60 segundos, e sem folga qualquer adiantamento
+		// do relógio desta máquina em relação ao do Clerk encurta essa janela na
+		// mesma medida: um token emitido agora chega "vencido". Com 60s de vida,
+		// poucos segundos de desvio já viram uma fatia relevante de 401s
+		// intermitentes — o padrão que o lojista via como "some e volta com F5".
+		//
+		// 30s é a folga usual para JWT e continua bem abaixo da vida do token,
+		// então não estende de fato a validade: só absorve o desvio.
+		jwt.WithLeeway(30*time.Second),
+	)
 
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
