@@ -20,10 +20,9 @@ import (
 	"livecart/apps/api/lib/ratelimit"
 )
 
-const (
-	// Tiny API v3 base URL
-	tinyAPIBaseURL = "https://api.tiny.com.br/public-api/v3"
-)
+// Tiny API v3 base URL. `var` e não `const` só para o teste poder apontar o
+// provider a um servidor local — nada em produção reatribui isto.
+var tinyAPIBaseURL = "https://api.tiny.com.br/public-api/v3"
 
 // Tiny is a Brazilian ERP and interprets `data` fields against São Paulo
 // local time. Sending UTC made orders created late at night land on the next
@@ -392,6 +391,14 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("product not found: %s", productID)
+	}
+	// 429 tipado, como em ListProducts. Sem isto o estrangulamento do Tiny
+	// (1 req/s) chegava ao chamador como um erro genérico indistinguível de
+	// "esse produto deu problema" — e a busca, que faz um GetProduct POR
+	// resultado, descartava produto por produto até sobrar zero e dizer ao
+	// lojista que o produto não existe no ERP.
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, &ratelimit.ErrRateLimited{}
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
 		return nil, fmt.Errorf("get product failed: status %d", resp.StatusCode)

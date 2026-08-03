@@ -100,6 +100,10 @@ const (
 	CodeErpRetryNoSnapshot        Code = "ERP_RETRY_NO_SNAPSHOT"        // erp/finalisation.go:387 ("snapshot de pagamento ausente")
 	CodeErpNotActive              Code = "ERP_NOT_ACTIVE"               // erp/invoice.go:99 ("ERP integration not active for store")
 	CodeErpNoInvoiceSupport       Code = "ERP_NO_INVOICE_SUPPORT"       // erp/invoice.go:108 ("ERP provider does not expose invoice operations")
+	// Busca de produto no ERP estrangulada (Tiny: 1 req/s). NÃO é "não existe":
+	// a listagem achou o produto e o detalhe é que foi recusado. Separar os dois
+	// é o que impede a busca de dizer ao lojista que o produto não existe.
+	CodeErpThrottled Code = "ERP_THROTTLED" // integration/service.go (SearchProducts)
 
 	// --- STOCK (internal/erp/stock_service.go) ---
 	CodeStockInsufficient Code = "STOCK_INSUFFICIENT" // erp/stock_service.go:213 ("estoque insuficiente para esse aumento")

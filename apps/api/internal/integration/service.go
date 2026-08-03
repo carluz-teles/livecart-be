@@ -2785,9 +2785,28 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 	// front-end can let the user pick a SKU.
 	var products []ERPProductResponse
 	foundButNoStock := false
+	// A listagem ACHOU produtos. Guardamos isso porque, se o enriquecimento
+	// abaixo derrubar todos, "não encontrado no ERP" seria mentira — o produto
+	// existe, o Tiny é que não deixou ler o detalhe.
+	enrichThrottled := false
 	for _, listed := range result.Products {
 		detailed, err := erpProvider.GetProduct(ctx, listed.ID)
 		if err != nil {
+			var rl *ratelimit.ErrRateLimited
+			if errors.As(err, &rl) {
+				// Estrangulado: PARA. Insistir nos que faltam só empilha 429 a
+				// 1 req/s — foi o que fez a busca levar 15-20s e o front
+				// desistir com "A busca demorou demais". Devolver rápido o que
+				// já temos (ou um erro honesto) vale mais que uma lista
+				// completa que ninguém espera.
+				enrichThrottled = true
+				logger.From(ctx, s.logger).Warn("ERP throttled while loading product details, stopping enrichment",
+					zap.String("product_id", listed.ID),
+					zap.Int("enriched_so_far", len(products)),
+					zap.Int("listed", len(result.Products)),
+				)
+				break
+			}
 			logger.From(ctx, s.logger).Warn("failed to get product details, skipping",
 				zap.String("product_id", listed.ID),
 				zap.Error(err),
@@ -2854,6 +2873,14 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 	if len(products) == 0 {
 		if foundButNoStock {
 			return nil, httpx.ErrUnprocessable("Produto encontrado, mas sem estoque disponível no momento")
+		}
+		// O produto EXISTE — a listagem o devolveu — e o ERP recusou entregar o
+		// detalhe. Dizer "não encontrado no ERP" aqui é acusar o lojista de
+		// procurar o que não existe, e foi o que aconteceu na prática: ele
+		// buscava um produto que estava lá e recebia que não estava.
+		if enrichThrottled {
+			return nil, httpx.DomainError(503, httpx.CodeErpThrottled,
+				"O ERP está limitando as consultas neste momento. Aguarde alguns segundos e busque de novo.")
 		}
 		return nil, httpx.ErrNotFound("Produto não encontrado no ERP")
 	}
