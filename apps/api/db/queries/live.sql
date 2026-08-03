@@ -121,9 +121,31 @@ SET webhook_active = true
 WHERE platform_live_id = $1 AND released_at IS NULL;
 
 -- name: ListPollableMedia :many
--- Mídias de post/reel que ainda não receberam webhook de comments e por isso
--- dependem do polling — o único caminho de captura para post sem webhook.
+-- Mídias que dependem do polling para capturar comentário.
 -- Story não entra: resposta de story chega por DM, não por comentário.
+--
+-- LIVE entra, e entra por uma regra DIFERENTE de post/reel.
+--
+-- Post/reel: o polling é a ponte ATÉ o webhook assumir, então `webhook_active`
+-- desliga o polling daquela mídia — o webhook é confiável ali e a publicação
+-- vive para sempre.
+--
+-- Live: o polling anda JUNTO com o webhook, o tempo todo. A Meta entrega
+-- live_comments só "for the duration of the broadcast", e na prática essa
+-- entrega FALHA no meio da transmissão: os primeiros comentários viram pedido e
+-- os seguintes somem — sem erro, sem log, sem nada, porque o webhook era o
+-- ÚNICO caminho de captura da live. Era a maior perda de venda possível, e
+-- invisível: ninguém sabe o que não chegou.
+--
+-- Desligar o polling da live no primeiro webhook (a regra de post) reproduziria
+-- exatamente o bug — é o primeiro webhook que chega, é do resto que se perde.
+-- Por isso a live ignora `webhook_active`; a duplicata é resolvida pelo dedup
+-- por platform_comment_id, que a captura já faz.
+--
+-- Ler comentário de live pela API só funciona durante a transmissão ("comments
+-- on live video broadcasts (outside of the broadcast window) are not
+-- returned"), então o polling é limitado à sessão no ar. Encerrar a sessão o
+-- desliga — é o segundo motivo para o botão "Encerrar" da transmissão existir.
 --
 -- O filtro e.status='active' SAIU (D19/D20/A3). Ele era o motivo pelo qual a
 -- promessa "nunca fica em silêncio" viraria silêncio TOTAL justamente no
@@ -154,8 +176,10 @@ SELECT
 FROM live_session_platforms lsp
 JOIN live_sessions ls ON ls.id = lsp.session_id
 JOIN live_events e ON e.id = ls.event_id
-WHERE ls.type IN ('post', 'reel')
-  AND lsp.webhook_active = false
+WHERE (
+        (ls.type IN ('post', 'reel') AND lsp.webhook_active = false)
+     OR (ls.type = 'live' AND ls.status <> 'ended' AND e.status <> 'ended')
+  )
   AND (
         e.status <> 'ended'
      OR COALESCE(e.ends_at, e.updated_at) >= now() - interval '7 days'

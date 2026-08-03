@@ -809,7 +809,15 @@ func (i *Instagram) PublishStory(ctx context.Context, mediaURL string, isVideo b
 // instagramWebhookFields are the webhook fields LiveCart depends on:
 //   - comments: keyword sales on posts/lives (has a polling fallback)
 //   - messages: story replies and DM sales (NO fallback — dead without this)
-const instagramWebhookFields = "comments,messages"
+//   - live_comments: comentário DURANTE a transmissão ao vivo. É um campo
+//     PRÓPRIO na API, não faz parte de `comments` — e faltava aqui, embora a
+//     venda por live seja o produto. Chegavam mesmo assim porque o app está
+//     inscrito no campo no painel da Meta e a inscrição por conta não permite
+//     customização por conta ("if an app user is subscribed to any Instagram
+//     webhook field, the app receives notifications for all subscribed
+//     fields"). Ou seja: funcionava por acidente da configuração do app, não
+//     por escolha nossa — e qualquer app novo nasceria sem live.
+const instagramWebhookFields = "comments,live_comments,messages"
 
 // SubscribeWebhooks subscribes the connected account to LiveCart's webhook
 // fields (POST /me/subscribed_apps). WITHOUT this call Meta never delivers
