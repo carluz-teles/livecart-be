@@ -1190,7 +1190,7 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 	// existia para o caso "configurei os produtos na campanha e criei a sessão
 	// depois", que não existe mais — não há lista de campanha de onde herdar, e
 	// cada transmissão é configurada explicitamente.
-	session, platform, err := s.repo.CreateSessionWithPlatformTx(ctx, input.EventID, SessionTypeFromEventType(input.Type), input.Platform, input.PlatformLiveID)
+	session, platform, err := s.repo.CreateSessionWithPlatformTx(ctx, input.EventID, SessionTypeFromEventType(input.Type), input.Platform, input.PlatformLiveID, input.ProductIDs)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("failed to create session with platform",
 			zap.String("event_id", input.EventID),

@@ -2354,20 +2354,8 @@ func (s *Service) publishInstagramPostEvent(ctx context.Context, input CreateIns
 		}
 	}
 
-	// Create the post-commerce event bound to the freshly published post.
-	out, err := s.liveService.CreatePostEvent(ctx, live.CreatePostInput{
-		StoreID:                input.StoreID,
-		Title:                  input.Title,
-		MediaID:                mediaID,
-		MediaPermalink:         permalink,
-		MediaThumbnailURL:      thumbnail,
-		MediaCaption:           input.Caption,
-		ProductIDs:             input.ProductIDs,
-		StartsAt:               input.StartsAt,
-		EndsAt:                 input.EndsAt,
-		CartExpirationMinutes:  input.CartExpirationMinutes,
-		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
-	})
+	// Liga a publicação: sessão do evento informado, ou evento novo.
+	out, err := s.attachPublishedMediaToEvent(ctx, input, live.SessionTypePost, mediaID, permalink, thumbnail)
 	if err != nil {
 		// The post is already live on Instagram; surface the event error so the
 		// merchant can retry binding via "select a post".
@@ -2535,23 +2523,9 @@ func (s *Service) publishInstagramReelEvent(ctx context.Context, input CreateIns
 		}
 	}
 
-	out, err := s.liveService.CreatePostEvent(ctx, live.CreatePostInput{
-		StoreID: input.StoreID,
-		// D3: até aqui todo Reel era gravado como 'post' e ficava
-		// indistinguível de um post de feed. A sessão passa a dizer 'reel';
-		// o evento continua rotulado 'post' porque o FE não conhece o valor.
-		Type:                   live.SessionTypeReel,
-		Title:                  input.Title,
-		MediaID:                mediaID,
-		MediaPermalink:         permalink,
-		MediaThumbnailURL:      thumbnail,
-		MediaCaption:           input.Caption,
-		ProductIDs:             input.ProductIDs,
-		StartsAt:               input.StartsAt,
-		EndsAt:                 input.EndsAt,
-		CartExpirationMinutes:  input.CartExpirationMinutes,
-		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
-	})
+	// D3: até aqui todo Reel era gravado como 'post' e ficava indistinguível de
+	// um post de feed. A sessão passa a dizer 'reel'.
+	out, err := s.attachPublishedMediaToEvent(ctx, input, live.SessionTypeReel, mediaID, permalink, thumbnail)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("reel published but event creation failed",
 			zap.String("store_id", input.StoreID),
@@ -2612,19 +2586,11 @@ func (s *Service) publishInstagramStoryEvent(ctx context.Context, input CreateIn
 	// input) so a retried publish still hashes identically.
 	endsAt := time.Now().Add(24 * time.Hour)
 
-	out, err := s.liveService.CreatePostEvent(ctx, live.CreatePostInput{
-		StoreID:                input.StoreID,
-		Type:                   "story",
-		Title:                  input.Title,
-		MediaID:                mediaID,
-		MediaPermalink:         permalink,
-		MediaThumbnailURL:      thumbnail,
-		MediaCaption:           input.Caption,
-		ProductIDs:             input.ProductIDs,
-		EndsAt:                 &endsAt,
-		CartExpirationMinutes:  input.CartExpirationMinutes,
-		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
-	})
+	// A janela de 24h do Story só vale quando ele cria o próprio evento; entrando
+	// num evento existente, quem manda no prazo é o evento.
+	storyInput := input
+	storyInput.EndsAt = &endsAt
+	out, err := s.attachPublishedMediaToEvent(ctx, storyInput, live.SessionTypeStory, mediaID, permalink, thumbnail)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("story published but event creation failed",
 			zap.String("store_id", input.StoreID),
@@ -5973,4 +5939,71 @@ func (s *Service) ensureWebhookSubscriptionOnce(ctx context.Context, storeID str
 		logger.From(ctx, s.logger).Warn("failed to ensure instagram webhook subscription for a store with a live on air",
 			zap.String("store_id", storeID), zap.Error(err))
 	}
+}
+
+// attachPublishedMediaToEvent liga uma publicação recém-criada no Instagram ao
+// LiveCart. Nome distinto de bindPublishedMedia (publish_schedule.go), que é o
+// caminho do agendamento e sempre cria evento próprio.
+//
+// Dois destinos, uma porta: com eventID, a publicação vira mais uma SESSÃO do
+// evento que já existe; sem eventID, cria um evento próprio, que é o
+// comportamento de sempre.
+//
+// A ligação por sessão é o que faz o guarda-chuva funcionar de ponta a ponta:
+// o post de terça entra no MESMO evento da live de segunda, então o comprador
+// que pediu nos dois continua com um carrinho só. Publicar sempre criando
+// evento próprio produzia dois carrinhos para a mesma pessoa na mesma campanha.
+//
+// Os três caminhos de publicação (post, reel, story) passam por aqui de
+// propósito: a regra de a qual evento a mídia pertence não pode divergir entre
+// eles, e divergiria se cada um tivesse a sua cópia.
+func (s *Service) attachPublishedMediaToEvent(
+	ctx context.Context,
+	input CreateInstagramPostInput,
+	sessionType, mediaID, permalink, thumbnail string,
+) (live.CreateLiveOutput, error) {
+	if input.EventID == "" {
+		return s.liveService.CreatePostEvent(ctx, live.CreatePostInput{
+			StoreID:                input.StoreID,
+			Title:                  input.Title,
+			Type:                   sessionType,
+			MediaID:                mediaID,
+			MediaPermalink:         permalink,
+			MediaThumbnailURL:      thumbnail,
+			MediaCaption:           input.Caption,
+			ProductIDs:             input.ProductIDs,
+			StartsAt:               input.StartsAt,
+			EndsAt:                 input.EndsAt,
+			CartExpirationMinutes:  input.CartExpirationMinutes,
+			CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
+		})
+	}
+
+	// Janela, expiração e teto NÃO são reenviados: eles são do evento, e a
+	// sessão que entra nele obedece o que já está lá. Aceitá-los aqui deixaria
+	// uma publicação redefinir a regra da campanha inteira pelas costas.
+	session, err := s.liveService.CreateSession(ctx, live.CreateSessionInput{
+		EventID:           input.EventID,
+		StoreID:           input.StoreID,
+		Type:              sessionType,
+		Platform:          "instagram",
+		PlatformLiveID:    mediaID,
+		MediaPermalink:    permalink,
+		MediaThumbnailURL: thumbnail,
+		MediaCaption:      input.Caption,
+		ProductIDs:        input.ProductIDs,
+	})
+	if err != nil {
+		return live.CreateLiveOutput{}, err
+	}
+
+	// O ID devolvido é o do EVENTO, não o da sessão: quem chamou quer navegar
+	// para a campanha, que é onde a publicação agora vive.
+	return live.CreateLiveOutput{
+		ID:        session.EventID,
+		Title:     input.Title,
+		Platform:  "instagram",
+		Status:    session.Status,
+		CreatedAt: session.CreatedAt,
+	}, nil
 }

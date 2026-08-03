@@ -562,6 +562,7 @@ func (h *Handler) CreateInstagramPost(c *fiber.Ctx) error {
 
 	event, err := h.service.CreateInstagramPostEvent(c.Context(), CreateInstagramPostInput{
 		StoreID:                storeID,
+		EventID:                req.EventID,
 		ImageURL:               req.ImageURL,
 		ImageKey:               req.ImageKey, // deleted (with logging) after publish
 		Caption:                req.Caption,
@@ -656,6 +657,7 @@ func (h *Handler) CreateInstagramReel(c *fiber.Ctx) error {
 	event, err := h.service.CreateInstagramReelEvent(c.Context(), CreateInstagramPostInput{
 		StoreID:                storeID,
 		ImageKey:               key, // the transient video key, deleted after publish
+		EventID:                c.FormValue("eventId"),
 		Caption:                c.FormValue("caption"),
 		Title:                  c.FormValue("title"),
 		ProductIDs:             productIDs,
@@ -742,6 +744,7 @@ func (h *Handler) CreateInstagramStory(c *fiber.Ctx) error {
 
 	event, err := h.service.CreateInstagramStoryEvent(c.Context(), CreateInstagramPostInput{
 		StoreID:                storeID,
+		EventID:                c.FormValue("eventId"),
 		ImageKey:               key, // transient media key, deleted after publish
 		Title:                  c.FormValue("title"),
 		ProductIDs:             productIDs,

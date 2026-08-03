@@ -225,7 +225,7 @@ func TestNewSessionIsBornEmpty(t *testing.T) {
 	}
 
 	// A transmissão seguinte, criada pelo caminho real do painel.
-	session, _, err := testRepo.CreateSessionWithPlatformTx(ctx, f.eventID, "live", "instagram", "media-sem-heranca")
+	session, _, err := testRepo.CreateSessionWithPlatformTx(ctx, f.eventID, "live", "instagram", "media-sem-heranca", nil)
 	if err != nil {
 		t.Fatalf("CreateSessionWithPlatformTx: %v", err)
 	}

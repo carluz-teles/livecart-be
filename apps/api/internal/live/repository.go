@@ -26,14 +26,20 @@ func NewRepository(q *sqlc.Queries, pool *pgxpool.Pool) *Repository {
 	return &Repository{q: q, pool: pool}
 }
 
-// CreateSessionWithPlatformTx cria a sessão e registra a mídia numa transação só.
-// sessionType é o tipo da transmissão (D3): live|post|reel|story.
+// CreateSessionWithPlatformTx cria a sessão, registra a mídia e grava a lista de
+// produtos numa transação só. sessionType é o tipo da transmissão (D3):
+// live|post|reel|story.
 //
-// A sessão NASCE VAZIA, e vazia vende TODOS os produtos ativos da loja. Não há
-// herança: a lista de produtos é da transmissão, não da campanha, então não há
-// de onde herdar. Quem quiser restringir esta transmissão configura os produtos
-// DELA depois de criá-la.
-func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, sessionType, platform, platformLiveID string) (SessionRow, *PlatformRow, error) {
+// productIDs VAZIO é o caso normal: a sessão nasce sem lista e, sem lista, vende
+// TODOS os produtos ativos da loja. Não há herança da campanha — a lista é da
+// transmissão, então não há de onde herdar.
+//
+// productIDs PREENCHIDO é o atalho de publicar: quem publica um post/reel pelo
+// LiveCart escolhe ali mesmo o que aquela publicação vende, e a lista tem de
+// nascer JUNTO com a sessão. Fora da transação, uma falha ao gravar produto
+// deixaria a publicação no ar com lista parcial — ou vazia, que sob "vazia vende
+// tudo" libera o catálogo inteiro, o oposto do que o lojista escolheu.
+func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, sessionType, platform, platformLiveID string, productIDs []string) (SessionRow, *PlatformRow, error) {
 	eventUID, err := parseUUID(eventID)
 	if err != nil {
 		return SessionRow{}, nil, err
@@ -55,6 +61,23 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, s
 	})
 	if err != nil {
 		return SessionRow{}, nil, fmt.Errorf("creating live session: %w", err)
+	}
+
+	// A lista de produtos DESTA transmissão, na mesma transação em que ela
+	// nasce. Mesma regra de CreateEventWithSessionTx: ou grava tudo, ou a
+	// sessão não existe.
+	for i, productID := range productIDs {
+		productUID, err := parseUUID(productID)
+		if err != nil {
+			return SessionRow{}, nil, err
+		}
+		if _, err := qtx.UpsertSessionProduct(ctx, sqlc.UpsertSessionProductParams{
+			SessionID:    sessionRow.ID,
+			ProductID:    productUID,
+			DisplayOrder: int32(i),
+		}); err != nil {
+			return SessionRow{}, nil, fmt.Errorf("adding product %s to the session product list: %w", productID, err)
+		}
 	}
 
 	// Add the platform to the session — só quando a mídia já é conhecida, o

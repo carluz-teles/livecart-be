@@ -337,6 +337,11 @@ type CreateSessionInput struct {
 	MediaPermalink    string
 	MediaThumbnailURL string
 	MediaCaption      string
+	// ProductIDs é a lista de produtos que ESTA transmissão vende. Vazia é o
+	// caso normal (sessão sem lista vende tudo); preenchida vem do atalho de
+	// publicar post/reel/story pelo LiveCart, onde o lojista escolhe o que a
+	// publicação vende no mesmo formulário em que a publica.
+	ProductIDs []string
 }
 
 type CreateSessionOutput struct {

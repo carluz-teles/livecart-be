@@ -627,6 +627,10 @@ type WebhookEventRow struct {
 // CreateInstagramPostRequest is the HTTP payload to publish an image post and
 // create its post-commerce event in one step.
 type CreateInstagramPostRequest struct {
+	// EventID opcional: informado, a publicação entra como sessão do evento
+	// que já existe; vazio, cria um evento próprio (comportamento antigo).
+	// Quando vem preenchido, endsAt deixa de ser exigido — o prazo é do evento.
+	EventID                string   `json:"eventId"`
 	ImageURL               string   `json:"imageUrl" validate:"required,url"`
 	ImageKey               string   `json:"imageKey"` // storage key, deleted after publish
 	Caption                string   `json:"caption"`
@@ -644,7 +648,18 @@ type CreateInstagramPostRequest struct {
 // CreateInstagramPostInput is the service input to publish an image post and
 // create its post event.
 type CreateInstagramPostInput struct {
-	StoreID                string
+	StoreID string
+	// EventID liga a publicação a um evento QUE JÁ EXISTE, como mais uma
+	// sessão dele. Vazio mantém o comportamento antigo: publicar cria um
+	// evento novo só para aquela publicação.
+	//
+	// É o que faltava no guarda-chuva. Publicar sempre criava evento próprio,
+	// então o post da terça nascia separado da live da segunda e o comprador
+	// ficava com dois carrinhos — exatamente o que o evento existe para
+	// impedir. Com o evento informado, a janela, a expiração e o teto vêm dele
+	// (os campos abaixo são ignorados) porque quem manda nessas regras é o
+	// evento, não a publicação.
+	EventID                string
 	ImageURL               string
 	ImageKey               string // storage key, deleted after publish
 	Caption                string

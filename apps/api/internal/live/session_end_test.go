@@ -155,3 +155,68 @@ func TestEndSessionRejectsSessionFromAnotherEvent(t *testing.T) {
 		t.Fatal("encerrar sessao de outro evento devia falhar")
 	}
 }
+
+// Publicar um post/reel DENTRO de um evento existente grava a lista de produtos
+// junto com a sessão.
+//
+// É o atalho de publicar pelo LiveCart: o lojista escolhe, no mesmo formulário,
+// a mídia e o que aquela publicação vende. Sem a lista nascer com a sessão, a
+// publicação vai ao ar vendendo TUDO — porque sessão sem lista vende tudo — que
+// é o oposto do que ele acabou de escolher.
+func TestCreateSessionGravaProdutosDaPublicacao(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	storeID := seedWindowStore(t, ctx, "publicar-no-evento")
+	svc := newWindowService(nil)
+
+	productIDs := make([]string, 0, 2)
+	for _, kw := range []string{"PUB1", "PUB2"} {
+		var id string
+		if err := testPool.QueryRow(ctx,
+			`INSERT INTO products (store_id, name, keyword, external_source, price, stock, active)
+			 VALUES ($1,$2,$3,'manual',5000,5,true) RETURNING id::text`, storeID, "Produto "+kw, kw,
+		).Scan(&id); err != nil {
+			t.Fatalf("seed produto: %v", err)
+		}
+		productIDs = append(productIDs, id)
+	}
+
+	endsAt := time.Now().Add(48 * time.Hour)
+	evento, err := svc.Create(ctx, CreateLiveInput{
+		StoreID: storeID, Title: "Semana Black", EndsAt: &endsAt,
+	})
+	if err != nil {
+		t.Fatalf("criar evento: %v", err)
+	}
+
+	sessao, err := svc.CreateSession(ctx, CreateSessionInput{
+		EventID:        evento.ID,
+		StoreID:        storeID,
+		Type:           SessionTypePost,
+		Platform:       "instagram",
+		PlatformLiveID: "media-publicada-no-evento",
+		ProductIDs:     productIDs,
+	})
+	if err != nil {
+		t.Fatalf("criar sessao de post no evento: %v", err)
+	}
+
+	list, err := testRepo.ListSessionProducts(ctx, sessao.ID)
+	if err != nil {
+		t.Fatalf("ListSessionProducts: %v", err)
+	}
+	if len(list) != len(productIDs) {
+		t.Fatalf("a publicacao ficou com %d produto(s), quero %d — sem lista ela venderia o catalogo inteiro",
+			len(list), len(productIDs))
+	}
+	for i, p := range list {
+		if p.DisplayOrder != int32(i) {
+			t.Errorf("produto %d veio com display_order %d, quero %d (a ordem escolhida no formulario)", i, p.DisplayOrder, i)
+		}
+	}
+
+	// E continua sendo uma sessão DO evento — não um evento novo.
+	if sessao.EventID != evento.ID {
+		t.Errorf("sessao nasceu no evento %s, esperado %s", sessao.EventID, evento.ID)
+	}
+}
