@@ -628,6 +628,9 @@ type sendNotificationInput struct {
 func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotificationInput) {
 	// Skip if notification service not configured
 	if s.notificationSvc == nil {
+		logger.From(ctx, s.logger).Warn("no DM sent: notification service not configured",
+			zap.String("cart_id", input.CartID),
+		)
 		return
 	}
 
@@ -646,6 +649,18 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 		return
 	}
 	if !shouldNotify {
+		// O carrinho existe, o estoque já foi reservado e o comprador não vai
+		// receber nada. Isso é indistinguível de uma falha quando não aparece
+		// no log — foi o que fez um teste em staging parecer que o webhook não
+		// tinha chegado, quando na verdade o portão é que recusou.
+		//
+		// Info, não Warn: o lojista TEM o direito de desligar a DM em tempo
+		// real, e nesse caso isto é operação normal, não defeito.
+		logger.From(ctx, s.logger).Info("no DM sent: notification disabled for this store",
+			zap.String("cart_id", input.CartID),
+			zap.String("notification_type", string(notifType)),
+			zap.Bool("is_new_cart", input.IsNewCart),
+		)
 		return
 	}
 

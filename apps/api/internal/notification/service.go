@@ -457,28 +457,44 @@ func (s *Service) ShouldNotify(ctx context.Context, storeID string, notifType No
 		return false, err
 	}
 
+	// Os três gatilhos de carrinho passam por getTemplateSettings pelo MESMO
+	// motivo que o grupo da RN-28 lá embaixo: seção ausente quer dizer "a loja
+	// nunca customizou", não "a loja desligou".
+	//
+	// Liam a seção crua e tratavam nil como desligado. Uma loja com
+	// checkout_immediate: null no JSONB parava de mandar o link de checkout —
+	// a promessa central do produto — sem log, sem erro e sem nada na tela: o
+	// comentário virava carrinho, o estoque era reservado no ERP e o comprador
+	// simplesmente nunca recebia a DM. Foi o que aconteceu na loja de staging,
+	// cujo JSONB tem as três chaves de carrinho nulas e as de e-mail intactas.
+	//
+	// A renderização já caía no padrão nesse caso; só o PORTÃO não caía. Ou
+	// seja: a mensagem existia e estava pronta para ser enviada, e o portão a
+	// barrava por falta de uma configuração que ninguém precisava ter feito.
 	switch notifType {
 	case TypeCheckoutImmediate:
-		// Template must be enabled and RealTimeCart must be on
-		if templateSettings.CheckoutImmediate == nil || !templateSettings.CheckoutImmediate.Enabled {
+		section := s.getTemplateSettings(templateSettings, notifType)
+		if section == nil || !section.Enabled {
 			return false, nil
 		}
 		// Only send if real-time cart is enabled
 		return cartSettings.RealTimeCart && isNewCart, nil
 
 	case TypeItemAdded:
-		if templateSettings.ItemAdded == nil {
+		section := s.getTemplateSettings(templateSettings, notifType)
+		if section == nil {
 			return false, nil
 		}
 		// Only send for existing carts when real-time cart is enabled
-		return templateSettings.ItemAdded.Enabled && !isNewCart && cartSettings.RealTimeCart, nil
+		return section.Enabled && !isNewCart && cartSettings.RealTimeCart, nil
 
 	case TypeCheckoutReminder:
-		if templateSettings.CheckoutReminder == nil {
+		section := s.getTemplateSettings(templateSettings, notifType)
+		if section == nil {
 			return false, nil
 		}
 		// Use cart_settings trigger for expiration reminder
-		return templateSettings.CheckoutReminder.Enabled && cartSettings.SendExpirationReminder, nil
+		return section.Enabled && cartSettings.SendExpirationReminder, nil
 
 	case TypeWaitlistNotified,
 		TypeOutOfWindowScheduled, TypeOutOfWindowSessionEnded, TypeOutOfWindowEventEnded,
