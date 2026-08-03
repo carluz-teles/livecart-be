@@ -415,11 +415,9 @@ func (q *Queries) ExpireCart(ctx context.Context, id pgtype.UUID) (Cart, error) 
 
 const extendCartExpiration = `-- name: ExtendCartExpiration :exec
 UPDATE carts
-SET expires_at = GREATEST(
-    COALESCE(expires_at, $2::timestamptz),
-    $2::timestamptz
-)
+SET expires_at = GREATEST(expires_at, $2::timestamptz)
 WHERE id = $1
+  AND expires_at IS NOT NULL
 `
 
 type ExtendCartExpirationParams struct {
@@ -430,6 +428,22 @@ type ExtendCartExpirationParams struct {
 // Empurra expires_at para no mínimo @new_expires_at ("gordura" extra para
 // clientes promovidos da waitlist). GREATEST evita encolher o prazo se o
 // cart já tem um expires_at maior do que o pedido.
+//
+// CARRINHO SEM PRAZO NÃO GANHA UM AQUI. expires_at NULL é a RN-04: o carrinho
+// não expira enquanto o evento roda. É o prazo mais LONGO que existe, não a
+// ausência de prazo — e era exatamente ao contrário que esta query o tratava.
+//
+// O COALESCE que estava aqui virava NULL no valor novo, e o GREATEST comparava
+// o valor novo com ele mesmo: promover alguém da fila CRIAVA um prazo de 30
+// minutos num carrinho que tinha até o fim da campanha. Aconteceu em staging —
+// o comprador foi promovido às 14:10, nunca recebeu o aviso (a DM falhou),
+// adicionou outro produto às 14:39 e perdeu o carrinho inteiro às 14:40, com o
+// evento aberto até dois dias depois.
+//
+// A intenção da regra é dar tempo A MAIS a quem esperou. Encurtar era o oposto.
+// O prazo da FILA continua existindo e continua vencendo: ele mora na linha da
+// waitlist (notified_until) e é ExpireNotifiedWaitlistItem quem o aplica —
+// devolvendo o item ao estoque, não matando o carrinho do comprador.
 func (q *Queries) ExtendCartExpiration(ctx context.Context, arg ExtendCartExpirationParams) error {
 	_, err := q.db.Exec(ctx, extendCartExpiration, arg.ID, arg.NewExpiresAt)
 	return err
