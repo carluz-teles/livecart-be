@@ -6,7 +6,7 @@ import "livecart/apps/api/internal/live"
 // Live/parse logic with no integration dependency, and internal/live is the
 // package that owns comment ingestion. These thin re-exports keep the parser's
 // public surface byte-identical for the integration callers that still reference
-// it (ProcessInstagramComment, resolvePostEventProduct), so no call site changed.
+// it (ProcessInstagramComment), so no call site changed.
 
 // PurchaseIntent is an alias of live.PurchaseIntent (moved with the parser).
 type PurchaseIntent = live.PurchaseIntent

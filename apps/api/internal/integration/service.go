@@ -4411,110 +4411,14 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 
 // =============================================================================
 
-// resolvePostEventProduct applies post-event rules. It returns the product to
-// add (resolved from a single-product promotion when the comment is a bare
-// "EU QUERO"), and handled=true when it already answered the commenter (product
-// not in the promotion, or ambiguous request), in which case the caller saves
-// the comment with resultLabel and stops.
-func (s *Service) resolvePostEventProduct(
-	ctx context.Context,
-	event *live.EventOutput,
-	sessionID string,
-	input ProcessInstagramCommentInput,
-	intent *PurchaseIntent,
-	matched *ProductRow,
-) (resolved *ProductRow, handled bool, resultLabel string) {
-	whitelist, err := s.liveService.ListSessionWhitelist(ctx, sessionID)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to load session promotion products", zap.Error(err))
-		return matched, false, ""
-	}
-
-	// N2 — semântica ÚNICA em todo o sistema: lista VAZIA libera TODOS os
-	// produtos da loja. Até aqui a ingestão fazia o oposto do checkout: sem
-	// whitelist, todo produto casado caía em 'not_in_promo' e o comprador
-	// recebia "não está disponível nesta promoção" — o lojista que não
-	// configurava produto nenhum simplesmente não vendia pelo post.
-	openSession := len(whitelist) == 0
-
-	inPromo := func(productID string) bool {
-		if openSession {
-			return true
-		}
-		for _, w := range whitelist {
-			if w.ProductID == productID {
-				return true
-			}
-		}
-		return false
-	}
-
-	// Case A: a code matched a real product.
-	if matched != nil {
-		if inPromo(matched.ID) {
-			if matched.Stock <= 0 {
-				s.replyPostOutOfStock(ctx, event, input, matched.Name, whitelist)
-				return nil, true, "out_of_stock"
-			}
-			return matched, false, "" // proceed to the normal cart flow
-		}
-		s.replyPostUnavailable(ctx, event, input, whitelist)
-		return nil, true, "not_in_promo"
-	}
-
-	// Case B: no product matched. A typed-but-unknown code is "unavailable";
-	// a bare trigger with one promo product auto-adds it, with many it asks.
-	if codes := ExtractPossibleKeywords(input.Text); len(codes) > 0 {
-		s.replyPostUnavailable(ctx, event, input, whitelist)
-		return nil, true, "not_in_promo"
-	}
-
-	// Sessão sem whitelist não tem lista de onde escolher: pedir a palavra-chave
-	// é a única resposta possível. Ficar em silêncio aqui era o caminho que
-	// produzia 'no_product' sem responder nada ao comprador.
-	if openSession {
-		s.replyPostChooseProduct(ctx, event, input, nil)
-		return nil, true, "needs_keyword"
-	}
-
-	available := availablePromoProducts(whitelist)
-	switch len(available) {
-	case 1:
-		p, err := s.repo.GetProductByID(ctx, event.StoreID, available[0].ProductID)
-		if err == nil && p != nil {
-			return p, false, ""
-		}
-		return nil, true, "no_product"
-	case 0:
-		// No available products: if the promotion has products but all are out
-		// of stock, tell the buyer; otherwise stay silent.
-		if len(whitelist) > 0 {
-			s.replyPostOutOfStock(ctx, event, input, "", whitelist)
-			return nil, true, "out_of_stock"
-		}
-		return nil, true, "no_product"
-	default:
-		s.replyPostChooseProduct(ctx, event, input, available)
-		return nil, true, "needs_keyword"
-	}
-}
-
-// savePostComment persists a post comment that was fully handled by the rules.
-func (s *Service) savePostComment(ctx context.Context, sessionID, eventID string, input ProcessInstagramCommentInput, result string) {
-	if _, err := s.repo.CreateLiveComment(ctx, CreateLiveCommentParams{
-		SessionID:         sessionID,
-		EventID:           eventID,
-		Platform:          "instagram",
-		PlatformCommentID: input.CommentID,
-		PlatformUserID:    input.UserID,
-		PlatformHandle:    input.Username,
-		Text:              input.Text,
-		HasPurchaseIntent: true,
-		Result:            result,
-	}); err != nil {
-		logger.From(ctx, s.logger).Error("failed to save post comment", zap.Error(err))
-	}
-}
+// A CÓPIA da ingestão de post/story que morava aqui FOI REMOVIDA
+// (resolvePostEventProduct, savePostComment e as respostas replyPost*). Era
+// código órfão: quem processa comentário é live.Service.ProcessInstagramComment,
+// chamado logo acima — este pacote só entrega o webhook.
+//
+// A única coisa que a cópia tinha de melhor que o original era o bypass
+// "lista vazia = vende tudo"; ele foi PORTADO para live/comment.go
+// (resolvePostEventProduct) antes desta remoção, e é lá que a regra vive agora.
 
 // replyOutOfWindow responde quem comentou fora da janela de venda (RN-28,
 // gatilho 1). Um funil para os três sub-casos, porque a única coisa que muda
@@ -4623,22 +4527,6 @@ func (s *Service) existingCartLink(ctx context.Context, eventID, platformUserID 
 	return fmt.Sprintf("%s/cart/%s", config.FrontendURL.StringOr("http://localhost:3000"), token)
 }
 
-// replyPostOutOfStock privately tells the buyer the product is sold out and
-// lists what's still available (when there is anything).
-func (s *Service) replyPostOutOfStock(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, productName string, whitelist []live.EventProductOutput) {
-	available := availablePromoProducts(whitelist)
-	var msg string
-	switch {
-	case productName != "" && len(available) > 0:
-		msg = fmt.Sprintf("Oi @%s! O produto %s esgotou. 😕\nAinda temos:\n%s\n\nComente o código do que você quer. 💜", input.Username, productName, promoProductLines(available))
-	case productName != "":
-		msg = fmt.Sprintf("Oi @%s! O produto %s esgotou. 😕", input.Username, productName)
-	default:
-		msg = fmt.Sprintf("Oi @%s! Os produtos desta promoção esgotaram. 😕 Fique de olho nas próximas! 💜", input.Username)
-	}
-	s.sendPostReply(ctx, event, input, msg)
-}
-
 // privateReplyWindow é o limite do private reply do Instagram: 7 dias a contar
 // do comentário, e uma única vez por comentário (N9/RN-37). Depois disso a
 // mensagem não sai de qualquer forma — tentar é só gastar chamada de API para
@@ -4654,6 +4542,12 @@ const privateReplyWindow = notification.PrivateReplyWindow
 // reply. Sem carimbo de tempo (ts <= 0) responde false: erra para o lado de
 // TENTAR enviar — silenciar por falta de dado seria pior do que uma chamada
 // perdida.
+//
+// ATENÇÃO: o último chamador de produção saiu junto com a cópia órfã da
+// ingestão de post/story (acima). A ingestão VIVA, em live/comment.go, responde
+// ao comprador sem passar por este guard — a RN-37 vale hoje só no caminho de
+// notificação. Fica aqui, com o teste, porque é a definição do prazo; ligar o
+// guard em live é fatia própria, não desta rodada.
 //
 // Normaliza ms→s aqui também, e não só na borda (E41): este é O guard, e o bug
 // que ele deixou passar por meses foi exatamente um carimbo em milissegundos
@@ -4680,100 +4574,6 @@ func parseGraphTimestamp(v string) int64 {
 		}
 	}
 	return 0
-}
-
-// sendPostReply privately answers the buyer. For a comment-channel event it
-// replies on the comment thread (which Instagram delivers as a private reply);
-// for a story (Channel="dm") it messages the buyer's IGSID directly, since a
-// story reply arrives as a DM and has no public comment to answer.
-//
-// É o funil ÚNICO de resposta ao comprador neste pipeline, e por isso é aqui
-// que a janela de 7 dias da RN-37 vale — para todas as respostas, não só a de
-// campanha encerrada. Webhook e polling passam pelos dois pelo mesmo lugar,
-// que é o que faz os dois concordarem no número (hoje o código prometia 2 dias
-// e entregava 0).
-func (s *Service) sendPostReply(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, msg string) {
-	if input.Channel == "dm" {
-		if err := s.SendInstagramDM(ctx, event.StoreID, input.UserID, msg); err != nil {
-			logger.From(ctx, s.logger).Warn("failed to send story DM reply",
-				zap.String("event_id", event.ID),
-				zap.String("user_id", input.UserID),
-				zap.Error(err),
-			)
-		}
-		return
-	}
-	// RN-37: fora da janela de 7 dias o private reply não sai. O comentário já
-	// foi persistido classificado pelo chamador — o que se perde é a tentativa
-	// de envio, não o registro.
-	if commentTooOldToReply(input.Timestamp, time.Now()) {
-		logger.From(ctx, s.logger).Info("post reply skipped: comment past the 7-day private reply window",
-			zap.String("event_id", event.ID),
-			zap.String("comment_id", input.CommentID),
-			zap.Int64("comment_ts", input.Timestamp),
-		)
-		return
-	}
-	if err := s.ReplyToInstagramComment(ctx, event.StoreID, input.CommentID, msg); err != nil {
-		logger.From(ctx, s.logger).Warn("failed to send post reply",
-			zap.String("event_id", event.ID),
-			zap.String("comment_id", input.CommentID),
-			zap.Error(err),
-		)
-	}
-}
-
-// availablePromoProducts filters the promotion to active, in-stock products.
-func availablePromoProducts(whitelist []live.EventProductOutput) []live.EventProductOutput {
-	out := make([]live.EventProductOutput, 0, len(whitelist))
-	for _, w := range whitelist {
-		if w.ProductActive && w.Stock > 0 {
-			out = append(out, w)
-		}
-	}
-	return out
-}
-
-// promoProductLines renders "• CODE — Name" lines for a list of products.
-func promoProductLines(products []live.EventProductOutput) string {
-	var b strings.Builder
-	for _, p := range products {
-		b.WriteString(fmt.Sprintf("• %s — %s\n", p.Keyword, p.Name))
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// replyPostUnavailable privately tells the commenter the product isn't in this
-// promotion and lists what is available.
-func (s *Service) replyPostUnavailable(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, whitelist []live.EventProductOutput) {
-	available := availablePromoProducts(whitelist)
-	var msg string
-	if len(available) == 0 {
-		msg = fmt.Sprintf("Oi @%s! Esse produto não está disponível nesta promoção no momento. 😕", input.Username)
-	} else {
-		msg = fmt.Sprintf(
-			"Oi @%s! Esse produto não está disponível nesta promoção. 😕\nDisponíveis nesta publicação:\n%s\n\nComente o código do produto que você quer. 💜",
-			input.Username, promoProductLines(available),
-		)
-	}
-	s.sendPostReply(ctx, event, input, msg)
-}
-
-// replyPostChooseProduct privately asks the commenter to specify which product
-// (used when a bare "EU QUERO" is posted on a multi-product promotion).
-func (s *Service) replyPostChooseProduct(ctx context.Context, event *live.EventOutput, input ProcessInstagramCommentInput, available []live.EventProductOutput) {
-	// Sessão sem whitelist (N2): não há lista para oferecer, mas o comprador
-	// precisa de uma resposta — "nunca fica em silêncio".
-	if len(available) == 0 {
-		s.sendPostReply(ctx, event, input,
-			fmt.Sprintf("Oi @%s! Pra adicionar ao carrinho, comente o código do produto que você quer. 💜", input.Username))
-		return
-	}
-	msg := fmt.Sprintf(
-		"Oi @%s! Pra adicionar ao carrinho, comente o código do produto que você quer:\n%s 💜",
-		input.Username, promoProductLines(available),
-	)
-	s.sendPostReply(ctx, event, input, msg)
 }
 
 // =============================================================================
