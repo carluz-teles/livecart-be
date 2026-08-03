@@ -1248,13 +1248,25 @@ func (s *Service) handleInstagramCallback(ctx context.Context, input OAuthCallba
 		expiresIn = 3600
 	}
 
-	// Step 3: Get user profile info (username)
-	username, err := s.getInstagramUserProfile(ctx, longLivedToken)
+	// Step 3: Get user profile info (username + o id da conta profissional)
+	//
+	// São DOIS ids diferentes e a diferença é o bug: `instagramUserID` acima vem
+	// da troca do código e é app-scoped (28139…); `accountID` aqui é o id da
+	// conta profissional (17841…), que é o que a Meta manda em entry.id de todo
+	// webhook. Gravar o primeiro como "instagram_user_id" fazia a resolução de
+	// loja por conta não achar nada — toda DM de comprador caía em "no
+	// integration found" e era descartada em silêncio.
+	username, accountID, err := s.getInstagramUserProfile(ctx, longLivedToken)
 	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to get Instagram username",
+		logger.From(ctx, s.logger).Warn("failed to get Instagram profile",
 			zap.Error(err),
 		)
 		username = instagramUserID // fallback to user ID
+	}
+	// Sem o perfil, o app-scoped é o único id que temos. Continua não casando
+	// com o webhook, mas não piora nada — e o fallback abaixo cobre o caso.
+	if accountID == "" {
+		accountID = instagramUserID
 	}
 
 	// Create credentials
@@ -1266,6 +1278,16 @@ func (s *Service) handleInstagramCallback(ctx context.Context, input OAuthCallba
 			"instagram_user_id": instagramUserID,
 			"username":          username,
 		},
+	}
+
+	// O metadata é a fonte da resolução de loja por conta, então ele guarda o id
+	// que o WEBHOOK usa. O app-scoped fica ao lado, com nome próprio, porque é o
+	// que a Graph aceita em algumas chamadas — perder um para ganhar o outro só
+	// trocaria de bug.
+	igMetadata := map[string]any{
+		"instagram_user_id":       accountID,
+		"instagram_app_scoped_id": instagramUserID,
+		"username":                username,
 	}
 
 	// Encrypt credentials
@@ -1290,9 +1312,33 @@ func (s *Service) handleInstagramCallback(ctx context.Context, input OAuthCallba
 		if err != nil {
 			return nil, fmt.Errorf("updating status: %w", err)
 		}
+		// O metadata TAMBÉM é reescrito ao reconectar.
+		//
+		// Antes só credenciais e status eram atualizados, então uma integração
+		// gravada com o id errado ficava errada para sempre: reconectar, que é o
+		// que qualquer um tenta primeiro, não tocava no campo que a resolução de
+		// loja lê. Preserva connected_at — a data da PRIMEIRA conexão não muda
+		// porque o lojista reconectou.
+		merged := map[string]any{}
+		for k, v := range existing.Metadata {
+			merged[k] = v
+		}
+		for k, v := range igMetadata {
+			merged[k] = v
+		}
+		if _, ok := merged["connected_at"]; !ok {
+			merged["connected_at"] = time.Now()
+		}
+		if err := s.repo.UpdateMetadata(ctx, existing.ID, merged); err != nil {
+			return nil, fmt.Errorf("updating instagram metadata: %w", err)
+		}
 		integrationID = existing.ID
 	} else {
 		// Create new integration
+		newMetadata := map[string]any{"connected_at": time.Now()}
+		for k, v := range igMetadata {
+			newMetadata[k] = v
+		}
 		row, err := s.repo.Create(ctx, CreateIntegrationParams{
 			StoreID:        storeID,
 			Type:           "social",
@@ -1300,11 +1346,7 @@ func (s *Service) handleInstagramCallback(ctx context.Context, input OAuthCallba
 			Status:         "active",
 			Credentials:    encryptedCreds,
 			TokenExpiresAt: &tokenExpiresAt,
-			Metadata: map[string]any{
-				"instagram_user_id": instagramUserID,
-				"username":          username,
-				"connected_at":      time.Now(),
-			},
+			Metadata:       newMetadata,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("creating integration: %w", err)
@@ -1471,7 +1513,7 @@ func (s *Service) exchangeInstagramLongLivedToken(ctx context.Context, appSecret
 }
 
 // getInstagramUserProfile fetches the user's Instagram username.
-func (s *Service) getInstagramUserProfile(ctx context.Context, accessToken string) (string, error) {
+func (s *Service) getInstagramUserProfile(ctx context.Context, accessToken string) (username, accountID string, err error) {
 	profileURL := fmt.Sprintf(
 		"https://graph.instagram.com/me?fields=user_id,username&access_token=%s",
 		accessToken,
@@ -1479,13 +1521,13 @@ func (s *Service) getInstagramUserProfile(ctx context.Context, accessToken strin
 
 	req, err := http.NewRequestWithContext(ctx, "GET", profileURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("creating profile request: %w", err)
+		return "", "", fmt.Errorf("creating profile request: %w", err)
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("sending profile request: %w", err)
+		return "", "", fmt.Errorf("sending profile request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -1496,7 +1538,7 @@ func (s *Service) getInstagramUserProfile(ctx context.Context, accessToken strin
 			zap.Int("status", resp.StatusCode),
 			zap.String("body", string(body)),
 		)
-		return "", fmt.Errorf("profile fetch failed: status %d", resp.StatusCode)
+		return "", "", fmt.Errorf("profile fetch failed: status %d", resp.StatusCode)
 	}
 
 	var profileResp struct {
@@ -1504,10 +1546,15 @@ func (s *Service) getInstagramUserProfile(ctx context.Context, accessToken strin
 		Username string `json:"username"`
 	}
 	if err := json.Unmarshal(body, &profileResp); err != nil {
-		return "", fmt.Errorf("parsing profile response: %w", err)
+		return "", "", fmt.Errorf("parsing profile response: %w", err)
 	}
 
-	return profileResp.Username, nil
+	// user_id é o id da CONTA PROFISSIONAL (17841…) — o mesmo que a Meta manda
+	// em entry.id nos webhooks. É diferente do id devolvido pela troca do
+	// código, que é app-scoped (28139…) e não aparece em webhook nenhum.
+	// Buscávamos o campo e descartávamos, guardando o app-scoped como
+	// `instagram_user_id`: a resolução de loja por conta nunca achava nada.
+	return profileResp.Username, profileResp.UserID, nil
 }
 
 // RefreshInstagramToken SAIU: era uma segunda implementacao do

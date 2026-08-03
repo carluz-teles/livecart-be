@@ -289,14 +289,22 @@ func (r *Repository) GetByProvider(ctx context.Context, storeID, integrationType
 	return r.toIntegrationRow(row), nil
 }
 
-// GetByInstagramUserID returns an active Instagram integration by the Instagram user ID stored in metadata.
+// GetByInstagramUserID returns an active Instagram integration by the Instagram
+// account ID that the webhook carries in entry.id.
+//
+// Casa contra os DOIS ids porque a Meta tem dois e nós já gravamos o errado: o
+// da troca do código é app-scoped (28139…) e o da conta profissional é o que
+// aparece no webhook (17841…). Toda integração conectada antes da correção tem
+// só o app-scoped gravado, e sem este OR ela continuaria sem resolver até o
+// lojista reconectar — ou seja, a correção do código não chegaria em ninguém.
 func (r *Repository) GetByInstagramUserID(ctx context.Context, instagramUserID string) (*IntegrationRow, error) {
 	query := `
 		SELECT id, store_id, type, provider, status, credentials, token_expires_at, metadata, last_synced_at, created_at
 		FROM integrations
 		WHERE provider = 'instagram'
 		  AND status = 'active'
-		  AND metadata->>'instagram_user_id' = $1
+		  AND (metadata->>'instagram_user_id' = $1
+		       OR metadata->>'instagram_app_scoped_id' = $1)
 		LIMIT 1
 	`
 

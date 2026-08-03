@@ -241,6 +241,23 @@ func (h *WebhookHandler) processLiveComment(c *fiber.Ctx, entry InstagramEntry, 
 
 // processInstagramMessage processes a messaging event (DM)
 func (h *WebhookHandler) processInstagramMessage(c *fiber.Ctx, entry InstagramEntry, msg InstagramMessage, rawBody []byte, sigValid bool) error {
+	// O array `messaging` não carrega só mensagem: a Meta manda também recibo de
+	// leitura, reação e confirmação de entrega no MESMO array, e esses eventos
+	// não têm o objeto `message`. Sem o objeto, o unmarshal preenche o zero
+	// value e o evento seguia adiante como se fosse uma DM de texto vazio —
+	// resultado: dois "no integration found for instagram account" no log logo
+	// depois de cada DM enviada, que é o comprador ABRINDO a mensagem.
+	//
+	// O `mid` é o discriminador certo porque toda mensagem de verdade tem um, e
+	// nenhum dos outros eventos tem.
+	if msg.Message.MID == "" {
+		logger.From(c.Context(), h.logger).Debug("skipping non-message instagram messaging event",
+			zap.String("account_id", entry.ID),
+			zap.String("sender_id", msg.Sender.ID),
+		)
+		return nil
+	}
+
 	logger.From(c.Context(), h.logger).Info("processing instagram message",
 		zap.String("account_id", entry.ID),
 		zap.String("sender_id", msg.Sender.ID),
