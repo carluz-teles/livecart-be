@@ -78,6 +78,9 @@ func (h *Handler) registerUnder(router fiber.Router, prefix string) {
 	// depois" que a sessão criada sem mídia prometia, e a única forma correta
 	// numa campanha com mais de uma transmissão.
 	g.Post("/:id/sessions/:sessionId/platforms", h.LinkSessionMedia)
+	// Encerra a sessão SEM encerrar o evento — ver session_end.go. É a
+	// contrapartida de /:id/end, que é do evento e finaliza os carrinhos.
+	g.Post("/:id/sessions/:sessionId/end", h.EndSession)
 
 	// Platform aggregation (on sessions) — rota LEGADA por evento: resolve a
 	// sessão sozinha (a mais recente no ar). É o crash recovery de live; numa
