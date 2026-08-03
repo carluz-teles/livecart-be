@@ -9,6 +9,7 @@ import (
 
 	"github.com/hibiken/asynq"
 	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
 )
 
 // Client publishes canonical events onto the asynq queue. It is used by the
@@ -20,15 +21,23 @@ type Client struct {
 	// inspector existe só para Reschedule: mover um agendamento ETA exige
 	// APAGAR a task pendente antes de re-enfileirar (ver Reschedule).
 	inspector *asynq.Inspector
+	// logger registra o enfileiramento dos scheduled-commands ETA (Schedule),
+	// que NÃO passam pelo outbox/relay — sem isto eles entram na fila sem rastro.
+	// Os eventos de domínio (via outbox) são logados pelo Relay no enqueue.
+	logger *zap.Logger
 }
 
 // NewClient builds an event publisher backed by the given Redis connection.
 // Callers pass a RedisConnOpt (not a bare addr) so managed Redis with a
 // password/TLS — e.g. Railway — works, not just local no-auth Redis.
-func NewClient(redisOpt asynq.RedisConnOpt) *Client {
+func NewClient(redisOpt asynq.RedisConnOpt, logger *zap.Logger) *Client {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &Client{
 		inner:     asynq.NewClient(redisOpt),
 		inspector: asynq.NewInspector(redisOpt),
+		logger:    logger.Named("events-client"),
 	}
 }
 
@@ -106,6 +115,17 @@ func (c *Client) Schedule(ctx context.Context, processAt time.Time, name Name, t
 	if err != nil {
 		return fmt.Errorf("scheduling %s at %s: %w", name, processAt.UTC().Format(time.RFC3339), err)
 	}
+	// Scheduled-commands (cart.expire, session.publish, event.window_close, ...)
+	// não passam pelo Relay, então este é o único ponto onde a task "nasce" na
+	// fila. Correlaciona com o "event observed" do consumidor via trace_id.
+	c.logger.Info("command scheduled",
+		zap.String("event", string(name)),
+		zap.String("task_id", taskID),
+		zap.String("queue", QueueNormal),
+		zap.Time("process_at", processAt.UTC()),
+		zap.String("source", string(SourceInternal)),
+		zap.String("trace_id", env.TraceID),
+	)
 	return nil
 }
 

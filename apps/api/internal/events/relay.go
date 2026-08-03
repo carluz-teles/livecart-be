@@ -143,6 +143,18 @@ func (r *Relay) sweep() {
 			r.logger.Error("outbox sweep: mark published", zap.Error(err))
 			continue
 		}
+		// Nasce aqui na fila o rastro de cada evento de domínio. Correlaciona com
+		// o "event observed" do consumidor via event_id/trace_id (mede latência
+		// enqueue→processamento). trace_id vem do envelope (o ctx do sweep é novo).
+		r.logger.Info("event enqueued",
+			zap.String("event", string(env.Name)),
+			zap.String("event_id", env.EventID),
+			zap.String("source", string(env.Source)),
+			zap.String("dedup_key", env.DedupKey),
+			zap.String("queue", env.Queue()),
+			zap.Int("schema_version", env.SchemaVersion),
+			zap.String("trace_id", env.TraceID),
+		)
 		published++
 	}
 

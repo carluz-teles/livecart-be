@@ -73,7 +73,7 @@ func TestOutbox_RelayDelivers(t *testing.T) {
 	defer srv.Shutdown()
 
 	// Relay drains the outbox to Redis.
-	client := NewClient(asynq.RedisClientOpt{Addr: addr})
+	client := NewClient(asynq.RedisClientOpt{Addr: addr}, zap.NewNop())
 	defer client.Close()
 	relay := NewRelay(RelayConfig{Pool: pool, Client: client, Logger: zap.NewNop(), Interval: 200 * time.Millisecond})
 	relay.Start()

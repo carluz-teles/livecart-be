@@ -982,7 +982,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		}
 		redisOpt = parsed
 	}
-	eventsClient := events.NewClient(redisOpt)
+	eventsClient := events.NewClient(redisOpt, log)
 	eventsServer := events.NewServer(events.ServerConfig{RedisOpt: redisOpt, Logger: log})
 	if integrationSvc != nil {
 		// Inverted comment flow: the webhook dispatches comment.received; the

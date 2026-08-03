@@ -12,6 +12,7 @@ import (
 	"github.com/hibiken/asynq"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.uber.org/zap"
 )
 
 // redisAddr returns the address to test against, skipping the test when no
@@ -36,7 +37,7 @@ func redisAddr(t *testing.T) string {
 func TestPipeline_EnqueueConsume(t *testing.T) {
 	addr := redisAddr(t)
 
-	client := NewClient(asynq.RedisClientOpt{Addr: addr})
+	client := NewClient(asynq.RedisClientOpt{Addr: addr}, zap.NewNop())
 	defer client.Close()
 
 	got := make(chan Envelope, 1)
@@ -90,7 +91,7 @@ func TestPipeline_TracePropagation(t *testing.T) {
 	// A real SDK provider generates valid trace/span ids (no exporter needed).
 	otel.SetTracerProvider(sdktrace.NewTracerProvider())
 
-	client := NewClient(asynq.RedisClientOpt{Addr: addr})
+	client := NewClient(asynq.RedisClientOpt{Addr: addr}, zap.NewNop())
 	defer client.Close()
 
 	got := make(chan Envelope, 1)
