@@ -119,6 +119,14 @@ type Service struct {
 	publishScheduler    PublishScheduler
 	logger              *zap.Logger
 
+	// subscriptionEnsured guarda as lojas cuja inscrição de webhook já foi
+	// garantida NESTE processo, para que o sweep não repita a chamada a cada
+	// 20s. Memória, e não banco, de propósito: reinscrever é idempotente na
+	// Meta, então perder o registro num deploy custa uma chamada por loja com
+	// live no ar — e é justamente num deploy (lista de campos nova) que
+	// reinscrever é desejável.
+	subscriptionEnsured sync.Map
+
 	// erpProviderFactory lets the finalisation state-machine tests inject a
 	// scripted ERP provider. nil in production (falls back to getERPProvider,
 	// which builds the real Tiny client from the integration credentials).
@@ -5859,6 +5867,21 @@ func (s *Service) endStaleLiveSessionsOnce(ctx context.Context) {
 
 	for storeID, storeMedias := range byStore {
 		storeCtx := logger.WithStore(ctx, storeID, "")
+
+		// A inscrição de webhook é garantida AQUI, e não só no OAuth.
+		//
+		// Ela rodava em dois lugares: no callback do OAuth e num endpoint que
+		// alguém precisa lembrar de chamar. Consequência: toda loja conectada
+		// antes de uma mudança na lista de campos ficava com a lista velha para
+		// sempre — foi assim que `live_comments` faltou na conta de uma loja
+		// que vende por live, sem ninguém ter como perceber.
+		//
+		// Este é o momento certo: existe uma transmissão NO AR desta loja, ou
+		// seja, é exatamente quando a captura precisa estar de pé. Uma vez por
+		// loja por processo (ver subscriptionEnsured), então o custo é uma
+		// chamada por lojista que fez live desde o último deploy.
+		s.ensureWebhookSubscriptionOnce(storeCtx, storeID)
+
 		provider, err := s.resolveInstagramSocialProvider(storeCtx, storeID)
 		if err != nil {
 			continue
@@ -5901,5 +5924,26 @@ func (s *Service) endStaleLiveSessionsOnce(ctx context.Context) {
 				zap.String("media_id", m.MediaID),
 			)
 		}
+	}
+}
+
+// ensureWebhookSubscriptionOnce garante, uma vez por loja por processo, que a
+// conta do Instagram está inscrita na lista ATUAL de campos de webhook.
+//
+// Best-effort e silencioso no sucesso: quem chama está no meio de um sweep de
+// 20s e não pode ser derrubado por isto. A falha vira Warn porque tem
+// consequência real — sem inscrição a Meta não entrega nada e a captura passa a
+// depender só do polling, que salva o pedido mas não consegue avisar o
+// comprador.
+func (s *Service) ensureWebhookSubscriptionOnce(ctx context.Context, storeID string) {
+	if _, done := s.subscriptionEnsured.LoadOrStore(storeID, struct{}{}); done {
+		return
+	}
+	if err := s.SubscribeInstagramWebhooks(ctx, storeID); err != nil {
+		// Solta o registro: uma falha transitória (token vencendo, Graph fora)
+		// merece nova tentativa no próximo sweep, não desistir até o deploy.
+		s.subscriptionEnsured.Delete(storeID)
+		logger.From(ctx, s.logger).Warn("failed to ensure instagram webhook subscription for a store with a live on air",
+			zap.String("store_id", storeID), zap.Error(err))
 	}
 }
