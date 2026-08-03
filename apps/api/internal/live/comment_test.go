@@ -603,3 +603,60 @@ func TestPostSessionWithEmptyListSellsAnything(t *testing.T) {
 		}
 	})
 }
+
+// Um REEL respeita a lista da transmissão, igual a um post e a um story.
+//
+// Reel entra no sistema por DOIS caminhos que EXIGEM pelo menos um produto
+// (publicar pelo LiveCart, integration.publishInstagramReelEvent, e mapear uma
+// publicação existente com type='reel'), e desde a 000122 a sessão diz mesmo
+// 'reel' em vez de se achatar em 'post'. Se a ingestão não reconhecer o tipo, a
+// barreira que o lojista acabou de configurar no formulário some em silêncio: o
+// reel passa a vender o catálogo inteiro.
+//
+// É exatamente o modo de falha que IsPostCommerceSessionType documenta
+// ("esquecer 'reel' aqui faria todo Reel perder as regras em silêncio").
+func TestReelHonoursItsProductList(t *testing.T) {
+	ctx := context.Background()
+
+	repo := newFakeIngestRepo()
+	repo.products["1001"] = &ProductRow{ID: "pX", Keyword: "1001", Price: 1000, Stock: 5, Name: "Vestido"}
+	repo.products["2002"] = &ProductRow{ID: "pY", Keyword: "2002", Price: 2000, Stock: 5, Name: "Bolsa"}
+
+	core := (&fakeCommentCore{
+		session:   &SessionOutput{ID: "sess-reel", Type: SessionTypeReel},
+		event:     &EventOutput{ID: "ev1", StoreID: "store1", Status: "active"},
+		addResult: AddToCartOutput{CartID: "cart1", CartToken: "tok1", IsNewCart: true},
+	}).scriptWhitelist(SessionProductOutput{
+		ProductID: "pX", ProductActive: true, Stock: 5, Keyword: "1001", Name: "Vestido",
+	})
+	s := newCommentTestService(repo, core)
+	s.stockReserver = &fakeStockReserver{}
+	social := &fakeSocialReplier{}
+	s.socialReplier = social
+
+	// O produto de FORA da lista tem de ser recusado, com resposta ao comprador.
+	if err := s.ProcessInstagramComment(ctx, ProcessInstagramCommentInput{
+		CommentID: "c1", MediaID: "m1", UserID: "u1", Username: "ana", Text: "quero 2002",
+	}); err != nil {
+		t.Fatalf("ProcessInstagramComment() error = %v", err)
+	}
+	if len(core.addCalls) != 0 {
+		t.Errorf("AddToCart = %+v, quero nenhum: 2002 nao esta na lista deste reel", core.addCalls)
+	}
+	if len(repo.createdComments) != 1 || repo.createdComments[0].Result != "not_in_promo" {
+		t.Errorf("resultado = %+v, quero [not_in_promo]", repo.createdComments)
+	}
+	if len(social.replies) != 1 {
+		t.Errorf("respostas = %d, quero 1: o comprador precisa saber que o produto nao esta na promocao", len(social.replies))
+	}
+
+	// E o produto DE DENTRO da lista continua entrando.
+	if err := s.ProcessInstagramComment(ctx, ProcessInstagramCommentInput{
+		CommentID: "c2", MediaID: "m1", UserID: "u1", Username: "ana", Text: "quero 1001",
+	}); err != nil {
+		t.Fatalf("ProcessInstagramComment() error = %v", err)
+	}
+	if len(core.addCalls) != 1 || core.addCalls[0].ProductID != "pX" {
+		t.Fatalf("AddToCart = %+v, quero um para pX", core.addCalls)
+	}
+}

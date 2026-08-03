@@ -327,7 +327,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	//
 	// A lista consultada é a DESTA transmissão, não a do evento: é o que permite
 	// que o post e o story da mesma campanha tenham barreiras diferentes.
-	if isPostCommerce(session.Type) && hasPurchaseIntent {
+	if IsPostCommerceSessionType(session.Type) && hasPurchaseIntent {
 		resolved, handled, resultLabel := s.resolvePostEventProduct(ctx, event, session, input, intent, product)
 		if handled {
 			s.savePostComment(ctx, session.ID, event.ID, input, resultLabel)
@@ -761,12 +761,14 @@ func (s *Service) sendMaxQuantityReply(ctx context.Context, storeID, channel, co
 // POST-COMMERCE COMMENT RULES
 // =============================================================================
 
-// isPostCommerce reports whether an event type uses the post-commerce intent
-// rules (whitelisted products, single-product auto-add, window gates). Both feed
-// posts and Stories share these rules — only the reply channel differs.
-func isPostCommerce(eventType string) bool {
-	return eventType == "post" || eventType == "story"
-}
+// A cópia local de isPostCommerce SAIU. Ela dizia "post ou story" e esquecia
+// 'reel' — exatamente o modo de falha que IsPostCommerceSessionType (session_type.go)
+// documenta. Enquanto o tipo vinha do EVENTO isso não aparecia, porque o
+// vocabulário antigo achatava reel em post ao gravar live_events.type; desde a
+// 000122 a sessão diz mesmo 'reel', e a cópia passou a deixar todo Reel sem
+// barreira nenhuma: os dois caminhos que criam um reel EXIGEM pelo menos um
+// produto, gravavam a lista na sessão, e a ingestão ignorava a lista e vendia o
+// catálogo inteiro. Uma regra, um lugar.
 
 // resolvePostEventProduct applies post-event rules. It returns the product to
 // add (resolved from a single-product promotion when the comment is a bare
