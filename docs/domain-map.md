@@ -49,7 +49,7 @@ onde o código atual não respeita a fronteira.
   expiração (ETA); reopen/cancel. **Termina no pagamento** (ver split Cart/Order).
 - **Possui:** `carts` (campos de intenção), `cart_items`, `cart_mutations`,
   `cart_initial_items`, `store_order_counters` (short_id), `blocked_handles`.
-- **Produz:** `cart.item_added`, `cart.checkout_armed`, `cart.reopened`,
+- **Produz:** `cart.item_added`, `cart.checkout_armed`,
   `cart.expired`, `cart.cancelled`.
 - **Hoje:** espalhado por `live` (criação na live), `checkout` (mutações),
   `integration` (expiração/estoque).

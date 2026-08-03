@@ -1331,7 +1331,7 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 
 // emitCartEvent writes a canonical cart lifecycle event to the outbox within
 // the caller's transaction. dedupKey may be empty for events that legitimately
-// repeat for the same cart (e.g. cart.reopened).
+// repeat for the same cart.
 func emitCartEvent(ctx context.Context, q *sqlc.Queries, name events.Name, cartID, eventID, sessionID, dedupKey string) error {
 	payload, err := json.Marshal(struct {
 		CartID    string `json:"cart_id"`

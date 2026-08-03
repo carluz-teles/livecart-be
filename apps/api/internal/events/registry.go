@@ -31,10 +31,10 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger) {
 	// CartCancellationReverted NÃO entra aqui: a composition root (main.newApp)
 	// registra o reactor que avisa o lojista no sino do painel. Registrar nos
 	// dois lugares faria o asynq entrar em pânico por padrão duplicado.
-	// CartCheckoutArmed, CartReopened, CartExpired and CartCancelled are registered
-	// by the composition root (main.newApp) with domain handlers: checkout_armed/
-	// reopened arm the cart.expire ETA timer (where expires_at is set — live carts
-	// have no window until the event ends); cart.expired drives the ERP reversal
+	// CartCheckoutArmed, CartExpired and CartCancelled are registered by the
+	// composition root (main.newApp) with domain handlers: checkout_armed arms
+	// the cart.expire ETA timer (where expires_at is set — live carts have no
+	// window until the event ends); cart.expired drives the ERP reversal
 	// reactor; cart.cancelled drives the Order → 'cancelled' reactor.
 	// Registering them here too would panic asynq on a duplicate pattern.
 

@@ -41,7 +41,6 @@ const (
 	CartItemAdded     Name = "cart.item_added"
 	CartCheckoutArmed Name = "cart.checkout_armed"
 	CartExpired       Name = "cart.expired"
-	CartReopened      Name = "cart.reopened"
 	CartCancelled     Name = "cart.cancelled"
 	// CartCancellationReverted: o pagamento chegou DEPOIS do cancelamento manual
 	// do lojista e venceu — o cart voltou para pago (regra "pagamento vence").
@@ -82,9 +81,10 @@ const (
 	// immutable Order is materialised (order.paid) or flipped to refunded
 	// (order.refunded), transactionally via the outbox with dedup by order_id
 	// (exactly-once). They are the fan-out anchors for POST-payment consumers:
-	// Fatia 11b wires the ERP finalisation/refund reactors onto them (moving the
-	// ERP off cart.*); no consumer exists yet in 11a. Distinct from group F, which
-	// are internal order_events timeline ROWS — these are first-class BUS facts.
+	// the composition root (main.newApp) wires the ERP finalisation/refund
+	// reactors onto them (ERP().OnOrderPaid / OnOrderRefunded), keeping the ERP
+	// off cart.*. Distinct from group F, which are internal order_events timeline
+	// ROWS — these are first-class BUS facts.
 	OrderPaid     Name = "order.paid"
 	OrderRefunded Name = "order.refunded"
 
@@ -142,11 +142,15 @@ const (
 	SubscriptionActivated    Name = "subscription.activated"
 	SubscriptionPastDue      Name = "subscription.past_due"
 	SubscriptionGraceExpired Name = "subscription.grace_expired"
-	SubscriptionCanceled     Name = "subscription.canceled"
-	SubscriptionPaused       Name = "subscription.paused"
-	SubscriptionResumed      Name = "subscription.resumed"
-	GMVRecorded              Name = "gmv.recorded"
-	GMVRefunded              Name = "gmv.refunded"
+	// SubscriptionCanceled keeps the American spelling ON PURPOSE: it mirrors
+	// Stripe's own vocabulary (subscription status "canceled"), the source of
+	// this fact. This is the one intentional exception to the British "cancelled"
+	// used by cart.cancelled / erp.order_cancelled — do not "fix" it.
+	SubscriptionCanceled Name = "subscription.canceled"
+	SubscriptionPaused   Name = "subscription.paused"
+	SubscriptionResumed  Name = "subscription.resumed"
+	GMVRecorded          Name = "gmv.recorded"
+	GMVRefunded          Name = "gmv.refunded"
 
 	// Notifications (group I). One canonical fact per outbound message lifecycle
 	// across ALL channels; the channel (instagram_dm / whatsapp / email) travels in

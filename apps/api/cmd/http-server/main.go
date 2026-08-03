@@ -912,8 +912,8 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	// NOTE: the periodic sweep workers (coupon-expirer, cart-recovery,
 	// cart-expiry) were removed — cart expiration is now driven exclusively by
-	// the asynq ETA schedule (cart.expire, armed at cart.checkout_armed /
-	// cart.reopened → RunScheduledExpiry). Coupon-slot reclamation moved to the
+	// the asynq ETA schedule (cart.expire, armed at cart.checkout_armed →
+	// RunScheduledExpiry). Coupon-slot reclamation moved to the
 	// cart.expired / cart.cancelled reactors (couponSvc.ExpireRedemptionForCart).
 	// WhatsApp cart-recovery (PRD 006) was retired with its worker.
 
@@ -1276,10 +1276,10 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		// ETA-based cart expiry: schedule a cart.expire task at the cart's
 		// expires_at (asynq ProcessAt) so it expires on the second, with the
 		// 5-min sweep kept as a safety net. The window is set at checkout-arm
-		// (live carts have no expires_at until the event ends) and at reopen —
-		// so those two events arm the timer. They are registered HERE (not in the
-		// default logEvent registry) with a handler that logs AND arms — double
-		// registration would panic asynq.
+		// (live carts have no expires_at until the event ends), so that event
+		// arms the timer. It is registered HERE (not in the default logEvent
+		// registry) with a handler that logs AND arms — double registration
+		// would panic asynq.
 		integrationSvc.SetCartExpiryScheduler(cartExpiryScheduler{client: eventsClient})
 		armCartExpiry := func(ctx context.Context, t *asynq.Task) error {
 			var env events.Envelope
@@ -1299,7 +1299,6 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			return integrationSvc.ScheduleExpiry(ctx, p.CartID)
 		}
 		eventsServer.Register(events.CartCheckoutArmed, armCartExpiry)
-		eventsServer.Register(events.CartReopened, armCartExpiry)
 
 		// The scheduled command itself: run the guarded expiry, or re-arm if the
 		// window was pushed out (waitlist promotion) after the task was armed.
