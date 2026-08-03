@@ -557,7 +557,6 @@ var baselineRawThrows = map[string]bool{
 	// manda registrar aqui em vez de tipar às pressas. A maioria é da publicação
 	// agendada, que é uma fatia inteira nova; tipá-los pertence à iniciativa de
 	// erros, não a esta entrega.
-	"coupon.Service.ApplyToCart:\"this coupon has already been used\"":                                                           true,
 	"integration.Handler.ListInstagramScheduledPublications:\"invalid status filter\"":                                           true,
 	"integration.Handler.ScheduleInstagramPublish:\"failed to read file\"":                                                       true,
 	"integration.Handler.ScheduleInstagramPublish:\"failed to upload the media\"":                                                true,
@@ -565,9 +564,7 @@ var baselineRawThrows = map[string]bool{
 	"integration.Handler.ScheduleInstagramPublish:\"storage not configured\"":                                                    true,
 	"integration.Service.CancelPublish#0":                                                                                        true,
 	"integration.Service.CancelPublish:\"scheduled publication not found\"":                                                      true,
-	"integration.Service.CancelPublish:\"this publication is being sent to Instagram right now and can no longer be cancelled\"": true,
 	"integration.Service.SchedulePublish#0":                                                                                      true,
-	"integration.Service.SchedulePublish:\"a story has no commercial window — it lasts 24h from publication\"":                   true,
 	"integration.Service.SchedulePublish:\"asset is required\"":                                                                  true,
 	"integration.Service.SchedulePublish:\"endsAt must be after startsAt\"":                                                      true,
 	"integration.Service.SchedulePublish:\"endsAt must be after the scheduled publication\"":                                     true,
@@ -595,10 +592,8 @@ var baselineRawThrows = map[string]bool{
 	"live.Service.Create:\"endsAt é obrigatório: o evento precisa de uma data de encerramento\"":                                 true,
 	"live.Service.ResendCheckoutMessage#0":                                                                                       true,
 	"live.Service.Start:\"event not found\"":                                                                                     true,
-	"live.Service.Start:\"evento encerrado nao pode ser iniciado\"":                                                              true,
 	"live.Service.Update:\"endsAt não pode ser removido: o evento precisa de uma data de encerramento\"":                         true,
 	"live.Service.Update:\"endsAt precisa ser depois de startsAt\"":                                                              true,
-	"live.Service.requireLiveSession:\"só é possível controlar o modo live de uma sessão em andamento\"":                         true,
 	"live.Service.resolveSessionOfEvent:\"session not found\"":                                                                   true,
 	"notification.Handler.ListUndelivered:\"Erro ao listar mensagens não entregues\"":                                            true,
 	"notification.Handler.ListUndelivered:\"eventId é obrigatório\"":                                                             true,

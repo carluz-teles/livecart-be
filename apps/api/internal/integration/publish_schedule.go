@@ -174,7 +174,7 @@ func (s *Service) SchedulePublish(ctx context.Context, input SchedulePublishInpu
 	// criado com ends_at = publicação + 24h (mesma regra do caminho síncrono).
 	// Aceitar uma janela aqui seria aceitar um valor que o disparo ignora.
 	if input.MediaKind == "story" && (input.StartsAt != nil || input.EndsAt != nil) {
-		return nil, httpx.ErrUnprocessable("a story has no commercial window — it lasts 24h from publication")
+		return nil, httpx.DomainError(422, httpx.CodeIgStoryNoWindow, "a story has no commercial window — it lasts 24h from publication")
 	}
 
 	job, err := s.repo.CreatePublishJob(ctx, CreatePublishJobParams(input))
@@ -239,7 +239,7 @@ func (s *Service) CancelPublish(ctx context.Context, jobID, storeID string) (*Pu
 			return nil, httpx.ErrNotFound("scheduled publication not found")
 		}
 		if existing.Status == "publishing" {
-			return nil, httpx.ErrUnprocessable("this publication is being sent to Instagram right now and can no longer be cancelled")
+			return nil, httpx.DomainError(422, httpx.CodeIgPublishInFlight, "this publication is being sent to Instagram right now and can no longer be cancelled")
 		}
 		return nil, httpx.ErrUnprocessable(fmt.Sprintf("this publication is already %s", existing.Status))
 	}

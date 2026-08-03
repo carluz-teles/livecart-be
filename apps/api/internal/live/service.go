@@ -913,7 +913,7 @@ func (s *Service) Start(ctx context.Context, id, storeID string) (LiveOutput, er
 		// ends_at o fecharia de novo no ciclo seguinte e o lojista veria o
 		// estado piscar. Antes daqui o pedido morria adiante com "no active
 		// session found for event", que não explica nada.
-		return LiveOutput{}, httpx.ErrUnprocessable("evento encerrado nao pode ser iniciado")
+		return LiveOutput{}, httpx.DomainError(422, httpx.CodeLiveEventEnded, "evento encerrado nao pode ser iniciado")
 	}
 
 	// Flip scheduled → active. Falso = já estava ativo: iniciar duas vezes é
@@ -2041,7 +2041,7 @@ func (s *Service) requireLiveSession(ctx context.Context, sessionID, eventID, st
 		return err
 	}
 	if session.Status != "active" && session.Status != "live" {
-		return httpx.ErrBadRequest("só é possível controlar o modo live de uma sessão em andamento")
+		return httpx.DomainError(400, httpx.CodeLiveSessionNotLive, "só é possível controlar o modo live de uma sessão em andamento")
 	}
 	return nil
 }

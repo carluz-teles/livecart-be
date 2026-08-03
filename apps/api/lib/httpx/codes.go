@@ -50,6 +50,7 @@ const (
 	CodeCouponInvalidCode      Code = "COUPON_INVALID_CODE"      // coupon/service.go:264 ("invalid coupon code")
 	CodeCouponMinPurchase      Code = "COUPON_MIN_PURCHASE"      // coupon/service.go:280 ("minimum purchase ... not reached")
 	CodeCouponShippingRequired Code = "COUPON_SHIPPING_REQUIRED" // coupon/service.go:672 ("select shipping before applying a free-shipping coupon")
+	CodeCouponAlreadyUsed      Code = "COUPON_ALREADY_USED"      // coupon/service.go:300 (23505 — já aplicado neste carrinho OU one-per-buyer RN-33)
 
 	// --- STORE (internal/store/service.go) ---
 	CodeStoreAlreadyExists Code = "STORE_ALREADY_EXISTS" // store/service.go:67 (1 user = 1 store)
@@ -79,6 +80,8 @@ const (
 	CodeLiveMediaRequired   Code = "LIVE_MEDIA_REQUIRED"   // live/service.go:253 ("mediaId is required")
 	CodeLiveProductRequired Code = "LIVE_PRODUCT_REQUIRED" // live/service.go:256 ("select at least one product for the promotion")
 	CodeLiveEventNotActive  Code = "LIVE_EVENT_NOT_ACTIVE" // live/service.go:1378,1409 (set active product / change processing on a non-active event)
+	CodeLiveEventEnded      Code = "LIVE_EVENT_ENDED"      // live/service.go:916 ("evento encerrado nao pode ser iniciado")
+	CodeLiveSessionNotLive  Code = "LIVE_SESSION_NOT_LIVE"  // live/service.go:2044 ("só é possível controlar o modo live de uma sessão em andamento")
 	// CreateSession com metade da mídia (platform sem platformLiveId, ou o
 	// inverso). Código próprio porque a tela do painel precisa distinguir "erro
 	// no seletor de publicação" de qualquer outro 400 da criação de sessão.
@@ -100,4 +103,8 @@ const (
 
 	// --- STOCK (internal/erp/stock_service.go) ---
 	CodeStockInsufficient Code = "STOCK_INSUFFICIENT" // erp/stock_service.go:213 ("estoque insuficiente para esse aumento")
+
+	// --- INSTAGRAM publishing (internal/integration/publish_schedule.go) ---
+	CodeIgStoryNoWindow   Code = "IG_STORY_NO_WINDOW"   // publish_schedule.go:177 ("a story has no commercial window — it lasts 24h from publication")
+	CodeIgPublishInFlight Code = "IG_PUBLISH_IN_FLIGHT" // publish_schedule.go:242 ("being sent to Instagram right now and can no longer be cancelled")
 )

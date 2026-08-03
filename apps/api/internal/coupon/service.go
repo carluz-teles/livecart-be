@@ -297,7 +297,7 @@ func (s *Service) ApplyToCart(
 		// Sem esta tradução o comprador receberia 500 no checkout.
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return nil, httpx.ErrConflict("this coupon has already been used")
+			return nil, httpx.DomainError(409, httpx.CodeCouponAlreadyUsed, "this coupon has already been used")
 		}
 		return nil, err
 	}
