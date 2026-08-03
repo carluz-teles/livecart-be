@@ -40,9 +40,13 @@ type EventResponse struct {
 	EndsAt      *time.Time `json:"endsAt"`
 	Description *string    `json:"description"`
 	// Counts
-	ProductCount int               `json:"productCount"`
-	UpsellCount  int               `json:"upsellCount"`
-	Sessions     []SessionResponse `json:"sessions,omitempty"`
+	//
+	// productCount SAIU do evento: a lista de produtos vendáveis é da
+	// TRANSMISSÃO, e a contagem que existe é a de cada sessão
+	// (SessionResponse.productCount). Um número no nível da campanha voltaria a
+	// sugerir uma lista de campanha que não existe.
+	UpsellCount int               `json:"upsellCount"`
+	Sessions    []SessionResponse `json:"sessions,omitempty"`
 	// SessionTypes são os tipos DISTINTOS das transmissões deste evento
 	// ({live, post, reel, story}). É a única fonte de "que espécie de evento é
 	// este" que sobrevive à 000122, que dropou live_events.type: com a campanha
@@ -108,12 +112,12 @@ type EventOutput struct {
 	ScheduledAt *time.Time
 	EndsAt      *time.Time
 	Description *string
-	// Counts
-	ProductCount int
-	UpsellCount  int
-	Sessions     []SessionOutput
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// Counts — só upsell. A contagem de produtos é por SESSÃO
+	// (SessionOutput.ProductCount).
+	UpsellCount int
+	Sessions    []SessionOutput
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 type ListEventsInput struct {
@@ -159,6 +163,10 @@ type CreateEventParams struct {
 	StartsAt    *time.Time
 	EndsAt      *time.Time
 	Description *string
+	// ProductIDs é a lista de produtos vendáveis da PRIMEIRA transmissão — dela,
+	// não da campanha, que não tem lista. Vazia significa "vende todos os
+	// produtos ativos da loja", que é o caso da live.
+	ProductIDs []string
 }
 
 type EventRow struct {
@@ -304,6 +312,10 @@ type SessionResponse struct {
 	StartedAt     *time.Time `json:"startedAt"`
 	EndedAt       *time.Time `json:"endedAt"`
 	TotalComments int        `json:"totalComments"`
+	// ProductCount é quantos produtos ESTA transmissão libera. Zero significa
+	// "vende todos os produtos ativos da loja" — a contagem existe justamente
+	// para a tela poder dizer isso em vez de mostrar uma lista vazia ambígua.
+	ProductCount int `json:"productCount"`
 	// Métrica desta transmissão (Fatia 5). Os nomes antigos (totalCarts,
 	// totalRevenue, paidRevenue) saíram junto com GetSessionStats: eles falavam
 	// do carrinho INTEIRO creditado à sessão em que ele nasceu.
@@ -393,6 +405,10 @@ type SessionOutput struct {
 	StartedAt              *time.Time
 	EndedAt                *time.Time
 	TotalComments          int
+	// ProductCount é quantos produtos ESTA transmissão libera. Zero é resposta
+	// legítima e significa "vende todos os produtos ativos da loja" — é o único
+	// jeito de a tela distinguir "vende tudo" de "esqueci de configurar".
+	ProductCount int
 	SessionRevenueOutput
 	Platforms []PlatformOutput
 	Comments  []CommentOutput
@@ -401,8 +417,8 @@ type SessionOutput struct {
 }
 
 // CreateSessionParams SAIU junto de Repository.CreateSession: era o parâmetro de
-// um segundo caminho de criação de sessão que não herdava a whitelist do evento.
-// A criação viva é CreateSessionWithPlatformTx, que herda dentro da transação.
+// um SEGUNDO caminho de criação de sessão, fora de transação e sem outbox. A
+// criação viva é CreateSessionWithPlatformTx.
 
 type SessionRow struct {
 	ID      string
@@ -685,9 +701,8 @@ type LiveResponse struct {
 	ScheduledAt *time.Time `json:"scheduledAt"`
 	EndsAt      *time.Time `json:"endsAt"`
 	Description *string    `json:"description"`
-	// Counts
-	ProductCount int `json:"productCount"`
-	UpsellCount  int `json:"upsellCount"`
+	// Counts — productCount saiu junto com a lista de campanha.
+	UpsellCount int `json:"upsellCount"`
 	// SessionTypes — mesma semântica de EventResponse.SessionTypes. A LISTA
 	// precisa dele tanto quanto o detalhe: ela não carrega sessions[], então
 	// sem este campo a tela de eventos só teria live_events.type para escolher
@@ -752,6 +767,10 @@ type CreateLiveInput struct {
 	StartsAt    *time.Time
 	EndsAt      *time.Time
 	Description *string
+	// ProductIDs restringe a PRIMEIRA transmissão a estes produtos. É o que o
+	// atalho de post/story manda; o formulário de campanha manda vazio, e vazio
+	// quer dizer "esta transmissão vende todos os produtos ativos da loja".
+	ProductIDs []string
 	// Metadados da publicação da primeira transmissão (gravados na MÍDIA).
 	MediaPermalink    string
 	MediaThumbnailURL string
@@ -844,11 +863,10 @@ type LiveOutput struct {
 	ScheduledAt *time.Time
 	EndsAt      *time.Time
 	Description *string
-	// Counts
-	ProductCount int
-	UpsellCount  int
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// Counts — productCount saiu junto com a lista de campanha.
+	UpsellCount int
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 type LiveStatsOutput struct {

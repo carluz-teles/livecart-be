@@ -171,13 +171,11 @@ var baselineWithoutValidate = map[string]bool{
 
 	// live — domínio não migrado (eventos/lives/posts)
 	"live.AddPlatformRequest":         true,
-	"live.BulkEventProductsRequest":   true,
 	"live.CreateLiveRequest":          true,
 	"live.CreatePostRequest":          true,
 	"live.CreateSessionRequest":       true,
 	"live.EndEventRequest":            true,
 	"live.EndLiveRequest":             true,
-	"live.EventProductRequest":        true,
 	"live.EventUpsellRequest":         true,
 	"live.SetActiveProductRequest":    true,
 	"live.SetProcessingPausedRequest": true,

@@ -3,22 +3,18 @@ package live
 import "time"
 
 // =============================================================================
-// EVENT PRODUCTS - Handler Types
+// PRODUTOS DE UMA TRANSMISSÃO — tipos compartilhados
+//
+// Os DTOs de entrada por EVENTO saíram junto com as rotas por evento
+// (EventProductRequest, BulkEventProductsRequest — esta última nunca teve rota
+// nem chamador —, AddEventProductInput e UpdateEventProductInput). A entrada
+// viva é SessionProductRequest/UpdateSessionProductRequest, em
+// session_product_types.go, já na convenção ozzo.
+//
+// O que sobra aqui é a SAÍDA, que os handlers por sessão continuam usando: é o
+// mesmo dado, só ancorado na transmissão (SessionProductOutput é alias de
+// EventProductOutput, não cópia).
 // =============================================================================
-
-// EventProductRequest is the request to add/update a product in an event whitelist
-type EventProductRequest struct {
-	ProductID    string `json:"productId" validate:"required,uuid"`
-	SpecialPrice *int64 `json:"specialPrice" validate:"omitempty,min=0"`
-	MaxQuantity  *int32 `json:"maxQuantity" validate:"omitempty,min=1"`
-	DisplayOrder int32  `json:"displayOrder"`
-	Featured     bool   `json:"featured"`
-}
-
-// BulkEventProductsRequest is the request to set all products for an event
-type BulkEventProductsRequest struct {
-	Products []EventProductRequest `json:"products" validate:"required,dive"`
-}
 
 // EventProductResponse is the response for an event product
 type EventProductResponse struct {
@@ -35,39 +31,6 @@ type EventProductResponse struct {
 	Featured       bool    `json:"featured"`
 	Stock          int32   `json:"stock"`
 	ProductActive  bool    `json:"productActive"`
-}
-
-// ListEventProductsResponse wraps the list of event products
-type ListEventProductsResponse struct {
-	Data []EventProductResponse `json:"data"`
-}
-
-// =============================================================================
-// EVENT PRODUCTS - Service Types
-// =============================================================================
-
-// AddEventProductInput is the input for adding a product to an event
-type AddEventProductInput struct {
-	EventID      string
-	StoreID      string
-	ProductID    string
-	SpecialPrice *int64
-	MaxQuantity  *int32
-	DisplayOrder int32
-	Featured     bool
-}
-
-// UpdateEventProductInput is the input for updating an event product.
-// A chave é o PRODUTO, não o id da linha da whitelist — ver o comentário em
-// Service.UpdateEventProduct.
-type UpdateEventProductInput struct {
-	ProductID    string
-	EventID      string
-	StoreID      string
-	SpecialPrice *int64
-	MaxQuantity  *int32
-	DisplayOrder int32
-	Featured     bool
 }
 
 // EventProductOutput is the output for an event product

@@ -11,22 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const countEventWhitelistFromSessions = `-- name: CountEventWhitelistFromSessions :one
-SELECT COUNT(DISTINCT sp.product_id)::int
-FROM session_products sp
-JOIN live_sessions ls ON ls.id = sp.session_id
-WHERE ls.event_id = $1
-`
-
-// Quantos produtos DISTINTOS o evento barra ao todo. Alimenta o badge da aba
-// "Produtos", que perdeu a fonte única quando a whitelist desceu para a sessão.
-func (q *Queries) CountEventWhitelistFromSessions(ctx context.Context, eventID pgtype.UUID) (int32, error) {
-	row := q.db.QueryRow(ctx, countEventWhitelistFromSessions, eventID)
-	var column_1 int32
-	err := row.Scan(&column_1)
-	return column_1, err
-}
-
 const countSessionProducts = `-- name: CountSessionProducts :one
 SELECT COUNT(*)::int FROM session_products WHERE session_id = $1
 `
@@ -36,6 +20,45 @@ func (q *Queries) CountSessionProducts(ctx context.Context, sessionID pgtype.UUI
 	var column_1 int32
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const countSessionProductsByEvent = `-- name: CountSessionProductsByEvent :many
+SELECT sp.session_id, COUNT(*)::int AS product_count
+FROM session_products sp
+JOIN live_sessions ls ON ls.id = sp.session_id
+WHERE ls.event_id = $1
+GROUP BY sp.session_id
+`
+
+type CountSessionProductsByEventRow struct {
+	SessionID    pgtype.UUID `json:"session_id"`
+	ProductCount int32       `json:"product_count"`
+}
+
+// Quantos produtos cada transmissão da campanha libera. UMA leitura por evento,
+// não uma por sessão: o detalhe da campanha lista todas as transmissões e o
+// laço com CountSessionProducts seria N+1.
+//
+// Só devolve linha para sessão QUE TEM produto: contagem zero é a ausência da
+// linha, e zero é a resposta legítima "esta transmissão vende tudo".
+func (q *Queries) CountSessionProductsByEvent(ctx context.Context, eventID pgtype.UUID) ([]CountSessionProductsByEventRow, error) {
+	rows, err := q.db.Query(ctx, countSessionProductsByEvent, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CountSessionProductsByEventRow{}
+	for rows.Next() {
+		var i CountSessionProductsByEventRow
+		if err := rows.Scan(&i.SessionID, &i.ProductCount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const deleteSessionProduct = `-- name: DeleteSessionProduct :exec
@@ -49,24 +72,6 @@ type DeleteSessionProductParams struct {
 
 func (q *Queries) DeleteSessionProduct(ctx context.Context, arg DeleteSessionProductParams) error {
 	_, err := q.db.Exec(ctx, deleteSessionProduct, arg.SessionID, arg.ProductID)
-	return err
-}
-
-const deleteSessionProductsByEventAndProduct = `-- name: DeleteSessionProductsByEventAndProduct :exec
-DELETE FROM session_products sp
-USING live_sessions ls
-WHERE ls.id = sp.session_id AND ls.event_id = $1 AND sp.product_id = $2
-`
-
-type DeleteSessionProductsByEventAndProductParams struct {
-	EventID   pgtype.UUID `json:"event_id"`
-	ProductID pgtype.UUID `json:"product_id"`
-}
-
-// Remove o produto da whitelist de TODAS as sessões do evento. Sustenta a rota
-// legada por evento, que o frontend ainda usa.
-func (q *Queries) DeleteSessionProductsByEventAndProduct(ctx context.Context, arg DeleteSessionProductsByEventAndProductParams) error {
-	_, err := q.db.Exec(ctx, deleteSessionProductsByEventAndProduct, arg.EventID, arg.ProductID)
 	return err
 }
 
@@ -182,79 +187,6 @@ func (q *Queries) GetEventProductConfigFromSessions(ctx context.Context, arg Get
 	return i, err
 }
 
-const getEventWhitelistProduct = `-- name: GetEventWhitelistProduct :one
-SELECT
-    sp.id,
-    sp.session_id,
-    sp.product_id,
-    sp.special_price,
-    sp.max_quantity,
-    sp.display_order,
-    sp.featured,
-    sp.created_at,
-    sp.updated_at,
-    p.name AS product_name,
-    p.keyword AS product_keyword,
-    p.price AS original_price,
-    p.image_url AS product_image_url,
-    p.stock AS product_stock,
-    p.active AS product_active
-FROM session_products sp
-JOIN live_sessions ls ON ls.id = sp.session_id
-JOIN products p ON p.id = sp.product_id
-WHERE ls.event_id = $1 AND sp.product_id = $2
-ORDER BY sp.special_price ASC NULLS LAST, sp.display_order ASC, sp.created_at ASC
-LIMIT 1
-`
-
-type GetEventWhitelistProductParams struct {
-	EventID   pgtype.UUID `json:"event_id"`
-	ProductID pgtype.UUID `json:"product_id"`
-}
-
-type GetEventWhitelistProductRow struct {
-	ID              pgtype.UUID        `json:"id"`
-	SessionID       pgtype.UUID        `json:"session_id"`
-	ProductID       pgtype.UUID        `json:"product_id"`
-	SpecialPrice    pgtype.Int4        `json:"special_price"`
-	MaxQuantity     pgtype.Int4        `json:"max_quantity"`
-	DisplayOrder    int32              `json:"display_order"`
-	Featured        bool               `json:"featured"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
-	ProductName     string             `json:"product_name"`
-	ProductKeyword  string             `json:"product_keyword"`
-	OriginalPrice   pgtype.Int8        `json:"original_price"`
-	ProductImageUrl pgtype.Text        `json:"product_image_url"`
-	ProductStock    pgtype.Int4        `json:"product_stock"`
-	ProductActive   pgtype.Bool        `json:"product_active"`
-}
-
-// Uma linha da união por evento, para devolver o produto recém-gravado pela
-// rota legada sem carregar a lista inteira.
-func (q *Queries) GetEventWhitelistProduct(ctx context.Context, arg GetEventWhitelistProductParams) (GetEventWhitelistProductRow, error) {
-	row := q.db.QueryRow(ctx, getEventWhitelistProduct, arg.EventID, arg.ProductID)
-	var i GetEventWhitelistProductRow
-	err := row.Scan(
-		&i.ID,
-		&i.SessionID,
-		&i.ProductID,
-		&i.SpecialPrice,
-		&i.MaxQuantity,
-		&i.DisplayOrder,
-		&i.Featured,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.ProductName,
-		&i.ProductKeyword,
-		&i.OriginalPrice,
-		&i.ProductImageUrl,
-		&i.ProductStock,
-		&i.ProductActive,
-	)
-	return i, err
-}
-
 const getSessionProductByProductID = `-- name: GetSessionProductByProductID :one
 SELECT
     sp.id, sp.session_id, sp.product_id, sp.special_price, sp.max_quantity, sp.display_order, sp.featured, sp.created_at, sp.updated_at,
@@ -313,138 +245,6 @@ func (q *Queries) GetSessionProductByProductID(ctx context.Context, arg GetSessi
 		&i.ProductActive,
 	)
 	return i, err
-}
-
-const inheritEventWhitelistIntoSession = `-- name: InheritEventWhitelistIntoSession :execrows
-INSERT INTO session_products (session_id, product_id, special_price, max_quantity, display_order, featured)
-SELECT $1, w.product_id, w.special_price, w.max_quantity, w.display_order, w.featured
-FROM (
-    SELECT DISTINCT ON (sp.product_id)
-        sp.product_id,
-        sp.special_price,
-        sp.max_quantity,
-        sp.display_order,
-        sp.featured,
-        sp.created_at
-    FROM session_products sp
-    JOIN live_sessions ls ON ls.id = sp.session_id
-    WHERE ls.event_id = $2 AND ls.id <> $1
-    ORDER BY sp.product_id, sp.special_price ASC NULLS LAST, sp.display_order ASC, sp.created_at ASC
-) w
-ON CONFLICT (session_id, product_id) DO NOTHING
-`
-
-type InheritEventWhitelistIntoSessionParams struct {
-	SessionID pgtype.UUID `json:"session_id"`
-	EventID   pgtype.UUID `json:"event_id"`
-}
-
-// Sessão nova NASCE com a whitelist do evento (decisão do dono, revoga a nota
-// "sessão criada depois nasce vazia" que estava logo abaixo).
-//
-// Sem isto a barreira era inútil no fluxo real: o lojista configura os produtos
-// do evento, cria a transmissão de terça e essa sessão nasce VAZIA — e "lista
-// vazia = libera tudo" (regra que continua valendo) faz a sessão nova liberar o
-// catálogo inteiro. A união de GetEventProductConfigFromSessions então aceita
-// qualquer produto no evento, porque basta UMA sessão sem lista.
-//
-// Herda a mesma linha que a leitura por evento já considera canônica: DISTINCT
-// ON (product_id) com o MENOR preço especial, igual a ListEventWhitelistFromSessions.
-//
-// ls.id <> $1 exclui a própria sessão (que está vazia neste ponto, mas o filtro
-// deixa a query segura para um re-run) e o ON CONFLICT torna a herança
-// idempotente.
-func (q *Queries) InheritEventWhitelistIntoSession(ctx context.Context, arg InheritEventWhitelistIntoSessionParams) (int64, error) {
-	result, err := q.db.Exec(ctx, inheritEventWhitelistIntoSession, arg.SessionID, arg.EventID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const listEventWhitelistFromSessions = `-- name: ListEventWhitelistFromSessions :many
-SELECT id, session_id, product_id, special_price, max_quantity, display_order, featured, created_at, updated_at, product_name, product_keyword, original_price, product_image_url, product_stock, product_active FROM (
-    SELECT DISTINCT ON (sp.product_id)
-        sp.id,
-        sp.session_id,
-        sp.product_id,
-        sp.special_price,
-        sp.max_quantity,
-        sp.display_order,
-        sp.featured,
-        sp.created_at,
-        sp.updated_at,
-        p.name AS product_name,
-        p.keyword AS product_keyword,
-        p.price AS original_price,
-        p.image_url AS product_image_url,
-        p.stock AS product_stock,
-        p.active AS product_active
-    FROM session_products sp
-    JOIN live_sessions ls ON ls.id = sp.session_id
-    JOIN products p ON p.id = sp.product_id
-    WHERE ls.event_id = $1
-    ORDER BY sp.product_id, sp.special_price ASC NULLS LAST, sp.display_order ASC, sp.created_at ASC
-) w
-ORDER BY w.display_order ASC, w.created_at ASC
-`
-
-type ListEventWhitelistFromSessionsRow struct {
-	ID              pgtype.UUID        `json:"id"`
-	SessionID       pgtype.UUID        `json:"session_id"`
-	ProductID       pgtype.UUID        `json:"product_id"`
-	SpecialPrice    pgtype.Int4        `json:"special_price"`
-	MaxQuantity     pgtype.Int4        `json:"max_quantity"`
-	DisplayOrder    int32              `json:"display_order"`
-	Featured        bool               `json:"featured"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
-	ProductName     string             `json:"product_name"`
-	ProductKeyword  string             `json:"product_keyword"`
-	OriginalPrice   pgtype.Int8        `json:"original_price"`
-	ProductImageUrl pgtype.Text        `json:"product_image_url"`
-	ProductStock    pgtype.Int4        `json:"product_stock"`
-	ProductActive   pgtype.Bool        `json:"product_active"`
-}
-
-// União das whitelists das sessões do evento, UMA linha por produto. Serve a
-// listagem legada por evento e o badge de contagem.
-// DISTINCT ON, não GROUP BY: o produto pode estar em várias sessões com preços
-// diferentes, e quem vale para o comprador é o MENOR preço especial.
-func (q *Queries) ListEventWhitelistFromSessions(ctx context.Context, eventID pgtype.UUID) ([]ListEventWhitelistFromSessionsRow, error) {
-	rows, err := q.db.Query(ctx, listEventWhitelistFromSessions, eventID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListEventWhitelistFromSessionsRow{}
-	for rows.Next() {
-		var i ListEventWhitelistFromSessionsRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.SessionID,
-			&i.ProductID,
-			&i.SpecialPrice,
-			&i.MaxQuantity,
-			&i.DisplayOrder,
-			&i.Featured,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.ProductName,
-			&i.ProductKeyword,
-			&i.OriginalPrice,
-			&i.ProductImageUrl,
-			&i.ProductStock,
-			&i.ProductActive,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const listSessionProducts = `-- name: ListSessionProducts :many
@@ -539,19 +339,32 @@ type UpsertSessionProductParams struct {
 }
 
 // =============================================================================
-// SESSION PRODUCTS (Whitelist da SESSÃO — D15/N2)
+// SESSION PRODUCTS — a lista de produtos vendáveis é da TRANSMISSÃO
 //
-// Regra única: lista vazia = TODOS os produtos da loja liberados.
+// Regra única, decidida pelo dono do produto: a lista pertence à SESSÃO e SÓ a
+// ela. Uma live pode vender qualquer coisa, um post vende só o produto X e um
+// story só o produto Y — e os três podem ser transmissões da MESMA campanha, ao
+// mesmo tempo. Por isso não existe (mais) lista no nível do EVENTO: nem query,
+// nem rota, nem contagem.
 //
-// Só existe aqui o que tem chamador. As seis queries de event_product.sql que
-// nunca tiveram um (HasEventProducts, IsProductInEventWhitelist,
-// GetEffectiveProductPrice, DeleteAllEventProducts, ListFeaturedEventProducts,
-// DeleteEventProductByProductID) NÃO foram espelhadas.
+//	lista VAZIA = TODOS os produtos ativos da loja liberados naquela transmissão.
+//	sessão nova NASCE VAZIA — não há herança, porque não há de onde herdar.
 //
-// O CRUD é chaveado por PRODUCT_ID, não pelo id da linha: o par FE/BE de hoje
-// está quebrado justamente porque o frontend manda products.id onde a API
-// espera event_products.id (PUT devolve 404, DELETE apaga zero linhas e ainda
-// responde 200).
+// A herança (InheritEventWhitelistIntoSession) e a escrita por evento
+// (UpsertSessionProductForEvent / DeleteSessionProductsByEventAndProduct /
+// ListEventWhitelistFromSessions / GetEventWhitelistProduct /
+// CountEventWhitelistFromSessions) saíram junto: existiam para o problema
+// "configurei na campanha e criei a sessão depois", que deixa de existir quando
+// não há lista de campanha e cada transmissão é configurada explicitamente.
+//
+// O CHECKOUT continua na UNIÃO (GetEventProductConfigFromSessions, no fim deste
+// arquivo) porque o carrinho é do EVENTO e atravessa N transmissões: não existe
+// "a sessão do checkout".
+//
+// O CRUD é chaveado por PRODUCT_ID, não pelo id da linha: chavear pelo id da
+// linha foi o que quebrou o par FE/BE (o frontend manda products.id onde a API
+// esperava o id da linha — PUT devolvia 404 e DELETE apagava zero linhas
+// respondendo 200).
 // =============================================================================
 func (q *Queries) UpsertSessionProduct(ctx context.Context, arg UpsertSessionProductParams) (SessionProduct, error) {
 	row := q.db.QueryRow(ctx, upsertSessionProduct,
@@ -575,41 +388,4 @@ func (q *Queries) UpsertSessionProduct(ctx context.Context, arg UpsertSessionPro
 		&i.UpdatedAt,
 	)
 	return i, err
-}
-
-const upsertSessionProductForEvent = `-- name: UpsertSessionProductForEvent :exec
-INSERT INTO session_products (session_id, product_id, special_price, max_quantity, display_order, featured)
-SELECT ls.id, $2, $3, $4, $5, $6
-FROM live_sessions ls
-WHERE ls.event_id = $1
-ON CONFLICT (session_id, product_id) DO UPDATE SET
-    special_price = EXCLUDED.special_price,
-    max_quantity  = EXCLUDED.max_quantity,
-    display_order = EXCLUDED.display_order,
-    featured      = EXCLUDED.featured,
-    updated_at    = now()
-`
-
-type UpsertSessionProductForEventParams struct {
-	EventID      pgtype.UUID `json:"event_id"`
-	ProductID    pgtype.UUID `json:"product_id"`
-	SpecialPrice pgtype.Int4 `json:"special_price"`
-	MaxQuantity  pgtype.Int4 `json:"max_quantity"`
-	DisplayOrder int32       `json:"display_order"`
-	Featured     bool        `json:"featured"`
-}
-
-// Aplica a whitelist do EVENTO em todas as sessões existentes dele. É a
-// tradução da rota legada por evento para o modelo novo. A sessão criada DEPOIS
-// não fica de fora: ela herda no nascimento, por InheritEventWhitelistIntoSession.
-func (q *Queries) UpsertSessionProductForEvent(ctx context.Context, arg UpsertSessionProductForEventParams) error {
-	_, err := q.db.Exec(ctx, upsertSessionProductForEvent,
-		arg.EventID,
-		arg.ProductID,
-		arg.SpecialPrice,
-		arg.MaxQuantity,
-		arg.DisplayOrder,
-		arg.Featured,
-	)
-	return err
 }

@@ -210,17 +210,13 @@ SET status = 'active', updated_at = now()
 WHERE id = $1 AND status = 'scheduled';
 
 -- name: GetLiveEventWithCounts :one
--- product_count conta produtos DISTINTOS nas whitelists das SESSOES (000112):
--- event_products deixa de existir na 000122. DISTINCT e nao COUNT(*) porque o
--- mesmo produto pode estar barrado em varias transmissoes da campanha e o badge
--- responde "quantos produtos", nao "quantas linhas" — a mesma regra de
--- CountEventWhitelistFromSessions, que ja e a fonte da aba Produtos.
+-- product_count SAIU: nao existe mais "quantos produtos a campanha vende". A
+-- lista de produtos e da TRANSMISSAO, e a contagem que importa e a de cada
+-- sessao (CountSessionProductsByEvent). Somar as sessoes num numero so voltaria
+-- a sugerir uma lista de campanha que nao existe — e mentiria, porque uma
+-- sessao sem lista vende TUDO e contaria zero.
 SELECT
     e.*,
-    (SELECT COUNT(DISTINCT sp.product_id)::int
-       FROM session_products sp
-       JOIN live_sessions ls ON ls.id = sp.session_id
-      WHERE ls.event_id = e.id) AS product_count,
     (SELECT COUNT(*)::int FROM event_upsells WHERE event_id = e.id) AS upsell_count
 FROM live_events e
 WHERE e.id = $1 AND e.store_id = $2;

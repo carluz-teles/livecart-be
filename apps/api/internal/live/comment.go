@@ -111,7 +111,14 @@ type commentCore interface {
 	GetSessionByPlatformLiveID(ctx context.Context, platformLiveID string) (*SessionOutput, error)
 	GetEventByPlatformLiveID(ctx context.Context, platformLiveID string) (*EventOutput, error)
 	AddToCart(ctx context.Context, input AddToCartInput) (AddToCartOutput, error)
-	ListEventProducts(ctx context.Context, eventID, storeID string) ([]EventProductOutput, error)
+	// ListSessionWhitelist lê a lista de produtos vendáveis DA TRANSMISSÃO em
+	// que o comentário caiu — sem checagem de posse, porque a sessão já foi
+	// resolvida pela mídia que chegou no webhook.
+	//
+	// Era ListEventProducts (a união do evento). Ler do evento fazia post e
+	// story da mesma campanha compartilharem a mesma barreira, que é justamente
+	// o que não pode: a live vende qualquer coisa, o post vende só o produto X.
+	ListSessionWhitelist(ctx context.Context, sessionID string) ([]SessionProductOutput, error)
 }
 
 // ProcessInstagramComment processes a live comment from Instagram webhook.
@@ -317,8 +324,11 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	// de produto único auto-adiciona num "EU QUERO" pelado, e pedido indisponível
 	// ou ambíguo recebe resposta privada. A espécie agora vem da SESSÃO (D3), não
 	// de live_events.type, que a 000122 dropou.
+	//
+	// A lista consultada é a DESTA transmissão, não a do evento: é o que permite
+	// que o post e o story da mesma campanha tenham barreiras diferentes.
 	if isPostCommerce(session.Type) && hasPurchaseIntent {
-		resolved, handled, resultLabel := s.resolvePostEventProduct(ctx, event, input, intent, product)
+		resolved, handled, resultLabel := s.resolvePostEventProduct(ctx, event, session, input, intent, product)
 		if handled {
 			s.savePostComment(ctx, session.ID, event.ID, input, resultLabel)
 			return nil
@@ -763,20 +773,34 @@ func isPostCommerce(eventType string) bool {
 // "EU QUERO"), and handled=true when it already answered the commenter (product
 // not in the promotion, or ambiguous request), in which case the caller saves
 // the comment with resultLabel and stops.
+//
+// A lista é lida da SESSÃO em que o comentário caiu. Antes vinha da união do
+// evento, o que colava a barreira do post na do story da mesma campanha.
 func (s *Service) resolvePostEventProduct(
 	ctx context.Context,
 	event *EventOutput,
+	session *SessionOutput,
 	input ProcessInstagramCommentInput,
 	intent *PurchaseIntent,
 	matched *ProductRow,
 ) (resolved *ProductRow, handled bool, resultLabel string) {
-	whitelist, err := s.core.ListEventProducts(ctx, event.ID, event.StoreID)
+	whitelist, err := s.core.ListSessionWhitelist(ctx, session.ID)
 	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to load post promotion products", zap.Error(err))
+		logger.From(ctx, s.logger).Warn("failed to load session promotion products", zap.Error(err))
 		return matched, false, ""
 	}
 
+	// Regra ÚNICA em todo o sistema: lista VAZIA libera TODOS os produtos ativos
+	// da loja nesta transmissão. Até aqui a ingestão fazia o OPOSTO do checkout —
+	// sem lista, todo produto casado caía em 'not_in_promo' e o comprador ouvia
+	// "não está disponível nesta promoção". Com a herança fora, toda sessão nova
+	// nasce vazia: sem este bypass, ela recusaria 100% dos comentários.
+	openSession := len(whitelist) == 0
+
 	inPromo := func(productID string) bool {
+		if openSession {
+			return true
+		}
 		for _, w := range whitelist {
 			if w.ProductID == productID {
 				return true
@@ -801,8 +825,22 @@ func (s *Service) resolvePostEventProduct(
 	// Case B: no product matched. A typed-but-unknown code is "unavailable";
 	// a bare trigger with one promo product auto-adds it, with many it asks.
 	if codes := ExtractPossibleKeywords(input.Text); len(codes) > 0 {
+		// Numa transmissão sem lista, um código que não casou não é "fora da
+		// promoção": ele simplesmente não existe no catálogo. Responder
+		// "não está disponível nesta promoção" seria mentira, e listar os
+		// disponíveis é impossível (são todos). Silêncio, como na live.
+		if openSession {
+			return nil, true, "no_product"
+		}
 		s.replyPostUnavailable(ctx, event, input, whitelist)
 		return nil, true, "not_in_promo"
+	}
+
+	// "EU QUERO" pelado numa transmissão sem lista: não há como adivinhar o
+	// produto de uma loja inteira, e pedir o código listando os disponíveis
+	// significaria despejar o catálogo na DM. Fica sem produto.
+	if openSession {
+		return nil, true, "no_product"
 	}
 
 	available := availablePromoProducts(whitelist)

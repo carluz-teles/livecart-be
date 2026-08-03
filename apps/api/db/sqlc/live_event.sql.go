@@ -459,10 +459,6 @@ func (q *Queries) GetLiveEventByIDAndStore(ctx context.Context, arg GetLiveEvent
 const getLiveEventWithCounts = `-- name: GetLiveEventWithCounts :one
 SELECT
     e.id, e.store_id, e.title, e.status, e.created_at, e.updated_at, e.total_orders, e.close_cart_on_event_end, e.cart_expiration_minutes, e.cart_max_quantity_per_item, e.send_on_live_end, e.scheduled_at, e.description, e.free_shipping, e.pix_discount_percent, e.waitlist_notified_ttl_minutes, e.ends_at, e.cart_extended_expiration_minutes, e.starts_at,
-    (SELECT COUNT(DISTINCT sp.product_id)::int
-       FROM session_products sp
-       JOIN live_sessions ls ON ls.id = sp.session_id
-      WHERE ls.event_id = e.id) AS product_count,
     (SELECT COUNT(*)::int FROM event_upsells WHERE event_id = e.id) AS upsell_count
 FROM live_events e
 WHERE e.id = $1 AND e.store_id = $2
@@ -493,15 +489,14 @@ type GetLiveEventWithCountsRow struct {
 	EndsAt                        pgtype.Timestamptz `json:"ends_at"`
 	CartExtendedExpirationMinutes pgtype.Int4        `json:"cart_extended_expiration_minutes"`
 	StartsAt                      pgtype.Timestamptz `json:"starts_at"`
-	ProductCount                  int32              `json:"product_count"`
 	UpsellCount                   int32              `json:"upsell_count"`
 }
 
-// product_count conta produtos DISTINTOS nas whitelists das SESSOES (000112):
-// event_products deixa de existir na 000122. DISTINCT e nao COUNT(*) porque o
-// mesmo produto pode estar barrado em varias transmissoes da campanha e o badge
-// responde "quantos produtos", nao "quantas linhas" — a mesma regra de
-// CountEventWhitelistFromSessions, que ja e a fonte da aba Produtos.
+// product_count SAIU: nao existe mais "quantos produtos a campanha vende". A
+// lista de produtos e da TRANSMISSAO, e a contagem que importa e a de cada
+// sessao (CountSessionProductsByEvent). Somar as sessoes num numero so voltaria
+// a sugerir uma lista de campanha que nao existe — e mentiria, porque uma
+// sessao sem lista vende TUDO e contaria zero.
 func (q *Queries) GetLiveEventWithCounts(ctx context.Context, arg GetLiveEventWithCountsParams) (GetLiveEventWithCountsRow, error) {
 	row := q.db.QueryRow(ctx, getLiveEventWithCounts, arg.ID, arg.StoreID)
 	var i GetLiveEventWithCountsRow
@@ -525,7 +520,6 @@ func (q *Queries) GetLiveEventWithCounts(ctx context.Context, arg GetLiveEventWi
 		&i.EndsAt,
 		&i.CartExtendedExpirationMinutes,
 		&i.StartsAt,
-		&i.ProductCount,
 		&i.UpsellCount,
 	)
 	return i, err

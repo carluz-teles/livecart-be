@@ -9,8 +9,12 @@ import (
 )
 
 // fakeCommentCore stubs the commentCore seam so the ingestion core can be
-// exercised without a database: it returns scripted session/event/whitelist and
-// records AddToCart calls (and can force errors).
+// exercised without a database: it returns scripted session/event/product list
+// and records AddToCart calls (and can force errors).
+//
+// A lista de produtos é scriptada POR SESSÃO (whitelistBySession), porque é essa
+// a unidade da regra: transmissões diferentes da MESMA campanha têm listas
+// diferentes, e o fake precisa ser capaz de mostrar isso.
 type fakeCommentCore struct {
 	session      *SessionOutput
 	sessionErr   error
@@ -19,12 +23,22 @@ type fakeCommentCore struct {
 	event    *EventOutput
 	eventErr error
 
-	whitelist    []EventProductOutput
-	whitelistErr error
+	whitelistBySession map[string][]SessionProductOutput
+	whitelistErr       error
 
 	addResult AddToCartOutput
 	addErr    error
 	addCalls  []AddToCartInput
+}
+
+// scriptWhitelist é o açúcar dos testes de sessão única: grava a lista da sessão
+// que o fake devolve.
+func (f *fakeCommentCore) scriptWhitelist(products ...SessionProductOutput) *fakeCommentCore {
+	if f.whitelistBySession == nil {
+		f.whitelistBySession = map[string][]SessionProductOutput{}
+	}
+	f.whitelistBySession[f.session.ID] = products
+	return f
 }
 
 func (f *fakeCommentCore) GetSessionByPlatformLiveID(_ context.Context, _ string) (*SessionOutput, error) {
@@ -41,8 +55,8 @@ func (f *fakeCommentCore) AddToCart(_ context.Context, input AddToCartInput) (Ad
 	return f.addResult, f.addErr
 }
 
-func (f *fakeCommentCore) ListEventProducts(_ context.Context, _, _ string) ([]EventProductOutput, error) {
-	return f.whitelist, f.whitelistErr
+func (f *fakeCommentCore) ListSessionWhitelist(_ context.Context, sessionID string) ([]SessionProductOutput, error) {
+	return f.whitelistBySession[sessionID], f.whitelistErr
 }
 
 // fakeStockReserver records the two StockReserver surfaces.
@@ -303,11 +317,10 @@ func TestService_ProcessInstagramComment_PostRules(t *testing.T) {
 	t.Run("not in promo: replies and does not add", func(t *testing.T) {
 		repo := newFakeIngestRepo()
 		repo.products["1001"] = &ProductRow{ID: "p1", Keyword: "1001", Stock: 5, Name: "Boné"}
-		core := &fakeCommentCore{
-			session:   &SessionOutput{ID: "sess1", Type: "post"},
-			event:     postEvent(),
-			whitelist: []EventProductOutput{{ProductID: "other", ProductActive: true, Stock: 5, Keyword: "2002", Name: "Caneca"}},
-		}
+		core := (&fakeCommentCore{
+			session: &SessionOutput{ID: "sess1", Type: "post"},
+			event:   postEvent(),
+		}).scriptWhitelist(SessionProductOutput{ProductID: "other", ProductActive: true, Stock: 5, Keyword: "2002", Name: "Caneca"})
 		s := newCommentTestService(repo, core)
 		social := &fakeSocialReplier{}
 		s.socialReplier = social
@@ -329,12 +342,11 @@ func TestService_ProcessInstagramComment_PostRules(t *testing.T) {
 	t.Run("single-promo bare trigger auto-adds", func(t *testing.T) {
 		repo := newFakeIngestRepo()
 		repo.productsByID["p1"] = &ProductRow{ID: "p1", Keyword: "1001", Stock: 5, Price: 300, Name: "Boné"}
-		core := &fakeCommentCore{
+		core := (&fakeCommentCore{
 			session:   &SessionOutput{ID: "sess1", Type: "post"},
 			event:     postEvent(),
-			whitelist: []EventProductOutput{{ProductID: "p1", ProductActive: true, Stock: 5, Keyword: "1001", Name: "Boné"}},
 			addResult: AddToCartOutput{CartID: "cart1", IsNewCart: true},
-		}
+		}).scriptWhitelist(SessionProductOutput{ProductID: "p1", ProductActive: true, Stock: 5, Keyword: "1001", Name: "Boné"})
 		s := newCommentTestService(repo, core)
 		s.stockReserver = &fakeStockReserver{}
 		s.socialReplier = &fakeSocialReplier{}
@@ -349,14 +361,13 @@ func TestService_ProcessInstagramComment_PostRules(t *testing.T) {
 
 	t.Run("multi-promo bare trigger asks for a keyword", func(t *testing.T) {
 		repo := newFakeIngestRepo()
-		core := &fakeCommentCore{
+		core := (&fakeCommentCore{
 			session: &SessionOutput{ID: "sess1", Type: "post"},
 			event:   postEvent(),
-			whitelist: []EventProductOutput{
-				{ProductID: "p1", ProductActive: true, Stock: 5, Keyword: "1001", Name: "Boné"},
-				{ProductID: "p2", ProductActive: true, Stock: 5, Keyword: "2002", Name: "Caneca"},
-			},
-		}
+		}).scriptWhitelist(
+			SessionProductOutput{ProductID: "p1", ProductActive: true, Stock: 5, Keyword: "1001", Name: "Boné"},
+			SessionProductOutput{ProductID: "p2", ProductActive: true, Stock: 5, Keyword: "2002", Name: "Caneca"},
+		)
 		s := newCommentTestService(repo, core)
 		social := &fakeSocialReplier{}
 		s.socialReplier = social
@@ -378,11 +389,10 @@ func TestService_ProcessInstagramComment_PostRules(t *testing.T) {
 	t.Run("in-promo but out of stock replies", func(t *testing.T) {
 		repo := newFakeIngestRepo()
 		repo.products["1001"] = &ProductRow{ID: "p1", Keyword: "1001", Stock: 0, Name: "Boné"}
-		core := &fakeCommentCore{
-			session:   &SessionOutput{ID: "sess1", Type: "post"},
-			event:     postEvent(),
-			whitelist: []EventProductOutput{{ProductID: "p1", ProductActive: true, Stock: 0, Keyword: "1001", Name: "Boné"}},
-		}
+		core := (&fakeCommentCore{
+			session: &SessionOutput{ID: "sess1", Type: "post"},
+			event:   postEvent(),
+		}).scriptWhitelist(SessionProductOutput{ProductID: "p1", ProductActive: true, Stock: 0, Keyword: "1001", Name: "Boné"})
 		s := newCommentTestService(repo, core)
 		social := &fakeSocialReplier{}
 		s.socialReplier = social
@@ -404,11 +414,10 @@ func TestService_ProcessInstagramComment_PostRules(t *testing.T) {
 	t.Run("story channel replies by DM, not comment", func(t *testing.T) {
 		repo := newFakeIngestRepo()
 		repo.products["1001"] = &ProductRow{ID: "p1", Keyword: "1001", Stock: 5, Name: "Boné"}
-		core := &fakeCommentCore{
-			session:   &SessionOutput{ID: "sess1", Type: "story"},
-			event:     &EventOutput{ID: "ev1", StoreID: "store1", Status: "active"},
-			whitelist: []EventProductOutput{{ProductID: "other", ProductActive: true, Stock: 5, Keyword: "2002", Name: "Caneca"}},
-		}
+		core := (&fakeCommentCore{
+			session: &SessionOutput{ID: "sess1", Type: "story"},
+			event:   &EventOutput{ID: "ev1", StoreID: "store1", Status: "active"},
+		}).scriptWhitelist(SessionProductOutput{ProductID: "other", ProductActive: true, Stock: 5, Keyword: "2002", Name: "Caneca"})
 		s := newCommentTestService(repo, core)
 		social := &fakeSocialReplier{}
 		s.socialReplier = social
@@ -421,6 +430,176 @@ func TestService_ProcessInstagramComment_PostRules(t *testing.T) {
 		}
 		if len(social.replies) != 0 {
 			t.Errorf("comment replies = %d, want 0 on the DM channel", len(social.replies))
+		}
+	})
+}
+
+// A REGRA DESTA RODADA, no cenário que o dono do produto descreveu:
+//
+//	"tem live que o cliente quer vender qualquer coisa... e Post que o cliente
+//	 quer vender apenas o produto X e story que o cliente quer vender apenas
+//	 produto Y."
+//
+// As três transmissões são da MESMA campanha e estão no ar AO MESMO TEMPO. É
+// por isso que a lista não pode ser do evento: uma lista só não consegue dizer
+// "tudo", "só X" e "só Y" ao mesmo tempo.
+//
+// Cada linha é um comentário caindo numa das três transmissões; o veredito
+// depende exclusivamente da lista DAQUELA sessão.
+func TestSameEventDifferentSessionsDifferentProductLists(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		sessionLive  = "sess-live"
+		sessionPost  = "sess-post"
+		sessionStory = "sess-story"
+	)
+
+	produtoX := SessionProductOutput{ProductID: "pX", ProductActive: true, Stock: 5, Keyword: "1001", Name: "Vestido"}
+	produtoY := SessionProductOutput{ProductID: "pY", ProductActive: true, Stock: 5, Keyword: "2002", Name: "Bolsa"}
+
+	// A campanha inteira: uma live sem lista (vende tudo), um post restrito ao
+	// produto X e um story restrito ao produto Y.
+	listasDaCampanha := map[string][]SessionProductOutput{
+		sessionLive:  nil,
+		sessionPost:  {produtoX},
+		sessionStory: {produtoY},
+	}
+
+	tests := []struct {
+		name        string
+		sessionID   string
+		sessionType string
+		text        string
+		wantProduct string // "" = nada entrou no carrinho
+		wantResult  string
+		wantReplies int
+	}{
+		{"live vende o produto X", sessionLive, "live", "quero 1001", "pX", "added_to_cart", 0},
+		{"live vende tambem o produto Y", sessionLive, "live", "quero 2002", "pY", "added_to_cart", 0},
+		{"post vende o produto X", sessionPost, "post", "quero 1001", "pX", "added_to_cart", 0},
+		{"post RECUSA o produto Y", sessionPost, "post", "quero 2002", "", "not_in_promo", 1},
+		{"story vende o produto Y", sessionStory, "story", "quero 2002", "pY", "added_to_cart", 0},
+		{"story RECUSA o produto X", sessionStory, "story", "quero 1001", "", "not_in_promo", 1},
+	}
+
+	// O rótulo do comentário sai por dois caminhos: quem entra no carrinho é
+	// carimbado depois (commentResults), quem é recusado nasce já classificado
+	// (createdComments). commentResult junta os dois para a tabela poder falar
+	// só de veredito.
+	commentResult := func(repo *fakeIngestRepo) []string {
+		if len(repo.commentResults) > 0 {
+			return repo.commentResults
+		}
+		out := make([]string, len(repo.createdComments))
+		for i, c := range repo.createdComments {
+			out[i] = c.Result
+		}
+		return out
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newFakeIngestRepo()
+			repo.products["1001"] = &ProductRow{ID: "pX", Keyword: "1001", Price: 1000, Stock: 5, Name: "Vestido"}
+			repo.products["2002"] = &ProductRow{ID: "pY", Keyword: "2002", Price: 2000, Stock: 5, Name: "Bolsa"}
+
+			core := &fakeCommentCore{
+				// Mesma campanha nas três linhas: o que muda é só a transmissão.
+				event:              &EventOutput{ID: "ev-guarda-chuva", StoreID: "store1", Status: "active"},
+				session:            &SessionOutput{ID: tc.sessionID, Type: tc.sessionType},
+				whitelistBySession: listasDaCampanha,
+				addResult:          AddToCartOutput{CartID: "cart1", CartToken: "tok1", IsNewCart: true},
+			}
+			s := newCommentTestService(repo, core)
+			s.stockReserver = &fakeStockReserver{}
+			social := &fakeSocialReplier{}
+			s.socialReplier = social
+
+			if err := s.ProcessInstagramComment(ctx, ProcessInstagramCommentInput{
+				CommentID: "c1", MediaID: "m1", UserID: "u1", Username: "ana", Text: tc.text,
+			}); err != nil {
+				t.Fatalf("ProcessInstagramComment() error = %v", err)
+			}
+
+			if tc.wantProduct == "" {
+				if len(core.addCalls) != 0 {
+					t.Errorf("AddToCart = %+v, quero nenhum: a transmissao nao vende esse produto", core.addCalls)
+				}
+			} else {
+				if len(core.addCalls) != 1 || core.addCalls[0].ProductID != tc.wantProduct {
+					t.Fatalf("AddToCart = %+v, quero um para %s", core.addCalls, tc.wantProduct)
+				}
+			}
+			if got := commentResult(repo); len(got) != 1 || got[0] != tc.wantResult {
+				t.Errorf("resultado do comentario = %v, quero [%s]", got, tc.wantResult)
+			}
+			if len(social.replies) != tc.wantReplies {
+				t.Errorf("respostas ao comprador = %d, quero %d", len(social.replies), tc.wantReplies)
+			}
+		})
+	}
+}
+
+// Post/story com lista VAZIA vende tudo — a mesma regra do checkout e da live.
+//
+// É o caso que a remoção da herança torna comum: toda transmissão criada pelo
+// painel nasce vazia. Antes desta rodada, a ingestão de post/story fazia o
+// OPOSTO do checkout e recusava 100% dos comentários numa lista vazia.
+func TestPostSessionWithEmptyListSellsAnything(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("codigo conhecido entra no carrinho", func(t *testing.T) {
+		repo := newFakeIngestRepo()
+		repo.products["1001"] = &ProductRow{ID: "p1", Keyword: "1001", Price: 1000, Stock: 5, Name: "Boné"}
+		core := (&fakeCommentCore{
+			session:   &SessionOutput{ID: "sess1", Type: "post"},
+			event:     &EventOutput{ID: "ev1", StoreID: "store1", Status: "active"},
+			addResult: AddToCartOutput{CartID: "cart1", CartToken: "tok1", IsNewCart: true},
+		}).scriptWhitelist() // nasce vazia
+		s := newCommentTestService(repo, core)
+		s.stockReserver = &fakeStockReserver{}
+		social := &fakeSocialReplier{}
+		s.socialReplier = social
+
+		if err := s.ProcessInstagramComment(ctx, ProcessInstagramCommentInput{
+			CommentID: "c1", MediaID: "m1", UserID: "u1", Username: "ana", Text: "quero 1001",
+		}); err != nil {
+			t.Fatalf("ProcessInstagramComment() error = %v", err)
+		}
+
+		if len(core.addCalls) != 1 || core.addCalls[0].ProductID != "p1" {
+			t.Fatalf("AddToCart = %+v, quero um para p1: lista vazia libera todo o catalogo", core.addCalls)
+		}
+		if len(social.replies) != 0 {
+			t.Errorf("respostas = %+v, quero nenhuma: nao ha o que recusar numa lista vazia", social.replies)
+		}
+	})
+
+	t.Run("EU QUERO pelado fica sem produto, e em silencio", func(t *testing.T) {
+		repo := newFakeIngestRepo()
+		core := (&fakeCommentCore{
+			session: &SessionOutput{ID: "sess1", Type: "post"},
+			event:   &EventOutput{ID: "ev1", StoreID: "store1", Status: "active"},
+		}).scriptWhitelist()
+		s := newCommentTestService(repo, core)
+		social := &fakeSocialReplier{}
+		s.socialReplier = social
+
+		if err := s.ProcessInstagramComment(ctx, ProcessInstagramCommentInput{
+			CommentID: "c1", MediaID: "m1", UserID: "u1", Username: "ana", Text: "EU QUERO",
+		}); err != nil {
+			t.Fatalf("ProcessInstagramComment() error = %v", err)
+		}
+
+		if len(core.addCalls) != 0 {
+			t.Errorf("AddToCart = %+v, quero nenhum: nao da para adivinhar o produto de uma loja inteira", core.addCalls)
+		}
+		if len(repo.createdComments) != 1 || repo.createdComments[0].Result != "no_product" {
+			t.Errorf("resultado = %+v, quero [no_product]", repo.createdComments)
+		}
+		if len(social.replies) != 0 || len(social.dms) != 0 {
+			t.Errorf("respostas = %+v / DMs = %+v, quero nenhuma: 'nao disponivel nesta promocao' seria mentira", social.replies, social.dms)
 		}
 	})
 }

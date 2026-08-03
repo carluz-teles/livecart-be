@@ -97,18 +97,17 @@ func (h *Handler) registerUnder(router fiber.Router, prefix string) {
 	g.Patch("/:id/active-product", h.SetActiveProduct)
 	g.Patch("/:id/pause-processing", h.SetProcessingPaused)
 
-	// Whitelist da SESSÃO (D15/N2) — a unidade nova. Chaveada por productId.
+	// Produtos vendáveis POR SESSÃO — a única unidade que tem lista. Chaveada
+	// por productId.
+	//
+	// As quatro rotas equivalentes por EVENTO saíram: elas escreviam em TODAS as
+	// sessões de uma vez, o que é justamente o que o dono do produto NÃO quer —
+	// uma live pode vender qualquer coisa enquanto o story da mesma campanha
+	// vende só uma peça.
 	g.Get("/:id/sessions/:sessionId/whitelist", h.ListSessionProducts)
 	g.Post("/:id/sessions/:sessionId/whitelist", h.AddSessionProduct)
 	g.Put("/:id/sessions/:sessionId/whitelist/:productId", h.UpdateSessionProduct)
 	g.Delete("/:id/sessions/:sessionId/whitelist/:productId", h.DeleteSessionProduct)
-
-	// Whitelist por EVENTO — rota legada mantida para o frontend atual. Cada
-	// operação é aplicada em TODAS as sessões do evento; a leitura é a união.
-	g.Get("/:id/whitelist", h.ListEventProducts)
-	g.Post("/:id/whitelist", h.AddEventProduct)
-	g.Put("/:id/whitelist/:productId", h.UpdateEventProduct)
-	g.Delete("/:id/whitelist/:productId", h.DeleteEventProduct)
 
 	// Event Upsells
 	g.Get("/:id/upsells", h.ListEventUpsells)
@@ -761,7 +760,6 @@ func toLiveResponse(o LiveOutput) LiveResponse {
 		ScheduledAt:            o.ScheduledAt,
 		EndsAt:                 o.EndsAt,
 		Description:            o.Description,
-		ProductCount:           o.ProductCount,
 		UpsellCount:            o.UpsellCount,
 		SessionTypes:           nonNilStrings(o.SessionTypes),
 		CreatedAt:              o.CreatedAt,
@@ -831,6 +829,7 @@ func toEventResponse(o EventOutput) EventResponse {
 			StartedAt:              s.StartedAt,
 			EndedAt:                s.EndedAt,
 			TotalComments:          s.TotalComments,
+			ProductCount:           s.ProductCount,
 			SessionRevenueResponse: newSessionRevenueResponse(s.SessionRevenueOutput),
 			Platforms:              platforms,
 			Comments:               comments,
@@ -852,7 +851,6 @@ func toEventResponse(o EventOutput) EventResponse {
 		ScheduledAt:            o.ScheduledAt,
 		EndsAt:                 o.EndsAt,
 		Description:            o.Description,
-		ProductCount:           o.ProductCount,
 		UpsellCount:            o.UpsellCount,
 		Sessions:               sessions,
 		SessionTypes:           distinctSessionTypes(o.Sessions),
@@ -1279,144 +1277,13 @@ func toLiveModeStateResponse(state *LiveModeStateOutput) LiveModeStateResponse {
 }
 
 // =============================================================================
-// EVENT PRODUCTS (Whitelist)
+// EVENT PRODUCTS (mapper de resposta)
+//
+// O CRUD por EVENTO saiu inteiro (ListEventProducts/AddEventProduct/
+// UpdateEventProduct/DeleteEventProduct): a lista de produtos vendáveis é da
+// TRANSMISSÃO. Sobra o mapper, que os handlers por sessão usam — o payload é o
+// mesmo dado, só ancorado na sessão.
 // =============================================================================
-
-// ListEventProducts godoc
-// @Summary      List event products in whitelist
-// @Description  Returns all products configured for this event's whitelist
-// @Tags         lives
-// @Produce      json
-// @Param        storeId path string true "Store UUID"
-// @Param        id path string true "Event UUID"
-// @Success      200 {object} httpx.Envelope{data=ListEventProductsResponse}
-// @Failure      404 {object} httpx.Envelope
-// @Router       /api/v1/stores/{storeId}/lives/{id}/whitelist [get]
-// @Security     BearerAuth
-func (h *Handler) ListEventProducts(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	eventID := c.Params("id")
-
-	products, err := h.service.ListEventProducts(c.Context(), eventID, storeID)
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	responses := make([]EventProductResponse, len(products))
-	for i, p := range products {
-		responses[i] = toEventProductResponse(p)
-	}
-
-	return httpx.OK(c, ListEventProductsResponse{Data: responses})
-}
-
-// AddEventProduct godoc
-// @Summary      Add product to event whitelist
-// @Description  Adds a product with optional special price and max quantity
-// @Tags         lives
-// @Accept       json
-// @Produce      json
-// @Param        storeId path string true "Store UUID"
-// @Param        id path string true "Event UUID"
-// @Param        request body EventProductRequest true "Product configuration"
-// @Success      201 {object} httpx.Envelope{data=EventProductResponse}
-// @Failure      400 {object} httpx.Envelope
-// @Failure      404 {object} httpx.Envelope
-// @Failure      422 {object} httpx.ValidationEnvelope
-// @Router       /api/v1/stores/{storeId}/lives/{id}/whitelist [post]
-// @Security     BearerAuth
-func (h *Handler) AddEventProduct(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	eventID := c.Params("id")
-
-	var req EventProductRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-	if err := h.validate.Struct(req); err != nil {
-		return httpx.ValidationError(c, err)
-	}
-
-	output, err := h.service.AddEventProduct(c.Context(), AddEventProductInput{
-		EventID:      eventID,
-		StoreID:      storeID,
-		ProductID:    req.ProductID,
-		SpecialPrice: req.SpecialPrice,
-		MaxQuantity:  req.MaxQuantity,
-		DisplayOrder: req.DisplayOrder,
-		Featured:     req.Featured,
-	})
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	return httpx.Created(c, toEventProductResponse(output))
-}
-
-// UpdateEventProduct godoc
-// @Summary      Update event product configuration
-// @Description  Updates special price, max quantity, display order, or featured status
-// @Tags         lives
-// @Accept       json
-// @Produce      json
-// @Param        storeId path string true "Store UUID"
-// @Param        id path string true "Event UUID"
-// @Param        productId path string true "Event Product UUID"
-// @Param        request body EventProductRequest true "Product configuration"
-// @Success      200 {object} httpx.Envelope{data=EventProductResponse}
-// @Failure      400 {object} httpx.Envelope
-// @Failure      404 {object} httpx.Envelope
-// @Failure      422 {object} httpx.ValidationEnvelope
-// @Router       /api/v1/stores/{storeId}/lives/{id}/whitelist/{productId} [put]
-// @Security     BearerAuth
-func (h *Handler) UpdateEventProduct(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	eventID := c.Params("id")
-	productID := c.Params("productId")
-
-	var req EventProductRequest
-	if err := c.BodyParser(&req); err != nil {
-		return httpx.BadRequest(c, "invalid request body")
-	}
-
-	output, err := h.service.UpdateEventProduct(c.Context(), UpdateEventProductInput{
-		ProductID:    productID,
-		EventID:      eventID,
-		StoreID:      storeID,
-		SpecialPrice: req.SpecialPrice,
-		MaxQuantity:  req.MaxQuantity,
-		DisplayOrder: req.DisplayOrder,
-		Featured:     req.Featured,
-	})
-	if err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	return httpx.OK(c, toEventProductResponse(output))
-}
-
-// DeleteEventProduct godoc
-// @Summary      Remove product from event whitelist
-// @Description  Removes a product from the event's whitelist
-// @Tags         lives
-// @Param        storeId path string true "Store UUID"
-// @Param        id path string true "Event UUID"
-// @Param        productId path string true "Event Product UUID"
-// @Success      200 {object} httpx.Envelope{data=httpx.DeletedResponse}
-// @Failure      404 {object} httpx.Envelope
-// @Router       /api/v1/stores/{storeId}/lives/{id}/whitelist/{productId} [delete]
-// @Security     BearerAuth
-func (h *Handler) DeleteEventProduct(c *fiber.Ctx) error {
-	storeID := c.Locals("store_id").(string)
-	eventID := c.Params("id")
-	productID := c.Params("productId")
-
-	if err := h.service.DeleteEventProduct(c.Context(), productID, eventID, storeID); err != nil {
-		return httpx.HandleServiceError(c, err)
-	}
-
-	return httpx.Deleted(c, productID)
-}
 
 func toEventProductResponse(o EventProductOutput) EventProductResponse {
 	return EventProductResponse{

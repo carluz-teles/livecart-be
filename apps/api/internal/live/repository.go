@@ -26,19 +26,22 @@ func NewRepository(q *sqlc.Queries, pool *pgxpool.Pool) *Repository {
 	return &Repository{q: q, pool: pool}
 }
 
-// CreateSessionWithPlatformTx cria a sessão, HERDA a whitelist do evento e
-// registra a mídia — tudo numa transação só. Devolve, além da sessão e da
-// plataforma, quantos produtos foram herdados (o chamador loga).
+// CreateSessionWithPlatformTx cria a sessão e registra a mídia numa transação só.
 // sessionType é o tipo da transmissão (D3): live|post|reel|story.
-func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, sessionType, platform, platformLiveID string) (SessionRow, *PlatformRow, int64, error) {
+//
+// A sessão NASCE VAZIA, e vazia vende TODOS os produtos ativos da loja. Não há
+// herança: a lista de produtos é da transmissão, não da campanha, então não há
+// de onde herdar. Quem quiser restringir esta transmissão configura os produtos
+// DELA depois de criá-la.
+func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, sessionType, platform, platformLiveID string) (SessionRow, *PlatformRow, error) {
 	eventUID, err := parseUUID(eventID)
 	if err != nil {
-		return SessionRow{}, nil, 0, err
+		return SessionRow{}, nil, err
 	}
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return SessionRow{}, nil, 0, fmt.Errorf("beginning transaction: %w", err)
+		return SessionRow{}, nil, fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer tx.Rollback(ctx) // No-op if already committed
 
@@ -51,28 +54,7 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, s
 		Type:    SessionTypeFromEventType(sessionType),
 	})
 	if err != nil {
-		return SessionRow{}, nil, 0, fmt.Errorf("creating live session: %w", err)
-	}
-
-	// A sessão nova HERDA a whitelist do evento, no MESMO tx em que nasce.
-	//
-	// Antes ela nascia vazia, e "lista vazia = libera tudo" (a regra continua
-	// valendo) transformava a barreira em nada no fluxo real do lojista:
-	// configurar os produtos do evento → criar a transmissão de terça → a
-	// sessão nova sem lista libera o catálogo inteiro, porque a união do
-	// checkout aceita o produto se ALGUMA sessão o aceita e uma sessão sem lista
-	// aceita tudo. Herdar é o que faz a configuração do evento continuar
-	// valendo para a transmissão seguinte.
-	//
-	// Dentro do tx de propósito: uma sessão que existe com a lista errada por
-	// uma janela de milissegundos é uma sessão que libera o catálogo inteiro
-	// nessa janela.
-	inherited, err := qtx.InheritEventWhitelistIntoSession(ctx, sqlc.InheritEventWhitelistIntoSessionParams{
-		SessionID: sessionRow.ID,
-		EventID:   eventUID,
-	})
-	if err != nil {
-		return SessionRow{}, nil, 0, fmt.Errorf("inheriting event whitelist into session: %w", err)
+		return SessionRow{}, nil, fmt.Errorf("creating live session: %w", err)
 	}
 
 	// Add the platform to the session — só quando a mídia já é conhecida, o
@@ -87,7 +69,7 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, s
 			PlatformLiveID: platformLiveID,
 		})
 		if err != nil {
-			return SessionRow{}, nil, 0, fmt.Errorf("adding platform to session: %w", err)
+			return SessionRow{}, nil, fmt.Errorf("adding platform to session: %w", err)
 		}
 		platformOut = &PlatformRow{
 			ID:             platformRow.ID.String(),
@@ -101,15 +83,15 @@ func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, s
 	// Emit session.created in the same tx (transactional outbox), carrying the
 	// assigned sequence_order so consumers see session ordering.
 	if err := emitSessionCreated(ctx, qtx, sessionRow, platform, platformLiveID); err != nil {
-		return SessionRow{}, nil, 0, err
+		return SessionRow{}, nil, err
 	}
 
 	// Commit the transaction
 	if err := tx.Commit(ctx); err != nil {
-		return SessionRow{}, nil, 0, fmt.Errorf("committing transaction: %w", err)
+		return SessionRow{}, nil, fmt.Errorf("committing transaction: %w", err)
 	}
 
-	return toSessionRow(sessionRow), platformOut, inherited, nil
+	return toSessionRow(sessionRow), platformOut, nil
 }
 
 // emitSessionCreated writes the canonical session.created event to the outbox
@@ -264,7 +246,32 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 		return EventRow{}, SessionRow{}, nil, fmt.Errorf("creating live session: %w", err)
 	}
 
-	// 3. Add the platform to the session — só quando a mídia já é conhecida.
+	// 3. A lista de produtos vendáveis da PRIMEIRA transmissão, na MESMA
+	// transação em que ela nasce.
+	//
+	// É o atalho de post/story: o lojista escolhe os produtos no formulário, e
+	// esses produtos são desta transmissão — não da campanha, que não tem lista.
+	// Antes isso era um laço FORA da transação, chamando a rota por evento
+	// (broadcast em todas as sessões) e só logando Warn a cada falha: a
+	// publicação já estava no ar e a campanha ficava com lista PARCIAL — ou
+	// vazia, que sob a regra "vazia vende tudo" libera o catálogo inteiro,
+	// exatamente o oposto do que o lojista pediu. Aqui, ou grava tudo, ou não
+	// existe evento.
+	for i, productID := range params.ProductIDs {
+		productUID, err := parseUUID(productID)
+		if err != nil {
+			return EventRow{}, SessionRow{}, nil, err
+		}
+		if _, err := qtx.UpsertSessionProduct(ctx, sqlc.UpsertSessionProductParams{
+			SessionID:    sessionRow.ID,
+			ProductID:    productUID,
+			DisplayOrder: int32(i),
+		}); err != nil {
+			return EventRow{}, SessionRow{}, nil, fmt.Errorf("adding product %s to the session product list: %w", productID, err)
+		}
+	}
+
+	// 4. Add the platform to the session — só quando a mídia já é conhecida.
 	var platformRow *PlatformRow
 	if platform != "" && platformLiveID != "" {
 		row, err := qtx.AddPlatformToSession(ctx, sqlc.AddPlatformToSessionParams{
@@ -806,16 +813,13 @@ func (r *Repository) DeleteEvent(ctx context.Context, id, storeID string) error 
 // SESSION OPERATIONS
 // =============================================================================
 
-// Repository.CreateSession foi REMOVIDA. Era o segundo caminho de criação de
-// sessão e, desde que a herança de whitelist entrou, uma armadilha silenciosa:
-// ela chamava CreateLiveSession direto, fora de transação e sem copiar
-// session_products do evento. Uma sessão nascida por ela ficaria com a lista
-// VAZIA — e "lista vazia libera tudo" (D15) faz disso a derrubada da barreira de
-// produtos da campanha inteira, sem erro nenhum e sem sintoma até a primeira
-// venda de um produto que não devia estar à venda.
+// Repository.CreateSession foi REMOVIDA. Era um SEGUNDO caminho de criação de
+// sessão: chamava CreateLiveSession direto, fora de transação, sem vincular
+// mídia e sem emitir session.created no outbox. Duas portas para o mesmo ato é
+// como cada regra nova acaba escrita só numa delas.
 //
 // Não tinha chamador. O ponto único de criação é CreateSessionWithPlatformTx,
-// que cria sessão + plataforma + whitelist herdada na MESMA transação.
+// que cria sessão + plataforma + evento de outbox na MESMA transação.
 
 func (r *Repository) GetSessionByID(ctx context.Context, id string) (*SessionRow, error) {
 	uid, err := parseUUID(id)
@@ -2479,15 +2483,19 @@ func (r *Repository) CountEventUpsells(ctx context.Context, eventID string) (int
 	return int(count), nil
 }
 
-// GetEventWithCounts returns an event with product and upsell counts
-func (r *Repository) GetEventWithCounts(ctx context.Context, eventID, storeID string) (*EventRow, int, int, error) {
+// GetEventWithCounts returns an event with its upsell count.
+//
+// A contagem de PRODUTOS saiu: não existe "quantos produtos a campanha vende".
+// A lista é da transmissão, e quem responde isso é CountSessionProductsByEvent,
+// uma contagem por sessão.
+func (r *Repository) GetEventWithCounts(ctx context.Context, eventID, storeID string) (*EventRow, int, error) {
 	eventUID, err := parseUUID(eventID)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, err
 	}
 	storeUID, err := parseUUID(storeID)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, err
 	}
 
 	row, err := r.q.GetLiveEventWithCounts(ctx, sqlc.GetLiveEventWithCountsParams{
@@ -2496,13 +2504,13 @@ func (r *Repository) GetEventWithCounts(ctx context.Context, eventID, storeID st
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, 0, 0, httpx.ErrNotFound("event not found")
+			return nil, 0, httpx.ErrNotFound("event not found")
 		}
-		return nil, 0, 0, fmt.Errorf("getting event with counts: %w", err)
+		return nil, 0, fmt.Errorf("getting event with counts: %w", err)
 	}
 
 	eventRow := toEventRowFromWithCounts(row)
-	return &eventRow, int(row.ProductCount), int(row.UpsellCount), nil
+	return &eventRow, int(row.UpsellCount), nil
 }
 
 // =============================================================================

@@ -13,11 +13,15 @@ import (
 )
 
 // =============================================================================
-// SESSION PRODUCTS (Whitelist da SESSÃO — D15/N2)
+// SESSION PRODUCTS — a lista de produtos vendáveis é da TRANSMISSÃO
 //
-// A whitelist passou a ser da sessão. As rotas legadas por EVENTO continuam
-// existindo (o frontend ainda as usa) e são traduzidas aqui: escrever no evento
-// aplica em todas as sessões dele; ler do evento devolve a UNIÃO das sessões.
+// A lista pertence à SESSÃO e só a ela: uma live vende qualquer coisa, um post
+// vende só o produto X e um story só o produto Y, e os três podem ser
+// transmissões da MESMA campanha. Não há leitura nem escrita por evento aqui —
+// as funções que traduziam "evento" para "todas as sessões" saíram junto com as
+// rotas que as chamavam.
+//
+// Lista vazia = todos os produtos ativos da loja liberados naquela transmissão.
 // =============================================================================
 
 func toSessionProductParams(in SessionProductInput) (pgtype.Int4, pgtype.Int4) {
@@ -116,103 +120,22 @@ func (r *Repository) CountSessionProducts(ctx context.Context, sessionID string)
 	return int(n), nil
 }
 
-// ListEventWhitelist devolve a UNIÃO das whitelists das sessões do evento, uma
-// linha por produto. É o que sustenta a listagem e o badge por evento.
-func (r *Repository) ListEventWhitelist(ctx context.Context, eventID string) ([]SessionProductOutput, error) {
+// CountSessionProductsByEvent devolve, numa leitura só, quantos produtos cada
+// transmissão da campanha libera. Sessão ausente do mapa = zero = vende tudo.
+func (r *Repository) CountSessionProductsByEvent(ctx context.Context, eventID string) (map[string]int, error) {
 	uid, err := parseUUID(eventID)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := r.q.ListEventWhitelistFromSessions(ctx, uid)
+	rows, err := r.q.CountSessionProductsByEvent(ctx, uid)
 	if err != nil {
-		return nil, fmt.Errorf("listing event whitelist: %w", err)
+		return nil, fmt.Errorf("counting session products by event: %w", err)
 	}
-	out := make([]SessionProductOutput, len(rows))
-	for i, row := range rows {
-		out[i] = toSessionProductOutputFromEvent(row)
+	out := make(map[string]int, len(rows))
+	for _, row := range rows {
+		out[row.SessionID.String()] = int(row.ProductCount)
 	}
 	return out, nil
-}
-
-// UpsertProductInAllEventSessions aplica a whitelist do EVENTO em todas as
-// sessões existentes dele. Sessão criada DEPOIS nasce vazia (N2): não há
-// herança, e vazia vende tudo.
-func (r *Repository) UpsertProductInAllEventSessions(ctx context.Context, in SessionProductInput) error {
-	eventUID, err := parseUUID(in.EventID)
-	if err != nil {
-		return err
-	}
-	productUID, err := parseUUID(in.ProductID)
-	if err != nil {
-		return err
-	}
-	specialPrice, maxQuantity := toSessionProductParams(in)
-	return r.q.UpsertSessionProductForEvent(ctx, sqlc.UpsertSessionProductForEventParams{
-		EventID:      eventUID,
-		ProductID:    productUID,
-		SpecialPrice: specialPrice,
-		MaxQuantity:  maxQuantity,
-		DisplayOrder: in.DisplayOrder,
-		Featured:     in.Featured,
-	})
-}
-
-// DeleteProductFromAllEventSessions remove o produto da whitelist de todas as
-// sessões do evento.
-func (r *Repository) DeleteProductFromAllEventSessions(ctx context.Context, eventID, productID string) error {
-	eventUID, err := parseUUID(eventID)
-	if err != nil {
-		return err
-	}
-	productUID, err := parseUUID(productID)
-	if err != nil {
-		return err
-	}
-	return r.q.DeleteSessionProductsByEventAndProduct(ctx, sqlc.DeleteSessionProductsByEventAndProductParams{
-		EventID:   eventUID,
-		ProductID: productUID,
-	})
-}
-
-// GetEventWhitelistProduct devolve uma linha da união por evento.
-func (r *Repository) GetEventWhitelistProduct(ctx context.Context, eventID, productID string) (SessionProductOutput, error) {
-	eventUID, err := parseUUID(eventID)
-	if err != nil {
-		return SessionProductOutput{}, err
-	}
-	productUID, err := parseUUID(productID)
-	if err != nil {
-		return SessionProductOutput{}, err
-	}
-	row, err := r.q.GetEventWhitelistProduct(ctx, sqlc.GetEventWhitelistProductParams{
-		EventID:   eventUID,
-		ProductID: productUID,
-	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return SessionProductOutput{}, httpx.ErrNotFound("produto nao esta na whitelist do evento")
-		}
-		return SessionProductOutput{}, fmt.Errorf("getting event whitelist product: %w", err)
-	}
-	return buildSessionProductOutput(
-		row.ID, row.ProductID, row.ProductName, row.ProductKeyword,
-		row.ProductImageUrl, row.OriginalPrice, row.SpecialPrice, row.MaxQuantity,
-		row.DisplayOrder, row.Featured, row.ProductStock, row.ProductActive,
-		row.CreatedAt, row.UpdatedAt,
-	), nil
-}
-
-// CountEventWhitelist conta produtos DISTINTOS barrados no evento inteiro.
-func (r *Repository) CountEventWhitelist(ctx context.Context, eventID string) (int, error) {
-	uid, err := parseUUID(eventID)
-	if err != nil {
-		return 0, err
-	}
-	n, err := r.q.CountEventWhitelistFromSessions(ctx, uid)
-	if err != nil {
-		return 0, fmt.Errorf("counting event whitelist: %w", err)
-	}
-	return int(n), nil
 }
 
 func toSessionProductOutput(row sqlc.GetSessionProductByProductIDRow) SessionProductOutput {
@@ -233,17 +156,8 @@ func toSessionProductOutputFromList(row sqlc.ListSessionProductsRow) SessionProd
 	)
 }
 
-func toSessionProductOutputFromEvent(row sqlc.ListEventWhitelistFromSessionsRow) SessionProductOutput {
-	return buildSessionProductOutput(
-		row.ID, row.ProductID, row.ProductName, row.ProductKeyword,
-		row.ProductImageUrl, row.OriginalPrice, row.SpecialPrice, row.MaxQuantity,
-		row.DisplayOrder, row.Featured, row.ProductStock, row.ProductActive,
-		row.CreatedAt, row.UpdatedAt,
-	)
-}
-
-// buildSessionProductOutput centraliza a conversão pgtype→DTO das três leituras
-// (por sessão, por produto e a união por evento) — elas devolvem exatamente os
+// buildSessionProductOutput centraliza a conversão pgtype→DTO das duas leituras
+// (a lista da sessão e a linha de um produto) — elas devolvem exatamente os
 // mesmos campos e duplicar a conversão é como o cálculo de preço efetivo já se
 // espalhou por três funções no lado do evento.
 func buildSessionProductOutput(

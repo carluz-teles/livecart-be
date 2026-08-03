@@ -243,6 +243,7 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		StartsAt:               startsAt,
 		EndsAt:                 input.EndsAt,
 		Description:            input.Description,
+		ProductIDs:             input.ProductIDs,
 	}, platform, platformLiveID)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("failed to create live with session",
@@ -364,7 +365,14 @@ func (s *Service) armEventClose(ctx context.Context, eventID, storeID string, en
 // CreatePostEvent creates a post-commerce event mapped to a published Instagram
 // post. It reuses the live create path (the post media id is stored as the
 // session platform_live_id so comment processing finds the event), persists the
-// post metadata, and whitelists the selected products for the promotion.
+// post metadata, and restricts the created SESSION to the selected products.
+//
+// Os produtos escolhidos no formulário são da TRANSMISSÃO que nasce aqui, não da
+// campanha: é justamente por isso que o atalho continua exigindo pelo menos um
+// produto. Eles são gravados DENTRO da transação de criação (ver
+// CreateEventWithSessionTx) — antes eram um laço posterior que só logava Warn a
+// cada falha, e a publicação já no ar ficava com lista parcial ou vazia. Vazia,
+// sob a regra "vazia vende tudo", libera o catálogo inteiro: o oposto do pedido.
 func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (CreateLiveOutput, error) {
 	if input.MediaID == "" {
 		return CreateLiveOutput{}, httpx.DomainError(400, httpx.CodeLiveMediaRequired, "mediaId is required")
@@ -397,6 +405,7 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 		CartMaxQuantityPerItem: input.CartMaxQuantityPerItem,
 		StartsAt:               input.StartsAt,
 		EndsAt:                 input.EndsAt,
+		ProductIDs:             input.ProductIDs,
 	})
 	if err != nil {
 		return CreateLiveOutput{}, err
@@ -411,21 +420,6 @@ func (s *Service) CreatePostEvent(ctx context.Context, input CreatePostInput) (C
 	}); err != nil {
 		logger.From(ctx, s.logger).Warn("failed to set post media metadata",
 			zap.String("event_id", out.ID), zap.Error(err))
-	}
-
-	// Whitelist the selected products for this promotion.
-	for i, productID := range input.ProductIDs {
-		if _, err := s.AddEventProduct(ctx, AddEventProductInput{
-			EventID:      out.ID,
-			StoreID:      input.StoreID,
-			ProductID:    productID,
-			DisplayOrder: int32(i),
-		}); err != nil {
-			logger.From(ctx, s.logger).Warn("failed to whitelist product on post event",
-				zap.String("event_id", out.ID),
-				zap.String("product_id", productID),
-				zap.Error(err))
-		}
 	}
 
 	logger.From(ctx, s.logger).Info("post event created",
@@ -684,6 +678,22 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		}
 	}
 
+	// Quantos produtos cada transmissão libera, numa leitura só. Zero (sessão
+	// ausente do mapa) é resposta legítima: "esta transmissão vende todos os
+	// produtos ativos da loja". Sem esse número a tela não consegue distinguir
+	// "vende tudo" de "esqueci de configurar" — e, como a lista vazia é o
+	// default, a diferença é a barreira inteira.
+	//
+	// Best-effort como a métrica acima: contagem é enfeite de tela, e derrubar o
+	// detalhe da campanha por causa dela seria trocar a venda pelo badge.
+	productCountBySession := map[string]int{}
+	if counts, cerr := s.repo.CountSessionProductsByEvent(ctx, event.ID); cerr != nil {
+		logger.From(ctx, s.logger).Warn("failed to count session products",
+			zap.String("event_id", event.ID), zap.Error(cerr))
+	} else {
+		productCountBySession = counts
+	}
+
 	// Build session outputs with platforms and stats
 	sessions := make([]SessionOutput, len(sessionRows))
 	for i, sessionRow := range sessionRows {
@@ -736,6 +746,7 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 			StartedAt:              sessionRow.StartedAt,
 			EndedAt:                sessionRow.EndedAt,
 			TotalComments:          sessionRow.TotalComments,
+			ProductCount:           productCountBySession[sessionRow.ID],
 			SessionRevenueOutput:   revenueBySession[sessionRow.ID],
 			Platforms:              platformOutputs,
 			Comments:               commentOutputs,
@@ -744,11 +755,6 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		}
 	}
 
-	// Get product and upsell counts
-	productCount, err := s.repo.CountEventWhitelist(ctx, event.ID)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to count event products", zap.String("event_id", event.ID), zap.Error(err))
-	}
 	upsellCount, err := s.repo.CountEventUpsells(ctx, event.ID)
 	if err != nil {
 		logger.From(ctx, s.logger).Warn("failed to count event upsells", zap.String("event_id", event.ID), zap.Error(err))
@@ -768,7 +774,6 @@ func (s *Service) GetEventWithSessions(ctx context.Context, id, storeID string) 
 		ScheduledAt:            event.ScheduledAt,
 		EndsAt:                 event.EndsAt,
 		Description:            event.Description,
-		ProductCount:           productCount,
 		UpsellCount:            upsellCount,
 		Sessions:               sessions,
 
@@ -1172,9 +1177,14 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 			"platform e platformLiveId precisam vir juntos: mande os dois para vincular a publicação, ou nenhum para criar a transmissão sem publicação")
 	}
 
-	// Create the session, inherit the event whitelist and add the platform in a
-	// single transaction.
-	session, platform, inherited, err := s.repo.CreateSessionWithPlatformTx(ctx, input.EventID, SessionTypeFromEventType(input.Type), input.Platform, input.PlatformLiveID)
+	// Create the session and add the platform in a single transaction.
+	//
+	// A sessão nasce VAZIA e, portanto, vendendo todos os produtos ativos da
+	// loja. A herança da lista do evento saiu junto com a lista do evento: ela
+	// existia para o caso "configurei os produtos na campanha e criei a sessão
+	// depois", que não existe mais — não há lista de campanha de onde herdar, e
+	// cada transmissão é configurada explicitamente.
+	session, platform, err := s.repo.CreateSessionWithPlatformTx(ctx, input.EventID, SessionTypeFromEventType(input.Type), input.Platform, input.PlatformLiveID)
 	if err != nil {
 		logger.From(ctx, s.logger).Error("failed to create session with platform",
 			zap.String("event_id", input.EventID),
@@ -1203,15 +1213,10 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		}
 	}
 
-	// inherited_products é o número que responde "por que meu produto está
-	// liberado/bloqueado nesta transmissão?" sem abrir o banco. Zero é legítimo
-	// (evento sem whitelist = tudo liberado) e é exatamente o caso que o
-	// suporte confunde com bug.
 	logger.From(ctx, s.logger).Info("session created",
 		zap.String("event_id", input.EventID),
 		zap.String("session_id", session.ID),
 		zap.String("platform", input.Platform),
-		zap.Int64("inherited_products", inherited),
 	)
 
 	out := CreateSessionOutput{
@@ -2035,120 +2040,15 @@ func (s *Service) requireLiveSession(ctx context.Context, sessionID, eventID, st
 	return nil
 }
 
-// A whitelist é da SESSÃO (D15/N2). As funções abaixo mantêm de pé as rotas
-// legadas por EVENTO — que o frontend ainda usa — traduzindo cada operação para
-// TODAS as sessões daquele evento. Ler pelo evento devolve a UNIÃO.
-//
-// Sessão criada DEPOIS de uma configuração por evento NASCE VAZIA (N2, decisão
-// explícita do dono) — e vazia vende tudo. Não há herança.
-
-// AddEventProduct aplica o produto na whitelist de todas as sessões do evento.
-func (s *Service) AddEventProduct(ctx context.Context, input AddEventProductInput) (EventProductOutput, error) {
-	// Verify event exists and belongs to store
-	if _, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID); err != nil {
-		return EventProductOutput{}, err
-	}
-
-	in := SessionProductInput{
-		StoreID:      input.StoreID,
-		EventID:      input.EventID,
-		ProductID:    input.ProductID,
-		SpecialPrice: input.SpecialPrice,
-		MaxQuantity:  input.MaxQuantity,
-		DisplayOrder: input.DisplayOrder,
-		Featured:     input.Featured,
-	}
-	if err := s.repo.UpsertProductInAllEventSessions(ctx, in); err != nil {
-		return EventProductOutput{}, err
-	}
-
-	output, err := s.repo.GetEventWhitelistProduct(ctx, input.EventID, input.ProductID)
-	if err != nil {
-		return EventProductOutput{}, err
-	}
-
-	logger.From(ctx, s.logger).Info("added product to event whitelist",
-		zap.String("event_id", input.EventID),
-		zap.String("product_id", input.ProductID),
-	)
-
-	return output, nil
-}
-
-// ListEventProducts devolve a união das whitelists das sessões do evento.
-func (s *Service) ListEventProducts(ctx context.Context, eventID, storeID string) ([]EventProductOutput, error) {
-	// Verify event exists and belongs to store
-	if _, err := s.repo.GetEventByID(ctx, eventID, storeID); err != nil {
-		return nil, err
-	}
-
-	return s.repo.ListEventWhitelist(ctx, eventID)
-}
-
-// UpdateEventProduct regrava a configuração do produto em todas as sessões.
-//
-// A chave é o PRODUTO, não o id da linha. Chavear pelo id da linha é o bug que
-// o par FE/BE carrega hoje: o frontend manda products.id no path onde a API
-// esperava event_products.id, então editar preço especial devolvia 404 e
-// remover era um no-op que ainda exibia "removido com sucesso".
-func (s *Service) UpdateEventProduct(ctx context.Context, input UpdateEventProductInput) (EventProductOutput, error) {
-	// Verify event exists and belongs to store
-	if _, err := s.repo.GetEventByID(ctx, input.EventID, input.StoreID); err != nil {
-		return EventProductOutput{}, err
-	}
-
-	// Só regrava o que já está na whitelist: um PUT em produto ausente é 404,
-	// não uma inclusão silenciosa.
-	if _, err := s.repo.GetEventWhitelistProduct(ctx, input.EventID, input.ProductID); err != nil {
-		return EventProductOutput{}, err
-	}
-
-	if err := s.repo.UpsertProductInAllEventSessions(ctx, SessionProductInput{
-		StoreID:      input.StoreID,
-		EventID:      input.EventID,
-		ProductID:    input.ProductID,
-		SpecialPrice: input.SpecialPrice,
-		MaxQuantity:  input.MaxQuantity,
-		DisplayOrder: input.DisplayOrder,
-		Featured:     input.Featured,
-	}); err != nil {
-		return EventProductOutput{}, err
-	}
-
-	output, err := s.repo.GetEventWhitelistProduct(ctx, input.EventID, input.ProductID)
-	if err != nil {
-		return EventProductOutput{}, err
-	}
-
-	logger.From(ctx, s.logger).Info("updated event product",
-		zap.String("event_id", input.EventID),
-		zap.String("product_id", input.ProductID),
-	)
-
-	return output, nil
-}
-
-// DeleteEventProduct remove o produto da whitelist de todas as sessões.
-func (s *Service) DeleteEventProduct(ctx context.Context, productID, eventID, storeID string) error {
-	// Verify event exists and belongs to store
-	if _, err := s.repo.GetEventByID(ctx, eventID, storeID); err != nil {
-		return err
-	}
-
-	if err := s.repo.DeleteProductFromAllEventSessions(ctx, eventID, productID); err != nil {
-		return err
-	}
-
-	logger.From(ctx, s.logger).Info("deleted event product",
-		zap.String("event_id", eventID),
-		zap.String("product_id", productID),
-	)
-
-	return nil
-}
-
 // =============================================================================
-// SESSION PRODUCTS (Whitelist da SESSÃO)
+// SESSION PRODUCTS — a lista de produtos vendáveis é da TRANSMISSÃO
+//
+// Não existe mais CRUD por EVENTO (AddEventProduct/ListEventProducts/
+// UpdateEventProduct/DeleteEventProduct saíram). Uma live vende qualquer coisa,
+// um post vende só o produto X e um story só o produto Y — e os três podem ser
+// transmissões da mesma campanha, então "a lista da campanha" não tem resposta.
+//
+// Lista vazia = todos os produtos ativos da loja liberados naquela transmissão.
 // =============================================================================
 
 // resolveSessionOfEvent confirma que a sessão pertence ao evento e que o evento

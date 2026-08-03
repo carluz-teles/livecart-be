@@ -7,16 +7,20 @@ import (
 )
 
 // =============================================================================
-// SESSION PRODUCTS (Whitelist da SESSÃO — D15/N2)
+// SESSION PRODUCTS — a lista de produtos vendáveis é da TRANSMISSÃO
 //
-// Regra única: lista vazia = TODOS os produtos da loja liberados naquela
-// sessão. Sessão nova nasce vazia, portanto vende tudo, mesmo que outra sessão
-// do mesmo evento tenha whitelist.
+// Estas quatro rotas são as ÚNICAS que configuram produtos: não existe
+// equivalente por evento. Uma live pode vender qualquer coisa enquanto o post e
+// o story da mesma campanha vendem só uma peça cada.
+//
+// Regra única: lista vazia = TODOS os produtos ativos da loja liberados naquela
+// transmissão. Sessão nova nasce vazia — portanto vende tudo, mesmo que outra
+// transmissão do mesmo evento tenha lista.
 // =============================================================================
 
 // ListSessionProducts godoc
-// @Summary      List the session whitelist
-// @Description  Products allowed in this session. Empty list means every store product is allowed.
+// @Summary      List the products this session can sell
+// @Description  Lista de produtos vendáveis DESTA transmissão. Lista vazia = todos os produtos ativos da loja são vendáveis aqui.
 // @Tags         lives
 // @Produce      json
 // @Param        storeId path string true "Store UUID"
@@ -45,7 +49,7 @@ func (h *Handler) ListSessionProducts(c *fiber.Ctx) error {
 }
 
 // AddSessionProduct godoc
-// @Summary      Add a product to the session whitelist
+// @Summary      Add a product to this session's sellable list
 // @Tags         lives
 // @Accept       json
 // @Produce      json
@@ -74,8 +78,8 @@ func (h *Handler) AddSessionProduct(c *fiber.Ctx) error {
 }
 
 // UpdateSessionProduct godoc
-// @Summary      Update a product in the session whitelist
-// @Description  Keyed by productId — never by the whitelist row id.
+// @Summary      Update a product in this session's sellable list
+// @Description  Chaveado por productId — nunca pelo id da linha da lista.
 // @Tags         lives
 // @Accept       json
 // @Produce      json
@@ -105,7 +109,7 @@ func (h *Handler) UpdateSessionProduct(c *fiber.Ctx) error {
 }
 
 // DeleteSessionProduct godoc
-// @Summary      Remove a product from the session whitelist
+// @Summary      Remove a product from this session's sellable list
 // @Tags         lives
 // @Param        storeId path string true "Store UUID"
 // @Param        id path string true "Event UUID"

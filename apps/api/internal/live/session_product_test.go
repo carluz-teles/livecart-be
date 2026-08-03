@@ -1,11 +1,11 @@
 package live
 
-// N2 — a semântica de "lista vazia" era OPOSTA nas duas metades do sistema:
-// no checkout liberava tudo, na ingestão de post/story bloqueava tudo. Estes
-// testes fixam a regra única: LISTA VAZIA = TODOS OS PRODUTOS LIBERADOS.
+// A lista de produtos vendáveis é da TRANSMISSÃO, e lista vazia libera TODOS os
+// produtos ativos da loja. Estes testes fixam a regra no banco.
 //
-// Cobre também a regra de UNIÃO do checkout, que existe porque o carrinho é do
-// EVENTO e atravessa N sessões — não há "a sessão do checkout".
+// Cobrem também a regra de UNIÃO do CHECKOUT, que continua sendo do evento
+// porque o carrinho é do evento e atravessa N transmissões — não existe "a
+// sessão do checkout".
 
 import (
 	"context"
@@ -127,11 +127,17 @@ func TestSessionWhitelistBlocksProductOutsideTheList(t *testing.T) {
 	}
 }
 
-// A regra de união do checkout: o carrinho é do evento, então basta UMA sessão
-// aceitar. Uma sessão sem lista aceita tudo — logo, ela sozinha derruba a
-// barreira das outras. É consequência direta de "vazia = libera tudo", e está
-// aqui explícito para ninguém descobrir isso em produção.
-func TestEventWhitelistIsTheUnionOfItsSessions(t *testing.T) {
+// O CHECKOUT aceita o que QUALQUER transmissão da campanha aceita: o carrinho é
+// do evento e atravessa todas elas, então basta UMA sessão aceitar. Uma sessão
+// sem lista aceita tudo — logo, ela sozinha derruba a barreira das outras.
+//
+// O nome fala do CHECKOUT de propósito: isto NÃO é "a lista da campanha" (que
+// não existe mais), é a regra de quem valida o carrinho. Numa campanha com uma
+// live (lista vazia) e um post (lista de 1), a live libera o catálogo inteiro no
+// checkout; a barreira que vale de verdade para o post é a da INGESTÃO, que lê a
+// lista da sessão do comentário. Está aqui explícito para ninguém descobrir isso
+// em produção.
+func TestCheckoutAcceptsWhatAnySessionAccepts(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	f := seedWhitelistFixture(t, ctx, "wl-uniao", 2)
@@ -156,50 +162,6 @@ func TestEventWhitelistIsTheUnionOfItsSessions(t *testing.T) {
 	}
 	if f.allowed(t, ctx, f.products[1]) {
 		t.Error("com whitelist em TODAS as sessoes, o produto de fora tem de ser barrado")
-	}
-}
-
-// A rota legada por evento escreve em todas as sessões existentes — é o que
-// mantém o frontend atual funcionando durante o expand.
-func TestEventLevelWriteReachesEverySession(t *testing.T) {
-	requireDB(t)
-	ctx := context.Background()
-	f := seedWhitelistFixture(t, ctx, "wl-legado", 2)
-
-	if err := testRepo.UpsertProductInAllEventSessions(ctx, SessionProductInput{
-		EventID:   f.eventID,
-		ProductID: f.products[0],
-	}); err != nil {
-		t.Fatalf("UpsertProductInAllEventSessions: %v", err)
-	}
-	for i, sessionID := range f.sessions {
-		products, err := testRepo.ListSessionProducts(ctx, sessionID)
-		if err != nil {
-			t.Fatalf("ListSessionProducts: %v", err)
-		}
-		if len(products) != 1 {
-			t.Errorf("sessao %d ficou com %d produto(s), quero 1", i, len(products))
-		}
-	}
-
-	// A leitura por evento devolve UMA linha por produto, não uma por sessão.
-	union, err := testRepo.ListEventWhitelist(ctx, f.eventID)
-	if err != nil {
-		t.Fatalf("ListEventWhitelist: %v", err)
-	}
-	if len(union) != 1 {
-		t.Errorf("uniao devolveu %d linhas, quero 1 (uma por PRODUTO)", len(union))
-	}
-
-	if err := testRepo.DeleteProductFromAllEventSessions(ctx, f.eventID, f.products[0]); err != nil {
-		t.Fatalf("DeleteProductFromAllEventSessions: %v", err)
-	}
-	count, err := testRepo.CountEventWhitelist(ctx, f.eventID)
-	if err != nil {
-		t.Fatalf("CountEventWhitelist: %v", err)
-	}
-	if count != 0 {
-		t.Errorf("delete por evento deixou %d produto(s) para tras", count)
 	}
 }
 
@@ -240,94 +202,76 @@ func TestSessionProductRequestValidate(t *testing.T) {
 	}
 }
 
-// A SESSÃO NOVA HERDA A WHITELIST DO EVENTO (decisão do dono).
+// A HERANÇA MORREU: a transmissão nova nasce VAZIA mesmo quando as outras da
+// mesma campanha têm lista.
 //
-// Sem herança a barreira era inútil no fluxo real: o lojista configura os
-// produtos do evento, cria a transmissão de terça e a sessão nova nasce VAZIA —
-// e "lista vazia = libera tudo" (regra que continua valendo) faz essa sessão
-// sozinha liberar o catálogo inteiro, porque a união do checkout aceita o
-// produto se ALGUMA sessão o aceita. É exatamente o cenário que
-// TestEventWhitelistIsTheUnionOfItsSessions já documentava como consequência
-// esperada — e que, no caminho de criar sessão, virava um buraco.
-func TestNewSessionInheritsEventWhitelist(t *testing.T) {
+// A herança (cf2f45b) existia para um problema que só existe quando há lista de
+// CAMPANHA: "configurei os produtos do evento, criei a transmissão depois, e a
+// sessão vazia derrubou a barreira". Sem lista de campanha não há de onde
+// herdar, e cada transmissão é configurada explicitamente — que é exatamente o
+// que o dono quer, porque a live vende tudo enquanto o story vende uma peça só.
+func TestNewSessionIsBornEmpty(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
-	f := seedWhitelistFixture(t, ctx, "wl-heranca", 1)
+	f := seedWhitelistFixture(t, ctx, "sem-heranca", 1)
 
 	price := int64(700)
-	qty := int32(3)
 	if _, err := testRepo.UpsertSessionProduct(ctx, SessionProductInput{
 		SessionID:    f.sessions[0],
 		ProductID:    f.products[0],
 		SpecialPrice: &price,
-		MaxQuantity:  &qty,
-		DisplayOrder: 2,
-		Featured:     true,
 	}); err != nil {
 		t.Fatalf("UpsertSessionProduct: %v", err)
 	}
-	if f.allowed(t, ctx, f.products[1]) {
-		t.Fatal("pré-condição quebrada: com uma sessão só e whitelist, o produto de fora tem de estar barrado")
-	}
 
 	// A transmissão seguinte, criada pelo caminho real do painel.
-	session, _, inherited, err := testRepo.CreateSessionWithPlatformTx(ctx, f.eventID, "live", "instagram", "media-heranca")
+	session, _, err := testRepo.CreateSessionWithPlatformTx(ctx, f.eventID, "live", "instagram", "media-sem-heranca")
 	if err != nil {
 		t.Fatalf("CreateSessionWithPlatformTx: %v", err)
 	}
-	if inherited != 1 {
-		t.Errorf("herdou %d produto(s), quero 1", inherited)
-	}
 
-	products, err := testRepo.ListSessionProducts(ctx, session.ID)
-	if err != nil {
-		t.Fatalf("ListSessionProducts: %v", err)
-	}
-	if len(products) != 1 || products[0].ProductID != f.products[0] {
-		t.Fatalf("sessão nova nasceu com %d produto(s) — vazia, ela libera o catálogo inteiro", len(products))
-	}
-	// A configuração viaja junto: herdar só o id deixaria o preço especial e o
-	// teto para trás e o comprador pagaria outro valor na transmissão nova.
-	if products[0].SpecialPrice == nil || *products[0].SpecialPrice != price {
-		t.Errorf("special_price herdado = %v, quero %d", products[0].SpecialPrice, price)
-	}
-	if products[0].MaxQuantity == nil || *products[0].MaxQuantity != qty {
-		t.Errorf("max_quantity herdado = %v, quero %d", products[0].MaxQuantity, qty)
-	}
-
-	// O que importa de verdade: a barreira do evento continua de pé.
-	if !f.allowed(t, ctx, f.products[0]) {
-		t.Error("produto da whitelist deixou de ser aceito depois da nova sessão")
-	}
-	if f.allowed(t, ctx, f.products[1]) {
-		t.Error("a sessão nova derrubou a barreira do evento — é o bug que a herança fecha")
-	}
-}
-
-// Evento SEM whitelist continua liberando tudo: a herança copia uma lista
-// vazia, não inventa barreira nenhuma.
-func TestNewSessionInheritsNothingFromEmptyEvent(t *testing.T) {
-	requireDB(t)
-	ctx := context.Background()
-	f := seedWhitelistFixture(t, ctx, "wl-heranca-vazia", 1)
-
-	session, _, inherited, err := testRepo.CreateSessionWithPlatformTx(ctx, f.eventID, "live", "instagram", "media-vazia")
-	if err != nil {
-		t.Fatalf("CreateSessionWithPlatformTx: %v", err)
-	}
-	if inherited != 0 {
-		t.Errorf("herdou %d produto(s) de um evento sem whitelist", inherited)
-	}
 	products, err := testRepo.ListSessionProducts(ctx, session.ID)
 	if err != nil {
 		t.Fatalf("ListSessionProducts: %v", err)
 	}
 	if len(products) != 0 {
-		t.Errorf("sessão nasceu com %d produto(s) num evento sem whitelist", len(products))
+		t.Fatalf("a transmissao nova herdou %d produto(s) — a heranca devia ter saido", len(products))
 	}
+
+	// A lista da transmissão ANTERIOR não foi tocada: cada uma é a sua.
+	anterior, err := testRepo.ListSessionProducts(ctx, f.sessions[0])
+	if err != nil {
+		t.Fatalf("ListSessionProducts (anterior): %v", err)
+	}
+	if len(anterior) != 1 {
+		t.Errorf("a transmissao anterior ficou com %d produto(s), quero 1", len(anterior))
+	}
+}
+
+// A contagem por transmissão é o que permite a tela distinguir "vende tudo" de
+// "esqueci de configurar": zero é resposta legítima, não ausência de dado.
+func TestCountSessionProductsByEventIsPerSession(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	f := seedWhitelistFixture(t, ctx, "contagem-por-sessao", 2)
+
 	for _, p := range f.products {
-		if !f.allowed(t, ctx, p) {
-			t.Errorf("evento sem whitelist tem de liberar o produto %s", p)
+		if _, err := testRepo.UpsertSessionProduct(ctx, SessionProductInput{
+			SessionID: f.sessions[0],
+			ProductID: p,
+		}); err != nil {
+			t.Fatalf("UpsertSessionProduct: %v", err)
 		}
+	}
+
+	counts, err := testRepo.CountSessionProductsByEvent(ctx, f.eventID)
+	if err != nil {
+		t.Fatalf("CountSessionProductsByEvent: %v", err)
+	}
+	if counts[f.sessions[0]] != 2 {
+		t.Errorf("sessao configurada conta %d, quero 2", counts[f.sessions[0]])
+	}
+	if got, ok := counts[f.sessions[1]]; ok || got != 0 {
+		t.Errorf("sessao sem lista conta %d (presente=%v), quero 0/ausente — zero significa 'vende tudo'", got, ok)
 	}
 }
