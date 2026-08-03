@@ -1,14 +1,21 @@
 package live
 
-// D1 — todo evento nasce com pelo menos UMA sessão, mesmo sem mídia.
+// A CAMPANHA NASCE VAZIA — sem transmissão nenhuma até o lojista criar uma.
 //
-// Por que este teste existe: a lista de produtos (000112) e o modo live (000113)
-// desceram de live_events para live_sessions. A criação de evento tinha DOIS
-// caminhos, e o caminho sem platformLiveId — que é o padrão do formulário do
-// painel, porque o lojista raramente já tem o id da live na hora de marcar a
-// campanha — criava o evento SEM sessão nenhuma. A partir daí não havia ONDE
-// guardar configuração: configurar produto gravava zero linhas e destacar
-// produto / pausar processamento virava no-op SILENCIOSO.
+// Este teste já cravou o OPOSTO ("todo evento nasce com pelo menos uma sessão"),
+// e a inversão é deliberada. Aquela regra existia por uma razão que morreu: a
+// lista de produtos (000112) e o modo live (000113) desceram para live_sessions,
+// e a rota de lista por EVENTO (POST /lives/:id/whitelist) precisava de uma
+// sessão onde gravar — sem ela, escrevia zero linhas e lia 404. Essa rota não
+// existe mais: a lista pertence à transmissão e só se configura lá.
+//
+// O que a sessão automática causava, já sem servir para nada: o painel anunciava
+// "Esta campanha tem uma transmissão (Live 1)" para uma campanha recém-criada,
+// vazia. Uma transmissão que o lojista nunca criou, aparecendo como se estivesse
+// no ar.
+//
+// A sessão continua nascendo junto quando a criação TRAZ transmissão — mídia
+// vinculada ou lista de produtos, que é o atalho de post/story.
 
 import (
 	"context"
@@ -16,7 +23,7 @@ import (
 	"time"
 )
 
-func TestCreateEventAlwaysHasASession(t *testing.T) {
+func TestCampaignStartsEmptyAndGainsSessionsOnDemand(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	storeID := seedWindowStore(t, ctx, "sessao-sempre")
@@ -24,7 +31,7 @@ func TestCreateEventAlwaysHasASession(t *testing.T) {
 
 	endsAt := time.Now().Add(48 * time.Hour)
 
-	t.Run("sem midia", func(t *testing.T) {
+	t.Run("sem midia nasce sem transmissao", func(t *testing.T) {
 		out, err := svc.Create(ctx, CreateLiveInput{
 			StoreID: storeID,
 			Title:   "Campanha sem id de live",
@@ -34,10 +41,10 @@ func TestCreateEventAlwaysHasASession(t *testing.T) {
 		if err != nil {
 			t.Fatalf("criar evento sem midia: %v", err)
 		}
-		assertSessionCount(t, ctx, out.ID, 1)
+		assertSessionCount(t, ctx, out.ID, 0)
 	})
 
-	t.Run("com midia", func(t *testing.T) {
+	t.Run("com midia nasce com a transmissao", func(t *testing.T) {
 		platform, mediaID := "instagram", "media-sessao-sempre"
 		out, err := svc.Create(ctx, CreateLiveInput{
 			StoreID:        storeID,
@@ -66,13 +73,13 @@ func TestCreateEventAlwaysHasASession(t *testing.T) {
 	})
 }
 
-// TestSessionProductsWorkOnEventCreatedWithoutMedia é o sintoma que o usuário
-// via: configurar os produtos de uma transmissão recém-criada, num evento que
-// nasceu sem publicação vinculada.
+// O caminho completo do painel, agora que a campanha nasce vazia: marcar a
+// campanha, criar a transmissão depois e só então escolher os produtos dela.
 //
-// O cenário continua valendo com a lista por transmissão — só mudou o endereço:
-// a configuração é da SESSÃO que nasceu junto com o evento, não do evento.
-func TestSessionProductsWorkOnEventCreatedWithoutMedia(t *testing.T) {
+// Este é o fluxo REAL — o lojista marca a "Semana Black" na segunda e pendura a
+// live quando ela existe. Antes o teste se apoiava na sessão que vinha de graça
+// com o evento; apoiar-se nela escondia justamente o passo que o lojista faz.
+func TestSessionProductsWorkOnSessionCreatedAfterTheCampaign(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	storeID := seedWindowStore(t, ctx, "produtos-sem-midia")
@@ -96,7 +103,20 @@ func TestSessionProductsWorkOnEventCreatedWithoutMedia(t *testing.T) {
 	if err != nil {
 		t.Fatalf("criar evento: %v", err)
 	}
-	sessionID := firstSessionID(t, ctx, out.ID)
+	assertSessionCount(t, ctx, out.ID, 0)
+
+	// A transmissão entra depois, sem mídia — o lojista ainda não tem o id da
+	// live. É o caminho que o formulário "Nova sessão" usa.
+	created, err := svc.CreateSession(ctx, CreateSessionInput{
+		EventID: out.ID,
+		StoreID: storeID,
+		Type:    "live",
+	})
+	if err != nil {
+		t.Fatalf("criar transmissao depois da campanha: %v", err)
+	}
+	sessionID := created.ID
+	assertSessionCount(t, ctx, out.ID, 1)
 
 	added, err := svc.UpsertSessionProduct(ctx, SessionProductInput{
 		StoreID:   storeID,

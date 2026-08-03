@@ -273,7 +273,9 @@ func (s *Service) Create(ctx context.Context, input CreateLiveInput) (CreateLive
 		}
 	}
 
-	logger.From(ctx, s.logger).Info("live created with session",
+	// session_id vazio é o caso normal da campanha sem transmissão — ela nasce
+	// vazia e as transmissões entram depois.
+	logger.From(ctx, s.logger).Info("live event created",
 		zap.String("event_id", event.ID),
 		zap.String("session_id", session.ID),
 		zap.String("platform", platform),
@@ -944,19 +946,23 @@ func (s *Service) Start(ctx context.Context, id, storeID string) (LiveOutput, er
 		)
 	}
 
-	// Get active session for this event
+	// Iniciar a CAMPANHA não depende de existir transmissão.
+	//
+	// Campanha sem transmissão nenhuma é um estado legítimo desde que a sessão
+	// automática saiu da criação: o lojista marca a "Semana Black" e pendura as
+	// lives depois. Aqui isso era um erro seco — "no active session found for
+	// event" — e o botão "Iniciar" morria para toda campanha recém-criada.
+	//
+	// O que se inicia é a janela do evento, escrita logo acima. A transmissão,
+	// quando existe, é iniciada junto por conveniência.
 	session, err := s.repo.GetActiveSessionByEvent(ctx, id)
 	if err != nil {
 		return LiveOutput{}, err
 	}
-	if session == nil {
-		return LiveOutput{}, fmt.Errorf("no active session found for event")
-	}
-
-	// Start the session
-	_, err = s.repo.StartSession(ctx, session.ID)
-	if err != nil {
-		return LiveOutput{}, err
+	if session != nil {
+		if _, err := s.repo.StartSession(ctx, session.ID); err != nil {
+			return LiveOutput{}, err
+		}
 	}
 
 	return s.GetByID(ctx, id, storeID)

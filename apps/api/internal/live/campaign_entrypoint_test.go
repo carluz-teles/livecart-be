@@ -76,12 +76,20 @@ func TestCreateEventTypesTheFirstSessionNotTheEvent(t *testing.T) {
 		{"story", SessionTypeStory},   //
 		{"qualquer", SessionTypeLive}, // desconhecido não pode virar 500 no CHECK
 	}
+	// A criação vem COM mídia porque é isso que faz nascer a transmissão: uma
+	// campanha vazia não tem sessão nenhuma, e não haveria tipo para conferir.
+	// O que está sob teste é o mapeamento do vocabulário pedido para o tipo da
+	// SESSÃO — não a existência dela.
+	platform := "instagram"
 	for i, caso := range casos {
+		mediaID := fmt.Sprintf("media-tipo-%d", i)
 		out, err := svc.Create(ctx, CreateLiveInput{
-			StoreID: storeID,
-			Title:   fmt.Sprintf("Campanha %d", i),
-			Type:    caso.pedido,
-			EndsAt:  &endsAt,
+			StoreID:        storeID,
+			Title:          fmt.Sprintf("Campanha %d", i),
+			Type:           caso.pedido,
+			Platform:       &platform,
+			PlatformLiveID: &mediaID,
+			EndsAt:         &endsAt,
 		})
 		if err != nil {
 			t.Fatalf("criar evento com type=%q: %v", caso.pedido, err)
@@ -143,9 +151,10 @@ func TestCreateSessionWithoutMediaOnScheduledEvent(t *testing.T) {
 		t.Errorf("sessao sem midia gravou %d vinculo(s) em live_session_platforms", vinculos)
 	}
 
-	// A campanha agora tem duas transmissões: a que nasceu com o evento e esta.
-	if got := sessionTypesOf(t, ctx, campanha.ID); len(got) != 2 {
-		t.Errorf("campanha tem %d transmissoes (%v), quero 2", len(got), got)
+	// A campanha nasceu VAZIA e ganhou exatamente esta transmissão — não há mais
+	// a sessão de brinde que o evento criava sozinho.
+	if got := sessionTypesOf(t, ctx, campanha.ID); len(got) != 1 {
+		t.Errorf("campanha tem %d transmissoes (%v), quero 1", len(got), got)
 	}
 }
 

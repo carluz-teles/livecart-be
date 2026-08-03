@@ -154,13 +154,22 @@ func emitEventCreated(ctx context.Context, q *sqlc.Queries, e sqlc.LiveEvent, se
 // CreateEventWithSessionTx creates an event, session, and platform in a single transaction.
 // This ensures atomicity - either all operations succeed or all are rolled back.
 //
-// platform/platformLiveID VAZIOS são legítimos: a D1 diz que dá para criar a
-// sessão ANTES de a mídia existir (o lojista marca a campanha antes de ter o id
-// da live). Nesse caso a sessão nasce sem plataforma e a mídia entra depois por
-// AddPlatformToSession. O que NÃO pode existir é evento sem sessão nenhuma:
-// desde que a whitelist e o modo live desceram para live_sessions (000112/
-// 000113), um evento sem sessão não tem onde guardar configuração — a whitelist
-// gravava zero linhas e a leitura devolvia 404.
+// A SESSÃO É CONDICIONAL: só nasce quando a criação TRAZ uma transmissão —
+// mídia vinculada (o atalho de post/story, que entra por CreatePostEvent) ou
+// uma lista de produtos, que é da sessão e não teria onde morar sem ela.
+//
+// Uma campanha criada pelo formulário do painel não traz nenhum dos dois: o
+// lojista marca a "Semana Black" e pendura as transmissões depois. Criar a
+// sessão mesmo assim é o que fazia o painel anunciar "Esta campanha tem uma
+// transmissão (Live 1)" para uma campanha recém-criada, vazia — uma transmissão
+// que o lojista nunca criou e que aparecia como se estivesse no ar.
+//
+// Isto JÁ FOI obrigatório, e a razão morreu: a whitelist de EVENTO
+// (POST /lives/:id/whitelist) precisava de uma sessão onde gravar, senão
+// escrevia zero linhas e lia 404. Essa rota não existe mais — a lista de
+// produtos pertence à transmissão e só se configura lá (session_product.sql).
+// Evento sem sessão voltou a ser um estado legítimo, e a leitura já o trata:
+// o checkout libera tudo quando o evento não tem sessão nenhuma.
 func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params CreateEventParams, platform, platformLiveID string) (EventRow, SessionRow, *PlatformRow, error) {
 	storeUID, err := parseUUID(params.StoreID)
 	if err != nil {
@@ -236,58 +245,67 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 		return EventRow{}, SessionRow{}, nil, fmt.Errorf("creating live event: %w", err)
 	}
 
-	// 2. Create the session
-	sessionRow, err := qtx.CreateLiveSession(ctx, sqlc.CreateLiveSessionParams{
-		EventID: eventRow.ID,
-		Status:  "active",
-		Type:    sessionType,
-	})
-	if err != nil {
-		return EventRow{}, SessionRow{}, nil, fmt.Errorf("creating live session: %w", err)
-	}
+	// 2. Create the session — só quando a criação traz transmissão (ver o
+	// cabeçalho da função). Campanha vazia fica sem sessão, de propósito.
+	hasSession := platformLiveID != "" || len(params.ProductIDs) > 0
 
-	// 3. A lista de produtos vendáveis da PRIMEIRA transmissão, na MESMA
-	// transação em que ela nasce.
-	//
-	// É o atalho de post/story: o lojista escolhe os produtos no formulário, e
-	// esses produtos são desta transmissão — não da campanha, que não tem lista.
-	// Antes isso era um laço FORA da transação, chamando a rota por evento
-	// (broadcast em todas as sessões) e só logando Warn a cada falha: a
-	// publicação já estava no ar e a campanha ficava com lista PARCIAL — ou
-	// vazia, que sob a regra "vazia vende tudo" libera o catálogo inteiro,
-	// exatamente o oposto do que o lojista pediu. Aqui, ou grava tudo, ou não
-	// existe evento.
-	for i, productID := range params.ProductIDs {
-		productUID, err := parseUUID(productID)
-		if err != nil {
-			return EventRow{}, SessionRow{}, nil, err
-		}
-		if _, err := qtx.UpsertSessionProduct(ctx, sqlc.UpsertSessionProductParams{
-			SessionID:    sessionRow.ID,
-			ProductID:    productUID,
-			DisplayOrder: int32(i),
-		}); err != nil {
-			return EventRow{}, SessionRow{}, nil, fmt.Errorf("adding product %s to the session product list: %w", productID, err)
-		}
-	}
+	var (
+		sessionRow  sqlc.LiveSession
+		platformRow *PlatformRow
+	)
 
-	// 4. Add the platform to the session — só quando a mídia já é conhecida.
-	var platformRow *PlatformRow
-	if platform != "" && platformLiveID != "" {
-		row, err := qtx.AddPlatformToSession(ctx, sqlc.AddPlatformToSessionParams{
-			SessionID:      sessionRow.ID,
-			Platform:       platform,
-			PlatformLiveID: platformLiveID,
+	if hasSession {
+		sessionRow, err = qtx.CreateLiveSession(ctx, sqlc.CreateLiveSessionParams{
+			EventID: eventRow.ID,
+			Status:  "active",
+			Type:    sessionType,
 		})
 		if err != nil {
-			return EventRow{}, SessionRow{}, nil, fmt.Errorf("adding platform to session: %w", err)
+			return EventRow{}, SessionRow{}, nil, fmt.Errorf("creating live session: %w", err)
 		}
-		platformRow = &PlatformRow{
-			ID:             row.ID.String(),
-			SessionID:      row.SessionID.String(),
-			Platform:       row.Platform,
-			PlatformLiveID: row.PlatformLiveID,
-			AddedAt:        row.AddedAt.Time,
+
+		// 3. A lista de produtos vendáveis da PRIMEIRA transmissão, na MESMA
+		// transação em que ela nasce.
+		//
+		// É o atalho de post/story: o lojista escolhe os produtos no formulário, e
+		// esses produtos são desta transmissão — não da campanha, que não tem lista.
+		// Antes isso era um laço FORA da transação, chamando a rota por evento
+		// (broadcast em todas as sessões) e só logando Warn a cada falha: a
+		// publicação já estava no ar e a campanha ficava com lista PARCIAL — ou
+		// vazia, que sob a regra "vazia vende tudo" libera o catálogo inteiro,
+		// exatamente o oposto do que o lojista pediu. Aqui, ou grava tudo, ou não
+		// existe evento.
+		for i, productID := range params.ProductIDs {
+			productUID, err := parseUUID(productID)
+			if err != nil {
+				return EventRow{}, SessionRow{}, nil, err
+			}
+			if _, err := qtx.UpsertSessionProduct(ctx, sqlc.UpsertSessionProductParams{
+				SessionID:    sessionRow.ID,
+				ProductID:    productUID,
+				DisplayOrder: int32(i),
+			}); err != nil {
+				return EventRow{}, SessionRow{}, nil, fmt.Errorf("adding product %s to the session product list: %w", productID, err)
+			}
+		}
+
+		// 4. Add the platform to the session — só quando a mídia já é conhecida.
+		if platform != "" && platformLiveID != "" {
+			row, err := qtx.AddPlatformToSession(ctx, sqlc.AddPlatformToSessionParams{
+				SessionID:      sessionRow.ID,
+				Platform:       platform,
+				PlatformLiveID: platformLiveID,
+			})
+			if err != nil {
+				return EventRow{}, SessionRow{}, nil, fmt.Errorf("adding platform to session: %w", err)
+			}
+			platformRow = &PlatformRow{
+				ID:             row.ID.String(),
+				SessionID:      row.SessionID.String(),
+				Platform:       row.Platform,
+				PlatformLiveID: row.PlatformLiveID,
+				AddedAt:        row.AddedAt.Time,
+			}
 		}
 	}
 
@@ -295,8 +313,12 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 	if err := emitEventCreated(ctx, qtx, eventRow, sessionType); err != nil {
 		return EventRow{}, SessionRow{}, nil, err
 	}
-	if err := emitSessionCreated(ctx, qtx, sessionRow, platform, platformLiveID); err != nil {
-		return EventRow{}, SessionRow{}, nil, err
+	// session.created só quando houve sessão: emitir para uma sessão que não
+	// existe entregaria ao consumidor um id zerado.
+	if hasSession {
+		if err := emitSessionCreated(ctx, qtx, sessionRow, platform, platformLiveID); err != nil {
+			return EventRow{}, SessionRow{}, nil, err
+		}
 	}
 
 	// Commit the transaction
@@ -304,6 +326,12 @@ func (r *Repository) CreateEventWithSessionTx(ctx context.Context, params Create
 		return EventRow{}, SessionRow{}, nil, fmt.Errorf("committing transaction: %w", err)
 	}
 
+	// SessionRow zerada quando não houve sessão. Passar a linha zerada por
+	// toSessionRow devolveria o UUID nulo formatado ("0000...0000") como se
+	// fosse um id de verdade — o chamador não teria como distinguir.
+	if !hasSession {
+		return toEventRow(eventRow), SessionRow{}, platformRow, nil
+	}
 	return toEventRow(eventRow), toSessionRow(sessionRow), platformRow, nil
 }
 

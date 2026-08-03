@@ -38,6 +38,19 @@ func TestSessionTypesComeFromSessionsNotFromEventType(t *testing.T) {
 		t.Fatalf("criar evento: %v", err)
 	}
 
+	// As DUAS transmissões são criadas explicitamente: a campanha nasce vazia.
+	// Antes a de live vinha de brinde com o evento, e o teste dependia disso
+	// sem dizer — o que escondia o passo que o lojista de fato dá.
+	if _, err := svc.CreateSession(ctx, CreateSessionInput{
+		EventID:        created.ID,
+		StoreID:        storeID,
+		Type:           "live",
+		Platform:       "instagram",
+		PlatformLiveID: "media-especie-live",
+	}); err != nil {
+		t.Fatalf("criar sessao de live: %v", err)
+	}
+
 	// Sessão de post na MESMA campanha: é o guarda-chuva funcionando.
 	if _, err := svc.CreateSession(ctx, CreateSessionInput{
 		EventID:        created.ID,
