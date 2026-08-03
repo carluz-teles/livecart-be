@@ -262,3 +262,10 @@ WHERE key = $1;
 UPDATE live_sessions
 SET publish_at = $2, updated_at = now()
 WHERE id = $1;
+
+-- name: SetSessionType :exec
+-- A campanha nasce sem perguntar a espécie da transmissão: no momento da
+-- criação ninguém sabe ainda se aquilo vai ser live, post ou reel. A sessão
+-- começa como marcador e aprende o que é quando a publicação é vinculada —
+-- o primeiro instante em que a resposta existe.
+UPDATE live_sessions SET type = $2 WHERE id = $1;

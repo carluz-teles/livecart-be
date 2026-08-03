@@ -1386,6 +1386,17 @@ func (s *Service) LinkSessionMedia(ctx context.Context, input LinkSessionMediaIn
 		return PlatformOutput{}, err
 	}
 
+	// A espécie da transmissão só é conhecida agora. A campanha é criada sem
+	// perguntá-la — na hora de criar, ninguém sabe ainda se aquilo vai ser uma
+	// live, um post ou um reel —, então a sessão nasce como marcador e aprende
+	// o que é quando a publicação chega. Vazio mantém o que já estava lá.
+	if input.Type != "" {
+		if err := s.repo.SetSessionType(ctx, input.SessionID, input.Type); err != nil {
+			return PlatformOutput{}, fmt.Errorf("setting session type on media link: %w", err)
+		}
+	}
+
+
 	row, err := s.repo.AddPlatformToSession(ctx, input.SessionID, input.Platform, input.PlatformLiveID)
 	if err != nil {
 		return PlatformOutput{}, err

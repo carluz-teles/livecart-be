@@ -36,12 +36,19 @@ type LinkSessionMediaRequest struct {
 	MediaPermalink    string `json:"mediaPermalink"`
 	MediaThumbnailURL string `json:"mediaThumbnailUrl"`
 	MediaCaption      string `json:"mediaCaption"`
+	// Type is the kind of broadcast this session turns out to be. A campaign is
+	// created without asking it — at that point nobody knows yet — so the
+	// session starts as a placeholder and only learns what it is when the
+	// publication is attached, which is the first moment the answer exists.
+	// Empty keeps whatever the session already had.
+	Type string `json:"type"`
 }
 
 func (r LinkSessionMediaRequest) Validate() error {
 	return validation.ValidateStruct(&r,
 		validation.Field(&r.Platform, validation.In("instagram")),
 		validation.Field(&r.PlatformLiveID, validation.Required, validation.Length(1, 100)),
+		validation.Field(&r.Type, validation.In("live", "post", "reel", "story")),
 	)
 }
 
@@ -61,6 +68,7 @@ func (r LinkSessionMediaRequest) ToInput(storeID, eventID, sessionID string) Lin
 		MediaPermalink:    r.MediaPermalink,
 		MediaThumbnailURL: r.MediaThumbnailURL,
 		MediaCaption:      r.MediaCaption,
+		Type:              r.Type,
 	}
 }
 
@@ -74,4 +82,5 @@ type LinkSessionMediaInput struct {
 	MediaPermalink    string
 	MediaThumbnailURL string
 	MediaCaption      string
+	Type              string
 }

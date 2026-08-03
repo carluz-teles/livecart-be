@@ -770,6 +770,24 @@ func (q *Queries) SetSessionPublishAt(ctx context.Context, arg SetSessionPublish
 	return err
 }
 
+const setSessionType = `-- name: SetSessionType :exec
+UPDATE live_sessions SET type = $2 WHERE id = $1
+`
+
+type SetSessionTypeParams struct {
+	ID   pgtype.UUID `json:"id"`
+	Type string      `json:"type"`
+}
+
+// A campanha nasce sem perguntar a espécie da transmissão: no momento da
+// criação ninguém sabe ainda se aquilo vai ser live, post ou reel. A sessão
+// começa como marcador e aprende o que é quando a publicação é vinculada —
+// o primeiro instante em que a resposta existe.
+func (q *Queries) SetSessionType(ctx context.Context, arg SetSessionTypeParams) error {
+	_, err := q.db.Exec(ctx, setSessionType, arg.ID, arg.Type)
+	return err
+}
+
 const startLiveSession = `-- name: StartLiveSession :one
 UPDATE live_sessions
 SET status = 'live', started_at = now(), updated_at = now()

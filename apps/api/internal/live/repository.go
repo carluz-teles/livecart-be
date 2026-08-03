@@ -2620,3 +2620,14 @@ func toEventRowFromWithCounts(row sqlc.GetLiveEventWithCountsRow) EventRow {
 		WaitlistNotifiedTTLMinutes: int(row.WaitlistNotifiedTtlMinutes),
 	}
 }
+
+// SetSessionType grava a espécie da transmissão. Ver SetSessionType em
+// db/queries/live.sql: a campanha nasce sem perguntar o tipo, e a sessão o
+// aprende quando a publicação é vinculada.
+func (r *Repository) SetSessionType(ctx context.Context, sessionID, sessionType string) error {
+	sid, err := parseUUID(sessionID)
+	if err != nil {
+		return err
+	}
+	return r.q.SetSessionType(ctx, sqlc.SetSessionTypeParams{ID: sid, Type: sessionType})
+}
