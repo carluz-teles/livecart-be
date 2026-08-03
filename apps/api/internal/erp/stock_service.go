@@ -123,12 +123,38 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 		return nil
 	}
 
-	// Idempotency: check if an active reservation already exists for this cart+product
+	// Já existe reserva deste produto neste carrinho: SOMA, não pula.
+	//
+	// `quantity` é a quantidade DESTA adição — o mesmo número que o chamador
+	// acabou de descontar do estoque local —, nunca o total do carrinho. Pular
+	// aqui rompia a única coisa que precisa ser verdade: o que o LiveCart tirou
+	// do estoque tem de estar reservado no ERP.
+	//
+	// O que acontecia: o comprador comenta "quero 1000" três vezes numa live.
+	// A primeira criava a reserva; a segunda e a terceira entravam no carrinho,
+	// baixavam o estoque local e NÃO reservavam no ERP. Resultado em campo: 5
+	// unidades vendidas no LiveCart e só 3 seguradas no Tiny — as outras 2
+	// seguiam à venda em qualquer outro canal, e no estorno voltariam 3 de 5.
+	//
+	// Repetir o mesmo comentário não cai aqui: o comentário é deduplicado por
+	// platform_comment_id antes de chegar ao carrinho.
 	existing, _ := s.repo.ListActiveReservationsByCartAndProduct(ctx, cartID, productID)
 	if len(existing) > 0 {
-		logger.From(ctx, s.logger).Debug("stock reservation already exists for cart+product, skipping",
+		obs := fmt.Sprintf("Ajuste reserva LiveCart (+%d) - @%s - Cart %s", quantity, platformHandle, cartID)
+		movementID, err := erpProvider.ReserveStock(ctx, externalID, quantity, float64(unitPrice)/100, obs)
+		if err != nil {
+			return fmt.Errorf("reserving additional stock in ERP: %w", err)
+		}
+		if _, err := s.repo.AdjustActiveReservationQuantity(ctx, cartID, productID, quantity, movementID); err != nil {
+			// A saída no ERP já aconteceu; sem a linha local o estorno não sabe
+			// devolvê-la. Erro alto para a reconciliação pegar.
+			return fmt.Errorf("bumping reservation quantity after ERP movement %s: %w", movementID, err)
+		}
+		logger.From(ctx, s.logger).Info("ERP reservation increased for repeat add",
 			zap.String("cart_id", cartID),
 			zap.String("product_id", productID),
+			zap.Int("added", quantity),
+			zap.String("erp_movement_id", movementID),
 		)
 		return nil
 	}

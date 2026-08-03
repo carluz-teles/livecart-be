@@ -302,15 +302,46 @@ func TestService_ReserveStockInERP(t *testing.T) {
 		}
 	})
 
-	t.Run("existing reservation is idempotent", func(t *testing.T) {
+	// Segunda adição do MESMO produto no MESMO carrinho SOMA à reserva.
+	//
+	// Este subteste cravava o oposto ("idempotente: pula"), e o que ele
+	// protegia não era retentativa — era o comprador pedindo mais uma unidade.
+	// O `quantity` recebido é a quantidade DESTA adição, o mesmo número que o
+	// chamador já descontou do estoque local. Pular deixava o LiveCart com
+	// unidade vendida que o ERP continuava oferecendo: em staging, 5 vendidas e
+	// 3 seguradas no Tiny.
+	//
+	// Repetição de verdade não chega aqui: o comentário é deduplicado por
+	// platform_comment_id antes de virar item de carrinho.
+	t.Run("segunda adicao do mesmo produto soma na reserva", func(t *testing.T) {
 		fake := &fakeERPProvider{}
 		repo := &mockRepo{existing: []StockReservationRow{{Quantity: 1}}}
 		collab := &mockCollab{provider: fake, linked: true, externalID: "ext-1"}
-		if err := newSvc(repo, collab).ReserveStockInERP(ctx, "s", "c", "e", "p", 1, 1000, "@h"); err != nil {
+		if err := newSvc(repo, collab).ReserveStockInERP(ctx, "s", "c", "e", "p", 2, 1000, "@h"); err != nil {
 			t.Fatalf("want nil, got %v", err)
 		}
-		if fake.reserves != 0 || repo.creates != 0 {
-			t.Fatalf("duplicate reserve should be skipped")
+		if fake.reserves != 1 {
+			t.Errorf("reserves=%d — a unidade adicional nao foi segurada no ERP e segue a venda em outro canal", fake.reserves)
+		}
+		if repo.adjusts != 1 {
+			t.Errorf("adjusts=%d — a linha de reserva nao acompanhou a quantidade do carrinho", repo.adjusts)
+		}
+		if repo.creates != 0 {
+			t.Errorf("creates=%d — deveria SOMAR na reserva existente, nao criar uma segunda", repo.creates)
+		}
+	})
+
+	// Falha no ERP não pode gravar aumento local: a linha diria que há mais
+	// segurado do que o ERP realmente segura.
+	t.Run("falha no ERP nao aumenta a reserva local", func(t *testing.T) {
+		fake := &fakeERPProvider{reserveErr: errors.New("tiny down")}
+		repo := &mockRepo{existing: []StockReservationRow{{Quantity: 1}}}
+		collab := &mockCollab{provider: fake, linked: true, externalID: "ext-1"}
+		if err := newSvc(repo, collab).ReserveStockInERP(ctx, "s", "c", "e", "p", 1, 1000, "@h"); err == nil {
+			t.Fatal("esperava erro quando o ERP recusa a reserva adicional")
+		}
+		if repo.adjusts != 0 {
+			t.Errorf("adjusts=%d apos falha no ERP", repo.adjusts)
 		}
 	})
 
