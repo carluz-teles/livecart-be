@@ -94,3 +94,60 @@ func TestLiveEntraNoPollingMesmoComWebhookAtivo(t *testing.T) {
 		})
 	}
 }
+
+// O teto de 12h: a live esquecida para de ser consultada sozinha.
+//
+// "O lojista esqueceu de encerrar" é o caso normal, não a exceção — quem termina
+// a live fecha o Instagram e vai embora. Sem teto, essa sessão seria consultada
+// a cada 20s até o EVENTO acabar, e num evento guarda-chuva isso é uma semana:
+// ~30 mil chamadas à Graph por transmissão esquecida.
+//
+// O desligamento normal NÃO é este teto — é o sweep que encerra a sessão quando
+// a transmissão sai do ar. Este teste guarda a rede que sobra quando o sweep
+// não consegue rodar (token expirado, Graph fora do ar).
+func TestLiveEsquecidaSaiDoPollingPeloTeto(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+
+	cases := []struct {
+		name       string
+		slug       string
+		mediaHours int
+		want       bool
+	}{
+		{"live vinculada ha 1h continua", "poll-live-1h", 1, true},
+		{"live vinculada ha 11h continua", "poll-live-11h", 11, true},
+		{"live vinculada ha 13h sai", "poll-live-13h", 13, false},
+		{"live vinculada ha 7 dias sai", "poll-live-7d", 24 * 7, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := seedMedia(t, ctx, tc.slug, "active", SessionStatusActive, SessionTypeLive, 0)
+			// added_at é o carimbo do VÍNCULO da mídia, que é quando a
+			// transmissão passou a ser capturada.
+			if _, err := testPool.Exec(ctx,
+				`UPDATE live_session_platforms
+				    SET added_at = now() - make_interval(hours => $2)
+				  WHERE session_id = $1::uuid`,
+				f.sessionID, tc.mediaHours,
+			); err != nil {
+				t.Fatalf("envelhecer o vinculo: %v", err)
+			}
+
+			medias, err := testRepo.ListPollableMedia(ctx)
+			if err != nil {
+				t.Fatalf("ListPollableMedia: %v", err)
+			}
+			found := false
+			for _, m := range medias {
+				if m.MediaID == f.mediaID {
+					found = true
+				}
+			}
+			if found != tc.want {
+				t.Errorf("live vinculada ha %dh no polling = %v, quero %v", tc.mediaHours, found, tc.want)
+			}
+		})
+	}
+}

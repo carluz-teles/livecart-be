@@ -3770,7 +3770,6 @@ func (s *Service) RestoreCancelledCartAsPaid(ctx context.Context, cartID, storeI
 	return s.repo.RestoreCancelledCartAsPaid(ctx, cartID, storeID, paymentStatus, paymentID, paidAt, paymentMethod)
 }
 
-
 // CartPaymentStatus returns the cart's current payment status ("" when the cart
 // no longer exists), swallowing the same not-found path GetCartByID does.
 func (s *Service) CartPaymentStatus(ctx context.Context, cartID string) (string, error) {
@@ -4370,6 +4369,7 @@ func (s *Service) StartPostCommentPolling(ctx context.Context) {
 				return
 			case <-ticker.C:
 				s.pollPostCommentsOnce(ctx)
+				s.endStaleLiveSessionsOnce(ctx)
 			}
 		}
 	}()
@@ -5819,4 +5819,87 @@ func (s *Service) LogIntegrationOperation(ctx context.Context, log providers.Int
 		log.ResponsePayload,
 		log.ErrorMessage,
 	)
+}
+
+// endStaleLiveSessionsOnce encerra as sessões de LIVE cuja transmissão já saiu
+// do ar no Instagram.
+//
+// Existe por causa de "o lojista esqueceu de encerrar", que é o caso normal e
+// não a exceção: quem termina a live fecha o Instagram e vai embora — voltar ao
+// painel para clicar em "Encerrar" é o passo que ninguém dá. Sem isto a sessão
+// ficaria "no ar" para sempre no painel, mentindo que captura, e o polling de
+// live continuaria consultando a Graph a cada 20s até o EVENTO acabar — uma
+// semana inteira, num evento guarda-chuva.
+//
+// O sinal é exato e não é heurística: GET /me/live_media devolve, por
+// definição, apenas o que está sendo transmitido NESTE instante ("Only live
+// video media currently being broadcast at the time of the request will be
+// returned"). Se a mídia da sessão não está mais lá, a transmissão acabou.
+//
+// UMA chamada por LOJA, não por mídia: a lista é da conta, então lojas com
+// várias sessões abertas custam o mesmo que uma.
+//
+// Falha da Graph não encerra nada. Encerrar por engano uma live que continua no
+// ar é pior do que continuar consultando: pararia de capturar venda. O teto de
+// 12h de ListPollableMedia é quem cobre a falha persistente.
+func (s *Service) endStaleLiveSessionsOnce(ctx context.Context) {
+	medias, err := s.liveService.ListPollableMedia(ctx)
+	if err != nil {
+		return // já logado por pollPostCommentsOnce, que roda antes
+	}
+
+	// Agrupa as mídias de live por loja, para uma consulta por conta.
+	byStore := map[string][]live.MediaRef{}
+	for _, m := range medias {
+		if m.SessionType != live.SessionTypeLive || m.MediaID == "" {
+			continue
+		}
+		byStore[m.StoreID] = append(byStore[m.StoreID], m)
+	}
+
+	for storeID, storeMedias := range byStore {
+		storeCtx := logger.WithStore(ctx, storeID, "")
+		provider, err := s.resolveInstagramSocialProvider(storeCtx, storeID)
+		if err != nil {
+			continue
+		}
+		lister, ok := provider.(interface {
+			GetActiveLives(ctx context.Context) ([]providers.LiveMedia, error)
+		})
+		if !ok {
+			continue
+		}
+		lives, err := lister.GetActiveLives(storeCtx)
+		if err != nil {
+			logger.From(storeCtx, s.logger).Warn("live sweep: failed to list active lives",
+				zap.Error(err))
+			continue
+		}
+
+		onAir := make(map[string]struct{}, len(lives))
+		for _, l := range lives {
+			onAir[l.ID] = struct{}{}
+		}
+
+		for _, m := range storeMedias {
+			if _, still := onAir[m.MediaID]; still {
+				continue
+			}
+			if _, err := s.liveService.EndSession(storeCtx, live.EndSessionInput{
+				StoreID:   storeID,
+				EventID:   m.EventID,
+				SessionID: m.SessionID,
+			}); err != nil {
+				logger.From(storeCtx, s.logger).Warn("live sweep: failed to end session",
+					zap.String("session_id", m.SessionID), zap.Error(err))
+				continue
+			}
+			// O EVENTO segue aberto de propósito: a transmissão acabou, a
+			// campanha não. Os carrinhos continuam valendo até o fim dela.
+			logger.From(storeCtx, s.logger).Info("live sweep: session ended, broadcast is over",
+				zap.String("session_id", m.SessionID),
+				zap.String("media_id", m.MediaID),
+			)
+		}
+	}
 }

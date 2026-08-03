@@ -178,7 +178,20 @@ JOIN live_sessions ls ON ls.id = lsp.session_id
 JOIN live_events e ON e.id = ls.event_id
 WHERE (
         (ls.type IN ('post', 'reel') AND lsp.webhook_active = false)
-     OR (ls.type = 'live' AND ls.status <> 'ended' AND e.status <> 'ended')
+        -- O TETO DE 12h é a rede de segurança para "o lojista esqueceu de
+        -- encerrar". Sem ele, uma sessão de live esquecida seria consultada a
+        -- cada 20s até o EVENTO acabar — e num evento guarda-chuva isso é uma
+        -- semana, ~30 mil chamadas à Graph por transmissão esquecida.
+        --
+        -- 12h é folgado de propósito: uma live do Instagram não passa de 4h, e
+        -- o desligamento normal não é este — é EndStaleLiveSessions, que encerra
+        -- a sessão assim que a transmissão sai do ar. Este teto só existe para
+        -- o caso de aquela checagem falhar (token expirado, Graph fora do ar):
+        -- o pior cenário passa a ser 12h de polling, não uma semana.
+     OR (ls.type = 'live'
+         AND ls.status <> 'ended'
+         AND e.status <> 'ended'
+         AND lsp.added_at > now() - interval '12 hours')
   )
   AND (
         e.status <> 'ended'
