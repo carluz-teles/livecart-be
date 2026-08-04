@@ -1137,7 +1137,7 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 	}
 
 	if delta > 0 {
-		if err := s.validateQuantityCap(ctx, cart, item.ProductID, input.Quantity); err != nil {
+		if err := s.validateQuantityCap(ctx, cart, item.ProductID, item.Quantity, input.Quantity); err != nil {
 			return nil, err
 		}
 	}
@@ -1332,7 +1332,10 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 	if cfg.MaxQuantity > 0 && desiredQty > cfg.MaxQuantity {
 		return nil, httpx.ErrUnprocessable(fmt.Sprintf("limite de %d por item", cfg.MaxQuantity))
 	}
-	if cfg.Stock > 0 && desiredQty > cfg.Stock {
+	// Mesma regra do PATCH: o estoque limita o que ESTÁ SENDO ACRESCENTADO, não
+	// o total. As unidades já no carrinho deste comprador saíram da prateleira
+	// quando entraram nele — cobrá-las de novo aqui as contaria duas vezes.
+	if !stockCoversIncrease(cfg.Stock, input.Quantity) {
 		return nil, httpx.ErrUnprocessable(fmt.Sprintf("apenas %d em estoque", cfg.Stock))
 	}
 
@@ -1455,8 +1458,40 @@ func (s *Service) loadEditableCartItem(ctx context.Context, token, itemID string
 	return cart, item, nil
 }
 
+// stockCoversIncrease diz se o saldo restante cobre o ACRÉSCIMO pedido.
+//
+// Ponto único da regra: o PATCH de quantidade e a adição de item aplicavam a
+// mesma conta em dois lugares, e o erro estava nos dois. `stock` é o que sobrou
+// na prateleira — as unidades que este comprador já tem saíram dela quando
+// entraram no carrinho dele, então comparar o TOTAL contra o saldo as cobra
+// duas vezes.
+//
+// stock <= 0 não bloqueia aqui de propósito: produto sem estoque é caminho de
+// fila de espera, decidido antes; esta função só responde "o saldo cobre o que
+// está sendo somado".
+func stockCoversIncrease(stock, added int) bool {
+	if added <= 0 {
+		return true
+	}
+	return stock >= added
+}
+
 // validateQuantityCap re-checks per-item caps + product stock for an increase.
-func (s *Service) validateQuantityCap(ctx context.Context, cart *CartRow, productID string, desiredQty int) error {
+//
+// As duas checagens usam números DIFERENTES, e confundi-los é o bug que estava
+// aqui:
+//
+//   - o TETO é sobre o total: "no máximo 3 deste produto" fala do carrinho
+//     inteiro, então compara com desiredQty;
+//   - o ESTOQUE é sobre o acréscimo: cfg.Stock é o que SOBROU na prateleira, e
+//     as unidades que este comprador já tem saíram dela quando entraram no
+//     carrinho dele.
+//
+// Comparar o total contra o saldo faz as unidades do próprio comprador
+// contarem contra ele. Com 5 no estoque e 3 no carrinho, sobram 2; pedir 4
+// virava `4 > 2` e recusava com "apenas 2 em estoque" — ele não conseguia
+// passar de 3 num produto que tinha 5.
+func (s *Service) validateQuantityCap(ctx context.Context, cart *CartRow, productID string, currentQty, desiredQty int) error {
 	cfg, err := s.repo.GetEventProductForCart(ctx, cart.EventID, cart.StoreID, productID)
 	if err != nil {
 		return err
@@ -1464,7 +1499,7 @@ func (s *Service) validateQuantityCap(ctx context.Context, cart *CartRow, produc
 	if cfg.MaxQuantity > 0 && desiredQty > cfg.MaxQuantity {
 		return httpx.ErrUnprocessable(fmt.Sprintf("limite de %d por item", cfg.MaxQuantity))
 	}
-	if cfg.Stock > 0 && desiredQty > cfg.Stock {
+	if !stockCoversIncrease(cfg.Stock, desiredQty-currentQty) {
 		return httpx.ErrUnprocessable(fmt.Sprintf("apenas %d em estoque", cfg.Stock))
 	}
 	return nil
