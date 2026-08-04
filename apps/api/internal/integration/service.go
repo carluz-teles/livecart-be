@@ -127,6 +127,12 @@ type Service struct {
 	// reinscrever é desejável.
 	subscriptionEnsured sync.Map
 
+	// lastWebhookAt guarda, por conta do Instagram (entry.id), quando o último
+	// webhook CHEGOU. É a memória do vigia: a Meta para de entregar sem avisar,
+	// e sem este relógio "parou de chegar" e "ninguém comentou" são o mesmo
+	// silêncio no log.
+	lastWebhookAt sync.Map
+
 	// erpProviderFactory lets the finalisation state-machine tests inject a
 	// scripted ERP provider. nil in production (falls back to getERPProvider,
 	// which builds the real Tiny client from the integration credentials).
@@ -4437,6 +4443,7 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 		if err != nil {
 			continue
 		}
+		accountID := s.instagramAccountID(evCtx, ev.StoreID)
 		comments, err := provider.GetMediaComments(evCtx, ev.MediaID)
 		if err != nil {
 			// Media gone (deleted / no longer accessible): close the event so we
@@ -4468,6 +4475,14 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 				username = c.Username
 			}
 			if err := s.liveService.ProcessInstagramComment(evCtx, ProcessInstagramCommentInput{
+				// A conta do Instagram desta loja. O webhook a traz em
+				// entry.id; o polling tem de buscá-la, e sem isso todo
+				// comentário capturado por aqui aparecia no log com
+				// account_id vazio — indistinguível de "não sabemos de quem
+				// é" e o suficiente para o diagnóstico apontar para o lado
+				// errado. É campo de LOG, não de decisão: nada no fluxo de
+				// resposta o consulta.
+				AccountID: accountID,
 				MediaID:   ev.MediaID,
 				CommentID: c.ID,
 				UserID:    c.From.ID,
@@ -5902,6 +5917,9 @@ func (s *Service) endStaleLiveSessionsOnce(ctx context.Context) {
 		// loja por processo (ver subscriptionEnsured), então o custo é uma
 		// chamada por lojista que fez live desde o último deploy.
 		s.ensureWebhookSubscriptionOnce(storeCtx, storeID)
+		// Só faz sentido com transmissão no ar — que é exatamente o laço em que
+		// estamos: byStore só contém loja com sessão de live viva.
+		s.checkWebhookSilence(storeCtx, storeID)
 
 		provider, err := s.resolveInstagramSocialProvider(storeCtx, storeID)
 		if err != nil {
@@ -6034,4 +6052,93 @@ func (s *Service) attachPublishedMediaToEvent(
 		Status:    session.Status,
 		CreatedAt: session.CreatedAt,
 	}, nil
+}
+
+// instagramAccountID devolve o id da conta profissional do Instagram da loja —
+// o mesmo que a Meta manda em entry.id nos webhooks. Vazio quando a integração
+// não resolve; é uso de LOG, então falhar aqui não pode derrubar captura.
+func (s *Service) instagramAccountID(ctx context.Context, storeID string) string {
+	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "social", "instagram")
+	if err != nil || integration == nil {
+		return ""
+	}
+	if v, ok := integration.Metadata["instagram_user_id"].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// webhookSilenceAlert é quanto tempo de silêncio, com transmissão NO AR, já
+// merece investigação. Uma live com público gera comentário em minutos; cinco
+// sem nada, com a live rodando, é sinal — não é prova, e o log diz isso.
+const webhookSilenceAlert = 5 * time.Minute
+
+// NoteInstagramWebhook carimba a chegada de um webhook para uma conta.
+func (s *Service) NoteInstagramWebhook(accountID string) {
+	if accountID == "" {
+		return
+	}
+	s.lastWebhookAt.Store(accountID, time.Now())
+}
+
+// checkWebhookSilence alerta quando uma loja COM TRANSMISSÃO NO AR passa tempo
+// demais sem receber webhook — e, quando isso acontece, consulta a Meta para
+// dizer em quais campos a conta está inscrita NAQUELE momento.
+//
+// Por que existe: a entrega de live_comments para no meio da transmissão, sem
+// erro do nosso lado (respondemos 200 em 100% das entregas) e sem nada no log.
+// A pergunta que ninguém conseguia responder era "a assinatura ainda está de
+// pé?" — porque só dava para consultá-la manualmente, depois, quando o estado
+// já podia ter mudado. Isto responde no instante em que o silêncio começa.
+//
+// O alerta NÃO conserta nada e não tenta: reinscrever aqui apagaria a evidência
+// justamente do estado que se quer capturar. É diagnóstico, e diz isso.
+func (s *Service) checkWebhookSilence(ctx context.Context, storeID string) {
+	accountID := s.instagramAccountID(ctx, storeID)
+	if accountID == "" {
+		return
+	}
+
+	v, seen := s.lastWebhookAt.Load(accountID)
+	if !seen {
+		// Nunca chegou nada NESTE processo. Pode ser deploy recente, então o
+		// relógio começa agora em vez de gritar de imediato.
+		s.lastWebhookAt.Store(accountID, time.Now())
+		return
+	}
+	last, _ := v.(time.Time)
+	silence := time.Since(last)
+	if silence < webhookSilenceAlert {
+		return
+	}
+
+	// Só alerta UMA vez por janela de silêncio: empurra o relógio para frente,
+	// senão o sweep de 20s viraria uma enxurrada de warns idênticos.
+	s.lastWebhookAt.Store(accountID, time.Now())
+
+	fields, err := s.GetInstagramWebhookSubscription(ctx, storeID)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("instagram webhook silent with a live on air, and the subscription could not be read",
+			zap.String("account_id", accountID),
+			zap.Duration("silent_for", silence),
+			zap.Error(err),
+		)
+		return
+	}
+
+	subscribed := false
+	for _, f := range fields {
+		if f == "live_comments" {
+			subscribed = true
+		}
+	}
+	logger.From(ctx, s.logger).Warn("instagram webhook silent with a live on air",
+		zap.String("account_id", accountID),
+		zap.Duration("silent_for", silence),
+		zap.Strings("subscribed_fields", fields),
+		// A resposta que faltava: a assinatura sumiu, ou ela está lá e a Meta
+		// simplesmente parou de entregar? São causas diferentes e correções
+		// diferentes, e até agora não dava para separar as duas.
+		zap.Bool("live_comments_subscribed", subscribed),
+	)
 }

@@ -99,9 +99,34 @@ func (h *WebhookHandler) HandleInstagramWebhook(c *fiber.Ctx) error {
 		return httpx.BadRequest(c, "invalid webhook payload")
 	}
 
+	// Carimba a chegada POR CONTA, antes de qualquer processamento.
+	//
+	// É o relógio do vigia (NoteInstagramWebhook): a Meta para de entregar sem
+	// avisar, e a única forma de flagrar isso é saber há quanto tempo nada
+	// chega para uma conta que TEM transmissão no ar. Sem carimbo, "silêncio"
+	// e "ninguém comentou" são o mesmo estado.
+	//
+	// Antes do parse de cada entry porque o que importa é a ENTREGA ter
+	// acontecido — mesmo um evento que vamos descartar prova que o canal está
+	// vivo.
+	fields := make([]string, 0, 4)
+	for _, e := range payload.Entry {
+		h.service.NoteInstagramWebhook(e.ID)
+		for _, ch := range e.Changes {
+			fields = append(fields, ch.Field)
+		}
+		if len(e.Messaging) > 0 {
+			fields = append(fields, "messaging")
+		}
+	}
+
 	logger.From(c.Context(), h.logger).Info("instagram webhook received",
 		zap.String("object", payload.Object),
 		zap.Int("entries", len(payload.Entry)),
+		// QUAIS campos chegaram. Sem isto o log não distingue um comentário de
+		// um eco de DM, e a pergunta "a Meta ainda manda live_comments?" não
+		// tem resposta no histórico.
+		zap.Strings("fields", fields),
 	)
 
 	// Process each entry
