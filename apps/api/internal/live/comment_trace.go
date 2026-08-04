@@ -29,3 +29,7 @@ func commentOrigin(input ProcessInstagramCommentInput) string {
 	}
 	return "polling"
 }
+
+// TraceExpiryPrefix marca as linhas da investigação da expiração em lote.
+// TODO REMOVER com o restante do [IGTRACE].
+const TraceExpiryPrefix = "[IGTRACE] "
