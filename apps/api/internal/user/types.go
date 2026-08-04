@@ -43,8 +43,25 @@ type SyncUserResponse struct {
 	Name         *string                    `json:"name"`
 	AvatarURL    *string                    `json:"avatarUrl"`
 	Membership   *MembershipResponse        `json:"membership"`             // Single membership (or null)
-	State        string                     `json:"state"`                  // "no_store" | "ready"
+	State        string                     `json:"state"`                  // "no_store" | "pending_invitation" | "ready"
 	Subscription *billing.SubscriptionState `json:"subscription,omitempty"` // paywall state (PRD 007)
+	// Convites que aguardam este e-mail. Só vem preenchido no estado
+	// "pending_invitation" — é o que a tela de escolha do front consome para
+	// oferecer "aceitar convite" ou "criar minha própria loja".
+	PendingInvitations []PendingInvitationResponse `json:"pendingInvitations,omitempty"`
+}
+
+// PendingInvitationResponse is an invitation waiting for the signed-in user.
+type PendingInvitationResponse struct {
+	ID          string    `json:"id"`
+	StoreID     string    `json:"storeId"`
+	StoreName   string    `json:"storeName"`
+	StoreSlug   string    `json:"storeSlug"`
+	Email       string    `json:"email"`
+	Role        string    `json:"role"`
+	Token       string    `json:"token"`
+	InviterName *string   `json:"inviterName"`
+	ExpiresAt   time.Time `json:"expiresAt"`
 }
 
 // MembershipResponse represents a user's membership to a store
@@ -85,15 +102,31 @@ func NewSyncUserResponse(out *SyncUserOutput) SyncUserResponse {
 		}
 	}
 
+	pending := make([]PendingInvitationResponse, 0, len(out.PendingInvitations))
+	for _, inv := range out.PendingInvitations {
+		pending = append(pending, PendingInvitationResponse{
+			ID:          inv.ID,
+			StoreID:     inv.StoreID,
+			StoreName:   inv.StoreName,
+			StoreSlug:   inv.StoreSlug,
+			Email:       inv.Email,
+			Role:        inv.Role,
+			Token:       inv.Token,
+			InviterName: inv.InviterName,
+			ExpiresAt:   inv.ExpiresAt,
+		})
+	}
+
 	return SyncUserResponse{
-		UserID:       out.UserID,
-		ClerkUserID:  out.ClerkUserID,
-		Email:        out.Email,
-		Name:         out.Name,
-		AvatarURL:    out.AvatarURL,
-		Membership:   membership,
-		State:        out.State,
-		Subscription: out.Subscription,
+		UserID:             out.UserID,
+		ClerkUserID:        out.ClerkUserID,
+		Email:              out.Email,
+		Name:               out.Name,
+		AvatarURL:          out.AvatarURL,
+		Membership:         membership,
+		State:              out.State,
+		Subscription:       out.Subscription,
+		PendingInvitations: pending,
 	}
 }
 
@@ -111,14 +144,15 @@ type SyncUserInput struct {
 
 // SyncUserOutput - output from sync service (single membership)
 type SyncUserOutput struct {
-	UserID       string
-	ClerkUserID  string
-	Email        string
-	Name         *string
-	AvatarURL    *string
-	Membership   *MembershipOutput // Single membership (or nil)
-	State        string            // "no_store" | "ready"
-	Subscription *billing.SubscriptionState
+	UserID             string
+	ClerkUserID        string
+	Email              string
+	Name               *string
+	AvatarURL          *string
+	Membership         *MembershipOutput // Single membership (or nil)
+	State              string            // "no_store" | "pending_invitation" | "ready"
+	Subscription       *billing.SubscriptionState
+	PendingInvitations []PendingInvitationRow // preenchido só no estado "pending_invitation"
 }
 
 // MembershipOutput - membership data from service
@@ -170,6 +204,19 @@ type UserRow struct {
 	AvatarURL *string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+// PendingInvitationRow - row from store_invitations joined with store/inviter
+type PendingInvitationRow struct {
+	ID          string
+	StoreID     string
+	StoreName   string
+	StoreSlug   string
+	Email       string
+	Role        string
+	Token       string
+	InviterName *string
+	ExpiresAt   time.Time
 }
 
 // MembershipRow - row from memberships table with store and user info
