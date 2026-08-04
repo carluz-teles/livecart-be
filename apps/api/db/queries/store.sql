@@ -88,6 +88,22 @@ LIMIT 1;
 -- name: DeleteStore :exec
 DELETE FROM stores WHERE id = $1;
 
+-- name: StoreHasContent :one
+-- Distingue a loja de verdade da loja criada por engano no onboarding e nunca
+-- usada. Só a segunda pode ser descartada para o usuário aceitar um convite.
+-- Carrinhos e sessões pendem de live_events, então checar eventos já cobre os
+-- dois. A checagem de outras memberships evita expulsar em silêncio alguém que
+-- o dono já tinha convidado para essa loja.
+SELECT (
+  EXISTS (SELECT 1 FROM products     p WHERE p.store_id = sqlc.arg('target_store_id'))
+  OR EXISTS (SELECT 1 FROM live_events  e WHERE e.store_id = sqlc.arg('target_store_id'))
+  OR EXISTS (SELECT 1 FROM integrations i WHERE i.store_id = sqlc.arg('target_store_id'))
+  OR EXISTS (
+    SELECT 1 FROM memberships m
+    WHERE m.store_id = sqlc.arg('target_store_id') AND m.user_id <> sqlc.arg('owner_user_id')
+  )
+)::boolean AS has_content;
+
 -- name: UpdateStoreCheckoutSettings :one
 UPDATE stores
 SET

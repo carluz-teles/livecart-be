@@ -389,6 +389,35 @@ func (q *Queries) ListStoreMembers(ctx context.Context, storeID pgtype.UUID) ([]
 	return items, nil
 }
 
+const storeHasContent = `-- name: StoreHasContent :one
+SELECT (
+  EXISTS (SELECT 1 FROM products     p WHERE p.store_id = $1)
+  OR EXISTS (SELECT 1 FROM live_events  e WHERE e.store_id = $1)
+  OR EXISTS (SELECT 1 FROM integrations i WHERE i.store_id = $1)
+  OR EXISTS (
+    SELECT 1 FROM memberships m
+    WHERE m.store_id = $1 AND m.user_id <> $2
+  )
+)::boolean AS has_content
+`
+
+type StoreHasContentParams struct {
+	TargetStoreID pgtype.UUID `json:"target_store_id"`
+	OwnerUserID   pgtype.UUID `json:"owner_user_id"`
+}
+
+// Distingue a loja de verdade da loja criada por engano no onboarding e nunca
+// usada. Só a segunda pode ser descartada para o usuário aceitar um convite.
+// Carrinhos e sessões pendem de live_events, então checar eventos já cobre os
+// dois. A checagem de outras memberships evita expulsar em silêncio alguém que
+// o dono já tinha convidado para essa loja.
+func (q *Queries) StoreHasContent(ctx context.Context, arg StoreHasContentParams) (bool, error) {
+	row := q.db.QueryRow(ctx, storeHasContent, arg.TargetStoreID, arg.OwnerUserID)
+	var has_content bool
+	err := row.Scan(&has_content)
+	return has_content, err
+}
+
 const updateStore = `-- name: UpdateStore :one
 UPDATE stores
 SET
