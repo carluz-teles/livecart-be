@@ -124,8 +124,9 @@ SELECT EXISTS(
     JOIN products p ON p.id = sr.product_id
     WHERE sr.external_product_id = $1
       AND p.store_id = $2
-      AND sr.status = 'active'
       AND c.status IN ('cancelled', 'expired')
+      AND (sr.status = 'active'
+           OR sr.reversed_at > now() - interval '3 minutes')
 ) AS has_pending
 `
 
@@ -153,6 +154,22 @@ type HasPendingCartReversalForProductParams struct {
 //
 // Só cart em estado TERMINAL entra: em cart vivo a reserva ativa é normal e já
 // é coberta pelo primeiro EXISTS de HasStockGuardForProduct.
+//
+// A JANELA NÃO FECHA NA MARCAÇÃO `reversed` — ela fecha alguns minutos DEPOIS.
+//
+// Marcar a reserva como estornada só diz que a chamada ao ERP retornou. O
+// webhook que o Tiny dispara por causa daquele movimento chega DEPOIS, e é ele
+// que carrega o saldo. Em staging (04/08) a diferença foi de 27 segundos:
+//
+//	18:39:14  últimos estornos terminam, reservas marcadas → guarda solta
+//	18:39:41  webhook do Tiny chega e sobrescreve estoque local 5 → 2, 9, 7, 6
+//
+// O log provou que o nosso número estava CERTO (local_stock=5 nos quatro) e que
+// foi o eco atrasado do nosso próprio estorno que o destruiu. Fechar a janela
+// na marcação era fechá-la exatamente antes da parte que importa.
+//
+// 3 minutos é folgado para a fila de webhooks do Tiny e curto perto de qualquer
+// alteração real de estoque feita pelo lojista, que continua chegando depois.
 func (q *Queries) HasPendingCartReversalForProduct(ctx context.Context, arg HasPendingCartReversalForProductParams) (bool, error) {
 	row := q.db.QueryRow(ctx, hasPendingCartReversalForProduct, arg.ExternalProductID, arg.StoreID)
 	var has_pending bool

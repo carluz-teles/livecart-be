@@ -118,9 +118,18 @@ func TestHasPendingCartReversalForProduct(t *testing.T) {
 	})
 }
 
-// Depois que TODOS os estornos fecham, o sync volta ao normal — senão o produto
-// ficaria congelado para sempre depois do primeiro cancelamento.
-func TestPendingReversalGuardLiberaAposEstorno(t *testing.T) {
+// A janela NÃO fecha na marcação `reversed` — fecha alguns minutos depois.
+//
+// Marcar a reserva como estornada só diz que a chamada ao ERP retornou. O
+// webhook que o Tiny dispara por aquele movimento chega DEPOIS e é ele que
+// carrega o saldo. Em staging (04/08) foram 27 segundos de diferença, e nesse
+// intervalo o eco do nosso próprio estorno sobrescreveu um estoque local que
+// estava CERTO: 5 virou 2, 9, 7 e 6.
+//
+// Este teste guarda as duas pontas: ainda suprime logo após o estorno, e volta
+// ao normal quando a janela passa — senão o produto congelaria para sempre
+// depois do primeiro cancelamento.
+func TestPendingReversalGuardLiberaAposAJanela(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 
@@ -168,17 +177,31 @@ func TestPendingReversalGuardLiberaAposEstorno(t *testing.T) {
 		t.Fatal("deveria suprimir enquanto o estorno nao fechou")
 	}
 
+	// Estorno acabou AGORA: o webhook do Tiny ainda está a caminho.
 	if _, err := testPool.Exec(ctx,
 		`UPDATE stock_reservations SET status='reversed', reversed_at=now() WHERE cart_id=$1::uuid`, cartID,
 	); err != nil {
 		t.Fatalf("marcar estornada: %v", err)
 	}
-
 	got, err = testRepo.HasPendingCartReversalForProduct(ctx, externalID, storeID)
 	if err != nil {
-		t.Fatalf("depois do estorno: %v", err)
+		t.Fatalf("logo apos o estorno: %v", err)
+	}
+	if !got {
+		t.Error("soltou na marcacao — e nesse intervalo que o eco do proprio estorno sobrescreve o estoque correto")
+	}
+
+	// Janela passada: o saldo do ERP volta a ser confiável.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE stock_reservations SET reversed_at = now() - interval '10 minutes' WHERE cart_id=$1::uuid`, cartID,
+	); err != nil {
+		t.Fatalf("envelhecer o estorno: %v", err)
+	}
+	got, err = testRepo.HasPendingCartReversalForProduct(ctx, externalID, storeID)
+	if err != nil {
+		t.Fatalf("depois da janela: %v", err)
 	}
 	if got {
-		t.Error("continuou suprimindo depois de todos os estornos fecharem — o produto ficaria congelado para sempre")
+		t.Error("continuou suprimindo depois da janela — o produto ficaria congelado para sempre")
 	}
 }
