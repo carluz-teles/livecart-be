@@ -2135,6 +2135,12 @@ func (s *Service) ReplyToInstagramComment(ctx context.Context, storeID, commentI
 
 	// Use Private Reply to send a DM in response to the comment
 	if err := socialProvider.SendPrivateReply(ctx, commentID, text); err != nil {
+		// [IGTRACE] TODO remover — o par (origem do comentário, recusa do
+		// private reply) é o que sustenta a tese de que a Meta só aceita o
+		// comment_id que ELA empurra pelo webhook.
+		logger.From(ctx, s.logger).Warn(TracePrefixIG+"reply refused by Instagram",
+			zap.String("comment_id", commentID),
+		)
 		logger.From(ctx, s.logger).Warn("failed to send private reply to instagram comment",
 			zap.String("store_id", storeID),
 			zap.String("comment_id", commentID),
@@ -6142,3 +6148,7 @@ func (s *Service) checkWebhookSilence(ctx context.Context, storeID string) {
 		zap.Bool("live_comments_subscribed", subscribed),
 	)
 }
+
+// TracePrefixIG marca as linhas da investigação da entrega de live_comments.
+// TODO REMOVER junto com o restante do [IGTRACE].
+const TracePrefixIG = "[IGTRACE] "

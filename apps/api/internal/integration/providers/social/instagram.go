@@ -62,7 +62,8 @@ func NewInstagram(cfg InstagramConfig) (providers.SocialProvider, error) {
 		logger:        cfg.Logger,
 		logFunc:       cfg.LogFunc,
 		rateLimiter:   cfg.RateLimiter,
-		client:        &http.Client{Timeout: 30 * time.Second},
+		// [IGTRACE] client instrumentado — ver instagram_trace.go. TODO remover.
+		client: tracedClient(cfg.Logger),
 	}, nil
 }
 
