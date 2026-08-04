@@ -257,7 +257,35 @@ func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool
 		return false, nil
 	}
 
-	stock := resolveSyncedStock(existing.Stock(), input.Stock, input.SkipStock, input.DowngradeOnly)
+	localStock := existing.Stock()
+	stock := resolveSyncedStock(localStock, input.Stock, input.SkipStock, input.DowngradeOnly)
+
+	// O que o sync fez com o estoque, sempre — e alto quando ele REDUZ.
+	//
+	// Nenhum dos dois valores era registrado. Quando o webhook do Tiny gravou
+	// 4 por cima de um 5 correto, em staging, não sobrou linha nenhuma dizendo
+	// isso: o log só imprimia as FLAGS, não os números nem se algo mudou.
+	// Reconstruir uma unidade perdida virou arqueologia sobre movimento de ERP.
+	//
+	// Reduzir é a direção que custa dinheiro: some estoque que o lojista tem.
+	// Ela pode ser legítima (o lojista baixou no ERP), então é Warn e não erro
+	// — mas nunca mais silêncio.
+	if stock != localStock {
+		lg := logger.From(ctx, s.logger)
+		fields := []zap.Field{
+			zap.String("external_id", input.ExternalID),
+			zap.Int("local_stock", localStock),
+			zap.Int("erp_stock", input.Stock),
+			zap.Int("new_stock", stock),
+			zap.Bool("skip_stock", input.SkipStock),
+			zap.Bool("downgrade_only", input.DowngradeOnly),
+		}
+		if stock < localStock {
+			lg.Warn("ERP sync REDUCED local stock", fields...)
+		} else {
+			lg.Info("ERP sync changed local stock", fields...)
+		}
+	}
 
 	shipping := existing.Shipping()
 	if input.Shipping != nil {

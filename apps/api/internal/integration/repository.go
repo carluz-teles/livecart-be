@@ -3347,6 +3347,21 @@ func (r *Repository) HasStockGuardForProduct(ctx context.Context, externalProduc
 	})
 }
 
+// HasPendingCartReversalForProduct reports whether some unit has already been
+// credited back to local stock while its ERP reversal is still in flight. In
+// that window the ERP balance is BEHIND ours — because of us — so an absolute
+// overwrite would write a value we ourselves just made stale.
+func (r *Repository) HasPendingCartReversalForProduct(ctx context.Context, externalProductID, storeID string) (bool, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return false, err
+	}
+	return r.queries.HasPendingCartReversalForProduct(ctx, sqlc.HasPendingCartReversalForProductParams{
+		ExternalProductID: externalProductID,
+		StoreID:           sID,
+	})
+}
+
 // HasInFlightFinalisationForProduct reports whether some paid cart containing
 // the product still has its ERP finalisation pending/failed within the guard
 // window — promotion triggered by stock webhooks must wait it out.

@@ -86,3 +86,33 @@ SELECT (
 -- apenas as que continuam 'active'.
 UPDATE stock_reservations SET status = 'reversed', reversed_at = now()
 WHERE id = $1 AND status = 'active';
+
+-- name: HasPendingCartReversalForProduct :one
+-- TRUE quando existe unidade JÁ CREDITADA no estoque local cujo estorno no ERP
+-- ainda não terminou. Nessa janela o sync tem de ser SUPRIMIDO por inteiro —
+-- não "só reduções".
+--
+-- Por que a distinção importa. Cancelar carrinho credita o local de uma vez,
+-- dentro de uma transação; o estorno no Tiny sai um a um, por HTTP, fora dela.
+-- Cada estorno dispara um webhook que nos faz reler o saldo ABSOLUTO do ERP —
+-- que naquele instante está atrasado em relação a nós, e atrasado por nossa
+-- causa. O `downgrade_only` lê "ERP menor que o local" como redução legítima do
+-- lojista e grava o valor do ERP.
+--
+-- Foi assim que 1001 e 1004 caíram de 5 para 4 em staging (03/08): dois
+-- estornos pendentes cada, o primeiro webhook chegou com o Tiny uma unidade
+-- atrás e cravou o valor. E a mesma regra depois IMPEDE a autocorreção: quando
+-- o Tiny alcança 5, `5 >= 4` preserva o 4 errado. O erro é gravado por uma
+-- regra e protegido por ela.
+--
+-- Só cart em estado TERMINAL entra: em cart vivo a reserva ativa é normal e já
+-- é coberta pelo primeiro EXISTS de HasStockGuardForProduct.
+SELECT EXISTS(
+    SELECT 1 FROM stock_reservations sr
+    JOIN carts c ON c.id = sr.cart_id
+    JOIN products p ON p.id = sr.product_id
+    WHERE sr.external_product_id = sqlc.arg(external_product_id)
+      AND p.store_id = sqlc.arg(store_id)
+      AND sr.status = 'active'
+      AND c.status IN ('cancelled', 'expired')
+) AS has_pending;

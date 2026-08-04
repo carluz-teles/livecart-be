@@ -117,6 +117,49 @@ func (q *Queries) HasActiveEventForProduct(ctx context.Context, externalProductI
 	return has_active, err
 }
 
+const hasPendingCartReversalForProduct = `-- name: HasPendingCartReversalForProduct :one
+SELECT EXISTS(
+    SELECT 1 FROM stock_reservations sr
+    JOIN carts c ON c.id = sr.cart_id
+    JOIN products p ON p.id = sr.product_id
+    WHERE sr.external_product_id = $1
+      AND p.store_id = $2
+      AND sr.status = 'active'
+      AND c.status IN ('cancelled', 'expired')
+) AS has_pending
+`
+
+type HasPendingCartReversalForProductParams struct {
+	ExternalProductID string      `json:"external_product_id"`
+	StoreID           pgtype.UUID `json:"store_id"`
+}
+
+// TRUE quando existe unidade JÁ CREDITADA no estoque local cujo estorno no ERP
+// ainda não terminou. Nessa janela o sync tem de ser SUPRIMIDO por inteiro —
+// não "só reduções".
+//
+// Por que a distinção importa. Cancelar carrinho credita o local de uma vez,
+// dentro de uma transação; o estorno no Tiny sai um a um, por HTTP, fora dela.
+// Cada estorno dispara um webhook que nos faz reler o saldo ABSOLUTO do ERP —
+// que naquele instante está atrasado em relação a nós, e atrasado por nossa
+// causa. O `downgrade_only` lê "ERP menor que o local" como redução legítima do
+// lojista e grava o valor do ERP.
+//
+// Foi assim que 1001 e 1004 caíram de 5 para 4 em staging (03/08): dois
+// estornos pendentes cada, o primeiro webhook chegou com o Tiny uma unidade
+// atrás e cravou o valor. E a mesma regra depois IMPEDE a autocorreção: quando
+// o Tiny alcança 5, `5 >= 4` preserva o 4 errado. O erro é gravado por uma
+// regra e protegido por ela.
+//
+// Só cart em estado TERMINAL entra: em cart vivo a reserva ativa é normal e já
+// é coberta pelo primeiro EXISTS de HasStockGuardForProduct.
+func (q *Queries) HasPendingCartReversalForProduct(ctx context.Context, arg HasPendingCartReversalForProductParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasPendingCartReversalForProduct, arg.ExternalProductID, arg.StoreID)
+	var has_pending bool
+	err := row.Scan(&has_pending)
+	return has_pending, err
+}
+
 const hasStockGuardForProduct = `-- name: HasStockGuardForProduct :one
 SELECT (
     EXISTS(

@@ -3364,6 +3364,34 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		)
 	}
 
+	// Estorno de carrinho em voo SUPRIME o sync inteiro, e tem de ser checado
+	// DEPOIS do guard porque é mais forte: `downgrade_only` deixa passar
+	// justamente a direção que causa o dano.
+	//
+	// Cancelar credita o estoque local numa transação só; o estorno no ERP sai
+	// um a um por HTTP, e cada um dispara um webhook. Nessa janela o Tiny está
+	// atrás de nós — por nossa causa — e "ERP menor que o local" NÃO é redução
+	// do lojista. Foi o que derrubou 1001 e 1004 de 5 para 4 em staging.
+	//
+	// Erro de DB aqui também suprime: preservar o local é sempre o lado seguro.
+	if !skipStock {
+		pending, pendErr := s.repo.HasPendingCartReversalForProduct(ctx, externalProductID, integration.StoreID)
+		if pendErr != nil {
+			skipStock = true
+			logger.From(ctx, s.logger).Warn("failed to check pending cart reversal, skipping stock sync as precaution",
+				zap.String("external_product_id", externalProductID),
+				zap.Error(pendErr),
+			)
+		} else if pending {
+			skipStock = true
+			downgradeOnly = false
+			logger.From(ctx, s.logger).Info("ERP stock sync suppressed: cart reversal in flight",
+				zap.String("external_product_id", externalProductID),
+				zap.String("store_id", integration.StoreID),
+			)
+		}
+	}
+
 	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, skipStock, downgradeOnly); err != nil {
 		return false, fmt.Errorf("syncing product: %w", err)
 	}
