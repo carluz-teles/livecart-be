@@ -116,6 +116,37 @@ func TestHasPendingCartReversalForProduct(t *testing.T) {
 			t.Error("expiracao credita o local igual ao cancelamento e tem a mesma janela")
 		}
 	})
+
+	// Reserva PRESA não pode travar o sync para sempre.
+	//
+	// Em 05/08, sete reservas ficaram 'active' em carrinhos cancelados porque o
+	// estorno estourou o prazo do handler. Sem teto, elas suprimiam o sync de
+	// seis produtos indefinidamente — e a correção que o lojista fizesse no
+	// Tiny nunca chegaria até nós. Uma trava de segurança que não solta deixa
+	// de ser segurança.
+	t.Run("reserva presa antiga para de suprimir", func(t *testing.T) {
+		cartID := newCart("cancelled", "presa")
+		reserve(cartID, "active")
+		if !check() {
+			t.Fatal("deveria suprimir enquanto o estorno e recente")
+		}
+		if _, err := testPool.Exec(ctx,
+			`UPDATE stock_reservations SET created_at = now() - interval '2 hours' WHERE cart_id = $1::uuid`,
+			cartID,
+		); err != nil {
+			t.Fatalf("envelhecer a reserva: %v", err)
+		}
+		// Só as OUTRAS reservas recentes deste produto podem segurar agora.
+		if _, err := testPool.Exec(ctx,
+			`UPDATE stock_reservations SET created_at = now() - interval '2 hours', reversed_at = NULL
+			  WHERE product_id = $1::uuid AND status = 'active'`, productID,
+		); err != nil {
+			t.Fatalf("envelhecer as demais: %v", err)
+		}
+		if check() {
+			t.Error("continuou suprimindo com reserva presa antiga — o produto fica congelado e o lojista nao consegue corrigir pelo Tiny")
+		}
+	})
 }
 
 // A janela NÃO fecha na marcação `reversed` — fecha alguns minutos depois.

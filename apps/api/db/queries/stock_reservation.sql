@@ -130,6 +130,16 @@ SELECT EXISTS(
     WHERE sr.external_product_id = sqlc.arg(external_product_id)
       AND p.store_id = sqlc.arg(store_id)
       AND c.status IN ('cancelled', 'expired')
-      AND (sr.status = 'active'
-           OR sr.reversed_at > now() - interval '3 minutes')
+      AND (
+            -- Estorno ainda pendente, mas com TETO. Sem ele, uma reserva que
+            -- nunca fecha (estorno falhou, ctx morreu) desliga o sync daquele
+            -- produto PARA SEMPRE — foi o que aconteceu em 05/08: 7 reservas
+            -- presas em carrinhos cancelados suprimiram o sync de 6 produtos
+            -- indefinidamente, e a correção que o lojista fizesse no Tiny nunca
+            -- chegaria até nós. A trava de segurança não pode ser eterna.
+            (sr.status = 'active'
+             AND sr.created_at > now() - interval '30 minutes')
+            -- Estorno concluído: segura pelo eco atrasado do Tiny.
+         OR sr.reversed_at > now() - interval '3 minutes'
+      )
 ) AS has_pending;

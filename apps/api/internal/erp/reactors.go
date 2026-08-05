@@ -86,6 +86,6 @@ func (s *Service) OnCartExpired(ctx context.Context, cartID, storeID string) err
 		return s.CancelERPOrderForCart(ctx, cartID, storeID)
 	}
 	// Legacy (non-converted): reverse the saída-manual reservations per cart.
-	s.reverseCartReservationsInERP(ctx, cartID, storeID)
-	return nil
+	// O erro sobe para o asynq poder repetir — antes era descartado aqui.
+	return s.reverseCartReservationsInERP(ctx, cartID, storeID)
 }
