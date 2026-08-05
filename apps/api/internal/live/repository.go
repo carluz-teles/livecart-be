@@ -1435,9 +1435,14 @@ func (r *Repository) FinalizeCartsByEvent(ctx context.Context, eventID string) (
 
 	// Finalize (active carts → checkout). Returns the finalized cart ids so we
 	// can emit cart.checkout_armed per cart in the same tx.
+	// O extra de quem está na fila vem do EVENTO: é a mesma configuração que o
+	// lojista já preenche em "quanto tempo a mais quem espera tem". Antes ela
+	// só valia DEPOIS da promoção — e a promoção nunca acontecia, porque quem
+	// esperava vencia junto com quem segurava o estoque.
 	ids, err := qtx.FinalizeCartsByEvent(ctx, sqlc.FinalizeCartsByEventParams{
-		EventID:           uid,
-		ExpirationMinutes: settings.EffectiveCartExpirationMinutes,
+		EventID:              uid,
+		ExpirationMinutes:    settings.EffectiveCartExpirationMinutes,
+		WaitlistExtraMinutes: settings.WaitlistNotifiedTtlMinutes,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("finalizing carts: %w", err)

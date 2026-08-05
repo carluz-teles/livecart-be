@@ -14,9 +14,11 @@ package live
 // Em staging (04/08) os três ficaram com 18:38:51.703178 e as três linhas de
 // fila terminaram `expired` com notified_at NULL: ninguém foi notificado.
 //
-// Este teste NÃO afirma qual deveria ser o comportamento — isso é decisão de
-// produto ainda aberta. Ele fixa o FATO que a torna necessária, para que a
-// correção tenha contra o que ser medida.
+// A REGRA, decidida pelo dono do produto: quem está esperando um produto liberar
+// ganha um prazo MAIOR, e o quanto vem da configuração do EVENTO
+// (waitlist_notified_ttl_minutes) — a mesma que ele já preenche para responder
+// "quanto tempo a mais quem espera tem". Não é número novo: é a regra dele,
+// aplicada onde finalmente importa.
 
 import (
 	"context"
@@ -25,7 +27,7 @@ import (
 	"time"
 )
 
-func TestFimDeEventoDaOMesmoPrazoParaTodoCarrinho(t *testing.T) {
+func TestQuemEstaNaFilaGanhaPrazoMaiorAoFecharOEvento(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	storeID := seedWindowStore(t, ctx, "expiracao-em-lote")
@@ -33,8 +35,9 @@ func TestFimDeEventoDaOMesmoPrazoParaTodoCarrinho(t *testing.T) {
 	n := fmt.Sprintf("%d", time.Now().UnixNano())
 	var eventID, productID string
 	if err := testPool.QueryRow(ctx,
-		`INSERT INTO live_events (store_id, status, title, ends_at, cart_expiration_minutes)
-		 VALUES ($1,'active','Semana Black', now() + interval '1 hour', 30) RETURNING id::text`, storeID,
+		`INSERT INTO live_events (store_id, status, title, ends_at, cart_expiration_minutes,
+		     waitlist_notified_ttl_minutes)
+		 VALUES ($1,'active','Semana Black', now() + interval '1 hour', 30, 45) RETURNING id::text`, storeID,
 	).Scan(&eventID); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
@@ -126,24 +129,34 @@ func TestFimDeEventoDaOMesmoPrazoParaTodoCarrinho(t *testing.T) {
 		}
 	}
 
-	if len(distintos) != 1 {
-		t.Logf("prazos distintos: %v", distintos)
-		t.Skip("o comportamento mudou: os carrinhos deixaram de compartilhar um prazo único — " +
-			"revise este teste junto com a correção da expiração em lote")
+	if len(distintos) != 2 {
+		t.Fatalf("esperava DOIS prazos (quem segura x quem espera), achei %d: %v", len(distintos), distintos)
 	}
 
-	t.Logf("os 3 carrinhos vencem no MESMO instante (%s): quem espera na fila morre junto "+
-		"com quem segura o estoque, e a promocao nao tem intervalo para acontecer",
-		distintos[0].Format(time.RFC3339Nano))
+	// Quem NÃO tem fila vence primeiro; quem espera ganha o extra do evento.
+	semFila := prazos[comEstoque]
+	for _, c := range []string{naFila1, naFila2} {
+		if !prazos[c].After(semFila) {
+			t.Errorf("carrinho na fila (%s) vence em %s, nao depois de quem segura o estoque (%s) — "+
+				"a promocao continua sem intervalo para acontecer",
+				c[:8], prazos[c].Format(time.RFC3339Nano), semFila.Format(time.RFC3339Nano))
+		}
+	}
 
-	// E ninguém na fila foi notificado — não havia intervalo para isso.
-	var notificados int
-	if err := testPool.QueryRow(ctx,
-		`SELECT count(*) FROM waitlist_items WHERE event_id = $1::uuid AND notified_at IS NOT NULL`, eventID,
-	).Scan(&notificados); err != nil {
-		t.Fatalf("contar notificados: %v", err)
+	// E o extra é EXATAMENTE o configurado no evento (45 min), não um número
+	// inventado pelo código.
+	extra := prazos[naFila1].Sub(semFila)
+	if extra < 44*time.Minute || extra > 46*time.Minute {
+		t.Errorf("o extra foi de %s, esperado ~45min (waitlist_notified_ttl_minutes do evento)", extra)
 	}
-	if notificados != 0 {
-		t.Logf("notificados: %d — o fluxo mudou, revise este teste", notificados)
+
+	// Os dois que esperam recebem o MESMO prazo: a diferença é ter fila ou não,
+	// não quem entrou primeiro.
+	if !prazos[naFila1].Equal(prazos[naFila2]) {
+		t.Errorf("os dois carrinhos na fila receberam prazos diferentes: %s x %s",
+			prazos[naFila1], prazos[naFila2])
 	}
+
+	t.Logf("quem segura vence em %s; quem espera, %s depois",
+		semFila.Format(time.RFC3339Nano), extra)
 }

@@ -453,7 +453,14 @@ const finalizeCartsByEvent = `-- name: FinalizeCartsByEvent :many
 
 UPDATE carts c
 SET status = 'checkout',
-    expires_at = now() + make_interval(mins => $2::int)
+    expires_at = now() + make_interval(mins =>
+        $2::int
+        + CASE WHEN EXISTS (
+              SELECT 1 FROM waitlist_items wi
+              WHERE wi.cart_id = c.id
+                AND (wi.status = 'waiting'
+                     OR (wi.status = 'notified' AND wi.expires_at > now()))
+          ) THEN $3::int ELSE 0 END)
 WHERE c.event_id = $1
   AND c.status = 'active'
   AND c.payment_status IS DISTINCT FROM 'paid'
@@ -461,8 +468,9 @@ RETURNING c.id
 `
 
 type FinalizeCartsByEventParams struct {
-	EventID           pgtype.UUID `json:"event_id"`
-	ExpirationMinutes int32       `json:"expiration_minutes"`
+	EventID              pgtype.UUID `json:"event_id"`
+	ExpirationMinutes    int32       `json:"expiration_minutes"`
+	WaitlistExtraMinutes int32       `json:"waitlist_extra_minutes"`
 }
 
 // SessionAttributionByEvent foi REMOVIDA (Fatia 5). Nunca teve chamador Go — e
@@ -494,9 +502,27 @@ type FinalizeCartsByEventParams struct {
 // estendido, conforme close_cart_on_event_end) e o fallback para a loja. O
 // COALESCE inline que existia aqui era a terceira cópia da mesma regra.
 //
+// QUEM ESTÁ NA FILA GANHA O PRAZO EXTRA DO EVENTO.
+//
+// Todo carrinho recebia o MESMO expires_at — um UPDATE, um now() — então os
+// três vencidos em 04/08 tinham 18:38:51.703178 idêntico ao microssegundo. Quem
+// esperava um produto morria no mesmo instante de quem o segurava, e a promoção
+// da fila não tinha intervalo nenhum para acontecer: as três linhas terminaram
+// 'expired' com notified_at NULL. Ninguém foi avisado.
+//
+// O extra é `waitlist_notified_ttl_minutes` do EVENTO — a mesma configuração
+// que o lojista já preenche para responder "quanto tempo A MAIS quem espera
+// tem". Não é número novo nem regra nova: é a regra dele, aplicada onde
+// finalmente importa. Sem isso ela só valia depois da promoção, e a promoção
+// nunca chegava.
+//
+// O critério é ter item AGUARDANDO ou PROMOVIDO com janela viva. Item já
+// 'expired' ou 'fulfilled' não estende nada — quem não espera mais não precisa
+// de prazo maior.
+//
 // Retorna os ids finalizados para emitir cart.checkout_armed por carrinho.
 func (q *Queries) FinalizeCartsByEvent(ctx context.Context, arg FinalizeCartsByEventParams) ([]pgtype.UUID, error) {
-	rows, err := q.db.Query(ctx, finalizeCartsByEvent, arg.EventID, arg.ExpirationMinutes)
+	rows, err := q.db.Query(ctx, finalizeCartsByEvent, arg.EventID, arg.ExpirationMinutes, arg.WaitlistExtraMinutes)
 	if err != nil {
 		return nil, err
 	}
