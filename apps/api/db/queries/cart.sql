@@ -849,3 +849,28 @@ SET quantity = @quantity::int,
     waitlisted_quantity = @waitlisted_quantity::int
 WHERE id = @id
   AND quantity = @expected_quantity::int;
+
+-- name: FindOpenCartUserIDByHandle :one
+-- O platform_user_id do carrinho ABERTO deste comprador no evento, procurado
+-- pelo @ em vez do id.
+--
+-- Existe porque o MESMO comprador chega com DOIS ids diferentes conforme o
+-- caminho: o webhook traz `from.self_ig_scoped_id` (o IGSID, único aceito pela
+-- API de mensagens como destinatário) e a aresta `/{media}/comments` do polling
+-- não devolve esse campo — só o `from.id` cru.
+--
+-- Em 05/08 isso deu DOIS carrinhos para @englivecart no mesmo evento: um com
+-- 1498886768484002 (webhook) e outro com 17841439350112281 (polling). A unique
+-- parcial por (evento, platform_user_id) não viu violação nenhuma — os ids são
+-- diferentes de verdade. O índice fez o trabalho dele; a entrada é que chegou
+-- com duas identidades para a mesma pessoa.
+--
+-- Só bate em quem já tem carrinho aberto no evento: o @ é estável dentro de uma
+-- transmissão e é por ele que o lojista reconhece o comprador.
+SELECT platform_user_id FROM carts
+WHERE event_id = $1
+  AND platform_handle = $2
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+ORDER BY created_at ASC
+LIMIT 1;

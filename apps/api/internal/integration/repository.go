@@ -896,6 +896,27 @@ func (r *Repository) IncrementProductStock(ctx context.Context, productID string
 // LiveCommentExistsByPlatformID reports whether a comment with the given
 // Instagram comment id was already stored. Used by the post-comment polling
 // capture to avoid reprocessing comments across polls (and vs the webhook).
+// FindOpenCartUserIDByHandle devolve o platform_user_id do carrinho ABERTO
+// deste @ no evento, se houver. Ver a query para o porquê: o mesmo comprador
+// chega com ids diferentes conforme venha por webhook ou por polling.
+func (r *Repository) FindOpenCartUserIDByHandle(ctx context.Context, eventID, handle string) (string, bool) {
+	if eventID == "" || handle == "" {
+		return "", false
+	}
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return "", false
+	}
+	userID, err := r.queries.FindOpenCartUserIDByHandle(ctx, sqlc.FindOpenCartUserIDByHandleParams{
+		EventID:        eID,
+		PlatformHandle: handle,
+	})
+	if err != nil || userID == "" {
+		return "", false
+	}
+	return userID, true
+}
+
 func (r *Repository) LiveCommentExistsByPlatformID(ctx context.Context, platformCommentID string) (bool, error) {
 	if platformCommentID == "" {
 		return false, nil

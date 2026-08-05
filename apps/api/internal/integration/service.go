@@ -4480,6 +4480,30 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 			if username == "" {
 				username = c.Username
 			}
+
+			// A MESMA pessoa chega com ids DIFERENTES conforme o caminho.
+			//
+			// O webhook traz `from.self_ig_scoped_id` — o IGSID, único id que a
+			// API de mensagens aceita como destinatário. A aresta
+			// /{media}/comments não devolve esse campo: só o `from.id` cru.
+			//
+			// Em 05/08 isso rendeu DOIS carrinhos para @englivecart no mesmo
+			// evento, um por caminho. A unique parcial por (evento, user_id)
+			// não viu violação — os ids são diferentes de verdade. E o carrinho
+			// nascido do polling ainda ficava com um id que NÃO recebe DM.
+			//
+			// Se já existe carrinho aberto deste @ no evento, adotamos o id
+			// dele. Não inventa identidade: só evita criar uma segunda para
+			// quem já tem uma.
+			userID := c.From.ID
+			if known, ok := s.repo.FindOpenCartUserIDByHandle(evCtx, ev.EventID, username); ok && known != userID {
+				logger.From(evCtx, s.logger).Info(TracePrefixIG+"polling: reusing the buyer id from their open cart",
+					zap.String("handle", username),
+					zap.String("raw_from_id", c.From.ID),
+					zap.String("cart_user_id", known),
+				)
+				userID = known
+			}
 			if err := s.liveService.ProcessInstagramComment(evCtx, ProcessInstagramCommentInput{
 				// A conta do Instagram desta loja. O webhook a traz em
 				// entry.id; o polling tem de buscá-la, e sem isso todo
@@ -4491,7 +4515,7 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 				AccountID: accountID,
 				MediaID:   ev.MediaID,
 				CommentID: c.ID,
-				UserID:    c.From.ID,
+				UserID:    userID,
 				Username:  username,
 				Text:      c.Text,
 				// RN-37: sem o carimbo o polling não saberia que o comentário
@@ -6105,7 +6129,19 @@ func (s *Service) checkWebhookSilence(ctx context.Context, storeID string) {
 		return
 	}
 
+	// O carimbo entra pelo entry.id do webhook (17841…) e este lookup devolve o
+	// metadata (28139…, app-scoped, gravado antes da correção do id). Chaves
+	// diferentes: o vigia nunca via o carimbo e considerava silêncio SEMPRE.
+	// Ele acertou em 05/08 por coincidência — os webhooks tinham parado mesmo.
+	//
+	// Aceita QUALQUER um dos dois ids que a loja possa ter, porque não dá para
+	// saber qual está no metadata sem reconectar a conta.
 	v, seen := s.lastWebhookAt.Load(accountID)
+	if !seen {
+		if alt := s.instagramAltAccountID(ctx, storeID); alt != "" {
+			v, seen = s.lastWebhookAt.Load(alt)
+		}
+	}
 	if !seen {
 		// Nunca chegou nada NESTE processo. Pode ser deploy recente, então o
 		// relógio começa agora em vez de gritar de imediato.
@@ -6152,3 +6188,17 @@ func (s *Service) checkWebhookSilence(ctx context.Context, storeID string) {
 // TracePrefixIG marca as linhas da investigação da entrega de live_comments.
 // TODO REMOVER junto com o restante do [IGTRACE].
 const TracePrefixIG = "[IGTRACE] "
+
+// instagramAltAccountID devolve o OUTRO id do Instagram da loja — a Meta tem
+// dois (conta profissional e app-scoped) e, dependendo de quando a conta foi
+// conectada, o metadata guarda um ou outro em `instagram_user_id`.
+func (s *Service) instagramAltAccountID(ctx context.Context, storeID string) string {
+	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "social", "instagram")
+	if err != nil || integration == nil {
+		return ""
+	}
+	if v, ok := integration.Metadata["instagram_app_scoped_id"].(string); ok {
+		return v
+	}
+	return ""
+}

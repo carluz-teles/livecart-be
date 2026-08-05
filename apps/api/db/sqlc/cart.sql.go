@@ -660,6 +660,44 @@ func (q *Queries) FindCartByExternalOrderID(ctx context.Context, arg FindCartByE
 	return i, err
 }
 
+const findOpenCartUserIDByHandle = `-- name: FindOpenCartUserIDByHandle :one
+SELECT platform_user_id FROM carts
+WHERE event_id = $1
+  AND platform_handle = $2
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+ORDER BY created_at ASC
+LIMIT 1
+`
+
+type FindOpenCartUserIDByHandleParams struct {
+	EventID        pgtype.UUID `json:"event_id"`
+	PlatformHandle string      `json:"platform_handle"`
+}
+
+// O platform_user_id do carrinho ABERTO deste comprador no evento, procurado
+// pelo @ em vez do id.
+//
+// Existe porque o MESMO comprador chega com DOIS ids diferentes conforme o
+// caminho: o webhook traz `from.self_ig_scoped_id` (o IGSID, único aceito pela
+// API de mensagens como destinatário) e a aresta `/{media}/comments` do polling
+// não devolve esse campo — só o `from.id` cru.
+//
+// Em 05/08 isso deu DOIS carrinhos para @englivecart no mesmo evento: um com
+// 1498886768484002 (webhook) e outro com 17841439350112281 (polling). A unique
+// parcial por (evento, platform_user_id) não viu violação nenhuma — os ids são
+// diferentes de verdade. O índice fez o trabalho dele; a entrada é que chegou
+// com duas identidades para a mesma pessoa.
+//
+// Só bate em quem já tem carrinho aberto no evento: o @ é estável dentro de uma
+// transmissão e é por ele que o lojista reconhece o comprador.
+func (q *Queries) FindOpenCartUserIDByHandle(ctx context.Context, arg FindOpenCartUserIDByHandleParams) (string, error) {
+	row := q.db.QueryRow(ctx, findOpenCartUserIDByHandle, arg.EventID, arg.PlatformHandle)
+	var platform_user_id string
+	err := row.Scan(&platform_user_id)
+	return platform_user_id, err
+}
+
 const getCartByCheckoutID = `-- name: GetCartByCheckoutID :one
 SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at FROM carts WHERE checkout_id = $1
 `
