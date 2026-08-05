@@ -821,3 +821,31 @@ WHERE c.erp_order_state IN ('converting','mutating')
 -- name: GetCartGMVCents :one
 -- GMV de um cart: delega à função canônica cart_product_total_cents (migration 000093).
 SELECT cart_product_total_cents(sqlc.arg(cart_id))::bigint AS gmv_cents;
+
+-- name: SetCartItemSplitIfUnchanged :execrows
+-- Escreve a quantidade TOTAL e a parte em FILA de uma vez, e só se ninguém
+-- tiver mexido na linha desde que a lemos.
+--
+-- Duas correções numa query, porque as duas vivem no mesmo UPDATE:
+--
+-- 1) TRAVA OTIMISTA. O UpdateCartItem antigo era `SET quantity = $2 WHERE
+--    id = $1` — absoluto e sem guarda. Entre a leitura e a escrita, o PATCH do
+--    checkout faz uma chamada HTTP ao Tiny que passa pelo limitador de ~1 req/s:
+--    a janela dura SEGUNDOS. Em 05/08 dois escritores leram quantity=2 com
+--    3.070 ms de diferença; o segundo calculou o delta contra um valor já
+--    obsoleto, debitou 2 e a linha só andou 1. Uma unidade sumiu do LiveCart e
+--    uma saída a mais foi lançada no Tiny. `AND quantity = @expected_quantity`
+--    faz o perdedor afetar ZERO linhas, e o chamador devolve conflito em vez de
+--    corromper a conta.
+--
+-- 2) A PARTE EM FILA ACOMPANHA. `waitlisted_quantity` é a parcela SEM estoque;
+--    o que está segurado é `quantity - waitlisted_quantity`. O update antigo
+--    mexia só no total, então baixar de 5 (com 3 em fila, 2 segurados) para 2
+--    creditava 3 unidades ao estoque quando só 2 haviam sido tiradas — e ainda
+--    deixava a linha com disponível NEGATIVO (2 - 3). Escrever as duas colunas
+--    juntas é o que mantém a identidade `total = segurado + em fila`.
+UPDATE cart_items
+SET quantity = @quantity::int,
+    waitlisted_quantity = @waitlisted_quantity::int
+WHERE id = @id
+  AND quantity = @expected_quantity::int;

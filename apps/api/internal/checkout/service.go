@@ -1142,20 +1142,54 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 		}
 	}
 
+	// A linha tem DUAS parcelas: o que está segurado no estoque e o que está
+	// esperando na fila. O que move estoque é só a primeira.
+	//
+	// Todo este bloco tratava `quantity` como se fosse tudo segurado. Baixar de
+	// 5 (com 3 na fila, 2 segurados) para 2 mandava delta -3 ao estoque quando
+	// só 2 haviam sido tirados: uma unidade creditada que nunca existiu, nos
+	// dois sistemas. E a linha ficava com 2 total e 3 em fila — disponível
+	// NEGATIVO, que os outros quatro pontos que calculam
+	// `quantity - waitlisted_quantity` leriam como número válido.
+	//
+	// Ao reduzir, some primeiro a parte em FILA: ela não segura nada, então é a
+	// que o comprador abre mão sem custo. Ao aumentar, o acréscimo vira
+	// segurado — validateQuantityCap acima já garantiu que há estoque.
+	heldAfter, waitlistedAfter, stockDelta := splitQuantityChange(
+		item.Quantity, item.WaitlistedQuantity, input.Quantity)
+	_ = heldAfter
+
 	if err := s.repo.EnsureInitialSnapshot(ctx, cart.ID); err != nil {
 		return nil, err
 	}
-	if err := s.repo.SetCartItemQuantity(ctx, item.ID, input.Quantity); err != nil {
+	// Trava otimista: a escrita só vale se a linha ainda estiver como a lemos.
+	//
+	// Entre a leitura lá em cima e esta escrita há uma chamada HTTP ao Tiny que
+	// passa pelo limitador de ~1 req/s — a janela dura SEGUNDOS. Em 05/08 dois
+	// escritores leram quantity=2 com 3s de diferença; o segundo calculou o
+	// delta contra um valor obsoleto e uma unidade sumiu do carrinho enquanto
+	// uma saída a mais era lançada no ERP.
+	ok, err := s.repo.SetCartItemSplitIfUnchanged(ctx, item.ID, item.Quantity, input.Quantity, waitlistedAfter)
+	if err != nil {
 		return nil, err
+	}
+	if !ok {
+		// Alguém alterou este item entre a leitura e a escrita. Recusar é o
+		// único caminho correto: o delta calculado não vale mais, e aplicá-lo
+		// corromperia a conta de estoque.
+		return nil, httpx.DomainError(409, httpx.CodeCartItemChanged,
+			"a quantidade deste item mudou enquanto você editava, recarregue e tente de novo")
 	}
 
 	movementID, syncErr := s.integrationService.AdjustStockReservationDelta(
 		ctx, cart.StoreID, cart.ID, cart.EventID, item.ProductID,
-		delta, item.UnitPrice, cart.PlatformHandle, integration.StockOpUnspecified,
+		stockDelta, item.UnitPrice, cart.PlatformHandle, integration.StockOpUnspecified,
 	)
 	if syncErr != nil {
 		// Roll back the local change so the buyer sees the failure clearly.
-		_ = s.repo.SetCartItemQuantity(ctx, item.ID, item.Quantity)
+		// Restaura as DUAS parcelas: reverter só o total deixaria a fila com o
+		// valor novo sobre um total antigo.
+		_, _ = s.repo.SetCartItemSplitIfUnchanged(ctx, item.ID, input.Quantity, item.Quantity, item.WaitlistedQuantity)
 		// Propagate typed httpx errors verbatim (e.g., "estoque insuficiente")
 		// so the buyer sees the actual reason instead of a generic retry copy.
 		var svcErr *httpx.ServiceError
@@ -1531,4 +1565,50 @@ func (s *Service) GetPaymentStatus(ctx context.Context, input GetPaymentStatusIn
 		PaidAt:        cart.PaidAt,
 		Message:       message,
 	}, nil
+}
+
+// splitQuantityChange reparte a quantidade nova entre o que fica SEGURADO no
+// estoque e o que fica esperando na FILA, e devolve quanto o estoque tem de se
+// mover.
+//
+// A linha de carrinho tem duas parcelas e só a primeira move estoque:
+//
+//	total = segurado + em fila
+//
+// AO REDUZIR, some primeiro a parte em FILA — ela não segura nada, então é a
+// que o comprador abre mão sem custo para ninguém. Só depois de zerá-la é que
+// se devolve estoque de verdade.
+//
+// AO AUMENTAR, o acréscimo inteiro vira segurado: quem chama já validou que há
+// saldo (validateQuantityCap).
+//
+// Isto era feito sobre o TOTAL, ignorando a fila. Baixar de 5 (3 na fila, 2
+// segurados) para 2 creditava 3 unidades ao estoque quando só 2 haviam sido
+// tiradas — uma unidade inventada, no LiveCart e no Tiny — e deixava a linha
+// com disponível negativo.
+func splitQuantityChange(currentTotal, currentWaitlisted, newTotal int) (heldAfter, waitlistedAfter, stockDelta int) {
+	heldBefore := currentTotal - currentWaitlisted
+	if heldBefore < 0 {
+		// Linha já inconsistente (o bug acima produzia isso). Tratar como zero
+		// segurado é o lado seguro: não devolve estoque que não foi tirado.
+		heldBefore = 0
+	}
+
+	switch {
+	case newTotal < heldBefore:
+		// Reduziu abaixo do que segura: a fila zera e sobra estoque a devolver.
+		heldAfter = newTotal
+	case newTotal > currentTotal:
+		// Aumentou: o acréscimo é segurado.
+		heldAfter = heldBefore + (newTotal - currentTotal)
+	default:
+		// Reduziu, mas ainda acima do segurado: só encolhe a fila.
+		heldAfter = heldBefore
+	}
+
+	waitlistedAfter = newTotal - heldAfter
+	if waitlistedAfter < 0 {
+		waitlistedAfter = 0
+	}
+	return heldAfter, waitlistedAfter, heldAfter - heldBefore
 }

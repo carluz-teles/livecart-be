@@ -525,6 +525,26 @@ func (r *Repository) GetCartItem(ctx context.Context, itemID string) (*CartItemR
 }
 
 // SetCartItemQuantity overwrites the quantity of a cart_items row.
+// SetCartItemSplitIfUnchanged grava total + parte em fila, e só se a linha
+// ainda estiver como a lemos. Devolve false quando outro escritor chegou antes
+// (0 linhas afetadas) — ver a query para o porquê das duas coisas juntas.
+func (r *Repository) SetCartItemSplitIfUnchanged(ctx context.Context, itemID string, expectedQty, quantity, waitlisted int) (bool, error) {
+	uid, err := uuid.Parse(itemID)
+	if err != nil {
+		return false, httpx.ErrBadRequest("invalid item ID")
+	}
+	n, err := r.q.SetCartItemSplitIfUnchanged(ctx, sqlc.SetCartItemSplitIfUnchangedParams{
+		ID:                 pgtype.UUID{Bytes: uid, Valid: true},
+		ExpectedQuantity:   int32(expectedQty),
+		Quantity:           int32(quantity),
+		WaitlistedQuantity: int32(waitlisted),
+	})
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (r *Repository) SetCartItemQuantity(ctx context.Context, itemID string, quantity int) error {
 	uid, err := uuid.Parse(itemID)
 	if err != nil {

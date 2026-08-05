@@ -2582,6 +2582,55 @@ func (q *Queries) SetCartERPStockLaunched(ctx context.Context, arg SetCartERPSto
 	return err
 }
 
+const setCartItemSplitIfUnchanged = `-- name: SetCartItemSplitIfUnchanged :execrows
+UPDATE cart_items
+SET quantity = $1::int,
+    waitlisted_quantity = $2::int
+WHERE id = $3
+  AND quantity = $4::int
+`
+
+type SetCartItemSplitIfUnchangedParams struct {
+	Quantity           int32       `json:"quantity"`
+	WaitlistedQuantity int32       `json:"waitlisted_quantity"`
+	ID                 pgtype.UUID `json:"id"`
+	ExpectedQuantity   int32       `json:"expected_quantity"`
+}
+
+// Escreve a quantidade TOTAL e a parte em FILA de uma vez, e só se ninguém
+// tiver mexido na linha desde que a lemos.
+//
+// Duas correções numa query, porque as duas vivem no mesmo UPDATE:
+//
+//  1. TRAVA OTIMISTA. O UpdateCartItem antigo era `SET quantity = $2 WHERE
+//     id = $1` — absoluto e sem guarda. Entre a leitura e a escrita, o PATCH do
+//     checkout faz uma chamada HTTP ao Tiny que passa pelo limitador de ~1 req/s:
+//     a janela dura SEGUNDOS. Em 05/08 dois escritores leram quantity=2 com
+//     3.070 ms de diferença; o segundo calculou o delta contra um valor já
+//     obsoleto, debitou 2 e a linha só andou 1. Uma unidade sumiu do LiveCart e
+//     uma saída a mais foi lançada no Tiny. `AND quantity = @expected_quantity`
+//     faz o perdedor afetar ZERO linhas, e o chamador devolve conflito em vez de
+//     corromper a conta.
+//
+//  2. A PARTE EM FILA ACOMPANHA. `waitlisted_quantity` é a parcela SEM estoque;
+//     o que está segurado é `quantity - waitlisted_quantity`. O update antigo
+//     mexia só no total, então baixar de 5 (com 3 em fila, 2 segurados) para 2
+//     creditava 3 unidades ao estoque quando só 2 haviam sido tiradas — e ainda
+//     deixava a linha com disponível NEGATIVO (2 - 3). Escrever as duas colunas
+//     juntas é o que mantém a identidade `total = segurado + em fila`.
+func (q *Queries) SetCartItemSplitIfUnchanged(ctx context.Context, arg SetCartItemSplitIfUnchangedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setCartItemSplitIfUnchanged,
+		arg.Quantity,
+		arg.WaitlistedQuantity,
+		arg.ID,
+		arg.ExpectedQuantity,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const transitionCartERPOrderState = `-- name: TransitionCartERPOrderState :execrows
 
 
