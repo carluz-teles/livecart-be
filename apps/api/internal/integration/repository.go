@@ -917,6 +917,29 @@ func (r *Repository) FindOpenCartUserIDByHandle(ctx context.Context, eventID, ha
 	return userID, true
 }
 
+// FindDMCapableUserIDByHandle procura, na loja inteira e não só no evento, uma
+// identidade já conhecida deste @ diferente da que acabou de chegar. Serve ao
+// caso da loja comentando na própria transmissão, em que o polling devolve o id
+// da CONTA — que nunca é aceito como destinatário de DM. Ver a query.
+func (r *Repository) FindDMCapableUserIDByHandle(ctx context.Context, storeID, handle, excludeUserID string) (string, bool) {
+	if storeID == "" || handle == "" {
+		return "", false
+	}
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return "", false
+	}
+	userID, err := r.queries.FindDMCapableUserIDByHandle(ctx, sqlc.FindDMCapableUserIDByHandleParams{
+		StoreID:       sID,
+		Handle:        handle,
+		ExcludeUserID: excludeUserID,
+	})
+	if err != nil || userID == "" {
+		return "", false
+	}
+	return userID, true
+}
+
 func (r *Repository) LiveCommentExistsByPlatformID(ctx context.Context, platformCommentID string) (bool, error) {
 	if platformCommentID == "" {
 		return false, nil

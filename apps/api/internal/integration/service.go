@@ -4496,6 +4496,39 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 			// dele. Não inventa identidade: só evita criar uma segunda para
 			// quem já tem uma.
 			userID := c.From.ID
+
+			// A LOJA comentando na própria transmissão é o caso em que o
+			// polling não erra por pouco: o Instagram devolve o id da CONTA,
+			// que não é destinatário de DM em hipótese nenhuma. Medido em
+			// 05/08, mesmo evento: a identidade da conta profissional acumulou
+			// 4 comentários e 0 DMs; a do IGSID, 1 comentário e 1 DM.
+			//
+			// Não dá para pedir o IGSID à Meta. Ele é `self_ig_scoped_id`, só
+			// existe no payload do webhook, e a própria doc de auto-conversa
+			// diz para usar "the recipient ID from the webhook". Os endpoints
+			// que aceitam IGSID (/{igsid}, /me/conversations?user_id=) o querem
+			// como ENTRADA — nenhum faz o caminho inverso a partir do @.
+			//
+			// Então recuperamos do que já gravamos: uma passagem pelo webhook
+			// basta para o IGSID estar em customers, e daí em diante o polling
+			// o reusa.
+			if storeHandle := s.instagramUsername(evCtx, ev.StoreID); storeHandle != "" &&
+				strings.EqualFold(storeHandle, username) {
+				if known, ok := s.repo.FindDMCapableUserIDByHandle(evCtx, ev.StoreID, username, userID); ok {
+					logger.From(evCtx, s.logger).Info(TracePrefixIG+"polling: store commented on its own media, using the id that receives DM",
+						zap.String("handle", username),
+						zap.String("raw_from_id", c.From.ID),
+						zap.String("dm_capable_id", known),
+					)
+					userID = known
+				} else {
+					logger.From(evCtx, s.logger).Warn(TracePrefixIG+"polling: store commented on its own media and no id known to receive DM",
+						zap.String("handle", username),
+						zap.String("raw_from_id", c.From.ID),
+					)
+				}
+			}
+
 			if known, ok := s.repo.FindOpenCartUserIDByHandle(evCtx, ev.EventID, username); ok && known != userID {
 				logger.From(evCtx, s.logger).Info(TracePrefixIG+"polling: reusing the buyer id from their open cart",
 					zap.String("handle", username),
@@ -6198,6 +6231,20 @@ func (s *Service) instagramAltAccountID(ctx context.Context, storeID string) str
 		return ""
 	}
 	if v, ok := integration.Metadata["instagram_app_scoped_id"].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// instagramUsername é o @ da conta que a loja conectou. Usado para reconhecer
+// que um comentário veio da PRÓPRIA loja — caso em que o id devolvido pelo
+// polling é o da conta, e não um destinatário válido de DM.
+func (s *Service) instagramUsername(ctx context.Context, storeID string) string {
+	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "social", "instagram")
+	if err != nil || integration == nil {
+		return ""
+	}
+	if v, ok := integration.Metadata["username"].(string); ok {
 		return v
 	}
 	return ""

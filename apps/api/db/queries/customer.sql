@@ -158,3 +158,42 @@ SELECT EXISTS(
   SELECT 1 FROM customers
   WHERE store_id = $1 AND phone = $2 AND whatsapp_opted_out = TRUE
 ) AS opted_out;
+
+-- name: FindDMCapableUserIDByHandle :one
+-- O id deste @ na loja que NÃO é o id passado em exclude_user_id, preferindo o
+-- que comprovadamente já recebeu DM.
+--
+-- Existe por causa da loja comentando na PRÓPRIA transmissão. Aí o Instagram
+-- não devolve um id de comprador: devolve o id da CONTA. São três identidades
+-- para o mesmo @ e só uma serve de destinatário:
+--
+--   28139217855675836  app-scoped id   (metadata da integração)
+--   17841439350112281  conta profissional (entry.id do webhook)
+--   1498886768484002   IGSID           — o único que a API de mensagens aceita
+--
+-- O webhook resolve isso sozinho: traz `from.self_ig_scoped_id` e o handler o
+-- prefere. A aresta `/{media}/comments` do polling não tem esse campo, e a doc
+-- da Meta é explícita em dizer que o IGSID de auto-conversa vem "from the
+-- webhook" — não há endpoint que o recupere. Então recuperamos do que já
+-- gravamos: se o webhook já viu essa pessoa uma vez, o IGSID está em customers.
+--
+-- Medido em 05/08, mesma loja, mesmo evento: a identidade do IGSID entregou 1
+-- DM em 1 comentário; a da conta profissional, 0 em 4.
+--
+-- O desempate por private_reply_used é empírico de propósito — DM entregue é a
+-- única prova de que um id é aceito como destinatário.
+SELECT cu.platform_user_id
+FROM customers cu
+WHERE cu.store_id = @store_id
+  AND cu.platform_handle = @handle
+  AND cu.platform_user_id <> @exclude_user_id::text
+ORDER BY (
+    SELECT count(*)
+    FROM live_comments lc
+    JOIN live_events e ON e.id = lc.event_id
+    WHERE e.store_id = cu.store_id
+      AND lc.platform_user_id = cu.platform_user_id
+      AND lc.private_reply_used
+  ) DESC,
+  cu.last_order_at DESC NULLS LAST
+LIMIT 1;

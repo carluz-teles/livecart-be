@@ -86,6 +86,59 @@ func (q *Queries) DeleteCustomer(ctx context.Context, id pgtype.UUID) error {
 	return err
 }
 
+const findDMCapableUserIDByHandle = `-- name: FindDMCapableUserIDByHandle :one
+SELECT cu.platform_user_id
+FROM customers cu
+WHERE cu.store_id = $1
+  AND cu.platform_handle = $2
+  AND cu.platform_user_id <> $3::text
+ORDER BY (
+    SELECT count(*)
+    FROM live_comments lc
+    JOIN live_events e ON e.id = lc.event_id
+    WHERE e.store_id = cu.store_id
+      AND lc.platform_user_id = cu.platform_user_id
+      AND lc.private_reply_used
+  ) DESC,
+  cu.last_order_at DESC NULLS LAST
+LIMIT 1
+`
+
+type FindDMCapableUserIDByHandleParams struct {
+	StoreID       pgtype.UUID `json:"store_id"`
+	Handle        string      `json:"handle"`
+	ExcludeUserID string      `json:"exclude_user_id"`
+}
+
+// O id deste @ na loja que NÃO é o id passado em exclude_user_id, preferindo o
+// que comprovadamente já recebeu DM.
+//
+// Existe por causa da loja comentando na PRÓPRIA transmissão. Aí o Instagram
+// não devolve um id de comprador: devolve o id da CONTA. São três identidades
+// para o mesmo @ e só uma serve de destinatário:
+//
+//	28139217855675836  app-scoped id   (metadata da integração)
+//	17841439350112281  conta profissional (entry.id do webhook)
+//	1498886768484002   IGSID           — o único que a API de mensagens aceita
+//
+// O webhook resolve isso sozinho: traz `from.self_ig_scoped_id` e o handler o
+// prefere. A aresta `/{media}/comments` do polling não tem esse campo, e a doc
+// da Meta é explícita em dizer que o IGSID de auto-conversa vem "from the
+// webhook" — não há endpoint que o recupere. Então recuperamos do que já
+// gravamos: se o webhook já viu essa pessoa uma vez, o IGSID está em customers.
+//
+// Medido em 05/08, mesma loja, mesmo evento: a identidade do IGSID entregou 1
+// DM em 1 comentário; a da conta profissional, 0 em 4.
+//
+// O desempate por private_reply_used é empírico de propósito — DM entregue é a
+// única prova de que um id é aceito como destinatário.
+func (q *Queries) FindDMCapableUserIDByHandle(ctx context.Context, arg FindDMCapableUserIDByHandleParams) (string, error) {
+	row := q.db.QueryRow(ctx, findDMCapableUserIDByHandle, arg.StoreID, arg.Handle, arg.ExcludeUserID)
+	var platform_user_id string
+	err := row.Scan(&platform_user_id)
+	return platform_user_id, err
+}
+
 const getCustomerByHandle = `-- name: GetCustomerByHandle :one
 SELECT id, store_id, platform_user_id, platform_handle, email, phone, first_order_at, last_order_at, created_at, updated_at, whatsapp_opted_out FROM customers
 WHERE store_id = $1 AND platform_handle = $2
