@@ -55,6 +55,7 @@ func TestUpdateSettingsPreservesUnsentKeysInJSONB(t *testing.T) {
 		"item_added":         {"enabled": true, "template": "item antigo"},
 		"checkout_reminder":  {"enabled": true, "template": "lembrete antigo"},
 		"waitlist_notified":  {"enabled": true, "template": "fila antiga"},
+		"waitlist_joined":    {"enabled": true, "template": "entrou na fila antigo"},
 		"payment_cancelled":  {"enabled": true, "subject": "cancelado"},
 		"payment_refunded":   {"enabled": true, "subject": "estornado"},
 		"cart_recovery":      {"enabled": true, "delay_minutes": 30, "max_attempts": 2,
@@ -90,7 +91,7 @@ func TestUpdateSettingsPreservesUnsentKeysInJSONB(t *testing.T) {
 	}
 
 	// E nada mais sumiu — é isto que regredia.
-	for _, key := range []string{"waitlist_notified", "cart_recovery", "payment_cancelled", "payment_refunded"} {
+	for _, key := range []string{"waitlist_notified", "waitlist_joined", "cart_recovery", "payment_cancelled", "payment_refunded"} {
 		if _, ok := got[key]; !ok {
 			t.Errorf("chave %q sumiu do JSONB depois do save", key)
 		}

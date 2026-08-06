@@ -637,6 +637,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		TotalItems:        result.TotalItems,
 		TotalCents:        result.TotalCents,
 		IsNewCart:         result.IsNewCart,
+		WaitlistedQty:     waitlistQty,
 	})
 
 	return nil
@@ -658,6 +659,32 @@ type sendNotificationInput struct {
 	TotalItems        int
 	TotalCents        int64
 	IsNewCart         bool
+	// WaitlistedQty é quanto deste pedido NÃO coube no estoque e foi para a
+	// fila. Maior que zero troca a mensagem: dizer "adicionei ao seu carrinho"
+	// para um item que ficou aguardando é a diferença entre o comprador achar
+	// que comprou e saber que está numa fila.
+	WaitlistedQty int
+}
+
+// notificationTypeForComment escolhe QUAL mensagem o comprador recebe depois de
+// um comentário virar carrinho.
+//
+// A fila vem primeiro, e é aí que estava o defeito: qualquer parte do pedido que
+// não coube no estoque muda o assunto da mensagem. Antes o comprador que pediu
+// um item esgotado recebia "Adicionei {produto} ao seu carrinho" — o texto de
+// item_added — e ficava achando que tinha comprado, sem nenhuma menção a fila.
+//
+// Vale também no caso PARCIAL (pediu 3, levou 2, 1 na fila): o que ele precisa
+// saber é da unidade que ficou aguardando, e o template de fila mostra o
+// carrinho inteiro justamente para não esconder as duas que entraram.
+func notificationTypeForComment(isNewCart bool, waitlistedQty int) notification.NotificationType {
+	if waitlistedQty > 0 {
+		return notification.TypeWaitlistJoined
+	}
+	if isNewCart {
+		return notification.TypeCheckoutImmediate
+	}
+	return notification.TypeItemAdded
 }
 
 // sendImmediateNotification sends an immediate checkout notification via the notification service.
@@ -671,11 +698,7 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 		return
 	}
 
-	// Determine notification type based on whether this is a new cart or adding to existing
-	notifType := notification.TypeCheckoutImmediate
-	if !input.IsNewCart {
-		notifType = notification.TypeItemAdded
-	}
+	notifType := notificationTypeForComment(input.IsNewCart, input.WaitlistedQty)
 
 	// Check if we should notify based on store settings
 	shouldNotify, err := s.notificationSvc.ShouldNotify(ctx, input.StoreID, notifType, input.IsNewCart)

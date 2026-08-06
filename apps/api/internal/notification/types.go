@@ -45,6 +45,16 @@ const (
 	// sempre aponta para o que ainda existe (o resto do carrinho) ou para o
 	// futuro, nunca termina no "não deu".
 	TypeWaitlistUnfulfilled NotificationType = "waitlist_unfulfilled"
+
+	// TypeWaitlistJoined é o momento em que o comprador ENTRA na fila: pediu um
+	// item que o estoque não cobriu, no todo ou em parte.
+	//
+	// Sem esta chave o comprador recebia o texto de item_added — "Adicionei X
+	// ao seu carrinho" — para um item que NÃO foi adicionado, e ficava sem
+	// saber que estava numa fila. Os dois gatilhos de fila que já existiam
+	// cobrem só o desfecho (waitlist_notified quando libera,
+	// waitlist_unfulfilled quando não libera); a entrada não tinha voz.
+	TypeWaitlistJoined NotificationType = "waitlist_joined"
 )
 
 // CartFlowTypes são os tipos entregues por Instagram (DM ou private reply) no
@@ -59,6 +69,7 @@ var CartFlowTypes = []NotificationType{
 	TypeOutOfWindowSessionEnded,
 	TypeOutOfWindowEventEnded,
 	TypeEventDeadlineStarted,
+	TypeWaitlistJoined,
 	TypeWaitlistNotified,
 	TypeWaitlistUnfulfilled,
 	TypeCheckoutReminder,
@@ -148,6 +159,7 @@ type Settings struct {
 	OutOfWindowEventEnded   *TemplateSettings `json:"out_of_window_event_ended,omitempty"`
 	EventDeadlineStarted    *TemplateSettings `json:"event_deadline_started,omitempty"`
 	WaitlistUnfulfilled     *TemplateSettings `json:"waitlist_unfulfilled,omitempty"`
+	WaitlistJoined          *TemplateSettings `json:"waitlist_joined,omitempty"`
 
 	PaymentConfirmed *EmailTemplateSettings `json:"payment_confirmed,omitempty"`
 	Shipped           *EmailTemplateSettings `json:"shipped,omitempty"`
@@ -220,6 +232,17 @@ func DefaultSettings() Settings {
 		CheckoutReminder: &TemplateSettings{
 			Enabled:  true,
 			Template: "Oi {handle}! 🛒\n\nSeu carrinho com {total_itens} itens está esperando!\n\nTotal: {total}\n\nFinalize aqui: {link}\n\n⏰ Válido por {expira_em}",
+		},
+		// A entrada na fila. O texto tem três trabalhos, nessa ordem: dizer que
+		// o item NÃO foi para o carrinho (antes o comprador lia "Adicionei" e
+		// achava que tinha comprado), dizer que ele não precisa fazer nada — o
+		// "não precisa pedir de novo" existe porque quem acha que o pedido não
+		// pegou comenta de novo, e cada recomentário vira uma tentativa a mais
+		// no fluxo — e só então mostrar o carrinho, que no caso parcial é o
+		// único lugar onde aparece o que de fato foi levado.
+		WaitlistJoined: &TemplateSettings{
+			Enabled:  true,
+			Template: "Oi {handle}! ⏳\n\n{produto} entrou na fila de espera — o estoque acabou antes de fechar seu pedido.\n\nAssim que liberar eu coloco no seu carrinho e te aviso. Não precisa pedir de novo.\n\nCarrinho: {total_itens} itens — {total}\n{link} 💜",
 		},
 		WaitlistNotified: &TemplateSettings{
 			Enabled:  true,

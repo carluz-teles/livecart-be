@@ -83,6 +83,11 @@ var templateVariableScopes = map[string][]string{
 	"event_deadline_started":      append(append([]string{}, cartVariables...), "{prazo_final}"),
 	"waitlist_notified":           append(append([]string{}, cartVariables...), "{tempo_extra}", "{prazo_final}"),
 	"waitlist_unfulfilled":        {"{handle}", "{loja}", "{evento}", "{produto}", "{link}"},
+	// A entrada na fila já tem carrinho (o item vai para lá como aguardando, e
+	// no caso parcial parte dele foi mesmo levada), então o escopo é o do
+	// carrinho inteiro — {total_itens}/{total} são o que conta a verdade do que
+	// o comprador de fato levou.
+	"waitlist_joined": cartVariables,
 
 	// E-mails pós-venda — variáveis do pedido.
 	"payment_confirmed": append(append([]string{}, orderBaseVariables...), "{lista_produtos}"),

@@ -114,6 +114,9 @@ func mergeSettings(current, incoming Settings) Settings {
 	if incoming.WaitlistNotified != nil {
 		merged.WaitlistNotified = incoming.WaitlistNotified
 	}
+	if incoming.WaitlistJoined != nil {
+		merged.WaitlistJoined = incoming.WaitlistJoined
+	}
 	if incoming.OutOfWindowScheduled != nil {
 		merged.OutOfWindowScheduled = incoming.OutOfWindowScheduled
 	}
@@ -488,6 +491,21 @@ func (s *Service) ShouldNotify(ctx context.Context, storeID string, notifType No
 		// Only send for existing carts when real-time cart is enabled
 		return section.Enabled && !isNewCart && cartSettings.RealTimeCart, nil
 
+	case TypeWaitlistJoined:
+		// Dispara no MESMO instante que checkout_immediate/item_added — o
+		// comentário do comprador — e por isso respeita o mesmo interruptor de
+		// carrinho em tempo real. Quem desligou a DM por comentário não pode
+		// voltar a receber uma por comentário só porque o item foi para a fila.
+		//
+		// O que NÃO herda desses dois é o corte por isNewCart: entrar na fila
+		// acontece tanto no primeiro pedido quanto no décimo, e amarrar a chave
+		// a um dos lados a mataria silenciosamente na metade dos casos.
+		section := s.getTemplateSettings(templateSettings, notifType)
+		if section == nil {
+			return false, nil
+		}
+		return section.Enabled && cartSettings.RealTimeCart, nil
+
 	case TypeCheckoutReminder:
 		section := s.getTemplateSettings(templateSettings, notifType)
 		if section == nil {
@@ -643,6 +661,8 @@ func templateSection(s *Settings, t NotificationType) *TemplateSettings {
 		return s.EventDeadlineStarted
 	case TypeWaitlistUnfulfilled:
 		return s.WaitlistUnfulfilled
+	case TypeWaitlistJoined:
+		return s.WaitlistJoined
 	default:
 		return nil
 	}
