@@ -397,6 +397,52 @@ func (i *Instagram) SendPrivateReply(ctx context.Context, commentID, text string
 		text = text[:997] + "..."
 	}
 
+	var lastErr error
+	for attempt := 1; attempt <= privateReplyMaxAttempts; attempt++ {
+		err, transient := i.sendPrivateReplyOnce(ctx, commentID, text)
+		if err == nil {
+			if attempt > 1 {
+				logger.From(ctx, i.logger).Info("instagram private reply sent after retry",
+					zap.String("comment_id", commentID),
+					zap.Int("attempt", attempt),
+				)
+			}
+			return nil
+		}
+		lastErr = err
+
+		// Recusa por REGRA não vira sucesso repetindo: o 403/2534066 ("verify if
+		// the comment id is valid") e o 400 são o Instagram dizendo que este
+		// comentário não aceita resposta privada. Insistir só somaria latência
+		// no caminho síncrono do comprador, que é o que não podemos gastar.
+		if !transient {
+			return err
+		}
+		if attempt < privateReplyMaxAttempts {
+			select {
+			case <-ctx.Done():
+				return lastErr
+			case <-time.After(privateReplyRetryDelay):
+			}
+		}
+	}
+	return lastErr
+}
+
+// privateReplyMaxAttempts é a primeira tentativa mais duas — o teto pedido para
+// o atraso somado ficar abaixo de um segundo no pior caso.
+const privateReplyMaxAttempts = 3
+
+// privateReplyRetryDelay: os 500 medidos vinham em rajada curta, e o objetivo é
+// atravessar o soluço sem que o comprador sinta a espera.
+const privateReplyRetryDelay = 300 * time.Millisecond
+
+// sendPrivateReplyOnce faz UMA tentativa. O segundo retorno diz se a falha é
+// transitória — só erro de rede e 5xx são. O 500 "An unknown error has
+// occurred" da Meta é o caso que motivou o retry: cinco dos vinte replies
+// recusados numa janela de oito minutos vieram assim, e o comentário seguinte
+// da mesma mídia passava.
+func (i *Instagram) sendPrivateReplyOnce(ctx context.Context, commentID, text string) (err error, transient bool) {
 	// Instagram Graph API: POST /me/messages with recipient.comment_id
 	// This sends a private DM to the commenter
 	url := fmt.Sprintf("%s/%s/me/messages",
@@ -412,21 +458,21 @@ func (i *Instagram) SendPrivateReply(ctx context.Context, commentID, text string
 			"text": text,
 		},
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshaling private reply payload: %w", err)
+	body, marshalErr := json.Marshal(payload)
+	if marshalErr != nil {
+		return fmt.Errorf("marshaling private reply payload: %w", marshalErr), false
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("creating private reply request: %w", err)
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if reqErr != nil {
+		return fmt.Errorf("creating private reply request: %w", reqErr), false
 	}
 	req.Header.Set("Authorization", "Bearer "+i.credentials.AccessToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := i.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("sending private reply request: %w", err)
+	resp, doErr := i.client.Do(req)
+	if doErr != nil {
+		return fmt.Errorf("sending private reply request: %w", doErr), true
 	}
 	defer resp.Body.Close()
 
@@ -441,14 +487,15 @@ func (i *Instagram) SendPrivateReply(ctx context.Context, commentID, text string
 			zap.String("body", bodyStr),
 			zap.String("comment_id", commentID),
 		)
-		return fmt.Errorf("instagram private reply failed: status %d, body: %s", resp.StatusCode, bodyStr)
+		return fmt.Errorf("instagram private reply failed: status %d, body: %s", resp.StatusCode, bodyStr),
+			resp.StatusCode >= 500
 	}
 
 	logger.From(ctx, i.logger).Info("instagram private reply sent",
 		zap.String("comment_id", commentID),
 		zap.Int("text_bytes", len(text)),
 	)
-	return nil
+	return nil, false
 }
 
 // GetActiveLives retrieves all live videos currently being broadcast by the user.

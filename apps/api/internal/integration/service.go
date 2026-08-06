@@ -5982,7 +5982,7 @@ func (s *Service) endStaleLiveSessionsOnce(ctx context.Context) {
 		s.ensureWebhookSubscriptionOnce(storeCtx, storeID)
 		// Só faz sentido com transmissão no ar — que é exatamente o laço em que
 		// estamos: byStore só contém loja com sessão de live viva.
-		s.checkWebhookSilence(storeCtx, storeID)
+		s.checkWebhookSilence(storeCtx, storeID, storeMedias)
 
 		provider, err := s.resolveInstagramSocialProvider(storeCtx, storeID)
 		if err != nil {
@@ -6144,6 +6144,30 @@ func (s *Service) NoteInstagramWebhook(accountID string) {
 	s.lastWebhookAt.Store(accountID, time.Now())
 }
 
+// commentWebhookKey separa o carimbo de COMENTÁRIO do carimbo de qualquer
+// webhook, no mesmo mapa.
+func commentWebhookKey(mediaID string) string { return "comment:" + mediaID }
+
+// NoteInstagramCommentWebhook carimba a chegada de um webhook de COMENTÁRIO
+// para uma mídia.
+//
+// O carimbo por conta não serve para a pergunta que interessa. Medido em
+// 06/08, numa janela de oito minutos com transmissão no ar: 20 webhooks
+// chegaram, 19 deles `messaging` e UM `live_comments`. O canal estava vivo o
+// tempo todo — quem parou foi só o campo de comentário. Um vigia que olha
+// "chegou algum webhook?" dá tudo certo enquanto nenhum comentário é entregue.
+//
+// A chave é a MÍDIA, e não a conta, porque é o único id que aparece igual nos
+// dois lados: o entry.id do webhook varia conforme o campo (a entrada de
+// comentário traz a conta profissional, a de mensagem traz outro id), e foi
+// por isso que o vigia media silêncio contra uma chave que nunca era carimbada.
+func (s *Service) NoteInstagramCommentWebhook(mediaID string) {
+	if mediaID == "" {
+		return
+	}
+	s.lastWebhookAt.Store(commentWebhookKey(mediaID), time.Now())
+}
+
 // checkWebhookSilence alerta quando uma loja COM TRANSMISSÃO NO AR passa tempo
 // demais sem receber webhook — e, quando isso acontece, consulta a Meta para
 // dizer em quais campos a conta está inscrita NAQUELE momento.
@@ -6156,32 +6180,44 @@ func (s *Service) NoteInstagramWebhook(accountID string) {
 //
 // O alerta NÃO conserta nada e não tenta: reinscrever aqui apagaria a evidência
 // justamente do estado que se quer capturar. É diagnóstico, e diz isso.
-func (s *Service) checkWebhookSilence(ctx context.Context, storeID string) {
+func (s *Service) checkWebhookSilence(ctx context.Context, storeID string, medias []live.MediaRef) {
 	accountID := s.instagramAccountID(ctx, storeID)
 	if accountID == "" {
 		return
 	}
 
-	// O carimbo entra pelo entry.id do webhook (17841…) e este lookup devolve o
-	// metadata (28139…, app-scoped, gravado antes da correção do id). Chaves
-	// diferentes: o vigia nunca via o carimbo e considerava silêncio SEMPRE.
-	// Ele acertou em 05/08 por coincidência — os webhooks tinham parado mesmo.
+	// Mede o silêncio de COMENTÁRIO, por mídia, e não "chegou algum webhook".
 	//
-	// Aceita QUALQUER um dos dois ids que a loja possa ter, porque não dá para
-	// saber qual está no metadata sem reconectar a conta.
-	v, seen := s.lastWebhookAt.Load(accountID)
-	if !seen {
-		if alt := s.instagramAltAccountID(ctx, storeID); alt != "" {
-			v, seen = s.lastWebhookAt.Load(alt)
+	// A versão anterior media a coisa errada duas vezes. Carimbava por entry.id
+	// e consultava o id do metadata — chaves que nem sempre são a mesma, então
+	// ela via silêncio onde não havia. E, quando as chaves batiam, carimbava
+	// também os webhooks de `messaging`: em 06/08 esses eram 19 dos 20 numa
+	// janela em que exatamente UM comentário foi entregue, ou seja, o vigia
+	// diria "tudo certo" no meio do apagão que ele existe para pegar.
+	//
+	// A mídia da transmissão é o id que aparece igual nos dois lados.
+	var last time.Time
+	for _, m := range medias {
+		if m.MediaID == "" {
+			continue
+		}
+		if v, ok := s.lastWebhookAt.Load(commentWebhookKey(m.MediaID)); ok {
+			if t, _ := v.(time.Time); t.After(last) {
+				last = t
+			}
 		}
 	}
-	if !seen {
-		// Nunca chegou nada NESTE processo. Pode ser deploy recente, então o
-		// relógio começa agora em vez de gritar de imediato.
-		s.lastWebhookAt.Store(accountID, time.Now())
+	if last.IsZero() {
+		// Nenhum comentário desta transmissão chegou por webhook NESTE processo.
+		// Pode ser deploy recente ou live recém-aberta, então o relógio começa
+		// agora em vez de gritar de imediato.
+		for _, m := range medias {
+			if m.MediaID != "" {
+				s.lastWebhookAt.Store(commentWebhookKey(m.MediaID), time.Now())
+			}
+		}
 		return
 	}
-	last, _ := v.(time.Time)
 	silence := time.Since(last)
 	if silence < webhookSilenceAlert {
 		return
@@ -6189,11 +6225,15 @@ func (s *Service) checkWebhookSilence(ctx context.Context, storeID string) {
 
 	// Só alerta UMA vez por janela de silêncio: empurra o relógio para frente,
 	// senão o sweep de 20s viraria uma enxurrada de warns idênticos.
-	s.lastWebhookAt.Store(accountID, time.Now())
+	for _, m := range medias {
+		if m.MediaID != "" {
+			s.lastWebhookAt.Store(commentWebhookKey(m.MediaID), time.Now())
+		}
+	}
 
 	fields, err := s.GetInstagramWebhookSubscription(ctx, storeID)
 	if err != nil {
-		logger.From(ctx, s.logger).Warn("instagram webhook silent with a live on air, and the subscription could not be read",
+		logger.From(ctx, s.logger).Warn("instagram comment webhook silent with a live on air, and the subscription could not be read",
 			zap.String("account_id", accountID),
 			zap.Duration("silent_for", silence),
 			zap.Error(err),
@@ -6207,7 +6247,7 @@ func (s *Service) checkWebhookSilence(ctx context.Context, storeID string) {
 			subscribed = true
 		}
 	}
-	logger.From(ctx, s.logger).Warn("instagram webhook silent with a live on air",
+	logger.From(ctx, s.logger).Warn("instagram comment webhook silent with a live on air",
 		zap.String("account_id", accountID),
 		zap.Duration("silent_for", silence),
 		zap.Strings("subscribed_fields", fields),

@@ -144,6 +144,25 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		zap.String("media_id", input.MediaID),
 		zap.String("origin", commentOrigin(input)),
 	)
+	// A IDADE separa as duas explicações que sobraram para o webhook silenciar.
+	//
+	// Se o polling entrega comentários com segundos de idade, a transmissão
+	// estava no ar recebendo comentário novo e a Meta simplesmente não os
+	// entregou — problema de entrega dela.
+	//
+	// Se ele entrega comentários VELHOS, não houve silêncio nenhum: ninguém
+	// comentou naquele intervalo e estamos só recuperando atrasados, o que
+	// significa que a fronteira é o fim da transmissão (a doc amarra os dois
+	// sintomas — live_comments e private reply — à duração do broadcast).
+	//
+	// O log até agora só tinha a hora da CAPTURA, que nos dois casos é igual.
+	if input.Timestamp > 0 {
+		createdAt := time.Unix(input.Timestamp, 0)
+		trace = trace.With(
+			zap.Time("comment_created_at", createdAt),
+			zap.Duration("age_at_capture", time.Since(createdAt)),
+		)
+	}
 	trace.Info(TracePrefix + "comment received")
 
 	// Idempotency guard: a comment can reach us from BOTH the real-time webhook

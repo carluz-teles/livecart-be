@@ -114,6 +114,13 @@ func (h *WebhookHandler) HandleInstagramWebhook(c *fiber.Ctx) error {
 		h.service.NoteInstagramWebhook(e.ID)
 		for _, ch := range e.Changes {
 			fields = append(fields, ch.Field)
+			// Carimbo separado para COMENTÁRIO, por mídia. É o único que
+			// responde "a Meta ainda está entregando comentário desta
+			// transmissão?" — o carimbo por conta acende com qualquer eco de
+			// DM e por isso ficava verde durante o apagão de live_comments.
+			if ch.Field == "comments" || ch.Field == "live_comments" {
+				h.service.NoteInstagramCommentWebhook(commentMediaID(ch.Value))
+			}
 		}
 		if len(e.Messaging) > 0 {
 			fields = append(fields, "messaging")
@@ -320,4 +327,23 @@ func (h *WebhookHandler) processInstagramMessage(c *fiber.Ctx, entry InstagramEn
 	}
 
 	return nil
+}
+
+// commentMediaID tira o id da mídia de um change de comentário.
+//
+// O Value do change é interface{} porque cada campo do webhook tem uma forma
+// diferente; aqui só precisamos de media.id, e um payload sem ele devolve
+// string vazia — o carimbo simplesmente não acontece, o que é melhor do que
+// carimbar sob uma chave inventada.
+func commentMediaID(value interface{}) string {
+	m, ok := value.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	media, ok := m["media"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	id, _ := media["id"].(string)
+	return id
 }
