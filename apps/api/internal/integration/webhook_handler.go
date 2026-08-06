@@ -62,10 +62,39 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App, slugResolver httpx.Store
 	webhooks.Post("/melhor_envio/:storeId", storeCtx, h.HandleMelhorEnvio)
 	webhooks.Post("/twilio/:storeId", storeCtx, h.HandleTwilio)
 
+	// GET/HEAD nas MESMAS URLs, respondendo 200.
+	//
+	// O provedor verifica a URL antes de aceitar o cadastro, e verifica com um
+	// método que não entrega evento. Registradas só como POST, essas rotas
+	// devolviam 405 à sondagem e o painel da Tiny recusava com "Não foi
+	// possível acessar a URL" — a URL estava no ar o tempo todo, respondendo
+	// 200 ao POST.
+	//
+	// O Instagram nunca sofreu disso, e a razão é a linha logo abaixo: ele já
+	// tinha um GET, para o desafio da Meta.
+	//
+	// Não recebe evento e não toca em nada: sondagem só quer saber se alguém
+	// atende. Quem processa continua sendo exclusivamente o POST.
+	for _, provider := range []string{"mercado_pago", "pagarme", "tiny", "melhor_envio", "twilio"} {
+		webhooks.Get("/"+provider+"/:storeId", h.HandleWebhookProbe)
+		webhooks.Head("/"+provider+"/:storeId", h.HandleWebhookProbe)
+	}
+
 	// Instagram webhooks (Meta platform)
 	instagram := app.Group("/api/webhooks/instagram")
 	instagram.Get("/", h.HandleInstagramVerification)
 	instagram.Post("/", h.HandleInstagramWebhook)
+}
+
+// HandleWebhookProbe answers the reachability check a provider makes before it
+// accepts a webhook URL.
+//
+// Deliberately inert: no signature check, no store lookup, no side effect. The
+// probe asks one question — "is anyone listening at this address?" — and the
+// answer is 200. Every event still arrives, and is only ever processed, via
+// POST.
+func (h *WebhookHandler) HandleWebhookProbe(c *fiber.Ctx) error {
+	return c.SendStatus(fiber.StatusOK)
 }
 
 // HandleMercadoPagoOAuthCallback handles the OAuth callback from Mercado Pago.
