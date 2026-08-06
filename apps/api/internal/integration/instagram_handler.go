@@ -99,9 +99,41 @@ func (h *WebhookHandler) HandleInstagramWebhook(c *fiber.Ctx) error {
 		return httpx.BadRequest(c, "invalid webhook payload")
 	}
 
+	// Carimba a chegada POR CONTA, antes de qualquer processamento.
+	//
+	// É o relógio do vigia (NoteInstagramWebhook): a Meta para de entregar sem
+	// avisar, e a única forma de flagrar isso é saber há quanto tempo nada
+	// chega para uma conta que TEM transmissão no ar. Sem carimbo, "silêncio"
+	// e "ninguém comentou" são o mesmo estado.
+	//
+	// Antes do parse de cada entry porque o que importa é a ENTREGA ter
+	// acontecido — mesmo um evento que vamos descartar prova que o canal está
+	// vivo.
+	fields := make([]string, 0, 4)
+	for _, e := range payload.Entry {
+		h.service.NoteInstagramWebhook(e.ID)
+		for _, ch := range e.Changes {
+			fields = append(fields, ch.Field)
+			// Carimbo separado para COMENTÁRIO, por mídia. É o único que
+			// responde "a Meta ainda está entregando comentário desta
+			// transmissão?" — o carimbo por conta acende com qualquer eco de
+			// DM e por isso ficava verde durante o apagão de live_comments.
+			if ch.Field == "comments" || ch.Field == "live_comments" {
+				h.service.NoteInstagramCommentWebhook(commentMediaID(ch.Value))
+			}
+		}
+		if len(e.Messaging) > 0 {
+			fields = append(fields, "messaging")
+		}
+	}
+
 	logger.From(c.Context(), h.logger).Info("instagram webhook received",
 		zap.String("object", payload.Object),
 		zap.Int("entries", len(payload.Entry)),
+		// QUAIS campos chegaram. Sem isto o log não distingue um comentário de
+		// um eco de DM, e a pergunta "a Meta ainda manda live_comments?" não
+		// tem resposta no histórico.
+		zap.Strings("fields", fields),
 	)
 
 	// Process each entry
@@ -295,4 +327,23 @@ func (h *WebhookHandler) processInstagramMessage(c *fiber.Ctx, entry InstagramEn
 	}
 
 	return nil
+}
+
+// commentMediaID tira o id da mídia de um change de comentário.
+//
+// O Value do change é interface{} porque cada campo do webhook tem uma forma
+// diferente; aqui só precisamos de media.id, e um payload sem ele devolve
+// string vazia — o carimbo simplesmente não acontece, o que é melhor do que
+// carimbar sob uma chave inventada.
+func commentMediaID(value interface{}) string {
+	m, ok := value.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	media, ok := m["media"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	id, _ := media["id"].(string)
+	return id
 }

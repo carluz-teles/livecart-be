@@ -81,7 +81,7 @@ const (
 	CodeLiveProductRequired Code = "LIVE_PRODUCT_REQUIRED" // live/service.go:256 ("select at least one product for the promotion")
 	CodeLiveEventNotActive  Code = "LIVE_EVENT_NOT_ACTIVE" // live/service.go:1378,1409 (set active product / change processing on a non-active event)
 	CodeLiveEventEnded      Code = "LIVE_EVENT_ENDED"      // live/service.go:916 ("evento encerrado nao pode ser iniciado")
-	CodeLiveSessionNotLive  Code = "LIVE_SESSION_NOT_LIVE"  // live/service.go:2044 ("só é possível controlar o modo live de uma sessão em andamento")
+	CodeLiveSessionNotLive  Code = "LIVE_SESSION_NOT_LIVE" // live/service.go:2044 ("só é possível controlar o modo live de uma sessão em andamento")
 	// CreateSession com metade da mídia (platform sem platformLiveId, ou o
 	// inverso). Código próprio porque a tela do painel precisa distinguir "erro
 	// no seletor de publicação" de qualquer outro 400 da criação de sessão.
@@ -104,6 +104,11 @@ const (
 	// a listagem achou o produto e o detalhe é que foi recusado. Separar os dois
 	// é o que impede a busca de dizer ao lojista que o produto não existe.
 	CodeErpThrottled Code = "ERP_THROTTLED" // integration/service.go (SearchProducts)
+	// Item do carrinho alterado por outro escritor entre a leitura e a escrita.
+	// É conflito, não entrada inválida: o comprador recarrega e refaz. Nasceu do
+	// lost update de 05/08, em que dois PATCHes leram a mesma quantidade e uma
+	// unidade sumiu do carrinho.
+	CodeCartItemChanged Code = "CART_ITEM_CHANGED" // checkout/service.go (UpdateCartItemQuantity)
 
 	// --- STOCK (internal/erp/stock_service.go) ---
 	CodeStockInsufficient Code = "STOCK_INSUFFICIENT" // erp/stock_service.go:213 ("estoque insuficiente para esse aumento")

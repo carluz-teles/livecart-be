@@ -56,6 +56,7 @@ type GetSettingsResponse struct {
 	OutOfWindowEventEnded   *TemplateSettingsResponse `json:"out_of_window_event_ended,omitempty"`
 	EventDeadlineStarted    *TemplateSettingsResponse `json:"event_deadline_started,omitempty"`
 	WaitlistUnfulfilled     *TemplateSettingsResponse `json:"waitlist_unfulfilled,omitempty"`
+	WaitlistJoined          *TemplateSettingsResponse `json:"waitlist_joined,omitempty"`
 
 	PaymentConfirmed *EmailTemplateSettingsResponse `json:"payment_confirmed,omitempty"`
 	Shipped           *EmailTemplateSettingsResponse `json:"shipped,omitempty"`
@@ -118,6 +119,7 @@ type UpdateSettingsRequest struct {
 	OutOfWindowEventEnded   *UpdateTemplateSettingsRequest `json:"out_of_window_event_ended,omitempty"`
 	EventDeadlineStarted    *UpdateTemplateSettingsRequest `json:"event_deadline_started,omitempty"`
 	WaitlistUnfulfilled     *UpdateTemplateSettingsRequest `json:"waitlist_unfulfilled,omitempty"`
+	WaitlistJoined          *UpdateTemplateSettingsRequest `json:"waitlist_joined,omitempty"`
 
 	PaymentConfirmed *UpdateEmailTemplateSettingsRequest `json:"payment_confirmed,omitempty"`
 	Shipped           *UpdateEmailTemplateSettingsRequest `json:"shipped,omitempty"`
@@ -395,6 +397,10 @@ var dmSections = []dmSection{
 		func(r *UpdateSettingsRequest) *UpdateTemplateSettingsRequest { return r.WaitlistUnfulfilled },
 		func(s *Settings, t *TemplateSettings) { s.WaitlistUnfulfilled = t },
 		func(r *GetSettingsResponse, t *TemplateSettingsResponse) { r.WaitlistUnfulfilled = t }},
+	{TypeWaitlistJoined,
+		func(r *UpdateSettingsRequest) *UpdateTemplateSettingsRequest { return r.WaitlistJoined },
+		func(s *Settings, t *TemplateSettings) { s.WaitlistJoined = t },
+		func(r *GetSettingsResponse, t *TemplateSettingsResponse) { r.WaitlistJoined = t }},
 }
 
 func toSettingsResponse(s *Settings) GetSettingsResponse {

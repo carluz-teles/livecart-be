@@ -2,6 +2,7 @@ package invitation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"go.uber.org/zap"
@@ -187,21 +188,23 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*dom
 		return nil, httpx.ErrInternal("failed to verify your current store membership")
 	}
 
+	var previous *PreviousMembership
+	var previousStoreName string
 	if existingMembership != nil {
-		// If user is owner of their current store, block acceptance
-		if existingMembership.GetRole() == "owner" {
-			logger.From(ctx, s.logger).Warn("owner tried to accept invite",
-				zap.String("user_id", userID),
-				zap.String("current_store", existingMembership.GetStoreName()),
-			)
-			return nil, httpx.DomainError(409, httpx.CodeOwnerOfOtherStore, "you are the owner of another store - delete your store first to accept this invitation")
+		previous = &PreviousMembership{
+			StoreID: existingMembership.GetStoreID(),
+			Role:    existingMembership.GetRole(),
 		}
 
-		// User is a member of another store — the swap happens inside the
-		// atomic accept below
-		logger.From(ctx, s.logger).Info("user will be moved from previous store",
+		// Owner de outra loja não é mais bloqueio automático: se a loja estiver
+		// vazia ela é descartada no aceite. Cobre quem foi convidado por e-mail,
+		// entrou por fora do link (ex.: "Login com Google") e criou uma loja sem
+		// querer no onboarding — antes ficava travado para sempre.
+		previousStoreName = existingMembership.GetStoreName()
+		logger.From(ctx, s.logger).Info("user will leave the previous store",
 			zap.String("user_id", userID),
-			zap.String("old_store", existingMembership.GetStoreName()),
+			zap.String("old_store", previousStoreName),
+			zap.String("old_role", previous.Role),
 			zap.String("new_store", inv.StoreName()),
 		)
 	}
@@ -209,7 +212,14 @@ func (s *Service) Accept(ctx context.Context, input AcceptInvitationInput) (*dom
 	// Troca de loja + criação da membership + marcação do convite numa única
 	// transação — nunca mais "membership criada com convite pendente".
 	inv.Accept()
-	if err := s.repo.AcceptAtomically(ctx, inv.ID(), inv.StoreID(), userID, inv.Role(), inv.InvitedBy(), existingMembership != nil); err != nil {
+	if err := s.repo.AcceptAtomically(ctx, inv.ID(), inv.StoreID(), userID, inv.Role(), inv.InvitedBy(), previous); err != nil {
+		if errors.Is(err, ErrOwnerStoreNotEmpty) {
+			logger.From(ctx, s.logger).Warn("owner of a store in use tried to accept invite",
+				zap.String("user_id", userID),
+				zap.String("current_store", previousStoreName),
+			)
+			return nil, httpx.DomainError(409, httpx.CodeOwnerOfOtherStore, "you are the owner of another store - delete your store first to accept this invitation")
+		}
 		return nil, err
 	}
 

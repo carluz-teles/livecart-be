@@ -896,6 +896,50 @@ func (r *Repository) IncrementProductStock(ctx context.Context, productID string
 // LiveCommentExistsByPlatformID reports whether a comment with the given
 // Instagram comment id was already stored. Used by the post-comment polling
 // capture to avoid reprocessing comments across polls (and vs the webhook).
+// FindOpenCartUserIDByHandle devolve o platform_user_id do carrinho ABERTO
+// deste @ no evento, se houver. Ver a query para o porquê: o mesmo comprador
+// chega com ids diferentes conforme venha por webhook ou por polling.
+func (r *Repository) FindOpenCartUserIDByHandle(ctx context.Context, eventID, handle string) (string, bool) {
+	if eventID == "" || handle == "" {
+		return "", false
+	}
+	eID, err := parseUUID(eventID)
+	if err != nil {
+		return "", false
+	}
+	userID, err := r.queries.FindOpenCartUserIDByHandle(ctx, sqlc.FindOpenCartUserIDByHandleParams{
+		EventID:        eID,
+		PlatformHandle: handle,
+	})
+	if err != nil || userID == "" {
+		return "", false
+	}
+	return userID, true
+}
+
+// FindDMCapableUserIDByHandle procura, na loja inteira e não só no evento, uma
+// identidade já conhecida deste @ diferente da que acabou de chegar. Serve ao
+// caso da loja comentando na própria transmissão, em que o polling devolve o id
+// da CONTA — que nunca é aceito como destinatário de DM. Ver a query.
+func (r *Repository) FindDMCapableUserIDByHandle(ctx context.Context, storeID, handle, excludeUserID string) (string, bool) {
+	if storeID == "" || handle == "" {
+		return "", false
+	}
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return "", false
+	}
+	userID, err := r.queries.FindDMCapableUserIDByHandle(ctx, sqlc.FindDMCapableUserIDByHandleParams{
+		StoreID:       sID,
+		Handle:        handle,
+		ExcludeUserID: excludeUserID,
+	})
+	if err != nil || userID == "" {
+		return "", false
+	}
+	return userID, true
+}
+
 func (r *Repository) LiveCommentExistsByPlatformID(ctx context.Context, platformCommentID string) (bool, error) {
 	if platformCommentID == "" {
 		return false, nil
@@ -3344,6 +3388,21 @@ func (r *Repository) HasStockGuardForProduct(ctx context.Context, externalProduc
 		ExternalProductID: externalProductID,
 		StoreID:           sID,
 		ExternalSource:    externalSource,
+	})
+}
+
+// HasPendingCartReversalForProduct reports whether some unit has already been
+// credited back to local stock while its ERP reversal is still in flight. In
+// that window the ERP balance is BEHIND ours — because of us — so an absolute
+// overwrite would write a value we ourselves just made stale.
+func (r *Repository) HasPendingCartReversalForProduct(ctx context.Context, externalProductID, storeID string) (bool, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return false, err
+	}
+	return r.queries.HasPendingCartReversalForProduct(ctx, sqlc.HasPendingCartReversalForProductParams{
+		ExternalProductID: externalProductID,
+		StoreID:           sID,
 	})
 }
 

@@ -25,12 +25,29 @@ func NewRepository(q *sqlc.Queries, pool *pgxpool.Pool) *Repository {
 	return &Repository{q: q, pool: pool}
 }
 
+// ErrOwnerStoreNotEmpty indica que o usuário é dono de uma loja com conteúdo
+// real, que portanto não pode ser descartada para ele aceitar o convite.
+var ErrOwnerStoreNotEmpty = errors.New("owner store is not empty")
+
+// PreviousMembership é a loja que o usuário deixa para trás ao aceitar o
+// convite. nil quando ele ainda não pertence a loja nenhuma.
+type PreviousMembership struct {
+	StoreID string
+	Role    string
+}
+
 // AcceptAtomically executa o aceite como UMA transação: remove a membership
 // anterior (se membro de outra loja), cria a nova e marca o convite como
 // aceito — tudo ou nada. Sem isso, uma falha no meio deixava estados
 // inconsistentes (ex.: membership criada com convite ainda "pending", ou
 // usuário órfão sem loja nenhuma).
-func (r *Repository) AcceptAtomically(ctx context.Context, invID vo.InvitationID, storeID vo.StoreID, userID string, role vo.Role, invitedBy vo.MemberID, removeExisting bool) error {
+//
+// Quando o usuário é OWNER da loja anterior, ela é descartada aqui — mas só se
+// estiver vazia. É o caso de quem foi convidado por e-mail, autenticou por fora
+// do link, foi empurrado ao onboarding e criou uma loja sem querer: sem isso
+// ele ficava permanentemente travado no 409 de "dono de outra loja". A checagem
+// roda DENTRO da transação para não decidir sobre um estado já vencido.
+func (r *Repository) AcceptAtomically(ctx context.Context, invID vo.InvitationID, storeID vo.StoreID, userID string, role vo.Role, invitedBy vo.MemberID, previous *PreviousMembership) error {
 	userUID, err := parseUUID(userID)
 	if err != nil {
 		return err
@@ -44,9 +61,46 @@ func (r *Repository) AcceptAtomically(ctx context.Context, invID vo.InvitationID
 
 	qtx := r.q.WithTx(tx)
 
-	if removeExisting {
+	if previous != nil {
+		previousUID, err := parseUUID(previous.StoreID)
+		if err != nil {
+			return err
+		}
+
+		// Membro comum apenas troca de loja; dono leva a loja junto, então ela
+		// precisa estar vazia e é descartada abaixo.
+		wasOwner := previous.Role == vo.RoleOwner.String()
+
+		if wasOwner {
+			hasContent, err := qtx.StoreHasContent(ctx, sqlc.StoreHasContentParams{
+				TargetStoreID: previousUID,
+				OwnerUserID:   userUID,
+			})
+			if err != nil {
+				return fmt.Errorf("checking previous store content: %w", err)
+			}
+			if hasContent {
+				return ErrOwnerStoreNotEmpty
+			}
+		}
+
 		if err := qtx.DeleteMembershipByUserID(ctx, userUID); err != nil {
 			return fmt.Errorf("removing previous membership: %w", err)
+		}
+
+		if wasOwner {
+			// subscriptions.store_id não tem ON DELETE CASCADE: o trial criado
+			// no onboarding barra o DELETE da loja se não sair antes.
+			if err := qtx.DeleteSubscriptionsByStore(ctx, previousUID); err != nil {
+				return fmt.Errorf("removing previous store subscription: %w", err)
+			}
+			// products/integrations também não têm cascade — se algo entrar na
+			// loja entre a checagem e aqui, o DELETE falha por FK e a transação
+			// inteira volta atrás. Falhar é o comportamento correto: melhor o
+			// usuário repetir o aceite do que perder dados em silêncio.
+			if err := qtx.DeleteStore(ctx, previousUID); err != nil {
+				return fmt.Errorf("removing previous store: %w", err)
+			}
 		}
 	}
 

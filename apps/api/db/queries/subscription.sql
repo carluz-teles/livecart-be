@@ -19,6 +19,12 @@ VALUES ($1, 'trialing', 'grow', $2, NOW(), $2)
 ON CONFLICT (store_id) DO UPDATE SET updated_at = NOW()
 RETURNING *;
 
+-- name: DeleteSubscriptionsByStore :exec
+-- subscriptions.store_id NÃO tem ON DELETE CASCADE, então o trial criado no
+-- onboarding bloqueia o DELETE da loja. Usado só ao descartar loja vazia no
+-- aceite de convite — nunca há histórico de cobrança a preservar ali.
+DELETE FROM subscriptions WHERE store_id = $1;
+
 -- name: SetSubscriptionStripeRefs :one
 -- Grava os IDs Stripe apos criar customer/subscription remotos.
 UPDATE subscriptions

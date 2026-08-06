@@ -118,6 +118,7 @@ func TestOsCincoGatilhosSaoDefaultOn(t *testing.T) {
 		TypeEventDeadlineStarted,
 		TypeWaitlistUnfulfilled,
 		TypeWaitlistNotified,
+		TypeWaitlistJoined,
 	}
 
 	for _, notifType := range novos {
@@ -182,6 +183,7 @@ func TestRespostaTrazTodosOsCards(t *testing.T) {
 		"out_of_window_event_ended":   resp.OutOfWindowEventEnded,
 		"event_deadline_started":      resp.EventDeadlineStarted,
 		"waitlist_unfulfilled":        resp.WaitlistUnfulfilled,
+		"waitlist_joined":             resp.WaitlistJoined,
 	}
 	for name, card := range cards {
 		if card == nil {

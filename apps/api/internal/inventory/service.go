@@ -302,6 +302,19 @@ func (s *Service) ExpireCart(ctx context.Context, cartID, storeID string) {
 		zap.Int("items_released", len(res.FreedProductIDs)),
 	)
 
+	// [IGTRACE] TODO remover — investigação da expiração em lote.
+	//
+	// Quando o EVENTO fecha, TODOS os carrinhos abertos recebem o MESMO
+	// expires_at (um UPDATE, um now()), então eles vencem no mesmo instante e a
+	// promoção abaixo tenta promover carrinhos que estão expirando junto. O
+	// campo que faltava era saber QUAIS produtos foram liberados e para quem a
+	// promoção foi tentada.
+	logger.From(ctx, s.logger).Info(TracePrefix+"expiry: released stock, will try to promote",
+		zap.String("cart_id", cartID),
+		zap.String("event_id", res.EventID),
+		zap.Strings("freed_product_ids", res.FreedProductIDs),
+	)
+
 	// Promove o próximo da fila para cada produto liberado. Idempotente.
 	for _, productID := range res.FreedProductIDs {
 		s.ProcessWaitlistForProduct(ctx, res.EventID, productID, storeID)
@@ -372,6 +385,8 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 		return
 	}
 	if next == nil {
+		logger.From(ctx, s.logger).Info(TracePrefix+"promote: nobody in the queue for this product",
+			zap.String("event_id", eventID), zap.String("product_id", productID))
 		return // fila vazia
 	}
 
@@ -804,3 +819,7 @@ func (s *Service) ProcessWaitlistAfterStockWebhook(ctx context.Context, storeID,
 	}
 	return nil
 }
+
+// TracePrefix marca as linhas da investigação de expiração/fila.
+// TODO REMOVER junto com o restante do [IGTRACE].
+const TracePrefix = "[IGTRACE] "

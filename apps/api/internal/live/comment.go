@@ -133,6 +133,38 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		zap.String("text", input.Text),
 	)
 
+	// [IGTRACE] TODO remover — investigação da entrega de live_comments.
+	//
+	// ORIGEM é o campo que faltava para ler o log. Webhook e polling produzem
+	// linhas idênticas daqui para baixo, e a diferença entre os dois é
+	// justamente o que decide se o comprador recebe a DM: private reply só
+	// funciona com o comment_id que a Meta empurra.
+	trace := logger.From(ctx, s.logger).With(
+		zap.String("comment_id", input.CommentID),
+		zap.String("media_id", input.MediaID),
+		zap.String("origin", commentOrigin(input)),
+	)
+	// A IDADE separa as duas explicações que sobraram para o webhook silenciar.
+	//
+	// Se o polling entrega comentários com segundos de idade, a transmissão
+	// estava no ar recebendo comentário novo e a Meta simplesmente não os
+	// entregou — problema de entrega dela.
+	//
+	// Se ele entrega comentários VELHOS, não houve silêncio nenhum: ninguém
+	// comentou naquele intervalo e estamos só recuperando atrasados, o que
+	// significa que a fronteira é o fim da transmissão (a doc amarra os dois
+	// sintomas — live_comments e private reply — à duração do broadcast).
+	//
+	// O log até agora só tinha a hora da CAPTURA, que nos dois casos é igual.
+	if input.Timestamp > 0 {
+		createdAt := time.Unix(input.Timestamp, 0)
+		trace = trace.With(
+			zap.Time("comment_created_at", createdAt),
+			zap.Duration("age_at_capture", time.Since(createdAt)),
+		)
+	}
+	trace.Info(TracePrefix + "comment received")
+
 	// Idempotency guard: a comment can reach us from BOTH the real-time webhook
 	// and the polling capture. Skip if we've already stored this comment id, so
 	// we never create a duplicate cart for the same comment.
@@ -141,6 +173,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			logger.From(ctx, s.logger).Info("comment already processed, skipping",
 				zap.String("comment_id", input.CommentID),
 			)
+			trace.Info(TracePrefix + "decision: skipped, comment already stored")
 			return nil
 		}
 	}
@@ -163,6 +196,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		return fmt.Errorf("finding live event: %w", err)
 	}
 	if event == nil {
+		trace.Warn(TracePrefix + "decision: dropped, media resolves to no event")
 		logger.From(ctx, s.logger).Warn("no active live event found for media_id",
 			zap.String("media_id", input.MediaID),
 		)
@@ -273,6 +307,11 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	// Parse purchase intent
 	intent := ParsePurchaseIntent(input.Text)
 	hasPurchaseIntent := intent != nil
+	if hasPurchaseIntent {
+		trace.Info(TracePrefix+"decision: purchase intent detected", zap.Int("quantity", intent.Quantity))
+	} else {
+		trace.Info(TracePrefix + "decision: no purchase intent, comment is just stored")
+	}
 
 	// Try to match product by keyword
 	var product *ProductRow
@@ -303,10 +342,12 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	if hasPurchaseIntent {
 		switch WindowAt(event.Status, event.ScheduledAt, event.EndsAt, time.Now()) {
 		case WindowNotStarted:
+			trace.Info(TracePrefix + "decision: refused, event window has not opened")
 			s.replyOutOfWindow(ctx, event, input, notification.TypeOutOfWindowScheduled)
 			s.savePostComment(ctx, session.ID, event.ID, input, "event_not_started")
 			return nil
 		case WindowEnded:
+			trace.Info(TracePrefix + "decision: refused, event window has closed")
 			s.replyOutOfWindow(ctx, event, input, notification.TypeOutOfWindowEventEnded)
 			s.savePostComment(ctx, session.ID, event.ID, input, "event_ended")
 			return nil
@@ -314,6 +355,8 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		// A transmissão pode ter acabado com a campanha ainda aberta — a venda
 		// não entra, mas o comprador é avisado (RN-18).
 		if !SessionAcceptsPurchase(session.Status) {
+			trace.Info(TracePrefix+"decision: refused, session no longer accepts purchase",
+				zap.String("session_status", session.Status))
 			s.replyOutOfWindow(ctx, event, input, notification.TypeOutOfWindowSessionEnded)
 			s.savePostComment(ctx, session.ID, event.ID, input, "session_ended")
 			return nil
@@ -370,6 +413,9 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	}
 
 	// If no purchase intent or no product match, we're done
+	if hasPurchaseIntent && product == nil {
+		trace.Info(TracePrefix + "decision: intent without a matching product")
+	}
 	if !hasPurchaseIntent || product == nil {
 		return nil
 	}
@@ -439,6 +485,11 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		availableQty = 0
 	}
 	waitlistQty := intent.Quantity - availableQty
+	trace.Info(TracePrefix+"decision: stock split",
+		zap.Int("requested", intent.Quantity),
+		zap.Int("from_stock", availableQty),
+		zap.Int("to_waitlist", waitlistQty),
+		zap.Int("product_stock", product.Stock))
 
 	// Reserve available stock (provisional: rolled back below if AddToCart
 	// fails). stock.reserved is emitted only after the add succeeds, with the
@@ -511,6 +562,11 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		}
 		return fmt.Errorf("adding to cart: %w", err)
 	}
+
+	trace.Info(TracePrefix+"decision: cart updated",
+		zap.String("cart_id", result.CartID),
+		zap.Bool("new_cart", result.IsNewCart),
+		zap.Int("total_items", result.TotalItems))
 
 	// Reservation is now definitive — emit stock.reserved keyed by the real cart.
 	if availableQty > 0 && s.stockReserver != nil {
@@ -600,6 +656,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		TotalItems:        result.TotalItems,
 		TotalCents:        result.TotalCents,
 		IsNewCart:         result.IsNewCart,
+		WaitlistedQty:     waitlistQty,
 	})
 
 	return nil
@@ -621,6 +678,32 @@ type sendNotificationInput struct {
 	TotalItems        int
 	TotalCents        int64
 	IsNewCart         bool
+	// WaitlistedQty é quanto deste pedido NÃO coube no estoque e foi para a
+	// fila. Maior que zero troca a mensagem: dizer "adicionei ao seu carrinho"
+	// para um item que ficou aguardando é a diferença entre o comprador achar
+	// que comprou e saber que está numa fila.
+	WaitlistedQty int
+}
+
+// notificationTypeForComment escolhe QUAL mensagem o comprador recebe depois de
+// um comentário virar carrinho.
+//
+// A fila vem primeiro, e é aí que estava o defeito: qualquer parte do pedido que
+// não coube no estoque muda o assunto da mensagem. Antes o comprador que pediu
+// um item esgotado recebia "Adicionei {produto} ao seu carrinho" — o texto de
+// item_added — e ficava achando que tinha comprado, sem nenhuma menção a fila.
+//
+// Vale também no caso PARCIAL (pediu 3, levou 2, 1 na fila): o que ele precisa
+// saber é da unidade que ficou aguardando, e o template de fila mostra o
+// carrinho inteiro justamente para não esconder as duas que entraram.
+func notificationTypeForComment(isNewCart bool, waitlistedQty int) notification.NotificationType {
+	if waitlistedQty > 0 {
+		return notification.TypeWaitlistJoined
+	}
+	if isNewCart {
+		return notification.TypeCheckoutImmediate
+	}
+	return notification.TypeItemAdded
 }
 
 // sendImmediateNotification sends an immediate checkout notification via the notification service.
@@ -634,11 +717,7 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 		return
 	}
 
-	// Determine notification type based on whether this is a new cart or adding to existing
-	notifType := notification.TypeCheckoutImmediate
-	if !input.IsNewCart {
-		notifType = notification.TypeItemAdded
-	}
+	notifType := notificationTypeForComment(input.IsNewCart, input.WaitlistedQty)
 
 	// Check if we should notify based on store settings
 	shouldNotify, err := s.notificationSvc.ShouldNotify(ctx, input.StoreID, notifType, input.IsNewCart)

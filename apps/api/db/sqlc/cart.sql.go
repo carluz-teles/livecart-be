@@ -453,7 +453,14 @@ const finalizeCartsByEvent = `-- name: FinalizeCartsByEvent :many
 
 UPDATE carts c
 SET status = 'checkout',
-    expires_at = now() + make_interval(mins => $2::int)
+    expires_at = now() + make_interval(mins =>
+        $2::int
+        + CASE WHEN EXISTS (
+              SELECT 1 FROM waitlist_items wi
+              WHERE wi.cart_id = c.id
+                AND (wi.status = 'waiting'
+                     OR (wi.status = 'notified' AND wi.expires_at > now()))
+          ) THEN $3::int ELSE 0 END)
 WHERE c.event_id = $1
   AND c.status = 'active'
   AND c.payment_status IS DISTINCT FROM 'paid'
@@ -461,8 +468,9 @@ RETURNING c.id
 `
 
 type FinalizeCartsByEventParams struct {
-	EventID           pgtype.UUID `json:"event_id"`
-	ExpirationMinutes int32       `json:"expiration_minutes"`
+	EventID              pgtype.UUID `json:"event_id"`
+	ExpirationMinutes    int32       `json:"expiration_minutes"`
+	WaitlistExtraMinutes int32       `json:"waitlist_extra_minutes"`
 }
 
 // SessionAttributionByEvent foi REMOVIDA (Fatia 5). Nunca teve chamador Go — e
@@ -494,9 +502,27 @@ type FinalizeCartsByEventParams struct {
 // estendido, conforme close_cart_on_event_end) e o fallback para a loja. O
 // COALESCE inline que existia aqui era a terceira cópia da mesma regra.
 //
+// QUEM ESTÁ NA FILA GANHA O PRAZO EXTRA DO EVENTO.
+//
+// Todo carrinho recebia o MESMO expires_at — um UPDATE, um now() — então os
+// três vencidos em 04/08 tinham 18:38:51.703178 idêntico ao microssegundo. Quem
+// esperava um produto morria no mesmo instante de quem o segurava, e a promoção
+// da fila não tinha intervalo nenhum para acontecer: as três linhas terminaram
+// 'expired' com notified_at NULL. Ninguém foi avisado.
+//
+// O extra é `waitlist_notified_ttl_minutes` do EVENTO — a mesma configuração
+// que o lojista já preenche para responder "quanto tempo A MAIS quem espera
+// tem". Não é número novo nem regra nova: é a regra dele, aplicada onde
+// finalmente importa. Sem isso ela só valia depois da promoção, e a promoção
+// nunca chegava.
+//
+// O critério é ter item AGUARDANDO ou PROMOVIDO com janela viva. Item já
+// 'expired' ou 'fulfilled' não estende nada — quem não espera mais não precisa
+// de prazo maior.
+//
 // Retorna os ids finalizados para emitir cart.checkout_armed por carrinho.
 func (q *Queries) FinalizeCartsByEvent(ctx context.Context, arg FinalizeCartsByEventParams) ([]pgtype.UUID, error) {
-	rows, err := q.db.Query(ctx, finalizeCartsByEvent, arg.EventID, arg.ExpirationMinutes)
+	rows, err := q.db.Query(ctx, finalizeCartsByEvent, arg.EventID, arg.ExpirationMinutes, arg.WaitlistExtraMinutes)
 	if err != nil {
 		return nil, err
 	}
@@ -658,6 +684,44 @@ func (q *Queries) FindCartByExternalOrderID(ctx context.Context, arg FindCartByE
 		&i.StoreID,
 	)
 	return i, err
+}
+
+const findOpenCartUserIDByHandle = `-- name: FindOpenCartUserIDByHandle :one
+SELECT platform_user_id FROM carts
+WHERE event_id = $1
+  AND platform_handle = $2
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+ORDER BY created_at ASC
+LIMIT 1
+`
+
+type FindOpenCartUserIDByHandleParams struct {
+	EventID        pgtype.UUID `json:"event_id"`
+	PlatformHandle string      `json:"platform_handle"`
+}
+
+// O platform_user_id do carrinho ABERTO deste comprador no evento, procurado
+// pelo @ em vez do id.
+//
+// Existe porque o MESMO comprador chega com DOIS ids diferentes conforme o
+// caminho: o webhook traz `from.self_ig_scoped_id` (o IGSID, único aceito pela
+// API de mensagens como destinatário) e a aresta `/{media}/comments` do polling
+// não devolve esse campo — só o `from.id` cru.
+//
+// Em 05/08 isso deu DOIS carrinhos para @englivecart no mesmo evento: um com
+// 1498886768484002 (webhook) e outro com 17841439350112281 (polling). A unique
+// parcial por (evento, platform_user_id) não viu violação nenhuma — os ids são
+// diferentes de verdade. O índice fez o trabalho dele; a entrada é que chegou
+// com duas identidades para a mesma pessoa.
+//
+// Só bate em quem já tem carrinho aberto no evento: o @ é estável dentro de uma
+// transmissão e é por ele que o lojista reconhece o comprador.
+func (q *Queries) FindOpenCartUserIDByHandle(ctx context.Context, arg FindOpenCartUserIDByHandleParams) (string, error) {
+	row := q.db.QueryRow(ctx, findOpenCartUserIDByHandle, arg.EventID, arg.PlatformHandle)
+	var platform_user_id string
+	err := row.Scan(&platform_user_id)
+	return platform_user_id, err
 }
 
 const getCartByCheckoutID = `-- name: GetCartByCheckoutID :one
@@ -2580,6 +2644,55 @@ type SetCartERPStockLaunchedParams struct {
 func (q *Queries) SetCartERPStockLaunched(ctx context.Context, arg SetCartERPStockLaunchedParams) error {
 	_, err := q.db.Exec(ctx, setCartERPStockLaunched, arg.ID, arg.ErpStockLaunched)
 	return err
+}
+
+const setCartItemSplitIfUnchanged = `-- name: SetCartItemSplitIfUnchanged :execrows
+UPDATE cart_items
+SET quantity = $1::int,
+    waitlisted_quantity = $2::int
+WHERE id = $3
+  AND quantity = $4::int
+`
+
+type SetCartItemSplitIfUnchangedParams struct {
+	Quantity           int32       `json:"quantity"`
+	WaitlistedQuantity int32       `json:"waitlisted_quantity"`
+	ID                 pgtype.UUID `json:"id"`
+	ExpectedQuantity   int32       `json:"expected_quantity"`
+}
+
+// Escreve a quantidade TOTAL e a parte em FILA de uma vez, e só se ninguém
+// tiver mexido na linha desde que a lemos.
+//
+// Duas correções numa query, porque as duas vivem no mesmo UPDATE:
+//
+//  1. TRAVA OTIMISTA. O UpdateCartItem antigo era `SET quantity = $2 WHERE
+//     id = $1` — absoluto e sem guarda. Entre a leitura e a escrita, o PATCH do
+//     checkout faz uma chamada HTTP ao Tiny que passa pelo limitador de ~1 req/s:
+//     a janela dura SEGUNDOS. Em 05/08 dois escritores leram quantity=2 com
+//     3.070 ms de diferença; o segundo calculou o delta contra um valor já
+//     obsoleto, debitou 2 e a linha só andou 1. Uma unidade sumiu do LiveCart e
+//     uma saída a mais foi lançada no Tiny. `AND quantity = @expected_quantity`
+//     faz o perdedor afetar ZERO linhas, e o chamador devolve conflito em vez de
+//     corromper a conta.
+//
+//  2. A PARTE EM FILA ACOMPANHA. `waitlisted_quantity` é a parcela SEM estoque;
+//     o que está segurado é `quantity - waitlisted_quantity`. O update antigo
+//     mexia só no total, então baixar de 5 (com 3 em fila, 2 segurados) para 2
+//     creditava 3 unidades ao estoque quando só 2 haviam sido tiradas — e ainda
+//     deixava a linha com disponível NEGATIVO (2 - 3). Escrever as duas colunas
+//     juntas é o que mantém a identidade `total = segurado + em fila`.
+func (q *Queries) SetCartItemSplitIfUnchanged(ctx context.Context, arg SetCartItemSplitIfUnchangedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setCartItemSplitIfUnchanged,
+		arg.Quantity,
+		arg.WaitlistedQuantity,
+		arg.ID,
+		arg.ExpectedQuantity,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const transitionCartERPOrderState = `-- name: TransitionCartERPOrderState :execrows

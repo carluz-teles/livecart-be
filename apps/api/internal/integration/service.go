@@ -127,6 +127,12 @@ type Service struct {
 	// reinscrever é desejável.
 	subscriptionEnsured sync.Map
 
+	// lastWebhookAt guarda, por conta do Instagram (entry.id), quando o último
+	// webhook CHEGOU. É a memória do vigia: a Meta para de entregar sem avisar,
+	// e sem este relógio "parou de chegar" e "ninguém comentou" são o mesmo
+	// silêncio no log.
+	lastWebhookAt sync.Map
+
 	// erpProviderFactory lets the finalisation state-machine tests inject a
 	// scripted ERP provider. nil in production (falls back to getERPProvider,
 	// which builds the real Tiny client from the integration credentials).
@@ -2129,6 +2135,12 @@ func (s *Service) ReplyToInstagramComment(ctx context.Context, storeID, commentI
 
 	// Use Private Reply to send a DM in response to the comment
 	if err := socialProvider.SendPrivateReply(ctx, commentID, text); err != nil {
+		// [IGTRACE] TODO remover — o par (origem do comentário, recusa do
+		// private reply) é o que sustenta a tese de que a Meta só aceita o
+		// comment_id que ELA empurra pelo webhook.
+		logger.From(ctx, s.logger).Warn(TracePrefixIG+"reply refused by Instagram",
+			zap.String("comment_id", commentID),
+		)
 		logger.From(ctx, s.logger).Warn("failed to send private reply to instagram comment",
 			zap.String("store_id", storeID),
 			zap.String("comment_id", commentID),
@@ -3364,6 +3376,34 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		)
 	}
 
+	// Estorno de carrinho em voo SUPRIME o sync inteiro, e tem de ser checado
+	// DEPOIS do guard porque é mais forte: `downgrade_only` deixa passar
+	// justamente a direção que causa o dano.
+	//
+	// Cancelar credita o estoque local numa transação só; o estorno no ERP sai
+	// um a um por HTTP, e cada um dispara um webhook. Nessa janela o Tiny está
+	// atrás de nós — por nossa causa — e "ERP menor que o local" NÃO é redução
+	// do lojista. Foi o que derrubou 1001 e 1004 de 5 para 4 em staging.
+	//
+	// Erro de DB aqui também suprime: preservar o local é sempre o lado seguro.
+	if !skipStock {
+		pending, pendErr := s.repo.HasPendingCartReversalForProduct(ctx, externalProductID, integration.StoreID)
+		if pendErr != nil {
+			skipStock = true
+			logger.From(ctx, s.logger).Warn("failed to check pending cart reversal, skipping stock sync as precaution",
+				zap.String("external_product_id", externalProductID),
+				zap.Error(pendErr),
+			)
+		} else if pending {
+			skipStock = true
+			downgradeOnly = false
+			logger.From(ctx, s.logger).Info("ERP stock sync suppressed: cart reversal in flight",
+				zap.String("external_product_id", externalProductID),
+				zap.String("store_id", integration.StoreID),
+			)
+		}
+	}
+
 	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, skipStock, downgradeOnly); err != nil {
 		return false, fmt.Errorf("syncing product: %w", err)
 	}
@@ -4409,6 +4449,7 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 		if err != nil {
 			continue
 		}
+		accountID := s.instagramAccountID(evCtx, ev.StoreID)
 		comments, err := provider.GetMediaComments(evCtx, ev.MediaID)
 		if err != nil {
 			// Media gone (deleted / no longer accessible): close the event so we
@@ -4439,10 +4480,75 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 			if username == "" {
 				username = c.Username
 			}
+
+			// A MESMA pessoa chega com ids DIFERENTES conforme o caminho.
+			//
+			// O webhook traz `from.self_ig_scoped_id` — o IGSID, único id que a
+			// API de mensagens aceita como destinatário. A aresta
+			// /{media}/comments não devolve esse campo: só o `from.id` cru.
+			//
+			// Em 05/08 isso rendeu DOIS carrinhos para @englivecart no mesmo
+			// evento, um por caminho. A unique parcial por (evento, user_id)
+			// não viu violação — os ids são diferentes de verdade. E o carrinho
+			// nascido do polling ainda ficava com um id que NÃO recebe DM.
+			//
+			// Se já existe carrinho aberto deste @ no evento, adotamos o id
+			// dele. Não inventa identidade: só evita criar uma segunda para
+			// quem já tem uma.
+			userID := c.From.ID
+
+			// A LOJA comentando na própria transmissão é o caso em que o
+			// polling não erra por pouco: o Instagram devolve o id da CONTA,
+			// que não é destinatário de DM em hipótese nenhuma. Medido em
+			// 05/08, mesmo evento: a identidade da conta profissional acumulou
+			// 4 comentários e 0 DMs; a do IGSID, 1 comentário e 1 DM.
+			//
+			// Não dá para pedir o IGSID à Meta. Ele é `self_ig_scoped_id`, só
+			// existe no payload do webhook, e a própria doc de auto-conversa
+			// diz para usar "the recipient ID from the webhook". Os endpoints
+			// que aceitam IGSID (/{igsid}, /me/conversations?user_id=) o querem
+			// como ENTRADA — nenhum faz o caminho inverso a partir do @.
+			//
+			// Então recuperamos do que já gravamos: uma passagem pelo webhook
+			// basta para o IGSID estar em customers, e daí em diante o polling
+			// o reusa.
+			if storeHandle := s.instagramUsername(evCtx, ev.StoreID); storeHandle != "" &&
+				strings.EqualFold(storeHandle, username) {
+				if known, ok := s.repo.FindDMCapableUserIDByHandle(evCtx, ev.StoreID, username, userID); ok {
+					logger.From(evCtx, s.logger).Info(TracePrefixIG+"polling: store commented on its own media, using the id that receives DM",
+						zap.String("handle", username),
+						zap.String("raw_from_id", c.From.ID),
+						zap.String("dm_capable_id", known),
+					)
+					userID = known
+				} else {
+					logger.From(evCtx, s.logger).Warn(TracePrefixIG+"polling: store commented on its own media and no id known to receive DM",
+						zap.String("handle", username),
+						zap.String("raw_from_id", c.From.ID),
+					)
+				}
+			}
+
+			if known, ok := s.repo.FindOpenCartUserIDByHandle(evCtx, ev.EventID, username); ok && known != userID {
+				logger.From(evCtx, s.logger).Info(TracePrefixIG+"polling: reusing the buyer id from their open cart",
+					zap.String("handle", username),
+					zap.String("raw_from_id", c.From.ID),
+					zap.String("cart_user_id", known),
+				)
+				userID = known
+			}
 			if err := s.liveService.ProcessInstagramComment(evCtx, ProcessInstagramCommentInput{
+				// A conta do Instagram desta loja. O webhook a traz em
+				// entry.id; o polling tem de buscá-la, e sem isso todo
+				// comentário capturado por aqui aparecia no log com
+				// account_id vazio — indistinguível de "não sabemos de quem
+				// é" e o suficiente para o diagnóstico apontar para o lado
+				// errado. É campo de LOG, não de decisão: nada no fluxo de
+				// resposta o consulta.
+				AccountID: accountID,
 				MediaID:   ev.MediaID,
 				CommentID: c.ID,
-				UserID:    c.From.ID,
+				UserID:    userID,
 				Username:  username,
 				Text:      c.Text,
 				// RN-37: sem o carimbo o polling não saberia que o comentário
@@ -5874,6 +5980,9 @@ func (s *Service) endStaleLiveSessionsOnce(ctx context.Context) {
 		// loja por processo (ver subscriptionEnsured), então o custo é uma
 		// chamada por lojista que fez live desde o último deploy.
 		s.ensureWebhookSubscriptionOnce(storeCtx, storeID)
+		// Só faz sentido com transmissão no ar — que é exatamente o laço em que
+		// estamos: byStore só contém loja com sessão de live viva.
+		s.checkWebhookSilence(storeCtx, storeID, storeMedias)
 
 		provider, err := s.resolveInstagramSocialProvider(storeCtx, storeID)
 		if err != nil {
@@ -6006,4 +6115,177 @@ func (s *Service) attachPublishedMediaToEvent(
 		Status:    session.Status,
 		CreatedAt: session.CreatedAt,
 	}, nil
+}
+
+// instagramAccountID devolve o id da conta profissional do Instagram da loja —
+// o mesmo que a Meta manda em entry.id nos webhooks. Vazio quando a integração
+// não resolve; é uso de LOG, então falhar aqui não pode derrubar captura.
+func (s *Service) instagramAccountID(ctx context.Context, storeID string) string {
+	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "social", "instagram")
+	if err != nil || integration == nil {
+		return ""
+	}
+	if v, ok := integration.Metadata["instagram_user_id"].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// webhookSilenceAlert é quanto tempo de silêncio, com transmissão NO AR, já
+// merece investigação. Uma live com público gera comentário em minutos; cinco
+// sem nada, com a live rodando, é sinal — não é prova, e o log diz isso.
+const webhookSilenceAlert = 5 * time.Minute
+
+// NoteInstagramWebhook carimba a chegada de um webhook para uma conta.
+func (s *Service) NoteInstagramWebhook(accountID string) {
+	if accountID == "" {
+		return
+	}
+	s.lastWebhookAt.Store(accountID, time.Now())
+}
+
+// commentWebhookKey separa o carimbo de COMENTÁRIO do carimbo de qualquer
+// webhook, no mesmo mapa.
+func commentWebhookKey(mediaID string) string { return "comment:" + mediaID }
+
+// NoteInstagramCommentWebhook carimba a chegada de um webhook de COMENTÁRIO
+// para uma mídia.
+//
+// O carimbo por conta não serve para a pergunta que interessa. Medido em
+// 06/08, numa janela de oito minutos com transmissão no ar: 20 webhooks
+// chegaram, 19 deles `messaging` e UM `live_comments`. O canal estava vivo o
+// tempo todo — quem parou foi só o campo de comentário. Um vigia que olha
+// "chegou algum webhook?" dá tudo certo enquanto nenhum comentário é entregue.
+//
+// A chave é a MÍDIA, e não a conta, porque é o único id que aparece igual nos
+// dois lados: o entry.id do webhook varia conforme o campo (a entrada de
+// comentário traz a conta profissional, a de mensagem traz outro id), e foi
+// por isso que o vigia media silêncio contra uma chave que nunca era carimbada.
+func (s *Service) NoteInstagramCommentWebhook(mediaID string) {
+	if mediaID == "" {
+		return
+	}
+	s.lastWebhookAt.Store(commentWebhookKey(mediaID), time.Now())
+}
+
+// checkWebhookSilence alerta quando uma loja COM TRANSMISSÃO NO AR passa tempo
+// demais sem receber webhook — e, quando isso acontece, consulta a Meta para
+// dizer em quais campos a conta está inscrita NAQUELE momento.
+//
+// Por que existe: a entrega de live_comments para no meio da transmissão, sem
+// erro do nosso lado (respondemos 200 em 100% das entregas) e sem nada no log.
+// A pergunta que ninguém conseguia responder era "a assinatura ainda está de
+// pé?" — porque só dava para consultá-la manualmente, depois, quando o estado
+// já podia ter mudado. Isto responde no instante em que o silêncio começa.
+//
+// O alerta NÃO conserta nada e não tenta: reinscrever aqui apagaria a evidência
+// justamente do estado que se quer capturar. É diagnóstico, e diz isso.
+func (s *Service) checkWebhookSilence(ctx context.Context, storeID string, medias []live.MediaRef) {
+	accountID := s.instagramAccountID(ctx, storeID)
+	if accountID == "" {
+		return
+	}
+
+	// Mede o silêncio de COMENTÁRIO, por mídia, e não "chegou algum webhook".
+	//
+	// A versão anterior media a coisa errada duas vezes. Carimbava por entry.id
+	// e consultava o id do metadata — chaves que nem sempre são a mesma, então
+	// ela via silêncio onde não havia. E, quando as chaves batiam, carimbava
+	// também os webhooks de `messaging`: em 06/08 esses eram 19 dos 20 numa
+	// janela em que exatamente UM comentário foi entregue, ou seja, o vigia
+	// diria "tudo certo" no meio do apagão que ele existe para pegar.
+	//
+	// A mídia da transmissão é o id que aparece igual nos dois lados.
+	var last time.Time
+	for _, m := range medias {
+		if m.MediaID == "" {
+			continue
+		}
+		if v, ok := s.lastWebhookAt.Load(commentWebhookKey(m.MediaID)); ok {
+			if t, _ := v.(time.Time); t.After(last) {
+				last = t
+			}
+		}
+	}
+	if last.IsZero() {
+		// Nenhum comentário desta transmissão chegou por webhook NESTE processo.
+		// Pode ser deploy recente ou live recém-aberta, então o relógio começa
+		// agora em vez de gritar de imediato.
+		for _, m := range medias {
+			if m.MediaID != "" {
+				s.lastWebhookAt.Store(commentWebhookKey(m.MediaID), time.Now())
+			}
+		}
+		return
+	}
+	silence := time.Since(last)
+	if silence < webhookSilenceAlert {
+		return
+	}
+
+	// Só alerta UMA vez por janela de silêncio: empurra o relógio para frente,
+	// senão o sweep de 20s viraria uma enxurrada de warns idênticos.
+	for _, m := range medias {
+		if m.MediaID != "" {
+			s.lastWebhookAt.Store(commentWebhookKey(m.MediaID), time.Now())
+		}
+	}
+
+	fields, err := s.GetInstagramWebhookSubscription(ctx, storeID)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("instagram comment webhook silent with a live on air, and the subscription could not be read",
+			zap.String("account_id", accountID),
+			zap.Duration("silent_for", silence),
+			zap.Error(err),
+		)
+		return
+	}
+
+	subscribed := false
+	for _, f := range fields {
+		if f == "live_comments" {
+			subscribed = true
+		}
+	}
+	logger.From(ctx, s.logger).Warn("instagram comment webhook silent with a live on air",
+		zap.String("account_id", accountID),
+		zap.Duration("silent_for", silence),
+		zap.Strings("subscribed_fields", fields),
+		// A resposta que faltava: a assinatura sumiu, ou ela está lá e a Meta
+		// simplesmente parou de entregar? São causas diferentes e correções
+		// diferentes, e até agora não dava para separar as duas.
+		zap.Bool("live_comments_subscribed", subscribed),
+	)
+}
+
+// TracePrefixIG marca as linhas da investigação da entrega de live_comments.
+// TODO REMOVER junto com o restante do [IGTRACE].
+const TracePrefixIG = "[IGTRACE] "
+
+// instagramAltAccountID devolve o OUTRO id do Instagram da loja — a Meta tem
+// dois (conta profissional e app-scoped) e, dependendo de quando a conta foi
+// conectada, o metadata guarda um ou outro em `instagram_user_id`.
+func (s *Service) instagramAltAccountID(ctx context.Context, storeID string) string {
+	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "social", "instagram")
+	if err != nil || integration == nil {
+		return ""
+	}
+	if v, ok := integration.Metadata["instagram_app_scoped_id"].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// instagramUsername é o @ da conta que a loja conectou. Usado para reconhecer
+// que um comentário veio da PRÓPRIA loja — caso em que o id devolvido pelo
+// polling é o da conta, e não um destinatário válido de DM.
+func (s *Service) instagramUsername(ctx context.Context, storeID string) string {
+	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "social", "instagram")
+	if err != nil || integration == nil {
+		return ""
+	}
+	if v, ok := integration.Metadata["username"].(string); ok {
+		return v
+	}
+	return ""
 }

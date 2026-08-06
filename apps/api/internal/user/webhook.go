@@ -3,10 +3,12 @@ package user
 import (
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 
@@ -59,11 +61,20 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App) {
 // @Failure      401 {object} httpx.Envelope
 // @Router       /api/webhooks/clerk [post]
 func (h *WebhookHandler) HandleClerkWebhook(c *fiber.Ctx) error {
-	// Verify webhook signature if secret is configured
+	// Verify webhook signature if secret is configured.
+	// ATENÇÃO: com CLERK_WEBHOOK_SECRET vazio a verificação é pulada inteira e
+	// esta rota — que cria/altera/apaga usuários e não passa pelo AuthMiddleware
+	// — fica aberta. Manter o segredo setado em staging e produção.
 	webhookSecret := os.Getenv("CLERK_WEBHOOK_SECRET")
 	if webhookSecret != "" {
-		signature := c.Get("svix-signature")
-		if !verifyWebhookSignature(c.Body(), signature, webhookSecret) {
+		ok := verifyWebhookSignature(
+			c.Body(),
+			c.Get("svix-id"),
+			c.Get("svix-timestamp"),
+			c.Get("svix-signature"),
+			webhookSecret,
+		)
+		if !ok {
 			return c.Status(fiber.StatusUnauthorized).JSON(httpx.Envelope{Error: "invalid signature"})
 		}
 	}
@@ -196,29 +207,64 @@ func getPrimaryEmail(userData ClerkUserData) string {
 	return ""
 }
 
-func verifyWebhookSignature(payload []byte, signature, secret string) bool {
-	// Svix signature format: v1,<signature>
-	parts := strings.Split(signature, ",")
-	if len(parts) < 2 {
+// Janela de tolerância do timestamp, igual à do Svix. Barra o replay de uma
+// entrega capturada sem rejeitar entregas legitimamente atrasadas.
+const webhookTolerance = 5 * time.Minute
+
+// svixSignature computes the base64 HMAC-SHA256 that Svix (and therefore Clerk)
+// expects for a delivery.
+//
+// Três detalhes que uma implementação ingênua erra — e cada um sozinho já
+// rejeita 100% dos webhooks: o conteúdo assinado é "id.timestamp.body" e não o
+// body puro; a chave é o que vem DEPOIS do prefixo whsec_, decodificado de
+// base64 para bytes; e a saída é base64, não hex.
+func svixSignature(secret, msgID, timestamp string, payload []byte) (string, error) {
+	key, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(secret, "whsec_"))
+	if err != nil {
+		return "", err
+	}
+
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(msgID))
+	mac.Write([]byte("."))
+	mac.Write([]byte(timestamp))
+	mac.Write([]byte("."))
+	mac.Write(payload)
+
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+// verifyWebhookSignature validates a Svix-signed delivery: headers present,
+// timestamp inside the tolerance window and a matching v1 signature.
+func verifyWebhookSignature(payload []byte, msgID, timestamp, signatureHeader, secret string) bool {
+	if msgID == "" || timestamp == "" || signatureHeader == "" {
 		return false
 	}
 
-	// Get the signature part
-	sig := ""
-	for _, part := range parts {
-		if strings.HasPrefix(part, "v1=") {
-			sig = strings.TrimPrefix(part, "v1=")
-			break
+	seconds, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil {
+		return false
+	}
+	if drift := time.Since(time.Unix(seconds, 0)); drift > webhookTolerance || drift < -webhookTolerance {
+		return false
+	}
+
+	expected, err := svixSignature(secret, msgID, timestamp, payload)
+	if err != nil {
+		return false
+	}
+
+	// O header carrega uma lista separada por espaço ("v1,<sig> v1,<sig>"):
+	// durante uma rotação de segredo o Svix assina com os dois. Basta uma bater.
+	for _, entry := range strings.Split(signatureHeader, " ") {
+		version, sig, ok := strings.Cut(entry, ",")
+		if !ok || version != "v1" {
+			continue
+		}
+		if hmac.Equal([]byte(sig), []byte(expected)) {
+			return true
 		}
 	}
-	if sig == "" {
-		return false
-	}
 
-	// Compute expected signature
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(payload)
-	expected := hex.EncodeToString(mac.Sum(nil))
-
-	return hmac.Equal([]byte(sig), []byte(expected))
+	return false
 }

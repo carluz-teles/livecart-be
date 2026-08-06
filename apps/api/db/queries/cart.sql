@@ -299,10 +299,35 @@ WHERE ci.cart_id = $1;
 -- estendido, conforme close_cart_on_event_end) e o fallback para a loja. O
 -- COALESCE inline que existia aqui era a terceira cópia da mesma regra.
 --
+-- QUEM ESTÁ NA FILA GANHA O PRAZO EXTRA DO EVENTO.
+--
+-- Todo carrinho recebia o MESMO expires_at — um UPDATE, um now() — então os
+-- três vencidos em 04/08 tinham 18:38:51.703178 idêntico ao microssegundo. Quem
+-- esperava um produto morria no mesmo instante de quem o segurava, e a promoção
+-- da fila não tinha intervalo nenhum para acontecer: as três linhas terminaram
+-- 'expired' com notified_at NULL. Ninguém foi avisado.
+--
+-- O extra é `waitlist_notified_ttl_minutes` do EVENTO — a mesma configuração
+-- que o lojista já preenche para responder "quanto tempo A MAIS quem espera
+-- tem". Não é número novo nem regra nova: é a regra dele, aplicada onde
+-- finalmente importa. Sem isso ela só valia depois da promoção, e a promoção
+-- nunca chegava.
+--
+-- O critério é ter item AGUARDANDO ou PROMOVIDO com janela viva. Item já
+-- 'expired' ou 'fulfilled' não estende nada — quem não espera mais não precisa
+-- de prazo maior.
+--
 -- Retorna os ids finalizados para emitir cart.checkout_armed por carrinho.
 UPDATE carts c
 SET status = 'checkout',
-    expires_at = now() + make_interval(mins => sqlc.arg(expiration_minutes)::int)
+    expires_at = now() + make_interval(mins =>
+        sqlc.arg(expiration_minutes)::int
+        + CASE WHEN EXISTS (
+              SELECT 1 FROM waitlist_items wi
+              WHERE wi.cart_id = c.id
+                AND (wi.status = 'waiting'
+                     OR (wi.status = 'notified' AND wi.expires_at > now()))
+          ) THEN sqlc.arg(waitlist_extra_minutes)::int ELSE 0 END)
 WHERE c.event_id = $1
   AND c.status = 'active'
   AND c.payment_status IS DISTINCT FROM 'paid'
@@ -821,3 +846,56 @@ WHERE c.erp_order_state IN ('converting','mutating')
 -- name: GetCartGMVCents :one
 -- GMV de um cart: delega à função canônica cart_product_total_cents (migration 000093).
 SELECT cart_product_total_cents(sqlc.arg(cart_id))::bigint AS gmv_cents;
+
+-- name: SetCartItemSplitIfUnchanged :execrows
+-- Escreve a quantidade TOTAL e a parte em FILA de uma vez, e só se ninguém
+-- tiver mexido na linha desde que a lemos.
+--
+-- Duas correções numa query, porque as duas vivem no mesmo UPDATE:
+--
+-- 1) TRAVA OTIMISTA. O UpdateCartItem antigo era `SET quantity = $2 WHERE
+--    id = $1` — absoluto e sem guarda. Entre a leitura e a escrita, o PATCH do
+--    checkout faz uma chamada HTTP ao Tiny que passa pelo limitador de ~1 req/s:
+--    a janela dura SEGUNDOS. Em 05/08 dois escritores leram quantity=2 com
+--    3.070 ms de diferença; o segundo calculou o delta contra um valor já
+--    obsoleto, debitou 2 e a linha só andou 1. Uma unidade sumiu do LiveCart e
+--    uma saída a mais foi lançada no Tiny. `AND quantity = @expected_quantity`
+--    faz o perdedor afetar ZERO linhas, e o chamador devolve conflito em vez de
+--    corromper a conta.
+--
+-- 2) A PARTE EM FILA ACOMPANHA. `waitlisted_quantity` é a parcela SEM estoque;
+--    o que está segurado é `quantity - waitlisted_quantity`. O update antigo
+--    mexia só no total, então baixar de 5 (com 3 em fila, 2 segurados) para 2
+--    creditava 3 unidades ao estoque quando só 2 haviam sido tiradas — e ainda
+--    deixava a linha com disponível NEGATIVO (2 - 3). Escrever as duas colunas
+--    juntas é o que mantém a identidade `total = segurado + em fila`.
+UPDATE cart_items
+SET quantity = @quantity::int,
+    waitlisted_quantity = @waitlisted_quantity::int
+WHERE id = @id
+  AND quantity = @expected_quantity::int;
+
+-- name: FindOpenCartUserIDByHandle :one
+-- O platform_user_id do carrinho ABERTO deste comprador no evento, procurado
+-- pelo @ em vez do id.
+--
+-- Existe porque o MESMO comprador chega com DOIS ids diferentes conforme o
+-- caminho: o webhook traz `from.self_ig_scoped_id` (o IGSID, único aceito pela
+-- API de mensagens como destinatário) e a aresta `/{media}/comments` do polling
+-- não devolve esse campo — só o `from.id` cru.
+--
+-- Em 05/08 isso deu DOIS carrinhos para @englivecart no mesmo evento: um com
+-- 1498886768484002 (webhook) e outro com 17841439350112281 (polling). A unique
+-- parcial por (evento, platform_user_id) não viu violação nenhuma — os ids são
+-- diferentes de verdade. O índice fez o trabalho dele; a entrada é que chegou
+-- com duas identidades para a mesma pessoa.
+--
+-- Só bate em quem já tem carrinho aberto no evento: o @ é estável dentro de uma
+-- transmissão e é por ele que o lojista reconhece o comprador.
+SELECT platform_user_id FROM carts
+WHERE event_id = $1
+  AND platform_handle = $2
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+ORDER BY created_at ASC
+LIMIT 1;

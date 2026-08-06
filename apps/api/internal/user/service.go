@@ -51,6 +51,29 @@ func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserO
 	// Determine state
 	state := "no_store"
 	var membershipOutput *MembershipOutput
+	var pendingInvitations []PendingInvitationRow
+
+	if membership == nil {
+		// Sem loja, mas talvez com convite esperando. O convite vive só na nossa
+		// base (o Clerk não sabe que ele existe) e o único elo é o link do
+		// e-mail — quem autentica por fora dele, tipicamente com "Login com
+		// Google", chegava aqui como "no_store" e era empurrado ao onboarding
+		// para criar uma loja própria. Virava owner e depois travava no 409 ao
+		// tentar aceitar o convite. Achar o convite pelo e-mail fecha esse buraco.
+		//
+		// Best-effort: falha aqui não pode derrubar o login. No pior caso o
+		// usuário segue para o onboarding, que é o comportamento antigo.
+		invitations, err := s.repo.ListPendingInvitationsByEmail(ctx, user.Email)
+		if err != nil {
+			logger.From(ctx, s.logger).Warn("failed to look up pending invitations on sync",
+				zap.String("user_id", user.ID),
+				zap.Error(err),
+			)
+		} else if len(invitations) > 0 {
+			state = "pending_invitation"
+			pendingInvitations = invitations
+		}
+	}
 
 	if membership != nil {
 		state = "ready"
@@ -86,14 +109,15 @@ func (s *Service) SyncUser(ctx context.Context, input SyncUserInput) (*SyncUserO
 	}
 
 	return &SyncUserOutput{
-		UserID:       user.ID,
-		ClerkUserID:  user.ClerkID,
-		Email:        user.Email,
-		Name:         user.Name,
-		AvatarURL:    user.AvatarURL,
-		Membership:   membershipOutput,
-		State:        state,
-		Subscription: subscription,
+		UserID:             user.ID,
+		ClerkUserID:        user.ClerkID,
+		Email:              user.Email,
+		Name:               user.Name,
+		AvatarURL:          user.AvatarURL,
+		Membership:         membershipOutput,
+		State:              state,
+		Subscription:       subscription,
+		PendingInvitations: pendingInvitations,
 	}, nil
 }
 

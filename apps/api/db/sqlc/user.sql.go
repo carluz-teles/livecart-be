@@ -705,6 +705,80 @@ func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (User, error)
 	return i, err
 }
 
+const listPendingInvitationsByEmail = `-- name: ListPendingInvitationsByEmail :many
+SELECT
+  si.id,
+  si.store_id,
+  si.email,
+  si.role,
+  si.token,
+  si.expires_at,
+  si.created_at,
+  s.name as store_name,
+  s.slug as store_slug,
+  inviter_user.name as inviter_name
+FROM store_invitations si
+JOIN stores s ON s.id = si.store_id
+JOIN memberships inviter ON inviter.id = si.invited_by
+JOIN users inviter_user ON inviter_user.id = inviter.user_id
+WHERE LOWER(si.email) = LOWER($1::text)
+  AND si.status = 'pending'
+  AND si.expires_at > now()
+ORDER BY si.created_at DESC
+`
+
+type ListPendingInvitationsByEmailRow struct {
+	ID          pgtype.UUID        `json:"id"`
+	StoreID     pgtype.UUID        `json:"store_id"`
+	Email       string             `json:"email"`
+	Role        string             `json:"role"`
+	Token       string             `json:"token"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	StoreName   string             `json:"store_name"`
+	StoreSlug   string             `json:"store_slug"`
+	InviterName pgtype.Text        `json:"inviter_name"`
+}
+
+// Convites pendentes e ainda válidos para um e-mail, em QUALQUER loja.
+// Usado pelo sync para descobrir que o usuário recém-autenticado foi convidado,
+// mesmo que ele nunca tenha clicado no link do e-mail (ex.: entrou direto com
+// "Login com Google"). Sem isto ele cai no onboarding e cria loja própria.
+//
+// LOWER() nos dois lados porque as duas pontas normalizam diferente:
+// store_invitations.email passa pelo value object (lowercase), users.email vem
+// cru dos claims do JWT do Clerk.
+func (q *Queries) ListPendingInvitationsByEmail(ctx context.Context, email string) ([]ListPendingInvitationsByEmailRow, error) {
+	rows, err := q.db.Query(ctx, listPendingInvitationsByEmail, email)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPendingInvitationsByEmailRow{}
+	for rows.Next() {
+		var i ListPendingInvitationsByEmailRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.StoreID,
+			&i.Email,
+			&i.Role,
+			&i.Token,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.StoreName,
+			&i.StoreSlug,
+			&i.InviterName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStoreInvitations = `-- name: ListStoreInvitations :many
 SELECT
   si.id,

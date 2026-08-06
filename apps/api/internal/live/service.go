@@ -1020,6 +1020,21 @@ func (s *Service) End(ctx context.Context, input EndLiveInput) (EndLiveOutput, e
 		)
 	}
 
+	// [IGTRACE] TODO remover — investigação da expiração em lote.
+	//
+	// UM update, UM now(): todo carrinho aberto do evento recebe o MESMO
+	// expires_at, idêntico ao microssegundo. Em staging (04/08) foram três
+	// carrinhos com 18:38:51.703178, expirando juntos.
+	//
+	// A consequência é a que o dono do produto descreveu: o carrinho SEM fila
+	// deveria vencer primeiro e liberar estoque para quem espera — mas quem
+	// espera vence no mesmo instante, e a promoção tenta promover carrinhos que
+	// já estão morrendo. Nenhum dos três chegou a ser notificado.
+	logger.From(ctx, s.logger).Info(TraceExpiryPrefix+"event end armed ONE deadline for every open cart",
+		zap.String("event_id", input.ID),
+		zap.Int("carts_finalized", cartsFinalized),
+	)
+
 	// Capture the slug before spawning detached goroutines: the request ctx is
 	// recycled by fasthttp when the response is sent.
 	storeSlug, _ := ctx.Value(logger.StoreSlugKey).(string)

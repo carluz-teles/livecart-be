@@ -126,6 +126,40 @@ func (r *Repository) DeleteUser(ctx context.Context, clerkID string) error {
 	return r.q.DeleteUser(ctx, clerkID)
 }
 
+// ListPendingInvitationsByEmail returns every pending, non-expired invitation
+// addressed to this email, across all stores.
+//
+// Existe para o sync conseguir enxergar que o usuário recém-autenticado foi
+// convidado mesmo sem ter clicado no link do e-mail — caso de quem entra direto
+// com "Login com Google". Sem isto ele cai no onboarding, cria loja própria e
+// depois trava no 409 de "dono de outra loja" ao tentar aceitar o convite.
+func (r *Repository) ListPendingInvitationsByEmail(ctx context.Context, email string) ([]PendingInvitationRow, error) {
+	rows, err := r.q.ListPendingInvitationsByEmail(ctx, email)
+	if err != nil {
+		return nil, fmt.Errorf("listing pending invitations: %w", err)
+	}
+
+	out := make([]PendingInvitationRow, 0, len(rows))
+	for _, row := range rows {
+		inv := PendingInvitationRow{
+			ID:        row.ID.String(),
+			StoreID:   row.StoreID.String(),
+			StoreName: row.StoreName,
+			StoreSlug: row.StoreSlug,
+			Email:     row.Email,
+			Role:      row.Role,
+			Token:     row.Token,
+			ExpiresAt: row.ExpiresAt.Time,
+		}
+		if row.InviterName.Valid {
+			inv.InviterName = &row.InviterName.String
+		}
+		out = append(out, inv)
+	}
+
+	return out, nil
+}
+
 // ============================================
 // Membership operations (Single store per user)
 // ============================================
