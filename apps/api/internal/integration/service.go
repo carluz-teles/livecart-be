@@ -3359,22 +3359,19 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	// só quando o valor do ERP é menor que o local (direção segura, nunca
 	// causa promoção fantasma). Fora da janela, sync normal. Fail-safe: em erro
 	// de DB, preserva o local inteiro.
-	skipStock := false
-	downgradeOnly := false
 	guarded, guardErr := s.repo.HasStockGuardForProduct(ctx, externalProductID, integration.StoreID, integration.Provider)
 	if guardErr != nil {
-		skipStock = true
 		logger.From(ctx, s.logger).Warn("failed to check stock guard for product, skipping stock sync as precaution",
 			zap.String("external_product_id", externalProductID),
 			zap.Error(guardErr),
 		)
 	} else if guarded {
-		downgradeOnly = true
 		logger.From(ctx, s.logger).Info("ERP stock sync in guard window: applying reductions only (reservation/finalisation in flight)",
 			zap.String("external_product_id", externalProductID),
 			zap.String("store_id", integration.StoreID),
 		)
 	}
+	skipStock, downgradeOnly := stockSyncMode(guarded, guardErr != nil, false, false)
 
 	// Estorno de carrinho em voo SUPRIME o sync inteiro, e tem de ser checado
 	// DEPOIS do guard porque é mais forte: `downgrade_only` deixa passar
@@ -3389,19 +3386,17 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	if !skipStock {
 		pending, pendErr := s.repo.HasPendingCartReversalForProduct(ctx, externalProductID, integration.StoreID)
 		if pendErr != nil {
-			skipStock = true
 			logger.From(ctx, s.logger).Warn("failed to check pending cart reversal, skipping stock sync as precaution",
 				zap.String("external_product_id", externalProductID),
 				zap.Error(pendErr),
 			)
 		} else if pending {
-			skipStock = true
-			downgradeOnly = false
 			logger.From(ctx, s.logger).Info("ERP stock sync suppressed: cart reversal in flight",
 				zap.String("external_product_id", externalProductID),
 				zap.String("store_id", integration.StoreID),
 			)
 		}
+		skipStock, downgradeOnly = stockSyncMode(guarded, guardErr != nil, pending, pendErr != nil)
 	}
 
 	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, skipStock, downgradeOnly); err != nil {
@@ -3927,22 +3922,24 @@ func (s *Service) reverseCartReservationsPerRow(ctx context.Context, erpProvider
 	if err != nil {
 		return fmt.Errorf("listing cart reservations: %w", err)
 	}
+	// Reivindica ANTES de chamar o ERP. A ordem inversa que vivia aqui já vinha
+	// documentada como perigosa em comentário — "um retry re-estornaria esta row
+	// e duplicaria a entrada E" — e em 08/08 aconteceu: o extrato do Tiny ficou
+	// com duas entradas idênticas e o produto ganhou unidades que não existiam.
+	// Ver erp.ReverseReservationsClaimFirst.
+	rows := make([]erp.ReversibleReservation, 0, len(reservations))
 	for _, r := range reservations {
-		obs := fmt.Sprintf("Estorno reserva pós-pagamento - Cart %s", cartID)
-		if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
-			return fmt.Errorf("reversing reservation %s: estorno de reserva pendente (produto %s): %w", r.ID, r.ExternalProductID, reverseErr)
-		}
-		if dbErr := s.repo.ReverseReservationByID(ctx, r.ID); dbErr != nil {
-			// Tiny estornou mas a marcação local falhou: um retry re-estornaria
-			// esta row e duplicaria a entrada E (sandbox T10: o Tiny aceita e
-			// infla em silêncio). Loga alto com o movementID para reconciliação.
-			logger.From(ctx, s.logger).Error("reservation reversed on Tiny but local mark failed — reconcile manually",
-				zap.String("cart_id", cartID),
-				zap.String("reservation_id", r.ID),
-				zap.String("erp_movement_id", r.ERPMovementID),
-				zap.Error(dbErr),
-			)
-		}
+		rows = append(rows, erp.ReversibleReservation{
+			ID:                r.ID,
+			ExternalProductID: r.ExternalProductID,
+			Quantity:          r.Quantity,
+		})
+	}
+	if _, allResolved := erp.ReverseReservationsClaimFirst(ctx, s.logger, s.repo, erpProvider, rows,
+		func(erp.ReversibleReservation) string {
+			return fmt.Sprintf("Estorno reserva pós-pagamento - Cart %s", cartID)
+		}); !allResolved {
+		return fmt.Errorf("reversing reservations for cart %s: estorno de reserva pendente", cartID)
 	}
 	return nil
 }
@@ -5407,18 +5404,24 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 						zap.Error(provErr),
 					)
 				} else {
-					erpReversed = true
+					// Reivindica antes de chamar o ERP — ver
+					// erp.ReverseReservationsClaimFirst. A marcação em bloco
+					// logo abaixo (ReverseReservationsByCartAndProduct) não
+					// protegia nada: ela roda DEPOIS do laço, então uma
+					// retentativa que chegasse no meio reenviava as entradas já
+					// aplicadas.
+					rows := make([]erp.ReversibleReservation, 0, len(reservations))
 					for _, res := range reservations {
-						obs := fmt.Sprintf("Estorno expiração carrinho LiveCart - Cart %s", cart.ID)
-						if _, reverseErr := erpProvider.ReverseStockReservation(ctx, res.ExternalProductID, res.Quantity, 0, obs); reverseErr != nil {
-							erpReversed = false
-							logger.From(ctx, s.logger).Warn("failed to reverse expired cart stock reservation in ERP",
-								zap.String("cart_id", cart.ID),
-								zap.String("external_product_id", res.ExternalProductID),
-								zap.Error(reverseErr),
-							)
-						}
+						rows = append(rows, erp.ReversibleReservation{
+							ID:                res.ID,
+							ExternalProductID: res.ExternalProductID,
+							Quantity:          res.Quantity,
+						})
 					}
+					_, erpReversed = erp.ReverseReservationsClaimFirst(ctx, s.logger, s.repo, erpProvider, rows,
+						func(erp.ReversibleReservation) string {
+							return fmt.Sprintf("Estorno expiração carrinho LiveCart - Cart %s", cart.ID)
+						})
 				}
 			}
 			if markErr := s.repo.ReverseReservationsByCartAndProduct(ctx, cart.ID, productID); markErr != nil {
@@ -5524,17 +5527,20 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 			)
 		}
 		if len(reservations) > 0 && erpProvider != nil {
+			// Reivindica antes de chamar o ERP — ver
+			// erp.ReverseReservationsClaimFirst.
+			rows := make([]erp.ReversibleReservation, 0, len(reservations))
 			for _, r := range reservations {
-				obs := fmt.Sprintf("Estorno cliente bloqueado - Cart %s", cart.ID)
-				if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
-					logger.From(ctx, s.logger).Warn("failed to reverse ERP reservation on block",
-						zap.String("cart_id", cart.ID),
-						zap.String("external_product_id", r.ExternalProductID),
-						zap.Int("quantity", r.Quantity),
-						zap.Error(reverseErr),
-					)
-				}
+				rows = append(rows, erp.ReversibleReservation{
+					ID:                r.ID,
+					ExternalProductID: r.ExternalProductID,
+					Quantity:          r.Quantity,
+				})
 			}
+			erp.ReverseReservationsClaimFirst(ctx, s.logger, s.repo, erpProvider, rows,
+				func(erp.ReversibleReservation) string {
+					return fmt.Sprintf("Estorno cliente bloqueado - Cart %s", cart.ID)
+				})
 		}
 		if len(reservations) > 0 {
 			if err := s.repo.ReverseReservationsByCart(ctx, cart.ID); err != nil {

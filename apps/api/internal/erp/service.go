@@ -107,6 +107,13 @@ type ERPRepository interface {
 	// ReverseReservationByID marks a single reservation reversed, only after the
 	// ERP confirmed the corresponding entrada E (per-row, resumable).
 	ReverseReservationByID(ctx context.Context, reservationID string) error
+	// ClaimReservationForReversal reivindica a reserva ANTES de falar com o ERP
+	// e devolve true só para quem ganhou a corrida. É o que torna o estorno
+	// duplo impossível quando a asynq retenta.
+	ClaimReservationForReversal(ctx context.Context, reservationID string) (bool, error)
+	// RestoreReservationToActive desfaz a reivindicação quando o ERP recusa o
+	// estorno, para a próxima tentativa voltar a enxergar a reserva.
+	RestoreReservationToActive(ctx context.Context, reservationID string) error
 	// ReverseReservationsByCart mass-marks a cart's active reservations reversed
 	// (the legacy expiry path, which marks locally regardless of the ERP result).
 	ReverseReservationsByCart(ctx context.Context, cartID string) error

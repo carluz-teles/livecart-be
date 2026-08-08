@@ -157,34 +157,39 @@ func (s *Service) FinalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 	// we know which ones to re-create in the failure path. A reservation that
 	// failed to reverse is still "active" on Tiny's side — re-creating it
 	// would double-deduct stock.
+	// Reivindica cada reserva ANTES de mandar o estorno — ver
+	// ReverseReservationsClaimFirst. Este caminho corre sobre um cart PAGO, e
+	// duplicar a entrada aqui devolveria ao estoque unidades que o pedido já
+	// vai baixar: oferta de produto que não existe, contra dinheiro recebido.
 	reversedSnapshot := make([]StockReservationRow, 0, len(reservations))
+	byID := make(map[string]StockReservationRow, len(reservations))
+	rows := make([]ReversibleReservation, 0, len(reservations))
 	for _, r := range reservations {
-		obs := fmt.Sprintf("Estorno reserva pós-pagamento - Cart %s", cartID)
-		if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
-			msg := fmt.Sprintf("estorno de reserva pendente (produto %s): %v", r.ExternalProductID, reverseErr)
-			s.collab.MarkFinalisationFailed(ctx, cartID, msg)
-			logger.From(ctx, s.logger).Warn("failed to reverse ERP reservation on paid cart, aborting for retry",
-				zap.String("cart_id", cartID),
-				zap.String("reservation_id", r.ID),
-				zap.String("external_product_id", r.ExternalProductID),
-				zap.Int("quantity", r.Quantity),
-				zap.Error(reverseErr),
-			)
-			return fmt.Errorf("reversing reservation %s: %w", r.ID, reverseErr)
-		}
-		if dbErr := s.repo.ReverseReservationByID(ctx, r.ID); dbErr != nil {
-			// Tiny estornou mas a marcação local falhou: um retry re-estornaria
-			// esta row e DUPLICARIA a entrada E. Loga alto com o movementID
-			// para reconciliação manual e segue — a direção do erro é estoque
-			// segurado a mais, nunca oferta falsa.
-			logger.From(ctx, s.logger).Error("reservation reversed on Tiny but local mark failed — reconcile manually",
-				zap.String("cart_id", cartID),
-				zap.String("reservation_id", r.ID),
-				zap.String("erp_movement_id", r.ERPMovementID),
-				zap.Error(dbErr),
-			)
-		}
-		reversedSnapshot = append(reversedSnapshot, r)
+		byID[r.ID] = r
+		rows = append(rows, ReversibleReservation{
+			ID:                r.ID,
+			ExternalProductID: r.ExternalProductID,
+			Quantity:          r.Quantity,
+		})
+	}
+	reversedIDs, allResolved := reverseAndCollect(ctx, s.logger, s.repo, erpProvider, rows,
+		func(ReversibleReservation) string {
+			return fmt.Sprintf("Estorno reserva pós-pagamento - Cart %s", cartID)
+		})
+	for _, id := range reversedIDs {
+		reversedSnapshot = append(reversedSnapshot, byID[id])
+	}
+	if !allResolved {
+		msg := fmt.Sprintf("estorno de reserva pendente no cart %s", cartID)
+		s.collab.MarkFinalisationFailed(ctx, cartID, msg)
+		logger.From(ctx, s.logger).Warn("failed to reverse ERP reservation on paid cart, aborting for retry",
+			zap.String("cart_id", cartID),
+			zap.Int("reversed", len(reversedSnapshot)),
+			zap.Int("requested", len(reservations)),
+		)
+		// O que JÁ foi estornado fica marcado: a retentativa vê só o que
+		// sobrou, e não reenvia entrada nenhuma.
+		return fmt.Errorf("reversing reservations for cart %s: %d de %d", cartID, len(reversedSnapshot), len(reservations))
 	}
 	logger.From(ctx, s.logger).Info("ERP stock reservations reversed",
 		zap.String("cart_id", cartID),
@@ -408,50 +413,55 @@ func (s *Service) reverseCartReservationsInERP(ctx context.Context, cartID, stor
 		return nil
 	}
 
-	// A marcação é POR RESERVA, logo após o Tiny confirmar aquela entrada.
+	// REIVINDICA a reserva, DEPOIS fala com o ERP. A ordem é o conserto.
 	//
-	// Era uma marcação só, no fim do laço, com o MESMO ctx. O handler tem 15s de
-	// orçamento e cada chamada ao Tiny leva ~1s pelo limitador: um carrinho com
-	// muitos itens estoura, e o UPDATE final recebe um contexto já morto. Foi o
-	// que aconteceu em 05/08 às 13:52:46 — "failed to mark reservations
-	// reversed: context deadline exceeded".
+	// A ordem anterior — estorna no Tiny, depois marca 'reversed' — perdia a
+	// corrida contra a própria retentativa. Em 08/08 às 15:29:28 a marcação
+	// falhou com "context deadline exceeded" DEPOIS de o Tiny já ter aceitado a
+	// entrada. A reserva continuou 'active', o handler devolveu erro, a asynq
+	// retentou, e a retentativa mandou a mesma entrada de novo: duas linhas
+	// idênticas no extrato do Tiny para a reserva f4590b1f, 12:29 e 12:30, e um
+	// produto com 7 unidades onde deviam existir 5.
 	//
-	// O estrago não é perder a marcação: é perder o PROGRESSO. As reservas que o
-	// Tiny já tinha estornado continuaram 'active', então a retentativa
-	// estornou tudo de novo e criou unidade que não existe. Marcando uma a uma,
-	// a retentativa vira idempotente por construção — ela só vê as que sobraram.
+	// Marcar antes torna o estorno duplo impossível por construção. A segunda
+	// tentativa recebe 0 linhas afetadas na reivindicação e nem chega a chamar o
+	// ERP — não depende mais de um UPDATE conseguir rodar a tempo.
 	//
-	// Este é o padrão que o caminho design-C já usa (ReverseReservationByID,
-	// stock_reservation.sql:83). Só o caminho legado ficou para trás.
+	// O risco troca de lado, e para o lado certo: se o processo morrer entre a
+	// reivindicação e a resposta do ERP, a unidade fica de fora do Tiny em vez
+	// de ser criada nele. Faltar unidade é visível e reconciliável; unidade
+	// fantasma vira venda de produto que não existe.
 	//
-	// markCtx sobrevive ao cancelamento do handler: o movimento no Tiny JÁ
-	// aconteceu, e não registrar isso é o que dispara o estorno duplicado.
-	markCtx, cancelMark := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancelMark()
+	// Cada chamada ao banco recebe o SEU prazo. O orçamento único de 10s para o
+	// laço inteiro era a outra metade do defeito: com ~1s por chamada ao Tiny
+	// pelo limitador, um carrinho de cinco itens consumia o prazo antes das
+	// últimas marcações — e elas eram exatamente as que falhavam.
+	dbCtx := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	}
 
 	erpReversed := true
 	if integration, intErr := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny"); intErr == nil {
 		if erpProvider, provErr := s.collab.ResolveProvider(ctx, integration); provErr == nil {
+			// dbCtx sobrevive ao cancelamento do handler: o movimento no ERP já
+			// pode ter acontecido, e não registrar isso é o que dispara o
+			// estorno duplicado.
+			claimCtx, cancelClaim := dbCtx()
+			defer cancelClaim()
+
+			rows := make([]ReversibleReservation, 0, len(reservations))
 			for _, r := range reservations {
-				obs := fmt.Sprintf("Estorno expiração carrinho LiveCart - Cart %s - Reserva %s", cartID, r.ID)
-				if _, reverseErr := erpProvider.ReverseStockReservation(ctx, r.ExternalProductID, r.Quantity, 0, obs); reverseErr != nil {
-					erpReversed = false
-					logger.From(ctx, s.logger).Warn("expiry: failed to reverse ERP reservation",
-						zap.String("cart_id", cartID),
-						zap.String("reservation_id", r.ID),
-						zap.String("external_product_id", r.ExternalProductID),
-						zap.Error(reverseErr))
-					continue
-				}
-				// Confirmado no Tiny: registra ANTES de seguir para a próxima.
-				if markErr := s.repo.ReverseReservationByID(markCtx, r.ID); markErr != nil {
-					erpReversed = false
-					logger.From(ctx, s.logger).Error("expiry: ERP reversed but marking failed — retry would double-reverse",
-						zap.String("cart_id", cartID),
-						zap.String("reservation_id", r.ID),
-						zap.Error(markErr))
-				}
+				rows = append(rows, ReversibleReservation{
+					ID:                r.ID,
+					ExternalProductID: r.ExternalProductID,
+					Quantity:          r.Quantity,
+				})
 			}
+			_, allResolved := ReverseReservationsClaimFirst(ctx, s.logger, claimCtxRepo{s.repo, claimCtx}, erpProvider, rows,
+				func(r ReversibleReservation) string {
+					return fmt.Sprintf("Estorno expiração carrinho LiveCart - Cart %s - Reserva %s", cartID, r.ID)
+				})
+			erpReversed = allResolved
 		} else {
 			erpReversed = false
 			logger.From(ctx, s.logger).Error("expiry: failed to build ERP provider", zap.String("cart_id", cartID), zap.Error(provErr))
@@ -462,6 +472,8 @@ func (s *Service) reverseCartReservationsInERP(ctx context.Context, cartID, stor
 			zap.String("store_id", storeID))
 		// Sem ERP não há movimento a duplicar: marcar em bloco é seguro e é o
 		// que evita deixar a reserva presa numa loja sem integração.
+		markCtx, cancelMark := dbCtx()
+		defer cancelMark()
 		if markErr := s.repo.ReverseReservationsByCart(markCtx, cartID); markErr != nil {
 			logger.From(ctx, s.logger).Error("expiry: failed to mark reservations reversed", zap.String("cart_id", cartID), zap.Error(markErr))
 		}
