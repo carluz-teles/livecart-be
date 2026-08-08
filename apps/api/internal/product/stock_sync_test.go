@@ -31,6 +31,23 @@ func TestResolveSyncedStock(t *testing.T) {
 
 		// skip tem precedência sobre downgradeOnly.
 		{"skip vence downgrade", 5, 2, true, true, 5},
+
+		// Saldo NEGATIVO no ERP nunca entra, em modo nenhum.
+		//
+		// O Tiny deixa o saldo passar de zero para baixo — gravado na bateria de
+		// sandbox: lançar sobre 0 levou a -1. Negativo lá é saída que passou do
+		// que existia, não estoque do lojista.
+		//
+		// Em 08/08 o Gabinete Gamer levou reserva de 3 sobre saldo 0, o Tiny foi
+		// para -3 e ecoou -3. O downgrade aceitou por ser "menor que o local", a
+		// escrita bateu na constraint `stock cannot be negative`, e o erro
+		// derrubou a sincronização INTEIRA do produto — quatro tentativas e
+		// desistiu.
+		{"negativo no modo normal preserva o local", 5, -3, false, false, 5},
+		{"negativo no downgrade preserva o local", 0, -3, false, true, 0},
+		{"negativo com local zero preserva zero", 0, -1, false, false, 0},
+		{"negativo profundo nao passa", 2, -99, false, false, 2},
+		{"zero continua valido, so o negativo e barrado", 5, 0, false, false, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
