@@ -17,6 +17,7 @@ package integration
 
 import (
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -26,11 +27,17 @@ import (
 )
 
 // providersComWebhook são os provedores que recebem evento por URL própria.
-// Todo nome aqui tem de atender GET e HEAD, senão o lojista não consegue nem
+// Todo nome aqui tem de atender a sondagem, senão o lojista não consegue nem
 // cadastrar a URL.
 var providersComWebhook = []string{
 	"mercado_pago", "pagarme", "tiny", "melhor_envio", "twilio",
 }
+
+// metodosDeSondagem é todo método que NÃO entrega evento. A lista é ampla
+// porque não sabemos qual deles o validador de cada provedor usa — e um túnel
+// apontando para um servidor de eco trivial, que responde 200 em qualquer
+// método, foi aceito pela Tiny no mesmo minuto em que a nossa URL era recusada.
+var metodosDeSondagem = []string{"GET", "HEAD", "OPTIONS", "PUT", "PATCH", "DELETE"}
 
 func newProbeTestApp(t *testing.T) *fiber.App {
 	t.Helper()
@@ -47,7 +54,7 @@ func TestSondagemDeWebhookRespondeOK(t *testing.T) {
 	app := newProbeTestApp(t)
 
 	for _, provider := range providersComWebhook {
-		for _, method := range []string{"GET", "HEAD"} {
+		for _, method := range metodosDeSondagem {
 			t.Run(provider+"/"+method, func(t *testing.T) {
 				url := "/api/webhooks/" + provider + "/00000000-0000-0000-0000-000000000000"
 				resp, err := app.Test(httptest.NewRequest(method, url, nil), 5000)
@@ -59,6 +66,14 @@ func TestSondagemDeWebhookRespondeOK(t *testing.T) {
 				if resp.StatusCode != fiber.StatusOK {
 					t.Errorf("%s %s = %d, quero 200 — com %d o provedor recusa o cadastro dizendo que a URL está inacessível",
 						method, url, resp.StatusCode, resp.StatusCode)
+				}
+				// HEAD não carrega corpo, então não carrega content-type.
+				if method == "HEAD" {
+					return
+				}
+				if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+					t.Errorf("%s %s devolveu Content-Type %q, quero JSON — validador que faz parse da resposta engasga com texto puro",
+						method, url, ct)
 				}
 			})
 		}
