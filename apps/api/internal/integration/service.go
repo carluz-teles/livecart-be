@@ -4397,20 +4397,49 @@ func (s *Service) MarkMediaWebhookActive(ctx context.Context, mediaID string) er
 // loop stops when ctx is cancelled.
 func (s *Service) StartPostCommentPolling(ctx context.Context) {
 	go func() {
-		ticker := time.NewTicker(20 * time.Second)
-		defer ticker.Stop()
+		timer := time.NewTimer(pollIntervalIdle)
+		defer timer.Stop()
 		logger.From(ctx, s.logger).Info("post-comment polling started")
 		for {
 			select {
 			case <-ctx.Done():
 				logger.From(ctx, s.logger).Info("post-comment polling stopped")
 				return
-			case <-ticker.C:
-				s.pollPostCommentsOnce(ctx)
+			case <-timer.C:
+				sawLive := s.pollPostCommentsOnce(ctx)
 				s.endStaleLiveSessionsOnce(ctx)
+				timer.Reset(pollInterval(sawLive))
 			}
 		}
 	}()
+}
+
+// Cadências do polling de comentário.
+//
+// Com transmissão no ar o polling deixou de ser rede de segurança e virou o
+// caminho principal: a Meta para de entregar `live_comments` no meio da live e
+// volta sozinha dezenas de minutos depois — em 08/08 foram 40 minutos de
+// silêncio, com `messaging` fluindo o tempo todo na mesma conexão e comentários
+// novos sendo criados durante a pausa (a idade na captura provou: 3 a 20
+// segundos). Na janela seguinte, 11 dos 17 comentários vieram por aqui.
+//
+// A 20 segundos, a idade na captura É a espera do comprador entre "quero" e o
+// carrinho existir. Cinco segundos com a live no ar corta isso em quatro e
+// custa três chamadas a mais por minuto por mídia — o limitador por integração
+// já serializa o resto.
+//
+// Fora da live a cadência antiga continua: post e reel não têm essa pressa, e
+// para eles o webhook assume assim que chega o primeiro comentário.
+const (
+	pollIntervalIdle = 20 * time.Second
+	pollIntervalLive = 5 * time.Second
+)
+
+func pollInterval(sawLive bool) time.Duration {
+	if sawLive {
+		return pollIntervalLive
+	}
+	return pollIntervalIdle
 }
 
 // isMediaGoneError reports whether an Instagram Graph error means the media is
@@ -4429,15 +4458,20 @@ func isMediaGoneError(err error) bool {
 // pollPostCommentsOnce processes one capture pass over active post events that
 // are not yet webhook-driven. New comments (deduped by platform_comment_id) are
 // fed into the same ProcessInstagramComment path used by the webhook.
-func (s *Service) pollPostCommentsOnce(ctx context.Context) {
+// Devolve true quando alguma das mídias varridas é uma LIVE no ar — o laço usa
+// isso para acelerar a cadência enquanto a transmissão está acontecendo.
+func (s *Service) pollPostCommentsOnce(ctx context.Context) (sawLive bool) {
 	medias, err := s.liveService.ListPollableMedia(ctx)
 	if err != nil {
 		logger.From(ctx, s.logger).Warn("post polling: failed to list pollable media", zap.Error(err))
-		return
+		return false
 	}
 	for _, ev := range medias {
 		if ev.MediaID == "" {
 			continue
+		}
+		if ev.SessionType == live.SessionTypeLive {
+			sawLive = true
 		}
 		// The polling loop runs on the app-level ctx (no store): enrich a
 		// per-media ctx with the store the media belongs to.
@@ -4558,6 +4592,7 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) {
 			}
 		}
 	}
+	return sawLive
 }
 
 // =============================================================================
