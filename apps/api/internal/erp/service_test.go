@@ -30,6 +30,10 @@ func (stubERPRepo) ListActiveReservationsByCart(context.Context, string) ([]Stoc
 }
 func (stubERPRepo) ReverseReservationByID(context.Context, string) error    { return nil }
 func (stubERPRepo) ReverseReservationsByCart(context.Context, string) error { return nil }
+func (stubERPRepo) ClaimReservationForReversal(context.Context, string) (bool, error) {
+	return true, nil
+}
+func (stubERPRepo) RestoreReservationToActive(context.Context, string) error { return nil }
 func (stubERPRepo) GetCartInvoiceAnchor(context.Context, string) (string, string, error) {
 	return "", "", nil
 }

@@ -143,3 +143,31 @@ SELECT EXISTS(
          OR sr.reversed_at > now() - interval '3 minutes'
       )
 ) AS has_pending;
+
+-- name: ClaimReservationForReversal :execrows
+-- Reivindica a reserva ANTES de mandar o estorno ao ERP. Devolve 1 para quem
+-- ganhou a corrida e 0 para todo o resto.
+--
+-- Inverte a ordem que produziu estoque fantasma em 08/08. Antes era: estorna no
+-- Tiny, depois marca 'reversed'. Quando a marcação falhava — "context deadline
+-- exceeded" às 15:29:28 — a reserva continuava 'active', o handler devolvia
+-- erro, a asynq retentava (max_retry 3), e a retentativa via a reserva ainda
+-- ativa e mandava a MESMA entrada de novo. O Tiny registrou duas linhas
+-- idênticas para a reserva f4590b1f, 12:29 e 12:30, e o produto terminou com
+-- 7 unidades onde deviam existir 5.
+--
+-- Reivindicando primeiro, a segunda tentativa recebe 0 e não chama o ERP. O
+-- estorno duplo deixa de ser possível por construção, e não por o UPDATE ter
+-- dado certo a tempo.
+UPDATE stock_reservations SET status = 'reversed', reversed_at = now()
+WHERE id = @id AND status = 'active';
+
+-- name: RestoreReservationToActive :execrows
+-- Devolve a reserva reivindicada ao estado ativo quando o ERP recusou o
+-- estorno. Sem isto a reivindicação seria uma via de mão única: a unidade
+-- ficaria presa no Tiny para sempre, porque nenhuma tentativa futura a veria.
+--
+-- Só desfaz o que ESTA execução reivindicou (status ainda 'reversed' e sem
+-- movimento gravado). O que já foi confirmado no ERP nunca volta.
+UPDATE stock_reservations SET status = 'active', reversed_at = NULL
+WHERE id = @id AND status = 'reversed';

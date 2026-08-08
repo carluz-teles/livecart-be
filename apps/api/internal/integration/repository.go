@@ -3165,6 +3165,32 @@ func (r *Repository) ReverseReservationByID(ctx context.Context, reservationID s
 	return r.queries.ReverseReservationByID(ctx, id)
 }
 
+// ClaimReservationForReversal reivindica a reserva antes de falar com o ERP.
+// Devolve true só para quem ganhou a corrida — ver a query para o estoque
+// fantasma que a ordem inversa produziu.
+func (r *Repository) ClaimReservationForReversal(ctx context.Context, reservationID string) (bool, error) {
+	id, err := parseUUID(reservationID)
+	if err != nil {
+		return false, err
+	}
+	rows, err := r.queries.ClaimReservationForReversal(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
+}
+
+// RestoreReservationToActive desfaz a reivindicação quando o ERP recusou o
+// estorno, para que a próxima tentativa volte a enxergar a reserva.
+func (r *Repository) RestoreReservationToActive(ctx context.Context, reservationID string) error {
+	id, err := parseUUID(reservationID)
+	if err != nil {
+		return err
+	}
+	_, err = r.queries.RestoreReservationToActive(ctx, id)
+	return err
+}
+
 // CartERPOrderState is the order-as-reservation lifecycle snapshot (design C).
 // Canonical home is internal/erp (Bloco B2b); aliased here for the Repository.
 type CartERPOrderState = erp.CartERPOrderState

@@ -174,6 +174,10 @@ func (m *mockRepo) ListActiveReservationsByCart(context.Context, string) ([]Stoc
 }
 func (m *mockRepo) ReverseReservationByID(context.Context, string) error    { return nil }
 func (m *mockRepo) ReverseReservationsByCart(context.Context, string) error { return nil }
+func (m *mockRepo) ClaimReservationForReversal(context.Context, string) (bool, error) {
+	return true, nil
+}
+func (m *mockRepo) RestoreReservationToActive(context.Context, string) error { return nil }
 func (m *mockRepo) GetCartInvoiceAnchor(context.Context, string) (string, string, error) {
 	return m.anchorStoreID, m.anchorExtOrder, m.anchorErr
 }
