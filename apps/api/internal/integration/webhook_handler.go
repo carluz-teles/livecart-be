@@ -62,7 +62,7 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App, slugResolver httpx.Store
 	webhooks.Post("/melhor_envio/:storeId", storeCtx, h.HandleMelhorEnvio)
 	webhooks.Post("/twilio/:storeId", storeCtx, h.HandleTwilio)
 
-	// GET/HEAD nas MESMAS URLs, respondendo 200.
+	// TODO MÉTODO que não seja POST responde 200 com JSON, nas MESMAS URLs.
 	//
 	// O provedor verifica a URL antes de aceitar o cadastro, e verifica com um
 	// método que não entrega evento. Registradas só como POST, essas rotas
@@ -70,14 +70,26 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App, slugResolver httpx.Store
 	// possível acessar a URL" — a URL estava no ar o tempo todo, respondendo
 	// 200 ao POST.
 	//
+	// A lista é ampla de propósito. Um túnel apontando para um servidor de eco
+	// trivial foi aceito pela Tiny no mesmo minuto em que a nossa URL era
+	// recusada, e a comparação das duas respostas sobrou exatamente nisto: o
+	// eco devolvia 200 com JSON em QUALQUER método, e nós devolvíamos 405 em
+	// OPTIONS e PUT e texto puro no GET. Não sabemos qual método a sondagem
+	// usa — e não precisamos saber para atendê-la.
+	//
 	// O Instagram nunca sofreu disso, e a razão é a linha logo abaixo: ele já
 	// tinha um GET, para o desafio da Meta.
 	//
-	// Não recebe evento e não toca em nada: sondagem só quer saber se alguém
-	// atende. Quem processa continua sendo exclusivamente o POST.
+	// Nenhum desses métodos recebe evento nem toca em nada. Quem processa
+	// continua sendo exclusivamente o POST.
 	for _, provider := range []string{"mercado_pago", "pagarme", "tiny", "melhor_envio", "twilio"} {
-		webhooks.Get("/"+provider+"/:storeId", h.HandleWebhookProbe)
-		webhooks.Head("/"+provider+"/:storeId", h.HandleWebhookProbe)
+		path := "/" + provider + "/:storeId"
+		webhooks.Get(path, h.HandleWebhookProbe)
+		webhooks.Head(path, h.HandleWebhookProbe)
+		webhooks.Options(path, h.HandleWebhookProbe)
+		webhooks.Put(path, h.HandleWebhookProbe)
+		webhooks.Patch(path, h.HandleWebhookProbe)
+		webhooks.Delete(path, h.HandleWebhookProbe)
 	}
 
 	// Instagram webhooks (Meta platform)
@@ -93,8 +105,13 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App, slugResolver httpx.Store
 // probe asks one question — "is anyone listening at this address?" — and the
 // answer is 200. Every event still arrives, and is only ever processed, via
 // POST.
+//
+// Responde JSON, e não o texto "OK" do SendStatus. O sondador é código, não
+// gente: um validador que faz parse da resposta engasga com `text/plain` e
+// reporta a URL como inacessível, que é indistinguível de estar fora do ar.
+// JSON é o que o provedor recebe de nós em todos os outros caminhos.
 func (h *WebhookHandler) HandleWebhookProbe(c *fiber.Ctx) error {
-	return c.SendStatus(fiber.StatusOK)
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 }
 
 // HandleMercadoPagoOAuthCallback handles the OAuth callback from Mercado Pago.
