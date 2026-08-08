@@ -3359,22 +3359,19 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	// só quando o valor do ERP é menor que o local (direção segura, nunca
 	// causa promoção fantasma). Fora da janela, sync normal. Fail-safe: em erro
 	// de DB, preserva o local inteiro.
-	skipStock := false
-	downgradeOnly := false
 	guarded, guardErr := s.repo.HasStockGuardForProduct(ctx, externalProductID, integration.StoreID, integration.Provider)
 	if guardErr != nil {
-		skipStock = true
 		logger.From(ctx, s.logger).Warn("failed to check stock guard for product, skipping stock sync as precaution",
 			zap.String("external_product_id", externalProductID),
 			zap.Error(guardErr),
 		)
 	} else if guarded {
-		downgradeOnly = true
 		logger.From(ctx, s.logger).Info("ERP stock sync in guard window: applying reductions only (reservation/finalisation in flight)",
 			zap.String("external_product_id", externalProductID),
 			zap.String("store_id", integration.StoreID),
 		)
 	}
+	skipStock, downgradeOnly := stockSyncMode(guarded, guardErr != nil, false, false)
 
 	// Estorno de carrinho em voo SUPRIME o sync inteiro, e tem de ser checado
 	// DEPOIS do guard porque é mais forte: `downgrade_only` deixa passar
@@ -3389,19 +3386,17 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	if !skipStock {
 		pending, pendErr := s.repo.HasPendingCartReversalForProduct(ctx, externalProductID, integration.StoreID)
 		if pendErr != nil {
-			skipStock = true
 			logger.From(ctx, s.logger).Warn("failed to check pending cart reversal, skipping stock sync as precaution",
 				zap.String("external_product_id", externalProductID),
 				zap.Error(pendErr),
 			)
 		} else if pending {
-			skipStock = true
-			downgradeOnly = false
 			logger.From(ctx, s.logger).Info("ERP stock sync suppressed: cart reversal in flight",
 				zap.String("external_product_id", externalProductID),
 				zap.String("store_id", integration.StoreID),
 			)
 		}
+		skipStock, downgradeOnly = stockSyncMode(guarded, guardErr != nil, pending, pendErr != nil)
 	}
 
 	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, skipStock, downgradeOnly); err != nil {
