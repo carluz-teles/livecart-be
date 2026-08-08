@@ -217,13 +217,26 @@ func (q *Queries) HasPendingCartReversalForProduct(ctx context.Context, arg HasP
 const hasStockGuardForProduct = `-- name: HasStockGuardForProduct :one
 SELECT (
     EXISTS(
+        -- O que importa é ter SAÍDA EM VIGOR no ERP, não a live estar no ar.
+        --
+        -- Esta condição exigia ` + "`" + `le.status = 'active'` + "`" + ` também, e essa exigência
+        -- abria a janela que estragou o estoque do Café em 08/08. A reserva
+        -- sobrevive ao fim do evento: quando a campanha fecha, o carrinho vai
+        -- para 'checkout' e continua segurando a unidade no Tiny até expirar ou
+        -- ser pago. Nesse intervalo — 22 minutos, no caso — o evento já estava
+        -- 'ended', o guard caía, e o saldo absoluto do Tiny (que está atrás do
+        -- nosso justamente por causa da nossa saída) sobrescrevia o contador
+        -- local. Às 18:38:15.693 o local subiu de 0 para 1 por esse caminho,
+        -- um milissegundo antes de sairmos com mais uma reserva.
+        --
+        -- Enquanto a reserva está 'active' nós seguramos a peça no ERP, e o
+        -- número dele não é fonte da verdade para o nosso contador. O status do
+        -- evento não muda esse fato.
         SELECT 1 FROM stock_reservations sr
-        JOIN live_events le ON le.id = sr.event_id
         JOIN products p ON p.id = sr.product_id
         WHERE sr.external_product_id = $1
           AND p.store_id = $2
-          AND sr.status = 'active'
-          AND le.status = 'active')
+          AND sr.status = 'active')
     OR EXISTS(
         -- Fatia 11b: finalização autoritativa em order_payments (join via Order);
         -- COALESCE('pending') cobre o cart pago cuja Order ainda materializa. As
@@ -254,12 +267,11 @@ type HasStockGuardForProductParams struct {
 }
 
 // Guard do sync de estoque vindo de webhook: TRUE quando o valor absoluto
-// reportado pelo ERP não pode sobrescrever o contador local — (a) live ativa
-// com reserva ativa segurando o produto (mesma semântica do antigo
-// HasActiveEventForProduct, agora com escopo por loja), ou (b) cart pago com
-// finalização ERP em voo ou falha recente contendo o produto: a reversão das
-// reservas na finalização infla o saldo do ERP por alguns segundos e o
-// overwrite local promoveria a waitlist contra unidades já vendidas.
+// reportado pelo ERP não pode sobrescrever o contador local — (a) existe
+// reserva ATIVA segurando o produto, ou (b) cart pago com finalização ERP em
+// voo ou falha recente contendo o produto: a reversão das reservas na
+// finalização infla o saldo do ERP por alguns segundos e o overwrite local
+// promoveria a waitlist contra unidades já vendidas.
 func (q *Queries) HasStockGuardForProduct(ctx context.Context, arg HasStockGuardForProductParams) (bool, error) {
 	row := q.db.QueryRow(ctx, hasStockGuardForProduct, arg.ExternalProductID, arg.StoreID, arg.ExternalSource)
 	var guarded bool
