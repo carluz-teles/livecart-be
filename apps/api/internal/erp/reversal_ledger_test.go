@@ -114,6 +114,7 @@ type tinyLedger struct {
 
 	stock       map[string]int // externalProductID -> saldo
 	entradas    map[string]int // externalProductID -> quantas ENTRADAS recebeu
+	saidas      map[string]int // externalProductID -> quantas SAÍDAS recebeu
 	failFor     map[string]int // externalProductID -> falhar as N primeiras vezes
 	movimentos  []string
 	totalCalls  int
@@ -125,7 +126,22 @@ func newTinyLedger(initial map[string]int) *tinyLedger {
 	for k, v := range initial {
 		st[k] = v
 	}
-	return &tinyLedger{stock: st, entradas: map[string]int{}, failFor: map[string]int{}}
+	return &tinyLedger{stock: st, entradas: map[string]int{}, saidas: map[string]int{}, failFor: map[string]int{}}
+}
+
+// ReserveStock é a SAÍDA: tira do saldo, como o Tiny faz.
+func (t *tinyLedger) ReserveStock(_ context.Context, productID string, qty int, _ float64, obs string) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.totalCalls++
+	if t.failAllOnce {
+		t.failAllOnce = false
+		return "", errors.New("tiny fora do ar")
+	}
+	t.stock[productID] -= qty
+	t.saidas[productID]++
+	t.movimentos = append(t.movimentos, fmt.Sprintf("SAIDA %d %s | %s", qty, productID, obs))
+	return fmt.Sprintf("mov-%d", t.totalCalls), nil
 }
 
 func (t *tinyLedger) ReverseStockReservation(_ context.Context, productID string, qty int, _ float64, obs string) (string, error) {
@@ -154,6 +170,13 @@ type ledgerCollab struct {
 
 func (c *ledgerCollab) ResolveProvider(context.Context, *Integration) (providers.ERPProvider, error) {
 	return c.ledger, nil
+}
+
+// Sem isto o mockCollab embutido devolve linked=false, ReserveStockInERP sai
+// cedo e o teste inteiro vira um no-op que passa sem exercitar nada. Foi o que
+// aconteceu na primeira versão deste arquivo.
+func (c *ledgerCollab) ResolveExternalProduct(context.Context, string, string) (string, bool) {
+	return "ext-1", true
 }
 
 // cenario monta o serviço, o razão e as reservas de um caso.
