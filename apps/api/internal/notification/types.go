@@ -118,6 +118,14 @@ const (
 	ReasonNoEligibleComment UndeliverableReason = "no_eligible_comment"
 	// ReasonInstagramRejected — houve tentativa e o Instagram recusou.
 	ReasonInstagramRejected UndeliverableReason = "instagram_rejected"
+	// ReasonNudgedPublicly — private reply e DM foram recusados, e o comprador
+	// foi chamado por resposta PÚBLICA sob o comentário dele.
+	//
+	// Não é entrega: o link não foi enviado (uma URL de carrinho é capacidade —
+	// quem tem o endereço fecha o pedido — e publicá-la exporia o carrinho para
+	// a live inteira). O que foi público é o convite a mandar DM; a DM do
+	// comprador abre a janela de 24h e o link sai por lá.
+	ReasonNudgedPublicly UndeliverableReason = "nudged_publicly"
 )
 
 // UndeliverableReasonText traduz o motivo para o texto que o painel mostra ao
@@ -131,6 +139,8 @@ func UndeliverableReasonText(r UndeliverableReason) string {
 		return "Este cliente não tem comentário que possa ser respondido. A conversa só pode ser retomada se ele te mandar mensagem."
 	case ReasonInstagramRejected:
 		return "O Instagram recusou o envio desta mensagem. Tente falar com o cliente diretamente."
+	case ReasonNudgedPublicly:
+		return "O Instagram não deixou mandar mensagem privada, então respondemos publicamente pedindo que ele te chame no direct. Assim que ele mandar, o link do carrinho sai automaticamente."
 	default:
 		return "Não foi possível entregar esta mensagem."
 	}

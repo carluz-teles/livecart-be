@@ -847,6 +847,45 @@ func (r *Repository) TryDecrementProductStock(ctx context.Context, productID str
 	return true, nil
 }
 
+// PendingPublicNudge devolve o convite público em aberto deste comprador: o id
+// do log a quitar e o token do carrinho a entregar. Token "" quando não há
+// convite pendente.
+//
+// Serve o caminho "o comprador atendeu ao chamado do direct". Ausência de
+// convite é resposta normal — a maioria das DMs é conversa comum —, não erro.
+func (r *Repository) PendingPublicNudge(ctx context.Context, storeID, platformUserID string) (logID, cartToken string, err error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return "", "", err
+	}
+	row, err := r.queries.FindPendingPublicNudge(ctx, sqlc.FindPendingPublicNudgeParams{
+		StoreID:        sID,
+		PlatformUserID: platformUserID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", nil
+		}
+		return "", "", fmt.Errorf("finding pending public nudge: %w", err)
+	}
+	return uuidToString(row.ID), row.Token, nil
+}
+
+// SettlePublicNudge quita o convite: o log passa a 'sent' porque o link ENFIM
+// chegou ao comprador. É o que faz FindPendingPublicNudge parar de encontrá-lo,
+// e portanto o que impede o link de ser reenviado a cada nova mensagem dele.
+func (r *Repository) SettlePublicNudge(ctx context.Context, logID string) error {
+	id, err := parseUUID(logID)
+	if err != nil {
+		return err
+	}
+	return r.queries.UpdateNotificationLogStatus(ctx, sqlc.UpdateNotificationLogStatusParams{
+		ID:     id,
+		Status: "sent",
+		SentAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+}
+
 // DecrementProductStockUpTo takes up to `want` units atomically and returns
 // how many were actually taken (0 when out of stock). Powers partial waitlist
 // promotion — one freed unit can serve part of a larger queued request.
