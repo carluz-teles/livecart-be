@@ -541,8 +541,30 @@ func (i *Instagram) GetActiveLives(ctx context.Context) ([]providers.LiveMedia, 
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
+	// QUAIS mídias, não só quantas.
+	//
+	// `count` sozinho não distingue os dois estados que importam: a mesma
+	// transmissão continuando, e uma transmissão NOVA no lugar da anterior. Nos
+	// dois casos o Instagram devolve 1.
+	//
+	// A distinção decide o caso: a doc diz que notificação de comentário em
+	// live "are only sent during the live broadcast". Se o Instagram encerrar o
+	// vídeo e abrir outro sozinho — queda de rede no celular, troca de Wi-Fi
+	// para 4G —, ele para de entregar para o vídeo antigo, corretamente, e o
+	// lojista não vê nada acontecer. Do nosso lado o sintoma é idêntico ao de
+	// "a Meta parou de entregar sem motivo": a sessão continua apontando para o
+	// vídeo velho, o polling segue pescando comentários nele (o vídeo continua
+	// existindo e recebendo comentário), e nenhum webhook chega.
+	//
+	// Com os ids no log, um `media_ids` que muda no meio de uma sessão é prova
+	// direta; um que não muda elimina a hipótese de vez.
+	ids := make([]string, 0, len(result.Data))
+	for _, m := range result.Data {
+		ids = append(ids, m.ID)
+	}
 	logger.From(ctx, i.logger).Info("fetched active instagram lives",
 		zap.Int("count", len(result.Data)),
+		zap.Strings("media_ids", ids),
 	)
 
 	return result.Data, nil

@@ -25,6 +25,13 @@ type fakeDMSender struct {
 	dmCalls    int
 	replyCalls int
 	failWith   error
+
+	// A resposta pública falha por conta própria: é o caminho que sobrevive
+	// quando os privados caem, então amarrá-la ao mesmo failWith tornaria
+	// impossível testar justamente o caso que ela existe para atender.
+	publicCalls    int
+	publicText     string
+	publicFailWith error
 }
 
 func (f *fakeDMSender) SendInstagramDM(_ context.Context, _, _, _ string) error {
@@ -35,6 +42,12 @@ func (f *fakeDMSender) SendInstagramDM(_ context.Context, _, _, _ string) error 
 func (f *fakeDMSender) ReplyToInstagramComment(_ context.Context, _, _, _ string) error {
 	f.replyCalls++
 	return f.failWith
+}
+
+func (f *fakeDMSender) PublicReplyToInstagramComment(_ context.Context, _, _, text string) error {
+	f.publicCalls++
+	f.publicText = text
+	return f.publicFailWith
 }
 
 func seedStoreEventCart(t *testing.T) (storeID, eventID, cartID string) {
@@ -191,7 +204,13 @@ func TestRecusaDoInstagramFicaFailedMasEntraNaLista(t *testing.T) {
 	ctx := context.Background()
 
 	storeID, eventID, cartID := seedStoreEventCart(t)
-	sender := &fakeDMSender{failWith: errors.New("status 400, body: (#2534022) fora da janela")}
+	// TODOS os caminhos recusados, inclusive o público: é o único estado em que
+	// não sobra nada a fazer e a linha vira 'failed'. Com a resposta pública
+	// passando, o desfecho é outro (ver TestCompradorEhChamadoAoDirect).
+	sender := &fakeDMSender{
+		failWith:       errors.New("status 400, body: (#2534022) fora da janela"),
+		publicFailWith: errors.New("status 400, body: comentário indisponível"),
+	}
 	svc := &Service{queries: testQueries, dmSender: sender, logger: zap.NewNop()}
 
 	in := sendInput(storeID, eventID, cartID)
