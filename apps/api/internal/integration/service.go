@@ -6196,10 +6196,19 @@ func (s *Service) instagramAccountID(ctx context.Context, storeID string) string
 	return ""
 }
 
-// webhookSilenceAlert é quanto tempo de silêncio, com transmissão NO AR, já
-// merece investigação. Uma live com público gera comentário em minutos; cinco
-// sem nada, com a live rodando, é sinal — não é prova, e o log diz isso.
-const webhookSilenceAlert = 5 * time.Minute
+// webhookSilenceAlert é quanto tempo sem comentário POR WEBHOOK, com
+// transmissão no ar, já é sinal de que a entrega caiu.
+//
+// Eram cinco minutos, escolhidos quando o silêncio era um mistério. Agora ele
+// está medido: em 09/08, duas transmissões seguidas entregaram por webhook
+// durante 41 e 18 segundos e pararam — com a live rodando por mais 4,5 e 2,5
+// minutos, os comentários continuando a nascer (o polling os capturou com 3 a
+// 20 segundos de idade) e o campo `messaging` fluindo na mesma conexão o tempo
+// todo.
+//
+// Contra um corte que acontece no primeiro minuto, cinco minutos de espera é
+// quase a transmissão inteira.
+const webhookSilenceAlert = 90 * time.Second
 
 // NoteInstagramWebhook carimba a chegada de um webhook para uma conta.
 func (s *Service) NoteInstagramWebhook(accountID string) {
@@ -6320,6 +6329,27 @@ func (s *Service) checkWebhookSilence(ctx context.Context, storeID string, media
 		// simplesmente parou de entregar? São causas diferentes e correções
 		// diferentes, e até agora não dava para separar as duas.
 		zap.Bool("live_comments_subscribed", subscribed),
+	)
+
+	// AGE, não só alerte.
+	//
+	// O vigia só logava. Detectar o silêncio e não tentar nada deixava a única
+	// hipótese acionável que sobrou — a inscrição cair no meio da transmissão —
+	// sem correção e sem teste: reinscrever é a forma de descobrir se era isso.
+	//
+	// Reinscrever é idempotente na Meta e custa uma chamada. Se a assinatura
+	// estava intacta (`live_comments_subscribed` true acima), a chamada não muda
+	// nada e o silêncio seguinte prova que a causa é a entrega dela, não a
+	// inscrição. Se estava caída, isto a levanta ainda durante a live. Nos dois
+	// casos o log fica com a resposta, que é mais do que ele tinha.
+	//
+	// O relógio já foi empurrado para frente acima, então isto acontece no
+	// máximo uma vez por janela de silêncio, não a cada sweep de 20s.
+	s.subscriptionEnsured.Delete(storeID)
+	s.ensureWebhookSubscriptionOnce(ctx, storeID)
+	logger.From(ctx, s.logger).Info("instagram webhook subscription re-asserted after comment silence",
+		zap.String("store_id", storeID),
+		zap.Duration("silent_for", silence),
 	)
 }
 
