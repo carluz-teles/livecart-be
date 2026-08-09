@@ -4413,9 +4413,9 @@ func (s *Service) StartPostCommentPolling(ctx context.Context) {
 				logger.From(ctx, s.logger).Info("post-comment polling stopped")
 				return
 			case <-timer.C:
-				sawLive := s.pollPostCommentsOnce(ctx)
+				sawLive, medias := s.pollPostCommentsOnce(ctx)
 				s.endStaleLiveSessionsOnce(ctx)
-				timer.Reset(pollInterval(sawLive))
+				timer.Reset(pollInterval(sawLive, s.commentWebhookSilent(medias)))
 			}
 		}
 	}()
@@ -4442,11 +4442,57 @@ const (
 	pollIntervalLive = 5 * time.Second
 )
 
-func pollInterval(sawLive bool) time.Duration {
-	if sawLive {
+// pollInterval escolhe a cadência da próxima varredura.
+//
+// Três estados, porque o problema tem três. Sem live no ar, 20s basta: post e
+// reel passam a bola para o webhook assim que o primeiro comentário chega. Com
+// live e o webhook entregando, 5s cobre a latência normal. Com live e o webhook
+// MUDO, o polling deixa de ser rede de segurança e vira o único caminho — e aí
+// a cadência dele é literalmente a espera do comprador entre escrever "quero" e
+// o carrinho existir.
+//
+// Que esse terceiro estado é o normal, e não a exceção, está medido: em 09/08 a
+// entrega morreu em toda transmissão testada, sempre no primeiro minuto ou dois,
+// e só voltou quando uma live NOVA foi aberta — reaproveitar a mesma mídia num
+// evento novo não trouxe nada de volta. Numa das janelas foram 12 minutos e meio
+// de silêncio TOTAL, com a inscrição verificada ativa
+// ("comments,live_comments,messages") no meio dele.
+func pollInterval(sawLive, webhookSilent bool) time.Duration {
+	switch {
+	case sawLive && webhookSilent:
+		return pollIntervalWebhookDown
+	case sawLive:
 		return pollIntervalLive
+	default:
+		return pollIntervalIdle
 	}
-	return pollIntervalIdle
+}
+
+// pollIntervalWebhookDown é a cadência quando a transmissão está no ar e o
+// webhook de comentário não entrega há mais de webhookSilenceAlert.
+//
+// Dois segundos porque o limitador por integração já espaça as chamadas em ~1s:
+// com uma ou duas mídias vivas, isto usa a folga que existe sem criar fila.
+const pollIntervalWebhookDown = 2 * time.Second
+
+// commentWebhookSilent diz se NENHUMA das mídias vivas recebeu webhook de
+// comentário dentro da janela de silêncio. Lê o mesmo carimbo do vigia, então
+// as duas coisas nunca divergem sobre o que é "mudo".
+func (s *Service) commentWebhookSilent(medias []live.MediaRef) bool {
+	visto := false
+	for _, m := range medias {
+		if m.MediaID == "" {
+			continue
+		}
+		visto = true
+		if v, ok := s.lastWebhookAt.Load(commentWebhookKey(m.MediaID)); ok {
+			if t, _ := v.(time.Time); time.Since(t) < webhookSilenceAlert {
+				return false
+			}
+		}
+	}
+	// Sem mídia nenhuma não há silêncio a compensar.
+	return visto
 }
 
 // isMediaGoneError reports whether an Instagram Graph error means the media is
@@ -4467,11 +4513,11 @@ func isMediaGoneError(err error) bool {
 // fed into the same ProcessInstagramComment path used by the webhook.
 // Devolve true quando alguma das mídias varridas é uma LIVE no ar — o laço usa
 // isso para acelerar a cadência enquanto a transmissão está acontecendo.
-func (s *Service) pollPostCommentsOnce(ctx context.Context) (sawLive bool) {
+func (s *Service) pollPostCommentsOnce(ctx context.Context) (sawLive bool, scanned []live.MediaRef) {
 	medias, err := s.liveService.ListPollableMedia(ctx)
 	if err != nil {
 		logger.From(ctx, s.logger).Warn("post polling: failed to list pollable media", zap.Error(err))
-		return false
+		return false, nil
 	}
 	for _, ev := range medias {
 		if ev.MediaID == "" {
@@ -4599,7 +4645,7 @@ func (s *Service) pollPostCommentsOnce(ctx context.Context) (sawLive bool) {
 			}
 		}
 	}
-	return sawLive
+	return sawLive, medias
 }
 
 // =============================================================================

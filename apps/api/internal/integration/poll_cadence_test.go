@@ -22,11 +22,37 @@ import (
 )
 
 func TestCadenciaDoPollingAceleraComLiveNoAr(t *testing.T) {
-	if got := pollInterval(true); got != pollIntervalLive {
-		t.Errorf("com live no ar o intervalo = %v, quero %v", got, pollIntervalLive)
+	if got := pollInterval(true, false); got != pollIntervalLive {
+		t.Errorf("com live no ar e webhook entregando, intervalo = %v, quero %v", got, pollIntervalLive)
 	}
-	if got := pollInterval(false); got != pollIntervalIdle {
+	if got := pollInterval(false, false); got != pollIntervalIdle {
 		t.Errorf("sem live o intervalo = %v, quero %v", got, pollIntervalIdle)
+	}
+	if got := pollInterval(false, true); got != pollIntervalIdle {
+		t.Errorf("sem live, silêncio do webhook não importa: intervalo = %v, quero %v", got, pollIntervalIdle)
+	}
+}
+
+// O estado que virou regra, não exceção: live no ar e webhook mudo. Aqui o
+// polling é o ÚNICO caminho, e a cadência é a espera do comprador.
+//
+// Medido em 09/08: a entrega morreu em toda transmissão testada, sempre no
+// primeiro minuto ou dois, e só voltou abrindo uma live NOVA — reaproveitar a
+// mesma mídia num evento novo não trouxe nada. Numa janela foram 12 min e meio
+// de silêncio total com a inscrição verificada ativa.
+func TestCadenciaAceleraQuandoOWebhookEstaMudo(t *testing.T) {
+	got := pollInterval(true, true)
+	if got != pollIntervalWebhookDown {
+		t.Errorf("live no ar com webhook mudo = %v, quero %v", got, pollIntervalWebhookDown)
+	}
+	if got >= pollIntervalLive {
+		t.Errorf("com o webhook mudo a cadência (%v) tem de ser mais rápida que a normal (%v) — "+
+			"é o único caminho que resta", got, pollIntervalLive)
+	}
+	// O limitador por integração espaça as chamadas em ~1s. Abaixo disso a fila
+	// cresce e o atraso volta pela porta dos fundos.
+	if got < time.Second {
+		t.Errorf("cadência de %v fica abaixo do espaçamento do limitador (~1s) e vira fila", got)
 	}
 }
 
