@@ -119,12 +119,19 @@ type Service struct {
 	publishScheduler    PublishScheduler
 	logger              *zap.Logger
 
-	// subscriptionEnsured guarda as lojas cuja inscrição de webhook já foi
-	// garantida NESTE processo, para que o sweep não repita a chamada a cada
-	// 20s. Memória, e não banco, de propósito: reinscrever é idempotente na
-	// Meta, então perder o registro num deploy custa uma chamada por loja com
-	// live no ar — e é justamente num deploy (lista de campos nova) que
-	// reinscrever é desejável.
+	// subscriptionEnsured guarda QUANDO a inscrição de webhook de cada loja foi
+	// garantida pela última vez neste processo, para que o sweep não repita a
+	// chamada a cada 20s. Memória, e não banco, de propósito: reinscrever é
+	// idempotente na Meta, então perder o registro num deploy custa uma chamada
+	// por loja com live no ar — e é justamente num deploy (lista de campos nova)
+	// que reinscrever é desejável.
+	//
+	// Guarda TEMPO, e não um booleano. Com booleano, o primeiro sucesso travava
+	// a verificação para o resto da vida do processo: uma inscrição que morresse
+	// no meio — e a Meta derruba assinatura de app cujas entregas falham
+	// seguidamente — nunca mais seria restabelecida, num processo que pode ficar
+	// semanas no ar. O caminho de FALHA já era retentado; o de sucesso é que
+	// latchava para sempre.
 	subscriptionEnsured sync.Map
 
 	// lastWebhookAt guarda, por conta do Instagram (entry.id), quando o último
@@ -6079,17 +6086,34 @@ func (s *Service) endStaleLiveSessionsOnce(ctx context.Context) {
 // depender só do polling, que salva o pedido mas não consegue avisar o
 // comprador.
 func (s *Service) ensureWebhookSubscriptionOnce(ctx context.Context, storeID string) {
-	if _, done := s.subscriptionEnsured.LoadOrStore(storeID, struct{}{}); done {
-		return
+	if v, ok := s.subscriptionEnsured.Load(storeID); ok {
+		if last, _ := v.(time.Time); time.Since(last) < subscriptionRecheckEvery {
+			return
+		}
 	}
+	s.subscriptionEnsured.Store(storeID, time.Now())
 	if err := s.SubscribeInstagramWebhooks(ctx, storeID); err != nil {
 		// Solta o registro: uma falha transitória (token vencendo, Graph fora)
-		// merece nova tentativa no próximo sweep, não desistir até o deploy.
+		// merece nova tentativa no próximo sweep, não esperar a janela inteira.
 		s.subscriptionEnsured.Delete(storeID)
 		logger.From(ctx, s.logger).Warn("failed to ensure instagram webhook subscription for a store with a live on air",
 			zap.String("store_id", storeID), zap.Error(err))
 	}
 }
+
+// subscriptionRecheckEvery é de quanto em quanto tempo a inscrição volta a ser
+// garantida, para uma loja COM TRANSMISSÃO NO AR.
+//
+// Antes era uma vez por processo, e essa era a única autocorreção que o sistema
+// tinha para uma inscrição morta. A Meta derruba a assinatura de um app cujas
+// entregas falham seguidamente — que é exatamente o cenário que estivemos
+// investigando, com o Bot Fight Mode do Cloudflare desafiando as entregas dela.
+// Num processo que fica semanas no ar, "uma vez" significava nunca mais.
+//
+// Quinze minutos custa quatro chamadas por hora por loja com live acontecendo, e
+// só enquanto ela acontece. É barato perto de uma transmissão inteira entregue
+// só pelo polling.
+const subscriptionRecheckEvery = 15 * time.Minute
 
 // attachPublishedMediaToEvent liga uma publicação recém-criada no Instagram ao
 // LiveCart. Nome distinto de bindPublishedMedia (publish_schedule.go), que é o
