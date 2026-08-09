@@ -4240,8 +4240,38 @@ func (s *Service) DispatchCommentReceived(ctx context.Context, input ProcessInst
 	return s.liveService.DispatchCommentReceived(ctx, input.CommentID, input.MediaID, source, input)
 }
 
-// ProcessInstagramMessage processes a DM from Instagram webhook.
-func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInstagramMessageInput) error {
+// DispatchMessageReceived é a borda HTTP do fluxo invertido de DM: valida o
+// mínimo, grava message.received no outbox e volta. Nada de lookup, Graph ou
+// ERP — o trabalho roda em HandleMessageReceived, no consumidor.
+//
+// A Meta exige 200 em ≤5s e desinscreve o app após 1 hora de falha contínua.
+// O caminho antigo fazia tudo em linha e chegava a ~90s no pior caso (dois
+// POSTs à Graph com timeout de 30s, mais refresh de token).
+//
+// Descartar echo aqui é de propósito: é a nossa PRÓPRIA mensagem voltando, e
+// enfileirá-la só para o consumidor ignorar seria gastar uma tarefa por DM
+// enviada. O mesmo vale para evento sem `mid` (recibo de leitura, reação),
+// que não é mensagem — o discriminador é o mesmo usado no handler.
+func (s *Service) DispatchMessageReceived(ctx context.Context, input ProcessInstagramMessageInput) error {
+	if input.IsEcho || input.MessageID == "" {
+		return nil
+	}
+	body, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("marshaling message.received payload: %w", err)
+	}
+	return s.repo.EmitMessageReceived(ctx, events.Envelope{
+		Name:     events.MessageReceived,
+		Source:   events.SourceInstagramDM,
+		DedupKey: "message.received:" + input.MessageID,
+		Metadata: map[string]string{"account_id": input.AccountID, "message_id": input.MessageID},
+		Payload:  body,
+	})
+}
+
+// HandleMessageReceived processes a DM from Instagram webhook. Runs in the event
+// consumer (ver DispatchMessageReceived), não mais dentro do request.
+func (s *Service) HandleMessageReceived(ctx context.Context, input ProcessInstagramMessageInput) error {
 	logger.From(ctx, s.logger).Info("processing instagram message",
 		zap.String("account_id", input.AccountID),
 		zap.String("sender_id", input.SenderID),

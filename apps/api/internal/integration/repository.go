@@ -871,6 +871,15 @@ func (r *Repository) PendingPublicNudge(ctx context.Context, storeID, platformUs
 	return uuidToString(row.ID), row.Token, nil
 }
 
+// EmitMessageReceived grava o envelope message.received no outbox numa única
+// transação, espelhando EmitCommentReceived. É o que permite a borda HTTP do
+// webhook de DM responder 200 sem tocar em Graph nem em ERP.
+func (r *Repository) EmitMessageReceived(ctx context.Context, env events.Envelope) error {
+	return dbtx.InTx(ctx, r.pool, r.queries, func(q *sqlc.Queries) error {
+		return events.Emit(ctx, q, env)
+	})
+}
+
 // SettlePublicNudge quita o convite: o log passa a 'sent' porque o link ENFIM
 // chegou ao comprador. É o que faz FindPendingPublicNudge parar de encontrá-lo,
 // e portanto o que impede o link de ser reenviado a cada nova mensagem dele.

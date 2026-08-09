@@ -303,8 +303,11 @@ func (h *WebhookHandler) processInstagramMessage(c *fiber.Ctx, entry InstagramEn
 		replyToStoryID = msg.Message.ReplyTo.Story.ID
 	}
 
-	// Process the message through the service
-	if err := h.service.ProcessInstagramMessage(c.Context(), ProcessInstagramMessageInput{
+	// Fluxo invertido, igual ao do comentário: grava message.received no outbox
+	// e volta. O trabalho (resposta de story, carrinho pendente, auditoria) roda
+	// no consumidor via HandleMessageReceived. Antes disto o caminho de DM fazia
+	// tudo aqui dentro, com até duas chamadas à Graph antes do 200.
+	if err := h.service.DispatchMessageReceived(c.Context(), ProcessInstagramMessageInput{
 		AccountID: entry.ID,
 		SenderID:  msg.Sender.ID,
 		MessageID: msg.Message.MID,
