@@ -239,6 +239,26 @@ func resolveSyncedStock(localStock, erpStock int, skipStock, downgradeOnly bool)
 	if skipStock {
 		return localStock
 	}
+	// Saldo NEGATIVO no ERP não é estoque, é sintoma.
+	//
+	// O Tiny aceita o saldo ir abaixo de zero — está gravado na bateria de
+	// sandbox: lançar sobre saldo 0 levou a -1, sem erro. Um número negativo lá
+	// significa que uma saída passou do que existia, e nunca que o lojista tem
+	// menos que nada. Copiá-lo para o nosso contador é copiar o defeito.
+	//
+	// Em 08/08 o Gabinete Gamer levou uma reserva de 3 sobre um saldo que já
+	// estava em 0. O Tiny foi para -3 e ecoou -3 no webhook; o `downgrade_only`
+	// aceitou por ser "menor que o local" e a escrita bateu na constraint
+	// `stock cannot be negative`. O estrago não parou no estoque: o erro derruba
+	// a sincronização INTEIRA do produto — nome, preço, dimensões — que
+	// retentou quatro vezes e desistiu. O produto parou de sincronizar por causa
+	// de um número que nunca deveria ter sido considerado.
+	//
+	// Preservar o local é o lado seguro: o saldo do ERP volta ao positivo assim
+	// que o estorno correspondente entra, e o sync seguinte reconcilia sozinho.
+	if erpStock < 0 {
+		return localStock
+	}
 	if downgradeOnly && erpStock >= localStock {
 		return localStock
 	}

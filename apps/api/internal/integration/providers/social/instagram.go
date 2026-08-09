@@ -18,7 +18,18 @@ import (
 )
 
 const (
-	instagramGraphAPIVersion = "v25.0"
+	// A MESMA versão configurada no app da Meta.
+	//
+	// Estava em v25.0 depois de o app ir para a v26, e as duas coisas não são
+	// independentes: a forma do webhook vem da versão do APP, e o modelo de
+	// permissão avaliado nas chamadas vem da versão da URL. Rodar as duas em
+	// versões diferentes deixa o comportamento no meio do caminho, e o sintoma
+	// disso não se parece com um erro de versão — em 08/08 apareceu como 21
+	// recusas 403 em POST /v25.0/me/messages, todas dizendo "check if access
+	// token has enough IG permissions granular scopes for IG private reply".
+	//
+	// Ao subir a versão do app na Meta, esta constante sobe junto.
+	instagramGraphAPIVersion = "v26.0"
 	instagramDMTextMaxBytes  = 1000
 )
 
