@@ -2590,6 +2590,34 @@ func (r *Repository) UpdateCartItemWaitlistedQuantity(ctx context.Context, cartI
 	})
 }
 
+// ListStockPositionsForReconciliation devolve, por produto ligado ao ERP, o
+// contador local e quanto está segurado por reserva ativa. É a entrada da
+// reconciliação: `local - held` é o saldo que o ERP deveria estar reportando.
+func (r *Repository) ListStockPositionsForReconciliation(ctx context.Context, storeID, externalSource string) ([]erp.StockPosition, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListStockPositionsForReconciliation(ctx, sqlc.ListStockPositionsForReconciliationParams{
+		StoreID:        sID,
+		ExternalSource: externalSource,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing stock positions: %w", err)
+	}
+	out := make([]erp.StockPosition, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, erp.StockPosition{
+			ProductID:  uuidToString(row.ID),
+			Name:       row.Name,
+			ExternalID: row.ExternalID.String,
+			LocalStock: int(row.LocalStock),
+			Held:       int(row.Held),
+		})
+	}
+	return out, nil
+}
+
 // CancelWaitlistForCartProduct mata a fila de um produto do carrinho e devolve
 // quantas linhas morreram.
 //

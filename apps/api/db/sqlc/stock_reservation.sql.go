@@ -468,6 +468,72 @@ func (q *Queries) ListActiveReservationsByEvent(ctx context.Context, eventID pgt
 	return items, nil
 }
 
+const listStockPositionsForReconciliation = `-- name: ListStockPositionsForReconciliation :many
+SELECT p.id,
+       p.name,
+       p.external_id,
+       p.stock::int AS local_stock,
+       COALESCE(SUM(sr.quantity) FILTER (WHERE sr.status = 'active'), 0)::int AS held
+FROM products p
+LEFT JOIN stock_reservations sr ON sr.product_id = p.id
+WHERE p.store_id = $1
+  AND p.external_id IS NOT NULL
+  AND p.external_id <> ''
+  AND p.external_source = $2
+GROUP BY p.id, p.name, p.external_id, p.stock
+ORDER BY p.name
+`
+
+type ListStockPositionsForReconciliationParams struct {
+	StoreID        pgtype.UUID `json:"store_id"`
+	ExternalSource string      `json:"external_source"`
+}
+
+type ListStockPositionsForReconciliationRow struct {
+	ID         pgtype.UUID `json:"id"`
+	Name       string      `json:"name"`
+	ExternalID pgtype.Text `json:"external_id"`
+	LocalStock int32       `json:"local_stock"`
+	Held       int32       `json:"held"`
+}
+
+// O que o sistema ACREDITA sobre cada produto ligado ao ERP: o contador local e
+// quantas unidades estão seguradas por reserva ativa neste instante.
+//
+// Existe porque não havia detecção nenhuma. O desvio de 12/08/2026 — uma unidade
+// inventada no Gabinete Gamer e uma perdida no Perfume — só apareceu porque o
+// lojista conferiu o Tiny na mão, e diagnosticá-lo exigiu reconstruir o razão a
+// partir de integration_logs. Bug de estoque é inevitável; ficar dias sem saber
+// não precisa ser.
+//
+// Só produtos com vínculo no ERP: sem external_id não há saldo remoto com que
+// comparar.
+func (q *Queries) ListStockPositionsForReconciliation(ctx context.Context, arg ListStockPositionsForReconciliationParams) ([]ListStockPositionsForReconciliationRow, error) {
+	rows, err := q.db.Query(ctx, listStockPositionsForReconciliation, arg.StoreID, arg.ExternalSource)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListStockPositionsForReconciliationRow{}
+	for rows.Next() {
+		var i ListStockPositionsForReconciliationRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.ExternalID,
+			&i.LocalStock,
+			&i.Held,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const restoreReservationQuantityByID = `-- name: RestoreReservationQuantityByID :execrows
 UPDATE stock_reservations
 SET quantity = CASE WHEN status = 'reversed' THEN quantity ELSE quantity + $1::int END,
