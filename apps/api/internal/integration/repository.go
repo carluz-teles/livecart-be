@@ -871,6 +871,20 @@ func (r *Repository) PendingPublicNudge(ctx context.Context, storeID, platformUs
 	return uuidToString(row.ID), row.Token, nil
 }
 
+// HealFromError devolve a integração para 'active' quando uma chamada volta a
+// dar certo, e diz se curou de fato. Só age sobre linha em 'error'.
+func (r *Repository) HealFromError(ctx context.Context, id string) (bool, error) {
+	integrationID, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.queries.HealIntegrationFromError(ctx, integrationID)
+	if err != nil {
+		return false, fmt.Errorf("healing integration from error: %w", err)
+	}
+	return n > 0, nil
+}
+
 // EmitMessageReceived grava o envelope message.received no outbox numa única
 // transação, espelhando EmitCommentReceived. É o que permite a borda HTTP do
 // webhook de DM responder 200 sem tocar em Graph nem em ERP.

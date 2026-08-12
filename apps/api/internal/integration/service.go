@@ -6133,25 +6133,66 @@ func (s *Service) handleProviderError(ctx context.Context, integrationID string,
 
 	var rateLimitErr *ratelimit.ErrRateLimited
 	if errors.As(err, &rateLimitErr) {
+		// Rate limit NÃO derruba a integração.
+		//
+		// Antes marcava status 'error', e isso custou três dias de ERP parado em
+		// 09/08/2026: o Tiny devolveu um HTTP 429 às 16:56:59, a integração virou
+		// 'error' na hora, e nada nunca reverteu — o botão de sincronizar sumiu
+		// do painel (o front exige 'active') e só reconectar à mão resolveria,
+		// caminho que também estava quebrado. O token só venceu 1h43 DEPOIS; o
+		// 429 foi o que derrubou, não a expiração.
+		//
+		// Ser transitório é a definição de rate limit: o provedor libera em
+		// segundos. Marcar estado permanente a partir de um sinal temporário é
+		// trocar uma pausa por uma parada.
+		//
+		// A visibilidade não se perde: a chamada já vira linha em
+		// integration_logs com status 'error' e a mensagem crua ("HTTP 429: ..."),
+		// que é de onde este diagnóstico saiu. O status da integração descreve se
+		// ela está utilizável, e durante um 429 ela está — daqui a pouco.
 		logger.From(ctx, s.logger).Error("provider rate limited",
 			zap.String("integration_id", integrationID),
 			zap.String("operation", operation),
 			zap.Duration("retry_after", rateLimitErr.RetryAfter),
 		)
+	}
+}
 
-		// Mark integration as error so it's visible in the dashboard
-		if updateErr := s.repo.UpdateStatus(ctx, integrationID, "error"); updateErr != nil {
-			logger.From(ctx, s.logger).Warn("failed to update integration status after rate limit",
-				zap.String("integration_id", integrationID),
-				zap.Error(updateErr),
-			)
-		}
+// noteProviderSuccess devolve a integração para 'active' depois de uma chamada
+// bem-sucedida, se ela estava em 'error'.
+//
+// É a saída que faltava: 'error' era estado terminal. Os únicos pontos que
+// escreviam 'active' eram os fluxos de CONEXÃO, então uma falha transitória
+// prendia o lojista até ele reconectar à mão.
+//
+// Best-effort e silencioso no caminho normal: roda em toda chamada de provider
+// e é um UPDATE condicional que não acerta linha nenhuma quando já está
+// saudável — barato o bastante para o caminho quente.
+func (s *Service) noteProviderSuccess(ctx context.Context, integrationID string) {
+	if integrationID == "" {
+		return
+	}
+	healed, err := s.repo.HealFromError(ctx, integrationID)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("failed to heal integration status after success",
+			zap.String("integration_id", integrationID), zap.Error(err))
+		return
+	}
+	if healed {
+		logger.From(ctx, s.logger).Info("integration recovered on its own after a successful call",
+			zap.String("integration_id", integrationID))
 	}
 }
 
 // LogIntegrationOperation logs an integration operation to the database.
 // This is used by providers via the LogFunc callback.
 func (s *Service) LogIntegrationOperation(ctx context.Context, log providers.IntegrationLog) error {
+	// Ponto único por onde passa TODA chamada HTTP de provider (providers/base.go),
+	// e por isso o lugar certo para a integração se curar sozinha: uma resposta
+	// boa é a prova de que ela voltou a funcionar.
+	if log.Status == "success" {
+		s.noteProviderSuccess(ctx, log.IntegrationID)
+	}
 	return s.repo.CreateLog(
 		ctx,
 		log.IntegrationID,
