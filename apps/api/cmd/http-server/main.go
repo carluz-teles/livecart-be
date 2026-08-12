@@ -322,6 +322,17 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		// buffering it in memory.
 		BodyLimit:         320 * 1024 * 1024,
 		StreamRequestBody: true,
+		// Tetos de conexão. Não existiam: nada no processo impedia uma
+		// requisição de segurar a conexão indefinidamente, e foi assim que o
+		// caminho de DM chegou a somar ~90s antes de responder à Meta.
+		//
+		// WriteTimeout é o mais folgado dos três porque o upload de Reels
+		// (BodyLimit de 320MB acima) escreve resposta depois de streamar corpo
+		// grande; ReadTimeout cobre a leitura do corpo e é o que fecha a porta
+		// para requisição pendurada.
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	})
 
 	// Panics viram log estruturado com o stack da goroutine que quebrou — o
@@ -997,6 +1008,22 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				return asynq.SkipRetry
 			}
 			return liveSvc.ProcessInstagramComment(ctx, input)
+		})
+
+		// Mesmo fluxo invertido para DM: o webhook grava message.received e
+		// responde 200; o trabalho pesado (resposta de story, entrega do
+		// carrinho pendente, auditoria) roda aqui. Idempotente pelo `mid`, que
+		// é o DedupKey do envelope.
+		eventsServer.Register(events.MessageReceived, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var input integration.ProcessInstagramMessageInput
+			if err := json.Unmarshal(env.Payload, &input); err != nil {
+				return asynq.SkipRetry
+			}
+			return integrationSvc.HandleMessageReceived(ctx, input)
 		})
 
 		// Payment choreography L2: the payment.process command (emitted by the

@@ -37,6 +37,17 @@ const (
 	// (live, story, dm) is Envelope.Source.
 	CommentReceived Name = "comment.received"
 
+	// MessageReceived: uma DM do Instagram chegou. Irmão de CommentReceived e
+	// pelo mesmo motivo — a borda HTTP grava o fato e responde 200; o trabalho
+	// (resposta de story, entrega de carrinho pendente, auditoria) roda no
+	// consumidor.
+	//
+	// Antes disto o caminho de DM processava tudo DENTRO do request: dois
+	// lookups, refresh de token e até duas chamadas à Graph, com timeout de 30s
+	// cada. A Meta exige 200 em ≤5s e desinscreve o app após 1 hora de falha
+	// contínua; o pior caso passava disso com folga.
+	MessageReceived Name = "message.received"
+
 	// Cart lifecycle (group C).
 	CartItemAdded     Name = "cart.item_added"
 	CartCheckoutArmed Name = "cart.checkout_armed"
