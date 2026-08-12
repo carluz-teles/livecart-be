@@ -145,6 +145,22 @@ SET status = 'cancelled', cancelled_at = now()
 WHERE cart_id = $1 AND status IN ('waiting', 'notified')
 RETURNING *;
 
+-- name: CancelWaitlistItemsByCartAndProduct :many
+-- Mata a fila de UM produto do carrinho. É o que faltava quando o comprador
+-- reduz a quantidade no checkout: a parcela em fila é a primeira a sair
+-- (splitQuantityChange), mas a LINHA em waitlist_items continuava viva.
+--
+-- Uma linha órfã dessas é reivindicada pela próxima promoção, que debita
+-- estoque local, emite uma SAÍDA no Tiny e não entrega unidade a ninguém — o
+-- comprador já tinha desistido daquela parcela. É o gerador crônico do sintoma
+-- "o comprador tira uma unidade e o sistema devolve errado".
+--
+-- Só toca itens vivos, então repetir a chamada é inofensivo.
+UPDATE waitlist_items
+SET status = 'cancelled', cancelled_at = now()
+WHERE cart_id = $1 AND product_id = $2 AND status IN ('waiting', 'notified')
+RETURNING *;
+
 -- name: GetWaitlistItemForCart :one
 SELECT * FROM waitlist_items
 WHERE id = $1 AND cart_id = $2;

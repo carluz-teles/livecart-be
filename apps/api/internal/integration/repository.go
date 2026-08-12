@@ -2590,12 +2590,50 @@ func (r *Repository) UpdateCartItemWaitlistedQuantity(ctx context.Context, cartI
 	})
 }
 
-// DecrementCartItemWaitlistedQuantity atomically subtracts `delta` from the
-// waitlisted_quantity of the (cartID, productID) cart_items row, clamping at
-// zero. Returns true when a matching row was found. Used by the waitlist
-// promotion to flip a row from "waiting" to "available" without re-running
-// UpsertCartItem (which sums both quantity and waitlisted_quantity, inflating
-// the row to 2x the customer's actual order).
+// CancelWaitlistForCartProduct mata a fila de um produto do carrinho e devolve
+// quantas linhas morreram.
+//
+// Chamada quando o comprador reduz a quantidade no checkout: a parcela em fila
+// é a primeira a sair (splitQuantityChange), mas a linha em waitlist_items
+// continuava viva e era reivindicada pela promoção seguinte — que debitava
+// estoque e emitia saída no Tiny sem entregar unidade a ninguém.
+func (r *Repository) CancelWaitlistForCartProduct(ctx context.Context, cartID, productID string) (int, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return 0, err
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := r.queries.CancelWaitlistItemsByCartAndProduct(ctx, sqlc.CancelWaitlistItemsByCartAndProductParams{
+		CartID:    cID,
+		ProductID: pID,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("cancelling waitlist for cart product: %w", err)
+	}
+	return len(rows), nil
+}
+
+// DecrementCartItemWaitlistedQuantity subtrai `delta` da parcela em fila do
+// item e devolve se a subtração ACONTECEU de verdade. Usada pela promoção da
+// waitlist para virar a linha de "em fila" para "segurada" sem passar pelo
+// UpsertCartItem (que soma quantity e waitlisted_quantity no ON CONFLICT e
+// dobraria o pedido do comprador).
+//
+// A condição `waitlisted_quantity >= delta` é o que dá sentido ao retorno.
+// Antes era `GREATEST(waitlisted_quantity - delta, 0)` sem filtro: o UPDATE
+// casava a linha mesmo quando não havia parcela em fila para entregar, o
+// GREATEST silenciava o resultado negativo, e `RowsAffected > 0` devolvia
+// "consegui" de qualquer jeito.
+//
+// O chamador lê esse booleano como "entreguei uma unidade a este comprador" e
+// então debita o estoque local e emite uma SAÍDA no Tiny. Com o retorno mentindo,
+// isso vira estoque consumido por ninguém — e é a origem crônica do sintoma que
+// o lojista descreve como "o comprador tira uma unidade e o sistema devolve
+// errado": a redução no checkout zera a parcela em fila mas não cancela a linha
+// de waitlist, e a promoção seguinte reivindica essa linha órfã.
 func (r *Repository) DecrementCartItemWaitlistedQuantity(ctx context.Context, cartID, productID string, delta int) (bool, error) {
 	cID, err := parseUUID(cartID)
 	if err != nil {
@@ -2607,8 +2645,8 @@ func (r *Repository) DecrementCartItemWaitlistedQuantity(ctx context.Context, ca
 	}
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE cart_items
-		SET waitlisted_quantity = GREATEST(waitlisted_quantity - $3::int, 0)
-		WHERE cart_id = $1 AND product_id = $2
+		SET waitlisted_quantity = waitlisted_quantity - $3::int
+		WHERE cart_id = $1 AND product_id = $2 AND waitlisted_quantity >= $3::int
 	`, cID, pID, delta)
 	if err != nil {
 		return false, fmt.Errorf("decrementing waitlisted quantity: %w", err)

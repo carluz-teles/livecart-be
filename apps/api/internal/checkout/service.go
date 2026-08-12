@@ -1173,6 +1173,31 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 	if err != nil {
 		return nil, err
 	}
+	if ok && waitlistedAfter < item.WaitlistedQuantity {
+		// A parcela em fila encolheu, então as linhas de waitlist_items que ela
+		// representava precisam morrer junto.
+		//
+		// Sem isto elas ficam órfãs e a próxima promoção as reivindica: debita
+		// estoque local, emite uma SAÍDA no Tiny, e não entrega unidade a
+		// ninguém — o comprador já tinha desistido daquela parcela. É o gerador
+		// crônico do "tirei uma unidade e o estoque ficou errado".
+		//
+		// Best-effort: falhar aqui não pode desfazer a alteração que o comprador
+		// acabou de fazer, e a linha órfã é recuperável pela expiração da fila.
+		if n, cancelErr := s.integrationService.CancelWaitlistForCartProduct(ctx, cart.ID, item.ProductID); cancelErr != nil {
+			logger.From(ctx, s.logger).Warn("failed to cancel waitlist rows freed by the quantity decrease",
+				zap.String("cart_id", cart.ID),
+				zap.String("product_id", item.ProductID),
+				zap.Error(cancelErr),
+			)
+		} else if n > 0 {
+			logger.From(ctx, s.logger).Info("waitlist rows cancelled after checkout decrease",
+				zap.String("cart_id", cart.ID),
+				zap.String("product_id", item.ProductID),
+				zap.Int("cancelled", n),
+			)
+		}
+	}
 	if !ok {
 		// Alguém alterou este item entre a leitura e a escrita. Recusar é o
 		// único caminho correto: o delta calculado não vale mais, e aplicá-lo

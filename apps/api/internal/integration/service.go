@@ -5790,6 +5790,17 @@ func (s *Service) NotifyWaitlistPromoted(ctx context.Context, in inventory.Waitl
 	})
 }
 
+// CancelWaitlistForCartProduct mata a fila de um produto do carrinho. Chamada
+// pelo checkout quando a redução de quantidade esvazia a parcela em fila: sem
+// isso a linha fica órfã e a próxima promoção a reivindica, consumindo estoque
+// para um comprador que já desistiu daquela parcela.
+//
+// Best-effort no chamador: falhar aqui não pode derrubar a alteração que o
+// comprador acabou de fazer.
+func (s *Service) CancelWaitlistForCartProduct(ctx context.Context, cartID, productID string) (int, error) {
+	return s.repo.CancelWaitlistForCartProduct(ctx, cartID, productID)
+}
+
 // ListActiveWaitlistByCart delega para inventory.Service (Bloco B3a — a lógica
 // vive em internal/inventory). Assinatura pública preservada: o checkout continua
 // chamando integration.Service.
