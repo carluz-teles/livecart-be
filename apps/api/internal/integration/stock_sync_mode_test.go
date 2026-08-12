@@ -60,15 +60,32 @@ func TestStockSyncModeCobreTodasAsCombinacoes(t *testing.T) {
 	}
 }
 
-// O caso que motivou o guard: reserva ativa numa live deixa passar redução do
-// lojista, mas nunca aumento.
-func TestReservaAtivaDeixaPassarSoReducao(t *testing.T) {
+// Reserva ativa suprime o sync inteiro — em direção nenhuma o saldo do ERP
+// manda no nosso contador enquanto seguramos a peça.
+//
+// Esta asserção era o contrário até 12/08/2026: downgrade-only, com o argumento
+// de que redução do lojista durante a live é legítima e deve refletir. O
+// argumento ignora quem mais mexe naquele saldo enquanto há hold — nós. Cada
+// reserva é uma saída, cada ajuste de checkout é outro movimento, e cada um
+// volta como webhook já deflacionado.
+//
+// O que aconteceu com o Gabinete Gamer: às 17:21:25.869, `local_stock=1
+// erp_stock=0 new_stock=0 downgrade_only=true`. Aquele zero era do movimento que
+// nós mesmos mandamos 0,6 segundo antes. O contador foi a zero e não voltou —
+// os webhooks seguintes vieram com skip_stock, então nada reconciliou.
+//
+// O custo da inversão é atraso: redução real do lojista durante a live só
+// reflete quando os holds saírem. Minutos de atraso contra um contador
+// corrompido que não se recupera sozinho.
+func TestReservaAtivaSuprimeOSyncInteiro(t *testing.T) {
 	skip, downgrade := stockSyncMode(true, false, false, false)
-	if skip {
-		t.Error("reserva ativa não pode suprimir o sync — redução do lojista durante a live é legítima")
+	if !skip {
+		t.Error("reserva ativa tem de suprimir: com hold nosso em vigor, o saldo do ERP " +
+			"é eco da nossa própria operação, não medida independente")
 	}
-	if !downgrade {
-		t.Error("reserva ativa tem de restringir a downgrade-only, senão o webhook sobe o local e inventa oferta")
+	if downgrade {
+		t.Error("downgrade-only com reserva ativa deixa passar o eco do nosso próprio " +
+			"movimento — foi assim que o contador do Gabinete foi a zero")
 	}
 }
 
@@ -119,11 +136,19 @@ func TestIdaEVoltaEntreDeltaESaldoNuncaInventaUnidade(t *testing.T) {
 			querLocal: 5,
 		},
 		{
-			// Live rodando com reserva ativa e o lojista tirou unidade do
-			// estoque no Tiny. Redução legítima, tem de refletir.
-			nome:       "reserva ativa: reducao do lojista reflete",
+			// Live rodando com reserva ativa e o saldo do Tiny veio MENOR.
+			//
+			// Pode ser o lojista tirando unidade, pode ser o eco da nossa
+			// própria saída — e não dá para distinguir. Com hold em vigor, o
+			// segundo caso é o comum: cada reserva e cada ajuste de checkout
+			// deflaciona o número que volta no webhook seguinte.
+			//
+			// Preservar o local atrasa uma redução legítima até os holds
+			// saírem. Aplicá-la corrompe o contador quando o palpite erra, e
+			// esse estrago não se desfaz — foi o Gabinete Gamer em 12/08.
+			nome:       "reserva ativa: saldo menor NAO derruba o local",
 			localAntes: 5, saldoNoTiny: 3, guarded: true,
-			querLocal: 3,
+			querLocal: 5,
 		},
 		{
 			// Mesma situação, mas o número do Tiny subiu porque a nossa própria

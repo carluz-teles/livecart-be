@@ -34,6 +34,59 @@ SET quantity = quantity + sqlc.arg(delta_qty)::int,
 WHERE cart_id = sqlc.arg(cart_id) AND product_id = sqlc.arg(product_id) AND status = 'active'
 RETURNING *;
 
+-- name: DecrementActiveReservationQuantity :many
+-- Baixa `dec_qty` unidades da reserva ativa, mas SÓ se ela tiver esse tanto.
+-- Zero linhas significa "não pude" — leitura obsoleta, reserva menor que o
+-- pedido, ou outra requisição chegou antes.
+--
+-- Existe porque decidir o ramo (reversão total × decremento parcial) a partir
+-- de uma leitura anterior é uma corrida. Em 12/08/2026 um PATCH e um DELETE do
+-- mesmo item se cruzaram: o DELETE leu `cart_items` já atualizado (1) e
+-- `stock_reservations` ainda desatualizado (2), concluiu que sobraria 1 unidade,
+-- mandou a entrada ao Tiny e só então tentou `1 + (-1) = 0` — que bate no
+-- CHECK (quantity > 0) da migration 000030. O movimento já estava no Tiny e
+-- ninguém o compensou: +1 unidade fantasma no Gabinete Gamer.
+--
+-- Com o guard `quantity >= dec_qty` dentro do próprio UPDATE, quem decide é o
+-- banco, e a decisão já vem aplicada. O chamador só chama o ERP depois.
+-- Os dois desfechos numa tacada só. Baixa parcial quando sobra unidade; quando
+-- a baixa consome a reserva inteira, a linha sai de 'active' com a quantidade
+-- INTACTA — zerar em vigor violaria o CHECK (quantity > 0) da migration 000030,
+-- que é exatamente a pedra em que o fluxo antigo tropeçou.
+--
+-- Separar em duas queries traria de volta a corrida: entre decidir qual usar e
+-- executá-la, outra requisição muda a reserva.
+UPDATE stock_reservations
+SET quantity = CASE WHEN quantity > sqlc.arg(dec_qty)::int
+                    THEN quantity - sqlc.arg(dec_qty)::int
+                    ELSE quantity END,
+    status = CASE WHEN quantity <= sqlc.arg(dec_qty)::int THEN 'reversed' ELSE status END,
+    reversed_at = CASE WHEN quantity <= sqlc.arg(dec_qty)::int THEN now() ELSE reversed_at END,
+    erp_movement_id = COALESCE(NULLIF(sqlc.arg(erp_movement_id)::text, ''), erp_movement_id)
+WHERE cart_id = sqlc.arg(cart_id)
+  AND product_id = sqlc.arg(product_id)
+  AND status = 'active'
+  AND quantity >= sqlc.arg(dec_qty)::int
+RETURNING *;
+
+-- name: RestoreReservationQuantityByID :execrows
+-- Desfaz DecrementActiveReservationQuantity quando o ERP recusa DEPOIS do
+-- decremento local. Sem isso o banco diria que a unidade está livre e o Tiny
+-- diria que está reservada, e nada reconciliaria as duas versões.
+--
+-- Por ID, e não por (cart, produto), porque o desfazer tem de acertar
+-- exatamente a linha que acabou de ser mexida — filtrar por par resgataria
+-- reservas reversadas em outro momento.
+--
+-- Espelha os dois desfechos do decremento: se a linha saiu de 'active' com a
+-- quantidade intacta (baixa total), só o status volta; se foi baixa parcial,
+-- as unidades voltam.
+UPDATE stock_reservations
+SET quantity = CASE WHEN status = 'reversed' THEN quantity ELSE quantity + sqlc.arg(inc_qty)::int END,
+    status = 'active',
+    reversed_at = NULL
+WHERE id = sqlc.arg(id);
+
 -- name: HasActiveEventForProduct :one
 SELECT EXISTS(
     SELECT 1 FROM stock_reservations sr

@@ -1173,6 +1173,31 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 	if err != nil {
 		return nil, err
 	}
+	if ok && waitlistedAfter < item.WaitlistedQuantity {
+		// A parcela em fila encolheu, então as linhas de waitlist_items que ela
+		// representava precisam morrer junto.
+		//
+		// Sem isto elas ficam órfãs e a próxima promoção as reivindica: debita
+		// estoque local, emite uma SAÍDA no Tiny, e não entrega unidade a
+		// ninguém — o comprador já tinha desistido daquela parcela. É o gerador
+		// crônico do "tirei uma unidade e o estoque ficou errado".
+		//
+		// Best-effort: falhar aqui não pode desfazer a alteração que o comprador
+		// acabou de fazer, e a linha órfã é recuperável pela expiração da fila.
+		if n, cancelErr := s.integrationService.CancelWaitlistForCartProduct(ctx, cart.ID, item.ProductID); cancelErr != nil {
+			logger.From(ctx, s.logger).Warn("failed to cancel waitlist rows freed by the quantity decrease",
+				zap.String("cart_id", cart.ID),
+				zap.String("product_id", item.ProductID),
+				zap.Error(cancelErr),
+			)
+		} else if n > 0 {
+			logger.From(ctx, s.logger).Info("waitlist rows cancelled after checkout decrease",
+				zap.String("cart_id", cart.ID),
+				zap.String("product_id", item.ProductID),
+				zap.Int("cancelled", n),
+			)
+		}
+	}
 	if !ok {
 		// Alguém alterou este item entre a leitura e a escrita. Recusar é o
 		// único caminho correto: o delta calculado não vale mais, e aplicá-lo
@@ -1252,9 +1277,23 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 		return nil, err
 	}
 
+	// Devolver ao ERP só o que SAIU dele.
+	//
+	// A parcela em fila nunca virou saída — ela existe justamente porque não
+	// havia estoque. Mandar `item.Quantity` devolvia também essa parcela: um
+	// item com quantity=3 e waitlisted=2 tem 1 unidade reservada, e a remoção
+	// creditava 3 no Tiny. Duas unidades nascidas do nada, por remoção.
+	//
+	// É a mesma conta que o PATCH já fazia certo via splitQuantityChange
+	// (:1158) — só a remoção ficou de fora.
+	held := item.Quantity - item.WaitlistedQuantity
+	if held < 0 {
+		held = 0
+	}
+
 	movementID, syncErr := s.integrationService.AdjustStockReservationDelta(
 		ctx, cart.StoreID, cart.ID, cart.EventID, item.ProductID,
-		-item.Quantity, item.UnitPrice, cart.PlatformHandle, integration.StockOpUnspecified,
+		-held, item.UnitPrice, cart.PlatformHandle, integration.StockOpUnspecified,
 	)
 	if syncErr != nil {
 		// Re-create the row at the original quantity to keep state consistent.

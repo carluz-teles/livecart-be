@@ -77,6 +77,64 @@ func (q *Queries) CancelWaitlistItemsByCart(ctx context.Context, cartID pgtype.U
 	return items, nil
 }
 
+const cancelWaitlistItemsByCartAndProduct = `-- name: CancelWaitlistItemsByCartAndProduct :many
+UPDATE waitlist_items
+SET status = 'cancelled', cancelled_at = now()
+WHERE cart_id = $1 AND product_id = $2 AND status IN ('waiting', 'notified')
+RETURNING id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at, cart_id, notification_sent_at, cancelled_at
+`
+
+type CancelWaitlistItemsByCartAndProductParams struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+}
+
+// Mata a fila de UM produto do carrinho. É o que faltava quando o comprador
+// reduz a quantidade no checkout: a parcela em fila é a primeira a sair
+// (splitQuantityChange), mas a LINHA em waitlist_items continuava viva.
+//
+// Uma linha órfã dessas é reivindicada pela próxima promoção, que debita
+// estoque local, emite uma SAÍDA no Tiny e não entrega unidade a ninguém — o
+// comprador já tinha desistido daquela parcela. É o gerador crônico do sintoma
+// "o comprador tira uma unidade e o sistema devolve errado".
+//
+// Só toca itens vivos, então repetir a chamada é inofensivo.
+func (q *Queries) CancelWaitlistItemsByCartAndProduct(ctx context.Context, arg CancelWaitlistItemsByCartAndProductParams) ([]WaitlistItem, error) {
+	rows, err := q.db.Query(ctx, cancelWaitlistItemsByCartAndProduct, arg.CartID, arg.ProductID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WaitlistItem{}
+	for rows.Next() {
+		var i WaitlistItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventID,
+			&i.ProductID,
+			&i.PlatformUserID,
+			&i.PlatformHandle,
+			&i.Quantity,
+			&i.Position,
+			&i.Status,
+			&i.NotifiedAt,
+			&i.FulfilledAt,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.CartID,
+			&i.NotificationSentAt,
+			&i.CancelledAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const claimNextWaitlistItem = `-- name: ClaimNextWaitlistItem :one
 UPDATE waitlist_items
 SET status               = 'notified',
