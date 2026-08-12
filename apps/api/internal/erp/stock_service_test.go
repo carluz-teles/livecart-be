@@ -121,6 +121,10 @@ func (m *mockRepo) CreateStockReservation(context.Context, CreateStockReservatio
 	}
 	return &StockReservationRow{}, nil
 }
+func (m *mockRepo) UpsertActiveReservationQuantity(_ context.Context, p UpsertReservationParams) (*StockReservationRow, error) {
+	return &StockReservationRow{Quantity: p.IncQty}, nil
+}
+
 func (m *mockRepo) DecrementActiveReservationQuantity(context.Context, string, string, int) (ReservationDecrement, error) {
 	return ReservationDecrement{}, nil
 }

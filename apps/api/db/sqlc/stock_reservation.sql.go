@@ -622,3 +622,66 @@ func (q *Queries) ReverseReservationsByCartAndProduct(ctx context.Context, arg R
 	_, err := q.db.Exec(ctx, reverseReservationsByCartAndProduct, arg.CartID, arg.ProductID)
 	return err
 }
+
+const upsertActiveReservationQuantity = `-- name: UpsertActiveReservationQuantity :one
+INSERT INTO stock_reservations (event_id, cart_id, product_id, external_product_id, quantity, erp_movement_id)
+VALUES ($1, $2, $3,
+        $4, $5::int, $6)
+ON CONFLICT (cart_id, product_id, event_id) WHERE status = 'active'
+DO UPDATE SET quantity = stock_reservations.quantity + $5::int,
+              erp_movement_id = COALESCE(NULLIF($6::text, ''), stock_reservations.erp_movement_id)
+RETURNING id, event_id, cart_id, product_id, external_product_id, quantity, erp_movement_id, status, created_at, reversed_at
+`
+
+type UpsertActiveReservationQuantityParams struct {
+	EventID           pgtype.UUID `json:"event_id"`
+	CartID            pgtype.UUID `json:"cart_id"`
+	ProductID         pgtype.UUID `json:"product_id"`
+	ExternalProductID string      `json:"external_product_id"`
+	IncQty            int32       `json:"inc_qty"`
+	ErpMovementID     pgtype.Text `json:"erp_movement_id"`
+}
+
+// Soma `inc_qty` à reserva ativa deste (carrinho, produto, evento), criando a
+// linha se ela ainda não existir. Uma chamada, uma decisão, sem leitura prévia.
+//
+// Substitui o par "listar reservas ativas / decidir entre CREATE e ADJUST", que
+// é uma corrida: a lista é lida antes da chamada ao ERP (~1s pelo limitador) e
+// decide um ramo que já não vale quando a gravação acontece. Os dois desfechos
+// apareceram em produção em 12/08/2026, no mesmo teste:
+//
+//	"no rows in result set"  -> leu reserva ativa, ela foi reversada no meio,
+//	                            o ADJUST não achou linha
+//	"duplicate key ... uq_stock_reservations_active" -> leu vazio, outra
+//	                            requisição criou a linha, o CREATE colidiu
+//
+// Nos dois casos o movimento JÁ tinha ido ao Tiny, e o comprador levou 422
+// depois de o estoque ter se mexido. Clicando rápido no "+", ele tentava de
+// novo, e cada tentativa repetia o ciclo.
+//
+// O ON CONFLICT usa o índice parcial uq_stock_reservations_active
+// (cart_id, product_id, event_id) WHERE status = 'active'.
+func (q *Queries) UpsertActiveReservationQuantity(ctx context.Context, arg UpsertActiveReservationQuantityParams) (StockReservation, error) {
+	row := q.db.QueryRow(ctx, upsertActiveReservationQuantity,
+		arg.EventID,
+		arg.CartID,
+		arg.ProductID,
+		arg.ExternalProductID,
+		arg.IncQty,
+		arg.ErpMovementID,
+	)
+	var i StockReservation
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.CartID,
+		&i.ProductID,
+		&i.ExternalProductID,
+		&i.Quantity,
+		&i.ErpMovementID,
+		&i.Status,
+		&i.CreatedAt,
+		&i.ReversedAt,
+	)
+	return i, err
+}

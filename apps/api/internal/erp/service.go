@@ -48,6 +48,10 @@ type ERPRepository interface {
 	CreateStockReservation(ctx context.Context, params CreateStockReservationParams) (*StockReservationRow, error)
 	// AdjustActiveReservationQuantity bumps an active reservation's quantity by delta.
 	AdjustActiveReservationQuantity(ctx context.Context, cartID, productID string, delta int, erpMovementID string) (*StockReservationRow, error)
+	// UpsertActiveReservationQuantity soma unidades à reserva ativa, criando a
+	// linha se não existir. Uma chamada, sem leitura prévia — o par
+	// "listar / decidir entre criar e ajustar" é uma corrida.
+	UpsertActiveReservationQuantity(ctx context.Context, p UpsertReservationParams) (*StockReservationRow, error)
 	// DecrementActiveReservationQuantity baixa dec unidades da reserva ativa e diz
 	// o que aconteceu. É o que substitui "ler, decidir, chamar o ERP, gravar":
 	// aqui quem decide é o banco, e a decisão já vem aplicada.

@@ -3193,6 +3193,48 @@ func (r *Repository) ReverseReservationsByCartAndProduct(ctx context.Context, ca
 // que é uma corrida: em 12/08/2026 um PATCH e um DELETE do mesmo item se
 // cruzaram, o segundo decidiu pelo número obsoleto, mandou a entrada ao Tiny e
 // só então bateu no CHECK (quantity > 0) — deixando um movimento sem lastro.
+// UpsertActiveReservationQuantity soma unidades à reserva ativa, criando a linha
+// se não existir. Uma chamada, sem leitura prévia — ler a lista de reservas para
+// escolher entre CREATE e ADJUST é uma corrida, e as duas pontas dela apareceram
+// em produção em 12/08/2026 ("no rows in result set" e "duplicate key ...
+// uq_stock_reservations_active"), sempre depois de o movimento já ter ido ao ERP.
+func (r *Repository) UpsertActiveReservationQuantity(ctx context.Context, p erp.UpsertReservationParams) (*erp.StockReservationRow, error) {
+	eID, err := parseUUID(p.EventID)
+	if err != nil {
+		return nil, fmt.Errorf("parsing event ID: %w", err)
+	}
+	cID, err := parseUUID(p.CartID)
+	if err != nil {
+		return nil, fmt.Errorf("parsing cart ID: %w", err)
+	}
+	pID, err := parseUUID(p.ProductID)
+	if err != nil {
+		return nil, fmt.Errorf("parsing product ID: %w", err)
+	}
+	row, err := r.queries.UpsertActiveReservationQuantity(ctx, sqlc.UpsertActiveReservationQuantityParams{
+		EventID:           eID,
+		CartID:            cID,
+		ProductID:         pID,
+		ExternalProductID: p.ExternalProductID,
+		IncQty:            int32(p.IncQty),
+		ErpMovementID:     pgtype.Text{String: p.ERPMovementID, Valid: p.ERPMovementID != ""},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("upserting reservation quantity: %w", err)
+	}
+	return &erp.StockReservationRow{
+		ID:                uuidToString(row.ID),
+		EventID:           uuidToString(row.EventID),
+		CartID:            uuidToString(row.CartID),
+		ProductID:         uuidToString(row.ProductID),
+		ExternalProductID: row.ExternalProductID,
+		Quantity:          int(row.Quantity),
+		ERPMovementID:     row.ErpMovementID.String,
+		Status:            row.Status,
+		CreatedAt:         row.CreatedAt.Time,
+	}, nil
+}
+
 func (r *Repository) DecrementActiveReservationQuantity(ctx context.Context, cartID, productID string, dec int) (erp.ReservationDecrement, error) {
 	var out erp.ReservationDecrement
 	cID, err := parseUUID(cartID)

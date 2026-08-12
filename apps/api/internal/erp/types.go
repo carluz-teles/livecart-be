@@ -61,6 +61,17 @@ type StockReservationRow struct {
 	CreatedAt         time.Time
 }
 
+// UpsertReservationParams soma unidades à reserva ativa do (carrinho, produto,
+// evento), criando a linha quando ela ainda não existe.
+type UpsertReservationParams struct {
+	EventID           string
+	CartID            string
+	ProductID         string
+	ExternalProductID string
+	IncQty            int
+	ERPMovementID     string
+}
+
 // ReservationDecrement é o que o banco decidiu ao baixar unidades de uma
 // reserva. O chamador só age depois de ler isto — nunca a partir de uma leitura
 // própria anterior, que envelhece durante a chamada ao ERP.
