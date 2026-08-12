@@ -568,13 +568,27 @@ func (s *Service) Create(ctx context.Context, input CreateIntegrationInput) (*Cr
 	// before connecting a new one. Mirrors the partial unique index in the DB
 	// but surfaces a friendly PT-BR message instead of a constraint violation.
 	if input.Type == string(providers.ProviderTypeERP) {
-		if existing, err := s.repo.GetAnyByType(ctx, input.StoreID, string(providers.ProviderTypeERP)); err != nil {
+		existing, err := s.repo.GetAnyByType(ctx, input.StoreID, string(providers.ProviderTypeERP))
+		if err != nil {
 			return nil, err
-		} else if existing != nil && existing.Provider != input.Provider {
+		}
+		if existing != nil && existing.Provider != input.Provider {
 			return nil, httpx.ErrConflict(fmt.Sprintf(
 				"você já tem o ERP %s conectado. Desconecte-o antes de conectar outro ERP.",
 				existing.Provider,
 			))
+		}
+		// RECONEXÃO do mesmo ERP. A guarda acima só barrava ERP DIFERENTE, então
+		// reconectar o mesmo caía no INSERT e estourava a
+		// uniq_integrations_store_one_erp com 500 (SQLSTATE 23505) — e reconectar
+		// é justamente o caminho de recuperação.
+		//
+		// Medido em produção em 12/08/2026: o token do Tiny venceu em 09/08 18:40,
+		// o refresh falhou, a integração virou 'error' e o lojista ficou preso —
+		// o botão de sincronizar desaparece (o front exige status 'active') e
+		// quatro tentativas de reconectar devolveram 500.
+		if existing != nil {
+			return s.reconnectSameProvider(ctx, existing, input)
 		}
 	}
 
@@ -604,6 +618,57 @@ func (s *Service) Create(ctx context.Context, input CreateIntegrationInput) (*Cr
 	}
 
 	return s.toCreateOutput(row), nil
+}
+
+// reconnectSameProvider reaproveita a linha existente em vez de inserir outra:
+// credenciais novas, prazo novo, status de volta para 'pending_auth' — o mesmo
+// estado em que uma integração nasce, para o fluxo de autorização seguir igual.
+//
+// Reusa a linha (e não apaga/recria) porque o id da integração é referenciado
+// por integration_logs e webhook_events; recriar romperia a trilha de auditoria
+// e invalidaria a URL de webhook que o lojista já cadastrou no ERP, que carrega
+// o id.
+//
+// Metadados só são substituídos quando vêm preenchidos: apagá-los levaria
+// embora o webhookLastPingAt, que é o que sustenta o indicador de webhook do
+// painel — o lojista reconectaria e o webhook apareceria como "nunca pingou".
+func (s *Service) reconnectSameProvider(ctx context.Context, existing *IntegrationRow, input CreateIntegrationInput) (*CreateIntegrationOutput, error) {
+	encryptedCreds, err := s.encryptor.EncryptJSON(input.Credentials)
+	if err != nil {
+		return nil, fmt.Errorf("encrypting credentials: %w", err)
+	}
+
+	var tokenExpiresAt *time.Time
+	if input.Credentials != nil && !input.Credentials.ExpiresAt.IsZero() {
+		tokenExpiresAt = &input.Credentials.ExpiresAt
+	}
+
+	if err := s.repo.UpdateCredentials(ctx, existing.ID, encryptedCreds, tokenExpiresAt); err != nil {
+		return nil, fmt.Errorf("updating credentials on reconnect: %w", err)
+	}
+	if err := s.repo.UpdateStatus(ctx, existing.ID, "pending_auth"); err != nil {
+		return nil, fmt.Errorf("resetting status on reconnect: %w", err)
+	}
+	if len(input.Metadata) > 0 {
+		if err := s.repo.UpdateMetadata(ctx, existing.ID, input.Metadata); err != nil {
+			return nil, fmt.Errorf("updating metadata on reconnect: %w", err)
+		}
+	}
+
+	logger.From(ctx, s.logger).Info("erp integration reconnected in place",
+		zap.String("integration_id", existing.ID),
+		zap.String("store_id", existing.StoreID),
+		zap.String("provider", existing.Provider),
+		zap.String("previous_status", existing.Status),
+	)
+
+	// Lê de volta para devolver o estado real gravado, e não o que supomos ter
+	// gravado — o front usa este retorno para montar as URLs e o indicador.
+	fresh, err := s.repo.GetByID(ctx, existing.ID, existing.StoreID)
+	if err != nil {
+		return nil, fmt.Errorf("reloading integration after reconnect: %w", err)
+	}
+	return s.toCreateOutput(fresh), nil
 }
 
 // GetByID retrieves an integration by ID.
