@@ -87,6 +87,32 @@ SET quantity = CASE WHEN status = 'reversed' THEN quantity ELSE quantity + sqlc.
     reversed_at = NULL
 WHERE id = sqlc.arg(id);
 
+-- name: ListStockPositionsForReconciliation :many
+-- O que o sistema ACREDITA sobre cada produto ligado ao ERP: o contador local e
+-- quantas unidades estão seguradas por reserva ativa neste instante.
+--
+-- Existe porque não havia detecção nenhuma. O desvio de 12/08/2026 — uma unidade
+-- inventada no Gabinete Gamer e uma perdida no Perfume — só apareceu porque o
+-- lojista conferiu o Tiny na mão, e diagnosticá-lo exigiu reconstruir o razão a
+-- partir de integration_logs. Bug de estoque é inevitável; ficar dias sem saber
+-- não precisa ser.
+--
+-- Só produtos com vínculo no ERP: sem external_id não há saldo remoto com que
+-- comparar.
+SELECT p.id,
+       p.name,
+       p.external_id,
+       p.stock::int AS local_stock,
+       COALESCE(SUM(sr.quantity) FILTER (WHERE sr.status = 'active'), 0)::int AS held
+FROM products p
+LEFT JOIN stock_reservations sr ON sr.product_id = p.id
+WHERE p.store_id = sqlc.arg(store_id)
+  AND p.external_id IS NOT NULL
+  AND p.external_id <> ''
+  AND p.external_source = sqlc.arg(external_source)
+GROUP BY p.id, p.name, p.external_id, p.stock
+ORDER BY p.name;
+
 -- name: HasActiveEventForProduct :one
 SELECT EXISTS(
     SELECT 1 FROM stock_reservations sr
