@@ -1,5 +1,7 @@
 package integration
 
+import "time"
+
 // A regra de como o SALDO ABSOLUTO do ERP entra no nosso contador local.
 //
 // Os dois lados falam línguas diferentes, e é daí que nasce toda esta classe de
@@ -73,4 +75,46 @@ func stockSyncMode(guarded, guardErr, pendingReversal, pendErr bool) (skipStock,
 	}
 
 	return false, false
+}
+
+// erpMovementEchoWindow é quanto tempo, depois de mandarmos um movimento ao
+// ERP, o saldo absoluto que ele devolve ainda pode ser o eco desse movimento em
+// vez de notícia sobre outro canal.
+//
+// Medido em produção em 12/08/2026: no caminho normal o webhook do Tiny voltou
+// em 1 a 3 segundos; quando o estorno entrou em retentativa, o último chegou
+// 50 segundos depois do primeiro. Um minuto cobre os dois casos com folga.
+//
+// Errar para cima só custa atraso: uma venda em outro canal demora até um
+// minuto para refletir. Errar para baixo custa contador corrompido, que não se
+// recupera sozinho. A assimetria manda ser generoso aqui.
+const erpMovementEchoWindow = 60 * time.Second
+
+// NoteERPMovementSent carimba que acabamos de mexer no estoque deste produto no
+// ERP. Chamado logo depois de cada saída ou entrada bem-sucedida.
+func (s *Service) NoteERPMovementSent(externalProductID string) {
+	if externalProductID == "" {
+		return
+	}
+	s.erpMovementSentAt.Store(externalProductID, time.Now())
+}
+
+// erpMovementEchoing responde se um movimento NOSSO ainda pode estar voltando
+// pelo webhook deste produto.
+//
+// É o que separa "o Tiny está me contando algo novo" de "o Tiny está repetindo
+// o que eu acabei de fazer". Sem essa distinção só restam dois extremos ruins:
+// aplicar sempre (e corromper o contador com o próprio eco) ou nunca aplicar
+// enquanto houver reserva (e ficar cego para os outros canais do lojista por
+// trinta minutos).
+func (s *Service) erpMovementEchoing(externalProductID string) bool {
+	v, ok := s.erpMovementSentAt.Load(externalProductID)
+	if !ok {
+		return false
+	}
+	sentAt, ok := v.(time.Time)
+	if !ok {
+		return false
+	}
+	return time.Since(sentAt) < erpMovementEchoWindow
 }

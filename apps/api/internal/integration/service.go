@@ -134,6 +134,27 @@ type Service struct {
 	// latchava para sempre.
 	subscriptionEnsured sync.Map
 
+	// erpMovementSentAt guarda QUANDO mandamos o último movimento de estoque de
+	// cada produto ao ERP, por external_product_id.
+	//
+	// Serve para separar duas coisas que o webhook do Tiny não distingue: o eco
+	// do NOSSO movimento e uma venda em OUTRO canal. Os dois chegam iguais — um
+	// saldo absoluto menor que o nosso número.
+	//
+	// A supressão anterior era por reserva ATIVA, e uma reserva vive o carrinho
+	// inteiro (30 minutos). Nessa janela toda a gente ignorava o Tiny, e o
+	// lojista que vende o mesmo SKU no Mercado Livre ficava com o LiveCart
+	// oferecendo unidade que não existe. Medido na simulação: disponível 3
+	// contra 2 reais.
+	//
+	// O eco, esse, chega em segundos — de 1 a 3 no caso normal, até ~50 quando o
+	// estorno entra em retentativa. Carimbar o instante do envio troca a cegueira
+	// de trinta minutos por uma de um minuto.
+	//
+	// Memória e não banco: perder o carimbo num deploy só faz voltar ao
+	// comportamento conservador por um minuto.
+	erpMovementSentAt sync.Map
+
 	// lastWebhookAt guarda, por conta do Instagram (entry.id), quando o último
 	// webhook CHEGOU. É a memória do vigia: a Meta para de entregar sem avisar,
 	// e sem este relógio "parou de chegar" e "ninguém comentou" são o mesmo
@@ -3437,13 +3458,35 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 			zap.String("external_product_id", externalProductID),
 			zap.Error(guardErr),
 		)
-	} else if guarded {
-		logger.From(ctx, s.logger).Info("ERP stock sync in guard window: applying reductions only (reservation/finalisation in flight)",
+	}
+
+	// O guard deixa de valer enquanto a reserva vive e passa a valer enquanto o
+	// NOSSO movimento pode estar ecoando.
+	//
+	// São coisas de duração muito diferente. Uma reserva dura o carrinho inteiro
+	// — trinta minutos. O eco de um movimento nosso chega em segundos. Suprimir
+	// pela reserva cegava o LiveCart para os outros canais do lojista durante a
+	// live toda: quem vende o mesmo SKU no Mercado Livre via o LiveCart oferecer
+	// unidade que já tinha sido vendida lá. A simulação em
+	// internal/erp/simulacao_multicanal_test.go mede isso — disponível 3 contra
+	// 2 reais no Tiny.
+	//
+	// O Tiny é a fonte da verdade do total: só ele agrega LiveCart, marketplace,
+	// site e balcão. Ignorá-lo por meia hora é abrir mão da única informação que
+	// temos sobre o que acontece fora daqui.
+	echoing := s.erpMovementEchoing(externalProductID)
+	if guarded && !echoing {
+		logger.From(ctx, s.logger).Info("stock guard relaxed: reservation is live but no movement of ours is echoing — trusting the ERP balance",
+			zap.String("external_product_id", externalProductID),
+			zap.String("store_id", integration.StoreID),
+		)
+	} else if echoing {
+		logger.From(ctx, s.logger).Info("ERP stock sync suppressed: a movement of ours may still be echoing",
 			zap.String("external_product_id", externalProductID),
 			zap.String("store_id", integration.StoreID),
 		)
 	}
-	skipStock, downgradeOnly := stockSyncMode(guarded, guardErr != nil, false, false)
+	skipStock, downgradeOnly := stockSyncMode(echoing, guardErr != nil, false, false)
 
 	// Estorno de carrinho em voo SUPRIME o sync inteiro, e tem de ser checado
 	// DEPOIS do guard porque é mais forte: `downgrade_only` deixa passar
@@ -3468,7 +3511,7 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 				zap.String("store_id", integration.StoreID),
 			)
 		}
-		skipStock, downgradeOnly = stockSyncMode(guarded, guardErr != nil, pending, pendErr != nil)
+		skipStock, downgradeOnly = stockSyncMode(echoing, guardErr != nil, pending, pendErr != nil)
 	}
 
 	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, skipStock, downgradeOnly); err != nil {
