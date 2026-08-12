@@ -336,56 +336,58 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 	existing, _ := s.repo.ListActiveReservationsByCartAndProduct(ctx, cartID, productID)
 
 	if delta > 0 {
+		// BANCO PRIMEIRO, ERP DEPOIS — simétrico ao ramo de redução.
+		//
+		// Antes: lia as reservas ativas, chamava o Tiny, e só então escolhia
+		// entre CREATE e ADJUST com base naquela leitura. Entre a leitura e a
+		// gravação passa ~1s (o limitador), e a escolha envelhece. As duas
+		// pontas quebraram no mesmo teste em 12/08/2026:
+		//
+		//   "no rows in result set" — leu reserva ativa, ela foi reversada no
+		//   meio, e o ADJUST não achou linha nenhuma;
+		//   "duplicate key ... uq_stock_reservations_active" — leu vazio, outra
+		//   requisição criou a linha, e o CREATE colidiu.
+		//
+		// Nos dois casos o movimento JÁ estava no Tiny e o comprador levava 422
+		// depois de o estoque ter se mexido. Clicando rápido no "+", ele
+		// repetia o ciclo a cada tentativa.
+		//
+		// O upsert atômico não precisa escolher ramo: o índice parcial decide.
+		row, saveErr := s.repo.UpsertActiveReservationQuantity(ctx, UpsertReservationParams{
+			EventID:           eventID,
+			CartID:            cartID,
+			ProductID:         productID,
+			ExternalProductID: externalID,
+			IncQty:            delta,
+		})
+		if saveErr != nil {
+			rollbackLocal()
+			return "", fmt.Errorf("recording reservation increase: %w", saveErr)
+		}
+
 		obs := fmt.Sprintf("Ajuste reserva LiveCart (+%d) - @%s - Cart %s", delta, platformHandle, cartID)
 		movementID, err := erpProvider.ReserveStock(ctx, externalID, delta, float64(unitPrice)/100, obs)
 		if err != nil {
-			rollbackLocal()
-			return "", fmt.Errorf("reserving stock delta in ERP: %w", err)
-		}
-
-		// Gravação falhou DEPOIS da saída no ERP: o Tiny já se moveu e nós não
-		// registramos nada. Sem o estorno compensatório abaixo, essa unidade
-		// some do ERP e nenhuma reconciliação a encontra — é o mesmo desfecho
-		// que produziu a unidade fantasma de 12/08, só que na outra direção.
-		//
-		// Mesmo padrão de ReserveStockInERP (:176-195). Estava lá e faltava aqui.
-		var saveErr error
-		if len(existing) == 0 {
-			_, saveErr = s.repo.CreateStockReservation(ctx, CreateStockReservationParams{
-				EventID:           eventID,
-				CartID:            cartID,
-				ProductID:         productID,
-				ExternalProductID: externalID,
-				Quantity:          delta,
-				ERPMovementID:     movementID,
-			})
-		} else {
-			_, saveErr = s.repo.AdjustActiveReservationQuantity(ctx, cartID, productID, delta, movementID)
-		}
-		if saveErr != nil {
-			logger.From(ctx, s.logger).Error("failed to record reservation increase, compensating in ERP",
-				zap.String("cart_id", cartID),
-				zap.String("product_id", productID),
-				zap.String("erp_movement_id", movementID),
-				zap.Error(saveErr),
-			)
-			reverseObs := fmt.Sprintf("Estorno compensatório - falha DB - Cart %s", cartID)
-			if _, revErr := erpProvider.ReverseStockReservation(ctx, externalID, delta, 0, reverseObs); revErr != nil {
-				logger.From(ctx, s.logger).Error("CRITICAL: failed to compensate ERP stock after DB failure — manual reconciliation required",
-					zap.String("external_product_id", externalID),
+			// O ERP recusou depois de já termos gravado. Desfazer é obrigatório:
+			// a reserva diria que seguramos unidades que o Tiny não separou.
+			if _, decErr := s.repo.DecrementActiveReservationQuantity(ctx, cartID, productID, delta); decErr != nil {
+				logger.From(ctx, s.logger).Error("ERP refused the increase and the reservation could not be undone — unit inconsistent between DB and ERP",
+					zap.String("cart_id", cartID),
+					zap.String("product_id", productID),
+					zap.String("reservation_id", row.ID),
 					zap.Int("quantity", delta),
-					zap.String("erp_movement_id", movementID),
-					zap.Error(revErr),
+					zap.Error(decErr),
 				)
 			}
 			rollbackLocal()
-			return "", fmt.Errorf("recording reservation increase: %w", saveErr)
+			return "", fmt.Errorf("reserving stock delta in ERP: %w", err)
 		}
 
 		logger.From(ctx, s.logger).Info("ERP reservation increased",
 			zap.String("cart_id", cartID),
 			zap.String("product_id", productID),
 			zap.Int("delta", delta),
+			zap.Int("new_qty", row.Quantity),
 			zap.String("erp_movement_id", movementID),
 		)
 		return movementID, nil

@@ -35,6 +35,7 @@ import (
 	"testing"
 
 	"livecart/apps/api/db/sqlc"
+	"livecart/apps/api/internal/erp"
 )
 
 func quantidadeDaReserva(t *testing.T, reservationID string) (int, string) {
@@ -60,7 +61,7 @@ func TestDecrementoConcorrenteNuncaBaixaAlemDaReserva(t *testing.T) {
 	repo := NewRepository(sqlc.New(testPool), testPool)
 
 	for _, caso := range []struct{ reserva, concorrentes int }{
-		{2, 2},   // o caso exato do incidente
+		{2, 2}, // o caso exato do incidente
 		{2, 8},
 		{3, 32},
 		{1, 16},
@@ -216,4 +217,79 @@ func TestRestauracaoDevolveAsUnidadesNosDoisDesfechos(t *testing.T) {
 				"mexeu na quantidade, então restaurar não pode somar de novo", qtd, status)
 		}
 	})
+}
+
+// O outro lado da mesma corrida: AUMENTO concorrente.
+//
+// Em 12/08/2026, no teste do lojista, cliques rápidos no "+" produziram os dois
+// desfechos possíveis do par "listar reservas / decidir CREATE ou ADJUST":
+//
+//	"no rows in result set"                          — leu ativa, sumiu no meio
+//	"duplicate key ... uq_stock_reservations_active" — leu vazio, outro criou
+//
+// Nos dois o movimento já tinha ido ao Tiny e o comprador levava 422 com o
+// estoque já mexido. O upsert atômico não escolhe ramo: o índice parcial
+// decide, e a soma é uma operação só.
+func TestUpsertConcorrenteSomaExatamenteUmaVezPorChamada(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+
+	fx := seedScaleEvent(t)
+	productID := seedSoldOutProductWithQueue(t, fx, 50, 0)
+	repo := NewRepository(sqlc.New(testPool), testPool)
+
+	var cartID string
+	if err := testPool.QueryRow(ctx,
+		`INSERT INTO carts (event_id, platform_user_id, platform_handle, token, short_id, status, payment_status)
+		 VALUES ($1, 'u-ups', 'h-ups', 't-ups-'||floor(random()*1000000)::text,
+		         (floor(random()*2000000000))::int, 'active', 'unpaid')
+		 RETURNING id::text`, fx.eventID).Scan(&cartID); err != nil {
+		t.Fatalf("seed cart: %v", err)
+	}
+
+	const chamadas = 16
+	var wg sync.WaitGroup
+	largada := make(chan struct{})
+	erros := make(chan error, chamadas)
+
+	for i := 0; i < chamadas; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-largada
+			_, err := repo.UpsertActiveReservationQuantity(ctx, erp.UpsertReservationParams{
+				EventID:           fx.eventID,
+				CartID:            cartID,
+				ProductID:         productID,
+				ExternalProductID: "EXT-UPS",
+				IncQty:            1,
+			})
+			if err != nil {
+				erros <- err
+			}
+		}()
+	}
+	close(largada)
+	wg.Wait()
+	close(erros)
+
+	for err := range erros {
+		t.Errorf("upsert concorrente falhou (era CREATE-vs-ADJUST antes): %v", err)
+	}
+
+	var linhas, total int
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*), COALESCE(sum(quantity),0)::int FROM stock_reservations
+		 WHERE cart_id = $1::uuid AND product_id = $2::uuid AND status = 'active'`,
+		cartID, productID).Scan(&linhas, &total); err != nil {
+		t.Fatalf("lendo reservas: %v", err)
+	}
+	if linhas != 1 {
+		t.Errorf("%d linhas ativas para o mesmo (carrinho, produto), quero 1 — "+
+			"linhas empilhadas viram estoque contado duas vezes", linhas)
+	}
+	if total != chamadas {
+		t.Errorf("soma = %d, quero %d — cada chamada soma exatamente uma unidade, "+
+			"nem a mais (oversell) nem a menos (unidade perdida)", total, chamadas)
+	}
 }

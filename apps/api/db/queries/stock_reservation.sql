@@ -34,6 +34,34 @@ SET quantity = quantity + sqlc.arg(delta_qty)::int,
 WHERE cart_id = sqlc.arg(cart_id) AND product_id = sqlc.arg(product_id) AND status = 'active'
 RETURNING *;
 
+-- name: UpsertActiveReservationQuantity :one
+-- Soma `inc_qty` à reserva ativa deste (carrinho, produto, evento), criando a
+-- linha se ela ainda não existir. Uma chamada, uma decisão, sem leitura prévia.
+--
+-- Substitui o par "listar reservas ativas / decidir entre CREATE e ADJUST", que
+-- é uma corrida: a lista é lida antes da chamada ao ERP (~1s pelo limitador) e
+-- decide um ramo que já não vale quando a gravação acontece. Os dois desfechos
+-- apareceram em produção em 12/08/2026, no mesmo teste:
+--
+--   "no rows in result set"  -> leu reserva ativa, ela foi reversada no meio,
+--                               o ADJUST não achou linha
+--   "duplicate key ... uq_stock_reservations_active" -> leu vazio, outra
+--                               requisição criou a linha, o CREATE colidiu
+--
+-- Nos dois casos o movimento JÁ tinha ido ao Tiny, e o comprador levou 422
+-- depois de o estoque ter se mexido. Clicando rápido no "+", ele tentava de
+-- novo, e cada tentativa repetia o ciclo.
+--
+-- O ON CONFLICT usa o índice parcial uq_stock_reservations_active
+-- (cart_id, product_id, event_id) WHERE status = 'active'.
+INSERT INTO stock_reservations (event_id, cart_id, product_id, external_product_id, quantity, erp_movement_id)
+VALUES (sqlc.arg(event_id), sqlc.arg(cart_id), sqlc.arg(product_id),
+        sqlc.arg(external_product_id), sqlc.arg(inc_qty)::int, sqlc.arg(erp_movement_id))
+ON CONFLICT (cart_id, product_id, event_id) WHERE status = 'active'
+DO UPDATE SET quantity = stock_reservations.quantity + sqlc.arg(inc_qty)::int,
+              erp_movement_id = COALESCE(NULLIF(sqlc.arg(erp_movement_id)::text, ''), stock_reservations.erp_movement_id)
+RETURNING *;
+
 -- name: DecrementActiveReservationQuantity :many
 -- Baixa `dec_qty` unidades da reserva ativa, mas SÓ se ela tiver esse tanto.
 -- Zero linhas significa "não pude" — leitura obsoleta, reserva menor que o

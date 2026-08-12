@@ -69,6 +69,35 @@ func (l *cicloRepo) AdjustActiveReservationQuantity(_ context.Context, cartID, p
 // DecrementActiveReservationQuantity espelha a query real: só baixa se a reserva
 // tiver o tanto pedido, e quando a baixa consome tudo a linha sai de 'active'
 // com a quantidade intacta (o CHECK (quantity > 0) proíbe zerar em vigor).
+// UpsertActiveReservationQuantity espelha o INSERT ... ON CONFLICT real: soma
+// na reserva ativa do par, ou cria a linha quando não há nenhuma.
+func (l *cicloRepo) UpsertActiveReservationQuantity(_ context.Context, p UpsertReservationParams) (*StockReservationRow, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, r := range l.rows {
+		if r.CartID == p.CartID && r.ProductID == p.ProductID && l.status[r.ID] == "active" {
+			r.Quantity += p.IncQty
+			if p.ERPMovementID != "" {
+				r.ERPMovementID = p.ERPMovementID
+			}
+			return r, nil
+		}
+	}
+	l.nextID++
+	row := &StockReservationRow{
+		ID:                fmt.Sprintf("res-%d", l.nextID),
+		EventID:           p.EventID,
+		CartID:            p.CartID,
+		ProductID:         p.ProductID,
+		ExternalProductID: p.ExternalProductID,
+		Quantity:          p.IncQty,
+		ERPMovementID:     p.ERPMovementID,
+	}
+	l.rows[row.ID] = row
+	l.status[row.ID] = "active"
+	return row, nil
+}
+
 func (l *cicloRepo) DecrementActiveReservationQuantity(_ context.Context, cartID, productID string, dec int) (ReservationDecrement, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
