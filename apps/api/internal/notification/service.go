@@ -18,35 +18,6 @@ import (
 type DMSender interface {
 	SendInstagramDM(ctx context.Context, storeID, recipientID, text string) error
 	ReplyToInstagramComment(ctx context.Context, storeID, commentID, text string) error
-	// PublicReplyToInstagramComment publica uma resposta VISÍVEL sob o
-	// comentário. É o último recurso quando os dois caminhos privados falham —
-	// ver publicNudgeText.
-	PublicReplyToInstagramComment(ctx context.Context, storeID, commentID, text string) error
-}
-
-// publicNudgeText é a resposta pública de último recurso, e o que ela NÃO tem é
-// o ponto: o link do carrinho fica de fora.
-//
-// Medido em produção (09/08/2026): dos 61 comentários capturados por polling,
-// ZERO aceitaram private reply — a Meta só aceita o comment_id que ela mesma
-// entregou por webhook. O fallback seguinte, DM direta, bate em 403/2534022
-// ("outside of allowed window") porque comentário não abre a janela de 24h. Ou
-// seja: enquanto o webhook de live_comments está mudo, o carrinho nasce e o
-// comprador nunca recebe o link — a venda morre em silêncio.
-//
-// A resposta pública é o único canal que sobra, e por isso não pode levar o
-// link: /cart/<token> é uma URL-capacidade (quem tem o endereço fecha o pedido,
-// vê e altera os dados) e publicá-la entregaria o carrinho à live inteira. O
-// convite ao direct resolve sem vazar: a DM do comprador abre a janela de 24h,
-// e aí o link sai em privado (ver DeliverPendingCartOnDM, do outro lado).
-//
-// Texto fixo, não template de loja: é mensagem de exceção do canal, não gatilho
-// de negócio — não atravessa as cinco camadas de configuração.
-func publicNudgeText(handle string) string {
-	if handle == "" {
-		return "Separei seu pedido! 💜 Me chama no direct que eu te mando o link pra finalizar."
-	}
-	return "@" + handle + " separei seu pedido! 💜 Me chama no direct que eu te mando o link pra finalizar."
 }
 
 // Service handles notification logic including templates, cooldowns, and logging.
@@ -360,9 +331,15 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 		}, nil
 	}
 
-	// Três caminhos, do mais privado ao mais público. Os dois primeiros entregam
-	// a mensagem inteira; o terceiro não entrega nada — só chama o comprador
-	// para o direct, porque publicar o link exporia o carrinho (publicNudgeText).
+	// Dois caminhos, os dois privados. Houve um terceiro — resposta PÚBLICA sob o
+	// comentário chamando o comprador ao direct — construído em 09/08/2026,
+	// quando a Meta havia parado de entregar `live_comments` e o private reply
+	// era recusado em 61 de 61 comentários capturados por polling.
+	//
+	// Removido em 12/08 junto com a causa: trocar a conta de Business para
+	// Creator restabeleceu a entrega, o private reply voltou a funcionar, e uma
+	// mensagem da loja na timeline pedindo DM deixou de ser o menor mal para
+	// virar ruído na live.
 	var sendErr error
 	if input.PlatformCommentID != "" {
 		logger.From(ctx, s.logger).Debug("trying comment reply first",
@@ -376,32 +353,6 @@ func (s *Service) Send(ctx context.Context, input SendInput) (*SendResult, error
 			)
 			// Fallback to DM
 			sendErr = s.dmSender.SendInstagramDM(ctx, input.StoreID, input.PlatformUserID, message)
-		}
-		// Os dois caminhos privados caíram. Antes desta guarda o pedido parava
-		// aqui e o comprador nunca sabia que tinha carrinho — 61 de 61 vezes
-		// nas lives medidas. A resposta pública é o que resta.
-		if sendErr != nil {
-			pubErr := s.dmSender.PublicReplyToInstagramComment(
-				ctx, input.StoreID, input.PlatformCommentID, publicNudgeText(input.PlatformHandle))
-			if pubErr == nil {
-				s.markUndelivered(ctx, logID, ReasonNudgedPublicly)
-				logger.From(ctx, s.logger).Info("private paths refused; buyer nudged publicly",
-					zap.String("store_id", input.StoreID),
-					zap.String("comment_id", input.PlatformCommentID),
-					zap.String("type", string(input.NotificationType)),
-					zap.Error(sendErr),
-				)
-				return &SendResult{
-					LogID:       logID,
-					Status:      StatusUndelivered,
-					MessageText: message,
-					Reason:      ReasonNudgedPublicly,
-				}, nil
-			}
-			logger.From(ctx, s.logger).Warn("public reply fallback also failed",
-				zap.String("comment_id", input.PlatformCommentID),
-				zap.Error(pubErr),
-			)
 		}
 	} else {
 		// No comment ID, send DM directly

@@ -129,6 +129,85 @@ func (q *Queries) CreateStockReservation(ctx context.Context, arg CreateStockRes
 	return i, err
 }
 
+const decrementActiveReservationQuantity = `-- name: DecrementActiveReservationQuantity :many
+UPDATE stock_reservations
+SET quantity = CASE WHEN quantity > $1::int
+                    THEN quantity - $1::int
+                    ELSE quantity END,
+    status = CASE WHEN quantity <= $1::int THEN 'reversed' ELSE status END,
+    reversed_at = CASE WHEN quantity <= $1::int THEN now() ELSE reversed_at END,
+    erp_movement_id = COALESCE(NULLIF($2::text, ''), erp_movement_id)
+WHERE cart_id = $3
+  AND product_id = $4
+  AND status = 'active'
+  AND quantity >= $1::int
+RETURNING id, event_id, cart_id, product_id, external_product_id, quantity, erp_movement_id, status, created_at, reversed_at
+`
+
+type DecrementActiveReservationQuantityParams struct {
+	DecQty        int32       `json:"dec_qty"`
+	ErpMovementID string      `json:"erp_movement_id"`
+	CartID        pgtype.UUID `json:"cart_id"`
+	ProductID     pgtype.UUID `json:"product_id"`
+}
+
+// Baixa `dec_qty` unidades da reserva ativa, mas SÓ se ela tiver esse tanto.
+// Zero linhas significa "não pude" — leitura obsoleta, reserva menor que o
+// pedido, ou outra requisição chegou antes.
+//
+// Existe porque decidir o ramo (reversão total × decremento parcial) a partir
+// de uma leitura anterior é uma corrida. Em 12/08/2026 um PATCH e um DELETE do
+// mesmo item se cruzaram: o DELETE leu `cart_items` já atualizado (1) e
+// `stock_reservations` ainda desatualizado (2), concluiu que sobraria 1 unidade,
+// mandou a entrada ao Tiny e só então tentou `1 + (-1) = 0` — que bate no
+// CHECK (quantity > 0) da migration 000030. O movimento já estava no Tiny e
+// ninguém o compensou: +1 unidade fantasma no Gabinete Gamer.
+//
+// Com o guard `quantity >= dec_qty` dentro do próprio UPDATE, quem decide é o
+// banco, e a decisão já vem aplicada. O chamador só chama o ERP depois.
+// Os dois desfechos numa tacada só. Baixa parcial quando sobra unidade; quando
+// a baixa consome a reserva inteira, a linha sai de 'active' com a quantidade
+// INTACTA — zerar em vigor violaria o CHECK (quantity > 0) da migration 000030,
+// que é exatamente a pedra em que o fluxo antigo tropeçou.
+//
+// Separar em duas queries traria de volta a corrida: entre decidir qual usar e
+// executá-la, outra requisição muda a reserva.
+func (q *Queries) DecrementActiveReservationQuantity(ctx context.Context, arg DecrementActiveReservationQuantityParams) ([]StockReservation, error) {
+	rows, err := q.db.Query(ctx, decrementActiveReservationQuantity,
+		arg.DecQty,
+		arg.ErpMovementID,
+		arg.CartID,
+		arg.ProductID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []StockReservation{}
+	for rows.Next() {
+		var i StockReservation
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventID,
+			&i.CartID,
+			&i.ProductID,
+			&i.ExternalProductID,
+			&i.Quantity,
+			&i.ErpMovementID,
+			&i.Status,
+			&i.CreatedAt,
+			&i.ReversedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const hasActiveEventForProduct = `-- name: HasActiveEventForProduct :one
 SELECT EXISTS(
     SELECT 1 FROM stock_reservations sr
@@ -387,6 +466,38 @@ func (q *Queries) ListActiveReservationsByEvent(ctx context.Context, eventID pgt
 		return nil, err
 	}
 	return items, nil
+}
+
+const restoreReservationQuantityByID = `-- name: RestoreReservationQuantityByID :execrows
+UPDATE stock_reservations
+SET quantity = CASE WHEN status = 'reversed' THEN quantity ELSE quantity + $1::int END,
+    status = 'active',
+    reversed_at = NULL
+WHERE id = $2
+`
+
+type RestoreReservationQuantityByIDParams struct {
+	IncQty int32       `json:"inc_qty"`
+	ID     pgtype.UUID `json:"id"`
+}
+
+// Desfaz DecrementActiveReservationQuantity quando o ERP recusa DEPOIS do
+// decremento local. Sem isso o banco diria que a unidade está livre e o Tiny
+// diria que está reservada, e nada reconciliaria as duas versões.
+//
+// Por ID, e não por (cart, produto), porque o desfazer tem de acertar
+// exatamente a linha que acabou de ser mexida — filtrar por par resgataria
+// reservas reversadas em outro momento.
+//
+// Espelha os dois desfechos do decremento: se a linha saiu de 'active' com a
+// quantidade intacta (baixa total), só o status volta; se foi baixa parcial,
+// as unidades voltam.
+func (q *Queries) RestoreReservationQuantityByID(ctx context.Context, arg RestoreReservationQuantityByIDParams) (int64, error) {
+	result, err := q.db.Exec(ctx, restoreReservationQuantityByID, arg.IncQty, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const restoreReservationToActive = `-- name: RestoreReservationToActive :execrows

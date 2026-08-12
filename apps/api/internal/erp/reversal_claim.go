@@ -53,17 +53,32 @@ type ReservationClaimer interface {
 // carrinho grande morrem por prazo — e foi exatamente nelas que a marcação
 // falhou em 08/08. O registro do que aconteceu no ERP não pode depender de
 // sobrar tempo no handler.
+//
+// Guarda uma FÁBRICA de contextos, não um contexto. Guardar um só era a outra
+// metade do mesmo defeito, apesar de o comentário vizinho já prometer o
+// contrário: um orçamento de 10s criado antes do laço é consumido pelas
+// chamadas ao ERP, e as últimas restaurações rodam com o prazo já vencido.
+//
+// Em 12/08/2026 isso custou uma unidade do Perfume Cebolinha: a reserva
+// 158b36e7 foi reivindicada com 1,5s de orçamento restante, o Tiny travou, e o
+// RestoreReservationToActive rodou com o contexto morto há 5 segundos. A linha
+// ficou 'reversed' sem movimento, e a retentativa não a viu — ela filtra por
+// 'active'. A unidade saiu do Tiny e não voltou nunca.
 type claimCtxRepo struct {
-	repo ERPRepository
-	ctx  context.Context
+	repo   ERPRepository
+	newCtx func() (context.Context, context.CancelFunc)
 }
 
 func (c claimCtxRepo) ClaimReservationForReversal(_ context.Context, id string) (bool, error) {
-	return c.repo.ClaimReservationForReversal(c.ctx, id)
+	ctx, cancel := c.newCtx()
+	defer cancel()
+	return c.repo.ClaimReservationForReversal(ctx, id)
 }
 
 func (c claimCtxRepo) RestoreReservationToActive(_ context.Context, id string) error {
-	return c.repo.RestoreReservationToActive(c.ctx, id)
+	ctx, cancel := c.newCtx()
+	defer cancel()
+	return c.repo.RestoreReservationToActive(ctx, id)
 }
 
 // ReverseReservationsClaimFirst estorna cada reserva no máximo UMA vez, mesmo

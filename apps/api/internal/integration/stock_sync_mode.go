@@ -48,11 +48,28 @@ func stockSyncMode(guarded, guardErr, pendingReversal, pendErr bool) (skipStock,
 		return true, false
 	}
 
-	// Reserva ativa numa live: reduções do lojista no Tiny durante a
-	// transmissão são legítimas e devem refletir. O que não pode é SUBIR, que é
-	// a direção capaz de inventar oferta.
+	// Reserva ATIVA: o saldo do ERP não é fonte da verdade para o nosso contador,
+	// em direção nenhuma.
+	//
+	// Aqui valia downgrade-only, com o argumento de que redução do lojista no
+	// Tiny durante a live é legítima e deve refletir. O argumento ignora que,
+	// enquanto seguramos a peça, quem mais mexe naquele saldo somos NÓS: cada
+	// reserva é uma saída, cada ajuste de checkout é outro movimento, e cada um
+	// volta como webhook com o valor absoluto já deflacionado. "ERP menor que o
+	// local" durante um hold é, quase sempre, o eco da nossa própria operação —
+	// e não dá para distinguir do lojista mexendo.
+	//
+	// Em 12/08/2026, às 17:21:25.869: `local_stock=1 erp_stock=0 new_stock=0
+	// downgrade_only=true`. Aquele zero era do movimento que nós mesmos
+	// tínhamos mandado 0,6 segundo antes. O contador local foi a zero e nunca
+	// mais reconciliou, porque os webhooks seguintes vieram com skip_stock.
+	//
+	// Suprimir custa atraso: uma redução real do lojista durante a live só
+	// reflete quando os holds saírem. É um atraso de minutos, contra um
+	// contador corrompido que não se recupera sozinho — e a query do guard
+	// (HasStockGuardForProduct) já afirma exatamente isto no comentário dela.
 	if guarded {
-		return false, true
+		return true, false
 	}
 
 	return false, false

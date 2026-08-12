@@ -121,6 +121,12 @@ func (m *mockRepo) CreateStockReservation(context.Context, CreateStockReservatio
 	}
 	return &StockReservationRow{}, nil
 }
+func (m *mockRepo) DecrementActiveReservationQuantity(context.Context, string, string, int) (ReservationDecrement, error) {
+	return ReservationDecrement{}, nil
+}
+
+func (m *mockRepo) RestoreReservationQuantityByID(context.Context, string, int) error { return nil }
+
 func (m *mockRepo) AdjustActiveReservationQuantity(context.Context, string, string, int, string) (*StockReservationRow, error) {
 	m.adjusts++
 	return &StockReservationRow{}, nil

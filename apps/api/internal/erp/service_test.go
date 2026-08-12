@@ -59,6 +59,12 @@ func (stubERPRepo) ListActiveReservationsByCartAndProduct(context.Context, strin
 func (stubERPRepo) CreateStockReservation(context.Context, CreateStockReservationParams) (*StockReservationRow, error) {
 	return nil, nil
 }
+func (stubERPRepo) DecrementActiveReservationQuantity(context.Context, string, string, int) (ReservationDecrement, error) {
+	return ReservationDecrement{}, nil
+}
+
+func (stubERPRepo) RestoreReservationQuantityByID(context.Context, string, int) error { return nil }
+
 func (stubERPRepo) AdjustActiveReservationQuantity(context.Context, string, string, int, string) (*StockReservationRow, error) {
 	return nil, nil
 }
