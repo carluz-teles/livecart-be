@@ -48,6 +48,13 @@ type ERPRepository interface {
 	CreateStockReservation(ctx context.Context, params CreateStockReservationParams) (*StockReservationRow, error)
 	// AdjustActiveReservationQuantity bumps an active reservation's quantity by delta.
 	AdjustActiveReservationQuantity(ctx context.Context, cartID, productID string, delta int, erpMovementID string) (*StockReservationRow, error)
+	// DecrementActiveReservationQuantity baixa dec unidades da reserva ativa e diz
+	// o que aconteceu. É o que substitui "ler, decidir, chamar o ERP, gravar":
+	// aqui quem decide é o banco, e a decisão já vem aplicada.
+	DecrementActiveReservationQuantity(ctx context.Context, cartID, productID string, dec int) (ReservationDecrement, error)
+	// RestoreReservationQuantityByID desfaz o decremento acima. Compensação
+	// obrigatória quando o ERP recusa depois do banco já ter baixado.
+	RestoreReservationQuantityByID(ctx context.Context, reservationID string, inc int) error
 	// ReverseReservationsByCartAndProduct marks a cart+product's reservations reversed.
 	ReverseReservationsByCartAndProduct(ctx context.Context, cartID, productID string) error
 	// DecrementProductStock atomically lowers local stock; ErrNoRows means the

@@ -847,29 +847,6 @@ func (r *Repository) TryDecrementProductStock(ctx context.Context, productID str
 	return true, nil
 }
 
-// PendingPublicNudge devolve o convite público em aberto deste comprador: o id
-// do log a quitar e o token do carrinho a entregar. Token "" quando não há
-// convite pendente.
-//
-// Serve o caminho "o comprador atendeu ao chamado do direct". Ausência de
-// convite é resposta normal — a maioria das DMs é conversa comum —, não erro.
-func (r *Repository) PendingPublicNudge(ctx context.Context, storeID, platformUserID string) (logID, cartToken string, err error) {
-	sID, err := parseUUID(storeID)
-	if err != nil {
-		return "", "", err
-	}
-	row, err := r.queries.FindPendingPublicNudge(ctx, sqlc.FindPendingPublicNudgeParams{
-		StoreID:        sID,
-		PlatformUserID: platformUserID,
-	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", "", nil
-		}
-		return "", "", fmt.Errorf("finding pending public nudge: %w", err)
-	}
-	return uuidToString(row.ID), row.Token, nil
-}
 
 // HealFromError devolve a integração para 'active' quando uma chamada volta a
 // dar certo, e diz se curou de fato. Só age sobre linha em 'error'.
@@ -894,20 +871,6 @@ func (r *Repository) EmitMessageReceived(ctx context.Context, env events.Envelop
 	})
 }
 
-// SettlePublicNudge quita o convite: o log passa a 'sent' porque o link ENFIM
-// chegou ao comprador. É o que faz FindPendingPublicNudge parar de encontrá-lo,
-// e portanto o que impede o link de ser reenviado a cada nova mensagem dele.
-func (r *Repository) SettlePublicNudge(ctx context.Context, logID string) error {
-	id, err := parseUUID(logID)
-	if err != nil {
-		return err
-	}
-	return r.queries.UpdateNotificationLogStatus(ctx, sqlc.UpdateNotificationLogStatusParams{
-		ID:     id,
-		Status: "sent",
-		SentAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
-	})
-}
 
 // DecrementProductStockUpTo takes up to `want` units atomically and returns
 // how many were actually taken (0 when out of stock). Powers partial waitlist
@@ -3155,6 +3118,65 @@ func (r *Repository) ReverseReservationsByCartAndProduct(ctx context.Context, ca
 // on the active reservation row for a (cart, product). erpMovementID is the
 // ID of the new ERP movement that produced the delta — empty leaves the
 // existing one in place.
+// DecrementActiveReservationQuantity baixa `dec` unidades da reserva ativa e diz
+// se conseguiu, junto do que sobrou. `applied=false` significa que a reserva
+// tinha menos que isso — leitura obsoleta, ou outra requisição do mesmo
+// comprador chegou primeiro.
+//
+// Substitui o par "ler quantidade / decidir o ramo / chamar o ERP / gravar",
+// que é uma corrida: em 12/08/2026 um PATCH e um DELETE do mesmo item se
+// cruzaram, o segundo decidiu pelo número obsoleto, mandou a entrada ao Tiny e
+// só então bateu no CHECK (quantity > 0) — deixando um movimento sem lastro.
+func (r *Repository) DecrementActiveReservationQuantity(ctx context.Context, cartID, productID string, dec int) (erp.ReservationDecrement, error) {
+	var out erp.ReservationDecrement
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return out, fmt.Errorf("parsing cart ID: %w", err)
+	}
+	pID, err := parseUUID(productID)
+	if err != nil {
+		return out, fmt.Errorf("parsing product ID: %w", err)
+	}
+	rows, err := r.queries.DecrementActiveReservationQuantity(ctx, sqlc.DecrementActiveReservationQuantityParams{
+		CartID:        cID,
+		ProductID:     pID,
+		DecQty:        int32(dec),
+		ErpMovementID: "",
+	})
+	if err != nil {
+		return out, fmt.Errorf("decrementing reservation quantity: %w", err)
+	}
+	if len(rows) == 0 {
+		return out, nil
+	}
+	out.Applied = true
+	for _, row := range rows {
+		out.ReservationIDs = append(out.ReservationIDs, uuidToString(row.ID))
+		if row.Status == "active" {
+			out.Remaining += int(row.Quantity)
+		}
+	}
+	return out, nil
+}
+
+// RestoreReservationQuantityByID devolve `inc` unidades à reserva. É a
+// compensação de DecrementActiveReservationQuantity: sem ela, um ERP que recusa
+// depois do decremento deixaria o banco dizendo "livre" e o Tiny dizendo
+// "reservada", divergência que nada reconcilia.
+func (r *Repository) RestoreReservationQuantityByID(ctx context.Context, reservationID string, inc int) error {
+	id, err := parseUUID(reservationID)
+	if err != nil {
+		return fmt.Errorf("parsing reservation ID: %w", err)
+	}
+	if _, err := r.queries.RestoreReservationQuantityByID(ctx, sqlc.RestoreReservationQuantityByIDParams{
+		ID:     id,
+		IncQty: int32(inc),
+	}); err != nil {
+		return fmt.Errorf("restoring reservation quantity: %w", err)
+	}
+	return nil
+}
+
 func (r *Repository) AdjustActiveReservationQuantity(ctx context.Context, cartID, productID string, delta int, erpMovementID string) (*StockReservationRow, error) {
 	cID, err := parseUUID(cartID)
 	if err != nil {

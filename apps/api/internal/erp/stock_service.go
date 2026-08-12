@@ -343,19 +343,43 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 			return "", fmt.Errorf("reserving stock delta in ERP: %w", err)
 		}
 
+		// Gravação falhou DEPOIS da saída no ERP: o Tiny já se moveu e nós não
+		// registramos nada. Sem o estorno compensatório abaixo, essa unidade
+		// some do ERP e nenhuma reconciliação a encontra — é o mesmo desfecho
+		// que produziu a unidade fantasma de 12/08, só que na outra direção.
+		//
+		// Mesmo padrão de ReserveStockInERP (:176-195). Estava lá e faltava aqui.
+		var saveErr error
 		if len(existing) == 0 {
-			if _, err := s.repo.CreateStockReservation(ctx, CreateStockReservationParams{
+			_, saveErr = s.repo.CreateStockReservation(ctx, CreateStockReservationParams{
 				EventID:           eventID,
 				CartID:            cartID,
 				ProductID:         productID,
 				ExternalProductID: externalID,
 				Quantity:          delta,
 				ERPMovementID:     movementID,
-			}); err != nil {
-				return movementID, fmt.Errorf("recording new reservation: %w", err)
+			})
+		} else {
+			_, saveErr = s.repo.AdjustActiveReservationQuantity(ctx, cartID, productID, delta, movementID)
+		}
+		if saveErr != nil {
+			logger.From(ctx, s.logger).Error("failed to record reservation increase, compensating in ERP",
+				zap.String("cart_id", cartID),
+				zap.String("product_id", productID),
+				zap.String("erp_movement_id", movementID),
+				zap.Error(saveErr),
+			)
+			reverseObs := fmt.Sprintf("Estorno compensatório - falha DB - Cart %s", cartID)
+			if _, revErr := erpProvider.ReverseStockReservation(ctx, externalID, delta, 0, reverseObs); revErr != nil {
+				logger.From(ctx, s.logger).Error("CRITICAL: failed to compensate ERP stock after DB failure — manual reconciliation required",
+					zap.String("external_product_id", externalID),
+					zap.Int("quantity", delta),
+					zap.String("erp_movement_id", movementID),
+					zap.Error(revErr),
+				)
 			}
-		} else if _, err := s.repo.AdjustActiveReservationQuantity(ctx, cartID, productID, delta, movementID); err != nil {
-			return movementID, fmt.Errorf("bumping reservation quantity: %w", err)
+			rollbackLocal()
+			return "", fmt.Errorf("recording reservation increase: %w", saveErr)
 		}
 
 		logger.From(ctx, s.logger).Info("ERP reservation increased",
@@ -377,36 +401,86 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 		return "", nil
 	}
 
-	// Sum across all active rows (in practice the unique index keeps it to 1).
-	currentQty := 0
-	for _, r := range existing {
-		currentQty += r.Quantity
-	}
-	newQty := currentQty + delta
-
-	obs := fmt.Sprintf("Ajuste reserva LiveCart (%d) - @%s - Cart %s", delta, platformHandle, cartID)
-	movementID, err := erpProvider.ReverseStockReservation(ctx, externalID, -delta, 0, obs)
+	// BANCO PRIMEIRO, ERP DEPOIS — a ordem aqui é a correção.
+	//
+	// Antes: somava a quantidade de uma leitura anterior, decidia o ramo por
+	// esse número, chamava o Tiny e SÓ ENTÃO gravava. Duas coisas davam errado
+	// ao mesmo tempo. A leitura envelhecia durante a chamada HTTP (~1s com o
+	// limitador), e quando a gravação seguinte falhava — tipicamente no
+	// CHECK (quantity > 0) ao tentar zerar em vez de reverter — o movimento já
+	// estava no Tiny e ninguém o desfazia.
+	//
+	// Foi exatamente isso em 12/08/2026: um PATCH (2→1) e um DELETE do mesmo
+	// item se cruzaram por 83ms. O DELETE leu `cart_items` já em 1 e a reserva
+	// ainda em 2, concluiu que sobraria 1, mandou a entrada (movimento
+	// 365095970) e bateu no CHECK. O Gabinete Gamer fechou o dia com uma
+	// unidade a mais no Tiny do que existia de verdade.
+	//
+	// Agora o UPDATE condicional decide: ou baixou (e diz quanto sobrou), ou não
+	// havia o que baixar. Só depois o ERP é chamado, e se ele recusar a
+	// quantidade volta. O pior caso deixou de ser "unidade fantasma invisível" e
+	// passou a ser "unidade a menos no Tiny", que a reconciliação enxerga.
+	dec := -delta
+	res, err := s.repo.DecrementActiveReservationQuantity(ctx, cartID, productID, dec)
 	if err != nil {
 		rollbackLocal()
-		return "", fmt.Errorf("reversing stock delta in ERP: %w", err)
+		return "", fmt.Errorf("decrementing reservation quantity: %w", err)
+	}
+	if !res.Applied {
+		// A reserva tem menos do que se pediu para baixar: leitura obsoleta, ou
+		// outra requisição do mesmo comprador chegou primeiro e já devolveu a
+		// unidade. Reverter o que sobrou é a única leitura segura — e se não
+		// sobrou nada, não há ERP a chamar.
+		logger.From(ctx, s.logger).Warn("reservation smaller than the requested decrease; reversing what is left",
+			zap.String("cart_id", cartID),
+			zap.String("product_id", productID),
+			zap.Int("delta", delta),
+		)
+		leftover := 0
+		for _, r := range existing {
+			leftover += r.Quantity
+		}
+		if leftover <= 0 {
+			return "", nil
+		}
+		obs := fmt.Sprintf("Ajuste reserva LiveCart (-%d) - @%s - Cart %s", leftover, platformHandle, cartID)
+		movementID, ferr := erpProvider.ReverseStockReservation(ctx, externalID, leftover, 0, obs)
+		if ferr != nil {
+			rollbackLocal()
+			return "", fmt.Errorf("reversing leftover reservation in ERP: %w", ferr)
+		}
+		if rerr := s.repo.ReverseReservationsByCartAndProduct(ctx, cartID, productID); rerr != nil {
+			return movementID, fmt.Errorf("marking leftover reservation reversed: %w", rerr)
+		}
+		return movementID, nil
 	}
 
-	// Full reversal: skip the UPDATE — stock_reservations.quantity has a
-	// CHECK (quantity > 0) constraint, so we cannot zero the row in place.
-	// Mark it reversed instead.
-	if newQty <= 0 {
-		if err := s.repo.ReverseReservationsByCartAndProduct(ctx, cartID, productID); err != nil {
-			return movementID, fmt.Errorf("marking reservation reversed: %w", err)
+	obs := fmt.Sprintf("Ajuste reserva LiveCart (%d) - @%s - Cart %s", delta, platformHandle, cartID)
+	movementID, err := erpProvider.ReverseStockReservation(ctx, externalID, dec, 0, obs)
+	if err != nil {
+		// O ERP recusou DEPOIS de já termos baixado no banco. Devolver as
+		// unidades é obrigatório: sem isso o banco diria "livre" e o Tiny diria
+		// "reservada", e nada reconciliaria as duas versões.
+		for _, id := range res.ReservationIDs {
+			if rerr := s.repo.RestoreReservationQuantityByID(ctx, id, dec); rerr != nil {
+				logger.From(ctx, s.logger).Error("ERP refused the decrease and the reservation could not be restored — unit inconsistent between DB and ERP",
+					zap.String("cart_id", cartID),
+					zap.String("product_id", productID),
+					zap.String("reservation_id", id),
+					zap.Int("quantity", dec),
+					zap.Error(rerr),
+				)
+			}
 		}
-	} else if _, err := s.repo.AdjustActiveReservationQuantity(ctx, cartID, productID, delta, movementID); err != nil {
-		return movementID, fmt.Errorf("decreasing reservation quantity: %w", err)
+		rollbackLocal()
+		return "", fmt.Errorf("reversing stock delta in ERP: %w", err)
 	}
 
 	logger.From(ctx, s.logger).Info("ERP reservation decreased",
 		zap.String("cart_id", cartID),
 		zap.String("product_id", productID),
 		zap.Int("delta", delta),
-		zap.Int("new_qty", newQty),
+		zap.Int("new_qty", res.Remaining),
 		zap.String("erp_movement_id", movementID),
 	)
 	return movementID, nil

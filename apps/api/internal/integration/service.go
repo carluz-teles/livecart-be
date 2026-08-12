@@ -4420,56 +4420,10 @@ func (s *Service) HandleMessageReceived(ctx context.Context, input ProcessInstag
 		}
 	}
 
-	// O comprador acabou de mandar DM — e é exatamente isso que abre a janela de
-	// 24h que um comentário NÃO abre (403/2534022). Se havia um convite público
-	// pendente para ele, este é o instante em que o link finalmente pode sair,
-	// e em privado.
-	//
-	// Outro lado de notification.publicNudgeText: lá o comprador é chamado ao
-	// direct porque os caminhos privados foram recusados; aqui o chamado é
-	// atendido. Sem este bloco o convite não levaria a lugar nenhum.
-	s.deliverPendingCartOnDM(ctx, integration.StoreID, input.SenderID)
 
 	return nil
 }
 
-// deliverPendingCartOnDM entrega o link do carrinho a quem foi chamado ao direct
-// e respondeu. Silencioso quando não há convite pendente: a maioria das DMs é
-// conversa comum, e reagir a todas transformaria a caixa de entrada em spam.
-//
-// Best-effort de propósito — é um bônus sobre uma DM que já foi processada, e
-// nada aqui pode derrubar o webhook.
-func (s *Service) deliverPendingCartOnDM(ctx context.Context, storeID, senderID string) {
-	logID, token, err := s.repo.PendingPublicNudge(ctx, storeID, senderID)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to look up pending public nudge",
-			zap.String("store_id", storeID), zap.Error(err))
-		return
-	}
-	if token == "" {
-		return
-	}
-
-	frontendURL := config.FrontendURL.StringOr("http://localhost:3000")
-	text := fmt.Sprintf("Aqui está o link pra finalizar seu pedido 💜\n\n%s/cart/%s", frontendURL, token)
-	if err := s.SendInstagramDM(ctx, storeID, senderID, text); err != nil {
-		logger.From(ctx, s.logger).Warn("failed to deliver pending cart link on dm",
-			zap.String("store_id", storeID), zap.Error(err))
-		return
-	}
-
-	// Só depois do envio confirmado. Quitar antes perderia o convite se o envio
-	// falhasse, e o comprador ficaria sem link e sem nova chance.
-	if err := s.repo.SettlePublicNudge(ctx, logID); err != nil {
-		logger.From(ctx, s.logger).Warn("cart link delivered but nudge not settled — may resend",
-			zap.String("log_id", logID), zap.Error(err))
-	}
-
-	logger.From(ctx, s.logger).Info("pending cart link delivered after buyer dm",
-		zap.String("store_id", storeID),
-		zap.String("sender_id", senderID),
-	)
-}
 
 // processStoryReply turns a DM reply to a published Story into a purchase intent.
 // It resolves the bound story-commerce event by the replied-to story media id,

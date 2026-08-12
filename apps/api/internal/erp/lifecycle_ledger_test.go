@@ -66,6 +66,47 @@ func (l *cicloRepo) AdjustActiveReservationQuantity(_ context.Context, cartID, p
 	return nil, fmt.Errorf("sem reserva ativa para %s/%s", cartID, productID)
 }
 
+// DecrementActiveReservationQuantity espelha a query real: só baixa se a reserva
+// tiver o tanto pedido, e quando a baixa consome tudo a linha sai de 'active'
+// com a quantidade intacta (o CHECK (quantity > 0) proíbe zerar em vigor).
+func (l *cicloRepo) DecrementActiveReservationQuantity(_ context.Context, cartID, productID string, dec int) (ReservationDecrement, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out ReservationDecrement
+	for _, r := range l.rows {
+		if r.CartID != cartID || r.ProductID != productID || l.status[r.ID] != "active" {
+			continue
+		}
+		if r.Quantity < dec {
+			return out, nil
+		}
+		out.Applied = true
+		out.ReservationIDs = append(out.ReservationIDs, r.ID)
+		if r.Quantity > dec {
+			r.Quantity -= dec
+			out.Remaining += r.Quantity
+		} else {
+			l.status[r.ID] = "reversed"
+		}
+		return out, nil
+	}
+	return out, nil
+}
+
+func (l *cicloRepo) RestoreReservationQuantityByID(_ context.Context, reservationID string, inc int) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	r, ok := l.rows[reservationID]
+	if !ok {
+		return fmt.Errorf("reserva %s inexistente", reservationID)
+	}
+	if l.status[reservationID] != "reversed" {
+		r.Quantity += inc
+	}
+	l.status[reservationID] = "active"
+	return nil
+}
+
 func (l *cicloRepo) ListActiveReservationsByCartAndProduct(_ context.Context, cartID, productID string) ([]StockReservationRow, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

@@ -446,9 +446,10 @@ func (s *Service) reverseCartReservationsInERP(ctx context.Context, cartID, stor
 			// dbCtx sobrevive ao cancelamento do handler: o movimento no ERP já
 			// pode ter acontecido, e não registrar isso é o que dispara o
 			// estorno duplicado.
-			claimCtx, cancelClaim := dbCtx()
-			defer cancelClaim()
-
+			//
+			// A fábrica é passada adiante em vez de um contexto já criado —
+			// criar um só aqui fora dava ao laço INTEIRO os 10s, e as últimas
+			// restaurações rodavam com o prazo vencido.
 			rows := make([]ReversibleReservation, 0, len(reservations))
 			for _, r := range reservations {
 				rows = append(rows, ReversibleReservation{
@@ -457,7 +458,7 @@ func (s *Service) reverseCartReservationsInERP(ctx context.Context, cartID, stor
 					Quantity:          r.Quantity,
 				})
 			}
-			_, allResolved := ReverseReservationsClaimFirst(ctx, s.logger, claimCtxRepo{s.repo, claimCtx}, erpProvider, rows,
+			_, allResolved := ReverseReservationsClaimFirst(ctx, s.logger, claimCtxRepo{s.repo, dbCtx}, erpProvider, rows,
 				func(r ReversibleReservation) string {
 					return fmt.Sprintf("Estorno expiração carrinho LiveCart - Cart %s - Reserva %s", cartID, r.ID)
 				})

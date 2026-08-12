@@ -76,28 +76,6 @@ WHERE nl.store_id = $1
   AND nl.undelivered_reason IS NOT NULL
 ORDER BY nl.platform_user_id, nl.created_at DESC;
 
--- name: FindPendingPublicNudge :one
--- O convite público em aberto deste comprador, com o token do carrinho a
--- entregar.
---
--- É a guarda do caminho "comprador respondeu ao convite": só recebe o link quem
--- foi chamado ao direct e ainda não foi atendido. Sem ela, toda mensagem que o
--- comprador mandasse — inclusive conversa comum — devolveria o link de novo.
---
--- Uma linha por convite; ao entregar, o log vira 'sent' e esta busca deixa de
--- encontrá-lo. É o que torna a entrega única sem precisar de estado novo.
-SELECT nl.id, c.token
-FROM notification_logs nl
-JOIN carts c ON c.id = nl.cart_id
-WHERE nl.store_id = $1
-  AND nl.platform_user_id = $2
-  AND nl.undelivered_reason = 'nudged_publicly'
-  AND nl.status = 'undelivered'
-  AND c.status IN ('pending', 'active', 'checkout')
-  AND (c.payment_status IS NULL OR c.payment_status NOT IN ('paid', 'refunded'))
-ORDER BY nl.created_at DESC
-LIMIT 1;
-
 -- name: GetLastNotificationForUser :one
 -- Returns the most recent notification for a user in a store (for cooldown check)
 SELECT * FROM notification_logs

@@ -245,8 +245,15 @@ func (i *Instagram) GetProfile(ctx context.Context) (*providers.SocialProfile, e
 
 // SendDirectMessage sends a text DM to a user via Instagram Graph API.
 // recipientID must be the Instagram-scoped ID (IGSID) of the recipient.
-// Uses HUMAN_AGENT tag to extend messaging window from 24h to 7 days.
-// If HUMAN_AGENT fails (not approved), falls back to standard messaging.
+//
+// Sem a tag HUMAN_AGENT. Ela estenderia a janela de 24h para 7 dias, mas a
+// permissão está `grant_status: REJECTED` no app (confirmado pelo App Review em
+// 11/08/2026), então a tentativa com a tag falhava com 403 em 100% dos envios e
+// só então caía para a mensagem padrão. Eram duas chamadas à Graph onde uma
+// resolve, com a primeira garantidamente inútil — e, com o timeout do client,
+// até 16s de latência jogados fora por DM.
+//
+// Se a permissão for aprovada um dia, a tag volta aqui.
 func (i *Instagram) SendDirectMessage(ctx context.Context, recipientID, text string) error {
 	if recipientID == "" {
 		return fmt.Errorf("recipient id is required")
@@ -260,26 +267,7 @@ func (i *Instagram) SendDirectMessage(ctx context.Context, recipientID, text str
 
 	url := fmt.Sprintf("%s/%s/me/messages", instagramGraphAPIBaseURL, instagramGraphAPIVersion)
 
-	// Try with HUMAN_AGENT tag first (extends window to 7 days)
 	payload := map[string]any{
-		"recipient":      map[string]string{"id": recipientID},
-		"message":        map[string]string{"text": text},
-		"messaging_type": "MESSAGE_TAG",
-		"tag":            "HUMAN_AGENT",
-	}
-
-	err := i.sendDMRequest(ctx, url, payload, recipientID, text)
-	if err == nil {
-		return nil
-	}
-
-	// If HUMAN_AGENT fails, try standard message (24h window)
-	logger.From(ctx, i.logger).Warn("HUMAN_AGENT tag failed, trying standard message",
-		zap.String("recipient_id", recipientID),
-		zap.Error(err),
-	)
-
-	payload = map[string]any{
 		"recipient": map[string]string{"id": recipientID},
 		"message":   map[string]string{"text": text},
 	}

@@ -61,6 +61,23 @@ type StockReservationRow struct {
 	CreatedAt         time.Time
 }
 
+// ReservationDecrement é o que o banco decidiu ao baixar unidades de uma
+// reserva. O chamador só age depois de ler isto — nunca a partir de uma leitura
+// própria anterior, que envelhece durante a chamada ao ERP.
+type ReservationDecrement struct {
+	// Applied é falso quando a reserva tinha menos unidades do que se pediu para
+	// baixar: leitura obsoleta, ou outra requisição do mesmo comprador chegou
+	// primeiro. Nesse caso NADA foi alterado.
+	Applied bool
+	// Remaining é o que continua reservado depois da baixa. Zero significa que a
+	// reserva foi consumida por inteiro e já saiu de 'active' — com a quantidade
+	// intacta, porque o CHECK (quantity > 0) proíbe zerar em vigor.
+	Remaining int
+	// ReservationIDs são as linhas efetivamente mexidas, para a compensação
+	// acertar exatamente elas se o ERP recusar.
+	ReservationIDs []string
+}
+
 // CreateStockReservationParams holds params for creating a stock reservation.
 type CreateStockReservationParams struct {
 	EventID           string
