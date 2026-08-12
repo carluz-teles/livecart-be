@@ -87,7 +87,12 @@ func tracedClient(logger *zap.Logger) *http.Client {
 		logger = zap.NewNop()
 	}
 	return &http.Client{
-		Timeout:   30 * time.Second,
+		// 8s, e não 30s. Nenhuma chamada nossa à Graph tem motivo para durar
+		// mais: a publicação de mídia, que é a única lenta, tem polling próprio
+		// com deadline separado (waitContainerFinished). Com 30s, dois POSTs
+		// empilhados (a tentativa com HUMAN_AGENT sempre falha antes do
+		// fallback) somavam mais que os 5s que a Meta exige para o 200.
+		Timeout:   8 * time.Second,
 		Transport: &traceTransport{base: http.DefaultTransport, logger: logger},
 	}
 }

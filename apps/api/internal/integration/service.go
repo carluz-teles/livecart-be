@@ -568,13 +568,27 @@ func (s *Service) Create(ctx context.Context, input CreateIntegrationInput) (*Cr
 	// before connecting a new one. Mirrors the partial unique index in the DB
 	// but surfaces a friendly PT-BR message instead of a constraint violation.
 	if input.Type == string(providers.ProviderTypeERP) {
-		if existing, err := s.repo.GetAnyByType(ctx, input.StoreID, string(providers.ProviderTypeERP)); err != nil {
+		existing, err := s.repo.GetAnyByType(ctx, input.StoreID, string(providers.ProviderTypeERP))
+		if err != nil {
 			return nil, err
-		} else if existing != nil && existing.Provider != input.Provider {
+		}
+		if existing != nil && existing.Provider != input.Provider {
 			return nil, httpx.ErrConflict(fmt.Sprintf(
 				"você já tem o ERP %s conectado. Desconecte-o antes de conectar outro ERP.",
 				existing.Provider,
 			))
+		}
+		// RECONEXÃO do mesmo ERP. A guarda acima só barrava ERP DIFERENTE, então
+		// reconectar o mesmo caía no INSERT e estourava a
+		// uniq_integrations_store_one_erp com 500 (SQLSTATE 23505) — e reconectar
+		// é justamente o caminho de recuperação.
+		//
+		// Medido em produção em 12/08/2026: o token do Tiny venceu em 09/08 18:40,
+		// o refresh falhou, a integração virou 'error' e o lojista ficou preso —
+		// o botão de sincronizar desaparece (o front exige status 'active') e
+		// quatro tentativas de reconectar devolveram 500.
+		if existing != nil {
+			return s.reconnectSameProvider(ctx, existing, input)
 		}
 	}
 
@@ -604,6 +618,57 @@ func (s *Service) Create(ctx context.Context, input CreateIntegrationInput) (*Cr
 	}
 
 	return s.toCreateOutput(row), nil
+}
+
+// reconnectSameProvider reaproveita a linha existente em vez de inserir outra:
+// credenciais novas, prazo novo, status de volta para 'pending_auth' — o mesmo
+// estado em que uma integração nasce, para o fluxo de autorização seguir igual.
+//
+// Reusa a linha (e não apaga/recria) porque o id da integração é referenciado
+// por integration_logs e webhook_events; recriar romperia a trilha de auditoria
+// e invalidaria a URL de webhook que o lojista já cadastrou no ERP, que carrega
+// o id.
+//
+// Metadados só são substituídos quando vêm preenchidos: apagá-los levaria
+// embora o webhookLastPingAt, que é o que sustenta o indicador de webhook do
+// painel — o lojista reconectaria e o webhook apareceria como "nunca pingou".
+func (s *Service) reconnectSameProvider(ctx context.Context, existing *IntegrationRow, input CreateIntegrationInput) (*CreateIntegrationOutput, error) {
+	encryptedCreds, err := s.encryptor.EncryptJSON(input.Credentials)
+	if err != nil {
+		return nil, fmt.Errorf("encrypting credentials: %w", err)
+	}
+
+	var tokenExpiresAt *time.Time
+	if input.Credentials != nil && !input.Credentials.ExpiresAt.IsZero() {
+		tokenExpiresAt = &input.Credentials.ExpiresAt
+	}
+
+	if err := s.repo.UpdateCredentials(ctx, existing.ID, encryptedCreds, tokenExpiresAt); err != nil {
+		return nil, fmt.Errorf("updating credentials on reconnect: %w", err)
+	}
+	if err := s.repo.UpdateStatus(ctx, existing.ID, "pending_auth"); err != nil {
+		return nil, fmt.Errorf("resetting status on reconnect: %w", err)
+	}
+	if len(input.Metadata) > 0 {
+		if err := s.repo.UpdateMetadata(ctx, existing.ID, input.Metadata); err != nil {
+			return nil, fmt.Errorf("updating metadata on reconnect: %w", err)
+		}
+	}
+
+	logger.From(ctx, s.logger).Info("erp integration reconnected in place",
+		zap.String("integration_id", existing.ID),
+		zap.String("store_id", existing.StoreID),
+		zap.String("provider", existing.Provider),
+		zap.String("previous_status", existing.Status),
+	)
+
+	// Lê de volta para devolver o estado real gravado, e não o que supomos ter
+	// gravado — o front usa este retorno para montar as URLs e o indicador.
+	fresh, err := s.repo.GetByID(ctx, existing.ID, existing.StoreID)
+	if err != nil {
+		return nil, fmt.Errorf("reloading integration after reconnect: %w", err)
+	}
+	return s.toCreateOutput(fresh), nil
 }
 
 // GetByID retrieves an integration by ID.
@@ -4240,8 +4305,38 @@ func (s *Service) DispatchCommentReceived(ctx context.Context, input ProcessInst
 	return s.liveService.DispatchCommentReceived(ctx, input.CommentID, input.MediaID, source, input)
 }
 
-// ProcessInstagramMessage processes a DM from Instagram webhook.
-func (s *Service) ProcessInstagramMessage(ctx context.Context, input ProcessInstagramMessageInput) error {
+// DispatchMessageReceived é a borda HTTP do fluxo invertido de DM: valida o
+// mínimo, grava message.received no outbox e volta. Nada de lookup, Graph ou
+// ERP — o trabalho roda em HandleMessageReceived, no consumidor.
+//
+// A Meta exige 200 em ≤5s e desinscreve o app após 1 hora de falha contínua.
+// O caminho antigo fazia tudo em linha e chegava a ~90s no pior caso (dois
+// POSTs à Graph com timeout de 30s, mais refresh de token).
+//
+// Descartar echo aqui é de propósito: é a nossa PRÓPRIA mensagem voltando, e
+// enfileirá-la só para o consumidor ignorar seria gastar uma tarefa por DM
+// enviada. O mesmo vale para evento sem `mid` (recibo de leitura, reação),
+// que não é mensagem — o discriminador é o mesmo usado no handler.
+func (s *Service) DispatchMessageReceived(ctx context.Context, input ProcessInstagramMessageInput) error {
+	if input.IsEcho || input.MessageID == "" {
+		return nil
+	}
+	body, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("marshaling message.received payload: %w", err)
+	}
+	return s.repo.EmitMessageReceived(ctx, events.Envelope{
+		Name:     events.MessageReceived,
+		Source:   events.SourceInstagramDM,
+		DedupKey: "message.received:" + input.MessageID,
+		Metadata: map[string]string{"account_id": input.AccountID, "message_id": input.MessageID},
+		Payload:  body,
+	})
+}
+
+// HandleMessageReceived processes a DM from Instagram webhook. Runs in the event
+// consumer (ver DispatchMessageReceived), não mais dentro do request.
+func (s *Service) HandleMessageReceived(ctx context.Context, input ProcessInstagramMessageInput) error {
 	logger.From(ctx, s.logger).Info("processing instagram message",
 		zap.String("account_id", input.AccountID),
 		zap.String("sender_id", input.SenderID),
@@ -6038,25 +6133,66 @@ func (s *Service) handleProviderError(ctx context.Context, integrationID string,
 
 	var rateLimitErr *ratelimit.ErrRateLimited
 	if errors.As(err, &rateLimitErr) {
+		// Rate limit NÃO derruba a integração.
+		//
+		// Antes marcava status 'error', e isso custou três dias de ERP parado em
+		// 09/08/2026: o Tiny devolveu um HTTP 429 às 16:56:59, a integração virou
+		// 'error' na hora, e nada nunca reverteu — o botão de sincronizar sumiu
+		// do painel (o front exige 'active') e só reconectar à mão resolveria,
+		// caminho que também estava quebrado. O token só venceu 1h43 DEPOIS; o
+		// 429 foi o que derrubou, não a expiração.
+		//
+		// Ser transitório é a definição de rate limit: o provedor libera em
+		// segundos. Marcar estado permanente a partir de um sinal temporário é
+		// trocar uma pausa por uma parada.
+		//
+		// A visibilidade não se perde: a chamada já vira linha em
+		// integration_logs com status 'error' e a mensagem crua ("HTTP 429: ..."),
+		// que é de onde este diagnóstico saiu. O status da integração descreve se
+		// ela está utilizável, e durante um 429 ela está — daqui a pouco.
 		logger.From(ctx, s.logger).Error("provider rate limited",
 			zap.String("integration_id", integrationID),
 			zap.String("operation", operation),
 			zap.Duration("retry_after", rateLimitErr.RetryAfter),
 		)
+	}
+}
 
-		// Mark integration as error so it's visible in the dashboard
-		if updateErr := s.repo.UpdateStatus(ctx, integrationID, "error"); updateErr != nil {
-			logger.From(ctx, s.logger).Warn("failed to update integration status after rate limit",
-				zap.String("integration_id", integrationID),
-				zap.Error(updateErr),
-			)
-		}
+// noteProviderSuccess devolve a integração para 'active' depois de uma chamada
+// bem-sucedida, se ela estava em 'error'.
+//
+// É a saída que faltava: 'error' era estado terminal. Os únicos pontos que
+// escreviam 'active' eram os fluxos de CONEXÃO, então uma falha transitória
+// prendia o lojista até ele reconectar à mão.
+//
+// Best-effort e silencioso no caminho normal: roda em toda chamada de provider
+// e é um UPDATE condicional que não acerta linha nenhuma quando já está
+// saudável — barato o bastante para o caminho quente.
+func (s *Service) noteProviderSuccess(ctx context.Context, integrationID string) {
+	if integrationID == "" {
+		return
+	}
+	healed, err := s.repo.HealFromError(ctx, integrationID)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("failed to heal integration status after success",
+			zap.String("integration_id", integrationID), zap.Error(err))
+		return
+	}
+	if healed {
+		logger.From(ctx, s.logger).Info("integration recovered on its own after a successful call",
+			zap.String("integration_id", integrationID))
 	}
 }
 
 // LogIntegrationOperation logs an integration operation to the database.
 // This is used by providers via the LogFunc callback.
 func (s *Service) LogIntegrationOperation(ctx context.Context, log providers.IntegrationLog) error {
+	// Ponto único por onde passa TODA chamada HTTP de provider (providers/base.go),
+	// e por isso o lugar certo para a integração se curar sozinha: uma resposta
+	// boa é a prova de que ela voltou a funcionar.
+	if log.Status == "success" {
+		s.noteProviderSuccess(ctx, log.IntegrationID)
+	}
 	return s.repo.CreateLog(
 		ctx,
 		log.IntegrationID,

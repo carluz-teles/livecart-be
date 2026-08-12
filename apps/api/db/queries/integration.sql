@@ -42,6 +42,22 @@ UPDATE integrations
 SET status = $2, last_synced_at = now()
 WHERE id = $1;
 
+-- name: HealIntegrationFromError :execrows
+-- Devolve a integração de 'error' para 'active' quando uma chamada volta a dar
+-- certo. Condicional de propósito: só toca a linha que ESTÁ em 'error', então
+-- não pisa em 'pending_auth' (autorização em andamento) nem em 'disconnected'
+-- (o lojista desligou de propósito).
+--
+-- Existe porque 'error' não tinha saída automática. Um HTTP 429 — que é
+-- transitório por definição — marcava a integração como quebrada e nada nunca
+-- revertia: o botão de sincronizar sumia do painel e só reconectar à mão
+-- resolvia. Aconteceu em 09/08/2026 e deixou o ERP parado por três dias.
+--
+-- Não mexe em last_synced_at: quem acabou de rodar a operação é que carimba isso.
+UPDATE integrations
+SET status = 'active'
+WHERE id = $1 AND status = 'error';
+
 -- name: UpdateIntegrationMetadata :exec
 UPDATE integrations
 SET metadata = $2

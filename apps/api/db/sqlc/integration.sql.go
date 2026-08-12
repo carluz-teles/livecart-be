@@ -498,6 +498,31 @@ func (q *Queries) GetWebhookEventByEventID(ctx context.Context, arg GetWebhookEv
 	return i, err
 }
 
+const healIntegrationFromError = `-- name: HealIntegrationFromError :execrows
+UPDATE integrations
+SET status = 'active'
+WHERE id = $1 AND status = 'error'
+`
+
+// Devolve a integração de 'error' para 'active' quando uma chamada volta a dar
+// certo. Condicional de propósito: só toca a linha que ESTÁ em 'error', então
+// não pisa em 'pending_auth' (autorização em andamento) nem em 'disconnected'
+// (o lojista desligou de propósito).
+//
+// Existe porque 'error' não tinha saída automática. Um HTTP 429 — que é
+// transitório por definição — marcava a integração como quebrada e nada nunca
+// revertia: o botão de sincronizar sumia do painel e só reconectar à mão
+// resolvia. Aconteceu em 09/08/2026 e deixou o ERP parado por três dias.
+//
+// Não mexe em last_synced_at: quem acabou de rodar a operação é que carimba isso.
+func (q *Queries) HealIntegrationFromError(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, healIntegrationFromError, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const listIntegrationLogs = `-- name: ListIntegrationLogs :many
 SELECT id, integration_id, entity_type, entity_id, direction, status, request_payload, response_payload, error_message, created_at FROM integration_logs
 WHERE integration_id = $1
