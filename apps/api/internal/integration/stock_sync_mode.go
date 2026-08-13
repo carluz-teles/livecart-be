@@ -1,6 +1,9 @@
 package integration
 
-import "time"
+import (
+	"sync/atomic"
+	"time"
+)
 
 // A regra de como o SALDO ABSOLUTO do ERP entra no nosso contador local.
 //
@@ -77,37 +80,63 @@ func stockSyncMode(guarded, guardErr, pendingReversal, pendErr bool) (skipStock,
 	return false, false
 }
 
-// erpMovementEchoWindow é quanto tempo, depois de mandarmos um movimento ao
-// ERP, o saldo absoluto que ele devolve ainda pode ser o eco desse movimento em
-// vez de notícia sobre outro canal.
+// erpMovementEchoGrace é a folga depois que a chamada ao ERP volta.
 //
-// Medido em produção em 12/08/2026: no caminho normal o webhook do Tiny voltou
-// em 1 a 3 segundos; quando o estorno entrou em retentativa, o último chegou
-// 50 segundos depois do primeiro. Um minuto cobre os dois casos com folga.
+// A contagem de movimentos em voo cobre o essencial — a janela entre baixarmos
+// o estoque local e o ERP registrar a saída. Esta folga cobre o resto do
+// caminho: o ERP processa, gera o webhook e ele chega até nós. Medido em
+// produção, esse trecho leva de 1 a 3 segundos.
 //
-// Errar para cima só custa atraso: uma venda em outro canal demora até um
-// minuto para refletir. Errar para baixo custa contador corrompido, que não se
-// recupera sozinho. A assimetria manda ser generoso aqui.
-const erpMovementEchoWindow = 60 * time.Second
+// Curta de propósito. Enquanto ela vale, uma venda do lojista em OUTRO canal
+// não é aplicada — e é exatamente isso que não se quer prolongar. Antes disto
+// aqui a supressão durava enquanto houvesse reserva viva (trinta minutos) e
+// depois virou uma janela fixa de sessenta segundos; nos dois casos o LiveCart
+// ficava cego para o Mercado Livre por tempo demais.
+const erpMovementEchoGrace = 5 * time.Second
 
-// NoteERPMovementSent carimba que acabamos de mexer no estoque deste produto no
-// ERP. Chamado logo depois de cada saída ou entrada bem-sucedida.
+// NoteERPMovementStarted marca que uma chamada de estoque ao ERP COMEÇOU.
+//
+// Entre baixarmos o estoque local e o ERP registrar a saída, o saldo dele ainda
+// é o de antes — maior que o nosso. Um webhook nessa fresta, aplicado ao pé da
+// letra, devolveria o local ao valor antigo e apagaria a reserva do comprador.
+//
+// Contar em vez de cronometrar: a fresta dura o que a chamada durar, e não um
+// prazo fixo que alguém chutou.
+func (s *Service) NoteERPMovementStarted(externalProductID string) {
+	if externalProductID == "" {
+		return
+	}
+	v, _ := s.erpMovementInFlight.LoadOrStore(externalProductID, new(int64))
+	atomic.AddInt64(v.(*int64), 1)
+}
+
+// NoteERPMovementSent marca que a chamada TERMINOU (com sucesso ou não) e
+// carimba o instante, para a folga do webhook correr a partir daí.
 func (s *Service) NoteERPMovementSent(externalProductID string) {
 	if externalProductID == "" {
 		return
 	}
+	if v, ok := s.erpMovementInFlight.Load(externalProductID); ok {
+		if n := atomic.AddInt64(v.(*int64), -1); n < 0 {
+			atomic.StoreInt64(v.(*int64), 0)
+		}
+	}
 	s.erpMovementSentAt.Store(externalProductID, time.Now())
 }
 
-// erpMovementEchoing responde se um movimento NOSSO ainda pode estar voltando
-// pelo webhook deste produto.
+// erpMovementEchoing responde se um movimento NOSSO ainda pode estar em
+// trânsito, num dos dois sentidos: a chamada ao ERP não voltou, ou voltou há
+// tão pouco tempo que o webhook dela ainda não chegou.
 //
-// É o que separa "o Tiny está me contando algo novo" de "o Tiny está repetindo
-// o que eu acabei de fazer". Sem essa distinção só restam dois extremos ruins:
-// aplicar sempre (e corromper o contador com o próprio eco) ou nunca aplicar
-// enquanto houver reserva (e ficar cego para os outros canais do lojista por
-// trinta minutos).
+// Fora disso, o saldo do ERP é notícia legítima — venda em outro canal,
+// reposição do lojista — e tem de ser aplicado. Ignorá-lo é ficar com estoque
+// errado, que foi o defeito que este mecanismo existe para não recriar.
 func (s *Service) erpMovementEchoing(externalProductID string) bool {
+	if v, ok := s.erpMovementInFlight.Load(externalProductID); ok {
+		if atomic.LoadInt64(v.(*int64)) > 0 {
+			return true
+		}
+	}
 	v, ok := s.erpMovementSentAt.Load(externalProductID)
 	if !ok {
 		return false
@@ -116,5 +145,5 @@ func (s *Service) erpMovementEchoing(externalProductID string) bool {
 	if !ok {
 		return false
 	}
-	return time.Since(sentAt) < erpMovementEchoWindow
+	return time.Since(sentAt) < erpMovementEchoGrace
 }

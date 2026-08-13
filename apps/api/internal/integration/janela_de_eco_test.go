@@ -1,23 +1,31 @@
 package integration
 
-// A janela de eco: separar "o Tiny está me contando algo novo" de "o Tiny está
-// repetindo o que eu acabei de fazer".
+// Separar "o Tiny está me contando algo novo" de "o Tiny está repetindo o que eu
+// acabei de fazer".
 //
-// O webhook do Tiny traz sempre o saldo ABSOLUTO, e os dois casos chegam
-// idênticos — um número menor que o nosso. Sem distinguir, sobram dois extremos
-// ruins: aplicar sempre, e o eco do nosso próprio movimento corrompe o contador
-// (foi o Gabinete Gamer indo a zero em 12/08); ou nunca aplicar enquanto houver
-// reserva viva, e ficar cego para os outros canais do lojista.
+// O webhook traz sempre o SALDO ABSOLUTO, e os dois casos chegam idênticos. Sem
+// distinguir, sobram dois extremos ruins:
 //
-// A supressão por reserva durava o carrinho inteiro — trinta minutos. O eco
-// dura segundos: 1 a 3 no caminho normal, até ~50 quando o estorno entra em
-// retentativa. Carimbar o instante do envio troca meia hora de cegueira por um
-// minuto.
+//   - aplicar sempre: o saldo pode ser uma foto tirada ANTES de a nossa saída
+//     chegar ao ERP, e aplicá-la devolve o local ao valor antigo, apagando a
+//     reserva do comprador;
+//   - nunca aplicar enquanto houver reserva viva: cega o LiveCart para os outros
+//     canais do lojista pela live inteira. Se ele vender no Mercado Livre nesse
+//     intervalo, ficamos oferecendo unidade que já foi.
 //
-// Importa para o cliente que vende o mesmo SKU em vários canais: durante uma
-// live de uma hora, o LiveCart ignorava tudo que acontecia no Mercado Livre.
+// A fresta real é curta e tem começo e fim conhecidos: vai de baixarmos o
+// estoque local (que é o porteiro, e vem primeiro) até o ERP registrar a saída.
+// Por isso o mecanismo CONTA chamadas em voo em vez de cronometrar um prazo
+// chutado — mais uma folga curta para o webhook viajar.
+//
+// Histórico do parâmetro, que é o próprio argumento: a supressão já foi "enquanto
+// houver reserva ativa" (até 30 minutos) e depois uma janela fixa de 60 segundos.
+// Nos dois casos o buraco era o mesmo — venda em outro canal dentro do intervalo
+// era perdida, e só se corrigia no webhook seguinte daquele produto, que pode
+// nunca vir.
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -34,70 +42,107 @@ func TestSemMovimentoNossoOSaldoDoERPEhConfiavel(t *testing.T) {
 
 	if s.erpMovementEchoing("EXT-1") {
 		t.Error("sem nunca termos mexido neste produto, nada pode estar ecoando — " +
-			"e um saldo do Tiny aqui é notícia legítima de outro canal")
+			"um saldo do Tiny aqui é notícia legítima de outro canal e tem de ser aplicado")
 	}
 }
 
-func TestLogoAposNossoMovimentoOSaldoEhSuspeito(t *testing.T) {
+// Durante a chamada ao ERP o saldo dele ainda é o de antes. Aplicá-lo devolveria
+// o estoque local ao valor anterior e apagaria a reserva.
+func TestDuranteAChamadaAoERPOSaldoEhSuspeito(t *testing.T) {
 	s := servicoComEco(t)
 
+	s.NoteERPMovementStarted("EXT-1")
+	if !s.erpMovementEchoing("EXT-1") {
+		t.Error("com chamada ao ERP em voo, o saldo dele é foto do meio do caminho")
+	}
+
+	// Produto diferente não é afetado: a contagem é por SKU.
+	if s.erpMovementEchoing("EXT-2") {
+		t.Error("a contagem vazou para outro produto")
+	}
+}
+
+// Terminada a chamada e passada a folga, o saldo volta a mandar — é assim que
+// uma venda no marketplace chega até nós.
+func TestDepoisDaChamadaEDaFolgaOSaldoVoltaAValer(t *testing.T) {
+	s := servicoComEco(t)
+
+	s.NoteERPMovementStarted("EXT-1")
 	s.NoteERPMovementSent("EXT-1")
 
 	if !s.erpMovementEchoing("EXT-1") {
-		t.Error("acabamos de mandar um movimento — o próximo saldo do Tiny pode ser " +
-			"o eco dele, e aplicá-lo por cima corrompe o contador")
+		t.Error("logo após a chamada o webhook dela ainda não chegou; a folga cobre isso")
 	}
-	// Produto diferente não é afetado: o carimbo é por SKU.
-	if s.erpMovementEchoing("EXT-2") {
-		t.Error("o carimbo vazou para outro produto — cada SKU tem a sua janela")
-	}
-}
 
-func TestAJanelaExpiraEOSaldoVoltaAValer(t *testing.T) {
-	s := servicoComEco(t)
-
-	// Carimbo antigo: mais velho que a janela.
-	s.erpMovementSentAt.Store("EXT-1", time.Now().Add(-erpMovementEchoWindow-time.Second))
+	// Envelhece o carimbo além da folga.
+	s.erpMovementSentAt.Store("EXT-1", time.Now().Add(-erpMovementEchoGrace-time.Second))
 
 	if s.erpMovementEchoing("EXT-1") {
-		t.Error("a janela não expirou — se ela não expirar, a cegueira volta a ser " +
-			"permanente e o multi-canal nunca sincroniza")
+		t.Error("passada a folga, o saldo do ERP tem de voltar a ser aplicado — " +
+			"senão a venda em outro canal é perdida e o estoque fica errado")
 	}
 }
 
-// A janela precisa cobrir o pior caso medido em produção, e não pode ser tão
-// longa a ponto de recriar a cegueira que ela veio resolver.
-func TestJanelaCobreOPiorCasoMedidoSemExagerar(t *testing.T) {
-	const piorRetentativaMedida = 50 * time.Second
-	if erpMovementEchoWindow < piorRetentativaMedida {
-		t.Errorf("janela de %v não cobre a retentativa de %v medida em 12/08 — "+
-			"um eco atrasado seria lido como venda em outro canal e derrubaria o "+
-			"contador", erpMovementEchoWindow, piorRetentativaMedida)
+// Movimentos concorrentes no mesmo produto: a supressão só cai quando o ÚLTIMO
+// termina. Um contador (e não um booleano) é o que garante isso.
+func TestVariosMovimentosConcorrentesNoMesmoProduto(t *testing.T) {
+	s := servicoComEco(t)
+
+	const n = 8
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		s.NoteERPMovementStarted("EXT-1")
 	}
-	// A reserva vive ~30 minutos. Se a janela chegasse perto disso, não teríamos
-	// ganho nada em relação à supressão anterior.
-	if erpMovementEchoWindow > 5*time.Minute {
-		t.Errorf("janela de %v é longa demais — o ponto da mudança é justamente "+
-			"deixar de ignorar os outros canais do lojista durante a live",
-			erpMovementEchoWindow)
+	if !s.erpMovementEchoing("EXT-1") {
+		t.Fatal("com 8 chamadas em voo, o saldo não pode ser aplicado")
+	}
+
+	for i := 0; i < n-1; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); s.NoteERPMovementSent("EXT-1") }()
+	}
+	wg.Wait()
+
+	if !s.erpMovementEchoing("EXT-1") {
+		t.Error("ainda resta uma chamada em voo — a supressão não pode cair antes dela")
+	}
+
+	s.NoteERPMovementSent("EXT-1")
+	s.erpMovementSentAt.Store("EXT-1", time.Now().Add(-erpMovementEchoGrace-time.Second))
+	if s.erpMovementEchoing("EXT-1") {
+		t.Error("todas terminaram e a folga passou: o saldo tem de voltar a valer")
 	}
 }
 
-// O modo de sincronização passa a ser decidido pelo eco, não pela reserva. Com
-// reserva viva mas nenhum movimento nosso recente, o saldo do Tiny vale.
+// A folga cobre a viagem do webhook sem virar cegueira.
+//
+// O trecho "ERP processa e o webhook chega" levou de 1 a 3 segundos em produção.
+// Cinco cobre com margem. O que NÃO pode é crescer: cada segundo aqui é um
+// segundo em que uma venda no Mercado Livre não é vista.
+func TestFolgaCobreAViagemDoWebhookSemVirarCegueira(t *testing.T) {
+	const viagemMedida = 3 * time.Second
+	if erpMovementEchoGrace < viagemMedida {
+		t.Errorf("folga de %v não cobre a viagem de %v medida em produção — o eco "+
+			"chegaria depois e seria lido como venda externa", erpMovementEchoGrace, viagemMedida)
+	}
+	if erpMovementEchoGrace > 15*time.Second {
+		t.Errorf("folga de %v é longa demais: enquanto ela vale, venda do lojista em "+
+			"outro canal não é aplicada e o estoque fica errado", erpMovementEchoGrace)
+	}
+}
+
+// A decisão de sync segue o eco, não a reserva.
 func TestModoDeSyncSegueOEcoENaoAReserva(t *testing.T) {
-	// Sem eco: aplica normalmente, e é assim que a venda no marketplace chega.
 	skip, downgrade := stockSyncMode(false, false, false, false)
 	if skip || downgrade {
-		t.Errorf("sem movimento nosso ecoando, o saldo do Tiny tem de ser aplicado "+
-			"(skip=%v downgrade=%v)", skip, downgrade)
+		t.Errorf("sem movimento nosso em trânsito, o saldo do Tiny tem de ser aplicado "+
+			"(skip=%v downgrade=%v) — é a única notícia que temos dos outros canais",
+			skip, downgrade)
 	}
 
-	// Com eco: suprime, porque o número pode ser o nosso próprio movimento.
 	skip, downgrade = stockSyncMode(true, false, false, false)
 	if !skip {
-		t.Error("com movimento nosso ecoando, aplicar o saldo é copiar o próprio " +
-			"rastro por cima do contador")
+		t.Error("com movimento nosso em trânsito, aplicar o saldo é copiar o próprio rastro")
 	}
 	if downgrade {
 		t.Error("downgrade-only deixa passar justamente a direção do eco")

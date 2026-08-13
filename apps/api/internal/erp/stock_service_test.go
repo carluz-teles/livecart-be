@@ -222,6 +222,8 @@ type mockCollab struct {
 func (m *mockCollab) ResolveProvider(context.Context, *Integration) (providers.ERPProvider, error) {
 	return m.provider, m.providerErr
 }
+func (m *mockCollab) NoteERPMovementStarted(string) {}
+
 func (m *mockCollab) NoteERPMovementSent(string) {}
 
 func (m *mockCollab) ResolveExternalProduct(context.Context, string, string) (string, bool) {

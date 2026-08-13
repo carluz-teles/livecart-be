@@ -155,6 +155,31 @@ type Service struct {
 	// comportamento conservador por um minuto.
 	erpMovementSentAt sync.Map
 
+	// erpMovementInFlight conta as chamadas de estoque ao ERP que COMEÇARAM e
+	// ainda não voltaram, por produto.
+	//
+	// A ordem do fluxo é: baixa o estoque local (atômico, é o porteiro) e só
+	// então manda a saída ao ERP. Entre as duas, o saldo dele ainda é o de antes
+	// — maior que o nosso. Um webhook nessa fresta, aplicado literalmente,
+	// devolveria o local ao valor antigo e apagaria a reserva do comprador.
+	//
+	// Contar é melhor que cronometrar: a fresta dura exatamente o que a chamada
+	// durar. Janela de tempo fixa ou é curta demais e não protege, ou é longa
+	// demais e cega o LiveCart para as vendas do lojista em outros canais.
+	erpMovementInFlight sync.Map
+
+	// erpMovementInFlight conta as chamadas de estoque ao ERP que COMEÇARAM e
+	// ainda não voltaram, por produto.
+	//
+	// A ordem do fluxo é: baixa o estoque local (atômico, é o porteiro) e só
+	// então manda a saída ao ERP. Entre as duas o saldo dele ainda é o de antes
+	// — maior que o nosso. Um webhook nessa fresta, aplicado literalmente,
+	// devolveria o local ao valor antigo e apagaria a reserva do comprador.
+	//
+	// Contar é melhor que cronometrar: a fresta dura exatamente o que a chamada
+	// durar. Uma janela de tempo fixa ou é curta demais e não protege, ou é
+	// longa demais e cega o LiveCart para as vendas do lojista em outros canais.
+
 	// lastWebhookAt guarda, por conta do Instagram (entry.id), quando o último
 	// webhook CHEGOU. É a memória do vigia: a Meta para de entregar sem avisar,
 	// e sem este relógio "parou de chegar" e "ninguém comentou" são o mesmo
