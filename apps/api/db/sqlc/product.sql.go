@@ -11,6 +11,40 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const applyERPStockMirror = `-- name: ApplyERPStockMirror :execrows
+UPDATE products
+SET stock = GREATEST($1::int, 0), updated_at = now()
+WHERE id = $2 AND erp_seq = $3::bigint
+`
+
+type ApplyERPStockMirrorParams struct {
+	ErpStock int32       `json:"erp_stock"`
+	ID       pgtype.UUID `json:"id"`
+	SeenSeq  int64       `json:"seen_seq"`
+}
+
+// Escreve o saldo lido do ERP, e SO se nenhum movimento nosso tiver acontecido
+// desde a leitura.
+//
+// Esta e a trava que substitui as heuristicas de janela. O webhook do Tiny nao
+// traz timestamp nem sequencia, entao nao ha como ordenar dois saldos pelo
+// conteudo. O seq resolve pelo unico lado que controlamos: os nossos proprios
+// movimentos, cada um subindo o contador quando altera o estoque.
+//
+// Zero linhas significa "leitura vencida", e o certo e descartar — nao aplicar
+// com ressalva, porque nao ha como saber quanto daquele numero ja estava velho.
+// Uma leitura nova vem no proximo webhook ou na reconciliacao.
+//
+// Saldo negativo do ERP nao e estoque, e sim sintoma: o Tiny aceita ir abaixo de
+// zero (gravado na bateria de sandbox) e copiar isso propagaria o defeito.
+func (q *Queries) ApplyERPStockMirror(ctx context.Context, arg ApplyERPStockMirrorParams) (int64, error) {
+	result, err := q.db.Exec(ctx, applyERPStockMirror, arg.ErpStock, arg.ID, arg.SeenSeq)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const createProduct = `-- name: CreateProduct :one
 INSERT INTO products (
     store_id, name, external_id, external_source, keyword, price, image_url, stock,
@@ -18,7 +52,7 @@ INSERT INTO products (
     group_id
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id
+RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, erp_seq
 `
 
 type CreateProductParams struct {
@@ -81,15 +115,16 @@ func (q *Queries) CreateProduct(ctx context.Context, arg CreateProductParams) (P
 		&i.PackageFormat,
 		&i.InsuranceValueCents,
 		&i.GroupID,
+		&i.ErpSeq,
 	)
 	return i, err
 }
 
 const decrementProductStock = `-- name: DecrementProductStock :one
 UPDATE products
-SET stock = stock - $2, updated_at = now()
+SET stock = stock - $2, erp_seq = erp_seq + 1, updated_at = now()
 WHERE id = $1 AND stock >= $2
-RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id
+RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, erp_seq
 `
 
 type DecrementProductStockParams struct {
@@ -122,6 +157,7 @@ func (q *Queries) DecrementProductStock(ctx context.Context, arg DecrementProduc
 		&i.PackageFormat,
 		&i.InsuranceValueCents,
 		&i.GroupID,
+		&i.ErpSeq,
 	)
 	return i, err
 }
@@ -132,6 +168,7 @@ WITH before AS (
 )
 UPDATE products p
 SET stock = p.stock - LEAST(before.s, $1::int),
+    erp_seq = p.erp_seq + 1,
     updated_at = now()
 FROM before
 WHERE p.id = $2
@@ -157,9 +194,9 @@ func (q *Queries) DecrementProductStockUpTo(ctx context.Context, arg DecrementPr
 
 const forceDecrementProductStock = `-- name: ForceDecrementProductStock :one
 UPDATE products
-SET stock = stock - $2, updated_at = now()
+SET stock = stock - $2, erp_seq = erp_seq + 1, updated_at = now()
 WHERE id = $1
-RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id
+RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, erp_seq
 `
 
 type ForceDecrementProductStockParams struct {
@@ -198,6 +235,7 @@ func (q *Queries) ForceDecrementProductStock(ctx context.Context, arg ForceDecre
 		&i.PackageFormat,
 		&i.InsuranceValueCents,
 		&i.GroupID,
+		&i.ErpSeq,
 	)
 	return i, err
 }
@@ -216,7 +254,7 @@ func (q *Queries) GetMaxKeyword(ctx context.Context, storeID pgtype.UUID) (inter
 }
 
 const getProductByExternalID = `-- name: GetProductByExternalID :one
-SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id FROM products
+SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, erp_seq FROM products
 WHERE store_id = $1 AND external_source = $2 AND external_id = $3
 `
 
@@ -252,12 +290,13 @@ func (q *Queries) GetProductByExternalID(ctx context.Context, arg GetProductByEx
 		&i.PackageFormat,
 		&i.InsuranceValueCents,
 		&i.GroupID,
+		&i.ErpSeq,
 	)
 	return i, err
 }
 
 const getProductByID = `-- name: GetProductByID :one
-SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id FROM products WHERE id = $1 AND store_id = $2
+SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, erp_seq FROM products WHERE id = $1 AND store_id = $2
 `
 
 type GetProductByIDParams struct {
@@ -289,12 +328,13 @@ func (q *Queries) GetProductByID(ctx context.Context, arg GetProductByIDParams) 
 		&i.PackageFormat,
 		&i.InsuranceValueCents,
 		&i.GroupID,
+		&i.ErpSeq,
 	)
 	return i, err
 }
 
 const getProductByKeyword = `-- name: GetProductByKeyword :one
-SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id FROM products WHERE store_id = $1 AND keyword = $2 AND active = true
+SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, erp_seq FROM products WHERE store_id = $1 AND keyword = $2 AND active = true
 `
 
 type GetProductByKeywordParams struct {
@@ -326,15 +366,16 @@ func (q *Queries) GetProductByKeyword(ctx context.Context, arg GetProductByKeywo
 		&i.PackageFormat,
 		&i.InsuranceValueCents,
 		&i.GroupID,
+		&i.ErpSeq,
 	)
 	return i, err
 }
 
 const incrementProductStock = `-- name: IncrementProductStock :one
 UPDATE products
-SET stock = stock + $2, updated_at = now()
+SET stock = stock + $2, erp_seq = erp_seq + 1, updated_at = now()
 WHERE id = $1
-RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id
+RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, erp_seq
 `
 
 type IncrementProductStockParams struct {
@@ -367,12 +408,13 @@ func (q *Queries) IncrementProductStock(ctx context.Context, arg IncrementProduc
 		&i.PackageFormat,
 		&i.InsuranceValueCents,
 		&i.GroupID,
+		&i.ErpSeq,
 	)
 	return i, err
 }
 
 const listProductsByGroup = `-- name: ListProductsByGroup :many
-SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id FROM products WHERE group_id = $1 ORDER BY keyword ASC
+SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, erp_seq FROM products WHERE group_id = $1 ORDER BY keyword ASC
 `
 
 func (q *Queries) ListProductsByGroup(ctx context.Context, groupID pgtype.UUID) ([]Product, error) {
@@ -405,6 +447,7 @@ func (q *Queries) ListProductsByGroup(ctx context.Context, groupID pgtype.UUID) 
 			&i.PackageFormat,
 			&i.InsuranceValueCents,
 			&i.GroupID,
+			&i.ErpSeq,
 		); err != nil {
 			return nil, err
 		}
@@ -417,7 +460,7 @@ func (q *Queries) ListProductsByGroup(ctx context.Context, groupID pgtype.UUID) 
 }
 
 const listProductsByStore = `-- name: ListProductsByStore :many
-SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id FROM products WHERE store_id = $1 ORDER BY created_at DESC
+SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, erp_seq FROM products WHERE store_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListProductsByStore(ctx context.Context, storeID pgtype.UUID) ([]Product, error) {
@@ -450,6 +493,7 @@ func (q *Queries) ListProductsByStore(ctx context.Context, storeID pgtype.UUID) 
 			&i.PackageFormat,
 			&i.InsuranceValueCents,
 			&i.GroupID,
+			&i.ErpSeq,
 		); err != nil {
 			return nil, err
 		}
@@ -459,6 +503,36 @@ func (q *Queries) ListProductsByStore(ctx context.Context, storeID pgtype.UUID) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const productSeqByExternalID = `-- name: ProductSeqByExternalID :one
+SELECT id, erp_seq FROM products
+WHERE store_id = $1
+  AND external_source = $2
+  AND external_id = $3
+LIMIT 1
+`
+
+type ProductSeqByExternalIDParams struct {
+	StoreID        pgtype.UUID `json:"store_id"`
+	ExternalSource string      `json:"external_source"`
+	ExternalID     pgtype.Text `json:"external_id"`
+}
+
+type ProductSeqByExternalIDRow struct {
+	ID     pgtype.UUID `json:"id"`
+	ErpSeq int64       `json:"erp_seq"`
+}
+
+// Resolve o produto local pelo codigo do ERP e devolve o seq do mesmo instante.
+//
+// Uma consulta so porque as duas informacoes tem de vir juntas: o id para saber
+// onde escrever, e o seq para saber se a escrita ainda valera.
+func (q *Queries) ProductSeqByExternalID(ctx context.Context, arg ProductSeqByExternalIDParams) (ProductSeqByExternalIDRow, error) {
+	row := q.db.QueryRow(ctx, productSeqByExternalID, arg.StoreID, arg.ExternalSource, arg.ExternalID)
+	var i ProductSeqByExternalIDRow
+	err := row.Scan(&i.ID, &i.ErpSeq)
+	return i, err
 }
 
 const setProductGroup = `-- name: SetProductGroup :exec
@@ -491,7 +565,7 @@ SET name = $3,
     insurance_value_cents = $14,
     updated_at = now()
 WHERE id = $1 AND store_id = $2
-RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id
+RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, erp_seq
 `
 
 type UpdateProductParams struct {
@@ -550,6 +624,7 @@ func (q *Queries) UpdateProduct(ctx context.Context, arg UpdateProductParams) (P
 		&i.PackageFormat,
 		&i.InsuranceValueCents,
 		&i.GroupID,
+		&i.ErpSeq,
 	)
 	return i, err
 }

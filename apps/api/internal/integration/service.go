@@ -3444,6 +3444,14 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		return false, fmt.Errorf("integration %s is not an ERP provider", integration.ID)
 	}
 
+	// O seq ANTES da consulta ao ERP. E o comprovante da leitura: se mudar ate a
+	// hora de aplicar, um movimento nosso entrou no meio e este saldo descreve
+	// um estado que ja nao existe.
+	//
+	// Ler depois nao serviria — a corrida mora exatamente entre a consulta e a
+	// escrita, que e onde a reserva de outro comprador cabe.
+	localProductID, seenSeq, seqErr := s.repo.ProductSeqByExternalID(ctx, integration.StoreID, integration.Provider, externalProductID)
+
 	detailed, err := erpProvider.GetProduct(ctx, externalProductID)
 	if err != nil {
 		s.handleProviderError(ctx, integration.ID, "webhook_get_product", err)
@@ -3477,69 +3485,44 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	// só quando o valor do ERP é menor que o local (direção segura, nunca
 	// causa promoção fantasma). Fora da janela, sync normal. Fail-safe: em erro
 	// de DB, preserva o local inteiro.
-	guarded, guardErr := s.repo.HasStockGuardForProduct(ctx, externalProductID, integration.StoreID, integration.Provider)
-	if guardErr != nil {
-		logger.From(ctx, s.logger).Warn("failed to check stock guard for product, skipping stock sync as precaution",
-			zap.String("external_product_id", externalProductID),
-			zap.Error(guardErr),
-		)
-	}
-
-	// O guard deixa de valer enquanto a reserva vive e passa a valer enquanto o
-	// NOSSO movimento pode estar ecoando.
+	// O ESTOQUE nao passa pelo sync generico: e aplicado a parte, com trava
+	// otimista. O `true` no SyncProduct abaixo diz "cuide de nome, preco e
+	// dimensoes; do saldo cuido eu".
 	//
-	// São coisas de duração muito diferente. Uma reserva dura o carrinho inteiro
-	// — trinta minutos. O eco de um movimento nosso chega em segundos. Suprimir
-	// pela reserva cegava o LiveCart para os outros canais do lojista durante a
-	// live toda: quem vende o mesmo SKU no Mercado Livre via o LiveCart oferecer
-	// unidade que já tinha sido vendida lá. A simulação em
-	// internal/erp/simulacao_multicanal_test.go mede isso — disponível 3 contra
-	// 2 reais no Tiny.
-	//
-	// O Tiny é a fonte da verdade do total: só ele agrega LiveCart, marketplace,
-	// site e balcão. Ignorá-lo por meia hora é abrir mão da única informação que
-	// temos sobre o que acontece fora daqui.
-	echoing := s.erpMovementEchoing(externalProductID)
-	if guarded && !echoing {
-		logger.From(ctx, s.logger).Info("stock guard relaxed: reservation is live but no movement of ours is echoing — trusting the ERP balance",
-			zap.String("external_product_id", externalProductID),
-			zap.String("store_id", integration.StoreID),
-		)
-	} else if echoing {
-		logger.From(ctx, s.logger).Info("ERP stock sync suppressed: a movement of ours may still be echoing",
-			zap.String("external_product_id", externalProductID),
-			zap.String("store_id", integration.StoreID),
-		)
-	}
-	skipStock, downgradeOnly := stockSyncMode(echoing, guardErr != nil, false, false)
-
-	// Estorno de carrinho em voo SUPRIME o sync inteiro, e tem de ser checado
-	// DEPOIS do guard porque é mais forte: `downgrade_only` deixa passar
-	// justamente a direção que causa o dano.
-	//
-	// Cancelar credita o estoque local numa transação só; o estorno no ERP sai
-	// um a um por HTTP, e cada um dispara um webhook. Nessa janela o Tiny está
-	// atrás de nós — por nossa causa — e "ERP menor que o local" NÃO é redução
-	// do lojista. Foi o que derrubou 1001 e 1004 de 5 para 4 em staging.
-	//
-	// Erro de DB aqui também suprime: preservar o local é sempre o lado seguro.
-	if !skipStock {
-		pending, pendErr := s.repo.HasPendingCartReversalForProduct(ctx, externalProductID, integration.StoreID)
-		if pendErr != nil {
-			logger.From(ctx, s.logger).Warn("failed to check pending cart reversal, skipping stock sync as precaution",
+	// O guard de reserva ativa deixou de existir aqui. Ele nascera para decidir
+	// se o saldo do ERP podia ser aplicado, e cada versao errava de um jeito:
+	// suprimir enquanto houvesse reserva cegava o LiveCart para os outros canais
+	// do lojista pela live inteira; downgrade-only deixava passar o eco do nosso
+	// proprio movimento. A trava responde a mesma pergunta sem heuristica — ou a
+	// leitura e do presente, ou nao e.
+	stockApplied := false
+	switch {
+	case seqErr != nil:
+		logger.From(ctx, s.logger).Warn("could not read product seq; skipping stock this round",
+			zap.String("external_product_id", externalProductID), zap.Error(seqErr))
+	case localProductID == "":
+		// Produto que o lojista nao importou. O ERP notifica sobre o catalogo
+		// inteiro dele; nos so espelhamos o que existe aqui.
+	default:
+		applied, applyErr := s.repo.ApplyERPStockMirror(ctx, localProductID, detailed.Stock, seenSeq)
+		switch {
+		case applyErr != nil:
+			logger.From(ctx, s.logger).Warn("failed to apply ERP stock mirror",
+				zap.String("external_product_id", externalProductID), zap.Error(applyErr))
+		case !applied:
+			// Um movimento nosso foi confirmado entre a leitura e agora. Aquele
+			// saldo e passado — descartar e a unica resposta correta, porque nao
+			// da para saber quanto dele ja estava velho. O proximo webhook, ou a
+			// reconciliacao, traz um numero atual.
+			logger.From(ctx, s.logger).Info("ERP balance discarded: one of our movements landed after the read",
 				zap.String("external_product_id", externalProductID),
-				zap.Error(pendErr),
-			)
-		} else if pending {
-			logger.From(ctx, s.logger).Info("ERP stock sync suppressed: cart reversal in flight",
-				zap.String("external_product_id", externalProductID),
-				zap.String("store_id", integration.StoreID),
-			)
+				zap.Int64("seen_seq", seenSeq), zap.Int("erp_stock", detailed.Stock))
+		default:
+			stockApplied = true
 		}
-		skipStock, downgradeOnly = stockSyncMode(echoing, guardErr != nil, pending, pendErr != nil)
 	}
 
-	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, skipStock, downgradeOnly); err != nil {
+	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, true, false); err != nil {
 		return false, fmt.Errorf("syncing product: %w", err)
 	}
 
@@ -3550,13 +3533,13 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		zap.String("integration_id", integration.ID),
 		zap.String("external_product_id", externalProductID),
 		zap.String("store_id", integration.StoreID),
-		zap.Bool("skip_stock", skipStock),
-		zap.Bool("downgrade_only", downgradeOnly),
+		zap.Bool("stock_applied", stockApplied),
+		zap.Int("erp_stock", detailed.Stock),
 	)
 
-	// stockApplied gate para o backstop de waitlist: só quando o estoque pôde
-	// subir (sync normal). skip e downgrade-only nunca sobem o local.
-	return !skipStock && !downgradeOnly, nil
+	// Backstop de waitlist so quando o saldo foi de fato aplicado: so ai uma
+	// unidade pode ter aparecido para promover.
+	return stockApplied, nil
 }
 
 // isGTIN checks if a string looks like a GTIN/barcode (8+ digits).

@@ -147,3 +147,4 @@ func (s *Service) erpMovementEchoing(externalProductID string) bool {
 	}
 	return time.Since(sentAt) < erpMovementEchoGrace
 }
+

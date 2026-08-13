@@ -1,0 +1,26 @@
+-- Trava otimista no estoque, no lugar de heuristicas de janela.
+--
+-- O problema, numa frase: nos mandamos DELTAS ao ERP ("saiu 1") e ele responde
+-- com SALDO ABSOLUTO por webhook, sem timestamp nem sequencia no payload
+-- (cnpj, tipo, dados{sku, nome, saldo, idProduto}, versao). Dois numeros na
+-- mesma linha do tempo, sem como ordena-los pelo conteudo.
+--
+-- Isso produziu, em 12/08/2026: o Gabinete Gamer com 6 unidades no Tiny e 4 no
+-- LiveCart sobre um estoque real de 5; e o Playstation com 7 contabilizadas
+-- sobre 5. As tentativas de conviver com a ambiguidade — suprimir o webhook
+-- enquanto houvesse reserva viva, janela fixa de 60s, contagem de chamadas em
+-- voo — trocavam um erro por outro: ou copiavam o eco do proprio movimento por
+-- cima do contador, ou ficavam cegas para o lojista vendendo o mesmo SKU no
+-- Mercado Livre.
+--
+-- `erp_seq` conta os movimentos NOSSOS ja aplicados neste produto. Quem le o
+-- saldo do ERP guarda o seq daquele instante; a escrita so vale se ele nao
+-- mudou. Se mudou, um movimento nosso entrou no meio e a leitura descreve um
+-- passado — descartada, sem palpite sobre quem causou a diferenca.
+--
+-- Uma coluna, e nada mais. `stock` continua sendo o disponivel, atualizado pelos
+-- nossos movimentos na hora (o comprador nao espera o ERP) e corrigido pelo
+-- saldo do ERP quando a leitura e do presente. Nao ha contador paralelo para
+-- divergir do primeiro.
+ALTER TABLE products
+  ADD COLUMN IF NOT EXISTS erp_seq BIGINT NOT NULL DEFAULT 0;

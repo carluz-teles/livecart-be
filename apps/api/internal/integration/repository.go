@@ -3757,3 +3757,48 @@ func (r *Repository) GetProductQuantityInUserCart(ctx context.Context, eventID, 
 
 	return int(qty), nil
 }
+
+// ProductSeqByExternalID resolve o produto local pelo código do ERP e devolve o
+// `erp_seq` do mesmo instante.
+//
+// Id vazio quando o produto não está cadastrado — caso normal, não erro: o ERP
+// notifica sobre o catálogo inteiro dele, e nós só espelhamos o que o lojista
+// importou.
+func (r *Repository) ProductSeqByExternalID(ctx context.Context, storeID, externalSource, externalID string) (string, int64, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return "", 0, err
+	}
+	row, err := r.queries.ProductSeqByExternalID(ctx, sqlc.ProductSeqByExternalIDParams{
+		StoreID:        sID,
+		ExternalSource: externalSource,
+		ExternalID:     pgtype.Text{String: externalID, Valid: true},
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", 0, nil
+		}
+		return "", 0, fmt.Errorf("resolving product seq by external id: %w", err)
+	}
+	return uuidToString(row.ID), row.ErpSeq, nil
+}
+
+// ApplyERPStockMirror grava o saldo lido do ERP, e só se nenhum movimento nosso
+// tiver acontecido desde a leitura.
+//
+// false significa leitura vencida — e descartar é a única resposta correta,
+// porque não há como saber quanto daquele número já estava desatualizado. Uma
+// leitura nova chega no próximo webhook ou na reconciliação.
+func (r *Repository) ApplyERPStockMirror(ctx context.Context, productID string, erpStock int, seenSeq int64) (bool, error) {
+	id, err := parseUUID(productID)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.queries.ApplyERPStockMirror(ctx, sqlc.ApplyERPStockMirrorParams{
+		ID: id, ErpStock: int32(erpStock), SeenSeq: seenSeq,
+	})
+	if err != nil {
+		return false, fmt.Errorf("applying ERP stock mirror: %w", err)
+	}
+	return n > 0, nil
+}
