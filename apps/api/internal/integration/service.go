@@ -3363,6 +3363,26 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 
 const productWebhookMaxRetries = 3
 
+// Por que o saldo do ERP entrou — ou não.
+//
+// Um booleano não bastava. "Não apliquei" agrupava dois casos com destinos
+// opostos: o produto que o lojista nunca importou (repetir não muda nada, o ERP
+// notifica sobre o catálogo inteiro dele) e a leitura que venceu porque um
+// movimento nosso aterrissou depois dela (só uma leitura NOVA resolve).
+//
+// Tratar os dois como iguais custava caro: a venda no e-commerce era descartada
+// em silêncio e ninguém ia buscá-la de novo. O comentário no ponto do descarte
+// apostava no "próximo webhook ou na reconciliação", mas se aquela venda foi o
+// último movimento do lojista, próximo webhook não existe — e a reconciliação
+// só reporta divergência, não conserta.
+type stockMirrorOutcome int
+
+const (
+	stockMirrorApplied stockMirrorOutcome = iota // o saldo do ERP entrou
+	stockMirrorNoTarget                          // produto não importado aqui
+	stockMirrorStale                             // leitura vencida: reler resolve
+)
+
 // ProcessProductWebhook checks if the product exists in LiveCart, then fetches
 // full details from the ERP and syncs locally. Ignores unknown products.
 // Retries on transient failures to avoid losing sync events.
@@ -3415,11 +3435,32 @@ func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, 
 			}
 		}
 
-		stockApplied, syncErr := s.processProductSync(ctx, integration, externalProductID)
+		outcome, syncErr := s.processProductSync(ctx, integration, externalProductID)
 		if syncErr == nil {
-			return stockApplied, nil
+			// Leitura vencida é o único desfecho que pede outra rodada: a
+			// próxima passada faz um GetProduct NOVO, e é a leitura nova — não
+			// um palpite sobre a velha — que corrige o contador.
+			if outcome != stockMirrorStale {
+				return outcome == stockMirrorApplied, nil
+			}
+			lastErr = nil
+			continue
 		}
 		lastErr = syncErr
+	}
+
+	// Esgotou as tentativas ainda vencido. Só acontece com movimento nosso
+	// constante no mesmo SKU durante a janela inteira, e o custo é real: aquela
+	// venda do lojista em outro canal ainda não está no nosso contador. Alto de
+	// propósito — é o gancho para a reconciliação e para o alerta.
+	if lastErr == nil {
+		logger.From(ctx, s.logger).Error("ERP balance never landed: stale on every attempt",
+			zap.String("store_id", storeID),
+			zap.String("integration_id", integration.ID),
+			zap.String("product_id", externalProductID),
+			zap.Int("attempts", productWebhookMaxRetries+1),
+		)
+		return false, nil
 	}
 
 	logger.From(ctx, s.logger).Error("product webhook processing failed after retries",
@@ -3433,15 +3474,15 @@ func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, 
 	return false, lastErr
 }
 
-func (s *Service) processProductSync(ctx context.Context, integration *IntegrationRow, externalProductID string) (bool, error) {
+func (s *Service) processProductSync(ctx context.Context, integration *IntegrationRow, externalProductID string) (stockMirrorOutcome, error) {
 	provider, err := s.createProviderFromRow(ctx, integration)
 	if err != nil {
-		return false, fmt.Errorf("creating provider: %w", err)
+		return stockMirrorNoTarget, fmt.Errorf("creating provider: %w", err)
 	}
 
 	erpProvider, ok := provider.(providers.ERPProvider)
 	if !ok {
-		return false, fmt.Errorf("integration %s is not an ERP provider", integration.ID)
+		return stockMirrorNoTarget, fmt.Errorf("integration %s is not an ERP provider", integration.ID)
 	}
 
 	// O seq ANTES da consulta ao ERP. E o comprovante da leitura: se mudar ate a
@@ -3455,7 +3496,7 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	detailed, err := erpProvider.GetProduct(ctx, externalProductID)
 	if err != nil {
 		s.handleProviderError(ctx, integration.ID, "webhook_get_product", err)
-		return false, fmt.Errorf("fetching product from ERP: %w", err)
+		return stockMirrorNoTarget, fmt.Errorf("fetching product from ERP: %w", err)
 	}
 
 	// Variant-aware branch: if the ERP returned a parent product with children
@@ -3466,9 +3507,9 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		s.enrichVariantsFromIndividualGets(ctx, erpProvider, detailed)
 		s.applyStoreDefaultDimensions(ctx, integration.StoreID, detailed)
 		if err := s.productGroupSyncer.SyncFromERP(ctx, integration.StoreID, integration.Provider, *detailed); err != nil {
-			return false, fmt.Errorf("syncing product group: %w", err)
+			return stockMirrorNoTarget, fmt.Errorf("syncing product group: %w", err)
 		}
-		return true, nil
+		return stockMirrorApplied, nil
 	}
 
 	// Variation child without its own dimensions inherits from the parent,
@@ -3495,11 +3536,12 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 	// do lojista pela live inteira; downgrade-only deixava passar o eco do nosso
 	// proprio movimento. A trava responde a mesma pergunta sem heuristica — ou a
 	// leitura e do presente, ou nao e.
-	stockApplied := false
+	outcome := stockMirrorNoTarget
 	switch {
 	case seqErr != nil:
 		logger.From(ctx, s.logger).Warn("could not read product seq; skipping stock this round",
 			zap.String("external_product_id", externalProductID), zap.Error(seqErr))
+		outcome = stockMirrorStale
 	case localProductID == "":
 		// Produto que o lojista nao importou. O ERP notifica sobre o catalogo
 		// inteiro dele; nos so espelhamos o que existe aqui.
@@ -3509,21 +3551,24 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		case applyErr != nil:
 			logger.From(ctx, s.logger).Warn("failed to apply ERP stock mirror",
 				zap.String("external_product_id", externalProductID), zap.Error(applyErr))
+			outcome = stockMirrorStale
 		case !applied:
 			// Um movimento nosso foi confirmado entre a leitura e agora. Aquele
-			// saldo e passado — descartar e a unica resposta correta, porque nao
-			// da para saber quanto dele ja estava velho. O proximo webhook, ou a
-			// reconciliacao, traz um numero atual.
-			logger.From(ctx, s.logger).Info("ERP balance discarded: one of our movements landed after the read",
+			// saldo e passado, e nao da para saber quanto dele ja estava velho —
+			// so uma leitura NOVA responde. Quem chama repete a rodada inteira,
+			// com um GetProduct novo; descartar sem repetir era perder a venda do
+			// lojista em outro canal, em silencio.
+			logger.From(ctx, s.logger).Info("ERP balance stale: one of our movements landed after the read; re-reading",
 				zap.String("external_product_id", externalProductID),
 				zap.Int64("seen_seq", seenSeq), zap.Int("erp_stock", detailed.Stock))
+			outcome = stockMirrorStale
 		default:
-			stockApplied = true
+			outcome = stockMirrorApplied
 		}
 	}
 
 	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, true, false); err != nil {
-		return false, fmt.Errorf("syncing product: %w", err)
+		return stockMirrorNoTarget, fmt.Errorf("syncing product: %w", err)
 	}
 
 	// O backstop de waitlist só deve rodar quando o estoque pôde AUMENTAR (sync
@@ -3533,13 +3578,13 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		zap.String("integration_id", integration.ID),
 		zap.String("external_product_id", externalProductID),
 		zap.String("store_id", integration.StoreID),
-		zap.Bool("stock_applied", stockApplied),
+		zap.Bool("stock_applied", outcome == stockMirrorApplied),
 		zap.Int("erp_stock", detailed.Stock),
 	)
 
 	// Backstop de waitlist so quando o saldo foi de fato aplicado: so ai uma
 	// unidade pode ter aparecido para promover.
-	return stockApplied, nil
+	return outcome, nil
 }
 
 // isGTIN checks if a string looks like a GTIN/barcode (8+ digits).
