@@ -33,6 +33,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"livecart/apps/api/db/sqlc"
 )
@@ -554,4 +555,123 @@ func TestLiveQuenteNaoCegaParaOEcommerce(t *testing.T) {
 		t.Errorf("%d vendas no e-commerce, só %d chegaram até nós — as outras ficaram "+
 			"invisíveis e o contador local segue inflado", vendasWebObservadas, aplicados)
 	}
+}
+
+// A pergunta direta: durante a guerra, alguma escrita mexeu no estoque de um
+// jeito que os nossos movimentos não justificam?
+//
+// Há duas direções, e elas não são igualmente perigosas. Contador a MENOS segura
+// venda que existia: chato, o lojista vê, e o próximo saldo do ERP corrige.
+// Contador a MAIS oferece unidade que não existe — vira promoção fantasma da
+// fila, venda confirmada de produto esgotado e pedido sem como atender.
+//
+// Duas armadilhas derrubaram as versões anteriores deste teste, e as duas o
+// faziam passar até com a trava REMOVIDA:
+//
+//  1. O ERP atualizado no mesmo instante do decremento local. Sem atraso não
+//     existe foto velha, e é a foto velha que infla. Na produção baixamos o
+//     contador local primeiro e só então mandamos o delta por HTTP — ordem
+//     deliberada, para nunca vender o que já saiu — e durante essa ida-e-volta
+//     o Tiny responde o saldo ANTIGO, maior que o nosso.
+//
+//  2. Estoque menor que a demanda. A conta final batia no piso zero, e o piso
+//     engolia qualquer erro. Aqui o estoque é folgado de propósito: a conta
+//     final é exata, e um contador inflado não tem onde se esconder.
+//
+// Medir por foto "antes/depois" de cada aplicação também não funciona: entre as
+// duas leituras caem dezenas de decrementos concorrentes que mascaram a subida.
+// Quem denuncia é a conta fechada no fim.
+func TestEspelhoDoERPNuncaInventaUnidade(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+
+	fx := seedScaleEvent(t)
+	repo := NewRepository(sqlc.New(testPool), testPool)
+
+	// Folgado: 200 para 70 de demanda. Nada é aparado no piso.
+	const inicial = 200
+	productID := seedSoldOutProductWithQueue(t, fx, inicial, 0)
+	tiny := &tinyReal{saldo: inicial}
+
+	var mu sync.Mutex
+	var aplicacoes int
+	var movimentosNossos int
+
+	var wg sync.WaitGroup
+	largada := make(chan struct{})
+
+	// A live comprando, com a chamada ao ERP viajando depois do decremento.
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-largada
+			if err := repo.DecrementProductStock(ctx, productID, 1); err != nil {
+				return
+			}
+			mu.Lock()
+			movimentosNossos++
+			mu.Unlock()
+			// Enquanto isto dorme, o Tiny responde o saldo de ANTES desta saída.
+			time.Sleep(time.Duration(2+i%7) * time.Millisecond)
+			tiny.saidaDoLiveCart(1)
+		}(i)
+	}
+
+	// O e-commerce vendendo, cada venda com o seu webhook — lendo o saldo do
+	// Tiny exatamente enquanto as nossas saídas estão em voo.
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-largada
+			time.Sleep(time.Duration(i%9) * time.Millisecond)
+			if !tiny.venderNoEcommerce(1) {
+				return
+			}
+			for tentativa := 0; tentativa < 200; tentativa++ {
+				seq := seqDoProduto(t, productID)
+				ok, err := repo.ApplyERPStockMirror(ctx, productID, tiny.ler(), seq)
+				if err != nil {
+					t.Errorf("webhook: %v", err)
+					return
+				}
+				if ok {
+					mu.Lock()
+					aplicacoes++
+					mu.Unlock()
+					return
+				}
+			}
+		}(i)
+	}
+	close(largada)
+	wg.Wait()
+
+	// A conta fechada. Tudo que saiu, saiu por um motivo rastreável: nossas
+	// vendas na live e as do lojista no e-commerce. Um contador MAIOR que isto é
+	// unidade inventada por uma foto velha do ERP; um contador MENOR é unidade
+	// sumida. Nenhum dos dois pode acontecer.
+	esperado := inicial - movimentosNossos - tiny.vendasWeb
+	got := estoqueDoProduto(t, productID)
+	switch {
+	case got > esperado:
+		t.Errorf("contador local = %d, deveria ser %d: o espelho do ERP INVENTOU %d "+
+			"unidade(s) a partir de uma leitura tirada enquanto a nossa saída estava em "+
+			"voo. Cada uma dessas oferece peça que não existe — é o que dispara promoção "+
+			"fantasma da fila e venda de produto esgotado",
+			got, esperado, got-esperado)
+	case got < esperado:
+		t.Errorf("contador local = %d, deveria ser %d: sumiram %d unidade(s) que ninguém "+
+			"comprou", got, esperado, esperado-got)
+	}
+
+	if tiny.ler() != esperado {
+		t.Errorf("o ERP terminou em %d e o nosso contador em %d — os dois têm de "+
+			"convergir quando o barulho para", tiny.ler(), got)
+	}
+
+	t.Logf("%d movimentos nossos, %d vendas no e-commerce, %d aplicações do saldo do ERP "+
+		"| contador final %d (esperado %d), Tiny %d",
+		movimentosNossos, tiny.vendasWeb, aplicacoes, got, esperado, tiny.ler())
 }
