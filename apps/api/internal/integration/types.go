@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	validation "github.com/go-ozzo/ozzo-validation/v4"
+
 	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/live"
@@ -115,6 +117,62 @@ type UpdateIntegrationRequest struct {
 // existing row.
 type UpdatePriorityRequest struct {
 	Priority int `json:"priority" validate:"gte=0"`
+}
+
+// UpdateERPStockSourceRequest é o corpo de PATCH /integrations/:id/erp/stock-source.
+//
+// Escolhe QUAL saldo do ERP o LiveCart espelha:
+//
+//	desligado (padrão)  saldo FÍSICO — tudo que existe no depósito
+//	ligado              saldo DISPONÍVEL — o físico menos o que já está reservado
+//
+// A diferença entre os dois é peça comprometida por documento aberto no ERP
+// (orçamento salvo, pedido não faturado). Ela continua contada no físico e sai
+// do disponível.
+type UpdateERPStockSourceRequest struct {
+	// Ponteiro de propósito. Com um bool puro, um PATCH que omitisse o campo
+	// chegaria como `false` e DESLIGARIA a configuração em silêncio — o mesmo
+	// buraco de zero-value que o ozzo tem com Min sem Required. NotNil
+	// transforma a omissão em 422 em vez de num efeito colateral.
+	UseAvailableStock *bool `json:"useAvailableStock"`
+}
+
+// Validate é o portão sintático. A regra de que só ERP aceita esta configuração
+// é invariante de negócio e mora no service, não aqui.
+func (r UpdateERPStockSourceRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.UseAvailableStock, validation.NotNil),
+	)
+}
+
+// ToInput traduz o request no input do usecase.
+func (r UpdateERPStockSourceRequest) ToInput(storeID, integrationID string) UpdateERPStockSourceInput {
+	return UpdateERPStockSourceInput{
+		StoreID:           storeID,
+		IntegrationID:     integrationID,
+		UseAvailableStock: *r.UseAvailableStock,
+	}
+}
+
+// UpdateERPStockSourceInput é o input do usecase.
+type UpdateERPStockSourceInput struct {
+	StoreID           string
+	IntegrationID     string
+	UseAvailableStock bool
+}
+
+// ERPStockSourceResponse devolve o estado depois da escrita.
+type ERPStockSourceResponse struct {
+	ID                string `json:"id"`
+	UseAvailableStock bool   `json:"useAvailableStock"`
+}
+
+// NewERPStockSourceResponse mapeia a integração para o DTO de saída.
+func NewERPStockSourceResponse(row *IntegrationRow) ERPStockSourceResponse {
+	return ERPStockSourceResponse{
+		ID:                row.ID,
+		UseAvailableStock: providers.MetadataBool(row.Metadata, providers.MetadataUseAvailableStock),
+	}
 }
 
 // IntegrationResponse is the HTTP response for an integration.

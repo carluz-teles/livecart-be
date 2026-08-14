@@ -62,6 +62,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/:id", h.GetByID)
 	g.Delete("/:id", h.Delete)
 	g.Patch("/:id/priority", h.UpdatePriority)
+	g.Patch("/:id/erp/stock-source", h.UpdateERPStockSource)
 
 	// Test connection
 	g.Post("/:id/test", h.TestConnection)
@@ -296,6 +297,33 @@ func (h *Handler) UpdatePriority(c *fiber.Ctx) error {
 		return httpx.HandleServiceError(c, err)
 	}
 	return httpx.OK(c, fiber.Map{"id": id, "priority": req.Priority})
+}
+
+// UpdateERPStockSource escolhe qual saldo do ERP o LiveCart espelha.
+// @Summary Choose which ERP balance mirrors into LiveCart
+// @Description Off (default) mirrors the physical balance; on mirrors the available one (physical minus what the ERP already committed to open documents).
+// @Tags integrations
+// @Accept json
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param id path string true "Integration ID"
+// @Param body body UpdateERPStockSourceRequest true "Stock source"
+// @Success 200 {object} httpx.Envelope{data=ERPStockSourceResponse}
+// @Failure 422 {object} httpx.Envelope
+// @Router /stores/{storeId}/integrations/{id}/erp/stock-source [patch]
+func (h *Handler) UpdateERPStockSource(c *fiber.Ctx) error {
+	var req UpdateERPStockSourceRequest
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
+	}
+	row, err := h.service.UpdateERPStockSource(
+		c.UserContext(),
+		req.ToInput(httpx.GetStoreID(c), c.Params("id")),
+	)
+	if err != nil {
+		return err
+	}
+	return httpx.OK(c, NewERPStockSourceResponse(row))
 }
 
 // TestConnection tests the connection to the integration provider.

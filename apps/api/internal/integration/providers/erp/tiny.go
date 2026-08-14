@@ -42,6 +42,11 @@ type Tiny struct {
 	credentials  *Credentials
 	clientID     string
 	clientSecret string
+
+	// useAvailableStock faz o provider espelhar o saldo VENDÁVEL em vez do
+	// físico. Desligado por padrão: mudar o significado do estoque de uma loja
+	// sem ela pedir é alterar o que ela vende.
+	useAvailableStock bool
 }
 
 // TinyConfig contains configuration for the Tiny provider.
@@ -54,6 +59,9 @@ type TinyConfig struct {
 	Logger        *zap.Logger
 	LogFunc       providers.LogFunc
 	RateLimiter   ratelimit.RateLimiter
+	// UseAvailableStock liga a leitura do saldo disponível. Ver o campo
+	// homônimo em Tiny.
+	UseAvailableStock bool
 }
 
 // NewTiny creates a new Tiny ERP provider.
@@ -66,6 +74,7 @@ func NewTiny(cfg TinyConfig) (*Tiny, error) {
 	}
 
 	return &Tiny{
+		useAvailableStock: cfg.UseAvailableStock,
 		BaseProvider: providers.NewBaseProvider(providers.BaseProviderConfig{
 			IntegrationID: cfg.IntegrationID,
 			StoreID:       cfg.StoreID,
@@ -505,8 +514,12 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 	// A diferença entre os dois é peça reservada por orçamento salvo no Tiny.
 	// Ela continua no físico e sai do disponível — oferecê-la é vender o que já
 	// tem dono, e é furo de estoque do tamanho de quantas estiverem reservadas.
-	if disponivel, ok := t.saldoDisponivel(ctx, productID); ok {
-		out.Stock = disponivel
+	// Só quando a loja pediu. Desligado, o comportamento é exatamente o de
+	// antes — inclusive sem a chamada extra ao Tiny.
+	if t.useAvailableStock {
+		if disponivel, ok := t.saldoDisponivel(ctx, productID); ok {
+			out.Stock = disponivel
+		}
 	}
 
 	// TEMP DEBUG: log shipping resolution so we can pinpoint why some Tiny

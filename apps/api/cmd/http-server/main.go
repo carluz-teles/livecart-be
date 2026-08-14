@@ -466,6 +466,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				},
 				TinyConstructor: func(cfg providers.TinyConfig) (providers.ERPProvider, error) {
 					return erp.NewTiny(erp.TinyConfig{
+						UseAvailableStock: cfg.UseAvailableStock,
 						IntegrationID: cfg.IntegrationID,
 						StoreID:       cfg.StoreID,
 						Credentials:   cfg.Credentials,
@@ -552,6 +553,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				},
 				TinyConstructor: func(cfg providers.TinyConfig) (providers.ERPProvider, error) {
 					return erp.NewTiny(erp.TinyConfig{
+						UseAvailableStock: cfg.UseAvailableStock,
 						IntegrationID: cfg.IntegrationID,
 						StoreID:       cfg.StoreID,
 						Credentials:   cfg.Credentials,

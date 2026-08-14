@@ -3043,6 +3043,17 @@ func (s *Service) enrichVariantsFromIndividualGets(ctx context.Context, erpProvi
 			if err != nil || child == nil {
 				return
 			}
+			// O saldo da variação também vem daqui.
+			//
+			// O payload do pai traz `estoque.quantidade` de cada variação, que é
+			// sempre o saldo FÍSICO — a resposta do produto não tem a quebra de
+			// reservado/disponível. O GET individual acima já passou pela regra
+			// da loja, então é ele quem sabe qual saldo vale, e esse número
+			// chega no banco por productgroup/adapter.
+			//
+			// De graça: a chamada já estava sendo feita para imagem e frete.
+			parent.Variants[idx].Stock = child.Stock
+
 			if child.ImageURL != "" {
 				parent.Variants[idx].ImageURL = child.ImageURL
 			}
@@ -5981,6 +5992,45 @@ func (s *Service) sendWaitlistNotifiedDM(ctx context.Context, input sendWaitlist
 // =============================================================================
 // HELPERS
 // =============================================================================
+
+// UpdateERPStockSource escolhe qual saldo do ERP o LiveCart passa a espelhar.
+//
+// Invariante: só integração de ERP tem os dois saldos. Pagamento e frete não
+// têm estoque nenhum, e aceitar a configuração neles gravaria uma chave que
+// ninguém lê — configuração que não faz nada é pior que configuração ausente,
+// porque o lojista acredita ter ligado alguma coisa.
+//
+// A escrita é um merge: o metadata carrega outras chaves (environment, dados de
+// OAuth) e substituí-lo inteiro apagaria o resto.
+func (s *Service) UpdateERPStockSource(ctx context.Context, input UpdateERPStockSourceInput) (*IntegrationRow, error) {
+	row, err := s.repo.GetByID(ctx, input.IntegrationID, input.StoreID)
+	if err != nil {
+		return nil, err
+	}
+	if row.Type != "erp" {
+		return nil, httpx.DomainError(422, httpx.CodeErpStockSourceUnsupported,
+			"essa configuração existe apenas para integrações de ERP")
+	}
+
+	metadata := row.Metadata
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata[providers.MetadataUseAvailableStock] = input.UseAvailableStock
+
+	if err := s.repo.UpdateMetadata(ctx, row.ID, metadata); err != nil {
+		return nil, err
+	}
+	row.Metadata = metadata
+
+	logger.From(ctx, s.logger).Info("ERP stock source changed",
+		zap.String("integration_id", row.ID),
+		zap.String("store_id", input.StoreID),
+		zap.String("provider", row.Provider),
+		zap.Bool("use_available_stock", input.UseAvailableStock),
+	)
+	return row, nil
+}
 
 func (s *Service) createProviderFromRow(ctx context.Context, integration *IntegrationRow) (providers.Provider, error) {
 	// Decrypt credentials
