@@ -117,6 +117,7 @@ type Service struct {
 	waitlistCloseSched  WaitlistCloseScheduler
 	publishScheduler    PublishScheduler
 	erpResyncScheduler  ERPResyncScheduler
+	erpResyncNotifier   ERPResyncNotifier
 	logger              *zap.Logger
 
 	// subscriptionEnsured guarda QUANDO a inscrição de webhook de cada loja foi
@@ -516,6 +517,11 @@ func NewService(
 // SetERPResyncScheduler injeta o enfileirador da releitura em massa.
 func (s *Service) SetERPResyncScheduler(sched ERPResyncScheduler) {
 	s.erpResyncScheduler = sched
+}
+
+// SetERPResyncNotifier injeta o avisador do fim da releitura em massa.
+func (s *Service) SetERPResyncNotifier(n ERPResyncNotifier) {
+	s.erpResyncNotifier = n
 }
 
 func (s *Service) SetProductSyncer(syncer ProductSyncer) {
@@ -6008,6 +6014,14 @@ func (s *Service) sendWaitlistNotifiedDM(ctx context.Context, input sendWaitlist
 //
 // A escrita é um merge: o metadata carrega outras chaves (environment, dados de
 // OAuth) e substituí-lo inteiro apagaria o resto.
+// ERPResyncNotifier avisa a loja que a releitura em massa terminou.
+//
+// Interface aqui (e não import do notification_inbox) pelo mesmo motivo do
+// idea.NotificationWriter: manter os módulos desacoplados e sem ciclo.
+type ERPResyncNotifier interface {
+	NotifyERPResyncFinished(ctx context.Context, storeID, provider string, synced, failed int) error
+}
+
 // ERPResyncScheduler enfileira a releitura em massa dos produtos de uma loja.
 type ERPResyncScheduler interface {
 	ScheduleERPResync(ctx context.Context, storeID, integrationID string) error
@@ -6105,6 +6119,18 @@ func (s *Service) RunERPResync(ctx context.Context, storeID, integrationID strin
 		zap.Int("synced", ok),
 		zap.Int("failed", falhou),
 	)
+
+	// O aviso é o fim do trabalho, não parte dele: falhar aqui não desfaz nada
+	// que já foi gravado, e devolver erro faria a asynq repetir a varredura
+	// inteira — gastando a cota do ERP de novo para reescrever os mesmos saldos.
+	if s.erpResyncNotifier != nil {
+		if err := s.erpResyncNotifier.NotifyERPResyncFinished(
+			ctx, storeID, integration.Provider, ok, falhou,
+		); err != nil {
+			lg.Warn("ERP resync finished but the merchant was not notified",
+				zap.String("store_id", storeID), zap.Error(err))
+		}
+	}
 	return nil
 }
 

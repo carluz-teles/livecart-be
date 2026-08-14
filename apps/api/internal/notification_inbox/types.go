@@ -14,6 +14,9 @@ const (
 	// Fato de PEDIDO (não de ideia): o carrinho cancelado pelo lojista acabou
 	// sendo pago e o cancelamento foi revertido. Ancorado em cart_id.
 	TypeOrderCancellationReverted = "order_cancellation_reverted"
+	// Fato de CATÁLOGO: a releitura em massa dos produtos do ERP terminou. Sem
+	// âncora — não é sobre um pedido nem uma ideia, é sobre a loja inteira.
+	TypeERPResyncFinished = "erp_resync_finished"
 )
 
 // =============================================================================

@@ -108,6 +108,30 @@ func (r *Repository) MarkAllRead(ctx context.Context, userID string) error {
 // membros na aplicação). ON CONFLICT DO NOTHING casa com o índice único parcial
 // (recipient_id, cart_id, type): a entrega at-least-once do bus pode repetir o
 // fato, o sino não.
+// InsertStoreNotification avisa todos os membros ativos da loja sobre um fato
+// que não tem âncora: nem pedido, nem ideia — a loja inteira.
+//
+// Sem ON CONFLICT porque não há índice único a violar: dois fatos iguais em
+// momentos diferentes (duas releituras do ERP no mesmo dia) são dois avisos
+// legítimos, e suprimir o segundo esconderia a segunda varredura.
+func (r *Repository) InsertStoreNotification(
+	ctx context.Context, notifType, storeID string, payload []byte,
+) error {
+	if len(payload) == 0 {
+		payload = []byte(`{}`)
+	}
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO notifications (recipient_id, type, payload)
+		SELECT m.user_id, $1, $3::jsonb
+		FROM memberships m
+		WHERE m.store_id = $2::uuid AND m.status = 'active'
+	`, notifType, storeID, string(payload))
+	if err != nil {
+		return fmt.Errorf("inserting store notification: %w", err)
+	}
+	return nil
+}
+
 func (r *Repository) InsertStoreOrderNotification(
 	ctx context.Context, notifType, storeID, cartID string, payload []byte,
 ) error {

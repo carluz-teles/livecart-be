@@ -1429,6 +1429,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		// não terminou. Sem isso, dobrar a releitura dobraria o consumo da cota
 		// do Tiny sem trazer nada de novo.
 		integrationSvc.SetERPResyncScheduler(erpResyncScheduler{client: eventsClient})
+		integrationSvc.SetERPResyncNotifier(notifInboxWriter)
 		eventsServer.Register(events.ERPResyncProducts, func(ctx context.Context, t *asynq.Task) error {
 			var env events.Envelope
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
