@@ -411,6 +411,28 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 
 	out := tinyPayloadToERP(p)
 
+	// O nó `estoque` inteiro, cru, para saber se ele já traz o saldo DISPONÍVEL.
+	//
+	// Hoje lemos só `estoque.quantidade`, e o teste do lojista provou que esse é
+	// o saldo FÍSICO: o Carrossel Musical estava com físico 4 / disponível 3 no
+	// Tiny e chegou aqui como 4. A diferença é peça reservada por orçamento —
+	// oferecê-la é vender o que já tem dono.
+	//
+	// Se este nó já carregar o disponível, o conserto não custa chamada nenhuma.
+	// Se trouxer só `quantidade`, é um GET /estoque/{id} por produto, e aí o
+	// rate limit do Tiny entra na decisão. Sai assim que a resposta aparecer.
+	if t.Logger != nil {
+		var cru struct {
+			Estoque json.RawMessage `json:"estoque"`
+		}
+		if json.Unmarshal(body, &cru) == nil && len(cru.Estoque) > 0 {
+			t.Logger.Info("tiny product stock node",
+				zap.String("external_product_id", productID),
+				zap.ByteString("estoque", cru.Estoque),
+			)
+		}
+	}
+
 	// TEMP DEBUG: log shipping resolution so we can pinpoint why some Tiny
 	// products land in LiveCart with no dimensions. Remove once the variation
 	// sync flow is confirmed working in production.
