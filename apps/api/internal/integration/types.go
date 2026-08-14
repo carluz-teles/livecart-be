@@ -190,6 +190,34 @@ func ERPResyncRunningFromMetadata(metadata map[string]any) bool {
 	return time.Since(desde) < erpResyncStaleAfter
 }
 
+// ERPResyncProgressFromMetadata lê "X de N" da varredura em andamento.
+//
+// Devolve (0, 0) quando não há varredura viva: o progresso é do trabalho em
+// curso, e números pendurados de uma varredura antiga descreveriam algo que já
+// não está acontecendo.
+func ERPResyncProgressFromMetadata(metadata map[string]any) (done, total int) {
+	if !ERPResyncRunningFromMetadata(metadata) {
+		return 0, 0
+	}
+	return metadataInt(metadata, providers.MetadataResyncDone),
+		metadataInt(metadata, providers.MetadataResyncTotal)
+}
+
+// metadataInt lê um inteiro do metadata tolerando as duas formas em que ele
+// chega: número vivo em memória (int) e número que passou pelo JSONB (float64).
+func metadataInt(metadata map[string]any, chave string) int {
+	switch v := metadata[chave].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
 // StartERPResyncInput é o input do usecase de releitura em massa.
 type StartERPResyncInput struct {
 	StoreID       string
@@ -230,7 +258,12 @@ type IntegrationResponse struct {
 	// Calculado aqui e não no cliente: a marca crua é um timestamp que precisa
 	// da guarda de obsolescência para virar resposta, e espalhar essa regra por
 	// cada tela que desabilita um botão é convidar as telas a divergirem.
-	ERPResyncRunning bool       `json:"erpResyncRunning"`
+	ERPResyncRunning bool `json:"erpResyncRunning"`
+	// ERPResyncDone / ERPResyncTotal levam o progresso, e só valem enquanto
+	// ERPResyncRunning é verdadeiro — zerados fora disso, para nenhuma tela
+	// mostrar "154 de 154" de uma varredura que acabou ontem.
+	ERPResyncDone  int `json:"erpResyncDone"`
+	ERPResyncTotal int `json:"erpResyncTotal"`
 	LastSyncedAt     *time.Time `json:"lastSyncedAt,omitempty"`
 	CreatedAt        time.Time  `json:"createdAt"`
 	// Setup URLs the merchant must paste into the provider's app config.

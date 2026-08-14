@@ -6087,12 +6087,41 @@ func (s *Service) markResyncRunning(ctx context.Context, integration *Integratio
 		metadata[providers.MetadataResyncRunningSince] = time.Now().UTC().Format(time.RFC3339)
 	} else {
 		delete(metadata, providers.MetadataResyncRunningSince)
+		delete(metadata, providers.MetadataResyncDone)
+		delete(metadata, providers.MetadataResyncTotal)
 	}
 	if err := s.repo.UpdateMetadata(ctx, integration.ID, metadata); err != nil {
 		logger.From(ctx, s.logger).Warn("could not update the ERP resync marker",
 			zap.String("integration_id", integration.ID),
 			zap.Bool("running", running),
 			zap.Error(err))
+		return
+	}
+	integration.Metadata = metadata
+}
+
+// erpResyncProgressEvery é de quantos em quantos produtos o progresso é gravado.
+//
+// Não a cada produto: seriam 154 escritas no metadata numa varredura comum, para
+// um número que ninguém consegue ler mudando a cada seis segundos. Não a cada
+// bloco de 25: com o ritmo que o ERP permite, o contador ficaria parado por
+// minutos e voltaria a parecer travado — que é o problema que ele existe para
+// resolver.
+const erpResyncProgressEvery = 5
+
+// markResyncProgress grava "vai em X de N".
+func (s *Service) markResyncProgress(ctx context.Context, integration *IntegrationRow, done, total int) {
+	metadata := integration.Metadata
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata[providers.MetadataResyncDone] = done
+	metadata[providers.MetadataResyncTotal] = total
+	if err := s.repo.UpdateMetadata(ctx, integration.ID, metadata); err != nil {
+		// Progresso é conforto, não correção: perder uma atualização atrasa o
+		// número na tela e não muda nada do que foi gravado no estoque.
+		logger.From(ctx, s.logger).Debug("could not update the ERP resync progress",
+			zap.String("integration_id", integration.ID), zap.Error(err))
 		return
 	}
 	integration.Metadata = metadata
@@ -6169,6 +6198,9 @@ func (s *Service) RunERPResync(ctx context.Context, storeID, integrationID strin
 		zap.Int("products", len(posicoes)),
 	)
 
+	total := len(posicoes)
+	s.markResyncProgress(ctx, integration, 0, total)
+
 	var ok, falhou int
 	for i, pos := range posicoes {
 		if i > 0 && i%erpResyncChunk == 0 {
@@ -6187,6 +6219,10 @@ func (s *Service) RunERPResync(ctx context.Context, storeID, integrationID strin
 			continue
 		}
 		ok++
+
+		if (i+1)%erpResyncProgressEvery == 0 {
+			s.markResyncProgress(ctx, integration, i+1, total)
+		}
 	}
 
 	lg.Info("ERP resync finished",

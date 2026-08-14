@@ -66,3 +66,54 @@ func TestERPResyncRunningFromMetadata(t *testing.T) {
 		})
 	}
 }
+
+// O progresso só existe enquanto a varredura existe.
+//
+// Números pendurados de uma varredura antiga descreveriam trabalho que já
+// terminou — e o botão mostraria "154 de 154" para sempre, que é pior que não
+// mostrar nada: parece travado no fim em vez de parado.
+func TestERPResyncProgressFromMetadata(t *testing.T) {
+	agora := time.Now()
+
+	t.Run("varredura viva devolve o progresso", func(t *testing.T) {
+		md := marcaDe(agora)
+		md[providers.MetadataResyncDone] = 42
+		md[providers.MetadataResyncTotal] = 154
+		done, total := ERPResyncProgressFromMetadata(md)
+		if done != 42 || total != 154 {
+			t.Errorf("progresso = %d de %d, quero 42 de 154", done, total)
+		}
+	})
+
+	t.Run("numeros que passaram pelo JSONB chegam como float", func(t *testing.T) {
+		// É a forma real: o metadata volta do Postgres decodificado por
+		// encoding/json, que transforma todo número em float64. Ler só `int`
+		// devolveria zero para toda varredura vinda do banco — ou seja, sempre.
+		md := marcaDe(agora)
+		md[providers.MetadataResyncDone] = float64(42)
+		md[providers.MetadataResyncTotal] = float64(154)
+		done, total := ERPResyncProgressFromMetadata(md)
+		if done != 42 || total != 154 {
+			t.Errorf("progresso = %d de %d, quero 42 de 154", done, total)
+		}
+	})
+
+	t.Run("sem varredura viva o progresso zera", func(t *testing.T) {
+		md := map[string]any{
+			providers.MetadataResyncDone:  154,
+			providers.MetadataResyncTotal: 154,
+		}
+		if done, total := ERPResyncProgressFromMetadata(md); done != 0 || total != 0 {
+			t.Errorf("progresso = %d de %d numa varredura que não está rodando", done, total)
+		}
+	})
+
+	t.Run("marca velha demais também zera o progresso", func(t *testing.T) {
+		md := marcaDe(agora.Add(-2 * time.Hour))
+		md[providers.MetadataResyncDone] = 30
+		md[providers.MetadataResyncTotal] = 154
+		if done, total := ERPResyncProgressFromMetadata(md); done != 0 || total != 0 {
+			t.Errorf("progresso = %d de %d de uma varredura abandonada", done, total)
+		}
+	})
+}
