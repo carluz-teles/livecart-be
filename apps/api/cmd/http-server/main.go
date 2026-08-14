@@ -1572,16 +1572,45 @@ func (s publishScheduler) CancelPublish(ctx context.Context, jobID string) error
 func publishTaskID(jobID string) string { return "session-publish:" + jobID }
 
 // erpResyncScheduler adapta o cliente de eventos para a releitura em massa dos
-// produtos de um ERP. TaskID por integração serve de dedup: o lojista clicando
-// duas vezes no botão não dispara duas varreduras sobre a mesma cota do Tiny.
+// produtos de um ERP.
+//
+// Vai para a fila BATCH, e não para a normal, porque é o que ela é: trabalho
+// pesado e tolerante a atraso. A varredura de 140 produtos de 14/08 levou mais
+// de sete minutos; na fila normal — onde a política é de 15 segundos e moram os
+// eventos de carrinho e comentário — ela ocupa um worker por todo esse tempo e
+// atrasa o que precisa ser rápido.
+//
+// Timeout explícito e generoso: a política da fila batch é de 60 segundos, que
+// mataria a varredura no primeiro minuto. MaxRetry 1 porque repetir custa a cota
+// inteira do ERP de novo para reescrever os mesmos saldos.
+//
+// TaskID por integração serve de dedup, e o conflito é resposta esperada: dois
+// cliques no botão são uma varredura só, não um erro para mostrar ao lojista.
 type erpResyncScheduler struct{ client *events.Client }
 
 func (s erpResyncScheduler) ScheduleERPResync(ctx context.Context, storeID, integrationID string) error {
-	return s.client.Schedule(ctx, time.Now(), events.ERPResyncProducts,
-		"erp-resync:"+integrationID, struct {
-			StoreID       string `json:"store_id"`
-			IntegrationID string `json:"integration_id"`
-		}{StoreID: storeID, IntegrationID: integrationID})
+	payload, err := json.Marshal(struct {
+		StoreID       string `json:"store_id"`
+		IntegrationID string `json:"integration_id"`
+	}{StoreID: storeID, IntegrationID: integrationID})
+	if err != nil {
+		return err
+	}
+	_, err = s.client.Enqueue(ctx, events.Envelope{
+		EventID:    "erp-resync:" + integrationID,
+		Name:       events.ERPResyncProducts,
+		Source:     events.SourceInternal,
+		OccurredAt: time.Now(),
+		Payload:    payload,
+	},
+		asynq.Queue(events.QueueBatch),
+		asynq.Timeout(45*time.Minute),
+		asynq.MaxRetry(1),
+	)
+	if errors.Is(err, asynq.ErrTaskIDConflict) {
+		return nil
+	}
+	return err
 }
 
 // trialReminderScheduler adapts the events client to billing.TrialReminderScheduler,
