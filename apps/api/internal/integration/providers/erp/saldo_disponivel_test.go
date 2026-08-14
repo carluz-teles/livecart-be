@@ -32,25 +32,30 @@ func TestSaldoFisicoNuncaPassaPorDisponivel(t *testing.T) {
 	}
 }
 
-func TestReconheceOsNomesCandidatos(t *testing.T) {
-	for _, campo := range []string{
-		"saldoDisponivel", "saldo_disponivel", "disponivel", "quantidadeDisponivel",
-	} {
-		t.Run(campo, func(t *testing.T) {
-			got, usado, ok := ExtrairSaldoDisponivel(map[string]any{
-				"saldo": float64(4),
-				campo:   float64(3),
-			})
-			if !ok {
-				t.Fatalf("não reconheceu %q", campo)
-			}
-			if usado != campo {
-				t.Errorf("usou %q em vez de %q", usado, campo)
-			}
-			if got != 3 {
-				t.Errorf("saldo = %d, quero 3 (o disponível, não o físico 4)", got)
-			}
-		})
+// A resposta real do Tiny, copiada de produção em 14/08/2026 para o Carrossel
+// Musical Azul: o lojista tinha físico 4 com 1 peça reservada num orçamento, e
+// só 3 podiam ser vendidas.
+func TestRespostaRealDoTiny(t *testing.T) {
+	resposta := map[string]any{
+		"id":         float64(830590845),
+		"nome":       "Carrossel Musical Azul - 17cm",
+		"codigo":     "3583A",
+		"unidade":    "UN",
+		"saldo":      float64(4),
+		"reservado":  float64(1),
+		"disponivel": float64(3),
+		"depositos":  []any{},
+	}
+	got, campo, ok := ExtrairSaldoDisponivel(resposta)
+	if !ok {
+		t.Fatal("não resolveu a resposta real do Tiny")
+	}
+	if campo != "disponivel" {
+		t.Errorf("campo = %q, quero \"disponivel\"", campo)
+	}
+	if got != 3 {
+		t.Errorf("saldo = %d, quero 3 — 4 é o físico, e é ele que oferecia a peça "+
+			"que já estava reservada num orçamento", got)
 	}
 }
 
@@ -61,6 +66,10 @@ func TestSemCampoConhecidoNaoAfirmaNada(t *testing.T) {
 		"resposta vazia":     {},
 		"só campos alheios":  {"id": float64(1), "produto": "x", "depositos": []any{}},
 		"disponível textual": {"disponivel": "3"},
+		// Só o físico e o reservado, sem o disponível calculado: não é papel
+		// desta função inferir a subtração — inferir viraria adivinhação sobre o
+		// número que decide venda.
+		"sem o disponível": {"saldo": float64(4), "reservado": float64(1)},
 	} {
 		t.Run(nome, func(t *testing.T) {
 			if saldo, _, ok := ExtrairSaldoDisponivel(resposta); ok {
@@ -75,7 +84,7 @@ func TestSemCampoConhecidoNaoAfirmaNada(t *testing.T) {
 // (gravado na bateria de sandbox) e copiar isso propaga o defeito em vez de
 // mostrá-lo. Cair para o físico deixa o número errado visível no lugar certo.
 func TestNegativoNaoEntra(t *testing.T) {
-	if saldo, _, ok := ExtrairSaldoDisponivel(map[string]any{"saldoDisponivel": float64(-2)}); ok {
+	if saldo, _, ok := ExtrairSaldoDisponivel(map[string]any{"disponivel": float64(-2)}); ok {
 		t.Errorf("aceitou disponível=%d — negativo é saída além do que existia, "+
 			"não um número a espelhar", saldo)
 	}
@@ -84,25 +93,11 @@ func TestNegativoNaoEntra(t *testing.T) {
 // Zero é saldo legítimo e precisa passar: é exatamente o produto esgotado, o
 // caso em que oferecer uma unidade a mais dói mais.
 func TestZeroEhSaldoValido(t *testing.T) {
-	saldo, _, ok := ExtrairSaldoDisponivel(map[string]any{"saldoDisponivel": float64(0)})
+	saldo, _, ok := ExtrairSaldoDisponivel(map[string]any{"disponivel": float64(0)})
 	if !ok {
 		t.Fatal("recusou zero — o produto esgotado voltaria a ser oferecido pelo físico")
 	}
 	if saldo != 0 {
 		t.Errorf("saldo = %d, quero 0", saldo)
-	}
-}
-
-// A ordem importa quando o Tiny manda mais de um nome: o mais específico ganha.
-func TestPrefereONomeMaisEspecifico(t *testing.T) {
-	_, campo, ok := ExtrairSaldoDisponivel(map[string]any{
-		"disponivel":      float64(9),
-		"saldoDisponivel": float64(3),
-	})
-	if !ok {
-		t.Fatal("não resolveu")
-	}
-	if campo != "saldoDisponivel" {
-		t.Errorf("escolheu %q; com os dois presentes o mais específico é que vale", campo)
 	}
 }
