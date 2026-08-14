@@ -1292,6 +1292,7 @@ func toIntegrationResponse(output *CreateIntegrationOutput) *IntegrationResponse
 		Provider:          output.Provider,
 		Status:            output.Status,
 		Metadata:          output.Metadata,
+		ERPResyncRunning:  ERPResyncRunningFromMetadata(output.Metadata),
 		LastSyncedAt:      output.LastSyncedAt,
 		CreatedAt:         output.CreatedAt,
 		RedirectURL:       output.RedirectURL,

@@ -6068,7 +6068,34 @@ func (s *Service) StartERPResync(ctx context.Context, input StartERPResyncInput)
 	if err := s.erpResyncScheduler.ScheduleERPResync(ctx, input.StoreID, integration.ID); err != nil {
 		return 0, fmt.Errorf("scheduling ERP resync: %w", err)
 	}
+	s.markResyncRunning(ctx, integration, true)
 	return len(posicoes), nil
+}
+
+// markResyncRunning liga/desliga a marca de varredura em andamento.
+//
+// Best-effort: falhar aqui não pode impedir a varredura de começar nem de
+// terminar. O pior desfecho de uma marca presa é o botão ficar desabilitado até
+// a guarda de obsolescência expirar — chato, e muito melhor que duas varreduras
+// simultâneas sobre a mesma cota do ERP.
+func (s *Service) markResyncRunning(ctx context.Context, integration *IntegrationRow, running bool) {
+	metadata := integration.Metadata
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	if running {
+		metadata[providers.MetadataResyncRunningSince] = time.Now().UTC().Format(time.RFC3339)
+	} else {
+		delete(metadata, providers.MetadataResyncRunningSince)
+	}
+	if err := s.repo.UpdateMetadata(ctx, integration.ID, metadata); err != nil {
+		logger.From(ctx, s.logger).Warn("could not update the ERP resync marker",
+			zap.String("integration_id", integration.ID),
+			zap.Bool("running", running),
+			zap.Error(err))
+		return
+	}
+	integration.Metadata = metadata
 }
 
 // erpResyncRateLimitRetries é quantas vezes um produto estrangulado é reposto na
@@ -6123,6 +6150,12 @@ func (s *Service) RunERPResync(ctx context.Context, storeID, integrationID strin
 	if err != nil {
 		return err
 	}
+
+	// A marca sai no fim, dê no que der. Se ficar presa, o botão do lojista fica
+	// desabilitado até a guarda de obsolescência soltar — e `context.WithoutCancel`
+	// porque a limpeza precisa acontecer mesmo quando a varredura morreu por
+	// timeout, que é justamente quando a marca ficaria mais tempo pendurada.
+	defer s.markResyncRunning(context.WithoutCancel(ctx), integration, false)
 
 	posicoes, err := s.repo.ListStockPositionsForReconciliation(ctx, storeID, integration.Provider)
 	if err != nil {
