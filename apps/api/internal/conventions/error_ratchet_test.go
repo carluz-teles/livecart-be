@@ -384,6 +384,10 @@ var baselineRawThrows = map[string]bool{
 	"integration.Service.SendWhatsAppTemplate:\"nenhum template WhatsApp aprovado configurado para esta loja\"":                 true,
 	"integration.Service.SyncProductManual:\"integração não corresponde à origem do produto\"":                                  true,
 	"integration.Service.SyncProductManual:\"product syncer not configured\"":                                                   true,
+	// Guarda de configuração: o enfileirador da releitura em massa não foi
+	// injetado (Redis/eventos ausentes). Mesma natureza dos "not configured"
+	// vizinhos — o lojista não tem o que fazer com um código aqui.
+	"integration.Service.StartERPResync:\"sincronização em massa não está configurada\"":                                        true,
 	"integration.Service.SyncProductManual:\"produto não possui ID externo vinculado a um ERP\"":                                true,
 	"integration.Service.TestPagarmeWebhookEndpoint:\"URL de webhook indisponível — verifique a configuração do servidor\"":     true,
 	"integration.Service.TestPagarmeWebhookEndpoint:\"integração Pagar.me não encontrada\"":                                     true,

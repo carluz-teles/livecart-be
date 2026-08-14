@@ -63,6 +63,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Delete("/:id", h.Delete)
 	g.Patch("/:id/priority", h.UpdatePriority)
 	g.Patch("/:id/erp/stock-source", h.UpdateERPStockSource)
+	g.Post("/:id/erp/resync", h.StartERPResync)
 
 	// Test connection
 	g.Post("/:id/test", h.TestConnection)
@@ -324,6 +325,27 @@ func (h *Handler) UpdateERPStockSource(c *fiber.Ctx) error {
 		return err
 	}
 	return httpx.OK(c, NewERPStockSourceResponse(row))
+}
+
+// StartERPResync relê todos os produtos vinculados ao ERP.
+// @Summary Re-read every ERP-linked product
+// @Description Queues a paced re-read of the store's ERP products. Used after changing which balance is mirrored, since the setting only affects future syncs and does not rewrite what is already stored.
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param id path string true "Integration ID"
+// @Success 202 {object} httpx.Envelope{data=StartERPResyncResponse}
+// @Failure 422 {object} httpx.Envelope
+// @Router /stores/{storeId}/integrations/{id}/erp/resync [post]
+func (h *Handler) StartERPResync(c *fiber.Ctx) error {
+	total, err := h.service.StartERPResync(c.UserContext(), StartERPResyncInput{
+		StoreID:       httpx.GetStoreID(c),
+		IntegrationID: c.Params("id"),
+	})
+	if err != nil {
+		return err
+	}
+	return httpx.OK(c, StartERPResyncResponse{Products: total})
 }
 
 // TestConnection tests the connection to the integration provider.

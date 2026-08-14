@@ -405,9 +405,20 @@ func (t *Tiny) saldoDisponivel(ctx context.Context, productID string) (int, bool
 	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
 	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
 	if err != nil || !providers.IsSuccessStatus(resp.StatusCode) {
+		// O status importa e faltava aqui: sem ele, um 404 (produto sem controle
+		// de estoque) e um 429 (estrangulado) viram a mesma linha muda, e as duas
+		// pedem coisas diferentes. Enquanto isso o produto é oferecido pelo saldo
+		// FÍSICO — de novo o furo que esta função existe para fechar —, então a
+		// linha precisa dizer o suficiente para agir.
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
 		if t.Logger != nil {
 			t.Logger.Warn("tiny available stock unavailable; falling back to physical",
 				zap.String("external_product_id", productID),
+				zap.Int("status", status),
+				zap.ByteString("body", body),
 				zap.Error(err),
 			)
 		}
@@ -417,13 +428,6 @@ func (t *Tiny) saldoDisponivel(ctx context.Context, productID string) (int, bool
 	var cru map[string]any
 	if json.Unmarshal(body, &cru) != nil {
 		return 0, false
-	}
-
-	if t.Logger != nil {
-		t.Logger.Info("tiny stock endpoint payload",
-			zap.String("external_product_id", productID),
-			zap.ByteString("body", body),
-		)
 	}
 
 	n, campo, ok := ExtrairSaldoDisponivel(cru)
@@ -436,9 +440,13 @@ func (t *Tiny) saldoDisponivel(ctx context.Context, productID string) (int, bool
 		return 0, false
 	}
 	if t.Logger != nil {
+		// Os três números juntos: é a conta que decide o que a loja pode vender,
+		// e vê-la inteira poupa arqueologia quando um saldo parecer errado.
 		t.Logger.Info("tiny available stock resolved",
 			zap.String("external_product_id", productID),
 			zap.String("campo", campo),
+			zap.Any("saldo", cru["saldo"]),
+			zap.Any("reservado", cru["reservado"]),
 			zap.Int("disponivel", n),
 		)
 	}
@@ -448,18 +456,20 @@ func (t *Tiny) saldoDisponivel(ctx context.Context, productID string) (int, bool
 // ExtrairSaldoDisponivel escolhe, na resposta de estoque do Tiny, o campo que
 // representa o saldo VENDÁVEL.
 //
-// A lista existe porque o schema desta resposta não está na documentação
-// pública, e chutar um nome só arriscava não achar nada. Ela encolhe para o
-// campo real assim que uma resposta de produção confirmar qual é.
+// O schema não está na documentação pública; foi confirmado por resposta de
+// produção em 14/08/2026:
 //
-// `saldo` está fora de propósito: é o saldo FÍSICO, o mesmo número que já vem em
-// `estoque.quantidade` do GET /produtos e que causou o furo. Aceitá-lo aqui
+//	{"id":830590845,"nome":"Carrossel Musical Azul - 17cm","codigo":"3583A",
+//	 "unidade":"UN","saldo":4,"reservado":1,"disponivel":3,"depositos":[...]}
+//
+// `saldo` fica de fora de propósito: é o saldo FÍSICO, o mesmo número que já vem
+// em `estoque.quantidade` do GET /produtos e que causou o furo. Aceitá-lo aqui
 // recriaria o bug com outro nome e com uma chamada HTTP a mais de custo.
 //
 // Negativo não é saldo, é sintoma — o Tiny aceita ir abaixo de zero, e copiar
 // isso propagaria o defeito em vez de mostrá-lo.
 func ExtrairSaldoDisponivel(cru map[string]any) (saldo int, campo string, ok bool) {
-	for _, c := range []string{"saldoDisponivel", "saldo_disponivel", "disponivel", "quantidadeDisponivel"} {
+	for _, c := range []string{"disponivel"} {
 		v, existe := cru[c]
 		if !existe {
 			continue

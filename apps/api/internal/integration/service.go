@@ -116,6 +116,8 @@ type Service struct {
 	expiryScheduler     CartExpiryScheduler
 	waitlistCloseSched  WaitlistCloseScheduler
 	publishScheduler    PublishScheduler
+	erpResyncScheduler  ERPResyncScheduler
+	erpResyncNotifier   ERPResyncNotifier
 	logger              *zap.Logger
 
 	// subscriptionEnsured guarda QUANDO a inscrição de webhook de cada loja foi
@@ -512,6 +514,16 @@ func NewService(
 }
 
 // SetProductSyncer sets the product syncer for webhook processing.
+// SetERPResyncScheduler injeta o enfileirador da releitura em massa.
+func (s *Service) SetERPResyncScheduler(sched ERPResyncScheduler) {
+	s.erpResyncScheduler = sched
+}
+
+// SetERPResyncNotifier injeta o avisador do fim da releitura em massa.
+func (s *Service) SetERPResyncNotifier(n ERPResyncNotifier) {
+	s.erpResyncNotifier = n
+}
+
 func (s *Service) SetProductSyncer(syncer ProductSyncer) {
 	s.productSyncer = syncer
 }
@@ -6002,6 +6014,126 @@ func (s *Service) sendWaitlistNotifiedDM(ctx context.Context, input sendWaitlist
 //
 // A escrita é um merge: o metadata carrega outras chaves (environment, dados de
 // OAuth) e substituí-lo inteiro apagaria o resto.
+// ERPResyncNotifier avisa a loja que a releitura em massa terminou.
+//
+// Interface aqui (e não import do notification_inbox) pelo mesmo motivo do
+// idea.NotificationWriter: manter os módulos desacoplados e sem ciclo.
+type ERPResyncNotifier interface {
+	NotifyERPResyncFinished(ctx context.Context, storeID, provider string, synced, failed int) error
+}
+
+// ERPResyncScheduler enfileira a releitura em massa dos produtos de uma loja.
+type ERPResyncScheduler interface {
+	ScheduleERPResync(ctx context.Context, storeID, integrationID string) error
+}
+
+// erpResyncChunk é de quantos em quantos produtos a releitura respira.
+//
+// O limitador adaptativo já espaça as chamadas pelos headers do Tiny, então a
+// pausa não existe para respeitar o limite — existe para não MONOPOLIZÁ-LO. Sem
+// ela, uma releitura de 300 produtos ocupa a cota inteira e o webhook de estoque
+// de uma live em andamento fica na fila atrás dela.
+const erpResyncChunk = 25
+
+// erpResyncBreath é quanto a releitura para entre um bloco e outro.
+const erpResyncBreath = 2 * time.Second
+
+// StartERPResync agenda a releitura e devolve quantos produtos entrarão nela.
+//
+// Existe porque os produtos foram importados quando o LiveCart só sabia ler o
+// saldo FÍSICO do ERP. Ligar a configuração de saldo disponível muda o que as
+// PRÓXIMAS sincronizações gravam, mas não reescreve o que já está no banco: sem
+// isto, cada produto só se corrigiria quando o lojista mexesse nele no ERP.
+func (s *Service) StartERPResync(ctx context.Context, input StartERPResyncInput) (int, error) {
+	integration, err := s.repo.GetByID(ctx, input.IntegrationID, input.StoreID)
+	if err != nil {
+		return 0, err
+	}
+	if integration.Type != "erp" {
+		return 0, httpx.DomainError(422, httpx.CodeErpStockSourceUnsupported,
+			"só integrações de ERP têm produtos para sincronizar")
+	}
+	if s.erpResyncScheduler == nil {
+		return 0, httpx.ErrUnprocessable("sincronização em massa não está configurada")
+	}
+
+	posicoes, err := s.repo.ListStockPositionsForReconciliation(ctx, input.StoreID, integration.Provider)
+	if err != nil {
+		return 0, err
+	}
+	if len(posicoes) == 0 {
+		return 0, nil
+	}
+
+	if err := s.erpResyncScheduler.ScheduleERPResync(ctx, input.StoreID, integration.ID); err != nil {
+		return 0, fmt.Errorf("scheduling ERP resync: %w", err)
+	}
+	return len(posicoes), nil
+}
+
+// RunERPResync percorre os produtos vinculados relendo cada um do ERP.
+//
+// Um produto que falha não derruba os outros: a releitura existe para consertar
+// um catálogo inteiro, e parar no primeiro erro deixaria o resto do estoque
+// errado por causa de um SKU que o lojista talvez tenha apagado no ERP.
+func (s *Service) RunERPResync(ctx context.Context, storeID, integrationID string) error {
+	integration, err := s.repo.GetByID(ctx, integrationID, storeID)
+	if err != nil {
+		return err
+	}
+
+	posicoes, err := s.repo.ListStockPositionsForReconciliation(ctx, storeID, integration.Provider)
+	if err != nil {
+		return err
+	}
+
+	lg := logger.From(ctx, s.logger)
+	lg.Info("ERP resync started",
+		zap.String("store_id", storeID),
+		zap.String("integration_id", integrationID),
+		zap.Int("products", len(posicoes)),
+	)
+
+	var ok, falhou int
+	for i, pos := range posicoes {
+		if i > 0 && i%erpResyncChunk == 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(erpResyncBreath):
+			}
+		}
+		if _, err := s.processProductSync(ctx, integration, pos.ExternalID); err != nil {
+			falhou++
+			lg.Warn("ERP resync: product failed",
+				zap.String("external_product_id", pos.ExternalID),
+				zap.String("name", pos.Name),
+				zap.Error(err))
+			continue
+		}
+		ok++
+	}
+
+	lg.Info("ERP resync finished",
+		zap.String("store_id", storeID),
+		zap.Int("synced", ok),
+		zap.Int("failed", falhou),
+	)
+
+	// O aviso é o fim do trabalho, não parte dele: falhar aqui não desfaz nada
+	// que já foi gravado, e devolver erro faria a asynq repetir a varredura
+	// inteira — gastando a cota do ERP de novo para reescrever os mesmos saldos.
+	if s.erpResyncNotifier != nil {
+		if err := s.erpResyncNotifier.NotifyERPResyncFinished(
+			ctx, storeID, integration.Provider, ok, falhou,
+		); err != nil {
+			lg.Warn("ERP resync finished but the merchant was not notified",
+				zap.String("store_id", storeID), zap.Error(err))
+		}
+	}
+	return nil
+}
+
 func (s *Service) UpdateERPStockSource(ctx context.Context, input UpdateERPStockSourceInput) (*IntegrationRow, error) {
 	row, err := s.repo.GetByID(ctx, input.IntegrationID, input.StoreID)
 	if err != nil {

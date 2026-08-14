@@ -87,6 +87,24 @@ func (w *Writer) NotifyOrderCancellationReverted(
 	return w.repo.InsertStoreOrderNotification(ctx, TypeOrderCancellationReverted, storeID, cartID, payload)
 }
 
+// NotifyERPResyncFinished avisa a loja que a releitura em massa dos produtos
+// terminou.
+//
+// A varredura é assíncrona e pode levar minutos; sem o aviso o lojista clica no
+// botão e fica recarregando a lista para adivinhar se já acabou. O payload leva
+// os dois números porque "terminou" e "terminou com 12 produtos falhando" pedem
+// reações diferentes.
+func (w *Writer) NotifyERPResyncFinished(
+	ctx context.Context, storeID, provider string, synced, failed int,
+) error {
+	payload, _ := json.Marshal(map[string]any{
+		"provider": provider,
+		"synced":   synced,
+		"failed":   failed,
+	})
+	return w.repo.InsertStoreNotification(ctx, TypeERPResyncFinished, storeID, payload)
+}
+
 func ptrOrNil(s string) *string {
 	if s == "" {
 		return nil
