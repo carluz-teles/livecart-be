@@ -161,6 +161,19 @@ type UpdateERPStockSourceInput struct {
 	UseAvailableStock bool
 }
 
+// StartERPResyncInput é o input do usecase de releitura em massa.
+type StartERPResyncInput struct {
+	StoreID       string
+	IntegrationID string
+}
+
+// StartERPResyncResponse conta o que entrou na releitura.
+type StartERPResyncResponse struct {
+	// Products é quantos produtos vinculados ao ERP serão relidos. Zero significa
+	// que a loja não tem produto importado desse ERP — não é erro.
+	Products int `json:"products"`
+}
+
 // ERPStockSourceResponse devolve o estado depois da escrita.
 type ERPStockSourceResponse struct {
 	ID                string `json:"id"`

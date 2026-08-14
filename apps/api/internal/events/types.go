@@ -200,6 +200,15 @@ const (
 	UserUpdated          Name = "user.updated"
 	UserDeleted          Name = "user.deleted"
 	CustomerUpserted     Name = "customer.upserted"
+
+	// ERPResyncProducts: relê no ERP todos os produtos vinculados de uma loja.
+	//
+	// Uma tarefa por LOJA, não por produto. Enfileirar N tarefas só empurraria o
+	// problema para o rate limit do ERP: elas correriam em paralelo e o Tiny
+	// estrangularia todas, inclusive as da live em andamento. Uma tarefa que
+	// percorre a lista em sequência deixa o limitador adaptativo espaçar as
+	// chamadas com os headers do próprio Tiny.
+	ERPResyncProducts Name = "erp.products_resync"
 	CouponApplied        Name = "coupon.applied"
 	CouponConfirmed      Name = "coupon.confirmed"
 	CouponRefunded       Name = "coupon.refunded"

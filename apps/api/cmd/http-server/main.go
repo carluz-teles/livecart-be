@@ -1421,6 +1421,28 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			}
 			return integrationSvc.RunScheduledPublish(ctx, p.JobID)
 		})
+
+		// Releitura em massa dos produtos de um ERP.
+		//
+		// Uma tarefa por loja, com TaskID por integração: dois cliques no botão
+		// viram uma execução só, e o asynq recusa a segunda enquanto a primeira
+		// não terminou. Sem isso, dobrar a releitura dobraria o consumo da cota
+		// do Tiny sem trazer nada de novo.
+		integrationSvc.SetERPResyncScheduler(erpResyncScheduler{client: eventsClient})
+		eventsServer.Register(events.ERPResyncProducts, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				StoreID       string `json:"store_id"`
+				IntegrationID string `json:"integration_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.IntegrationID == "" {
+				return asynq.SkipRetry
+			}
+			return integrationSvc.RunERPResync(ctx, p.StoreID, p.IntegrationID)
+		})
 	}
 
 	// Billing choreography L2: the subscription.process command (emitted by the
@@ -1547,6 +1569,19 @@ func (s publishScheduler) CancelPublish(ctx context.Context, jobID string) error
 }
 
 func publishTaskID(jobID string) string { return "session-publish:" + jobID }
+
+// erpResyncScheduler adapta o cliente de eventos para a releitura em massa dos
+// produtos de um ERP. TaskID por integração serve de dedup: o lojista clicando
+// duas vezes no botão não dispara duas varreduras sobre a mesma cota do Tiny.
+type erpResyncScheduler struct{ client *events.Client }
+
+func (s erpResyncScheduler) ScheduleERPResync(ctx context.Context, storeID, integrationID string) error {
+	return s.client.Schedule(ctx, time.Now(), events.ERPResyncProducts,
+		"erp-resync:"+integrationID, struct {
+			StoreID       string `json:"store_id"`
+			IntegrationID string `json:"integration_id"`
+		}{StoreID: storeID, IntegrationID: integrationID})
+}
 
 // trialReminderScheduler adapts the events client to billing.TrialReminderScheduler,
 // enqueueing a trial.ending_soon ETA task keyed "trial-ending:<store>" for dedup.
