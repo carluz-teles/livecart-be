@@ -899,3 +899,47 @@ WHERE event_id = $1
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
 ORDER BY created_at ASC
 LIMIT 1;
+
+-- name: SetCartPixCharge :exec
+-- Guarda a cobranca PIX viva do carrinho: o id que da para cancelar e o valor
+-- que o QR na mao do comprador cobra.
+UPDATE carts
+SET pix_charge_id = sqlc.arg(pix_charge_id),
+    pix_amount_cents = sqlc.arg(pix_amount_cents)
+WHERE id = sqlc.arg(id);
+
+-- name: ClearCartPixCharge :exec
+-- Esquece a cobranca PIX. Chamado depois de cancelar no gateway; separado da
+-- escrita para o cancelamento poder falhar sem deixar um id fantasma aqui.
+UPDATE carts
+SET pix_charge_id = NULL,
+    pix_amount_cents = NULL
+WHERE id = sqlc.arg(id);
+
+-- name: TakeCartPixCharge :one
+-- Le e LIMPA a cobranca viva na mesma instrucao.
+--
+-- Duas mutacoes simultaneas no mesmo carrinho tentariam cancelar a mesma
+-- cobranca duas vezes; quem le aqui e o unico que recebe o id, entao o
+-- cancelamento no gateway sai uma vez so.
+--
+-- O valor devolvido tem de ser o ANTIGO. `RETURNING` num UPDATE entrega a linha
+-- DEPOIS da escrita, entao a forma direta devolveria os NULL que acabamos de
+-- gravar. A CTE le antes, e o `FOR UPDATE` nela serializa os concorrentes: o
+-- segundo a chegar espera, reavalia o predicado com a coluna ja nula, nao
+-- encontra linha e sai sem id — que e exatamente o vencedor unico que se quer.
+--
+-- Evita de proposito o `RETURNING OLD.*` do Postgres 18: a query passaria a
+-- depender da versao do servidor, e o custo aqui e uma CTE.
+WITH tomada AS (
+    SELECT carts.id AS cart_id, carts.pix_charge_id, carts.pix_amount_cents
+    FROM carts
+    WHERE carts.id = sqlc.arg(id) AND carts.pix_charge_id IS NOT NULL
+    FOR UPDATE
+)
+UPDATE carts c
+SET pix_charge_id = NULL,
+    pix_amount_cents = NULL
+FROM tomada
+WHERE c.id = tomada.cart_id
+RETURNING tomada.pix_charge_id, tomada.pix_amount_cents;

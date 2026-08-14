@@ -121,6 +121,23 @@ type PaymentProvider interface {
 	// GeneratePixPayment generates a PIX QR code for payment.
 	GeneratePixPayment(ctx context.Context, input PixPaymentInput) (*PixPaymentResult, error)
 
+	// CancelPixPayment cancela uma cobranca PIX ainda nao paga, para que o QR
+	// que ja esta na mao do comprador deixe de ser pagavel.
+	//
+	// Sem isto, mudar o carrinho depois de gerar o PIX deixa dois codigos vivos
+	// e quem paga o antigo paga o valor errado. Os dois gateways aceitam:
+	// Pagar.me por DELETE /charges/{id} ("a qualquer momento, desde que nao
+	// tenha sido paga") e Mercado Pago por PUT /v1/payments/{id} com status
+	// cancelled.
+	//
+	// O id e o de CANCELAMENTO, que nem sempre e o mesmo de PixPaymentResult.
+	// PaymentID: no Pagar.me aquele e a ordem e este e a cobranca.
+	//
+	// Best-effort por natureza: se a cobranca ja foi paga o gateway recusa, e
+	// recusar e a resposta certa — quem chama trata como "nao deu para
+	// invalidar" e nao como falha da operacao do comprador.
+	CancelPixPayment(ctx context.Context, chargeID string) error
+
 	// GetPaymentMethods returns the available payment methods for the store.
 	GetPaymentMethods(ctx context.Context) ([]string, error)
 }
@@ -706,6 +723,13 @@ type PixPaymentInput struct {
 type PixPaymentResult struct {
 	// PaymentID is the provider's payment identifier
 	PaymentID string `json:"payment_id"`
+
+	// CancelID identifica a cobranca para efeito de CANCELAMENTO.
+	//
+	// No Pagar.me PaymentID e a ordem (`or_...`) e o cancelamento exige a
+	// cobranca (`ch_...`). No Mercado Pago os dois coincidem. Quem cancela usa
+	// este campo e nao precisa saber de qual provedor veio.
+	CancelID string `json:"cancel_id"`
 
 	// Status is the initial payment status (always pending for PIX)
 	Status PaymentState `json:"status"`

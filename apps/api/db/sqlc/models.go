@@ -106,6 +106,8 @@ type Cart struct {
 	ErpOpStartedAt       pgtype.Timestamptz `json:"erp_op_started_at"`
 	// Quando um cancelamento manual do lojista foi revertido por um pagamento aprovado. NULL = nunca ocorreu.
 	CancellationRevertedAt pgtype.Timestamptz `json:"cancellation_reverted_at"`
+	PixChargeID            pgtype.Text        `json:"pix_charge_id"`
+	PixAmountCents         pgtype.Int8        `json:"pix_amount_cents"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.
