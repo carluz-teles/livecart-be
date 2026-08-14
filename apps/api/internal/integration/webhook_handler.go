@@ -598,11 +598,29 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		productID = webhook.Dados.ID
 	}
 
-	logger.From(c.Context(), h.logger).Info("tiny webhook received",
+	// O payload cru, para descobrir QUAIS saldos o Tiny manda.
+	//
+	// Hoje o estoque local vem de `estoque.quantidade` do GET /produtos/{id}, que
+	// é o saldo FÍSICO. O lojista relatou que precisa ser o DISPONÍVEL: um
+	// orçamento salvo no Tiny reserva a peça, que sai do disponível e continua no
+	// físico — vender por cima disso é furo de estoque.
+	//
+	// O `saldo` deste payload é parseado e nunca usado, então ninguém sabe qual
+	// dos dois ele é. Se vier o disponível (ou vier a quebra reservado/disponível),
+	// o conserto não custa chamada nenhuma ao Tiny; se vier só o físico, é um GET
+	// /estoque/{id} por produto, e aí o rate limit entra na conta.
+	//
+	// Restrito a tipo=estoque de propósito: `atualizacao_pedido` carrega dados do
+	// comprador, que não têm por que ir para o log.
+	campos := []zap.Field{
 		zap.String("tipo", webhook.Tipo),
 		zap.String("id_produto", productID),
 		zap.String("sku", webhook.Dados.SKU),
-	)
+	}
+	if webhook.Tipo == "estoque" {
+		campos = append(campos, zap.ByteString("payload", body))
+	}
+	logger.From(c.Context(), h.logger).Info("tiny webhook received", campos...)
 
 	// Store webhook event
 	eventID := productID
