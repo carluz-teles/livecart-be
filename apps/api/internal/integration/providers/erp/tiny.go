@@ -433,8 +433,13 @@ func (t *Tiny) saldoDisponivel(ctx context.Context, productID string) (int, bool
 	n, campo, ok := ExtrairSaldoDisponivel(cru)
 	if !ok {
 		if t.Logger != nil {
+			// Com o corpo. Sem ele esta linha só diz que falhou, e o produto segue
+			// sendo oferecido pelo saldo FÍSICO — que é exatamente o furo. Dois
+			// produtos caíram aqui na varredura de 14/08 e não sobrou nada para
+			// descobrir por quê.
 			t.Logger.Warn("tiny stock endpoint had no known available-balance field",
 				zap.String("external_product_id", productID),
+				zap.ByteString("body", body),
 			)
 		}
 		return 0, false
