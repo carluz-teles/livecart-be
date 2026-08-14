@@ -658,6 +658,30 @@ func extractStatusDetail(body string) string {
 	return ""
 }
 
+// CancelPixPayment cancela um pagamento PIX pendente no Mercado Pago.
+//
+// `PUT /v1/payments/{id}` com `{"status":"cancelled"}` — o mesmo endpoint que a
+// documentacao usa para cancelar reserva. Só vale para pagamento pendente: o
+// Mercado Pago recusa quando ja foi aprovado, e recusar e o comportamento
+// desejado. Preferimos falhar a invalidacao a apagar um pagamento legitimo.
+//
+// Aqui PaymentID e CancelID sao o mesmo numero, diferente do Pagar.me.
+func (m *MercadoPago) CancelPixPayment(ctx context.Context, paymentID string) error {
+	if paymentID == "" {
+		return nil
+	}
+	url := fmt.Sprintf("%s/v1/payments/%s", mpAPIBaseURL, paymentID)
+	resp, body, err := m.DoRequest(ctx, http.MethodPut, url,
+		map[string]any{"status": "cancelled"}, m.authHeaders())
+	if err != nil {
+		return fmt.Errorf("cancelling pix payment: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return fmt.Errorf("cancelling pix payment: HTTP %d: %s", resp.StatusCode, extractStatusDetail(string(body)))
+	}
+	return nil
+}
+
 // GeneratePixPayment generates a PIX QR code via the sdk-go Payment client.
 // Behavior change vs. the previous raw HTTP call: the SDK auto-attaches a
 // random X-Idempotency-Key per request, so a second PIX generation for the
@@ -702,6 +726,7 @@ func (m *MercadoPago) GeneratePixPayment(ctx context.Context, input PixPaymentIn
 
 	return &PixPaymentResult{
 		PaymentID:         strconv.Itoa(resource.ID),
+		CancelID:          strconv.Itoa(resource.ID),
 		Status:            PaymentPending,
 		QRCode:            resource.PointOfInteraction.TransactionData.QRCodeBase64,
 		QRCodeText:        resource.PointOfInteraction.TransactionData.QRCode,

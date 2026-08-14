@@ -64,6 +64,8 @@ type PaymentService interface {
 	GetCheckoutConfig(ctx context.Context, integrationID, storeID string) (publicKey string, methods []string, err error)
 	ProcessCardPayment(ctx context.Context, input payment.ProcessCardPaymentInput) (*payment.ProcessCardPaymentOutput, error)
 	GeneratePixPayment(ctx context.Context, input payment.GeneratePixPaymentInput) (*payment.GeneratePixPaymentOutput, error)
+	// CancelPixPayment invalida no gateway uma cobranca PIX ainda nao paga.
+	CancelPixPayment(ctx context.Context, integrationID, storeID, cancelID string) error
 }
 
 // Service handles business logic for public checkout.
@@ -1022,6 +1024,14 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 		)
 	}
 
+	// Antes de abrir outra, mata a cobranca anterior deste carrinho.
+	//
+	// Cada geracao abre uma cobranca nova no gateway; sem cancelar a de tras,
+	// duas ficam pagaveis ao mesmo tempo e o comprador escolhe, sem saber, qual
+	// valor manda. O caminho normal ja invalida na mutacao do carrinho — este
+	// aqui cobre gerar de novo sem mudar nada (QR expirado, aba reaberta).
+	s.invalidatePendingPix(ctx, cart)
+
 	// Use the integration the cart was bound to during GetCheckoutConfig.
 	paymentIntegration, err := s.resolvePaymentIntegration(ctx, cart)
 	if err != nil {
@@ -1087,6 +1097,20 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 	}
 
 	// Update cart with payment ID for tracking
+	// Guarda o que da para CANCELAR e por quanto. `checkout_id` acima nao serve:
+	// no Pagar.me ele e a ordem, e o cancelamento exige a cobranca.
+	//
+	// Falhar aqui deixa uma cobranca viva que ninguem sabe cancelar, entao o log
+	// e de erro — mas nao derruba a geracao: o comprador tem um QR valido na mao
+	// e negar isso seria trocar um risco por um prejuizo certo.
+	if err := s.repo.SetCartPixCharge(ctx, cart.ID, result.CancelID, totalAmount); err != nil {
+		logger.From(ctx, s.logger).Error("PIX charge not recorded: it cannot be invalidated later",
+			zap.String("cart_id", cart.ID),
+			zap.String("cancel_id", result.CancelID),
+			zap.Error(err),
+		)
+	}
+
 	if err := s.repo.UpdateCheckoutInfo(ctx, UpdateCheckoutParams{
 		CartID:     cart.ID,
 		CheckoutID: result.PaymentID,
@@ -1251,6 +1275,7 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 	}
 
 	s.reevaluateCouponAfterCartMutation(ctx, cart.ID)
+	s.invalidatePendingPix(ctx, cart)
 
 	// Quando a quantidade diminui, parte do estoque foi devolvida — tenta
 	// promover o próximo da fila. Best-effort em goroutine para não
@@ -1333,6 +1358,7 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 	}
 
 	s.reevaluateCouponAfterCartMutation(ctx, cart.ID)
+	s.invalidatePendingPix(ctx, cart)
 
 	// Estoque liberado pela remoção — promove o próximo da fila se houver.
 	go s.integrationService.ProcessWaitlistForProduct(logger.WithStore(context.Background(), cart.StoreID, cart.StoreSlug), cart.EventID, item.ProductID, cart.StoreID)
@@ -1465,6 +1491,7 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 	}
 
 	s.reevaluateCouponAfterCartMutation(ctx, cart.ID)
+	s.invalidatePendingPix(ctx, cart)
 
 	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
 }
@@ -1475,6 +1502,59 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 // /checkout fetch (or another mutation) will reconcile, so failing the
 // caller would leave the buyer staring at a successful mutation that
 // pretends it failed.
+// invalidatePendingPix mata, no gateway, o QR que o comprador ja tem na mao.
+//
+// Sem isto o codigo antigo continua pagavel ate expirar. O comprador que copiou
+// o "copia e cola", mexeu no carrinho e pagou pelo app do banco manda o valor
+// ANTIGO — e o webhook chega com uma quantia que nao corresponde a nenhum
+// carrinho atual. Some o QR da tela nao resolve: ele ja saiu da tela.
+//
+// A leitura LIMPA a coluna na mesma instrucao, entao duas mutacoes simultaneas
+// no mesmo carrinho nao disparam dois cancelamentos para a mesma cobranca.
+//
+// Best-effort de proposito. Se o gateway recusar — o caso normal e a cobranca ja
+// ter sido paga entre a leitura e a chamada — nao ha o que desfazer do lado do
+// comprador: a mutacao dele ja aconteceu, e transformar isso em erro seria
+// punir quem so mudou de ideia sobre a quantidade. Fica no log, alto, porque
+// significa QR vivo cobrando valor obsoleto.
+func (s *Service) invalidatePendingPix(ctx context.Context, cart *CartRow) {
+	cancelID, amountCents, err := s.repo.TakeCartPixCharge(ctx, cart.ID)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("could not read pending pix charge to invalidate",
+			zap.String("cart_id", cart.ID), zap.Error(err))
+		return
+	}
+	if cancelID == "" {
+		return
+	}
+
+	integration, err := s.resolvePaymentIntegration(ctx, cart)
+	if err != nil {
+		logger.From(ctx, s.logger).Error("PIX charge left alive: no payment integration to cancel it",
+			zap.String("cart_id", cart.ID),
+			zap.String("cancel_id", cancelID),
+			zap.Int64("amount_cents", amountCents),
+			zap.Error(err))
+		return
+	}
+
+	if err := s.paymentService.CancelPixPayment(ctx, integration.ID.String(), cart.StoreID, cancelID); err != nil {
+		logger.From(ctx, s.logger).Error("PIX charge left alive: gateway refused the cancellation",
+			zap.String("cart_id", cart.ID),
+			zap.String("cancel_id", cancelID),
+			zap.Int64("amount_cents", amountCents),
+			zap.String("provider", integration.ProviderName),
+			zap.Error(err))
+		return
+	}
+
+	logger.From(ctx, s.logger).Info("pending PIX invalidated after cart change",
+		zap.String("cart_id", cart.ID),
+		zap.String("cancel_id", cancelID),
+		zap.Int64("amount_cents", amountCents),
+	)
+}
+
 func (s *Service) reevaluateCouponAfterCartMutation(ctx context.Context, cartID string) {
 	if s.couponLifecycle == nil {
 		return

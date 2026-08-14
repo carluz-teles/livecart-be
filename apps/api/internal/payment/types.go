@@ -137,7 +137,10 @@ type GeneratePixPaymentInput struct {
 
 // GeneratePixPaymentOutput is the service output for generating a PIX payment.
 type GeneratePixPaymentOutput struct {
-	PaymentID  string
+	PaymentID string
+	// CancelID identifica a cobranca para CANCELAMENTO — no Pagar.me e a
+	// cobranca (`ch_...`), nao a ordem que vai em PaymentID.
+	CancelID   string
 	QRCode     string
 	QRCodeText string
 	Amount     int64

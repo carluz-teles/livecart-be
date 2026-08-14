@@ -326,16 +326,29 @@ func (p *Pagarme) CreateWebhookTestOrder(ctx context.Context, code string) (*Web
 // CancelTestCharge best-effort cancels the pending charge from
 // CreateWebhookTestOrder so the test leaves no residue on the merchant account.
 func (p *Pagarme) CancelTestCharge(ctx context.Context, chargeID string) error {
+	return p.CancelPixPayment(ctx, chargeID)
+}
+
+// CancelPixPayment cancela a cobranca no Pagar.me.
+//
+// `DELETE /charges/{charge_id}` — a documentacao e explicita: "a cobranca pode
+// ser cancelada a qualquer momento, desde que nao tenha sido paga". Pagar.me
+// devolve erro quando ja foi paga, e e o que se quer: preferimos falhar a
+// invalidacao a apagar um pagamento legitimo.
+//
+// O id aqui e o da COBRANCA (`ch_...`), nao o da ordem (`or_...`) que vai em
+// PixPaymentResult.PaymentID.
+func (p *Pagarme) CancelPixPayment(ctx context.Context, chargeID string) error {
 	if chargeID == "" {
 		return nil
 	}
 	url := fmt.Sprintf("%s/charges/%s", pagarmeAPIBaseURL, chargeID)
 	resp, body, err := p.DoRequest(ctx, http.MethodDelete, url, nil, p.authHeaders())
 	if err != nil {
-		return fmt.Errorf("cancelling test charge: %w", err)
+		return fmt.Errorf("cancelling charge: %w", err)
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return fmt.Errorf("cancelling test charge: HTTP %d: %s", resp.StatusCode, parsePagarmeError(body))
+		return fmt.Errorf("cancelling charge: HTTP %d: %s", resp.StatusCode, parsePagarmeError(body))
 	}
 	return nil
 }
@@ -1273,6 +1286,7 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 
 	return &PixPaymentResult{
 		PaymentID:         pgResp.ID,
+		CancelID:          chargeID,
 		Status:            PaymentPending,
 		QRCode:            qrCode,
 		QRCodeText:        qrCodeText,

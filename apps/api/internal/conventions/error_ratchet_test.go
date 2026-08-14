@@ -247,6 +247,10 @@ var baselineRawThrows = map[string]bool{
 	"checkout.Repository.GetShippingContextByToken:\"carrinho não encontrado\"": true,
 	"checkout.Repository.ListCartItems:\"invalid cart ID\"":                     true,
 	"checkout.Repository.ListPaymentIntegrations:\"invalid store ID\"":          true,
+	// Parse do UUID do carrinho que veio da NOSSA propria linha carregada —
+	// mesma natureza dos irmaos acima (BindCartPaymentIntegration, CreateCartItem).
+	"checkout.Repository.SetCartPixCharge:\"invalid cart ID\"":                  true,
+	"checkout.Repository.TakeCartPixCharge:\"invalid cart ID\"":                 true,
 	"checkout.Repository.LoadEventCheckoutFlags:\"invalid event ID\"":           true,
 	"checkout.Repository.LoadEventType:\"invalid event ID\"":                    true,
 	"checkout.Repository.ReadCartPaymentDetails:\"invalid cart ID\"":            true,

@@ -301,10 +301,31 @@ func (s *Service) GeneratePixPayment(ctx context.Context, input GeneratePixPayme
 
 	return &GeneratePixPaymentOutput{
 		PaymentID:  result.PaymentID,
+		CancelID:   result.CancelID,
 		QRCode:     result.QRCode,
 		QRCodeText: result.QRCodeText,
 		Amount:     result.Amount,
 		ExpiresAt:  result.ExpiresAt,
 		TicketURL:  result.TicketURL,
 	}, nil
+}
+
+// CancelPixPayment invalida no gateway uma cobranca PIX ainda nao paga.
+//
+// Best-effort por contrato: o gateway recusa quando a cobranca ja foi paga, e
+// essa recusa e o comportamento correto — nunca queremos apagar um pagamento
+// legitimo. Quem chama trata o erro como "nao deu para invalidar" e segue.
+func (s *Service) CancelPixPayment(ctx context.Context, integrationID, storeID, cancelID string) error {
+	if cancelID == "" {
+		return nil
+	}
+	paymentProvider, err := s.GetProvider(ctx, integrationID, storeID)
+	if err != nil {
+		return err
+	}
+	if err := paymentProvider.CancelPixPayment(ctx, cancelID); err != nil {
+		s.resolver.HandleProviderError(ctx, integrationID, "cancel_pix_payment", err)
+		return err
+	}
+	return nil
 }

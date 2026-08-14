@@ -209,6 +209,40 @@ func (r *Repository) UpdateCheckoutCustomer(ctx context.Context, cartID, email, 
 }
 
 // UpdateCheckoutInfo updates the checkout URL and ID for a cart.
+// SetCartPixCharge guarda a cobranca PIX viva: o id que da para cancelar e o
+// valor que o QR na mao do comprador cobra.
+func (r *Repository) SetCartPixCharge(ctx context.Context, cartID, cancelID string, amountCents int64) error {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return httpx.ErrBadRequest("invalid cart ID")
+	}
+	return r.q.SetCartPixCharge(ctx, sqlc.SetCartPixChargeParams{
+		ID:             pgtype.UUID{Bytes: uid, Valid: true},
+		PixChargeID:    pgtype.Text{String: cancelID, Valid: cancelID != ""},
+		PixAmountCents: pgtype.Int8{Int64: amountCents, Valid: true},
+	})
+}
+
+// TakeCartPixCharge le E limpa a cobranca viva na mesma instrucao.
+//
+// Duas mutacoes simultaneas no mesmo carrinho tentariam cancelar a mesma
+// cobranca duas vezes. Quem le aqui e o unico que recebe o id, entao a chamada
+// ao gateway sai uma vez so. Devolve ("", 0, nil) quando nao havia nada.
+func (r *Repository) TakeCartPixCharge(ctx context.Context, cartID string) (string, int64, error) {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return "", 0, httpx.ErrBadRequest("invalid cart ID")
+	}
+	row, err := r.q.TakeCartPixCharge(ctx, pgtype.UUID{Bytes: uid, Valid: true})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", 0, nil
+		}
+		return "", 0, err
+	}
+	return row.PixChargeID.String, row.PixAmountCents.Int64, nil
+}
+
 func (r *Repository) UpdateCheckoutInfo(ctx context.Context, params UpdateCheckoutParams) error {
 	uid, err := uuid.Parse(params.CartID)
 	if err != nil {
