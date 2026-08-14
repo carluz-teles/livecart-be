@@ -123,7 +123,7 @@ func erpShippingToDomain(s *providers.ERPShippingProfile) domain.ShippingProfile
 // SyncProduct updates a product from an ERP webhook notification or a manual
 // sync. When p.Shipping is non-nil the local shipping profile is refreshed too;
 // otherwise the existing profile is preserved.
-func (a *ProductSyncerAdapter) SyncProduct(ctx context.Context, storeID, externalSource string, p providers.ERPProduct, skipStock, downgradeOnly bool) error {
+func (a *ProductSyncerAdapter) SyncProduct(ctx context.Context, storeID, externalSource string, p providers.ERPProduct, skipStock bool) error {
 	sid, err := vo.NewStoreID(storeID)
 	if err != nil {
 		return err
@@ -149,7 +149,6 @@ func (a *ProductSyncerAdapter) SyncProduct(ctx context.Context, storeID, externa
 		Stock:          p.Stock,
 		Active:         p.Active,
 		SkipStock:      skipStock,
-		DowngradeOnly:  downgradeOnly,
 	}
 	if p.Shipping != nil {
 		shipping := erpShippingToDomain(p.Shipping)

@@ -611,15 +611,6 @@ func TestStockGuardArmsDuringFinalisationWindow(t *testing.T) {
 	fx := seedPaidCart(t, 1, 0)
 	ctx := context.Background()
 
-	extID := extProductID(t, fx.productID)
-
-	guarded, err := testRepo.HasStockGuardForProduct(ctx, extID, fx.storeID, "tiny")
-	if err != nil {
-		t.Fatalf("guard: %v", err)
-	}
-	if !guarded {
-		t.Fatal("guard deveria estar ARMADO com cart paid+pending contendo o produto")
-	}
 	inFlight, err := testRepo.HasInFlightFinalisationForProduct(ctx, fx.productID)
 	if err != nil || !inFlight {
 		t.Fatalf("in-flight esperado true (err=%v)", err)
@@ -628,12 +619,12 @@ func TestStockGuardArmsDuringFinalisationWindow(t *testing.T) {
 	if err := testRepo.MarkCartERPFinalisationDone(ctx, fx.cartID); err != nil {
 		t.Fatalf("mark done: %v", err)
 	}
-	guarded, err = testRepo.HasStockGuardForProduct(ctx, extID, fx.storeID, "tiny")
+	inFlight, err = testRepo.HasInFlightFinalisationForProduct(ctx, fx.productID)
 	if err != nil {
-		t.Fatalf("guard pós-done: %v", err)
+		t.Fatalf("in-flight pós-done: %v", err)
 	}
-	if guarded {
-		t.Fatal("guard deveria DESARMAR após done")
+	if inFlight {
+		t.Fatal("in-flight deveria DESARMAR após done")
 	}
 }
 
@@ -1476,12 +1467,6 @@ func TestStockGuardArmsDuringConversion(t *testing.T) {
 		        erp_order_state = 'converting', erp_op_started_at = now() WHERE id = $1`, fx.cartID); err != nil {
 		t.Fatalf("seed converting: %v", err)
 	}
-	ext := extProductID(t, fx.productID)
-
-	guarded, err := testRepo.HasStockGuardForProduct(ctx, ext, fx.storeID, "tiny")
-	if err != nil || !guarded {
-		t.Fatalf("guard deveria armar durante converting (guarded=%v err=%v)", guarded, err)
-	}
 	inFlight, err := testRepo.HasInFlightFinalisationForProduct(ctx, fx.productID)
 	if err != nil || !inFlight {
 		t.Fatalf("in-flight deveria armar durante converting (err=%v)", err)
@@ -1491,12 +1476,12 @@ func TestStockGuardArmsDuringConversion(t *testing.T) {
 		`UPDATE carts SET erp_order_state = 'open' WHERE id = $1`, fx.cartID); err != nil {
 		t.Fatalf("move to open: %v", err)
 	}
-	guarded, err = testRepo.HasStockGuardForProduct(ctx, ext, fx.storeID, "tiny")
+	inFlight, err = testRepo.HasInFlightFinalisationForProduct(ctx, fx.productID)
 	if err != nil {
-		t.Fatalf("guard pós-open: %v", err)
+		t.Fatalf("in-flight pós-open: %v", err)
 	}
-	if guarded {
-		t.Fatal("guard deve DESARMAR em open (estado estável, sem ciclo em voo)")
+	if inFlight {
+		t.Fatal("in-flight deve DESARMAR em open (estado estável, sem ciclo em voo)")
 	}
 }
 
@@ -1701,7 +1686,7 @@ func (s raceStubالسyncer) GetProduct(ctx context.Context, storeID, productID 
 func (s raceStubالسyncer) FilterRegisteredExternalIDs(ctx context.Context, storeID, externalSource string, externalIDs []string) ([]string, error) {
 	return nil, nil
 }
-func (s raceStubالسyncer) SyncProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct, skipStock, downgradeOnly bool) error {
+func (s raceStubالسyncer) SyncProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct, skipStock bool) error {
 	return nil
 }
 func (s raceStubالسyncer) ImportProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct) (string, error) {
@@ -1783,48 +1768,7 @@ func erpProd(ext string, stock int) providers.ERPProduct {
 	return providers.ERPProduct{ID: ext, Name: "Produto Teste", Price: 1000, Stock: stock, Active: true}
 }
 
-// Na janela do guard: uma REDUÇÃO do lojista no Tiny deve refletir no local.
-func TestGuardDowngradeOnlyAppliesReduction(t *testing.T) {
-	requireDB(t)
-	ctx := context.Background()
-	fx := seedPaidCart(t, 1, 0)
-	ext := extProductID(t, fx.productID)
-	if _, err := testPool.Exec(ctx, `UPDATE products SET stock = 10 WHERE id=$1`, fx.productID); err != nil {
-		t.Fatalf("seed stock: %v", err)
-	}
-	syncer := realProductSyncer()
-
-	// downgradeOnly=true (guard armado), ERP reporta 4 (< 10) → aplica.
-	if err := syncer.SyncProduct(ctx, fx.storeID, "tiny", erpProd(ext, 4), false, true); err != nil {
-		t.Fatalf("sync: %v", err)
-	}
-	if got := productStockByID(t, fx.productID); got != 4 {
-		t.Fatalf("redução do lojista deveria refletir (stock=%d, esperado 4)", got)
-	}
-}
-
-// Na janela do guard: um AUMENTO (eco de reserva / inflação de finalização)
-// deve ser IGNORADO — é o que evita a promoção fantasma.
-func TestGuardDowngradeOnlyIgnoresIncrease(t *testing.T) {
-	requireDB(t)
-	ctx := context.Background()
-	fx := seedPaidCart(t, 1, 0)
-	ext := extProductID(t, fx.productID)
-	if _, err := testPool.Exec(ctx, `UPDATE products SET stock = 5 WHERE id=$1`, fx.productID); err != nil {
-		t.Fatalf("seed stock: %v", err)
-	}
-	syncer := realProductSyncer()
-
-	// downgradeOnly=true, ERP reporta 9 (> 5) → preserva o local.
-	if err := syncer.SyncProduct(ctx, fx.storeID, "tiny", erpProd(ext, 9), false, true); err != nil {
-		t.Fatalf("sync: %v", err)
-	}
-	if got := productStockByID(t, fx.productID); got != 5 {
-		t.Fatalf("aumento na janela do guard deveria ser ignorado (stock=%d, esperado 5)", got)
-	}
-}
-
-// Fora da janela do guard (sync normal): aplica qualquer valor.
+// Sync normal: aplica qualquer valor vindo do ERP.
 func TestNormalSyncAppliesAnyValue(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
@@ -1835,7 +1779,7 @@ func TestNormalSyncAppliesAnyValue(t *testing.T) {
 	}
 	syncer := realProductSyncer()
 
-	if err := syncer.SyncProduct(ctx, fx.storeID, "tiny", erpProd(ext, 12), false, false); err != nil {
+	if err := syncer.SyncProduct(ctx, fx.storeID, "tiny", erpProd(ext, 12), false); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	if got := productStockByID(t, fx.productID); got != 12 {

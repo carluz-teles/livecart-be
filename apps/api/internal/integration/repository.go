@@ -3325,11 +3325,6 @@ func (r *Repository) ConvertReservationsByEvent(ctx context.Context, eventID str
 	return r.queries.ConvertReservationsByEvent(ctx, eID)
 }
 
-// HasActiveEventForProduct checks if a product has active reservations in a running event.
-func (r *Repository) HasActiveEventForProduct(ctx context.Context, externalProductID string) (bool, error) {
-	return r.queries.HasActiveEventForProduct(ctx, externalProductID)
-}
-
 // MarkCartERPFinalisationAttempt persists the gateway snapshot (first write
 // wins) and stamps erp_last_attempt_at BEFORE the finalisation touches the ERP —
 // S1 of the resumable state machine.
@@ -3593,37 +3588,6 @@ func (r *Repository) AcquireCartFinalisationLock(ctx context.Context, cartID str
 	return release, true, nil
 }
 
-// HasStockGuardForProduct reports whether the ERP-reported absolute stock must
-// NOT overwrite the local counter right now: live ativa com reserva ativa
-// (escopo por loja) OU cart pago com finalização ERP em voo/falha recente
-// contendo o produto. Substitui HasActiveEventForProduct no sync de webhook.
-func (r *Repository) HasStockGuardForProduct(ctx context.Context, externalProductID, storeID, externalSource string) (bool, error) {
-	sID, err := parseUUID(storeID)
-	if err != nil {
-		return false, err
-	}
-	return r.queries.HasStockGuardForProduct(ctx, sqlc.HasStockGuardForProductParams{
-		ExternalProductID: externalProductID,
-		StoreID:           sID,
-		ExternalSource:    externalSource,
-	})
-}
-
-// HasPendingCartReversalForProduct reports whether some unit has already been
-// credited back to local stock while its ERP reversal is still in flight. In
-// that window the ERP balance is BEHIND ours — because of us — so an absolute
-// overwrite would write a value we ourselves just made stale.
-func (r *Repository) HasPendingCartReversalForProduct(ctx context.Context, externalProductID, storeID string) (bool, error) {
-	sID, err := parseUUID(storeID)
-	if err != nil {
-		return false, err
-	}
-	return r.queries.HasPendingCartReversalForProduct(ctx, sqlc.HasPendingCartReversalForProductParams{
-		ExternalProductID: externalProductID,
-		StoreID:           sID,
-	})
-}
-
 // HasInFlightFinalisationForProduct reports whether some paid cart containing
 // the product still has its ERP finalisation pending/failed within the guard
 // window — promotion triggered by stock webhooks must wait it out.
@@ -3756,4 +3720,49 @@ func (r *Repository) GetProductQuantityInUserCart(ctx context.Context, eventID, 
 	}
 
 	return int(qty), nil
+}
+
+// ProductSeqByExternalID resolve o produto local pelo código do ERP e devolve o
+// `erp_seq` do mesmo instante.
+//
+// Id vazio quando o produto não está cadastrado — caso normal, não erro: o ERP
+// notifica sobre o catálogo inteiro dele, e nós só espelhamos o que o lojista
+// importou.
+func (r *Repository) ProductSeqByExternalID(ctx context.Context, storeID, externalSource, externalID string) (string, int64, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return "", 0, err
+	}
+	row, err := r.queries.ProductSeqByExternalID(ctx, sqlc.ProductSeqByExternalIDParams{
+		StoreID:        sID,
+		ExternalSource: externalSource,
+		ExternalID:     pgtype.Text{String: externalID, Valid: true},
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", 0, nil
+		}
+		return "", 0, fmt.Errorf("resolving product seq by external id: %w", err)
+	}
+	return uuidToString(row.ID), row.ErpSeq, nil
+}
+
+// ApplyERPStockMirror grava o saldo lido do ERP, e só se nenhum movimento nosso
+// tiver acontecido desde a leitura.
+//
+// false significa leitura vencida — e descartar é a única resposta correta,
+// porque não há como saber quanto daquele número já estava desatualizado. Uma
+// leitura nova chega no próximo webhook ou na reconciliação.
+func (r *Repository) ApplyERPStockMirror(ctx context.Context, productID string, erpStock int, seenSeq int64) (bool, error) {
+	id, err := parseUUID(productID)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.queries.ApplyERPStockMirror(ctx, sqlc.ApplyERPStockMirrorParams{
+		ID: id, ErpStock: int32(erpStock), SeenSeq: seenSeq,
+	})
+	if err != nil {
+		return false, fmt.Errorf("applying ERP stock mirror: %w", err)
+	}
+	return n > 0, nil
 }

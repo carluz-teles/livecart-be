@@ -585,6 +585,7 @@ type Product struct {
 	InsuranceValueCents pgtype.Int8 `json:"insurance_value_cents"`
 	// FK to product_groups when this product is a variant; NULL for simple products.
 	GroupID pgtype.UUID `json:"group_id"`
+	ErpSeq  int64       `json:"erp_seq"`
 }
 
 // Catalog aggregator over `products` (variants). NULL group_id = simple product.

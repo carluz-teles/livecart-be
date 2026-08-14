@@ -54,14 +54,14 @@ WHERE store_id = $1;
 -- name: DecrementProductStock :one
 -- Atomically decrement stock. Fails (no rows) if insufficient stock.
 UPDATE products
-SET stock = stock - $2, updated_at = now()
+SET stock = stock - $2, erp_seq = erp_seq + 1, updated_at = now()
 WHERE id = $1 AND stock >= $2
 RETURNING *;
 
 -- name: IncrementProductStock :one
 -- Release reserved stock back to product.
 UPDATE products
-SET stock = stock + $2, updated_at = now()
+SET stock = stock + $2, erp_seq = erp_seq + 1, updated_at = now()
 WHERE id = $1
 RETURNING *;
 
@@ -74,7 +74,7 @@ RETURNING *;
 -- NÃO usar em fluxo de compra normal — lá o piso do DecrementProductStock é
 -- justamente o que impede overselling.
 UPDATE products
-SET stock = stock - $2, updated_at = now()
+SET stock = stock - $2, erp_seq = erp_seq + 1, updated_at = now()
 WHERE id = $1
 RETURNING *;
 
@@ -89,7 +89,39 @@ WITH before AS (
 )
 UPDATE products p
 SET stock = p.stock - LEAST(before.s, sqlc.arg(want)::int),
+    erp_seq = p.erp_seq + 1,
     updated_at = now()
 FROM before
 WHERE p.id = sqlc.arg(id)
 RETURNING LEAST(before.s, sqlc.arg(want)::int)::int AS taken;
+
+
+-- name: ProductSeqByExternalID :one
+-- Resolve o produto local pelo codigo do ERP e devolve o seq do mesmo instante.
+--
+-- Uma consulta so porque as duas informacoes tem de vir juntas: o id para saber
+-- onde escrever, e o seq para saber se a escrita ainda valera.
+SELECT id, erp_seq FROM products
+WHERE store_id = sqlc.arg(store_id)
+  AND external_source = sqlc.arg(external_source)
+  AND external_id = sqlc.arg(external_id)
+LIMIT 1;
+
+-- name: ApplyERPStockMirror :execrows
+-- Escreve o saldo lido do ERP, e SO se nenhum movimento nosso tiver acontecido
+-- desde a leitura.
+--
+-- Esta e a trava que substitui as heuristicas de janela. O webhook do Tiny nao
+-- traz timestamp nem sequencia, entao nao ha como ordenar dois saldos pelo
+-- conteudo. O seq resolve pelo unico lado que controlamos: os nossos proprios
+-- movimentos, cada um subindo o contador quando altera o estoque.
+--
+-- Zero linhas significa "leitura vencida", e o certo e descartar — nao aplicar
+-- com ressalva, porque nao ha como saber quanto daquele numero ja estava velho.
+-- Uma leitura nova vem no proximo webhook ou na reconciliacao.
+--
+-- Saldo negativo do ERP nao e estoque, e sim sintoma: o Tiny aceita ir abaixo de
+-- zero (gravado na bateria de sandbox) e copiar isso propagaria o defeito.
+UPDATE products
+SET stock = GREATEST(sqlc.arg(erp_stock)::int, 0), updated_at = now()
+WHERE id = sqlc.arg(id) AND erp_seq = sqlc.arg(seen_seq)::bigint;

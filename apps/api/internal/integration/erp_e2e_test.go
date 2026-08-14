@@ -51,7 +51,7 @@ func (stubProductSyncer) FilterRegisteredExternalIDs(ctx context.Context, storeI
 	return nil, nil
 }
 
-func (stubProductSyncer) SyncProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct, skipStock, downgradeOnly bool) error {
+func (stubProductSyncer) SyncProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct, skipStock bool) error {
 	return nil
 }
 

@@ -391,12 +391,6 @@ type SyncFromERPInput struct {
 	Stock          int
 	Active         bool
 	SkipStock      bool // When true, preserve local stock (e.g. on a DB-error fail-safe)
-	// DowngradeOnly: durante a janela do guard (live com reserva ativa /
-	// finalização em voo) aplica o estoque do ERP SÓ quando ele é MENOR que o
-	// local — uma redução do lojista, direção segura que nunca infla o local
-	// nem dispara promoção fantasma. Aumentos (eco de reserva ou inflação da
-	// finalização) são preservados. Ignorado quando SkipStock=true.
-	DowngradeOnly bool
 	// Shipping is optional. When non-nil and complete, the local shipping
 	// profile is replaced — useful so re-imports/syncs pull the latest
 	// dimensions from the ERP. When nil, the existing local profile is kept.
