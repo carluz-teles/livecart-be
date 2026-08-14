@@ -3325,11 +3325,6 @@ func (r *Repository) ConvertReservationsByEvent(ctx context.Context, eventID str
 	return r.queries.ConvertReservationsByEvent(ctx, eID)
 }
 
-// HasActiveEventForProduct checks if a product has active reservations in a running event.
-func (r *Repository) HasActiveEventForProduct(ctx context.Context, externalProductID string) (bool, error) {
-	return r.queries.HasActiveEventForProduct(ctx, externalProductID)
-}
-
 // MarkCartERPFinalisationAttempt persists the gateway snapshot (first write
 // wins) and stamps erp_last_attempt_at BEFORE the finalisation touches the ERP —
 // S1 of the resumable state machine.
@@ -3591,37 +3586,6 @@ func (r *Repository) AcquireCartFinalisationLock(ctx context.Context, cartID str
 		freeSlot()
 	}
 	return release, true, nil
-}
-
-// HasStockGuardForProduct reports whether the ERP-reported absolute stock must
-// NOT overwrite the local counter right now: live ativa com reserva ativa
-// (escopo por loja) OU cart pago com finalização ERP em voo/falha recente
-// contendo o produto. Substitui HasActiveEventForProduct no sync de webhook.
-func (r *Repository) HasStockGuardForProduct(ctx context.Context, externalProductID, storeID, externalSource string) (bool, error) {
-	sID, err := parseUUID(storeID)
-	if err != nil {
-		return false, err
-	}
-	return r.queries.HasStockGuardForProduct(ctx, sqlc.HasStockGuardForProductParams{
-		ExternalProductID: externalProductID,
-		StoreID:           sID,
-		ExternalSource:    externalSource,
-	})
-}
-
-// HasPendingCartReversalForProduct reports whether some unit has already been
-// credited back to local stock while its ERP reversal is still in flight. In
-// that window the ERP balance is BEHIND ours — because of us — so an absolute
-// overwrite would write a value we ourselves just made stale.
-func (r *Repository) HasPendingCartReversalForProduct(ctx context.Context, externalProductID, storeID string) (bool, error) {
-	sID, err := parseUUID(storeID)
-	if err != nil {
-		return false, err
-	}
-	return r.queries.HasPendingCartReversalForProduct(ctx, sqlc.HasPendingCartReversalForProductParams{
-		ExternalProductID: externalProductID,
-		StoreID:           sID,
-	})
 }
 
 // HasInFlightFinalisationForProduct reports whether some paid cart containing

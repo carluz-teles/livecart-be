@@ -102,9 +102,7 @@ type stubCollaborators struct{}
 func (stubCollaborators) ResolveProvider(context.Context, *Integration) (providers.ERPProvider, error) {
 	return nil, nil
 }
-func (stubCollaborators) NoteERPMovementStarted(string) {}
 
-func (stubCollaborators) NoteERPMovementSent(string) {}
 
 func (stubCollaborators) ResolveExternalProduct(context.Context, string, string) (string, bool) {
 	return "", false

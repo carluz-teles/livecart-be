@@ -51,10 +51,9 @@ type ProductSyncer interface {
 	// SyncProduct updates an existing LiveCart product with the latest ERP data.
 	// When product.Shipping is non-nil, dimensions are refreshed too; otherwise
 	// the local shipping profile is preserved. skipStock=true keeps local stock
-	// entirely (DB-error fail-safe); downgradeOnly=true applies the ERP stock
-	// only when it is LOWER than local (safe reductions during the guard
-	// window). Both false = normal full stock sync.
-	SyncProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct, skipStock, downgradeOnly bool) error
+	// entirely — used by the webhook path, where the balance is applied apart,
+	// under the optimistic lock. false = normal full stock sync.
+	SyncProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct, skipStock bool) error
 	// ImportProduct creates a new simple product in LiveCart from an ERP source.
 	// Returns the new LiveCart product UUID.
 	ImportProduct(ctx context.Context, storeID, externalSource string, product providers.ERPProduct) (productID string, err error)
@@ -133,52 +132,6 @@ type Service struct {
 	// semanas no ar. O caminho de FALHA já era retentado; o de sucesso é que
 	// latchava para sempre.
 	subscriptionEnsured sync.Map
-
-	// erpMovementSentAt guarda QUANDO mandamos o último movimento de estoque de
-	// cada produto ao ERP, por external_product_id.
-	//
-	// Serve para separar duas coisas que o webhook do Tiny não distingue: o eco
-	// do NOSSO movimento e uma venda em OUTRO canal. Os dois chegam iguais — um
-	// saldo absoluto menor que o nosso número.
-	//
-	// A supressão anterior era por reserva ATIVA, e uma reserva vive o carrinho
-	// inteiro (30 minutos). Nessa janela toda a gente ignorava o Tiny, e o
-	// lojista que vende o mesmo SKU no Mercado Livre ficava com o LiveCart
-	// oferecendo unidade que não existe. Medido na simulação: disponível 3
-	// contra 2 reais.
-	//
-	// O eco, esse, chega em segundos — de 1 a 3 no caso normal, até ~50 quando o
-	// estorno entra em retentativa. Carimbar o instante do envio troca a cegueira
-	// de trinta minutos por uma de um minuto.
-	//
-	// Memória e não banco: perder o carimbo num deploy só faz voltar ao
-	// comportamento conservador por um minuto.
-	erpMovementSentAt sync.Map
-
-	// erpMovementInFlight conta as chamadas de estoque ao ERP que COMEÇARAM e
-	// ainda não voltaram, por produto.
-	//
-	// A ordem do fluxo é: baixa o estoque local (atômico, é o porteiro) e só
-	// então manda a saída ao ERP. Entre as duas, o saldo dele ainda é o de antes
-	// — maior que o nosso. Um webhook nessa fresta, aplicado literalmente,
-	// devolveria o local ao valor antigo e apagaria a reserva do comprador.
-	//
-	// Contar é melhor que cronometrar: a fresta dura exatamente o que a chamada
-	// durar. Janela de tempo fixa ou é curta demais e não protege, ou é longa
-	// demais e cega o LiveCart para as vendas do lojista em outros canais.
-	erpMovementInFlight sync.Map
-
-	// erpMovementInFlight conta as chamadas de estoque ao ERP que COMEÇARAM e
-	// ainda não voltaram, por produto.
-	//
-	// A ordem do fluxo é: baixa o estoque local (atômico, é o porteiro) e só
-	// então manda a saída ao ERP. Entre as duas o saldo dele ainda é o de antes
-	// — maior que o nosso. Um webhook nessa fresta, aplicado literalmente,
-	// devolveria o local ao valor antigo e apagaria a reserva do comprador.
-	//
-	// Contar é melhor que cronometrar: a fresta dura exatamente o que a chamada
-	// durar. Uma janela de tempo fixa ou é curta demais e não protege, ou é
-	// longa demais e cega o LiveCart para as vendas do lojista em outros canais.
 
 	// lastWebhookAt guarda, por conta do Instagram (entry.id), quando o último
 	// webhook CHEGOU. É a memória do vigia: a Meta para de entregar sem avisar,
@@ -3339,7 +3292,7 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 
 	// Update the local product. Manual sync always refreshes stock and pulls
 	// dimensions if the ERP returned them (detailed.Shipping non-nil).
-	if err := s.productSyncer.SyncProduct(ctx, input.StoreID, externalSource, *detailed, false, false); err != nil {
+	if err := s.productSyncer.SyncProduct(ctx, input.StoreID, externalSource, *detailed, false); err != nil {
 		return nil, fmt.Errorf("syncing product: %w", err)
 	}
 
@@ -3567,7 +3520,7 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		}
 	}
 
-	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, true, false); err != nil {
+	if err := s.productSyncer.SyncProduct(ctx, integration.StoreID, integration.Provider, *detailed, true); err != nil {
 		return stockMirrorNoTarget, fmt.Errorf("syncing product: %w", err)
 	}
 

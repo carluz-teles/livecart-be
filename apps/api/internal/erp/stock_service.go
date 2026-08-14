@@ -27,13 +27,6 @@ type StockCollaborators interface {
 	// syncer wired, the product is not linked, or the lookup failed — and the
 	// caller MUST treat that as a silent no-op (the source semantics).
 	ResolveExternalProduct(ctx context.Context, storeID, productID string) (externalID string, linked bool)
-	// NoteERPMovementStarted marca que uma chamada de estoque ao ERP começou —
-	// a fresta em que o saldo dele ainda não sabe do nosso movimento.
-	NoteERPMovementStarted(externalProductID string)
-	// NoteERPMovementSent carimba que acabamos de mexer no estoque deste produto
-	// no ERP. É o que permite distinguir, no webhook seguinte, o eco do nosso
-	// próprio movimento de uma venda em outro canal do lojista.
-	NoteERPMovementSent(externalProductID string)
 
 	// --- Order-as-reservation lifecycle collaborators (Bloco B2c, Design C) ---
 
@@ -373,9 +366,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 		}
 
 		obs := fmt.Sprintf("Ajuste reserva LiveCart (+%d) - @%s - Cart %s", delta, platformHandle, cartID)
-		s.collab.NoteERPMovementStarted(externalID)
 		movementID, err := erpProvider.ReserveStock(ctx, externalID, delta, float64(unitPrice)/100, obs)
-		s.collab.NoteERPMovementSent(externalID)
 		if err != nil {
 			// O ERP recusou depois de já termos gravado. Desfazer é obrigatório:
 			// a reserva diria que seguramos unidades que o Tiny não separou.
@@ -467,9 +458,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 	}
 
 	obs := fmt.Sprintf("Ajuste reserva LiveCart (%d) - @%s - Cart %s", delta, platformHandle, cartID)
-	s.collab.NoteERPMovementStarted(externalID)
 	movementID, err := erpProvider.ReverseStockReservation(ctx, externalID, dec, 0, obs)
-	s.collab.NoteERPMovementSent(externalID)
 	if err != nil {
 		// O ERP recusou DEPOIS de já termos baixado no banco. Devolver as
 		// unidades é obrigatório: sem isso o banco diria "livre" e o Tiny diria

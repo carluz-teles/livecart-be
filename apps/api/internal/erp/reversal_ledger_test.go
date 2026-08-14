@@ -175,9 +175,7 @@ func (c *ledgerCollab) ResolveProvider(context.Context, *Integration) (providers
 // Sem isto o mockCollab embutido devolve linked=false, ReserveStockInERP sai
 // cedo e o teste inteiro vira um no-op que passa sem exercitar nada. Foi o que
 // aconteceu na primeira versão deste arquivo.
-func (c *ledgerCollab) NoteERPMovementStarted(string) {}
 
-func (c *ledgerCollab) NoteERPMovementSent(string) {}
 
 func (c *ledgerCollab) ResolveExternalProduct(context.Context, string, string) (string, bool) {
 	return "ext-1", true

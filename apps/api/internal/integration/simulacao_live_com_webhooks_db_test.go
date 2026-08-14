@@ -171,6 +171,13 @@ func TestSimulacaoLiveComComprasEAlteracoesConcorrentes(t *testing.T) {
 // Cada caso muda QUANDO o saldo do ERP chega em relação aos nossos movimentos.
 // O desenho não pode depender dessa ordem: em produção os atrasos variaram de
 // 1 a 50 segundos no mesmo dia.
+//
+// Antes esta pergunta era respondida por uma janela de tempo — suprimir o
+// webhook por alguns segundos depois de mandarmos um movimento. Uma janela erra
+// dos dois lados: curta demais não protege, longa demais cega o LiveCart para o
+// lojista vendendo o mesmo SKU em outro canal. Quem responde agora é o
+// comprovante da leitura: o saldo entra se ninguém nosso mexeu desde que ele foi
+// lido, e não entra se mexeu. Sem prazo, sem tolerância.
 func TestSimulacaoWebhookDoTinyEmTemposDistintos(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
@@ -187,22 +194,31 @@ func TestSimulacaoWebhookDoTinyEmTemposDistintos(t *testing.T) {
 			const inicial = 10
 			productID := seedSoldOutProductWithQueue(t, fx, inicial, 0)
 			repo := NewRepository(sqlc.New(testPool), testPool)
-			svc := &Service{repo: repo, logger: zapNopLogger()}
 
 			cartID, _ := seedReservaAtiva(t, fx, productID, 3)
 
-			// Mandamos um movimento ao ERP agora.
-			svc.NoteERPMovementSent("EXT-TEMPO")
-			if !svc.erpMovementEchoing("EXT-TEMPO") {
-				t.Fatal("o carimbo do movimento não pegou")
-			}
+			// O comprovante, tirado no instante em que o Tiny foi consultado.
+			seqNaLeitura := seqDoProduto(t, productID)
 
 			if caso.webhookAntesDoEstorno {
-				// Webhook chega enquanto o eco ainda é possível: tem de ser
-				// suprimido, senão copiamos o nosso próprio rastro.
-				skip, _ := stockSyncMode(svc.erpMovementEchoing("EXT-TEMPO"), false, false, false)
-				if !skip {
-					t.Error("webhook dentro da janela de eco não foi suprimido")
+				// Um movimento nosso aterrissa entre a consulta e a escrita. O
+				// saldo que está a caminho descreve o estado ANTERIOR a ele;
+				// aplicá-lo repõe a unidade que acabou de sair e o produto volta
+				// a oferecer o que já não tem.
+				if err := repo.DecrementProductStock(ctx, productID, 1); err != nil {
+					t.Fatalf("movimento nosso: %v", err)
+				}
+				aplicou, err := repo.ApplyERPStockMirror(ctx, productID, inicial, seqNaLeitura)
+				if err != nil {
+					t.Fatalf("webhook: %v", err)
+				}
+				if aplicou {
+					t.Error("o saldo lido ANTES do nosso movimento entrou — é o eco da " +
+						"nossa própria saída, e aplicá-lo desfaz a reserva do comprador")
+				}
+				if got := estoqueDoProduto(t, productID); got != inicial-1 {
+					t.Errorf("estoque = %d, quero %d: o movimento manda, a leitura velha não",
+						got, inicial-1)
 				}
 			}
 
@@ -212,19 +228,21 @@ func TestSimulacaoWebhookDoTinyEmTemposDistintos(t *testing.T) {
 			}
 
 			if !caso.webhookAntesDoEstorno {
-				// Janela expirada: o saldo do Tiny volta a ser confiável, e é
-				// assim que uma venda em outro canal chega até nós.
-				svc.erpMovementSentAt.Delete("EXT-TEMPO")
-				skip, downgrade := stockSyncMode(svc.erpMovementEchoing("EXT-TEMPO"), false, false, false)
-				if skip || downgrade {
-					t.Error("fora da janela de eco o saldo do ERP tem de ser aplicado — " +
-						"é a única notícia que temos dos outros canais do lojista")
+				// Nada nosso mexeu desde a consulta. O saldo do Tiny é notícia
+				// legítima — o lojista vendeu 2 no marketplace — e tem de entrar.
+				// É a única forma de sabermos dos outros canais dele.
+				aplicou, err := repo.ApplyERPStockMirror(ctx, productID, inicial-2, seqNaLeitura)
+				if err != nil {
+					t.Fatalf("webhook: %v", err)
 				}
-			}
-
-			if got := estoqueContabilizado(t, productID); got != inicial {
-				t.Errorf("contabilizado %d, quero %d — o resultado não pode depender "+
-					"de quando o webhook chegou", got, inicial)
+				if !aplicou {
+					t.Fatal("o saldo do ERP foi recusado sem nenhum movimento nosso no meio — " +
+						"assim a venda do lojista em outro canal nunca chega, que era " +
+						"exatamente o buraco da janela de tempo")
+				}
+				if got := estoqueDoProduto(t, productID); got != inicial-2 {
+					t.Errorf("estoque = %d, quero %d", got, inicial-2)
+				}
 			}
 		})
 	}

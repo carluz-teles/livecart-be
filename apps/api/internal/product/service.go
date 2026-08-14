@@ -230,12 +230,14 @@ func (s *Service) FilterRegisteredExternalIDs(ctx context.Context, storeID vo.St
 
 // resolveSyncedStock decide o estoque local após um sync vindo do ERP:
 //   - skipStock: preserva o local (fail-safe de erro de DB);
-//   - downgradeOnly: janela do guard — aplica o valor do ERP só quando é MENOR
-//     que o local (redução legítima do lojista, direção segura); um valor >=
-//     local é eco de reserva ou inflação de finalização e é preservado, para
-//     nunca inflar o local e disparar promoção fantasma da waitlist;
 //   - caso normal: aplica o valor do ERP.
-func resolveSyncedStock(localStock, erpStock int, skipStock, downgradeOnly bool) int {
+//
+// O modo "downgrade-only" — aplicar o saldo do ERP só quando fosse MENOR que o
+// local — saiu daqui. Ele existia para adivinhar, durante uma live, se a queda
+// no saldo do Tiny era do lojista ou o eco do nosso próprio movimento, e não
+// tinha como distinguir os dois. Quem responde isso agora é a trava de sequência
+// (ApplyERPStockMirror), que não adivinha: ou a leitura é do presente, ou não é.
+func resolveSyncedStock(localStock, erpStock int, skipStock bool) int {
 	if skipStock {
 		return localStock
 	}
@@ -259,9 +261,6 @@ func resolveSyncedStock(localStock, erpStock int, skipStock, downgradeOnly bool)
 	if erpStock < 0 {
 		return localStock
 	}
-	if downgradeOnly && erpStock >= localStock {
-		return localStock
-	}
 	return erpStock
 }
 
@@ -278,7 +277,7 @@ func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool
 	}
 
 	localStock := existing.Stock()
-	stock := resolveSyncedStock(localStock, input.Stock, input.SkipStock, input.DowngradeOnly)
+	stock := resolveSyncedStock(localStock, input.Stock, input.SkipStock)
 
 	// O que o sync fez com o estoque, sempre — e alto quando ele REDUZ.
 	//
@@ -298,7 +297,6 @@ func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool
 			zap.Int("erp_stock", input.Stock),
 			zap.Int("new_stock", stock),
 			zap.Bool("skip_stock", input.SkipStock),
-			zap.Bool("downgrade_only", input.DowngradeOnly),
 		}
 		if stock < localStock {
 			lg.Warn("ERP sync REDUCED local stock", fields...)
