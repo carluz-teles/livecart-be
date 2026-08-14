@@ -6071,6 +6071,48 @@ func (s *Service) StartERPResync(ctx context.Context, input StartERPResyncInput)
 	return len(posicoes), nil
 }
 
+// erpResyncRateLimitRetries é quantas vezes um produto estrangulado é reposto na
+// fila antes de contar como falha.
+const erpResyncRateLimitRetries = 4
+
+// resyncOneProduct relê um produto, insistindo quando o ERP estrangula.
+//
+// Estrangulamento não é falha do produto: é o provedor pedindo para esperar, e
+// ele libera em segundos. Contar como falha e seguir era o defeito da primeira
+// versão — na varredura de 14/08 um produto ("Arranjo com Sino Listrado") levou
+// 429 e foi PULADO, ficando com o saldo físico enquanto os outros 139 iam para o
+// disponível. Uma varredura que existe para consertar o catálogo inteiro não
+// pode deixar buraco silencioso por causa de uma pausa do provedor.
+//
+// A espera cresce a cada tentativa porque o `retry_after` do Tiny volta zerado —
+// respeitá-lo ao pé da letra seria bater na mesma porta no mesmo instante.
+func (s *Service) resyncOneProduct(ctx context.Context, integration *IntegrationRow, externalID string) error {
+	var ultimo error
+	for tentativa := 0; tentativa <= erpResyncRateLimitRetries; tentativa++ {
+		if tentativa > 0 {
+			espera := time.Duration(tentativa*tentativa) * time.Second
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(espera):
+			}
+		}
+		_, err := s.processProductSync(ctx, integration, externalID)
+		if err == nil {
+			return nil
+		}
+		ultimo = err
+
+		var estrangulado *ratelimit.ErrRateLimited
+		if !errors.As(err, &estrangulado) {
+			// Erro que não é pausa do provedor (produto apagado no ERP, resposta
+			// ilegível): insistir não muda o desfecho.
+			return err
+		}
+	}
+	return ultimo
+}
+
 // RunERPResync percorre os produtos vinculados relendo cada um do ERP.
 //
 // Um produto que falha não derruba os outros: a releitura existe para consertar
@@ -6103,7 +6145,7 @@ func (s *Service) RunERPResync(ctx context.Context, storeID, integrationID strin
 			case <-time.After(erpResyncBreath):
 			}
 		}
-		if _, err := s.processProductSync(ctx, integration, pos.ExternalID); err != nil {
+		if err := s.resyncOneProduct(ctx, integration, pos.ExternalID); err != nil {
 			falhou++
 			lg.Warn("ERP resync: product failed",
 				zap.String("external_product_id", pos.ExternalID),
