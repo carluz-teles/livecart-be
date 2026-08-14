@@ -42,6 +42,11 @@ type Tiny struct {
 	credentials  *Credentials
 	clientID     string
 	clientSecret string
+
+	// useAvailableStock faz o provider espelhar o saldo VENDÁVEL em vez do
+	// físico. Desligado por padrão: mudar o significado do estoque de uma loja
+	// sem ela pedir é alterar o que ela vende.
+	useAvailableStock bool
 }
 
 // TinyConfig contains configuration for the Tiny provider.
@@ -54,6 +59,9 @@ type TinyConfig struct {
 	Logger        *zap.Logger
 	LogFunc       providers.LogFunc
 	RateLimiter   ratelimit.RateLimiter
+	// UseAvailableStock liga a leitura do saldo disponível. Ver o campo
+	// homônimo em Tiny.
+	UseAvailableStock bool
 }
 
 // NewTiny creates a new Tiny ERP provider.
@@ -66,6 +74,7 @@ func NewTiny(cfg TinyConfig) (*Tiny, error) {
 	}
 
 	return &Tiny{
+		useAvailableStock: cfg.UseAvailableStock,
 		BaseProvider: providers.NewBaseProvider(providers.BaseProviderConfig{
 			IntegrationID: cfg.IntegrationID,
 			StoreID:       cfg.StoreID,
@@ -381,6 +390,89 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 }
 
 // GetProduct retrieves a single product by ID.
+// saldoDisponivel busca em `GET /estoque/{idProduto}` o saldo que pode de fato
+// ser vendido.
+//
+// Devolve (0, false) sempre que não dá para afirmar: chamada falhou, resposta
+// ilegível, ou nenhum dos campos conhecidos apareceu. Quem chama preserva o
+// saldo físico nesse caso — que é o comportamento de hoje, e errar para o lado
+// de "vende demais" é ruim, mas trocar por um número inventado é pior.
+//
+// O corpo cru vai para o log porque o schema desta resposta não está na
+// documentação pública que consultei. Assim que os nomes estiverem confirmados,
+// o log sai e a lista de candidatos encolhe para o campo real.
+func (t *Tiny) saldoDisponivel(ctx context.Context, productID string) (int, bool) {
+	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
+	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil || !providers.IsSuccessStatus(resp.StatusCode) {
+		if t.Logger != nil {
+			t.Logger.Warn("tiny available stock unavailable; falling back to physical",
+				zap.String("external_product_id", productID),
+				zap.Error(err),
+			)
+		}
+		return 0, false
+	}
+
+	var cru map[string]any
+	if json.Unmarshal(body, &cru) != nil {
+		return 0, false
+	}
+
+	if t.Logger != nil {
+		t.Logger.Info("tiny stock endpoint payload",
+			zap.String("external_product_id", productID),
+			zap.ByteString("body", body),
+		)
+	}
+
+	n, campo, ok := ExtrairSaldoDisponivel(cru)
+	if !ok {
+		if t.Logger != nil {
+			t.Logger.Warn("tiny stock endpoint had no known available-balance field",
+				zap.String("external_product_id", productID),
+			)
+		}
+		return 0, false
+	}
+	if t.Logger != nil {
+		t.Logger.Info("tiny available stock resolved",
+			zap.String("external_product_id", productID),
+			zap.String("campo", campo),
+			zap.Int("disponivel", n),
+		)
+	}
+	return n, true
+}
+
+// ExtrairSaldoDisponivel escolhe, na resposta de estoque do Tiny, o campo que
+// representa o saldo VENDÁVEL.
+//
+// A lista existe porque o schema desta resposta não está na documentação
+// pública, e chutar um nome só arriscava não achar nada. Ela encolhe para o
+// campo real assim que uma resposta de produção confirmar qual é.
+//
+// `saldo` está fora de propósito: é o saldo FÍSICO, o mesmo número que já vem em
+// `estoque.quantidade` do GET /produtos e que causou o furo. Aceitá-lo aqui
+// recriaria o bug com outro nome e com uma chamada HTTP a mais de custo.
+//
+// Negativo não é saldo, é sintoma — o Tiny aceita ir abaixo de zero, e copiar
+// isso propagaria o defeito em vez de mostrá-lo.
+func ExtrairSaldoDisponivel(cru map[string]any) (saldo int, campo string, ok bool) {
+	for _, c := range []string{"saldoDisponivel", "saldo_disponivel", "disponivel", "quantidadeDisponivel"} {
+		v, existe := cru[c]
+		if !existe {
+			continue
+		}
+		n, isNum := v.(float64)
+		if !isNum || n < 0 {
+			continue
+		}
+		return int(n), c, true
+	}
+	return 0, "", false
+}
+
 func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, error) {
 	endpoint := fmt.Sprintf("%s/produtos/%s", tinyAPIBaseURL, productID)
 
@@ -411,25 +503,22 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 
 	out := tinyPayloadToERP(p)
 
-	// O nó `estoque` inteiro, cru, para saber se ele já traz o saldo DISPONÍVEL.
+	// O saldo que vale para vender é o DISPONÍVEL, e ele não vem aqui.
 	//
-	// Hoje lemos só `estoque.quantidade`, e o teste do lojista provou que esse é
-	// o saldo FÍSICO: o Carrossel Musical estava com físico 4 / disponível 3 no
-	// Tiny e chegou aqui como 4. A diferença é peça reservada por orçamento —
-	// oferecê-la é vender o que já tem dono.
+	// `GET /produtos/{id}` devolve `estoque.quantidade`, que é o saldo FÍSICO —
+	// provado pelo lojista e confirmado no log: o Carrossel Musical estava com
+	// físico 4 e disponível 3 no Tiny, e chegou aqui como 4. O nó inteiro é
+	// {controlar, sobEncomenda, diasPreparacao, localizacao, minimo, maximo,
+	// quantidade}: não existe reservado nem disponível para parsear.
 	//
-	// Se este nó já carregar o disponível, o conserto não custa chamada nenhuma.
-	// Se trouxer só `quantidade`, é um GET /estoque/{id} por produto, e aí o
-	// rate limit do Tiny entra na decisão. Sai assim que a resposta aparecer.
-	if t.Logger != nil {
-		var cru struct {
-			Estoque json.RawMessage `json:"estoque"`
-		}
-		if json.Unmarshal(body, &cru) == nil && len(cru.Estoque) > 0 {
-			t.Logger.Info("tiny product stock node",
-				zap.String("external_product_id", productID),
-				zap.ByteString("estoque", cru.Estoque),
-			)
+	// A diferença entre os dois é peça reservada por orçamento salvo no Tiny.
+	// Ela continua no físico e sai do disponível — oferecê-la é vender o que já
+	// tem dono, e é furo de estoque do tamanho de quantas estiverem reservadas.
+	// Só quando a loja pediu. Desligado, o comportamento é exatamente o de
+	// antes — inclusive sem a chamada extra ao Tiny.
+	if t.useAvailableStock {
+		if disponivel, ok := t.saldoDisponivel(ctx, productID); ok {
+			out.Stock = disponivel
 		}
 	}
 

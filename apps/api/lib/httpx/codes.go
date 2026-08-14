@@ -100,6 +100,10 @@ const (
 	CodeErpRetryNoSnapshot        Code = "ERP_RETRY_NO_SNAPSHOT"        // erp/finalisation.go:387 ("snapshot de pagamento ausente")
 	CodeErpNotActive              Code = "ERP_NOT_ACTIVE"               // erp/invoice.go:99 ("ERP integration not active for store")
 	CodeErpNoInvoiceSupport       Code = "ERP_NO_INVOICE_SUPPORT"       // erp/invoice.go:108 ("ERP provider does not expose invoice operations")
+	// Configuração de estoque pedida numa integração que não é de ERP. Pagamento
+	// e frete não têm saldo nenhum, e gravar a chave neles criaria uma
+	// configuração que o lojista acredita ter ligado e que ninguém lê.
+	CodeErpStockSourceUnsupported Code = "ERP_STOCK_SOURCE_UNSUPPORTED" // integration/service.go (UpdateERPStockSource)
 	// Busca de produto no ERP estrangulada (Tiny: 1 req/s). NÃO é "não existe":
 	// a listagem achou o produto e o detalhe é que foi recusado. Separar os dois
 	// é o que impede a busca de dizer ao lojista que o produto não existe.
