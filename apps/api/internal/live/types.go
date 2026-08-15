@@ -225,6 +225,17 @@ type CreateSessionRequest struct {
 	MediaPermalink    string `json:"mediaPermalink"`
 	MediaThumbnailURL string `json:"mediaThumbnailUrl"`
 	MediaCaption      string `json:"mediaCaption"`
+	// ProductIDs é a lista de produtos que ESTA transmissão vende. Opcional:
+	// vazia significa "vende qualquer produto ativo da loja", que é como toda
+	// sessão nascia antes.
+	//
+	// O caminho já existia inteiro do service para baixo — CreateSessionInput
+	// tem o campo e CreateSessionWithPlatformTx grava sessão e whitelist na
+	// MESMA transação. Só o DTO da borda não expunha, então o painel era
+	// obrigado a criar a sessão e depois adicionar produto por produto por
+	// POST /whitelist: uma falha no meio deixava a transmissão no ar vendendo
+	// o catálogo inteiro, que é o oposto do que o lojista pediu.
+	ProductIDs []string `json:"productIds" validate:"omitempty,dive,uuid"`
 }
 
 // EventPulse is a tiny change-signal for near-real-time dashboard refresh. The

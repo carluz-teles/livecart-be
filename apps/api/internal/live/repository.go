@@ -39,6 +39,45 @@ func NewRepository(q *sqlc.Queries, pool *pgxpool.Pool) *Repository {
 // nascer JUNTO com a sessão. Fora da transação, uma falha ao gravar produto
 // deixaria a publicação no ar com lista parcial — ou vazia, que sob "vazia vende
 // tudo" libera o catálogo inteiro, o oposto do que o lojista escolheu.
+// AllProductsBelongToStore diz se TODOS os ids informados sao produtos desta
+// loja.
+//
+// A whitelist da transmissao grava (session_id, product_id) confiando na FK, que
+// garante existencia e nao posse. Enquanto a lista so entrava um a um por rota
+// autenticada, o buraco era teorico; a criacao de sessao passou a aceitar a
+// lista inteira de uma vez, e sem esta checagem um uuid de outra loja entraria
+// na lista de venda desta.
+//
+// Lista vazia devolve true: vazia significa "vende qualquer produto ativo da
+// loja", e nao ha o que conferir.
+func (r *Repository) AllProductsBelongToStore(ctx context.Context, storeID string, productIDs []string) (bool, error) {
+	if len(productIDs) == 0 {
+		return true, nil
+	}
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return false, err
+	}
+	ids := make([]pgtype.UUID, 0, len(productIDs))
+	for _, raw := range productIDs {
+		pid, err := parseUUID(raw)
+		if err != nil {
+			// Id malformado nao pertence a loja nenhuma; recusar aqui poupa uma
+			// ida ao banco e devolve o mesmo 422 do id de outra loja.
+			return false, nil
+		}
+		ids = append(ids, pid)
+	}
+	n, err := r.q.CountProductsOwnedByStore(ctx, sqlc.CountProductsOwnedByStoreParams{
+		StoreID:    sID,
+		ProductIds: ids,
+	})
+	if err != nil {
+		return false, fmt.Errorf("counting products owned by store: %w", err)
+	}
+	return int(n) == len(ids), nil
+}
+
 func (r *Repository) CreateSessionWithPlatformTx(ctx context.Context, eventID, sessionType, platform, platformLiveID string, productIDs []string) (SessionRow, *PlatformRow, error) {
 	eventUID, err := parseUUID(eventID)
 	if err != nil {

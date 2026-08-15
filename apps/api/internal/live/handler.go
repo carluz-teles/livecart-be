@@ -539,6 +539,7 @@ func (h *Handler) CreateSession(c *fiber.Ctx) error {
 		MediaPermalink:    req.MediaPermalink,
 		MediaThumbnailURL: req.MediaThumbnailURL,
 		MediaCaption:      req.MediaCaption,
+		ProductIDs:        req.ProductIDs,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)

@@ -145,3 +145,19 @@ FROM live_events e
 JOIN stores s ON s.id = e.store_id
 WHERE e.id = $1;
 
+
+-- name: CountProductsOwnedByStore :one
+-- Quantos dos ids informados pertencem MESMO a esta loja.
+--
+-- A whitelist da transmissão grava (session_id, product_id) e confia na FK, que
+-- so garante que o produto EXISTE — nao que ele e do lojista que esta pedindo.
+-- Enquanto a lista so entrava um a um por rota autenticada isso passava; expor
+-- productIds na criacao da sessao amplia a superficie, e um uuid de outra loja
+-- entraria na lista de venda desta.
+--
+-- Contar e comparar com o tamanho da lista responde a pergunta inteira numa ida
+-- ao banco: se o numero bate, todos sao dele; se nao bate, pelo menos um nao e —
+-- e nao interessa qual, porque a resposta e a mesma.
+SELECT count(*) FROM products
+WHERE store_id = sqlc.arg(store_id)
+  AND id = ANY(sqlc.arg(product_ids)::uuid[]);
