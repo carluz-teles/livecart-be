@@ -1198,6 +1198,22 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 			"platform e platformLiveId precisam vir juntos: mande os dois para vincular a publicação, ou nenhum para criar a transmissão sem publicação")
 	}
 
+	// Os produtos têm de ser DESTA loja.
+	//
+	// A whitelist grava (session_id, product_id) confiando na FK, que garante
+	// existência e não posse. Enquanto a lista só entrava um a um, o buraco era
+	// teórico; a criação passou a aceitá-la inteira de uma vez, e sem esta
+	// checagem um uuid de outra loja entraria na lista de venda desta.
+	//
+	// 422 e não 500: mandar o id errado é erro de quem chama, e deixar a FK
+	// derrubar a transação devolveria "erro interno" para um pedido inválido.
+	if ok, err := s.repo.AllProductsBelongToStore(ctx, input.StoreID, input.ProductIDs); err != nil {
+		return CreateSessionOutput{}, err
+	} else if !ok {
+		return CreateSessionOutput{}, httpx.DomainError(422, httpx.CodeSessionProductNotOwned,
+			"um dos produtos informados não é desta loja")
+	}
+
 	// Create the session and add the platform in a single transaction.
 	//
 	// A sessão nasce VAZIA e, portanto, vendendo todos os produtos ativos da

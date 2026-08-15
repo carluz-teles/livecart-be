@@ -115,6 +115,10 @@ const (
 	CodeCartItemChanged Code = "CART_ITEM_CHANGED" // checkout/service.go (UpdateCartItemQuantity)
 
 	// --- STOCK (internal/erp/stock_service.go) ---
+	// Produto de outra loja na lista da transmissão. A FK garante existência, não
+	// posse — ver live.Repository.AllProductsBelongToStore.
+	CodeSessionProductNotOwned Code = "SESSION_PRODUCT_NOT_OWNED" // live/service.go (CreateSession)
+
 	CodeStockInsufficient Code = "STOCK_INSUFFICIENT" // erp/stock_service.go:213 ("estoque insuficiente para esse aumento")
 
 	// --- INSTAGRAM publishing (internal/integration/publish_schedule.go) ---

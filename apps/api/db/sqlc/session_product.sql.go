@@ -11,6 +11,35 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countProductsOwnedByStore = `-- name: CountProductsOwnedByStore :one
+SELECT count(*) FROM products
+WHERE store_id = $1
+  AND id = ANY($2::uuid[])
+`
+
+type CountProductsOwnedByStoreParams struct {
+	StoreID    pgtype.UUID   `json:"store_id"`
+	ProductIds []pgtype.UUID `json:"product_ids"`
+}
+
+// Quantos dos ids informados pertencem MESMO a esta loja.
+//
+// A whitelist da transmissão grava (session_id, product_id) e confia na FK, que
+// so garante que o produto EXISTE — nao que ele e do lojista que esta pedindo.
+// Enquanto a lista so entrava um a um por rota autenticada isso passava; expor
+// productIds na criacao da sessao amplia a superficie, e um uuid de outra loja
+// entraria na lista de venda desta.
+//
+// Contar e comparar com o tamanho da lista responde a pergunta inteira numa ida
+// ao banco: se o numero bate, todos sao dele; se nao bate, pelo menos um nao e —
+// e nao interessa qual, porque a resposta e a mesma.
+func (q *Queries) CountProductsOwnedByStore(ctx context.Context, arg CountProductsOwnedByStoreParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countProductsOwnedByStore, arg.StoreID, arg.ProductIds)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countSessionProducts = `-- name: CountSessionProducts :one
 SELECT COUNT(*)::int FROM session_products WHERE session_id = $1
 `
