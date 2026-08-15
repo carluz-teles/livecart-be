@@ -161,6 +161,63 @@ type UpdateERPStockSourceInput struct {
 	UseAvailableStock bool
 }
 
+// erpResyncStaleAfter é quando uma marca de varredura deixa de ser acreditada.
+//
+// A marca sai num defer, mas o processo pode morrer antes dele — deploy no meio
+// da varredura, OOM, pod reciclado. Sem esta guarda o botão do lojista ficaria
+// desabilitado para sempre, e ele não teria como destravar sozinho.
+//
+// Maior que o timeout da task (45min) de propósito: enquanto a task pode estar
+// viva, a marca é verdade.
+const erpResyncStaleAfter = 60 * time.Minute
+
+// ERPResyncRunningFromMetadata lê a marca crua e aplica a guarda de obsolescência.
+func ERPResyncRunningFromMetadata(metadata map[string]any) bool {
+	if metadata == nil {
+		return false
+	}
+	raw, ok := metadata[providers.MetadataResyncRunningSince].(string)
+	if !ok || raw == "" {
+		return false
+	}
+	desde, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		// Marca ilegível não segura o botão: preferimos deixar o lojista tentar
+		// de novo (a dedup por TaskID barra a segunda varredura) a travá-lo por
+		// causa de um valor que ninguém sabe interpretar.
+		return false
+	}
+	return time.Since(desde) < erpResyncStaleAfter
+}
+
+// ERPResyncProgressFromMetadata lê "X de N" da varredura em andamento.
+//
+// Devolve (0, 0) quando não há varredura viva: o progresso é do trabalho em
+// curso, e números pendurados de uma varredura antiga descreveriam algo que já
+// não está acontecendo.
+func ERPResyncProgressFromMetadata(metadata map[string]any) (done, total int) {
+	if !ERPResyncRunningFromMetadata(metadata) {
+		return 0, 0
+	}
+	return metadataInt(metadata, providers.MetadataResyncDone),
+		metadataInt(metadata, providers.MetadataResyncTotal)
+}
+
+// metadataInt lê um inteiro do metadata tolerando as duas formas em que ele
+// chega: número vivo em memória (int) e número que passou pelo JSONB (float64).
+func metadataInt(metadata map[string]any, chave string) int {
+	switch v := metadata[chave].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
 // StartERPResyncInput é o input do usecase de releitura em massa.
 type StartERPResyncInput struct {
 	StoreID       string
@@ -196,8 +253,19 @@ type IntegrationResponse struct {
 	Provider     string         `json:"provider"`
 	Status       string         `json:"status"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
-	LastSyncedAt *time.Time     `json:"lastSyncedAt,omitempty"`
-	CreatedAt    time.Time      `json:"createdAt"`
+	// ERPResyncRunning diz se a releitura em massa está em andamento AGORA.
+	//
+	// Calculado aqui e não no cliente: a marca crua é um timestamp que precisa
+	// da guarda de obsolescência para virar resposta, e espalhar essa regra por
+	// cada tela que desabilita um botão é convidar as telas a divergirem.
+	ERPResyncRunning bool `json:"erpResyncRunning"`
+	// ERPResyncDone / ERPResyncTotal levam o progresso, e só valem enquanto
+	// ERPResyncRunning é verdadeiro — zerados fora disso, para nenhuma tela
+	// mostrar "154 de 154" de uma varredura que acabou ontem.
+	ERPResyncDone  int `json:"erpResyncDone"`
+	ERPResyncTotal int `json:"erpResyncTotal"`
+	LastSyncedAt     *time.Time `json:"lastSyncedAt,omitempty"`
+	CreatedAt        time.Time  `json:"createdAt"`
 	// Setup URLs the merchant must paste into the provider's app config.
 	// Populated for providers that need user-side configuration (e.g. Tiny ERP).
 	RedirectURL string `json:"redirectUrl,omitempty"`

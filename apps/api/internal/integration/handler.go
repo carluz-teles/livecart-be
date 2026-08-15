@@ -1285,6 +1285,7 @@ func mapToCredentials(m map[string]any) *providers.Credentials {
 }
 
 func toIntegrationResponse(output *CreateIntegrationOutput) *IntegrationResponse {
+	resyncDone, resyncTotal := ERPResyncProgressFromMetadata(output.Metadata)
 	return &IntegrationResponse{
 		ID:                output.ID,
 		StoreID:           output.StoreID,
@@ -1292,6 +1293,9 @@ func toIntegrationResponse(output *CreateIntegrationOutput) *IntegrationResponse
 		Provider:          output.Provider,
 		Status:            output.Status,
 		Metadata:          output.Metadata,
+		ERPResyncRunning:  ERPResyncRunningFromMetadata(output.Metadata),
+		ERPResyncDone:     resyncDone,
+		ERPResyncTotal:    resyncTotal,
 		LastSyncedAt:      output.LastSyncedAt,
 		CreatedAt:         output.CreatedAt,
 		RedirectURL:       output.RedirectURL,

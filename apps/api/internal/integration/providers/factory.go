@@ -116,6 +116,25 @@ func NewFactory(cfg FactoryConfig) *Factory {
 // físico e disponível é um conceito do Tiny.
 const MetadataUseAvailableStock = "use_available_stock"
 
+// MetadataResyncRunningSince marca, no metadata da integração, o instante em que
+// a releitura em massa começou. Ausente = nenhuma em andamento.
+//
+// Persistido e não em memória porque a resposta precisa valer para QUALQUER pod:
+// o lojista pode abrir o painel numa aba servida por outra instância, e um
+// estado só na memória de quem enfileirou diria "parado" para ela.
+const MetadataResyncRunningSince = "resync_running_since"
+
+// MetadataResyncDone e MetadataResyncTotal levam o progresso da varredura.
+//
+// Escritos no mesmo metadata da marca de andamento porque são a mesma coisa
+// vista de perto: "está rodando" é a existência da marca, "vai em 42 de 154" é
+// o detalhe que faz dezessete minutos de espera parecerem trabalho em vez de
+// travamento.
+const (
+	MetadataResyncDone  = "resync_done"
+	MetadataResyncTotal = "resync_total"
+)
+
 // MetadataBool lê uma chave booleana do metadata da integração.
 //
 // Ausente, nulo ou de outro tipo devolve false — o padrão de toda configuração
