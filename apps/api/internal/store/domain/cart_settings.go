@@ -17,6 +17,9 @@ type CartSettings struct {
 	reserveStock        bool
 	allowStorePickup    bool
 	maxQuantityPerItem  int
+	// minInstallmentCents é o piso de uma parcela no cartão, em centavos.
+	// Zero = sem mínimo.
+	minInstallmentCents int
 	allowEdit           bool
 	checkoutSendMethods []string
 	// Automatic message settings
@@ -68,6 +71,7 @@ func ReconstructCartSettings(
 	reserveStock bool,
 	allowStorePickup bool,
 	maxQuantityPerItem int,
+	minInstallmentCents int,
 	allowEdit bool,
 	checkoutSendMethods []string,
 	realTimeCart bool,
@@ -82,6 +86,7 @@ func ReconstructCartSettings(
 		reserveStock:              reserveStock,
 		allowStorePickup:          allowStorePickup,
 		maxQuantityPerItem:        maxQuantityPerItem,
+		minInstallmentCents:       minInstallmentCents,
 		allowEdit:                 allowEdit,
 		checkoutSendMethods:       checkoutSendMethods,
 		realTimeCart:              realTimeCart,
@@ -101,6 +106,7 @@ func (c CartSettings) ExpirationMinutes() int         { return c.expirationMinut
 func (c CartSettings) ReserveStock() bool             { return c.reserveStock }
 func (c CartSettings) AllowStorePickup() bool         { return c.allowStorePickup }
 func (c CartSettings) MaxQuantityPerItem() int        { return c.maxQuantityPerItem }
+func (c CartSettings) MinInstallmentCents() int       { return c.minInstallmentCents }
 func (c CartSettings) AllowEdit() bool                { return c.allowEdit }
 func (c CartSettings) CheckoutSendMethods() []string  { return c.checkoutSendMethods }
 func (c CartSettings) RealTimeCart() bool             { return c.realTimeCart }

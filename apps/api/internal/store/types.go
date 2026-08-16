@@ -311,6 +311,7 @@ func NewStoreResponse(s *storedomain.Store) StoreResponse {
 			ReserveStock:              cart.ReserveStock(),
 			AllowStorePickup:          cart.AllowStorePickup(),
 			MaxQuantityPerItem:        cart.MaxQuantityPerItem(),
+			MinInstallmentCents:       cart.MinInstallmentCents(),
 			AllowEdit:                 cart.AllowEdit(),
 			CheckoutSendMethods:       cart.CheckoutSendMethods(),
 			RealTimeCart:              cart.RealTimeCart(),
