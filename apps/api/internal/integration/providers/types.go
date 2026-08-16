@@ -792,6 +792,12 @@ type ERPOrder struct {
 	Payment *ERPOrderPayment `json:"payment,omitempty"`
 }
 
+// StorePickupCarrier is the Carrier the checkout writes when the buyer chose
+// "retirar na loja". It lives here, and not as a literal on each side, because
+// the ERP layer has to recognise it: retirada não é uma remessa, e tratá-la
+// como transportadora fez o Tiny recusar o pedido inteiro.
+const StorePickupCarrier = "Retirada na loja"
+
 // ERPOrderShipping captures the freight option chosen at checkout so the ERP
 // records the shipment alongside the sales order.
 type ERPOrderShipping struct {

@@ -540,7 +540,7 @@ func (s *Service) QuoteShipping(ctx context.Context, input QuoteShippingInput) (
 			ID:             pickupOptionID,
 			Provider:       pickupProvider,
 			Service:        "Retirar na loja",
-			Carrier:        "Retirada na loja",
+			Carrier:        providers.StorePickupCarrier,
 			PriceCents:     0,
 			RealPriceCents: 0,
 			DeadlineDays:   0,
