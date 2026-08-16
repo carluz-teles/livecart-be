@@ -1095,16 +1095,31 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 			"fretePorConta": "D",
 		}
 
-		// Try to resolve the formaEnvio id, preferring the carrier name
-		// (Correios / Jadlog / etc.) and falling back to "SmartEnvios" so
-		// stores that cadastrou só o agregador também batem.
-		formaEnvioID, formaEnvioErr := t.lookupFormaEnvioID(ctx, ship.Carrier)
-		formaEnvioName := ship.Carrier
-		if formaEnvioErr == nil && formaEnvioID == 0 && ship.Carrier != "SmartEnvios" {
-			id, err := t.lookupFormaEnvioID(ctx, "SmartEnvios")
-			if err == nil && id > 0 {
-				formaEnvioID = id
-				formaEnvioName = "SmartEnvios"
+		// Retirada na loja não é remessa: não existe transportadora a
+		// resolver, e o fallback abaixo pegaria o agregador de frete e
+		// carimbaria uma entrega que ninguém vai despachar. Foi assim que um
+		// pedido de retirada saiu com "SmartEnvios" e o Tiny recusou o pedido
+		// inteiro com "Forma de envio não habilitada".
+		var (
+			formaEnvioID   int64
+			formaEnvioErr  error
+			formaEnvioName = ship.Carrier
+		)
+		if isStorePickup(ship.Carrier) {
+			logger.From(ctx, t.Logger).Info("tiny: retirada na loja, pedido segue sem forma de envio",
+				zap.String("carrier", ship.Carrier),
+			)
+		} else {
+			// Try to resolve the formaEnvio id, preferring the carrier name
+			// (Correios / Jadlog / etc.) and falling back to "SmartEnvios" so
+			// stores that cadastrou só o agregador também batem.
+			formaEnvioID, formaEnvioErr = t.lookupFormaEnvioID(ctx, ship.Carrier)
+			if formaEnvioErr == nil && formaEnvioID == 0 && ship.Carrier != "SmartEnvios" {
+				id, err := t.lookupFormaEnvioID(ctx, "SmartEnvios")
+				if err == nil && id > 0 {
+					formaEnvioID = id
+					formaEnvioName = "SmartEnvios"
+				}
 			}
 		}
 		switch {
@@ -1263,6 +1278,32 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
 	if err != nil {
 		return nil, fmt.Errorf("creating order: %w", err)
+	}
+
+	// Uma forma de envio recusada não pode custar o pedido.
+	//
+	// O vínculo com a transportadora depende de cadastro do lojista dentro do
+	// Tiny, e a listagem de /formas-envio devolve só id, nome e tipo — não há
+	// campo dizendo se ela está habilitada. Não dá para escolher certo na
+	// consulta; só o POST revela. Quando o Tiny recusa por causa desse campo,
+	// reenviamos sem ele: o pedido é registrado e o lojista corrige a forma de
+	// envio no Tiny. O contrário é o que aconteceu em produção — pedido pago,
+	// carrinho concluído e nada no ERP, que é o pior dos dois mundos.
+	if !providers.IsSuccessStatus(resp.StatusCode) && isFormaEnvioRejection(body) && dropFormaEnvio(payload) {
+		logger.From(ctx, t.Logger).Warn("tiny recusou a forma de envio; reenviando o pedido sem ela",
+			zap.String("external_id", order.ExternalID),
+			zap.Int("status", resp.StatusCode),
+			zap.String("detail", tinyErrorDetail(body)),
+		)
+		resp, body, err = t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
+		if err != nil {
+			return nil, fmt.Errorf("creating order without forma de envio: %w", err)
+		}
+		if providers.IsSuccessStatus(resp.StatusCode) {
+			logger.From(ctx, t.Logger).Warn("pedido registrado no Tiny sem forma de envio; ajustar no ERP",
+				zap.String("external_id", order.ExternalID),
+			)
+		}
 	}
 
 	if !providers.IsSuccessStatus(resp.StatusCode) {
@@ -1445,9 +1486,12 @@ func (t *Tiny) lookupFormaPagamentoID(ctx context.Context, method string) (int64
 			return item.ID, nil
 		}
 	}
-	if len(result.Itens) > 0 {
-		return result.Itens[0].ID, nil
-	}
+	// Sem o "pega o primeiro da lista" que existia aqui. O parâmetro `nome`
+	// não está na doc da v3 (a listagem documenta só limit/offset), então
+	// quando o Tiny o ignora a lista volta inteira e o primeiro item é uma
+	// forma de envio arbitrária — não a que o lojista usa. Vincular a
+	// transportadora errada é pior que não vincular nenhuma: sem o campo o
+	// Tiny aplica o padrão dele, com o campo errado o pedido é recusado.
 	return 0, nil
 }
 
@@ -1679,6 +1723,45 @@ func (t *Tiny) lookupFormaEnvioID(ctx context.Context, name string) (int64, erro
 		return result.Itens[0].ID, nil
 	}
 	return 0, nil
+}
+
+// isFormaEnvioRejection reports whether the Tiny rejection is about the
+// shipping method — and only about it. Retrying without the field only helps
+// when that field is the problem; a rejection over items or contact would come
+// back identical and we would have burned a second POST for nothing.
+func isFormaEnvioRejection(body []byte) bool {
+	return strings.Contains(strings.ToLower(tinyErrorDetail(body)), "formaenvio")
+}
+
+// dropFormaEnvio removes the shipping-method link from the payload, reporting
+// whether there was one to remove. The `transportador` block itself stays: it
+// still carries fretePorConta, and o valorFrete continua no pedido.
+func dropFormaEnvio(payload map[string]any) bool {
+	transportador, ok := payload["transportador"].(map[string]any)
+	if !ok {
+		return false
+	}
+	if _, ok := transportador["formaEnvio"]; !ok {
+		return false
+	}
+	delete(transportador, "formaEnvio")
+
+	// O lojista precisa saber por que o pedido entrou sem transportadora
+	// vinculada; sem isso o pedido chega no Tiny silenciosamente diferente do
+	// que foi vendido.
+	const aviso = "Forma de envio não vinculada: recusada pelo Tiny (verificar cadastro em Cadastros → Formas de envio)"
+	if atual, _ := payload["observacoesInternas"].(string); atual != "" {
+		payload["observacoesInternas"] = atual + " | " + aviso
+	} else {
+		payload["observacoesInternas"] = aviso
+	}
+	return true
+}
+
+// isStorePickup reports whether the chosen "shipping" is actually the buyer
+// picking the order up at the store.
+func isStorePickup(carrier string) bool {
+	return strings.EqualFold(strings.TrimSpace(carrier), providers.StorePickupCarrier)
 }
 
 // LaunchOrderStock decrements stock in Tiny for all items in the order.
