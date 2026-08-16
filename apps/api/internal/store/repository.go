@@ -251,6 +251,7 @@ func rowToEntity(row sqlc.Store) *storedomain.Store {
 		row.CartReserveStock,
 		row.AllowStorePickup,
 		int(row.CartMaxQuantityPerItem),
+		int(row.MinInstallmentCents),
 		row.CartAllowEdit,
 		checkoutMethods,
 		row.CartRealTime,
