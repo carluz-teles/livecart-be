@@ -463,7 +463,8 @@ func (r *Repository) toCartRow(row sqlc.GetCartByTokenWithDetailsRow) *CartRow {
 		StoreName:          row.StoreName,
 		StoreSlug:          row.StoreSlug,
 		AllowEdit:          row.AllowEdit,
-		MaxQuantityPerItem: int(row.MaxQuantityPerItem),
+		MaxQuantityPerItem:  int(row.MaxQuantityPerItem),
+		MinInstallmentCents: int(row.MinInstallmentCents),
 	}
 
 	if row.CheckoutUrl.Valid {

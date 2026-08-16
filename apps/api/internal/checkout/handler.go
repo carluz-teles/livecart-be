@@ -191,6 +191,7 @@ func (h *Handler) GetCheckoutConfig(c *fiber.Ctx) error {
 		PublicKey:        output.PublicKey,
 		AvailableMethods: output.AvailableMethods,
 		TotalAmount:      output.TotalAmount,
+		MaxInstallments:  output.MaxInstallments,
 		Currency:         output.Currency,
 	})
 }

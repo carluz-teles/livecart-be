@@ -119,6 +119,10 @@ const (
 	// posse — ver live.Repository.AllProductsBelongToStore.
 	CodeSessionProductNotOwned Code = "SESSION_PRODUCT_NOT_OWNED" // live/service.go (CreateSession)
 
+	// Parcelamento acima do que a loja permite para este valor. A lista da tela
+	// já vem limitada; este código cobre o POST que a ignora.
+	CodeInstallmentsAboveLimit Code = "INSTALLMENTS_ABOVE_LIMIT" // checkout/service.go (ProcessCardPayment)
+
 	CodeStockInsufficient Code = "STOCK_INSUFFICIENT" // erp/stock_service.go:213 ("estoque insuficiente para esse aumento")
 
 	// --- INSTAGRAM publishing (internal/integration/publish_schedule.go) ---

@@ -814,6 +814,8 @@ type Store struct {
 	AllowStorePickup                bool               `json:"allow_store_pickup"`
 	// Prazo do carrinho quando close_cart_on_event_end = FALSE. Default 10080 (7 dias). O ramo desligado NÃO é "sem prazo" — é um prazo maior, armado pelo mesmo cart.expire do ramo ligado.
 	CartExtendedExpirationMinutes int32 `json:"cart_extended_expiration_minutes"`
+	// Valor minimo de uma parcela no cartao, em centavos. 0 = sem minimo.
+	MinInstallmentCents int32 `json:"min_installment_cents"`
 }
 
 type StoreInvitation struct {

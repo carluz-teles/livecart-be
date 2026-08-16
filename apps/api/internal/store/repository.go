@@ -156,6 +156,7 @@ func (r *Repository) UpdateCartSettings(ctx context.Context, params UpdateCartSe
 		CartExpirationMinutes:         int32(params.ExpirationMinutes),
 		CartReserveStock:              params.ReserveStock,
 		AllowStorePickup:              params.AllowStorePickup,
+		MinInstallmentCents:           int32(params.MinInstallmentCents),
 		CartMaxQuantityPerItem:        int32(params.MaxQuantityPerItem),
 		CartAllowEdit:                 params.AllowEdit,
 		CartRealTime:                  params.RealTimeCart,

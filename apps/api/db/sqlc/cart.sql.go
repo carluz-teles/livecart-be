@@ -1151,7 +1151,12 @@ SELECT
     s.name AS store_name,
     s.logo_url AS store_logo_url,
     s.cart_allow_edit AS allow_edit,
-    s.cart_max_quantity_per_item AS max_quantity_per_item
+    s.cart_max_quantity_per_item AS max_quantity_per_item,
+    -- Parcela minima da loja: a regra de quantas parcelas cabem no total mora no
+    -- servidor (checkout.MaxInstallmentsFor), e ela precisa deste numero tanto
+    -- para montar a lista que o comprador ve quanto para recusar um POST que
+    -- peca mais parcelas do que a loja permite.
+    s.min_installment_cents AS min_installment_cents
 FROM carts c
 JOIN live_events le ON le.id = c.event_id
 JOIN stores s ON s.id = le.store_id
@@ -1187,6 +1192,7 @@ type GetCartByTokenWithDetailsRow struct {
 	StoreLogoUrl           pgtype.Text        `json:"store_logo_url"`
 	AllowEdit              bool               `json:"allow_edit"`
 	MaxQuantityPerItem     int32              `json:"max_quantity_per_item"`
+	MinInstallmentCents    int32              `json:"min_installment_cents"`
 }
 
 // =============================================================================
@@ -1225,6 +1231,7 @@ func (q *Queries) GetCartByTokenWithDetails(ctx context.Context, token string) (
 		&i.StoreLogoUrl,
 		&i.AllowEdit,
 		&i.MaxQuantityPerItem,
+		&i.MinInstallmentCents,
 	)
 	return i, err
 }
