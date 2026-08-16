@@ -788,6 +788,108 @@ func (p *Pagarme) GetPublicKey(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("public key not available. Please configure the Pagar.me public key")
 }
 
+// pagarmeOrderItems maps checkout items to Pagar.me's item payload and
+// reconciles their sum against the amount the buyer agreed to pay. Pagar.me
+// derives order.amount from sum(item.amount * quantity), so a shipping
+// surcharge or a coupon discount (both already baked into totalAmount) has to
+// be reflected in the items — but Pagar.me ALSO rejects any item with
+// amount < 1. A surcharge stays a single positive "Frete" line; a discount
+// can NOT be a negative "Desconto" line (that returned the 422
+// `items[1].amount must be greater than or equal to 1` on coupon orders), so
+// it is subtracted from the product lines themselves, spread one cent at a
+// time across units, keeping every amount >= 1 and sum(items) == totalAmount
+// exactly. Shared by the card and PIX flows so the invariant lives in one place.
+func pagarmeOrderItems(items []CheckoutItem, totalAmount int64) ([]map[string]any, error) {
+	var itemsSum int64
+	for _, it := range items {
+		itemsSum += it.UnitPrice * int64(it.Quantity)
+	}
+	diff := totalAmount - itemsSum
+
+	// No adjustment or a surcharge: keep product lines; add one positive
+	// "Frete" line when the total is above the subtotal (always >= 1).
+	if diff >= 0 {
+		out := make([]map[string]any, 0, len(items)+1)
+		for _, it := range items {
+			out = append(out, pagarmeItemMap(it.ID, it.Name, it.UnitPrice, it.Quantity))
+		}
+		if diff > 0 {
+			out = append(out, map[string]any{
+				"amount":      diff,
+				"description": "Frete",
+				"quantity":    1,
+				"code":        "checkout-adjustment",
+			})
+		}
+		return out, nil
+	}
+
+	// Discount: fold -diff cents into the product lines. Flatten to units,
+	// peel one cent at a time round-robin (even distribution, minimal price
+	// distortion, every unit stays >= 1), then regroup equal consecutive units
+	// back into quantity lines.
+	type unit struct {
+		code, desc string
+		amount     int64
+	}
+	units := make([]unit, 0)
+	for _, it := range items {
+		for i := 0; i < it.Quantity; i++ {
+			units = append(units, unit{it.ID, it.Name, it.UnitPrice})
+		}
+	}
+
+	remaining := -diff
+	for remaining > 0 {
+		progressed := false
+		for i := range units {
+			if remaining == 0 {
+				break
+			}
+			if units[i].amount > 1 {
+				units[i].amount--
+				remaining--
+				progressed = true
+			}
+		}
+		if !progressed {
+			break // every unit hit the 1-cent floor
+		}
+	}
+	if remaining > 0 {
+		return nil, fmt.Errorf("desconto de %d centavos excede o valor dos itens", -diff)
+	}
+
+	out := make([]map[string]any, 0, len(units))
+	codeSeen := map[string]int{}
+	for i := 0; i < len(units); {
+		j := i
+		for j < len(units) && units[j].code == units[i].code && units[j].amount == units[i].amount {
+			j++
+		}
+		// Keep the store's product code on the first line of each product;
+		// suffix any split remainder so Pagar.me never sees a duplicate code.
+		code := units[i].code
+		codeSeen[units[i].code]++
+		if n := codeSeen[units[i].code]; n > 1 {
+			code = fmt.Sprintf("%s-%d", units[i].code, n)
+		}
+		out = append(out, pagarmeItemMap(code, units[i].desc, units[i].amount, j-i))
+		i = j
+	}
+	return out, nil
+}
+
+// pagarmeItemMap builds a single Pagar.me order item.
+func pagarmeItemMap(code, desc string, amount int64, quantity int) map[string]any {
+	return map[string]any{
+		"amount":      amount,
+		"description": desc,
+		"quantity":    quantity,
+		"code":        code,
+	}
+}
+
 // ProcessCardPayment processes a payment with a tokenized card via the
 // Pagar.me v5 /orders endpoint. The X-Idempotency-Key is a fresh UUID per
 // call (not derived from cart+amount) so a retry after a rejected attempt
@@ -795,39 +897,9 @@ func (p *Pagarme) GetPublicKey(ctx context.Context) (string, error) {
 func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput) (*CardPaymentResult, error) {
 	url := pagarmeAPIBaseURL + "/orders"
 
-	items := make([]map[string]any, 0, len(input.Items)+1)
-	var itemsSum int64
-	for _, item := range input.Items {
-		items = append(items, map[string]any{
-			"amount":      item.UnitPrice,
-			"description": item.Name,
-			"quantity":    item.Quantity,
-			"code":        item.ID,
-		})
-		itemsSum += item.UnitPrice * int64(item.Quantity)
-	}
-	// Reconcile shipping/coupon: input.TotalAmount already factors in
-	// the selected shipping option and any applied coupon, but our items
-	// array carries only the product subtotals. Pagar.me's order.amount
-	// is derived as sum(items.amount * quantity); if we leave it equal
-	// to itemsSum the charge silently drops shipping (and the merchant
-	// undercharges) or, worse, the PSP-layer validator rejects the
-	// whole order with an opaque "validation_error | billing | value is
-	// required" when the sum doesn't match a payments[].amount we set
-	// elsewhere. Expressing the gap as a single line item keeps the
-	// invariant items_sum == order_amount and keeps the buyer charged
-	// for exactly what they agreed to at checkout.
-	if diff := input.TotalAmount - itemsSum; diff != 0 {
-		desc := "Frete"
-		if diff < 0 {
-			desc = "Desconto"
-		}
-		items = append(items, map[string]any{
-			"amount":      diff,
-			"description": desc,
-			"quantity":    1,
-			"code":        "checkout-adjustment",
-		})
+	items, err := pagarmeOrderItems(input.Items, input.TotalAmount)
+	if err != nil {
+		return nil, err
 	}
 
 	customer := buildPagarmeCustomer(input.Customer)
@@ -1144,33 +1216,9 @@ func (p *Pagarme) GeneratePixPayment(ctx context.Context, input PixPaymentInput)
 	}
 	expiresAt := time.Now().Add(expiresIn)
 
-	items := make([]map[string]any, 0, len(input.Items)+1)
-	var itemsSum int64
-	for _, item := range input.Items {
-		items = append(items, map[string]any{
-			"amount":      item.UnitPrice,
-			"description": item.Name,
-			"quantity":    item.Quantity,
-			"code":        item.ID,
-		})
-		itemsSum += item.UnitPrice * int64(item.Quantity)
-	}
-	// Same invariant as the card flow: Pagar.me derives order.amount from
-	// sum(items.amount * quantity). input.TotalAmount already includes
-	// shipping/coupon, so when it differs from itemsSum we expose the gap
-	// as a single line item — otherwise sum(items) won't match the charge
-	// amount the buyer agreed to.
-	if diff := input.TotalAmount - itemsSum; diff != 0 {
-		desc := "Frete"
-		if diff < 0 {
-			desc = "Desconto"
-		}
-		items = append(items, map[string]any{
-			"amount":      diff,
-			"description": desc,
-			"quantity":    1,
-			"code":        "checkout-adjustment",
-		})
+	items, err := pagarmeOrderItems(input.Items, input.TotalAmount)
+	if err != nil {
+		return nil, err
 	}
 
 	customer := buildPagarmeCustomer(input.Customer)
