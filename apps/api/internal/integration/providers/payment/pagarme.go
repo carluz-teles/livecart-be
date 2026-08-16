@@ -888,6 +888,19 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 		"payments":    []map[string]any{cardPayment},
 	}
 
+	// Enriquecimento do antifraude (campos no nível do pedido). O antifraude do
+	// próprio Pagar.me reprova transação que chega sem sinal de origem — um
+	// comprador novo, de IP/device desconhecido, pontua "high" mesmo numa
+	// compra de R$ 5 (ver antifraudReproved). O `ip` é capturado no servidor
+	// (sob nosso controle) e o `session_id` carrega o fingerprint que o FE
+	// coletou. Só enviamos quando presentes, para não sobrescrever com vazio.
+	if input.IPAddress != "" {
+		payload["ip"] = input.IPAddress
+	}
+	if input.DeviceID != "" {
+		payload["session_id"] = input.DeviceID
+	}
+
 	if input.Metadata != nil {
 		payload["metadata"] = input.Metadata
 	}

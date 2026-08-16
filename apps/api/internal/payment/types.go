@@ -105,6 +105,7 @@ type ProcessCardPaymentInput struct {
 	PaymentMethodID string
 	IssuerID        string
 	DeviceID        string
+	IPAddress       string
 	Metadata        map[string]any
 }
 

@@ -458,6 +458,7 @@ type ProcessCardPaymentInput struct {
 	PaymentMethodID  string
 	IssuerID         string
 	DeviceID         string
+	IPAddress        string
 	CustomerName     string
 	CustomerDocument string
 	CustomerPhone    string

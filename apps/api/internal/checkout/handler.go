@@ -2,6 +2,7 @@ package checkout
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -10,6 +11,20 @@ import (
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/storage"
 )
+
+// clientIP returns the buyer's real client IP for antifraud enrichment. The
+// app runs behind a proxy and Fiber is not configured with a trusted proxy, so
+// c.IP() yields the proxy hop, not the buyer. X-Forwarded-For is
+// "client, proxy1, proxy2, ..." — the leftmost entry is the origin client.
+// Falls back to c.IP() when the header is absent (e.g. local requests).
+func clientIP(c *fiber.Ctx) string {
+	if xff := c.Get("X-Forwarded-For"); xff != "" {
+		if first := strings.TrimSpace(strings.Split(xff, ",")[0]); first != "" {
+			return first
+		}
+	}
+	return c.IP()
+}
 
 // Handler handles HTTP requests for public checkout.
 type Handler struct {
@@ -221,6 +236,7 @@ func (h *Handler) ProcessCardPayment(c *fiber.Ctx) error {
 		PaymentMethodID:  req.PaymentMethodID,
 		IssuerID:         req.IssuerID,
 		DeviceID:         req.DeviceID,
+		IPAddress:        clientIP(c),
 		CustomerName:     req.CustomerName,
 		CustomerDocument: req.CustomerDocument,
 		CustomerPhone:    req.CustomerPhone,

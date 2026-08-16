@@ -849,6 +849,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		PaymentMethodID: input.PaymentMethodID,
 		IssuerID:        input.IssuerID,
 		DeviceID:        input.DeviceID,
+		IPAddress:       input.IPAddress,
 		Metadata: map[string]any{
 			"cart_id":    cart.ID,
 			"cart_token": cart.Token,

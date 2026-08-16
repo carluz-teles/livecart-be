@@ -258,6 +258,7 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		PaymentMethodID: input.PaymentMethodID,
 		IssuerID:        input.IssuerID,
 		DeviceID:        input.DeviceID,
+		IPAddress:       input.IPAddress,
 	})
 	if err != nil {
 		s.resolver.HandleProviderError(ctx, input.IntegrationID, "process_card_payment", err)

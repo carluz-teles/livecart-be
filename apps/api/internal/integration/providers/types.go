@@ -630,8 +630,17 @@ type CardPaymentInput struct {
 	// Metadata for additional context
 	Metadata map[string]any `json:"metadata,omitempty"`
 
-	// DeviceID for fraud prevention (optional, provider-specific)
+	// DeviceID for fraud prevention (optional, provider-specific).
+	// For Pagar.me this is forwarded as the order-level `session_id` (the
+	// device-fingerprint id their antifraud correlates against); for Mercado
+	// Pago it becomes the X-meli-session-id header.
 	DeviceID string `json:"device_id,omitempty"`
+
+	// IPAddress is the buyer's real client IP, captured server-side from the
+	// checkout request (X-Forwarded-For behind the proxy). Pagar.me's antifraud
+	// weighs it heavily — omitting it makes every transaction look like it
+	// comes from an unknown origin and inflates the risk score.
+	IPAddress string `json:"ip_address,omitempty"`
 
 	// PayerCost contains installment info from Mercado Pago SDK (optional)
 	PayerCost *PayerCostInfo `json:"payer_cost,omitempty"`
