@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/logger"
 	"livecart/apps/api/lib/ratelimit"
 )
@@ -973,6 +974,18 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 		payload["session_id"] = input.DeviceID
 	}
 
+	// Escape hatch: when the store's Pagar.me account has an antifraud régua
+	// that reproves legit sales as "high" (acquirer approves, Pagar.me
+	// antifraud reproves — confirmed on cantodaart with ip+session_id present),
+	// bypass antifraud for that store so card sales go through. Scoped per store
+	// via config so we don't strip protection from accounts that are fine;
+	// chargeback liability shifts to the merchant for listed stores. Temporary
+	// until the merchant's antifraud régua is fixed with Pagar.me.
+	antifraudDisabled := pagarmeAntifraudDisabledForStore(p.StoreID)
+	if antifraudDisabled {
+		payload["antifraud_enabled"] = false
+	}
+
 	if input.Metadata != nil {
 		payload["metadata"] = input.Metadata
 	}
@@ -1110,6 +1123,7 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 		zap.String("acquirer_return_code", acquirerReturnCode),
 		zap.Any("gateway_response", gatewayResp),
 		zap.Any("antifraud_response", antifraudResp),
+		zap.Bool("antifraud_disabled", antifraudDisabled),
 	}
 	// Log at Error level on rejection so the message + return code
 	// surface in error dashboards alongside the 5xx transport failures.
@@ -1521,6 +1535,24 @@ func antifraudReproved(antifraud map[string]any) bool {
 	}
 	status, _ := antifraud["status"].(string)
 	return strings.EqualFold(status, "reproved")
+}
+
+// pagarmeAntifraudDisabledForStore reports whether the given store is in the
+// PAGARME_ANTIFRAUD_DISABLED_STORES allowlist (comma-separated store IDs). When
+// it is, the card order is sent with antifraud_enabled=false to bypass an
+// account régua that reproves legit sales. Matching is exact on store id; blank
+// entries and surrounding whitespace are ignored.
+func pagarmeAntifraudDisabledForStore(storeID string) bool {
+	if storeID == "" {
+		return false
+	}
+	list := config.PagarmeAntifraudDisabledStores.String()
+	for _, id := range strings.Split(list, ",") {
+		if strings.TrimSpace(id) == storeID {
+			return true
+		}
+	}
+	return false
 }
 
 func getPagarmeStatusMessage(status string) string {

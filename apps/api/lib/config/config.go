@@ -36,6 +36,15 @@ const (
 	MercadoPagoAppSecret Key = "MERCADO_PAGO_APP_SECRET" // Mercado Pago OAuth App Secret
 	MercadoPagoTestMode  Key = "MERCADO_PAGO_TEST_MODE"  // Set to "true" to get TEST credentials via OAuth
 
+	// PagarmeAntifraudDisabledStores is a comma-separated allowlist of store IDs
+	// for which we send antifraud_enabled=false on Pagar.me card orders. Escape
+	// hatch for accounts whose antifraud régua reproves legit sales as "high"
+	// (acquirer approves, Pagar.me antifraud reproves) — scoped per store so we
+	// don't strip fraud protection from merchants whose accounts are fine.
+	// Flipping the list is a config/env change, not a code deploy. Chargeback
+	// liability shifts to the merchant for the listed stores.
+	PagarmeAntifraudDisabledStores Key = "PAGARME_ANTIFRAUD_DISABLED_STORES"
+
 	// Instagram/Meta Integration
 	InstagramVerifyToken Key = "INSTAGRAM_VERIFY_TOKEN" // Token for Meta webhook verification
 	InstagramAppID       Key = "INSTAGRAM_APP_ID"       // Instagram OAuth App ID (from Meta for Developers)
