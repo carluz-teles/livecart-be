@@ -19,6 +19,15 @@ type CartSettingsDTO struct {
 	ReserveStock        bool     `json:"reserveStock"`
 	AllowStorePickup    bool     `json:"allowStorePickup"`
 	MaxQuantityPerItem  int      `json:"maxQuantityPerItem"`
+	// MinInstallmentCents é o piso de uma parcela no cartão, em centavos.
+	//
+	// Zero = sem mínimo, que é o comportamento histórico: o checkout oferecia
+	// 1 a 12 fixo, dividindo o total. Numa venda de R$ 60 isso vira "12× de
+	// R$ 5,00" e o lojista paga a MDR de doze parcelas sobre sessenta reais.
+	//
+	// Vive na LOJA e não no evento porque é decisão comercial da operação, não
+	// de uma venda específica.
+	MinInstallmentCents int      `json:"minInstallmentCents"`
 	AllowEdit           bool     `json:"allowEdit"`
 	CheckoutSendMethods []string `json:"checkoutSendMethods"`
 	// Automatic message settings
@@ -161,6 +170,15 @@ type UpdateCartSettingsRequest struct {
 	ReserveStock        bool     `json:"reserveStock"`
 	AllowStorePickup    bool     `json:"allowStorePickup"`
 	MaxQuantityPerItem  int      `json:"maxQuantityPerItem"`
+	// MinInstallmentCents é o piso de uma parcela no cartão, em centavos.
+	//
+	// Zero = sem mínimo, que é o comportamento histórico: o checkout oferecia
+	// 1 a 12 fixo, dividindo o total. Numa venda de R$ 60 isso vira "12× de
+	// R$ 5,00" e o lojista paga a MDR de doze parcelas sobre sessenta reais.
+	//
+	// Vive na LOJA e não no evento porque é decisão comercial da operação, não
+	// de uma venda específica.
+	MinInstallmentCents int      `json:"minInstallmentCents"`
 	AllowEdit           bool     `json:"allowEdit"`
 	CheckoutSendMethods []string `json:"checkoutSendMethods"`
 	// Automatic message settings
@@ -185,6 +203,9 @@ func (r UpdateCartSettingsRequest) Validate() error {
 		// no banco como 500 em vez de 422 com a mensagem de campo.
 		validation.Field(&r.ExpirationMinutes, validation.Required, validation.Min(15), validation.Max(1440)),
 		validation.Field(&r.MaxQuantityPerItem, validation.Required, validation.Min(1)),
+		// Sem Required de propósito: zero É o valor válido para "sem mínimo", e
+		// Required trataria o zero como vazio e recusaria justamente o padrão.
+		validation.Field(&r.MinInstallmentCents, validation.Min(0)),
 		validation.Field(&r.MessageCooldownSeconds, validation.Min(0), validation.Max(300)),
 		// Only meaningful when the reminder toggle is on; required only then.
 		validation.Field(&r.ExpirationReminderMinutes,
@@ -201,6 +222,7 @@ func (r UpdateCartSettingsRequest) ToInput(storeID string) UpdateCartSettingsInp
 		ReserveStock:              r.ReserveStock,
 		AllowStorePickup:          r.AllowStorePickup,
 		MaxQuantityPerItem:        r.MaxQuantityPerItem,
+		MinInstallmentCents:       r.MinInstallmentCents,
 		AllowEdit:                 r.AllowEdit,
 		CheckoutSendMethods:       r.CheckoutSendMethods,
 		RealTimeCart:              r.RealTimeCart,
@@ -352,6 +374,7 @@ type UpdateCartSettingsInput struct {
 	ReserveStock        bool
 	AllowStorePickup    bool
 	MaxQuantityPerItem  int
+	MinInstallmentCents int
 	AllowEdit           bool
 	CheckoutSendMethods []string
 	// Automatic message settings
@@ -408,6 +431,7 @@ type UpdateCartSettingsParams struct {
 	ReserveStock        bool
 	AllowStorePickup    bool
 	MaxQuantityPerItem  int
+	MinInstallmentCents int
 	AllowEdit           bool
 	CheckoutSendMethods []string
 	// Automatic message settings

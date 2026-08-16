@@ -238,6 +238,9 @@ type GetCheckoutConfigResponse struct {
 	AvailableMethods []string `json:"availableMethods"`
 	TotalAmount      int64    `json:"totalAmount"`
 	Currency         string   `json:"currency"`
+	// MaxInstallments é quantas parcelas este carrinho aceita, já com o mínimo
+	// por parcela da loja aplicado. A tela oferece exatamente até aqui.
+	MaxInstallments int `json:"maxInstallments"`
 }
 
 // ProcessCardPaymentRequest is the request for POST /api/public/checkout/:token/card
@@ -375,6 +378,9 @@ type CartDetails struct {
 	StoreLogoURL            *string
 	AllowEdit               bool
 	MaxQuantityPerItem      int
+	// MinInstallmentCents é o piso de uma parcela no cartão, em centavos.
+	// 0 = sem mínimo.
+	MinInstallmentCents     int
 	Shipping                *CartShippingSelection
 	// Set by the service when Customer / ShippingAddress on this output came
 	// from the buyer's prior paid cart (returning-buyer prefill) rather than
@@ -433,6 +439,14 @@ type GetCheckoutConfigOutput struct {
 	AvailableMethods []string
 	TotalAmount      int64
 	Currency         string
+	// MaxInstallments é quantas parcelas ESTE carrinho aceita, já considerando o
+	// mínimo por parcela configurado pela loja.
+	//
+	// Calculado aqui e não no navegador: a mesma regra decide o que a tela
+	// oferece e o que o servidor aceita, e duplicá-la seria assinar que as duas
+	// vão divergir. O Mercado Pago tem a lista dele (payer_costs, vinda da conta
+	// do lojista); este número é o teto que vale para os dois.
+	MaxInstallments int
 }
 
 // ProcessCardPaymentInput is the input for ProcessCardPayment service method
@@ -661,6 +675,9 @@ type CartRow struct {
 	StoreLogoURL            *string
 	AllowEdit               bool
 	MaxQuantityPerItem      int
+	// MinInstallmentCents é o piso de uma parcela no cartão, em centavos.
+	// 0 = sem mínimo.
+	MinInstallmentCents     int
 	Shipping                *CartShippingSelection
 	// Coupon snapshot. CouponID/CouponCode are nil when no coupon is applied;
 	// CouponDiscountCents is the absolute discount in cents and is 0 when none.

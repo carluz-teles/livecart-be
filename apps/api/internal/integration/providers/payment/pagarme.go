@@ -994,6 +994,21 @@ func (p *Pagarme) ProcessCardPayment(ctx context.Context, input CardPaymentInput
 	}
 	result.StatusDetail = statusDetail
 
+	// Quando o ANTIFRAUDE reprova, a mensagem tem de dizer isso.
+	//
+	// Em 16/08/2026 uma venda de R$ 4,90 foi recusada três vezes seguidas com
+	// `acquirer_return_code: "0000"` e `acquirer_message: "Transação aprovada com
+	// sucesso"` — o banco autorizou, e o antifraude do Pagar.me reprovou
+	// (score high, status reproved). O comprador lia "verifique os dados do
+	// cartão", conferia, e tentava de novo: o cartão estava certo, e nenhuma
+	// tentativa ia passar.
+	//
+	// Trocar de cartão também não resolve — o antifraude pontua a transação, não
+	// o plástico. O caminho que funciona é outro meio de pagamento.
+	if antifraudReproved(antifraudResp) {
+		result.Message = "Não conseguimos concluir o pagamento no cartão. Tente pagar com Pix."
+	}
+
 	logFields := []zap.Field{
 		zap.String("payment_id", result.PaymentID),
 		zap.String("cart_id", input.CartID),
@@ -1435,6 +1450,18 @@ func (p *Pagarme) GetPaymentMethods(ctx context.Context) ([]string, error) {
 }
 
 // getPagarmeStatusMessage returns a user-friendly message for a payment status.
+// antifraudReproved diz se a recusa veio do antifraude, e não do banco.
+//
+// A distinção importa porque muda o conselho ao comprador: recusa do emissor
+// pede outro cartão, reprovação de antifraude pede outro MEIO de pagamento.
+func antifraudReproved(antifraud map[string]any) bool {
+	if antifraud == nil {
+		return false
+	}
+	status, _ := antifraud["status"].(string)
+	return strings.EqualFold(status, "reproved")
+}
+
 func getPagarmeStatusMessage(status string) string {
 	switch status {
 	case "paid":

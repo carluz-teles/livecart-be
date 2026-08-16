@@ -630,6 +630,7 @@ func (s *Service) GetCheckoutConfig(ctx context.Context, input GetCheckoutConfig
 		AvailableMethods: methods,
 		TotalAmount:      totalAmount,
 		Currency:         "BRL",
+		MaxInstallments:  MaxInstallmentsFor(totalAmount, cart.MinInstallmentCents),
 	}, nil
 }
 
@@ -790,6 +791,19 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 		totalAmount += shippingSel.CostCents
 	}
 	totalAmount = applyCouponDiscount(totalAmount, cart.CouponDiscountCents)
+
+	// O parcelamento pedido tem de caber na regra da loja.
+	//
+	// A lista que o comprador vê já vem limitada pelo GetCheckoutConfig, mas ela
+	// é do navegador: um POST direto com `installments: 12` numa venda de R$ 4,90
+	// passaria pela validação da borda (min=1,max=12) e faria o lojista pagar a
+	// MDR de doze parcelas sobre cinco reais. A regra é a mesma função dos dois
+	// lados, para a tela e o servidor nunca discordarem.
+	if max := MaxInstallmentsFor(totalAmount, cart.MinInstallmentCents); input.Installments > max {
+		return nil, httpx.DomainError(422, httpx.CodeInstallmentsAboveLimit,
+			fmt.Sprintf("esta compra aceita no máximo %d parcela(s)", max))
+	}
+
 
 	// Use the integration the cart was bound to during GetCheckoutConfig so
 	// card tokens reach the gateway that issued the public key on the FE.

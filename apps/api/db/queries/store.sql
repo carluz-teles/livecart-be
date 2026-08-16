@@ -51,6 +51,7 @@ SET
   cart_send_expiration_reminder = $11,
   cart_expiration_reminder_minutes = $12,
   allow_store_pickup = $13,
+  min_installment_cents = $14,
   updated_at = now()
 WHERE id = $1
 RETURNING *;
