@@ -287,7 +287,7 @@ func (p *Pagarme) CreateWebhookTestOrder(ctx context.Context, code string) (*Web
 			"email":         "webhook-test@livecart.com.br",
 			"type":          "individual",
 			"document":      "01234567890",
-			"document_type": "cpf",
+			"document_type": "CPF",
 			"phones": map[string]any{
 				"mobile_phone": map[string]any{
 					"country_code": "55",
@@ -1341,7 +1341,14 @@ func buildPagarmeCustomer(c CheckoutCustomer) map[string]any {
 	}
 	if c.Document != "" {
 		customer["document"] = c.Document
-		customer["document_type"] = "cpf"
+		// Maiúsculas e derivado do tamanho, não fixo em "cpf".
+		//
+		// A doc lista "CPF", "CNPJ" e "PASSPORT" — em caixa alta — e o valor
+		// estava cravado em minúsculo, além de chamar de CPF qualquer documento.
+		// Um CNPJ rotulado como CPF é documento que não valida no formato
+		// declarado, e o antifraude usa isso: dado que não bate é sinal de
+		// risco, não de erro de digitação.
+		customer["document_type"] = pagarmeDocumentType(c.Document)
 	}
 	if c.Phone != "" {
 		customer["phones"] = map[string]any{
@@ -1366,6 +1373,28 @@ func buildPagarmeCustomer(c CheckoutCustomer) map[string]any {
 		customer["address"] = address
 	}
 	return customer
+}
+
+// pagarmeDocumentType classifica o documento pelo tamanho.
+//
+// Só existem três valores aceitos, e eles são em CAIXA ALTA. CPF tem 11 dígitos
+// e CNPJ 14; qualquer outra coisa é passaporte, que é o único dos três sem
+// formato numérico fixo.
+func pagarmeDocumentType(document string) string {
+	digitos := 0
+	for _, r := range document {
+		if r >= '0' && r <= '9' {
+			digitos++
+		}
+	}
+	switch digitos {
+	case 11:
+		return "CPF"
+	case 14:
+		return "CNPJ"
+	default:
+		return "PASSPORT"
+	}
 }
 
 // buildPagarmeLine1 assembles the Pagar.me line_1 field (free-form street
