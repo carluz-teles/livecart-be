@@ -1105,11 +1105,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 			formaEnvioErr  error
 			formaEnvioName = ship.Carrier
 		)
-		if isStorePickup(ship.Carrier) {
-			logger.From(ctx, t.Logger).Info("tiny: retirada na loja, pedido segue sem forma de envio",
-				zap.String("carrier", ship.Carrier),
-			)
-		} else {
+		if !isStorePickup(ship.Carrier) {
 			// Try to resolve the formaEnvio id, preferring the carrier name
 			// (Correios / Jadlog / etc.) and falling back to "SmartEnvios" so
 			// stores that cadastrou só o agregador também batem.
@@ -1122,7 +1118,17 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 				}
 			}
 		}
+		// UM lugar decide a mensagem. Quando a retirada só pulava a consulta lá
+		// em cima, ela desembocava no `default` e saía como WARN dizendo que a
+		// busca não achou nada — afirmando uma consulta que nunca houve, num
+		// caso perfeitamente normal. Todo pedido de retirada gerava esse aviso
+		// falso, e quem fosse investigar procuraria um problema de transportadora
+		// que não existe.
 		switch {
+		case isStorePickup(ship.Carrier):
+			logger.From(ctx, t.Logger).Info("tiny: retirada na loja, pedido segue sem forma de envio",
+				zap.String("carrier", ship.Carrier),
+			)
 		case formaEnvioErr != nil:
 			logger.From(ctx, t.Logger).Warn("tiny formaEnvio lookup failed, sending order without it",
 				zap.String("carrier", ship.Carrier),
