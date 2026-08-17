@@ -68,8 +68,13 @@ func (f *tinyFake) chamou(rota string) bool {
 	return false
 }
 
+// pedidoPago é a venda fechada pelo gateway: aprova E lança o financeiro. A
+// aprovação passou a viajar em `Approve` — antes era inferida da presença do
+// bloco de pagamento, e essa inferência quebrava o pagamento recebido por fora,
+// que fecha a venda sem trazer financeiro.
 func pedidoPago() ERPOrder {
 	return ERPOrder{
+		Approve:     true,
 		ExternalID:  "c1ec50cc-940b-46d6-bf41-d1336d9f9d35",
 		ContactID:   "809820176",
 		TotalAmount: 12650,

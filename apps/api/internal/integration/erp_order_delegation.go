@@ -133,7 +133,8 @@ func (s *Service) CreateFinalERPOrderForConversion(ctx context.Context, provider
 	if err != nil {
 		return fmt.Errorf("loading cart for conversion: %w", err)
 	}
-	return s.createFinalERPOrder(ctx, provider, integrationRowFromERP(integration), storeID, cart.EventID, *cart, nil, false)
+	// Conversão PRÉ-pagamento: segura a grade, mas a venda ainda não aconteceu.
+	return s.createFinalERPOrder(ctx, provider, integrationRowFromERP(integration), storeID, cart.EventID, *cart, nil, false, false)
 }
 
 // CreateFinalERPOrder carrega o cart (CartRow segue integration-owned) e reusa
@@ -145,7 +146,9 @@ func (s *Service) CreateFinalERPOrder(ctx context.Context, provider providers.ER
 	if err != nil {
 		return fmt.Errorf("loading cart for ERP order: %w", err)
 	}
-	return s.createFinalERPOrder(ctx, provider, integrationRowFromERP(integration), storeID, cart.EventID, *cart, status, launchStock)
+	// Caminho PAGO: aprova sempre. `status` decide só se vai financeiro junto —
+	// nil é o pagamento recebido por fora, que o lojista lança no ERP.
+	return s.createFinalERPOrder(ctx, provider, integrationRowFromERP(integration), storeID, cart.EventID, *cart, status, launchStock, true)
 }
 
 // FinalisationInverted reporta se a loja finaliza em ordem invertida

@@ -795,10 +795,26 @@ type ERPOrder struct {
 	// by the customer and the freight value so the ERP records the shipment.
 	Shipping *ERPOrderShipping `json:"shipping,omitempty"`
 
-	// Payment, when set, flags the order as already paid: the provider fills
-	// parcelas with dataPagamento, records the payment method/ID and approves
-	// the order in the ERP.
+	// Payment, when set, carries the FINANCIAL entry: the provider fills
+	// parcelas with dataPagamento and records the payment method/ID in the ERP.
+	//
+	// Absent does NOT mean unpaid — see Approve. A sale paid outside LiveCart is
+	// paid, but its receivable is entered by the merchant in the ERP, with the
+	// form the money actually arrived in.
 	Payment *ERPOrderPayment `json:"payment,omitempty"`
+
+	// Approve asks the provider to leave the order APPROVED (Tiny situação 3)
+	// instead of open.
+	//
+	// Separate from Payment on purpose. Approval answers "is this sale closed?";
+	// Payment answers "who records the receivable?". They travelled together
+	// while every payment came from the gateway, and using one to decide the
+	// other left a manually-paid order sitting as "Em aberto" for the merchant
+	// to approve by hand — the same state the failed orders of 16/08 ended in.
+	//
+	// False on the pre-payment conversion: that order exists to hold the grid,
+	// and approving it would register a sale nobody paid for.
+	Approve bool `json:"approve,omitempty"`
 }
 
 // StorePickupCarrier is the Carrier the checkout writes when the buyer chose
