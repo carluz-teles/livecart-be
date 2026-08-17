@@ -243,20 +243,21 @@ func (s *Service) GetByID(ctx context.Context, id string, storeID string) (*Orde
 	for i, item := range itemRows {
 		itemTotal := item.UnitPrice * int64(item.Quantity)
 		items[i] = OrderItemOutput{
-			ID:            item.ID,
-			ProductID:     item.ProductID,
-			ProductName:   item.ProductName,
-			ProductImage:  item.ProductImage,
-			Keyword:       item.ProductKeyword,
-			Size:          item.Size,
-			Quantity:      item.Quantity,
-			UnitPrice:     item.UnitPrice,
-			TotalPrice:    itemTotal,
-			WeightGrams:   item.WeightGrams,
-			HeightCm:      item.HeightCm,
-			WidthCm:       item.WidthCm,
-			LengthCm:      item.LengthCm,
-			PackageFormat: item.PackageFormat,
+			ID:                 item.ID,
+			ProductID:          item.ProductID,
+			ProductName:        item.ProductName,
+			ProductImage:       item.ProductImage,
+			Keyword:            item.ProductKeyword,
+			Size:               item.Size,
+			Quantity:           item.Quantity,
+			UnitPrice:          item.UnitPrice,
+			TotalPrice:         itemTotal,
+			WaitlistedQuantity: item.WaitlistedQuantity,
+			WeightGrams:        item.WeightGrams,
+			HeightCm:           item.HeightCm,
+			WidthCm:            item.WidthCm,
+			LengthCm:           item.LengthCm,
+			PackageFormat:      item.PackageFormat,
 		}
 		totalAmount += itemTotal
 		totalItems += item.Quantity
@@ -313,10 +314,37 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 		}
 	}
 
+	// Fila de espera do carrinho: produtos que a cliente pediu e a loja não
+	// tinha. Best-effort — a fila é informação adicional, e perdê-la não pode
+	// impedir o lojista de abrir o pedido.
+	waitlist, err := s.repo.ListActiveWaitlist(ctx, id)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("failed to load waitlist for order detail",
+			zap.String("order_id", id), zap.Error(err))
+		waitlist = []OrderWaitlistItemOutput{}
+	}
+
+	// Separa o que a cliente pode pagar do que está em fila. Uma passada só
+	// pelos itens: quantity é o total pedido, waitlisted é a parcela sem
+	// estoque, e as duas somas juntas fecham em TotalAmount.
+	var payable, waitlisted int64
+	for _, item := range orderOutput.Items {
+		disponivel := item.Quantity - item.WaitlistedQuantity
+		if disponivel > 0 {
+			payable += item.UnitPrice * int64(disponivel)
+		}
+		if item.WaitlistedQuantity > 0 {
+			waitlisted += item.UnitPrice * int64(item.WaitlistedQuantity)
+		}
+	}
+
 	out := &OrderDetailOutput{
 		OrderOutput:            *orderOutput,
 		Token:                  row.Token,
 		Comments:               comments,
+		Waitlist:               waitlist,
+		PayableAmount:          payable,
+		WaitlistedAmount:       waitlisted,
 		CancellationRevertedAt: row.CancellationRevertedAt,
 	}
 

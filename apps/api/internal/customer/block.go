@@ -324,6 +324,9 @@ func (h *Handler) RegisterBlockRoutes(group fiber.Router) {
 	group.Post("/blocks", h.Block)
 	group.Get("/blocks", h.ListBlocked)
 	group.Delete("/blocks/:handle", h.Unblock)
+	// Busca na plateia da loja (live_comments), não em `customers`: é onde está
+	// quem só comentou. Alimenta a tela de perfis bloqueados.
+	group.Get("/handles", h.SearchHandles)
 }
 
 // Block godoc
