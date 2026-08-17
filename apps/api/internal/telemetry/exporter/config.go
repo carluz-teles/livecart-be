@@ -13,15 +13,23 @@ type Config struct {
 	// Enabled is false when APIKey is empty (local dev / tests without a New
 	// Relic account configured). Every exporter call site must no-op when false.
 	Enabled bool
+	// Environment is config.Environment() ("development"/"staging"/"production"/
+	// "test"), resolved once here and propagated onto every payload — staging
+	// and production share the same New Relic account and dashboard, so every
+	// custom event must self-identify to be filterable. Doesn't change at
+	// runtime, hence resolved once at construction rather than re-read per
+	// event.
+	Environment string
 }
 
-// NewConfig builds a Config from the license key and account id. Enabled is
-// derived from licenseKey being non-empty — mirrors telemetry.Init's
-// cfg.Endpoint == "" check for OTEL.
-func NewConfig(licenseKey, accountID string) Config {
+// NewConfig builds a Config from the license key, account id and environment.
+// Enabled is derived from licenseKey being non-empty — mirrors
+// telemetry.Init's cfg.Endpoint == "" check for OTEL.
+func NewConfig(licenseKey, accountID, environment string) Config {
 	return Config{
-		APIKey:    licenseKey,
-		AccountID: accountID,
-		Enabled:   licenseKey != "",
+		APIKey:      licenseKey,
+		AccountID:   accountID,
+		Enabled:     licenseKey != "",
+		Environment: environment,
 	}
 }

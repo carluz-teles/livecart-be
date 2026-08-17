@@ -157,7 +157,7 @@ func (l *Listeners) OnCartPaid(ctx context.Context, env events.Envelope) {
 	ts := occurredAtMillis(env)
 	provider := string(env.Source)
 
-	cart := NewLiveCommerceCartPayload()
+	cart := NewLiveCommerceCartPayload(l.cfg.Environment)
 	cart.LiveEventID = env.LiveEventID
 	cart.StoreID = p.StoreID
 	cart.CartID = p.CartID
@@ -175,7 +175,7 @@ func (l *Listeners) OnCartPaid(ctx context.Context, env events.Envelope) {
 	}
 	l.send(ctx, env, cart)
 
-	payment := NewLiveCommercePaymentPayload()
+	payment := NewLiveCommercePaymentPayload(l.cfg.Environment)
 	payment.LiveEventID = env.LiveEventID
 	payment.StoreID = p.StoreID
 	payment.CartID = p.CartID
@@ -188,7 +188,7 @@ func (l *Listeners) OnCartPaid(ctx context.Context, env events.Envelope) {
 	l.send(ctx, env, payment)
 
 	if l.enricher != nil {
-		for _, item := range l.enricher.CartItemBreakdown(ctx, p.CartID, env.LiveEventID, p.StoreID, ts) {
+		for _, item := range l.enricher.CartItemBreakdown(ctx, p.CartID, env.LiveEventID, p.StoreID, l.cfg.Environment, ts) {
 			l.send(ctx, env, item)
 		}
 	}
@@ -208,7 +208,7 @@ func (l *Listeners) OnPaymentFailed(ctx context.Context, env events.Envelope) {
 	if !l.decode(ctx, env, &p) {
 		return
 	}
-	payment := NewLiveCommercePaymentPayload()
+	payment := NewLiveCommercePaymentPayload(l.cfg.Environment)
 	payment.LiveEventID = env.LiveEventID
 	payment.StoreID = p.StoreID
 	payment.CartID = p.CartID
@@ -231,7 +231,7 @@ func (l *Listeners) OnCartCheckoutArmed(ctx context.Context, env events.Envelope
 	if !l.decode(ctx, env, &p) {
 		return
 	}
-	cart := NewLiveCommerceCartPayload()
+	cart := NewLiveCommerceCartPayload(l.cfg.Environment)
 	cart.LiveEventID = env.LiveEventID
 	cart.CartID = p.CartID
 	cart.Status = "checkout_armed"
@@ -250,7 +250,7 @@ func (l *Listeners) OnCartExpired(ctx context.Context, env events.Envelope) {
 	if !l.decode(ctx, env, &p) {
 		return
 	}
-	cart := NewLiveCommerceCartPayload()
+	cart := NewLiveCommerceCartPayload(l.cfg.Environment)
 	cart.LiveEventID = env.LiveEventID
 	cart.StoreID = p.StoreID
 	cart.CartID = p.CartID
@@ -272,7 +272,7 @@ func (l *Listeners) OnCartCancelled(ctx context.Context, env events.Envelope) {
 	if !l.decode(ctx, env, &p) {
 		return
 	}
-	cart := NewLiveCommerceCartPayload()
+	cart := NewLiveCommerceCartPayload(l.cfg.Environment)
 	cart.LiveEventID = env.LiveEventID
 	cart.StoreID = p.StoreID
 	cart.CartID = p.CartID
@@ -302,7 +302,7 @@ func (l *Listeners) OnCartRefunded(ctx context.Context, env events.Envelope) {
 	ts := occurredAtMillis(env)
 	provider := string(env.Source)
 
-	cart := NewLiveCommerceCartPayload()
+	cart := NewLiveCommerceCartPayload(l.cfg.Environment)
 	cart.LiveEventID = env.LiveEventID
 	cart.StoreID = p.StoreID
 	cart.CartID = p.CartID
@@ -313,7 +313,7 @@ func (l *Listeners) OnCartRefunded(ctx context.Context, env events.Envelope) {
 	cart.Timestamp = ts
 	l.send(ctx, env, cart)
 
-	payment := NewLiveCommercePaymentPayload()
+	payment := NewLiveCommercePaymentPayload(l.cfg.Environment)
 	payment.LiveEventID = env.LiveEventID
 	payment.StoreID = p.StoreID
 	payment.CartID = p.CartID
@@ -344,7 +344,7 @@ func (l *Listeners) OnGMVRecorded(ctx context.Context, env events.Envelope) {
 	if !l.decode(ctx, env, &p) {
 		return
 	}
-	payment := NewLiveCommercePaymentPayload()
+	payment := NewLiveCommercePaymentPayload(l.cfg.Environment)
 	payment.LiveEventID = env.LiveEventID
 	payment.StoreID = p.StoreID
 	payment.CartID = p.CartID
@@ -374,7 +374,7 @@ func (l *Listeners) OnGMVRefunded(ctx context.Context, env events.Envelope) {
 	if !l.decode(ctx, env, &p) {
 		return
 	}
-	payment := NewLiveCommercePaymentPayload()
+	payment := NewLiveCommercePaymentPayload(l.cfg.Environment)
 	payment.LiveEventID = env.LiveEventID
 	payment.StoreID = p.StoreID
 	payment.CartID = p.CartID
@@ -432,7 +432,7 @@ func (l *Listeners) OnCommentReceived(ctx context.Context, env events.Envelope) 
 		return
 	}
 
-	p := NewLiveCommerceCommentPayload()
+	p := NewLiveCommerceCommentPayload(l.cfg.Environment)
 	p.LiveEventID = correlation.LiveEventID
 	p.StoreID = correlation.StoreID
 	p.SessionID = correlation.SessionID
@@ -451,7 +451,7 @@ func (l *Listeners) OnCommentReceived(ctx context.Context, env events.Envelope) 
 // sendLifecycleEvent builds and sends a LiveCommerceEvent payload — shared by
 // the four event/session lifecycle handlers.
 func (l *Listeners) sendLifecycleEvent(ctx context.Context, env events.Envelope, storeID, sessionID, platform, action string) {
-	p := NewLiveCommerceEventPayload()
+	p := NewLiveCommerceEventPayload(l.cfg.Environment)
 	p.LiveEventID = env.LiveEventID
 	p.StoreID = storeID
 	p.SessionID = sessionID

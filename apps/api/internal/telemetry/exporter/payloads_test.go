@@ -15,40 +15,65 @@ func boolPtr(b bool) *bool {
 func TestNewLiveCommerceCartPayload(t *testing.T) {
 	t.Parallel()
 
-	got := NewLiveCommerceCartPayload()
+	got := NewLiveCommerceCartPayload("staging")
 
 	if got.EventType != eventTypeLiveCommerceCart {
 		t.Errorf("EventType = %q, want %q", got.EventType, eventTypeLiveCommerceCart)
+	}
+	if got.Environment != "staging" {
+		t.Errorf("Environment = %q, want %q", got.Environment, "staging")
 	}
 }
 
 func TestNewLiveCommercePaymentPayload(t *testing.T) {
 	t.Parallel()
 
-	got := NewLiveCommercePaymentPayload()
+	got := NewLiveCommercePaymentPayload("staging")
 
 	if got.EventType != eventTypeLiveCommercePayment {
 		t.Errorf("EventType = %q, want %q", got.EventType, eventTypeLiveCommercePayment)
+	}
+	if got.Environment != "staging" {
+		t.Errorf("Environment = %q, want %q", got.Environment, "staging")
 	}
 }
 
 func TestNewLiveCommerceEventPayload(t *testing.T) {
 	t.Parallel()
 
-	got := NewLiveCommerceEventPayload()
+	got := NewLiveCommerceEventPayload("staging")
 
 	if got.EventType != eventTypeLiveCommerceEvent {
 		t.Errorf("EventType = %q, want %q", got.EventType, eventTypeLiveCommerceEvent)
+	}
+	if got.Environment != "staging" {
+		t.Errorf("Environment = %q, want %q", got.Environment, "staging")
 	}
 }
 
 func TestNewLiveCommerceCartItemPayload(t *testing.T) {
 	t.Parallel()
 
-	got := NewLiveCommerceCartItemPayload()
+	got := NewLiveCommerceCartItemPayload("staging")
 
 	if got.EventType != eventTypeLiveCommerceCartItem {
 		t.Errorf("EventType = %q, want %q", got.EventType, eventTypeLiveCommerceCartItem)
+	}
+	if got.Environment != "staging" {
+		t.Errorf("Environment = %q, want %q", got.Environment, "staging")
+	}
+}
+
+func TestNewLiveCommerceCommentPayload(t *testing.T) {
+	t.Parallel()
+
+	got := NewLiveCommerceCommentPayload("staging")
+
+	if got.EventType != eventTypeLiveCommerceComment {
+		t.Errorf("EventType = %q, want %q", got.EventType, eventTypeLiveCommerceComment)
+	}
+	if got.Environment != "staging" {
+		t.Errorf("Environment = %q, want %q", got.Environment, "staging")
 	}
 }
 
@@ -61,7 +86,7 @@ func TestNewLiveCommerceCartItemPayload(t *testing.T) {
 func TestLiveCommercePaymentPayload_BillableFalseIsSerialized(t *testing.T) {
 	t.Parallel()
 
-	payload := NewLiveCommercePaymentPayload()
+	payload := NewLiveCommercePaymentPayload("staging")
 	payload.Billable = boolPtr(false)
 
 	raw, err := json.Marshal(payload)
@@ -81,7 +106,7 @@ func TestLiveCommercePaymentPayload_BillableFalseIsSerialized(t *testing.T) {
 func TestLiveCommercePaymentPayload_BillableNilIsOmitted(t *testing.T) {
 	t.Parallel()
 
-	payload := NewLiveCommercePaymentPayload()
+	payload := NewLiveCommercePaymentPayload("staging")
 
 	raw, err := json.Marshal(payload)
 	if err != nil {

@@ -25,7 +25,7 @@ func TestNRClient_SendEvent(t *testing.T) {
 
 		client := newTestNRClient(t, srv.URL, "license-key")
 
-		event := NewLiveCommerceEventPayload()
+		event := NewLiveCommerceEventPayload("staging")
 		event.LiveEventID = "live-1"
 		event.Action = "created"
 
@@ -60,7 +60,7 @@ func TestNRClient_SendEvent(t *testing.T) {
 
 		client := newTestNRClient(t, srv.URL, "bad-key")
 
-		err := client.SendEvent(t.Context(), NewLiveCommerceEventPayload())
+		err := client.SendEvent(t.Context(), NewLiveCommerceEventPayload("staging"))
 		if err == nil {
 			t.Fatal("SendEvent() error = nil, want non-nil")
 		}
@@ -81,7 +81,7 @@ func TestNRClient_SendEvent(t *testing.T) {
 
 		client := newTestNRClient(t, srv.URL, "license-key")
 
-		err := client.SendEvent(t.Context(), NewLiveCommerceEventPayload())
+		err := client.SendEvent(t.Context(), NewLiveCommerceEventPayload("staging"))
 		if err == nil {
 			t.Fatal("SendEvent() error = nil, want non-nil")
 		}
@@ -106,7 +106,7 @@ func TestNRClient_SendEvent(t *testing.T) {
 
 		client := newTestNRClient(t, srv.URL, "license-key")
 
-		if err := client.SendEvent(t.Context(), NewLiveCommerceEventPayload()); err != nil {
+		if err := client.SendEvent(t.Context(), NewLiveCommerceEventPayload("staging")); err != nil {
 			t.Fatalf("SendEvent() error = %v, want nil", err)
 		}
 		if got := atomic.LoadInt32(&attempts); got != 2 {

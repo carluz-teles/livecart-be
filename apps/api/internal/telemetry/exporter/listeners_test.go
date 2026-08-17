@@ -31,7 +31,7 @@ func (f *fakeSender) SendEvent(_ context.Context, event any) error {
 func newTestListeners(sender eventSender, enabled bool) (*Listeners, *observer.ObservedLogs) {
 	core, logs := observer.New(zap.WarnLevel)
 	log := zap.New(core)
-	return NewListeners(sender, Config{Enabled: enabled}, log), logs
+	return NewListeners(sender, Config{Enabled: enabled, Environment: "staging"}, log), logs
 }
 
 func envelopeWithPayload(t *testing.T, name events.Name, payload any) events.Envelope {
@@ -111,6 +111,7 @@ func TestListeners_OnEventCreated(t *testing.T) {
 
 	want := LiveCommerceEventPayload{
 		EventType:   eventTypeLiveCommerceEvent,
+		Environment: "staging",
 		LiveEventID: "live-1",
 		StoreID:     "store-1",
 		Action:      "created",
@@ -130,6 +131,7 @@ func TestListeners_OnEventEnded(t *testing.T) {
 
 	want := LiveCommerceEventPayload{
 		EventType:   eventTypeLiveCommerceEvent,
+		Environment: "staging",
 		LiveEventID: "live-1",
 		StoreID:     "store-1",
 		Action:      "ended",
@@ -149,6 +151,7 @@ func TestListeners_OnSessionCreated(t *testing.T) {
 
 	want := LiveCommerceEventPayload{
 		EventType:   eventTypeLiveCommerceEvent,
+		Environment: "staging",
 		LiveEventID: "live-1",
 		SessionID:   "sess-1",
 		Platform:    "instagram",
@@ -169,6 +172,7 @@ func TestListeners_OnSessionEnded(t *testing.T) {
 
 	want := LiveCommerceEventPayload{
 		EventType:   eventTypeLiveCommerceEvent,
+		Environment: "staging",
 		LiveEventID: "live-1",
 		SessionID:   "sess-1",
 		Action:      "ended",
@@ -202,6 +206,7 @@ func TestListeners_OnCartPaid(t *testing.T) {
 	}
 	wantCart := LiveCommerceCartPayload{
 		EventType:     eventTypeLiveCommerceCart,
+		Environment:   "staging",
 		LiveEventID:   "live-1",
 		StoreID:       "store-1",
 		CartID:        "cart-1",
@@ -221,6 +226,7 @@ func TestListeners_OnCartPaid(t *testing.T) {
 	}
 	wantPayment := LiveCommercePaymentPayload{
 		EventType:   eventTypeLiveCommercePayment,
+		Environment: "staging",
 		LiveEventID: "live-1",
 		StoreID:     "store-1",
 		CartID:      "cart-1",
@@ -295,6 +301,7 @@ func TestListeners_OnPaymentFailed(t *testing.T) {
 
 	want := LiveCommercePaymentPayload{
 		EventType:   eventTypeLiveCommercePayment,
+		Environment: "staging",
 		LiveEventID: "live-1",
 		StoreID:     "store-1",
 		CartID:      "cart-1",
@@ -318,6 +325,7 @@ func TestListeners_OnCartCheckoutArmed(t *testing.T) {
 
 	want := LiveCommerceCartPayload{
 		EventType:   eventTypeLiveCommerceCart,
+		Environment: "staging",
 		LiveEventID: "live-1",
 		CartID:      "cart-1",
 		Status:      "checkout_armed",
@@ -337,6 +345,7 @@ func TestListeners_OnCartExpired(t *testing.T) {
 
 	want := LiveCommerceCartPayload{
 		EventType:   eventTypeLiveCommerceCart,
+		Environment: "staging",
 		LiveEventID: "live-1",
 		StoreID:     "store-1",
 		CartID:      "cart-1",
@@ -359,6 +368,7 @@ func TestListeners_OnCartCancelled(t *testing.T) {
 
 	want := LiveCommerceCartPayload{
 		EventType:   eventTypeLiveCommerceCart,
+		Environment: "staging",
 		LiveEventID: "live-1",
 		StoreID:     "store-1",
 		CartID:      "cart-1",
@@ -391,6 +401,7 @@ func TestListeners_OnCartRefunded(t *testing.T) {
 	}
 	wantCart := LiveCommerceCartPayload{
 		EventType:     eventTypeLiveCommerceCart,
+		Environment:   "staging",
 		LiveEventID:   "live-1",
 		StoreID:       "store-1",
 		CartID:        "cart-1",
@@ -410,6 +421,7 @@ func TestListeners_OnCartRefunded(t *testing.T) {
 	}
 	wantPayment := LiveCommercePaymentPayload{
 		EventType:   eventTypeLiveCommercePayment,
+		Environment: "staging",
 		LiveEventID: "live-1",
 		StoreID:     "store-1",
 		CartID:      "cart-1",
@@ -438,6 +450,7 @@ func TestListeners_OnGMVRecorded(t *testing.T) {
 
 	want := LiveCommercePaymentPayload{
 		EventType:   eventTypeLiveCommercePayment,
+		Environment: "staging",
 		LiveEventID: "live-1",
 		StoreID:     "store-1",
 		CartID:      "cart-1",
@@ -463,6 +476,7 @@ func TestListeners_OnGMVRefunded(t *testing.T) {
 
 	want := LiveCommercePaymentPayload{
 		EventType:   eventTypeLiveCommercePayment,
+		Environment: "staging",
 		LiveEventID: "live-1",
 		StoreID:     "store-1",
 		CartID:      "cart-1",
@@ -541,6 +555,7 @@ func TestListeners_OnCommentReceived(t *testing.T) {
 
 		want := LiveCommerceCommentPayload{
 			EventType:         eventTypeLiveCommerceComment,
+			Environment:       "staging",
 			LiveEventID:       "11111111-1111-1111-1111-111111111111",
 			StoreID:           "22222222-2222-2222-2222-222222222222",
 			Platform:          "instagram",
@@ -574,6 +589,7 @@ func TestListeners_OnCommentReceived(t *testing.T) {
 
 		want := LiveCommerceCommentPayload{
 			EventType:       eventTypeLiveCommerceComment,
+			Environment:     "staging",
 			LiveEventID:     "11111111-1111-1111-1111-111111111111",
 			Platform:        "instagram",
 			PlatformUserID:  "ig-buyer-2",

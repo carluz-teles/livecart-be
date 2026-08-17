@@ -28,16 +28,19 @@
 # ==============================================================================
 
 resource "newrelic_one_dashboard" "live_commerce" {
-  name        = "${var.project_name}-${var.environment}-live-commerce"
-  description = "LiveCart — visão macro (todos os eventos) e micro (por live_event_id) do funil de live commerce: eventos/sessões, carrinhos, pagamentos, produtos e comentários."
+  name        = "${var.project_name}-live-commerce"
+  description = "LiveCart — visão macro (todos os eventos, filtrável por ambiente) e micro (por live_event_id) do funil de live commerce: eventos/sessões, carrinhos, pagamentos, produtos e comentários. Staging e produção compartilham esta conta/dashboard — use a variável 'environment' para separar."
   permissions = var.dashboard_permissions
 
   # ----------------------------------------------------------------------
-  # Page 1 — Macro: agregado de todos os eventos, sem filtro de live_event_id
+  # Page 1 — Macro: agregado de todos os eventos, filtrado pela dashboard
+  # variable `environment` (staging/production compartilham conta+dashboard —
+  # ver variable "environment" abaixo). A variable tem default_values fixo, o
+  # que garante que {{environment}} nunca chega vazio às queries abaixo.
   # ----------------------------------------------------------------------
   page {
     name        = "Macro"
-    description = "Visão agregada de todos os live events, sem filtro por evento."
+    description = "Visão agregada de todos os live events de um ambiente (selecione em 'environment'), sem filtro por evento."
 
     widget_billboard {
       title  = "Active Events (24h)"
@@ -47,7 +50,7 @@ resource "newrelic_one_dashboard" "live_commerce" {
       height = 3
 
       nrql_query {
-        query = "SELECT uniqueCount(live_event_id) AS 'Active Events' FROM LiveCommerceEvent WHERE action = 'created' AND live_event_id NOT IN (SELECT uniques(live_event_id) FROM LiveCommerceEvent WHERE action = 'ended' SINCE 24 hours ago) SINCE 24 hours ago"
+        query = "SELECT uniqueCount(live_event_id) AS 'Active Events' FROM LiveCommerceEvent WHERE action = 'created' AND environment = {{environment}} AND live_event_id NOT IN (SELECT uniques(live_event_id) FROM LiveCommerceEvent WHERE action = 'ended' AND environment = {{environment}} SINCE 24 hours ago) SINCE 24 hours ago"
       }
     }
 
@@ -59,7 +62,7 @@ resource "newrelic_one_dashboard" "live_commerce" {
       height = 3
 
       nrql_query {
-        query = "SELECT sum(gmv_cents) / 100 AS 'GMV (R$)' FROM LiveCommerceCart WHERE status = 'paid' SINCE 1 day ago"
+        query = "SELECT sum(gmv_cents) / 100 AS 'GMV (R$)' FROM LiveCommerceCart WHERE status = 'paid' AND environment = {{environment}} SINCE 1 day ago"
       }
     }
 
@@ -71,7 +74,7 @@ resource "newrelic_one_dashboard" "live_commerce" {
       height = 3
 
       nrql_query {
-        query = "SELECT filter(count(*), WHERE status = 'paid') / filter(count(*), WHERE status = 'checkout_armed') * 100 AS 'Conversion %' FROM LiveCommerceCart SINCE 1 day ago"
+        query = "SELECT filter(count(*), WHERE status = 'paid') / filter(count(*), WHERE status = 'checkout_armed') * 100 AS 'Conversion %' FROM LiveCommerceCart WHERE environment = {{environment}} SINCE 1 day ago"
       }
     }
 
@@ -83,7 +86,7 @@ resource "newrelic_one_dashboard" "live_commerce" {
       height = 3
 
       nrql_query {
-        query = "SELECT filter(count(*), WHERE outcome = 'approved') / filter(count(*), WHERE outcome IN ('approved', 'rejected')) * 100 AS 'Payment Success %' FROM LiveCommercePayment SINCE 1 day ago"
+        query = "SELECT filter(count(*), WHERE outcome = 'approved') / filter(count(*), WHERE outcome IN ('approved', 'rejected')) * 100 AS 'Payment Success %' FROM LiveCommercePayment WHERE environment = {{environment}} SINCE 1 day ago"
       }
     }
 
@@ -95,7 +98,7 @@ resource "newrelic_one_dashboard" "live_commerce" {
       height = 3
 
       nrql_query {
-        query = "SELECT sum(gmv_cents) / 100 AS 'GMV (R$)' FROM LiveCommerceCart WHERE status = 'paid' TIMESERIES SINCE 1 day ago"
+        query = "SELECT sum(gmv_cents) / 100 AS 'GMV (R$)' FROM LiveCommerceCart WHERE status = 'paid' AND environment = {{environment}} TIMESERIES SINCE 1 day ago"
       }
     }
 
@@ -107,7 +110,7 @@ resource "newrelic_one_dashboard" "live_commerce" {
       height = 3
 
       nrql_query {
-        query = "SELECT filter(count(*), WHERE status = 'created') AS 'Created', filter(count(*), WHERE status = 'checkout_armed') AS 'Checkout Armed', filter(count(*), WHERE status = 'paid') AS 'Paid' FROM LiveCommerceCart TIMESERIES SINCE 1 day ago"
+        query = "SELECT filter(count(*), WHERE status = 'created') AS 'Created', filter(count(*), WHERE status = 'checkout_armed') AS 'Checkout Armed', filter(count(*), WHERE status = 'paid') AS 'Paid' FROM LiveCommerceCart WHERE environment = {{environment}} TIMESERIES SINCE 1 day ago"
       }
     }
 
@@ -119,7 +122,7 @@ resource "newrelic_one_dashboard" "live_commerce" {
       height = 3
 
       nrql_query {
-        query = "SELECT count(*) AS 'Comentários' FROM LiveCommerceComment FACET live_event_id SINCE 1 day ago LIMIT 10"
+        query = "SELECT count(*) AS 'Comentários' FROM LiveCommerceComment WHERE environment = {{environment}} FACET live_event_id SINCE 1 day ago LIMIT 10"
       }
     }
 
@@ -131,7 +134,7 @@ resource "newrelic_one_dashboard" "live_commerce" {
       height = 3
 
       nrql_query {
-        query = "SELECT sum(revenue_cents) / 100 AS 'Revenue (R$)' FROM LiveCommerceCartItem FACET product_name SINCE 1 day ago LIMIT 10"
+        query = "SELECT sum(revenue_cents) / 100 AS 'Revenue (R$)' FROM LiveCommerceCartItem WHERE environment = {{environment}} FACET product_name SINCE 1 day ago LIMIT 10"
       }
     }
 
@@ -143,7 +146,7 @@ resource "newrelic_one_dashboard" "live_commerce" {
       height = 3
 
       nrql_query {
-        query = "SELECT percentile(checkout_duration_ms, 50, 95, 99) FROM LiveCommerceCart WHERE status = 'paid' SINCE 1 day ago"
+        query = "SELECT percentile(checkout_duration_ms, 50, 95, 99) FROM LiveCommerceCart WHERE status = 'paid' AND environment = {{environment}} SINCE 1 day ago"
       }
     }
 
@@ -284,5 +287,35 @@ resource "newrelic_one_dashboard" "live_commerce" {
     type                 = "string"
     replacement_strategy = "string"
     is_multi_selection   = false
+  }
+
+  # environment filters the Macro page (staging vs production share this
+  # single account+dashboard, per apps/api/internal/telemetry/exporter's
+  # `environment` attribute on every LiveCommerce* custom event). `enum`
+  # (not free-text "string") constrains the operator to real values, and
+  # default_values guarantees {{environment}} is never empty/unselected —
+  # an empty NRQL variable would make `WHERE environment = {{environment}}`
+  # either error or silently match nothing, which is why this is not left
+  # to a free-text default. Not referenced on the "Micro" page: live_event_id
+  # already isolates a single event unambiguously, and events only ever
+  # belong to one environment, so stacking both filters there would be
+  # redundant.
+  variable {
+    name                 = "environment"
+    title                = "Environment"
+    type                 = "enum"
+    replacement_strategy = "string"
+    is_multi_selection   = false
+    default_values       = [var.environment]
+
+    item {
+      title = "staging"
+      value = "staging"
+    }
+
+    item {
+      title = "production"
+      value = "production"
+    }
   }
 }

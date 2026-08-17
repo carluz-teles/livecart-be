@@ -34,12 +34,16 @@ type LiveCommerceCartPayload struct {
 	PaymentMethod      string `json:"payment_method,omitempty"`
 	Provider           string `json:"provider,omitempty"`
 	Reason             string `json:"reason,omitempty"`
-	Timestamp          int64  `json:"timestamp"`
+	// Environment is "staging"/"production"/"development" (config.Environment())
+	// — staging and production share the same New Relic account (8291202) and
+	// dashboard, so every custom event must self-identify to be filterable.
+	Environment string `json:"environment"`
+	Timestamp   int64  `json:"timestamp"`
 }
 
 // NewLiveCommerceCartPayload builds the payload with EventType prefilled.
-func NewLiveCommerceCartPayload() LiveCommerceCartPayload {
-	return LiveCommerceCartPayload{EventType: eventTypeLiveCommerceCart}
+func NewLiveCommerceCartPayload(environment string) LiveCommerceCartPayload {
+	return LiveCommerceCartPayload{EventType: eventTypeLiveCommerceCart, Environment: environment}
 }
 
 // LiveCommercePaymentPayload is the New Relic custom event for a payment
@@ -71,13 +75,17 @@ type LiveCommercePaymentPayload struct {
 	// billable) from "not resolved" (enrichment didn't run/failed). A plain
 	// bool with `omitempty` would drop billable=false from the exported
 	// event, making it indistinguishable from missing data.
-	Billable  *bool `json:"billable,omitempty"`
-	Timestamp int64 `json:"timestamp"`
+	Billable *bool `json:"billable,omitempty"`
+	// Environment is "staging"/"production"/"development" (config.Environment())
+	// — staging and production share the same New Relic account (8291202) and
+	// dashboard, so every custom event must self-identify to be filterable.
+	Environment string `json:"environment"`
+	Timestamp   int64  `json:"timestamp"`
 }
 
 // NewLiveCommercePaymentPayload builds the payload with EventType prefilled.
-func NewLiveCommercePaymentPayload() LiveCommercePaymentPayload {
-	return LiveCommercePaymentPayload{EventType: eventTypeLiveCommercePayment}
+func NewLiveCommercePaymentPayload(environment string) LiveCommercePaymentPayload {
+	return LiveCommercePaymentPayload{EventType: eventTypeLiveCommercePayment, Environment: environment}
 }
 
 // LiveCommerceCartItemPayload is the New Relic custom event for a single line
@@ -93,12 +101,16 @@ type LiveCommerceCartItemPayload struct {
 	Quantity       int64  `json:"quantity,omitempty"`
 	UnitPriceCents int64  `json:"unit_price_cents,omitempty"`
 	RevenueCents   int64  `json:"revenue_cents,omitempty"`
-	Timestamp      int64  `json:"timestamp"`
+	// Environment is "staging"/"production"/"development" (config.Environment())
+	// — staging and production share the same New Relic account (8291202) and
+	// dashboard, so every custom event must self-identify to be filterable.
+	Environment string `json:"environment"`
+	Timestamp   int64  `json:"timestamp"`
 }
 
 // NewLiveCommerceCartItemPayload builds the payload with EventType prefilled.
-func NewLiveCommerceCartItemPayload() LiveCommerceCartItemPayload {
-	return LiveCommerceCartItemPayload{EventType: eventTypeLiveCommerceCartItem}
+func NewLiveCommerceCartItemPayload(environment string) LiveCommerceCartItemPayload {
+	return LiveCommerceCartItemPayload{EventType: eventTypeLiveCommerceCartItem, Environment: environment}
 }
 
 // LiveCommerceEventPayload is the New Relic custom event covering both the
@@ -112,12 +124,16 @@ type LiveCommerceEventPayload struct {
 	SessionID   string `json:"session_id,omitempty"`
 	Platform    string `json:"platform,omitempty"`
 	Action      string `json:"action,omitempty"`
+	// Environment is "staging"/"production"/"development" (config.Environment())
+	// — staging and production share the same New Relic account (8291202) and
+	// dashboard, so every custom event must self-identify to be filterable.
+	Environment string `json:"environment"`
 	Timestamp   int64  `json:"timestamp"`
 }
 
 // NewLiveCommerceEventPayload builds the payload with EventType prefilled.
-func NewLiveCommerceEventPayload() LiveCommerceEventPayload {
-	return LiveCommerceEventPayload{EventType: eventTypeLiveCommerceEvent}
+func NewLiveCommerceEventPayload(environment string) LiveCommerceEventPayload {
+	return LiveCommerceEventPayload{EventType: eventTypeLiveCommerceEvent, Environment: environment}
 }
 
 // LiveCommerceCommentPayload is the New Relic custom event for a live comment
@@ -139,10 +155,14 @@ type LiveCommerceCommentPayload struct {
 	ConvertedToCart   bool   `json:"converted_to_cart"`
 	CartID            string `json:"cart_id,omitempty"`
 	TimeToCartMs      int64  `json:"time_to_cart_ms,omitempty"`
-	Timestamp         int64  `json:"timestamp"`
+	// Environment is "staging"/"production"/"development" (config.Environment())
+	// — staging and production share the same New Relic account (8291202) and
+	// dashboard, so every custom event must self-identify to be filterable.
+	Environment string `json:"environment"`
+	Timestamp   int64  `json:"timestamp"`
 }
 
 // NewLiveCommerceCommentPayload builds the payload with EventType prefilled.
-func NewLiveCommerceCommentPayload() LiveCommerceCommentPayload {
-	return LiveCommerceCommentPayload{EventType: eventTypeLiveCommerceComment}
+func NewLiveCommerceCommentPayload(environment string) LiveCommerceCommentPayload {
+	return LiveCommerceCommentPayload{EventType: eventTypeLiveCommerceComment, Environment: environment}
 }
