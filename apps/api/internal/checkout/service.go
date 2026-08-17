@@ -1160,7 +1160,7 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 // the freshly-loaded cart payload so the frontend can swap the React Query
 // cache in one call.
 func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartItemInput) (*GetCartForCheckoutOutput, error) {
-	cart, item, err := s.loadEditableCartItem(ctx, input.Token, input.ItemID, input.ByMerchant)
+	cart, item, err := s.loadEditableCartItem(ctx, input.Token, input.ItemID, itemEditPolicy(input.ByMerchant))
 	if err != nil {
 		return nil, err
 	}
@@ -1307,7 +1307,7 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 
 // RemoveCartItem deletes an item entirely and reverses the ERP reservation.
 func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput) (*GetCartForCheckoutOutput, error) {
-	cart, item, err := s.loadEditableCartItem(ctx, input.Token, input.ItemID, input.ByMerchant)
+	cart, item, err := s.loadEditableCartItem(ctx, input.Token, input.ItemID, itemEditPolicy(input.ByMerchant))
 	if err != nil {
 		return nil, err
 	}
@@ -1394,9 +1394,7 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 // integrationService que conhece a mecânica de devolver estoque caso a
 // entry estivesse 'notified'.
 func (s *Service) DropFromWaitlist(ctx context.Context, input DropFromWaitlistInput) (*GetCartForCheckoutOutput, error) {
-	// Sair da fila é ação do COMPRADOR: `false` mantém o toggle cart_allow_edit
-	// valendo, como sempre valeu neste caminho.
-	cart, err := s.loadEditableCart(ctx, input.Token, false)
+	cart, err := s.loadEditableCart(ctx, input.Token, toggleGovernsWaitlistExit)
 	if err != nil {
 		return nil, err
 	}
@@ -1423,7 +1421,7 @@ func (s *Service) DropFromWaitlist(ctx context.Context, input DropFromWaitlistIn
 // row for the same product). Validates the product against the event whitelist
 // and quantity cap before touching the ERP.
 func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*GetCartForCheckoutOutput, error) {
-	cart, err := s.loadEditableCart(ctx, input.Token, input.ByMerchant)
+	cart, err := s.loadEditableCart(ctx, input.Token, itemEditPolicy(input.ByMerchant))
 	if err != nil {
 		return nil, err
 	}
@@ -1683,15 +1681,52 @@ func (s *Service) clearShippingAfterMerchantEdit(ctx context.Context, cart *Cart
 	}
 }
 
-func (s *Service) loadEditableCart(ctx context.Context, token string, byMerchant bool) (*CartRow, error) {
+func (s *Service) loadEditableCart(ctx context.Context, token string, storeToggleApplies bool) (*CartRow, error) {
 	cart, err := s.repo.GetCartByToken(ctx, token)
 	if err != nil {
 		return nil, err
 	}
-	if err := assertCartMutable(cart, byMerchant, time.Now()); err != nil {
+	if err := assertCartMutable(cart, storeToggleApplies, time.Now()); err != nil {
 		return nil, err
 	}
 	return cart, nil
+}
+
+// Quais ações o toggle `cart_allow_edit` da loja governa.
+//
+// O toggle responde UMA pergunta: "o comprador pode mexer nos itens do carrinho
+// na página de checkout?" (é o texto do comentário da própria coluna). Tratá-lo
+// como um interruptor geral do checkout faz ele barrar ações que não são mexer
+// em item — foi assim que sair da fila de espera parou de funcionar nas lojas
+// que desligaram a edição.
+const (
+	// O comprador mexendo nos itens: é exatamente o que o toggle existe para
+	// permitir ou proibir.
+	toggleGovernsBuyerItemEdit = true
+
+	// O LOJISTA corrigindo o pedido pelo painel. O toggle é política sobre o
+	// comprador; usá-lo contra a dona da loja trava a correção justamente onde
+	// ela mais é necessária.
+	toggleGovernsMerchantItemEdit = false
+
+	// Sair da FILA DE ESPERA. Não é mexer no carrinho: a compradora está
+	// desistindo de algo que ela nem tem — o item está sem estoque e não faz
+	// parte do que ela vai pagar. Barrar isso a prende numa fila que ela não
+	// consegue abandonar, e o produto segue reservado para alguém que já
+	// desistiu, sem chegar a quem está atrás dela.
+	toggleGovernsWaitlistExit = false
+)
+
+// itemEditPolicy traduz QUEM está editando os itens para a política do toggle.
+//
+// Existe para o call site não escrever `!input.ByMerchant`: a negação esconde a
+// tradução, e quem lesse depois teria de reconstruir de cabeça que "não é
+// lojista" significa "o toggle da loja vale".
+func itemEditPolicy(byMerchant bool) bool {
+	if byMerchant {
+		return toggleGovernsMerchantItemEdit
+	}
+	return toggleGovernsBuyerItemEdit
 }
 
 // assertCartMutable é a decisão sobre o ESTADO do carrinho, separada da leitura.
@@ -1701,7 +1736,7 @@ func (s *Service) loadEditableCart(ctx context.Context, token string, byMerchant
 // Com a leitura no meio, a única forma de exercitá-la seria montar carrinho no
 // banco para cada combinação, e a combinação que mais importa — lojista editando
 // loja com edição desligada — jamais teria teste.
-func assertCartMutable(cart *CartRow, byMerchant bool, now time.Time) error {
+func assertCartMutable(cart *CartRow, storeToggleApplies bool, now time.Time) error {
 	if cart.Status == "expired" {
 		return httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
@@ -1714,12 +1749,9 @@ func assertCartMutable(cart *CartRow, byMerchant bool, now time.Time) error {
 	if cart.PaymentStatus == "paid" {
 		return httpx.ErrConflict("carrinho já foi pago")
 	}
-	// `cart_allow_edit` é política sobre o COMPRADOR — o comentário da coluna diz
-	// "allow customers to edit cart on checkout page". Aplicá-la ao lojista
-	// impediria a dona da loja de corrigir o pedido exatamente nas lojas que
-	// desligaram a edição pelo comprador, que são as que mais precisam corrigir
-	// pelo painel.
-	if !byMerchant && !cart.AllowEdit {
+	// O toggle da loja só entra nas ações que ele governa — ver as constantes
+	// toggleGoverns*. Pago, cancelado e expirado, acima, valem para TODAS.
+	if storeToggleApplies && !cart.AllowEdit {
 		return httpx.ErrConflict("edição do carrinho desabilitada para esta loja")
 	}
 	if cart.ExpiresAt != nil && cart.ExpiresAt.Before(now) {
@@ -1739,8 +1771,8 @@ func productAllowedForCart(cfg *EventProductConfig, byMerchant bool) bool {
 
 // loadEditableCartItem returns the cart and the specific item, asserting the
 // item belongs to the cart and the cart is editable.
-func (s *Service) loadEditableCartItem(ctx context.Context, token, itemID string, byMerchant bool) (*CartRow, *CartItemRow, error) {
-	cart, err := s.loadEditableCart(ctx, token, byMerchant)
+func (s *Service) loadEditableCartItem(ctx context.Context, token, itemID string, storeToggleApplies bool) (*CartRow, *CartItemRow, error) {
+	cart, err := s.loadEditableCart(ctx, token, storeToggleApplies)
 	if err != nil {
 		return nil, nil, err
 	}

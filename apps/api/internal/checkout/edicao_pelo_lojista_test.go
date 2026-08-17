@@ -19,6 +19,10 @@ package checkout
 //      painel reportar o aumento dele como compra espontânea da cliente.
 //   M4 a whitelist da sessão não limita o lojista — foi o pedido explícito
 //      ("adicionar outros produtos cadastrados no LiveCart").
+//   M5 SAIR DA FILA não é governado pelo toggle. O toggle responde "o comprador
+//      pode mexer nos itens do carrinho?"; desistir de um item ESGOTADO, que ela
+//      nem vai pagar, não é mexer no carrinho. Em produção isso apareceu como
+//      quatro tentativas seguidas de sair da fila, todas 409, no mesmo item.
 
 import (
 	"errors"
@@ -36,66 +40,66 @@ func TestEdicaoPeloLojista_MatrizDeEstado(t *testing.T) {
 	futuro := agora.Add(time.Hour)
 
 	casos := []struct {
-		nome       string
-		cart       CartRow
-		byMerchant bool
-		recusa     bool
-		porque     string
+		nome               string
+		cart               CartRow
+		storeToggleApplies bool
+		recusa             bool
+		porque             string
 	}{
 		{
-			nome:       "loja com edição do comprador DESLIGADA: lojista edita",
-			cart:       CartRow{Status: "checkout", PaymentStatus: "pending", AllowEdit: false, ExpiresAt: &futuro},
-			byMerchant: true,
-			recusa:     false,
-			porque:     "é o caso que motivou a feature — a lojista precisa corrigir o pedido",
+			nome:               "loja com edição do comprador DESLIGADA: lojista edita",
+			cart:               CartRow{Status: "checkout", PaymentStatus: "pending", AllowEdit: false, ExpiresAt: &futuro},
+			storeToggleApplies: toggleGovernsMerchantItemEdit,
+			recusa:             false,
+			porque:             "é o caso que motivou a feature — a lojista precisa corrigir o pedido",
 		},
 		{
-			nome:       "loja com edição do comprador DESLIGADA: comprador não edita",
-			cart:       CartRow{Status: "checkout", PaymentStatus: "pending", AllowEdit: false, ExpiresAt: &futuro},
-			byMerchant: false,
-			recusa:     true,
-			porque:     "afrouxar aqui daria ao comprador o que a loja desligou",
+			nome:               "loja com edição do comprador DESLIGADA: comprador não edita",
+			cart:               CartRow{Status: "checkout", PaymentStatus: "pending", AllowEdit: false, ExpiresAt: &futuro},
+			storeToggleApplies: toggleGovernsBuyerItemEdit,
+			recusa:             true,
+			porque:             "afrouxar aqui daria ao comprador o que a loja desligou",
 		},
 		{
-			nome:       "pedido PAGO: lojista também não edita",
-			cart:       CartRow{Status: "checkout", PaymentStatus: "paid", AllowEdit: true, ExpiresAt: &futuro},
-			byMerchant: true,
-			recusa:     true,
-			porque:     "mexeria em estoque e ERP de uma venda fechada",
+			nome:               "pedido PAGO: lojista também não edita",
+			cart:               CartRow{Status: "checkout", PaymentStatus: "paid", AllowEdit: true, ExpiresAt: &futuro},
+			storeToggleApplies: toggleGovernsMerchantItemEdit,
+			recusa:             true,
+			porque:             "mexeria em estoque e ERP de uma venda fechada",
 		},
 		{
-			nome:       "pedido CANCELADO: lojista também não edita",
-			cart:       CartRow{Status: "cancelled", PaymentStatus: "pending", AllowEdit: true, ExpiresAt: &futuro},
-			byMerchant: true,
-			recusa:     true,
-			porque:     "o estorno já devolveu estoque e reserva",
+			nome:               "pedido CANCELADO: lojista também não edita",
+			cart:               CartRow{Status: "cancelled", PaymentStatus: "pending", AllowEdit: true, ExpiresAt: &futuro},
+			storeToggleApplies: toggleGovernsMerchantItemEdit,
+			recusa:             true,
+			porque:             "o estorno já devolveu estoque e reserva",
 		},
 		{
-			nome:       "pedido EXPIRADO por status: lojista também não edita",
-			cart:       CartRow{Status: "expired", PaymentStatus: "pending", AllowEdit: true},
-			byMerchant: true,
-			recusa:     true,
-			porque:     "carrinho morto",
+			nome:               "pedido EXPIRADO por status: lojista também não edita",
+			cart:               CartRow{Status: "expired", PaymentStatus: "pending", AllowEdit: true},
+			storeToggleApplies: toggleGovernsMerchantItemEdit,
+			recusa:             true,
+			porque:             "carrinho morto",
 		},
 		{
-			nome:       "prazo VENCIDO no relógio: lojista também não edita",
-			cart:       CartRow{Status: "checkout", PaymentStatus: "pending", AllowEdit: true, ExpiresAt: &passado},
-			byMerchant: true,
-			recusa:     true,
-			porque:     "o worker de expiração pode não ter passado ainda",
+			nome:               "prazo VENCIDO no relógio: lojista também não edita",
+			cart:               CartRow{Status: "checkout", PaymentStatus: "pending", AllowEdit: true, ExpiresAt: &passado},
+			storeToggleApplies: toggleGovernsMerchantItemEdit,
+			recusa:             true,
+			porque:             "o worker de expiração pode não ter passado ainda",
 		},
 		{
-			nome:       "sem prazo e não pago: os dois editam",
-			cart:       CartRow{Status: "active", PaymentStatus: "pending", AllowEdit: true},
-			byMerchant: false,
-			recusa:     false,
-			porque:     "carrinho de evento aberto não tem prazo correndo",
+			nome:               "sem prazo e não pago: os dois editam",
+			cart:               CartRow{Status: "active", PaymentStatus: "pending", AllowEdit: true},
+			storeToggleApplies: toggleGovernsBuyerItemEdit,
+			recusa:             false,
+			porque:             "carrinho de evento aberto não tem prazo correndo",
 		},
 	}
 
 	for _, tt := range casos {
 		t.Run(tt.nome, func(t *testing.T) {
-			err := assertCartMutable(&tt.cart, tt.byMerchant, agora)
+			err := assertCartMutable(&tt.cart, tt.storeToggleApplies, agora)
 			if tt.recusa && err == nil {
 				t.Fatalf("deveria recusar (%s), aceitou", tt.porque)
 			}
@@ -113,7 +117,7 @@ func TestEdicaoPeloLojista_PrazoVencidoTemCodigoDeExpirado(t *testing.T) {
 	vencido := agora.Add(-time.Minute)
 	cart := &CartRow{Status: "checkout", PaymentStatus: "pending", AllowEdit: true, ExpiresAt: &vencido}
 
-	err := assertCartMutable(cart, true, agora)
+	err := assertCartMutable(cart, toggleGovernsMerchantItemEdit, agora)
 	if err == nil {
 		t.Fatal("prazo vencido foi aceito")
 	}
@@ -169,5 +173,59 @@ func TestEdicaoPeloLojista_WhitelistDaSessaoNaoLimitaOPainel(t *testing.T) {
 	}
 	if !productAllowedForCart(naLive, false) {
 		t.Error("produto liberado na sessão foi barrado para o comprador")
+	}
+}
+
+// ─── M5 ─────────────────────────────────────────────────────────────────────
+
+// Loja com edição do comprador DESLIGADA: sair da fila continua funcionando.
+//
+// Foi o que quebrou em produção. O endpoint de sair da fila reusava o mesmo
+// guarda da edição de item, então o toggle da loja o derrubava com 409 — a
+// compradora tentou quatro vezes seguidas no mesmo item e não conseguiu.
+//
+// O custo não é só a frustração dela: a unidade fica reservada para alguém que
+// já desistiu, e não chega a quem está atrás na fila.
+func TestSairDaFila_NaoEhGovernadoPeloToggleDaLoja(t *testing.T) {
+	agora := time.Now()
+	futuro := agora.Add(time.Hour)
+	semEdicao := &CartRow{
+		Status:        "checkout",
+		PaymentStatus: "pending",
+		AllowEdit:     false, // a loja desligou a edição pelo comprador
+		ExpiresAt:     &futuro,
+	}
+
+	if err := assertCartMutable(semEdicao, toggleGovernsWaitlistExit, agora); err != nil {
+		t.Errorf("sair da fila foi recusado numa loja sem edição do comprador: %v", err)
+	}
+
+	// A outra metade: mexer nos ITENS continua barrado na mesma loja. Sem isto,
+	// "corrigir o bug da fila" poderia ter sido só desligar o toggle inteiro.
+	if err := assertCartMutable(semEdicao, toggleGovernsBuyerItemEdit, agora); err == nil {
+		t.Error("o comprador conseguiu editar itens numa loja que desligou a edição — " +
+			"a correção da fila afrouxou o que o toggle protege")
+	}
+}
+
+// Os estados terminais continuam barrando a saída da fila. Carrinho cancelado ou
+// expirado já teve estoque e reserva devolvidos; mexer na fila dele reabriria
+// contabilidade fechada.
+func TestSairDaFila_AindaRespeitaEstadoTerminal(t *testing.T) {
+	agora := time.Now()
+	vencido := agora.Add(-time.Minute)
+
+	casos := map[string]*CartRow{
+		"cancelado": {Status: "cancelled", PaymentStatus: "pending", AllowEdit: true},
+		"expirado":  {Status: "expired", PaymentStatus: "pending", AllowEdit: true},
+		"prazo vencido": {
+			Status: "checkout", PaymentStatus: "pending", AllowEdit: true, ExpiresAt: &vencido,
+		},
+	}
+
+	for nome, cart := range casos {
+		if err := assertCartMutable(cart, toggleGovernsWaitlistExit, agora); err == nil {
+			t.Errorf("carrinho %s aceitou saída da fila", nome)
+		}
 	}
 }
