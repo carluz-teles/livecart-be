@@ -61,8 +61,10 @@ type CartPaymentGateway interface {
 
 	// UpdateCartPaymentStatus applies the guarded cart payment write. It returns
 	// ErrCartNotPayable when the cart expired/cancelled between the charge and the
-	// webhook — the guard that serializes this consumer against ExpireCart.
-	UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) error
+	// webhook — the guard that serializes this consumer against ExpireCart. On
+	// success it also returns the cart's live_event_id (from the same RETURNING
+	// row, no extra query) so the caller can tag the emitted cart payment fact.
+	UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (liveEventID string, err error)
 
 	// RestoreCancelledCartAsPaid handles the inverse race (LIV-84): a MANUAL
 	// store cancellation that a payment then won. When UpdateCartPaymentStatus
@@ -70,8 +72,8 @@ type CartPaymentGateway interface {
 	// cart to paid in a single tx (retomando o estoque devolvido) so the normal
 	// fan-out runs — o dinheiro manda. Returns restored=false when the cart is
 	// not a store-cancelled cart pending payment (the caller then does the benign
-	// ErrCartNotPayable skip).
-	RestoreCancelledCartAsPaid(ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (restored bool, err error)
+	// ErrCartNotPayable skip). Also returns the cart's live_event_id on restore.
+	RestoreCancelledCartAsPaid(ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (restored bool, liveEventID string, err error)
 
 	// CartGMVCents returns the pure item sum (excludes shipping and coupon) for
 	// the cart — the single source of truth. A malformed cart id yields (0, nil);
@@ -213,8 +215,10 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		cartPaymentStatus = "pending"
 	}
 
-	// Update cart payment status and payment method
-	if err := s.gateway.UpdateCartPaymentStatus(ctx, status.ExternalReference, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod); err != nil {
+	// Update cart payment status and payment method. liveEventID travels to the
+	// cart payment fact emitted below (from the RETURNING row, no extra query).
+	liveEventID, err := s.gateway.UpdateCartPaymentStatus(ctx, status.ExternalReference, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod)
+	if err != nil {
 		if errors.Is(err, ErrCartNotPayable) {
 			// Corrida cancelamento × pagamento, lado inverso (LIV-84): o lojista
 			// cancelou o carrinho e o pagamento foi aprovado assim mesmo (PIX pago
@@ -225,7 +229,7 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 			restored := false
 			if cartPaymentStatus == "paid" {
 				var restoreErr error
-				restored, restoreErr = s.gateway.RestoreCancelledCartAsPaid(ctx,
+				restored, liveEventID, restoreErr = s.gateway.RestoreCancelledCartAsPaid(ctx,
 					status.ExternalReference, input.StoreID, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod)
 				if restoreErr != nil {
 					logger.From(ctx, s.logger).Error("failed to restore store-cancelled cart as paid",
@@ -303,10 +307,11 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 			PaymentSnapshot *providers.PaymentStatus `json:"payment_snapshot,omitempty"`
 		}{status.ExternalReference, input.StoreID, status.PaymentID, status.PaymentMethod, gmvCents, snap})
 		_ = s.gateway.EmitEvent(ctx, events.Envelope{
-			Name:     name,
-			Source:   events.Source(input.Provider),
-			DedupKey: string(name) + ":" + status.PaymentID,
-			Payload:  payload,
+			Name:        name,
+			Source:      events.Source(input.Provider),
+			DedupKey:    string(name) + ":" + status.PaymentID,
+			LiveEventID: liveEventID,
+			Payload:     payload,
 		})
 	}
 

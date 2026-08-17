@@ -27,6 +27,8 @@ const (
 	RedisAddr            Key = "REDIS_ADDR"                  // Redis host:port for the asynq event queue (local/no-auth; default localhost:6379)
 	OTELExporterEndpoint Key = "OTEL_EXPORTER_OTLP_ENDPOINT" // OTLP gRPC endpoint (Jaeger local, Datadog agent in prod); empty = tracing no-op
 	OTELServiceName      Key = "OTEL_SERVICE_NAME"           // service.name resource attr (default livecart-api)
+	NewRelicLicenseKey   Key = "NEW_RELIC_LICENSE_KEY"       // Insights Event API ingest key; empty = New Relic custom-events exporter disabled
+	NewRelicAccountID    Key = "NEW_RELIC_ACCOUNT_ID"        // New Relic account id the custom events are posted to
 
 	// Integration Layer
 	EncryptionKey        Key = "ENCRYPTION_KEY"          // Base64-encoded 32-byte key for AES-GCM

@@ -71,6 +71,14 @@ func Emit(ctx context.Context, q *sqlc.Queries, env Envelope) error {
 		payload = []byte("{}")
 	}
 
+	var liveEventID pgtype.UUID
+	if env.LiveEventID != "" {
+		liveEventID, err = toPgUUID(env.LiveEventID)
+		if err != nil {
+			return fmt.Errorf("invalid live event id %q: %w", env.LiveEventID, err)
+		}
+	}
+
 	return q.InsertOutboxEvent(ctx, sqlc.InsertOutboxEventParams{
 		EventID:       eventID,
 		Name:          string(env.Name),
@@ -82,6 +90,7 @@ func Emit(ctx context.Context, q *sqlc.Queries, env Envelope) error {
 		DedupKey:      env.DedupKey,
 		Queue:         env.Queue(),
 		SchemaVersion: int32(env.SchemaVersion),
+		LiveEventID:   liveEventID,
 	})
 }
 
@@ -101,6 +110,7 @@ func envelopeFromRow(r sqlc.EventOutbox) Envelope {
 		TraceID:       r.TraceID,
 		SpanID:        r.SpanID,
 		DedupKey:      r.DedupKey,
+		LiveEventID:   fromPgUUID(r.LiveEventID),
 	}
 	if r.CreatedAt.Valid {
 		env.OccurredAt = r.CreatedAt.Time

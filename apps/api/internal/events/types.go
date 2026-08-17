@@ -294,6 +294,12 @@ type Envelope struct {
 	// DedupKey lets consumers deduplicate at-least-once delivery when there is
 	// no natural unique key on the side-effect.
 	DedupKey string `json:"dedup_key,omitempty"`
+	// LiveEventID is the live_events.id (the "live event"/campaign domain
+	// entity) this event correlates to, when applicable. Distinct from EventID
+	// above, which identifies THIS event instance for idempotency — do not
+	// confuse the two. First-class (not folded into Payload) so every consumer
+	// and the telemetry pipeline can read it without unmarshaling the payload.
+	LiveEventID string `json:"live_event_id,omitempty"`
 	// Payload is the domain-specific data for this event.
 	Payload json.RawMessage `json:"payload,omitempty"`
 }

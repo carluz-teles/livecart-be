@@ -97,6 +97,88 @@ func (q *Queries) CreateLiveComment(ctx context.Context, arg CreateLiveCommentPa
 	return i, err
 }
 
+const findCommentCartCorrelation = `-- name: FindCommentCartCorrelation :one
+SELECT
+    lc.id                AS comment_id,
+    lc.event_id,
+    le.store_id,
+    lc.session_id,
+    lc.platform,
+    lc.platform_user_id,
+    lc.has_purchase_intent,
+    lc.matched_product_id,
+    lc.result,
+    lc.created_at         AS comment_created_at,
+    cie.cart_id           AS cart_id,
+    cie.created_at        AS item_created_at
+FROM live_comments lc
+JOIN live_events le ON le.id = lc.event_id
+LEFT JOIN carts ct
+    ON ct.event_id = lc.event_id
+   AND ct.platform_user_id = lc.platform_user_id
+LEFT JOIN cart_item_events cie
+    ON cie.cart_id = ct.id
+   AND cie.created_at BETWEEN lc.created_at AND lc.created_at + INTERVAL '120 seconds'
+WHERE lc.platform_comment_id = $1
+ORDER BY lc.created_at DESC, cie.created_at ASC NULLS LAST
+LIMIT 1
+`
+
+type FindCommentCartCorrelationRow struct {
+	CommentID         pgtype.UUID        `json:"comment_id"`
+	EventID           pgtype.UUID        `json:"event_id"`
+	StoreID           pgtype.UUID        `json:"store_id"`
+	SessionID         pgtype.UUID        `json:"session_id"`
+	Platform          string             `json:"platform"`
+	PlatformUserID    string             `json:"platform_user_id"`
+	HasPurchaseIntent pgtype.Bool        `json:"has_purchase_intent"`
+	MatchedProductID  pgtype.UUID        `json:"matched_product_id"`
+	Result            pgtype.Text        `json:"result"`
+	CommentCreatedAt  pgtype.Timestamptz `json:"comment_created_at"`
+	CartID            pgtype.UUID        `json:"cart_id"`
+	ItemCreatedAt     pgtype.Timestamptz `json:"item_created_at"`
+}
+
+// Telemetria (Fatia 4/6): correlaciona um comentário com a ADIÇÃO de item ao
+// carrinho do mesmo comprador+evento, dentro de uma janela de 120s a partir
+// do comentário — alimenta LiveCommerceComment{converted_to_cart}.
+//
+// Casa por cart_item_events.created_at (não carts.created_at). GetOrCreateCart
+// (internal/live/repository.go) reusa o carrinho ABERTO do comprador no
+// evento: só o comentário que CRIA o carrinho cai dentro da janela de
+// carts.created_at; comentários seguintes do mesmo comprador que adicionam
+// outro produto ao carrinho JÁ ABERTO ficam fora dela, porque o carrinho é
+// bem mais velho que o comentário. cart_item_events tem uma linha por
+// adição (RN-12, migration 000110), com created_at próprio — casar por ela
+// cobre os dois casos (carrinho novo e carrinho reaberto) com a mesma regra.
+//
+// LEFT JOIN carts primeiro (todo carrinho do comprador no evento, aberto ou
+// arquivado) e depois LEFT JOIN cart_item_events filtrado pela janela: cie é
+// quem decide o match, não ct — por isso cart_id vem de cie.cart_id, não de
+// ct.id. Se nenhuma adição cair na janela, cie.cart_id é NULL mesmo que o
+// comprador tenha carrinho (aberto ou não) — comment.converted_to_cart=false
+// nesse caso. ORDER BY/LIMIT: quando há mais de uma adição na janela (raro,
+// ex.: dois produtos no mesmo comentário), pega a mais antiga.
+func (q *Queries) FindCommentCartCorrelation(ctx context.Context, platformCommentID string) (FindCommentCartCorrelationRow, error) {
+	row := q.db.QueryRow(ctx, findCommentCartCorrelation, platformCommentID)
+	var i FindCommentCartCorrelationRow
+	err := row.Scan(
+		&i.CommentID,
+		&i.EventID,
+		&i.StoreID,
+		&i.SessionID,
+		&i.Platform,
+		&i.PlatformUserID,
+		&i.HasPurchaseIntent,
+		&i.MatchedProductID,
+		&i.Result,
+		&i.CommentCreatedAt,
+		&i.CartID,
+		&i.ItemCreatedAt,
+	)
+	return i, err
+}
+
 const listCommentsByEvent = `-- name: ListCommentsByEvent :many
 SELECT id, session_id, event_id, platform, platform_comment_id, platform_user_id, platform_handle, text, has_purchase_intent, matched_product_id, matched_quantity, result, created_at, private_reply_used, hidden, deleted_at FROM live_comments
 WHERE event_id = $1

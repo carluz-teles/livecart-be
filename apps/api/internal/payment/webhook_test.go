@@ -48,6 +48,8 @@ type mockGateway struct {
 	updateErr   error
 	updateCalls []string // captured cart payment statuses passed to the write
 
+	liveEventID string // returned by UpdateCartPaymentStatus / RestoreCancelledCartAsPaid
+
 	restored     bool // RestoreCancelledCartAsPaid return
 	restoreErr   error
 	restoreCalls int
@@ -78,14 +80,14 @@ func (m *mockGateway) CartPaymentStatus(_ context.Context, _ string) (string, er
 	return m.cartStatus, m.cartStatusErr
 }
 
-func (m *mockGateway) UpdateCartPaymentStatus(_ context.Context, _, paymentStatus, _ string, _ *time.Time, _ string) error {
+func (m *mockGateway) UpdateCartPaymentStatus(_ context.Context, _, paymentStatus, _ string, _ *time.Time, _ string) (string, error) {
 	m.updateCalls = append(m.updateCalls, paymentStatus)
-	return m.updateErr
+	return m.liveEventID, m.updateErr
 }
 
-func (m *mockGateway) RestoreCancelledCartAsPaid(_ context.Context, _, _, _, _ string, _ *time.Time, _ string) (bool, error) {
+func (m *mockGateway) RestoreCancelledCartAsPaid(_ context.Context, _, _, _, _ string, _ *time.Time, _ string) (bool, string, error) {
 	m.restoreCalls++
-	return m.restored, m.restoreErr
+	return m.restored, m.liveEventID, m.restoreErr
 }
 
 func (m *mockGateway) CartGMVCents(_ context.Context, _ string) (int64, error) {
@@ -151,6 +153,31 @@ func TestService_ProcessPaymentNotification(t *testing.T) {
 		is.eq(string(events.CartPaid), string(env.Name))
 		is.eq([]string{"paid"}, gw.updateCalls)
 		is.eq(0, len(gw.cancelled))
+	})
+
+	t.Run("paid fact carries the cart's live_event_id from the gateway write", func(t *testing.T) {
+		t.Parallel()
+		is := newAssert(t)
+
+		gw := newMockGateway()
+		gw.provider = stubPaymentProvider{statusResult: &providers.PaymentStatus{
+			Status:            providers.PaymentApproved,
+			ExternalReference: cartID,
+			PaymentID:         paymentID,
+			PaymentMethod:     "pix",
+		}}
+		gw.liveEventID = "22222222-2222-2222-2222-222222222222"
+		svc := newWebhookService(gw)
+
+		err := svc.ProcessPaymentNotification(context.Background(), payment.ProcessPaymentInput{
+			StoreID: "store-1", Provider: "pagarme", PaymentID: paymentID,
+		})
+		is.noErr(err)
+		env, ok := gw.emittedByKey[string(events.CartPaid)+":"+paymentID]
+		if !ok {
+			t.Fatalf("expected cart.paid emitted with key %q; got keys %v", string(events.CartPaid)+":"+paymentID, gw.emitOrder)
+		}
+		is.eq(gw.liveEventID, env.LiveEventID)
 	})
 
 	t.Run("redelivery of the same payment id collapses to one fact", func(t *testing.T) {

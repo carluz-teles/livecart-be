@@ -8,8 +8,8 @@
 -- Emit-time idempotency: a duplicate dedup_key (webhook retry, at-least-once
 -- producer) is a no-op. dedup_key = '' opts out (matches the partial unique
 -- index event_outbox_dedup_key_uniq).
-INSERT INTO event_outbox (event_id, name, source, metadata, payload, trace_id, span_id, dedup_key, queue, schema_version)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+INSERT INTO event_outbox (event_id, name, source, metadata, payload, trace_id, span_id, dedup_key, queue, schema_version, live_event_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 ON CONFLICT (dedup_key) WHERE dedup_key <> '' DO NOTHING;
 
 -- name: MarkOutboxDead :exec

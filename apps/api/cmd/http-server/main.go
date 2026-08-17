@@ -69,6 +69,7 @@ import (
 	"livecart/apps/api/internal/productgroup"
 	"livecart/apps/api/internal/store"
 	"livecart/apps/api/internal/telemetry"
+	"livecart/apps/api/internal/telemetry/exporter"
 	"livecart/apps/api/internal/user"
 	"livecart/apps/api/lib/storage"
 )
@@ -127,6 +128,19 @@ func main() {
 		}
 	}()
 
+	// New Relic custom-events exporter (telemetry dashboard project, Fatia 2).
+	// No-op when NEW_RELIC_LICENSE_KEY is unset — nrListeners is always
+	// constructed (never nil) so it can be wired unconditionally below; every
+	// method checks cfg.Enabled first.
+	nrConfig := exporter.NewConfig(config.NewRelicLicenseKey.String(), config.NewRelicAccountID.String())
+	nrClient := exporter.NewNRClient(nrConfig, log)
+	nrListeners := exporter.NewListeners(nrClient, nrConfig, log)
+	if nrConfig.Enabled {
+		log.Info("new relic telemetry exporter enabled", zap.String("account_id", nrConfig.AccountID))
+	} else {
+		log.Info("new relic telemetry exporter disabled (NEW_RELIC_LICENSE_KEY not set)")
+	}
+
 	databaseURL := config.DatabaseURL.Required()
 	clerkFrontendAPI := config.ClerkFrontendAPI.Required()
 	port := config.Port.StringOr("3001")
@@ -150,6 +164,10 @@ func main() {
 	defer pool.Close()
 
 	queries := sqlc.New(pool)
+	// Telemetry enrichment (Fatia 3): wired here, once *sqlc.Queries exists —
+	// nrListeners was constructed earlier (before the DB pool) so it can be
+	// passed unconditionally into newApp. See Listeners.SetEnricher's doc.
+	nrListeners.SetEnricher(exporter.NewEnricher(queries, log))
 	validate := validator.New()
 	registerCustomValidators(validate)
 	clerkClient := clerk.NewClient(clerkFrontendAPI)
@@ -164,7 +182,7 @@ func main() {
 	// The async event pipeline (asynq client/server + outbox relay) is built and
 	// started inside newApp, where the domain services its consumers dispatch to
 	// are constructed. Its stop hooks are registered on the returned lifecycle.
-	app, lifecycle := newApp(log, pool, queries, validate, clerkClient, emailClient)
+	app, lifecycle := newApp(log, pool, queries, validate, clerkClient, emailClient, nrListeners)
 
 	go func() {
 		if err := app.Listen(":" + port); err != nil {
@@ -311,7 +329,46 @@ func pgTextFromString(s string) pgtype.Text {
 	return pgtype.Text{String: s, Valid: s != ""}
 }
 
-func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate *validator.Validate, clerkClient *clerk.Client, emailClient *email.Client) (*fiber.App, *appLifecycle) {
+// telemetryDispatchTimeout bounds the detached goroutine dispatchTelemetryAsync
+// spawns — long enough for NRClient's own worst case (maxRetries=2 *
+// requestTimeout=5s can still exceed this), short enough that a stuck New
+// Relic call never lingers indefinitely in the background.
+const telemetryDispatchTimeout = 3 * time.Second
+
+// dispatchTelemetryAsync runs nrListeners.Dispatch off the caller's goroutine,
+// on a context decoupled from ctx via context.WithoutCancel. cart.paid,
+// cart.refunded, cart.checkout_armed, cart.expired, cart.cancelled and
+// event.ended are the facts where Dispatch is called inline ahead of
+// business-critical fan-out (order materialisation, coupon confirmation, GMV
+// ledger, waitlist, receipt/refund email, ERP reversal, the cart.expire ETA
+// timer / ArmEventWaitlistClose) — all sharing the same asynq task deadline
+// (QueueNormal: 15s). Running Dispatch synchronously there let a slow/
+// unavailable New Relic (up to maxRetries=2 * requestTimeout=5s) burn most of
+// that budget before business logic even started, which is exactly what
+// NRClient's own timeout comment ("Telemetry export must never stall the
+// asynq consumer pool") is meant to prevent. Fire-and-forget here, bounded by
+// telemetryDispatchTimeout, restores that guarantee without touching the other
+// facts (event.created, session.*, payment.failed, gmv.recorded/refunded),
+// where Dispatch is already the only thing the handler does (registry.go's
+// logAndExport).
+func dispatchTelemetryAsync(ctx context.Context, nrListeners *exporter.Listeners, env events.Envelope, log *zap.Logger) {
+	go func() {
+		detachedCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), telemetryDispatchTimeout)
+		defer cancel()
+
+		nrListeners.Dispatch(detachedCtx, env)
+
+		if detachedCtx.Err() != nil {
+			logger.From(ctx, log).Warn("new relic exporter: async dispatch exceeded detached timeout",
+				zap.String("event", string(env.Name)),
+				zap.String("event_id", env.EventID),
+				zap.Duration("timeout", telemetryDispatchTimeout),
+			)
+		}
+	}()
+}
+
+func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate *validator.Validate, clerkClient *clerk.Client, emailClient *email.Client, nrListeners *exporter.Listeners) (*fiber.App, *appLifecycle) {
 	lifecycle := &appLifecycle{log: log}
 	app := fiber.New(fiber.Config{
 		// Single error handler: handlers `return err` and this renders the
@@ -996,7 +1053,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		redisOpt = parsed
 	}
 	eventsClient := events.NewClient(redisOpt, log)
-	eventsServer := events.NewServer(events.ServerConfig{RedisOpt: redisOpt, Logger: log})
+	eventsServer := events.NewServer(events.ServerConfig{RedisOpt: redisOpt, Logger: log, Exporter: nrListeners})
 	if integrationSvc != nil {
 		// Inverted comment flow: the webhook dispatches comment.received; the
 		// domain work (cart/stock/waitlist) runs here, idempotent by comment_id.
@@ -1009,7 +1066,17 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(env.Payload, &input); err != nil {
 				return asynq.SkipRetry
 			}
-			return liveSvc.ProcessInstagramComment(ctx, input)
+			err := liveSvc.ProcessInstagramComment(ctx, input)
+			// Telemetry export (Fatia 4). Dispatched AFTER ProcessInstagramComment
+			// returns — not before, unlike cart.paid's dispatchTelemetryAsync call
+			// site — because comment.received's own handler is what creates the
+			// cart (AddToCart, synchronous, no separate outbox hop). The exporter's
+			// correlation query (exporter.OnCommentReceived) needs that cart row —
+			// and the live_comments row it also reads — to already be committed.
+			// Dispatching earlier would race an empty result. Still async/detached
+			// (dispatchTelemetryAsync) so New Relic never shares this task's budget.
+			dispatchTelemetryAsync(ctx, nrListeners, env, log)
+			return err
 		})
 
 		// Mesmo fluxo invertido para DM: o webhook grava message.received e
@@ -1056,6 +1123,14 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
 				return asynq.SkipRetry
 			}
+			// Telemetry export (Fatia 2). cart.paid is claimed exclusively by this
+			// composition-root registration (see registry.go's comment), so the
+			// exporter is dispatched here instead of via RegisterHandlers'
+			// logAndExport — asynq panics on a duplicate pattern otherwise.
+			// Dispatched async (own detached deadline) — see
+			// dispatchTelemetryAsync's doc: cart.paid's business fan-out below must
+			// never share its 15s task budget with New Relic's retry/timeout budget.
+			dispatchTelemetryAsync(ctx, nrListeners, env, log)
 			var p struct {
 				CartID          string          `json:"cart_id"`
 				StoreID         string          `json:"store_id"`
@@ -1114,6 +1189,13 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
 				return asynq.SkipRetry
 			}
+			// Telemetry export (Fatia 3). cart.refunded is claimed exclusively by
+			// this composition-root registration, so the exporter is dispatched
+			// here — same reasoning as cart.paid above. Async/detached (see
+			// dispatchTelemetryAsync's doc): the Order flip + coupon refund +
+			// customer fan-out below must never share its task budget with New
+			// Relic's retry/timeout budget.
+			dispatchTelemetryAsync(ctx, nrListeners, env, log)
 			var p struct {
 				CartID  string `json:"cart_id"`
 				StoreID string `json:"store_id"`
@@ -1204,6 +1286,12 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
 				return asynq.SkipRetry
 			}
+			// Telemetry export (Fatia 3). cart.cancelled is claimed exclusively by
+			// this composition-root registration, so the exporter is dispatched
+			// here — same reasoning as cart.paid above. Async/detached: the coupon
+			// release + ERP reversal + Order flip below must never share its task
+			// budget with New Relic's retry/timeout budget.
+			dispatchTelemetryAsync(ctx, nrListeners, env, log)
 			var p struct {
 				CartID  string `json:"cart_id"`
 				StoreID string `json:"store_id"`
@@ -1250,6 +1338,12 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
 				return asynq.SkipRetry
 			}
+			// Telemetry export (Fatia 3). cart.expired is claimed exclusively by
+			// this composition-root registration, so the exporter is dispatched
+			// here — same reasoning as cart.paid above. Async/detached: the coupon
+			// release + ERP reversal below must never share its task budget with
+			// New Relic's retry/timeout budget.
+			dispatchTelemetryAsync(ctx, nrListeners, env, log)
 			var p struct {
 				CartID  string `json:"cart_id"`
 				StoreID string `json:"store_id"`
@@ -1315,6 +1409,12 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
 				return asynq.SkipRetry
 			}
+			// Telemetry export (Fatia 3). cart.checkout_armed is claimed
+			// exclusively by this composition-root registration, so the exporter
+			// is dispatched here — same reasoning as cart.paid above. Async/
+			// detached: arming the cart.expire ETA timer below must never share
+			// its task budget with New Relic's retry/timeout budget.
+			dispatchTelemetryAsync(ctx, nrListeners, env, log)
 			var p struct {
 				CartID string `json:"cart_id"`
 			}
@@ -1375,6 +1475,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
 				return asynq.SkipRetry
 			}
+			// Telemetry export (Fatia 2). event.ended is claimed exclusively by this
+			// composition-root registration (RN-32 comment above), so the exporter is
+			// dispatched here — same reasoning as cart.paid above. Async/detached —
+			// see dispatchTelemetryAsync's doc.
+			dispatchTelemetryAsync(ctx, nrListeners, env, log)
 			var p struct {
 				EventID string `json:"event_id"`
 			}

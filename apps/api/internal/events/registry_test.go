@@ -18,7 +18,7 @@ import (
 // handlers here that 11b-2 removed; this guards against them coming back.
 func TestRegisterHandlers_LeavesCompositionRootFactsFree(t *testing.T) {
 	mux := asynq.NewServeMux()
-	RegisterHandlers(mux, zap.NewNop())
+	RegisterHandlers(mux, zap.NewNop(), nil)
 
 	noop := func(context.Context, *asynq.Task) error { return nil }
 
@@ -35,7 +35,7 @@ func TestRegisterHandlers_LeavesCompositionRootFactsFree(t *testing.T) {
 			}()
 			// A fresh mux per fact: proves each is unclaimed by RegisterHandlers.
 			m := asynq.NewServeMux()
-			RegisterHandlers(m, zap.NewNop())
+			RegisterHandlers(m, zap.NewNop(), nil)
 			m.HandleFunc(string(name), noop)
 		}()
 	}

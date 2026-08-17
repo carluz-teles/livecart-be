@@ -125,3 +125,23 @@ Um evento **sobrevive** se for: **(C)** command num fluxo, **(F)** fact canônic
 3. **Depreciar** os eventos do §5 (marcar deprecated → remover após 1 ciclo sem uso).
 4. **Renomear** commands/facts (P0/P1 da auditoria) — barato agora, sem consumer externo.
 5. **Fase 11:** o Analytics exporter (L4) → New Relic fecha o loop dos facts que sobreviveram.
+
+---
+
+## 8. Fase 11 — status (dashboard New Relic)
+
+Implementada em 6 fatias (branch `stg`, não commitada ainda):
+
+1. Propagação de `live_event_id` (context/Envelope/outbox/span) — `lib/logger/context.go`, `internal/events/types.go`.
+2. Exporter básico (`internal/telemetry/exporter/`) — client, config, listeners `On<Fato>`, dispatch síncrono para fatos "só telemetria" e assíncrono desacoplado (`dispatchTelemetryAsync`) para fatos com fan-out de negócio (`cart.paid`, `event.ended`, `cart.checkout_armed/expired/cancelled/refunded`).
+3. Enrich de GMV/checkout_duration_ms/item breakdown/fee-plan-billable.
+4. Correlação comentário→carrinho (janela 120s, via `cart_item_events` para cobrir carrinhos já abertos).
+5. Dashboard Terraform (`infra/terraform/newrelic/`), aplicado na conta 8291202 — 2 pages (Macro/Micro), 19 widgets.
+6. **Pendente (esta seção):** logs/traces linkáveis por `live_event_id` end-to-end.
+
+**O que já funciona:** `zap` já emite `store_id`/`live_event_id`/`trace_id` como campos estruturados em todo log (via `logger.From(ctx)`), desde a Fatia 1 — confirmado em `lib/logger/context.go`. Span HTTP também carrega `live_event_id` como atributo (`internal/telemetry/middleware.go`).
+
+**O que falta para logs/traces aparecerem no New Relic (fora do código Go, é infra de plataforma):**
+- Hoje os logs (`zap`, JSON estruturado) vão para stdout; o roteamento pro New Relic Logs depende de um log drain configurado na plataforma de deploy (Railway — conforme [[deploy-via-git-push]]), não existe hoje.
+- Os traces OTEL (`internal/telemetry/otel.go`) exportam via `OTEL_EXPORTER_OTLP_ENDPOINT` — hoje vazio em produção (no-op) ou apontando pra um endpoint não-New-Relic; para aparecerem no New Relic APM/Distributed Tracing, é preciso configurar esse endpoint para o OTLP receiver da New Relic (`otlp.nr-data.net:4317`, com o `NEW_RELIC_LICENSE_KEY` já disponível em `.env`) — mudança de configuração de ambiente, não de código.
+- Ação recomendada: configurar `OTEL_EXPORTER_OTLP_ENDPOINT`/headers no Railway (staging primeiro) e um log drain para New Relic Logs; depois disso, os widgets de "logs por live_event_id"/"traces linkáveis" do dashboard passam a ter dado real.

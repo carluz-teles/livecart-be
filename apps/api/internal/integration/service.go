@@ -3948,7 +3948,7 @@ func (s *Service) ResolvePaymentProvider(ctx context.Context, storeID, provider 
 // RestoreCancelledCartAsPaid satisfies payment.CartPaymentGateway (LIV-84 inverse
 // race): delega ao repo, que numa única tx restaura o cart cancelado pelo lojista
 // para pago e retoma o estoque. Mesmo repo/pool do resto do consumer.
-func (s *Service) RestoreCancelledCartAsPaid(ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (bool, error) {
+func (s *Service) RestoreCancelledCartAsPaid(ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (bool, string, error) {
 	return s.repo.RestoreCancelledCartAsPaid(ctx, cartID, storeID, paymentStatus, paymentID, paidAt, paymentMethod)
 }
 
@@ -3967,8 +3967,9 @@ func (s *Service) CartPaymentStatus(ctx context.Context, cartID string) (string,
 
 // UpdateCartPaymentStatus applies the guarded cart payment write. It returns
 // paymentdomain.ErrCartNotPayable (the sentinel the repo now returns) when the
-// cart expired/cancelled between the charge and the webhook.
-func (s *Service) UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) error {
+// cart expired/cancelled between the charge and the webhook, and the cart's
+// live_event_id (from the same RETURNING row) on success.
+func (s *Service) UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (string, error) {
 	return s.repo.UpdateCartPaymentStatus(ctx, cartID, paymentStatus, paymentID, paidAt, paymentMethod)
 }
 

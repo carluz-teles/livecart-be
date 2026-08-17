@@ -2160,12 +2160,25 @@ func (r *Repository) ExpireCartAndReleaseStock(ctx context.Context, cartID, stor
 		// cart.expired in the SAME tx: committed atomically with the flip + stock
 		// release, so it is never lost. store_id lets the ERP reversal consumer
 		// (ReactCartExpiredERP) act without a cart→store lookup.
-		if err := events.EmitInternal(ctx, q, events.CartExpired, "cart.expired:"+cartID, struct {
+		//
+		// events.Emit direto (não EmitInternal): LiveEventID é um campo de
+		// primeira classe do Envelope, e eventID já está em mãos (sem query extra).
+		cartExpiredPayload, err := json.Marshal(struct {
 			CartID          string   `json:"cart_id"`
 			StoreID         string   `json:"store_id"`
 			EventID         string   `json:"event_id"`
 			FreedProductIDs []string `json:"freed_product_ids"`
-		}{CartID: cartID, StoreID: storeID, EventID: eventID, FreedProductIDs: freed}); err != nil {
+		}{CartID: cartID, StoreID: storeID, EventID: eventID, FreedProductIDs: freed})
+		if err != nil {
+			return fmt.Errorf("marshaling cart.expired payload: %w", err)
+		}
+		if err := events.Emit(ctx, q, events.Envelope{
+			Name:        events.CartExpired,
+			Source:      events.SourceInternal,
+			DedupKey:    "cart.expired:" + cartID,
+			LiveEventID: eventID,
+			Payload:     cartExpiredPayload,
+		}); err != nil {
 			return fmt.Errorf("emitting cart.expired: %w", err)
 		}
 
@@ -2266,13 +2279,25 @@ func (r *Repository) CancelCartAndReleaseStock(ctx context.Context, cartID, stor
 		// engoliria em silêncio um cancelamento legítimo, deixando-o sem estorno
 		// de ERP. A emissão já é exatamente-uma-vez por cancelamento: só
 		// acontece dentro do tx do flip guard-first, que um retry não repete.
-		if err := events.EmitInternal(ctx, q, events.CartCancelled, "", struct {
+		// events.Emit direto (não EmitInternal): LiveEventID é campo de primeira
+		// classe do Envelope, e eventID já está em mãos (sem query extra).
+		cartCancelledPayload, err := json.Marshal(struct {
 			CartID          string   `json:"cart_id"`
 			StoreID         string   `json:"store_id"`
 			EventID         string   `json:"event_id"`
 			Reason          string   `json:"reason"`
 			FreedProductIDs []string `json:"freed_product_ids"`
-		}{CartID: cartID, StoreID: storeID, EventID: eventID, Reason: CancelReasonStore, FreedProductIDs: freed}); err != nil {
+		}{CartID: cartID, StoreID: storeID, EventID: eventID, Reason: CancelReasonStore, FreedProductIDs: freed})
+		if err != nil {
+			return fmt.Errorf("marshaling cart.cancelled payload: %w", err)
+		}
+		if err := events.Emit(ctx, q, events.Envelope{
+			Name:        events.CartCancelled,
+			Source:      events.SourceInternal,
+			DedupKey:    "",
+			LiveEventID: eventID,
+			Payload:     cartCancelledPayload,
+		}); err != nil {
 			return fmt.Errorf("emitting cart.cancelled: %w", err)
 		}
 
@@ -2294,12 +2319,16 @@ func (r *Repository) CancelCartAndReleaseStock(ctx context.Context, cartID, stor
 // Devolve restored=false quando o cart não é um cancelamento de lojista
 // pendente de pagamento — o caller trata como "não aplicável" e segue o fluxo
 // normal (ou o skip benigno de ErrCartNotPayable).
+//
+// Também devolve o live_event_id do cart (a partir do RETURNING já feito
+// dentro da tx, sem query extra) — o cart.paid emitido pelo caller logo depois
+// do restore precisa dele.
 func (r *Repository) RestoreCancelledCartAsPaid(
 	ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string,
-) (restored bool, err error) {
+) (restored bool, liveEventID string, err error) {
 	cID, err := parseUUID(cartID)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	var paidAtPg pgtype.Timestamptz
 	if paidAt != nil {
@@ -2375,12 +2404,13 @@ func (r *Repository) RestoreCancelledCartAsPaid(
 		}
 
 		restored = true
+		liveEventID = eventID
 		return nil
 	})
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
-	return restored, nil
+	return restored, liveEventID, nil
 }
 
 // GetCartByEventAndUser gets a cart for a specific event and user.
@@ -2706,10 +2736,13 @@ func (r *Repository) GetCartTokenByID(ctx context.Context, cartID string) (strin
 // two breaks paid-order idempotency — every paid cart was being skipped because
 // finalize saw a populated external_order_id and assumed the ERP order had
 // already been created.
-func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string, paymentStatus string, paymentID string, paidAt *time.Time, paymentMethod string) error {
+// It returns the cart's live_event_id from the RETURNING row — the cart.paid
+// (etc.) fact emitted right after by the caller needs it and this avoids a
+// second query.
+func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string, paymentStatus string, paymentID string, paidAt *time.Time, paymentMethod string) (liveEventID string, err error) {
 	cID, err := parseUUID(cartID)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	var paidAtPg pgtype.Timestamptz
@@ -2717,7 +2750,7 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 		paidAtPg = pgtype.Timestamptz{Time: *paidAt, Valid: true}
 	}
 
-	_, err = r.queries.UpdateCartPayment(ctx, sqlc.UpdateCartPaymentParams{
+	cart, err := r.queries.UpdateCartPayment(ctx, sqlc.UpdateCartPaymentParams{
 		ID:            cID,
 		PaymentStatus: pgtype.Text{String: paymentStatus, Valid: true},
 		CheckoutID:    pgtype.Text{String: paymentID, Valid: paymentID != ""},
@@ -2729,11 +2762,11 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 			// Guard da query recusou: cart expirado/cancelado. Não é falha.
 			// Sentinel vive no pacote payment (B1d) — fonte única, consumido pelo
 			// webhook de pagamento que agora mora lá.
-			return paymentdomain.ErrCartNotPayable
+			return "", paymentdomain.ErrCartNotPayable
 		}
-		return fmt.Errorf("updating cart payment status: %w", err)
+		return "", fmt.Errorf("updating cart payment status: %w", err)
 	}
-	return nil
+	return uuidToString(cart.EventID), nil
 }
 
 // =============================================================================

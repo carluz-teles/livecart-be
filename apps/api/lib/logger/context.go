@@ -16,6 +16,12 @@ const (
 	// TraceIDKey carries the OTEL trace id. The telemetry middleware sets it in
 	// c.Locals per request so every log correlates with its distributed trace.
 	TraceIDKey = "trace_id"
+	// LiveEventIDKey carries the live_events.id (the "live event"/campaign
+	// domain entity — NOT the outbox Envelope.EventID, which identifies an
+	// async event instance for idempotency). Set by WithLiveEvent for
+	// workers/consumers, and by c.Locals in the telemetry middleware for
+	// requests scoped to a live event.
+	LiveEventIDKey = "live_event_id"
 )
 
 // setUserValuer é o RequestCtx do fasthttp. Quando o ctx é o próprio request
@@ -45,6 +51,21 @@ func WithStore(ctx context.Context, storeID, storeSlug string) context.Context {
 	return ctx
 }
 
+// WithLiveEvent devolve um contexto que carrega o live event para os logs.
+// Mesmo padrão de WithStore: workers/consumers/webhooks que resolvem o live
+// event fora do middleware HTTP chamam isto para popular a mesma chave que
+// From lê.
+func WithLiveEvent(ctx context.Context, liveEventID string) context.Context {
+	if uv, ok := ctx.(setUserValuer); ok {
+		if liveEventID != "" {
+			uv.SetUserValue(LiveEventIDKey, liveEventID)
+		}
+		return ctx // Value() do fasthttp já lê os UserValues
+	}
+	ctx = context.WithValue(ctx, LiveEventIDKey, liveEventID) //nolint:staticcheck // chave string casa com c.Locals
+	return ctx
+}
+
 // From devolve o logger enriquecido com store_id e store_slug quando o
 // contexto os carrega; caso contrário devolve o base intocado. Nunca retorna
 // nil e aceita ctx nil, então é seguro em qualquer call site.
@@ -52,7 +73,7 @@ func From(ctx context.Context, base *zap.Logger) *zap.Logger {
 	if ctx == nil {
 		return base
 	}
-	fields := make([]zap.Field, 0, 3)
+	fields := make([]zap.Field, 0, 4)
 	if id, ok := ctx.Value(StoreIDKey).(string); ok && id != "" {
 		fields = append(fields, zap.String("store_id", id))
 	}
@@ -61,6 +82,9 @@ func From(ctx context.Context, base *zap.Logger) *zap.Logger {
 	}
 	if traceID, ok := ctx.Value(TraceIDKey).(string); ok && traceID != "" {
 		fields = append(fields, zap.String("trace_id", traceID))
+	}
+	if liveEventID, ok := ctx.Value(LiveEventIDKey).(string); ok && liveEventID != "" {
+		fields = append(fields, zap.String("live_event_id", liveEventID))
 	}
 	if len(fields) == 0 {
 		return base

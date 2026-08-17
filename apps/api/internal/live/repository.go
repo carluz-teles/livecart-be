@@ -177,10 +177,11 @@ func emitSessionCreated(ctx context.Context, q *sqlc.Queries, s sqlc.LiveSession
 		return fmt.Errorf("marshaling session.created payload: %w", err)
 	}
 	return events.Emit(ctx, q, events.Envelope{
-		Name:     events.SessionCreated,
-		Source:   events.SourceInternal,
-		DedupKey: "session.created:" + s.ID.String(),
-		Payload:  payload,
+		Name:        events.SessionCreated,
+		Source:      events.SourceInternal,
+		DedupKey:    "session.created:" + s.ID.String(),
+		LiveEventID: s.EventID.String(),
+		Payload:     payload,
 	})
 }
 
@@ -206,10 +207,11 @@ func emitEventCreated(ctx context.Context, q *sqlc.Queries, e sqlc.LiveEvent, se
 		return fmt.Errorf("marshaling event.created payload: %w", err)
 	}
 	return events.Emit(ctx, q, events.Envelope{
-		Name:     events.EventEventCreated,
-		Source:   events.SourceInternal,
-		DedupKey: "event.created:" + e.ID.String(),
-		Payload:  payload,
+		Name:        events.EventEventCreated,
+		Source:      events.SourceInternal,
+		DedupKey:    "event.created:" + e.ID.String(),
+		LiveEventID: e.ID.String(),
+		Payload:     payload,
 	})
 }
 
@@ -796,10 +798,11 @@ func (r *Repository) EndEvent(ctx context.Context, id, storeID string) (EventRow
 		return EventRow{}, fmt.Errorf("marshaling event.ended payload: %w", err)
 	}
 	if err := events.Emit(ctx, qtx, events.Envelope{
-		Name:     events.EventEventEnded,
-		Source:   events.SourceInternal,
-		DedupKey: "event.ended:" + row.ID.String(),
-		Payload:  payload,
+		Name:        events.EventEventEnded,
+		Source:      events.SourceInternal,
+		DedupKey:    "event.ended:" + row.ID.String(),
+		LiveEventID: row.ID.String(),
+		Payload:     payload,
 	}); err != nil {
 		return EventRow{}, err
 	}
@@ -1006,10 +1009,11 @@ func (r *Repository) EndSession(ctx context.Context, id string) (SessionRow, err
 		return SessionRow{}, fmt.Errorf("marshaling session.ended payload: %w", err)
 	}
 	if err := events.Emit(ctx, qtx, events.Envelope{
-		Name:     events.SessionEnded,
-		Source:   events.SourceInternal,
-		DedupKey: "session.ended:" + row.ID.String(),
-		Payload:  payload,
+		Name:        events.SessionEnded,
+		Source:      events.SourceInternal,
+		DedupKey:    "session.ended:" + row.ID.String(),
+		LiveEventID: row.EventID.String(),
+		Payload:     payload,
 	}); err != nil {
 		return SessionRow{}, err
 	}
@@ -1404,10 +1408,11 @@ func emitCartEvent(ctx context.Context, q *sqlc.Queries, name events.Name, cartI
 		return fmt.Errorf("marshaling %s payload: %w", name, err)
 	}
 	return events.Emit(ctx, q, events.Envelope{
-		Name:     name,
-		Source:   events.SourceInternal,
-		DedupKey: dedupKey,
-		Payload:  payload,
+		Name:        name,
+		Source:      events.SourceInternal,
+		DedupKey:    dedupKey,
+		LiveEventID: eventID,
+		Payload:     payload,
 	})
 }
 

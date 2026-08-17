@@ -1,7 +1,10 @@
 package telemetry
 
 import (
+	"strings"
+
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
@@ -33,6 +36,10 @@ func Middleware() fiber.Handler {
 		if sc := span.SpanContext(); sc.HasTraceID() {
 			c.Locals(logger.TraceIDKey, sc.TraceID().String())
 		}
+		if liveEventID := resolveLiveEventID(c); liveEventID != "" {
+			span.SetAttributes(attribute.String("live_event_id", liveEventID))
+			c.Locals(logger.LiveEventIDKey, liveEventID)
+		}
 		c.SetUserContext(ctx)
 
 		err := c.Next()
@@ -43,6 +50,39 @@ func Middleware() fiber.Handler {
 		}
 		return err
 	}
+}
+
+// resolveLiveEventID extracts the live_events.id from the raw request path
+// for routes scoped to a live event: /events/:id/... and its /lives/:id/...
+// alias (internal/live/handler.go RegisterRoutes), plus
+// /events/:eventId/coupons (internal/coupon/handler.go). It parses c.Path()
+// directly instead of c.Route()/c.Params() because this middleware runs
+// BEFORE Fiber resolves the leaf route (c.Next() hasn't executed yet), so the
+// route's own path params are not populated at this point — see Fiber's
+// router.next(), which sets c.route/c.values only as each stack entry is
+// matched during the c.Next() walk.
+//
+// The segment right after "/events" or "/lives" is only treated as a
+// live_event_id when it parses as a UUID (live_events.id's column type). This
+// is a robust allowlist: any static sub-route — current ("/", "/stats",
+// "/posts") or future — is a non-UUID literal and is therefore ignored
+// without needing to keep a blocklist in sync with internal/live/handler.go.
+func resolveLiveEventID(c *fiber.Ctx) string {
+	segments := strings.Split(c.Path(), "/")
+	for i, seg := range segments {
+		if seg != "events" && seg != "lives" {
+			continue
+		}
+		if i+1 >= len(segments) {
+			return ""
+		}
+		candidate := segments[i+1]
+		if _, err := uuid.Parse(candidate); err != nil {
+			return ""
+		}
+		return candidate
+	}
+	return ""
 }
 
 // fiberHeaderCarrier adapts a Fiber request's headers to the OTEL
