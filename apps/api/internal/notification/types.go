@@ -242,7 +242,7 @@ func DefaultSettings() Settings {
 		// único lugar onde aparece o que de fato foi levado.
 		WaitlistJoined: &TemplateSettings{
 			Enabled:  true,
-			Template: "Oi {handle}! ⏳\n\n{produto} entrou na fila de espera — o estoque acabou antes de fechar seu pedido.\n\nAssim que liberar eu coloco no seu carrinho e te aviso. Não precisa pedir de novo.\n\nCarrinho: {total_itens} itens — {total}\n{link} 💜",
+			Template: "Oi {handle}! ⏳\n\n{produto} entrou na fila de espera — o estoque acabou antes de fechar seu pedido.\n\nAssim que liberar eu coloco no seu carrinho automaticamente. Não precisa pedir de novo — é só ficar de olho no seu carrinho pelo link.\n\nCarrinho: {total_itens} itens — {total}\n{link} 💜",
 		},
 		WaitlistNotified: &TemplateSettings{
 			Enabled:  true,

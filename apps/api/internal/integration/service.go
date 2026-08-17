@@ -5626,26 +5626,21 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	s.inventory().ProcessWaitlistForProduct(ctx, eventID, productID, storeID)
 }
 
-// NotifyWaitlistPromoted satisfies inventory.WaitlistCollaborators: it maps the
-// neutral DTO back to the integration DM payload and sends the "produto liberou"
-// DM through sendWaitlistNotifiedDM (which stays here — it reads
-// s.notificationService LAZILY, so the setter-wired service is picked up at call
-// time; NIL-GUARD LAZY). No-op when the notification service is unwired.
-func (s *Service) NotifyWaitlistPromoted(ctx context.Context, in inventory.WaitlistNotifiedInput) {
-	s.sendWaitlistNotifiedDM(ctx, sendWaitlistNotifiedInput{
-		StoreID:        in.StoreID,
-		EventID:        in.EventID,
-		EventTitle:     in.EventTitle,
-		CartID:         in.CartID,
-		CartToken:      in.CartToken,
-		PlatformUserID: in.PlatformUserID,
-		PlatformHandle: in.PlatformHandle,
-		ProductName:    in.ProductName,
-		ProductKeyword: in.ProductKeyword,
-		Quantity:       in.Quantity,
-		TTL:            in.TTL,
-	})
-}
+// NotifyWaitlistPromoted satisfies inventory.WaitlistCollaborators and does
+// nothing on purpose: a promoção da fila NÃO avisa o comprador.
+//
+// Não é omissão nossa, é regra do Instagram. A janela de 24h para mandar DM só
+// abre quando o COMPRADOR manda mensagem para a conta; comentar não abre —
+// comentário concede um private reply, permissão distinta e de uso único, já
+// gasta no aviso de entrada na fila. Quando o estoque volta não existe
+// comentário novo para responder, então sobrava o DM, e ele voltava 403
+// "outside of allowed window" em 100% das tentativas (3 de 3 na live de 16/08).
+//
+// O item continua entrando no carrinho sozinho e o prazo continua sendo
+// estendido — o que muda é a promessa: o texto da entrada na fila agora manda
+// o comprador ficar de olho no carrinho, em vez de garantir um aviso que a
+// plataforma não deixa entregar.
+func (s *Service) NotifyWaitlistPromoted(context.Context, inventory.WaitlistNotifiedInput) {}
 
 // CancelWaitlistForCartProduct mata a fila de um produto do carrinho. Chamada
 // pelo checkout quando a redução de quantidade esvazia a parcela em fila: sem
@@ -5689,101 +5684,6 @@ func (s *Service) ExpireNotifiedWaitlistSweep(ctx context.Context) (int, error) 
 // integration.Service.
 func (s *Service) ProcessWaitlistAfterStockWebhook(ctx context.Context, storeID, externalSource, externalProductID string) error {
 	return s.inventory().ProcessWaitlistAfterStockWebhook(ctx, storeID, externalSource, externalProductID)
-}
-
-// sendWaitlistNotifiedInput é o payload da DM "produto liberou".
-type sendWaitlistNotifiedInput struct {
-	StoreID        string
-	EventID        string
-	EventTitle     string
-	CartID         string
-	CartToken      string
-	PlatformUserID string
-	PlatformHandle string
-	ProductName    string
-	ProductKeyword string
-	Quantity       int
-	TTL            time.Duration
-	// DeadlineAt é o novo expires_at do carrinho depois da extensão — o
-	// {prazo_final} que a mensagem anuncia.
-	DeadlineAt time.Time
-}
-
-func (s *Service) sendWaitlistNotifiedDM(ctx context.Context, input sendWaitlistNotifiedInput) {
-	if s.notificationService == nil {
-		return
-	}
-	shouldNotify, err := s.notificationService.ShouldNotify(ctx, input.StoreID, notification.TypeWaitlistNotified, false)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to check notification settings for waitlist",
-			zap.String("store_id", input.StoreID),
-			zap.Error(err),
-		)
-		return
-	}
-	if !shouldNotify {
-		return
-	}
-
-	storeInfo, err := s.repo.GetStoreInfo(ctx, input.StoreID)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to get store info for waitlist notification",
-			zap.String("store_id", input.StoreID),
-			zap.Error(err),
-		)
-		return
-	}
-
-	frontendURL := config.FrontendURL.StringOr("http://localhost:3000")
-	checkoutURL := fmt.Sprintf("%s/cart/%s", frontendURL, input.CartToken)
-
-	vars := notification.TemplateVariables{
-		Handle:     "@" + input.PlatformHandle,
-		Produto:    input.ProductName,
-		Keyword:    input.ProductKeyword,
-		Quantidade: input.Quantity,
-		Link:       checkoutURL,
-		Loja:       storeInfo.Name,
-		ExpiraEm:   notification.FormatExpiryMinutes(int(input.TTL.Minutes())),
-		LiveTitulo: input.EventTitle,
-		// {tempo_extra} é o prazo GANHO pela fila, e {expira_em} continua
-		// existindo para não quebrar template já salvo. São o mesmo número com
-		// nomes diferentes de propósito: o texto novo fala de ganho ("ganhei
-		// mais 30 minutos pra você"), o antigo falava de limite.
-		TempoExtra: notification.FormatExpiryMinutes(int(input.TTL.Minutes())),
-	}
-	if !input.DeadlineAt.IsZero() {
-		vars.PrazoFinal = live.FormatBRT(input.DeadlineAt)
-	}
-	if items, cents, err := s.repo.GetCartTotals(ctx, input.CartID); err == nil {
-		vars.TotalItens = items
-		vars.Total = notification.FormatCurrency(cents)
-		vars.TotalCents = cents
-	}
-
-	result, err := s.notificationService.Send(ctx, notification.SendInput{
-		StoreID:          input.StoreID,
-		EventID:          input.EventID,
-		CartID:           input.CartID,
-		CartToken:        input.CartToken,
-		PlatformUserID:   input.PlatformUserID,
-		PlatformHandle:   input.PlatformHandle,
-		NotificationType: notification.TypeWaitlistNotified,
-		Variables:        vars,
-	})
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("waitlist notification send error",
-			zap.String("store_id", input.StoreID),
-			zap.String("cart_id", input.CartID),
-			zap.Error(err),
-		)
-		return
-	}
-	logger.From(ctx, s.logger).Info("waitlist notification dispatched",
-		zap.String("store_id", input.StoreID),
-		zap.String("cart_id", input.CartID),
-		zap.String("status", string(result.Status)),
-	)
 }
 
 // =============================================================================
