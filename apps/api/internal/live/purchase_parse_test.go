@@ -354,6 +354,16 @@ var casosDaLive = []casoDeComentario{
 	{"3 1213", []PurchaseItem{{"1213", 3}}},
 	{"quero 5 1000 e 1005", []PurchaseItem{{"1000", 5}, {"1005", 1}}},
 	{"quero 2 unidades", []PurchaseItem{{"", 2}}},
+
+	// Três produtos numa tacada, em cada separador que as pessoas usam. A
+	// quebra de linha é a mais comum quando a lista é longa: elas escrevem um
+	// por linha.
+	{"1130 2x, 1207 6X, 1161 2 X", []PurchaseItem{{"1130", 2}, {"1207", 6}, {"1161", 2}}},
+	{"1130 2x 1207 6X 1161 2 X", []PurchaseItem{{"1130", 2}, {"1207", 6}, {"1161", 2}}},
+	{"1130 2x\n1207 6X\n1161 2 X", []PurchaseItem{{"1130", 2}, {"1207", 6}, {"1161", 2}}},
+	{"1130 2x / 1207 6X / 1161 2 X", []PurchaseItem{{"1130", 2}, {"1207", 6}, {"1161", 2}}},
+	{"quero 1130 2x, 1207 6X e 1161 2 X", []PurchaseItem{{"1130", 2}, {"1207", 6}, {"1161", 2}}},
+	{"1024x3, 1303x3, 1208 × 4", []PurchaseItem{{"1024", 3}, {"1303", 3}, {"1208", 4}}},
 }
 
 func TestParsePurchaseItems_CorpusDaLive(t *testing.T) {
