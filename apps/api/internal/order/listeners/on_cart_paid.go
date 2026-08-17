@@ -159,6 +159,14 @@ func (l *Listener) createPaidOrder(
 		PaidAt:           cart.PaidAt,
 		CustomerSnapshot: customerSnap,
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Perdemos a corrida: outro worker materializou este carrinho entre a
+		// nossa checagem e o INSERT. A Order existe e está completa — não há o
+		// que refazer, e devolver erro aqui só produziria uma retentativa que
+		// perderia a corrida de novo.
+		log.Info("OnCartPaid: order materialized concurrently, nothing to do")
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("order OnCartPaid: insert order: %w", err)
 	}
