@@ -51,6 +51,7 @@ type Service struct {
 	blockChecker    BlockedHandleChecker
 	cartCanceller   CartCanceller
 	itemEditor      CartItemEditor
+	manualPayment   ManualPaymentConfirmer
 }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {

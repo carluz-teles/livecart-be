@@ -225,6 +225,10 @@ func ordinalSuffix(n int) string {
 //     as DomainError(status, httpx.Code…, msg); only a conscious reviewer adds a
 //     genuinely code-less not-found/validation/config throw here.
 var baselineRawThrows = map[string]bool{
+	// Confirmação manual de pagamento: not-found do carrinho e a validação de
+	// "sem itens". A tela mostra a mensagem do servidor; não há ramo a tomar.
+	"payment.Service.ConfirmManualPayment:\"pedido não encontrado\"":               true,
+	"payment.Service.ConfirmManualPayment:\"pedido sem itens para enviar ao ERP\"": true,
 	// Edição de itens pelo painel: not-found do escopo de loja, e um guarda
 	// defensivo para carrinho sem token (estado que a criação não produz).
 	"order.Service.resolveEditableCartToken:\"pedido não encontrado\"":                   true,
