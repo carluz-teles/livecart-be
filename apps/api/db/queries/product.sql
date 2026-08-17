@@ -2,9 +2,9 @@
 INSERT INTO products (
     store_id, name, external_id, external_source, keyword, price, image_url, stock,
     weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents,
-    group_id
+    group_id, barcode
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 RETURNING *;
 
 -- name: SetProductGroup :exec
@@ -42,6 +42,7 @@ SET name = $3,
     sku = $12,
     package_format = $13,
     insurance_value_cents = $14,
+    barcode = $15,
     updated_at = now()
 WHERE id = $1 AND store_id = $2
 RETURNING *;

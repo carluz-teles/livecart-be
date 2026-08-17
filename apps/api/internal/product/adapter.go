@@ -91,7 +91,7 @@ func (a *ProductSyncerAdapter) ImportProduct(ctx context.Context, storeID, exter
 		Price:          money,
 		ImageURL:       p.ImageURL,
 		Stock:          p.Stock,
-		Shipping:       erpShippingToDomain(p.Shipping),
+		Shipping:       erpShippingWithIDs(p),
 	})
 	if err != nil {
 		return "", err
@@ -118,6 +118,18 @@ func erpShippingToDomain(s *providers.ERPShippingProfile) domain.ShippingProfile
 		LengthCm:      &l,
 		PackageFormat: pf,
 	}
+}
+
+// erpShippingWithIDs monta o perfil da IMPORTAÇÃO com os identificadores do
+// produto no ERP.
+//
+// Na importação não existe valor local a preservar, então dá para montar tudo
+// de uma vez — diferente do sync, onde o local manda quando o ERP não informa.
+func erpShippingWithIDs(p providers.ERPProduct) domain.ShippingProfile {
+	profile := erpShippingToDomain(p.Shipping)
+	profile.SKU = p.SKU
+	profile.Barcode = p.GTIN
+	return profile
 }
 
 // SyncProduct updates a product from an ERP webhook notification or a manual
@@ -149,6 +161,8 @@ func (a *ProductSyncerAdapter) SyncProduct(ctx context.Context, storeID, externa
 		Stock:          p.Stock,
 		Active:         p.Active,
 		SkipStock:      skipStock,
+		SKU:            p.SKU,
+		Barcode:        p.GTIN,
 	}
 	if p.Shipping != nil {
 		shipping := erpShippingToDomain(p.Shipping)

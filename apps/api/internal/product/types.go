@@ -36,6 +36,7 @@ type ShippingProfileDTO struct {
 	WidthCm             *int   `json:"widthCm"`
 	LengthCm            *int   `json:"lengthCm"`
 	SKU                 string `json:"sku"`
+	Barcode             string `json:"barcode"`
 	PackageFormat       string `json:"packageFormat"`
 	InsuranceValueCents *int64 `json:"insuranceValueCents"`
 }
@@ -391,6 +392,11 @@ type SyncFromERPInput struct {
 	Stock          int
 	Active         bool
 	SkipStock      bool // When true, preserve local stock (e.g. on a DB-error fail-safe)
+	// SKU e Barcode vêm do PRODUTO no ERP, não do perfil de frete dele.
+	// Vazio significa "o ERP não informou" e o valor local é preservado — nunca
+	// apagado, porque o lojista pode tê-lo preenchido à mão.
+	SKU     string
+	Barcode string
 	// Shipping is optional. When non-nil and complete, the local shipping
 	// profile is replaced — useful so re-imports/syncs pull the latest
 	// dimensions from the ERP. When nil, the existing local profile is kept.
@@ -432,6 +438,7 @@ func shippingDTOToDomain(dto ShippingProfileDTO) (domain.ShippingProfile, error)
 		WidthCm:             dto.WidthCm,
 		LengthCm:            dto.LengthCm,
 		SKU:                 dto.SKU,
+		Barcode:             dto.Barcode,
 		PackageFormat:       format,
 		InsuranceValueCents: dto.InsuranceValueCents,
 	}, nil
@@ -448,6 +455,7 @@ func shippingDomainToDTO(s domain.ShippingProfile) ShippingProfileDTO {
 		WidthCm:             s.WidthCm,
 		LengthCm:            s.LengthCm,
 		SKU:                 s.SKU,
+		Barcode:             s.Barcode,
 		PackageFormat:       format,
 		InsuranceValueCents: s.InsuranceValueCents,
 	}

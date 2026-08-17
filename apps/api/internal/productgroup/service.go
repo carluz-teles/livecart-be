@@ -154,6 +154,7 @@ func (s *Service) Create(ctx context.Context, input CreateGroupInput) (*domain.C
 			WidthCm:             intPtrToInt4(shipping.WidthCm),
 			LengthCm:            intPtrToInt4(shipping.LengthCm),
 			Sku:                 pgtype.Text{String: shipping.SKU, Valid: shipping.SKU != ""},
+			Barcode:             pgtype.Text{String: shipping.Barcode, Valid: shipping.Barcode != ""},
 			PackageFormat:       packageFormat(shipping.PackageFormat),
 			InsuranceValueCents: int64PtrToInt8(shipping.InsuranceValueCents),
 			GroupID:             groupID,
