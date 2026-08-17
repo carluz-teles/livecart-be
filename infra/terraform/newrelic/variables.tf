@@ -19,9 +19,14 @@ variable "newrelic_api_key" {
 # ==============================================================================
 
 variable "environment" {
-  description = "Environment name, used only for tagging/naming this module's resources. The LiveCommerce* events themselves are not environment-scoped today."
+  description = "Default selection for the dashboard's 'environment' variable (staging/production) when the dashboard first loads — every LiveCommerce* custom event now carries an `environment` attribute (exporter/config.go's Config.Environment), since staging and production share this account+dashboard."
   type        = string
   default     = "staging"
+
+  validation {
+    condition     = contains(["staging", "production"], var.environment)
+    error_message = "environment must be one of: staging, production."
+  }
 }
 
 variable "project_name" {

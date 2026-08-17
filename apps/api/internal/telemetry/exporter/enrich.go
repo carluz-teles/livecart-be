@@ -106,7 +106,7 @@ func (e *Enricher) CartSnapshot(ctx context.Context, cartID string) (CartSnapsho
 // order_items into existence. quantity*unit_price per row is the same formula
 // as the canonical cart_product_total_cents (migration 000093), so the rows
 // sum to the cart's GMVCents.
-func (e *Enricher) CartItemBreakdown(ctx context.Context, cartID, liveEventID, storeID string, timestampMs int64) []LiveCommerceCartItemPayload {
+func (e *Enricher) CartItemBreakdown(ctx context.Context, cartID, liveEventID, storeID, environment string, timestampMs int64) []LiveCommerceCartItemPayload {
 	id, err := idempotency.ParseUUID(cartID)
 	if err != nil {
 		logger.From(ctx, e.logger).Warn("telemetry enrich: invalid cart_id, skipping item breakdown",
@@ -126,7 +126,7 @@ func (e *Enricher) CartItemBreakdown(ctx context.Context, cartID, liveEventID, s
 		quantity := int64(row.Quantity.Int32)
 		unitPrice := row.UnitPrice.Int64
 
-		item := NewLiveCommerceCartItemPayload()
+		item := NewLiveCommerceCartItemPayload(environment)
 		item.LiveEventID = liveEventID
 		item.StoreID = storeID
 		item.CartID = cartID

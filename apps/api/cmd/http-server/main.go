@@ -132,7 +132,7 @@ func main() {
 	// No-op when NEW_RELIC_LICENSE_KEY is unset — nrListeners is always
 	// constructed (never nil) so it can be wired unconditionally below; every
 	// method checks cfg.Enabled first.
-	nrConfig := exporter.NewConfig(config.NewRelicLicenseKey.String(), config.NewRelicAccountID.String())
+	nrConfig := exporter.NewConfig(config.NewRelicLicenseKey.String(), config.NewRelicAccountID.String(), config.Environment())
 	nrClient := exporter.NewNRClient(nrConfig, log)
 	nrListeners := exporter.NewListeners(nrClient, nrConfig, log)
 	if nrConfig.Enabled {

@@ -150,7 +150,7 @@ func TestEnricher_CartItemBreakdown(t *testing.T) {
 
 		enricher, _ := newTestEnricher(&fakeEnrichQueries{items: []sqlc.ListCartItemsRow{row}})
 
-		got := enricher.CartItemBreakdown(t.Context(), testCartID, "live-1", "store-1", 1700000000000)
+		got := enricher.CartItemBreakdown(t.Context(), testCartID, "live-1", "store-1", "staging", 1700000000000)
 		if len(got) != 1 {
 			t.Fatalf("len(got) = %d, want 1", len(got))
 		}
@@ -164,6 +164,7 @@ func TestEnricher_CartItemBreakdown(t *testing.T) {
 			Quantity:       3,
 			UnitPriceCents: 1000,
 			RevenueCents:   3000,
+			Environment:    "staging",
 			Timestamp:      1700000000000,
 		}
 		if got[0] != want {
@@ -176,7 +177,7 @@ func TestEnricher_CartItemBreakdown(t *testing.T) {
 
 		enricher, _ := newTestEnricher(&fakeEnrichQueries{})
 
-		got := enricher.CartItemBreakdown(t.Context(), "not-a-uuid", "live-1", "store-1", 0)
+		got := enricher.CartItemBreakdown(t.Context(), "not-a-uuid", "live-1", "store-1", "staging", 0)
 		if got != nil {
 			t.Errorf("got = %+v, want nil", got)
 		}
@@ -187,7 +188,7 @@ func TestEnricher_CartItemBreakdown(t *testing.T) {
 
 		enricher, logs := newTestEnricher(&fakeEnrichQueries{itemsErr: errors.New("db unavailable")})
 
-		got := enricher.CartItemBreakdown(t.Context(), testCartID, "live-1", "store-1", 0)
+		got := enricher.CartItemBreakdown(t.Context(), testCartID, "live-1", "store-1", "staging", 0)
 		if got != nil {
 			t.Errorf("got = %+v, want nil", got)
 		}
