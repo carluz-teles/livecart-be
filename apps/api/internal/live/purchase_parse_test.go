@@ -364,6 +364,43 @@ var casosDaLive = []casoDeComentario{
 	{"1130 2x / 1207 6X / 1161 2 X", []PurchaseItem{{"1130", 2}, {"1207", 6}, {"1161", 2}}},
 	{"quero 1130 2x, 1207 6X e 1161 2 X", []PurchaseItem{{"1130", 2}, {"1207", 6}, {"1161", 2}}},
 	{"1024x3, 1303x3, 1208 × 4", []PurchaseItem{{"1024", 3}, {"1303", 3}, {"1208", 4}}},
+
+	// ─── Live de 17/08, texto colhido AO VIVO ────────────────────────────────
+	//
+	// Nos primeiros 13 minutos daquela transmissão o parser antigo levantou 18
+	// intenções de compra; UMA era real. As outras 17 estão abaixo, e nenhuma
+	// virou pedido só porque não havia produto em destaque marcado — sorte, não
+	// proteção.
+	//
+	// O acento AMPLIA o defeito e isso não tinha aparecido na análise de 16/08:
+	// `\b` em Go é ASCII, então o `ã` de "paixão" conta como fronteira e "paix"
+	// vira código de quatro caracteres. Idem "ótimo" → "timo".
+	{"Como vc está minha linda", nil},
+	{"Oii gi, tudo bem?", nil},
+	{"Meninas chegou o golden com luzinhas ameeeeei de paixão", nil},
+	{"?Quem esta com vc hoje", nil},
+	{"Agora ninguém mais segura a Gi, Bora pra Cimaaaaa 🥰", nil},
+	{"Achei ótimo", nil},
+	{"como funciona  agora...conta pra min", nil},
+	{"E o bom do sistema e que ele manda uma mensagem do item que foi p o carrinho", nil},
+	{"Aqui é a Kitty, não tô conseguindo ver a live pela minha conta, não aparece 😭", nil},
+	{"@jackliborio  agora é  pelo código,  se for mais  de um colocar código  espaço X quantidade", nil},
+	{"Eu recebi a árvore Esmeralda e amei 😍", nil},
+	{"Flores tem hoje?", nil},
+	{"Hoje você mostrará a guirlanda de cipreste  minha flor?", nil},
+	{"Essa vilas é qual material??", nil},
+	{"Noel", nil},
+	{"Resina", nil},
+	{"Chegou calendário", nil},
+	{"Vilas", nil},
+	{"Estamos todas juntas!", nil},
+	{"Oi poderosa", nil},
+	{"É bem tranquilo", nil},
+	{"Bora pra Cimaaaaa", nil},
+
+	// O pedido REAL da noite, e a forma que a audiência está sendo ensinada a
+	// usar: "código espaço X quantidade".
+	{"1099 X 1", []PurchaseItem{{"1099", 1}}},
 }
 
 func TestParsePurchaseItems_CorpusDaLive(t *testing.T) {
