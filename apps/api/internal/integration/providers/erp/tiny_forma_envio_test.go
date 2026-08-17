@@ -46,6 +46,14 @@ type capturaDePedidos struct {
 func (c *capturaDePedidos) servidor(t *testing.T, responder func(tentativa int, w http.ResponseWriter)) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Rotas auxiliares do pós-criação (marcador, situação, estoque) não são
+		// tentativas de criar pedido — contá-las mascararia o que o teste mede.
+		if strings.Contains(r.URL.Path, "/marcadores") ||
+			strings.Contains(r.URL.Path, "/situacao") ||
+			strings.Contains(r.URL.Path, "/lancar-estoque") {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if strings.Contains(r.URL.Path, "formas-envio") {
 			c.formasEnvio++
 			w.Header().Set("Content-Type", "application/json")

@@ -209,9 +209,9 @@ const (
 	// percorre a lista em sequência deixa o limitador adaptativo espaçar as
 	// chamadas com os headers do próprio Tiny.
 	ERPResyncProducts Name = "erp.products_resync"
-	CouponApplied        Name = "coupon.applied"
-	CouponConfirmed      Name = "coupon.confirmed"
-	CouponRefunded       Name = "coupon.refunded"
+	CouponApplied     Name = "coupon.applied"
+	CouponConfirmed   Name = "coupon.confirmed"
+	CouponRefunded    Name = "coupon.refunded"
 )
 
 // Source identifies where an event was dispatched from. It is metadata on the
@@ -251,6 +251,22 @@ var DefaultPolicies = map[string]QueuePolicy{
 	QueueFastTrack: {MaxRetry: 3, Timeout: 5 * time.Second},
 	QueueNormal:    {MaxRetry: 3, Timeout: 15 * time.Second},
 	QueueBatch:     {MaxRetry: 1, Timeout: 60 * time.Second},
+}
+
+// EventTimeouts sobrepõe o teto da fila para eventos cujo trabalho não cabe
+// nele. A fila define a prioridade; o teto tem de caber no trabalho.
+//
+// `order.paid` é o caso que motivou o mapa. Ele faz, em série e passando pelo
+// limitador do Tiny: resolver contato, buscar dimensão de cada item para o
+// frete, resolver forma de pagamento, de recebimento e de envio, criar o
+// pedido, APROVAR (chamada separada) e lançar estoque. Um pedido de 1 item
+// fecha em 2-3s; os de 5 e 7 itens estouraram os 15s no meio — e estourar
+// DEPOIS de criar o pedido é o pior ponto possível, porque o pedido nasce
+// "Em aberto" no Tiny e a aprovação nunca roda. Em 16/08 foram 3 pedidos
+// pagos nesse estado, 2 deles sem sequer registrar o id de volta.
+var EventTimeouts = map[Name]time.Duration{
+	OrderPaid:     90 * time.Second,
+	OrderRefunded: 90 * time.Second,
 }
 
 // Envelope is the canonical wire format for every event. It is serialized as
