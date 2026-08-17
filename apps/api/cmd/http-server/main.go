@@ -467,14 +467,14 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				TinyConstructor: func(cfg providers.TinyConfig) (providers.ERPProvider, error) {
 					return erp.NewTiny(erp.TinyConfig{
 						UseAvailableStock: cfg.UseAvailableStock,
-						IntegrationID: cfg.IntegrationID,
-						StoreID:       cfg.StoreID,
-						Credentials:   cfg.Credentials,
-						ClientID:      cfg.ClientID,
-						ClientSecret:  cfg.ClientSecret,
-						Logger:        cfg.Logger,
-						LogFunc:       cfg.LogFunc,
-						RateLimiter:   cfg.RateLimiter,
+						IntegrationID:     cfg.IntegrationID,
+						StoreID:           cfg.StoreID,
+						Credentials:       cfg.Credentials,
+						ClientID:          cfg.ClientID,
+						ClientSecret:      cfg.ClientSecret,
+						Logger:            cfg.Logger,
+						LogFunc:           cfg.LogFunc,
+						RateLimiter:       cfg.RateLimiter,
 					})
 				},
 				InstagramConstructor: func(cfg providers.InstagramConfig) (providers.SocialProvider, error) {
@@ -554,14 +554,14 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				TinyConstructor: func(cfg providers.TinyConfig) (providers.ERPProvider, error) {
 					return erp.NewTiny(erp.TinyConfig{
 						UseAvailableStock: cfg.UseAvailableStock,
-						IntegrationID: cfg.IntegrationID,
-						StoreID:       cfg.StoreID,
-						Credentials:   cfg.Credentials,
-						ClientID:      cfg.ClientID,
-						ClientSecret:  cfg.ClientSecret,
-						Logger:        cfg.Logger,
-						LogFunc:       cfg.LogFunc,
-						RateLimiter:   cfg.RateLimiter,
+						IntegrationID:     cfg.IntegrationID,
+						StoreID:           cfg.StoreID,
+						Credentials:       cfg.Credentials,
+						ClientID:          cfg.ClientID,
+						ClientSecret:      cfg.ClientSecret,
+						Logger:            cfg.Logger,
+						LogFunc:           cfg.LogFunc,
+						RateLimiter:       cfg.RateLimiter,
 					})
 				},
 				InstagramConstructor: func(cfg providers.InstagramConfig) (providers.SocialProvider, error) {
@@ -667,9 +667,9 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			trackingPoller.Start()
 			lifecycle.add("tracking-poller", trackingPoller.Stop)
 
-			// Capture comments on active post-commerce events via polling until
-			// the real-time `comments` webhook takes over for each post.
-			integrationSvc.StartPostCommentPolling(context.Background())
+			// Encerra sessões de live cuja transmissão saiu do ar. A captura de
+			// comentário é 100%% webhook — o polling foi removido.
+			integrationSvc.StartLiveSessionSweep(context.Background())
 
 			// Sweep do pedido-como-reserva (design C): reconcilia conversões e
 			// mutações presas em voo (processo morto no meio do ciclo) — adota
