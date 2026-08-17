@@ -100,22 +100,40 @@ func TestIsCancellation(t *testing.T) {
 	}
 }
 
+// O que conta como código de produto.
+//
+// Estes casos afirmavam o contrário: "AZUL", "A9B1", "X1Y2" eram tratados como
+// códigos. Nenhum produto pode ter esses códigos. `domain.NewKeyword` faz
+// `strconv.Atoi` e exige 1000–9999, é o ÚNICO caminho que grava a coluna, e a
+// leitura do produto passa por ele de volta — um "AZUL" no banco quebraria a
+// listagem antes de chegar aqui.
+//
+// A folga não era acadêmica. Toda palavra portuguesa de quatro letras virava
+// código: "esse", "isso", "aqui", "amei", "acho". Sozinho, código inexistente
+// não acha produto; combinado com o fallback de produto em destaque, virava
+// venda. "Esse cogumelo tem maior?" não achava produto ESSE, caía no destaque e
+// criava pedido que ninguém fez — o que a lojista relatou depois da live de
+// 16/08.
 func TestExtractPossibleKeywords(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
 		want  []string
 	}{
-		{name: "simple keyword", input: "quero 2 A9B1", want: []string{"A9B1"}},
-		{name: "lowercase", input: "quero a9b1", want: []string{"A9B1"}},
-		{name: "multiple keywords", input: "quero X1Y2 e Z3W4", want: []string{"X1Y2", "Z3W4"}},
-		{name: "no keyword", input: "quero 2 unidades", want: nil},
-		{name: "only letters", input: "quero AZUL", want: []string{"AZUL"}},
-		{name: "only numbers", input: "quero 1234", want: []string{"1234"}},
-		{name: "mixed valid", input: "reserva 3 do 1A2B pra mim", want: []string{"1A2B"}},
-		{name: "keyword at start", input: "A1B2 quero", want: []string{"A1B2"}},
-		{name: "duplicate keyword", input: "quero A9B1 manda A9B1", want: []string{"A9B1"}},
-		{name: "empty", input: "", want: nil},
+		{name: "código numérico", input: "quero 1234", want: []string{"1234"}},
+		{name: "dois códigos no mesmo comentário", input: "quero 1000 e 1005", want: []string{"1000", "1005"}},
+		{name: "código no começo", input: "1130 quero", want: []string{"1130"}},
+		{name: "código repetido sai uma vez", input: "quero 1130 manda 1130", want: []string{"1130"}},
+		{name: "sem código", input: "quero 2 unidades", want: nil},
+		{name: "vazio", input: "", want: nil},
+
+		// A correção propriamente dita:
+		{name: "palavra de quatro letras não é código", input: "quero AZUL", want: nil},
+		{name: "pronome de quatro letras não é código", input: "Esse cogumelo tem maior?", want: nil},
+		{name: "alfanumérico não é código", input: "quero 2 A9B1", want: nil},
+		{name: "alfanumérico em minúsculas também não", input: "quero a9b1", want: nil},
+		{name: "abaixo da faixa do domínio", input: "quero 0999", want: nil},
+		{name: "zeros não são código", input: "0000", want: nil},
 	}
 
 	for _, tt := range tests {

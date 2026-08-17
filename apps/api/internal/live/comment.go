@@ -304,28 +304,35 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		return nil
 	}
 
-	// Parse purchase intent
-	intent := ParsePurchaseIntent(input.Text)
-	hasPurchaseIntent := intent != nil
+	// Leitura do comentário: QUAIS produtos, e QUANTO de cada um.
+	//
+	// Um comentário pode pedir mais de um produto ("1000 5x 1005 3x"). Até a
+	// live de 16/08 líamos um só — o primeiro código, com a primeira quantidade
+	// — e as outras linhas do pedido sumiam sem log; a compradora só descobria
+	// no checkout.
+	pedidos := ParsePurchaseItems(input.Text)
+	hasPurchaseIntent := len(pedidos) > 0
+	intent := intentDoComentario(pedidos, input.Text)
 	if hasPurchaseIntent {
-		trace.Info(TracePrefix+"decision: purchase intent detected", zap.Int("quantity", intent.Quantity))
+		trace.Info(TracePrefix+"decision: purchase intent detected",
+			zap.Int("itens", len(pedidos)),
+			zap.Int("quantity", intent.Quantity))
 	} else {
 		trace.Info(TracePrefix + "decision: no purchase intent, comment is just stored")
 	}
 
-	// Try to match product by keyword
-	var product *ProductRow
+	// Cada item é resolvido no produto que ELE nomeia.
+	var resolvidos []pedidoResolvido
 	if hasPurchaseIntent {
-		product = s.FindProductByKeyword(ctx, event.StoreID, input.Text)
-
-		// If no keyword match but has purchase intent, try active product as fallback
-		// Produto em destaque também é da sessão (D17).
-		if product == nil && session.CurrentActiveProductID != nil && *session.CurrentActiveProductID != "" {
-			logger.From(ctx, s.logger).Info("no keyword match, trying active product fallback",
-				zap.String("session_id", session.ID),
-				zap.String("active_product_id", *session.CurrentActiveProductID),
-			)
-			product, _ = s.ingestRepo.GetProductByID(ctx, event.StoreID, *session.CurrentActiveProductID)
+		resolvidos = s.resolverPedidos(ctx, event, session, pedidos)
+	}
+	// `product` é o primeiro produto casado. As regras de post-commerce e o
+	// registro do comentário guardam um produto só, e é este.
+	var product *ProductRow
+	for _, r := range resolvidos {
+		if r.product != nil {
+			product = r.product
+			break
 		}
 	}
 
@@ -377,6 +384,15 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			return nil
 		}
 		product = resolved
+		// Post e story seguem com UM item por comentário. As regras de promoção
+		// daqui — whitelist da sessão, auto-adição do produto único, resposta de
+		// indisponível — são escritas por COMENTÁRIO, não por item, e decidem
+		// pelo comentário inteiro (`handled` encerra tudo). Generalizá-las é
+		// outra mudança; a que a lojista pediu é a da live.
+		resolvidos = []pedidoResolvido{{
+			item:    PurchaseItem{Quantity: intent.Quantity},
+			product: product,
+		}}
 	}
 
 	// Determine result for the comment record
@@ -420,11 +436,228 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		return nil
 	}
 
+	// Um comentário pode pedir vários produtos. Cada item entra por si; um que
+	// não produz nada (teto da loja, já na fila) não cancela os outros.
+	var adicionados []resultadoDoItem
+	for _, r := range resolvidos {
+		if r.product == nil {
+			// Código citado que não existe no catálogo desta loja.
+			continue
+		}
+		item, err := s.processarItemDoComentario(ctx, event, session, input, trace, commentID, r.product, r.item.Quantity)
+		if err != nil {
+			return err
+		}
+		if item != nil {
+			adicionados = append(adicionados, *item)
+		}
+	}
+	if len(adicionados) == 0 {
+		return nil
+	}
+
+	// O contador de pedidos do evento conta CARRINHOS, e um comentário é um
+	// carrinho. Ele vivia dentro do corpo por item: com dois produtos no mesmo
+	// comentário, um evento com dez compradoras exibiria mais pedidos do que
+	// carrinhos existem. Hoje o segundo AddToCart devolve IsNewCart=false e o
+	// erro não aparece — mas isso é a implementação do carrinho protegendo o
+	// contador, não o contador estando certo.
+	for _, item := range adicionados {
+		if !item.carrinho.IsNewCart {
+			continue
+		}
+		if err := s.ingestRepo.IncrementLiveEventOrders(ctx, event.ID); err != nil {
+			logger.From(ctx, s.logger).Error("failed to increment order counter",
+				zap.String("event_id", event.ID),
+				zap.Error(err),
+			)
+		}
+		break
+	}
+
+	// UMA mensagem para o comentário inteiro, e não uma por produto: o carrinho
+	// é um só e o link é o mesmo. Duas DMs para "1000 5x 1005 3x" seriam duas
+	// notificações dizendo a mesma coisa, e a segunda invalidaria a leitura da
+	// primeira.
+	//
+	// Os totais saem do ÚLTIMO item porque AddToCart devolve o carrinho já
+	// somado; o nome e o código saem de todos, para a compradora conferir o que
+	// entrou.
+	ultimo := adicionados[len(adicionados)-1]
+	nomes, keywords, pedidaTotal, naFilaTotal := resumoDosItens(adicionados)
+
+	// Story replies (Channel="dm") não têm comentário para responder, então o id
+	// é limpo — a notificação vai direto por DM para o IGSID da compradora.
+	notifyCommentID := input.CommentID
+	if input.Channel == "dm" {
+		notifyCommentID = ""
+	}
+	s.sendImmediateNotification(ctx, sendNotificationInput{
+		StoreID:           event.StoreID,
+		EventID:           event.ID,
+		EventTitle:        event.Title,
+		CartID:            ultimo.carrinho.CartID,
+		CartToken:         ultimo.carrinho.CartToken,
+		PlatformUserID:    input.UserID,
+		PlatformHandle:    input.Username,
+		PlatformCommentID: notifyCommentID,
+		ProductName:       nomes,
+		ProductKeyword:    keywords,
+		Quantity:          pedidaTotal,
+		TotalItems:        ultimo.carrinho.TotalItems,
+		TotalCents:        ultimo.carrinho.TotalCents,
+		IsNewCart:         ultimo.carrinho.IsNewCart,
+		WaitlistedQty:     naFilaTotal,
+	})
+
+	return nil
+}
+
+// pedidoResolvido liga um item do comentário ao produto que ele nomeia.
+type pedidoResolvido struct {
+	item    PurchaseItem
+	product *ProductRow
+}
+
+// resolverPedidos traduz cada item do comentário no produto correspondente.
+//
+// A resolução é POR ITEM, e é essa a diferença. Antes, FindProductByKeyword
+// varria o texto inteiro e devolvia o primeiro produto que casasse com qualquer
+// código encontrado — o que, num comentário com dois códigos, casava o primeiro
+// e perdia o segundo junto com a quantidade dele.
+//
+// O produto em destaque só entra para item SEM código. Quando a compradora
+// digitou um código, ela disse o que queria; se aquele código não existe nesta
+// loja, dar a ela o produto em destaque é entregar outra coisa — e é um erro que
+// só aparece na hora de separar a caixa. O destaque continua servindo ao caso
+// para o qual foi feito: o "EU QUERO" pelado, que não nomeia nada.
+func (s *Service) resolverPedidos(
+	ctx context.Context,
+	event *EventOutput,
+	session *SessionOutput,
+	pedidos []PurchaseItem,
+) []pedidoResolvido {
+	if s.ingestRepo == nil {
+		return nil
+	}
+	log := logger.From(ctx, s.logger)
+
+	resolvidos := make([]pedidoResolvido, 0, len(pedidos))
+	for _, item := range pedidos {
+		r := pedidoResolvido{item: item}
+
+		if item.Keyword != "" {
+			produto, err := s.ingestRepo.GetProductByKeyword(ctx, event.StoreID, item.Keyword)
+			if err != nil {
+				// Falha de consulta num código não pode derrubar os outros itens.
+				log.Error("failed to lookup product by keyword",
+					zap.String("keyword", item.Keyword),
+					zap.Error(err),
+				)
+			}
+			r.product = produto
+			if produto == nil {
+				log.Info("comment cited a code with no product in this store",
+					zap.String("keyword", item.Keyword),
+					zap.String("store_id", event.StoreID),
+				)
+			}
+		} else if session.CurrentActiveProductID != nil && *session.CurrentActiveProductID != "" {
+			// Pedido sem código: quem escolhe é o destaque da transmissão (D17).
+			log.Info("purchase without a code, using the featured product",
+				zap.String("session_id", session.ID),
+				zap.String("active_product_id", *session.CurrentActiveProductID),
+			)
+			r.product, _ = s.ingestRepo.GetProductByID(ctx, event.StoreID, *session.CurrentActiveProductID)
+		}
+
+		resolvidos = append(resolvidos, r)
+	}
+	return resolvidos
+}
+
+// intentDoComentario resume os itens na visão de UM pedido.
+//
+// Existe porque as regras de post-commerce e o registro do comentário guardam
+// uma quantidade só. A soma é a leitura honesta: quem comentou "1000 5x 1005 3x"
+// pediu oito unidades.
+func intentDoComentario(pedidos []PurchaseItem, texto string) *PurchaseIntent {
+	if len(pedidos) == 0 {
+		return nil
+	}
+	total := 0
+	for _, p := range pedidos {
+		total += p.Quantity
+	}
+	return &PurchaseIntent{Quantity: total, RawText: texto}
+}
+
+// resumoDosItens junta o que entrou, para a mensagem que a compradora recebe.
+//
+// O template tem UM campo {produto}; com dois produtos no mesmo comentário,
+// citar só um deixaria a compradora achando que o outro não entrou. A lista sai
+// escrita como se fala — "Vaso e Prato", "Vaso, Prato e Copo".
+func resumoDosItens(itens []resultadoDoItem) (nomes, keywords string, pedida, naFila int) {
+	listaNomes := make([]string, 0, len(itens))
+	listaKeywords := make([]string, 0, len(itens))
+	for _, it := range itens {
+		listaNomes = append(listaNomes, it.produto.Name)
+		listaKeywords = append(listaKeywords, it.produto.Keyword)
+		pedida += it.pedida
+		naFila += it.naFila
+	}
+	return juntarEmPortugues(listaNomes), strings.Join(listaKeywords, ", "), pedida, naFila
+}
+
+// juntarEmPortugues escreve a lista com "e" antes do último item.
+func juntarEmPortugues(itens []string) string {
+	switch len(itens) {
+	case 0:
+		return ""
+	case 1:
+		return itens[0]
+	default:
+		return strings.Join(itens[:len(itens)-1], ", ") + " e " + itens[len(itens)-1]
+	}
+}
+
+// resultadoDoItem é o que UM item do comentário produziu depois de passar pelo
+// teto da loja, pelo estoque, pela fila e pelo carrinho.
+type resultadoDoItem struct {
+	produto  *ProductRow
+	pedida   int // quantidade efetivamente pedida, já com o teto da loja aplicado
+	naFila   int
+	carrinho AddToCartOutput
+}
+
+// processarItemDoComentario coloca UM produto no carrinho da compradora.
+//
+// É o corpo que antes vivia solto no fim de ProcessComment, quando um
+// comentário só podia pedir um produto. Nada aqui mudou de regra: teto por
+// item, divisão entre estoque e fila, reserva provisória revertida se o
+// carrinho falhar, linha de fila carimbada com o cart_id, contador de pedidos e
+// reserva no ERP.
+//
+// O que mudou é o contorno. Devolve `nil, nil` quando o item não gerou nada
+// (teto já atingido, já estava na fila, nada a adicionar) em vez de encerrar o
+// comentário inteiro: num pedido de dois produtos, o primeiro esbarrar no teto
+// não pode fazer o segundo desaparecer. E não manda a DM — quem manda é
+// ProcessComment, uma vez só, com o carrinho já completo.
+func (s *Service) processarItemDoComentario(
+	ctx context.Context,
+	event *EventOutput,
+	session *SessionOutput,
+	input ProcessInstagramCommentInput,
+	trace *zap.Logger,
+	commentID string,
+	product *ProductRow,
+	quantidade int,
+) (*resultadoDoItem, error) {
 	logger.From(ctx, s.logger).Info("purchase intent detected with product match",
 		zap.String("username", input.Username),
 		zap.String("product_id", product.ID),
 		zap.String("keyword", product.Keyword),
-		zap.Int("quantity", intent.Quantity),
+		zap.Int("quantity", quantidade),
 		zap.Int("stock", product.Stock),
 	)
 
@@ -451,42 +684,42 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 				zap.Int("max_allowed", maxAllowed),
 			)
 			if commentID != "" {
-				_ = s.ingestRepo.UpdateLiveCommentResult(ctx, commentID, false, product.ID, intent.Quantity, "max_quantity_reached")
+				_ = s.ingestRepo.UpdateLiveCommentResult(ctx, commentID, false, product.ID, quantidade, "max_quantity_reached")
 			}
 			// Send reply notifying user they've reached the limit.
 			// Detached goroutine: never carry the (recyclable) request ctx —
 			// hand it a Background ctx enriched with the store instead.
 			go s.sendMaxQuantityReply(logger.WithStore(context.Background(), event.StoreID, ""), event.StoreID, input.Channel, input.CommentID, input.UserID, input.Username, product.Name, maxAllowed, true)
-			return nil
+			return nil, nil
 		}
 
 		// Cap quantity to remaining allowed
 		remaining := maxAllowed - currentQty
-		if intent.Quantity > remaining {
+		if quantidade > remaining {
 			logger.From(ctx, s.logger).Info("capping quantity to max allowed",
 				zap.String("username", input.Username),
 				zap.String("product_id", product.ID),
-				zap.Int("requested", intent.Quantity),
+				zap.Int("requested", quantidade),
 				zap.Int("capped_to", remaining),
 			)
 			// Send reply notifying user their quantity was capped.
 			// Detached goroutine: same ctx rule as above.
 			go s.sendMaxQuantityReply(logger.WithStore(context.Background(), event.StoreID, ""), event.StoreID, input.Channel, input.CommentID, input.UserID, input.Username, product.Name, maxAllowed, false)
-			intent.Quantity = remaining
+			quantidade = remaining
 		}
 	}
 
 	// Calculate partial fulfillment: how many available vs waitlisted
-	availableQty := intent.Quantity
-	if product.Stock < intent.Quantity {
+	availableQty := quantidade
+	if product.Stock < quantidade {
 		availableQty = product.Stock
 	}
 	if availableQty < 0 {
 		availableQty = 0
 	}
-	waitlistQty := intent.Quantity - availableQty
+	waitlistQty := quantidade - availableQty
 	trace.Info(TracePrefix+"decision: stock split",
-		zap.Int("requested", intent.Quantity),
+		zap.Int("requested", quantidade),
 		zap.Int("from_stock", availableQty),
 		zap.Int("to_waitlist", waitlistQty),
 		zap.Int("product_stock", product.Stock))
@@ -502,7 +735,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 				zap.Int("attempted", availableQty),
 			)
 			availableQty = 0
-			waitlistQty = intent.Quantity
+			waitlistQty = quantidade
 		}
 	}
 
@@ -521,9 +754,9 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 			)
 			if availableQty == 0 {
 				if commentID != "" {
-					_ = s.ingestRepo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "already_waitlisted")
+					_ = s.ingestRepo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, quantidade, "already_waitlisted")
 				}
-				return nil
+				return nil, nil
 			}
 			waitlistQty = 0
 		} else {
@@ -540,7 +773,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	totalQtyToAdd := availableQty + waitlistQty
 	if totalQtyToAdd == 0 {
 		// Nothing to add
-		return nil
+		return nil, nil
 	}
 
 	// Add product to cart with partial fulfillment
@@ -560,7 +793,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		if availableQty > 0 {
 			_ = s.ingestRepo.IncrementProductStock(ctx, product.ID, availableQty)
 		}
-		return fmt.Errorf("adding to cart: %w", err)
+		return nil, fmt.Errorf("adding to cart: %w", err)
 	}
 
 	trace.Info(TracePrefix+"decision: cart updated",
@@ -605,21 +838,11 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	// Update comment result
 	if commentID != "" {
 		if waitlistQty > 0 && availableQty > 0 {
-			_ = s.ingestRepo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "partial_fulfillment")
+			_ = s.ingestRepo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, quantidade, "partial_fulfillment")
 		} else if waitlistQty > 0 {
-			_ = s.ingestRepo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "waitlisted")
+			_ = s.ingestRepo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, quantidade, "waitlisted")
 		} else {
-			_ = s.ingestRepo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, intent.Quantity, "added_to_cart")
-		}
-	}
-
-	// Increment order counter on event only for new carts
-	if result.IsNewCart {
-		if err := s.ingestRepo.IncrementLiveEventOrders(ctx, event.ID); err != nil {
-			logger.From(ctx, s.logger).Error("failed to increment order counter",
-				zap.String("event_id", event.ID),
-				zap.Error(err),
-			)
+			_ = s.ingestRepo.UpdateLiveCommentResult(ctx, commentID, true, product.ID, quantidade, "added_to_cart")
 		}
 	}
 
@@ -633,33 +856,12 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		}
 	}
 
-	// Send immediate notification (fire-and-forget, doesn't block the flow). For
-	// story replies (Channel="dm") there is no comment to reply on, so we clear
-	// the comment id — the notification service then delivers straight via DM to
-	// the buyer's IGSID.
-	notifyCommentID := input.CommentID
-	if input.Channel == "dm" {
-		notifyCommentID = ""
-	}
-	s.sendImmediateNotification(ctx, sendNotificationInput{
-		StoreID:           event.StoreID,
-		EventID:           event.ID,
-		EventTitle:        event.Title,
-		CartID:            result.CartID,
-		CartToken:         result.CartToken,
-		PlatformUserID:    input.UserID,
-		PlatformHandle:    input.Username,
-		PlatformCommentID: notifyCommentID,
-		ProductName:       product.Name,
-		ProductKeyword:    product.Keyword,
-		Quantity:          intent.Quantity,
-		TotalItems:        result.TotalItems,
-		TotalCents:        result.TotalCents,
-		IsNewCart:         result.IsNewCart,
-		WaitlistedQty:     waitlistQty,
-	})
-
-	return nil
+	return &resultadoDoItem{
+		produto:  product,
+		pedida:   quantidade,
+		naFila:   waitlistQty,
+		carrinho: result,
+	}, nil
 }
 
 // sendNotificationInput contains all data needed for immediate notifications.
