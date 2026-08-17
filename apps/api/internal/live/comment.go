@@ -313,12 +313,21 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	pedidos := ParsePurchaseItems(input.Text)
 	hasPurchaseIntent := len(pedidos) > 0
 	intent := intentDoComentario(pedidos, input.Text)
+	// O texto e a leitura viajam JUNTOS na linha da decisão. Eles existiam em
+	// linhas separadas — o texto lá em cima, a decisão aqui — e reconstruir o
+	// par exigia casar comment_id no meio do log de uma live inteira. Numa noite
+	// de transmissão isso é a diferença entre responder a lojista na hora e
+	// responder no dia seguinte.
 	if hasPurchaseIntent {
 		trace.Info(TracePrefix+"decision: purchase intent detected",
+			zap.String("text", input.Text),
+			zap.String("lido", DescreveItens(pedidos)),
 			zap.Int("itens", len(pedidos)),
 			zap.Int("quantity", intent.Quantity))
 	} else {
-		trace.Info(TracePrefix + "decision: no purchase intent, comment is just stored")
+		trace.Info(TracePrefix+"decision: no purchase intent, comment is just stored",
+			zap.String("text", input.Text),
+			zap.String("motivo", MotivoDaRecusa(input.Text)))
 	}
 
 	// Cada item é resolvido no produto que ELE nomeia.

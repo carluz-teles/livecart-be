@@ -229,3 +229,71 @@ var unidadesRe = regexp.MustCompile(`(?i)\b\d{1,2}\s+unidades?\b`)
 // verboDeCompraRe cobre o pedido sem código.
 var verboDeCompraRe = regexp.MustCompile(
 	`(?i)\b(quero|queria|manda|me\s+manda|separa|reserva|pega|coloca|vou\s+levar|leva)\b`)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Explicação para o log. NADA aqui participa da decisão.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// MotivoDaRecusa diz, em uma expressão, por que o comentário não virou pedido.
+//
+// Roda DEPOIS da decisão, sobre o mesmo texto, e só quando ela foi negativa —
+// não pode mudar o que já foi decidido. Existe para que "a Fulana comentou e
+// não entrou" tenha resposta na hora, em vez de alguém reprocessar o comentário
+// à mão. Foi assim que os defeitos da live de 16/08 apareceram: puxando 501
+// comentários do log e passando um a um pelo parser.
+//
+// A ordem espelha a de ParsePurchaseItems, porque o primeiro portão que fecha é
+// o que explica.
+func MotivoDaRecusa(texto string) string {
+	texto = strings.TrimSpace(texto)
+	if texto == "" {
+		return "texto vazio"
+	}
+	for _, p := range negativePatterns {
+		if p.MatchString(texto) {
+			return "negação ou cancelamento"
+		}
+	}
+	for _, p := range questionPatterns {
+		if p.MatchString(texto) {
+			return "pergunta conhecida"
+		}
+	}
+	if palavrasDePreco.MatchString(texto) && !marcadorExplicitoRe.MatchString(texto) {
+		return "fala de preço sem quantidade explícita"
+	}
+
+	tokens := tokenizar(normalizarComentario(texto))
+	temVerbo := verboDeCompraRe.MatchString(texto) || unidadesRe.MatchString(texto)
+	switch {
+	case !temVerbo:
+		return "sem código e sem verbo de compra"
+	case verboDeOlharRe.MatchString(texto):
+		return "pediu para ver, não para comprar"
+	case negacaoRe.MatchString(texto):
+		return "negação na frase"
+	case len(tokens) > maxTokensPedidoNu:
+		return "verbo dentro de uma frase, sem código"
+	}
+	return "sem código reconhecido"
+}
+
+// DescreveItens resume o pedido lido numa string de log: "1130x2 1144x3".
+//
+// O log tinha a contagem de itens e a quantidade somada, mas não QUAIS. Numa
+// live, saber que o comentário virou "2 itens, 5 unidades" não diz se lemos os
+// produtos certos.
+func DescreveItens(itens []PurchaseItem) string {
+	if len(itens) == 0 {
+		return ""
+	}
+	partes := make([]string, 0, len(itens))
+	for _, it := range itens {
+		kw := it.Keyword
+		if kw == "" {
+			kw = "destaque"
+		}
+		partes = append(partes, kw+"x"+strconv.Itoa(it.Quantity))
+	}
+	return strings.Join(partes, " ")
+}
