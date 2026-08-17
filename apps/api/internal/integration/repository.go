@@ -847,7 +847,6 @@ func (r *Repository) TryDecrementProductStock(ctx context.Context, productID str
 	return true, nil
 }
 
-
 // HealFromError devolve a integração para 'active' quando uma chamada volta a
 // dar certo, e diz se curou de fato. Só age sobre linha em 'error'.
 func (r *Repository) HealFromError(ctx context.Context, id string) (bool, error) {
@@ -870,7 +869,6 @@ func (r *Repository) EmitMessageReceived(ctx context.Context, env events.Envelop
 		return events.Emit(ctx, q, env)
 	})
 }
-
 
 // DecrementProductStockUpTo takes up to `want` units atomically and returns
 // how many were actually taken (0 when out of stock). Powers partial waitlist

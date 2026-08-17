@@ -2805,16 +2805,24 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 	}
 
 	if allErrored {
-		// All jobs hit Tiny's rate limit — degrade to "no results" instead of
-		// 500 so the merchant can retry instead of seeing an internal-error
-		// toast. handleProviderError still flags the integration so the
-		// dashboard reflects the throttle.
+		// Estrangulado na LISTAGEM: diz que está estrangulado.
+		//
+		// Aqui se devolvia lista vazia com sucesso, para fugir do toast de erro
+		// interno. A troca saiu cara: a tela mostrava "nada encontrado", a
+		// lojista concluía que o produto não existia e clicava de novo — em
+		// 16/08 foram ~20 buscas em rajada no meio da live, cada uma somando
+		// pressão no limitador que já estava recusando.
+		//
+		// "Não achei" e "não posso olhar agora" pedem ações opostas do lojista.
+		// O caminho do enriquecimento logo abaixo já devolve ERP_THROTTLED com
+		// o texto certo; a listagem tinha ficado para trás.
 		if allRateLimited {
 			s.handleProviderError(ctx, input.IntegrationID, "search_products", firstErr)
-			logger.From(ctx, s.logger).Warn("ERP product search throttled, returning empty results",
+			logger.From(ctx, s.logger).Warn("ERP product search throttled",
 				zap.String("integration_id", input.IntegrationID),
 			)
-			return &SearchProductsOutput{Products: []ERPProductResponse{}, HasMore: false}, nil
+			return nil, httpx.DomainError(503, httpx.CodeErpThrottled,
+				"O ERP está limitando as consultas neste momento. Aguarde alguns segundos e busque de novo.")
 		}
 		// At least one job failed for a non-rate-limit reason — escalate.
 		s.handleProviderError(ctx, input.IntegrationID, "search_products", firstNonRateLimitErr)

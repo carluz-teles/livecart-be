@@ -113,7 +113,7 @@ func seedProdutosVariados(t *testing.T, fx scaleFixture, n int, rng *rand.Rand) 
 			RETURNING id::text`,
 			fx.storeID,
 			fmt.Sprintf("Produto Simulado %d", i),
-			fmt.Sprintf("%04d", 1000+i),  // keyword é character(4): é o número que o comprador digita na live
+			fmt.Sprintf("%04d", 1000+i), // keyword é character(4): é o número que o comprador digita na live
 			estoque, externalID,
 		).Scan(&id); err != nil {
 			t.Fatalf("seed produto %d: %v", i, err)
