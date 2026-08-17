@@ -32,10 +32,16 @@ func TestCodeDeOutraPlataformaNaoEhNosso(t *testing.T) {
 }
 
 func TestCarrinhoNossoEhReconhecido(t *testing.T) {
-	// Os três carrinhos da live de 16/08, formato que o checkout grava.
+	// TODAS as referências que o LiveCart produziu em produção entre 16 e 17/08:
+	// os 6 pagamentos aprovados mais o cancelado. Levantadas dos logs, não
+	// deduzidas do código — é a prova de que o formato é discriminador seguro.
 	nossos := []string{
+		"74c0abd0-ffd5-4aed-a3e9-7c04fa471a33", // cancelado, Pix R$ 4,90
 		"c1ec50cc-940b-46d6-bf41-d1336d9f9d35",
+		"0aab0e24-3ccf-4ef5-98f3-18a4ee1081e2",
 		"f6f0be13-5a09-4193-b032-da300f8a3201",
+		"2e2b9b53-0486-4e99-9ef8-c56cfbc6636f",
+		"4e6f37c3-76b7-4fe7-928e-a81042201305",
 		"38980178-408d-41c2-993b-58281efc36ed",
 	}
 
