@@ -305,9 +305,20 @@ func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool
 		}
 	}
 
+	// O perfil de frete do ERP NÃO carrega identificador: `ERPShippingProfile` é
+	// só peso e medidas. Substituir o perfil inteiro por ele zerava o SKU a cada
+	// sincronização — o produto era importado com SKU e o primeiro webhook de
+	// estoque o apagava, o que deixava a busca por SKU sem achar nada mesmo em
+	// catálogo recém-importado.
+	//
+	// Os identificadores vêm do PRODUTO no ERP e são aplicados à parte, e só
+	// quando existem: vazio quer dizer "o ERP não informou", e nesse caso o
+	// local manda (o lojista pode ter preenchido à mão).
 	shipping := existing.Shipping()
 	if input.Shipping != nil {
-		shipping = *input.Shipping
+		shipping = mesclarIdentificadores(shipping, *input.Shipping, input.SKU, input.Barcode)
+	} else {
+		shipping = mesclarIdentificadores(shipping, shipping, input.SKU, input.Barcode)
 	}
 
 	if err := existing.UpdateDetails(input.Name, input.Price, input.ImageURL, stock, input.Active, shipping); err != nil {
@@ -317,6 +328,31 @@ func (s *Service) SyncFromERP(ctx context.Context, input SyncFromERPInput) (bool
 		return false, err
 	}
 	return true, nil
+}
+
+// mesclarIdentificadores decide o perfil de frete a gravar num sync do ERP.
+//
+// As MEDIDAS vêm do ERP; os IDENTIFICADORES (SKU, código de barras) não vêm
+// junto delas. `ERPShippingProfile` só tem peso e dimensões, então substituir o
+// perfil inteiro pelo do ERP zerava o SKU: o produto era importado com SKU e o
+// primeiro webhook de estoque o apagava, deixando a busca por SKU sem achar
+// nada nem em catálogo recém-importado.
+//
+// Os identificadores chegam à parte, do PRODUTO no ERP, e só sobrepõem quando
+// existem. Vazio quer dizer "o ERP não informou" — e aí o local manda, porque o
+// lojista pode tê-lo preenchido à mão.
+func mesclarIdentificadores(atual, doERP domain.ShippingProfile, skuDoERP, barcodeDoERP string) domain.ShippingProfile {
+	resultado := doERP
+	resultado.SKU = atual.SKU
+	resultado.Barcode = atual.Barcode
+
+	if skuDoERP != "" {
+		resultado.SKU = skuDoERP
+	}
+	if barcodeDoERP != "" {
+		resultado.Barcode = barcodeDoERP
+	}
+	return resultado
 }
 
 func (s *Service) GetStats(ctx context.Context, storeID vo.StoreID) (ProductStats, error) {

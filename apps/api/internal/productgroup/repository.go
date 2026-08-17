@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"livecart/apps/api/db/sqlc"
-	"livecart/apps/api/internal/productgroup/domain"
 	productdomain "livecart/apps/api/internal/product/domain"
+	"livecart/apps/api/internal/productgroup/domain"
 	"livecart/apps/api/lib/httpx"
 	vo "livecart/apps/api/lib/valueobject"
 )

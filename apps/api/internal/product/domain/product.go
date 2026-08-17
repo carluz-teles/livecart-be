@@ -48,11 +48,17 @@ var (
 // ShippingProfile holds the physical attributes needed to quote freight.
 // All dimension fields are optional: when any is nil, the product is not shippable yet.
 type ShippingProfile struct {
-	WeightGrams         *int
-	HeightCm            *int
-	WidthCm             *int
-	LengthCm            *int
+	WeightGrams *int
+	HeightCm    *int
+	WidthCm     *int
+	LengthCm    *int
+	// SKU e Barcode são IDENTIFICADORES do produto, não medidas de despacho.
+	// Moram aqui porque é onde o SKU já morava (veio junto com os campos de
+	// etiqueta, na 000045) e porque `ShippingProfile` é struct: um campo novo
+	// aqui não mexe nos 25 chamadores posicionais de Reconstruct. Os dois vão
+	// para a etiqueta e os dois alimentam a busca do catálogo.
 	SKU                 string
+	Barcode             string
 	PackageFormat       PackageFormat
 	InsuranceValueCents *int64
 }

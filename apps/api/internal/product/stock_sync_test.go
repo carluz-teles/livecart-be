@@ -8,10 +8,10 @@ import "testing"
 // preservados para não disparar promoção fantasma da waitlist.
 func TestResolveSyncedStock(t *testing.T) {
 	cases := []struct {
-		name          string
-		local, erp    int
-		skip          bool
-		want          int
+		name       string
+		local, erp int
+		skip       bool
+		want       int
 	}{
 		// Sync normal: sempre aplica o valor do ERP.
 		{"normal aplica aumento", 5, 8, false, 8},

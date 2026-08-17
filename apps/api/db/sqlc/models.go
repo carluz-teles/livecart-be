@@ -590,6 +590,8 @@ type Product struct {
 	// FK to product_groups when this product is a variant; NULL for simple products.
 	GroupID pgtype.UUID `json:"group_id"`
 	ErpSeq  int64       `json:"erp_seq"`
+	// Barcode (GTIN/EAN) as registered in the ERP. Used by the catalog search alongside sku and keyword.
+	Barcode pgtype.Text `json:"barcode"`
 }
 
 // Catalog aggregator over `products` (variants). NULL group_id = simple product.

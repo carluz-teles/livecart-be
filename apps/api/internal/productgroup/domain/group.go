@@ -56,14 +56,14 @@ func Reconstruct(id vo.ID, storeID vo.StoreID, name, description, externalID str
 	}
 }
 
-func (g *Group) ID() vo.ID                                 { return g.id }
-func (g *Group) StoreID() vo.StoreID                       { return g.storeID }
-func (g *Group) Name() string                              { return g.name }
-func (g *Group) Description() string                       { return g.description }
-func (g *Group) ExternalID() string                        { return g.externalID }
+func (g *Group) ID() vo.ID                                    { return g.id }
+func (g *Group) StoreID() vo.StoreID                          { return g.storeID }
+func (g *Group) Name() string                                 { return g.name }
+func (g *Group) Description() string                          { return g.description }
+func (g *Group) ExternalID() string                           { return g.externalID }
 func (g *Group) ExternalSource() productdomain.ExternalSource { return g.externalSource }
-func (g *Group) CreatedAt() time.Time                      { return g.createdAt }
-func (g *Group) UpdatedAt() time.Time                      { return g.updatedAt }
+func (g *Group) CreatedAt() time.Time                         { return g.createdAt }
+func (g *Group) UpdatedAt() time.Time                         { return g.updatedAt }
 
 func (g *Group) Update(name, description string) error {
 	if name == "" {
@@ -133,10 +133,10 @@ func NewDetail(group *Group, options []Option, groupImages []Image, variants []V
 	return &Detail{group: group, options: options, groupImages: groupImages, variants: variants}
 }
 
-func (d *Detail) Group() *Group         { return d.group }
-func (d *Detail) Options() []Option     { return d.options }
-func (d *Detail) GroupImages() []Image  { return d.groupImages }
-func (d *Detail) Variants() []Variant   { return d.variants }
+func (d *Detail) Group() *Group        { return d.group }
+func (d *Detail) Options() []Option    { return d.options }
+func (d *Detail) GroupImages() []Image { return d.groupImages }
+func (d *Detail) Variants() []Variant  { return d.variants }
 
 // CreatedVariant is the minimal identity of a variant produced by a Create.
 type CreatedVariant struct {
@@ -159,10 +159,10 @@ func NewCreateResult(id, name string, variants []CreatedVariant, createdAt time.
 	return &CreateResult{id: id, name: name, variants: variants, createdAt: createdAt}
 }
 
-func (r *CreateResult) ID() string                  { return r.id }
-func (r *CreateResult) Name() string                { return r.name }
-func (r *CreateResult) Variants() []CreatedVariant  { return r.variants }
-func (r *CreateResult) CreatedAt() time.Time        { return r.createdAt }
+func (r *CreateResult) ID() string                 { return r.id }
+func (r *CreateResult) Name() string               { return r.name }
+func (r *CreateResult) Variants() []CreatedVariant { return r.variants }
+func (r *CreateResult) CreatedAt() time.Time       { return r.createdAt }
 
 // Summary is a lightweight list-row view of a group.
 type Summary struct {

@@ -8,8 +8,8 @@ import (
 
 // ptrInt / ptrInt64 são helpers locais (nomes exclusivos p/ não colidir com
 // stock_sync_test.go) para montar os ponteiros opcionais das DTOs.
-func ptrInt(v int) *int         { return &v }
-func ptrInt64(v int64) *int64   { return &v }
+func ptrInt(v int) *int       { return &v }
+func ptrInt64(v int64) *int64 { return &v }
 
 // hasFieldKey confere se a chave JSON do campo ofensor aparece no erro ozzo.
 func hasFieldKey(t *testing.T, err error, key string) {

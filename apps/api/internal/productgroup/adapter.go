@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"livecart/apps/api/internal/integration/providers"
 	productpkg "livecart/apps/api/internal/product"
 	productdomain "livecart/apps/api/internal/product/domain"
-	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/httpx"
 	vo "livecart/apps/api/lib/valueobject"
 )
@@ -86,9 +86,14 @@ func (a *SyncerAdapter) SyncFromERP(ctx context.Context, storeIDStr, externalSou
 			ImageURL:       v.ImageURL,
 			Stock:          v.Stock,
 			Active:         v.Active,
+			// Identificadores fora do perfil de frete: o sync os aplica sozinho e
+			// preserva o local quando o ERP não informa. Sem isto, variação sem
+			// dimensões cadastradas ficava também sem SKU.
+			SKU:     v.SKU,
+			Barcode: v.GTIN,
 		}
 		if v.Shipping != nil {
-			dto := erpShippingToDTO(v.Shipping)
+			dto := erpShippingToDTO(v)
 			profile, err := productpkg.ShippingDTOToDomain(dto)
 			if err == nil {
 				input.Shipping = &profile
@@ -214,7 +219,7 @@ func buildVariantsFromERP(variants []providers.ERPProduct, options []OptionReque
 			SKU:          v.SKU,
 			ImageURL:     v.ImageURL,
 			ExternalID:   v.ID,
-			Shipping:     erpShippingToDTO(v.Shipping),
+			Shipping:     erpShippingToDTO(v),
 		})
 	}
 	return out
@@ -224,18 +229,27 @@ func buildVariantsFromERP(variants []providers.ERPProduct, options []OptionReque
 // productgroup service expects. Returns the zero value when the ERP did not
 // supply one — the variant just won't be marked as shippable until the merchant
 // edits it.
-func erpShippingToDTO(s *providers.ERPShippingProfile) productpkg.ShippingProfileDTO {
-	if s == nil {
-		return productpkg.ShippingProfileDTO{}
+// erpShippingToDTO monta o perfil da VARIAÇÃO a partir do produto do ERP.
+//
+// Recebe o produto inteiro, e não só o perfil de frete, porque SKU e código de
+// barras são do PRODUTO — `ERPShippingProfile` só tem peso e medidas. Enquanto
+// esta função recebia apenas o perfil, toda variação era gravada com SKU vazio:
+// o `SKU` do VariantRequest existia mas não era o campo que a inserção lia.
+func erpShippingToDTO(p providers.ERPProduct) productpkg.ShippingProfileDTO {
+	dto := productpkg.ShippingProfileDTO{
+		SKU:     p.SKU,
+		Barcode: p.GTIN,
 	}
-	w, h, wd, l := s.WeightGrams, s.HeightCm, s.WidthCm, s.LengthCm
-	return productpkg.ShippingProfileDTO{
-		WeightGrams:   &w,
-		HeightCm:      &h,
-		WidthCm:       &wd,
-		LengthCm:      &l,
-		PackageFormat: s.PackageFormat,
+	if p.Shipping == nil {
+		return dto
 	}
+	w, h, wd, l := p.Shipping.WeightGrams, p.Shipping.HeightCm, p.Shipping.WidthCm, p.Shipping.LengthCm
+	dto.WeightGrams = &w
+	dto.HeightCm = &h
+	dto.WidthCm = &wd
+	dto.LengthCm = &l
+	dto.PackageFormat = p.Shipping.PackageFormat
+	return dto
 }
 
 func joinAttributes(attrs map[string]string) string {

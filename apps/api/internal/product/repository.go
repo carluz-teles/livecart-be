@@ -41,6 +41,7 @@ func (r *Repository) Save(ctx context.Context, product *domain.Product) error {
 		WidthCm:             intPtrToInt4(sp.WidthCm),
 		LengthCm:            intPtrToInt4(sp.LengthCm),
 		Sku:                 pgtype.Text{String: sp.SKU, Valid: sp.SKU != ""},
+		Barcode:             pgtype.Text{String: sp.Barcode, Valid: sp.Barcode != ""},
 		PackageFormat:       packageFormatToColumn(sp.PackageFormat),
 		InsuranceValueCents: int64PtrToInt8(sp.InsuranceValueCents),
 		GroupID:             groupIDToPg(product.GroupID()),
@@ -206,9 +207,23 @@ func (r *Repository) List(ctx context.Context, params ListProductsParams) (ListP
 	args := []interface{}{params.StoreID.String()}
 	argIdx := 2
 
-	// Search filter (name or keyword)
+	// Busca do catálogo: nome, keyword, SKU e código de barras.
+	//
+	// SKU e código de barras entraram porque são o que o lojista tem À MÃO
+	// quando está com a peça na frente — na etiqueta, no leitor, na nota do
+	// fornecedor. Procurar pelo nome exige lembrar como o produto foi
+	// cadastrado; procurar pelo código não exige lembrar nada.
+	//
+	// LOWER nos dois novos campos: SKU do Tiny mistura caixa ("PA440450000093"),
+	// e um lojista que digita minúsculo não pode ficar sem resultado.
+	//
+	// Vale para TODA tela que busca produto interno — catálogo, seletor de
+	// sessão, upsell, painel de live e a adição de item no pedido passam por
+	// esta única condição.
 	if params.Search != "" {
-		conditions = append(conditions, fmt.Sprintf("(LOWER(name) LIKE $%d OR keyword LIKE $%d)", argIdx, argIdx))
+		conditions = append(conditions, fmt.Sprintf(
+			"(LOWER(name) LIKE $%d OR keyword LIKE $%d OR LOWER(sku) LIKE $%d OR LOWER(barcode) LIKE $%d)",
+			argIdx, argIdx, argIdx, argIdx))
 		args = append(args, "%"+strings.ToLower(params.Search)+"%")
 		argIdx++
 	}
@@ -304,7 +319,7 @@ func (r *Repository) List(ctx context.Context, params ListProductsParams) (ListP
 	// Build main query with pagination
 	query := fmt.Sprintf(`
 		SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at,
-		       weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id
+		       weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, barcode
 		FROM products
 		WHERE %s
 		ORDER BY %s
@@ -343,6 +358,7 @@ func (r *Repository) List(ctx context.Context, params ListProductsParams) (ListP
 			&row.PackageFormat,
 			&row.InsuranceValueCents,
 			&row.GroupID,
+			&row.Barcode,
 		); err != nil {
 			return ListProductsResult{}, fmt.Errorf("scanning product: %w", err)
 		}
@@ -378,6 +394,7 @@ func (r *Repository) Update(ctx context.Context, product *domain.Product) error 
 		WidthCm:             intPtrToInt4(sp.WidthCm),
 		LengthCm:            intPtrToInt4(sp.LengthCm),
 		Sku:                 pgtype.Text{String: sp.SKU, Valid: sp.SKU != ""},
+		Barcode:             pgtype.Text{String: sp.Barcode, Valid: sp.Barcode != ""},
 		PackageFormat:       packageFormatToColumn(sp.PackageFormat),
 		InsuranceValueCents: int64PtrToInt8(sp.InsuranceValueCents),
 	})
@@ -420,7 +437,7 @@ func (r *Repository) Delete(ctx context.Context, id vo.ProductID, storeID vo.Sto
 func (r *Repository) GetByExternalID(ctx context.Context, storeID vo.StoreID, externalSource domain.ExternalSource, externalID string) (*domain.Product, error) {
 	query := `
 		SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at,
-		       weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id
+		       weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, barcode
 		FROM products
 		WHERE store_id = $1 AND external_source = $2 AND external_id = $3
 	`
@@ -447,6 +464,7 @@ func (r *Repository) GetByExternalID(ctx context.Context, storeID vo.StoreID, ex
 		&row.PackageFormat,
 		&row.InsuranceValueCents,
 		&row.GroupID,
+		&row.Barcode,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -566,6 +584,7 @@ func toDomainProduct(row sqlc.Product) (*domain.Product, error) {
 		WidthCm:             int4ToIntPtr(row.WidthCm),
 		LengthCm:            int4ToIntPtr(row.LengthCm),
 		SKU:                 textToString(row.Sku),
+		Barcode:             textToString(row.Barcode),
 		PackageFormat:       format,
 		InsuranceValueCents: int8ToInt64Ptr(row.InsuranceValueCents),
 	}
