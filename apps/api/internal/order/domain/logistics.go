@@ -12,7 +12,7 @@ type Logistics struct {
 	erpOrderState        string
 }
 
-func (l *Logistics) OrderID() string              { return l.orderID }
+func (l *Logistics) OrderID() string                { return l.orderID }
 func (l *Logistics) ShipmentStatus() ShipmentStatus { return l.shipmentStatus }
-func (l *Logistics) TrackingToken() *string        { return l.trackingToken }
-func (l *Logistics) ERPOrderState() string         { return l.erpOrderState }
+func (l *Logistics) TrackingToken() *string         { return l.trackingToken }
+func (l *Logistics) ERPOrderState() string          { return l.erpOrderState }

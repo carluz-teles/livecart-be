@@ -922,6 +922,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	}
 	// Block-status lookup for the order detail page; customerSvc is the
 	// authoritative source for blocked_handles.
+	// Edição de itens do pedido pelo painel delega ao checkout, que é onde a
+	// mecânica de mutação (estoque, ERP, fila, PIX) já vive testada.
+	if checkoutSvc != nil {
+		orderSvc.SetCartItemEditor(checkoutSvc)
+	}
 	orderSvc.SetBlockedHandleChecker(customerSvc)
 	orderHandler := order.NewHandler(orderSvc)
 

@@ -245,20 +245,20 @@ type GetCheckoutConfigResponse struct {
 
 // ProcessCardPaymentRequest is the request for POST /api/public/checkout/:token/card
 type ProcessCardPaymentRequest struct {
-	Email            string           `json:"email" validate:"required,email"`
-	Token            string           `json:"token" validate:"required"`
-	Installments     int              `json:"installments" validate:"required,min=1,max=12"`
-	PaymentMethodID  string           `json:"paymentMethodId,omitempty"` // For Mercado Pago
-	IssuerID         string           `json:"issuerId,omitempty"`        // For Mercado Pago
-	DeviceID         string           `json:"deviceId,omitempty"`        // For fraud prevention
-	CustomerName     string           `json:"customerName" validate:"required"`
-	CustomerDocument string           `json:"customerDocument" validate:"required"`
+	Email            string `json:"email" validate:"required,email"`
+	Token            string `json:"token" validate:"required"`
+	Installments     int    `json:"installments" validate:"required,min=1,max=12"`
+	PaymentMethodID  string `json:"paymentMethodId,omitempty"` // For Mercado Pago
+	IssuerID         string `json:"issuerId,omitempty"`        // For Mercado Pago
+	DeviceID         string `json:"deviceId,omitempty"`        // For fraud prevention
+	CustomerName     string `json:"customerName" validate:"required"`
+	CustomerDocument string `json:"customerDocument" validate:"required"`
 	// Obrigatório: contas PSP do Pagar.me rejeitam customer sem telefone
 	// ("At least one customer phone is required") — melhor falhar na
 	// validação com mensagem clara do que no gateway.
-	CustomerPhone    string           `json:"customerPhone" validate:"required"`
-	WhatsappConsent  bool             `json:"whatsappConsent,omitempty"` // PRD 006: opt-in p/ lembretes e recuperação
-	ShippingAddress  *ShippingAddress `json:"shippingAddress" validate:"required"`
+	CustomerPhone   string           `json:"customerPhone" validate:"required"`
+	WhatsappConsent bool             `json:"whatsappConsent,omitempty"` // PRD 006: opt-in p/ lembretes e recuperação
+	ShippingAddress *ShippingAddress `json:"shippingAddress" validate:"required"`
 }
 
 // ProcessCardPaymentResponse is the response for POST /api/public/checkout/:token/card
@@ -276,13 +276,13 @@ type ProcessCardPaymentResponse struct {
 
 // GeneratePixRequest is the request for POST /api/public/checkout/:token/pix
 type GeneratePixRequest struct {
-	Email            string           `json:"email" validate:"required,email"`
-	CustomerName     string           `json:"customerName" validate:"required"`
-	CustomerDocument string           `json:"customerDocument" validate:"required"`
+	Email            string `json:"email" validate:"required,email"`
+	CustomerName     string `json:"customerName" validate:"required"`
+	CustomerDocument string `json:"customerDocument" validate:"required"`
 	// Obrigatório: mesma exigência de telefone das contas PSP (ver card).
-	CustomerPhone    string           `json:"customerPhone" validate:"required"`
-	WhatsappConsent  bool             `json:"whatsappConsent,omitempty"` // PRD 006: opt-in p/ lembretes e recuperação
-	ShippingAddress  *ShippingAddress `json:"shippingAddress" validate:"required"`
+	CustomerPhone   string           `json:"customerPhone" validate:"required"`
+	WhatsappConsent bool             `json:"whatsappConsent,omitempty"` // PRD 006: opt-in p/ lembretes e recuperação
+	ShippingAddress *ShippingAddress `json:"shippingAddress" validate:"required"`
 }
 
 // ShippingAddress is the delivery address supplied by the customer at checkout.
@@ -380,8 +380,8 @@ type CartDetails struct {
 	MaxQuantityPerItem      int
 	// MinInstallmentCents é o piso de uma parcela no cartão, em centavos.
 	// 0 = sem mínimo.
-	MinInstallmentCents     int
-	Shipping                *CartShippingSelection
+	MinInstallmentCents int
+	Shipping            *CartShippingSelection
 	// Set by the service when Customer / ShippingAddress on this output came
 	// from the buyer's prior paid cart (returning-buyer prefill) rather than
 	// from the current cart's own paid receipt.
@@ -529,6 +529,22 @@ type MutateCartItemInput struct {
 	ItemID    string
 	ProductID string
 	Quantity  int
+
+	// ByMerchant marca a edição feita pelo LOJISTA no painel de pedidos, em vez
+	// da compradora no checkout público. Muda três coisas, e só elas:
+	//
+	//   1. o toggle `cart_allow_edit` não se aplica — a coluna existe para
+	//      "allow CUSTOMERS to edit cart", e usá-la aqui impediria a lojista de
+	//      consertar o pedido justamente nas lojas que travaram o comprador;
+	//   2. a mutação é auditada com source='merchant', senão a edição dela
+	//      entraria nas métricas de upsell como se a compradora tivesse
+	//      aumentado o carrinho sozinha;
+	//   3. a seleção de frete é limpa — ela mudou o que vai ser despachado.
+	//
+	// A posse da loja NÃO é verificada aqui: quem chama é o domínio order, que
+	// já resolveu o pedido pela consulta escopada por store_id (mesma fronteira
+	// de confiança de RetryERPFinalisation).
+	ByMerchant bool
 }
 
 // DropFromWaitlistInput é o input para o endpoint "sair da fila".
@@ -678,8 +694,8 @@ type CartRow struct {
 	MaxQuantityPerItem      int
 	// MinInstallmentCents é o piso de uma parcela no cartão, em centavos.
 	// 0 = sem mínimo.
-	MinInstallmentCents     int
-	Shipping                *CartShippingSelection
+	MinInstallmentCents int
+	Shipping            *CartShippingSelection
 	// Coupon snapshot. CouponID/CouponCode are nil when no coupon is applied;
 	// CouponDiscountCents is the absolute discount in cents and is 0 when none.
 	// CouponType / CouponMaxDiscountCents / CouponMinPurchaseCents are

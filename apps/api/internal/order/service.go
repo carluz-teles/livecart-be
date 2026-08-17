@@ -50,6 +50,7 @@ type Service struct {
 	invoiceSyncer   CartInvoiceSyncer
 	blockChecker    BlockedHandleChecker
 	cartCanceller   CartCanceller
+	itemEditor      CartItemEditor
 }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {

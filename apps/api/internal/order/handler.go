@@ -27,6 +27,10 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Post("/:id/cancel", h.Cancel)
 	g.Post("/:id/retry-erp", h.RetryERPFinalisation)
 	g.Post("/:id/sync-invoice", h.SyncInvoice)
+	// Edição dos itens pelo lojista, para pedido ainda não pago. Ver item_edit.go.
+	g.Post("/:id/items", h.AddItem)
+	g.Patch("/:id/items/:itemId", h.SetItemQuantity)
+	g.Delete("/:id/items/:itemId", h.RemoveItem)
 }
 
 // List godoc

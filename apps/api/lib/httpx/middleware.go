@@ -197,7 +197,7 @@ func StoreAccessMiddleware(validator StoreAccessValidator) fiber.Handler {
 		// UserValue do fasthttp, que é o Value do c.Context().
 		c.Locals("store_id", storeID)
 		c.Locals("store_slug", storeSlug)
-		c.Locals("store_user_id", membershipID)     // Membership ID for this store
+		c.Locals("store_user_id", membershipID)      // Membership ID for this store
 		c.Locals("store_role", role)                 // Role in this store
 		c.Locals("internal_user_id", internalUserID) // Internal user UUID
 		return c.Next()
