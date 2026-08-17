@@ -293,3 +293,59 @@ func (h *Handler) respondWithDetail(c *fiber.Ctx, orderID, storeID string) error
 	}
 	return httpx.OK(c, NewOrderDetailResponse(*detail))
 }
+
+// =============================================================================
+// PAGAMENTO MANUAL
+// =============================================================================
+
+// ManualPaymentConfirmer é cumprida por payment.Service. Invertida pelo mesmo
+// motivo das demais: o order não importa o payment.
+type ManualPaymentConfirmer interface {
+	ConfirmManualPayment(ctx context.Context, cartID, storeID string) error
+}
+
+// SetManualPaymentConfirmer liga o payment.Service no boot.
+func (s *Service) SetManualPaymentConfirmer(c ManualPaymentConfirmer) {
+	s.manualPayment = c
+}
+
+// ConfirmManualPayment marca como pago um pedido cujo dinheiro entrou por fora.
+//
+// A posse da loja é resolvida aqui, pela mesma consulta escopada que as demais
+// ações usam — o payment confia no par (cart, store) que recebe. Os estados que
+// impedem a confirmação (já pago, estornado, expirado) são decididos do outro
+// lado, com a leitura fresca no instante da escrita: duplicar aqui daria uma
+// segunda fonte da verdade, e a corrida real (o pagamento do gateway entrando
+// agora) só o lado de lá resolve.
+func (s *Service) ConfirmManualPayment(ctx context.Context, orderID, storeID string) error {
+	if s.manualPayment == nil {
+		return httpx.DomainError(422, httpx.CodeManualPaymentUnavailable,
+			"confirmação manual de pagamento indisponível")
+	}
+	if _, err := s.GetByID(ctx, orderID, storeID); err != nil {
+		return err
+	}
+	return s.manualPayment.ConfirmManualPayment(ctx, orderID, storeID)
+}
+
+// ConfirmManualPayment godoc
+// @Summary      Mark an unpaid order as paid outside LiveCart
+// @Description  Runs the SAME cycle as a gateway payment: materialises the Order, creates the ERP sales order and launches stock. No financial entry is sent to the ERP — the merchant records that there.
+// @Tags         orders
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        id path string true "Order (cart) UUID"
+// @Success      200 {object} httpx.Envelope{data=OrderDetailResponse}
+// @Failure      409 {object} httpx.Envelope "already paid / refunded / expired"
+// @Failure      422 {object} httpx.Envelope "no items to send"
+// @Router       /api/v1/stores/{storeId}/orders/{id}/confirm-manual-payment [post]
+// @Security     BearerAuth
+func (h *Handler) ConfirmManualPayment(c *fiber.Ctx) error {
+	orderID := c.Params("id")
+	storeID := httpx.GetStoreID(c)
+
+	if err := h.service.ConfirmManualPayment(c.UserContext(), orderID, storeID); err != nil {
+		return err
+	}
+	return h.respondWithDetail(c, orderID, storeID)
+}

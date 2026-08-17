@@ -66,16 +66,18 @@ const (
 	CodeOwnerOfOtherStore       Code = "OWNER_OF_OTHER_STORE"      // invitation/service.go:197
 
 	// --- ORDER (internal/order/service.go) ---
-	CodeCancelUnavailable     Code = "CANCEL_UNAVAILABLE"      // order/service.go:98 (cancel not allowed in current status)
-	CodeOrderAlreadyPaid      Code = "ORDER_ALREADY_PAID"      // order/service.go:105
-	CodeOrderAlreadyCancelled Code = "ORDER_ALREADY_CANCELLED" // order/service.go:108
-	CodeOrderExpired          Code = "ORDER_EXPIRED"           // order/service.go:111
-	CodeOrderRegenCancelled   Code = "ORDER_REGEN_CANCELLED"   // order/service.go:557 (regenerate link on cancelled)
-	CodeOrderAddressLocked    Code = "ORDER_ADDRESS_LOCKED"    // order/service.go:516,527 (after payment/shipment)
-	CodeOrderCheckoutLocked   Code = "ORDER_CHECKOUT_LOCKED"   // order/service.go:550,568 (regenerate on paid/shipped)
-	CodeNfeSyncUnavailable    Code = "NFE_SYNC_UNAVAILABLE"    // order/service.go:126
-	CodeErpRetryUnavailable   Code = "ERP_RETRY_UNAVAILABLE"   // order/service.go:140
-	CodeCartEditUnavailable   Code = "CART_EDIT_UNAVAILABLE"   // order/item_edit.go (checkout service not wired)
+	CodeCancelUnavailable        Code = "CANCEL_UNAVAILABLE"         // order/service.go:98 (cancel not allowed in current status)
+	CodeOrderAlreadyPaid         Code = "ORDER_ALREADY_PAID"         // order/service.go:105
+	CodeOrderAlreadyCancelled    Code = "ORDER_ALREADY_CANCELLED"    // order/service.go:108
+	CodeOrderExpired             Code = "ORDER_EXPIRED"              // order/service.go:111
+	CodeOrderRefunded            Code = "ORDER_REFUNDED"             // payment/manual.go (confirmação manual sobre pedido estornado)
+	CodeOrderRegenCancelled      Code = "ORDER_REGEN_CANCELLED"      // order/service.go:557 (regenerate link on cancelled)
+	CodeOrderAddressLocked       Code = "ORDER_ADDRESS_LOCKED"       // order/service.go:516,527 (after payment/shipment)
+	CodeOrderCheckoutLocked      Code = "ORDER_CHECKOUT_LOCKED"      // order/service.go:550,568 (regenerate on paid/shipped)
+	CodeNfeSyncUnavailable       Code = "NFE_SYNC_UNAVAILABLE"       // order/service.go:126
+	CodeErpRetryUnavailable      Code = "ERP_RETRY_UNAVAILABLE"      // order/service.go:140
+	CodeCartEditUnavailable      Code = "CART_EDIT_UNAVAILABLE"      // order/item_edit.go (checkout service not wired)
+	CodeManualPaymentUnavailable Code = "MANUAL_PAYMENT_UNAVAILABLE" // order/item_edit.go (payment service not wired)
 
 	// --- LIVE (internal/live/service.go) ---
 	CodeLiveMediaRequired   Code = "LIVE_MEDIA_REQUIRED"   // live/service.go:253 ("mediaId is required")

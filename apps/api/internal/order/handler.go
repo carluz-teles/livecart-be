@@ -31,6 +31,8 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Post("/:id/items", h.AddItem)
 	g.Patch("/:id/items/:itemId", h.SetItemQuantity)
 	g.Delete("/:id/items/:itemId", h.RemoveItem)
+	// Pagamento recebido fora do LiveCart. Ver item_edit.go.
+	g.Post("/:id/confirm-manual-payment", h.ConfirmManualPayment)
 }
 
 // List godoc

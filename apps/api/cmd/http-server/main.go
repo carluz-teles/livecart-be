@@ -927,6 +927,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	if checkoutSvc != nil {
 		orderSvc.SetCartItemEditor(checkoutSvc)
 	}
+	// Pagamento recebido por fora: delega ao payment, que aplica a MESMA escrita
+	// guardada e emite o MESMO cart.paid do fluxo normal.
+	if paymentSvc != nil {
+		orderSvc.SetManualPaymentConfirmer(paymentSvc)
+	}
 	orderSvc.SetBlockedHandleChecker(customerSvc)
 	orderHandler := order.NewHandler(orderSvc)
 
