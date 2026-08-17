@@ -54,7 +54,6 @@ func TestUpdateSettingsPreservesUnsentKeysInJSONB(t *testing.T) {
 		"checkout_immediate": {"enabled": true, "template": "checkout antigo"},
 		"item_added":         {"enabled": true, "template": "item antigo"},
 		"checkout_reminder":  {"enabled": true, "template": "lembrete antigo"},
-		"waitlist_notified":  {"enabled": true, "template": "fila antiga"},
 		"waitlist_joined":    {"enabled": true, "template": "entrou na fila antigo"},
 		"payment_cancelled":  {"enabled": true, "subject": "cancelado"},
 		"payment_refunded":   {"enabled": true, "subject": "estornado"},
@@ -91,7 +90,13 @@ func TestUpdateSettingsPreservesUnsentKeysInJSONB(t *testing.T) {
 	}
 
 	// E nada mais sumiu — é isto que regredia.
-	for _, key := range []string{"waitlist_notified", "waitlist_joined", "cart_recovery", "payment_cancelled", "payment_refunded"} {
+	//
+	// waitlist_notified saiu desta lista junto com o gatilho: o Instagram bloqueia
+	// o DM de promoção de fila, então a chave deixou de existir em Settings. O que
+	// o teste precisa provar é que uma Settings PARCIAL não apaga chave conhecida
+	// que não veio no PUT — e waitlist_joined, o aviso de fila que ainda é
+	// entregável, prova exatamente isso.
+	for _, key := range []string{"waitlist_joined", "cart_recovery", "payment_cancelled", "payment_refunded"} {
 		if _, ok := got[key]; !ok {
 			t.Errorf("chave %q sumiu do JSONB depois do save", key)
 		}
@@ -106,11 +111,11 @@ func TestUpdateSettingsPreservesUnsentKeysInJSONB(t *testing.T) {
 	}
 
 	var wl TemplateSettings
-	if err := json.Unmarshal(got["waitlist_notified"], &wl); err != nil {
-		t.Fatalf("waitlist_notified ilegível: %v", err)
+	if err := json.Unmarshal(got["waitlist_joined"], &wl); err != nil {
+		t.Fatalf("waitlist_joined ilegível: %v", err)
 	}
-	if wl.Template != "fila antiga" {
-		t.Errorf("waitlist_notified.template = %q, quero preservado", wl.Template)
+	if wl.Template != "entrou na fila antigo" {
+		t.Errorf("waitlist_joined.template = %q, quero preservado", wl.Template)
 	}
 }
 
@@ -122,7 +127,7 @@ func TestUpdateSettingsSequentialSavesAccumulate(t *testing.T) {
 	storeID := seedStoreWithSettings(t, `{
 		"checkout_immediate": {"enabled": true, "template": "A"},
 		"item_added":         {"enabled": true, "template": "B"},
-		"waitlist_notified":  {"enabled": true, "template": "fila"}
+		"waitlist_joined":    {"enabled": true, "template": "fila"}
 	}`)
 	svc := &Service{queries: testQueries, logger: zap.NewNop()}
 	ctx := context.Background()

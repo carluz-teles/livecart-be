@@ -16,9 +16,9 @@ type OrderFilters struct {
 	// SQL sempre foi `c.event_id = ?` — nome que ativamente engana quem for
 	// implementar: quem lesse "session" passaria um id de live_sessions e
 	// receberia zero linhas, sem erro. RN-19.
-	EventID *string `query:"eventId"`
-	DateFrom      *string  `query:"dateFrom"`
-	DateTo        *string  `query:"dateTo"`
+	EventID  *string `query:"eventId"`
+	DateFrom *string `query:"dateFrom"`
+	DateTo   *string `query:"dateTo"`
 
 	// Tri-state filter on whether the order has any shipment row.
 	// nil = ignore; *true = only orders with at least one shipment;
@@ -130,6 +130,12 @@ type OrderItemResponse struct {
 	UnitPrice    int64   `json:"unitPrice"`
 	TotalPrice   int64   `json:"totalPrice"`
 
+	// WaitlistedQuantity é a parcela de quantity SEM estoque. `quantity` é o
+	// total pedido, então o que a cliente pode pagar agora é
+	// quantity - waitlistedQuantity — a mesma conta do checkout público. Sempre
+	// 0 em pedido já pago (o snapshot registra o que foi vendido).
+	WaitlistedQuantity int `json:"waitlistedQuantity"`
+
 	// Shipping dimensions (joined from products). Zero when the product has no
 	// dimensions filled in — admin UIs should treat them as "missing" not "0"
 	// and block create-shipment until the merchant fills them in.
@@ -141,7 +147,7 @@ type OrderItemResponse struct {
 }
 
 type OrderResponse struct {
-	ID             string              `json:"id"`
+	ID string `json:"id"`
 	// Per-store sequential order number, starts at 1000 in each store. UI shows
 	// "#{shortId}" to merchants and customers — the UUID stays as the URL key.
 	ShortID int `json:"shortId"`
@@ -163,24 +169,24 @@ type OrderResponse struct {
 	// Mirrors the live event's freeShipping flag, used by the list to render
 	// a "frete grátis" indicator without loading the full event.
 	FreeShipping  bool   `json:"freeShipping"`
-	Status         string              `json:"status"`
-	PaymentStatus  string              `json:"paymentStatus"`
+	Status        string `json:"status"`
+	PaymentStatus string `json:"paymentStatus"`
 	// Latest shipment status (normalized enum). Empty string when the order has
 	// no shipment yet.
-	ShipmentStatus string              `json:"shipmentStatus"`
+	ShipmentStatus string `json:"shipmentStatus"`
 	// True when the buyer picked a shipping service at checkout. Lets the
 	// admin list distinguish "buyer never selected anything" from "selected,
 	// but no shipment row created yet".
-	HasShipping    bool                `json:"hasShipping"`
-	Items          []OrderItemResponse `json:"items"`
+	HasShipping bool                `json:"hasShipping"`
+	Items       []OrderItemResponse `json:"items"`
 	// Lightweight preview (name/image/qty) so the list can render an avatar
 	// stack without the full Items array. Populated only on list endpoints.
-	ItemsPreview   []OrderItemPreviewResponse `json:"itemsPreview"`
-	TotalItems     int                 `json:"totalItems"`
-	TotalAmount    int64               `json:"totalAmount"`
-	PaidAt         *time.Time          `json:"paidAt"`
-	CreatedAt      time.Time           `json:"createdAt"`
-	ExpiresAt      *time.Time          `json:"expiresAt"`
+	ItemsPreview []OrderItemPreviewResponse `json:"itemsPreview"`
+	TotalItems   int                        `json:"totalItems"`
+	TotalAmount  int64                      `json:"totalAmount"`
+	PaidAt       *time.Time                 `json:"paidAt"`
+	CreatedAt    time.Time                  `json:"createdAt"`
+	ExpiresAt    *time.Time                 `json:"expiresAt"`
 	// True only for the buyer's earliest paid order in this store. Frontend
 	// renders a "Primeira venda" badge from this flag.
 	IsFirstPurchase bool `json:"isFirstPurchase"`
@@ -217,11 +223,36 @@ type OrderDetailResponse struct {
 	ERPInvoice      *ERPInvoiceResponse           `json:"erpInvoice,omitempty"`
 	// CustomerBlocked is true when the buyer's handle is currently blocked
 	// for this store. The FE uses it to render a "Cliente bloqueado" badge.
-	CustomerBlocked bool                          `json:"customerBlocked"`
+	CustomerBlocked bool `json:"customerBlocked"`
 	// CancellationRevertedAt: quando presente, este pedido foi cancelado pela
 	// loja e mesmo assim foi pago — o cancelamento foi revertido e o pedido
 	// seguiu o fluxo normal. O FE mostra isso no histórico do pedido.
-	CancellationRevertedAt *time.Time             `json:"cancellationRevertedAt,omitempty"`
+	CancellationRevertedAt *time.Time `json:"cancellationRevertedAt,omitempty"`
+	// Waitlist são os produtos que a cliente pediu, a loja não tinha e ela
+	// entrou na fila. Não somam no total nem vão para a transportadora — são o
+	// que o lojista precisa dizer que está esperando reposição.
+	Waitlist []OrderWaitlistItemResponse `json:"waitlist"`
+	// PayableAmount: só as unidades COM estoque — é o que a cliente consegue
+	// pagar agora e o valor que o orçamento impresso apresenta. Igual a
+	// totalAmount quando não há nada em fila.
+	PayableAmount int64 `json:"payableAmount"`
+	// WaitlistedAmount: valor das unidades em fila, declarado no orçamento como
+	// não incluído em vez de simplesmente omitido.
+	WaitlistedAmount int64 `json:"waitlistedAmount"`
+}
+
+// OrderWaitlistItemResponse é a projeção de uma entrada de fila de espera.
+type OrderWaitlistItemResponse struct {
+	ID           string    `json:"id"`
+	ProductID    string    `json:"productId"`
+	ProductName  string    `json:"productName"`
+	ProductImage *string   `json:"productImage"`
+	Keyword      string    `json:"keyword"`
+	Quantity     int       `json:"quantity"`
+	UnitPrice    int64     `json:"unitPrice"`
+	Position     int       `json:"position"`
+	Status       string    `json:"status"` // waiting | notified
+	CreatedAt    time.Time `json:"createdAt"`
 }
 
 // ERPFinalisationResponse is the FE-visible projection of the cart's ERP
@@ -311,14 +342,14 @@ type OrderShipmentEventResp struct {
 
 // OrderStoreResponse exposes the origin data needed to pre-fill create-shipment.
 type OrderStoreResponse struct {
-	ID                string                      `json:"id"`
-	Name              string                      `json:"name"`
-	LogoURL           *string                     `json:"logoUrl"`
-	Document          string                      `json:"document"` // CNPJ
-	Email             string                      `json:"email"`
-	Phone             string                      `json:"phone"`
-	Address           OrderStoreAddressResponse   `json:"address"`
-	ShippingDefaults  OrderStoreShippingDefaults  `json:"shippingDefaults"`
+	ID               string                     `json:"id"`
+	Name             string                     `json:"name"`
+	LogoURL          *string                    `json:"logoUrl"`
+	Document         string                     `json:"document"` // CNPJ
+	Email            string                     `json:"email"`
+	Phone            string                     `json:"phone"`
+	Address          OrderStoreAddressResponse  `json:"address"`
+	ShippingDefaults OrderStoreShippingDefaults `json:"shippingDefaults"`
 }
 
 type OrderStoreAddressResponse struct {
@@ -365,20 +396,21 @@ func NewOrderResponse(o OrderOutput) OrderResponse {
 	items := make([]OrderItemResponse, len(o.Items))
 	for i, item := range o.Items {
 		items[i] = OrderItemResponse{
-			ID:            item.ID,
-			ProductID:     item.ProductID,
-			ProductName:   item.ProductName,
-			ProductImage:  item.ProductImage,
-			Keyword:       item.Keyword,
-			Size:          item.Size,
-			Quantity:      item.Quantity,
-			UnitPrice:     item.UnitPrice,
-			TotalPrice:    item.TotalPrice,
-			WeightGrams:   item.WeightGrams,
-			HeightCm:      item.HeightCm,
-			WidthCm:       item.WidthCm,
-			LengthCm:      item.LengthCm,
-			PackageFormat: item.PackageFormat,
+			ID:                 item.ID,
+			ProductID:          item.ProductID,
+			ProductName:        item.ProductName,
+			ProductImage:       item.ProductImage,
+			Keyword:            item.Keyword,
+			Size:               item.Size,
+			Quantity:           item.Quantity,
+			UnitPrice:          item.UnitPrice,
+			TotalPrice:         item.TotalPrice,
+			WaitlistedQuantity: item.WaitlistedQuantity,
+			WeightGrams:        item.WeightGrams,
+			HeightCm:           item.HeightCm,
+			WidthCm:            item.WidthCm,
+			LengthCm:           item.LengthCm,
+			PackageFormat:      item.PackageFormat,
 		}
 	}
 
@@ -460,10 +492,29 @@ func NewOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 		}
 	}
 
+	waitlist := make([]OrderWaitlistItemResponse, len(o.Waitlist))
+	for i, w := range o.Waitlist {
+		waitlist[i] = OrderWaitlistItemResponse{
+			ID:           w.ID,
+			ProductID:    w.ProductID,
+			ProductName:  w.ProductName,
+			ProductImage: w.ProductImage,
+			Keyword:      w.Keyword,
+			Quantity:     w.Quantity,
+			UnitPrice:    w.UnitPrice,
+			Position:     w.Position,
+			Status:       w.Status,
+			CreatedAt:    w.CreatedAt,
+		}
+	}
+
 	resp := OrderDetailResponse{
 		OrderResponse:          NewOrderResponse(o.OrderOutput),
 		Token:                  o.Token,
 		Comments:               comments,
+		Waitlist:               waitlist,
+		PayableAmount:          o.PayableAmount,
+		WaitlistedAmount:       o.WaitlistedAmount,
 		CustomerBlocked:        o.CustomerBlocked,
 		CancellationRevertedAt: o.CancellationRevertedAt,
 	}
@@ -582,14 +633,14 @@ func NewOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 // for legacy orders that predate the feature — frontend renders a neutral
 // empty state in that case.
 type OrderUpsellOutput struct {
-	HasSnapshot          bool                   `json:"hasSnapshot"`
-	SnapshotTakenAt      *time.Time             `json:"snapshotTakenAt,omitempty"`
-	InitialSubtotalCents int64                  `json:"initialSubtotalCents"`
-	FinalSubtotalCents   int64                  `json:"finalSubtotalCents"`
-	DeltaCents           int64                  `json:"deltaCents"`
-	MutationCount        int                    `json:"mutationCount"`
-	InitialItems         []OrderUpsellItem      `json:"initialItems"`
-	Mutations            []OrderUpsellMutation  `json:"mutations"`
+	HasSnapshot          bool                  `json:"hasSnapshot"`
+	SnapshotTakenAt      *time.Time            `json:"snapshotTakenAt,omitempty"`
+	InitialSubtotalCents int64                 `json:"initialSubtotalCents"`
+	FinalSubtotalCents   int64                 `json:"finalSubtotalCents"`
+	DeltaCents           int64                 `json:"deltaCents"`
+	MutationCount        int                   `json:"mutationCount"`
+	InitialItems         []OrderUpsellItem     `json:"initialItems"`
+	Mutations            []OrderUpsellMutation `json:"mutations"`
 }
 
 type OrderUpsellItem struct {
@@ -631,14 +682,14 @@ type ListOrdersOutput struct {
 }
 
 type OrderOutput struct {
-	ID                    string
-	ShortID               int
+	ID      string
+	ShortID int
 	// EventID/EventTitle são da CAMPANHA. O campo interno se chamava
 	// LiveSessionID e sempre carregou row.EventID — o comentário "keeping
 	// response field name for backwards compatibility" no service justificava o
 	// nome do JSON, mas o campo Go também tinha herdado a mentira (RN-19).
-	EventID    string
-	EventTitle string
+	EventID               string
+	EventTitle            string
 	LivePlatform          string
 	CustomerHandle        string
 	CustomerID            string
@@ -676,6 +727,12 @@ type OrderItemOutput struct {
 	Quantity     int
 	UnitPrice    int64
 	TotalPrice   int64
+
+	// WaitlistedQuantity é a parcela de Quantity que está em fila de espera.
+	// Quantity - WaitlistedQuantity é o que a cliente pode pagar agora — a
+	// mesma conta que o checkout público faz para montar o subtotal. Sempre 0
+	// depois da venda materializada.
+	WaitlistedQuantity int
 
 	WeightGrams   int
 	HeightCm      int
@@ -741,7 +798,7 @@ type OrderRow struct {
 	TotalItems      int
 	IsFirstPurchase bool
 	// Latest shipment status for the cart, "" when no shipment exists yet.
-	ShipmentStatus  string
+	ShipmentStatus string
 	// True when the buyer picked a shipping service at checkout and the cart
 	// is still in a state where a shipment can be issued (i.e. payment is not
 	// 'cancelled'/'refunded'). Lets the list show "Aguardando emissão" instead
@@ -760,15 +817,21 @@ type OrderItemPreviewRow struct {
 }
 
 type OrderItemRow struct {
-	ID           string
-	CartID       string
-	ProductID    string
-	Size         *string
-	Quantity     int
-	UnitPrice    int64
-	ProductName  string
-	ProductImage *string
+	ID             string
+	CartID         string
+	ProductID      string
+	Size           *string
+	Quantity       int
+	UnitPrice      int64
+	ProductName    string
+	ProductImage   *string
 	ProductKeyword string
+
+	// WaitlistedQuantity é a parcela de Quantity SEM estoque — o que a cliente
+	// pediu e a loja ainda não tem. Só existe enquanto o pedido é carrinho:
+	// `order_items` não tem a coluna porque o snapshot registra o que foi
+	// vendido, e vem 0 para pedido já materializado.
+	WaitlistedQuantity int
 
 	// Joined from products for the shipping flow. Zero when the product has
 	// no dimensions filled in — service-layer sets them unchanged (0) so the
@@ -849,10 +912,10 @@ type OrderDetailRow struct {
 	// ERP invoice (NFe) state captured by the Tiny webhook or the manual
 	// "Verificar NFe" button. Empty status means no NFe has been linked yet
 	// — that's the "Aguardando NFe" branch on the FE.
-	ERPInvoiceID         string
-	ERPInvoiceKey        string
-	ERPInvoiceStatus     string
-	ERPInvoiceEmittedAt  *time.Time
+	ERPInvoiceID        string
+	ERPInvoiceKey       string
+	ERPInvoiceStatus    string
+	ERPInvoiceEmittedAt *time.Time
 
 	// Preenchido quando o lojista cancelou este pedido e o pagamento entrou
 	// assim mesmo, revertendo o cancelamento. NULL na esmagadora maioria.
@@ -933,15 +996,15 @@ type OrderShippingOutput struct {
 
 // OrderStoreOutput is the store origin info.
 type OrderStoreOutput struct {
-	ID                string
-	Name              string
-	LogoURL           *string
-	Document          string
-	Email             string
-	Phone             string
-	Address           OrderShippingAddressOutput // reused shape
+	ID                 string
+	Name               string
+	LogoURL            *string
+	Document           string
+	Email              string
+	Phone              string
+	Address            OrderShippingAddressOutput // reused shape
 	PackageWeightGrams int
-	PackageFormat     string
+	PackageFormat      string
 }
 
 // OrderShipmentOutput bundles the shipment record + its tracking events.
@@ -955,28 +1018,67 @@ type OrderDetailOutput struct {
 	// Cart token used to build the public checkout link (/cart/{token}). Only
 	// surfaced on the detail endpoint because the admin actions menu builds the
 	// shareable URL from it.
-	Token            string
-	Comments         []CommentOutput
-	Customer         *OrderCustomerOutput
-	ShippingAddress  *OrderShippingAddressOutput
-	Shipping         *OrderShippingOutput
-	Shipment         *OrderShipmentOutput
-	Store            *OrderStoreOutput
-	ERPFinalisation  *ERPFinalisationOutput
+	Token           string
+	Comments        []CommentOutput
+	Customer        *OrderCustomerOutput
+	ShippingAddress *OrderShippingAddressOutput
+	Shipping        *OrderShippingOutput
+	Shipment        *OrderShipmentOutput
+	Store           *OrderStoreOutput
+	ERPFinalisation *ERPFinalisationOutput
 	// ERPInvoice is populated once the merchant emits the NFe in the ERP.
 	// Drives the "Aguardando NFe" / "Criar envio" gate on the order detail
 	// page — pointer so the FE can distinguish "no NFe yet" (nil) from
 	// "rejected/cancelled" (status is set, key may be empty).
-	ERPInvoice       *ERPInvoiceOutput
+	ERPInvoice *ERPInvoiceOutput
 	// CustomerBlocked is true when the buyer's Instagram handle is currently
 	// blocked for this store. Drives the "Cliente bloqueado" badge on the
 	// order detail page. Doesn't affect past orders — informational only.
-	CustomerBlocked  bool
+	CustomerBlocked bool
 	// CancellationRevertedAt marca o caso em que a loja cancelou este pedido e
 	// o pagamento entrou assim mesmo: o cancelamento foi revertido e o pedido
 	// seguiu o fluxo normal. Vira uma entrada no histórico do pedido para o
 	// lojista entender por que um pedido "cancelado" está pago.
 	CancellationRevertedAt *time.Time
+	// Waitlist são os produtos que a cliente pediu, a loja não tinha e ela
+	// entrou na fila. Não são itens pagáveis: não entram no total e não vão
+	// para a transportadora. Aparecem no detalhe porque é a única forma do
+	// lojista saber o que prometeu — e porque o orçamento impresso precisa
+	// dizer à cliente o que está reservado e o que está esperando reposição.
+	//
+	// Mesma fonte do checkout público (waitlist_items com status ativo), para
+	// que o que o lojista lê em voz alta seja exatamente o que a cliente vê.
+	Waitlist []OrderWaitlistItemOutput
+
+	// PayableAmount é o que a cliente consegue pagar AGORA: só as unidades com
+	// estoque. TotalAmount soma a quantidade CHEIA (é a fonte da receita do
+	// evento e do valor que a lista mostra) e por isso inclui o que está em
+	// fila. Quando não há fila os dois são idênticos.
+	//
+	// O orçamento impresso usa este número: cobrar pela unidade que a loja não
+	// tem para entregar é a única forma de o documento sair errado.
+	PayableAmount int64
+	// WaitlistedAmount é o valor das unidades em fila — o que o orçamento
+	// declara como NÃO incluído no total, em vez de apenas omitir.
+	WaitlistedAmount int64
+}
+
+// OrderWaitlistItemOutput é uma entrada de fila de espera do carrinho.
+type OrderWaitlistItemOutput struct {
+	ID           string
+	ProductID    string
+	ProductName  string
+	ProductImage *string
+	Keyword      string
+	Quantity     int
+	UnitPrice    int64
+	// Position é o lugar na fila daquele produto no evento — 1 é o próximo a
+	// ser atendido quando o estoque voltar.
+	Position int
+	// Status é waiting (esperando estoque) ou notified (estoque voltou e o
+	// prazo extra dela está correndo). Encerradas não chegam aqui.
+	Status    string
+	CreatedAt time.Time
 }
 
 // ERPInvoiceOutput surfaces the persisted erp_invoice_* state on the cart.

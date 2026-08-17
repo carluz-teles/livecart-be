@@ -400,6 +400,16 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 	// products (que pode ter sido renomeado). Imagem/keyword/dimensões seguem de
 	// products, pois são dados de apresentação/frete, não valores congelados.
 	// cartID é o identificador público; resolve-se order_id via orders.cart_id.
+	//
+	// O segundo ramo cobre o pedido que AINDA É CARRINHO. A linha em `orders` só
+	// nasce no pagamento, então para carrinho em aberto o primeiro ramo não casa
+	// nada — e o detalhe abria com "Itens (0)" e total R$ 0,00, impedindo a
+	// lojista de conferir e de imprimir orçamento antes da venda.
+	//
+	// O guarda é `NOT EXISTS (orders)`, não "o primeiro ramo veio vazio": depois
+	// da venda selada o cart NUNCA volta a ser lido (invariante B1b). Amarrar o
+	// fallback à ausência de itens deixaria uma Order sem itens — estado de bug —
+	// exibir o cart vivo e mascarar o defeito.
 	query := `
 		SELECT
 			oi.id,
@@ -411,6 +421,7 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			oi.product_name,
 			p.image_url as product_image,
 			p.keyword as product_keyword,
+			0::INT as waitlisted_quantity,
 			COALESCE(p.weight_grams, 0),
 			COALESCE(p.height_cm, 0),
 			COALESCE(p.width_cm, 0),
@@ -420,6 +431,29 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 		JOIN orders o   ON o.id = oi.order_id
 		JOIN products p ON p.id = oi.product_id
 		WHERE o.cart_id = $1
+
+		UNION ALL
+
+		SELECT
+			ci.id,
+			ci.cart_id,
+			ci.product_id,
+			NULL::TEXT as size,
+			ci.quantity,
+			COALESCE(ci.unit_price, 0)::BIGINT as unit_price,
+			p.name as product_name,
+			p.image_url as product_image,
+			p.keyword as product_keyword,
+			ci.waitlisted_quantity,
+			COALESCE(p.weight_grams, 0),
+			COALESCE(p.height_cm, 0),
+			COALESCE(p.width_cm, 0),
+			COALESCE(p.length_cm, 0),
+			COALESCE(p.package_format, 'box')
+		FROM cart_items ci
+		JOIN products p ON p.id = ci.product_id
+		WHERE ci.cart_id = $1
+		  AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.cart_id = ci.cart_id)
 	`
 
 	rows, err := r.db.Query(ctx, query, cartID)
@@ -441,6 +475,7 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			&item.ProductName,
 			&item.ProductImage,
 			&item.ProductKeyword,
+			&item.WaitlistedQuantity,
 			&item.WeightGrams,
 			&item.HeightCm,
 			&item.WidthCm,
@@ -962,6 +997,54 @@ func (r *Repository) GetOrderIDByCartID(ctx context.Context, cartID string) (str
 		return "", nil
 	}
 	return uuid.UUID(orderID.Bytes).String(), nil
+}
+
+// ListActiveWaitlist returns the cart's live waitlist entries (waiting/notified).
+//
+// Delega para a MESMA query sqlc que alimenta a seção de fila do checkout
+// público (ListActiveByCart) — assim o que o lojista vê no detalhe e no
+// orçamento impresso é exatamente o que a compradora vê na tela dela. Um SELECT
+// próprio aqui seria a segunda definição de "o que conta como fila ativa", e as
+// duas divergiriam na primeira mudança de status.
+//
+// Leitura pura: a varredura que expira entradas 'notified' vencidas é do
+// checkout, e disparar escrita a partir de um GET do painel faria o lojista
+// devolver estoque só por abrir a tela.
+func (r *Repository) ListActiveWaitlist(ctx context.Context, cartID string) ([]OrderWaitlistItemOutput, error) {
+	uid, err := uuid.Parse(cartID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cart id: %w", err)
+	}
+
+	rows, err := sqlc.New(r.db).ListActiveByCart(ctx, pgtype.UUID{Bytes: uid, Valid: true})
+	if err != nil {
+		return nil, fmt.Errorf("listing active waitlist by cart: %w", err)
+	}
+
+	items := make([]OrderWaitlistItemOutput, 0, len(rows))
+	for _, row := range rows {
+		item := OrderWaitlistItemOutput{
+			ID:          uuid.UUID(row.ID.Bytes).String(),
+			ProductID:   uuid.UUID(row.ProductID.Bytes).String(),
+			ProductName: row.ProductName,
+			Keyword:     row.ProductKeyword,
+			Quantity:    int(row.Quantity),
+			Position:    int(row.Position),
+			Status:      row.Status,
+		}
+		if row.ProductImageUrl.Valid {
+			img := row.ProductImageUrl.String
+			item.ProductImage = &img
+		}
+		if row.ProductPrice.Valid {
+			item.UnitPrice = row.ProductPrice.Int64
+		}
+		if row.CreatedAt.Valid {
+			item.CreatedAt = row.CreatedAt.Time
+		}
+		items = append(items, item)
+	}
+	return items, nil
 }
 
 // ListShipmentEvents returns the tracking timeline for a shipment, ascending
