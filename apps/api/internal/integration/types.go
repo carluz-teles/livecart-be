@@ -247,12 +247,12 @@ func NewERPStockSourceResponse(row *IntegrationRow) ERPStockSourceResponse {
 
 // IntegrationResponse is the HTTP response for an integration.
 type IntegrationResponse struct {
-	ID           string         `json:"id"`
-	StoreID      string         `json:"storeId"`
-	Type         string         `json:"type"`
-	Provider     string         `json:"provider"`
-	Status       string         `json:"status"`
-	Metadata     map[string]any `json:"metadata,omitempty"`
+	ID       string         `json:"id"`
+	StoreID  string         `json:"storeId"`
+	Type     string         `json:"type"`
+	Provider string         `json:"provider"`
+	Status   string         `json:"status"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 	// ERPResyncRunning diz se a releitura em massa está em andamento AGORA.
 	//
 	// Calculado aqui e não no cliente: a marca crua é um timestamp que precisa
@@ -262,10 +262,10 @@ type IntegrationResponse struct {
 	// ERPResyncDone / ERPResyncTotal levam o progresso, e só valem enquanto
 	// ERPResyncRunning é verdadeiro — zerados fora disso, para nenhuma tela
 	// mostrar "154 de 154" de uma varredura que acabou ontem.
-	ERPResyncDone  int `json:"erpResyncDone"`
-	ERPResyncTotal int `json:"erpResyncTotal"`
-	LastSyncedAt     *time.Time `json:"lastSyncedAt,omitempty"`
-	CreatedAt        time.Time  `json:"createdAt"`
+	ERPResyncDone  int        `json:"erpResyncDone"`
+	ERPResyncTotal int        `json:"erpResyncTotal"`
+	LastSyncedAt   *time.Time `json:"lastSyncedAt,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
 	// Setup URLs the merchant must paste into the provider's app config.
 	// Populated for providers that need user-side configuration (e.g. Tiny ERP).
 	RedirectURL string `json:"redirectUrl,omitempty"`

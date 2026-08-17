@@ -135,12 +135,6 @@ type Service struct {
 	// latchava para sempre.
 	subscriptionEnsured sync.Map
 
-	// lastWebhookAt guarda, por conta do Instagram (entry.id), quando o último
-	// webhook CHEGOU. É a memória do vigia: a Meta para de entregar sem avisar,
-	// e sem este relógio "parou de chegar" e "ninguém comentou" são o mesmo
-	// silêncio no log.
-	lastWebhookAt sync.Map
-
 	// erpProviderFactory lets the finalisation state-machine tests inject a
 	// scripted ERP provider. nil in production (falls back to getERPProvider,
 	// which builds the real Tiny client from the integration credentials).
@@ -2811,16 +2805,24 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 	}
 
 	if allErrored {
-		// All jobs hit Tiny's rate limit — degrade to "no results" instead of
-		// 500 so the merchant can retry instead of seeing an internal-error
-		// toast. handleProviderError still flags the integration so the
-		// dashboard reflects the throttle.
+		// Estrangulado na LISTAGEM: diz que está estrangulado.
+		//
+		// Aqui se devolvia lista vazia com sucesso, para fugir do toast de erro
+		// interno. A troca saiu cara: a tela mostrava "nada encontrado", a
+		// lojista concluía que o produto não existia e clicava de novo — em
+		// 16/08 foram ~20 buscas em rajada no meio da live, cada uma somando
+		// pressão no limitador que já estava recusando.
+		//
+		// "Não achei" e "não posso olhar agora" pedem ações opostas do lojista.
+		// O caminho do enriquecimento logo abaixo já devolve ERP_THROTTLED com
+		// o texto certo; a listagem tinha ficado para trás.
 		if allRateLimited {
 			s.handleProviderError(ctx, input.IntegrationID, "search_products", firstErr)
-			logger.From(ctx, s.logger).Warn("ERP product search throttled, returning empty results",
+			logger.From(ctx, s.logger).Warn("ERP product search throttled",
 				zap.String("integration_id", input.IntegrationID),
 			)
-			return &SearchProductsOutput{Products: []ERPProductResponse{}, HasMore: false}, nil
+			return nil, httpx.DomainError(503, httpx.CodeErpThrottled,
+				"O ERP está limitando as consultas neste momento. Aguarde alguns segundos e busque de novo.")
 		}
 		// At least one job failed for a non-rate-limit reason — escalate.
 		s.handleProviderError(ctx, input.IntegrationID, "search_products", firstNonRateLimitErr)
@@ -3354,9 +3356,9 @@ const productWebhookMaxRetries = 3
 type stockMirrorOutcome int
 
 const (
-	stockMirrorApplied stockMirrorOutcome = iota // o saldo do ERP entrou
-	stockMirrorNoTarget                          // produto não importado aqui
-	stockMirrorStale                             // leitura vencida: reler resolve
+	stockMirrorApplied  stockMirrorOutcome = iota // o saldo do ERP entrou
+	stockMirrorNoTarget                           // produto não importado aqui
+	stockMirrorStale                              // leitura vencida: reler resolve
 )
 
 // ProcessProductWebhook checks if the product exists in LiveCart, then fetches
@@ -3946,7 +3948,7 @@ func (s *Service) ResolvePaymentProvider(ctx context.Context, storeID, provider 
 // RestoreCancelledCartAsPaid satisfies payment.CartPaymentGateway (LIV-84 inverse
 // race): delega ao repo, que numa única tx restaura o cart cancelado pelo lojista
 // para pago e retoma o estoque. Mesmo repo/pool do resto do consumer.
-func (s *Service) RestoreCancelledCartAsPaid(ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (bool, error) {
+func (s *Service) RestoreCancelledCartAsPaid(ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (bool, string, error) {
 	return s.repo.RestoreCancelledCartAsPaid(ctx, cartID, storeID, paymentStatus, paymentID, paidAt, paymentMethod)
 }
 
@@ -3965,8 +3967,9 @@ func (s *Service) CartPaymentStatus(ctx context.Context, cartID string) (string,
 
 // UpdateCartPaymentStatus applies the guarded cart payment write. It returns
 // paymentdomain.ErrCartNotPayable (the sentinel the repo now returns) when the
-// cart expired/cancelled between the charge and the webhook.
-func (s *Service) UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) error {
+// cart expired/cancelled between the charge and the webhook, and the cart's
+// live_event_id (from the same RETURNING row) on success.
+func (s *Service) UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (string, error) {
 	return s.repo.UpdateCartPaymentStatus(ctx, cartID, paymentStatus, paymentID, paidAt, paymentMethod)
 }
 
@@ -4492,10 +4495,8 @@ func (s *Service) HandleMessageReceived(ctx context.Context, input ProcessInstag
 		}
 	}
 
-
 	return nil
 }
-
 
 // processStoryReply turns a DM reply to a published Story into a purchase intent.
 // It resolves the bound story-commerce event by the replied-to story media id,
@@ -4568,101 +4569,34 @@ func (s *Service) MarkMediaWebhookActive(ctx context.Context, mediaID string) er
 	return s.liveService.MarkMediaWebhookActive(ctx, mediaID)
 }
 
-// StartPostCommentPolling launches a background loop that captures comments on
-// active post events until the real-time `comments` webhook takes over. The
-// loop stops when ctx is cancelled.
-func (s *Service) StartPostCommentPolling(ctx context.Context) {
+// StartLiveSessionSweep launches a background loop that closes live sessions
+// whose broadcast has gone off air. It no longer captures comments: those
+// arrive by webhook only.
+//
+// O laço sobreviveu à remoção do polling porque ele não era só captura. Sem
+// este encerramento a sessão fica "no ar" para sempre no painel — o lojista
+// fecha o Instagram e vai embora, e voltar para clicar em "Encerrar" é o passo
+// que ninguém dá.
+func (s *Service) StartLiveSessionSweep(ctx context.Context) {
 	go func() {
-		timer := time.NewTimer(pollIntervalIdle)
-		defer timer.Stop()
-		logger.From(ctx, s.logger).Info("post-comment polling started")
+		ticker := time.NewTicker(liveSessionSweepInterval)
+		defer ticker.Stop()
+		logger.From(ctx, s.logger).Info("live session sweep started")
 		for {
 			select {
 			case <-ctx.Done():
-				logger.From(ctx, s.logger).Info("post-comment polling stopped")
+				logger.From(ctx, s.logger).Info("live session sweep stopped")
 				return
-			case <-timer.C:
-				sawLive, medias := s.pollPostCommentsOnce(ctx)
+			case <-ticker.C:
 				s.endStaleLiveSessionsOnce(ctx)
-				timer.Reset(pollInterval(sawLive, s.commentWebhookSilent(medias)))
 			}
 		}
 	}()
 }
 
-// Cadências do polling de comentário.
-//
-// Com transmissão no ar o polling deixou de ser rede de segurança e virou o
-// caminho principal: a Meta para de entregar `live_comments` no meio da live e
-// volta sozinha dezenas de minutos depois — em 08/08 foram 40 minutos de
-// silêncio, com `messaging` fluindo o tempo todo na mesma conexão e comentários
-// novos sendo criados durante a pausa (a idade na captura provou: 3 a 20
-// segundos). Na janela seguinte, 11 dos 17 comentários vieram por aqui.
-//
-// A 20 segundos, a idade na captura É a espera do comprador entre "quero" e o
-// carrinho existir. Cinco segundos com a live no ar corta isso em quatro e
-// custa três chamadas a mais por minuto por mídia — o limitador por integração
-// já serializa o resto.
-//
-// Fora da live a cadência antiga continua: post e reel não têm essa pressa, e
-// para eles o webhook assume assim que chega o primeiro comentário.
-const (
-	pollIntervalIdle = 20 * time.Second
-	pollIntervalLive = 5 * time.Second
-)
-
-// pollInterval escolhe a cadência da próxima varredura.
-//
-// Três estados, porque o problema tem três. Sem live no ar, 20s basta: post e
-// reel passam a bola para o webhook assim que o primeiro comentário chega. Com
-// live e o webhook entregando, 5s cobre a latência normal. Com live e o webhook
-// MUDO, o polling deixa de ser rede de segurança e vira o único caminho — e aí
-// a cadência dele é literalmente a espera do comprador entre escrever "quero" e
-// o carrinho existir.
-//
-// Que esse terceiro estado é o normal, e não a exceção, está medido: em 09/08 a
-// entrega morreu em toda transmissão testada, sempre no primeiro minuto ou dois,
-// e só voltou quando uma live NOVA foi aberta — reaproveitar a mesma mídia num
-// evento novo não trouxe nada de volta. Numa das janelas foram 12 minutos e meio
-// de silêncio TOTAL, com a inscrição verificada ativa
-// ("comments,live_comments,messages") no meio dele.
-func pollInterval(sawLive, webhookSilent bool) time.Duration {
-	switch {
-	case sawLive && webhookSilent:
-		return pollIntervalWebhookDown
-	case sawLive:
-		return pollIntervalLive
-	default:
-		return pollIntervalIdle
-	}
-}
-
-// pollIntervalWebhookDown é a cadência quando a transmissão está no ar e o
-// webhook de comentário não entrega há mais de webhookSilenceAlert.
-//
-// Dois segundos porque o limitador por integração já espaça as chamadas em ~1s:
-// com uma ou duas mídias vivas, isto usa a folga que existe sem criar fila.
-const pollIntervalWebhookDown = 2 * time.Second
-
-// commentWebhookSilent diz se NENHUMA das mídias vivas recebeu webhook de
-// comentário dentro da janela de silêncio. Lê o mesmo carimbo do vigia, então
-// as duas coisas nunca divergem sobre o que é "mudo".
-func (s *Service) commentWebhookSilent(medias []live.MediaRef) bool {
-	visto := false
-	for _, m := range medias {
-		if m.MediaID == "" {
-			continue
-		}
-		visto = true
-		if v, ok := s.lastWebhookAt.Load(commentWebhookKey(m.MediaID)); ok {
-			if t, _ := v.(time.Time); time.Since(t) < webhookSilenceAlert {
-				return false
-			}
-		}
-	}
-	// Sem mídia nenhuma não há silêncio a compensar.
-	return visto
-}
+// A varredura só precisa notar que a transmissão acabou; não há comprador
+// esperando por ela, então a cadência antiga de ocioso serve.
+const liveSessionSweepInterval = 20 * time.Second
 
 // isMediaGoneError reports whether an Instagram Graph error means the media is
 // permanently unreachable for us (deleted or no longer accessible) rather than a
@@ -4675,146 +4609,6 @@ func isMediaGoneError(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "error_subcode\":33") ||
 		strings.Contains(msg, "does not exist, cannot be loaded")
-}
-
-// pollPostCommentsOnce processes one capture pass over active post events that
-// are not yet webhook-driven. New comments (deduped by platform_comment_id) are
-// fed into the same ProcessInstagramComment path used by the webhook.
-// Devolve true quando alguma das mídias varridas é uma LIVE no ar — o laço usa
-// isso para acelerar a cadência enquanto a transmissão está acontecendo.
-func (s *Service) pollPostCommentsOnce(ctx context.Context) (sawLive bool, scanned []live.MediaRef) {
-	medias, err := s.liveService.ListPollableMedia(ctx)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("post polling: failed to list pollable media", zap.Error(err))
-		return false, nil
-	}
-	for _, ev := range medias {
-		if ev.MediaID == "" {
-			continue
-		}
-		if ev.SessionType == live.SessionTypeLive {
-			sawLive = true
-		}
-		// The polling loop runs on the app-level ctx (no store): enrich a
-		// per-media ctx with the store the media belongs to.
-		evCtx := logger.WithStore(ctx, ev.StoreID, "")
-		provider, err := s.resolveInstagramSocialProvider(evCtx, ev.StoreID)
-		if err != nil {
-			continue
-		}
-		accountID := s.instagramAccountID(evCtx, ev.StoreID)
-		comments, err := provider.GetMediaComments(evCtx, ev.MediaID)
-		if err != nil {
-			// Media gone (deleted / no longer accessible): close the event so we
-			// stop hammering a dead media id every tick instead of warning forever.
-			if isMediaGoneError(err) {
-				if endErr := s.liveService.EndEventByMediaID(evCtx, ev.MediaID); endErr != nil {
-					logger.From(evCtx, s.logger).Warn("post polling: failed to end event for missing media",
-						zap.String("media_id", ev.MediaID), zap.Error(endErr))
-				} else {
-					logger.From(evCtx, s.logger).Info("post polling: ended event, media no longer accessible",
-						zap.String("media_id", ev.MediaID))
-				}
-				continue
-			}
-			logger.From(evCtx, s.logger).Warn("post polling: failed to fetch comments",
-				zap.String("media_id", ev.MediaID), zap.Error(err))
-			continue
-		}
-		for _, c := range comments {
-			if c.ID == "" {
-				continue
-			}
-			exists, _ := s.repo.LiveCommentExistsByPlatformID(evCtx, c.ID)
-			if exists {
-				continue
-			}
-			username := c.From.Username
-			if username == "" {
-				username = c.Username
-			}
-
-			// A MESMA pessoa chega com ids DIFERENTES conforme o caminho.
-			//
-			// O webhook traz `from.self_ig_scoped_id` — o IGSID, único id que a
-			// API de mensagens aceita como destinatário. A aresta
-			// /{media}/comments não devolve esse campo: só o `from.id` cru.
-			//
-			// Em 05/08 isso rendeu DOIS carrinhos para @englivecart no mesmo
-			// evento, um por caminho. A unique parcial por (evento, user_id)
-			// não viu violação — os ids são diferentes de verdade. E o carrinho
-			// nascido do polling ainda ficava com um id que NÃO recebe DM.
-			//
-			// Se já existe carrinho aberto deste @ no evento, adotamos o id
-			// dele. Não inventa identidade: só evita criar uma segunda para
-			// quem já tem uma.
-			userID := c.From.ID
-
-			// A LOJA comentando na própria transmissão é o caso em que o
-			// polling não erra por pouco: o Instagram devolve o id da CONTA,
-			// que não é destinatário de DM em hipótese nenhuma. Medido em
-			// 05/08, mesmo evento: a identidade da conta profissional acumulou
-			// 4 comentários e 0 DMs; a do IGSID, 1 comentário e 1 DM.
-			//
-			// Não dá para pedir o IGSID à Meta. Ele é `self_ig_scoped_id`, só
-			// existe no payload do webhook, e a própria doc de auto-conversa
-			// diz para usar "the recipient ID from the webhook". Os endpoints
-			// que aceitam IGSID (/{igsid}, /me/conversations?user_id=) o querem
-			// como ENTRADA — nenhum faz o caminho inverso a partir do @.
-			//
-			// Então recuperamos do que já gravamos: uma passagem pelo webhook
-			// basta para o IGSID estar em customers, e daí em diante o polling
-			// o reusa.
-			if storeHandle := s.instagramUsername(evCtx, ev.StoreID); storeHandle != "" &&
-				strings.EqualFold(storeHandle, username) {
-				if known, ok := s.repo.FindDMCapableUserIDByHandle(evCtx, ev.StoreID, username, userID); ok {
-					logger.From(evCtx, s.logger).Info(TracePrefixIG+"polling: store commented on its own media, using the id that receives DM",
-						zap.String("handle", username),
-						zap.String("raw_from_id", c.From.ID),
-						zap.String("dm_capable_id", known),
-					)
-					userID = known
-				} else {
-					logger.From(evCtx, s.logger).Warn(TracePrefixIG+"polling: store commented on its own media and no id known to receive DM",
-						zap.String("handle", username),
-						zap.String("raw_from_id", c.From.ID),
-					)
-				}
-			}
-
-			if known, ok := s.repo.FindOpenCartUserIDByHandle(evCtx, ev.EventID, username); ok && known != userID {
-				logger.From(evCtx, s.logger).Info(TracePrefixIG+"polling: reusing the buyer id from their open cart",
-					zap.String("handle", username),
-					zap.String("raw_from_id", c.From.ID),
-					zap.String("cart_user_id", known),
-				)
-				userID = known
-			}
-			if err := s.liveService.ProcessInstagramComment(evCtx, ProcessInstagramCommentInput{
-				// A conta do Instagram desta loja. O webhook a traz em
-				// entry.id; o polling tem de buscá-la, e sem isso todo
-				// comentário capturado por aqui aparecia no log com
-				// account_id vazio — indistinguível de "não sabemos de quem
-				// é" e o suficiente para o diagnóstico apontar para o lado
-				// errado. É campo de LOG, não de decisão: nada no fluxo de
-				// resposta o consulta.
-				AccountID: accountID,
-				MediaID:   ev.MediaID,
-				CommentID: c.ID,
-				UserID:    userID,
-				Username:  username,
-				Text:      c.Text,
-				// RN-37: sem o carimbo o polling não saberia que o comentário
-				// está fora da janela de 7 dias e tentaria responder — e é
-				// justamente o polling que agora varre campanha encerrada.
-				Timestamp: parseGraphTimestamp(c.Timestamp),
-			}); err != nil {
-				logger.From(evCtx, s.logger).Warn("post polling: failed to process comment",
-					zap.String("comment_id", c.ID), zap.Error(err))
-			}
-		}
-	}
-	return sawLive, medias
 }
 
 // =============================================================================
@@ -5841,26 +5635,21 @@ func (s *Service) ProcessWaitlistForProduct(ctx context.Context, eventID, produc
 	s.inventory().ProcessWaitlistForProduct(ctx, eventID, productID, storeID)
 }
 
-// NotifyWaitlistPromoted satisfies inventory.WaitlistCollaborators: it maps the
-// neutral DTO back to the integration DM payload and sends the "produto liberou"
-// DM through sendWaitlistNotifiedDM (which stays here — it reads
-// s.notificationService LAZILY, so the setter-wired service is picked up at call
-// time; NIL-GUARD LAZY). No-op when the notification service is unwired.
-func (s *Service) NotifyWaitlistPromoted(ctx context.Context, in inventory.WaitlistNotifiedInput) {
-	s.sendWaitlistNotifiedDM(ctx, sendWaitlistNotifiedInput{
-		StoreID:        in.StoreID,
-		EventID:        in.EventID,
-		EventTitle:     in.EventTitle,
-		CartID:         in.CartID,
-		CartToken:      in.CartToken,
-		PlatformUserID: in.PlatformUserID,
-		PlatformHandle: in.PlatformHandle,
-		ProductName:    in.ProductName,
-		ProductKeyword: in.ProductKeyword,
-		Quantity:       in.Quantity,
-		TTL:            in.TTL,
-	})
-}
+// NotifyWaitlistPromoted satisfies inventory.WaitlistCollaborators and does
+// nothing on purpose: a promoção da fila NÃO avisa o comprador.
+//
+// Não é omissão nossa, é regra do Instagram. A janela de 24h para mandar DM só
+// abre quando o COMPRADOR manda mensagem para a conta; comentar não abre —
+// comentário concede um private reply, permissão distinta e de uso único, já
+// gasta no aviso de entrada na fila. Quando o estoque volta não existe
+// comentário novo para responder, então sobrava o DM, e ele voltava 403
+// "outside of allowed window" em 100% das tentativas (3 de 3 na live de 16/08).
+//
+// O item continua entrando no carrinho sozinho e o prazo continua sendo
+// estendido — o que muda é a promessa: o texto da entrada na fila agora manda
+// o comprador ficar de olho no carrinho, em vez de garantir um aviso que a
+// plataforma não deixa entregar.
+func (s *Service) NotifyWaitlistPromoted(context.Context, inventory.WaitlistNotifiedInput) {}
 
 // CancelWaitlistForCartProduct mata a fila de um produto do carrinho. Chamada
 // pelo checkout quando a redução de quantidade esvazia a parcela em fila: sem
@@ -5904,101 +5693,6 @@ func (s *Service) ExpireNotifiedWaitlistSweep(ctx context.Context) (int, error) 
 // integration.Service.
 func (s *Service) ProcessWaitlistAfterStockWebhook(ctx context.Context, storeID, externalSource, externalProductID string) error {
 	return s.inventory().ProcessWaitlistAfterStockWebhook(ctx, storeID, externalSource, externalProductID)
-}
-
-// sendWaitlistNotifiedInput é o payload da DM "produto liberou".
-type sendWaitlistNotifiedInput struct {
-	StoreID        string
-	EventID        string
-	EventTitle     string
-	CartID         string
-	CartToken      string
-	PlatformUserID string
-	PlatformHandle string
-	ProductName    string
-	ProductKeyword string
-	Quantity       int
-	TTL            time.Duration
-	// DeadlineAt é o novo expires_at do carrinho depois da extensão — o
-	// {prazo_final} que a mensagem anuncia.
-	DeadlineAt time.Time
-}
-
-func (s *Service) sendWaitlistNotifiedDM(ctx context.Context, input sendWaitlistNotifiedInput) {
-	if s.notificationService == nil {
-		return
-	}
-	shouldNotify, err := s.notificationService.ShouldNotify(ctx, input.StoreID, notification.TypeWaitlistNotified, false)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to check notification settings for waitlist",
-			zap.String("store_id", input.StoreID),
-			zap.Error(err),
-		)
-		return
-	}
-	if !shouldNotify {
-		return
-	}
-
-	storeInfo, err := s.repo.GetStoreInfo(ctx, input.StoreID)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to get store info for waitlist notification",
-			zap.String("store_id", input.StoreID),
-			zap.Error(err),
-		)
-		return
-	}
-
-	frontendURL := config.FrontendURL.StringOr("http://localhost:3000")
-	checkoutURL := fmt.Sprintf("%s/cart/%s", frontendURL, input.CartToken)
-
-	vars := notification.TemplateVariables{
-		Handle:     "@" + input.PlatformHandle,
-		Produto:    input.ProductName,
-		Keyword:    input.ProductKeyword,
-		Quantidade: input.Quantity,
-		Link:       checkoutURL,
-		Loja:       storeInfo.Name,
-		ExpiraEm:   notification.FormatExpiryMinutes(int(input.TTL.Minutes())),
-		LiveTitulo: input.EventTitle,
-		// {tempo_extra} é o prazo GANHO pela fila, e {expira_em} continua
-		// existindo para não quebrar template já salvo. São o mesmo número com
-		// nomes diferentes de propósito: o texto novo fala de ganho ("ganhei
-		// mais 30 minutos pra você"), o antigo falava de limite.
-		TempoExtra: notification.FormatExpiryMinutes(int(input.TTL.Minutes())),
-	}
-	if !input.DeadlineAt.IsZero() {
-		vars.PrazoFinal = live.FormatBRT(input.DeadlineAt)
-	}
-	if items, cents, err := s.repo.GetCartTotals(ctx, input.CartID); err == nil {
-		vars.TotalItens = items
-		vars.Total = notification.FormatCurrency(cents)
-		vars.TotalCents = cents
-	}
-
-	result, err := s.notificationService.Send(ctx, notification.SendInput{
-		StoreID:          input.StoreID,
-		EventID:          input.EventID,
-		CartID:           input.CartID,
-		CartToken:        input.CartToken,
-		PlatformUserID:   input.PlatformUserID,
-		PlatformHandle:   input.PlatformHandle,
-		NotificationType: notification.TypeWaitlistNotified,
-		Variables:        vars,
-	})
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("waitlist notification send error",
-			zap.String("store_id", input.StoreID),
-			zap.String("cart_id", input.CartID),
-			zap.Error(err),
-		)
-		return
-	}
-	logger.From(ctx, s.logger).Info("waitlist notification dispatched",
-		zap.String("store_id", input.StoreID),
-		zap.String("cart_id", input.CartID),
-		zap.String("status", string(result.Status)),
-	)
 }
 
 // =============================================================================
@@ -6537,7 +6231,7 @@ func (s *Service) LogIntegrationOperation(ctx context.Context, log providers.Int
 func (s *Service) endStaleLiveSessionsOnce(ctx context.Context) {
 	medias, err := s.liveService.ListPollableMedia(ctx)
 	if err != nil {
-		return // já logado por pollPostCommentsOnce, que roda antes
+		return // sem lista de mídias não há sessão a encerrar
 	}
 
 	// Agrupa as mídias de live por loja, para uma consulta por conta.
@@ -6565,10 +6259,6 @@ func (s *Service) endStaleLiveSessionsOnce(ctx context.Context) {
 		// loja por processo (ver subscriptionEnsured), então o custo é uma
 		// chamada por lojista que fez live desde o último deploy.
 		s.ensureWebhookSubscriptionOnce(storeCtx, storeID)
-		// Só faz sentido com transmissão no ar — que é exatamente o laço em que
-		// estamos: byStore só contém loja com sessão de live viva.
-		s.checkWebhookSilence(storeCtx, storeID, storeMedias)
-
 		provider, err := s.resolveInstagramSocialProvider(storeCtx, storeID)
 		if err != nil {
 			continue
@@ -6731,163 +6421,6 @@ func (s *Service) instagramAccountID(ctx context.Context, storeID string) string
 		return v
 	}
 	return ""
-}
-
-// webhookSilenceAlert é quanto tempo sem comentário POR WEBHOOK, com
-// transmissão no ar, já é sinal de que a entrega caiu.
-//
-// Eram cinco minutos, escolhidos quando o silêncio era um mistério. Agora ele
-// está medido: em 09/08, duas transmissões seguidas entregaram por webhook
-// durante 41 e 18 segundos e pararam — com a live rodando por mais 4,5 e 2,5
-// minutos, os comentários continuando a nascer (o polling os capturou com 3 a
-// 20 segundos de idade) e o campo `messaging` fluindo na mesma conexão o tempo
-// todo.
-//
-// Contra um corte que acontece no primeiro minuto, cinco minutos de espera é
-// quase a transmissão inteira.
-const webhookSilenceAlert = 90 * time.Second
-
-// NoteInstagramWebhook carimba a chegada de um webhook para uma conta.
-func (s *Service) NoteInstagramWebhook(accountID string) {
-	if accountID == "" {
-		return
-	}
-	s.lastWebhookAt.Store(accountID, time.Now())
-}
-
-// commentWebhookKey separa o carimbo de COMENTÁRIO do carimbo de qualquer
-// webhook, no mesmo mapa.
-func commentWebhookKey(mediaID string) string { return "comment:" + mediaID }
-
-// NoteInstagramCommentWebhook carimba a chegada de um webhook de COMENTÁRIO
-// para uma mídia.
-//
-// O carimbo por conta não serve para a pergunta que interessa. Medido em
-// 06/08, numa janela de oito minutos com transmissão no ar: 20 webhooks
-// chegaram, 19 deles `messaging` e UM `live_comments`. O canal estava vivo o
-// tempo todo — quem parou foi só o campo de comentário. Um vigia que olha
-// "chegou algum webhook?" dá tudo certo enquanto nenhum comentário é entregue.
-//
-// A chave é a MÍDIA, e não a conta, porque é o único id que aparece igual nos
-// dois lados: o entry.id do webhook varia conforme o campo (a entrada de
-// comentário traz a conta profissional, a de mensagem traz outro id), e foi
-// por isso que o vigia media silêncio contra uma chave que nunca era carimbada.
-func (s *Service) NoteInstagramCommentWebhook(mediaID string) {
-	if mediaID == "" {
-		return
-	}
-	s.lastWebhookAt.Store(commentWebhookKey(mediaID), time.Now())
-}
-
-// checkWebhookSilence alerta quando uma loja COM TRANSMISSÃO NO AR passa tempo
-// demais sem receber webhook — e, quando isso acontece, consulta a Meta para
-// dizer em quais campos a conta está inscrita NAQUELE momento.
-//
-// Por que existe: a entrega de live_comments para no meio da transmissão, sem
-// erro do nosso lado (respondemos 200 em 100% das entregas) e sem nada no log.
-// A pergunta que ninguém conseguia responder era "a assinatura ainda está de
-// pé?" — porque só dava para consultá-la manualmente, depois, quando o estado
-// já podia ter mudado. Isto responde no instante em que o silêncio começa.
-//
-// O alerta NÃO conserta nada e não tenta: reinscrever aqui apagaria a evidência
-// justamente do estado que se quer capturar. É diagnóstico, e diz isso.
-func (s *Service) checkWebhookSilence(ctx context.Context, storeID string, medias []live.MediaRef) {
-	accountID := s.instagramAccountID(ctx, storeID)
-	if accountID == "" {
-		return
-	}
-
-	// Mede o silêncio de COMENTÁRIO, por mídia, e não "chegou algum webhook".
-	//
-	// A versão anterior media a coisa errada duas vezes. Carimbava por entry.id
-	// e consultava o id do metadata — chaves que nem sempre são a mesma, então
-	// ela via silêncio onde não havia. E, quando as chaves batiam, carimbava
-	// também os webhooks de `messaging`: em 06/08 esses eram 19 dos 20 numa
-	// janela em que exatamente UM comentário foi entregue, ou seja, o vigia
-	// diria "tudo certo" no meio do apagão que ele existe para pegar.
-	//
-	// A mídia da transmissão é o id que aparece igual nos dois lados.
-	var last time.Time
-	for _, m := range medias {
-		if m.MediaID == "" {
-			continue
-		}
-		if v, ok := s.lastWebhookAt.Load(commentWebhookKey(m.MediaID)); ok {
-			if t, _ := v.(time.Time); t.After(last) {
-				last = t
-			}
-		}
-	}
-	if last.IsZero() {
-		// Nenhum comentário desta transmissão chegou por webhook NESTE processo.
-		// Pode ser deploy recente ou live recém-aberta, então o relógio começa
-		// agora em vez de gritar de imediato.
-		for _, m := range medias {
-			if m.MediaID != "" {
-				s.lastWebhookAt.Store(commentWebhookKey(m.MediaID), time.Now())
-			}
-		}
-		return
-	}
-	silence := time.Since(last)
-	if silence < webhookSilenceAlert {
-		return
-	}
-
-	// Só alerta UMA vez por janela de silêncio: empurra o relógio para frente,
-	// senão o sweep de 20s viraria uma enxurrada de warns idênticos.
-	for _, m := range medias {
-		if m.MediaID != "" {
-			s.lastWebhookAt.Store(commentWebhookKey(m.MediaID), time.Now())
-		}
-	}
-
-	fields, err := s.GetInstagramWebhookSubscription(ctx, storeID)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("instagram comment webhook silent with a live on air, and the subscription could not be read",
-			zap.String("account_id", accountID),
-			zap.Duration("silent_for", silence),
-			zap.Error(err),
-		)
-		return
-	}
-
-	subscribed := false
-	for _, f := range fields {
-		if f == "live_comments" {
-			subscribed = true
-		}
-	}
-	logger.From(ctx, s.logger).Warn("instagram comment webhook silent with a live on air",
-		zap.String("account_id", accountID),
-		zap.Duration("silent_for", silence),
-		zap.Strings("subscribed_fields", fields),
-		// A resposta que faltava: a assinatura sumiu, ou ela está lá e a Meta
-		// simplesmente parou de entregar? São causas diferentes e correções
-		// diferentes, e até agora não dava para separar as duas.
-		zap.Bool("live_comments_subscribed", subscribed),
-	)
-
-	// AGE, não só alerte.
-	//
-	// O vigia só logava. Detectar o silêncio e não tentar nada deixava a única
-	// hipótese acionável que sobrou — a inscrição cair no meio da transmissão —
-	// sem correção e sem teste: reinscrever é a forma de descobrir se era isso.
-	//
-	// Reinscrever é idempotente na Meta e custa uma chamada. Se a assinatura
-	// estava intacta (`live_comments_subscribed` true acima), a chamada não muda
-	// nada e o silêncio seguinte prova que a causa é a entrega dela, não a
-	// inscrição. Se estava caída, isto a levanta ainda durante a live. Nos dois
-	// casos o log fica com a resposta, que é mais do que ele tinha.
-	//
-	// O relógio já foi empurrado para frente acima, então isto acontece no
-	// máximo uma vez por janela de silêncio, não a cada sweep de 20s.
-	s.subscriptionEnsured.Delete(storeID)
-	s.ensureWebhookSubscriptionOnce(ctx, storeID)
-	logger.From(ctx, s.logger).Info("instagram webhook subscription re-asserted after comment silence",
-		zap.String("store_id", storeID),
-		zap.Duration("silent_for", silence),
-	)
 }
 
 // TracePrefixIG marca as linhas da investigação da entrega de live_comments.

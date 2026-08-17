@@ -64,7 +64,13 @@ func (c *Client) Enqueue(ctx context.Context, env Envelope, opts ...asynq.Option
 	queue := env.Queue()
 	baseOpts := []asynq.Option{asynq.Queue(queue)}
 	if p, ok := DefaultPolicies[queue]; ok {
-		baseOpts = append(baseOpts, asynq.MaxRetry(p.MaxRetry), asynq.Timeout(p.Timeout))
+		timeout := p.Timeout
+		// O teto do evento vence o da fila: a fila diz a prioridade, não quanto
+		// tempo o trabalho leva.
+		if override, ok := EventTimeouts[env.Name]; ok {
+			timeout = override
+		}
+		baseOpts = append(baseOpts, asynq.MaxRetry(p.MaxRetry), asynq.Timeout(timeout))
 	}
 	// Use the event id as the task id so a duplicated relay enqueue is a no-op
 	// on the queue itself (belt-and-suspenders with the outbox published flag).

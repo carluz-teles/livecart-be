@@ -231,6 +231,8 @@ type EventOutbox struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	PublishedAt   pgtype.Timestamptz `json:"published_at"`
 	SchemaVersion int32              `json:"schema_version"`
+	// live_events.id do live/campanha que este evento correlaciona (quando aplicável). Distinto de event_id, que identifica a INSTÂNCIA deste evento assíncrono (idempotência) — não confundir.
+	LiveEventID pgtype.UUID `json:"live_event_id"`
 }
 
 // Global upsell offers for events, shown after any cart addition.

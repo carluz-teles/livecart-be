@@ -209,9 +209,9 @@ const (
 	// percorre a lista em sequência deixa o limitador adaptativo espaçar as
 	// chamadas com os headers do próprio Tiny.
 	ERPResyncProducts Name = "erp.products_resync"
-	CouponApplied        Name = "coupon.applied"
-	CouponConfirmed      Name = "coupon.confirmed"
-	CouponRefunded       Name = "coupon.refunded"
+	CouponApplied     Name = "coupon.applied"
+	CouponConfirmed   Name = "coupon.confirmed"
+	CouponRefunded    Name = "coupon.refunded"
 )
 
 // Source identifies where an event was dispatched from. It is metadata on the
@@ -253,6 +253,22 @@ var DefaultPolicies = map[string]QueuePolicy{
 	QueueBatch:     {MaxRetry: 1, Timeout: 60 * time.Second},
 }
 
+// EventTimeouts sobrepõe o teto da fila para eventos cujo trabalho não cabe
+// nele. A fila define a prioridade; o teto tem de caber no trabalho.
+//
+// `order.paid` é o caso que motivou o mapa. Ele faz, em série e passando pelo
+// limitador do Tiny: resolver contato, buscar dimensão de cada item para o
+// frete, resolver forma de pagamento, de recebimento e de envio, criar o
+// pedido, APROVAR (chamada separada) e lançar estoque. Um pedido de 1 item
+// fecha em 2-3s; os de 5 e 7 itens estouraram os 15s no meio — e estourar
+// DEPOIS de criar o pedido é o pior ponto possível, porque o pedido nasce
+// "Em aberto" no Tiny e a aprovação nunca roda. Em 16/08 foram 3 pedidos
+// pagos nesse estado, 2 deles sem sequer registrar o id de volta.
+var EventTimeouts = map[Name]time.Duration{
+	OrderPaid:     90 * time.Second,
+	OrderRefunded: 90 * time.Second,
+}
+
 // Envelope is the canonical wire format for every event. It is serialized as
 // the asynq task payload, so a consumer can reconstruct the domain payload, the
 // origin metadata and the trace context.
@@ -278,6 +294,12 @@ type Envelope struct {
 	// DedupKey lets consumers deduplicate at-least-once delivery when there is
 	// no natural unique key on the side-effect.
 	DedupKey string `json:"dedup_key,omitempty"`
+	// LiveEventID is the live_events.id (the "live event"/campaign domain
+	// entity) this event correlates to, when applicable. Distinct from EventID
+	// above, which identifies THIS event instance for idempotency — do not
+	// confuse the two. First-class (not folded into Payload) so every consumer
+	// and the telemetry pipeline can read it without unmarshaling the payload.
+	LiveEventID string `json:"live_event_id,omitempty"`
 	// Payload is the domain-specific data for this event.
 	Payload json.RawMessage `json:"payload,omitempty"`
 }

@@ -30,6 +30,10 @@ type ServerConfig struct {
 	RedisOpt    asynq.RedisConnOpt // carries addr + optional password/TLS (managed Redis)
 	Logger      *zap.Logger
 	Concurrency int // total worker goroutines; default 10
+	// Exporter is the telemetry pipeline (New Relic — Fatia 2) fed by a handful
+	// of the default logEvent-registered facts. nil disables it (no
+	// NEW_RELIC_LICENSE_KEY at boot); RegisterHandlers guards every call site.
+	Exporter Exporter
 }
 
 // NewServer builds the asynq server with the LiveCart queue taxonomy and wires
@@ -60,14 +64,15 @@ func NewServer(cfg ServerConfig) *Server {
 	// Continue the producer's trace and expose trace_id to logger.From for every
 	// event before it reaches its handler.
 	mux.Use(traceMiddleware)
-	RegisterHandlers(mux, log)
+	RegisterHandlers(mux, log, cfg.Exporter)
 
 	return &Server{inner: srv, mux: mux, logger: log}
 }
 
 // traceMiddleware reconstructs the producer's span context from the envelope
-// and starts a consumer span, making trace_id available to logger.From inside
-// the handler so consumer logs correlate with the originating request trace.
+// and starts a consumer span, making trace_id (and live_event_id, when the
+// envelope carries one) available to logger.From inside the handler so
+// consumer logs correlate with the originating request trace and live event.
 func traceMiddleware(next asynq.Handler) asynq.Handler {
 	return asynq.HandlerFunc(func(ctx context.Context, t *asynq.Task) error {
 		var env Envelope
@@ -93,6 +98,9 @@ func traceMiddleware(next asynq.Handler) asynq.Handler {
 		if sc := span.SpanContext(); sc.HasTraceID() {
 			//nolint:staticcheck // string key matches logger.From / c.Locals convention
 			ctx = context.WithValue(ctx, logger.TraceIDKey, sc.TraceID().String())
+		}
+		if env.LiveEventID != "" {
+			ctx = logger.WithLiveEvent(ctx, env.LiveEventID)
 		}
 		return next.ProcessTask(ctx, t)
 	})

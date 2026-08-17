@@ -50,7 +50,6 @@ type GetSettingsResponse struct {
 	// pelo qual waitlist_notified existiu por meses sem ser configurável: o
 	// domínio tinha a chave, o HTTP não, e nenhuma UI conseguia nem ler nem
 	// escrever. Chave nova sem entrada aqui é chave morta.
-	WaitlistNotified        *TemplateSettingsResponse `json:"waitlist_notified,omitempty"`
 	OutOfWindowScheduled    *TemplateSettingsResponse `json:"out_of_window_scheduled,omitempty"`
 	OutOfWindowSessionEnded *TemplateSettingsResponse `json:"out_of_window_session_ended,omitempty"`
 	OutOfWindowEventEnded   *TemplateSettingsResponse `json:"out_of_window_event_ended,omitempty"`
@@ -59,10 +58,10 @@ type GetSettingsResponse struct {
 	WaitlistJoined          *TemplateSettingsResponse `json:"waitlist_joined,omitempty"`
 
 	PaymentConfirmed *EmailTemplateSettingsResponse `json:"payment_confirmed,omitempty"`
-	Shipped           *EmailTemplateSettingsResponse `json:"shipped,omitempty"`
-	Delivered         *EmailTemplateSettingsResponse `json:"delivered,omitempty"`
-	PaymentCancelled  *EmailTemplateSettingsResponse `json:"payment_cancelled,omitempty"`
-	PaymentRefunded   *EmailTemplateSettingsResponse `json:"payment_refunded,omitempty"`
+	Shipped          *EmailTemplateSettingsResponse `json:"shipped,omitempty"`
+	Delivered        *EmailTemplateSettingsResponse `json:"delivered,omitempty"`
+	PaymentCancelled *EmailTemplateSettingsResponse `json:"payment_cancelled,omitempty"`
+	PaymentRefunded  *EmailTemplateSettingsResponse `json:"payment_refunded,omitempty"`
 }
 
 // TemplateSettingsResponse represents template settings in API responses.
@@ -113,7 +112,6 @@ type UpdateSettingsRequest struct {
 	ItemAdded         *UpdateTemplateSettingsRequest `json:"item_added"`
 	CheckoutReminder  *UpdateTemplateSettingsRequest `json:"checkout_reminder"`
 
-	WaitlistNotified        *UpdateTemplateSettingsRequest `json:"waitlist_notified,omitempty"`
 	OutOfWindowScheduled    *UpdateTemplateSettingsRequest `json:"out_of_window_scheduled,omitempty"`
 	OutOfWindowSessionEnded *UpdateTemplateSettingsRequest `json:"out_of_window_session_ended,omitempty"`
 	OutOfWindowEventEnded   *UpdateTemplateSettingsRequest `json:"out_of_window_event_ended,omitempty"`
@@ -122,10 +120,10 @@ type UpdateSettingsRequest struct {
 	WaitlistJoined          *UpdateTemplateSettingsRequest `json:"waitlist_joined,omitempty"`
 
 	PaymentConfirmed *UpdateEmailTemplateSettingsRequest `json:"payment_confirmed,omitempty"`
-	Shipped           *UpdateEmailTemplateSettingsRequest `json:"shipped,omitempty"`
-	Delivered         *UpdateEmailTemplateSettingsRequest `json:"delivered,omitempty"`
-	PaymentCancelled  *UpdateEmailTemplateSettingsRequest `json:"payment_cancelled,omitempty"`
-	PaymentRefunded   *UpdateEmailTemplateSettingsRequest `json:"payment_refunded,omitempty"`
+	Shipped          *UpdateEmailTemplateSettingsRequest `json:"shipped,omitempty"`
+	Delivered        *UpdateEmailTemplateSettingsRequest `json:"delivered,omitempty"`
+	PaymentCancelled *UpdateEmailTemplateSettingsRequest `json:"payment_cancelled,omitempty"`
+	PaymentRefunded  *UpdateEmailTemplateSettingsRequest `json:"payment_refunded,omitempty"`
 }
 
 // UpdateTemplateSettingsRequest represents template settings in API requests.
@@ -373,10 +371,6 @@ var dmSections = []dmSection{
 		func(r *UpdateSettingsRequest) *UpdateTemplateSettingsRequest { return r.CheckoutReminder },
 		func(s *Settings, t *TemplateSettings) { s.CheckoutReminder = t },
 		func(r *GetSettingsResponse, t *TemplateSettingsResponse) { r.CheckoutReminder = t }},
-	{TypeWaitlistNotified,
-		func(r *UpdateSettingsRequest) *UpdateTemplateSettingsRequest { return r.WaitlistNotified },
-		func(s *Settings, t *TemplateSettings) { s.WaitlistNotified = t },
-		func(r *GetSettingsResponse, t *TemplateSettingsResponse) { r.WaitlistNotified = t }},
 	{TypeOutOfWindowScheduled,
 		func(r *UpdateSettingsRequest) *UpdateTemplateSettingsRequest { return r.OutOfWindowScheduled },
 		func(s *Settings, t *TemplateSettings) { s.OutOfWindowScheduled = t },

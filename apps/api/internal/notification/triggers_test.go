@@ -117,7 +117,6 @@ func TestOsCincoGatilhosSaoDefaultOn(t *testing.T) {
 		TypeOutOfWindowEventEnded,
 		TypeEventDeadlineStarted,
 		TypeWaitlistUnfulfilled,
-		TypeWaitlistNotified,
 		TypeWaitlistJoined,
 	}
 
@@ -177,7 +176,6 @@ func TestRespostaTrazTodosOsCards(t *testing.T) {
 		"checkout_immediate":          resp.CheckoutImmediate,
 		"item_added":                  resp.ItemAdded,
 		"checkout_reminder":           resp.CheckoutReminder,
-		"waitlist_notified":           resp.WaitlistNotified,
 		"out_of_window_scheduled":     resp.OutOfWindowScheduled,
 		"out_of_window_session_ended": resp.OutOfWindowSessionEnded,
 		"out_of_window_event_ended":   resp.OutOfWindowEventEnded,

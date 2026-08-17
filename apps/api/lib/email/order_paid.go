@@ -173,7 +173,7 @@ const orderPaidShellHTML = `<!DOCTYPE html>
                                 ✓ Pagamento confirmado
                             </p>
                             <h1 style="margin: 8px 0 0; color: #111827; font-size: 24px; font-weight: 600; letter-spacing: -0.01em;">
-                                Pedido #{{.OrderShortID}} a caminho
+                                Pedido #{{.OrderShortID}} confirmado
                             </h1>
                         </td>
                     </tr>

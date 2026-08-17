@@ -76,10 +76,10 @@ func TestReivindicacaoSoUmVencedorNoPostgres(t *testing.T) {
 			repo := NewRepository(sqlc.New(testPool), testPool)
 
 			var (
-				wg        sync.WaitGroup
-				mu        sync.Mutex
+				wg         sync.WaitGroup
+				mu         sync.Mutex
 				vencedores int
-				erros     []error
+				erros      []error
 			)
 			largada := make(chan struct{})
 

@@ -1105,11 +1105,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 			formaEnvioErr  error
 			formaEnvioName = ship.Carrier
 		)
-		if isStorePickup(ship.Carrier) {
-			logger.From(ctx, t.Logger).Info("tiny: retirada na loja, pedido segue sem forma de envio",
-				zap.String("carrier", ship.Carrier),
-			)
-		} else {
+		if !isStorePickup(ship.Carrier) {
 			// Try to resolve the formaEnvio id, preferring the carrier name
 			// (Correios / Jadlog / etc.) and falling back to "SmartEnvios" so
 			// stores that cadastrou só o agregador também batem.
@@ -1122,7 +1118,17 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 				}
 			}
 		}
+		// UM lugar decide a mensagem. Quando a retirada só pulava a consulta lá
+		// em cima, ela desembocava no `default` e saía como WARN dizendo que a
+		// busca não achou nada — afirmando uma consulta que nunca houve, num
+		// caso perfeitamente normal. Todo pedido de retirada gerava esse aviso
+		// falso, e quem fosse investigar procuraria um problema de transportadora
+		// que não existe.
 		switch {
+		case isStorePickup(ship.Carrier):
+			logger.From(ctx, t.Logger).Info("tiny: retirada na loja, pedido segue sem forma de envio",
+				zap.String("carrier", ship.Carrier),
+			)
 		case formaEnvioErr != nil:
 			logger.From(ctx, t.Logger).Warn("tiny formaEnvio lookup failed, sending order without it",
 				zap.String("carrier", ship.Carrier),
@@ -1289,6 +1295,21 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 	// reenviamos sem ele: o pedido é registrado e o lojista corrige a forma de
 	// envio no Tiny. O contrário é o que aconteceu em produção — pedido pago,
 	// carrinho concluído e nada no ERP, que é o pior dos dois mundos.
+	// 409 significa que o pedido JÁ EXISTE — a tentativa anterior chegou ao
+	// Tiny e só a resposta se perdeu. Repetir o POST nunca vai passar, então
+	// tratar como falha custava três retentativas e uma dead letter para um
+	// pedido que estava lá o tempo todo.
+	//
+	// O marcador gravado na criação é o que permite reencontrá-lo. Achando,
+	// devolvemos sucesso: o chamador grava o external_order_id e a máquina de
+	// estados retomável assume dali (o relançamento de estoque já tolera
+	// "Estoque já lançado").
+	if resp.StatusCode == http.StatusConflict {
+		if adopted, err := t.adoptExistingOrder(ctx, order); err == nil && adopted != nil {
+			return adopted, nil
+		}
+	}
+
 	if !providers.IsSuccessStatus(resp.StatusCode) && isFormaEnvioRejection(body) && dropFormaEnvio(payload) {
 		logger.From(ctx, t.Logger).Warn("tiny recusou a forma de envio; reenviando o pedido sem ela",
 			zap.String("external_id", order.ExternalID),
@@ -1333,6 +1354,24 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		zap.Int64("fee_amount_cents", feeCents),
 		zap.Int64("net_amount_cents", netCents),
 	)
+
+	// Marca o pedido com o vínculo do carrinho.
+	//
+	// É o que permite reencontrá-lo quando a resposta do POST se perde: o
+	// `numeroOrdemCompra` viaja no corpo mas não é filtro de busca, e
+	// `marcadores` é. Sem este carimbo, um timeout entre o POST e a resposta
+	// deixa o pedido existindo no Tiny sem nenhuma forma de achá-lo pela API —
+	// foi o que aconteceu com 2 pedidos pagos em 16/08.
+	//
+	// Best-effort, como a aprovação: falhar aqui não invalida o pedido.
+	marker := tinyCartMarker(order.ExternalID)
+	if markErr := t.AddOrderMarker(ctx, orderID, marker); markErr != nil {
+		logger.From(ctx, t.Logger).Warn("failed to tag tiny order with cart marker",
+			zap.String("order_id", orderID),
+			zap.String("marker", marker),
+			zap.Error(markErr),
+		)
+	}
 
 	// Approve the order so it shows under "Pedidos de Venda" when already paid.
 	// Failure here is non-fatal — the order still exists in Tiny.
@@ -1766,6 +1805,49 @@ func isStorePickup(carrier string) bool {
 
 // LaunchOrderStock decrements stock in Tiny for all items in the order.
 // POST /pedidos/{idPedido}/lancar-estoque
+// adoptExistingOrder reencontra, pelo marcador, o pedido que uma tentativa
+// anterior já criou, e o devolve como sucesso.
+//
+// Também termina o que ficou pela metade: a criação só aprova DEPOIS do POST
+// voltar, então um pedido criado por uma tentativa que morreu no caminho está
+// no Tiny como "Em aberto". Aprovar aqui é o passo que faltava — e aprovar de
+// novo um pedido já aprovado é inócuo.
+//
+// Devolve (nil, nil) quando o marcador não acha nada: é o caso dos pedidos
+// criados ANTES de o carimbo existir, e aí o 409 segue sendo falha.
+func (t *Tiny) adoptExistingOrder(ctx context.Context, order ERPOrder) (*OrderResult, error) {
+	marker := tinyCartMarker(order.ExternalID)
+	orderID, err := t.FindOrderIDByMarker(ctx, marker)
+	if err != nil {
+		return nil, fmt.Errorf("looking up existing order by marker %s: %w", marker, err)
+	}
+	if orderID == "" {
+		return nil, nil
+	}
+
+	logger.From(ctx, t.Logger).Warn("tiny devolveu 409; adotando o pedido que já existe",
+		zap.String("order_id", orderID),
+		zap.String("marker", marker),
+		zap.String("external_id", order.ExternalID),
+	)
+
+	if order.Payment != nil {
+		if approveErr := t.ApproveOrder(ctx, orderID); approveErr != nil {
+			logger.From(ctx, t.Logger).Warn("failed to approve adopted tiny order",
+				zap.String("order_id", orderID),
+				zap.Error(approveErr),
+			)
+		}
+	}
+
+	return &OrderResult{OrderID: orderID, Status: "adopted"}, nil
+}
+
+// tinyCartMarker é o vínculo pedido↔carrinho, no mesmo formato que a varredura
+// de reconciliação procura (erpOrderMarker). O `numeroOrdemCompra` carrega o
+// mesmo valor no corpo do pedido, mas só `marcadores` é filtro de busca na API.
+func tinyCartMarker(cartID string) string { return "lc-cart-" + cartID }
+
 func (t *Tiny) LaunchOrderStock(ctx context.Context, orderID string) error {
 	endpoint := fmt.Sprintf("%s/pedidos/%s/lancar-estoque", tinyAPIBaseURL, orderID)
 

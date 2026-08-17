@@ -180,7 +180,7 @@ func TestPaymentAfterCancellationWins(t *testing.T) {
 	}
 
 	paidAt := time.Now().UTC()
-	restored, err := testRepo.RestoreCancelledCartAsPaid(ctx, cartID, fx.storeID, "paid", "pay_123", &paidAt, "pix")
+	restored, _, err := testRepo.RestoreCancelledCartAsPaid(ctx, cartID, fx.storeID, "paid", "pay_123", &paidAt, "pix")
 	if err != nil {
 		t.Fatalf("RestoreCancelledCartAsPaid: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestPaymentDoesNotRestoreExpiredCart(t *testing.T) {
 	}
 
 	paidAt := time.Now().UTC()
-	restored, err := testRepo.RestoreCancelledCartAsPaid(ctx, cartID, fx.storeID, "paid", "pay_456", &paidAt, "pix")
+	restored, _, err := testRepo.RestoreCancelledCartAsPaid(ctx, cartID, fx.storeID, "paid", "pay_456", &paidAt, "pix")
 	if err != nil {
 		t.Fatalf("RestoreCancelledCartAsPaid: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestPaymentDoesNotRestoreBlockedCart(t *testing.T) {
 	}
 
 	paidAt := time.Now().UTC()
-	restored, err := testRepo.RestoreCancelledCartAsPaid(ctx, cartID, fx.storeID, "paid", "pay_789", &paidAt, "pix")
+	restored, _, err := testRepo.RestoreCancelledCartAsPaid(ctx, cartID, fx.storeID, "paid", "pay_789", &paidAt, "pix")
 	if err != nil {
 		t.Fatalf("RestoreCancelledCartAsPaid: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestCancellationRevertedIsStampedOnTheCart(t *testing.T) {
 		t.Fatalf("CancelCart: %v", err)
 	}
 	paidAt := time.Now().UTC()
-	if _, err := testRepo.RestoreCancelledCartAsPaid(ctx, cartID, fx.storeID, "paid", "pay_stamp", &paidAt, "pix"); err != nil {
+	if _, _, err := testRepo.RestoreCancelledCartAsPaid(ctx, cartID, fx.storeID, "paid", "pay_stamp", &paidAt, "pix"); err != nil {
 		t.Fatalf("RestoreCancelledCartAsPaid: %v", err)
 	}
 

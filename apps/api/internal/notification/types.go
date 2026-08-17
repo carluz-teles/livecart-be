@@ -12,10 +12,6 @@ const (
 	TypeItemAdded NotificationType = "item_added"
 	// TypeCheckoutReminder is sent when the live ends (current behavior).
 	TypeCheckoutReminder NotificationType = "checkout_reminder"
-	// TypeWaitlistNotified is fired when a waitlisted item is promoted: the
-	// next-in-line customer was just bumped to "notified" and has the
-	// configurable TTL window to finalize before the slot is released.
-	TypeWaitlistNotified NotificationType = "waitlist_notified"
 	// TypeCartRecovery is the post-expiration WhatsApp recovery message
 	// (PRD 006): the cart expired unpaid, a fresh checkout was regenerated
 	// and the approved template goes out with the new link.
@@ -70,7 +66,6 @@ var CartFlowTypes = []NotificationType{
 	TypeOutOfWindowEventEnded,
 	TypeEventDeadlineStarted,
 	TypeWaitlistJoined,
-	TypeWaitlistNotified,
 	TypeWaitlistUnfulfilled,
 	TypeCheckoutReminder,
 }
@@ -149,7 +144,6 @@ type Settings struct {
 	CheckoutImmediate *TemplateSettings `json:"checkout_immediate"`
 	ItemAdded         *TemplateSettings `json:"item_added"`
 	CheckoutReminder  *TemplateSettings `json:"checkout_reminder"`
-	WaitlistNotified  *TemplateSettings `json:"waitlist_notified,omitempty"`
 
 	// Gatilhos da RN-28. Ponteiros e `omitempty` como os demais: nil significa
 	// "a loja nunca customizou", e o default entra por getTemplateSettings —
@@ -162,10 +156,10 @@ type Settings struct {
 	WaitlistJoined          *TemplateSettings `json:"waitlist_joined,omitempty"`
 
 	PaymentConfirmed *EmailTemplateSettings `json:"payment_confirmed,omitempty"`
-	Shipped           *EmailTemplateSettings `json:"shipped,omitempty"`
-	Delivered         *EmailTemplateSettings `json:"delivered,omitempty"`
-	PaymentCancelled  *EmailTemplateSettings `json:"payment_cancelled,omitempty"`
-	PaymentRefunded   *EmailTemplateSettings `json:"payment_refunded,omitempty"`
+	Shipped          *EmailTemplateSettings `json:"shipped,omitempty"`
+	Delivered        *EmailTemplateSettings `json:"delivered,omitempty"`
+	PaymentCancelled *EmailTemplateSettings `json:"payment_cancelled,omitempty"`
+	PaymentRefunded  *EmailTemplateSettings `json:"payment_refunded,omitempty"`
 	// CartRecovery (PRD 006): WhatsApp post-expiration recovery. Must stay in
 	// this struct so UpdateSettings round-trips the JSONB without dropping it.
 	CartRecovery *CartRecoverySettings `json:"cart_recovery,omitempty"`
@@ -242,11 +236,7 @@ func DefaultSettings() Settings {
 		// único lugar onde aparece o que de fato foi levado.
 		WaitlistJoined: &TemplateSettings{
 			Enabled:  true,
-			Template: "Oi {handle}! ⏳\n\n{produto} entrou na fila de espera — o estoque acabou antes de fechar seu pedido.\n\nAssim que liberar eu coloco no seu carrinho e te aviso. Não precisa pedir de novo.\n\nCarrinho: {total_itens} itens — {total}\n{link} 💜",
-		},
-		WaitlistNotified: &TemplateSettings{
-			Enabled:  true,
-			Template: "Boa notícia, {handle}! ✅\n\n{produto} acabou de liberar e já está no seu carrinho.\n\nGanhei mais {tempo_extra} pra você finalizar: agora o prazo é até {prazo_final}.\n\n{total_itens} itens — {total}\n{link} 💜",
+			Template: "Oi {handle}! ⏳\n\n{produto} entrou na fila de espera — o estoque acabou antes de fechar seu pedido.\n\nAssim que liberar eu coloco no seu carrinho automaticamente. Não precisa pedir de novo — é só ficar de olho no seu carrinho pelo link.\n\nCarrinho: {total_itens} itens — {total}\n{link} 💜",
 		},
 		OutOfWindowScheduled: &TemplateSettings{
 			Enabled:  true,
@@ -338,10 +328,10 @@ type TemplateVariables struct {
 
 	// Post-payment variables. Empty for cart-flow notifications, populated
 	// by the postcheckout package when sending receipt/shipped/delivered.
-	NumeroPedido  string // Order short_id, formatted as "1234"
-	TrackingCode  string // Carrier tracking code, when known
+	NumeroPedido   string // Order short_id, formatted as "1234"
+	TrackingCode   string // Carrier tracking code, when known
 	Transportadora string // Carrier name + service ("Sedex via Correios")
-	LinkPedido    string // Public order page URL with tracking_token
+	LinkPedido     string // Public order page URL with tracking_token
 }
 
 // LogEntry represents a notification log entry.

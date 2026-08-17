@@ -61,11 +61,19 @@ FROM orders o
 WHERE o.id = op.order_id AND o.cart_id = $1;
 
 -- name: InsertOrder :one
+-- ON CONFLICT porque a checagem prévia em OnCartPaid é check-then-act e a fila
+-- roda com 2 workers: o gateway reporta o MESMO pagamento por dois objetos
+-- (or_ e ch_), que viram dois cart.paid com dedup_key diferente e chegam a 7ms
+-- um do outro. Os dois consultam, nenhum acha pedido, os dois inserem — e o
+-- perdedor estourava a unique em 100% dos pagamentos.
+-- Sem linha devolvida = outro processo materializou; o chamador trata como
+-- sucesso benigno.
 INSERT INTO orders (
     cart_id, short_id, store_id, event_id, customer_id, status,
     total_cents, discount_cents, shipping_cents, paid_total_cents, paid_at,
     customer_snapshot
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+ON CONFLICT (cart_id) DO NOTHING
 RETURNING *;
 
 -- name: InsertOrderItem :exec

@@ -577,11 +577,24 @@ func (r *Repository) RegenerateCheckout(ctx context.Context, id string, expiresA
 		return fmt.Errorf("regenerating checkout: %w", err)
 	}
 
+	// events.Emit direto (não EmitInternal): o LiveEventID de primeira classe do
+	// Envelope é um "campo custom" no sentido do doc de EmitInternal — o RETURNING
+	// já trouxe event_id, sem query extra.
 	dedup := fmt.Sprintf("cart.checkout_armed:%s:regen:%d", id, expiresAt.UTC().Unix())
-	if err := events.EmitInternal(ctx, sqlc.New(tx), events.CartCheckoutArmed, dedup, struct {
+	payload, err := json.Marshal(struct {
 		CartID  string `json:"cart_id"`
 		EventID string `json:"event_id"`
-	}{CartID: id, EventID: eventID}); err != nil {
+	}{CartID: id, EventID: eventID})
+	if err != nil {
+		return fmt.Errorf("marshaling cart.checkout_armed payload: %w", err)
+	}
+	if err := events.Emit(ctx, sqlc.New(tx), events.Envelope{
+		Name:        events.CartCheckoutArmed,
+		Source:      events.SourceInternal,
+		DedupKey:    dedup,
+		LiveEventID: eventID,
+		Payload:     payload,
+	}); err != nil {
 		return fmt.Errorf("emitting cart.checkout_armed on regenerate: %w", err)
 	}
 
