@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	paymentdomain "livecart/apps/api/internal/payment"
@@ -374,6 +375,19 @@ func (h *WebhookHandler) HandleMercadoPago(c *fiber.Ctx) error {
 // @Produce json
 // @Param storeId path string true "Store ID"
 // @Success 200 {object} map[string]string
+// isLiveCartOrderCode diz se o `code` do pedido no gateway foi gravado por nós.
+//
+// Gravamos sempre o UUID do carrinho (checkout de cartão e de Pix), e os
+// pedidos do teste de webhook levam o prefixo LCWHTEST-. Qualquer outro formato
+// pertence a outra plataforma que compartilha a conta do gateway.
+func isLiveCartOrderCode(code string) bool {
+	if strings.HasPrefix(code, pagarmeWebhookTestOrderPrefix) {
+		return true
+	}
+	_, err := uuid.Parse(code)
+	return err == nil
+}
+
 // @Router /api/webhooks/pagarme/{storeId} [post]
 func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 	// Clone the storeId out of fasthttp's recycled request buffer. We spawn
@@ -458,6 +472,25 @@ func (h *WebhookHandler) HandlePagarme(c *fiber.Ctx) error {
 		// waiting for organic traffic. Detached ctx: outlives the request.
 		go h.service.RecordWebhookPing(logger.WithStore(context.Background(), storeID, storeSlug), storeID, "pagarme")
 		return httpx.OK(c, fiber.Map{"status": "webhook_test_ok"})
+	}
+
+	// Pedido de OUTRA plataforma na mesma conta do gateway.
+	//
+	// A conta Pagar.me pode ser compartilhada (a cantodaart usa a mesma no
+	// Shopify) e o gateway entrega todos os eventos dela para a URL cadastrada.
+	// Nosso `code` é sempre o UUID do carrinho, então um code presente que não é
+	// UUID veio de outra loja — parar aqui evita a consulta à API do gateway
+	// para um pagamento que nunca foi nosso.
+	//
+	// Só decide com o code PRESENTE: evento de charge nem sempre o traz, e o
+	// discriminador definitivo roda depois, sobre a referência que a consulta
+	// devolve (payment.ProcessPaymentNotification).
+	if webhook.Data.Code != "" && !isLiveCartOrderCode(webhook.Data.Code) {
+		logger.From(c.Context(), h.logger).Info("pagarme webhook for another platform's order, ignoring",
+			zap.String("type", webhook.Type),
+			zap.String("order_code", webhook.Data.Code),
+		)
+		return httpx.OK(c, fiber.Map{"status": "ignored_foreign_order"})
 	}
 
 	logger.From(c.Context(), h.logger).Info("pagarme webhook received",

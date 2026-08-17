@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/events"
@@ -158,6 +159,28 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 	if status.ExternalReference == "" {
 		logger.From(ctx, s.logger).Warn("payment notification has no external reference, cannot update cart",
 			zap.String("payment_id", input.PaymentID),
+		)
+		return nil
+	}
+
+	// A referência tem de ser um carrinho NOSSO.
+	//
+	// A conta do gateway pode ser compartilhada com outra plataforma — a
+	// cantodaart usa a mesma conta Pagar.me no Shopify. O gateway entrega TODOS
+	// os eventos da conta para a URL cadastrada, então venda da outra loja chega
+	// aqui com uma referência que não é nossa (ex.: "ryoVyuBVr9nrtwNecjXgNwnYb").
+	//
+	// Sem esta checagem o evento seguia para o banco, quebrava em "invalid UUID"
+	// e gastava as três retentativas até morrer na dead letter — ruído recorrente
+	// sobre um pagamento que nunca foi nosso para processar.
+	//
+	// Nosso `code` é sempre o UUID do carrinho (checkout de cartão e de Pix o
+	// gravam), então o formato é o discriminador. ACK benigno, igual ao caso de
+	// referência ausente logo acima: não é erro nosso, não há o que reprocessar.
+	if _, err := uuid.Parse(status.ExternalReference); err != nil {
+		logger.From(ctx, s.logger).Info("payment notification for another platform's order, ignoring",
+			zap.String("payment_id", input.PaymentID),
+			zap.String("external_reference", status.ExternalReference),
 		)
 		return nil
 	}
