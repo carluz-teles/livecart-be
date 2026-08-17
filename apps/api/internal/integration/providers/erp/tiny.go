@@ -535,6 +535,31 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 		if disponivel, ok := t.saldoDisponivel(ctx, productID); ok {
 			out.Stock = disponivel
 		}
+		// A regra vale para CADA VARIAÇÃO, não só para o pai.
+		//
+		// O bloco acima trocava apenas `out.Stock` — o saldo do produto pai. As
+		// variações seguiam com o `estoque.quantidade` que veio dentro do payload
+		// do pai, que é o FÍSICO: aquela resposta não tem reservado nem
+		// disponível para parsear, então não havia como corrigi-las depois sem
+		// perguntar por cada uma.
+		//
+		// A loja ligou a configuração e produto com variação continuou chegando
+		// com o físico. Resolver aqui é resolver para todo mundo: quem lê
+		// `Variants[].Stock` — a tela de importação, o grupo de produtos, a
+		// varredura — passa a receber o vendável sem precisar lembrar da regra.
+		//
+		// Uma consulta por variação, pelo mesmo limitador do resto. Só quando a
+		// loja pediu, e só quando o produto tem variação; falha em uma não
+		// contamina as outras nem derruba o produto (mantém o que veio, que é o
+		// comportamento de sempre quando não dá para afirmar).
+		for i := range out.Variants {
+			if out.Variants[i].ID == "" {
+				continue
+			}
+			if disponivel, ok := t.saldoDisponivel(ctx, out.Variants[i].ID); ok {
+				out.Variants[i].Stock = disponivel
+			}
+		}
 	}
 
 	// TEMP DEBUG: log shipping resolution so we can pinpoint why some Tiny
