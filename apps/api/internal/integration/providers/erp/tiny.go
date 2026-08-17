@@ -1398,9 +1398,10 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		)
 	}
 
-	// Approve the order so it shows under "Pedidos de Venda" when already paid.
-	// Failure here is non-fatal — the order still exists in Tiny.
-	if order.Payment != nil {
+	// Aprova quando a VENDA está fechada — não quando há bloco financeiro.
+	// Ver ERPOrder.Approve: pagamento por fora aprova sem lançar recebimento.
+	// Falha aqui não é fatal — o pedido existe no Tiny de qualquer forma.
+	if order.Approve {
 		if approveErr := t.ApproveOrder(ctx, orderID); approveErr != nil {
 			logger.From(ctx, t.Logger).Warn("failed to approve tiny order after creation",
 				zap.String("order_id", orderID),
@@ -1856,7 +1857,7 @@ func (t *Tiny) adoptExistingOrder(ctx context.Context, order ERPOrder) (*OrderRe
 		zap.String("external_id", order.ExternalID),
 	)
 
-	if order.Payment != nil {
+	if order.Approve {
 		if approveErr := t.ApproveOrder(ctx, orderID); approveErr != nil {
 			logger.From(ctx, t.Logger).Warn("failed to approve adopted tiny order",
 				zap.String("order_id", orderID),

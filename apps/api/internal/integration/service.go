@@ -4818,7 +4818,10 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 // createFinalERPOrder creates a single paid sales order in the ERP for a cart
 // whose payment was just confirmed. Uses the customer identity + shipping
 // address captured at checkout and the payment details from the provider.
-func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, eventID string, cart CartRow, paymentStatus *providers.PaymentStatus, launchStock bool) error {
+// approve diz se a VENDA está fechada — separado de paymentStatus, que diz
+// apenas quem lança o recebimento. Pagamento recebido por fora fecha a venda
+// (aprova) sem trazer financeiro; a conversão pré-pagamento não fecha nada.
+func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, eventID string, cart CartRow, paymentStatus *providers.PaymentStatus, launchStock, approve bool) error {
 	// Resolve contact — enriched with customer identity when available, so the
 	// Tiny contact ends up with CPF/email/phone instead of just the @handle.
 	contactID, err := s.resolveERPContact(ctx, erpProvider, integration, storeID, cart.PlatformUserID, cart.PlatformHandle, cart.CustomerName, cart.CustomerDocument, cart.CustomerEmail, cart.CustomerPhone)
@@ -4870,6 +4873,7 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 		TotalAmount: totalAmount,
 		Observation: fmt.Sprintf("LiveCart - Evento %s - @%s", eventID, cart.PlatformHandle),
 	}
+	order.Approve = approve
 
 	// Attach the delivery address from the cart when the customer submitted one.
 	if len(cart.ShippingAddress) > 0 {
