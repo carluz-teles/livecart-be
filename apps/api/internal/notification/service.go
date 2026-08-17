@@ -111,9 +111,6 @@ func mergeSettings(current, incoming Settings) Settings {
 	if incoming.CheckoutReminder != nil {
 		merged.CheckoutReminder = incoming.CheckoutReminder
 	}
-	if incoming.WaitlistNotified != nil {
-		merged.WaitlistNotified = incoming.WaitlistNotified
-	}
 	if incoming.WaitlistJoined != nil {
 		merged.WaitlistJoined = incoming.WaitlistJoined
 	}
@@ -522,8 +519,7 @@ func (s *Service) ShouldNotify(ctx context.Context, storeID string, notifType No
 		// Use cart_settings trigger for expiration reminder
 		return section.Enabled && cartSettings.SendExpirationReminder, nil
 
-	case TypeWaitlistNotified,
-		TypeOutOfWindowScheduled, TypeOutOfWindowSessionEnded, TypeOutOfWindowEventEnded,
+	case TypeOutOfWindowScheduled, TypeOutOfWindowSessionEnded, TypeOutOfWindowEventEnded,
 		TypeEventDeadlineStarted, TypeWaitlistUnfulfilled:
 		// Sem gatilho em cart_settings: estes momentos não são "mensagem de
 		// marketing em tempo real", são resposta a um fato do ciclo de vida
@@ -657,8 +653,6 @@ func templateSection(s *Settings, t NotificationType) *TemplateSettings {
 		return s.ItemAdded
 	case TypeCheckoutReminder:
 		return s.CheckoutReminder
-	case TypeWaitlistNotified:
-		return s.WaitlistNotified
 	case TypeOutOfWindowScheduled:
 		return s.OutOfWindowScheduled
 	case TypeOutOfWindowSessionEnded:

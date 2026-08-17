@@ -149,7 +149,7 @@ func TestUpdateSettingsSequentialSavesAccumulate(t *testing.T) {
 	if final.ItemAdded.Template != "B2" || final.ItemAdded.Enabled {
 		t.Errorf("item_added = %+v, quero B2 desabilitado", final.ItemAdded)
 	}
-	if final.WaitlistNotified == nil || final.WaitlistNotified.Template != "fila" {
-		t.Errorf("waitlist_notified = %+v, quero sobreviver aos dois saves", final.WaitlistNotified)
+	if final.WaitlistJoined == nil || final.WaitlistJoined.Template != "fila" {
+		t.Errorf("waitlist_joined = %+v, quero sobreviver aos dois saves", final.WaitlistJoined)
 	}
 }
