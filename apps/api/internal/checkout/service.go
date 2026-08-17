@@ -804,7 +804,6 @@ func (s *Service) ProcessCardPayment(ctx context.Context, input ProcessCardPayme
 			fmt.Sprintf("esta compra aceita no máximo %d parcela(s)", max))
 	}
 
-
 	// Use the integration the cart was bound to during GetCheckoutConfig so
 	// card tokens reach the gateway that issued the public key on the FE.
 	paymentIntegration, err := s.resolvePaymentIntegration(ctx, cart)
@@ -1161,7 +1160,7 @@ func (s *Service) GeneratePix(ctx context.Context, input GeneratePixInput) (*Gen
 // the freshly-loaded cart payload so the frontend can swap the React Query
 // cache in one call.
 func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartItemInput) (*GetCartForCheckoutOutput, error) {
-	cart, item, err := s.loadEditableCartItem(ctx, input.Token, input.ItemID)
+	cart, item, err := s.loadEditableCartItem(ctx, input.Token, input.ItemID, input.ByMerchant)
 	if err != nil {
 		return nil, err
 	}
@@ -1280,6 +1279,7 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 		QuantityBefore: item.Quantity,
 		QuantityAfter:  input.Quantity,
 		UnitPrice:      item.UnitPrice,
+		Source:         mutationSource(input.ByMerchant),
 		ERPMovementID:  movementID,
 	}); err != nil {
 		logger.From(ctx, s.logger).Warn("cart item quantity changed but mutation log write failed",
@@ -1290,6 +1290,9 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 	}
 
 	s.reevaluateCouponAfterCartMutation(ctx, cart.ID)
+	if input.ByMerchant {
+		s.clearShippingAfterMerchantEdit(ctx, cart)
+	}
 	s.invalidatePendingPix(ctx, cart)
 
 	// Quando a quantidade diminui, parte do estoque foi devolvida — tenta
@@ -1304,7 +1307,7 @@ func (s *Service) UpdateCartItemQuantity(ctx context.Context, input MutateCartIt
 
 // RemoveCartItem deletes an item entirely and reverses the ERP reservation.
 func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput) (*GetCartForCheckoutOutput, error) {
-	cart, item, err := s.loadEditableCartItem(ctx, input.Token, input.ItemID)
+	cart, item, err := s.loadEditableCartItem(ctx, input.Token, input.ItemID, input.ByMerchant)
 	if err != nil {
 		return nil, err
 	}
@@ -1360,6 +1363,7 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 		CartID:         cart.ID,
 		ProductID:      item.ProductID,
 		MutationType:   "item_removed",
+		Source:         mutationSource(input.ByMerchant),
 		QuantityBefore: item.Quantity,
 		QuantityAfter:  0,
 		UnitPrice:      item.UnitPrice,
@@ -1373,6 +1377,9 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 	}
 
 	s.reevaluateCouponAfterCartMutation(ctx, cart.ID)
+	if input.ByMerchant {
+		s.clearShippingAfterMerchantEdit(ctx, cart)
+	}
 	s.invalidatePendingPix(ctx, cart)
 
 	// Estoque liberado pela remoção — promove o próximo da fila se houver.
@@ -1387,7 +1394,9 @@ func (s *Service) RemoveCartItem(ctx context.Context, input MutateCartItemInput)
 // integrationService que conhece a mecânica de devolver estoque caso a
 // entry estivesse 'notified'.
 func (s *Service) DropFromWaitlist(ctx context.Context, input DropFromWaitlistInput) (*GetCartForCheckoutOutput, error) {
-	cart, err := s.loadEditableCart(ctx, input.Token)
+	// Sair da fila é ação do COMPRADOR: `false` mantém o toggle cart_allow_edit
+	// valendo, como sempre valeu neste caminho.
+	cart, err := s.loadEditableCart(ctx, input.Token, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1414,7 +1423,7 @@ func (s *Service) DropFromWaitlist(ctx context.Context, input DropFromWaitlistIn
 // row for the same product). Validates the product against the event whitelist
 // and quantity cap before touching the ERP.
 func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*GetCartForCheckoutOutput, error) {
-	cart, err := s.loadEditableCart(ctx, input.Token)
+	cart, err := s.loadEditableCart(ctx, input.Token, input.ByMerchant)
 	if err != nil {
 		return nil, err
 	}
@@ -1430,7 +1439,17 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 	if !cfg.Active {
 		return nil, httpx.ErrUnprocessable("produto não está ativo")
 	}
-	if !cfg.IsAllowed {
+	// A whitelist é da SESSÃO e existe para limitar o que a AUDIÊNCIA consegue
+	// pedir por comentário durante a transmissão. Ela não é uma regra sobre o
+	// catálogo: o lojista, corrigindo um pedido pelo painel, pode precisar somar
+	// um produto que não estava naquela live — é o caso que ele pediu, "adicionar
+	// outros produtos cadastrados no LiveCart".
+	//
+	// Seguro porque o preço não depende da whitelist: effective_price é
+	// COALESCE(special_price, p.price), então produto fora dela entra com o preço
+	// do catálogo em vez de zero. `Active` continua valendo para os dois — produto
+	// inativo não tem preço nem estoque que signifiquem algo.
+	if !productAllowedForCart(cfg, input.ByMerchant) {
 		return nil, httpx.ErrUnprocessable("produto não disponível neste evento")
 	}
 
@@ -1496,6 +1515,7 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 		QuantityBefore: currentQty,
 		QuantityAfter:  desiredQty,
 		UnitPrice:      cfg.UnitPrice,
+		Source:         mutationSource(input.ByMerchant),
 		ERPMovementID:  movementID,
 	}); err != nil {
 		logger.From(ctx, s.logger).Warn("cart item added but mutation log write failed",
@@ -1506,6 +1526,9 @@ func (s *Service) AddCartItem(ctx context.Context, input MutateCartItemInput) (*
 	}
 
 	s.reevaluateCouponAfterCartMutation(ctx, cart.ID)
+	if input.ByMerchant {
+		s.clearShippingAfterMerchantEdit(ctx, cart)
+	}
 	s.invalidatePendingPix(ctx, cart)
 
 	return s.GetCartForCheckout(ctx, GetCartForCheckoutInput{Token: input.Token})
@@ -1583,36 +1606,141 @@ func (s *Service) reevaluateCouponAfterCartMutation(ctx context.Context, cartID 
 }
 
 // loadEditableCart asserts the cart is in a state that accepts mutations.
-func (s *Service) loadEditableCart(ctx context.Context, token string) (*CartRow, error) {
+// =============================================================================
+// EDIÇÃO PELO LOJISTA (painel de pedidos)
+// =============================================================================
+//
+// Três wrappers finos sobre as MESMAS mutações do comprador, com ByMerchant
+// ligado. Wrappers explícitos em vez de expor o campo ao chamador: o domínio
+// order não tem como marcar a origem errada, e ler a chamada já diz quem editou.
+//
+// A posse da loja é responsabilidade de quem chama (order resolve o pedido por
+// consulta escopada antes de chegar aqui) — o token sozinho não prova nada sobre
+// a loja, ele prova o carrinho.
+
+// AddCartItemAsMerchant adiciona produto do catálogo ao carrinho pelo painel.
+func (s *Service) AddCartItemAsMerchant(ctx context.Context, token, productID string, quantity int) error {
+	_, err := s.AddCartItem(ctx, MutateCartItemInput{
+		Token:      token,
+		ProductID:  productID,
+		Quantity:   quantity,
+		ByMerchant: true,
+	})
+	return err
+}
+
+// SetCartItemQuantityAsMerchant fixa a quantidade de um item pelo painel.
+func (s *Service) SetCartItemQuantityAsMerchant(ctx context.Context, token, itemID string, quantity int) error {
+	_, err := s.UpdateCartItemQuantity(ctx, MutateCartItemInput{
+		Token:      token,
+		ItemID:     itemID,
+		Quantity:   quantity,
+		ByMerchant: true,
+	})
+	return err
+}
+
+// RemoveCartItemAsMerchant remove um item pelo painel.
+func (s *Service) RemoveCartItemAsMerchant(ctx context.Context, token, itemID string) error {
+	_, err := s.RemoveCartItem(ctx, MutateCartItemInput{
+		Token:      token,
+		ItemID:     itemID,
+		ByMerchant: true,
+	})
+	return err
+}
+
+// mutationSource traduz quem editou para o `source` da auditoria em
+// cart_mutations.
+//
+// Não é detalhe de log: GetCheckoutUpsellMetricsByEvent conta como upsell os
+// carrinhos que têm mutação com source='buyer_checkout'. Gravar a edição do
+// LOJISTA com o default faria o painel reportar o aumento dele como se a
+// compradora tivesse comprado mais por conta própria.
+func mutationSource(byMerchant bool) string {
+	if byMerchant {
+		return "merchant"
+	}
+	return "buyer_checkout"
+}
+
+// clearShippingAfterMerchantEdit descarta a forma de envio escolhida quando o
+// LOJISTA muda os itens.
+//
+// Peso, dimensão e valor mudaram, então a cotação anterior não vale mais — e
+// quem paga a diferença de um frete subcotado é a loja. A compradora escolhe de
+// novo no checkout, que já sabe lidar com carrinho sem seleção (é o estado
+// inicial de todo carrinho).
+//
+// Só no caminho do lojista de propósito: a mutação pelo COMPRADOR também deixa
+// o frete obsoleto (bugs 2 e 4 da auditoria de frete, LIV-59..71), mas mudar o
+// comportamento do checkout público é escopo daquele ticket — aqui eu não vou
+// alterar em silêncio o fluxo que a compradora já usa.
+func (s *Service) clearShippingAfterMerchantEdit(ctx context.Context, cart *CartRow) {
+	if err := s.repo.UpdateCartShipping(ctx, s.pool, cart.ID, nil); err != nil {
+		logger.From(ctx, s.logger).Warn("merchant edit left a stale shipping selection",
+			zap.String("cart_id", cart.ID), zap.Error(err))
+	}
+}
+
+func (s *Service) loadEditableCart(ctx context.Context, token string, byMerchant bool) (*CartRow, error) {
 	cart, err := s.repo.GetCartByToken(ctx, token)
 	if err != nil {
 		return nil, err
 	}
+	if err := assertCartMutable(cart, byMerchant, time.Now()); err != nil {
+		return nil, err
+	}
+	return cart, nil
+}
+
+// assertCartMutable é a decisão sobre o ESTADO do carrinho, separada da leitura.
+//
+// Pura de propósito: é a matriz de política (pago / cancelado / expirado /
+// toggle da loja) × (comprador / lojista), e é o único lugar onde ela existe.
+// Com a leitura no meio, a única forma de exercitá-la seria montar carrinho no
+// banco para cada combinação, e a combinação que mais importa — lojista editando
+// loja com edição desligada — jamais teria teste.
+func assertCartMutable(cart *CartRow, byMerchant bool, now time.Time) error {
 	if cart.Status == "expired" {
-		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
+		return httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
 	// Cart cancelado (pelo lojista ou por bloqueio do comprador) não aceita mais
 	// mutação de item: editar aqui mexeria em estoque e reservas de ERP de um
 	// carrinho morto — o estorno já devolveu tudo.
 	if cart.Status == "cancelled" {
-		return nil, httpx.ErrConflict("carrinho cancelado")
+		return httpx.ErrConflict("carrinho cancelado")
 	}
 	if cart.PaymentStatus == "paid" {
-		return nil, httpx.ErrConflict("carrinho já foi pago")
+		return httpx.ErrConflict("carrinho já foi pago")
 	}
-	if !cart.AllowEdit {
-		return nil, httpx.ErrConflict("edição do carrinho desabilitada para esta loja")
+	// `cart_allow_edit` é política sobre o COMPRADOR — o comentário da coluna diz
+	// "allow customers to edit cart on checkout page". Aplicá-la ao lojista
+	// impediria a dona da loja de corrigir o pedido exatamente nas lojas que
+	// desligaram a edição pelo comprador, que são as que mais precisam corrigir
+	// pelo painel.
+	if !byMerchant && !cart.AllowEdit {
+		return httpx.ErrConflict("edição do carrinho desabilitada para esta loja")
 	}
-	if cart.ExpiresAt != nil && cart.ExpiresAt.Before(time.Now()) {
-		return nil, httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
+	if cart.ExpiresAt != nil && cart.ExpiresAt.Before(now) {
+		return httpx.DomainError(422, httpx.CodeCartExpired, "carrinho expirado")
 	}
-	return cart, nil
+	return nil
+}
+
+// productAllowedForCart decide se o produto pode entrar no carrinho.
+//
+// A whitelist é da SESSÃO e limita o que a AUDIÊNCIA pede por comentário durante
+// a transmissão — não é regra sobre o catálogo. O lojista corrigindo um pedido
+// pelo painel pode precisar somar produto que não estava naquela live.
+func productAllowedForCart(cfg *EventProductConfig, byMerchant bool) bool {
+	return cfg.IsAllowed || byMerchant
 }
 
 // loadEditableCartItem returns the cart and the specific item, asserting the
 // item belongs to the cart and the cart is editable.
-func (s *Service) loadEditableCartItem(ctx context.Context, token, itemID string) (*CartRow, *CartItemRow, error) {
-	cart, err := s.loadEditableCart(ctx, token)
+func (s *Service) loadEditableCartItem(ctx context.Context, token, itemID string, byMerchant bool) (*CartRow, *CartItemRow, error) {
+	cart, err := s.loadEditableCart(ctx, token, byMerchant)
 	if err != nil {
 		return nil, nil, err
 	}

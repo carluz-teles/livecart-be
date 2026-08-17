@@ -37,9 +37,9 @@ func NewPaymentStatus(raw string) (PaymentStatus, error) {
 	return s, nil
 }
 
-func (s PaymentStatus) String() string     { return s.value }
-func (s PaymentStatus) IsZero() bool       { return s.value == "" }
-func (s PaymentStatus) IsPaid() bool       { return s.value == PaymentPaid.value }
+func (s PaymentStatus) String() string      { return s.value }
+func (s PaymentStatus) IsZero() bool        { return s.value == "" }
+func (s PaymentStatus) IsPaid() bool        { return s.value == PaymentPaid.value }
 func (s PaymentStatus) CanBeRefunded() bool { return s.IsPaid() }
 
 func (s PaymentStatus) Value() (driver.Value, error) {
@@ -81,9 +81,9 @@ type Payment struct {
 	couponDiscountCents int64
 }
 
-func (p *Payment) OrderID() string             { return p.orderID }
-func (p *Payment) Status() PaymentStatus       { return p.paymentStatus }
-func (p *Payment) PaymentMethod() *string      { return p.paymentMethod }
-func (p *Payment) CouponID() *string           { return p.couponID }
-func (p *Payment) CouponCode() *string         { return p.couponCode }
-func (p *Payment) CouponDiscountCents() int64  { return p.couponDiscountCents }
+func (p *Payment) OrderID() string            { return p.orderID }
+func (p *Payment) Status() PaymentStatus      { return p.paymentStatus }
+func (p *Payment) PaymentMethod() *string     { return p.paymentMethod }
+func (p *Payment) CouponID() *string          { return p.couponID }
+func (p *Payment) CouponCode() *string        { return p.couponCode }
+func (p *Payment) CouponDiscountCents() int64 { return p.couponDiscountCents }

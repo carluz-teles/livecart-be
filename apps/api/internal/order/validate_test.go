@@ -23,10 +23,10 @@ func hasFieldKey(err error, key string) bool {
 
 func TestUpdateOrderRequestValidate(t *testing.T) {
 	cases := []struct {
-		name      string
-		req       UpdateOrderRequest
-		wantErr   bool
-		fieldKey  string // json key expected in the error, "" to skip the assertion
+		name     string
+		req      UpdateOrderRequest
+		wantErr  bool
+		fieldKey string // json key expected in the error, "" to skip the assertion
 	}{
 		{
 			name:    "valid: both enums allowed",

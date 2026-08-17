@@ -225,6 +225,10 @@ func ordinalSuffix(n int) string {
 //     as DomainError(status, httpx.Code…, msg); only a conscious reviewer adds a
 //     genuinely code-less not-found/validation/config throw here.
 var baselineRawThrows = map[string]bool{
+	// Edição de itens pelo painel: not-found do escopo de loja, e um guarda
+	// defensivo para carrinho sem token (estado que a criação não produz).
+	"order.Service.resolveEditableCartToken:\"pedido não encontrado\"":                   true,
+	"order.Service.resolveEditableCartToken:\"pedido sem link de checkout para editar\"": true,
 	// Parse de query string malformada: o front nunca ramifica nisso, e o termo
 	// em si é recusado como validation.Errors (fields.search), não aqui.
 	"customer.Handler.SearchHandles:\"invalid query parameters\"":               true,
@@ -294,9 +298,9 @@ var baselineRawThrows = map[string]bool{
 	"checkout.Service.RemoveCartItem:\"não foi possível remover o item, tente novamente\"":                                      true,
 	"checkout.Service.UpdateCartItemQuantity:\"não foi possível atualizar o estoque, tente novamente\"":                         true,
 	"checkout.Service.UpdateCartItemQuantity:\"quantidade deve ser pelo menos 1\"":                                              true,
-	"checkout.Service.loadEditableCart:\"carrinho cancelado\"":                                                                  true,
-	"checkout.Service.loadEditableCart:\"carrinho já foi pago\"":                                                                true,
-	"checkout.Service.loadEditableCart:\"edição do carrinho desabilitada para esta loja\"":                                      true,
+	"checkout.assertCartMutable:\"carrinho cancelado\"":                                                                         true,
+	"checkout.assertCartMutable:\"carrinho já foi pago\"":                                                                       true,
+	"checkout.assertCartMutable:\"edição do carrinho desabilitada para esta loja\"":                                             true,
 	"checkout.Service.loadEditableCartItem:\"item não encontrado neste carrinho\"":                                              true,
 	"checkout.Service.validateQuantityCap#0":                                                                                    true,
 	"checkout.Service.validateQuantityCap#1":                                                                                    true,

@@ -22,10 +22,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go.uber.org/zap"
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/order/listeners"
 	"livecart/apps/api/lib/database"
-	"go.uber.org/zap"
 )
 
 // ─── Test harness ────────────────────────────────────────────────────────────

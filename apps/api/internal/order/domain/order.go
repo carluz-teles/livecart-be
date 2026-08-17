@@ -66,26 +66,26 @@ func Reconstruct(
 	}
 }
 
-func (o *Order) ID() string          { return o.id }
-func (o *Order) CartID() string      { return o.cartID }
-func (o *Order) ShortID() int32      { return o.shortID }
-func (o *Order) StoreID() string     { return o.storeID }
-func (o *Order) EventID() string     { return o.eventID }
-func (o *Order) CustomerID() *string { return o.customerID }
-func (o *Order) Status() OrderStatus { return o.status }
-func (o *Order) TotalCents() *int64  { return o.totalCents }
-func (o *Order) DiscountCents() int64  { return o.discountCents }
-func (o *Order) ShippingCents() int64  { return o.shippingCents }
+func (o *Order) ID() string             { return o.id }
+func (o *Order) CartID() string         { return o.cartID }
+func (o *Order) ShortID() int32         { return o.shortID }
+func (o *Order) StoreID() string        { return o.storeID }
+func (o *Order) EventID() string        { return o.eventID }
+func (o *Order) CustomerID() *string    { return o.customerID }
+func (o *Order) Status() OrderStatus    { return o.status }
+func (o *Order) TotalCents() *int64     { return o.totalCents }
+func (o *Order) DiscountCents() int64   { return o.discountCents }
+func (o *Order) ShippingCents() int64   { return o.shippingCents }
 func (o *Order) PaidTotalCents() *int64 { return o.paidTotalCents }
-func (o *Order) PaidAt() *time.Time  { return o.paidAt }
-func (o *Order) CreatedAt() time.Time { return o.createdAt }
-func (o *Order) Items() []*OrderItem  { return o.items }
-func (o *Order) Payment() *Payment    { return o.payment }
-func (o *Order) Logistics() *Logistics { return o.logistics }
+func (o *Order) PaidAt() *time.Time     { return o.paidAt }
+func (o *Order) CreatedAt() time.Time   { return o.createdAt }
+func (o *Order) Items() []*OrderItem    { return o.items }
+func (o *Order) Payment() *Payment      { return o.payment }
+func (o *Order) Logistics() *Logistics  { return o.logistics }
 
-func (o *Order) SetItems(items []*OrderItem)      { o.items = items }
-func (o *Order) SetPayment(p *Payment)            { o.payment = p }
-func (o *Order) SetLogistics(l *Logistics)        { o.logistics = l }
+func (o *Order) SetItems(items []*OrderItem) { o.items = items }
+func (o *Order) SetPayment(p *Payment)       { o.payment = p }
+func (o *Order) SetLogistics(l *Logistics)   { o.logistics = l }
 
 func (o *Order) IsPaid() bool { return o.status.IsPaid() }
 
