@@ -1438,7 +1438,6 @@ func (s *Service) LinkSessionMedia(ctx context.Context, input LinkSessionMediaIn
 		}
 	}
 
-
 	row, err := s.repo.AddPlatformToSession(ctx, input.SessionID, input.Platform, input.PlatformLiveID)
 	if err != nil {
 		return PlatformOutput{}, err

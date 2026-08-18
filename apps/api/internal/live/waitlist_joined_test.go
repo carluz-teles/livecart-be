@@ -28,23 +28,23 @@ func TestNotificationTypeForComment(t *testing.T) {
 		want          notification.NotificationType
 	}{
 		{
-			name: "primeiro pedido, tudo em estoque",
+			name:      "primeiro pedido, tudo em estoque",
 			isNewCart: true, waitlistedQty: 0,
 			want: notification.TypeCheckoutImmediate,
 		},
 		{
-			name: "item novo em carrinho existente, tudo em estoque",
+			name:      "item novo em carrinho existente, tudo em estoque",
 			isNewCart: false, waitlistedQty: 0,
 			want: notification.TypeItemAdded,
 		},
 		{
 			// O caso de campo.
-			name: "item esgotado no primeiro pedido vai para a fila",
+			name:      "item esgotado no primeiro pedido vai para a fila",
 			isNewCart: true, waitlistedQty: 1,
 			want: notification.TypeWaitlistJoined,
 		},
 		{
-			name: "item esgotado em carrinho existente vai para a fila",
+			name:      "item esgotado em carrinho existente vai para a fila",
 			isNewCart: false, waitlistedQty: 1,
 			want: notification.TypeWaitlistJoined,
 		},
@@ -52,7 +52,7 @@ func TestNotificationTypeForComment(t *testing.T) {
 			// Pediu 3, levou 2, 1 ficou aguardando. A fila ganha o assunto da
 			// mensagem: as 2 que entraram aparecem no {total_itens} do próprio
 			// template de fila.
-			name: "atendimento parcial ainda é mensagem de fila",
+			name:      "atendimento parcial ainda é mensagem de fila",
 			isNewCart: false, waitlistedQty: 1,
 			want: notification.TypeWaitlistJoined,
 		},

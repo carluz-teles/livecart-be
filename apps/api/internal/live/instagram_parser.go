@@ -32,7 +32,11 @@ type PurchaseIntent struct {
 // negativePatterns indicate the user is NOT buying.
 var negativePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bn[aã]o\s+quero\b`),
-	regexp.MustCompile(`(?i)\bcancela\b`),
+	// `cancela` sozinho não pegava "cancelar", que é como as pessoas escrevem.
+	// Na live de 17/08: "Gi, quero cancelar 1124 e colocar essa que vc mostrou
+	// 1229" era lido como pedido DOS DOIS — inclusive o que ela estava
+	// cancelando.
+	regexp.MustCompile(`(?i)\bcancel\w*`),
 	regexp.MustCompile(`(?i)\bdesisto\b`),
 	regexp.MustCompile(`(?i)\bn[aã]o\s+preciso\b`),
 }
@@ -51,128 +55,19 @@ var questionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\btem\s+outras\s+cores\b`),
 }
 
-// quantityPatterns extract quantity from text. Order matters: specific first.
-// IMPORTANT: All patterns use {1,2} to match only 1-2 digit quantities (1-99).
-// This prevents 4-digit keywords like "1001" from being interpreted as quantities.
-var quantityPatterns = []*regexp.Regexp{
-	// "2x", "3X" (multiplier notation)
-	regexp.MustCompile(`(?i)\b(\d{1,2})\s*x\b`),
-	// "x2", "X3"
-	regexp.MustCompile(`(?i)\bx\s*(\d{1,2})\b`),
-	// "quero N", "eu quero N" - only match 1-2 digit numbers to avoid matching keywords
-	regexp.MustCompile(`(?i)\bquero\s+(\d{1,2})\b`),
-	// "reserva N"
-	regexp.MustCompile(`(?i)\breserva\s+(\d{1,2})\b`),
-	// "manda N"
-	regexp.MustCompile(`(?i)\bmanda\s+(\d{1,2})\b`),
-	// "separa N"
-	regexp.MustCompile(`(?i)\bsepara\s+(\d{1,2})\b`),
-	// "pega N"
-	regexp.MustCompile(`(?i)\bpega\s+(\d{1,2})\b`),
-	// "coloca N"
-	regexp.MustCompile(`(?i)\bcoloca\s+(\d{1,2})\b`),
-	// "me manda N"
-	regexp.MustCompile(`(?i)\bme\s+manda\s+(\d{1,2})\b`),
-	// "N unidade(s)"
-	regexp.MustCompile(`(?i)\b(\d{1,2})\s+unidades?\b`),
-}
-
-// ParsePurchaseIntent analyzes comment text and detects purchase intent.
-// Uses keyword-first approach: if a 4-char keyword is present AND the comment
-// isn't a question/negation, it's a purchase. Quantity defaults to 1.
+// ParsePurchaseIntent responde "é compra, e de quantas unidades no total?".
+//
+// Delega para ParsePurchaseItems. Antes tinha leitura PRÓPRIA do comentário — e
+// era ela que rodava em produção, com os defeitos da live de 16/08: "1024x3"
+// não casava com padrão nenhum, "1208 × 4" usava um sinal que ela não conhecia,
+// e "valor 1000" virava pedido. Manter duas leituras do mesmo texto garantia
+// que uma delas fosse a errada; quem chamasse esta continuaria com os defeitos
+// depois de corrigidos na outra.
+//
+// A resposta é achatada em UMA quantidade porque é o que o chamador antigo
+// sabe receber. Quem precisa saber QUAIS produtos usa ParsePurchaseItems.
 func ParsePurchaseIntent(text string) *PurchaseIntent {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return nil
-	}
-
-	// Check for negative patterns first
-	for _, pattern := range negativePatterns {
-		if pattern.MatchString(text) {
-			return nil
-		}
-	}
-
-	// Check for question patterns
-	for _, pattern := range questionPatterns {
-		if pattern.MatchString(text) {
-			return nil
-		}
-	}
-
-	// Check if text contains a keyword (4-char alphanumeric code).
-	// If it does, this IS a purchase intent — extract quantity.
-	keywords := ExtractPossibleKeywords(text)
-	if len(keywords) > 0 {
-		quantity := extractQuantity(text)
-		return &PurchaseIntent{
-			Quantity: quantity,
-			RawText:  text,
-		}
-	}
-
-	// No keyword found. Fall back to explicit purchase verb patterns
-	// like "quero", "manda", etc. (handles cases without a keyword in the text,
-	// the keyword matching will happen later in findProductByKeyword).
-	for _, pattern := range quantityPatterns {
-		matches := pattern.FindStringSubmatch(text)
-		if matches != nil {
-			quantity := 1
-			if len(matches) > 1 && matches[1] != "" {
-				if q, err := strconv.Atoi(matches[1]); err == nil && q > 0 {
-					quantity = q
-				}
-			}
-			if quantity > 100 {
-				quantity = 100
-			}
-			return &PurchaseIntent{
-				Quantity: quantity,
-				RawText:  text,
-			}
-		}
-	}
-
-	// "quero" / "eu quero" without number
-	if regexp.MustCompile(`(?i)\b(eu\s+)?quero\b`).MatchString(text) {
-		return &PurchaseIntent{
-			Quantity: 1,
-			RawText:  text,
-		}
-	}
-
-	return nil
-}
-
-// extractQuantity finds a quantity number in the text using known patterns.
-// Returns 1 if no quantity is found (default to 1 unit).
-func extractQuantity(text string) int {
-	for _, pattern := range quantityPatterns {
-		matches := pattern.FindStringSubmatch(text)
-		if matches != nil && len(matches) > 1 && matches[1] != "" {
-			if q, err := strconv.Atoi(matches[1]); err == nil && q > 0 {
-				if q > 100 {
-					return 100
-				}
-				return q
-			}
-		}
-	}
-
-	// Look for a standalone small number (1-99) that isn't part of the keyword.
-	// e.g., "1001 2" → quantity=2, "3 1001" → quantity=3
-	standaloneNum := regexp.MustCompile(`\b(\d{1,2})\b`)
-	for _, match := range standaloneNum.FindAllStringSubmatch(text, -1) {
-		if n, err := strconv.Atoi(match[1]); err == nil && n > 0 && n <= 99 {
-			// Make sure this isn't part of a keyword (4-char code)
-			// by checking the matched string length
-			if len(match[1]) <= 2 {
-				return n
-			}
-		}
-	}
-
-	return 1 // Default
+	return intentDoComentario(ParsePurchaseItems(text), text)
 }
 
 // IsCancellation checks if the text indicates a cancellation request.
@@ -222,16 +117,32 @@ func ExtractPossibleKeywords(text string) []string {
 	return keywords
 }
 
-// isValidKeyword checks if a 4-char string is a valid product keyword.
-// Accepts any 4-char alphanumeric code: "1001", "A9B1", "BONE", etc.
+// isValidKeyword diz se o trecho PODE ser o código de um produto.
+//
+// Espelha o value object do domínio, que é a autoridade:
+//
+//	// Keywords are 4-digit numeric strings between 1000-9999.
+//	func NewKeyword(value string) (Keyword, error)  → product/domain/keyword.go
+//
+// Antes, aqui aceitava-se qualquer alfanumérico de 4 caracteres ("BONE",
+// "A9B1"). Nenhum produto pode ter esses códigos — o domínio recusa na
+// criação —, mas o parser os tratava como pedido, e toda palavra portuguesa de
+// quatro letras virava código: "esse", "essa", "isso", "aqui", "amei", "acho".
+//
+// Sozinho isso seria inofensivo (código que não existe não acha produto). Junto
+// com o fallback de produto em destaque, virava venda: "Esse cogumelo tem
+// maior?" não achava produto ESSE, caía no destaque e criava o pedido que
+// ninguém fez. Foi um dos casos da live de 16/08.
 func isValidKeyword(s string) bool {
 	if len(s) != 4 {
 		return false
 	}
 	for _, c := range s {
-		if !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+		if c < '0' || c > '9' {
 			return false
 		}
 	}
-	return true
+	// Fora de 1000-9999 nenhum produto existe: "0999" e "0000" são ruído.
+	n, err := strconv.Atoi(s)
+	return err == nil && n >= 1000 && n <= 9999
 }

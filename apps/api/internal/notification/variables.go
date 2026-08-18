@@ -16,20 +16,22 @@ type VariableSpec struct {
 // variableCatalog é a fonte única de verdade de cada variável (ordem de
 // exibição preservada por templateVariableScopes, não aqui).
 var variableCatalog = map[string]VariableSpec{
-	"{handle}":      {"{handle}", "Nome de usuário do comprador", "@cliente_exemplo"},
-	"{produto}":     {"{produto}", "Nome do produto", "Camiseta Preta M"},
-	"{keyword}":     {"{keyword}", "Palavra-chave do produto", "ABCD"},
-	"{quantidade}":  {"{quantidade}", "Quantidade do último item", "2"},
-	"{total_itens}": {"{total_itens}", "Total de itens no carrinho", "3"},
-	"{total}":       {"{total}", "Valor total formatado", "R$ 199,90"},
-	"{link}":        {"{link}", "Link de checkout do carrinho", "https://sualoja.com/cart/abc123"},
-	"{loja}":        {"{loja}", "Nome da loja", "Minha Loja"},
-	"{expira_em}":   {"{expira_em}", "Tempo até o carrinho expirar", "48 horas"},
-	"{evento}":      {"{evento}", "Nome da campanha", "Semana Black"},
-	"{sessao}":      {"{sessao}", "Nome ou data da transmissão", "Live de segunda"},
-	"{prazo_final}": {"{prazo_final}", "Data e hora limite para finalizar", "09/11 às 23h59"},
-	"{comeca_em}":   {"{comeca_em}", "Quando a campanha começa", "03/11 às 20h"},
-	"{tempo_extra}": {"{tempo_extra}", "Prazo extra ganho pela fila", "30 minutos"},
+	"{handle}":              {"{handle}", "Nome de usuário do comprador", "@cliente_exemplo"},
+	"{produto}":             {"{produto}", "Nome do produto", "Camiseta Preta M"},
+	"{keyword}":             {"{keyword}", "Palavra-chave do produto", "ABCD"},
+	"{quantidade}":          {"{quantidade}", "Quantidade pedida no último comentário", "10"},
+	"{quantidade_carrinho}": {"{quantidade_carrinho}", "Quanto do pedido entrou no carrinho", "2"},
+	"{quantidade_fila}":     {"{quantidade_fila}", "Quanto do pedido ficou na fila de espera", "8"},
+	"{total_itens}":         {"{total_itens}", "Total de itens no carrinho", "3"},
+	"{total}":               {"{total}", "Valor total formatado", "R$ 199,90"},
+	"{link}":                {"{link}", "Link de checkout do carrinho", "https://sualoja.com/cart/abc123"},
+	"{loja}":                {"{loja}", "Nome da loja", "Minha Loja"},
+	"{expira_em}":           {"{expira_em}", "Tempo até o carrinho expirar", "48 horas"},
+	"{evento}":              {"{evento}", "Nome da campanha", "Semana Black"},
+	"{sessao}":              {"{sessao}", "Nome ou data da transmissão", "Live de segunda"},
+	"{prazo_final}":         {"{prazo_final}", "Data e hora limite para finalizar", "09/11 às 23h59"},
+	"{comeca_em}":           {"{comeca_em}", "Quando a campanha começa", "03/11 às 20h"},
+	"{tempo_extra}":         {"{tempo_extra}", "Prazo extra ganho pela fila", "30 minutos"},
 	// {live_titulo} continua no catálogo por compatibilidade com templates já
 	// salvos, mas some da oferta de todo escopo: quem escrever um template novo
 	// pelo editor recebe {evento}. Ver RenderTemplate — os dois apontam para o
@@ -86,7 +88,11 @@ var templateVariableScopes = map[string][]string{
 	// no caso parcial parte dele foi mesmo levada), então o escopo é o do
 	// carrinho inteiro — {total_itens}/{total} são o que conta a verdade do que
 	// o comprador de fato levou.
-	"waitlist_joined": cartVariables,
+	// A fila precisa dizer a QUEBRA — quanto entrou e quanto ficou aguardando.
+	// Só {total_itens}/{total} não contavam a história: são o carrinho inteiro,
+	// e coladas embaixo do nome do produto foram lidas como quantidade DELE.
+	"waitlist_joined": append(append([]string{}, cartVariables...),
+		"{quantidade_carrinho}", "{quantidade_fila}"),
 
 	// E-mails pós-venda — variáveis do pedido.
 	"payment_confirmed": append(append([]string{}, orderBaseVariables...), "{lista_produtos}"),

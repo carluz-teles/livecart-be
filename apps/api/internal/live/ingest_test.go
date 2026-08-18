@@ -256,11 +256,11 @@ func TestService_FindProductByKeyword(t *testing.T) {
 
 	t.Run("lookup error on one keyword is skipped so a later keyword still matches", func(t *testing.T) {
 		repo := newFakeIngestRepo()
-		repo.lookupErr["X1Y2"] = context.DeadlineExceeded
-		repo.products["Z3W4"] = product
+		repo.lookupErr["1000"] = context.DeadlineExceeded
+		repo.products["1005"] = product
 		s := newTestService(repo)
 
-		got := s.FindProductByKeyword(ctx, "store1", "quero X1Y2 e Z3W4")
+		got := s.FindProductByKeyword(ctx, "store1", "quero 1000 e 1005")
 		if got == nil || got.ID != "p1" {
 			t.Fatalf("FindProductByKeyword() = %+v, want product p1 after skipping errored keyword", got)
 		}
