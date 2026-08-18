@@ -968,18 +968,23 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 	checkoutURL := fmt.Sprintf("%s/cart/%s", frontendURL, input.CartToken)
 
 	// Build template variables
+	// A quebra do pedido: quanto foi pedido, quanto coube, quanto ficou na fila.
+	// Sem os dois últimos a mensagem de fila cita o produto e emenda o total do
+	// CARRINHO, e quem lê entende que o total é daquele produto.
 	vars := notification.TemplateVariables{
-		Handle:     "@" + input.PlatformHandle,
-		Produto:    input.ProductName,
-		Keyword:    input.ProductKeyword,
-		Quantidade: input.Quantity,
-		TotalItens: input.TotalItems,
-		Total:      notification.FormatCurrency(input.TotalCents),
-		TotalCents: input.TotalCents,
-		Link:       checkoutURL,
-		Loja:       storeInfo.Name,
-		ExpiraEm:   notification.FormatExpiryMinutes(storeInfo.CartExpirationMinutes),
-		LiveTitulo: input.EventTitle,
+		Handle:             "@" + input.PlatformHandle,
+		Produto:            input.ProductName,
+		Keyword:            input.ProductKeyword,
+		Quantidade:         input.Quantity,
+		QuantidadeCarrinho: input.Quantity - input.WaitlistedQty,
+		QuantidadeFila:     input.WaitlistedQty,
+		TotalItens:         input.TotalItems,
+		Total:              notification.FormatCurrency(input.TotalCents),
+		TotalCents:         input.TotalCents,
+		Link:               checkoutURL,
+		Loja:               storeInfo.Name,
+		ExpiraEm:           notification.FormatExpiryMinutes(storeInfo.CartExpirationMinutes),
+		LiveTitulo:         input.EventTitle,
 	}
 
 	// Send notification

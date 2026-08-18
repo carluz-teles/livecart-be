@@ -10,15 +10,17 @@ import (
 // Variables are in the format {variable_name}.
 func RenderTemplate(template string, vars TemplateVariables) string {
 	replacements := map[string]string{
-		"{handle}":      vars.Handle,
-		"{produto}":     vars.Produto,
-		"{keyword}":     vars.Keyword,
-		"{quantidade}":  fmt.Sprintf("%d", vars.Quantidade),
-		"{total_itens}": fmt.Sprintf("%d", vars.TotalItens),
-		"{total}":       vars.Total,
-		"{link}":        vars.Link,
-		"{loja}":        vars.Loja,
-		"{expira_em}":   vars.ExpiraEm,
+		"{handle}":              vars.Handle,
+		"{produto}":             vars.Produto,
+		"{keyword}":             vars.Keyword,
+		"{quantidade}":          fmt.Sprintf("%d", vars.Quantidade),
+		"{quantidade_carrinho}": fmt.Sprintf("%d", vars.QuantidadeCarrinho),
+		"{quantidade_fila}":     fmt.Sprintf("%d", vars.QuantidadeFila),
+		"{total_itens}":         fmt.Sprintf("%d", vars.TotalItens),
+		"{total}":               vars.Total,
+		"{link}":                vars.Link,
+		"{loja}":                vars.Loja,
+		"{expira_em}":           vars.ExpiraEm,
 		// {evento} e {live_titulo} são a MESMA variável com dois nomes: o novo
 		// (RN-19, "live" significando campanha é o nome que engana) e o antigo,
 		// mantido como alias depreciado para não quebrar template já salvo.

@@ -236,7 +236,7 @@ func DefaultSettings() Settings {
 		// único lugar onde aparece o que de fato foi levado.
 		WaitlistJoined: &TemplateSettings{
 			Enabled:  true,
-			Template: "Oi {handle}! ⏳\n\n{produto} entrou na fila de espera — o estoque acabou antes de fechar seu pedido.\n\nAssim que liberar eu coloco no seu carrinho automaticamente. Não precisa pedir de novo — é só ficar de olho no seu carrinho pelo link.\n\nCarrinho: {total_itens} itens — {total}\n{link} 💜",
+			Template: "Oi {handle}! ⏳\n\n{produto}\nVocê pediu {quantidade} · Entraram no carrinho {quantidade_carrinho} · Na fila de espera {quantidade_fila}\n\nO estoque acabou antes de fechar seu pedido. Assim que liberar eu coloco no seu carrinho automaticamente — não precisa pedir de novo.\n\nSeu carrinho INTEIRO: {total_itens} itens — {total}\n{link} 💜",
 		},
 		OutOfWindowScheduled: &TemplateSettings{
 			Enabled:  true,
@@ -290,13 +290,23 @@ type TemplateVariables struct {
 	Handle     string // @username
 	Produto    string // Product name
 	Keyword    string // Product keyword
-	Quantidade int    // Quantity of last item
-	TotalItens int    // Total items in cart
-	Total      string // Formatted total (e.g., "R$ 199,90")
-	TotalCents int64  // Total in cents
-	Link       string // Checkout URL
-	Loja       string // Store name
-	ExpiraEm   string // Expiry time (e.g., "48 horas")
+	Quantidade int    // Quantidade PEDIDA no último comentário
+	// QuantidadeCarrinho e QuantidadeFila quebram a quantidade pedida em duas.
+	//
+	// Sem elas a mensagem de fila não tinha como dizer o que tinha acontecido:
+	// citava o produto e, na linha seguinte, o total do CARRINHO. Na live de
+	// 17/08 a @karinafragahoelz pediu "1368 x10", levou 2 e ficou com 8 na fila,
+	// e leu "Carrinho: 24 itens" logo abaixo do nome do produto como 24 unidades
+	// daquele produto — "adicionou 24 noéis de 40cm no meu carrinho". A leitura
+	// dela é a leitura natural das duas linhas juntas.
+	QuantidadeCarrinho int    // Quanto do pedido coube no estoque e entrou
+	QuantidadeFila     int    // Quanto ficou aguardando
+	TotalItens         int    // Total items in cart
+	Total              string // Formatted total (e.g., "R$ 199,90")
+	TotalCents         int64  // Total in cents
+	Link               string // Checkout URL
+	Loja               string // Store name
+	ExpiraEm           string // Expiry time (e.g., "48 horas")
 	// LiveTitulo é o nome do EVENTO/campanha. Alimenta {evento} (RN-19) e
 	// {live_titulo}, que continua respondendo como alias depreciado: templates
 	// já salvos por lojistas usam o nome antigo, e trocar a chave sem alias
