@@ -978,8 +978,19 @@ func (s *Service) processarItemDoComentario(
 	// Reserve stock in ERP (only for available items)
 	if availableQty > 0 && s.stockReserver != nil {
 		if syncErr := s.stockReserver.ReserveStockInERP(ctx, event.StoreID, result.CartID, event.ID, product.ID, availableQty, product.Price, input.Username); syncErr != nil {
+			// QUAL produto e QUANTO. A linha só tinha o carrinho, e quando duas
+			// reservas falharam na live de 17/08 não deu para saber sequer em que
+			// produto conferir o Tiny — uma delas só foi identificada porque a URL
+			// aparecia por acaso no texto do erro.
+			//
+			// Esta linha é o único registro que sobra: sem linha em
+			// stock_reservations, é dela que sai a conferência manual.
 			logger.From(ctx, s.logger).Warn("failed to reserve stock in ERP",
 				zap.String("cart_id", result.CartID),
+				zap.String("product_id", product.ID),
+				zap.String("keyword", product.Keyword),
+				zap.String("username", input.Username),
+				zap.Int("quantity", availableQty),
 				zap.Error(syncErr),
 			)
 		}
