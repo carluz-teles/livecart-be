@@ -158,7 +158,7 @@ func ParsePurchaseItems(texto string) []PurchaseItem {
 	}
 
 	if len(itens) > 0 {
-		return itens
+		return unificarRepetidos(itens)
 	}
 
 	if pedidoSemCodigo(texto, tokens) {
@@ -170,6 +170,37 @@ func ParsePurchaseItems(texto string) []PurchaseItem {
 	}
 
 	return nil
+}
+
+// unificarRepetidos junta o mesmo código citado mais de uma vez no comentário.
+//
+// A leitura por item passou a produzir uma entrada por citação, e citações
+// repetidas do MESMO código somavam: "1130 x2 1130 x3" virava cinco unidades, e
+// "1130 1130" — o código digitado duas vezes — virava duas.
+//
+// Dentro de um único comentário, repetir o código é correção ou dedo duplo com
+// muito mais frequência do que é soma: quem quer cinco escreve "1130 x5". Então
+// vale a ÚLTIMA quantidade dita, que é a versão mais recente da intenção dela.
+//
+// A escolha segue a assimetria de custo de todo o resto deste parser: entregar
+// menos do que ela quis é um comentário a mais; entregar mais é unidade que ela
+// não pediu, com baixa de estoque e pedido no ERP. A ordem é a da primeira
+// aparição, porque é a ordem em que ela pensou.
+func unificarRepetidos(itens []PurchaseItem) []PurchaseItem {
+	if len(itens) < 2 {
+		return itens
+	}
+	posicao := make(map[string]int, len(itens))
+	out := make([]PurchaseItem, 0, len(itens))
+	for _, it := range itens {
+		if i, visto := posicao[it.Keyword]; visto {
+			out[i].Quantity = it.Quantity
+			continue
+		}
+		posicao[it.Keyword] = len(out)
+		out = append(out, it)
+	}
+	return out
 }
 
 // pedidoSemCodigo decide se um comentário SEM código é um pedido.
