@@ -32,7 +32,11 @@ type PurchaseIntent struct {
 // negativePatterns indicate the user is NOT buying.
 var negativePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bn[aã]o\s+quero\b`),
-	regexp.MustCompile(`(?i)\bcancela\b`),
+	// `cancela` sozinho não pegava "cancelar", que é como as pessoas escrevem.
+	// Na live de 17/08: "Gi, quero cancelar 1124 e colocar essa que vc mostrou
+	// 1229" era lido como pedido DOS DOIS — inclusive o que ela estava
+	// cancelando.
+	regexp.MustCompile(`(?i)\bcancel\w*`),
 	regexp.MustCompile(`(?i)\bdesisto\b`),
 	regexp.MustCompile(`(?i)\bn[aã]o\s+preciso\b`),
 }

@@ -108,6 +108,11 @@ func ParsePurchaseItems(texto string) []PurchaseItem {
 		return nil
 	}
 
+	// "1107 ou 1207" é pergunta de qual é o código, não pedido dos dois.
+	if codigoOuCodigoRe.MatchString(texto) {
+		return nil
+	}
+
 	normalizado := normalizarComentario(texto)
 	tokens := tokenizar(normalizado)
 
@@ -221,6 +226,17 @@ var negacaoRe = regexp.MustCompile(`(?i)\bn[aã]o\b`)
 
 // maxQuantidadePorItem é o teto de sanidade por linha do comentário.
 const maxQuantidadePorItem = 100
+
+// codigoOuCodigoRe pega a dúvida entre dois códigos.
+//
+// Da live de 17/08: "O código das velas é 1107 ou 1207. Me corrige por favor".
+// A leitura por item, que existe para atender "1000 5x 1005 3x", transformava
+// isso em pedido dos DOIS produtos — e ela estava perguntando qual era o certo.
+//
+// O "ou" é a diferença. Ninguém pede dois produtos dizendo "ou"; quem pede lista
+// ("1107 1207", "1107 x2 1207 x3"). Uma pergunta mal lida aqui custa um produto
+// que a compradora nunca pediu, na caixa dela.
+var codigoOuCodigoRe = regexp.MustCompile(`(?i)\b\d{4}\s*(ou|/)\s*\d{4}\b`)
 
 // unidadesRe cobre "5 unidades por favor", "1 unidade" — pedido sem verbo e sem
 // código, em que a quantidade é o próprio pedido.

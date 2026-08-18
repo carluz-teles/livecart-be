@@ -401,6 +401,37 @@ var casosDaLive = []casoDeComentario{
 	// O pedido REAL da noite, e a forma que a audiência está sendo ensinada a
 	// usar: "código espaço X quantidade".
 	{"1099 X 1", []PurchaseItem{{"1099", 1}}},
+
+	// ─── As 10 vendas que a live de 17/08 PERDEU ─────────────────────────────
+	//
+	// Todas na forma colada, que o parser antigo não enxergava: sem fronteira de
+	// palavra entre o código e o "x", nenhum código era extraído e nada
+	// acontecia. Nove dessas compradoras nunca voltaram a comentar o código —
+	// para elas a venda simplesmente não existiu. Só `lcarol2906` percebeu e
+	// reescreveu com espaços 31 segundos depois.
+	{"1207x2", []PurchaseItem{{"1207", 2}}},
+	{"1207x4", []PurchaseItem{{"1207", 4}}},
+	{"1107x3", []PurchaseItem{{"1107", 3}}},
+	{"1125x2", []PurchaseItem{{"1125", 2}}},
+	{"1124x2", []PurchaseItem{{"1124", 2}}},
+	{"1104x2", []PurchaseItem{{"1104", 2}}},
+	{"1419x1", []PurchaseItem{{"1419", 1}}},
+	{"1086x2", []PurchaseItem{{"1086", 2}}},
+	{"1124 x 2", []PurchaseItem{{"1124", 2}}},
+	{"1425 x 3", []PurchaseItem{{"1425", 3}}},
+
+	// ─── Dois defeitos do parser NOVO, achados pela mesma live ───────────────
+	//
+	// A leitura por item existe para atender "1000 5x 1005 3x". Nestas duas
+	// frases ela lia dois produtos onde não havia pedido nenhum, e o erro é do
+	// tipo caro: produto que ninguém pediu, dentro da caixa.
+	{"O código das velas é 1107 ou 1207. Me corrige por favor", nil},
+	{"Gi, quero cancelar  1124 e colocar essa que vc mostrou 1229", nil},
+	{"1107 ou 1207?", nil},
+	{"é 1124 ou 1125", nil},
+	{"cancelar 1130", nil},
+	{"quero cancelar o 1144", nil},
+	{"pode cancelar", nil},
 }
 
 func TestParsePurchaseItems_CorpusDaLive(t *testing.T) {
