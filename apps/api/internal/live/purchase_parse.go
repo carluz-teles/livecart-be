@@ -233,10 +233,15 @@ const maxQuantidadePorItem = 100
 // A leitura por item, que existe para atender "1000 5x 1005 3x", transformava
 // isso em pedido dos DOIS produtos — e ela estava perguntando qual era o certo.
 //
-// O "ou" é a diferença. Ninguém pede dois produtos dizendo "ou"; quem pede lista
-// ("1107 1207", "1107 x2 1207 x3"). Uma pergunta mal lida aqui custa um produto
-// que a compradora nunca pediu, na caixa dela.
-var codigoOuCodigoRe = regexp.MustCompile(`(?i)\b\d{4}\s*(ou|/)\s*\d{4}\b`)
+// O "ou" é a diferença, e SÓ o "ou". Ninguém pede dois produtos dizendo "ou";
+// quem pede lista. Uma pergunta mal lida aqui custa um produto que a compradora
+// nunca pediu, na caixa dela.
+//
+// A barra estava aqui e saiu: "1130 / 1207 / 1145" é lista, não escolha, e em
+// português a barra separa itens com a mesma frequência com que oferece
+// alternativa. Mantê-la recusava três pedidos legítimos para pegar uma pergunta
+// que o "ou" já pega.
+var codigoOuCodigoRe = regexp.MustCompile(`(?i)\b\d{4}\s*ou\s*\d{4}\b`)
 
 // unidadesRe cobre "5 unidades por favor", "1 unidade" — pedido sem verbo e sem
 // código, em que a quantidade é o próprio pedido.

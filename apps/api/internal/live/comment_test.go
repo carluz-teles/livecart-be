@@ -28,7 +28,10 @@ type fakeCommentCore struct {
 
 	addResult AddToCartOutput
 	addErr    error
-	addCalls  []AddToCartInput
+	// addErrOnCall faz o N-ésimo AddToCart falhar (1-indexado). Serve ao caso de
+	// um comentário com vários produtos em que só um item quebra.
+	addErrOnCall int
+	addCalls     []AddToCartInput
 }
 
 // scriptWhitelist é o açúcar dos testes de sessão única: grava a lista da sessão
@@ -52,6 +55,9 @@ func (f *fakeCommentCore) GetEventByPlatformLiveID(_ context.Context, _ string) 
 
 func (f *fakeCommentCore) AddToCart(_ context.Context, input AddToCartInput) (AddToCartOutput, error) {
 	f.addCalls = append(f.addCalls, input)
+	if f.addErrOnCall > 0 && len(f.addCalls) == f.addErrOnCall {
+		return AddToCartOutput{}, errors.New("add falhou neste item")
+	}
 	return f.addResult, f.addErr
 }
 

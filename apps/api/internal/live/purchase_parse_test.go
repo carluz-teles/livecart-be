@@ -428,6 +428,10 @@ var casosDaLive = []casoDeComentario{
 	{"O código das velas é 1107 ou 1207. Me corrige por favor", nil},
 	{"Gi, quero cancelar  1124 e colocar essa que vc mostrou 1229", nil},
 	{"1107 ou 1207?", nil},
+	// A barra separa lista, não oferece alternativa.
+	{"1130 / 1207", []PurchaseItem{{"1130", 1}, {"1207", 1}}},
+	{"1130 / 1207 / 1145", []PurchaseItem{{"1130", 1}, {"1207", 1}, {"1145", 1}}},
+	{"1130 x2 / 1207 x3", []PurchaseItem{{"1130", 2}, {"1207", 3}}},
 	{"é 1124 ou 1125", nil},
 	{"cancelar 1130", nil},
 	{"quero cancelar o 1144", nil},
