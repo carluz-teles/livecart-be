@@ -131,4 +131,7 @@ const (
 	// --- INSTAGRAM publishing (internal/integration/publish_schedule.go) ---
 	CodeIgStoryNoWindow   Code = "IG_STORY_NO_WINDOW"   // publish_schedule.go:177 ("a story has no commercial window — it lasts 24h from publication")
 	CodeIgPublishInFlight Code = "IG_PUBLISH_IN_FLIGHT" // publish_schedule.go:242 ("being sent to Instagram right now and can no longer be cancelled")
+	// Razão de movimentos de estoque (erp_stock_movements, 000132).
+	CodeStockMovementStale Code = "STOCK_MOVEMENT_STALE" // erp/movement_resolution.go: o CAS perdeu para o resolver; recarregar o painel
+
 )

@@ -65,6 +65,15 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Patch("/:id/erp/stock-source", h.UpdateERPStockSource)
 	g.Post("/:id/erp/resync", h.StartERPResync)
 
+	// Painel de pendências do razão de movimentos (erp_stock_movements). As
+	// rotas vivem fora de /:id porque a pendência é da LOJA, não de uma
+	// integração específica.
+	g.Get("/erp/stock-movements/pending", h.ListPendingStockMovements)
+	g.Post("/erp/stock-movements/:movementId/resolve", h.ResolveStockMovement)
+	// Reconciliação local × ERP em modo relatório (só leitura). Rodar com a
+	// loja quieta: durante uma live cada reserva borra a foto por segundos.
+	g.Get("/erp/stock-reconciliation", h.RunStockReconciliation)
+
 	// Test connection
 	g.Post("/:id/test", h.TestConnection)
 

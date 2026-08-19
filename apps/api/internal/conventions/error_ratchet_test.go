@@ -225,6 +225,18 @@ func ordinalSuffix(n int) string {
 //     as DomainError(status, httpx.Code…, msg); only a conscious reviewer adds a
 //     genuinely code-less not-found/validation/config throw here.
 var baselineRawThrows = map[string]bool{
+	// 404 simples da reconciliação em modo relatório: sem integração ERP ativa
+	// não há o que comparar, e provider sem leitura de saldo é config, não
+	// domínio.
+	`integration.Service.RunStockReconciliation:"nenhuma integração ERP ativa"`:              true,
+	`integration.Service.RunStockReconciliation:"o provedor ERP não expõe leitura de saldo"`: true,
+
+	// 404 simples do painel de pendências do razão: não há código de domínio a
+	// mapear — a linha não existe (ou é de outra loja, indistinguível de
+	// propósito) e o painel só recarrega.
+	`erp.Service.ResolveStockMovementManually:"movimento não encontrado"`:                true,
+	`erp.Service.ResolveStockMovementManually:"razão de movimentos não está habilitado"`: true,
+
 	// Confirmação manual de pagamento: not-found do carrinho e a validação de
 	// "sem itens". A tela mostra a mensagem do servidor; não há ramo a tomar.
 	"payment.Service.ConfirmManualPayment:\"pedido não encontrado\"":               true,

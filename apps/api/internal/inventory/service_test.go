@@ -56,18 +56,19 @@ type fakeRepo struct {
 	eventsErr       error
 
 	// contadores
-	cancelCalls    int
-	decCalls       int
-	revertCalls    int
-	incrementCalls int
-	lockCalls      int
-	requeueCalls   int
-	requeueRem     int
-	emitNotified   int
-	extendCalls    int
-	updateCalls    int
-	emitExpired    int
-	expireRelCalls int
+	cancelCalls          int
+	decCalls             int
+	waitlistedDecrements map[string]int
+	revertCalls          int
+	incrementCalls       int
+	lockCalls            int
+	requeueCalls         int
+	requeueRem           int
+	emitNotified         int
+	extendCalls          int
+	updateCalls          int
+	emitExpired          int
+	expireRelCalls       int
 }
 
 // --- B3a port ---
@@ -128,7 +129,11 @@ func (r *fakeRepo) GetCartExpirySnapshot(context.Context, string) (*inventory.Ca
 func (r *fakeRepo) GetProductByID(context.Context, string, string) (*inventory.ProductRef, error) {
 	return r.product, r.productErr
 }
-func (r *fakeRepo) DecrementCartItemWaitlistedQuantity(context.Context, string, string, int) (bool, error) {
+func (r *fakeRepo) DecrementCartItemWaitlistedQuantity(_ context.Context, cartID, productID string, delta int) (bool, error) {
+	if r.waitlistedDecrements == nil {
+		r.waitlistedDecrements = map[string]int{}
+	}
+	r.waitlistedDecrements[cartID+"|"+productID] += delta
 	return r.found, r.foundErr
 }
 func (r *fakeRepo) RequeueWaitlistItemPartial(_ context.Context, _ string, remainingQty int) error {

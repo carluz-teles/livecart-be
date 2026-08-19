@@ -404,6 +404,29 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 // O corpo cru vai para o log porque o schema desta resposta não está na
 // documentação pública que consultei. Assim que os nomes estiverem confirmados,
 // o log sai e a lista de candidatos encolhe para o campo real.
+// GetProductStock devolve o SALDO físico do produto no Tiny — o campo que a
+// reconciliação compara com a contabilidade local. Saldo, e não disponível, de
+// propósito: as nossas reservas são saídas manuais e descontam do saldo; o
+// "disponível" ainda subtrai as reservas de PEDIDO da própria Tiny, que não são
+// nossas e poluiriam a comparação.
+func (t *Tiny) GetProductStock(ctx context.Context, productID string) (int, error) {
+	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
+	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return 0, fmt.Errorf("reading stock: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return 0, fmt.Errorf("reading stock: status %d", resp.StatusCode)
+	}
+	var out struct {
+		Saldo float64 `json:"saldo"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return 0, fmt.Errorf("parsing stock response: %w", err)
+	}
+	return int(out.Saldo), nil
+}
+
 func (t *Tiny) saldoDisponivel(ctx context.Context, productID string) (int, bool) {
 	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
 	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
