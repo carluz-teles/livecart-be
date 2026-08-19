@@ -14,11 +14,11 @@ import (
 // ============================================
 
 type CartSettingsDTO struct {
-	Enabled             bool     `json:"enabled"`
-	ExpirationMinutes   int      `json:"expirationMinutes"`
-	ReserveStock        bool     `json:"reserveStock"`
-	AllowStorePickup    bool     `json:"allowStorePickup"`
-	MaxQuantityPerItem  int      `json:"maxQuantityPerItem"`
+	Enabled            bool `json:"enabled"`
+	ExpirationMinutes  int  `json:"expirationMinutes"`
+	ReserveStock       bool `json:"reserveStock"`
+	AllowStorePickup   bool `json:"allowStorePickup"`
+	MaxQuantityPerItem int  `json:"maxQuantityPerItem"`
 	// MinInstallmentCents é o piso de uma parcela no cartão, em centavos.
 	//
 	// Zero = sem mínimo, que é o comportamento histórico: o checkout oferecia
@@ -165,11 +165,11 @@ func (r UpdateShippingDefaultsRequest) ToInput(storeID string) UpdateShippingDef
 }
 
 type UpdateCartSettingsRequest struct {
-	Enabled             bool     `json:"enabled"`
-	ExpirationMinutes   int      `json:"expirationMinutes"`
-	ReserveStock        bool     `json:"reserveStock"`
-	AllowStorePickup    bool     `json:"allowStorePickup"`
-	MaxQuantityPerItem  int      `json:"maxQuantityPerItem"`
+	Enabled            bool `json:"enabled"`
+	ExpirationMinutes  int  `json:"expirationMinutes"`
+	ReserveStock       bool `json:"reserveStock"`
+	AllowStorePickup   bool `json:"allowStorePickup"`
+	MaxQuantityPerItem int  `json:"maxQuantityPerItem"`
 	// MinInstallmentCents é o piso de uma parcela no cartão, em centavos.
 	//
 	// Zero = sem mínimo, que é o comportamento histórico: o checkout oferecia

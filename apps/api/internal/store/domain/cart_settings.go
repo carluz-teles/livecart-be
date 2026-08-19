@@ -12,11 +12,11 @@ var (
 // full persisted shape (base rules + automatic-message settings) so the
 // presentation layer can render the whole cartSettings object from getters.
 type CartSettings struct {
-	enabled             bool
-	expirationMinutes   int
-	reserveStock        bool
-	allowStorePickup    bool
-	maxQuantityPerItem  int
+	enabled            bool
+	expirationMinutes  int
+	reserveStock       bool
+	allowStorePickup   bool
+	maxQuantityPerItem int
 	// minInstallmentCents é o piso de uma parcela no cartão, em centavos.
 	// Zero = sem mínimo.
 	minInstallmentCents int
