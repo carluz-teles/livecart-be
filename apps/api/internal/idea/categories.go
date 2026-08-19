@@ -43,11 +43,11 @@ func IsValidCategory(slug string) bool {
 
 // Status values match the CHECK constraint on ideas.status.
 const (
-	StatusOpen        = "aberta"
-	StatusUnderStudy  = "em_estudo"
-	StatusInDev       = "em_desenvolvimento"
-	StatusCompleted   = "concluida"
-	StatusRejected    = "recusada"
+	StatusOpen       = "aberta"
+	StatusUnderStudy = "em_estudo"
+	StatusInDev      = "em_desenvolvimento"
+	StatusCompleted  = "concluida"
+	StatusRejected   = "recusada"
 )
 
 // Tab values are filter shortcuts used by the feed UI.

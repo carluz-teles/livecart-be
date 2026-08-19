@@ -65,10 +65,10 @@ func (r *Repository) List(ctx context.Context, params ListCartsParams) (ListCart
 
 	sortColumn := "c.created_at"
 	allowedSortColumns := map[string]string{
-		"created_at": "c.created_at",
-		"status":     "c.status",
+		"created_at":  "c.created_at",
+		"status":      "c.status",
 		"total_cents": "total_cents",
-		"short_id":   "c.short_id",
+		"short_id":    "c.short_id",
 	}
 	if col, ok := allowedSortColumns[params.Sorting.SortBy]; ok {
 		sortColumn = col
