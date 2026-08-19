@@ -41,7 +41,7 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger, exporter Exporter) {
 	mux.HandleFunc(string(SessionCreated), logAndExport(log, exporter))
 	mux.HandleFunc(string(SessionEnded), logAndExport(log, exporter))
 	mux.HandleFunc(string(PostWindowClosed), logEvent(log))
-	mux.HandleFunc(string(CartItemAdded), logEvent(log))
+	mux.HandleFunc(string(CartItemAdded), logAndExport(log, exporter))
 	// CartCancellationReverted NÃO entra aqui: a composition root (main.newApp)
 	// registra o reactor que avisa o lojista no sino do painel. Registrar nos
 	// dois lugares faria o asynq entrar em pânico por padrão duplicado.
@@ -93,14 +93,14 @@ func RegisterHandlers(mux *asynq.ServeMux, log *zap.Logger, exporter Exporter) {
 	// Group I — notifications (unified across channels; channel in the payload).
 	mux.HandleFunc(string(NotificationRequested), logEvent(log))
 	mux.HandleFunc(string(NotificationSent), logEvent(log))
-	mux.HandleFunc(string(NotificationFailed), logEvent(log))
+	mux.HandleFunc(string(NotificationFailed), logAndExport(log, exporter))
 	mux.HandleFunc(string(NotificationSkipped), logEvent(log))
 
 	// Group G — ERP / Tiny.
 	mux.HandleFunc(string(ERPOrderCreated), logEvent(log))
 	mux.HandleFunc(string(ERPOrderFinalized), logEvent(log))
 	mux.HandleFunc(string(ERPOrderCancelled), logEvent(log))
-	mux.HandleFunc(string(ERPFinalizationFailed), logEvent(log))
+	mux.HandleFunc(string(ERPFinalizationFailed), logAndExport(log, exporter))
 
 	// Group H — shipping / delivery.
 	mux.HandleFunc(string(ShipmentCreated), logEvent(log))

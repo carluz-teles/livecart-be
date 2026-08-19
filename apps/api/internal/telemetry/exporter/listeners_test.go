@@ -334,6 +334,83 @@ func TestListeners_OnCartCheckoutArmed(t *testing.T) {
 	assertSingleSent(t, sender, want)
 }
 
+func TestListeners_OnCartItemAdded(t *testing.T) {
+	t.Parallel()
+
+	sender := &fakeSender{}
+	listeners, _ := newTestListeners(sender, true)
+	env := envelopeWithPayload(t, events.CartItemAdded, map[string]any{"cart_id": "cart-1", "product_id": "prod-1", "quantity": 2})
+
+	listeners.OnCartItemAdded(t.Context(), env)
+
+	want := LiveCommerceCartPayload{
+		EventType:   eventTypeLiveCommerceCart,
+		Environment: "staging",
+		LiveEventID: "live-1",
+		CartID:      "cart-1",
+		Status:      "item_added",
+		Timestamp:   env.OccurredAt.UnixMilli(),
+	}
+	assertSingleSent(t, sender, want)
+}
+
+func TestListeners_OnERPFinalizationFailed(t *testing.T) {
+	t.Parallel()
+
+	sender := &fakeSender{}
+	listeners, _ := newTestListeners(sender, true)
+	env := envelopeWithPayload(t, events.ERPFinalizationFailed, map[string]any{
+		"store_id":          "store-1",
+		"cart_id":           "cart-1",
+		"provider":          "tiny",
+		"reason":            "erp timeout",
+		"external_order_id": "ext-1",
+	})
+
+	listeners.OnERPFinalizationFailed(t.Context(), env)
+
+	want := LiveCommerceOpsPayload{
+		EventType:    eventTypeLiveCommerceOps,
+		Environment:  "staging",
+		LiveEventID:  "live-1",
+		StoreID:      "store-1",
+		CartID:       "cart-1",
+		ErrorType:    "erp.finalization_failed",
+		Provider:     "tiny",
+		ErrorMessage: "erp timeout",
+		Timestamp:    env.OccurredAt.UnixMilli(),
+	}
+	assertSingleSent(t, sender, want)
+}
+
+func TestListeners_OnNotificationFailed(t *testing.T) {
+	t.Parallel()
+
+	sender := &fakeSender{}
+	listeners, _ := newTestListeners(sender, true)
+	env := envelopeWithPayload(t, events.NotificationFailed, map[string]any{
+		"store_id": "store-1",
+		"channel":  "whatsapp",
+		"cart_id":  "cart-1",
+		"error":    "provider timeout",
+	})
+
+	listeners.OnNotificationFailed(t.Context(), env)
+
+	want := LiveCommerceOpsPayload{
+		EventType:    eventTypeLiveCommerceOps,
+		Environment:  "staging",
+		LiveEventID:  "live-1",
+		StoreID:      "store-1",
+		CartID:       "cart-1",
+		ErrorType:    "notification.failed",
+		Channel:      "whatsapp",
+		ErrorMessage: "provider timeout",
+		Timestamp:    env.OccurredAt.UnixMilli(),
+	}
+	assertSingleSent(t, sender, want)
+}
+
 func TestListeners_OnCartExpired(t *testing.T) {
 	t.Parallel()
 
@@ -635,6 +712,40 @@ func TestListeners_Dispatch_routesCommentReceived(t *testing.T) {
 	}
 	if _, ok := sender.sent[0].(LiveCommerceCommentPayload); !ok {
 		t.Fatalf("sent[0] type = %T, want LiveCommerceCommentPayload", sender.sent[0])
+	}
+}
+
+func TestListeners_Dispatch_routesNewFacts(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		event   events.Name
+		payload any
+		want    any
+	}{
+		{"cart.item_added", events.CartItemAdded, map[string]any{"cart_id": "cart-1"}, LiveCommerceCartPayload{}},
+		{"erp.finalization_failed", events.ERPFinalizationFailed, map[string]any{"cart_id": "cart-1"}, LiveCommerceOpsPayload{}},
+		{"notification.failed", events.NotificationFailed, map[string]any{"cart_id": "cart-1"}, LiveCommerceOpsPayload{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sender := &fakeSender{}
+			listeners, _ := newTestListeners(sender, true)
+
+			listeners.Dispatch(t.Context(), envelopeWithPayload(t, tc.event, tc.payload))
+
+			if len(sender.sent) != 1 {
+				t.Fatalf("sent = %d events, want 1", len(sender.sent))
+			}
+			gotType := reflect.TypeOf(sender.sent[0])
+			wantType := reflect.TypeOf(tc.want)
+			if gotType != wantType {
+				t.Fatalf("sent[0] type = %v, want %v", gotType, wantType)
+			}
+		})
 	}
 }
 
