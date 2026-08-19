@@ -169,8 +169,8 @@ func (s *Service) ReReserveAfterFailedFinalisation(ctx context.Context, provider
 
 // ReverseCartReservationsPerRow reusa o helper legado de estorno per-row das
 // saídas manuais do cart.
-func (s *Service) ReverseCartReservationsPerRow(ctx context.Context, provider providers.ERPProvider, cartID string) error {
-	return s.reverseCartReservationsPerRow(ctx, provider, cartID)
+func (s *Service) ReverseCartReservationsPerRow(ctx context.Context, provider providers.ERPProvider, storeID, cartID string) error {
+	return s.reverseCartReservationsPerRow(ctx, provider, storeID, cartID)
 }
 
 // MarkFinalisationFailed reusa o helper legado (grava 'failed' + emite o fato).

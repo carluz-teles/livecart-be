@@ -30,6 +30,7 @@ func movementRowFromSQLC(r sqlc.ErpStockMovement) *erp.StockMovementRow {
 		IdempotencyKey:    uuidToString(r.IdempotencyKey),
 		Status:            r.Status,
 		ERPMovementID:     r.ErpMovementID.String,
+		ReservationID:     uuidToString(r.ReservationID),
 		Attempts:          int(r.Attempts),
 		LastError:         r.LastError.String,
 		CreatedAt:         r.CreatedAt.Time,
@@ -55,6 +56,12 @@ func (r *Repository) CreateERPStockMovement(ctx context.Context, p erp.CreateSto
 			return nil, err
 		}
 	}
+	var reservationID pgtype.UUID
+	if p.ReservationID != "" {
+		if reservationID, err = parseUUID(p.ReservationID); err != nil {
+			return nil, err
+		}
+	}
 	row, err := r.queries.CreateERPStockMovement(ctx, sqlc.CreateERPStockMovementParams{
 		StoreID:           storeID,
 		CartID:            cartID,
@@ -64,6 +71,7 @@ func (r *Repository) CreateERPStockMovement(ctx context.Context, p erp.CreateSto
 		Direction:         p.Direction,
 		Quantity:          int32(p.Quantity),
 		UnitPriceCents:    p.UnitPriceCents,
+		ReservationID:     reservationID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating erp stock movement: %w", err)

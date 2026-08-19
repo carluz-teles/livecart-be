@@ -18,7 +18,7 @@ WHERE id = $1
   AND status = $2::varchar
   AND ($2::varchar <> 'pending' OR created_at < now() - interval '2 minutes')
   AND ($2::varchar <> 'resolving' OR last_attempt_at < now() - interval '5 minutes')
-RETURNING id, store_id, cart_id, event_id, product_id, external_product_id, direction, quantity, unit_price_cents, idempotency_key, status, erp_movement_id, attempts, last_error, last_attempt_at, created_at, updated_at
+RETURNING id, store_id, cart_id, event_id, product_id, external_product_id, direction, quantity, unit_price_cents, idempotency_key, status, erp_movement_id, attempts, last_error, last_attempt_at, created_at, updated_at, reservation_id
 `
 
 type ClaimERPStockMovementParams struct {
@@ -53,6 +53,7 @@ func (q *Queries) ClaimERPStockMovement(ctx context.Context, arg ClaimERPStockMo
 		&i.LastAttemptAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReservationID,
 	)
 	return i, err
 }
@@ -60,9 +61,9 @@ func (q *Queries) ClaimERPStockMovement(ctx context.Context, arg ClaimERPStockMo
 const createERPStockMovement = `-- name: CreateERPStockMovement :one
 INSERT INTO erp_stock_movements (
     store_id, cart_id, event_id, product_id, external_product_id,
-    direction, quantity, unit_price_cents
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, store_id, cart_id, event_id, product_id, external_product_id, direction, quantity, unit_price_cents, idempotency_key, status, erp_movement_id, attempts, last_error, last_attempt_at, created_at, updated_at
+    direction, quantity, unit_price_cents, reservation_id
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, store_id, cart_id, event_id, product_id, external_product_id, direction, quantity, unit_price_cents, idempotency_key, status, erp_movement_id, attempts, last_error, last_attempt_at, created_at, updated_at, reservation_id
 `
 
 type CreateERPStockMovementParams struct {
@@ -74,6 +75,7 @@ type CreateERPStockMovementParams struct {
 	Direction         string      `json:"direction"`
 	Quantity          int32       `json:"quantity"`
 	UnitPriceCents    int64       `json:"unit_price_cents"`
+	ReservationID     pgtype.UUID `json:"reservation_id"`
 }
 
 // A intenção, gravada ANTES da chamada ao ERP. Ver a migration 000132.
@@ -87,6 +89,7 @@ func (q *Queries) CreateERPStockMovement(ctx context.Context, arg CreateERPStock
 		arg.Direction,
 		arg.Quantity,
 		arg.UnitPriceCents,
+		arg.ReservationID,
 	)
 	var i ErpStockMovement
 	err := row.Scan(
@@ -107,12 +110,13 @@ func (q *Queries) CreateERPStockMovement(ctx context.Context, arg CreateERPStock
 		&i.LastAttemptAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReservationID,
 	)
 	return i, err
 }
 
 const getERPStockMovement = `-- name: GetERPStockMovement :one
-SELECT id, store_id, cart_id, event_id, product_id, external_product_id, direction, quantity, unit_price_cents, idempotency_key, status, erp_movement_id, attempts, last_error, last_attempt_at, created_at, updated_at FROM erp_stock_movements WHERE id = $1
+SELECT id, store_id, cart_id, event_id, product_id, external_product_id, direction, quantity, unit_price_cents, idempotency_key, status, erp_movement_id, attempts, last_error, last_attempt_at, created_at, updated_at, reservation_id FROM erp_stock_movements WHERE id = $1
 `
 
 func (q *Queries) GetERPStockMovement(ctx context.Context, id pgtype.UUID) (ErpStockMovement, error) {
@@ -136,12 +140,13 @@ func (q *Queries) GetERPStockMovement(ctx context.Context, id pgtype.UUID) (ErpS
 		&i.LastAttemptAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReservationID,
 	)
 	return i, err
 }
 
 const listUnresolvedERPStockMovements = `-- name: ListUnresolvedERPStockMovements :many
-SELECT id, store_id, cart_id, event_id, product_id, external_product_id, direction, quantity, unit_price_cents, idempotency_key, status, erp_movement_id, attempts, last_error, last_attempt_at, created_at, updated_at FROM erp_stock_movements
+SELECT id, store_id, cart_id, event_id, product_id, external_product_id, direction, quantity, unit_price_cents, idempotency_key, status, erp_movement_id, attempts, last_error, last_attempt_at, created_at, updated_at, reservation_id FROM erp_stock_movements
 WHERE status IN ('pending', 'failed', 'unconfirmed', 'resolving')
   AND created_at < now() - interval '1 minute'
 ORDER BY created_at ASC
@@ -176,6 +181,7 @@ func (q *Queries) ListUnresolvedERPStockMovements(ctx context.Context, limit int
 			&i.LastAttemptAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ReservationID,
 		); err != nil {
 			return nil, err
 		}
@@ -188,7 +194,7 @@ func (q *Queries) ListUnresolvedERPStockMovements(ctx context.Context, limit int
 }
 
 const listUnresolvedERPStockMovementsByCart = `-- name: ListUnresolvedERPStockMovementsByCart :many
-SELECT id, store_id, cart_id, event_id, product_id, external_product_id, direction, quantity, unit_price_cents, idempotency_key, status, erp_movement_id, attempts, last_error, last_attempt_at, created_at, updated_at FROM erp_stock_movements
+SELECT id, store_id, cart_id, event_id, product_id, external_product_id, direction, quantity, unit_price_cents, idempotency_key, status, erp_movement_id, attempts, last_error, last_attempt_at, created_at, updated_at, reservation_id FROM erp_stock_movements
 WHERE cart_id = $1 AND status IN ('pending', 'failed', 'unconfirmed', 'resolving')
 ORDER BY created_at ASC
 `
@@ -222,6 +228,7 @@ func (q *Queries) ListUnresolvedERPStockMovementsByCart(ctx context.Context, car
 			&i.LastAttemptAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ReservationID,
 		); err != nil {
 			return nil, err
 		}

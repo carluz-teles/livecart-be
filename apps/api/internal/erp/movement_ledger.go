@@ -59,6 +59,8 @@ type StockMovementRow struct {
 	Attempts          int
 	LastError         string
 	CreatedAt         time.Time
+	// ReservationID liga o movimento 'in' à reserva que ele desfaz (000133).
+	ReservationID string
 }
 
 // CreateStockMovementParams grava a intenção.
@@ -71,6 +73,7 @@ type CreateStockMovementParams struct {
 	Direction         string
 	Quantity          int
 	UnitPriceCents    int64
+	ReservationID     string
 }
 
 // StockMovementLedger é o razão persistente. Interface separada de
@@ -90,6 +93,24 @@ type StockMovementLedger interface {
 	// na query.
 	ClaimERPStockMovement(ctx context.Context, id, fromStatus string) (*StockMovementRow, error)
 	ListUnresolvedERPStockMovementsByCart(ctx context.Context, cartID string) ([]StockMovementRow, error)
+}
+
+// ReversalLedger é o que o estorno claim-first precisa do razão. Struct em vez
+// de parâmetros soltos porque atravessa a função livre de reversal_claim.go —
+// nil inteiro = modo legado (restore-and-retry), preservado para rollout.
+type ReversalLedger struct {
+	Movements StockMovementLedger
+	Scheduler StockMovementScheduler // pode ser nil; o gate da finalização cobre
+	StoreID   string
+}
+
+// ReversalLedgerHooks monta os hooks para os chamadores do estorno. nil quando
+// o razão não está ligado — a função livre entende nil como modo legado.
+func (s *Service) ReversalLedgerHooks(storeID string) *ReversalLedger {
+	if s.movements == nil {
+		return nil
+	}
+	return &ReversalLedger{Movements: s.movements, Scheduler: s.movementScheduler, StoreID: storeID}
 }
 
 // StockMovementScheduler agenda a próxima tentativa de resolução.
@@ -139,16 +160,28 @@ func (s *Service) executeStockMovement(ctx context.Context, provider providers.E
 	dctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
-	// Só direção "out" (reserva) por enquanto. Estornos têm caminho próprio com
-	// claim-first (ReverseReservationsClaimFirst) e a catraca de convenção
-	// impede chamada crua a ReverseStockReservation — quando os estornos
-	// entrarem no razão, é por lá que entram.
-	if mov.Direction != "out" {
-		s.finishStockMovement(ctx, mov, "", fmt.Errorf("unsupported ledgered movement direction %q", mov.Direction))
-		return
+	var movementID string
+	var err error
+	if mov.Direction == "in" {
+		// A chamada crua vive em reversal_claim.go (a catraca de convenção
+		// autoriza só lá). Aqui só se chega com a reserva JÁ reivindicada — a
+		// reivindicação aconteceu antes do primeiro POST e nunca é desfeita no
+		// modo razão, então a retentativa é single-flight por construção.
+		movementID, err = executarEntradaNoERP(dctx, provider, mov.ExternalProductID, mov.Quantity, obs)
+	} else {
+		movementID, err = provider.ReserveStock(dctx, mov.ExternalProductID, mov.Quantity, float64(mov.UnitPriceCents)/100, obs)
 	}
-	movementID, err := provider.ReserveStock(dctx, mov.ExternalProductID, mov.Quantity, float64(mov.UnitPriceCents)/100, obs)
 	s.finishStockMovement(ctx, mov, movementID, err)
+}
+
+// movementStatusForError traduz o erro do provider no estado do movimento. É a
+// ÚNICA tabela de classificação — reserva e estorno usam a mesma, porque a
+// física é a mesma: só prova de não-entrega autoriza repetir.
+func movementStatusForError(err error) string {
+	if errors.Is(err, providers.ErrProvenUndelivered) {
+		return MovementFailed
+	}
+	return MovementUnconfirmed
 }
 
 // finishStockMovement classifica o desfecho e aplica as consequências.
@@ -312,7 +345,11 @@ func (s *Service) RunScheduledMovementResolve(ctx context.Context, movementID st
 			_ = s.movements.MarkERPStockMovementOutcome(ctx, row.ID, MovementFailed, fmt.Sprintf("resolving provider at retry: %v", err))
 			return nil
 		}
-		s.executeStockMovement(ctx, provider, claimed, movementObservacao(claimed, "", claimed.Attempts))
+		obs := movementObservacao(claimed, "", claimed.Attempts)
+		if claimed.Direction == "in" {
+			obs = fmt.Sprintf("Estorno LiveCart [%s] - Cart %s (retry %d)", claimed.IdempotencyKey, claimed.CartID, claimed.Attempts)
+		}
+		s.executeStockMovement(ctx, provider, claimed, obs)
 		return nil
 	}
 	return nil

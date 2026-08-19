@@ -4078,7 +4078,7 @@ func (s *Service) emitERPOrderFinalized(ctx context.Context, storeID, cartID str
 // NÃO altera erp_finalisation_status — quem decide o efeito de uma falha é o
 // caller (a finalização pós-pago marca 'failed'; a conversão pré-pagamento do
 // design C não toca nessa coluna).
-func (s *Service) reverseCartReservationsPerRow(ctx context.Context, erpProvider providers.ERPProvider, cartID string) error {
+func (s *Service) reverseCartReservationsPerRow(ctx context.Context, erpProvider providers.ERPProvider, storeID, cartID string) error {
 	reservations, err := s.repo.ListActiveReservationsByCart(ctx, cartID)
 	if err != nil {
 		return fmt.Errorf("listing cart reservations: %w", err)
@@ -4094,12 +4094,15 @@ func (s *Service) reverseCartReservationsPerRow(ctx context.Context, erpProvider
 			ID:                r.ID,
 			ExternalProductID: r.ExternalProductID,
 			Quantity:          r.Quantity,
+			CartID:            r.CartID,
+			EventID:           r.EventID,
+			ProductID:         r.ProductID,
 		})
 	}
 	if _, allResolved := erp.ReverseReservationsClaimFirst(ctx, s.logger, s.repo, erpProvider, rows,
 		func(erp.ReversibleReservation) string {
 			return fmt.Sprintf("Estorno reserva pós-pagamento - Cart %s", cartID)
-		}); !allResolved {
+		}, s.erpStock().ReversalLedgerHooks(storeID)); !allResolved {
 		return fmt.Errorf("reversing reservations for cart %s: estorno de reserva pendente", cartID)
 	}
 	return nil
@@ -5485,12 +5488,15 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 							ID:                res.ID,
 							ExternalProductID: res.ExternalProductID,
 							Quantity:          res.Quantity,
+							CartID:            res.CartID,
+							EventID:           res.EventID,
+							ProductID:         res.ProductID,
 						})
 					}
 					_, erpReversed = erp.ReverseReservationsClaimFirst(ctx, s.logger, s.repo, erpProvider, rows,
 						func(erp.ReversibleReservation) string {
 							return fmt.Sprintf("Estorno expiração carrinho LiveCart - Cart %s", cart.ID)
-						})
+						}, s.erpStock().ReversalLedgerHooks(cart.StoreID))
 				}
 			}
 			if markErr := s.repo.ReverseReservationsByCartAndProduct(ctx, cart.ID, productID); markErr != nil {
@@ -5604,12 +5610,15 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 					ID:                r.ID,
 					ExternalProductID: r.ExternalProductID,
 					Quantity:          r.Quantity,
+					CartID:            r.CartID,
+					EventID:           r.EventID,
+					ProductID:         r.ProductID,
 				})
 			}
 			erp.ReverseReservationsClaimFirst(ctx, s.logger, s.repo, erpProvider, rows,
 				func(erp.ReversibleReservation) string {
 					return fmt.Sprintf("Estorno cliente bloqueado - Cart %s", cart.ID)
-				})
+				}, s.erpStock().ReversalLedgerHooks(storeID))
 		}
 		if len(reservations) > 0 {
 			if err := s.repo.ReverseReservationsByCart(ctx, cart.ID); err != nil {

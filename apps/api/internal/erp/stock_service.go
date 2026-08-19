@@ -56,7 +56,7 @@ type StockCollaborators interface {
 	ReReserveAfterFailedFinalisation(ctx context.Context, provider providers.ERPProvider, cartID string, snapshot []StockReservationRow)
 	// ReverseCartReservationsPerRow estorna the cart's active manual stock exits,
 	// row by row, marking each only after the ERP confirms the entry.
-	ReverseCartReservationsPerRow(ctx context.Context, provider providers.ERPProvider, cartID string) error
+	ReverseCartReservationsPerRow(ctx context.Context, provider providers.ERPProvider, storeID, cartID string) error
 	// MarkFinalisationFailed records the 'failed' finalisation state with the
 	// error and emits the group G erp.finalization_failed fact (best-effort).
 	MarkFinalisationFailed(ctx context.Context, cartID, msg string)
