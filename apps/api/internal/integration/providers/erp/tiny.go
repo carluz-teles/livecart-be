@@ -2146,6 +2146,11 @@ func (t *Tiny) ReserveStock(ctx context.Context, productID string, qty int, unit
 
 	resp, body, err := t.postComRetryDeDiscagem(ctx, endpoint, payload)
 	if err != nil {
+		// Falha de discagem que sobreviveu ao retry: nenhum byte chegou à
+		// aplicação do Tiny. O sentinela diz ao ledger que re-executar é seguro.
+		if falhaDeDiscagem(err) {
+			return "", fmt.Errorf("reserving stock: %w", errors.Join(providers.ErrProvenUndelivered, err))
+		}
 		return "", fmt.Errorf("reserving stock: %w", err)
 	}
 
@@ -2154,7 +2159,16 @@ func (t *Tiny) ReserveStock(ctx context.Context, productID string, qty int, unit
 			Mensagem string `json:"mensagem"`
 		}
 		_ = json.Unmarshal(body, &errResp)
-		return "", fmt.Errorf("reserve stock failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+		reject := fmt.Errorf("reserve stock failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+		// 4xx é recusa de validação: o Tiny processou e disse não ANTES de
+		// aplicar. Provado não-aplicado; repetível (vai falhar igual até a causa
+		// ser corrigida, e o teto de tentativas para o loop).
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return "", errors.Join(providers.ErrProvenUndelivered, reject)
+		}
+		// 5xx fica ambíguo de propósito: o servidor respondeu, e pode ter
+		// aplicado antes de quebrar.
+		return "", reject
 	}
 
 	var result struct {

@@ -104,6 +104,11 @@ const (
 	// instead of waiting for the 5-min sweep. Its handler runs the same guarded
 	// ExpireCart; the sweep stays as a safety net for any lost task.
 	CartExpire Name = "cart.expire"
+	// StockMovementResolve is an internal SCHEDULED COMMAND: armed when an ERP
+	// stock movement lands in 'failed' (provably undelivered), it retries the
+	// movement with spaced attempts. Ambiguous movements ('unconfirmed') are
+	// NEVER retried by it — see internal/erp/movement_ledger.go.
+	StockMovementResolve Name = "erp.stock_movement.resolve"
 
 	// PaymentProcess is a COMMAND (L1→L2 inversion): the payment webhook is a thin
 	// dispatcher that emits it to the outbox; the consumer runs the guarded

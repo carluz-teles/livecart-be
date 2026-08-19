@@ -6,6 +6,17 @@ import (
 	"time"
 )
 
+// ErrProvenUndelivered marca um erro em que a requisição COMPROVADAMENTE não
+// foi aplicada pelo provedor: falha de discagem (conexão recusada, DNS, rede
+// inalcançável — nenhum byte chegou à aplicação) ou recusa de validação 4xx (o
+// provedor processou e rejeitou antes de aplicar).
+//
+// A distinção existe porque, em movimentação de estoque, repetir é seguro
+// EXATAMENTE quando este sentinela está presente. Timeout e 5xx ficam de fora
+// de propósito: o provedor pode ter aplicado e falhado só em responder — na
+// live de 17/08/2026 dois timeouts idênticos tiveram desfechos opostos.
+var ErrProvenUndelivered = errors.New("erp request provably not applied")
+
 // ErrOperationNotSupported is returned by providers that do not implement a
 // specific capability (for example, a carrier aggregator that only quotes but
 // cannot create shipments). Callers should match against this sentinel rather
