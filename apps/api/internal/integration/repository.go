@@ -2213,6 +2213,21 @@ type CancelCartResult struct {
 // anti-dupla-devolução (commitado, o cart deixa de ser elegível; um retry não
 // redevolve), e as ações remotas de ERP ficam FORA do tx — no reactor de
 // cart.cancelled, com retry + DLQ próprios.
+// CancelCartOnRefund flips um carrinho reembolsado para 'cancelled'
+// (reason 'refunded'). Guard-first e idempotente — ver a query. Devolve se o
+// flip aconteceu nesta chamada (false = já era terminal, redelivery do asynq).
+func (r *Repository) CancelCartOnRefund(ctx context.Context, cartID string) (bool, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.queries.CancelCartOnRefund(ctx, cID)
+	if err != nil {
+		return false, fmt.Errorf("cancelling refunded cart: %w", err)
+	}
+	return n > 0, nil
+}
+
 func (r *Repository) CancelCartAndReleaseStock(ctx context.Context, cartID, storeID string) (CancelCartResult, error) {
 	cID, err := parseUUID(cartID)
 	if err != nil {

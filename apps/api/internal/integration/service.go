@@ -4081,6 +4081,20 @@ func (s *Service) ReactCartPaid(ctx context.Context, cartID, storeID string, gmv
 // 11b-2), and the refund EMAIL reacts to cart.refunded as its own Notification
 // reactor (notification/listeners.OnCartRefunded) — both decoupled from this fan-out.
 func (s *Service) ReactCartRefunded(ctx context.Context, cartID, storeID string) error {
+	// O reembolso mata a venda; o carrinho morre junto. Sem este flip o pedido
+	// ficava 'active'+refunded para sempre: fora de "Cancelados" (que filtra por
+	// status do carrinho) e preso em "Precisam atenção" (o matcher casa
+	// payment_status='refunded'), sem NENHUMA ação que o tirasse de lá — o
+	// cancelamento manual recusa carrinho não-pendente. Idempotente (guard na
+	// query), então a redelivery do asynq re-passa em silêncio.
+	flipped, err := s.repo.CancelCartOnRefund(ctx, cartID)
+	if err != nil {
+		return fmt.Errorf("cancelling cart on refund: %w", err)
+	}
+	if flipped {
+		logger.From(ctx, s.logger).Info("refunded cart moved to cancelled",
+			zap.String("cart_id", cartID))
+	}
 	if s.billingGate != nil {
 		if err := s.billingGate.OnCartRefunded(ctx, storeID, cartID); err != nil {
 			return fmt.Errorf("billing ledger on cart.refunded: %w", err)

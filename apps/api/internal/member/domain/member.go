@@ -85,17 +85,17 @@ func Reconstruct(
 // Getters (immutable access)
 // ============================================
 
-func (m *Member) ID() vo.MemberID        { return m.id }
-func (m *Member) StoreID() vo.StoreID    { return m.storeID }
-func (m *Member) UserID() string         { return m.userID }
-func (m *Member) Email() vo.Email        { return m.email }
-func (m *Member) Name() *string          { return m.name }
-func (m *Member) AvatarURL() *string     { return m.avatarURL }
-func (m *Member) Role() vo.Role          { return m.role }
-func (m *Member) Status() MemberStatus   { return m.status }
+func (m *Member) ID() vo.MemberID         { return m.id }
+func (m *Member) StoreID() vo.StoreID     { return m.storeID }
+func (m *Member) UserID() string          { return m.userID }
+func (m *Member) Email() vo.Email         { return m.email }
+func (m *Member) Name() *string           { return m.name }
+func (m *Member) AvatarURL() *string      { return m.avatarURL }
+func (m *Member) Role() vo.Role           { return m.role }
+func (m *Member) Status() MemberStatus    { return m.status }
 func (m *Member) InvitedBy() *vo.MemberID { return m.invitedBy }
-func (m *Member) JoinedAt() *time.Time   { return m.joinedAt }
-func (m *Member) InvitedAt() *time.Time  { return m.invitedAt }
+func (m *Member) JoinedAt() *time.Time    { return m.joinedAt }
+func (m *Member) InvitedAt() *time.Time   { return m.invitedAt }
 
 // ============================================
 // Business Rules

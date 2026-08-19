@@ -117,6 +117,37 @@ func (q *Queries) CancelCart(ctx context.Context, id pgtype.UUID) (Cart, error) 
 	return i, err
 }
 
+const cancelCartOnRefund = `-- name: CancelCartOnRefund :execrows
+UPDATE carts
+SET status = 'cancelled', cancelled_reason = 'refunded'
+WHERE id = $1
+  AND payment_status = 'refunded'
+  AND status NOT IN ('cancelled', 'expired')
+`
+
+// O reembolso mata a venda, e o carrinho precisa morrer junto.
+//
+// Até 19/08 o estorno mexia em tudo (cobrança, cupom, e-mail, pedido no ERP)
+// MENOS no status do carrinho: ele ficava 'active' + payment 'refunded' para
+// sempre. Consequência dupla no painel: nunca aparecia em "Cancelados" (a aba
+// filtra por status do carrinho, de propósito) e ficava em "Precisam atenção"
+// eternamente, porque o matcher casa payment_status='refunded' e não existia
+// ação que o tirasse de lá — o cancelamento manual recusa carrinho não-pendente
+// ("pagamento vence"). Dois pedidos de teste reembolsados em 16/08 provaram o
+// beco: três dias parados na aba de triagem sem saída.
+//
+// Guard-first e idempotente: só age sobre carrinho reembolsado ainda não
+// terminal. NÃO devolve estoque local nem toca fila — o fan-out do reembolso
+// (ReactOrderRefundedERP cancela o pedido no Tiny, que devolve o estoque lá; o
+// espelho traz o número de volta) é quem cuida disso.
+func (q *Queries) CancelCartOnRefund(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, cancelCartOnRefund, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const clearCartPixCharge = `-- name: ClearCartPixCharge :exec
 UPDATE carts
 SET pix_charge_id = NULL,

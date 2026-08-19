@@ -42,13 +42,13 @@ const GraceDays = 7
 
 // PlanConfig carries the Stripe price pair and display data for a plan.
 type PlanConfig struct {
-	Plan          Plan
-	Name          string
-	FlatCents     int64
-	GMVBps        int    // basis points (180 = 1,80%)
-	FlatPriceID   string // Stripe price (recurring flat)
-	MeterPriceID  string // Stripe price (metered, GMV)
-	SelfService   bool   // Enterprise is dashboard-managed
+	Plan         Plan
+	Name         string
+	FlatCents    int64
+	GMVBps       int    // basis points (180 = 1,80%)
+	FlatPriceID  string // Stripe price (recurring flat)
+	MeterPriceID string // Stripe price (metered, GMV)
+	SelfService  bool   // Enterprise is dashboard-managed
 }
 
 // Plans returns the plan registry with price IDs resolved from env.

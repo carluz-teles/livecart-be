@@ -900,8 +900,13 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 			args = append(args, st)
 			argIndex++
 		}
+		// A cláusula de pagamento só vale enquanto o carrinho não é terminal:
+		// "precisa de atenção" é fila de triagem, e fila de triagem precisa de
+		// SAÍDA. Um reembolso tratado (o reator agora cancela o carrinho, e o
+		// lojista via o pedido preso aqui para sempre — payment_status
+		// 'refunded' nunca muda) sai da fila e mora em "Cancelados".
 		matcher := fmt.Sprintf(
-			"(op.erp_finalisation_status = 'failed' OR c.payment_status IN (%s) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s)))",
+			"(op.erp_finalisation_status = 'failed' OR (c.payment_status IN (%s) AND c.status NOT IN ('cancelled', 'expired')) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s)))",
 			strings.Join(paymentPlaceholders, ","),
 			strings.Join(shipmentPlaceholders, ","),
 		)

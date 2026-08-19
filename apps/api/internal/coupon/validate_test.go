@@ -17,10 +17,10 @@ func hasFieldErr(err error, field string) bool {
 	return present
 }
 
-func intPtr(v int) *int         { return &v }
-func int64Ptr(v int64) *int64   { return &v }
-func typePtr(v Type) *Type      { return &v }
-func boolPtr(v bool) *bool      { return &v }
+func intPtr(v int) *int       { return &v }
+func int64Ptr(v int64) *int64 { return &v }
+func typePtr(v Type) *Type    { return &v }
+func boolPtr(v bool) *bool    { return &v }
 
 func TestCreateRequestValidate(t *testing.T) {
 	// valid baseline: Code within Length(2,40), a valid Type, non-negative

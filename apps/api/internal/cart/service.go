@@ -73,4 +73,3 @@ func (s *Service) GetStats(ctx context.Context, storeID string) (*CartStatsOutpu
 		RecoverableCarts: row.RecoverableCarts,
 	}, nil
 }
-
