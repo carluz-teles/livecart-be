@@ -905,8 +905,14 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 		// SAÍDA. Um reembolso tratado (o reator agora cancela o carrinho, e o
 		// lojista via o pedido preso aqui para sempre — payment_status
 		// 'refunded' nunca muda) sai da fila e mora em "Cancelados".
+		// COALESCE é obrigatório: op vem de LEFT JOIN e carrinho aguardando
+		// pagamento não tem Order — a coluna chega NULL. Dentro do ramo
+		// negado (needsAttention=false), NULL OR false = NULL, e NOT NULL
+		// também é NULL: a linha era EXCLUÍDA. Resultado medido em produção
+		// em 19/08: a aba "Aguardando pagamento" mostrava 0 de 121 carrinhos
+		// — todo o pipeline pré-pagamento invisível, silenciosamente.
 		matcher := fmt.Sprintf(
-			"(op.erp_finalisation_status = 'failed' OR (c.payment_status IN (%s) AND c.status NOT IN ('cancelled', 'expired')) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s)))",
+			"(COALESCE(op.erp_finalisation_status, '') = 'failed' OR (c.payment_status IN (%s) AND c.status NOT IN ('cancelled', 'expired')) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s)))",
 			strings.Join(paymentPlaceholders, ","),
 			strings.Join(shipmentPlaceholders, ","),
 		)
