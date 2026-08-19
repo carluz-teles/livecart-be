@@ -2,8 +2,8 @@
 -- A intenção, gravada ANTES da chamada ao ERP. Ver a migration 000132.
 INSERT INTO erp_stock_movements (
     store_id, cart_id, event_id, product_id, external_product_id,
-    direction, quantity, unit_price_cents
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    direction, quantity, unit_price_cents, reservation_id
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 RETURNING *;
 
 -- name: MarkERPStockMovementConfirmed :exec

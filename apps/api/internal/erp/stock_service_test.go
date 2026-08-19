@@ -241,7 +241,7 @@ func (m *mockCollab) CreateFinalERPOrder(context.Context, providers.ERPProvider,
 func (m *mockCollab) FinalisationInverted(string) bool { return false }
 func (m *mockCollab) ReReserveAfterFailedFinalisation(context.Context, providers.ERPProvider, string, []StockReservationRow) {
 }
-func (m *mockCollab) ReverseCartReservationsPerRow(context.Context, providers.ERPProvider, string) error {
+func (m *mockCollab) ReverseCartReservationsPerRow(context.Context, providers.ERPProvider, string, string) error {
 	return nil
 }
 func (m *mockCollab) MarkFinalisationFailed(context.Context, string, string)                {}

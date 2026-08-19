@@ -17,6 +17,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -245,16 +246,17 @@ func activeReservationCount(t *testing.T, cartID string) int {
 type scriptedERP struct {
 	providers.ERPProvider // nil: método não roteirizado = panic (chamada inesperada)
 
-	mu           sync.Mutex
-	calls        []string
-	failures     map[string]int // método -> quantas próximas chamadas falham
-	createDelay  time.Duration
-	orderSeq     int
-	markerOrders map[string]string // marcador -> orderID (FindOrderIDByMarker)
+	mu             sync.Mutex
+	calls          []string
+	failures       map[string]int // método -> próximas chamadas falham com erro AMBÍGUO
+	provenFailures map[string]int // método -> próximas chamadas falham com prova de não-entrega
+	createDelay    time.Duration
+	orderSeq       int
+	markerOrders   map[string]string // marcador -> orderID (FindOrderIDByMarker)
 }
 
 func newScriptedERP() *scriptedERP {
-	return &scriptedERP{failures: map[string]int{}}
+	return &scriptedERP{failures: map[string]int{}, provenFailures: map[string]int{}}
 }
 
 func (f *scriptedERP) record(name string) {
@@ -266,8 +268,17 @@ func (f *scriptedERP) record(name string) {
 func (f *scriptedERP) scriptedFail(name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.provenFailures[name] > 0 {
+		f.provenFailures[name]--
+		// Falha de discagem: comprovadamente não chegou à aplicação do ERP. É
+		// a classe que o razão de movimentos re-executa sozinho.
+		return fmt.Errorf("scripted dial failure: %s: %w", name,
+			errors.Join(providers.ErrProvenUndelivered, errors.New("connection refused")))
+	}
 	if f.failures[name] > 0 {
 		f.failures[name]--
+		// Erro genérico: AMBÍGUO para o razão (o ERP pode ter aplicado). Nunca
+		// re-executado às cegas.
 		return fmt.Errorf("scripted failure: %s", name)
 	}
 	return nil
@@ -413,10 +424,12 @@ func TestFinalisationHappyPath(t *testing.T) {
 }
 
 func TestFinalisationReversalFailureIsResumable(t *testing.T) {
+	// Falha PROVADA (discagem): o razão de movimentos re-executa sozinho no
+	// retry — a retomada converge sem intervenção, como antes da fase 2.
 	requireDB(t)
 	fx := seedPaidCart(t, 1, 1)
 	fake := newScriptedERP()
-	fake.failures["ReverseStockReservation"] = 1
+	fake.provenFailures["ReverseStockReservation"] = 1
 	svc := newFinalisationService(fake)
 
 	if err := svc.finalizeCartERPOrder(context.Background(), fx.cartID, fx.storeID, testPaymentStatus()); err == nil {
@@ -429,11 +442,18 @@ func TestFinalisationReversalFailureIsResumable(t *testing.T) {
 	if orderID != "" || fake.count("CreateOrder") != 0 {
 		t.Fatalf("pedido não deveria ter sido criado com estorno pendente (orderID=%q, creates=%d)", orderID, fake.count("CreateOrder"))
 	}
-	if n := activeReservationCount(t, fx.cartID); n != 1 {
-		t.Fatalf("reserva deveria continuar active (n=%d)", n)
+	// Contrato da fase 2: a reserva NÃO volta a 'active' — voltar era a porta do
+	// retry cego que deixou um produto de 5 unidades com 7 em 08/08. Quem
+	// carrega a pendência é a linha do razão, em 'failed' (provado não-entregue).
+	if n := activeReservationCount(t, fx.cartID); n != 0 {
+		t.Fatalf("reserva voltou a active (n=%d) — a reivindicação tinha que ficar de pé", n)
+	}
+	if got := movementStatusesForCart(t, fx.cartID, "in"); len(got) != 1 || got[0] != "failed" {
+		t.Fatalf("razão do estorno = %v; esperava exatamente [failed]", got)
 	}
 
-	// Retry admin: converge para done, criando o pedido exatamente uma vez.
+	// Retry admin: o gate da finalização re-executa a pendência PROVADA inline e
+	// converge para done, criando o pedido exatamente uma vez.
 	if err := svc.RetryERPFinalisation(context.Background(), fx.cartID, fx.storeID); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -446,6 +466,59 @@ func TestFinalisationReversalFailureIsResumable(t *testing.T) {
 	}
 	if fake.count("CreateOrder") != 1 || fake.count("Launch") != 1 {
 		t.Fatalf("create/launch duplicados: %v", fake.calls)
+	}
+	if got := movementStatusesForCart(t, fx.cartID, "in"); len(got) != 1 || got[0] != "confirmed" {
+		t.Fatalf("razão pós-retry = %v; a MESMA linha confirma, nunca nasce outra", got)
+	}
+}
+
+// O outro mundo: erro AMBÍGUO no estorno. O ERP pode ter aplicado — em 08/08
+// tinha aplicado, o retry cego reenviou, e um produto de 5 unidades ficou com
+// 7. A fase 2 troca o retry cego por bloqueio visível: a finalização fica
+// 'failed' citando a chave de idempotência, e só destrava quando alguém decide
+// com o extrato (aqui, simulado marcando a linha como 'failed' = "não entrou").
+func TestFinalisationReversalAmbiguaBloqueiaAteResolucao(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 1, 1)
+	fake := newScriptedERP()
+	fake.failures["ReverseStockReservation"] = 1 // erro genérico = ambíguo
+	svc := newFinalisationService(fake)
+
+	if err := svc.finalizeCartERPOrder(context.Background(), fx.cartID, fx.storeID, testPaymentStatus()); err == nil {
+		t.Fatal("esperava erro na primeira tentativa")
+	}
+	if got := movementStatusesForCart(t, fx.cartID, "in"); len(got) != 1 || got[0] != "unconfirmed" {
+		t.Fatalf("razão = %v; erro genérico é ambíguo", got)
+	}
+
+	// O retry NÃO converge sozinho: repetir sem prova é o defeito de 08/08.
+	if err := svc.RetryERPFinalisation(context.Background(), fx.cartID, fx.storeID); err == nil {
+		t.Fatal("retry convergiu com movimento ambíguo aberto — retry cego de volta")
+	}
+	if n := fake.count("ReverseRes"); n != 1 {
+		t.Fatalf("o estorno foi reenviado (%d POSTs) sem prova de não-entrega", n)
+	}
+	status, lastErr, _, _, _ := cartFinalisationState(t, fx.cartID)
+	if status != "failed" {
+		t.Fatalf("status = %q; a finalização fica retida", status)
+	}
+	if key := movementKeyForCart(t, fx.cartID); !strings.Contains(lastErr, key) {
+		t.Fatalf("o erro não cita a chave de idempotência (%s) — é ela que o "+
+			"humano procura no extrato: %q", key, lastErr)
+	}
+
+	// Resolução humana: o extrato mostrou que a entrada NÃO entrou → a linha é
+	// marcada 'failed' (provado não-entregue) e o retry passa a poder repetir.
+	resolveMovementAs(t, fx.cartID, "failed")
+	if err := svc.RetryERPFinalisation(context.Background(), fx.cartID, fx.storeID); err != nil {
+		t.Fatalf("retry pós-resolução: %v", err)
+	}
+	status, _, orderID, _, _ := cartFinalisationState(t, fx.cartID)
+	if status != "done" || orderID != "ORD-1" {
+		t.Fatalf("pós-resolução: status=%q orderID=%q", status, orderID)
+	}
+	if fake.count("CreateOrder") != 1 {
+		t.Fatalf("pedidos criados: %d", fake.count("CreateOrder"))
 	}
 }
 
@@ -901,7 +974,7 @@ func TestInvertedReversalFailureAfterLaunchResumable(t *testing.T) {
 	requireDB(t)
 	fx := seedPaidCart(t, 1, 1)
 	fake := newScriptedERP()
-	fake.failures["ReverseStockReservation"] = 1
+	fake.provenFailures["ReverseStockReservation"] = 1 // discagem: re-executável
 	svc := newInvertedService(fake)
 
 	if err := svc.finalizeCartERPOrder(context.Background(), fx.cartID, fx.storeID, testPaymentStatus()); err == nil {
@@ -911,8 +984,9 @@ func TestInvertedReversalFailureAfterLaunchResumable(t *testing.T) {
 	if status != "failed" || orderID != "ORD-1" || !strings.Contains(lastErr, "estorno") {
 		t.Fatalf("status=%q orderID=%q lastErr=%q", status, orderID, lastErr)
 	}
-	if n := activeReservationCount(t, fx.cartID); n != 1 {
-		t.Fatalf("reserva deveria seguir active (n=%d)", n)
+	// Fase 2: a reserva fica reivindicada; a pendência mora no razão.
+	if n := activeReservationCount(t, fx.cartID); n != 0 {
+		t.Fatalf("reserva voltou a active (n=%d)", n)
 	}
 
 	if err := svc.RetryERPFinalisation(context.Background(), fx.cartID, fx.storeID); err != nil {
@@ -928,11 +1002,10 @@ func TestInvertedReversalFailureAfterLaunchResumable(t *testing.T) {
 	if n := activeReservationCount(t, fx.cartID); n != 0 {
 		t.Fatalf("reservas pós-resume = %d", n)
 	}
+	if n := fake.count("ReverseRes"); n != 2 {
+		t.Fatalf("estorno enviado %d vez(es); a falha provada + exatamente uma retentativa", n)
+	}
 }
-
-// ============================================================================
-// Design C — pedido-como-reserva (conversão na iniciação do pagamento)
-// ============================================================================
 
 func (f *scriptedERP) UpdateOrderItems(ctx context.Context, orderID string, items []providers.ERPOrderItem) error {
 	f.record("PutItens:" + orderID)
@@ -1936,4 +2009,48 @@ func seedQueueWaiterQty(t *testing.T, fx finFixture, productID string, position,
 		t.Fatalf("seed waitlist_item: %v", err)
 	}
 	return cartID
+}
+
+// movementStatusesForCart lê o razão de movimentos do carrinho.
+func movementStatusesForCart(t *testing.T, cartID, direction string) []string {
+	t.Helper()
+	rows, err := testPool.Query(context.Background(),
+		`SELECT status FROM erp_stock_movements WHERE cart_id = $1 AND direction = $2 ORDER BY created_at`,
+		cartID, direction)
+	if err != nil {
+		t.Fatalf("lendo razão: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func movementKeyForCart(t *testing.T, cartID string) string {
+	t.Helper()
+	var key string
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT idempotency_key::text FROM erp_stock_movements WHERE cart_id = $1 LIMIT 1`,
+		cartID).Scan(&key); err != nil {
+		t.Fatalf("lendo chave: %v", err)
+	}
+	return key
+}
+
+// resolveMovementAs simula a decisão humana pós-extrato. É SQL cru de propósito:
+// a ação de produto (painel/endpoint) ainda não existe, e este é o registro de
+// como destravar à mão enquanto isso.
+func resolveMovementAs(t *testing.T, cartID, status string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE erp_stock_movements SET status = $2, updated_at = now() WHERE cart_id = $1`,
+		cartID, status); err != nil {
+		t.Fatalf("resolvendo movimento: %v", err)
+	}
 }

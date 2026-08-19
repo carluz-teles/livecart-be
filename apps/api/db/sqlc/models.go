@@ -226,6 +226,7 @@ type ErpStockMovement struct {
 	LastAttemptAt     pgtype.Timestamptz `json:"last_attempt_at"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	ReservationID     pgtype.UUID        `json:"reservation_id"`
 }
 
 type EventConsumed struct {

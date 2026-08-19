@@ -25,11 +25,12 @@ import (
 
 // fakeLedger é o razão em memória.
 type fakeLedger struct {
-	mu     sync.Mutex
-	rows   map[string]*StockMovementRow
-	seq    int
-	stale  map[string]bool // linhas tratadas como envelhecidas pelos guards do claim
-	failAt string          // id cuja escrita de desfecho deve falhar
+	mu        sync.Mutex
+	rows      map[string]*StockMovementRow
+	seq       int
+	stale     map[string]bool // linhas tratadas como envelhecidas pelos guards do claim
+	failAt    string          // id cuja escrita de desfecho deve falhar
+	createErr error           // falha scriptada do INSERT de intenção
 }
 
 func newFakeLedger() *fakeLedger {
@@ -39,6 +40,9 @@ func newFakeLedger() *fakeLedger {
 func (f *fakeLedger) CreateERPStockMovement(_ context.Context, p CreateStockMovementParams) (*StockMovementRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
 	f.seq++
 	row := &StockMovementRow{
 		ID:                fmt.Sprintf("mov-%d", f.seq),
@@ -50,6 +54,7 @@ func (f *fakeLedger) CreateERPStockMovement(_ context.Context, p CreateStockMove
 		Direction:         p.Direction,
 		Quantity:          p.Quantity,
 		UnitPriceCents:    p.UnitPriceCents,
+		ReservationID:     p.ReservationID,
 		IdempotencyKey:    fmt.Sprintf("key-%d", f.seq),
 		Status:            MovementPending,
 		CreatedAt:         time.Now(),
