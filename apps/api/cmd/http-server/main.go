@@ -1414,6 +1414,20 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		// registry) with a handler that logs AND arms — double registration
 		// would panic asynq.
 		integrationSvc.SetCartExpiryScheduler(cartExpiryScheduler{client: eventsClient})
+		integrationSvc.SetStockMovementScheduler(stockMovementScheduler{client: eventsClient})
+		eventsServer.Register(events.StockMovementResolve, func(ctx context.Context, t *asynq.Task) error {
+			var env events.Envelope
+			if err := json.Unmarshal(t.Payload(), &env); err != nil {
+				return asynq.SkipRetry
+			}
+			var p struct {
+				MovementID string `json:"movement_id"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil || p.MovementID == "" {
+				return asynq.SkipRetry
+			}
+			return integrationSvc.RunScheduledStockMovementResolve(ctx, p.MovementID)
+		})
 		armCartExpiry := func(ctx context.Context, t *asynq.Task) error {
 			var env events.Envelope
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
@@ -1609,6 +1623,18 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	lifecycle.add("events-relay", eventsRelay.Stop)
 
 	return app, lifecycle
+}
+
+// stockMovementScheduler adapts the events client to erp.StockMovementScheduler.
+// O task id carrega o horário: cada retentativa é um task novo (o dedup por id
+// do asynq engoliria a segunda tentativa do mesmo movimento).
+type stockMovementScheduler struct{ client *events.Client }
+
+func (s stockMovementScheduler) ScheduleStockMovementResolve(ctx context.Context, movementID string, at time.Time) error {
+	taskID := fmt.Sprintf("stockmov-resolve:%s:%d", movementID, at.Unix())
+	return s.client.Schedule(ctx, at, events.StockMovementResolve, taskID, struct {
+		MovementID string `json:"movement_id"`
+	}{MovementID: movementID})
 }
 
 // cartExpiryScheduler adapts the events client to integration.CartExpiryScheduler,

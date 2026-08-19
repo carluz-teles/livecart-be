@@ -185,6 +185,9 @@ type Service struct {
 func (s *Service) erpStock() *erp.Service {
 	s.erpStockOnce.Do(func() {
 		s.erpStockService = erp.NewService(erpRepoAdapter{s.repo}, s, s.logger)
+		// O razão de movimentos (000132) é o mesmo Repository por baixo; a
+		// interface é separada para o ledger ser opcional nos testes do erp.
+		s.erpStockService.SetStockMovementLedger(s.repo)
 	})
 	return s.erpStockService
 }
@@ -219,6 +222,17 @@ func (s *Service) erpProviderFor(ctx context.Context, integration *IntegrationRo
 		return s.erpProviderFactory(ctx, integration)
 	}
 	return s.getERPProvider(ctx, integration)
+}
+
+// RunScheduledStockMovementResolve delega ao resolver do razão de movimentos
+// (comando agendado erp.stock_movement.resolve e gate da finalização).
+func (s *Service) RunScheduledStockMovementResolve(ctx context.Context, movementID string) error {
+	return s.erpStockService.RunScheduledMovementResolve(ctx, movementID)
+}
+
+// SetStockMovementScheduler liga o agendador de retries do razão de movimentos.
+func (s *Service) SetStockMovementScheduler(sch erp.StockMovementScheduler) {
+	s.erpStockService.SetStockMovementScheduler(sch)
 }
 
 // ResolveProvider satisfies erp.StockCollaborators: it maps the neutral

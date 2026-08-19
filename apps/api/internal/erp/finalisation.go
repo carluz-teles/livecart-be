@@ -120,6 +120,18 @@ func (s *Service) FinalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 		return fmt.Errorf("creating ERP provider: %w", err)
 	}
 
+	// [GATE] Movimento de estoque em dúvida trava a finalização.
+	//
+	// O [S2] abaixo estorna as reservas ATIVAS e o pedido final baixa o estoque
+	// de novo. Um movimento que entrou no ERP sem virar agregado (o órfão de
+	// 17/08) escapa do estorno e vira baixa dobrada — permanente. Segurar o
+	// pagamento por minutos é o erro barato: a finalização é retentável por
+	// desenho, e o gate dá a cada pendência uma chance inline antes de recusar.
+	if gateErr := s.ResolveCartMovementsBeforeFinalisation(ctx, cartID); gateErr != nil {
+		s.collab.MarkFinalisationFailed(ctx, cartID, gateErr.Error())
+		return gateErr
+	}
+
 	// [S0] RESUME: o pedido já existe no Tiny — crash ou falha após o
 	// CreateOrder de uma tentativa anterior (Gaps A/B). Nunca pular o launch:
 	// ele é tolerante a "já lançado", e pulá-lo devolveria as reservas sem o

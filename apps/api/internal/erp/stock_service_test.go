@@ -68,14 +68,15 @@ type mockRepo struct {
 	incrementErr  error
 	createErr     error
 
-	reserved    int
-	released    int
-	decrements  int
-	increments  int
-	creates     int
-	adjusts     int
-	reverses    int
-	transitions int
+	reserved           int
+	released           int
+	decrements         int
+	increments         int
+	creates            int
+	adjusts            int
+	reservationUpserts int
+	reverses           int
+	transitions        int
 
 	// Cart NFe sync (Bloco B2d).
 	anchorStoreID  string
@@ -122,6 +123,7 @@ func (m *mockRepo) CreateStockReservation(context.Context, CreateStockReservatio
 	return &StockReservationRow{}, nil
 }
 func (m *mockRepo) UpsertActiveReservationQuantity(_ context.Context, p UpsertReservationParams) (*StockReservationRow, error) {
+	m.reservationUpserts++
 	return &StockReservationRow{Quantity: p.IncQty}, nil
 }
 
@@ -222,7 +224,6 @@ type mockCollab struct {
 func (m *mockCollab) ResolveProvider(context.Context, *Integration) (providers.ERPProvider, error) {
 	return m.provider, m.providerErr
 }
-
 
 func (m *mockCollab) ResolveExternalProduct(context.Context, string, string) (string, bool) {
 	return m.externalID, m.linked

@@ -103,7 +103,6 @@ func (stubCollaborators) ResolveProvider(context.Context, *Integration) (provide
 	return nil, nil
 }
 
-
 func (stubCollaborators) ResolveExternalProduct(context.Context, string, string) (string, bool) {
 	return "", false
 }
