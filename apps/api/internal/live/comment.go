@@ -398,10 +398,22 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		// indisponível — são escritas por COMENTÁRIO, não por item, e decidem
 		// pelo comentário inteiro (`handled` encerra tudo). Generalizá-las é
 		// outra mudança; a que a lojista pediu é a da live.
+		//
+		// A quantidade é a do item que resolveu NESTE produto, nunca a soma.
+		// `intent.Quantity` soma todos os itens, e usá-lo aqui transformava
+		// "1000 5x 1005 3x" num pedido de oito unidades do 1000 — inflando o
+		// carrinho de alguém em silêncio.
 		resolvidos = []pedidoResolvido{{
-			item:    PurchaseItem{Quantity: intent.Quantity},
+			item:    PurchaseItem{Quantity: quantidadeDoProduto(resolvidos, pedidos, product)},
 			product: product,
 		}}
+		if len(pedidos) > 1 {
+			// O comentário citou mais de um produto e aqui só um segue. Sem esta
+			// linha o resto do pedido desaparece sem rastro.
+			trace.Info(TracePrefix+"decision: post-commerce keeps a single item",
+				zap.Int("itens_no_comentario", len(pedidos)),
+				zap.String("lido", DescreveItens(pedidos)))
+		}
 	}
 
 	// Determine result for the comment record
@@ -447,7 +459,18 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 
 	// Um comentário pode pedir vários produtos. Cada item entra por si; um que
 	// não produz nada (teto da loja, já na fila) não cancela os outros.
+	//
+	// Um item que ERRA também não. A leitura por item trouxe um estado que antes
+	// não existia — sucesso parcial —, e devolver o erro no meio do laço era a
+	// pior saída possível: o que já entrou fica no carrinho, e a função sai antes
+	// de mandar a DM. O retry do asynq não conserta, porque o comentário já está
+	// gravado e ele bate no dedup. Ficaria item no carrinho e compradora sem
+	// link, que é o defeito mais caro deste sistema.
+	//
+	// Então o erro de um item é registrado e o laço segue. O erro só sobe quando
+	// NADA entrou — aí não há mensagem a mandar e o retry faz sentido.
 	var adicionados []resultadoDoItem
+	var ultimoErro error
 	for _, r := range resolvidos {
 		if r.product == nil {
 			// Código citado que não existe no catálogo desta loja.
@@ -455,14 +478,23 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		}
 		item, err := s.processarItemDoComentario(ctx, event, session, input, trace, commentID, r.product, r.item.Quantity)
 		if err != nil {
-			return err
+			ultimoErro = err
+			logger.From(ctx, s.logger).Error("item do comentário não entrou",
+				zap.String("product_id", r.product.ID),
+				zap.String("keyword", r.product.Keyword),
+				zap.Int("quantity", r.item.Quantity),
+				zap.Error(err),
+			)
+			continue
 		}
 		if item != nil {
 			adicionados = append(adicionados, *item)
 		}
 	}
 	if len(adicionados) == 0 {
-		return nil
+		// Nada entrou. Se houve erro, ele sobe para o retry tentar de novo; se
+		// não houve, o comentário simplesmente não gerou item (teto, fila).
+		return ultimoErro
 	}
 
 	// O contador de pedidos do evento conta CARRINHOS, e um comentário é um
@@ -493,7 +525,7 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	// somado; o nome e o código saem de todos, para a compradora conferir o que
 	// entrou.
 	ultimo := adicionados[len(adicionados)-1]
-	nomes, keywords, pedidaTotal, naFilaTotal := resumoDosItens(adicionados)
+	resumo := resumoDosItens(adicionados)
 
 	// Story replies (Channel="dm") não têm comentário para responder, então o id
 	// é limpo — a notificação vai direto por DM para o IGSID da compradora.
@@ -501,7 +533,17 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 	if input.Channel == "dm" {
 		notifyCommentID = ""
 	}
-	s.sendImmediateNotification(ctx, sendNotificationInput{
+	// A mensagem da compradora NÃO viaja no prazo da requisição.
+	//
+	// A reserva no ERP roda antes dela, no mesmo ctx, e é a parte lenta. Na live
+	// de 17/08 o Tiny estourou o prazo duas vezes e a consulta de configuração de
+	// notificação falhou pelo mesmo `context deadline exceeded` — item no
+	// carrinho, compradora sem aviso. E o retry do asynq não conserta: o
+	// comentário já está gravado e ele sai pelo dedup.
+	//
+	// Um ERP lento não pode calar o comprador. Mesmo desacoplamento que o aviso
+	// de teto por item já usa.
+	s.sendImmediateNotification(contextoDaMensagem(ctx, event.StoreID), sendNotificationInput{
 		StoreID:           event.StoreID,
 		EventID:           event.ID,
 		EventTitle:        event.Title,
@@ -510,13 +552,14 @@ func (s *Service) ProcessInstagramComment(ctx context.Context, input ProcessInst
 		PlatformUserID:    input.UserID,
 		PlatformHandle:    input.Username,
 		PlatformCommentID: notifyCommentID,
-		ProductName:       nomes,
-		ProductKeyword:    keywords,
-		Quantity:          pedidaTotal,
+		ProductName:       resumo.nomes,
+		ProductKeyword:    resumo.keywords,
+		Quantity:          resumo.pedida,
+		QuantityInCart:    resumo.noCarrinho,
 		TotalItems:        ultimo.carrinho.TotalItems,
 		TotalCents:        ultimo.carrinho.TotalCents,
 		IsNewCart:         ultimo.carrinho.IsNewCart,
-		WaitlistedQty:     naFilaTotal,
+		WaitlistedQty:     resumo.naFila,
 	})
 
 	return nil
@@ -585,6 +628,28 @@ func (s *Service) resolverPedidos(
 	return resolvidos
 }
 
+// quantidadeDoProduto acha a quantidade que o comentário pediu DAQUELE produto.
+//
+// Serve ao ramo de post-commerce, que segue com um item só. A soma dos itens é a
+// resposta errada: ela é a leitura do comentário inteiro, não deste produto.
+//
+// Quando `resolvePostEventProduct` substitui o produto (auto-adição da promoção
+// de produto único, num "EU QUERO" pelado), nenhum item casa por id — aí vale a
+// quantidade do primeiro item, que é o que a pessoa disse primeiro.
+func quantidadeDoProduto(resolvidos []pedidoResolvido, pedidos []PurchaseItem, produto *ProductRow) int {
+	if produto != nil {
+		for _, r := range resolvidos {
+			if r.product != nil && r.product.ID == produto.ID {
+				return r.item.Quantity
+			}
+		}
+	}
+	if len(pedidos) > 0 {
+		return pedidos[0].Quantity
+	}
+	return 1
+}
+
 // intentDoComentario resume os itens na visão de UM pedido.
 //
 // Existe porque as regras de post-commerce e o registro do comentário guardam
@@ -601,21 +666,76 @@ func intentDoComentario(pedidos []PurchaseItem, texto string) *PurchaseIntent {
 	return &PurchaseIntent{Quantity: total, RawText: texto}
 }
 
-// resumoDosItens junta o que entrou, para a mensagem que a compradora recebe.
+// contextoDaMensagem devolve um contexto que sobrevive ao prazo da requisição.
 //
-// O template tem UM campo {produto}; com dois produtos no mesmo comentário,
-// citar só um deixaria a compradora achando que o outro não entrou. A lista sai
-// escrita como se fala — "Vaso e Prato", "Vaso, Prato e Copo".
-func resumoDosItens(itens []resultadoDoItem) (nomes, keywords string, pedida, naFila int) {
-	listaNomes := make([]string, 0, len(itens))
-	listaKeywords := make([]string, 0, len(itens))
-	for _, it := range itens {
-		listaNomes = append(listaNomes, it.produto.Name)
-		listaKeywords = append(listaKeywords, it.produto.Keyword)
-		pedida += it.pedida
-		naFila += it.naFila
+// A DM é o único passo cujo destinatário é uma pessoa esperando um link para
+// pagar. Todo o resto do fluxo — reserva no ERP, log de integração, telemetria —
+// pode ser retomado depois; a mensagem não, porque o retry bate no dedup do
+// comentário e sai calado.
+//
+// Carrega a loja para o log continuar correlacionando, e não herda o
+// cancelamento de quem chamou: é justamente disso que ele precisa escapar.
+func contextoDaMensagem(ctx context.Context, storeID string) context.Context {
+	return logger.WithStore(context.Background(), storeID, "")
+}
+
+// resumoDaDM é o que a mensagem do comentário vai dizer.
+type resumoDaDM struct {
+	nomes      string // {produto}
+	keywords   string // {keyword}
+	pedida     int    // {quantidade}
+	noCarrinho int    // {quantidade_carrinho}
+	naFila     int    // {quantidade_fila}
+}
+
+// resumoDosItens monta a mensagem do comentário inteiro.
+//
+// Uma DM por comentário, não uma por produto: o carrinho é um e o link é o
+// mesmo. O template tem UM campo {produto}, então com dois produtos a lista sai
+// escrita como se fala — "Vaso e Prato".
+//
+// A regra que importa está no caso MISTO. Qualquer parte na fila troca o assunto
+// da mensagem para fila (é regra, e está certa: quem ficou esperando precisa
+// saber). Mas então {produto} tem de nomear o que está NA FILA, e os números têm
+// de ser desse produto. Somar tudo dizia "Vaso e Prato · na fila 2" para um
+// pedido em que o Vaso entrou inteiro — e a compradora olha o Vaso no carrinho e
+// conclui que o pedido está furado no produto errado.
+//
+// O total do carrinho, que vem à parte, é quem conta o resto.
+func resumoDosItens(itens []resultadoDoItem) resumoDaDM {
+	escopo := itens
+	if temFila(itens) {
+		escopo = nil
+		for _, it := range itens {
+			if it.naFila > 0 {
+				escopo = append(escopo, it)
+			}
+		}
 	}
-	return juntarEmPortugues(listaNomes), strings.Join(listaKeywords, ", "), pedida, naFila
+
+	var r resumoDaDM
+	nomes := make([]string, 0, len(escopo))
+	keywords := make([]string, 0, len(escopo))
+	for _, it := range escopo {
+		nomes = append(nomes, it.produto.Name)
+		keywords = append(keywords, it.produto.Keyword)
+		r.pedida += it.pedida
+		r.naFila += it.naFila
+	}
+	r.noCarrinho = r.pedida - r.naFila
+	r.nomes = juntarEmPortugues(nomes)
+	r.keywords = strings.Join(keywords, ", ")
+	return r
+}
+
+// temFila diz se alguma parte do comentário ficou aguardando estoque.
+func temFila(itens []resultadoDoItem) bool {
+	for _, it := range itens {
+		if it.naFila > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // juntarEmPortugues escreve a lista com "e" antes do último item.
@@ -858,8 +978,19 @@ func (s *Service) processarItemDoComentario(
 	// Reserve stock in ERP (only for available items)
 	if availableQty > 0 && s.stockReserver != nil {
 		if syncErr := s.stockReserver.ReserveStockInERP(ctx, event.StoreID, result.CartID, event.ID, product.ID, availableQty, product.Price, input.Username); syncErr != nil {
+			// QUAL produto e QUANTO. A linha só tinha o carrinho, e quando duas
+			// reservas falharam na live de 17/08 não deu para saber sequer em que
+			// produto conferir o Tiny — uma delas só foi identificada porque a URL
+			// aparecia por acaso no texto do erro.
+			//
+			// Esta linha é o único registro que sobra: sem linha em
+			// stock_reservations, é dela que sai a conferência manual.
 			logger.From(ctx, s.logger).Warn("failed to reserve stock in ERP",
 				zap.String("cart_id", result.CartID),
+				zap.String("product_id", product.ID),
+				zap.String("keyword", product.Keyword),
+				zap.String("username", input.Username),
+				zap.Int("quantity", availableQty),
 				zap.Error(syncErr),
 			)
 		}
@@ -894,6 +1025,10 @@ type sendNotificationInput struct {
 	// para um item que ficou aguardando é a diferença entre o comprador achar
 	// que comprou e saber que está numa fila.
 	WaitlistedQty int
+	// QuantityInCart é quanto do pedido DESTE produto coube no estoque. Vem do
+	// resumo já escopado, então no caso misto ele fala do produto que está na
+	// fila — o mesmo de que {produto} fala.
+	QuantityInCart int
 }
 
 // notificationTypeForComment escolhe QUAL mensagem o comprador recebe depois de
@@ -976,7 +1111,7 @@ func (s *Service) sendImmediateNotification(ctx context.Context, input sendNotif
 		Produto:            input.ProductName,
 		Keyword:            input.ProductKeyword,
 		Quantidade:         input.Quantity,
-		QuantidadeCarrinho: input.Quantity - input.WaitlistedQty,
+		QuantidadeCarrinho: input.QuantityInCart,
 		QuantidadeFila:     input.WaitlistedQty,
 		TotalItens:         input.TotalItems,
 		Total:              notification.FormatCurrency(input.TotalCents),

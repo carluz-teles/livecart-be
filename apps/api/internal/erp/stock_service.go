@@ -56,7 +56,7 @@ type StockCollaborators interface {
 	ReReserveAfterFailedFinalisation(ctx context.Context, provider providers.ERPProvider, cartID string, snapshot []StockReservationRow)
 	// ReverseCartReservationsPerRow estorna the cart's active manual stock exits,
 	// row by row, marking each only after the ERP confirms the entry.
-	ReverseCartReservationsPerRow(ctx context.Context, provider providers.ERPProvider, cartID string) error
+	ReverseCartReservationsPerRow(ctx context.Context, provider providers.ERPProvider, storeID, cartID string) error
 	// MarkFinalisationFailed records the 'failed' finalisation state with the
 	// error and emits the group G erp.finalization_failed fact (best-effort).
 	MarkFinalisationFailed(ctx context.Context, cartID, msg string)
@@ -138,6 +138,33 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 	//
 	// Repetir o mesmo comentário não cai aqui: o comentário é deduplicado por
 	// platform_comment_id antes de chegar ao carrinho.
+	// Caminho com razão: a intenção é gravada ANTES da chamada, e a chamada
+	// roda fora do prazo da requisição. Foi o prazo compartilhado que perdeu
+	// duas respostas do Tiny em 17/08 — item no carrinho, nada registrado, e um
+	// lançamento órfão que ninguém ia estornar. Com o razão, todo desfecho
+	// (inclusive "não sei") vira linha consultável, o retry só acontece com
+	// prova de não-entrega, e a finalização não fecha com dúvida aberta.
+	if s.movements != nil {
+		mov, movErr := s.movements.CreateERPStockMovement(ctx, CreateStockMovementParams{
+			StoreID:           storeID,
+			CartID:            cartID,
+			EventID:           eventID,
+			ProductID:         productID,
+			ExternalProductID: externalID,
+			Direction:         "out",
+			Quantity:          quantity,
+			UnitPriceCents:    unitPrice,
+		})
+		if movErr != nil {
+			// Sem registro de intenção não há chamada: é o registro que garante
+			// que nenhum desfecho se perde.
+			return fmt.Errorf("recording stock movement intent: %w", movErr)
+		}
+		obs := movementObservacao(mov, platformHandle, 0)
+		go s.executeStockMovement(logger.WithStore(context.Background(), storeID, ""), erpProvider, mov, obs)
+		return nil
+	}
+
 	existing, _ := s.repo.ListActiveReservationsByCartAndProduct(ctx, cartID, productID)
 	if len(existing) > 0 {
 		obs := fmt.Sprintf("Ajuste reserva LiveCart (+%d) - @%s - Cart %s", quantity, platformHandle, cartID)

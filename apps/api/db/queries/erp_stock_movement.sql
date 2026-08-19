@@ -1,0 +1,87 @@
+-- name: CreateERPStockMovement :one
+-- A intenção, gravada ANTES da chamada ao ERP. Ver a migration 000132.
+INSERT INTO erp_stock_movements (
+    store_id, cart_id, event_id, product_id, external_product_id,
+    direction, quantity, unit_price_cents, reservation_id
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING *;
+
+-- name: MarkERPStockMovementConfirmed :exec
+UPDATE erp_stock_movements
+SET status = 'confirmed', erp_movement_id = $2, last_error = NULL, updated_at = now()
+WHERE id = $1;
+
+-- name: MarkERPStockMovementOutcome :exec
+-- failed | unconfirmed, com o erro que levou até lá. attempts conta as
+-- tentativas de EXECUÇÃO (a inline e as do resolver), para o teto de desistir.
+UPDATE erp_stock_movements
+SET status = $2, last_error = $3, attempts = attempts + 1,
+    last_attempt_at = now(), updated_at = now()
+WHERE id = $1;
+
+-- name: GetERPStockMovement :one
+SELECT * FROM erp_stock_movements WHERE id = $1;
+
+-- name: ClaimERPStockMovement :one
+-- Reivindica a linha (CAS: só se ela estiver no estado esperado) — mesmo
+-- desenho do claim-first da reversão de reservas: dois resolvers (o agendado e
+-- o inline do pagamento) podem mirar a mesma linha, e quem não reivindicou não
+-- age. Os guards de idade impedem reivindicar trabalho que ainda está em voo:
+-- 'pending' recente pertence à goroutine que fez a chamada; 'resolving' recente
+-- pertence a outro resolver. Envelhecidos são de processos mortos.
+UPDATE erp_stock_movements
+SET status = 'resolving', last_attempt_at = now(), updated_at = now()
+WHERE id = $1
+  AND status = sqlc.arg(from_status)::varchar
+  AND (sqlc.arg(from_status)::varchar <> 'pending' OR created_at < now() - interval '2 minutes')
+  AND (sqlc.arg(from_status)::varchar <> 'resolving' OR last_attempt_at < now() - interval '5 minutes')
+RETURNING *;
+
+-- name: ListUnresolvedERPStockMovementsByCart :many
+-- O gate da finalização: nada de pedido pago enquanto houver movimento em
+-- dúvida para o carrinho. 'pending' recente conta — pode ser chamada em voo.
+SELECT * FROM erp_stock_movements
+WHERE cart_id = $1 AND status IN ('pending', 'failed', 'unconfirmed', 'resolving')
+ORDER BY created_at ASC;
+
+-- name: ListUnresolvedERPStockMovements :many
+-- Visibilidade: o que está parado, para log/painel/alerta.
+SELECT * FROM erp_stock_movements
+WHERE status IN ('pending', 'failed', 'unconfirmed', 'resolving')
+  AND created_at < now() - interval '1 minute'
+ORDER BY created_at ASC
+LIMIT $1;
+
+-- name: ListUnresolvedERPStockMovementsByStore :many
+-- O painel de pendências do lojista: todo movimento não-resolvido da loja, com
+-- o contexto que o humano precisa para conferir o extrato (produto e carrinho).
+SELECT m.*, p.name AS product_name, p.keyword AS product_keyword,
+       c.platform_handle AS cart_handle
+FROM erp_stock_movements m
+JOIN products p ON p.id = m.product_id
+JOIN carts c ON c.id = m.cart_id
+WHERE m.store_id = $1
+  AND m.status IN ('pending', 'failed', 'unconfirmed', 'resolving')
+ORDER BY m.created_at ASC;
+
+-- name: ConfirmERPStockMovementManually :one
+-- Decisão humana pós-extrato: o lançamento ESTÁ lá. CAS a partir dos estados
+-- parados — 'resolving' pertence a um resolver em voo e 'pending' recente à
+-- goroutine dona; nenhum dos dois aceita decisão manual por cima.
+UPDATE erp_stock_movements
+SET status = 'confirmed',
+    last_error = 'resolvido manualmente: lançamento confirmado no extrato',
+    updated_at = now()
+WHERE id = $1 AND store_id = $2 AND status IN ('failed', 'unconfirmed')
+RETURNING *;
+
+-- name: ResetERPStockMovementForRetry :one
+-- Decisão humana pós-extrato: o lançamento NÃO está lá — provado não-entregue
+-- pelo olho humano, que é a única consulta que a API do Tiny permite. Zera as
+-- tentativas para o resolver re-executar imediatamente com o teto cheio.
+UPDATE erp_stock_movements
+SET status = 'failed', attempts = 0,
+    last_error = 'resolvido manualmente: lançamento ausente do extrato; re-execução autorizada',
+    last_attempt_at = now(), updated_at = now()
+WHERE id = $1 AND store_id = $2 AND status IN ('failed', 'unconfirmed')
+RETURNING *;

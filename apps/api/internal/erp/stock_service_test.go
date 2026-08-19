@@ -68,14 +68,15 @@ type mockRepo struct {
 	incrementErr  error
 	createErr     error
 
-	reserved    int
-	released    int
-	decrements  int
-	increments  int
-	creates     int
-	adjusts     int
-	reverses    int
-	transitions int
+	reserved           int
+	released           int
+	decrements         int
+	increments         int
+	creates            int
+	adjusts            int
+	reservationUpserts int
+	reverses           int
+	transitions        int
 
 	// Cart NFe sync (Bloco B2d).
 	anchorStoreID  string
@@ -122,6 +123,7 @@ func (m *mockRepo) CreateStockReservation(context.Context, CreateStockReservatio
 	return &StockReservationRow{}, nil
 }
 func (m *mockRepo) UpsertActiveReservationQuantity(_ context.Context, p UpsertReservationParams) (*StockReservationRow, error) {
+	m.reservationUpserts++
 	return &StockReservationRow{Quantity: p.IncQty}, nil
 }
 
@@ -223,7 +225,6 @@ func (m *mockCollab) ResolveProvider(context.Context, *Integration) (providers.E
 	return m.provider, m.providerErr
 }
 
-
 func (m *mockCollab) ResolveExternalProduct(context.Context, string, string) (string, bool) {
 	return m.externalID, m.linked
 }
@@ -240,7 +241,7 @@ func (m *mockCollab) CreateFinalERPOrder(context.Context, providers.ERPProvider,
 func (m *mockCollab) FinalisationInverted(string) bool { return false }
 func (m *mockCollab) ReReserveAfterFailedFinalisation(context.Context, providers.ERPProvider, string, []StockReservationRow) {
 }
-func (m *mockCollab) ReverseCartReservationsPerRow(context.Context, providers.ERPProvider, string) error {
+func (m *mockCollab) ReverseCartReservationsPerRow(context.Context, providers.ERPProvider, string, string) error {
 	return nil
 }
 func (m *mockCollab) MarkFinalisationFailed(context.Context, string, string)                {}

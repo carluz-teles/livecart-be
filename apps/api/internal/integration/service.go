@@ -185,6 +185,10 @@ type Service struct {
 func (s *Service) erpStock() *erp.Service {
 	s.erpStockOnce.Do(func() {
 		s.erpStockService = erp.NewService(erpRepoAdapter{s.repo}, s, s.logger)
+		// O razão de movimentos (000132) é o mesmo Repository por baixo; a
+		// interface é separada para o ledger ser opcional nos testes do erp.
+		s.erpStockService.SetStockMovementLedger(s.repo)
+		s.erpStockService.SetStockMovementResolution(s.repo)
 	})
 	return s.erpStockService
 }
@@ -219,6 +223,50 @@ func (s *Service) erpProviderFor(ctx context.Context, integration *IntegrationRo
 		return s.erpProviderFactory(ctx, integration)
 	}
 	return s.getERPProvider(ctx, integration)
+}
+
+// RunScheduledStockMovementResolve delega ao resolver do razão de movimentos
+// (comando agendado erp.stock_movement.resolve e gate da finalização).
+func (s *Service) RunScheduledStockMovementResolve(ctx context.Context, movementID string) error {
+	return s.erpStockService.RunScheduledMovementResolve(ctx, movementID)
+}
+
+// SetStockMovementScheduler liga o agendador de retries do razão de movimentos.
+func (s *Service) SetStockMovementScheduler(sch erp.StockMovementScheduler) {
+	s.erpStockService.SetStockMovementScheduler(sch)
+}
+
+// RunStockReconciliation roda a comparação local × ERP para a loja, em modo
+// RELATÓRIO: só detecta, nunca corrige, e não dispara alerta nenhum. A fórmula
+// (LocalStock − Held) ainda precisa de calibração com dados reais — a validação
+// de 18/08 mostrou divergência não explicada num produto saudável — então o
+// primeiro uso disto é justamente calibrar, com a loja quieta.
+func (s *Service) RunStockReconciliation(ctx context.Context, storeID string) (*erp.ReconciliationReport, error) {
+	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	if err != nil {
+		return nil, httpx.ErrNotFound("nenhuma integração ERP ativa")
+	}
+	provider, err := s.erpProviderFor(ctx, integration)
+	if err != nil {
+		return nil, fmt.Errorf("creating ERP provider: %w", err)
+	}
+	stockReader, ok := provider.(interface {
+		GetProductStock(ctx context.Context, externalID string) (int, error)
+	})
+	if !ok {
+		return nil, httpx.ErrNotFound("o provedor ERP não expõe leitura de saldo")
+	}
+	return erp.ReconcileStockAgainstERP(ctx, s.logger, s.repo, stockReader, storeID, "tiny")
+}
+
+// ListPendingStockMovements delega o painel de pendências do razão.
+func (s *Service) ListPendingStockMovements(ctx context.Context, storeID string) ([]erp.PendingStockMovement, error) {
+	return s.erpStockService.ListPendingStockMovements(ctx, storeID)
+}
+
+// ResolveStockMovementManually delega a decisão humana pós-extrato.
+func (s *Service) ResolveStockMovementManually(ctx context.Context, storeID, movementID string, landed bool) (*erp.StockMovementRow, error) {
+	return s.erpStockService.ResolveStockMovementManually(ctx, storeID, movementID, landed)
 }
 
 // ResolveProvider satisfies erp.StockCollaborators: it maps the neutral
@@ -4064,7 +4112,7 @@ func (s *Service) emitERPOrderFinalized(ctx context.Context, storeID, cartID str
 // NÃO altera erp_finalisation_status — quem decide o efeito de uma falha é o
 // caller (a finalização pós-pago marca 'failed'; a conversão pré-pagamento do
 // design C não toca nessa coluna).
-func (s *Service) reverseCartReservationsPerRow(ctx context.Context, erpProvider providers.ERPProvider, cartID string) error {
+func (s *Service) reverseCartReservationsPerRow(ctx context.Context, erpProvider providers.ERPProvider, storeID, cartID string) error {
 	reservations, err := s.repo.ListActiveReservationsByCart(ctx, cartID)
 	if err != nil {
 		return fmt.Errorf("listing cart reservations: %w", err)
@@ -4080,12 +4128,15 @@ func (s *Service) reverseCartReservationsPerRow(ctx context.Context, erpProvider
 			ID:                r.ID,
 			ExternalProductID: r.ExternalProductID,
 			Quantity:          r.Quantity,
+			CartID:            r.CartID,
+			EventID:           r.EventID,
+			ProductID:         r.ProductID,
 		})
 	}
 	if _, allResolved := erp.ReverseReservationsClaimFirst(ctx, s.logger, s.repo, erpProvider, rows,
 		func(erp.ReversibleReservation) string {
 			return fmt.Sprintf("Estorno reserva pós-pagamento - Cart %s", cartID)
-		}); !allResolved {
+		}, s.erpStock().ReversalLedgerHooks(storeID)); !allResolved {
 		return fmt.Errorf("reversing reservations for cart %s: estorno de reserva pendente", cartID)
 	}
 	return nil
@@ -5471,12 +5522,15 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 							ID:                res.ID,
 							ExternalProductID: res.ExternalProductID,
 							Quantity:          res.Quantity,
+							CartID:            res.CartID,
+							EventID:           res.EventID,
+							ProductID:         res.ProductID,
 						})
 					}
 					_, erpReversed = erp.ReverseReservationsClaimFirst(ctx, s.logger, s.repo, erpProvider, rows,
 						func(erp.ReversibleReservation) string {
 							return fmt.Sprintf("Estorno expiração carrinho LiveCart - Cart %s", cart.ID)
-						})
+						}, s.erpStock().ReversalLedgerHooks(cart.StoreID))
 				}
 			}
 			if markErr := s.repo.ReverseReservationsByCartAndProduct(ctx, cart.ID, productID); markErr != nil {
@@ -5590,12 +5644,15 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 					ID:                r.ID,
 					ExternalProductID: r.ExternalProductID,
 					Quantity:          r.Quantity,
+					CartID:            r.CartID,
+					EventID:           r.EventID,
+					ProductID:         r.ProductID,
 				})
 			}
 			erp.ReverseReservationsClaimFirst(ctx, s.logger, s.repo, erpProvider, rows,
 				func(erp.ReversibleReservation) string {
 					return fmt.Sprintf("Estorno cliente bloqueado - Cart %s", cart.ID)
-				})
+				}, s.erpStock().ReversalLedgerHooks(storeID))
 		}
 		if len(reservations) > 0 {
 			if err := s.repo.ReverseReservationsByCart(ctx, cart.ID); err != nil {

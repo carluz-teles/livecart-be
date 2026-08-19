@@ -3,13 +3,16 @@ package erp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"go.uber.org/zap"
@@ -401,6 +404,29 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 // O corpo cru vai para o log porque o schema desta resposta não está na
 // documentação pública que consultei. Assim que os nomes estiverem confirmados,
 // o log sai e a lista de candidatos encolhe para o campo real.
+// GetProductStock devolve o SALDO físico do produto no Tiny — o campo que a
+// reconciliação compara com a contabilidade local. Saldo, e não disponível, de
+// propósito: as nossas reservas são saídas manuais e descontam do saldo; o
+// "disponível" ainda subtrai as reservas de PEDIDO da própria Tiny, que não são
+// nossas e poluiriam a comparação.
+func (t *Tiny) GetProductStock(ctx context.Context, productID string) (int, error) {
+	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
+	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return 0, fmt.Errorf("reading stock: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return 0, fmt.Errorf("reading stock: status %d", resp.StatusCode)
+	}
+	var out struct {
+		Saldo float64 `json:"saldo"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return 0, fmt.Errorf("parsing stock response: %w", err)
+	}
+	return int(out.Saldo), nil
+}
+
 func (t *Tiny) saldoDisponivel(ctx context.Context, productID string) (int, bool) {
 	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
 	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
@@ -2115,6 +2141,23 @@ func (t *Tiny) FindOrderIDByMarker(ctx context.Context, marker string) (string, 
 
 // ReserveStock creates a manual stock exit (tipo S) in Tiny for the given product.
 // POST /estoque/{idProduto} — returns the movement ID (idLancamento).
+//
+// Retenta, mas NÃO em tudo — e a distinção é a coisa mais importante desta
+// função. Este POST CRIA um lançamento: não é idempotente, e a API do Tiny não
+// oferece consulta de lançamentos (só criar e estornar), então não há como
+// perguntar depois "chegou?".
+//
+// Numa falha de discagem — conexão recusada, host não resolvido, rede
+// inalcançável — a requisição comprovadamente não chegou à aplicação do Tiny, e
+// repetir é seguro. Num TIMEOUT não se sabe: o Tiny pode ter processado a saída
+// e demorado a responder. Repetir ali cria um SEGUNDO lançamento, e o índice
+// único de reserva ativa por cart+produto garante que só um seria registrado do
+// nosso lado — o outro fica órfão, retirando do Tiny estoque que ninguém
+// comprou, e o estorno da expiração devolve só um.
+//
+// Perder a reserva é ruim e detectável. Criar uma reserva fantasma é ruim,
+// invisível e permanente. Enquanto não existir estado `pending` para retomar a
+// tentativa com segurança, o timeout sobe como erro.
 func (t *Tiny) ReserveStock(ctx context.Context, productID string, qty int, unitPrice float64, obs string) (string, error) {
 	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
 	payload := map[string]any{
@@ -2124,8 +2167,13 @@ func (t *Tiny) ReserveStock(ctx context.Context, productID string, qty int, unit
 		"observacoes":   obs,
 	}
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
+	resp, body, err := t.postComRetryDeDiscagem(ctx, endpoint, payload)
 	if err != nil {
+		// Falha de discagem que sobreviveu ao retry: nenhum byte chegou à
+		// aplicação do Tiny. O sentinela diz ao ledger que re-executar é seguro.
+		if falhaDeDiscagem(err) {
+			return "", fmt.Errorf("reserving stock: %w", errors.Join(providers.ErrProvenUndelivered, err))
+		}
 		return "", fmt.Errorf("reserving stock: %w", err)
 	}
 
@@ -2134,7 +2182,16 @@ func (t *Tiny) ReserveStock(ctx context.Context, productID string, qty int, unit
 			Mensagem string `json:"mensagem"`
 		}
 		_ = json.Unmarshal(body, &errResp)
-		return "", fmt.Errorf("reserve stock failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+		reject := fmt.Errorf("reserve stock failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+		// 4xx é recusa de validação: o Tiny processou e disse não ANTES de
+		// aplicar. Provado não-aplicado; repetível (vai falhar igual até a causa
+		// ser corrigida, e o teto de tentativas para o loop).
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return "", errors.Join(providers.ErrProvenUndelivered, reject)
+		}
+		// 5xx fica ambíguo de propósito: o servidor respondeu, e pode ter
+		// aplicado antes de quebrar.
+		return "", reject
 	}
 
 	var result struct {
@@ -2893,4 +2950,76 @@ func healthCheckItem(
 	}
 	item.Status = providers.ERPHealthStatusMissing
 	return item
+}
+
+// maxTentativasDeDiscagem é quantas vezes uma falha de discagem é repetida.
+//
+// Três tentativas, com espera crescente entre elas: uma queda de rede de alguns
+// segundos deixa de custar a reserva.
+const maxTentativasDeDiscagem = 3
+
+// esperaEntreTentativas cresce a cada tentativa (1s, 3s), para não bater de novo
+// no mesmo instante em que a rede está caída.
+var esperaEntreTentativas = []time.Duration{time.Second, 3 * time.Second}
+
+// postComRetryDeDiscagem repete o POST apenas quando a falha PROVA que nada foi
+// processado do outro lado.
+//
+// Ver o comentário de ReserveStock: num endpoint que cria lançamento e não tem
+// consulta, repetir o que é ambíguo troca um problema detectável por um
+// invisível.
+func (t *Tiny) postComRetryDeDiscagem(ctx context.Context, endpoint string, payload any) (*http.Response, []byte, error) {
+	var resp *http.Response
+	var body []byte
+	var err error
+
+	for tentativa := 0; tentativa < maxTentativasDeDiscagem; tentativa++ {
+		if tentativa > 0 {
+			espera := esperaEntreTentativas[min(tentativa-1, len(esperaEntreTentativas)-1)]
+			logger.From(ctx, t.Logger).Warn("retrying Tiny stock movement after a dial failure",
+				zap.Int("attempt", tentativa+1),
+				zap.Duration("wait", espera),
+				zap.Error(err),
+			)
+			select {
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			case <-time.After(espera):
+			}
+		}
+
+		resp, body, err = t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
+		if err == nil || !falhaDeDiscagem(err) {
+			return resp, body, err
+		}
+	}
+	return resp, body, err
+}
+
+// falhaDeDiscagem diz se o erro prova que a requisição não chegou à aplicação.
+//
+// Conexão recusada, host não resolvido e rede inalcançável acontecem ANTES de
+// qualquer byte ser processado. Timeout fica de fora de propósito: ele não prova
+// nada, e é justamente o caso ambíguo.
+func falhaDeDiscagem(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Timeout nunca é falha de discagem para este fim, mesmo quando o pacote
+	// de rede o classifica como tal.
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	return errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH)
 }

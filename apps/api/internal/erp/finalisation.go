@@ -120,6 +120,18 @@ func (s *Service) FinalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 		return fmt.Errorf("creating ERP provider: %w", err)
 	}
 
+	// [GATE] Movimento de estoque em dúvida trava a finalização.
+	//
+	// O [S2] abaixo estorna as reservas ATIVAS e o pedido final baixa o estoque
+	// de novo. Um movimento que entrou no ERP sem virar agregado (o órfão de
+	// 17/08) escapa do estorno e vira baixa dobrada — permanente. Segurar o
+	// pagamento por minutos é o erro barato: a finalização é retentável por
+	// desenho, e o gate dá a cada pendência uma chance inline antes de recusar.
+	if gateErr := s.ResolveCartMovementsBeforeFinalisation(ctx, cartID); gateErr != nil {
+		s.collab.MarkFinalisationFailed(ctx, cartID, gateErr.Error())
+		return gateErr
+	}
+
 	// [S0] RESUME: o pedido já existe no Tiny — crash ou falha após o
 	// CreateOrder de uma tentativa anterior (Gaps A/B). Nunca pular o launch:
 	// ele é tolerante a "já lançado", e pulá-lo devolveria as reservas sem o
@@ -170,12 +182,15 @@ func (s *Service) FinalizeCartERPOrder(ctx context.Context, cartID, storeID stri
 			ID:                r.ID,
 			ExternalProductID: r.ExternalProductID,
 			Quantity:          r.Quantity,
+			CartID:            r.CartID,
+			EventID:           r.EventID,
+			ProductID:         r.ProductID,
 		})
 	}
 	reversedIDs, allResolved := reverseAndCollect(ctx, s.logger, s.repo, erpProvider, rows,
 		func(ReversibleReservation) string {
 			return fmt.Sprintf("Estorno reserva pós-pagamento - Cart %s", cartID)
-		})
+		}, s.ReversalLedgerHooks(storeID))
 	for _, id := range reversedIDs {
 		reversedSnapshot = append(reversedSnapshot, byID[id])
 	}
@@ -237,7 +252,7 @@ func (s *Service) resumeCartERPFinalisation(ctx context.Context, erpProvider pro
 		return fmt.Errorf("re-launching stock for order %s: %w", externalOrderID, err)
 	}
 
-	if err := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, cartID); err != nil {
+	if err := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, storeID, cartID); err != nil {
 		s.collab.MarkFinalisationFailed(ctx, cartID, err.Error())
 		return fmt.Errorf("reversing reservations on resume: %w", err)
 	}
@@ -291,7 +306,7 @@ func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider 
 	}
 	orderID := fresh.ExternalOrderID
 	if orderID == "" {
-		if err := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, cartID); err != nil {
+		if err := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, storeID, cartID); err != nil {
 			s.collab.MarkFinalisationFailed(ctx, cartID, err.Error())
 			return err
 		}
@@ -312,7 +327,7 @@ func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider 
 			zap.Bool("insufficient_balance", IsTinyInsufficientBalanceErr(launchErr)),
 			zap.Error(launchErr),
 		)
-		if err := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, cartID); err != nil {
+		if err := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, storeID, cartID); err != nil {
 			s.collab.MarkFinalisationFailed(ctx, cartID, err.Error())
 			return err
 		}
@@ -335,7 +350,7 @@ func (s *Service) finalizeCartERPOrderInverted(ctx context.Context, erpProvider 
 
 	// [I3] Estornos per-row: o saldo do Tiny volta ao valor real. Falha aqui é
 	// retomável — o resume re-lança (no-op tolerado) e estorna o restante.
-	if err := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, cartID); err != nil {
+	if err := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, storeID, cartID); err != nil {
 		s.collab.MarkFinalisationFailed(ctx, cartID, err.Error())
 		return err
 	}
@@ -456,12 +471,15 @@ func (s *Service) reverseCartReservationsInERP(ctx context.Context, cartID, stor
 					ID:                r.ID,
 					ExternalProductID: r.ExternalProductID,
 					Quantity:          r.Quantity,
+					CartID:            r.CartID,
+					EventID:           r.EventID,
+					ProductID:         r.ProductID,
 				})
 			}
 			_, allResolved := ReverseReservationsClaimFirst(ctx, s.logger, claimCtxRepo{s.repo, dbCtx}, erpProvider, rows,
 				func(r ReversibleReservation) string {
 					return fmt.Sprintf("Estorno expiração carrinho LiveCart - Cart %s - Reserva %s", cartID, r.ID)
-				})
+				}, s.ReversalLedgerHooks(storeID))
 			erpReversed = allResolved
 		} else {
 			erpReversed = false

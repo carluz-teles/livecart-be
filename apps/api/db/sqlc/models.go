@@ -208,6 +208,27 @@ type ErpContact struct {
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
 }
 
+type ErpStockMovement struct {
+	ID                pgtype.UUID        `json:"id"`
+	StoreID           pgtype.UUID        `json:"store_id"`
+	CartID            pgtype.UUID        `json:"cart_id"`
+	EventID           pgtype.UUID        `json:"event_id"`
+	ProductID         pgtype.UUID        `json:"product_id"`
+	ExternalProductID string             `json:"external_product_id"`
+	Direction         string             `json:"direction"`
+	Quantity          int32              `json:"quantity"`
+	UnitPriceCents    int64              `json:"unit_price_cents"`
+	IdempotencyKey    pgtype.UUID        `json:"idempotency_key"`
+	Status            string             `json:"status"`
+	ErpMovementID     pgtype.Text        `json:"erp_movement_id"`
+	Attempts          int16              `json:"attempts"`
+	LastError         pgtype.Text        `json:"last_error"`
+	LastAttemptAt     pgtype.Timestamptz `json:"last_attempt_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	ReservationID     pgtype.UUID        `json:"reservation_id"`
+}
+
 type EventConsumed struct {
 	EventID    pgtype.UUID        `json:"event_id"`
 	Handler    string             `json:"handler"`

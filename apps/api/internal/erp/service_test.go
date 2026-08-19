@@ -103,7 +103,6 @@ func (stubCollaborators) ResolveProvider(context.Context, *Integration) (provide
 	return nil, nil
 }
 
-
 func (stubCollaborators) ResolveExternalProduct(context.Context, string, string) (string, bool) {
 	return "", false
 }
@@ -120,7 +119,7 @@ func (stubCollaborators) CreateFinalERPOrder(context.Context, providers.ERPProvi
 func (stubCollaborators) FinalisationInverted(string) bool { return false }
 func (stubCollaborators) ReReserveAfterFailedFinalisation(context.Context, providers.ERPProvider, string, []StockReservationRow) {
 }
-func (stubCollaborators) ReverseCartReservationsPerRow(context.Context, providers.ERPProvider, string) error {
+func (stubCollaborators) ReverseCartReservationsPerRow(context.Context, providers.ERPProvider, string, string) error {
 	return nil
 }
 func (stubCollaborators) MarkFinalisationFailed(context.Context, string, string)                {}

@@ -158,7 +158,7 @@ func ParsePurchaseItems(texto string) []PurchaseItem {
 	}
 
 	if len(itens) > 0 {
-		return itens
+		return unificarRepetidos(itens)
 	}
 
 	if pedidoSemCodigo(texto, tokens) {
@@ -170,6 +170,37 @@ func ParsePurchaseItems(texto string) []PurchaseItem {
 	}
 
 	return nil
+}
+
+// unificarRepetidos junta o mesmo código citado mais de uma vez no comentário.
+//
+// A leitura por item passou a produzir uma entrada por citação, e citações
+// repetidas do MESMO código somavam: "1130 x2 1130 x3" virava cinco unidades, e
+// "1130 1130" — o código digitado duas vezes — virava duas.
+//
+// Dentro de um único comentário, repetir o código é correção ou dedo duplo com
+// muito mais frequência do que é soma: quem quer cinco escreve "1130 x5". Então
+// vale a ÚLTIMA quantidade dita, que é a versão mais recente da intenção dela.
+//
+// A escolha segue a assimetria de custo de todo o resto deste parser: entregar
+// menos do que ela quis é um comentário a mais; entregar mais é unidade que ela
+// não pediu, com baixa de estoque e pedido no ERP. A ordem é a da primeira
+// aparição, porque é a ordem em que ela pensou.
+func unificarRepetidos(itens []PurchaseItem) []PurchaseItem {
+	if len(itens) < 2 {
+		return itens
+	}
+	posicao := make(map[string]int, len(itens))
+	out := make([]PurchaseItem, 0, len(itens))
+	for _, it := range itens {
+		if i, visto := posicao[it.Keyword]; visto {
+			out[i].Quantity = it.Quantity
+			continue
+		}
+		posicao[it.Keyword] = len(out)
+		out = append(out, it)
+	}
+	return out
 }
 
 // pedidoSemCodigo decide se um comentário SEM código é um pedido.
@@ -233,10 +264,15 @@ const maxQuantidadePorItem = 100
 // A leitura por item, que existe para atender "1000 5x 1005 3x", transformava
 // isso em pedido dos DOIS produtos — e ela estava perguntando qual era o certo.
 //
-// O "ou" é a diferença. Ninguém pede dois produtos dizendo "ou"; quem pede lista
-// ("1107 1207", "1107 x2 1207 x3"). Uma pergunta mal lida aqui custa um produto
-// que a compradora nunca pediu, na caixa dela.
-var codigoOuCodigoRe = regexp.MustCompile(`(?i)\b\d{4}\s*(ou|/)\s*\d{4}\b`)
+// O "ou" é a diferença, e SÓ o "ou". Ninguém pede dois produtos dizendo "ou";
+// quem pede lista. Uma pergunta mal lida aqui custa um produto que a compradora
+// nunca pediu, na caixa dela.
+//
+// A barra estava aqui e saiu: "1130 / 1207 / 1145" é lista, não escolha, e em
+// português a barra separa itens com a mesma frequência com que oferece
+// alternativa. Mantê-la recusava três pedidos legítimos para pegar uma pergunta
+// que o "ou" já pega.
+var codigoOuCodigoRe = regexp.MustCompile(`(?i)\b\d{4}\s*ou\s*\d{4}\b`)
 
 // unidadesRe cobre "5 unidades por favor", "1 unidade" — pedido sem verbo e sem
 // código, em que a quantidade é o próprio pedido.

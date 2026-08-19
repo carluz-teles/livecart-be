@@ -347,7 +347,7 @@ func (s *Service) finishERPOrderConversion(ctx context.Context, cartID, storeID,
 			zap.Bool("insufficient_balance", IsTinyInsufficientBalanceErr(launchErr)),
 			zap.Error(launchErr),
 		)
-		if err := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, cartID); err != nil {
+		if err := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, storeID, cartID); err != nil {
 			return fmt.Errorf("reversing reservations on conversion fallback: %w", err)
 		}
 		if retryErr := erpProvider.LaunchOrderStock(ctx, orderID); retryErr != nil {
@@ -362,7 +362,7 @@ func (s *Service) finishERPOrderConversion(ctx context.Context, cartID, storeID,
 		)
 	}
 
-	if err := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, cartID); err != nil {
+	if err := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, storeID, cartID); err != nil {
 		return fmt.Errorf("reversing reservations after conversion launch: %w", err)
 	}
 

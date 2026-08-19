@@ -196,7 +196,7 @@ func TestCicloDeVidaDevolveOSaldoExatoAoTiny(t *testing.T) {
 	}{
 		{
 			// O caso de campo: reserva 1, ajusta +1, expira.
-			nome: "reserva 1, ajuste +1, expira",
+			nome:  "reserva 1, ajuste +1, expira",
 			saldo: 5,
 			ops: []operacao{
 				{tipo: "reserva", qtd: 1},
@@ -205,7 +205,7 @@ func TestCicloDeVidaDevolveOSaldoExatoAoTiny(t *testing.T) {
 			},
 		},
 		{
-			nome: "reserva sozinha e expira",
+			nome:  "reserva sozinha e expira",
 			saldo: 5,
 			ops: []operacao{
 				{tipo: "reserva", qtd: 2},
