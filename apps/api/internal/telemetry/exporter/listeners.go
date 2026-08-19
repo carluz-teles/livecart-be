@@ -63,6 +63,8 @@ func (l *Listeners) Dispatch(ctx context.Context, env events.Envelope) {
 		l.OnSessionCreated(ctx, env)
 	case events.SessionEnded:
 		l.OnSessionEnded(ctx, env)
+	case events.CartItemAdded:
+		l.OnCartItemAdded(ctx, env)
 	case events.CartPaid:
 		l.OnCartPaid(ctx, env)
 	case events.PaymentFailed:
@@ -81,6 +83,10 @@ func (l *Listeners) Dispatch(ctx context.Context, env events.Envelope) {
 		l.OnGMVRefunded(ctx, env)
 	case events.CommentReceived:
 		l.OnCommentReceived(ctx, env)
+	case events.ERPFinalizationFailed:
+		l.OnERPFinalizationFailed(ctx, env)
+	case events.NotificationFailed:
+		l.OnNotificationFailed(ctx, env)
 	}
 }
 
@@ -218,6 +224,78 @@ func (l *Listeners) OnPaymentFailed(ctx context.Context, env events.Envelope) {
 	payment.Outcome = "rejected"
 	payment.Timestamp = occurredAtMillis(env)
 	l.send(ctx, env, payment)
+}
+
+// OnCartItemAdded exports cart.item_added as LiveCommerceCart{status:
+// "item_added"} — the funnel's start-of-cart signal. There is no cart.created
+// fact in the domain (carts are inserted directly, no event emitted): the
+// first item_added for a cart is the earliest telemetry-visible proxy for "a
+// cart exists". Fires once per cart+product added (repeatable, no dedup key —
+// see checkout.Repository.cartMutationEventName's doc), so downstream NRQL
+// must use uniqueCount(cart_id), not count(*), to size the funnel's mouth.
+func (l *Listeners) OnCartItemAdded(ctx context.Context, env events.Envelope) {
+	var p struct {
+		CartID string `json:"cart_id"`
+	}
+	if !l.decode(ctx, env, &p) {
+		return
+	}
+	cart := NewLiveCommerceCartPayload(l.cfg.Environment)
+	cart.LiveEventID = env.LiveEventID
+	cart.CartID = p.CartID
+	cart.Status = "item_added"
+	cart.Timestamp = occurredAtMillis(env)
+	l.send(ctx, env, cart)
+}
+
+// OnERPFinalizationFailed exports erp.finalization_failed as
+// LiveCommerceOps{error_type: "erp.finalization_failed"} — closes the "Gap
+// conhecido — Erros" this dashboard used to just warn about (see
+// infra/terraform/newrelic/main.tf).
+func (l *Listeners) OnERPFinalizationFailed(ctx context.Context, env events.Envelope) {
+	var p struct {
+		StoreID  string `json:"store_id"`
+		CartID   string `json:"cart_id"`
+		Provider string `json:"provider"`
+		Reason   string `json:"reason"`
+	}
+	if !l.decode(ctx, env, &p) {
+		return
+	}
+	ops := NewLiveCommerceOpsPayload(l.cfg.Environment)
+	ops.LiveEventID = env.LiveEventID
+	ops.StoreID = p.StoreID
+	ops.CartID = p.CartID
+	ops.ErrorType = "erp.finalization_failed"
+	ops.Provider = p.Provider
+	ops.ErrorMessage = p.Reason
+	ops.Timestamp = occurredAtMillis(env)
+	l.send(ctx, env, ops)
+}
+
+// OnNotificationFailed exports notification.failed as LiveCommerceOps{error_type:
+// "notification.failed"} — covers every channel (Channel carries which one:
+// whatsapp, instagram_dm, ...), same gap-closing rationale as
+// OnERPFinalizationFailed.
+func (l *Listeners) OnNotificationFailed(ctx context.Context, env events.Envelope) {
+	var p struct {
+		StoreID string `json:"store_id"`
+		Channel string `json:"channel"`
+		CartID  string `json:"cart_id"`
+		Error   string `json:"error"`
+	}
+	if !l.decode(ctx, env, &p) {
+		return
+	}
+	ops := NewLiveCommerceOpsPayload(l.cfg.Environment)
+	ops.LiveEventID = env.LiveEventID
+	ops.StoreID = p.StoreID
+	ops.CartID = p.CartID
+	ops.ErrorType = "notification.failed"
+	ops.Channel = p.Channel
+	ops.ErrorMessage = p.Error
+	ops.Timestamp = occurredAtMillis(env)
+	l.send(ctx, env, ops)
 }
 
 // OnCartCheckoutArmed exports cart.checkout_armed as

@@ -10,6 +10,7 @@ const (
 	eventTypeLiveCommerceEvent    = "LiveCommerceEvent"
 	eventTypeLiveCommerceCartItem = "LiveCommerceCartItem"
 	eventTypeLiveCommerceComment  = "LiveCommerceComment"
+	eventTypeLiveCommerceOps      = "LiveCommerceOps"
 )
 
 // LiveCommerceCartPayload is the New Relic custom event for a cart's payment
@@ -165,4 +166,31 @@ type LiveCommerceCommentPayload struct {
 // NewLiveCommerceCommentPayload builds the payload with EventType prefilled.
 func NewLiveCommerceCommentPayload(environment string) LiveCommerceCommentPayload {
 	return LiveCommerceCommentPayload{EventType: eventTypeLiveCommerceComment, Environment: environment}
+}
+
+// LiveCommerceOpsPayload is the New Relic custom event for an operational
+// failure downstream of a paid cart: erp.finalization_failed (ERP/Tiny push
+// failed) or notification.failed (a delivery attempt failed, any channel).
+// Dashboard gap this closes: before this fatia, neither fact had any New
+// Relic telemetry — see infra/terraform/newrelic/main.tf's "Gap conhecido"
+// markdown widget.
+type LiveCommerceOpsPayload struct {
+	EventType    string `json:"eventType"`
+	LiveEventID  string `json:"live_event_id,omitempty"`
+	StoreID      string `json:"store_id,omitempty"`
+	CartID       string `json:"cart_id,omitempty"`
+	ErrorType    string `json:"error_type,omitempty"` // erp.finalization_failed | notification.failed
+	Channel      string `json:"channel,omitempty"`    // whatsapp | instagram_dm — notification.failed only
+	Provider     string `json:"provider,omitempty"`   // tiny — erp.finalization_failed only
+	ErrorMessage string `json:"error_message,omitempty"`
+	// Environment is "staging"/"production"/"development" (config.Environment())
+	// — staging and production share the same New Relic account (8291202) and
+	// dashboard, so every custom event must self-identify to be filterable.
+	Environment string `json:"environment"`
+	Timestamp   int64  `json:"timestamp"`
+}
+
+// NewLiveCommerceOpsPayload builds the payload with EventType prefilled.
+func NewLiveCommerceOpsPayload(environment string) LiveCommerceOpsPayload {
+	return LiveCommerceOpsPayload{EventType: eventTypeLiveCommerceOps, Environment: environment}
 }

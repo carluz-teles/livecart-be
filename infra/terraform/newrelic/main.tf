@@ -2,13 +2,14 @@
 # LiveCart — New Relic Dashboard (Fatia 5/6 do projeto de telemetria)
 # ==============================================================================
 #
-# Fonte de dados: 5 custom events emitidos pelo exporter
+# Fonte de dados: 6 custom events emitidos pelo exporter
 # (apps/api/internal/telemetry/exporter/payloads.go), conta New Relic 8291202:
 #   - LiveCommerceEvent      (action=created|ended)
-#   - LiveCommerceCart       (status=created|checkout_armed|paid|expired|cancelled|refunded)
+#   - LiveCommerceCart       (status=item_added|checkout_armed|paid|expired|cancelled|refunded)
 #   - LiveCommerceCartItem   (1 por item vendido)
 #   - LiveCommercePayment    (outcome=approved|rejected|recorded|refunded)
-#   - LiveCommerceComment
+#   - LiveCommerceComment    (engajamento — não usado em nenhum funil de vendas)
+#   - LiveCommerceOps        (error_type=erp.finalization_failed|notification.failed)
 #
 # ARMADILHA DE GMV (ver payloads.go, comentário de LiveCommercePaymentPayload):
 # um cart pago emite DOIS eventos LiveCommercePayment para o mesmo cart_id —
@@ -17,10 +18,20 @@
 # outcomes DOBRA o GMV.
 #
 # Decisão deste dashboard: todo widget de GMV usa `sum(gmv_cents) FROM
-# LiveCommerceCart WHERE status = 'paid'` — é a fonte mais direta (1 evento por
-# cart pago) e não tem esse risco de duplicidade. LiveCommercePayment só é usado
-# aqui para Payment Success Rate (contagem de outcomes approved/rejected, não
-# soma de amount_cents), nunca para GMV.
+# LiveCommerceCart WHERE status = 'paid'` (Item Revenue) ou
+# `sum(gmv_cents - discount_cents + shipping_cents)` (Order Total) — ambos são a
+# fonte mais direta (1 evento por cart pago) e não têm o risco de duplicidade
+# acima. LiveCommercePayment só é usado aqui para Payment Success Rate (contagem
+# de outcomes approved/rejected, não soma de amount_cents), nunca para GMV.
+#
+# FUNIL DE CONVERSÃO: usa status='item_added' -> status='paid' (uniqueCount de
+# cart_id). Não existe fato cart.created no domínio (ver OnCartItemAdded's doc
+# em listeners.go) — item_added é o proxy de "carrinho iniciado" mais próximo.
+# checkout_armed foi abandonado como denominador: não dispara no fluxo normal de
+# compra (só em finalização forçada por fim de live/regeneração de checkout —
+# ver enrich.go), o que inflava/zerava a conversão. Comentários (LiveCommerceComment)
+# não entram no funil de vendas: nem todo comentário numa live é intenção de
+# compra, o que tornava o dado ruidoso demais para decisão.
 #
 # Retenção de dados: controlada no nível de conta/plano do New Relic para custom
 # events, não por Terraform de dashboard. Ver var.data_retention_days
@@ -55,26 +66,46 @@ resource "newrelic_one_dashboard" "live_commerce" {
     }
 
     widget_billboard {
-      title  = "GMV total (R$)"
+      title  = "Item Revenue (R$)"
       row    = 1
       column = 4
-      width  = 3
+      width  = 2
       height = 3
 
       nrql_query {
-        query = "SELECT sum(gmv_cents) / 100 AS 'GMV (R$)' FROM LiveCommerceCart WHERE status = 'paid' AND environment = {{environment}} SINCE 1 day ago"
+        query = "SELECT sum(gmv_cents) / 100 AS 'Item Revenue (R$)' FROM LiveCommerceCart WHERE status = 'paid' AND environment = {{environment}} SINCE 1 day ago"
       }
     }
 
+    # Order Total = Item Revenue - desconto + frete (gmv_cents é só a soma de
+    # itens; discount_cents/shipping_cents já são enriquecidos no evento
+    # cart.paid — ver listeners.go's OnCartPaid).
     widget_billboard {
-      title  = "Conversion Rate geral (%)"
+      title  = "Order Total (R$)"
       row    = 1
-      column = 7
-      width  = 3
+      column = 6
+      width  = 2
       height = 3
 
       nrql_query {
-        query = "SELECT filter(count(*), WHERE status = 'paid') / filter(count(*), WHERE status = 'checkout_armed') * 100 AS 'Conversion %' FROM LiveCommerceCart WHERE environment = {{environment}} SINCE 1 day ago"
+        query = "SELECT sum(gmv_cents - discount_cents + shipping_cents) / 100 AS 'Order Total (R$)' FROM LiveCommerceCart WHERE status = 'paid' AND environment = {{environment}} SINCE 1 day ago"
+      }
+    }
+
+    # Conversion Rate: created (proxy = uniqueCount de cart_id em
+    # status='item_added', já que não existe fato cart.created — ver
+    # OnCartItemAdded's doc) -> paid. checkout_armed foi abandonado como
+    # denominador: não dispara no fluxo normal de compra, só em finalização
+    # forçada por fim de live ou regeneração de checkout (enrich.go).
+    widget_billboard {
+      title  = "Conversion Rate geral (%)"
+      row    = 1
+      column = 8
+      width  = 2
+      height = 3
+
+      nrql_query {
+        query = "SELECT filter(uniqueCount(cart_id), WHERE status = 'paid') / filter(uniqueCount(cart_id), WHERE status = 'item_added') * 100 AS 'Conversion %' FROM LiveCommerceCart WHERE environment = {{environment}} SINCE 1 day ago"
       }
     }
 
@@ -91,26 +122,26 @@ resource "newrelic_one_dashboard" "live_commerce" {
     }
 
     widget_line {
-      title  = "GMV acumulado (R$)"
+      title  = "GMV acumulado — Item Revenue vs Order Total (R$)"
       row    = 4
       column = 1
       width  = 6
       height = 3
 
       nrql_query {
-        query = "SELECT sum(gmv_cents) / 100 AS 'GMV (R$)' FROM LiveCommerceCart WHERE status = 'paid' AND environment = {{environment}} TIMESERIES SINCE 1 day ago"
+        query = "SELECT sum(gmv_cents) / 100 AS 'Item Revenue (R$)', sum(gmv_cents - discount_cents + shipping_cents) / 100 AS 'Order Total (R$)' FROM LiveCommerceCart WHERE status = 'paid' AND environment = {{environment}} TIMESERIES SINCE 1 day ago"
       }
     }
 
     widget_line {
-      title  = "Cart funnel (created -> checkout_armed -> paid)"
+      title  = "Cart funnel (item_added -> paid)"
       row    = 4
       column = 7
       width  = 6
       height = 3
 
       nrql_query {
-        query = "SELECT filter(count(*), WHERE status = 'created') AS 'Created', filter(count(*), WHERE status = 'checkout_armed') AS 'Checkout Armed', filter(count(*), WHERE status = 'paid') AS 'Paid' FROM LiveCommerceCart WHERE environment = {{environment}} TIMESERIES SINCE 1 day ago"
+        query = "SELECT filter(uniqueCount(cart_id), WHERE status = 'item_added') AS 'Created', filter(uniqueCount(cart_id), WHERE status = 'paid') AS 'Paid' FROM LiveCommerceCart WHERE environment = {{environment}} TIMESERIES SINCE 1 day ago"
       }
     }
 
@@ -150,14 +181,28 @@ resource "newrelic_one_dashboard" "live_commerce" {
       }
     }
 
-    widget_markdown {
-      title  = "Gap conhecido — Erros"
+    widget_table {
+      title  = "Erros operacionais por tipo (24h)"
       row    = 10
       column = 7
       width  = 6
       height = 3
 
-      text = "### Erros\n\nNão existe hoje um `eventType` de erro/log exportado para o New Relic (o exporter só emite os 5 custom events LiveCommerce*). Este espaço fica reservado para quando essa telemetria existir — ver Fatia 6 (log drain), fora do escopo desta fatia."
+      nrql_query {
+        query = "SELECT count(*) FROM LiveCommerceOps WHERE environment = {{environment}} FACET error_type, channel, provider SINCE 24 hours ago LIMIT 20"
+      }
+    }
+
+    widget_table {
+      title  = "Erros recentes (detalhe)"
+      row    = 13
+      column = 1
+      width  = 12
+      height = 3
+
+      nrql_query {
+        query = "SELECT error_type, channel, provider, error_message, cart_id, store_id FROM LiveCommerceOps WHERE environment = {{environment}} SINCE 24 hours ago LIMIT 50"
+      }
     }
   }
 
@@ -181,38 +226,50 @@ resource "newrelic_one_dashboard" "live_commerce" {
     }
 
     widget_billboard {
-      title  = "GMV do evento (R$)"
+      title  = "Item Revenue do evento (R$)"
       row    = 1
       column = 5
-      width  = 4
+      width  = 2
       height = 3
 
       nrql_query {
-        query = "SELECT sum(gmv_cents) / 100 AS 'GMV (R$)' FROM LiveCommerceCart WHERE status = 'paid' AND live_event_id = {{live_event_id}} SINCE 1 day ago"
+        query = "SELECT sum(gmv_cents) / 100 AS 'Item Revenue (R$)' FROM LiveCommerceCart WHERE status = 'paid' AND live_event_id = {{live_event_id}} SINCE 1 day ago"
       }
     }
 
     widget_billboard {
-      title  = "Comment -> Cart (%)"
+      title  = "Order Total do evento (R$)"
+      row    = 1
+      column = 7
+      width  = 2
+      height = 3
+
+      nrql_query {
+        query = "SELECT sum(gmv_cents - discount_cents + shipping_cents) / 100 AS 'Order Total (R$)' FROM LiveCommerceCart WHERE status = 'paid' AND live_event_id = {{live_event_id}} SINCE 1 day ago"
+      }
+    }
+
+    widget_billboard {
+      title  = "Conversion Rate do evento — mouth (%)"
       row    = 1
       column = 9
       width  = 4
       height = 3
 
       nrql_query {
-        query = "SELECT filter(uniqueCount(cart_id), WHERE converted_to_cart) / count(*) * 100 AS 'Comment->Cart %' FROM LiveCommerceComment WHERE live_event_id = {{live_event_id}} SINCE 1 day ago"
+        query = "SELECT filter(uniqueCount(cart_id), WHERE status = 'paid') / filter(uniqueCount(cart_id), WHERE status = 'item_added') * 100 AS 'Conversion %' FROM LiveCommerceCart WHERE live_event_id = {{live_event_id}} SINCE 1 day ago"
       }
     }
 
     widget_funnel {
-      title  = "Funil comentário -> carrinho -> pago"
+      title  = "Funil carrinho -> pago"
       row    = 4
       column = 1
       width  = 6
       height = 3
 
       nrql_query {
-        query = "SELECT filter(count(*), WHERE eventType() = 'LiveCommerceComment') AS 'Comentários', filter(uniqueCount(cart_id), WHERE eventType() = 'LiveCommerceComment' AND converted_to_cart) AS 'Convertidos p/ Carrinho', filter(uniqueCount(cart_id), WHERE eventType() = 'LiveCommerceCart' AND status = 'paid') AS 'Pagos' FROM LiveCommerceComment, LiveCommerceCart WHERE live_event_id = {{live_event_id}} SINCE 1 day ago"
+        query = "SELECT filter(uniqueCount(cart_id), WHERE status = 'item_added') AS 'Carrinhos', filter(uniqueCount(cart_id), WHERE status = 'paid') AS 'Pagos' FROM LiveCommerceCart WHERE live_event_id = {{live_event_id}} SINCE 1 day ago"
       }
     }
 
@@ -252,17 +309,9 @@ resource "newrelic_one_dashboard" "live_commerce" {
       }
     }
 
-    widget_table {
-      title  = "Conversion Rate do evento (%)"
-      row    = 10
-      column = 1
-      width  = 6
-      height = 3
-
-      nrql_query {
-        query = "SELECT filter(count(*), WHERE status = 'paid') / filter(count(*), WHERE status = 'checkout_armed') * 100 AS 'Conversion %' FROM LiveCommerceCart WHERE live_event_id = {{live_event_id}} SINCE 1 day ago"
-      }
-    }
+    # A billboard "Conversion Rate do evento — mouth (%)" já cobre esse número
+    # (row 1) com o denominador correto (item_added, não checkout_armed) — sem
+    # duplicar aqui.
 
     widget_table {
       title  = "Timeline do evento (últimos 60min)"
