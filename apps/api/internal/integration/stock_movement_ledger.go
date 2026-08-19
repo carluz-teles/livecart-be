@@ -151,3 +151,71 @@ func (r *Repository) ListUnresolvedERPStockMovementsByCart(ctx context.Context, 
 	}
 	return out, nil
 }
+
+// ─── Resolução manual (erp.StockMovementResolution) ─────────────────────────
+
+func (r *Repository) ListUnresolvedERPStockMovementsByStore(ctx context.Context, storeID string) ([]erp.PendingStockMovement, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListUnresolvedERPStockMovementsByStore(ctx, sID)
+	if err != nil {
+		return nil, fmt.Errorf("listing pending erp stock movements: %w", err)
+	}
+	out := make([]erp.PendingStockMovement, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, erp.PendingStockMovement{
+			StockMovementRow: *movementRowFromSQLC(sqlc.ErpStockMovement{
+				ID: row.ID, StoreID: row.StoreID, CartID: row.CartID, EventID: row.EventID,
+				ProductID: row.ProductID, ExternalProductID: row.ExternalProductID,
+				Direction: row.Direction, Quantity: row.Quantity, UnitPriceCents: row.UnitPriceCents,
+				IdempotencyKey: row.IdempotencyKey, Status: row.Status, ErpMovementID: row.ErpMovementID,
+				Attempts: row.Attempts, LastError: row.LastError, LastAttemptAt: row.LastAttemptAt,
+				CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, ReservationID: row.ReservationID,
+			}),
+			ProductName:    row.ProductName,
+			ProductKeyword: row.ProductKeyword,
+			CartHandle:     row.CartHandle,
+		})
+	}
+	return out, nil
+}
+
+func (r *Repository) ConfirmERPStockMovementManually(ctx context.Context, movementID, storeID string) (*erp.StockMovementRow, error) {
+	mID, err := parseUUID(movementID)
+	if err != nil {
+		return nil, err
+	}
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.ConfirmERPStockMovementManually(ctx, sqlc.ConfirmERPStockMovementManuallyParams{ID: mID, StoreID: sID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil // o CAS perdeu: estado mudou por baixo
+	}
+	if err != nil {
+		return nil, fmt.Errorf("confirming erp stock movement manually: %w", err)
+	}
+	return movementRowFromSQLC(row), nil
+}
+
+func (r *Repository) ResetERPStockMovementForRetry(ctx context.Context, movementID, storeID string) (*erp.StockMovementRow, error) {
+	mID, err := parseUUID(movementID)
+	if err != nil {
+		return nil, err
+	}
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.ResetERPStockMovementForRetry(ctx, sqlc.ResetERPStockMovementForRetryParams{ID: mID, StoreID: sID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resetting erp stock movement for retry: %w", err)
+	}
+	return movementRowFromSQLC(row), nil
+}

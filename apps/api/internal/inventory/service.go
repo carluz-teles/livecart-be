@@ -205,6 +205,25 @@ func (s *Service) CancelWaitlistItem(ctx context.Context, waitlistItemID, cartID
 		return false, fmt.Errorf("cancelling waitlist item: %w", err)
 	}
 
+	if item.Status == "waiting" {
+		// A fila vive em DUAS fontes: a linha em waitlist_items e o contador
+		// waitlisted_quantity no item do carrinho. Este ramo só matava a linha,
+		// e o contador ficava — o checkout mostrava "aguardando" para sempre.
+		// Na live de 17/08 a @daianyfer saiu de duas filas (7 e 5 unidades),
+		// nada mudou na tela dela, e o carrinho seguiu anunciando 12 unidades
+		// fantasma. Nada de estoque ou ERP a devolver aqui: em 'waiting' nenhuma
+		// unidade foi separada — o que sai é só o contador.
+		if _, err := s.repo.DecrementCartItemWaitlistedQuantity(ctx, cartID, item.ProductID, item.Quantity); err != nil {
+			logger.From(ctx, s.logger).Error("waitlist cancel: cart counter not decremented — the cart will keep announcing phantom waitlisted units",
+				zap.String("waitlist_item_id", waitlistItemID),
+				zap.String("cart_id", cartID),
+				zap.Int("quantity", item.Quantity),
+				zap.Error(err),
+			)
+		}
+		return true, nil
+	}
+
 	if item.Status == "notified" {
 		// O cliente já tinha o item reservado no cart + ERP. Devolve
 		// tudo via mesmo fluxo do worker de expiração.

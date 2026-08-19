@@ -58,6 +58,49 @@ func (q *Queries) ClaimERPStockMovement(ctx context.Context, arg ClaimERPStockMo
 	return i, err
 }
 
+const confirmERPStockMovementManually = `-- name: ConfirmERPStockMovementManually :one
+UPDATE erp_stock_movements
+SET status = 'confirmed',
+    last_error = 'resolvido manualmente: lançamento confirmado no extrato',
+    updated_at = now()
+WHERE id = $1 AND store_id = $2 AND status IN ('failed', 'unconfirmed')
+RETURNING id, store_id, cart_id, event_id, product_id, external_product_id, direction, quantity, unit_price_cents, idempotency_key, status, erp_movement_id, attempts, last_error, last_attempt_at, created_at, updated_at, reservation_id
+`
+
+type ConfirmERPStockMovementManuallyParams struct {
+	ID      pgtype.UUID `json:"id"`
+	StoreID pgtype.UUID `json:"store_id"`
+}
+
+// Decisão humana pós-extrato: o lançamento ESTÁ lá. CAS a partir dos estados
+// parados — 'resolving' pertence a um resolver em voo e 'pending' recente à
+// goroutine dona; nenhum dos dois aceita decisão manual por cima.
+func (q *Queries) ConfirmERPStockMovementManually(ctx context.Context, arg ConfirmERPStockMovementManuallyParams) (ErpStockMovement, error) {
+	row := q.db.QueryRow(ctx, confirmERPStockMovementManually, arg.ID, arg.StoreID)
+	var i ErpStockMovement
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.CartID,
+		&i.EventID,
+		&i.ProductID,
+		&i.ExternalProductID,
+		&i.Direction,
+		&i.Quantity,
+		&i.UnitPriceCents,
+		&i.IdempotencyKey,
+		&i.Status,
+		&i.ErpMovementID,
+		&i.Attempts,
+		&i.LastError,
+		&i.LastAttemptAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ReservationID,
+	)
+	return i, err
+}
+
 const createERPStockMovement = `-- name: CreateERPStockMovement :one
 INSERT INTO erp_stock_movements (
     store_id, cart_id, event_id, product_id, external_product_id,
@@ -240,6 +283,85 @@ func (q *Queries) ListUnresolvedERPStockMovementsByCart(ctx context.Context, car
 	return items, nil
 }
 
+const listUnresolvedERPStockMovementsByStore = `-- name: ListUnresolvedERPStockMovementsByStore :many
+SELECT m.id, m.store_id, m.cart_id, m.event_id, m.product_id, m.external_product_id, m.direction, m.quantity, m.unit_price_cents, m.idempotency_key, m.status, m.erp_movement_id, m.attempts, m.last_error, m.last_attempt_at, m.created_at, m.updated_at, m.reservation_id, p.name AS product_name, p.keyword AS product_keyword,
+       c.platform_handle AS cart_handle
+FROM erp_stock_movements m
+JOIN products p ON p.id = m.product_id
+JOIN carts c ON c.id = m.cart_id
+WHERE m.store_id = $1
+  AND m.status IN ('pending', 'failed', 'unconfirmed', 'resolving')
+ORDER BY m.created_at ASC
+`
+
+type ListUnresolvedERPStockMovementsByStoreRow struct {
+	ID                pgtype.UUID        `json:"id"`
+	StoreID           pgtype.UUID        `json:"store_id"`
+	CartID            pgtype.UUID        `json:"cart_id"`
+	EventID           pgtype.UUID        `json:"event_id"`
+	ProductID         pgtype.UUID        `json:"product_id"`
+	ExternalProductID string             `json:"external_product_id"`
+	Direction         string             `json:"direction"`
+	Quantity          int32              `json:"quantity"`
+	UnitPriceCents    int64              `json:"unit_price_cents"`
+	IdempotencyKey    pgtype.UUID        `json:"idempotency_key"`
+	Status            string             `json:"status"`
+	ErpMovementID     pgtype.Text        `json:"erp_movement_id"`
+	Attempts          int16              `json:"attempts"`
+	LastError         pgtype.Text        `json:"last_error"`
+	LastAttemptAt     pgtype.Timestamptz `json:"last_attempt_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	ReservationID     pgtype.UUID        `json:"reservation_id"`
+	ProductName       string             `json:"product_name"`
+	ProductKeyword    string             `json:"product_keyword"`
+	CartHandle        string             `json:"cart_handle"`
+}
+
+// O painel de pendências do lojista: todo movimento não-resolvido da loja, com
+// o contexto que o humano precisa para conferir o extrato (produto e carrinho).
+func (q *Queries) ListUnresolvedERPStockMovementsByStore(ctx context.Context, storeID pgtype.UUID) ([]ListUnresolvedERPStockMovementsByStoreRow, error) {
+	rows, err := q.db.Query(ctx, listUnresolvedERPStockMovementsByStore, storeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListUnresolvedERPStockMovementsByStoreRow{}
+	for rows.Next() {
+		var i ListUnresolvedERPStockMovementsByStoreRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.StoreID,
+			&i.CartID,
+			&i.EventID,
+			&i.ProductID,
+			&i.ExternalProductID,
+			&i.Direction,
+			&i.Quantity,
+			&i.UnitPriceCents,
+			&i.IdempotencyKey,
+			&i.Status,
+			&i.ErpMovementID,
+			&i.Attempts,
+			&i.LastError,
+			&i.LastAttemptAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ReservationID,
+			&i.ProductName,
+			&i.ProductKeyword,
+			&i.CartHandle,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markERPStockMovementConfirmed = `-- name: MarkERPStockMovementConfirmed :exec
 UPDATE erp_stock_movements
 SET status = 'confirmed', erp_movement_id = $2, last_error = NULL, updated_at = now()
@@ -274,4 +396,47 @@ type MarkERPStockMovementOutcomeParams struct {
 func (q *Queries) MarkERPStockMovementOutcome(ctx context.Context, arg MarkERPStockMovementOutcomeParams) error {
 	_, err := q.db.Exec(ctx, markERPStockMovementOutcome, arg.ID, arg.Status, arg.LastError)
 	return err
+}
+
+const resetERPStockMovementForRetry = `-- name: ResetERPStockMovementForRetry :one
+UPDATE erp_stock_movements
+SET status = 'failed', attempts = 0,
+    last_error = 'resolvido manualmente: lançamento ausente do extrato; re-execução autorizada',
+    last_attempt_at = now(), updated_at = now()
+WHERE id = $1 AND store_id = $2 AND status IN ('failed', 'unconfirmed')
+RETURNING id, store_id, cart_id, event_id, product_id, external_product_id, direction, quantity, unit_price_cents, idempotency_key, status, erp_movement_id, attempts, last_error, last_attempt_at, created_at, updated_at, reservation_id
+`
+
+type ResetERPStockMovementForRetryParams struct {
+	ID      pgtype.UUID `json:"id"`
+	StoreID pgtype.UUID `json:"store_id"`
+}
+
+// Decisão humana pós-extrato: o lançamento NÃO está lá — provado não-entregue
+// pelo olho humano, que é a única consulta que a API do Tiny permite. Zera as
+// tentativas para o resolver re-executar imediatamente com o teto cheio.
+func (q *Queries) ResetERPStockMovementForRetry(ctx context.Context, arg ResetERPStockMovementForRetryParams) (ErpStockMovement, error) {
+	row := q.db.QueryRow(ctx, resetERPStockMovementForRetry, arg.ID, arg.StoreID)
+	var i ErpStockMovement
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.CartID,
+		&i.EventID,
+		&i.ProductID,
+		&i.ExternalProductID,
+		&i.Direction,
+		&i.Quantity,
+		&i.UnitPriceCents,
+		&i.IdempotencyKey,
+		&i.Status,
+		&i.ErpMovementID,
+		&i.Attempts,
+		&i.LastError,
+		&i.LastAttemptAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ReservationID,
+	)
+	return i, err
 }

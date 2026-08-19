@@ -51,3 +51,37 @@ WHERE status IN ('pending', 'failed', 'unconfirmed', 'resolving')
   AND created_at < now() - interval '1 minute'
 ORDER BY created_at ASC
 LIMIT $1;
+
+-- name: ListUnresolvedERPStockMovementsByStore :many
+-- O painel de pendências do lojista: todo movimento não-resolvido da loja, com
+-- o contexto que o humano precisa para conferir o extrato (produto e carrinho).
+SELECT m.*, p.name AS product_name, p.keyword AS product_keyword,
+       c.platform_handle AS cart_handle
+FROM erp_stock_movements m
+JOIN products p ON p.id = m.product_id
+JOIN carts c ON c.id = m.cart_id
+WHERE m.store_id = $1
+  AND m.status IN ('pending', 'failed', 'unconfirmed', 'resolving')
+ORDER BY m.created_at ASC;
+
+-- name: ConfirmERPStockMovementManually :one
+-- Decisão humana pós-extrato: o lançamento ESTÁ lá. CAS a partir dos estados
+-- parados — 'resolving' pertence a um resolver em voo e 'pending' recente à
+-- goroutine dona; nenhum dos dois aceita decisão manual por cima.
+UPDATE erp_stock_movements
+SET status = 'confirmed',
+    last_error = 'resolvido manualmente: lançamento confirmado no extrato',
+    updated_at = now()
+WHERE id = $1 AND store_id = $2 AND status IN ('failed', 'unconfirmed')
+RETURNING *;
+
+-- name: ResetERPStockMovementForRetry :one
+-- Decisão humana pós-extrato: o lançamento NÃO está lá — provado não-entregue
+-- pelo olho humano, que é a única consulta que a API do Tiny permite. Zera as
+-- tentativas para o resolver re-executar imediatamente com o teto cheio.
+UPDATE erp_stock_movements
+SET status = 'failed', attempts = 0,
+    last_error = 'resolvido manualmente: lançamento ausente do extrato; re-execução autorizada',
+    last_attempt_at = now(), updated_at = now()
+WHERE id = $1 AND store_id = $2 AND status IN ('failed', 'unconfirmed')
+RETURNING *;

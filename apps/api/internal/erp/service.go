@@ -167,8 +167,9 @@ type Service struct {
 	// movements é o razão de movimentos contra o ERP (migration 000132).
 	// Opcional de propósito: nil = caminho legado, síncrono e sem registro de
 	// intenção. Ver movement_ledger.go.
-	movements         StockMovementLedger
-	movementScheduler StockMovementScheduler
+	movements          StockMovementLedger
+	movementScheduler  StockMovementScheduler
+	movementResolution StockMovementResolution
 }
 
 // NewService creates a new ERP service. collab supplies the integration-Service

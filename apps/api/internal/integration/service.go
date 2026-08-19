@@ -188,6 +188,7 @@ func (s *Service) erpStock() *erp.Service {
 		// O razão de movimentos (000132) é o mesmo Repository por baixo; a
 		// interface é separada para o ledger ser opcional nos testes do erp.
 		s.erpStockService.SetStockMovementLedger(s.repo)
+		s.erpStockService.SetStockMovementResolution(s.repo)
 	})
 	return s.erpStockService
 }
@@ -233,6 +234,39 @@ func (s *Service) RunScheduledStockMovementResolve(ctx context.Context, movement
 // SetStockMovementScheduler liga o agendador de retries do razão de movimentos.
 func (s *Service) SetStockMovementScheduler(sch erp.StockMovementScheduler) {
 	s.erpStockService.SetStockMovementScheduler(sch)
+}
+
+// RunStockReconciliation roda a comparação local × ERP para a loja, em modo
+// RELATÓRIO: só detecta, nunca corrige, e não dispara alerta nenhum. A fórmula
+// (LocalStock − Held) ainda precisa de calibração com dados reais — a validação
+// de 18/08 mostrou divergência não explicada num produto saudável — então o
+// primeiro uso disto é justamente calibrar, com a loja quieta.
+func (s *Service) RunStockReconciliation(ctx context.Context, storeID string) (*erp.ReconciliationReport, error) {
+	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	if err != nil {
+		return nil, httpx.ErrNotFound("nenhuma integração ERP ativa")
+	}
+	provider, err := s.erpProviderFor(ctx, integration)
+	if err != nil {
+		return nil, fmt.Errorf("creating ERP provider: %w", err)
+	}
+	stockReader, ok := provider.(interface {
+		GetProductStock(ctx context.Context, externalID string) (int, error)
+	})
+	if !ok {
+		return nil, httpx.ErrNotFound("o provedor ERP não expõe leitura de saldo")
+	}
+	return erp.ReconcileStockAgainstERP(ctx, s.logger, s.repo, stockReader, storeID, "tiny")
+}
+
+// ListPendingStockMovements delega o painel de pendências do razão.
+func (s *Service) ListPendingStockMovements(ctx context.Context, storeID string) ([]erp.PendingStockMovement, error) {
+	return s.erpStockService.ListPendingStockMovements(ctx, storeID)
+}
+
+// ResolveStockMovementManually delega a decisão humana pós-extrato.
+func (s *Service) ResolveStockMovementManually(ctx context.Context, storeID, movementID string, landed bool) (*erp.StockMovementRow, error) {
+	return s.erpStockService.ResolveStockMovementManually(ctx, storeID, movementID, landed)
 }
 
 // ResolveProvider satisfies erp.StockCollaborators: it maps the neutral
