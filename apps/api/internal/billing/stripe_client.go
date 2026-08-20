@@ -32,12 +32,13 @@ type stripeGateway interface {
 	CreateTrialSubscription(ctx context.Context, customerID string, cfg PlanConfig, trialEnd time.Time) (*StripeSubscription, error)
 	GetSubscription(ctx context.Context, subscriptionID string) (*StripeSubscription, error)
 	CreateSetupCheckoutSession(ctx context.Context, customerID, successURL, cancelURL string, metadata map[string]string) (*CheckoutSession, error)
+	CreateSubscriptionCheckoutSession(ctx context.Context, customerID, flatPriceID, feeDisclosure, successURL, cancelURL string, metadata map[string]string) (*CheckoutSession, error)
 	GetSetupIntentPaymentMethod(ctx context.Context, setupIntentID string) (string, error)
 	ActivateSubscription(ctx context.Context, sub *StripeSubscription, cfg PlanConfig, paymentMethodID string) (*StripeSubscription, error)
 	CreatePortalSession(ctx context.Context, customerID, returnURL string) (string, error)
 	UpgradeSubscription(ctx context.Context, sub *StripeSubscription, cfg PlanConfig) (*StripeSubscription, error)
 	ScheduleDowngrade(ctx context.Context, sub *StripeSubscription, cfg PlanConfig) error
-	SendMeterEvent(ctx context.Context, eventName, customerID, identifier string, valueCents int64) error
+	AddInvoiceItem(ctx context.Context, customerID, invoiceID string, amountCents int64, currency, description string) error
 	CreateCustomerBalanceCredit(ctx context.Context, customerID string, amountCents int64, description string) error
 }
 
@@ -239,6 +240,12 @@ type stripeError struct {
 }
 
 func (c *StripeClient) do(ctx context.Context, method, path string, form url.Values, out any) error {
+	return c.doIdem(ctx, method, path, form, "", out)
+}
+
+// doIdem is do with an optional Stripe Idempotency-Key — set it on writes that
+// must not duplicate on retry/webhook-redelivery (e.g. commission invoice items).
+func (c *StripeClient) doIdem(ctx context.Context, method, path string, form url.Values, idemKey string, out any) error {
 	var body io.Reader
 	if form != nil {
 		body = strings.NewReader(form.Encode())
@@ -250,6 +257,9 @@ func (c *StripeClient) do(ctx context.Context, method, path string, form url.Val
 	req.SetBasicAuth(c.secretKey, "")
 	if form != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	if idemKey != "" {
+		req.Header.Set("Idempotency-Key", idemKey)
 	}
 
 	start := time.Now()
@@ -289,12 +299,23 @@ func (c *StripeClient) do(ctx context.Context, method, path string, form url.Val
 
 // CheckoutSession is the subset of the session resource we consume.
 type CheckoutSession struct {
-	ID          string            `json:"id"`
-	URL         string            `json:"url"`
-	Mode        string            `json:"mode"`
-	Customer    string            `json:"customer"`
-	Metadata    map[string]string `json:"metadata"`
-	SetupIntent string            `json:"setup_intent"`
+	ID           string            `json:"id"`
+	URL          string            `json:"url"`
+	Mode         string            `json:"mode"`
+	Customer     string            `json:"customer"`
+	Metadata     map[string]string `json:"metadata"`
+	SetupIntent  string            `json:"setup_intent"`
+	Subscription string            `json:"subscription"` // populated in subscription mode
+}
+
+// StripeInvoice is the subset of the invoice resource the cycle reactor consumes.
+type StripeInvoice struct {
+	ID            string `json:"id"`
+	BillingReason string `json:"billing_reason"`
+	Subscription  string `json:"subscription"`
+	Customer      string `json:"customer"`
+	PeriodStart   int64  `json:"period_start"`
+	PeriodEnd     int64  `json:"period_end"`
 }
 
 // CreateSetupCheckoutSession opens a hosted Checkout that collects a payment
@@ -314,6 +335,46 @@ func (c *StripeClient) CreateSetupCheckoutSession(ctx context.Context, customerI
 	var out CheckoutSession
 	if err := c.do(ctx, http.MethodPost, "/checkout/sessions", form, &out); err != nil {
 		return nil, fmt.Errorf("creating checkout session: %w", err)
+	}
+	return &out, nil
+}
+
+// CreateSubscriptionCheckoutSession opens a hosted Checkout in subscription
+// mode that creates the paid subscription directly (the trial-local model:
+// there is no pre-existing Stripe subscription). Only the flat price is a line
+// item so the customer never sees the metered per-unit micro-price; the metered
+// GMV item is attached via API on checkout.session.completed. allow_promotion_codes
+// exposes Stripe's native promo field (e.g. CANTODAART). feeDisclosure surfaces
+// the GMV commission in the Checkout via custom_text — the CDC transparency
+// requirement — since the fee is usage-based and can't be shown as an amount here.
+//
+// Follow-up (needs a Terms of Service URL configured in Stripe branding):
+// consent_collection[terms_of_service]=required to capture a recorded acceptance.
+func (c *StripeClient) CreateSubscriptionCheckoutSession(ctx context.Context, customerID, flatPriceID, feeDisclosure, successURL, cancelURL string, metadata map[string]string) (*CheckoutSession, error) {
+	if flatPriceID == "" {
+		return nil, fmt.Errorf("subscription checkout requires a flat price id")
+	}
+	form := url.Values{}
+	form.Set("mode", "subscription")
+	form.Set("customer", customerID)
+	form.Set("line_items[0][price]", flatPriceID)
+	form.Set("line_items[0][quantity]", "1")
+	form.Set("allow_promotion_codes", "true")
+	form.Set("success_url", successURL)
+	form.Set("cancel_url", cancelURL)
+	if feeDisclosure != "" {
+		form.Set("custom_text[submit][message]", feeDisclosure)
+	}
+	// Carry the identifiers on both the session and the created subscription so
+	// the webhook/reactor can resolve store+plan without a side lookup.
+	for k, v := range metadata {
+		form.Set("metadata["+k+"]", v)
+		form.Set("subscription_data[metadata]["+k+"]", v)
+	}
+
+	var out CheckoutSession
+	if err := c.do(ctx, http.MethodPost, "/checkout/sessions", form, &out); err != nil {
+		return nil, fmt.Errorf("creating subscription checkout session: %w", err)
 	}
 	return &out, nil
 }
@@ -552,15 +613,31 @@ func findItemIDs(sub *StripeSubscription, _ PlanConfig) (flatItemID, meterItemID
 
 // SendMeterEvent reports paid GMV for metered billing. identifier dedupes on
 // Stripe's side (retries of the same cart are no-ops).
-func (c *StripeClient) SendMeterEvent(ctx context.Context, eventName, customerID, identifier string, valueCents int64) error {
+// AddInvoiceItem attaches a one-off charge to a customer's invoice — used to
+// bill the accrued GMV commission on each renewal invoice, so mensalidade and
+// commission land on ONE charge. amountCents may be negative (a credit). The
+// idempotency key (derived from the invoice) makes a webhook redelivery a
+// no-op even if the caller's "mark invoiced" step failed on the first attempt.
+func (c *StripeClient) AddInvoiceItem(ctx context.Context, customerID, invoiceID string, amountCents int64, currency, description string) error {
+	if customerID == "" {
+		return fmt.Errorf("invoice item requires a customer id")
+	}
 	form := url.Values{}
-	form.Set("event_name", eventName)
-	form.Set("identifier", identifier)
-	form.Set("payload[stripe_customer_id]", customerID)
-	form.Set("payload[value]", strconv.FormatInt(valueCents, 10))
-
-	if err := c.do(ctx, http.MethodPost, "/billing/meter_events", form, nil); err != nil {
-		return fmt.Errorf("sending meter event: %w", err)
+	form.Set("customer", customerID)
+	if invoiceID != "" {
+		form.Set("invoice", invoiceID)
+	}
+	form.Set("amount", strconv.FormatInt(amountCents, 10))
+	form.Set("currency", currency)
+	if description != "" {
+		form.Set("description", description)
+	}
+	idemKey := ""
+	if invoiceID != "" {
+		idemKey = "gmv-commission-" + invoiceID
+	}
+	if err := c.doIdem(ctx, http.MethodPost, "/invoiceitems", form, idemKey, nil); err != nil {
+		return fmt.Errorf("creating invoice item: %w", err)
 	}
 	return nil
 }

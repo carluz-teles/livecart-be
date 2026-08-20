@@ -76,6 +76,41 @@ SELECT
 FROM billing_ledger_entries
 WHERE store_id = $1 AND created_at >= $2;
 
+-- name: SumUnbilledBillableFees :one
+-- Soma a taxa (líquida de refunds via refund_credit) ainda NÃO faturada de uma
+-- loja, até o corte do ciclo. stripe_ref IS NULL = não faturada. Usado pelo
+-- reactor de ciclo pra montar o InvoiceItem da comissão.
+SELECT COALESCE(SUM(fee_cents), 0)::bigint AS fee_cents
+FROM billing_ledger_entries
+WHERE store_id = $1 AND billable = true AND stripe_ref IS NULL AND created_at < $2;
+
+-- name: MarkStoreFeesInvoiced :exec
+-- Marca como faturadas as taxas billable não faturadas até o corte (idempotência
+-- do ciclo: um redelivery não refatura). Mesmo predicado do SUM.
+UPDATE billing_ledger_entries
+SET stripe_ref = $3
+WHERE store_id = $1 AND billable = true AND stripe_ref IS NULL AND created_at < $2;
+
+-- name: InsertTaxaPromo :one
+-- Cria uma promo de desconto sobre a comissão (taxa) para uma loja.
+INSERT INTO billing_taxa_promos (store_id, discount_bps, cycles_remaining, code, description)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING *;
+
+-- name: GetActiveTaxaPromo :one
+-- Promo de taxa ativa da loja (mais recente com ciclos restantes). Usada pelo
+-- reactor de ciclo pra descontar a comissão antes de faturar.
+SELECT * FROM billing_taxa_promos
+WHERE store_id = $1 AND cycles_remaining > 0
+ORDER BY created_at DESC
+LIMIT 1;
+
+-- name: ConsumeTaxaPromoCycle :exec
+-- Consome um ciclo da promo (decrementa) após aplicá-la numa fatura.
+UPDATE billing_taxa_promos
+SET cycles_remaining = cycles_remaining - 1
+WHERE id = $1 AND cycles_remaining > 0;
+
 -- name: ListLedgerEntries :many
 -- Extrato do lojista, mais recente primeiro, com contexto do pedido.
 SELECT

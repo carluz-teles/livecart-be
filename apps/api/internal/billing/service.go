@@ -144,37 +144,25 @@ func (s *Service) provisionStripe(ctx context.Context, row *sqlc.Subscription, s
 		customerID = customer.ID
 	}
 
-	// Trial anchored on the Grow plan (PRD 007 decision: plan chosen at
-	// conversion; prices only matter once a card exists).
-	trialEnd := row.TrialEndsAt.Time
-	if !row.TrialEndsAt.Valid || trialEnd.Before(time.Now()) {
-		trialEnd = time.Now().Add(TrialDays * 24 * time.Hour)
-	}
-	sub, err := s.stripe.CreateTrialSubscription(ctx, customerID, Plans()[PlanGrow], trialEnd)
-	if err != nil {
-		// Persist the customer even when the subscription fails, so the
-		// retry skips customer creation.
-		_, _ = s.queries.SetSubscriptionStripeRefs(ctx, sqlc.SetSubscriptionStripeRefsParams{
-			StoreID:          row.StoreID,
-			StripeCustomerID: pgtype.Text{String: customerID, Valid: true},
-		})
-		return err
-	}
-
+	// Trial-local model: onboarding provisions ONLY the Stripe customer. The
+	// paid subscription is created later by the subscription-mode Checkout at
+	// conversion (see CreateCheckoutSession), so the customer can redeem a
+	// promo code natively and never sees the metered per-unit micro-price.
+	// Legacy stores that already carry a Stripe trial subscription are not
+	// re-provisioned here (guarded by !StripeSubscriptionID.Valid at the call
+	// site) and drain through the setup-mode conversion path.
 	updated, err := s.queries.SetSubscriptionStripeRefs(ctx, sqlc.SetSubscriptionStripeRefsParams{
-		StoreID:              row.StoreID,
-		StripeCustomerID:     pgtype.Text{String: customerID, Valid: true},
-		StripeSubscriptionID: pgtype.Text{String: sub.ID, Valid: true},
+		StoreID:          row.StoreID,
+		StripeCustomerID: pgtype.Text{String: customerID, Valid: true},
 	})
 	if err != nil {
-		return fmt.Errorf("persisting stripe refs: %w", err)
+		return fmt.Errorf("persisting stripe customer: %w", err)
 	}
 	*row = updated
 
-	logger.From(ctx, s.logger).Info("stripe trial provisioned",
+	logger.From(ctx, s.logger).Info("stripe customer provisioned (trial-local)",
 		zap.String("store_id", storeID),
 		zap.String("customer", customerID),
-		zap.String("subscription", sub.ID),
 	)
 	return nil
 }
@@ -281,10 +269,23 @@ func (s *Service) ProcessWebhookEvent(ctx context.Context, event *StripeEvent) e
 		if err := json.Unmarshal(event.Data.Object, &session); err != nil {
 			return fmt.Errorf("parsing checkout session: %w", err)
 		}
-		if session.Mode != "setup" {
+		switch session.Mode {
+		case "setup":
+			return s.completeConversion(ctx, &session)
+		case "subscription":
+			return s.completeSubscriptionConversion(ctx, &session)
+		default:
 			return nil
 		}
-		return s.completeConversion(ctx, &session)
+
+	case "invoice.created":
+		// Renewal invoice just drafted — inject the accrued GMV commission as an
+		// invoice item before it finalizes (billed on the same charge).
+		var inv StripeInvoice
+		if err := json.Unmarshal(event.Data.Object, &inv); err != nil {
+			return fmt.Errorf("parsing invoice: %w", err)
+		}
+		return s.OnSubscriptionCycleInvoice(ctx, &inv)
 
 	case "invoice.payment_failed":
 		// Grace handling rides the subscription.updated → past_due event;
@@ -470,26 +471,54 @@ func (s *Service) CreateConversionCheckout(ctx context.Context, input CheckoutIn
 	if err != nil {
 		return "", fmt.Errorf("loading subscription: %w", err)
 	}
-	if !row.StripeCustomerID.Valid || !row.StripeSubscriptionID.Valid {
-		return "", fmt.Errorf("assinatura Stripe ainda não provisionada — tente novamente em instantes")
+	if !row.StripeCustomerID.Valid {
+		return "", fmt.Errorf("cliente Stripe ainda não provisionado — tente novamente em instantes")
 	}
 
 	frontend := strings.TrimRight(config.FrontendURL.String(), "/")
-	session, err := s.stripe.CreateSetupCheckoutSession(ctx,
-		row.StripeCustomerID.String,
-		frontend+"/settings/billing?billing=success",
-		frontend+"/settings/billing?billing=cancelled",
-		map[string]string{
-			"store_id":        storeID,
-			"plan":            string(plan),
-			"subscription_id": row.StripeSubscriptionID.String,
-		},
-	)
+	successURL := frontend + "/settings/billing?billing=success"
+	cancelURL := frontend + "/settings/billing?billing=cancelled"
+
+	// Coexistence by state: legacy stores that still carry a Stripe trial
+	// subscription convert through the setup-mode Checkout (card only) + API
+	// activation. Trial-local stores (no Stripe subscription yet) convert
+	// through a subscription-mode Checkout that creates the paid subscription
+	// directly, exposes Stripe's native promo field, and discloses the GMV fee.
+	var session *CheckoutSession
+	if row.StripeSubscriptionID.Valid {
+		session, err = s.stripe.CreateSetupCheckoutSession(ctx,
+			row.StripeCustomerID.String, successURL, cancelURL,
+			map[string]string{
+				"store_id":        storeID,
+				"plan":            string(plan),
+				"subscription_id": row.StripeSubscriptionID.String,
+			},
+		)
+	} else {
+		session, err = s.stripe.CreateSubscriptionCheckoutSession(ctx,
+			row.StripeCustomerID.String, cfg.FlatPriceID, feeDisclosure(cfg),
+			successURL, cancelURL,
+			map[string]string{
+				"store_id": storeID,
+				"plan":     string(plan),
+			},
+		)
+	}
 	if err != nil {
 		return "", err
 	}
 
 	return session.URL, nil
+}
+
+// feeDisclosure is the plain-language GMV-fee notice shown in the subscription
+// Checkout via custom_text — the CDC transparency requirement, since the fee is
+// usage-based and can't be rendered as an amount at checkout time.
+func feeDisclosure(cfg PlanConfig) string {
+	return fmt.Sprintf(
+		"Além da mensalidade, o plano %s cobra uma taxa de %d,%02d%% sobre o valor das vendas (GMV), faturada mensalmente conforme o uso.",
+		cfg.Name, cfg.GMVBps/100, cfg.GMVBps%100,
+	)
 }
 
 // completeConversion runs on checkout.session.completed (setup mode): grabs
@@ -533,6 +562,158 @@ func (s *Service) completeConversion(ctx context.Context, session *CheckoutSessi
 	)
 	// Sync imediato (o customer.subscription.updated também chega e é idempotente).
 	return s.applySubscription(ctx, activated, "conversion")
+}
+
+// completeSubscriptionConversion runs on checkout.session.completed in
+// subscription mode (trial-local): the paid subscription was just created with
+// only the flat mensalidade item. Links it to the store and syncs the local
+// row. The GMV commission is billed as a computed invoice item each cycle (see
+// OnSubscriptionCycleInvoice), NOT as a metered item on this subscription.
+// Idempotent — SetSubscriptionStripeRefs tolerates webhook redelivery.
+func (s *Service) completeSubscriptionConversion(ctx context.Context, session *CheckoutSession) error {
+	plan := Plan(session.Metadata["plan"])
+	if plan == "" || session.Subscription == "" {
+		logger.From(ctx, s.logger).Debug("subscription checkout without conversion metadata — ignored",
+			zap.String("session", session.ID))
+		return nil
+	}
+	ctx = logger.WithStore(ctx, session.Metadata["store_id"], "")
+	if _, ok := Plans()[plan]; !ok {
+		return fmt.Errorf("unknown plan in session metadata: %s", plan)
+	}
+
+	sub, err := s.stripe.GetSubscription(ctx, session.Subscription)
+	if err != nil {
+		return err
+	}
+
+	// Link the freshly created subscription to the store.
+	if storeID := session.Metadata["store_id"]; storeID != "" {
+		if sid, perr := parseUUID(storeID); perr == nil {
+			if _, serr := s.queries.SetSubscriptionStripeRefs(ctx, sqlc.SetSubscriptionStripeRefsParams{
+				StoreID:              sid,
+				StripeCustomerID:     pgtype.Text{String: session.Customer, Valid: session.Customer != ""},
+				StripeSubscriptionID: pgtype.Text{String: sub.ID, Valid: true},
+			}); serr != nil {
+				return fmt.Errorf("linking subscription: %w", serr)
+			}
+		}
+	}
+
+	logger.From(ctx, s.logger).Info("subscription converted (trial-local)",
+		zap.String("plan", string(plan)),
+		zap.String("subscription", sub.ID),
+		zap.String("status", sub.Status),
+	)
+	return s.applySubscription(ctx, sub, "conversion")
+}
+
+// CreateTaxaPromo registers a commission (taxa) discount for a store, consumed
+// one cycle at a time by OnSubscriptionCycleInvoice. This is the taxa side of a
+// full-cycle promo; the mensalidade side is a native Stripe coupon (e.g.
+// CANTODAART). discountBps 5000 = 50%.
+func (s *Service) CreateTaxaPromo(ctx context.Context, storeID string, discountBps, cycles int, code, description string) error {
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+	if _, err := s.queries.InsertTaxaPromo(ctx, sqlc.InsertTaxaPromoParams{
+		StoreID:         sid,
+		DiscountBps:     int32(discountBps),
+		CyclesRemaining: int32(cycles),
+		Code:            pgtype.Text{String: code, Valid: code != ""},
+		Description:     pgtype.Text{String: description, Valid: description != ""},
+	}); err != nil {
+		return fmt.Errorf("creating taxa promo: %w", err)
+	}
+	logger.From(ctx, s.logger).Info("taxa promo created",
+		zap.String("store_id", storeID),
+		zap.Int("discount_bps", discountBps),
+		zap.Int("cycles", cycles),
+		zap.String("code", code),
+	)
+	return nil
+}
+
+// OnSubscriptionCycleInvoice bills the accrued GMV commission as an invoice item
+// on each renewal invoice (billing_reason=subscription_cycle), so the mensalidade
+// and the just-closed cycle's commission land on ONE charge. The amount comes
+// from the ledger (fee_cents per sale, net of refunds), not a metered price.
+// Idempotent: swept fees are marked invoiced and AddInvoiceItem carries an
+// idempotency key, so a redelivered webhook won't rebill.
+func (s *Service) OnSubscriptionCycleInvoice(ctx context.Context, inv *StripeInvoice) error {
+	if inv.BillingReason != "subscription_cycle" || inv.ID == "" || inv.Subscription == "" {
+		return nil
+	}
+	row, err := s.queries.GetSubscriptionByStripeSubID(ctx, pgtype.Text{String: inv.Subscription, Valid: true})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil // unknown subscription (e.g. a legacy metered sub still draining)
+		}
+		return fmt.Errorf("cycle invoice: load subscription: %w", err)
+	}
+	storeID := uuidToString(row.StoreID)
+	ctx = logger.WithStore(ctx, storeID, "")
+
+	// Cutoff = start of the new cycle (= end of the closed cycle): sales before
+	// it belong to the closed cycle and are billed now.
+	cutoff := unixToTimestamptz(inv.PeriodStart)
+
+	feeCents, err := s.queries.SumUnbilledBillableFees(ctx, sqlc.SumUnbilledBillableFeesParams{
+		StoreID:   row.StoreID,
+		CreatedAt: cutoff,
+	})
+	if err != nil {
+		return fmt.Errorf("cycle invoice: sum fees: %w", err)
+	}
+	if feeCents <= 0 {
+		return nil // nothing billable this cycle (or fully offset by refunds → carries forward)
+	}
+	if !row.StripeCustomerID.Valid {
+		return fmt.Errorf("cycle invoice: store %s has no stripe customer", storeID)
+	}
+
+	// Apply an active taxa promo (discount on the commission), if any. The promo
+	// is consumed one cycle at a time (billing_taxa_promos). The mark-invoiced
+	// step below gates re-entry, so a redelivery won't double-consume.
+	desc := "Comissão sobre vendas (GMV)"
+	promo, perr := s.queries.GetActiveTaxaPromo(ctx, row.StoreID)
+	if perr != nil && !errors.Is(perr, pgx.ErrNoRows) {
+		return fmt.Errorf("cycle invoice: load taxa promo: %w", perr)
+	}
+	promoApplied := perr == nil
+	if promoApplied {
+		feeCents -= feeCents * int64(promo.DiscountBps) / 10000
+		desc = fmt.Sprintf("Comissão sobre vendas (GMV) — desconto de %d%%", promo.DiscountBps/100)
+	}
+
+	// A 100%-off promo nets to zero: skip the invoice item but still mark fees
+	// invoiced and consume the promo.
+	if feeCents > 0 {
+		if err := s.stripe.AddInvoiceItem(ctx, row.StripeCustomerID.String, inv.ID, feeCents, "brl", desc); err != nil {
+			return err
+		}
+	}
+	if err := s.queries.MarkStoreFeesInvoiced(ctx, sqlc.MarkStoreFeesInvoicedParams{
+		StoreID:   row.StoreID,
+		CreatedAt: cutoff,
+		StripeRef: pgtype.Text{String: "invoice:" + inv.ID, Valid: true},
+	}); err != nil {
+		return fmt.Errorf("cycle invoice: mark fees invoiced: %w", err)
+	}
+	if promoApplied {
+		if err := s.queries.ConsumeTaxaPromoCycle(ctx, promo.ID); err != nil {
+			logger.From(ctx, s.logger).Warn("billed commission but failed to consume taxa promo",
+				zap.String("store_id", storeID), zap.Error(err))
+		}
+	}
+	logger.From(ctx, s.logger).Info("gmv commission billed",
+		zap.String("store_id", storeID),
+		zap.String("invoice", inv.ID),
+		zap.Int64("fee_cents", feeCents),
+		zap.Bool("promo_applied", promoApplied),
+	)
+	return nil
 }
 
 // =============================================================================
@@ -663,8 +844,11 @@ func (s *Service) OnCartPaid(ctx context.Context, storeID, cartID string, gmvCen
 	billable := sub.Status == StatusActive || sub.Status == StatusPastDue
 	feeCents := gmvCents * int64(cfg.GMVBps) / 10000
 
-	// (4) Insert do ledger — propaga erro real; ErrNoRows = idempotente → nil SEM meter.
-	entry, err := s.queries.InsertLedgerEntry(ctx, sqlc.InsertLedgerEntryParams{
+	// (4) Insert do ledger — propaga erro real; ErrNoRows = idempotente.
+	// The commission is NOT metered to Stripe: it accrues here with stripe_ref
+	// NULL and is billed as an invoice item at the cycle boundary
+	// (OnSubscriptionCycleInvoice), so mensalidade + commission are one charge.
+	if _, err = s.queries.InsertLedgerEntry(ctx, sqlc.InsertLedgerEntryParams{
 		StoreID:     sid,
 		CartID:      cid,
 		EntryType:   "sale",
@@ -673,26 +857,11 @@ func (s *Service) OnCartPaid(ctx context.Context, storeID, cartID string, gmvCen
 		FeeBps:      int32(cfg.GMVBps),
 		FeeCents:    feeCents,
 		Billable:    billable,
-	})
-	if err != nil {
+	}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil // conflito (cart_id, 'sale') — já registrado, retry idempotente
 		}
 		return fmt.Errorf("billing OnCartPaid: insert ledger entry: %w", err)
-	}
-
-	// (5) Meter na Stripe — melhor esforço: falha só loga, NUNCA retorna erro.
-	if s.stripe != nil && sub.StripeCustomerID.Valid {
-		event := config.StripeGMVMeterEvent.StringOr("gmv_cents")
-		if err := s.stripe.SendMeterEvent(ctx, event, sub.StripeCustomerID.String, "gmv-"+cartID, gmvCents); err != nil {
-			logger.From(ctx, s.logger).Warn("failed to report gmv meter event",
-				zap.String("cart_id", cartID), zap.Error(err))
-		} else {
-			_ = s.queries.SetLedgerEntryStripeRef(ctx, sqlc.SetLedgerEntryStripeRefParams{
-				ID:        entry.ID,
-				StripeRef: pgtype.Text{String: "meter:gmv-" + cartID, Valid: true},
-			})
-		}
 	}
 
 	logger.From(ctx, s.logger).Info("gmv sale recorded",
@@ -743,7 +912,12 @@ func (s *Service) OnCartRefunded(ctx context.Context, storeID, cartID string) er
 		feeCredit = sale.FeeCents
 	}
 
-	entry, err := s.queries.InsertLedgerEntry(ctx, sqlc.InsertLedgerEntryParams{
+	// The refund records a negative-fee refund_credit entry (stripe_ref NULL).
+	// It nets against the next cycle's commission invoice item automatically
+	// (SumUnbilledBillableFees includes it), so NO separate balance credit is
+	// issued — that would double-credit. Cross-cycle refunds land the credit on
+	// the next invoice; a net-negative cycle carries forward until offset.
+	if _, err = s.queries.InsertLedgerEntry(ctx, sqlc.InsertLedgerEntryParams{
 		StoreID:     sid,
 		CartID:      cid,
 		EntryType:   "refund_credit",
@@ -752,8 +926,7 @@ func (s *Service) OnCartRefunded(ctx context.Context, storeID, cartID string) er
 		FeeBps:      sale.FeeBps,
 		FeeCents:    -feeCredit,
 		Billable:    sale.Billable,
-	})
-	if err != nil {
+	}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil // estorno já registrado (retry idempotente)
 		}
@@ -768,28 +941,11 @@ func (s *Service) OnCartRefunded(ctx context.Context, storeID, cartID string) er
 		FeeCreditCents int64  `json:"fee_credit_cents"`
 	}{storeID, cartID, sale.AmountCents, feeCredit})
 
-	// Stripe balance credit — melhor esforço, falha só loga.
-	if feeCredit > 0 && s.stripe != nil {
-		sub, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
-		if err == nil && sub.StripeCustomerID.Valid {
-			desc := fmt.Sprintf("Estorno de venda — devolução da taxa (%.2f%% de R$ %.2f)",
-				float64(sale.FeeBps)/100, float64(sale.AmountCents)/100)
-			if err := s.stripe.CreateCustomerBalanceCredit(ctx, sub.StripeCustomerID.String, feeCredit, desc); err != nil {
-				logger.From(ctx, s.logger).Error("failed to create refund balance credit",
-					zap.String("cart_id", cartID), zap.Error(err))
-			} else {
-				_ = s.queries.SetLedgerEntryStripeRef(ctx, sqlc.SetLedgerEntryStripeRefParams{
-					ID:        entry.ID,
-					StripeRef: pgtype.Text{String: "balance_credit", Valid: true},
-				})
-				logger.From(ctx, s.logger).Info("refund fee credited",
-					zap.String("store_id", storeID),
-					zap.String("cart_id", cartID),
-					zap.Int64("credit_cents", feeCredit),
-				)
-			}
-		}
-	}
+	logger.From(ctx, s.logger).Info("refund recorded (fee credit nets next cycle)",
+		zap.String("store_id", storeID),
+		zap.String("cart_id", cartID),
+		zap.Int64("credit_cents", feeCredit),
+	)
 	return nil
 }
 

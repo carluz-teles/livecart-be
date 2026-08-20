@@ -73,6 +73,10 @@ const (
 	TwilioAccountSID Key = "TWILIO_ACCOUNT_SID" // Master account SID (Console -> Account Info)
 	TwilioAuthToken  Key = "TWILIO_AUTH_TOKEN"  // Master auth token — also signs webhook validation
 
+	// OpenRouter (LLM gateway — WhatsApp sales assistant, catalog RAG)
+	OpenRouterAPIKey Key = "OPENROUTER_API_KEY" // Bearer key for https://openrouter.ai/api/v1
+	OpenRouterModel  Key = "OPENROUTER_MODEL"   // model id (see NewOpenRouterClient default)
+
 	// Stripe (paywall/assinaturas — PRD 007)
 	StripeSecretKey     Key = "STRIPE_SECRET_KEY"     // sk_test_/sk_live_
 	StripeWebhookSecret Key = "STRIPE_WEBHOOK_SECRET" // whsec_ do endpoint /api/webhooks/stripe
