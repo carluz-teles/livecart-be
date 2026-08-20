@@ -642,10 +642,11 @@ func (s *Service) CreateTaxaPromo(ctx context.Context, storeID string, discountB
 // Idempotent: swept fees are marked invoiced and AddInvoiceItem carries an
 // idempotency key, so a redelivered webhook won't rebill.
 func (s *Service) OnSubscriptionCycleInvoice(ctx context.Context, inv *StripeInvoice) error {
-	if inv.BillingReason != "subscription_cycle" || inv.ID == "" || inv.Subscription == "" {
+	subID := inv.SubscriptionID()
+	if inv.BillingReason != "subscription_cycle" || inv.ID == "" || subID == "" {
 		return nil
 	}
-	row, err := s.queries.GetSubscriptionByStripeSubID(ctx, pgtype.Text{String: inv.Subscription, Valid: true})
+	row, err := s.queries.GetSubscriptionByStripeSubID(ctx, pgtype.Text{String: subID, Valid: true})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil // unknown subscription (e.g. a legacy metered sub still draining)
