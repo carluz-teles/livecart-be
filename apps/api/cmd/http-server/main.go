@@ -674,6 +674,9 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			liveSvc.SetBillingGate(integrationSvc)
 			liveSvc.SetWebhookAuditor(integrationSvc)
 			liveSvc.SetSocialReplier(integrationSvc)
+			// Edição de prazo do evento (20/08/2026): move o cart.expire dos
+			// carrinhos deslocados. RescheduleExpiry já existia para a RN-10.
+			liveSvc.SetCartExpiryRescheduler(integrationSvc)
 
 			// Customer block flow needs the integration service to sweep
 			// open carts (release local + ERP stock, promote waitlist).

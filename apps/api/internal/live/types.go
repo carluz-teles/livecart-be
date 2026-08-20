@@ -581,8 +581,10 @@ type CreatePostRequest struct {
 	// durante o evento) deixa o carrinho sem prazo para sempre.
 	EndsAt *string `json:"endsAt" validate:"required"`
 	// min=15 espelha o CHECK da migration 000106; abaixo disso o INSERT vira
-	// 500 em vez de erro de campo (lição E6 da errata).
-	CartExpirationMinutes  *int `json:"cartExpirationMinutes" validate:"omitempty,min=15,max=1440"`
+	// 500 em vez de erro de campo (lição E6 da errata). Teto de 30 dias
+	// (43200): o antigo 1440 era o motivo de "carrinho não pode durar mais de
+	// 24h" — pedido do cliente em 20/08/2026.
+	CartExpirationMinutes  *int `json:"cartExpirationMinutes" validate:"omitempty,min=15,max=43200"`
 	CartMaxQuantityPerItem *int `json:"cartMaxQuantityPerItem" validate:"omitempty,min=1,max=100"`
 }
 
@@ -659,7 +661,8 @@ type CreateLiveRequest struct {
 	CloseCartOnEventEnd *bool `json:"closeCartOnEventEnd"`
 	// min=15 espelha o CHECK da migration 000106. Estava em 5 e um valor entre
 	// 5 e 14 passava na validação e estourava no banco como 500 (lição E6).
-	CartExpirationMinutes  *int  `json:"cartExpirationMinutes" validate:"omitempty,min=15,max=1440"`
+	// Teto de 30 dias (43200) — era 1440 e limitava todo carrinho a 24h.
+	CartExpirationMinutes  *int  `json:"cartExpirationMinutes" validate:"omitempty,min=15,max=43200"`
 	CartMaxQuantityPerItem *int  `json:"cartMaxQuantityPerItem" validate:"omitempty,min=1,max=100"`
 	SendOnLiveEnd          *bool `json:"sendOnLiveEnd"`
 	// PixDiscountPercent (0-100). 0 disables the feature.
@@ -691,6 +694,10 @@ type UpdateLiveRequest struct {
 	EndsAt   *string `json:"endsAt"`
 	// RN-10 — mesmo range do CHECK da 000073.
 	WaitlistNotifiedTtlMinutes *int `json:"waitlistNotifiedTtlMinutes" validate:"omitempty,min=5,max=240"`
+	// Prazo do carrinho, editável depois de criado (20/08/2026). nil = não
+	// mexer. Mesmo range da criação (piso do CHECK 000106, teto de 30 dias).
+	// Mudar aqui PROPAGA para os carrinhos abertos — ver Update.
+	CartExpirationMinutes *int `json:"cartExpirationMinutes" validate:"omitempty,min=15,max=43200"`
 }
 
 type LiveResponse struct {
@@ -808,6 +815,9 @@ type UpdateLiveInput struct {
 	PixDiscountPercent *int
 	// RN-10 — nil = não mexer.
 	WaitlistNotifiedTTLMinutes *int
+	// Prazo do carrinho — nil = não mexer; valor = grava E propaga para os
+	// carrinhos abertos do evento.
+	CartExpirationMinutes *int
 	// Window carrega a alteração PARCIAL da janela comercial.
 	Window EventWindowUpdate
 }

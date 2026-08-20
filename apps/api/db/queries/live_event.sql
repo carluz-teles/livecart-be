@@ -109,6 +109,15 @@ FROM live_events e
 JOIN stores s ON s.id = e.store_id
 WHERE e.id = $1;
 
+-- name: SetEventCartExpirationMinutes :execrows
+-- Prazo do carrinho editável DEPOIS de criado (pedido do cliente 20/08/2026 —
+-- o teto virou 30 dias e mudar no evento tem de valer para quem já comprou).
+-- A propagação para os carrinhos abertos é de ShiftOpenCartExpirations; esta
+-- query só grava o override do evento.
+UPDATE live_events
+SET cart_expiration_minutes = $3, updated_at = now()
+WHERE id = $1 AND store_id = $2;
+
 -- name: GetWaitlistNotifiedTTLByEvent :one
 SELECT waitlist_notified_ttl_minutes FROM live_events WHERE id = $1;
 

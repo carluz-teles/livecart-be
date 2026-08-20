@@ -814,6 +814,64 @@ func (r *Repository) EndEvent(ctx context.Context, id, storeID string) (EventRow
 	return toEventRow(row), nil
 }
 
+// GetEffectiveCartExpirationMinutes lê o prazo EFETIVO do carrinho para o
+// evento na fonte única (GetEventCartSettings): override do evento com
+// fallback para a loja, curto x estendido conforme close_cart_on_event_end.
+func (r *Repository) GetEffectiveCartExpirationMinutes(ctx context.Context, eventID string) (int, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return 0, err
+	}
+	settings, err := r.q.GetEventCartSettings(ctx, uid)
+	if err != nil {
+		return 0, fmt.Errorf("reading event cart settings: %w", err)
+	}
+	return int(settings.EffectiveCartExpirationMinutes), nil
+}
+
+// SetCartExpirationMinutes grava o override de prazo do evento. 0 linhas não é
+// erro aqui: o Update já verificou posse/existência; sumir no meio é corrida
+// com um delete e o resultado (nada gravado) é o certo.
+func (r *Repository) SetCartExpirationMinutes(ctx context.Context, eventID, storeID string, minutes int) error {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return err
+	}
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return err
+	}
+	if _, err := r.q.SetEventCartExpirationMinutes(ctx, sqlc.SetEventCartExpirationMinutesParams{
+		ID:                    uid,
+		StoreID:               sid,
+		CartExpirationMinutes: pgtype.Int4{Int32: int32(minutes), Valid: true},
+	}); err != nil {
+		return fmt.Errorf("setting event cart expiration: %w", err)
+	}
+	return nil
+}
+
+// ShiftOpenCartExpirations desloca a janela dos carrinhos abertos do evento
+// pelo delta (minutos) e devolve os ids afetados para o re-arm do cart.expire.
+func (r *Repository) ShiftOpenCartExpirations(ctx context.Context, eventID string, deltaMinutes int) ([]string, error) {
+	uid, err := parseUUID(eventID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.q.ShiftOpenCartExpirations(ctx, sqlc.ShiftOpenCartExpirationsParams{
+		EventID:      uid,
+		DeltaMinutes: int32(deltaMinutes),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("shifting open cart expirations: %w", err)
+	}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, pgUUIDString(row))
+	}
+	return ids, nil
+}
+
 func (r *Repository) UpdateEventTitle(ctx context.Context, id, title string) (EventRow, error) {
 	uid, err := parseUUID(id)
 	if err != nil {

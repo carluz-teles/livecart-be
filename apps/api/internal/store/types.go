@@ -201,7 +201,7 @@ func (r UpdateCartSettingsRequest) Validate() error {
 		// Piso 15: o CHECK stores_cart_expiration_minutes_check (000106) rejeita
 		// abaixo disso. Sem alinhar aqui, um 5 passaria a validação e estouraria
 		// no banco como 500 em vez de 422 com a mensagem de campo.
-		validation.Field(&r.ExpirationMinutes, validation.Required, validation.Min(15), validation.Max(1440)),
+		validation.Field(&r.ExpirationMinutes, validation.Required, validation.Min(15), validation.Max(43200)),
 		validation.Field(&r.MaxQuantityPerItem, validation.Required, validation.Min(1)),
 		// Sem Required de propósito: zero É o valor válido para "sem mínimo", e
 		// Required trataria o zero como vazio e recusaria justamente o padrão.

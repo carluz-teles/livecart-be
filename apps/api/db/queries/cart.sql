@@ -333,6 +333,30 @@ WHERE c.event_id = $1
   AND c.payment_status IS DISTINCT FROM 'paid'
 RETURNING c.id;
 
+-- name: ShiftOpenCartExpirations :many
+-- Propagação da edição de prazo do evento para quem JÁ está com o relógio
+-- correndo: desloca expires_at pelo delta entre o prazo efetivo novo e o
+-- antigo. DESLOCA, não recalcula — recalcular do zero apagaria as extensões
+-- individuais (prazo extra da fila no finalize, GREATEST do reopen RN-10).
+--
+-- Quem fica de fora, e por quê:
+--   • expires_at IS NULL — RN-04: evento ativo não tem relógio; o valor novo
+--     passa a valer sozinho no fechamento (FinalizeCartsByEvent lê da fonte
+--     única GetEventCartSettings);
+--   • pago — A10: pagamento neutraliza o prazo, nada a deslocar;
+--   • terminal (expired/cancelled) — o desfecho já aconteceu; "reviver" um
+--     carrinho expirado por edição de configuração seria decisão de negócio
+--     nova, não propagação.
+-- O deslocamento pode cair no passado (lojista ENCURTOU dias depois): correto —
+-- o cart.expire re-armado dispara na hora e o guard decide, como sempre.
+UPDATE carts
+SET expires_at = expires_at + make_interval(mins => sqlc.arg(delta_minutes)::int)
+WHERE event_id = $1
+  AND status IN ('active', 'checkout')
+  AND payment_status IS DISTINCT FROM 'paid'
+  AND expires_at IS NOT NULL
+RETURNING id;
+
 -- name: CountCartsByEvent :one
 SELECT COUNT(*)::int as count FROM carts WHERE event_id = $1 AND status = 'active';
 

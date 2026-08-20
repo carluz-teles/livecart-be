@@ -97,11 +97,12 @@ type Service struct {
 	// stockReserver breaks the erp import cycle (neutral ReserveParams);
 	// billingGate/webhookAuditor/socialReplier are satisfied by integration.Service
 	// directly; notificationSvc is imported directly (notification has no cycle).
-	stockReserver   StockReserver
-	billingGate     BillingGate
-	webhookAuditor  WebhookAuditor
-	socialReplier   SocialReplier
-	notificationSvc *notification.Service
+	stockReserver         StockReserver
+	billingGate           BillingGate
+	webhookAuditor        WebhookAuditor
+	socialReplier         SocialReplier
+	notificationSvc       *notification.Service
+	cartExpiryRescheduler CartExpiryRescheduler
 
 	// core is the slice of this Service's own behaviour the comment consumer
 	// reuses (session/event lookups, AddToCart, event-product whitelist). It
@@ -114,6 +115,19 @@ type Service struct {
 // SetEventCloseScheduler wires the ETA scheduler for timed-event window close
 // (optional — when unset, only SweepEndedTimedEvents finalizes timed events).
 func (s *Service) SetEventCloseScheduler(sch EventCloseScheduler) { s.closeScheduler = sch }
+
+// CartExpiryRescheduler MOVE a task cart.expire de um carrinho para o
+// expires_at atual dele. Satisfeita por integration.Service.RescheduleExpiry
+// (fiação em main.newApp, como os demais colaboradores). Nil-safe: sem ela a
+// edição de prazo continua correta — o cart.expire é guard-first e se re-arma
+// sozinho quando a janela cresceu; só o encurtamento dispararia na hora antiga.
+type CartExpiryRescheduler interface {
+	RescheduleExpiry(ctx context.Context, cartID string) error
+}
+
+// SetCartExpiryRescheduler liga o re-arm de cart.expire usado pela edição de
+// prazo do evento (20/08/2026).
+func (s *Service) SetCartExpiryRescheduler(r CartExpiryRescheduler) { s.cartExpiryRescheduler = r }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {
 	s := &Service{
@@ -879,8 +893,70 @@ func (s *Service) Update(ctx context.Context, input UpdateLiveInput) (LiveOutput
 		}
 	}
 
+	// Prazo do carrinho, editável depois de criado — COM propagação (pedido do
+	// cliente, 20/08/2026: o teto virou 30 dias e mudar no evento tem de valer
+	// para quem já está com o relógio correndo).
+	if input.CartExpirationMinutes != nil {
+		if err := s.applyCartExpirationChange(ctx, event.ID, input.StoreID, *input.CartExpirationMinutes); err != nil {
+			return LiveOutput{}, err
+		}
+	}
+
 	// Get full live output
 	return s.GetByID(ctx, event.ID, input.StoreID)
+}
+
+// applyCartExpirationChange grava o override de prazo do evento e propaga a
+// diferença para os carrinhos abertos.
+//
+// A propagação é por DELTA do prazo EFETIVO (fonte única GetEventCartSettings,
+// antes x depois), não por recálculo: deslocar preserva as extensões
+// individuais (prazo extra da fila no finalize, RN-10) e faz as duas pontas
+// certas de graça —
+//   - evento ATIVO: RN-04 mantém expires_at NULL, o shift não acha ninguém e o
+//     valor novo vale sozinho no fechamento;
+//   - close_cart_on_event_end desligado: o efetivo é o prazo ESTENDIDO, o
+//     delta dá zero e nenhum carrinho se move por uma configuração que não
+//     rege o relógio deles.
+func (s *Service) applyCartExpirationChange(ctx context.Context, eventID, storeID string, minutes int) error {
+	before, err := s.repo.GetEffectiveCartExpirationMinutes(ctx, eventID)
+	if err != nil {
+		return err
+	}
+	if err := s.repo.SetCartExpirationMinutes(ctx, eventID, storeID, minutes); err != nil {
+		return err
+	}
+	after, err := s.repo.GetEffectiveCartExpirationMinutes(ctx, eventID)
+	if err != nil {
+		return err
+	}
+	delta := after - before
+	if delta == 0 {
+		return nil
+	}
+
+	ids, err := s.repo.ShiftOpenCartExpirations(ctx, eventID, delta)
+	if err != nil {
+		return err
+	}
+	logger.From(ctx, s.logger).Info("event cart expiration changed; open carts shifted",
+		zap.String("event_id", eventID),
+		zap.Int("delta_minutes", delta),
+		zap.Int("carts_shifted", len(ids)),
+	)
+
+	// Re-armar é conforto, não corretude: cart.expire é guard-first. Janela
+	// maior → a task antiga dispara e SE re-arma; janela menor → mover antecipa
+	// um desfecho já decidido. Por isso best-effort, nunca erro para o lojista.
+	if s.cartExpiryRescheduler != nil {
+		for _, id := range ids {
+			if err := s.cartExpiryRescheduler.RescheduleExpiry(ctx, id); err != nil {
+				logger.From(ctx, s.logger).Warn("failed to move cart.expire after expiration change",
+					zap.String("cart_id", id), zap.Error(err))
+			}
+		}
+	}
+	return nil
 }
 
 // Start é o "Iniciar live" do painel. E37: ele ATIVA o evento, não só a sessão.
