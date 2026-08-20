@@ -312,10 +312,25 @@ type CheckoutSession struct {
 type StripeInvoice struct {
 	ID            string `json:"id"`
 	BillingReason string `json:"billing_reason"`
-	Subscription  string `json:"subscription"`
+	Subscription  string `json:"subscription"` // legacy top-level; empty on 2025+ API versions
 	Customer      string `json:"customer"`
 	PeriodStart   int64  `json:"period_start"`
 	PeriodEnd     int64  `json:"period_end"`
+	Parent        struct {
+		SubscriptionDetails struct {
+			Subscription string `json:"subscription"`
+		} `json:"subscription_details"`
+	} `json:"parent"`
+}
+
+// SubscriptionID resolves the subscription reference across Stripe API versions:
+// 2025+ drops the top-level invoice.subscription and exposes it under
+// parent.subscription_details.subscription instead.
+func (i *StripeInvoice) SubscriptionID() string {
+	if i.Subscription != "" {
+		return i.Subscription
+	}
+	return i.Parent.SubscriptionDetails.Subscription
 }
 
 // CreateSetupCheckoutSession opens a hosted Checkout that collects a payment
