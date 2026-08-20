@@ -103,11 +103,16 @@ func TestEventoEhAliasDeLiveTitulo(t *testing.T) {
 	}
 }
 
-// TestOsCincoGatilhosSaoDefaultOn: um gatilho que nasce desligado é um gatilho
-// que não existe. Como o JSONB de toda loja da base antecede estas chaves, o
-// default tem de valer quando a seção vem nil — senão a RN-28 entra no ar
-// silenciosa em 100% das lojas.
-func TestOsCincoGatilhosSaoDefaultOn(t *testing.T) {
+// TestGatilhosDefaultOn: um gatilho que nasce desligado é um gatilho que não
+// existe. Como o JSONB de toda loja da base antecede estas chaves, o default
+// tem de valer quando a seção vem nil — senão a RN-28 entra no ar silenciosa
+// em 100% das lojas.
+//
+// waitlist_unfulfilled saiu desta lista em 20/08/2026: dispara no fechamento
+// da fila, dias fora de qualquer janela do Instagram — zero entregas na
+// história do produto. Nasce DESLIGADO de propósito (asserção própria abaixo);
+// loja que gravou enabled=true no JSONB continua valendo.
+func TestGatilhosDefaultOn(t *testing.T) {
 	svc := &Service{}
 	vazio := &Settings{} // loja cujo JSONB não conhece nenhuma chave nova
 
@@ -116,7 +121,6 @@ func TestOsCincoGatilhosSaoDefaultOn(t *testing.T) {
 		TypeOutOfWindowSessionEnded,
 		TypeOutOfWindowEventEnded,
 		TypeEventDeadlineStarted,
-		TypeWaitlistUnfulfilled,
 		TypeWaitlistJoined,
 	}
 
@@ -129,6 +133,14 @@ func TestOsCincoGatilhosSaoDefaultOn(t *testing.T) {
 		if !got.Enabled {
 			t.Errorf("%s: default desligado", notifType)
 		}
+	}
+
+	unfulfilled := svc.getTemplateSettings(vazio, TypeWaitlistUnfulfilled)
+	if unfulfilled == nil {
+		t.Fatal("waitlist_unfulfilled: seção nil sem default")
+	}
+	if unfulfilled.Enabled {
+		t.Error("waitlist_unfulfilled: default LIGADO — nunca entregou e voltou a tentar sozinho")
 	}
 }
 

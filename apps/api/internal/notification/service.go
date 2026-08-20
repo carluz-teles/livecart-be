@@ -66,7 +66,64 @@ func (s *Service) GetSettings(ctx context.Context, storeID string) (*Settings, e
 		return &defaults, nil
 	}
 
+	// Devolve a config EFETIVA, não o JSON cru: chave ausente significa "a
+	// loja nunca customizou" e o ENVIO aplica o default (ligado) — mas o GET
+	// omitia a chave e a tela lia como "Pausada". Foi assim que os e-mails
+	// pós-venda da Canto da Art apareceram todos pausados enquanto o e-mail
+	// de estorno chegava normalmente (20/08/2026): a UI e o envio liam
+	// verdades diferentes. O overlay abaixo faz o GET contar a mesma.
+	fillMissingWithDefaults(&settings)
 	return &settings, nil
+}
+
+// fillMissingWithDefaults completa as chaves nunca customizadas com o default
+// que o caminho de envio já usa — a resposta do GET passa a ser a config
+// efetiva. Não escreve nada no JSONB: o default continua entrando em tempo de
+// leitura, loja nenhuma ganha escrita retroativa.
+func fillMissingWithDefaults(settings *Settings) {
+	d := DefaultSettings()
+	if settings.CheckoutImmediate == nil {
+		settings.CheckoutImmediate = d.CheckoutImmediate
+	}
+	if settings.ItemAdded == nil {
+		settings.ItemAdded = d.ItemAdded
+	}
+	if settings.CheckoutReminder == nil {
+		settings.CheckoutReminder = d.CheckoutReminder
+	}
+	if settings.OutOfWindowScheduled == nil {
+		settings.OutOfWindowScheduled = d.OutOfWindowScheduled
+	}
+	if settings.OutOfWindowSessionEnded == nil {
+		settings.OutOfWindowSessionEnded = d.OutOfWindowSessionEnded
+	}
+	if settings.OutOfWindowEventEnded == nil {
+		settings.OutOfWindowEventEnded = d.OutOfWindowEventEnded
+	}
+	if settings.EventDeadlineStarted == nil {
+		settings.EventDeadlineStarted = d.EventDeadlineStarted
+	}
+	if settings.WaitlistUnfulfilled == nil {
+		settings.WaitlistUnfulfilled = d.WaitlistUnfulfilled
+	}
+	if settings.WaitlistJoined == nil {
+		settings.WaitlistJoined = d.WaitlistJoined
+	}
+	if settings.PaymentConfirmed == nil {
+		settings.PaymentConfirmed = d.PaymentConfirmed
+	}
+	if settings.Shipped == nil {
+		settings.Shipped = d.Shipped
+	}
+	if settings.Delivered == nil {
+		settings.Delivered = d.Delivered
+	}
+	if settings.PaymentCancelled == nil {
+		settings.PaymentCancelled = d.PaymentCancelled
+	}
+	if settings.PaymentRefunded == nil {
+		settings.PaymentRefunded = d.PaymentRefunded
+	}
 }
 
 // GetCartMessageSettings retrieves cart message settings (triggers) for a store.
