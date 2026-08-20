@@ -150,6 +150,10 @@ func (r fakeIdempotencyRepo) Update(_ context.Context, _ string, _ []byte, statu
 	return nil
 }
 
+func (r fakeIdempotencyRepo) Reclaim(_ context.Context, _ string) (bool, error) {
+	return true, nil
+}
+
 func TestService_GetProvider(t *testing.T) {
 	t.Parallel()
 

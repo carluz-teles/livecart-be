@@ -851,6 +851,27 @@ func (q *Queries) MarkWebhookProcessed(ctx context.Context, id pgtype.UUID) erro
 	return err
 }
 
+const reclaimIdempotencyKey = `-- name: ReclaimIdempotencyKey :execrows
+UPDATE idempotency_keys
+SET status = 'pending', response_payload = NULL,
+    expires_at = now() + interval '24 hours'
+WHERE id = $1
+  AND (status = 'failed'
+       OR (status = 'pending' AND created_at < now() - interval '5 minutes'))
+`
+
+// Toma posse (CAS) de uma tentativa anterior: 'failed', ou 'pending' velha o
+// bastante para a tentativa dona ter morrido no meio (janela casa com
+// stalePendingAfter em lib/idempotency). 0 linhas = outra tentativa chegou
+// antes; o chamador vira ErrInFlight, nunca execução dupla.
+func (q *Queries) ReclaimIdempotencyKey(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, reclaimIdempotencyKey, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const stampIntegrationStockWebhookAlert = `-- name: StampIntegrationStockWebhookAlert :exec
 UPDATE integrations
 SET metadata = COALESCE(metadata, '{}'::jsonb)

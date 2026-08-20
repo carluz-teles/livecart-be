@@ -400,6 +400,7 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 		Window:             window,
 
 		WaitlistNotifiedTTLMinutes: req.WaitlistNotifiedTtlMinutes,
+		CartExpirationMinutes:      req.CartExpirationMinutes,
 	})
 	if err != nil {
 		return httpx.HandleServiceError(c, err)

@@ -2456,30 +2456,43 @@ func (s *Service) FetchInstagramMedia(ctx context.Context, storeID string, limit
 func (s *Service) CreateInstagramPostEvent(ctx context.Context, input CreateInstagramPostInput) (live.CreateLiveOutput, error) {
 	return s.publishWithIdempotency(ctx, input, "create_instagram_post",
 		func() { s.deleteTransientImage(ctx, input.ImageKey) },
-		func() (live.CreateLiveOutput, error) { return s.publishInstagramPostEvent(ctx, input) },
+		func(prior priorPublishAttempt) (live.CreateLiveOutput, error) {
+			return s.publishInstagramPostEvent(ctx, input, prior)
+		},
 	)
 }
 
-func (s *Service) publishInstagramPostEvent(ctx context.Context, input CreateInstagramPostInput) (live.CreateLiveOutput, error) {
+func (s *Service) publishInstagramPostEvent(ctx context.Context, input CreateInstagramPostInput, prior priorPublishAttempt) (live.CreateLiveOutput, error) {
 	provider, err := s.resolveInstagramSocialProvider(ctx, input.StoreID)
 	if err != nil {
 		return live.CreateLiveOutput{}, err
 	}
 
-	// Publish the image post.
-	mediaID, err := provider.PublishImagePost(ctx, input.ImageURL, input.Caption)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to publish instagram image post",
-			zap.String("store_id", input.StoreID), zap.Error(err))
-		// Clean up the uploaded image even when publishing fails, so a failed
-		// attempt doesn't leave an orphan in storage.
-		s.deleteTransientImage(ctx, input.ImageKey)
-		return live.CreateLiveOutput{}, httpx.ErrUnprocessable("failed to publish the post on Instagram")
-	}
+	// Publish the image post — a menos que a tentativa anterior já tenha
+	// publicado e falhado só no vínculo: aí a mídia existe e é reusada.
+	mediaID := prior.MediaID
+	if mediaID == "" {
+		mediaID, err = s.publishOrResume(ctx, provider, prior, false, func() (string, error) {
+			return provider.PublishImagePost(ctx, input.ImageURL, input.Caption)
+		})
+		if err != nil {
+			logger.From(ctx, s.logger).Warn("failed to publish instagram image post",
+				zap.String("store_id", input.StoreID), zap.Error(err))
+			// Clean up the uploaded image even when publishing fails, so a failed
+			// attempt doesn't leave an orphan in storage.
+			s.deleteTransientImage(ctx, input.ImageKey)
+			if errors.Is(err, providers.ErrPublishOutcomeUnknown) {
+				return live.CreateLiveOutput{}, errors.Join(
+					httpx.DomainError(422, httpx.CodeIgPublishUnconfirmed, "Instagram did not confirm the publish — try again in a few seconds (the retry resumes this publish, it will not duplicate the post)"),
+					err)
+			}
+			return live.CreateLiveOutput{}, httpx.ErrUnprocessable("failed to publish the post on Instagram")
+		}
 
-	// Instagram has now fetched and stored the image, so the transient upload
-	// can be removed. Logged (not swallowed) so a delete failure is visible.
-	s.deleteTransientImage(ctx, input.ImageKey)
+		// Instagram has now fetched and stored the image, so the transient upload
+		// can be removed. Logged (not swallowed) so a delete failure is visible.
+		s.deleteTransientImage(ctx, input.ImageKey)
+	}
 
 	// Fetch the new post's permalink/thumbnail (best-effort).
 	permalink, thumbnail := "", ""
@@ -2500,7 +2513,7 @@ func (s *Service) publishInstagramPostEvent(ctx context.Context, input CreateIns
 			zap.String("store_id", input.StoreID),
 			zap.String("media_id", mediaID),
 			zap.Error(err))
-		return live.CreateLiveOutput{}, err
+		return live.CreateLiveOutput{}, &publishedUnboundError{MediaID: mediaID, Err: err}
 	}
 
 	logger.From(ctx, s.logger).Info("instagram post created and event bound",
@@ -2544,13 +2557,13 @@ func (s *Service) publishWithIdempotency(
 	input CreateInstagramPostInput,
 	operation string,
 	onDuplicate func(),
-	publish func() (live.CreateLiveOutput, error),
+	publish func(priorPublishAttempt) (live.CreateLiveOutput, error),
 ) (live.CreateLiveOutput, error) {
 	integrationID := s.instagramIntegrationID(ctx, input.StoreID)
 	// Without the idempotency service or a known integration we can't dedup
 	// safely (the record FK needs the integration id) — publish directly.
 	if s.idempotency == nil || integrationID == "" {
-		return publish()
+		return publish(priorPublishAttempt{})
 	}
 
 	// Stable dedup payload: everything that identifies the post EXCEPT the
@@ -2599,20 +2612,149 @@ func (s *Service) publishWithIdempotency(
 		}
 	}
 
-	rec, err := s.idempotency.Start(ctx, req)
+	claim, err := s.idempotency.Claim(ctx, req)
 	if err != nil {
-		// Couldn't record the attempt — publish anyway rather than block the user.
-		logger.From(ctx, s.logger).Warn("instagram publish idempotency start failed", zap.Error(err))
-		return publish()
+		switch {
+		case errors.Is(err, idempotency.ErrInFlight):
+			// O antecessor tratava a colisão como "não consegui registrar" e
+			// publicava assim mesmo — em 19/08/2026 isso criou o segundo
+			// story enquanto o primeiro (timeout que ENTROU) ainda vivia.
+			return live.CreateLiveOutput{}, httpx.DomainError(409, httpx.CodeIgPublishInFlight, "this publish is already in progress — wait a few seconds and check the event list")
+		case errors.Is(err, idempotency.ErrPayloadMismatch):
+			return live.CreateLiveOutput{}, httpx.DomainError(422, httpx.CodeIdempotencyKeyReused, "idempotency key reused with different content")
+		}
+		// Falha de infra na trava: publicar mesmo assim, para a
+		// indisponibilidade do registro não derrubar a lojista.
+		logger.From(ctx, s.logger).Warn("instagram publish idempotency claim failed", zap.Error(err))
+		return publish(priorPublishAttempt{})
+	}
+	if claim.Completed != nil {
+		var out live.CreateLiveOutput
+		if json.Unmarshal(claim.Completed.Response, &out) == nil && out.ID != "" {
+			logger.From(ctx, s.logger).Info("instagram publish deduped, returning original event",
+				zap.String("store_id", input.StoreID),
+				zap.String("operation", operation),
+				zap.String("event_id", out.ID))
+			if onDuplicate != nil {
+				onDuplicate()
+			}
+			return out, nil
+		}
+		// Completou mas a resposta não é legível: repetir publicaria de novo.
+		return live.CreateLiveOutput{}, httpx.DomainError(409, httpx.CodeIgAlreadyPublished, "this content was already published")
+	}
+	if claim.Unguarded {
+		return publish(priorPublishAttempt{})
 	}
 
-	out, pErr := publish()
+	prior := priorPublishAttempt{}
+	if claim.Reclaimed {
+		prior = priorFromFailurePayload(claim.PriorResponse, claim.Record.CreatedAt)
+		if prior.ContainerID != "" || prior.MediaID != "" {
+			logger.From(ctx, s.logger).Info("instagram publish retry resuming prior attempt",
+				zap.String("store_id", input.StoreID),
+				zap.String("operation", operation),
+				zap.String("container_id", prior.ContainerID),
+				zap.String("media_id", prior.MediaID))
+		}
+	}
+
+	out, pErr := publish(prior)
 	if pErr != nil {
-		_ = s.idempotency.Fail(ctx, rec.ID, pErr)
+		var unknown *providers.PublishOutcomeUnknownError
+		var unbound *publishedUnboundError
+		switch {
+		case errors.As(pErr, &unknown):
+			// O container fica gravado para o retry RETOMAR — nunca duplicar.
+			_ = s.idempotency.FailWithMeta(ctx, claim.Record.ID, pErr, map[string]any{
+				"outcome":      "unknown",
+				"container_id": unknown.ContainerID,
+			})
+		case errors.As(pErr, &unbound):
+			// Publicou no Instagram e falhou só no vínculo com o evento: o
+			// retry reusa a mídia publicada em vez de postar outra igual.
+			_ = s.idempotency.FailWithMeta(ctx, claim.Record.ID, pErr, map[string]any{
+				"outcome":  "published_unbound",
+				"media_id": unbound.MediaID,
+			})
+		default:
+			_ = s.idempotency.Fail(ctx, claim.Record.ID, pErr)
+		}
 		return out, pErr
 	}
-	_ = s.idempotency.Complete(ctx, rec.ID, out)
+	_ = s.idempotency.Complete(ctx, claim.Record.ID, out)
 	return out, nil
+}
+
+// priorPublishAttempt é o que uma tentativa anterior deixou para trás no
+// registro de idempotência: um container de desfecho desconhecido para
+// retomar, ou uma mídia já publicada cujo vínculo com o evento falhou.
+type priorPublishAttempt struct {
+	ContainerID string
+	MediaID     string
+	NotBefore   time.Time
+}
+
+// publishedUnboundError marca "publicou no Instagram, falhou no vínculo com o
+// evento" — a mídia existe e o retry precisa dela, não de uma cópia.
+type publishedUnboundError struct {
+	MediaID string
+	Err     error
+}
+
+func (e *publishedUnboundError) Error() string {
+	return "media " + e.MediaID + " published but event binding failed: " + e.Err.Error()
+}
+
+func (e *publishedUnboundError) Unwrap() error { return e.Err }
+
+// priorFromFailurePayload lê do payload de falha (gravado por FailWithMeta) o
+// que a tentativa anterior deixou para o retry retomar.
+func priorFromFailurePayload(payload []byte, createdAt time.Time) priorPublishAttempt {
+	if len(payload) == 0 {
+		return priorPublishAttempt{}
+	}
+	var meta struct {
+		Outcome     string `json:"outcome"`
+		ContainerID string `json:"container_id"`
+		MediaID     string `json:"media_id"`
+	}
+	if json.Unmarshal(payload, &meta) != nil {
+		return priorPublishAttempt{}
+	}
+	switch meta.Outcome {
+	case "unknown":
+		return priorPublishAttempt{ContainerID: meta.ContainerID, NotBefore: createdAt}
+	case "published_unbound":
+		return priorPublishAttempt{MediaID: meta.MediaID, NotBefore: createdAt}
+	}
+	return priorPublishAttempt{}
+}
+
+// publishOrResume aplica a regra central do incidente dos 2 stories: retry de
+// publicação NUNCA cria outro container às cegas. Se a tentativa anterior
+// deixou um container de desfecho desconhecido, primeiro pergunta ao
+// Instagram o que aconteceu com ele; só um container comprovadamente morto
+// libera uma publicação nova.
+func (s *Service) publishOrResume(ctx context.Context, provider providers.SocialProvider, prior priorPublishAttempt, isStory bool, fresh func() (string, error)) (string, error) {
+	resumer, ok := provider.(interface {
+		ResumeContainerPublish(ctx context.Context, containerID string, isStory bool, notBefore time.Time) (string, error)
+	})
+	if prior.ContainerID == "" || !ok {
+		return fresh()
+	}
+	mediaID, err := resumer.ResumeContainerPublish(ctx, prior.ContainerID, isStory, prior.NotBefore)
+	switch {
+	case err == nil:
+		return mediaID, nil
+	case errors.Is(err, providers.ErrContainerDead):
+		logger.From(ctx, s.logger).Info("prior publish container is dead; publishing fresh",
+			zap.String("container_id", prior.ContainerID))
+		return fresh()
+	default:
+		// Desfecho continua desconhecido — parar preserva a trava.
+		return "", err
+	}
 }
 
 // instagramIntegrationID returns the store's Instagram integration id, or ""
@@ -2630,26 +2772,38 @@ func (s *Service) instagramIntegrationID(ctx context.Context, storeID string) st
 func (s *Service) CreateInstagramReelEvent(ctx context.Context, input CreateInstagramPostInput, videoURL string) (live.CreateLiveOutput, error) {
 	return s.publishWithIdempotency(ctx, input, "create_instagram_reel",
 		func() { s.deleteTransientImage(ctx, input.ImageKey) },
-		func() (live.CreateLiveOutput, error) { return s.publishInstagramReelEvent(ctx, input, videoURL) },
+		func(prior priorPublishAttempt) (live.CreateLiveOutput, error) {
+			return s.publishInstagramReelEvent(ctx, input, videoURL, prior)
+		},
 	)
 }
 
-func (s *Service) publishInstagramReelEvent(ctx context.Context, input CreateInstagramPostInput, videoURL string) (live.CreateLiveOutput, error) {
+func (s *Service) publishInstagramReelEvent(ctx context.Context, input CreateInstagramPostInput, videoURL string, prior priorPublishAttempt) (live.CreateLiveOutput, error) {
 	provider, err := s.resolveInstagramSocialProvider(ctx, input.StoreID)
 	if err != nil {
 		return live.CreateLiveOutput{}, err
 	}
 
-	mediaID, err := provider.PublishReel(ctx, videoURL, input.Caption)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to publish instagram reel",
-			zap.String("store_id", input.StoreID), zap.Error(err))
-		s.deleteTransientImage(ctx, input.ImageKey)
-		return live.CreateLiveOutput{}, httpx.ErrUnprocessable("failed to publish the reel on Instagram")
-	}
+	mediaID := prior.MediaID
+	if mediaID == "" {
+		mediaID, err = s.publishOrResume(ctx, provider, prior, false, func() (string, error) {
+			return provider.PublishReel(ctx, videoURL, input.Caption)
+		})
+		if err != nil {
+			logger.From(ctx, s.logger).Warn("failed to publish instagram reel",
+				zap.String("store_id", input.StoreID), zap.Error(err))
+			s.deleteTransientImage(ctx, input.ImageKey)
+			if errors.Is(err, providers.ErrPublishOutcomeUnknown) {
+				return live.CreateLiveOutput{}, errors.Join(
+					httpx.DomainError(422, httpx.CodeIgPublishUnconfirmed, "Instagram did not confirm the publish — try again in a few seconds (the retry resumes this publish, it will not duplicate the reel)"),
+					err)
+			}
+			return live.CreateLiveOutput{}, httpx.ErrUnprocessable("failed to publish the reel on Instagram")
+		}
 
-	// Instagram has fetched and processed the video; remove the transient upload.
-	s.deleteTransientImage(ctx, input.ImageKey)
+		// Instagram has fetched and processed the video; remove the transient upload.
+		s.deleteTransientImage(ctx, input.ImageKey)
+	}
 
 	permalink, thumbnail := "", ""
 	if details, dErr := provider.GetMediaDetails(ctx, mediaID); dErr == nil && details != nil {
@@ -2667,7 +2821,7 @@ func (s *Service) publishInstagramReelEvent(ctx context.Context, input CreateIns
 		logger.From(ctx, s.logger).Error("reel published but event creation failed",
 			zap.String("store_id", input.StoreID),
 			zap.String("media_id", mediaID), zap.Error(err))
-		return live.CreateLiveOutput{}, err
+		return live.CreateLiveOutput{}, &publishedUnboundError{MediaID: mediaID, Err: err}
 	}
 
 	logger.From(ctx, s.logger).Info("instagram reel created and event bound",
@@ -2685,28 +2839,41 @@ func (s *Service) publishInstagramReelEvent(ctx context.Context, input CreateIns
 func (s *Service) CreateInstagramStoryEvent(ctx context.Context, input CreateInstagramPostInput, mediaURL string, isVideo bool) (live.CreateLiveOutput, error) {
 	return s.publishWithIdempotency(ctx, input, "create_instagram_story",
 		func() { s.deleteTransientImage(ctx, input.ImageKey) },
-		func() (live.CreateLiveOutput, error) {
-			return s.publishInstagramStoryEvent(ctx, input, mediaURL, isVideo)
+		func(prior priorPublishAttempt) (live.CreateLiveOutput, error) {
+			return s.publishInstagramStoryEvent(ctx, input, mediaURL, isVideo, prior)
 		},
 	)
 }
 
-func (s *Service) publishInstagramStoryEvent(ctx context.Context, input CreateInstagramPostInput, mediaURL string, isVideo bool) (live.CreateLiveOutput, error) {
+func (s *Service) publishInstagramStoryEvent(ctx context.Context, input CreateInstagramPostInput, mediaURL string, isVideo bool, prior priorPublishAttempt) (live.CreateLiveOutput, error) {
 	provider, err := s.resolveInstagramSocialProvider(ctx, input.StoreID)
 	if err != nil {
 		return live.CreateLiveOutput{}, err
 	}
 
-	mediaID, err := provider.PublishStory(ctx, mediaURL, isVideo)
-	if err != nil {
-		logger.From(ctx, s.logger).Warn("failed to publish instagram story",
-			zap.String("store_id", input.StoreID), zap.Error(err))
-		s.deleteTransientImage(ctx, input.ImageKey)
-		return live.CreateLiveOutput{}, httpx.ErrUnprocessable("failed to publish the story on Instagram")
-	}
+	mediaID := prior.MediaID
+	if mediaID == "" {
+		mediaID, err = s.publishOrResume(ctx, provider, prior, true, func() (string, error) {
+			return provider.PublishStory(ctx, mediaURL, isVideo)
+		})
+		if err != nil {
+			logger.From(ctx, s.logger).Warn("failed to publish instagram story",
+				zap.String("store_id", input.StoreID), zap.Error(err))
+			s.deleteTransientImage(ctx, input.ImageKey)
+			if errors.Is(err, providers.ErrPublishOutcomeUnknown) {
+				// 19/08/2026: o timeout daqui virou 422 seco, a lojista
+				// reenviou e nasceu o segundo story. Agora o desfecho
+				// desconhecido fica retomável — o retry NÃO duplica.
+				return live.CreateLiveOutput{}, errors.Join(
+					httpx.DomainError(422, httpx.CodeIgPublishUnconfirmed, "Instagram did not confirm the publish — try again in a few seconds (the retry resumes this publish, it will not duplicate the story)"),
+					err)
+			}
+			return live.CreateLiveOutput{}, httpx.ErrUnprocessable("failed to publish the story on Instagram")
+		}
 
-	// Instagram has fetched the media; remove the transient upload.
-	s.deleteTransientImage(ctx, input.ImageKey)
+		// Instagram has fetched the media; remove the transient upload.
+		s.deleteTransientImage(ctx, input.ImageKey)
+	}
 
 	// Best-effort metadata (a Story may not expose a public permalink).
 	permalink, thumbnail := "", ""
@@ -2729,10 +2896,13 @@ func (s *Service) publishInstagramStoryEvent(ctx context.Context, input CreateIn
 	storyInput.EndsAt = &endsAt
 	out, err := s.attachPublishedMediaToEvent(ctx, storyInput, live.SessionTypeStory, mediaID, permalink, thumbnail)
 	if err != nil {
+		// O story JÁ está no ar; sem o vínculo, cada resposta de compradora
+		// cai em "no matching story session" e morre. O erro tipado deixa o
+		// retry religar ESTA mídia em vez de publicar uma cópia.
 		logger.From(ctx, s.logger).Error("story published but event creation failed",
 			zap.String("store_id", input.StoreID),
 			zap.String("media_id", mediaID), zap.Error(err))
-		return live.CreateLiveOutput{}, err
+		return live.CreateLiveOutput{}, &publishedUnboundError{MediaID: mediaID, Err: err}
 	}
 
 	logger.From(ctx, s.logger).Info("instagram story created and event bound",

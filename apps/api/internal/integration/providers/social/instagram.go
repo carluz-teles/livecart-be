@@ -738,11 +738,9 @@ func (i *Instagram) PublishImagePost(ctx context.Context, imageURL, caption stri
 	}
 
 	// Step 3 — publish.
-	mediaID, err := i.postGraph(ctx, "/me/media_publish", map[string]any{
-		"creation_id": containerID,
-	})
+	mediaID, err := i.publishContainer(ctx, containerID, publishKindFeed)
 	if err != nil {
-		return "", fmt.Errorf("publishing media: %w", err)
+		return "", err
 	}
 
 	logger.From(ctx, i.logger).Info("instagram image post published",
@@ -750,6 +748,196 @@ func (i *Instagram) PublishImagePost(ctx context.Context, imageURL, caption stri
 		zap.String("media_id", mediaID),
 	)
 	return mediaID, nil
+}
+
+// publishKind diferencia onde procurar a mídia quando a resposta do
+// media_publish se perdeu: stories moram em /me/stories, feed e Reels em
+// /me/media.
+type publishKind string
+
+const (
+	publishKindFeed  publishKind = "feed"
+	publishKindStory publishKind = "story"
+)
+
+// publishContainer publica um container FINISHED com verificação de desfecho.
+//
+// "O POST falhou" não diz o que aconteceu no Instagram: em 19/08/2026 um
+// timeout no media_publish ENTROU (o story foi publicado, a resposta se
+// perdeu) e o reenvio às cegas criou um segundo story idêntico — um deles sem
+// vínculo com a sessão, engolindo respostas de compradoras. Quem decide o
+// desfecho é o status do container, nunca uma nova publicação.
+func (i *Instagram) publishContainer(ctx context.Context, containerID string, kind publishKind) (string, error) {
+	started := time.Now()
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		mediaID, postErr := i.postGraph(ctx, "/me/media_publish", map[string]any{
+			"creation_id": containerID,
+		})
+		if postErr == nil {
+			return mediaID, nil
+		}
+		lastErr = postErr
+
+		status := i.settledContainerStatus(ctx, containerID)
+		switch status {
+		case "PUBLISHED":
+			// O erro mentiu: publicou. Recupera o id da mídia recém-criada.
+			if recovered, ok := i.recoverPublishedMediaID(ctx, kind, started); ok {
+				logger.From(ctx, i.logger).Warn("instagram publish landed despite failed response; media id recovered",
+					zap.String("container_id", containerID),
+					zap.String("media_id", recovered),
+					zap.Error(postErr))
+				return recovered, nil
+			}
+			return "", &providers.PublishOutcomeUnknownError{ContainerID: containerID, Err: postErr}
+		case "FINISHED":
+			// Comprovadamente não publicado — repetir com o MESMO container.
+			logger.From(ctx, i.logger).Warn("instagram publish failed but container unpublished; retrying same container",
+				zap.String("container_id", containerID),
+				zap.Int("attempt", attempt),
+				zap.Error(postErr))
+			continue
+		case "ERROR", "EXPIRED":
+			return "", fmt.Errorf("publishing media (container %s is %s): %w", containerID, status, postErr)
+		default:
+			// Nem o status respondeu: desfecho desconhecido. Parar aqui — o
+			// retry correto retoma este container, nunca cria outro.
+			return "", &providers.PublishOutcomeUnknownError{ContainerID: containerID, Err: postErr}
+		}
+	}
+	return "", fmt.Errorf("publishing media (container %s): %w", containerID, lastErr)
+}
+
+// settledContainerStatus consulta o status do container após uma falha de
+// publicação, num contexto próprio: se o request original morreu por timeout,
+// a verificação é exatamente o que NÃO pode morrer junto.
+func (i *Instagram) settledContainerStatus(ctx context.Context, containerID string) string {
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+	defer cancel()
+
+	for attempt := 1; attempt <= 4; attempt++ {
+		status, err := i.containerStatus(checkCtx, containerID)
+		if err == nil && status != "" && status != "IN_PROGRESS" {
+			return status
+		}
+		if err != nil {
+			logger.From(ctx, i.logger).Warn("instagram container status check failed",
+				zap.String("container_id", containerID),
+				zap.Int("attempt", attempt),
+				zap.Error(err))
+		}
+		select {
+		case <-checkCtx.Done():
+			return ""
+		case <-time.After(containerStatusRetryDelay):
+		}
+	}
+	return ""
+}
+
+// containerStatusRetryDelay é var (não const) pelo mesmo motivo da base URL:
+// os testes de desfecho desconhecido precisam esgotar as tentativas sem
+// dormir de verdade. Nada em produção reescreve isto.
+var containerStatusRetryDelay = 3 * time.Second
+
+// recoverPublishedMediaID localiza a mídia que um media_publish de resposta
+// perdida acabou criando: lista as mídias recentes do tipo certo e escolhe a
+// mais antiga publicada a partir de notBefore (com folga para clock skew).
+func (i *Instagram) recoverPublishedMediaID(ctx context.Context, kind publishKind, notBefore time.Time) (string, bool) {
+	path := "/me/media"
+	if kind == publishKindStory {
+		path = "/me/stories"
+	}
+
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+	defer cancel()
+
+	url := fmt.Sprintf("%s/%s%s?fields=id,timestamp&limit=10&access_token=%s",
+		instagramGraphAPIBaseURL, instagramGraphAPIVersion, path, i.credentials.AccessToken)
+	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", false
+	}
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", false
+	}
+
+	var out struct {
+		Data []struct {
+			ID        string `json:"id"`
+			Timestamp string `json:"timestamp"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", false
+	}
+
+	cutoff := notBefore.Add(-2 * time.Minute)
+	bestID, bestAt := "", time.Time{}
+	candidates := 0
+	for _, m := range out.Data {
+		at, pErr := time.Parse("2006-01-02T15:04:05-0700", m.Timestamp)
+		if pErr != nil || at.Before(cutoff) {
+			continue
+		}
+		candidates++
+		if bestID == "" || at.Before(bestAt) {
+			bestID, bestAt = m.ID, at
+		}
+	}
+	if bestID == "" {
+		return "", false
+	}
+	if candidates > 1 {
+		logger.From(ctx, i.logger).Warn("instagram media recovery matched multiple recent items; picking the earliest",
+			zap.Int("candidates", candidates),
+			zap.String("media_id", bestID))
+	}
+	return bestID, true
+}
+
+// ResumeContainerPublish retoma uma publicação de desfecho desconhecido pelo
+// container que ela deixou. Devolve o media id quando o container já publicou
+// (ou publica agora se ainda estava pronto); ErrContainerDead quando ele é
+// comprovadamente impublicável — só então o chamador pode criar outro.
+func (i *Instagram) ResumeContainerPublish(ctx context.Context, containerID string, isStory bool, notBefore time.Time) (string, error) {
+	kind := publishKindFeed
+	if isStory {
+		kind = publishKindStory
+	}
+
+	status, err := i.containerStatus(ctx, containerID)
+	if err != nil {
+		return "", &providers.PublishOutcomeUnknownError{ContainerID: containerID, Err: err}
+	}
+	switch status {
+	case "PUBLISHED":
+		if recovered, ok := i.recoverPublishedMediaID(ctx, kind, notBefore); ok {
+			logger.From(ctx, i.logger).Info("instagram publish resumed: prior container had landed",
+				zap.String("container_id", containerID),
+				zap.String("media_id", recovered))
+			return recovered, nil
+		}
+		return "", &providers.PublishOutcomeUnknownError{
+			ContainerID: containerID,
+			Err:         fmt.Errorf("container published but media id not identified"),
+		}
+	case "IN_PROGRESS":
+		if err := i.waitContainerFinished(ctx, containerID); err != nil {
+			return "", &providers.PublishOutcomeUnknownError{ContainerID: containerID, Err: err}
+		}
+		return i.publishContainer(ctx, containerID, kind)
+	case "FINISHED":
+		return i.publishContainer(ctx, containerID, kind)
+	default: // ERROR, EXPIRED
+		return "", fmt.Errorf("container %s is %s: %w", containerID, status, providers.ErrContainerDead)
+	}
 }
 
 // postGraph POSTs a JSON body to a graph endpoint and returns the response "id".
@@ -825,9 +1013,9 @@ func (i *Instagram) PublishReel(ctx context.Context, videoURL, caption string) (
 		return "", err
 	}
 
-	mediaID, err := i.postGraph(ctx, "/me/media_publish", map[string]any{"creation_id": containerID})
+	mediaID, err := i.publishContainer(ctx, containerID, publishKindFeed)
 	if err != nil {
-		return "", fmt.Errorf("publishing reel: %w", err)
+		return "", err
 	}
 
 	logger.From(ctx, i.logger).Info("instagram reel published",
@@ -862,9 +1050,9 @@ func (i *Instagram) PublishStory(ctx context.Context, mediaURL string, isVideo b
 		return "", err
 	}
 
-	mediaID, err := i.postGraph(ctx, "/me/media_publish", map[string]any{"creation_id": containerID})
+	mediaID, err := i.publishContainer(ctx, containerID, publishKindStory)
 	if err != nil {
-		return "", fmt.Errorf("publishing story: %w", err)
+		return "", err
 	}
 
 	logger.From(ctx, i.logger).Info("instagram story published",

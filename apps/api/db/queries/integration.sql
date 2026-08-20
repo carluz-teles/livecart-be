@@ -126,6 +126,18 @@ UPDATE idempotency_keys
 SET response_payload = $2, status = $3
 WHERE id = $1;
 
+-- name: ReclaimIdempotencyKey :execrows
+-- Toma posse (CAS) de uma tentativa anterior: 'failed', ou 'pending' velha o
+-- bastante para a tentativa dona ter morrido no meio (janela casa com
+-- stalePendingAfter em lib/idempotency). 0 linhas = outra tentativa chegou
+-- antes; o chamador vira ErrInFlight, nunca execução dupla.
+UPDATE idempotency_keys
+SET status = 'pending', response_payload = NULL,
+    expires_at = now() + interval '24 hours'
+WHERE id = $1
+  AND (status = 'failed'
+       OR (status = 'pending' AND created_at < now() - interval '5 minutes'));
+
 -- name: DeleteExpiredIdempotencyKeys :exec
 DELETE FROM idempotency_keys WHERE expires_at < now();
 

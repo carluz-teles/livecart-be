@@ -128,9 +128,14 @@ const (
 
 	CodeStockInsufficient Code = "STOCK_INSUFFICIENT" // erp/stock_service.go:213 ("estoque insuficiente para esse aumento")
 
-	// --- INSTAGRAM publishing (internal/integration/publish_schedule.go) ---
+	// --- INSTAGRAM publishing (internal/integration/publish_schedule.go, service.go) ---
 	CodeIgStoryNoWindow   Code = "IG_STORY_NO_WINDOW"   // publish_schedule.go:177 ("a story has no commercial window — it lasts 24h from publication")
-	CodeIgPublishInFlight Code = "IG_PUBLISH_IN_FLIGHT" // publish_schedule.go:242 ("being sent to Instagram right now and can no longer be cancelled")
+	CodeIgPublishInFlight Code = "IG_PUBLISH_IN_FLIGHT" // publish_schedule.go:242; service.go publishWithIdempotency (409: mesma chave em voo — o bug dos 2 stories de 19/08)
+	// Desfecho desconhecido na Graph (timeout no media_publish sem status): o
+	// retry com a MESMA chave retoma o container — reenviar é seguro e NÃO duplica.
+	CodeIgPublishUnconfirmed Code = "IG_PUBLISH_UNCONFIRMED" // service.go publishInstagram{Post,Reel,Story}Event
+	CodeIgAlreadyPublished   Code = "IG_ALREADY_PUBLISHED"   // service.go publishWithIdempotency (completou mas a resposta gravada é ilegível)
+	CodeIdempotencyKeyReused Code = "IDEMPOTENCY_KEY_REUSED" // service.go publishWithIdempotency (mesma chave, conteúdo diferente = bug do cliente)
 	// Razão de movimentos de estoque (erp_stock_movements, 000132).
 	CodeStockMovementStale Code = "STOCK_MOVEMENT_STALE" // erp/movement_resolution.go: o CAS perdeu para o resolver; recarregar o painel
 

@@ -23,6 +23,42 @@ var ErrProvenUndelivered = errors.New("erp request provably not applied")
 // than parsing error strings.
 var ErrOperationNotSupported = errors.New("operation not supported by this provider")
 
+// ErrPublishOutcomeUnknown marca uma publicação de mídia cujo desfecho o
+// provedor NÃO conseguiu determinar: a chamada de publicação falhou E a
+// verificação posterior (status do container) também não respondeu. É o
+// análogo social do "unconfirmed" do ledger de estoque — em 19/08/2026 um
+// timeout no media_publish ENTROU (o story foi publicado) e o retry às cegas
+// criou um segundo story idêntico.
+//
+// Quem recebe este sentinela nunca deve publicar de novo às cegas; o retry
+// correto retoma o MESMO container (ResumeContainerPublish).
+var ErrPublishOutcomeUnknown = errors.New("media publish outcome unknown")
+
+// ErrContainerDead marca um container de publicação comprovadamente
+// impublicável (ERROR/EXPIRED na Graph). Ao contrário do desfecho
+// desconhecido, aqui é seguro criar um container novo.
+var ErrContainerDead = errors.New("media container is dead")
+
+// PublishOutcomeUnknownError carrega o container da tentativa de desfecho
+// desconhecido, para que o registro de idempotência guarde a referência e o
+// retry consiga retomá-lo em vez de duplicar a mídia.
+type PublishOutcomeUnknownError struct {
+	ContainerID string
+	Err         error
+}
+
+func (e *PublishOutcomeUnknownError) Error() string {
+	return "media publish outcome unknown (container " + e.ContainerID + "): " + e.Err.Error()
+}
+
+func (e *PublishOutcomeUnknownError) Unwrap() error { return e.Err }
+
+// Is faz errors.Is(err, ErrPublishOutcomeUnknown) funcionar sem perder a
+// causa original na cadeia de Unwrap.
+func (e *PublishOutcomeUnknownError) Is(target error) bool {
+	return target == ErrPublishOutcomeUnknown
+}
+
 // ProviderType represents the category of integration.
 type ProviderType string
 

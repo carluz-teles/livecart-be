@@ -49,7 +49,7 @@ func (r ScheduleInstagramPublishRequest) Validate() error {
 		// convenção). Ponteiro nil continua significando "usar o da loja".
 		validation.Field(&r.CartExpirationMinutes,
 			validation.When(r.CartExpirationMinutes != nil,
-				validation.Required, validation.Min(15), validation.Max(1440))),
+				validation.Required, validation.Min(15), validation.Max(43200))),
 		validation.Field(&r.CartMaxQuantityPerItem,
 			validation.When(r.CartMaxQuantityPerItem != nil,
 				validation.Required, validation.Min(1), validation.Max(999))),

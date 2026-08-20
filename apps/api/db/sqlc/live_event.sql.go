@@ -710,6 +710,30 @@ func (q *Queries) ListLiveEventsByStore(ctx context.Context, storeID pgtype.UUID
 	return items, nil
 }
 
+const setEventCartExpirationMinutes = `-- name: SetEventCartExpirationMinutes :execrows
+UPDATE live_events
+SET cart_expiration_minutes = $3, updated_at = now()
+WHERE id = $1 AND store_id = $2
+`
+
+type SetEventCartExpirationMinutesParams struct {
+	ID                    pgtype.UUID `json:"id"`
+	StoreID               pgtype.UUID `json:"store_id"`
+	CartExpirationMinutes pgtype.Int4 `json:"cart_expiration_minutes"`
+}
+
+// Prazo do carrinho editável DEPOIS de criado (pedido do cliente 20/08/2026 —
+// o teto virou 30 dias e mudar no evento tem de valer para quem já comprou).
+// A propagação para os carrinhos abertos é de ShiftOpenCartExpirations; esta
+// query só grava o override do evento.
+func (q *Queries) SetEventCartExpirationMinutes(ctx context.Context, arg SetEventCartExpirationMinutesParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setEventCartExpirationMinutes, arg.ID, arg.StoreID, arg.CartExpirationMinutes)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const updateLiveEventDetails = `-- name: UpdateLiveEventDetails :one
 UPDATE live_events
 SET
