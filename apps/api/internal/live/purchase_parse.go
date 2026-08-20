@@ -71,6 +71,14 @@ func normalizarComentario(texto string) string {
 	t = precoRe.ReplaceAllString(t, " ")
 	// Separa código colado da quantidade: 1024x3 → 1024 x3
 	t = regexp.MustCompile(`(?i)([0-9A-Za-z]{4})x(\d{1,2})\b`).ReplaceAllString(t, "$1 x$2")
+	// Separa palavra colada ANTES do código: "Código1485" → "Código 1485".
+	// Da live de 19/08: a @mariabsales escreveu "Código1485 X2" e perdeu a
+	// compra — o "ó" não é ASCII, o tokenizador quebrava em "digo1485", e
+	// nenhum código sobrava. O MESMO comentário dela com espaço ("Código 1543
+	// X 3"), 18 minutos antes, tinha funcionado. Só letra→dígito com exatamente
+	// 4 dígitos e fronteira: não mexe em "R$3391" (o preço já foi apagado
+	// acima) nem em números longos.
+	t = regexp.MustCompile(`(?i)([a-zà-ú])(\d{4})\b`).ReplaceAllString(t, "$1 $2")
 	return t
 }
 

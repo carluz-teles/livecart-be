@@ -398,6 +398,14 @@ var casosDaLive = []casoDeComentario{
 	{"É bem tranquilo", nil},
 	{"Bora pra Cimaaaaa", nil},
 
+	// Live de 19/08: palavra colada ANTES do código. A @mariabsales perdeu 2
+	// unidades do 1485 assim — e o mesmo formato com espaço tinha funcionado
+	// para ela minutos antes.
+	{"Código1485 X2", []PurchaseItem{{"1485", 2}}},
+	{"Código 1543 X 3", []PurchaseItem{{"1543", 3}}},
+	{"codigo1130x2", []PurchaseItem{{"1130", 2}}},
+	{"quero1130", []PurchaseItem{{"1130", 1}}},
+
 	// O pedido REAL da noite, e a forma que a audiência está sendo ensinada a
 	// usar: "código espaço X quantidade".
 	{"1099 X 1", []PurchaseItem{{"1099", 1}}},
