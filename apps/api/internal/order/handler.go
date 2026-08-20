@@ -2,6 +2,7 @@ package order
 
 import (
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/query"
@@ -19,6 +20,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g := router.Group("/orders")
 	g.Get("/", h.List)
 	g.Get("/stats", h.GetStats)
+	g.Get("/product-breakdown", h.ProductBreakdown)
 	g.Get("/:id", h.GetByID)
 	g.Get("/:id/upsell", h.GetUpsell)
 	g.Patch("/:id", h.Update)
@@ -49,6 +51,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 // @Param        status query []string false "Filter by status"
 // @Param        paymentStatus query []string false "Filter by payment status"
 // @Param        eventId query string false "Filter by event (campaign) ID"
+// @Param        productId query string false "Only orders containing this product"
 // @Param        liveSessionId query string false "Deprecated: alias of eventId"
 // @Success      200 {object} httpx.Envelope{data=ListOrdersResponse}
 // @Router       /api/v1/stores/{storeId}/orders [get]
@@ -159,6 +162,26 @@ func (h *Handler) GetStats(c *fiber.Ctx) error {
 		return err
 	}
 	return httpx.OK(c, NewOrderStatsResponse(*output))
+}
+
+// ProductBreakdown godoc
+// @Summary      Orders containing a product, grouped by status
+// @Description  Counts orders and units of a product per (status, paymentStatus)
+// @Description  bucket — the product modal's "pedidos com este produto" view.
+// @Tags         orders
+// @Produce      json
+// @Param        productId query string true "Product ID"
+// @Router       /stores/{storeId}/orders/product-breakdown [get]
+func (h *Handler) ProductBreakdown(c *fiber.Ctx) error {
+	productID := c.Query("productId")
+	if _, err := uuid.Parse(productID); err != nil {
+		return httpx.BadRequest(c, "productId inválido")
+	}
+	rows, err := h.service.GetProductOrderBreakdown(c.UserContext(), httpx.GetStoreID(c), productID)
+	if err != nil {
+		return err
+	}
+	return httpx.OK(c, fiber.Map{"buckets": rows})
 }
 
 // UpdateShippingAddress godoc
@@ -343,6 +366,15 @@ func parseOrderFilters(c *fiber.Ctx) OrderFilters {
 		filters.EventID = &eventID
 	} else if legacy := c.Query("liveSessionId"); legacy != "" {
 		filters.EventID = &legacy
+	}
+
+	// Vem de deep-link (/orders?product=...). Garbage viraria erro de sintaxe
+	// uuid no Postgres — uuid inválido é descartado (lista sem filtro), o
+	// mesmo contrato tolerante do eventId acima.
+	if productID := c.Query("productId"); productID != "" {
+		if _, err := uuid.Parse(productID); err == nil {
+			filters.ProductID = &productID
+		}
 	}
 
 	if dateFrom := c.Query("dateFrom"); dateFrom != "" {

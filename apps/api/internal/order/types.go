@@ -35,6 +35,12 @@ type OrderFilters struct {
 	// the unified "Precisam atenção" bucket.
 	ERPFinalisation []string `query:"erpFinalisation"` // pending | done | failed
 
+	// ProductID filtra pedidos que CONTÊM o produto (existe cart_item dele no
+	// carrinho). Pedido do cliente 20/08/2026: "a partir de um produto, quais
+	// pedidos estão com aquele produto" — a tela de produtos deep-linka para
+	// /orders?product=<id>. Vale para lista E contadores de aba (mesmo builder).
+	ProductID *string `query:"productId"`
+
 	// Single triage flag that ORs every kind of "merchant has to fix this"
 	// state into one filter — payment failed/refunded, shipment in error,
 	// or ERP finalisation failed. Drives the unified "Precisam atenção"
@@ -754,6 +760,16 @@ type UpdateShippingAddressInput struct {
 	ID      string
 	StoreID string
 	Address map[string]string
+}
+
+// ProductOrderBreakdownRow é um balde do "pedidos com este produto": quantos
+// pedidos e quantas unidades do produto em cada par (status do carrinho,
+// status de pagamento). O FE dobra os pares em rótulos amigáveis.
+type ProductOrderBreakdownRow struct {
+	Status        string `json:"status"`
+	PaymentStatus string `json:"paymentStatus"`
+	Orders        int    `json:"orders"`
+	Units         int    `json:"units"`
 }
 
 type OrderStatsOutput struct {
