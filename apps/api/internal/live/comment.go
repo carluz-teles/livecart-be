@@ -1448,7 +1448,15 @@ func (s *Service) replyOutOfWindow(
 	notifType notification.NotificationType,
 ) {
 	if s.notificationSvc != nil {
-		if ok, err := s.notificationSvc.ShouldNotify(ctx, event.StoreID, notifType, false); err == nil && ok {
+		ok, err := s.notificationSvc.ShouldNotify(ctx, event.StoreID, notifType, false)
+		if err == nil && !ok {
+			// O lojista DESLIGOU este gatilho nas Comunicações. Antes o código
+			// caía no fallback hardcoded abaixo e respondia assim mesmo —
+			// desligar não silenciava nada (20/08/2026). Desligado = silêncio;
+			// o fallback é só para infra indisponível/erro.
+			return
+		}
+		if err == nil && ok {
 			vars := notification.TemplateVariables{
 				Handle:     "@" + input.Username,
 				LiveTitulo: event.Title,
@@ -1466,7 +1474,14 @@ func (s *Service) replyOutOfWindow(
 
 			commentAt := time.Time{}
 			if input.Timestamp > 0 {
-				commentAt = time.Unix(input.Timestamp, 0)
+				// Webhook do IG manda epoch em MS em alguns payloads e em
+				// segundos em outros; sem normalizar, ms virava ano ~57000 e o
+				// guard de janela de 7 dias deixava de valer.
+				ts := input.Timestamp
+				if ts > 1_000_000_000_000 {
+					ts /= 1000
+				}
+				commentAt = time.Unix(ts, 0)
 			}
 
 			if _, err := s.notificationSvc.Send(ctx, notification.SendInput{

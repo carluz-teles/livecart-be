@@ -254,8 +254,12 @@ func DefaultSettings() Settings {
 			Enabled:  true,
 			Template: "Oi {handle}! 🛍️\n\nA {evento} encerrou e seu carrinho está fechado com {total_itens} itens.\n\nTotal: {total}\n\nVocê tem até {prazo_final} para finalizar — depois disso os produtos voltam pra loja.\n\nFinaliza aqui: {link} 💜",
 		},
+		// Desligado por padrão (20/08/2026): dispara no fechamento da fila,
+		// horas/dias depois do último comentário — fora de qualquer janela do
+		// Instagram. Zero entregas na história do produto; o card saiu da UI.
+		// Loja que já tenha gravado enabled=true no JSONB continua valendo.
 		WaitlistUnfulfilled: &TemplateSettings{
-			Enabled:  true,
+			Enabled:  false,
 			Template: "Oi {handle}! 😔\n\nNão consegui liberar {produto} pra você — quem estava na frente na fila acabou levando.\n\nO resto do seu carrinho da {evento} continua valendo:\n{link} 💜",
 		},
 		PaymentConfirmed: &EmailTemplateSettings{

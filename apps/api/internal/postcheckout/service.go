@@ -127,6 +127,14 @@ func (s *Service) SendPaidReceipt(ctx context.Context, cartID string) error {
 	}
 	ctx = logger.WithStore(ctx, uuidStr(snapshot.Store.ID), snapshot.Store.Slug)
 
+	// Pausado nas Comunicações: sai ANTES do retry de prontidão — ficar
+	// re-enfileirando um e-mail que o lojista desligou é ruído.
+	if s.emailPaused(ctx, uuidStr(snapshot.Store.ID), func(n *notification.Settings) *notification.EmailTemplateSettings { return n.PaymentConfirmed }) {
+		logger.From(ctx, s.logger).Info("order paid email paused by store settings",
+			zap.String("cart_id", cartID))
+		return nil
+	}
+
 	// Resolve the Order + its tracking token (source of truth: order_logistics).
 	token, materialised, err := s.repo.GetOrderLogisticsTrackingToken(ctx, cartID)
 	if err != nil {
@@ -225,6 +233,11 @@ func (s *Service) OnCartCancelled(ctx context.Context, cartID string) {
 	}
 	s.applyEmailOverride(ctx, snapshot, s.settingsFor(ctx, snapshot, "cancelled"), &input.OverrideSubject, &input.OverrideBodyHTML, "", "")
 
+	if s.emailPaused(ctx, uuidStr(snapshot.Store.ID), func(n *notification.Settings) *notification.EmailTemplateSettings { return n.PaymentCancelled }) {
+		logger.From(ctx, s.logger).Info("order cancelled email paused by store settings",
+			zap.String("cart_id", cartID))
+		return
+	}
 	if err := s.email.SendOrderCancelled(ctx, input); err != nil {
 		logger.From(ctx, s.logger).Warn("failed to send order cancelled email",
 			zap.String("cart_id", cartID), zap.Error(err))
@@ -282,6 +295,11 @@ func (s *Service) SendRefundEmail(ctx context.Context, cartID string) error {
 	}
 	s.applyEmailOverride(ctx, snapshot, s.settingsFor(ctx, snapshot, "refunded"), &input.OverrideSubject, &input.OverrideBodyHTML, "", "")
 
+	if s.emailPaused(ctx, uuidStr(snapshot.Store.ID), func(n *notification.Settings) *notification.EmailTemplateSettings { return n.PaymentRefunded }) {
+		logger.From(ctx, s.logger).Info("order refunded email paused by store settings",
+			zap.String("cart_id", cartID))
+		return nil
+	}
 	if err := s.email.SendOrderRefunded(ctx, input); err != nil {
 		// Best-effort: the marker is already claimed, so a retry won't double-mail.
 		logger.From(ctx, s.logger).Warn("failed to send order refunded email",
@@ -391,6 +409,11 @@ func (s *Service) OnDelivered(ctx context.Context, cartID, source string) {
 		EventID:      uuidStr(snapshot.Cart.EventID),
 	}
 	s.applyDeliveredOverride(ctx, snapshot, &deliveredInput)
+	if s.emailPaused(ctx, uuidStr(snapshot.Store.ID), func(n *notification.Settings) *notification.EmailTemplateSettings { return n.Delivered }) {
+		logger.From(ctx, s.logger).Info("order delivered email paused by store settings",
+			zap.String("cart_id", cartID))
+		return
+	}
 	if err := s.email.SendOrderDelivered(ctx, deliveredInput); err != nil {
 		logger.From(ctx, s.logger).Warn("failed to send order delivered email",
 			zap.String("cart_id", cartID),
@@ -459,6 +482,11 @@ func (s *Service) OnShipmentPosted(ctx context.Context, cartID, trackingCode str
 
 	input := buildShippedEmailInput(snapshot, trackingCode, trackingToken)
 	s.applyShippedOverride(ctx, snapshot, &input, trackingCode)
+	if s.emailPaused(ctx, uuidStr(snapshot.Store.ID), func(n *notification.Settings) *notification.EmailTemplateSettings { return n.Shipped }) {
+		logger.From(ctx, s.logger).Info("order shipped email paused by store settings",
+			zap.String("cart_id", cartID))
+		return
+	}
 	if err := s.email.SendOrderShipped(ctx, input); err != nil {
 		logger.From(ctx, s.logger).Warn("failed to send order shipped email",
 			zap.String("cart_id", cartID),
@@ -527,6 +555,21 @@ func buildEmailInput(s *CartSnapshot, trackingToken string) email.OrderPaidEmail
 // loadEmailSettings returns the merchant's notification.Settings, or nil when
 // the feature isn't wired (e.g. tests). Errors are swallowed because every
 // call site is in a best-effort flow.
+// emailPaused diz se o lojista PAUSOU este e-mail na aba de Comunicações.
+// Até 20/08/2026 o toggle NÃO gateava o envio — só decidia se o texto
+// customizado era aplicado — então "pausar" na tela não pausava nada (o
+// e-mail de estorno da Canto da Art saiu com o card marcado como pausado).
+// Chave ausente = ligado, o mesmo default que o GET efetivo mostra na tela.
+// Fail-open de propósito: settings ilegíveis não podem calar transacional.
+func (s *Service) emailPaused(ctx context.Context, storeID string, pick func(*notification.Settings) *notification.EmailTemplateSettings) bool {
+	settings := s.loadEmailSettings(ctx, storeID)
+	if settings == nil {
+		return false
+	}
+	tpl := pick(settings)
+	return tpl != nil && !tpl.Enabled
+}
+
 func (s *Service) loadEmailSettings(ctx context.Context, storeID string) *notification.Settings {
 	if s.notificationService == nil {
 		return nil
