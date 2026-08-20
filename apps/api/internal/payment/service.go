@@ -105,12 +105,26 @@ func (s *Service) CreateCheckout(ctx context.Context, input CreateCheckoutInput)
 		}
 	}
 
-	// Start idempotency tracking
+	// Start idempotency tracking. O checkout mantém o contrato antigo de
+	// propósito: trava indisponível (ou disputada) NÃO bloqueia a compradora —
+	// segue sem registro. A semântica estrita de posse (ErrInFlight etc.) é do
+	// fluxo de publicação de mídia, onde repetir cria story duplicado.
 	var idemRecord *idempotency.Record
-	if input.IdempotencyKey != "" || s.idempotency != nil {
-		idemRecord, err = s.idempotency.Start(ctx, idemReq)
-		if err != nil {
-			logger.From(ctx, s.logger).Warn("idempotency start failed", zap.Error(err))
+	if s.idempotency != nil {
+		claim, cErr := s.idempotency.Claim(ctx, idemReq)
+		switch {
+		case cErr != nil:
+			logger.From(ctx, s.logger).Warn("idempotency claim failed", zap.Error(cErr))
+		case claim.Completed != nil:
+			var output CreateCheckoutOutput
+			if err := json.Unmarshal(claim.Completed.Response, &output); err == nil {
+				logger.From(ctx, s.logger).Debug("returning cached checkout response",
+					zap.String("idempotency_key", input.IdempotencyKey),
+				)
+				return &output, nil
+			}
+		case claim.Record != nil:
+			idemRecord = claim.Record
 		}
 	}
 

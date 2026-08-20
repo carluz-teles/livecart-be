@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -654,10 +655,31 @@ func (r *IdempotencyRepository) Create(ctx context.Context, params idempotency.C
 		Status:         "pending",
 	})
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			// Não é falha de infra: outra tentativa da mesma operação já
+			// registrou esta chave. Claim decide se devolve a resposta dela,
+			// recusa por estar em voo ou toma posse da falha.
+			return nil, fmt.Errorf("creating idempotency key: %w", idempotency.ErrDuplicateKey)
+		}
 		return nil, fmt.Errorf("creating idempotency key: %w", err)
 	}
 
 	return r.toIdempotencyRecord(row), nil
+}
+
+// Reclaim toma posse (CAS) de um registro 'failed' — ou 'pending' velho o
+// bastante para a tentativa dona ter morrido. false = outra tentativa venceu.
+func (r *IdempotencyRepository) Reclaim(ctx context.Context, id string) (bool, error) {
+	idemID, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	rows, err := r.queries.ReclaimIdempotencyKey(ctx, idemID)
+	if err != nil {
+		return false, fmt.Errorf("reclaiming idempotency key: %w", err)
+	}
+	return rows > 0, nil
 }
 
 // Update updates an idempotency record.
