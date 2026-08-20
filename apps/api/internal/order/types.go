@@ -213,6 +213,37 @@ type OrderItemPreviewResponse struct {
 // shipment created at the carrier (when any) with its tracking timeline, and
 // store shipping defaults so the UI can pre-fill the create-shipment form.
 // The `OrderResponse` embedding keeps list-page fields identical.
+// OrderNotificationOutput é uma DM automática do pedido, direto do
+// notification_logs: o QUE foi enviado (texto verbatim), quando, e o desfecho
+// (sent/failed/skipped/cooldown + erro). É a metade "o que a cliente recebeu"
+// da árvore de histórico — antes o lojista via o comentário e o pedido, mas
+// nunca a mensagem que o LiveCart mandou (ou deixou de mandar).
+type OrderNotificationOutput struct {
+	Type      string     `json:"type"`
+	Channel   string     `json:"channel"`
+	Status    string     `json:"status"`
+	Message   *string    `json:"message,omitempty"`
+	Error     *string    `json:"error,omitempty"`
+	CreatedAt time.Time  `json:"createdAt"`
+	SentAt    *time.Time `json:"sentAt,omitempty"`
+}
+
+// OrderWaitlistJourneyOutput é a jornada COMPLETA de uma entrada na fila —
+// inclusive as encerradas (fulfilled/expired/cancelled), que a seção
+// "Aguardando estoque" de propósito não mostra. O histórico precisa delas:
+// "entrou na fila → liberou → o prazo da liberação venceu" é exatamente o tipo
+// de desfecho que hoje some da tela.
+type OrderWaitlistJourneyOutput struct {
+	ProductName string     `json:"productName"`
+	Quantity    int        `json:"quantity"`
+	Status      string     `json:"status"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	NotifiedAt  *time.Time `json:"notifiedAt,omitempty"`
+	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
+	FulfilledAt *time.Time `json:"fulfilledAt,omitempty"`
+	CancelledAt *time.Time `json:"cancelledAt,omitempty"`
+}
+
 type OrderDetailResponse struct {
 	OrderResponse
 	// Cart token; the public buyer link is `${frontend_origin}/cart/${token}`.
@@ -238,6 +269,9 @@ type OrderDetailResponse struct {
 	// entrou na fila. Não somam no total nem vão para a transportadora — são o
 	// que o lojista precisa dizer que está esperando reposição.
 	Waitlist []OrderWaitlistItemResponse `json:"waitlist"`
+	// Árvore de histórico (20/08/2026): DMs enviadas e jornada completa da fila.
+	Notifications   []OrderNotificationOutput    `json:"notifications"`
+	WaitlistJourney []OrderWaitlistJourneyOutput `json:"waitlistJourney"`
 	// PayableAmount: só as unidades COM estoque — é o que a cliente consegue
 	// pagar agora e o valor que o orçamento impresso apresenta. Igual a
 	// totalAmount quando não há nada em fila.
@@ -519,6 +553,8 @@ func NewOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 		Token:                  o.Token,
 		Comments:               comments,
 		Waitlist:               waitlist,
+		Notifications:          append([]OrderNotificationOutput{}, o.Notifications...),
+		WaitlistJourney:        append([]OrderWaitlistJourneyOutput{}, o.WaitlistJourney...),
 		PayableAmount:          o.PayableAmount,
 		WaitlistedAmount:       o.WaitlistedAmount,
 		CustomerBlocked:        o.CustomerBlocked,
@@ -1065,6 +1101,10 @@ type OrderDetailOutput struct {
 	// Mesma fonte do checkout público (waitlist_items com status ativo), para
 	// que o que o lojista lê em voz alta seja exatamente o que a cliente vê.
 	Waitlist []OrderWaitlistItemOutput
+	// Notifications e WaitlistJourney alimentam a árvore de histórico — ver
+	// os tipos correspondentes acima.
+	Notifications   []OrderNotificationOutput
+	WaitlistJourney []OrderWaitlistJourneyOutput
 
 	// PayableAmount é o que a cliente consegue pagar AGORA: só as unidades com
 	// estoque. TotalAmount soma a quantidade CHEIA (é a fonte da receita do

@@ -326,6 +326,21 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 		waitlist = []OrderWaitlistItemOutput{}
 	}
 
+	// Matéria-prima da árvore de histórico (20/08/2026): as DMs enviadas e a
+	// jornada completa da fila. Best-effort pelo mesmo motivo da fila acima.
+	notifications, err := s.repo.ListCartNotifications(ctx, id)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("failed to load notifications for order detail",
+			zap.String("order_id", id), zap.Error(err))
+		notifications = []OrderNotificationOutput{}
+	}
+	waitlistJourney, err := s.repo.ListWaitlistJourney(ctx, id)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("failed to load waitlist journey for order detail",
+			zap.String("order_id", id), zap.Error(err))
+		waitlistJourney = []OrderWaitlistJourneyOutput{}
+	}
+
 	// Separa o que a cliente pode pagar do que está em fila. Uma passada só
 	// pelos itens: quantity é o total pedido, waitlisted é a parcela sem
 	// estoque, e as duas somas juntas fecham em TotalAmount.
@@ -345,6 +360,8 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 		Token:                  row.Token,
 		Comments:               comments,
 		Waitlist:               waitlist,
+		Notifications:          notifications,
+		WaitlistJourney:        waitlistJourney,
 		PayableAmount:          payable,
 		WaitlistedAmount:       waitlisted,
 		CancellationRevertedAt: row.CancellationRevertedAt,

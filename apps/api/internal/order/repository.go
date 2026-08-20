@@ -1051,6 +1051,58 @@ func (r *Repository) GetOrderIDByCartID(ctx context.Context, cartID string) (str
 	return uuid.UUID(orderID.Bytes).String(), nil
 }
 
+// ListCartNotifications lê as DMs automáticas do carrinho no notification_logs
+// — tipo, desfecho, texto verbatim e erro. Ordem cronológica: o histórico
+// intercala estas entradas com comentários e transições do pedido.
+func (r *Repository) ListCartNotifications(ctx context.Context, cartID string) ([]OrderNotificationOutput, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT notification_type, channel, status, message_text, error_message, created_at, sent_at
+		FROM notification_logs
+		WHERE cart_id = $1
+		ORDER BY created_at`, cartID)
+	if err != nil {
+		return nil, fmt.Errorf("listing cart notifications: %w", err)
+	}
+	defer rows.Close()
+
+	out := []OrderNotificationOutput{}
+	for rows.Next() {
+		var n OrderNotificationOutput
+		if err := rows.Scan(&n.Type, &n.Channel, &n.Status, &n.Message, &n.Error, &n.CreatedAt, &n.SentAt); err != nil {
+			return nil, fmt.Errorf("scanning cart notification: %w", err)
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// ListWaitlistJourney lê TODAS as entradas de fila do carrinho — vivas e
+// encerradas — com os carimbos de cada etapa (entrou/liberou/venceu/saiu).
+// Não substitui ListActiveWaitlist: a seção "Aguardando estoque" continua
+// mostrando só a fila viva; esta é a matéria-prima do histórico.
+func (r *Repository) ListWaitlistJourney(ctx context.Context, cartID string) ([]OrderWaitlistJourneyOutput, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT p.name, wi.quantity, wi.status, wi.created_at, wi.notified_at, wi.expires_at, wi.fulfilled_at, wi.cancelled_at
+		FROM waitlist_items wi
+		JOIN products p ON p.id = wi.product_id
+		WHERE wi.cart_id = $1
+		ORDER BY wi.created_at`, cartID)
+	if err != nil {
+		return nil, fmt.Errorf("listing waitlist journey: %w", err)
+	}
+	defer rows.Close()
+
+	out := []OrderWaitlistJourneyOutput{}
+	for rows.Next() {
+		var w OrderWaitlistJourneyOutput
+		if err := rows.Scan(&w.ProductName, &w.Quantity, &w.Status, &w.CreatedAt, &w.NotifiedAt, &w.ExpiresAt, &w.FulfilledAt, &w.CancelledAt); err != nil {
+			return nil, fmt.Errorf("scanning waitlist journey: %w", err)
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
 // ListActiveWaitlist returns the cart's live waitlist entries (waiting/notified).
 //
 // Delega para a MESMA query sqlc que alimenta a seção de fila do checkout
