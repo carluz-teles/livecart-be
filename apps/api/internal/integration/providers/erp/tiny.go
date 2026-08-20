@@ -506,8 +506,22 @@ func ExtrairSaldoDisponivel(cru map[string]any) (saldo int, campo string, ok boo
 			continue
 		}
 		n, isNum := v.(float64)
-		if !isNum || n < 0 {
+		if !isNum {
 			continue
+		}
+		// Disponível NEGATIVO é esgotado, e o número mais importante do
+		// endpoint — não "campo ausente". Descartá-lo (o `n < 0 → continue`
+		// que existia aqui) fazia o chamador cair no saldo FÍSICO bruto, que
+		// é positivo, e reofertar um produto sem estoque.
+		//
+		// Foi a raiz do estoque negativo do 1268/1130 em 20/08/2026: um
+		// "estorno de reserva pós-pagamento" devolveu +1 ao saldo bruto do
+		// Tiny enquanto o disponível real estava -1 (mais pedidos de venda que
+		// físico); o parser jogou fora o -1, o LiveCart gravou stock=1 e o
+		// backstop da fila promoveu compradoras sobre unidades que não
+		// existiam. Negativo satura em 0 (esgotado).
+		if n < 0 {
+			return 0, c, true
 		}
 		return int(n), c, true
 	}
