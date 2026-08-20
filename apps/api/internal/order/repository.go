@@ -723,6 +723,36 @@ func (r *Repository) GetCustomerComments(ctx context.Context, eventID string, pl
 	return comments, nil
 }
 
+// GetProductOrderBreakdown agrupa os carrinhos que CONTÊM o produto por
+// (status, payment_status), contando pedidos e unidades. Âncora no cart, como
+// a lista — os números batem com as linhas que /orders?productId mostra.
+func (r *Repository) GetProductOrderBreakdown(ctx context.Context, storeID, productID string) ([]ProductOrderBreakdownRow, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT c.status, c.payment_status,
+		       COUNT(DISTINCT c.id)::INT AS orders,
+		       COALESCE(SUM(ci.quantity), 0)::INT AS units
+		FROM carts c
+		JOIN live_events e ON e.id = c.event_id
+		JOIN cart_items ci ON ci.cart_id = c.id AND ci.product_id = $2
+		WHERE e.store_id = $1
+		GROUP BY c.status, c.payment_status
+		ORDER BY orders DESC`, storeID, productID)
+	if err != nil {
+		return nil, fmt.Errorf("querying product order breakdown: %w", err)
+	}
+	defer rows.Close()
+
+	out := []ProductOrderBreakdownRow{}
+	for rows.Next() {
+		var row ProductOrderBreakdownRow
+		if err := rows.Scan(&row.Status, &row.PaymentStatus, &row.Orders, &row.Units); err != nil {
+			return nil, fmt.Errorf("scanning product order breakdown: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
 func (r *Repository) GetStats(ctx context.Context, storeID string, search string, filters OrderFilters) (*OrderStatsOutput, error) {
 	// Mesma âncora da lista (cart), para os KPIs baterem com as linhas mostradas:
 	// os contadores falavam de "pedidos" que a lista não conseguia listar.
@@ -814,6 +844,17 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 	if filters.EventID != nil && *filters.EventID != "" {
 		conditions = append(conditions, fmt.Sprintf("c.event_id = $%d", argIndex))
 		args = append(args, *filters.EventID)
+		argIndex++
+	}
+
+	if filters.ProductID != nil && *filters.ProductID != "" {
+		// EXISTS, não JOIN: carrinho com o produto em 2 linhas de item não
+		// pode virar 2 linhas de pedido.
+		conditions = append(conditions, fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM cart_items fci WHERE fci.cart_id = c.id AND fci.product_id = $%d)",
+			argIndex,
+		))
+		args = append(args, *filters.ProductID)
 		argIndex++
 	}
 

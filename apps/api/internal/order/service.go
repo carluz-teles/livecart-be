@@ -612,6 +612,12 @@ func (s *Service) RegenerateCheckout(
 	return row.Token, expiresAt, nil
 }
 
+// GetProductOrderBreakdown responde "quais pedidos têm este produto, por
+// status" — pedidos e unidades por par (status, payment_status).
+func (s *Service) GetProductOrderBreakdown(ctx context.Context, storeID, productID string) ([]ProductOrderBreakdownRow, error) {
+	return s.repo.GetProductOrderBreakdown(ctx, storeID, productID)
+}
+
 func (s *Service) GetStats(ctx context.Context, storeID string, search string, filters OrderFilters) (*OrderStatsOutput, error) {
 	stats, err := s.repo.GetStats(ctx, storeID, search, filters)
 	if err != nil {
