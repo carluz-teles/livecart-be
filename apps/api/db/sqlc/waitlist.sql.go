@@ -584,10 +584,25 @@ func (q *Queries) ListEventsWithWaitingByProduct(ctx context.Context, productID 
 }
 
 const listExpiredNotifiedWaitlistItems = `-- name: ListExpiredNotifiedWaitlistItems :many
-SELECT id, event_id, product_id, platform_user_id, platform_handle, quantity, position, status, notified_at, fulfilled_at, expires_at, created_at, cart_id, notification_sent_at, cancelled_at FROM waitlist_items
-WHERE status = 'notified' AND expires_at IS NOT NULL AND expires_at < now()
+SELECT wi.id, wi.event_id, wi.product_id, wi.platform_user_id, wi.platform_handle, wi.quantity, wi.position, wi.status, wi.notified_at, wi.fulfilled_at, wi.expires_at, wi.created_at, wi.cart_id, wi.notification_sent_at, wi.cancelled_at FROM waitlist_items wi
+JOIN live_events e ON e.id = wi.event_id
+WHERE wi.status = 'notified'
+  AND wi.expires_at IS NOT NULL AND wi.expires_at < now()
+  AND (e.status = 'ended' OR (e.ends_at IS NOT NULL AND e.ends_at < now()))
 `
 
+// RN-04: NADA expira dentro de um evento ABERTO. A promoção da fila ganha um
+// TTL (waitlist_notified_ttl) que só vale DEPOIS que o evento fecha — o
+// período de recuperação, onde o estoque escasso precisa girar. Enquanto o
+// evento roda, a promovida segura a unidade como qualquer carrinho (que também
+// não expira sob a RN-04); a fila só anda no fechamento.
+//
+// Sem o filtro de evento abaixo, o sweep lazy expirava promoções no MEIO de um
+// evento aberto (20/08/2026, produto 1130): a promoção da @tatiani venceu o TTL
+// de 1h às 18:22 com o evento fechando só no dia seguinte, e a cadeia
+// expiração → devolve-estoque-local → promove-próximo propagou uma unidade
+// fantasma pela fila (a @andrea foi promovida sobre estoque que não existia).
+// Evento aberto = nada expira. Ponto.
 func (q *Queries) ListExpiredNotifiedWaitlistItems(ctx context.Context) ([]WaitlistItem, error) {
 	rows, err := q.db.Query(ctx, listExpiredNotifiedWaitlistItems)
 	if err != nil {

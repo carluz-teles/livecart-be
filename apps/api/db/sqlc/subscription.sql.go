@@ -11,6 +11,18 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const consumeTaxaPromoCycle = `-- name: ConsumeTaxaPromoCycle :exec
+UPDATE billing_taxa_promos
+SET cycles_remaining = cycles_remaining - 1
+WHERE id = $1 AND cycles_remaining > 0
+`
+
+// Consome um ciclo da promo (decrementa) após aplicá-la numa fatura.
+func (q *Queries) ConsumeTaxaPromoCycle(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, consumeTaxaPromoCycle, id)
+	return err
+}
+
 const deleteSubscriptionsByStore = `-- name: DeleteSubscriptionsByStore :exec
 DELETE FROM subscriptions WHERE store_id = $1
 `
@@ -56,6 +68,30 @@ func (q *Queries) EnsureTrialSubscription(ctx context.Context, arg EnsureTrialSu
 		&i.GraceUntil,
 		&i.ManualOverride,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getActiveTaxaPromo = `-- name: GetActiveTaxaPromo :one
+SELECT id, store_id, discount_bps, cycles_remaining, code, description, created_at FROM billing_taxa_promos
+WHERE store_id = $1 AND cycles_remaining > 0
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+// Promo de taxa ativa da loja (mais recente com ciclos restantes). Usada pelo
+// reactor de ciclo pra descontar a comissão antes de faturar.
+func (q *Queries) GetActiveTaxaPromo(ctx context.Context, storeID pgtype.UUID) (BillingTaxaPromo, error) {
+	row := q.db.QueryRow(ctx, getActiveTaxaPromo, storeID)
+	var i BillingTaxaPromo
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.DiscountBps,
+		&i.CyclesRemaining,
+		&i.Code,
+		&i.Description,
+		&i.CreatedAt,
 	)
 	return i, err
 }
@@ -259,6 +295,42 @@ func (q *Queries) InsertLedgerEntry(ctx context.Context, arg InsertLedgerEntryPa
 	return i, err
 }
 
+const insertTaxaPromo = `-- name: InsertTaxaPromo :one
+INSERT INTO billing_taxa_promos (store_id, discount_bps, cycles_remaining, code, description)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, store_id, discount_bps, cycles_remaining, code, description, created_at
+`
+
+type InsertTaxaPromoParams struct {
+	StoreID         pgtype.UUID `json:"store_id"`
+	DiscountBps     int32       `json:"discount_bps"`
+	CyclesRemaining int32       `json:"cycles_remaining"`
+	Code            pgtype.Text `json:"code"`
+	Description     pgtype.Text `json:"description"`
+}
+
+// Cria uma promo de desconto sobre a comissão (taxa) para uma loja.
+func (q *Queries) InsertTaxaPromo(ctx context.Context, arg InsertTaxaPromoParams) (BillingTaxaPromo, error) {
+	row := q.db.QueryRow(ctx, insertTaxaPromo,
+		arg.StoreID,
+		arg.DiscountBps,
+		arg.CyclesRemaining,
+		arg.Code,
+		arg.Description,
+	)
+	var i BillingTaxaPromo
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.DiscountBps,
+		&i.CyclesRemaining,
+		&i.Code,
+		&i.Description,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const listLedgerEntries = `-- name: ListLedgerEntries :many
 SELECT
   le.id, le.entry_type, le.amount_cents, le.fee_cents, le.fee_bps, le.billable, le.created_at,
@@ -323,6 +395,25 @@ func (q *Queries) ListLedgerEntries(ctx context.Context, arg ListLedgerEntriesPa
 	return items, nil
 }
 
+const markStoreFeesInvoiced = `-- name: MarkStoreFeesInvoiced :exec
+UPDATE billing_ledger_entries
+SET stripe_ref = $3
+WHERE store_id = $1 AND billable = true AND stripe_ref IS NULL AND created_at < $2
+`
+
+type MarkStoreFeesInvoicedParams struct {
+	StoreID   pgtype.UUID        `json:"store_id"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	StripeRef pgtype.Text        `json:"stripe_ref"`
+}
+
+// Marca como faturadas as taxas billable não faturadas até o corte (idempotência
+// do ciclo: um redelivery não refatura). Mesmo predicado do SUM.
+func (q *Queries) MarkStoreFeesInvoiced(ctx context.Context, arg MarkStoreFeesInvoicedParams) error {
+	_, err := q.db.Exec(ctx, markStoreFeesInvoiced, arg.StoreID, arg.CreatedAt, arg.StripeRef)
+	return err
+}
+
 const setLedgerEntryStripeRef = `-- name: SetLedgerEntryStripeRef :exec
 UPDATE billing_ledger_entries SET stripe_ref = $2 WHERE id = $1
 `
@@ -374,6 +465,27 @@ func (q *Queries) SetSubscriptionStripeRefs(ctx context.Context, arg SetSubscrip
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const sumUnbilledBillableFees = `-- name: SumUnbilledBillableFees :one
+SELECT COALESCE(SUM(fee_cents), 0)::bigint AS fee_cents
+FROM billing_ledger_entries
+WHERE store_id = $1 AND billable = true AND stripe_ref IS NULL AND created_at < $2
+`
+
+type SumUnbilledBillableFeesParams struct {
+	StoreID   pgtype.UUID        `json:"store_id"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// Soma a taxa (líquida de refunds via refund_credit) ainda NÃO faturada de uma
+// loja, até o corte do ciclo. stripe_ref IS NULL = não faturada. Usado pelo
+// reactor de ciclo pra montar o InvoiceItem da comissão.
+func (q *Queries) SumUnbilledBillableFees(ctx context.Context, arg SumUnbilledBillableFeesParams) (int64, error) {
+	row := q.db.QueryRow(ctx, sumUnbilledBillableFees, arg.StoreID, arg.CreatedAt)
+	var fee_cents int64
+	err := row.Scan(&fee_cents)
+	return fee_cents, err
 }
 
 const updateSubscriptionFromStripe = `-- name: UpdateSubscriptionFromStripe :one

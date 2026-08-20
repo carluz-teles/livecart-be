@@ -24,6 +24,16 @@ type BillingLedgerEntry struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type BillingTaxaPromo struct {
+	ID              pgtype.UUID        `json:"id"`
+	StoreID         pgtype.UUID        `json:"store_id"`
+	DiscountBps     int32              `json:"discount_bps"`
+	CyclesRemaining int32              `json:"cycles_remaining"`
+	Code            pgtype.Text        `json:"code"`
+	Description     pgtype.Text        `json:"description"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
 type BlockedHandle struct {
 	ID                pgtype.UUID        `json:"id"`
 	StoreID           pgtype.UUID        `json:"store_id"`
@@ -394,6 +404,8 @@ type LiveEvent struct {
 	CartExtendedExpirationMinutes pgtype.Int4 `json:"cart_extended_expiration_minutes"`
 	// D21: inicio da JANELA COMERCIAL da campanha. Nao e a data de publicacao da midia (essa e live_sessions.publish_at). Escrita SEMPRE em par com scheduled_at, que continua sendo a coluna que EffectiveStatus le.
 	StartsAt pgtype.Timestamptz `json:"starts_at"`
+	// live = campanha real (comentários, sessões, painel). whatsapp = evento sintético, session-less, dono do carrinho da venda por WhatsApp por IA (Fatia 4c). Um por loja (índice único parcial). Invisível no painel/métricas de live.
+	Kind string `json:"kind"`
 }
 
 type LiveSession struct {
@@ -919,4 +931,58 @@ type WebhookEvent struct {
 	ProcessedAt    pgtype.Timestamptz `json:"processed_at"`
 	ErrorMessage   pgtype.Text        `json:"error_message"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+type WhatsappConnection struct {
+	ID                    pgtype.UUID        `json:"id"`
+	StoreID               pgtype.UUID        `json:"store_id"`
+	Status                string             `json:"status"`
+	PhoneE164             pgtype.Text        `json:"phone_e164"`
+	WabaID                pgtype.Text        `json:"waba_id"`
+	DisplayName           pgtype.Text        `json:"display_name"`
+	TwilioSubaccountSid   pgtype.Text        `json:"twilio_subaccount_sid"`
+	TwilioSubaccountToken []byte             `json:"twilio_subaccount_token"`
+	SenderSid             pgtype.Text        `json:"sender_sid"`
+	SenderStatus          pgtype.Text        `json:"sender_status"`
+	QualityRating         pgtype.Text        `json:"quality_rating"`
+	TemplateContentSid    pgtype.Text        `json:"template_content_sid"`
+	TemplateStatus        pgtype.Text        `json:"template_status"`
+	TemplateReason        pgtype.Text        `json:"template_reason"`
+	LastError             pgtype.Text        `json:"last_error"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+}
+
+type WhatsappConversation struct {
+	ID            pgtype.UUID        `json:"id"`
+	StoreID       pgtype.UUID        `json:"store_id"`
+	CustomerID    pgtype.UUID        `json:"customer_id"`
+	PhoneE164     string             `json:"phone_e164"`
+	LastMessageAt pgtype.Timestamptz `json:"last_message_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	AiEnabled     bool               `json:"ai_enabled"`
+}
+
+type WhatsappMessage struct {
+	ID                 pgtype.UUID        `json:"id"`
+	ConversationID     pgtype.UUID        `json:"conversation_id"`
+	StoreID            pgtype.UUID        `json:"store_id"`
+	Direction          string             `json:"direction"`
+	Body               string             `json:"body"`
+	HasMedia           bool               `json:"has_media"`
+	TemplatePurpose    pgtype.Text        `json:"template_purpose"`
+	ProviderMessageSid pgtype.Text        `json:"provider_message_sid"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+}
+
+type WhatsappTemplate struct {
+	ID           pgtype.UUID        `json:"id"`
+	ConnectionID pgtype.UUID        `json:"connection_id"`
+	Purpose      string             `json:"purpose"`
+	ContentSid   pgtype.Text        `json:"content_sid"`
+	Status       pgtype.Text        `json:"status"`
+	Reason       pgtype.Text        `json:"reason"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }

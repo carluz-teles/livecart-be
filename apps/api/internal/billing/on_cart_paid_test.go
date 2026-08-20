@@ -53,6 +53,9 @@ func (noopStripe) GetSubscription(_ context.Context, _ string) (*StripeSubscript
 func (noopStripe) CreateSetupCheckoutSession(_ context.Context, _, _, _ string, _ map[string]string) (*CheckoutSession, error) {
 	return nil, nil
 }
+func (noopStripe) CreateSubscriptionCheckoutSession(_ context.Context, _, _, _, _, _ string, _ map[string]string) (*CheckoutSession, error) {
+	return nil, nil
+}
 func (noopStripe) GetSetupIntentPaymentMethod(_ context.Context, _ string) (string, error) {
 	return "", nil
 }
@@ -69,6 +72,9 @@ func (noopStripe) ScheduleDowngrade(_ context.Context, _ *StripeSubscription, _ 
 	return nil
 }
 func (noopStripe) SendMeterEvent(_ context.Context, _, _, _ string, _ int64) error { return nil }
+func (noopStripe) AddInvoiceItem(_ context.Context, _, _ string, _ int64, _, _ string) error {
+	return nil
+}
 func (noopStripe) CreateCustomerBalanceCredit(_ context.Context, _ string, _ int64, _ string) error {
 	return nil
 }
@@ -232,8 +238,10 @@ func TestOnCartPaid_AC2_RetryOnInsertError(t *testing.T) {
 	t.Skip("AC2 coberto pelas verificações de interface em AC7 e AC9")
 }
 
-// AC3 Meter best-effort: SendMeterEvent falha → sale persiste com stripe_ref NULL
-// e OnCartPaid NÃO retorna erro.
+// AC3 (modelo InvoiceItem): a taxa NÃO é mais reportada por meter — acumula no
+// ledger com stripe_ref NULL e é faturada no ciclo (OnSubscriptionCycleInvoice).
+// Este teste garante o invariante: após OnCartPaid a venda existe e o
+// stripe_ref fica NULL (comissão pendente de faturamento), sem erro.
 func TestOnCartPaid_AC3_MeterBestEffort(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
