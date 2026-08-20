@@ -1395,10 +1395,48 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 	// comprador eram APAGADOS (DeleteCartItemsByCart) para o carrinho poder ser
 	// reusado. Numa campanha de uma semana isso apagaria a compra de dias
 	// (RN-08). Agora o antigo fica arquivado, intacto, e o novo nasce limpo.
-	existing, err := qtx.GetCartByEventAndUserForUpdate(ctx, sqlc.GetCartByEventAndUserForUpdateParams{
-		EventID:        eventID,
-		PlatformUserID: params.PlatformUserID,
-	})
+	// VIP: resolve o carrinho ETERNO por (loja, @), atravessando eventos, ANTES
+	// da busca por evento — é isto que faz a compra num evento novo cair no
+	// mesmo carrinho. Só quando há store_id (sempre, na prática).
+	if params.IsVip && params.StoreID != "" {
+		storeUUID, sErr := parseUUID(params.StoreID)
+		if sErr == nil {
+			vipCart, vErr := qtx.GetEternalCartByStoreAndHandleForUpdate(ctx, sqlc.GetEternalCartByStoreAndHandleForUpdateParams{
+				StoreID:        storeUUID,
+				PlatformHandle: params.PlatformHandle,
+			})
+			if vErr == nil {
+				if err := tx.Commit(ctx); err != nil {
+					return nil, false, fmt.Errorf("committing transaction: %w", err)
+				}
+				return &CartRow{
+					ID:             vipCart.ID.String(),
+					EventID:        vipCart.EventID.String(),
+					PlatformUserID: vipCart.PlatformUserID,
+					PlatformHandle: vipCart.PlatformHandle,
+					Token:          vipCart.Token,
+				}, false, nil
+			}
+			if !errors.Is(vErr, pgx.ErrNoRows) {
+				return nil, false, fmt.Errorf("getting eternal cart: %w", vErr)
+			}
+			// Sem carrinho eterno ainda → cai no fluxo de criação abaixo, que
+			// marca never_expires. NÃO buscamos por evento para o VIP: um
+			// carrinho por evento anterior (não-eterno) não deve capturar o VIP.
+		}
+	}
+
+	// Busca por evento (não-VIP, ou VIP sem carrinho eterno ainda não é o caso —
+	// o VIP pula direto para a criação eterna).
+	var existing sqlc.Cart
+	if !params.IsVip {
+		existing, err = qtx.GetCartByEventAndUserForUpdate(ctx, sqlc.GetCartByEventAndUserForUpdateParams{
+			EventID:        eventID,
+			PlatformUserID: params.PlatformUserID,
+		})
+	} else {
+		err = pgx.ErrNoRows // VIP sem carrinho eterno → força criação eterna
+	}
 	if err == nil {
 		if err := tx.Commit(ctx); err != nil {
 			return nil, false, fmt.Errorf("committing transaction: %w", err)
@@ -1426,6 +1464,12 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 	}
 
 	// Note: expires_at is NOT set on creation. It will be set when the live event ends.
+	var storePg pgtype.UUID
+	if params.StoreID != "" {
+		if sid, sErr := parseUUID(params.StoreID); sErr == nil {
+			storePg = sid
+		}
+	}
 	created, err := qtx.CreateCart(ctx, sqlc.CreateCartParams{
 		EventID:        eventID,
 		SessionID:      sessionID,
@@ -1434,6 +1478,8 @@ func (r *Repository) GetOrCreateCart(ctx context.Context, params GetOrCreateCart
 		Token:          params.Token,
 		CustomerID:     customerID,
 		ShortID:        shortID,
+		StoreID:        storePg,
+		NeverExpires:   params.IsVip,
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("creating cart: %w", err)

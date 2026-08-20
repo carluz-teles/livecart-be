@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -3163,6 +3164,35 @@ func (r *Repository) IsHandleBlocked(ctx context.Context, storeID, handle string
 
 // ListOpenCartsByHandle returns non-paid carts for the given (store, handle),
 // used by the customer-block flow to find what needs cancelling.
+// ActivateEternalCartsForHandle marca os carrinhos abertos do @ como eternos e
+// anula a expiração deles. Devolve os ids afetados.
+func (r *Repository) ActivateEternalCartsForHandle(ctx context.Context, storeID, handle string) ([]string, error) {
+	sid, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ActivateEternalCartsForHandle(ctx, sqlc.ActivateEternalCartsForHandleParams{
+		StoreID:        sid,
+		PlatformHandle: normalizeVipHandle(handle),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("activating eternal carts: %w", err)
+	}
+	out := make([]string, 0, len(rows))
+	for _, id := range rows {
+		out = append(out, uuidToString(id))
+	}
+	return out, nil
+}
+
+// normalizeVipHandle espelha customer.normalizeHandle (@ + lowercase) — o
+// carrinho grava platform_handle sem @, e a lista VIP guarda normalizado.
+func normalizeVipHandle(h string) string {
+	h = strings.TrimSpace(h)
+	h = strings.TrimPrefix(h, "@")
+	return strings.ToLower(h)
+}
+
 func (r *Repository) ListOpenCartsByHandle(ctx context.Context, storeID, handle string) ([]CartRow, error) {
 	sID, err := parseUUID(storeID)
 	if err != nil {

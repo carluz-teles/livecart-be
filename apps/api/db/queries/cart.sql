@@ -3,9 +3,33 @@
 -- =============================================================================
 
 -- name: CreateCart :one
-INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, status, expires_at, customer_id, short_id)
-VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8)
+INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, status, expires_at, customer_id, short_id, store_id, never_expires)
+VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, $10)
 RETURNING *;
+
+-- name: GetEternalCartByStoreAndHandleForUpdate :one
+-- Resolução do carrinho ETERNO do VIP: por (loja, @), ATRAVESSANDO eventos.
+-- É isto que faz a compra do VIP num evento novo cair no MESMO carrinho de um
+-- evento anterior. FOR UPDATE serializa dois comentários concorrentes do VIP.
+SELECT * FROM carts
+WHERE store_id = $1 AND platform_handle = $2
+  AND never_expires
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+ORDER BY created_at DESC
+LIMIT 1
+FOR UPDATE;
+
+-- name: ActivateEternalCartsForHandle :many
+-- Ao promover um @ a VIP: os carrinhos abertos que ele JÁ tem viram eternos e
+-- a agenda de expiração é ANULADA (expires_at NULL → o worker cart.expire vira
+-- no-op pelo próprio guard). Devolve os ids afetados.
+UPDATE carts
+SET never_expires = true, expires_at = NULL
+WHERE store_id = $1 AND platform_handle = $2
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+RETURNING id;
 
 -- name: ExtendCartExpiration :exec
 -- Empurra expires_at para no mínimo @new_expires_at ("gordura" extra para
@@ -141,6 +165,7 @@ SET status = 'expired', cancelled_reason = 'expired'
 WHERE carts.id = $1
   AND status IN ('active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND NOT never_expires   -- VIP: carrinho eterno nunca expira (defesa explícita; expires_at NULL já barraria)
   AND expires_at < now()
   AND NOT EXISTS (
       SELECT 1 FROM waitlist_items wi
@@ -331,6 +356,7 @@ SET status = 'checkout',
 WHERE c.event_id = $1
   AND c.status = 'active'
   AND c.payment_status IS DISTINCT FROM 'paid'
+  AND NOT c.never_expires   -- VIP: carrinho eterno nunca ganha prazo no fechamento
 RETURNING c.id;
 
 -- name: ShiftOpenCartExpirations :many

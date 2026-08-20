@@ -103,6 +103,7 @@ type Service struct {
 	socialReplier         SocialReplier
 	notificationSvc       *notification.Service
 	cartExpiryRescheduler CartExpiryRescheduler
+	vipChecker            VipChecker
 
 	// core is the slice of this Service's own behaviour the comment consumer
 	// reuses (session/event lookups, AddToCart, event-product whitelist). It
@@ -128,6 +129,16 @@ type CartExpiryRescheduler interface {
 // SetCartExpiryRescheduler liga o re-arm de cart.expire usado pela edição de
 // prazo do evento (20/08/2026).
 func (s *Service) SetCartExpiryRescheduler(r CartExpiryRescheduler) { s.cartExpiryRescheduler = r }
+
+// VipChecker responde se um @ é cliente VIP da loja. Satisfeita por
+// customer.Service.IsVipHandle (adapter em main.newApp). Nil-safe: sem ela,
+// nenhum carrinho é tratado como eterno (comportamento de antes da feature).
+type VipChecker interface {
+	IsVipHandle(ctx context.Context, storeID, handle string) (bool, error)
+}
+
+// SetVipChecker liga a checagem de cliente VIP usada na resolução do carrinho.
+func (s *Service) SetVipChecker(v VipChecker) { s.vipChecker = v }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {
 	s := &Service{
@@ -1612,13 +1623,31 @@ func (s *Service) AddToCart(ctx context.Context, input AddToCartInput) (AddToCar
 	if input.SessionID != "" {
 		originSession = &input.SessionID
 	}
+	// Cliente VIP? Então o carrinho é ETERNO e resolvido por (loja, @)
+	// atravessando eventos. Best-effort: falha na checagem cai em carrinho
+	// normal (nunca bloqueia a compra).
+	isVip := false
+	if s.vipChecker != nil && input.StoreID != "" && input.PlatformHandle != "" {
+		if v, vErr := s.vipChecker.IsVipHandle(ctx, input.StoreID, input.PlatformHandle); vErr != nil {
+			logger.From(ctx, s.logger).Warn("vip check failed, treating as normal cart",
+				zap.String("store_id", input.StoreID),
+				zap.String("handle", input.PlatformHandle),
+				zap.Error(vErr),
+			)
+		} else {
+			isVip = v
+		}
+	}
+
 	cart, isNew, err := s.repo.GetOrCreateCart(ctx, GetOrCreateCartParams{
 		EventID:        input.EventID,
+		StoreID:        input.StoreID,
 		SessionID:      originSession,
 		PlatformUserID: input.PlatformUserID,
 		PlatformHandle: input.PlatformHandle,
 		Token:          token,
 		CustomerID:     customerID,
+		IsVip:          isVip,
 	})
 	if err != nil {
 		return AddToCartOutput{}, fmt.Errorf("getting or creating cart: %w", err)
