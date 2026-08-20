@@ -80,13 +80,24 @@ func TestSemCampoConhecidoNaoAfirmaNada(t *testing.T) {
 	}
 }
 
-// Saldo negativo é sintoma, não estoque: o Tiny aceita ir abaixo de zero
-// (gravado na bateria de sandbox) e copiar isso propaga o defeito em vez de
-// mostrá-lo. Cair para o físico deixa o número errado visível no lugar certo.
-func TestNegativoNaoEntra(t *testing.T) {
-	if saldo, _, ok := ExtrairSaldoDisponivel(map[string]any{"disponivel": float64(-2)}); ok {
-		t.Errorf("aceitou disponível=%d — negativo é saída além do que existia, "+
-			"não um número a espelhar", saldo)
+// Saldo disponível NEGATIVO satura em 0 (esgotado) — REVISÃO 20/08/2026.
+//
+// A versão anterior deste teste exigia que o negativo NÃO entrasse, "para
+// cair no físico e deixar o número errado visível". A premissa estava errada:
+// o físico não fica só "visível" — ele vira products.stock e ALIMENTA a
+// reoferta e a promoção da fila. Um "estorno de reserva pós-pagamento"
+// devolveu +1 ao saldo bruto do Tiny enquanto o disponível real era -1; o
+// parser jogava fora o -1, o LiveCart gravava stock=1 e promovia compradoras
+// da fila sobre unidades que não existiam (1268/1130). Disponível negativo é
+// "não posso vender nenhuma" = 0, nunca o físico. O overselling é alerta de
+// reconciliação, não estoque vendável.
+func TestNegativoSaturaEmZero(t *testing.T) {
+	saldo, campo, ok := ExtrairSaldoDisponivel(map[string]any{"disponivel": float64(-2)})
+	if !ok || campo != "disponivel" {
+		t.Fatalf("recusou disponível=-2 — cairia no físico e reofertaria o esgotado (ok=%v campo=%q)", ok, campo)
+	}
+	if saldo != 0 {
+		t.Errorf("disponível=-2 virou %d; esperava 0 (esgotado)", saldo)
 	}
 }
 
@@ -99,5 +110,26 @@ func TestZeroEhSaldoValido(t *testing.T) {
 	}
 	if saldo != 0 {
 		t.Errorf("saldo = %d, quero 0", saldo)
+	}
+}
+
+func TestDisponivelNegativoSaturaEmZero(t *testing.T) {
+	// O caso do 1268/1130 (20/08/2026): o Tiny devolveu disponivel=-1 (esgotado,
+	// mais pedidos de venda que físico) e o parser DESCARTAVA o negativo, caindo
+	// no saldo físico bruto e reofertando. Negativo tem de virar 0 (esgotado),
+	// nunca "campo ausente".
+	for _, disp := range []float64{-1, -2, -10} {
+		saldo, campo, ok := ExtrairSaldoDisponivel(map[string]any{
+			"saldo": float64(1), "reservado": float64(2), "disponivel": disp,
+		})
+		if !ok {
+			t.Fatalf("disponivel=%v recusado — cairia no saldo físico e reofertaria o esgotado", disp)
+		}
+		if saldo != 0 {
+			t.Errorf("disponivel=%v virou saldo=%d; esperava 0 (esgotado)", disp, saldo)
+		}
+		if campo != "disponivel" {
+			t.Errorf("campo=%q; esperava 'disponivel'", campo)
+		}
 	}
 }
