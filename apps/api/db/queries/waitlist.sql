@@ -92,8 +92,23 @@ JOIN products p ON p.id = e.product_id
 LEFT JOIN carts c ON c.id = e.cart_id;
 
 -- name: ListExpiredNotifiedWaitlistItems :many
-SELECT * FROM waitlist_items
-WHERE status = 'notified' AND expires_at IS NOT NULL AND expires_at < now();
+-- RN-04: NADA expira dentro de um evento ABERTO. A promoção da fila ganha um
+-- TTL (waitlist_notified_ttl) que só vale DEPOIS que o evento fecha — o
+-- período de recuperação, onde o estoque escasso precisa girar. Enquanto o
+-- evento roda, a promovida segura a unidade como qualquer carrinho (que também
+-- não expira sob a RN-04); a fila só anda no fechamento.
+--
+-- Sem o filtro de evento abaixo, o sweep lazy expirava promoções no MEIO de um
+-- evento aberto (20/08/2026, produto 1130): a promoção da @tatiani venceu o TTL
+-- de 1h às 18:22 com o evento fechando só no dia seguinte, e a cadeia
+-- expiração → devolve-estoque-local → promove-próximo propagou uma unidade
+-- fantasma pela fila (a @andrea foi promovida sobre estoque que não existia).
+-- Evento aberto = nada expira. Ponto.
+SELECT wi.* FROM waitlist_items wi
+JOIN live_events e ON e.id = wi.event_id
+WHERE wi.status = 'notified'
+  AND wi.expires_at IS NOT NULL AND wi.expires_at < now()
+  AND (e.status = 'ended' OR (e.ends_at IS NOT NULL AND e.ends_at < now()));
 
 -- name: CountWaitingByProduct :one
 SELECT COUNT(*)::int FROM waitlist_items
