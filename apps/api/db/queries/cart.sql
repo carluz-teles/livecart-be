@@ -439,9 +439,15 @@ SELECT
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1), 0)::int AS total_carts,
     COALESCE((
         SELECT COUNT(*) FROM carts ct
-        WHERE ct.event_id = $1
-          AND ct.status IN ('active', 'checkout')
+        WHERE ct.status IN ('active', 'checkout')
           AND COALESCE(ct.payment_status, '') NOT IN ('paid', 'refunded')
+          AND (
+            ct.event_id = $1
+            OR (ct.never_expires AND EXISTS (
+                SELECT 1 FROM cart_item_events cie2
+                JOIN live_sessions ls2 ON ls2.id = cie2.session_id
+                WHERE cie2.cart_id = ct.id AND ls2.event_id = $1))
+          )
     ), 0)::int AS open_carts,
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND (ct.status = 'checkout' OR ct.checkout_url IS NOT NULL)), 0)::int AS checkout_carts,
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.payment_status = 'paid'), 0)::int AS paid_carts,
@@ -572,12 +578,21 @@ SELECT
     ci.cart_id,
     ci.product_id,
     ci.quantity,
-    ci.unit_price
+    ci.unit_price,
+    ct.event_id AS cart_event_id
 FROM carts ct
 JOIN cart_items ci ON ci.cart_id = ct.id
-WHERE ct.event_id = $1
-  AND ct.status IN ('active', 'checkout')
+WHERE ct.status IN ('active', 'checkout')
   AND COALESCE(ct.payment_status, '') NOT IN ('paid', 'refunded')
+  AND (
+    ct.event_id = $1
+    -- Carrinho VIP eterno ancorado em OUTRO evento, mas que vendeu neste: entra
+    -- inteiro na projeção; ProjectBySessionForEvent fica só com a fatia de $1.
+    OR (ct.never_expires AND EXISTS (
+        SELECT 1 FROM cart_item_events cie2
+        JOIN live_sessions ls2 ON ls2.id = cie2.session_id
+        WHERE cie2.cart_id = ct.id AND ls2.event_id = $1))
+  )
 ORDER BY ci.cart_id, ci.product_id;
 
 -- name: ListCartItemEventsByEvent :many
@@ -590,12 +605,20 @@ SELECT
     cie.product_id,
     cie.session_id,
     cie.quantity,
-    cie.unit_price
+    cie.unit_price,
+    ls.event_id AS session_event_id
 FROM cart_item_events cie
 JOIN carts ct ON ct.id = cie.cart_id
-WHERE ct.event_id = $1
-  AND ct.status IN ('active', 'checkout')
+LEFT JOIN live_sessions ls ON ls.id = cie.session_id
+WHERE ct.status IN ('active', 'checkout')
   AND COALESCE(ct.payment_status, '') NOT IN ('paid', 'refunded')
+  AND (
+    ct.event_id = $1
+    OR (ct.never_expires AND EXISTS (
+        SELECT 1 FROM cart_item_events cie2
+        JOIN live_sessions ls2 ON ls2.id = cie2.session_id
+        WHERE cie2.cart_id = ct.id AND ls2.event_id = $1))
+  )
 ORDER BY cie.cart_id, cie.product_id, cie.created_at, cie.id;
 
 -- =============================================================================

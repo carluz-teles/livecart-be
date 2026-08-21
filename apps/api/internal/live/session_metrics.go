@@ -26,6 +26,9 @@ type OpenCartItem struct {
 	ProductID string
 	Quantity  int
 	UnitPrice int64
+	// CartEventID é o evento ÂNCORA do carrinho. Serve de destino das unidades
+	// sem transmissão (session vazia) na atribuição por evento de origem.
+	CartEventID string
 }
 
 // CartItemAdditionRow é uma linha do log de adições já situada no seu carrinho e
@@ -33,6 +36,9 @@ type OpenCartItem struct {
 type CartItemAdditionRow struct {
 	CartID    string
 	ProductID string
+	// SessionEventID é o evento da transmissão que fez esta adição
+	// (live_sessions.event_id). Vazio quando a adição não tem sessão.
+	SessionEventID string
 	CartItemAddition
 }
 
@@ -87,6 +93,75 @@ func ProjectBySession(items []OpenCartItem, additions []CartItemAdditionRow) []S
 			// praticado na hora da adição, e usá-lo aqui faria a projeção
 			// divergir de cart_product_total_cents assim que o lojista mudasse
 			// o preço — exatamente o que o selamento evita (on_cart_paid).
+			a.revenue += int64(alloc.Quantity) * item.UnitPrice
+			a.carts[item.CartID] = struct{}{}
+		}
+	}
+
+	out := make([]SessionProjection, 0, len(order))
+	for _, sessionID := range order {
+		a := bySession[sessionID]
+		out = append(out, SessionProjection{
+			SessionID:    sessionID,
+			Units:        a.units,
+			RevenueCents: a.revenue,
+			OpenCarts:    len(a.carts),
+		})
+	}
+	return out
+}
+
+// ProjectBySessionForEvent é ProjectBySession com atribuição por evento de
+// ORIGEM (Clientes VIP / F3). Reparte os itens dos carrinhos abertos entre as
+// transmissões, mas fica só com a fatia cujo evento de origem é targetEventID:
+//
+//   - unidade de uma sessão → conta para o evento DA SESSÃO (session_event_id);
+//   - unidade sem sessão (posta pelo painel, ou anterior ao log) → conta para o
+//     evento ÂNCORA do carrinho (cart_event_id).
+//
+// Para carrinho normal (um evento) TODA unidade resolve para o próprio evento,
+// então o resultado é IDÊNTICO a ProjectBySession — é o que garante a paridade
+// da tela de qualquer evento sem VIP. Só o carrinho VIP cross-evento se reparte.
+//
+// items e additions vêm da versão AMPLIADA das queries (carrinho VIP ancorado em
+// outro evento também entra quando vendeu em targetEventID); o filtro por evento
+// aqui é o que impede a fatia do outro evento de vazar.
+func ProjectBySessionForEvent(items []OpenCartItem, additions []CartItemAdditionRow, targetEventID string) []SessionProjection {
+	log := make(map[cartProduct][]CartItemAddition, len(items))
+	sessionEvent := map[string]string{}
+	for _, a := range additions {
+		k := cartProduct{a.CartID, a.ProductID}
+		log[k] = append(log[k], a.CartItemAddition)
+		if a.SessionID != "" {
+			sessionEvent[a.SessionID] = a.SessionEventID
+		}
+	}
+
+	type acc struct {
+		units   int
+		revenue int64
+		carts   map[string]struct{}
+	}
+	bySession := map[string]*acc{}
+	var order []string
+
+	for _, item := range items {
+		for _, alloc := range AllocateBySession(item.Quantity, log[cartProduct{item.CartID, item.ProductID}]) {
+			// Evento de origem desta fatia.
+			originEvent := item.CartEventID // adição sem sessão cai no âncora
+			if alloc.SessionID != "" {
+				originEvent = sessionEvent[alloc.SessionID]
+			}
+			if originEvent != targetEventID {
+				continue // fatia de outro evento (carrinho VIP cross-evento)
+			}
+			a := bySession[alloc.SessionID]
+			if a == nil {
+				a = &acc{carts: map[string]struct{}{}}
+				bySession[alloc.SessionID] = a
+				order = append(order, alloc.SessionID)
+			}
+			a.units += alloc.Quantity
 			a.revenue += int64(alloc.Quantity) * item.UnitPrice
 			a.carts[item.CartID] = struct{}{}
 		}

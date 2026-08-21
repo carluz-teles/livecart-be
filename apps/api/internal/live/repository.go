@@ -2285,11 +2285,16 @@ func (r *Repository) ListProjectionInputByEvent(ctx context.Context, eventID str
 	}
 	items := make([]OpenCartItem, len(itemRows))
 	for i, row := range itemRows {
+		var cartEvent string
+		if row.CartEventID.Valid {
+			cartEvent = row.CartEventID.String()
+		}
 		items[i] = OpenCartItem{
-			CartID:    row.CartID.String(),
-			ProductID: row.ProductID.String(),
-			Quantity:  int(row.Quantity.Int32),
-			UnitPrice: row.UnitPrice.Int64,
+			CartID:      row.CartID.String(),
+			ProductID:   row.ProductID.String(),
+			Quantity:    int(row.Quantity.Int32),
+			UnitPrice:   row.UnitPrice.Int64,
+			CartEventID: cartEvent,
 		}
 	}
 
@@ -2303,9 +2308,14 @@ func (r *Repository) ListProjectionInputByEvent(ctx context.Context, eventID str
 		if row.SessionID.Valid {
 			sessionID = row.SessionID.String()
 		}
+		var sessionEvent string
+		if row.SessionEventID.Valid {
+			sessionEvent = row.SessionEventID.String()
+		}
 		additions[i] = CartItemAdditionRow{
-			CartID:    row.CartID.String(),
-			ProductID: row.ProductID.String(),
+			CartID:         row.CartID.String(),
+			ProductID:      row.ProductID.String(),
+			SessionEventID: sessionEvent,
 			CartItemAddition: CartItemAddition{
 				SessionID: sessionID,
 				Quantity:  int(row.Quantity),

@@ -1718,6 +1718,24 @@ func (s *Service) GetEventStats(ctx context.Context, eventID, storeID string) (E
 		return EventStatsOutput{}, err
 	}
 
+	// Projetado por evento de ORIGEM (F3): a expectativa de venda deste evento
+	// é a soma dos itens de carrinho aberto ADICIONADOS nele — inclusive os de
+	// um carrinho VIP ancorado em outro evento. Roda a MESMA AllocateBySession
+	// que o selamento e a quebra por transmissão usam (fonte única), então bate
+	// com GetSessionMetrics por construção. Para evento sem VIP o valor é igual
+	// ao antigo SUM(cart_product_total_cents) scoped por event_id.
+	projectedRevenue := stats.ProjectedRevenue
+	if items, additions, perr := s.repo.ListProjectionInputByEvent(ctx, eventID); perr != nil {
+		logger.From(ctx, s.logger).Warn("projected-by-origin-event indisponível, usando projetado por âncora",
+			zap.String("event_id", eventID), zap.Error(perr))
+	} else {
+		var sum int64
+		for _, sp := range ProjectBySessionForEvent(items, additions, eventID) {
+			sum += sp.RevenueCents
+		}
+		projectedRevenue = sum
+	}
+
 	return EventStatsOutput{
 		TotalComments:     stats.TotalComments,
 		TotalCarts:        stats.TotalCarts,
@@ -1725,7 +1743,7 @@ func (s *Service) GetEventStats(ctx context.Context, eventID, storeID string) (E
 		CheckoutCarts:     stats.CheckoutCarts,
 		PaidCarts:         stats.PaidCarts,
 		TotalProductsSold: stats.TotalProductsSold,
-		ProjectedRevenue:  stats.ProjectedRevenue,
+		ProjectedRevenue:  projectedRevenue,
 		ConfirmedRevenue:  stats.ConfirmedRevenue,
 	}, nil
 }
@@ -1763,7 +1781,10 @@ func (s *Service) GetSessionMetrics(ctx context.Context, eventID, storeID string
 	if err != nil {
 		return EventSessionMetricsOutput{}, err
 	}
-	projected := ProjectBySession(items, additions)
+	// Atribuição por evento de origem (F3): a fatia de um carrinho VIP que foi
+	// vendida em OUTRO evento não aparece aqui, e a vendida NESTE aparece mesmo
+	// que o carrinho esteja ancorado em outro. Carrinho normal: idêntico.
+	projected := ProjectBySessionForEvent(items, additions, eventID)
 
 	revenue := map[string]*SessionRevenueOutput{}
 	pick := func(sessionID string) *SessionRevenueOutput {
