@@ -331,7 +331,9 @@ func (s *Service) applySubscription(ctx context.Context, sub *StripeSubscription
 		TrialEndsAt:          unixToTimestamptz(sub.TrialEnd),
 		CurrentPeriodStart:   unixToTimestamptz(sub.PeriodStart()),
 		CurrentPeriodEnd:     unixToTimestamptz(sub.PeriodEnd()),
-		CancelAtPeriodEnd:    sub.CancelAtPeriodEnd,
+		// The Customer Portal schedules end-of-cycle cancellation via cancel_at
+		// (a timestamp), NOT cancel_at_period_end — so treat either as "canceling".
+		CancelAtPeriodEnd:    sub.CancelAtPeriodEnd || sub.CancelAt > 0,
 		GraceUntil:           graceUntil,
 	})
 	if err != nil {

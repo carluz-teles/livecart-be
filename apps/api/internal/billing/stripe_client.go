@@ -92,6 +92,7 @@ type StripeSubscription struct {
 	ID                 string `json:"id"`
 	Status             string `json:"status"`
 	CancelAtPeriodEnd  bool   `json:"cancel_at_period_end"`
+	CancelAt           int64  `json:"cancel_at"` // timestamp — the portal schedules cancellation via this, not cancel_at_period_end
 	TrialEnd           int64  `json:"trial_end"`
 	CurrentPeriodStart int64  `json:"current_period_start"`
 	CurrentPeriodEnd   int64  `json:"current_period_end"`
