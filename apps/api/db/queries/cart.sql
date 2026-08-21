@@ -405,6 +405,19 @@ SELECT * FROM cart_items WHERE id = $1;
 -- name: GetEventStats :one
 -- Returns stats for an event: comments, carts, revenue, products sold, funnel metrics
 --
+-- ⓥ ATRIBUIÇÃO POR EVENTO DE ORIGEM (Clientes VIP / F3). As métricas de VENDA
+-- (total_products_sold, confirmed_revenue) e a quebra por transmissão
+-- (ListSessionConfirmedRevenueByEvent, ListProductsByEvent) creditam cada
+-- unidade ao evento da SESSÃO que a vendeu (order_items.session_id ->
+-- live_sessions.event_id), não ao evento âncora do carrinho. Para carrinho
+-- normal (1 evento) o COALESCE cai em o.event_id e o número é IDÊNTICO ao antigo
+-- — provado em produção: 0 order_items com ls.event_id != o.event_id e
+-- SUM(oi.quantity*oi.unit_price)==orders.total_cents para todo pedido pago. Só o
+-- carrinho VIP cross-evento se reparte. Os CONTADORES de funil (total_carts,
+-- open_carts, checkout_carts, paid_carts) e o PROJETADO seguem por carts.event_id
+-- (âncora): repartir carrinho aberto por evento exige AllocateBySession e fica
+-- para a próxima fatia; a venda confirmada é a que o cliente pediu separada.
+--
 -- ⚠️ O PREDICADO DO CARRINHO ABERTO ("ainda em aberto") aparece aqui em
 -- open_carts e projected_revenue e é repetido, ao pé da letra, em
 -- ListOpenCartItemsByEvent e ListCartItemEventsByEvent. É esse par que faz a
@@ -443,7 +456,8 @@ SELECT
         SELECT SUM(oi.quantity)
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
-        WHERE o.event_id = $1 AND o.status = 'paid'
+        LEFT JOIN live_sessions ls ON ls.id = oi.session_id
+        WHERE COALESCE(ls.event_id, o.event_id) = $1 AND o.status = 'paid'
     ), 0)::int AS total_products_sold,
     -- Revenue metrics (Grupo C: projected stays cart-based; Grupo A: confirmed reads from sealed orders)
     COALESCE((
@@ -454,9 +468,11 @@ SELECT
           AND COALESCE(ct.payment_status, '') NOT IN ('paid', 'refunded')
     ), 0)::bigint AS projected_revenue,
     COALESCE((
-        SELECT SUM(o.total_cents)
-        FROM orders o
-        WHERE o.event_id = $1 AND o.status = 'paid'
+        SELECT SUM(oi.quantity * oi.unit_price)
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        LEFT JOIN live_sessions ls ON ls.id = oi.session_id
+        WHERE COALESCE(ls.event_id, o.event_id) = $1 AND o.status = 'paid'
     ), 0)::bigint AS confirmed_revenue;
 
 -- name: ListCartsWithTotalByEvent :many
@@ -494,7 +510,8 @@ SELECT
 FROM order_items oi
 JOIN orders o ON o.id = oi.order_id
 JOIN products p ON p.id = oi.product_id
-WHERE o.event_id = $1 AND o.status = 'paid'
+LEFT JOIN live_sessions ls ON ls.id = oi.session_id
+WHERE COALESCE(ls.event_id, o.event_id) = $1 AND o.status = 'paid'
 GROUP BY p.id, p.name, p.image_url, p.keyword
 ORDER BY total_quantity DESC;
 
@@ -539,7 +556,8 @@ SELECT
     COUNT(DISTINCT o.cart_id)::int                        AS paid_carts
 FROM order_items oi
 JOIN orders o ON o.id = oi.order_id
-WHERE o.event_id = $1 AND o.status = 'paid'
+LEFT JOIN live_sessions ls ON ls.id = oi.session_id
+WHERE COALESCE(ls.event_id, o.event_id) = $1 AND o.status = 'paid'
 GROUP BY oi.session_id;
 
 -- name: ListOpenCartItemsByEvent :many
