@@ -3,9 +3,33 @@
 -- =============================================================================
 
 -- name: CreateCart :one
-INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, status, expires_at, customer_id, short_id)
-VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8)
+INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, status, expires_at, customer_id, short_id, store_id, never_expires)
+VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, $10)
 RETURNING *;
+
+-- name: GetEternalCartByStoreAndHandleForUpdate :one
+-- Resolução do carrinho ETERNO do VIP: por (loja, @), ATRAVESSANDO eventos.
+-- É isto que faz a compra do VIP num evento novo cair no MESMO carrinho de um
+-- evento anterior. FOR UPDATE serializa dois comentários concorrentes do VIP.
+SELECT * FROM carts
+WHERE store_id = $1 AND platform_handle = $2
+  AND never_expires
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+ORDER BY created_at DESC
+LIMIT 1
+FOR UPDATE;
+
+-- name: ActivateEternalCartsForHandle :many
+-- Ao promover um @ a VIP: os carrinhos abertos que ele JÁ tem viram eternos e
+-- a agenda de expiração é ANULADA (expires_at NULL → o worker cart.expire vira
+-- no-op pelo próprio guard). Devolve os ids afetados.
+UPDATE carts
+SET never_expires = true, expires_at = NULL
+WHERE store_id = $1 AND platform_handle = $2
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+RETURNING id;
 
 -- name: ExtendCartExpiration :exec
 -- Empurra expires_at para no mínimo @new_expires_at ("gordura" extra para
@@ -141,6 +165,7 @@ SET status = 'expired', cancelled_reason = 'expired'
 WHERE carts.id = $1
   AND status IN ('active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND NOT never_expires   -- VIP: carrinho eterno nunca expira (defesa explícita; expires_at NULL já barraria)
   AND expires_at < now()
   AND NOT EXISTS (
       SELECT 1 FROM waitlist_items wi
@@ -331,6 +356,7 @@ SET status = 'checkout',
 WHERE c.event_id = $1
   AND c.status = 'active'
   AND c.payment_status IS DISTINCT FROM 'paid'
+  AND NOT c.never_expires   -- VIP: carrinho eterno nunca ganha prazo no fechamento
 RETURNING c.id;
 
 -- name: ShiftOpenCartExpirations :many
@@ -379,6 +405,19 @@ SELECT * FROM cart_items WHERE id = $1;
 -- name: GetEventStats :one
 -- Returns stats for an event: comments, carts, revenue, products sold, funnel metrics
 --
+-- ⓥ ATRIBUIÇÃO POR EVENTO DE ORIGEM (Clientes VIP / F3). As métricas de VENDA
+-- (total_products_sold, confirmed_revenue) e a quebra por transmissão
+-- (ListSessionConfirmedRevenueByEvent, ListProductsByEvent) creditam cada
+-- unidade ao evento da SESSÃO que a vendeu (order_items.session_id ->
+-- live_sessions.event_id), não ao evento âncora do carrinho. Para carrinho
+-- normal (1 evento) o COALESCE cai em o.event_id e o número é IDÊNTICO ao antigo
+-- — provado em produção: 0 order_items com ls.event_id != o.event_id e
+-- SUM(oi.quantity*oi.unit_price)==orders.total_cents para todo pedido pago. Só o
+-- carrinho VIP cross-evento se reparte. Os CONTADORES de funil (total_carts,
+-- open_carts, checkout_carts, paid_carts) e o PROJETADO seguem por carts.event_id
+-- (âncora): repartir carrinho aberto por evento exige AllocateBySession e fica
+-- para a próxima fatia; a venda confirmada é a que o cliente pediu separada.
+--
 -- ⚠️ O PREDICADO DO CARRINHO ABERTO ("ainda em aberto") aparece aqui em
 -- open_carts e projected_revenue e é repetido, ao pé da letra, em
 -- ListOpenCartItemsByEvent e ListCartItemEventsByEvent. É esse par que faz a
@@ -400,9 +439,15 @@ SELECT
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1), 0)::int AS total_carts,
     COALESCE((
         SELECT COUNT(*) FROM carts ct
-        WHERE ct.event_id = $1
-          AND ct.status IN ('active', 'checkout')
+        WHERE ct.status IN ('active', 'checkout')
           AND COALESCE(ct.payment_status, '') NOT IN ('paid', 'refunded')
+          AND (
+            ct.event_id = $1
+            OR (ct.never_expires AND EXISTS (
+                SELECT 1 FROM cart_item_events cie2
+                JOIN live_sessions ls2 ON ls2.id = cie2.session_id
+                WHERE cie2.cart_id = ct.id AND ls2.event_id = $1))
+          )
     ), 0)::int AS open_carts,
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND (ct.status = 'checkout' OR ct.checkout_url IS NOT NULL)), 0)::int AS checkout_carts,
     COALESCE((SELECT COUNT(*) FROM carts ct WHERE ct.event_id = $1 AND ct.payment_status = 'paid'), 0)::int AS paid_carts,
@@ -417,7 +462,8 @@ SELECT
         SELECT SUM(oi.quantity)
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
-        WHERE o.event_id = $1 AND o.status = 'paid'
+        LEFT JOIN live_sessions ls ON ls.id = oi.session_id
+        WHERE COALESCE(ls.event_id, o.event_id) = $1 AND o.status = 'paid'
     ), 0)::int AS total_products_sold,
     -- Revenue metrics (Grupo C: projected stays cart-based; Grupo A: confirmed reads from sealed orders)
     COALESCE((
@@ -428,9 +474,11 @@ SELECT
           AND COALESCE(ct.payment_status, '') NOT IN ('paid', 'refunded')
     ), 0)::bigint AS projected_revenue,
     COALESCE((
-        SELECT SUM(o.total_cents)
-        FROM orders o
-        WHERE o.event_id = $1 AND o.status = 'paid'
+        SELECT SUM(oi.quantity * oi.unit_price)
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        LEFT JOIN live_sessions ls ON ls.id = oi.session_id
+        WHERE COALESCE(ls.event_id, o.event_id) = $1 AND o.status = 'paid'
     ), 0)::bigint AS confirmed_revenue;
 
 -- name: ListCartsWithTotalByEvent :many
@@ -468,7 +516,8 @@ SELECT
 FROM order_items oi
 JOIN orders o ON o.id = oi.order_id
 JOIN products p ON p.id = oi.product_id
-WHERE o.event_id = $1 AND o.status = 'paid'
+LEFT JOIN live_sessions ls ON ls.id = oi.session_id
+WHERE COALESCE(ls.event_id, o.event_id) = $1 AND o.status = 'paid'
 GROUP BY p.id, p.name, p.image_url, p.keyword
 ORDER BY total_quantity DESC;
 
@@ -513,7 +562,8 @@ SELECT
     COUNT(DISTINCT o.cart_id)::int                        AS paid_carts
 FROM order_items oi
 JOIN orders o ON o.id = oi.order_id
-WHERE o.event_id = $1 AND o.status = 'paid'
+LEFT JOIN live_sessions ls ON ls.id = oi.session_id
+WHERE COALESCE(ls.event_id, o.event_id) = $1 AND o.status = 'paid'
 GROUP BY oi.session_id;
 
 -- name: ListOpenCartItemsByEvent :many
@@ -528,12 +578,21 @@ SELECT
     ci.cart_id,
     ci.product_id,
     ci.quantity,
-    ci.unit_price
+    ci.unit_price,
+    ct.event_id AS cart_event_id
 FROM carts ct
 JOIN cart_items ci ON ci.cart_id = ct.id
-WHERE ct.event_id = $1
-  AND ct.status IN ('active', 'checkout')
+WHERE ct.status IN ('active', 'checkout')
   AND COALESCE(ct.payment_status, '') NOT IN ('paid', 'refunded')
+  AND (
+    ct.event_id = $1
+    -- Carrinho VIP eterno ancorado em OUTRO evento, mas que vendeu neste: entra
+    -- inteiro na projeção; ProjectBySessionForEvent fica só com a fatia de $1.
+    OR (ct.never_expires AND EXISTS (
+        SELECT 1 FROM cart_item_events cie2
+        JOIN live_sessions ls2 ON ls2.id = cie2.session_id
+        WHERE cie2.cart_id = ct.id AND ls2.event_id = $1))
+  )
 ORDER BY ci.cart_id, ci.product_id;
 
 -- name: ListCartItemEventsByEvent :many
@@ -546,12 +605,20 @@ SELECT
     cie.product_id,
     cie.session_id,
     cie.quantity,
-    cie.unit_price
+    cie.unit_price,
+    ls.event_id AS session_event_id
 FROM cart_item_events cie
 JOIN carts ct ON ct.id = cie.cart_id
-WHERE ct.event_id = $1
-  AND ct.status IN ('active', 'checkout')
+LEFT JOIN live_sessions ls ON ls.id = cie.session_id
+WHERE ct.status IN ('active', 'checkout')
   AND COALESCE(ct.payment_status, '') NOT IN ('paid', 'refunded')
+  AND (
+    ct.event_id = $1
+    OR (ct.never_expires AND EXISTS (
+        SELECT 1 FROM cart_item_events cie2
+        JOIN live_sessions ls2 ON ls2.id = cie2.session_id
+        WHERE cie2.cart_id = ct.id AND ls2.event_id = $1))
+  )
 ORDER BY cie.cart_id, cie.product_id, cie.created_at, cie.id;
 
 -- =============================================================================

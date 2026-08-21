@@ -5757,6 +5757,27 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 // All errors are logged; the function never fails hard — the block row is
 // already persisted by the caller, so even if some cleanup fails the block
 // itself is in effect (future comments are filtered).
+// ActivateVipCartsForHandle é o efeito colateral de promover um @ a VIP: os
+// carrinhos abertos que ele JÁ tem viram eternos (never_expires=true) e a
+// agenda de expiração é anulada (expires_at NULL). Nenhuma task cart.expire
+// precisa ser cancelada explicitamente — com expires_at NULL o guard do
+// ExpireCart/RunScheduledExpiry já a torna no-op. Devolve quantos carrinhos
+// foram convertidos. Satisfaz customer.VipCartActivator.
+func (s *Service) ActivateVipCartsForHandle(ctx context.Context, storeID, handle string) (int, error) {
+	ids, err := s.repo.ActivateEternalCartsForHandle(ctx, storeID, handle)
+	if err != nil {
+		return 0, fmt.Errorf("activating eternal carts for vip handle: %w", err)
+	}
+	if len(ids) > 0 {
+		logger.From(ctx, s.logger).Info("vip promotion made existing carts eternal",
+			zap.String("store_id", storeID),
+			zap.String("handle", handle),
+			zap.Int("carts", len(ids)),
+		)
+	}
+	return len(ids), nil
+}
+
 func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, handle string) error {
 	carts, err := s.repo.ListOpenCartsByHandle(ctx, storeID, handle)
 	if err != nil {

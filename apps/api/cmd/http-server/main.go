@@ -681,6 +681,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// Customer block flow needs the integration service to sweep
 			// open carts (release local + ERP stock, promote waitlist).
 			customerSvc.SetCartCanceler(integrationSvc)
+			// Clientes VIP: promover um @ torna eternos os carrinhos abertos que
+			// ele já tem (anula a expiração). E a resolução do carrinho na
+			// ingestão consulta a lista VIP para decidir se o carrinho é eterno.
+			customerSvc.SetVipCartActivator(integrationSvc)
+			liveSvc.SetVipChecker(vipCheckerAdapter{svc: customerSvc})
 
 			// Create notification service and wire into integration service
 			// (integrationSvc implements notification.DMSender via SendInstagramDM)
@@ -1770,6 +1775,18 @@ func (s trialReminderScheduler) ScheduleTrialEndingSoon(ctx context.Context, sto
 // liveNotifierAdapter bridges integration.InstagramNotifier (concrete impl)
 // to live.Notifier (local interface). The packages cannot share the params
 // type without introducing an import cycle, so we translate at the boundary.
+// vipCheckerAdapter adapta customer.Service (IsVipHandle por uuid) à interface
+// live.VipChecker (por string), usada na resolução do carrinho eterno do VIP.
+type vipCheckerAdapter struct{ svc *customer.Service }
+
+func (a vipCheckerAdapter) IsVipHandle(ctx context.Context, storeID, handle string) (bool, error) {
+	sid, err := uuid.Parse(storeID)
+	if err != nil {
+		return false, nil // store id inválido → trata como não-VIP
+	}
+	return a.svc.IsVipHandle(ctx, sid, handle)
+}
+
 type liveNotifierAdapter struct {
 	inner *integration.InstagramNotifier
 }

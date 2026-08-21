@@ -932,11 +932,16 @@ type AddToCartOutput struct {
 // GetOrCreateCartParams represents parameters for GetOrCreateCart.
 type GetOrCreateCartParams struct {
 	EventID        string
+	StoreID        string  // Loja do evento — grava carts.store_id e resolve o carrinho eterno do VIP
 	SessionID      *string // Optional - tracks which session created the cart
 	PlatformUserID string
 	PlatformHandle string
 	Token          string
 	CustomerID     *string // Optional - links cart to a customer
+	// IsVip: quando true, o carrinho é ETERNO (never_expires) e resolvido por
+	// (loja, @) atravessando eventos — a compra do VIP num evento novo cai no
+	// MESMO carrinho de um evento anterior.
+	IsVip bool
 }
 
 // CartRow represents a cart row from the database.

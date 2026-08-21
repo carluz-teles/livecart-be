@@ -23,6 +23,8 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// /blocks routes registered before /:id so the literal segment wins over
 	// the UUID-shaped param.
 	h.RegisterBlockRoutes(g)
+	// /vips antes de /:id, mesmo motivo dos /blocks (literal vence o UUID).
+	h.RegisterVipRoutes(g)
 	g.Get("/:id", h.GetByID)
 	g.Get("/:id/orders", h.ListOrders)
 }
