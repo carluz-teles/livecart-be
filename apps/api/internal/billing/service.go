@@ -960,7 +960,9 @@ func (s *Service) OnCartRefunded(ctx context.Context, storeID, cartID string) er
 type PeriodUsage struct {
 	PeriodStart        time.Time `json:"periodStart"`
 	GMVCents           int64     `json:"gmvCents"`
-	FeeCents           int64     `json:"feeCents"`
+	FeeCents           int64     `json:"feeCents"`      // net — after an active taxa promo (what will be charged)
+	FeeCentsGross      int64     `json:"feeCentsGross"` // before the promo discount
+	TaxaDiscountBps    int32     `json:"taxaDiscountBps"`
 	Sales              int32     `json:"sales"`
 	Refunds            int32     `json:"refunds"`
 	RefundCreditsCents int64     `json:"refundCreditsCents"`
@@ -986,10 +988,21 @@ func (s *Service) GetUsage(ctx context.Context, storeID string) (*PeriodUsage, e
 	if err != nil {
 		return nil, fmt.Errorf("loading ledger usage: %w", err)
 	}
+	// Apply the active taxa promo so the preview matches what OnSubscriptionCycleInvoice
+	// will actually charge this cycle (the reactor discounts the commission there).
+	feeNet := row.FeeCents
+	var taxaDiscountBps int32
+	if promo, perr := s.queries.GetActiveTaxaPromo(ctx, sid); perr == nil {
+		taxaDiscountBps = promo.DiscountBps
+		feeNet -= feeNet * int64(promo.DiscountBps) / 10000
+	}
+
 	return &PeriodUsage{
 		PeriodStart:        since,
 		GMVCents:           row.GmvCents,
-		FeeCents:           row.FeeCents,
+		FeeCents:           feeNet,
+		FeeCentsGross:      row.FeeCents,
+		TaxaDiscountBps:    taxaDiscountBps,
 		Sales:              row.Sales,
 		Refunds:            row.Refunds,
 		RefundCreditsCents: row.RefundCreditsCents,
