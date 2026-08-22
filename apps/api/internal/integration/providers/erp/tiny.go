@@ -27,6 +27,11 @@ import (
 // provider a um servidor local — nada em produção reatribui isto.
 var tinyAPIBaseURL = "https://api.tiny.com.br/public-api/v3"
 
+// Backoff entre as retentativas do GET /estoque quando o Tiny estrangula (429).
+// `var` só para o teste encurtar a espera; produção nunca reatribui. ~1.2s cobre
+// a janela de ~1 req/s do Tiny.
+var estoqueThrottleBackoff = 1200 * time.Millisecond
+
 // Tiny is a Brazilian ERP and interprets `data` fields against São Paulo
 // local time. Sending UTC made orders created late at night land on the next
 // day from Tiny's perspective, putting them outside the merchant's "últimos 30
@@ -429,7 +434,45 @@ func (t *Tiny) GetProductStock(ctx context.Context, productID string) (int, erro
 
 func (t *Tiny) saldoDisponivel(ctx context.Context, productID string) (int, bool) {
 	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
-	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+
+	// O 429 do Tiny (limite ~1 req/s) é TRANSITÓRIO e não pode virar saldo
+	// físico. Ele estoura quando uma varredura de estoque concorrente consome a
+	// cota no mesmo segundo em que o lojista cadastra um produto — foi o que
+	// derrubou o 834962410 em 22/08/2026 (429 no GET /estoque durante o cadastro
+	// → gravou o físico), enquanto o 837156336, 2s depois, passou. Cair no físico
+	// aqui viola a opção "apenas disponível" e reoferta estoque reservado. Então
+	// re-tentamos o estrangulamento com backoff curto (o reset do Tiny é ~1s),
+	// capado para não travar o cadastro; 404 (produto sem controle de estoque) e
+	// os demais erros continuam caindo no físico na hora, sem espera.
+	const maxTentativasEstoque = 4
+	var resp *http.Response
+	var body []byte
+	var err error
+	for tentativa := 1; ; tentativa++ {
+		resp, body, err = t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
+		estrangulado := err == nil && resp != nil && resp.StatusCode == http.StatusTooManyRequests
+		if !estrangulado || tentativa >= maxTentativasEstoque {
+			break
+		}
+		espera := estoqueThrottleBackoff // ~1 req/s do Tiny
+		if ra := resp.Header.Get("X-RateLimit-Reset"); ra != "" {
+			if s, e := strconv.Atoi(ra); e == nil && s > 0 && s <= 2 {
+				espera = time.Duration(s) * time.Second
+			}
+		}
+		if t.Logger != nil {
+			t.Logger.Warn("tiny available stock throttled (429); retrying before physical fallback",
+				zap.String("external_product_id", productID),
+				zap.Int("tentativa", tentativa),
+				zap.Duration("espera", espera),
+			)
+		}
+		select {
+		case <-ctx.Done():
+			return 0, false
+		case <-time.After(espera):
+		}
+	}
 	if err != nil || !providers.IsSuccessStatus(resp.StatusCode) {
 		// O status importa e faltava aqui: sem ele, um 404 (produto sem controle
 		// de estoque) e um 429 (estrangulado) viram a mesma linha muda, e as duas
