@@ -246,12 +246,44 @@ func (s *Service) resumeCartERPFinalisation(ctx context.Context, erpProvider pro
 		zap.String("external_order_id", externalOrderID),
 	)
 
-	if err := erpProvider.LaunchOrderStock(ctx, externalOrderID); err != nil {
-		msg := fmt.Sprintf("relançamento de estoque do pedido %s falhou: %v", externalOrderID, err)
-		s.collab.MarkFinalisationFailed(ctx, cartID, msg)
-		return fmt.Errorf("re-launching stock for order %s: %w", externalOrderID, err)
+	if launchErr := erpProvider.LaunchOrderStock(ctx, externalOrderID); launchErr != nil {
+		// O launch falhou — o caso do pedido 847911430 (24/08): a "re-reserva
+		// pós-falha" de uma tentativa anterior ainda segura o estoque como
+		// saída manual, então o PRÓPRIO pedido não acha saldo pra baixar. Sem
+		// o fallback abaixo, cada retry repete o mesmo launch e falha igual —
+		// um deadlock permanente num pedido PAGO (a re-reserva nossa trava o
+		// nosso relançamento).
+		//
+		// Fallback reverse-first, idêntico ao [I2] do caminho invertido:
+		// estorna as reservas ATIVAS (devolve o saldo ao depósito) e RELANÇA
+		// o estoque do pedido — agora com saldo disponível, o launch passa.
+		logger.From(ctx, s.logger).Warn("resume launch failed, falling back to reverse-first",
+			zap.String("cart_id", cartID),
+			zap.String("external_order_id", externalOrderID),
+			zap.Bool("insufficient_balance", IsTinyInsufficientBalanceErr(launchErr)),
+			zap.Error(launchErr),
+		)
+		if revErr := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, storeID, cartID); revErr != nil {
+			s.collab.MarkFinalisationFailed(ctx, cartID, revErr.Error())
+			return fmt.Errorf("reversing reservations on resume fallback: %w", revErr)
+		}
+		if retryErr := erpProvider.LaunchOrderStock(ctx, externalOrderID); retryErr != nil {
+			msg := fmt.Sprintf("relançamento de estoque do pedido %s falhou após fallback: %v", externalOrderID, retryErr)
+			s.collab.MarkFinalisationFailed(ctx, cartID, msg)
+			return fmt.Errorf("re-launching stock for order %s after fallback: %w", externalOrderID, retryErr)
+		}
+		if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
+			logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation done after resume fallback",
+				zap.String("cart_id", cartID), zap.Error(markErr))
+		}
+		s.collab.EmitERPOrderFinalized(ctx, storeID, cartID)
+		logger.From(ctx, s.logger).Info("ERP finalisation resumed to done via reverse-first fallback",
+			zap.String("cart_id", cartID), zap.String("external_order_id", externalOrderID))
+		return nil
 	}
 
+	// Launch de primeira: o pedido já baixou o estoque; estorna as reservas
+	// (mantê-las seria baixa dobrada) e encerra.
 	if err := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, storeID, cartID); err != nil {
 		s.collab.MarkFinalisationFailed(ctx, cartID, err.Error())
 		return fmt.Errorf("reversing reservations on resume: %w", err)

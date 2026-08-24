@@ -2054,3 +2054,54 @@ func resolveMovementAs(t *testing.T, cartID, status string) {
 		t.Fatalf("resolvendo movimento: %v", err)
 	}
 }
+
+// RESUME com fallback reverse-first (bug do pedido 847911430, 24/08/2026).
+//
+// Cenário real: a 1ª finalização falha no launch, grava o pedido e RE-RESERVA o
+// estoque (saída manual). Em toda retentativa o resume tentava LaunchOrderStock
+// uma vez — mas a re-reserva ainda segura o estoque, então o launch falha
+// "saldo insuficiente" e o resume desistia: deadlock permanente num pedido PAGO.
+//
+// Com o fallback (igual ao [I2] do invertido), o resume estorna as reservas
+// ATIVAS e RE-LANÇA na mesma chamada, concluindo. Aqui: launch falha 2× (fresh
+// + resume-first) e passa na 3ª (o relaunch do fallback).
+func TestResumeLaunchFallbackReversesFirstThenSucceeds(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 1, 1)
+	fake := newScriptedERP()
+	fake.failures["LaunchOrderStock"] = 2 // 1: fresh · 2: resume-first (dispara fallback) · 3: relaunch OK
+	svc := newFinalisationService(fake)
+
+	// 1ª finalização (normal): estorna a reserva, cria o pedido, launch falha,
+	// re-reserva o estoque e marca failed.
+	if err := svc.finalizeCartERPOrder(context.Background(), fx.cartID, fx.storeID, testPaymentStatus()); err == nil {
+		t.Fatal("esperava erro na 1ª tentativa (launch falho)")
+	}
+	status, _, orderID, _, _ := cartFinalisationState(t, fx.cartID)
+	if status != "failed" || orderID != "ORD-1" {
+		t.Fatalf("status=%q orderID=%q — esperado failed com pedido gravado", status, orderID)
+	}
+	if n := activeReservationCount(t, fx.cartID); n == 0 {
+		t.Fatal("re-reserva pós-falha deveria estar ATIVA (segurando o estoque) — é ela que trava o relançamento")
+	}
+
+	// Retry (RESUME): launch falha de novo → o fallback estorna e re-lança → done.
+	if err := svc.RetryERPFinalisation(context.Background(), fx.cartID, fx.storeID); err != nil {
+		t.Fatalf("retry (resume com fallback) deveria concluir: %v", err)
+	}
+	status, _, orderID, _, _ = cartFinalisationState(t, fx.cartID)
+	if status != "done" || orderID != "ORD-1" {
+		t.Fatalf("pós-retry: status=%q orderID=%q — esperado done", status, orderID)
+	}
+	if fake.count("CreateOrder") != 1 {
+		t.Fatalf("resume duplicou o pedido: %v", fake.calls)
+	}
+	// 3 launches: fresh (falha) + resume-first (falha) + resume-fallback (ok).
+	if fake.count("Launch") != 3 {
+		t.Fatalf("esperava 3 launches (fresh + resume + fallback), got: %v", fake.calls)
+	}
+	// A re-reserva foi estornada no fallback do resume — nada pode sobrar.
+	if n := activeReservationCount(t, fx.cartID); n != 0 {
+		t.Fatalf("re-reserva não estornada no resume fallback (n=%d): %v", n, fake.calls)
+	}
+}
