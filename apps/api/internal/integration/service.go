@@ -3144,6 +3144,7 @@ func (s *Service) SearchProducts(ctx context.Context, input SearchProductsInput)
 			Price:       detailed.Price,
 			Stock:       effectiveStock,
 			ImageURL:    detailed.ImageURL,
+			ImageURLs:   detailed.ImageURLs,
 			Active:      detailed.Active,
 			Shipping:    shippingPreviewFromERP(detailed.Shipping, detailed.WeightGramsHint),
 			IsParent:    isParent,

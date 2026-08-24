@@ -554,6 +554,7 @@ type ERPProductResponse struct {
 	Price       int64                  `json:"price"`
 	Stock       int                    `json:"stock"`
 	ImageURL    string                 `json:"imageUrl,omitempty"`
+	ImageURLs   []string               `json:"imageUrls,omitempty"` // todas as imagens do ERP (Tiny anexos); o lojista escolhe a principal no import
 	Active      bool                   `json:"active"`
 	Shipping    *ERPShippingPreviewDTO `json:"shipping,omitempty"` // weight + dimensions resolved from the ERP, for the picker preview
 	IsParent    bool                   `json:"isParent,omitempty"`
