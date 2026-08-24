@@ -364,6 +364,10 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 		WaitlistJourney:        waitlistJourney,
 		PayableAmount:          payable,
 		WaitlistedAmount:       waitlisted,
+		PaymentMethod:          row.PaymentMethod,
+		Installments:           row.Installments,
+		DiscountCents:          row.DiscountCents,
+		PaidTotalCents:         row.PaidTotalCents,
 		CancellationRevertedAt: row.CancellationRevertedAt,
 	}
 

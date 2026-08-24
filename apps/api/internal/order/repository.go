@@ -286,7 +286,14 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 			COALESCE(op.invoice_status, ''),
 			op.invoice_emitted_at,
 
-			c.cancellation_reverted_at
+			c.cancellation_reverted_at,
+
+			-- Forma de pagamento, parcelas e os valores REAIS do pedido
+			-- (desconto e valor pago) para a tela mostrar exatamente o cobrado.
+			COALESCE(op.payment_method, ''),
+			COALESCE(NULLIF(op.gateway_snapshot->>'installments', '')::int, 0),
+			COALESCE(o.discount_cents, 0),
+			COALESCE(o.paid_total_cents, 0)
 		FROM carts c
 		JOIN live_events e ON e.id = c.event_id
 		JOIN stores s      ON s.id = e.store_id
@@ -359,6 +366,10 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 		&row.ERPInvoiceEmittedAt,
 
 		&row.CancellationRevertedAt,
+		&row.PaymentMethod,
+		&row.Installments,
+		&row.DiscountCents,
+		&row.PaidTotalCents,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil

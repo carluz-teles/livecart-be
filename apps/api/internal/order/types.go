@@ -279,6 +279,15 @@ type OrderDetailResponse struct {
 	// WaitlistedAmount: valor das unidades em fila, declarado no orçamento como
 	// não incluído em vez de simplesmente omitido.
 	WaitlistedAmount int64 `json:"waitlistedAmount"`
+
+	// Pagamento: método (pix/credit_card/...), parcelas e os valores REAIS do
+	// pedido. PaidTotalCents é EXATAMENTE o que foi cobrado (com desconto PIX);
+	// DiscountCents é cupom + desconto PIX. O FE exibe "PIX" / "Cartão · 3x", o
+	// desconto e o valor pago sem recalcular.
+	PaymentMethod  string `json:"paymentMethod,omitempty"`
+	Installments   int    `json:"installments,omitempty"`
+	DiscountCents  int64  `json:"discountCents"`
+	PaidTotalCents int64  `json:"paidTotalCents"`
 }
 
 // OrderWaitlistItemResponse é a projeção de uma entrada de fila de espera.
@@ -557,6 +566,10 @@ func NewOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 		WaitlistJourney:        append([]OrderWaitlistJourneyOutput{}, o.WaitlistJourney...),
 		PayableAmount:          o.PayableAmount,
 		WaitlistedAmount:       o.WaitlistedAmount,
+		PaymentMethod:          o.PaymentMethod,
+		Installments:           o.Installments,
+		DiscountCents:          o.DiscountCents,
+		PaidTotalCents:         o.PaidTotalCents,
 		CustomerBlocked:        o.CustomerBlocked,
 		CancellationRevertedAt: o.CancellationRevertedAt,
 	}
@@ -972,6 +985,14 @@ type OrderDetailRow struct {
 	// Preenchido quando o lojista cancelou este pedido e o pagamento entrou
 	// assim mesmo, revertendo o cancelamento. NULL na esmagadora maioria.
 	CancellationRevertedAt *time.Time
+
+	// Pagamento: método (pix/credit_card/...), parcelas (do gateway_snapshot) e
+	// os valores REAIS do pedido — desconto (cupom + PIX) e valor efetivamente
+	// pago. Zero quando ainda não há pedido/pagamento materializado.
+	PaymentMethod  string
+	Installments   int
+	DiscountCents  int64
+	PaidTotalCents int64
 }
 
 // OrderShipmentRecord is the projection of `shipments` used by order service.
@@ -1117,6 +1138,13 @@ type OrderDetailOutput struct {
 	// WaitlistedAmount é o valor das unidades em fila — o que o orçamento
 	// declara como NÃO incluído no total, em vez de apenas omitir.
 	WaitlistedAmount int64
+
+	// Pagamento (método/parcelas) e os valores reais do pedido: desconto (cupom +
+	// PIX) e valor efetivamente pago. Ver OrderDetailRow.
+	PaymentMethod  string
+	Installments   int
+	DiscountCents  int64
+	PaidTotalCents int64
 }
 
 // OrderWaitlistItemOutput é uma entrada de fila de espera do carrinho.
