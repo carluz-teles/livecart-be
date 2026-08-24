@@ -426,8 +426,10 @@ func TestOnCartPaid_AC11_ExactlyOnce(t *testing.T) {
 	}
 }
 
-// AC13 Cupom+frete fora do GMV: ledger.amount_cents == SUM(qty*unit_price).
-func TestOnCartPaid_AC13_CouponAndShippingExcluded(t *testing.T) {
+// AC13 Comissão sobre o LÍQUIDO (política 24/08/2026): o cupom REDUZ a base da
+// comissão (a loja recebe com desconto), mas o FRETE fica fora (comissão é sobre
+// produtos). amount_cents == SUM(qty*unit_price) − cupom.
+func TestOnCartPaid_AC13_CommissionOnNet_CouponReducesBase(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
 	svc := newTestService(t)
@@ -483,8 +485,44 @@ func TestOnCartPaid_AC13_CouponAndShippingExcluded(t *testing.T) {
 	}
 
 	entry := getSaleEntry(t, cartID)
-	if entry.AmountCents != 40000 {
-		t.Fatalf("AC13: amount_cents want 40000 (sem cupom/frete), got %d", entry.AmountCents)
+	if entry.AmountCents != 38500 {
+		t.Fatalf("AC13: amount_cents want 38500 (líquido: 40000 − 1500 de cupom), got %d", entry.AmountCents)
+	}
+}
+
+// Comissão sobre o LÍQUIDO no PIX com desconto (política 24/08/2026): a loja dá
+// X%% de desconto no Pix e recebe o valor descontado (pix_amount_cents). A taxa
+// incide sobre o que ela recebeu pelos produtos (pix_amount − frete), não sobre
+// o preço cheio.
+func TestOnCartPaid_CommissionOnNet_PixDiscount(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	svc := newTestService(t)
+
+	storeID := seedStore(t)
+	seedSubscription(t, storeID, StatusActive)
+
+	// Produtos = 16980. PIX com 5%% de desconto → cobrado 16131 (16980*0.95),
+	// sem frete. A base da comissão deve ser 16131 (o que a loja recebeu).
+	cartID := seedCartWithItems(t, storeID, 1, 16980)
+	if _, err := testPool.Exec(ctx,
+		`UPDATE carts SET payment_method='pix', pix_amount_cents=16131 WHERE id=$1::uuid`, cartID,
+	); err != nil {
+		t.Fatalf("set pix: %v", err)
+	}
+
+	if err := svc.OnCartPaid(ctx, storeID, cartID, 16980); err != nil {
+		t.Fatalf("OnCartPaid: %v", err)
+	}
+
+	entry := getSaleEntry(t, cartID)
+	if entry.AmountCents != 16131 {
+		t.Fatalf("base da comissão want 16131 (líquido do PIX), got %d — cobrar sobre 16980 seria taxa sobre o valor cheio", entry.AmountCents)
+	}
+	// fee = base × bps do plano; confirma que o fee acompanha o líquido.
+	wantFee := int64(16131) * int64(entry.FeeBps) / 10000
+	if entry.FeeCents != wantFee {
+		t.Fatalf("fee_cents want %d (sobre o líquido), got %d", wantFee, entry.FeeCents)
 	}
 }
 

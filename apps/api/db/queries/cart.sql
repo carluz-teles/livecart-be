@@ -943,6 +943,20 @@ WHERE c.erp_order_state IN ('converting','mutating')
 -- GMV de um cart: delega à função canônica cart_product_total_cents (migration 000093).
 SELECT cart_product_total_cents(sqlc.arg(cart_id))::bigint AS gmv_cents;
 
+-- name: GetCartCommissionBaseCents :one
+-- Base da COMISSÃO (taxa de sucesso): o valor LÍQUIDO dos produtos que o cliente
+-- de fato pagou — o bruto menos os descontos (cupom + PIX), SEM frete. A loja
+-- recebe o valor com desconto, então a taxa incide sobre isso, não sobre o preço
+-- cheio. Para PIX o valor real cobrado está em pix_amount_cents (já com desconto),
+-- e tiramos o frete; para cartão/sem PIX é bruto - cupom. Nunca negativo.
+SELECT GREATEST(
+  CASE
+    WHEN c.payment_method = 'pix' AND c.pix_amount_cents IS NOT NULL
+      THEN c.pix_amount_cents - COALESCE(c.shipping_cost_cents, 0)
+    ELSE cart_product_total_cents(c.id) - c.coupon_discount_cents
+  END, 0)::bigint AS base_cents
+FROM carts c WHERE c.id = sqlc.arg(cart_id);
+
 -- name: SetCartItemSplitIfUnchanged :execrows
 -- Escreve a quantidade TOTAL e a parte em FILA de uma vez, e só se ninguém
 -- tiver mexido na linha desde que a lemos.

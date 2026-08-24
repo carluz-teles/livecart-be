@@ -826,18 +826,21 @@ func (s *Service) OnCartPaid(ctx context.Context, storeID, cartID string, gmvCen
 		return fmt.Errorf("billing OnCartPaid: no subscription for store %q: %w", storeID, err)
 	}
 
-	// (2) Fallback: payload legado sem gmv_cents (ou gmv_cents=0) → computa do banco.
-	if gmvCents <= 0 {
-		gmvCents, err = s.queries.GetCartGMVCents(ctx, cid)
-		if err != nil {
-			logger.From(ctx, s.logger).Warn("OnCartPaid: fallback GetCartGMVCents failed",
-				zap.String("cart_id", cartID), zap.Error(err))
-			gmvCents = 0
-		}
+	// (2) Base da COMISSÃO = valor LÍQUIDO que o cliente pagou pelos produtos
+	// (bruto − cupom − desconto PIX, SEM frete). O gmv_cents do evento é o BRUTO
+	// (é o que o pedido usa em total_cents); a comissão incide sobre o LÍQUIDO —
+	// a loja recebe o valor com desconto, então cobrar sobre o cheio cobraria
+	// taxa de dinheiro que não entrou. GetCartCommissionBaseCents é a fonte única
+	// da regra. Falha na query → cai no bruto do evento (conservador).
+	baseCents, err := s.queries.GetCartCommissionBaseCents(ctx, cid)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("OnCartPaid: commission base query failed, using gross gmv",
+			zap.String("cart_id", cartID), zap.Error(err))
+		baseCents = gmvCents
 	}
 
-	// (3) Cart com gmv=0 (sem itens ou puro-frete) → early return, não grava linha.
-	if gmvCents <= 0 {
+	// (3) Base 0 (sem itens ou puro-frete) → early return, não grava linha.
+	if baseCents <= 0 {
 		return nil
 	}
 
@@ -845,7 +848,7 @@ func (s *Service) OnCartPaid(ctx context.Context, storeID, cartID string, gmvCen
 	// billable = taxa cobrada neste ciclo (assinatura convertida).
 	// Trial/paused/etc: grava para visibilidade, fee snapshot, billable=false.
 	billable := sub.Status == StatusActive || sub.Status == StatusPastDue
-	feeCents := gmvCents * int64(cfg.GMVBps) / 10000
+	feeCents := baseCents * int64(cfg.GMVBps) / 10000
 
 	// (4) Insert do ledger — propaga erro real; ErrNoRows = idempotente.
 	// The commission is NOT metered to Stripe: it accrues here with stripe_ref
@@ -855,7 +858,7 @@ func (s *Service) OnCartPaid(ctx context.Context, storeID, cartID string, gmvCen
 		StoreID:     sid,
 		CartID:      cid,
 		EntryType:   "sale",
-		AmountCents: gmvCents,
+		AmountCents: baseCents,
 		Plan:        sub.Plan,
 		FeeBps:      int32(cfg.GMVBps),
 		FeeCents:    feeCents,
@@ -870,7 +873,7 @@ func (s *Service) OnCartPaid(ctx context.Context, storeID, cartID string, gmvCen
 	logger.From(ctx, s.logger).Info("gmv sale recorded",
 		zap.String("store_id", storeID),
 		zap.String("cart_id", cartID),
-		zap.Int64("amount_cents", gmvCents),
+		zap.Int64("amount_cents", baseCents),
 		zap.Bool("billable", billable),
 	)
 
@@ -882,7 +885,7 @@ func (s *Service) OnCartPaid(ctx context.Context, storeID, cartID string, gmvCen
 		AmountCents int64  `json:"amount_cents"`
 		FeeCents    int64  `json:"fee_cents"`
 		Billable    bool   `json:"billable"`
-	}{storeID, cartID, gmvCents, feeCents, billable})
+	}{storeID, cartID, baseCents, feeCents, billable})
 	return nil
 }
 

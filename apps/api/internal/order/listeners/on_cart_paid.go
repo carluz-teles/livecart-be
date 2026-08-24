@@ -96,12 +96,29 @@ func (l *Listener) createPaidOrder(
 		}
 	}
 
-	discountCents := cart.CouponDiscountCents
+	couponDiscount := cart.CouponDiscountCents
 	shippingCents := int64(0)
 	if cart.ShippingCostCents.Valid {
 		shippingCents = cart.ShippingCostCents.Int64
 	}
-	paidTotal := gmvCents - discountCents + shippingCents
+	// paid = produtos - cupom + frete (o caso do cartão, sem desconto por método).
+	paidTotal := gmvCents - couponDiscount + shippingCents
+
+	// Desconto PIX (RN live_events.pix_discount_percent). Quando o comprador paga
+	// com Pix, a cobrança sai JÁ com o desconto e o valor REAL cobrado está em
+	// cart.pix_amount_cents. Sem reconhecê-lo aqui, o pedido gravava paid_total com
+	// o valor CHEIO — o cliente pagou menos, o desconto sumia, e a conta não fechava
+	// nem no extrato nem no Tiny. Agora paid_total é o valor efetivamente cobrado e o
+	// desconto PIX entra em discount_cents (somado ao cupom). Vale só para 'pix'; no
+	// cartão pix_amount_cents é NULL e nada muda.
+	pixDiscount := int64(0)
+	if cart.PaymentMethod.String == "pix" && cart.PixAmountCents.Valid && cart.PixAmountCents.Int64 > 0 {
+		if charged := cart.PixAmountCents.Int64; charged < paidTotal {
+			pixDiscount = paidTotal - charged
+			paidTotal = charged
+		}
+	}
+	discountCents := couponDiscount + pixDiscount
 
 	items, err := l.queries.GetCartItemsForOrderMaterialization(ctx, cid)
 	if err != nil {
@@ -218,7 +235,7 @@ func (l *Listener) createPaidOrder(
 		GatewaySnapshot:     paymentSnapshot,
 		CouponID:            cart.CouponID,
 		CouponCode:          cart.CouponCode,
-		CouponDiscountCents: discountCents,
+		CouponDiscountCents: couponDiscount,
 	}); err != nil {
 		return fmt.Errorf("order OnCartPaid: insert order_payment: %w", err)
 	}

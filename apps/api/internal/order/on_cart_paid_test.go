@@ -462,3 +462,55 @@ func TestOnCartPaid_A4_IdempotentTokenAndTimeline(t *testing.T) {
 		t.Errorf("AC3: expected 1 payment_confirmed, got %d", events)
 	}
 }
+
+// ─── Desconto PIX: paid_total reflete o valor realmente cobrado ──────────────
+//
+// Evento com pix_discount_percent: o comprador paga com Pix e a cobrança sai já
+// com desconto (cart.pix_amount_cents). Antes o pedido gravava paid_total com o
+// valor CHEIO e discount_cents=0 — a conta não fechava. Agora paid_total é o
+// cobrado e o desconto PIX entra em discount_cents (mas NÃO em
+// order_payments.coupon_discount_cents, que é só cupom). P3 segue de pé.
+func TestOnCartPaid_PixDiscountReflectedInPaidTotal(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	l := newListener(t)
+
+	// 1 item * 16980 = 16980 GMV, sem cupom, sem frete.
+	r := seedPaidCart(t, 1, 16980, 0, 0)
+	// Pagamento PIX com 5% de desconto: cobrado 16131 (= 16980 * 0.95).
+	if _, err := testPool.Exec(ctx,
+		`UPDATE carts SET payment_method='pix', pix_amount_cents=16131 WHERE id=$1::uuid`, r.cartID,
+	); err != nil {
+		t.Fatalf("set pix: %v", err)
+	}
+
+	if err := l.OnCartPaid(ctx, r.cartID, r.storeID, 16980, nil); err != nil {
+		t.Fatalf("OnCartPaid: %v", err)
+	}
+
+	var total, discount, shipping, paid, couponPay int64
+	if err := testPool.QueryRow(ctx, `
+		SELECT o.total_cents, o.discount_cents, o.shipping_cents, o.paid_total_cents,
+		       op.coupon_discount_cents
+		FROM orders o JOIN order_payments op ON op.order_id = o.id
+		WHERE o.cart_id = $1`, r.cartID,
+	).Scan(&total, &discount, &shipping, &paid, &couponPay); err != nil {
+		t.Fatalf("query order: %v", err)
+	}
+
+	if paid != 16131 {
+		t.Errorf("paid_total_cents=%d, quero 16131 (o valor realmente cobrado no PIX)", paid)
+	}
+	if discount != 849 {
+		t.Errorf("discount_cents=%d, quero 849 (desconto PIX de 5%%)", discount)
+	}
+	if total != 16980 {
+		t.Errorf("total_cents=%d, quero 16980 (produtos cheios, inalterado)", total)
+	}
+	if couponPay != 0 {
+		t.Errorf("coupon_discount_cents=%d, quero 0 (desconto PIX não é cupom)", couponPay)
+	}
+	if paid != total-discount+shipping {
+		t.Errorf("P3 quebrado: paid=%d != total-discount+shipping=%d", paid, total-discount+shipping)
+	}
+}
