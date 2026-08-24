@@ -1330,6 +1330,28 @@ func (q *Queries) GetCartByTokenWithDetails(ctx context.Context, token string) (
 	return i, err
 }
 
+const getCartCommissionBaseCents = `-- name: GetCartCommissionBaseCents :one
+SELECT GREATEST(
+  CASE
+    WHEN c.payment_method = 'pix' AND c.pix_amount_cents IS NOT NULL
+      THEN c.pix_amount_cents - COALESCE(c.shipping_cost_cents, 0)
+    ELSE cart_product_total_cents(c.id) - c.coupon_discount_cents
+  END, 0)::bigint AS base_cents
+FROM carts c WHERE c.id = $1
+`
+
+// Base da COMISSÃO (taxa de sucesso): o valor LÍQUIDO dos produtos que o cliente
+// de fato pagou — o bruto menos os descontos (cupom + PIX), SEM frete. A loja
+// recebe o valor com desconto, então a taxa incide sobre isso, não sobre o preço
+// cheio. Para PIX o valor real cobrado está em pix_amount_cents (já com desconto),
+// e tiramos o frete; para cartão/sem PIX é bruto - cupom. Nunca negativo.
+func (q *Queries) GetCartCommissionBaseCents(ctx context.Context, cartID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, getCartCommissionBaseCents, cartID)
+	var base_cents int64
+	err := row.Scan(&base_cents)
+	return base_cents, err
+}
+
 const getCartERPOrderState = `-- name: GetCartERPOrderState :one
 SELECT erp_order_state, erp_stock_launched, COALESCE(external_order_id,'') AS external_order_id
 FROM carts WHERE id = $1
