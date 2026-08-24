@@ -41,6 +41,10 @@ type ERPRepository interface {
 
 	// GetCartERPOrderState reads the cart's order-as-reservation lifecycle state.
 	GetCartERPOrderState(ctx context.Context, cartID string) (*CartERPOrderState, error)
+	// GetCartShortID returns the cart's human-facing sequential number (the
+	// #1189 the merchant sees in LiveCart). Stamped on ERP stock movements so
+	// the merchant can copy it from the Tiny extract and find the cart.
+	GetCartShortID(ctx context.Context, cartID string) (int32, error)
 	// ListActiveReservationsByCartAndProduct returns the active reservations for a
 	// cart+product (in practice the unique index keeps it to one row).
 	ListActiveReservationsByCartAndProduct(ctx context.Context, cartID, productID string) ([]StockReservationRow, error)

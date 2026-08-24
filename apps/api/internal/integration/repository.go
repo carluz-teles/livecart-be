@@ -1907,6 +1907,21 @@ func (r *Repository) GetCartInvoiceAnchor(ctx context.Context, cartID string) (s
 	return cart.StoreID, cart.ExternalOrderID, nil
 }
 
+// GetCartShortID returns the cart's human-facing sequential number (#1189),
+// stamped on ERP stock movements so the merchant can copy it from the Tiny
+// extract and locate the cart in LiveCart. Enxuto reader over GetCartByID.
+func (r *Repository) GetCartShortID(ctx context.Context, cartID string) (int32, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return 0, err
+	}
+	cart, err := r.queries.GetCartByID(ctx, cID)
+	if err != nil {
+		return 0, fmt.Errorf("getting cart short id: %w", err)
+	}
+	return cart.ShortID, nil
+}
+
 // NonWaitlistedCartItem represents a cart item that is not waitlisted, with
 // product info. Canonical home is internal/erp (Bloco B2c); aliased here so the
 // Repository (which owns the SQL) and its ~call sites keep compiling unchanged.

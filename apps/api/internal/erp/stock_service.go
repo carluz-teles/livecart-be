@@ -144,6 +144,8 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 	// lançamento órfão que ninguém ia estornar. Com o razão, todo desfecho
 	// (inclusive "não sei") vira linha consultável, o retry só acontece com
 	// prova de não-entrega, e a finalização não fecha com dúvida aberta.
+	cartRef := s.cartRef(ctx, cartID)
+
 	if s.movements != nil {
 		mov, movErr := s.movements.CreateERPStockMovement(ctx, CreateStockMovementParams{
 			StoreID:           storeID,
@@ -160,14 +162,14 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 			// que nenhum desfecho se perde.
 			return fmt.Errorf("recording stock movement intent: %w", movErr)
 		}
-		obs := movementObservacao(mov, platformHandle, 0)
+		obs := movementObservacao(cartRef, platformHandle, 0)
 		go s.executeStockMovement(logger.WithStore(context.Background(), storeID, ""), erpProvider, mov, obs)
 		return nil
 	}
 
 	existing, _ := s.repo.ListActiveReservationsByCartAndProduct(ctx, cartID, productID)
 	if len(existing) > 0 {
-		obs := fmt.Sprintf("Ajuste reserva LiveCart (+%d) - @%s - Cart %s", quantity, platformHandle, cartID)
+		obs := fmt.Sprintf("@%s - Cart %s (+%d)", platformHandle, cartRef, quantity)
 		movementID, err := erpProvider.ReserveStock(ctx, externalID, quantity, float64(unitPrice)/100, obs)
 		if err != nil {
 			return fmt.Errorf("reserving additional stock in ERP: %w", err)
@@ -186,7 +188,7 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 		return nil
 	}
 
-	obs := fmt.Sprintf("Reserva LiveCart - @%s - Evento %s", platformHandle, eventID)
+	obs := fmt.Sprintf("@%s - Cart %s", platformHandle, cartRef)
 	movementID, err := erpProvider.ReserveStock(ctx, externalID, quantity, float64(unitPrice)/100, obs)
 	if err != nil {
 		return fmt.Errorf("reserving stock in ERP: %w", err)
@@ -360,6 +362,8 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 		return "", nil
 	}
 
+	cartRef := s.cartRef(ctx, cartID)
+
 	existing, _ := s.repo.ListActiveReservationsByCartAndProduct(ctx, cartID, productID)
 
 	if delta > 0 {
@@ -392,7 +396,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 			return "", fmt.Errorf("recording reservation increase: %w", saveErr)
 		}
 
-		obs := fmt.Sprintf("Ajuste reserva LiveCart (+%d) - @%s - Cart %s", delta, platformHandle, cartID)
+		obs := fmt.Sprintf("@%s - Cart %s (+%d)", platformHandle, cartRef, delta)
 		movementID, err := erpProvider.ReserveStock(ctx, externalID, delta, float64(unitPrice)/100, obs)
 		if err != nil {
 			// O ERP recusou depois de já termos gravado. Desfazer é obrigatório:
@@ -472,7 +476,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 		if leftover <= 0 {
 			return "", nil
 		}
-		obs := fmt.Sprintf("Ajuste reserva LiveCart (-%d) - @%s - Cart %s", leftover, platformHandle, cartID)
+		obs := fmt.Sprintf("@%s - Cart %s (-%d)", platformHandle, cartRef, leftover)
 		movementID, ferr := erpProvider.ReverseStockReservation(ctx, externalID, leftover, 0, obs)
 		if ferr != nil {
 			rollbackLocal()
@@ -484,7 +488,7 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 		return movementID, nil
 	}
 
-	obs := fmt.Sprintf("Ajuste reserva LiveCart (%d) - @%s - Cart %s", delta, platformHandle, cartID)
+	obs := fmt.Sprintf("@%s - Cart %s (%d)", platformHandle, cartRef, delta)
 	movementID, err := erpProvider.ReverseStockReservation(ctx, externalID, dec, 0, obs)
 	if err != nil {
 		// O ERP recusou DEPOIS de já termos baixado no banco. Devolver as

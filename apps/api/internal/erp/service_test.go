@@ -37,6 +37,7 @@ func (stubERPRepo) RestoreReservationToActive(context.Context, string) error { r
 func (stubERPRepo) GetCartInvoiceAnchor(context.Context, string) (string, string, error) {
 	return "", "", nil
 }
+func (stubERPRepo) GetCartShortID(context.Context, string) (int32, error) { return 0, nil }
 func (stubERPRepo) UpsertCartERPInvoice(context.Context, UpsertCartERPInvoiceParams) (int64, error) {
 	return 0, nil
 }

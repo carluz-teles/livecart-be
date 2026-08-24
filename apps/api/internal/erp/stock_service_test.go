@@ -64,6 +64,7 @@ type mockRepo struct {
 	orderStateErr error
 	existing      []StockReservationRow
 	items         []NonWaitlistedCartItem
+	cartShortID   int32
 	decrementErr  error
 	incrementErr  error
 	createErr     error
@@ -192,6 +193,9 @@ func (m *mockRepo) ClaimReservationForReversal(context.Context, string) (bool, e
 func (m *mockRepo) RestoreReservationToActive(context.Context, string) error { return nil }
 func (m *mockRepo) GetCartInvoiceAnchor(context.Context, string) (string, string, error) {
 	return m.anchorStoreID, m.anchorExtOrder, m.anchorErr
+}
+func (m *mockRepo) GetCartShortID(context.Context, string) (int32, error) {
+	return m.cartShortID, nil
 }
 func (m *mockRepo) UpsertCartERPInvoice(context.Context, UpsertCartERPInvoiceParams) (int64, error) {
 	m.upserts++
