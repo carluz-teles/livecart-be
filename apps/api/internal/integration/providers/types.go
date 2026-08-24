@@ -998,6 +998,10 @@ type ERPProduct struct {
 	Stock       int                 `json:"stock"`
 	Active      bool                `json:"active"`
 	ImageURL    string              `json:"image_url,omitempty"`
+	// ImageURLs are ALL image URLs the ERP returned for this product (Tiny
+	// anexos), in order. The merchant picks which becomes the LiveCart main
+	// image on import; ImageURL stays the default (first). Empty when none.
+	ImageURLs   []string            `json:"image_urls,omitempty"`
 	UpdatedAt   time.Time           `json:"updated_at"`
 	Shipping    *ERPShippingProfile `json:"shipping,omitempty"` // nil when the ERP didn't return a complete profile
 	// WeightGramsHint is set whenever the ERP returned a positive weight, even

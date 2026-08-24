@@ -799,12 +799,17 @@ func tinyPayloadToERP(p tinyProductPayload) ERPProduct {
 		updatedAt, _ = time.Parse("2006-01-02 15:04:05", p.DataAlteracao)
 	}
 
+	// Todas as imagens do Tiny (anexos), na ordem. O lojista escolhe qual vira a
+	// principal no import; ImageURL segue como default (a primeira).
 	var imageURL string
+	var imageURLs []string
 	for _, a := range p.Anexos {
 		if a.URL != "" {
-			imageURL = a.URL
-			break
+			imageURLs = append(imageURLs, a.URL)
 		}
+	}
+	if len(imageURLs) > 0 {
+		imageURL = imageURLs[0]
 	}
 
 	// Dimensions: prefer the structured `dimensoes` block; fall back to
@@ -829,6 +834,7 @@ func tinyPayloadToERP(p tinyProductPayload) ERPProduct {
 		Stock:           int(p.Estoque.Quantidade),
 		Active:          p.Situacao == "A",
 		ImageURL:        imageURL,
+		ImageURLs:       imageURLs,
 		UpdatedAt:       updatedAt,
 		Type:            p.Tipo,
 		IsParent:        p.Tipo == "V",
