@@ -46,7 +46,7 @@ comportamento decide algo, o item aparece como `[ABERTO]` com o teste nomeado.
    - [6.4 Webhooks](#64-webhooks)
    - [6.5 Autenticação](#65-autenticação)
 7. [Tabela de cobertura da Fase 0](#7-tabela-de-cobertura-da-fase-0)
-8. [A pauta da próxima bateria](#8-a-pauta-da-próxima-bateria)
+8. [A pauta da próxima bateria](#8-a-pauta-da-próxima-bateria) — [o harness de 11/07 está num stash](#80-o-harness-da-bateria-de-1107-existe--e-está-num-stash)
 9. [Anexo — higiene e registros do dia](#9-anexo--higiene-e-registros-do-dia)
 10. [Verificação — a revisão adversarial de 25/08](#verificação)
 
@@ -1764,6 +1764,48 @@ isso (`.tiny-lab/audit.jsonl`).
 cada execução. **A allowlist está VAZIA hoje — o primeiro ato da bateria é uma pessoa decidir e escrever o CNPJ
 autorizado.** Não descobrir por tentativa. **Não existe sandbox do lado do fornecedor: toda escrita é numa conta
 real.**
+
+## 8.0 O harness da bateria de 11/07 existe — e está num stash
+
+`[EMPÍRICO 25/08: git stash]` O binário que produziu toda a bateria de 11/07 **não foi perdido**: está
+em `stash@{1}` ("tiny-sandbox: bateria de testes empiricos T1-T11 da API Tiny"), na parte *untracked*,
+como `apps/api/cmd/tiny-sandbox/{main.go,README.md}` — 1.201 linhas de Go e um README de 74.
+
+```bash
+git show 35dc196:apps/api/cmd/tiny-sandbox/main.go    > /tmp/tiny-sandbox-main.go
+git show 35dc196:apps/api/cmd/tiny-sandbox/README.md  > /tmp/tiny-sandbox-README.md
+```
+
+Vale recuperá-lo antes de escrever qualquer bateria nova. Ele já traz:
+
+- **Guard de conta por `-confirm-account=<substring da razão social>`** — a mesma ideia do guard por
+  CNPJ do `apps/tiny-lab`, e os dois devem convergir (o CNPJ é a chave mais forte).
+- **Captura de webhook embutida** na porta `:9099`, com timestamp em nanossegundos, para medir a
+  latência entre a ação e o webhook por diferença com o `actions.jsonl`. O `tiny-lab` grava os
+  **headers**, que este descartava — a junção dos dois é que fecha a pergunta do HMAC.
+- **Rounds de configuração de conta** (`-round=<rótulo>`), que é como T3 e T9 foram desenhados: o
+  operador altera o toggle na UI do Tiny e roda o mesmo teste de novo com outro rótulo. É o
+  mecanismo que responde E13 (§7.5) — *quando o Tiny lança estoque sozinho*.
+- `setup` / `run -tests=…` / `cleanup` com fixtures em `fixtures.json`.
+
+Duas correções que o README dele impõe ao acervo:
+
+1. **O rate limit já era conhecido, e depende do PLANO.** O README diz textualmente: *"Pace default de
+   2,1 s entre escritas (≈28/min, abaixo do teto do plano Básico); 429 espera 61 s e repete uma vez."*
+   Isso corrobora de forma independente a medição de 25/08 (30 req/60 s) e acrescenta o que ela não
+   podia mostrar: **o teto é do plano contratado**, então a ADABYTE e a conta de produção podem ter
+   tetos diferentes. `[ABERTO]` medir o teto na conta de produção — é uma rajada de GETs, não escreve.
+2. **T9 nunca rodou.** `[EMPÍRICO 25/08: contagem por `test` no actions.jsonl]` T1(15) T2(26) T3(22)
+   T4(18) T5(7) T6(41) T7(21) T8(69) T10(10) T11(35) — **não há uma única chamada marcada T9**. E T9 é
+   justamente *"config 'momento do lançamento de estoque' (manual / ao salvar / ao aprovar)"*, que é o
+   parâmetro **"Lançamento de estoque para saídas"** da pergunta que abre a Fase 0. A divergência de
+   E13 (§7.5) entre sandbox e produção não é mistério: é o teste que faltou.
+
+`[EMPÍRICO 25/08]` T1 e T4 rodaram mas **não têm seção nos `report-run-*.md`** — os resultados só
+existem no `actions.jsonl`. O veredito do T1 foi reconstruído de lá e está em §3.4 e §4.4: criar
+não move estoque, aprovar não move estoque, e `lancar-estoque` **funciona em pedido `0 Aberta`**
+(204, saldo 10→8). Ou seja, o go/no-go do design C era **GO**, e ficou ilegível por oito semanas
+porque o relatório não foi gerado.
 
 ## 8.1 Ordem de execução — os cinco primeiros mudam a arquitetura
 
