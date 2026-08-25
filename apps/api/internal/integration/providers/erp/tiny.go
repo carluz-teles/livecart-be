@@ -1095,7 +1095,7 @@ func (t *Tiny) SyncProduct(ctx context.Context, product ERPProduct) (*SyncResult
 		"situacao":  boolToSituacao(product.Active),
 	}
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, payload, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPut, endpoint, payload, t.authHeaders())
 	if err != nil {
 		return &SyncResult{
 			ProductID: product.ID,
@@ -1395,7 +1395,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		zap.Int64("net_amount_cents", netCents),
 	)
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, payload, t.authHeaders())
 	if err != nil {
 		return nil, fmt.Errorf("creating order: %w", err)
 	}
@@ -1430,7 +1430,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 			zap.Int("status", resp.StatusCode),
 			zap.String("detail", tinyErrorDetail(body)),
 		)
-		resp, body, err = t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
+		resp, body, err = t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, payload, t.authHeaders())
 		if err != nil {
 			return nil, fmt.Errorf("creating order without forma de envio: %w", err)
 		}
@@ -1966,7 +1966,7 @@ func tinyCartMarker(cartID string) string { return "lc-cart-" + cartID }
 func (t *Tiny) LaunchOrderStock(ctx context.Context, orderID string) error {
 	endpoint := fmt.Sprintf("%s/pedidos/%s/lancar-estoque", tinyAPIBaseURL, orderID)
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, nil, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, nil, t.authHeaders())
 	if err != nil {
 		return fmt.Errorf("launching order stock: %w", err)
 	}
@@ -1999,7 +1999,7 @@ func (t *Tiny) LaunchOrderStock(ctx context.Context, orderID string) error {
 func (t *Tiny) ReverseOrderStock(ctx context.Context, orderID string) error {
 	endpoint := fmt.Sprintf("%s/pedidos/%s/estornar-estoque", tinyAPIBaseURL, orderID)
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, nil, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, nil, t.authHeaders())
 	if err != nil {
 		return fmt.Errorf("reversing order stock: %w", err)
 	}
@@ -2023,7 +2023,7 @@ func (t *Tiny) ApproveOrder(ctx context.Context, orderID string) error {
 		"situacao": 3, // Aprovado
 	}
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, payload, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPut, endpoint, payload, t.authHeaders())
 	if err != nil {
 		return fmt.Errorf("approving order: %w", err)
 	}
@@ -2060,7 +2060,7 @@ func (t *Tiny) CancelOrder(ctx context.Context, orderID string) error {
 		"situacao": 2, // Cancelada
 	}
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, payload, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPut, endpoint, payload, t.authHeaders())
 	if err != nil {
 		return fmt.Errorf("cancelling order: %w", err)
 	}
@@ -2095,7 +2095,7 @@ func (t *Tiny) UpdateOrderItems(ctx context.Context, orderID string, items []pro
 		}
 	}
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, map[string]any{"itens": grid}, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPut, endpoint, map[string]any{"itens": grid}, t.authHeaders())
 	if err != nil {
 		return fmt.Errorf("updating order items: %w", err)
 	}
@@ -2129,7 +2129,7 @@ func (t *Tiny) UpdateOrderPayment(ctx context.Context, orderID string, payment *
 	// a receber — refinamento futuro: gravar pagamento.formaRecebimento já no
 	// POST da conversão quando o método do checkout for conhecido.
 	parcelas := buildTinyParcelas(payment, nil, nil)
-	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, map[string]any{
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPut, endpoint, map[string]any{
 		"pagamento": map[string]any{"parcelas": parcelas},
 	}, t.authHeaders())
 	if err != nil {
@@ -2152,7 +2152,7 @@ func (t *Tiny) UpdateOrderPayment(ctx context.Context, orderID string, payment *
 // cancelamento é SetOrderSituacao(2) seguido de ReverseOrderStock.
 func (t *Tiny) SetOrderSituacao(ctx context.Context, orderID string, situacao int) error {
 	endpoint := fmt.Sprintf("%s/pedidos/%s/situacao", tinyAPIBaseURL, orderID)
-	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, map[string]any{"situacao": situacao}, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPut, endpoint, map[string]any{"situacao": situacao}, t.authHeaders())
 	if err != nil {
 		return fmt.Errorf("setting order situacao: %w", err)
 	}
@@ -2166,7 +2166,7 @@ func (t *Tiny) SetOrderSituacao(ctx context.Context, orderID string, situacao in
 // lc-cart-<cartID> é a âncora de idempotência do fluxo pedido-como-reserva.
 func (t *Tiny) AddOrderMarker(ctx context.Context, orderID, marker string) error {
 	endpoint := fmt.Sprintf("%s/pedidos/%s/marcadores", tinyAPIBaseURL, orderID)
-	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, []map[string]any{{"descricao": marker}}, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, []map[string]any{{"descricao": marker}}, t.authHeaders())
 	if err != nil {
 		return fmt.Errorf("adding order marker: %w", err)
 	}
@@ -2383,7 +2383,7 @@ func (t *Tiny) CreateContact(ctx context.Context, contact ERPContactInput) (*ERP
 		payload["celular"] = contact.Phone
 	}
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, payload, t.authHeaders())
 	if err != nil {
 		return nil, fmt.Errorf("creating contact: %w", err)
 	}
@@ -2526,7 +2526,7 @@ func (t *Tiny) UpdateContact(ctx context.Context, contactID string, contact ERPC
 		return nil
 	}
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, payload, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPut, endpoint, payload, t.authHeaders())
 	if err != nil {
 		return fmt.Errorf("updating contact: %w", err)
 	}
