@@ -2278,8 +2278,17 @@ func (t *Tiny) ReverseStockReservation(ctx context.Context, productID string, qt
 		"observacoes":   obs,
 	}
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
+	// Simétrico a ReserveStock, e por obrigação: o razão tem UMA tabela de
+	// classificação para saída e entrada, e ela lê só ErrProvenUndelivered.
+	// Sem emitir o sentinela aqui, TODA falha de estorno virava `unconfirmed`
+	// — inclusive um 429, que é recusa antes de aplicar — e `unconfirmed` nunca
+	// re-tenta e trava a finalização de um carrinho pago (produção 25/08,
+	// carrinho #1115).
+	resp, body, err := t.postComRetryDeDiscagem(ctx, endpoint, payload)
 	if err != nil {
+		if falhaDeDiscagem(err) {
+			return "", fmt.Errorf("reversing stock reservation: %w", errors.Join(providers.ErrProvenUndelivered, err))
+		}
 		return "", fmt.Errorf("reversing stock reservation: %w", err)
 	}
 
@@ -2288,7 +2297,15 @@ func (t *Tiny) ReverseStockReservation(ctx context.Context, productID string, qt
 			Mensagem string `json:"mensagem"`
 		}
 		_ = json.Unmarshal(body, &errResp)
-		return "", fmt.Errorf("reverse stock reservation failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+		reject := fmt.Errorf("reverse stock reservation failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+		// 4xx é recusa: o Tiny processou e disse não ANTES de dar entrada.
+		// Provado não-aplicado, logo repetível — e no 429 repetir é a cura.
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return "", errors.Join(providers.ErrProvenUndelivered, reject)
+		}
+		// 5xx fica ambíguo de propósito: o servidor respondeu, e pode ter dado
+		// entrada antes de quebrar. Repetir cegamente inflaria o saldo.
+		return "", reject
 	}
 
 	var result struct {
