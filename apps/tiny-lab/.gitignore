@@ -1,0 +1,4 @@
+# Segredos e estado local — NUNCA versionar.
+.env
+.tiny-lab/
+tiny-lab
