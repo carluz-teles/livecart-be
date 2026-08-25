@@ -13,14 +13,15 @@ import (
 )
 
 type Server struct {
-	store *Store
-	audit *audit.Log
-	port  int
-	seq   atomic.Int64
+	store   *Store
+	audit   *audit.Log
+	port    int
+	forward string // quando definido, a entrega é repassada para a aplicação
+	seq     atomic.Int64
 }
 
-func NewServer(store *Store, lg *audit.Log, port int) *Server {
-	return &Server{store: store, audit: lg, port: port}
+func NewServer(store *Store, lg *audit.Log, port int, forward string) *Server {
+	return &Server{store: store, audit: lg, port: port, forward: forward}
 }
 
 // Serve sobe o receptor. O handler é deliberadamente um catch-all: o painel do
@@ -49,6 +50,11 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	fmt.Printf("ponte de webhooks ouvindo em http://localhost:%d\n", s.port)
 	fmt.Printf("gravando em %s\n", s.store.Dir())
+	if s.forward != "" {
+		fmt.Printf("encaminhando para %s\n", s.forward)
+	} else {
+		fmt.Println("SEM encaminhamento — só grava (use --forward para a aplicação processar).")
+	}
 	fmt.Println("qualquer caminho é aceito — o caminho recebido fica gravado no evento.")
 	fmt.Println()
 
@@ -88,9 +94,60 @@ func (s *Server) capture(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("← %s  %s %s\n   %s\n", now.Format("15:04:05.000"), ev.Method, ev.Path, ev.Summary())
 
-	// 200 sempre: nesta fase queremos o payload, não exercitar o retry do Tiny.
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, `{"ok":true}`)
+	if s.forward == "" {
+		// 200 sempre: sem destino, queremos o payload, não exercitar o retry
+		// do Tiny.
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+		return
+	}
+
+	status, corpo, err := entregar(r.Context(), ev, s.forward)
+	if err != nil {
+		// A aplicação estar fora não pode virar 5xx para o Tiny: ele
+		// re-entregaria, e o payload já está gravado aqui de qualquer jeito.
+		fmt.Printf("   ⚠ encaminhamento falhou: %v (respondendo 200 assim mesmo)\n", err)
+		_ = s.audit.Append(audit.Entry{Kind: "webhook", Method: ev.Method, URL: s.forward, Note: ev.ID, Error: err.Error()})
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"ok":true,"forwarded":false}`)
+		return
+	}
+
+	resumo := strings.TrimSpace(corpo)
+	if len(resumo) > 160 {
+		resumo = resumo[:160] + "…"
+	}
+	fmt.Printf("   → app respondeu %d  %s\n", status, resumo)
+	_ = s.audit.Append(audit.Entry{
+		Kind: "webhook", Method: ev.Method, URL: s.forward,
+		Status: status, Note: ev.ID + " (encaminhado)", ResponseRaw: resumo,
+	})
+
+	// Espelha a resposta da aplicação: é ela que o Tiny precisa ver.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, corpo)
+}
+
+// entregar repassa a requisição preservando método, headers e corpo.
+func entregar(ctx context.Context, ev *Event, destino string) (int, string, error) {
+	req, err := http.NewRequestWithContext(ctx, ev.Method, destino, strings.NewReader(ev.Body))
+	if err != nil {
+		return 0, "", err
+	}
+	req.Header = headersToHTTP(ev.Headers)
+	if req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+
+	corpo, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, string(corpo), nil
 }
 
 // Replay reenvia um evento gravado para um destino, N vezes. É como se testa

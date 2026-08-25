@@ -278,7 +278,7 @@ func cmdHooks(ctx context.Context, cfg *config.Config, lg *audit.Log, args []str
 			}
 			port = p
 		}
-		return hooks.NewServer(store, lg, port).Serve(ctx)
+		return hooks.NewServer(store, lg, port, flagValue(args, "--forward")).Serve(ctx)
 
 	case "list":
 		evs, err := store.List()
@@ -388,7 +388,10 @@ func usage() {
       --dry-run                 imprime o que seria enviado, sem enviar
       --raw                     não formata a resposta
 
-  hooks serve [--port N]        recebe e grava webhooks (payload cru)
+  hooks serve [--port N] [--forward <url>]
+                                recebe e grava webhooks (payload cru); com
+                                --forward, repassa para a aplicação e devolve
+                                ao Tiny a resposta que ela deu
   hooks list                    lista os webhooks gravados
   hooks show <id>               mostra headers e corpo de um webhook
   hooks replay <id> [--to url] [--times n]
