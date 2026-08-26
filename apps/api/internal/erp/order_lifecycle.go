@@ -313,25 +313,56 @@ func (s *Service) MutateERPOrderItems(ctx context.Context, cartID, storeID strin
 // a mais contra o teto da conta. nil significa "não sei o que o pedido tem", e
 // aí a primeira passada sempre envia.
 func (s *Service) mutarGrade(ctx context.Context, cartID, storeID string, jaAplicada []providers.ERPOrderItem) error {
+	// Reconfere DEPOIS de soltar 'mutating'.
+	//
+	// A passada interna já repete enquanto o banco muda, mas ela termina numa
+	// leitura e só então o estado volta para 'open'. Um comentário que caia
+	// exatamente nesse vão perde o CAS (ainda é 'mutating'), desiste, e ninguém
+	// mais o aplica. É estreito e acontece: numa live simulada de 15
+	// compradores, uma unidade de um carrinho ficou de fora assim.
+	//
+	// Soltar e reconferir fecha o vão, porque a releitura acontece com o estado
+	// já em 'open' — quem chegar a partir dali ganha o CAS e cuida de si.
+	ja := jaAplicada
+	for tentativa := 1; tentativa <= 3; tentativa++ {
+		aplicada, err := s.umaPassadaDeMutacao(ctx, cartID, storeID, ja)
+		if err != nil || aplicada == nil {
+			return err // erro, ou perdeu o CAS e outro está cuidando
+		}
+		grid, gridErr := s.cartGrid(ctx, cartID)
+		if gridErr != nil || mesmaGrade(aplicada, grid) {
+			return nil
+		}
+		ja = aplicada
+	}
+	logger.From(ctx, s.logger).Info("grid still moving after re-checking; the next comment continues",
+		zap.String("cart_id", cartID),
+	)
+	return nil
+}
+
+// umaPassadaDeMutacao reivindica o pedido, aplica a grade até convergir e
+// devolve o carrinho para 'open'. nil,nil significa que o CAS foi perdido.
+func (s *Service) umaPassadaDeMutacao(ctx context.Context, cartID, storeID string, jaAplicada []providers.ERPOrderItem) ([]providers.ERPOrderItem, error) {
 	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
 	if err != nil {
-		return fmt.Errorf("loading cart ERP order state: %w", err)
+		return nil, fmt.Errorf("loading cart ERP order state: %w", err)
 	}
 	if st.State != OrderStateOpen || st.ExternalOrderID == "" {
-		return fmt.Errorf("cart %s não está em 'open' (estado %s): %w", cartID, st.State, ErrCartNotConverted)
+		return nil, fmt.Errorf("cart %s não está em 'open' (estado %s): %w", cartID, st.State, ErrCartNotConverted)
 	}
 
 	won, err := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateOpen, OrderStateMutating)
 	if err != nil {
-		return fmt.Errorf("claiming order mutation: %w", err)
+		return nil, fmt.Errorf("claiming order mutation: %w", err)
 	}
 	if !won {
 		// Outra mutação em voo: ela reconstrói a grade do banco, que já contém a
-		// mudança deste chamador. Convergência garantida.
+		// mudança deste chamador, e reconfere depois de soltar o estado.
 		logger.From(ctx, s.logger).Info("order mutation already in flight, latest grid will win",
 			zap.String("cart_id", cartID),
 		)
-		return nil
+		return nil, nil
 	}
 	defer func() {
 		// Contexto SEM cancelamento, e essa é a parte que importa.
@@ -364,14 +395,14 @@ func (s *Service) mutarGrade(ctx context.Context, cartID, storeID string, jaApli
 // ERP enquanto a live rodava. Aí, e SÓ aí, o estorno destrava — e o pedido volta
 // a apenas reservar, que é onde ele deveria estar. Não relançamos depois: quem
 // lança é o faturamento.
-func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, orderID string, jaAplicada []providers.ERPOrderItem) error {
+func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, orderID string, jaAplicada []providers.ERPOrderItem) ([]providers.ERPOrderItem, error) {
 	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
 	if err != nil {
-		return fmt.Errorf("loading ERP integration: %w", err)
+		return nil, fmt.Errorf("loading ERP integration: %w", err)
 	}
 	erpProvider, err := s.collab.ResolveProvider(ctx, erpIntegration)
 	if err != nil {
-		return fmt.Errorf("creating ERP provider: %w", err)
+		return nil, fmt.Errorf("creating ERP provider: %w", err)
 	}
 
 	// Repete até o banco parar de mudar.
@@ -391,13 +422,13 @@ func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, ord
 	for passada := 1; ; passada++ {
 		grid, gridErr := s.cartGrid(ctx, cartID)
 		if gridErr != nil {
-			return gridErr
+			return nil, gridErr
 		}
 		if mesmaGrade(enviada, grid) {
-			return nil // convergiu: o pedido já reflete o carrinho
+			return enviada, nil // convergiu: o pedido já reflete o carrinho
 		}
 		if err := s.enviarGrade(ctx, erpProvider, cartID, storeID, orderID, grid); err != nil {
-			return err
+			return nil, err
 		}
 		enviada = grid
 		if passada >= maxPassadas {
@@ -405,7 +436,7 @@ func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, ord
 				zap.String("cart_id", cartID),
 				zap.Int("passes", passada),
 			)
-			return nil
+			return enviada, nil
 		}
 	}
 }
@@ -597,7 +628,7 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 		if _, err := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateMutating, OrderStateOpen); err != nil {
 			return fmt.Errorf("unsticking mutating cart: %w", err)
 		}
-		if err := s.applyCartGridToOrder(ctx, cartID, storeID, st.ExternalOrderID, nil); err != nil {
+		if _, err := s.applyCartGridToOrder(ctx, cartID, storeID, st.ExternalOrderID, nil); err != nil {
 			return fmt.Errorf("reconciling order grid before confirm: %w", err)
 		}
 	case OrderStateOpen:
@@ -612,6 +643,22 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 	}
 	if fresh.ExternalOrderID == "" {
 		return ErrCartNotConverted
+	}
+
+	// A GRADE É RECONCILIADA ANTES DE APROVAR. Sempre.
+	//
+	// É a rede que o resto do sistema não consegue ser: a mutação converge por
+	// releitura, mas há um vão entre a última leitura e a liberação do estado, e
+	// um comentário que caia nele fica só no carrinho. Numa live simulada de 15
+	// compradores isso foi uma unidade em quinze.
+	//
+	// No pagamento, essa diferença deixa de ser aceitável: o pedido que o
+	// comprador paga tem de ser o carrinho que ele montou. Custa UM PUT por
+	// VENDA — não por comentário —, porque daqui não dá para saber o que o pedido
+	// tem sem perguntar, e perguntar custaria o mesmo que escrever.
+	if _, recErr := s.applyCartGridToOrder(ctx, cartID, storeID, fresh.ExternalOrderID, nil); recErr != nil {
+		s.collab.MarkFinalisationFailed(ctx, cartID, "reconciliação da grade antes de aprovar falhou: "+recErr.Error())
+		return fmt.Errorf("reconciling grid before approving: %w", recErr)
 	}
 
 	erpProvider, err := s.collab.ResolveProvider(ctx, erpIntegration)
@@ -694,6 +741,20 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 // instante do cancelamento, sem nenhuma outra chamada. Estornar junto, num
 // pedido que só reservou, INFLARIA a reserva em vez de devolvê-la.
 func (s *Service) CancelERPOrderForCart(ctx context.Context, cartID, storeID string) error {
+	// Mesma trava do confirm, e por um motivo concreto: os dois são operações
+	// TERMINAIS sobre o mesmo pedido, e o confirm reconcilia a grade antes de
+	// aprovar. Sem a exclusão, essa reconciliação aterrissa depois do
+	// cancelamento e o pedido cancelado volta a segurar estoque — medido numa
+	// bateria de 200 rodadas de "cancelar × pagar", rodada 39.
+	release, acquired, lockErr := s.repo.AcquireCartFinalisationLock(ctx, cartID)
+	if lockErr != nil {
+		return fmt.Errorf("acquiring cancel lock: %w", lockErr)
+	}
+	if !acquired {
+		return fmt.Errorf("cart %s com operação terminal em voo; cancelamento adiado: %w", cartID, ErrCartBusy)
+	}
+	defer release()
+
 	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
 	if err != nil {
 		return fmt.Errorf("loading cart ERP order state: %w", err)
@@ -784,6 +845,15 @@ func (s *Service) CancelERPOrderForCart(ctx context.Context, cartID, storeID str
 // não desfaz a baixa — e não deve mesmo: a peça saiu, e é ele quem decide se
 // volta. Estornar aqui, às cegas, é que estragaria a conta.
 func (s *Service) RefundConvertedCartOrder(ctx context.Context, cartID, storeID string) error {
+	release, acquired, lockErr := s.repo.AcquireCartFinalisationLock(ctx, cartID)
+	if lockErr != nil {
+		return fmt.Errorf("acquiring refund lock: %w", lockErr)
+	}
+	if !acquired {
+		return fmt.Errorf("cart %s com operação terminal em voo; estorno adiado: %w", cartID, ErrCartBusy)
+	}
+	defer release()
+
 	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
 	if err != nil {
 		return fmt.Errorf("loading cart ERP order state: %w", err)
@@ -845,18 +915,19 @@ func (s *Service) RunERPOrderOpsSweep(ctx context.Context) {
 					zap.String("cart_id", op.CartID), zap.Error(err))
 			}
 		case op.State == OrderStateConverting:
-			foundID, adoptErr := s.adoptOrderByMarker(opCtx, op.CartID, op.StoreID)
-			if adoptErr != nil || foundID == "" {
-				// Sem pedido rastreável: o confirm cria um quando o pagamento
-				// chegar. O converting vazio fica para auditoria.
-				continue
-			}
-			if err := s.openCartOrder(opCtx, op.StoreID, op.CartID, foundID); err != nil {
-				logger.From(opCtx, s.logger).Warn("sweep failed to open adopted order",
+			// Adota se o pedido existir; CRIA se não existir.
+			//
+			// Antes a varredura só tentava adotar e desistia — e um carrinho cuja
+			// criação morreu antes do POST ficava sem pedido para sempre, sem
+			// segurar estoque nenhum, esperando um pagamento que talvez nunca
+			// viesse. Medido numa live simulada: três carrinhos parados assim por
+			// mais de seis minutos, com a varredura rodando 31 vezes no meio.
+			if err := s.retomarCriacaoPresa(opCtx, op.CartID, op.StoreID); err != nil {
+				logger.From(opCtx, s.logger).Warn("sweep failed to resume a stuck creation",
 					zap.String("cart_id", op.CartID), zap.Error(err))
 			}
 		case op.State == OrderStateMutating && op.ExternalOrderID != "":
-			if err := s.applyCartGridToOrder(opCtx, op.CartID, op.StoreID, op.ExternalOrderID, nil); err != nil {
+			if _, err := s.applyCartGridToOrder(opCtx, op.CartID, op.StoreID, op.ExternalOrderID, nil); err != nil {
 				logger.From(opCtx, s.logger).Warn("sweep failed to reconcile mutating cart",
 					zap.String("cart_id", op.CartID), zap.Error(err))
 				continue

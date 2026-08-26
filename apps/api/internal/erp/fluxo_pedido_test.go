@@ -764,3 +764,52 @@ func TestComentarioDuranteCriacaoNaoViraErro(t *testing.T) {
 		t.Errorf("comentário durante a criação virou erro: %v", err)
 	}
 }
+
+// A grade é reconciliada ANTES de aprovar — a venda nunca fecha sobre um pedido
+// que não é o carrinho.
+//
+// É a rede do sistema inteiro: a mutação converge por releitura, mas há um vão
+// entre a última leitura e a liberação do estado, e um comentário que caia nele
+// fica só no carrinho. Numa live simulada de 15 compradores foi uma unidade.
+// No pagamento essa diferença deixa de ser tolerável.
+func TestPagamentoReconciliaAGradeAntesDeAprovar(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 100})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 2))
+	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@maria")
+
+	// O carrinho ganhou uma unidade que nunca chegou ao pedido.
+	repo.definirItens("cart-1", item("p1", 3))
+
+	if err := svc.ConfirmERPOrderPayment(ctx, "cart-1", "loja-1", nil); err != nil {
+		t.Fatalf("confirmando: %v", err)
+	}
+	ped := erp.pedido(repo.carrinho("cart-1").externalOrderID)
+	if ped.itens["ext-p1"] != 3 {
+		t.Errorf("o pedido aprovado tem %d un. e o carrinho tem 3 — o comprador "+
+			"pagou por algo diferente do que montou", ped.itens["ext-p1"])
+	}
+	if got := erp.estoque("ext-p1").reservado; got != 3 {
+		t.Errorf("reservado = %d, quero 3", got)
+	}
+}
+
+// E custa UM PUT por venda, não mais — o preço da garantia acima. Daqui não dá
+// para saber o que o pedido tem sem perguntar, e perguntar custaria o mesmo que
+// escrever.
+func TestPagamentoGastaExatamenteUmPutDeGrade(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 100})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 2))
+	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@maria")
+
+	putsAntes := erp.puts
+	if err := svc.ConfirmERPOrderPayment(ctx, "cart-1", "loja-1", nil); err != nil {
+		t.Fatalf("confirmando: %v", err)
+	}
+	if got := erp.puts - putsAntes; got != 1 {
+		t.Errorf("PUTs de grade no pagamento = %d, quero exatamente 1 — mais do que "+
+			"isso é orçamento de escrita gasto por venda contra um teto de 30 por "+
+			"minuto", got)
+	}
+}

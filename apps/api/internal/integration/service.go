@@ -171,6 +171,12 @@ type Service struct {
 	// it on first use) so it always wraps THIS Service's repo/collaborators/stock.
 	inventoryService *inventory.Service
 	inventoryOnce    sync.Once
+
+	// espelhoDeProduto coalesce as releituras de saldo disparadas pelo webhook
+	// de estoque. Ver coalescencia.go. Construído sob demanda porque há testes
+	// que montam o Service por literal, sem passar por NewService.
+	espelhoDeProduto     *coalescedor
+	espelhoDeProdutoOnce sync.Once
 }
 
 // erpStock returns the delegate erp.Service, building it once over this
@@ -3555,7 +3561,35 @@ const (
 // overwritten by this sync ("stock applied"). The waitlist backstop keys off
 // it: promoting after a sync that skipped stock (guard armed) or failed would
 // act on a stale/poisoned counter.
+func (s *Service) coalescedorDeEspelho() *coalescedor {
+	s.espelhoDeProdutoOnce.Do(func() { s.espelhoDeProduto = novoCoalescedor() })
+	return s.espelhoDeProduto
+}
+
 func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, externalProductID string) (bool, error) {
+	// Coalesce por produto. Cada pedido criado durante a live mexe no reservado,
+	// o ERP dispara um webhook de estoque por isso, e cada webhook faria uma
+	// releitura do saldo — quinze compradores no mesmo produto viravam quinze
+	// leituras onde uma basta, tiradas do mesmo teto que a live usa para criar os
+	// pedidos. Ver coalescencia.go.
+	var aplicado bool
+	rodou, err := s.coalescedorDeEspelho().Fazer(storeID+"|"+externalProductID, func() error {
+		var innerErr error
+		aplicado, innerErr = s.processProductWebhook(ctx, storeID, provider, externalProductID)
+		return innerErr
+	})
+	if !rodou {
+		// Absorvido por uma releitura em curso, que repetirá e verá o estado
+		// final. Não aplicou nada AGORA, e é isso que o chamador precisa saber:
+		// o backstop da fila de espera só roda sobre estoque efetivamente escrito.
+		logger.From(ctx, s.logger).Debug("stock re-read coalesced into the one already running",
+			zap.String("external_product_id", externalProductID))
+		return false, nil
+	}
+	return aplicado, err
+}
+
+func (s *Service) processProductWebhook(ctx context.Context, storeID, provider, externalProductID string) (bool, error) {
 	if s.productSyncer == nil {
 		logger.From(ctx, s.logger).Warn("product syncer not configured, skipping product webhook")
 		return false, nil
