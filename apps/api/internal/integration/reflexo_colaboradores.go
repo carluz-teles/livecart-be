@@ -28,9 +28,14 @@ func (s *Service) ResolveLocalProduct(ctx context.Context, storeID, externalProd
 
 // ImportProductFromERP cadastra na loja um produto que só existia no ERP.
 //
-// Reusa exatamente o caminho da importação manual — mesmo ImportProduct que a
-// tela chama. O produto entra sem keyword: ele não foi anunciado na live, e
-// inventar um código de quatro dígitos criaria um gatilho que ninguém combinou.
+// Reusa exatamente o caminho da importação manual — o mesmo ImportProduct que a
+// tela chama —, e por isso entra COMPLETO: keyword gerada (a próxima livre da
+// loja) e a primeira imagem dos anexos do ERP.
+//
+// Isso importa porque ele não é um produto fantasma: vai aparecer no carrinho da
+// compradora, no checkout e na tela do lojista, e vai querer ser pedido na live
+// seguinte. Sem keyword ninguém consegue pedi-lo; sem imagem ele é um retângulo
+// vazio no meio da compra.
 func (s *Service) ImportProductFromERP(ctx context.Context, storeID, externalProductID string) (string, error) {
 	if s.productSyncer == nil {
 		return "", fmt.Errorf("importação de produto não está ligada neste processo")

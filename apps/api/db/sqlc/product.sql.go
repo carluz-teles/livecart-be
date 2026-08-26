@@ -47,11 +47,11 @@ func (q *Queries) ApplyERPStockMirror(ctx context.Context, arg ApplyERPStockMirr
 
 const createProduct = `-- name: CreateProduct :one
 INSERT INTO products (
-    store_id, name, external_id, external_source, keyword, price, image_url, stock,
+    id, store_id, name, external_id, external_source, keyword, price, image_url, stock,
     weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents,
     group_id, barcode
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+VALUES ($18, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, erp_seq, barcode
 `
 
@@ -73,8 +73,15 @@ type CreateProductParams struct {
 	InsuranceValueCents pgtype.Int8 `json:"insurance_value_cents"`
 	GroupID             pgtype.UUID `json:"group_id"`
 	Barcode             pgtype.Text `json:"barcode"`
+	ID                  pgtype.UUID `json:"id"`
 }
 
+// O id vem do DOMÍNIO, não do banco.
+//
+// Sem ele na lista, o Postgres gerava um id próprio e o objeto em memória ficava
+// com outro — e quem confiasse no retorno de Save/ImportProduct recebia um id que
+// não corresponde a linha nenhuma. O import manual da tela devolvia esse id, e o
+// reflexo do pedido no ERP o usaria para amarrar o item ao carrinho.
 func (q *Queries) CreateProduct(ctx context.Context, arg CreateProductParams) (Product, error) {
 	row := q.db.QueryRow(ctx, createProduct,
 		arg.StoreID,
@@ -94,6 +101,7 @@ func (q *Queries) CreateProduct(ctx context.Context, arg CreateProductParams) (P
 		arg.InsuranceValueCents,
 		arg.GroupID,
 		arg.Barcode,
+		arg.ID,
 	)
 	var i Product
 	err := row.Scan(

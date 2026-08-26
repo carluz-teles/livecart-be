@@ -38,7 +38,9 @@ type CartSyncCollaborators interface {
 	// found=false quando a loja nunca importou aquele produto.
 	ResolveLocalProduct(ctx context.Context, storeID, externalProductID string) (productID string, found bool, err error)
 	// ImportProductFromERP cadastra na loja um produto que só existia no ERP,
-	// como se o lojista o tivesse importado pela tela.
+	// pelo MESMO caminho da importação manual — com keyword gerada e a primeira
+	// imagem do ERP. Ele vai aparecer no carrinho da compradora; entrar pela
+	// metade seria pior do que não entrar.
 	ImportProductFromERP(ctx context.Context, storeID, externalProductID string) (productID string, err error)
 	// SetCartItemQuantity ajusta a quantidade de um item do carrinho.
 	SetCartItemQuantity(ctx context.Context, cartID, productID string, quantity int, unitPrice int64) error

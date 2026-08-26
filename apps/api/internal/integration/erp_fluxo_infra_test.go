@@ -382,6 +382,7 @@ func (f *scriptedERP) CreateOrder(ctx context.Context, order providers.ERPOrder)
 	if order.ExternalID != "" {
 		f.markerOrders["lc-cart-"+order.ExternalID] = id
 	}
+	f.ultimaGrade = append([]providers.ERPOrderItem(nil), order.Items...)
 	f.mu.Unlock()
 	return &providers.OrderResult{OrderID: id, OrderNumber: id, Status: "created"}, nil
 }
@@ -406,6 +407,17 @@ func (f *scriptedERP) UpdateOrderItems(ctx context.Context, orderID string, iten
 		return providers.ErrOrderStockLaunched
 	}
 	return f.scriptedFail("UpdateOrderItems")
+}
+
+// GetOrderItems devolve a grade que o roteiro guardou, com as notas — é o que a
+// preservação das linhas do lojista lê antes de escrever.
+func (f *scriptedERP) GetOrderItems(ctx context.Context, orderID string) ([]providers.ERPOrderItem, error) {
+	f.record("GetItens:" + orderID)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]providers.ERPOrderItem, len(f.ultimaGrade))
+	copy(out, f.ultimaGrade)
+	return out, nil
 }
 
 func (f *scriptedERP) UpdateOrderPayment(ctx context.Context, orderID string, _ *providers.ERPOrderPayment) error {
