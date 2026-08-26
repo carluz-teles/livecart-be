@@ -45,17 +45,18 @@ func Admissivel(saldoERP, emVoo int) int {
 // portão acima do admissível**. Pode baixar à vontade (o ERP mandou), mas subir
 // só até o que sobra depois de descontar o que está em voo.
 func NovoSaldoDoPortao(portaoAtual, saldoERP, emVoo int) int {
-	teto := Admissivel(saldoERP, emVoo)
-	if portaoAtual > teto {
-		// O ERP diz que há menos do que o portão acredita: baixar é obrigatório.
-		return teto
-	}
-	if portaoAtual < teto {
-		// O ERP diz que há mais. Subir é permitido — foi reposição de verdade —
-		// mas só até o teto conservador, nunca até o saldo cru.
-		return teto
-	}
-	return portaoAtual
+	// O valor ATUAL do portão não participa da conta, e isso é deliberado.
+	//
+	// A primeira versão desta função ramificava em "baixar" e "subir" como se
+	// fossem decisões diferentes, e os dois ramos devolviam a mesma coisa — uma
+	// decisão de mentira. O admissível já é a resposta completa: ele desconta o
+	// que está em voo, então subir até ele nunca promete duas vezes, e descer
+	// até ele é obrigatório quando o ERP diz que há menos.
+	//
+	// O parâmetro fica na assinatura porque o chamador precisa dele para logar
+	// o delta e para PodeSubir explicar o motivo.
+	_ = portaoAtual
+	return Admissivel(saldoERP, emVoo)
 }
 
 // PodeSubir diz se uma leitura do ERP autoriza aumentar o portão. Serve de
