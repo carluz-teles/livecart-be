@@ -204,7 +204,7 @@ func reservar(t *testing.T, svc *Service, ledger *fakeLedger) *StockMovementRow 
 	}
 	// Execução SÍNCRONA nos testes: a goroutine de produção chama exatamente
 	// este método; o que se valida aqui é a máquina de estados, não o go.
-	svc.executeStockMovement(context.Background(), svc.collabProvider(t), mov, movementObservacao(mov, "ana", 0))
+	svc.executeStockMovement(context.Background(), svc.collabProvider(t), mov, movementObservacao("#1", "ana", 0))
 	return mov
 }
 

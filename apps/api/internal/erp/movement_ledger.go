@@ -139,15 +139,26 @@ func movementRetryDelay(attempts int) time.Duration {
 	}
 }
 
-// movementObservacao é o texto que viaja no lançamento do Tiny. A chave de
-// idempotência impressa é o que permite casar, NO EXTRATO do produto, uma
-// linha do razão com um lançamento de lá — a API não oferece consulta, então o
-// desempate humano é pelo olho, e o texto é a única ponte.
-func movementObservacao(mov *StockMovementRow, platformHandle string, retry int) string {
-	if retry > 0 {
-		return fmt.Sprintf("Reserva LiveCart [%s] - Cart %s (retry %d)", mov.IdempotencyKey, mov.CartID, retry)
+// cartRef é a referência do carrinho carimbada nos lançamentos do Tiny: o
+// #short_id que o lojista vê no LiveCart, para copiar do extrato e achar o
+// carrinho. Cai no UUID do carrinho se o número não puder ser lido, para a
+// referência nunca se perder.
+func (s *Service) cartRef(ctx context.Context, cartID string) string {
+	if sid, err := s.repo.GetCartShortID(ctx, cartID); err == nil && sid > 0 {
+		return fmt.Sprintf("#%d", sid)
 	}
-	return fmt.Sprintf("Reserva LiveCart [%s] - @%s - Cart %s", mov.IdempotencyKey, platformHandle, mov.CartID)
+	return cartID
+}
+
+// movementObservacao é o texto que viaja no lançamento do Tiny: só o @ do
+// comprador e o número do carrinho, para o lojista copiar e localizar o
+// carrinho no LiveCart. A chave de idempotência mora na linha do razão (e no
+// índice único cart+produto), não neste texto voltado ao humano.
+func movementObservacao(cartRef, platformHandle string, retry int) string {
+	if retry > 0 {
+		return fmt.Sprintf("Cart %s (retry %d)", cartRef, retry)
+	}
+	return fmt.Sprintf("@%s - Cart %s", platformHandle, cartRef)
 }
 
 // executeStockMovement faz UMA execução do movimento e grava o desfecho.
@@ -345,9 +356,11 @@ func (s *Service) RunScheduledMovementResolve(ctx context.Context, movementID st
 			_ = s.movements.MarkERPStockMovementOutcome(ctx, row.ID, MovementFailed, fmt.Sprintf("resolving provider at retry: %v", err))
 			return nil
 		}
-		obs := movementObservacao(claimed, "", claimed.Attempts)
+		var obs string
 		if claimed.Direction == "in" {
 			obs = fmt.Sprintf("Estorno LiveCart [%s] - Cart %s (retry %d)", claimed.IdempotencyKey, claimed.CartID, claimed.Attempts)
+		} else {
+			obs = movementObservacao(s.cartRef(ctx, claimed.CartID), "", claimed.Attempts)
 		}
 		s.executeStockMovement(ctx, provider, claimed, obs)
 		return nil

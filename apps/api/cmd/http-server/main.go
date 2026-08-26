@@ -684,7 +684,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// Clientes VIP: promover um @ torna eternos os carrinhos abertos que
 			// ele já tem (anula a expiração). E a resolução do carrinho na
 			// ingestão consulta a lista VIP para decidir se o carrinho é eterno.
-			customerSvc.SetVipCartActivator(integrationSvc)
+			customerSvc.SetVipCartActivator(vipCartActivatorAdapter{svc: integrationSvc})
 			liveSvc.SetVipChecker(vipCheckerAdapter{svc: customerSvc})
 
 			// Create notification service and wire into integration service
@@ -1785,6 +1785,23 @@ func (a vipCheckerAdapter) IsVipHandle(ctx context.Context, storeID, handle stri
 		return false, nil // store id inválido → trata como não-VIP
 	}
 	return a.svc.IsVipHandle(ctx, sid, handle)
+}
+
+// vipCartActivatorAdapter traduz o desfecho da consolidação de carrinhos da
+// integration para o tipo do customer — mesma razão do vipCheckerAdapter acima:
+// customer não pode importar integration.
+type vipCartActivatorAdapter struct{ svc *integration.Service }
+
+func (a vipCartActivatorAdapter) ActivateVipCartsForHandle(ctx context.Context, storeID, handle string) (customer.VipActivation, error) {
+	res, err := a.svc.ActivateVipCartsForHandle(ctx, storeID, handle)
+	if err != nil {
+		return customer.VipActivation{}, err
+	}
+	return customer.VipActivation{
+		EternalCartID: res.EternalCartID,
+		Merged:        res.Merged,
+		Skipped:       res.Skipped,
+	}, nil
 }
 
 type liveNotifierAdapter struct {

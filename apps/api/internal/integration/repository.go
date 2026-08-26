@@ -1907,6 +1907,21 @@ func (r *Repository) GetCartInvoiceAnchor(ctx context.Context, cartID string) (s
 	return cart.StoreID, cart.ExternalOrderID, nil
 }
 
+// GetCartShortID returns the cart's human-facing sequential number (#1189),
+// stamped on ERP stock movements so the merchant can copy it from the Tiny
+// extract and locate the cart in LiveCart. Enxuto reader over GetCartByID.
+func (r *Repository) GetCartShortID(ctx context.Context, cartID string) (int32, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return 0, err
+	}
+	cart, err := r.queries.GetCartByID(ctx, cID)
+	if err != nil {
+		return 0, fmt.Errorf("getting cart short id: %w", err)
+	}
+	return cart.ShortID, nil
+}
+
 // NonWaitlistedCartItem represents a cart item that is not waitlisted, with
 // product info. Canonical home is internal/erp (Bloco B2c); aliased here so the
 // Repository (which owns the SQL) and its ~call sites keep compiling unchanged.
@@ -3164,25 +3179,114 @@ func (r *Repository) IsHandleBlocked(ctx context.Context, storeID, handle string
 
 // ListOpenCartsByHandle returns non-paid carts for the given (store, handle),
 // used by the customer-block flow to find what needs cancelling.
-// ActivateEternalCartsForHandle marca os carrinhos abertos do @ como eternos e
-// anula a expiração deles. Devolve os ids afetados.
-func (r *Repository) ActivateEternalCartsForHandle(ctx context.Context, storeID, handle string) ([]string, error) {
+// VipConsolidation é o desfecho de promover um @ a VIP.
+type VipConsolidation struct {
+	// EternalCartID é o carrinho que ficou eterno. Vazio quando o @ não tinha
+	// nenhum carrinho aberto — promoção válida, sem nada a consolidar.
+	EternalCartID string
+	// MergedCartIDs são os carrinhos que entregaram itens, log de adições,
+	// reservas e fila ao eterno e foram fechados como fundidos.
+	MergedCartIDs []string
+	// SkippedCartIDs são os abertos que NÃO foram fundidos porque já têm pedido
+	// no ERP. Continuam vivos, com o prazo que tinham. Quem decide o que fazer
+	// com eles é gente, não este código.
+	SkippedCartIDs []string
+}
+
+// ConsolidateEternalCartForHandle transforma os N carrinhos abertos de um @ no
+// ÚNICO carrinho eterno que o modelo admite (carts_one_eternal_per_store_buyer).
+//
+// O mais recente sobrevive — é o que GetEternalCartByStoreAndHandleForUpdate vai
+// achar depois, e promoção e ingestão não podem eleger carrinhos diferentes.
+//
+// Nada aqui emite cart.cancelled para o carrinho fundido, e é deliberado: os
+// reactors desse evento devolvem estoque e cancelam pedido no ERP. Aqui o
+// conteúdo não morreu — mudou de carrinho, e a reserva foi junto. Emitir o
+// evento liberaria estoque que continua legitimamente reservado.
+func (r *Repository) ConsolidateEternalCartForHandle(ctx context.Context, storeID, handle string) (VipConsolidation, error) {
+	var out VipConsolidation
+
 	sid, err := parseUUID(storeID)
 	if err != nil {
-		return nil, err
+		return out, err
 	}
-	rows, err := r.queries.ActivateEternalCartsForHandle(ctx, sqlc.ActivateEternalCartsForHandleParams{
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return out, fmt.Errorf("begin vip-consolidation tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+	qtx := r.queries.WithTx(tx)
+
+	carts, err := qtx.ListOpenCartsForVipPromotion(ctx, sqlc.ListOpenCartsForVipPromotionParams{
 		StoreID:        sid,
 		PlatformHandle: normalizeVipHandle(handle),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("activating eternal carts: %w", err)
+		return out, fmt.Errorf("listing open carts for vip promotion: %w", err)
 	}
-	out := make([]string, 0, len(rows))
-	for _, id := range rows {
-		out = append(out, uuidToString(id))
+	if len(carts) == 0 {
+		return out, tx.Commit(ctx)
 	}
-	return out, nil
+
+	dest := carts[0].ID
+	for _, src := range carts[1:] {
+		if hasERPOrder(src) {
+			out.SkippedCartIDs = append(out.SkippedCartIDs, uuidToString(src.ID))
+			continue
+		}
+		if err := absorbCart(ctx, qtx, dest, src.ID); err != nil {
+			return out, err
+		}
+		out.MergedCartIDs = append(out.MergedCartIDs, uuidToString(src.ID))
+	}
+
+	if err := qtx.MakeCartEternal(ctx, dest); err != nil {
+		return out, fmt.Errorf("making cart eternal: %w", err)
+	}
+	out.EternalCartID = uuidToString(dest)
+
+	return out, tx.Commit(ctx)
+}
+
+// hasERPOrder diz se o carrinho já materializou um pedido no ERP do lojista.
+func hasERPOrder(c sqlc.ListOpenCartsForVipPromotionRow) bool {
+	if c.ExternalOrderID.Valid && c.ExternalOrderID.String != "" {
+		return true
+	}
+	return c.ErpOrderState != "" && c.ErpOrderState != "none"
+}
+
+// absorbCart despeja um carrinho no outro, na ordem que importa: o conteúdo
+// primeiro, o fechamento por último.
+func absorbCart(ctx context.Context, qtx *sqlc.Queries, dest, source pgtype.UUID) error {
+	if err := qtx.AbsorbCartItemsIntoCart(ctx, sqlc.AbsorbCartItemsIntoCartParams{
+		DestCartID: dest, SourceCartID: source,
+	}); err != nil {
+		return fmt.Errorf("absorbing cart items: %w", err)
+	}
+	if err := qtx.ClearCartItems(ctx, source); err != nil {
+		return fmt.Errorf("clearing merged cart items: %w", err)
+	}
+	if err := qtx.MoveCartItemEventsToCart(ctx, sqlc.MoveCartItemEventsToCartParams{
+		DestCartID: dest, SourceCartID: source,
+	}); err != nil {
+		return fmt.Errorf("moving cart item events: %w", err)
+	}
+	if err := qtx.MoveStockReservationsToCart(ctx, sqlc.MoveStockReservationsToCartParams{
+		DestCartID: dest, SourceCartID: source,
+	}); err != nil {
+		return fmt.Errorf("moving stock reservations: %w", err)
+	}
+	if err := qtx.MoveWaitlistItemsToCart(ctx, sqlc.MoveWaitlistItemsToCartParams{
+		DestCartID: dest, SourceCartID: source,
+	}); err != nil {
+		return fmt.Errorf("moving waitlist items: %w", err)
+	}
+	if err := qtx.CloseMergedCart(ctx, source); err != nil {
+		return fmt.Errorf("closing merged cart: %w", err)
+	}
+	return nil
 }
 
 // normalizeVipHandle espelha customer.normalizeHandle (@ + lowercase) — o

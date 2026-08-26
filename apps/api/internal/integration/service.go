@@ -5759,24 +5759,41 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 // already persisted by the caller, so even if some cleanup fails the block
 // itself is in effect (future comments are filtered).
 // ActivateVipCartsForHandle é o efeito colateral de promover um @ a VIP: os
-// carrinhos abertos que ele JÁ tem viram eternos (never_expires=true) e a
-// agenda de expiração é anulada (expires_at NULL). Nenhuma task cart.expire
-// precisa ser cancelada explicitamente — com expires_at NULL o guard do
-// ExpireCart/RunScheduledExpiry já a torna no-op. Devolve quantos carrinhos
-// foram convertidos. Satisfaz customer.VipCartActivator.
-func (s *Service) ActivateVipCartsForHandle(ctx context.Context, storeID, handle string) (int, error) {
-	ids, err := s.repo.ActivateEternalCartsForHandle(ctx, storeID, handle)
+// carrinhos abertos que ele JÁ tem são consolidados num só, que vira eterno
+// (never_expires=true, expires_at NULL). Nenhuma task cart.expire precisa ser
+// cancelada explicitamente — com expires_at NULL o guard do ExpireCart já a
+// torna no-op. Satisfaz customer.VipCartActivator.
+func (s *Service) ActivateVipCartsForHandle(ctx context.Context, storeID, handle string) (VipActivation, error) {
+	res, err := s.repo.ConsolidateEternalCartForHandle(ctx, storeID, handle)
 	if err != nil {
-		return 0, fmt.Errorf("activating eternal carts for vip handle: %w", err)
+		return VipActivation{}, fmt.Errorf("consolidating eternal cart for vip handle: %w", err)
 	}
-	if len(ids) > 0 {
-		logger.From(ctx, s.logger).Info("vip promotion made existing carts eternal",
+
+	if res.EternalCartID != "" {
+		logger.From(ctx, s.logger).Info("vip promotion consolidated carts",
 			zap.String("store_id", storeID),
 			zap.String("handle", handle),
-			zap.Int("carts", len(ids)),
+			zap.String("eternal_cart_id", res.EternalCartID),
+			zap.Int("merged", len(res.MergedCartIDs)),
+			zap.Int("skipped_with_erp_order", len(res.SkippedCartIDs)),
 		)
 	}
-	return len(ids), nil
+	// Um carrinho deixado de fora não é detalhe: ele mantém o prazo e vai
+	// expirar como se o comprador não fosse VIP. Sobe como warn para aparecer
+	// sem depender de alguém abrir a resposta da API.
+	if len(res.SkippedCartIDs) > 0 {
+		logger.From(ctx, s.logger).Warn("vip promotion left carts out of the merge (erp order already exists)",
+			zap.String("store_id", storeID),
+			zap.String("handle", handle),
+			zap.Strings("cart_ids", res.SkippedCartIDs),
+		)
+	}
+
+	return VipActivation{
+		EternalCartID: res.EternalCartID,
+		Merged:        len(res.MergedCartIDs),
+		Skipped:       len(res.SkippedCartIDs),
+	}, nil
 }
 
 func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, handle string) error {
