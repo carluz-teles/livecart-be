@@ -23,6 +23,9 @@ type carrinhoSimulado struct {
 	statusERP       string
 	statusEm        time.Time
 	numeroPedido    string
+	// operacaoEm é o carimbo de quando a operação ERP em curso começou, igual ao
+	// erp_op_started_at da coluna.
+	operacaoEm time.Time
 }
 
 type repoSimulado struct {
@@ -37,6 +40,8 @@ type repoSimulado struct {
 	// idadeDaOperacao força o relógio da operação ERP em curso. Zero = "velha o
 	// bastante para retomar", que é o padrão dos testes de fluxo.
 	idadeDaOperacao time.Duration
+	// presos é o que a varredura enxerga como operação abandonada.
+	presos []StuckERPOrderOp
 
 	transicoesGanhas int
 	reservados       []StockEventParams
@@ -112,16 +117,26 @@ func (r *repoSimulado) GetCartERPOrderState(_ context.Context, cartID string) (*
 	return &CartERPOrderState{State: c.state, StockLaunched: c.stockLaunched, ExternalOrderID: c.externalOrderID}, nil
 }
 
-// GetCartERPOpAge devolve uma idade alta por padrão: os testes de fluxo querem
-// que a retomada de um 'converting' preso ACONTEÇA, e não que ela espere a
-// carência de 45s do relógio de verdade.
-func (r *repoSimulado) GetCartERPOpAge(_ context.Context, _ string) (time.Duration, error) {
+// GetCartERPOpAge conta a partir do instante em que o carrinho ENTROU na
+// operação — como a coluna erp_op_started_at faz no banco.
+//
+// Devolver uma idade alta por padrão parecia conveniente e é falso: durante uma
+// rajada real a operação tem segundos de vida, e todo comentário concorrente a
+// veria como abandonada, retomaria, e criaria um pedido a mais. Um duplo que
+// mente sobre o relógio esconde exatamente a corrida que ele deveria expor.
+//
+// idadeDaOperacao sobrepõe isto para o teste que QUER a retomada.
+func (r *repoSimulado) GetCartERPOpAge(_ context.Context, cartID string) (time.Duration, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.idadeDaOperacao != 0 {
 		return r.idadeDaOperacao, nil
 	}
-	return time.Hour, nil
+	c, ok := r.carrinhos[cartID]
+	if !ok || c.operacaoEm.IsZero() {
+		return 0, nil
+	}
+	return time.Since(c.operacaoEm), nil
 }
 
 func (r *repoSimulado) GetCartERPFinalisationStatus(_ context.Context, cartID string) (*CartFinalisationStatus, error) {
@@ -188,6 +203,9 @@ func (r *repoSimulado) TransitionCartERPOrderState(ctx context.Context, cartID, 
 		return false, nil
 	}
 	c.state = para
+	if para == OrderStateConverting || para == OrderStateMutating {
+		c.operacaoEm = time.Now()
+	}
 	r.transicoesGanhas++
 	return true, nil
 }
@@ -225,7 +243,17 @@ func (r *repoSimulado) ListNonWaitlistedCartItems(_ context.Context, cartID stri
 }
 
 func (r *repoSimulado) ListStuckERPOrderOps(context.Context, time.Duration) ([]StuckERPOrderOp, error) {
-	return nil, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]StuckERPOrderOp, len(r.presos))
+	copy(out, r.presos)
+	for i := range out {
+		if c, ok := r.carrinhos[out[i].CartID]; ok {
+			out[i].State = c.state
+			out[i].ExternalOrderID = c.externalOrderID
+		}
+	}
+	return out, nil
 }
 
 func (r *repoSimulado) ListTinyIntegrationsWithStaleStockWebhook(context.Context, time.Duration) ([]StaleStockWebhookIntegration, error) {

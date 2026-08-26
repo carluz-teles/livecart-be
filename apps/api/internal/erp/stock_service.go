@@ -105,16 +105,20 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 	case st.State == OrderStateCancelled:
 		return nil // carrinho encerrado; não ressuscita
 	case st.State == OrderStateConverting:
-		// A criação está em voo AGORA e monta a grade a partir do banco, onde
-		// este item já está. Se ele tiver entrado tarde demais para aquela
-		// leitura, a própria criação reconcilia ao terminar.
+		// 'converting' é ambíguo, e quem desfaz a ambiguidade é o relógio:
+		// criação em voo AGORA, ou criação que morreu antes do POST.
 		//
-		// Antes isto virava erro ("cart não está em 'open'") e o item ficava só
-		// no carrinho: numa live simulada de 15 compradores, doze comentários
-		// morreram exatamente aqui.
-		logger.From(ctx, s.logger).Debug("order creation in flight; the grid will be applied by it",
-			zap.String("cart_id", cartID),
-		)
+		// Se está em voo, ela monta a grade a partir do banco — onde este item já
+		// está — e reconcilia ao terminar; EnsureERPOrderForCart apenas registra e
+		// sai. Passada a carência, ela retoma, e é assim que um comentário
+		// seguinte destrava o carrinho sem esperar a varredura.
+		//
+		// Antes isto virava erro ("cart não está em 'open'") e o item ficava só no
+		// carrinho. Depois virou um `return nil` — que calou o erro mas deixou o
+		// carrinho preso, porque ninguém mais chamava a retomada.
+		if err := s.EnsureERPOrderForCart(ctx, cartID, storeID); err != nil {
+			return fmt.Errorf("resuming order creation for cart %s: %w", cartID, err)
+		}
 		return nil
 	default:
 		if mutErr := s.MutateERPOrderItems(ctx, cartID, storeID); mutErr != nil {
