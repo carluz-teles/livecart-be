@@ -842,6 +842,20 @@ func (h *WebhookHandler) reflexoDoPedido(ctx context.Context, storeID, idPedido 
 		return // pedido que não é de nenhum carrinho nosso
 	}
 	rodou, err := h.service.CoalescerReflexo().Fazer(storeID+"|"+idPedido, func() error {
+		// Pedido PAGO: a grade não volta para o carrinho (aquela venda está
+		// fechada), mas o dinheiro precisa continuar dizendo a verdade. Toda
+		// mudança de item faz o ERP redistribuir o total pelas parcelas e
+		// afirmar que ela pagou o valor novo.
+		if split, splitErr := h.service.RecomporParcelasDoPedidoPago(ctx, cartID, storeID); splitErr != nil {
+			logger.From(ctx, h.logger).Error("could not restore the paid/outstanding split",
+				zap.String("cart_id", cartID), zap.Error(splitErr))
+		} else if split != nil && split.Reescrito {
+			logger.From(ctx, h.logger).Info("paid order gained items; installments split",
+				zap.String("cart_id", cartID),
+				zap.Int64("paid_cents", split.PagoCents),
+				zap.Int64("outstanding_cents", split.SaldoCents))
+		}
+
 		rel, syncErr := h.service.SyncCartFromERPOrder(ctx, cartID, storeID)
 		if syncErr != nil {
 			return syncErr

@@ -26,6 +26,12 @@ type carrinhoSimulado struct {
 	// operacaoEm é o carimbo de quando a operação ERP em curso começou, igual ao
 	// erp_op_started_at da coluna.
 	operacaoEm time.Time
+	// O dinheiro, como a 000140 o guarda: quanto já entrou no carrinho e quantas
+	// unidades de cada produto algum pagamento cobriu. Modelado aqui porque a
+	// divisão pago/a pagar é decidida por estes números.
+	pagoCents int64
+	pagoEm    time.Time
+	pagoQtd   map[string]int
 }
 
 type repoSimulado struct {
@@ -114,7 +120,14 @@ func (r *repoSimulado) GetCartERPOrderState(_ context.Context, cartID string) (*
 	if !ok {
 		return nil, pgx.ErrNoRows
 	}
-	return &CartERPOrderState{State: c.state, StockLaunched: c.stockLaunched, ExternalOrderID: c.externalOrderID}, nil
+	return &CartERPOrderState{
+		State:           c.state,
+		StockLaunched:   c.stockLaunched,
+		ExternalOrderID: c.externalOrderID,
+		OrderStatus:     c.statusERP,
+		PaidAmountCents: c.pagoCents,
+		PaidAt:          c.pagoEm,
+	}, nil
 }
 
 // GetCartERPOpAge conta a partir do instante em que o carrinho ENTROU na
@@ -447,3 +460,93 @@ var (
 	_ ERPOrderStatusRepository = (*repoSimulado)(nil)
 	_ StockCollaborators       = (*colabSimulado)(nil)
 )
+
+// pagarCarrinho encena o pagamento como a 000140 o grava: soma ao carrinho o que
+// ainda não estava pago e carimba as unidades que aquele dinheiro cobriu.
+//
+// Repetir a chamada não soma de novo — não porque o teste seja gentil, mas
+// porque o `paid_quantity < quantity` da query também não deixa.
+func (r *repoSimulado) pagarCarrinho(cartID string, quando time.Time) int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c := r.carrinhos[cartID]
+	if c == nil {
+		return 0
+	}
+	if c.pagoQtd == nil {
+		c.pagoQtd = map[string]int{}
+	}
+	var entrou int64
+	for _, it := range c.itens {
+		falta := it.Quantity - c.pagoQtd[it.ProductID]
+		if falta <= 0 {
+			continue
+		}
+		entrou += int64(falta) * it.UnitPrice
+		c.pagoQtd[it.ProductID] = it.Quantity
+	}
+	c.pagoCents += entrou
+	c.pagoEm = quando
+	return entrou
+}
+
+// faltaPagar é cart_unpaid_total_cents: o que o carrinho ainda deve.
+func (r *repoSimulado) faltaPagar(cartID string) int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c := r.carrinhos[cartID]
+	if c == nil {
+		return 0
+	}
+	var falta int64
+	for _, it := range c.itens {
+		if resto := it.Quantity - c.pagoQtd[it.ProductID]; resto > 0 {
+			falta += int64(resto) * it.UnitPrice
+		}
+	}
+	return falta
+}
+
+// acrescentarItem encena o comentário que chega: soma na linha do produto se ela
+// já existe, como o ON CONFLICT (cart_id, product_id) do upsert faz.
+func (r *repoSimulado) acrescentarItem(cartID string, novo NonWaitlistedCartItem) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c := r.carrinhos[cartID]
+	if c == nil {
+		return
+	}
+	for i := range c.itens {
+		if c.itens[i].ProductID == novo.ProductID {
+			c.itens[i].Quantity += novo.Quantity
+			return
+		}
+	}
+	c.itens = append(c.itens, novo)
+}
+
+// quantidadeNoCarrinho é quanto o banco diz que o carrinho tem daquele produto.
+func (r *repoSimulado) quantidadeNoCarrinho(cartID, produtoID string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c := r.carrinhos[cartID]
+	if c == nil {
+		return 0
+	}
+	for _, it := range c.itens {
+		if it.ProductID == produtoID {
+			return it.Quantity
+		}
+	}
+	return 0
+}
+
+// definirStatusERP encena a situação que o webhook de vendas deixou no carrinho.
+func (r *repoSimulado) definirStatusERP(cartID, situacao string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if c := r.carrinhos[cartID]; c != nil {
+		c.statusERP = situacao
+		c.statusEm = time.Now()
+	}
+}

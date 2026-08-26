@@ -91,6 +91,27 @@ func (s ERPOrderStatus) Terminal() bool {
 	return s == ERPOrderStatusEntregue || s == ERPOrderStatusCancelado || s == ERPOrderStatusNaoEntregue
 }
 
+// FechadoParaNovosItens diz se o pedido já virou documento fiscal e por isso não
+// recebe mais item.
+//
+// Este é o limite que o lojista reconhece: enquanto está "Em aberto" ou
+// "Aprovado" — pago, mas ainda não faturado — ele soma a compra de hoje na de
+// ontem e manda tudo numa caixa só. Depois de faturado, o pedido virou NF, e
+// somar item nele é emitir nota errada.
+//
+// O ERP NÃO impõe esse limite: em 26/08/2026 a API aceitou (204) editar os itens
+// de um pedido em situação "Faturada". A recusa tem de ser nossa.
+//
+// Cancelado entra na lista pelo motivo oposto: não há pedido vivo a que somar.
+func (s ERPOrderStatus) FechadoParaNovosItens() bool {
+	switch s {
+	case ERPOrderStatusFaturado, ERPOrderStatusProntoEnvio, ERPOrderStatusEnviado,
+		ERPOrderStatusEntregue, ERPOrderStatusNaoEntregue, ERPOrderStatusCancelado:
+		return true
+	}
+	return false
+}
+
 // ErrOrderStockLaunched é a recusa do ERP em editar um pedido cujo estoque foi
 // lançado — na prática, alguém mexeu no pedido pelo painel enquanto a live
 // rolava. Chega como `400 {"detalhes":[{"campo":"pedido.motivosBloqueio[0]",

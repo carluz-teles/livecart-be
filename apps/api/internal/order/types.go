@@ -142,6 +142,15 @@ type OrderItemResponse struct {
 	// 0 em pedido já pago (o snapshot registra o que foi vendido).
 	WaitlistedQuantity int `json:"waitlistedQuantity"`
 
+	// PaidQuantity é quantas unidades desta linha algum pagamento já cobriu.
+	// Quantity - PaidQuantity é o que falta pagar dela.
+	//
+	// A contagem é por unidade porque o carrinho passou a receber item DEPOIS
+	// do pagamento: a compradora pagou 2 un. na live de segunda e pediu a 3ª na
+	// quinta, tudo na mesma linha (cart_items é único por produto). "Esta linha
+	// está paga" seria mentira; "2 de 3 pagas" é a verdade.
+	PaidQuantity int `json:"paidQuantity"`
+
 	// Shipping dimensions (joined from products). Zero when the product has no
 	// dimensions filled in — admin UIs should treat them as "missing" not "0"
 	// and block create-shipment until the merchant fills them in.
@@ -279,6 +288,16 @@ type OrderDetailResponse struct {
 	// WaitlistedAmount: valor das unidades em fila, declarado no orçamento como
 	// não incluído em vez de simplesmente omitido.
 	WaitlistedAmount int64 `json:"waitlistedAmount"`
+
+	// AlreadyPaidAmount / OutstandingAmount: a divisão do dinheiro do pedido.
+	//
+	// Um pedido não vira mais "pago" de uma vez só. Enquanto não foi faturado
+	// ele continua recebendo item, e o lojista despacha olhando para as duas
+	// metades: o que a compradora já pagou e o que ela ainda deve. Quando nada
+	// entrou depois do pagamento, outstandingAmount é 0 e a tela some com a
+	// divisão — que é o caso comum.
+	AlreadyPaidAmount int64 `json:"alreadyPaidAmount"`
+	OutstandingAmount int64 `json:"outstandingAmount"`
 
 	// Pagamento: método (pix/credit_card/...), parcelas e os valores REAIS do
 	// pedido. PaidTotalCents é EXATAMENTE o que foi cobrado (com desconto PIX);
@@ -566,6 +585,8 @@ func NewOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 		WaitlistJourney:        append([]OrderWaitlistJourneyOutput{}, o.WaitlistJourney...),
 		PayableAmount:          o.PayableAmount,
 		WaitlistedAmount:       o.WaitlistedAmount,
+		AlreadyPaidAmount:      o.AlreadyPaidAmount,
+		OutstandingAmount:      o.OutstandingAmount,
 		PaymentMethod:          o.PaymentMethod,
 		Installments:           o.Installments,
 		DiscountCents:          o.DiscountCents,
@@ -789,6 +810,10 @@ type OrderItemOutput struct {
 	// depois da venda materializada.
 	WaitlistedQuantity int
 
+	// PaidQuantity é quantas unidades desta linha algum pagamento já cobriu —
+	// ver a nota em OrderItemResponse.
+	PaidQuantity int
+
 	WeightGrams   int
 	HeightCm      int
 	WidthCm       int
@@ -897,6 +922,10 @@ type OrderItemRow struct {
 	// `order_items` não tem a coluna porque o snapshot registra o que foi
 	// vendido, e vem 0 para pedido já materializado.
 	WaitlistedQuantity int
+
+	// PaidQuantity é quantas unidades desta linha algum pagamento já cobriu —
+	// ver a nota em OrderItemResponse.
+	PaidQuantity int
 
 	// Joined from products for the shipping flow. Zero when the product has
 	// no dimensions filled in — service-layer sets them unchanged (0) so the
@@ -1135,6 +1164,10 @@ type OrderDetailOutput struct {
 	// O orçamento impresso usa este número: cobrar pela unidade que a loja não
 	// tem para entregar é a única forma de o documento sair errado.
 	PayableAmount int64
+	// AlreadyPaidAmount / OutstandingAmount: a divisão do dinheiro — ver a nota
+	// em OrderDetailResponse.
+	AlreadyPaidAmount int64
+	OutstandingAmount int64
 	// WaitlistedAmount é o valor das unidades em fila — o que o orçamento
 	// declara como NÃO incluído no total, em vez de apenas omitir.
 	WaitlistedAmount int64

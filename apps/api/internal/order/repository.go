@@ -433,6 +433,10 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			p.image_url as product_image,
 			p.keyword as product_keyword,
 			0::INT as waitlisted_quantity,
+			-- Venda materializada: o snapshot registra o que foi vendido, e
+			-- vendido é pago. A divisão pago × a pagar só existe enquanto o
+			-- pedido é carrinho.
+			oi.quantity as paid_quantity,
 			COALESCE(p.weight_grams, 0),
 			COALESCE(p.height_cm, 0),
 			COALESCE(p.width_cm, 0),
@@ -456,6 +460,7 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			p.image_url as product_image,
 			p.keyword as product_keyword,
 			ci.waitlisted_quantity,
+			ci.paid_quantity,
 			COALESCE(p.weight_grams, 0),
 			COALESCE(p.height_cm, 0),
 			COALESCE(p.width_cm, 0),
@@ -487,6 +492,7 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			&item.ProductImage,
 			&item.ProductKeyword,
 			&item.WaitlistedQuantity,
+			&item.PaidQuantity,
 			&item.WeightGrams,
 			&item.HeightCm,
 			&item.WidthCm,

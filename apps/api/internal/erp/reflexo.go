@@ -75,8 +75,14 @@ type CartSyncReport struct {
 // é o que o próximo reflexo vai ler. Sem isso os dois se atropelariam, cada um
 // desfazendo o outro.
 //
-// Carrinho pago, cancelado ou vencido não é tocado: a grade daquela venda já está
-// fechada, e mexer nela mudaria o que a compradora pagou.
+// O carrinho PAGO é refletido também, e essa é a mudança que a junção de compras
+// exigiu: o pedido pago segue aberto até faturar, e o que o lojista acrescenta
+// nele pelo painel tem de aparecer aqui — é o que a compradora vê e é o que ela
+// vai pagar. O que o pagamento já cobriu está guardado em unidades
+// (cart_items.paid_quantity), então reduzir a grade não apaga o registro do
+// dinheiro: ele reaparece como crédito a devolver em RecomporParcelasDoPedidoPago.
+//
+// Cancelado e vencido continuam intocados: não há venda a refletir.
 func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID string) (*CartSyncReport, error) {
 	if s.cartSync == nil {
 		return nil, nil
@@ -87,12 +93,13 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 	if err != nil {
 		return nil, fmt.Errorf("loading cart ERP order state: %w", err)
 	}
-	if st.State != OrderStateOpen || st.ExternalOrderID == "" {
-		rel.Skipped = "carrinho não está aberto com pedido (estado " + st.State + ")"
+	casa := st.State
+	if !podeMutar(casa) || st.ExternalOrderID == "" {
+		rel.Skipped = "carrinho não aceita reflexo no estado " + st.State
 		return rel, nil
 	}
 
-	won, err := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateOpen, OrderStateMutating)
+	won, err := s.repo.TransitionCartERPOrderState(ctx, cartID, casa, OrderStateMutating)
 	if err != nil {
 		return nil, fmt.Errorf("claiming cart for reflection: %w", err)
 	}
@@ -104,9 +111,11 @@ func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID stri
 	}
 	defer func() {
 		fim := context.WithoutCancel(ctx)
-		if _, backErr := s.repo.TransitionCartERPOrderState(fim, cartID, OrderStateMutating, OrderStateOpen); backErr != nil {
-			logger.From(fim, s.logger).Error("failed to return cart to open after reflection",
-				zap.String("cart_id", cartID), zap.Error(backErr))
+		if _, backErr := s.repo.TransitionCartERPOrderState(fim, cartID, OrderStateMutating, casa); backErr != nil {
+			logger.From(fim, s.logger).Error("failed to return cart to its resting state after reflection",
+				zap.String("cart_id", cartID),
+				zap.String("resting_state", string(casa)),
+				zap.Error(backErr))
 		}
 		s.collab.MirrorToOrder(fim, cartID)
 	}()

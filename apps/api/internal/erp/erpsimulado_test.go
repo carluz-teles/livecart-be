@@ -400,3 +400,15 @@ func (e *erpSimulado) GetProductStock(_ context.Context, produtoID string) (int,
 	}
 	return p.disponivel(), nil
 }
+
+// quantidadeNoPedido é quanto a grade do pedido tem daquele produto — a
+// pergunta que separa "o item chegou ao ERP" de "o item ficou no banco".
+func (e *erpSimulado) quantidadeNoPedido(orderID, produtoID string) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	p := e.pedidos[orderID]
+	if p == nil {
+		return 0
+	}
+	return p.itens[produtoID]
+}

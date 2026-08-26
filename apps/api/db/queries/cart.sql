@@ -11,11 +11,26 @@ RETURNING *;
 -- Resolução do carrinho ETERNO do VIP: por (loja, @), ATRAVESSANDO eventos.
 -- É isto que faz a compra do VIP num evento novo cair no MESMO carrinho de um
 -- evento anterior. FOR UPDATE serializa dois comentários concorrentes do VIP.
+--
+-- O carrinho PAGO continua sendo o mesmo carrinho, e essa é a regra que o
+-- lojista pediu por extenso: pagou na live de segunda, pediu mais uma coisa na
+-- quinta, sai numa caixa só — um frete, uma nota. Enquanto o pedido não virou
+-- documento fiscal ele ainda recebe item, e o que entrou depois do pagamento
+-- fica separado por cart_items.paid_at (ver migration 000140).
+--
+-- O FATURAMENTO é o portão. Depois dele a nota existe, e somar item seria emitir
+-- nota errada — então a compra de quinta abre um pedido NOVO. Note que o ERP não
+-- impõe esse limite: em 26/08/2026 ele aceitou (204) editar os itens de um
+-- pedido "Faturada". A recusa é nossa.
+--
+-- Estornado fica de fora pelo motivo oposto: não há venda a que somar.
 SELECT * FROM carts
 WHERE store_id = $1 AND platform_handle = $2
   AND never_expires
-  AND status IN ('pending', 'active', 'checkout')
-  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND status IN ('pending', 'active', 'checkout', 'paid')
+  AND (payment_status IS NULL OR payment_status <> 'refunded')
+  AND (erp_order_status IS NULL OR erp_order_status NOT IN (
+        'faturado', 'pronto_envio', 'enviado', 'entregue', 'nao_entregue', 'cancelado'))
 ORDER BY created_at DESC
 LIMIT 1
 FOR UPDATE;
@@ -206,27 +221,37 @@ RETURNING *;
 -- por conta do caller, na MESMA transação.
 -- Guard: só restaura cart cancelado PELO LOJISTA e ainda não pago — um cart
 -- expirado, bloqueado por handle ou já pago não entra por aqui.
-UPDATE carts
-SET status              = 'checkout',
-    cancelled_reason    = NULL,
-    payment_status      = $2,
-    checkout_id         = $3,
-    paid_at             = $4,
-    payment_method      = $5,
-    expires_at          = NULL,
-    -- Carimbo do caso para o histórico do pedido e para o aviso no sino do
-    -- painel: sem ele o lojista descobriria por acidente que vendeu algo que
-    -- julgava cancelado.
-    cancellation_reverted_at = now(),
-    erp_order_state     = 'none',
-    external_order_id   = NULL,
-    erp_stock_launched  = FALSE,
-    erp_op_started_at   = NULL
-WHERE id = $1
-  AND status = 'cancelled'
-  AND cancelled_reason = 'store_cancelled'
-  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
-RETURNING *;
+WITH pago AS (
+    UPDATE carts c
+    SET status              = 'checkout',
+        cancelled_reason    = NULL,
+        payment_status      = $2,
+        checkout_id         = $3,
+        paid_at             = $4,
+        payment_method      = $5,
+        expires_at          = NULL,
+        -- Carimbo do caso para o histórico do pedido e para o aviso no sino do
+        -- painel: sem ele o lojista descobriria por acidente que vendeu algo que
+        -- julgava cancelado.
+        cancellation_reverted_at = now(),
+        erp_order_state     = 'none',
+        external_order_id   = NULL,
+        erp_stock_launched  = FALSE,
+        erp_op_started_at   = NULL,
+        paid_amount_cents   = c.paid_amount_cents + cart_unpaid_total_cents(c.id)
+    WHERE c.id = $1
+      AND c.status = 'cancelled'
+      AND c.cancelled_reason = 'store_cancelled'
+      AND (c.payment_status IS NULL OR c.payment_status NOT IN ('paid', 'refunded'))
+    RETURNING *
+), carimbo AS (
+    UPDATE cart_items ci
+    SET paid_quantity = ci.quantity
+    WHERE ci.cart_id = (SELECT p.id FROM pago p WHERE p.payment_status = 'paid')
+      AND ci.paid_quantity < ci.quantity
+    RETURNING 1
+)
+SELECT * FROM pago;
 
 -- name: UpdateCartPayment :one
 -- $3 = payment-provider ID (MP/Pagar.me). Goes to checkout_id, not
@@ -237,12 +262,44 @@ RETURNING *;
 -- não deve finalizar (evita o estado inconsistente pago+expirado e o cancel de
 -- pedido ERP de venda paga). Ao pagar, neutraliza expires_at para que o worker
 -- nunca reselcione a venda.
-UPDATE carts
-SET payment_status = $2, checkout_id = $3, paid_at = $4, payment_method = $5,
-    expires_at = CASE WHEN $2 = 'paid' THEN NULL ELSE expires_at END
-WHERE id = $1
-  AND status NOT IN ('expired', 'cancelled')
-RETURNING *;
+
+-- Carimbo do que ESTE pagamento cobre.
+--
+-- O `::varchar` nas comparações não é enfeite: sem ele o Postgres deduz `text`
+-- pelo literal e `character varying` pela coluna, e recusa a instrução inteira
+-- com "inconsistent types deduced for parameter $2" sempre que o cliente deixa
+-- os tipos por inferir. A forma antiga tinha a mesma fragilidade latente e só
+-- escapava porque o driver mandava o OID.
+--
+-- O carrinho não morre mais no pagamento: o lojista que junta compras soma o
+-- pedido de quinta no de segunda e manda uma caixa só. Para isso o carrinho tem
+-- de saber, unidade a unidade, o que o dinheiro que entrou já cobriu — o que
+-- sobrar sem carimbo é o "falta pagar". Os dois UPDATE veem a MESMA fotografia,
+-- então
+-- as unidades que a soma contou são exatamente as que o carimbo marcou.
+WITH pago AS (
+    UPDATE carts c
+    SET payment_status = $2, checkout_id = $3, paid_at = $4, payment_method = $5,
+        expires_at = CASE WHEN $2::varchar = 'paid' THEN NULL ELSE expires_at END,
+        paid_amount_cents = CASE WHEN $2::varchar = 'paid'
+            THEN c.paid_amount_cents + cart_unpaid_total_cents(c.id)
+            ELSE c.paid_amount_cents END
+    WHERE c.id = $1
+      AND c.status NOT IN ('expired', 'cancelled')
+    RETURNING *
+), carimbo AS (
+    UPDATE cart_items ci
+    SET paid_quantity = ci.quantity
+    -- A condição "é pagamento?" vem da LINHA que acabou de ser escrita, não do
+    -- parâmetro. Reusar $2 aqui faz o Postgres recusar a instrução inteira
+    -- ("inconsistent types deduced for parameter $2"), porque ele já o deduziu
+    -- como varchar no SET acima — e ler o resultado é mais honesto de qualquer
+    -- forma: carimba quando a linha gravada diz que está paga.
+    WHERE ci.cart_id = (SELECT p.id FROM pago p WHERE p.payment_status = 'paid')
+      AND ci.paid_quantity < ci.quantity
+    RETURNING 1
+)
+SELECT * FROM pago;
 
 -- name: UpdateCartNotifyStatus :one
 UPDATE carts
@@ -832,22 +889,74 @@ SELECT * FROM carts WHERE checkout_id = $1;
 
 -- name: UpdateCartPaymentByCheckoutID :one
 -- Updates payment status when webhook confirms payment
-UPDATE carts
-SET payment_status = $2, paid_at = $3
-WHERE checkout_id = $1
-RETURNING *;
+
+-- Carimbo do que ESTE pagamento cobre.
+--
+-- O carrinho não morre mais no pagamento: o lojista que junta compras soma o
+-- pedido de quinta no de segunda e manda uma caixa só. Para isso o carrinho tem
+-- de saber, unidade a unidade, o que o dinheiro que entrou já cobriu — o que
+-- sobrar sem carimbo é o "falta pagar". Os dois UPDATE veem a MESMA fotografia,
+-- então
+-- as unidades que a soma contou são exatamente as que o carimbo marcou.
+WITH pago AS (
+    UPDATE carts c
+    SET payment_status = $2, paid_at = $3,
+        paid_amount_cents = CASE WHEN $2::varchar = 'paid'
+            THEN c.paid_amount_cents + cart_unpaid_total_cents(c.id)
+            ELSE c.paid_amount_cents END
+    WHERE c.checkout_id = $1
+    RETURNING *
+), carimbo AS (
+    UPDATE cart_items ci
+    SET paid_quantity = ci.quantity
+    -- A condição "é pagamento?" vem da LINHA que acabou de ser escrita, não do
+    -- parâmetro. Reusar $2 aqui faz o Postgres recusar a instrução inteira
+    -- ("inconsistent types deduced for parameter $2"), porque ele já o deduziu
+    -- como varchar no SET acima — e ler o resultado é mais honesto de qualquer
+    -- forma: carimba quando a linha gravada diz que está paga.
+    WHERE ci.cart_id = (SELECT p.id FROM pago p WHERE p.payment_status = 'paid')
+      AND ci.paid_quantity < ci.quantity
+    RETURNING 1
+)
+SELECT * FROM pago;
 
 -- name: UpdateCartPaymentStatus :one
 -- Updates payment status directly by cart ID (for transparent checkout)
 -- Uses checkout_id to store the payment ID from the provider.
 -- Mesmo guard de UpdateCartPayment: não marca pagamento em cart expirado/
 -- cancelado (0 rows = caller não finaliza) e neutraliza expires_at ao pagar.
-UPDATE carts
-SET payment_status = $2, checkout_id = $3, paid_at = $4,
-    expires_at = CASE WHEN $2 = 'paid' THEN NULL ELSE expires_at END
-WHERE id = $1
-  AND status NOT IN ('expired', 'cancelled')
-RETURNING *;
+
+-- Carimbo do que ESTE pagamento cobre.
+--
+-- O carrinho não morre mais no pagamento: o lojista que junta compras soma o
+-- pedido de quinta no de segunda e manda uma caixa só. Para isso o carrinho tem
+-- de saber, unidade a unidade, o que o dinheiro que entrou já cobriu — o que
+-- sobrar sem carimbo é o "falta pagar". Os dois UPDATE veem a MESMA fotografia,
+-- então
+-- as unidades que a soma contou são exatamente as que o carimbo marcou.
+WITH pago AS (
+    UPDATE carts c
+    SET payment_status = $2, checkout_id = $3, paid_at = $4,
+        expires_at = CASE WHEN $2::varchar = 'paid' THEN NULL ELSE expires_at END,
+        paid_amount_cents = CASE WHEN $2::varchar = 'paid'
+            THEN c.paid_amount_cents + cart_unpaid_total_cents(c.id)
+            ELSE c.paid_amount_cents END
+    WHERE c.id = $1
+      AND c.status NOT IN ('expired', 'cancelled')
+    RETURNING *
+), carimbo AS (
+    UPDATE cart_items ci
+    SET paid_quantity = ci.quantity
+    -- A condição "é pagamento?" vem da LINHA que acabou de ser escrita, não do
+    -- parâmetro. Reusar $2 aqui faz o Postgres recusar a instrução inteira
+    -- ("inconsistent types deduced for parameter $2"), porque ele já o deduziu
+    -- como varchar no SET acima — e ler o resultado é mais honesto de qualquer
+    -- forma: carimba quando a linha gravada diz que está paga.
+    WHERE ci.cart_id = (SELECT p.id FROM pago p WHERE p.payment_status = 'paid')
+      AND ci.paid_quantity < ci.quantity
+    RETURNING 1
+)
+SELECT * FROM pago;
 
 -- name: GetStorePaymentIntegration :one
 -- Returns the highest-priority active payment integration for a store.
@@ -921,7 +1030,15 @@ SET erp_order_state = sqlc.arg(to_state)::varchar,
 WHERE id = sqlc.arg(cart_id) AND erp_order_state = sqlc.arg(from_state);
 
 -- name: GetCartERPOrderState :one
-SELECT erp_order_state, erp_stock_launched, COALESCE(external_order_id,'') AS external_order_id
+-- A situação do pedido e o quanto já foi pago vêm na MESMA linha, de propósito.
+-- A situação diz se o pedido ainda recebe item (pago, não faturado) ou se já
+-- virou nota; o valor pago é o que separa, nas parcelas do ERP, o que entrou do
+-- que falta. Buscá-los à parte custaria duas leituras a mais no caminho mais
+-- quente da live.
+SELECT erp_order_state, erp_stock_launched, COALESCE(external_order_id,'') AS external_order_id,
+       COALESCE(erp_order_status,'') AS erp_order_status,
+       paid_amount_cents,
+       COALESCE(paid_at, created_at) AS paid_at
 FROM carts WHERE id = $1;
 
 -- name: SetCartERPStockLaunched :exec

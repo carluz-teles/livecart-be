@@ -22,6 +22,13 @@ import (
 // keeps a backward-compatible alias while its logic is strangled out (Bloco B2).
 var ErrCartNotConverted = errors.New("cart não convertido em pedido ERP")
 
+// ErrPedidoFaturado é a recusa em somar item a um pedido que já virou nota.
+//
+// Tipada porque tem consequência de negócio a montante: quem quiser juntar
+// carrinhos precisa saber que ESTE não junta mais, e abrir um pedido novo em vez
+// de perder a venda.
+var ErrPedidoFaturado = errors.New("pedido já faturado: não recebe mais item")
+
 // ErrCartBusy diz que há uma escrita em voo naquele pedido e a operação pedida
 // precisa esperar. É transitório por natureza — a mutação devolve o carrinho em
 // menos de um segundo —, e existe para o chamador saber que RETENTAR resolve, em
@@ -110,6 +117,17 @@ type CartERPOrderState struct {
 	State           string
 	StockLaunched   bool
 	ExternalOrderID string
+	// Situação do pedido no ERP (slug do `codigoSituacao`), vazia enquanto
+	// nenhum webhook chegou. Vazio significa "ainda não sei", e quem decide se
+	// o pedido recebe item trata isso como "não faturado" — ver pedidoJaFaturado.
+	OrderStatus string
+	// Quanto o carrinho já recebeu, somando TODOS os pagamentos. É o número que
+	// vai para a parcela "PAGO" no ERP. Vem do carrinho e não do retrato do
+	// gateway porque o retrato conhece um pagamento só, e um carrinho que juntou
+	// compras pode ter dois.
+	PaidAmountCents int64
+	// Quando o último pagamento entrou — a data que a parcela "PAGO" carrega.
+	PaidAt time.Time
 }
 
 // NonWaitlistedCartItem is a non-waitlisted cart item carrying its ERP external

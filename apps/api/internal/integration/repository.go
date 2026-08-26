@@ -3508,6 +3508,9 @@ func (r *Repository) GetCartERPOrderState(ctx context.Context, cartID string) (*
 		State:           row.ErpOrderState,
 		StockLaunched:   row.ErpStockLaunched,
 		ExternalOrderID: row.ExternalOrderID,
+		OrderStatus:     row.ErpOrderStatus,
+		PaidAmountCents: row.PaidAmountCents,
+		PaidAt:          row.PaidAt.Time,
 	}, nil
 }
 

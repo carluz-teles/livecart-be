@@ -256,6 +256,7 @@ func (s *Service) GetByID(ctx context.Context, id string, storeID string) (*Orde
 			UnitPrice:          item.UnitPrice,
 			TotalPrice:         itemTotal,
 			WaitlistedQuantity: item.WaitlistedQuantity,
+			PaidQuantity:       item.PaidQuantity,
 			WeightGrams:        item.WeightGrams,
 			HeightCm:           item.HeightCm,
 			WidthCm:            item.WidthCm,
@@ -345,7 +346,13 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 	// Separa o que a cliente pode pagar do que está em fila. Uma passada só
 	// pelos itens: quantity é o total pedido, waitlisted é a parcela sem
 	// estoque, e as duas somas juntas fecham em TotalAmount.
-	var payable, waitlisted int64
+	//
+	// A mesma passada separa o que JÁ FOI PAGO do que ainda falta. Desde que o
+	// carrinho passou a receber item depois do pagamento — a compradora pagou na
+	// live de segunda e pediu mais uma coisa na quinta, para sair um frete só —
+	// "pago" e "total" deixaram de ser o mesmo número, e o lojista precisa
+	// enxergar a diferença antes de faturar.
+	var payable, waitlisted, pago, aPagar int64
 	for _, item := range orderOutput.Items {
 		disponivel := item.Quantity - item.WaitlistedQuantity
 		if disponivel > 0 {
@@ -353,6 +360,10 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 		}
 		if item.WaitlistedQuantity > 0 {
 			waitlisted += item.UnitPrice * int64(item.WaitlistedQuantity)
+		}
+		pago += item.UnitPrice * int64(item.PaidQuantity)
+		if resto := item.Quantity - item.PaidQuantity; resto > 0 {
+			aPagar += item.UnitPrice * int64(resto)
 		}
 	}
 
@@ -365,6 +376,8 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 		WaitlistJourney:        waitlistJourney,
 		PayableAmount:          payable,
 		WaitlistedAmount:       waitlisted,
+		AlreadyPaidAmount:      pago,
+		OutstandingAmount:      aPagar,
 		PaymentMethod:          row.PaymentMethod,
 		Installments:           row.Installments,
 		DiscountCents:          row.DiscountCents,

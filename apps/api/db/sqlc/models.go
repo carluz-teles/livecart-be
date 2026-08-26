@@ -123,6 +123,7 @@ type Cart struct {
 	ErpOrderStatus         pgtype.Text        `json:"erp_order_status"`
 	ErpOrderStatusAt       pgtype.Timestamptz `json:"erp_order_status_at"`
 	ErpOrderNumber         pgtype.Text        `json:"erp_order_number"`
+	PaidAmountCents        int64              `json:"paid_amount_cents"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.
@@ -141,6 +142,7 @@ type CartItem struct {
 	UnitPrice          pgtype.Int8 `json:"unit_price"`
 	WaitlistedQuantity int32       `json:"waitlisted_quantity"`
 	SessionID          pgtype.UUID `json:"session_id"`
+	PaidQuantity       int32       `json:"paid_quantity"`
 }
 
 // RN-12: uma linha por ADIÇÃO ao carrinho, com a sessão de origem. cart_items diz o que TEM no carrinho; esta tabela diz de onde veio cada unidade. Sem ela, cart_items.session_id é first-touch e credita tudo à primeira transmissão.

@@ -349,11 +349,37 @@ func (s *Service) umaPassadaDeMutacao(ctx context.Context, cartID, storeID strin
 	if err != nil {
 		return nil, fmt.Errorf("loading cart ERP order state: %w", err)
 	}
-	if st.State != OrderStateOpen || st.ExternalOrderID == "" {
-		return nil, fmt.Errorf("cart %s não está em 'open' (estado %s): %w", cartID, st.State, ErrCartNotConverted)
+	// O pedido PAGO continua aceitando item, e essa é uma regra de negócio, não
+	// uma frouxidão. A compradora pagou na live de segunda e pediu mais uma coisa
+	// na quinta; o lojista soma no mesmo pedido para sair um frete só. Só o
+	// faturamento fecha a porta — ver casaDaMutacao.
+	casa := st.State
+	if casa == OrderStateMutating {
+		// Encontrar o carrinho JÁ em 'mutating' é a mesma notícia que perder o
+		// CAS logo abaixo: outra mutação está escrevendo este pedido, monta a
+		// grade a partir do banco — onde o item deste chamador já está — e
+		// reconfere depois de soltar o estado.
+		//
+		// Isto era um ERRO, e o erro tinha dente: em AdjustStockReservationDelta
+		// ele dispara rollbackLocal() e DESFAZ a unidade da compradora. Ou seja,
+		// dois comentários que se cruzassem por ~1s custavam uma venda — e o
+		// caso passava despercebido porque a rajada mais antiga descartava o
+		// erro com `_ =`.
+		logger.From(ctx, s.logger).Info("order mutation already in flight, latest grid will win",
+			zap.String("cart_id", cartID),
+		)
+		return nil, nil
+	}
+	if !podeMutar(casa) || st.ExternalOrderID == "" {
+		return nil, fmt.Errorf("cart %s não aceita mutação no estado %s: %w", cartID, st.State, ErrCartNotConverted)
+	}
+	if casa == OrderStateConfirmed {
+		if fechado, motivo := pedidoJaFaturado(st.OrderStatus); fechado {
+			return nil, fmt.Errorf("cart %s: %s: %w", cartID, motivo, ErrPedidoFaturado)
+		}
 	}
 
-	won, err := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateOpen, OrderStateMutating)
+	won, err := s.repo.TransitionCartERPOrderState(ctx, cartID, casa, OrderStateMutating)
 	if err != nil {
 		return nil, fmt.Errorf("claiming order mutation: %w", err)
 	}
@@ -378,16 +404,53 @@ func (s *Service) umaPassadaDeMutacao(ctx context.Context, cartID, storeID strin
 		// 'mutating' e parados ali, com 10 itens no banco que nunca chegaram ao
 		// pedido.
 		fim := context.WithoutCancel(ctx)
-		if _, backErr := s.repo.TransitionCartERPOrderState(fim, cartID, OrderStateMutating, OrderStateOpen); backErr != nil {
-			logger.From(fim, s.logger).Error("failed to return cart to open after mutation",
+		if _, backErr := s.repo.TransitionCartERPOrderState(fim, cartID, OrderStateMutating, casa); backErr != nil {
+			logger.From(fim, s.logger).Error("failed to return cart to its resting state after mutation",
 				zap.String("cart_id", cartID),
+				zap.String("resting_state", string(casa)),
 				zap.Error(backErr),
 			)
+		}
+		// Pedido pago que ganhou item passa a valer mais do que entrou. Refazer a
+		// divisão aqui é o que impede o ERP de afirmar, calado, que ela pagou o
+		// valor novo — ver parcelas.go.
+		if casa == OrderStateConfirmed {
+			if _, splitErr := s.RecomporParcelasDoPedidoPago(fim, cartID, storeID); splitErr != nil {
+				logger.From(fim, s.logger).Error("failed to restore the paid/outstanding split after mutation",
+					zap.String("cart_id", cartID),
+					zap.Error(splitErr),
+				)
+			}
 		}
 		s.collab.MirrorToOrder(fim, cartID)
 	}()
 
 	return s.applyCartGridToOrder(ctx, cartID, storeID, st.ExternalOrderID, jaAplicada)
+}
+
+// podeMutar diz de quais estados a mutação pode partir.
+//
+// 'open' é a live acontecendo. 'confirmed' é a compradora que já pagou e voltou
+// — dois momentos diferentes do mesmo pedido, e a mutação devolve o carrinho ao
+// estado de onde partiu, nunca rebaixando um pedido pago a 'open'.
+func podeMutar(estado string) bool {
+	return estado == OrderStateOpen || estado == OrderStateConfirmed
+}
+
+// pedidoJaFaturado é o portão que o ERP não tem.
+//
+// Lê a situação que o webhook de vendas deixou no carrinho. Quando ela ainda não
+// chegou, a resposta é "não faturado": o pedido acabou de ser pago e a situação
+// nasce 'aprovado'. Errar para o lado de deixar somar é o certo aqui — o erro
+// oposto seria recusar a compra de uma cliente cujo webhook atrasou.
+func pedidoJaFaturado(situacao string) (bool, string) {
+	if situacao == "" {
+		return false, ""
+	}
+	if providers.ERPOrderStatus(situacao).FechadoParaNovosItens() {
+		return true, "pedido em situação '" + situacao + "' não recebe mais item"
+	}
+	return false, ""
 }
 
 // applyCartGridToOrder manda a grade do banco para o pedido. Uma chamada.

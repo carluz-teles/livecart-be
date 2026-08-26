@@ -338,6 +338,17 @@ type ERPProvider interface {
 	// Use as constantes Situacao* — o enum completo do ERP está lá.
 	SetOrderSituacao(ctx context.Context, orderID string, situacao int) error
 
+	// SetOrderInstallments grava as parcelas do pedido EXPLICITAMENTE, uma a uma.
+	//
+	// Diferente de UpdateOrderPayment, que deriva as parcelas do método e do
+	// número de vezes: aqui o chamador diz exatamente quanto foi pago e quanto
+	// falta. É o que separa, no pedido, o dinheiro que já entrou do que ainda
+	// não — ver ERPInstallment.
+	SetOrderInstallments(ctx context.Context, orderID string, parcelas []ERPInstallment) error
+
+	// GetOrderTotal lê o total atual do pedido no ERP.
+	GetOrderTotal(ctx context.Context, orderID string) (cents int64, hasInvoice bool, err error)
+
 	// GetOrderItems lê a grade atual do pedido, com a informação adicional de
 	// cada linha. É o que permite preservar o que o lojista acrescentou à mão:
 	// a escrita substitui a grade inteira, então sem reler antes a linha dele
@@ -967,6 +978,29 @@ type ERPOrderItem struct {
 	// leitura. É por ela que se sabe, ao reler um pedido, quais linhas são
 	// nossas e quais o lojista digitou à mão — ver LiveCartItemMarker.
 	Note string `json:"note,omitempty"`
+}
+
+// ERPInstallment é uma parcela do pedido, dita por extenso.
+//
+// 🔴 A soma das parcelas é FORÇADA ao total do pedido, em silêncio. Medido em
+// 26/08/2026: enviar uma parcela de R$ 60 num pedido de R$ 100 grava R$ 100, com
+// HTTP 204 e sem aviso. Quem manda um valor que não fecha não recebe erro —
+// recebe outro número.
+//
+// Daí este tipo existir. Acrescentar item a um pedido PAGO faz o ERP
+// redistribuir o total pelas parcelas existentes: uma venda de R$ 40 que virou
+// R$ 145 passou a registrar que a compradora pagou R$ 145. Um terceiro item
+// dividiu R$ 195 em duas parcelas de R$ 97,50. O registro financeiro é destruído
+// a cada edição, e só reenviar a divisão correta o reconstrói.
+type ERPInstallment struct {
+	// AmountCents é o valor desta parcela. A soma de todas TEM de dar o total do
+	// pedido, ou o ERP a reescreve sozinho.
+	AmountCents int64
+	// DueDate é o vencimento. Para a parcela já paga, é a data do pagamento.
+	DueDate time.Time
+	// Note é o que o lojista lê no painel — é aqui que "PAGO" e "A PAGAR" ficam
+	// visíveis para ele.
+	Note string
 }
 
 // LiveCartItemMarker abre a informação adicional de toda linha que o LiveCart

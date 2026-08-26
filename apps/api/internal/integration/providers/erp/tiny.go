@@ -2100,6 +2100,72 @@ func bloqueioPorEstoqueLancado(body []byte) bool {
 	return false
 }
 
+// SetOrderInstallments grava as parcelas do pedido, uma a uma, como o chamador
+// as ditou.
+//
+// A soma tem de fechar com o total do pedido: o ERP não recusa uma divisão que
+// não fecha, ele a substitui pelo total e devolve 204. Ver ERPInstallment.
+func (t *Tiny) SetOrderInstallments(ctx context.Context, orderID string, parcelas []providers.ERPInstallment) error {
+	if len(parcelas) == 0 {
+		return nil
+	}
+	endpoint := fmt.Sprintf("%s/pedidos/%s", tinyAPIBaseURL, orderID)
+
+	emissao := time.Now().In(tinyLocation)
+	lista := make([]map[string]any, 0, len(parcelas))
+	for _, p := range parcelas {
+		dias := int(p.DueDate.Sub(emissao).Hours() / 24)
+		if dias < 0 {
+			dias = 0
+		}
+		lista = append(lista, map[string]any{
+			"dias":        dias,
+			"data":        p.DueDate.Format("2006-01-02"),
+			"valor":       float64(p.AmountCents) / 100,
+			"observacoes": p.Note,
+		})
+	}
+
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPut, endpoint,
+		map[string]any{"pagamento": map[string]any{"parcelas": lista}}, t.authHeaders())
+	if err != nil {
+		return fmt.Errorf("setting order installments: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return fmt.Errorf("set order installments failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+	}
+	logger.From(ctx, t.Logger).Info("tiny order installments rewritten",
+		zap.String("order_id", orderID),
+		zap.Int("parcelas", len(lista)),
+	)
+	return nil
+}
+
+// GetOrderTotal lê o total do pedido e diz se há nota fiscal atrelada.
+//
+// `idNotaFiscal` é o sinal confiável de documento fiscal — a situação não é: a
+// API aceitou editar os itens de um pedido em situação "Faturada" sem reclamar
+// (medido em 26/08/2026, HTTP 204). Quem tem de recusar somos nós.
+func (t *Tiny) GetOrderTotal(ctx context.Context, orderID string) (int64, bool, error) {
+	endpoint := fmt.Sprintf("%s/pedidos/%s", tinyAPIBaseURL, orderID)
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return 0, false, fmt.Errorf("reading order total: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return 0, false, fmt.Errorf("read order total failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+	}
+	var out struct {
+		Total        float64     `json:"valorTotalPedido"`
+		IDNotaFiscal json.Number `json:"idNotaFiscal"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return 0, false, fmt.Errorf("parsing order total: %w", err)
+	}
+	nf, _ := out.IDNotaFiscal.Int64()
+	return int64(math.Round(out.Total * 100)), nf > 0, nil
+}
+
 // GetOrderItems lê a grade atual do pedido, com a informação adicional de cada
 // linha — é ela que diz quem escreveu aquela linha.
 //

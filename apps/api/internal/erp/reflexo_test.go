@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"livecart/apps/api/internal/integration/providers"
 )
@@ -275,27 +276,61 @@ func TestReflexoNaoMexeNoContadorLocal(t *testing.T) {
 	}
 }
 
-// Carrinho pago não é tocado: a grade daquela venda está fechada, e mexer nela
-// mudaria o que a compradora pagou.
-func TestReflexoNaoTocaCarrinhoPago(t *testing.T) {
+// Carrinho PAGO também é refletido — a regra mudou junto com a junção de
+// compras.
+//
+// O pedido pago segue aberto até faturar, e o lojista acrescenta coisa nele pelo
+// painel o tempo todo. Se aquilo não voltasse, a compradora veria um carrinho
+// que não é o que vai chegar na caixa dela.
+func TestReflexoTrazItemQueOLojistaSomouEmPedidoPago(t *testing.T) {
 	svc, repo, erp, cs := montarReflexo(map[string]int{"ext-p1": 20, "ext-p2": 20})
 	ctx := context.Background()
 	repo.criarCarrinho("cart-1", item("p1", 2))
 	cs.catalogo["ext-p1"] = "p1"
 	cs.catalogo["ext-p2"] = "p2"
 	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@maria")
+	repo.pagarCarrinho("cart-1", time.Now())
 	_ = svc.ConfirmERPOrderPayment(ctx, "cart-1", "loja-1", nil)
 
-	erp.adicionarLinhaDoLojista(repo.carrinho("cart-1").externalOrderID, "ext-p2", 5, "depois do pagamento")
+	erp.adicionarLinhaDoLojista(repo.carrinho("cart-1").externalOrderID, "ext-p2", 5, "somou depois do pagamento")
 	rel, err := svc.SyncCartFromERPOrder(ctx, "cart-1", "loja-1")
 	if err != nil {
 		t.Fatalf("reflexo: %v", err)
 	}
-	if rel.Skipped == "" {
-		t.Errorf("o reflexo agiu sobre um carrinho pago: %+v", rel.Changes)
+	if rel.Skipped != "" {
+		t.Fatalf("pulou o reflexo de um pedido pago: %s", rel.Skipped)
 	}
-	if _, existe := itensDoCarrinho(repo, "cart-1")["ext-p2"]; existe {
-		t.Error("mudou a grade de uma venda já paga")
+	if _, existe := itensDoCarrinho(repo, "cart-1")["ext-p2"]; !existe {
+		t.Error("o item que o lojista somou no pedido pago não voltou para o carrinho")
+	}
+	if est := repo.carrinho("cart-1").state; est != OrderStateConfirmed {
+		t.Errorf("o reflexo deixou o carrinho em %q, quero %q — não pode rebaixar "+
+			"um pedido pago a 'open'", est, OrderStateConfirmed)
+	}
+}
+
+// O que ele NÃO faz é cobrar sozinho: o item que entrou depois do pagamento
+// aparece como "a pagar", nunca como pago.
+func TestItemRefletidoEmPedidoPagoNasceComoAPagar(t *testing.T) {
+	svc, repo, erp, cs := montarReflexo(map[string]int{"ext-p1": 20, "ext-p2": 20})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 2))
+	cs.catalogo["ext-p1"] = "p1"
+	cs.catalogo["ext-p2"] = "p2"
+	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@maria")
+	repo.pagarCarrinho("cart-1", time.Now())
+	_ = svc.ConfirmERPOrderPayment(ctx, "cart-1", "loja-1", nil)
+	if falta := repo.faltaPagar("cart-1"); falta != 0 {
+		t.Fatalf("o carrinho já nasceu devendo %d", falta)
+	}
+
+	erp.adicionarLinhaDoLojista(repo.carrinho("cart-1").externalOrderID, "ext-p2", 5, "somou depois")
+	if _, err := svc.SyncCartFromERPOrder(ctx, "cart-1", "loja-1"); err != nil {
+		t.Fatalf("reflexo: %v", err)
+	}
+	if falta := repo.faltaPagar("cart-1"); falta <= 0 {
+		t.Errorf("falta pagar %d — o item que entrou depois do pagamento tem de "+
+			"ficar do lado de fora do que já foi pago", falta)
 	}
 }
 
