@@ -26,7 +26,6 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/subscription", h.GetSubscription)
 	g.Post("/checkout", h.CreateCheckout)
 	g.Post("/portal", h.CreatePortal)
-	g.Post("/change-plan", h.ChangePlan)
 	g.Get("/usage", h.GetUsage)
 	g.Get("/statement", h.GetStatement)
 }
@@ -65,7 +64,7 @@ func (h *Handler) GetSubscription(c *fiber.Ctx) error {
 // @Accept json
 // @Produce json
 // @Param storeId path string true "Store ID"
-// @Param body body CreateCheckoutRequest true "Chosen plan"
+// @Param body body CreateCheckoutRequest true "Chosen billing interval"
 // @Success 200 {object} httpx.Envelope
 // @Failure 422 {object} httpx.ValidationEnvelope
 // @Router /api/v1/stores/{storeId}/billing/checkout [post]
@@ -100,33 +99,6 @@ func (h *Handler) CreatePortal(c *fiber.Ctx) error {
 		return err
 	}
 	return httpx.OK(c, fiber.Map{"url": url})
-}
-
-// ChangePlan upgrades immediately (prorated) or schedules a downgrade.
-// @Summary Change plan
-// @Tags billing
-// @Accept json
-// @Produce json
-// @Param storeId path string true "Store ID"
-// @Param body body ChangePlanRequest true "Target plan"
-// @Success 200 {object} httpx.Envelope{data=SubscriptionState}
-// @Failure 422 {object} httpx.ValidationEnvelope
-// @Router /api/v1/stores/{storeId}/billing/change-plan [post]
-// @Security BearerAuth
-func (h *Handler) ChangePlan(c *fiber.Ctx) error {
-	var req ChangePlanRequest
-	if err := httpx.BindAndValidate(c, &req); err != nil {
-		return err
-	}
-	input, err := req.ToInput(httpx.GetStoreID(c))
-	if err != nil {
-		return err
-	}
-	sub, err := h.service.ChangePlan(c.UserContext(), input)
-	if err != nil {
-		return err
-	}
-	return httpx.OK(c, NewSubscriptionResponse(sub, config.PaywallEnabled.Bool(), time.Now()))
 }
 
 // GetUsage returns the current-cycle ledger summary (Financeiro hero).

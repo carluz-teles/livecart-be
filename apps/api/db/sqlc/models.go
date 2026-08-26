@@ -889,6 +889,7 @@ type Subscription struct {
 	GraceUntil           pgtype.Timestamptz `json:"grace_until"`
 	ManualOverride       bool               `json:"manual_override"`
 	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
+	BillingInterval      string             `json:"billing_interval"`
 }
 
 type User struct {

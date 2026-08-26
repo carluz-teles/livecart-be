@@ -15,7 +15,7 @@ SELECT * FROM subscriptions WHERE stripe_customer_id = $1;
 -- Cria o trial local na criacao da loja (ou lazy no /users/sync). Idempotente:
 -- se ja existe assinatura para a loja, devolve a existente sem tocar em nada.
 INSERT INTO subscriptions (store_id, status, plan, trial_ends_at, current_period_start, current_period_end)
-VALUES ($1, 'trialing', 'grow', $2, NOW(), $2)
+VALUES ($1, 'trialing', 'pro', $2, NOW(), $2)
 ON CONFLICT (store_id) DO UPDATE SET updated_at = NOW()
 RETURNING *;
 
@@ -33,6 +33,32 @@ SET stripe_customer_id     = COALESCE($2, stripe_customer_id),
     updated_at             = NOW()
 WHERE store_id = $1
 RETURNING *;
+
+-- name: SetSubscriptionInterval :exec
+-- Grava o intervalo de cobrança escolhido (mensal/semestral/anual) na
+-- conversão. A troca posterior entre intervalos é feita pelo Customer Portal
+-- (os 3 preços do produto Pro agrupados lá) — não há endpoint próprio.
+UPDATE subscriptions
+SET billing_interval = $2,
+    updated_at        = NOW()
+WHERE store_id = $1;
+
+-- name: ListLegacyPlanSubscriptions :many
+-- Assinaturas ainda nos planos antigos (start/grow/scale), candidatas à
+-- migração para o plano único "pro". Usado pelo job one-off de migração.
+SELECT * FROM subscriptions
+WHERE plan IN ('start', 'grow', 'scale')
+  AND status IN ('trialing', 'active', 'past_due')
+ORDER BY store_id;
+
+-- name: MigrateSubscriptionToPro :exec
+-- Aplica a migração local (plano + intervalo) depois da troca de price ter
+-- sido confirmada no Stripe pelo job de migração.
+UPDATE subscriptions
+SET plan             = 'pro',
+    billing_interval = $2,
+    updated_at       = NOW()
+WHERE store_id = $1;
 
 -- name: UpdateSubscriptionFromStripe :one
 -- Aplica o estado vindo dos webhooks (fonte da verdade).

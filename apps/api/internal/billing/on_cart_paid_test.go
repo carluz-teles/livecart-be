@@ -6,7 +6,7 @@ package billing
 //   AC1  Idempotência: N entregas → count(sale)=1; ≤1 meter event.
 //   AC2  Retry-driven: erro transitório no InsertLedgerEntry → OnCartPaid retorna erro não-nil.
 //   AC3  Meter best-effort: SendMeterEvent falha → sale persiste, método não retorna erro.
-//   AC5  Listener lê o campo: amount_cents==gmv; fee_cents==amount*GMVBps/10000.
+//   AC5  Listener lê o campo: amount_cents==gmv; fee_cents==0 (sem comissão).
 //   AC6  Fallback rollout: gmvCents<=0 → busca do banco, grava sale correto.
 //   AC7  Sem subscription → retorna erro (DLQ).
 //   AC9  Simetria: erro de OnCartRefunded agora propaga erro.
@@ -53,7 +53,7 @@ func (noopStripe) GetSubscription(_ context.Context, _ string) (*StripeSubscript
 func (noopStripe) CreateSetupCheckoutSession(_ context.Context, _, _, _ string, _ map[string]string) (*CheckoutSession, error) {
 	return nil, nil
 }
-func (noopStripe) CreateSubscriptionCheckoutSession(_ context.Context, _, _, _, _, _ string, _ map[string]string) (*CheckoutSession, error) {
+func (noopStripe) CreateSubscriptionCheckoutSession(_ context.Context, _, _, _, _ string, _ map[string]string) (*CheckoutSession, error) {
 	return nil, nil
 }
 func (noopStripe) GetSetupIntentPaymentMethod(_ context.Context, _ string) (string, error) {
@@ -62,14 +62,11 @@ func (noopStripe) GetSetupIntentPaymentMethod(_ context.Context, _ string) (stri
 func (noopStripe) ActivateSubscription(_ context.Context, _ *StripeSubscription, _ PlanConfig, _ string) (*StripeSubscription, error) {
 	return nil, nil
 }
-func (noopStripe) CreatePortalSession(_ context.Context, _, _ string) (string, error) {
-	return "", nil
-}
-func (noopStripe) UpgradeSubscription(_ context.Context, _ *StripeSubscription, _ PlanConfig) (*StripeSubscription, error) {
+func (noopStripe) MigrateSubscriptionItems(_ context.Context, _ *StripeSubscription, _ string) (*StripeSubscription, error) {
 	return nil, nil
 }
-func (noopStripe) ScheduleDowngrade(_ context.Context, _ *StripeSubscription, _ PlanConfig) error {
-	return nil
+func (noopStripe) CreatePortalSession(_ context.Context, _, _ string) (string, error) {
+	return "", nil
 }
 func (noopStripe) SendMeterEvent(_ context.Context, _, _, _ string, _ int64) error { return nil }
 func (noopStripe) AddInvoiceItem(_ context.Context, _, _ string, _ int64, _, _ string) error {
@@ -163,7 +160,7 @@ func seedSubscription(t *testing.T, storeID, status string) {
 	ctx := context.Background()
 	if _, err := testPool.Exec(ctx,
 		`INSERT INTO subscriptions (store_id, status, plan, trial_ends_at, current_period_start, current_period_end)
-		 VALUES ($1, $2, 'grow', now()+interval '7d', now(), now()+interval '30d')
+		 VALUES ($1, $2, 'pro', now()+interval '7d', now(), now()+interval '30d')
 		 ON CONFLICT (store_id) DO UPDATE SET status=$2`,
 		storeID, status,
 	); err != nil {
@@ -277,7 +274,8 @@ func TestOnCartPaid_AC3_MeterBestEffort(t *testing.T) {
 	}
 }
 
-// AC5 Listener lê o campo: amount_cents == gmv; fee_cents == amount*GMVBps/10000 do plano.
+// AC5 Listener lê o campo: amount_cents == gmv; fee_cents == 0 sempre (comissão
+// sobre GMV eliminada para todo mundo — o plano único Pro não cobra taxa).
 func TestOnCartPaid_AC5_FeeCalculation(t *testing.T) {
 	requireDB(t)
 	ctx := context.Background()
@@ -295,12 +293,8 @@ func TestOnCartPaid_AC5_FeeCalculation(t *testing.T) {
 	if entry.AmountCents != 30000 {
 		t.Fatalf("amount_cents: want 30000, got %d", entry.AmountCents)
 	}
-
-	// grow plan = 130 bps = 1,30%; 30000 * 130 / 10000 = 390
-	cfg := Plans()[PlanGrow]
-	wantFee := int64(30000) * int64(cfg.GMVBps) / 10000
-	if entry.FeeCents != wantFee {
-		t.Fatalf("fee_cents: want %d, got %d", wantFee, entry.FeeCents)
+	if entry.FeeCents != 0 {
+		t.Fatalf("fee_cents: want 0 (sem comissão), got %d", entry.FeeCents)
 	}
 }
 
@@ -519,10 +513,9 @@ func TestOnCartPaid_CommissionOnNet_PixDiscount(t *testing.T) {
 	if entry.AmountCents != 16131 {
 		t.Fatalf("base da comissão want 16131 (líquido do PIX), got %d — cobrar sobre 16980 seria taxa sobre o valor cheio", entry.AmountCents)
 	}
-	// fee = base × bps do plano; confirma que o fee acompanha o líquido.
-	wantFee := int64(16131) * int64(entry.FeeBps) / 10000
-	if entry.FeeCents != wantFee {
-		t.Fatalf("fee_cents want %d (sobre o líquido), got %d", wantFee, entry.FeeCents)
+	// Sem comissão: fee_cents é sempre 0, independentemente da base líquida.
+	if entry.FeeCents != 0 {
+		t.Fatalf("fee_cents want 0 (sem comissão), got %d", entry.FeeCents)
 	}
 }
 
