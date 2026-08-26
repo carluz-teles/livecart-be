@@ -72,6 +72,34 @@ func (r *Repository) RecordUnlinkedOrderStatus(ctx context.Context, obs erp.ERPO
 	})
 }
 
+// AdoptOrphanOrderStatusEvents vincula ao carrinho as passagens que chegaram
+// antes de sabermos que o pedido era nosso.
+func (r *Repository) AdoptOrphanOrderStatusEvents(ctx context.Context, cartID, externalOrderID string) (int64, error) {
+	cart, err := parseUUID(cartID)
+	if err != nil {
+		return 0, err
+	}
+	return r.queries.AdoptOrphanERPOrderStatusEvents(ctx, sqlc.AdoptOrphanERPOrderStatusEventsParams{
+		CartID:          cart,
+		ExternalOrderID: externalOrderID,
+	})
+}
+
+// UpdateCartERPOrderNumber grava o número humano do pedido no carrinho.
+func (r *Repository) UpdateCartERPOrderNumber(ctx context.Context, cartID, orderNumber string) error {
+	if orderNumber == "" {
+		return nil
+	}
+	cart, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	return r.queries.UpdateCartERPOrderNumber(ctx, sqlc.UpdateCartERPOrderNumberParams{
+		CartID:      cart,
+		OrderNumber: pgtype.Text{String: orderNumber, Valid: true},
+	})
+}
+
 // ListStaleOrderStatuses lista pedidos não terminais parados há mais que a
 // janela.
 func (r *Repository) ListStaleOrderStatuses(ctx context.Context, staleAfter time.Duration, limit int) ([]erp.StaleERPOrderStatus, error) {
@@ -91,7 +119,7 @@ func (r *Repository) ListStaleOrderStatuses(ctx context.Context, staleAfter time
 			CartID:          uuidToString(row.CartID),
 			StoreID:         uuidToString(row.StoreID),
 			ExternalOrderID: row.ExternalOrderID.String,
-			Status:          row.ErpOrderStatus.String,
+			Status:          row.ErpOrderStatus,
 			StatusAt:        row.ErpOrderStatusAt.Time,
 		})
 	}

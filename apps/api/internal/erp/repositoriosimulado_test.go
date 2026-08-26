@@ -266,6 +266,21 @@ func (r *repoSimulado) RecordUnlinkedOrderStatus(_ context.Context, obs ERPOrder
 	return nil
 }
 
+// AdoptOrphanOrderStatusEvents vincula ao carrinho as passagens que já estavam
+// gravadas sem dono para aquele pedido.
+func (r *repoSimulado) AdoptOrphanOrderStatusEvents(_ context.Context, cartID, externalOrderID string) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var n int64
+	for i := range r.statusEventos {
+		if r.statusEventos[i].CartID == "" && r.statusEventos[i].ExternalOrderID == externalOrderID {
+			r.statusEventos[i].CartID = cartID
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (r *repoSimulado) ListStaleOrderStatuses(_ context.Context, _ time.Duration, _ int) ([]StaleERPOrderStatus, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

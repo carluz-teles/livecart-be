@@ -344,6 +344,8 @@ func TestERPRastreamentoGravaTrajetoSemDuplicar(t *testing.T) {
 		}
 	}
 
+	// 'aberto' já foi semeado na criação; observá-lo de novo no-opa, então o
+	// histórico tem exatamente uma linha por situação do trajeto.
 	hist := erpStatusHistory(t, fx.cartID)
 	if len(hist) != len(trajeto) {
 		t.Fatalf("histórico = %v (%d linhas), quero %d — reentrega não é transição",
@@ -393,8 +395,16 @@ func TestERPRastreamentoSobEntregasSimultaneas(t *testing.T) {
 	}
 	wg.Wait()
 
-	if hist := erpStatusHistory(t, fx.cartID); len(hist) != 1 {
-		t.Errorf("histórico = %v, quero uma linha só", hist)
+	// O trajeto já começa com a situação semeada na criação ('aberto'), então a
+	// asserção é sobre as passagens por 'enviado'.
+	enviados := 0
+	for _, s := range erpStatusHistory(t, fx.cartID) {
+		if s == string(providers.ERPOrderStatusEnviado) {
+			enviados++
+		}
+	}
+	if enviados != 1 {
+		t.Errorf("oito entregas simultâneas da mesma situação viraram %d linhas, quero 1", enviados)
 	}
 }
 

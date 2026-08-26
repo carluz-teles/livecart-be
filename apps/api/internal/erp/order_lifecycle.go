@@ -109,7 +109,7 @@ func (s *Service) EnsureERPOrderForCart(ctx context.Context, cartID, storeID str
 		return nil // não ressuscita carrinho cancelado
 	case OrderStateConverting:
 		if st.ExternalOrderID != "" {
-			return s.openCartOrder(ctx, cartID, st.ExternalOrderID)
+			return s.openCartOrder(ctx, storeID, cartID, st.ExternalOrderID)
 		}
 		// Em voo agora, ou processo morreu antes do POST: não bloqueia ninguém;
 		// a adoção por marcador acontece no confirm/varredura.
@@ -188,13 +188,13 @@ func (s *Service) criarPedidoParaCarrinho(ctx context.Context, cartID, storeID s
 		)
 	}
 
-	return s.openCartOrder(ctx, cartID, fresh.ExternalOrderID)
+	return s.openCartOrder(ctx, storeID, cartID, fresh.ExternalOrderID)
 }
 
 // openCartOrder fecha a criação: CAS converting→open, log e espelho. O pedido já
 // está segurando a peça desde o instante em que o ERP respondeu ao POST; aqui só
 // se registra isso do lado de cá.
-func (s *Service) openCartOrder(ctx context.Context, cartID, orderID string) error {
+func (s *Service) openCartOrder(ctx context.Context, storeID, cartID, orderID string) error {
 	moved, err := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateConverting, OrderStateOpen)
 	if err != nil {
 		return fmt.Errorf("transitioning cart to open: %w", err)
@@ -208,6 +208,7 @@ func (s *Service) openCartOrder(ctx context.Context, cartID, orderID string) err
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", orderID),
 	)
+	s.SeedOrderStatusOnCreate(ctx, storeID, cartID, orderID)
 	s.collab.MirrorToOrder(ctx, cartID)
 	return nil
 }
@@ -430,7 +431,7 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 			}
 		}
 		if orderID != "" {
-			if err := s.openCartOrder(ctx, cartID, orderID); err != nil {
+			if err := s.openCartOrder(ctx, storeID, cartID, orderID); err != nil {
 				return fmt.Errorf("opening order before confirm: %w", err)
 			}
 		}
@@ -680,7 +681,7 @@ func (s *Service) RunERPOrderOpsSweep(ctx context.Context) {
 		opCtx := logger.WithStore(ctx, op.StoreID, "")
 		switch {
 		case op.State == OrderStateConverting && op.ExternalOrderID != "":
-			if err := s.openCartOrder(opCtx, op.CartID, op.ExternalOrderID); err != nil {
+			if err := s.openCartOrder(opCtx, op.StoreID, op.CartID, op.ExternalOrderID); err != nil {
 				logger.From(opCtx, s.logger).Warn("sweep failed to open stuck order",
 					zap.String("cart_id", op.CartID), zap.Error(err))
 			}
@@ -691,7 +692,7 @@ func (s *Service) RunERPOrderOpsSweep(ctx context.Context) {
 				// chegar. O converting vazio fica para auditoria.
 				continue
 			}
-			if err := s.openCartOrder(opCtx, op.CartID, foundID); err != nil {
+			if err := s.openCartOrder(opCtx, op.StoreID, op.CartID, foundID); err != nil {
 				logger.From(opCtx, s.logger).Warn("sweep failed to open adopted order",
 					zap.String("cart_id", op.CartID), zap.Error(err))
 			}

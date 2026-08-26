@@ -32,6 +32,15 @@ import (
 const (
 	StatusSourceWebhook = "webhook"
 	StatusSourceSweep   = "sweep"
+	// StatusSourceCreate é a situação que não precisou ser observada: o pedido
+	// acabou de ser criado por nós, em situação Aberta.
+	//
+	// Existe por uma corrida medida: o webhook `inclusao_pedido` do ERP chega
+	// ~90ms DEPOIS do POST responder e ~90ms ANTES de gravarmos o
+	// external_order_id no carrinho. Nessa janela a primeira situação do pedido
+	// não encontra dono e é arquivada como avulsa — e o carrinho fica sem
+	// situação nenhuma, invisível para a varredura, para sempre.
+	StatusSourceCreate = "create"
 )
 
 // ERPOrderStatusObservation é uma situação observada num pedido do ERP.
@@ -82,6 +91,9 @@ type ERPOrderStatusRepository interface {
 	// FindCartByExternalOrderID resolve o carrinho a partir do id do pedido no
 	// ERP — o webhook só manda o id do pedido.
 	FindCartByExternalOrderID(ctx context.Context, externalOrderID, storeID string) (string, error)
+	// AdoptOrphanOrderStatusEvents vincula ao carrinho as passagens que chegaram
+	// antes de sabermos que aquele pedido era nosso.
+	AdoptOrphanOrderStatusEvents(ctx context.Context, cartID, externalOrderID string) (int64, error)
 }
 
 // SetOrderStatusRepository liga a persistência do rastreamento. Opcional: sem
@@ -158,6 +170,39 @@ func (s *Service) ObserveOrderStatus(ctx context.Context, storeID, externalOrder
 	// não pode desfazer isso nem devolver não-200 ao ERP.
 	s.collab.MirrorToOrder(ctx, t.CartID)
 	return nil
+}
+
+// SeedOrderStatusOnCreate registra a situação inicial do pedido que acabamos de
+// criar. Fecha a corrida descrita em StatusSourceCreate: mesmo que o webhook de
+// inclusão tenha chegado antes de o carrinho conhecer o pedido, o trajeto começa
+// aqui — e um webhook posterior com "aberto" no-opa, porque a situação já é essa.
+func (s *Service) SeedOrderStatusOnCreate(ctx context.Context, storeID, cartID, externalOrderID string) {
+	if s.status == nil || externalOrderID == "" {
+		return
+	}
+	// Primeiro adota o que já chegou. A ordem importa: a passagem órfã é a
+	// 'aberto' que o ERP anunciou, e adotá-la ANTES de semear faz a semente
+	// no-opar (a situação já é essa) em vez de criar uma segunda linha idêntica.
+	if n, err := s.status.AdoptOrphanOrderStatusEvents(ctx, cartID, externalOrderID); err != nil {
+		logger.From(ctx, s.logger).Warn("could not adopt orphan status events",
+			zap.String("cart_id", cartID), zap.Error(err))
+	} else if n > 0 {
+		logger.From(ctx, s.logger).Debug("adopted status events that arrived before the order was linked",
+			zap.String("cart_id", cartID), zap.Int64("events", n))
+	}
+
+	if _, _, err := s.status.RecordOrderStatus(ctx, ERPOrderStatusObservation{
+		StoreID:         storeID,
+		CartID:          cartID,
+		ExternalOrderID: externalOrderID,
+		Status:          providers.ERPOrderStatusAberto,
+		Source:          StatusSourceCreate,
+	}); err != nil {
+		logger.From(ctx, s.logger).Warn("could not seed the order's initial status",
+			zap.String("cart_id", cartID),
+			zap.String("external_order_id", externalOrderID),
+			zap.Error(err))
+	}
 }
 
 // RunERPOrderStatusSweep pergunta ao ERP a situação dos pedidos que pararam de

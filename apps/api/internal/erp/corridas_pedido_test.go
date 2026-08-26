@@ -285,8 +285,16 @@ func TestWebhooksDeSituacaoSimultaneosNaoDuplicamHistorico(t *testing.T) {
 	}
 	wg.Wait()
 
-	if len(repo.statusEventos) != 1 {
-		t.Errorf("gravou %d passagens para a mesma situação, quero 1", len(repo.statusEventos))
+	// O trajeto começa com a situação semeada na criação ('aberto'), então
+	// contamos só as passagens por 'faturado'.
+	faturados := 0
+	for _, e := range repo.statusEventos {
+		if e.Status == providers.ERPOrderStatusFaturado {
+			faturados++
+		}
+	}
+	if faturados != 1 {
+		t.Errorf("gravou %d passagens para a mesma situação, quero 1", faturados)
 	}
 }
 

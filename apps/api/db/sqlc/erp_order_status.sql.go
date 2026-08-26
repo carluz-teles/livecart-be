@@ -12,6 +12,50 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const adoptOrphanERPOrderStatusEvents = `-- name: AdoptOrphanERPOrderStatusEvents :execrows
+WITH adotadas AS (
+    UPDATE erp_order_status_events e
+    SET cart_id = $1::uuid
+    WHERE e.external_order_id = $2
+      AND e.cart_id IS NULL
+    RETURNING e.status, e.order_number, e.observed_at
+), ultima AS (
+    SELECT status, order_number FROM adotadas ORDER BY observed_at DESC LIMIT 1
+)
+UPDATE carts c
+SET erp_order_status    = u.status,
+    erp_order_status_at = NOW(),
+    erp_order_number    = COALESCE(u.order_number, c.erp_order_number)
+FROM ultima u
+WHERE c.id = $1::uuid
+`
+
+type AdoptOrphanERPOrderStatusEventsParams struct {
+	CartID          pgtype.UUID `json:"cart_id"`
+	ExternalOrderID string      `json:"external_order_id"`
+}
+
+// Vincula ao carrinho as passagens que chegaram antes de sabermos que o pedido
+// era nosso.
+//
+// O ERP dispara `inclusao_pedido` no instante em que o POST /pedidos responde —
+// medido chegando ~6s ANTES de gravarmos o external_order_id no carrinho. Aquela
+// primeira passagem é verdadeira e vale guardar, mas nasce sem dono; deixá-la
+// assim faria toda venda produzir uma linha órfã, e o sinal "pedido que não é
+// nosso" — que serve para saber se a entrega de webhook está viva — viraria ruído.
+//
+// Adota E projeta: a passagem adotada vira a situação ATUAL do carrinho. Sem a
+// segunda metade, o carrinho continuaria sem situação e a semente da criação
+// gravaria uma segunda linha idêntica — o trajeto abriria com
+// "aberto -> aberto", que não é uma transição, é uma duplicata.
+func (q *Queries) AdoptOrphanERPOrderStatusEvents(ctx context.Context, arg AdoptOrphanERPOrderStatusEventsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, adoptOrphanERPOrderStatusEvents, arg.CartID, arg.ExternalOrderID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const listERPOrderStatusHistory = `-- name: ListERPOrderStatusHistory :many
 SELECT id, external_order_id, order_number, status, previous_status,
        source, observed_at
@@ -63,16 +107,16 @@ const listStaleERPOrderStatuses = `-- name: ListStaleERPOrderStatuses :many
 SELECT c.id AS cart_id,
        COALESCE(c.store_id, e.store_id) AS store_id,
        c.external_order_id,
-       c.erp_order_status,
-       c.erp_order_status_at
+       COALESCE(c.erp_order_status, '') AS erp_order_status,
+       COALESCE(c.erp_order_status_at, c.created_at) AS erp_order_status_at
 FROM carts c
 JOIN live_events e ON e.id = c.event_id
-WHERE c.erp_order_status IS NOT NULL
-  AND c.erp_order_status NOT IN ('entregue', 'cancelado', 'nao_entregue')
+WHERE (c.erp_order_status IS NULL
+       OR c.erp_order_status NOT IN ('entregue', 'cancelado', 'nao_entregue'))
   AND c.external_order_id IS NOT NULL
   AND c.external_order_id <> ''
-  AND c.erp_order_status_at < NOW() - $1::interval
-ORDER BY c.erp_order_status_at ASC
+  AND COALESCE(c.erp_order_status_at, c.created_at) < NOW() - $1::interval
+ORDER BY COALESCE(c.erp_order_status_at, c.created_at) ASC
 LIMIT $2
 `
 
@@ -85,7 +129,7 @@ type ListStaleERPOrderStatusesRow struct {
 	CartID           pgtype.UUID        `json:"cart_id"`
 	StoreID          pgtype.UUID        `json:"store_id"`
 	ExternalOrderID  pgtype.Text        `json:"external_order_id"`
-	ErpOrderStatus   pgtype.Text        `json:"erp_order_status"`
+	ErpOrderStatus   string             `json:"erp_order_status"`
 	ErpOrderStatusAt pgtype.Timestamptz `json:"erp_order_status_at"`
 }
 
@@ -100,6 +144,15 @@ type ListStaleERPOrderStatusesRow struct {
 // 000138) e o evento é a fonte original. Exigir a coluna preenchida faria a
 // varredura ignorar em silêncio justamente os carrinhos mais antigos — os que
 // têm mais chance de ter perdido um webhook.
+//
+// Situação NULA entra na lista, e essa é a parte importante. O webhook de
+// inclusão do ERP chega antes de o carrinho conhecer o próprio pedido — medido
+// em ~90ms de diferença —, e naquela janela a primeira situação é arquivada sem
+// dono. Um carrinho que ficasse fora daqui por não ter situação seria justamente
+// o que perdeu o primeiro aviso, e nunca mais seria reconciliado.
+//
+// A idade, nesse caso, é a do carrinho: COALESCE com created_at evita perguntar
+// por um pedido que nasceu há dois segundos.
 func (q *Queries) ListStaleERPOrderStatuses(ctx context.Context, arg ListStaleERPOrderStatusesParams) ([]ListStaleERPOrderStatusesRow, error) {
 	rows, err := q.db.Query(ctx, listStaleERPOrderStatuses, arg.StaleAfter, arg.MaxRows)
 	if err != nil {
@@ -247,5 +300,24 @@ func (q *Queries) RecordUnlinkedERPOrderStatus(ctx context.Context, arg RecordUn
 		arg.Source,
 		arg.Payload,
 	)
+	return err
+}
+
+const updateCartERPOrderNumber = `-- name: UpdateCartERPOrderNumber :exec
+UPDATE carts
+SET erp_order_number = $1
+WHERE id = $2::uuid
+  AND erp_order_number IS DISTINCT FROM $1
+`
+
+type UpdateCartERPOrderNumberParams struct {
+	OrderNumber pgtype.Text `json:"order_number"`
+	CartID      pgtype.UUID `json:"cart_id"`
+}
+
+// Grava o número humano do pedido ("37"), que vem na resposta da criação. É como
+// o lojista chama o pedido ao telefone; o id interno não serve para essa conversa.
+func (q *Queries) UpdateCartERPOrderNumber(ctx context.Context, arg UpdateCartERPOrderNumberParams) error {
+	_, err := q.db.Exec(ctx, updateCartERPOrderNumber, arg.OrderNumber, arg.CartID)
 	return err
 }

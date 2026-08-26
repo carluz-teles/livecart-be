@@ -173,8 +173,8 @@ func MustNewUserID(raw string) UserID {
 	return id
 }
 
-func (id UserID) String() string  { return id.value }
-func (id UserID) IsZero() bool    { return id.value == "" }
+func (id UserID) String() string           { return id.value }
+func (id UserID) IsZero() bool             { return id.value == "" }
 func (id UserID) Equals(other UserID) bool { return id.value == other.value }
 
 // ProductID represents a product's unique identifier.

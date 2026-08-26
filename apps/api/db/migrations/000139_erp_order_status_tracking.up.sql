@@ -21,12 +21,15 @@ ALTER TABLE carts
     ADD COLUMN IF NOT EXISTS erp_order_number VARCHAR(32);
 
 -- Índice para a varredura de reconciliação: pedidos parados num estágio não
--- terminal são exatamente os que podem ter perdido um webhook. Parcial porque a
--- imensa maioria dos carrinhos nunca chega a ter pedido.
+-- terminal são exatamente os que podem ter perdido um webhook. Parcial pelo
+-- external_order_id porque a imensa maioria dos carrinhos nunca chega a ter
+-- pedido; a situação NULA fica DENTRO do índice de propósito — é o carrinho que
+-- perdeu o primeiro aviso, e ele é o mais importante de alcançar.
 CREATE INDEX IF NOT EXISTS idx_carts_erp_order_status_stale
-    ON carts (erp_order_status_at)
-    WHERE erp_order_status IS NOT NULL
-      AND erp_order_status NOT IN ('entregue', 'cancelado', 'nao_entregue');
+    ON carts (erp_order_status_at, created_at)
+    WHERE external_order_id IS NOT NULL
+      AND (erp_order_status IS NULL
+           OR erp_order_status NOT IN ('entregue', 'cancelado', 'nao_entregue'));
 
 CREATE TABLE IF NOT EXISTS erp_order_status_events (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),

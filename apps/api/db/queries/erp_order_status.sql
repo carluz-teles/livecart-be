@@ -80,17 +80,64 @@ ORDER BY observed_at DESC, id DESC;
 -- 000138) e o evento é a fonte original. Exigir a coluna preenchida faria a
 -- varredura ignorar em silêncio justamente os carrinhos mais antigos — os que
 -- têm mais chance de ter perdido um webhook.
+--
+-- Situação NULA entra na lista, e essa é a parte importante. O webhook de
+-- inclusão do ERP chega antes de o carrinho conhecer o próprio pedido — medido
+-- em ~90ms de diferença —, e naquela janela a primeira situação é arquivada sem
+-- dono. Um carrinho que ficasse fora daqui por não ter situação seria justamente
+-- o que perdeu o primeiro aviso, e nunca mais seria reconciliado.
+--
+-- A idade, nesse caso, é a do carrinho: COALESCE com created_at evita perguntar
+-- por um pedido que nasceu há dois segundos.
 SELECT c.id AS cart_id,
        COALESCE(c.store_id, e.store_id) AS store_id,
        c.external_order_id,
-       c.erp_order_status,
-       c.erp_order_status_at
+       COALESCE(c.erp_order_status, '') AS erp_order_status,
+       COALESCE(c.erp_order_status_at, c.created_at) AS erp_order_status_at
 FROM carts c
 JOIN live_events e ON e.id = c.event_id
-WHERE c.erp_order_status IS NOT NULL
-  AND c.erp_order_status NOT IN ('entregue', 'cancelado', 'nao_entregue')
+WHERE (c.erp_order_status IS NULL
+       OR c.erp_order_status NOT IN ('entregue', 'cancelado', 'nao_entregue'))
   AND c.external_order_id IS NOT NULL
   AND c.external_order_id <> ''
-  AND c.erp_order_status_at < NOW() - sqlc.arg(stale_after)::interval
-ORDER BY c.erp_order_status_at ASC
+  AND COALESCE(c.erp_order_status_at, c.created_at) < NOW() - sqlc.arg(stale_after)::interval
+ORDER BY COALESCE(c.erp_order_status_at, c.created_at) ASC
 LIMIT sqlc.arg(max_rows);
+
+-- name: AdoptOrphanERPOrderStatusEvents :execrows
+-- Vincula ao carrinho as passagens que chegaram antes de sabermos que o pedido
+-- era nosso.
+--
+-- O ERP dispara `inclusao_pedido` no instante em que o POST /pedidos responde —
+-- medido chegando ~6s ANTES de gravarmos o external_order_id no carrinho. Aquela
+-- primeira passagem é verdadeira e vale guardar, mas nasce sem dono; deixá-la
+-- assim faria toda venda produzir uma linha órfã, e o sinal "pedido que não é
+-- nosso" — que serve para saber se a entrega de webhook está viva — viraria ruído.
+--
+-- Adota E projeta: a passagem adotada vira a situação ATUAL do carrinho. Sem a
+-- segunda metade, o carrinho continuaria sem situação e a semente da criação
+-- gravaria uma segunda linha idêntica — o trajeto abriria com
+-- "aberto -> aberto", que não é uma transição, é uma duplicata.
+WITH adotadas AS (
+    UPDATE erp_order_status_events e
+    SET cart_id = sqlc.arg(cart_id)::uuid
+    WHERE e.external_order_id = sqlc.arg(external_order_id)
+      AND e.cart_id IS NULL
+    RETURNING e.status, e.order_number, e.observed_at
+), ultima AS (
+    SELECT status, order_number FROM adotadas ORDER BY observed_at DESC LIMIT 1
+)
+UPDATE carts c
+SET erp_order_status    = u.status,
+    erp_order_status_at = NOW(),
+    erp_order_number    = COALESCE(u.order_number, c.erp_order_number)
+FROM ultima u
+WHERE c.id = sqlc.arg(cart_id)::uuid;
+
+-- name: UpdateCartERPOrderNumber :exec
+-- Grava o número humano do pedido ("37"), que vem na resposta da criação. É como
+-- o lojista chama o pedido ao telefone; o id interno não serve para essa conversa.
+UPDATE carts
+SET erp_order_number = sqlc.arg(order_number)
+WHERE id = sqlc.arg(cart_id)::uuid
+  AND erp_order_number IS DISTINCT FROM sqlc.arg(order_number);

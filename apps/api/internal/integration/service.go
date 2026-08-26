@@ -5062,6 +5062,13 @@ func (s *Service) createERPOrderForCart(ctx context.Context, erpProvider provide
 	if err := s.repo.UpdateCartExternalOrderID(ctx, cart.ID, result.OrderID); err != nil {
 		return fmt.Errorf("saving external order ID: %w", err)
 	}
+	// O número humano ("37") só existe nesta resposta e no webhook. Guardar aqui
+	// significa que o lojista o vê desde o primeiro comentário, em vez de esperar
+	// a próxima transição do pedido.
+	if err := s.repo.UpdateCartERPOrderNumber(ctx, cart.ID, result.OrderNumber); err != nil {
+		logger.From(ctx, s.logger).Warn("could not store the ERP order number",
+			zap.String("cart_id", cart.ID), zap.Error(err))
+	}
 
 	// Group G fact (best-effort): the order now exists in the ERP. Este é o
 	// único ponto que o cria. Dedup pelo id do pedido no ERP.
