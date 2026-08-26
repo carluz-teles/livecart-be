@@ -1,6 +1,6 @@
 # ADR 001 — Integração LiveCart ↔ Olist/Tiny v3
 
-- **Status:** proposto
+- **Status:** proposto — Caminho A verificado em 26/08, ver §5.2
 - **Data:** 26/08/2026
 - **Contexto:** Fase 0 concluída. Base empírica em [`RECON.md`](../RECON.md) §7bis e §8.0,
   mapa do código em [`AUDIT.md`](../AUDIT.md).
@@ -135,26 +135,58 @@ Três achados tornam isso viável, e nenhum deles era conhecido antes da Fase 0:
    `POST /pedidos/{id}/marcadores` (corpo é **array puro**), legível em **segundos**, e
    **acumula** em vez de substituir.
 
-### 5.2 Caminho A e Caminho B coexistem, detectados por conta
+### 5.2 O Caminho A está VERIFICADO e é o alvo
 
-`[EMPÍRICO 11/07 + 25/08]` A conta de sandbox tem `reservado` e `disponivel` constantes em
-zero (92/92 leituras); a de produção tem `reservado=1` e `disponivel = saldo − reservado`.
-**A pergunta "A ou B" estava mal posta: é por conta.**
+`[EMPÍRICO 26/08 — módulo de reserva instalado na conta de teste]` A pergunta que
+bloqueava este ADR foi medida, e a resposta é favorável em todos os pontos:
 
-`[SWAGGER]` `GET /depositos` declara `possuiReserva` — *"Indica se a conta possui o módulo de
-reserva de estoque ativo"*. É o detector determinístico, e **nunca foi chamado** nem pela
-bateria nem pelo nosso código.
+| teste | resultado |
+|---|---|
+| criar pedido | `saldo` **inalterado**, `reservado 0→2`, `disponivel 42→40` |
+| **`PUT /itens` num pedido apenas RESERVADO** | **204** — e `reservado` foi 2→5: o PUT **reajusta a reserva** |
+| cancelar (`situacao=2`) | `reservado` volta a 0, saldo intocado, **sozinho** |
+| `lancar-estoque` sobre a reserva | `saldo −3` e `reservado −3` — converte limpo, **sem contar duas vezes** |
 
-`[ABERTO]` 🔴 Na conta ADABYTE, `GET /depositos` responde **403**, apesar de o token carregar
-o role `depositos-leitura` — é limitação de conta/plano. **Duas perguntas seguem sem resposta
-e bloqueiam a parte A deste ADR:**
+**A suposição sobre a qual todo o fluxo alvo se apoiava é verdadeira.** O pedido pode
+nascer na primeira admissão, ser mutado item a item com `PUT /itens`, e a reserva
+acompanha a grade sem que o saldo físico se mova.
 
-- `possuiReserva` numa conta com o módulo ligado;
-- se **`PUT /itens` funciona num pedido apenas RESERVADO** — a suposição sobre a qual todo o
-  Caminho A se apoia, e que ninguém jamais testou.
+Duas consequências grandes: o estoque fica **protegido no ERP durante a live** (o que
+no Caminho B era impossível — §5.3), e o movimento manual tipo `S` **desaparece**, e com
+ele a classe inteira de reservas órfãs.
 
-**Enquanto isso não for medido, implementamos o Caminho B**, que está integralmente provado,
-com a detecção já no código para ligar o A quando houver conta.
+#### 5.2.1 O que o Caminho A NÃO resolve
+
+`[EMPÍRICO 26/08]` **O ERP não faz o gate.** Um pedido de 92 unidades sobre 42
+disponíveis foi aceito, e o `disponivel` foi para −50. Três pedidos simultâneos
+disputando a última unidade: todos reservaram. **A admissão continua sendo nossa** —
+a regra de §5.4 e o portão atômico local seguem valendo integralmente.
+
+#### 5.2.2 A troca que a migração exige: ler `disponivel`, não `saldo`
+
+`[EMPÍRICO 26/08]` No Caminho A o **saldo físico não se move durante a live**. O webhook
+de estoque continua disparando, mas carregando o `saldo` — inalterado. Um espelho que
+leia o físico veria um número constante enquanto o `disponivel` despenca, e a live
+ofereceria unidade que já tem dono.
+
+O código já resolve isso: `ExtrairSaldoDisponivel` (`tiny.go:545`) lê `disponivel` e
+satura negativo em zero, e o provider troca físico por disponível quando
+`use_available_stock` está no metadata da integração (`factory.go:117`) — **por
+integração, não por loja**, porque um lojista pode ter mais de um ERP.
+
+`[EMPÍRICO 26/08]` Validado ponta a ponta com a flag ligada: com `saldo=9`,
+`reservado=3` e `disponivel=6` no Tiny, o estoque local do LiveCart ficou em **6**.
+
+**Portanto a migração para o Caminho A é: instalar o módulo na conta + ligar
+`use_available_stock` naquela integração.** Nenhum dos dois é código novo.
+
+#### 5.2.3 A detecção automática segue sem endpoint
+
+`[EMPÍRICO 26/08]` `GET /depositos` continua devolvendo **403** mesmo com o módulo
+instalado e com o role `depositos-leitura` no token. Então `possuiReserva` não serve
+como detector nesta conta. A detecção prática é comportamental e não custa escrita:
+ler `GET /estoque/{id}` e verificar se `disponivel` acompanha `saldo − reservado` em
+vez de ser zero constante.
 
 ### 5.3 No Caminho B, o estoque só é lançado no pagamento
 
@@ -253,14 +285,19 @@ deste ADR**, porque o B está inteiramente provado.
 
 ---
 
-## 8. O que fecha os pontos em aberto
+## 8. O que os testes de 26/08 fecharam, e o que sobrou
 
-Uma conta Tiny com o módulo de reserva **e** com permissão em `/depositos` e
-`/estoque/{id}/logs-movimentacao`. Nela, na ordem:
+**Fechado.** O Caminho A está verificado (§5.2): o pedido reserva sem mexer no físico,
+`PUT /itens` funciona e reajusta a reserva, cancelar devolve sozinho, o lançamento
+converte limpo, e o espelho segue o `disponivel` com `use_available_stock` ligado.
 
-1. `GET /depositos` → ler `possuiReserva`.
-2. `POST /pedidos` → `GET /estoque` (o `reservado` subiu sem mexer no `saldo`?).
-3. `PUT /pedidos/{id}/itens` no pedido apenas reservado → **é o teste que decide o Caminho A**.
-4. `PUT /situacao = 2` → o `reservado` volta sozinho?
-5. `POST /estoque` com `observacoes` marcada → `GET /logs-movimentacao` → o campo `observacao`
-   ecoa o que enviamos? Se sim, a classe `unconfirmed` inteira vira consulta determinística.
+**Sobrou.**
+
+1. `GET /estoque/{id}/logs-movimentacao` continua **403** — o shape real do log de
+   movimentação segue sem verificação, e com ele a possibilidade de resolver a classe
+   `unconfirmed` por consulta determinística em vez de sonda de saldo.
+2. `GET /depositos` continua **403**, então não há detector automático de conta.
+3. O **rate limit no Caminho A** não foi medido sob carga de live: a reserva agora é
+   `POST /pedidos` + `PUT /itens` em vez de `POST /estoque`, e o custo por carrinho muda.
+4. A **migração dos pedidos legados** — carrinhos com reserva por movimento manual
+   convivendo com carrinhos por reserva de pedido — não tem plano escrito nem teste.
