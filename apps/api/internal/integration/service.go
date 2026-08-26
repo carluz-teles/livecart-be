@@ -189,6 +189,12 @@ func (s *Service) erpStock() *erp.Service {
 		// interface é separada para o ledger ser opcional nos testes do erp.
 		s.erpStockService.SetStockMovementLedger(s.repo)
 		s.erpStockService.SetStockMovementResolution(s.repo)
+		// Serialização por pedido + teto real da API. Desligado por padrão: o
+		// caminho legado segue sendo o default até a migração terminar (ADR 001).
+		if config.ERPWritePipeline.Bool() {
+			s.erpStockService.EnableWritePipeline()
+			s.logger.Info("erp write pipeline enabled: serial queue per order + measured rate limits")
+		}
 	})
 	return s.erpStockService
 }

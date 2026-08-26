@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/internal/erp/erpwrite"
 )
 
 // ERPRepository is the persistence port consumed by the ERP service. It is
@@ -174,7 +176,34 @@ type Service struct {
 	movements          StockMovementLedger
 	movementScheduler  StockMovementScheduler
 	movementResolution StockMovementResolution
+
+	// pipeline serializa e estrangula as escritas no ERP. Opcional de
+	// propósito: nil = caminho legado (chamada direta ao provider), que é o
+	// que roda hoje em produção. Ver EnableWritePipeline.
+	pipeline *writePipeline
 }
+
+// writePipeline é o par limiter + fila serial por pedido. Existe porque três
+// corridas medidas contra a API real corrompem um pedido quando duas escritas
+// dele estão em voo, e porque uma rajada de live estoura o teto de 30 escritas
+// por minuto da conta.
+type writePipeline struct {
+	lim  *erpwrite.Limiter
+	fila *erpwrite.Queue
+}
+
+// EnableWritePipeline liga a serialização por pedido e o respeito ao teto real
+// da API. Fica desligado por padrão: o caminho legado continua sendo o default
+// até a migração terminar, exatamente como pede o ADR 001.
+func (s *Service) EnableWritePipeline() {
+	s.pipeline = &writePipeline{
+		lim:  erpwrite.NewLimiter(erpwrite.DefaultLimits()),
+		fila: erpwrite.NewQueue(erpwrite.DefaultLimits().BurstN),
+	}
+}
+
+// WritePipelineEnabled diz se a serialização está ativa (log e teste).
+func (s *Service) WritePipelineEnabled() bool { return s.pipeline != nil }
 
 // NewService creates a new ERP service. collab supplies the integration-Service
 // helpers the migrated stock flow still calls back into (provider resolution,
