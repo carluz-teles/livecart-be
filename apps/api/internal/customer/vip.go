@@ -23,12 +23,24 @@ import (
 // VIP CART ACTIVATOR INTERFACE
 // =============================================================================
 
+// VipActivation é o que a promoção fez com os carrinhos abertos do @.
+type VipActivation struct {
+	// EternalCartID é o carrinho que ficou eterno; vazio quando o @ não tinha
+	// nenhum carrinho aberto.
+	EternalCartID string
+	// Merged é quantos carrinhos foram fundidos no eterno.
+	Merged int
+	// Skipped é quantos ficaram de fora por já terem pedido no ERP: seguem com
+	// prazo, e portanto seguem expirando.
+	Skipped int
+}
+
 // VipCartActivator is implemented by the integration service to handle the
-// side effect of promoting a handle to VIP: turning their existing open carts
-// eternal (never_expires=true, expires_at NULL) and cancelling the pending
-// cart.expire tasks. Narrow interface so customer doesn't import integration.
+// side effect of promoting a handle to VIP: consolidating their existing open
+// carts into the single eternal one (never_expires=true, expires_at NULL).
+// Narrow interface so customer doesn't import integration.
 type VipCartActivator interface {
-	ActivateVipCartsForHandle(ctx context.Context, storeID, handle string) (int, error)
+	ActivateVipCartsForHandle(ctx context.Context, storeID, handle string) (VipActivation, error)
 }
 
 // SetVipCartActivator is wired from main.go after both services exist.
@@ -93,16 +105,24 @@ type VipHandleResponse struct {
 	RemovedAt    *time.Time `json:"removedAt,omitempty"`
 	AddedByID    *string    `json:"addedByUserId,omitempty"`
 	CartsUpdated int        `json:"cartsUpdated,omitempty"`
+	CartsMerged  int        `json:"cartsMerged,omitempty"`
+	CartsSkipped int        `json:"cartsSkipped,omitempty"`
+	// ActivationFailed: o @ virou VIP, mas os carrinhos que ele já tinha não
+	// foram consolidados e seguem com prazo para expirar.
+	ActivationFailed bool `json:"activationFailed,omitempty"`
 }
 
 func NewVipHandleResponse(v *domain.VipHandle) VipHandleResponse {
 	return VipHandleResponse{
-		ID:           v.ID(),
-		Handle:       v.Handle(),
-		AddedAt:      v.AddedAt(),
-		RemovedAt:    v.RemovedAt(),
-		AddedByID:    v.AddedByID(),
-		CartsUpdated: v.CartsUpdated(),
+		ID:               v.ID(),
+		Handle:           v.Handle(),
+		AddedAt:          v.AddedAt(),
+		RemovedAt:        v.RemovedAt(),
+		AddedByID:        v.AddedByID(),
+		CartsUpdated:     v.CartsUpdated(),
+		CartsMerged:      v.CartsMerged(),
+		CartsSkipped:     v.CartsSkipped(),
+		ActivationFailed: v.ActivationFailed(),
 	}
 }
 
@@ -235,24 +255,27 @@ func (s *Service) AddVipHandle(ctx context.Context, input AddVipInput) (*domain.
 		zap.String("handle", input.Handle),
 	)
 
-	cartsUpdated := 0
 	if s.vipCartActivator != nil {
-		// Best-effort: a linha já está no banco, então compras futuras já caem
-		// no carrinho eterno. Se anular a agenda dos carrinhos EXISTENTES
-		// falhar, o admin re-adiciona e tenta de novo.
-		n, actErr := s.vipCartActivator.ActivateVipCartsForHandle(ctx, input.StoreID.String(), input.Handle)
+		// A linha do VIP já está no banco, então compras FUTURAS já caem no
+		// carrinho eterno mesmo se a consolidação falhar aqui. Por isso a
+		// promoção não vira erro — mas também não pode mais passar em silêncio:
+		// o que falha aqui são os carrinhos que o comprador JÁ tem, e eles
+		// continuam expirando. Quem chamou precisa saber para poder avisar.
+		act, actErr := s.vipCartActivator.ActivateVipCartsForHandle(ctx, input.StoreID.String(), input.Handle)
 		if actErr != nil {
 			logger.From(ctx, s.logger).Error("failed to activate vip carts after promotion",
 				zap.String("storeId", input.StoreID.String()),
 				zap.String("handle", input.Handle),
 				zap.Error(actErr),
 			)
+			vip.SetActivationFailed()
 		} else {
-			cartsUpdated = n
+			vip.SetCartsUpdated(activatedCount(act))
+			vip.SetCartsMerged(act.Merged)
+			vip.SetCartsSkipped(act.Skipped)
 		}
 	}
 
-	vip.SetCartsUpdated(cartsUpdated)
 	return vip, nil
 }
 
@@ -410,4 +433,14 @@ func toDomainVipHandle(row sqlc.VipHandle) *domain.VipHandle {
 		removedAt,
 		addedByID,
 	)
+}
+
+// activatedCount mantém o contrato antigo de cartsUpdated: quantos carrinhos
+// abertos passaram a nunca expirar. Com a consolidação isso é 1 (o eterno) ou 0
+// (o @ não tinha carrinho aberto).
+func activatedCount(a VipActivation) int {
+	if a.EternalCartID == "" {
+		return 0
+	}
+	return 1
 }
