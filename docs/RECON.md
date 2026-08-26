@@ -46,6 +46,7 @@ comportamento decide algo, o item aparece como `[ABERTO]` com o teste nomeado.
    - [6.4 Webhooks](#64-webhooks)
    - [6.5 Autenticação](#65-autenticação)
 7. [Tabela de cobertura da Fase 0](#7-tabela-de-cobertura-da-fase-0)
+7bis. [BATERIA DE 26/08 — o que deixou de estar ABERTO](#7bis-bateria-de-2608--o-que-deixou-de-estar-aberto)
 8. [A pauta da próxima bateria](#8-a-pauta-da-próxima-bateria) — [o harness de 11/07 está num stash](#80-o-harness-da-bateria-de-1107-existe--e-está-num-stash)
 9. [Anexo — higiene e registros do dia](#9-anexo--higiene-e-registros-do-dia)
 10. [Verificação — a revisão adversarial de 25/08](#verificação)
@@ -1748,6 +1749,135 @@ ressalva · **ABERTO** = não sabemos.
 | G25 | NFe: `/notafiscal/{id}` existe? | **ABERTO — provável 404 silencioso** | `[CÓDIGO tiny.go:2636, :2665]` chama `/notafiscal/…`; `[SWAGGER]` **não há path com "notafiscal"** — os reais são `/notas/{idNota}` e `/notas/{idNota}/xml` | chamar os dois paths com uma NFe real; e conferir se `GET /pedidos/{id}.idNotaFiscal` vem preenchido |
 
 ---
+
+# 7bis. BATERIA DE 26/08 — o que deixou de estar ABERTO
+
+`[EMPÍRICO 26/08]` Bateria rodada contra a conta ADABYTE com `apps/tiny-lab`, guard de CNPJ
+liberado. **9 pedidos criados, todos cancelados e o estoque devolvido ao final** (produto
+`342753344` voltou de 54 para 55). Evidência crua em `scratchpad/bateria.jsonl`.
+
+## 7bis.1 `POST /pedidos` — a obrigatoriedade real
+
+| teste | corpo | resultado |
+|---|---|---|
+| A1 | `{}` | **400** — `detalhes[0]` = `{"campo":"idContato","mensagem":"Campo obrigatório"}` |
+| A2 | sem `idContato` | **400**, mesmo erro |
+| A3 | **sem `itens`** | **201** — pedido criado SEM item nenhum |
+| A4 | sem `data` | **201** |
+| A5 | só `idContato` + `itens` | **201** |
+| A6 | item sem `valorUnitario` | **400** — `{"campo":"itens[0].valorUnitario","mensagem":"Este valor deve ser maior que 0"}` |
+
+**`idContato` é o ÚNICO campo obrigatório no nível raiz.** `itens` e `data` são opcionais —
+dá para criar pedido vazio e preencher depois com `PUT /itens`, que é exatamente a manobra
+que o fluxo alvo precisa. Se `itens` vier, cada linha exige `valorUnitario > 0`.
+
+## 7bis.2 `PUT /itens` — frete e desconto SOBREVIVEM
+
+Pedido criado com `valorFrete: 15.90` e `valorDesconto: 5.00`, depois mutado:
+
+| momento | frete | desconto | totalProdutos | totalPedido | linhas |
+|---|---|---|---|---|---|
+| criado (2 × R$10) | 15.9 | 5 | 20 | **30.9** | 1 |
+| após `PUT /itens` (3 × R$10) | **15.9** | **5** | 30 | **40.9** | 1 |
+| após `PUT /itens` (1×10 + 2×7) | **15.9** | **5** | 24 | **34.9** | 2 |
+
+**`valorFrete` e `valorDesconto` são preservados**; só o total de produtos é recalculado, e
+`valorTotalPedido = produtos + frete − desconto`. Isso derruba o risco que o §3.2 levantava
+de "pedido mutável exigir cancel+recreate para não perder o frete".
+
+**Duas linhas do mesmo produto são MANTIDAS SEPARADAS** — o ERP não mescla. Regra direta
+para a feature de mesclagem (§7 do brief): somar quantidades é decisão NOSSA, não do ERP.
+
+`{"itens":[]}` → **204** (grade vazia aceita, confirma 11/07 T6).
+
+## 7bis.3 O bloqueio do estoque lançado, confirmado
+
+| passo | resultado |
+|---|---|
+| `lancar-estoque` em pedido Aberta | **204**, saldo 55 → 54 |
+| `PUT /itens` COM estoque lançado | **400** `{"campo":"pedido.motivosBloqueio[0]","mensagem":"estoque lançado"}` |
+| `estornar-estoque` | **204** |
+| `PUT /itens` depois do estorno | **204** |
+
+Reproduz 11/07 T6 byte a byte. **É a trava que torna "pedido mutável + estoque protegido"
+incompatíveis no Caminho B.**
+
+## 7bis.4 Contas a receber — o território virgem, mapeado
+
+| teste | resultado |
+|---|---|
+| `lancar-contas` em pedido **sem parcelas** | **400** `"Não existem parcelas cadastradas! É necessário que você inclua parcelas para integrar o financeiro"` |
+| `lancar-contas` com `pagamento.parcelas` | **204** — cria **1 conta por parcela** |
+| `GET /contas-receber?idVenda={idPedido}` | **200**, lista as contas do pedido (`historico` = `"Ref. ao pedido de venda nº 9, <cliente>"`) |
+| `lancar-contas` 2ª vez | **400** `"Já existem contas lançadas para este pedido"` — **não duplica** |
+| `estornar-contas` | **204**, contas voltam a 0 |
+| `estornar-contas` sem contas | **204** — no-op |
+| relançar após estorno | **204** — funciona |
+
+**`idVenda` é o elo pedido ↔ contas** — era `[ABERTO]` em §5.
+
+## 7bis.5 🔴 A assimetria que causa estorno duplo
+
+| ação | o que o cancelamento faz sozinho |
+|---|---|
+| **contas a receber** | **ESTORNA automaticamente** — após `situacao=2`, `GET /contas-receber?idVenda=` devolve 0 |
+| **estoque lançado** | **NÃO estorna** — saldo permaneceu 54 após cancelar |
+
+Responde diretamente a pergunta do F5 do brief. **Cancelar ⇒ estornar estoque explicitamente,
+e NUNCA estornar contas** (seria estorno duplo). Confirma 11/07 T7 no lado do estoque e
+acrescenta o lado financeiro, que nunca havia sido testado.
+
+## 7bis.6 Situação: a máquina de estados é totalmente permissiva
+
+Nove transições encadeadas num mesmo pedido, **todas 204**, e o `GET` final confirma que a
+situação REALMENTE mudou (terminou em `3`):
+
+`0→3` · `3→3` · `3→4` · `4→7` · `7→5` · `5→6` · **`6→0`** · `→2` · **`2→3`**
+
+**Nenhuma transição foi bloqueada** — inclusive Entregue voltando para Aberta e Cancelada
+sendo reaberta. A matriz de 88 células desconhecidas do §3.4 se resolve assim: o ERP não
+impõe máquina de estados via API. **Qualquer invariante de estado tem de ser nossa.**
+
+## 7bis.7 Paginação e marcadores
+
+- `limit=1000` → **400** `"Este valor deve ser menor ou igual a 100"`. **O teto é 100.**
+- `limit=0` → **400** `"Este valor deve ser positivo"`.
+- `GET /pedidos?numero=N` → **200** e devolve o pedido. A busca por número que o lojista vê **funciona**.
+- `POST /pedidos/{id}/marcadores` — o corpo é um **array puro** `[{"descricao":"tag"}]`, não um objeto.
+- **Read-after-write do marcador: achou na 1ª tentativa, 2,6 s depois do POST** — e desses,
+  2,2 s eram a MINHA pausa de rate limit. O índice é praticamente imediato. Isso encerra a
+  dúvida do §3.6: não são 112 s, e o "~300 ms" do comentário do código, embora obtido por
+  leitura errada, está na ordem de grandeza certa.
+- `POST /marcadores` **ACUMULA**: após dois POSTs, `GET /pedidos/{id}/marcadores` devolveu
+  `[{"descricao":"lc-lab-X"},{"descricao":"lc-lab-X-b"}]`.
+
+## 7bis.8 `POST /pedidos` deduplica por CONTEÚDO
+
+Dois POSTs com payload idêntico (mesmo contato, mesmos itens, mesma observação) → o segundo
+volta **409 `{"mensagem":"Esse registro já existe"}`**. Não é chave de idempotência nossa: é
+hash do conteúdo, do lado deles. Foi preciso variar o `valorUnitario` para criar pedidos de
+teste distintos. Explica o 409 que o `adoptExistingOrder` trata — e explica por que dois
+compradores com carrinho idêntico no mesmo instante podem colidir.
+
+## 7bis.9 O que a documentação oficial confirmou
+
+`[DOC https://api-docs.erp.olist.com/documentacao/comecando/limites-de-consulta]`
+Headers `X-RateLimit-Limit` (por minuto), `X-RateLimit-Remaining`, `X-RateLimit-Reset`
+(segundos). **Nenhuma menção a `Retry-After`** — bate com a medição. Dois acréscimos que a
+medição não podia revelar: **os limites são por CONTA, não por aplicativo** (várias lojas no
+mesmo Tiny dividem o orçamento) e **leitura tem limite maior que escrita** — os 30/min que
+medi foram em `GET`, então o teto de escrita é possivelmente MENOR.
+
+`[DOC .../webhooks/webhooks]` Quatro tipos: vendas (criado/alterado), pedido enviado,
+movimentação de estoque, NF autorizada. **Nenhuma menção a assinatura, HMAC ou token** — o
+que confirma a captura de 26/08. Retry: **até 10 vezes, com atraso crescente de +5 min a
+cada tentativa**, enquanto não receber HTTP 200.
+
+`[EMPÍRICO 26/08: headers capturados pela ponte]` A entrega real do painel do Tiny trouxe
+apenas headers do Cloudflare (do túnel), tracing interno deles (`X-Datadog-*`, `traceparent`,
+`baggage` do Sentry) e `User-Agent: Go-http-client/2.0`. **Corpo vazio no ping de validação.**
+🔴 **Consequência de segurança:** o `storeId` na URL é o único segredo do endpoint. Quem
+souber a URL forja webhook de estoque ou de pedido. Vale avaliar um segredo por loja.
 
 # 8. A pauta da próxima bateria
 
