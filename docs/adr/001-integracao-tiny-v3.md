@@ -162,6 +162,23 @@ disponíveis foi aceito, e o `disponivel` foi para −50. Três pedidos simultâ
 disputando a última unidade: todos reservaram. **A admissão continua sendo nossa** —
 a regra de §5.4 e o portão atômico local seguem valendo integralmente.
 
+#### 5.2.2 🔴 `estornar-estoque` num pedido apenas RESERVADO infla a reserva
+
+`[EMPÍRICO 26/08]` Num pedido de 3 unidades que só reservou (nunca lançou), três
+chamadas seguidas a `POST /pedidos/{id}/estornar-estoque` devolveram 204 e o
+`reservado` subiu **+3 a cada uma**: 12 → 15 → 18 → 21. Não é no-op, e não tem teto.
+
+Isso é o oposto do Caminho B, onde estornar sobre pedido não lançado é 204 inócuo
+(medido em 11/07 T2 e reconfirmado em 26/08). **O mesmo endpoint tem semânticas
+opostas conforme a conta tenha ou não o módulo de reserva.**
+
+**Consequência direta:** o ciclo de mutação do Design C — `estornar → PUT /itens →
+lançar` — **não pode ser usado no Caminho A**. Ele inflaria o `reservado` a cada item
+que a compradora acrescentasse, consumindo disponível que não existe.
+
+No Caminho A a mutação é só `PUT /itens`, que já reajusta a reserva sozinho (§5.2).
+O `estornar-estoque` fica reservado ao caminho B e ao cancelamento pós-lançamento.
+
 #### 5.2.2 A troca que a migração exige: ler `disponivel`, não `saldo`
 
 `[EMPÍRICO 26/08]` No Caminho A o **saldo físico não se move durante a live**. O webhook
@@ -180,7 +197,7 @@ integração, não por loja**, porque um lojista pode ter mais de um ERP.
 **Portanto a migração para o Caminho A é: instalar o módulo na conta + ligar
 `use_available_stock` naquela integração.** Nenhum dos dois é código novo.
 
-#### 5.2.3 A detecção automática segue sem endpoint
+#### 5.2.4 A detecção automática segue sem endpoint
 
 `[EMPÍRICO 26/08]` `GET /depositos` continua devolvendo **403** mesmo com o módulo
 instalado e com o role `depositos-leitura` no token. Então `possuiReserva` não serve
