@@ -42,7 +42,11 @@ type pedidoSimulado struct {
 	// essa diferença que o cancelamento precisa devolver. Foi medido: um pedido
 	// de 2 unidades chegou a segurar 4 depois de um estorno, e cancelá-lo baixou
 	// as 4.
-	reservado      map[string]int
+	reservado map[string]int
+	// notas guarda a informação adicional de cada linha, como o ERP guarda: é
+	// por ela que se distingue a linha que o LiveCart escreveu da que o lojista
+	// digitou no painel.
+	notas          map[string]string
 	situacao       int
 	estoqueLancado bool
 	marcadores     []string
@@ -74,12 +78,16 @@ type erpSimulado struct {
 	lancamentos int
 	situacoes   int
 	pagamentos  int
+	// leiturasDeGrade conta os GET que a preservação das linhas do lojista custa.
+	leiturasDeGrade int
 
 	// Falhas injetáveis.
 	falharPut     error
 	falharCriacao error
 	// putsAteFalhar > 0 faz os N primeiros PUTs passarem e o seguinte falhar.
 	putsAteFalhar int
+	// falharLeituraDeGrade derruba o GET que precede a escrita.
+	falharLeituraDeGrade error
 	// antesDoPut roda antes de cada PUT — para o teste encenar um ERP lento e
 	// estourar o prazo do chamador, ou mexer no carrinho no meio da chamada.
 	antesDoPut func()
@@ -147,10 +155,11 @@ func (e *erpSimulado) CreateOrder(_ context.Context, order providers.ERPOrder) (
 	e.criacoes++
 	e.proximo++
 	id := fmt.Sprintf("ped-%d", e.proximo)
-	p := &pedidoSimulado{id: id, itens: map[string]int{}, reservado: map[string]int{}, situacao: providers.SituacaoAberta}
+	p := &pedidoSimulado{id: id, itens: map[string]int{}, reservado: map[string]int{}, notas: map[string]string{}, situacao: providers.SituacaoAberta}
 	grade := map[string]int{}
 	for _, it := range order.Items {
 		grade[it.ProductID] += it.Quantity
+		p.notas[it.ProductID] = it.Note
 	}
 	e.aplicarGrade(p, grade)
 	e.pedidos[id] = p
@@ -190,11 +199,68 @@ func (e *erpSimulado) UpdateOrderItems(ctx context.Context, orderID string, iten
 		return providers.ErrOrderStockLaunched
 	}
 	grade := map[string]int{}
+	if p.notas == nil {
+		p.notas = map[string]string{}
+	}
+	novas := map[string]string{}
 	for _, it := range itens {
 		grade[it.ProductID] += it.Quantity
+		novas[it.ProductID] = it.Note
 	}
+	p.notas = novas // substituição: a grade nova define as notas, como no ERP
 	e.aplicarGrade(p, grade)
 	return nil
+}
+
+// GetOrderItems devolve a grade com as notas, como o ERP real devolve.
+func (e *erpSimulado) GetOrderItems(_ context.Context, orderID string) ([]providers.ERPOrderItem, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.leiturasDeGrade++
+	if e.falharLeituraDeGrade != nil {
+		return nil, e.falharLeituraDeGrade
+	}
+	p := e.pedidos[orderID]
+	if p == nil {
+		return nil, fmt.Errorf("pedido %s não existe", orderID)
+	}
+	out := make([]providers.ERPOrderItem, 0, len(p.itens))
+	for produto, q := range p.itens {
+		out = append(out, providers.ERPOrderItem{
+			ProductID: produto, Quantity: q, UnitPrice: 2000, Note: p.notas[produto],
+		})
+	}
+	return out, nil
+}
+
+// limparMarcadores encena um pedido criado ANTES de as linhas serem marcadas.
+func (e *erpSimulado) limparMarcadores(orderID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if p := e.pedidos[orderID]; p != nil {
+		p.notas = map[string]string{}
+	}
+}
+
+// adicionarLinhaDoLojista encena o lojista somando um produto ao pedido pelo
+// painel: entra na grade, segura estoque, e NÃO leva o nosso marcador.
+func (e *erpSimulado) adicionarLinhaDoLojista(orderID, produtoID string, qtd int, nota string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	p := e.pedidos[orderID]
+	if p == nil {
+		return
+	}
+	nova := map[string]int{}
+	for k, v := range p.itens {
+		nova[k] = v
+	}
+	nova[produtoID] += qtd
+	if p.notas == nil {
+		p.notas = map[string]string{}
+	}
+	p.notas[produtoID] = nota
+	e.aplicarGrade(p, nova)
 }
 
 // LaunchOrderStock não está na interface ERPProvider — o LiveCart não lança

@@ -40,6 +40,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -427,7 +428,11 @@ func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, ord
 		if mesmaGrade(enviada, grid) {
 			return enviada, nil // convergiu: o pedido já reflete o carrinho
 		}
-		if err := s.enviarGrade(ctx, erpProvider, cartID, storeID, orderID, grid); err != nil {
+		final, mergeErr := s.preservarLinhasDoLojista(ctx, erpProvider, orderID, grid)
+		if mergeErr != nil {
+			return nil, mergeErr
+		}
+		if err := s.enviarGrade(ctx, erpProvider, cartID, storeID, orderID, final); err != nil {
 			return nil, err
 		}
 		enviada = grid
@@ -460,6 +465,62 @@ func mesmaGrade(a, b []providers.ERPOrderItem) bool {
 		}
 	}
 	return true
+}
+
+// preservarLinhasDoLojista relê o pedido e devolve a grade a enviar: a nossa,
+// mais o que o lojista acrescentou pelo painel.
+//
+// A escrita é SUBSTITUIÇÃO — `PUT /itens` troca a grade inteira. Sem reler antes,
+// toda linha que ele tenha digitado desaparece na próxima mutação. Medido em
+// 26/08/2026: o lojista somou 3 unidades de um produto ao pedido, o comentário
+// seguinte da compradora fez o LiveCart reenviar a sua grade, e a linha sumiu com
+// HTTP 204 e nenhum aviso — as 3 unidades voltaram à venda enquanto ele achava
+// que estavam comprometidas.
+//
+// A partilha:
+//
+//   - linha COM o nosso marcador → nossa; a grade nova a substitui;
+//   - linha SEM marcador, de produto que está no carrinho → tratada como nossa.
+//     É o caso dos pedidos criados ANTES do marcador existir: preservá-la e
+//     mandar a nossa junto dobraria a quantidade;
+//   - linha SEM marcador, de produto fora do carrinho → do lojista, preservada.
+//
+// O caso que essa regra NÃO distingue é o lojista somar unidades de um produto
+// que a compradora já pediu: a nossa quantidade vence, porque ela vem do
+// carrinho. É a ambiguidade que sobra, e ela é irredutível sem um marcador nas
+// linhas antigas.
+//
+// Falha de leitura NÃO vira escrita cega. Pular a mutação adia o ajuste da
+// reserva, e a próxima tentativa a faz; escrever sem saber apaga o trabalho de
+// alguém.
+func (s *Service) preservarLinhasDoLojista(ctx context.Context, erpProvider providers.ERPProvider, orderID string, nossa []providers.ERPOrderItem) ([]providers.ERPOrderItem, error) {
+	atuais, err := erpProvider.GetOrderItems(ctx, orderID)
+	if err != nil {
+		return nil, fmt.Errorf("relendo o pedido antes de escrever (mutação adiada para não apagar linha do lojista): %w", err)
+	}
+
+	noCarrinho := make(map[string]bool, len(nossa))
+	for _, it := range nossa {
+		noCarrinho[it.ProductID] = true
+	}
+
+	final := make([]providers.ERPOrderItem, 0, len(nossa)+len(atuais))
+	final = append(final, nossa...)
+	for _, it := range atuais {
+		if providers.IsLiveCartItem(it.Note) || noCarrinho[it.ProductID] {
+			continue // nossa, e a grade nova já a representa
+		}
+		final = append(final, it)
+	}
+
+	if len(final) > len(nossa) {
+		logger.From(ctx, s.logger).Info("preserving lines the merchant added by hand",
+			zap.String("external_order_id", orderID),
+			zap.Int("ours", len(nossa)),
+			zap.Int("theirs", len(final)-len(nossa)),
+		)
+	}
+	return final, nil
 }
 
 // enviarGrade manda a grade e trata a única recusa que autoriza um estorno.
@@ -518,6 +579,11 @@ func (s *Service) cartGrid(ctx context.Context, cartID string) ([]providers.ERPO
 			Name:      item.ProductName,
 			Quantity:  item.Quantity,
 			UnitPrice: item.UnitPrice,
+			// Marca a linha como nossa. É o que permite, na próxima leitura,
+			// distinguir o que o LiveCart escreveu do que o lojista digitou —
+			// e preservar o dele. A keyword vai junto porque é o que ele
+			// reconhece na tela.
+			Note: strings.TrimSpace(providers.LiveCartItemMarker + " " + item.ProductKeyword),
 		})
 	}
 	if len(grid) == 0 {

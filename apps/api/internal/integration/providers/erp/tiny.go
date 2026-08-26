@@ -1123,6 +1123,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 			},
 			"quantidade":    item.Quantity,
 			"valorUnitario": float64(item.UnitPrice) / 100,
+			"infoAdicional": item.Note,
 		}
 	}
 
@@ -1995,6 +1996,7 @@ func (t *Tiny) UpdateOrderItems(ctx context.Context, orderID string, items []pro
 			"produto":       map[string]any{"id": productID},
 			"quantidade":    item.Quantity,
 			"valorUnitario": float64(item.UnitPrice) / 100,
+			"infoAdicional": item.Note,
 		}
 	}
 
@@ -2096,6 +2098,48 @@ func bloqueioPorEstoqueLancado(body []byte) bool {
 		}
 	}
 	return false
+}
+
+// GetOrderItems lê a grade atual do pedido, com a informação adicional de cada
+// linha — é ela que diz quem escreveu aquela linha.
+//
+// Necessária porque a escrita é SUBSTITUIÇÃO: sem reler antes, toda linha que o
+// lojista tenha acrescentado pelo painel é apagada em silêncio na próxima
+// mutação, junto com o estoque que ela segurava.
+func (t *Tiny) GetOrderItems(ctx context.Context, orderID string) ([]providers.ERPOrderItem, error) {
+	endpoint := fmt.Sprintf("%s/pedidos/%s", tinyAPIBaseURL, orderID)
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return nil, fmt.Errorf("reading order items: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return nil, fmt.Errorf("read order items failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+	}
+	var out struct {
+		Itens []struct {
+			Produto struct {
+				ID        int64  `json:"id"`
+				Descricao string `json:"descricao"`
+			} `json:"produto"`
+			Quantidade    float64 `json:"quantidade"`
+			ValorUnitario float64 `json:"valorUnitario"`
+			InfoAdicional string  `json:"infoAdicional"`
+		} `json:"itens"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parsing order items: %w", err)
+	}
+	itens := make([]providers.ERPOrderItem, 0, len(out.Itens))
+	for _, it := range out.Itens {
+		itens = append(itens, providers.ERPOrderItem{
+			ProductID: strconv.FormatInt(it.Produto.ID, 10),
+			Name:      it.Produto.Descricao,
+			Quantity:  int(it.Quantidade),
+			UnitPrice: int64(math.Round(it.ValorUnitario * 100)),
+			Note:      it.InfoAdicional,
+		})
+	}
+	return itens, nil
 }
 
 // GetOrderSituacao lê a situação atual do pedido (GET /pedidos/{id}).

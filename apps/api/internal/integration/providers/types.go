@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -336,6 +337,12 @@ type ERPProvider interface {
 	// SetOrderSituacao transitions the order status (PUT /pedidos/{id}/situacao).
 	// Use as constantes Situacao* — o enum completo do ERP está lá.
 	SetOrderSituacao(ctx context.Context, orderID string, situacao int) error
+
+	// GetOrderItems lê a grade atual do pedido, com a informação adicional de
+	// cada linha. É o que permite preservar o que o lojista acrescentou à mão:
+	// a escrita substitui a grade inteira, então sem reler antes a linha dele
+	// desaparece em silêncio.
+	GetOrderItems(ctx context.Context, orderID string) ([]ERPOrderItem, error)
 
 	// GetOrderSituacao lê a situação atual do pedido no ERP
 	// (GET /pedidos/{id}). É a reconciliação do rastreamento: webhook perdido
@@ -956,7 +963,28 @@ type ERPOrderItem struct {
 	Name      string `json:"name"`
 	Quantity  int    `json:"quantity"`
 	UnitPrice int64  `json:"unit_price"` // In cents
+	// Note vai para a informação adicional da linha no ERP e volta intacta na
+	// leitura. É por ela que se sabe, ao reler um pedido, quais linhas são
+	// nossas e quais o lojista digitou à mão — ver LiveCartItemMarker.
+	Note string `json:"note,omitempty"`
 }
+
+// LiveCartItemMarker abre a informação adicional de toda linha que o LiveCart
+// escreve num pedido do ERP.
+//
+// Existe porque `PUT /pedidos/{id}/itens` SUBSTITUI a grade inteira. Medido em
+// 26/08/2026: o lojista acrescentou um produto ao pedido pelo painel, o
+// comentário seguinte da compradora fez o LiveCart reenviar a sua grade, e a
+// linha dele sumiu — HTTP 204, sem aviso — junto com as 3 unidades que ela
+// segurava, que voltaram à venda.
+//
+// Com o marcador, reler o pedido antes de escrever separa o que é nosso do que é
+// dele, e o que é dele é reenviado junto. O texto é legível de propósito: o
+// lojista vê "[livecart]" na linha e entende de onde ela veio.
+const LiveCartItemMarker = "[livecart]"
+
+// IsLiveCartItem diz se a linha foi escrita pelo LiveCart.
+func IsLiveCartItem(note string) bool { return strings.HasPrefix(note, LiveCartItemMarker) }
 
 // OrderResult is the result of creating an order in the ERP.
 type OrderResult struct {

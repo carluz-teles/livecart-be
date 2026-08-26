@@ -817,3 +817,164 @@ func TestPagamentoGastaExatamenteUmPutDeGrade(t *testing.T) {
 			"minuto", got)
 	}
 }
+
+// ─── 10. O que o lojista digita no pedido ───────────────────────────────────
+
+// A escrita da grade é SUBSTITUIÇÃO. Sem reler antes, a linha que o lojista
+// acrescentou pelo painel some na próxima mutação — e o estoque dela volta à
+// venda enquanto ele acha que está comprometido.
+//
+// Medido contra a API real em 26/08/2026: pedido com 2 un. do produto A, lojista
+// soma 3 un. do produto B, comentário seguinte faz o LiveCart reenviar só o A →
+// HTTP 204, a linha B desaparece, e o `reservado` de B cai de 3 para 0.
+func TestLinhaQueOLojistaAdicionouSobrevive(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 20, "ext-p2": 10})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 2))
+	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@maria")
+	orderID := repo.carrinho("cart-1").externalOrderID
+
+	// O lojista soma 3 unidades de outro produto pelo painel.
+	erp.adicionarLinhaDoLojista(orderID, "ext-p2", 3, "cliente pediu por DM")
+	if got := erp.estoque("ext-p2").reservado; got != 3 {
+		t.Fatalf("preparo: reservado de p2 = %d, quero 3", got)
+	}
+
+	// Chega mais um comentário: o LiveCart reenvia a SUA grade.
+	repo.definirItens("cart-1", item("p1", 5))
+	if err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1"); err != nil {
+		t.Fatalf("mutação: %v", err)
+	}
+
+	ped := erp.pedido(orderID)
+	if ped.itens["ext-p2"] != 3 {
+		t.Errorf("a linha do lojista virou %d un. (quero 3) — reenviar a nossa grade "+
+			"apagou o que ele digitou, sem aviso", ped.itens["ext-p2"])
+	}
+	if ped.itens["ext-p1"] != 5 {
+		t.Errorf("a nossa linha = %d, quero 5", ped.itens["ext-p1"])
+	}
+	if got := erp.estoque("ext-p2").reservado; got != 3 {
+		t.Errorf("reservado de p2 = %d, quero 3 — o estoque dele não pode voltar à "+
+			"venda por causa de um comentário da compradora", got)
+	}
+}
+
+// A nossa linha é SUBSTITUÍDA, não somada. Preservar a nossa própria linha e
+// mandar a grade nova junto dobraria a quantidade.
+func TestNossaLinhaNaoSeDuplicaNaFusao(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 50})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 2))
+	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@maria")
+
+	for _, qtd := range []int{4, 7, 3} {
+		repo.definirItens("cart-1", item("p1", qtd))
+		if err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1"); err != nil {
+			t.Fatalf("mutação para %d: %v", qtd, err)
+		}
+		if got := erp.estoque("ext-p1").reservado; got != qtd {
+			t.Fatalf("reservado = %d depois de mandar %d — a grade está somando em "+
+				"vez de substituir", got, qtd)
+		}
+	}
+}
+
+// E remover um item do carrinho continua removendo do pedido: a linha é nossa,
+// tem o nosso marcador, e sai.
+func TestRemoverItemAindaRemoveComAFusaoLigada(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 20, "ext-p2": 20})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 3), item("p2", 2))
+	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 3, 2000, "@maria")
+
+	repo.definirItens("cart-1", item("p1", 3))
+	if err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1"); err != nil {
+		t.Fatalf("mutação: %v", err)
+	}
+	if got := erp.estoque("ext-p2").reservado; got != 0 {
+		t.Errorf("reservado de p2 = %d, quero 0 — a linha era NOSSA e saiu do "+
+			"carrinho; preservá-la seria não devolver o estoque nunca", got)
+	}
+}
+
+// Falha de leitura NÃO vira escrita cega. Adiar a mutação atrasa o ajuste da
+// reserva e a próxima tentativa a faz; escrever sem saber apaga o trabalho de
+// alguém para sempre.
+func TestLeituraQueFalhaNaoViraEscritaCega(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 20, "ext-p2": 10})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 2))
+	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@maria")
+	orderID := repo.carrinho("cart-1").externalOrderID
+	erp.adicionarLinhaDoLojista(orderID, "ext-p2", 4, "do lojista")
+
+	erp.falharLeituraDeGrade = errors.New("500 do ERP")
+	putsAntes := erp.puts
+	repo.definirItens("cart-1", item("p1", 9))
+	if err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1"); err == nil {
+		t.Fatal("a mutação devia falhar em vez de escrever sem saber o que há lá")
+	}
+	if erp.puts != putsAntes {
+		t.Errorf("escreveu %d vez(es) sem conseguir ler antes", erp.puts-putsAntes)
+	}
+	if got := erp.pedido(orderID).itens["ext-p2"]; got != 4 {
+		t.Errorf("a linha do lojista virou %d — a falha de leitura a destruiu", got)
+	}
+
+	// Com o ERP de volta, a mutação acontece e preserva.
+	erp.falharLeituraDeGrade = nil
+	if err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1"); err != nil {
+		t.Fatalf("segunda tentativa: %v", err)
+	}
+	ped := erp.pedido(orderID)
+	if ped.itens["ext-p1"] != 9 || ped.itens["ext-p2"] != 4 {
+		t.Errorf("grade final = %v, quero p1=9 e p2=4", ped.itens)
+	}
+}
+
+// Linha SEM marcador de um produto que ESTÁ no carrinho é tratada como nossa.
+//
+// É o caso dos pedidos criados antes do marcador existir: preservá-la e mandar a
+// nossa junto dobraria a quantidade. O preço é a ambiguidade que sobra — se o
+// lojista somar unidades de um produto que a compradora já pediu, a nossa
+// quantidade vence, porque ela vem do carrinho.
+func TestLinhaAntigaSemMarcadorNaoDobraAQuantidade(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 50})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 2))
+	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@maria")
+	orderID := repo.carrinho("cart-1").externalOrderID
+
+	// Encena o pedido legado: a linha existe sem marcador nenhum.
+	erp.limparMarcadores(orderID)
+
+	repo.definirItens("cart-1", item("p1", 6))
+	if err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1"); err != nil {
+		t.Fatalf("mutação: %v", err)
+	}
+	if got := erp.estoque("ext-p1").reservado; got != 6 {
+		t.Errorf("reservado = %d, quero 6 — a linha antiga foi somada à nova em vez "+
+			"de substituída", got)
+	}
+}
+
+// A fusão custa UMA leitura por mutação. É o preço de nunca apagar o trabalho do
+// lojista, e ele precisa ficar visível: numa live de 450 comentários são 450
+// requisições a mais contra um teto de 30 por minuto.
+func TestFusaoCustaUmaLeituraPorMutacao(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 50})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 1))
+	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 1, 2000, "@maria")
+
+	leiturasAntes := erp.leiturasDeGrade
+	for _, qtd := range []int{2, 3, 4} {
+		repo.definirItens("cart-1", item("p1", qtd))
+		_ = svc.MutateERPOrderItems(ctx, "cart-1", "loja-1")
+	}
+	if got := erp.leiturasDeGrade - leiturasAntes; got != 3 {
+		t.Errorf("leituras = %d para 3 mutações, quero 3 — uma a mais por mutação é "+
+			"o custo aceito; mais que isso não é", got)
+	}
+}

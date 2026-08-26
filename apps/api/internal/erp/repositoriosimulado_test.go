@@ -398,6 +398,10 @@ func (c *colabSimulado) CreateERPOrderForCart(ctx context.Context, p providers.E
 		grade = append(grade, providers.ERPOrderItem{
 			ProductID: it.ProductExternalID, Name: it.ProductName,
 			Quantity: it.Quantity, UnitPrice: it.UnitPrice,
+			// Marca a linha, como o colaborador de verdade faz. Um duplo que
+			// esquecesse disso faria as próprias linhas parecerem do lojista na
+			// primeira mutação.
+			Note: providers.LiveCartItemMarker + " " + it.ProductKeyword,
 		})
 	}
 	if len(grade) == 0 {

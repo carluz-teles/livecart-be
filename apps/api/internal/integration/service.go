@@ -5021,6 +5021,9 @@ func (s *Service) createERPOrderForCart(ctx context.Context, erpProvider provide
 			Name:      item.ProductName,
 			Quantity:  item.Quantity,
 			UnitPrice: item.UnitPrice,
+			// Marca a linha desde o nascimento do pedido. Sem isto, a primeira
+			// mutação leria as próprias linhas como se fossem do lojista.
+			Note: strings.TrimSpace(providers.LiveCartItemMarker + " " + item.ProductKeyword),
 		})
 		totalAmount += item.UnitPrice * int64(item.Quantity)
 	}
