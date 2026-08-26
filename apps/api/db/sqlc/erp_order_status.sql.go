@@ -180,34 +180,46 @@ func (q *Queries) ListStaleERPOrderStatuses(ctx context.Context, arg ListStaleER
 }
 
 const recordERPOrderStatus = `-- name: RecordERPOrderStatus :one
-WITH anterior AS (
-    SELECT id, erp_order_status
-    FROM carts
-    WHERE id = $7::uuid
-    FOR UPDATE
+WITH alvo AS (
+    SELECT c.id, c.erp_order_status
+    FROM carts c
+    JOIN live_events e ON e.id = c.event_id
+    WHERE c.external_order_id = $2
+      AND COALESCE(c.store_id, e.store_id) = $1::uuid
+    ORDER BY c.created_at DESC
+    LIMIT 1
+    FOR UPDATE OF c
 ), mudou AS (
     UPDATE carts c
     SET erp_order_status    = $4,
         erp_order_status_at = NOW(),
         erp_order_number    = COALESCE(NULLIF($3::text, ''), c.erp_order_number)
-    FROM anterior a
+    FROM alvo a
     WHERE c.id = a.id
       AND a.erp_order_status IS DISTINCT FROM $4
-    RETURNING c.id AS cart_id, c.store_id, a.erp_order_status AS previous_status
+    RETURNING c.id AS cart_id, a.erp_order_status AS previous_status
+), semDono AS (
+    -- Pedido que não é de nenhum carrinho nosso: guarda a passagem e pronto.
+    SELECT NULL::uuid AS cart_id, NULL::varchar AS previous_status
+    WHERE NOT EXISTS (SELECT 1 FROM alvo)
+), aGravar AS (
+    SELECT cart_id, previous_status FROM mudou
+    UNION ALL
+    SELECT cart_id, previous_status FROM semDono
 )
 INSERT INTO erp_order_status_events (
     store_id, cart_id, external_order_id, order_number,
     status, previous_status, source, payload
 )
-SELECT COALESCE(m.store_id, $1::uuid),
-       m.cart_id,
+SELECT $1::uuid,
+       g.cart_id,
        $2,
        NULLIF($3::text, ''),
        $4,
-       m.previous_status,
+       g.previous_status,
        $5,
        $6
-FROM mudou m
+FROM aGravar g
 RETURNING id, cart_id, previous_status, status, observed_at
 `
 
@@ -218,7 +230,6 @@ type RecordERPOrderStatusParams struct {
 	Status          string          `json:"status"`
 	Source          string          `json:"source"`
 	Payload         json.RawMessage `json:"payload"`
-	CartID          pgtype.UUID     `json:"cart_id"`
 }
 
 type RecordERPOrderStatusRow struct {
@@ -229,19 +240,25 @@ type RecordERPOrderStatusRow struct {
 	ObservedAt     pgtype.Timestamptz `json:"observed_at"`
 }
 
-// Registra a situação do pedido no ERP, SÓ quando ela mudou.
+// Registra a situação de um pedido no ERP, SÓ quando ela mudou.
 //
-// A condição de mudança é o que faz a dedupe: o ERP entrega o mesmo webhook até
-// dez vezes quando não recebe 200, e uma redelivery não é uma transição. Sem
-// isso o histórico encheria de linhas idênticas e "quando foi despachado?"
-// deixaria de ter resposta.
+// Quem resolve "este pedido é de algum carrinho nosso?" é ESTA query, e não o
+// chamador. A diferença não é estilo: o webhook de inclusão do ERP chega no
+// mesmo instante em que gravamos o external_order_id, e uma resolução feita em
+// Go lê antes e grava depois — a janela entre as duas produziu, numa live
+// simulada de 12 compradores, quatro passagens arquivadas como "de ninguém"
+// sendo que duas eram nossas. Resolvendo aqui, a leitura e a gravação são o
+// mesmo instante.
 //
-// FOR UPDATE serializa duas entregas simultâneas do mesmo pedido: sem ele as
-// duas leriam o estado antigo e as duas gravariam, que é a mesma duplicata por
-// outro caminho.
+// Carrinho não encontrado é resultado NORMAL: o lojista cria pedidos direto no
+// ERP, e outros canais de venda disparam o mesmo webhook. A passagem é guardada
+// sem dono, que é o sinal vivo de que a entrega de webhook está funcionando.
 //
-// Zero linhas = nada mudou. Uma linha = a transição, com o estágio anterior
-// junto, para o log dizer de onde para onde.
+// A condição de mudança é a dedupe: o ERP reentrega o mesmo aviso até dez vezes
+// quando não recebe 200, e reentrega não é transição. FOR UPDATE serializa duas
+// entregas simultâneas do mesmo pedido.
+//
+// Zero linhas = nada mudou.
 func (q *Queries) RecordERPOrderStatus(ctx context.Context, arg RecordERPOrderStatusParams) (RecordERPOrderStatusRow, error) {
 	row := q.db.QueryRow(ctx, recordERPOrderStatus,
 		arg.StoreID,
@@ -250,7 +267,6 @@ func (q *Queries) RecordERPOrderStatus(ctx context.Context, arg RecordERPOrderSt
 		arg.Status,
 		arg.Source,
 		arg.Payload,
-		arg.CartID,
 	)
 	var i RecordERPOrderStatusRow
 	err := row.Scan(
@@ -261,46 +277,6 @@ func (q *Queries) RecordERPOrderStatus(ctx context.Context, arg RecordERPOrderSt
 		&i.ObservedAt,
 	)
 	return i, err
-}
-
-const recordUnlinkedERPOrderStatus = `-- name: RecordUnlinkedERPOrderStatus :exec
-INSERT INTO erp_order_status_events (
-    store_id, cart_id, external_order_id, order_number,
-    status, previous_status, source, payload
-)
-VALUES (
-    $1::uuid, NULL, $2,
-    NULLIF($3::text, ''),
-    $4, NULL, $5, $6
-)
-`
-
-type RecordUnlinkedERPOrderStatusParams struct {
-	StoreID         pgtype.UUID     `json:"store_id"`
-	ExternalOrderID string          `json:"external_order_id"`
-	OrderNumber     string          `json:"order_number"`
-	Status          string          `json:"status"`
-	Source          string          `json:"source"`
-	Payload         json.RawMessage `json:"payload"`
-}
-
-// Mesma coisa para o pedido que não é de nenhum carrinho nosso: o lojista criou
-// direto no ERP, ou é de outro canal de venda. Não há carrinho para atualizar,
-// então guarda-se só a passagem — e ela vale, porque é assim que se descobre
-// que o webhook está entregando (o oposto também: silêncio total é sintoma).
-//
-// Sem dedupe por mudança porque não há estado anterior a comparar; a chave é o
-// webhook_events, que já dedupla por event_id antes de chegar aqui.
-func (q *Queries) RecordUnlinkedERPOrderStatus(ctx context.Context, arg RecordUnlinkedERPOrderStatusParams) error {
-	_, err := q.db.Exec(ctx, recordUnlinkedERPOrderStatus,
-		arg.StoreID,
-		arg.ExternalOrderID,
-		arg.OrderNumber,
-		arg.Status,
-		arg.Source,
-		arg.Payload,
-	)
-	return err
 }
 
 const updateCartERPOrderNumber = `-- name: UpdateCartERPOrderNumber :exec

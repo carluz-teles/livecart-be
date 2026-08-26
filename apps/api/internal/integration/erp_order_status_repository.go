@@ -24,16 +24,11 @@ import (
 // devolver zero linhas é como ela diz isso. É o caminho normal de uma
 // redelivery, não um erro.
 func (r *Repository) RecordOrderStatus(ctx context.Context, obs erp.ERPOrderStatusObservation) (erp.ERPOrderStatusTransition, bool, error) {
-	cart, err := parseUUID(obs.CartID)
-	if err != nil {
-		return erp.ERPOrderStatusTransition{}, false, err
-	}
 	store, err := parseUUID(obs.StoreID)
 	if err != nil {
 		return erp.ERPOrderStatusTransition{}, false, err
 	}
 	row, err := r.queries.RecordERPOrderStatus(ctx, sqlc.RecordERPOrderStatusParams{
-		CartID:          cart,
 		StoreID:         store,
 		ExternalOrderID: obs.ExternalOrderID,
 		OrderNumber:     obs.OrderNumber,
@@ -55,25 +50,8 @@ func (r *Repository) RecordOrderStatus(ctx context.Context, obs erp.ERPOrderStat
 	}, true, nil
 }
 
-// RecordUnlinkedOrderStatus guarda a passagem de um pedido que não é de nenhum
-// carrinho nosso.
-func (r *Repository) RecordUnlinkedOrderStatus(ctx context.Context, obs erp.ERPOrderStatusObservation) error {
-	store, err := parseUUID(obs.StoreID)
-	if err != nil {
-		return err
-	}
-	return r.queries.RecordUnlinkedERPOrderStatus(ctx, sqlc.RecordUnlinkedERPOrderStatusParams{
-		StoreID:         store,
-		ExternalOrderID: obs.ExternalOrderID,
-		OrderNumber:     obs.OrderNumber,
-		Status:          string(obs.Status),
-		Source:          obs.Source,
-		Payload:         jsonOrNil(obs.Payload),
-	})
-}
-
 // AdoptOrphanOrderStatusEvents vincula ao carrinho as passagens que chegaram
-// antes de sabermos que o pedido era nosso.
+// antes de o pedido existir do lado de cá.
 func (r *Repository) AdoptOrphanOrderStatusEvents(ctx context.Context, cartID, externalOrderID string) (int64, error) {
 	cart, err := parseUUID(cartID)
 	if err != nil {
@@ -170,4 +148,17 @@ func jsonOrNil(b []byte) []byte {
 		return nil
 	}
 	return b
+}
+
+// GetCartERPOpAge devolve há quanto tempo a operação ERP em curso começou.
+func (r *Repository) GetCartERPOpAge(ctx context.Context, cartID string) (time.Duration, error) {
+	cart, err := parseUUID(cartID)
+	if err != nil {
+		return 0, err
+	}
+	segundos, err := r.queries.GetCartERPOpAge(ctx, cart)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(segundos * float64(time.Second)), nil
 }

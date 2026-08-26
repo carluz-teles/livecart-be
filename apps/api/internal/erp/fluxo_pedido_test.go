@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -564,7 +565,7 @@ func TestRetomadaAdotaOPedidoPeloMarcador(t *testing.T) {
 
 	// Simula: o pedido foi criado e marcado, mas o processo morreu antes de
 	// gravar o external_order_id.
-	_ = colab.CreateERPOrderForCart(ctx, erp, nil, "loja-1", "cart-1")
+	_, _ = colab.CreateERPOrderForCart(ctx, erp, nil, "loja-1", "cart-1")
 	orderID := repo.carrinho("cart-1").externalOrderID
 	_ = erp.AddOrderMarker(ctx, orderID, erpOrderMarker("cart-1"))
 	_ = repo.UpdateCartExternalOrderID(ctx, "cart-1", "")
@@ -640,4 +641,126 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// ─── 8. A compensação sobrevive ao prazo ────────────────────────────────────
+
+// Prazo estourado no meio da mutação NÃO pode deixar o carrinho preso.
+//
+// Este é o defeito que a live simulada de 15 compradores expôs: o `defer` que
+// devolve o carrinho para 'open' rodava no MESMO contexto que acabara de ser
+// cancelado, então o UPDATE morria junto e o carrinho ficava em 'mutating' —
+// estado em que nenhum comentário seguinte consegue entrar. Seis dos quinze
+// carrinhos pararam ali, com itens no banco que nunca chegaram ao pedido.
+//
+// A compensação de uma operação não pode depender do contexto dela.
+func TestPrazoEstouradoNaoDeixaOCarrinhoPreso(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 100})
+	repo.criarCarrinho("cart-1", item("p1", 1))
+	_ = svc.ReserveStockInERP(context.Background(), "loja-1", "cart-1", "ev-1", "p1", 1, 2000, "@maria")
+
+	// O ERP demora mais do que o prazo do chamador.
+	erp.antesDoPut = func() { time.Sleep(40 * time.Millisecond) }
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	repo.definirItens("cart-1", item("p1", 5))
+	_ = svc.MutateERPOrderItems(ctx, "cart-1", "loja-1")
+
+	if st := repo.carrinho("cart-1").state; st != OrderStateOpen {
+		t.Fatalf("carrinho ficou em %q depois de um prazo estourado — preso em "+
+			"'mutating' ele nunca mais aceita um comentário", st)
+	}
+
+	// E continua editável: o próximo comentário entra normalmente.
+	erp.antesDoPut = nil
+	if err := svc.MutateERPOrderItems(context.Background(), "cart-1", "loja-1"); err != nil {
+		t.Fatalf("mutação seguinte: %v", err)
+	}
+	if got := erp.estoque("ext-p1").reservado; got != 5 {
+		t.Errorf("reservado = %d, quero 5 — a grade do banco tinha de chegar ao pedido", got)
+	}
+}
+
+// ─── 9. Convergência: nada fica no carrinho sem chegar ao pedido ────────────
+
+// Item que entra DEPOIS de a mutação ter lido a grade ainda assim chega ao
+// pedido.
+//
+// A mutação lê o carrinho, fala com o ERP por ~1s e termina. Todo comentário
+// dessa janela cai no CAS perdedor e desiste — o que só é seguro se quem ganhou
+// enxergar a mudança. Quando o item é gravado depois da leitura, ninguém mais o
+// aplicaria: numa live simulada de 15 compradores foram 11 unidades presas no
+// carrinho, invisíveis para o ERP.
+func TestItemQueChegaDepoisDaLeituraAindaAssimEntra(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 100})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 1))
+	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 1, 2000, "@maria")
+
+	// Enquanto o PUT está no ar, o comprador comenta de novo.
+	var umaVez sync.Once
+	erp.antesDoPut = func() {
+		umaVez.Do(func() { repo.definirItens("cart-1", item("p1", 6)) })
+	}
+	repo.definirItens("cart-1", item("p1", 3))
+
+	if err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1"); err != nil {
+		t.Fatalf("mutação: %v", err)
+	}
+	if got := erp.estoque("ext-p1").reservado; got != 6 {
+		t.Errorf("reservado = %d, quero 6 — o item que entrou durante a chamada "+
+			"tem de chegar ao pedido, senão ele fica só no carrinho", got)
+	}
+}
+
+// Comentário durante a CRIAÇÃO do pedido também chega.
+func TestComentarioDuranteACriacaoEntraNoPedido(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 100})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 1))
+
+	// O ERP demora para criar; nesse meio-tempo chegam mais 4 unidades.
+	var umaVez sync.Once
+	erp.antesDaCriacao = func() {
+		umaVez.Do(func() { repo.definirItens("cart-1", item("p1", 5)) })
+	}
+
+	if err := svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 1, 2000, "@maria"); err != nil {
+		t.Fatalf("comentário: %v", err)
+	}
+	if erp.criacoes != 1 {
+		t.Fatalf("pedidos = %d, quero 1", erp.criacoes)
+	}
+	if got := erp.estoque("ext-p1").reservado; got != 5 {
+		t.Errorf("reservado = %d, quero 5 — a reconciliação logo após a criação "+
+			"existe exatamente para os comentários dessa janela", got)
+	}
+}
+
+// E o caso comum não paga por isso: sem mudança, a reconciliação não gasta
+// escrita nenhuma.
+func TestReconciliacaoAposCriacaoNaoGastaEscritaAtoa(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 100})
+	repo.criarCarrinho("cart-1", item("p1", 2))
+
+	if err := svc.ReserveStockInERP(context.Background(), "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@maria"); err != nil {
+		t.Fatalf("comentário: %v", err)
+	}
+	if erp.puts != 0 {
+		t.Errorf("PUTs = %d, quero 0 — nada mudou entre criar e reconciliar, e o "+
+			"teto da conta é de 30 escritas por minuto", erp.puts)
+	}
+}
+
+// Comentário que chega enquanto a criação está em voo não vira erro. Antes
+// virava ("cart não está em 'open'") e o item ficava só no carrinho.
+func TestComentarioDuranteCriacaoNaoViraErro(t *testing.T) {
+	svc, repo, _, _ := montar(map[string]int{"ext-p1": 100})
+	repo.criarCarrinho("cart-1", item("p1", 1))
+	_, _ = repo.TransitionCartERPOrderState(context.Background(), "cart-1", OrderStateNone, OrderStateConverting)
+
+	if err := svc.ReserveStockInERP(context.Background(), "loja-1", "cart-1", "ev-1", "p1", 1, 2000, "@maria"); err != nil {
+		t.Errorf("comentário durante a criação virou erro: %v", err)
+	}
 }

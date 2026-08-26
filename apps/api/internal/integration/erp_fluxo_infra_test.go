@@ -376,6 +376,12 @@ func (f *scriptedERP) CreateOrder(ctx context.Context, order providers.ERPOrder)
 	f.mu.Lock()
 	f.orderSeq++
 	id := fmt.Sprintf("%s-%d", f.prefixo, f.orderSeq)
+	// O carimbo acontece DENTRO da criação, como no provider de verdade: é a
+	// única âncora buscável, e um roteiro que não o registrasse esconderia a
+	// adoção que ele existe para permitir.
+	if order.ExternalID != "" {
+		f.markerOrders["lc-cart-"+order.ExternalID] = id
+	}
 	f.mu.Unlock()
 	return &providers.OrderResult{OrderID: id, OrderNumber: id, Status: "created"}, nil
 }

@@ -4955,18 +4955,18 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 // dele. O contato é resolvido por esse @ e enriquecido depois, quando o checkout
 // trouxer nome, CPF, e-mail e telefone — o pedido não espera esses dados para
 // existir, porque esperar é deixar a peça à venda para outra pessoa.
-func (s *Service) createERPOrderForCart(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, eventID string, cart CartRow) error {
+func (s *Service) createERPOrderForCart(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, eventID string, cart CartRow) ([]providers.ERPOrderItem, error) {
 	// Resolve contact — enriched with customer identity when available, so the
 	// Tiny contact ends up with CPF/email/phone instead of just the @handle.
 	contactID, err := s.resolveERPContact(ctx, erpProvider, integration, storeID, cart.PlatformUserID, cart.PlatformHandle, cart.CustomerName, cart.CustomerDocument, cart.CustomerEmail, cart.CustomerPhone)
 	if err != nil {
-		return fmt.Errorf("resolving ERP contact: %w", err)
+		return nil, fmt.Errorf("resolving ERP contact: %w", err)
 	}
 
 	// Collect non-waitlisted items
 	items, err := s.repo.ListNonWaitlistedCartItems(ctx, cart.ID)
 	if err != nil {
-		return fmt.Errorf("listing cart items: %w", err)
+		return nil, fmt.Errorf("listing cart items: %w", err)
 	}
 
 	var erpItems []providers.ERPOrderItem
@@ -4989,7 +4989,7 @@ func (s *Service) createERPOrderForCart(ctx context.Context, erpProvider provide
 			zap.String("cart_id", cart.ID),
 			zap.Int("cart_items_total", len(items)),
 		)
-		return nil
+		return nil, nil
 	}
 
 	logger.From(ctx, s.logger).Info("ERP order items prepared",
@@ -5055,12 +5055,12 @@ func (s *Service) createERPOrderForCart(ctx context.Context, erpProvider provide
 
 	result, err := erpProvider.CreateOrder(ctx, order)
 	if err != nil {
-		return fmt.Errorf("creating ERP order: %w", err)
+		return nil, fmt.Errorf("creating ERP order: %w", err)
 	}
 
 	// Save external order ID on cart first — ensures idempotency if we retry
 	if err := s.repo.UpdateCartExternalOrderID(ctx, cart.ID, result.OrderID); err != nil {
-		return fmt.Errorf("saving external order ID: %w", err)
+		return nil, fmt.Errorf("saving external order ID: %w", err)
 	}
 	// O número humano ("37") só existe nesta resposta e no webhook. Guardar aqui
 	// significa que o lojista o vê desde o primeiro comentário, em vez de esperar
@@ -5085,7 +5085,7 @@ func (s *Service) createERPOrderForCart(ctx context.Context, erpProvider provide
 		zap.Int("items", len(erpItems)),
 	)
 
-	return nil
+	return erpItems, nil
 }
 
 // =============================================================================

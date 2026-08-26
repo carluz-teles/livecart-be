@@ -1075,3 +1075,12 @@ SET status = 'cancelled', cancelled_reason = 'refunded'
 WHERE id = $1
   AND payment_status = 'refunded'
   AND status NOT IN ('cancelled', 'expired');
+
+-- name: GetCartERPOpAge :one
+-- Há quanto tempo a operação ERP em curso começou, em segundos.
+--
+-- Separa "criação em voo agora" de "criação que morreu no meio" — no estado as
+-- duas são idênticas ('converting' sem pedido), e só o relógio as distingue.
+-- Zero quando não há marca, que é o caso de quem nunca começou.
+SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - erp_op_started_at)), 0)::float8
+FROM carts WHERE id = $1;

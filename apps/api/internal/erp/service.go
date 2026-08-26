@@ -39,6 +39,10 @@ type ERPRepository interface {
 
 	// GetCartERPOrderState reads the cart's ERP order lifecycle state.
 	GetCartERPOrderState(ctx context.Context, cartID string) (*CartERPOrderState, error)
+	// GetCartERPOpAge diz há quanto tempo a operação ERP em curso começou. É o
+	// que separa "criação em voo agora" de "criação que morreu" — as duas se
+	// parecem no estado, e só o relógio as distingue. Zero quando não há marca.
+	GetCartERPOpAge(ctx context.Context, cartID string) (time.Duration, error)
 	// GetCartERPFinalisationStatus reads the Order payment row's ERP finalisation
 	// lifecycle (status/attempts/snapshot) plus the cart's external_order_id. É o
 	// que o reenvio manual relê para não aprovar a venda sem o financeiro.

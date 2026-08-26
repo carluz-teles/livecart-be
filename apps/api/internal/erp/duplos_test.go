@@ -62,6 +62,9 @@ func (m *mockRepo) GetActiveByProvider(context.Context, string, string, string) 
 func (m *mockRepo) AcquireCartFinalisationLock(context.Context, string) (func(), bool, error) {
 	return func() {}, false, nil
 }
+func (m *mockRepo) GetCartERPOpAge(context.Context, string) (time.Duration, error) {
+	return time.Hour, nil
+}
 func (m *mockRepo) GetCartERPOrderState(context.Context, string) (*CartERPOrderState, error) {
 	if m.orderStateErr != nil {
 		return nil, m.orderStateErr
@@ -192,8 +195,8 @@ func (m *mockCollab) ResolveExternalProduct(context.Context, string, string) (st
 func (m *mockCollab) ResolveERPContact(context.Context, providers.ERPProvider, *Integration, string, string, string, string, string, string, string) (string, error) {
 	return "", nil
 }
-func (m *mockCollab) CreateERPOrderForCart(context.Context, providers.ERPProvider, *Integration, string, string) error {
-	return nil
+func (m *mockCollab) CreateERPOrderForCart(context.Context, providers.ERPProvider, *Integration, string, string) ([]providers.ERPOrderItem, error) {
+	return nil, nil
 }
 
 func (m *mockCollab) MarkFinalisationFailed(context.Context, string, string)                {}

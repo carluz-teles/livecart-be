@@ -1437,15 +1437,9 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		zap.Int64("net_amount_cents", netCents),
 	)
 
-	// Marca o pedido com o vínculo do carrinho.
-	//
-	// É o que permite reencontrá-lo quando a resposta do POST se perde: o
-	// `numeroOrdemCompra` viaja no corpo mas não é filtro de busca, e
-	// `marcadores` é. Sem este carimbo, um timeout entre o POST e a resposta
-	// deixa o pedido existindo no Tiny sem nenhuma forma de achá-lo pela API —
-	// foi o que aconteceu com 2 pedidos pagos em 16/08.
-	//
-	// Best-effort, como a aprovação: falhar aqui não invalida o pedido.
+	// Carimba o vínculo do carrinho. Best-effort, como a aprovação: falhar aqui
+	// não invalida o pedido, mas deixa-o sem âncora de busca — e aí uma retomada
+	// não o reencontra.
 	marker := tinyCartMarker(order.ExternalID)
 	if markErr := t.AddOrderMarker(ctx, orderID, marker); markErr != nil {
 		logger.From(ctx, t.Logger).Warn("failed to tag tiny order with cart marker",
@@ -2131,8 +2125,25 @@ func (t *Tiny) GetOrderSituacao(ctx context.Context, orderID string) (int, error
 	return *out.Situacao, nil
 }
 
-// AddOrderMarker tags the order via POST /pedidos/{id}/marcadores. O marcador
-// lc-cart-<cartID> é a âncora de idempotência do fluxo pedido-como-reserva.
+// FindOrderIDByMarker resolves an order by marker via GET /pedidos?marcadores=.
+// Match exato com read-after-write de ~300ms (sandbox T8; a forma com
+// colchetes `marcadores[]=` NÃO funciona). Retorna "" quando não encontrado.
+// AddOrderMarker carimba o pedido com o vínculo do carrinho
+// (POST /pedidos/{id}/marcadores).
+//
+// 🔴 Esta escrita PARECE redundante e não é. O mesmo valor já viaja no
+// `numeroOrdemCompra` do corpo do pedido, e é tentador poupar a chamada
+// buscando por lá — o teto da conta é de 30 escritas por minuto, e numa live
+// cada escrita conta.
+//
+// Só que `GET /pedidos?numeroOrdemCompra=` é IGNORADO em silêncio: devolve 200 e
+// a conta inteira, sem filtrar nada. Medido em 26/08/2026 — uma busca por uma
+// âncora inexistente devolveu os 92 pedidos da conta, com o primeiro parecendo
+// um resultado legítimo. Numa live simulada isso vinculou o pedido de um
+// comprador ao carrinho de outro.
+//
+// `marcadores` filtra de verdade: 0 resultados para valor inexistente, 1 exato
+// para o que existe. É por isso que o carimbo continua aqui.
 func (t *Tiny) AddOrderMarker(ctx context.Context, orderID, marker string) error {
 	endpoint := fmt.Sprintf("%s/pedidos/%s/marcadores", tinyAPIBaseURL, orderID)
 	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, []map[string]any{{"descricao": marker}}, t.authHeaders())
@@ -2145,10 +2156,8 @@ func (t *Tiny) AddOrderMarker(ctx context.Context, orderID, marker string) error
 	return nil
 }
 
-// FindOrderIDByMarker resolves an order by marker via GET /pedidos?marcadores=.
-// Match exato com read-after-write de ~300ms (sandbox T8; a forma com
-// colchetes `marcadores[]=` NÃO funciona). Retorna "" quando não encontrado.
 func (t *Tiny) FindOrderIDByMarker(ctx context.Context, marker string) (string, error) {
+	// `marcadores`, e não `numeroOrdemCompra` — ver a nota em AddOrderMarker.
 	endpoint := fmt.Sprintf("%s/pedidos?marcadores=%s", tinyAPIBaseURL, url.QueryEscape(marker))
 	resp, body, err := t.DoRequestWithRetry(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
 	if err != nil {
@@ -2163,7 +2172,7 @@ func (t *Tiny) FindOrderIDByMarker(ctx context.Context, marker string) (string, 
 		} `json:"itens"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("parsing marker search response: %w", err)
+		return "", fmt.Errorf("parsing order search response: %w", err)
 	}
 	if len(result.Itens) == 0 {
 		return "", nil

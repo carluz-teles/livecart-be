@@ -1382,6 +1382,23 @@ func (q *Queries) GetCartCommissionBaseCents(ctx context.Context, cartID pgtype.
 	return base_cents, err
 }
 
+const getCartERPOpAge = `-- name: GetCartERPOpAge :one
+SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - erp_op_started_at)), 0)::float8
+FROM carts WHERE id = $1
+`
+
+// Há quanto tempo a operação ERP em curso começou, em segundos.
+//
+// Separa "criação em voo agora" de "criação que morreu no meio" — no estado as
+// duas são idênticas ('converting' sem pedido), e só o relógio as distingue.
+// Zero quando não há marca, que é o caso de quem nunca começou.
+func (q *Queries) GetCartERPOpAge(ctx context.Context, id pgtype.UUID) (float64, error) {
+	row := q.db.QueryRow(ctx, getCartERPOpAge, id)
+	var column_1 float64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const getCartERPOrderState = `-- name: GetCartERPOrderState :one
 SELECT erp_order_state, erp_stock_launched, COALESCE(external_order_id,'') AS external_order_id
 FROM carts WHERE id = $1

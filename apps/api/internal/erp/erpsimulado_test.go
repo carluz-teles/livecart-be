@@ -80,6 +80,11 @@ type erpSimulado struct {
 	falharCriacao error
 	// putsAteFalhar > 0 faz os N primeiros PUTs passarem e o seguinte falhar.
 	putsAteFalhar int
+	// antesDoPut roda antes de cada PUT — para o teste encenar um ERP lento e
+	// estourar o prazo do chamador, ou mexer no carrinho no meio da chamada.
+	antesDoPut func()
+	// antesDaCriacao roda antes de cada POST /pedidos, pelo mesmo motivo.
+	antesDaCriacao func()
 }
 
 func novoERPSimulado(saldos map[string]int) *erpSimulado {
@@ -129,6 +134,12 @@ func (e *erpSimulado) aplicarGrade(p *pedidoSimulado, nova map[string]int) {
 
 func (e *erpSimulado) CreateOrder(_ context.Context, order providers.ERPOrder) (*providers.OrderResult, error) {
 	e.mu.Lock()
+	lento := e.antesDaCriacao
+	e.mu.Unlock()
+	if lento != nil {
+		lento()
+	}
+	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.falharCriacao != nil {
 		return nil, e.falharCriacao
@@ -146,7 +157,19 @@ func (e *erpSimulado) CreateOrder(_ context.Context, order providers.ERPOrder) (
 	return &providers.OrderResult{OrderID: id, Status: "created"}, nil
 }
 
-func (e *erpSimulado) UpdateOrderItems(_ context.Context, orderID string, itens []providers.ERPOrderItem) error {
+func (e *erpSimulado) UpdateOrderItems(ctx context.Context, orderID string, itens []providers.ERPOrderItem) error {
+	e.mu.Lock()
+	lento := e.antesDoPut
+	e.mu.Unlock()
+	if lento != nil {
+		lento()
+		if err := ctx.Err(); err != nil {
+			e.mu.Lock()
+			e.puts++
+			e.mu.Unlock()
+			return err
+		}
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.puts++

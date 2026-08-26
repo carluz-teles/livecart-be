@@ -342,13 +342,14 @@ type ERPProvider interface {
 	// ou fora de ordem deixa o LiveCart mostrando um estágio que já passou.
 	GetOrderSituacao(ctx context.Context, orderID string) (int, error)
 
-	// AddOrderMarker tags the order (POST /pedidos/{id}/marcadores). LiveCart's
-	// idempotency anchor is the marker lc-cart-<cartID>.
+	// AddOrderMarker carimba o pedido com a âncora lc-cart-<cartID>
+	// (POST /pedidos/{id}/marcadores). Parece redundante com o
+	// `numeroOrdemCompra` do corpo e não é — ver a nota na implementação.
 	AddOrderMarker(ctx context.Context, orderID, marker string) error
 
-	// FindOrderIDByMarker resolves an order by marker (GET /pedidos?marcadores=,
-	// exact match — validated in sandbox 11/07, ~300ms read-after-write).
-	// Returns "" when not found.
+	// FindOrderIDByMarker resolve o pedido pela âncora lc-cart-<cartID>. É como
+	// uma tentativa que morreu depois do POST reencontra o pedido em vez de criar
+	// um segundo. Devolve "" quando não existe.
 	FindOrderIDByMarker(ctx context.Context, marker string) (string, error)
 
 	// SearchContacts searches for contacts by name or document.

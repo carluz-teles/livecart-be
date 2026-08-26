@@ -42,6 +42,9 @@ func (stubERPRepo) UpdateShipmentInvoice(context.Context, string, string, string
 func (stubERPRepo) AcquireCartFinalisationLock(context.Context, string) (func(), bool, error) {
 	return func() {}, false, nil
 }
+func (stubERPRepo) GetCartERPOpAge(context.Context, string) (time.Duration, error) {
+	return 0, nil
+}
 func (stubERPRepo) GetCartERPOrderState(context.Context, string) (*CartERPOrderState, error) {
 	return nil, nil
 }
@@ -79,8 +82,8 @@ func (stubCollaborators) ResolveExternalProduct(context.Context, string, string)
 func (stubCollaborators) ResolveERPContact(context.Context, providers.ERPProvider, *Integration, string, string, string, string, string, string, string) (string, error) {
 	return "", nil
 }
-func (stubCollaborators) CreateERPOrderForCart(context.Context, providers.ERPProvider, *Integration, string, string) error {
-	return nil
+func (stubCollaborators) CreateERPOrderForCart(context.Context, providers.ERPProvider, *Integration, string, string) ([]providers.ERPOrderItem, error) {
+	return nil, nil
 }
 func (stubCollaborators) MarkFinalisationFailed(context.Context, string, string)                {}
 func (stubCollaborators) MirrorToOrder(context.Context, string)                                 {}

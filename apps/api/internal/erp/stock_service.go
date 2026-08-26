@@ -33,7 +33,11 @@ type StockCollaborators interface {
 	// CreateERPOrderForCart cria o pedido de venda do carrinho (situação Aberta,
 	// sem pagamento e sem qualquer movimentação de estoque) e grava o
 	// external_order_id. É a reserva.
-	CreateERPOrderForCart(ctx context.Context, provider providers.ERPProvider, integration *Integration, storeID, cartID string) error
+	//
+	// Devolve a grade que foi de fato enviada. Ela é o ponto de partida da
+	// reconciliação seguinte: sem saber o que o pedido já tem, a reconciliação
+	// gastaria um PUT redundante em toda venda.
+	CreateERPOrderForCart(ctx context.Context, provider providers.ERPProvider, integration *Integration, storeID, cartID string) ([]providers.ERPOrderItem, error)
 	// MirrorToOrder projects the cart's current ERP state into the Order
 	// aggregate (best-effort; no-op when the mirror is not wired).
 	MirrorToOrder(ctx context.Context, cartID string)
@@ -94,8 +98,25 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 	// O carrinho já tem pedido: a grade nova entra por mutação. Cobre o segundo
 	// comentário, o item somado depois do pix e a promoção de fila num único
 	// ponto — todos são "a grade do banco mudou, mande-a".
-	if st, stErr := s.repo.GetCartERPOrderState(ctx, cartID); stErr == nil &&
-		st.State != OrderStateNone && st.State != OrderStateCancelled {
+	st, stErr := s.repo.GetCartERPOrderState(ctx, cartID)
+	switch {
+	case stErr != nil || st.State == OrderStateNone:
+		// segue para a criação, abaixo
+	case st.State == OrderStateCancelled:
+		return nil // carrinho encerrado; não ressuscita
+	case st.State == OrderStateConverting:
+		// A criação está em voo AGORA e monta a grade a partir do banco, onde
+		// este item já está. Se ele tiver entrado tarde demais para aquela
+		// leitura, a própria criação reconcilia ao terminar.
+		//
+		// Antes isto virava erro ("cart não está em 'open'") e o item ficava só
+		// no carrinho: numa live simulada de 15 compradores, doze comentários
+		// morreram exatamente aqui.
+		logger.From(ctx, s.logger).Debug("order creation in flight; the grid will be applied by it",
+			zap.String("cart_id", cartID),
+		)
+		return nil
+	default:
 		if mutErr := s.MutateERPOrderItems(ctx, cartID, storeID); mutErr != nil {
 			return fmt.Errorf("applying grid to cart order: %w", mutErr)
 		}

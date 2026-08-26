@@ -742,7 +742,10 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 			// entregar em silêncio — sem este alarme, a loja fica sem sync até
 			// alguém notar.
 			go func() {
-				sweepTicker := time.NewTicker(5 * time.Minute)
+				// Um minuto, e não cinco: esta varredura passou a ser a rede de
+				// segurança de carrinho que ficou sem pedido no meio da live —
+				// e uma live inteira cabe em cinco minutos.
+				sweepTicker := time.NewTicker(1 * time.Minute)
 				webhookTicker := time.NewTicker(1 * time.Hour)
 				defer sweepTicker.Stop()
 				defer webhookTicker.Stop()

@@ -34,6 +34,9 @@ type repoSimulado struct {
 
 	semIntegracao bool
 	snapshot      []byte
+	// idadeDaOperacao força o relógio da operação ERP em curso. Zero = "velha o
+	// bastante para retomar", que é o padrão dos testes de fluxo.
+	idadeDaOperacao time.Duration
 
 	transicoesGanhas int
 	reservados       []StockEventParams
@@ -109,6 +112,18 @@ func (r *repoSimulado) GetCartERPOrderState(_ context.Context, cartID string) (*
 	return &CartERPOrderState{State: c.state, StockLaunched: c.stockLaunched, ExternalOrderID: c.externalOrderID}, nil
 }
 
+// GetCartERPOpAge devolve uma idade alta por padrão: os testes de fluxo querem
+// que a retomada de um 'converting' preso ACONTEÇA, e não que ela espere a
+// carência de 45s do relógio de verdade.
+func (r *repoSimulado) GetCartERPOpAge(_ context.Context, _ string) (time.Duration, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.idadeDaOperacao != 0 {
+		return r.idadeDaOperacao, nil
+	}
+	return time.Hour, nil
+}
+
 func (r *repoSimulado) GetCartERPFinalisationStatus(_ context.Context, cartID string) (*CartFinalisationStatus, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -157,7 +172,15 @@ func (r *repoSimulado) EmitStockReleased(_ context.Context, p StockEventParams) 
 
 // TransitionCartERPOrderState é o CAS. Devolve false sem alterar nada quando o
 // estado atual não é o esperado — é isto que faz o single-flight funcionar.
-func (r *repoSimulado) TransitionCartERPOrderState(_ context.Context, cartID, de, para string) (bool, error) {
+//
+// Respeita o cancelamento do contexto, como um driver de banco de verdade. Um
+// duplo que ignorasse isso deixaria passar a classe inteira de defeitos em que a
+// COMPENSAÇÃO morre junto com a operação que ela compensa — e foi exatamente
+// essa que travou seis carrinhos numa live simulada.
+func (r *repoSimulado) TransitionCartERPOrderState(ctx context.Context, cartID, de, para string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	c, ok := r.carrinhos[cartID]
@@ -236,12 +259,25 @@ func (r *repoSimulado) UpdateShipmentInvoice(context.Context, string, string, st
 
 // --- ERPOrderStatusRepository ----------------------------------------------
 
+// RecordOrderStatus resolve o carrinho pelo id do PEDIDO, como a query real —
+// resolver pelo cart_id do chamador esconderia justamente a corrida que a query
+// existe para fechar.
 func (r *repoSimulado) RecordOrderStatus(_ context.Context, obs ERPOrderStatusObservation) (ERPOrderStatusTransition, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	c, ok := r.carrinhos[obs.CartID]
-	if !ok {
-		return ERPOrderStatusTransition{}, false, nil
+
+	var cartID string
+	var c *carrinhoSimulado
+	for id, cand := range r.carrinhos {
+		if cand.externalOrderID == obs.ExternalOrderID {
+			cartID, c = id, cand
+			break
+		}
+	}
+	if c == nil {
+		// Pedido que não é de nenhum carrinho nosso: guarda a passagem avulsa.
+		r.statusEventos = append(r.statusEventos, obs)
+		return ERPOrderStatusTransition{Status: string(obs.Status)}, true, nil
 	}
 	if c.statusERP == string(obs.Status) {
 		return ERPOrderStatusTransition{}, false, nil
@@ -252,22 +288,14 @@ func (r *repoSimulado) RecordOrderStatus(_ context.Context, obs ERPOrderStatusOb
 	if obs.OrderNumber != "" {
 		c.numeroPedido = obs.OrderNumber
 	}
+	obs.CartID = cartID
 	r.statusEventos = append(r.statusEventos, obs)
 	return ERPOrderStatusTransition{
-		CartID: obs.CartID, PreviousStatus: anterior,
+		CartID: cartID, PreviousStatus: anterior,
 		Status: string(obs.Status), ObservedAt: c.statusEm,
 	}, true, nil
 }
 
-func (r *repoSimulado) RecordUnlinkedOrderStatus(_ context.Context, obs ERPOrderStatusObservation) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.statusEventos = append(r.statusEventos, obs)
-	return nil
-}
-
-// AdoptOrphanOrderStatusEvents vincula ao carrinho as passagens que já estavam
-// gravadas sem dono para aquele pedido.
 func (r *repoSimulado) AdoptOrphanOrderStatusEvents(_ context.Context, cartID, externalOrderID string) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -328,7 +356,7 @@ func (c *colabSimulado) ResolveERPContact(context.Context, providers.ERPProvider
 
 // CreateERPOrderForCart faz o que o colaborador de verdade faz: monta a grade a
 // partir do banco, cria o pedido e grava o external_order_id.
-func (c *colabSimulado) CreateERPOrderForCart(ctx context.Context, p providers.ERPProvider, _ *Integration, _, cartID string) error {
+func (c *colabSimulado) CreateERPOrderForCart(ctx context.Context, p providers.ERPProvider, _ *Integration, _, cartID string) ([]providers.ERPOrderItem, error) {
 	itens, _ := c.repo.ListNonWaitlistedCartItems(ctx, cartID)
 	grade := make([]providers.ERPOrderItem, 0, len(itens))
 	for _, it := range itens {
@@ -341,13 +369,13 @@ func (c *colabSimulado) CreateERPOrderForCart(ctx context.Context, p providers.E
 		})
 	}
 	if len(grade) == 0 {
-		return nil // carrinho sem item vinculado: nada a criar, e nada gravado
+		return nil, nil // carrinho sem item vinculado: nada a criar, e nada gravado
 	}
 	res, err := p.CreateOrder(ctx, providers.ERPOrder{ExternalID: cartID, ContactID: "contato-1", Items: grade})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return c.repo.UpdateCartExternalOrderID(ctx, cartID, res.OrderID)
+	return grade, c.repo.UpdateCartExternalOrderID(ctx, cartID, res.OrderID)
 }
 
 func (c *colabSimulado) MirrorToOrder(context.Context, string) {

@@ -16,11 +16,9 @@ package erp
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
@@ -77,22 +75,20 @@ type StaleERPOrderStatus struct {
 // ERPRepository porque é uma fatia com dono próprio, e porque o webhook de
 // pedido pode chegar sem carrinho nenhum do lado de cá.
 type ERPOrderStatusRepository interface {
-	// RecordOrderStatus grava a situação de um pedido VINCULADO a um carrinho e
-	// devolve a transição. changed=false significa que a situação já era essa —
-	// redelivery, ou varredura confirmando o que já sabíamos.
+	// RecordOrderStatus grava a situação de um pedido e devolve a transição.
+	//
+	// A resolução do carrinho é DELA, a partir do id do pedido — não do chamador.
+	// Resolver em Go significaria ler antes e gravar depois, e o webhook de
+	// inclusão do ERP chega exatamente nessa janela. Transition.CartID vazio
+	// significa "não é de nenhum carrinho nosso"; changed=false significa que a
+	// situação já era essa (reentrega, ou varredura confirmando o que sabíamos).
 	RecordOrderStatus(ctx context.Context, obs ERPOrderStatusObservation) (t ERPOrderStatusTransition, changed bool, err error)
-	// RecordUnlinkedOrderStatus guarda a passagem de um pedido que não é de
-	// nenhum carrinho nosso (o lojista criou direto no ERP, ou veio de outro
-	// canal). Não há estado a atualizar, só histórico a preservar.
-	RecordUnlinkedOrderStatus(ctx context.Context, obs ERPOrderStatusObservation) error
 	// ListStaleOrderStatuses lista pedidos não terminais parados há mais que a
 	// janela, do mais antigo para o mais novo.
 	ListStaleOrderStatuses(ctx context.Context, staleAfter time.Duration, limit int) ([]StaleERPOrderStatus, error)
-	// FindCartByExternalOrderID resolve o carrinho a partir do id do pedido no
-	// ERP — o webhook só manda o id do pedido.
-	FindCartByExternalOrderID(ctx context.Context, externalOrderID, storeID string) (string, error)
 	// AdoptOrphanOrderStatusEvents vincula ao carrinho as passagens que chegaram
-	// antes de sabermos que aquele pedido era nosso.
+	// antes de o pedido existir do lado de cá — a janela entre o POST responder e
+	// o external_order_id ser gravado, onde nem o SQL consegue resolver o dono.
 	AdoptOrphanOrderStatusEvents(ctx context.Context, cartID, externalOrderID string) (int64, error)
 }
 
@@ -114,45 +110,30 @@ func (s *Service) ObserveOrderStatus(ctx context.Context, storeID, externalOrder
 		return fmt.Errorf("observação de situação sem id de pedido")
 	}
 
-	// Pedido desconhecido não é erro: o lojista cria pedidos direto no ERP, e
-	// outros canais de venda também disparam este webhook.
-	cartID, err := s.status.FindCartByExternalOrderID(ctx, externalOrderID, storeID)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("resolving cart for ERP order %s: %w", externalOrderID, err)
-	}
-	if err != nil {
-		cartID = ""
-	}
-
-	obs := ERPOrderStatusObservation{
+	t, changed, err := s.status.RecordOrderStatus(ctx, ERPOrderStatusObservation{
 		StoreID:         storeID,
-		CartID:          cartID,
 		ExternalOrderID: externalOrderID,
 		OrderNumber:     orderNumber,
 		Status:          status,
 		Source:          source,
 		Payload:         payload,
-	}
-
-	if cartID == "" {
-		// Pedido que não é nosso. Guardar a passagem ainda vale: é o sinal vivo
-		// de que a entrega de webhook está funcionando, e o silêncio total desta
-		// tabela é o sintoma de URL descadastrada.
-		if err := s.status.RecordUnlinkedOrderStatus(ctx, obs); err != nil {
-			return fmt.Errorf("recording unlinked ERP order status: %w", err)
-		}
-		logger.From(ctx, s.logger).Debug("ERP order status for an order LiveCart does not own",
-			zap.String("external_order_id", externalOrderID),
-			zap.String("status", string(status)),
-		)
-		return nil
-	}
-
-	t, changed, err := s.status.RecordOrderStatus(ctx, obs)
+	})
 	if err != nil {
 		return fmt.Errorf("recording ERP order status: %w", err)
 	}
 	if !changed {
+		return nil
+	}
+
+	if t.CartID == "" {
+		// Pedido que não é de nenhum carrinho nosso — o lojista criou direto no
+		// ERP, ou veio de outro canal. A passagem fica guardada: é o sinal vivo
+		// de que a entrega de webhook está funcionando, e o silêncio total desta
+		// tabela é o sintoma de URL descadastrada.
+		logger.From(ctx, s.logger).Debug("ERP order status for an order LiveCart does not own",
+			zap.String("external_order_id", externalOrderID),
+			zap.String("status", string(status)),
+		)
 		return nil
 	}
 

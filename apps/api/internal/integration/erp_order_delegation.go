@@ -136,10 +136,10 @@ func (s *Service) ResolveERPContact(ctx context.Context, provider providers.ERPP
 // CreateERPOrderForCart carrega o carrinho e cria o pedido de venda no ERP —
 // situação Aberta, sem pagamento e sem movimentação de estoque. Grava o
 // external_order_id no carrinho em caso de sucesso.
-func (s *Service) CreateERPOrderForCart(ctx context.Context, provider providers.ERPProvider, integration *erp.Integration, storeID, cartID string) error {
+func (s *Service) CreateERPOrderForCart(ctx context.Context, provider providers.ERPProvider, integration *erp.Integration, storeID, cartID string) ([]providers.ERPOrderItem, error) {
 	cart, err := s.repo.GetCartForPaidOrder(ctx, cartID)
 	if err != nil {
-		return fmt.Errorf("loading cart for ERP order: %w", err)
+		return nil, fmt.Errorf("loading cart for ERP order: %w", err)
 	}
 	return s.createERPOrderForCart(ctx, provider, integrationRowFromERP(integration), storeID, cart.EventID, *cart)
 }
