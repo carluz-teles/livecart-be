@@ -192,6 +192,8 @@ func (s *Service) erpStock() *erp.Service {
 		s.erpStockService.SetOrderStatusRepository(s.repo)
 		// Drenagem das reservas manuais: migração única, sai com ela.
 		s.erpStockService.SetDrainRepository(s.repo)
+		// Caminho de volta: o pedido do ERP refletido no carrinho.
+		s.erpStockService.SetCartSyncCollaborators(s)
 	})
 	return s.erpStockService
 }

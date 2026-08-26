@@ -771,6 +771,7 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		default:
 			payload := append([]byte(nil), body...)
 			numero := webhook.Dados.Numero
+			ehAtualizacao := webhook.Tipo == "atualizacao_pedido"
 			go func() {
 				ctx := logger.WithStore(context.Background(), storeID, storeSlug)
 				if err := h.service.ERP().ObserveOrderStatus(ctx, storeID, idPedido, numero, status, erp.StatusSourceWebhook, payload); err != nil {
@@ -780,6 +781,21 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 						zap.Error(err),
 					)
 				}
+
+				// `atualizacao_pedido` também dispara quando SÓ os itens mudam —
+				// medido em 26/08/2026: um PUT de quantidades às 20:14:21 gerou o
+				// webhook às 20:14:24, com a situação parada em "aberto". É o
+				// empurrão que dispensa sondagem: o lojista mexeu no pedido pelo
+				// painel e o carrinho precisa seguir.
+				//
+				// Ele chega também depois das NOSSAS escritas. O reflexo é
+				// idempotente e sai barato quando nada mudou (uma leitura e uma
+				// comparação), e é coalescido por pedido para uma rajada não virar
+				// uma leitura por webhook.
+				if !ehAtualizacao {
+					return
+				}
+				h.reflexoDoPedido(ctx, storeID, idPedido)
 			}()
 		}
 	}
@@ -813,6 +829,44 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, fiber.Map{"status": "received"})
+}
+
+// reflexoDoPedido traz para o carrinho o que o pedido no ERP diz agora.
+//
+// Coalescido por pedido: uma rajada de webhooks (a nossa própria escrita gera
+// um, e o lojista pode salvar várias vezes seguidas) vira no máximo duas
+// leituras, e a última sempre enxerga o estado final.
+func (h *WebhookHandler) reflexoDoPedido(ctx context.Context, storeID, idPedido string) {
+	cartID, err := h.service.CartIDByExternalOrder(ctx, storeID, idPedido)
+	if err != nil || cartID == "" {
+		return // pedido que não é de nenhum carrinho nosso
+	}
+	rodou, err := h.service.CoalescerReflexo().Fazer(storeID+"|"+idPedido, func() error {
+		rel, syncErr := h.service.SyncCartFromERPOrder(ctx, cartID, storeID)
+		if syncErr != nil {
+			return syncErr
+		}
+		if rel != nil && len(rel.Changes) > 0 {
+			logger.From(ctx, h.logger).Info("cart followed the merchant's edit in the ERP",
+				zap.String("cart_id", cartID),
+				zap.String("id_pedido", idPedido),
+				zap.Int("changes", len(rel.Changes)),
+				zap.Int("products_imported", rel.Imported),
+			)
+		}
+		return nil
+	})
+	if err != nil {
+		logger.From(ctx, h.logger).Warn("could not reflect the ERP order into the cart",
+			zap.String("cart_id", cartID),
+			zap.String("id_pedido", idPedido),
+			zap.Error(err))
+		return
+	}
+	if !rodou {
+		logger.From(ctx, h.logger).Debug("reflection coalesced into the one already running",
+			zap.String("id_pedido", idPedido))
+	}
 }
 
 // HandleMelhorEnvio handles Melhor Envio webhook notifications. ME signs the

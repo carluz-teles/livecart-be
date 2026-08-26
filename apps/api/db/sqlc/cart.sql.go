@@ -2893,6 +2893,28 @@ func (q *Queries) ListStuckERPOrderOps(ctx context.Context, olderThanSeconds int
 	return items, nil
 }
 
+const removeCartItemFromERP = `-- name: RemoveCartItemFromERP :exec
+DELETE FROM cart_items
+WHERE cart_id = $1::uuid
+  AND product_id = $2::uuid
+  AND waitlisted_quantity = 0
+`
+
+type RemoveCartItemFromERPParams struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+}
+
+// Tira do carrinho o item que o lojista apagou do pedido.
+//
+// Só quando NÃO há parcela em fila: uma linha com fila representa gente
+// esperando, e apagá-la por causa de uma edição no painel do ERP mataria a
+// espera de alguém que nunca chegou a estar no pedido.
+func (q *Queries) RemoveCartItemFromERP(ctx context.Context, arg RemoveCartItemFromERPParams) error {
+	_, err := q.db.Exec(ctx, removeCartItemFromERP, arg.CartID, arg.ProductID)
+	return err
+}
+
 const restoreCancelledCartAsPaid = `-- name: RestoreCancelledCartAsPaid :one
 UPDATE carts
 SET status              = 'checkout',
@@ -3021,6 +3043,39 @@ type SetCartERPStockLaunchedParams struct {
 
 func (q *Queries) SetCartERPStockLaunched(ctx context.Context, arg SetCartERPStockLaunchedParams) error {
 	_, err := q.db.Exec(ctx, setCartERPStockLaunched, arg.ID, arg.ErpStockLaunched)
+	return err
+}
+
+const setCartItemQuantityFromERP = `-- name: SetCartItemQuantityFromERP :exec
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity)
+VALUES ($1::uuid, $2::uuid, $3, $4, 0)
+ON CONFLICT (cart_id, product_id) DO UPDATE
+SET quantity   = EXCLUDED.quantity + cart_items.waitlisted_quantity,
+    unit_price = EXCLUDED.unit_price
+`
+
+type SetCartItemQuantityFromERPParams struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	Quantity  pgtype.Int4 `json:"quantity"`
+	UnitPrice pgtype.Int8 `json:"unit_price"`
+}
+
+// Ajusta a quantidade de um item do carrinho para refletir o pedido no ERP.
+//
+// É o caminho de volta: o lojista mexeu no pedido pelo painel e o carrinho tem
+// de seguir, porque é o carrinho que a compradora vê e paga. Preserva a parcela
+// em fila de espera — ela não está no pedido e não é do lojista mexer.
+//
+// Sem ON CONFLICT DO UPDATE isto seria um par ler-decidir-gravar, e duas
+// reflexões simultâneas do mesmo pedido se atropelariam.
+func (q *Queries) SetCartItemQuantityFromERP(ctx context.Context, arg SetCartItemQuantityFromERPParams) error {
+	_, err := q.db.Exec(ctx, setCartItemQuantityFromERP,
+		arg.CartID,
+		arg.ProductID,
+		arg.Quantity,
+		arg.UnitPrice,
+	)
 	return err
 }
 

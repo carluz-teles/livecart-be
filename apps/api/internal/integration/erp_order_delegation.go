@@ -102,6 +102,12 @@ func (s *Service) DrainLegacyReservations(ctx context.Context, storeID string, d
 	return s.erpStock().DrainLegacyReservations(ctx, storeID, dryRun, limite)
 }
 
+// SyncCartFromERPOrder delega para erp.Service: traz para o carrinho o que o
+// pedido no ERP diz hoje.
+func (s *Service) SyncCartFromERPOrder(ctx context.Context, cartID, storeID string) (*erp.CartSyncReport, error) {
+	return s.erpStock().SyncCartFromERPOrder(ctx, cartID, storeID)
+}
+
 // RunERPOrderStatusSweep delega para erp.Service.
 func (s *Service) RunERPOrderStatusSweep(ctx context.Context, staleAfter time.Duration, limit int) {
 	s.erpStock().RunERPOrderStatusSweep(ctx, staleAfter, limit)

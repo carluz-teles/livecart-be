@@ -132,8 +132,11 @@ type Service struct {
 	status ERPOrderStatusRepository
 	// drain é a persistência da migração única das reservas manuais. Opcional e
 	// com prazo: sai quando a drenagem terminar. Ver drenagem.go.
-	drain  DrainRepository
-	logger *zap.Logger
+	drain DrainRepository
+	// cartSync é o caminho de volta: o pedido do ERP refletido no carrinho.
+	// Ver reflexo.go.
+	cartSync CartSyncCollaborators
+	logger   *zap.Logger
 
 	// escrita serializa as escritas no ERP e as mantém dentro do teto real da
 	// conta. Não é opcional: o teto é um fato da API, não uma preferência.

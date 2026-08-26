@@ -1114,3 +1114,29 @@ WHERE p.external_id = sqlc.arg(external_product_id)
   AND c.status NOT IN ('expired', 'cancelled')
   AND (c.payment_status IS NULL OR c.payment_status <> 'refunded')
   AND ci.quantity > ci.waitlisted_quantity;
+
+-- name: SetCartItemQuantityFromERP :exec
+-- Ajusta a quantidade de um item do carrinho para refletir o pedido no ERP.
+--
+-- É o caminho de volta: o lojista mexeu no pedido pelo painel e o carrinho tem
+-- de seguir, porque é o carrinho que a compradora vê e paga. Preserva a parcela
+-- em fila de espera — ela não está no pedido e não é do lojista mexer.
+--
+-- Sem ON CONFLICT DO UPDATE isto seria um par ler-decidir-gravar, e duas
+-- reflexões simultâneas do mesmo pedido se atropelariam.
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity)
+VALUES (sqlc.arg(cart_id)::uuid, sqlc.arg(product_id)::uuid, sqlc.arg(quantity), sqlc.arg(unit_price), 0)
+ON CONFLICT (cart_id, product_id) DO UPDATE
+SET quantity   = EXCLUDED.quantity + cart_items.waitlisted_quantity,
+    unit_price = EXCLUDED.unit_price;
+
+-- name: RemoveCartItemFromERP :exec
+-- Tira do carrinho o item que o lojista apagou do pedido.
+--
+-- Só quando NÃO há parcela em fila: uma linha com fila representa gente
+-- esperando, e apagá-la por causa de uma edição no painel do ERP mataria a
+-- espera de alguém que nunca chegou a estar no pedido.
+DELETE FROM cart_items
+WHERE cart_id = sqlc.arg(cart_id)::uuid
+  AND product_id = sqlc.arg(product_id)::uuid
+  AND waitlisted_quantity = 0;
