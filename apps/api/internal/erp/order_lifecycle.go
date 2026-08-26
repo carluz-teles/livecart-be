@@ -340,6 +340,25 @@ func (s *Service) finishERPOrderConversion(ctx context.Context, cartID, storeID,
 		return fmt.Errorf("creating ERP provider: %w", err)
 	}
 
+	// MODO RESERVA: a conversão NÃO lança estoque.
+	//
+	// O pedido já segura a peça pelo `reservado` no instante em que nasce, então
+	// lançar aqui faria duas coisas erradas de uma vez: baixaria o saldo físico
+	// no meio da live (o que este modo existe para evitar) e travaria toda
+	// mutação seguinte com `400 motivosBloqueio: "estoque lançado"` — foi
+	// exatamente isso que impediu o segundo comentário de entrar no pedido no
+	// primeiro teste. A baixa física acontece uma vez só, no pagamento.
+	//
+	// Também não há reserva manual a estornar: neste modo nenhuma foi criada.
+	if s.reserveModeEnabled(ctx, storeID) {
+		s.logReserveMode(ctx, cartID, true)
+		logger.From(ctx, s.logger).Info("conversion complete (reserve mode: order holds the stock, nothing launched)",
+			zap.String("cart_id", cartID),
+			zap.String("external_order_id", orderID),
+		)
+		return s.openConvertedOrder(ctx, cartID, orderID)
+	}
+
 	if launchErr := erpProvider.LaunchOrderStock(ctx, orderID); launchErr != nil {
 		logger.From(ctx, s.logger).Warn("conversion launch-first failed, falling back to reverse-first",
 			zap.String("cart_id", cartID),
@@ -366,6 +385,16 @@ func (s *Service) finishERPOrderConversion(ctx context.Context, cartID, storeID,
 		return fmt.Errorf("reversing reservations after conversion launch: %w", err)
 	}
 
+	return s.openConvertedOrder(ctx, cartID, orderID)
+}
+
+// openConvertedOrder fecha a conversão: CAS converting→open, log e espelho.
+//
+// Extraído porque os dois modos chegam aqui pelo mesmo lugar — o de lançamento
+// depois de baixar o estoque, o de reserva direto, já que lá o pedido segura a
+// peça sozinho. Duplicar a transição faria dois pontos de verdade para o mesmo
+// estado.
+func (s *Service) openConvertedOrder(ctx context.Context, cartID, orderID string) error {
 	moved, err := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateConverting, OrderStateOpen)
 	if err != nil {
 		return fmt.Errorf("transitioning cart to open: %w", err)
@@ -459,6 +488,28 @@ func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, ord
 		// Grade vazia é ACEITA pela API (sandbox T6) mas nunca é o que o
 		// comprador quer — trate como erro de chamada.
 		return fmt.Errorf("cart %s sem itens vinculados ao ERP para aplicar no pedido", cartID)
+	}
+
+	// MODO RESERVA: a mutação é UM PUT, e nada mais.
+	//
+	// O pedido já segura a peça pelo `reservado`, e o `PUT /itens` reajusta essa
+	// reserva sozinho (medido 26/08: qtd 2→5 levou reservado de 2 para 5). Rodar
+	// o ciclo estornar→PUT→lançar aqui seria ativamente destrutivo: neste modo
+	// `estornar-estoque` num pedido que só reservou NÃO é no-op, ele RE-RESERVA —
+	// três chamadas num pedido de 3 unidades levaram o reservado de 12 a 21.
+	// E lançar durante a live travaria os próximos PUTs com
+	// `400 motivosBloqueio: "estoque lançado"`.
+	if s.reserveModeEnabled(ctx, storeID) {
+		s.logReserveMode(ctx, cartID, true)
+		if err := erpProvider.UpdateOrderItems(ctx, orderID, grid); err != nil {
+			return fmt.Errorf("updating order items: %w", err)
+		}
+		logger.From(ctx, s.logger).Info("order grid updated (reserve mode: PUT only, stock untouched)",
+			zap.String("cart_id", cartID),
+			zap.String("external_order_id", orderID),
+			zap.Int("items", len(grid)),
+		)
+		return nil
 	}
 
 	if err := erpProvider.ReverseOrderStock(ctx, orderID); err != nil {

@@ -109,6 +109,24 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 		return nil
 	}
 
+	// MODO RESERVA: o PEDIDO é a reserva, e nenhum movimento manual acontece.
+	//
+	// O cart ainda não foi convertido (o ramo acima cuidaria disso), então este é
+	// o PRIMEIRO item: criar o pedido de venda no Tiny já segura a peça, sem
+	// tocar no saldo físico. A partir daqui todo item novo cai no ramo acima e
+	// vira um `PUT /itens`, que reajusta a reserva.
+	//
+	// É o que substitui a saída manual tipo `S` — e com ela somem o webhook de
+	// estoque que realimentava a fila, o par estorno→criação no pagamento e a
+	// classe inteira de reservas órfãs.
+	if s.reserveModeEnabled(ctx, storeID) {
+		s.logReserveMode(ctx, cartID, true)
+		if convErr := s.EnsureERPOrderForCart(ctx, cartID, storeID); convErr != nil {
+			return fmt.Errorf("creating order-as-reservation for cart %s: %w", cartID, convErr)
+		}
+		return nil
+	}
+
 	erpProvider, err := s.collab.ResolveProvider(ctx, integration)
 	if err != nil {
 		return fmt.Errorf("creating ERP provider: %w", err)
