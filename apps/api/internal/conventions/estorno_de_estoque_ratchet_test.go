@@ -162,6 +162,16 @@ func TestMovimentoManualDeEstoqueNaoRessuscita(t *testing.T) {
 		"LaunchOrderStock(",
 		"lancar-estoque",
 	}
+	// A drenagem é a exceção com prazo: ela devolve as saídas manuais que já
+	// existiam no instante do corte, e para isso precisa da entrada tipo E. Sai
+	// junto com a tabela stock_reservations. Ver erp/drenagem.go.
+	daDrenagem := map[string]bool{
+		"erp/drenagem.go":                            true,
+		"integration/providers/erp/tiny.go":          true,
+		"integration/providers/types.go":             true,
+		"integration/erp_order_status_repository.go": true,
+		"integration/drenagem_handler.go":            true,
+	}
 	var infratores []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -184,6 +194,9 @@ func TestMovimentoManualDeEstoqueNaoRessuscita(t *testing.T) {
 		codigo := semComentarios(string(src))
 		rel, _ := filepath.Rel(root, path)
 		rel = filepath.ToSlash(rel)
+		if daDrenagem[rel] {
+			return nil
+		}
 		for _, p := range proibidos {
 			if strings.Contains(codigo, p) {
 				infratores = append(infratores, rel+" → "+strings.TrimSuffix(p, "("))

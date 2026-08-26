@@ -190,6 +190,8 @@ func (s *Service) erpStock() *erp.Service {
 		// Rastreamento da situação do pedido: mesmo Repository por baixo, porta
 		// separada porque o webhook de pedido pode chegar sem carrinho nosso.
 		s.erpStockService.SetOrderStatusRepository(s.repo)
+		// Drenagem das reservas manuais: migração única, sai com ela.
+		s.erpStockService.SetDrainRepository(s.repo)
 	})
 	return s.erpStockService
 }

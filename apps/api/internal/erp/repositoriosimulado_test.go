@@ -356,7 +356,11 @@ func (r *repoSimulado) ListStaleOrderStatuses(_ context.Context, _ time.Duration
 // --- StockCollaborators -----------------------------------------------------
 
 type colabSimulado struct {
-	erp  *erpSimulado
+	// erp é a interface, não o tipo concreto: a drenagem embrulha o simulador
+	// para acrescentar o estorno da saída manual, e o colaborador precisa
+	// devolver ESSE objeto — senão a criação do pedido e o estorno falariam com
+	// ERPs diferentes, e a sequência que os testes afirmam deixaria de existir.
+	erp  providers.ERPProvider
 	repo *repoSimulado
 
 	mu             sync.Mutex

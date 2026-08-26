@@ -26,14 +26,18 @@ func montar(saldos map[string]int) (*Service, *repoSimulado, *erpSimulado, *cola
 	c := &colabSimulado{erp: e, repo: r}
 	s := NewService(r, c, zap.NewNop())
 	s.SetOrderStatusRepository(r)
-	// Teto de escrita aberto: o limitador é real em produção e tem os seus
-	// próprios testes; aqui ele só faria a suíte esperar a janela de 60s do
-	// balde sustentado para provar uma regra de negócio.
-	s.SetWriteLimits(erpwrite.Limits{
+	s.SetWriteLimits(limitesAbertos())
+	return s, r, e, c
+}
+
+// limitesAbertos desliga o estrangulamento nos testes de fluxo. O limitador é
+// real em produção e tem os seus próprios testes; aqui ele só faria a suíte
+// esperar a janela de 60s do balde sustentado para provar uma regra de negócio.
+func limitesAbertos() erpwrite.Limits {
+	return erpwrite.Limits{
 		BurstN: 4096, BurstWindow: time.Millisecond,
 		SustainedN: 1 << 20, SustWindow: time.Millisecond,
-	})
-	return s, r, e, c
+	}
 }
 
 func item(produtoID string, qtd int) NonWaitlistedCartItem {

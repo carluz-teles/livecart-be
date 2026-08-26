@@ -175,3 +175,25 @@ WHERE id = @id AND status = 'active';
 -- movimento gravado). O que já foi confirmado no ERP nunca volta.
 UPDATE stock_reservations SET status = 'active', reversed_at = NULL
 WHERE id = @id AND status = 'reversed';
+
+-- name: ListCartsWithActiveReservations :many
+-- Carrinhos da loja que ainda seguram peça por reserva MANUAL — a lista de
+-- trabalho da drenagem única.
+--
+-- Ordena do mais novo para o mais antigo de propósito: os carrinhos recentes são
+-- os de uma live em andamento, e são eles que não podem ficar um segundo sem
+-- estoque segurado. Os antigos já estão parados há dias e podem esperar.
+SELECT c.id::text AS cart_id,
+       COALESCE(c.store_id, e.store_id)::text AS store_id,
+       c.status,
+       COALESCE(c.payment_status, '') AS payment_status,
+       COALESCE(c.external_order_id, '') AS external_order_id,
+       e.status AS event_status,
+       COUNT(sr.id)::int AS reservation_rows,
+       COALESCE(SUM(sr.quantity), 0)::int AS reserved_units
+FROM carts c
+JOIN live_events e ON e.id = c.event_id
+JOIN stock_reservations sr ON sr.cart_id = c.id AND sr.status = 'active'
+WHERE COALESCE(c.store_id, e.store_id) = sqlc.arg(store_id)::uuid
+GROUP BY c.id, c.store_id, e.store_id, c.status, c.payment_status, c.external_order_id, e.status, c.created_at
+ORDER BY c.created_at DESC;

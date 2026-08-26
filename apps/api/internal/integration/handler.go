@@ -70,6 +70,10 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// o item entrar no carrinho e o pedido refletir no ERP.
 	g.Get("/erp/stock-reconciliation", h.RunStockReconciliation)
 
+	// Drenagem das reservas manuais para pedidos de venda. Migração única: sai
+	// da API quando a tabela stock_reservations estiver vazia.
+	g.Post("/erp/drain-legacy-reservations", h.DrainLegacyReservations)
+
 	// Test connection
 	g.Post("/:id/test", h.TestConnection)
 

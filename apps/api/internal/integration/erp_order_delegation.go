@@ -97,6 +97,11 @@ func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID stri
 	return s.erpStock().RetryERPFinalisation(ctx, cartID, storeID)
 }
 
+// DrainLegacyReservations delega para erp.Service (migração única).
+func (s *Service) DrainLegacyReservations(ctx context.Context, storeID string, dryRun bool, limite int) (*erp.DrainReport, error) {
+	return s.erpStock().DrainLegacyReservations(ctx, storeID, dryRun, limite)
+}
+
 // RunERPOrderStatusSweep delega para erp.Service.
 func (s *Service) RunERPOrderStatusSweep(ctx context.Context, staleAfter time.Duration, limit int) {
 	s.erpStock().RunERPOrderStatusSweep(ctx, staleAfter, limit)
