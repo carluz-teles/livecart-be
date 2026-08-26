@@ -1,6 +1,6 @@
 package erp
 
-// 429 no GET /estoque NÃO pode virar saldo físico — incidente 834962410
+// 429 no GET /estoque não pode custar o saldo — incidente 834962410
 // (22/08/2026).
 //
 // A cantodaart cadastrou dois produtos quase idênticos em sequência. O
@@ -10,9 +10,11 @@ package erp
 // disponível" existe para impedir. O 837156336, 2s depois, passou sem 429 e
 // puxou o disponível certo. Não era o produto: era estrangulamento transitório.
 //
-// A correção re-tenta o 429 com backoff curto antes de desistir. Só cai no
-// físico se o estrangulamento persistir — 404 (sem controle de estoque) segue
-// caindo na hora, sem espera.
+// A correção re-tenta o 429 com backoff curto antes de desistir. Hoje nem o
+// desistir cai no físico: o produto volta marcado como não-apurado e ninguém
+// escreve. O que o retry ainda compra é a diferença entre "estrangulado agora"
+// e "sem saldo apurável", que é a diferença entre uma live que vende e uma que
+// pára — daí ele continuar aqui, e 404 continuar não sendo re-tentado.
 
 import (
 	"context"
@@ -71,10 +73,11 @@ func TestEstoque429TransitorioNaoCaiNoFisico(t *testing.T) {
 	}
 }
 
-// TestEstoque404CaiNoFisicoSemEsperar: 404 é ausência real (produto sem
-// controle de estoque), não estrangulamento — cai no físico de imediato, uma
-// só chamada, sem retry.
-func TestEstoque404CaiNoFisicoSemEsperar(t *testing.T) {
+// TestEstoque404NaoApuraSaldoESaiSemEsperar: 404 é ausência real (produto sem
+// controle de estoque), não estrangulamento — desiste de imediato, uma só
+// chamada, e o produto volta sem saldo apurado. O `estoque.quantidade` do
+// payload continua ali e continua sendo o físico; ninguém pode usá-lo.
+func TestEstoque404NaoApuraSaldoESaiSemEsperar(t *testing.T) {
 	backoffInstantaneo(t)
 
 	var tentativasEstoque int32
@@ -93,8 +96,13 @@ func TestEstoque404CaiNoFisicoSemEsperar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProduct: %v", err)
 	}
-	if prod.Stock != 7 {
-		t.Errorf("Stock = %d, quero 7 (físico) — 404 sem controle de estoque preserva o físico", prod.Stock)
+	if prod.StockKnown {
+		t.Errorf("StockKnown = true para produto sem controle de estoque (Stock=%d) — "+
+			"não há disponível a apurar, e afirmar um convida o chamador a gravá-lo", prod.Stock)
+	}
+	if prod.Stock == 7 {
+		t.Errorf("Stock = 7, que é o físico de `estoque.quantidade` — o 404 não " +
+			"autoriza usá-lo")
 	}
 	if got := atomic.LoadInt32(&tentativasEstoque); got != 1 {
 		t.Errorf("tentativas ao /estoque = %d, quero 1 — 404 não pode ser re-tentado como se fosse 429", got)

@@ -10,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/erp"
+	"livecart/apps/api/internal/integration/providers"
 	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/httpx"
@@ -617,6 +619,19 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 			Saldo        *float64    `json:"saldo"`
 			ChaveAcesso  string      `json:"chaveAcesso"`
 			Situacao     json.Number `json:"situacao"`
+			// Eventos de pedido (inclusao_pedido / atualizacao_pedido). O
+			// `codigoSituacao` é um SLUG ("aberto", "aprovado", "enviado"), não o
+			// código numérico que a API usa para MUDAR a situação — as duas
+			// grafias convivem, e a tabela que as casa está em
+			// providers.ERPOrderStatus.
+			Numero            string `json:"numero"`
+			CodigoSituacao    string `json:"codigoSituacao"`
+			DescricaoSituacao string `json:"descricaoSituacao"`
+			// Evento de rastreio.
+			IDVendaTiny    json.Number `json:"idVendaTiny"`
+			CodigoRastreio string      `json:"codigoRastreio"`
+			URLRastreio    string      `json:"urlRastreio"`
+			Transportadora string      `json:"transportadora"`
 		} `json:"dados"`
 	}
 	if err := json.Unmarshal(body, &webhook); err != nil {
@@ -655,9 +670,18 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	}
 	logger.From(c.Context(), h.logger).Info("tiny webhook received", campos...)
 
-	// Store webhook event
+	// Âncora de dedupe do webhook_events. Para eventos de pedido é o par
+	// pedido+situação: sem a situação, uma redelivery e uma transição de verdade
+	// no mesmo pedido teriam a mesma chave, e a segunda seria descartada como
+	// duplicata.
 	eventID := productID
-	if eventID == "" {
+	switch {
+	case webhook.Tipo == "inclusao_pedido" || webhook.Tipo == "atualizacao_pedido":
+		eventID = webhook.Dados.ID + ":" + webhook.Dados.CodigoSituacao
+	case webhook.Tipo == "rastreio":
+		eventID = "rastreio:" + webhook.Dados.IDVendaTiny.String()
+	}
+	if eventID == "" || eventID == ":" {
 		eventID = c.Get("X-Request-Id")
 	}
 
@@ -716,6 +740,48 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 				}
 			}
 		}()
+	}
+
+	// Eventos de PEDIDO: o ERP avisa a cada transição de situação, e é assim que
+	// o trajeto pós-venda (faturado → separado → enviado → entregue) chega ao
+	// LiveCart em vez de ficar só no outro sistema.
+	//
+	// `inclusao_pedido` entra junto com `atualizacao_pedido` de propósito: o
+	// pedido que o LiveCart acabou de criar nasce Em aberto, e registrar esse
+	// primeiro estágio é o que dá começo ao histórico.
+	if webhook.Tipo == "inclusao_pedido" || webhook.Tipo == "atualizacao_pedido" {
+		idPedido := webhook.Dados.ID
+		if idPedido == "" {
+			idPedido = webhook.Dados.IDPedido.String()
+		}
+		status, conhecida := providers.ParseERPOrderStatus(webhook.Dados.CodigoSituacao)
+		switch {
+		case idPedido == "":
+			logger.From(c.Context(), h.logger).Warn("order webhook missing order id — cannot track",
+				zap.String("tipo", webhook.Tipo),
+			)
+		case !conhecida:
+			// Situação nova numa versão futura da API. Inventar um nome seria
+			// pior do que registrar que não conhecemos aquela.
+			logger.From(c.Context(), h.logger).Warn("order webhook carries an unknown situation",
+				zap.String("id_pedido", idPedido),
+				zap.String("codigo_situacao", webhook.Dados.CodigoSituacao),
+				zap.String("descricao_situacao", webhook.Dados.DescricaoSituacao),
+			)
+		default:
+			payload := append([]byte(nil), body...)
+			numero := webhook.Dados.Numero
+			go func() {
+				ctx := logger.WithStore(context.Background(), storeID, storeSlug)
+				if err := h.service.ERP().ObserveOrderStatus(ctx, storeID, idPedido, numero, status, erp.StatusSourceWebhook, payload); err != nil {
+					logger.From(ctx, h.logger).Error("failed to record ERP order status",
+						zap.String("id_pedido", idPedido),
+						zap.String("status", string(status)),
+						zap.Error(err),
+					)
+				}
+			}()
+		}
 	}
 
 	// Process NFe events: when the merchant emits/cancels a nota fiscal in

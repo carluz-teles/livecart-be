@@ -62,16 +62,12 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/:id", h.GetByID)
 	g.Delete("/:id", h.Delete)
 	g.Patch("/:id/priority", h.UpdatePriority)
-	g.Patch("/:id/erp/stock-source", h.UpdateERPStockSource)
 	g.Post("/:id/erp/resync", h.StartERPResync)
 
-	// Painel de pendências do razão de movimentos (erp_stock_movements). As
-	// rotas vivem fora de /:id porque a pendência é da LOJA, não de uma
-	// integração específica.
-	g.Get("/erp/stock-movements/pending", h.ListPendingStockMovements)
-	g.Post("/erp/stock-movements/:movementId/resolve", h.ResolveStockMovement)
-	// Reconciliação local × ERP em modo relatório (só leitura). Rodar com a
-	// loja quieta: durante uma live cada reserva borra a foto por segundos.
+	// Reconciliação local × ERP em modo relatório (só leitura). Fica fora de
+	// /:id porque a comparação é da LOJA, não de uma integração específica.
+	// Rodar com a loja quieta: durante uma live há uma janela de segundos entre
+	// o item entrar no carrinho e o pedido refletir no ERP.
 	g.Get("/erp/stock-reconciliation", h.RunStockReconciliation)
 
 	// Test connection
@@ -307,33 +303,6 @@ func (h *Handler) UpdatePriority(c *fiber.Ctx) error {
 		return httpx.HandleServiceError(c, err)
 	}
 	return httpx.OK(c, fiber.Map{"id": id, "priority": req.Priority})
-}
-
-// UpdateERPStockSource escolhe qual saldo do ERP o LiveCart espelha.
-// @Summary Choose which ERP balance mirrors into LiveCart
-// @Description Off (default) mirrors the physical balance; on mirrors the available one (physical minus what the ERP already committed to open documents).
-// @Tags integrations
-// @Accept json
-// @Produce json
-// @Param storeId path string true "Store ID"
-// @Param id path string true "Integration ID"
-// @Param body body UpdateERPStockSourceRequest true "Stock source"
-// @Success 200 {object} httpx.Envelope{data=ERPStockSourceResponse}
-// @Failure 422 {object} httpx.Envelope
-// @Router /stores/{storeId}/integrations/{id}/erp/stock-source [patch]
-func (h *Handler) UpdateERPStockSource(c *fiber.Ctx) error {
-	var req UpdateERPStockSourceRequest
-	if err := httpx.BindAndValidate(c, &req); err != nil {
-		return err
-	}
-	row, err := h.service.UpdateERPStockSource(
-		c.UserContext(),
-		req.ToInput(httpx.GetStoreID(c), c.Params("id")),
-	)
-	if err != nil {
-		return err
-	}
-	return httpx.OK(c, NewERPStockSourceResponse(row))
 }
 
 // StartERPResync relê todos os produtos vinculados ao ERP.

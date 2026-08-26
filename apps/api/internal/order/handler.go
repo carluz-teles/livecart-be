@@ -29,6 +29,8 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Post("/:id/cancel", h.Cancel)
 	g.Post("/:id/retry-erp", h.RetryERPFinalisation)
 	g.Post("/:id/sync-invoice", h.SyncInvoice)
+	// Trajeto do pedido dentro do ERP (aberto → aprovado → faturado → …).
+	g.Get("/:id/erp-status", h.ERPOrderStatusHistory)
 	// Edição dos itens pelo lojista, para pedido ainda não pago. Ver item_edit.go.
 	g.Post("/:id/items", h.AddItem)
 	g.Patch("/:id/items/:itemId", h.SetItemQuantity)

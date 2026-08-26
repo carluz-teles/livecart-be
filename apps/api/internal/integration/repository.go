@@ -2693,7 +2693,6 @@ func (r *Repository) ListStockPositionsForReconciliation(ctx context.Context, st
 			Name:       row.Name,
 			ExternalID: row.ExternalID.String,
 			LocalStock: int(row.LocalStock),
-			Held:       int(row.Held),
 		})
 	}
 	return out, nil

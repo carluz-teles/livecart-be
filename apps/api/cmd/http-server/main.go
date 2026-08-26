@@ -523,15 +523,14 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				},
 				TinyConstructor: func(cfg providers.TinyConfig) (providers.ERPProvider, error) {
 					return erp.NewTiny(erp.TinyConfig{
-						UseAvailableStock: cfg.UseAvailableStock,
-						IntegrationID:     cfg.IntegrationID,
-						StoreID:           cfg.StoreID,
-						Credentials:       cfg.Credentials,
-						ClientID:          cfg.ClientID,
-						ClientSecret:      cfg.ClientSecret,
-						Logger:            cfg.Logger,
-						LogFunc:           cfg.LogFunc,
-						RateLimiter:       cfg.RateLimiter,
+						IntegrationID: cfg.IntegrationID,
+						StoreID:       cfg.StoreID,
+						Credentials:   cfg.Credentials,
+						ClientID:      cfg.ClientID,
+						ClientSecret:  cfg.ClientSecret,
+						Logger:        cfg.Logger,
+						LogFunc:       cfg.LogFunc,
+						RateLimiter:   cfg.RateLimiter,
 					})
 				},
 				InstagramConstructor: func(cfg providers.InstagramConfig) (providers.SocialProvider, error) {
@@ -610,15 +609,14 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 				},
 				TinyConstructor: func(cfg providers.TinyConfig) (providers.ERPProvider, error) {
 					return erp.NewTiny(erp.TinyConfig{
-						UseAvailableStock: cfg.UseAvailableStock,
-						IntegrationID:     cfg.IntegrationID,
-						StoreID:           cfg.StoreID,
-						Credentials:       cfg.Credentials,
-						ClientID:          cfg.ClientID,
-						ClientSecret:      cfg.ClientSecret,
-						Logger:            cfg.Logger,
-						LogFunc:           cfg.LogFunc,
-						RateLimiter:       cfg.RateLimiter,
+						IntegrationID: cfg.IntegrationID,
+						StoreID:       cfg.StoreID,
+						Credentials:   cfg.Credentials,
+						ClientID:      cfg.ClientID,
+						ClientSecret:  cfg.ClientSecret,
+						Logger:        cfg.Logger,
+						LogFunc:       cfg.LogFunc,
+						RateLimiter:   cfg.RateLimiter,
 					})
 				},
 				InstagramConstructor: func(cfg providers.InstagramConfig) (providers.SocialProvider, error) {
@@ -783,6 +781,14 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						integrationSvc.SweepDuePublishJobs(context.Background())
 					case <-webhookTicker.C:
 						integrationSvc.CheckTinyStockWebhookDelivery(context.Background(), 12*time.Hour)
+						// Pedidos parados num estágio não terminal: pergunta a
+						// situação de volta ao ERP. É o conserto de webhook
+						// perdido — o ERP desiste depois de dez tentativas, e o
+						// silêncio dele é indistinguível de "nada aconteceu".
+						// Janela larga de propósito: um pedido pode ficar
+						// legitimamente dias em "aprovado" antes de o lojista
+						// faturar, e perguntar antes disso só gasta cota.
+						integrationSvc.RunERPOrderStatusSweep(context.Background(), 24*time.Hour, 200)
 					}
 				}
 			}()
@@ -920,6 +926,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		// button on a failed paid cart routes through orderSvc but the actual
 		// re-creation lives on the integration service.
 		orderSvc.SetERPFinalisationRetrier(integrationSvc)
+		orderSvc.SetERPOrderStatusReader(integrationSvc)
 		// Same pattern for the manual "Verificar NFe" button: orderSvc is the
 		// HTTP entry point but the ERP fetch lives on the integration service.
 		orderSvc.SetCartInvoiceSyncer(integrationSvc.ERP())
@@ -1422,20 +1429,6 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		// registry) with a handler that logs AND arms — double registration
 		// would panic asynq.
 		integrationSvc.SetCartExpiryScheduler(cartExpiryScheduler{client: eventsClient})
-		integrationSvc.SetStockMovementScheduler(stockMovementScheduler{client: eventsClient})
-		eventsServer.Register(events.StockMovementResolve, func(ctx context.Context, t *asynq.Task) error {
-			var env events.Envelope
-			if err := json.Unmarshal(t.Payload(), &env); err != nil {
-				return asynq.SkipRetry
-			}
-			var p struct {
-				MovementID string `json:"movement_id"`
-			}
-			if err := json.Unmarshal(env.Payload, &p); err != nil || p.MovementID == "" {
-				return asynq.SkipRetry
-			}
-			return integrationSvc.RunScheduledStockMovementResolve(ctx, p.MovementID)
-		})
 		armCartExpiry := func(ctx context.Context, t *asynq.Task) error {
 			var env events.Envelope
 			if err := json.Unmarshal(t.Payload(), &env); err != nil {
@@ -1631,18 +1624,6 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	lifecycle.add("events-relay", eventsRelay.Stop)
 
 	return app, lifecycle
-}
-
-// stockMovementScheduler adapts the events client to erp.StockMovementScheduler.
-// O task id carrega o horário: cada retentativa é um task novo (o dedup por id
-// do asynq engoliria a segunda tentativa do mesmo movimento).
-type stockMovementScheduler struct{ client *events.Client }
-
-func (s stockMovementScheduler) ScheduleStockMovementResolve(ctx context.Context, movementID string, at time.Time) error {
-	taskID := fmt.Sprintf("stockmov-resolve:%s:%d", movementID, at.Unix())
-	return s.client.Schedule(ctx, at, events.StockMovementResolve, taskID, struct {
-		MovementID string `json:"movement_id"`
-	}{MovementID: movementID})
 }
 
 // cartExpiryScheduler adapts the events client to integration.CartExpiryScheduler,

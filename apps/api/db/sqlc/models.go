@@ -120,6 +120,9 @@ type Cart struct {
 	PixAmountCents         pgtype.Int8        `json:"pix_amount_cents"`
 	NeverExpires           bool               `json:"never_expires"`
 	StoreID                pgtype.UUID        `json:"store_id"`
+	ErpOrderStatus         pgtype.Text        `json:"erp_order_status"`
+	ErpOrderStatusAt       pgtype.Timestamptz `json:"erp_order_status_at"`
+	ErpOrderNumber         pgtype.Text        `json:"erp_order_number"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.
@@ -218,6 +221,19 @@ type ErpContact struct {
 	ExternalContactID string             `json:"external_contact_id"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ErpOrderStatusEvent struct {
+	ID              pgtype.UUID        `json:"id"`
+	StoreID         pgtype.UUID        `json:"store_id"`
+	CartID          pgtype.UUID        `json:"cart_id"`
+	ExternalOrderID string             `json:"external_order_id"`
+	OrderNumber     pgtype.Text        `json:"order_number"`
+	Status          string             `json:"status"`
+	PreviousStatus  pgtype.Text        `json:"previous_status"`
+	Source          string             `json:"source"`
+	ObservedAt      pgtype.Timestamptz `json:"observed_at"`
+	Payload         json.RawMessage    `json:"payload"`
 }
 
 type ErpStockMovement struct {

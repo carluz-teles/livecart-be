@@ -22,6 +22,12 @@ import (
 // keeps a backward-compatible alias while its logic is strangled out (Bloco B2).
 var ErrCartNotConverted = errors.New("cart não convertido em pedido ERP")
 
+// ErrCartBusy diz que há uma escrita em voo naquele pedido e a operação pedida
+// precisa esperar. É transitório por natureza — a mutação devolve o carrinho em
+// menos de um segundo —, e existe para o chamador saber que RETENTAR resolve, em
+// vez de tratar como falha e desistir.
+var ErrCartBusy = errors.New("cart com operação ERP em voo")
+
 // ERP order state machine (carts.erp_order_state column):
 //
 //	none → converting → open ⇄ mutating → confirmed

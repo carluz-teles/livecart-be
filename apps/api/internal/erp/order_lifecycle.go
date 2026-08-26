@@ -1,44 +1,45 @@
 package erp
 
-// Design C — pedido Tiny como reserva a partir da INICIAÇÃO DO PAGAMENTO.
+// O pedido de venda É a reserva.
 //
-// A fase live continua barata (saída manual, 1 escrita por mutação). Quando o
-// comprador clica em pagar — o último instante em que grade, endereço e frete
-// estão congelados, para cliente novo E recorrente — o cart converte:
+// Um comentário na live vira um item de carrinho; o primeiro item cria o pedido
+// no ERP, e cada item seguinte reenvia a grade inteira por `PUT /itens`. Criar o
+// pedido já segura a peça — o saldo físico não se mexe, `reservado` sobe e
+// `disponivel` desce. Medido em 26/08/2026 na conta real:
 //
-//	POST /pedidos (Aberta, sem pagamento, com endereço+frete+numeroOrdemCompra)
-//	→ marcador lc-cart-<id> (âncora de idempotência, busca em ~300ms)
-//	→ lancar-estoque (launch-first: o saldo MERGULHA, nunca faz pico)
-//	→ estornos per-row das saídas manuais (saldo volta ao real)
-//	→ erp_order_state = 'open'
-//
-// Pagamento confirmado vira 2 PUTs sem NENHUMA movimentação de estoque
-// (parcelas reais + situação Aprovada) — o gap da finalização morre
-// estruturalmente para carts convertidos. Edições no checkout usam o ciclo
-// estornar → PUT /itens → lançar (imposto pela própria API: "estoque
-// lançado" bloqueia o PUT — sandbox 11/07). Expiração/refund: cancelar →
-// estornar (cancelamento NÃO devolve estoque sozinho — sandbox T7/C4).
+//	criar pedido de 1 un.   →  saldo 5 (parado) · reservado 3→4 · disponivel 2→1
+//	PUT /itens 1→2 un.      →  204, e reservado acompanha: 4→5
+//	cancelar (situacao=2)   →  reserva devolvida sozinha, sem mais nada
 //
 // Máquina de estados (coluna carts.erp_order_state):
 //
 //	none → converting → open ⇄ mutating → confirmed
 //	                      └──────────────→ cancelled
 //
-// Regra sagrada: 'converting' NUNCA volta para 'none' — a chamada em voo pode
-// ter sucedido server-side; resetar reabriria o caminho legado e duplicaria a
-// baixa. Quem resolve converting sem pedido é a adoção por marcador (confirm)
-// e o sweep (ListStuckERPOrderOps).
+// Regra sagrada: 'converting' NUNCA volta para 'none' — a chamada em voo pode ter
+// sucedido do lado do ERP, e resetar criaria um segundo pedido para o mesmo
+// carrinho. Quem resolve um converting sem pedido é a adoção por marcador.
 //
-// Bloco B2c-1: esta máquina de estados vive agora no pacote canônico
-// internal/erp. integration.Service mantém delegações finas (assinaturas
-// públicas inalteradas); os call sites em checkout/main.go migram em B2e. A
-// finalização LEGADA (finalizeCartERPOrder etc.) e os reactors seguem em
-// internal/integration até B2c-2.
+// ═══ As três coisas que este arquivo NÃO faz, e por quê ═══
+//
+//  1. Não lança estoque. Nunca. O lançamento é a baixa física, e quem a faz é o
+//     faturamento do lojista no ERP. Lançar durante a live baixaria o físico
+//     (justamente o que o modelo evita) e travaria toda edição seguinte com
+//     `400 motivosBloqueio: "estoque lançado"`.
+//
+//  2. Não estorna por precaução. Num pedido que apenas reservou, `estornar-estoque`
+//     devolve 204 e INFLA a reserva pela quantidade do pedido, a cada chamada, sem
+//     teto — medido: 2 un. levaram `reservado` de 5 a 7 a 9, e `disponivel` a −4.
+//     O único estorno legítimo é o de recuperação, e só depois de a própria API
+//     recusar a edição com "estoque lançado".
+//
+//  3. Não movimenta estoque manual. Não existe mais `POST /estoque` no sistema.
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -49,43 +50,26 @@ import (
 
 func erpOrderMarker(cartID string) string { return "lc-cart-" + cartID }
 
-// IsTinyInsufficientBalanceErr reconhece a rejeição de lançamento por saldo
-// insuficiente sob "estoque negativo = Não". Mensagem real capturada na conta
-// de teste em 11/07: "Não é possível integrar o estoque deste pedido pois o
-// saldo em estoque de um ou mais produtos é insuficiente." Usado só para
-// classificar logs/métricas — o fallback dispara para qualquer erro de launch.
-// Exportada porque a finalização legada (B2c-2, ainda em internal/integration)
-// a reusa; canônica aqui, um único ponto de manutenção.
-func IsTinyInsufficientBalanceErr(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "insuficiente")
-}
-
-// PrepareCartForPayment é o gancho da INICIAÇÃO de pagamento (card/pix/link):
-// converte o cart em pedido-como-reserva quando a loja está no modo C.
-// Chamado em goroutine pelo checkout (fire-and-forget): o pagamento nunca
-// espera o Tiny — se a conversão ainda estiver em voo quando o pago chegar,
-// o confirm retoma/adota; se nunca aconteceu, cai no legado.
+// PrepareCartForPayment é o gancho da iniciação de pagamento. Hoje ele quase
+// nunca tem trabalho: o pedido nasceu no primeiro comentário, muito antes do
+// checkout. Continua existindo para o carrinho que chegou ao pagamento sem
+// pedido — loja que ligou o ERP no meio da live, produto vinculado tarde,
+// conversão que morreu no caminho.
 func (s *Service) PrepareCartForPayment(ctx context.Context, cartID, storeID string) {
-	if !s.collab.OrderAtCheckoutEnabled(storeID) {
-		return
-	}
 	ctx = logger.WithStore(ctx, storeID, "")
 	if err := s.EnsureERPOrderForCart(ctx, cartID, storeID); err != nil {
-		logger.From(ctx, s.logger).Warn("cart conversion on payment initiation failed (legacy fallback remains)",
+		logger.From(ctx, s.logger).Warn("cart order creation on payment initiation failed",
 			zap.String("cart_id", cartID),
 			zap.Error(err),
 		)
 	}
 }
 
-// PrewarmERPContact resolve/enriquece o contato Tiny em background quando um
-// cliente RECORRENTE abre o checkout (dados já conhecidos pelo @handle) — a
-// conversão na iniciação encontra o cache quente e fica ~2 escritas. Erros
-// são irrelevantes: o caminho síncrono resolve o contato de qualquer forma.
+// PrewarmERPContact resolve/enriquece o contato no ERP em background quando um
+// cliente RECORRENTE abre o checkout, para a criação do pedido achar o cache
+// quente. Erros são irrelevantes: o caminho síncrono resolve o contato de
+// qualquer forma.
 func (s *Service) PrewarmERPContact(ctx context.Context, storeID, platformUserID, platformHandle, name, document, email, phone string) {
-	if !s.collab.OrderAtCheckoutEnabled(storeID) {
-		return
-	}
 	ctx = logger.WithStore(ctx, storeID, "")
 	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
 	if err != nil {
@@ -103,151 +87,15 @@ func (s *Service) PrewarmERPContact(ctx context.Context, storeID, platformUserID
 	}
 }
 
-// RefundConvertedCartOrder devolve o estoque de um pedido CONFIRMADO cujo
-// pagamento foi estornado no gateway: situação 2 → estorno (ordem validada;
-// estorno funciona pós-cancelamento) → estado 'cancelled'. Resolve o TODO
-// antigo do refund para carts convertidos.
-func (s *Service) RefundConvertedCartOrder(ctx context.Context, cartID, storeID string) error {
-	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
-	if err != nil {
-		return fmt.Errorf("loading cart ERP order state: %w", err)
-	}
-	if st.State != OrderStateConfirmed || st.ExternalOrderID == "" {
-		return nil // não convertido/não confirmado — fluxo legado de refund (TODO histórico)
-	}
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
-	if err != nil {
-		return fmt.Errorf("loading ERP integration: %w", err)
-	}
-	erpProvider, err := s.collab.ResolveProvider(ctx, erpIntegration)
-	if err != nil {
-		return fmt.Errorf("creating ERP provider: %w", err)
-	}
-	if err := erpProvider.SetOrderSituacao(ctx, st.ExternalOrderID, 2); err != nil {
-		return fmt.Errorf("cancelling refunded order: %w", err)
-	}
-	if err := erpProvider.ReverseOrderStock(ctx, st.ExternalOrderID); err != nil {
-		return fmt.Errorf("reversing refunded order stock: %w", err)
-	}
-	if _, err := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateConfirmed, OrderStateCancelled); err != nil {
-		logger.From(ctx, s.logger).Error("failed to transition refunded cart to cancelled",
-			zap.String("cart_id", cartID),
-			zap.Error(err),
-		)
-	}
-	// Group G fact (best-effort): a confirmed order was cancelled on refund.
-	// Dedup by external order id; the state guard makes this fire once.
-	s.collab.EmitERPOrderCancelled(ctx, storeID, cartID, st.ExternalOrderID, "refund")
-	logger.From(ctx, s.logger).Info("refunded ERP order cancelled and stock returned",
-		zap.String("cart_id", cartID),
-		zap.String("external_order_id", st.ExternalOrderID),
-	)
-	return nil
-}
+// =============================================================================
+// CRIAÇÃO — o primeiro comentário
+// =============================================================================
 
-// CheckTinyStockWebhookDelivery é o health-check de ENTREGA de webhook:
-// integração Tiny ativa sem NENHUM evento 'estoque' na janela = quase certeza
-// de URL removida pelo Tiny (eles deletam o cadastro após falhas consecutivas
-// e param de entregar em silêncio — aprendizado de campo de 11/07). Loga em
-// ERROR (visível no Railway/alertas de log) com dedupe de 24h por integração.
-// Follow-up registrado: notificação in-app ao lojista (o inbox atual é
-// idea-cêntrico; exige migration própria).
-func (s *Service) CheckTinyStockWebhookDelivery(ctx context.Context, staleAfter time.Duration) {
-	stale, err := s.repo.ListTinyIntegrationsWithStaleStockWebhook(ctx, staleAfter)
-	if err != nil {
-		logger.From(ctx, s.logger).Error("stock webhook delivery check failed to list", zap.Error(err))
-		return
-	}
-	for _, integ := range stale {
-		itemCtx := logger.WithStore(ctx, integ.StoreID, "")
-		fields := []zap.Field{
-			zap.String("integration_id", integ.IntegrationID),
-			zap.Duration("stale_after", staleAfter),
-		}
-		if integ.LastStockEventAt != nil {
-			fields = append(fields, zap.Time("last_stock_event_at", *integ.LastStockEventAt))
-		} else {
-			fields = append(fields, zap.String("last_stock_event_at", "nunca"))
-		}
-		logger.From(itemCtx, s.logger).Error("TINY WEBHOOK POSSIVELMENTE REMOVIDO: sem eventos de estoque na janela — recadastrar a URL no painel do Tiny", fields...)
-		if stampErr := s.repo.StampIntegrationStockWebhookAlert(itemCtx, integ.IntegrationID); stampErr != nil {
-			logger.From(itemCtx, s.logger).Warn("failed to stamp stock webhook alert",
-				zap.String("integration_id", integ.IntegrationID),
-				zap.Error(stampErr),
-			)
-		}
-	}
-}
-
-// RunERPOrderOpsSweep reconcilia conversões/mutações presas (processo morreu
-// no meio): converting com pedido → termina a conversão; converting sem
-// pedido → tenta adotar por marcador; mutating → re-aplica a grade do banco.
-// Chamado por ticker no main. NUNCA regride estado para 'none'.
-func (s *Service) RunERPOrderOpsSweep(ctx context.Context) {
-	stuck, err := s.repo.ListStuckERPOrderOps(ctx, 10*time.Minute)
-	if err != nil {
-		logger.From(ctx, s.logger).Error("ERP order ops sweep failed to list", zap.Error(err))
-		return
-	}
-	for _, op := range stuck {
-		opCtx := logger.WithStore(ctx, op.StoreID, "")
-		switch {
-		case op.State == OrderStateConverting && op.ExternalOrderID != "":
-			if err := s.finishERPOrderConversion(opCtx, op.CartID, op.StoreID, op.ExternalOrderID); err != nil {
-				logger.From(opCtx, s.logger).Warn("sweep failed to finish conversion",
-					zap.String("cart_id", op.CartID), zap.Error(err))
-			}
-			// mirror já chamado dentro de finishERPOrderConversion
-		case op.State == OrderStateConverting:
-			erpIntegration, intErr := s.repo.GetActiveByProvider(opCtx, op.StoreID, "erp", "tiny")
-			if intErr != nil {
-				continue
-			}
-			erpProvider, provErr := s.collab.ResolveProvider(opCtx, erpIntegration)
-			if provErr != nil {
-				continue
-			}
-			foundID, findErr := erpProvider.FindOrderIDByMarker(opCtx, erpOrderMarker(op.CartID))
-			if findErr != nil || foundID == "" {
-				// Sem pedido rastreável: o confirm cairá no legado; o estado
-				// converting vazio é cosmético e fica para auditoria.
-				continue
-			}
-			if updErr := s.repo.UpdateCartExternalOrderID(opCtx, op.CartID, foundID); updErr != nil {
-				logger.From(opCtx, s.logger).Error("sweep failed to adopt orphan order",
-					zap.String("cart_id", op.CartID), zap.Error(updErr))
-				continue
-			}
-			logger.From(opCtx, s.logger).Info("sweep adopted orphan ERP order via marker",
-				zap.String("cart_id", op.CartID),
-				zap.String("external_order_id", foundID),
-			)
-			if err := s.finishERPOrderConversion(opCtx, op.CartID, op.StoreID, foundID); err != nil {
-				logger.From(opCtx, s.logger).Warn("sweep failed to finish adopted conversion",
-					zap.String("cart_id", op.CartID), zap.Error(err))
-			}
-			// mirror já chamado dentro de finishERPOrderConversion
-		case op.State == OrderStateMutating && op.ExternalOrderID != "":
-			if err := s.applyCartGridToOrder(opCtx, op.CartID, op.StoreID, op.ExternalOrderID); err != nil {
-				logger.From(opCtx, s.logger).Warn("sweep failed to reconcile mutating cart",
-					zap.String("cart_id", op.CartID), zap.Error(err))
-				continue
-			}
-			if _, err := s.repo.TransitionCartERPOrderState(opCtx, op.CartID, OrderStateMutating, OrderStateOpen); err != nil {
-				logger.From(opCtx, s.logger).Error("sweep failed to return cart to open",
-					zap.String("cart_id", op.CartID), zap.Error(err))
-			}
-			// Espelho: projeta estado reconciliado na Order. Best-effort.
-			s.collab.MirrorToOrder(opCtx, op.CartID)
-		}
-	}
-}
-
-// EnsureERPOrderForCart converte o cart em pedido Tiny na iniciação do
-// pagamento. Single-flight via CAS none→converting; idempotente (estados pós-
-// conversão retornam nil sem tocar o ERP). Erros deixam o estado 'converting'
-// com external_order_id como marcador de progresso — a retomada acontece na
-// próxima iniciação, no confirm (adoção) ou no sweep; NUNCA regride a 'none'.
+// EnsureERPOrderForCart cria o pedido de venda do carrinho no ERP. Single-flight
+// por CAS none→converting; idempotente (estados pós-criação retornam nil sem
+// tocar o ERP). Erros deixam o estado 'converting' com o external_order_id como
+// marcador de progresso — a retomada acontece na próxima chamada, no confirm
+// (adoção por marcador) ou na varredura; NUNCA regride a 'none'.
 func (s *Service) EnsureERPOrderForCart(ctx context.Context, cartID, storeID string) error {
 	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
 	if err != nil {
@@ -256,17 +104,16 @@ func (s *Service) EnsureERPOrderForCart(ctx context.Context, cartID, storeID str
 
 	switch st.State {
 	case OrderStateOpen, OrderStateMutating, OrderStateConfirmed:
-		return nil // já convertido
+		return nil // já existe
 	case OrderStateCancelled:
-		return nil // não ressuscita cart cancelado
+		return nil // não ressuscita carrinho cancelado
 	case OrderStateConverting:
 		if st.ExternalOrderID != "" {
-			// Conversão anterior morreu entre o create e o open — retoma.
-			return s.finishERPOrderConversion(ctx, cartID, storeID, st.ExternalOrderID)
+			return s.openCartOrder(ctx, cartID, st.ExternalOrderID)
 		}
-		// Em voo agora (outra iniciação) ou crash pré-create: não bloqueia o
-		// pagamento; adoção por marcador acontece no confirm/sweep.
-		logger.From(ctx, s.logger).Info("ERP order conversion already in flight for cart",
+		// Em voo agora, ou processo morreu antes do POST: não bloqueia ninguém;
+		// a adoção por marcador acontece no confirm/varredura.
+		logger.From(ctx, s.logger).Info("ERP order creation already in flight for cart",
 			zap.String("cart_id", cartID),
 		)
 		return nil
@@ -274,48 +121,66 @@ func (s *Service) EnsureERPOrderForCart(ctx context.Context, cartID, storeID str
 
 	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
 	if err != nil {
-		return nil // loja sem Tiny — modo legado segue valendo
+		return nil // loja sem ERP ligado
 	}
 
 	won, err := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateNone, OrderStateConverting)
 	if err != nil {
-		return fmt.Errorf("claiming cart conversion: %w", err)
+		return fmt.Errorf("claiming cart order creation: %w", err)
 	}
 	if !won {
-		return nil // outra iniciação converteu/está convertendo
+		return nil // outro comentário do mesmo carrinho ganhou a corrida
 	}
 
+	return s.criarPedidoParaCarrinho(ctx, cartID, storeID, erpIntegration)
+}
+
+// criarPedidoParaCarrinho faz a criação propriamente dita, assumindo que quem
+// chama JÁ garantiu o single-flight — pelo CAS none→converting, ou por segurar a
+// trava do carrinho.
+//
+// Está separado porque há dois donos legítimos dessa garantia, e o confirm é o
+// segundo: um carrinho que ficou preso em 'converting' sem pedido (o processo
+// morreu entre o CAS e o POST) não pode ser criado por EnsureERPOrderForCart —
+// ela lê o estado e conclui, corretamente, que outra criação está em voo. Sem
+// esta porta o carrinho ficava sem pedido para sempre, e o pagamento com ele.
+func (s *Service) criarPedidoParaCarrinho(ctx context.Context, cartID, storeID string, erpIntegration *Integration) error {
 	erpProvider, err := s.collab.ResolveProvider(ctx, erpIntegration)
 	if err != nil {
 		return fmt.Errorf("creating ERP provider: %w", err)
 	}
 
-	// Pedido SEM pagamento (nasce Aberta, sem contas a receber — validado em
-	// sandbox), SEM launch (orquestrado abaixo, launch-first com fallback). O
-	// colaborador resolve o contato (cache quente para recorrentes), monta
-	// endereço+frete e grava external_order_id.
-	if createErr := s.collab.CreateFinalERPOrderForConversion(ctx, erpProvider, erpIntegration, storeID, cartID); createErr != nil {
+	// Pedido em situação Aberta, sem pagamento e sem nenhuma movimentação de
+	// estoque. O colaborador resolve o contato — pelo @ do comprador quando é só
+	// o que temos, com nome/CPF/e-mail/telefone quando já os conhecemos — monta
+	// endereço e frete se existirem, e grava o external_order_id.
+	createErr := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
+		return s.collab.CreateERPOrderForCart(ctx, erpProvider, erpIntegration, storeID, cartID)
+	})
+	if createErr != nil {
 		// Estado permanece 'converting' de propósito (ver regra no topo).
-		return fmt.Errorf("creating ERP order for cart conversion: %w", createErr)
+		return fmt.Errorf("creating ERP order for cart: %w", createErr)
 	}
 
 	fresh, err := s.repo.GetCartERPOrderState(ctx, cartID)
 	if err != nil {
-		return fmt.Errorf("reloading cart after conversion create: %w", err)
+		return fmt.Errorf("reloading cart after order create: %w", err)
 	}
 	if fresh.ExternalOrderID == "" {
-		// Cart sem itens vinculados ao ERP: nada a converter. Sem pedido, o
-		// único caminho seguro é seguir 'converting' vazio — o confirm cai no
-		// legado via ErrCartNotConverted e o cart segue o fluxo antigo.
-		logger.From(ctx, s.logger).Info("cart has no ERP-linked items, conversion skipped",
+		// Carrinho sem nenhum item vinculado ao ERP: não há pedido a criar.
+		logger.From(ctx, s.logger).Info("cart has no ERP-linked items, order creation skipped",
 			zap.String("cart_id", cartID),
 		)
 		return nil
 	}
 
-	// Âncora de idempotência ANTES de mexer em estoque. Best-effort: com o
-	// numeroOrdemCompra gravado no POST, o sweep reconcilia mesmo sem marcador.
-	if markErr := erpProvider.AddOrderMarker(ctx, fresh.ExternalOrderID, erpOrderMarker(cartID)); markErr != nil {
+	// Âncora de idempotência: é por ela que uma tentativa que morreu depois do
+	// POST reencontra o pedido em vez de criar um segundo. Best-effort — o
+	// numeroOrdemCompra gravado no corpo do pedido carrega o mesmo valor.
+	markErr := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
+		return erpProvider.AddOrderMarker(ctx, fresh.ExternalOrderID, erpOrderMarker(cartID))
+	})
+	if markErr != nil {
 		logger.From(ctx, s.logger).Warn("failed to tag ERP order with cart marker",
 			zap.String("cart_id", cartID),
 			zap.String("external_order_id", fresh.ExternalOrderID),
@@ -323,78 +188,13 @@ func (s *Service) EnsureERPOrderForCart(ctx context.Context, cartID, storeID str
 		)
 	}
 
-	return s.finishERPOrderConversion(ctx, cartID, storeID, fresh.ExternalOrderID)
+	return s.openCartOrder(ctx, cartID, fresh.ExternalOrderID)
 }
 
-// finishERPOrderConversion completa a conversão a partir de "pedido criado":
-// launch-first (com fallback reverse-first para contas que bloqueiam saldo
-// negativo), estornos per-row das saídas manuais e CAS converting→open.
-// Retomável: launch tolera "já lançado", estornos pulam rows já 'reversed'.
-func (s *Service) finishERPOrderConversion(ctx context.Context, cartID, storeID, orderID string) error {
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
-	if err != nil {
-		return fmt.Errorf("loading ERP integration: %w", err)
-	}
-	erpProvider, err := s.collab.ResolveProvider(ctx, erpIntegration)
-	if err != nil {
-		return fmt.Errorf("creating ERP provider: %w", err)
-	}
-
-	// MODO RESERVA: a conversão NÃO lança estoque.
-	//
-	// O pedido já segura a peça pelo `reservado` no instante em que nasce, então
-	// lançar aqui faria duas coisas erradas de uma vez: baixaria o saldo físico
-	// no meio da live (o que este modo existe para evitar) e travaria toda
-	// mutação seguinte com `400 motivosBloqueio: "estoque lançado"` — foi
-	// exatamente isso que impediu o segundo comentário de entrar no pedido no
-	// primeiro teste. A baixa física acontece uma vez só, no pagamento.
-	//
-	// Também não há reserva manual a estornar: neste modo nenhuma foi criada.
-	if s.reserveModeEnabled(ctx, storeID) {
-		s.logReserveMode(ctx, cartID, true)
-		logger.From(ctx, s.logger).Info("conversion complete (reserve mode: order holds the stock, nothing launched)",
-			zap.String("cart_id", cartID),
-			zap.String("external_order_id", orderID),
-		)
-		return s.openConvertedOrder(ctx, cartID, orderID)
-	}
-
-	if launchErr := erpProvider.LaunchOrderStock(ctx, orderID); launchErr != nil {
-		logger.From(ctx, s.logger).Warn("conversion launch-first failed, falling back to reverse-first",
-			zap.String("cart_id", cartID),
-			zap.String("external_order_id", orderID),
-			zap.Bool("insufficient_balance", IsTinyInsufficientBalanceErr(launchErr)),
-			zap.Error(launchErr),
-		)
-		if err := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, storeID, cartID); err != nil {
-			return fmt.Errorf("reversing reservations on conversion fallback: %w", err)
-		}
-		if retryErr := erpProvider.LaunchOrderStock(ctx, orderID); retryErr != nil {
-			// Estado fica converting+order — retomável (confirm/sweep/retry).
-			return fmt.Errorf("launching order stock after conversion fallback: %w", retryErr)
-		}
-	}
-	if err := s.repo.SetCartERPStockLaunched(ctx, cartID, true); err != nil {
-		logger.From(ctx, s.logger).Warn("failed to persist erp_stock_launched",
-			zap.String("cart_id", cartID),
-			zap.Error(err),
-		)
-	}
-
-	if err := s.collab.ReverseCartReservationsPerRow(ctx, erpProvider, storeID, cartID); err != nil {
-		return fmt.Errorf("reversing reservations after conversion launch: %w", err)
-	}
-
-	return s.openConvertedOrder(ctx, cartID, orderID)
-}
-
-// openConvertedOrder fecha a conversão: CAS converting→open, log e espelho.
-//
-// Extraído porque os dois modos chegam aqui pelo mesmo lugar — o de lançamento
-// depois de baixar o estoque, o de reserva direto, já que lá o pedido segura a
-// peça sozinho. Duplicar a transição faria dois pontos de verdade para o mesmo
-// estado.
-func (s *Service) openConvertedOrder(ctx context.Context, cartID, orderID string) error {
+// openCartOrder fecha a criação: CAS converting→open, log e espelho. O pedido já
+// está segurando a peça desde o instante em que o ERP respondeu ao POST; aqui só
+// se registra isso do lado de cá.
+func (s *Service) openCartOrder(ctx context.Context, cartID, orderID string) error {
 	moved, err := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateConverting, OrderStateOpen)
 	if err != nil {
 		return fmt.Errorf("transitioning cart to open: %w", err)
@@ -404,20 +204,22 @@ func (s *Service) openConvertedOrder(ctx context.Context, cartID, orderID string
 			zap.String("cart_id", cartID),
 		)
 	}
-	logger.From(ctx, s.logger).Info("cart converted to ERP order-as-reservation",
+	logger.From(ctx, s.logger).Info("sales order created for cart — the order holds the stock",
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", orderID),
 	)
-	// Espelho aditivo: projeta o estado da reserva (open) na Order. Best-effort.
 	s.collab.MirrorToOrder(ctx, cartID)
 	return nil
 }
 
-// MutateERPOrderItems aplica a grade ATUAL do cart ao pedido via o ciclo
-// obrigatório estornar-estoque → PUT /itens → lancar-estoque (a API bloqueia
-// PUT com estoque lançado). Single-flight via CAS open→mutating. A grade é
-// SEMPRE reconstruída do banco — chamadas concorrentes convergem para o
-// estado final do cart, não para deltas individuais.
+// =============================================================================
+// MUTAÇÃO — do segundo comentário em diante
+// =============================================================================
+
+// MutateERPOrderItems aplica a grade ATUAL do carrinho ao pedido. Single-flight
+// via CAS open→mutating. A grade é SEMPRE reconstruída do banco — chamadas
+// concorrentes convergem para o estado final do carrinho, não para deltas
+// individuais, então a ordem em que elas chegam não importa.
 func (s *Service) MutateERPOrderItems(ctx context.Context, cartID, storeID string) error {
 	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
 	if err != nil {
@@ -432,32 +234,32 @@ func (s *Service) MutateERPOrderItems(ctx context.Context, cartID, storeID strin
 		return fmt.Errorf("claiming order mutation: %w", err)
 	}
 	if !won {
-		// Outra mutação em voo: ela reconstrói a grade do banco, que já
-		// contém a mudança deste caller — convergência garantida.
+		// Outra mutação em voo: ela reconstrói a grade do banco, que já contém a
+		// mudança deste chamador. Convergência garantida.
 		logger.From(ctx, s.logger).Info("order mutation already in flight, latest grid will win",
 			zap.String("cart_id", cartID),
 		)
 		return nil
 	}
 	defer func() {
-		// Melhor esforço: devolve para open mesmo em erro — o pedido pode ter
-		// ficado estornado (grade divergente), e o confirm SEMPRE reconcilia a
-		// grade antes das parcelas exatamente por isso.
 		if _, backErr := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateMutating, OrderStateOpen); backErr != nil {
 			logger.From(ctx, s.logger).Error("failed to return cart to open after mutation",
 				zap.String("cart_id", cartID),
 				zap.Error(backErr),
 			)
 		}
-		// Espelho: projeta o estado final (open) na Order, após a transição. Best-effort.
 		s.collab.MirrorToOrder(ctx, cartID)
 	}()
 
 	return s.applyCartGridToOrder(ctx, cartID, storeID, st.ExternalOrderID)
 }
 
-// applyCartGridToOrder roda o ciclo estornar → PUT /itens (grade do banco) →
-// lançar no pedido do cart. Usado pela mutação e pela reconciliação do confirm.
+// applyCartGridToOrder manda a grade do banco para o pedido. Uma chamada.
+//
+// A exceção é o pedido travado porque alguém lançou o estoque à mão no painel do
+// ERP enquanto a live rodava. Aí, e SÓ aí, o estorno destrava — e o pedido volta
+// a apenas reservar, que é onde ele deveria estar. Não relançamos depois: quem
+// lança é o faturamento.
 func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, orderID string) error {
 	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
 	if err != nil {
@@ -468,9 +270,54 @@ func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, ord
 		return fmt.Errorf("creating ERP provider: %w", err)
 	}
 
+	grid, err := s.cartGrid(ctx, cartID)
+	if err != nil {
+		return err
+	}
+
+	err = s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
+		return erpProvider.UpdateOrderItems(ctx, orderID, grid)
+	})
+	if errors.Is(err, providers.ErrOrderStockLaunched) {
+		logger.From(ctx, s.logger).Warn("order locked by manually launched stock; reversing once to edit it",
+			zap.String("cart_id", cartID),
+			zap.String("external_order_id", orderID),
+		)
+		revErr := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
+			return erpProvider.ReverseOrderStock(ctx, orderID)
+		})
+		if revErr != nil {
+			return fmt.Errorf("reversing manually launched stock to edit order: %w", revErr)
+		}
+		if err := s.repo.SetCartERPStockLaunched(ctx, cartID, false); err != nil {
+			logger.From(ctx, s.logger).Warn("failed to clear erp_stock_launched",
+				zap.String("cart_id", cartID),
+				zap.Error(err),
+			)
+		}
+		err = s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
+			return erpProvider.UpdateOrderItems(ctx, orderID, grid)
+		})
+	}
+	if err != nil {
+		return fmt.Errorf("updating order items: %w", err)
+	}
+
+	logger.From(ctx, s.logger).Info("order grid updated — reservation follows, stock untouched",
+		zap.String("cart_id", cartID),
+		zap.String("external_order_id", orderID),
+		zap.Int("items", len(grid)),
+	)
+	return nil
+}
+
+// cartGrid monta a grade do pedido a partir dos itens do carrinho vinculados ao
+// ERP. Grade vazia é aceita pela API mas nunca é o que o comprador quer, então
+// vira erro aqui: um pedido sem itens não segura nada.
+func (s *Service) cartGrid(ctx context.Context, cartID string) ([]providers.ERPOrderItem, error) {
 	items, err := s.repo.ListNonWaitlistedCartItems(ctx, cartID)
 	if err != nil {
-		return fmt.Errorf("listing cart items for order grid: %w", err)
+		return nil, fmt.Errorf("listing cart items for order grid: %w", err)
 	}
 	grid := make([]providers.ERPOrderItem, 0, len(items))
 	for _, item := range items {
@@ -485,61 +332,25 @@ func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, ord
 		})
 	}
 	if len(grid) == 0 {
-		// Grade vazia é ACEITA pela API (sandbox T6) mas nunca é o que o
-		// comprador quer — trate como erro de chamada.
-		return fmt.Errorf("cart %s sem itens vinculados ao ERP para aplicar no pedido", cartID)
+		return nil, fmt.Errorf("cart %s sem itens vinculados ao ERP para aplicar no pedido", cartID)
 	}
-
-	// MODO RESERVA: a mutação é UM PUT, e nada mais.
-	//
-	// O pedido já segura a peça pelo `reservado`, e o `PUT /itens` reajusta essa
-	// reserva sozinho (medido 26/08: qtd 2→5 levou reservado de 2 para 5). Rodar
-	// o ciclo estornar→PUT→lançar aqui seria ativamente destrutivo: neste modo
-	// `estornar-estoque` num pedido que só reservou NÃO é no-op, ele RE-RESERVA —
-	// três chamadas num pedido de 3 unidades levaram o reservado de 12 a 21.
-	// E lançar durante a live travaria os próximos PUTs com
-	// `400 motivosBloqueio: "estoque lançado"`.
-	if s.reserveModeEnabled(ctx, storeID) {
-		s.logReserveMode(ctx, cartID, true)
-		if err := erpProvider.UpdateOrderItems(ctx, orderID, grid); err != nil {
-			return fmt.Errorf("updating order items: %w", err)
-		}
-		logger.From(ctx, s.logger).Info("order grid updated (reserve mode: PUT only, stock untouched)",
-			zap.String("cart_id", cartID),
-			zap.String("external_order_id", orderID),
-			zap.Int("items", len(grid)),
-		)
-		return nil
-	}
-
-	if err := erpProvider.ReverseOrderStock(ctx, orderID); err != nil {
-		return fmt.Errorf("reversing order stock for mutation: %w", err)
-	}
-	if err := erpProvider.UpdateOrderItems(ctx, orderID, grid); err != nil {
-		// Pedido estornado com grade antiga — estado seguro (saldo correto no
-		// Tiny, sem baixa dupla); o confirm reconcilia e relança.
-		return fmt.Errorf("updating order items: %w", err)
-	}
-	if err := erpProvider.LaunchOrderStock(ctx, orderID); err != nil {
-		return fmt.Errorf("re-launching order stock after mutation: %w", err)
-	}
-	logger.From(ctx, s.logger).Info("order grid updated via estornar→PUT→lançar cycle",
-		zap.String("cart_id", cartID),
-		zap.String("external_order_id", orderID),
-		zap.Int("items", len(grid)),
-	)
-	return nil
+	return grid, nil
 }
 
-// ConfirmERPOrderPayment é o caminho pago do pedido-como-reserva: grava as
-// parcelas reais do gateway e aprova o pedido — DUAS escritas, zero
-// movimentação de estoque, zero webhook adversário. Retorna
-// ErrCartNotConverted quando o cart deve seguir a finalização legada.
+// =============================================================================
+// PAGAMENTO
+// =============================================================================
+
+// ConfirmERPOrderPayment fecha a venda: grava as parcelas reais do gateway e
+// aprova o pedido. Duas escritas, zero movimentação de estoque.
+//
+// A reserva feita no primeiro comentário segue de pé e vira baixa física quando
+// o lojista fatura — nós não lançamos. Devolve ErrCartNotConverted quando o
+// carrinho não tem pedido nenhum e não foi possível criar um.
 func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID string, status *providers.PaymentStatus) error {
-	// Mesmo claim por cart da finalização legada: webhooks de gateway chegam
-	// duplicados em goroutines concorrentes; a adoção/retomada dentro do
-	// confirm mexe em estoque e não pode correr em dupla. O perdedor sai — a
-	// redelivery seguinte encontra 'confirmed' e no-opa.
+	// Mesmo claim por carrinho: webhooks de gateway chegam duplicados em
+	// goroutines concorrentes, e a adoção/retomada aqui dentro não pode correr em
+	// dupla. O perdedor sai — a redelivery seguinte encontra 'confirmed' e no-opa.
 	release, acquired, lockErr := s.repo.AcquireCartFinalisationLock(ctx, cartID)
 	if lockErr != nil {
 		return fmt.Errorf("acquiring confirm lock: %w", lockErr)
@@ -552,14 +363,47 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 	}
 	defer release()
 
+	// O retrato do gateway é gravado ANTES de qualquer chamada ao ERP.
+	//
+	// É o que o botão de reenviar relê meses depois: sem ele, um reenvio aprova
+	// a venda no ERP sem as parcelas junto, e o financeiro do lojista fica com um
+	// pedido aprovado e nenhum recebimento lançado. Gravar depois não serve —
+	// exatamente as tentativas que falham no meio são as que vão precisar dele.
+	//
+	// A gravação é um COALESCE: preserva o retrato da primeira tentativa, que é a
+	// visão canônica do que o gateway disse.
+	if status != nil {
+		snapshot, marshalErr := json.Marshal(status)
+		if marshalErr != nil {
+			logger.From(ctx, s.logger).Warn("could not serialise gateway snapshot",
+				zap.String("cart_id", cartID), zap.Error(marshalErr))
+		} else if err := s.repo.MarkCartERPFinalisationAttempt(ctx, cartID, snapshot); err != nil {
+			logger.From(ctx, s.logger).Warn("could not stamp finalisation attempt",
+				zap.String("cart_id", cartID), zap.Error(err))
+		}
+	}
+
 	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
 	if err != nil {
 		return fmt.Errorf("loading cart ERP order state: %w", err)
 	}
 
+	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	if err != nil {
+		return fmt.Errorf("loading ERP integration: %w", err)
+	}
+
 	switch st.State {
 	case OrderStateNone:
-		return ErrCartNotConverted
+		// Carrinho pago sem pedido: cria agora. Acontece quando a loja ligou o
+		// ERP no meio da live, ou quando o produto foi vinculado depois do
+		// comentário. É tarde para segurar estoque, mas a venda tem de existir.
+		logger.From(ctx, s.logger).Info("paid cart had no ERP order; creating it now",
+			zap.String("cart_id", cartID),
+		)
+		if err := s.EnsureERPOrderForCart(ctx, cartID, storeID); err != nil {
+			return fmt.Errorf("creating ERP order for paid cart: %w", err)
+		}
 	case OrderStateConfirmed:
 		return nil // redelivery de webhook — idempotente
 	case OrderStateCancelled:
@@ -567,38 +411,31 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 	case OrderStateConverting:
 		orderID := st.ExternalOrderID
 		if orderID == "" {
-			// Adoção por marcador: a conversão pode ter sucedido server-side
-			// antes do crash. Sem pedido encontrado → finalização legada.
-			erpIntegration, intErr := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
-			if intErr != nil {
-				return ErrCartNotConverted
+			// A criação anterior morreu em algum ponto entre reivindicar o
+			// carrinho e gravar o id. Primeiro procura o pedido pelo marcador —
+			// ele pode ter nascido do lado do ERP antes do processo cair.
+			adopted, adoptErr := s.adoptOrderByMarker(ctx, cartID, storeID)
+			if adoptErr != nil {
+				return adoptErr
 			}
-			erpProvider, provErr := s.collab.ResolveProvider(ctx, erpIntegration)
-			if provErr != nil {
-				return fmt.Errorf("creating ERP provider: %w", provErr)
+			orderID = adopted
+			if orderID == "" {
+				// Nada rastreável: cria agora. A trava do carrinho, tomada no
+				// início deste método, é o single-flight — por isso a criação
+				// entra pela porta direta, e não por EnsureERPOrderForCart, que
+				// veria 'converting' e concluiria que há outra em voo.
+				if err := s.criarPedidoParaCarrinho(ctx, cartID, storeID, erpIntegration); err != nil {
+					return fmt.Errorf("creating ERP order for stuck cart: %w", err)
+				}
 			}
-			foundID, findErr := erpProvider.FindOrderIDByMarker(ctx, erpOrderMarker(cartID))
-			if findErr != nil {
-				return fmt.Errorf("searching order by marker for adoption: %w", findErr)
-			}
-			if foundID == "" {
-				return ErrCartNotConverted
-			}
-			if updErr := s.repo.UpdateCartExternalOrderID(ctx, cartID, foundID); updErr != nil {
-				return fmt.Errorf("adopting ERP order %s: %w", foundID, updErr)
-			}
-			orderID = foundID
-			logger.From(ctx, s.logger).Info("adopted orphan ERP order via marker",
-				zap.String("cart_id", cartID),
-				zap.String("external_order_id", orderID),
-			)
 		}
-		if err := s.finishERPOrderConversion(ctx, cartID, storeID, orderID); err != nil {
-			return fmt.Errorf("finishing conversion before confirm: %w", err)
+		if orderID != "" {
+			if err := s.openCartOrder(ctx, cartID, orderID); err != nil {
+				return fmt.Errorf("opening order before confirm: %w", err)
+			}
 		}
 	case OrderStateMutating:
-		// Mutação presa (processo morreu no meio do ciclo): reconcilia a
-		// grade — o pedido pode estar estornado e/ou com grade velha.
+		// Mutação presa (processo morreu no meio): a grade pode estar velha.
 		if _, err := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateMutating, OrderStateOpen); err != nil {
 			return fmt.Errorf("unsticking mutating cart: %w", err)
 		}
@@ -619,17 +456,11 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 		return ErrCartNotConverted
 	}
 
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
-	if err != nil {
-		return fmt.Errorf("loading ERP integration: %w", err)
-	}
 	erpProvider, err := s.collab.ResolveProvider(ctx, erpIntegration)
 	if err != nil {
 		return fmt.Errorf("creating ERP provider: %w", err)
 	}
 
-	// Parcelas reais do gateway (mesma montagem do legado: valores em cima do
-	// total dos itens; MoneyReleaseDate/installments vindos do provider).
 	if status != nil {
 		items, err := s.repo.ListNonWaitlistedCartItems(ctx, cartID)
 		if err != nil {
@@ -656,13 +487,17 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 			FeeAmountCents:   status.FeeAmountCents,
 			NetAmountCents:   status.NetAmountCents,
 		}
-		if err := erpProvider.UpdateOrderPayment(ctx, fresh.ExternalOrderID, payment); err != nil {
+		if err := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
+			return erpProvider.UpdateOrderPayment(ctx, fresh.ExternalOrderID, payment)
+		}); err != nil {
 			s.collab.MarkFinalisationFailed(ctx, cartID, "gravação das parcelas falhou: "+err.Error())
 			return fmt.Errorf("updating order payment: %w", err)
 		}
 	}
 
-	if err := erpProvider.SetOrderSituacao(ctx, fresh.ExternalOrderID, 3); err != nil {
+	if err := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
+		return erpProvider.SetOrderSituacao(ctx, fresh.ExternalOrderID, providers.SituacaoAprovada)
+	}); err != nil {
 		s.collab.MarkFinalisationFailed(ctx, cartID, "aprovação do pedido falhou: "+err.Error())
 		return fmt.Errorf("approving order: %w", err)
 	}
@@ -673,29 +508,33 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 			zap.Error(err),
 		)
 	}
-	// Mantém a telemetria/guards existentes coerentes: confirmado = done.
 	if markErr := s.repo.MarkCartERPFinalisationDone(ctx, cartID); markErr != nil {
 		logger.From(ctx, s.logger).Error("failed to mark cart ERP finalisation done after confirm",
 			zap.String("cart_id", cartID),
 			zap.Error(markErr),
 		)
 	}
-	// Group G fact (best-effort): Design C confirm reached the terminal state
-	// (order approved, situação 3). Dedup by cart.
 	s.collab.EmitERPOrderFinalized(ctx, storeID, cartID)
 	logger.From(ctx, s.logger).Info("ERP order payment confirmed — two PUTs, zero stock movement",
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", fresh.ExternalOrderID),
 	)
-	// Espelho: projeta estado confirmado + invoice na Order. Best-effort.
 	s.collab.MirrorToOrder(ctx, cartID)
 	return nil
 }
 
-// CancelERPOrderForCart cancela o pedido-como-reserva devolvendo o estoque:
-// situação 2 e SÓ ENTÃO estornar (cancelamento não devolve sozinho, e o
-// estorno funciona em pedido cancelado — sandbox T7; a ordem cancel→estornar
-// também fecha a corrida cancelar∥lançar do T11/C4). Idempotente.
+// =============================================================================
+// CANCELAMENTO E ESTORNO DE PAGAMENTO
+// =============================================================================
+
+// CancelERPOrderForCart cancela o pedido, devolvendo a reserva. UMA chamada:
+// `situacao=2`.
+//
+// Não acompanha estorno de estoque, e isso é a correção, não um esquecimento. O
+// cancelamento já devolve a reserva sozinho — medido em 26/08/2026: um pedido
+// com a reserva inflada a 9 unidades voltou a 3 (o valor de outros pedidos) no
+// instante do cancelamento, sem nenhuma outra chamada. Estornar junto, num
+// pedido que só reservou, INFLARIA a reserva em vez de devolvê-la.
 func (s *Service) CancelERPOrderForCart(ctx context.Context, cartID, storeID string) error {
 	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
 	if err != nil {
@@ -706,48 +545,237 @@ func (s *Service) CancelERPOrderForCart(ctx context.Context, cartID, storeID str
 		return nil
 	case OrderStateConfirmed:
 		return fmt.Errorf("cart %s confirmado — cancelamento pós-pago é fluxo de refund", cartID)
+	case OrderStateMutating:
+		// Há uma escrita EM VOO neste pedido. Cancelar por cima dela produz o
+		// pior desfecho possível: o cancelamento devolve a reserva, o `PUT` que
+		// estava no ar aterrissa logo depois e o pedido cancelado volta a segurar
+		// estoque — e o CAS de volta para 'open' falha, então nada mais reconcilia
+		// aquele carrinho.
+		//
+		// Foi medido: com o cancelamento reivindicando a partir de 'mutating',
+		// uma bateria de 200 rodadas de "expiração × comentário" produziu um
+		// pedido cancelado segurando 3 unidades.
+		//
+		// A mutação sempre devolve o carrinho para 'open', inclusive em erro, e
+		// dura menos de um segundo. Devolver erro aqui faz a retentativa do asynq
+		// encontrar o carrinho parado — que é o momento certo de cancelar.
+		return fmt.Errorf("cart %s com mutação em voo; cancelamento adiado: %w", cartID, ErrCartBusy)
 	}
 	if st.ExternalOrderID == "" {
-		// converting sem pedido: nada a cancelar no Tiny; marca cancelado
-		// para o sweep não insistir.
+		// converting sem pedido: nada a cancelar no ERP.
 		_, _ = s.repo.TransitionCartERPOrderState(ctx, cartID, st.State, OrderStateCancelled)
 		return nil
 	}
 
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	erpProvider, err := s.providerFor(ctx, storeID)
 	if err != nil {
-		return fmt.Errorf("loading ERP integration: %w", err)
-	}
-	erpProvider, err := s.collab.ResolveProvider(ctx, erpIntegration)
-	if err != nil {
-		return fmt.Errorf("creating ERP provider: %w", err)
+		return err
 	}
 
-	if err := erpProvider.SetOrderSituacao(ctx, st.ExternalOrderID, 2); err != nil {
+	// REIVINDICA ANTES DE CANCELAR. A ordem inversa tem uma janela: enquanto o
+	// estado for 'open', um comentário que chega no mesmo instante ganha o CAS
+	// open→mutating e manda um `PUT /itens` DEPOIS do cancelamento — e o pedido
+	// cancelado volta a segurar estoque, sem que nada no sistema saiba.
+	//
+	// Foi medido: numa bateria de 40 rodadas de "expiração × comentário", a
+	// rodada 24 terminou com um pedido cancelado segurando 3 unidades.
+	//
+	// Com o estado já em 'cancelled', o CAS do comentário concorrente falha e
+	// ele desiste — que é o desfecho certo para um carrinho que venceu.
+	won, err := s.repo.TransitionCartERPOrderState(ctx, cartID, st.State, OrderStateCancelled)
+	if err != nil {
+		return fmt.Errorf("claiming cart cancellation: %w", err)
+	}
+	if !won {
+		// Outro caminho mexeu no carrinho entre a leitura e agora (uma mutação
+		// em voo, um pagamento). A próxima tentativa relê e decide.
+		logger.From(ctx, s.logger).Info("cart left its state concurrently, cancellation skipped",
+			zap.String("cart_id", cartID),
+		)
+		return nil
+	}
+
+	if err := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
+		return erpProvider.SetOrderSituacao(ctx, st.ExternalOrderID, providers.SituacaoCancelada)
+	}); err != nil {
+		// Devolve o estado para a retentativa refazer o ciclo inteiro. Deixá-lo
+		// em 'cancelled' com o pedido vivo no ERP seria pior: o carrinho pararia
+		// de ser reconciliado e a reserva ficaria presa lá para sempre.
+		if _, backErr := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateCancelled, st.State); backErr != nil {
+			logger.From(ctx, s.logger).Error("failed to return cart from cancelled after ERP refusal",
+				zap.String("cart_id", cartID),
+				zap.Error(backErr),
+			)
+		}
 		return fmt.Errorf("cancelling order: %w", err)
 	}
-	// Estorno incondicional pós-cancel: no-op seguro se nunca lançou (T2) e
-	// único jeito de devolver o saldo se lançou (T7). Fecha a corrida C4.
-	if err := erpProvider.ReverseOrderStock(ctx, st.ExternalOrderID); err != nil {
-		return fmt.Errorf("reversing order stock after cancel: %w", err)
-	}
-	if err := s.repo.SetCartERPStockLaunched(ctx, cartID, false); err != nil {
-		logger.From(ctx, s.logger).Warn("failed to clear erp_stock_launched",
-			zap.String("cart_id", cartID),
-			zap.Error(err),
-		)
-	}
-	if _, err := s.repo.TransitionCartERPOrderState(ctx, cartID, st.State, OrderStateCancelled); err != nil {
-		return fmt.Errorf("transitioning cart to cancelled: %w", err)
-	}
-	// Group G fact (best-effort): the order-as-reservation was cancelled (cart
-	// expiry / pre-payment cancel). Dedup by external order id.
 	s.collab.EmitERPOrderCancelled(ctx, storeID, cartID, st.ExternalOrderID, "cancel")
-	logger.From(ctx, s.logger).Info("ERP order cancelled and stock returned",
+	logger.From(ctx, s.logger).Info("ERP order cancelled — reservation returned by the cancel itself",
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", st.ExternalOrderID),
 	)
-	// Espelho: projeta estado cancelled na Order. Best-effort.
 	s.collab.MirrorToOrder(ctx, cartID)
 	return nil
+}
+
+// RefundConvertedCartOrder cancela um pedido CONFIRMADO cujo pagamento foi
+// estornado no gateway. Mesma regra do cancelamento: `situacao=2` e nada mais.
+//
+// Se o lojista já tiver faturado (baixando o estoque de verdade), o cancelamento
+// não desfaz a baixa — e não deve mesmo: a peça saiu, e é ele quem decide se
+// volta. Estornar aqui, às cegas, é que estragaria a conta.
+func (s *Service) RefundConvertedCartOrder(ctx context.Context, cartID, storeID string) error {
+	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
+	if err != nil {
+		return fmt.Errorf("loading cart ERP order state: %w", err)
+	}
+	if st.State != OrderStateConfirmed || st.ExternalOrderID == "" {
+		return nil
+	}
+	erpProvider, err := s.providerFor(ctx, storeID)
+	if err != nil {
+		return err
+	}
+	// Mesma reivindicação prévia do cancelamento comum, pelo mesmo motivo.
+	won, err := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateConfirmed, OrderStateCancelled)
+	if err != nil {
+		return fmt.Errorf("claiming refunded cart cancellation: %w", err)
+	}
+	if !won {
+		return nil // já cancelado por outro caminho
+	}
+	if err := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
+		return erpProvider.SetOrderSituacao(ctx, st.ExternalOrderID, providers.SituacaoCancelada)
+	}); err != nil {
+		if _, backErr := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateCancelled, OrderStateConfirmed); backErr != nil {
+			logger.From(ctx, s.logger).Error("failed to return refunded cart from cancelled after ERP refusal",
+				zap.String("cart_id", cartID),
+				zap.Error(backErr),
+			)
+		}
+		return fmt.Errorf("cancelling refunded order: %w", err)
+	}
+	s.collab.EmitERPOrderCancelled(ctx, storeID, cartID, st.ExternalOrderID, "refund")
+	logger.From(ctx, s.logger).Info("refunded ERP order cancelled",
+		zap.String("cart_id", cartID),
+		zap.String("external_order_id", st.ExternalOrderID),
+	)
+	return nil
+}
+
+// =============================================================================
+// RECONCILIAÇÃO
+// =============================================================================
+
+// RunERPOrderOpsSweep reconcilia criações/mutações presas (o processo morreu no
+// meio): converting com pedido → abre; converting sem pedido → tenta adotar pelo
+// marcador; mutating → re-aplica a grade do banco. NUNCA regride para 'none'.
+func (s *Service) RunERPOrderOpsSweep(ctx context.Context) {
+	stuck, err := s.repo.ListStuckERPOrderOps(ctx, 10*time.Minute)
+	if err != nil {
+		logger.From(ctx, s.logger).Error("ERP order ops sweep failed to list", zap.Error(err))
+		return
+	}
+	for _, op := range stuck {
+		opCtx := logger.WithStore(ctx, op.StoreID, "")
+		switch {
+		case op.State == OrderStateConverting && op.ExternalOrderID != "":
+			if err := s.openCartOrder(opCtx, op.CartID, op.ExternalOrderID); err != nil {
+				logger.From(opCtx, s.logger).Warn("sweep failed to open stuck order",
+					zap.String("cart_id", op.CartID), zap.Error(err))
+			}
+		case op.State == OrderStateConverting:
+			foundID, adoptErr := s.adoptOrderByMarker(opCtx, op.CartID, op.StoreID)
+			if adoptErr != nil || foundID == "" {
+				// Sem pedido rastreável: o confirm cria um quando o pagamento
+				// chegar. O converting vazio fica para auditoria.
+				continue
+			}
+			if err := s.openCartOrder(opCtx, op.CartID, foundID); err != nil {
+				logger.From(opCtx, s.logger).Warn("sweep failed to open adopted order",
+					zap.String("cart_id", op.CartID), zap.Error(err))
+			}
+		case op.State == OrderStateMutating && op.ExternalOrderID != "":
+			if err := s.applyCartGridToOrder(opCtx, op.CartID, op.StoreID, op.ExternalOrderID); err != nil {
+				logger.From(opCtx, s.logger).Warn("sweep failed to reconcile mutating cart",
+					zap.String("cart_id", op.CartID), zap.Error(err))
+				continue
+			}
+			if _, err := s.repo.TransitionCartERPOrderState(opCtx, op.CartID, OrderStateMutating, OrderStateOpen); err != nil {
+				logger.From(opCtx, s.logger).Error("sweep failed to return cart to open",
+					zap.String("cart_id", op.CartID), zap.Error(err))
+			}
+			s.collab.MirrorToOrder(opCtx, op.CartID)
+		}
+	}
+}
+
+// adoptOrderByMarker reencontra, pelo marcador lc-cart-<id>, o pedido que uma
+// tentativa anterior criou antes de morrer, e o vincula ao carrinho. Devolve ""
+// quando não existe — aí não há nada a adotar. É o que impede que uma retomada
+// crie um segundo pedido para o mesmo carrinho.
+func (s *Service) adoptOrderByMarker(ctx context.Context, cartID, storeID string) (string, error) {
+	erpProvider, err := s.providerFor(ctx, storeID)
+	if err != nil {
+		return "", nil
+	}
+	foundID, findErr := erpProvider.FindOrderIDByMarker(ctx, erpOrderMarker(cartID))
+	if findErr != nil {
+		return "", fmt.Errorf("searching order by marker for adoption: %w", findErr)
+	}
+	if foundID == "" {
+		return "", nil
+	}
+	if updErr := s.repo.UpdateCartExternalOrderID(ctx, cartID, foundID); updErr != nil {
+		return "", fmt.Errorf("adopting ERP order %s: %w", foundID, updErr)
+	}
+	logger.From(ctx, s.logger).Info("adopted orphan ERP order via marker",
+		zap.String("cart_id", cartID),
+		zap.String("external_order_id", foundID),
+	)
+	return foundID, nil
+}
+
+// providerFor resolve o cliente do ERP ativo da loja.
+func (s *Service) providerFor(ctx context.Context, storeID string) (providers.ERPProvider, error) {
+	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	if err != nil {
+		return nil, fmt.Errorf("loading ERP integration: %w", err)
+	}
+	erpProvider, err := s.collab.ResolveProvider(ctx, erpIntegration)
+	if err != nil {
+		return nil, fmt.Errorf("creating ERP provider: %w", err)
+	}
+	return erpProvider, nil
+}
+
+// CheckTinyStockWebhookDelivery é o health-check de ENTREGA de webhook:
+// integração ativa sem NENHUM evento de estoque na janela é quase certeza de URL
+// removida pelo lado do ERP (eles apagam o cadastro após falhas consecutivas e
+// param de entregar em silêncio). Loga em ERROR com dedupe de 24h por integração.
+func (s *Service) CheckTinyStockWebhookDelivery(ctx context.Context, staleAfter time.Duration) {
+	stale, err := s.repo.ListTinyIntegrationsWithStaleStockWebhook(ctx, staleAfter)
+	if err != nil {
+		logger.From(ctx, s.logger).Error("stock webhook delivery check failed to list", zap.Error(err))
+		return
+	}
+	for _, integ := range stale {
+		itemCtx := logger.WithStore(ctx, integ.StoreID, "")
+		fields := []zap.Field{
+			zap.String("integration_id", integ.IntegrationID),
+			zap.Duration("stale_after", staleAfter),
+		}
+		if integ.LastStockEventAt != nil {
+			fields = append(fields, zap.Time("last_stock_event_at", *integ.LastStockEventAt))
+		} else {
+			fields = append(fields, zap.String("last_stock_event_at", "nunca"))
+		}
+		logger.From(itemCtx, s.logger).Error("WEBHOOK DO ERP POSSIVELMENTE REMOVIDO: sem eventos de estoque na janela — recadastrar a URL no painel", fields...)
+		if stampErr := s.repo.StampIntegrationStockWebhookAlert(itemCtx, integ.IntegrationID); stampErr != nil {
+			logger.From(itemCtx, s.logger).Warn("failed to stamp stock webhook alert",
+				zap.String("integration_id", integ.IntegrationID),
+				zap.Error(stampErr),
+			)
+		}
+	}
 }

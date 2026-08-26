@@ -3,18 +3,19 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
+
+	"livecart/apps/api/internal/integration/providers"
 )
 
-// Bloco B2c-2 — AC1: os reactors ERP (agora com corpo em internal/erp, chamados
-// via delegação React*ERP) são idempotentes sob redelivery do asynq. Uma segunda
-// entrega do MESMO fato não pode duplicar pedido, baixa/entrada de estoque nem
-// estorno. Rodam contra o Postgres real + ERP roteirizado (mesma infra do
-// finalisation_resume_test).
+// Os reactors ERP são idempotentes sob redelivery do asynq. Uma segunda entrega
+// do MESMO fato não pode duplicar pedido nem movimentar estoque. Rodam contra o
+// Postgres real + ERP roteirizado.
 
-// AC1a: OnOrderPaid 2× → erp_finalisation_status='done', CreateOrder==1,
-// Launch==1. A redelivery cai no guard de done e não custa nem uma chamada ao
-// Tiny.
+// OnOrderPaid 2× → um pedido, uma aprovação. A redelivery cai no guard de
+// 'confirmed' e não custa nem uma chamada ao ERP.
 func TestReactOrderPaidERP_RedeliveryIsIdempotent(t *testing.T) {
 	requireDB(t)
 	fx := seedPaidCart(t, 2, 1)
@@ -33,19 +34,22 @@ func TestReactOrderPaidERP_RedeliveryIsIdempotent(t *testing.T) {
 	}
 
 	status, _, orderID, _, _ := cartFinalisationState(t, fx.cartID)
-	if status != "done" || orderID != "ORD-1" {
-		t.Fatalf("status=%q orderID=%q — esperado done/ORD-1", status, orderID)
+	if status != "done" || orderID == "" {
+		t.Fatalf("status=%q orderID=%q — esperado done com pedido gravado", status, orderID)
 	}
-	if fake.count("CreateOrder") != 1 || fake.count("Launch") != 1 {
-		t.Fatalf("redelivery duplicou o pedido/launch: %v", fake.calls)
+	if fake.count("CreateOrder") != 1 {
+		t.Fatalf("redelivery duplicou o pedido: %v", fake.calls)
+	}
+	if fake.count("Reverse:") != 0 {
+		t.Fatalf("redelivery estornou estoque: %v", fake.calls)
 	}
 	if n := activeReservationCount(t, fx.cartID); n != 0 {
-		t.Fatalf("reservas active pós-redelivery = %d", n)
+		t.Fatalf("reservas manuais = %d, quero 0", n)
 	}
 }
 
-// AC1b: OnOrderRefunded 2× → state=cancelled, uma única situação 2 (cancelar) e
-// um único estorno do pedido. A segunda entrega vê 'cancelled' e no-opa.
+// OnOrderRefunded 2× → state=cancelled com UM cancelamento e ZERO estornos. A
+// segunda entrega vê 'cancelled' e no-opa.
 func TestReactOrderRefundedERP_RedeliveryIsIdempotent(t *testing.T) {
 	requireDB(t)
 	fx := seedPaidCart(t, 1, 1)
@@ -65,24 +69,35 @@ func TestReactOrderRefundedERP_RedeliveryIsIdempotent(t *testing.T) {
 		}
 	}
 
-	if state, _, _ := cartOrderState(t, fx.cartID); state != "cancelled" {
+	if state, _, _, _ := cartERPState(t, fx.cartID); state != "cancelled" {
 		t.Fatalf("state pós-refund = %q, esperado cancelled", state)
 	}
-	if c := fake.count("Situacao:2"); c != 1 {
-		t.Fatalf("cancelamento (situação 2) rodou %d× — esperado 1", c)
+	cancelamentos := 0
+	for _, c := range fake.callsWithPrefix("Situacao:") {
+		if strings.HasSuffix(c, fmt.Sprintf(":%d", providers.SituacaoCancelada)) {
+			cancelamentos++
+		}
 	}
-	if c := fake.count("OrderReverse"); c != 1 {
-		t.Fatalf("estorno do pedido rodou %d× — esperado 1", c)
+	if cancelamentos != 1 {
+		t.Fatalf("cancelamento rodou %d× — esperado 1: %v", cancelamentos, fake.calls)
+	}
+	if c := fake.count("Reverse:"); c != 0 {
+		t.Fatalf("estorno rodou %d× — esperado 0: cancelar já devolve a reserva, e "+
+			"estornar por cima a inflaria", c)
 	}
 }
 
-// AC1c: OnCartExpired 2× (cart NÃO convertido) → reservas revertidas sem estorno
-// duplicado. A segunda entrega não encontra reservas 'active' e no-opa no Tiny.
+// OnCartExpired 2× num carrinho COM pedido → um cancelamento, zero estornos. A
+// segunda entrega vê 'cancelled' e no-opa.
 func TestReactCartExpiredERP_RedeliveryIsIdempotent(t *testing.T) {
 	requireDB(t)
-	fx := seedPaidCart(t, 1, 1)
+	fx := seedPaidCart(t, 1, 0)
 	fake := newScriptedERP()
 	svc := newFinalisationService(fake)
+
+	if err := svc.EnsureERPOrderForCart(context.Background(), fx.cartID, fx.storeID); err != nil {
+		t.Fatalf("criando pedido: %v", err)
+	}
 
 	for i := 0; i < 2; i++ {
 		if err := svc.ERP().OnCartExpired(context.Background(), fx.cartID, fx.storeID); err != nil {
@@ -91,12 +106,33 @@ func TestReactCartExpiredERP_RedeliveryIsIdempotent(t *testing.T) {
 	}
 
 	if n := activeReservationCount(t, fx.cartID); n != 0 {
-		t.Fatalf("reservas active pós-expiração = %d", n)
+		t.Fatalf("reservas manuais = %d, quero 0", n)
 	}
-	if c := fake.count("ReverseRes"); c != 1 {
-		t.Fatalf("estorno de reserva rodou %d× — esperado 1 (sem duplicar na redelivery): %v", c, fake.calls)
+	if c := fake.count("Reverse:"); c != 0 {
+		t.Fatalf("estorno rodou %d× na expiração — esperado 0: %v", c, fake.calls)
 	}
-	if fake.count("CreateOrder") != 0 || fake.count("OrderReverse") != 0 {
-		t.Fatalf("expiração de cart não convertido não pode criar/cancelar pedido: %v", fake.calls)
+	cancelamentos := 0
+	for _, c := range fake.callsWithPrefix("Situacao:") {
+		if strings.HasSuffix(c, fmt.Sprintf(":%d", providers.SituacaoCancelada)) {
+			cancelamentos++
+		}
+	}
+	if cancelamentos != 1 {
+		t.Fatalf("cancelamento rodou %d× — esperado 1: %v", cancelamentos, fake.calls)
+	}
+}
+
+// Carrinho SEM pedido nenhum expira sem falar com o ERP.
+func TestReactCartExpiredERP_SemPedidoNaoFalaComOERP(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 1, 0)
+	fake := newScriptedERP()
+	svc := newFinalisationService(fake)
+
+	if err := svc.ERP().OnCartExpired(context.Background(), fx.cartID, fx.storeID); err != nil {
+		t.Fatalf("expiração: %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("falou com o ERP sem ter pedido: %v", fake.calls)
 	}
 }

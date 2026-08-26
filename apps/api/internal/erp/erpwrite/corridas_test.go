@@ -309,8 +309,11 @@ var cenarios = []cenario{
 	{"15_mesma_compradora_varios_comentarios", func(t *testing.T, m *mundo, r *rand.Rand) {
 		ctx, c := ctxCurto(3 * time.Second)
 		defer c()
-		paralelo(8, r, func(int) {
-			m.escrever(ctx, "ped-mesma", func() error { return m.erp.PutItens("ped-mesma", "P", 1+r.Intn(3)) })
+		// Quantidade derivada do índice, não sorteada dentro da goroutine: o
+		// *rand.Rand do cenário é usado só na montagem (em `paralelo`), e chamá-lo
+		// concorrentemente seria uma corrida do próprio teste.
+		paralelo(8, r, func(i int) {
+			m.escrever(ctx, "ped-mesma", func() error { return m.erp.PutItens("ped-mesma", "P", 1+i%3) })
 		})
 		if n := m.erp.Linhas("ped-mesma"); n > 1 {
 			t.Errorf("grade com %d linhas", n)
@@ -436,10 +439,15 @@ var cenarios = []cenario{
 	{"28_erp_lento_intermitente", func(t *testing.T, m *mundo, r *rand.Rand) {
 		ctx, c := ctxCurto(5 * time.Second)
 		defer c()
+		// A lentidão vem do índice, não de `r`: o *rand.Rand do cenário não é
+		// seguro para uso concorrente, e sorteá-lo dentro das goroutines era uma
+		// corrida no PRÓPRIO teste — que o -race acusava como se fosse do
+		// sistema. Espalhar por i%4 dá a mesma variação de latência e é
+		// determinístico.
 		paralelo(15, r, func(i int) {
 			p := fmt.Sprintf("ped-%d", i)
 			m.escrever(ctx, p, func() error {
-				time.Sleep(time.Duration(r.Intn(4)) * time.Millisecond)
+				time.Sleep(time.Duration(i%4) * time.Millisecond)
 				return m.erp.PutItens(p, "P", 1)
 			})
 		})

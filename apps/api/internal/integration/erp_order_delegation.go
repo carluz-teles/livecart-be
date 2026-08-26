@@ -1,17 +1,12 @@
 package integration
 
-// Bloco B2c-1 — a máquina de estados Design C (pedido-como-reserva) foi extraída
-// para internal/erp (erp/order_lifecycle.go). Este arquivo mantém em
-// internal/integration:
+// A máquina de estados do pedido vive em internal/erp (erp/order_lifecycle.go).
+// Este arquivo mantém em internal/integration:
 //
-//   - os aliases in-package do estado/sentinela ainda usados pela finalização
-//     LEGADA e pelos reactors (B2c-2), sem churnar ~30 call sites;
-//   - as DELEGAÇÕES finas dos métodos públicos (assinaturas inalteradas) — os
-//     call sites em checkout/main.go seguem chamando integration.Service por ora
-//     (a troca para erp.Service é B2e);
-//   - o bridge finalizeOrConfirmCartERP (confirm Design C → fallback legado);
-//   - os COLABORADORES que erp.Service chama de volta (provider/contato/criação
-//     de pedido/estorno/mirror/eventos), satisfazendo erp.StockCollaborators.
+//   - os aliases in-package do estado/sentinela, para não churnar os call sites;
+//   - as DELEGAÇÕES finas dos métodos públicos (assinaturas inalteradas);
+//   - os COLABORADORES que erp.Service chama de volta (provider, contato, criação
+//     do pedido, espelho, eventos), satisfazendo erp.StockCollaborators.
 
 import (
 	"context"
@@ -21,6 +16,7 @@ import (
 	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/internal/order"
 )
 
 // Estado ERP e sentinela vivem no pacote canônico internal/erp (Bloco B2a).
@@ -89,35 +85,47 @@ func (s *Service) CheckTinyStockWebhookDelivery(ctx context.Context, staleAfter 
 	s.erpStock().CheckTinyStockWebhookDelivery(ctx, staleAfter)
 }
 
-// finalizeOrConfirmCartERP delega para erp.Service (Bloco B2c-2): confirm do
-// pedido-como-reserva com fallback para a finalização legada. Mantido para os
-// testes in-package que exercitam o bridge diretamente.
+// finalizeOrConfirmCartERP delega para erp.Service. Mantido para os testes
+// in-package que exercitam o caminho pago diretamente.
 func (s *Service) finalizeOrConfirmCartERP(ctx context.Context, cartID, storeID string, status *providers.PaymentStatus) error {
 	return s.erpStock().FinalizeOrConfirm(ctx, cartID, storeID, status)
 }
 
-// finalizeCartERPOrder delega para erp.Service (Bloco B2c-2). Mantido para os
-// testes in-package que chamam a finalização legada diretamente.
-func (s *Service) finalizeCartERPOrder(ctx context.Context, cartID, storeID string, status *providers.PaymentStatus) error {
-	return s.erpStock().FinalizeCartERPOrder(ctx, cartID, storeID, status)
-}
-
-// RetryERPFinalisation delega para erp.Service (Bloco B2c-2). Segue chamado por
-// internal/order (erpRetryService) — a troca do wiring para erpSvc é B2e.
+// RetryERPFinalisation delega para erp.Service. Segue chamado por internal/order
+// (o botão de reenviar do painel).
 func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID string) error {
 	return s.erpStock().RetryERPFinalisation(ctx, cartID, storeID)
+}
+
+// RunERPOrderStatusSweep delega para erp.Service.
+func (s *Service) RunERPOrderStatusSweep(ctx context.Context, staleAfter time.Duration, limit int) {
+	s.erpStock().RunERPOrderStatusSweep(ctx, staleAfter, limit)
+}
+
+// ListERPOrderStatusHistory satisfaz order.ERPOrderStatusReader: devolve o
+// trajeto do pedido no ERP para a tela de pedidos, sem que o pacote order
+// precise importar este.
+func (s *Service) ListERPOrderStatusHistory(ctx context.Context, cartID string) ([]order.ERPOrderStatusEntry, error) {
+	rows, err := s.repo.ListERPOrderStatusHistory(ctx, cartID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]order.ERPOrderStatusEntry, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, order.ERPOrderStatusEntry{
+			Status:         r.Status,
+			PreviousStatus: r.PreviousStatus,
+			OrderNumber:    r.OrderNumber,
+			Source:         r.Source,
+			ObservedAt:     r.ObservedAt,
+		})
+	}
+	return out, nil
 }
 
 // =============================================================================
 // COLABORADORES (satisfazem erp.StockCollaborators — Bloco B2c-1)
 // =============================================================================
-
-// OrderAtCheckoutEnabled reporta se a loja opera no modo pedido-como-reserva
-// (design C). Reusa o flag por loja da Fase 3 (ERP_ORDER_AT_CHECKOUT_STORE_IDS,
-// "*" = todas) parseado em NewService.
-func (s *Service) OrderAtCheckoutEnabled(storeID string) bool {
-	return s.orderAtCheckoutAll || s.orderAtCheckoutStoreIDs[storeID]
-}
 
 // ResolveERPContact converte a Integration neutra e reusa o helper legado
 // resolveERPContact (find/create + enriquecimento do contato Tiny).
@@ -125,52 +133,15 @@ func (s *Service) ResolveERPContact(ctx context.Context, provider providers.ERPP
 	return s.resolveERPContact(ctx, provider, integrationRowFromERP(integration), storeID, platformUserID, platformHandle, name, document, email, phone)
 }
 
-// CreateFinalERPOrderForConversion carrega o cart e reusa createFinalERPOrder
-// para criar o pedido SEM pagamento e SEM launch (a conversão do design C
-// orquestra o launch depois). Grava external_order_id no cart no sucesso.
-func (s *Service) CreateFinalERPOrderForConversion(ctx context.Context, provider providers.ERPProvider, integration *erp.Integration, storeID, cartID string) error {
-	cart, err := s.repo.GetCartForPaidOrder(ctx, cartID)
-	if err != nil {
-		return fmt.Errorf("loading cart for conversion: %w", err)
-	}
-	// Conversão PRÉ-pagamento: segura a grade, mas a venda ainda não aconteceu.
-	return s.createFinalERPOrder(ctx, provider, integrationRowFromERP(integration), storeID, cart.EventID, *cart, nil, false, false)
-}
-
-// CreateFinalERPOrder carrega o cart (CartRow segue integration-owned) e reusa
-// createFinalERPOrder para o caminho pago da finalização LEGADA — com pagamento
-// e launch opcional (legado lança inline; invertido lança fora). Grava
-// external_order_id no cart no sucesso.
-func (s *Service) CreateFinalERPOrder(ctx context.Context, provider providers.ERPProvider, integration *erp.Integration, storeID, cartID string, status *providers.PaymentStatus, launchStock bool) error {
+// CreateERPOrderForCart carrega o carrinho e cria o pedido de venda no ERP —
+// situação Aberta, sem pagamento e sem movimentação de estoque. Grava o
+// external_order_id no carrinho em caso de sucesso.
+func (s *Service) CreateERPOrderForCart(ctx context.Context, provider providers.ERPProvider, integration *erp.Integration, storeID, cartID string) error {
 	cart, err := s.repo.GetCartForPaidOrder(ctx, cartID)
 	if err != nil {
 		return fmt.Errorf("loading cart for ERP order: %w", err)
 	}
-	// Caminho PAGO: aprova sempre. `status` decide só se vai financeiro junto —
-	// nil é o pagamento recebido por fora, que o lojista lança no ERP.
-	return s.createFinalERPOrder(ctx, provider, integrationRowFromERP(integration), storeID, cart.EventID, *cart, status, launchStock, true)
-}
-
-// FinalisationInverted reporta se a loja finaliza em ordem invertida
-// (launch-first, Fase 3). Reusa o flag por loja parseado em NewService.
-func (s *Service) FinalisationInverted(storeID string) bool {
-	return s.finalisationInverted(storeID)
-}
-
-// ReReserveAfterFailedFinalisation reusa o helper legado que recria as saídas
-// manuais no Tiny e as rows locais após uma finalização que falhou pós-estorno.
-// O eventID vem das próprias rows do snapshot (todas do mesmo cart).
-func (s *Service) ReReserveAfterFailedFinalisation(ctx context.Context, provider providers.ERPProvider, cartID string, snapshot []StockReservationRow) {
-	if len(snapshot) == 0 {
-		return
-	}
-	s.reReserveAfterFailedFinalisation(ctx, provider, cartID, snapshot[0].EventID, snapshot)
-}
-
-// ReverseCartReservationsPerRow reusa o helper legado de estorno per-row das
-// saídas manuais do cart.
-func (s *Service) ReverseCartReservationsPerRow(ctx context.Context, provider providers.ERPProvider, storeID, cartID string) error {
-	return s.reverseCartReservationsPerRow(ctx, provider, storeID, cartID)
+	return s.createERPOrderForCart(ctx, provider, integrationRowFromERP(integration), storeID, cart.EventID, *cart)
 }
 
 // MarkFinalisationFailed reusa o helper legado (grava 'failed' + emite o fato).

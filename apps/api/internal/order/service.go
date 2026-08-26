@@ -52,6 +52,7 @@ type Service struct {
 	cartCanceller   CartCanceller
 	itemEditor      CartItemEditor
 	manualPayment   ManualPaymentConfirmer
+	erpStatusReader ERPOrderStatusReader
 }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {

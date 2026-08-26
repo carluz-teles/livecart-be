@@ -322,15 +322,12 @@ const listStockPositionsForReconciliation = `-- name: ListStockPositionsForRecon
 SELECT p.id,
        p.name,
        p.external_id,
-       p.stock::int AS local_stock,
-       COALESCE(SUM(sr.quantity) FILTER (WHERE sr.status = 'active'), 0)::int AS held
+       p.stock::int AS local_stock
 FROM products p
-LEFT JOIN stock_reservations sr ON sr.product_id = p.id
 WHERE p.store_id = $1
   AND p.external_id IS NOT NULL
   AND p.external_id <> ''
   AND p.external_source = $2
-GROUP BY p.id, p.name, p.external_id, p.stock
 ORDER BY p.name
 `
 
@@ -344,15 +341,19 @@ type ListStockPositionsForReconciliationRow struct {
 	Name       string      `json:"name"`
 	ExternalID pgtype.Text `json:"external_id"`
 	LocalStock int32       `json:"local_stock"`
-	Held       int32       `json:"held"`
 }
 
-// O que o sistema ACREDITA sobre cada produto ligado ao ERP: o contador local e
-// quantas unidades estão seguradas por reserva ativa neste instante.
+// O contador local de cada produto ligado ao ERP — o lado de cá da comparação.
+//
+// Havia uma segunda coluna aqui, `held`, somando as reservas ativas para que a
+// conta fosse `local − held = saldo remoto`. Ela saiu junto com as reservas
+// manuais: hoje quem segura a peça é o próprio pedido de venda, e o `disponivel`
+// que o ERP devolve já vem com essas unidades descontadas. Os dois lados passaram
+// a medir a mesma coisa, e a igualdade ficou direta — `local == disponivel`.
 //
 // Existe porque não havia detecção nenhuma. O desvio de 12/08/2026 — uma unidade
 // inventada no Gabinete Gamer e uma perdida no Perfume — só apareceu porque o
-// lojista conferiu o Tiny na mão, e diagnosticá-lo exigiu reconstruir o razão a
+// lojista conferiu o ERP na mão, e diagnosticá-lo exigiu reconstruir o razão a
 // partir de integration_logs. Bug de estoque é inevitável; ficar dias sem saber
 // não precisa ser.
 //
@@ -372,7 +373,6 @@ func (q *Queries) ListStockPositionsForReconciliation(ctx context.Context, arg L
 			&i.Name,
 			&i.ExternalID,
 			&i.LocalStock,
-			&i.Held,
 		); err != nil {
 			return nil, err
 		}

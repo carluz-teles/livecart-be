@@ -28,6 +28,8 @@ func (l leitorFake) ListStockPositionsForReconciliation(context.Context, string,
 	return l.posicoes, l.err
 }
 
+// erpFake responde `disponivel` — que é o único saldo que o provider real
+// entrega hoje. O físico não chega mais até aqui.
 type erpFake struct {
 	saldo map[string]int
 	falha map[string]bool
@@ -44,10 +46,10 @@ func (e erpFake) GetProductStock(_ context.Context, externalID string) (int, err
 // (todos os carrinhos já cancelados).
 func TestReconciliacaoApontaOsDoisProdutosDoIncidente(t *testing.T) {
 	leitor := leitorFake{posicoes: []StockPosition{
-		{ProductID: "p1", Name: "Gabinete Gamer", ExternalID: "362828569", LocalStock: 5, Held: 0},
-		{ProductID: "p2", Name: "Perfume Cebolinha", ExternalID: "362829084", LocalStock: 5, Held: 0},
-		{ProductID: "p3", Name: "Café em Grão", ExternalID: "362829514", LocalStock: 5, Held: 0},
-		{ProductID: "p4", Name: "Playstation 5", ExternalID: "362829312", LocalStock: 5, Held: 0},
+		{ProductID: "p1", Name: "Gabinete Gamer", ExternalID: "362828569", LocalStock: 5},
+		{ProductID: "p2", Name: "Perfume Cebolinha", ExternalID: "362829084", LocalStock: 5},
+		{ProductID: "p3", Name: "Café em Grão", ExternalID: "362829514", LocalStock: 5},
+		{ProductID: "p4", Name: "Playstation 5", ExternalID: "362829312", LocalStock: 5},
 	}}
 	tiny := erpFake{saldo: map[string]int{
 		"362828569": 6, // uma unidade inventada
@@ -91,31 +93,58 @@ func TestReconciliacaoApontaOsDoisProdutosDoIncidente(t *testing.T) {
 	}
 }
 
-// Reserva ativa NÃO é divergência: a unidade está segurada no ERP de propósito,
-// e é justamente por isso que a conta é `local - held`. Sem descontar o hold, a
-// varredura acusaria toda live em andamento e ninguém olharia mais para ela.
-func TestReservaAtivaNaoEhDivergencia(t *testing.T) {
+// Carrinho aberto NÃO é divergência, e agora isso sai de graça: o item no
+// carrinho desconta do contador local aqui e, porque o carrinho virou pedido de
+// venda, desconta do `disponivel` lá. Os dois lados andam juntos.
+//
+// Este teste substituiu um que subtraía `held` de `local` para chegar no mesmo
+// lugar. A subtração era necessária quando as reservas eram saídas manuais e
+// mexiam no saldo FÍSICO; ela sumiu junto com elas.
+func TestCarrinhoAbertoNaoEhDivergencia(t *testing.T) {
+	// Console com 8 no ERP; 3 unidades já em carrinhos abertos, então o
+	// disponível de lá é 5 e o contador local também.
 	leitor := leitorFake{posicoes: []StockPosition{
-		{ProductID: "p1", Name: "Console", ExternalID: "E1", LocalStock: 5, Held: 3},
+		{ProductID: "p1", Name: "Console", ExternalID: "E1", LocalStock: 5},
 	}}
-	tiny := erpFake{saldo: map[string]int{"E1": 2}} // 5 - 3 = 2, correto
+	tiny := erpFake{saldo: map[string]int{"E1": 5}}
 
 	rel, err := ReconcileStockAgainstERP(context.Background(), zap.NewNop(), leitor, tiny, "loja-1", "tiny")
 	if err != nil {
 		t.Fatalf("reconciliando: %v", err)
 	}
 	if len(rel.Divergences) != 0 {
-		t.Errorf("acusou divergência com reserva legítima em vigor: %+v", rel.Divergences)
+		t.Errorf("acusou divergência com carrinho aberto legítimo: %+v", rel.Divergences)
+	}
+}
+
+// O FÍSICO chegando aqui É divergência, e tem de aparecer como tal.
+//
+// Se alguma regressão fizer o provider voltar a devolver `saldo` em vez de
+// `disponivel`, toda loja com carrinho aberto passa a divergir — e é assim que
+// se descobre, em vez de descobrir vendendo o que já tem dono.
+func TestSaldoFisicoNoLugarDoDisponivelApareceComoDivergencia(t *testing.T) {
+	leitor := leitorFake{posicoes: []StockPosition{
+		{ProductID: "p1", Name: "Console", ExternalID: "E1", LocalStock: 5},
+	}}
+	tiny := erpFake{saldo: map[string]int{"E1": 8}} // 8 é o físico; 5 é o disponível
+
+	rel, err := ReconcileStockAgainstERP(context.Background(), zap.NewNop(), leitor, tiny, "loja-1", "tiny")
+	if err != nil {
+		t.Fatalf("reconciliando: %v", err)
+	}
+	if len(rel.Divergences) != 1 || rel.Divergences[0].Delta != 3 {
+		t.Errorf("quero uma divergência de +3 (o físico contando as 3 unidades já "+
+			"comprometidas), veio %+v", rel.Divergences)
 	}
 }
 
 // Tudo certo tem de ser silêncio total.
 func TestReconciliacaoSilenciosaQuandoEstaTudoCerto(t *testing.T) {
 	leitor := leitorFake{posicoes: []StockPosition{
-		{ProductID: "p1", Name: "A", ExternalID: "E1", LocalStock: 5, Held: 0},
-		{ProductID: "p2", Name: "B", ExternalID: "E2", LocalStock: 3, Held: 1},
+		{ProductID: "p1", Name: "A", ExternalID: "E1", LocalStock: 5},
+		{ProductID: "p2", Name: "B", ExternalID: "E2", LocalStock: 3},
 	}}
-	tiny := erpFake{saldo: map[string]int{"E1": 5, "E2": 2}}
+	tiny := erpFake{saldo: map[string]int{"E1": 5, "E2": 3}}
 
 	rel, err := ReconcileStockAgainstERP(context.Background(), zap.NewNop(), leitor, tiny, "loja-1", "tiny")
 	if err != nil {
@@ -133,8 +162,8 @@ func TestReconciliacaoSilenciosaQuandoEstaTudoCerto(t *testing.T) {
 // encheria o relatório de ruído exatamente quando ele precisa ser legível.
 func TestFalhaDoERPNaoViraDivergencia(t *testing.T) {
 	leitor := leitorFake{posicoes: []StockPosition{
-		{ProductID: "p1", Name: "A", ExternalID: "E1", LocalStock: 5, Held: 0},
-		{ProductID: "p2", Name: "B", ExternalID: "E2", LocalStock: 5, Held: 0},
+		{ProductID: "p1", Name: "A", ExternalID: "E1", LocalStock: 5},
+		{ProductID: "p2", Name: "B", ExternalID: "E2", LocalStock: 5},
 	}}
 	tiny := erpFake{
 		saldo: map[string]int{"E1": 5},

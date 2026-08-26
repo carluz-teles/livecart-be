@@ -234,8 +234,6 @@ var baselineRawThrows = map[string]bool{
 	// 404 simples do painel de pendências do razão: não há código de domínio a
 	// mapear — a linha não existe (ou é de outra loja, indistinguível de
 	// propósito) e o painel só recarrega.
-	`erp.Service.ResolveStockMovementManually:"movimento não encontrado"`:                true,
-	`erp.Service.ResolveStockMovementManually:"razão de movimentos não está habilitado"`: true,
 
 	// Confirmação manual de pagamento: not-found do carrinho e a validação de
 	// "sem itens". A tela mostra a mensagem do servidor; não há ramo a tomar.
