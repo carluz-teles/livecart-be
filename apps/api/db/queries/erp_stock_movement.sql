@@ -85,3 +85,17 @@ SET status = 'failed', attempts = 0,
     last_attempt_at = now(), updated_at = now()
 WHERE id = $1 AND store_id = $2 AND status IN ('failed', 'unconfirmed')
 RETURNING *;
+
+-- name: SumInFlightOutMovements :one
+-- Unidades que JÁ prometemos e que o saldo do ERP ainda NÃO reflete.
+--
+-- É o "em voo" da regra de admissão. Um movimento `confirmed` já está descontado
+-- no ERP e não entra aqui; todos os outros estados vivos representam uma unidade
+-- que a live entregou a uma compradora e que a leitura do ERP ainda mostra como
+-- disponível. Somar isso e subtrair do saldo lido é o que impede o espelho de
+-- reabastecer o portão com estoque que já tem dono.
+SELECT COALESCE(SUM(quantity), 0)::bigint AS total
+FROM erp_stock_movements
+WHERE external_product_id = $1
+  AND direction = 'out'
+  AND status IN ('pending', 'failed', 'unconfirmed', 'resolving');

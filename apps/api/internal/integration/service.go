@@ -24,6 +24,7 @@ import (
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/erp"
+	"livecart/apps/api/internal/erp/erpwrite"
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/integration/providers/payment"
@@ -189,6 +190,12 @@ func (s *Service) erpStock() *erp.Service {
 		// interface é separada para o ledger ser opcional nos testes do erp.
 		s.erpStockService.SetStockMovementLedger(s.repo)
 		s.erpStockService.SetStockMovementResolution(s.repo)
+		// Serialização por pedido + teto real da API. Desligado por padrão: o
+		// caminho legado segue sendo o default até a migração terminar (ADR 001).
+		if config.ERPWritePipeline.Bool() {
+			s.erpStockService.EnableWritePipeline()
+			s.logger.Info("erp write pipeline enabled: serial queue per order + measured rate limits")
+		}
 	})
 	return s.erpStockService
 }
@@ -3743,7 +3750,25 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		// Produto que o lojista nao importou. O ERP notifica sobre o catalogo
 		// inteiro dele; nos so espelhamos o que existe aqui.
 	default:
-		applied, applyErr := s.repo.ApplyERPStockMirror(ctx, localProductID, detailed.Stock, seenSeq)
+		// O saldo do ERP é verdadeiro para o ERP e mentiroso para nós: ele não
+		// desconta o que a live já prometeu e cuja reserva ainda não confirmou.
+		// Gravá-lo cru reabastece o portão com estoque que já tem dono — foi
+		// assim que 25 admissões saíram de 20 unidades em 26/08, com o Tiny
+		// terminando em −13. A regra conservadora vive em erpwrite.Admissivel.
+		saldoParaOPortao := detailed.Stock
+		if emVoo, voErr := s.repo.SumInFlightOutMovements(ctx, externalProductID); voErr != nil {
+			logger.From(ctx, s.logger).Warn("could not read in-flight movements; mirroring the raw ERP balance",
+				zap.String("external_product_id", externalProductID), zap.Error(voErr))
+		} else if emVoo > 0 {
+			saldoParaOPortao = erpwrite.Admissivel(detailed.Stock, emVoo)
+			logger.From(ctx, s.logger).Info("stock mirror discounted in-flight reservations",
+				zap.String("external_product_id", externalProductID),
+				zap.Int("erp_stock", detailed.Stock),
+				zap.Int("in_flight", emVoo),
+				zap.Int("admissible", saldoParaOPortao))
+		}
+
+		applied, applyErr := s.repo.ApplyERPStockMirror(ctx, localProductID, saldoParaOPortao, seenSeq)
 		switch {
 		case applyErr != nil:
 			logger.From(ctx, s.logger).Warn("failed to apply ERP stock mirror",

@@ -27,6 +27,8 @@ import (
 
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/logger"
+
+	"livecart/apps/api/internal/erp/erpwrite"
 )
 
 // Estados de um movimento. A linha nunca é apagada — só anda.
@@ -170,6 +172,47 @@ func movementObservacao(cartRef, platformHandle string, retry int) string {
 func (s *Service) executeStockMovement(ctx context.Context, provider providers.ERPProvider, mov *StockMovementRow, obs string) {
 	dctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
+
+	// Com o pipeline ligado, a escrita passa pelo teto real da API e pela fila
+	// serial do PEDIDO antes de sair. Se qualquer um dos dois recusar, nada foi
+	// despachado — e o erro carrega ErrProvenUndelivered, que é o contrato que
+	// finishStockMovement já entende como "seguro repetir".
+	//
+	// Foi essa distinção que faltou numa live simulada de 26/08: 115 das 170
+	// reservas morreram esperando a fila até o prazo estourar e viraram
+	// `unconfirmed`, que nunca re-tenta e trava o carrinho pago. Nenhuma delas
+	// havia saído da máquina.
+	if s.pipeline != nil {
+		if waitErr := s.pipeline.lim.Wait(dctx); waitErr != nil {
+			s.finishStockMovement(ctx, mov, "", naoDespachada(waitErr))
+			return
+		}
+	}
+
+	executar := func(dctx context.Context) (string, error) {
+		if mov.Direction == "in" {
+			return executarEntradaNoERP(dctx, provider, mov.ExternalProductID, mov.Quantity, obs)
+		}
+		return provider.ReserveStock(dctx, mov.ExternalProductID, mov.Quantity, float64(mov.UnitPriceCents)/100, obs)
+	}
+
+	if s.pipeline != nil {
+		var movementID string
+		var despachou bool
+		filaErr := s.pipeline.fila.Do(dctx, chaveDeSerializacao(mov), func(dctx context.Context) error {
+			despachou = true
+			var inner error
+			movementID, inner = executar(dctx)
+			return inner
+		})
+		if !despachou {
+			// Desistiu na espera da vez: provadamente não aplicado.
+			s.finishStockMovement(ctx, mov, "", naoDespachada(filaErr))
+			return
+		}
+		s.finishStockMovement(ctx, mov, movementID, filaErr)
+		return
+	}
 
 	var movementID string
 	var err error
@@ -405,4 +448,27 @@ func (s *Service) ResolveCartMovementsBeforeFinalisation(ctx context.Context, ca
 		keys = append(keys, fmt.Sprintf("%s [%s]", r.Status, r.IdempotencyKey))
 	}
 	return fmt.Errorf("cart %s has %d unresolved ERP stock movement(s): %v — finalisation blocked to avoid a double stock decrement; resolve via the product's Tiny extract", cartID, len(rows), keys)
+}
+
+// chaveDeSerializacao é o que a fila serializa. É o CARRINHO, não o produto: as
+// escritas que se corrompem entre si são as do mesmo pedido no ERP, e um
+// carrinho vira um pedido. Serializar por produto deixaria duas escritas do
+// mesmo pedido correrem juntas, que é exatamente a corrida medida.
+func chaveDeSerializacao(mov *StockMovementRow) string {
+	if mov.CartID != "" {
+		return "cart:" + mov.CartID
+	}
+	return "prod:" + mov.ExternalProductID
+}
+
+// naoDespachada embrulha o erro no contrato que o razão já entende. Sem isto o
+// desfecho cairia no ramo `default` de finishStockMovement e viraria
+// `unconfirmed`, travando a finalização de um carrinho pago por uma escrita que
+// nunca chegou a existir.
+func naoDespachada(cause error) error {
+	if cause == nil {
+		cause = erpwrite.ErrNotDispatched
+	}
+	return fmt.Errorf("escrita não despachada: %w",
+		errors.Join(providers.ErrProvenUndelivered, cause))
 }

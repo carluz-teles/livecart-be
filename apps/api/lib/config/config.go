@@ -23,8 +23,12 @@ const (
 	AWSSecretAccessKey Key = "AWS_SECRET_ACCESS_KEY"
 
 	// Async events / telemetry
-	RedisURL             Key = "REDIS_URL"                   // Full redis[s]:// connection URL (Railway/managed Redis: carries user/password/TLS). Takes precedence over REDIS_ADDR.
-	RedisAddr            Key = "REDIS_ADDR"                  // Redis host:port for the asynq event queue (local/no-auth; default localhost:6379)
+	RedisURL  Key = "REDIS_URL" // Full redis[s]:// connection URL (Railway/managed Redis: carries user/password/TLS). Takes precedence over REDIS_ADDR.
+	RedisAddr Key = "REDIS_ADDR"
+	// ERPWritePipeline liga a fila serial por pedido e o limiter com os tetos
+	// medidos da API do Tiny (4/s em rajada, 30/min por conta). Desligado por
+	// padrão — o caminho legado continua sendo o default durante a migração.
+	ERPWritePipeline     Key = "ERP_WRITE_PIPELINE"          // Redis host:port for the asynq event queue (local/no-auth; default localhost:6379)
 	OTELExporterEndpoint Key = "OTEL_EXPORTER_OTLP_ENDPOINT" // OTLP gRPC endpoint (Jaeger local, Datadog agent in prod); empty = tracing no-op
 	OTELServiceName      Key = "OTEL_SERVICE_NAME"           // service.name resource attr (default livecart-api)
 	NewRelicLicenseKey   Key = "NEW_RELIC_LICENSE_KEY"       // Insights Event API ingest key; empty = New Relic custom-events exporter disabled
