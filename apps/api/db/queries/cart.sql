@@ -1084,3 +1084,33 @@ WHERE id = $1
 -- Zero quando não há marca, que é o caso de quem nunca começou.
 SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - erp_op_started_at)), 0)::float8
 FROM carts WHERE id = $1;
+
+-- name: SumPromisedWithoutERPOrder :one
+-- Unidades que a live JÁ prometeu e que o ERP ainda não conhece.
+--
+-- O saldo disponível do ERP é verdadeiro para o ERP e incompleto para nós
+-- durante alguns segundos: entre o comentário baixar o contador local e o pedido
+-- de venda existir lá, aquela unidade não aparece em `disponivel`. Gravar o
+-- disponível cru nesse intervalo REABASTECE o portão com estoque que já tem
+-- dono — e a unidade é oferecida duas vezes.
+--
+-- Só carrinhos VIVOS e ainda SEM pedido entram na conta: assim que o pedido
+-- existe, o `disponivel` do ERP já o desconta, e somá-lo aqui seria descontar
+-- duas vezes.
+--
+-- Carrinho PAGO sem pedido conta, e é o caso mais importante de todos: a venda
+-- aconteceu, aquelas unidades têm dono, e o pedido só vai nascer quando a
+-- confirmação rodar. Excluí-lo devolveria ao portão estoque já vendido.
+--
+-- Substitui a soma sobre erp_stock_movements, que media a mesma coisa num mundo
+-- onde a reserva era um lançamento manual de estoque.
+SELECT COALESCE(SUM(ci.quantity - ci.waitlisted_quantity), 0)::int
+FROM cart_items ci
+JOIN carts c ON c.id = ci.cart_id
+JOIN products p ON p.id = ci.product_id
+WHERE p.external_id = sqlc.arg(external_product_id)
+  AND p.external_source = 'tiny'
+  AND (c.external_order_id IS NULL OR c.external_order_id = '')
+  AND c.status NOT IN ('expired', 'cancelled')
+  AND (c.payment_status IS NULL OR c.payment_status <> 'refunded')
+  AND ci.quantity > ci.waitlisted_quantity;

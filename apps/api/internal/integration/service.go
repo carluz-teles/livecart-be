@@ -3744,21 +3744,26 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		// Produto que o lojista nao importou. O ERP notifica sobre o catalogo
 		// inteiro dele; nos so espelhamos o que existe aqui.
 	default:
-		// O saldo do ERP é verdadeiro para o ERP e mentiroso para nós: ele não
-		// desconta o que a live já prometeu e cuja reserva ainda não confirmou.
-		// Gravá-lo cru reabastece o portão com estoque que já tem dono — foi
-		// assim que 25 admissões saíram de 20 unidades em 26/08, com o Tiny
-		// terminando em −13. A regra conservadora vive em erpwrite.Admissivel.
+		// O saldo disponível do ERP é verdadeiro para o ERP e INCOMPLETO para nós
+		// por alguns segundos: entre o comentário baixar o contador local e o
+		// pedido de venda existir lá, aquela unidade não aparece em `disponivel`.
+		// Gravá-lo cru nesse intervalo reabastece o portão com estoque que já tem
+		// dono — foi assim que 25 admissões saíram de 20 unidades em 26/08, com o
+		// ERP terminando em −13.
+		//
+		// A conta desconta só o que o ERP ainda NÃO conhece: carrinho vivo e sem
+		// pedido. Assim que o pedido existe, o `disponivel` já o desconta, e
+		// somá-lo aqui seria descontar duas vezes.
 		saldoParaOPortao := detailed.Stock
-		if emVoo, voErr := s.repo.SumInFlightOutMovements(ctx, externalProductID); voErr != nil {
-			logger.From(ctx, s.logger).Warn("could not read in-flight movements; mirroring the raw ERP balance",
+		if prometido, voErr := s.repo.SumPromisedWithoutERPOrder(ctx, externalProductID); voErr != nil {
+			logger.From(ctx, s.logger).Warn("could not read promised-but-unsent units; mirroring the raw ERP balance",
 				zap.String("external_product_id", externalProductID), zap.Error(voErr))
-		} else if emVoo > 0 {
-			saldoParaOPortao = erpwrite.Admissivel(detailed.Stock, emVoo)
-			logger.From(ctx, s.logger).Info("stock mirror discounted in-flight reservations",
+		} else if prometido > 0 {
+			saldoParaOPortao = erpwrite.Admissivel(detailed.Stock, prometido)
+			logger.From(ctx, s.logger).Info("stock mirror discounted units promised before the order existed",
 				zap.String("external_product_id", externalProductID),
-				zap.Int("erp_stock", detailed.Stock),
-				zap.Int("in_flight", emVoo),
+				zap.Int("erp_available", detailed.Stock),
+				zap.Int("promised_without_order", prometido),
 				zap.Int("admissible", saldoParaOPortao))
 		}
 

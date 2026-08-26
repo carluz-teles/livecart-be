@@ -162,3 +162,10 @@ func (r *Repository) GetCartERPOpAge(ctx context.Context, cartID string) (time.D
 	}
 	return time.Duration(segundos * float64(time.Second)), nil
 }
+
+// SumPromisedWithoutERPOrder devolve as unidades que a live já prometeu e que o
+// ERP ainda não conhece — carrinho vivo, sem pedido criado.
+func (r *Repository) SumPromisedWithoutERPOrder(ctx context.Context, externalProductID string) (int, error) {
+	n, err := r.queries.SumPromisedWithoutERPOrder(ctx, pgtype.Text{String: externalProductID, Valid: true})
+	return int(n), err
+}

@@ -506,3 +506,93 @@ func TestERPSituacaoDePedidoAlheioViraHistoricoSolto(t *testing.T) {
 			"webhook está funcionando", n)
 	}
 }
+
+// ─── O portão não é reabastecido pelo espelho ───────────────────────────────
+
+// Entre o comentário baixar o contador local e o pedido existir no ERP, aquela
+// unidade não aparece no `disponivel` de lá. Um espelho que grave o disponível
+// cru nesse intervalo devolve a unidade ao portão — e ela é oferecida duas vezes.
+//
+// Foi assim que 25 admissões saíram de 20 unidades em 26/08. A conta que evita
+// isso desconta exatamente o que o ERP ainda não conhece: carrinho vivo, sem
+// pedido.
+func TestUnidadesPrometidasSemPedidoSaoDescontadasDoEspelho(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 3, 0)
+	ctx := context.Background()
+
+	// O carrinho existe com 3 unidades e ainda não tem pedido no ERP.
+	prometido, err := testRepo.SumPromisedWithoutERPOrder(ctx, extIDDoProduto(t, fx.productID))
+	if err != nil {
+		t.Fatalf("somando prometidas: %v", err)
+	}
+	if prometido != 3 {
+		t.Fatalf("prometidas sem pedido = %d, quero 3", prometido)
+	}
+
+	// Assim que o pedido existe, o `disponivel` do ERP já o desconta — somar
+	// aqui de novo seria descontar duas vezes.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE carts SET external_order_id = 'ORD-X' WHERE id = $1`, fx.cartID); err != nil {
+		t.Fatalf("vinculando pedido: %v", err)
+	}
+	prometido, err = testRepo.SumPromisedWithoutERPOrder(ctx, extIDDoProduto(t, fx.productID))
+	if err != nil {
+		t.Fatalf("somando prometidas: %v", err)
+	}
+	if prometido != 0 {
+		t.Errorf("prometidas = %d depois de o pedido existir, quero 0 — o disponível "+
+			"do ERP já desconta essas unidades, e somá-las de novo tiraria o dobro",
+			prometido)
+	}
+}
+
+// Carrinho morto não segura nada.
+func TestCarrinhoCanceladoNaoContaComoPrometido(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 4, 0)
+	ctx := context.Background()
+	ext := extIDDoProduto(t, fx.productID)
+
+	if _, err := testPool.Exec(ctx, `UPDATE carts SET status='cancelled' WHERE id=$1`, fx.cartID); err != nil {
+		t.Fatalf("cancelando: %v", err)
+	}
+	prometido, err := testRepo.SumPromisedWithoutERPOrder(ctx, ext)
+	if err != nil {
+		t.Fatalf("somando: %v", err)
+	}
+	if prometido != 0 {
+		t.Errorf("carrinho cancelado contou %d unidades como prometidas", prometido)
+	}
+}
+
+// Unidade em FILA de espera não foi prometida a ninguém.
+func TestUnidadeEmFilaNaoContaComoPrometida(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 5, 0)
+	ctx := context.Background()
+	ext := extIDDoProduto(t, fx.productID)
+
+	// Das 5, três estão em fila.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE cart_items SET waitlisted_quantity = 3 WHERE cart_id = $1`, fx.cartID); err != nil {
+		t.Fatalf("marcando fila: %v", err)
+	}
+	prometido, err := testRepo.SumPromisedWithoutERPOrder(ctx, ext)
+	if err != nil {
+		t.Fatalf("somando: %v", err)
+	}
+	if prometido != 2 {
+		t.Errorf("prometidas = %d, quero 2 — a fila não tirou estoque de ninguém", prometido)
+	}
+}
+
+func extIDDoProduto(t *testing.T, productID string) string {
+	t.Helper()
+	var ext string
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT external_id FROM products WHERE id = $1`, productID).Scan(&ext); err != nil {
+		t.Fatalf("lendo external_id: %v", err)
+	}
+	return ext
+}

@@ -3865,20 +3865,6 @@ func (r *Repository) ProductSeqByExternalID(ctx context.Context, storeID, extern
 // false significa leitura vencida — e descartar é a única resposta correta,
 // porque não há como saber quanto daquele número já estava desatualizado. Uma
 // leitura nova chega no próximo webhook ou na reconciliação.
-// SumInFlightOutMovements soma as unidades que já prometemos e que o saldo lido
-// do ERP ainda NÃO reflete — tudo que saiu do razão e não está `confirmed`.
-//
-// É o "em voo" da regra de admissão. Sem subtrair isto, o espelho reabastece o
-// portão com estoque que já tem dono, que foi como uma live de 25 comentários
-// sobre 20 unidades terminou com o saldo do Tiny em −13 (medido em 26/08).
-func (r *Repository) SumInFlightOutMovements(ctx context.Context, externalProductID string) (int, error) {
-	n, err := r.queries.SumInFlightOutMovements(ctx, externalProductID)
-	if err != nil {
-		return 0, fmt.Errorf("summing in-flight out movements: %w", err)
-	}
-	return int(n), nil
-}
-
 func (r *Repository) ApplyERPStockMirror(ctx context.Context, productID string, erpStock int, seenSeq int64) (bool, error) {
 	id, err := parseUUID(productID)
 	if err != nil {
