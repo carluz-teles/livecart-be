@@ -418,6 +418,53 @@ func (t *Tiny) GetProductStock(ctx context.Context, productID string) (int, erro
 	return disponivel, nil
 }
 
+// GetProductStockDetail lê os três saldos de um produto.
+//
+// Separado de saldoDisponivel de propósito: aquele é o caminho QUENTE da live,
+// com o retry longo que existe para um 429 nunca virar saldo físico. Este é uma
+// checagem de diagnóstico, roda fora de live e não pode monopolizar a cota — usa
+// o retry curto padrão e, se o Tiny não responder, admite que não sabe.
+func (t *Tiny) GetProductStockDetail(ctx context.Context, productID string) (providers.ERPStockDetail, error) {
+	var out providers.ERPStockDetail
+	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return out, fmt.Errorf("reading stock detail: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return out, fmt.Errorf("read stock detail failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+	}
+	var cru map[string]any
+	if err := json.Unmarshal(body, &cru); err != nil {
+		return out, fmt.Errorf("parsing stock detail: %w", err)
+	}
+	// Reusa o mesmo extrator do caminho quente: o Tiny devolve o disponível em
+	// mais de uma forma, e duas leituras diferentes do mesmo campo divergiriam.
+	if n, _, ok := ExtrairSaldoDisponivel(cru); ok {
+		out.Available = n
+	}
+	out.Balance = inteiroDoCru(cru["saldo"])
+	out.Reserved = inteiroDoCru(cru["reservado"])
+	return out, nil
+}
+
+// inteiroDoCru aceita as formas em que o Tiny devolve número (float, string).
+func inteiroDoCru(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	case string:
+		i, _ := strconv.Atoi(n)
+		return i
+	}
+	return 0
+}
+
 func (t *Tiny) saldoDisponivel(ctx context.Context, productID string) (int, bool) {
 	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
 

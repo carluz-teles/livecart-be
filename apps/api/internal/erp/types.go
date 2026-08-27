@@ -113,6 +113,13 @@ type CreateStockReservationParams struct {
 }
 
 // CartERPOrderState is the order-as-reservation lifecycle snapshot (design C).
+// ERPLinkedProduct é um produto nosso ligado a um produto do ERP.
+type ERPLinkedProduct struct {
+	ID         string
+	Name       string
+	ExternalID string
+}
+
 type CartERPOrderState struct {
 	State           string
 	StockLaunched   bool

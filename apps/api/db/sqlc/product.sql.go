@@ -430,6 +430,54 @@ func (q *Queries) IncrementProductStock(ctx context.Context, arg IncrementProduc
 	return i, err
 }
 
+const listERPLinkedProductsSample = `-- name: ListERPLinkedProductsSample :many
+SELECT id, name, external_id
+FROM products
+WHERE store_id = $1::uuid
+  AND external_source = 'tiny'
+  AND external_id IS NOT NULL AND external_id <> ''
+  AND stock > 0
+ORDER BY updated_at DESC NULLS LAST
+LIMIT $2::int
+`
+
+type ListERPLinkedProductsSampleParams struct {
+	StoreID pgtype.UUID `json:"store_id"`
+	Limite  int32       `json:"limite"`
+}
+
+type ListERPLinkedProductsSampleRow struct {
+	ID         pgtype.UUID `json:"id"`
+	Name       string      `json:"name"`
+	ExternalID pgtype.Text `json:"external_id"`
+}
+
+// Uma amostra pequena de produtos ligados ao ERP, dos que TÊM estoque — são os
+// únicos em que uma reserva poderia aparecer.
+//
+// Serve à checagem do módulo de Reserva de Estoque, e a amostra é pequena de
+// propósito: as leituras dividem a cota da conta com a live, e provar um módulo
+// não vale atrasar uma venda.
+func (q *Queries) ListERPLinkedProductsSample(ctx context.Context, arg ListERPLinkedProductsSampleParams) ([]ListERPLinkedProductsSampleRow, error) {
+	rows, err := q.db.Query(ctx, listERPLinkedProductsSample, arg.StoreID, arg.Limite)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListERPLinkedProductsSampleRow{}
+	for rows.Next() {
+		var i ListERPLinkedProductsSampleRow
+		if err := rows.Scan(&i.ID, &i.Name, &i.ExternalID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listProductsByGroup = `-- name: ListProductsByGroup :many
 SELECT id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, erp_seq, barcode FROM products WHERE group_id = $1 ORDER BY keyword ASC
 `

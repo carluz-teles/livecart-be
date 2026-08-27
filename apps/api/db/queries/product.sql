@@ -132,3 +132,19 @@ LIMIT 1;
 UPDATE products
 SET stock = GREATEST(sqlc.arg(erp_stock)::int, 0), updated_at = now()
 WHERE id = sqlc.arg(id) AND erp_seq = sqlc.arg(seen_seq)::bigint;
+
+-- name: ListERPLinkedProductsSample :many
+-- Uma amostra pequena de produtos ligados ao ERP, dos que TÊM estoque — são os
+-- únicos em que uma reserva poderia aparecer.
+--
+-- Serve à checagem do módulo de Reserva de Estoque, e a amostra é pequena de
+-- propósito: as leituras dividem a cota da conta com a live, e provar um módulo
+-- não vale atrasar uma venda.
+SELECT id, name, external_id
+FROM products
+WHERE store_id = sqlc.arg(store_id)::uuid
+  AND external_source = 'tiny'
+  AND external_id IS NOT NULL AND external_id <> ''
+  AND stock > 0
+ORDER BY updated_at DESC NULLS LAST
+LIMIT sqlc.arg(limite)::int;

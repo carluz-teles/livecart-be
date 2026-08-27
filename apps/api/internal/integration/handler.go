@@ -81,6 +81,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// formas-recebimento / formas-envio against the canonical names so
 	// the merchant sees what to register before the first sale.
 	g.Get("/:id/erp/health-check", h.RunERPHealthCheck)
+	g.Get("/:id/erp/reserva", h.CheckERPReserva)
 
 	// Instagram operations
 	g.Get("/instagram/lives", h.GetInstagramLives)
@@ -386,6 +387,52 @@ func (h *Handler) RunERPHealthCheck(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, output)
+}
+
+// CheckERPReserva reports what can be known about the Tiny stock-reservation
+// module. It is deliberately three-valued: `GET /depositos`, which carries
+// `possuiReserva`, answers 403 even on an account with the module enabled, so
+// the only evidence available is `reservado > 0` on some product — which proves
+// the module is ON but never proves it is OFF.
+// @Summary Tiny stock reservation module check
+// @Description Reports confirmed / indeterminate / not-checked for the Tiny reservation module
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param id path string true "Integration ID"
+// @Success 200 {object} httpx.Envelope{data=ERPReservaResponse}
+// @Router /api/v1/stores/{storeId}/integrations/{id}/erp/reserva [get]
+// @Security BearerAuth
+func (h *Handler) CheckERPReserva(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	check, err := h.service.ERP().VerificarReserva(c.Context(), storeID)
+	if err != nil && check == nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, ERPReservaResponse{
+		Status:   string(check.Status),
+		Sampled:  check.Amostrados,
+		WithHold: check.ComReserva,
+		Example:  check.Exemplo,
+		Reason:   check.Motivo,
+	})
+}
+
+// ERPReservaResponse é o retrato da checagem do módulo de Reserva.
+type ERPReservaResponse struct {
+	// Status: "confirmada" | "indeterminada" | "nao_verificada". Nunca
+	// "desativada" — ausência de reserva não prova ausência do módulo.
+	Status string `json:"status"`
+	// Sampled é quantos produtos foram lidos no Tiny.
+	Sampled int `json:"sampled"`
+	// WithHold é em quantos deles havia unidade reservada.
+	WithHold int `json:"withHold"`
+	// Example é o nome de um produto com reserva, para o lojista reconhecer a
+	// evidência em vez de ter de confiar no número.
+	Example string `json:"example,omitempty"`
+	// Reason explica um "nao_verificada".
+	Reason string `json:"reason,omitempty"`
 }
 
 // =============================================================================

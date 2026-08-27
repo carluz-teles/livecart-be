@@ -119,3 +119,7 @@ func TestNewService(t *testing.T) {
 		t.Error("logger not wired")
 	}
 }
+
+func (stubERPRepo) ListERPLinkedProductsSample(context.Context, string, int) ([]ERPLinkedProduct, error) {
+	return nil, nil
+}
