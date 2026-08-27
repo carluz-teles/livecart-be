@@ -754,6 +754,32 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		if idPedido == "" {
 			idPedido = webhook.Dados.IDPedido.String()
 		}
+
+		// A nota fiscal chega POR AQUI, e não só pelo evento `nota_fiscal`.
+		//
+		// Todo webhook de pedido carrega `idNotaFiscal`, e ele vale "0" enquanto
+		// não há nota (capturado em 26/08/2026, com o pedido em situação
+		// "faturado" e idNotaFiscal ainda "0" — a situação mente, o campo não).
+		// Depender do evento `nota_fiscal` sozinho é frágil: em 1.807 webhooks
+		// gravados dessa conta ele NUNCA apareceu, e não há rota na API v3 para
+		// conferir a quais tipos a conta está inscrita.
+		//
+		// `atualizacao_pedido` apareceu 380 vezes nas mesmas capturas. Usar o
+		// canal que comprovadamente chega, em vez do que talvez chegue, é o que
+		// impede o LiveCart de somar item num pedido que já virou documento.
+		if nf := webhook.Dados.IDNotaFiscal.String(); nf != "" && nf != "0" && idPedido != "" {
+			go func() {
+				ctx := logger.WithStore(context.Background(), storeID, storeSlug)
+				if _, err := h.service.ERP().SyncCartInvoiceByExternalOrder(ctx, storeID, idPedido, nf); err != nil {
+					logger.From(ctx, h.logger).Error("failed to record the invoice carried by the order webhook",
+						zap.String("id_pedido", idPedido),
+						zap.String("id_nfe", nf),
+						zap.Error(err),
+					)
+				}
+			}()
+		}
+
 		status, conhecida := providers.ParseERPOrderStatus(webhook.Dados.CodigoSituacao)
 		switch {
 		case idPedido == "":

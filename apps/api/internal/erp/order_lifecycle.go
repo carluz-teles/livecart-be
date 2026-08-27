@@ -603,6 +603,13 @@ func (s *Service) enviarGrade(ctx context.Context, erpProvider providers.ERPProv
 	err := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
 		return erpProvider.UpdateOrderItems(ctx, orderID, grid)
 	})
+	if errors.Is(err, providers.ErrPedidoComNotaFiscal) {
+		// Porta fechada, e o ERP diz isso na cara: `400 motivosBloqueio: "nota
+		// fiscal gerada"`. Não é para retentar nem para estornar — o pedido
+		// virou documento e não recebe mais item. Sobe tipado para o chamador
+		// abrir um pedido novo em vez de insistir para sempre.
+		return fmt.Errorf("cart order %s: %w: %w", orderID, ErrPedidoFaturado, err)
+	}
 	if errors.Is(err, providers.ErrOrderStockLaunched) {
 		logger.From(ctx, s.logger).Warn("order locked by manually launched stock; reversing once to edit it",
 			zap.String("cart_id", cartID),

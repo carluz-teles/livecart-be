@@ -354,3 +354,62 @@ func TestSituacaoQueAEmissaoDaNotaProduzFechaAPorta(t *testing.T) {
 		t.Error("'faturado' também tem de fechar a porta")
 	}
 }
+
+// O próprio ERP recusa quando a nota é REAL — e a recusa tem de ser reconhecida.
+//
+// Medido em 27/08/2026, com uma nota emitida de verdade:
+//
+//	PUT /pedidos/{id}/itens
+//	→ 400 {"detalhes":[{"campo":"pedido.motivosBloqueio[0]",
+//	                    "mensagem":"nota fiscal gerada"}]}
+//
+// Ela anda junto do bloqueio por estoque lançado (mesmo campo, mensagem
+// diferente). Sem reconhecimento próprio vira erro genérico — e erro genérico é
+// retentado, então a mutação ficaria batendo num pedido que nunca mais aceita
+// item. Pior: confundi-la com o bloqueio por estoque autorizaria um estorno, que
+// é mexer no que já virou documento.
+func TestRecusaDoERPPorNotaFiscalNaoEhRetentadaNemEstornada(t *testing.T) {
+	e := novoERPSimulado(map[string]int{"ext-p1": 50, "ext-p2": 50})
+	r := novoRepoSimulado()
+	recusa := &erpQueRecusaPorNota{erpComParcelas: &erpComParcelas{erpSimulado: e}}
+	svc := NewService(r, &colabSimulado{erp: recusa, repo: r}, zap.NewNop())
+	svc.SetOrderStatusRepository(r)
+	svc.SetWriteLimits(limitesAbertos())
+
+	ctx := context.Background()
+	r.criarCarrinho("cart-1", item("p1", 2))
+	if err := svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@maria"); err != nil {
+		t.Fatalf("primeira compra: %v", err)
+	}
+	recusa.comNota = true
+
+	r.acrescentarItem("cart-1", item("p2", 1))
+	err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1")
+	if !errors.Is(err, ErrPedidoFaturado) {
+		t.Fatalf("erro = %v, quero ErrPedidoFaturado", err)
+	}
+	if e.estornos != 0 {
+		t.Errorf("estornou %d vez(es) num pedido faturado — estorno em pedido só "+
+			"reservado infla a reserva, e neste caso ainda mexe no documento",
+			e.estornos)
+	}
+	if recusa.tentativas > 1 {
+		t.Errorf("tentou escrever %d vezes — porta fechada não se retenta",
+			recusa.tentativas)
+	}
+}
+
+// erpQueRecusaPorNota encena a recusa do ERP com nota emitida.
+type erpQueRecusaPorNota struct {
+	*erpComParcelas
+	comNota    bool
+	tentativas int
+}
+
+func (e *erpQueRecusaPorNota) UpdateOrderItems(ctx context.Context, orderID string, itens []providers.ERPOrderItem) error {
+	if e.comNota {
+		e.tentativas++
+		return providers.ErrPedidoComNotaFiscal
+	}
+	return e.erpComParcelas.UpdateOrderItems(ctx, orderID, itens)
+}

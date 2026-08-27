@@ -2008,6 +2008,9 @@ func (t *Tiny) UpdateOrderItems(ctx context.Context, orderID string, items []pro
 		if bloqueioPorEstoqueLancado(body) {
 			return providers.ErrOrderStockLaunched
 		}
+		if bloqueioPorNotaFiscal(body) {
+			return providers.ErrPedidoComNotaFiscal
+		}
 		return fmt.Errorf("update order items failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
 	}
 	logger.From(ctx, t.Logger).Info("tiny order items updated",
@@ -2100,6 +2103,43 @@ func bloqueioPorEstoqueLancado(body []byte) bool {
 	return false
 }
 
+// bloqueioPorNotaFiscal reconhece a recusa de edição por nota fiscal emitida.
+//
+// Forma exata capturada contra a API real em 27/08/2026, depois de gerar uma
+// nota de verdade:
+//
+//	400 {"mensagem":"Ocorreram erros de validação",
+//	     "detalhes":[{"campo":"pedido.motivosBloqueio[0]",
+//	                  "mensagem":"nota fiscal gerada"}]}
+//
+// Ela ANDA JUNTO do bloqueio por estoque lançado — mesmo campo, mensagem
+// diferente — e é por isso que precisa de reconhecimento próprio: sem ele, a
+// recusa vira erro genérico, e erro genérico é retentado. A mutação ficaria
+// batendo num pedido que nunca mais vai aceitar item.
+//
+// O que ela NÃO pode fazer é cair no ramo do estoque lançado: aquele autoriza o
+// estorno, e estornar um pedido faturado é mexer no que já virou documento.
+// Casar pelo par campo+mensagem, e não pela substring solta, é o que separa os
+// dois.
+func bloqueioPorNotaFiscal(body []byte) bool {
+	var resp struct {
+		Detalhes []struct {
+			Campo    string `json:"campo"`
+			Mensagem string `json:"mensagem"`
+		} `json:"detalhes"`
+	}
+	if json.Unmarshal(body, &resp) != nil {
+		return false
+	}
+	for _, d := range resp.Detalhes {
+		if strings.HasPrefix(d.Campo, "pedido.motivosBloqueio") &&
+			strings.Contains(strings.ToLower(d.Mensagem), "nota fiscal") {
+			return true
+		}
+	}
+	return false
+}
+
 // SetOrderInstallments grava as parcelas do pedido, uma a uma, como o chamador
 // as ditou.
 //
@@ -2143,9 +2183,15 @@ func (t *Tiny) SetOrderInstallments(ctx context.Context, orderID string, parcela
 
 // GetOrderTotal lê o total do pedido e diz se há nota fiscal atrelada.
 //
-// `idNotaFiscal` é o sinal confiável de documento fiscal — a situação não é: a
-// API aceitou editar os itens de um pedido em situação "Faturada" sem reclamar
-// (medido em 26/08/2026, HTTP 204). Quem tem de recusar somos nós.
+// `idNotaFiscal` é o sinal confiável de documento fiscal; a situação não é.
+// Medido em 27/08/2026, gerando uma nota de verdade: a emissão leva o pedido
+// para a situação 4 ("Preparando envio"), nunca para a 1 ("Faturada"). Quem
+// esperasse o 1 acharia a porta aberta com a nota já emitida.
+//
+// Com nota real o próprio ERP recusa a edição — `400 motivosBloqueio: "nota
+// fiscal gerada"`. Uma medição anterior, em que a situação foi posta em
+// "Faturada" à mão e o idNotaFiscal seguia 0, tinha devolvido 204: a situação
+// sozinha não bloqueia nada, o documento é que bloqueia.
 func (t *Tiny) GetOrderTotal(ctx context.Context, orderID string) (int64, bool, error) {
 	endpoint := fmt.Sprintf("%s/pedidos/%s", tinyAPIBaseURL, orderID)
 	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
