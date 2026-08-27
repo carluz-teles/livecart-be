@@ -102,6 +102,12 @@ func (s *Service) DrainLegacyReservations(ctx context.Context, storeID string, d
 	return s.erpStock().DrainLegacyReservations(ctx, storeID, dryRun, limite)
 }
 
+// MergeERPOrdersIntoCart delega para erp.Service: faz o pedido do carrinho
+// eterno absorver o que os outros seguravam, e só então solta os outros.
+func (s *Service) MergeERPOrdersIntoCart(ctx context.Context, destCartID, storeID string, orfaos []erp.ERPOrderMerge) (*erp.MergeReport, error) {
+	return s.erpStock().MergeERPOrdersIntoCart(ctx, destCartID, storeID, orfaos)
+}
+
 // RecomporParcelasDoPedidoPago delega para erp.Service: separa, no pedido, o que
 // já foi pago do que ainda falta.
 func (s *Service) RecomporParcelasDoPedidoPago(ctx context.Context, cartID, storeID string) (*erp.SplitDePagamento, error) {

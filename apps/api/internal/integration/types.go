@@ -753,3 +753,22 @@ type CreateInstagramPostInput struct {
 	CartMaxQuantityPerItem *int
 	IdempotencyKey         string // dedupes retried publishes (empty = none)
 }
+
+// VipActivation resume o que a promoção a VIP fez com os carrinhos abertos do @.
+type VipActivation struct {
+	// EternalCartID é o carrinho que ficou eterno; vazio quando não havia
+	// nenhum aberto.
+	EternalCartID string
+	// Merged é quantos carrinhos foram fundidos no eterno.
+	Merged int
+	// Skipped é quantos ficaram de fora — pago, ou com nota já emitida. Esses
+	// continuam com prazo e precisam de decisão humana.
+	Skipped int
+	// OrdersReleased é quantos pedidos antigos soltaram a reserva no ERP depois
+	// de o pedido do carrinho eterno absorver o conteúdo deles.
+	OrdersReleased int
+	// OrdersStuck é quantos NÃO soltaram. Cada um é a mesma peça reservada em
+	// dois pedidos: o comprador vê no carrinho e a loja para de vender uma
+	// unidade que existe. Precisa de gente.
+	OrdersStuck int
+}

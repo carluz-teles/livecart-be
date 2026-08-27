@@ -550,3 +550,13 @@ func (r *repoSimulado) definirStatusERP(cartID, situacao string) {
 		c.statusEm = time.Now()
 	}
 }
+
+// esvaziarCarrinho encena o que a consolidação faz com o carrinho de origem:
+// os itens já foram para o eterno e a linha fica sem nada.
+func (r *repoSimulado) esvaziarCarrinho(cartID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if c := r.carrinhos[cartID]; c != nil {
+		c.itens = nil
+	}
+}

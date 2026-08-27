@@ -373,10 +373,15 @@ func (s *Service) umaPassadaDeMutacao(ctx context.Context, cartID, storeID strin
 	if !podeMutar(casa) || st.ExternalOrderID == "" {
 		return nil, fmt.Errorf("cart %s não aceita mutação no estado %s: %w", cartID, st.State, ErrCartNotConverted)
 	}
-	if casa == OrderStateConfirmed {
-		if fechado, motivo := pedidoJaFaturado(st.OrderStatus); fechado {
-			return nil, fmt.Errorf("cart %s: %s: %w", cartID, motivo, ErrPedidoFaturado)
-		}
+	// A guarda vale em QUALQUER estado, não só no pago.
+	//
+	// Ela nasceu presa a 'confirmed' com o raciocínio de que só pedido pago
+	// chegaria a ser faturado. Não é verdade: o lojista fatura pelo painel quando
+	// quer, e recebe por fora com frequência — um pedido nosso ainda 'open' pode
+	// muito bem já ter nota. Emitida a nota, ele não recebe mais item, e de quem
+	// era o dinheiro não muda isso.
+	if fechado, motivo := pedidoJaFaturado(st.OrderStatus); fechado {
+		return nil, fmt.Errorf("cart %s: %s: %w", cartID, motivo, ErrPedidoFaturado)
 	}
 
 	won, err := s.repo.TransitionCartERPOrderState(ctx, cartID, casa, OrderStateMutating)

@@ -12,41 +12,32 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const activateEternalCartsForHandle = `-- name: ActivateEternalCartsForHandle :many
-UPDATE carts
-SET never_expires = true, expires_at = NULL
-WHERE store_id = $1 AND platform_handle = $2
-  AND status IN ('pending', 'active', 'checkout')
-  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
-RETURNING id
+const absorbCartItemsIntoCart = `-- name: AbsorbCartItemsIntoCart :exec
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id)
+SELECT $1, s.product_id, s.quantity, s.unit_price, s.waitlisted_quantity, s.session_id
+FROM cart_items s
+WHERE s.cart_id = $2
+ON CONFLICT (cart_id, product_id) DO UPDATE
+SET quantity            = cart_items.quantity + EXCLUDED.quantity,
+    waitlisted_quantity = cart_items.waitlisted_quantity + EXCLUDED.waitlisted_quantity
 `
 
-type ActivateEternalCartsForHandleParams struct {
-	StoreID        pgtype.UUID `json:"store_id"`
-	PlatformHandle string      `json:"platform_handle"`
+type AbsorbCartItemsIntoCartParams struct {
+	DestCartID   pgtype.UUID `json:"dest_cart_id"`
+	SourceCartID pgtype.UUID `json:"source_cart_id"`
 }
 
-// Ao promover um @ a VIP: os carrinhos abertos que ele JÁ tem viram eternos e
-// a agenda de expiração é ANULADA (expires_at NULL → o worker cart.expire vira
-// no-op pelo próprio guard). Devolve os ids afetados.
-func (q *Queries) ActivateEternalCartsForHandle(ctx context.Context, arg ActivateEternalCartsForHandleParams) ([]pgtype.UUID, error) {
-	rows, err := q.db.Query(ctx, activateEternalCartsForHandle, arg.StoreID, arg.PlatformHandle)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []pgtype.UUID{}
-	for rows.Next() {
-		var id pgtype.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		items = append(items, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
+// Move os itens de UM carrinho de origem para o destino. O mesmo produto nos
+// dois soma quantidade (é o mesmo comprador querendo mais daquilo), e o preço
+// que fica é o do destino — o carrinho vivo é o mais recente, e é o preço dele
+// que o comprador está vendo na tela. O histórico de cada adição, com o preço
+// praticado na hora, continua íntegro em cart_item_events.
+//
+// session_id viaja junto na linha nova: é a atribuição de primeiro toque, e é
+// o que mantém a métrica por evento de origem correta depois da fusão.
+func (q *Queries) AbsorbCartItemsIntoCart(ctx context.Context, arg AbsorbCartItemsIntoCartParams) error {
+	_, err := q.db.Exec(ctx, absorbCartItemsIntoCart, arg.DestCartID, arg.SourceCartID)
+	return err
 }
 
 const bindCartPaymentIntegration = `-- name: BindCartPaymentIntegration :exec
@@ -191,6 +182,15 @@ func (q *Queries) CancelCartOnRefund(ctx context.Context, id pgtype.UUID) (int64
 	return result.RowsAffected(), nil
 }
 
+const clearCartItems = `-- name: ClearCartItems :exec
+DELETE FROM cart_items WHERE cart_id = $1
+`
+
+func (q *Queries) ClearCartItems(ctx context.Context, cartID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, clearCartItems, cartID)
+	return err
+}
+
 const clearCartPixCharge = `-- name: ClearCartPixCharge :exec
 UPDATE carts
 SET pix_charge_id = NULL,
@@ -202,6 +202,21 @@ WHERE id = $1
 // escrita para o cancelamento poder falhar sem deixar um id fantasma aqui.
 func (q *Queries) ClearCartPixCharge(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, clearCartPixCharge, id)
+	return err
+}
+
+const closeMergedCart = `-- name: CloseMergedCart :exec
+UPDATE carts
+SET status = 'cancelled', cancelled_reason = 'merged_into_vip_cart', expires_at = NULL
+WHERE id = $1
+`
+
+// O carrinho de origem sai de cena depois de entregar o conteúdo. Não é uma
+// expiração nem um cancelamento do lojista: o conteúdo não morreu, mudou de
+// endereço. cart_mutations e cart_initial_items ficam onde estão — descrevem o
+// que aconteceu NAQUELE carrinho.
+func (q *Queries) CloseMergedCart(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, closeMergedCart, id)
 	return err
 }
 
@@ -2727,6 +2742,92 @@ func (q *Queries) ListOpenCartItemsByEvent(ctx context.Context, eventID pgtype.U
 	return items, nil
 }
 
+const listOpenCartsForVipPromotion = `-- name: ListOpenCartsForVipPromotion :many
+
+SELECT id, status, created_at, erp_order_state, external_order_id FROM carts
+WHERE store_id = $1 AND platform_handle = $2
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND (erp_order_status IS NULL OR erp_order_status NOT IN (
+        'preparando_envio', 'faturado', 'pronto_envio', 'enviado', 'entregue',
+        'nao_entregue', 'cancelado'))
+ORDER BY created_at DESC
+FOR UPDATE
+`
+
+type ListOpenCartsForVipPromotionParams struct {
+	StoreID        pgtype.UUID `json:"store_id"`
+	PlatformHandle string      `json:"platform_handle"`
+}
+
+type ListOpenCartsForVipPromotionRow struct {
+	ID              pgtype.UUID        `json:"id"`
+	Status          string             `json:"status"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	ErpOrderState   string             `json:"erp_order_state"`
+	ExternalOrderID pgtype.Text        `json:"external_order_id"`
+}
+
+// A PROMOÇÃO A VIP CONSOLIDA, NÃO MARCA EM MASSA.
+//
+// ActivateEternalCartsForHandle (removida) era UM update que marcava
+// never_expires em TODOS os carrinhos abertos do @. Só que o modelo admite UM
+// carrinho eterno por comprador — carts_one_eternal_per_store_buyer, índice
+// único parcial em (store_id, platform_handle). Quem chega à promoção com dois
+// carrinhos abertos é o caso NORMAL, não o raro: antes de virar VIP o
+// comprador ganha um carrinho por evento. O update então violava o índice, e
+// como era uma instrução só, o Postgres desfazia tudo: NENHUM carrinho virava
+// eterno, o erro era engolido pelo best-effort do chamador e a promoção
+// respondia 200. Aconteceu em produção em 26/08/2026 com @eulalisueli, com
+// R$ 2.480,80 em dois carrinhos e o mais antigo a horas de expirar.
+//
+// No lugar entra uma consolidação, que é o que "carrinho eterno que acumula
+// entre eventos" sempre significou: o carrinho aberto mais recente recebe os
+// itens dos outros e vira o eterno; os demais são fechados como fundidos.
+// Os carrinhos abertos de um @ no instante em que ele é promovido a VIP, do
+// mais novo para o mais velho e travados para a consolidação.
+//
+// A ordem é a MESMA de GetEternalCartByStoreAndHandleForUpdate (created_at
+// DESC): o primeiro da lista é o que o resolvedor vai encontrar depois, então
+// é ele que tem de virar o eterno. Qualquer outro critério faria a promoção
+// eleger um carrinho e a ingestão procurar outro.
+//
+// erp_order_state/external_order_id vêm junto porque um carrinho que já tem
+// pedido no ERP não pode ser esvaziado às cegas: os itens iriam embora e o
+// pedido lá dentro continuaria segurando peça. Esse fica de fora da fusão e é
+// devolvido ao chamador para decisão humana.
+//
+// O filtro é o MESMO de GetEternalCartByStoreAndHandleForUpdate, e tem de
+// continuar sendo: quem a promoção elege é quem a ingestão vai procurar depois.
+// Pago fica de fora porque aquela venda está fechada — o carrinho junta até ser
+// pago ou cancelado. Faturado também: emitida a nota, o pedido não recebe mais
+// item, então esvaziá-lo seria mexer no que já virou documento fiscal.
+func (q *Queries) ListOpenCartsForVipPromotion(ctx context.Context, arg ListOpenCartsForVipPromotionParams) ([]ListOpenCartsForVipPromotionRow, error) {
+	rows, err := q.db.Query(ctx, listOpenCartsForVipPromotion, arg.StoreID, arg.PlatformHandle)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOpenCartsForVipPromotionRow{}
+	for rows.Next() {
+		var i ListOpenCartsForVipPromotionRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Status,
+			&i.CreatedAt,
+			&i.ErpOrderState,
+			&i.ExternalOrderID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listProductsByEvent = `-- name: ListProductsByEvent :many
 SELECT
     p.id,
@@ -2949,6 +3050,68 @@ func (q *Queries) ListStuckERPOrderOps(ctx context.Context, olderThanSeconds int
 		return nil, err
 	}
 	return items, nil
+}
+
+const makeCartEternal = `-- name: MakeCartEternal :exec
+UPDATE carts SET never_expires = true, expires_at = NULL WHERE id = $1
+`
+
+// O sobrevivente vira eterno. expires_at NULL já basta para o worker cart.expire
+// virar no-op; never_expires é a defesa explícita nos guards.
+func (q *Queries) MakeCartEternal(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, makeCartEternal, id)
+	return err
+}
+
+const moveCartItemEventsToCart = `-- name: MoveCartItemEventsToCart :exec
+UPDATE cart_item_events SET cart_id = $1
+WHERE cart_id = $2
+`
+
+type MoveCartItemEventsToCartParams struct {
+	DestCartID   pgtype.UUID `json:"dest_cart_id"`
+	SourceCartID pgtype.UUID `json:"source_cart_id"`
+}
+
+// O log de adições acompanha os itens. É ele que diz DE QUAL sessão veio cada
+// unidade (ListCartItemEventsByEvent → AllocateBySession); deixá-lo no carrinho
+// de origem faria as peças fundidas aparecerem sem atribuição na métrica por
+// evento — exatamente o que o carrinho eterno cross-evento existe para medir.
+func (q *Queries) MoveCartItemEventsToCart(ctx context.Context, arg MoveCartItemEventsToCartParams) error {
+	_, err := q.db.Exec(ctx, moveCartItemEventsToCart, arg.DestCartID, arg.SourceCartID)
+	return err
+}
+
+const moveStockReservationsToCart = `-- name: MoveStockReservationsToCart :exec
+UPDATE stock_reservations SET cart_id = $1
+WHERE cart_id = $2
+`
+
+type MoveStockReservationsToCartParams struct {
+	DestCartID   pgtype.UUID `json:"dest_cart_id"`
+	SourceCartID pgtype.UUID `json:"source_cart_id"`
+}
+
+// A reserva segue a peça. event_id e erp_movement_id ficam como estão: a peça
+// continua reservada no ERP pelo movimento original, só mudou de carrinho.
+func (q *Queries) MoveStockReservationsToCart(ctx context.Context, arg MoveStockReservationsToCartParams) error {
+	_, err := q.db.Exec(ctx, moveStockReservationsToCart, arg.DestCartID, arg.SourceCartID)
+	return err
+}
+
+const moveWaitlistItemsToCart = `-- name: MoveWaitlistItemsToCart :exec
+UPDATE waitlist_items SET cart_id = $1
+WHERE cart_id = $2
+`
+
+type MoveWaitlistItemsToCartParams struct {
+	DestCartID   pgtype.UUID `json:"dest_cart_id"`
+	SourceCartID pgtype.UUID `json:"source_cart_id"`
+}
+
+func (q *Queries) MoveWaitlistItemsToCart(ctx context.Context, arg MoveWaitlistItemsToCartParams) error {
+	_, err := q.db.Exec(ctx, moveWaitlistItemsToCart, arg.DestCartID, arg.SourceCartID)
+	return err
 }
 
 const removeCartItemFromERP = `-- name: RemoveCartItemFromERP :exec
