@@ -24,6 +24,7 @@ import (
 
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/erp"
+	"livecart/apps/api/internal/erp/erpwrite"
 	"livecart/apps/api/internal/events"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/integration/providers/payment"
@@ -149,11 +150,6 @@ type Service struct {
 	invertFinalisationAll      bool
 	invertFinalisationStoreIDs map[string]bool
 
-	// Design C: lojas no modo pedido-como-reserva (conversão na iniciação do
-	// pagamento). Populado de ERP_ORDER_AT_CHECKOUT_STORE_IDS ("*" = todas).
-	orderAtCheckoutAll      bool
-	orderAtCheckoutStoreIDs map[string]bool
-
 	// erpOrderMirror projects ERP state changes into the Order aggregate.
 	// Wired at boot from main.go; nil = mirror disabled (e.g. order module not yet live).
 	erpOrderMirror ERPOrderMirror
@@ -175,6 +171,12 @@ type Service struct {
 	// it on first use) so it always wraps THIS Service's repo/collaborators/stock.
 	inventoryService *inventory.Service
 	inventoryOnce    sync.Once
+
+	// espelhoDeProduto coalesce as releituras de saldo disparadas pelo webhook
+	// de estoque. Ver coalescencia.go. Construído sob demanda porque há testes
+	// que montam o Service por literal, sem passar por NewService.
+	espelhoDeProduto     *coalescedor
+	espelhoDeProdutoOnce sync.Once
 }
 
 // erpStock returns the delegate erp.Service, building it once over this
@@ -185,10 +187,13 @@ type Service struct {
 func (s *Service) erpStock() *erp.Service {
 	s.erpStockOnce.Do(func() {
 		s.erpStockService = erp.NewService(erpRepoAdapter{s.repo}, s, s.logger)
-		// O razão de movimentos (000132) é o mesmo Repository por baixo; a
-		// interface é separada para o ledger ser opcional nos testes do erp.
-		s.erpStockService.SetStockMovementLedger(s.repo)
-		s.erpStockService.SetStockMovementResolution(s.repo)
+		// Rastreamento da situação do pedido: mesmo Repository por baixo, porta
+		// separada porque o webhook de pedido pode chegar sem carrinho nosso.
+		s.erpStockService.SetOrderStatusRepository(s.repo)
+		// Drenagem das reservas manuais: migração única, sai com ela.
+		s.erpStockService.SetDrainRepository(s.repo)
+		// Caminho de volta: o pedido do ERP refletido no carrinho.
+		s.erpStockService.SetCartSyncCollaborators(s)
 	})
 	return s.erpStockService
 }
@@ -210,12 +215,6 @@ func (s *Service) inventory() *inventory.Service {
 	return s.inventoryService
 }
 
-// finalisationInverted reports whether this store runs the launch-first
-// finalisation order (Fase 3).
-func (s *Service) finalisationInverted(storeID string) bool {
-	return s.invertFinalisationAll || s.invertFinalisationStoreIDs[storeID]
-}
-
 // erpProviderFor resolves the ERP provider for an integration, honouring the
 // test seam when set.
 func (s *Service) erpProviderFor(ctx context.Context, integration *IntegrationRow) (providers.ERPProvider, error) {
@@ -226,21 +225,12 @@ func (s *Service) erpProviderFor(ctx context.Context, integration *IntegrationRo
 }
 
 // RunScheduledStockMovementResolve delega ao resolver do razão de movimentos
-// (comando agendado erp.stock_movement.resolve e gate da finalização).
-func (s *Service) RunScheduledStockMovementResolve(ctx context.Context, movementID string) error {
-	return s.erpStockService.RunScheduledMovementResolve(ctx, movementID)
-}
-
-// SetStockMovementScheduler liga o agendador de retries do razão de movimentos.
-func (s *Service) SetStockMovementScheduler(sch erp.StockMovementScheduler) {
-	s.erpStockService.SetStockMovementScheduler(sch)
-}
-
 // RunStockReconciliation roda a comparação local × ERP para a loja, em modo
-// RELATÓRIO: só detecta, nunca corrige, e não dispara alerta nenhum. A fórmula
-// (LocalStock − Held) ainda precisa de calibração com dados reais — a validação
-// de 18/08 mostrou divergência não explicada num produto saudável — então o
-// primeiro uso disto é justamente calibrar, com a loja quieta.
+// RELATÓRIO: só detecta, nunca corrige, e não dispara alerta nenhum. A conta é
+// `estoque local == disponível no ERP` — uma igualdade, desde que as reservas
+// manuais saíram e os dois lados passaram a medir a mesma coisa. Ainda assim
+// vale rodar com a loja quieta: durante a live há uma janela de segundos entre o
+// item entrar no carrinho e o pedido refletir no ERP.
 func (s *Service) RunStockReconciliation(ctx context.Context, storeID string) (*erp.ReconciliationReport, error) {
 	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
 	if err != nil {
@@ -257,16 +247,6 @@ func (s *Service) RunStockReconciliation(ctx context.Context, storeID string) (*
 		return nil, httpx.ErrNotFound("o provedor ERP não expõe leitura de saldo")
 	}
 	return erp.ReconcileStockAgainstERP(ctx, s.logger, s.repo, stockReader, storeID, "tiny")
-}
-
-// ListPendingStockMovements delega o painel de pendências do razão.
-func (s *Service) ListPendingStockMovements(ctx context.Context, storeID string) ([]erp.PendingStockMovement, error) {
-	return s.erpStockService.ListPendingStockMovements(ctx, storeID)
-}
-
-// ResolveStockMovementManually delega a decisão humana pós-extrato.
-func (s *Service) ResolveStockMovementManually(ctx context.Context, storeID, movementID string, landed bool) (*erp.StockMovementRow, error) {
-	return s.erpStockService.ResolveStockMovementManually(ctx, storeID, movementID, landed)
 }
 
 // ResolveProvider satisfies erp.StockCollaborators: it maps the neutral
@@ -526,7 +506,6 @@ func NewService(
 		return all, ids
 	}
 	invertAll, invertIDs := parseStoreFlag("ERP_FINALISE_INVERTED_STORE_IDS")
-	orderModeAll, orderModeIDs := parseStoreFlag("ERP_ORDER_AT_CHECKOUT_STORE_IDS")
 	svc := &Service{
 		repo:                       repo,
 		factory:                    factory,
@@ -537,8 +516,6 @@ func NewService(
 		logger:                     logger,
 		invertFinalisationAll:      invertAll,
 		invertFinalisationStoreIDs: invertIDs,
-		orderAtCheckoutAll:         orderModeAll,
-		orderAtCheckoutStoreIDs:    orderModeIDs,
 	}
 	// Build the ERP stock and Inventory delegates eagerly so the production
 	// singletons never race on the lazy init in erpStock() / inventory() under
@@ -3588,7 +3565,35 @@ const (
 // overwritten by this sync ("stock applied"). The waitlist backstop keys off
 // it: promoting after a sync that skipped stock (guard armed) or failed would
 // act on a stale/poisoned counter.
+func (s *Service) coalescedorDeEspelho() *coalescedor {
+	s.espelhoDeProdutoOnce.Do(func() { s.espelhoDeProduto = novoCoalescedor() })
+	return s.espelhoDeProduto
+}
+
 func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, externalProductID string) (bool, error) {
+	// Coalesce por produto. Cada pedido criado durante a live mexe no reservado,
+	// o ERP dispara um webhook de estoque por isso, e cada webhook faria uma
+	// releitura do saldo — quinze compradores no mesmo produto viravam quinze
+	// leituras onde uma basta, tiradas do mesmo teto que a live usa para criar os
+	// pedidos. Ver coalescencia.go.
+	var aplicado bool
+	rodou, err := s.coalescedorDeEspelho().Fazer(storeID+"|"+externalProductID, func() error {
+		var innerErr error
+		aplicado, innerErr = s.processProductWebhook(ctx, storeID, provider, externalProductID)
+		return innerErr
+	})
+	if !rodou {
+		// Absorvido por uma releitura em curso, que repetirá e verá o estado
+		// final. Não aplicou nada AGORA, e é isso que o chamador precisa saber:
+		// o backstop da fila de espera só roda sobre estoque efetivamente escrito.
+		logger.From(ctx, s.logger).Debug("stock re-read coalesced into the one already running",
+			zap.String("external_product_id", externalProductID))
+		return false, nil
+	}
+	return aplicado, err
+}
+
+func (s *Service) processProductWebhook(ctx context.Context, storeID, provider, externalProductID string) (bool, error) {
 	if s.productSyncer == nil {
 		logger.From(ctx, s.logger).Warn("product syncer not configured, skipping product webhook")
 		return false, nil
@@ -3743,7 +3748,30 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		// Produto que o lojista nao importou. O ERP notifica sobre o catalogo
 		// inteiro dele; nos so espelhamos o que existe aqui.
 	default:
-		applied, applyErr := s.repo.ApplyERPStockMirror(ctx, localProductID, detailed.Stock, seenSeq)
+		// O saldo disponível do ERP é verdadeiro para o ERP e INCOMPLETO para nós
+		// por alguns segundos: entre o comentário baixar o contador local e o
+		// pedido de venda existir lá, aquela unidade não aparece em `disponivel`.
+		// Gravá-lo cru nesse intervalo reabastece o portão com estoque que já tem
+		// dono — foi assim que 25 admissões saíram de 20 unidades em 26/08, com o
+		// ERP terminando em −13.
+		//
+		// A conta desconta só o que o ERP ainda NÃO conhece: carrinho vivo e sem
+		// pedido. Assim que o pedido existe, o `disponivel` já o desconta, e
+		// somá-lo aqui seria descontar duas vezes.
+		saldoParaOPortao := detailed.Stock
+		if prometido, voErr := s.repo.SumPromisedWithoutERPOrder(ctx, externalProductID); voErr != nil {
+			logger.From(ctx, s.logger).Warn("could not read promised-but-unsent units; mirroring the raw ERP balance",
+				zap.String("external_product_id", externalProductID), zap.Error(voErr))
+		} else if prometido > 0 {
+			saldoParaOPortao = erpwrite.Admissivel(detailed.Stock, prometido)
+			logger.From(ctx, s.logger).Info("stock mirror discounted units promised before the order existed",
+				zap.String("external_product_id", externalProductID),
+				zap.Int("erp_available", detailed.Stock),
+				zap.Int("promised_without_order", prometido),
+				zap.Int("admissible", saldoParaOPortao))
+		}
+
+		applied, applyErr := s.repo.ApplyERPStockMirror(ctx, localProductID, saldoParaOPortao, seenSeq)
 		switch {
 		case applyErr != nil:
 			logger.From(ctx, s.logger).Warn("failed to apply ERP stock mirror",
@@ -4188,8 +4216,8 @@ func (s *Service) CartPaymentStatus(ctx context.Context, cartID string) (string,
 // paymentdomain.ErrCartNotPayable (the sentinel the repo now returns) when the
 // cart expired/cancelled between the charge and the webhook, and the cart's
 // live_event_id (from the same RETURNING row) on success.
-func (s *Service) UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (string, error) {
-	return s.repo.UpdateCartPaymentStatus(ctx, cartID, paymentStatus, paymentID, paidAt, paymentMethod)
+func (s *Service) UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string, amountCents int64) (string, error) {
+	return s.repo.UpdateCartPaymentStatus(ctx, cartID, paymentStatus, paymentID, paidAt, paymentMethod, amountCents)
 }
 
 // CartGMVCents returns the pure item sum (excludes shipping and coupon) via the
@@ -4292,41 +4320,6 @@ func (s *Service) emitERPOrderFinalized(ctx context.Context, storeID, cartID str
 	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: "tiny"})
 }
 
-// reverseCartReservationsPerRow estorna todas as reservas 'active' do cart,
-// marcando cada row somente após o Tiny confirmar a entrada E correspondente.
-// NÃO altera erp_finalisation_status — quem decide o efeito de uma falha é o
-// caller (a finalização pós-pago marca 'failed'; a conversão pré-pagamento do
-// design C não toca nessa coluna).
-func (s *Service) reverseCartReservationsPerRow(ctx context.Context, erpProvider providers.ERPProvider, storeID, cartID string) error {
-	reservations, err := s.repo.ListActiveReservationsByCart(ctx, cartID)
-	if err != nil {
-		return fmt.Errorf("listing cart reservations: %w", err)
-	}
-	// Reivindica ANTES de chamar o ERP. A ordem inversa que vivia aqui já vinha
-	// documentada como perigosa em comentário — "um retry re-estornaria esta row
-	// e duplicaria a entrada E" — e em 08/08 aconteceu: o extrato do Tiny ficou
-	// com duas entradas idênticas e o produto ganhou unidades que não existiam.
-	// Ver erp.ReverseReservationsClaimFirst.
-	rows := make([]erp.ReversibleReservation, 0, len(reservations))
-	for _, r := range reservations {
-		rows = append(rows, erp.ReversibleReservation{
-			ID:                r.ID,
-			ExternalProductID: r.ExternalProductID,
-			Quantity:          r.Quantity,
-			CartID:            r.CartID,
-			EventID:           r.EventID,
-			ProductID:         r.ProductID,
-		})
-	}
-	if _, allResolved := erp.ReverseReservationsClaimFirst(ctx, s.logger, s.repo, erpProvider, rows,
-		func(erp.ReversibleReservation) string {
-			return fmt.Sprintf("Estorno reserva pós-pagamento - Cart %s", cartID)
-		}, s.erpStock().ReversalLedgerHooks(storeID)); !allResolved {
-		return fmt.Errorf("reversing reservations for cart %s: estorno de reserva pendente", cartID)
-	}
-	return nil
-}
-
 // markFinalisationFailed grava o estado 'failed' com o erro e loga falhas da
 // própria marcação (nunca as propaga — o sinal primário é o erro do caller).
 func (s *Service) markFinalisationFailed(ctx context.Context, cartID, msg string, snapshot []byte) {
@@ -4358,63 +4351,6 @@ func (s *Service) emitERPFinalizationFailed(ctx context.Context, cartID, reason 
 		Provider        string `json:"provider"`
 		Reason          string `json:"reason"`
 	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: "tiny", Reason: reason})
-}
-
-// reReserveAfterFailedFinalisation re-creates Tiny saída-manual exits for the
-// reservations we reversed during the failed finalisation, and inserts new
-// active rows in stock_reservations so the cart still owns the units. Errors
-// here are logged but never returned — the caller's primary signal is the
-// upstream createFinalERPOrder error, and we don't want to mask it. Even a
-// partial success keeps more stock held than the alternative of releasing
-// everything.
-func (s *Service) reReserveAfterFailedFinalisation(ctx context.Context, erpProvider providers.ERPProvider, cartID, eventID string, snapshot []StockReservationRow) {
-	if len(snapshot) == 0 {
-		return
-	}
-	logger.From(ctx, s.logger).Warn("re-reserving stock after failed ERP finalisation",
-		zap.String("cart_id", cartID),
-		zap.Int("reservations_count", len(snapshot)),
-	)
-	restored := 0
-	for _, r := range snapshot {
-		obs := fmt.Sprintf("Re-reserva pós-falha de finalização - Cart %s", cartID)
-		movementID, reserveErr := erpProvider.ReserveStock(ctx, r.ExternalProductID, r.Quantity, 0, obs)
-		if reserveErr != nil {
-			logger.From(ctx, s.logger).Error("failed to re-reserve stock after finalisation failure",
-				zap.String("cart_id", cartID),
-				zap.String("external_product_id", r.ExternalProductID),
-				zap.Int("quantity", r.Quantity),
-				zap.Error(reserveErr),
-			)
-			continue
-		}
-		if _, dbErr := s.repo.CreateStockReservation(ctx, CreateStockReservationParams{
-			EventID:           eventID,
-			CartID:            cartID,
-			ProductID:         r.ProductID,
-			ExternalProductID: r.ExternalProductID,
-			Quantity:          r.Quantity,
-			ERPMovementID:     movementID,
-		}); dbErr != nil {
-			// Tiny holds the stock, but our DB row failed. The reservation
-			// is real on the merchant's side — flag loudly so we can
-			// reconcile manually instead of silently losing the link.
-			logger.From(ctx, s.logger).Error("re-reserved on Tiny but failed to persist reservation row",
-				zap.String("cart_id", cartID),
-				zap.String("external_product_id", r.ExternalProductID),
-				zap.String("erp_movement_id", movementID),
-				zap.Int("quantity", r.Quantity),
-				zap.Error(dbErr),
-			)
-			continue
-		}
-		restored++
-	}
-	logger.From(ctx, s.logger).Info("re-reservation after failed ERP finalisation completed",
-		zap.String("cart_id", cartID),
-		zap.Int("requested", len(snapshot)),
-		zap.Int("succeeded", restored),
-	)
 }
 
 // =============================================================================
@@ -5051,24 +4987,29 @@ func (s *Service) AdjustStockReservationDelta(ctx context.Context, storeID, cart
 	return s.erpStock().AdjustStockReservationDelta(ctx, storeID, cartID, eventID, productID, delta, unitPrice, platformHandle, op)
 }
 
-// createFinalERPOrder creates a single paid sales order in the ERP for a cart
-// whose payment was just confirmed. Uses the customer identity + shipping
-// address captured at checkout and the payment details from the provider.
-// approve diz se a VENDA está fechada — separado de paymentStatus, que diz
-// apenas quem lança o recebimento. Pagamento recebido por fora fecha a venda
-// (aprova) sem trazer financeiro; a conversão pré-pagamento não fecha nada.
-func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, eventID string, cart CartRow, paymentStatus *providers.PaymentStatus, launchStock, approve bool) error {
+// createERPOrderForCart cria o pedido de venda do carrinho no ERP.
+//
+// Situação Aberta, sem pagamento, sem aprovação e sem NENHUMA movimentação de
+// estoque. É isso que o torna a reserva: o pedido existir já segura a peça, e o
+// resto do trajeto (aprovar no pagamento, faturar, despachar) acontece por cima
+// deste mesmo pedido.
+//
+// Chamado no PRIMEIRO comentário do comprador, quando tipicamente só se sabe o @
+// dele. O contato é resolvido por esse @ e enriquecido depois, quando o checkout
+// trouxer nome, CPF, e-mail e telefone — o pedido não espera esses dados para
+// existir, porque esperar é deixar a peça à venda para outra pessoa.
+func (s *Service) createERPOrderForCart(ctx context.Context, erpProvider providers.ERPProvider, integration *IntegrationRow, storeID, eventID string, cart CartRow) ([]providers.ERPOrderItem, error) {
 	// Resolve contact — enriched with customer identity when available, so the
 	// Tiny contact ends up with CPF/email/phone instead of just the @handle.
 	contactID, err := s.resolveERPContact(ctx, erpProvider, integration, storeID, cart.PlatformUserID, cart.PlatformHandle, cart.CustomerName, cart.CustomerDocument, cart.CustomerEmail, cart.CustomerPhone)
 	if err != nil {
-		return fmt.Errorf("resolving ERP contact: %w", err)
+		return nil, fmt.Errorf("resolving ERP contact: %w", err)
 	}
 
 	// Collect non-waitlisted items
 	items, err := s.repo.ListNonWaitlistedCartItems(ctx, cart.ID)
 	if err != nil {
-		return fmt.Errorf("listing cart items: %w", err)
+		return nil, fmt.Errorf("listing cart items: %w", err)
 	}
 
 	var erpItems []providers.ERPOrderItem
@@ -5082,16 +5023,19 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 			Name:      item.ProductName,
 			Quantity:  item.Quantity,
 			UnitPrice: item.UnitPrice,
+			// Marca a linha desde o nascimento do pedido. Sem isto, a primeira
+			// mutação leria as próprias linhas como se fossem do lojista.
+			Note: strings.TrimSpace(providers.LiveCartItemMarker + " " + item.ProductKeyword),
 		})
 		totalAmount += item.UnitPrice * int64(item.Quantity)
 	}
 
 	if len(erpItems) == 0 {
-		logger.From(ctx, s.logger).Warn("paid cart has no ERP-linked items, skipping order creation",
+		logger.From(ctx, s.logger).Warn("cart has no ERP-linked items, skipping order creation",
 			zap.String("cart_id", cart.ID),
 			zap.Int("cart_items_total", len(items)),
 		)
-		return nil
+		return nil, nil
 	}
 
 	logger.From(ctx, s.logger).Info("ERP order items prepared",
@@ -5109,7 +5053,6 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 		TotalAmount: totalAmount,
 		Observation: fmt.Sprintf("LiveCart - Evento %s - @%s", eventID, cart.PlatformHandle),
 	}
-	order.Approve = approve
 
 	// Attach the delivery address from the cart when the customer submitted one.
 	if len(cart.ShippingAddress) > 0 {
@@ -5156,56 +5099,25 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 		}
 	}
 
-	// Flag the order as already paid using the provider-reported details.
-	if paymentStatus != nil {
-		paidAt := time.Now()
-		if paymentStatus.PaidAt != nil {
-			paidAt = *paymentStatus.PaidAt
-		}
-		order.Payment = &providers.ERPOrderPayment{
-			Method:           paymentStatus.PaymentMethod,
-			PaymentID:        paymentStatus.PaymentID,
-			Installments:     paymentStatus.Installments,
-			PaidAt:           paidAt,
-			Amount:           totalAmount,
-			MoneyReleaseDate: paymentStatus.MoneyReleaseDate,
-			FeeAmountCents:   paymentStatus.FeeAmountCents,
-			NetAmountCents:   paymentStatus.NetAmountCents,
-		}
-
-		// Snapshot of the financial breakdown right before we hand the
-		// order to the ERP adapter. This is the single point that
-		// connects "what the gateway told us" to "what we asked the ERP
-		// to record" — if the two ever drift (rounding, fee changes,
-		// refund), the diff shows up between this log and the
-		// `tiny CreateOrder sending payload` log that follows.
-		logger.From(ctx, s.logger).Info("ERP order payment snapshot prepared",
-			zap.String("cart_id", cart.ID),
-			zap.String("payment_id", paymentStatus.PaymentID),
-			zap.String("payment_method", paymentStatus.PaymentMethod),
-			zap.String("payment_status", string(paymentStatus.Status)),
-			zap.Int("installments", paymentStatus.Installments),
-			zap.Int64("order_total_cents", totalAmount),
-			zap.Int64("paid_amount_cents", paymentStatus.Amount),
-			zap.Int64("fee_amount_cents", paymentStatus.FeeAmountCents),
-			zap.Int64("net_amount_cents", paymentStatus.NetAmountCents),
-			zap.Bool("has_money_release_date", paymentStatus.MoneyReleaseDate != nil),
-		)
-	}
-
 	result, err := erpProvider.CreateOrder(ctx, order)
 	if err != nil {
-		return fmt.Errorf("creating ERP order: %w", err)
+		return nil, fmt.Errorf("creating ERP order: %w", err)
 	}
 
 	// Save external order ID on cart first — ensures idempotency if we retry
 	if err := s.repo.UpdateCartExternalOrderID(ctx, cart.ID, result.OrderID); err != nil {
-		return fmt.Errorf("saving external order ID: %w", err)
+		return nil, fmt.Errorf("saving external order ID: %w", err)
+	}
+	// O número humano ("37") só existe nesta resposta e no webhook. Guardar aqui
+	// significa que o lojista o vê desde o primeiro comentário, em vez de esperar
+	// a próxima transição do pedido.
+	if err := s.repo.UpdateCartERPOrderNumber(ctx, cart.ID, result.OrderNumber); err != nil {
+		logger.From(ctx, s.logger).Warn("could not store the ERP order number",
+			zap.String("cart_id", cart.ID), zap.Error(err))
 	}
 
-	// Group G fact (best-effort): the order now exists in the ERP. This is the
-	// single point that creates it (both legacy and Design C conversion paths
-	// funnel through here). Dedup by the ERP external order id.
+	// Group G fact (best-effort): the order now exists in the ERP. Este é o
+	// único ponto que o cria. Dedup pelo id do pedido no ERP.
 	_ = events.EmitInternal(ctx, s.repo.queries, events.ERPOrderCreated, "erp.order_created:"+result.OrderID, struct {
 		StoreID         string `json:"store_id"`
 		CartID          string `json:"cart_id"`
@@ -5213,32 +5125,13 @@ func (s *Service) createFinalERPOrder(ctx context.Context, erpProvider providers
 		Provider        string `json:"provider"`
 	}{StoreID: storeID, CartID: cart.ID, ExternalOrderID: result.OrderID, Provider: "tiny"})
 
-	// Launch stock (permanent decrement). O fluxo invertido (Fase 3) passa
-	// launchStock=false e orquestra o launch no caller, com fallback próprio.
-	if launchStock {
-		if err := erpProvider.LaunchOrderStock(ctx, result.OrderID); err != nil {
-			return fmt.Errorf("launching stock for order %s: %w", result.OrderID, err)
-		}
-	}
-
-	logFields := []zap.Field{
+	logger.From(ctx, s.logger).Info("ERP order created for cart — no stock movement, the order is the reservation",
 		zap.String("cart_id", cart.ID),
 		zap.String("erp_order_id", result.OrderID),
 		zap.Int("items", len(erpItems)),
-	}
-	// paymentStatus é nil na conversão pré-pagamento do design C (pedido
-	// nasce Aberta, sem parcelas).
-	if paymentStatus != nil {
-		logFields = append(logFields,
-			zap.String("payment_id", paymentStatus.PaymentID),
-			zap.String("payment_method", paymentStatus.PaymentMethod),
-			zap.Int64("fee_amount_cents", paymentStatus.FeeAmountCents),
-			zap.Int64("net_amount_cents", paymentStatus.NetAmountCents),
-		)
-	}
-	logger.From(ctx, s.logger).Info("ERP order created for cart", logFields...)
+	)
 
-	return nil
+	return erpItems, nil
 }
 
 // =============================================================================
@@ -5637,17 +5530,13 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 			continue
 		}
 
-		// Cart convertido (design C): quem devolve o estoque é o cancelamento
-		// do PEDIDO (situação 2 → estorno incondicional). As saídas manuais já
-		// foram estornadas na conversão — o branch de reservas abaixo no-opa.
-		if st, stErr := s.repo.GetCartERPOrderState(ctx, cart.ID); stErr == nil &&
-			st.State != erpOrderStateNone && st.State != erpOrderStateCancelled {
-			if cancelErr := s.CancelERPOrderForCart(ctx, cart.ID, cart.StoreID); cancelErr != nil {
-				logger.From(ctx, s.logger).Error("failed to cancel converted cart order on expiry",
-					zap.String("cart_id", cart.ID),
-					zap.Error(cancelErr),
-				)
-			}
+		// Quem devolve o estoque no ERP é o cancelamento do PEDIDO, e só ele:
+		// cancelar libera a reserva sozinho. Uma chamada.
+		if cancelErr := s.CancelERPOrderForCart(ctx, cart.ID, cart.StoreID); cancelErr != nil {
+			logger.From(ctx, s.logger).Error("failed to cancel cart order on expiry",
+				zap.String("cart_id", cart.ID),
+				zap.Error(cancelErr),
+			)
 		}
 
 		// Release stock back to product — the real non-waitlisted quantity of
@@ -5669,68 +5558,6 @@ func (s *Service) ProcessExpiredCartsForProduct(ctx context.Context, eventID, pr
 		}
 		if err := s.repo.IncrementProductStock(ctx, productID, releaseQty); err != nil {
 			logger.From(ctx, s.logger).Error("failed to release stock", zap.String("product_id", productID), zap.Error(err))
-		}
-
-		// Reverse ERP stock reservations for this cart+product
-		reservations, resErr := s.repo.ListActiveReservationsByCartAndProduct(ctx, cart.ID, productID)
-		if resErr != nil {
-			logger.From(ctx, s.logger).Error("failed to list reservations for expired cart",
-				zap.String("cart_id", cart.ID),
-				zap.String("product_id", productID),
-				zap.Error(resErr),
-			)
-		}
-		if len(reservations) > 0 {
-			erpReversed := false
-			integration, intErr := s.repo.GetActiveByProvider(ctx, cart.StoreID, "erp", "tiny")
-			if intErr != nil {
-				logger.From(ctx, s.logger).Warn("no active ERP integration for expired cart reversal, marking reservations as reversed locally only",
-					zap.String("store_id", cart.StoreID),
-				)
-			} else {
-				erpProvider, provErr := s.erpProviderFor(ctx, integration)
-				if provErr != nil {
-					logger.From(ctx, s.logger).Error("failed to create ERP provider for expired cart reversal",
-						zap.String("cart_id", cart.ID),
-						zap.Error(provErr),
-					)
-				} else {
-					// Reivindica antes de chamar o ERP — ver
-					// erp.ReverseReservationsClaimFirst. A marcação em bloco
-					// logo abaixo (ReverseReservationsByCartAndProduct) não
-					// protegia nada: ela roda DEPOIS do laço, então uma
-					// retentativa que chegasse no meio reenviava as entradas já
-					// aplicadas.
-					rows := make([]erp.ReversibleReservation, 0, len(reservations))
-					for _, res := range reservations {
-						rows = append(rows, erp.ReversibleReservation{
-							ID:                res.ID,
-							ExternalProductID: res.ExternalProductID,
-							Quantity:          res.Quantity,
-							CartID:            res.CartID,
-							EventID:           res.EventID,
-							ProductID:         res.ProductID,
-						})
-					}
-					_, erpReversed = erp.ReverseReservationsClaimFirst(ctx, s.logger, s.repo, erpProvider, rows,
-						func(erp.ReversibleReservation) string {
-							return fmt.Sprintf("Estorno expiração carrinho LiveCart - Cart %s", cart.ID)
-						}, s.erpStock().ReversalLedgerHooks(cart.StoreID))
-				}
-			}
-			if markErr := s.repo.ReverseReservationsByCartAndProduct(ctx, cart.ID, productID); markErr != nil {
-				logger.From(ctx, s.logger).Error("failed to mark reservations as reversed",
-					zap.String("cart_id", cart.ID),
-					zap.String("product_id", productID),
-					zap.Error(markErr),
-				)
-			}
-			if !erpReversed {
-				logger.From(ctx, s.logger).Warn("ERP stock reservations NOT reversed for expired cart — manual reconciliation may be needed",
-					zap.String("cart_id", cart.ID),
-					zap.String("product_id", productID),
-				)
-			}
 		}
 
 		logger.From(ctx, s.logger).Info("expired cart processed",
@@ -5782,18 +5609,43 @@ func (s *Service) ActivateVipCartsForHandle(ctx context.Context, storeID, handle
 	// expirar como se o comprador não fosse VIP. Sobe como warn para aparecer
 	// sem depender de alguém abrir a resposta da API.
 	if len(res.SkippedCartIDs) > 0 {
-		logger.From(ctx, s.logger).Warn("vip promotion left carts out of the merge (erp order already exists)",
+		logger.From(ctx, s.logger).Warn("vip promotion left carts out of the merge",
 			zap.String("store_id", storeID),
 			zap.String("handle", handle),
 			zap.Strings("cart_ids", res.SkippedCartIDs),
 		)
 	}
 
-	return VipActivation{
+	// Os pedidos no ERP seguem a fusão, e só agora — a transação acima segurava
+	// FOR UPDATE em todos os carrinhos do comprador, e falar com o ERP leva
+	// segundos. Do lado de cá os itens já mudaram de dono; do lado de lá cada
+	// pedido antigo ainda segura a peça dele.
+	//
+	// Isto NÃO é best-effort. Um pedido que não solta é a mesma peça contada
+	// duas vezes até alguém mexer: o comprador vê no carrinho, o ERP conta como
+	// reservada em dois pedidos, e a loja para de vender uma unidade que existe.
+	act := VipActivation{
 		EternalCartID: res.EternalCartID,
 		Merged:        len(res.MergedCartIDs),
 		Skipped:       len(res.SkippedCartIDs),
-	}, nil
+	}
+	if len(res.OrdersToMerge) > 0 {
+		orfaos := make([]erp.ERPOrderMerge, 0, len(res.OrdersToMerge))
+		for _, o := range res.OrdersToMerge {
+			orfaos = append(orfaos, erp.ERPOrderMerge{
+				SourceCartID: o.SourceCartID, ExternalOrderID: o.ExternalOrderID,
+			})
+		}
+		rel, err := s.MergeERPOrdersIntoCart(ctx, res.EternalCartID, storeID, orfaos)
+		if rel != nil {
+			act.OrdersReleased = len(rel.Released)
+			act.OrdersStuck = len(rel.Stuck)
+		}
+		if err != nil {
+			return act, fmt.Errorf("fundindo os pedidos do ERP depois de consolidar os carrinhos: %w", err)
+		}
+	}
+	return act, nil
 }
 
 func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, handle string) error {
@@ -5809,21 +5661,6 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 		eventID, productID string
 	}
 	freedKeys := make(map[freed]bool)
-
-	// Resolve the ERP integration once — same one applies to every cart in
-	// this store. nil is OK: handle the no-ERP case by skipping the remote
-	// reversal step and only flipping the local DB.
-	var erpProvider providers.ERPProvider
-	if integration, intErr := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny"); intErr == nil {
-		if provider, provErr := s.erpProviderFor(ctx, integration); provErr == nil {
-			erpProvider = provider
-		} else {
-			logger.From(ctx, s.logger).Warn("failed to build ERP provider for block sweep",
-				zap.String("store_id", storeID),
-				zap.Error(provErr),
-			)
-		}
-	}
 
 	for _, cart := range carts {
 		items, listErr := s.repo.ListNonWaitlistedCartItems(ctx, cart.ID)
@@ -5848,42 +5685,14 @@ func (s *Service) CancelOpenCartsForBlockedHandle(ctx context.Context, storeID, 
 			freedKeys[freed{eventID: cart.EventID, productID: item.ProductID}] = true
 		}
 
-		// 2. Reverse ERP stock reservations (saída-manual) so Tiny gets its
-		//    inventory back. Best-effort: if the ERP call fails we still mark
-		//    the DB rows reversed and surface a warning for manual reconciliation.
-		reservations, resErr := s.repo.ListActiveReservationsByCart(ctx, cart.ID)
-		if resErr != nil {
-			logger.From(ctx, s.logger).Error("failed to list reservations for blocked cart",
+		// 2. Cancelar o pedido no ERP devolve a reserva. Uma chamada, e ela
+		//    também é o que impede um pedido de cliente bloqueado de ficar
+		//    aberto lá dentro segurando peça.
+		if cancelErr := s.CancelERPOrderForCart(ctx, cart.ID, storeID); cancelErr != nil {
+			logger.From(ctx, s.logger).Error("failed to cancel ERP order for blocked cart",
 				zap.String("cart_id", cart.ID),
-				zap.Error(resErr),
+				zap.Error(cancelErr),
 			)
-		}
-		if len(reservations) > 0 && erpProvider != nil {
-			// Reivindica antes de chamar o ERP — ver
-			// erp.ReverseReservationsClaimFirst.
-			rows := make([]erp.ReversibleReservation, 0, len(reservations))
-			for _, r := range reservations {
-				rows = append(rows, erp.ReversibleReservation{
-					ID:                r.ID,
-					ExternalProductID: r.ExternalProductID,
-					Quantity:          r.Quantity,
-					CartID:            r.CartID,
-					EventID:           r.EventID,
-					ProductID:         r.ProductID,
-				})
-			}
-			erp.ReverseReservationsClaimFirst(ctx, s.logger, s.repo, erpProvider, rows,
-				func(erp.ReversibleReservation) string {
-					return fmt.Sprintf("Estorno cliente bloqueado - Cart %s", cart.ID)
-				}, s.erpStock().ReversalLedgerHooks(storeID))
-		}
-		if len(reservations) > 0 {
-			if err := s.repo.ReverseReservationsByCart(ctx, cart.ID); err != nil {
-				logger.From(ctx, s.logger).Error("failed to mark reservations reversed for blocked cart",
-					zap.String("cart_id", cart.ID),
-					zap.Error(err),
-				)
-			}
 		}
 
 		// 3. Mark cart as cancelled (no-op if it was paid in the gap).
@@ -6221,36 +6030,6 @@ func (s *Service) RunERPResync(ctx context.Context, storeID, integrationID strin
 		}
 	}
 	return nil
-}
-
-func (s *Service) UpdateERPStockSource(ctx context.Context, input UpdateERPStockSourceInput) (*IntegrationRow, error) {
-	row, err := s.repo.GetByID(ctx, input.IntegrationID, input.StoreID)
-	if err != nil {
-		return nil, err
-	}
-	if row.Type != "erp" {
-		return nil, httpx.DomainError(422, httpx.CodeErpStockSourceUnsupported,
-			"essa configuração existe apenas para integrações de ERP")
-	}
-
-	metadata := row.Metadata
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	metadata[providers.MetadataUseAvailableStock] = input.UseAvailableStock
-
-	if err := s.repo.UpdateMetadata(ctx, row.ID, metadata); err != nil {
-		return nil, err
-	}
-	row.Metadata = metadata
-
-	logger.From(ctx, s.logger).Info("ERP stock source changed",
-		zap.String("integration_id", row.ID),
-		zap.String("store_id", input.StoreID),
-		zap.String("provider", row.Provider),
-		zap.Bool("use_available_stock", input.UseAvailableStock),
-	)
-	return row, nil
 }
 
 func (s *Service) createProviderFromRow(ctx context.Context, integration *IntegrationRow) (providers.Provider, error) {

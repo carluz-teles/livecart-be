@@ -30,9 +30,15 @@ type VipActivation struct {
 	EternalCartID string
 	// Merged é quantos carrinhos foram fundidos no eterno.
 	Merged int
-	// Skipped é quantos ficaram de fora por já terem pedido no ERP: seguem com
-	// prazo, e portanto seguem expirando.
+	// Skipped é quantos ficaram de fora — pago, ou com nota já emitida: seguem
+	// com prazo, e portanto seguem expirando.
 	Skipped int
+	// OrdersReleased é quantos pedidos antigos soltaram a reserva no ERP depois
+	// de o pedido do carrinho eterno absorver o conteúdo deles.
+	OrdersReleased int
+	// OrdersStuck é quantos NÃO soltaram: a mesma peça reservada em dois
+	// pedidos, e a loja parada de vender uma unidade que existe.
+	OrdersStuck int
 }
 
 // VipCartActivator is implemented by the integration service to handle the
@@ -107,6 +113,10 @@ type VipHandleResponse struct {
 	CartsUpdated int        `json:"cartsUpdated,omitempty"`
 	CartsMerged  int        `json:"cartsMerged,omitempty"`
 	CartsSkipped int        `json:"cartsSkipped,omitempty"`
+	// OrdersStuck: pedidos antigos que continuaram reservando peça no ERP
+	// depois da fusão. É a pior saída possível daqui — a mesma unidade contada
+	// em dois pedidos — e precisa aparecer na tela, não só no log.
+	OrdersStuck int `json:"ordersStuck,omitempty"`
 	// ActivationFailed: o @ virou VIP, mas os carrinhos que ele já tinha não
 	// foram consolidados e seguem com prazo para expirar.
 	ActivationFailed bool `json:"activationFailed,omitempty"`
@@ -122,6 +132,7 @@ func NewVipHandleResponse(v *domain.VipHandle) VipHandleResponse {
 		CartsUpdated:     v.CartsUpdated(),
 		CartsMerged:      v.CartsMerged(),
 		CartsSkipped:     v.CartsSkipped(),
+		OrdersStuck:      v.OrdersStuck(),
 		ActivationFailed: v.ActivationFailed(),
 	}
 }
@@ -269,11 +280,14 @@ func (s *Service) AddVipHandle(ctx context.Context, input AddVipInput) (*domain.
 				zap.Error(actErr),
 			)
 			vip.SetActivationFailed()
-		} else {
-			vip.SetCartsUpdated(activatedCount(act))
-			vip.SetCartsMerged(act.Merged)
-			vip.SetCartsSkipped(act.Skipped)
 		}
+		// Os números valem com ou sem erro: a fusão pode ter consolidado os
+		// carrinhos e falhado só ao soltar um pedido antigo no ERP. Descartá-los
+		// no caminho do erro esconderia exatamente o que ficou por resolver.
+		vip.SetCartsUpdated(activatedCount(act))
+		vip.SetCartsMerged(act.Merged)
+		vip.SetCartsSkipped(act.Skipped)
+		vip.SetOrdersStuck(act.OrdersStuck)
 	}
 
 	return vip, nil

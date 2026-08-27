@@ -2693,7 +2693,6 @@ func (r *Repository) ListStockPositionsForReconciliation(ctx context.Context, st
 			Name:       row.Name,
 			ExternalID: row.ExternalID.String,
 			LocalStock: int(row.LocalStock),
-			Held:       int(row.Held),
 		})
 	}
 	return out, nil
@@ -2792,7 +2791,13 @@ func (r *Repository) GetCartTokenByID(ctx context.Context, cartID string) (strin
 // It returns the cart's live_event_id from the RETURNING row — the cart.paid
 // (etc.) fact emitted right after by the caller needs it and this avoids a
 // second query.
-func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string, paymentStatus string, paymentID string, paidAt *time.Time, paymentMethod string) (liveEventID string, err error) {
+//
+// amountCents é o que o gateway confirmou — o número que vira a parcela "PAGO"
+// no pedido do ERP. Ele não é derivável do carrinho: com cupom ou desconto de
+// PIX, o que entra é MENOR que o preço cheio das unidades cobertas, e é
+// exatamente essa diferença que o pedido precisa declarar como desconto em vez
+// de como saldo a pagar.
+func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string, paymentStatus string, paymentID string, paidAt *time.Time, paymentMethod string, amountCents int64) (liveEventID string, err error) {
 	cID, err := parseUUID(cartID)
 	if err != nil {
 		return "", err
@@ -2804,11 +2809,12 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 	}
 
 	cart, err := r.queries.UpdateCartPayment(ctx, sqlc.UpdateCartPaymentParams{
-		ID:            cID,
+		CartID:        cID,
 		PaymentStatus: pgtype.Text{String: paymentStatus, Valid: true},
-		CheckoutID:    pgtype.Text{String: paymentID, Valid: paymentID != ""},
+		CheckoutID:    paymentID,
 		PaidAt:        paidAtPg,
 		PaymentMethod: pgtype.Text{String: paymentMethod, Valid: paymentMethod != ""},
+		AmountCents:   amountCents,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -3187,10 +3193,24 @@ type VipConsolidation struct {
 	// MergedCartIDs são os carrinhos que entregaram itens, log de adições,
 	// reservas e fila ao eterno e foram fechados como fundidos.
 	MergedCartIDs []string
-	// SkippedCartIDs são os abertos que NÃO foram fundidos porque já têm pedido
-	// no ERP. Continuam vivos, com o prazo que tinham. Quem decide o que fazer
-	// com eles é gente, não este código.
+	// SkippedCartIDs são os abertos que NÃO foram fundidos. Continuam vivos, com
+	// o prazo que tinham. Quem decide o que fazer com eles é gente.
 	SkippedCartIDs []string
+	// OrdersToMerge são os pedidos no ERP que ficaram sem carrinho: o conteúdo
+	// deles mudou de dono aqui dentro, e lá fora eles ainda seguram a peça.
+	//
+	// A resolução NÃO acontece nesta transação, e não por descuido: falar com o
+	// ERP leva segundos e a transação segura FOR UPDATE em todos os carrinhos do
+	// comprador. Sai daqui como lista de trabalho para o serviço fazer depois do
+	// commit, na ordem que protege o comprador — ver MergeERPOrdersIntoCart.
+	OrdersToMerge []ERPOrderToMerge
+}
+
+// ERPOrderToMerge é um pedido órfão pela fusão: o carrinho dele foi esvaziado e
+// fechado, mas o pedido continua reservando no ERP.
+type ERPOrderToMerge struct {
+	SourceCartID    string
+	ExternalOrderID string
 }
 
 // ConsolidateEternalCartForHandle transforma os N carrinhos abertos de um @ no
@@ -3231,14 +3251,25 @@ func (r *Repository) ConsolidateEternalCartForHandle(ctx context.Context, storeI
 
 	dest := carts[0].ID
 	for _, src := range carts[1:] {
-		if hasERPOrder(src) {
-			out.SkippedCartIDs = append(out.SkippedCartIDs, uuidToString(src.ID))
-			continue
-		}
 		if err := absorbCart(ctx, qtx, dest, src.ID); err != nil {
 			return out, err
 		}
 		out.MergedCartIDs = append(out.MergedCartIDs, uuidToString(src.ID))
+
+		// Carrinho com pedido no ERP era PULADO aqui — os itens sairiam e o
+		// pedido continuaria lá dentro segurando peça. Era a decisão certa
+		// enquanto o pedido só nascia no checkout e ter um era exceção.
+		//
+		// Agora o pedido nasce no primeiro comentário: TODO carrinho tem um, e
+		// pular por isso seria pular todos — a promoção não fundiria nada e o
+		// comprador voltaria a ter um carrinho por evento, calado. Fundir
+		// carrinho passou a significar fundir os PEDIDOS, e é isso que sai
+		// daqui como trabalho para depois do commit.
+		if id := externalOrderID(src); id != "" {
+			out.OrdersToMerge = append(out.OrdersToMerge, ERPOrderToMerge{
+				SourceCartID: uuidToString(src.ID), ExternalOrderID: id,
+			})
+		}
 	}
 
 	if err := qtx.MakeCartEternal(ctx, dest); err != nil {
@@ -3249,12 +3280,15 @@ func (r *Repository) ConsolidateEternalCartForHandle(ctx context.Context, storeI
 	return out, tx.Commit(ctx)
 }
 
-// hasERPOrder diz se o carrinho já materializou um pedido no ERP do lojista.
-func hasERPOrder(c sqlc.ListOpenCartsForVipPromotionRow) bool {
-	if c.ExternalOrderID.Valid && c.ExternalOrderID.String != "" {
-		return true
+// externalOrderID devolve o pedido que o carrinho materializou no ERP, ou vazio.
+//
+// Estado pós-criação sem id é o carrinho preso em 'converting' antes do POST
+// responder: não há pedido a fundir, e a retomada por marcador cuida dele.
+func externalOrderID(c sqlc.ListOpenCartsForVipPromotionRow) string {
+	if c.ExternalOrderID.Valid {
+		return c.ExternalOrderID.String
 	}
-	return c.ErpOrderState != "" && c.ErpOrderState != "none"
+	return ""
 }
 
 // absorbCart despeja um carrinho no outro, na ordem que importa: o conteúdo
@@ -3598,6 +3632,9 @@ func (r *Repository) GetCartERPOrderState(ctx context.Context, cartID string) (*
 		State:           row.ErpOrderState,
 		StockLaunched:   row.ErpStockLaunched,
 		ExternalOrderID: row.ExternalOrderID,
+		OrderStatus:     row.ErpOrderStatus,
+		PaidAmountCents: row.PaidAmountCents,
+		PaidAt:          row.PaidAt.Time,
 	}, nil
 }
 
@@ -3967,4 +4004,28 @@ func (r *Repository) ApplyERPStockMirror(ctx context.Context, productID string, 
 		return false, fmt.Errorf("applying ERP stock mirror: %w", err)
 	}
 	return n > 0, nil
+}
+
+// ListCartPayments lê o livro de pagamentos de um carrinho, na ordem em que o
+// dinheiro entrou. Satisfaz erp.CartPaymentLedger.
+func (r *Repository) ListCartPayments(ctx context.Context, cartID string) ([]erp.CartPayment, error) {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	linhas, err := r.queries.ListCartPayments(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]erp.CartPayment, 0, len(linhas))
+	for _, l := range linhas {
+		out = append(out, erp.CartPayment{
+			AmountCents:       l.AmountCents,
+			GrossCoveredCents: l.GrossCoveredCents,
+			Method:            l.Method,
+			CheckoutID:        l.CheckoutID,
+			PaidAt:            l.PaidAt.Time,
+		})
+	}
+	return out, nil
 }

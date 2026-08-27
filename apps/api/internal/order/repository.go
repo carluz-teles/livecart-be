@@ -433,6 +433,10 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			p.image_url as product_image,
 			p.keyword as product_keyword,
 			0::INT as waitlisted_quantity,
+			-- Venda materializada: o snapshot registra o que foi vendido, e
+			-- vendido é pago. A divisão pago × a pagar só existe enquanto o
+			-- pedido é carrinho.
+			oi.quantity as paid_quantity,
 			COALESCE(p.weight_grams, 0),
 			COALESCE(p.height_cm, 0),
 			COALESCE(p.width_cm, 0),
@@ -456,6 +460,7 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			p.image_url as product_image,
 			p.keyword as product_keyword,
 			ci.waitlisted_quantity,
+			ci.paid_quantity,
 			COALESCE(p.weight_grams, 0),
 			COALESCE(p.height_cm, 0),
 			COALESCE(p.width_cm, 0),
@@ -487,6 +492,7 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			&item.ProductImage,
 			&item.ProductKeyword,
 			&item.WaitlistedQuantity,
+			&item.PaidQuantity,
 			&item.WeightGrams,
 			&item.HeightCm,
 			&item.WidthCm,
@@ -1353,4 +1359,28 @@ func (r *Repository) GetUpsellSummary(ctx context.Context, orderID string) (*Ord
 	}
 
 	return out, nil
+}
+
+// ListCartPaymentEntries lê o extrato de cobranças do carrinho, na ordem em que
+// o dinheiro entrou. Vazio para pedido já materializado — a venda fechou, e o
+// que ficou registrado ali é o snapshot dela.
+func (r *Repository) ListCartPaymentEntries(ctx context.Context, cartID string) ([]OrderPaymentEntry, error) {
+	const q = `
+		SELECT amount_cents, gross_covered_cents, COALESCE(method,''), paid_at
+		FROM cart_payments WHERE cart_id = $1 ORDER BY paid_at, created_at`
+	rows, err := r.db.Query(ctx, q, cartID)
+	if err != nil {
+		return nil, fmt.Errorf("listing cart payments: %w", err)
+	}
+	defer rows.Close()
+
+	var out []OrderPaymentEntry
+	for rows.Next() {
+		var e OrderPaymentEntry
+		if err := rows.Scan(&e.AmountCents, &e.GrossCoveredCents, &e.Method, &e.PaidAt); err != nil {
+			return nil, fmt.Errorf("scanning cart payment: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }

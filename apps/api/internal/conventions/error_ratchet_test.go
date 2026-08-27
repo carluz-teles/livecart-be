@@ -234,8 +234,6 @@ var baselineRawThrows = map[string]bool{
 	// 404 simples do painel de pendências do razão: não há código de domínio a
 	// mapear — a linha não existe (ou é de outra loja, indistinguível de
 	// propósito) e o painel só recarrega.
-	`erp.Service.ResolveStockMovementManually:"movimento não encontrado"`:                true,
-	`erp.Service.ResolveStockMovementManually:"razão de movimentos não está habilitado"`: true,
 
 	// Confirmação manual de pagamento: not-found do carrinho e a validação de
 	// "sem itens". A tela mostra a mensagem do servidor; não há ramo a tomar.
@@ -247,8 +245,19 @@ var baselineRawThrows = map[string]bool{
 	"order.Service.resolveEditableCartToken:\"pedido sem link de checkout para editar\"": true,
 	// Parse de query string malformada: o front nunca ramifica nisso, e o termo
 	// em si é recusado como validation.Errors (fields.search), não aqui.
-	"customer.Handler.SearchHandles:\"invalid query parameters\"":               true,
-	"customer.SearchHandlesRequest.ToInput:\"invalid store id\"":                true,
+	"customer.Handler.SearchHandles:\"invalid query parameters\"": true,
+	"customer.SearchHandlesRequest.ToInput:\"invalid store id\"":  true,
+	// Clientes VIP: o store id vem do middleware de autenticação, então um id
+	// inválido aqui é configuração quebrada, não estado de domínio — não há
+	// ramo que a tela possa tomar. "handle is required" é validação pura, e a
+	// mensagem do servidor já é o que o painel mostra.
+	"customer.AddVipRequest.ToInput:\"invalid store id\"":     true,
+	"customer.Handler.ListVips:\"invalid store id\"":          true,
+	"customer.Handler.RemoveVip:\"invalid store id\"":         true,
+	"customer.Service.AddVipHandle:\"handle is required\"":    true,
+	"customer.Service.RemoveVipHandle:\"handle is required\"": true,
+	// Not-found da remoção: o @ nunca foi VIP. A tela recarrega a lista.
+	"customer.Service.RemoveVipHandle#0":                                        true,
 	"billing.WebhookHandler.HandleStripe:\"invalid event payload\"":             true,
 	"checkout.Repository.BindCartPaymentIntegration:\"invalid cart ID\"":        true,
 	"checkout.Repository.BindCartPaymentIntegration:\"invalid integration ID\"": true,

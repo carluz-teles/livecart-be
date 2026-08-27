@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -259,4 +260,77 @@ func ParseResponse[T any](body []byte) (*T, error) {
 // IsSuccessStatus checks if the HTTP status code indicates success.
 func IsSuccessStatus(statusCode int) bool {
 	return statusCode >= 200 && statusCode < 300
+}
+
+// resetDoRateLimit lê quantos segundos faltam para a janela de rate limit rolar.
+//
+// Medido contra a API v3 do Tiny em 25/08/2026: são dois baldes — 4 requisições
+// por segundo (429 com `X-Ratelimit-Limit: 4`, reset 1) e 30 por minuto (429 com
+// limite 30, reset até 58). NÃO existe header `Retry-After` ali; `Retry-After`
+// fica como fallback para outros provedores.
+func resetDoRateLimit(h http.Header, padrao time.Duration) time.Duration {
+	for _, chave := range []string{"X-RateLimit-Reset", "RateLimit-Reset", "Retry-After"} {
+		v := strings.TrimSpace(h.Get(chave))
+		if v == "" {
+			continue
+		}
+		if segundos, err := strconv.Atoi(v); err == nil && segundos > 0 && segundos <= 300 {
+			return time.Duration(segundos) * time.Second
+		}
+		if quando, err := http.ParseTime(v); err == nil {
+			if d := time.Until(quando); d > 0 && d <= 5*time.Minute {
+				return d
+			}
+		}
+	}
+	return padrao
+}
+
+// DoRequestRetrying429 repete a requisição APENAS quando a API recusa por rate
+// limit. É o retry das ESCRITAS, e a diferença para DoRequestWithRetry é
+// deliberada: um 5xx numa escrita significa que o servidor respondeu e pode ter
+// aplicado, então repetir duplicaria; um 429 é recusa ANTES de aplicar, provado
+// não-aplicado, e repetir é a única cura.
+//
+// Só espera se a janela couber no prazo restante do contexto. Estourar o
+// deadline dormindo deixaria a escrita sem desfecho registrado — pior do que
+// devolver o 429 para quem sabe reagendar (o razão de movimentos, o outbox).
+// Por isso o 429 final volta como resposta normal, não como erro: o chamador
+// decide o que ele significa no seu fluxo.
+func (b *BaseProvider) DoRequestRetrying429(ctx context.Context, maxRetries int, method, url string, body any, headers map[string]string) (*http.Response, []byte, error) {
+	for tentativa := 0; ; tentativa++ {
+		resp, respBody, err := b.DoRequest(ctx, method, url, body, headers)
+		if err != nil || resp.StatusCode != http.StatusTooManyRequests || tentativa >= maxRetries {
+			return resp, respBody, err
+		}
+
+		espera := resetDoRateLimit(resp.Header, 2*time.Second)
+
+		// Sem deadline não há o que estourar; com deadline, só dorme se sobrar
+		// folga depois da espera.
+		if prazo, temPrazo := ctx.Deadline(); temPrazo {
+			if restante := time.Until(prazo); restante <= espera {
+				logger.From(ctx, b.Logger).Warn("rate limited on a write, and the reset does not fit the remaining deadline — handing the 429 back to the caller",
+					zap.String("integration_id", b.IntegrationID),
+					zap.String("method", method),
+					zap.Duration("reset_in", espera),
+					zap.Duration("deadline_in", restante),
+				)
+				return resp, respBody, nil
+			}
+		}
+
+		logger.From(ctx, b.Logger).Warn("rate limited on a write (429) — waiting for the window to roll",
+			zap.String("integration_id", b.IntegrationID),
+			zap.String("method", method),
+			zap.Int("attempt", tentativa+1),
+			zap.Duration("reset_in", espera),
+		)
+
+		select {
+		case <-ctx.Done():
+			return resp, respBody, ctx.Err()
+		case <-time.After(espera):
+		}
+	}
 }

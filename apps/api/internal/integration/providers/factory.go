@@ -108,14 +108,6 @@ func NewFactory(cfg FactoryConfig) *Factory {
 }
 
 // ProviderConfig contains all data needed to instantiate a provider.
-// MetadataUseAvailableStock é a chave, no metadata da integração, que liga o
-// espelhamento do saldo VENDÁVEL do ERP em vez do físico.
-//
-// Vive no metadata e não numa coluna porque é configuração de UMA integração,
-// não da loja: um lojista pode ter mais de um ERP ligado, e a diferença entre
-// físico e disponível é um conceito do Tiny.
-const MetadataUseAvailableStock = "use_available_stock"
-
 // MetadataResyncRunningSince marca, no metadata da integração, o instante em que
 // a releitura em massa começou. Ausente = nenhuma em andamento.
 //
@@ -393,15 +385,14 @@ func (f *Factory) createERPProvider(cfg ProviderConfig) (ERPProvider, error) {
 			}
 		}
 		return f.tinyConstructor(TinyConfig{
-			IntegrationID:     cfg.IntegrationID,
-			StoreID:           cfg.StoreID,
-			Credentials:       cfg.Credentials,
-			ClientID:          clientID,
-			ClientSecret:      clientSecret,
-			Logger:            f.logger,
-			LogFunc:           f.logFunc,
-			RateLimiter:       limiter,
-			UseAvailableStock: MetadataBool(cfg.Metadata, MetadataUseAvailableStock),
+			IntegrationID: cfg.IntegrationID,
+			StoreID:       cfg.StoreID,
+			Credentials:   cfg.Credentials,
+			ClientID:      clientID,
+			ClientSecret:  clientSecret,
+			Logger:        f.logger,
+			LogFunc:       f.logFunc,
+			RateLimiter:   limiter,
 		})
 	default:
 		return nil, fmt.Errorf("unknown ERP provider: %s", cfg.Name)
@@ -453,9 +444,6 @@ type TinyConfig struct {
 	Logger        *zap.Logger
 	LogFunc       LogFunc
 	RateLimiter   ratelimit.RateLimiter
-	// UseAvailableStock espelha o saldo VENDÁVEL do Tiny em vez do físico.
-	// Desligado por padrão — ver MetadataUseAvailableStock.
-	UseAvailableStock bool
 }
 
 // InstagramConstructor is a function type for creating Instagram providers.

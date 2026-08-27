@@ -64,7 +64,7 @@ type CartPaymentGateway interface {
 	// webhook — the guard that serializes this consumer against ExpireCart. On
 	// success it also returns the cart's live_event_id (from the same RETURNING
 	// row, no extra query) so the caller can tag the emitted cart payment fact.
-	UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (liveEventID string, err error)
+	UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string, amountCents int64) (liveEventID string, err error)
 
 	// RestoreCancelledCartAsPaid handles the inverse race (LIV-84): a MANUAL
 	// store cancellation that a payment then won. When UpdateCartPaymentStatus
@@ -217,7 +217,10 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 
 	// Update cart payment status and payment method. liveEventID travels to the
 	// cart payment fact emitted below (from the RETURNING row, no extra query).
-	liveEventID, err := s.gateway.UpdateCartPaymentStatus(ctx, status.ExternalReference, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod)
+	// status.Amount é o que o gateway cobrou de fato — já com cupom e desconto
+	// de PIX descontados. É esse número que o pedido no ERP tem de declarar
+	// como pago; o preço cheio das unidades ele já sabe sozinho.
+	liveEventID, err := s.gateway.UpdateCartPaymentStatus(ctx, status.ExternalReference, cartPaymentStatus, status.PaymentID, status.PaidAt, status.PaymentMethod, status.Amount)
 	if err != nil {
 		if errors.Is(err, ErrCartNotPayable) {
 			// Corrida cancelamento × pagamento, lado inverso (LIV-84): o lojista

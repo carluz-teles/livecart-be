@@ -52,6 +52,7 @@ type Service struct {
 	cartCanceller   CartCanceller
 	itemEditor      CartItemEditor
 	manualPayment   ManualPaymentConfirmer
+	erpStatusReader ERPOrderStatusReader
 }
 
 func NewService(repo *Repository, logger *zap.Logger) *Service {
@@ -255,6 +256,7 @@ func (s *Service) GetByID(ctx context.Context, id string, storeID string) (*Orde
 			UnitPrice:          item.UnitPrice,
 			TotalPrice:         itemTotal,
 			WaitlistedQuantity: item.WaitlistedQuantity,
+			PaidQuantity:       item.PaidQuantity,
 			WeightGrams:        item.WeightGrams,
 			HeightCm:           item.HeightCm,
 			WidthCm:            item.WidthCm,
@@ -344,7 +346,13 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 	// Separa o que a cliente pode pagar do que está em fila. Uma passada só
 	// pelos itens: quantity é o total pedido, waitlisted é a parcela sem
 	// estoque, e as duas somas juntas fecham em TotalAmount.
-	var payable, waitlisted int64
+	//
+	// A mesma passada separa o que JÁ FOI PAGO do que ainda falta. Desde que o
+	// carrinho passou a receber item depois do pagamento — a compradora pagou na
+	// live de segunda e pediu mais uma coisa na quinta, para sair um frete só —
+	// "pago" e "total" deixaram de ser o mesmo número, e o lojista precisa
+	// enxergar a diferença antes de faturar.
+	var payable, waitlisted, pago, aPagar int64
 	for _, item := range orderOutput.Items {
 		disponivel := item.Quantity - item.WaitlistedQuantity
 		if disponivel > 0 {
@@ -353,6 +361,35 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 		if item.WaitlistedQuantity > 0 {
 			waitlisted += item.UnitPrice * int64(item.WaitlistedQuantity)
 		}
+		pago += item.UnitPrice * int64(item.PaidQuantity)
+		if resto := item.Quantity - item.PaidQuantity; resto > 0 {
+			aPagar += item.UnitPrice * int64(resto)
+		}
+	}
+
+	// O extrato: uma linha por cobrança. `pago` acima é o PREÇO CHEIO das
+	// unidades cobertas; o dinheiro que entrou por elas é menor sempre que
+	// houve cupom ou desconto de PIX, e a diferença é abatimento, não dívida.
+	// Sem separar os dois, a tela mostraria o desconto como saldo devedor.
+	pagamentos, err := s.repo.ListCartPaymentEntries(ctx, id)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("failed to load the payment ledger for order detail",
+			zap.String("order_id", id), zap.Error(err))
+		pagamentos = nil
+	}
+	var entrou, cobertoBruto int64
+	for _, p := range pagamentos {
+		entrou += p.AmountCents
+		cobertoBruto += p.GrossCoveredCents
+	}
+	desconto := cobertoBruto - entrou
+	if desconto < 0 {
+		desconto = 0
+	}
+	if len(pagamentos) > 0 {
+		// Com extrato, quem manda é ele: `pago` vira o dinheiro que entrou de
+		// fato, e o preço cheio coberto se divide entre pago e desconto.
+		pago = entrou
 	}
 
 	out := &OrderDetailOutput{
@@ -364,6 +401,10 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 		WaitlistJourney:        waitlistJourney,
 		PayableAmount:          payable,
 		WaitlistedAmount:       waitlisted,
+		AlreadyPaidAmount:      pago,
+		OutstandingAmount:      aPagar,
+		DiscountedAmount:       desconto,
+		Payments:               pagamentos,
 		PaymentMethod:          row.PaymentMethod,
 		Installments:           row.Installments,
 		DiscountCents:          row.DiscountCents,

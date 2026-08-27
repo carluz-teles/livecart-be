@@ -50,10 +50,10 @@ func TestERPResyncRunningFromMetadata(t *testing.T) {
 			false,
 		},
 		{
-			// A chave que liga o saldo disponível vive no mesmo metadata e não
-			// pode ser confundida com varredura em andamento.
+			// Outras chaves vivem no mesmo metadata e não podem ser confundidas
+			// com varredura em andamento.
 			"outra configuração no metadata não conta como varredura",
-			map[string]any{providers.MetadataUseAvailableStock: true},
+			map[string]any{"alguma_outra_configuracao": true},
 			false,
 		},
 	}

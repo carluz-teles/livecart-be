@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -304,21 +305,28 @@ type ERPProvider interface {
 	// CreateOrder creates an order in the ERP for invoicing.
 	CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, error)
 
-	// LaunchOrderStock decrements stock in ERP for the order items.
-	LaunchOrderStock(ctx context.Context, orderID string) error
-
-	// ReverseOrderStock returns stock in ERP for the order items.
+	// ReverseOrderStock devolve o estoque lançado de um pedido
+	// (POST /pedidos/{id}/estornar-estoque). É a ÚNICA operação de estoque que
+	// sobrou, e existe só como recuperação: quando alguém lança o estoque à mão
+	// no painel, o pedido trava para edição e só o estorno o destrava.
+	//
+	// 🔴 Nunca chamar de forma especulativa. Medido em 26/08/2026 numa conta com
+	// o módulo de reserva ativo: num pedido que apenas RESERVOU, o estorno
+	// devolve 204 e INFLA a reserva pela quantidade do pedido, a cada chamada,
+	// sem teto (2 un.: reservado 5 → 7 → 9, disponível 1 → −2 → −4). Só depois
+	// de a própria API responder "estoque lançado" é que ele é seguro.
 	ReverseOrderStock(ctx context.Context, orderID string) error
 
 	// ApproveOrder sets the order status to approved in the ERP.
 	ApproveOrder(ctx context.Context, orderID string) error
 
-	// CancelOrder reverses stock and cancels an order in the ERP.
-	CancelOrder(ctx context.Context, orderID string) error
-
-	// UpdateOrderItems replaces the order's item grid (PUT /pedidos/{id}/itens).
-	// The ERP blocks this while the order stock is launched ("estoque lançado")
-	// — callers must run the estornar → PUT → lançar cycle.
+	// UpdateOrderItems substitui a grade de itens do pedido
+	// (PUT /pedidos/{id}/itens). É como um segundo comentário da mesma pessoa
+	// entra na venda: a grade vai inteira, como deve ficar, e o Tiny reajusta a
+	// reserva sozinho.
+	//
+	// Devolve ErrOrderStockLaunched quando o pedido está travado por estoque
+	// lançado à mão — o único caso em que o chamador deve estornar e repetir.
 	UpdateOrderItems(ctx context.Context, orderID string, items []ERPOrderItem) error
 
 	// UpdateOrderPayment writes the real payment installments onto an existing
@@ -327,23 +335,44 @@ type ERPProvider interface {
 	UpdateOrderPayment(ctx context.Context, orderID string, payment *ERPOrderPayment) error
 
 	// SetOrderSituacao transitions the order status (PUT /pedidos/{id}/situacao).
-	// Situação codes: 0 Aberta · 3 Aprovada · 2 Cancelada (swagger v3.1).
+	// Use as constantes Situacao* — o enum completo do ERP está lá.
 	SetOrderSituacao(ctx context.Context, orderID string, situacao int) error
 
-	// AddOrderMarker tags the order (POST /pedidos/{id}/marcadores). LiveCart's
-	// idempotency anchor is the marker lc-cart-<cartID>.
+	// SetOrderInstallments grava as parcelas do pedido EXPLICITAMENTE, uma a uma.
+	//
+	// Diferente de UpdateOrderPayment, que deriva as parcelas do método e do
+	// número de vezes: aqui o chamador diz exatamente quanto foi pago e quanto
+	// falta. É o que separa, no pedido, o dinheiro que já entrou do que ainda
+	// não — ver ERPInstallment.
+	SetOrderInstallments(ctx context.Context, orderID string, parcelas []ERPInstallment) error
+
+	// GetOrderTotal lê o total atual do pedido no ERP.
+	GetOrderTotal(ctx context.Context, orderID string) (cents int64, hasInvoice bool, err error)
+
+	// GetOrderItems lê a grade atual do pedido, com a informação adicional de
+	// cada linha. É o que permite preservar o que o lojista acrescentou à mão:
+	// a escrita substitui a grade inteira, então sem reler antes a linha dele
+	// desaparece em silêncio.
+	GetOrderItems(ctx context.Context, orderID string) ([]ERPOrderItem, error)
+
+	// GetOrderSituacao lê a situação atual do pedido no ERP
+	// (GET /pedidos/{id}). É a reconciliação do rastreamento: webhook perdido
+	// ou fora de ordem deixa o LiveCart mostrando um estágio que já passou.
+	GetOrderSituacao(ctx context.Context, orderID string) (int, error)
+
+	// AddOrderMarker carimba o pedido com a âncora lc-cart-<cartID>
+	// (POST /pedidos/{id}/marcadores). Parece redundante com o
+	// `numeroOrdemCompra` do corpo e não é — ver a nota na implementação.
 	AddOrderMarker(ctx context.Context, orderID, marker string) error
 
-	// FindOrderIDByMarker resolves an order by marker (GET /pedidos?marcadores=,
-	// exact match — validated in sandbox 11/07, ~300ms read-after-write).
-	// Returns "" when not found.
+	// FindOrderIDByMarker resolve o pedido pela âncora lc-cart-<cartID>. É como
+	// uma tentativa que morreu depois do POST reencontra o pedido em vez de criar
+	// um segundo. Devolve "" quando não existe.
 	FindOrderIDByMarker(ctx context.Context, marker string) (string, error)
 
-	// ReserveStock creates a manual stock exit in the ERP. Returns movement ID.
-	ReserveStock(ctx context.Context, productID string, qty int, unitPrice float64, obs string) (string, error)
-
-	// ReverseStockReservation creates a manual stock entry in the ERP. Returns movement ID.
-	ReverseStockReservation(ctx context.Context, productID string, qty int, unitPrice float64, obs string) (string, error)
+	// ReverseLegacyStockExit devolve ao estoque uma saída manual do modelo ANTIGO.
+	// Só a drenagem única chama — ver a nota na implementação; sai junto com ela.
+	ReverseLegacyStockExit(ctx context.Context, productID string, qty int, obs string) (string, error)
 
 	// SearchContacts searches for contacts by name or document.
 	SearchContacts(ctx context.Context, params SearchContactsParams) ([]ERPContactResult, error)
@@ -945,7 +974,60 @@ type ERPOrderItem struct {
 	Name      string `json:"name"`
 	Quantity  int    `json:"quantity"`
 	UnitPrice int64  `json:"unit_price"` // In cents
+	// Note vai para a informação adicional da linha no ERP e volta intacta na
+	// leitura. É por ela que se sabe, ao reler um pedido, quais linhas são
+	// nossas e quais o lojista digitou à mão — ver LiveCartItemMarker.
+	Note string `json:"note,omitempty"`
 }
+
+// ERPInstallment é uma parcela do pedido, dita por extenso.
+//
+// 🔴 A soma das parcelas é FORÇADA ao total do pedido, em silêncio. Medido em
+// 26/08/2026: enviar uma parcela de R$ 60 num pedido de R$ 100 grava R$ 100, com
+// HTTP 204 e sem aviso. Quem manda um valor que não fecha não recebe erro —
+// recebe outro número.
+//
+// Daí este tipo existir. Acrescentar item a um pedido PAGO faz o ERP
+// redistribuir o total pelas parcelas existentes: uma venda de R$ 40 que virou
+// R$ 145 passou a registrar que a compradora pagou R$ 145. Um terceiro item
+// dividiu R$ 195 em duas parcelas de R$ 97,50. O registro financeiro é destruído
+// a cada edição, e só reenviar a divisão correta o reconstrói.
+type ERPInstallment struct {
+	// AmountCents é o valor desta parcela. A soma de todas TEM de dar o total do
+	// pedido, ou o ERP a reescreve sozinho.
+	AmountCents int64
+	// DueDate é o vencimento. Para a parcela já paga, é a data do pagamento.
+	DueDate time.Time
+	// Note é o que o lojista lê no painel — é aqui que "PAGO" e "A PAGAR" ficam
+	// visíveis para ele.
+	Note string
+}
+
+// LiveCartItemMarker abre a informação adicional de toda linha que o LiveCart
+// escreve num pedido do ERP.
+//
+// Existe porque `PUT /pedidos/{id}/itens` SUBSTITUI a grade inteira. Medido em
+// 26/08/2026: o lojista acrescentou um produto ao pedido pelo painel, o
+// comentário seguinte da compradora fez o LiveCart reenviar a sua grade, e a
+// linha dele sumiu — HTTP 204, sem aviso — junto com as 3 unidades que ela
+// segurava, que voltaram à venda.
+//
+// Com o marcador, reler o pedido antes de escrever separa o que é nosso do que é
+// dele, e o que é dele é reenviado junto. O texto é legível de propósito: o
+// lojista vê "[livecart]" na linha e entende de onde ela veio.
+const LiveCartItemMarker = "[livecart]"
+
+// ErrPedidoComNotaFiscal é a recusa em mexer num pedido que já virou documento
+// fiscal, decidida pelo sinal AUTORITATIVO: `idNotaFiscal != 0`.
+//
+// A situação não serve para isso, e a medição de 26/08/2026 mostra por quê:
+// gerar a nota (`POST /pedidos/{id}/gerar-nota-fiscal`) leva o pedido de
+// situação 0 para 4 ("Preparando envio") — NUNCA para 1 ("Faturada"). Quem
+// esperasse a situação 1 deixaria a porta aberta com a nota já emitida.
+var ErrPedidoComNotaFiscal = errors.New("pedido já tem nota fiscal emitida")
+
+// IsLiveCartItem diz se a linha foi escrita pelo LiveCart.
+func IsLiveCartItem(note string) bool { return strings.HasPrefix(note, LiveCartItemMarker) }
 
 // OrderResult is the result of creating an order in the ERP.
 type OrderResult struct {
@@ -989,21 +1071,31 @@ type ERPShippingProfile struct {
 
 // ERPProduct represents a product in the ERP.
 type ERPProduct struct {
-	ID          string              `json:"id"` // ERP product ID
-	SKU         string              `json:"sku,omitempty"`
-	GTIN        string              `json:"gtin,omitempty"` // Barcode (EAN/GTIN)
-	Name        string              `json:"name"`
-	Description string              `json:"description,omitempty"`
-	Price       int64               `json:"price"` // In cents
-	Stock       int                 `json:"stock"`
-	Active      bool                `json:"active"`
-	ImageURL    string              `json:"image_url,omitempty"`
+	ID          string `json:"id"` // ERP product ID
+	SKU         string `json:"sku,omitempty"`
+	GTIN        string `json:"gtin,omitempty"` // Barcode (EAN/GTIN)
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Price       int64  `json:"price"` // In cents
+	Stock       int    `json:"stock"`
+	// StockKnown diz se `Stock` é um saldo DISPONÍVEL de verdade.
+	//
+	// Existe porque a alternativa — devolver zero, ou pior, o saldo físico —
+	// é indistinguível de "esgotado" e de "tem 4". O físico está fora de
+	// questão: ele conta peça já reservada por outro pedido, e vendê-la é o
+	// furo que esta refatoração fecha. Então quando o disponível não pode ser
+	// afirmado (produto sem controle de estoque, chamada estrangulada, resposta
+	// ilegível), este campo vem falso e quem espelha NÃO escreve o contador
+	// local: fica o número que já estava, que ao menos não foi inventado.
+	StockKnown bool   `json:"stock_known"`
+	Active     bool   `json:"active"`
+	ImageURL   string `json:"image_url,omitempty"`
 	// ImageURLs are ALL image URLs the ERP returned for this product (Tiny
 	// anexos), in order. The merchant picks which becomes the LiveCart main
 	// image on import; ImageURL stays the default (first). Empty when none.
-	ImageURLs   []string            `json:"image_urls,omitempty"`
-	UpdatedAt   time.Time           `json:"updated_at"`
-	Shipping    *ERPShippingProfile `json:"shipping,omitempty"` // nil when the ERP didn't return a complete profile
+	ImageURLs []string            `json:"image_urls,omitempty"`
+	UpdatedAt time.Time           `json:"updated_at"`
+	Shipping  *ERPShippingProfile `json:"shipping,omitempty"` // nil when the ERP didn't return a complete profile
 	// WeightGramsHint is set whenever the ERP returned a positive weight, even
 	// when dimensions are missing (so Shipping had to be nil). The integration
 	// service uses it to combine with store-level default dimensions and

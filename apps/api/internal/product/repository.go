@@ -28,6 +28,7 @@ func NewRepository(q *sqlc.Queries, pool *pgxpool.Pool) *Repository {
 func (r *Repository) Save(ctx context.Context, product *domain.Product) error {
 	sp := product.Shipping()
 	_, err := r.q.CreateProduct(ctx, sqlc.CreateProductParams{
+		ID:                  product.ID().ToPgUUID(),
 		StoreID:             product.StoreID().ToPgUUID(),
 		Name:                product.Name(),
 		ExternalID:          pgtype.Text{String: product.ExternalID(), Valid: product.ExternalID() != ""},

@@ -38,6 +38,9 @@ func (a assertT) eq(want, got any) {
 // production), so asserting the collapse here proves ProcessPaymentNotification
 // hands a STABLE key across the provider's at-least-once redeliveries.
 type mockGateway struct {
+	// amountCents é o valor que o gateway confirmou — o que vira a parcela
+	// "PAGO" no ERP. Guardado para o teste conferir que ele chega até aqui.
+	amountCents   int64
 	provider      providers.PaymentProvider
 	integrationID string
 	resolveErr    error
@@ -80,7 +83,8 @@ func (m *mockGateway) CartPaymentStatus(_ context.Context, _ string) (string, er
 	return m.cartStatus, m.cartStatusErr
 }
 
-func (m *mockGateway) UpdateCartPaymentStatus(_ context.Context, _, paymentStatus, _ string, _ *time.Time, _ string) (string, error) {
+func (m *mockGateway) UpdateCartPaymentStatus(_ context.Context, _, paymentStatus, _ string, _ *time.Time, _ string, amountCents int64) (string, error) {
+	m.amountCents = amountCents
 	m.updateCalls = append(m.updateCalls, paymentStatus)
 	return m.liveEventID, m.updateErr
 }

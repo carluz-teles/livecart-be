@@ -1,10 +1,16 @@
 -- name: CreateProduct :one
+-- O id vem do DOMÍNIO, não do banco.
+--
+-- Sem ele na lista, o Postgres gerava um id próprio e o objeto em memória ficava
+-- com outro — e quem confiasse no retorno de Save/ImportProduct recebia um id que
+-- não corresponde a linha nenhuma. O import manual da tela devolvia esse id, e o
+-- reflexo do pedido no ERP o usaria para amarrar o item ao carrinho.
 INSERT INTO products (
-    store_id, name, external_id, external_source, keyword, price, image_url, stock,
+    id, store_id, name, external_id, external_source, keyword, price, image_url, stock,
     weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents,
     group_id, barcode
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+VALUES (sqlc.arg(id), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 RETURNING *;
 
 -- name: SetProductGroup :exec

@@ -50,11 +50,6 @@ type Tiny struct {
 	credentials  *Credentials
 	clientID     string
 	clientSecret string
-
-	// useAvailableStock faz o provider espelhar o saldo VENDÁVEL em vez do
-	// físico. Desligado por padrão: mudar o significado do estoque de uma loja
-	// sem ela pedir é alterar o que ela vende.
-	useAvailableStock bool
 }
 
 // TinyConfig contains configuration for the Tiny provider.
@@ -82,7 +77,6 @@ func NewTiny(cfg TinyConfig) (*Tiny, error) {
 	}
 
 	return &Tiny{
-		useAvailableStock: cfg.UseAvailableStock,
 		BaseProvider: providers.NewBaseProvider(providers.BaseProviderConfig{
 			IntegrationID: cfg.IntegrationID,
 			StoreID:       cfg.StoreID,
@@ -399,37 +393,29 @@ func (t *Tiny) ListProducts(ctx context.Context, params ListProductsParams) (*Pr
 
 // GetProduct retrieves a single product by ID.
 // saldoDisponivel busca em `GET /estoque/{idProduto}` o saldo que pode de fato
-// ser vendido.
+// ser vendido — a ÚNICA fonte de estoque que este provider reconhece.
 //
-// Devolve (0, false) sempre que não dá para afirmar: chamada falhou, resposta
-// ilegível, ou nenhum dos campos conhecidos apareceu. Quem chama preserva o
-// saldo físico nesse caso — que é o comportamento de hoje, e errar para o lado
-// de "vende demais" é ruim, mas trocar por um número inventado é pior.
+// Devolve (0, false) sempre que não dá para afirmar: chamada falhou, produto sem
+// controle de estoque (404), resposta ilegível, ou o campo não veio. Quem chama
+// não escreve nada nesse caso. Não existe mais o desvio para o saldo físico: ele
+// conta peça já comprometida com outro pedido, e foi exatamente por onde a loja
+// vendeu o que não tinha.
+// GetProductStock devolve o saldo DISPONÍVEL do produto — o mesmo número que
+// governa a venda, para a reconciliação comparar contra o contador local.
 //
-// O corpo cru vai para o log porque o schema desta resposta não está na
-// documentação pública que consultei. Assim que os nomes estiverem confirmados,
-// o log sai e a lista de candidatos encolhe para o campo real.
-// GetProductStock devolve o SALDO físico do produto no Tiny — o campo que a
-// reconciliação compara com a contabilidade local. Saldo, e não disponível, de
-// propósito: as nossas reservas são saídas manuais e descontam do saldo; o
-// "disponível" ainda subtrai as reservas de PEDIDO da própria Tiny, que não são
-// nossas e poluiriam a comparação.
+// Era o saldo físico, e a justificativa de então já não vale: as reservas
+// deixaram de ser saídas manuais e passaram a ser o próprio pedido de venda, que
+// desconta exatamente de `disponivel`. Comparar contra o físico agora acusaria
+// divergência em todo carrinho aberto e não acusaria nenhuma real.
+//
+// Erro em vez de palpite quando não dá para ler: uma reconciliação que inventa
+// o lado do ERP não reconcilia nada.
 func (t *Tiny) GetProductStock(ctx context.Context, productID string) (int, error) {
-	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
-	resp, body, err := t.DoRequest(ctx, http.MethodGet, endpoint, nil, t.authHeaders())
-	if err != nil {
-		return 0, fmt.Errorf("reading stock: %w", err)
+	disponivel, ok := t.saldoDisponivel(ctx, productID)
+	if !ok {
+		return 0, fmt.Errorf("saldo disponível indeterminado para o produto %s", productID)
 	}
-	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return 0, fmt.Errorf("reading stock: status %d", resp.StatusCode)
-	}
-	var out struct {
-		Saldo float64 `json:"saldo"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return 0, fmt.Errorf("parsing stock response: %w", err)
-	}
-	return int(out.Saldo), nil
+	return disponivel, nil
 }
 
 func (t *Tiny) saldoDisponivel(ctx context.Context, productID string) (int, bool) {
@@ -484,7 +470,7 @@ func (t *Tiny) saldoDisponivel(ctx context.Context, productID string) (int, bool
 			status = resp.StatusCode
 		}
 		if t.Logger != nil {
-			t.Logger.Warn("tiny available stock unavailable; falling back to physical",
+			t.Logger.Warn("saldo disponível indeterminado; o contador local fica como está",
 				zap.String("external_product_id", productID),
 				zap.Int("status", status),
 				zap.ByteString("body", body),
@@ -601,48 +587,30 @@ func (t *Tiny) GetProduct(ctx context.Context, productID string) (*ERPProduct, e
 
 	out := tinyPayloadToERP(p)
 
-	// O saldo que vale para vender é o DISPONÍVEL, e ele não vem aqui.
+	// O saldo que vale para vender é o DISPONÍVEL, e ele não vem nesta resposta.
 	//
-	// `GET /produtos/{id}` devolve `estoque.quantidade`, que é o saldo FÍSICO —
-	// provado pelo lojista e confirmado no log: o Carrossel Musical estava com
-	// físico 4 e disponível 3 no Tiny, e chegou aqui como 4. O nó inteiro é
-	// {controlar, sobEncomenda, diasPreparacao, localizacao, minimo, maximo,
-	// quantidade}: não existe reservado nem disponível para parsear.
+	// `GET /produtos/{id}` devolve `estoque.quantidade`, que é o saldo FÍSICO. O
+	// nó inteiro é {controlar, sobEncomenda, diasPreparacao, localizacao, minimo,
+	// maximo, quantidade}: não há reservado nem disponível para parsear. E o
+	// físico conta peça que já tem dono — cada unidade presa num pedido de venda
+	// aberto continua ali. Oferecê-la é vender duas vezes a mesma coisa.
 	//
-	// A diferença entre os dois é peça reservada por orçamento salvo no Tiny.
-	// Ela continua no físico e sai do disponível — oferecê-la é vender o que já
-	// tem dono, e é furo de estoque do tamanho de quantas estiverem reservadas.
-	// Só quando a loja pediu. Desligado, o comportamento é exatamente o de
-	// antes — inclusive sem a chamada extra ao Tiny.
-	if t.useAvailableStock {
-		if disponivel, ok := t.saldoDisponivel(ctx, productID); ok {
-			out.Stock = disponivel
+	// Por isso o físico é DESCARTADO aqui, sem alternativa e sem configuração. O
+	// disponível vem de `GET /estoque/{id}`, uma chamada por produto; quando não
+	// dá para afirmar, StockKnown fica falso e quem espelha não escreve nada.
+	// Zerar seria dizer "esgotado" sem saber, e cair no físico é o furo original.
+	out.Stock, out.StockKnown = t.saldoDisponivel(ctx, productID)
+
+	// A regra vale para CADA VARIAÇÃO, não só para o pai: as variações vêm com o
+	// `estoque.quantidade` de dentro do payload do pai, que é o mesmo físico.
+	// Uma consulta por variação, pelo mesmo limitador do resto; falha em uma não
+	// contamina as outras.
+	for i := range out.Variants {
+		if out.Variants[i].ID == "" {
+			out.Variants[i].StockKnown = false
+			continue
 		}
-		// A regra vale para CADA VARIAÇÃO, não só para o pai.
-		//
-		// O bloco acima trocava apenas `out.Stock` — o saldo do produto pai. As
-		// variações seguiam com o `estoque.quantidade` que veio dentro do payload
-		// do pai, que é o FÍSICO: aquela resposta não tem reservado nem
-		// disponível para parsear, então não havia como corrigi-las depois sem
-		// perguntar por cada uma.
-		//
-		// A loja ligou a configuração e produto com variação continuou chegando
-		// com o físico. Resolver aqui é resolver para todo mundo: quem lê
-		// `Variants[].Stock` — a tela de importação, o grupo de produtos, a
-		// varredura — passa a receber o vendável sem precisar lembrar da regra.
-		//
-		// Uma consulta por variação, pelo mesmo limitador do resto. Só quando a
-		// loja pediu, e só quando o produto tem variação; falha em uma não
-		// contamina as outras nem derruba o produto (mantém o que veio, que é o
-		// comportamento de sempre quando não dá para afirmar).
-		for i := range out.Variants {
-			if out.Variants[i].ID == "" {
-				continue
-			}
-			if disponivel, ok := t.saldoDisponivel(ctx, out.Variants[i].ID); ok {
-				out.Variants[i].Stock = disponivel
-			}
-		}
+		out.Variants[i].Stock, out.Variants[i].StockKnown = t.saldoDisponivel(ctx, out.Variants[i].ID)
 	}
 
 	// TEMP DEBUG: log shipping resolution so we can pinpoint why some Tiny
@@ -1095,7 +1063,7 @@ func (t *Tiny) SyncProduct(ctx context.Context, product ERPProduct) (*SyncResult
 		"situacao":  boolToSituacao(product.Active),
 	}
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, payload, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPut, endpoint, payload, t.authHeaders())
 	if err != nil {
 		return &SyncResult{
 			ProductID: product.ID,
@@ -1155,6 +1123,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 			},
 			"quantidade":    item.Quantity,
 			"valorUnitario": float64(item.UnitPrice) / 100,
+			"infoAdicional": item.Note,
 		}
 	}
 
@@ -1395,7 +1364,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		zap.Int64("net_amount_cents", netCents),
 	)
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, payload, t.authHeaders())
 	if err != nil {
 		return nil, fmt.Errorf("creating order: %w", err)
 	}
@@ -1430,7 +1399,7 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 			zap.Int("status", resp.StatusCode),
 			zap.String("detail", tinyErrorDetail(body)),
 		)
-		resp, body, err = t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
+		resp, body, err = t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, payload, t.authHeaders())
 		if err != nil {
 			return nil, fmt.Errorf("creating order without forma de envio: %w", err)
 		}
@@ -1469,15 +1438,9 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		zap.Int64("net_amount_cents", netCents),
 	)
 
-	// Marca o pedido com o vínculo do carrinho.
-	//
-	// É o que permite reencontrá-lo quando a resposta do POST se perde: o
-	// `numeroOrdemCompra` viaja no corpo mas não é filtro de busca, e
-	// `marcadores` é. Sem este carimbo, um timeout entre o POST e a resposta
-	// deixa o pedido existindo no Tiny sem nenhuma forma de achá-lo pela API —
-	// foi o que aconteceu com 2 pedidos pagos em 16/08.
-	//
-	// Best-effort, como a aprovação: falhar aqui não invalida o pedido.
+	// Carimba o vínculo do carrinho. Best-effort, como a aprovação: falhar aqui
+	// não invalida o pedido, mas deixa-o sem âncora de busca — e aí uma retomada
+	// não o reencontra.
 	marker := tinyCartMarker(order.ExternalID)
 	if markErr := t.AddOrderMarker(ctx, orderID, marker); markErr != nil {
 		logger.From(ctx, t.Logger).Warn("failed to tag tiny order with cart marker",
@@ -1918,8 +1881,6 @@ func isStorePickup(carrier string) bool {
 	return strings.EqualFold(strings.TrimSpace(carrier), providers.StorePickupCarrier)
 }
 
-// LaunchOrderStock decrements stock in Tiny for all items in the order.
-// POST /pedidos/{idPedido}/lancar-estoque
 // adoptExistingOrder reencontra, pelo marcador, o pedido que uma tentativa
 // anterior já criou, e o devolve como sucesso.
 //
@@ -1963,43 +1924,12 @@ func (t *Tiny) adoptExistingOrder(ctx context.Context, order ERPOrder) (*OrderRe
 // mesmo valor no corpo do pedido, mas só `marcadores` é filtro de busca na API.
 func tinyCartMarker(cartID string) string { return "lc-cart-" + cartID }
 
-func (t *Tiny) LaunchOrderStock(ctx context.Context, orderID string) error {
-	endpoint := fmt.Sprintf("%s/pedidos/%s/lancar-estoque", tinyAPIBaseURL, orderID)
-
-	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, nil, t.authHeaders())
-	if err != nil {
-		return fmt.Errorf("launching order stock: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusNoContent && !providers.IsSuccessStatus(resp.StatusCode) {
-		var errResp struct {
-			Mensagem string `json:"mensagem"`
-		}
-		_ = json.Unmarshal(body, &errResp)
-
-		// "Estoque já lançado" means Tiny auto-launched stock on order creation — treat as success
-		if strings.Contains(errResp.Mensagem, "já lançado") {
-			logger.From(ctx, t.Logger).Info("stock already launched by Tiny automatically",
-				zap.String("order_id", orderID),
-			)
-			return nil
-		}
-
-		return fmt.Errorf("launch stock failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
-	}
-
-	logger.From(ctx, t.Logger).Info("tiny order stock launched",
-		zap.String("order_id", orderID),
-	)
-	return nil
-}
-
 // ReverseOrderStock returns stock in Tiny for all items in the order.
 // POST /pedidos/{idPedido}/estornar-estoque
 func (t *Tiny) ReverseOrderStock(ctx context.Context, orderID string) error {
 	endpoint := fmt.Sprintf("%s/pedidos/%s/estornar-estoque", tinyAPIBaseURL, orderID)
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, nil, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, nil, t.authHeaders())
 	if err != nil {
 		return fmt.Errorf("reversing order stock: %w", err)
 	}
@@ -2023,7 +1953,7 @@ func (t *Tiny) ApproveOrder(ctx context.Context, orderID string) error {
 		"situacao": 3, // Aprovado
 	}
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, payload, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPut, endpoint, payload, t.authHeaders())
 	if err != nil {
 		return fmt.Errorf("approving order: %w", err)
 	}
@@ -2042,46 +1972,20 @@ func (t *Tiny) ApproveOrder(ctx context.Context, orderID string) error {
 	return nil
 }
 
-// CancelOrder reverses stock and cancels an order in Tiny.
-// Steps: estornar-estoque → situacao=2 (Cancelada)
-func (t *Tiny) CancelOrder(ctx context.Context, orderID string) error {
-	// First reverse stock
-	if err := t.ReverseOrderStock(ctx, orderID); err != nil {
-		// Log but continue — order might not have stock launched yet
-		logger.From(ctx, t.Logger).Warn("failed to reverse stock before cancel, continuing",
-			zap.String("order_id", orderID),
-			zap.Error(err),
-		)
-	}
-
-	// Then cancel the order
-	endpoint := fmt.Sprintf("%s/pedidos/%s/situacao", tinyAPIBaseURL, orderID)
-	payload := map[string]any{
-		"situacao": 2, // Cancelada
-	}
-
-	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, payload, t.authHeaders())
-	if err != nil {
-		return fmt.Errorf("cancelling order: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusNoContent && !providers.IsSuccessStatus(resp.StatusCode) {
-		var errResp struct {
-			Mensagem string `json:"mensagem"`
-		}
-		_ = json.Unmarshal(body, &errResp)
-		return fmt.Errorf("cancel order failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
-	}
-
-	return nil
-}
-
-// UpdateOrderItems replaces the order's item grid via PUT /pedidos/{id}/itens.
+// UpdateOrderItems substitui a grade de itens via PUT /pedidos/{id}/itens.
+//
+// É o coração do fluxo novo: o segundo comentário do mesmo comprador não cria
+// nada, só reenvia a grade completa como ela deve ficar. O Tiny recalcula
+// totais e reajusta a reserva sozinho — medido em 26/08/2026, 1 → 2 unidades
+// levou `reservado` de 4 para 5 e `disponivel` de 1 para 0, com o saldo físico
+// parado em 5.
+//
 // Spec (v3.1): "O corpo substitui os itens atuais; totais, impostos e valores
 // das parcelas existentes são recalculados." — nunca chamar depois de gravar
-// parcelas reais sem reenviá-las. Com estoque lançado o Tiny bloqueia com
-// 400 motivosBloqueio "estoque lançado" (validado em sandbox 11/07): o ciclo
-// obrigatório é estornar-estoque → PUT /itens → lancar-estoque.
+// parcelas reais sem reenviá-las.
+//
+// Um pedido com estoque lançado à mão recusa a edição; isso vira
+// ErrOrderStockLaunched para o chamador poder estornar UMA vez e repetir.
 func (t *Tiny) UpdateOrderItems(ctx context.Context, orderID string, items []providers.ERPOrderItem) error {
 	endpoint := fmt.Sprintf("%s/pedidos/%s/itens", tinyAPIBaseURL, orderID)
 
@@ -2092,14 +1996,21 @@ func (t *Tiny) UpdateOrderItems(ctx context.Context, orderID string, items []pro
 			"produto":       map[string]any{"id": productID},
 			"quantidade":    item.Quantity,
 			"valorUnitario": float64(item.UnitPrice) / 100,
+			"infoAdicional": item.Note,
 		}
 	}
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, map[string]any{"itens": grid}, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPut, endpoint, map[string]any{"itens": grid}, t.authHeaders())
 	if err != nil {
 		return fmt.Errorf("updating order items: %w", err)
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
+		if bloqueioPorEstoqueLancado(body) {
+			return providers.ErrOrderStockLaunched
+		}
+		if bloqueioPorNotaFiscal(body) {
+			return providers.ErrPedidoComNotaFiscal
+		}
 		return fmt.Errorf("update order items failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
 	}
 	logger.From(ctx, t.Logger).Info("tiny order items updated",
@@ -2129,7 +2040,7 @@ func (t *Tiny) UpdateOrderPayment(ctx context.Context, orderID string, payment *
 	// a receber — refinamento futuro: gravar pagamento.formaRecebimento já no
 	// POST da conversão quando o método do checkout for conhecido.
 	parcelas := buildTinyParcelas(payment, nil, nil)
-	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, map[string]any{
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPut, endpoint, map[string]any{
 		"pagamento": map[string]any{"parcelas": parcelas},
 	}, t.authHeaders())
 	if err != nil {
@@ -2152,7 +2063,7 @@ func (t *Tiny) UpdateOrderPayment(ctx context.Context, orderID string, payment *
 // cancelamento é SetOrderSituacao(2) seguido de ReverseOrderStock.
 func (t *Tiny) SetOrderSituacao(ctx context.Context, orderID string, situacao int) error {
 	endpoint := fmt.Sprintf("%s/pedidos/%s/situacao", tinyAPIBaseURL, orderID)
-	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, map[string]any{"situacao": situacao}, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPut, endpoint, map[string]any{"situacao": situacao}, t.authHeaders())
 	if err != nil {
 		return fmt.Errorf("setting order situacao: %w", err)
 	}
@@ -2162,11 +2073,243 @@ func (t *Tiny) SetOrderSituacao(ctx context.Context, orderID string, situacao in
 	return nil
 }
 
-// AddOrderMarker tags the order via POST /pedidos/{id}/marcadores. O marcador
-// lc-cart-<cartID> é a âncora de idempotência do fluxo pedido-como-reserva.
+// bloqueioPorEstoqueLancado reconhece a recusa de edição por estoque lançado.
+//
+// Forma exata capturada contra a API real em 26/08/2026:
+//
+//	400 {"mensagem":"Ocorreram erros de validação",
+//	     "detalhes":[{"campo":"pedido.motivosBloqueio[0]",
+//	                  "mensagem":"estoque lançado"}]}
+//
+// Casa pelo par campo+mensagem em vez de procurar a substring solta no corpo:
+// "estoque lançado" aparece em outras recusas do ERP, e confundi-las liberaria
+// um estorno que infla a reserva de forma irreversível.
+func bloqueioPorEstoqueLancado(body []byte) bool {
+	var resp struct {
+		Detalhes []struct {
+			Campo    string `json:"campo"`
+			Mensagem string `json:"mensagem"`
+		} `json:"detalhes"`
+	}
+	if json.Unmarshal(body, &resp) != nil {
+		return false
+	}
+	for _, d := range resp.Detalhes {
+		if strings.HasPrefix(d.Campo, "pedido.motivosBloqueio") &&
+			strings.Contains(strings.ToLower(d.Mensagem), "estoque lan") {
+			return true
+		}
+	}
+	return false
+}
+
+// bloqueioPorNotaFiscal reconhece a recusa de edição por nota fiscal emitida.
+//
+// Forma exata capturada contra a API real em 27/08/2026, depois de gerar uma
+// nota de verdade:
+//
+//	400 {"mensagem":"Ocorreram erros de validação",
+//	     "detalhes":[{"campo":"pedido.motivosBloqueio[0]",
+//	                  "mensagem":"nota fiscal gerada"}]}
+//
+// Ela ANDA JUNTO do bloqueio por estoque lançado — mesmo campo, mensagem
+// diferente — e é por isso que precisa de reconhecimento próprio: sem ele, a
+// recusa vira erro genérico, e erro genérico é retentado. A mutação ficaria
+// batendo num pedido que nunca mais vai aceitar item.
+//
+// O que ela NÃO pode fazer é cair no ramo do estoque lançado: aquele autoriza o
+// estorno, e estornar um pedido faturado é mexer no que já virou documento.
+// Casar pelo par campo+mensagem, e não pela substring solta, é o que separa os
+// dois.
+func bloqueioPorNotaFiscal(body []byte) bool {
+	var resp struct {
+		Detalhes []struct {
+			Campo    string `json:"campo"`
+			Mensagem string `json:"mensagem"`
+		} `json:"detalhes"`
+	}
+	if json.Unmarshal(body, &resp) != nil {
+		return false
+	}
+	for _, d := range resp.Detalhes {
+		if strings.HasPrefix(d.Campo, "pedido.motivosBloqueio") &&
+			strings.Contains(strings.ToLower(d.Mensagem), "nota fiscal") {
+			return true
+		}
+	}
+	return false
+}
+
+// SetOrderInstallments grava as parcelas do pedido, uma a uma, como o chamador
+// as ditou.
+//
+// A soma tem de fechar com o total do pedido: o ERP não recusa uma divisão que
+// não fecha, ele a substitui pelo total e devolve 204. Ver ERPInstallment.
+func (t *Tiny) SetOrderInstallments(ctx context.Context, orderID string, parcelas []providers.ERPInstallment) error {
+	if len(parcelas) == 0 {
+		return nil
+	}
+	endpoint := fmt.Sprintf("%s/pedidos/%s", tinyAPIBaseURL, orderID)
+
+	emissao := time.Now().In(tinyLocation)
+	lista := make([]map[string]any, 0, len(parcelas))
+	for _, p := range parcelas {
+		dias := int(p.DueDate.Sub(emissao).Hours() / 24)
+		if dias < 0 {
+			dias = 0
+		}
+		lista = append(lista, map[string]any{
+			"dias":        dias,
+			"data":        p.DueDate.Format("2006-01-02"),
+			"valor":       float64(p.AmountCents) / 100,
+			"observacoes": p.Note,
+		})
+	}
+
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPut, endpoint,
+		map[string]any{"pagamento": map[string]any{"parcelas": lista}}, t.authHeaders())
+	if err != nil {
+		return fmt.Errorf("setting order installments: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return fmt.Errorf("set order installments failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+	}
+	logger.From(ctx, t.Logger).Info("tiny order installments rewritten",
+		zap.String("order_id", orderID),
+		zap.Int("parcelas", len(lista)),
+	)
+	return nil
+}
+
+// GetOrderTotal lê o total do pedido e diz se há nota fiscal atrelada.
+//
+// `idNotaFiscal` é o sinal confiável de documento fiscal; a situação não é.
+// Medido em 27/08/2026, gerando uma nota de verdade: a emissão leva o pedido
+// para a situação 4 ("Preparando envio"), nunca para a 1 ("Faturada"). Quem
+// esperasse o 1 acharia a porta aberta com a nota já emitida.
+//
+// Com nota real o próprio ERP recusa a edição — `400 motivosBloqueio: "nota
+// fiscal gerada"`. Uma medição anterior, em que a situação foi posta em
+// "Faturada" à mão e o idNotaFiscal seguia 0, tinha devolvido 204: a situação
+// sozinha não bloqueia nada, o documento é que bloqueia.
+func (t *Tiny) GetOrderTotal(ctx context.Context, orderID string) (int64, bool, error) {
+	endpoint := fmt.Sprintf("%s/pedidos/%s", tinyAPIBaseURL, orderID)
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return 0, false, fmt.Errorf("reading order total: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return 0, false, fmt.Errorf("read order total failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+	}
+	var out struct {
+		Total        float64     `json:"valorTotalPedido"`
+		IDNotaFiscal json.Number `json:"idNotaFiscal"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return 0, false, fmt.Errorf("parsing order total: %w", err)
+	}
+	nf, _ := out.IDNotaFiscal.Int64()
+	return int64(math.Round(out.Total * 100)), nf > 0, nil
+}
+
+// GetOrderItems lê a grade atual do pedido, com a informação adicional de cada
+// linha — é ela que diz quem escreveu aquela linha.
+//
+// Necessária porque a escrita é SUBSTITUIÇÃO: sem reler antes, toda linha que o
+// lojista tenha acrescentado pelo painel é apagada em silêncio na próxima
+// mutação, junto com o estoque que ela segurava.
+func (t *Tiny) GetOrderItems(ctx context.Context, orderID string) ([]providers.ERPOrderItem, error) {
+	endpoint := fmt.Sprintf("%s/pedidos/%s", tinyAPIBaseURL, orderID)
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return nil, fmt.Errorf("reading order items: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return nil, fmt.Errorf("read order items failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+	}
+	var out struct {
+		Itens []struct {
+			Produto struct {
+				ID        int64  `json:"id"`
+				Descricao string `json:"descricao"`
+			} `json:"produto"`
+			Quantidade    float64 `json:"quantidade"`
+			ValorUnitario float64 `json:"valorUnitario"`
+			InfoAdicional string  `json:"infoAdicional"`
+		} `json:"itens"`
+		// A mesma resposta já traz o sinal de documento fiscal. Lê-lo aqui não
+		// custa chamada nenhuma — e esta leitura acontece antes de TODA escrita,
+		// que é exatamente onde a recusa precisa estar.
+		IDNotaFiscal json.Number `json:"idNotaFiscal"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parsing order items: %w", err)
+	}
+	if nf, _ := out.IDNotaFiscal.Int64(); nf > 0 {
+		return nil, fmt.Errorf("pedido %s tem a nota %d: %w", orderID, nf, providers.ErrPedidoComNotaFiscal)
+	}
+	itens := make([]providers.ERPOrderItem, 0, len(out.Itens))
+	for _, it := range out.Itens {
+		itens = append(itens, providers.ERPOrderItem{
+			ProductID: strconv.FormatInt(it.Produto.ID, 10),
+			Name:      it.Produto.Descricao,
+			Quantity:  int(it.Quantidade),
+			UnitPrice: int64(math.Round(it.ValorUnitario * 100)),
+			Note:      it.InfoAdicional,
+		})
+	}
+	return itens, nil
+}
+
+// GetOrderSituacao lê a situação atual do pedido (GET /pedidos/{id}).
+//
+// O rastreamento vive de webhook, e webhook se perde: o Tiny tenta dez vezes e
+// desiste. Esta é a leitura que fecha a diferença — a varredura pergunta o
+// estágio de quem parou de se mexer.
+func (t *Tiny) GetOrderSituacao(ctx context.Context, orderID string) (int, error) {
+	endpoint := fmt.Sprintf("%s/pedidos/%s", tinyAPIBaseURL, orderID)
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return 0, fmt.Errorf("reading order situation: %w", err)
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return 0, fmt.Errorf("read order situation failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+	}
+	var out struct {
+		Situacao *int `json:"situacao"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return 0, fmt.Errorf("parsing order situation: %w", err)
+	}
+	if out.Situacao == nil {
+		// Ausente é diferente de zero: zero é "Em aberto", um estágio real.
+		return 0, fmt.Errorf("pedido %s veio sem o campo situacao", orderID)
+	}
+	return *out.Situacao, nil
+}
+
+// FindOrderIDByMarker resolves an order by marker via GET /pedidos?marcadores=.
+// Match exato com read-after-write de ~300ms (sandbox T8; a forma com
+// colchetes `marcadores[]=` NÃO funciona). Retorna "" quando não encontrado.
+// AddOrderMarker carimba o pedido com o vínculo do carrinho
+// (POST /pedidos/{id}/marcadores).
+//
+// 🔴 Esta escrita PARECE redundante e não é. O mesmo valor já viaja no
+// `numeroOrdemCompra` do corpo do pedido, e é tentador poupar a chamada
+// buscando por lá — o teto da conta é de 30 escritas por minuto, e numa live
+// cada escrita conta.
+//
+// Só que `GET /pedidos?numeroOrdemCompra=` é IGNORADO em silêncio: devolve 200 e
+// a conta inteira, sem filtrar nada. Medido em 26/08/2026 — uma busca por uma
+// âncora inexistente devolveu os 92 pedidos da conta, com o primeiro parecendo
+// um resultado legítimo. Numa live simulada isso vinculou o pedido de um
+// comprador ao carrinho de outro.
+//
+// `marcadores` filtra de verdade: 0 resultados para valor inexistente, 1 exato
+// para o que existe. É por isso que o carimbo continua aqui.
 func (t *Tiny) AddOrderMarker(ctx context.Context, orderID, marker string) error {
 	endpoint := fmt.Sprintf("%s/pedidos/%s/marcadores", tinyAPIBaseURL, orderID)
-	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, []map[string]any{{"descricao": marker}}, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, []map[string]any{{"descricao": marker}}, t.authHeaders())
 	if err != nil {
 		return fmt.Errorf("adding order marker: %w", err)
 	}
@@ -2176,10 +2319,8 @@ func (t *Tiny) AddOrderMarker(ctx context.Context, orderID, marker string) error
 	return nil
 }
 
-// FindOrderIDByMarker resolves an order by marker via GET /pedidos?marcadores=.
-// Match exato com read-after-write de ~300ms (sandbox T8; a forma com
-// colchetes `marcadores[]=` NÃO funciona). Retorna "" quando não encontrado.
 func (t *Tiny) FindOrderIDByMarker(ctx context.Context, marker string) (string, error) {
+	// `marcadores`, e não `numeroOrdemCompra` — ver a nota em AddOrderMarker.
 	endpoint := fmt.Sprintf("%s/pedidos?marcadores=%s", tinyAPIBaseURL, url.QueryEscape(marker))
 	resp, body, err := t.DoRequestWithRetry(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
 	if err != nil {
@@ -2194,7 +2335,7 @@ func (t *Tiny) FindOrderIDByMarker(ctx context.Context, marker string) (string, 
 		} `json:"itens"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("parsing marker search response: %w", err)
+		return "", fmt.Errorf("parsing order search response: %w", err)
 	}
 	if len(result.Itens) == 0 {
 		return "", nil
@@ -2202,102 +2343,35 @@ func (t *Tiny) FindOrderIDByMarker(ctx context.Context, marker string) (string, 
 	return strconv.FormatInt(result.Itens[0].ID, 10), nil
 }
 
-// ReserveStock creates a manual stock exit (tipo S) in Tiny for the given product.
-// POST /estoque/{idProduto} — returns the movement ID (idLancamento).
+// ReverseLegacyStockExit devolve ao estoque uma saída manual criada pelo modelo
+// ANTIGO (POST /estoque tipo E, a entrada que compensa a saída tipo S).
 //
-// Retenta, mas NÃO em tudo — e a distinção é a coisa mais importante desta
-// função. Este POST CRIA um lançamento: não é idempotente, e a API do Tiny não
-// oferece consulta de lançamentos (só criar e estornar), então não há como
-// perguntar depois "chegou?".
+// Existe por uma razão só, e ela tem prazo: no instante do corte havia 690
+// unidades da cantodaart seguradas por 462 saídas manuais, e alguém precisa
+// devolvê-las depois que o pedido de venda assumir a guarda. Fora da drenagem,
+// nada no sistema deve chamar isto — a catraca em conventions garante.
 //
-// Numa falha de discagem — conexão recusada, host não resolvido, rede
-// inalcançável — a requisição comprovadamente não chegou à aplicação do Tiny, e
-// repetir é seguro. Num TIMEOUT não se sabe: o Tiny pode ter processado a saída
-// e demorado a responder. Repetir ali cria um SEGUNDO lançamento, e o índice
-// único de reserva ativa por cart+produto garante que só um seria registrado do
-// nosso lado — o outro fica órfão, retirando do Tiny estoque que ninguém
-// comprou, e o estorno da expiração devolve só um.
-//
-// Perder a reserva é ruim e detectável. Criar uma reserva fantasma é ruim,
-// invisível e permanente. Enquanto não existir estado `pending` para retomar a
-// tentativa com segurança, o timeout sobe como erro.
-func (t *Tiny) ReserveStock(ctx context.Context, productID string, qty int, unitPrice float64, obs string) (string, error) {
-	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
-	payload := map[string]any{
-		"tipo":          "S",
-		"quantidade":    qty,
-		"precoUnitario": unitPrice,
-		"observacoes":   obs,
-	}
-
-	resp, body, err := t.postComRetryDeDiscagem(ctx, endpoint, payload)
-	if err != nil {
-		// Falha de discagem que sobreviveu ao retry: nenhum byte chegou à
-		// aplicação do Tiny. O sentinela diz ao ledger que re-executar é seguro.
-		if falhaDeDiscagem(err) {
-			return "", fmt.Errorf("reserving stock: %w", errors.Join(providers.ErrProvenUndelivered, err))
-		}
-		return "", fmt.Errorf("reserving stock: %w", err)
-	}
-
-	if !providers.IsSuccessStatus(resp.StatusCode) {
-		var errResp struct {
-			Mensagem string `json:"mensagem"`
-		}
-		_ = json.Unmarshal(body, &errResp)
-		reject := fmt.Errorf("reserve stock failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
-		// 4xx é recusa de validação: o Tiny processou e disse não ANTES de
-		// aplicar. Provado não-aplicado; repetível (vai falhar igual até a causa
-		// ser corrigida, e o teto de tentativas para o loop).
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			return "", errors.Join(providers.ErrProvenUndelivered, reject)
-		}
-		// 5xx fica ambíguo de propósito: o servidor respondeu, e pode ter
-		// aplicado antes de quebrar.
-		return "", reject
-	}
-
-	var result struct {
-		IDLancamento int64 `json:"idLancamento"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("parsing reserve stock response: %w", err)
-	}
-
-	return strconv.FormatInt(result.IDLancamento, 10), nil
-}
-
-// ReverseStockReservation creates a manual stock entry (tipo E) in Tiny for the given product.
-// POST /estoque/{idProduto} — returns the movement ID (idLancamento).
-func (t *Tiny) ReverseStockReservation(ctx context.Context, productID string, qty int, unitPrice float64, obs string) (string, error) {
+// Quando a drenagem tiver rodado e a tabela stock_reservations estiver vazia,
+// este método e a rota que ele usa saem juntos.
+func (t *Tiny) ReverseLegacyStockExit(ctx context.Context, productID string, qty int, obs string) (string, error) {
 	endpoint := fmt.Sprintf("%s/estoque/%s", tinyAPIBaseURL, productID)
 	payload := map[string]any{
 		"tipo":          "E",
 		"quantidade":    qty,
-		"precoUnitario": unitPrice,
+		"precoUnitario": 0,
 		"observacoes":   obs,
 	}
-
-	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, payload, t.authHeaders())
 	if err != nil {
-		return "", fmt.Errorf("reversing stock reservation: %w", err)
+		return "", fmt.Errorf("reversing legacy stock exit: %w", err)
 	}
-
 	if !providers.IsSuccessStatus(resp.StatusCode) {
-		var errResp struct {
-			Mensagem string `json:"mensagem"`
-		}
-		_ = json.Unmarshal(body, &errResp)
-		return "", fmt.Errorf("reverse stock reservation failed: status %d, message: %s", resp.StatusCode, errResp.Mensagem)
+		return "", fmt.Errorf("reverse legacy stock exit failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
 	}
-
 	var result struct {
 		IDLancamento int64 `json:"idLancamento"`
 	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("parsing reverse stock response: %w", err)
-	}
-
+	_ = json.Unmarshal(body, &result)
 	return strconv.FormatInt(result.IDLancamento, 10), nil
 }
 
@@ -2383,7 +2457,7 @@ func (t *Tiny) CreateContact(ctx context.Context, contact ERPContactInput) (*ERP
 		payload["celular"] = contact.Phone
 	}
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPost, endpoint, payload, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, payload, t.authHeaders())
 	if err != nil {
 		return nil, fmt.Errorf("creating contact: %w", err)
 	}
@@ -2526,7 +2600,7 @@ func (t *Tiny) UpdateContact(ctx context.Context, contactID string, contact ERPC
 		return nil
 	}
 
-	resp, body, err := t.DoRequest(ctx, http.MethodPut, endpoint, payload, t.authHeaders())
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPut, endpoint, payload, t.authHeaders())
 	if err != nil {
 		return fmt.Errorf("updating contact: %w", err)
 	}

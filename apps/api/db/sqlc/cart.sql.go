@@ -67,7 +67,7 @@ SET status = 'cancelled', cancelled_reason = 'store_cancelled'
 WHERE carts.id = $1
   AND status IN ('active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents
 `
 
 // Cancelamento MANUAL pelo lojista (LIV-84). Mesmo desenho guard-first do
@@ -143,6 +143,10 @@ func (q *Queries) CancelCart(ctx context.Context, id pgtype.UUID) (Cart, error) 
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
@@ -231,7 +235,7 @@ const createCart = `-- name: CreateCart :one
 
 INSERT INTO carts (event_id, session_id, platform_user_id, platform_handle, token, status, expires_at, customer_id, short_id, store_id, never_expires)
 VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, $10)
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents
 `
 
 type CreateCartParams struct {
@@ -322,6 +326,10 @@ func (q *Queries) CreateCart(ctx context.Context, arg CreateCartParams) (Cart, e
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
@@ -329,7 +337,7 @@ func (q *Queries) CreateCart(ctx context.Context, arg CreateCartParams) (Cart, e
 const createCartItem = `-- name: CreateCartItem :one
 INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id
+RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id, paid_quantity
 `
 
 type CreateCartItemParams struct {
@@ -359,6 +367,7 @@ func (q *Queries) CreateCartItem(ctx context.Context, arg CreateCartItemParams) 
 		&i.UnitPrice,
 		&i.WaitlistedQuantity,
 		&i.SessionID,
+		&i.PaidQuantity,
 	)
 	return i, err
 }
@@ -434,7 +443,7 @@ WHERE carts.id = $1
         AND (wi.status = 'waiting'
              OR (wi.status = 'notified' AND wi.expires_at > now()))
   )
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents
 `
 
 // Flip idempotente e guard-first do worker de expiração. O guard vive DENTRO do
@@ -523,6 +532,10 @@ func (q *Queries) ExpireCart(ctx context.Context, id pgtype.UUID) (Cart, error) 
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
@@ -658,7 +671,7 @@ func (q *Queries) FinalizeCartsByEvent(ctx context.Context, arg FinalizeCartsByE
 
 const findCartByExternalOrderID = `-- name: FindCartByExternalOrderID :one
 
-SELECT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, c.shipping_service_id, c.shipping_service_name, c.shipping_carrier, c.shipping_cost_cents, c.shipping_cost_real_cents, c.shipping_deadline_days, c.shipping_quoted_at, c.shipping_provider, c.last_shipping_quote_options, c.last_shipping_quote_at, c.card_brand, c.card_last_four, c.card_installments, c.card_authorization_code, c.initial_snapshot_taken_at, c.initial_subtotal_cents, c.short_id, c.coupon_id, c.coupon_code, c.coupon_discount_cents, c.cancelled_reason, c.whatsapp_consent, c.whatsapp_consent_at, c.erp_order_state, c.erp_stock_launched, c.erp_op_started_at, c.cancellation_reverted_at, c.pix_charge_id, c.pix_amount_cents, c.never_expires, c.store_id, le.store_id
+SELECT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, c.shipping_service_id, c.shipping_service_name, c.shipping_carrier, c.shipping_cost_cents, c.shipping_cost_real_cents, c.shipping_deadline_days, c.shipping_quoted_at, c.shipping_provider, c.last_shipping_quote_options, c.last_shipping_quote_at, c.card_brand, c.card_last_four, c.card_installments, c.card_authorization_code, c.initial_snapshot_taken_at, c.initial_subtotal_cents, c.short_id, c.coupon_id, c.coupon_code, c.coupon_discount_cents, c.cancelled_reason, c.whatsapp_consent, c.whatsapp_consent_at, c.erp_order_state, c.erp_stock_launched, c.erp_op_started_at, c.cancellation_reverted_at, c.pix_charge_id, c.pix_amount_cents, c.never_expires, c.store_id, c.erp_order_status, c.erp_order_status_at, c.erp_order_number, c.paid_amount_cents, le.store_id
 FROM carts c
 JOIN live_events le ON le.id = c.event_id
 WHERE c.external_order_id = $1
@@ -730,6 +743,10 @@ type FindCartByExternalOrderIDRow struct {
 	PixAmountCents           pgtype.Int8        `json:"pix_amount_cents"`
 	NeverExpires             bool               `json:"never_expires"`
 	StoreID                  pgtype.UUID        `json:"store_id"`
+	ErpOrderStatus           pgtype.Text        `json:"erp_order_status"`
+	ErpOrderStatusAt         pgtype.Timestamptz `json:"erp_order_status_at"`
+	ErpOrderNumber           pgtype.Text        `json:"erp_order_number"`
+	PaidAmountCents          int64              `json:"paid_amount_cents"`
 	StoreID_2                pgtype.UUID        `json:"store_id_2"`
 }
 
@@ -804,6 +821,10 @@ func (q *Queries) FindCartByExternalOrderID(ctx context.Context, arg FindCartByE
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 		&i.StoreID_2,
 	)
 	return i, err
@@ -848,7 +869,7 @@ func (q *Queries) FindOpenCartUserIDByHandle(ctx context.Context, arg FindOpenCa
 }
 
 const getCartByCheckoutID = `-- name: GetCartByCheckoutID :one
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id FROM carts WHERE checkout_id = $1
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents FROM carts WHERE checkout_id = $1
 `
 
 // Used by webhook to find cart when payment is confirmed
@@ -913,13 +934,17 @@ func (q *Queries) GetCartByCheckoutID(ctx context.Context, checkoutID pgtype.Tex
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
 
 const getCartByEventAndUser = `-- name: GetCartByEventAndUser :one
 
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id FROM carts
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents FROM carts
 WHERE event_id = $1 AND platform_user_id = $2
   AND status IN ('pending', 'active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
@@ -1005,12 +1030,16 @@ func (q *Queries) GetCartByEventAndUser(ctx context.Context, arg GetCartByEventA
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
 
 const getCartByEventAndUserForUpdate = `-- name: GetCartByEventAndUserForUpdate :one
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id FROM carts
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents FROM carts
 WHERE event_id = $1 AND platform_user_id = $2
   AND status IN ('pending', 'active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
@@ -1088,12 +1117,16 @@ func (q *Queries) GetCartByEventAndUserForUpdate(ctx context.Context, arg GetCar
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
 
 const getCartByID = `-- name: GetCartByID :one
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id FROM carts WHERE id = $1
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents FROM carts WHERE id = $1
 `
 
 func (q *Queries) GetCartByID(ctx context.Context, id pgtype.UUID) (Cart, error) {
@@ -1157,12 +1190,16 @@ func (q *Queries) GetCartByID(ctx context.Context, id pgtype.UUID) (Cart, error)
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
 
 const getCartByToken = `-- name: GetCartByToken :one
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id FROM carts WHERE token = $1
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents FROM carts WHERE token = $1
 `
 
 func (q *Queries) GetCartByToken(ctx context.Context, token string) (Cart, error) {
@@ -1226,6 +1263,10 @@ func (q *Queries) GetCartByToken(ctx context.Context, token string) (Cart, error
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
@@ -1367,21 +1408,56 @@ func (q *Queries) GetCartCommissionBaseCents(ctx context.Context, cartID pgtype.
 	return base_cents, err
 }
 
+const getCartERPOpAge = `-- name: GetCartERPOpAge :one
+SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - erp_op_started_at)), 0)::float8
+FROM carts WHERE id = $1
+`
+
+// Há quanto tempo a operação ERP em curso começou, em segundos.
+//
+// Separa "criação em voo agora" de "criação que morreu no meio" — no estado as
+// duas são idênticas ('converting' sem pedido), e só o relógio as distingue.
+// Zero quando não há marca, que é o caso de quem nunca começou.
+func (q *Queries) GetCartERPOpAge(ctx context.Context, id pgtype.UUID) (float64, error) {
+	row := q.db.QueryRow(ctx, getCartERPOpAge, id)
+	var column_1 float64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const getCartERPOrderState = `-- name: GetCartERPOrderState :one
-SELECT erp_order_state, erp_stock_launched, COALESCE(external_order_id,'') AS external_order_id
+SELECT erp_order_state, erp_stock_launched, COALESCE(external_order_id,'') AS external_order_id,
+       COALESCE(erp_order_status,'') AS erp_order_status,
+       paid_amount_cents,
+       COALESCE(paid_at, created_at) AS paid_at
 FROM carts WHERE id = $1
 `
 
 type GetCartERPOrderStateRow struct {
-	ErpOrderState    string `json:"erp_order_state"`
-	ErpStockLaunched bool   `json:"erp_stock_launched"`
-	ExternalOrderID  string `json:"external_order_id"`
+	ErpOrderState    string             `json:"erp_order_state"`
+	ErpStockLaunched bool               `json:"erp_stock_launched"`
+	ExternalOrderID  string             `json:"external_order_id"`
+	ErpOrderStatus   string             `json:"erp_order_status"`
+	PaidAmountCents  int64              `json:"paid_amount_cents"`
+	PaidAt           pgtype.Timestamptz `json:"paid_at"`
 }
 
+// A situação do pedido e o quanto já foi pago vêm na MESMA linha, de propósito.
+// A situação diz se o pedido ainda recebe item (pago, não faturado) ou se já
+// virou nota; o valor pago é o que separa, nas parcelas do ERP, o que entrou do
+// que falta. Buscá-los à parte custaria duas leituras a mais no caminho mais
+// quente da live.
 func (q *Queries) GetCartERPOrderState(ctx context.Context, id pgtype.UUID) (GetCartERPOrderStateRow, error) {
 	row := q.db.QueryRow(ctx, getCartERPOrderState, id)
 	var i GetCartERPOrderStateRow
-	err := row.Scan(&i.ErpOrderState, &i.ErpStockLaunched, &i.ExternalOrderID)
+	err := row.Scan(
+		&i.ErpOrderState,
+		&i.ErpStockLaunched,
+		&i.ExternalOrderID,
+		&i.ErpOrderStatus,
+		&i.PaidAmountCents,
+		&i.PaidAt,
+	)
 	return i, err
 }
 
@@ -1398,7 +1474,7 @@ func (q *Queries) GetCartGMVCents(ctx context.Context, cartID pgtype.UUID) (int6
 }
 
 const getCartItem = `-- name: GetCartItem :one
-SELECT id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id FROM cart_items WHERE id = $1
+SELECT id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id, paid_quantity FROM cart_items WHERE id = $1
 `
 
 func (q *Queries) GetCartItem(ctx context.Context, id pgtype.UUID) (CartItem, error) {
@@ -1412,6 +1488,7 @@ func (q *Queries) GetCartItem(ctx context.Context, id pgtype.UUID) (CartItem, er
 		&i.UnitPrice,
 		&i.WaitlistedQuantity,
 		&i.SessionID,
+		&i.PaidQuantity,
 	)
 	return i, err
 }
@@ -1458,11 +1535,14 @@ func (q *Queries) GetCartTotals(ctx context.Context, pCartID pgtype.UUID) (GetCa
 }
 
 const getEternalCartByStoreAndHandleForUpdate = `-- name: GetEternalCartByStoreAndHandleForUpdate :one
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id FROM carts
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents FROM carts
 WHERE store_id = $1 AND platform_handle = $2
   AND never_expires
-  AND status IN ('pending', 'active', 'checkout')
-  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND status IN ('pending', 'active', 'checkout', 'paid')
+  AND (payment_status IS NULL OR payment_status <> 'refunded')
+  AND (erp_order_status IS NULL OR erp_order_status NOT IN (
+        'preparando_envio', 'faturado', 'pronto_envio', 'enviado', 'entregue',
+        'nao_entregue', 'cancelado'))
 ORDER BY created_at DESC
 LIMIT 1
 FOR UPDATE
@@ -1476,6 +1556,23 @@ type GetEternalCartByStoreAndHandleForUpdateParams struct {
 // Resolução do carrinho ETERNO do VIP: por (loja, @), ATRAVESSANDO eventos.
 // É isto que faz a compra do VIP num evento novo cair no MESMO carrinho de um
 // evento anterior. FOR UPDATE serializa dois comentários concorrentes do VIP.
+//
+// O carrinho PAGO continua sendo o mesmo carrinho, e essa é a regra que o
+// lojista pediu por extenso: pagou na live de segunda, pediu mais uma coisa na
+// quinta, sai numa caixa só — um frete, uma nota. Enquanto o pedido não virou
+// documento fiscal ele ainda recebe item, e o que entrou depois do pagamento
+// fica separado por cart_items.paid_at (ver migration 000140).
+//
+// O FATURAMENTO é o portão. Depois dele a nota existe, e somar item seria emitir
+// nota errada — então a compra de quinta abre um pedido NOVO. Note que o ERP não
+// impõe esse limite: em 26/08/2026 ele aceitou (204) editar os itens de um
+// pedido "Faturada". A recusa é nossa.
+//
+// 'preparando_envio' está na lista de fechados apesar do nome e apesar de a
+// lista do enum o colocar ANTES de 'faturado': na operação o pedido só entra em
+// preparo depois de a nota sair. Ver ERPOrderStatus.FechadoParaNovosItens.
+//
+// Estornado fica de fora pelo motivo oposto: não há venda a que somar.
 func (q *Queries) GetEternalCartByStoreAndHandleForUpdate(ctx context.Context, arg GetEternalCartByStoreAndHandleForUpdateParams) (Cart, error) {
 	row := q.db.QueryRow(ctx, getEternalCartByStoreAndHandleForUpdate, arg.StoreID, arg.PlatformHandle)
 	var i Cart
@@ -1537,6 +1634,10 @@ func (q *Queries) GetEternalCartByStoreAndHandleForUpdate(ctx context.Context, a
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
@@ -1906,7 +2007,7 @@ func (q *Queries) ListCartItemEventsForCart(ctx context.Context, cartID pgtype.U
 }
 
 const listCartItems = `-- name: ListCartItems :many
-SELECT ci.id, ci.cart_id, ci.product_id, ci.quantity, ci.unit_price, ci.waitlisted_quantity, ci.session_id, p.name AS product_name, p.image_url AS product_image_url
+SELECT ci.id, ci.cart_id, ci.product_id, ci.quantity, ci.unit_price, ci.waitlisted_quantity, ci.session_id, ci.paid_quantity, p.name AS product_name, p.image_url AS product_image_url
 FROM cart_items ci
 JOIN products p ON p.id = ci.product_id
 WHERE ci.cart_id = $1
@@ -1920,6 +2021,7 @@ type ListCartItemsRow struct {
 	UnitPrice          pgtype.Int8 `json:"unit_price"`
 	WaitlistedQuantity int32       `json:"waitlisted_quantity"`
 	SessionID          pgtype.UUID `json:"session_id"`
+	PaidQuantity       int32       `json:"paid_quantity"`
 	ProductName        string      `json:"product_name"`
 	ProductImageUrl    pgtype.Text `json:"product_image_url"`
 }
@@ -1941,6 +2043,7 @@ func (q *Queries) ListCartItems(ctx context.Context, cartID pgtype.UUID) ([]List
 			&i.UnitPrice,
 			&i.WaitlistedQuantity,
 			&i.SessionID,
+			&i.PaidQuantity,
 			&i.ProductName,
 			&i.ProductImageUrl,
 		); err != nil {
@@ -2021,7 +2124,7 @@ func (q *Queries) ListCartItemsForCheckout(ctx context.Context, cartID pgtype.UU
 
 const listCartsByCustomer = `-- name: ListCartsByCustomer :many
 SELECT
-    c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, c.shipping_service_id, c.shipping_service_name, c.shipping_carrier, c.shipping_cost_cents, c.shipping_cost_real_cents, c.shipping_deadline_days, c.shipping_quoted_at, c.shipping_provider, c.last_shipping_quote_options, c.last_shipping_quote_at, c.card_brand, c.card_last_four, c.card_installments, c.card_authorization_code, c.initial_snapshot_taken_at, c.initial_subtotal_cents, c.short_id, c.coupon_id, c.coupon_code, c.coupon_discount_cents, c.cancelled_reason, c.whatsapp_consent, c.whatsapp_consent_at, c.erp_order_state, c.erp_stock_launched, c.erp_op_started_at, c.cancellation_reverted_at, c.pix_charge_id, c.pix_amount_cents, c.never_expires, c.store_id,
+    c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, c.shipping_service_id, c.shipping_service_name, c.shipping_carrier, c.shipping_cost_cents, c.shipping_cost_real_cents, c.shipping_deadline_days, c.shipping_quoted_at, c.shipping_provider, c.last_shipping_quote_options, c.last_shipping_quote_at, c.card_brand, c.card_last_four, c.card_installments, c.card_authorization_code, c.initial_snapshot_taken_at, c.initial_subtotal_cents, c.short_id, c.coupon_id, c.coupon_code, c.coupon_discount_cents, c.cancelled_reason, c.whatsapp_consent, c.whatsapp_consent_at, c.erp_order_state, c.erp_stock_launched, c.erp_op_started_at, c.cancellation_reverted_at, c.pix_charge_id, c.pix_amount_cents, c.never_expires, c.store_id, c.erp_order_status, c.erp_order_status_at, c.erp_order_number, c.paid_amount_cents,
     cart_product_total_cents(c.id) AS total_value,
     COALESCE(SUM(ci.quantity), 0)::int AS total_items
 FROM carts c
@@ -2096,6 +2199,10 @@ type ListCartsByCustomerRow struct {
 	PixAmountCents           pgtype.Int8        `json:"pix_amount_cents"`
 	NeverExpires             bool               `json:"never_expires"`
 	StoreID                  pgtype.UUID        `json:"store_id"`
+	ErpOrderStatus           pgtype.Text        `json:"erp_order_status"`
+	ErpOrderStatusAt         pgtype.Timestamptz `json:"erp_order_status_at"`
+	ErpOrderNumber           pgtype.Text        `json:"erp_order_number"`
+	PaidAmountCents          int64              `json:"paid_amount_cents"`
 	TotalValue               int64              `json:"total_value"`
 	TotalItems               int32              `json:"total_items"`
 }
@@ -2168,6 +2275,10 @@ func (q *Queries) ListCartsByCustomer(ctx context.Context, arg ListCartsByCustom
 			&i.PixAmountCents,
 			&i.NeverExpires,
 			&i.StoreID,
+			&i.ErpOrderStatus,
+			&i.ErpOrderStatusAt,
+			&i.ErpOrderNumber,
+			&i.PaidAmountCents,
 			&i.TotalValue,
 			&i.TotalItems,
 		); err != nil {
@@ -2182,7 +2293,7 @@ func (q *Queries) ListCartsByCustomer(ctx context.Context, arg ListCartsByCustom
 }
 
 const listCartsByEvent = `-- name: ListCartsByEvent :many
-SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id FROM carts WHERE event_id = $1 ORDER BY created_at
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents FROM carts WHERE event_id = $1 ORDER BY created_at
 `
 
 func (q *Queries) ListCartsByEvent(ctx context.Context, eventID pgtype.UUID) ([]Cart, error) {
@@ -2252,6 +2363,10 @@ func (q *Queries) ListCartsByEvent(ctx context.Context, eventID pgtype.UUID) ([]
 			&i.PixAmountCents,
 			&i.NeverExpires,
 			&i.StoreID,
+			&i.ErpOrderStatus,
+			&i.ErpOrderStatusAt,
+			&i.ErpOrderNumber,
+			&i.PaidAmountCents,
 		); err != nil {
 			return nil, err
 		}
@@ -2340,7 +2455,7 @@ func (q *Queries) ListCartsWithTotalByEvent(ctx context.Context, eventID pgtype.
 }
 
 const listExpiredCartsByEventAndProduct = `-- name: ListExpiredCartsByEventAndProduct :many
-SELECT DISTINCT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, c.shipping_service_id, c.shipping_service_name, c.shipping_carrier, c.shipping_cost_cents, c.shipping_cost_real_cents, c.shipping_deadline_days, c.shipping_quoted_at, c.shipping_provider, c.last_shipping_quote_options, c.last_shipping_quote_at, c.card_brand, c.card_last_four, c.card_installments, c.card_authorization_code, c.initial_snapshot_taken_at, c.initial_subtotal_cents, c.short_id, c.coupon_id, c.coupon_code, c.coupon_discount_cents, c.cancelled_reason, c.whatsapp_consent, c.whatsapp_consent_at, c.erp_order_state, c.erp_stock_launched, c.erp_op_started_at, c.cancellation_reverted_at, c.pix_charge_id, c.pix_amount_cents, c.never_expires, c.store_id, le.store_id
+SELECT DISTINCT c.id, c.event_id, c.platform_user_id, c.platform_handle, c.token, c.status, c.checkout_url, c.payment_integration_id, c.external_order_id, c.payment_status, c.paid_at, c.notify_status, c.notify_error, c.notified_at, c.created_at, c.expires_at, c.session_id, c.checkout_id, c.checkout_expires_at, c.customer_email, c.payment_method, c.customer_name, c.customer_document, c.customer_phone, c.shipping_address, c.customer_id, c.shipping_service_id, c.shipping_service_name, c.shipping_carrier, c.shipping_cost_cents, c.shipping_cost_real_cents, c.shipping_deadline_days, c.shipping_quoted_at, c.shipping_provider, c.last_shipping_quote_options, c.last_shipping_quote_at, c.card_brand, c.card_last_four, c.card_installments, c.card_authorization_code, c.initial_snapshot_taken_at, c.initial_subtotal_cents, c.short_id, c.coupon_id, c.coupon_code, c.coupon_discount_cents, c.cancelled_reason, c.whatsapp_consent, c.whatsapp_consent_at, c.erp_order_state, c.erp_stock_launched, c.erp_op_started_at, c.cancellation_reverted_at, c.pix_charge_id, c.pix_amount_cents, c.never_expires, c.store_id, c.erp_order_status, c.erp_order_status_at, c.erp_order_number, c.paid_amount_cents, le.store_id
 FROM carts c
 JOIN live_events le ON le.id = c.event_id
 JOIN cart_items ci ON ci.cart_id = c.id
@@ -2415,6 +2530,10 @@ type ListExpiredCartsByEventAndProductRow struct {
 	PixAmountCents           pgtype.Int8        `json:"pix_amount_cents"`
 	NeverExpires             bool               `json:"never_expires"`
 	StoreID                  pgtype.UUID        `json:"store_id"`
+	ErpOrderStatus           pgtype.Text        `json:"erp_order_status"`
+	ErpOrderStatusAt         pgtype.Timestamptz `json:"erp_order_status_at"`
+	ErpOrderNumber           pgtype.Text        `json:"erp_order_number"`
+	PaidAmountCents          int64              `json:"paid_amount_cents"`
 	StoreID_2                pgtype.UUID        `json:"store_id_2"`
 }
 
@@ -2486,6 +2605,10 @@ func (q *Queries) ListExpiredCartsByEventAndProduct(ctx context.Context, arg Lis
 			&i.PixAmountCents,
 			&i.NeverExpires,
 			&i.StoreID,
+			&i.ErpOrderStatus,
+			&i.ErpOrderStatusAt,
+			&i.ErpOrderNumber,
+			&i.PaidAmountCents,
 			&i.StoreID_2,
 		); err != nil {
 			return nil, err
@@ -2625,6 +2748,9 @@ SELECT id, status, created_at, erp_order_state, external_order_id FROM carts
 WHERE store_id = $1 AND platform_handle = $2
   AND status IN ('pending', 'active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+  AND (erp_order_status IS NULL OR erp_order_status NOT IN (
+        'preparando_envio', 'faturado', 'pronto_envio', 'enviado', 'entregue',
+        'nao_entregue', 'cancelado'))
 ORDER BY created_at DESC
 FOR UPDATE
 `
@@ -2670,6 +2796,12 @@ type ListOpenCartsForVipPromotionRow struct {
 // pedido no ERP não pode ser esvaziado às cegas: os itens iriam embora e o
 // pedido lá dentro continuaria segurando peça. Esse fica de fora da fusão e é
 // devolvido ao chamador para decisão humana.
+//
+// O filtro é o MESMO de GetEternalCartByStoreAndHandleForUpdate, e tem de
+// continuar sendo: quem a promoção elege é quem a ingestão vai procurar depois.
+// Pago fica de fora porque aquela venda está fechada — o carrinho junta até ser
+// pago ou cancelado. Faturado também: emitida a nota, o pedido não recebe mais
+// item, então esvaziá-lo seria mexer no que já virou documento fiscal.
 func (q *Queries) ListOpenCartsForVipPromotion(ctx context.Context, arg ListOpenCartsForVipPromotionParams) ([]ListOpenCartsForVipPromotionRow, error) {
 	rows, err := q.db.Query(ctx, listOpenCartsForVipPromotion, arg.StoreID, arg.PlatformHandle)
 	if err != nil {
@@ -2982,28 +3114,60 @@ func (q *Queries) MoveWaitlistItemsToCart(ctx context.Context, arg MoveWaitlistI
 	return err
 }
 
+const removeCartItemFromERP = `-- name: RemoveCartItemFromERP :exec
+DELETE FROM cart_items
+WHERE cart_id = $1::uuid
+  AND product_id = $2::uuid
+  AND waitlisted_quantity = 0
+`
+
+type RemoveCartItemFromERPParams struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+}
+
+// Tira do carrinho o item que o lojista apagou do pedido.
+//
+// Só quando NÃO há parcela em fila: uma linha com fila representa gente
+// esperando, e apagá-la por causa de uma edição no painel do ERP mataria a
+// espera de alguém que nunca chegou a estar no pedido.
+func (q *Queries) RemoveCartItemFromERP(ctx context.Context, arg RemoveCartItemFromERPParams) error {
+	_, err := q.db.Exec(ctx, removeCartItemFromERP, arg.CartID, arg.ProductID)
+	return err
+}
+
 const restoreCancelledCartAsPaid = `-- name: RestoreCancelledCartAsPaid :one
-UPDATE carts
-SET status              = 'checkout',
-    cancelled_reason    = NULL,
-    payment_status      = $2,
-    checkout_id         = $3,
-    paid_at             = $4,
-    payment_method      = $5,
-    expires_at          = NULL,
-    -- Carimbo do caso para o histórico do pedido e para o aviso no sino do
-    -- painel: sem ele o lojista descobriria por acidente que vendeu algo que
-    -- julgava cancelado.
-    cancellation_reverted_at = now(),
-    erp_order_state     = 'none',
-    external_order_id   = NULL,
-    erp_stock_launched  = FALSE,
-    erp_op_started_at   = NULL
-WHERE id = $1
-  AND status = 'cancelled'
-  AND cancelled_reason = 'store_cancelled'
-  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id
+WITH pago AS (
+    UPDATE carts c
+    SET status              = 'checkout',
+        cancelled_reason    = NULL,
+        payment_status      = $2,
+        checkout_id         = $3,
+        paid_at             = $4,
+        payment_method      = $5,
+        expires_at          = NULL,
+        -- Carimbo do caso para o histórico do pedido e para o aviso no sino do
+        -- painel: sem ele o lojista descobriria por acidente que vendeu algo que
+        -- julgava cancelado.
+        cancellation_reverted_at = now(),
+        erp_order_state     = 'none',
+        external_order_id   = NULL,
+        erp_stock_launched  = FALSE,
+        erp_op_started_at   = NULL,
+        paid_amount_cents   = c.paid_amount_cents + cart_unpaid_total_cents(c.id)
+    WHERE c.id = $1
+      AND c.status = 'cancelled'
+      AND c.cancelled_reason = 'store_cancelled'
+      AND (c.payment_status IS NULL OR c.payment_status NOT IN ('paid', 'refunded'))
+    RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents
+), carimbo AS (
+    UPDATE cart_items ci
+    SET paid_quantity = ci.quantity
+    WHERE ci.cart_id = (SELECT p.id FROM pago p WHERE p.payment_status = 'paid')
+      AND ci.paid_quantity < ci.quantity
+    RETURNING 1
+)
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents FROM pago
 `
 
 type RestoreCancelledCartAsPaidParams struct {
@@ -3012,6 +3176,70 @@ type RestoreCancelledCartAsPaidParams struct {
 	CheckoutID    pgtype.Text        `json:"checkout_id"`
 	PaidAt        pgtype.Timestamptz `json:"paid_at"`
 	PaymentMethod pgtype.Text        `json:"payment_method"`
+}
+
+type RestoreCancelledCartAsPaidRow struct {
+	ID                       pgtype.UUID        `json:"id"`
+	EventID                  pgtype.UUID        `json:"event_id"`
+	PlatformUserID           string             `json:"platform_user_id"`
+	PlatformHandle           string             `json:"platform_handle"`
+	Token                    string             `json:"token"`
+	Status                   string             `json:"status"`
+	CheckoutUrl              pgtype.Text        `json:"checkout_url"`
+	PaymentIntegrationID     pgtype.UUID        `json:"payment_integration_id"`
+	ExternalOrderID          pgtype.Text        `json:"external_order_id"`
+	PaymentStatus            pgtype.Text        `json:"payment_status"`
+	PaidAt                   pgtype.Timestamptz `json:"paid_at"`
+	NotifyStatus             pgtype.Text        `json:"notify_status"`
+	NotifyError              pgtype.Text        `json:"notify_error"`
+	NotifiedAt               pgtype.Timestamptz `json:"notified_at"`
+	CreatedAt                pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt                pgtype.Timestamptz `json:"expires_at"`
+	SessionID                pgtype.UUID        `json:"session_id"`
+	CheckoutID               pgtype.Text        `json:"checkout_id"`
+	CheckoutExpiresAt        pgtype.Timestamptz `json:"checkout_expires_at"`
+	CustomerEmail            pgtype.Text        `json:"customer_email"`
+	PaymentMethod            pgtype.Text        `json:"payment_method"`
+	CustomerName             pgtype.Text        `json:"customer_name"`
+	CustomerDocument         pgtype.Text        `json:"customer_document"`
+	CustomerPhone            pgtype.Text        `json:"customer_phone"`
+	ShippingAddress          json.RawMessage    `json:"shipping_address"`
+	CustomerID               pgtype.UUID        `json:"customer_id"`
+	ShippingServiceID        pgtype.Text        `json:"shipping_service_id"`
+	ShippingServiceName      pgtype.Text        `json:"shipping_service_name"`
+	ShippingCarrier          pgtype.Text        `json:"shipping_carrier"`
+	ShippingCostCents        pgtype.Int8        `json:"shipping_cost_cents"`
+	ShippingCostRealCents    pgtype.Int8        `json:"shipping_cost_real_cents"`
+	ShippingDeadlineDays     pgtype.Int4        `json:"shipping_deadline_days"`
+	ShippingQuotedAt         pgtype.Timestamptz `json:"shipping_quoted_at"`
+	ShippingProvider         pgtype.Text        `json:"shipping_provider"`
+	LastShippingQuoteOptions json.RawMessage    `json:"last_shipping_quote_options"`
+	LastShippingQuoteAt      pgtype.Timestamptz `json:"last_shipping_quote_at"`
+	CardBrand                pgtype.Text        `json:"card_brand"`
+	CardLastFour             pgtype.Text        `json:"card_last_four"`
+	CardInstallments         pgtype.Int4        `json:"card_installments"`
+	CardAuthorizationCode    pgtype.Text        `json:"card_authorization_code"`
+	InitialSnapshotTakenAt   pgtype.Timestamptz `json:"initial_snapshot_taken_at"`
+	InitialSubtotalCents     pgtype.Int8        `json:"initial_subtotal_cents"`
+	ShortID                  int32              `json:"short_id"`
+	CouponID                 pgtype.UUID        `json:"coupon_id"`
+	CouponCode               pgtype.Text        `json:"coupon_code"`
+	CouponDiscountCents      int64              `json:"coupon_discount_cents"`
+	CancelledReason          pgtype.Text        `json:"cancelled_reason"`
+	WhatsappConsent          bool               `json:"whatsapp_consent"`
+	WhatsappConsentAt        pgtype.Timestamptz `json:"whatsapp_consent_at"`
+	ErpOrderState            string             `json:"erp_order_state"`
+	ErpStockLaunched         bool               `json:"erp_stock_launched"`
+	ErpOpStartedAt           pgtype.Timestamptz `json:"erp_op_started_at"`
+	CancellationRevertedAt   pgtype.Timestamptz `json:"cancellation_reverted_at"`
+	PixChargeID              pgtype.Text        `json:"pix_charge_id"`
+	PixAmountCents           pgtype.Int8        `json:"pix_amount_cents"`
+	NeverExpires             bool               `json:"never_expires"`
+	StoreID                  pgtype.UUID        `json:"store_id"`
+	ErpOrderStatus           pgtype.Text        `json:"erp_order_status"`
+	ErpOrderStatusAt         pgtype.Timestamptz `json:"erp_order_status_at"`
+	ErpOrderNumber           pgtype.Text        `json:"erp_order_number"`
+	PaidAmountCents          int64              `json:"paid_amount_cents"`
 }
 
 // O outro lado da corrida cancelamento × pagamento: o webhook confirmou o
@@ -3025,7 +3253,7 @@ type RestoreCancelledCartAsPaidParams struct {
 // por conta do caller, na MESMA transação.
 // Guard: só restaura cart cancelado PELO LOJISTA e ainda não pago — um cart
 // expirado, bloqueado por handle ou já pago não entra por aqui.
-func (q *Queries) RestoreCancelledCartAsPaid(ctx context.Context, arg RestoreCancelledCartAsPaidParams) (Cart, error) {
+func (q *Queries) RestoreCancelledCartAsPaid(ctx context.Context, arg RestoreCancelledCartAsPaidParams) (RestoreCancelledCartAsPaidRow, error) {
 	row := q.db.QueryRow(ctx, restoreCancelledCartAsPaid,
 		arg.ID,
 		arg.PaymentStatus,
@@ -3033,7 +3261,7 @@ func (q *Queries) RestoreCancelledCartAsPaid(ctx context.Context, arg RestoreCan
 		arg.PaidAt,
 		arg.PaymentMethod,
 	)
-	var i Cart
+	var i RestoreCancelledCartAsPaidRow
 	err := row.Scan(
 		&i.ID,
 		&i.EventID,
@@ -3092,6 +3320,10 @@ func (q *Queries) RestoreCancelledCartAsPaid(ctx context.Context, arg RestoreCan
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
@@ -3107,6 +3339,39 @@ type SetCartERPStockLaunchedParams struct {
 
 func (q *Queries) SetCartERPStockLaunched(ctx context.Context, arg SetCartERPStockLaunchedParams) error {
 	_, err := q.db.Exec(ctx, setCartERPStockLaunched, arg.ID, arg.ErpStockLaunched)
+	return err
+}
+
+const setCartItemQuantityFromERP = `-- name: SetCartItemQuantityFromERP :exec
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity)
+VALUES ($1::uuid, $2::uuid, $3, $4, 0)
+ON CONFLICT (cart_id, product_id) DO UPDATE
+SET quantity   = EXCLUDED.quantity + cart_items.waitlisted_quantity,
+    unit_price = EXCLUDED.unit_price
+`
+
+type SetCartItemQuantityFromERPParams struct {
+	CartID    pgtype.UUID `json:"cart_id"`
+	ProductID pgtype.UUID `json:"product_id"`
+	Quantity  pgtype.Int4 `json:"quantity"`
+	UnitPrice pgtype.Int8 `json:"unit_price"`
+}
+
+// Ajusta a quantidade de um item do carrinho para refletir o pedido no ERP.
+//
+// É o caminho de volta: o lojista mexeu no pedido pelo painel e o carrinho tem
+// de seguir, porque é o carrinho que a compradora vê e paga. Preserva a parcela
+// em fila de espera — ela não está no pedido e não é do lojista mexer.
+//
+// Sem ON CONFLICT DO UPDATE isto seria um par ler-decidir-gravar, e duas
+// reflexões simultâneas do mesmo pedido se atropelariam.
+func (q *Queries) SetCartItemQuantityFromERP(ctx context.Context, arg SetCartItemQuantityFromERPParams) error {
+	_, err := q.db.Exec(ctx, setCartItemQuantityFromERP,
+		arg.CartID,
+		arg.ProductID,
+		arg.Quantity,
+		arg.UnitPrice,
+	)
 	return err
 }
 
@@ -3230,6 +3495,44 @@ func (q *Queries) ShiftOpenCartExpirations(ctx context.Context, arg ShiftOpenCar
 	return items, nil
 }
 
+const sumPromisedWithoutERPOrder = `-- name: SumPromisedWithoutERPOrder :one
+SELECT COALESCE(SUM(ci.quantity - ci.waitlisted_quantity), 0)::int
+FROM cart_items ci
+JOIN carts c ON c.id = ci.cart_id
+JOIN products p ON p.id = ci.product_id
+WHERE p.external_id = $1
+  AND p.external_source = 'tiny'
+  AND (c.external_order_id IS NULL OR c.external_order_id = '')
+  AND c.status NOT IN ('expired', 'cancelled')
+  AND (c.payment_status IS NULL OR c.payment_status <> 'refunded')
+  AND ci.quantity > ci.waitlisted_quantity
+`
+
+// Unidades que a live JÁ prometeu e que o ERP ainda não conhece.
+//
+// O saldo disponível do ERP é verdadeiro para o ERP e incompleto para nós
+// durante alguns segundos: entre o comentário baixar o contador local e o pedido
+// de venda existir lá, aquela unidade não aparece em `disponivel`. Gravar o
+// disponível cru nesse intervalo REABASTECE o portão com estoque que já tem
+// dono — e a unidade é oferecida duas vezes.
+//
+// Só carrinhos VIVOS e ainda SEM pedido entram na conta: assim que o pedido
+// existe, o `disponivel` do ERP já o desconta, e somá-lo aqui seria descontar
+// duas vezes.
+//
+// Carrinho PAGO sem pedido conta, e é o caso mais importante de todos: a venda
+// aconteceu, aquelas unidades têm dono, e o pedido só vai nascer quando a
+// confirmação rodar. Excluí-lo devolveria ao portão estoque já vendido.
+//
+// Substitui a soma sobre erp_stock_movements, que media a mesma coisa num mundo
+// onde a reserva era um lançamento manual de estoque.
+func (q *Queries) SumPromisedWithoutERPOrder(ctx context.Context, externalProductID pgtype.Text) (int32, error) {
+	row := q.db.QueryRow(ctx, sumPromisedWithoutERPOrder, externalProductID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const takeCartPixCharge = `-- name: TakeCartPixCharge :one
 WITH tomada AS (
     SELECT carts.id AS cart_id, carts.pix_charge_id, carts.pix_amount_cents
@@ -3307,7 +3610,7 @@ const updateCartCheckoutInfo = `-- name: UpdateCartCheckoutInfo :one
 UPDATE carts
 SET checkout_url = $2, checkout_id = $3, checkout_expires_at = $4
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents
 `
 
 type UpdateCartCheckoutInfoParams struct {
@@ -3384,6 +3687,10 @@ func (q *Queries) UpdateCartCheckoutInfo(ctx context.Context, arg UpdateCartChec
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
@@ -3401,7 +3708,7 @@ SET customer_email    = $2,
       ELSE whatsapp_consent_at
     END
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents
 `
 
 type UpdateCartCustomerCheckoutParams struct {
@@ -3486,6 +3793,10 @@ func (q *Queries) UpdateCartCustomerCheckout(ctx context.Context, arg UpdateCart
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
@@ -3494,7 +3805,7 @@ const updateCartCustomerEmail = `-- name: UpdateCartCustomerEmail :one
 UPDATE carts
 SET customer_email = $2
 WHERE token = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents
 `
 
 type UpdateCartCustomerEmailParams struct {
@@ -3563,6 +3874,10 @@ func (q *Queries) UpdateCartCustomerEmail(ctx context.Context, arg UpdateCartCus
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
@@ -3603,7 +3918,7 @@ const updateCartItem = `-- name: UpdateCartItem :one
 UPDATE cart_items
 SET quantity = $2
 WHERE id = $1
-RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id
+RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id, paid_quantity
 `
 
 type UpdateCartItemParams struct {
@@ -3622,6 +3937,7 @@ func (q *Queries) UpdateCartItem(ctx context.Context, arg UpdateCartItemParams) 
 		&i.UnitPrice,
 		&i.WaitlistedQuantity,
 		&i.SessionID,
+		&i.PaidQuantity,
 	)
 	return i, err
 }
@@ -3645,7 +3961,7 @@ const updateCartNotifyStatus = `-- name: UpdateCartNotifyStatus :one
 UPDATE carts
 SET notify_status = $2, notify_error = $3, notified_at = $4
 WHERE id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents
 `
 
 type UpdateCartNotifyStatusParams struct {
@@ -3721,25 +4037,135 @@ func (q *Queries) UpdateCartNotifyStatus(ctx context.Context, arg UpdateCartNoti
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
 
 const updateCartPayment = `-- name: UpdateCartPayment :one
-UPDATE carts
-SET payment_status = $2, checkout_id = $3, paid_at = $4, payment_method = $5,
-    expires_at = CASE WHEN $2 = 'paid' THEN NULL ELSE expires_at END
-WHERE id = $1
-  AND status NOT IN ('expired', 'cancelled')
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id
+
+WITH inedito AS (
+    -- Reentrega do webhook não é segundo pagamento. O ERP e o gateway
+    -- reentregam o mesmo aviso até dez vezes, e o que separa uma cobrança nova
+    -- de um eco é o id do gateway.
+    SELECT NOT EXISTS (
+        SELECT 1 FROM cart_payments cp WHERE cp.cart_id = $1 AND cp.checkout_id = $3
+    ) AS primeira_vez
+), coberto AS (
+    -- O BRUTO que esta cobrança liquida: as unidades ainda não pagas, a preço
+    -- cheio, mais o frete. É contra este número que o valor cobrado revela o
+    -- desconto.
+    SELECT cart_unpaid_total_cents($1) + COALESCE(
+        (SELECT c.shipping_cost_cents FROM carts c WHERE c.id = $1), 0) AS bruto
+), pago AS (
+    UPDATE carts c
+    SET payment_status = $2, checkout_id = $3, paid_at = $4, payment_method = $5,
+        expires_at = CASE WHEN $2::varchar = 'paid' THEN NULL ELSE expires_at END,
+        paid_amount_cents = CASE
+            WHEN $2::varchar = 'paid' AND (SELECT primeira_vez FROM inedito)
+            THEN c.paid_amount_cents + $6::bigint
+            ELSE c.paid_amount_cents END
+    WHERE c.id = $1
+      AND c.status NOT IN ('expired', 'cancelled')
+    RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents
+), carimbo AS (
+    UPDATE cart_items ci
+    SET paid_quantity = ci.quantity
+    -- A condição "é pagamento?" vem da LINHA que acabou de ser escrita, não do
+    -- parâmetro. Reusar $2 aqui faz o Postgres recusar a instrução inteira
+    -- ("inconsistent types deduced for parameter $2"), porque ele já o deduziu
+    -- como varchar no SET acima — e ler o resultado é mais honesto de qualquer
+    -- forma: carimba quando a linha gravada diz que está paga.
+    WHERE ci.cart_id = (SELECT p.id FROM pago p WHERE p.payment_status = 'paid')
+      AND ci.paid_quantity < ci.quantity
+    RETURNING 1
+), livro AS (
+    -- Uma linha por cobrança. É o que permite o pedido no ERP dizer "R$ 40 pagos
+    -- em 18/08, R$ 105 em 22/08" em vez de um total mudo.
+    INSERT INTO cart_payments (cart_id, amount_cents, gross_covered_cents, method, checkout_id, paid_at)
+    SELECT p.id, $6::bigint, (SELECT bruto FROM coberto),
+           NULLIF($5, ''), $3, COALESCE($4, NOW())
+    FROM pago p WHERE p.payment_status = 'paid' AND $3 <> ''
+    ON CONFLICT (cart_id, checkout_id) DO NOTHING
+    RETURNING 1
+)
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents FROM pago
 `
 
 type UpdateCartPaymentParams struct {
-	ID            pgtype.UUID        `json:"id"`
+	CartID        pgtype.UUID        `json:"cart_id"`
 	PaymentStatus pgtype.Text        `json:"payment_status"`
-	CheckoutID    pgtype.Text        `json:"checkout_id"`
+	CheckoutID    string             `json:"checkout_id"`
 	PaidAt        pgtype.Timestamptz `json:"paid_at"`
 	PaymentMethod pgtype.Text        `json:"payment_method"`
+	AmountCents   int64              `json:"amount_cents"`
+}
+
+type UpdateCartPaymentRow struct {
+	ID                       pgtype.UUID        `json:"id"`
+	EventID                  pgtype.UUID        `json:"event_id"`
+	PlatformUserID           string             `json:"platform_user_id"`
+	PlatformHandle           string             `json:"platform_handle"`
+	Token                    string             `json:"token"`
+	Status                   string             `json:"status"`
+	CheckoutUrl              pgtype.Text        `json:"checkout_url"`
+	PaymentIntegrationID     pgtype.UUID        `json:"payment_integration_id"`
+	ExternalOrderID          pgtype.Text        `json:"external_order_id"`
+	PaymentStatus            pgtype.Text        `json:"payment_status"`
+	PaidAt                   pgtype.Timestamptz `json:"paid_at"`
+	NotifyStatus             pgtype.Text        `json:"notify_status"`
+	NotifyError              pgtype.Text        `json:"notify_error"`
+	NotifiedAt               pgtype.Timestamptz `json:"notified_at"`
+	CreatedAt                pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt                pgtype.Timestamptz `json:"expires_at"`
+	SessionID                pgtype.UUID        `json:"session_id"`
+	CheckoutID               pgtype.Text        `json:"checkout_id"`
+	CheckoutExpiresAt        pgtype.Timestamptz `json:"checkout_expires_at"`
+	CustomerEmail            pgtype.Text        `json:"customer_email"`
+	PaymentMethod            pgtype.Text        `json:"payment_method"`
+	CustomerName             pgtype.Text        `json:"customer_name"`
+	CustomerDocument         pgtype.Text        `json:"customer_document"`
+	CustomerPhone            pgtype.Text        `json:"customer_phone"`
+	ShippingAddress          json.RawMessage    `json:"shipping_address"`
+	CustomerID               pgtype.UUID        `json:"customer_id"`
+	ShippingServiceID        pgtype.Text        `json:"shipping_service_id"`
+	ShippingServiceName      pgtype.Text        `json:"shipping_service_name"`
+	ShippingCarrier          pgtype.Text        `json:"shipping_carrier"`
+	ShippingCostCents        pgtype.Int8        `json:"shipping_cost_cents"`
+	ShippingCostRealCents    pgtype.Int8        `json:"shipping_cost_real_cents"`
+	ShippingDeadlineDays     pgtype.Int4        `json:"shipping_deadline_days"`
+	ShippingQuotedAt         pgtype.Timestamptz `json:"shipping_quoted_at"`
+	ShippingProvider         pgtype.Text        `json:"shipping_provider"`
+	LastShippingQuoteOptions json.RawMessage    `json:"last_shipping_quote_options"`
+	LastShippingQuoteAt      pgtype.Timestamptz `json:"last_shipping_quote_at"`
+	CardBrand                pgtype.Text        `json:"card_brand"`
+	CardLastFour             pgtype.Text        `json:"card_last_four"`
+	CardInstallments         pgtype.Int4        `json:"card_installments"`
+	CardAuthorizationCode    pgtype.Text        `json:"card_authorization_code"`
+	InitialSnapshotTakenAt   pgtype.Timestamptz `json:"initial_snapshot_taken_at"`
+	InitialSubtotalCents     pgtype.Int8        `json:"initial_subtotal_cents"`
+	ShortID                  int32              `json:"short_id"`
+	CouponID                 pgtype.UUID        `json:"coupon_id"`
+	CouponCode               pgtype.Text        `json:"coupon_code"`
+	CouponDiscountCents      int64              `json:"coupon_discount_cents"`
+	CancelledReason          pgtype.Text        `json:"cancelled_reason"`
+	WhatsappConsent          bool               `json:"whatsapp_consent"`
+	WhatsappConsentAt        pgtype.Timestamptz `json:"whatsapp_consent_at"`
+	ErpOrderState            string             `json:"erp_order_state"`
+	ErpStockLaunched         bool               `json:"erp_stock_launched"`
+	ErpOpStartedAt           pgtype.Timestamptz `json:"erp_op_started_at"`
+	CancellationRevertedAt   pgtype.Timestamptz `json:"cancellation_reverted_at"`
+	PixChargeID              pgtype.Text        `json:"pix_charge_id"`
+	PixAmountCents           pgtype.Int8        `json:"pix_amount_cents"`
+	NeverExpires             bool               `json:"never_expires"`
+	StoreID                  pgtype.UUID        `json:"store_id"`
+	ErpOrderStatus           pgtype.Text        `json:"erp_order_status"`
+	ErpOrderStatusAt         pgtype.Timestamptz `json:"erp_order_status_at"`
+	ErpOrderNumber           pgtype.Text        `json:"erp_order_number"`
+	PaidAmountCents          int64              `json:"paid_amount_cents"`
 }
 
 // $3 = payment-provider ID (MP/Pagar.me). Goes to checkout_id, not
@@ -3750,15 +4176,30 @@ type UpdateCartPaymentParams struct {
 // não deve finalizar (evita o estado inconsistente pago+expirado e o cancel de
 // pedido ERP de venda paga). Ao pagar, neutraliza expires_at para que o worker
 // nunca reselcione a venda.
-func (q *Queries) UpdateCartPayment(ctx context.Context, arg UpdateCartPaymentParams) (Cart, error) {
+// Carimbo do que ESTE pagamento cobre.
+//
+// O `::varchar` nas comparações não é enfeite: sem ele o Postgres deduz `text`
+// pelo literal e `character varying` pela coluna, e recusa a instrução inteira
+// com "inconsistent types deduced for parameter $2" sempre que o cliente deixa
+// os tipos por inferir. A forma antiga tinha a mesma fragilidade latente e só
+// escapava porque o driver mandava o OID.
+//
+// O carrinho não morre mais no pagamento: o lojista que junta compras soma o
+// pedido de quinta no de segunda e manda uma caixa só. Para isso o carrinho tem
+// de saber, unidade a unidade, o que o dinheiro que entrou já cobriu — o que
+// sobrar sem carimbo é o "falta pagar". Os dois UPDATE veem a MESMA fotografia,
+// então
+// as unidades que a soma contou são exatamente as que o carimbo marcou.
+func (q *Queries) UpdateCartPayment(ctx context.Context, arg UpdateCartPaymentParams) (UpdateCartPaymentRow, error) {
 	row := q.db.QueryRow(ctx, updateCartPayment,
-		arg.ID,
+		arg.CartID,
 		arg.PaymentStatus,
 		arg.CheckoutID,
 		arg.PaidAt,
 		arg.PaymentMethod,
+		arg.AmountCents,
 	)
-	var i Cart
+	var i UpdateCartPaymentRow
 	err := row.Scan(
 		&i.ID,
 		&i.EventID,
@@ -3817,15 +4258,37 @@ func (q *Queries) UpdateCartPayment(ctx context.Context, arg UpdateCartPaymentPa
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
 
 const updateCartPaymentByCheckoutID = `-- name: UpdateCartPaymentByCheckoutID :one
-UPDATE carts
-SET payment_status = $2, paid_at = $3
-WHERE checkout_id = $1
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id
+
+WITH pago AS (
+    UPDATE carts c
+    SET payment_status = $2, paid_at = $3,
+        paid_amount_cents = CASE WHEN $2::varchar = 'paid'
+            THEN c.paid_amount_cents + cart_unpaid_total_cents(c.id)
+            ELSE c.paid_amount_cents END
+    WHERE c.checkout_id = $1
+    RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents
+), carimbo AS (
+    UPDATE cart_items ci
+    SET paid_quantity = ci.quantity
+    -- A condição "é pagamento?" vem da LINHA que acabou de ser escrita, não do
+    -- parâmetro. Reusar $2 aqui faz o Postgres recusar a instrução inteira
+    -- ("inconsistent types deduced for parameter $2"), porque ele já o deduziu
+    -- como varchar no SET acima — e ler o resultado é mais honesto de qualquer
+    -- forma: carimba quando a linha gravada diz que está paga.
+    WHERE ci.cart_id = (SELECT p.id FROM pago p WHERE p.payment_status = 'paid')
+      AND ci.paid_quantity < ci.quantity
+    RETURNING 1
+)
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents FROM pago
 `
 
 type UpdateCartPaymentByCheckoutIDParams struct {
@@ -3834,10 +4297,82 @@ type UpdateCartPaymentByCheckoutIDParams struct {
 	PaidAt        pgtype.Timestamptz `json:"paid_at"`
 }
 
+type UpdateCartPaymentByCheckoutIDRow struct {
+	ID                       pgtype.UUID        `json:"id"`
+	EventID                  pgtype.UUID        `json:"event_id"`
+	PlatformUserID           string             `json:"platform_user_id"`
+	PlatformHandle           string             `json:"platform_handle"`
+	Token                    string             `json:"token"`
+	Status                   string             `json:"status"`
+	CheckoutUrl              pgtype.Text        `json:"checkout_url"`
+	PaymentIntegrationID     pgtype.UUID        `json:"payment_integration_id"`
+	ExternalOrderID          pgtype.Text        `json:"external_order_id"`
+	PaymentStatus            pgtype.Text        `json:"payment_status"`
+	PaidAt                   pgtype.Timestamptz `json:"paid_at"`
+	NotifyStatus             pgtype.Text        `json:"notify_status"`
+	NotifyError              pgtype.Text        `json:"notify_error"`
+	NotifiedAt               pgtype.Timestamptz `json:"notified_at"`
+	CreatedAt                pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt                pgtype.Timestamptz `json:"expires_at"`
+	SessionID                pgtype.UUID        `json:"session_id"`
+	CheckoutID               pgtype.Text        `json:"checkout_id"`
+	CheckoutExpiresAt        pgtype.Timestamptz `json:"checkout_expires_at"`
+	CustomerEmail            pgtype.Text        `json:"customer_email"`
+	PaymentMethod            pgtype.Text        `json:"payment_method"`
+	CustomerName             pgtype.Text        `json:"customer_name"`
+	CustomerDocument         pgtype.Text        `json:"customer_document"`
+	CustomerPhone            pgtype.Text        `json:"customer_phone"`
+	ShippingAddress          json.RawMessage    `json:"shipping_address"`
+	CustomerID               pgtype.UUID        `json:"customer_id"`
+	ShippingServiceID        pgtype.Text        `json:"shipping_service_id"`
+	ShippingServiceName      pgtype.Text        `json:"shipping_service_name"`
+	ShippingCarrier          pgtype.Text        `json:"shipping_carrier"`
+	ShippingCostCents        pgtype.Int8        `json:"shipping_cost_cents"`
+	ShippingCostRealCents    pgtype.Int8        `json:"shipping_cost_real_cents"`
+	ShippingDeadlineDays     pgtype.Int4        `json:"shipping_deadline_days"`
+	ShippingQuotedAt         pgtype.Timestamptz `json:"shipping_quoted_at"`
+	ShippingProvider         pgtype.Text        `json:"shipping_provider"`
+	LastShippingQuoteOptions json.RawMessage    `json:"last_shipping_quote_options"`
+	LastShippingQuoteAt      pgtype.Timestamptz `json:"last_shipping_quote_at"`
+	CardBrand                pgtype.Text        `json:"card_brand"`
+	CardLastFour             pgtype.Text        `json:"card_last_four"`
+	CardInstallments         pgtype.Int4        `json:"card_installments"`
+	CardAuthorizationCode    pgtype.Text        `json:"card_authorization_code"`
+	InitialSnapshotTakenAt   pgtype.Timestamptz `json:"initial_snapshot_taken_at"`
+	InitialSubtotalCents     pgtype.Int8        `json:"initial_subtotal_cents"`
+	ShortID                  int32              `json:"short_id"`
+	CouponID                 pgtype.UUID        `json:"coupon_id"`
+	CouponCode               pgtype.Text        `json:"coupon_code"`
+	CouponDiscountCents      int64              `json:"coupon_discount_cents"`
+	CancelledReason          pgtype.Text        `json:"cancelled_reason"`
+	WhatsappConsent          bool               `json:"whatsapp_consent"`
+	WhatsappConsentAt        pgtype.Timestamptz `json:"whatsapp_consent_at"`
+	ErpOrderState            string             `json:"erp_order_state"`
+	ErpStockLaunched         bool               `json:"erp_stock_launched"`
+	ErpOpStartedAt           pgtype.Timestamptz `json:"erp_op_started_at"`
+	CancellationRevertedAt   pgtype.Timestamptz `json:"cancellation_reverted_at"`
+	PixChargeID              pgtype.Text        `json:"pix_charge_id"`
+	PixAmountCents           pgtype.Int8        `json:"pix_amount_cents"`
+	NeverExpires             bool               `json:"never_expires"`
+	StoreID                  pgtype.UUID        `json:"store_id"`
+	ErpOrderStatus           pgtype.Text        `json:"erp_order_status"`
+	ErpOrderStatusAt         pgtype.Timestamptz `json:"erp_order_status_at"`
+	ErpOrderNumber           pgtype.Text        `json:"erp_order_number"`
+	PaidAmountCents          int64              `json:"paid_amount_cents"`
+}
+
 // Updates payment status when webhook confirms payment
-func (q *Queries) UpdateCartPaymentByCheckoutID(ctx context.Context, arg UpdateCartPaymentByCheckoutIDParams) (Cart, error) {
+// Carimbo do que ESTE pagamento cobre.
+//
+// O carrinho não morre mais no pagamento: o lojista que junta compras soma o
+// pedido de quinta no de segunda e manda uma caixa só. Para isso o carrinho tem
+// de saber, unidade a unidade, o que o dinheiro que entrou já cobriu — o que
+// sobrar sem carimbo é o "falta pagar". Os dois UPDATE veem a MESMA fotografia,
+// então
+// as unidades que a soma contou são exatamente as que o carimbo marcou.
+func (q *Queries) UpdateCartPaymentByCheckoutID(ctx context.Context, arg UpdateCartPaymentByCheckoutIDParams) (UpdateCartPaymentByCheckoutIDRow, error) {
 	row := q.db.QueryRow(ctx, updateCartPaymentByCheckoutID, arg.CheckoutID, arg.PaymentStatus, arg.PaidAt)
-	var i Cart
+	var i UpdateCartPaymentByCheckoutIDRow
 	err := row.Scan(
 		&i.ID,
 		&i.EventID,
@@ -3896,17 +4431,39 @@ func (q *Queries) UpdateCartPaymentByCheckoutID(ctx context.Context, arg UpdateC
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
 
 const updateCartPaymentStatus = `-- name: UpdateCartPaymentStatus :one
-UPDATE carts
-SET payment_status = $2, checkout_id = $3, paid_at = $4,
-    expires_at = CASE WHEN $2 = 'paid' THEN NULL ELSE expires_at END
-WHERE id = $1
-  AND status NOT IN ('expired', 'cancelled')
-RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id
+
+WITH pago AS (
+    UPDATE carts c
+    SET payment_status = $2, checkout_id = $3, paid_at = $4,
+        expires_at = CASE WHEN $2::varchar = 'paid' THEN NULL ELSE expires_at END,
+        paid_amount_cents = CASE WHEN $2::varchar = 'paid'
+            THEN c.paid_amount_cents + cart_unpaid_total_cents(c.id)
+            ELSE c.paid_amount_cents END
+    WHERE c.id = $1
+      AND c.status NOT IN ('expired', 'cancelled')
+    RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents
+), carimbo AS (
+    UPDATE cart_items ci
+    SET paid_quantity = ci.quantity
+    -- A condição "é pagamento?" vem da LINHA que acabou de ser escrita, não do
+    -- parâmetro. Reusar $2 aqui faz o Postgres recusar a instrução inteira
+    -- ("inconsistent types deduced for parameter $2"), porque ele já o deduziu
+    -- como varchar no SET acima — e ler o resultado é mais honesto de qualquer
+    -- forma: carimba quando a linha gravada diz que está paga.
+    WHERE ci.cart_id = (SELECT p.id FROM pago p WHERE p.payment_status = 'paid')
+      AND ci.paid_quantity < ci.quantity
+    RETURNING 1
+)
+SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents FROM pago
 `
 
 type UpdateCartPaymentStatusParams struct {
@@ -3916,18 +4473,90 @@ type UpdateCartPaymentStatusParams struct {
 	PaidAt        pgtype.Timestamptz `json:"paid_at"`
 }
 
+type UpdateCartPaymentStatusRow struct {
+	ID                       pgtype.UUID        `json:"id"`
+	EventID                  pgtype.UUID        `json:"event_id"`
+	PlatformUserID           string             `json:"platform_user_id"`
+	PlatformHandle           string             `json:"platform_handle"`
+	Token                    string             `json:"token"`
+	Status                   string             `json:"status"`
+	CheckoutUrl              pgtype.Text        `json:"checkout_url"`
+	PaymentIntegrationID     pgtype.UUID        `json:"payment_integration_id"`
+	ExternalOrderID          pgtype.Text        `json:"external_order_id"`
+	PaymentStatus            pgtype.Text        `json:"payment_status"`
+	PaidAt                   pgtype.Timestamptz `json:"paid_at"`
+	NotifyStatus             pgtype.Text        `json:"notify_status"`
+	NotifyError              pgtype.Text        `json:"notify_error"`
+	NotifiedAt               pgtype.Timestamptz `json:"notified_at"`
+	CreatedAt                pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt                pgtype.Timestamptz `json:"expires_at"`
+	SessionID                pgtype.UUID        `json:"session_id"`
+	CheckoutID               pgtype.Text        `json:"checkout_id"`
+	CheckoutExpiresAt        pgtype.Timestamptz `json:"checkout_expires_at"`
+	CustomerEmail            pgtype.Text        `json:"customer_email"`
+	PaymentMethod            pgtype.Text        `json:"payment_method"`
+	CustomerName             pgtype.Text        `json:"customer_name"`
+	CustomerDocument         pgtype.Text        `json:"customer_document"`
+	CustomerPhone            pgtype.Text        `json:"customer_phone"`
+	ShippingAddress          json.RawMessage    `json:"shipping_address"`
+	CustomerID               pgtype.UUID        `json:"customer_id"`
+	ShippingServiceID        pgtype.Text        `json:"shipping_service_id"`
+	ShippingServiceName      pgtype.Text        `json:"shipping_service_name"`
+	ShippingCarrier          pgtype.Text        `json:"shipping_carrier"`
+	ShippingCostCents        pgtype.Int8        `json:"shipping_cost_cents"`
+	ShippingCostRealCents    pgtype.Int8        `json:"shipping_cost_real_cents"`
+	ShippingDeadlineDays     pgtype.Int4        `json:"shipping_deadline_days"`
+	ShippingQuotedAt         pgtype.Timestamptz `json:"shipping_quoted_at"`
+	ShippingProvider         pgtype.Text        `json:"shipping_provider"`
+	LastShippingQuoteOptions json.RawMessage    `json:"last_shipping_quote_options"`
+	LastShippingQuoteAt      pgtype.Timestamptz `json:"last_shipping_quote_at"`
+	CardBrand                pgtype.Text        `json:"card_brand"`
+	CardLastFour             pgtype.Text        `json:"card_last_four"`
+	CardInstallments         pgtype.Int4        `json:"card_installments"`
+	CardAuthorizationCode    pgtype.Text        `json:"card_authorization_code"`
+	InitialSnapshotTakenAt   pgtype.Timestamptz `json:"initial_snapshot_taken_at"`
+	InitialSubtotalCents     pgtype.Int8        `json:"initial_subtotal_cents"`
+	ShortID                  int32              `json:"short_id"`
+	CouponID                 pgtype.UUID        `json:"coupon_id"`
+	CouponCode               pgtype.Text        `json:"coupon_code"`
+	CouponDiscountCents      int64              `json:"coupon_discount_cents"`
+	CancelledReason          pgtype.Text        `json:"cancelled_reason"`
+	WhatsappConsent          bool               `json:"whatsapp_consent"`
+	WhatsappConsentAt        pgtype.Timestamptz `json:"whatsapp_consent_at"`
+	ErpOrderState            string             `json:"erp_order_state"`
+	ErpStockLaunched         bool               `json:"erp_stock_launched"`
+	ErpOpStartedAt           pgtype.Timestamptz `json:"erp_op_started_at"`
+	CancellationRevertedAt   pgtype.Timestamptz `json:"cancellation_reverted_at"`
+	PixChargeID              pgtype.Text        `json:"pix_charge_id"`
+	PixAmountCents           pgtype.Int8        `json:"pix_amount_cents"`
+	NeverExpires             bool               `json:"never_expires"`
+	StoreID                  pgtype.UUID        `json:"store_id"`
+	ErpOrderStatus           pgtype.Text        `json:"erp_order_status"`
+	ErpOrderStatusAt         pgtype.Timestamptz `json:"erp_order_status_at"`
+	ErpOrderNumber           pgtype.Text        `json:"erp_order_number"`
+	PaidAmountCents          int64              `json:"paid_amount_cents"`
+}
+
 // Updates payment status directly by cart ID (for transparent checkout)
 // Uses checkout_id to store the payment ID from the provider.
 // Mesmo guard de UpdateCartPayment: não marca pagamento em cart expirado/
 // cancelado (0 rows = caller não finaliza) e neutraliza expires_at ao pagar.
-func (q *Queries) UpdateCartPaymentStatus(ctx context.Context, arg UpdateCartPaymentStatusParams) (Cart, error) {
+// Carimbo do que ESTE pagamento cobre.
+//
+// O carrinho não morre mais no pagamento: o lojista que junta compras soma o
+// pedido de quinta no de segunda e manda uma caixa só. Para isso o carrinho tem
+// de saber, unidade a unidade, o que o dinheiro que entrou já cobriu — o que
+// sobrar sem carimbo é o "falta pagar". Os dois UPDATE veem a MESMA fotografia,
+// então
+// as unidades que a soma contou são exatamente as que o carimbo marcou.
+func (q *Queries) UpdateCartPaymentStatus(ctx context.Context, arg UpdateCartPaymentStatusParams) (UpdateCartPaymentStatusRow, error) {
 	row := q.db.QueryRow(ctx, updateCartPaymentStatus,
 		arg.ID,
 		arg.PaymentStatus,
 		arg.CheckoutID,
 		arg.PaidAt,
 	)
-	var i Cart
+	var i UpdateCartPaymentStatusRow
 	err := row.Scan(
 		&i.ID,
 		&i.EventID,
@@ -3986,6 +4615,10 @@ func (q *Queries) UpdateCartPaymentStatus(ctx context.Context, arg UpdateCartPay
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
@@ -4010,7 +4643,7 @@ func (q *Queries) UpdateCartShippingAddress(ctx context.Context, arg UpdateCartS
 }
 
 const updateCartStatus = `-- name: UpdateCartStatus :one
-UPDATE carts SET status = $2 WHERE id = $1 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id
+UPDATE carts SET status = $2 WHERE id = $1 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents
 `
 
 type UpdateCartStatusParams struct {
@@ -4079,6 +4712,10 @@ func (q *Queries) UpdateCartStatus(ctx context.Context, arg UpdateCartStatusPara
 		&i.PixAmountCents,
 		&i.NeverExpires,
 		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
 	)
 	return i, err
 }
@@ -4090,7 +4727,7 @@ ON CONFLICT (cart_id, product_id)
 DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity,
              waitlisted_quantity = cart_items.waitlisted_quantity + EXCLUDED.waitlisted_quantity,
              session_id = COALESCE(cart_items.session_id, EXCLUDED.session_id)
-RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id
+RETURNING id, cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id, paid_quantity
 `
 
 type UpsertCartItemParams struct {
@@ -4124,6 +4761,7 @@ func (q *Queries) UpsertCartItem(ctx context.Context, arg UpsertCartItemParams) 
 		&i.UnitPrice,
 		&i.WaitlistedQuantity,
 		&i.SessionID,
+		&i.PaidQuantity,
 	)
 	return i, err
 }

@@ -120,6 +120,10 @@ type Cart struct {
 	PixAmountCents         pgtype.Int8        `json:"pix_amount_cents"`
 	NeverExpires           bool               `json:"never_expires"`
 	StoreID                pgtype.UUID        `json:"store_id"`
+	ErpOrderStatus         pgtype.Text        `json:"erp_order_status"`
+	ErpOrderStatusAt       pgtype.Timestamptz `json:"erp_order_status_at"`
+	ErpOrderNumber         pgtype.Text        `json:"erp_order_number"`
+	PaidAmountCents        int64              `json:"paid_amount_cents"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.
@@ -138,6 +142,7 @@ type CartItem struct {
 	UnitPrice          pgtype.Int8 `json:"unit_price"`
 	WaitlistedQuantity int32       `json:"waitlisted_quantity"`
 	SessionID          pgtype.UUID `json:"session_id"`
+	PaidQuantity       int32       `json:"paid_quantity"`
 }
 
 // RN-12: uma linha por ADIÇÃO ao carrinho, com a sessão de origem. cart_items diz o que TEM no carrinho; esta tabela diz de onde veio cada unidade. Sem ela, cart_items.session_id é first-touch e credita tudo à primeira transmissão.
@@ -164,6 +169,17 @@ type CartMutation struct {
 	Source         string             `json:"source"`
 	ErpMovementID  pgtype.Text        `json:"erp_movement_id"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+type CartPayment struct {
+	ID                pgtype.UUID        `json:"id"`
+	CartID            pgtype.UUID        `json:"cart_id"`
+	AmountCents       int64              `json:"amount_cents"`
+	GrossCoveredCents int64              `json:"gross_covered_cents"`
+	Method            pgtype.Text        `json:"method"`
+	CheckoutID        string             `json:"checkout_id"`
+	PaidAt            pgtype.Timestamptz `json:"paid_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 }
 
 type Coupon struct {
@@ -218,6 +234,19 @@ type ErpContact struct {
 	ExternalContactID string             `json:"external_contact_id"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ErpOrderStatusEvent struct {
+	ID              pgtype.UUID        `json:"id"`
+	StoreID         pgtype.UUID        `json:"store_id"`
+	CartID          pgtype.UUID        `json:"cart_id"`
+	ExternalOrderID string             `json:"external_order_id"`
+	OrderNumber     pgtype.Text        `json:"order_number"`
+	Status          string             `json:"status"`
+	PreviousStatus  pgtype.Text        `json:"previous_status"`
+	Source          string             `json:"source"`
+	ObservedAt      pgtype.Timestamptz `json:"observed_at"`
+	Payload         json.RawMessage    `json:"payload"`
 }
 
 type ErpStockMovement struct {

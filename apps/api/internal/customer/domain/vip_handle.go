@@ -14,6 +14,7 @@ type VipHandle struct {
 	cartsUpdated     int
 	cartsMerged      int
 	cartsSkipped     int
+	ordersStuck      int
 	activationFailed bool
 }
 
@@ -42,6 +43,13 @@ func (v *VipHandle) AddedByID() *string    { return v.addedByID }
 func (v *VipHandle) CartsUpdated() int     { return v.cartsUpdated }
 func (v *VipHandle) CartsMerged() int      { return v.cartsMerged }
 func (v *VipHandle) CartsSkipped() int     { return v.cartsSkipped }
+
+// OrdersStuck é quantos pedidos antigos continuaram reservando peça no ERP
+// depois da fusão. Cada um é a mesma unidade contada em dois pedidos.
+func (v *VipHandle) OrdersStuck() int { return v.ordersStuck }
+
+// SetOrdersStuck registra os pedidos que não soltaram. Não persistido.
+func (v *VipHandle) SetOrdersStuck(n int) { v.ordersStuck = n }
 
 // ActivationFailed diz que a promoção foi gravada mas a consolidação dos
 // carrinhos que o comprador já tinha não rodou. Compras futuras caem no
