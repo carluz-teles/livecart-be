@@ -64,7 +64,7 @@ func (h *WebhookHandler) RegisterSimulatorRoutes(router fiber.Router) {
 		return
 	}
 	g := router.Group("/simulador/live", h.somenteStaging)
-	g.Post("/evento", h.SimularEvento)
+	g.Post("/sessao", h.SimularSessaoNoAr)
 	g.Get("/sessoes", h.SimularListarSessoes)
 	g.Post("/midia", h.SimularMidia)
 	g.Delete("/midia/:mediaId", h.SimularEncerrarMidia)
@@ -79,51 +79,68 @@ func (h *WebhookHandler) somenteStaging(c *fiber.Ctx) error {
 	return c.Next()
 }
 
-// SimularEventoRequest cria a campanha e a transmissão de uma vez.
-type SimularEventoRequest struct {
-	Titulo string `json:"titulo"`
-	// DiasAteFechar é o teto da campanha. 7 quando ausente.
-	DiasAteFechar int `json:"diasAteFechar"`
+// SimularSessaoNoARequest cria uma transmissão dentro de um evento que JÁ EXISTE.
+type SimularSessaoNoARequest struct {
+	EventID string `json:"eventId"`
+	// MediaID é opcional: em branco, o simulador inventa. Preenchido, permite
+	// reencenar um caso real com o media id que apareceu num log.
+	MediaID string `json:"mediaId"`
 }
 
-// Validate: título curto e prazo sóbrio. O teto existe porque evento é
-// carrinho sem prazo enquanto está aberto, e um evento de um ano em staging
-// deixaria estoque reservado até alguém lembrar.
-func (r SimularEventoRequest) Validate() error {
+func (r SimularSessaoNoARequest) Validate() error {
 	return validation.ValidateStruct(&r,
-		validation.Field(&r.Titulo, validation.Length(0, 120)),
-		validation.Field(&r.DiasAteFechar, validation.Min(0), validation.Max(60)),
+		validation.Field(&r.EventID, validation.Required, is.UUIDv4),
+		validation.Field(&r.MediaID, validation.Length(0, 128)),
 	)
 }
 
-// SimularEvento cria evento + sessão sem passar pelo Instagram.
+// SessaoNoAr é a transmissão recém-criada, já capturando comentário.
+type SessaoNoAr struct {
+	EventID   string `json:"eventId"`
+	SessionID string `json:"sessionId"`
+	MediaID   string `json:"mediaId"`
+}
+
+// SimularSessaoNoAr cria a transmissão e já a coloca no ar, num passo só.
 //
-// Existe porque o simulador nasceu inútil sem isto: a tela só cria transmissão
-// escolhendo uma live ativa da conta do Instagram, e em staging não há conta com
-// live. O caminho do serviço, porém, SEMPRE aceitou sessão sem plataforma
-// (Platform e PlatformLiveID são opcionais em CreateSessionRequest desde a
-// campanha guarda-chuva) — quem exigia a mídia era só o formulário.
+// O evento vem PRONTO, escolhido pelo lojista na lista dele — criar campanha é
+// trabalho do painel de verdade, e duplicar isso aqui daria duas telas fazendo
+// a mesma coisa com regras diferentes. O que o painel de verdade NÃO consegue
+// fazer em staging é abrir a transmissão: a tela exige escolher uma live ativa
+// da conta do Instagram, e a conta de teste não transmite.
 //
-// Então aqui não há caminho novo: é a MESMA live.Service.Create que o painel
-// chama, com a mídia deixada em branco. A mídia entra depois, pelo bloco 01 do
-// simulador.
-func (h *WebhookHandler) SimularEvento(c *fiber.Ctx) error {
+// Criar a sessão e pendurar a mídia são duas coisas, mas uma sessão sem mídia
+// não captura nada — então virar as duas de uma vez é o que corresponde ao gesto
+// real de "entrar no ar". Separá-las só criaria um estado intermediário inútil
+// em que o lojista acha que está transmitindo e nada chega.
+//
+// Nada aqui é caminho novo: é a MESMA live.Service.CreateSession do painel, com
+// a plataforma em branco — o que o serviço sempre aceitou (Platform e
+// PlatformLiveID são opcionais desde a campanha guarda-chuva). Quem exigia a
+// mídia era só o formulário.
+func (h *WebhookHandler) SimularSessaoNoAr(c *fiber.Ctx) error {
 	storeID, _ := c.Locals("store_id").(string)
-	var req SimularEventoRequest
+	var req SimularSessaoNoARequest
 	if err := c.BodyParser(&req); err != nil {
 		return httpx.DomainError(400, httpx.CodeValidationFailed, "corpo inválido")
 	}
 	if err := req.Validate(); err != nil {
 		return err
 	}
-	out, err := h.service.CreateSimulatedEvent(c.Context(), storeID, req.Titulo, req.DiasAteFechar)
+	mediaID := strings.TrimSpace(req.MediaID)
+	if mediaID == "" {
+		mediaID = novoMediaIDSimulado()
+	}
+
+	out, err := h.service.CreateSimulatedSessionOnAir(c.Context(), storeID, req.EventID, mediaID)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}
-	logger.From(c.Context(), h.logger).Info("live simulator created an event with a session",
+	logger.From(c.Context(), h.logger).Info("live simulator opened a session on air",
 		zap.String("store_id", storeID),
 		zap.String("event_id", out.EventID),
 		zap.String("session_id", out.SessionID),
+		zap.String("media_id", out.MediaID),
 	)
 	return httpx.OK(c, out)
 }

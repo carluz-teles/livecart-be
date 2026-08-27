@@ -6558,52 +6558,39 @@ func (s *Service) ListSessionsForSimulator(ctx context.Context, storeID string) 
 	return s.repo.ListSessionsForSimulator(ctx, storeID)
 }
 
-// EventoSimulado é o par campanha+transmissão que o simulador cria.
-type EventoSimulado struct {
-	EventID   string `json:"eventId"`
-	SessionID string `json:"sessionId"`
-	Title     string `json:"title"`
-}
+// SessaoNoArSimulada é a transmissão que o simulador abriu.
+type SessaoNoArSimulada = SessaoNoAr
 
-// CreateSimulatedEvent cria evento e sessão SEM mídia, para o simulador.
-//
-// Usa a mesma live.Service.Create do painel. A única diferença é não mandar
-// plataforma — o que o serviço sempre aceitou, e só o formulário exigia.
-func (s *Service) CreateSimulatedEvent(ctx context.Context, storeID, titulo string, dias int) (EventoSimulado, error) {
-	var out EventoSimulado
+// CreateSimulatedSessionOnAir cria a transmissão num evento existente e já
+// pendura a mídia — o gesto de "entrar no ar", que em staging não tem como
+// acontecer pelo Instagram.
+func (s *Service) CreateSimulatedSessionOnAir(ctx context.Context, storeID, eventID, mediaID string) (SessaoNoAr, error) {
+	var out SessaoNoAr
 	if !config.IsStaging() {
 		return out, httpx.DomainError(403, httpx.CodeStagingOnly, "o simulador de live existe apenas em staging")
 	}
 	if s.liveService == nil {
 		return out, httpx.DomainError(422, httpx.CodeStagingOnly, "serviço de lives indisponível")
 	}
-	if strings.TrimSpace(titulo) == "" {
-		titulo = "Live simulada " + time.Now().Format("02/01 15:04")
-	}
-	if dias <= 0 {
-		dias = 7
-	}
-	fim := time.Now().Add(time.Duration(dias) * 24 * time.Hour)
 
-	criado, err := s.liveService.Create(ctx, live.CreateLiveInput{
+	// A plataforma vai em branco de propósito: a mídia é pendurada logo abaixo,
+	// pelo mesmo caminho que o simulador já usa para reabrir uma transmissão.
+	// Mandá-la aqui faria a criação e a vinculação divergirem em dois lugares.
+	sess, err := s.liveService.CreateSession(ctx, live.CreateSessionInput{
+		EventID: eventID,
 		StoreID: storeID,
-		Title:   titulo,
 		Type:    "live",
-		EndsAt:  &fim,
 	})
 	if err != nil {
 		return out, err
 	}
-	out = EventoSimulado{EventID: criado.ID, Title: titulo}
-	// A criação do evento já abre a primeira sessão; pega o id dela.
-	sessoes, err := s.repo.ListSessionsForSimulator(ctx, storeID)
-	if err == nil {
-		for _, ss := range sessoes {
-			if ss.EventID == criado.ID {
-				out.SessionID = ss.SessionID
-				break
-			}
-		}
+	if err := s.AttachSimulatedMedia(ctx, storeID, sess.ID, mediaID); err != nil {
+		// A sessão ficou criada e sem mídia: é um estado que o painel mostra e
+		// que o próprio simulador consegue resolver depois, então o erro sobe
+		// com o id dela em vez de fingir que nada aconteceu.
+		out.SessionID = sess.ID
+		out.EventID = eventID
+		return out, err
 	}
-	return out, nil
+	return SessaoNoAr{EventID: eventID, SessionID: sess.ID, MediaID: mediaID}, nil
 }
