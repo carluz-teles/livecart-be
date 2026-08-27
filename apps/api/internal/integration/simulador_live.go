@@ -64,6 +64,7 @@ func (h *WebhookHandler) RegisterSimulatorRoutes(router fiber.Router) {
 		return
 	}
 	g := router.Group("/simulador/live", h.somenteStaging)
+	g.Post("/evento", h.SimularEvento)
 	g.Get("/sessoes", h.SimularListarSessoes)
 	g.Post("/midia", h.SimularMidia)
 	g.Delete("/midia/:mediaId", h.SimularEncerrarMidia)
@@ -76,6 +77,55 @@ func (h *WebhookHandler) somenteStaging(c *fiber.Ctx) error {
 		return httpx.DomainError(403, httpx.CodeStagingOnly, "o simulador de live existe apenas em staging")
 	}
 	return c.Next()
+}
+
+// SimularEventoRequest cria a campanha e a transmissão de uma vez.
+type SimularEventoRequest struct {
+	Titulo string `json:"titulo"`
+	// DiasAteFechar é o teto da campanha. 7 quando ausente.
+	DiasAteFechar int `json:"diasAteFechar"`
+}
+
+// Validate: título curto e prazo sóbrio. O teto existe porque evento é
+// carrinho sem prazo enquanto está aberto, e um evento de um ano em staging
+// deixaria estoque reservado até alguém lembrar.
+func (r SimularEventoRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.Titulo, validation.Length(0, 120)),
+		validation.Field(&r.DiasAteFechar, validation.Min(0), validation.Max(60)),
+	)
+}
+
+// SimularEvento cria evento + sessão sem passar pelo Instagram.
+//
+// Existe porque o simulador nasceu inútil sem isto: a tela só cria transmissão
+// escolhendo uma live ativa da conta do Instagram, e em staging não há conta com
+// live. O caminho do serviço, porém, SEMPRE aceitou sessão sem plataforma
+// (Platform e PlatformLiveID são opcionais em CreateSessionRequest desde a
+// campanha guarda-chuva) — quem exigia a mídia era só o formulário.
+//
+// Então aqui não há caminho novo: é a MESMA live.Service.Create que o painel
+// chama, com a mídia deixada em branco. A mídia entra depois, pelo bloco 01 do
+// simulador.
+func (h *WebhookHandler) SimularEvento(c *fiber.Ctx) error {
+	storeID, _ := c.Locals("store_id").(string)
+	var req SimularEventoRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.DomainError(400, httpx.CodeValidationFailed, "corpo inválido")
+	}
+	if err := req.Validate(); err != nil {
+		return err
+	}
+	out, err := h.service.CreateSimulatedEvent(c.Context(), storeID, req.Titulo, req.DiasAteFechar)
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	logger.From(c.Context(), h.logger).Info("live simulator created an event with a session",
+		zap.String("store_id", storeID),
+		zap.String("event_id", out.EventID),
+		zap.String("session_id", out.SessionID),
+	)
+	return httpx.OK(c, out)
 }
 
 // SessaoSimulavel é uma sessão da loja onde dá para pendurar uma mídia.

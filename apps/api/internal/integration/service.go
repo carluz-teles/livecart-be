@@ -6557,3 +6557,53 @@ func (s *Service) ListSessionsForSimulator(ctx context.Context, storeID string) 
 	}
 	return s.repo.ListSessionsForSimulator(ctx, storeID)
 }
+
+// EventoSimulado é o par campanha+transmissão que o simulador cria.
+type EventoSimulado struct {
+	EventID   string `json:"eventId"`
+	SessionID string `json:"sessionId"`
+	Title     string `json:"title"`
+}
+
+// CreateSimulatedEvent cria evento e sessão SEM mídia, para o simulador.
+//
+// Usa a mesma live.Service.Create do painel. A única diferença é não mandar
+// plataforma — o que o serviço sempre aceitou, e só o formulário exigia.
+func (s *Service) CreateSimulatedEvent(ctx context.Context, storeID, titulo string, dias int) (EventoSimulado, error) {
+	var out EventoSimulado
+	if !config.IsStaging() {
+		return out, httpx.DomainError(403, httpx.CodeStagingOnly, "o simulador de live existe apenas em staging")
+	}
+	if s.liveService == nil {
+		return out, httpx.DomainError(422, httpx.CodeStagingOnly, "serviço de lives indisponível")
+	}
+	if strings.TrimSpace(titulo) == "" {
+		titulo = "Live simulada " + time.Now().Format("02/01 15:04")
+	}
+	if dias <= 0 {
+		dias = 7
+	}
+	fim := time.Now().Add(time.Duration(dias) * 24 * time.Hour)
+
+	criado, err := s.liveService.Create(ctx, live.CreateLiveInput{
+		StoreID: storeID,
+		Title:   titulo,
+		Type:    "live",
+		EndsAt:  &fim,
+	})
+	if err != nil {
+		return out, err
+	}
+	out = EventoSimulado{EventID: criado.ID, Title: titulo}
+	// A criação do evento já abre a primeira sessão; pega o id dela.
+	sessoes, err := s.repo.ListSessionsForSimulator(ctx, storeID)
+	if err == nil {
+		for _, ss := range sessoes {
+			if ss.EventID == criado.ID {
+				out.SessionID = ss.SessionID
+				break
+			}
+		}
+	}
+	return out, nil
+}
