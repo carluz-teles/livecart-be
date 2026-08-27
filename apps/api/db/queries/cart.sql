@@ -23,6 +23,10 @@ RETURNING *;
 -- impõe esse limite: em 26/08/2026 ele aceitou (204) editar os itens de um
 -- pedido "Faturada". A recusa é nossa.
 --
+-- 'preparando_envio' está na lista de fechados apesar do nome e apesar de a
+-- lista do enum o colocar ANTES de 'faturado': na operação o pedido só entra em
+-- preparo depois de a nota sair. Ver ERPOrderStatus.FechadoParaNovosItens.
+--
 -- Estornado fica de fora pelo motivo oposto: não há venda a que somar.
 SELECT * FROM carts
 WHERE store_id = $1 AND platform_handle = $2
@@ -30,7 +34,8 @@ WHERE store_id = $1 AND platform_handle = $2
   AND status IN ('pending', 'active', 'checkout', 'paid')
   AND (payment_status IS NULL OR payment_status <> 'refunded')
   AND (erp_order_status IS NULL OR erp_order_status NOT IN (
-        'faturado', 'pronto_envio', 'enviado', 'entregue', 'nao_entregue', 'cancelado'))
+        'preparando_envio', 'faturado', 'pronto_envio', 'enviado', 'entregue',
+        'nao_entregue', 'cancelado'))
 ORDER BY created_at DESC
 LIMIT 1
 FOR UPDATE;

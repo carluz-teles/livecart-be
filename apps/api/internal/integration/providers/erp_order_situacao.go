@@ -96,17 +96,24 @@ func (s ERPOrderStatus) Terminal() bool {
 //
 // Este é o limite que o lojista reconhece: enquanto está "Em aberto" ou
 // "Aprovado" — pago, mas ainda não faturado — ele soma a compra de hoje na de
-// ontem e manda tudo numa caixa só. Depois de faturado, o pedido virou NF, e
-// somar item nele é emitir nota errada.
+// ontem e manda tudo numa caixa só. A partir do documento fiscal, somar item é
+// emitir nota errada.
 //
-// O ERP NÃO impõe esse limite: em 26/08/2026 a API aceitou (204) editar os itens
+// "Preparando envio" está do lado fechado, e isso NÃO se lê pelo nome. O nome
+// sugere alguém montando a caixa, e a lista do enum o coloca antes de "Faturada".
+// Na operação é o contrário: o pedido só entra em preparo depois de a nota sair,
+// então quando ele chega aqui o documento fiscal já existe. Regra do lojista,
+// 26/08/2026 — não invente uma janela de edição que a nota já fechou.
+//
+// O ERP não impõe nada disso: em 26/08/2026 a API aceitou (204) editar os itens
 // de um pedido em situação "Faturada". A recusa tem de ser nossa.
 //
 // Cancelado entra na lista pelo motivo oposto: não há pedido vivo a que somar.
 func (s ERPOrderStatus) FechadoParaNovosItens() bool {
 	switch s {
-	case ERPOrderStatusFaturado, ERPOrderStatusProntoEnvio, ERPOrderStatusEnviado,
-		ERPOrderStatusEntregue, ERPOrderStatusNaoEntregue, ERPOrderStatusCancelado:
+	case ERPOrderStatusPreparandoEnvio, ERPOrderStatusFaturado, ERPOrderStatusProntoEnvio,
+		ERPOrderStatusEnviado, ERPOrderStatusEntregue, ERPOrderStatusNaoEntregue,
+		ERPOrderStatusCancelado:
 		return true
 	}
 	return false

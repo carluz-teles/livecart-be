@@ -298,7 +298,7 @@ func TestPortaDeJuncaoPorSituacaoDoERP(t *testing.T) {
 	}{
 		{"aberto", true},
 		{"aprovado", true},
-		{"preparando_envio", true},
+		{"preparando_envio", false}, // a nota já saiu quando o pedido entra em preparo
 		{"dados_incompletos", true},
 		{"faturado", false},
 		{"pronto_envio", false},

@@ -119,6 +119,7 @@ func TestPedidoFaturadoNaoRecebeMaisItem(t *testing.T) {
 // têm nota emitida.
 func TestSituacoesPosFaturamentoTambemFechamAPorta(t *testing.T) {
 	fechadas := []providers.ERPOrderStatus{
+		providers.ERPOrderStatusPreparandoEnvio,
 		providers.ERPOrderStatusFaturado,
 		providers.ERPOrderStatusProntoEnvio,
 		providers.ERPOrderStatusEnviado,
@@ -129,7 +130,6 @@ func TestSituacoesPosFaturamentoTambemFechamAPorta(t *testing.T) {
 	abertas := []providers.ERPOrderStatus{
 		providers.ERPOrderStatusAberto,
 		providers.ERPOrderStatusAprovado,
-		providers.ERPOrderStatusPreparandoEnvio,
 		providers.ERPOrderStatusDadosIncompletos,
 	}
 	for _, s := range fechadas {
@@ -145,19 +145,24 @@ func TestSituacoesPosFaturamentoTambemFechamAPorta(t *testing.T) {
 	}
 }
 
-// "Preparando envio" é o lojista separando a caixa: ainda dá tempo de somar.
-func TestPreparandoEnvioAindaRecebeItem(t *testing.T) {
+// "Preparando envio" NÃO é uma janela de edição.
+//
+// O nome sugere alguém montando a caixa, e a lista do enum o coloca antes de
+// "Faturada" — as duas coisas enganam. Na operação o pedido só entra em preparo
+// depois de a nota sair, então aqui o documento fiscal já existe.
+func TestPreparandoEnvioJaTemNotaENaoRecebeItem(t *testing.T) {
 	svc, repo, erp := paraJuntar(t, map[string]int{"ext-p1": 50, "ext-p2": 50})
 	ctx := context.Background()
 	orderID := repo.carrinho("cart-1").externalOrderID
 	repo.definirStatusERP("cart-1", string(providers.ERPOrderStatusPreparandoEnvio))
 
 	repo.acrescentarItem("cart-1", item("p2", 2))
-	if err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1"); err != nil {
-		t.Fatalf("recusou item em pedido só separado: %v", err)
+	err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1")
+	if !errors.Is(err, ErrPedidoFaturado) {
+		t.Fatalf("erro = %v, quero ErrPedidoFaturado — em preparo a nota já saiu", err)
 	}
-	if q := erp.quantidadeNoPedido(orderID, "ext-p2"); q != 2 {
-		t.Errorf("o pedido tem %d un., quero 2", q)
+	if q := erp.quantidadeNoPedido(orderID, "ext-p2"); q != 0 {
+		t.Errorf("o item entrou (%d un.) num pedido que já tem nota", q)
 	}
 }
 
