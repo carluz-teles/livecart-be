@@ -23,6 +23,9 @@ import (
 )
 
 type carrinhoDeTeste struct {
+	// cobrado é quanto a próxima cobrança vai debitar. -1 significa "o preço
+	// cheio do que ainda falta" — sem desconto.
+	cobrado  int64
 	id       string
 	produtoA string
 	produtoB string
@@ -33,7 +36,7 @@ func semearCarrinho(t *testing.T) carrinhoDeTeste {
 	t.Helper()
 	ctx := context.Background()
 	n := fmt.Sprintf("%d", time.Now().UnixNano())
-	c := carrinhoDeTeste{q: sqlc.New(testPool)}
+	c := carrinhoDeTeste{q: sqlc.New(testPool), cobrado: -1}
 
 	var storeID, eventID string
 	mustScan := func(dst *string, sql string, args ...any) {
@@ -71,12 +74,22 @@ func (c carrinhoDeTeste) somar(t *testing.T, produto string, qtd int, preco int6
 func (c carrinhoDeTeste) pagar(t *testing.T, idDoPagamento string) {
 	t.Helper()
 	agora := time.Now()
+	if c.cobrado < 0 {
+		var falta int64
+		if err := testPool.QueryRow(context.Background(),
+			`SELECT cart_unpaid_total_cents($1) + COALESCE((SELECT shipping_cost_cents FROM carts WHERE id=$1),0)`,
+			c.id).Scan(&falta); err != nil {
+			t.Fatalf("lendo o que falta pagar: %v", err)
+		}
+		c.cobrado = falta
+	}
 	if _, err := c.q.UpdateCartPayment(context.Background(), sqlc.UpdateCartPaymentParams{
-		ID:            pgUUID(t, c.id),
+		CartID:        pgUUID(t, c.id),
 		PaymentStatus: pgtype.Text{String: "paid", Valid: true},
-		CheckoutID:    pgtype.Text{String: idDoPagamento, Valid: true},
+		CheckoutID:    idDoPagamento,
 		PaidAt:        pgtype.Timestamptz{Time: agora, Valid: true},
 		PaymentMethod: pgtype.Text{String: "pix", Valid: true},
+		AmountCents:   c.cobrado,
 	}); err != nil {
 		t.Fatalf("pagando: %v", err)
 	}
@@ -210,5 +223,121 @@ func TestCarrinhoNaoPagoDeveTudo(t *testing.T) {
 	if pago, total, falta := c.dinheiro(t); pago != 0 || falta != total {
 		t.Errorf("pago=%d total=%d falta=%d, quero 0 pago e falta=total",
 			pago, total, falta)
+	}
+}
+
+// ─── Desconto de cupom e de PIX ─────────────────────────────────────────────
+
+func (c carrinhoDeTeste) extrato(t *testing.T) (entrou, bruto int64, cobrancas int) {
+	t.Helper()
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT COALESCE(SUM(amount_cents),0)::bigint, COALESCE(SUM(gross_covered_cents),0)::bigint, COUNT(*)
+		 FROM cart_payments WHERE cart_id = $1`, c.id).Scan(&entrou, &bruto, &cobrancas); err != nil {
+		t.Fatalf("lendo o extrato: %v", err)
+	}
+	return
+}
+
+// PIX com desconto: entra menos que o preço cheio, e a diferença é abatimento,
+// não dívida. O livro guarda as DUAS observações para que dê para saber qual é
+// qual depois.
+func TestCobrancaComDescontoGuardaOQueEntrouEOQueCobriu(t *testing.T) {
+	requireDB(t)
+	c := semearCarrinho(t)
+	c.somar(t, c.produtoA, 5, 2000) // preço cheio: R$ 100
+	c.cobrado = 9500                // PIX com 5% de desconto
+	c.pagar(t, "pay-pix")
+
+	entrou, bruto, n := c.extrato(t)
+	if n != 1 {
+		t.Fatalf("cobranças = %d, quero 1", n)
+	}
+	if entrou != 9500 {
+		t.Errorf("entrou = %d, quero 9500 — é o que o gateway cobrou", entrou)
+	}
+	if bruto != 10000 {
+		t.Errorf("bruto coberto = %d, quero 10000 — é o preço cheio das unidades "+
+			"que essa cobrança liquidou", bruto)
+	}
+	if _, _, falta := c.dinheiro(t); falta != 0 {
+		t.Errorf("falta pagar %d, quero 0 — os R$ 5 são desconto, não dívida", falta)
+	}
+}
+
+// Duas cobranças, cada uma cobrindo o que faltava no seu momento.
+func TestDuasCobrancasSaoDuasLinhasNoExtrato(t *testing.T) {
+	requireDB(t)
+	c := semearCarrinho(t)
+	c.somar(t, c.produtoA, 2, 2000) // R$ 40
+	c.cobrado = -1
+	c.pagar(t, "pay-1")
+
+	c.somar(t, c.produtoB, 3, 500) // + R$ 15
+	c.cobrado = -1
+	c.pagar(t, "pay-2")
+
+	entrou, bruto, n := c.extrato(t)
+	if n != 2 {
+		t.Fatalf("cobranças = %d, quero 2 — uma por vez que o dinheiro entrou", n)
+	}
+	if entrou != 5500 || bruto != 5500 {
+		t.Errorf("entrou=%d bruto=%d, quero 5500/5500", entrou, bruto)
+	}
+	var segunda int64
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT amount_cents FROM cart_payments WHERE cart_id=$1 AND checkout_id='pay-2'`,
+		c.id).Scan(&segunda); err != nil {
+		t.Fatalf("lendo a segunda cobrança: %v", err)
+	}
+	if segunda != 1500 {
+		t.Errorf("a segunda cobrança = %d, quero 1500 — ela cobre só o que "+
+			"faltava, não o pedido inteiro de novo", segunda)
+	}
+}
+
+// Reentrega do webhook não vira segunda linha nem soma de novo.
+func TestReentregaNaoDuplicaNoExtrato(t *testing.T) {
+	requireDB(t)
+	c := semearCarrinho(t)
+	c.somar(t, c.produtoA, 2, 2000)
+	c.cobrado = 4000
+	c.pagar(t, "pay-1")
+	c.cobrado = 4000
+	c.pagar(t, "pay-1")
+	c.cobrado = 4000
+	c.pagar(t, "pay-1")
+
+	entrou, _, n := c.extrato(t)
+	if n != 1 {
+		t.Errorf("cobranças = %d, quero 1 — o gateway reentrega o mesmo aviso "+
+			"até dez vezes, e reentrega não é pagamento novo", n)
+	}
+	if entrou != 4000 {
+		t.Errorf("entrou = %d, quero 4000", entrou)
+	}
+	if pago, _, _ := c.dinheiro(t); pago != 4000 {
+		t.Errorf("paid_amount_cents = %d, quero 4000 — a coluna acumulada tem de "+
+			"seguir o extrato, não contar o eco", pago)
+	}
+}
+
+// Cupom: mesmo mecanismo, mesma conta.
+func TestCupomTambemNaoViraDivida(t *testing.T) {
+	requireDB(t)
+	c := semearCarrinho(t)
+	c.somar(t, c.produtoA, 3, 2000) // R$ 60
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE carts SET coupon_code='OFF10', coupon_discount_cents=1000 WHERE id=$1`, c.id); err != nil {
+		t.Fatalf("aplicando cupom: %v", err)
+	}
+	c.cobrado = 5000 // R$ 60 - R$ 10 de cupom
+	c.pagar(t, "pay-cupom")
+
+	entrou, bruto, _ := c.extrato(t)
+	if bruto-entrou != 1000 {
+		t.Errorf("desconto = %d, quero 1000 — é o cupom", bruto-entrou)
+	}
+	if _, _, falta := c.dinheiro(t); falta != 0 {
+		t.Errorf("falta pagar %d, quero 0 — o cupom não é dívida", falta)
 	}
 }

@@ -4047,12 +4047,26 @@ func (q *Queries) UpdateCartNotifyStatus(ctx context.Context, arg UpdateCartNoti
 
 const updateCartPayment = `-- name: UpdateCartPayment :one
 
-WITH pago AS (
+WITH inedito AS (
+    -- Reentrega do webhook não é segundo pagamento. O ERP e o gateway
+    -- reentregam o mesmo aviso até dez vezes, e o que separa uma cobrança nova
+    -- de um eco é o id do gateway.
+    SELECT NOT EXISTS (
+        SELECT 1 FROM cart_payments cp WHERE cp.cart_id = $1 AND cp.checkout_id = $3
+    ) AS primeira_vez
+), coberto AS (
+    -- O BRUTO que esta cobrança liquida: as unidades ainda não pagas, a preço
+    -- cheio, mais o frete. É contra este número que o valor cobrado revela o
+    -- desconto.
+    SELECT cart_unpaid_total_cents($1) + COALESCE(
+        (SELECT c.shipping_cost_cents FROM carts c WHERE c.id = $1), 0) AS bruto
+), pago AS (
     UPDATE carts c
     SET payment_status = $2, checkout_id = $3, paid_at = $4, payment_method = $5,
         expires_at = CASE WHEN $2::varchar = 'paid' THEN NULL ELSE expires_at END,
-        paid_amount_cents = CASE WHEN $2::varchar = 'paid'
-            THEN c.paid_amount_cents + cart_unpaid_total_cents(c.id)
+        paid_amount_cents = CASE
+            WHEN $2::varchar = 'paid' AND (SELECT primeira_vez FROM inedito)
+            THEN c.paid_amount_cents + $6::bigint
             ELSE c.paid_amount_cents END
     WHERE c.id = $1
       AND c.status NOT IN ('expired', 'cancelled')
@@ -4068,16 +4082,26 @@ WITH pago AS (
     WHERE ci.cart_id = (SELECT p.id FROM pago p WHERE p.payment_status = 'paid')
       AND ci.paid_quantity < ci.quantity
     RETURNING 1
+), livro AS (
+    -- Uma linha por cobrança. É o que permite o pedido no ERP dizer "R$ 40 pagos
+    -- em 18/08, R$ 105 em 22/08" em vez de um total mudo.
+    INSERT INTO cart_payments (cart_id, amount_cents, gross_covered_cents, method, checkout_id, paid_at)
+    SELECT p.id, $6::bigint, (SELECT bruto FROM coberto),
+           NULLIF($5, ''), $3, COALESCE($4, NOW())
+    FROM pago p WHERE p.payment_status = 'paid' AND $3 <> ''
+    ON CONFLICT (cart_id, checkout_id) DO NOTHING
+    RETURNING 1
 )
 SELECT id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents FROM pago
 `
 
 type UpdateCartPaymentParams struct {
-	ID            pgtype.UUID        `json:"id"`
+	CartID        pgtype.UUID        `json:"cart_id"`
 	PaymentStatus pgtype.Text        `json:"payment_status"`
-	CheckoutID    pgtype.Text        `json:"checkout_id"`
+	CheckoutID    string             `json:"checkout_id"`
 	PaidAt        pgtype.Timestamptz `json:"paid_at"`
 	PaymentMethod pgtype.Text        `json:"payment_method"`
+	AmountCents   int64              `json:"amount_cents"`
 }
 
 type UpdateCartPaymentRow struct {
@@ -4168,11 +4192,12 @@ type UpdateCartPaymentRow struct {
 // as unidades que a soma contou são exatamente as que o carimbo marcou.
 func (q *Queries) UpdateCartPayment(ctx context.Context, arg UpdateCartPaymentParams) (UpdateCartPaymentRow, error) {
 	row := q.db.QueryRow(ctx, updateCartPayment,
-		arg.ID,
+		arg.CartID,
 		arg.PaymentStatus,
 		arg.CheckoutID,
 		arg.PaidAt,
 		arg.PaymentMethod,
+		arg.AmountCents,
 	)
 	var i UpdateCartPaymentRow
 	err := row.Scan(

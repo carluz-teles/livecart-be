@@ -101,8 +101,12 @@ func (s *Service) ConfirmManualPayment(ctx context.Context, cartID, storeID stri
 	agora := time.Now()
 	paymentID := manualPaymentID(cartID)
 
+	// Confirmação MANUAL: o lojista está dizendo que recebeu o valor do pedido.
+	// Não há gateway a consultar, então o valor pago é o preço cheio — se ele
+	// deu desconto por fora, quem sabe é ele, e inventar um desconto aqui faria
+	// o pedido no ERP declarar um abatimento que ninguém concedeu.
 	liveEventID, err := s.gateway.UpdateCartPaymentStatus(
-		ctx, cartID, "paid", paymentID, &agora, manualPaymentMethod)
+		ctx, cartID, "paid", paymentID, &agora, manualPaymentMethod, gmvCents)
 	if err != nil {
 		if !errors.Is(err, ErrCartNotPayable) {
 			return fmt.Errorf("updating cart payment status: %w", err)

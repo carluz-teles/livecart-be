@@ -2791,7 +2791,13 @@ func (r *Repository) GetCartTokenByID(ctx context.Context, cartID string) (strin
 // It returns the cart's live_event_id from the RETURNING row — the cart.paid
 // (etc.) fact emitted right after by the caller needs it and this avoids a
 // second query.
-func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string, paymentStatus string, paymentID string, paidAt *time.Time, paymentMethod string) (liveEventID string, err error) {
+//
+// amountCents é o que o gateway confirmou — o número que vira a parcela "PAGO"
+// no pedido do ERP. Ele não é derivável do carrinho: com cupom ou desconto de
+// PIX, o que entra é MENOR que o preço cheio das unidades cobertas, e é
+// exatamente essa diferença que o pedido precisa declarar como desconto em vez
+// de como saldo a pagar.
+func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string, paymentStatus string, paymentID string, paidAt *time.Time, paymentMethod string, amountCents int64) (liveEventID string, err error) {
 	cID, err := parseUUID(cartID)
 	if err != nil {
 		return "", err
@@ -2803,11 +2809,12 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 	}
 
 	cart, err := r.queries.UpdateCartPayment(ctx, sqlc.UpdateCartPaymentParams{
-		ID:            cID,
+		CartID:        cID,
 		PaymentStatus: pgtype.Text{String: paymentStatus, Valid: true},
-		CheckoutID:    pgtype.Text{String: paymentID, Valid: paymentID != ""},
+		CheckoutID:    paymentID,
 		PaidAt:        paidAtPg,
 		PaymentMethod: pgtype.Text{String: paymentMethod, Valid: paymentMethod != ""},
+		AmountCents:   amountCents,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -3997,4 +4004,28 @@ func (r *Repository) ApplyERPStockMirror(ctx context.Context, productID string, 
 		return false, fmt.Errorf("applying ERP stock mirror: %w", err)
 	}
 	return n > 0, nil
+}
+
+// ListCartPayments lê o livro de pagamentos de um carrinho, na ordem em que o
+// dinheiro entrou. Satisfaz erp.CartPaymentLedger.
+func (r *Repository) ListCartPayments(ctx context.Context, cartID string) ([]erp.CartPayment, error) {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	linhas, err := r.queries.ListCartPayments(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]erp.CartPayment, 0, len(linhas))
+	for _, l := range linhas {
+		out = append(out, erp.CartPayment{
+			AmountCents:       l.AmountCents,
+			GrossCoveredCents: l.GrossCoveredCents,
+			Method:            l.Method,
+			CheckoutID:        l.CheckoutID,
+			PaidAt:            l.PaidAt.Time,
+		})
+	}
+	return out, nil
 }

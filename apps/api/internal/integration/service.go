@@ -4216,8 +4216,8 @@ func (s *Service) CartPaymentStatus(ctx context.Context, cartID string) (string,
 // paymentdomain.ErrCartNotPayable (the sentinel the repo now returns) when the
 // cart expired/cancelled between the charge and the webhook, and the cart's
 // live_event_id (from the same RETURNING row) on success.
-func (s *Service) UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (string, error) {
-	return s.repo.UpdateCartPaymentStatus(ctx, cartID, paymentStatus, paymentID, paidAt, paymentMethod)
+func (s *Service) UpdateCartPaymentStatus(ctx context.Context, cartID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string, amountCents int64) (string, error) {
+	return s.repo.UpdateCartPaymentStatus(ctx, cartID, paymentStatus, paymentID, paidAt, paymentMethod, amountCents)
 }
 
 // CartGMVCents returns the pure item sum (excludes shipping and coupon) via the

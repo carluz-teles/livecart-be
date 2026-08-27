@@ -7,6 +7,7 @@ package erp
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -32,6 +33,9 @@ type carrinhoSimulado struct {
 	pagoCents int64
 	pagoEm    time.Time
 	pagoQtd   map[string]int
+	// livro é a razão de pagamentos, como a 000141 a guarda: uma linha por
+	// cobrança, com o que entrou e o preço cheio que aquilo liquidou.
+	livro []CartPayment
 }
 
 type repoSimulado struct {
@@ -467,6 +471,16 @@ var (
 // Repetir a chamada não soma de novo — não porque o teste seja gentil, mas
 // porque o `paid_quantity < quantity` da query também não deixa.
 func (r *repoSimulado) pagarCarrinho(cartID string, quando time.Time) int64 {
+	return r.cobrar(cartID, quando, -1, "pix")
+}
+
+// cobrar encena uma cobrança como a query de pagamento a grava: carimba as
+// unidades que ela liquida, guarda o BRUTO que elas valiam e o que de fato
+// entrou. cobradoCents negativo significa "sem desconto" — entrou o preço cheio.
+//
+// Repetir com o mesmo checkout id não soma de novo, pelo mesmo motivo que a
+// query não soma: reentrega de webhook não é segundo pagamento.
+func (r *repoSimulado) cobrar(cartID string, quando time.Time, cobradoCents int64, metodo string) int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	c := r.carrinhos[cartID]
@@ -476,18 +490,41 @@ func (r *repoSimulado) pagarCarrinho(cartID string, quando time.Time) int64 {
 	if c.pagoQtd == nil {
 		c.pagoQtd = map[string]int{}
 	}
-	var entrou int64
-	for _, it := range c.itens {
+	var bruto int64
+	for i, it := range c.itens {
 		falta := it.Quantity - c.pagoQtd[it.ProductID]
 		if falta <= 0 {
 			continue
 		}
-		entrou += int64(falta) * it.UnitPrice
+		bruto += int64(falta) * it.UnitPrice
 		c.pagoQtd[it.ProductID] = it.Quantity
+		_ = i
+	}
+	entrou := cobradoCents
+	if entrou < 0 {
+		entrou = bruto
 	}
 	c.pagoCents += entrou
 	c.pagoEm = quando
+	c.livro = append(c.livro, CartPayment{
+		AmountCents:       entrou,
+		GrossCoveredCents: bruto,
+		Method:            metodo,
+		CheckoutID:        fmt.Sprintf("pay-%d", len(c.livro)+1),
+		PaidAt:            quando,
+	})
 	return entrou
+}
+
+// ListCartPayments satisfaz erp.CartPaymentLedger.
+func (r *repoSimulado) ListCartPayments(_ context.Context, cartID string) ([]CartPayment, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c := r.carrinhos[cartID]
+	if c == nil {
+		return nil, nil
+	}
+	return append([]CartPayment(nil), c.livro...), nil
 }
 
 // faltaPagar é cart_unpaid_total_cents: o que o carrinho ainda deve.

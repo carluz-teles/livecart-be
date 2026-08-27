@@ -367,6 +367,31 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 		}
 	}
 
+	// O extrato: uma linha por cobrança. `pago` acima é o PREÇO CHEIO das
+	// unidades cobertas; o dinheiro que entrou por elas é menor sempre que
+	// houve cupom ou desconto de PIX, e a diferença é abatimento, não dívida.
+	// Sem separar os dois, a tela mostraria o desconto como saldo devedor.
+	pagamentos, err := s.repo.ListCartPaymentEntries(ctx, id)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("failed to load the payment ledger for order detail",
+			zap.String("order_id", id), zap.Error(err))
+		pagamentos = nil
+	}
+	var entrou, cobertoBruto int64
+	for _, p := range pagamentos {
+		entrou += p.AmountCents
+		cobertoBruto += p.GrossCoveredCents
+	}
+	desconto := cobertoBruto - entrou
+	if desconto < 0 {
+		desconto = 0
+	}
+	if len(pagamentos) > 0 {
+		// Com extrato, quem manda é ele: `pago` vira o dinheiro que entrou de
+		// fato, e o preço cheio coberto se divide entre pago e desconto.
+		pago = entrou
+	}
+
 	out := &OrderDetailOutput{
 		OrderOutput:            *orderOutput,
 		Token:                  row.Token,
@@ -378,6 +403,8 @@ func (s *Service) GetDetailByID(ctx context.Context, id string, storeID string) 
 		WaitlistedAmount:       waitlisted,
 		AlreadyPaidAmount:      pago,
 		OutstandingAmount:      aPagar,
+		DiscountedAmount:       desconto,
+		Payments:               pagamentos,
 		PaymentMethod:          row.PaymentMethod,
 		Installments:           row.Installments,
 		DiscountCents:          row.DiscountCents,

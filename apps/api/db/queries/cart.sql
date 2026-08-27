@@ -369,12 +369,26 @@ SELECT * FROM pago;
 -- sobrar sem carimbo é o "falta pagar". Os dois UPDATE veem a MESMA fotografia,
 -- então
 -- as unidades que a soma contou são exatamente as que o carimbo marcou.
-WITH pago AS (
+WITH inedito AS (
+    -- Reentrega do webhook não é segundo pagamento. O ERP e o gateway
+    -- reentregam o mesmo aviso até dez vezes, e o que separa uma cobrança nova
+    -- de um eco é o id do gateway.
+    SELECT NOT EXISTS (
+        SELECT 1 FROM cart_payments cp WHERE cp.cart_id = $1 AND cp.checkout_id = $3
+    ) AS primeira_vez
+), coberto AS (
+    -- O BRUTO que esta cobrança liquida: as unidades ainda não pagas, a preço
+    -- cheio, mais o frete. É contra este número que o valor cobrado revela o
+    -- desconto.
+    SELECT cart_unpaid_total_cents($1) + COALESCE(
+        (SELECT c.shipping_cost_cents FROM carts c WHERE c.id = $1), 0) AS bruto
+), pago AS (
     UPDATE carts c
     SET payment_status = $2, checkout_id = $3, paid_at = $4, payment_method = $5,
         expires_at = CASE WHEN $2::varchar = 'paid' THEN NULL ELSE expires_at END,
-        paid_amount_cents = CASE WHEN $2::varchar = 'paid'
-            THEN c.paid_amount_cents + cart_unpaid_total_cents(c.id)
+        paid_amount_cents = CASE
+            WHEN $2::varchar = 'paid' AND (SELECT primeira_vez FROM inedito)
+            THEN c.paid_amount_cents + sqlc.arg(amount_cents)::bigint
             ELSE c.paid_amount_cents END
     WHERE c.id = $1
       AND c.status NOT IN ('expired', 'cancelled')
@@ -389,6 +403,15 @@ WITH pago AS (
     -- forma: carimba quando a linha gravada diz que está paga.
     WHERE ci.cart_id = (SELECT p.id FROM pago p WHERE p.payment_status = 'paid')
       AND ci.paid_quantity < ci.quantity
+    RETURNING 1
+), livro AS (
+    -- Uma linha por cobrança. É o que permite o pedido no ERP dizer "R$ 40 pagos
+    -- em 18/08, R$ 105 em 22/08" em vez de um total mudo.
+    INSERT INTO cart_payments (cart_id, amount_cents, gross_covered_cents, method, checkout_id, paid_at)
+    SELECT p.id, sqlc.arg(amount_cents)::bigint, (SELECT bruto FROM coberto),
+           NULLIF($5, ''), $3, COALESCE($4, NOW())
+    FROM pago p WHERE p.payment_status = 'paid' AND $3 <> ''
+    ON CONFLICT (cart_id, checkout_id) DO NOTHING
     RETURNING 1
 )
 SELECT * FROM pago;

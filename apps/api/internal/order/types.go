@@ -298,6 +298,14 @@ type OrderDetailResponse struct {
 	// divisão — que é o caso comum.
 	AlreadyPaidAmount int64 `json:"alreadyPaidAmount"`
 	OutstandingAmount int64 `json:"outstandingAmount"`
+	// DiscountedAmount é o que foi abatido por cupom ou desconto de PIX. Sem
+	// ele a tela mostraria a diferença entre o preço cheio e o que entrou como
+	// se fosse dívida — que é exatamente o erro que a parcela "DESCONTO" no ERP
+	// existe para não cometer.
+	DiscountedAmount int64 `json:"discountedAmount"`
+	// Payments é o extrato: uma linha por cobrança, na ordem em que o dinheiro
+	// entrou. Um pedido pode ser pago em várias vezes enquanto recebe item.
+	Payments []OrderPaymentEntryResponse `json:"payments,omitempty"`
 
 	// Pagamento: método (pix/credit_card/...), parcelas e os valores REAIS do
 	// pedido. PaidTotalCents é EXATAMENTE o que foi cobrado (com desconto PIX);
@@ -307,6 +315,16 @@ type OrderDetailResponse struct {
 	Installments   int    `json:"installments,omitempty"`
 	DiscountCents  int64  `json:"discountCents"`
 	PaidTotalCents int64  `json:"paidTotalCents"`
+}
+
+// OrderPaymentEntryResponse é uma cobrança do extrato do pedido.
+type OrderPaymentEntryResponse struct {
+	AmountCents int64 `json:"amountCents"`
+	// DiscountCents é o abatimento desta cobrança: o preço cheio que ela
+	// liquidou menos o que de fato entrou.
+	DiscountCents int64     `json:"discountCents"`
+	Method        string    `json:"method,omitempty"`
+	PaidAt        time.Time `json:"paidAt"`
 }
 
 // OrderWaitlistItemResponse é a projeção de uma entrada de fila de espera.
@@ -587,6 +605,8 @@ func NewOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 		WaitlistedAmount:       o.WaitlistedAmount,
 		AlreadyPaidAmount:      o.AlreadyPaidAmount,
 		OutstandingAmount:      o.OutstandingAmount,
+		DiscountedAmount:       o.DiscountedAmount,
+		Payments:               pagamentosResponse(o.Payments),
 		PaymentMethod:          o.PaymentMethod,
 		Installments:           o.Installments,
 		DiscountCents:          o.DiscountCents,
@@ -1168,6 +1188,8 @@ type OrderDetailOutput struct {
 	// em OrderDetailResponse.
 	AlreadyPaidAmount int64
 	OutstandingAmount int64
+	DiscountedAmount  int64
+	Payments          []OrderPaymentEntry
 	// WaitlistedAmount é o valor das unidades em fila — o que o orçamento
 	// declara como NÃO incluído no total, em vez de apenas omitir.
 	WaitlistedAmount int64
@@ -1217,4 +1239,32 @@ type ERPFinalisationOutput struct {
 	LastError     string     // populated when Status == "failed"
 	LastAttemptAt *time.Time // most recent attempt (success or failure)
 	AttemptsCount int        // includes the initial finalisation
+}
+
+// OrderPaymentEntry é uma cobrança do carrinho, como o livro a guarda.
+type OrderPaymentEntry struct {
+	AmountCents       int64
+	GrossCoveredCents int64
+	Method            string
+	PaidAt            time.Time
+}
+
+func pagamentosResponse(in []OrderPaymentEntry) []OrderPaymentEntryResponse {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]OrderPaymentEntryResponse, 0, len(in))
+	for _, p := range in {
+		desconto := p.GrossCoveredCents - p.AmountCents
+		if desconto < 0 {
+			desconto = 0
+		}
+		out = append(out, OrderPaymentEntryResponse{
+			AmountCents:   p.AmountCents,
+			DiscountCents: desconto,
+			Method:        p.Method,
+			PaidAt:        p.PaidAt,
+		})
+	}
+	return out
 }

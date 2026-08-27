@@ -171,6 +171,17 @@ type CartMutation struct {
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 }
 
+type CartPayment struct {
+	ID                pgtype.UUID        `json:"id"`
+	CartID            pgtype.UUID        `json:"cart_id"`
+	AmountCents       int64              `json:"amount_cents"`
+	GrossCoveredCents int64              `json:"gross_covered_cents"`
+	Method            pgtype.Text        `json:"method"`
+	CheckoutID        string             `json:"checkout_id"`
+	PaidAt            pgtype.Timestamptz `json:"paid_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+}
+
 type Coupon struct {
 	ID               pgtype.UUID        `json:"id"`
 	EventID          pgtype.UUID        `json:"event_id"`

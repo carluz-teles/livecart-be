@@ -268,3 +268,215 @@ func TestFalhaAoReescreverParcelasSobe(t *testing.T) {
 		t.Error("engoliu a falha — o pedido segue dizendo que ela pagou o valor novo")
 	}
 }
+
+// ─── Desconto de cupom e de PIX ─────────────────────────────────────────────
+//
+// O total do pedido no ERP é o preço CHEIO — `valorDesconto` é gravável só na
+// criação, e o pedido nasce no primeiro comentário, muito antes de existir
+// cupom ou forma de pagamento. Então o dinheiro que entra é MENOR que o total,
+// sempre, quando há desconto. Sem uma parcela dizendo isso, a diferença viraria
+// saldo devedor e o pedido cobraria o que ninguém deve.
+
+// somaParcelas confere a lei que o ERP impõe em silêncio.
+func somaParcelas(p []providers.ERPInstallment) int64 {
+	var t int64
+	for _, x := range p {
+		t += x.AmountCents
+	}
+	return t
+}
+
+func achaNota(p []providers.ERPInstallment, sub string) *providers.ERPInstallment {
+	for i := range p {
+		if contains(p[i].Note, sub) {
+			return &p[i]
+		}
+	}
+	return nil
+}
+
+// PIX com desconto: entra menos do que o preço cheio, e o que falta NÃO é dívida.
+func TestDescontoPixViraParcelaEmVezDeSaldoDevedor(t *testing.T) {
+	svc, repo, erp := montarParcelas(map[string]int{"ext-p1": 50})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 5)) // preço cheio: R$ 100
+	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 5, 2000, "@maria")
+
+	// PIX com 5% de desconto: entram R$ 95 cobrindo R$ 100 de preço cheio.
+	repo.cobrar("cart-1", time.Now().Add(-time.Hour), 9500, "pix")
+	if err := svc.ConfirmERPOrderPayment(ctx, "cart-1", "loja-1", nil); err != nil {
+		t.Fatalf("pagamento: %v", err)
+	}
+
+	split, err := svc.RecomporParcelasDoPedidoPago(ctx, "cart-1", "loja-1")
+	if err != nil {
+		t.Fatalf("recompondo: %v", err)
+	}
+	if split.SaldoCents != 0 {
+		t.Errorf("saldo = %d, quero 0 — os R$ 5 de desconto não são dívida da "+
+			"compradora, e cobrá-los seria cobrar o que ninguém deve", split.SaldoCents)
+	}
+	if split.DescontoCents != 500 {
+		t.Errorf("desconto = %d, quero 500", split.DescontoCents)
+	}
+
+	p := erp.parcelas[repo.carrinho("cart-1").externalOrderID]
+	if somaParcelas(p) != split.TotalCents {
+		t.Errorf("as parcelas somam %d e o pedido vale %d — soma que não fecha é "+
+			"substituída pelo total em silêncio", somaParcelas(p), split.TotalCents)
+	}
+	if d := achaNota(p, "DESCONTO"); d == nil || d.AmountCents != 500 {
+		t.Errorf("faltou a parcela de desconto de R$ 5: %+v", p)
+	}
+	if a := achaNota(p, "A PAGAR"); a != nil {
+		t.Errorf("criou dívida de %d que não existe — é o desconto disfarçado", a.AmountCents)
+	}
+}
+
+// Desconto E saldo ao mesmo tempo: os dois convivem, e a soma continua fechando.
+func TestDescontoESaldoConvivemNaMesmaDivisao(t *testing.T) {
+	svc, repo, erp := montarParcelas(map[string]int{"ext-p1": 50, "ext-p2": 50})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 5)) // R$ 100
+	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 5, 2000, "@maria")
+	repo.cobrar("cart-1", time.Now().Add(-time.Hour), 9500, "pix") // 5% off
+	_ = svc.ConfirmERPOrderPayment(ctx, "cart-1", "loja-1", nil)
+
+	// Na quinta ela pede mais R$ 40.
+	repo.acrescentarItem("cart-1", item("p2", 2))
+	if err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1"); err != nil {
+		t.Fatalf("acrescentando item: %v", err)
+	}
+
+	split, err := svc.RecomporParcelasDoPedidoPago(ctx, "cart-1", "loja-1")
+	if err != nil {
+		t.Fatalf("recompondo: %v", err)
+	}
+	if split.PagoCents != 9500 || split.DescontoCents != 500 || split.SaldoCents != 4000 {
+		t.Errorf("pago=%d desconto=%d saldo=%d, quero 9500/500/4000",
+			split.PagoCents, split.DescontoCents, split.SaldoCents)
+	}
+	p := erp.parcelas[repo.carrinho("cart-1").externalOrderID]
+	if somaParcelas(p) != 14000 {
+		t.Errorf("as parcelas somam %d, quero 14000 (o total do pedido)", somaParcelas(p))
+	}
+	if achaNota(p, "DESCONTO") == nil || achaNota(p, "A PAGAR") == nil || achaNota(p, "PAGO") == nil {
+		t.Errorf("o extrato não tem as três linhas que o lojista precisa ler: %+v", p)
+	}
+}
+
+// ─── Vários pagamentos até quitar ───────────────────────────────────────────
+
+// Cada cobrança é uma parcela "PAGO", com a data dela. É isso que transforma o
+// pedido num extrato em vez de um total mudo.
+func TestCadaCobrancaViraUmaParcelaPaga(t *testing.T) {
+	svc, repo, erp := montarParcelas(map[string]int{"ext-p1": 50, "ext-p2": 50})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 2)) // R$ 40
+	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@maria")
+	repo.cobrar("cart-1", time.Now().Add(-72*time.Hour), -1, "pix")
+	_ = svc.ConfirmERPOrderPayment(ctx, "cart-1", "loja-1", nil)
+
+	// Quinta: mais R$ 60, e ela paga o saldo na hora.
+	repo.acrescentarItem("cart-1", item("p2", 3))
+	if err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1"); err != nil {
+		t.Fatalf("acrescentando: %v", err)
+	}
+	repo.cobrar("cart-1", time.Now(), -1, "pix")
+
+	split, err := svc.RecomporParcelasDoPedidoPago(ctx, "cart-1", "loja-1")
+	if err != nil {
+		t.Fatalf("recompondo: %v", err)
+	}
+	if split.Pagamentos != 2 {
+		t.Errorf("pagamentos = %d, quero 2", split.Pagamentos)
+	}
+	if split.SaldoCents != 0 {
+		t.Errorf("saldo = %d, quero 0 — o pedido foi quitado", split.SaldoCents)
+	}
+
+	p := erp.parcelas[repo.carrinho("cart-1").externalOrderID]
+	var pagas int
+	for _, x := range p {
+		if contains(x.Note, "PAGO") {
+			pagas++
+		}
+	}
+	if pagas != 2 {
+		t.Errorf("parcelas PAGO = %d, quero 2 — uma por cobrança, com a data de "+
+			"cada uma; um total só não conta essa história: %+v", pagas, p)
+	}
+	if somaParcelas(p) != 10000 {
+		t.Errorf("as parcelas somam %d, quero 10000", somaParcelas(p))
+	}
+	if achaNota(p, "A PAGAR") != nil {
+		t.Error("deixou saldo devedor num pedido quitado")
+	}
+}
+
+// Ir pagando aos poucos: a cada rodada a soma fecha e o saldo encolhe.
+func TestPagamentosSucessivosAteQuitar(t *testing.T) {
+	svc, repo, erp := montarParcelas(map[string]int{"ext-p1": 500, "ext-p2": 500})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 1))
+	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 1, 2000, "@maria")
+	repo.cobrar("cart-1", time.Now().Add(-96*time.Hour), -1, "pix")
+	_ = svc.ConfirmERPOrderPayment(ctx, "cart-1", "loja-1", nil)
+
+	saldoAnterior := int64(-1)
+	for rodada := 1; rodada <= 4; rodada++ {
+		repo.acrescentarItem("cart-1", item("p2", 1))
+		if err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1"); err != nil {
+			t.Fatalf("rodada %d: %v", rodada, err)
+		}
+		split, err := svc.RecomporParcelasDoPedidoPago(ctx, "cart-1", "loja-1")
+		if err != nil {
+			t.Fatalf("rodada %d, recompondo: %v", rodada, err)
+		}
+		if split.SaldoCents != 2000 {
+			t.Errorf("rodada %d: saldo = %d, quero 2000 (a peça recém-pedida)",
+				rodada, split.SaldoCents)
+		}
+		p := erp.parcelas[repo.carrinho("cart-1").externalOrderID]
+		if somaParcelas(p) != split.TotalCents {
+			t.Errorf("rodada %d: parcelas somam %d e o pedido vale %d",
+				rodada, somaParcelas(p), split.TotalCents)
+		}
+
+		repo.cobrar("cart-1", time.Now(), -1, "pix")
+		quitado, err := svc.RecomporParcelasDoPedidoPago(ctx, "cart-1", "loja-1")
+		if err != nil {
+			t.Fatalf("rodada %d, quitando: %v", rodada, err)
+		}
+		if quitado.SaldoCents != 0 {
+			t.Errorf("rodada %d: sobrou %d depois de quitar", rodada, quitado.SaldoCents)
+		}
+		if quitado.Pagamentos != rodada+1 {
+			t.Errorf("rodada %d: pagamentos = %d, quero %d", rodada, quitado.Pagamentos, rodada+1)
+		}
+		if saldoAnterior >= 0 && quitado.TotalCents <= saldoAnterior {
+			t.Errorf("rodada %d: o pedido não cresceu", rodada)
+		}
+		saldoAnterior = quitado.TotalCents
+	}
+}
+
+// Um pagamento simples, sem desconto e cobrindo tudo: o ERP já tem essa parcela.
+// Reescrever gastaria uma escrita do teto de 30/min para não mudar nada.
+func TestPagamentoUnicoSemDescontoNaoGastaEscrita(t *testing.T) {
+	svc, repo, erp := montarParcelas(map[string]int{"ext-p1": 50})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 3))
+	_ = svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 3, 2000, "@maria")
+	repo.cobrar("cart-1", time.Now(), -1, "pix")
+	_ = svc.ConfirmERPOrderPayment(ctx, "cart-1", "loja-1", nil)
+	erp.escritas = 0
+
+	split, err := svc.RecomporParcelasDoPedidoPago(ctx, "cart-1", "loja-1")
+	if err != nil {
+		t.Fatalf("recompondo: %v", err)
+	}
+	if split.Reescrito || erp.escritas != 0 {
+		t.Errorf("gastou %d escrita(s) para não mudar nada", erp.escritas)
+	}
+}
