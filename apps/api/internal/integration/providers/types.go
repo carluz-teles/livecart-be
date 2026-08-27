@@ -1017,6 +1017,15 @@ type ERPInstallment struct {
 // lojista vê "[livecart]" na linha e entende de onde ela veio.
 const LiveCartItemMarker = "[livecart]"
 
+// ErrPedidoComNotaFiscal é a recusa em mexer num pedido que já virou documento
+// fiscal, decidida pelo sinal AUTORITATIVO: `idNotaFiscal != 0`.
+//
+// A situação não serve para isso, e a medição de 26/08/2026 mostra por quê:
+// gerar a nota (`POST /pedidos/{id}/gerar-nota-fiscal`) leva o pedido de
+// situação 0 para 4 ("Preparando envio") — NUNCA para 1 ("Faturada"). Quem
+// esperasse a situação 1 deixaria a porta aberta com a nota já emitida.
+var ErrPedidoComNotaFiscal = errors.New("pedido já tem nota fiscal emitida")
+
 // IsLiveCartItem diz se a linha foi escrita pelo LiveCart.
 func IsLiveCartItem(note string) bool { return strings.HasPrefix(note, LiveCartItemMarker) }
 

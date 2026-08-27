@@ -564,6 +564,13 @@ func mesmaGrade(a, b []providers.ERPOrderItem) bool {
 func (s *Service) preservarLinhasDoLojista(ctx context.Context, erpProvider providers.ERPProvider, orderID string, nossa []providers.ERPOrderItem) ([]providers.ERPOrderItem, error) {
 	atuais, err := erpProvider.GetOrderItems(ctx, orderID)
 	if err != nil {
+		// Nota fiscal emitida não é falha de leitura a ser reententada: é uma
+		// porta fechada. A releitura que acontece antes de toda escrita é o
+		// último ponto em que dá para saber disso, e é o mais confiável — o
+		// `idNotaFiscal` vem do próprio pedido, sem depender de webhook.
+		if errors.Is(err, providers.ErrPedidoComNotaFiscal) {
+			return nil, fmt.Errorf("cart order %s: %w: %w", orderID, ErrPedidoFaturado, err)
+		}
 		return nil, fmt.Errorf("relendo o pedido antes de escrever (mutação adiada para não apagar linha do lojista): %w", err)
 	}
 

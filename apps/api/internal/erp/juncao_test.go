@@ -13,8 +13,11 @@ package erp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
 
 	"livecart/apps/api/internal/integration/providers"
 )
@@ -267,5 +270,87 @@ func TestFaturamentoNoMeioDaRajadaFechaAPorta(t *testing.T) {
 	if noPedido > noCarrinho {
 		t.Errorf("o pedido faturado tem %d un. e o carrinho só %d — entrou item "+
 			"depois da nota", noPedido, noCarrinho)
+	}
+}
+
+// ─── A nota fiscal, medida ──────────────────────────────────────────────────
+//
+// Gerar a nota (`POST /pedidos/{id}/gerar-nota-fiscal`) foi medido em
+// 26/08/2026 na conta real:
+//
+//	antes:   situacao 0 (Em aberto)      idNotaFiscal 0
+//	depois:  situacao 4 (Preparando envio) idNotaFiscal 368093855
+//
+// A situação vai para 4, NUNCA para 1 ("Faturada"). Quem esperasse o 1 deixaria
+// a porta aberta com a nota já emitida — que é o erro que eu tinha cometido ao
+// ler o nome "Preparando envio" como "ainda dá tempo".
+
+// erpComNota encena a releitura recusando o pedido que já tem nota.
+type erpComNota struct {
+	*erpComParcelas
+	comNota map[string]bool
+}
+
+func (e *erpComNota) GetOrderItems(ctx context.Context, orderID string) ([]providers.ERPOrderItem, error) {
+	if e.comNota[orderID] {
+		return nil, fmt.Errorf("pedido %s tem a nota 999: %w", orderID, providers.ErrPedidoComNotaFiscal)
+	}
+	return e.erpComParcelas.GetOrderItems(ctx, orderID)
+}
+
+// A recusa da releitura vira ErrPedidoFaturado, não "erro de leitura".
+//
+// A diferença importa: erro de leitura ADIA a escrita e o próximo comentário
+// tenta de novo, para sempre. Nota emitida é uma porta fechada, e o chamador
+// precisa saber disso para abrir um pedido novo em vez de insistir.
+func TestNotaFiscalNaReleituraFechaAPortaEmVezDeAdiar(t *testing.T) {
+	e := novoERPSimulado(map[string]int{"ext-p1": 50, "ext-p2": 50})
+	r := novoRepoSimulado()
+	comNota := &erpComNota{erpComParcelas: &erpComParcelas{erpSimulado: e}, comNota: map[string]bool{}}
+	svc := NewService(r, &colabSimulado{erp: comNota, repo: r}, zap.NewNop())
+	svc.SetOrderStatusRepository(r)
+	svc.SetWriteLimits(limitesAbertos())
+
+	ctx := context.Background()
+	r.criarCarrinho("cart-1", item("p1", 2))
+	if err := svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 2, 2000, "@maria"); err != nil {
+		t.Fatalf("primeira compra: %v", err)
+	}
+	orderID := r.carrinho("cart-1").externalOrderID
+	// O lojista emite a nota pelo painel. Nenhum webhook chegou ainda: a
+	// situação no carrinho continua dizendo 'aberto'.
+	comNota.comNota[orderID] = true
+
+	r.acrescentarItem("cart-1", item("p2", 3))
+	err := svc.MutateERPOrderItems(ctx, "cart-1", "loja-1")
+	if !errors.Is(err, ErrPedidoFaturado) {
+		t.Fatalf("erro = %v, quero ErrPedidoFaturado — a nota está emitida e a "+
+			"situação local ainda não sabe; o idNotaFiscal do próprio pedido é "+
+			"o único sinal que não depende de webhook", err)
+	}
+	if q := comNota.quantidadeNoPedido(orderID, "ext-p2"); q != 0 {
+		t.Errorf("escreveu %d un. num pedido que já virou nota", q)
+	}
+}
+
+// A situação que a emissão da nota produz é 'preparando_envio', e ela fecha a
+// porta. Esta é a tradução direta da medição.
+func TestSituacaoQueAEmissaoDaNotaProduzFechaAPorta(t *testing.T) {
+	produzidaPelaNota := providers.ERPOrderStatusPreparandoEnvio
+	if code, ok := providers.SituacaoFromERPOrderStatus(produzidaPelaNota); !ok || code != 4 {
+		t.Fatalf("preparando_envio = %d, quero 4 — é o código medido depois de "+
+			"gerar a nota", code)
+	}
+	if !produzidaPelaNota.FechadoParaNovosItens() {
+		t.Error("a situação que a emissão da nota produz não fecha a porta — " +
+			"seria receber item com a nota já emitida")
+	}
+	// E a situação 1, que o nome sugere, NÃO é a que a emissão produz.
+	faturada, ok := providers.ERPOrderStatusFromSituacao(1)
+	if !ok || faturada != providers.ERPOrderStatusFaturado {
+		t.Fatalf("situação 1 = %q", faturada)
+	}
+	if !faturada.FechadoParaNovosItens() {
+		t.Error("'faturado' também tem de fechar a porta")
 	}
 }

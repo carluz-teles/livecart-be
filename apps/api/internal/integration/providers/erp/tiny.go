@@ -2191,9 +2191,16 @@ func (t *Tiny) GetOrderItems(ctx context.Context, orderID string) ([]providers.E
 			ValorUnitario float64 `json:"valorUnitario"`
 			InfoAdicional string  `json:"infoAdicional"`
 		} `json:"itens"`
+		// A mesma resposta já traz o sinal de documento fiscal. Lê-lo aqui não
+		// custa chamada nenhuma — e esta leitura acontece antes de TODA escrita,
+		// que é exatamente onde a recusa precisa estar.
+		IDNotaFiscal json.Number `json:"idNotaFiscal"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, fmt.Errorf("parsing order items: %w", err)
+	}
+	if nf, _ := out.IDNotaFiscal.Int64(); nf > 0 {
+		return nil, fmt.Errorf("pedido %s tem a nota %d: %w", orderID, nf, providers.ErrPedidoComNotaFiscal)
 	}
 	itens := make([]providers.ERPOrderItem, 0, len(out.Itens))
 	for _, it := range out.Itens {
