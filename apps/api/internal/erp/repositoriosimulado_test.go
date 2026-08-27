@@ -597,3 +597,17 @@ func (r *repoSimulado) esvaziarCarrinho(cartID string) {
 		c.itens = nil
 	}
 }
+
+// ListERPLinkedProductsSample: a amostra que a checagem do módulo de Reserva lê.
+func (r *repoSimulado) ListERPLinkedProductsSample(_ context.Context, _ string, limite int) ([]ERPLinkedProduct, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]ERPLinkedProduct, 0, limite)
+	for id, qtd := range r.estoque {
+		if qtd <= 0 || len(out) >= limite {
+			continue
+		}
+		out = append(out, ERPLinkedProduct{ID: id, Name: "Produto " + id, ExternalID: "ext-" + id})
+	}
+	return out, nil
+}

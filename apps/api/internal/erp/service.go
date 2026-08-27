@@ -16,6 +16,9 @@ import (
 // integration (cycle). It starts with the two methods the ERP order flow already
 // needs and grows one method per slice as logic migrates (Bloco B2b+).
 type ERPRepository interface {
+	// ListERPLinkedProductsSample devolve uma amostra de produtos ligados ao
+	// ERP e com estoque — a matéria-prima da checagem do módulo de Reserva.
+	ListERPLinkedProductsSample(ctx context.Context, storeID string, limite int) ([]ERPLinkedProduct, error)
 	// GetActiveByProvider resolves the active ERP integration for a store.
 	// Signature mirrors integration.Repository.GetActiveByProvider, but returns
 	// the neutral erp.Integration instead of the integration-owned IntegrationRow

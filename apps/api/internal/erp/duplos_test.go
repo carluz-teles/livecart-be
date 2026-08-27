@@ -220,3 +220,7 @@ func newSvc(repo *mockRepo, collab *mockCollab) *Service {
 type fakeERPProvider struct {
 	providers.ERPProvider
 }
+
+func (m *mockRepo) ListERPLinkedProductsSample(context.Context, string, int) ([]ERPLinkedProduct, error) {
+	return nil, nil
+}

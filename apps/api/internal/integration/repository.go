@@ -4029,3 +4029,28 @@ func (r *Repository) ListCartPayments(ctx context.Context, cartID string) ([]erp
 	}
 	return out, nil
 }
+
+// ListERPLinkedProductsSample devolve uma amostra de produtos ligados ao Tiny e
+// com estoque. Satisfaz erp.ERPRepository.
+func (r *Repository) ListERPLinkedProductsSample(ctx context.Context, storeID string, limite int) ([]erp.ERPLinkedProduct, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	linhas, err := r.queries.ListERPLinkedProductsSample(ctx, sqlc.ListERPLinkedProductsSampleParams{
+		StoreID: sID,
+		Limite:  int32(limite),
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]erp.ERPLinkedProduct, 0, len(linhas))
+	for _, l := range linhas {
+		out = append(out, erp.ERPLinkedProduct{
+			ID:         uuidToString(l.ID),
+			Name:       l.Name,
+			ExternalID: l.ExternalID.String,
+		})
+	}
+	return out, nil
+}

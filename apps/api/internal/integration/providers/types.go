@@ -1026,6 +1026,18 @@ const LiveCartItemMarker = "[livecart]"
 // esperasse a situação 1 deixaria a porta aberta com a nota já emitida.
 var ErrPedidoComNotaFiscal = errors.New("pedido já tem nota fiscal emitida")
 
+// ERPStockDetail são os três saldos que o ERP guarda de um produto.
+//
+// O LiveCart só usa `Available` para decidir o que vende. Os outros dois existem
+// para DIAGNÓSTICO: `Reserved > 0` é a única evidência disponível de que o
+// módulo de Reserva de Estoque está ativo na conta — `GET /depositos`, que traz
+// `possuiReserva`, devolve 403 mesmo com o módulo ligado.
+type ERPStockDetail struct {
+	Balance   int
+	Reserved  int
+	Available int
+}
+
 // IsLiveCartItem diz se a linha foi escrita pelo LiveCart.
 func IsLiveCartItem(note string) bool { return strings.HasPrefix(note, LiveCartItemMarker) }
 
