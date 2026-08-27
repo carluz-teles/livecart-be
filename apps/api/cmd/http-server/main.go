@@ -1028,6 +1028,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		integrationHandler := integration.NewHandler(integrationSvc, paymentSvc, validate, s3Client)
 		integrationHandler.RegisterRoutes(storeScoped)
 
+		// Simulador de live — as rotas SÓ EXISTEM em staging. A checagem vive
+		// dentro de RegisterSimulatorRoutes: em produção nada é montado, e o
+		// servidor devolve 404 porque não há o que servir. Ver simulador_live.go.
+		integrationWebhookHandler.RegisterSimulatorRoutes(storeScoped)
+
 		// Payment admin routes (Bloco B1c) — Pagar.me connect + webhook
 		// diagnostics extracted into payment.Handler. Same /integrations group,
 		// same paths/verbs; the still-integration-owned use cases are reached

@@ -4054,3 +4054,69 @@ func (r *Repository) ListERPLinkedProductsSample(ctx context.Context, storeID st
 	}
 	return out, nil
 }
+
+// =============================================================================
+// SIMULADOR DE LIVE — staging apenas. Ver simulador_live.go.
+// =============================================================================
+
+// GetSessionStoreID devolve a loja dona de uma sessão.
+func (r *Repository) GetSessionStoreID(ctx context.Context, sessionID string) (string, error) {
+	id, err := parseUUID(sessionID)
+	if err != nil {
+		return "", err
+	}
+	storeID, err := r.queries.GetSessionStoreID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return uuidToString(storeID), nil
+}
+
+// AttachPlatformMedia vincula um id de mídia da plataforma a uma sessão.
+func (r *Repository) AttachPlatformMedia(ctx context.Context, sessionID, platform, mediaID string) error {
+	sid, err := parseUUID(sessionID)
+	if err != nil {
+		return err
+	}
+	_, err = r.queries.AddPlatformToSession(ctx, sqlc.AddPlatformToSessionParams{
+		SessionID:      sid,
+		Platform:       platform,
+		PlatformLiveID: mediaID,
+	})
+	return err
+}
+
+// ReleasePlatformMedia solta a mídia viva daquele id.
+func (r *Repository) ReleasePlatformMedia(ctx context.Context, mediaID string) error {
+	return r.queries.ReleasePlatformMedia(ctx, mediaID)
+}
+
+// ListSessionsForSimulator lista sessões recentes da loja. Simulador de staging.
+func (r *Repository) ListSessionsForSimulator(ctx context.Context, storeID string) ([]SessaoSimulavel, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	linhas, err := r.queries.ListSessionsForSimulator(ctx, sID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SessaoSimulavel, 0, len(linhas))
+	for _, l := range linhas {
+		s := SessaoSimulavel{
+			SessionID:   uuidToString(l.ID),
+			Status:      l.Status,
+			EventID:     uuidToString(l.EventID),
+			EventTitle:  l.EventTitle.String,
+			MidiasVivas: []string{},
+		}
+		if l.StartedAt.Valid {
+			s.StartedAt = l.StartedAt.Time.Format(time.RFC3339)
+		}
+		if m, _ := l.MidiasVivas.(string); m != "" {
+			s.MidiasVivas = strings.Split(m, ",")
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}

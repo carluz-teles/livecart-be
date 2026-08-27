@@ -6517,3 +6517,43 @@ func (s *Service) instagramUsername(ctx context.Context, storeID string) string 
 	}
 	return ""
 }
+
+// =============================================================================
+// SIMULADOR DE LIVE — staging apenas. Ver simulador_live.go.
+// =============================================================================
+
+// AttachSimulatedMedia vincula uma mídia inventada a uma sessão da loja.
+//
+// A checagem de posse não é formalidade: o id da sessão vem do corpo do
+// request, e sem ela um POST com a sessão de outra loja vincularia mídia num
+// evento alheio — em staging isso é bagunça, mas o mesmo código não pode
+// existir sem a guarda por acidente.
+func (s *Service) AttachSimulatedMedia(ctx context.Context, storeID, sessionID, mediaID string) error {
+	if !config.IsStaging() {
+		return httpx.DomainError(403, httpx.CodeStagingOnly, "o simulador de live existe apenas em staging")
+	}
+	dona, err := s.repo.GetSessionStoreID(ctx, sessionID)
+	if err != nil {
+		return httpx.DomainError(404, httpx.CodeStagingOnly, "sessão não encontrada")
+	}
+	if dona != storeID {
+		return httpx.DomainError(403, httpx.CodeStagingOnly, "essa sessão é de outra loja")
+	}
+	return s.repo.AttachPlatformMedia(ctx, sessionID, "instagram", mediaID)
+}
+
+// ReleaseSimulatedMedia solta a mídia, encenando o fim da transmissão.
+func (s *Service) ReleaseSimulatedMedia(ctx context.Context, storeID, mediaID string) error {
+	if !config.IsStaging() {
+		return httpx.DomainError(403, httpx.CodeStagingOnly, "o simulador de live existe apenas em staging")
+	}
+	return s.repo.ReleasePlatformMedia(ctx, mediaID)
+}
+
+// ListSessionsForSimulator lista as sessões recentes da loja para o simulador.
+func (s *Service) ListSessionsForSimulator(ctx context.Context, storeID string) ([]SessaoSimulavel, error) {
+	if !config.IsStaging() {
+		return nil, httpx.DomainError(403, httpx.CodeStagingOnly, "o simulador de live existe apenas em staging")
+	}
+	return s.repo.ListSessionsForSimulator(ctx, storeID)
+}

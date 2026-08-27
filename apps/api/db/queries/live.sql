@@ -306,3 +306,36 @@ WHERE id = $1;
 -- começa como marcador e aprende o que é quando a publicação é vinculada —
 -- o primeiro instante em que a resposta existe.
 UPDATE live_sessions SET type = $2 WHERE id = $1;
+
+-- name: ReleasePlatformMedia :exec
+-- Solta a mídia da sessão — o equivalente a a transmissão acabar.
+--
+-- Existe para o SIMULADOR de staging. Em produção quem solta é o encerramento
+-- da campanha; aqui é preciso poder encenar "a live acabou" para ver o que
+-- acontece com um comentário que chega depois.
+UPDATE live_session_platforms
+SET released_at = now()
+WHERE platform_live_id = sqlc.arg(platform_live_id) AND released_at IS NULL;
+
+-- name: GetSessionStoreID :one
+-- A loja dona de uma sessão. Guarda de posse do simulador: sem ela, um POST
+-- com o id de sessão de OUTRA loja vincularia mídia no evento alheio.
+SELECT e.store_id
+FROM live_sessions s
+JOIN live_events e ON e.id = s.event_id
+WHERE s.id = sqlc.arg(session_id)::uuid;
+
+-- name: ListSessionsForSimulator :many
+-- Sessões recentes da loja, para o simulador de staging oferecer escolha em vez
+-- de exigir que alguém cole um UUID na mão.
+SELECT s.id, s.status, s.started_at, e.id AS event_id, e.title AS event_title,
+       COALESCE((
+           SELECT string_agg(lsp.platform_live_id, ',')
+           FROM live_session_platforms lsp
+           WHERE lsp.session_id = s.id AND lsp.released_at IS NULL
+       ), '') AS midias_vivas
+FROM live_sessions s
+JOIN live_events e ON e.id = s.event_id
+WHERE e.store_id = sqlc.arg(store_id)::uuid
+ORDER BY s.created_at DESC
+LIMIT 20;

@@ -106,6 +106,8 @@ const (
 	// Configuração de estoque pedida numa integração que não é de ERP. Pagamento
 	// e frete não têm saldo nenhum, e gravar a chave neles criaria uma
 	// configuração que o lojista acredita ter ligado e que ninguém lê.
+	// CodeStagingOnly: recurso que só existe em staging. Ver simulador_live.go.
+	CodeStagingOnly               Code = "STAGING_ONLY"
 	CodeErpStockSourceUnsupported Code = "ERP_STOCK_SOURCE_UNSUPPORTED" // integration/service.go (UpdateERPStockSource)
 	// Busca de produto no ERP estrangulada (Tiny: 1 req/s). NÃO é "não existe":
 	// a listagem achou o produto e o detalhe é que foi recusado. Separar os dois
