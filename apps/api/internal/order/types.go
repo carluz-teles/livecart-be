@@ -274,6 +274,12 @@ type OrderDetailResponse struct {
 	// loja e mesmo assim foi pago — o cancelamento foi revertido e o pedido
 	// seguiu o fluxo normal. O FE mostra isso no histórico do pedido.
 	CancellationRevertedAt *time.Time `json:"cancellationRevertedAt,omitempty"`
+	// CancellationRevertedReason: POR QUE o cancelamento foi desfeito. Os dois
+	// casos existem e o lojista precisa saber qual é — um diz "ela pagou assim
+	// mesmo", o outro diz "você reabriu o pedido no Tiny".
+	//   'payment_won'  — o pagamento entrou depois do cancelamento
+	//   'erp_reopened' — o lojista reabriu o pedido no ERP, à mão
+	CancellationRevertedReason string `json:"cancellationRevertedReason,omitempty"`
 	// Waitlist são os produtos que a cliente pediu, a loja não tinha e ela
 	// entrou na fila. Não somam no total nem vão para a transportadora — são o
 	// que o lojista precisa dizer que está esperando reposição.
@@ -595,24 +601,25 @@ func NewOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 	}
 
 	resp := OrderDetailResponse{
-		OrderResponse:          NewOrderResponse(o.OrderOutput),
-		Token:                  o.Token,
-		Comments:               comments,
-		Waitlist:               waitlist,
-		Notifications:          append([]OrderNotificationOutput{}, o.Notifications...),
-		WaitlistJourney:        append([]OrderWaitlistJourneyOutput{}, o.WaitlistJourney...),
-		PayableAmount:          o.PayableAmount,
-		WaitlistedAmount:       o.WaitlistedAmount,
-		AlreadyPaidAmount:      o.AlreadyPaidAmount,
-		OutstandingAmount:      o.OutstandingAmount,
-		DiscountedAmount:       o.DiscountedAmount,
-		Payments:               pagamentosResponse(o.Payments),
-		PaymentMethod:          o.PaymentMethod,
-		Installments:           o.Installments,
-		DiscountCents:          o.DiscountCents,
-		PaidTotalCents:         o.PaidTotalCents,
-		CustomerBlocked:        o.CustomerBlocked,
-		CancellationRevertedAt: o.CancellationRevertedAt,
+		OrderResponse:              NewOrderResponse(o.OrderOutput),
+		Token:                      o.Token,
+		Comments:                   comments,
+		Waitlist:                   waitlist,
+		Notifications:              append([]OrderNotificationOutput{}, o.Notifications...),
+		WaitlistJourney:            append([]OrderWaitlistJourneyOutput{}, o.WaitlistJourney...),
+		PayableAmount:              o.PayableAmount,
+		WaitlistedAmount:           o.WaitlistedAmount,
+		AlreadyPaidAmount:          o.AlreadyPaidAmount,
+		OutstandingAmount:          o.OutstandingAmount,
+		DiscountedAmount:           o.DiscountedAmount,
+		Payments:                   pagamentosResponse(o.Payments),
+		PaymentMethod:              o.PaymentMethod,
+		Installments:               o.Installments,
+		DiscountCents:              o.DiscountCents,
+		PaidTotalCents:             o.PaidTotalCents,
+		CustomerBlocked:            o.CustomerBlocked,
+		CancellationRevertedAt:     o.CancellationRevertedAt,
+		CancellationRevertedReason: o.CancellationRevertedReason,
 	}
 
 	if o.Customer != nil {
@@ -1033,7 +1040,8 @@ type OrderDetailRow struct {
 
 	// Preenchido quando o lojista cancelou este pedido e o pagamento entrou
 	// assim mesmo, revertendo o cancelamento. NULL na esmagadora maioria.
-	CancellationRevertedAt *time.Time
+	CancellationRevertedAt     *time.Time
+	CancellationRevertedReason string
 
 	// Pagamento: método (pix/credit_card/...), parcelas (do gateway_snapshot) e
 	// os valores REAIS do pedido — desconto (cupom + PIX) e valor efetivamente
@@ -1161,7 +1169,8 @@ type OrderDetailOutput struct {
 	// o pagamento entrou assim mesmo: o cancelamento foi revertido e o pedido
 	// seguiu o fluxo normal. Vira uma entrada no histórico do pedido para o
 	// lojista entender por que um pedido "cancelado" está pago.
-	CancellationRevertedAt *time.Time
+	CancellationRevertedAt     *time.Time
+	CancellationRevertedReason string
 	// Waitlist são os produtos que a cliente pediu, a loja não tinha e ela
 	// entrou na fila. Não são itens pagáveis: não entram no total e não vão
 	// para a transportadora. Aparecem no detalhe porque é a única forma do

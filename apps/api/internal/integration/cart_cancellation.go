@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 
 	"go.uber.org/zap"
 
@@ -114,4 +115,73 @@ func (s *Service) ReactCartCancelledERP(ctx context.Context, cartID, storeID str
 // é a superfície pública equivalente.
 func (s *Service) reverseCartERPFootprint(ctx context.Context, cartID, storeID string) error {
 	return s.ERP().OnCartExpired(ctx, cartID, storeID)
+}
+
+// =============================================================================
+// O CANCELAMENTO QUE O ERP DESFEZ
+// =============================================================================
+
+// ReopenCartResult conta o que a ressurreição conseguiu recuperar.
+type ReopenCartResult struct {
+	Reopened bool
+	CartID   string
+	EventID  string
+	// Recuperadas é quantas unidades voltaram para o carrinho com estoque.
+	Recuperadas int
+	// EmFila é quantas não couberam e foram para a lista de espera. É o número
+	// que o lojista precisa ver: o carrinho voltou, mas não inteiro.
+	EmFila int
+}
+
+// ReopenCartFromERP traz de volta o carrinho que o lojista reabriu no ERP.
+//
+// O gesto do outro lado é claro: ele cancelou, se arrependeu, e reabriu o pedido
+// no Tiny à mão. Seguir isso é o que o LiveCart deve fazer — o pedido de lá já
+// está vivo e reservando peça, e deixar o carrinho morto aqui produz justamente
+// a unidade presa sem dono que a detecção denunciava.
+//
+// ═══ O QUE MUDA ENTRE CANCELAR E RESSUSCITAR ═══
+//
+// Cancelar devolveu o estoque. Entre o cancelamento e a reabertura, outra
+// compradora pode ter levado a peça — e é por isso que a ressurreição aceita
+// voltar INCOMPLETA: leva o que houver e manda o resto para a fila de espera.
+// Recusar tudo por causa de uma unidade jogaria fora o carrinho inteiro, que é o
+// oposto do que o lojista pediu ao reabrir.
+//
+// O pedido do ERP não é tocado aqui: ele já está vivo, foi o lojista quem o
+// reabriu, e é isso que estamos seguindo. O que volta é o estado da máquina para
+// 'open', para o próximo comentário mutar a grade em vez de criar pedido novo.
+func (s *Service) ReopenCartFromERP(ctx context.Context, cartID, storeID string) (ReopenCartResult, error) {
+	var out ReopenCartResult
+	ctx = logger.WithStore(ctx, storeID, "")
+
+	release, acquired, err := s.repo.AcquireCartFinalisationLock(ctx, cartID)
+	if err != nil {
+		return out, err
+	}
+	if !acquired {
+		// Pagamento em voo neste carrinho. O pagamento vence sempre, e ele tem
+		// o seu próprio caminho de restauração — sair daqui é o certo.
+		logger.From(ctx, s.logger).Info("reopen: refused, finalisation in progress",
+			zap.String("cart_id", cartID))
+		return out, nil
+	}
+	defer release()
+
+	out, err = s.repo.ReopenCancelledCartFromERP(ctx, cartID, storeID)
+	if err != nil {
+		return out, fmt.Errorf("reopening cancelled cart: %w", err)
+	}
+	if !out.Reopened {
+		logger.From(ctx, s.logger).Info("reopen: cart not eligible (expired, paid or not store-cancelled)",
+			zap.String("cart_id", cartID))
+		return out, nil
+	}
+
+	logger.From(ctx, s.logger).Info("cart reopened because the merchant reopened the order in the ERP",
+		zap.String("cart_id", cartID),
+		zap.Int("units_recovered", out.Recuperadas),
+		zap.Int("units_waitlisted", out.EmFila),
+	)
+	return out, nil
 }

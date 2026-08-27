@@ -92,6 +92,25 @@ type ERPOrderStatusRepository interface {
 	AdoptOrphanOrderStatusEvents(ctx context.Context, cartID, externalOrderID string) (int64, error)
 }
 
+// CartReopener ressuscita o carrinho quando o lojista reabre o pedido no ERP.
+//
+// Interface aqui, e não import do integration, pelo mesmo motivo dos outros
+// colaboradores deste pacote: manter o erp sem ciclo com quem o usa.
+type CartReopener interface {
+	ReopenCartFromERP(ctx context.Context, cartID, storeID string) (ReopenReport, error)
+}
+
+// ReopenReport é o que a ressurreição recuperou.
+type ReopenReport struct {
+	Reopened    bool
+	Recuperadas int
+	EmFila      int
+}
+
+// SetCartReopener liga o seguimento do pedido reaberto. Opcional: sem ele a
+// volta é apenas registrada, que era o comportamento anterior.
+func (s *Service) SetCartReopener(r CartReopener) { s.reopener = r }
+
 // SetOrderStatusRepository liga a persistência do rastreamento. Opcional: sem
 // ela o rastreamento simplesmente não acontece, e o resto do fluxo segue igual.
 func (s *Service) SetOrderStatusRepository(r ERPOrderStatusRepository) { s.status = r }
@@ -147,14 +166,35 @@ func (s *Service) ObserveOrderStatus(ctx context.Context, storeID, externalOrder
 	// conta própria tentaria refazer as outras — inclusive re-reservar uma peça
 	// que pode já ter sido vendida no meio tempo. Quem decide é gente; o que o
 	// sistema deve é não deixar isso invisível.
-	if providers.ERPOrderStatus(t.Status).VoltouAViver() {
+	if providers.ERPOrderStatus(t.Status).VoltouAViver() && s.reopener != nil {
 		if morto, err := s.repo.CartIsTerminated(ctx, t.CartID); err == nil && morto {
-			logger.From(ctx, s.logger).Error("ERP order came back to life while the cart stayed dead — a unit is reserved with no cart behind it",
-				zap.String("cart_id", t.CartID),
-				zap.String("external_order_id", externalOrderID),
-				zap.String("from", t.PreviousStatus),
-				zap.String("to", t.Status),
-			)
+			rel, rErr := s.reopener.ReopenCartFromERP(ctx, t.CartID, storeID)
+			switch {
+			case rErr != nil:
+				// Falhar aqui é grave e não pode passar em silêncio: o pedido
+				// segue vivo no ERP reservando peça, e o carrinho continua
+				// morto. A aba "Precisam atenção" pega o caso pelo estado, mas
+				// o motivo só existe aqui.
+				logger.From(ctx, s.logger).Error("the ERP order came back to life and the cart could not follow — a unit stays reserved with no cart behind it",
+					zap.String("cart_id", t.CartID),
+					zap.String("external_order_id", externalOrderID),
+					zap.Error(rErr),
+				)
+			case rel.Reopened:
+				logger.From(ctx, s.logger).Info("cart reopened following the ERP order",
+					zap.String("cart_id", t.CartID),
+					zap.String("external_order_id", externalOrderID),
+					zap.Int("units_recovered", rel.Recuperadas),
+					zap.Int("units_waitlisted", rel.EmFila),
+				)
+			default:
+				// Não elegível: vencido, pago, ou cancelado por outro motivo
+				// que não a mão do lojista. Fica para a triagem humana.
+				logger.From(ctx, s.logger).Warn("ERP order came back to life but the cart cannot be reopened — it is reserving stock with no cart behind it",
+					zap.String("cart_id", t.CartID),
+					zap.String("external_order_id", externalOrderID),
+				)
+			}
 		}
 	}
 

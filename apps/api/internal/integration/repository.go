@@ -4129,3 +4129,118 @@ func (r *Repository) CartIsTerminated(ctx context.Context, cartID string) (bool,
 	}
 	return r.queries.CartIsTerminated(ctx, id)
 }
+
+// ReopenCancelledCartFromERP ressuscita o carrinho que o lojista reabriu no ERP.
+//
+// Numa transação só, espelhando o cancelamento: devolve o carrinho ao estado
+// 'checkout', retoma o estoque que ainda existe e manda para a fila de espera o
+// que outra compradora levou no meio-tempo.
+func (r *Repository) ReopenCancelledCartFromERP(ctx context.Context, cartID, storeID string) (ReopenCartResult, error) {
+	out := ReopenCartResult{CartID: cartID}
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return out, err
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return out, fmt.Errorf("begin reopen tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op depois do Commit
+
+	err = func(q *sqlc.Queries) error {
+		// O prazo vem da fonte única (evento com fallback da loja). Precisa ser
+		// lido ANTES do flip, porque o flip já grava o expires_at novo.
+		// O prazo tem de ser lido ANTES do flip: o flip já grava o expires_at
+		// novo, e depois dele a fonte do número já foi consumida.
+		prazo, err := r.prazoDoCarrinho(ctx, q, cID)
+		if err != nil {
+			return err
+		}
+
+		cart, err := q.ReopenCancelledCart(ctx, sqlc.ReopenCancelledCartParams{
+			CartID:         cID,
+			MinutosDePrazo: int32(prazo),
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil // guard recusou: expirado, pago, ou não cancelado pelo lojista
+			}
+			return fmt.Errorf("flipping cart back from cancelled: %w", err)
+		}
+		out.Reopened = true
+		out.EventID = uuidToString(cart.EventID)
+
+		itens, err := q.ListNonWaitlistedCartItems(ctx, cID)
+		if err != nil {
+			return fmt.Errorf("listing items to reopen: %w", err)
+		}
+		for _, item := range itens {
+			desejado := item.Quantity
+			obtido, err := q.TakeStockForReopen(ctx, sqlc.TakeStockForReopenParams{
+				ProductID: item.ProductID,
+				Desejado:  desejado,
+			})
+			if err != nil {
+				return fmt.Errorf("retaking stock on reopen: %w", err)
+			}
+			out.Recuperadas += int(obtido)
+
+			falta := desejado - obtido
+			if falta <= 0 {
+				continue
+			}
+			// O que não coube vira espera. A linha do carrinho continua com a
+			// quantidade cheia — quantity é o que ela PEDIU — e a parte sem
+			// lastro fica marcada em waitlisted_quantity, que é a mesma
+			// convenção do caminho normal de compra.
+			out.EmFila += int(falta)
+			if err := q.SetCartItemWaitlistedOnReopen(ctx, sqlc.SetCartItemWaitlistedOnReopenParams{
+				CartID:     cID,
+				ProductID:  item.ProductID,
+				Waitlisted: falta,
+			}); err != nil {
+				return fmt.Errorf("marking waitlisted units on reopen: %w", err)
+			}
+			pos, err := q.GetNextWaitlistPosition(ctx, sqlc.GetNextWaitlistPositionParams{
+				EventID:   cart.EventID,
+				ProductID: item.ProductID,
+			})
+			if err != nil {
+				return fmt.Errorf("reading waitlist position: %w", err)
+			}
+			if _, err := q.CreateWaitlistItem(ctx, sqlc.CreateWaitlistItemParams{
+				EventID:        cart.EventID,
+				ProductID:      item.ProductID,
+				PlatformUserID: cart.PlatformUserID,
+				PlatformHandle: cart.PlatformHandle,
+				Quantity:       falta,
+				Position:       int32(pos),
+				CartID:         cID,
+			}); err != nil {
+				return fmt.Errorf("putting the missing units on the waitlist: %w", err)
+			}
+		}
+		return nil
+	}(r.queries.WithTx(tx))
+	if err != nil {
+		return out, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return out, fmt.Errorf("commit reopen tx: %w", err)
+	}
+	return out, nil
+}
+
+// prazoDoCarrinho lê o prazo efetivo pela fonte única (evento + loja).
+func (r *Repository) prazoDoCarrinho(ctx context.Context, q *sqlc.Queries, cartID pgtype.UUID) (int, error) {
+	ev, err := q.GetCartEventID(ctx, cartID)
+	if err != nil {
+		return 0, fmt.Errorf("reading cart event: %w", err)
+	}
+	cfg, err := q.GetEventCartSettings(ctx, ev)
+	if err != nil {
+		return 0, fmt.Errorf("reading cart expiration settings: %w", err)
+	}
+	return int(cfg.EffectiveCartExpirationMinutes), nil
+}

@@ -136,6 +136,8 @@ type Service struct {
 	collab StockCollaborators
 	stock  *StockReservations
 	status ERPOrderStatusRepository
+	// reopener segue o pedido que o lojista reabriu no ERP. Opcional.
+	reopener CartReopener
 	// drain é a persistência da migração única das reservas manuais. Opcional e
 	// com prazo: sai quando a drenagem terminar. Ver drenagem.go.
 	drain DrainRepository

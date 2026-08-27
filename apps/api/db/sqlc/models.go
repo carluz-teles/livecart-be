@@ -124,6 +124,8 @@ type Cart struct {
 	ErpOrderStatusAt       pgtype.Timestamptz `json:"erp_order_status_at"`
 	ErpOrderNumber         pgtype.Text        `json:"erp_order_number"`
 	PaidAmountCents        int64              `json:"paid_amount_cents"`
+	// Por que o cancelamento foi desfeito: payment_won (pagamento venceu a corrida) ou erp_reopened (lojista reabriu o pedido no ERP à mão)
+	CancellationRevertedReason pgtype.Text `json:"cancellation_reverted_reason"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.

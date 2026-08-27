@@ -190,6 +190,10 @@ func (s *Service) erpStock() *erp.Service {
 		// Rastreamento da situação do pedido: mesmo Repository por baixo, porta
 		// separada porque o webhook de pedido pode chegar sem carrinho nosso.
 		s.erpStockService.SetOrderStatusRepository(s.repo)
+		// Seguir o pedido que o lojista reabriu no ERP: sem isto a volta é só
+		// registrada, e o pedido fica vivo lá reservando peça com o carrinho
+		// morto aqui.
+		s.erpStockService.SetCartReopener(reopenerAdapter{s})
 		// Drenagem das reservas manuais: migração única, sai com ela.
 		s.erpStockService.SetDrainRepository(s.repo)
 		// Caminho de volta: o pedido do ERP refletido no carrinho.

@@ -1380,3 +1380,71 @@ WHERE cart_id = sqlc.arg(cart_id)::uuid
 -- aqui — o que deixa uma unidade reservada sem ninguém para reclamá-la.
 SELECT status IN ('cancelled', 'expired') AS terminado
 FROM carts WHERE id = sqlc.arg(cart_id)::uuid;
+
+-- name: ReopenCancelledCart :one
+-- Traz de volta o carrinho que o lojista reabriu no ERP.
+--
+-- Espelho do CancelCart, e a simetria é proposital: aquele mata por decisão
+-- humana, este ressuscita por decisão humana. O que ele NÃO faz é mexer no
+-- pedido do ERP — o pedido já está vivo, foi o lojista quem o reabriu, e é
+-- justamente isso que estamos seguindo.
+--
+-- Volta para 'checkout' e não para 'active' porque o carrinho cancelado já
+-- tinha link: reativá-lo é o ponto, e é o que faz a compradora conseguir pagar.
+--
+-- Guarda: só carrinho cancelado PELO LOJISTA. Expirado não entra — prazo vencido
+-- não é engano, é regra, e ressuscitar por causa de um clique no ERP passaria
+-- por cima dela. Pago/estornado também não: aquela venda já teve desfecho.
+UPDATE carts
+SET status                       = 'checkout',
+    cancelled_reason             = NULL,
+    cancellation_reverted_at     = now(),
+    cancellation_reverted_reason = 'erp_reopened',
+    -- O estado da máquina volta para 'open': o pedido existe e está vivo lá,
+    -- então o próximo comentário muta a grade em vez de criar um pedido novo.
+    erp_order_state              = 'open',
+    erp_op_started_at            = NULL,
+    -- Prazo re-armado a partir de AGORA. O antigo já passou (ou passaria em
+    -- instantes), e devolver um carrinho que expira em seguida seria devolver
+    -- nada.
+    expires_at = CASE WHEN never_expires THEN NULL
+                      ELSE now() + (sqlc.arg(minutos_de_prazo)::int || ' minutes')::interval END
+WHERE id = sqlc.arg(cart_id)::uuid
+  AND status = 'cancelled'
+  AND cancelled_reason = 'store_cancelled'
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+RETURNING *;
+
+-- name: TakeStockForReopen :one
+-- Retoma o estoque de um item, aceitando levar MENOS do que pediu.
+--
+-- É a diferença entre este caminho e uma compra normal: na compra, o que não
+-- tem estoque vira fila na hora do comentário. Aqui o carrinho já existia, as
+-- unidades foram devolvidas no cancelamento, e no meio-tempo outra pessoa pode
+-- ter levado. Recusar tudo por causa de uma unidade jogaria fora o carrinho
+-- inteiro; levar o que há e mandar o resto para a fila devolve o máximo
+-- possível — que é o que o lojista quer ao reabrir.
+--
+-- Devolve quanto CONSEGUIU tirar.
+-- O RETURNING de um UPDATE enxerga o valor NOVO, então "quanto saiu" não sai
+-- dele: precisa ser calculado ANTES de escrever. Por isso a leitura travada
+-- vem primeiro, numa CTE, e a escrita usa o número que ela computou.
+WITH atual AS (
+    SELECT id, stock FROM products WHERE id = sqlc.arg(product_id)::uuid FOR UPDATE
+), tomado AS (
+    SELECT id, LEAST(GREATEST(stock, 0), sqlc.arg(desejado)::int) AS qtd FROM atual
+), aplicado AS (
+    UPDATE products p SET stock = p.stock - t.qtd
+    FROM tomado t WHERE p.id = t.id
+    RETURNING 1
+)
+SELECT qtd::int AS obtido FROM tomado;
+
+-- name: SetCartItemWaitlistedOnReopen :exec
+-- Marca, na linha do carrinho, quantas unidades ficaram esperando.
+UPDATE cart_items
+SET waitlisted_quantity = sqlc.arg(waitlisted)::int
+WHERE cart_id = sqlc.arg(cart_id)::uuid AND product_id = sqlc.arg(product_id)::uuid;
+
+-- name: GetCartEventID :one
+SELECT event_id FROM carts WHERE id = $1;

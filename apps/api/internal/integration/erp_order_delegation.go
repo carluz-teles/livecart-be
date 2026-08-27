@@ -102,6 +102,19 @@ func (s *Service) DrainLegacyReservations(ctx context.Context, storeID string, d
 	return s.erpStock().DrainLegacyReservations(ctx, storeID, dryRun, limite)
 }
 
+// reopenerAdapter traduz o relatório de reabertura para o tipo do erp — mesmo
+// motivo dos outros adaptadores: nenhum dos dois pacotes importa o outro.
+type reopenerAdapter struct{ svc *Service }
+
+func (a reopenerAdapter) ReopenCartFromERP(ctx context.Context, cartID, storeID string) (erp.ReopenReport, error) {
+	rel, err := a.svc.ReopenCartFromERP(ctx, cartID, storeID)
+	return erp.ReopenReport{
+		Reopened:    rel.Reopened,
+		Recuperadas: rel.Recuperadas,
+		EmFila:      rel.EmFila,
+	}, err
+}
+
 // MergeERPOrdersIntoCart delega para erp.Service: faz o pedido do carrinho
 // eterno absorver o que os outros seguravam, e só então solta os outros.
 func (s *Service) MergeERPOrdersIntoCart(ctx context.Context, destCartID, storeID string, orfaos []erp.ERPOrderMerge) (*erp.MergeReport, error) {

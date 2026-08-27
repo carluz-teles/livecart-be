@@ -287,6 +287,7 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 			op.invoice_emitted_at,
 
 			c.cancellation_reverted_at,
+			COALESCE(c.cancellation_reverted_reason, ''),
 
 			-- Forma de pagamento, parcelas e os valores REAIS do pedido
 			-- (desconto e valor pago) para a tela mostrar exatamente o cobrado.
@@ -366,6 +367,7 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 		&row.ERPInvoiceEmittedAt,
 
 		&row.CancellationRevertedAt,
+		&row.CancellationRevertedReason,
 		&row.PaymentMethod,
 		&row.Installments,
 		&row.DiscountCents,
