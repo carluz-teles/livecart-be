@@ -182,6 +182,22 @@ func (q *Queries) CancelCartOnRefund(ctx context.Context, id pgtype.UUID) (int64
 	return result.RowsAffected(), nil
 }
 
+const cartIsTerminated = `-- name: CartIsTerminated :one
+SELECT status IN ('cancelled', 'expired') AS terminado
+FROM carts WHERE id = $1::uuid
+`
+
+// O carrinho chegou a um fim de onde não sai sozinho.
+//
+// Serve para reconhecer o pedido que ressuscitou no ERP com o carrinho morto
+// aqui — o que deixa uma unidade reservada sem ninguém para reclamá-la.
+func (q *Queries) CartIsTerminated(ctx context.Context, cartID pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, cartIsTerminated, cartID)
+	var terminado bool
+	err := row.Scan(&terminado)
+	return terminado, err
+}
+
 const clearCartItems = `-- name: ClearCartItems :exec
 DELETE FROM cart_items WHERE cart_id = $1
 `

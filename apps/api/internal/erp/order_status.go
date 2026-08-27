@@ -137,6 +137,27 @@ func (s *Service) ObserveOrderStatus(ctx context.Context, storeID, externalOrder
 		return nil
 	}
 
+	// O pedido voltou a viver e o carrinho não. Sobe como ERRO, e não como
+	// info: dali em diante existe uma unidade reservada no ERP que nenhum
+	// carrinho reclama, e ela some do disponível até alguém reparar no Tiny.
+	//
+	// O LiveCart não desfaz o cancelamento sozinho de propósito. Cancelar aqui
+	// devolveu estoque local, desativou o link e avisou a compradora; reabrir o
+	// pedido no ERP desfaz UMA dessas coisas, e ressuscitar o carrinho por
+	// conta própria tentaria refazer as outras — inclusive re-reservar uma peça
+	// que pode já ter sido vendida no meio tempo. Quem decide é gente; o que o
+	// sistema deve é não deixar isso invisível.
+	if providers.ERPOrderStatus(t.Status).VoltouAViver() {
+		if morto, err := s.repo.CartIsTerminated(ctx, t.CartID); err == nil && morto {
+			logger.From(ctx, s.logger).Error("ERP order came back to life while the cart stayed dead — a unit is reserved with no cart behind it",
+				zap.String("cart_id", t.CartID),
+				zap.String("external_order_id", externalOrderID),
+				zap.String("from", t.PreviousStatus),
+				zap.String("to", t.Status),
+			)
+		}
+	}
+
 	logger.From(ctx, s.logger).Info("ERP order status advanced",
 		zap.String("cart_id", t.CartID),
 		zap.String("external_order_id", externalOrderID),

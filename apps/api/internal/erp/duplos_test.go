@@ -224,3 +224,5 @@ type fakeERPProvider struct {
 func (m *mockRepo) ListERPLinkedProductsSample(context.Context, string, int) ([]ERPLinkedProduct, error) {
 	return nil, nil
 }
+
+func (m *mockRepo) CartIsTerminated(context.Context, string) (bool, error) { return false, nil }

@@ -413,3 +413,73 @@ func (e *erpQueRecusaPorNota) UpdateOrderItems(ctx context.Context, orderID stri
 	}
 	return e.erpComParcelas.UpdateOrderItems(ctx, orderID, itens)
 }
+
+// ─── O pedido que ressuscita no ERP ─────────────────────────────────────────
+//
+// Aconteceu em staging em 27/08: o lojista cancelou pelo LiveCart, nós
+// cancelamos no Tiny, e depois ele reabriu o pedido lá pelo painel. Os dois
+// avisos chegaram e foram gravados:
+//
+//	21:02:30  pedido 6  aberto    → cancelado
+//	21:02:50  pedido 6  cancelado → aberto
+//
+// O rastreamento funcionou. O que ficou sem dono foi a PEÇA: um pedido em
+// aberto no ERP reservando unidade, com o carrinho morto deste lado. Ninguém
+// vai pagar, o LiveCart não mexe mais nele (estado terminal), e a unidade some
+// do disponível até alguém abrir o Tiny.
+
+func TestSituacaoQueVoltaAViverEhReconhecida(t *testing.T) {
+	vivas := []providers.ERPOrderStatus{
+		providers.ERPOrderStatusAberto,
+		providers.ERPOrderStatusAprovado,
+		providers.ERPOrderStatusDadosIncompletos,
+	}
+	mortas := []providers.ERPOrderStatus{
+		providers.ERPOrderStatusCancelado,
+		providers.ERPOrderStatusFaturado,
+		providers.ERPOrderStatusPreparandoEnvio,
+		providers.ERPOrderStatusEnviado,
+		providers.ERPOrderStatusEntregue,
+		providers.ERPOrderStatusNaoEntregue,
+	}
+	for _, s := range vivas {
+		if !s.VoltouAViver() {
+			t.Errorf("%q segura peça e devia contar como pedido vivo", s)
+		}
+	}
+	for _, s := range mortas {
+		if s.VoltouAViver() {
+			t.Errorf("%q não é reserva presa — %s", s,
+				map[bool]string{true: "é o próprio cancelamento", false: "já virou nota"}[s == providers.ERPOrderStatusCancelado])
+		}
+	}
+}
+
+// A ida e a volta são gravadas, e a volta com carrinho morto é reconhecida.
+func TestPedidoQueRessuscitaComCarrinhoMortoEhDetectado(t *testing.T) {
+	svc, repo, _ := montarParcelas(map[string]int{"ext-p1": 50})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-1", item("p1", 1))
+	if err := svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 1, 2000, "@mariahelena"); err != nil {
+		t.Fatalf("compra: %v", err)
+	}
+	if err := svc.CancelERPOrderForCart(ctx, "cart-1", "loja-1"); err != nil {
+		t.Fatalf("cancelando: %v", err)
+	}
+
+	morto, err := repo.CartIsTerminated(ctx, "cart-1")
+	if err != nil {
+		t.Fatalf("lendo o estado: %v", err)
+	}
+	if !morto {
+		t.Fatal("o carrinho devia estar terminado depois do cancelamento")
+	}
+	// O lojista reabre o pedido no Tiny: a situação volta a segurar peça.
+	if !providers.ERPOrderStatusAberto.VoltouAViver() {
+		t.Fatal("'aberto' devia contar como pedido vivo")
+	}
+	// As duas condições juntas são a detecção: carrinho morto + pedido vivo.
+	if !morto || !providers.ERPOrderStatusAberto.VoltouAViver() {
+		t.Error("a combinação que deixa uma unidade reservada sem dono não foi reconhecida")
+	}
+}

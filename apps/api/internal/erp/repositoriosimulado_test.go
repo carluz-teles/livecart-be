@@ -611,3 +611,14 @@ func (r *repoSimulado) ListERPLinkedProductsSample(_ context.Context, _ string, 
 	}
 	return out, nil
 }
+
+// CartIsTerminated: o carrinho chegou a um fim de onde não sai sozinho.
+func (r *repoSimulado) CartIsTerminated(_ context.Context, cartID string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c := r.carrinhos[cartID]
+	if c == nil {
+		return false, nil
+	}
+	return c.state == OrderStateCancelled, nil
+}

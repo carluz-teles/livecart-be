@@ -119,6 +119,19 @@ func (s ERPOrderStatus) FechadoParaNovosItens() bool {
 	return false
 }
 
+// VoltouAViver diz se a situação é de um pedido que ainda segura peça.
+//
+// São as situações ANTES da nota: o pedido reserva e ninguém baixou nada. Serve
+// para reconhecer o pedido que ressuscitou no ERP — o lojista reabriu à mão o
+// que o LiveCart tinha cancelado — enquanto o carrinho daqui continua morto.
+func (s ERPOrderStatus) VoltouAViver() bool {
+	switch s {
+	case ERPOrderStatusAberto, ERPOrderStatusAprovado, ERPOrderStatusDadosIncompletos:
+		return true
+	}
+	return false
+}
+
 // ErrOrderStockLaunched é a recusa do ERP em editar um pedido cujo estoque foi
 // lançado — na prática, alguém mexeu no pedido pelo painel enquanto a live
 // rolava. Chega como `400 {"detalhes":[{"campo":"pedido.motivosBloqueio[0]",

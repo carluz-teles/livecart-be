@@ -4120,3 +4120,12 @@ func (r *Repository) ListSessionsForSimulator(ctx context.Context, storeID strin
 	}
 	return out, nil
 }
+
+// CartIsTerminated diz se o carrinho está cancelado ou vencido.
+func (r *Repository) CartIsTerminated(ctx context.Context, cartID string) (bool, error) {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return false, err
+	}
+	return r.queries.CartIsTerminated(ctx, id)
+}

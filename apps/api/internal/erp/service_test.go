@@ -123,3 +123,5 @@ func TestNewService(t *testing.T) {
 func (stubERPRepo) ListERPLinkedProductsSample(context.Context, string, int) ([]ERPLinkedProduct, error) {
 	return nil, nil
 }
+
+func (stubERPRepo) CartIsTerminated(context.Context, string) (bool, error) { return false, nil }

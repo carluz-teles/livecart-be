@@ -1372,3 +1372,11 @@ DELETE FROM cart_items
 WHERE cart_id = sqlc.arg(cart_id)::uuid
   AND product_id = sqlc.arg(product_id)::uuid
   AND waitlisted_quantity = 0;
+
+-- name: CartIsTerminated :one
+-- O carrinho chegou a um fim de onde não sai sozinho.
+--
+-- Serve para reconhecer o pedido que ressuscitou no ERP com o carrinho morto
+-- aqui — o que deixa uma unidade reservada sem ninguém para reclamá-la.
+SELECT status IN ('cancelled', 'expired') AS terminado
+FROM carts WHERE id = sqlc.arg(cart_id)::uuid;
