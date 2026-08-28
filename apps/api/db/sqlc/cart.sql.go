@@ -1655,6 +1655,7 @@ SELECT c.id, c.platform_user_id, c.platform_handle,
        (c.payment_status = 'refunded') AS refunded,
        (c.status IN ('cancelled','expired')) AS terminated,
        COALESCE(c.erp_order_status,'') AS erp_order_status,
+       (c.erp_order_state = 'confirmed') AS order_confirmed,
        (c.joined_to_cart_id IS NOT NULL
         OR EXISTS (SELECT 1 FROM carts o WHERE o.joined_to_cart_id = c.id)) AS already_joined
 FROM carts c
@@ -1678,6 +1679,7 @@ type GetCartForJoinRow struct {
 	Refunded        bool               `json:"refunded"`
 	Terminated      bool               `json:"terminated"`
 	ErpOrderStatus  string             `json:"erp_order_status"`
+	OrderConfirmed  bool               `json:"order_confirmed"`
 	AlreadyJoined   pgtype.Bool        `json:"already_joined"`
 }
 
@@ -1695,6 +1697,7 @@ func (q *Queries) GetCartForJoin(ctx context.Context, arg GetCartForJoinParams) 
 		&i.Refunded,
 		&i.Terminated,
 		&i.ErpOrderStatus,
+		&i.OrderConfirmed,
 		&i.AlreadyJoined,
 	)
 	return i, err

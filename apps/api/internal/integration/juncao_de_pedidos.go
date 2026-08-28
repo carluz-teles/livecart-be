@@ -182,19 +182,25 @@ func podemSerJuntados(a, b CartForJoin, confirmouCompradorDiferente bool) error 
 				"um dos pedidos já faz parte de outra junção")
 		}
 	}
-	// Dois pedidos JÁ PAGOS não se juntam, e a razão é do ERP, não nossa:
-	// juntar significa cancelar um dos pedidos, e cancelar um pedido pago no
-	// Tiny é fluxo de ESTORNO — o dinheiro já foi conciliado contra aquele
-	// pedido. A junção existe para sair um frete e uma nota só; com os dois
-	// pagos o lojista ainda pode despachar junto sem mexer nos pedidos.
+	// Juntar significa CANCELAR um dos pedidos no ERP, e o cancelamento se recusa
+	// quando o pedido já foi confirmado: cancelar pedido confirmado é fluxo de
+	// ESTORNO, não de junção.
 	//
-	// Foi o que quebrou em staging em 28/08: a regra de desempate elegia o mais
-	// antigo como anfitrião e mandava o pago mais novo para o cancelamento, que
-	// o ERP recusa com "cancelamento pós-pago é fluxo de refund".
-	if a.Paid && b.Paid {
+	// A guarda olha o estado do PEDIDO (erp_order_state), e não o
+	// payment_status, porque os dois podem discordar — e discordaram em staging
+	// em 28/08. O carrinho recusado estava com payment_status 'pending' e ZERO
+	// cobranças no livro, mas com erp_order_state 'confirmed'. Uma guarda por
+	// pagamento o teria deixado passar, e o ERP recusaria de novo:
+	//
+	//   cart 2a965cca confirmado — cancelamento pós-pago é fluxo de refund
+	//
+	// Com os dois confirmados não há candidato a ser cancelado, e a junção não
+	// tem como acontecer. O lojista ainda pode despachar os dois juntos sem
+	// mexer nos pedidos.
+	if a.OrderConfirmed && b.OrderConfirmed {
 		return httpx.DomainError(422, httpx.CodeJoinBothPaid,
-			"os dois pedidos já foram pagos — juntar exigiria cancelar um deles no ERP, "+
-				"e cancelar pedido pago é estorno. Despache os dois juntos sem juntar os pedidos.")
+			"os dois pedidos já estão confirmados no ERP — juntar exigiria cancelar um deles, "+
+				"e cancelar pedido confirmado é estorno. Despache os dois juntos sem juntar os pedidos.")
 	}
 	if a.PlatformUserID != b.PlatformUserID && !confirmouCompradorDiferente {
 		return httpx.DomainError(409, httpx.CodeJoinDifferentBuyers,
@@ -206,6 +212,18 @@ func podemSerJuntados(a, b CartForJoin, confirmouCompradorDiferente bool) error 
 
 // escolherAnfitriao aplica a regra de quem fica com o pedido. Ver o topo.
 func escolherAnfitriao(a, b CartForJoin) (host, juntado CartForJoin) {
+	// Quem NÃO pode ser cancelado tem de ser o anfitrião. O pedido confirmado é
+	// esse: o ERP recusa cancelá-lo, e mandá-lo para o cancelamento é o bug que
+	// quebrou em staging em 28/08.
+	//
+	// Vem ANTES da regra do pagamento porque é mais forte: um pedido confirmado
+	// sem pagamento registrado ainda assim não pode ser cancelado.
+	switch {
+	case a.OrderConfirmed && !b.OrderConfirmed:
+		return a, b
+	case b.OrderConfirmed && !a.OrderConfirmed:
+		return b, a
+	}
 	switch {
 	case a.Paid && !b.Paid:
 		return a, b
@@ -230,6 +248,10 @@ type CartForJoin struct {
 	Terminated      bool
 	// Invoiced vem da situação que o webhook do ERP deixou no carrinho.
 	Invoiced bool
+	// OrderConfirmed: o pedido no ERP já foi confirmado (erp_order_state).
+	// É o campo que o CANCELAMENTO consulta, e por isso é ele que decide quem
+	// pode ser a origem — não o payment_status, que pode discordar.
+	OrderConfirmed bool
 	// AlreadyJoined: já é anfitrião de alguém, ou já foi juntado a outro.
 	AlreadyJoined bool
 }
