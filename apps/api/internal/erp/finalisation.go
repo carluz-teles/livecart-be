@@ -430,13 +430,22 @@ func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID stri
 	// Replay the original gateway PaymentStatus snapshot captured on the first
 	// attempt (S1). Re-fetching from the gateway would work too but adds an
 	// external dependency to a manual action.
+	//
+	// Sem snapshot persistido, finaliza com nil — e isso cobre os DOIS casos em
+	// que o snapshot legitimamente não existe:
+	//
+	//   • Resume: o pedido já existe no Tiny (ExternalOrderID setado); launch +
+	//     estornos não usam dados de pagamento.
+	//   • Pagamento MANUAL: o snapshot é nil DE PROPÓSITO — é ele que viraria
+	//     "conta a receber" no Tiny, e no manual quem lança isso é o lojista
+	//     (ver payment/manual.go). Um gateway SEMPRE persiste o seu snapshot,
+	//     então um cart 'failed' sem snapshot é, por construção, manual.
+	//
+	// Antes, um pagamento manual cuja 1ª finalização travou ANTES de criar o
+	// pedido no Tiny (ex.: bloqueada por um movimento de estoque em dúvida) caía
+	// aqui num 422 e o pedido pago ficava preso, sem nunca ir ao ERP.
 	if len(row.PaymentSnapshot) == 0 {
-		if row.ExternalOrderID != "" {
-			// Resume puro: o pedido já existe no Tiny, e launch + estornos não
-			// usam dados de pagamento — dá para terminar sem snapshot.
-			return s.FinalizeCartERPOrder(ctx, cartID, storeID, nil)
-		}
-		return httpx.DomainError(422, httpx.CodeErpRetryNoSnapshot, "snapshot de pagamento ausente — retry não disponível")
+		return s.FinalizeCartERPOrder(ctx, cartID, storeID, nil)
 	}
 	var status providers.PaymentStatus
 	if err := json.Unmarshal(row.PaymentSnapshot, &status); err != nil {
