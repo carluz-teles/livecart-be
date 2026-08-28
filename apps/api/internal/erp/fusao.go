@@ -38,6 +38,17 @@ import (
 type ERPOrderMerge struct {
 	SourceCartID    string
 	ExternalOrderID string
+	// SemDinheiro afirma que esta origem NÃO tem cobrança registrada, e por isso
+	// pode ser solta mesmo se o pedido dela já estiver 'confirmed'.
+	//
+	// Quem chama tem de ter lido isso ANTES de vincular os carrinhos: depois do
+	// vínculo, o livro de pagamentos da origem já responde pelo grupo do
+	// anfitrião, e uma releitura aqui viria vazia para qualquer origem — o que
+	// faria toda fusão parecer segura.
+	//
+	// Falso é o padrão e o valor conservador: a origem vai pelo cancelamento
+	// comum, que recusa 'confirmed' e protege o pedido pago.
+	SemDinheiro bool
 }
 
 // MergeReport diz o que aconteceu com cada pedido órfão.
@@ -82,7 +93,7 @@ func (s *Service) MergeERPOrdersIntoCart(ctx context.Context, destCartID, storeI
 	// O laço não para no primeiro erro. Cada pedido é independente, e desistir
 	// no primeiro deixaria os seguintes segurando peça sem ninguém sabendo.
 	for _, o := range orfaos {
-		if err := s.CancelERPOrderForCart(ctx, o.SourceCartID, storeID); err != nil {
+		if err := s.soltarPedidoDaFusao(ctx, o, storeID); err != nil {
 			rel.Stuck = append(rel.Stuck, o.ExternalOrderID)
 			logger.From(ctx, s.logger).Error("merged cart's ERP order could not be released; it is still holding stock",
 				zap.String("dest_cart_id", destCartID),
@@ -105,4 +116,25 @@ func (s *Service) MergeERPOrdersIntoCart(ctx context.Context, destCartID, storeI
 			len(rel.Stuck), rel.Stuck)
 	}
 	return rel, nil
+}
+
+// soltarPedidoDaFusao solta a origem pelo caminho que o estado dela permite.
+//
+// O cancelamento comum não sai de 'confirmed' — é a guarda que impede um estorno
+// acidental, e ela fica. Mas um pedido confirmado SEM cobrança nenhuma não tem
+// estorno para acontecer: soltá-lo é arrumação, e recusá-lo deixava a fusão sem
+// saída (a junção do painel travava com os dois lados intocáveis, staging 28/08).
+//
+// Sem a afirmação explícita de que não há dinheiro, vai pelo caminho comum.
+func (s *Service) soltarPedidoDaFusao(ctx context.Context, o ERPOrderMerge, storeID string) error {
+	if o.SemDinheiro {
+		st, err := s.repo.GetCartERPOrderState(ctx, o.SourceCartID)
+		if err != nil {
+			return fmt.Errorf("lendo o estado do pedido de origem: %w", err)
+		}
+		if st != nil && st.State == OrderStateConfirmed {
+			return s.soltarPedidoConfirmado(ctx, o.SourceCartID, storeID, "join")
+		}
+	}
+	return s.CancelERPOrderForCart(ctx, o.SourceCartID, storeID)
 }

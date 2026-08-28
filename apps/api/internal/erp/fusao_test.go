@@ -27,6 +27,18 @@ type erpEspiaOrdem struct {
 	produtoObservado        string
 }
 
+// cancelou diz se o ERP chegou a receber o cancelamento daquele pedido. Ler a
+// sequência é o que separa "o relatório disse que soltou" de "o pedido saiu
+// mesmo de lá" — e é a diferença entre peça devolvida e peça contada duas vezes.
+func (e *erpEspiaOrdem) cancelou(orderID string) bool {
+	for _, p := range e.sequencia {
+		if p == "cancelou:"+orderID {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *erpEspiaOrdem) UpdateOrderItems(ctx context.Context, orderID string, itens []providers.ERPOrderItem) error {
 	e.sequencia = append(e.sequencia, "cresceu:"+orderID)
 	return e.erpComParcelas.UpdateOrderItems(ctx, orderID, itens)
@@ -248,5 +260,71 @@ func TestFusaoSemOrfaosNaoEscreveNoERP(t *testing.T) {
 	}
 	if len(erp.sequencia) != 0 {
 		t.Errorf("gastou escrita à toa: %v — o teto da conta é 30 por minuto", erp.sequencia)
+	}
+}
+
+// ─── Como a origem é solta ──────────────────────────────────────────────────
+//
+// O cancelamento comum não sai de 'confirmed', e essa guarda existe para impedir
+// estorno acidental. Mas ela não pode travar a fusão de um pedido confirmado que
+// não tem cobrança nenhuma em cima: aí não há estorno a acontecer, e recusar
+// deixa o pedido vivo segurando peça que já está no pedido do anfitrião — a
+// mesma unidade contada duas vezes.
+//
+// Foi o caso real de staging em 28/08: o carrinho 2a965cca estava 'confirmed'
+// com payment_status 'pending' e zero linhas no livro, e a junção do painel não
+// tinha saída.
+
+func confirmarPedido(t *testing.T, repo *repoSimulado, cartID string) {
+	t.Helper()
+	ok, err := repo.TransitionCartERPOrderState(context.Background(), cartID, OrderStateOpen, OrderStateConfirmed)
+	if err != nil || !ok {
+		t.Fatalf("não consegui deixar %s confirmado: ok=%v err=%v", cartID, ok, err)
+	}
+}
+
+func TestOrigemConfirmadaSemDinheiroESolta(t *testing.T) {
+	svc, repo, erp := montarFusao(map[string]int{"ext-p1": 100})
+	ctx := context.Background()
+	dest, origem := doisCarrinhosDeEventosDiferentes(t, svc, repo)
+	confirmarPedido(t, repo, origem)
+
+	orfaos := fundir(repo, dest, origem)
+	orfaos[0].SemDinheiro = true // quem chamou leu o livro ANTES do vínculo
+
+	rel, err := svc.MergeERPOrdersIntoCart(ctx, dest, "loja-1", orfaos)
+	if err != nil {
+		t.Fatalf("a fusão devia soltar o pedido confirmado sem cobrança: %v", err)
+	}
+	if len(rel.Stuck) > 0 {
+		t.Fatalf("pedido preso: %v — ele continua segurando peça que já está no do anfitrião", rel.Stuck)
+	}
+	if len(rel.Released) != 1 {
+		t.Fatalf("solto = %v, queria exatamente o pedido da origem", rel.Released)
+	}
+	if !erp.cancelou(rel.Released[0]) {
+		t.Errorf("o pedido saiu do relatório como solto mas o ERP nunca recebeu o cancelamento")
+	}
+}
+
+// A afirmação é o que libera. Sem ela a origem vai pelo caminho comum, que
+// recusa 'confirmed' — e é assim que o pedido PAGO fica protegido, já que quem
+// chama só afirma o que leu no livro de pagamentos.
+func TestOrigemConfirmadaSemAfirmacaoNaoESolta(t *testing.T) {
+	svc, repo, erp := montarFusao(map[string]int{"ext-p1": 100})
+	ctx := context.Background()
+	dest, origem := doisCarrinhosDeEventosDiferentes(t, svc, repo)
+	confirmarPedido(t, repo, origem)
+
+	orfaos := fundir(repo, dest, origem) // SemDinheiro fica falso — o padrão
+	rel, err := svc.MergeERPOrdersIntoCart(ctx, dest, "loja-1", orfaos)
+	if err == nil {
+		t.Fatal("devia subir como erro: o pedido continua segurando peça depois da fusão")
+	}
+	if len(rel.Released) > 0 {
+		t.Fatalf("soltou %v sem a afirmação de que não há dinheiro — é um estorno silencioso", rel.Released)
+	}
+	if erp.cancelou(repo.carrinho(origem).externalOrderID) {
+		t.Error("o ERP recebeu o cancelamento de um pedido que podia ter pagamento")
 	}
 }

@@ -16,15 +16,20 @@ package integration
 //
 // O anfitrião é quem fica com o pedido no ERP, e a escolha não é de gosto:
 //
-//	um pago e um não pago  →  o PAGO, sempre
-//	os dois pagos          →  o mais antigo
-//	nenhum pago            →  o mais antigo
+//	um com dinheiro e um sem  →  o do DINHEIRO, sempre
+//	nenhum com dinheiro       →  o mais antigo
+//	os dois com dinheiro      →  não há junção
 //
-// O pago manda porque o pedido dele já está aprovado no ERP e tem cobrança
-// atrelada; cancelá-lo para reabrir a venda no outro seria desfazer um
-// pagamento aceito. O mais antigo desempata porque é o pedido que a compradora
-// já conhece — é o número que ela viu primeiro, e é o que o lojista já pode ter
-// citado numa conversa.
+// "Dinheiro" é cobrança registrada — payment_status 'paid' ou linha no livro de
+// pagamentos —, e não `erp_order_state`. Juntar cancela um dos dois pedidos, e
+// cancelar pedido com cobrança em cima é ESTORNO: decisão do lojista com a
+// compradora, nunca efeito colateral de arrumar dois pedidos. Por isso quem tem
+// dinheiro nunca é a origem, e com os dois carregando dinheiro não sobra
+// candidato a soltar.
+//
+// O mais antigo desempata porque é o pedido que a compradora já conhece — é o
+// número que ela viu primeiro, e o que o lojista já pode ter citado numa
+// conversa.
 //
 // ═══ A ORDEM ═══
 //
@@ -114,7 +119,14 @@ func (s *Service) JoinCarts(ctx context.Context, in JoinCartsInput) (JoinCartsRe
 	//    só então o outro é cancelado.
 	if pedidoASoltar != "" {
 		rel, mErr := s.MergeERPOrdersIntoCart(ctx, host.CartID, in.StoreID,
-			[]erp.ERPOrderMerge{{SourceCartID: juntado.CartID, ExternalOrderID: pedidoASoltar}})
+			[]erp.ERPOrderMerge{{
+				SourceCartID:    juntado.CartID,
+				ExternalOrderID: pedidoASoltar,
+				// Lido ANTES do vínculo, de propósito: depois dele o livro de
+				// pagamentos deste carrinho já responde pelo grupo do anfitrião,
+				// e uma releitura aqui viria vazia para qualquer origem.
+				SemDinheiro: !juntado.HasMoney,
+			}})
 		if rel != nil && len(rel.Released) > 0 {
 			out.OrderReleased = rel.Released[0]
 		}
@@ -182,25 +194,28 @@ func podemSerJuntados(a, b CartForJoin, confirmouCompradorDiferente bool) error 
 				"um dos pedidos já faz parte de outra junção")
 		}
 	}
-	// Juntar significa CANCELAR um dos pedidos no ERP, e o cancelamento se recusa
-	// quando o pedido já foi confirmado: cancelar pedido confirmado é fluxo de
-	// ESTORNO, não de junção.
+	// Juntar significa CANCELAR um dos dois pedidos no ERP. O que não se pode
+	// cancelar por tabela é pedido com DINHEIRO em cima: aí o cancelamento é um
+	// estorno, e estorno é decisão do lojista com a compradora, não efeito
+	// colateral de arrumar dois pedidos.
 	//
-	// A guarda olha o estado do PEDIDO (erp_order_state), e não o
-	// payment_status, porque os dois podem discordar — e discordaram em staging
-	// em 28/08. O carrinho recusado estava com payment_status 'pending' e ZERO
-	// cobranças no livro, mas com erp_order_state 'confirmed'. Uma guarda por
-	// pagamento o teria deixado passar, e o ERP recusaria de novo:
+	// A guarda pergunta pelo dinheiro — payment_status 'paid' ou cobrança no
+	// livro —, e não por erp_order_state. Os dois discordam, e discordaram em
+	// staging em 28/08: o carrinho 2a965cca estava 'confirmed' com ZERO
+	// cobranças e situação "aberto" no Tiny. Uma guarda por estado o tratava
+	// como intocável, e a junção que o lojista pedia não tinha como acontecer.
 	//
-	//   cart 2a965cca confirmado — cancelamento pós-pago é fluxo de refund
+	// O ERP não é quem recusa. `RefundConvertedCartOrder` cancela pedido
+	// confirmado com a mesma chamada de sempre (`situacao=2`); quem recusava era
+	// o nosso CancelERPOrderForCart, que só sabe soltar pedido 'open'. Por isso
+	// a fusão escolhe o caminho pelo estado — ver soltarPedidoDaFusao.
 	//
-	// Com os dois confirmados não há candidato a ser cancelado, e a junção não
-	// tem como acontecer. O lojista ainda pode despachar os dois juntos sem
-	// mexer nos pedidos.
-	if a.OrderConfirmed && b.OrderConfirmed {
+	// Com os dois carregando dinheiro não há candidato a soltar, e aí sim não há
+	// junção. O lojista ainda pode despachar os dois juntos sem mexer nos pedidos.
+	if a.HasMoney && b.HasMoney {
 		return httpx.DomainError(422, httpx.CodeJoinBothPaid,
-			"os dois pedidos já estão confirmados no ERP — juntar exigiria cancelar um deles, "+
-				"e cancelar pedido confirmado é estorno. Despache os dois juntos sem juntar os pedidos.")
+			"os dois pedidos já têm pagamento registrado — juntar exigiria cancelar um deles, "+
+				"e cancelar pedido pago é estorno. Despache os dois juntos sem juntar os pedidos.")
 	}
 	if a.PlatformUserID != b.PlatformUserID && !confirmouCompradorDiferente {
 		return httpx.DomainError(409, httpx.CodeJoinDifferentBuyers,
@@ -212,24 +227,21 @@ func podemSerJuntados(a, b CartForJoin, confirmouCompradorDiferente bool) error 
 
 // escolherAnfitriao aplica a regra de quem fica com o pedido. Ver o topo.
 func escolherAnfitriao(a, b CartForJoin) (host, juntado CartForJoin) {
-	// Quem NÃO pode ser cancelado tem de ser o anfitrião. O pedido confirmado é
-	// esse: o ERP recusa cancelá-lo, e mandá-lo para o cancelamento é o bug que
-	// quebrou em staging em 28/08.
+	// Quem tem DINHEIRO é o anfitrião, sempre. É o único dos dois que não pode
+	// ser a origem: soltar o pedido dele seria estornar uma cobrança aceita.
 	//
-	// Vem ANTES da regra do pagamento porque é mais forte: um pedido confirmado
-	// sem pagamento registrado ainda assim não pode ser cancelado.
+	// Só o dinheiro decide aqui. `erp_order_state` não entra — um pedido
+	// confirmado sem cobrança nenhuma pode ser solto, e tratá-lo como intocável
+	// era o que travava a junção em staging em 28/08.
 	switch {
-	case a.OrderConfirmed && !b.OrderConfirmed:
+	case a.HasMoney && !b.HasMoney:
 		return a, b
-	case b.OrderConfirmed && !a.OrderConfirmed:
+	case b.HasMoney && !a.HasMoney:
 		return b, a
 	}
-	switch {
-	case a.Paid && !b.Paid:
-		return a, b
-	case b.Paid && !a.Paid:
-		return b, a
-	}
+	// Nenhum tem dinheiro (os dois com dinheiro nem chegam aqui: podemSerJuntados
+	// recusa antes). Desempata o mais antigo — é o número que a compradora viu
+	// primeiro, e o que o lojista já pode ter citado numa conversa.
 	if a.CreatedAt.Before(b.CreatedAt) {
 		return a, b
 	}
@@ -243,15 +255,18 @@ type CartForJoin struct {
 	PlatformHandle  string
 	ExternalOrderID string
 	CreatedAt       time.Time
-	Paid            bool
 	Refunded        bool
 	Terminated      bool
 	// Invoiced vem da situação que o webhook do ERP deixou no carrinho.
 	Invoiced bool
 	// OrderConfirmed: o pedido no ERP já foi confirmado (erp_order_state).
-	// É o campo que o CANCELAMENTO consulta, e por isso é ele que decide quem
-	// pode ser a origem — não o payment_status, que pode discordar.
+	// NÃO decide quem pode ser a origem — decide só COMO soltar o pedido, já que
+	// o cancelamento comum não sai de 'confirmed'.
 	OrderConfirmed bool
+	// HasMoney: há cobrança registrada neste carrinho — payment_status 'paid' ou
+	// linha no livro de pagamentos. É quem decide a direção da junção, porque
+	// cancelar pedido com dinheiro em cima é estorno.
+	HasMoney bool
 	// AlreadyJoined: já é anfitrião de alguém, ou já foi juntado a outro.
 	AlreadyJoined bool
 }

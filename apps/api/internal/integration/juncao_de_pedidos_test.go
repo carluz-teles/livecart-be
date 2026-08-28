@@ -25,11 +25,16 @@ func carrinho(id string, opts ...func(*CartForJoin)) CartForJoin {
 	return c
 }
 
-func pago(c *CartForJoin) { c.Paid = true; c.OrderConfirmed = true }
+// pago: há cobrança registrada. No caminho normal o pedido também já está
+// confirmado no ERP, e os dois andam juntos.
+func pago(c *CartForJoin) { c.HasMoney = true; c.OrderConfirmed = true }
 
 // confirmadoSemPagar: o pedido está confirmado no ERP mas o carrinho não tem
-// pagamento registrado. Os dois campos PODEM discordar — foi o caso real de
-// staging em 28/08, com payment_status 'pending' e zero cobranças no livro.
+// cobrança nenhuma. Os dois campos PODEM discordar — foi o caso real de staging
+// em 28/08, com payment_status 'pending' e zero linhas no livro de pagamentos.
+//
+// Este é o carrinho que a regra antiga tratava como intocável, travando a
+// junção. Ele não tem dinheiro em cima: pode ser solto.
 func confirmadoSemPagar(c *CartForJoin) { c.OrderConfirmed = true }
 func estornado(c *CartForJoin)          { c.Refunded = true }
 func morto(c *CartForJoin)              { c.Terminated = true }
@@ -58,13 +63,13 @@ func TestMapaDeCasosDaJuncao(t *testing.T) {
 		{"um pago e um aberto", carrinho("a", pago), carrinho("b"), false, true,
 			"o pago vira anfitrião; o aberto entra nele"},
 		{"os dois pagos", carrinho("a", pago), carrinho("b", pago), false, false,
-			"juntar exigiria cancelar um dos pedidos, e cancelar pedido confirmado " +
-				"é ESTORNO — o Tiny recusa"},
-		{"os dois confirmados no ERP, nenhum pago", carrinho("a", confirmadoSemPagar), carrinho("b", confirmadoSemPagar), false, false,
-			"o CANCELAMENTO olha erp_order_state, não payment_status. Foi o caso " +
-				"real de staging: pending, zero cobranças, e mesmo assim confirmado"},
-		{"um confirmado sem pagar, outro aberto", carrinho("a", confirmadoSemPagar), carrinho("b"), false, true,
-			"há um candidato a ser cancelado — o aberto"},
+			"juntar cancelaria um dos dois, e cancelar pedido com cobrança em cima " +
+				"é ESTORNO — decisão do lojista com a compradora, não efeito colateral"},
+		{"os dois confirmados no ERP, nenhum com cobrança", carrinho("a", confirmadoSemPagar), carrinho("b", confirmadoSemPagar), false, true,
+			"sem dinheiro em cima não há estorno a acontecer, e soltar o pedido é " +
+				"arrumação. Recusar aqui travava o caso real de staging em 28/08"},
+		{"um confirmado sem cobrança, outro aberto", carrinho("a", confirmadoSemPagar), carrinho("b"), false, true,
+			"os dois podem ser a origem — nenhum tem dinheiro"},
 		{"um faturado", carrinho("a", faturado), carrinho("b"), false, false,
 			"a nota está emitida e o pedido não recebe mais item"},
 		{"o outro faturado", carrinho("a"), carrinho("b", faturado), false, false,
@@ -112,10 +117,10 @@ func TestQuemViraAnfitriao(t *testing.T) {
 		queroHost string
 		porque    string
 	}{
-		{"o confirmado no ERP vira anfitrião mesmo sem pagamento",
-			carrinho("confirmado", confirmadoSemPagar), carrinho("aberto"),
-			"confirmado", "o ERP recusa cancelar pedido confirmado; mandá-lo para a " +
-				"origem é o bug que quebrou em staging"},
+		{"confirmado sem cobrança não vira anfitrião por ser confirmado",
+			carrinho("confirmado", confirmadoSemPagar, em(tarde)), carrinho("aberto", em(cedo)),
+			"aberto", "sem dinheiro em cima, `erp_order_state` não decide nada — " +
+				"quem desempata é a idade. Tratá-lo como intocável travava a junção"},
 		{"o pago vence o mais recente",
 			carrinho("pago-antigo", pago, em(cedo)), carrinho("aberto-novo", em(tarde)),
 			"pago-antigo", "cancelar o pedido pago desfaria um pagamento aceito"},

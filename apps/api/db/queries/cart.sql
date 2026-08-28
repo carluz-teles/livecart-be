@@ -1579,11 +1579,12 @@ WHERE id = sqlc.arg(cart_id)::uuid
 SELECT c.id, c.platform_user_id, c.platform_handle,
        COALESCE(c.external_order_id,'') AS external_order_id,
        c.created_at,
-       (c.payment_status = 'paid')     AS paid,
        (c.payment_status = 'refunded') AS refunded,
        (c.status IN ('cancelled','expired')) AS terminated,
        COALESCE(c.erp_order_status,'') AS erp_order_status,
        (c.erp_order_state = 'confirmed') AS order_confirmed,
+       (COALESCE(c.payment_status,'') = 'paid'
+        OR EXISTS (SELECT 1 FROM cart_payments p WHERE p.cart_id = c.id))::boolean AS has_money,
        (c.joined_to_cart_id IS NOT NULL
         OR EXISTS (SELECT 1 FROM carts o WHERE o.joined_to_cart_id = c.id)) AS already_joined
 FROM carts c
@@ -1618,6 +1619,23 @@ WHERE COALESCE(c.store_id, e.store_id) = sqlc.arg(store_id)::uuid
         'preparando_envio','faturado','pronto_envio','enviado','entregue','nao_entregue','cancelado'))
   AND c.joined_to_cart_id IS NULL
   AND NOT EXISTS (SELECT 1 FROM carts o WHERE o.joined_to_cart_id = c.id)
+  -- Juntar CANCELA um dos dois pedidos no ERP, e cancelar pedido com dinheiro
+  -- em cima e' estorno. Quando ESTE ja' tem dinheiro, so' entram na lista os que
+  -- nao tem -- sao os unicos que podem ser a origem.
+  --
+  -- Sem este filtro a lista oferecia o par impossivel: o lojista escolhia,
+  -- confirmava, e so' entao levava 422. Aconteceu em staging em 28/08 com os
+  -- pedidos 1005 e 1007.
+  AND (
+        NOT EXISTS (
+          SELECT 1 FROM carts src
+          WHERE src.id = sqlc.arg(cart_id)::uuid
+            AND (COALESCE(src.payment_status,'') = 'paid'
+                 OR EXISTS (SELECT 1 FROM cart_payments p WHERE p.cart_id = src.id))
+        )
+        OR (COALESCE(c.payment_status,'') <> 'paid'
+            AND NOT EXISTS (SELECT 1 FROM cart_payments p WHERE p.cart_id = c.id))
+      )
 ORDER BY c.created_at DESC
 LIMIT 20;
 

@@ -4325,11 +4325,11 @@ func (r *Repository) GetCartForJoin(ctx context.Context, cartID, storeID string)
 		PlatformHandle:  row.PlatformHandle,
 		ExternalOrderID: row.ExternalOrderID,
 		CreatedAt:       row.CreatedAt.Time,
-		Paid:            row.Paid,
 		Refunded:        row.Refunded,
 		Terminated:      row.Terminated,
 		Invoiced:        providers.ERPOrderStatus(row.ErpOrderStatus).FechadoParaNovosItens(),
 		OrderConfirmed:  row.OrderConfirmed,
+		HasMoney:        row.HasMoney,
 		AlreadyJoined:   row.AlreadyJoined.Bool,
 	}, nil
 }

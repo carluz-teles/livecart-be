@@ -1000,12 +1000,27 @@ func (s *Service) CancelERPOrderForCart(ctx context.Context, cartID, storeID str
 // não desfaz a baixa — e não deve mesmo: a peça saiu, e é ele quem decide se
 // volta. Estornar aqui, às cegas, é que estragaria a conta.
 func (s *Service) RefundConvertedCartOrder(ctx context.Context, cartID, storeID string) error {
+	return s.soltarPedidoConfirmado(ctx, cartID, storeID, "refund")
+}
+
+// soltarPedidoConfirmado cancela no ERP um pedido que já está em 'confirmed'.
+//
+// É o único caminho que sai desse estado: o cancelamento comum recusa 'confirmed'
+// de propósito, para que um estorno nunca aconteça por engano. Aqui a decisão já
+// foi tomada por quem chamou, e `motivo` diz qual foi — "refund" quando o
+// gateway devolveu o dinheiro, "join" quando o pedido perdeu o conteúdo para o
+// anfitrião de uma junção e não tinha cobrança nenhuma em cima.
+//
+// A chamada ao ERP é a mesma dos dois lados (`situacao=2`), e é ela que devolve
+// a reserva. O que muda é só a razão registrada — e a razão é o que permite
+// distinguir depois, no histórico, um estorno de uma arrumação.
+func (s *Service) soltarPedidoConfirmado(ctx context.Context, cartID, storeID, motivo string) error {
 	release, acquired, lockErr := s.repo.AcquireCartFinalisationLock(ctx, cartID)
 	if lockErr != nil {
-		return fmt.Errorf("acquiring refund lock: %w", lockErr)
+		return fmt.Errorf("acquiring %s lock: %w", motivo, lockErr)
 	}
 	if !acquired {
-		return fmt.Errorf("cart %s com operação terminal em voo; estorno adiado: %w", cartID, ErrCartBusy)
+		return fmt.Errorf("cart %s com operação terminal em voo; %s adiado: %w", cartID, motivo, ErrCartBusy)
 	}
 	defer release()
 
@@ -1023,7 +1038,7 @@ func (s *Service) RefundConvertedCartOrder(ctx context.Context, cartID, storeID 
 	// Mesma reivindicação prévia do cancelamento comum, pelo mesmo motivo.
 	won, err := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateConfirmed, OrderStateCancelled)
 	if err != nil {
-		return fmt.Errorf("claiming refunded cart cancellation: %w", err)
+		return fmt.Errorf("claiming confirmed cart cancellation (%s): %w", motivo, err)
 	}
 	if !won {
 		return nil // já cancelado por outro caminho
@@ -1033,17 +1048,19 @@ func (s *Service) RefundConvertedCartOrder(ctx context.Context, cartID, storeID 
 	}); err != nil {
 		fim := context.WithoutCancel(ctx) // a compensação sobrevive ao prazo
 		if _, backErr := s.repo.TransitionCartERPOrderState(fim, cartID, OrderStateCancelled, OrderStateConfirmed); backErr != nil {
-			logger.From(fim, s.logger).Error("failed to return refunded cart from cancelled after ERP refusal",
+			logger.From(fim, s.logger).Error("failed to return confirmed cart from cancelled after ERP refusal",
 				zap.String("cart_id", cartID),
+				zap.String("reason", motivo),
 				zap.Error(backErr),
 			)
 		}
-		return fmt.Errorf("cancelling refunded order: %w", err)
+		return fmt.Errorf("cancelling confirmed order (%s): %w", motivo, err)
 	}
-	s.collab.EmitERPOrderCancelled(ctx, storeID, cartID, st.ExternalOrderID, "refund")
-	logger.From(ctx, s.logger).Info("refunded ERP order cancelled",
+	s.collab.EmitERPOrderCancelled(ctx, storeID, cartID, st.ExternalOrderID, motivo)
+	logger.From(ctx, s.logger).Info("confirmed ERP order cancelled",
 		zap.String("cart_id", cartID),
 		zap.String("external_order_id", st.ExternalOrderID),
+		zap.String("reason", motivo),
 	)
 	return nil
 }
