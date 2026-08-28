@@ -95,13 +95,43 @@ FOR UPDATE;
 --
 -- session_id viaja junto na linha nova: é a atribuição de primeiro toque, e é
 -- o que mantém a métrica por evento de origem correta depois da fusão.
-INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id)
-SELECT sqlc.arg(dest_cart_id), s.product_id, s.quantity, s.unit_price, s.waitlisted_quantity, s.session_id
+-- paid_quantity viaja junto, e isso não é detalhe: uma unidade PAGA que chegue
+-- ao destino sem a marca vira "a pagar" na hora, e o pedido no ERP passaria a
+-- cobrar de novo o que a compradora já pagou. Foi o furo que a junção manual
+-- revelou — a fusão do VIP não o exibia porque só junta carrinho não pago.
+INSERT INTO cart_items (cart_id, product_id, quantity, unit_price, waitlisted_quantity, session_id, paid_quantity)
+SELECT sqlc.arg(dest_cart_id), s.product_id, s.quantity, s.unit_price, s.waitlisted_quantity, s.session_id, s.paid_quantity
 FROM cart_items s
 WHERE s.cart_id = sqlc.arg(source_cart_id)
 ON CONFLICT (cart_id, product_id) DO UPDATE
 SET quantity            = cart_items.quantity + EXCLUDED.quantity,
-    waitlisted_quantity = cart_items.waitlisted_quantity + EXCLUDED.waitlisted_quantity;
+    waitlisted_quantity = cart_items.waitlisted_quantity + EXCLUDED.waitlisted_quantity,
+    paid_quantity       = cart_items.paid_quantity + EXCLUDED.paid_quantity;
+
+-- name: MovePaymentsToCart :exec
+-- Leva o extrato de cobranças junto com os itens.
+--
+-- Sem isto o dinheiro ficaria no carrinho fechado: o destino mostraria os itens
+-- da compra antiga como "a pagar" e a compradora seria cobrada duas vezes pela
+-- mesma coisa. O checkout_id continua sendo a chave de idempotência, agora sob
+-- o carrinho novo.
+UPDATE cart_payments SET cart_id = sqlc.arg(dest_cart_id)
+WHERE cart_id = sqlc.arg(source_cart_id);
+
+-- name: AccumulatePaidAmountFromCart :exec
+-- Soma ao destino o que a origem já tinha recebido, e zera a origem — o total
+-- pago é do carrinho que sobreviveu, e contá-lo nos dois inflaria o faturamento.
+WITH antes AS (
+    SELECT paid_amount_cents, paid_at FROM carts WHERE id = sqlc.arg(source_cart_id)::uuid
+), zera AS (
+    UPDATE carts SET paid_amount_cents = 0 WHERE id = sqlc.arg(source_cart_id)::uuid RETURNING 1
+)
+UPDATE carts d
+SET paid_amount_cents = d.paid_amount_cents + COALESCE((SELECT paid_amount_cents FROM antes), 0),
+    -- A data do pagamento mais ANTIGO sobrevive: é quando o dinheiro entrou
+    -- pela primeira vez neste pedido, e é o que a parcela "PAGO" carrega.
+    paid_at = LEAST(d.paid_at, (SELECT paid_at FROM antes))
+WHERE d.id = sqlc.arg(dest_cart_id)::uuid;
 
 -- name: ClearCartItems :exec
 DELETE FROM cart_items WHERE cart_id = $1;
@@ -1139,10 +1169,17 @@ WHERE cart_id = $1 AND product_id = $2;
 -- name: TransitionCartERPOrderState :execrows
 -- CAS de transição da máquina de estados do pedido-como-reserva. rows=0 quando
 -- o estado atual não é o esperado — single-flight de conversão/mutação.
+--
+-- Resolve para o ANFITRIÃO, igual à leitura do estado, e por um motivo que é a
+-- razão de a junção funcionar: a trava é por LINHA de carrinho. Sem resolver,
+-- dois carrinhos juntados tomariam duas travas diferentes para o MESMO pedido e
+-- poderiam escrever a grade ao mesmo tempo — que é exatamente como se corrompe
+-- um pedido no ERP, já que a escrita é substituição da grade inteira.
 UPDATE carts
 SET erp_order_state = sqlc.arg(to_state)::varchar,
     erp_op_started_at = CASE WHEN sqlc.arg(to_state)::varchar IN ('converting','mutating') THEN now() ELSE erp_op_started_at END
-WHERE id = sqlc.arg(cart_id) AND erp_order_state = sqlc.arg(from_state);
+WHERE carts.id = (SELECT COALESCE(j.joined_to_cart_id, j.id) FROM carts j WHERE j.id = sqlc.arg(cart_id))
+  AND carts.erp_order_state = sqlc.arg(from_state);
 
 -- name: GetCartERPOrderState :one
 -- A situação do pedido e o quanto já foi pago vêm na MESMA linha, de propósito.
@@ -1150,11 +1187,18 @@ WHERE id = sqlc.arg(cart_id) AND erp_order_state = sqlc.arg(from_state);
 -- virou nota; o valor pago é o que separa, nas parcelas do ERP, o que entrou do
 -- que falta. Buscá-los à parte custaria duas leituras a mais no caminho mais
 -- quente da live.
-SELECT erp_order_state, erp_stock_launched, COALESCE(external_order_id,'') AS external_order_id,
-       COALESCE(erp_order_status,'') AS erp_order_status,
-       paid_amount_cents,
-       COALESCE(paid_at, created_at) AS paid_at
-FROM carts WHERE id = $1;
+--
+-- Resolve para o ANFITRIÃO quando o carrinho foi juntado a outro: o pedido é
+-- dele, e é o estado dele que decide o que pode ser escrito. Sem isto, um
+-- carrinho juntado leria o próprio estado — vazio, sem pedido — e tentaria
+-- criar um segundo pedido para o mesmo conteúdo.
+SELECT c.erp_order_state, c.erp_stock_launched, COALESCE(c.external_order_id,'') AS external_order_id,
+       COALESCE(c.erp_order_status,'') AS erp_order_status,
+       c.paid_amount_cents,
+       COALESCE(c.paid_at, c.created_at) AS paid_at
+FROM carts orig
+JOIN carts c ON c.id = COALESCE(orig.joined_to_cart_id, orig.id)
+WHERE orig.id = $1;
 
 -- name: SetCartERPStockLaunched :exec
 UPDATE carts SET erp_stock_launched = $2 WHERE id = $1;
@@ -1476,3 +1520,72 @@ WHERE carts.id = $1
   AND status IN ('pending', 'active', 'checkout')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
 RETURNING *;
+
+
+-- name: ListCartGridItems :many
+-- A grade que sobe para o ERP: os itens deste carrinho MAIS os de todos os
+-- carrinhos juntados a ele.
+--
+-- Existe separada de ListNonWaitlistedCartItems de propósito. Aquela é usada
+-- também pelo cancelamento e pela expiração, que devolvem estoque — e devolver
+-- o estoque do carrinho VIZINHO ao cancelar este seria roubar a compra de outra
+-- pessoa. A união vale só para a grade.
+--
+-- O mesmo produto pedido nos dois carrinhos vira UMA linha somada: o ERP aceita
+-- um produto por linha, e mandar duas faria a segunda substituir a primeira.
+SELECT p.external_id AS product_external_id,
+       MIN(p.name)::text AS product_name,
+       MIN(p.keyword)::text AS product_keyword,
+       SUM(ci.quantity - ci.waitlisted_quantity)::int AS quantity,
+       MAX(ci.unit_price)::bigint AS unit_price
+FROM cart_items ci
+JOIN products p ON p.id = ci.product_id
+JOIN carts c ON c.id = ci.cart_id
+WHERE COALESCE(c.joined_to_cart_id, c.id) = sqlc.arg(cart_id)::uuid
+  AND ci.quantity > ci.waitlisted_quantity
+  AND p.external_id IS NOT NULL AND p.external_id <> ''
+GROUP BY p.external_id;
+
+-- name: ListJoinedCartIDs :many
+-- Os carrinhos que foram juntados a este. Vazio quando ele é independente.
+SELECT id FROM carts WHERE joined_to_cart_id = sqlc.arg(cart_id)::uuid;
+
+-- name: GetCartJoinHost :one
+-- O anfitrião deste carrinho — ele mesmo quando não foi juntado a ninguém.
+SELECT COALESCE(joined_to_cart_id, id) AS host_id FROM carts WHERE id = $1;
+
+-- name: JoinCartIntoHost :execrows
+-- Prende o carrinho ao anfitrião e o deixa sem pedido próprio.
+--
+-- O pedido dele foi cancelado no ERP logo antes — daqui em diante toda operação
+-- de ERP deste carrinho resolve para o anfitrião, e é o pedido do anfitrião que
+-- carrega o conteúdo dos dois.
+--
+-- Guards: nem anfitrião nem juntado pode já estar em outra junção. Cadeia de
+-- dois níveis faria a resolução depender de quantos saltos existem.
+UPDATE carts
+SET joined_to_cart_id = sqlc.arg(host_id)::uuid,
+    joined_at         = now(),
+    external_order_id = NULL,
+    erp_order_state   = 'none',
+    erp_op_started_at = NULL
+WHERE id = sqlc.arg(cart_id)::uuid
+  AND joined_to_cart_id IS NULL
+  AND NOT EXISTS (SELECT 1 FROM carts o WHERE o.joined_to_cart_id = sqlc.arg(cart_id)::uuid)
+  AND EXISTS (SELECT 1 FROM carts h WHERE h.id = sqlc.arg(host_id)::uuid AND h.joined_to_cart_id IS NULL);
+
+-- name: GetCartForJoin :one
+-- Tudo que a decisão de junção precisa saber de um pedido, numa leitura.
+SELECT c.id, c.platform_user_id, c.platform_handle,
+       COALESCE(c.external_order_id,'') AS external_order_id,
+       c.created_at,
+       (c.payment_status = 'paid')     AS paid,
+       (c.payment_status = 'refunded') AS refunded,
+       (c.status IN ('cancelled','expired')) AS terminated,
+       COALESCE(c.erp_order_status,'') AS erp_order_status,
+       (c.joined_to_cart_id IS NOT NULL
+        OR EXISTS (SELECT 1 FROM carts o WHERE o.joined_to_cart_id = c.id)) AS already_joined
+FROM carts c
+JOIN live_events e ON e.id = c.event_id
+WHERE c.id = sqlc.arg(cart_id)::uuid
+  AND COALESCE(c.store_id, e.store_id) = sqlc.arg(store_id)::uuid;

@@ -125,3 +125,7 @@ func (stubERPRepo) ListERPLinkedProductsSample(context.Context, string, int) ([]
 }
 
 func (stubERPRepo) CartIsTerminated(context.Context, string) (bool, error) { return false, nil }
+
+func (stubERPRepo) ListCartGridItems(context.Context, string) ([]NonWaitlistedCartItem, error) {
+	return nil, nil
+}

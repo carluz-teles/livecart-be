@@ -12,11 +12,12 @@ import (
 )
 
 const listCartPayments = `-- name: ListCartPayments :many
-SELECT id, cart_id, amount_cents, gross_covered_cents, COALESCE(method,'') AS method,
-       checkout_id, paid_at
-FROM cart_payments
-WHERE cart_id = $1
-ORDER BY paid_at, created_at
+SELECT cp.id, cp.cart_id, cp.amount_cents, cp.gross_covered_cents, COALESCE(cp.method,'') AS method,
+       cp.checkout_id, cp.paid_at
+FROM cart_payments cp
+JOIN carts c ON c.id = cp.cart_id
+WHERE COALESCE(c.joined_to_cart_id, c.id) = $1
+ORDER BY cp.paid_at, cp.created_at
 `
 
 type ListCartPaymentsRow struct {
@@ -34,8 +35,14 @@ type ListCartPaymentsRow struct {
 // É daqui que saem as parcelas "PAGO" do pedido no ERP — uma por cobrança, com
 // data e valor —, em vez de um total mudo que não diz quando nem em quantas
 // vezes.
-func (q *Queries) ListCartPayments(ctx context.Context, cartID pgtype.UUID) ([]ListCartPaymentsRow, error) {
-	rows, err := q.db.Query(ctx, listCartPayments, cartID)
+//
+// Soma o GRUPO: as cobranças deste carrinho e as dos que foram juntados a ele.
+// O pedido no ERP é um só e carrega o conteúdo dos dois, então o extrato dele
+// tem de mostrar todo o dinheiro que entrou por aquele conteúdo. Ler só um
+// carrinho faria a compra do outro aparecer como "a pagar" — cobrando de novo o
+// que já foi pago.
+func (q *Queries) ListCartPayments(ctx context.Context, joinedToCartID pgtype.UUID) ([]ListCartPaymentsRow, error) {
+	rows, err := q.db.Query(ctx, listCartPayments, joinedToCartID)
 	if err != nil {
 		return nil, err
 	}

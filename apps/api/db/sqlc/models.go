@@ -126,6 +126,9 @@ type Cart struct {
 	PaidAmountCents        int64              `json:"paid_amount_cents"`
 	// Por que o cancelamento foi desfeito: payment_won (pagamento venceu a corrida) ou erp_reopened (lojista reabriu o pedido no ERP à mão)
 	CancellationRevertedReason pgtype.Text `json:"cancellation_reverted_reason"`
+	// Carrinho ANFITRIÃO desta junção — é dele o pedido no ERP. NULO = carrinho independente ou anfitrião.
+	JoinedToCartID pgtype.UUID        `json:"joined_to_cart_id"`
+	JoinedAt       pgtype.Timestamptz `json:"joined_at"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.

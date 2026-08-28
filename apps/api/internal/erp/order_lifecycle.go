@@ -647,7 +647,14 @@ func (s *Service) enviarGrade(ctx context.Context, erpProvider providers.ERPProv
 // ERP. Grade vazia é aceita pela API mas nunca é o que o comprador quer, então
 // vira erro aqui: um pedido sem itens não segura nada.
 func (s *Service) cartGrid(ctx context.Context, cartID string) ([]providers.ERPOrderItem, error) {
-	items, err := s.repo.ListNonWaitlistedCartItems(ctx, cartID)
+	// A grade é a do GRUPO: este carrinho mais os que foram juntados a ele. Um
+	// pedido só no ERP carrega o conteúdo de todos.
+	//
+	// Query própria, e não a ListNonWaitlistedCartItems: aquela também alimenta
+	// o cancelamento e a expiração, que DEVOLVEM estoque — e devolver o estoque
+	// do carrinho vizinho ao cancelar este seria apagar a compra de outra
+	// pessoa. A união vale só aqui.
+	items, err := s.repo.ListCartGridItems(ctx, cartID)
 	if err != nil {
 		return nil, fmt.Errorf("listing cart items for order grid: %w", err)
 	}

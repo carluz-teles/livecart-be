@@ -17,6 +17,7 @@ import (
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/events"
+	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/inventory"
 	"livecart/apps/api/internal/live"
 	paymentdomain "livecart/apps/api/internal/payment"
@@ -4273,4 +4274,75 @@ func (r *Repository) prazoDoCarrinho(ctx context.Context, q *sqlc.Queries, cartI
 		return 0, fmt.Errorf("reading cart expiration settings: %w", err)
 	}
 	return int(cfg.EffectiveCartExpirationMinutes), nil
+}
+
+// ListCartGridItems devolve a grade do GRUPO: este carrinho e os juntados a ele.
+//
+// Separada de ListNonWaitlistedCartItems porque aquela também alimenta o
+// cancelamento e a expiração, que devolvem estoque — unir os grupos ali faria
+// cancelar um carrinho devolver o estoque do vizinho.
+func (r *Repository) ListCartGridItems(ctx context.Context, cartID string) ([]NonWaitlistedCartItem, error) {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	linhas, err := r.queries.ListCartGridItems(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]NonWaitlistedCartItem, 0, len(linhas))
+	for _, l := range linhas {
+		out = append(out, NonWaitlistedCartItem{
+			CartID:            cartID,
+			ProductExternalID: l.ProductExternalID.String,
+			ProductName:       l.ProductName,
+			ProductKeyword:    l.ProductKeyword,
+			Quantity:          int(l.Quantity),
+			UnitPrice:         l.UnitPrice,
+		})
+	}
+	return out, nil
+}
+
+// GetCartForJoin lê o que a decisão de junção precisa saber de um pedido.
+func (r *Repository) GetCartForJoin(ctx context.Context, cartID, storeID string) (CartForJoin, error) {
+	var out CartForJoin
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return out, err
+	}
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return out, err
+	}
+	row, err := r.queries.GetCartForJoin(ctx, sqlc.GetCartForJoinParams{CartID: cID, StoreID: sID})
+	if err != nil {
+		return out, err
+	}
+	return CartForJoin{
+		CartID:          uuidToString(row.ID),
+		PlatformUserID:  row.PlatformUserID,
+		PlatformHandle:  row.PlatformHandle,
+		ExternalOrderID: row.ExternalOrderID,
+		CreatedAt:       row.CreatedAt.Time,
+		Paid:            row.Paid,
+		Refunded:        row.Refunded,
+		Terminated:      row.Terminated,
+		Invoiced:        providers.ERPOrderStatus(row.ErpOrderStatus).FechadoParaNovosItens(),
+		AlreadyJoined:   row.AlreadyJoined.Bool,
+	}, nil
+}
+
+// JoinCartIntoHost prende o carrinho ao anfitrião. false = os guards recusaram.
+func (r *Repository) JoinCartIntoHost(ctx context.Context, cartID, hostID string) (bool, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return false, err
+	}
+	hID, err := parseUUID(hostID)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.queries.JoinCartIntoHost(ctx, sqlc.JoinCartIntoHostParams{CartID: cID, HostID: hID})
+	return n > 0, err
 }

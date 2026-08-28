@@ -622,3 +622,9 @@ func (r *repoSimulado) CartIsTerminated(_ context.Context, cartID string) (bool,
 	}
 	return c.state == OrderStateCancelled, nil
 }
+
+// ListCartGridItems: a grade do grupo. No simulado não há junção, então é a
+// lista do próprio carrinho.
+func (r *repoSimulado) ListCartGridItems(ctx context.Context, cartID string) ([]NonWaitlistedCartItem, error) {
+	return r.ListNonWaitlistedCartItems(ctx, cartID)
+}

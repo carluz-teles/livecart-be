@@ -16,6 +16,9 @@ import (
 // integration (cycle). It starts with the two methods the ERP order flow already
 // needs and grows one method per slice as logic migrates (Bloco B2b+).
 type ERPRepository interface {
+	// ListCartGridItems devolve a grade do GRUPO — este carrinho mais os que
+	// foram juntados a ele. É o que sobe para o pedido no ERP.
+	ListCartGridItems(ctx context.Context, cartID string) ([]NonWaitlistedCartItem, error)
 	// CartIsTerminated diz se o carrinho chegou a um fim de onde não sai
 	// sozinho (cancelado ou vencido).
 	CartIsTerminated(ctx context.Context, cartID string) (bool, error)

@@ -10,6 +10,8 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
+	validation "github.com/go-ozzo/ozzo-validation/v4"
+	"github.com/go-ozzo/ozzo-validation/v4/is"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/query"
@@ -73,6 +75,9 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// Drenagem das reservas manuais para pedidos de venda. Migração única: sai
 	// da API quando a tabela stock_reservations estiver vazia.
 	g.Post("/erp/drain-legacy-reservations", h.DrainLegacyReservations)
+	// Juntar pedidos no ERP. Fica no grupo de integrações porque o efeito é
+	// inteiramente do lado do ERP — no LiveCart os pedidos continuam separados.
+	g.Post("/erp/join-orders", h.JoinOrders)
 
 	// Test connection
 	g.Post("/:id/test", h.TestConnection)
@@ -1333,4 +1338,60 @@ func toIntegrationResponse(output *CreateIntegrationOutput) *IntegrationResponse
 		WebhookLastPingAt: output.WebhookLastPingAt,
 		Priority:          output.Priority,
 	}
+}
+
+// =============================================================================
+// JUNTAR PEDIDOS
+// =============================================================================
+
+// JoinOrdersRequest é o pedido de junção vindo do painel.
+type JoinOrdersRequest struct {
+	CartAID string `json:"cartAId"`
+	CartBID string `json:"cartBId"`
+	// ConfirmDifferentBuyers libera juntar pedidos de compradores diferentes.
+	// Fechado por padrão — ver JoinCartsInput.
+	ConfirmDifferentBuyers bool `json:"confirmDifferentBuyers"`
+}
+
+// Validate é o portão sintático. A decisão de QUAL vira anfitrião não está aqui:
+// é regra de negócio e vive no serviço, onde os dois carrinhos já foram lidos.
+func (r JoinOrdersRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.CartAID, validation.Required, is.UUIDv4),
+		validation.Field(&r.CartBID, validation.Required, is.UUIDv4),
+	)
+}
+
+// JoinOrders junta dois pedidos num só no ERP, mantendo-os separados aqui.
+// @Summary      Juntar pedidos no ERP
+// @Description  Um pedido só no Tiny com o conteúdo dos dois; no LiveCart eles continuam separados e vinculados.
+// @Tags         integrations
+// @Accept       json
+// @Produce      json
+// @Param        storeId path string true "Store ID"
+// @Param        payload body JoinOrdersRequest true "Os dois pedidos"
+// @Success      200 {object} httpx.Envelope{data=JoinCartsResult}
+// @Failure      409 {object} httpx.Envelope "compradores diferentes, ou já juntado"
+// @Failure      422 {object} httpx.Envelope "faturado, cancelado ou estornado"
+// @Router       /api/v1/stores/{storeId}/orders/join [post]
+// @Security     BearerAuth
+func (h *Handler) JoinOrders(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	var req JoinOrdersRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.DomainError(400, httpx.CodeValidationFailed, "corpo inválido")
+	}
+	if err := req.Validate(); err != nil {
+		return err
+	}
+	out, err := h.service.JoinCarts(c.Context(), JoinCartsInput{
+		StoreID:                     storeID,
+		CartAID:                     req.CartAID,
+		CartBID:                     req.CartBID,
+		ConfirmarCompradorDiferente: req.ConfirmDifferentBuyers,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, out)
 }

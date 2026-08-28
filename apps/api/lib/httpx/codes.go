@@ -106,6 +106,13 @@ const (
 	// Configuração de estoque pedida numa integração que não é de ERP. Pagamento
 	// e frete não têm saldo nenhum, e gravar a chave neles criaria uma
 	// configuração que o lojista acredita ter ligado e que ninguém lê.
+	// CodeErpOrderInvoiced: o pedido já virou nota e não recebe mais item.
+	CodeErpOrderInvoiced Code = "ERP_ORDER_INVOICED"
+	// CodeJoinDifferentBuyers: os pedidos são de compradores diferentes. O
+	// painel usa isto para pedir a confirmação em vez de mostrar erro seco.
+	CodeJoinDifferentBuyers Code = "JOIN_DIFFERENT_BUYERS"
+	// CodeJoinAlreadyLinked: um dos pedidos já está em outra junção.
+	CodeJoinAlreadyLinked Code = "JOIN_ALREADY_LINKED"
 	// CodeStagingOnly: recurso que só existe em staging. Ver simulador_live.go.
 	CodeStagingOnly               Code = "STAGING_ONLY"
 	CodeErpStockSourceUnsupported Code = "ERP_STOCK_SOURCE_UNSUPPORTED" // integration/service.go (UpdateERPStockSource)

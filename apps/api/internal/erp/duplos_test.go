@@ -226,3 +226,7 @@ func (m *mockRepo) ListERPLinkedProductsSample(context.Context, string, int) ([]
 }
 
 func (m *mockRepo) CartIsTerminated(context.Context, string) (bool, error) { return false, nil }
+
+func (m *mockRepo) ListCartGridItems(ctx context.Context, cartID string) ([]NonWaitlistedCartItem, error) {
+	return m.ListNonWaitlistedCartItems(ctx, cartID)
+}
