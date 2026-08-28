@@ -276,6 +276,13 @@ func (s *Service) ListJoinCandidates(ctx context.Context, storeID, cartID string
 
 // CartJoinLink é o vínculo de junção de um pedido, para a tela.
 type CartJoinLink struct {
+	// CanJoin diz se ESTE pedido pode entrar numa junção. A tela usa para não
+	// oferecer o botão a quem nunca vai conseguir.
+	CanJoin bool `json:"canJoin"`
+	// CannotJoinReason nomeia o impedimento, para a tela dizer o motivo em vez
+	// de só esconder o botão: cancelado_ou_vencido | estornado | faturado |
+	// pedido_cancelado_no_erp | ja_juntado.
+	CannotJoinReason string `json:"cannotJoinReason,omitempty"`
 	// HostCartID/HostShortID: este pedido foi juntado NAQUELE. Vazios quando ele
 	// é independente ou é o anfitrião.
 	HostCartID  string `json:"hostCartId,omitempty"`

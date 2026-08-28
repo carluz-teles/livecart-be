@@ -4390,6 +4390,8 @@ func (r *Repository) GetCartJoinLink(ctx context.Context, cartID string) (CartJo
 	if err != nil {
 		return out, err
 	}
+	out.CanJoin = row.CanJoin
+	out.CannotJoinReason = row.CannotJoinReason
 	out.HostCartID = row.JoinedToCartID
 	out.HostShortID = row.HostShortID
 	if row.JoinedCartIds != "" {

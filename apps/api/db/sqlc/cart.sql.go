@@ -1785,6 +1785,26 @@ func (q *Queries) GetCartJoinHost(ctx context.Context, id pgtype.UUID) (pgtype.U
 
 const getCartJoinLink = `-- name: GetCartJoinLink :one
 SELECT
+    -- Se ESTE pedido pode entrar numa junção, e por que não. A tela precisa
+    -- disto para não oferecer o botão a quem nunca vai conseguir: sem ele o
+    -- lojista escolhe o outro pedido, confirma, e só então leva a recusa —
+    -- que foi exatamente o que aconteceu em staging em 28/08 com um carrinho
+    -- vencido.
+    (c.status IN ('pending','active','checkout','paid')
+     AND (c.payment_status IS NULL OR c.payment_status <> 'refunded')
+     AND (c.erp_order_status IS NULL OR c.erp_order_status NOT IN (
+           'preparando_envio','faturado','pronto_envio','enviado','entregue',
+           'nao_entregue','cancelado'))
+     AND c.joined_to_cart_id IS NULL)::boolean AS can_join,
+    (CASE
+        WHEN c.status IN ('cancelled','expired') THEN 'cancelado_ou_vencido'
+        WHEN c.payment_status = 'refunded'       THEN 'estornado'
+        WHEN c.erp_order_status IN ('preparando_envio','faturado','pronto_envio',
+                                    'enviado','entregue','nao_entregue') THEN 'faturado'
+        WHEN c.erp_order_status = 'cancelado'    THEN 'pedido_cancelado_no_erp'
+        WHEN c.joined_to_cart_id IS NOT NULL     THEN 'ja_juntado'
+        ELSE ''
+     END)::text AS cannot_join_reason,
     COALESCE(c.joined_to_cart_id::text,'')::text AS joined_to_cart_id,
     COALESCE((SELECT h.short_id::text FROM carts h WHERE h.id = c.joined_to_cart_id),'')::text AS host_short_id,
     COALESCE((SELECT string_agg(o.short_id::text, ',') FROM carts o WHERE o.joined_to_cart_id = c.id),'')::text AS joined_short_ids,
@@ -1794,11 +1814,13 @@ FROM carts c WHERE c.id = $1::uuid
 `
 
 type GetCartJoinLinkRow struct {
-	JoinedToCartID string             `json:"joined_to_cart_id"`
-	HostShortID    string             `json:"host_short_id"`
-	JoinedShortIds string             `json:"joined_short_ids"`
-	JoinedCartIds  string             `json:"joined_cart_ids"`
-	JoinedAt       pgtype.Timestamptz `json:"joined_at"`
+	CanJoin          bool               `json:"can_join"`
+	CannotJoinReason string             `json:"cannot_join_reason"`
+	JoinedToCartID   string             `json:"joined_to_cart_id"`
+	HostShortID      string             `json:"host_short_id"`
+	JoinedShortIds   string             `json:"joined_short_ids"`
+	JoinedCartIds    string             `json:"joined_cart_ids"`
+	JoinedAt         pgtype.Timestamptz `json:"joined_at"`
 }
 
 // O vínculo de junção deste pedido, para a tela mostrar.
@@ -1806,6 +1828,8 @@ func (q *Queries) GetCartJoinLink(ctx context.Context, cartID pgtype.UUID) (GetC
 	row := q.db.QueryRow(ctx, getCartJoinLink, cartID)
 	var i GetCartJoinLinkRow
 	err := row.Scan(
+		&i.CanJoin,
+		&i.CannotJoinReason,
 		&i.JoinedToCartID,
 		&i.HostShortID,
 		&i.JoinedShortIds,
