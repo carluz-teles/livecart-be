@@ -4346,3 +4346,60 @@ func (r *Repository) JoinCartIntoHost(ctx context.Context, cartID, hostID string
 	n, err := r.queries.JoinCartIntoHost(ctx, sqlc.JoinCartIntoHostParams{CartID: cID, HostID: hID})
 	return n > 0, err
 }
+
+// ListJoinCandidates lista os pedidos que podem ser juntados a este.
+func (r *Repository) ListJoinCandidates(ctx context.Context, storeID, cartID string) ([]JoinCandidate, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	linhas, err := r.queries.ListJoinCandidates(ctx, sqlc.ListJoinCandidatesParams{StoreID: sID, CartID: cID})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]JoinCandidate, 0, len(linhas))
+	for _, l := range linhas {
+		out = append(out, JoinCandidate{
+			CartID:         uuidToString(l.ID),
+			ShortID:        l.ShortID,
+			EventTitle:     l.EventTitle.String,
+			CreatedAt:      l.CreatedAt.Time,
+			Status:         l.Status,
+			PaymentStatus:  l.PaymentStatus,
+			ERPOrderNumber: l.ErpOrderNumber,
+			TotalCents:     l.TotalCents,
+			ItemCount:      int(l.ItemCount),
+		})
+	}
+	return out, nil
+}
+
+// GetCartJoinLink lê de que lado da junção este pedido está.
+func (r *Repository) GetCartJoinLink(ctx context.Context, cartID string) (CartJoinLink, error) {
+	var out CartJoinLink
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return out, err
+	}
+	row, err := r.queries.GetCartJoinLink(ctx, cID)
+	if err != nil {
+		return out, err
+	}
+	out.HostCartID = row.JoinedToCartID
+	out.HostShortID = row.HostShortID
+	if row.JoinedCartIds != "" {
+		out.JoinedCartIDs = strings.Split(row.JoinedCartIds, ",")
+	}
+	if row.JoinedShortIds != "" {
+		out.JoinedShortIDs = strings.Split(row.JoinedShortIds, ",")
+	}
+	if row.JoinedAt.Valid {
+		t := row.JoinedAt.Time
+		out.JoinedAt = &t
+	}
+	return out, nil
+}

@@ -78,6 +78,8 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// Juntar pedidos no ERP. Fica no grupo de integrações porque o efeito é
 	// inteiramente do lado do ERP — no LiveCart os pedidos continuam separados.
 	g.Post("/erp/join-orders", h.JoinOrders)
+	g.Get("/erp/join-candidates/:cartId", h.ListJoinCandidates)
+	g.Get("/erp/join-link/:cartId", h.GetCartJoinLink)
 
 	// Test connection
 	g.Post("/:id/test", h.TestConnection)
@@ -1390,6 +1392,41 @@ func (h *Handler) JoinOrders(c *fiber.Ctx) error {
 		CartBID:                     req.CartBID,
 		ConfirmarCompradorDiferente: req.ConfirmDifferentBuyers,
 	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, out)
+}
+
+// ListJoinCandidates lista os pedidos que podem ser juntados a este.
+// @Summary      Pedidos que podem ser juntados
+// @Tags         integrations
+// @Produce      json
+// @Param        storeId path string true "Store ID"
+// @Param        cartId  path string true "Pedido de referência"
+// @Success      200 {object} httpx.Envelope{data=[]JoinCandidate}
+// @Router       /api/v1/stores/{storeId}/integrations/erp/join-candidates/{cartId} [get]
+// @Security     BearerAuth
+func (h *Handler) ListJoinCandidates(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	out, err := h.service.ListJoinCandidates(c.Context(), storeID, c.Params("cartId"))
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, out)
+}
+
+// GetCartJoinLink diz de que lado da junção este pedido está.
+// @Summary      Vínculo de junção do pedido
+// @Tags         integrations
+// @Produce      json
+// @Param        storeId path string true "Store ID"
+// @Param        cartId  path string true "Pedido"
+// @Success      200 {object} httpx.Envelope{data=CartJoinLink}
+// @Router       /api/v1/stores/{storeId}/integrations/erp/join-link/{cartId} [get]
+// @Security     BearerAuth
+func (h *Handler) GetCartJoinLink(c *fiber.Ctx) error {
+	out, err := h.service.GetCartJoinLink(c.Context(), c.Params("cartId"))
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}

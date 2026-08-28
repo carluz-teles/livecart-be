@@ -1764,6 +1764,38 @@ func (q *Queries) GetCartJoinHost(ctx context.Context, id pgtype.UUID) (pgtype.U
 	return host_id, err
 }
 
+const getCartJoinLink = `-- name: GetCartJoinLink :one
+SELECT
+    COALESCE(c.joined_to_cart_id::text,'')::text AS joined_to_cart_id,
+    COALESCE((SELECT h.short_id::text FROM carts h WHERE h.id = c.joined_to_cart_id),'')::text AS host_short_id,
+    COALESCE((SELECT string_agg(o.short_id::text, ',') FROM carts o WHERE o.joined_to_cart_id = c.id),'')::text AS joined_short_ids,
+    COALESCE((SELECT string_agg(o.id::text, ',') FROM carts o WHERE o.joined_to_cart_id = c.id),'')::text AS joined_cart_ids,
+    c.joined_at
+FROM carts c WHERE c.id = $1::uuid
+`
+
+type GetCartJoinLinkRow struct {
+	JoinedToCartID string             `json:"joined_to_cart_id"`
+	HostShortID    string             `json:"host_short_id"`
+	JoinedShortIds string             `json:"joined_short_ids"`
+	JoinedCartIds  string             `json:"joined_cart_ids"`
+	JoinedAt       pgtype.Timestamptz `json:"joined_at"`
+}
+
+// O vínculo de junção deste pedido, para a tela mostrar.
+func (q *Queries) GetCartJoinLink(ctx context.Context, cartID pgtype.UUID) (GetCartJoinLinkRow, error) {
+	row := q.db.QueryRow(ctx, getCartJoinLink, cartID)
+	var i GetCartJoinLinkRow
+	err := row.Scan(
+		&i.JoinedToCartID,
+		&i.HostShortID,
+		&i.JoinedShortIds,
+		&i.JoinedCartIds,
+		&i.JoinedAt,
+	)
+	return i, err
+}
+
 const getCartTotals = `-- name: GetCartTotals :one
 SELECT
     COALESCE(SUM(ci.quantity), 0)::int AS total_items,
@@ -2972,6 +3004,84 @@ func (q *Queries) ListExpiredCartsByEventAndProduct(ctx context.Context, arg Lis
 			&i.JoinedToCartID,
 			&i.JoinedAt,
 			&i.StoreID_2,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listJoinCandidates = `-- name: ListJoinCandidates :many
+SELECT c.id, c.short_id, c.created_at, c.status,
+       COALESCE(c.payment_status,'') AS payment_status,
+       COALESCE(c.erp_order_number,'') AS erp_order_number,
+       e.title AS event_title,
+       cart_product_total_cents(c.id)::bigint AS total_cents,
+       (SELECT COUNT(*) FROM cart_items ci WHERE ci.cart_id = c.id)::int AS item_count
+FROM carts c
+JOIN live_events e ON e.id = c.event_id
+WHERE COALESCE(c.store_id, e.store_id) = $1::uuid
+  AND c.id <> $2::uuid
+  AND c.platform_user_id = (SELECT platform_user_id FROM carts WHERE id = $2::uuid)
+  AND c.status IN ('pending','active','checkout','paid')
+  AND (c.payment_status IS NULL OR c.payment_status <> 'refunded')
+  AND (c.erp_order_status IS NULL OR c.erp_order_status NOT IN (
+        'preparando_envio','faturado','pronto_envio','enviado','entregue','nao_entregue','cancelado'))
+  AND c.joined_to_cart_id IS NULL
+  AND NOT EXISTS (SELECT 1 FROM carts o WHERE o.joined_to_cart_id = c.id)
+ORDER BY c.created_at DESC
+LIMIT 20
+`
+
+type ListJoinCandidatesParams struct {
+	StoreID pgtype.UUID `json:"store_id"`
+	CartID  pgtype.UUID `json:"cart_id"`
+}
+
+type ListJoinCandidatesRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	ShortID        int32              `json:"short_id"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	Status         string             `json:"status"`
+	PaymentStatus  string             `json:"payment_status"`
+	ErpOrderNumber string             `json:"erp_order_number"`
+	EventTitle     pgtype.Text        `json:"event_title"`
+	TotalCents     int64              `json:"total_cents"`
+	ItemCount      int32              `json:"item_count"`
+}
+
+// Os pedidos que PODEM ser juntados a este.
+//
+// Mesma loja, mesmo comprador, vivos, não faturados e fora de qualquer junção.
+// Compradores diferentes ficam de fora da lista de propósito: juntar a compra
+// de duas pessoas é possível, mas exige confirmação explícita do lojista — e
+// oferecê-la numa lista faria o clique errado parecer normal.
+//
+// Evento DIFERENTE não é filtro, é consequência: carts_one_open_per_event_buyer
+// já impede dois carrinhos abertos do mesmo comprador na mesma campanha.
+func (q *Queries) ListJoinCandidates(ctx context.Context, arg ListJoinCandidatesParams) ([]ListJoinCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, listJoinCandidates, arg.StoreID, arg.CartID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListJoinCandidatesRow{}
+	for rows.Next() {
+		var i ListJoinCandidatesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ShortID,
+			&i.CreatedAt,
+			&i.Status,
+			&i.PaymentStatus,
+			&i.ErpOrderNumber,
+			&i.EventTitle,
+			&i.TotalCents,
+			&i.ItemCount,
 		); err != nil {
 			return nil, err
 		}

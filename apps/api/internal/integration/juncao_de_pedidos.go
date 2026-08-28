@@ -214,3 +214,38 @@ type CartForJoin struct {
 	// AlreadyJoined: já é anfitrião de alguém, ou já foi juntado a outro.
 	AlreadyJoined bool
 }
+
+// JoinCandidate é um pedido que pode ser juntado a outro.
+type JoinCandidate struct {
+	CartID         string    `json:"cartId"`
+	ShortID        int32     `json:"shortId"`
+	EventTitle     string    `json:"eventTitle"`
+	CreatedAt      time.Time `json:"createdAt"`
+	Status         string    `json:"status"`
+	PaymentStatus  string    `json:"paymentStatus,omitempty"`
+	ERPOrderNumber string    `json:"erpOrderNumber,omitempty"`
+	TotalCents     int64     `json:"totalCents"`
+	ItemCount      int       `json:"itemCount"`
+}
+
+// ListJoinCandidates lista os pedidos que podem ser juntados a este.
+func (s *Service) ListJoinCandidates(ctx context.Context, storeID, cartID string) ([]JoinCandidate, error) {
+	return s.repo.ListJoinCandidates(ctx, storeID, cartID)
+}
+
+// CartJoinLink é o vínculo de junção de um pedido, para a tela.
+type CartJoinLink struct {
+	// HostCartID/HostShortID: este pedido foi juntado NAQUELE. Vazios quando ele
+	// é independente ou é o anfitrião.
+	HostCartID  string `json:"hostCartId,omitempty"`
+	HostShortID string `json:"hostShortId,omitempty"`
+	// JoinedCartIDs/JoinedShortIDs: os pedidos juntados A ESTE.
+	JoinedCartIDs  []string   `json:"joinedCartIds,omitempty"`
+	JoinedShortIDs []string   `json:"joinedShortIds,omitempty"`
+	JoinedAt       *time.Time `json:"joinedAt,omitempty"`
+}
+
+// GetCartJoinLink lê o vínculo para a tela mostrar de que lado ele está.
+func (s *Service) GetCartJoinLink(ctx context.Context, cartID string) (CartJoinLink, error) {
+	return s.repo.GetCartJoinLink(ctx, cartID)
+}
