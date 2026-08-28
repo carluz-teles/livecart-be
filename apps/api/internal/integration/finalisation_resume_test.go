@@ -622,6 +622,37 @@ func TestFinalisationZombiePendingResumes(t *testing.T) {
 	}
 }
 
+// Pagamento MANUAL: o snapshot é nil de propósito (o lojista lança a conta a
+// receber no Tiny). Se a 1ª finalização travar ANTES de criar o pedido (ex.:
+// bloqueada por um movimento em dúvida, depois resolvido), o cart fica 'failed'
+// SEM snapshot e SEM pedido Tiny. Antes o retry caía num 422 'snapshot ausente'
+// e o pedido pago ficava preso fora do ERP; agora finaliza com nil (cria o
+// pedido + baixa, sem lançamento financeiro).
+func TestFinalisationManualPaymentRetryFinalises(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 1, 0)
+	// Manual travado: status failed, snapshot nil e pedido Tiny ainda inexistente
+	// (external_order_id nulo) — o estado que o 422 recusava.
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE order_payments op SET erp_finalisation_status = 'failed', erp_payment_snapshot = NULL
+		 FROM orders o WHERE o.id = op.order_id AND o.cart_id = $1`, fx.cartID); err != nil {
+		t.Fatalf("seed manual travado: %v", err)
+	}
+	fake := newScriptedERP()
+	svc := newFinalisationService(fake)
+
+	if err := svc.RetryERPFinalisation(context.Background(), fx.cartID, fx.storeID); err != nil {
+		t.Fatalf("retry manual (sem snapshot, sem pedido): %v", err)
+	}
+	status, _, orderID, _, _ := cartFinalisationState(t, fx.cartID)
+	if status != "done" || orderID != "ORD-1" {
+		t.Fatalf("status=%q orderID=%q — o manual devia finalizar com nil", status, orderID)
+	}
+	if fake.count("CreateOrder") != 1 {
+		t.Fatalf("pedidos criados: %d (o retry manual precisa criar o pedido)", fake.count("CreateOrder"))
+	}
+}
+
 // Webhooks de gateway chegam duplicados e cada entrega roda numa goroutine
 // própria sem lock (webhook_handler.go). O advisory lock por cart garante
 // exatamente UMA finalização; a perdedora retorna nil cedo.
