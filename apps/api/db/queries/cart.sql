@@ -1644,3 +1644,11 @@ SET joined_to_cart_id = NULL,
     external_order_id = NULLIF(sqlc.arg(external_order_id)::text, ''),
     erp_order_state   = sqlc.arg(erp_order_state)::varchar
 WHERE id = sqlc.arg(cart_id)::uuid;
+
+-- name: CartIsPaid :one
+-- O carrinho já tem pagamento registrado deste lado.
+--
+-- É a guarda do pagamento vindo do ERP: sem ela, a aprovação que NÓS mesmos
+-- fazemos quando o gateway confirma dispararia o registro de novo, e o carrinho
+-- seria pago duas vezes.
+SELECT payment_status = 'paid' AS pago FROM carts WHERE id = sqlc.arg(cart_id)::uuid;

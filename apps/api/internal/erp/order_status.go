@@ -102,6 +102,9 @@ type CartReopener interface {
 	// o carrinho segue. Devolve false quando o carrinho não pôde ser cancelado
 	// (pago, ou já terminal).
 	CancelCartFromERP(ctx context.Context, cartID, storeID string) (bool, error)
+	// MarkCartPaidFromERP registra, do lado de cá, o pagamento que o lojista
+	// lançou no ERP. Devolve false quando o carrinho já estava pago.
+	MarkCartPaidFromERP(ctx context.Context, cartID, storeID string, amountCents int64) (bool, error)
 }
 
 // ReopenReport é o que a ressurreição recuperou.
@@ -170,6 +173,36 @@ func (s *Service) ObserveOrderStatus(ctx context.Context, storeID, externalOrder
 	// conta própria tentaria refazer as outras — inclusive re-reservar uma peça
 	// que pode já ter sido vendida no meio tempo. Quem decide é gente; o que o
 	// sistema deve é não deixar isso invisível.
+	// O PAGAMENTO LANÇADO NO ERP.
+	//
+	// O lojista recebeu por fora — dinheiro, transferência, maquininha — e
+	// registrou no Tiny, que leva o pedido para "Aprovado". Antes disto ele
+	// tinha de repetir o gesto aqui, no "confirmar pagamento manual", e os dois
+	// lados divergiam sempre que ele esquecia um.
+	//
+	// A guarda é o próprio estado daqui: só age quando o carrinho AINDA NÃO
+	// está pago. Sem ela isto dispararia na nossa própria aprovação — somos nós
+	// que levamos o pedido a "Aprovado" quando o pagamento entra pelo gateway —
+	// e o carrinho seria "pago" duas vezes.
+	if providers.ERPOrderStatus(t.Status) == providers.ERPOrderStatusAprovado && s.reopener != nil {
+		if pago, err := s.repo.CartIsPaid(ctx, t.CartID); err == nil && !pago {
+			total := s.totalDoPedido(ctx, storeID, externalOrderID)
+			marcou, pErr := s.reopener.MarkCartPaidFromERP(ctx, t.CartID, storeID, total)
+			switch {
+			case pErr != nil:
+				logger.From(ctx, s.logger).Error("the order was approved in the ERP but the payment could not be recorded here",
+					zap.String("cart_id", t.CartID),
+					zap.String("external_order_id", externalOrderID),
+					zap.Error(pErr))
+			case marcou:
+				logger.From(ctx, s.logger).Info("cart marked as paid following the ERP order approval",
+					zap.String("cart_id", t.CartID),
+					zap.String("external_order_id", externalOrderID),
+					zap.Int64("amount_cents", total))
+			}
+		}
+	}
+
 	// A IDA: o pedido foi cancelado no ERP e o carrinho ainda está vivo aqui.
 	//
 	// Fecha a simetria. Antes disto o rastreamento gravava 'cancelado' na coluna
@@ -374,4 +407,31 @@ func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID stri
 	// O carimbo da tentativa acontece dentro do confirm, junto com o retrato do
 	// gateway — um ponto só, para o painel não depender de quem chamou.
 	return s.ConfirmERPOrderPayment(ctx, cartID, storeID, status)
+}
+
+// totalDoPedido lê quanto o pedido vale no ERP.
+//
+// É o valor que o pagamento lançado lá cobre: o lojista aprovou o pedido
+// inteiro, e o ERP é quem sabe quanto ele vale depois de qualquer ajuste que o
+// lojista tenha feito pelo painel. Zero quando não dá para ler — e aí o
+// pagamento é registrado sem valor, que é melhor do que registrar um errado.
+func (s *Service) totalDoPedido(ctx context.Context, storeID, externalOrderID string) int64 {
+	if externalOrderID == "" {
+		return 0
+	}
+	erpProvider, err := s.providerFor(ctx, storeID)
+	if err != nil {
+		return 0
+	}
+	contador, ok := erpProvider.(interface {
+		GetOrderTotal(ctx context.Context, orderID string) (int64, bool, error)
+	})
+	if !ok {
+		return 0
+	}
+	total, _, err := contador.GetOrderTotal(ctx, externalOrderID)
+	if err != nil {
+		return 0
+	}
+	return total
 }

@@ -129,3 +129,5 @@ func (stubERPRepo) CartIsTerminated(context.Context, string) (bool, error) { ret
 func (stubERPRepo) ListCartGridItems(context.Context, string) ([]NonWaitlistedCartItem, error) {
 	return nil, nil
 }
+
+func (stubERPRepo) CartIsPaid(context.Context, string) (bool, error) { return false, nil }

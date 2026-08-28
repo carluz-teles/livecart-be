@@ -110,6 +110,10 @@ func (a reopenerAdapter) CancelCartFromERP(ctx context.Context, cartID, storeID 
 	return a.svc.CancelCartFromERP(ctx, cartID, storeID)
 }
 
+func (a reopenerAdapter) MarkCartPaidFromERP(ctx context.Context, cartID, storeID string, amountCents int64) (bool, error) {
+	return a.svc.MarkCartPaidFromERP(ctx, cartID, storeID, amountCents)
+}
+
 func (a reopenerAdapter) ReopenCartFromERP(ctx context.Context, cartID, storeID string) (erp.ReopenReport, error) {
 	rel, err := a.svc.ReopenCartFromERP(ctx, cartID, storeID)
 	return erp.ReopenReport{

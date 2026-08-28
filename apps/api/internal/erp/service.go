@@ -19,6 +19,8 @@ type ERPRepository interface {
 	// ListCartGridItems devolve a grade do GRUPO — este carrinho mais os que
 	// foram juntados a ele. É o que sobe para o pedido no ERP.
 	ListCartGridItems(ctx context.Context, cartID string) ([]NonWaitlistedCartItem, error)
+	// CartIsPaid diz se o carrinho já tem pagamento registrado deste lado.
+	CartIsPaid(ctx context.Context, cartID string) (bool, error)
 	// CartIsTerminated diz se o carrinho chegou a um fim de onde não sai
 	// sozinho (cancelado ou vencido).
 	CartIsTerminated(ctx context.Context, cartID string) (bool, error)

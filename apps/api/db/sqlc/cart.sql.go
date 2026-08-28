@@ -307,6 +307,22 @@ func (q *Queries) CancelCartOnRefund(ctx context.Context, id pgtype.UUID) (int64
 	return result.RowsAffected(), nil
 }
 
+const cartIsPaid = `-- name: CartIsPaid :one
+SELECT payment_status = 'paid' AS pago FROM carts WHERE id = $1::uuid
+`
+
+// O carrinho já tem pagamento registrado deste lado.
+//
+// É a guarda do pagamento vindo do ERP: sem ela, a aprovação que NÓS mesmos
+// fazemos quando o gateway confirma dispararia o registro de novo, e o carrinho
+// seria pago duas vezes.
+func (q *Queries) CartIsPaid(ctx context.Context, cartID pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, cartIsPaid, cartID)
+	var pago bool
+	err := row.Scan(&pago)
+	return pago, err
+}
+
 const cartIsTerminated = `-- name: CartIsTerminated :one
 SELECT status IN ('cancelled', 'expired') AS terminado
 FROM carts WHERE id = $1::uuid

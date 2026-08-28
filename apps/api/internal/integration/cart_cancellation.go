@@ -6,8 +6,11 @@ import (
 
 	"go.uber.org/zap"
 
+	"errors"
+	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
+	"time"
 )
 
 // Motivos de morte de um cart (coluna carts.cancelled_reason). São o
@@ -246,3 +249,48 @@ func (s *Service) CancelCartFromERP(ctx context.Context, cartID, storeID string)
 	}
 	return true, nil
 }
+
+// MarkCartPaidFromERP registra, do lado de cá, o pagamento que o lojista lançou
+// no ERP.
+//
+// O lojista recebeu por fora — dinheiro, transferência, maquininha — e registrou
+// no Tiny, que leva o pedido para "Aprovado". Antes disto ele tinha de repetir o
+// gesto aqui, no "confirmar pagamento manual", e os dois lados divergiam sempre
+// que ele esquecia um. Agora o Tiny é a fonte, e este é o caminho de volta.
+//
+// Usa a MESMA escrita guardada do pagamento por gateway — a que serializa
+// contra a expiração e recusa carrinho morto. O que muda é a origem: o
+// checkout_id leva o id do pedido no ERP, que é o que torna a operação
+// idempotente. A reentrega do webhook não paga duas vezes.
+func (s *Service) MarkCartPaidFromERP(ctx context.Context, cartID, storeID string, amountCents int64) (bool, error) {
+	ctx = logger.WithStore(ctx, storeID, "")
+
+	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
+	if err != nil {
+		return false, fmt.Errorf("reading the cart order state: %w", err)
+	}
+	if st.ExternalOrderID == "" {
+		return false, nil // sem pedido não há pagamento do ERP a seguir
+	}
+
+	agora := time.Now()
+	_, err = s.repo.UpdateCartPaymentStatus(ctx, cartID, "paid",
+		"erp-"+st.ExternalOrderID, &agora, erpPaymentMethod, amountCents)
+	if err != nil {
+		if errors.Is(err, paymentdomain.ErrCartNotPayable) {
+			// Carrinho expirado ou cancelado. O pagamento existe no ERP e o
+			// carrinho não pode recebê-lo — é caso de gente, e a aba "Precisam
+			// atenção" o pega pelo estado.
+			logger.From(ctx, s.logger).Warn("the ERP order was approved but the cart cannot be marked paid — it is expired or cancelled",
+				zap.String("cart_id", cartID),
+				zap.String("external_order_id", st.ExternalOrderID))
+			return false, nil
+		}
+		return false, fmt.Errorf("recording the ERP payment: %w", err)
+	}
+	return true, nil
+}
+
+// erpPaymentMethod nomeia, no histórico, o pagamento que veio de fora do
+// gateway. O lojista reconhece a origem sem precisar abrir o pedido no Tiny.
+const erpPaymentMethod = "erp_manual"

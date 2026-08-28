@@ -4417,3 +4417,12 @@ func (r *Repository) UnjoinCart(ctx context.Context, cartID, externalOrderID, er
 		ErpOrderState:   erpOrderState,
 	})
 }
+
+// CartIsPaid diz se o carrinho já tem pagamento registrado deste lado.
+func (r *Repository) CartIsPaid(ctx context.Context, cartID string) (bool, error) {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return false, err
+	}
+	return r.queries.CartIsPaid(ctx, id)
+}

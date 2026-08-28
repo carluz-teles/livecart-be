@@ -628,3 +628,11 @@ func (r *repoSimulado) CartIsTerminated(_ context.Context, cartID string) (bool,
 func (r *repoSimulado) ListCartGridItems(ctx context.Context, cartID string) ([]NonWaitlistedCartItem, error) {
 	return r.ListNonWaitlistedCartItems(ctx, cartID)
 }
+
+// CartIsPaid: o carrinho já tem pagamento registrado deste lado.
+func (r *repoSimulado) CartIsPaid(_ context.Context, cartID string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c := r.carrinhos[cartID]
+	return c != nil && c.pagoCents > 0, nil
+}
