@@ -1629,3 +1629,17 @@ SELECT
     COALESCE((SELECT string_agg(o.id::text, ',') FROM carts o WHERE o.joined_to_cart_id = c.id),'')::text AS joined_cart_ids,
     c.joined_at
 FROM carts c WHERE c.id = sqlc.arg(cart_id)::uuid;
+
+-- name: UnjoinCart :exec
+-- Desfaz o vínculo, devolvendo o carrinho ao pedido que ele tinha.
+--
+-- Existe para a recuperação: se o ERP recusa soltar o pedido antigo depois de o
+-- vínculo estar feito, o estado que sobra é o pior de todos — a grade do
+-- anfitrião já cresceu e o pedido do outro continua vivo, com a mesma peça
+-- contada duas vezes. Desfazer devolve tudo ao que era antes.
+UPDATE carts
+SET joined_to_cart_id = NULL,
+    joined_at         = NULL,
+    external_order_id = NULLIF(sqlc.arg(external_order_id)::text, ''),
+    erp_order_state   = sqlc.arg(erp_order_state)::varchar
+WHERE id = sqlc.arg(cart_id)::uuid;

@@ -119,15 +119,20 @@ func (s *Service) JoinCarts(ctx context.Context, in JoinCartsInput) (JoinCartsRe
 			out.OrderReleased = rel.Released[0]
 		}
 		if mErr != nil {
-			// O vínculo está feito e a grade do anfitrião já cresceu; o que
-			// falhou foi soltar o pedido velho. Ele continua reservando peça, e
-			// isso não pode passar em silêncio.
-			logger.From(ctx, s.logger).Error("orders joined but the old ERP order was not released — it is still holding stock",
+			// O pior estado possível: a grade do anfitrião já cresceu e o pedido
+			// do outro continua vivo — a mesma peça contada duas vezes. Desfazer
+			// o vínculo devolve os dois ao que eram, e é melhor do que deixar a
+			// junção pela metade esperando alguém reparar.
+			//
+			// Sem isto a tentativa seguinte batia em "já faz parte de outra
+			// junção" e o lojista ficava preso, sem caminho pelo painel.
+			s.desfazerJuncao(ctx, in.StoreID, host, juntado, pedidoASoltar)
+			logger.From(ctx, s.logger).Error("join undone: the old ERP order refused to be released",
 				zap.String("host_cart_id", host.CartID),
 				zap.String("joined_cart_id", juntado.CartID),
 				zap.String("external_order_id", pedidoASoltar),
 				zap.Error(mErr))
-			return out, fmt.Errorf("os pedidos foram juntados, mas o pedido %s continua reservando peça no ERP: %w",
+			return JoinCartsResult{}, fmt.Errorf("não consegui soltar o pedido %s no ERP, então desfiz a junção — os dois pedidos continuam como estavam: %w",
 				pedidoASoltar, mErr)
 		}
 	} else {
@@ -176,6 +181,20 @@ func podemSerJuntados(a, b CartForJoin, confirmouCompradorDiferente bool) error 
 			return httpx.DomainError(409, httpx.CodeJoinAlreadyLinked,
 				"um dos pedidos já faz parte de outra junção")
 		}
+	}
+	// Dois pedidos JÁ PAGOS não se juntam, e a razão é do ERP, não nossa:
+	// juntar significa cancelar um dos pedidos, e cancelar um pedido pago no
+	// Tiny é fluxo de ESTORNO — o dinheiro já foi conciliado contra aquele
+	// pedido. A junção existe para sair um frete e uma nota só; com os dois
+	// pagos o lojista ainda pode despachar junto sem mexer nos pedidos.
+	//
+	// Foi o que quebrou em staging em 28/08: a regra de desempate elegia o mais
+	// antigo como anfitrião e mandava o pago mais novo para o cancelamento, que
+	// o ERP recusa com "cancelamento pós-pago é fluxo de refund".
+	if a.Paid && b.Paid {
+		return httpx.DomainError(422, httpx.CodeJoinBothPaid,
+			"os dois pedidos já foram pagos — juntar exigiria cancelar um deles no ERP, "+
+				"e cancelar pedido pago é estorno. Despache os dois juntos sem juntar os pedidos.")
 	}
 	if a.PlatformUserID != b.PlatformUserID && !confirmouCompradorDiferente {
 		return httpx.DomainError(409, httpx.CodeJoinDifferentBuyers,
@@ -248,4 +267,26 @@ type CartJoinLink struct {
 // GetCartJoinLink lê o vínculo para a tela mostrar de que lado ele está.
 func (s *Service) GetCartJoinLink(ctx context.Context, cartID string) (CartJoinLink, error) {
 	return s.repo.GetCartJoinLink(ctx, cartID)
+}
+
+// desfazerJuncao devolve os dois pedidos ao estado anterior.
+//
+// Melhor esforço, e com contexto sem cancelamento: é compensação, e compensação
+// que morre junto com o que ela compensa não compensa nada. Cada passo que
+// falhar é logado — o que sobra é a aba "Precisam atenção", que pega o caso pelo
+// estado.
+func (s *Service) desfazerJuncao(ctx context.Context, storeID string, host, juntado CartForJoin, pedidoDoJuntado string) {
+	fim := context.WithoutCancel(ctx)
+
+	if err := s.repo.UnjoinCart(fim, juntado.CartID, pedidoDoJuntado, "open"); err != nil {
+		logger.From(fim, s.logger).Error("could not undo the join link — the carts are still linked with the old order alive",
+			zap.String("joined_cart_id", juntado.CartID), zap.Error(err))
+		return
+	}
+	// A grade do anfitrião cresceu com os itens do outro; agora que o vínculo
+	// caiu, mandá-la de novo a encolhe de volta para o que era.
+	if err := s.MutateERPOrderItems(fim, host.CartID, storeID); err != nil {
+		logger.From(fim, s.logger).Error("join undone but the host order still carries the other cart's items",
+			zap.String("host_cart_id", host.CartID), zap.Error(err))
+	}
 }

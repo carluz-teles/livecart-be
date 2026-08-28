@@ -1180,9 +1180,13 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		// time so the order lands on the merchant's "today" rather than UTC's
 		// (otherwise late-night UTC orders fall a day ahead and disappear from
 		// the merchant's "últimos 30 dias" filter).
-		"data":        time.Now().In(tinyLocation).Format("2006-01-02"),
-		"itens":       items,
-		"observacoes": order.Observation,
+		"data":  time.Now().In(tinyLocation).Format("2006-01-02"),
+		"itens": items,
+		// A observação carrega a âncora de forma legível. Antes ela vivia num
+		// marcador; marcador é a etiqueta de organização DO LOJISTA, e não o
+		// lugar de metadado nosso. Aqui ela é informação: quem abre o pedido no
+		// Tiny vê de onde ele veio.
+		"observacoes": observacaoComAncora(order.Observation, order.ExternalID),
 		"ecommerce": map[string]any{
 			"numeroPedidoEcommerce": order.ExternalID,
 		},
@@ -1485,17 +1489,16 @@ func (t *Tiny) CreateOrder(ctx context.Context, order ERPOrder) (*OrderResult, e
 		zap.Int64("net_amount_cents", netCents),
 	)
 
-	// Carimba o vínculo do carrinho. Best-effort, como a aprovação: falhar aqui
-	// não invalida o pedido, mas deixa-o sem âncora de busca — e aí uma retomada
-	// não o reencontra.
-	marker := tinyCartMarker(order.ExternalID)
-	if markErr := t.AddOrderMarker(ctx, orderID, marker); markErr != nil {
-		logger.From(ctx, t.Logger).Warn("failed to tag tiny order with cart marker",
-			zap.String("order_id", orderID),
-			zap.String("marker", marker),
-			zap.Error(markErr),
-		)
-	}
+	// O marcador saiu. Os marcadores do Tiny são do LOJISTA — ele os usa para
+	// organizar os pedidos dele, e enchê-los de âncora nossa polui a ferramenta
+	// de trabalho dele para resolver um problema nosso. A âncora continua
+	// existindo, em numeroOrdemCompra e nas observações, onde ela é informação
+	// e não etiqueta.
+	//
+	// O que se perde é a BUSCA barata: `?marcadores=` filtra de verdade e
+	// `?numeroOrdemCompra=` é ignorado em silêncio (medido em 26/08/2026 — devolve
+	// a conta inteira). A adoção passa a varrer os pedidos mais recentes, que é
+	// caro mas raro: ela só roda quando um POST sucedeu e a resposta se perdeu.
 
 	// Aprova quando a VENDA está fechada — não quando há bloco financeiro.
 	// Ver ERPOrder.Approve: pagamento por fora aprova sem lançar recebimento.
@@ -2187,6 +2190,16 @@ func bloqueioPorNotaFiscal(body []byte) bool {
 	return false
 }
 
+// observacaoComAncora acrescenta a origem à observação do pedido, sem apagar o
+// que o chamador já tinha escrito.
+func observacaoComAncora(observacao, cartID string) string {
+	ancora := "LiveCart " + tinyCartMarker(cartID)
+	if strings.TrimSpace(observacao) == "" {
+		return ancora
+	}
+	return observacao + " | " + ancora
+}
+
 // SetOrderInstallments grava as parcelas do pedido, uma a uma, como o chamador
 // as ditou.
 //
@@ -2335,59 +2348,94 @@ func (t *Tiny) GetOrderSituacao(ctx context.Context, orderID string) (int, error
 	return *out.Situacao, nil
 }
 
-// FindOrderIDByMarker resolves an order by marker via GET /pedidos?marcadores=.
-// Match exato com read-after-write de ~300ms (sandbox T8; a forma com
-// colchetes `marcadores[]=` NÃO funciona). Retorna "" quando não encontrado.
-// AddOrderMarker carimba o pedido com o vínculo do carrinho
-// (POST /pedidos/{id}/marcadores).
+// FindOrderIDByMarker reencontra o pedido pela âncora `lc-cart-<cartID>`.
 //
-// 🔴 Esta escrita PARECE redundante e não é. O mesmo valor já viaja no
-// `numeroOrdemCompra` do corpo do pedido, e é tentador poupar a chamada
-// buscando por lá — o teto da conta é de 30 escritas por minuto, e numa live
-// cada escrita conta.
+// O nome ficou por compatibilidade da interface; a busca não usa mais marcador.
+// Os marcadores do Tiny são a etiqueta de organização DO LOJISTA, e enchê-los de
+// metadado nosso polui a ferramenta de trabalho dele. A âncora vive agora em
+// `numeroOrdemCompra` e nas observações do pedido.
 //
-// Só que `GET /pedidos?numeroOrdemCompra=` é IGNORADO em silêncio: devolve 200 e
-// a conta inteira, sem filtrar nada. Medido em 26/08/2026 — uma busca por uma
-// âncora inexistente devolveu os 92 pedidos da conta, com o primeiro parecendo
-// um resultado legítimo. Numa live simulada isso vinculou o pedido de um
-// comprador ao carrinho de outro.
-//
-// `marcadores` filtra de verdade: 0 resultados para valor inexistente, 1 exato
-// para o que existe. É por isso que o carimbo continua aqui.
-func (t *Tiny) AddOrderMarker(ctx context.Context, orderID, marker string) error {
-	endpoint := fmt.Sprintf("%s/pedidos/%s/marcadores", tinyAPIBaseURL, orderID)
-	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodPost, endpoint, []map[string]any{{"descricao": marker}}, t.authHeaders())
-	if err != nil {
-		return fmt.Errorf("adding order marker: %w", err)
-	}
-	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return fmt.Errorf("add order marker failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
-	}
-	return nil
-}
-
+// 🔴 O preço disso é a busca: `?numeroOrdemCompra=` é IGNORADO em silêncio —
+// devolve 200 e a conta inteira, sem filtrar. Medido em 26/08/2026: uma busca
+// por âncora inexistente devolveu os 92 pedidos da conta, com o primeiro
+// parecendo resultado legítimo. Numa live simulada isso vinculou o pedido de um
+// comprador ao carrinho de outro, e é por isso que a varredura abaixo COMPARA a
+// âncora em vez de confiar na ordem.
 func (t *Tiny) FindOrderIDByMarker(ctx context.Context, marker string) (string, error) {
-	// `marcadores`, e não `numeroOrdemCompra` — ver a nota em AddOrderMarker.
-	endpoint := fmt.Sprintf("%s/pedidos?marcadores=%s", tinyAPIBaseURL, url.QueryEscape(marker))
+	// Sem marcador, sem filtro. `?numeroOrdemCompra=` é IGNORADO em silêncio
+	// (medido em 26/08/2026: devolve a conta inteira, 92 pedidos), e o marcador
+	// — que filtrava de verdade — saiu porque marcador é a etiqueta de
+	// organização do LOJISTA, não lugar de metadado nosso.
+	//
+	// Então a busca vira varredura dos mais recentes, e ela é curta de
+	// propósito. Esta função só roda quando um POST /pedidos sucedeu e a
+	// resposta se perdeu no caminho — o pedido procurado acabou de ser criado e
+	// está entre os primeiros da lista. Varrer mais do que isso gastaria a cota
+	// da conta para procurar onde ele não pode estar.
+	const candidatos = 10
+
+	endpoint := fmt.Sprintf("%s/pedidos?limit=%d&orderBy=desc", tinyAPIBaseURL, candidatos)
 	resp, body, err := t.DoRequestWithRetry(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
 	if err != nil {
-		return "", fmt.Errorf("searching order by marker: %w", err)
+		return "", fmt.Errorf("listing recent orders to adopt: %w", err)
 	}
 	if !providers.IsSuccessStatus(resp.StatusCode) {
-		return "", fmt.Errorf("search order by marker failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
+		return "", fmt.Errorf("list recent orders failed: status %d: %s", resp.StatusCode, tinyErrorDetail(body))
 	}
-	var result struct {
+	var lista struct {
 		Itens []struct {
-			ID int64 `json:"id"`
+			ID                int64  `json:"id"`
+			NumeroOrdemCompra string `json:"numeroOrdemCompra"`
 		} `json:"itens"`
 	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("parsing order search response: %w", err)
+	if err := json.Unmarshal(body, &lista); err != nil {
+		return "", fmt.Errorf("parsing recent orders: %w", err)
 	}
-	if len(result.Itens) == 0 {
-		return "", nil
+
+	// A listagem PODE já trazer o numeroOrdemCompra. Quando traz, a âncora sai
+	// daqui sem custo nenhum.
+	for _, it := range lista.Itens {
+		if it.NumeroOrdemCompra == marker {
+			return strconv.FormatInt(it.ID, 10), nil
+		}
 	}
-	return strconv.FormatInt(result.Itens[0].ID, 10), nil
+
+	// Quando não traz, cada candidato é lido individualmente. O GET do pedido
+	// devolve o campo com certeza — é o mesmo que GetOrderTotal já lê.
+	for _, it := range lista.Itens {
+		if it.NumeroOrdemCompra != "" {
+			continue // a listagem trouxe o campo e ele não bate; não relê
+		}
+		id := strconv.FormatInt(it.ID, 10)
+		ancora, err := t.orderAnchor(ctx, id)
+		if err != nil {
+			continue // um pedido que não responde não invalida a varredura
+		}
+		if ancora == marker {
+			return id, nil
+		}
+	}
+	return "", nil
+}
+
+// orderAnchor lê o numeroOrdemCompra de um pedido — a âncora que liga o pedido
+// ao carrinho que o criou.
+func (t *Tiny) orderAnchor(ctx context.Context, orderID string) (string, error) {
+	endpoint := fmt.Sprintf("%s/pedidos/%s", tinyAPIBaseURL, orderID)
+	resp, body, err := t.DoRequestRetrying429(ctx, 2, http.MethodGet, endpoint, nil, t.authHeaders())
+	if err != nil {
+		return "", err
+	}
+	if !providers.IsSuccessStatus(resp.StatusCode) {
+		return "", fmt.Errorf("status %d", resp.StatusCode)
+	}
+	var out struct {
+		NumeroOrdemCompra string `json:"numeroOrdemCompra"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", err
+	}
+	return out.NumeroOrdemCompra, nil
 }
 
 // ReverseLegacyStockExit devolve ao estoque uma saída manual criada pelo modelo

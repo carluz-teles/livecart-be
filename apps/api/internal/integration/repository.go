@@ -4403,3 +4403,16 @@ func (r *Repository) GetCartJoinLink(ctx context.Context, cartID string) (CartJo
 	}
 	return out, nil
 }
+
+// UnjoinCart desfaz o vínculo de junção, devolvendo o pedido ao carrinho.
+func (r *Repository) UnjoinCart(ctx context.Context, cartID, externalOrderID, erpOrderState string) error {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	return r.queries.UnjoinCart(ctx, sqlc.UnjoinCartParams{
+		CartID:          cID,
+		ExternalOrderID: externalOrderID,
+		ErpOrderState:   erpOrderState,
+	})
+}

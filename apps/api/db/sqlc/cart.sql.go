@@ -4315,6 +4315,32 @@ func (q *Queries) TransitionCartERPOrderState(ctx context.Context, arg Transitio
 	return result.RowsAffected(), nil
 }
 
+const unjoinCart = `-- name: UnjoinCart :exec
+UPDATE carts
+SET joined_to_cart_id = NULL,
+    joined_at         = NULL,
+    external_order_id = NULLIF($1::text, ''),
+    erp_order_state   = $2::varchar
+WHERE id = $3::uuid
+`
+
+type UnjoinCartParams struct {
+	ExternalOrderID string      `json:"external_order_id"`
+	ErpOrderState   string      `json:"erp_order_state"`
+	CartID          pgtype.UUID `json:"cart_id"`
+}
+
+// Desfaz o vínculo, devolvendo o carrinho ao pedido que ele tinha.
+//
+// Existe para a recuperação: se o ERP recusa soltar o pedido antigo depois de o
+// vínculo estar feito, o estado que sobra é o pior de todos — a grade do
+// anfitrião já cresceu e o pedido do outro continua vivo, com a mesma peça
+// contada duas vezes. Desfazer devolve tudo ao que era antes.
+func (q *Queries) UnjoinCart(ctx context.Context, arg UnjoinCartParams) error {
+	_, err := q.db.Exec(ctx, unjoinCart, arg.ExternalOrderID, arg.ErpOrderState, arg.CartID)
+	return err
+}
+
 const updateCartCheckoutInfo = `-- name: UpdateCartCheckoutInfo :one
 UPDATE carts
 SET checkout_url = $2, checkout_id = $3, checkout_expires_at = $4

@@ -360,11 +360,6 @@ type ERPProvider interface {
 	// ou fora de ordem deixa o LiveCart mostrando um estágio que já passou.
 	GetOrderSituacao(ctx context.Context, orderID string) (int, error)
 
-	// AddOrderMarker carimba o pedido com a âncora lc-cart-<cartID>
-	// (POST /pedidos/{id}/marcadores). Parece redundante com o
-	// `numeroOrdemCompra` do corpo e não é — ver a nota na implementação.
-	AddOrderMarker(ctx context.Context, orderID, marker string) error
-
 	// FindOrderIDByMarker resolve o pedido pela âncora lc-cart-<cartID>. É como
 	// uma tentativa que morreu depois do POST reencontra o pedido em vez de criar
 	// um segundo. Devolve "" quando não existe.

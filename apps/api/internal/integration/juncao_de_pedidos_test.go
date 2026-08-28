@@ -52,8 +52,10 @@ func TestMapaDeCasosDaJuncao(t *testing.T) {
 			"é o caso normal"},
 		{"um pago e um aberto", carrinho("a", pago), carrinho("b"), false, true,
 			"o pago vira anfitrião; o aberto entra nele"},
-		{"os dois pagos", carrinho("a", pago), carrinho("b", pago), false, true,
-			"duas compras pagas no mesmo frete — o extrato mostra as duas"},
+		{"os dois pagos", carrinho("a", pago), carrinho("b", pago), false, false,
+			"juntar exigiria cancelar um dos pedidos no ERP, e cancelar pedido " +
+				"pago é ESTORNO — o Tiny recusa com 'cancelamento pós-pago é fluxo " +
+				"de refund'. Quebrou em staging em 28/08"},
 		{"um faturado", carrinho("a", faturado), carrinho("b"), false, false,
 			"a nota está emitida e o pedido não recebe mais item"},
 		{"o outro faturado", carrinho("a"), carrinho("b", faturado), false, false,
@@ -110,9 +112,9 @@ func TestQuemViraAnfitriao(t *testing.T) {
 		{"nenhum pago: o mais antigo",
 			carrinho("antigo", em(cedo)), carrinho("novo", em(tarde)),
 			"antigo", "é o número que a compradora já conhece"},
-		{"os dois pagos: o mais antigo",
-			carrinho("antigo", pago, em(cedo)), carrinho("novo", pago, em(tarde)),
-			"antigo", "mesma regra de desempate"},
+		{"nenhum pago, empate de data: escolhe um e não trava",
+			carrinho("um", em(cedo)), carrinho("dois", em(cedo)),
+			"dois", "empate resolve pelo caminho padrão; o que não pode é travar"},
 	}
 	for _, c := range casos {
 		t.Run(c.nome, func(t *testing.T) {

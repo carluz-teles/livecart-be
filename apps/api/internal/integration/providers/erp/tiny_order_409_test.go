@@ -33,9 +33,14 @@ type tinyFake struct {
 	rotas           []string
 	pedidosPost     int
 	responderPedido func(tentativa int, w http.ResponseWriter)
-	// ancoraAchaID: o id que a busca por marcador devolve. Vazio = não existe
+	// ancoraAchaID: o id que a varredura dos pedidos recentes devolve. Vazio =
+	// não existe
 	// pedido com aquela âncora.
 	ancoraAchaID string
+	// ancoraDoCarrinho é o cart id que a âncora do pedido encontrado carrega.
+	// Tem de bater com o do pedido sendo criado, senão a varredura o descarta —
+	// que é justamente a proteção contra adotar o pedido de outro comprador.
+	ancoraDoCarrinho string
 	// corpoDoPedido guarda o corpo do POST /pedidos, para o teste afirmar que a
 	// âncora viajou junto.
 	corpoDoPedido string
@@ -48,12 +53,16 @@ func (f *tinyFake) servidor(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch {
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/pedidos") && r.URL.Query().Get("marcadores") != "":
+		// A adoção não busca mais por marcador: varre os pedidos recentes e
+		// COMPARA a âncora. O fake responde a listagem já com o campo, que é o
+		// caminho barato (sem releitura por pedido).
+		case r.Method == http.MethodGet && r.URL.Path == "/pedidos" && r.URL.Query().Get("limit") != "":
 			if f.ancoraAchaID == "" {
 				_, _ = w.Write([]byte(`{"itens":[]}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"itens":[{"id":` + f.ancoraAchaID + `}]}`))
+			_, _ = w.Write([]byte(`{"itens":[{"id":` + f.ancoraAchaID +
+				`,"numeroOrdemCompra":"lc-cart-` + f.ancoraDoCarrinho + `"}]}`))
 
 		case r.Method == http.MethodPost && r.URL.Path == "/pedidos":
 			f.pedidosPost++
@@ -103,25 +112,25 @@ func TestPedidoCriadoRecebeAAncoraDeBusca(t *testing.T) {
 		t.Fatalf("CreateOrder: %v", err)
 	}
 
-	// O carimbo é a ÚNICA âncora buscável. O `numeroOrdemCompra` viaja no corpo e
-	// parece dispensá-lo, mas `GET /pedidos?numeroOrdemCompra=` é ignorado em
-	// silêncio pela API: devolve 200 e a conta inteira. Medido em 26/08/2026 —
-	// uma busca por âncora inexistente trouxe os 92 pedidos da conta, e o
-	// primeiro deles parecia um resultado legítimo.
-	if !f.chamou("POST /pedidos/847673655/marcadores") {
-		t.Errorf("o pedido criado não recebeu o marcador; sem ele uma retomada não "+
-			"o reencontra. rotas: %v", f.rotas)
+	// O MARCADOR NÃO É ESCRITO, e isto trava essa decisão. Os marcadores do
+	// Tiny são a etiqueta de organização do LOJISTA; enchê-los de metadado
+	// nosso polui a ferramenta de trabalho dele para resolver um problema
+	// nosso. A âncora vive em numeroOrdemCompra e nas observações.
+	if f.chamou("POST /pedidos/847673655/marcadores") {
+		t.Errorf("escreveu marcador no pedido — os marcadores são do lojista. "+
+			"rotas: %v", f.rotas)
 	}
 	if !strings.Contains(f.corpoDoPedido, "numeroOrdemCompra") {
 		t.Errorf("o POST /pedidos não levou numeroOrdemCompra — ele não serve de "+
-			"filtro, mas é o que deixa o vínculo legível na tela do lojista. corpo: %s",
-			f.corpoDoPedido)
+			"filtro, mas é a âncora que a adoção compara ao varrer os pedidos "+
+			"recentes. corpo: %s", f.corpoDoPedido)
 	}
 }
 
 func TestConflitoAdotaOPedidoQueJaExiste(t *testing.T) {
 	f := &tinyFake{
-		ancoraAchaID: "847673655",
+		ancoraAchaID:     "847673655",
+		ancoraDoCarrinho: "c1ec50cc-940b-46d6-bf41-d1336d9f9d35",
 		responderPedido: func(_ int, w http.ResponseWriter) {
 			w.WriteHeader(http.StatusConflict)
 			_, _ = w.Write([]byte(`{"mensagem":"Esse registro já existe"}`))
@@ -136,7 +145,7 @@ func TestConflitoAdotaOPedidoQueJaExiste(t *testing.T) {
 			"fora de sincronia mesmo estando lá: %v", err)
 	}
 	if res == nil || res.OrderID != "847673655" {
-		t.Fatalf("adoção devolveu %+v, esperava o pedido encontrado pelo marcador", res)
+		t.Fatalf("adoção devolveu %+v, esperava o pedido encontrado pela âncora", res)
 	}
 
 	// O passo que faltava nos pedidos "Em aberto": a aprovação roda depois do
@@ -178,21 +187,19 @@ func TestOrdemDosPassosNaCriacao(t *testing.T) {
 
 	// A ordem importa e é o que explica o "Em aberto": criar → marcar → aprovar.
 	// Se o marcador viesse depois da aprovação, um timeout entre os dois deixaria
-	// o pedido aprovado porém invisível para a retomada.
-	iMarcador, iAprova := -1, -1
+	// A âncora agora viaja DENTRO do POST /pedidos, então ela não pode chegar
+	// tarde — é gravada com o pedido ou não é gravada. O que resta verificar é
+	// que a aprovação aconteceu e que nenhum marcador foi escrito.
+	iAprova := -1
 	for i, r := range f.rotas {
-		switch r {
-		case "POST /pedidos/900/marcadores":
-			iMarcador = i
-		case "PUT /pedidos/900/situacao":
+		if r == "PUT /pedidos/900/situacao" {
 			iAprova = i
 		}
+		if strings.HasSuffix(r, "/marcadores") {
+			t.Errorf("escreveu marcador — os marcadores são do lojista. rotas: %v", f.rotas)
+		}
 	}
-	if iMarcador == -1 || iAprova == -1 {
-		t.Fatalf("marcador ou aprovação não aconteceram; rotas: %v", f.rotas)
-	}
-	if iMarcador > iAprova {
-		t.Errorf("o marcador foi gravado depois da aprovação; um timeout entre os "+
-			"dois deixa o pedido sem âncora de busca. rotas: %v", f.rotas)
+	if iAprova == -1 {
+		t.Fatalf("a aprovação não aconteceu; rotas: %v", f.rotas)
 	}
 }

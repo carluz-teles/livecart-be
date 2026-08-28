@@ -111,6 +111,9 @@ const (
 	// CodeJoinDifferentBuyers: os pedidos são de compradores diferentes. O
 	// painel usa isto para pedir a confirmação em vez de mostrar erro seco.
 	CodeJoinDifferentBuyers Code = "JOIN_DIFFERENT_BUYERS"
+	// CodeJoinBothPaid: os dois pedidos já foram pagos. Juntar exigiria
+	// cancelar um deles no ERP, e cancelar pedido pago é estorno.
+	CodeJoinBothPaid Code = "JOIN_BOTH_PAID"
 	// CodeJoinAlreadyLinked: um dos pedidos já está em outra junção.
 	CodeJoinAlreadyLinked Code = "JOIN_ALREADY_LINKED"
 	// CodeStagingOnly: recurso que só existe em staging. Ver simulador_live.go.
