@@ -1392,9 +1392,19 @@ FROM carts WHERE id = sqlc.arg(cart_id)::uuid;
 -- Volta para 'checkout' e não para 'active' porque o carrinho cancelado já
 -- tinha link: reativá-lo é o ponto, e é o que faz a compradora conseguir pagar.
 --
--- Guarda: só carrinho cancelado PELO LOJISTA. Expirado não entra — prazo vencido
--- não é engano, é regra, e ressuscitar por causa de um clique no ERP passaria
--- por cima dela. Pago/estornado também não: aquela venda já teve desfecho.
+-- Guarda: só carrinho morto por DECISÃO HUMANA — cancelado pelo lojista aqui
+-- (`store_cancelled`) ou cancelado por ele no ERP (`erp_cancelled`). Os dois são
+-- o mesmo gesto, de lados diferentes, e os dois se desfazem do mesmo jeito.
+--
+-- Aceitar `erp_cancelled` não é detalhe: sem isso a viagem de ida e volta pelo
+-- Tiny quebrava na volta. Cancelar lá gravava `erp_cancelled`, e reabrir lá
+-- encontrava um motivo que esta query não reconhecia — o pedido voltava a viver
+-- no ERP e o carrinho ficava morto para sempre, que é exatamente a peça presa
+-- sem dono que a reabertura existe para evitar.
+--
+-- Expirado continua de fora: prazo vencido é regra, não engano, e um clique no
+-- ERP não passa por cima dela. Pago/estornado também não — aquela venda já teve
+-- desfecho.
 UPDATE carts
 SET status                       = 'checkout',
     cancelled_reason             = NULL,
@@ -1411,7 +1421,7 @@ SET status                       = 'checkout',
                       ELSE now() + (sqlc.arg(minutos_de_prazo)::int || ' minutes')::interval END
 WHERE id = sqlc.arg(cart_id)::uuid
   AND status = 'cancelled'
-  AND cancelled_reason = 'store_cancelled'
+  AND cancelled_reason IN ('store_cancelled', 'erp_cancelled')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
 RETURNING *;
 
@@ -1448,3 +1458,21 @@ WHERE cart_id = sqlc.arg(cart_id)::uuid AND product_id = sqlc.arg(product_id)::u
 
 -- name: GetCartEventID :one
 SELECT event_id FROM carts WHERE id = $1;
+
+-- name: CancelCartFromERPStatus :one
+-- O carrinho segue o pedido que foi cancelado no ERP.
+--
+-- Igual ao CancelCart, com o motivo trocado: `erp_cancelled` em vez de
+-- `store_cancelled`. A troca não é cosmética — o reactor que estorna no ERP só
+-- reage a `store_cancelled`, e mandá-lo cancelar um pedido que já está
+-- cancelado gastaria escrita do teto da conta para pedir o que o Tiny acabou
+-- de contar.
+--
+-- Pago fica de fora: cancelar um pedido pago no ERP é decisão sobre dinheiro
+-- que já entrou, e o estorno é do gateway. Esse caso vai para a triagem humana.
+UPDATE carts
+SET status = 'cancelled', cancelled_reason = 'erp_cancelled'
+WHERE carts.id = $1
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+RETURNING *;

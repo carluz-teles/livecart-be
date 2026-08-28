@@ -152,6 +152,95 @@ func (q *Queries) CancelCart(ctx context.Context, id pgtype.UUID) (Cart, error) 
 	return i, err
 }
 
+const cancelCartFromERPStatus = `-- name: CancelCartFromERPStatus :one
+UPDATE carts
+SET status = 'cancelled', cancelled_reason = 'erp_cancelled'
+WHERE carts.id = $1
+  AND status IN ('pending', 'active', 'checkout')
+  AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
+RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents, cancellation_reverted_reason
+`
+
+// O carrinho segue o pedido que foi cancelado no ERP.
+//
+// Igual ao CancelCart, com o motivo trocado: `erp_cancelled` em vez de
+// `store_cancelled`. A troca não é cosmética — o reactor que estorna no ERP só
+// reage a `store_cancelled`, e mandá-lo cancelar um pedido que já está
+// cancelado gastaria escrita do teto da conta para pedir o que o Tiny acabou
+// de contar.
+//
+// Pago fica de fora: cancelar um pedido pago no ERP é decisão sobre dinheiro
+// que já entrou, e o estorno é do gateway. Esse caso vai para a triagem humana.
+func (q *Queries) CancelCartFromERPStatus(ctx context.Context, id pgtype.UUID) (Cart, error) {
+	row := q.db.QueryRow(ctx, cancelCartFromERPStatus, id)
+	var i Cart
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.PlatformUserID,
+		&i.PlatformHandle,
+		&i.Token,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.PaymentIntegrationID,
+		&i.ExternalOrderID,
+		&i.PaymentStatus,
+		&i.PaidAt,
+		&i.NotifyStatus,
+		&i.NotifyError,
+		&i.NotifiedAt,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.SessionID,
+		&i.CheckoutID,
+		&i.CheckoutExpiresAt,
+		&i.CustomerEmail,
+		&i.PaymentMethod,
+		&i.CustomerName,
+		&i.CustomerDocument,
+		&i.CustomerPhone,
+		&i.ShippingAddress,
+		&i.CustomerID,
+		&i.ShippingServiceID,
+		&i.ShippingServiceName,
+		&i.ShippingCarrier,
+		&i.ShippingCostCents,
+		&i.ShippingCostRealCents,
+		&i.ShippingDeadlineDays,
+		&i.ShippingQuotedAt,
+		&i.ShippingProvider,
+		&i.LastShippingQuoteOptions,
+		&i.LastShippingQuoteAt,
+		&i.CardBrand,
+		&i.CardLastFour,
+		&i.CardInstallments,
+		&i.CardAuthorizationCode,
+		&i.InitialSnapshotTakenAt,
+		&i.InitialSubtotalCents,
+		&i.ShortID,
+		&i.CouponID,
+		&i.CouponCode,
+		&i.CouponDiscountCents,
+		&i.CancelledReason,
+		&i.WhatsappConsent,
+		&i.WhatsappConsentAt,
+		&i.ErpOrderState,
+		&i.ErpStockLaunched,
+		&i.ErpOpStartedAt,
+		&i.CancellationRevertedAt,
+		&i.PixChargeID,
+		&i.PixAmountCents,
+		&i.NeverExpires,
+		&i.StoreID,
+		&i.ErpOrderStatus,
+		&i.ErpOrderStatusAt,
+		&i.ErpOrderNumber,
+		&i.PaidAmountCents,
+		&i.CancellationRevertedReason,
+	)
+	return i, err
+}
+
 const cancelCartOnRefund = `-- name: CancelCartOnRefund :execrows
 UPDATE carts
 SET status = 'cancelled', cancelled_reason = 'refunded'
@@ -3196,7 +3285,7 @@ SET status                       = 'checkout',
                       ELSE now() + ($1::int || ' minutes')::interval END
 WHERE id = $2::uuid
   AND status = 'cancelled'
-  AND cancelled_reason = 'store_cancelled'
+  AND cancelled_reason IN ('store_cancelled', 'erp_cancelled')
   AND (payment_status IS NULL OR payment_status NOT IN ('paid', 'refunded'))
 RETURNING id, event_id, platform_user_id, platform_handle, token, status, checkout_url, payment_integration_id, external_order_id, payment_status, paid_at, notify_status, notify_error, notified_at, created_at, expires_at, session_id, checkout_id, checkout_expires_at, customer_email, payment_method, customer_name, customer_document, customer_phone, shipping_address, customer_id, shipping_service_id, shipping_service_name, shipping_carrier, shipping_cost_cents, shipping_cost_real_cents, shipping_deadline_days, shipping_quoted_at, shipping_provider, last_shipping_quote_options, last_shipping_quote_at, card_brand, card_last_four, card_installments, card_authorization_code, initial_snapshot_taken_at, initial_subtotal_cents, short_id, coupon_id, coupon_code, coupon_discount_cents, cancelled_reason, whatsapp_consent, whatsapp_consent_at, erp_order_state, erp_stock_launched, erp_op_started_at, cancellation_reverted_at, pix_charge_id, pix_amount_cents, never_expires, store_id, erp_order_status, erp_order_status_at, erp_order_number, paid_amount_cents, cancellation_reverted_reason
 `
@@ -3216,9 +3305,19 @@ type ReopenCancelledCartParams struct {
 // Volta para 'checkout' e não para 'active' porque o carrinho cancelado já
 // tinha link: reativá-lo é o ponto, e é o que faz a compradora conseguir pagar.
 //
-// Guarda: só carrinho cancelado PELO LOJISTA. Expirado não entra — prazo vencido
-// não é engano, é regra, e ressuscitar por causa de um clique no ERP passaria
-// por cima dela. Pago/estornado também não: aquela venda já teve desfecho.
+// Guarda: só carrinho morto por DECISÃO HUMANA — cancelado pelo lojista aqui
+// (`store_cancelled`) ou cancelado por ele no ERP (`erp_cancelled`). Os dois são
+// o mesmo gesto, de lados diferentes, e os dois se desfazem do mesmo jeito.
+//
+// Aceitar `erp_cancelled` não é detalhe: sem isso a viagem de ida e volta pelo
+// Tiny quebrava na volta. Cancelar lá gravava `erp_cancelled`, e reabrir lá
+// encontrava um motivo que esta query não reconhecia — o pedido voltava a viver
+// no ERP e o carrinho ficava morto para sempre, que é exatamente a peça presa
+// sem dono que a reabertura existe para evitar.
+//
+// Expirado continua de fora: prazo vencido é regra, não engano, e um clique no
+// ERP não passa por cima dela. Pago/estornado também não — aquela venda já teve
+// desfecho.
 func (q *Queries) ReopenCancelledCart(ctx context.Context, arg ReopenCancelledCartParams) (Cart, error) {
 	row := q.db.QueryRow(ctx, reopenCancelledCart, arg.MinutosDePrazo, arg.CartID)
 	var i Cart

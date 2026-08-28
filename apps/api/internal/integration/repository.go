@@ -2267,6 +2267,26 @@ func (r *Repository) CancelCartOnRefund(ctx context.Context, cartID string) (boo
 }
 
 func (r *Repository) CancelCartAndReleaseStock(ctx context.Context, cartID, storeID string) (CancelCartResult, error) {
+	return r.cancelCartComMotivo(ctx, cartID, storeID, CancelReasonStore)
+}
+
+// CancelCartFromERP cancela o carrinho porque o pedido foi cancelado no ERP.
+//
+// Mesmo caminho do cancelamento do lojista — devolve estoque, mata a fila,
+// emite cart.cancelled — trocando apenas o MOTIVO. E o motivo é o que decide se
+// o reactor vai mandar cancelar no ERP: ele só reage a `store_cancelled`, e
+// aqui o pedido já está cancelado lá.
+func (r *Repository) CancelCartFromERP(ctx context.Context, cartID, storeID string) (CancelCartResult, error) {
+	return r.cancelCartComMotivo(ctx, cartID, storeID, CancelReasonERP)
+}
+
+// cancelCartComMotivo é o cancelamento, uma vez só.
+//
+// Os dois caminhos que matam um carrinho por decisão humana fazem exatamente o
+// mesmo trabalho — a diferença cabe num campo. Duplicar a função para trocar uma
+// string criaria duas versões de "o que acontece ao cancelar" que divergiriam na
+// primeira correção feita só numa delas.
+func (r *Repository) cancelCartComMotivo(ctx context.Context, cartID, storeID, motivo string) (CancelCartResult, error) {
 	cID, err := parseUUID(cartID)
 	if err != nil {
 		return CancelCartResult{}, err
@@ -2274,7 +2294,17 @@ func (r *Repository) CancelCartAndReleaseStock(ctx context.Context, cartID, stor
 
 	var result CancelCartResult
 	err = dbtx.InTx(ctx, r.pool, r.queries, func(q *sqlc.Queries) error {
-		cart, err := q.CancelCart(ctx, cID)
+		// Uma query OU a outra — nunca as duas. Elas diferem só no
+		// cancelled_reason que gravam, e rodar a primeira deixaria o carrinho já
+		// cancelado: a segunda cairia no próprio guard e voltaria ErrNoRows,
+		// fazendo o cancelamento do ERP se anunciar como do lojista.
+		var cart sqlc.Cart
+		var err error
+		if motivo == CancelReasonERP {
+			cart, err = q.CancelCartFromERPStatus(ctx, cID)
+		} else {
+			cart, err = q.CancelCart(ctx, cID)
+		}
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				// Guard pegou: cart pago no intervalo ou já terminal.
@@ -2340,7 +2370,7 @@ func (r *Repository) CancelCartAndReleaseStock(ctx context.Context, cartID, stor
 			EventID         string   `json:"event_id"`
 			Reason          string   `json:"reason"`
 			FreedProductIDs []string `json:"freed_product_ids"`
-		}{CartID: cartID, StoreID: storeID, EventID: eventID, Reason: CancelReasonStore, FreedProductIDs: freed})
+		}{CartID: cartID, StoreID: storeID, EventID: eventID, Reason: motivo, FreedProductIDs: freed})
 		if err != nil {
 			return fmt.Errorf("marshaling cart.cancelled payload: %w", err)
 		}

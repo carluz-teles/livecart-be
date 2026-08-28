@@ -98,6 +98,10 @@ type ERPOrderStatusRepository interface {
 // colaboradores deste pacote: manter o erp sem ciclo com quem o usa.
 type CartReopener interface {
 	ReopenCartFromERP(ctx context.Context, cartID, storeID string) (ReopenReport, error)
+	// CancelCartFromERP é o caminho de ida: o lojista cancelou o pedido no ERP e
+	// o carrinho segue. Devolve false quando o carrinho não pôde ser cancelado
+	// (pago, ou já terminal).
+	CancelCartFromERP(ctx context.Context, cartID, storeID string) (bool, error)
 }
 
 // ReopenReport é o que a ressurreição recuperou.
@@ -166,6 +170,38 @@ func (s *Service) ObserveOrderStatus(ctx context.Context, storeID, externalOrder
 	// conta própria tentaria refazer as outras — inclusive re-reservar uma peça
 	// que pode já ter sido vendida no meio tempo. Quem decide é gente; o que o
 	// sistema deve é não deixar isso invisível.
+	// A IDA: o pedido foi cancelado no ERP e o carrinho ainda está vivo aqui.
+	//
+	// Fecha a simetria. Antes disto o rastreamento gravava 'cancelado' na coluna
+	// e o carrinho seguia aberto: link ativo, estoque preso do lado de cá,
+	// compradora podendo pagar um pedido que não existe mais no ERP.
+	if providers.ERPOrderStatus(t.Status) == providers.ERPOrderStatusCancelado && s.reopener != nil {
+		if morto, err := s.repo.CartIsTerminated(ctx, t.CartID); err == nil && !morto {
+			cancelado, cErr := s.reopener.CancelCartFromERP(ctx, t.CartID, storeID)
+			switch {
+			case cErr != nil:
+				logger.From(ctx, s.logger).Error("the order was cancelled in the ERP and the cart could not follow",
+					zap.String("cart_id", t.CartID),
+					zap.String("external_order_id", externalOrderID),
+					zap.Error(cErr),
+				)
+			case cancelado:
+				logger.From(ctx, s.logger).Info("cart cancelled following the ERP order",
+					zap.String("cart_id", t.CartID),
+					zap.String("external_order_id", externalOrderID),
+				)
+			default:
+				// Pago, ou terminal por outro motivo. Cancelar um pedido pago no
+				// ERP é decisão sobre dinheiro que já entrou, e o estorno é do
+				// gateway — não nosso. Fica para gente.
+				logger.From(ctx, s.logger).Warn("the order was cancelled in the ERP but the cart is paid — the refund is a human decision",
+					zap.String("cart_id", t.CartID),
+					zap.String("external_order_id", externalOrderID),
+				)
+			}
+		}
+	}
+
 	if providers.ERPOrderStatus(t.Status).VoltouAViver() && s.reopener != nil {
 		if morto, err := s.repo.CartIsTerminated(ctx, t.CartID); err == nil && morto {
 			rel, rErr := s.reopener.ReopenCartFromERP(ctx, t.CartID, storeID)

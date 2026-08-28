@@ -19,6 +19,11 @@ const (
 	CancelReasonBlocked = "customer_blocked"
 	CancelReasonExpired = "expired"
 	CancelReasonPayment = "payment_cancelled"
+	// CancelReasonERP: o lojista cancelou o pedido direto no ERP, e o carrinho
+	// está seguindo. Deliberadamente FORA do gatilho do reactor: o pedido já
+	// está cancelado lá — foi de onde o aviso veio — e mandar cancelar de novo
+	// seria falar com o Tiny para pedir o que ele acabou de nos contar.
+	CancelReasonERP = "erp_cancelled"
 )
 
 // CancelCart cancela UM carrinho por decisão do lojista, com a mesma proteção de
@@ -184,4 +189,60 @@ func (s *Service) ReopenCartFromERP(ctx context.Context, cartID, storeID string)
 		zap.Int("units_waitlisted", out.EmFila),
 	)
 	return out, nil
+}
+
+// CancelCartFromERP cancela o carrinho porque o pedido foi cancelado no ERP.
+//
+// Fecha a simetria que faltava. As três direções agora existem:
+//
+//	cancelar no LiveCart  →  o pedido é cancelado no Tiny      (reactor)
+//	reabrir no Tiny       →  o carrinho ressuscita aqui        (ReopenCartFromERP)
+//	cancelar no Tiny      →  o carrinho é cancelado aqui       (esta função)
+//
+// Faz o MESMO que o cancelamento do lojista — devolve estoque local, mata a fila
+// do carrinho, desativa o link — com uma diferença que importa: o motivo
+// gravado é `erp_cancelled`, e o reactor que estorna no ERP só reage a
+// `store_cancelled`. Sem isso o LiveCart mandaria cancelar um pedido que já
+// está cancelado, gastando escrita do teto da conta para nada.
+//
+// Carrinho PAGO não é cancelado por aqui. Cancelar um pedido pago no ERP é uma
+// decisão sobre dinheiro que já entrou, e o estorno é do gateway, não nosso.
+// Esses ficam para a triagem humana — a aba "Precisam atenção" os pega pelo
+// estado, e o log diz o que aconteceu.
+func (s *Service) CancelCartFromERP(ctx context.Context, cartID, storeID string) (bool, error) {
+	ctx = logger.WithStore(ctx, storeID, "")
+
+	release, acquired, err := s.repo.AcquireCartFinalisationLock(ctx, cartID)
+	if err != nil {
+		return false, err
+	}
+	if !acquired {
+		// Pagamento finalizando agora. O pagamento vence — sair daqui é o certo,
+		// e o mesmo raciocínio do cancelamento manual.
+		logger.From(ctx, s.logger).Info("erp cancel: refused, finalisation in progress",
+			zap.String("cart_id", cartID))
+		return false, nil
+	}
+	defer release()
+
+	res, err := s.repo.CancelCartFromERP(ctx, cartID, storeID)
+	if err != nil {
+		return false, fmt.Errorf("cancelling cart from ERP: %w", err)
+	}
+	if !res.Eligible {
+		logger.From(ctx, s.logger).Warn("the order was cancelled in the ERP but the cart cannot follow — it is paid or already terminal",
+			zap.String("cart_id", cartID))
+		return false, nil
+	}
+
+	logger.From(ctx, s.logger).Info("cart cancelled because the order was cancelled in the ERP",
+		zap.String("cart_id", cartID),
+		zap.Int("items_released", len(res.FreedProductIDs)),
+	)
+	// Estoque devolvido = alguém da fila pode ser atendido. Mesma promoção do
+	// cancelamento manual, pelo mesmo motivo.
+	for _, productID := range res.FreedProductIDs {
+		s.ProcessWaitlistForProduct(ctx, res.EventID, productID, storeID)
+	}
+	return true, nil
 }

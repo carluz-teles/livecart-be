@@ -106,6 +106,10 @@ func (s *Service) DrainLegacyReservations(ctx context.Context, storeID string, d
 // motivo dos outros adaptadores: nenhum dos dois pacotes importa o outro.
 type reopenerAdapter struct{ svc *Service }
 
+func (a reopenerAdapter) CancelCartFromERP(ctx context.Context, cartID, storeID string) (bool, error) {
+	return a.svc.CancelCartFromERP(ctx, cartID, storeID)
+}
+
 func (a reopenerAdapter) ReopenCartFromERP(ctx context.Context, cartID, storeID string) (erp.ReopenReport, error) {
 	rel, err := a.svc.ReopenCartFromERP(ctx, cartID, storeID)
 	return erp.ReopenReport{

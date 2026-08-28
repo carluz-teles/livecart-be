@@ -201,3 +201,142 @@ func TestReaberturaRepetidaNaoRetomaEstoqueDuasVezes(t *testing.T) {
 			"duas vezes", estoque)
 	}
 }
+
+// ─── A IDA: cancelaram no Tiny ──────────────────────────────────────────────
+//
+// O lojista muda a situação do pedido para Cancelado direto no painel do Tiny.
+// Antes disto o rastreamento gravava 'cancelado' na coluna e o carrinho seguia
+// aberto: link ativo, estoque preso deste lado, e a compradora podendo pagar um
+// pedido que não existe mais no ERP.
+
+func semearCarrinhoVivo(t *testing.T, estoque, qtd int) carrinhoCancelado {
+	t.Helper()
+	c := semearCarrinhoCancelado(t, estoque, qtd)
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE carts SET status='checkout', cancelled_reason=NULL WHERE id=$1`, c.cartID); err != nil {
+		t.Fatalf("deixando o carrinho vivo: %v", err)
+	}
+	return c
+}
+
+func TestCancelarNoTinyCancelaOCarrinhoEDevolveEstoque(t *testing.T) {
+	requireDB(t)
+	c := semearCarrinhoVivo(t, 5, 2)
+
+	res, err := testRepo.CancelCartFromERP(context.Background(), c.cartID, c.storeID)
+	if err != nil {
+		t.Fatalf("cancelando: %v", err)
+	}
+	if !res.Eligible {
+		t.Fatal("não cancelou um carrinho vivo")
+	}
+
+	var status, motivo string
+	var estoque int
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT c.status, c.cancelled_reason, (SELECT stock FROM products WHERE id=$2)
+		 FROM carts c WHERE c.id=$1`, c.cartID, c.produto).Scan(&status, &motivo, &estoque); err != nil {
+		t.Fatalf("lendo: %v", err)
+	}
+	if status != "cancelled" {
+		t.Errorf("status=%q, quero cancelled", status)
+	}
+	if motivo != "erp_cancelled" {
+		t.Errorf("motivo=%q, quero erp_cancelled — é o que impede o reactor de "+
+			"mandar cancelar no Tiny um pedido que JÁ está cancelado lá", motivo)
+	}
+	if estoque != 7 {
+		t.Errorf("estoque=%d, quero 7 (5 + 2 devolvidas)", estoque)
+	}
+}
+
+// O motivo é a trava que evita a escrita redundante no ERP. O reactor só reage
+// a 'store_cancelled'; se este caminho gravasse esse motivo, o LiveCart mandaria
+// cancelar de novo o pedido que o Tiny acabou de contar que cancelou.
+func TestCancelamentoVindoDoERPNaoDisparaOEstornoNoERP(t *testing.T) {
+	requireDB(t)
+	c := semearCarrinhoVivo(t, 5, 1)
+
+	if _, err := testRepo.CancelCartFromERP(context.Background(), c.cartID, c.storeID); err != nil {
+		t.Fatalf("cancelando: %v", err)
+	}
+	var motivo string
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT cancelled_reason FROM carts WHERE id=$1`, c.cartID).Scan(&motivo); err != nil {
+		t.Fatalf("lendo motivo: %v", err)
+	}
+	if motivo == "store_cancelled" {
+		t.Fatal("gravou store_cancelled — o reactor mandaria cancelar no Tiny " +
+			"um pedido já cancelado, gastando escrita do teto para nada")
+	}
+
+	// E o evento emitido carrega o mesmo motivo, que é o que o reactor lê.
+	var payloadMotivo string
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT payload->>'reason' FROM event_outbox
+		 WHERE name='cart.cancelled' AND payload->>'cart_id'=$1
+		 ORDER BY created_at DESC LIMIT 1`, c.cartID).Scan(&payloadMotivo); err != nil {
+		t.Fatalf("lendo o evento: %v", err)
+	}
+	if payloadMotivo != "erp_cancelled" {
+		t.Errorf("o evento diz reason=%q — o reactor decide por ele, não pela "+
+			"coluna", payloadMotivo)
+	}
+}
+
+// Carrinho PAGO não é cancelado pelo ERP. Cancelar um pedido pago lá é decisão
+// sobre dinheiro que já entrou, e o estorno é do gateway.
+func TestCancelarNoTinyNaoDerrubaCarrinhoPago(t *testing.T) {
+	requireDB(t)
+	c := semearCarrinhoVivo(t, 5, 2)
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE carts SET payment_status='paid', paid_at=now() WHERE id=$1`, c.cartID); err != nil {
+		t.Fatalf("pagando: %v", err)
+	}
+
+	res, err := testRepo.CancelCartFromERP(context.Background(), c.cartID, c.storeID)
+	if err != nil {
+		t.Fatalf("cancelando: %v", err)
+	}
+	if res.Eligible {
+		t.Error("cancelou uma venda paga por causa de um clique no ERP")
+	}
+	var status string
+	var estoque int
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT c.status, (SELECT stock FROM products WHERE id=$2) FROM carts c WHERE c.id=$1`,
+		c.cartID, c.produto).Scan(&status, &estoque); err != nil {
+		t.Fatalf("lendo: %v", err)
+	}
+	if status == "cancelled" {
+		t.Error("o carrinho pago virou cancelado")
+	}
+	if estoque != 5 {
+		t.Errorf("mexeu no estoque (%d) de uma venda paga", estoque)
+	}
+}
+
+// Ida e volta, no mesmo carrinho: cancela no Tiny, reabre no Tiny.
+func TestIdaEVoltaPeloTinyTerminaComOCarrinhoVivo(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	c := semearCarrinhoVivo(t, 5, 2)
+
+	if _, err := testRepo.CancelCartFromERP(ctx, c.cartID, c.storeID); err != nil {
+		t.Fatalf("cancelando: %v", err)
+	}
+	// Sem ajuste nenhum: a reabertura reconhece `erp_cancelled` tanto quanto
+	// `store_cancelled`. É o mesmo gesto humano, do outro lado — e sem isso a
+	// ida e volta quebrava na volta, deixando o pedido vivo no ERP com o
+	// carrinho morto aqui.
+	rel, err := testRepo.ReopenCancelledCartFromERP(ctx, c.cartID, c.storeID)
+	if err != nil {
+		t.Fatalf("reabrindo: %v", err)
+	}
+	if !rel.Reopened || rel.Recuperadas != 2 {
+		t.Errorf("reaberto=%v recuperadas=%d, quero true/2", rel.Reopened, rel.Recuperadas)
+	}
+	if _, _, _, estoque := c.estado(t); estoque != 5 {
+		t.Errorf("estoque=%d, quero 5 — a ida devolveu 2 e a volta retomou 2", estoque)
+	}
+}
