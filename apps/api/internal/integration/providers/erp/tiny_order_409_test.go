@@ -17,6 +17,7 @@ package erp
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,7 +33,17 @@ type tinyFake struct {
 	rotas           []string
 	pedidosPost     int
 	responderPedido func(tentativa int, w http.ResponseWriter)
-	marcadorAchaID  string
+	// ancoraAchaID: o id que a varredura dos pedidos recentes devolve. Vazio =
+	// não existe
+	// pedido com aquela âncora.
+	ancoraAchaID string
+	// ancoraDoCarrinho é o cart id que a âncora do pedido encontrado carrega.
+	// Tem de bater com o do pedido sendo criado, senão a varredura o descarta —
+	// que é justamente a proteção contra adotar o pedido de outro comprador.
+	ancoraDoCarrinho string
+	// corpoDoPedido guarda o corpo do POST /pedidos, para o teste afirmar que a
+	// âncora viajou junto.
+	corpoDoPedido string
 }
 
 func (f *tinyFake) servidor(t *testing.T) *httptest.Server {
@@ -42,18 +53,25 @@ func (f *tinyFake) servidor(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch {
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/pedidos") && r.URL.Query().Get("marcadores") != "":
-			if f.marcadorAchaID == "" {
+		// A adoção não busca mais por marcador: varre os pedidos recentes e
+		// COMPARA a âncora. O fake responde a listagem já com o campo, que é o
+		// caminho barato (sem releitura por pedido).
+		case r.Method == http.MethodGet && r.URL.Path == "/pedidos" && r.URL.Query().Get("limit") != "":
+			if f.ancoraAchaID == "" {
 				_, _ = w.Write([]byte(`{"itens":[]}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"itens":[{"id":` + f.marcadorAchaID + `}]}`))
+			_, _ = w.Write([]byte(`{"itens":[{"id":` + f.ancoraAchaID +
+				`,"numeroOrdemCompra":"lc-cart-` + f.ancoraDoCarrinho + `"}]}`))
 
 		case r.Method == http.MethodPost && r.URL.Path == "/pedidos":
 			f.pedidosPost++
+			if b, err := io.ReadAll(r.Body); err == nil {
+				f.corpoDoPedido = string(b)
+			}
 			f.responderPedido(f.pedidosPost, w)
 
-		default: // marcadores, situacao, lancar-estoque
+		default: // marcadores, situacao
 			w.WriteHeader(http.StatusNoContent)
 		}
 	}))
@@ -83,7 +101,7 @@ func pedidoPago() ERPOrder {
 	}
 }
 
-func TestPedidoCriadoRecebeOMarcadorDoCarrinho(t *testing.T) {
+func TestPedidoCriadoRecebeAAncoraDeBusca(t *testing.T) {
 	f := &tinyFake{responderPedido: func(_ int, w http.ResponseWriter) {
 		_, _ = w.Write([]byte(`{"id":847673655,"numeroPedido":"26954"}`))
 	}}
@@ -94,16 +112,25 @@ func TestPedidoCriadoRecebeOMarcadorDoCarrinho(t *testing.T) {
 		t.Fatalf("CreateOrder: %v", err)
 	}
 
-	// Sem o marcador o pedido não é localizável pela API depois: numeroOrdemCompra
-	// viaja no corpo mas não é filtro de busca.
-	if !f.chamou("POST /pedidos/847673655/marcadores") {
-		t.Errorf("o pedido criado não recebeu o marcador do carrinho; rotas: %v", f.rotas)
+	// O MARCADOR NÃO É ESCRITO, e isto trava essa decisão. Os marcadores do
+	// Tiny são a etiqueta de organização do LOJISTA; enchê-los de metadado
+	// nosso polui a ferramenta de trabalho dele para resolver um problema
+	// nosso. A âncora vive em numeroOrdemCompra e nas observações.
+	if f.chamou("POST /pedidos/847673655/marcadores") {
+		t.Errorf("escreveu marcador no pedido — os marcadores são do lojista. "+
+			"rotas: %v", f.rotas)
+	}
+	if !strings.Contains(f.corpoDoPedido, "numeroOrdemCompra") {
+		t.Errorf("o POST /pedidos não levou numeroOrdemCompra — ele não serve de "+
+			"filtro, mas é a âncora que a adoção compara ao varrer os pedidos "+
+			"recentes. corpo: %s", f.corpoDoPedido)
 	}
 }
 
 func TestConflitoAdotaOPedidoQueJaExiste(t *testing.T) {
 	f := &tinyFake{
-		marcadorAchaID: "847673655",
+		ancoraAchaID:     "847673655",
+		ancoraDoCarrinho: "c1ec50cc-940b-46d6-bf41-d1336d9f9d35",
 		responderPedido: func(_ int, w http.ResponseWriter) {
 			w.WriteHeader(http.StatusConflict)
 			_, _ = w.Write([]byte(`{"mensagem":"Esse registro já existe"}`))
@@ -118,7 +145,7 @@ func TestConflitoAdotaOPedidoQueJaExiste(t *testing.T) {
 			"fora de sincronia mesmo estando lá: %v", err)
 	}
 	if res == nil || res.OrderID != "847673655" {
-		t.Fatalf("adoção devolveu %+v, esperava o pedido encontrado pelo marcador", res)
+		t.Fatalf("adoção devolveu %+v, esperava o pedido encontrado pela âncora", res)
 	}
 
 	// O passo que faltava nos pedidos "Em aberto": a aprovação roda depois do
@@ -133,7 +160,7 @@ func TestConflitoSemMarcadorContinuaSendoFalha(t *testing.T) {
 	// sucesso aqui seria pior que falhar: o carrinho ficaria marcado como
 	// concluído apontando para um pedido que ninguém sabe qual é.
 	f := &tinyFake{
-		marcadorAchaID: "",
+		ancoraAchaID: "",
 		responderPedido: func(_ int, w http.ResponseWriter) {
 			w.WriteHeader(http.StatusConflict)
 			_, _ = w.Write([]byte(`{"mensagem":"Esse registro já existe"}`))
@@ -148,9 +175,6 @@ func TestConflitoSemMarcadorContinuaSendoFalha(t *testing.T) {
 }
 
 func TestOrdemDosPassosNaCriacao(t *testing.T) {
-	// A ordem importa e é o que explica o "Em aberto": criar → marcar → aprovar.
-	// Se o marcador viesse depois da aprovação, um timeout entre os dois deixaria
-	// o pedido aprovado porém ainda invisível para a reconciliação.
 	f := &tinyFake{responderPedido: func(_ int, w http.ResponseWriter) {
 		_, _ = w.Write([]byte(`{"id":900,"numeroPedido":"1"}`))
 	}}
@@ -161,20 +185,21 @@ func TestOrdemDosPassosNaCriacao(t *testing.T) {
 		t.Fatalf("CreateOrder: %v", err)
 	}
 
-	iMarcador, iAprova := -1, -1
+	// A ordem importa e é o que explica o "Em aberto": criar → marcar → aprovar.
+	// Se o marcador viesse depois da aprovação, um timeout entre os dois deixaria
+	// A âncora agora viaja DENTRO do POST /pedidos, então ela não pode chegar
+	// tarde — é gravada com o pedido ou não é gravada. O que resta verificar é
+	// que a aprovação aconteceu e que nenhum marcador foi escrito.
+	iAprova := -1
 	for i, r := range f.rotas {
-		switch r {
-		case "POST /pedidos/900/marcadores":
-			iMarcador = i
-		case "PUT /pedidos/900/situacao":
+		if r == "PUT /pedidos/900/situacao" {
 			iAprova = i
 		}
+		if strings.HasSuffix(r, "/marcadores") {
+			t.Errorf("escreveu marcador — os marcadores são do lojista. rotas: %v", f.rotas)
+		}
 	}
-	if iMarcador == -1 || iAprova == -1 {
-		t.Fatalf("marcador ou aprovação não aconteceram; rotas: %v", f.rotas)
-	}
-	if iMarcador > iAprova {
-		t.Errorf("o marcador foi gravado depois da aprovação; um timeout entre os dois "+
-			"deixa o pedido sem âncora de busca. rotas: %v", f.rotas)
+	if iAprova == -1 {
+		t.Fatalf("a aprovação não aconteceu; rotas: %v", f.rotas)
 	}
 }

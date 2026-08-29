@@ -10,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/erp"
+	"livecart/apps/api/internal/integration/providers"
 	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/httpx"
@@ -617,6 +619,19 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 			Saldo        *float64    `json:"saldo"`
 			ChaveAcesso  string      `json:"chaveAcesso"`
 			Situacao     json.Number `json:"situacao"`
+			// Eventos de pedido (inclusao_pedido / atualizacao_pedido). O
+			// `codigoSituacao` é um SLUG ("aberto", "aprovado", "enviado"), não o
+			// código numérico que a API usa para MUDAR a situação — as duas
+			// grafias convivem, e a tabela que as casa está em
+			// providers.ERPOrderStatus.
+			Numero            string `json:"numero"`
+			CodigoSituacao    string `json:"codigoSituacao"`
+			DescricaoSituacao string `json:"descricaoSituacao"`
+			// Evento de rastreio.
+			IDVendaTiny    json.Number `json:"idVendaTiny"`
+			CodigoRastreio string      `json:"codigoRastreio"`
+			URLRastreio    string      `json:"urlRastreio"`
+			Transportadora string      `json:"transportadora"`
 		} `json:"dados"`
 	}
 	if err := json.Unmarshal(body, &webhook); err != nil {
@@ -655,9 +670,18 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	}
 	logger.From(c.Context(), h.logger).Info("tiny webhook received", campos...)
 
-	// Store webhook event
+	// Âncora de dedupe do webhook_events. Para eventos de pedido é o par
+	// pedido+situação: sem a situação, uma redelivery e uma transição de verdade
+	// no mesmo pedido teriam a mesma chave, e a segunda seria descartada como
+	// duplicata.
 	eventID := productID
-	if eventID == "" {
+	switch {
+	case webhook.Tipo == "inclusao_pedido" || webhook.Tipo == "atualizacao_pedido":
+		eventID = webhook.Dados.ID + ":" + webhook.Dados.CodigoSituacao
+	case webhook.Tipo == "rastreio":
+		eventID = "rastreio:" + webhook.Dados.IDVendaTiny.String()
+	}
+	if eventID == "" || eventID == ":" {
 		eventID = c.Get("X-Request-Id")
 	}
 
@@ -718,6 +742,90 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 		}()
 	}
 
+	// Eventos de PEDIDO: o ERP avisa a cada transição de situação, e é assim que
+	// o trajeto pós-venda (faturado → separado → enviado → entregue) chega ao
+	// LiveCart em vez de ficar só no outro sistema.
+	//
+	// `inclusao_pedido` entra junto com `atualizacao_pedido` de propósito: o
+	// pedido que o LiveCart acabou de criar nasce Em aberto, e registrar esse
+	// primeiro estágio é o que dá começo ao histórico.
+	if webhook.Tipo == "inclusao_pedido" || webhook.Tipo == "atualizacao_pedido" {
+		idPedido := webhook.Dados.ID
+		if idPedido == "" {
+			idPedido = webhook.Dados.IDPedido.String()
+		}
+
+		// A nota fiscal chega POR AQUI, e não só pelo evento `nota_fiscal`.
+		//
+		// Todo webhook de pedido carrega `idNotaFiscal`, e ele vale "0" enquanto
+		// não há nota (capturado em 26/08/2026, com o pedido em situação
+		// "faturado" e idNotaFiscal ainda "0" — a situação mente, o campo não).
+		// Depender do evento `nota_fiscal` sozinho é frágil: em 1.807 webhooks
+		// gravados dessa conta ele NUNCA apareceu, e não há rota na API v3 para
+		// conferir a quais tipos a conta está inscrita.
+		//
+		// `atualizacao_pedido` apareceu 380 vezes nas mesmas capturas. Usar o
+		// canal que comprovadamente chega, em vez do que talvez chegue, é o que
+		// impede o LiveCart de somar item num pedido que já virou documento.
+		if nf := webhook.Dados.IDNotaFiscal.String(); nf != "" && nf != "0" && idPedido != "" {
+			go func() {
+				ctx := logger.WithStore(context.Background(), storeID, storeSlug)
+				if _, err := h.service.ERP().SyncCartInvoiceByExternalOrder(ctx, storeID, idPedido, nf); err != nil {
+					logger.From(ctx, h.logger).Error("failed to record the invoice carried by the order webhook",
+						zap.String("id_pedido", idPedido),
+						zap.String("id_nfe", nf),
+						zap.Error(err),
+					)
+				}
+			}()
+		}
+
+		status, conhecida := providers.ParseERPOrderStatus(webhook.Dados.CodigoSituacao)
+		switch {
+		case idPedido == "":
+			logger.From(c.Context(), h.logger).Warn("order webhook missing order id — cannot track",
+				zap.String("tipo", webhook.Tipo),
+			)
+		case !conhecida:
+			// Situação nova numa versão futura da API. Inventar um nome seria
+			// pior do que registrar que não conhecemos aquela.
+			logger.From(c.Context(), h.logger).Warn("order webhook carries an unknown situation",
+				zap.String("id_pedido", idPedido),
+				zap.String("codigo_situacao", webhook.Dados.CodigoSituacao),
+				zap.String("descricao_situacao", webhook.Dados.DescricaoSituacao),
+			)
+		default:
+			payload := append([]byte(nil), body...)
+			numero := webhook.Dados.Numero
+			ehAtualizacao := webhook.Tipo == "atualizacao_pedido"
+			go func() {
+				ctx := logger.WithStore(context.Background(), storeID, storeSlug)
+				if err := h.service.ERP().ObserveOrderStatus(ctx, storeID, idPedido, numero, status, erp.StatusSourceWebhook, payload); err != nil {
+					logger.From(ctx, h.logger).Error("failed to record ERP order status",
+						zap.String("id_pedido", idPedido),
+						zap.String("status", string(status)),
+						zap.Error(err),
+					)
+				}
+
+				// `atualizacao_pedido` também dispara quando SÓ os itens mudam —
+				// medido em 26/08/2026: um PUT de quantidades às 20:14:21 gerou o
+				// webhook às 20:14:24, com a situação parada em "aberto". É o
+				// empurrão que dispensa sondagem: o lojista mexeu no pedido pelo
+				// painel e o carrinho precisa seguir.
+				//
+				// Ele chega também depois das NOSSAS escritas. O reflexo é
+				// idempotente e sai barato quando nada mudou (uma leitura e uma
+				// comparação), e é coalescido por pedido para uma rajada não virar
+				// uma leitura por webhook.
+				if !ehAtualizacao {
+					return
+				}
+				h.reflexoDoPedido(ctx, storeID, idPedido)
+			}()
+		}
+	}
+
 	// Process NFe events: when the merchant emits/cancels a nota fiscal in
 	// Tiny we resolve the local cart by external_order_id and refresh the
 	// erp_invoice_* fields. The shipping flow listens to those fields to
@@ -747,6 +855,58 @@ func (h *WebhookHandler) HandleTiny(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, fiber.Map{"status": "received"})
+}
+
+// reflexoDoPedido traz para o carrinho o que o pedido no ERP diz agora.
+//
+// Coalescido por pedido: uma rajada de webhooks (a nossa própria escrita gera
+// um, e o lojista pode salvar várias vezes seguidas) vira no máximo duas
+// leituras, e a última sempre enxerga o estado final.
+func (h *WebhookHandler) reflexoDoPedido(ctx context.Context, storeID, idPedido string) {
+	cartID, err := h.service.CartIDByExternalOrder(ctx, storeID, idPedido)
+	if err != nil || cartID == "" {
+		return // pedido que não é de nenhum carrinho nosso
+	}
+	rodou, err := h.service.CoalescerReflexo().Fazer(storeID+"|"+idPedido, func() error {
+		// Pedido PAGO: a grade não volta para o carrinho (aquela venda está
+		// fechada), mas o dinheiro precisa continuar dizendo a verdade. Toda
+		// mudança de item faz o ERP redistribuir o total pelas parcelas e
+		// afirmar que ela pagou o valor novo.
+		if split, splitErr := h.service.RecomporParcelasDoPedidoPago(ctx, cartID, storeID); splitErr != nil {
+			logger.From(ctx, h.logger).Error("could not restore the paid/outstanding split",
+				zap.String("cart_id", cartID), zap.Error(splitErr))
+		} else if split != nil && split.Reescrito {
+			logger.From(ctx, h.logger).Info("paid order gained items; installments split",
+				zap.String("cart_id", cartID),
+				zap.Int64("paid_cents", split.PagoCents),
+				zap.Int64("outstanding_cents", split.SaldoCents))
+		}
+
+		rel, syncErr := h.service.SyncCartFromERPOrder(ctx, cartID, storeID)
+		if syncErr != nil {
+			return syncErr
+		}
+		if rel != nil && len(rel.Changes) > 0 {
+			logger.From(ctx, h.logger).Info("cart followed the merchant's edit in the ERP",
+				zap.String("cart_id", cartID),
+				zap.String("id_pedido", idPedido),
+				zap.Int("changes", len(rel.Changes)),
+				zap.Int("products_imported", rel.Imported),
+			)
+		}
+		return nil
+	})
+	if err != nil {
+		logger.From(ctx, h.logger).Warn("could not reflect the ERP order into the cart",
+			zap.String("cart_id", cartID),
+			zap.String("id_pedido", idPedido),
+			zap.Error(err))
+		return
+	}
+	if !rodou {
+		logger.From(ctx, h.logger).Debug("reflection coalesced into the one already running",
+			zap.String("id_pedido", idPedido))
+	}
 }
 
 // HandleMelhorEnvio handles Melhor Envio webhook notifications. ME signs the

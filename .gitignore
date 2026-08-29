@@ -7,3 +7,6 @@ tiny-sandbox-bin
 
 # Compiled Go binary (built from apps/api/cmd/http-server)
 /http-server
+# Env do laboratório local (deriva do .env e carrega segredo). Nunca versionar.
+.lab.env.local
+.lab.prod.env.local

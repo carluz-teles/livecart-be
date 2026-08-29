@@ -1,14 +1,10 @@
 package erp
 
-// Bloco B2c-2 — reactors ERP no padrão On<Fato> (docs/domain-map.md §8). O corpo
-// destes reactors vive no pacote canônico internal/erp; integration.Service
-// mantém as delegações React*ERP (assinaturas inalteradas) para NÃO tocar
-// main.go — o rename dos call sites e o wiring direto do reactor são B2e.
+// Reactors ERP no padrão On<Fato> (docs/domain-map.md §8).
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	"go.uber.org/zap"
@@ -17,28 +13,27 @@ import (
 	"livecart/apps/api/lib/logger"
 )
 
-// FinalizeOrConfirm é a entrada única do caminho pago: tenta o confirm do
-// pedido-como-reserva (2 PUTs, zero estoque) e cai na finalização LEGADA quando
-// o cart não foi convertido (ErrCartNotConverted).
+// FinalizeOrConfirm é a entrada única do caminho pago.
+//
+// Era um par: tentava o confirm do pedido e, quando o carrinho não tinha pedido,
+// caía numa finalização legada que criava o pedido do zero, lançava estoque e
+// estornava as reservas manuais. Esse segundo caminho não existe mais — o
+// carrinho sempre tem pedido desde o primeiro comentário, e quando não tem o
+// próprio confirm cria um. Restou a chamada direta; o nome fica porque é o que
+// os reactors e as delegações chamam.
 func (s *Service) FinalizeOrConfirm(ctx context.Context, cartID, storeID string, status *providers.PaymentStatus) error {
-	err := s.ConfirmERPOrderPayment(ctx, cartID, storeID, status)
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, ErrCartNotConverted) {
-		return s.FinalizeCartERPOrder(ctx, cartID, storeID, status)
-	}
-	return err
+	return s.ConfirmERPOrderPayment(ctx, cartID, storeID, status)
 }
 
-// OnOrderPaid finalises the ERP (Tiny) order in reaction to the order.paid fact
+// OnOrderPaid finalises the ERP order in reaction to the order.paid fact
 // (emitted transactionally by OnCartPaid once the immutable Order exists), NOT
 // cart.paid directly — decoupling the ERP retry loop from the customer-facing
-// fan-out. It needs the FRESH gateway snapshot (installments, fees, money-release
-// date) frozen into the order.paid payload. Errors are returned so asynq retries
-// + dead-letters (idempotent via the advisory lock + resumable markers). Stores
-// without a Tiny integration no-op so a paid order never churns retries. A nil
-// snapshot finalises without payment details — admin retry replays afterwards.
+// fan-out. It needs the FRESH gateway snapshot (installments, fees,
+// money-release date) frozen into the order.paid payload. Errors are returned so
+// asynq retries + dead-letters (idempotent via the advisory lock + resumable
+// markers). Stores without an ERP integration no-op so a paid order never churns
+// retries. A nil snapshot finalises without payment details — admin retry
+// replays afterwards.
 func (s *Service) OnOrderPaid(ctx context.Context, cartID, storeID string, snapshotJSON []byte) error {
 	ctx = logger.WithStore(ctx, storeID, "")
 	if _, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny"); err != nil {
@@ -57,11 +52,11 @@ func (s *Service) OnOrderPaid(ctx context.Context, cartID, storeID string, snaps
 	return s.FinalizeOrConfirm(ctx, cartID, storeID, status)
 }
 
-// OnOrderRefunded cancels the converted ERP (Tiny) order and returns its stock
-// in reaction to the order.refunded fact (emitted transactionally by
-// OnCartRefunded once the Order is flipped to 'refunded'), NOT cart.refunded
-// directly. Idempotent by erp_order_state (once cancelled, a re-run no-ops), so
-// returning the error for asynq retry + DLQ is safe — no payment snapshot needed.
+// OnOrderRefunded cancels the ERP order in reaction to the order.refunded fact
+// (emitted transactionally by OnCartRefunded once the Order is flipped to
+// 'refunded'), NOT cart.refunded directly. Idempotent by erp_order_state (once
+// cancelled, a re-run no-ops), so returning the error for asynq retry + DLQ is
+// safe — no payment snapshot needed.
 func (s *Service) OnOrderRefunded(ctx context.Context, cartID, storeID string) error {
 	ctx = logger.WithStore(ctx, storeID, "")
 	if err := s.RefundConvertedCartOrder(ctx, cartID, storeID); err != nil {
@@ -70,22 +65,10 @@ func (s *Service) OnOrderRefunded(ctx context.Context, cartID, storeID string) e
 	return nil
 }
 
-// OnCartExpired reverses the cart's ERP footprint in Tiny in reaction to the
-// cart.expired fact, decoupled from ExpireCart's eligibility flip so it gets its
-// own asynq retry + DLQ. Design-C converted carts get their order cancelled
-// (idempotent by erp_order_state, so the error is returned for retry);
-// non-converted carts have their saída-manual reservations reversed best-effort.
+// OnCartExpired devolve o estoque do carrinho que venceu, cancelando o pedido.
+// Uma chamada, idempotente pelo erp_order_state — o erro sobe para o asynq
+// repetir. Carrinho sem pedido não tem nada preso no ERP e sai por aqui mesmo.
 func (s *Service) OnCartExpired(ctx context.Context, cartID, storeID string) error {
 	ctx = logger.WithStore(ctx, storeID, "")
-	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
-	if err != nil {
-		return fmt.Errorf("loading cart ERP order state on expiry: %w", err)
-	}
-	if st.State != OrderStateNone && st.State != OrderStateCancelled {
-		// Design C: cancelling the converted order returns stock in Tiny.
-		return s.CancelERPOrderForCart(ctx, cartID, storeID)
-	}
-	// Legacy (non-converted): reverse the saída-manual reservations per cart.
-	// O erro sobe para o asynq poder repetir — antes era descartado aqui.
-	return s.reverseCartReservationsInERP(ctx, cartID, storeID)
+	return s.CancelERPOrderForCart(ctx, cartID, storeID)
 }

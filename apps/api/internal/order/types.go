@@ -142,6 +142,15 @@ type OrderItemResponse struct {
 	// 0 em pedido já pago (o snapshot registra o que foi vendido).
 	WaitlistedQuantity int `json:"waitlistedQuantity"`
 
+	// PaidQuantity é quantas unidades desta linha algum pagamento já cobriu.
+	// Quantity - PaidQuantity é o que falta pagar dela.
+	//
+	// A contagem é por unidade porque o carrinho passou a receber item DEPOIS
+	// do pagamento: a compradora pagou 2 un. na live de segunda e pediu a 3ª na
+	// quinta, tudo na mesma linha (cart_items é único por produto). "Esta linha
+	// está paga" seria mentira; "2 de 3 pagas" é a verdade.
+	PaidQuantity int `json:"paidQuantity"`
+
 	// Shipping dimensions (joined from products). Zero when the product has no
 	// dimensions filled in — admin UIs should treat them as "missing" not "0"
 	// and block create-shipment until the merchant fills them in.
@@ -265,6 +274,12 @@ type OrderDetailResponse struct {
 	// loja e mesmo assim foi pago — o cancelamento foi revertido e o pedido
 	// seguiu o fluxo normal. O FE mostra isso no histórico do pedido.
 	CancellationRevertedAt *time.Time `json:"cancellationRevertedAt,omitempty"`
+	// CancellationRevertedReason: POR QUE o cancelamento foi desfeito. Os dois
+	// casos existem e o lojista precisa saber qual é — um diz "ela pagou assim
+	// mesmo", o outro diz "você reabriu o pedido no Tiny".
+	//   'payment_won'  — o pagamento entrou depois do cancelamento
+	//   'erp_reopened' — o lojista reabriu o pedido no ERP, à mão
+	CancellationRevertedReason string `json:"cancellationRevertedReason,omitempty"`
 	// Waitlist são os produtos que a cliente pediu, a loja não tinha e ela
 	// entrou na fila. Não somam no total nem vão para a transportadora — são o
 	// que o lojista precisa dizer que está esperando reposição.
@@ -280,6 +295,24 @@ type OrderDetailResponse struct {
 	// não incluído em vez de simplesmente omitido.
 	WaitlistedAmount int64 `json:"waitlistedAmount"`
 
+	// AlreadyPaidAmount / OutstandingAmount: a divisão do dinheiro do pedido.
+	//
+	// Um pedido não vira mais "pago" de uma vez só. Enquanto não foi faturado
+	// ele continua recebendo item, e o lojista despacha olhando para as duas
+	// metades: o que a compradora já pagou e o que ela ainda deve. Quando nada
+	// entrou depois do pagamento, outstandingAmount é 0 e a tela some com a
+	// divisão — que é o caso comum.
+	AlreadyPaidAmount int64 `json:"alreadyPaidAmount"`
+	OutstandingAmount int64 `json:"outstandingAmount"`
+	// DiscountedAmount é o que foi abatido por cupom ou desconto de PIX. Sem
+	// ele a tela mostraria a diferença entre o preço cheio e o que entrou como
+	// se fosse dívida — que é exatamente o erro que a parcela "DESCONTO" no ERP
+	// existe para não cometer.
+	DiscountedAmount int64 `json:"discountedAmount"`
+	// Payments é o extrato: uma linha por cobrança, na ordem em que o dinheiro
+	// entrou. Um pedido pode ser pago em várias vezes enquanto recebe item.
+	Payments []OrderPaymentEntryResponse `json:"payments,omitempty"`
+
 	// Pagamento: método (pix/credit_card/...), parcelas e os valores REAIS do
 	// pedido. PaidTotalCents é EXATAMENTE o que foi cobrado (com desconto PIX);
 	// DiscountCents é cupom + desconto PIX. O FE exibe "PIX" / "Cartão · 3x", o
@@ -288,6 +321,16 @@ type OrderDetailResponse struct {
 	Installments   int    `json:"installments,omitempty"`
 	DiscountCents  int64  `json:"discountCents"`
 	PaidTotalCents int64  `json:"paidTotalCents"`
+}
+
+// OrderPaymentEntryResponse é uma cobrança do extrato do pedido.
+type OrderPaymentEntryResponse struct {
+	AmountCents int64 `json:"amountCents"`
+	// DiscountCents é o abatimento desta cobrança: o preço cheio que ela
+	// liquidou menos o que de fato entrou.
+	DiscountCents int64     `json:"discountCents"`
+	Method        string    `json:"method,omitempty"`
+	PaidAt        time.Time `json:"paidAt"`
 }
 
 // OrderWaitlistItemResponse é a projeção de uma entrada de fila de espera.
@@ -558,20 +601,25 @@ func NewOrderDetailResponse(o OrderDetailOutput) OrderDetailResponse {
 	}
 
 	resp := OrderDetailResponse{
-		OrderResponse:          NewOrderResponse(o.OrderOutput),
-		Token:                  o.Token,
-		Comments:               comments,
-		Waitlist:               waitlist,
-		Notifications:          append([]OrderNotificationOutput{}, o.Notifications...),
-		WaitlistJourney:        append([]OrderWaitlistJourneyOutput{}, o.WaitlistJourney...),
-		PayableAmount:          o.PayableAmount,
-		WaitlistedAmount:       o.WaitlistedAmount,
-		PaymentMethod:          o.PaymentMethod,
-		Installments:           o.Installments,
-		DiscountCents:          o.DiscountCents,
-		PaidTotalCents:         o.PaidTotalCents,
-		CustomerBlocked:        o.CustomerBlocked,
-		CancellationRevertedAt: o.CancellationRevertedAt,
+		OrderResponse:              NewOrderResponse(o.OrderOutput),
+		Token:                      o.Token,
+		Comments:                   comments,
+		Waitlist:                   waitlist,
+		Notifications:              append([]OrderNotificationOutput{}, o.Notifications...),
+		WaitlistJourney:            append([]OrderWaitlistJourneyOutput{}, o.WaitlistJourney...),
+		PayableAmount:              o.PayableAmount,
+		WaitlistedAmount:           o.WaitlistedAmount,
+		AlreadyPaidAmount:          o.AlreadyPaidAmount,
+		OutstandingAmount:          o.OutstandingAmount,
+		DiscountedAmount:           o.DiscountedAmount,
+		Payments:                   pagamentosResponse(o.Payments),
+		PaymentMethod:              o.PaymentMethod,
+		Installments:               o.Installments,
+		DiscountCents:              o.DiscountCents,
+		PaidTotalCents:             o.PaidTotalCents,
+		CustomerBlocked:            o.CustomerBlocked,
+		CancellationRevertedAt:     o.CancellationRevertedAt,
+		CancellationRevertedReason: o.CancellationRevertedReason,
 	}
 
 	if o.Customer != nil {
@@ -789,6 +837,10 @@ type OrderItemOutput struct {
 	// depois da venda materializada.
 	WaitlistedQuantity int
 
+	// PaidQuantity é quantas unidades desta linha algum pagamento já cobriu —
+	// ver a nota em OrderItemResponse.
+	PaidQuantity int
+
 	WeightGrams   int
 	HeightCm      int
 	WidthCm       int
@@ -898,6 +950,10 @@ type OrderItemRow struct {
 	// vendido, e vem 0 para pedido já materializado.
 	WaitlistedQuantity int
 
+	// PaidQuantity é quantas unidades desta linha algum pagamento já cobriu —
+	// ver a nota em OrderItemResponse.
+	PaidQuantity int
+
 	// Joined from products for the shipping flow. Zero when the product has
 	// no dimensions filled in — service-layer sets them unchanged (0) so the
 	// UI knows they are missing.
@@ -984,7 +1040,8 @@ type OrderDetailRow struct {
 
 	// Preenchido quando o lojista cancelou este pedido e o pagamento entrou
 	// assim mesmo, revertendo o cancelamento. NULL na esmagadora maioria.
-	CancellationRevertedAt *time.Time
+	CancellationRevertedAt     *time.Time
+	CancellationRevertedReason string
 
 	// Pagamento: método (pix/credit_card/...), parcelas (do gateway_snapshot) e
 	// os valores REAIS do pedido — desconto (cupom + PIX) e valor efetivamente
@@ -1112,7 +1169,8 @@ type OrderDetailOutput struct {
 	// o pagamento entrou assim mesmo: o cancelamento foi revertido e o pedido
 	// seguiu o fluxo normal. Vira uma entrada no histórico do pedido para o
 	// lojista entender por que um pedido "cancelado" está pago.
-	CancellationRevertedAt *time.Time
+	CancellationRevertedAt     *time.Time
+	CancellationRevertedReason string
 	// Waitlist são os produtos que a cliente pediu, a loja não tinha e ela
 	// entrou na fila. Não são itens pagáveis: não entram no total e não vão
 	// para a transportadora. Aparecem no detalhe porque é a única forma do
@@ -1135,6 +1193,12 @@ type OrderDetailOutput struct {
 	// O orçamento impresso usa este número: cobrar pela unidade que a loja não
 	// tem para entregar é a única forma de o documento sair errado.
 	PayableAmount int64
+	// AlreadyPaidAmount / OutstandingAmount: a divisão do dinheiro — ver a nota
+	// em OrderDetailResponse.
+	AlreadyPaidAmount int64
+	OutstandingAmount int64
+	DiscountedAmount  int64
+	Payments          []OrderPaymentEntry
 	// WaitlistedAmount é o valor das unidades em fila — o que o orçamento
 	// declara como NÃO incluído no total, em vez de apenas omitir.
 	WaitlistedAmount int64
@@ -1184,4 +1248,32 @@ type ERPFinalisationOutput struct {
 	LastError     string     // populated when Status == "failed"
 	LastAttemptAt *time.Time // most recent attempt (success or failure)
 	AttemptsCount int        // includes the initial finalisation
+}
+
+// OrderPaymentEntry é uma cobrança do carrinho, como o livro a guarda.
+type OrderPaymentEntry struct {
+	AmountCents       int64
+	GrossCoveredCents int64
+	Method            string
+	PaidAt            time.Time
+}
+
+func pagamentosResponse(in []OrderPaymentEntry) []OrderPaymentEntryResponse {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]OrderPaymentEntryResponse, 0, len(in))
+	for _, p := range in {
+		desconto := p.GrossCoveredCents - p.AmountCents
+		if desconto < 0 {
+			desconto = 0
+		}
+		out = append(out, OrderPaymentEntryResponse{
+			AmountCents:   p.AmountCents,
+			DiscountCents: desconto,
+			Method:        p.Method,
+			PaidAt:        p.PaidAt,
+		})
+	}
+	return out
 }

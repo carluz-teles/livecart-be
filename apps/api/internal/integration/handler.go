@@ -10,6 +10,8 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 
+	validation "github.com/go-ozzo/ozzo-validation/v4"
+	"github.com/go-ozzo/ozzo-validation/v4/is"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/query"
@@ -62,17 +64,22 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/:id", h.GetByID)
 	g.Delete("/:id", h.Delete)
 	g.Patch("/:id/priority", h.UpdatePriority)
-	g.Patch("/:id/erp/stock-source", h.UpdateERPStockSource)
 	g.Post("/:id/erp/resync", h.StartERPResync)
 
-	// Painel de pendências do razão de movimentos (erp_stock_movements). As
-	// rotas vivem fora de /:id porque a pendência é da LOJA, não de uma
-	// integração específica.
-	g.Get("/erp/stock-movements/pending", h.ListPendingStockMovements)
-	g.Post("/erp/stock-movements/:movementId/resolve", h.ResolveStockMovement)
-	// Reconciliação local × ERP em modo relatório (só leitura). Rodar com a
-	// loja quieta: durante uma live cada reserva borra a foto por segundos.
+	// Reconciliação local × ERP em modo relatório (só leitura). Fica fora de
+	// /:id porque a comparação é da LOJA, não de uma integração específica.
+	// Rodar com a loja quieta: durante uma live há uma janela de segundos entre
+	// o item entrar no carrinho e o pedido refletir no ERP.
 	g.Get("/erp/stock-reconciliation", h.RunStockReconciliation)
+
+	// Drenagem das reservas manuais para pedidos de venda. Migração única: sai
+	// da API quando a tabela stock_reservations estiver vazia.
+	g.Post("/erp/drain-legacy-reservations", h.DrainLegacyReservations)
+	// Juntar pedidos no ERP. Fica no grupo de integrações porque o efeito é
+	// inteiramente do lado do ERP — no LiveCart os pedidos continuam separados.
+	g.Post("/erp/join-orders", h.JoinOrders)
+	g.Get("/erp/join-candidates/:cartId", h.ListJoinCandidates)
+	g.Get("/erp/join-link/:cartId", h.GetCartJoinLink)
 
 	// Test connection
 	g.Post("/:id/test", h.TestConnection)
@@ -81,6 +88,7 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// formas-recebimento / formas-envio against the canonical names so
 	// the merchant sees what to register before the first sale.
 	g.Get("/:id/erp/health-check", h.RunERPHealthCheck)
+	g.Get("/:id/erp/reserva", h.CheckERPReserva)
 
 	// Instagram operations
 	g.Get("/instagram/lives", h.GetInstagramLives)
@@ -309,33 +317,6 @@ func (h *Handler) UpdatePriority(c *fiber.Ctx) error {
 	return httpx.OK(c, fiber.Map{"id": id, "priority": req.Priority})
 }
 
-// UpdateERPStockSource escolhe qual saldo do ERP o LiveCart espelha.
-// @Summary Choose which ERP balance mirrors into LiveCart
-// @Description Off (default) mirrors the physical balance; on mirrors the available one (physical minus what the ERP already committed to open documents).
-// @Tags integrations
-// @Accept json
-// @Produce json
-// @Param storeId path string true "Store ID"
-// @Param id path string true "Integration ID"
-// @Param body body UpdateERPStockSourceRequest true "Stock source"
-// @Success 200 {object} httpx.Envelope{data=ERPStockSourceResponse}
-// @Failure 422 {object} httpx.Envelope
-// @Router /stores/{storeId}/integrations/{id}/erp/stock-source [patch]
-func (h *Handler) UpdateERPStockSource(c *fiber.Ctx) error {
-	var req UpdateERPStockSourceRequest
-	if err := httpx.BindAndValidate(c, &req); err != nil {
-		return err
-	}
-	row, err := h.service.UpdateERPStockSource(
-		c.UserContext(),
-		req.ToInput(httpx.GetStoreID(c), c.Params("id")),
-	)
-	if err != nil {
-		return err
-	}
-	return httpx.OK(c, NewERPStockSourceResponse(row))
-}
-
 // StartERPResync relê todos os produtos vinculados ao ERP.
 // @Summary Re-read every ERP-linked product
 // @Description Queues a paced re-read of the store's ERP products. Used after changing which balance is mirrored, since the setting only affects future syncs and does not rewrite what is already stored.
@@ -413,6 +394,52 @@ func (h *Handler) RunERPHealthCheck(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, output)
+}
+
+// CheckERPReserva reports what can be known about the Tiny stock-reservation
+// module. It is deliberately three-valued: `GET /depositos`, which carries
+// `possuiReserva`, answers 403 even on an account with the module enabled, so
+// the only evidence available is `reservado > 0` on some product — which proves
+// the module is ON but never proves it is OFF.
+// @Summary Tiny stock reservation module check
+// @Description Reports confirmed / indeterminate / not-checked for the Tiny reservation module
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param id path string true "Integration ID"
+// @Success 200 {object} httpx.Envelope{data=ERPReservaResponse}
+// @Router /api/v1/stores/{storeId}/integrations/{id}/erp/reserva [get]
+// @Security BearerAuth
+func (h *Handler) CheckERPReserva(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+
+	check, err := h.service.ERP().VerificarReserva(c.Context(), storeID)
+	if err != nil && check == nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, ERPReservaResponse{
+		Status:   string(check.Status),
+		Sampled:  check.Amostrados,
+		WithHold: check.ComReserva,
+		Example:  check.Exemplo,
+		Reason:   check.Motivo,
+	})
+}
+
+// ERPReservaResponse é o retrato da checagem do módulo de Reserva.
+type ERPReservaResponse struct {
+	// Status: "confirmada" | "indeterminada" | "nao_verificada". Nunca
+	// "desativada" — ausência de reserva não prova ausência do módulo.
+	Status string `json:"status"`
+	// Sampled é quantos produtos foram lidos no Tiny.
+	Sampled int `json:"sampled"`
+	// WithHold é em quantos deles havia unidade reservada.
+	WithHold int `json:"withHold"`
+	// Example é o nome de um produto com reserva, para o lojista reconhecer a
+	// evidência em vez de ter de confiar no número.
+	Example string `json:"example,omitempty"`
+	// Reason explica um "nao_verificada".
+	Reason string `json:"reason,omitempty"`
 }
 
 // =============================================================================
@@ -1313,4 +1340,95 @@ func toIntegrationResponse(output *CreateIntegrationOutput) *IntegrationResponse
 		WebhookLastPingAt: output.WebhookLastPingAt,
 		Priority:          output.Priority,
 	}
+}
+
+// =============================================================================
+// JUNTAR PEDIDOS
+// =============================================================================
+
+// JoinOrdersRequest é o pedido de junção vindo do painel.
+type JoinOrdersRequest struct {
+	CartAID string `json:"cartAId"`
+	CartBID string `json:"cartBId"`
+	// ConfirmDifferentBuyers libera juntar pedidos de compradores diferentes.
+	// Fechado por padrão — ver JoinCartsInput.
+	ConfirmDifferentBuyers bool `json:"confirmDifferentBuyers"`
+}
+
+// Validate é o portão sintático. A decisão de QUAL vira anfitrião não está aqui:
+// é regra de negócio e vive no serviço, onde os dois carrinhos já foram lidos.
+func (r JoinOrdersRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.CartAID, validation.Required, is.UUIDv4),
+		validation.Field(&r.CartBID, validation.Required, is.UUIDv4),
+	)
+}
+
+// JoinOrders junta dois pedidos num só no ERP, mantendo-os separados aqui.
+// @Summary      Juntar pedidos no ERP
+// @Description  Um pedido só no Tiny com o conteúdo dos dois; no LiveCart eles continuam separados e vinculados.
+// @Tags         integrations
+// @Accept       json
+// @Produce      json
+// @Param        storeId path string true "Store ID"
+// @Param        payload body JoinOrdersRequest true "Os dois pedidos"
+// @Success      200 {object} httpx.Envelope{data=JoinCartsResult}
+// @Failure      409 {object} httpx.Envelope "compradores diferentes, ou já juntado"
+// @Failure      422 {object} httpx.Envelope "faturado, cancelado ou estornado"
+// @Router       /api/v1/stores/{storeId}/orders/join [post]
+// @Security     BearerAuth
+func (h *Handler) JoinOrders(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	var req JoinOrdersRequest
+	if err := c.BodyParser(&req); err != nil {
+		return httpx.DomainError(400, httpx.CodeValidationFailed, "corpo inválido")
+	}
+	if err := req.Validate(); err != nil {
+		return err
+	}
+	out, err := h.service.JoinCarts(c.Context(), JoinCartsInput{
+		StoreID:                     storeID,
+		CartAID:                     req.CartAID,
+		CartBID:                     req.CartBID,
+		ConfirmarCompradorDiferente: req.ConfirmDifferentBuyers,
+	})
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, out)
+}
+
+// ListJoinCandidates lista os pedidos que podem ser juntados a este.
+// @Summary      Pedidos que podem ser juntados
+// @Tags         integrations
+// @Produce      json
+// @Param        storeId path string true "Store ID"
+// @Param        cartId  path string true "Pedido de referência"
+// @Success      200 {object} httpx.Envelope{data=[]JoinCandidate}
+// @Router       /api/v1/stores/{storeId}/integrations/erp/join-candidates/{cartId} [get]
+// @Security     BearerAuth
+func (h *Handler) ListJoinCandidates(c *fiber.Ctx) error {
+	storeID := c.Locals("store_id").(string)
+	out, err := h.service.ListJoinCandidates(c.Context(), storeID, c.Params("cartId"))
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, out)
+}
+
+// GetCartJoinLink diz de que lado da junção este pedido está.
+// @Summary      Vínculo de junção do pedido
+// @Tags         integrations
+// @Produce      json
+// @Param        storeId path string true "Store ID"
+// @Param        cartId  path string true "Pedido"
+// @Success      200 {object} httpx.Envelope{data=CartJoinLink}
+// @Router       /api/v1/stores/{storeId}/integrations/erp/join-link/{cartId} [get]
+// @Security     BearerAuth
+func (h *Handler) GetCartJoinLink(c *fiber.Ctx) error {
+	out, err := h.service.GetCartJoinLink(c.Context(), c.Params("cartId"))
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, out)
 }

@@ -2,9 +2,12 @@ package erp
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
+
+	"livecart/apps/api/internal/erp/erpwrite"
 )
 
 // ERPRepository is the persistence port consumed by the ERP service. It is
@@ -13,6 +16,17 @@ import (
 // integration (cycle). It starts with the two methods the ERP order flow already
 // needs and grows one method per slice as logic migrates (Bloco B2b+).
 type ERPRepository interface {
+	// ListCartGridItems devolve a grade do GRUPO — este carrinho mais os que
+	// foram juntados a ele. É o que sobe para o pedido no ERP.
+	ListCartGridItems(ctx context.Context, cartID string) ([]NonWaitlistedCartItem, error)
+	// CartIsPaid diz se o carrinho já tem pagamento registrado deste lado.
+	CartIsPaid(ctx context.Context, cartID string) (bool, error)
+	// CartIsTerminated diz se o carrinho chegou a um fim de onde não sai
+	// sozinho (cancelado ou vencido).
+	CartIsTerminated(ctx context.Context, cartID string) (bool, error)
+	// ListERPLinkedProductsSample devolve uma amostra de produtos ligados ao
+	// ERP e com estoque — a matéria-prima da checagem do módulo de Reserva.
+	ListERPLinkedProductsSample(ctx context.Context, storeID string, limite int) ([]ERPLinkedProduct, error)
 	// GetActiveByProvider resolves the active ERP integration for a store.
 	// Signature mirrors integration.Repository.GetActiveByProvider, but returns
 	// the neutral erp.Integration instead of the integration-owned IntegrationRow
@@ -34,37 +48,28 @@ type ERPRepository interface {
 	// release() when acquired.
 	AcquireCartFinalisationLock(ctx context.Context, cartID string) (release func(), acquired bool, err error)
 
-	// --- Stock reservation persistence (Bloco B2b) ---
-	// Every method below is already implemented verbatim on integration.Repository;
-	// it satisfies this port directly (the DTO types are aliases of the erp ones),
-	// so only GetActiveByProvider needs an adapter for its return type.
-
-	// GetCartERPOrderState reads the cart's order-as-reservation lifecycle state.
+	// GetCartERPOrderState reads the cart's ERP order lifecycle state.
 	GetCartERPOrderState(ctx context.Context, cartID string) (*CartERPOrderState, error)
+	// GetCartERPOpAge diz há quanto tempo a operação ERP em curso começou. É o
+	// que separa "criação em voo agora" de "criação que morreu" — as duas se
+	// parecem no estado, e só o relógio as distingue. Zero quando não há marca.
+	GetCartERPOpAge(ctx context.Context, cartID string) (time.Duration, error)
+	// GetCartERPFinalisationStatus reads the Order payment row's ERP finalisation
+	// lifecycle (status/attempts/snapshot) plus the cart's external_order_id. É o
+	// que o reenvio manual relê para não aprovar a venda sem o financeiro.
+	GetCartERPFinalisationStatus(ctx context.Context, cartID string) (*CartFinalisationStatus, error)
+	// MarkCartERPFinalisationAttempt stamps the attempt (bumps count, COALESCEs
+	// the gateway snapshot) BEFORE the ERP is touched, so an admin retry replays.
+	MarkCartERPFinalisationAttempt(ctx context.Context, cartID string, paymentSnapshot []byte) error
+
+	// --- Contador de estoque local ---
+	// O contador local é o portão da venda: atômico, é o que a fila de espera
+	// consulta e o que responde ao comprador na hora. Ele existe
+	// independentemente do ERP — loja sem integração vende por ele igual.
+
 	// GetCartShortID returns the cart's human-facing sequential number (the
-	// #1189 the merchant sees in LiveCart). Stamped on ERP stock movements so
-	// the merchant can copy it from the Tiny extract and find the cart.
+	// #1189 the merchant sees in LiveCart).
 	GetCartShortID(ctx context.Context, cartID string) (int32, error)
-	// ListActiveReservationsByCartAndProduct returns the active reservations for a
-	// cart+product (in practice the unique index keeps it to one row).
-	ListActiveReservationsByCartAndProduct(ctx context.Context, cartID, productID string) ([]StockReservationRow, error)
-	// CreateStockReservation persists a new stock reservation row.
-	CreateStockReservation(ctx context.Context, params CreateStockReservationParams) (*StockReservationRow, error)
-	// AdjustActiveReservationQuantity bumps an active reservation's quantity by delta.
-	AdjustActiveReservationQuantity(ctx context.Context, cartID, productID string, delta int, erpMovementID string) (*StockReservationRow, error)
-	// UpsertActiveReservationQuantity soma unidades à reserva ativa, criando a
-	// linha se não existir. Uma chamada, sem leitura prévia — o par
-	// "listar / decidir entre criar e ajustar" é uma corrida.
-	UpsertActiveReservationQuantity(ctx context.Context, p UpsertReservationParams) (*StockReservationRow, error)
-	// DecrementActiveReservationQuantity baixa dec unidades da reserva ativa e diz
-	// o que aconteceu. É o que substitui "ler, decidir, chamar o ERP, gravar":
-	// aqui quem decide é o banco, e a decisão já vem aplicada.
-	DecrementActiveReservationQuantity(ctx context.Context, cartID, productID string, dec int) (ReservationDecrement, error)
-	// RestoreReservationQuantityByID desfaz o decremento acima. Compensação
-	// obrigatória quando o ERP recusa depois do banco já ter baixado.
-	RestoreReservationQuantityByID(ctx context.Context, reservationID string, inc int) error
-	// ReverseReservationsByCartAndProduct marks a cart+product's reservations reversed.
-	ReverseReservationsByCartAndProduct(ctx context.Context, cartID, productID string) error
 	// DecrementProductStock atomically lowers local stock; ErrNoRows means the
 	// decrement would go negative (insufficient stock).
 	DecrementProductStock(ctx context.Context, productID string, quantity int) error
@@ -104,35 +109,6 @@ type ERPRepository interface {
 	// StampIntegrationStockWebhookAlert dedupes the stale-webhook alert (24h).
 	StampIntegrationStockWebhookAlert(ctx context.Context, integrationID string) error
 
-	// --- Legacy post-payment finalisation persistence (Bloco B2c-2) ---
-	// Each method below is already implemented verbatim on integration.Repository
-	// (the DTO types are aliases of the erp ones), so it satisfies this port
-	// directly — no new adapter code beyond GetByProvider.
-
-	// GetCartERPFinalisationStatus reads the Order payment row's ERP finalisation
-	// lifecycle (status/attempts/snapshot) plus the cart's reserve
-	// external_order_id. Returns pgx.ErrNoRows when the Order isn't materialised.
-	GetCartERPFinalisationStatus(ctx context.Context, cartID string) (*CartFinalisationStatus, error)
-	// MarkCartERPFinalisationAttempt stamps the attempt (bumps count, COALESCEs
-	// the gateway snapshot) BEFORE the ERP is touched, so an admin retry replays.
-	MarkCartERPFinalisationAttempt(ctx context.Context, cartID string, paymentSnapshot []byte) error
-	// ListActiveReservationsByCart returns the cart's still-active saída-manual
-	// reservations — the input to the post-payment reversal.
-	ListActiveReservationsByCart(ctx context.Context, cartID string) ([]StockReservationRow, error)
-	// ReverseReservationByID marks a single reservation reversed, only after the
-	// ERP confirmed the corresponding entrada E (per-row, resumable).
-	ReverseReservationByID(ctx context.Context, reservationID string) error
-	// ClaimReservationForReversal reivindica a reserva ANTES de falar com o ERP
-	// e devolve true só para quem ganhou a corrida. É o que torna o estorno
-	// duplo impossível quando a asynq retenta.
-	ClaimReservationForReversal(ctx context.Context, reservationID string) (bool, error)
-	// RestoreReservationToActive desfaz a reivindicação quando o ERP recusa o
-	// estorno, para a próxima tentativa voltar a enxergar a reserva.
-	RestoreReservationToActive(ctx context.Context, reservationID string) error
-	// ReverseReservationsByCart mass-marks a cart's active reservations reversed
-	// (the legacy expiry path, which marks locally regardless of the ERP result).
-	ReverseReservationsByCart(ctx context.Context, cartID string) error
-
 	// --- Cart NFe sync persistence (Bloco B2d) ---
 	// UpsertCartERPInvoice, FindCartByExternalOrderID and UpdateShipmentInvoice are
 	// already implemented verbatim on integration.Repository (DTO types aliased),
@@ -159,31 +135,106 @@ type ERPRepository interface {
 	UpdateShipmentInvoice(ctx context.Context, shipmentID, invoiceKey, invoiceKind string) error
 }
 
-// Service handles ERP-domain business logic. B2a laid the foundation (struct +
-// ports); B2b moves in the cart→ERP stock reservation flow (ReserveStockInERP /
-// AdjustStockReservationDelta). More order/finalisation logic follows in B2c+.
+// Service handles ERP-domain business logic.
 type Service struct {
 	repo   ERPRepository
 	collab StockCollaborators
 	stock  *StockReservations
-	logger *zap.Logger
+	status ERPOrderStatusRepository
+	// reopener segue o pedido que o lojista reabriu no ERP. Opcional.
+	reopener CartReopener
+	// drain é a persistência da migração única das reservas manuais. Opcional e
+	// com prazo: sai quando a drenagem terminar. Ver drenagem.go.
+	drain DrainRepository
+	// cartSync é o caminho de volta: o pedido do ERP refletido no carrinho.
+	// Ver reflexo.go.
+	cartSync CartSyncCollaborators
+	logger   *zap.Logger
 
-	// movements é o razão de movimentos contra o ERP (migration 000132).
-	// Opcional de propósito: nil = caminho legado, síncrono e sem registro de
-	// intenção. Ver movement_ledger.go.
-	movements          StockMovementLedger
-	movementScheduler  StockMovementScheduler
-	movementResolution StockMovementResolution
+	// escrita serializa as escritas no ERP e as mantém dentro do teto real da
+	// conta. Não é opcional: o teto é um fato da API, não uma preferência.
+	escrita *filaDeEscrita
+}
+
+// filaDeEscrita é o par limitador + fila serial por chave.
+//
+// Existe por dois números medidos. O primeiro é o teto: 4 escritas por segundo
+// em rajada e 30 por minuto sustentadas, POR CONTA — uma live de 150 comentários
+// passa disso com folga, e o Tiny não manda Retry-After, então quem não se
+// contém sozinho descobre o limite por 429. O segundo é a corrida: duas escritas
+// em voo no MESMO pedido corrompem a grade, então elas entram em fila pela chave
+// do carrinho.
+//
+// Os baldes são POR LOJA porque o teto é por conta do ERP: um processo que
+// atende dez lojas não pode fazer uma esperar a cota da outra.
+type filaDeEscrita struct {
+	mu      sync.Mutex
+	limites erpwrite.Limits
+	fila    *erpwrite.Queue
+	baldes  map[string]*erpwrite.Limiter
+}
+
+func novaFilaDeEscrita(limites erpwrite.Limits) *filaDeEscrita {
+	return &filaDeEscrita{
+		limites: limites,
+		fila:    erpwrite.NewQueue(limites.BurstN),
+		baldes:  map[string]*erpwrite.Limiter{},
+	}
+}
+
+func (f *filaDeEscrita) balde(storeID string) *erpwrite.Limiter {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	lim, ok := f.baldes[storeID]
+	if !ok {
+		lim = erpwrite.NewLimiter(f.limites)
+		f.baldes[storeID] = lim
+	}
+	return lim
+}
+
+// SetWriteLimits troca os tetos de escrita da conta.
+//
+// O padrão é o medido contra a API real, e é o que vale em produção. Existe
+// porque o teto é uma propriedade da CONTA no ERP — planos diferentes podem ter
+// números diferentes —, e porque os testes de fluxo não têm por que esperar uma
+// janela de 60 segundos para provar uma regra de negócio. O limitador tem os
+// seus próprios testes.
+func (s *Service) SetWriteLimits(limites erpwrite.Limits) {
+	s.escrita = novaFilaDeEscrita(limites)
+}
+
+// escreverNoERP roda fn com a vez do carrinho e dentro da cota da loja.
+//
+// A ordem importa: primeiro a fila (garante que ninguém mais está escrevendo
+// neste pedido), depois o limitador (garante que a conta tem cota). Invertida,
+// duas escritas do mesmo pedido poderiam passar pelo limitador juntas e só então
+// disputar a fila, o que não corrompe nada mas gasta cota fora de hora.
+//
+// erpwrite.ErrNotDispatched sobe intacto quando o prazo não comporta a espera:
+// é a diferença entre "não saiu daqui" e "não sei se chegou", e ela decide se
+// repetir é seguro.
+func (s *Service) escreverNoERP(ctx context.Context, storeID, chave string, fn func(context.Context) error) error {
+	if s.escrita == nil {
+		return fn(ctx)
+	}
+	return s.escrita.fila.Do(ctx, chave, func(ctx context.Context) error {
+		if err := s.escrita.balde(storeID).Wait(ctx); err != nil {
+			return err
+		}
+		return fn(ctx)
+	})
 }
 
 // NewService creates a new ERP service. collab supplies the integration-Service
-// helpers the migrated stock flow still calls back into (provider resolution,
-// product linking, converted-cart mutation); it shrinks as more logic migrates.
+// helpers the ERP flow calls back into (provider resolution, product linking,
+// order creation, mirroring).
 func NewService(repo ERPRepository, collab StockCollaborators, logger *zap.Logger) *Service {
 	return &Service{
-		repo:   repo,
-		collab: collab,
-		stock:  NewStockReservations(repo, logger),
-		logger: logger,
+		repo:    repo,
+		collab:  collab,
+		stock:   NewStockReservations(repo, logger),
+		logger:  logger,
+		escrita: novaFilaDeEscrita(erpwrite.DefaultLimits()),
 	}
 }

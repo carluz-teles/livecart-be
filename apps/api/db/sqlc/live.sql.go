@@ -386,6 +386,22 @@ func (q *Queries) GetSessionLiveModeState(ctx context.Context, arg GetSessionLiv
 	return i, err
 }
 
+const getSessionStoreID = `-- name: GetSessionStoreID :one
+SELECT e.store_id
+FROM live_sessions s
+JOIN live_events e ON e.id = s.event_id
+WHERE s.id = $1::uuid
+`
+
+// A loja dona de uma sessão. Guarda de posse do simulador: sem ela, um POST
+// com o id de sessão de OUTRA loja vincularia mídia no evento alheio.
+func (q *Queries) GetSessionStoreID(ctx context.Context, sessionID pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, getSessionStoreID, sessionID)
+	var store_id pgtype.UUID
+	err := row.Scan(&store_id)
+	return store_id, err
+}
+
 const incrementLiveSessionComments = `-- name: IncrementLiveSessionComments :exec
 UPDATE live_sessions
 SET total_comments = total_comments + 1, updated_at = now()
@@ -592,6 +608,58 @@ func (q *Queries) ListSessionsByEvent(ctx context.Context, eventID pgtype.UUID) 
 	return items, nil
 }
 
+const listSessionsForSimulator = `-- name: ListSessionsForSimulator :many
+SELECT s.id, s.status, s.started_at, e.id AS event_id, e.title AS event_title,
+       COALESCE((
+           SELECT string_agg(lsp.platform_live_id, ',')
+           FROM live_session_platforms lsp
+           WHERE lsp.session_id = s.id AND lsp.released_at IS NULL
+       ), '') AS midias_vivas
+FROM live_sessions s
+JOIN live_events e ON e.id = s.event_id
+WHERE e.store_id = $1::uuid
+ORDER BY s.created_at DESC
+LIMIT 20
+`
+
+type ListSessionsForSimulatorRow struct {
+	ID          pgtype.UUID        `json:"id"`
+	Status      string             `json:"status"`
+	StartedAt   pgtype.Timestamptz `json:"started_at"`
+	EventID     pgtype.UUID        `json:"event_id"`
+	EventTitle  pgtype.Text        `json:"event_title"`
+	MidiasVivas interface{}        `json:"midias_vivas"`
+}
+
+// Sessões recentes da loja, para o simulador de staging oferecer escolha em vez
+// de exigir que alguém cole um UUID na mão.
+func (q *Queries) ListSessionsForSimulator(ctx context.Context, storeID pgtype.UUID) ([]ListSessionsForSimulatorRow, error) {
+	rows, err := q.db.Query(ctx, listSessionsForSimulator, storeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSessionsForSimulatorRow{}
+	for rows.Next() {
+		var i ListSessionsForSimulatorRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Status,
+			&i.StartedAt,
+			&i.EventID,
+			&i.EventTitle,
+			&i.MidiasVivas,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markMediaWebhookActive = `-- name: MarkMediaWebhookActive :exec
 UPDATE live_session_platforms
 SET webhook_active = true
@@ -603,6 +671,22 @@ WHERE platform_live_id = $1 AND released_at IS NULL
 // uma campanha encerrada não é polada e não deve ser tocada.
 func (q *Queries) MarkMediaWebhookActive(ctx context.Context, platformLiveID string) error {
 	_, err := q.db.Exec(ctx, markMediaWebhookActive, platformLiveID)
+	return err
+}
+
+const releasePlatformMedia = `-- name: ReleasePlatformMedia :exec
+UPDATE live_session_platforms
+SET released_at = now()
+WHERE platform_live_id = $1 AND released_at IS NULL
+`
+
+// Solta a mídia da sessão — o equivalente a a transmissão acabar.
+//
+// Existe para o SIMULADOR de staging. Em produção quem solta é o encerramento
+// da campanha; aqui é preciso poder encenar "a live acabou" para ver o que
+// acontece com um comentário que chega depois.
+func (q *Queries) ReleasePlatformMedia(ctx context.Context, platformLiveID string) error {
+	_, err := q.db.Exec(ctx, releasePlatformMedia, platformLiveID)
 	return err
 }
 

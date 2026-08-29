@@ -287,6 +287,7 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 			op.invoice_emitted_at,
 
 			c.cancellation_reverted_at,
+			COALESCE(c.cancellation_reverted_reason, ''),
 
 			-- Forma de pagamento, parcelas e os valores REAIS do pedido
 			-- (desconto e valor pago) para a tela mostrar exatamente o cobrado.
@@ -366,6 +367,7 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*OrderDetailRow, e
 		&row.ERPInvoiceEmittedAt,
 
 		&row.CancellationRevertedAt,
+		&row.CancellationRevertedReason,
 		&row.PaymentMethod,
 		&row.Installments,
 		&row.DiscountCents,
@@ -433,6 +435,10 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			p.image_url as product_image,
 			p.keyword as product_keyword,
 			0::INT as waitlisted_quantity,
+			-- Venda materializada: o snapshot registra o que foi vendido, e
+			-- vendido é pago. A divisão pago × a pagar só existe enquanto o
+			-- pedido é carrinho.
+			oi.quantity as paid_quantity,
 			COALESCE(p.weight_grams, 0),
 			COALESCE(p.height_cm, 0),
 			COALESCE(p.width_cm, 0),
@@ -456,6 +462,7 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			p.image_url as product_image,
 			p.keyword as product_keyword,
 			ci.waitlisted_quantity,
+			ci.paid_quantity,
 			COALESCE(p.weight_grams, 0),
 			COALESCE(p.height_cm, 0),
 			COALESCE(p.width_cm, 0),
@@ -487,6 +494,7 @@ func (r *Repository) GetItems(ctx context.Context, cartID string) ([]OrderItemRo
 			&item.ProductImage,
 			&item.ProductKeyword,
 			&item.WaitlistedQuantity,
+			&item.PaidQuantity,
 			&item.WeightGrams,
 			&item.HeightCm,
 			&item.WidthCm,
@@ -963,10 +971,30 @@ func buildOrderListConditions(storeID string, search string, filters OrderFilter
 		// também é NULL: a linha era EXCLUÍDA. Resultado medido em produção
 		// em 19/08: a aba "Aguardando pagamento" mostrava 0 de 121 carrinhos
 		// — todo o pipeline pré-pagamento invisível, silenciosamente.
+		// PEDIDO ÓRFÃO SEGURANDO PEÇA.
+		//
+		// O carrinho está morto aqui (cancelado ou vencido) e o pedido no ERP
+		// voltou a viver. Acontece de verdade: o lojista cancela pelo LiveCart,
+		// nós cancelamos no Tiny, e depois ele reabre o pedido lá — foi o que
+		// aconteceu em staging em 27/08, pedido 6, cancelado → aberto.
+		//
+		// O rastreamento registra a volta, e é só o que ele pode fazer. O
+		// problema é o que fica: um pedido EM ABERTO no ERP reservando unidade,
+		// sem carrinho vivo atrás dele. Ninguém vai pagar, o LiveCart não vai
+		// mexer nele de novo (o estado do carrinho é terminal), e a peça some do
+		// disponível até alguém abrir o Tiny e reparar.
+		//
+		// A situação não é ruído: o `cancelado` do próprio cancelamento fica de
+		// fora, e as pós-nota também — pedido faturado com carrinho cancelado é
+		// outra conversa, e não é reserva presa.
+		orfaoSegurandoPeca := "(c.status IN ('cancelled','expired') AND c.external_order_id IS NOT NULL " +
+			"AND c.erp_order_status IN ('aberto','aprovado','dados_incompletos'))"
+
 		matcher := fmt.Sprintf(
-			"(COALESCE(op.erp_finalisation_status, '') = 'failed' OR (c.payment_status IN (%s) AND c.status NOT IN ('cancelled', 'expired')) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s)))",
+			"(COALESCE(op.erp_finalisation_status, '') = 'failed' OR (c.payment_status IN (%s) AND c.status NOT IN ('cancelled', 'expired')) OR EXISTS (SELECT 1 FROM shipments sh WHERE sh.cart_id = c.id AND sh.status IN (%s)) OR %s)",
 			strings.Join(paymentPlaceholders, ","),
 			strings.Join(shipmentPlaceholders, ","),
+			orfaoSegurandoPeca,
 		)
 		if *filters.NeedsAttention {
 			conditions = append(conditions, matcher)
@@ -1353,4 +1381,28 @@ func (r *Repository) GetUpsellSummary(ctx context.Context, orderID string) (*Ord
 	}
 
 	return out, nil
+}
+
+// ListCartPaymentEntries lê o extrato de cobranças do carrinho, na ordem em que
+// o dinheiro entrou. Vazio para pedido já materializado — a venda fechou, e o
+// que ficou registrado ali é o snapshot dela.
+func (r *Repository) ListCartPaymentEntries(ctx context.Context, cartID string) ([]OrderPaymentEntry, error) {
+	const q = `
+		SELECT amount_cents, gross_covered_cents, COALESCE(method,''), paid_at
+		FROM cart_payments WHERE cart_id = $1 ORDER BY paid_at, created_at`
+	rows, err := r.db.Query(ctx, q, cartID)
+	if err != nil {
+		return nil, fmt.Errorf("listing cart payments: %w", err)
+	}
+	defer rows.Close()
+
+	var out []OrderPaymentEntry
+	for rows.Next() {
+		var e OrderPaymentEntry
+		if err := rows.Scan(&e.AmountCents, &e.GrossCoveredCents, &e.Method, &e.PaidAt); err != nil {
+			return nil, fmt.Errorf("scanning cart payment: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }

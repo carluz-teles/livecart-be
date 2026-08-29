@@ -16,12 +16,12 @@ import (
 )
 
 var (
-	ErrInvalidToken     = errors.New("invalid token")
-	ErrTokenExpired     = errors.New("token expired")
-	ErrMissingClaims    = errors.New("missing required claims")
-	ErrJWKSFetch        = errors.New("failed to fetch JWKS")
-	ErrKeyNotFound      = errors.New("signing key not found")
-	ErrUserFetch        = errors.New("failed to fetch user from Clerk")
+	ErrInvalidToken  = errors.New("invalid token")
+	ErrTokenExpired  = errors.New("token expired")
+	ErrMissingClaims = errors.New("missing required claims")
+	ErrJWKSFetch     = errors.New("failed to fetch JWKS")
+	ErrKeyNotFound   = errors.New("signing key not found")
+	ErrUserFetch     = errors.New("failed to fetch user from Clerk")
 )
 
 // Claims represents the JWT claims from Clerk

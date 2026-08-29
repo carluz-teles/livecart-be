@@ -1,19 +1,16 @@
 package erp
 
-// O saldo que vale para vender é o DISPONÍVEL — e a regra estava mapeada num
-// lugar só.
+// O saldo que vale para vender é o DISPONÍVEL — pai e variações, sem exceção
+// e sem configuração.
 //
-// `GET /produtos/{id}` devolve `estoque.quantidade`, o saldo FÍSICO. Quando a
-// loja liga `use_available_stock`, o GetProduct consulta `/estoque/{id}` e
-// troca esse número pelo disponível. Só que a troca acontecia em `out.Stock`,
-// que é o estoque do produto PAI: cada variação seguia com o físico que veio
-// dentro do payload do pai, onde não existe quebra de reservado.
+// `GET /produtos/{id}` devolve `estoque.quantidade`, o saldo FÍSICO, e esse
+// número conta peça que já tem dono: cada unidade presa num pedido de venda
+// aberto continua ali. Oferecê-la é vender duas vezes a mesma coisa — e foi
+// assim que a cantodaart vendeu o que não tinha.
 //
-// A diferença é peça reservada por orçamento salvo no Tiny. Ela continua no
-// físico e sai do disponível — oferecê-la é vender o que já tem dono.
-//
-// Em campo: a cantodaart ligou a configuração, e produto importado continuou
-// chegando com o físico.
+// O disponível vem de `/estoque/{id}`, uma consulta por id. Quando não dá para
+// afirmar, o produto volta com StockKnown falso e quem espelha não escreve —
+// nem zera, nem cai no físico.
 
 import (
 	"context"
@@ -27,7 +24,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// tinyComSaldoDisponivel monta um provider com a regra da loja LIGADA.
+// tinyComSaldoDisponivel monta um provider apontado para o servidor de teste.
 func tinyComSaldoDisponivel(t *testing.T, srv *httptest.Server) *Tiny {
 	t.Helper()
 	original := tinyAPIBaseURL
@@ -35,11 +32,10 @@ func tinyComSaldoDisponivel(t *testing.T, srv *httptest.Server) *Tiny {
 	t.Cleanup(func() { tinyAPIBaseURL = original })
 
 	tiny, err := NewTiny(TinyConfig{
-		IntegrationID:     "int-test",
-		StoreID:           "store-test",
-		Credentials:       &Credentials{AccessToken: "tok"},
-		Logger:            zap.NewNop(),
-		UseAvailableStock: true,
+		IntegrationID: "int-test",
+		StoreID:       "store-test",
+		Credentials:   &Credentials{AccessToken: "tok"},
+		Logger:        zap.NewNop(),
 	})
 	if err != nil {
 		t.Fatalf("NewTiny: %v", err)
@@ -86,7 +82,7 @@ func servidorDePaiComVariacoes(t *testing.T, saldos map[string][2]int) *httptest
 	}))
 }
 
-func TestVariacaoUsaSaldoDisponivelQuandoALojaPede(t *testing.T) {
+func TestPaiEVariacoesUsamOSaldoDisponivel(t *testing.T) {
 	// pai 10 físico / 2 reservados; variações 6-1 e 4-3.
 	saldos := map[string][2]int{
 		"800000": {10, 2},
@@ -118,71 +114,55 @@ func TestVariacaoUsaSaldoDisponivelQuandoALojaPede(t *testing.T) {
 	}
 }
 
-// Com a regra DESLIGADA nada muda: o físico é o comportamento de antes, e
-// inclusive sem a chamada extra ao Tiny.
-func TestVariacaoMantemFisicoQuandoALojaNaoPede(t *testing.T) {
-	saldos := map[string][2]int{
-		"800000": {10, 2},
-		"900001": {6, 1},
-		"900002": {4, 3},
-	}
-
-	var consultasDeEstoque int
+// O FÍSICO nunca vaza para o resultado, nem quando é o único número legível.
+//
+// Este é o teste que substituiu o antigo "com a regra desligada mantém o
+// físico". Aquele fixava justamente o comportamento que causava o furo; agora o
+// contrato é o oposto e precisa ser afirmado: `/estoque` fora do ar não
+// autoriza ninguém a usar `estoque.quantidade`.
+func TestFisicoNuncaViraSaldoQuandoODisponivelFalha(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/estoque/") {
-			consultasDeEstoque++
-		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{
+		if strings.Contains(r.URL.Path, "/estoque/") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{
 			"id": 800000, "nome": "Caneca", "tipo": "P",
 			"precos": {"preco": 39.90},
-			"estoque": {"quantidade": %d},
+			"estoque": {"quantidade": 10},
 			"variacoes": [
-				{"id": 900001, "descricao": "Vermelha", "estoque": {"quantidade": %d}, "precos": {"preco": 39.90}},
-				{"id": 900002, "descricao": "Verde",    "estoque": {"quantidade": %d}, "precos": {"preco": 39.90}}
+				{"id": 900001, "descricao": "Vermelha", "estoque": {"quantidade": 6}, "precos": {"preco": 39.90}}
 			]
-		}`, saldos["800000"][0], saldos["900001"][0], saldos["900002"][0])
+		}`)
 	}))
 	defer srv.Close()
 
-	original := tinyAPIBaseURL
-	tinyAPIBaseURL = srv.URL
-	defer func() { tinyAPIBaseURL = original }()
-
-	tiny, err := NewTiny(TinyConfig{
-		IntegrationID: "int-test",
-		StoreID:       "store-test",
-		Credentials:   &Credentials{AccessToken: "tok"},
-		Logger:        zap.NewNop(),
-		// UseAvailableStock ausente = desligado
-	})
-	if err != nil {
-		t.Fatalf("NewTiny: %v", err)
-	}
-
-	pai, err := tiny.GetProduct(context.Background(), "800000")
+	pai, err := tinyComSaldoDisponivel(t, srv).GetProduct(context.Background(), "800000")
 	if err != nil {
 		t.Fatalf("GetProduct: %v", err)
 	}
-	if pai.Stock != 10 {
-		t.Errorf("pai = %d, esperava o físico 10", pai.Stock)
+	if pai.StockKnown {
+		t.Errorf("StockKnown = true com /estoque fora do ar — o chamador vai " +
+			"escrever um número que ninguém apurou")
+	}
+	if pai.Stock == 10 {
+		t.Errorf("saldo do pai = 10, que é o FÍSICO de `estoque.quantidade` — " +
+			"é exatamente o vazamento que esta regra existe para impedir")
 	}
 	for _, v := range pai.Variants {
-		fisico := saldos[v.ID][0]
-		if v.Stock != fisico {
-			t.Errorf("variação %s = %d, esperava o físico %d", v.ID, v.Stock, fisico)
+		if v.StockKnown {
+			t.Errorf("variação %s veio com StockKnown = true sem saldo apurável", v.ID)
 		}
-	}
-	if consultasDeEstoque != 0 {
-		t.Errorf("houve %d consulta(s) a /estoque com a regra desligada — a loja "+
-			"que não pediu não deve pagar a chamada extra", consultasDeEstoque)
+		if v.Stock == 6 {
+			t.Errorf("variação %s = 6, o físico do payload do pai", v.ID)
+		}
 	}
 }
 
-// Estoque indisponível para UMA variação não pode contaminar as outras nem
-// derrubar o produto: aquela mantém o físico (comportamento de hoje quando não
-// dá para afirmar), as demais recebem o disponível.
-func TestVariacaoSemSaldoConsultavelMantemOFisico(t *testing.T) {
+// Estoque indisponível para UMA variação não contamina as outras nem derruba o
+// produto: aquela volta marcada como não-apurada, as demais com o disponível.
+func TestVariacaoSemSaldoConsultavelFicaMarcadaComoNaoApurada(t *testing.T) {
 	saldos := map[string][2]int{
 		"800000": {10, 2},
 		"900001": {6, 1},
@@ -196,16 +176,17 @@ func TestVariacaoSemSaldoConsultavelMantemOFisico(t *testing.T) {
 		t.Fatalf("GetProduct: %v", err)
 	}
 
-	porID := map[string]int{}
+	porID := map[string]ERPProduct{}
 	for _, v := range pai.Variants {
-		porID[v.ID] = v.Stock
+		porID[v.ID] = v
 	}
-	if porID["900001"] != 5 {
-		t.Errorf("variação com estoque consultável = %d, esperava 5", porID["900001"])
+	if v := porID["900001"]; !v.StockKnown || v.Stock != 5 {
+		t.Errorf("variação com estoque consultável = %d (conhecido=%v), esperava 5 apurado",
+			v.Stock, v.StockKnown)
 	}
-	if porID["900002"] != 0 {
-		t.Errorf("variação sem estoque consultável = %d; o payload do pai a traz "+
-			"com 0 e é esse número que deve sobrar", porID["900002"])
+	if v := porID["900002"]; v.StockKnown {
+		t.Errorf("variação sem estoque consultável voltou como apurada (%d) — o "+
+			"físico 4 do payload do pai não pode virar saldo", v.Stock)
 	}
 }
 

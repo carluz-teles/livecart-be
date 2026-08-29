@@ -2,11 +2,15 @@ package integration
 
 import (
 	"context"
+	"fmt"
 
 	"go.uber.org/zap"
 
+	"errors"
+	paymentdomain "livecart/apps/api/internal/payment"
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/logger"
+	"time"
 )
 
 // Motivos de morte de um cart (coluna carts.cancelled_reason). São o
@@ -18,6 +22,11 @@ const (
 	CancelReasonBlocked = "customer_blocked"
 	CancelReasonExpired = "expired"
 	CancelReasonPayment = "payment_cancelled"
+	// CancelReasonERP: o lojista cancelou o pedido direto no ERP, e o carrinho
+	// está seguindo. Deliberadamente FORA do gatilho do reactor: o pedido já
+	// está cancelado lá — foi de onde o aviso veio — e mandar cancelar de novo
+	// seria falar com o Tiny para pedir o que ele acabou de nos contar.
+	CancelReasonERP = "erp_cancelled"
 )
 
 // CancelCart cancela UM carrinho por decisão do lojista, com a mesma proteção de
@@ -115,3 +124,173 @@ func (s *Service) ReactCartCancelledERP(ctx context.Context, cartID, storeID str
 func (s *Service) reverseCartERPFootprint(ctx context.Context, cartID, storeID string) error {
 	return s.ERP().OnCartExpired(ctx, cartID, storeID)
 }
+
+// =============================================================================
+// O CANCELAMENTO QUE O ERP DESFEZ
+// =============================================================================
+
+// ReopenCartResult conta o que a ressurreição conseguiu recuperar.
+type ReopenCartResult struct {
+	Reopened bool
+	CartID   string
+	EventID  string
+	// Recuperadas é quantas unidades voltaram para o carrinho com estoque.
+	Recuperadas int
+	// EmFila é quantas não couberam e foram para a lista de espera. É o número
+	// que o lojista precisa ver: o carrinho voltou, mas não inteiro.
+	EmFila int
+}
+
+// ReopenCartFromERP traz de volta o carrinho que o lojista reabriu no ERP.
+//
+// O gesto do outro lado é claro: ele cancelou, se arrependeu, e reabriu o pedido
+// no Tiny à mão. Seguir isso é o que o LiveCart deve fazer — o pedido de lá já
+// está vivo e reservando peça, e deixar o carrinho morto aqui produz justamente
+// a unidade presa sem dono que a detecção denunciava.
+//
+// ═══ O QUE MUDA ENTRE CANCELAR E RESSUSCITAR ═══
+//
+// Cancelar devolveu o estoque. Entre o cancelamento e a reabertura, outra
+// compradora pode ter levado a peça — e é por isso que a ressurreição aceita
+// voltar INCOMPLETA: leva o que houver e manda o resto para a fila de espera.
+// Recusar tudo por causa de uma unidade jogaria fora o carrinho inteiro, que é o
+// oposto do que o lojista pediu ao reabrir.
+//
+// O pedido do ERP não é tocado aqui: ele já está vivo, foi o lojista quem o
+// reabriu, e é isso que estamos seguindo. O que volta é o estado da máquina para
+// 'open', para o próximo comentário mutar a grade em vez de criar pedido novo.
+func (s *Service) ReopenCartFromERP(ctx context.Context, cartID, storeID string) (ReopenCartResult, error) {
+	var out ReopenCartResult
+	ctx = logger.WithStore(ctx, storeID, "")
+
+	release, acquired, err := s.repo.AcquireCartFinalisationLock(ctx, cartID)
+	if err != nil {
+		return out, err
+	}
+	if !acquired {
+		// Pagamento em voo neste carrinho. O pagamento vence sempre, e ele tem
+		// o seu próprio caminho de restauração — sair daqui é o certo.
+		logger.From(ctx, s.logger).Info("reopen: refused, finalisation in progress",
+			zap.String("cart_id", cartID))
+		return out, nil
+	}
+	defer release()
+
+	out, err = s.repo.ReopenCancelledCartFromERP(ctx, cartID, storeID)
+	if err != nil {
+		return out, fmt.Errorf("reopening cancelled cart: %w", err)
+	}
+	if !out.Reopened {
+		logger.From(ctx, s.logger).Info("reopen: cart not eligible (expired, paid or not store-cancelled)",
+			zap.String("cart_id", cartID))
+		return out, nil
+	}
+
+	logger.From(ctx, s.logger).Info("cart reopened because the merchant reopened the order in the ERP",
+		zap.String("cart_id", cartID),
+		zap.Int("units_recovered", out.Recuperadas),
+		zap.Int("units_waitlisted", out.EmFila),
+	)
+	return out, nil
+}
+
+// CancelCartFromERP cancela o carrinho porque o pedido foi cancelado no ERP.
+//
+// Fecha a simetria que faltava. As três direções agora existem:
+//
+//	cancelar no LiveCart  →  o pedido é cancelado no Tiny      (reactor)
+//	reabrir no Tiny       →  o carrinho ressuscita aqui        (ReopenCartFromERP)
+//	cancelar no Tiny      →  o carrinho é cancelado aqui       (esta função)
+//
+// Faz o MESMO que o cancelamento do lojista — devolve estoque local, mata a fila
+// do carrinho, desativa o link — com uma diferença que importa: o motivo
+// gravado é `erp_cancelled`, e o reactor que estorna no ERP só reage a
+// `store_cancelled`. Sem isso o LiveCart mandaria cancelar um pedido que já
+// está cancelado, gastando escrita do teto da conta para nada.
+//
+// Carrinho PAGO não é cancelado por aqui. Cancelar um pedido pago no ERP é uma
+// decisão sobre dinheiro que já entrou, e o estorno é do gateway, não nosso.
+// Esses ficam para a triagem humana — a aba "Precisam atenção" os pega pelo
+// estado, e o log diz o que aconteceu.
+func (s *Service) CancelCartFromERP(ctx context.Context, cartID, storeID string) (bool, error) {
+	ctx = logger.WithStore(ctx, storeID, "")
+
+	release, acquired, err := s.repo.AcquireCartFinalisationLock(ctx, cartID)
+	if err != nil {
+		return false, err
+	}
+	if !acquired {
+		// Pagamento finalizando agora. O pagamento vence — sair daqui é o certo,
+		// e o mesmo raciocínio do cancelamento manual.
+		logger.From(ctx, s.logger).Info("erp cancel: refused, finalisation in progress",
+			zap.String("cart_id", cartID))
+		return false, nil
+	}
+	defer release()
+
+	res, err := s.repo.CancelCartFromERP(ctx, cartID, storeID)
+	if err != nil {
+		return false, fmt.Errorf("cancelling cart from ERP: %w", err)
+	}
+	if !res.Eligible {
+		logger.From(ctx, s.logger).Warn("the order was cancelled in the ERP but the cart cannot follow — it is paid or already terminal",
+			zap.String("cart_id", cartID))
+		return false, nil
+	}
+
+	logger.From(ctx, s.logger).Info("cart cancelled because the order was cancelled in the ERP",
+		zap.String("cart_id", cartID),
+		zap.Int("items_released", len(res.FreedProductIDs)),
+	)
+	// Estoque devolvido = alguém da fila pode ser atendido. Mesma promoção do
+	// cancelamento manual, pelo mesmo motivo.
+	for _, productID := range res.FreedProductIDs {
+		s.ProcessWaitlistForProduct(ctx, res.EventID, productID, storeID)
+	}
+	return true, nil
+}
+
+// MarkCartPaidFromERP registra, do lado de cá, o pagamento que o lojista lançou
+// no ERP.
+//
+// O lojista recebeu por fora — dinheiro, transferência, maquininha — e registrou
+// no Tiny, que leva o pedido para "Aprovado". Antes disto ele tinha de repetir o
+// gesto aqui, no "confirmar pagamento manual", e os dois lados divergiam sempre
+// que ele esquecia um. Agora o Tiny é a fonte, e este é o caminho de volta.
+//
+// Usa a MESMA escrita guardada do pagamento por gateway — a que serializa
+// contra a expiração e recusa carrinho morto. O que muda é a origem: o
+// checkout_id leva o id do pedido no ERP, que é o que torna a operação
+// idempotente. A reentrega do webhook não paga duas vezes.
+func (s *Service) MarkCartPaidFromERP(ctx context.Context, cartID, storeID string, amountCents int64) (bool, error) {
+	ctx = logger.WithStore(ctx, storeID, "")
+
+	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
+	if err != nil {
+		return false, fmt.Errorf("reading the cart order state: %w", err)
+	}
+	if st.ExternalOrderID == "" {
+		return false, nil // sem pedido não há pagamento do ERP a seguir
+	}
+
+	agora := time.Now()
+	_, err = s.repo.UpdateCartPaymentStatus(ctx, cartID, "paid",
+		"erp-"+st.ExternalOrderID, &agora, erpPaymentMethod, amountCents)
+	if err != nil {
+		if errors.Is(err, paymentdomain.ErrCartNotPayable) {
+			// Carrinho expirado ou cancelado. O pagamento existe no ERP e o
+			// carrinho não pode recebê-lo — é caso de gente, e a aba "Precisam
+			// atenção" o pega pelo estado.
+			logger.From(ctx, s.logger).Warn("the ERP order was approved but the cart cannot be marked paid — it is expired or cancelled",
+				zap.String("cart_id", cartID),
+				zap.String("external_order_id", st.ExternalOrderID))
+			return false, nil
+		}
+		return false, fmt.Errorf("recording the ERP payment: %w", err)
+	}
+	return true, nil
+}
+
+// erpPaymentMethod nomeia, no histórico, o pagamento que veio de fora do
+// gateway. O lojista reconhece a origem sem precisar abrir o pedido no Tiny.
+const erpPaymentMethod = "erp_manual"

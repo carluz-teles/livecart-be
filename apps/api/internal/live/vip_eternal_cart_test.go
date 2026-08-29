@@ -215,3 +215,138 @@ func TestActivateEternalCartsAnnulsExpiry(t *testing.T) {
 		t.Errorf("agenda de expiração não foi anulada: expires_at=%v", expiresAt)
 	}
 }
+
+// ─── Juntar compras num pedido pago (26/08/2026) ────────────────────────────
+//
+// "Carrinho com pagamento APROVADO também devemos juntar. Se foi faturado aí sim
+// não pode mais juntar pedidos."
+//
+// O pedido pago segue aberto até virar nota: a compradora pagou na live de
+// segunda, pede mais uma coisa na quinta, e sai uma caixa só. Depois do
+// faturamento a nota existe, e somar item nela seria emitir nota errada — então
+// a compra de quinta abre um pedido NOVO.
+//
+// O ERP não impõe esse limite (em 26/08/2026 aceitou, com 204, editar os itens
+// de um pedido "Faturada"). Quem recusa é esta query.
+
+// marcarPago encena o pagamento no carrinho, como as queries de pagamento fazem.
+func marcarPago(t *testing.T, cartID string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE carts SET payment_status='paid', paid_at=now(), expires_at=NULL WHERE id=$1`,
+		cartID); err != nil {
+		t.Fatalf("marcando pago: %v", err)
+	}
+}
+
+func marcarSituacaoERP(t *testing.T, cartID, situacao string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE carts SET erp_order_status=$2, erp_order_status_at=now(), external_order_id='ext-1' WHERE id=$1`,
+		cartID, situacao); err != nil {
+		t.Fatalf("marcando situação: %v", err)
+	}
+}
+
+func TestVipCartPagoAindaRecebeCompraDeOutroEvento(t *testing.T) {
+	requireDB(t)
+	storeID := seedStore(t)
+	evSegunda := seedEventInStore(t, storeID)
+	evQuinta := seedEventInStore(t, storeID)
+	comprador := fmt.Sprintf("@maria%d", time.Now().UnixNano())
+
+	segunda, _ := getOrCreateVip(t, storeID, evSegunda, comprador)
+	marcarPago(t, segunda.ID)
+	marcarSituacaoERP(t, segunda.ID, "aprovado")
+
+	quinta, criou := getOrCreateVip(t, storeID, evQuinta, comprador)
+	if criou {
+		t.Error("abriu carrinho novo para uma compra que devia entrar no pedido pago")
+	}
+	if quinta.ID != segunda.ID {
+		t.Errorf("a compra de quinta caiu em %s e o pedido pago é %s — o lojista "+
+			"queria uma caixa só", quinta.ID, segunda.ID)
+	}
+}
+
+func TestVipCartFaturadoNaoRecebeMaisCompra(t *testing.T) {
+	requireDB(t)
+	storeID := seedStore(t)
+	evSegunda := seedEventInStore(t, storeID)
+	evQuinta := seedEventInStore(t, storeID)
+	comprador := fmt.Sprintf("@ana%d", time.Now().UnixNano())
+
+	segunda, _ := getOrCreateVip(t, storeID, evSegunda, comprador)
+	marcarPago(t, segunda.ID)
+	marcarSituacaoERP(t, segunda.ID, "faturado")
+
+	quinta, criou := getOrCreateVip(t, storeID, evQuinta, comprador)
+	if !criou {
+		t.Error("não abriu carrinho novo depois da nota emitida")
+	}
+	if quinta.ID == segunda.ID {
+		t.Error("somou item num pedido já faturado — seria emitir nota errada")
+	}
+}
+
+// Toda situação pós-faturamento fecha a porta; as anteriores não.
+func TestPortaDeJuncaoPorSituacaoDoERP(t *testing.T) {
+	requireDB(t)
+	casos := []struct {
+		situacao string
+		junta    bool
+	}{
+		{"aberto", true},
+		{"aprovado", true},
+		{"preparando_envio", false}, // a nota já saiu quando o pedido entra em preparo
+		{"dados_incompletos", true},
+		{"faturado", false},
+		{"pronto_envio", false},
+		{"enviado", false},
+		{"entregue", false},
+		{"nao_entregue", false},
+		{"cancelado", false},
+	}
+	for _, c := range casos {
+		t.Run(c.situacao, func(t *testing.T) {
+			requireDB(t)
+			storeID := seedStore(t)
+			ev1 := seedEventInStore(t, storeID)
+			ev2 := seedEventInStore(t, storeID)
+			comprador := fmt.Sprintf("@c%s%d", c.situacao, time.Now().UnixNano())
+
+			primeiro, _ := getOrCreateVip(t, storeID, ev1, comprador)
+			marcarPago(t, primeiro.ID)
+			marcarSituacaoERP(t, primeiro.ID, c.situacao)
+
+			segundo, _ := getOrCreateVip(t, storeID, ev2, comprador)
+			juntou := segundo.ID == primeiro.ID
+			if juntou != c.junta {
+				verbo := map[bool]string{true: "juntou", false: "não juntou"}
+				t.Errorf("situação %q: %s, e a regra diz que devia %s",
+					c.situacao, verbo[juntou], verbo[c.junta])
+			}
+		})
+	}
+}
+
+// Estornado é o oposto do pago: não há venda a que somar, e o carrinho novo
+// nasce limpo.
+func TestVipCartEstornadoNaoRecebeMaisCompra(t *testing.T) {
+	requireDB(t)
+	storeID := seedStore(t)
+	ev1 := seedEventInStore(t, storeID)
+	ev2 := seedEventInStore(t, storeID)
+	comprador := fmt.Sprintf("@bia%d", time.Now().UnixNano())
+
+	primeiro, _ := getOrCreateVip(t, storeID, ev1, comprador)
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE carts SET payment_status='refunded' WHERE id=$1`, primeiro.ID); err != nil {
+		t.Fatalf("estornando: %v", err)
+	}
+
+	segundo, criou := getOrCreateVip(t, storeID, ev2, comprador)
+	if !criou || segundo.ID == primeiro.ID {
+		t.Error("juntou compra num carrinho estornado")
+	}
+}

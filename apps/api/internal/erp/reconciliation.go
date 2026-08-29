@@ -28,14 +28,12 @@ import (
 	"livecart/apps/api/lib/logger"
 )
 
-// StockPosition é o que o sistema acredita sobre um produto: o contador local e
-// quanto está segurado por reserva ativa agora.
+// StockPosition é o que o sistema acredita sobre um produto.
 type StockPosition struct {
 	ProductID  string
 	Name       string
 	ExternalID string
 	LocalStock int
-	Held       int
 }
 
 // StockDivergence é um produto cujo saldo no ERP não bate com o esperado.
@@ -43,10 +41,10 @@ type StockDivergence struct {
 	ProductID  string
 	Name       string
 	ExternalID string
-	// Expected é LocalStock − Held: o que deveria estar disponível no ERP, já
-	// descontadas as unidades que nossas reservas ativas seguram lá.
+	// Expected é o contador local — que, no modelo de pedido-como-reserva, é
+	// exatamente o que o ERP deveria reportar como disponível.
 	Expected int
-	// Actual é o que o ERP respondeu.
+	// Actual é o saldo DISPONÍVEL que o ERP respondeu.
 	Actual int
 	// Delta é Actual − Expected. Positivo significa unidade a mais no ERP do que
 	// deveria (foi o Gabinete, +1); negativo, unidade a menos (o Perfume, −1).
@@ -69,20 +67,22 @@ type StockPositionReader interface {
 // ReconcileStockAgainstERP compara, produto a produto, o saldo que o ERP reporta
 // com o que deveria estar lá segundo o nosso estado.
 //
-// A conta é `LocalStock − Held`: o contador local menos o que nossas reservas
-// ativas seguram no ERP. Quando as duas contabilidades estão saudáveis, esse
-// número É o saldo remoto.
+// A conta é uma igualdade simples: `LocalStock == disponivel`. Ela ficou simples
+// porque os dois lados passaram a medir a mesma coisa — o carrinho aberto
+// desconta do contador local aqui e, como virou pedido de venda, desconta do
+// disponível lá. Antes era `local − reservas ativas`, e cada termo dessa
+// subtração era uma oportunidade de errar.
 //
-// Uma varredura só é confiável em repouso. Durante uma live cada reserva
-// deflaciona o saldo remoto por alguns segundos antes de a reserva existir no
-// nosso lado, e a foto sai borrada — divergências transitórias que se resolvem
-// sozinhas. Chame com a loja quieta, ou trate os resultados como suspeita e não
-// como veredito.
+// Uma varredura só é confiável em repouso. Durante uma live existe uma janela de
+// alguns segundos entre o item entrar no carrinho e o pedido refletir no ERP, e a
+// foto sai borrada — divergências transitórias que se resolvem sozinhas. Chame
+// com a loja quieta, ou trate os resultados como suspeita e não como veredito.
 func ReconcileStockAgainstERP(
 	ctx context.Context,
 	log *zap.Logger,
 	reader StockPositionReader,
 	provider interface {
+		// GetProductStock devolve o saldo DISPONÍVEL do produto no ERP.
 		GetProductStock(ctx context.Context, externalID string) (int, error)
 	},
 	storeID, externalSource string,
@@ -109,7 +109,7 @@ func ReconcileStockAgainstERP(
 		}
 		report.Checked++
 
-		expected := p.LocalStock - p.Held
+		expected := p.LocalStock
 		if actual == expected {
 			continue
 		}
@@ -130,9 +130,7 @@ func ReconcileStockAgainstERP(
 			zap.String("product_name", p.Name),
 			zap.String("external_id", p.ExternalID),
 			zap.Int("local_stock", p.LocalStock),
-			zap.Int("held_by_reservations", p.Held),
-			zap.Int("expected_in_erp", expected),
-			zap.Int("actual_in_erp", actual),
+			zap.Int("available_in_erp", actual),
 			zap.Int("delta", d.Delta),
 		)
 	}

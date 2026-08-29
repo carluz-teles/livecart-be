@@ -333,8 +333,8 @@ func (s *Service) applySubscription(ctx context.Context, sub *StripeSubscription
 		CurrentPeriodEnd:     unixToTimestamptz(sub.PeriodEnd()),
 		// The Customer Portal schedules end-of-cycle cancellation via cancel_at
 		// (a timestamp), NOT cancel_at_period_end — so treat either as "canceling".
-		CancelAtPeriodEnd:    sub.CancelAtPeriodEnd || sub.CancelAt > 0,
-		GraceUntil:           graceUntil,
+		CancelAtPeriodEnd: sub.CancelAtPeriodEnd || sub.CancelAt > 0,
+		GraceUntil:        graceUntil,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

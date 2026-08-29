@@ -272,6 +272,16 @@ var DefaultPolicies = map[string]QueuePolicy{
 var EventTimeouts = map[Name]time.Duration{
 	OrderPaid:     90 * time.Second,
 	OrderRefunded: 90 * time.Second,
+	// `comment.received` passou a criar o pedido de venda no ERP — antes ele só
+	// lançava um movimento de estoque. O trabalho agora é resolver o contato do
+	// comprador (busca + criação, para quem é novo) e criar o pedido, tudo em
+	// série e passando pelo limitador da conta, que é de 30 escritas por minuto.
+	//
+	// Com os 15s da fila, uma medição de 12 compradores simultâneos deixou OITO
+	// carrinhos sem pedido nenhum: o prazo estourava enquanto a chamada esperava
+	// a vez, e o carrinho ficava sem segurar estoque. O teto tem de caber no
+	// trabalho — é a mesma lição do order.paid, uma linha acima.
+	CommentReceived: 90 * time.Second,
 }
 
 // Envelope is the canonical wire format for every event. It is serialized as

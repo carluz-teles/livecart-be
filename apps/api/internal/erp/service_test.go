@@ -25,15 +25,6 @@ func (stubERPRepo) GetCartERPFinalisationStatus(context.Context, string) (*CartF
 	return nil, nil
 }
 func (stubERPRepo) MarkCartERPFinalisationAttempt(context.Context, string, []byte) error { return nil }
-func (stubERPRepo) ListActiveReservationsByCart(context.Context, string) ([]StockReservationRow, error) {
-	return nil, nil
-}
-func (stubERPRepo) ReverseReservationByID(context.Context, string) error    { return nil }
-func (stubERPRepo) ReverseReservationsByCart(context.Context, string) error { return nil }
-func (stubERPRepo) ClaimReservationForReversal(context.Context, string) (bool, error) {
-	return true, nil
-}
-func (stubERPRepo) RestoreReservationToActive(context.Context, string) error { return nil }
 func (stubERPRepo) GetCartInvoiceAnchor(context.Context, string) (string, string, error) {
 	return "", "", nil
 }
@@ -51,30 +42,11 @@ func (stubERPRepo) UpdateShipmentInvoice(context.Context, string, string, string
 func (stubERPRepo) AcquireCartFinalisationLock(context.Context, string) (func(), bool, error) {
 	return func() {}, false, nil
 }
+func (stubERPRepo) GetCartERPOpAge(context.Context, string) (time.Duration, error) {
+	return 0, nil
+}
 func (stubERPRepo) GetCartERPOrderState(context.Context, string) (*CartERPOrderState, error) {
 	return nil, nil
-}
-func (stubERPRepo) ListActiveReservationsByCartAndProduct(context.Context, string, string) ([]StockReservationRow, error) {
-	return nil, nil
-}
-func (stubERPRepo) CreateStockReservation(context.Context, CreateStockReservationParams) (*StockReservationRow, error) {
-	return nil, nil
-}
-func (stubERPRepo) UpsertActiveReservationQuantity(_ context.Context, p UpsertReservationParams) (*StockReservationRow, error) {
-	return &StockReservationRow{Quantity: p.IncQty}, nil
-}
-
-func (stubERPRepo) DecrementActiveReservationQuantity(context.Context, string, string, int) (ReservationDecrement, error) {
-	return ReservationDecrement{}, nil
-}
-
-func (stubERPRepo) RestoreReservationQuantityByID(context.Context, string, int) error { return nil }
-
-func (stubERPRepo) AdjustActiveReservationQuantity(context.Context, string, string, int, string) (*StockReservationRow, error) {
-	return nil, nil
-}
-func (stubERPRepo) ReverseReservationsByCartAndProduct(context.Context, string, string) error {
-	return nil
 }
 func (stubERPRepo) DecrementProductStock(context.Context, string, int) error  { return nil }
 func (stubERPRepo) IncrementProductStock(context.Context, string, int) error  { return nil }
@@ -107,21 +79,11 @@ func (stubCollaborators) ResolveProvider(context.Context, *Integration) (provide
 func (stubCollaborators) ResolveExternalProduct(context.Context, string, string) (string, bool) {
 	return "", false
 }
-func (stubCollaborators) OrderAtCheckoutEnabled(string) bool { return false }
 func (stubCollaborators) ResolveERPContact(context.Context, providers.ERPProvider, *Integration, string, string, string, string, string, string, string) (string, error) {
 	return "", nil
 }
-func (stubCollaborators) CreateFinalERPOrderForConversion(context.Context, providers.ERPProvider, *Integration, string, string) error {
-	return nil
-}
-func (stubCollaborators) CreateFinalERPOrder(context.Context, providers.ERPProvider, *Integration, string, string, *providers.PaymentStatus, bool) error {
-	return nil
-}
-func (stubCollaborators) FinalisationInverted(string) bool { return false }
-func (stubCollaborators) ReReserveAfterFailedFinalisation(context.Context, providers.ERPProvider, string, []StockReservationRow) {
-}
-func (stubCollaborators) ReverseCartReservationsPerRow(context.Context, providers.ERPProvider, string, string) error {
-	return nil
+func (stubCollaborators) CreateERPOrderForCart(context.Context, providers.ERPProvider, *Integration, string, string) ([]providers.ERPOrderItem, error) {
+	return nil, nil
 }
 func (stubCollaborators) MarkFinalisationFailed(context.Context, string, string)                {}
 func (stubCollaborators) MirrorToOrder(context.Context, string)                                 {}
@@ -157,3 +119,15 @@ func TestNewService(t *testing.T) {
 		t.Error("logger not wired")
 	}
 }
+
+func (stubERPRepo) ListERPLinkedProductsSample(context.Context, string, int) ([]ERPLinkedProduct, error) {
+	return nil, nil
+}
+
+func (stubERPRepo) CartIsTerminated(context.Context, string) (bool, error) { return false, nil }
+
+func (stubERPRepo) ListCartGridItems(context.Context, string) ([]NonWaitlistedCartItem, error) {
+	return nil, nil
+}
+
+func (stubERPRepo) CartIsPaid(context.Context, string) (bool, error) { return false, nil }

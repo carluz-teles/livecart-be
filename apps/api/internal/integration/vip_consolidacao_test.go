@@ -234,7 +234,14 @@ func TestPromocaoVipSemCarrinhoAberto(t *testing.T) {
 
 // Carrinho com pedido no ERP não é esvaziado às cegas: fica de fora e é
 // devolvido ao chamador. Esvaziá-lo deixaria um pedido lá dentro segurando peça.
-func TestPromocaoVipPulaCarrinhoComPedidoNoERP(t *testing.T) {
+// O carrinho com pedido no ERP É fundido, e o pedido dele sai daqui como
+// trabalho para o serviço resolver depois do commit.
+//
+// Pular era a regra antiga, e ela fazia sentido enquanto o pedido só nascia no
+// checkout e ter um era exceção. Agora o pedido nasce no primeiro comentário:
+// TODO carrinho tem um, e pular por isso pularia todos — a promoção não
+// fundiria nada, calada, e o comprador voltaria a ter um carrinho por evento.
+func TestPromocaoVipFundeCarrinhoComPedidoNoERP(t *testing.T) {
 	requireDB(t)
 	fx := seedVipBuyer(t)
 	comPedido := seedOpenCart(t, fx, fx.eventA, fx.productA, 3, 10*24*time.Hour, "checkout")
@@ -252,13 +259,125 @@ func TestPromocaoVipPulaCarrinhoComPedidoNoERP(t *testing.T) {
 	if res.EternalCartID != recente {
 		t.Fatalf("o mais recente devia virar eterno, veio %s", res.EternalCartID)
 	}
-	if len(res.SkippedCartIDs) != 1 || res.SkippedCartIDs[0] != comPedido {
-		t.Fatalf("o carrinho com pedido no ERP devia ser reportado, veio %v", res.SkippedCartIDs)
+	if len(res.SkippedCartIDs) != 0 {
+		t.Fatalf("pulou %v — com o pedido nascendo no primeiro comentário, pular "+
+			"por ter pedido é pular todos", res.SkippedCartIDs)
 	}
-	if status, _, _, _ := cartState(t, comPedido); status != "checkout" {
-		t.Fatalf("o carrinho pulado devia continuar vivo, veio %s", status)
+	if len(res.MergedCartIDs) != 1 || res.MergedCartIDs[0] != comPedido {
+		t.Fatalf("fundidos = %v, quero só o carrinho com pedido", res.MergedCartIDs)
 	}
-	if q := cartItemQty(t, comPedido, fx.productA); q != 3 {
-		t.Fatalf("o carrinho pulado devia manter os itens, veio %d", q)
+	if q := cartItemQty(t, recente, fx.productA); q != 3 {
+		t.Fatalf("o eterno devia ter recebido as 3 un., veio %d", q)
+	}
+
+	// O pedido órfão sai como trabalho: o carrinho dele está vazio aqui dentro,
+	// mas lá fora ele continua reservando peça até alguém cancelá-lo.
+	if len(res.OrdersToMerge) != 1 {
+		t.Fatalf("pedidos a fundir = %v, quero 1", res.OrdersToMerge)
+	}
+	if res.OrdersToMerge[0].ExternalOrderID != "TINY-123" || res.OrdersToMerge[0].SourceCartID != comPedido {
+		t.Fatalf("o pedido órfão veio errado: %+v", res.OrdersToMerge[0])
+	}
+}
+
+// Carrinho já faturado fica INTEIRO de fora: esvaziá-lo mexeria no que já virou
+// documento fiscal. Ele nem vira destino nem vira origem.
+func TestPromocaoVipDeixaCarrinhoFaturadoDeFora(t *testing.T) {
+	requireDB(t)
+	fx := seedVipBuyer(t)
+	faturado := seedOpenCart(t, fx, fx.eventA, fx.productA, 3, 1*time.Hour, "checkout")
+	outro := seedOpenCart(t, fx, fx.eventB, fx.productB, 2, 10*24*time.Hour, "active")
+
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE carts SET external_order_id='TINY-NF', erp_order_state='open',
+		 erp_order_status='faturado', erp_order_status_at=now() WHERE id=$1`, faturado); err != nil {
+		t.Fatalf("marcando faturado: %v", err)
+	}
+
+	res, err := testRepo.ConsolidateEternalCartForHandle(context.Background(), fx.storeID, fx.handle)
+	if err != nil {
+		t.Fatalf("consolidação falhou: %v", err)
+	}
+	// O faturado é o MAIS RECENTE; mesmo assim não pode ser o eterno, senão a
+	// próxima compra cairia nele e o resolvedor — que também o exclui —
+	// procuraria outro.
+	if res.EternalCartID != outro {
+		t.Fatalf("eterno = %s, quero %s (o faturado não pode ser eleito)", res.EternalCartID, outro)
+	}
+	if q := cartItemQty(t, faturado, fx.productA); q != 3 {
+		t.Fatalf("o faturado perdeu itens (%d) — a nota já foi emitida com eles", q)
+	}
+	if len(res.MergedCartIDs) != 0 {
+		t.Fatalf("fundiu %v, e não havia o que fundir", res.MergedCartIDs)
+	}
+}
+
+// Carrinho PAGO também fica de fora: o carrinho junta até ser pago ou cancelado.
+func TestPromocaoVipDeixaCarrinhoPagoDeFora(t *testing.T) {
+	requireDB(t)
+	fx := seedVipBuyer(t)
+	pago := seedOpenCart(t, fx, fx.eventA, fx.productA, 3, 1*time.Hour, "checkout")
+	aberto := seedOpenCart(t, fx, fx.eventB, fx.productB, 2, 10*24*time.Hour, "active")
+
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE carts SET payment_status='paid', paid_at=now() WHERE id=$1`, pago); err != nil {
+		t.Fatalf("marcando pago: %v", err)
+	}
+
+	res, err := testRepo.ConsolidateEternalCartForHandle(context.Background(), fx.storeID, fx.handle)
+	if err != nil {
+		t.Fatalf("consolidação falhou: %v", err)
+	}
+	if res.EternalCartID != aberto {
+		t.Fatalf("eterno = %s, quero o aberto %s", res.EternalCartID, aberto)
+	}
+	if q := cartItemQty(t, pago, fx.productA); q != 3 {
+		t.Fatalf("o carrinho pago perdeu itens (%d) — aquela venda está fechada", q)
+	}
+}
+
+// A eleição do eterno tem de ser a MESMA da ingestão. Se as duas divergirem, a
+// promoção elege um carrinho e a próxima compra cai em outro — e o comprador
+// termina com dois carrinhos de novo, que é o bug que a consolidação existe
+// para não deixar acontecer.
+func TestPromocaoElegeOMesmoCarrinhoQueAIngestaoVaiAchar(t *testing.T) {
+	requireDB(t)
+	for _, situacao := range []string{"", "aberto", "aprovado", "faturado", "enviado", "cancelado"} {
+		t.Run("situacao="+situacao, func(t *testing.T) {
+			fx := seedVipBuyer(t)
+			recente := seedOpenCart(t, fx, fx.eventA, fx.productA, 1, 1*time.Hour, "checkout")
+			antigo := seedOpenCart(t, fx, fx.eventB, fx.productB, 1, 10*24*time.Hour, "active")
+			if situacao != "" {
+				if _, err := testPool.Exec(context.Background(),
+					`UPDATE carts SET external_order_id='TINY-X', erp_order_state='open',
+					 erp_order_status=$2, erp_order_status_at=now() WHERE id=$1`, recente, situacao); err != nil {
+					t.Fatalf("marcando situação: %v", err)
+				}
+			}
+
+			res, err := testRepo.ConsolidateEternalCartForHandle(context.Background(), fx.storeID, fx.handle)
+			if err != nil {
+				t.Fatalf("consolidação: %v", err)
+			}
+			var resolvido string
+			err = testPool.QueryRow(context.Background(),
+				`SELECT id::text FROM carts
+				 WHERE store_id=$1 AND platform_handle=$2 AND never_expires
+				   AND status IN ('pending','active','checkout','paid')
+				   AND (payment_status IS NULL OR payment_status <> 'refunded')
+				   AND (erp_order_status IS NULL OR erp_order_status NOT IN (
+				         'preparando_envio','faturado','pronto_envio','enviado','entregue',
+				         'nao_entregue','cancelado'))
+				 ORDER BY created_at DESC LIMIT 1`, fx.storeID, fx.handle).Scan(&resolvido)
+			if err != nil {
+				t.Fatalf("resolvendo o carrinho eterno: %v", err)
+			}
+			if resolvido != res.EternalCartID {
+				t.Errorf("a promoção elegeu %s e a ingestão vai achar %s — com os "+
+					"dois divergindo o comprador volta a ter um carrinho por evento",
+					res.EternalCartID, resolvido)
+			}
+			_ = antigo
+		})
 	}
 }

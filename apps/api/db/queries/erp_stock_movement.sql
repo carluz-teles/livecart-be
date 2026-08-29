@@ -85,3 +85,4 @@ SET status = 'failed', attempts = 0,
     last_attempt_at = now(), updated_at = now()
 WHERE id = $1 AND store_id = $2 AND status IN ('failed', 'unconfirmed')
 RETURNING *;
+

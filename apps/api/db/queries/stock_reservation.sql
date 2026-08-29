@@ -116,12 +116,17 @@ SET quantity = CASE WHEN status = 'reversed' THEN quantity ELSE quantity + sqlc.
 WHERE id = sqlc.arg(id);
 
 -- name: ListStockPositionsForReconciliation :many
--- O que o sistema ACREDITA sobre cada produto ligado ao ERP: o contador local e
--- quantas unidades estão seguradas por reserva ativa neste instante.
+-- O contador local de cada produto ligado ao ERP — o lado de cá da comparação.
+--
+-- Havia uma segunda coluna aqui, `held`, somando as reservas ativas para que a
+-- conta fosse `local − held = saldo remoto`. Ela saiu junto com as reservas
+-- manuais: hoje quem segura a peça é o próprio pedido de venda, e o `disponivel`
+-- que o ERP devolve já vem com essas unidades descontadas. Os dois lados passaram
+-- a medir a mesma coisa, e a igualdade ficou direta — `local == disponivel`.
 --
 -- Existe porque não havia detecção nenhuma. O desvio de 12/08/2026 — uma unidade
 -- inventada no Gabinete Gamer e uma perdida no Perfume — só apareceu porque o
--- lojista conferiu o Tiny na mão, e diagnosticá-lo exigiu reconstruir o razão a
+-- lojista conferiu o ERP na mão, e diagnosticá-lo exigiu reconstruir o razão a
 -- partir de integration_logs. Bug de estoque é inevitável; ficar dias sem saber
 -- não precisa ser.
 --
@@ -130,15 +135,12 @@ WHERE id = sqlc.arg(id);
 SELECT p.id,
        p.name,
        p.external_id,
-       p.stock::int AS local_stock,
-       COALESCE(SUM(sr.quantity) FILTER (WHERE sr.status = 'active'), 0)::int AS held
+       p.stock::int AS local_stock
 FROM products p
-LEFT JOIN stock_reservations sr ON sr.product_id = p.id
 WHERE p.store_id = sqlc.arg(store_id)
   AND p.external_id IS NOT NULL
   AND p.external_id <> ''
   AND p.external_source = sqlc.arg(external_source)
-GROUP BY p.id, p.name, p.external_id, p.stock
 ORDER BY p.name;
 -- name: ReverseReservationByID :exec
 -- Marcação per-row da finalização retomável: cada reserva só vira 'reversed'
@@ -173,3 +175,25 @@ WHERE id = @id AND status = 'active';
 -- movimento gravado). O que já foi confirmado no ERP nunca volta.
 UPDATE stock_reservations SET status = 'active', reversed_at = NULL
 WHERE id = @id AND status = 'reversed';
+
+-- name: ListCartsWithActiveReservations :many
+-- Carrinhos da loja que ainda seguram peça por reserva MANUAL — a lista de
+-- trabalho da drenagem única.
+--
+-- Ordena do mais novo para o mais antigo de propósito: os carrinhos recentes são
+-- os de uma live em andamento, e são eles que não podem ficar um segundo sem
+-- estoque segurado. Os antigos já estão parados há dias e podem esperar.
+SELECT c.id::text AS cart_id,
+       COALESCE(c.store_id, e.store_id)::text AS store_id,
+       c.status,
+       COALESCE(c.payment_status, '') AS payment_status,
+       COALESCE(c.external_order_id, '') AS external_order_id,
+       e.status AS event_status,
+       COUNT(sr.id)::int AS reservation_rows,
+       COALESCE(SUM(sr.quantity), 0)::int AS reserved_units
+FROM carts c
+JOIN live_events e ON e.id = c.event_id
+JOIN stock_reservations sr ON sr.cart_id = c.id AND sr.status = 'active'
+WHERE COALESCE(c.store_id, e.store_id) = sqlc.arg(store_id)::uuid
+GROUP BY c.id, c.store_id, e.store_id, c.status, c.payment_status, c.external_order_id, e.status, c.created_at
+ORDER BY c.created_at DESC;

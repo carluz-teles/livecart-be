@@ -318,19 +318,79 @@ func (q *Queries) ListActiveReservationsByEvent(ctx context.Context, eventID pgt
 	return items, nil
 }
 
+const listCartsWithActiveReservations = `-- name: ListCartsWithActiveReservations :many
+SELECT c.id::text AS cart_id,
+       COALESCE(c.store_id, e.store_id)::text AS store_id,
+       c.status,
+       COALESCE(c.payment_status, '') AS payment_status,
+       COALESCE(c.external_order_id, '') AS external_order_id,
+       e.status AS event_status,
+       COUNT(sr.id)::int AS reservation_rows,
+       COALESCE(SUM(sr.quantity), 0)::int AS reserved_units
+FROM carts c
+JOIN live_events e ON e.id = c.event_id
+JOIN stock_reservations sr ON sr.cart_id = c.id AND sr.status = 'active'
+WHERE COALESCE(c.store_id, e.store_id) = $1::uuid
+GROUP BY c.id, c.store_id, e.store_id, c.status, c.payment_status, c.external_order_id, e.status, c.created_at
+ORDER BY c.created_at DESC
+`
+
+type ListCartsWithActiveReservationsRow struct {
+	CartID          string `json:"cart_id"`
+	StoreID         string `json:"store_id"`
+	Status          string `json:"status"`
+	PaymentStatus   string `json:"payment_status"`
+	ExternalOrderID string `json:"external_order_id"`
+	EventStatus     string `json:"event_status"`
+	ReservationRows int32  `json:"reservation_rows"`
+	ReservedUnits   int32  `json:"reserved_units"`
+}
+
+// Carrinhos da loja que ainda seguram peça por reserva MANUAL — a lista de
+// trabalho da drenagem única.
+//
+// Ordena do mais novo para o mais antigo de propósito: os carrinhos recentes são
+// os de uma live em andamento, e são eles que não podem ficar um segundo sem
+// estoque segurado. Os antigos já estão parados há dias e podem esperar.
+func (q *Queries) ListCartsWithActiveReservations(ctx context.Context, storeID pgtype.UUID) ([]ListCartsWithActiveReservationsRow, error) {
+	rows, err := q.db.Query(ctx, listCartsWithActiveReservations, storeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCartsWithActiveReservationsRow{}
+	for rows.Next() {
+		var i ListCartsWithActiveReservationsRow
+		if err := rows.Scan(
+			&i.CartID,
+			&i.StoreID,
+			&i.Status,
+			&i.PaymentStatus,
+			&i.ExternalOrderID,
+			&i.EventStatus,
+			&i.ReservationRows,
+			&i.ReservedUnits,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStockPositionsForReconciliation = `-- name: ListStockPositionsForReconciliation :many
 SELECT p.id,
        p.name,
        p.external_id,
-       p.stock::int AS local_stock,
-       COALESCE(SUM(sr.quantity) FILTER (WHERE sr.status = 'active'), 0)::int AS held
+       p.stock::int AS local_stock
 FROM products p
-LEFT JOIN stock_reservations sr ON sr.product_id = p.id
 WHERE p.store_id = $1
   AND p.external_id IS NOT NULL
   AND p.external_id <> ''
   AND p.external_source = $2
-GROUP BY p.id, p.name, p.external_id, p.stock
 ORDER BY p.name
 `
 
@@ -344,15 +404,19 @@ type ListStockPositionsForReconciliationRow struct {
 	Name       string      `json:"name"`
 	ExternalID pgtype.Text `json:"external_id"`
 	LocalStock int32       `json:"local_stock"`
-	Held       int32       `json:"held"`
 }
 
-// O que o sistema ACREDITA sobre cada produto ligado ao ERP: o contador local e
-// quantas unidades estão seguradas por reserva ativa neste instante.
+// O contador local de cada produto ligado ao ERP — o lado de cá da comparação.
+//
+// Havia uma segunda coluna aqui, `held`, somando as reservas ativas para que a
+// conta fosse `local − held = saldo remoto`. Ela saiu junto com as reservas
+// manuais: hoje quem segura a peça é o próprio pedido de venda, e o `disponivel`
+// que o ERP devolve já vem com essas unidades descontadas. Os dois lados passaram
+// a medir a mesma coisa, e a igualdade ficou direta — `local == disponivel`.
 //
 // Existe porque não havia detecção nenhuma. O desvio de 12/08/2026 — uma unidade
 // inventada no Gabinete Gamer e uma perdida no Perfume — só apareceu porque o
-// lojista conferiu o Tiny na mão, e diagnosticá-lo exigiu reconstruir o razão a
+// lojista conferiu o ERP na mão, e diagnosticá-lo exigiu reconstruir o razão a
 // partir de integration_logs. Bug de estoque é inevitável; ficar dias sem saber
 // não precisa ser.
 //
@@ -372,7 +436,6 @@ func (q *Queries) ListStockPositionsForReconciliation(ctx context.Context, arg L
 			&i.Name,
 			&i.ExternalID,
 			&i.LocalStock,
-			&i.Held,
 		); err != nil {
 			return nil, err
 		}

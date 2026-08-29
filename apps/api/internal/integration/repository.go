@@ -17,6 +17,7 @@ import (
 	"livecart/apps/api/db/sqlc"
 	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/events"
+	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/inventory"
 	"livecart/apps/api/internal/live"
 	paymentdomain "livecart/apps/api/internal/payment"
@@ -2267,6 +2268,26 @@ func (r *Repository) CancelCartOnRefund(ctx context.Context, cartID string) (boo
 }
 
 func (r *Repository) CancelCartAndReleaseStock(ctx context.Context, cartID, storeID string) (CancelCartResult, error) {
+	return r.cancelCartComMotivo(ctx, cartID, storeID, CancelReasonStore)
+}
+
+// CancelCartFromERP cancela o carrinho porque o pedido foi cancelado no ERP.
+//
+// Mesmo caminho do cancelamento do lojista — devolve estoque, mata a fila,
+// emite cart.cancelled — trocando apenas o MOTIVO. E o motivo é o que decide se
+// o reactor vai mandar cancelar no ERP: ele só reage a `store_cancelled`, e
+// aqui o pedido já está cancelado lá.
+func (r *Repository) CancelCartFromERP(ctx context.Context, cartID, storeID string) (CancelCartResult, error) {
+	return r.cancelCartComMotivo(ctx, cartID, storeID, CancelReasonERP)
+}
+
+// cancelCartComMotivo é o cancelamento, uma vez só.
+//
+// Os dois caminhos que matam um carrinho por decisão humana fazem exatamente o
+// mesmo trabalho — a diferença cabe num campo. Duplicar a função para trocar uma
+// string criaria duas versões de "o que acontece ao cancelar" que divergiriam na
+// primeira correção feita só numa delas.
+func (r *Repository) cancelCartComMotivo(ctx context.Context, cartID, storeID, motivo string) (CancelCartResult, error) {
 	cID, err := parseUUID(cartID)
 	if err != nil {
 		return CancelCartResult{}, err
@@ -2274,7 +2295,17 @@ func (r *Repository) CancelCartAndReleaseStock(ctx context.Context, cartID, stor
 
 	var result CancelCartResult
 	err = dbtx.InTx(ctx, r.pool, r.queries, func(q *sqlc.Queries) error {
-		cart, err := q.CancelCart(ctx, cID)
+		// Uma query OU a outra — nunca as duas. Elas diferem só no
+		// cancelled_reason que gravam, e rodar a primeira deixaria o carrinho já
+		// cancelado: a segunda cairia no próprio guard e voltaria ErrNoRows,
+		// fazendo o cancelamento do ERP se anunciar como do lojista.
+		var cart sqlc.Cart
+		var err error
+		if motivo == CancelReasonERP {
+			cart, err = q.CancelCartFromERPStatus(ctx, cID)
+		} else {
+			cart, err = q.CancelCart(ctx, cID)
+		}
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				// Guard pegou: cart pago no intervalo ou já terminal.
@@ -2340,7 +2371,7 @@ func (r *Repository) CancelCartAndReleaseStock(ctx context.Context, cartID, stor
 			EventID         string   `json:"event_id"`
 			Reason          string   `json:"reason"`
 			FreedProductIDs []string `json:"freed_product_ids"`
-		}{CartID: cartID, StoreID: storeID, EventID: eventID, Reason: CancelReasonStore, FreedProductIDs: freed})
+		}{CartID: cartID, StoreID: storeID, EventID: eventID, Reason: motivo, FreedProductIDs: freed})
 		if err != nil {
 			return fmt.Errorf("marshaling cart.cancelled payload: %w", err)
 		}
@@ -2693,7 +2724,6 @@ func (r *Repository) ListStockPositionsForReconciliation(ctx context.Context, st
 			Name:       row.Name,
 			ExternalID: row.ExternalID.String,
 			LocalStock: int(row.LocalStock),
-			Held:       int(row.Held),
 		})
 	}
 	return out, nil
@@ -2792,7 +2822,13 @@ func (r *Repository) GetCartTokenByID(ctx context.Context, cartID string) (strin
 // It returns the cart's live_event_id from the RETURNING row — the cart.paid
 // (etc.) fact emitted right after by the caller needs it and this avoids a
 // second query.
-func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string, paymentStatus string, paymentID string, paidAt *time.Time, paymentMethod string) (liveEventID string, err error) {
+//
+// amountCents é o que o gateway confirmou — o número que vira a parcela "PAGO"
+// no pedido do ERP. Ele não é derivável do carrinho: com cupom ou desconto de
+// PIX, o que entra é MENOR que o preço cheio das unidades cobertas, e é
+// exatamente essa diferença que o pedido precisa declarar como desconto em vez
+// de como saldo a pagar.
+func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string, paymentStatus string, paymentID string, paidAt *time.Time, paymentMethod string, amountCents int64) (liveEventID string, err error) {
 	cID, err := parseUUID(cartID)
 	if err != nil {
 		return "", err
@@ -2804,11 +2840,12 @@ func (r *Repository) UpdateCartPaymentStatus(ctx context.Context, cartID string,
 	}
 
 	cart, err := r.queries.UpdateCartPayment(ctx, sqlc.UpdateCartPaymentParams{
-		ID:            cID,
+		CartID:        cID,
 		PaymentStatus: pgtype.Text{String: paymentStatus, Valid: true},
-		CheckoutID:    pgtype.Text{String: paymentID, Valid: paymentID != ""},
+		CheckoutID:    paymentID,
 		PaidAt:        paidAtPg,
 		PaymentMethod: pgtype.Text{String: paymentMethod, Valid: paymentMethod != ""},
+		AmountCents:   amountCents,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -3187,10 +3224,24 @@ type VipConsolidation struct {
 	// MergedCartIDs são os carrinhos que entregaram itens, log de adições,
 	// reservas e fila ao eterno e foram fechados como fundidos.
 	MergedCartIDs []string
-	// SkippedCartIDs são os abertos que NÃO foram fundidos porque já têm pedido
-	// no ERP. Continuam vivos, com o prazo que tinham. Quem decide o que fazer
-	// com eles é gente, não este código.
+	// SkippedCartIDs são os abertos que NÃO foram fundidos. Continuam vivos, com
+	// o prazo que tinham. Quem decide o que fazer com eles é gente.
 	SkippedCartIDs []string
+	// OrdersToMerge são os pedidos no ERP que ficaram sem carrinho: o conteúdo
+	// deles mudou de dono aqui dentro, e lá fora eles ainda seguram a peça.
+	//
+	// A resolução NÃO acontece nesta transação, e não por descuido: falar com o
+	// ERP leva segundos e a transação segura FOR UPDATE em todos os carrinhos do
+	// comprador. Sai daqui como lista de trabalho para o serviço fazer depois do
+	// commit, na ordem que protege o comprador — ver MergeERPOrdersIntoCart.
+	OrdersToMerge []ERPOrderToMerge
+}
+
+// ERPOrderToMerge é um pedido órfão pela fusão: o carrinho dele foi esvaziado e
+// fechado, mas o pedido continua reservando no ERP.
+type ERPOrderToMerge struct {
+	SourceCartID    string
+	ExternalOrderID string
 }
 
 // ConsolidateEternalCartForHandle transforma os N carrinhos abertos de um @ no
@@ -3231,14 +3282,25 @@ func (r *Repository) ConsolidateEternalCartForHandle(ctx context.Context, storeI
 
 	dest := carts[0].ID
 	for _, src := range carts[1:] {
-		if hasERPOrder(src) {
-			out.SkippedCartIDs = append(out.SkippedCartIDs, uuidToString(src.ID))
-			continue
-		}
 		if err := absorbCart(ctx, qtx, dest, src.ID); err != nil {
 			return out, err
 		}
 		out.MergedCartIDs = append(out.MergedCartIDs, uuidToString(src.ID))
+
+		// Carrinho com pedido no ERP era PULADO aqui — os itens sairiam e o
+		// pedido continuaria lá dentro segurando peça. Era a decisão certa
+		// enquanto o pedido só nascia no checkout e ter um era exceção.
+		//
+		// Agora o pedido nasce no primeiro comentário: TODO carrinho tem um, e
+		// pular por isso seria pular todos — a promoção não fundiria nada e o
+		// comprador voltaria a ter um carrinho por evento, calado. Fundir
+		// carrinho passou a significar fundir os PEDIDOS, e é isso que sai
+		// daqui como trabalho para depois do commit.
+		if id := externalOrderID(src); id != "" {
+			out.OrdersToMerge = append(out.OrdersToMerge, ERPOrderToMerge{
+				SourceCartID: uuidToString(src.ID), ExternalOrderID: id,
+			})
+		}
 	}
 
 	if err := qtx.MakeCartEternal(ctx, dest); err != nil {
@@ -3249,12 +3311,15 @@ func (r *Repository) ConsolidateEternalCartForHandle(ctx context.Context, storeI
 	return out, tx.Commit(ctx)
 }
 
-// hasERPOrder diz se o carrinho já materializou um pedido no ERP do lojista.
-func hasERPOrder(c sqlc.ListOpenCartsForVipPromotionRow) bool {
-	if c.ExternalOrderID.Valid && c.ExternalOrderID.String != "" {
-		return true
+// externalOrderID devolve o pedido que o carrinho materializou no ERP, ou vazio.
+//
+// Estado pós-criação sem id é o carrinho preso em 'converting' antes do POST
+// responder: não há pedido a fundir, e a retomada por marcador cuida dele.
+func externalOrderID(c sqlc.ListOpenCartsForVipPromotionRow) string {
+	if c.ExternalOrderID.Valid {
+		return c.ExternalOrderID.String
 	}
-	return c.ErpOrderState != "" && c.ErpOrderState != "none"
+	return ""
 }
 
 // absorbCart despeja um carrinho no outro, na ordem que importa: o conteúdo
@@ -3598,6 +3663,9 @@ func (r *Repository) GetCartERPOrderState(ctx context.Context, cartID string) (*
 		State:           row.ErpOrderState,
 		StockLaunched:   row.ErpStockLaunched,
 		ExternalOrderID: row.ExternalOrderID,
+		OrderStatus:     row.ErpOrderStatus,
+		PaidAmountCents: row.PaidAmountCents,
+		PaidAt:          row.PaidAt.Time,
 	}, nil
 }
 
@@ -3967,4 +4035,396 @@ func (r *Repository) ApplyERPStockMirror(ctx context.Context, productID string, 
 		return false, fmt.Errorf("applying ERP stock mirror: %w", err)
 	}
 	return n > 0, nil
+}
+
+// ListCartPayments lê o livro de pagamentos de um carrinho, na ordem em que o
+// dinheiro entrou. Satisfaz erp.CartPaymentLedger.
+func (r *Repository) ListCartPayments(ctx context.Context, cartID string) ([]erp.CartPayment, error) {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	linhas, err := r.queries.ListCartPayments(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]erp.CartPayment, 0, len(linhas))
+	for _, l := range linhas {
+		out = append(out, erp.CartPayment{
+			AmountCents:       l.AmountCents,
+			GrossCoveredCents: l.GrossCoveredCents,
+			Method:            l.Method,
+			CheckoutID:        l.CheckoutID,
+			PaidAt:            l.PaidAt.Time,
+		})
+	}
+	return out, nil
+}
+
+// ListERPLinkedProductsSample devolve uma amostra de produtos ligados ao Tiny e
+// com estoque. Satisfaz erp.ERPRepository.
+func (r *Repository) ListERPLinkedProductsSample(ctx context.Context, storeID string, limite int) ([]erp.ERPLinkedProduct, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	linhas, err := r.queries.ListERPLinkedProductsSample(ctx, sqlc.ListERPLinkedProductsSampleParams{
+		StoreID: sID,
+		Limite:  int32(limite),
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]erp.ERPLinkedProduct, 0, len(linhas))
+	for _, l := range linhas {
+		out = append(out, erp.ERPLinkedProduct{
+			ID:         uuidToString(l.ID),
+			Name:       l.Name,
+			ExternalID: l.ExternalID.String,
+		})
+	}
+	return out, nil
+}
+
+// =============================================================================
+// SIMULADOR DE LIVE — staging apenas. Ver simulador_live.go.
+// =============================================================================
+
+// GetSessionStoreID devolve a loja dona de uma sessão.
+func (r *Repository) GetSessionStoreID(ctx context.Context, sessionID string) (string, error) {
+	id, err := parseUUID(sessionID)
+	if err != nil {
+		return "", err
+	}
+	storeID, err := r.queries.GetSessionStoreID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return uuidToString(storeID), nil
+}
+
+// AttachPlatformMedia vincula um id de mídia da plataforma a uma sessão.
+func (r *Repository) AttachPlatformMedia(ctx context.Context, sessionID, platform, mediaID string) error {
+	sid, err := parseUUID(sessionID)
+	if err != nil {
+		return err
+	}
+	_, err = r.queries.AddPlatformToSession(ctx, sqlc.AddPlatformToSessionParams{
+		SessionID:      sid,
+		Platform:       platform,
+		PlatformLiveID: mediaID,
+	})
+	return err
+}
+
+// ReleasePlatformMedia solta a mídia viva daquele id.
+func (r *Repository) ReleasePlatformMedia(ctx context.Context, mediaID string) error {
+	return r.queries.ReleasePlatformMedia(ctx, mediaID)
+}
+
+// ListSessionsForSimulator lista sessões recentes da loja. Simulador de staging.
+func (r *Repository) ListSessionsForSimulator(ctx context.Context, storeID string) ([]SessaoSimulavel, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	linhas, err := r.queries.ListSessionsForSimulator(ctx, sID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SessaoSimulavel, 0, len(linhas))
+	for _, l := range linhas {
+		s := SessaoSimulavel{
+			SessionID:   uuidToString(l.ID),
+			Status:      l.Status,
+			EventID:     uuidToString(l.EventID),
+			EventTitle:  l.EventTitle.String,
+			MidiasVivas: []string{},
+		}
+		if l.StartedAt.Valid {
+			s.StartedAt = l.StartedAt.Time.Format(time.RFC3339)
+		}
+		if m, _ := l.MidiasVivas.(string); m != "" {
+			s.MidiasVivas = strings.Split(m, ",")
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// CartIsTerminated diz se o carrinho está cancelado ou vencido.
+func (r *Repository) CartIsTerminated(ctx context.Context, cartID string) (bool, error) {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return false, err
+	}
+	return r.queries.CartIsTerminated(ctx, id)
+}
+
+// ReopenCancelledCartFromERP ressuscita o carrinho que o lojista reabriu no ERP.
+//
+// Numa transação só, espelhando o cancelamento: devolve o carrinho ao estado
+// 'checkout', retoma o estoque que ainda existe e manda para a fila de espera o
+// que outra compradora levou no meio-tempo.
+func (r *Repository) ReopenCancelledCartFromERP(ctx context.Context, cartID, storeID string) (ReopenCartResult, error) {
+	out := ReopenCartResult{CartID: cartID}
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return out, err
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return out, fmt.Errorf("begin reopen tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op depois do Commit
+
+	err = func(q *sqlc.Queries) error {
+		// O prazo vem da fonte única (evento com fallback da loja). Precisa ser
+		// lido ANTES do flip, porque o flip já grava o expires_at novo.
+		// O prazo tem de ser lido ANTES do flip: o flip já grava o expires_at
+		// novo, e depois dele a fonte do número já foi consumida.
+		prazo, err := r.prazoDoCarrinho(ctx, q, cID)
+		if err != nil {
+			return err
+		}
+
+		cart, err := q.ReopenCancelledCart(ctx, sqlc.ReopenCancelledCartParams{
+			CartID:         cID,
+			MinutosDePrazo: int32(prazo),
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil // guard recusou: expirado, pago, ou não cancelado pelo lojista
+			}
+			return fmt.Errorf("flipping cart back from cancelled: %w", err)
+		}
+		out.Reopened = true
+		out.EventID = uuidToString(cart.EventID)
+
+		itens, err := q.ListNonWaitlistedCartItems(ctx, cID)
+		if err != nil {
+			return fmt.Errorf("listing items to reopen: %w", err)
+		}
+		for _, item := range itens {
+			desejado := item.Quantity
+			obtido, err := q.TakeStockForReopen(ctx, sqlc.TakeStockForReopenParams{
+				ProductID: item.ProductID,
+				Desejado:  desejado,
+			})
+			if err != nil {
+				return fmt.Errorf("retaking stock on reopen: %w", err)
+			}
+			out.Recuperadas += int(obtido)
+
+			falta := desejado - obtido
+			if falta <= 0 {
+				continue
+			}
+			// O que não coube vira espera. A linha do carrinho continua com a
+			// quantidade cheia — quantity é o que ela PEDIU — e a parte sem
+			// lastro fica marcada em waitlisted_quantity, que é a mesma
+			// convenção do caminho normal de compra.
+			out.EmFila += int(falta)
+			if err := q.SetCartItemWaitlistedOnReopen(ctx, sqlc.SetCartItemWaitlistedOnReopenParams{
+				CartID:     cID,
+				ProductID:  item.ProductID,
+				Waitlisted: falta,
+			}); err != nil {
+				return fmt.Errorf("marking waitlisted units on reopen: %w", err)
+			}
+			pos, err := q.GetNextWaitlistPosition(ctx, sqlc.GetNextWaitlistPositionParams{
+				EventID:   cart.EventID,
+				ProductID: item.ProductID,
+			})
+			if err != nil {
+				return fmt.Errorf("reading waitlist position: %w", err)
+			}
+			if _, err := q.CreateWaitlistItem(ctx, sqlc.CreateWaitlistItemParams{
+				EventID:        cart.EventID,
+				ProductID:      item.ProductID,
+				PlatformUserID: cart.PlatformUserID,
+				PlatformHandle: cart.PlatformHandle,
+				Quantity:       falta,
+				Position:       int32(pos),
+				CartID:         cID,
+			}); err != nil {
+				return fmt.Errorf("putting the missing units on the waitlist: %w", err)
+			}
+		}
+		return nil
+	}(r.queries.WithTx(tx))
+	if err != nil {
+		return out, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return out, fmt.Errorf("commit reopen tx: %w", err)
+	}
+	return out, nil
+}
+
+// prazoDoCarrinho lê o prazo efetivo pela fonte única (evento + loja).
+func (r *Repository) prazoDoCarrinho(ctx context.Context, q *sqlc.Queries, cartID pgtype.UUID) (int, error) {
+	ev, err := q.GetCartEventID(ctx, cartID)
+	if err != nil {
+		return 0, fmt.Errorf("reading cart event: %w", err)
+	}
+	cfg, err := q.GetEventCartSettings(ctx, ev)
+	if err != nil {
+		return 0, fmt.Errorf("reading cart expiration settings: %w", err)
+	}
+	return int(cfg.EffectiveCartExpirationMinutes), nil
+}
+
+// ListCartGridItems devolve a grade do GRUPO: este carrinho e os juntados a ele.
+//
+// Separada de ListNonWaitlistedCartItems porque aquela também alimenta o
+// cancelamento e a expiração, que devolvem estoque — unir os grupos ali faria
+// cancelar um carrinho devolver o estoque do vizinho.
+func (r *Repository) ListCartGridItems(ctx context.Context, cartID string) ([]NonWaitlistedCartItem, error) {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	linhas, err := r.queries.ListCartGridItems(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]NonWaitlistedCartItem, 0, len(linhas))
+	for _, l := range linhas {
+		out = append(out, NonWaitlistedCartItem{
+			CartID:            cartID,
+			ProductExternalID: l.ProductExternalID.String,
+			ProductName:       l.ProductName,
+			ProductKeyword:    l.ProductKeyword,
+			Quantity:          int(l.Quantity),
+			UnitPrice:         l.UnitPrice,
+		})
+	}
+	return out, nil
+}
+
+// GetCartForJoin lê o que a decisão de junção precisa saber de um pedido.
+func (r *Repository) GetCartForJoin(ctx context.Context, cartID, storeID string) (CartForJoin, error) {
+	var out CartForJoin
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return out, err
+	}
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return out, err
+	}
+	row, err := r.queries.GetCartForJoin(ctx, sqlc.GetCartForJoinParams{CartID: cID, StoreID: sID})
+	if err != nil {
+		return out, err
+	}
+	return CartForJoin{
+		CartID:          uuidToString(row.ID),
+		PlatformUserID:  row.PlatformUserID,
+		PlatformHandle:  row.PlatformHandle,
+		ExternalOrderID: row.ExternalOrderID,
+		CreatedAt:       row.CreatedAt.Time,
+		Refunded:        row.Refunded,
+		Terminated:      row.Terminated,
+		Invoiced:        providers.ERPOrderStatus(row.ErpOrderStatus).FechadoParaNovosItens(),
+		OrderConfirmed:  row.OrderConfirmed,
+		HasMoney:        row.HasMoney,
+		AlreadyJoined:   row.AlreadyJoined.Bool,
+	}, nil
+}
+
+// JoinCartIntoHost prende o carrinho ao anfitrião. false = os guards recusaram.
+func (r *Repository) JoinCartIntoHost(ctx context.Context, cartID, hostID string) (bool, error) {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return false, err
+	}
+	hID, err := parseUUID(hostID)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.queries.JoinCartIntoHost(ctx, sqlc.JoinCartIntoHostParams{CartID: cID, HostID: hID})
+	return n > 0, err
+}
+
+// ListJoinCandidates lista os pedidos que podem ser juntados a este.
+func (r *Repository) ListJoinCandidates(ctx context.Context, storeID, cartID string) ([]JoinCandidate, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return nil, err
+	}
+	linhas, err := r.queries.ListJoinCandidates(ctx, sqlc.ListJoinCandidatesParams{StoreID: sID, CartID: cID})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]JoinCandidate, 0, len(linhas))
+	for _, l := range linhas {
+		out = append(out, JoinCandidate{
+			CartID:         uuidToString(l.ID),
+			ShortID:        l.ShortID,
+			EventTitle:     l.EventTitle.String,
+			CreatedAt:      l.CreatedAt.Time,
+			Status:         l.Status,
+			PaymentStatus:  l.PaymentStatus,
+			ERPOrderNumber: l.ErpOrderNumber,
+			TotalCents:     l.TotalCents,
+			ItemCount:      int(l.ItemCount),
+		})
+	}
+	return out, nil
+}
+
+// GetCartJoinLink lê de que lado da junção este pedido está.
+func (r *Repository) GetCartJoinLink(ctx context.Context, cartID string) (CartJoinLink, error) {
+	var out CartJoinLink
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return out, err
+	}
+	row, err := r.queries.GetCartJoinLink(ctx, cID)
+	if err != nil {
+		return out, err
+	}
+	out.CanJoin = row.CanJoin
+	out.CannotJoinReason = row.CannotJoinReason
+	out.HostCartID = row.JoinedToCartID
+	out.HostShortID = row.HostShortID
+	if row.JoinedCartIds != "" {
+		out.JoinedCartIDs = strings.Split(row.JoinedCartIds, ",")
+	}
+	if row.JoinedShortIds != "" {
+		out.JoinedShortIDs = strings.Split(row.JoinedShortIds, ",")
+	}
+	if row.JoinedAt.Valid {
+		t := row.JoinedAt.Time
+		out.JoinedAt = &t
+	}
+	return out, nil
+}
+
+// UnjoinCart desfaz o vínculo de junção, devolvendo o pedido ao carrinho.
+func (r *Repository) UnjoinCart(ctx context.Context, cartID, externalOrderID, erpOrderState string) error {
+	cID, err := parseUUID(cartID)
+	if err != nil {
+		return err
+	}
+	return r.queries.UnjoinCart(ctx, sqlc.UnjoinCartParams{
+		CartID:          cID,
+		ExternalOrderID: externalOrderID,
+		ErpOrderState:   erpOrderState,
+	})
+}
+
+// CartIsPaid diz se o carrinho já tem pagamento registrado deste lado.
+func (r *Repository) CartIsPaid(ctx context.Context, cartID string) (bool, error) {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return false, err
+	}
+	return r.queries.CartIsPaid(ctx, id)
 }

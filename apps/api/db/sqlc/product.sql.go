@@ -47,11 +47,11 @@ func (q *Queries) ApplyERPStockMirror(ctx context.Context, arg ApplyERPStockMirr
 
 const createProduct = `-- name: CreateProduct :one
 INSERT INTO products (
-    store_id, name, external_id, external_source, keyword, price, image_url, stock,
+    id, store_id, name, external_id, external_source, keyword, price, image_url, stock,
     weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents,
     group_id, barcode
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+VALUES ($18, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 RETURNING id, store_id, name, external_id, external_source, keyword, price, image_url, stock, active, created_at, updated_at, weight_grams, height_cm, width_cm, length_cm, sku, package_format, insurance_value_cents, group_id, erp_seq, barcode
 `
 
@@ -73,8 +73,15 @@ type CreateProductParams struct {
 	InsuranceValueCents pgtype.Int8 `json:"insurance_value_cents"`
 	GroupID             pgtype.UUID `json:"group_id"`
 	Barcode             pgtype.Text `json:"barcode"`
+	ID                  pgtype.UUID `json:"id"`
 }
 
+// O id vem do DOMÍNIO, não do banco.
+//
+// Sem ele na lista, o Postgres gerava um id próprio e o objeto em memória ficava
+// com outro — e quem confiasse no retorno de Save/ImportProduct recebia um id que
+// não corresponde a linha nenhuma. O import manual da tela devolvia esse id, e o
+// reflexo do pedido no ERP o usaria para amarrar o item ao carrinho.
 func (q *Queries) CreateProduct(ctx context.Context, arg CreateProductParams) (Product, error) {
 	row := q.db.QueryRow(ctx, createProduct,
 		arg.StoreID,
@@ -94,6 +101,7 @@ func (q *Queries) CreateProduct(ctx context.Context, arg CreateProductParams) (P
 		arg.InsuranceValueCents,
 		arg.GroupID,
 		arg.Barcode,
+		arg.ID,
 	)
 	var i Product
 	err := row.Scan(
@@ -420,6 +428,54 @@ func (q *Queries) IncrementProductStock(ctx context.Context, arg IncrementProduc
 		&i.Barcode,
 	)
 	return i, err
+}
+
+const listERPLinkedProductsSample = `-- name: ListERPLinkedProductsSample :many
+SELECT id, name, external_id
+FROM products
+WHERE store_id = $1::uuid
+  AND external_source = 'tiny'
+  AND external_id IS NOT NULL AND external_id <> ''
+  AND stock > 0
+ORDER BY updated_at DESC NULLS LAST
+LIMIT $2::int
+`
+
+type ListERPLinkedProductsSampleParams struct {
+	StoreID pgtype.UUID `json:"store_id"`
+	Limite  int32       `json:"limite"`
+}
+
+type ListERPLinkedProductsSampleRow struct {
+	ID         pgtype.UUID `json:"id"`
+	Name       string      `json:"name"`
+	ExternalID pgtype.Text `json:"external_id"`
+}
+
+// Uma amostra pequena de produtos ligados ao ERP, dos que TÊM estoque — são os
+// únicos em que uma reserva poderia aparecer.
+//
+// Serve à checagem do módulo de Reserva de Estoque, e a amostra é pequena de
+// propósito: as leituras dividem a cota da conta com a live, e provar um módulo
+// não vale atrasar uma venda.
+func (q *Queries) ListERPLinkedProductsSample(ctx context.Context, arg ListERPLinkedProductsSampleParams) ([]ListERPLinkedProductsSampleRow, error) {
+	rows, err := q.db.Query(ctx, listERPLinkedProductsSample, arg.StoreID, arg.Limite)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListERPLinkedProductsSampleRow{}
+	for rows.Next() {
+		var i ListERPLinkedProductsSampleRow
+		if err := rows.Scan(&i.ID, &i.Name, &i.ExternalID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listProductsByGroup = `-- name: ListProductsByGroup :many
