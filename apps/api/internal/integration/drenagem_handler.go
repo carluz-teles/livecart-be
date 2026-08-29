@@ -23,7 +23,14 @@ type DrainLegacyReservationsRequest struct {
 	DryRun *bool `json:"dryRun"`
 	// Limite corta a passada depois de N carrinhos. Zero = todos. Serve para
 	// drenar em lotes — o teto da conta é de 30 escritas por minuto.
-	Limite int `json:"limit"`
+	//
+	// Aceita `limit` e `limite`. O campo nasceu com a tag em inglês e o nome do
+	// Go em português, e num ensaio em 29/08 isso custou caro: o cliente mandou
+	// `limite`, o JSON ignorou, o valor virou zero — e zero quer dizer TODOS.
+	// Num pedido de lote, o erro de digitação escolhia sozinho a opção mais
+	// perigosa e irreversível que existe aqui.
+	Limite      int `json:"limit"`
+	LimiteAlias int `json:"limite"`
 }
 
 // Validate é o portão sintático. dryRun fica de fora de propósito: ele é
@@ -41,7 +48,11 @@ func (r DrainLegacyReservationsRequest) ToInput(storeID string) DrainLegacyReser
 	if r.DryRun != nil {
 		dryRun = *r.DryRun
 	}
-	return DrainLegacyReservationsInput{StoreID: storeID, DryRun: dryRun, Limite: r.Limite}
+	limite := r.Limite
+	if limite == 0 {
+		limite = r.LimiteAlias
+	}
+	return DrainLegacyReservationsInput{StoreID: storeID, DryRun: dryRun, Limite: limite}
 }
 
 // DrainLegacyReservationsInput é o input do usecase.
