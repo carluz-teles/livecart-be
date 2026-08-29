@@ -31,6 +31,14 @@ type DrainLegacyReservationsRequest struct {
 	// perigosa e irreversível que existe aqui.
 	Limite      int `json:"limit"`
 	LimiteAlias int `json:"limite"`
+	// MaxSeconds é o orçamento de TEMPO da passada, em segundos. É ele que
+	// garante que a resposta chega antes de qualquer proxy desistir — o limite
+	// por carrinhos não consegue, porque o custo de um carrinho varia com a
+	// quantidade de linhas e com o quanto o ERP está devolvendo 429.
+	//
+	// Numa loja com 150 produtos disputando a mesma cota, um lote de 5 passou
+	// de sete minutos e nenhum navegador esperou. Zero desliga o orçamento.
+	MaxSeconds int `json:"maxSeconds"`
 }
 
 // Validate é o portão sintático. dryRun fica de fora de propósito: ele é
@@ -52,11 +60,16 @@ func (r DrainLegacyReservationsRequest) ToInput(storeID string) DrainLegacyReser
 	if limite == 0 {
 		limite = r.LimiteAlias
 	}
-	return DrainLegacyReservationsInput{StoreID: storeID, DryRun: dryRun, Limite: limite}
+	maxSeg := r.MaxSeconds
+	if maxSeg == 0 {
+		maxSeg = 45 // cabe folgado em qualquer proxy; ver MaxSeconds
+	}
+	return DrainLegacyReservationsInput{StoreID: storeID, DryRun: dryRun, Limite: limite, MaxSeconds: maxSeg}
 }
 
 // DrainLegacyReservationsInput é o input do usecase.
 type DrainLegacyReservationsInput struct {
+	MaxSeconds int
 	StoreID string
 	DryRun  bool
 	Limite  int
@@ -82,6 +95,10 @@ type DrainLegacyReservationsResponse struct {
 	OrdersCreated int                    `json:"ordersCreated"`
 	RowsReversed  int                    `json:"rowsReversed"`
 	Failed        int                    `json:"failed"`
+	// PorTempo: parou pelo orçamento de tempo, há mais para fazer.
+	PorTempo bool `json:"stoppedOnTime"`
+	// JaRodando: outra passada estava em curso; nada foi feito.
+	JaRodando bool `json:"alreadyRunning"`
 	TookSeconds   float64                `json:"tookSeconds"`
 	Outcomes      []DrainOutcomeResponse `json:"outcomes"`
 }
@@ -109,7 +126,7 @@ func (h *Handler) DrainLegacyReservations(c *fiber.Ctx) error {
 	// que precisa ser dita em voz alta.
 	input := req.ToInput(httpx.GetStoreID(c))
 
-	rel, err := h.service.DrainLegacyReservations(c.UserContext(), input.StoreID, input.DryRun, input.Limite)
+	rel, err := h.service.DrainLegacyReservations(c.UserContext(), input.StoreID, input.DryRun, input.Limite, input.MaxSeconds)
 	if err != nil {
 		return err
 	}
@@ -124,6 +141,8 @@ func newDrainResponse(rel *erp.DrainReport) DrainLegacyReservationsResponse {
 		OrdersCreated: rel.OrdersCreated,
 		RowsReversed:  rel.RowsReversed,
 		Failed:        rel.Failed,
+		PorTempo:      rel.PorTempo,
+		JaRodando:     rel.JaRodando,
 		TookSeconds:   rel.Duration.Seconds(),
 		Outcomes:      make([]DrainOutcomeResponse, 0, len(rel.Outcomes)),
 	}
