@@ -101,6 +101,11 @@ type DrainReport struct {
 	Failed        int
 	Outcomes      []DrainCartOutcome
 	Duration      time.Duration
+	// PorTempo diz que a passada parou pelo orçamento de tempo, não por ter
+	// acabado o trabalho. A tela usa para saber que há mais e seguir.
+	PorTempo bool
+	// JaRodando diz que outra passada tinha a trava. Nada foi feito aqui.
+	JaRodando bool
 }
 
 // DrainLegacyReservations passa a guarda do estoque das saídas manuais para os
@@ -112,12 +117,37 @@ type DrainReport struct {
 // limite corta a passada depois de N carrinhos (0 = todos). Serve para drenar em
 // lotes: o teto da conta é de 30 escritas por minuto, e 126 carrinhos são cerca
 // de 850 chamadas.
-func (s *Service) DrainLegacyReservations(ctx context.Context, storeID string, dryRun bool, limite int) (*DrainReport, error) {
+func (s *Service) DrainLegacyReservations(ctx context.Context, storeID string, dryRun bool, limite, maxSegundos int) (*DrainReport, error) {
 	if s.drain == nil {
 		return nil, fmt.Errorf("drenagem não está ligada neste processo")
 	}
 	inicio := time.Now()
 	ctx = logger.WithStore(ctx, storeID, "")
+
+	// UMA passada por loja de cada vez.
+	//
+	// A requisição estoura o prazo do navegador muito antes de a passada
+	// terminar, e o servidor NÃO para junto: ele segue drenando. O cliente
+	// então repete, e as duas passadas caminham sobre a mesma lista. O CAS da
+	// reivindicação impede estorno duplo — foi o que salvou a migração da
+	// cantodaart em 29/08 —, mas as duas competem pela mesma cota de 30
+	// escritas por minuto e o resultado é metade das chamadas desperdiçada em
+	// corridas perdidas, com o Tiny devolvendo 429 para todo mundo.
+	//
+	// Reusa a trava de finalização, que é um advisory lock por string. A chave
+	// é da LOJA, não do carrinho: o que não pode acontecer duas vezes é a
+	// passada inteira.
+	if !dryRun {
+		liberar, obteve, err := s.repo.AcquireCartFinalisationLock(ctx, "drenagem:"+storeID)
+		if err != nil {
+			return nil, fmt.Errorf("tomando a trava da drenagem: %w", err)
+		}
+		if !obteve {
+			logger.From(ctx, s.logger).Info("drain skipped: another pass holds the lock")
+			return &DrainReport{StoreID: storeID, JaRodando: true}, nil
+		}
+		defer liberar()
+	}
 
 	carrinhos, err := s.drain.ListCartsWithActiveReservations(ctx, storeID)
 	if err != nil {
@@ -157,8 +187,18 @@ func (s *Service) DrainLegacyReservations(ctx context.Context, storeID string, d
 		return nil, fmt.Errorf("o provedor deste ERP não sabe estornar saída manual")
 	}
 
+	prazo := time.Duration(maxSegundos) * time.Second
 	for i, c := range carrinhos {
 		if limite > 0 && i >= limite {
+			break
+		}
+		// O orçamento de tempo é conferido ANTES de começar mais um carrinho, e
+		// não durante: interromper um pela metade deixaria o pedido criado e os
+		// estornos por fazer, que é o estado que a ordem das etapas existe para
+		// evitar. Assim a passada devolve sempre um número inteiro de carrinhos
+		// prontos, e a próxima continua do começo do seguinte.
+		if prazo > 0 && i > 0 && time.Since(inicio) >= prazo {
+			rel.PorTempo = true
 			break
 		}
 		res := s.drenarCarrinho(ctx, legado, c)

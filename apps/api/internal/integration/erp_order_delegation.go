@@ -98,8 +98,8 @@ func (s *Service) RetryERPFinalisation(ctx context.Context, cartID, storeID stri
 }
 
 // DrainLegacyReservations delega para erp.Service (migração única).
-func (s *Service) DrainLegacyReservations(ctx context.Context, storeID string, dryRun bool, limite int) (*erp.DrainReport, error) {
-	return s.erpStock().DrainLegacyReservations(ctx, storeID, dryRun, limite)
+func (s *Service) DrainLegacyReservations(ctx context.Context, storeID string, dryRun bool, limite, maxSegundos int) (*erp.DrainReport, error) {
+	return s.erpStock().DrainLegacyReservations(ctx, storeID, dryRun, limite, maxSegundos)
 }
 
 // reopenerAdapter traduz o relatório de reabertura para o tipo do erp — mesmo

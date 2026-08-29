@@ -141,7 +141,7 @@ func TestDrenagemCriaOPedidoAntesDeEstornar(t *testing.T) {
 	// A saída manual já havia baixado o físico: 10 é o saldo COM ela aplicada.
 	antesFisico := legado.estoque("ext-p1").saldo
 
-	rel, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 0)
+	rel, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 0, 0)
 	if err != nil {
 		t.Fatalf("drenagem: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestDrenagemNaoEstornaSeOPedidoNaoNasce(t *testing.T) {
 	dreno.linhas["cart-1"] = []LegacyReservationRow{{ID: "r1", CartID: "cart-1", ExternalProductID: "ext-p1", Quantity: 3}}
 	legado.falharCriacao = errors.New("503 do ERP")
 
-	rel, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 0)
+	rel, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 0, 0)
 	if err != nil {
 		t.Fatalf("drenagem: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestDrenagemRepetidaNaoEstornaDuasVezes(t *testing.T) {
 	}
 
 	for i := 0; i < 4; i++ {
-		if _, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 0); err != nil {
+		if _, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 0, 0); err != nil {
 			t.Fatalf("passada %d: %v", i, err)
 		}
 		// Depois da primeira, o carrinho já tem pedido — como a lista real diria.
@@ -240,7 +240,7 @@ func TestDrenagemDeCarrinhoQueJaTemPedidoSoEstorna(t *testing.T) {
 	}}
 	dreno.linhas["cart-1"] = []LegacyReservationRow{{ID: "r1", CartID: "cart-1", ExternalProductID: "ext-p1", Quantity: 2}}
 
-	if _, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 0); err != nil {
+	if _, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 0, 0); err != nil {
 		t.Fatalf("drenagem: %v", err)
 	}
 	if legado.criacoes != criacoesAntes {
@@ -264,7 +264,7 @@ func TestDrenagemDevolveALinhaQuandoOERPRecusa(t *testing.T) {
 	dreno.linhas["cart-1"] = []LegacyReservationRow{{ID: "r1", CartID: "cart-1", ExternalProductID: "ext-p1", Quantity: 2}}
 	legado.falharTipoE = errors.New("429 do ERP")
 
-	rel, _ := svc.DrainLegacyReservations(ctx, "loja-1", false, 0)
+	rel, _ := svc.DrainLegacyReservations(ctx, "loja-1", false, 0, 0)
 	if rel.RowsReversed != 0 {
 		t.Errorf("contou %d revertidas apesar da recusa", rel.RowsReversed)
 	}
@@ -278,7 +278,7 @@ func TestDrenagemDevolveALinhaQuandoOERPRecusa(t *testing.T) {
 	// Com o ERP de volta, a próxima passada resolve.
 	legado.falharTipoE = nil
 	dreno.carrinhos[0].ExternalOrderID = repo.carrinho("cart-1").externalOrderID
-	if _, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 0); err != nil {
+	if _, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 0, 0); err != nil {
 		t.Fatalf("segunda passada: %v", err)
 	}
 	if !dreno.revertidas["r1"] {
@@ -301,7 +301,7 @@ func TestEnsaioNaoEscreveNada(t *testing.T) {
 	}
 	antes := legado.estoque("ext-p1")
 
-	rel, err := svc.DrainLegacyReservations(ctx, "loja-1", true, 0)
+	rel, err := svc.DrainLegacyReservations(ctx, "loja-1", true, 0, 0)
 	if err != nil {
 		t.Fatalf("ensaio: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestLimiteCortaAPassada(t *testing.T) {
 		dreno.linhas[id] = []LegacyReservationRow{{ID: "r" + id, CartID: id, ExternalProductID: "ext-p1", Quantity: 1}}
 	}
 
-	rel, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 3)
+	rel, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 3, 0)
 	if err != nil {
 		t.Fatalf("drenagem: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestDrenagemNoTamanhoDaCantodaart(t *testing.T) {
 		dreno.linhas[cart] = linhas
 	}
 
-	rel, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 0)
+	rel, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 0, 0)
 	if err != nil {
 		t.Fatalf("drenagem: %v", err)
 	}
@@ -409,6 +409,102 @@ func TestDrenagemNoTamanhoDaCantodaart(t *testing.T) {
 		if depois := legado.estoque(ext).disponivel(); depois != antes {
 			t.Errorf("produto %s: disponivel %d → %d — a troca de guarda tem de ser "+
 				"neutra", ext, antes, depois)
+		}
+	}
+}
+
+// ─── O prazo e a trava ──────────────────────────────────────────────────────
+//
+// Os dois nasceram do mesmo defeito, medido na migração da cantodaart em 29/08:
+// a requisição estoura o prazo do navegador, o SERVIDOR não para junto, o
+// cliente repete, e duas passadas caminham sobre a mesma lista disputando a cota
+// de 30 escritas por minuto da conta.
+
+// Uma segunda passada não entra enquanto a primeira tem a trava — e não é erro:
+// devolve um relatório dizendo que já há uma em curso, para a tela não tratar
+// isso como falha e mandar o lojista repetir.
+func TestSegundaPassadaNaoEntraEnquantoAPrimeiraRoda(t *testing.T) {
+	svc, repo, _, dreno := montarDrenagem(map[string]int{"ext-p1": 100})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-a", item("p1", 1))
+	dreno.carrinhos = append(dreno.carrinhos, CartWithLegacyReservations{CartID: "cart-a", StoreID: "loja-1", Rows: 1, Units: 1})
+	dreno.linhas["cart-a"] = []LegacyReservationRow{{ID: "r-a", CartID: "cart-a", ExternalProductID: "ext-p1", Quantity: 1}}
+
+	liberar, obteve, err := repo.AcquireCartFinalisationLock(ctx, "drenagem:loja-1")
+	if err != nil || !obteve {
+		t.Fatalf("não consegui simular a primeira passada segurando a trava: %v", err)
+	}
+	defer liberar()
+
+	rel, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 0, 0)
+	if err != nil {
+		t.Fatalf("a passada barrada devia voltar sem erro: %v", err)
+	}
+	if !rel.JaRodando {
+		t.Error("não sinalizou que já havia uma passada rodando")
+	}
+	if len(rel.Outcomes) != 0 {
+		t.Errorf("mexeu em %d carrinho(s) com a trava tomada", len(rel.Outcomes))
+	}
+}
+
+// O ensaio não toma a trava: ele só lê, e precisa poder responder "quanto falta"
+// enquanto a passada de verdade caminha — é dele que a barra de progresso vive.
+func TestEnsaioNaoDisputaATrava(t *testing.T) {
+	svc, repo, _, dreno := montarDrenagem(map[string]int{"ext-p1": 100})
+	ctx := context.Background()
+	repo.criarCarrinho("cart-a", item("p1", 1))
+	dreno.carrinhos = append(dreno.carrinhos, CartWithLegacyReservations{CartID: "cart-a", StoreID: "loja-1", Rows: 1, Units: 1})
+	dreno.linhas["cart-a"] = []LegacyReservationRow{{ID: "r-a", CartID: "cart-a", ExternalProductID: "ext-p1", Quantity: 1}}
+
+	liberar, _, _ := repo.AcquireCartFinalisationLock(ctx, "drenagem:loja-1")
+	defer liberar()
+
+	rel, err := svc.DrainLegacyReservations(ctx, "loja-1", true, 0, 0)
+	if err != nil {
+		t.Fatalf("ensaio: %v", err)
+	}
+	if rel.JaRodando {
+		t.Error("o ensaio foi barrado pela trava — a tela ficaria cega durante a migração")
+	}
+	if rel.Carts == 0 {
+		t.Error("o ensaio devia continuar contando o que falta")
+	}
+}
+
+// O orçamento de tempo corta ENTRE carrinhos, nunca no meio de um: parar com o
+// pedido criado e os estornos por fazer é exatamente o estado que a ordem das
+// etapas existe para evitar.
+func TestOrcamentoDeTempoParaEntreCarrinhos(t *testing.T) {
+	svc, repo, _, dreno := montarDrenagem(map[string]int{"ext-p1": 100})
+	ctx := context.Background()
+	for i := 0; i < 4; i++ {
+		id := fmt.Sprintf("cart-t%d", i)
+		repo.criarCarrinho(id, item("p1", 1))
+		dreno.carrinhos = append(dreno.carrinhos, CartWithLegacyReservations{CartID: id, StoreID: "loja-1", Rows: 1, Units: 1})
+		dreno.linhas[id] = []LegacyReservationRow{{ID: "r" + id, CartID: id, ExternalProductID: "ext-p1", Quantity: 1}}
+	}
+
+	// Um segundo negativo: o orçamento já está estourado no primeiro teste.
+	rel, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 0, -1)
+	if err != nil {
+		t.Fatalf("drenagem: %v", err)
+	}
+	// Com prazo <= 0 o orçamento fica desligado — é o valor que diz "sem teto".
+	if rel.PorTempo {
+		t.Error("prazo zero ou negativo devia DESLIGAR o orçamento, não parar tudo")
+	}
+
+	// Agora com um prazo real, mas curtíssimo: o primeiro carrinho sempre roda
+	// (i > 0 na guarda), e o segundo é que encontra o orçamento estourado.
+	rel2, err := svc.DrainLegacyReservations(ctx, "loja-1", false, 0, 1)
+	if err != nil {
+		t.Fatalf("segunda drenagem: %v", err)
+	}
+	for _, o := range rel2.Outcomes {
+		if o.OrderID != "" && o.Remaining > 0 && o.Err == "" {
+			t.Errorf("carrinho %s ficou com pedido criado e %d linha(s) por estornar, sem erro — "+
+				"o corte por tempo pegou no meio", o.CartID, o.Remaining)
 		}
 	}
 }
