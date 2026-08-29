@@ -32,12 +32,11 @@ type stripeGateway interface {
 	CreateTrialSubscription(ctx context.Context, customerID string, cfg PlanConfig, trialEnd time.Time) (*StripeSubscription, error)
 	GetSubscription(ctx context.Context, subscriptionID string) (*StripeSubscription, error)
 	CreateSetupCheckoutSession(ctx context.Context, customerID, successURL, cancelURL string, metadata map[string]string) (*CheckoutSession, error)
-	CreateSubscriptionCheckoutSession(ctx context.Context, customerID, flatPriceID, feeDisclosure, successURL, cancelURL string, metadata map[string]string) (*CheckoutSession, error)
+	CreateSubscriptionCheckoutSession(ctx context.Context, customerID, flatPriceID, successURL, cancelURL string, metadata map[string]string) (*CheckoutSession, error)
 	GetSetupIntentPaymentMethod(ctx context.Context, setupIntentID string) (string, error)
 	ActivateSubscription(ctx context.Context, sub *StripeSubscription, cfg PlanConfig, paymentMethodID string) (*StripeSubscription, error)
+	MigrateSubscriptionItems(ctx context.Context, sub *StripeSubscription, priceID string) (*StripeSubscription, error)
 	CreatePortalSession(ctx context.Context, customerID, returnURL string) (string, error)
-	UpgradeSubscription(ctx context.Context, sub *StripeSubscription, cfg PlanConfig) (*StripeSubscription, error)
-	ScheduleDowngrade(ctx context.Context, sub *StripeSubscription, cfg PlanConfig) error
 	AddInvoiceItem(ctx context.Context, customerID, invoiceID string, amountCents int64, currency, description string) error
 	CreateCustomerBalanceCredit(ctx context.Context, customerID string, amountCents int64, description string) error
 }
@@ -145,12 +144,13 @@ func (s *StripeSubscription) PeriodEnd() int64 {
 // GMV item is added at conversion, when the card arrives (trial GMV is free
 // anyway).
 func (c *StripeClient) CreateTrialSubscription(ctx context.Context, customerID string, cfg PlanConfig, trialEnd time.Time) (*StripeSubscription, error) {
-	if cfg.FlatPriceID == "" {
+	price, ok := cfg.Prices[IntervalMonthly]
+	if !ok || price.PriceID == "" {
 		return nil, fmt.Errorf("plan %s has no stripe price ids configured", cfg.Plan)
 	}
 	form := url.Values{}
 	form.Set("customer", customerID)
-	form.Set("items[0][price]", cfg.FlatPriceID)
+	form.Set("items[0][price]", price.PriceID)
 	form.Set("trial_end", strconv.FormatInt(trialEnd.Unix(), 10))
 	form.Set("trial_settings[end_behavior][missing_payment_method]", "pause")
 	form.Set("payment_settings[save_default_payment_method]", "on_subscription")
@@ -357,18 +357,16 @@ func (c *StripeClient) CreateSetupCheckoutSession(ctx context.Context, customerI
 
 // CreateSubscriptionCheckoutSession opens a hosted Checkout in subscription
 // mode that creates the paid subscription directly (the trial-local model:
-// there is no pre-existing Stripe subscription). Only the flat price is a line
-// item so the customer never sees the metered per-unit micro-price; the metered
-// GMV item is attached via API on checkout.session.completed. allow_promotion_codes
-// exposes Stripe's native promo field (e.g. CANTODAART). feeDisclosure surfaces
-// the GMV commission in the Checkout via custom_text — the CDC transparency
-// requirement — since the fee is usage-based and can't be shown as an amount here.
+// there is no pre-existing Stripe subscription). The single Pro price for the
+// chosen interval is the only line item. allow_promotion_codes exposes
+// Stripe's native promo field (e.g. CANTODAART). No GMV fee to disclose
+// anymore — the commission was eliminated for everyone.
 //
 // Follow-up (needs a Terms of Service URL configured in Stripe branding):
 // consent_collection[terms_of_service]=required to capture a recorded acceptance.
-func (c *StripeClient) CreateSubscriptionCheckoutSession(ctx context.Context, customerID, flatPriceID, feeDisclosure, successURL, cancelURL string, metadata map[string]string) (*CheckoutSession, error) {
+func (c *StripeClient) CreateSubscriptionCheckoutSession(ctx context.Context, customerID, flatPriceID, successURL, cancelURL string, metadata map[string]string) (*CheckoutSession, error) {
 	if flatPriceID == "" {
-		return nil, fmt.Errorf("subscription checkout requires a flat price id")
+		return nil, fmt.Errorf("subscription checkout requires a price id")
 	}
 	form := url.Values{}
 	form.Set("mode", "subscription")
@@ -378,9 +376,6 @@ func (c *StripeClient) CreateSubscriptionCheckoutSession(ctx context.Context, cu
 	form.Set("allow_promotion_codes", "true")
 	form.Set("success_url", successURL)
 	form.Set("cancel_url", cancelURL)
-	if feeDisclosure != "" {
-		form.Set("custom_text[submit][message]", feeDisclosure)
-	}
 	// Carry the identifiers on both the session and the created subscription so
 	// the webhook/reactor can resolve store+plan without a side lookup.
 	for k, v := range metadata {
@@ -408,22 +403,29 @@ func (c *StripeClient) GetSetupIntentPaymentMethod(ctx context.Context, setupInt
 }
 
 // ActivateSubscription converts the trial: attaches the payment method, swaps
-// the flat item to the chosen plan, adds the metered GMV item and bills the
-// first flat invoice immediately.
+// the item to the chosen plan/interval price and bills the first invoice
+// immediately. There is no more metered item — the GMV commission was
+// eliminated for everyone.
+//
+// This is the legacy setup-mode conversion path (stores that already carried
+// a Stripe trial subscription before the trial-local model). It has no
+// interval information available at this point, so it assumes the monthly
+// price — merchants can switch interval afterwards via the Customer Portal.
 //
 // Stripe blocks several of these updates while the pause-at-trial-end
 // behavior is set or the subscription is already paused (constraints
 // verified against the test API):
 //   - the pause validator runs against the PRE-update state, so
 //     trial_settings must be cleared in its own request first;
-//   - metered items and payment_behavior are rejected while paused — the
-//     paused path goes through resume instead (activatePausedSubscription).
+//   - payment_behavior is rejected while paused — the paused path goes
+//     through resume instead (activatePausedSubscription).
 func (c *StripeClient) ActivateSubscription(ctx context.Context, sub *StripeSubscription, cfg PlanConfig, paymentMethodID string) (*StripeSubscription, error) {
-	if cfg.FlatPriceID == "" || cfg.MeterPriceID == "" {
+	price, ok := cfg.Prices[IntervalMonthly]
+	if !ok || price.PriceID == "" {
 		return nil, fmt.Errorf("plan %s has no stripe price ids configured", cfg.Plan)
 	}
 	if sub.Status == "paused" {
-		return c.activatePausedSubscription(ctx, sub, cfg, paymentMethodID)
+		return c.activatePausedSubscription(ctx, sub, price.PriceID, paymentMethodID)
 	}
 
 	clear := url.Values{}
@@ -439,7 +441,10 @@ func (c *StripeClient) ActivateSubscription(ctx context.Context, sub *StripeSubs
 	}
 	form.Set("proration_behavior", "none")
 	form.Set("payment_behavior", "allow_incomplete")
-	c.setConversionItems(form, sub, cfg)
+	if len(sub.Items.Data) > 0 {
+		form.Set("items[0][id]", sub.Items.Data[0].ID)
+	}
+	form.Set("items[0][price]", price.PriceID)
 
 	var out StripeSubscription
 	if err := c.do(ctx, http.MethodPost, "/subscriptions/"+sub.ID, form, &out); err != nil {
@@ -450,15 +455,15 @@ func (c *StripeClient) ActivateSubscription(ctx context.Context, sub *StripeSubs
 
 // activatePausedSubscription converts a subscription paused at trial end (the
 // merchant let the trial expire and is paying through the paywall). Sequence
-// required by Stripe: card + flat swap while paused, resume on a fresh cycle,
-// pay the resumption invoice, then add the metered item.
-func (c *StripeClient) activatePausedSubscription(ctx context.Context, sub *StripeSubscription, cfg PlanConfig, paymentMethodID string) (*StripeSubscription, error) {
+// required by Stripe: card + price swap while paused, then resume on a fresh
+// cycle and pay the resumption invoice.
+func (c *StripeClient) activatePausedSubscription(ctx context.Context, sub *StripeSubscription, priceID, paymentMethodID string) (*StripeSubscription, error) {
 	form := url.Values{}
 	form.Set("default_payment_method", paymentMethodID)
 	if len(sub.Items.Data) > 0 {
 		form.Set("items[0][id]", sub.Items.Data[0].ID)
 	}
-	form.Set("items[0][price]", cfg.FlatPriceID)
+	form.Set("items[0][price]", priceID)
 	if err := c.do(ctx, http.MethodPost, "/subscriptions/"+sub.ID, form, nil); err != nil {
 		return nil, fmt.Errorf("preparing paused subscription: %w", err)
 	}
@@ -481,45 +486,44 @@ func (c *StripeClient) activatePausedSubscription(ctx context.Context, sub *Stri
 
 	form = url.Values{}
 	form.Set("trial_settings[end_behavior][missing_payment_method]", "create_invoice")
-	form.Set("items[0][price]", cfg.MeterPriceID)
+	if err := c.do(ctx, http.MethodPost, "/subscriptions/"+sub.ID, form, nil); err != nil {
+		return nil, fmt.Errorf("clearing trial pause behavior after resume: %w", err)
+	}
+	return &resumed, nil
+}
+
+// MigrateSubscriptionItems replaces every item on a legacy subscription
+// (flat + metered, from the old 3-plan model) with a single item on the new
+// Pro price, WITHOUT proration and WITHOUT moving the billing_cycle_anchor —
+// the store keeps its existing renewal date and simply starts being charged
+// the new flat price (no commission) from that date on. Used by the one-off
+// pricing migration (cmd/migrate-billing-plan), never by the regular
+// checkout/webhook flows.
+func (c *StripeClient) MigrateSubscriptionItems(ctx context.Context, sub *StripeSubscription, priceID string) (*StripeSubscription, error) {
+	form := url.Values{}
 	form.Set("proration_behavior", "none")
+	if len(sub.Items.Data) == 0 {
+		return nil, fmt.Errorf("subscription %s has no items to migrate", sub.ID)
+	}
+	// Keep item 0 alive on the new price; delete every extra item (the old
+	// metered GMV item, when present).
+	form.Set("items[0][id]", sub.Items.Data[0].ID)
+	form.Set("items[0][price]", priceID)
+	for i, item := range sub.Items.Data[1:] {
+		idx := i + 1
+		form.Set(fmt.Sprintf("items[%d][id]", idx), item.ID)
+		form.Set(fmt.Sprintf("items[%d][deleted]", idx), "true")
+	}
+
 	var out StripeSubscription
 	if err := c.do(ctx, http.MethodPost, "/subscriptions/"+sub.ID, form, &out); err != nil {
-		return nil, fmt.Errorf("adding metered item after resume: %w", err)
+		return nil, fmt.Errorf("migrating subscription items: %w", err)
 	}
 	return &out, nil
 }
 
-// setConversionItems swaps the existing flat item to the chosen plan and
-// appends the metered item when absent — converges on webhook retries that
-// land after a partial activation.
-func (c *StripeClient) setConversionItems(form url.Values, sub *StripeSubscription, cfg PlanConfig) {
-	idx := 0
-	hasMetered := false
-	for _, item := range sub.Items.Data {
-		if item.Price.ID == cfg.MeterPriceID {
-			hasMetered = true
-		}
-	}
-	for _, item := range sub.Items.Data {
-		if item.Price.ID != cfg.MeterPriceID {
-			form.Set("items[0][id]", item.ID)
-			form.Set("items[0][price]", cfg.FlatPriceID)
-			idx = 1
-			break
-		}
-	}
-	if idx == 0 {
-		form.Set("items[0][price]", cfg.FlatPriceID)
-		idx = 1
-	}
-	if !hasMetered {
-		form.Set(fmt.Sprintf("items[%d][price]", idx), cfg.MeterPriceID)
-	}
-}
-
 // =============================================================================
-// PORTAL + PLAN CHANGES
+// PORTAL
 // =============================================================================
 
 // CreatePortalSession opens the Stripe Customer Portal (card, invoices,
@@ -536,91 +540,6 @@ func (c *StripeClient) CreatePortalSession(ctx context.Context, customerID, retu
 		return "", fmt.Errorf("creating portal session: %w", err)
 	}
 	return out.URL, nil
-}
-
-// UpgradeSubscription applies the new plan immediately, invoicing the
-// prorated flat difference now (PRD 007: upgrade imediato com proration).
-func (c *StripeClient) UpgradeSubscription(ctx context.Context, sub *StripeSubscription, cfg PlanConfig) (*StripeSubscription, error) {
-	form := url.Values{}
-	form.Set("proration_behavior", "always_invoice")
-	form.Set("payment_behavior", "allow_incomplete")
-
-	flatID, meterID := findItemIDs(sub, cfg)
-	i := 0
-	if flatID != "" {
-		form.Set(fmt.Sprintf("items[%d][id]", i), flatID)
-		form.Set(fmt.Sprintf("items[%d][price]", i), cfg.FlatPriceID)
-		i++
-	} else {
-		form.Set(fmt.Sprintf("items[%d][price]", i), cfg.FlatPriceID)
-		i++
-	}
-	if meterID != "" {
-		form.Set(fmt.Sprintf("items[%d][id]", i), meterID)
-		form.Set(fmt.Sprintf("items[%d][price]", i), cfg.MeterPriceID)
-	} else {
-		form.Set(fmt.Sprintf("items[%d][price]", i), cfg.MeterPriceID)
-	}
-
-	var out StripeSubscription
-	if err := c.do(ctx, http.MethodPost, "/subscriptions/"+sub.ID, form, &out); err != nil {
-		return nil, fmt.Errorf("upgrading subscription: %w", err)
-	}
-	return &out, nil
-}
-
-// ScheduleDowngrade swaps the plan at the end of the current period via a
-// subscription schedule (PRD 007: downgrade agendado, sem estorno).
-func (c *StripeClient) ScheduleDowngrade(ctx context.Context, sub *StripeSubscription, cfg PlanConfig) error {
-	// 1. Wrap the subscription in a schedule.
-	form := url.Values{}
-	form.Set("from_subscription", sub.ID)
-	var schedule struct {
-		ID     string `json:"id"`
-		Phases []struct {
-			StartDate int64 `json:"start_date"`
-			EndDate   int64 `json:"end_date"`
-		} `json:"phases"`
-	}
-	if err := c.do(ctx, http.MethodPost, "/subscription_schedules", form, &schedule); err != nil {
-		// Already managed by a schedule — surface a friendly error; the
-		// merchant can retry after the pending change resolves.
-		return fmt.Errorf("creating subscription schedule: %w", err)
-	}
-
-	// 2. Keep the current phase as-is and append the downgraded phase.
-	update := url.Values{}
-	update.Set("end_behavior", "release")
-	// current phase: preserve existing prices until period end
-	update.Set("phases[0][start_date]", strconv.FormatInt(schedule.Phases[0].StartDate, 10))
-	update.Set("phases[0][end_date]", strconv.FormatInt(sub.CurrentPeriodEnd, 10))
-	for i, item := range sub.Items.Data {
-		update.Set(fmt.Sprintf("phases[0][items][%d][price]", i), item.Price.ID)
-	}
-	// next phase: new plan prices
-	update.Set("phases[1][items][0][price]", cfg.FlatPriceID)
-	update.Set("phases[1][items][1][price]", cfg.MeterPriceID)
-
-	if err := c.do(ctx, http.MethodPost, "/subscription_schedules/"+schedule.ID, update, nil); err != nil {
-		return fmt.Errorf("scheduling downgrade phases: %w", err)
-	}
-	return nil
-}
-
-// findItemIDs maps the subscription's current items to flat/meter slots by
-// matching against any known plan price.
-func findItemIDs(sub *StripeSubscription, _ PlanConfig) (flatItemID, meterItemID string) {
-	for _, item := range sub.Items.Data {
-		for _, cfg := range Plans() {
-			if item.Price.ID == cfg.FlatPriceID {
-				flatItemID = item.ID
-			}
-			if item.Price.ID == cfg.MeterPriceID {
-				meterItemID = item.ID
-			}
-		}
-	}
-	return flatItemID, meterItemID
 }
 
 // =============================================================================

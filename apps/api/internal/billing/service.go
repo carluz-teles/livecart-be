@@ -315,7 +315,7 @@ func (s *Service) applySubscription(ctx context.Context, sub *StripeSubscription
 		if current, err := s.queries.GetSubscriptionByStripeSubID(ctx, pgtype.Text{String: sub.ID, Valid: true}); err == nil {
 			plan = current.Plan
 		} else {
-			plan = string(PlanGrow)
+			plan = string(PlanPro)
 		}
 	}
 
@@ -452,10 +452,10 @@ func unixToTimestamptz(ts int64) pgtype.Timestamptz {
 // collects the card. Conversion completes on the webhook.
 func (s *Service) CreateConversionCheckout(ctx context.Context, input CheckoutInput) (string, error) {
 	storeID := input.StoreID
-	plan := input.Plan
-	cfg, ok := Plans()[plan]
-	if !ok || !cfg.SelfService {
-		return "", fmt.Errorf("plano inválido para contratação self-service: %s", plan)
+	cfg := Plans()[PlanPro]
+	price, ok := cfg.Prices[input.Interval]
+	if !ok || price.PriceID == "" {
+		return "", fmt.Errorf("intervalo de cobrança inválido: %s", input.Interval)
 	}
 	if s.stripe == nil {
 		return "", fmt.Errorf("billing não configurado (STRIPE_SECRET_KEY ausente)")
@@ -485,24 +485,27 @@ func (s *Service) CreateConversionCheckout(ctx context.Context, input CheckoutIn
 	// subscription convert through the setup-mode Checkout (card only) + API
 	// activation. Trial-local stores (no Stripe subscription yet) convert
 	// through a subscription-mode Checkout that creates the paid subscription
-	// directly, exposes Stripe's native promo field, and discloses the GMV fee.
+	// directly and exposes Stripe's native promo field. No GMV fee to disclose
+	// anymore — the commission was eliminated for everyone.
 	var session *CheckoutSession
 	if row.StripeSubscriptionID.Valid {
 		session, err = s.stripe.CreateSetupCheckoutSession(ctx,
 			row.StripeCustomerID.String, successURL, cancelURL,
 			map[string]string{
 				"store_id":        storeID,
-				"plan":            string(plan),
+				"plan":            string(PlanPro),
+				"interval":        string(input.Interval),
 				"subscription_id": row.StripeSubscriptionID.String,
 			},
 		)
 	} else {
 		session, err = s.stripe.CreateSubscriptionCheckoutSession(ctx,
-			row.StripeCustomerID.String, cfg.FlatPriceID, feeDisclosure(cfg),
+			row.StripeCustomerID.String, price.PriceID,
 			successURL, cancelURL,
 			map[string]string{
 				"store_id": storeID,
-				"plan":     string(plan),
+				"plan":     string(PlanPro),
+				"interval": string(input.Interval),
 			},
 		)
 	}
@@ -513,22 +516,11 @@ func (s *Service) CreateConversionCheckout(ctx context.Context, input CheckoutIn
 	return session.URL, nil
 }
 
-// feeDisclosure is the plain-language GMV-fee notice shown in the subscription
-// Checkout via custom_text — the CDC transparency requirement, since the fee is
-// usage-based and can't be rendered as an amount at checkout time.
-func feeDisclosure(cfg PlanConfig) string {
-	return fmt.Sprintf(
-		"Além da mensalidade, o plano %s cobra uma taxa de %d,%02d%% sobre o valor das vendas (GMV), faturada mensalmente conforme o uso.",
-		cfg.Name, cfg.GMVBps/100, cfg.GMVBps%100,
-	)
-}
-
 // completeConversion runs on checkout.session.completed (setup mode): grabs
 // the collected card, activates the chosen plan and syncs the local row.
 func (s *Service) completeConversion(ctx context.Context, session *CheckoutSession) error {
-	plan := Plan(session.Metadata["plan"])
 	subID := session.Metadata["subscription_id"]
-	if plan == "" || subID == "" {
+	if subID == "" {
 		logger.From(ctx, s.logger).Debug("checkout session without conversion metadata — ignored",
 			zap.String("session", session.ID))
 		return nil
@@ -536,10 +528,7 @@ func (s *Service) completeConversion(ctx context.Context, session *CheckoutSessi
 	// Store resolvido a partir do metadata da session — enriquece o ctx para
 	// os logs seguintes do fluxo.
 	ctx = logger.WithStore(ctx, session.Metadata["store_id"], "")
-	cfg, ok := Plans()[plan]
-	if !ok {
-		return fmt.Errorf("unknown plan in session metadata: %s", plan)
-	}
+	cfg := Plans()[PlanPro]
 
 	paymentMethod, err := s.stripe.GetSetupIntentPaymentMethod(ctx, session.SetupIntent)
 	if err != nil {
@@ -559,7 +548,8 @@ func (s *Service) completeConversion(ctx context.Context, session *CheckoutSessi
 	}
 
 	logger.From(ctx, s.logger).Info("subscription converted",
-		zap.String("plan", string(plan)),
+		zap.String("plan", string(PlanPro)),
+		zap.String("interval", session.Metadata["interval"]),
 		zap.String("status", activated.Status),
 	)
 	// Sync imediato (o customer.subscription.updated também chega e é idempotente).
@@ -568,28 +558,25 @@ func (s *Service) completeConversion(ctx context.Context, session *CheckoutSessi
 
 // completeSubscriptionConversion runs on checkout.session.completed in
 // subscription mode (trial-local): the paid subscription was just created with
-// only the flat mensalidade item. Links it to the store and syncs the local
-// row. The GMV commission is billed as a computed invoice item each cycle (see
-// OnSubscriptionCycleInvoice), NOT as a metered item on this subscription.
-// Idempotent — SetSubscriptionStripeRefs tolerates webhook redelivery.
+// the single Pro price for the chosen interval. Links it to the store,
+// persists the interval and syncs the local row. Idempotent —
+// SetSubscriptionStripeRefs tolerates webhook redelivery.
 func (s *Service) completeSubscriptionConversion(ctx context.Context, session *CheckoutSession) error {
-	plan := Plan(session.Metadata["plan"])
-	if plan == "" || session.Subscription == "" {
+	if session.Subscription == "" {
 		logger.From(ctx, s.logger).Debug("subscription checkout without conversion metadata — ignored",
 			zap.String("session", session.ID))
 		return nil
 	}
 	ctx = logger.WithStore(ctx, session.Metadata["store_id"], "")
-	if _, ok := Plans()[plan]; !ok {
-		return fmt.Errorf("unknown plan in session metadata: %s", plan)
-	}
+	interval := session.Metadata["interval"]
 
 	sub, err := s.stripe.GetSubscription(ctx, session.Subscription)
 	if err != nil {
 		return err
 	}
 
-	// Link the freshly created subscription to the store.
+	// Link the freshly created subscription to the store and persist the
+	// chosen billing interval (defaults to monthly if unset/unknown).
 	if storeID := session.Metadata["store_id"]; storeID != "" {
 		if sid, perr := parseUUID(storeID); perr == nil {
 			if _, serr := s.queries.SetSubscriptionStripeRefs(ctx, sqlc.SetSubscriptionStripeRefsParams{
@@ -599,11 +586,22 @@ func (s *Service) completeSubscriptionConversion(ctx context.Context, session *C
 			}); serr != nil {
 				return fmt.Errorf("linking subscription: %w", serr)
 			}
+			if interval == "" {
+				interval = string(IntervalMonthly)
+			}
+			if serr := s.queries.SetSubscriptionInterval(ctx, sqlc.SetSubscriptionIntervalParams{
+				StoreID:         sid,
+				BillingInterval: interval,
+			}); serr != nil {
+				logger.From(ctx, s.logger).Warn("failed to persist billing interval",
+					zap.String("interval", interval), zap.Error(serr))
+			}
 		}
 	}
 
 	logger.From(ctx, s.logger).Info("subscription converted (trial-local)",
-		zap.String("plan", string(plan)),
+		zap.String("plan", string(PlanPro)),
+		zap.String("interval", interval),
 		zap.String("subscription", sub.ID),
 		zap.String("status", sub.Status),
 	)
@@ -720,10 +718,12 @@ func (s *Service) OnSubscriptionCycleInvoice(ctx context.Context, inv *StripeInv
 }
 
 // =============================================================================
-// PORTAL + PLAN CHANGE (Sprint 3)
+// PORTAL (Sprint 3)
 // =============================================================================
 
-// CreatePortalSession opens the Customer Portal for the store.
+// CreatePortalSession opens the Customer Portal for the store. Switching
+// billing interval (monthly/semestral/annual) is done here too — the 3 Pro
+// prices are grouped on the same product in the Portal configuration.
 func (s *Service) CreatePortalSession(ctx context.Context, storeID string) (string, error) {
 	if s.stripe == nil {
 		return "", fmt.Errorf("billing não configurado")
@@ -738,65 +738,6 @@ func (s *Service) CreatePortalSession(ctx context.Context, storeID string) (stri
 	}
 	frontend := strings.TrimRight(config.FrontendURL.String(), "/")
 	return s.stripe.CreatePortalSession(ctx, row.StripeCustomerID.String, frontend+"/settings/billing")
-}
-
-// ChangePlan applies an upgrade immediately (prorated) or schedules a
-// downgrade for the period end. Requires an active (converted) subscription —
-// trials convert through the checkout flow instead.
-func (s *Service) ChangePlan(ctx context.Context, input ChangePlanInput) (*domain.Subscription, error) {
-	storeID := input.StoreID
-	target := input.Plan
-	cfg, ok := Plans()[target]
-	if !ok || !cfg.SelfService {
-		return nil, fmt.Errorf("plano inválido: %s", target)
-	}
-	if s.stripe == nil {
-		return nil, fmt.Errorf("billing não configurado")
-	}
-
-	sid, err := parseUUID(storeID)
-	if err != nil {
-		return nil, err
-	}
-	row, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
-	if err != nil || !row.StripeSubscriptionID.Valid {
-		return nil, fmt.Errorf("assinatura Stripe não encontrada para esta loja")
-	}
-	if row.Status != StatusActive && row.Status != StatusPastDue {
-		return nil, fmt.Errorf("mudança de plano requer assinatura ativa — finalize a contratação primeiro")
-	}
-	if Plan(row.Plan) == target {
-		return rowToSubscription(&row), nil
-	}
-
-	sub, err := s.stripe.GetSubscription(ctx, row.StripeSubscriptionID.String)
-	if err != nil {
-		return nil, err
-	}
-
-	current := Plans()[Plan(row.Plan)]
-	if cfg.FlatCents > current.FlatCents {
-		// Upgrade: imediato com proração.
-		updated, err := s.stripe.UpgradeSubscription(ctx, sub, cfg)
-		if err != nil {
-			return nil, err
-		}
-		if err := s.applySubscription(ctx, updated, "plan_change"); err != nil {
-			return nil, err
-		}
-	} else {
-		// Downgrade: agendado para o fim do período (sem estorno).
-		if err := s.stripe.ScheduleDowngrade(ctx, sub, cfg); err != nil {
-			return nil, err
-		}
-		// O plano local muda quando a fase virar (webhook subscription.updated).
-	}
-
-	fresh, err := s.queries.GetSubscriptionByStoreID(ctx, sid)
-	if err != nil {
-		return nil, err
-	}
-	return rowToSubscription(&fresh), nil
 }
 
 // =============================================================================
@@ -844,23 +785,23 @@ func (s *Service) OnCartPaid(ctx context.Context, storeID, cartID string, gmvCen
 		return nil
 	}
 
-	cfg := Plans()[Plan(sub.Plan)]
-	// billable = taxa cobrada neste ciclo (assinatura convertida).
-	// Trial/paused/etc: grava para visibilidade, fee snapshot, billable=false.
+	// billable = venda contabilizada neste ciclo (assinatura convertida).
+	// Trial/paused/etc: grava para visibilidade, billable=false.
+	// A comissão sobre GMV foi eliminada para todo mundo — fee sempre 0. O
+	// ledger/gmv.recorded continuam existindo só para o dashboard de analytics.
 	billable := sub.Status == StatusActive || sub.Status == StatusPastDue
-	feeCents := baseCents * int64(cfg.GMVBps) / 10000
+	feeCents := int64(0)
 
 	// (4) Insert do ledger — propaga erro real; ErrNoRows = idempotente.
-	// The commission is NOT metered to Stripe: it accrues here with stripe_ref
-	// NULL and is billed as an invoice item at the cycle boundary
-	// (OnSubscriptionCycleInvoice), so mensalidade + commission are one charge.
+	// No more commission: fee_bps/fee_cents are always 0. The row still exists
+	// for the analytics dashboard (gmv.recorded) and the extrato.
 	if _, err = s.queries.InsertLedgerEntry(ctx, sqlc.InsertLedgerEntryParams{
 		StoreID:     sid,
 		CartID:      cid,
 		EntryType:   "sale",
 		AmountCents: baseCents,
 		Plan:        sub.Plan,
-		FeeBps:      int32(cfg.GMVBps),
+		FeeBps:      0,
 		FeeCents:    feeCents,
 		Billable:    billable,
 	}); err != nil {

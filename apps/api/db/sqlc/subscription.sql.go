@@ -37,9 +37,9 @@ func (q *Queries) DeleteSubscriptionsByStore(ctx context.Context, storeID pgtype
 
 const ensureTrialSubscription = `-- name: EnsureTrialSubscription :one
 INSERT INTO subscriptions (store_id, status, plan, trial_ends_at, current_period_start, current_period_end)
-VALUES ($1, 'trialing', 'grow', $2, NOW(), $2)
+VALUES ($1, 'trialing', 'pro', $2, NOW(), $2)
 ON CONFLICT (store_id) DO UPDATE SET updated_at = NOW()
-RETURNING id, store_id, status, current_period_start, current_period_end, cancelled_at, created_at, stripe_customer_id, stripe_subscription_id, plan, trial_ends_at, cancel_at_period_end, grace_until, manual_override, updated_at
+RETURNING id, store_id, status, current_period_start, current_period_end, cancelled_at, created_at, stripe_customer_id, stripe_subscription_id, plan, trial_ends_at, cancel_at_period_end, grace_until, manual_override, updated_at, billing_interval
 `
 
 type EnsureTrialSubscriptionParams struct {
@@ -68,6 +68,7 @@ func (q *Queries) EnsureTrialSubscription(ctx context.Context, arg EnsureTrialSu
 		&i.GraceUntil,
 		&i.ManualOverride,
 		&i.UpdatedAt,
+		&i.BillingInterval,
 	)
 	return i, err
 }
@@ -159,7 +160,7 @@ func (q *Queries) GetLedgerUsageSince(ctx context.Context, arg GetLedgerUsageSin
 
 const getSubscriptionByStoreID = `-- name: GetSubscriptionByStoreID :one
 
-SELECT id, store_id, status, current_period_start, current_period_end, cancelled_at, created_at, stripe_customer_id, stripe_subscription_id, plan, trial_ends_at, cancel_at_period_end, grace_until, manual_override, updated_at FROM subscriptions WHERE store_id = $1
+SELECT id, store_id, status, current_period_start, current_period_end, cancelled_at, created_at, stripe_customer_id, stripe_subscription_id, plan, trial_ends_at, cancel_at_period_end, grace_until, manual_override, updated_at, billing_interval FROM subscriptions WHERE store_id = $1
 `
 
 // =============================================================================
@@ -184,12 +185,13 @@ func (q *Queries) GetSubscriptionByStoreID(ctx context.Context, storeID pgtype.U
 		&i.GraceUntil,
 		&i.ManualOverride,
 		&i.UpdatedAt,
+		&i.BillingInterval,
 	)
 	return i, err
 }
 
 const getSubscriptionByStripeCustomerID = `-- name: GetSubscriptionByStripeCustomerID :one
-SELECT id, store_id, status, current_period_start, current_period_end, cancelled_at, created_at, stripe_customer_id, stripe_subscription_id, plan, trial_ends_at, cancel_at_period_end, grace_until, manual_override, updated_at FROM subscriptions WHERE stripe_customer_id = $1
+SELECT id, store_id, status, current_period_start, current_period_end, cancelled_at, created_at, stripe_customer_id, stripe_subscription_id, plan, trial_ends_at, cancel_at_period_end, grace_until, manual_override, updated_at, billing_interval FROM subscriptions WHERE stripe_customer_id = $1
 `
 
 func (q *Queries) GetSubscriptionByStripeCustomerID(ctx context.Context, stripeCustomerID pgtype.Text) (Subscription, error) {
@@ -211,12 +213,13 @@ func (q *Queries) GetSubscriptionByStripeCustomerID(ctx context.Context, stripeC
 		&i.GraceUntil,
 		&i.ManualOverride,
 		&i.UpdatedAt,
+		&i.BillingInterval,
 	)
 	return i, err
 }
 
 const getSubscriptionByStripeSubID = `-- name: GetSubscriptionByStripeSubID :one
-SELECT id, store_id, status, current_period_start, current_period_end, cancelled_at, created_at, stripe_customer_id, stripe_subscription_id, plan, trial_ends_at, cancel_at_period_end, grace_until, manual_override, updated_at FROM subscriptions WHERE stripe_subscription_id = $1
+SELECT id, store_id, status, current_period_start, current_period_end, cancelled_at, created_at, stripe_customer_id, stripe_subscription_id, plan, trial_ends_at, cancel_at_period_end, grace_until, manual_override, updated_at, billing_interval FROM subscriptions WHERE stripe_subscription_id = $1
 `
 
 func (q *Queries) GetSubscriptionByStripeSubID(ctx context.Context, stripeSubscriptionID pgtype.Text) (Subscription, error) {
@@ -238,6 +241,7 @@ func (q *Queries) GetSubscriptionByStripeSubID(ctx context.Context, stripeSubscr
 		&i.GraceUntil,
 		&i.ManualOverride,
 		&i.UpdatedAt,
+		&i.BillingInterval,
 	)
 	return i, err
 }
@@ -395,6 +399,52 @@ func (q *Queries) ListLedgerEntries(ctx context.Context, arg ListLedgerEntriesPa
 	return items, nil
 }
 
+const listLegacyPlanSubscriptions = `-- name: ListLegacyPlanSubscriptions :many
+SELECT id, store_id, status, current_period_start, current_period_end, cancelled_at, created_at, stripe_customer_id, stripe_subscription_id, plan, trial_ends_at, cancel_at_period_end, grace_until, manual_override, updated_at, billing_interval FROM subscriptions
+WHERE plan IN ('start', 'grow', 'scale')
+  AND status IN ('trialing', 'active', 'past_due')
+ORDER BY store_id
+`
+
+// Assinaturas ainda nos planos antigos (start/grow/scale), candidatas à
+// migração para o plano único "pro". Usado pelo job one-off de migração.
+func (q *Queries) ListLegacyPlanSubscriptions(ctx context.Context) ([]Subscription, error) {
+	rows, err := q.db.Query(ctx, listLegacyPlanSubscriptions)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Subscription{}
+	for rows.Next() {
+		var i Subscription
+		if err := rows.Scan(
+			&i.ID,
+			&i.StoreID,
+			&i.Status,
+			&i.CurrentPeriodStart,
+			&i.CurrentPeriodEnd,
+			&i.CancelledAt,
+			&i.CreatedAt,
+			&i.StripeCustomerID,
+			&i.StripeSubscriptionID,
+			&i.Plan,
+			&i.TrialEndsAt,
+			&i.CancelAtPeriodEnd,
+			&i.GraceUntil,
+			&i.ManualOverride,
+			&i.UpdatedAt,
+			&i.BillingInterval,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markStoreFeesInvoiced = `-- name: MarkStoreFeesInvoiced :exec
 UPDATE billing_ledger_entries
 SET stripe_ref = $3
@@ -414,6 +464,26 @@ func (q *Queries) MarkStoreFeesInvoiced(ctx context.Context, arg MarkStoreFeesIn
 	return err
 }
 
+const migrateSubscriptionToPro = `-- name: MigrateSubscriptionToPro :exec
+UPDATE subscriptions
+SET plan             = 'pro',
+    billing_interval = $2,
+    updated_at       = NOW()
+WHERE store_id = $1
+`
+
+type MigrateSubscriptionToProParams struct {
+	StoreID         pgtype.UUID `json:"store_id"`
+	BillingInterval string      `json:"billing_interval"`
+}
+
+// Aplica a migração local (plano + intervalo) depois da troca de price ter
+// sido confirmada no Stripe pelo job de migração.
+func (q *Queries) MigrateSubscriptionToPro(ctx context.Context, arg MigrateSubscriptionToProParams) error {
+	_, err := q.db.Exec(ctx, migrateSubscriptionToPro, arg.StoreID, arg.BillingInterval)
+	return err
+}
+
 const setLedgerEntryStripeRef = `-- name: SetLedgerEntryStripeRef :exec
 UPDATE billing_ledger_entries SET stripe_ref = $2 WHERE id = $1
 `
@@ -428,13 +498,33 @@ func (q *Queries) SetLedgerEntryStripeRef(ctx context.Context, arg SetLedgerEntr
 	return err
 }
 
+const setSubscriptionInterval = `-- name: SetSubscriptionInterval :exec
+UPDATE subscriptions
+SET billing_interval = $2,
+    updated_at        = NOW()
+WHERE store_id = $1
+`
+
+type SetSubscriptionIntervalParams struct {
+	StoreID         pgtype.UUID `json:"store_id"`
+	BillingInterval string      `json:"billing_interval"`
+}
+
+// Grava o intervalo de cobrança escolhido (mensal/semestral/anual) na
+// conversão. A troca posterior entre intervalos é feita pelo Customer Portal
+// (os 3 preços do produto Pro agrupados lá) — não há endpoint próprio.
+func (q *Queries) SetSubscriptionInterval(ctx context.Context, arg SetSubscriptionIntervalParams) error {
+	_, err := q.db.Exec(ctx, setSubscriptionInterval, arg.StoreID, arg.BillingInterval)
+	return err
+}
+
 const setSubscriptionStripeRefs = `-- name: SetSubscriptionStripeRefs :one
 UPDATE subscriptions
 SET stripe_customer_id     = COALESCE($2, stripe_customer_id),
     stripe_subscription_id = COALESCE($3, stripe_subscription_id),
     updated_at             = NOW()
 WHERE store_id = $1
-RETURNING id, store_id, status, current_period_start, current_period_end, cancelled_at, created_at, stripe_customer_id, stripe_subscription_id, plan, trial_ends_at, cancel_at_period_end, grace_until, manual_override, updated_at
+RETURNING id, store_id, status, current_period_start, current_period_end, cancelled_at, created_at, stripe_customer_id, stripe_subscription_id, plan, trial_ends_at, cancel_at_period_end, grace_until, manual_override, updated_at, billing_interval
 `
 
 type SetSubscriptionStripeRefsParams struct {
@@ -463,6 +553,7 @@ func (q *Queries) SetSubscriptionStripeRefs(ctx context.Context, arg SetSubscrip
 		&i.GraceUntil,
 		&i.ManualOverride,
 		&i.UpdatedAt,
+		&i.BillingInterval,
 	)
 	return i, err
 }
@@ -499,7 +590,7 @@ SET status               = $2,
     grace_until          = $8,
     updated_at           = NOW()
 WHERE stripe_subscription_id = $1
-RETURNING id, store_id, status, current_period_start, current_period_end, cancelled_at, created_at, stripe_customer_id, stripe_subscription_id, plan, trial_ends_at, cancel_at_period_end, grace_until, manual_override, updated_at
+RETURNING id, store_id, status, current_period_start, current_period_end, cancelled_at, created_at, stripe_customer_id, stripe_subscription_id, plan, trial_ends_at, cancel_at_period_end, grace_until, manual_override, updated_at, billing_interval
 `
 
 type UpdateSubscriptionFromStripeParams struct {
@@ -542,6 +633,7 @@ func (q *Queries) UpdateSubscriptionFromStripe(ctx context.Context, arg UpdateSu
 		&i.GraceUntil,
 		&i.ManualOverride,
 		&i.UpdatedAt,
+		&i.BillingInterval,
 	)
 	return i, err
 }

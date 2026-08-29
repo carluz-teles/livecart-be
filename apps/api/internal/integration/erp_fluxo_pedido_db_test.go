@@ -258,6 +258,41 @@ func TestERPFalhaNasParcelasNaoAprovaEGuardaOSnapshot(t *testing.T) {
 	}
 }
 
+// Pagamento MANUAL: o snapshot é nil DE PROPÓSITO — é ele que viraria conta a
+// receber no Tiny, e no manual quem lança isso é o lojista. Se a primeira
+// finalização travar ANTES de criar o pedido (por exemplo, bloqueada por um
+// movimento de estoque em dúvida que depois se resolve), o carrinho fica
+// 'failed' sem snapshot E sem pedido.
+//
+// Esse era o estado que o reenvio recusava com 422 "snapshot de pagamento
+// ausente", e o pedido pago ficava preso fora do ERP para sempre. O
+// comportamento novo — finalizar com nil — chegou como correção em produção
+// (5c3aaa8) num arquivo que esta refatoração apagou; o teste veio junto para
+// que a guarda não se perdesse na fusão.
+func TestReenvioDePagamentoManualFinalizaSemSnapshot(t *testing.T) {
+	requireDB(t)
+	fx := seedPaidCart(t, 1, 0)
+	// O estado que o 422 recusava: falhou, sem retrato do gateway e sem pedido.
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE order_payments op SET erp_finalisation_status = 'failed', erp_payment_snapshot = NULL
+		 FROM orders o WHERE o.id = op.order_id AND o.cart_id = $1`, fx.cartID); err != nil {
+		t.Fatalf("semeando o manual travado: %v", err)
+	}
+	fake := newScriptedERP()
+	svc := newFinalisationService(fake)
+
+	if err := svc.RetryERPFinalisation(context.Background(), fx.cartID, fx.storeID); err != nil {
+		t.Fatalf("reenvio manual (sem snapshot, sem pedido): %v", err)
+	}
+	status, _, orderID, _, _ := cartFinalisationState(t, fx.cartID)
+	if status != "done" || orderID == "" {
+		t.Fatalf("status=%q pedido=%q — o manual devia finalizar com nil", status, orderID)
+	}
+	if n := fake.count("CreateOrder"); n != 1 {
+		t.Fatalf("pedidos criados = %d, quero 1 — o reenvio manual precisa criar o pedido", n)
+	}
+}
+
 // ─── Mutação ────────────────────────────────────────────────────────────────
 
 // Pedido travado por lançamento manual: um estorno destrava, e o PUT repete.

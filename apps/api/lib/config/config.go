@@ -81,14 +81,11 @@ const (
 	StripeSecretKey     Key = "STRIPE_SECRET_KEY"     // sk_test_/sk_live_
 	StripeWebhookSecret Key = "STRIPE_WEBHOOK_SECRET" // whsec_ do endpoint /api/webhooks/stripe
 
-	StripePriceStartFlat    Key = "STRIPE_PRICE_START_FLAT"
-	StripePriceStartMetered Key = "STRIPE_PRICE_START_METERED"
-	StripePriceGrowFlat     Key = "STRIPE_PRICE_GROW_FLAT"
-	StripePriceGrowMetered  Key = "STRIPE_PRICE_GROW_METERED"
-	StripePriceScaleFlat    Key = "STRIPE_PRICE_SCALE_FLAT"
-	StripePriceScaleMetered Key = "STRIPE_PRICE_SCALE_METERED"
-	StripeGMVMeterEvent     Key = "STRIPE_GMV_METER_EVENT" // default: gmv_cents
-	PaywallEnabled          Key = "PAYWALL_ENABLED"        // default false: trial/ledger/meter rodam, mas NADA bloqueia
+	StripePriceProMonthly   Key = "STRIPE_PRICE_PRO_MONTHLY"
+	StripePriceProSemestral Key = "STRIPE_PRICE_PRO_SEMESTRAL"
+	StripePriceProAnnual    Key = "STRIPE_PRICE_PRO_ANNUAL"
+	StripeGMVMeterEvent     Key = "STRIPE_GMV_METER_EVENT" // legado: sem efeito (comissão sobre GMV eliminada)
+	PaywallEnabled          Key = "PAYWALL_ENABLED"        // default false: trial/ledger rodam, mas NADA bloqueia
 
 	// S3 Storage (supports both standard and Railway naming conventions)
 	S3Bucket   Key = "S3_BUCKET"    // S3 bucket name for uploads

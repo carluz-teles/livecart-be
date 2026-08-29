@@ -1,7 +1,8 @@
 // Package billing implements subscriptions and the paywall via Stripe
-// (PRD 007): 7-day cardless trial created at store creation, plan chosen at
-// conversion, flat monthly price + metered GMV fee, access enforcement from
-// the local subscriptions table (webhooks are the source of truth).
+// (PRD 007): 7-day cardless trial created at store creation, a single Pro
+// plan chosen at conversion (monthly/semestral/annual — no GMV commission),
+// access enforcement from the local subscriptions table (webhooks are the
+// source of truth).
 package billing
 
 import (
@@ -17,10 +18,20 @@ import (
 type Plan string
 
 const (
-	PlanStart      Plan = "start"
-	PlanGrow       Plan = "grow"
-	PlanScale      Plan = "scale"
+	PlanPro        Plan = "pro"
 	PlanEnterprise Plan = "enterprise"
+)
+
+// BillingInterval identifies which of the Pro plan's 3 recurring prices a
+// subscription is on. Switching between them is done via the Stripe Customer
+// Portal (the 3 prices are grouped on the same product there) — no API
+// endpoint is needed for that.
+type BillingInterval string
+
+const (
+	IntervalMonthly   BillingInterval = "monthly"
+	IntervalSemestral BillingInterval = "semestral"
+	IntervalAnnual    BillingInterval = "annual"
 )
 
 // Subscription statuses persisted locally (subset of Stripe's, plus paused).
@@ -40,37 +51,32 @@ const TrialDays = 7
 // retries the card.
 const GraceDays = 7
 
-// PlanConfig carries the Stripe price pair and display data for a plan.
+// IntervalPrice is one of the Pro plan's recurring prices.
+type IntervalPrice struct {
+	Cents   int64
+	PriceID string
+}
+
+// PlanConfig carries the Stripe prices and display data for a plan. There is
+// no more per-GMV commission: the fee charged is always 0 for every store.
 type PlanConfig struct {
-	Plan         Plan
-	Name         string
-	FlatCents    int64
-	GMVBps       int    // basis points (180 = 1,80%)
-	FlatPriceID  string // Stripe price (recurring flat)
-	MeterPriceID string // Stripe price (metered, GMV)
-	SelfService  bool   // Enterprise is dashboard-managed
+	Plan        Plan
+	Name        string
+	Prices      map[BillingInterval]IntervalPrice // empty for Enterprise (dashboard-managed)
+	SelfService bool                               // Enterprise is dashboard-managed
 }
 
 // Plans returns the plan registry with price IDs resolved from env.
 func Plans() map[Plan]PlanConfig {
 	return map[Plan]PlanConfig{
-		PlanStart: {
-			Plan: PlanStart, Name: "Start", FlatCents: 14700, GMVBps: 180,
-			FlatPriceID:  config.StripePriceStartFlat.String(),
-			MeterPriceID: config.StripePriceStartMetered.String(),
-			SelfService:  true,
-		},
-		PlanGrow: {
-			Plan: PlanGrow, Name: "Grow", FlatCents: 29700, GMVBps: 130,
-			FlatPriceID:  config.StripePriceGrowFlat.String(),
-			MeterPriceID: config.StripePriceGrowMetered.String(),
-			SelfService:  true,
-		},
-		PlanScale: {
-			Plan: PlanScale, Name: "Scale", FlatCents: 69700, GMVBps: 100,
-			FlatPriceID:  config.StripePriceScaleFlat.String(),
-			MeterPriceID: config.StripePriceScaleMetered.String(),
-			SelfService:  true,
+		PlanPro: {
+			Plan: PlanPro, Name: "Pro",
+			Prices: map[BillingInterval]IntervalPrice{
+				IntervalMonthly:   {Cents: 59700, PriceID: config.StripePriceProMonthly.String()},
+				IntervalSemestral: {Cents: 340290, PriceID: config.StripePriceProSemestral.String()},
+				IntervalAnnual:    {Cents: 644760, PriceID: config.StripePriceProAnnual.String()},
+			},
+			SelfService: true,
 		},
 		PlanEnterprise: {
 			Plan: PlanEnterprise, Name: "Enterprise", SelfService: false,
@@ -84,8 +90,10 @@ func planFromPriceID(priceID string) Plan {
 		return ""
 	}
 	for p, cfg := range Plans() {
-		if cfg.FlatPriceID == priceID || cfg.MeterPriceID == priceID {
-			return p
+		for _, ip := range cfg.Prices {
+			if ip.PriceID == priceID {
+				return p
+			}
 		}
 	}
 	return ""
@@ -135,52 +143,32 @@ func NewSubscriptionResponse(sub *domain.Subscription, enforced bool, now time.T
 // Request types (ozzo syntactic gate + ToInput semantic build)
 // ============================================
 
-// CreateCheckoutRequest picks the plan being contracted.
+// CreateCheckoutRequest picks the billing interval for the (single) Pro plan.
+// There is no plan choice anymore — switching between monthly/semestral/annual
+// after conversion is handled by the Stripe Customer Portal.
 type CreateCheckoutRequest struct {
-	Plan string `json:"plan"`
+	Interval string `json:"interval"`
 }
 
-// Validate is the syntactic gate (ozzo): only self-service plans are contractable.
+// Validate is the syntactic gate (ozzo): only the 3 known intervals are contractable.
 func (r CreateCheckoutRequest) Validate() error {
 	return validation.ValidateStruct(&r,
-		validation.Field(&r.Plan, validation.Required, validation.In("start", "grow", "scale")),
+		validation.Field(&r.Interval, validation.Required, validation.In("monthly", "semestral", "annual")),
 	)
 }
 
 // ToInput builds the usecase input for a store-scoped checkout.
 func (r CreateCheckoutRequest) ToInput(storeID string) (CheckoutInput, error) {
-	return CheckoutInput{StoreID: storeID, Plan: Plan(r.Plan)}, nil
-}
-
-// ChangePlanRequest picks the target plan.
-type ChangePlanRequest struct {
-	Plan string `json:"plan"`
-}
-
-// Validate is the syntactic gate (ozzo): only self-service plans are targetable.
-func (r ChangePlanRequest) Validate() error {
-	return validation.ValidateStruct(&r,
-		validation.Field(&r.Plan, validation.Required, validation.In("start", "grow", "scale")),
-	)
-}
-
-// ToInput builds the usecase input for a store-scoped plan change.
-func (r ChangePlanRequest) ToInput(storeID string) (ChangePlanInput, error) {
-	return ChangePlanInput{StoreID: storeID, Plan: Plan(r.Plan)}, nil
+	return CheckoutInput{StoreID: storeID, Interval: BillingInterval(r.Interval)}, nil
 }
 
 // ============================================
 // Service layer - Input types
 // ============================================
 
-// CheckoutInput is the usecase input for opening a conversion checkout.
+// CheckoutInput is the usecase input for opening a conversion checkout. The
+// plan is always PlanPro (implicit) — only the billing interval is chosen.
 type CheckoutInput struct {
-	StoreID string
-	Plan    Plan
-}
-
-// ChangePlanInput is the usecase input for an upgrade/downgrade.
-type ChangePlanInput struct {
-	StoreID string
-	Plan    Plan
+	StoreID  string
+	Interval BillingInterval
 }
