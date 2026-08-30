@@ -250,7 +250,10 @@ func (s *Service) RunStockReconciliation(ctx context.Context, storeID string) (*
 	if !ok {
 		return nil, httpx.ErrNotFound("o provedor ERP não expõe leitura de saldo")
 	}
-	return erp.ReconcileStockAgainstERP(ctx, s.logger, s.repo, stockReader, storeID, "tiny")
+	// A fonte é a do ERP CONECTADO, não o literal 'tiny'. Com o literal, a
+	// reconciliação de uma loja Bling compara zero produtos e devolve um
+	// relatório limpo — que é pior do que não rodar, porque parece confirmação.
+	return erp.ReconcileStockAgainstERP(ctx, s.logger, s.repo, stockReader, storeID, integration.Provider)
 }
 
 // ResolveProvider satisfies erp.StockCollaborators: it maps the neutral
@@ -4343,12 +4346,30 @@ func (s *Service) emitERPOrderFinalized(ctx context.Context, storeID, cartID str
 	if fresh, err := s.repo.GetCartForPaidOrder(ctx, cartID); err == nil {
 		externalOrderID = fresh.ExternalOrderID
 	}
+	provider := s.providerDaLoja(ctx, storeID)
 	_ = events.EmitInternal(ctx, s.repo.queries, events.ERPOrderFinalized, "erp.order_finalized:"+cartID, struct {
 		StoreID         string `json:"store_id"`
 		CartID          string `json:"cart_id"`
 		ExternalOrderID string `json:"external_order_id"`
 		Provider        string `json:"provider"`
-	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: "tiny"})
+	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: provider})
+}
+
+// providerDaLoja diz qual ERP está conectado, para os fatos do grupo G não
+// mentirem o nome do ERP.
+//
+// Os três fatos (order_created, order_finalized, finalization_failed) traziam
+// o literal "tiny" mesmo num pedido do Bling. Ninguém RAMIFICA nesse campo
+// hoje, e é justamente por isso que o erro passaria despercebido até alguém
+// investigar um pedido pelo evento e procurá-lo no ERP errado.
+//
+// Best-effort de propósito: emitir o fato é mais importante do que nomear o
+// provider, e o fato é emitido fora da transação principal.
+func (s *Service) providerDaLoja(ctx context.Context, storeID string) string {
+	if integracao, err := s.repo.GetActiveERP(ctx, storeID); err == nil && integracao != nil {
+		return integracao.Provider
+	}
+	return ""
 }
 
 // markFinalisationFailed grava o estado 'failed' com o erro e loga falhas da
@@ -4381,7 +4402,7 @@ func (s *Service) emitERPFinalizationFailed(ctx context.Context, cartID, reason 
 		ExternalOrderID string `json:"external_order_id"`
 		Provider        string `json:"provider"`
 		Reason          string `json:"reason"`
-	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: "tiny", Reason: reason})
+	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: s.providerDaLoja(ctx, storeID), Reason: reason})
 }
 
 // =============================================================================
@@ -5154,7 +5175,7 @@ func (s *Service) createERPOrderForCart(ctx context.Context, erpProvider provide
 		CartID          string `json:"cart_id"`
 		ExternalOrderID string `json:"external_order_id"`
 		Provider        string `json:"provider"`
-	}{StoreID: storeID, CartID: cart.ID, ExternalOrderID: result.OrderID, Provider: "tiny"})
+	}{StoreID: storeID, CartID: cart.ID, ExternalOrderID: result.OrderID, Provider: integration.Provider})
 
 	logger.From(ctx, s.logger).Info("ERP order created for cart — no stock movement, the order is the reservation",
 		zap.String("cart_id", cart.ID),
@@ -6681,7 +6702,7 @@ func (s *Service) DefinirModoDeReserva(ctx context.Context, input SetModoDeReser
 
 // retratoDoModoDeReserva junta a escolha do lojista com a capacidade medida.
 func (s *Service) retratoDoModoDeReserva(ctx context.Context, integracao *IntegrationRow) *ModoDeReservaResponse {
-	escolhido := erp.ModoDeReservaDoMetadata(integracao.Metadata)
+	escolhido := erp.ModoDeReservaDaIntegracao(integracao.Provider, integracao.Metadata)
 	sonda := s.sondarCapacidadeDeReserva(ctx, integracao)
 	efetivo, motivo := erp.EscolherModo(escolhido, sonda)
 

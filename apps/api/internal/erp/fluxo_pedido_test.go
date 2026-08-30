@@ -978,3 +978,120 @@ func TestFusaoCustaUmaLeituraPorMutacao(t *testing.T) {
 			"o custo aceito; mais que isso não é", got)
 	}
 }
+
+// ─── 1b. O modo de reserva decide QUANDO o pedido nasce ─────────────────────
+
+// No modo LOCAL o comentário não cria pedido: quem segura a peça durante a live
+// é o contador do LiveCart. Criar cedo custaria duas requisições por compradora
+// contra o teto de 3 req/s do Bling sem reservar nada, porque numa conta sem a
+// Reserva de estoque ligada pedido em aberto não mexe no saldo.
+func TestModoLocalNaoCriaOPedidoNoComentario(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 5})
+	repo.provider = "bling"
+	repo.metadata = map[string]any{ChaveModoDeReserva: string(ReservaSomenteLocal)}
+	repo.criarCarrinho("cart-1", item("p1", 1))
+
+	if err := svc.ReserveStockInERP(context.Background(), "loja-1", "cart-1", "ev-1", "p1", 1, 2000, "@maria"); err != nil {
+		t.Fatalf("comentário no modo local: %v", err)
+	}
+
+	if erp.criacoes != 0 {
+		t.Errorf("pedidos criados = %d, quero 0 — no modo local o pedido nasce no pagamento", erp.criacoes)
+	}
+	if c := repo.carrinho("cart-1"); c.state != OrderStateNone || c.externalOrderID != "" {
+		t.Errorf("carrinho ficou em %q com pedido %q, quero 'none' e vazio", c.state, c.externalOrderID)
+	}
+	if est := erp.estoque("ext-p1"); est.saldo != 5 || est.reservado != 0 {
+		t.Errorf("saldo=%d reservado=%d, quero 5 e 0 — o modo local não toca o ERP na live",
+			est.saldo, est.reservado)
+	}
+}
+
+// O CONTRÁRIO da regra acima, e o que mais importa aqui: o carrinho PAGO cria o
+// pedido em qualquer modo. A primeira versão deste portão fechava as duas
+// portas juntas, e o carrinho pago — que chega em 'none' — teria ficado sem
+// pedido para sempre. A venda existiu; o pedido tem de existir.
+func TestModoLocalAindaAssimCriaOPedidoQuandoOCarrinhoEhPago(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 5})
+	repo.provider = "bling"
+	repo.metadata = map[string]any{ChaveModoDeReserva: string(ReservaSomenteLocal)}
+	repo.criarCarrinho("cart-1", item("p1", 1))
+
+	ctx := context.Background()
+	if err := svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 1, 2000, "@maria"); err != nil {
+		t.Fatalf("comentário: %v", err)
+	}
+	if erp.criacoes != 0 {
+		t.Fatalf("o comentário criou %d pedido(s) — o teste anterior já deveria ter pegado isso", erp.criacoes)
+	}
+
+	// Agora a compradora paga.
+	if err := svc.ConfirmERPOrderPayment(ctx, "cart-1", "loja-1", nil); err != nil {
+		t.Fatalf("confirmando o carrinho pago: %v", err)
+	}
+
+	if erp.criacoes != 1 {
+		t.Fatalf("pedidos criados no pagamento = %d, quero 1 — sem isso a venda paga "+
+			"não existe no ERP do lojista", erp.criacoes)
+	}
+	if c := repo.carrinho("cart-1"); c.externalOrderID == "" {
+		t.Errorf("carrinho pago ficou sem external_order_id (estado %q)", c.state)
+	}
+}
+
+// E o Tiny não muda: o pedido continua nascendo no primeiro comentário, que é
+// como a live fatura hoje.
+func TestTinyContinuaCriandoOPedidoNoComentario(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 5})
+	repo.provider = "tiny" // sem metadata nenhum, como toda integração Tiny em produção
+	repo.criarCarrinho("cart-1", item("p1", 1))
+
+	if err := svc.ReserveStockInERP(context.Background(), "loja-1", "cart-1", "ev-1", "p1", 1, 2000, "@maria"); err != nil {
+		t.Fatalf("primeiro comentário: %v", err)
+	}
+	if erp.criacoes != 1 {
+		t.Fatalf("pedidos criados = %d, quero 1 — o Tiny reserva PELO pedido; sem ele "+
+			"a live para de segurar peça", erp.criacoes)
+	}
+}
+
+// Um ERP que RECUSA mudar a situação não pode travar a venda.
+//
+// O pedido já existe lá, com itens e pagamento. Abortar deixaria o pior estado
+// possível: pedido certo no ERP do lojista e carrinho eternamente "não
+// confirmado" no LiveCart. Só a recusa explícita (ErrOperationNotSupported) é
+// tolerada — falha de rede continua sendo falha.
+func TestRecusaDeSituacaoNaoTravaAVendaJaPaga(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 5})
+	repo.criarCarrinho("cart-1", item("p1", 1))
+	ctx := context.Background()
+
+	if err := svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 1, 2000, "@maria"); err != nil {
+		t.Fatalf("comentário: %v", err)
+	}
+	erp.recusarSituacao = true
+
+	if err := svc.ConfirmERPOrderPayment(ctx, "cart-1", "loja-1", nil); err != nil {
+		t.Fatalf("o pagamento falhou por causa da situação: %v", err)
+	}
+	if c := repo.carrinho("cart-1"); c.state != OrderStateConfirmed {
+		t.Errorf("carrinho ficou em %q, quero 'confirmed' — a venda aconteceu", c.state)
+	}
+}
+
+// E o contrário: uma falha de verdade continua abortando.
+func TestFalhaDeVerdadeNaSituacaoAindaAbortaAConfirmacao(t *testing.T) {
+	svc, repo, erp, _ := montar(map[string]int{"ext-p1": 5})
+	repo.criarCarrinho("cart-1", item("p1", 1))
+	ctx := context.Background()
+
+	if err := svc.ReserveStockInERP(ctx, "loja-1", "cart-1", "ev-1", "p1", 1, 2000, "@maria"); err != nil {
+		t.Fatalf("comentário: %v", err)
+	}
+	erp.falharSituacao = true
+
+	if err := svc.ConfirmERPOrderPayment(ctx, "cart-1", "loja-1", nil); err == nil {
+		t.Error("o pagamento passou apesar de a situação ter falhado de verdade — " +
+			"a tolerância vazou para além da recusa explícita")
+	}
+}

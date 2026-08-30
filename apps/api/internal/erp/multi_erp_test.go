@@ -127,3 +127,100 @@ func arquivosGo(dir string) ([]arquivoGo, error) {
 	}
 	return out, nil
 }
+
+// O FLUXO DE PEDIDO RESPEITA O MODO DE RESERVA.
+//
+// Antes desta ligação o modo era decorativo: só o endpoint que o reporta o lia,
+// e EnsureERPOrderForCart criava o pedido em qualquer caso. "Modo local" não
+// impedia nada.
+//
+// A garantia que mais importa aqui é a NEGATIVA: o Tiny tem de continuar
+// criando o pedido no primeiro comentário, porque lá o pedido É a reserva.
+func TestFluxoDePedidoRespeitaOModoDeReserva(t *testing.T) {
+	casos := []struct {
+		nome     string
+		provider string
+		metadata map[string]any
+		querCria bool
+	}{
+		{
+			nome:     "Tiny sem metadata — CRIA (é como funciona hoje, não pode mudar)",
+			provider: "tiny", metadata: nil, querCria: true,
+		},
+		{
+			nome:     "Bling sem metadata — não cria (padrão local)",
+			provider: "bling", metadata: nil, querCria: false,
+		},
+		{
+			nome:     "Bling com modo nativo — CRIA",
+			provider: "bling",
+			metadata: map[string]any{ChaveModoDeReserva: string(ReservaNativaDoERP)},
+			querCria: true,
+		},
+		{
+			nome:     "Tiny com modo local escolhido — não cria",
+			provider: "tiny",
+			metadata: map[string]any{ChaveModoDeReserva: string(ReservaSomenteLocal)},
+			querCria: false,
+		},
+	}
+
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			modo := ModoDeReservaDaIntegracao(c.provider, c.metadata)
+			cria := modo == ReservaNativaDoERP
+			if cria != c.querCria {
+				t.Errorf("modo resolvido = %q → criaria=%v, queria criar=%v",
+					modo, cria, c.querCria)
+			}
+		})
+	}
+}
+
+// NENHUM literal 'tiny' pode decidir algo que vale para QUALQUER ERP.
+//
+// Catraca de código-fonte, e não teste de comportamento, porque o defeito é
+// invisível em execução: uma loja Bling recebia relatório de reconciliação
+// LIMPO — comparando zero produtos, porque a fonte pedida era 'tiny' — e um
+// relatório limpo parece confirmação, não ausência de dados. Os fatos do grupo
+// G tinham a mesma doença: carimbavam "tiny" no pedido de qualquer ERP.
+func TestNenhumLiteralTinyDecidePorTodosOsERPs(t *testing.T) {
+	// A proibição é PRECISA, como a do teste acima. `Provider: "tiny"` no
+	// OAuthCallbackInput do handler do Tiny é a pergunta CERTA e fica de fora;
+	// o que se proíbe é o literal no payload de um fato do grupo G, que a
+	// presença de `CartID:` na mesma linha identifica sem ambiguidade.
+	proibidos := []struct{ trecho, exigeTambem, porque string }{
+		{`stockReader, storeID, "tiny")`, "",
+			"a reconciliação tem de comparar contra a fonte do ERP CONECTADO; com o " +
+				"literal, uma loja Bling compara zero produtos e o relatório sai limpo"},
+		{`Provider: "tiny"`, "CartID:",
+			"o fato do grupo G tem de carregar o ERP real do pedido, não o literal"},
+	}
+
+	for _, dir := range []string{".", "../integration"} {
+		arquivos, err := arquivosGo(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range arquivos {
+			if strings.HasSuffix(f.nome, "_test.go") {
+				continue
+			}
+			for i, linha := range strings.Split(f.conteudo, "\n") {
+				corte := strings.TrimSpace(linha)
+				if strings.HasPrefix(corte, "//") {
+					continue // comentário citando o padrão antigo é documentação
+				}
+				for _, p := range proibidos {
+					if !strings.Contains(linha, p.trecho) {
+						continue
+					}
+					if p.exigeTambem != "" && !strings.Contains(linha, p.exigeTambem) {
+						continue
+					}
+					t.Errorf("%s:%d — %s\n  linha: %s", f.nome, i+1, p.porque, corte)
+				}
+			}
+		}
+	}
+}

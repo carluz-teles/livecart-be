@@ -505,21 +505,162 @@ func TestBlingAprendeOIdDaSituacaoAoLer(t *testing.T) {
 // Escrever situação NÃO mapeada tem de RECUSAR sem gastar requisição: os ids
 // são por conta, e escrever um id desconhecido pode disparar uma transição com
 // efeito de estoque na conta do lojista.
-func TestBlingRecusaEscreverSituacaoNaoMapeadaSemGastarRequisicao(t *testing.T) {
+// A recusa custa UMA leitura, e no máximo uma.
+//
+// Este teste já exigiu recusa a custo ZERO. A troca foi deliberada e medida
+// contra a conta real: sem ler o próprio pedido, o adapter nunca descobre os
+// ids daquela conta, e TODO carrinho pago no Bling falhava na aprovação. Uma
+// requisição é o preço de saber; o que não pode é virar tentativa em série.
+func TestBlingRecusaEscreverSituacaoDepoisDeUmaUnicaLeitura(t *testing.T) {
 	var chamadas int
 	b, _ := bancadaBling(t, func(w http.ResponseWriter, r *http.Request) {
 		chamadas++
-		respJSON(`{"data":{}}`)(w, r)
+		// Pedido em situação que esta conta NÃO semeou: nada a corroborar.
+		respJSON(`{"data":{"id":1,"situacao":{"id":777001,"valor":3}}}`)(w, r)
 	})
 
 	err := b.SetOrderSituacao(context.Background(), "1", providers.SituacaoAprovada)
 	if err == nil {
-		t.Fatal("queria recusa")
+		t.Fatal("queria recusa — o id 777001 é do lojista e não corrobora a tabela semeada")
 	}
-	if chamadas != 0 {
-		t.Errorf("gastou %d requisição(ões) para recusar — a recusa tem de ser local", chamadas)
+	if chamadas != 1 {
+		t.Errorf("gastou %d requisições, quero exatamente 1 — a descoberta é uma leitura, não um laço", chamadas)
 	}
 	if !strings.Contains(err.Error(), providers.ErrOperationNotSupported.Error()) {
 		t.Errorf("erro devia carregar ErrOperationNotSupported: %v", err)
+	}
+}
+
+// E quando a leitura CORROBORA, a escrita acontece — sem escopo de Situações,
+// que é 403 nesta conta. É o caminho que o ensaio contra a conta real percorre.
+func TestBlingAprendeOsIdsLendoOProprioPedidoEEntaoEscreve(t *testing.T) {
+	var caminhos []string
+	b, _ := bancadaBling(t, func(w http.ResponseWriter, r *http.Request) {
+		caminhos = append(caminhos, r.Method+" "+r.URL.Path)
+		// Todo pedido do Bling nasce em "Em aberto" = id 6, valor 0 — o par que
+		// confirma que esta conta usa os ids semeados.
+		respJSON(`{"data":{"id":1,"situacao":{"id":6,"valor":0}}}`)(w, r)
+	})
+
+	if err := b.SetOrderSituacao(context.Background(), "1", providers.SituacaoAprovada); err != nil {
+		t.Fatalf("queria que escrevesse depois de corroborar: %v", err)
+	}
+	if len(caminhos) != 2 {
+		t.Fatalf("requisições = %v, queria uma leitura e uma escrita", caminhos)
+	}
+	// 15 é "Em andamento", o destino medido para um pedido pago.
+	if !strings.HasSuffix(caminhos[1], "/situacoes/15") {
+		t.Errorf("escreveu em %q, queria terminar em /situacoes/15", caminhos[1])
+	}
+
+	// E a segunda vez não relê: o veredito ficou guardado.
+	caminhos = nil
+	if err := b.SetOrderSituacao(context.Background(), "1", providers.SituacaoCancelada); err != nil {
+		t.Fatalf("segunda transição: %v", err)
+	}
+	if len(caminhos) != 1 {
+		t.Errorf("requisições = %v, queria só a escrita — a corroboração não pode repetir por pedido", caminhos)
+	}
+}
+
+// ─── A TABELA DE SITUAÇÕES ──────────────────────────────────────────────────
+//
+// Os ids de situação do Bling são POR CONTA. A tabela semeada (medida em
+// 30/08/2026) resolve o caso comum, mas escrever um id que naquela conta
+// significa outra coisa mexeria no estoque do lojista. Por isso ela só vale
+// depois de corroborada por uma leitura da própria conta.
+
+func TestTabelaDeSituacoesSoValeDepoisDeCorroborada(t *testing.T) {
+	b := &Bling{}
+
+	if _, ok := b.situacaoDaConta(providers.SituacaoAprovada); ok {
+		t.Fatal("a tabela semeada foi usada sem corroboração — escrever um id não " +
+			"confirmado pode disparar a transição errada na conta do lojista")
+	}
+
+	// Uma leitura qualquer da conta mostrando um par que BATE autoriza a tabela.
+	b.corroborarTabelaPadrao(6, 0) // Em aberto, como todo pedido nasce
+	id, ok := b.situacaoDaConta(providers.SituacaoAprovada)
+	if !ok || id != 15 {
+		t.Errorf("depois de corroborada: id=%d ok=%v, queria 15 e true", id, ok)
+	}
+}
+
+func TestUmParContraditorioDesligaATabelaParaSempre(t *testing.T) {
+	b := &Bling{}
+	b.corroborarTabelaPadrao(6, 0) // confirma
+	if _, ok := b.situacaoDaConta(providers.SituacaoCancelada); !ok {
+		t.Fatal("a corroboração não pegou")
+	}
+
+	// Esta conta reaproveitou o id 12 para outra coisa.
+	b.corroborarTabelaPadrao(12, 7)
+	if _, ok := b.situacaoDaConta(providers.SituacaoCancelada); ok {
+		t.Error("a tabela continuou valendo depois de ser desmentida")
+	}
+	// E não volta atrás nem com mais pares que batem.
+	b.corroborarTabelaPadrao(9, 1)
+	if _, ok := b.situacaoDaConta(providers.SituacaoAberta); ok {
+		t.Error("um par que bate reabilitou uma tabela já desmentida — uma conta com " +
+			"ids reaproveitados nunca é segura de novo")
+	}
+}
+
+func TestSituacaoCriadaPeloLojistaNaoDizNadaSobreATabela(t *testing.T) {
+	b := &Bling{}
+	// Id fora da faixa semeada: é situação do lojista, e não corrobora nem
+	// desmente coisa nenhuma.
+	b.corroborarTabelaPadrao(918273, 3)
+	if _, ok := b.situacaoDaConta(providers.SituacaoAprovada); ok {
+		t.Error("uma situação criada pelo lojista corroborou a tabela semeada")
+	}
+}
+
+// O que foi OBSERVADO vence a tabela: um id aprendido de leitura é dado, não
+// palpite.
+func TestOAprendidoVenceOSemeado(t *testing.T) {
+	b := &Bling{}
+	b.corroborarTabelaPadrao(6, 0)
+	b.aprenderSituacao(providers.SituacaoCancelada, 4242)
+
+	id, ok := b.situacaoDaConta(providers.SituacaoCancelada)
+	if !ok || id != 4242 {
+		t.Errorf("id=%d ok=%v, queria 4242 — o observado na conta vence o semeado", id, ok)
+	}
+}
+
+// A tradução na LEITURA continua recusando "Em andamento" → "Aprovada". As duas
+// direções são deliberadamente assimétricas: nós escolhemos "Em andamento" como
+// destino porque SABEMOS que o pagamento entrou; o Bling dizendo "em andamento"
+// não afirma isso de volta.
+func TestALeituraNaoTrocaEmAndamentoPorAprovada(t *testing.T) {
+	if _, ok := situacaoCanonicaDoValor(blingValorEmAndamento); ok {
+		t.Error("a leitura traduziu 'Em andamento' — o núcleo daria a venda por " +
+			"aprovada sem que ninguém tenha aprovado")
+	}
+	// E o caminho de escrita usa exatamente esse id.
+	if blingSituacoesPadrao[providers.SituacaoAprovada] != 15 {
+		t.Errorf("a escrita de 'Aprovada' aponta para %d, e a medição de 30/08 diz 15",
+			blingSituacoesPadrao[providers.SituacaoAprovada])
+	}
+}
+
+// As duas tabelas descrevem a MESMA medição e não podem divergir.
+func TestAsDuasTabelasConcordam(t *testing.T) {
+	valorCanonico := map[int]int{ // canônico → valor normalizado do Bling
+		providers.SituacaoAberta:    0,
+		providers.SituacaoFaturada:  1,
+		providers.SituacaoCancelada: 2,
+		providers.SituacaoAprovada:  3,
+	}
+	for canonico, id := range blingSituacoesPadrao {
+		valor, ok := blingValorDaSituacaoPadrao[id]
+		if !ok {
+			t.Errorf("o id %d (canônico %d) não está na tabela id→valor", id, canonico)
+			continue
+		}
+		if querido := valorCanonico[canonico]; valor != querido {
+			t.Errorf("canônico %d → id %d → valor %d, queria valor %d", canonico, id, valor, querido)
+		}
 	}
 }

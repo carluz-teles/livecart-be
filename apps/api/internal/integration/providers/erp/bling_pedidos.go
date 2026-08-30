@@ -203,6 +203,12 @@ func (b *Bling) FindOrderIDByMarker(ctx context.Context, marker string) (string,
 		return "", err
 	}
 	for _, p := range env.Data {
+		if p.Situacao != nil {
+			// De graça, e no melhor momento possível: este GET precede TODA
+			// criação de pedido, então a tabela já está corroborada (ou
+			// desmentida) antes da primeira escrita de situação da live.
+			b.corroborarTabelaPadrao(p.Situacao.ID, p.Situacao.Valor)
+		}
 		// Conferência explícita: o filtro é do servidor, e confiar nele sem
 		// checar o que voltou é como se adota o pedido errado.
 		if p.NumeroLoja == marker {
@@ -326,6 +332,21 @@ func limparReadOnly(cru map[string]any) {
 func (b *Bling) SetOrderSituacao(ctx context.Context, orderID string, situacao int) error {
 	idSituacao, ok := b.situacaoDaConta(situacao)
 	if !ok {
+		// UMA leitura do próprio pedido que se vai mudar, e só quando o id é
+		// desconhecido. É a corroboração no único momento em que ela tem de
+		// existir: o pedido está em ALGUMA situação, e o par (id, valor) dela
+		// confirma ou desmente a tabela semeada.
+		//
+		// O GET de claim não serve para isto — ele filtra pelo marcador e, num
+		// carrinho novo, volta vazio. Descobrir isso custou uma execução do
+		// ensaio contra a conta real.
+		if _, err := b.GetOrderSituacao(ctx, orderID); err != nil {
+			return fmt.Errorf("bling: lendo a situação atual do pedido %s para "+
+				"descobrir os ids desta conta: %w", orderID, err)
+		}
+		idSituacao, ok = b.situacaoDaConta(situacao)
+	}
+	if !ok {
 		return fmt.Errorf("%w: situação %d não está mapeada para esta conta Bling — "+
 			"os ids de situação são por conta e escrever um id não mapeado pode "+
 			"disparar ação de estoque na conta do lojista",
@@ -335,16 +356,91 @@ func (b *Bling) SetOrderSituacao(ctx context.Context, orderID string, situacao i
 	return b.escrever(ctx, http.MethodPatch, caminho, nil, nil)
 }
 
+// blingSituacoesPadrao é a tabela que o Bling SEMEIA em toda conta nova para o
+// módulo de pedidos de venda. MEDIDA em 30/08/2026, passando um pedido
+// descartável por todas elas e lendo `situacao` de volta a cada transição:
+//
+//	id  valor  nome              reserva estoque?
+//	 6    0    Em aberto         SIM   (virtual 4 de 5)
+//	 9    1    Atendido          não   (virtual volta a 5)
+//	12    2    Cancelado         não
+//	15    3    Em andamento      SIM
+//	18    4    Venda agenciada   não
+//	21   10    Em digitação      SIM
+//	24   11    Verificado        SIM
+//
+// O FÍSICO não se mexeu em nenhuma das sete transições — mudar situação nunca
+// dá baixa, que é a propriedade de que este modelo inteiro depende.
+//
+// A tabela é só um PALPITE INFORMADO até ser corroborada contra a conta, porque
+// o lojista pode criar situações próprias, e escrever um id que significa outra
+// coisa mexeria no estoque dele. Ver corroborarTabelaPadrao.
+var blingSituacoesPadrao = map[int]int64{
+	providers.SituacaoAberta:    6,
+	providers.SituacaoFaturada:  9,
+	providers.SituacaoCancelada: 12,
+	// ⚠ O par que exige julgamento: o Bling não tem "Aprovada". "Em andamento"
+	// é o destino honesto de um pedido cujo pagamento entrou — continua
+	// reservando (medido) e deixa de ser só "em aberto".
+	//
+	// É a direção de ESCRITA e só ela. Na LEITURA a tradução inversa continua
+	// recusada de propósito (situacaoCanonicaDoValor), porque "em andamento" no
+	// Bling não afirma que a venda foi aprovada: nós é que sabemos que foi.
+	providers.SituacaoAprovada: 15,
+}
+
+// blingValorDaSituacaoPadrao é a mesma tabela pela outra chave: id → valor
+// normalizado. É com ela que uma leitura qualquer confirma ou desmente que esta
+// conta usa os ids semeados.
+var blingValorDaSituacaoPadrao = map[int64]int{
+	6: 0, 9: 1, 12: 2, 15: 3, 18: 4, 21: 10, 24: 11,
+}
+
+// corroborarTabelaPadrao confere um par (id, valor) observado na conta contra a
+// tabela semeada.
+//
+// Um par que BATE autoriza usar a tabela para escrever; um par que CONTRADIZ a
+// desliga para sempre nesta sessão do adapter. É o que separa "sei porque vi"
+// de "chutei um id no ERP do lojista": todo pedido lido — inclusive o GET de
+// claim que precede toda criação — passa por aqui de graça.
+func (b *Bling) corroborarTabelaPadrao(id int64, valor int) {
+	if id == 0 {
+		return
+	}
+	esperado, conhecido := blingValorDaSituacaoPadrao[id]
+	if !conhecido {
+		// Situação criada pelo lojista. Não diz nada sobre as semeadas.
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if esperado == valor {
+		b.padraoConfirmado = true
+		return
+	}
+	// Esta conta reaproveitou um id semeado para outra coisa. A tabela inteira
+	// vira suspeita — escrever qualquer id dela poderia disparar a transição
+	// errada.
+	b.padraoContradito = true
+}
+
 // situacaoDaConta traduz o código canônico (o enum do Tiny, que o núcleo usa)
 // no id daquela conta Bling.
+//
+// Três fontes, nesta ordem: o que já foi OBSERVADO nesta conta, a tabela
+// semeada quando uma leitura a corroborou, e nada. "Nada" faz a escrita
+// recusar, que é o comportamento seguro.
 func (b *Bling) situacaoDaConta(canonico int) (int64, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.mapaSituacoes == nil {
-		return 0, false
+	if id, ok := b.mapaSituacoes[canonico]; ok {
+		return id, true
 	}
-	id, ok := b.mapaSituacoes[canonico]
-	return id, ok
+	if b.padraoConfirmado && !b.padraoContradito {
+		id, ok := blingSituacoesPadrao[canonico]
+		return id, ok
+	}
+	return 0, false
 }
 
 // Valores NORMALIZADOS de situação de venda do Bling.
@@ -416,6 +512,7 @@ func (b *Bling) GetOrderSituacao(ctx context.Context, orderID string) (int, erro
 	if p.Situacao == nil {
 		return 0, nil
 	}
+	b.corroborarTabelaPadrao(p.Situacao.ID, p.Situacao.Valor)
 	if canonico, ok := situacaoCanonicaDoValor(p.Situacao.Valor); ok {
 		// Aprende o id daquela conta de graça, para a ESCRITA poder usá-lo
 		// depois sem precisar do escopo de Situações.

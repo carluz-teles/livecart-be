@@ -35,13 +35,50 @@ const (
 	ReservaSomenteLocal ModoDeReserva = "local"
 )
 
-// ModoDeReservaPadrao é o que vale quando o lojista não escolheu.
+// ModoDeReservaPadrao é o padrão genérico: local.
 //
 // Local, e não nativa, porque a nativa depende de uma configuração da conta que
 // não conseguimos VERIFICAR por API. Assumir que está ligada quando não está
 // significa o LiveCart achar que o ERP está segurando a peça enquanto ninguém
 // está — e a peça é vendida duas vezes. O default erra para o lado recuperável.
 const ModoDeReservaPadrao = ReservaSomenteLocal
+
+// ModoDeReservaPadraoDoProvider é o padrão de um ERP específico.
+//
+// O Tiny é NATIVO por definição e não por escolha: lá o pedido de venda É a
+// reserva (módulo `possuiReserva`), e é isso que o LiveCart faz desde sempre —
+// cria o pedido no primeiro comentário e deixa o ERP segurar a peça. Aplicar o
+// padrão genérico a ele mudaria o comportamento de quem fatura hoje, que é
+// exatamente o que esta função existe para impedir.
+//
+// O Bling cai no padrão genérico: lá a reserva depende de uma configuração da
+// conta que só a sonda confirma.
+func ModoDeReservaPadraoDoProvider(provider string) ModoDeReserva {
+	if provider == "tiny" {
+		return ReservaNativaDoERP
+	}
+	return ModoDeReservaPadrao
+}
+
+// ModoDeReservaDaIntegracao lê o modo escolhido, caindo no padrão DO PROVIDER.
+//
+// É deliberadamente a ÚNICA forma de ler o modo. Existiu aqui um
+// ModoDeReservaDoMetadata que não recebia o provider, e ele devolvia "local"
+// para o Tiny — o que faria a tela dizer que o pedido nasce no pagamento
+// enquanto o fluxo o cria no comentário. Pior: o lojista que salvasse o que a
+// tela mostra gravaria "local" e o Tiny pararia de reservar na live.
+func ModoDeReservaDaIntegracao(provider string, metadata map[string]any) ModoDeReserva {
+	if metadata != nil {
+		if v, _ := metadata[ChaveModoDeReserva].(string); v != "" {
+			// Metadata malformado NÃO liga um comportamento que muda o que a
+			// loja vende. Mesma regra do MetadataBool.
+			if m := ModoDeReserva(v); m.Valido() {
+				return m
+			}
+		}
+	}
+	return ModoDeReservaPadraoDoProvider(provider)
+}
 
 // ChaveModoDeReserva é onde o modo vive no metadata da integração.
 const ChaveModoDeReserva = "modo_reserva_estoque"
@@ -67,21 +104,6 @@ func (m ModoDeReserva) PrecoParaOLojista() string {
 	default:
 		return ""
 	}
-}
-
-// ModoDeReservaDoMetadata lê o modo escolhido, com o padrão seguro.
-func ModoDeReservaDoMetadata(metadata map[string]any) ModoDeReserva {
-	if metadata == nil {
-		return ModoDeReservaPadrao
-	}
-	v, _ := metadata[ChaveModoDeReserva].(string)
-	m := ModoDeReserva(v)
-	if !m.Valido() {
-		// Metadata malformado NÃO liga um comportamento que muda o que a loja
-		// vende. Mesma regra do MetadataBool.
-		return ModoDeReservaPadrao
-	}
-	return m
 }
 
 // ResultadoDaSonda é o que a sonda de capacidade descobriu sobre a conta.

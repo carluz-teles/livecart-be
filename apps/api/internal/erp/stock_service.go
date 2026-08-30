@@ -130,7 +130,11 @@ func (s *Service) ReserveStockInERP(ctx context.Context, storeID, cartID, eventI
 	// Primeiro item: o pedido nasce, e ao nascer já segura tudo que está no
 	// carrinho — inclusive itens que tenham entrado enquanto isto rodava, porque
 	// a grade é sempre reconstruída do banco.
-	if err := s.EnsureERPOrderForCart(ctx, cartID, storeID); err != nil {
+	//
+	// É a porta da LIVE: só nasce aqui quem reserva pelo pedido. No modo local
+	// o carrinho segue sem pedido até o pagamento, e quem segura a peça nesse
+	// meio-tempo é o contador do LiveCart.
+	if err := s.EnsureERPOrderDuranteALive(ctx, cartID, storeID); err != nil {
 		return fmt.Errorf("creating sales order for cart %s: %w", cartID, err)
 	}
 	return nil

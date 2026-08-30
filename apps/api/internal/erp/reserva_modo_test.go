@@ -22,7 +22,7 @@ func TestPadraoEhLocalMesmoComMetadataAusenteOuLixo(t *testing.T) {
 	}
 	for _, c := range casos {
 		t.Run(c.nome, func(t *testing.T) {
-			if got := ModoDeReservaDoMetadata(c.metadata); got != ReservaSomenteLocal {
+			if got := ModoDeReservaDaIntegracao("bling", c.metadata); got != ReservaSomenteLocal {
 				t.Errorf("modo = %q, queria %q — metadata malformado NÃO pode ligar "+
 					"um comportamento que muda o que a loja vende", got, ReservaSomenteLocal)
 			}
@@ -32,7 +32,7 @@ func TestPadraoEhLocalMesmoComMetadataAusenteOuLixo(t *testing.T) {
 
 func TestModoValidoEhLidoDoMetadata(t *testing.T) {
 	for _, m := range []ModoDeReserva{ReservaNativaDoERP, ReservaSomenteLocal} {
-		got := ModoDeReservaDoMetadata(map[string]any{ChaveModoDeReserva: string(m)})
+		got := ModoDeReservaDaIntegracao("bling", map[string]any{ChaveModoDeReserva: string(m)})
 		if got != m {
 			t.Errorf("modo = %q, queria %q", got, m)
 		}
@@ -178,4 +178,65 @@ func contemAlgum(s string, alvos ...string) bool {
 		}
 	}
 	return false
+}
+
+// O TINY NÃO PODE MUDAR. Lá o pedido de venda É a reserva desde sempre, e o
+// LiveCart cria o pedido no primeiro comentário. Aplicar o padrão genérico
+// (local) a ele faria o pedido deixar de nascer na live — a regressão mais cara
+// possível, no caminho que fatura hoje.
+func TestTinyEhNativoPorPadraoEOTinyNaoPodeMudar(t *testing.T) {
+	if got := ModoDeReservaPadraoDoProvider("tiny"); got != ReservaNativaDoERP {
+		t.Fatalf("padrão do Tiny = %q, queria %q — com outro valor o pedido deixa "+
+			"de nascer no comentário e a live do Tiny para de reservar", got, ReservaNativaDoERP)
+	}
+	// E sem metadata nenhum, que é o estado de TODA integração Tiny em produção.
+	if got := ModoDeReservaDaIntegracao("tiny", nil); got != ReservaNativaDoERP {
+		t.Errorf("Tiny sem metadata = %q, queria %q", got, ReservaNativaDoERP)
+	}
+	if got := ModoDeReservaDaIntegracao("tiny", map[string]any{}); got != ReservaNativaDoERP {
+		t.Errorf("Tiny com metadata vazio = %q, queria %q", got, ReservaNativaDoERP)
+	}
+}
+
+// O Bling cai no padrão seguro: a reserva dele depende de uma configuração da
+// conta que só a sonda confirma.
+func TestBlingEhLocalPorPadrao(t *testing.T) {
+	if got := ModoDeReservaPadraoDoProvider("bling"); got != ReservaSomenteLocal {
+		t.Errorf("padrão do Bling = %q, queria %q", got, ReservaSomenteLocal)
+	}
+	if got := ModoDeReservaDaIntegracao("bling", nil); got != ReservaSomenteLocal {
+		t.Errorf("Bling sem metadata = %q, queria %q", got, ReservaSomenteLocal)
+	}
+}
+
+// A escolha explícita do lojista vence o padrão do provider — nos dois sentidos.
+func TestAEscolhaDoLojistaVenceOPadraoDoProvider(t *testing.T) {
+	nativo := map[string]any{ChaveModoDeReserva: string(ReservaNativaDoERP)}
+	local := map[string]any{ChaveModoDeReserva: string(ReservaSomenteLocal)}
+
+	if got := ModoDeReservaDaIntegracao("bling", nativo); got != ReservaNativaDoERP {
+		t.Errorf("Bling com escolha nativa = %q", got)
+	}
+	// Um lojista Tiny que escolha local tem de ser obedecido: é escolha dele.
+	if got := ModoDeReservaDaIntegracao("tiny", local); got != ReservaSomenteLocal {
+		t.Errorf("Tiny com escolha local = %q, queria %q — a escolha explícita vence", got, ReservaSomenteLocal)
+	}
+}
+
+// Metadata malformado NÃO pode virar uma escolha: cai no padrão do provider.
+func TestMetadataMalformadoCaiNoPadraoDoProvider(t *testing.T) {
+	lixo := []map[string]any{
+		{ChaveModoDeReserva: "turbo"},
+		{ChaveModoDeReserva: 42},
+		{ChaveModoDeReserva: ""},
+		{ChaveModoDeReserva: nil},
+	}
+	for _, m := range lixo {
+		if got := ModoDeReservaDaIntegracao("tiny", m); got != ReservaNativaDoERP {
+			t.Errorf("Tiny com metadata %v = %q, queria o padrão %q", m, got, ReservaNativaDoERP)
+		}
+		if got := ModoDeReservaDaIntegracao("bling", m); got != ReservaSomenteLocal {
+			t.Errorf("Bling com metadata %v = %q, queria o padrão %q", m, got, ReservaSomenteLocal)
+		}
+	}
 }

@@ -62,7 +62,14 @@ type Bling struct {
 	// guardado no metadata da integração; sem entrada, a escrita RECUSA.
 	mapaSituacoes map[int]int64
 
-	// mu protege os caches resolvidos sob demanda (forma de pagamento).
+	// padraoConfirmado/padraoContradito guardam o veredito sobre a tabela de
+	// situações semeada pelo Bling, decidido por leituras da própria conta.
+	// Contradito vence confirmado e nunca volta atrás.
+	padraoConfirmado bool
+	padraoContradito bool
+
+	// mu protege os caches resolvidos sob demanda (forma de pagamento) e o
+	// veredito da tabela de situações.
 	mu                  sync.Mutex
 	formaPagamentoCache int64
 	// formaPagamentoEmVoo colapsa as leituras concorrentes numa só.
