@@ -89,6 +89,8 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	// the merchant sees what to register before the first sale.
 	g.Get("/:id/erp/health-check", h.RunERPHealthCheck)
 	g.Get("/:id/erp/reserva", h.CheckERPReserva)
+	g.Get("/:id/erp/modo-reserva", h.GetModoDeReserva)
+	g.Put("/:id/erp/modo-reserva", h.SetModoDeReserva)
 
 	// Instagram operations
 	g.Get("/instagram/lives", h.GetInstagramLives)
@@ -1427,6 +1429,53 @@ func (h *Handler) ListJoinCandidates(c *fiber.Ctx) error {
 // @Security     BearerAuth
 func (h *Handler) GetCartJoinLink(c *fiber.Ctx) error {
 	out, err := h.service.GetCartJoinLink(c.Context(), c.Params("cartId"))
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, out)
+}
+
+// GetModoDeReserva devolve o modo de reserva escolhido e o que se sabe sobre a
+// capacidade da conta.
+//
+// @Summary Modo de reserva de estoque
+// @Tags integrations
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param id path string true "Integration ID"
+// @Success 200 {object} httpx.Envelope{data=ModoDeReservaResponse}
+// @Router /api/v1/stores/{storeId}/integrations/{id}/erp/modo-reserva [get]
+// @Security BearerAuth
+func (h *Handler) GetModoDeReserva(c *fiber.Ctx) error {
+	out, err := h.service.LerModoDeReserva(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return httpx.HandleServiceError(c, err)
+	}
+	return httpx.OK(c, out)
+}
+
+// SetModoDeReserva grava o modo escolhido pelo lojista.
+//
+// @Summary Escolher o modo de reserva de estoque
+// @Tags integrations
+// @Accept json
+// @Produce json
+// @Param storeId path string true "Store ID"
+// @Param id path string true "Integration ID"
+// @Param request body SetModoDeReservaRequest true "Modo"
+// @Success 200 {object} httpx.Envelope{data=ModoDeReservaResponse}
+// @Router /api/v1/stores/{storeId}/integrations/{id}/erp/modo-reserva [put]
+// @Security BearerAuth
+func (h *Handler) SetModoDeReserva(c *fiber.Ctx) error {
+	var req SetModoDeReservaRequest
+	if err := httpx.BindAndValidate(c, &req); err != nil {
+		return err
+	}
+	input, err := req.ToInput(c.Params("id"))
+	if err != nil {
+		return err
+	}
+	out, err := h.service.DefinirModoDeReserva(c.UserContext(), input)
 	if err != nil {
 		return httpx.HandleServiceError(c, err)
 	}

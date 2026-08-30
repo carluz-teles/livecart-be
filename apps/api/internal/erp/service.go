@@ -33,6 +33,15 @@ type ERPRepository interface {
 	// so this package stays free of the integration import.
 	GetActiveByProvider(ctx context.Context, storeID, integrationType, provider string) (*Integration, error)
 
+	// GetActiveERP resolve o ERP ATIVO da loja sem perguntar por provider — a
+	// pergunta certa, agora que existe mais de um ERP possível. O banco garante
+	// no máximo um por loja (uniq_integrations_store_one_erp, migration 000061),
+	// então não há ambiguidade a resolver aqui.
+	//
+	// Devolve o MESMO httpx.ErrNotFound de GetActiveByProvider quando a loja não
+	// tem ERP, para que os call sites que já tratam "sem ERP" não mudem.
+	GetActiveERP(ctx context.Context, storeID string) (*Integration, error)
+
 	// GetByProvider resolves ANY integration for a store (active or not) so the
 	// legacy finalisation can disambiguate "merchant never set up Tiny" (info)
 	// from "Tiny exists but is in error state" (warn). Returns the neutral

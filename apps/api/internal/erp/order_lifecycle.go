@@ -72,7 +72,7 @@ func (s *Service) PrepareCartForPayment(ctx context.Context, cartID, storeID str
 // qualquer forma.
 func (s *Service) PrewarmERPContact(ctx context.Context, storeID, platformUserID, platformHandle, name, document, email, phone string) {
 	ctx = logger.WithStore(ctx, storeID, "")
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return
 	}
@@ -125,7 +125,7 @@ func (s *Service) EnsureERPOrderForCart(ctx context.Context, cartID, storeID str
 		return s.retomarCriacaoPresa(ctx, cartID, storeID)
 	}
 
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return nil // loja sem ERP ligado
 	}
@@ -265,7 +265,7 @@ func (s *Service) retomarCriacaoPresa(ctx context.Context, cartID, storeID strin
 		return s.openCartOrder(ctx, storeID, cartID, adopted)
 	}
 
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return nil
 	}
@@ -465,7 +465,7 @@ func pedidoJaFaturado(situacao string) (bool, string) {
 // a apenas reservar, que é onde ele deveria estar. Não relançamos depois: quem
 // lança é o faturamento.
 func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, orderID string, jaAplicada []providers.ERPOrderItem) ([]providers.ERPOrderItem, error) {
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return nil, fmt.Errorf("loading ERP integration: %w", err)
 	}
@@ -732,7 +732,7 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 		return fmt.Errorf("loading cart ERP order state: %w", err)
 	}
 
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return fmt.Errorf("loading ERP integration: %w", err)
 	}
@@ -1141,7 +1141,7 @@ func (s *Service) adoptOrderByMarker(ctx context.Context, cartID, storeID string
 
 // providerFor resolve o cliente do ERP ativo da loja.
 func (s *Service) providerFor(ctx context.Context, storeID string) (providers.ERPProvider, error) {
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return nil, fmt.Errorf("loading ERP integration: %w", err)
 	}

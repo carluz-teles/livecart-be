@@ -24,6 +24,14 @@ type Factory struct {
 	melhorEnvioUserAgent    string
 	melhorEnvioRedirectURI  string
 
+	// Credenciais do APLICATIVO Bling. Diferente do Tiny, onde cada lojista cria
+	// o próprio aplicativo e cola client_id/secret: no Bling o LiveCart tem UM
+	// aplicativo, e o mesmo client_secret assina o HMAC dos webhooks de TODAS as
+	// lojas. Rotacioná-lo invalida o Basic do token endpoint E a assinatura de
+	// todos os webhooks ao mesmo tempo.
+	blingClientID     string
+	blingClientSecret string
+
 	// Rate limit manager
 	rateLimitManager *ratelimit.Manager
 
@@ -41,6 +49,7 @@ type Factory struct {
 	mercadoPagoConstructor MercadoPagoConstructor
 	pagarmeConstructor     PagarmeConstructor
 	tinyConstructor        TinyConstructor
+	blingConstructor       BlingConstructor
 	instagramConstructor   InstagramConstructor
 	melhorEnvioConstructor MelhorEnvioConstructor
 	smartEnviosConstructor SmartEnviosConstructor
@@ -53,6 +62,8 @@ type FactoryConfig struct {
 	LogFunc              LogFunc
 	MercadoPagoAppID     string
 	MercadoPagoAppSecret string
+	BlingClientID        string
+	BlingClientSecret    string
 	RateLimitManager     *ratelimit.Manager
 
 	// Melhor Envio OAuth app (each env has its own app/credentials)
@@ -74,6 +85,7 @@ type FactoryConfig struct {
 	MercadoPagoConstructor MercadoPagoConstructor
 	PagarmeConstructor     PagarmeConstructor
 	TinyConstructor        TinyConstructor
+	BlingConstructor       BlingConstructor
 	InstagramConstructor   InstagramConstructor
 	MelhorEnvioConstructor MelhorEnvioConstructor
 	SmartEnviosConstructor SmartEnviosConstructor
@@ -87,6 +99,8 @@ func NewFactory(cfg FactoryConfig) *Factory {
 		logFunc:                 cfg.LogFunc,
 		mercadoPagoAppID:        cfg.MercadoPagoAppID,
 		mercadoPagoAppSecret:    cfg.MercadoPagoAppSecret,
+		blingClientID:           cfg.BlingClientID,
+		blingClientSecret:       cfg.BlingClientSecret,
 		melhorEnvioClientID:     cfg.MelhorEnvioClientID,
 		melhorEnvioClientSecret: cfg.MelhorEnvioClientSecret,
 		melhorEnvioEnv:          cfg.MelhorEnvioEnv,
@@ -100,6 +114,7 @@ func NewFactory(cfg FactoryConfig) *Factory {
 		mercadoPagoConstructor:  cfg.MercadoPagoConstructor,
 		pagarmeConstructor:      cfg.PagarmeConstructor,
 		tinyConstructor:         cfg.TinyConstructor,
+		blingConstructor:        cfg.BlingConstructor,
 		instagramConstructor:    cfg.InstagramConstructor,
 		melhorEnvioConstructor:  cfg.MelhorEnvioConstructor,
 		smartEnviosConstructor:  cfg.SmartEnviosConstructor,
@@ -363,10 +378,31 @@ func (f *Factory) createPaymentProvider(cfg ProviderConfig) (PaymentProvider, er
 	}
 }
 
+// BlingRPSPadrao é o freio local para o Bling.
+//
+// O teto real é 3 req/s POR CONTA somando TODOS os apps do lojista — se ele tem
+// e-commerce ou marketplace no mesmo Bling, eles comem da mesma cota e são
+// invisíveis para nós, sem header nenhum para reconciliar. 2 e não 3 porque
+// errar para menos custa latência e errar para mais custa a venda.
+var BlingRPSPadrao = 2.0
+
 func (f *Factory) createERPProvider(cfg ProviderConfig) (ERPProvider, error) {
 	var limiter ratelimit.RateLimiter
 	if f.rateLimitManager != nil {
-		limiter = f.rateLimitManager.GetOrCreate(cfg.IntegrationID)
+		if cfg.Name == ProviderBling {
+			// Duas decisões, ambas medidas:
+			//
+			// 1. Limitador PREDITIVO. A API do Bling não devolve header de cota
+			//    (medido: 23 headers numa resposta 200, nenhum deles de cota), e
+			//    o AdaptiveLimiter sem header devolve "pode passar" para sempre.
+			// 2. Chave pela CONTA, não pela integração — o teto é por conta.
+			//    Sem conta conhecida ainda (primeira conexão), cai no id da
+			//    integração: um balde a mais é melhor do que balde nenhum.
+			chave := chaveDeCotaBling(cfg)
+			limiter = f.rateLimitManager.GetOrCreateFixo(chave, BlingRPSPadrao)
+		} else {
+			limiter = f.rateLimitManager.GetOrCreate(cfg.IntegrationID)
+		}
 	}
 
 	switch cfg.Name {
@@ -394,6 +430,37 @@ func (f *Factory) createERPProvider(cfg ProviderConfig) (ERPProvider, error) {
 			LogFunc:       f.logFunc,
 			RateLimiter:   limiter,
 		})
+	case ProviderBling:
+		if f.blingConstructor == nil {
+			return nil, fmt.Errorf("bling constructor not configured")
+		}
+		// As credenciais do aplicativo vêm do ambiente (app único do LiveCart),
+		// com escape para o lojista que preferir o PRÓPRIO aplicativo privado —
+		// mesmo padrão de fonte dupla que o Tiny já usa em Credentials.Extra.
+		clientID, clientSecret := f.blingClientID, f.blingClientSecret
+		if cfg.Credentials != nil && cfg.Credentials.Extra != nil {
+			if v, ok := cfg.Credentials.Extra["client_id"].(string); ok && v != "" {
+				clientID = v
+			}
+			if v, ok := cfg.Credentials.Extra["client_secret"].(string); ok && v != "" {
+				clientSecret = v
+			}
+		}
+		var contaID string
+		if cfg.Metadata != nil {
+			contaID, _ = cfg.Metadata[MetadataBlingCompanyID].(string)
+		}
+		return f.blingConstructor(BlingConfig{
+			IntegrationID: cfg.IntegrationID,
+			StoreID:       cfg.StoreID,
+			Credentials:   cfg.Credentials,
+			ClientID:      clientID,
+			ClientSecret:  clientSecret,
+			ContaID:       contaID,
+			Logger:        f.logger,
+			LogFunc:       f.logFunc,
+			RateLimiter:   limiter,
+		})
 	default:
 		return nil, fmt.Errorf("unknown ERP provider: %s", cfg.Name)
 	}
@@ -409,8 +476,42 @@ type MercadoPagoConstructor func(cfg MercadoPagoConfig) (PaymentProvider, error)
 // PagarmeConstructor is a function type for creating Pagar.me providers.
 type PagarmeConstructor func(cfg PagarmeConfig) (PaymentProvider, error)
 
+// chaveDeCotaBling devolve a chave do balde: a conta do ERP quando conhecida.
+func chaveDeCotaBling(cfg ProviderConfig) string {
+	if cfg.Metadata != nil {
+		if id, _ := cfg.Metadata[MetadataBlingCompanyID].(string); id != "" {
+			return "bling:conta:" + id
+		}
+	}
+	return "bling:integracao:" + cfg.IntegrationID
+}
+
 // TinyConstructor is a function type for creating Tiny providers.
 type TinyConstructor func(cfg TinyConfig) (ERPProvider, error)
+
+// BlingConstructor cria o provider do Bling (injetado do pacote erp, como os outros).
+type BlingConstructor func(cfg BlingConfig) (ERPProvider, error)
+
+// BlingConfig é a configuração do provider do Bling.
+type BlingConfig struct {
+	IntegrationID string
+	StoreID       string
+	Credentials   *Credentials
+	ClientID      string
+	ClientSecret  string
+	// ContaID é o `data.id` de GET /empresas/me/dados-basicos — a identidade da
+	// CONTA, que é a chave de cota correta (o teto do Bling é POR CONTA, não por
+	// integração) e o mesmo valor que o webhook manda como `companyId`.
+	ContaID     string
+	Logger      *zap.Logger
+	LogFunc     LogFunc
+	RateLimiter ratelimit.RateLimiter
+}
+
+// MetadataBlingCompanyID é a chave do metadata onde a identidade da conta Bling
+// é guardada em espelho da coluna integrations.erp_account_id, para o factory
+// não precisar de uma consulta a mais na construção do provider.
+const MetadataBlingCompanyID = "bling_company_id"
 
 // MercadoPagoConfig contains configuration for Mercado Pago provider.
 type MercadoPagoConfig struct {

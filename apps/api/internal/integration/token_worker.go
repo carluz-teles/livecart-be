@@ -67,6 +67,39 @@ func (w *TokenRefreshWorker) Stop() {
 	w.logger.Info("token refresh worker stopped")
 }
 
+// tetoDeTokensPorMinuto é quantas chamadas ao endpoint de TOKEN cada provedor
+// tolera por minuto, do nosso IP.
+//
+// Só entra provider cujo teto foi LIDO na documentação — um palpite aqui vira
+// bloqueio de IP em produção. Ausente = sem teto conhecido, e o worker não
+// espaça por causa dele.
+var tetoDeTokensPorMinuto = map[string]int{
+	// Doc do Bling: "20 requisições a /oauth/token em 60 segundos → bloqueio de
+	// 60 minutos". Usamos 10, metade do teto, porque o MESMO endpoint atende o
+	// authorization_code: gastar a cota toda em renovação impediria um lojista
+	// de conectar.
+	"bling": 10,
+}
+
+// espacamentoEntreRenovacoes devolve quanto esperar entre uma renovação e a
+// seguinte para não estourar o teto de nenhum provedor da leva.
+func espacamentoEntreRenovacoes(integracoes []IntegrationRow) time.Duration {
+	pior := 0
+	for _, i := range integracoes {
+		teto, tem := tetoDeTokensPorMinuto[i.Provider]
+		if !tem {
+			continue
+		}
+		if pior == 0 || teto < pior {
+			pior = teto
+		}
+	}
+	if pior <= 0 {
+		return 0
+	}
+	return time.Minute / time.Duration(pior)
+}
+
 func (w *TokenRefreshWorker) run() {
 	defer w.wg.Done()
 
@@ -108,9 +141,41 @@ func (w *TokenRefreshWorker) refreshExpiringTokens() {
 		zap.Time("expires_before", expiresBefore),
 	)
 
-	// Refresh each token
+	// Refresh each token, ESPAÇADO.
+	//
+	// O laço nu — que era o que existia aqui — dispara as 100 renovações o mais
+	// rápido que a rede permite. Isso passou despercebido enquanto só havia
+	// Tiny, Mercado Pago e Instagram, que não punem rajada no endpoint de token.
+	//
+	// O Bling pune: 20 chamadas a /oauth/token em 60 SEGUNDOS bloqueiam o IP por
+	// 60 MINUTOS. O IP é o NAT compartilhado do Railway, então o castigo é
+	// coletivo — durante ele nenhuma loja renova e nenhuma loja nova conecta.
+	// Com 21 lojas Bling vencendo na mesma janela, uma passada do worker
+	// derrubaria a frota por uma hora.
+	//
+	// O intervalo é calculado do teto mais apertado entre os providers desta
+	// leva, e não de um número fixo: assim acrescentar um provider novo com
+	// limite pior é uma linha em tetoDeTokensPorMinuto, não uma descoberta em
+	// produção.
+	espacamento := espacamentoEntreRenovacoes(integrations)
+	if espacamento > 0 {
+		logger.From(ctx, w.logger).Info("espaçando as renovações para não estourar o teto do provedor",
+			zap.Duration("intervalo", espacamento),
+			zap.Int("integracoes", len(integrations)),
+		)
+	}
+
 	var refreshed, failed int
-	for _, integration := range integrations {
+	for i, integration := range integrations {
+		if i > 0 && espacamento > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-w.stopCh:
+				return
+			case <-time.After(espacamento):
+			}
+		}
 		itemCtx := logger.WithStore(ctx, integration.StoreID, "")
 		if err := w.refreshToken(itemCtx, &integration); err != nil {
 			logger.From(itemCtx, w.logger).Warn("failed to refresh token",

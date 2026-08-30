@@ -165,8 +165,40 @@ func (r *Repository) GetCartERPOpAge(ctx context.Context, cartID string) (time.D
 
 // SumPromisedWithoutERPOrder devolve as unidades que a live já prometeu e que o
 // ERP ainda não conhece — carrinho vivo, sem pedido criado.
+//
+// ⚠ Só o Tiny: a query tem 'tiny' literal e não filtra por loja. Substituída por
+// SumPromisedNotYetReflected; fica enquanto os call sites migram.
 func (r *Repository) SumPromisedWithoutERPOrder(ctx context.Context, externalProductID string) (int, error) {
 	n, err := r.queries.SumPromisedWithoutERPOrder(ctx, pgtype.Text{String: externalProductID, Valid: true})
+	return int(n), err
+}
+
+// JanelaDeAtrasoDoERP é quanto tempo, depois de o pedido existir, o saldo lido
+// do ERP ainda pode não descontá-lo.
+//
+// MEDIDO contra o Bling em 29/08/2026: o `virtual_stock.updated` chegou 9 s
+// depois do `order.created` numa reserva e 22 s depois numa liberação. 45 s é o
+// dobro do pior caso observado — margem deliberada, porque errar para mais aqui
+// custa oferecer menos por alguns segundos, e errar para menos custa vender a
+// mesma peça duas vezes.
+const JanelaDeAtrasoDoERP = 45 * time.Second
+
+// SumPromisedNotYetReflected devolve as unidades prometidas que o SALDO LIDO do
+// ERP ainda não desconta — por não haver pedido, ou por o pedido ser recente
+// demais para o ERP já ter refletido.
+func (r *Repository) SumPromisedNotYetReflected(
+	ctx context.Context, storeID, externalSource, externalProductID string,
+) (int, error) {
+	loja, err := parseUUID(storeID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := r.queries.SumPromisedNotYetReflected(ctx, sqlc.SumPromisedNotYetReflectedParams{
+		ExternalProductID: pgtype.Text{String: externalProductID, Valid: true},
+		ExternalSource:    externalSource,
+		StoreID:           loja,
+		JanelaSegundos:    JanelaDeAtrasoDoERP.Seconds(),
+	})
 	return int(n), err
 }
 

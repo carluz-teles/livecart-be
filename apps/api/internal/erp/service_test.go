@@ -21,6 +21,9 @@ func (stubERPRepo) GetActiveByProvider(context.Context, string, string, string) 
 func (stubERPRepo) GetByProvider(context.Context, string, string, string) (*Integration, error) {
 	return nil, nil
 }
+func (stubERPRepo) GetActiveERP(context.Context, string) (*Integration, error) {
+	return nil, nil
+}
 func (stubERPRepo) GetCartERPFinalisationStatus(context.Context, string) (*CartFinalisationStatus, error) {
 	return nil, nil
 }

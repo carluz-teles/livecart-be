@@ -53,6 +53,7 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App, slugResolver httpx.Store
 	oauth.Get("/tiny/callback", h.HandleTinyOAuthCallback)
 	oauth.Get("/instagram/callback", h.HandleInstagramOAuthCallback)
 	oauth.Get("/melhor_envio/callback", h.HandleMelhorEnvioOAuthCallback)
+	oauth.Get("/bling/callback", h.HandleBlingOAuthCallback)
 
 	// Webhooks (event notifications from external providers)
 	// Uses storeId instead of integrationId for stable URLs across reconnections
@@ -64,6 +65,12 @@ func (h *WebhookHandler) RegisterRoutes(app *fiber.App, slugResolver httpx.Store
 	webhooks.Post("/tiny/:storeId", storeCtx, h.HandleTiny)
 	webhooks.Post("/melhor_envio/:storeId", storeCtx, h.HandleMelhorEnvio)
 	webhooks.Post("/twilio/:storeId", storeCtx, h.HandleTwilio)
+
+	// O Bling é a ÚNICA rota sem :storeId, e não é esquecimento: o Bling não
+	// tem API para registrar webhook — a URL é cadastrada na UI do APLICATIVO,
+	// que é um só para todas as lojas. Quem identifica a origem é o `companyId`
+	// do envelope, casado com integrations.erp_account_id.
+	webhooks.Post("/bling", h.HandleBling)
 
 	// TODO MÉTODO que não seja POST responde 200 com JSON, nas MESMAS URLs.
 	//
@@ -1068,4 +1075,53 @@ func (h *WebhookHandler) HandleTwilio(c *fiber.Ctx) error {
 	}
 
 	return httpx.OK(c, fiber.Map{"status": "received"})
+}
+
+// HandleBlingOAuthCallback recebe o redirect da autorização do Bling.
+//
+// É o alvo do "URL de redirecionamento" cadastrado no aplicativo — e o Bling
+// IGNORA o redirect_uri que a gente manda na requisição, usando sempre o do
+// cadastro. Divergir entre os dois não dá erro: dá um callback que nunca chega.
+//
+// ⚠ Sem retry em cima do erro. O `code` do Bling vale UM MINUTO e a doc avisa
+// que reusar um code ainda válido faz o usuário ter "o seu acesso revogado por
+// medidas de segurança". Falhou, o lojista clica em conectar de novo — o que
+// gera um code novo.
+//
+// @Summary Bling OAuth callback
+// @Router /api/v1/integrations/oauth/bling/callback [get]
+func (h *WebhookHandler) HandleBlingOAuthCallback(c *fiber.Ctx) error {
+	code := c.Query("code")
+	state := c.Query("state")
+	frontendURL := config.FrontendURL.StringOr("http://localhost:3000")
+
+	if erro := c.Query("error"); erro != "" {
+		logger.From(c.Context(), h.logger).Warn("bling: o lojista recusou a autorização",
+			zap.String("error", erro),
+			zap.String("error_description", c.Query("error_description")))
+		return c.Redirect(frontendURL+"/settings/integrations?error=access_denied", fiber.StatusFound)
+	}
+	if code == "" {
+		return c.Redirect(frontendURL+"/settings/integrations?error=missing_code", fiber.StatusFound)
+	}
+	if state == "" {
+		return c.Redirect(frontendURL+"/settings/integrations?error=missing_state", fiber.StatusFound)
+	}
+
+	out, err := h.service.HandleOAuthCallback(c.Context(), OAuthCallbackInput{
+		Provider: "bling",
+		Code:     code,
+		State:    state,
+	})
+	if err != nil {
+		logger.From(c.Context(), h.logger).Error("bling: callback de OAuth falhou",
+			zap.String("state", state), zap.Error(err))
+		return c.Redirect(frontendURL+"/settings/integrations?error=bling_connection_failed", fiber.StatusFound)
+	}
+
+	logger.From(c.Context(), h.logger).Info("bling conectado pelo callback",
+		zap.String("store_id", out.StoreID),
+		zap.String("integration_id", out.IntegrationID))
+
+	return c.Redirect(frontendURL+"/settings/integrations?connected=bling", fiber.StatusFound)
 }

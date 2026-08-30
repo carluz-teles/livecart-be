@@ -480,9 +480,16 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 			// Create provider factory with constructors
 			providerFactory := providers.NewFactory(providers.FactoryConfig{
-				Logger:                  log,
-				MercadoPagoAppID:        config.MercadoPagoAppID.String(),
-				MercadoPagoAppSecret:    config.MercadoPagoAppSecret.String(),
+				Logger:               log,
+				MercadoPagoAppID:     config.MercadoPagoAppID.String(),
+				MercadoPagoAppSecret: config.MercadoPagoAppSecret.String(),
+				// Credenciais do APLICATIVO Bling (app único do LiveCart). Sem
+				// elas o factory recusa construir o provider, e o worker de token
+				// falha toda renovação com "client_id e client_secret são
+				// obrigatórios" — que foi exatamente como este esquecimento
+				// apareceu, no primeiro ciclo do worker com uma loja Bling.
+				BlingClientID:           config.BlingClientID.String(),
+				BlingClientSecret:       config.BlingClientSecret.String(),
 				MelhorEnvioClientID:     config.MelhorEnvioClientID.String(),
 				MelhorEnvioClientSecret: config.MelhorEnvioClientSecret.String(),
 				MelhorEnvioEnv:          config.MelhorEnvioEnv.StringOr("sandbox"),
@@ -528,6 +535,19 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						Credentials:   cfg.Credentials,
 						ClientID:      cfg.ClientID,
 						ClientSecret:  cfg.ClientSecret,
+						Logger:        cfg.Logger,
+						LogFunc:       cfg.LogFunc,
+						RateLimiter:   cfg.RateLimiter,
+					})
+				},
+				BlingConstructor: func(cfg providers.BlingConfig) (providers.ERPProvider, error) {
+					return erp.NewBling(erp.BlingConfig{
+						IntegrationID: cfg.IntegrationID,
+						StoreID:       cfg.StoreID,
+						Credentials:   cfg.Credentials,
+						ClientID:      cfg.ClientID,
+						ClientSecret:  cfg.ClientSecret,
+						ContaID:       cfg.ContaID,
 						Logger:        cfg.Logger,
 						LogFunc:       cfg.LogFunc,
 						RateLimiter:   cfg.RateLimiter,
@@ -565,10 +585,17 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 			// Set log function for providers
 			providerFactory = providers.NewFactory(providers.FactoryConfig{
-				Logger:                  log,
-				LogFunc:                 integrationSvc.LogIntegrationOperation,
-				MercadoPagoAppID:        config.MercadoPagoAppID.String(),
-				MercadoPagoAppSecret:    config.MercadoPagoAppSecret.String(),
+				Logger:               log,
+				LogFunc:              integrationSvc.LogIntegrationOperation,
+				MercadoPagoAppID:     config.MercadoPagoAppID.String(),
+				MercadoPagoAppSecret: config.MercadoPagoAppSecret.String(),
+				// Credenciais do APLICATIVO Bling (app único do LiveCart). Sem
+				// elas o factory recusa construir o provider, e o worker de token
+				// falha toda renovação com "client_id e client_secret são
+				// obrigatórios" — que foi exatamente como este esquecimento
+				// apareceu, no primeiro ciclo do worker com uma loja Bling.
+				BlingClientID:           config.BlingClientID.String(),
+				BlingClientSecret:       config.BlingClientSecret.String(),
 				MelhorEnvioClientID:     config.MelhorEnvioClientID.String(),
 				MelhorEnvioClientSecret: config.MelhorEnvioClientSecret.String(),
 				MelhorEnvioEnv:          config.MelhorEnvioEnv.StringOr("sandbox"),
@@ -614,6 +641,19 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						Credentials:   cfg.Credentials,
 						ClientID:      cfg.ClientID,
 						ClientSecret:  cfg.ClientSecret,
+						Logger:        cfg.Logger,
+						LogFunc:       cfg.LogFunc,
+						RateLimiter:   cfg.RateLimiter,
+					})
+				},
+				BlingConstructor: func(cfg providers.BlingConfig) (providers.ERPProvider, error) {
+					return erp.NewBling(erp.BlingConfig{
+						IntegrationID: cfg.IntegrationID,
+						StoreID:       cfg.StoreID,
+						Credentials:   cfg.Credentials,
+						ClientID:      cfg.ClientID,
+						ClientSecret:  cfg.ClientSecret,
+						ContaID:       cfg.ContaID,
 						Logger:        cfg.Logger,
 						LogFunc:       cfg.LogFunc,
 						RateLimiter:   cfg.RateLimiter,

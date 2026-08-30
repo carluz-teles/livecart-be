@@ -120,15 +120,15 @@ type Cart struct {
 	PixAmountCents         pgtype.Int8        `json:"pix_amount_cents"`
 	NeverExpires           bool               `json:"never_expires"`
 	StoreID                pgtype.UUID        `json:"store_id"`
-	ErpOrderStatus         pgtype.Text        `json:"erp_order_status"`
-	ErpOrderStatusAt       pgtype.Timestamptz `json:"erp_order_status_at"`
-	ErpOrderNumber         pgtype.Text        `json:"erp_order_number"`
 	PaidAmountCents        int64              `json:"paid_amount_cents"`
 	// Por que o cancelamento foi desfeito: payment_won (pagamento venceu a corrida) ou erp_reopened (lojista reabriu o pedido no ERP à mão)
 	CancellationRevertedReason pgtype.Text `json:"cancellation_reverted_reason"`
 	// Carrinho ANFITRIÃO desta junção — é dele o pedido no ERP. NULO = carrinho independente ou anfitrião.
-	JoinedToCartID pgtype.UUID        `json:"joined_to_cart_id"`
-	JoinedAt       pgtype.Timestamptz `json:"joined_at"`
+	JoinedToCartID   pgtype.UUID        `json:"joined_to_cart_id"`
+	JoinedAt         pgtype.Timestamptz `json:"joined_at"`
+	ErpOrderStatus   pgtype.Text        `json:"erp_order_status"`
+	ErpOrderStatusAt pgtype.Timestamptz `json:"erp_order_status_at"`
+	ErpOrderNumber   pgtype.Text        `json:"erp_order_number"`
 }
 
 // Immutable per-cart baseline of items present when the buyer first opened checkout.
@@ -372,6 +372,8 @@ type Integration struct {
 	Credentials    []byte             `json:"credentials"`
 	Metadata       json.RawMessage    `json:"metadata"`
 	Priority       int32              `json:"priority"`
+	// Identificador da CONTA no ERP (Bling: data.id de /empresas/me/dados-basicos, que é o mesmo companyId do webhook). Chave de rate limit e de roteamento de webhook por URL única. NULL para Tiny, que não tem esse conceito.
+	ErpAccountID pgtype.Text `json:"erp_account_id"`
 }
 
 type IntegrationLog struct {

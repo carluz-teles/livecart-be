@@ -26,6 +26,37 @@ SELECT * FROM integrations
 WHERE store_id = $1 AND type = $2 AND provider = $3 AND status = 'active'
 LIMIT 1;
 
+-- GetActiveERPIntegration resolve o ERP ATIVO da loja pela LINHA, sem o literal
+-- do provider. É seguro devolver :one porque o índice parcial
+-- uniq_integrations_store_one_erp (migration 000061) garante no máximo uma
+-- integração de ERP por loja — a regra de negócio "ou Tiny ou Bling, nunca os
+-- dois" é do banco, não da convenção de quem escreve a query.
+--
+-- Existe para substituir os call sites que perguntavam por provider='tiny'
+-- literal: com Bling conectado, aqueles devolviam not-found e QUATRO deles
+-- tratavam isso como "loja sem ERP", devolvendo nil em silêncio — a live rodava
+-- inteira sem criar um pedido e sem uma linha de log.
+-- name: GetActiveERPIntegration :one
+SELECT * FROM integrations
+WHERE store_id = $1 AND type = 'erp' AND status = 'active'
+LIMIT 1;
+
+-- GetActiveERPByAccount resolve a LOJA a partir da conta do ERP. É como o
+-- webhook do Bling, que chega numa URL única para todas as lojas, descobre de
+-- quem é o evento: o `companyId` do envelope casa com integrations.erp_account_id.
+--
+-- Usa o índice parcial idx_integrations_erp_account.
+-- name: GetActiveERPByAccount :one
+SELECT * FROM integrations
+WHERE type = 'erp' AND provider = $1 AND erp_account_id = $2 AND status = 'active'
+LIMIT 1;
+
+-- SetIntegrationERPAccount grava a identidade da conta do ERP no fim do OAuth.
+-- name: SetIntegrationERPAccount :exec
+UPDATE integrations
+SET erp_account_id = $2
+WHERE id = $1;
+
 -- name: GetIntegrationByProvider :one
 SELECT * FROM integrations
 WHERE store_id = $1 AND type = $2 AND provider = $3 AND status IN ('active', 'pending_auth')
@@ -80,7 +111,15 @@ SELECT * FROM integrations
 WHERE status = 'active'
   AND token_expires_at IS NOT NULL
   AND token_expires_at <= $1
-  AND provider IN ('tiny', 'mercado_pago', 'instagram')
+  -- ⚠ Acrescentar provider aqui é a mudança de UMA PALAVRA que pode derrubar a
+  -- frota inteira. O Bling bloqueia o IP por 60 MINUTOS depois de 20 chamadas a
+  -- /oauth/token em 60 s, e o IP é o NAT compartilhado do Railway — durante o
+  -- bloqueio ninguém renova E ninguém consegue conectar.
+  --
+  -- Por isso 'bling' só entrou junto com o espaçamento no worker
+  -- (TokenRefreshWorker.refreshExpiringTokens). Nunca acrescente um provider
+  -- aqui sem conferir que o worker respeita o teto de chamadas dele.
+  AND provider IN ('tiny', 'mercado_pago', 'instagram', 'bling')
 ORDER BY token_expires_at ASC
 LIMIT 100;
 
@@ -190,6 +229,18 @@ VALUES ($1, $2, $3, $4);
 -- name: GetOAuthState :one
 SELECT * FROM oauth_states
 WHERE state = $1 AND expires_at > now();
+
+-- ConsumeOAuthState valida e APAGA o state numa operação só.
+--
+-- Diferente do par GetOAuthState + DeleteOAuthState, que são duas queries e
+-- deixam uma janela entre a leitura e o apagamento. Para o Bling isso não é
+-- preciosismo: a doc avisa que reusar um authorization code ainda válido faz o
+-- usuário ter "o seu acesso revogado por medidas de segurança". Um duplo clique
+-- no callback com o par não-atômico passaria os dois pela validação.
+-- name: ConsumeOAuthState :one
+DELETE FROM oauth_states
+WHERE state = $1 AND expires_at > now()
+RETURNING *;
 
 -- name: DeleteOAuthState :exec
 DELETE FROM oauth_states WHERE state = $1;

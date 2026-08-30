@@ -270,6 +270,69 @@ func (r *Repository) GetActiveByProvider(ctx context.Context, storeID, integrati
 	return r.toIntegrationRow(row), nil
 }
 
+// GetActiveERP resolve o ERP ATIVO da loja SEM perguntar por provider.
+//
+// Existe porque a pergunta certa nunca foi "a loja tem Tiny?" e sim "qual ERP a
+// loja tem?". O índice parcial uniq_integrations_store_one_erp (migration
+// 000061) garante no máximo uma integração de ERP por loja, então :one é
+// seguro e a regra de negócio "ou Tiny ou Bling, nunca os dois" é do banco.
+//
+// Devolve httpx.ErrNotFound quando a loja não tem ERP nenhum — o MESMO erro que
+// GetActiveByProvider devolvia, para os call sites não mudarem de comportamento
+// no caso "sem ERP".
+func (r *Repository) GetActiveERP(ctx context.Context, storeID string) (*IntegrationRow, error) {
+	sID, err := parseUUID(storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := r.queries.GetActiveERPIntegration(ctx, sID)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, httpx.ErrNotFound("active integration not found")
+		}
+		return nil, fmt.Errorf("getting active erp integration: %w", err)
+	}
+
+	return r.toIntegrationRow(row), nil
+}
+
+// GetActiveERPByAccount resolve a LOJA a partir da conta do ERP.
+//
+// É como o webhook do Bling — que chega numa URL ÚNICA para todas as lojas,
+// porque a URL é do APLICATIVO e não da loja — descobre de quem é o evento: o
+// `companyId` do envelope casa com integrations.erp_account_id. Medido em
+// 29/08/2026: o companyId é byte-idêntico ao data.id de
+// GET /empresas/me/dados-basicos.
+func (r *Repository) GetActiveERPByAccount(ctx context.Context, provider, accountID string) (*IntegrationRow, error) {
+	if accountID == "" {
+		return nil, httpx.ErrNotFound("active integration not found")
+	}
+	row, err := r.queries.GetActiveERPByAccount(ctx, sqlc.GetActiveERPByAccountParams{
+		Provider:     provider,
+		ErpAccountID: pgtype.Text{String: accountID, Valid: true},
+	})
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, httpx.ErrNotFound("active integration not found")
+		}
+		return nil, fmt.Errorf("getting erp integration by account: %w", err)
+	}
+	return r.toIntegrationRow(row), nil
+}
+
+// SetERPAccountID grava a identidade da conta do ERP no fim do fluxo OAuth.
+func (r *Repository) SetERPAccountID(ctx context.Context, integrationID, accountID string) error {
+	id, err := parseUUID(integrationID)
+	if err != nil {
+		return err
+	}
+	return r.queries.SetIntegrationERPAccount(ctx, sqlc.SetIntegrationERPAccountParams{
+		ID:           id,
+		ErpAccountID: pgtype.Text{String: accountID, Valid: accountID != ""},
+	})
+}
+
 // GetByProvider gets an integration by type and provider (active or pending_auth).
 func (r *Repository) GetByProvider(ctx context.Context, storeID, integrationType, provider string) (*IntegrationRow, error) {
 	sID, err := parseUUID(storeID)
@@ -2892,6 +2955,29 @@ func (r *Repository) GetOAuthState(ctx context.Context, state string) (*OAuthSta
 	row, err := r.queries.GetOAuthState(ctx, state)
 	if err != nil {
 		return nil, fmt.Errorf("getting OAuth state: %w", err)
+	}
+	return &OAuthStateRow{
+		State:        row.State,
+		StoreID:      row.StoreID,
+		Provider:     row.Provider,
+		CodeVerifier: row.CodeVerifier,
+		CreatedAt:    row.CreatedAt.Time,
+		ExpiresAt:    row.ExpiresAt.Time,
+	}, nil
+}
+
+// ConsumeOAuthState valida e APAGA o state numa operação só.
+//
+// Existe para o Bling, onde o par GetOAuthState + DeleteOAuthState não serve:
+// entre as duas queries há uma janela em que dois callbacks simultâneos passam
+// os dois pela validação e tentam trocar o MESMO authorization code. A doc do
+// Bling avisa que reusar um code ainda válido faz o usuário ter "o seu acesso
+// revogado por medidas de segurança" — o custo de perder essa corrida não é um
+// erro na tela, é a loja desconectada.
+func (r *Repository) ConsumeOAuthState(ctx context.Context, state string) (*OAuthStateRow, error) {
+	row, err := r.queries.ConsumeOAuthState(ctx, state)
+	if err != nil {
+		return nil, fmt.Errorf("consuming OAuth state: %w", err)
 	}
 	return &OAuthStateRow{
 		State:        row.State,

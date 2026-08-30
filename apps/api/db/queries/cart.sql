@@ -1380,6 +1380,10 @@ FROM carts WHERE id = $1;
 --
 -- Substitui a soma sobre erp_stock_movements, que media a mesma coisa num mundo
 -- onde a reserva era um lançamento manual de estoque.
+--
+-- ⚠ SUBSTITUÍDA por SumPromisedNotYetReflected. Fica porque o Tiny em produção
+-- ainda a usa enquanto a migração dos call sites não fecha; não acrescentar
+-- chamador novo.
 SELECT COALESCE(SUM(ci.quantity - ci.waitlisted_quantity), 0)::int
 FROM cart_items ci
 JOIN carts c ON c.id = ci.cart_id
@@ -1387,6 +1391,50 @@ JOIN products p ON p.id = ci.product_id
 WHERE p.external_id = sqlc.arg(external_product_id)
   AND p.external_source = 'tiny'
   AND (c.external_order_id IS NULL OR c.external_order_id = '')
+  AND c.status NOT IN ('expired', 'cancelled')
+  AND (c.payment_status IS NULL OR c.payment_status <> 'refunded')
+  AND ci.quantity > ci.waitlisted_quantity;
+
+-- name: SumPromisedNotYetReflected :one
+-- Unidades que a live já prometeu e que o SALDO LIDO do ERP ainda não desconta.
+--
+-- Três diferenças em relação a SumPromisedWithoutERPOrder, e cada uma conserta
+-- um defeito distinto:
+--
+-- 1. `external_source` VIRA PARÂMETRO. A versão anterior tem 'tiny' literal, e
+--    para um produto Bling ela devolve ZERO — o portão recebe o disponível cru
+--    e é reabastecido com estoque que já tem dono. É o −13 de 26/08 letra por
+--    letra, num ERP novo.
+--
+-- 2. `store_id` ENTRA no WHERE. A versão anterior casa só por `external_id`, sem
+--    loja nenhuma: duas lojas com produtos de mesmo id somam as promessas uma da
+--    outra. Hoje é inócuo porque só existe 'tiny' e o id do Tiny é global; com
+--    dois ERPs são dois espaços de numeração independentes com larguras que se
+--    sobrepõem, e o defeito passa a ser real.
+--
+-- 3. A JANELA DE ATRASO. `external_order_id IS NULL` assume que, existindo o
+--    pedido, o ERP já o desconta. MEDIDO contra o Bling em 29/08/2026: o evento
+--    `virtual_stock.updated` chega de 9 a 22 SEGUNDOS depois do `order.created`.
+--    Nessa janela o pedido existe (a soma antiga já não conta a unidade) e o
+--    saldo lido ainda não a desconta — ninguém conta, e o portão sobe com
+--    estoque que já tem dono.
+--
+--    Por isso um pedido RECÉM-CRIADO continua contando: `erp_op_started_at`
+--    dentro da janela significa "o ERP pode ainda não ter acordado".
+SELECT COALESCE(SUM(ci.quantity - ci.waitlisted_quantity), 0)::int
+FROM cart_items ci
+JOIN carts c ON c.id = ci.cart_id
+JOIN products p ON p.id = ci.product_id
+WHERE p.external_id = sqlc.arg(external_product_id)
+  AND p.external_source = sqlc.arg(external_source)
+  AND p.store_id = sqlc.arg(store_id)
+  AND (
+        -- sem pedido no ERP: ele não sabe da promessa
+        c.external_order_id IS NULL OR c.external_order_id = ''
+        -- ou com pedido RECÉM-criado, dentro da janela de atraso medida
+     OR (c.erp_op_started_at IS NOT NULL
+         AND c.erp_op_started_at > now() - make_interval(secs => sqlc.arg(janela_segundos)::float))
+      )
   AND c.status NOT IN ('expired', 'cancelled')
   AND (c.payment_status IS NULL OR c.payment_status <> 'refunded')
   AND ci.quantity > ci.waitlisted_quantity;

@@ -94,7 +94,7 @@ func (s *Service) fetchAndPersistCartInvoice(ctx context.Context, storeID, cartI
 		return nil, nil
 	}
 
-	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	integration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return nil, httpx.DomainError(422, httpx.CodeErpNotActive, "ERP integration not active for store")
 	}

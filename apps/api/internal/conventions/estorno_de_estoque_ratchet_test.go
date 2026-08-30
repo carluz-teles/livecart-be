@@ -46,6 +46,17 @@ var arquivosQuePodemEstornarEstoque = map[string]string{
 
 	// O cliente do ERP: implementa a operação, não a orquestra.
 	"integration/providers/erp/tiny.go": "implementação do provider",
+
+	// O adapter do Bling implementa ReverseOrderStock para RECUSAR: ele devolve
+	// ErrOperationNotSupported e não chama endpoint nenhum.
+	//
+	// É o oposto de um estorno novo. No Bling a reserva é NATIVA — efeito
+	// colateral da SITUAÇÃO do pedido, ligada por configuração da conta
+	// ("Considerar situações de vendas para obter o saldo atual"). O LiveCart
+	// não escreve movimento de estoque lá, então não há estorno para emitir nem
+	// para receber — e some a classe de bug em que um webhook de estorno
+	// reabria a fila de um produto.
+	"integration/providers/erp/bling_pedidos.go": "implementação que RECUSA — o Bling reserva nativamente",
 }
 
 func TestEstornoDeEstoqueSoAconteceNaRecuperacao(t *testing.T) {

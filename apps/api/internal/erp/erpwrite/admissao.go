@@ -64,3 +64,15 @@ func NovoSaldoDoPortao(portaoAtual, saldoERP, emVoo int) int {
 func PodeSubir(portaoAtual, saldoERP, emVoo int) bool {
 	return Admissivel(saldoERP, emVoo) > portaoAtual
 }
+
+// Nota sobre reserva NATIVA do ERP (Bling com "Considerar situações de vendas
+// para obter o saldo atual" ligada).
+//
+// Chegou a existir aqui um AdmissivelPorModo, para não subtrair duas vezes
+// quando o saldo do ERP já desconta os nossos pedidos. Ele foi REMOVIDO: a
+// distinção não é desta função e sim de QUEM CONTA o `emVoo` —
+// SumPromisedNotYetReflected só soma o que o saldo lido ainda não desconta.
+// Duas fórmulas competindo pela mesma decisão é pior do que uma certa.
+//
+// A janela de atraso medida (9 a 22 s entre o pedido existir e o saldo do ERP
+// refleti-lo) também vive lá, em JanelaDeAtrasoDoERP.

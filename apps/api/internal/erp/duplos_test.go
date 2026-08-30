@@ -59,6 +59,13 @@ func (m *mockRepo) GetActiveByProvider(context.Context, string, string, string) 
 	}
 	return &Integration{ID: "int-1"}, nil
 }
+// GetActiveERP compartilha o estado de GetActiveByProvider de propósito: os
+// testes que configuram `integration` ou `getActiveErr` valem para os dois
+// caminhos, e um comportamento divergente entre eles seria armadilha.
+func (m *mockRepo) GetActiveERP(ctx context.Context, storeID string) (*Integration, error) {
+	return m.GetActiveByProvider(ctx, storeID, "erp", "")
+}
+
 func (m *mockRepo) AcquireCartFinalisationLock(context.Context, string) (func(), bool, error) {
 	return func() {}, false, nil
 }

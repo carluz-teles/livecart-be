@@ -11,6 +11,7 @@ import (
 type Manager struct {
 	mu       sync.RWMutex
 	limiters map[string]*AdaptiveLimiter
+	fixos    map[string]*Fixo
 	logger   *zap.Logger
 }
 
@@ -18,6 +19,7 @@ type Manager struct {
 func NewManager(logger *zap.Logger) *Manager {
 	return &Manager{
 		limiters: make(map[string]*AdaptiveLimiter),
+		fixos:    make(map[string]*Fixo),
 		logger:   logger.Named("ratelimit"),
 	}
 }
@@ -46,9 +48,36 @@ func (m *Manager) GetOrCreate(integrationID string) *AdaptiveLimiter {
 	return limiter
 }
 
+// GetOrCreateFixo devolve um limitador PREDITIVO para a chave, criando se
+// preciso. É o caminho dos provedores que não devolvem header de cota.
+//
+// ⚠ A CHAVE não é o integration id. Para o Bling ela é a CONTA do ERP, porque o
+// teto é por conta somando todos os apps do lojista: duas lojas LiveCart na
+// mesma empresa Bling têm de dividir UM balde, e chavear por integração daria
+// dois baldes para uma cota só — o dobro do teto, descoberto por 429 no meio da
+// venda.
+func (m *Manager) GetOrCreateFixo(chave string, rps float64) *Fixo {
+	m.mu.RLock()
+	if f, ok := m.fixos[chave]; ok {
+		m.mu.RUnlock()
+		return f
+	}
+	m.mu.RUnlock()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if f, ok := m.fixos[chave]; ok {
+		return f
+	}
+	f := NovoFixo(rps)
+	m.fixos[chave] = f
+	return f
+}
+
 // Remove cleans up the limiter for a deleted integration.
 func (m *Manager) Remove(integrationID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.limiters, integrationID)
+	delete(m.fixos, integrationID)
 }

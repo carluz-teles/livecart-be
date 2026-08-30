@@ -40,7 +40,7 @@ func (s *Service) ImportProductFromERP(ctx context.Context, storeID, externalPro
 	if s.productSyncer == nil {
 		return "", fmt.Errorf("importação de produto não está ligada neste processo")
 	}
-	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	integration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return "", fmt.Errorf("loading ERP integration: %w", err)
 	}
