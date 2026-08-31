@@ -157,6 +157,24 @@ func (s *Service) ProcessPaymentNotification(ctx context.Context, input ProcessP
 		zap.String("external_reference", status.ExternalReference),
 	)
 
+	return s.AplicarStatusDePagamento(ctx, input, status)
+}
+
+// AplicarStatusDePagamento é tudo o que acontece DEPOIS de o gateway dizer o
+// que aconteceu com o dinheiro: a escrita guardada no carrinho e o fato
+// canônico que o resto do sistema consome.
+//
+// Está separada de ProcessPaymentNotification por um motivo só: o simulador de
+// pagamentos de staging precisa exercitar exatamente este trecho. Ele não pode
+// entrar pela porta de cima porque ali o primeiro gesto é RECONSULTAR o gateway
+// — e num pagamento simulado não há o que consultar.
+//
+// Separar em vez de duplicar é o que garante que o simulado e o real sejam a
+// mesma coisa. Se um dia divergirem, terá sido porque alguém escreveu um
+// caminho paralelo aqui — e não há motivo para isso existir.
+func (s *Service) AplicarStatusDePagamento(
+	ctx context.Context, input ProcessPaymentInput, status *providers.PaymentStatus,
+) error {
 	// ExternalReference contains the cart ID (set when creating checkout)
 	if status.ExternalReference == "" {
 		logger.From(ctx, s.logger).Warn("payment notification has no external reference, cannot update cart",

@@ -1780,3 +1780,40 @@ WHERE id = sqlc.arg(cart_id)::uuid;
 -- fazemos quando o gateway confirma dispararia o registro de novo, e o carrinho
 -- seria pago duas vezes.
 SELECT payment_status = 'paid' AS pago FROM carts WHERE id = sqlc.arg(cart_id)::uuid;
+
+-- name: ListCartsParaSimuladorDePagamento :many
+-- Carrinhos que o simulador de pagamentos de staging pode pagar.
+--
+-- Traz a conta do dinheiro montada, e não só o id, porque o simulador precisa
+-- cobrar EXATAMENTE o que o checkout cobraria. Recalcular isso no Go a partir
+-- de várias leituras daria duas fórmulas para o mesmo número — que é o defeito
+-- que este projeto já pagou caro para aprender.
+SELECT
+    c.id,
+    c.short_id,
+    c.platform_handle,
+    c.status,
+    c.payment_status,
+    c.created_at,
+    e.id      AS event_id,
+    e.title   AS event_title,
+    COALESCE(e.pix_discount_percent, 0)::int AS pix_discount_percent,
+    COALESCE(c.coupon_code, '')              AS coupon_code,
+    COALESCE(c.coupon_discount_cents, 0)::bigint AS coupon_discount_cents,
+    COALESCE(c.shipping_cost_cents, 0)::bigint   AS shipping_cost_cents,
+    COALESCE((
+        SELECT SUM((ci.quantity - ci.waitlisted_quantity) * ci.unit_price)
+        FROM cart_items ci WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity
+    ), 0)::bigint AS subtotal_cents,
+    COALESCE((
+        SELECT SUM(ci.quantity - ci.waitlisted_quantity)
+        FROM cart_items ci WHERE ci.cart_id = c.id
+    ), 0)::int AS itens
+FROM carts c
+JOIN live_events e ON e.id = c.event_id
+WHERE e.store_id = sqlc.arg(store_id)
+  AND c.status NOT IN ('expired', 'cancelled')
+  AND (c.payment_status IS NULL OR c.payment_status NOT IN ('paid', 'refunded'))
+  AND EXISTS (SELECT 1 FROM cart_items ci WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity)
+ORDER BY c.created_at DESC
+LIMIT 50;

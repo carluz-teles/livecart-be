@@ -176,6 +176,9 @@ type Service struct {
 	// de estoque. Ver coalescencia.go. Construído sob demanda porque há testes
 	// que montam o Service por literal, sem passar por NewService.
 	espelhoDeProduto *coalescedor
+	// coupons é o caminho REAL de aplicar cupom, usado pelo simulador de
+	// pagamentos de staging. Opcional: nil só desabilita aplicar cupom por lá.
+	coupons CouponApplier
 	// situacaoDePedido coalesce as releituras de situação disparadas pelo
 	// webhook de pedido. O Bling emite `order.updated` a cada mutação da
 	// grade, e numa live isso é um evento por comentário — sem coalescer,

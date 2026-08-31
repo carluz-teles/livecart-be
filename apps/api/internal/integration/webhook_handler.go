@@ -26,6 +26,11 @@ import (
 // (strangler-fig B1e).
 type PaymentDispatcher interface {
 	DispatchPaymentProcess(ctx context.Context, input paymentdomain.ProcessPaymentInput) error
+	// AplicarStatusDePagamento é o que o webhook real faz DEPOIS de consultar o
+	// gateway. O simulador de staging entra por aqui porque não há pagamento
+	// para consultar — e entrar por aqui é o que garante que simulado e real
+	// sejam a mesma coisa daí para a frente.
+	AplicarStatusDePagamento(ctx context.Context, input paymentdomain.ProcessPaymentInput, status *providers.PaymentStatus) error
 }
 
 // WebhookHandler handles incoming webhooks from external providers.

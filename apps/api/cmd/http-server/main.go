@@ -1073,6 +1073,38 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		// servidor devolve 404 porque não há o que servir. Ver simulador_live.go.
 		integrationWebhookHandler.RegisterSimulatorRoutes(storeScoped)
 
+		// Simulador de PAGAMENTOS — mesma regra, mesmo motivo. Ver
+		// simulador_pagamento.go. O aplicador de cupom é o serviço REAL: o
+		// simulador não tem um desconto próprio, ele aplica um cupom que existe.
+		integrationSvc.SetCouponApplier(integration.NovoAplicadorDeCupom(
+			func(ctx context.Context, cartToken, code string) (int64, error) {
+				res, err := couponSvc.ApplyToCart(ctx, cartToken, code)
+				if err != nil {
+					return 0, err
+				}
+				return res.AppliedValueCents, nil
+			},
+			func(ctx context.Context, eventID, storeID string) ([]integration.CupomDoEvento, error) {
+				lista, err := couponSvc.List(ctx, eventID, storeID)
+				if err != nil {
+					return nil, err
+				}
+				out := make([]integration.CupomDoEvento, 0, len(lista))
+				for _, c := range lista {
+					if !c.Active() {
+						continue
+					}
+					out = append(out, integration.CupomDoEvento{
+						Codigo: c.Code(), Tipo: string(c.Type()),
+						PercentBPS: c.PercentBPS(), ValorCents: c.ValueCents(),
+						EventID: c.EventID(),
+					})
+				}
+				return out, nil
+			},
+		))
+		integrationWebhookHandler.RegisterPaymentSimulatorRoutes(storeScoped)
+
 		// Payment admin routes (Bloco B1c) — Pagar.me connect + webhook
 		// diagnostics extracted into payment.Handler. Same /integrations group,
 		// same paths/verbs; the still-integration-owned use cases are reached

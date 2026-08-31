@@ -5639,3 +5639,73 @@ func (q *Queries) UpsertCartItem(ctx context.Context, arg UpsertCartItemParams) 
 	)
 	return i, err
 }
+
+const listCartsParaSimuladorDePagamento = `-- name: ListCartsParaSimuladorDePagamento :many
+SELECT
+    c.id,
+    c.short_id,
+    c.platform_handle,
+    c.status,
+    c.payment_status,
+    c.created_at,
+    e.id      AS event_id,
+    e.title   AS event_title,
+    COALESCE(e.pix_discount_percent, 0)::int AS pix_discount_percent,
+    COALESCE(c.coupon_code, '')              AS coupon_code,
+    COALESCE(c.coupon_discount_cents, 0)::bigint AS coupon_discount_cents,
+    COALESCE(c.shipping_cost_cents, 0)::bigint   AS shipping_cost_cents,
+    COALESCE((
+        SELECT SUM((ci.quantity - ci.waitlisted_quantity) * ci.unit_price)
+        FROM cart_items ci WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity
+    ), 0)::bigint AS subtotal_cents,
+    COALESCE((
+        SELECT SUM(ci.quantity - ci.waitlisted_quantity)
+        FROM cart_items ci WHERE ci.cart_id = c.id
+    ), 0)::int AS itens
+FROM carts c
+JOIN live_events e ON e.id = c.event_id
+WHERE e.store_id = $1
+  AND c.status NOT IN ('expired', 'cancelled')
+  AND (c.payment_status IS NULL OR c.payment_status NOT IN ('paid', 'refunded'))
+  AND EXISTS (SELECT 1 FROM cart_items ci WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity)
+ORDER BY c.created_at DESC
+LIMIT 50
+`
+
+type ListCartsParaSimuladorDePagamentoRow struct {
+	ID                  pgtype.UUID        `json:"id"`
+	ShortID             int32              `json:"short_id"`
+	PlatformHandle      string             `json:"platform_handle"`
+	Status              string             `json:"status"`
+	PaymentStatus       pgtype.Text        `json:"payment_status"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	EventID             pgtype.UUID        `json:"event_id"`
+	EventTitle          pgtype.Text        `json:"event_title"`
+	PixDiscountPercent  int32              `json:"pix_discount_percent"`
+	CouponCode          string             `json:"coupon_code"`
+	CouponDiscountCents int64              `json:"coupon_discount_cents"`
+	ShippingCostCents   int64              `json:"shipping_cost_cents"`
+	SubtotalCents       int64              `json:"subtotal_cents"`
+	Itens               int32              `json:"itens"`
+}
+
+func (q *Queries) ListCartsParaSimuladorDePagamento(ctx context.Context, storeID pgtype.UUID) ([]ListCartsParaSimuladorDePagamentoRow, error) {
+	rows, err := q.db.Query(ctx, listCartsParaSimuladorDePagamento, storeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListCartsParaSimuladorDePagamentoRow
+	for rows.Next() {
+		var i ListCartsParaSimuladorDePagamentoRow
+		if err := rows.Scan(
+			&i.ID, &i.ShortID, &i.PlatformHandle, &i.Status, &i.PaymentStatus, &i.CreatedAt,
+			&i.EventID, &i.EventTitle, &i.PixDiscountPercent, &i.CouponCode,
+			&i.CouponDiscountCents, &i.ShippingCostCents, &i.SubtotalCents, &i.Itens,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	return items, rows.Err()
+}
