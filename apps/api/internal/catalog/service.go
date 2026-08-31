@@ -5,18 +5,32 @@ import (
 
 	"go.uber.org/zap"
 
+	"livecart/apps/api/lib/storage"
 	vo "livecart/apps/api/lib/valueobject"
 )
 
 type Service struct {
-	repo   *Repository
-	logger *zap.Logger
+	repo     *Repository
+	s3Client *storage.S3Client
+	logger   *zap.Logger
 }
 
-func NewService(repo *Repository, logger *zap.Logger) *Service {
+func NewService(repo *Repository, s3Client *storage.S3Client, logger *zap.Logger) *Service {
 	return &Service{
-		repo:   repo,
-		logger: logger.Named("catalog"),
+		repo:     repo,
+		s3Client: s3Client,
+		logger:   logger.Named("catalog"),
+	}
+}
+
+// presignProducts replaces every product's stored image key with a fresh
+// presigned GET URL (external ERP URLs are passed through unchanged).
+func (s *Service) presignProducts(ctx context.Context, products []CatalogProductView) {
+	if s.s3Client == nil {
+		return
+	}
+	for i := range products {
+		products[i].ImageURL = s.s3Client.PresignImageURL(ctx, products[i].ImageURL)
 	}
 }
 
@@ -49,6 +63,7 @@ func (s *Service) GetByID(ctx context.Context, id vo.ID, storeID vo.StoreID) (Ca
 		return Catalog{}, nil, err
 	}
 	cat.ProductCount = len(products)
+	s.presignProducts(ctx, products)
 	return cat, products, nil
 }
 
@@ -73,7 +88,12 @@ func (s *Service) SetProducts(ctx context.Context, id vo.ID, storeID vo.StoreID,
 	if err := s.repo.SetProducts(ctx, id, productIDs); err != nil {
 		return nil, err
 	}
-	return s.repo.ListProducts(ctx, id, storeID)
+	products, err := s.repo.ListProducts(ctx, id, storeID)
+	if err != nil {
+		return nil, err
+	}
+	s.presignProducts(ctx, products)
+	return products, nil
 }
 
 // SetEventCatalog associates or clears the catalog of an event. When associating,
@@ -92,5 +112,10 @@ func (s *Service) GetEventCatalog(ctx context.Context, eventID vo.ID, storeID vo
 }
 
 func (s *Service) GetPublicCatalogByEvent(ctx context.Context, eventID vo.ID) (Catalog, []CatalogProductView, error) {
-	return s.repo.GetPublicCatalogByEvent(ctx, eventID)
+	cat, products, err := s.repo.GetPublicCatalogByEvent(ctx, eventID)
+	if err != nil {
+		return Catalog{}, nil, err
+	}
+	s.presignProducts(ctx, products)
+	return cat, products, nil
 }

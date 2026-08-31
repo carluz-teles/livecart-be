@@ -963,7 +963,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 	liveHandler := live.NewHandler(liveSvc, validate)
 	liveHandler.RegisterRoutes(storeScoped)
 
-	catalogSvc := catalog.NewService(catalog.NewRepository(queries, pool), log)
+	catalogSvc := catalog.NewService(catalog.NewRepository(queries, pool), s3Client, log)
 	catalogHandler := catalog.NewHandler(catalogSvc)
 	catalogHandler.RegisterRoutes(storeScoped)
 	catalogHandler.RegisterPublicRoutes(app)

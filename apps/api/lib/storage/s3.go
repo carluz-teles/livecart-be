@@ -12,7 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/google/uuid"
 
 	appconfig "livecart/apps/api/lib/config"
@@ -115,33 +114,6 @@ func (c *S3Client) UploadFile(ctx context.Context, reader io.Reader, filename st
 	return key, nil
 }
 
-// UploadPublicFile uploads a file with a public-read ACL and returns the S3 key.
-// Used for assets served by their permanent public URL (GetPublicURL) instead of
-// a short-lived presigned one — e.g. product images, which are read as-is in the
-// admin, the buyer catalog and the checkout. The private-bucket default (plain
-// UploadFile) would 403 those reads.
-func (c *S3Client) UploadPublicFile(ctx context.Context, reader io.Reader, filename string, contentType string, folder string) (string, error) {
-	ext := filepath.Ext(filename)
-	if ext == "" {
-		ext = ".jpg"
-	}
-
-	key := fmt.Sprintf("%s/%s%s", folder, uuid.New().String(), ext)
-
-	_, err := c.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String(c.bucket),
-		Key:         aws.String(key),
-		Body:        reader,
-		ContentType: aws.String(contentType),
-		ACL:         s3types.ObjectCannedACLPublicRead,
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to upload public file: %w", err)
-	}
-
-	return key, nil
-}
-
 // GeneratePresignedGetURL generates a presigned URL for reading a file
 // The URL expires after the specified duration (default 24 hours)
 func (c *S3Client) GeneratePresignedGetURL(ctx context.Context, key string, expiration time.Duration) (string, error) {
@@ -184,6 +156,55 @@ func (c *S3Client) GetPublicURL(key string) string {
 	}
 	// Standard AWS S3
 	return fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", c.bucket, c.region, key)
+}
+
+// NormalizeToKey converts a stored/submitted image reference into the canonical
+// S3 key when it points at OUR bucket, so the database always holds a stable key
+// (not an expiring presigned URL). External URLs (e.g. ERP product images on a
+// different host) and empty values are returned unchanged. Query strings are
+// stripped before matching so a presigned URL round-trips to its key.
+func (c *S3Client) NormalizeToKey(imageURL string) string {
+	if imageURL == "" {
+		return ""
+	}
+	trimmed := imageURL
+	if i := strings.IndexByte(trimmed, '?'); i >= 0 {
+		trimmed = trimmed[:i]
+	}
+	if !strings.HasPrefix(trimmed, "http") {
+		return trimmed // already a key
+	}
+	if key := c.extractKeyFromURL(trimmed); key != "" {
+		return key // our bucket → key
+	}
+	return imageURL // external URL (e.g. ERP) → keep as-is
+}
+
+// PresignImageURL turns a stored image reference into something a browser can
+// load: our keys (and our-bucket URLs) become a fresh presigned GET URL;
+// external URLs (ERP) and empty values pass through unchanged. This is the read
+// side of the private-bucket product image flow.
+func (c *S3Client) PresignImageURL(ctx context.Context, imageURL string) string {
+	if imageURL == "" {
+		return ""
+	}
+	key := imageURL
+	if strings.HasPrefix(imageURL, "http") {
+		trimmed := imageURL
+		if i := strings.IndexByte(trimmed, '?'); i >= 0 {
+			trimmed = trimmed[:i]
+		}
+		extracted := c.extractKeyFromURL(trimmed)
+		if extracted == "" {
+			return imageURL // external URL (ERP) → serve as-is
+		}
+		key = extracted
+	}
+	presigned, err := c.GeneratePresignedGetURL(ctx, key, 0)
+	if err != nil || presigned == "" {
+		return imageURL
+	}
+	return presigned
 }
 
 // DeleteFile deletes a file from S3

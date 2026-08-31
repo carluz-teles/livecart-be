@@ -432,11 +432,19 @@ func (h *Handler) toCartResponse(output *GetCartForCheckoutOutput) CartForChecko
 		// Calculate available quantity (total - waitlisted)
 		availableQty := item.Quantity - item.WaitlistedQuantity
 
+		// Product images live in a private bucket; serve a fresh presigned URL
+		// (external ERP URLs pass through unchanged).
+		imageURL := item.ImageURL
+		if h.s3Client != nil && imageURL != nil {
+			presigned := h.s3Client.PresignImageURL(context.Background(), *imageURL)
+			imageURL = &presigned
+		}
+
 		items[i] = CartItemResponse{
 			ID:                 item.ID,
 			ProductID:          item.ProductID,
 			Name:               item.Name,
-			ImageURL:           item.ImageURL,
+			ImageURL:           imageURL,
 			Keyword:            item.Keyword,
 			Quantity:           item.Quantity,
 			UnitPrice:          item.UnitPrice,
