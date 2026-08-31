@@ -1380,6 +1380,10 @@ FROM carts WHERE id = $1;
 --
 -- Substitui a soma sobre erp_stock_movements, que media a mesma coisa num mundo
 -- onde a reserva era um lançamento manual de estoque.
+--
+-- ⚠ SUBSTITUÍDA por SumPromisedNotYetReflected. Fica porque o Tiny em produção
+-- ainda a usa enquanto a migração dos call sites não fecha; não acrescentar
+-- chamador novo.
 SELECT COALESCE(SUM(ci.quantity - ci.waitlisted_quantity), 0)::int
 FROM cart_items ci
 JOIN carts c ON c.id = ci.cart_id
@@ -1387,6 +1391,87 @@ JOIN products p ON p.id = ci.product_id
 WHERE p.external_id = sqlc.arg(external_product_id)
   AND p.external_source = 'tiny'
   AND (c.external_order_id IS NULL OR c.external_order_id = '')
+  AND c.status NOT IN ('expired', 'cancelled')
+  AND (c.payment_status IS NULL OR c.payment_status <> 'refunded')
+  AND ci.quantity > ci.waitlisted_quantity;
+
+-- name: SumPromisedNotYetReflected :one
+-- As unidades prometidas que o SALDO LIDO do ERP ainda NÃO desconta.
+--
+-- Quem decide isso é o MODO DE RESERVA, e não o relógio.
+--
+-- Havia aqui uma janela de 45 segundos: um carrinho com pedido criado há menos
+-- disso continuava sendo contado, na ideia de cobrir o atraso entre o pedido
+-- existir e o ERP refleti-lo. Ela estava errada, e o erro era garantido em vez
+-- de eventual — numa live TODO carrinho está dentro dos 45 s, então TODA
+-- reserva era descontada duas vezes: uma pelo ERP (que já a tirou do
+-- `disponivel`) e outra por esta soma.
+--
+-- Medido em staging em 31/08/2026, com o Bling em reserva nativa:
+--
+--   erp_available 3 · promised_without_order 2 · admissible 1   ← devia ser 3
+--   erp_available 2 · promised_without_order 3 · admissible 0   ← devia ser 2
+--
+-- A regra certa é a que a mensagem de log já anunciava, "units promised BEFORE
+-- the order existed":
+--
+--   reserva NATIVA  → o `disponivel` já desconta o pedido; conta só carrinho
+--                     SEM pedido no ERP
+--   reserva LOCAL   → o ERP não sabe de nada nosso; conta tudo que está vivo
+--
+-- `conta_com_pedido` é esse interruptor. O chamador o deriva do modo efetivo.
+SELECT COALESCE(SUM(ci.quantity - ci.waitlisted_quantity), 0)::int
+FROM cart_items ci
+JOIN carts c ON c.id = ci.cart_id
+JOIN products p ON p.id = ci.product_id
+WHERE p.external_id = sqlc.arg(external_product_id)
+  AND p.external_source = sqlc.arg(external_source)
+  AND p.store_id = sqlc.arg(store_id)
+  AND (
+        c.external_order_id IS NULL OR c.external_order_id = ''
+     -- Pedido CANCELADO não segura nada. Olhar só a EXISTÊNCIA do id foi o
+     -- defeito: em 31/08/2026 o lojista cancelou dois pedidos no Bling, o ERP
+     -- devolveu as peças (saldo_virtual voltou de 3 para 5), os carrinhos
+     -- continuaram vivos — e esta soma devolveu ZERO porque o id ainda estava
+     -- lá. O saldo cru entrou no portão e o contador ficou 2 unidades acima do
+     -- que existe fisicamente.
+     --
+     -- Status desconhecido ou vazio conta como NÃO refletido de propósito: é o
+     -- lado que oferece de menos, e oferecer de menos é recuperável.
+     OR c.erp_order_status IS NULL
+     OR c.erp_order_status = ''
+     OR c.erp_order_status = 'cancelado'
+     OR sqlc.arg(conta_com_pedido)::bool
+      )
+  AND c.status NOT IN ('expired', 'cancelled')
+  AND (c.payment_status IS NULL OR c.payment_status <> 'refunded')
+  AND ci.quantity > ci.waitlisted_quantity; com
+--    dois ERPs são dois espaços de numeração independentes com larguras que se
+--    sobrepõem, e o defeito passa a ser real.
+--
+-- 3. A JANELA DE ATRASO. `external_order_id IS NULL` assume que, existindo o
+--    pedido, o ERP já o desconta. MEDIDO contra o Bling em 29/08/2026: o evento
+--    `virtual_stock.updated` chega de 9 a 22 SEGUNDOS depois do `order.created`.
+--    Nessa janela o pedido existe (a soma antiga já não conta a unidade) e o
+--    saldo lido ainda não a desconta — ninguém conta, e o portão sobe com
+--    estoque que já tem dono.
+--
+--    Por isso um pedido RECÉM-CRIADO continua contando: `erp_op_started_at`
+--    dentro da janela significa "o ERP pode ainda não ter acordado".
+SELECT COALESCE(SUM(ci.quantity - ci.waitlisted_quantity), 0)::int
+FROM cart_items ci
+JOIN carts c ON c.id = ci.cart_id
+JOIN products p ON p.id = ci.product_id
+WHERE p.external_id = sqlc.arg(external_product_id)
+  AND p.external_source = sqlc.arg(external_source)
+  AND p.store_id = sqlc.arg(store_id)
+  AND (
+        -- sem pedido no ERP: ele não sabe da promessa
+        c.external_order_id IS NULL OR c.external_order_id = ''
+        -- ou com pedido RECÉM-criado, dentro da janela de atraso medida
+     OR (c.erp_op_started_at IS NOT NULL
+         AND c.erp_op_started_at > now() - make_interval(secs => sqlc.arg(janela_segundos)::float))
+      )
   AND c.status NOT IN ('expired', 'cancelled')
   AND (c.payment_status IS NULL OR c.payment_status <> 'refunded')
   AND ci.quantity > ci.waitlisted_quantity;
@@ -1488,7 +1573,12 @@ WITH atual AS (
 ), tomado AS (
     SELECT id, LEAST(GREATEST(stock, 0), sqlc.arg(desejado)::int) AS qtd FROM atual
 ), aplicado AS (
-    UPDATE products p SET stock = p.stock - t.qtd
+    -- `erp_seq` sobe porque este É um movimento nosso, e o espelho decide se a
+    -- leitura dele venceu comparando esse contador. Sem isto a retomada era
+    -- INVISÍVEL ao CAS: um saldo lido antes dela era aplicado depois, apagando
+    -- o débito e inflando o portão — a mesma família do 7 unidades medido em
+    -- 31/08/2026 num produto com 5 peças.
+    UPDATE products p SET stock = p.stock - t.qtd, erp_seq = p.erp_seq + 1
     FROM tomado t WHERE p.id = t.id
     RETURNING 1
 )
@@ -1690,3 +1780,56 @@ WHERE id = sqlc.arg(cart_id)::uuid;
 -- fazemos quando o gateway confirma dispararia o registro de novo, e o carrinho
 -- seria pago duas vezes.
 SELECT payment_status = 'paid' AS pago FROM carts WHERE id = sqlc.arg(cart_id)::uuid;
+
+-- name: ListCartsParaSimuladorDePagamento :many
+-- Carrinhos que o simulador de pagamentos de staging pode pagar.
+--
+-- Traz a conta do dinheiro montada, e não só o id, porque o simulador precisa
+-- cobrar EXATAMENTE o que o checkout cobraria. Recalcular isso no Go a partir
+-- de várias leituras daria duas fórmulas para o mesmo número — que é o defeito
+-- que este projeto já pagou caro para aprender.
+SELECT
+    c.id,
+    c.short_id,
+    c.platform_handle,
+    c.status,
+    c.payment_status,
+    c.created_at,
+    e.id      AS event_id,
+    e.title   AS event_title,
+    COALESCE(e.pix_discount_percent, 0)::int AS pix_discount_percent,
+    COALESCE(c.coupon_code, '')              AS coupon_code,
+    COALESCE(c.coupon_discount_cents, 0)::bigint AS coupon_discount_cents,
+    COALESCE(c.shipping_cost_cents, 0)::bigint   AS shipping_cost_cents,
+    COALESCE((
+        SELECT SUM((ci.quantity - ci.waitlisted_quantity) * ci.unit_price)
+        FROM cart_items ci WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity
+    ), 0)::bigint AS subtotal_cents,
+    COALESCE((
+        SELECT SUM(ci.quantity - ci.waitlisted_quantity)
+        FROM cart_items ci WHERE ci.cart_id = c.id
+    ), 0)::int AS itens
+FROM carts c
+JOIN live_events e ON e.id = c.event_id
+WHERE e.store_id = sqlc.arg(store_id)
+  AND c.status NOT IN ('expired', 'cancelled')
+  AND (c.payment_status IS NULL OR c.payment_status NOT IN ('paid', 'refunded'))
+  AND EXISTS (SELECT 1 FROM cart_items ci WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity)
+ORDER BY c.created_at DESC
+LIMIT 50;
+
+-- name: MarkCartRefunded :one
+-- Estorno MANUAL: o lojista está dizendo que devolveu o dinheiro.
+--
+-- Só um carrinho PAGO pode ser estornado — o guard vive aqui, e não no Go, para
+-- duas abas clicando junto não emitirem dois fatos. Zero linhas significa
+-- "não estava pago", e o chamador recusa em vez de fingir sucesso.
+--
+-- paid_at e checkout_id ficam INTACTOS de propósito: o pagamento aconteceu, e
+-- apagar a hora e o identificador dele apagaria a única trilha de quando o
+-- dinheiro entrou e por onde. Estorno não desfaz a história; acrescenta um
+-- capítulo.
+UPDATE carts
+SET payment_status = 'refunded', updated_at = now()
+WHERE id = sqlc.arg(id) AND payment_status = 'paid'
+RETURNING id, event_id, COALESCE(checkout_id, '') AS checkout_id;

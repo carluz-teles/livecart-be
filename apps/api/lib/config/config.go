@@ -59,6 +59,13 @@ const (
 	InstagramWebhookEnforceSignature Key = "INSTAGRAM_WEBHOOK_ENFORCE_SIGNATURE"
 
 	// Melhor Envio (shipping provider)
+	// Credenciais do APLICATIVO Bling do LiveCart (app único, um por ambiente).
+	// O mesmo client_secret assina o HMAC dos webhooks de TODAS as lojas —
+	// rotacioná-lo invalida o Basic do token endpoint E toda assinatura ao mesmo
+	// tempo, então a troca exige janela com dois segredos aceitos.
+	BlingClientID     Key = "BLING_CLIENT_ID"
+	BlingClientSecret Key = "BLING_CLIENT_SECRET"
+
 	MelhorEnvioClientID     Key = "MELHOR_ENVIO_CLIENT_ID"     // OAuth App ID from Melhor Envio panel
 	MelhorEnvioClientSecret Key = "MELHOR_ENVIO_CLIENT_SECRET" // OAuth App Secret from Melhor Envio panel
 	MelhorEnvioEnv          Key = "MELHOR_ENVIO_ENV"           // "sandbox" or "production"

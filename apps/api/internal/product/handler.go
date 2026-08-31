@@ -7,15 +7,17 @@ import (
 
 	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/query"
+	"livecart/apps/api/lib/storage"
 	vo "livecart/apps/api/lib/valueobject"
 )
 
 type Handler struct {
-	service *Service
+	service  *Service
+	s3Client *storage.S3Client
 }
 
-func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
+func NewHandler(service *Service, s3Client *storage.S3Client) *Handler {
+	return &Handler{service: service, s3Client: s3Client}
 }
 
 func (h *Handler) RegisterRoutes(router fiber.Router) {
@@ -23,11 +25,75 @@ func (h *Handler) RegisterRoutes(router fiber.Router) {
 	g.Get("/", h.List)
 	g.Get("/stats", h.GetStats)
 	g.Post("/", h.Create)
+	g.Post("/upload-image", h.UploadImage)
 	g.Get("/:id", h.GetByID)
 	g.Put("/:id", h.Update)
 	g.Delete("/:id", h.Delete)
 	g.Post("/:id/images", h.AddImage)
 	g.Delete("/:id/images/:imageId", h.DeleteImage)
+}
+
+// UploadImage stores an uploaded image file in the private S3 bucket and returns
+// a presigned preview URL. The form submits that URL back on create/update, where
+// it is normalized to the stable S3 key; product images are served via presigned
+// URLs on read (see S3Client.PresignImageURL).
+// @Summary      Upload a product image file
+// @Tags         products
+// @Accept       multipart/form-data
+// @Produce      json
+// @Param        storeId path string true "Store UUID"
+// @Param        file formData file true "Image file (JPG, PNG, GIF, WebP; max 5MB)"
+// @Success      200 {object} httpx.Envelope{data=UploadProductImageResponse}
+// @Failure      400 {object} httpx.Envelope
+// @Router       /api/v1/stores/{storeId}/products/upload-image [post]
+// @Security     BearerAuth
+func (h *Handler) UploadImage(c *fiber.Ctx) error {
+	storeID := httpx.GetStoreID(c)
+	if storeID == "" {
+		return httpx.ErrUnprocessable("invalid store ID")
+	}
+	if h.s3Client == nil {
+		return httpx.ErrInternal("storage not configured")
+	}
+
+	file, err := c.FormFile("file")
+	if err != nil {
+		return httpx.ErrBadRequest("file is required")
+	}
+	if file.Size > 5*1024*1024 {
+		return httpx.ErrBadRequest("file too large, maximum size is 5MB")
+	}
+	contentType := file.Header.Get("Content-Type")
+	validTypes := map[string]bool{
+		"image/jpeg": true,
+		"image/jpg":  true,
+		"image/png":  true,
+		"image/gif":  true,
+		"image/webp": true,
+	}
+	if !validTypes[contentType] {
+		return httpx.ErrBadRequest("invalid file type, accepted: JPG, PNG, GIF, WebP")
+	}
+
+	src, err := file.Open()
+	if err != nil {
+		return httpx.ErrInternal("failed to read file")
+	}
+	defer src.Close()
+
+	key, err := h.s3Client.UploadFile(c.UserContext(), src, file.Filename, contentType, "products/"+storeID)
+	if err != nil {
+		return httpx.ErrInternal("failed to upload file")
+	}
+
+	// Return a presigned URL for immediate preview. The bucket is private, so the
+	// image is served via presigned URLs (see S3Client.PresignImageURL on read).
+	// The form submits this URL back; Create/Update normalize it to the stable key.
+	previewURL, err := h.s3Client.GeneratePresignedGetURL(c.UserContext(), key, 0)
+	if err != nil {
+		return httpx.ErrInternal("failed to generate image URL")
+	}
+	return httpx.OK(c, UploadProductImageResponse{URL: previewURL})
 }
 
 // AddImage attaches one image URL to a variant gallery.
@@ -114,6 +180,9 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if h.s3Client != nil {
+		input.ImageURL = h.s3Client.NormalizeToKey(input.ImageURL)
+	}
 	product, err := h.service.Create(c.UserContext(), input)
 	if err != nil {
 		return err
@@ -145,7 +214,11 @@ func (h *Handler) GetByID(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	return httpx.OK(c, NewProductResponse(view))
+	resp := NewProductResponse(view)
+	if h.s3Client != nil {
+		resp.ImageURL = h.s3Client.PresignImageURL(c.UserContext(), resp.ImageURL)
+	}
+	return httpx.OK(c, resp)
 }
 
 // List godoc
@@ -194,7 +267,13 @@ func (h *Handler) List(c *fiber.Ctx) error {
 		return err
 	}
 
-	return httpx.OK(c, NewListProductsResponse(views, input.Pagination, total))
+	resp := NewListProductsResponse(views, input.Pagination, total)
+	if h.s3Client != nil {
+		for i := range resp.Data {
+			resp.Data[i].ImageURL = h.s3Client.PresignImageURL(c.UserContext(), resp.Data[i].ImageURL)
+		}
+	}
+	return httpx.OK(c, resp)
 }
 
 func parseProductFilters(c *fiber.Ctx) ProductFilters {
@@ -271,11 +350,18 @@ func (h *Handler) Update(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if h.s3Client != nil {
+		input.ImageURL = h.s3Client.NormalizeToKey(input.ImageURL)
+	}
 	view, err := h.service.Update(c.UserContext(), input)
 	if err != nil {
 		return err
 	}
-	return httpx.OK(c, NewProductResponse(view))
+	resp := NewProductResponse(view)
+	if h.s3Client != nil {
+		resp.ImageURL = h.s3Client.PresignImageURL(c.UserContext(), resp.ImageURL)
+	}
+	return httpx.OK(c, resp)
 }
 
 // Delete godoc

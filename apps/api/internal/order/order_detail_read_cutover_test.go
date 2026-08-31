@@ -250,12 +250,19 @@ func TestOrderDetailReadCutover_AdminUpdate_DoesNotCorruptOrderStatus(t *testing
 
 	// Vocabulário real de UpdateOrderRequest (types.go): status de CART
 	// (active/checkout/completed/expired) e payment (pending/paid/failed/refunded).
+	// 'refunded' SAIU desta tabela, e a saída é a correção.
+	//
+	// Ele deixou de ser escrita de campo: estorno é FATO. O botão "Marcar como
+	// reembolsado" escrevia a coluna e parava aí, e o pedido ficava preso em
+	// "Precisam atenção" — fora de "Cancelados" — enquanto a Order seguia paga,
+	// o pedido no ERP seguia segurando peça e o cupom seguia consumido.
+	//
+	// O caso dele agora é TestEstornoSemCasoDeUsoRecusa, logo abaixo.
 	cases := []struct {
 		name          string
 		status        string
 		paymentStatus string
 	}{
-		{"completed + refunded", "completed", "refunded"},
 		{"expired + failed", "expired", "failed"},
 	}
 
@@ -340,4 +347,29 @@ func assertDBString(t *testing.T, ctx context.Context, query, arg, want string) 
 	if got != want {
 		t.Errorf("query %q = %q, want %q", query, got, want)
 	}
+}
+
+// ESTORNO SEM O CASO DE USO É RECUSA, e não meia escrita.
+//
+// Um Service sem o colaborador de pagamento não consegue emitir cart.refunded.
+// Nesse caso ele TEM de recusar: gravar a coluna assim mesmo reproduziria
+// exatamente o defeito que o lojista relatou — pedido estornado preso em
+// "Precisam atenção", com a Order paga e o pedido vivo no ERP.
+func TestEstornoSemCasoDeUsoRecusa(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	repo := order.NewRepository(testPool)
+	svc := order.NewService(repo, zap.NewNop()) // sem SetManualPaymentConfirmer
+
+	storeID, cartID := seedFrozenOrder(t, "9")
+	refunded := "refunded"
+
+	if _, err := svc.Update(ctx, order.UpdateOrderInput{
+		ID: cartID, StoreID: storeID, PaymentStatus: &refunded,
+	}); err == nil {
+		t.Fatal("aceitou o estorno sem poder emitir o fato — o pedido ficaria pela metade")
+	}
+
+	// E a coluna NÃO foi escrita: meia verdade é pior que recusa.
+	assertDBString(t, ctx, `SELECT payment_status FROM carts WHERE id = $1`, cartID, "paid")
 }

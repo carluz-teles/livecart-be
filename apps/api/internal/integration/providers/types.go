@@ -78,6 +78,7 @@ const (
 	ProviderMercadoPago ProviderName = "mercado_pago"
 	ProviderPagarme     ProviderName = "pagarme"
 	ProviderTiny        ProviderName = "tiny"
+	ProviderBling       ProviderName = "bling"
 	ProviderInstagram   ProviderName = "instagram"
 	ProviderMelhorEnvio ProviderName = "melhor_envio"
 	ProviderSmartEnvios ProviderName = "smartenvios"
@@ -297,6 +298,34 @@ type ERPInvoiceProvider interface {
 // the order has no NFe linked yet. Callers translate this to the "aguardando
 // NFe" UI state instead of surfacing a generic error.
 var ErrInvoiceNotFound = errors.New("invoice not found")
+
+// ERPStockReader é a leitura de saldo de UM produto. Já era resolvida por type
+// assertion antes de existir com nome; nomeá-la torna o contrato explícito.
+type ERPStockReader interface {
+	GetProductStock(ctx context.Context, productID string) (int, error)
+}
+
+// ERPStockDetailReader devolve saldo, reservado e disponível separados.
+type ERPStockDetailReader interface {
+	GetProductStockDetail(ctx context.Context, productID string) (ERPStockDetail, error)
+}
+
+// ERPStockBatchReader lê o saldo de VÁRIOS produtos numa requisição.
+//
+// É capacidade OPCIONAL porque nem todo ERP a tem: o Tiny obriga 1 GET por
+// produto (e foi assim que o resync virou 12,5 req/s e fonte de 429), enquanto
+// o Bling expõe GET /estoques/saldos?idsProdutos[] e resolve 300 produtos em
+// ~3 requisições.
+//
+// Quem consome DEVE ter fallback para a leitura unitária: um adapter sem esta
+// capacidade continua correto, só mais caro.
+//
+// Contrato: a chave do mapa é o external id do produto. Um id AUSENTE do mapa
+// significa "o ERP não devolveu saldo para este produto" — nunca zero. Quem
+// espelha trata ausência como "não sei" e NÃO escreve o contador local.
+type ERPStockBatchReader interface {
+	GetProductStockBatch(ctx context.Context, externalIDs []string) (map[string]ERPStockDetail, error)
+}
 
 // ERPProvider interface for ERP system integrations.
 type ERPProvider interface {
@@ -996,6 +1025,19 @@ type ERPInstallment struct {
 	// Note é o que o lojista lê no painel — é aqui que "PAGO" e "A PAGAR" ficam
 	// visíveis para ele.
 	Note string
+	// Method é COMO esta parcela foi paga: "pix", "credit_card", "debit_card",
+	// "boleto". Vazio significa "não sei" — e não "dinheiro".
+	//
+	// Vive na PARCELA, e não na chamada, porque um carrinho pode ter mais de um
+	// pagamento (PIX + cartão) e as linhas "DESCONTO concedido" e "A PAGAR" não
+	// têm método nenhum. Resolver um método por chamada carimbaria o da
+	// primeira parcela em todas.
+	//
+	// Campo ADITIVO de propósito: SetOrderInstallments não muda de assinatura.
+	// internal/erp/parcelas.go faz uma asserção estrutural ANÔNIMA com a
+	// assinatura exata — mudá-la compila, o `ok` vira false, e a recomposição
+	// das parcelas para de acontecer EM SILÊNCIO nos dois ERPs.
+	Method string
 }
 
 // LiveCartItemMarker abre a informação adicional de toda linha que o LiveCart

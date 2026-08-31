@@ -12,6 +12,33 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const consumeOAuthState = `-- name: ConsumeOAuthState :one
+DELETE FROM oauth_states
+WHERE state = $1 AND expires_at > now()
+RETURNING state, store_id, provider, code_verifier, created_at, expires_at
+`
+
+// ConsumeOAuthState valida e APAGA o state numa operação só.
+//
+// Diferente do par GetOAuthState + DeleteOAuthState, que são duas queries e
+// deixam uma janela entre a leitura e o apagamento. Para o Bling isso não é
+// preciosismo: a doc avisa que reusar um authorization code ainda válido faz o
+// usuário ter "o seu acesso revogado por medidas de segurança". Um duplo clique
+// no callback com o par não-atômico passaria os dois pela validação.
+func (q *Queries) ConsumeOAuthState(ctx context.Context, state string) (OauthState, error) {
+	row := q.db.QueryRow(ctx, consumeOAuthState, state)
+	var i OauthState
+	err := row.Scan(
+		&i.State,
+		&i.StoreID,
+		&i.Provider,
+		&i.CodeVerifier,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
 const countIntegrationLogs = `-- name: CountIntegrationLogs :one
 SELECT COUNT(*) FROM integration_logs WHERE integration_id = $1
 `
@@ -67,7 +94,7 @@ const createIntegration = `-- name: CreateIntegration :one
 
 INSERT INTO integrations (store_id, type, provider, status, credentials, token_expires_at, metadata)
 VALUES ($1, $2, $3, $4, $5, $6, COALESCE(NULLIF($7::text, '')::jsonb, '{}'::jsonb))
-RETURNING id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority
+RETURNING id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id
 `
 
 type CreateIntegrationParams struct {
@@ -106,6 +133,7 @@ func (q *Queries) CreateIntegration(ctx context.Context, arg CreateIntegrationPa
 		&i.Credentials,
 		&i.Metadata,
 		&i.Priority,
+		&i.ErpAccountID,
 	)
 	return i, err
 }
@@ -273,8 +301,81 @@ func (q *Queries) DeleteOAuthState(ctx context.Context, state string) error {
 	return err
 }
 
+const getActiveERPByAccount = `-- name: GetActiveERPByAccount :one
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations
+WHERE type = 'erp' AND provider = $1 AND erp_account_id = $2 AND status = 'active'
+LIMIT 1
+`
+
+type GetActiveERPByAccountParams struct {
+	Provider     string      `json:"provider"`
+	ErpAccountID pgtype.Text `json:"erp_account_id"`
+}
+
+// GetActiveERPByAccount resolve a LOJA a partir da conta do ERP. É como o
+// webhook do Bling, que chega numa URL única para todas as lojas, descobre de
+// quem é o evento: o `companyId` do envelope casa com integrations.erp_account_id.
+//
+// Usa o índice parcial idx_integrations_erp_account.
+func (q *Queries) GetActiveERPByAccount(ctx context.Context, arg GetActiveERPByAccountParams) (Integration, error) {
+	row := q.db.QueryRow(ctx, getActiveERPByAccount, arg.Provider, arg.ErpAccountID)
+	var i Integration
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.Type,
+		&i.Provider,
+		&i.Status,
+		&i.TokenExpiresAt,
+		&i.LastSyncedAt,
+		&i.CreatedAt,
+		&i.Credentials,
+		&i.Metadata,
+		&i.Priority,
+		&i.ErpAccountID,
+	)
+	return i, err
+}
+
+const getActiveERPIntegration = `-- name: GetActiveERPIntegration :one
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations
+WHERE store_id = $1 AND type = 'erp' AND status = 'active'
+ORDER BY created_at ASC, id ASC
+LIMIT 1
+`
+
+// GetActiveERPIntegration resolve o ERP ATIVO da loja pela LINHA, sem o literal
+// do provider. É seguro devolver :one porque o índice parcial
+// uniq_integrations_store_one_erp (migration 000061) garante no máximo uma
+// integração de ERP por loja — a regra de negócio "ou Tiny ou Bling, nunca os
+// dois" é do banco, não da convenção de quem escreve a query.
+//
+// Existe para substituir os call sites que perguntavam por provider='tiny'
+// literal: com Bling conectado, aqueles devolviam not-found e QUATRO deles
+// tratavam isso como "loja sem ERP", devolvendo nil em silêncio — a live rodava
+// inteira sem criar um pedido e sem uma linha de log.
+func (q *Queries) GetActiveERPIntegration(ctx context.Context, storeID pgtype.UUID) (Integration, error) {
+	row := q.db.QueryRow(ctx, getActiveERPIntegration, storeID)
+	var i Integration
+	err := row.Scan(
+		&i.ID,
+		&i.StoreID,
+		&i.Type,
+		&i.Provider,
+		&i.Status,
+		&i.TokenExpiresAt,
+		&i.LastSyncedAt,
+		&i.CreatedAt,
+		&i.Credentials,
+		&i.Metadata,
+		&i.Priority,
+		&i.ErpAccountID,
+	)
+	return i, err
+}
+
 const getActiveIntegrationByProvider = `-- name: GetActiveIntegrationByProvider :one
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority FROM integrations
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations
 WHERE store_id = $1 AND type = $2 AND provider = $3 AND status = 'active'
 LIMIT 1
 `
@@ -300,6 +401,7 @@ func (q *Queries) GetActiveIntegrationByProvider(ctx context.Context, arg GetAct
 		&i.Credentials,
 		&i.Metadata,
 		&i.Priority,
+		&i.ErpAccountID,
 	)
 	return i, err
 }
@@ -368,7 +470,7 @@ func (q *Queries) GetIdempotencyByKey(ctx context.Context, arg GetIdempotencyByK
 }
 
 const getIntegrationByID = `-- name: GetIntegrationByID :one
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority FROM integrations WHERE id = $1 AND store_id = $2
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations WHERE id = $1 AND store_id = $2
 `
 
 type GetIntegrationByIDParams struct {
@@ -391,12 +493,13 @@ func (q *Queries) GetIntegrationByID(ctx context.Context, arg GetIntegrationByID
 		&i.Credentials,
 		&i.Metadata,
 		&i.Priority,
+		&i.ErpAccountID,
 	)
 	return i, err
 }
 
 const getIntegrationByIDOnly = `-- name: GetIntegrationByIDOnly :one
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority FROM integrations WHERE id = $1
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations WHERE id = $1
 `
 
 func (q *Queries) GetIntegrationByIDOnly(ctx context.Context, id pgtype.UUID) (Integration, error) {
@@ -414,12 +517,13 @@ func (q *Queries) GetIntegrationByIDOnly(ctx context.Context, id pgtype.UUID) (I
 		&i.Credentials,
 		&i.Metadata,
 		&i.Priority,
+		&i.ErpAccountID,
 	)
 	return i, err
 }
 
 const getIntegrationByProvider = `-- name: GetIntegrationByProvider :one
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority FROM integrations
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations
 WHERE store_id = $1 AND type = $2 AND provider = $3 AND status IN ('active', 'pending_auth')
 ORDER BY created_at DESC
 LIMIT 1
@@ -446,6 +550,7 @@ func (q *Queries) GetIntegrationByProvider(ctx context.Context, arg GetIntegrati
 		&i.Credentials,
 		&i.Metadata,
 		&i.Priority,
+		&i.ErpAccountID,
 	)
 	return i, err
 }
@@ -568,7 +673,7 @@ func (q *Queries) ListIntegrationLogs(ctx context.Context, arg ListIntegrationLo
 }
 
 const listIntegrationsByStore = `-- name: ListIntegrationsByStore :many
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority FROM integrations WHERE store_id = $1 ORDER BY created_at DESC
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations WHERE store_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListIntegrationsByStore(ctx context.Context, storeID pgtype.UUID) ([]Integration, error) {
@@ -592,6 +697,7 @@ func (q *Queries) ListIntegrationsByStore(ctx context.Context, storeID pgtype.UU
 			&i.Credentials,
 			&i.Metadata,
 			&i.Priority,
+			&i.ErpAccountID,
 		); err != nil {
 			return nil, err
 		}
@@ -604,7 +710,7 @@ func (q *Queries) ListIntegrationsByStore(ctx context.Context, storeID pgtype.UU
 }
 
 const listIntegrationsByType = `-- name: ListIntegrationsByType :many
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority FROM integrations
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations
 WHERE store_id = $1 AND type = $2 AND status = 'active'
 ORDER BY created_at DESC
 `
@@ -635,6 +741,7 @@ func (q *Queries) ListIntegrationsByType(ctx context.Context, arg ListIntegratio
 			&i.Credentials,
 			&i.Metadata,
 			&i.Priority,
+			&i.ErpAccountID,
 		); err != nil {
 			return nil, err
 		}
@@ -647,11 +754,19 @@ func (q *Queries) ListIntegrationsByType(ctx context.Context, arg ListIntegratio
 }
 
 const listIntegrationsWithExpiringTokens = `-- name: ListIntegrationsWithExpiringTokens :many
-SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority FROM integrations
+SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations
 WHERE status = 'active'
   AND token_expires_at IS NOT NULL
   AND token_expires_at <= $1
-  AND provider IN ('tiny', 'mercado_pago', 'instagram')
+  -- ⚠ Acrescentar provider aqui é a mudança de UMA PALAVRA que pode derrubar a
+  -- frota inteira. O Bling bloqueia o IP por 60 MINUTOS depois de 20 chamadas a
+  -- /oauth/token em 60 s, e o IP é o NAT compartilhado do Railway — durante o
+  -- bloqueio ninguém renova E ninguém consegue conectar.
+  --
+  -- Por isso 'bling' só entrou junto com o espaçamento no worker
+  -- (TokenRefreshWorker.refreshExpiringTokens). Nunca acrescente um provider
+  -- aqui sem conferir que o worker respeita o teto de chamadas dele.
+  AND provider IN ('tiny', 'mercado_pago', 'instagram', 'bling')
 ORDER BY token_expires_at ASC
 LIMIT 100
 `
@@ -679,6 +794,7 @@ func (q *Queries) ListIntegrationsWithExpiringTokens(ctx context.Context, tokenE
 			&i.Credentials,
 			&i.Metadata,
 			&i.Priority,
+			&i.ErpAccountID,
 		); err != nil {
 			return nil, err
 		}
@@ -870,6 +986,23 @@ func (q *Queries) ReclaimIdempotencyKey(ctx context.Context, id pgtype.UUID) (in
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const setIntegrationERPAccount = `-- name: SetIntegrationERPAccount :exec
+UPDATE integrations
+SET erp_account_id = $2
+WHERE id = $1
+`
+
+type SetIntegrationERPAccountParams struct {
+	ID           pgtype.UUID `json:"id"`
+	ErpAccountID pgtype.Text `json:"erp_account_id"`
+}
+
+// SetIntegrationERPAccount grava a identidade da conta do ERP no fim do OAuth.
+func (q *Queries) SetIntegrationERPAccount(ctx context.Context, arg SetIntegrationERPAccountParams) error {
+	_, err := q.db.Exec(ctx, setIntegrationERPAccount, arg.ID, arg.ErpAccountID)
+	return err
 }
 
 const stampIntegrationStockWebhookAlert = `-- name: StampIntegrationStockWebhookAlert :exec

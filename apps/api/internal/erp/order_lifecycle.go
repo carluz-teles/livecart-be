@@ -72,7 +72,7 @@ func (s *Service) PrepareCartForPayment(ctx context.Context, cartID, storeID str
 // qualquer forma.
 func (s *Service) PrewarmERPContact(ctx context.Context, storeID, platformUserID, platformHandle, name, document, email, phone string) {
 	ctx = logger.WithStore(ctx, storeID, "")
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return
 	}
@@ -98,6 +98,32 @@ func (s *Service) PrewarmERPContact(ctx context.Context, storeID, platformUserID
 // marcador de progresso — a retomada acontece na próxima chamada, no confirm
 // (adoção por marcador) ou na varredura; NUNCA regride a 'none'.
 func (s *Service) EnsureERPOrderForCart(ctx context.Context, cartID, storeID string) error {
+	return s.garantirPedidoDoCarrinho(ctx, cartID, storeID, false)
+}
+
+// EnsureERPOrderDuranteALive é a porta do COMENTÁRIO, e a única que o modo de
+// reserva pode fechar.
+//
+// A distinção existe porque a pergunta "criar o pedido agora?" tem duas
+// respostas conforme quem pergunta. No comentário ela é uma escolha: no modo
+// nativo o pedido É a reserva e tem de nascer já; no modo local quem segura a
+// peça é o contador do LiveCart, e nascer cedo não reservaria nada — numa conta
+// sem a Reserva de estoque ligada, pedido em aberto não mexe no saldo (medido
+// no Bling em 29/08/2026). Custaria duas requisições por compradora contra um
+// teto de 3 req/s, e deixaria no ERP do lojista um pedido para uma venda que
+// pode não sair.
+//
+// No PAGAMENTO não há escolha nenhuma: a venda aconteceu e o pedido tem de
+// existir, em qualquer modo. Fechar aquela porta junto com esta era o defeito
+// da primeira versão deste portão — o carrinho pago chega em 'none' e teria
+// ficado sem pedido para sempre.
+//
+// O Tiny cai em NATIVO pelo padrão do provider, então nada muda para ele.
+func (s *Service) EnsureERPOrderDuranteALive(ctx context.Context, cartID, storeID string) error {
+	return s.garantirPedidoDoCarrinho(ctx, cartID, storeID, true)
+}
+
+func (s *Service) garantirPedidoDoCarrinho(ctx context.Context, cartID, storeID string, respeitaModo bool) error {
 	st, err := s.repo.GetCartERPOrderState(ctx, cartID)
 	if err != nil {
 		return fmt.Errorf("loading cart ERP order state: %w", err)
@@ -125,9 +151,20 @@ func (s *Service) EnsureERPOrderForCart(ctx context.Context, cartID, storeID str
 		return s.retomarCriacaoPresa(ctx, cartID, storeID)
 	}
 
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return nil // loja sem ERP ligado
+	}
+
+	if respeitaModo {
+		if modo := ModoDeReservaDaIntegracao(erpIntegration.Provider, erpIntegration.Metadata); modo != ReservaNativaDoERP {
+			logger.From(ctx, s.logger).Debug("modo de reserva local: o pedido no ERP nasce no pagamento",
+				zap.String("cart_id", cartID),
+				zap.String("provider", erpIntegration.Provider),
+				zap.String("modo", string(modo)),
+			)
+			return nil
+		}
 	}
 
 	won, err := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateNone, OrderStateConverting)
@@ -176,7 +213,18 @@ func (s *Service) criarPedidoParaCarrinho(ctx context.Context, cartID, storeID s
 		return fmt.Errorf("reloading cart after order create: %w", err)
 	}
 	if fresh.ExternalOrderID == "" {
-		// Carrinho sem nenhum item vinculado ao ERP: não há pedido a criar.
+		// Carrinho sem nenhum item vinculado ao ERP (ex.: só produtos manuais):
+		// não há pedido a criar. Solta o estado de volta para 'none' — senão o
+		// carrinho fica preso em 'converting' e todo add-item futuro tenta mutar
+		// um pedido inexistente (MutateERPOrderItems → ErrCartNotConverted → 422).
+		// Manual fica manual: um carrinho que não tem nada de ERP não pode ficar
+		// preso na máquina de estado do ERP.
+		if _, relErr := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateConverting, OrderStateNone); relErr != nil {
+			logger.From(ctx, s.logger).Warn("failed to release converting state for ERP-less cart",
+				zap.String("cart_id", cartID),
+				zap.Error(relErr),
+			)
+		}
 		logger.From(ctx, s.logger).Info("cart has no ERP-linked items, order creation skipped",
 			zap.String("cart_id", cartID),
 		)
@@ -265,7 +313,7 @@ func (s *Service) retomarCriacaoPresa(ctx context.Context, cartID, storeID strin
 		return s.openCartOrder(ctx, storeID, cartID, adopted)
 	}
 
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return nil
 	}
@@ -465,7 +513,7 @@ func pedidoJaFaturado(situacao string) (bool, string) {
 // a apenas reservar, que é onde ele deveria estar. Não relançamos depois: quem
 // lança é o faturamento.
 func (s *Service) applyCartGridToOrder(ctx context.Context, cartID, storeID, orderID string, jaAplicada []providers.ERPOrderItem) ([]providers.ERPOrderItem, error) {
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return nil, fmt.Errorf("loading ERP integration: %w", err)
 	}
@@ -732,7 +780,7 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 		return fmt.Errorf("loading cart ERP order state: %w", err)
 	}
 
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return fmt.Errorf("loading ERP integration: %w", err)
 	}
@@ -858,8 +906,28 @@ func (s *Service) ConfirmERPOrderPayment(ctx context.Context, cartID, storeID st
 	if err := s.escreverNoERP(ctx, storeID, cartID, func(ctx context.Context) error {
 		return erpProvider.SetOrderSituacao(ctx, fresh.ExternalOrderID, providers.SituacaoAprovada)
 	}); err != nil {
-		s.collab.MarkFinalisationFailed(ctx, cartID, "aprovação do pedido falhou: "+err.Error())
-		return fmt.Errorf("approving order: %w", err)
+		// Um ERP que RECUSA a transição não pode travar a venda.
+		//
+		// É o caso da conta Bling cujos ids de situação não batem com a tabela
+		// semeada: o adapter se recusa a escrever um id que pode significar
+		// outra coisa, e está certo. Mas nesse ponto o pedido já existe no ERP,
+		// com os itens e o pagamento gravados — a venda ESTÁ lá. Abortar aqui
+		// deixaria o pior estado possível: pedido correto no ERP do lojista e
+		// carrinho eternamente "não confirmado" no LiveCart.
+		//
+		// A situação que fica é "Em aberto", que continua reservando a peça
+		// (medido em 30/08/2026). Fica ruidoso no log de propósito: é
+		// configuração faltando, não um erro do dia a dia.
+		if errors.Is(err, providers.ErrOperationNotSupported) {
+			logger.From(ctx, s.logger).Error("o ERP recusou mudar a situação do pedido pago; a venda segue confirmada no LiveCart",
+				zap.String("cart_id", cartID),
+				zap.String("external_order_id", fresh.ExternalOrderID),
+				zap.Error(err),
+			)
+		} else {
+			s.collab.MarkFinalisationFailed(ctx, cartID, "aprovação do pedido falhou: "+err.Error())
+			return fmt.Errorf("approving order: %w", err)
+		}
 	}
 
 	if _, err := s.repo.TransitionCartERPOrderState(ctx, cartID, fresh.State, OrderStateConfirmed); err != nil {
@@ -1141,7 +1209,7 @@ func (s *Service) adoptOrderByMarker(ctx context.Context, cartID, storeID string
 
 // providerFor resolve o cliente do ERP ativo da loja.
 func (s *Service) providerFor(ctx context.Context, storeID string) (providers.ERPProvider, error) {
-	erpIntegration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	erpIntegration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return nil, fmt.Errorf("loading ERP integration: %w", err)
 	}

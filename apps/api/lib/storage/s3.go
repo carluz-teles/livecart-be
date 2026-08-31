@@ -158,6 +158,55 @@ func (c *S3Client) GetPublicURL(key string) string {
 	return fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", c.bucket, c.region, key)
 }
 
+// NormalizeToKey converts a stored/submitted image reference into the canonical
+// S3 key when it points at OUR bucket, so the database always holds a stable key
+// (not an expiring presigned URL). External URLs (e.g. ERP product images on a
+// different host) and empty values are returned unchanged. Query strings are
+// stripped before matching so a presigned URL round-trips to its key.
+func (c *S3Client) NormalizeToKey(imageURL string) string {
+	if imageURL == "" {
+		return ""
+	}
+	trimmed := imageURL
+	if i := strings.IndexByte(trimmed, '?'); i >= 0 {
+		trimmed = trimmed[:i]
+	}
+	if !strings.HasPrefix(trimmed, "http") {
+		return trimmed // already a key
+	}
+	if key := c.extractKeyFromURL(trimmed); key != "" {
+		return key // our bucket → key
+	}
+	return imageURL // external URL (e.g. ERP) → keep as-is
+}
+
+// PresignImageURL turns a stored image reference into something a browser can
+// load: our keys (and our-bucket URLs) become a fresh presigned GET URL;
+// external URLs (ERP) and empty values pass through unchanged. This is the read
+// side of the private-bucket product image flow.
+func (c *S3Client) PresignImageURL(ctx context.Context, imageURL string) string {
+	if imageURL == "" {
+		return ""
+	}
+	key := imageURL
+	if strings.HasPrefix(imageURL, "http") {
+		trimmed := imageURL
+		if i := strings.IndexByte(trimmed, '?'); i >= 0 {
+			trimmed = trimmed[:i]
+		}
+		extracted := c.extractKeyFromURL(trimmed)
+		if extracted == "" {
+			return imageURL // external URL (ERP) → serve as-is
+		}
+		key = extracted
+	}
+	presigned, err := c.GeneratePresignedGetURL(ctx, key, 0)
+	if err != nil || presigned == "" {
+		return imageURL
+	}
+	return presigned
+}
+
 // DeleteFile deletes a file from S3
 func (c *S3Client) DeleteFile(ctx context.Context, url string) error {
 	return c.DeleteByKey(ctx, c.extractKeyFromURL(url))

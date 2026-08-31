@@ -60,6 +60,8 @@ type mockGateway struct {
 	gmv    int64
 	gmvErr error
 
+	refundCalls int // MarkCartRefunded
+
 	emittedByKey map[string]events.Envelope
 	emitOrder    []string
 	internalCmds []string
@@ -320,4 +322,14 @@ func TestService_DispatchPaymentProcess(t *testing.T) {
 	})
 	is.noErr(err)
 	is.eq([]string{string(events.PaymentProcess)}, gw.internalCmds)
+}
+
+// MarkCartRefunded espelha a escrita guardada: só carrinho PAGO vira estornado.
+func (m *mockGateway) MarkCartRefunded(_ context.Context, _ string) (string, string, bool, error) {
+	if m.cartStatus != "paid" {
+		return "", "", false, nil
+	}
+	m.cartStatus = "refunded"
+	m.refundCalls++
+	return m.liveEventID, "pay_original", true, nil
 }

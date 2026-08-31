@@ -93,6 +93,12 @@ type erpSimulado struct {
 	antesDoPut func()
 	// antesDaCriacao roda antes de cada POST /pedidos, pelo mesmo motivo.
 	antesDaCriacao func()
+	// recusarSituacao encena o ERP que NÃO SABE fazer a transição (o Bling com
+	// ids de situação que não batem com a tabela semeada). É diferente de
+	// falharSituacao, que é erro de verdade — e o fluxo trata os dois de forma
+	// diferente de propósito.
+	recusarSituacao bool
+	falharSituacao  bool
 }
 
 func novoERPSimulado(saldos map[string]int) *erpSimulado {
@@ -320,6 +326,13 @@ func (e *erpSimulado) ReverseOrderStock(_ context.Context, orderID string) error
 func (e *erpSimulado) SetOrderSituacao(_ context.Context, orderID string, situacao int) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.recusarSituacao {
+		return fmt.Errorf("%w: situação %d não mapeada nesta conta",
+			providers.ErrOperationNotSupported, situacao)
+	}
+	if e.falharSituacao {
+		return fmt.Errorf("a conexão caiu no meio da transição")
+	}
 	e.situacoes++
 	p := e.pedidos[orderID]
 	if p == nil {

@@ -175,7 +175,17 @@ type Service struct {
 	// espelhoDeProduto coalesce as releituras de saldo disparadas pelo webhook
 	// de estoque. Ver coalescencia.go. Construído sob demanda porque há testes
 	// que montam o Service por literal, sem passar por NewService.
-	espelhoDeProduto     *coalescedor
+	espelhoDeProduto *coalescedor
+	// coupons é o caminho REAL de aplicar cupom, usado pelo simulador de
+	// pagamentos de staging. Opcional: nil só desabilita aplicar cupom por lá.
+	coupons CouponApplier
+	// situacaoDePedido coalesce as releituras de situação disparadas pelo
+	// webhook de pedido. O Bling emite `order.updated` a cada mutação da
+	// grade, e numa live isso é um evento por comentário — sem coalescer,
+	// cada um custaria um GET do mesmo teto de 3 req/s que a live usa para
+	// criar os pedidos.
+	situacaoDePedido     *coalescedor
+	situacaoDePedidoOnce sync.Once
 	espelhoDeProdutoOnce sync.Once
 }
 
@@ -236,7 +246,7 @@ func (s *Service) erpProviderFor(ctx context.Context, integration *IntegrationRo
 // vale rodar com a loja quieta: durante a live há uma janela de segundos entre o
 // item entrar no carrinho e o pedido refletir no ERP.
 func (s *Service) RunStockReconciliation(ctx context.Context, storeID string) (*erp.ReconciliationReport, error) {
-	integration, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny")
+	integration, err := s.repo.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return nil, httpx.ErrNotFound("nenhuma integração ERP ativa")
 	}
@@ -250,7 +260,10 @@ func (s *Service) RunStockReconciliation(ctx context.Context, storeID string) (*
 	if !ok {
 		return nil, httpx.ErrNotFound("o provedor ERP não expõe leitura de saldo")
 	}
-	return erp.ReconcileStockAgainstERP(ctx, s.logger, s.repo, stockReader, storeID, "tiny")
+	// A fonte é a do ERP CONECTADO, não o literal 'tiny'. Com o literal, a
+	// reconciliação de uma loja Bling compara zero produtos e devolve um
+	// relatório limpo — que é pior do que não rodar, porque parece confirmação.
+	return erp.ReconcileStockAgainstERP(ctx, s.logger, s.repo, stockReader, storeID, integration.Provider)
 }
 
 // ResolveProvider satisfies erp.StockCollaborators: it maps the neutral
@@ -313,6 +326,16 @@ type erpRepoAdapter struct{ *Repository }
 
 func (a erpRepoAdapter) GetActiveByProvider(ctx context.Context, storeID, integrationType, provider string) (*erp.Integration, error) {
 	row, err := a.Repository.GetActiveByProvider(ctx, storeID, integrationType, provider)
+	if err != nil {
+		return nil, err
+	}
+	return erpIntegrationFromRow(row), nil
+}
+
+// GetActiveERP mapeia o ERP ativo da loja para a forma neutra. É o substituto
+// do antigo GetActiveByProvider com provider literal, em todo o fluxo de ERP.
+func (a erpRepoAdapter) GetActiveERP(ctx context.Context, storeID string) (*erp.Integration, error) {
+	row, err := a.Repository.GetActiveERP(ctx, storeID)
 	if err != nil {
 		return nil, err
 	}
@@ -792,6 +815,8 @@ func (s *Service) GetOAuthURL(ctx context.Context, input GetOAuthURLInput) (*Get
 		return s.getInstagramOAuthURL(input.StoreID)
 	case "melhor_envio":
 		return s.getMelhorEnvioOAuthURL(input.StoreID)
+	case "bling":
+		return s.getBlingOAuthURL(input.StoreID)
 	default:
 		return nil, httpx.ErrUnprocessable("unknown provider: " + input.Provider)
 	}
@@ -1013,6 +1038,8 @@ func (s *Service) HandleOAuthCallback(ctx context.Context, input OAuthCallbackIn
 		return s.handleInstagramCallback(ctx, input)
 	case "melhor_envio":
 		return s.handleMelhorEnvioCallback(ctx, input)
+	case "bling":
+		return s.handleBlingCallback(ctx, input)
 	default:
 		return nil, httpx.ErrUnprocessable("unknown provider: " + input.Provider)
 	}
@@ -3368,6 +3395,17 @@ func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductIn
 		return nil, fmt.Errorf("fetching product from ERP: %w", err)
 	}
 
+	// Imagem que EXPIRA vira imagem nossa, aqui e não antes.
+	//
+	// Aqui e não na BUSCA porque a busca é uma prévia que vive segundos e o
+	// lojista pode nem importar — copiar ali gastaria armazenamento por produto
+	// olhado. Aqui e não depois porque, depois, a URL assinada do Bling já pode
+	// ter vencido (a miniatura vale ~30 minutos) e não haveria o que copiar.
+	//
+	// Só toca URL efêmera: imagem do Tiny, ou `externa` do próprio lojista no
+	// Bling, passa intacta. Ver imagem_efemera.go.
+	s.reHospedarImagensDoProduto(ctx, input.StoreID, detailed)
+
 	// === Simple product (no variations) ===
 	if !detailed.IsParent || len(detailed.Variants) == 0 {
 		if len(input.VariantIDs) > 0 {
@@ -3418,10 +3456,10 @@ func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductIn
 			}
 		}
 		if len(filtered) == 0 {
-			return nil, httpx.ErrUnprocessable("nenhuma das variantIds informadas existe no produto Tiny")
+			return nil, httpx.ErrUnprocessable("nenhuma das variantIds informadas existe no produto do " + nomeAmigavelDoERP(integration.Provider))
 		}
 		if len(filtered) != len(input.VariantIDs) {
-			return nil, httpx.ErrUnprocessable("uma ou mais variantIds informadas não existem no produto Tiny")
+			return nil, httpx.ErrUnprocessable("uma ou mais variantIds informadas não existem no produto do " + nomeAmigavelDoERP(integration.Provider))
 		}
 		detailed.Variants = filtered
 	}
@@ -3515,10 +3553,36 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 	// only carries weight (or nothing).
 	s.applyStoreDefaultDimensions(ctx, input.StoreID, detailed)
 
-	// Update the local product. Manual sync always refreshes stock and pulls
-	// dimensions if the ERP returned them (detailed.Shipping non-nil).
-	if err := s.productSyncer.SyncProduct(ctx, input.StoreID, externalSource, *detailed, false); err != nil {
+	// O SALDO NÃO PASSA POR AQUI — `true` é "cuide de nome, preço e dimensões;
+	// do estoque cuido eu".
+	//
+	// Este caminho gravava o saldo do ERP CRU, sem compensar as unidades presas
+	// em carrinho e sem a trava otimista do erp_seq. Em 31/08/2026 ele repôs um
+	// saldo de 5 vinte e cinco segundos depois de o espelho ter feito a mesma
+	// coisa, e as duas escritas juntas apagaram três débitos que só existiam no
+	// razão relativo. O lojista clicou "Sincronizar" três vezes tentando
+	// consertar o número — e cada clique reinstalava o defeito.
+	if err := s.productSyncer.SyncProduct(ctx, input.StoreID, externalSource, *detailed, true); err != nil {
 		return nil, fmt.Errorf("syncing product: %w", err)
+	}
+
+	// E o saldo entra pela MESMA porta do espelho: compensado e sob a trava.
+	if detailed.StockKnown {
+		localID, seenSeq, seqErr := s.repo.ProductSeqByExternalID(ctx, input.StoreID, externalSource, externalID)
+		switch {
+		case seqErr != nil || localID == "":
+			logger.From(ctx, s.logger).Warn("manual sync could not read the product seq; stock left untouched",
+				zap.String("external_id", externalID), zap.Error(seqErr))
+		default:
+			portao := s.PortaoAPartirDoSaldoDoERP(ctx, integration, externalID, detailed.Stock)
+			if portao < 0 {
+				break
+			}
+			if _, err := s.repo.ApplyERPStockMirror(ctx, localID, portao, seenSeq); err != nil {
+				logger.From(ctx, s.logger).Warn("manual sync could not apply the stock gate",
+					zap.String("external_id", externalID), zap.Error(err))
+			}
+		}
 	}
 
 	logger.From(ctx, s.logger).Info("product synced manually",
@@ -3572,6 +3636,11 @@ const (
 func (s *Service) coalescedorDeEspelho() *coalescedor {
 	s.espelhoDeProdutoOnce.Do(func() { s.espelhoDeProduto = novoCoalescedor() })
 	return s.espelhoDeProduto
+}
+
+func (s *Service) coalescedorDeSituacao() *coalescedor {
+	s.situacaoDePedidoOnce.Do(func() { s.situacaoDePedido = novoCoalescedor() })
+	return s.situacaoDePedido
 }
 
 func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, externalProductID string) (bool, error) {
@@ -3680,6 +3749,54 @@ func (s *Service) processProductWebhook(ctx context.Context, storeID, provider, 
 	return false, lastErr
 }
 
+// PortaoAPartirDoSaldoDoERP é a ÚNICA conta que transforma um saldo lido do ERP
+// no valor do portão de admissão. Devolve -1 quando não dá para compensar, e
+// nesse caso o chamador NÃO pode escrever.
+//
+// A invariante que ela existe para manter:
+//
+//	products.stock == saldo do ERP − unidades vivas que esse saldo ainda não desconta
+//
+// É única porque a pluralidade era o defeito. Havia TRÊS escritas absolutas
+// sobre products.stock com defesas diferentes — o espelho do webhook (com esta
+// compensação), o botão "Sincronizar" e a edição do produto (sem nenhuma) — e o
+// contador da live é um razão RELATIVO: cada comentário debita, cada
+// cancelamento credita. Uma escrita absoluta apaga em silêncio os débitos
+// pendentes, e o crédito que depois solta aquelas mesmas unidades soma sobre a
+// base nova assim mesmo. O portão ganha exatamente o número de unidades que
+// estavam presas em carrinho no instante da escrita.
+//
+// Medido em staging em 31/08/2026, produto 16698953100:
+//
+//	5 → −1 = 4 → +2 = 6 → −1 −1 = 4 → +3 = 7      com 5 peças no Bling
+//
+// e o 16698952209 chegou a OITO unidades ofertadas de cinco físicas.
+func (s *Service) PortaoAPartirDoSaldoDoERP(
+	ctx context.Context, integration *IntegrationRow, externalProductID string, saldoERP int,
+) int {
+	modo := erp.ModoDeReservaDaIntegracao(integration.Provider, integration.Metadata)
+
+	prometido, err := s.repo.SumPromisedNotYetReflected(
+		ctx, integration.StoreID, integration.Provider, externalProductID,
+		modo != erp.ReservaNativaDoERP,
+	)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("could not read promised units; the local counter stays untouched",
+			zap.String("external_product_id", externalProductID), zap.Error(err))
+		return -1
+	}
+	portao := erpwrite.Admissivel(saldoERP, prometido)
+	if prometido > 0 {
+		logger.From(ctx, s.logger).Info("stock mirror discounted units the ERP balance does not reflect",
+			zap.String("external_product_id", externalProductID),
+			zap.String("modo_reserva", string(modo)),
+			zap.Int("erp_available", saldoERP),
+			zap.Int("promised_not_reflected", prometido),
+			zap.Int("admissible", portao))
+	}
+	return portao
+}
+
 func (s *Service) processProductSync(ctx context.Context, integration *IntegrationRow, externalProductID string) (stockMirrorOutcome, error) {
 	provider, err := s.createProviderFromRow(ctx, integration)
 	if err != nil {
@@ -3752,27 +3869,26 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		// Produto que o lojista nao importou. O ERP notifica sobre o catalogo
 		// inteiro dele; nos so espelhamos o que existe aqui.
 	default:
-		// O saldo disponível do ERP é verdadeiro para o ERP e INCOMPLETO para nós
-		// por alguns segundos: entre o comentário baixar o contador local e o
+		// O saldo disponível do ERP é verdadeiro para o ERP e pode ser
+		// INCOMPLETO para nós: entre o comentário baixar o contador local e o
 		// pedido de venda existir lá, aquela unidade não aparece em `disponivel`.
 		// Gravá-lo cru nesse intervalo reabastece o portão com estoque que já tem
 		// dono — foi assim que 25 admissões saíram de 20 unidades em 26/08, com o
 		// ERP terminando em −13.
 		//
-		// A conta desconta só o que o ERP ainda NÃO conhece: carrinho vivo e sem
-		// pedido. Assim que o pedido existe, o `disponivel` já o desconta, e
-		// somá-lo aqui seria descontar duas vezes.
-		saldoParaOPortao := detailed.Stock
-		if prometido, voErr := s.repo.SumPromisedWithoutERPOrder(ctx, externalProductID); voErr != nil {
-			logger.From(ctx, s.logger).Warn("could not read promised-but-unsent units; mirroring the raw ERP balance",
-				zap.String("external_product_id", externalProductID), zap.Error(voErr))
-		} else if prometido > 0 {
-			saldoParaOPortao = erpwrite.Admissivel(detailed.Stock, prometido)
-			logger.From(ctx, s.logger).Info("stock mirror discounted units promised before the order existed",
-				zap.String("external_product_id", externalProductID),
-				zap.Int("erp_available", detailed.Stock),
-				zap.Int("promised_without_order", prometido),
-				zap.Int("admissible", saldoParaOPortao))
+		// QUANTO descontar depende do modo de reserva, e não do relógio:
+		//
+		//	nativa → o pedido já tirou a peça do `disponivel` lá. Só carrinho
+		//	         SEM pedido é invisível para o ERP.
+		//	local  → o ERP não sabe de carrinho nenhum. Tudo conta.
+		//
+		// Confundir os dois desconta em dobro no modo nativo, e foi o que
+		// aconteceu: o Bling dizia 3 disponíveis e o LiveCart gravava 1.
+		saldoParaOPortao := s.PortaoAPartirDoSaldoDoERP(ctx, integration, externalProductID, detailed.Stock)
+		if saldoParaOPortao < 0 {
+			// Não deu para compensar. Preservar o contador é o lado seguro;
+			// escrever o saldo cru aqui é justamente o que inflou o portão.
+			return stockMirrorStale, nil
 		}
 
 		applied, applyErr := s.repo.ApplyERPStockMirror(ctx, localProductID, saldoParaOPortao, seenSeq)
@@ -4216,6 +4332,11 @@ func (s *Service) CartPaymentStatus(ctx context.Context, cartID string) (string,
 	return cart.PaymentStatus, nil
 }
 
+// MarkCartRefunded aplica a escrita guardada do estorno manual. Ver a query.
+func (s *Service) MarkCartRefunded(ctx context.Context, cartID string) (string, string, bool, error) {
+	return s.repo.MarkCartRefunded(ctx, cartID)
+}
+
 // UpdateCartPaymentStatus applies the guarded cart payment write. It returns
 // paymentdomain.ErrCartNotPayable (the sentinel the repo now returns) when the
 // cart expired/cancelled between the charge and the webhook, and the cart's
@@ -4316,12 +4437,30 @@ func (s *Service) emitERPOrderFinalized(ctx context.Context, storeID, cartID str
 	if fresh, err := s.repo.GetCartForPaidOrder(ctx, cartID); err == nil {
 		externalOrderID = fresh.ExternalOrderID
 	}
+	provider := s.providerDaLoja(ctx, storeID)
 	_ = events.EmitInternal(ctx, s.repo.queries, events.ERPOrderFinalized, "erp.order_finalized:"+cartID, struct {
 		StoreID         string `json:"store_id"`
 		CartID          string `json:"cart_id"`
 		ExternalOrderID string `json:"external_order_id"`
 		Provider        string `json:"provider"`
-	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: "tiny"})
+	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: provider})
+}
+
+// providerDaLoja diz qual ERP está conectado, para os fatos do grupo G não
+// mentirem o nome do ERP.
+//
+// Os três fatos (order_created, order_finalized, finalization_failed) traziam
+// o literal "tiny" mesmo num pedido do Bling. Ninguém RAMIFICA nesse campo
+// hoje, e é justamente por isso que o erro passaria despercebido até alguém
+// investigar um pedido pelo evento e procurá-lo no ERP errado.
+//
+// Best-effort de propósito: emitir o fato é mais importante do que nomear o
+// provider, e o fato é emitido fora da transação principal.
+func (s *Service) providerDaLoja(ctx context.Context, storeID string) string {
+	if integracao, err := s.repo.GetActiveERP(ctx, storeID); err == nil && integracao != nil {
+		return integracao.Provider
+	}
+	return ""
 }
 
 // markFinalisationFailed grava o estado 'failed' com o erro e loga falhas da
@@ -4354,7 +4493,7 @@ func (s *Service) emitERPFinalizationFailed(ctx context.Context, cartID, reason 
 		ExternalOrderID string `json:"external_order_id"`
 		Provider        string `json:"provider"`
 		Reason          string `json:"reason"`
-	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: "tiny", Reason: reason})
+	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: s.providerDaLoja(ctx, storeID), Reason: reason})
 }
 
 // =============================================================================
@@ -5127,7 +5266,7 @@ func (s *Service) createERPOrderForCart(ctx context.Context, erpProvider provide
 		CartID          string `json:"cart_id"`
 		ExternalOrderID string `json:"external_order_id"`
 		Provider        string `json:"provider"`
-	}{StoreID: storeID, CartID: cart.ID, ExternalOrderID: result.OrderID, Provider: "tiny"})
+	}{StoreID: storeID, CartID: cart.ID, ExternalOrderID: result.OrderID, Provider: integration.Provider})
 
 	logger.From(ctx, s.logger).Info("ERP order created for cart — no stock movement, the order is the reservation",
 		zap.String("cart_id", cart.ID),
@@ -6598,3 +6737,139 @@ func (s *Service) CreateSimulatedSessionOnAir(ctx context.Context, storeID, even
 	}
 	return SessaoNoAr{EventID: eventID, SessionID: sess.ID, MediaID: mediaID}, nil
 }
+
+// =============================================================================
+// MODO DE RESERVA DE ESTOQUE
+// =============================================================================
+
+// explicacaoDaCapacidade conta ao lojista o que sabemos, e como sabemos.
+func explicacaoDaCapacidade(provider string, confirmada bool) string {
+	if provider == "tiny" {
+		return "no Tiny o pedido de venda É a reserva — confira o módulo na sua conta"
+	}
+	if confirmada {
+		return "já observamos este ERP segurando estoque"
+	}
+	return "ainda não observamos este ERP segurando estoque"
+}
+
+// comoLigarReservaNoBling é o passo a passo, com as palavras que aparecem na
+// tela do Bling. Genérico ("vá nas configurações") faria o lojista procurar.
+const comoLigarReservaNoBling = "No Bling: clique no ícone do perfil da sua empresa → " +
+	"Todas as configurações → Suprimentos → Estoque → ative " +
+	"\"Considerar situações de vendas para obter o saldo atual (Reserva de estoque)\" e salve. " +
+	"Só o usuário administrador da conta consegue."
+
+// LerModoDeReserva devolve o modo escolhido, o efetivo e o porquê da diferença.
+func (s *Service) LerModoDeReserva(ctx context.Context, integrationID string) (*ModoDeReservaResponse, error) {
+	integracao, err := s.repo.GetByIDOnly(ctx, integrationID)
+	if err != nil {
+		return nil, err
+	}
+	return s.retratoDoModoDeReserva(ctx, integracao), nil
+}
+
+// DefinirModoDeReserva grava a escolha do lojista.
+//
+// Grava o que ele PEDIU, não o efetivo. Guardar o efetivo apagaria a intenção:
+// se ele escolher "nativa" antes de ligar a configuração no ERP, o modo tem de
+// passar a valer sozinho assim que ele ligar — sem precisar voltar aqui e
+// escolher de novo uma coisa que ele já escolheu.
+func (s *Service) DefinirModoDeReserva(ctx context.Context, input SetModoDeReservaInput) (*ModoDeReservaResponse, error) {
+	integracao, err := s.repo.GetByIDOnly(ctx, input.IntegrationID)
+	if err != nil {
+		return nil, err
+	}
+	if integracao.Type != string(providers.ProviderTypeERP) {
+		return nil, httpx.ErrUnprocessable("modo de reserva só se aplica a integração de ERP")
+	}
+
+	metadata := integracao.Metadata
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	// O MODO NATIVO EXIGE PROVA, e não um clique.
+	//
+	// Sem isto o aviso "sua escolha ainda não está valendo" era um bilhete numa
+	// porta destrancada: a tela avisava, o backend gravava assim mesmo, e na
+	// live o LiveCart parava de segurar a peça achando que o ERP a segurava.
+	// Ninguém segurava, e a mesma peça era vendida duas vezes.
+	//
+	// A prova é observada, não perguntada: disponível < físico em qualquer
+	// leitura de saldo. E o Tiny está isento — lá o pedido de venda É a reserva,
+	// por desenho do produto; o que o lojista precisa conferir no painel do Tiny
+	// nós já dizemos a ele, e não há nada que possamos fazer por ele.
+	if input.Modo == erp.ReservaNativaDoERP &&
+		!erp.CapacidadeConfirmada(integracao.Provider, integracao.Metadata) {
+		return nil, httpx.DomainError(422, httpx.CodeValidationFailed,
+			"ainda não observamos este ERP segurando estoque, então não dá para "+
+				"delegar a reserva a ele — o LiveCart venderia a mesma peça duas vezes. "+
+				comoLigarReservaNoBling)
+	}
+
+	metadata[erp.ChaveModoDeReserva] = string(input.Modo)
+	if err := s.repo.UpdateMetadata(ctx, integracao.ID, metadata); err != nil {
+		return nil, fmt.Errorf("gravando o modo de reserva: %w", err)
+	}
+	integracao.Metadata = metadata
+
+	logger.From(ctx, s.logger).Info("modo de reserva de estoque alterado",
+		zap.String("integration_id", integracao.ID),
+		zap.String("provider", integracao.Provider),
+		zap.String("modo", string(input.Modo)),
+	)
+	return s.retratoDoModoDeReserva(ctx, integracao), nil
+}
+
+// retratoDoModoDeReserva junta a escolha do lojista com a capacidade medida.
+func (s *Service) retratoDoModoDeReserva(ctx context.Context, integracao *IntegrationRow) *ModoDeReservaResponse {
+	escolhido := erp.ModoDeReservaDaIntegracao(integracao.Provider, integracao.Metadata)
+
+	// O veredito vem do que já foi OBSERVADO, e não de uma sondagem ao vivo.
+	//
+	// Sondar aqui era duas coisas ruins ao mesmo tempo: custava até dez leituras
+	// do ERP no caminho crítico de abrir um diálogo (9,8 s medidos, o navegador
+	// desistia), e devolvia "não sei" sempre que nenhum produto tivesse reserva
+	// naquele instante — que é o estado normal fora de live. Ou seja: gastava
+	// caro para quase nunca responder.
+	//
+	// A resposta certa chega sozinha, de graça, em todo webhook de estoque:
+	// disponível < físico prova que a conta reserva. Ver ObservarCapacidade.
+	confirmada := erp.CapacidadeConfirmada(integracao.Provider, integracao.Metadata)
+	sonda := erp.ResultadoDaSonda{
+		ReservaLigada: confirmada,
+		Conclusiva:    confirmada,
+		Explicacao:    explicacaoDaCapacidade(integracao.Provider, confirmada),
+	}
+	efetivo, motivo := erp.EscolherModo(escolhido, sonda)
+
+	out := &ModoDeReservaResponse{
+		Modo:                 string(escolhido),
+		ModoEfetivo:          string(efetivo),
+		Motivo:               motivo,
+		Preco:                efetivo.PrecoParaOLojista(),
+		CapacidadeConfirmada: sonda.Conclusiva && sonda.ReservaLigada,
+	}
+	// O passo a passo só aparece quando resolve alguma coisa: mostrá-lo para
+	// quem já está com a reserva funcionando é ruído.
+	if escolhido == erp.ReservaNativaDoERP && efetivo != erp.ReservaNativaDoERP &&
+		integracao.Provider == string(providers.ProviderBling) {
+		out.ComoLigarNoERP = comoLigarReservaNoBling
+	}
+	return out
+}
+
+// A SONDA AO VIVO FOI REMOVIDA, e a remoção é a correção.
+//
+// Ela lia até dez produtos do ERP no caminho crítico de abrir um diálogo — 9,8
+// segundos medidos em staging, com o navegador desistindo quatro vezes — e
+// respondia "não sei" sempre que nenhum produto tivesse reserva naquele
+// instante, que é o estado normal fora de live. Gastava caro para quase nunca
+// responder.
+//
+// A resposta chega sozinha, de graça: disponível < físico em qualquer leitura
+// de saldo prova que a conta reserva. Ver erp.ObservarCapacidade e
+// observarCapacidadeDeReserva, no bling_webhook.go.
+//
+// Não deixei a função aqui "por precaução": código morto que custa dez leituras
+// do ERP é armadilha para quem for chamá-lo sem ler este comentário.

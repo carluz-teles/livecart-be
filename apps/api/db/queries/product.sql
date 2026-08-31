@@ -143,7 +143,7 @@ WHERE id = sqlc.arg(id) AND erp_seq = sqlc.arg(seen_seq)::bigint;
 SELECT id, name, external_id
 FROM products
 WHERE store_id = sqlc.arg(store_id)::uuid
-  AND external_source = 'tiny'
+  AND external_source = sqlc.arg(external_source)
   AND external_id IS NOT NULL AND external_id <> ''
   AND stock > 0
 ORDER BY updated_at DESC NULLS LAST

@@ -212,5 +212,5 @@ func (s *Service) EmitERPOrderCancelled(ctx context.Context, storeID, cartID, ex
 		ExternalOrderID string `json:"external_order_id"`
 		Provider        string `json:"provider"`
 		Reason          string `json:"reason"`
-	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: "tiny", Reason: reason})
+	}{StoreID: storeID, CartID: cartID, ExternalOrderID: externalOrderID, Provider: s.providerDaLoja(ctx, storeID), Reason: reason})
 }

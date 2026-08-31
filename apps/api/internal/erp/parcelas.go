@@ -214,6 +214,14 @@ func extratoDeParcelas(pagamentos []CartPayment, desconto, saldo int64) []provid
 			AmountCents: p.AmountCents,
 			DueDate:     p.PaidAt,
 			Note:        notaDePagamento(p),
+			// O instrumento vai no campo ESTRUTURADO, e não só no texto. É ele
+			// que vira o `tPag` do XML da NF-e, a linha do fechamento de caixa
+			// e a conta da DRE — a observação é para o lojista ler, o campo é
+			// para o ERP contabilizar.
+			//
+			// Cada cobrança tem o SEU método: um carrinho pago em PIX e depois
+			// completado no cartão gera duas parcelas com formas diferentes.
+			Method: p.Method,
 		})
 	}
 	if desconto > 0 {
@@ -223,6 +231,10 @@ func extratoDeParcelas(pagamentos []CartPayment, desconto, saldo int64) []provid
 			AmountCents: desconto,
 			DueDate:     pagamentos[len(pagamentos)-1].PaidAt,
 			Note:        "DESCONTO concedido (cupom/PIX) - nao cobrar",
+			// Method VAZIO de propósito: desconto não é instrumento de
+			// pagamento. Vazio significa "não sei", e quem resolve a forma cai
+			// na padrão da conta EM SILÊNCIO — sem isso toda venda com desconto
+			// PIX geraria um aviso falso e o alarme morreria de ruído.
 		})
 	}
 	if saldo > 0 {
@@ -230,6 +242,7 @@ func extratoDeParcelas(pagamentos []CartPayment, desconto, saldo int64) []provid
 			AmountCents: saldo,
 			DueDate:     time.Now().Add(prazoDoSaldo),
 			Note:        "A PAGAR - itens acrescentados depois do pagamento",
+			// Method vazio: ninguém pagou isto ainda. Ver a nota do DESCONTO.
 		})
 	}
 	return parcelas

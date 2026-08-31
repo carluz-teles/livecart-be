@@ -63,7 +63,7 @@ type PlanConfig struct {
 	Plan        Plan
 	Name        string
 	Prices      map[BillingInterval]IntervalPrice // empty for Enterprise (dashboard-managed)
-	SelfService bool                               // Enterprise is dashboard-managed
+	SelfService bool                              // Enterprise is dashboard-managed
 }
 
 // Plans returns the plan registry with price IDs resolved from env.

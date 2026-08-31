@@ -36,7 +36,7 @@ func (s *Service) FinalizeOrConfirm(ctx context.Context, cartID, storeID string,
 // replays afterwards.
 func (s *Service) OnOrderPaid(ctx context.Context, cartID, storeID string, snapshotJSON []byte) error {
 	ctx = logger.WithStore(ctx, storeID, "")
-	if _, err := s.repo.GetActiveByProvider(ctx, storeID, "erp", "tiny"); err != nil {
+	if _, err := s.repo.GetActiveERP(ctx, storeID); err != nil {
 		return nil // no active ERP integration — nothing to finalise
 	}
 	var status *providers.PaymentStatus

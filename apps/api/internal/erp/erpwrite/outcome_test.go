@@ -16,6 +16,8 @@ import (
 	"net"
 	"syscall"
 	"testing"
+
+	"livecart/apps/api/lib/ratelimit"
 )
 
 func classeEsperada(status int) Outcome {
@@ -190,5 +192,32 @@ func TestMatrizCompletaDaClassificacao(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// A recusa do limitador é "NÃO APLICADO", e não "não sei".
+//
+// É a metade que TEM de vir antes de afrouxar o teto de escrita. Ao dar mais
+// vazão ao balde de cima, quem passa a frear é o limitador do provider — e se a
+// recusa dele fosse lida como timeout ambíguo, cada live trocaria "algumas
+// compradoras falham" por "carrinho pago travado", que é estritamente pior.
+func TestRecusaDoLimitadorEhNaoAplicado(t *testing.T) {
+	// Dispatched: true de propósito — é o caso REAL. A recusa do limitador do
+	// provider acontece DENTRO da chamada, abaixo de quem monta o Attempt, e
+	// portanto depois de o chamador já ter marcado que despachou. Sem esta
+	// checagem o erro cairia no ramo do timeout ambíguo.
+	got := Classify(Attempt{Dispatched: true, Err: ratelimit.ErrNaoDespachado})
+	if got != NotApplied {
+		t.Errorf("classificou como %v, queria NotApplied — a recusa acontece ANTES "+
+			"de qualquer byte sair, e o que não saiu é seguro repetir", got)
+	}
+}
+
+// E um timeout DE VERDADE continua ambíguo — a correção não pode vazar para ele.
+func TestTimeoutDeRedeContinuaAmbiguo(t *testing.T) {
+	got := Classify(Attempt{Dispatched: true, Err: context.DeadlineExceeded})
+	if got != Unknown {
+		t.Errorf("classificou DeadlineExceeded cru como %v, queria Unknown: o ERP "+
+			"pode ter processado e demorado a responder", got)
 	}
 }

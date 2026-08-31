@@ -19,6 +19,8 @@ import (
 	"net"
 	"net/http"
 	"syscall"
+
+	"livecart/apps/api/lib/ratelimit"
 )
 
 // Outcome é a classificação de uma tentativa de escrita. É deliberadamente
@@ -97,6 +99,13 @@ func Classify(a Attempt) Outcome {
 	// foi acrescentado depois de a suíte de corridas flagrar exatamente isso.
 	if a.Err == nil {
 		return Applied
+	}
+
+	// A recusa do limitador vem ANTES do exame de timeout, e tem de vir: ela
+	// EMBRULHA DeadlineExceeded, então cairia no ramo do ambíguo. Mas ela não é
+	// ambígua — nenhum byte saiu, e é isso que a torna segura de repetir.
+	if errors.Is(a.Err, ratelimit.ErrNaoDespachado) {
+		return NotApplied
 	}
 
 	// Sem status, com erro: erro de transporte. Só falha de DISCAGEM prova

@@ -165,8 +165,43 @@ func (r *Repository) GetCartERPOpAge(ctx context.Context, cartID string) (time.D
 
 // SumPromisedWithoutERPOrder devolve as unidades que a live já prometeu e que o
 // ERP ainda não conhece — carrinho vivo, sem pedido criado.
+//
+// ⚠ Só o Tiny: a query tem 'tiny' literal e não filtra por loja. Substituída por
+// SumPromisedNotYetReflected; fica enquanto os call sites migram.
 func (r *Repository) SumPromisedWithoutERPOrder(ctx context.Context, externalProductID string) (int, error) {
 	n, err := r.queries.SumPromisedWithoutERPOrder(ctx, pgtype.Text{String: externalProductID, Valid: true})
+	return int(n), err
+}
+
+// SumPromisedNotYetReflected devolve as unidades prometidas que o SALDO LIDO do
+// ERP ainda NÃO desconta.
+//
+// `contaComPedido` diz se um carrinho que JÁ tem pedido no ERP deve entrar na
+// conta, e sai do modo de reserva:
+//
+//	reserva LOCAL  → true.  O ERP não sabe de nada nosso; tudo que está vivo
+//	                        precisa ser descontado do saldo lido.
+//	reserva NATIVA → false. O pedido JÁ tirou a peça do `disponivel` lá;
+//	                        descontá-la aqui de novo tira duas vezes.
+//
+// Existiu aqui um JanelaDeAtrasoDoERP de 45 s que fazia esse papel pelo relógio
+// — carrinho com pedido recente continuava contando. Era errado, e errado
+// SEMPRE: numa live todo carrinho está dentro dos 45 s, então toda reserva era
+// descontada em dobro. Medido em staging em 31/08/2026, com o Bling em reserva
+// nativa: o ERP dizia 3 disponíveis e o LiveCart gravava 1.
+func (r *Repository) SumPromisedNotYetReflected(
+	ctx context.Context, storeID, externalSource, externalProductID string, contaComPedido bool,
+) (int, error) {
+	loja, err := parseUUID(storeID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := r.queries.SumPromisedNotYetReflected(ctx, sqlc.SumPromisedNotYetReflectedParams{
+		ExternalProductID: pgtype.Text{String: externalProductID, Valid: true},
+		ExternalSource:    externalSource,
+		StoreID:           loja,
+		ContaComPedido:    contaComPedido,
+	})
 	return int(n), err
 }
 

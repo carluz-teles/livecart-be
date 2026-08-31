@@ -302,6 +302,11 @@ func (h *Handler) respondWithDetail(c *fiber.Ctx, orderID, storeID string) error
 // motivo das demais: o order não importa o payment.
 type ManualPaymentConfirmer interface {
 	ConfirmManualPayment(ctx context.Context, cartID, storeID string) error
+	// ConfirmManualRefund é a ação inversa, e passa pelo MESMO caminho: emite o
+	// fato cart.refunded para que os reatores façam o resto. Escrever a coluna
+	// direto deixava o pedido preso em "Precisam atenção" e a Order, o pedido no
+	// ERP, o cupom, o e-mail e a comissão todos sem saber do estorno.
+	ConfirmManualRefund(ctx context.Context, cartID, storeID string) error
 }
 
 // SetManualPaymentConfirmer liga o payment.Service no boot.

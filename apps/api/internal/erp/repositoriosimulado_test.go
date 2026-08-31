@@ -39,6 +39,11 @@ type carrinhoSimulado struct {
 }
 
 type repoSimulado struct {
+	// provider deixa um teste escolher o ERP da loja (default "tiny").
+	provider string
+	// metadata deixa um teste escolher o modo de reserva da integração.
+	metadata map[string]any
+
 	mu        sync.Mutex
 	carrinhos map[string]*carrinhoSimulado
 	estoque   map[string]int
@@ -101,6 +106,21 @@ func (r *repoSimulado) GetActiveByProvider(context.Context, string, string, stri
 
 func (r *repoSimulado) GetByProvider(ctx context.Context, s, t, p string) (*Integration, error) {
 	return r.GetActiveByProvider(ctx, s, t, p)
+}
+
+// GetActiveERP devolve o ERP da loja sem olhar provider. O campo `provider` do
+// simulado é configurável para que um teste possa afirmar o comportamento com
+// Bling — que é justamente o que GetActiveByProvider(..., "tiny") não permitia
+// exercitar.
+func (r *repoSimulado) GetActiveERP(context.Context, string) (*Integration, error) {
+	if r.semIntegracao {
+		return nil, pgx.ErrNoRows
+	}
+	prov := r.provider
+	if prov == "" {
+		prov = "tiny"
+	}
+	return &Integration{ID: "int-1", StoreID: "loja-1", Provider: prov, Metadata: r.metadata}, nil
 }
 
 func (r *repoSimulado) AcquireCartFinalisationLock(_ context.Context, cartID string) (func(), bool, error) {
@@ -379,6 +399,9 @@ type colabSimulado struct {
 	// ERPs diferentes, e a sequência que os testes afirmam deixaria de existir.
 	erp  providers.ERPProvider
 	repo *repoSimulado
+	// contatoID deixa o ensaio contra o ERP REAL usar um contato que existe
+	// mesmo na conta. Vazio = o contato de mentira dos testes de fluxo.
+	contatoID string
 
 	mu             sync.Mutex
 	espelhos       int
@@ -400,7 +423,14 @@ func (c *colabSimulado) ResolveExternalProduct(_ context.Context, _, produtoID s
 }
 
 func (c *colabSimulado) ResolveERPContact(context.Context, providers.ERPProvider, *Integration, string, string, string, string, string, string, string) (string, error) {
-	return "contato-1", nil
+	return c.contato(), nil
+}
+
+func (c *colabSimulado) contato() string {
+	if c.contatoID != "" {
+		return c.contatoID
+	}
+	return "contato-1"
 }
 
 // CreateERPOrderForCart faz o que o colaborador de verdade faz: monta a grade a
@@ -424,7 +454,7 @@ func (c *colabSimulado) CreateERPOrderForCart(ctx context.Context, p providers.E
 	if len(grade) == 0 {
 		return nil, nil // carrinho sem item vinculado: nada a criar, e nada gravado
 	}
-	res, err := p.CreateOrder(ctx, providers.ERPOrder{ExternalID: cartID, ContactID: "contato-1", Items: grade})
+	res, err := p.CreateOrder(ctx, providers.ERPOrder{ExternalID: cartID, ContactID: c.contato(), Items: grade})
 	if err != nil {
 		return nil, err
 	}
@@ -599,7 +629,7 @@ func (r *repoSimulado) esvaziarCarrinho(cartID string) {
 }
 
 // ListERPLinkedProductsSample: a amostra que a checagem do módulo de Reserva lê.
-func (r *repoSimulado) ListERPLinkedProductsSample(_ context.Context, _ string, limite int) ([]ERPLinkedProduct, error) {
+func (r *repoSimulado) ListERPLinkedProductsSample(_ context.Context, _ string, _ string, limite int) ([]ERPLinkedProduct, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]ERPLinkedProduct, 0, limite)

@@ -70,9 +70,9 @@ func (r DrainLegacyReservationsRequest) ToInput(storeID string) DrainLegacyReser
 // DrainLegacyReservationsInput é o input do usecase.
 type DrainLegacyReservationsInput struct {
 	MaxSeconds int
-	StoreID string
-	DryRun  bool
-	Limite  int
+	StoreID    string
+	DryRun     bool
+	Limite     int
 }
 
 // DrainOutcomeResponse é o que aconteceu com um carrinho.
@@ -90,17 +90,17 @@ type DrainOutcomeResponse struct {
 type DrainLegacyReservationsResponse struct {
 	DryRun bool `json:"dryRun"`
 	// Carts e Units descrevem o trabalho TOTAL pendente, não só o desta passada.
-	Carts         int                    `json:"carts"`
-	Units         int                    `json:"units"`
-	OrdersCreated int                    `json:"ordersCreated"`
-	RowsReversed  int                    `json:"rowsReversed"`
-	Failed        int                    `json:"failed"`
+	Carts         int `json:"carts"`
+	Units         int `json:"units"`
+	OrdersCreated int `json:"ordersCreated"`
+	RowsReversed  int `json:"rowsReversed"`
+	Failed        int `json:"failed"`
 	// PorTempo: parou pelo orçamento de tempo, há mais para fazer.
 	PorTempo bool `json:"stoppedOnTime"`
 	// JaRodando: outra passada estava em curso; nada foi feito.
-	JaRodando bool `json:"alreadyRunning"`
-	TookSeconds   float64                `json:"tookSeconds"`
-	Outcomes      []DrainOutcomeResponse `json:"outcomes"`
+	JaRodando   bool                   `json:"alreadyRunning"`
+	TookSeconds float64                `json:"tookSeconds"`
+	Outcomes    []DrainOutcomeResponse `json:"outcomes"`
 }
 
 // DrainLegacyReservations troca a guarda do estoque das saídas manuais para os

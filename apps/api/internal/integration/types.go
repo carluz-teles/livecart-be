@@ -4,10 +4,13 @@ import (
 	"context"
 	"time"
 
+	validation "github.com/go-ozzo/ozzo-validation/v4"
+
 	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/internal/live"
 	paymentdomain "livecart/apps/api/internal/payment"
+	"livecart/apps/api/lib/httpx"
 	"livecart/apps/api/lib/query"
 )
 
@@ -771,4 +774,57 @@ type VipActivation struct {
 	// dois pedidos: o comprador vê no carrinho e a loja para de vender uma
 	// unidade que existe. Precisa de gente.
 	OrdersStuck int
+}
+
+// =============================================================================
+// MODO DE RESERVA DE ESTOQUE
+// =============================================================================
+
+// SetModoDeReservaRequest é o corpo de PUT .../erp/modo-reserva.
+type SetModoDeReservaRequest struct {
+	// Modo: "nativa" (o ERP reserva) ou "local" (o contador do LiveCart segura).
+	Modo string `json:"modo"`
+}
+
+func (r SetModoDeReservaRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.Modo, validation.Required,
+			validation.In(string(erp.ReservaNativaDoERP), string(erp.ReservaSomenteLocal))),
+	)
+}
+
+// SetModoDeReservaInput é o input do usecase.
+type SetModoDeReservaInput struct {
+	IntegrationID string
+	Modo          erp.ModoDeReserva
+}
+
+func (r SetModoDeReservaRequest) ToInput(integrationID string) (SetModoDeReservaInput, error) {
+	m := erp.ModoDeReserva(r.Modo)
+	if !m.Valido() {
+		return SetModoDeReservaInput{}, httpx.ErrUnprocessable("modo de reserva inválido: " + r.Modo)
+	}
+	return SetModoDeReservaInput{IntegrationID: integrationID, Modo: m}, nil
+}
+
+// ModoDeReservaResponse é o retrato que a tela desenha.
+type ModoDeReservaResponse struct {
+	// Modo é o que o lojista ESCOLHEU.
+	Modo string `json:"modo"`
+	// ModoEfetivo é o que o LiveCart vai USAR de verdade.
+	//
+	// Pode diferir do escolhido: pedir "nativa" numa conta que não reserva cai
+	// para "local", porque acreditar que o ERP está segurando a peça enquanto
+	// ninguém está é vender a mesma peça duas vezes. A tela mostra os dois, e o
+	// motivo, senão o lojista escolhe e não entende por que nada mudou.
+	ModoEfetivo string `json:"modoEfetivo"`
+	// Motivo explica a diferença entre escolhido e efetivo, em português.
+	Motivo string `json:"motivo"`
+	// Preco é a consequência do modo efetivo para o negócio dele.
+	Preco string `json:"preco"`
+	// CapacidadeConfirmada diz se a sonda conseguiu provar que a conta reserva.
+	// Falso NÃO significa "não reserva" — significa "não deu para afirmar".
+	CapacidadeConfirmada bool `json:"capacidadeConfirmada"`
+	// ComoLigarNoERP é o passo a passo, mostrado quando a capacidade falta.
+	ComoLigarNoERP string `json:"comoLigarNoErp,omitempty"`
 }

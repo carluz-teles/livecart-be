@@ -363,60 +363,100 @@ var baselineRawThrows = map[string]bool{
 	"integration.Repository.CreateShipment:\"invalid order id\"":                                                                true,
 	"integration.Repository.CreateShipment:\"invalid store id\"":                                                                true,
 	"integration.Repository.GetActiveByProvider:\"active integration not found\"":                                               true,
-	"integration.Repository.GetByID:\"integration not found\"":                                                                  true,
-	"integration.Repository.GetByIDOnly:\"integration not found\"":                                                              true,
-	"integration.Repository.GetByProvider:\"integration not found\"":                                                            true,
-	"integration.Repository.GetShipmentByOrderID:\"invalid order id\"":                                                          true,
-	"integration.Repository.InsertTrackingEvents:\"invalid shipment id\"":                                                       true,
-	"integration.Repository.ListTrackingEvents:\"invalid shipment id\"":                                                         true,
-	"integration.Repository.UpdateShipmentInvoice:\"invalid shipment id\"":                                                      true,
-	"integration.Repository.UpdateShipmentLabels:\"invalid shipment id\"":                                                       true,
-	"integration.Repository.UpdateShipmentStatus:\"invalid shipment id\"":                                                       true,
-	"integration.Repository.getShipmentByIDForStore:\"invalid shipment id\"":                                                    true,
-	"integration.Repository.getShipmentByIDForStore:\"invalid store id\"":                                                       true,
-	"integration.Repository.getShipmentByIDForStore:\"shipment not found\"":                                                     true,
-	"integration.Service.CancelCart:\"carrinho não pode ser cancelado: já foi pago, expirou ou já estava cancelado\"":           true,
-	"integration.Service.CancelCart:\"pagamento em processamento para este carrinho — tente novamente em instantes\"":           true,
-	"integration.Service.ConnectPagarme#0":                                                                                      true,
-	"integration.Service.ConnectPagarme#1":                                                                                      true,
-	"integration.Service.ConnectPagarme:\"as chaves precisam ser do mesmo ambiente (ambas de teste ou ambas de produção)\"":     true,
-	"integration.Service.ConnectPagarme:\"chave pública inválida — deve começar com pk_\"":                                      true,
-	"integration.Service.ConnectPagarme:\"chave pública é obrigatória\"":                                                        true,
-	"integration.Service.ConnectPagarme:\"chave secreta inválida — deve começar com sk_\"":                                      true,
-	"integration.Service.ConnectPagarme:\"chave secreta é obrigatória\"":                                                        true,
-	"integration.Service.ConnectSmartEnvios#0":                                                                                  true,
-	"integration.Service.ConnectSmartEnvios#1":                                                                                  true,
-	"integration.Service.ConnectSmartEnvios:\"env must be 'sandbox' or 'production'\"":                                          true,
-	"integration.Service.ConnectSmartEnvios:\"token is required\"":                                                              true,
-	"integration.Service.ConnectWhatsApp:\"integração WhatsApp indisponível: credenciais Twilio não configuradas\"":             true,
-	"integration.Service.Create#0":                                                                                              true,
-	"integration.Service.GetCommunicationProvider:\"failed to cast to communication provider\"":                                 true,
-	"integration.Service.GetCommunicationProvider:\"nenhuma integração WhatsApp configurada para esta loja\"":                   true,
-	"integration.Service.GetERPProvider:\"failed to cast to ERP provider\"":                                                     true,
-	"integration.Service.GetERPProvider:\"integration is not an ERP provider\"":                                                 true,
-	"integration.Service.GetOAuthURL#0":                                                                                         true,
-	"integration.Service.GetPagarmeWebhookStatus:\"integration is not Pagar.me\"":                                               true,
-	"integration.Service.GetProviderURLs#0":                                                                                     true,
-	"integration.Service.GetShippingProvider:\"no active shipping integration for this store\"":                                 true,
-	"integration.Service.GetShippingProviderByName#0":                                                                           true,
-	"integration.Service.GetShippingProviderByName:\"failed to cast to shipping provider\"":                                     true,
-	"integration.Service.GetSocialProvider:\"failed to cast to social provider\"":                                               true,
-	"integration.Service.GetSocialProvider:\"integration is not a social provider\"":                                            true,
-	"integration.Service.HandleOAuthCallback#0":                                                                                 true,
-	"integration.Service.ImportERPProduct:\"nenhuma das variantIds informadas existe no produto Tiny\"":                         true,
-	"integration.Service.ImportERPProduct:\"product group syncer not configured\"":                                              true,
-	"integration.Service.ImportERPProduct:\"product syncer not configured\"":                                                    true,
-	"integration.Service.ImportERPProduct:\"produto já importado neste catálogo\"":                                              true,
-	"integration.Service.ImportERPProduct:\"uma ou mais variantIds informadas não existem no produto Tiny\"":                    true,
-	"integration.Service.ImportERPProduct:\"variantIds informado mas o produto não possui variações\"":                          true,
-	"integration.Service.RunPagarmeWebhookLiveTest#0":                                                                           true,
-	"integration.Service.RunPagarmeWebhookLiveTest:\"URL de webhook indisponível — verifique a configuração do servidor\"":      true,
-	"integration.Service.RunPagarmeWebhookLiveTest:\"integration is not Pagar.me\"":                                             true,
-	"integration.Service.SearchProducts:\"Produto encontrado, mas sem estoque disponível no momento\"":                          true,
-	"integration.Service.SearchProducts:\"Produto não encontrado no ERP\"":                                                      true,
-	"integration.Service.SendWhatsAppTemplate:\"nenhum template WhatsApp aprovado configurado para esta loja\"":                 true,
-	"integration.Service.SyncProductManual:\"integração não corresponde à origem do produto\"":                                  true,
-	"integration.Service.SyncProductManual:\"product syncer not configured\"":                                                   true,
+	// GetActiveERP e GetActiveERPByAccount devolvem o MESMO not-found cru de
+	// propósito: elas substituem GetActiveByProvider nos call sites de ERP, e
+	// quatro deles distinguem "loja sem ERP" (pular em silêncio) de erro real
+	// justamente por este erro. Trocar a forma aqui mudaria o comportamento de
+	// quem já trata o caso — a migração para Code, se vier, tem de ser das três
+	// juntas.
+	"integration.Repository.GetActiveERP:\"active integration not found\"":          true,
+	"integration.Repository.GetActiveERPByAccount:\"active integration not found\"": true,
+
+	// Fluxo OAuth do Bling. Todos são configuração ausente ou validação de
+	// entrada — a categoria que a política desta lista já admite crua — e as
+	// mensagens são escritas para o LOJISTA ler na tela, não para código
+	// ramificar em cima.
+	"integration.Service.getBlingOAuthURL#0":                                                true,
+	"integration.Service.getBlingOAuthURL:\"Aplicativo Bling não configurado no servidor\"": true,
+	// Estorno manual e a transição de pagamento: config ausente e not-found, as
+	// duas categorias que esta lista já admite cruas. As mensagens são para o
+	// LOJISTA ler na tela, não para código ramificar em cima — quem ramifica usa
+	// os httpx.Code* que as outras recusas do mesmo fluxo carregam.
+	"order.Service.aplicarTransicaoDePagamento:\"serviço de pagamento não configurado\"": true,
+	"payment.Service.ConfirmManualRefund:\"pedido não encontrado\"":                      true,
+
+	"integration.Service.handleBlingCallback#0": true,
+	// #1 é a regra de UM ERP por loja aplicada no callback. A mensagem é montada
+	// com o nome amigável do ERP já conectado, então a chave é posicional. O
+	// banco também a garante (uniq_integrations_store_one_erp, migration 000061);
+	// esta camada existe para o lojista ler uma frase em vez de um 500.
+	"integration.Service.handleBlingCallback#1":                                                                   true,
+	"integration.Service.handleBlingCallback:\"Aplicativo Bling não configurado no servidor\"":                    true,
+	"integration.Service.handleBlingCallback:\"Autorização expirada ou já utilizada. Tente conectar novamente.\"": true,
+
+	// Modo de reserva de estoque: validação de entrada (o ozzo já barra o valor
+	// fora do enum; estes são a segunda camada) e uma regra de tipo de
+	// integração. Categoria que a política já admite crua.
+	"integration.Service.DefinirModoDeReserva:\"modo de reserva só se aplica a integração de ERP\"":                         true,
+	"integration.SetModoDeReservaRequest.ToInput#0":                                                                         true,
+	"integration.Repository.GetByID:\"integration not found\"":                                                              true,
+	"integration.Repository.GetByIDOnly:\"integration not found\"":                                                          true,
+	"integration.Repository.GetByProvider:\"integration not found\"":                                                        true,
+	"integration.Repository.GetShipmentByOrderID:\"invalid order id\"":                                                      true,
+	"integration.Repository.InsertTrackingEvents:\"invalid shipment id\"":                                                   true,
+	"integration.Repository.ListTrackingEvents:\"invalid shipment id\"":                                                     true,
+	"integration.Repository.UpdateShipmentInvoice:\"invalid shipment id\"":                                                  true,
+	"integration.Repository.UpdateShipmentLabels:\"invalid shipment id\"":                                                   true,
+	"integration.Repository.UpdateShipmentStatus:\"invalid shipment id\"":                                                   true,
+	"integration.Repository.getShipmentByIDForStore:\"invalid shipment id\"":                                                true,
+	"integration.Repository.getShipmentByIDForStore:\"invalid store id\"":                                                   true,
+	"integration.Repository.getShipmentByIDForStore:\"shipment not found\"":                                                 true,
+	"integration.Service.CancelCart:\"carrinho não pode ser cancelado: já foi pago, expirou ou já estava cancelado\"":       true,
+	"integration.Service.CancelCart:\"pagamento em processamento para este carrinho — tente novamente em instantes\"":       true,
+	"integration.Service.ConnectPagarme#0":                                                                                  true,
+	"integration.Service.ConnectPagarme#1":                                                                                  true,
+	"integration.Service.ConnectPagarme:\"as chaves precisam ser do mesmo ambiente (ambas de teste ou ambas de produção)\"": true,
+	"integration.Service.ConnectPagarme:\"chave pública inválida — deve começar com pk_\"":                                  true,
+	"integration.Service.ConnectPagarme:\"chave pública é obrigatória\"":                                                    true,
+	"integration.Service.ConnectPagarme:\"chave secreta inválida — deve começar com sk_\"":                                  true,
+	"integration.Service.ConnectPagarme:\"chave secreta é obrigatória\"":                                                    true,
+	"integration.Service.ConnectSmartEnvios#0":                                                                              true,
+	"integration.Service.ConnectSmartEnvios#1":                                                                              true,
+	"integration.Service.ConnectSmartEnvios:\"env must be 'sandbox' or 'production'\"":                                      true,
+	"integration.Service.ConnectSmartEnvios:\"token is required\"":                                                          true,
+	"integration.Service.ConnectWhatsApp:\"integração WhatsApp indisponível: credenciais Twilio não configuradas\"":         true,
+	"integration.Service.Create#0":                                                                                          true,
+	"integration.Service.GetCommunicationProvider:\"failed to cast to communication provider\"":                             true,
+	"integration.Service.GetCommunicationProvider:\"nenhuma integração WhatsApp configurada para esta loja\"":               true,
+	"integration.Service.GetERPProvider:\"failed to cast to ERP provider\"":                                                 true,
+	"integration.Service.GetERPProvider:\"integration is not an ERP provider\"":                                             true,
+	"integration.Service.GetOAuthURL#0":                                                                                     true,
+	"integration.Service.GetPagarmeWebhookStatus:\"integration is not Pagar.me\"":                                           true,
+	"integration.Service.GetProviderURLs#0":                                                                                 true,
+	"integration.Service.GetShippingProvider:\"no active shipping integration for this store\"":                             true,
+	"integration.Service.GetShippingProviderByName#0":                                                                       true,
+	"integration.Service.GetShippingProviderByName:\"failed to cast to shipping provider\"":                                 true,
+	"integration.Service.GetSocialProvider:\"failed to cast to social provider\"":                                           true,
+	"integration.Service.GetSocialProvider:\"integration is not a social provider\"":                                        true,
+	"integration.Service.HandleOAuthCallback#0":                                                                             true,
+	"integration.Service.ImportERPProduct:\"product group syncer not configured\"":                                          true,
+	"integration.Service.ImportERPProduct:\"product syncer not configured\"":                                                true,
+	"integration.Service.ImportERPProduct:\"produto já importado neste catálogo\"":                                          true,
+	// #0 e #1 são as duas recusas de variantIds. Deixaram de ter chave por
+	// mensagem porque a mensagem passou a nomear o ERP CONECTADO — antes elas
+	// diziam "produto Tiny" numa loja Bling. Continuam sendo validação de
+	// entrada, a categoria que esta lista admite crua.
+	"integration.Service.ImportERPProduct#0": true,
+	"integration.Service.ImportERPProduct#1": true,
+	"integration.Service.ImportERPProduct:\"variantIds informado mas o produto não possui variações\"":                     true,
+	"integration.Service.RunPagarmeWebhookLiveTest#0":                                                                      true,
+	"integration.Service.RunPagarmeWebhookLiveTest:\"URL de webhook indisponível — verifique a configuração do servidor\"": true,
+	"integration.Service.RunPagarmeWebhookLiveTest:\"integration is not Pagar.me\"":                                        true,
+	"integration.Service.SearchProducts:\"Produto encontrado, mas sem estoque disponível no momento\"":                     true,
+	"integration.Service.SearchProducts:\"Produto não encontrado no ERP\"":                                                 true,
+	"integration.Service.SendWhatsAppTemplate:\"nenhum template WhatsApp aprovado configurado para esta loja\"":            true,
+	"integration.Service.SyncProductManual:\"integração não corresponde à origem do produto\"":                             true,
+	"integration.Service.SyncProductManual:\"product syncer not configured\"":                                              true,
 	// Guarda de configuração: o enfileirador da releitura em massa não foi
 	// injetado (Redis/eventos ausentes). Mesma natureza dos "not configured"
 	// vizinhos — o lojista não tem o que fazer com um código aqui.

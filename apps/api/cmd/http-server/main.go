@@ -39,6 +39,7 @@ import (
 
 	"livecart/apps/api/internal/billing"
 	"livecart/apps/api/internal/cart"
+	"livecart/apps/api/internal/catalog"
 	"livecart/apps/api/internal/checkout"
 	"livecart/apps/api/internal/coupon"
 	couponlisteners "livecart/apps/api/internal/coupon/listeners"
@@ -480,9 +481,16 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 			// Create provider factory with constructors
 			providerFactory := providers.NewFactory(providers.FactoryConfig{
-				Logger:                  log,
-				MercadoPagoAppID:        config.MercadoPagoAppID.String(),
-				MercadoPagoAppSecret:    config.MercadoPagoAppSecret.String(),
+				Logger:               log,
+				MercadoPagoAppID:     config.MercadoPagoAppID.String(),
+				MercadoPagoAppSecret: config.MercadoPagoAppSecret.String(),
+				// Credenciais do APLICATIVO Bling (app único do LiveCart). Sem
+				// elas o factory recusa construir o provider, e o worker de token
+				// falha toda renovação com "client_id e client_secret são
+				// obrigatórios" — que foi exatamente como este esquecimento
+				// apareceu, no primeiro ciclo do worker com uma loja Bling.
+				BlingClientID:           config.BlingClientID.String(),
+				BlingClientSecret:       config.BlingClientSecret.String(),
 				MelhorEnvioClientID:     config.MelhorEnvioClientID.String(),
 				MelhorEnvioClientSecret: config.MelhorEnvioClientSecret.String(),
 				MelhorEnvioEnv:          config.MelhorEnvioEnv.StringOr("sandbox"),
@@ -528,6 +536,19 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						Credentials:   cfg.Credentials,
 						ClientID:      cfg.ClientID,
 						ClientSecret:  cfg.ClientSecret,
+						Logger:        cfg.Logger,
+						LogFunc:       cfg.LogFunc,
+						RateLimiter:   cfg.RateLimiter,
+					})
+				},
+				BlingConstructor: func(cfg providers.BlingConfig) (providers.ERPProvider, error) {
+					return erp.NewBling(erp.BlingConfig{
+						IntegrationID: cfg.IntegrationID,
+						StoreID:       cfg.StoreID,
+						Credentials:   cfg.Credentials,
+						ClientID:      cfg.ClientID,
+						ClientSecret:  cfg.ClientSecret,
+						ContaID:       cfg.ContaID,
 						Logger:        cfg.Logger,
 						LogFunc:       cfg.LogFunc,
 						RateLimiter:   cfg.RateLimiter,
@@ -565,10 +586,17 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 			// Set log function for providers
 			providerFactory = providers.NewFactory(providers.FactoryConfig{
-				Logger:                  log,
-				LogFunc:                 integrationSvc.LogIntegrationOperation,
-				MercadoPagoAppID:        config.MercadoPagoAppID.String(),
-				MercadoPagoAppSecret:    config.MercadoPagoAppSecret.String(),
+				Logger:               log,
+				LogFunc:              integrationSvc.LogIntegrationOperation,
+				MercadoPagoAppID:     config.MercadoPagoAppID.String(),
+				MercadoPagoAppSecret: config.MercadoPagoAppSecret.String(),
+				// Credenciais do APLICATIVO Bling (app único do LiveCart). Sem
+				// elas o factory recusa construir o provider, e o worker de token
+				// falha toda renovação com "client_id e client_secret são
+				// obrigatórios" — que foi exatamente como este esquecimento
+				// apareceu, no primeiro ciclo do worker com uma loja Bling.
+				BlingClientID:           config.BlingClientID.String(),
+				BlingClientSecret:       config.BlingClientSecret.String(),
 				MelhorEnvioClientID:     config.MelhorEnvioClientID.String(),
 				MelhorEnvioClientSecret: config.MelhorEnvioClientSecret.String(),
 				MelhorEnvioEnv:          config.MelhorEnvioEnv.StringOr("sandbox"),
@@ -614,6 +642,19 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 						Credentials:   cfg.Credentials,
 						ClientID:      cfg.ClientID,
 						ClientSecret:  cfg.ClientSecret,
+						Logger:        cfg.Logger,
+						LogFunc:       cfg.LogFunc,
+						RateLimiter:   cfg.RateLimiter,
+					})
+				},
+				BlingConstructor: func(cfg providers.BlingConfig) (providers.ERPProvider, error) {
+					return erp.NewBling(erp.BlingConfig{
+						IntegrationID: cfg.IntegrationID,
+						StoreID:       cfg.StoreID,
+						Credentials:   cfg.Credentials,
+						ClientID:      cfg.ClientID,
+						ClientSecret:  cfg.ClientSecret,
+						ContaID:       cfg.ContaID,
 						Logger:        cfg.Logger,
 						LogFunc:       cfg.LogFunc,
 						RateLimiter:   cfg.RateLimiter,
@@ -905,7 +946,7 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	productRepo := product.NewRepository(queries, pool)
 	productSvc := product.NewService(productRepo, log)
-	productHandler := product.NewHandler(productSvc)
+	productHandler := product.NewHandler(productSvc, s3Client)
 	productHandler.RegisterRoutes(storeScoped)
 
 	productGroupRepo := productgroup.NewRepository(queries, pool)
@@ -921,6 +962,11 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 
 	liveHandler := live.NewHandler(liveSvc, validate)
 	liveHandler.RegisterRoutes(storeScoped)
+
+	catalogSvc := catalog.NewService(catalog.NewRepository(queries, pool), s3Client, log)
+	catalogHandler := catalog.NewHandler(catalogSvc)
+	catalogHandler.RegisterRoutes(storeScoped)
+	catalogHandler.RegisterPublicRoutes(app)
 
 	orderRepo := order.NewRepository(pool)
 	orderSvc := order.NewService(orderRepo, log)
@@ -1032,6 +1078,38 @@ func newApp(log *zap.Logger, pool *pgxpool.Pool, queries *sqlc.Queries, validate
 		// dentro de RegisterSimulatorRoutes: em produção nada é montado, e o
 		// servidor devolve 404 porque não há o que servir. Ver simulador_live.go.
 		integrationWebhookHandler.RegisterSimulatorRoutes(storeScoped)
+
+		// Simulador de PAGAMENTOS — mesma regra, mesmo motivo. Ver
+		// simulador_pagamento.go. O aplicador de cupom é o serviço REAL: o
+		// simulador não tem um desconto próprio, ele aplica um cupom que existe.
+		integrationSvc.SetCouponApplier(integration.NovoAplicadorDeCupom(
+			func(ctx context.Context, cartToken, code string) (int64, error) {
+				res, err := couponSvc.ApplyToCart(ctx, cartToken, code)
+				if err != nil {
+					return 0, err
+				}
+				return res.AppliedValueCents, nil
+			},
+			func(ctx context.Context, eventID, storeID string) ([]integration.CupomDoEvento, error) {
+				lista, err := couponSvc.List(ctx, eventID, storeID)
+				if err != nil {
+					return nil, err
+				}
+				out := make([]integration.CupomDoEvento, 0, len(lista))
+				for _, c := range lista {
+					if !c.Active() {
+						continue
+					}
+					out = append(out, integration.CupomDoEvento{
+						Codigo: c.Code(), Tipo: string(c.Type()),
+						PercentBPS: c.PercentBPS(), ValorCents: c.ValueCents(),
+						EventID: c.EventID(),
+					})
+				}
+				return out, nil
+			},
+		))
+		integrationWebhookHandler.RegisterPaymentSimulatorRoutes(storeScoped)
 
 		// Payment admin routes (Bloco B1c) — Pagar.me connect + webhook
 		// diagnostics extracted into payment.Handler. Same /integrations group,
