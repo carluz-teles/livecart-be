@@ -6,12 +6,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"go.uber.org/zap"
 
+	"livecart/apps/api/internal/erp"
 	"livecart/apps/api/internal/integration/providers"
 	"livecart/apps/api/lib/config"
 	"livecart/apps/api/lib/logger"
@@ -210,7 +212,7 @@ func (h *WebhookHandler) enfileirarEventoBling(
 		// ⚠ NÃO parsear `data` além do id: a forma dela não está verificada em
 		// fonte nenhuma. Um GET do pedido devolve situação, notaFiscal e grade
 		// de uma vez, e é imune à forma do payload.
-		log.Info("bling webhook: pedido/nota — releitura pendente de implementação (fase 3)")
+		h.service.despacharPedidoBling(ctx, integracao, env)
 
 	default:
 		log.Debug("bling webhook: recurso sem tratamento")
@@ -271,4 +273,98 @@ func (s *Service) despacharProdutoBling(ctx context.Context, integracao *Integra
 				zap.String("external_product_id", produtoID), zap.Error(err))
 		}
 	}()
+}
+
+// despacharPedidoBling reage a uma mudança no pedido de venda.
+//
+// Era o buraco que fechava o ciclo pela metade: o evento chegava, era logado
+// como "fase 3 pendente" e descartado. O lojista cancelou dois pedidos no
+// Bling em 31/08/2026, o estoque de lá voltou corretamente, e o LiveCart
+// continuou com os dois carrinhos vivos segurando 5 unidades — 10 promessas
+// contra 5 peças, com o portão aberto para vender de novo o que já tinha dono.
+//
+// A reação em si NÃO é nova nem específica do Bling: ObserveOrderStatus já
+// cancela o carrinho, marca pagamento lançado por fora e ressuscita carrinho
+// quando o pedido volta a viver. Só faltava o Bling chegar até ela.
+func (s *Service) despacharPedidoBling(
+	ctx context.Context, integracao *IntegrationRow, env BlingEnvelope,
+) {
+	var d struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(env.Data, &d); err != nil || d.ID == 0 {
+		logger.From(ctx, s.logger).Warn("bling webhook: evento de pedido sem id legível",
+			zap.String("bling_event", env.Event), zap.Error(err))
+		return
+	}
+	pedidoID := strconv.FormatInt(d.ID, 10)
+	storeID := integracao.StoreID
+
+	go func() {
+		bg := logger.WithStore(context.WithoutCancel(ctx), storeID, "")
+		log := logger.From(bg, s.logger).With(
+			zap.String("bling_event", env.Event),
+			zap.String("external_order_id", pedidoID),
+		)
+
+		// Coalesce por pedido. O Bling emite `order.updated` a cada mutação da
+		// grade, e numa live isso é um evento por comentário do mesmo carrinho.
+		// Sem isto, cada um custaria um GET do teto de 3 req/s que a live já usa
+		// para criar os pedidos — a mesma correção que o espelho de estoque
+		// precisou, pelo mesmo motivo.
+		rodou, err := s.coalescedorDeSituacao().Fazer(storeID+"|"+pedidoID, func() error {
+			return s.observarSituacaoDoPedidoBling(bg, integracao, pedidoID, env.Event)
+		})
+		if !rodou {
+			log.Debug("bling: leitura de situação absorvida por outra em curso")
+			return
+		}
+		if err != nil {
+			log.Error("bling: falha ao observar a situação do pedido", zap.Error(err))
+		}
+	}()
+}
+
+// observarSituacaoDoPedidoBling lê a situação atual e entrega ao rastreamento.
+//
+// Um GET, e não o payload: a forma de `data` não está verificada em fonte
+// nenhuma, e a leitura devolve a situação normalizada (`situacao.valor`), que
+// vale em qualquer conta — ao contrário do `id`, que é do lojista.
+func (s *Service) observarSituacaoDoPedidoBling(
+	ctx context.Context, integracao *IntegrationRow, pedidoID, evento string,
+) error {
+	prov, err := s.createProviderFromRow(ctx, integracao)
+	if err != nil {
+		return fmt.Errorf("criando o provider: %w", err)
+	}
+	leitor, ok := prov.(interface {
+		GetOrderSituacao(ctx context.Context, orderID string) (int, error)
+	})
+	if !ok {
+		return nil // provider sem leitura de situação: nada a observar
+	}
+
+	canonico, err := leitor.GetOrderSituacao(ctx, pedidoID)
+	if err != nil {
+		return fmt.Errorf("lendo a situação do pedido %s: %w", pedidoID, err)
+	}
+
+	status, conhecido := providers.ERPOrderStatusFromSituacao(canonico)
+	if !conhecido {
+		// "Não sei" explícito. O Bling tem situações sem análogo no nosso enum
+		// (parciais, "em digitação"), e inventar uma faria o rastreamento
+		// concluir coisa que ninguém afirmou.
+		logger.From(ctx, s.logger).Debug("bling: situação sem análogo no núcleo; nada a observar",
+			zap.String("external_order_id", pedidoID), zap.Int("canonico", canonico))
+		return nil
+	}
+
+	logger.From(ctx, s.logger).Info("bling: situação do pedido observada",
+		zap.String("external_order_id", pedidoID),
+		zap.String("bling_event", evento),
+		zap.String("status", string(status)),
+	)
+	return s.ERP().ObserveOrderStatus(
+		ctx, integracao.StoreID, pedidoID, "", status, erp.StatusSourceWebhook, nil,
+	)
 }

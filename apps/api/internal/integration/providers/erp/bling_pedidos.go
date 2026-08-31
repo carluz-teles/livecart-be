@@ -637,7 +637,9 @@ func (b *Bling) GetOrderSituacao(ctx context.Context, orderID string) (int, erro
 		return 0, err
 	}
 	if p.Situacao == nil {
-		return 0, nil
+		// Ausente é diferente de zero: zero é "Em aberto", um estágio real.
+		return providers.SituacaoDesconhecida, fmt.Errorf(
+			"bling: pedido %s veio sem o campo situacao", orderID)
 	}
 	b.corroborarTabelaPadrao(p.Situacao.ID, p.Situacao.Valor)
 	if canonico, ok := situacaoCanonicaDoValor(p.Situacao.Valor); ok {
@@ -646,7 +648,10 @@ func (b *Bling) GetOrderSituacao(ctx context.Context, orderID string) (int, erro
 		b.aprenderSituacao(canonico, p.Situacao.ID)
 		return canonico, nil
 	}
-	return 0, nil
+	// Situação REAL do Bling sem análogo honesto aqui (parciais, "em
+	// andamento", "em digitação"). Devolver zero diria "Em aberto", que é uma
+	// afirmação — e das perigosas: ela faz VoltouAViver() ser verdadeiro.
+	return providers.SituacaoDesconhecida, nil
 }
 
 // aprenderSituacao guarda o par (canônico → id da conta) observado numa leitura.

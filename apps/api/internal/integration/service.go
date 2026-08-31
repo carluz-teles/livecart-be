@@ -175,7 +175,14 @@ type Service struct {
 	// espelhoDeProduto coalesce as releituras de saldo disparadas pelo webhook
 	// de estoque. Ver coalescencia.go. Construído sob demanda porque há testes
 	// que montam o Service por literal, sem passar por NewService.
-	espelhoDeProduto     *coalescedor
+	espelhoDeProduto *coalescedor
+	// situacaoDePedido coalesce as releituras de situação disparadas pelo
+	// webhook de pedido. O Bling emite `order.updated` a cada mutação da
+	// grade, e numa live isso é um evento por comentário — sem coalescer,
+	// cada um custaria um GET do mesmo teto de 3 req/s que a live usa para
+	// criar os pedidos.
+	situacaoDePedido     *coalescedor
+	situacaoDePedidoOnce sync.Once
 	espelhoDeProdutoOnce sync.Once
 }
 
@@ -3600,6 +3607,11 @@ const (
 func (s *Service) coalescedorDeEspelho() *coalescedor {
 	s.espelhoDeProdutoOnce.Do(func() { s.espelhoDeProduto = novoCoalescedor() })
 	return s.espelhoDeProduto
+}
+
+func (s *Service) coalescedorDeSituacao() *coalescedor {
+	s.situacaoDePedidoOnce.Do(func() { s.situacaoDePedido = novoCoalescedor() })
+	return s.situacaoDePedido
 }
 
 func (s *Service) ProcessProductWebhook(ctx context.Context, storeID, provider, externalProductID string) (bool, error) {

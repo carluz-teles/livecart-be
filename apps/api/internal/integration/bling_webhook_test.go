@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -144,5 +146,29 @@ func TestRecursoDoEventoEhOPrefixoAteOPonto(t *testing.T) {
 		if got != querRecurso {
 			t.Errorf("recurso de %q = %q, queria %q", evento, got, querRecurso)
 		}
+	}
+}
+
+// ─── FASE 3: o evento de pedido não pode voltar a ser descartado ────────────
+//
+// O buraco que fechava o ciclo pela metade. O lojista cancelou dois pedidos no
+// Bling em 31/08/2026: o estoque de lá voltou certo, e o LiveCart continuou com
+// os dois carrinhos vivos segurando 5 unidades — 10 promessas contra 5 peças.
+// O evento CHEGAVA e era descartado com um log de "fase 3 pendente".
+//
+// Catraca de FONTE porque o sintoma é silêncio: o webhook chega, responde 200,
+// e nada acontece. Nenhum teste de comportamento falharia.
+func TestEventoDePedidoDoBlingNaoEhMaisDescartado(t *testing.T) {
+	fonte, err := os.ReadFile("bling_webhook.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(fonte), "releitura pendente de implementação") {
+		t.Error("o evento de pedido voltou a ser descartado — o cancelamento no ERP " +
+			"deixa de chegar ao carrinho, e o carrinho segue segurando peça que o " +
+			"ERP já liberou")
+	}
+	if !strings.Contains(string(fonte), "despacharPedidoBling") {
+		t.Error("o handler de pedido sumiu")
 	}
 }

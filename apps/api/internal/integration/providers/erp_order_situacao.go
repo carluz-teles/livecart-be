@@ -23,6 +23,17 @@ const (
 	SituacaoEntregue         = 6
 	SituacaoCancelada        = 2
 	SituacaoNaoEntregue      = 9
+
+	// SituacaoDesconhecida é "o ERP respondeu, e o que ele disse não tem
+	// análogo aqui".
+	//
+	// Precisa ser um valor FORA da faixa porque zero já significa "Em aberto",
+	// um estágio real. O adapter do Bling devolvia zero para "não sei", e um
+	// pedido em "Em andamento" chegava ao rastreamento como ABERTO — o que faz
+	// VoltouAViver() ser verdadeiro e pode ressuscitar um carrinho cancelado.
+	// O adapter do Tiny já trazia o aviso no comentário; eu o ignorei ao
+	// escrever o do Bling.
+	SituacaoDesconhecida = -1
 )
 
 // ERPOrderStatus é a situação do pedido como o LiveCart a guarda. Deliberadamente

@@ -3,6 +3,7 @@ package erp
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -462,8 +463,12 @@ func TestBlingValor3NaoViraAprovada(t *testing.T) {
 		t.Error("o valor 3 do Bling (Em andamento) virou SituacaoAprovada — " +
 			"são coisas diferentes, e a coincidência numérica é armadilha")
 	}
-	if got != 0 {
-		t.Errorf("sem análogo honesto a resposta devia ser 0 (não sei), veio %d", got)
+	// "Não sei" é SituacaoDesconhecida, e NÃO zero: zero é "Em aberto", um
+	// estágio real. Esta asserção já exigiu zero — e era ela que deixava passar
+	// o disfarce que ressuscitava carrinho cancelado.
+	if got != providers.SituacaoDesconhecida {
+		t.Errorf("sem análogo honesto a resposta devia ser SituacaoDesconhecida (%d), veio %d",
+			providers.SituacaoDesconhecida, got)
 	}
 }
 
@@ -478,8 +483,10 @@ func TestBlingParciaisNaoArredondamParaCima(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != 0 {
-			t.Errorf("valor %d virou situação %d — parcial não é concluído", valor, got)
+		if got != providers.SituacaoDesconhecida {
+			t.Errorf("valor %d virou situação %d — parcial não é concluído, e a resposta "+
+				"tem de ser SituacaoDesconhecida (%d), nunca zero (Em aberto)",
+				valor, got, providers.SituacaoDesconhecida)
 		}
 	}
 }
@@ -789,5 +796,97 @@ func TestErroDoBlingCarregaOCampoQueFalhou(t *testing.T) {
 		if !strings.Contains(msg, querido) {
 			t.Errorf("a mensagem não traz %q: %s", querido, msg)
 		}
+	}
+}
+
+// A situação lida do pedido vira o status canônico que o rastreamento entende.
+//
+// É o que faz um cancelamento no Bling chegar ao carrinho: ObserveOrderStatus
+// já sabe cancelar o carrinho, marcar pagamento lançado por fora e ressuscitar
+// — só faltava o Bling traduzir a situação para o vocabulário dele.
+func TestSituacaoLidaViraStatusCanonico(t *testing.T) {
+	casos := []struct {
+		nome    string
+		valor   int
+		quero   providers.ERPOrderStatus
+		observa bool
+	}{
+		{"cancelado", 2, providers.ERPOrderStatusCancelado, true},
+		{"em aberto", 0, providers.ERPOrderStatusAberto, true},
+		{"atendido vira faturado", 1, providers.ERPOrderStatusFaturado, true},
+		// "Em andamento" não tem análogo honesto: não afirma aprovação.
+		// Inventar um faria o rastreamento concluir o que ninguém disse.
+		{"em andamento não observa", 3, "", false},
+		{"aguardando pagamento não observa", 7, "", false},
+	}
+
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			var gets int
+			b, _ := bancadaBling(t, func(w http.ResponseWriter, r *http.Request) {
+				gets++
+				respJSON(fmt.Sprintf(
+					`{"data":{"id":26737111955,"situacao":{"id":6,"valor":%d}}}`, c.valor))(w, r)
+			})
+
+			canonico, err := b.GetOrderSituacao(context.Background(), "26737111955")
+			if err != nil {
+				t.Fatalf("lendo a situação: %v", err)
+			}
+			status, conhecido := providers.ERPOrderStatusFromSituacao(canonico)
+
+			if conhecido != c.observa {
+				t.Fatalf("conhecido = %v (canônico %d), queria %v", conhecido, canonico, c.observa)
+			}
+			if c.observa && status != c.quero {
+				t.Errorf("status = %q, queria %q", status, c.quero)
+			}
+			if gets != 1 {
+				t.Errorf("gastou %d GETs, quero exatamente 1", gets)
+			}
+		})
+	}
+}
+
+// "Não sei" NÃO pode ser confundido com "Em aberto".
+//
+// Zero é um estágio real (SituacaoAberta). O adapter devolvia zero para uma
+// situação sem análogo, e um pedido "Em andamento" chegava ao rastreamento como
+// ABERTO — o que faz VoltouAViver() ser verdadeiro e pode RESSUSCITAR um
+// carrinho que o lojista cancelou. O adapter do Tiny já trazia o aviso no
+// comentário ("ausente é diferente de zero"); este teste impede a recaída.
+func TestSituacaoDesconhecidaNaoSeDisfarcaDeEmAberto(t *testing.T) {
+	semAnalogo := []int{
+		blingValorEmAndamento, blingValorAguardandoPagto,
+		blingValorFaturadoParcial, blingValorAtendidoParcial,
+	}
+	for _, valor := range semAnalogo {
+		b, _ := bancadaBling(t, func(w http.ResponseWriter, r *http.Request) {
+			respJSON(fmt.Sprintf(`{"data":{"id":1,"situacao":{"id":6,"valor":%d}}}`, valor))(w, r)
+		})
+		got, err := b.GetOrderSituacao(context.Background(), "1")
+		if err != nil {
+			t.Fatalf("valor %d: %v", valor, err)
+		}
+		if got == providers.SituacaoAberta {
+			t.Errorf("valor %d virou SituacaoAberta (%d) — o rastreamento concluiria que "+
+				"o pedido está aberto e poderia ressuscitar um carrinho cancelado",
+				valor, providers.SituacaoAberta)
+		}
+		if _, conhecido := providers.ERPOrderStatusFromSituacao(got); conhecido {
+			t.Errorf("valor %d virou um status conhecido (%d) sem ter análogo", valor, got)
+		}
+	}
+}
+
+// Pedido SEM o campo situacao é ERRO, não um palpite — mesma regra do Tiny.
+func TestPedidoSemCampoSituacaoEhErro(t *testing.T) {
+	b, _ := bancadaBling(t, respJSON(`{"data":{"id":1}}`))
+	got, err := b.GetOrderSituacao(context.Background(), "1")
+	if err == nil {
+		t.Error("aceitou um pedido sem situação em silêncio")
+	}
+	if got == providers.SituacaoAberta {
+		t.Error("devolveu 'Em aberto' para um pedido cuja situação não veio")
 	}
 }
