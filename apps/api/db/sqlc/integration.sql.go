@@ -340,6 +340,7 @@ func (q *Queries) GetActiveERPByAccount(ctx context.Context, arg GetActiveERPByA
 const getActiveERPIntegration = `-- name: GetActiveERPIntegration :one
 SELECT id, store_id, type, provider, status, token_expires_at, last_synced_at, created_at, credentials, metadata, priority, erp_account_id FROM integrations
 WHERE store_id = $1 AND type = 'erp' AND status = 'active'
+ORDER BY created_at ASC, id ASC
 LIMIT 1
 `
 

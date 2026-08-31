@@ -131,6 +131,19 @@ func (s *Service) handleBlingCallback(ctx context.Context, input OAuthCallbackIn
 			"Esta conta Bling (" + empresa.Nome + ") já está conectada a outra loja do LiveCart.")
 	}
 
+	// A regra de UM ERP tem de valer AQUI também, e não só no botão.
+	//
+	// getBlingOAuthURL já a checa, mas ele roda ANTES da tela de consentimento
+	// do Bling — e entre uma coisa e outra cabe uma conexão de Tiny em outra
+	// aba. Aplicá-la só lá deixa a janela aberta, e o resultado é uma loja com
+	// dois ERPs ativos: um estado que nada no fluxo de pedido sabe resolver.
+	if existente, err := s.repo.GetActiveERP(ctx, storeID); err == nil && existente != nil &&
+		existente.Provider != string(providers.ProviderBling) {
+		return nil, httpx.ErrUnprocessable(
+			"Esta loja já usa o " + nomeAmigavelDoERP(existente.Provider) +
+				". Só é possível manter um ERP conectado por vez — desconecte-o antes de conectar o Bling.")
+	}
+
 	metadata := map[string]any{
 		providers.MetadataBlingCompanyID: empresa.ID,
 		"bling_company_name":             empresa.Nome,

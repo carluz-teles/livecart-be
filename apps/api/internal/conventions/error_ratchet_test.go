@@ -376,9 +376,14 @@ var baselineRawThrows = map[string]bool{
 	// entrada — a categoria que a política desta lista já admite crua — e as
 	// mensagens são escritas para o LOJISTA ler na tela, não para código
 	// ramificar em cima.
-	"integration.Service.getBlingOAuthURL#0":                                                                      true,
-	"integration.Service.getBlingOAuthURL:\"Aplicativo Bling não configurado no servidor\"":                       true,
-	"integration.Service.handleBlingCallback#0":                                                                   true,
+	"integration.Service.getBlingOAuthURL#0":                                                true,
+	"integration.Service.getBlingOAuthURL:\"Aplicativo Bling não configurado no servidor\"": true,
+	"integration.Service.handleBlingCallback#0":                                             true,
+	// #1 é a regra de UM ERP por loja aplicada no callback. A mensagem é montada
+	// com o nome amigável do ERP já conectado, então a chave é posicional. O
+	// banco também a garante (uniq_integrations_store_one_erp, migration 000061);
+	// esta camada existe para o lojista ler uma frase em vez de um 500.
+	"integration.Service.handleBlingCallback#1":                                                                   true,
 	"integration.Service.handleBlingCallback:\"Aplicativo Bling não configurado no servidor\"":                    true,
 	"integration.Service.handleBlingCallback:\"Autorização expirada ou já utilizada. Tente conectar novamente.\"": true,
 

@@ -6731,7 +6731,22 @@ func (s *Service) retratoDoModoDeReserva(ctx context.Context, integracao *Integr
 //
 // Devolve inconclusivo em qualquer dúvida. "Não sei" é resposta legítima, e
 // tratá-la como "não reserva" faria o lojista escolher o modo errado.
+// PrazoDaSonda é o teto de tempo da sondagem de reserva.
+//
+// Existe porque a primeira versão não tinha nenhum: ela lia até dez produtos um
+// a um, cada leitura passando pelo limitador de 2 req/s do Bling, e o endpoint
+// levava 9,8 SEGUNDOS. Medido em staging em 31/08/2026 — o navegador desistia
+// (HTTP 499) quatro vezes seguidas e o lojista via "Não consegui ler a
+// configuração agora", que descreve o sintoma e esconde a causa.
+//
+// Estourar o prazo NÃO é erro: "não sei" já é uma das três respostas que a
+// sonda sabe dar, e a tela já sabe mostrá-la.
+const PrazoDaSonda = 2500 * time.Millisecond
+
 func (s *Service) sondarCapacidadeDeReserva(ctx context.Context, integracao *IntegrationRow) erp.ResultadoDaSonda {
+	ctx, cancelar := context.WithTimeout(ctx, PrazoDaSonda)
+	defer cancelar()
+
 	prov, err := s.createProviderFromRow(ctx, integracao)
 	if err != nil {
 		return erp.ResultadoDaSonda{Explicacao: "não consegui falar com o ERP agora"}
@@ -6747,13 +6762,43 @@ func (s *Service) sondarCapacidadeDeReserva(ctx context.Context, integracao *Int
 			Explicacao: "nenhum produto vinculado ao ERP para observar",
 		}
 	}
+	ids := make([]string, 0, len(amostra))
+	for _, p := range amostra {
+		ids = append(ids, p.ExternalID)
+	}
 
 	// Basta UM produto com reserva para provar que a conta reserva. O contrário
 	// não vale: nenhum produto com reserva pode significar só que ninguém tem
 	// pedido em aberto agora.
-	for _, p := range amostra {
-		d, err := leitor.GetProductStockDetail(ctx, p.ExternalID)
+	//
+	// EM LOTE quando o ERP sabe — no Bling são os dez produtos numa requisição
+	// só, contra dez requisições enfileiradas no limitador. É a diferença entre
+	// o diálogo abrir na hora e o navegador desistir.
+	if lote, temLote := prov.(providers.ERPStockBatchReader); temLote {
+		saldos, err := lote.GetProductStockBatch(ctx, ids)
 		if err != nil {
+			return sondaInconclusiva(ctx)
+		}
+		for _, d := range saldos {
+			if d.Reserved > 0 {
+				return erp.SondaDeReserva{
+					SaldoFisico:            d.Balance,
+					SaldoDisponivel:        d.Available,
+					UnidadesEmPedidoAberto: d.Reserved,
+				}.Avaliar()
+			}
+		}
+		return sondaSemReservaVisivel()
+	}
+
+	for _, id := range ids {
+		d, err := leitor.GetProductStockDetail(ctx, id)
+		if err != nil {
+			// Prazo estourado encerra a varredura: insistir só empurraria o
+			// endpoint de volta para o tempo que o navegador não espera.
+			if ctx.Err() != nil {
+				return sondaInconclusiva(ctx)
+			}
 			continue
 		}
 		if d.Reserved > 0 {
@@ -6764,6 +6809,22 @@ func (s *Service) sondarCapacidadeDeReserva(ctx context.Context, integracao *Int
 			}.Avaliar()
 		}
 	}
+	if ctx.Err() != nil {
+		return sondaInconclusiva(ctx)
+	}
+	return sondaSemReservaVisivel()
+}
+
+func sondaInconclusiva(ctx context.Context) erp.ResultadoDaSonda {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return erp.ResultadoDaSonda{
+			Explicacao: "o ERP demorou demais para responder agora — abra de novo daqui a pouco",
+		}
+	}
+	return erp.ResultadoDaSonda{Explicacao: "não consegui ler o saldo no ERP agora"}
+}
+
+func sondaSemReservaVisivel() erp.ResultadoDaSonda {
 	return erp.ResultadoDaSonda{
 		Explicacao: "nenhum dos produtos lidos tem unidade reservada — pode ser que a conta " +
 			"não reserve, ou simplesmente que não há pedido em aberto agora",

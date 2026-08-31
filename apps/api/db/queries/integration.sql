@@ -37,8 +37,17 @@ LIMIT 1;
 -- tratavam isso como "loja sem ERP", devolvendo nil em silêncio — a live rodava
 -- inteira sem criar um pedido e sem uma linha de log.
 -- name: GetActiveERPIntegration :one
+-- O ORDER BY não é enfeite. `LIMIT 1` sozinho deixa o Postgres devolver
+-- qualquer uma das linhas, e ele pode devolver uma DIFERENTE a cada chamada —
+-- plano novo, página no cache, autovacuum. Numa loja com dois ERPs ativos isso
+-- faz o mesmo carrinho criar o pedido num ERP e tentar confirmá-lo no outro.
+--
+-- Enquanto o CHECK só aceitava 'tiny' o estado era impossível. A migration
+-- 000145 abriu para 'bling' e, no instante em que abriu, tornou-o alcançável.
+-- A mais ANTIGA vence: é a que já tem pedidos vivos lá dentro.
 SELECT * FROM integrations
 WHERE store_id = $1 AND type = 'erp' AND status = 'active'
+ORDER BY created_at ASC, id ASC
 LIMIT 1;
 
 -- GetActiveERPByAccount resolve a LOJA a partir da conta do ERP. É como o
