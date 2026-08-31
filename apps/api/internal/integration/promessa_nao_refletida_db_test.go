@@ -183,3 +183,72 @@ func TestPromessaNaoRefletida(t *testing.T) {
 		}
 	})
 }
+
+// A NOVA QUERY NÃO PODE DIVERGIR DA QUE RODA EM PRODUÇÃO.
+//
+// SumPromisedWithoutERPOrder é a versão em produção hoje, com anos de live em
+// cima dela. A regra dela é uma linha:
+//
+//	AND (c.external_order_id IS NULL OR c.external_order_id = '')
+//
+// Sem janela de tempo, sem nada. SumPromisedNotYetReflected foi escrita para
+// substituí-la (a antiga tem 'tiny' literal e não filtra loja) e, no caminho,
+// GANHOU uma janela de 45 segundos que a antiga nunca teve. Aplicada a todos os
+// providers, ela faria TODA loja Tiny descontar estoque em dobro no instante em
+// que a branch chegasse a produção — porque numa live todo carrinho tem menos
+// de 45 s.
+//
+// Este teste existe para que a substituição seja provada, e não presumida: no
+// modo NATIVO (o padrão do Tiny), as duas têm de devolver o MESMO número, em
+// todos os arranjos de carrinho que importam.
+func TestNovaSomaEhEquivalenteAQueRodaEmProducao(t *testing.T) {
+	if testPool == nil {
+		t.Skip("TEST_DATABASE_URL não definida")
+	}
+	ctx := context.Background()
+
+	// external_id único: a query ANTIGA não filtra por loja, então qualquer
+	// outro produto com o mesmo id somaria junto e o teste mentiria.
+	externalID := fmt.Sprintf("EQV-%d-%d", seedSeq, rand.Intn(1_000_000))
+	_, evento, produto := lojaComProduto(t, "tiny", externalID)
+	loja := ""
+	if err := testPool.QueryRow(ctx,
+		`SELECT store_id::text FROM products WHERE id=$1::uuid`, produto).Scan(&loja); err != nil {
+		t.Fatal(err)
+	}
+
+	agora := time.Now()
+	velho := agora.Add(-10 * time.Minute)
+	arranjos := []struct {
+		nome   string
+		qtd    int
+		pedido string
+		quando *time.Time
+	}{
+		{"sem pedido", 3, "", nil},
+		{"pedido recém-criado", 2, "TINY-NOVO", &agora},
+		{"pedido antigo", 4, "TINY-VELHO", &velho},
+		{"pedido sem carimbo de operação", 1, "TINY-SEM-STAMP", nil},
+	}
+
+	for _, a := range arranjos {
+		carrinhoPrometendo(t, evento, produto, a.qtd, a.pedido, a.quando)
+
+		antiga, err := testRepo.SumPromisedWithoutERPOrder(ctx, externalID)
+		if err != nil {
+			t.Fatalf("%s: query de produção: %v", a.nome, err)
+		}
+		// contaComPedido=false é o modo NATIVO, que é o padrão do Tiny.
+		nova, err := testRepo.SumPromisedNotYetReflected(ctx, loja, "tiny", externalID, false)
+		if err != nil {
+			t.Fatalf("%s: query nova: %v", a.nome, err)
+		}
+		if antiga != nova {
+			t.Fatalf("depois de acrescentar %q: produção diz %d e a nova diz %d.\n"+
+				"  A substituta DIVERGIU da query que roda hoje. Se a diferença for "+
+				"deliberada, ela precisa de um teste próprio dizendo por quê — foi "+
+				"exatamente assim que uma janela de 45 s entrou sem ninguém notar e "+
+				"passou a descontar toda reserva duas vezes.", a.nome, antiga, nova)
+		}
+	}
+}
