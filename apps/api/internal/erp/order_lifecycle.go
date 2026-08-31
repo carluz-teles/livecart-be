@@ -213,7 +213,18 @@ func (s *Service) criarPedidoParaCarrinho(ctx context.Context, cartID, storeID s
 		return fmt.Errorf("reloading cart after order create: %w", err)
 	}
 	if fresh.ExternalOrderID == "" {
-		// Carrinho sem nenhum item vinculado ao ERP: não há pedido a criar.
+		// Carrinho sem nenhum item vinculado ao ERP (ex.: só produtos manuais):
+		// não há pedido a criar. Solta o estado de volta para 'none' — senão o
+		// carrinho fica preso em 'converting' e todo add-item futuro tenta mutar
+		// um pedido inexistente (MutateERPOrderItems → ErrCartNotConverted → 422).
+		// Manual fica manual: um carrinho que não tem nada de ERP não pode ficar
+		// preso na máquina de estado do ERP.
+		if _, relErr := s.repo.TransitionCartERPOrderState(ctx, cartID, OrderStateConverting, OrderStateNone); relErr != nil {
+			logger.From(ctx, s.logger).Warn("failed to release converting state for ERP-less cart",
+				zap.String("cart_id", cartID),
+				zap.Error(relErr),
+			)
+		}
 		logger.From(ctx, s.logger).Info("cart has no ERP-linked items, order creation skipped",
 			zap.String("cart_id", cartID),
 		)
