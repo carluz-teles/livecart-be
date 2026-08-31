@@ -66,13 +66,26 @@ func PodeSubir(portaoAtual, saldoERP, emVoo int) bool {
 }
 
 // Nota sobre reserva NATIVA do ERP (Bling com "Considerar situações de vendas
-// para obter o saldo atual" ligada).
+// para obter o saldo atual" ligada), e sobre um erro que custou caro.
 //
 // Chegou a existir aqui um AdmissivelPorModo, para não subtrair duas vezes
-// quando o saldo do ERP já desconta os nossos pedidos. Ele foi REMOVIDO: a
-// distinção não é desta função e sim de QUEM CONTA o `emVoo` —
-// SumPromisedNotYetReflected só soma o que o saldo lido ainda não desconta.
-// Duas fórmulas competindo pela mesma decisão é pior do que uma certa.
+// quando o saldo do ERP já desconta os nossos pedidos. Ele foi removido com o
+// argumento de que a distinção não é desta função e sim de QUEM CONTA o
+// `emVoo`. O argumento continua certo — e a implementação que o acompanhou
+// estava errada.
 //
-// A janela de atraso medida (9 a 22 s entre o pedido existir e o saldo do ERP
-// refleti-lo) também vive lá, em JanelaDeAtrasoDoERP.
+// SumPromisedNotYetReflected decidia pelo RELÓGIO: um carrinho com pedido
+// criado há menos de 45 s continuava contando, para cobrir o atraso entre o
+// pedido existir e o ERP refleti-lo. Numa live TODO carrinho está dentro dos
+// 45 s, então TODA reserva era descontada duas vezes — uma pelo ERP, outra por
+// nós. Medido em staging em 31/08/2026: o Bling dizia 3 disponíveis e o
+// LiveCart gravava 1.
+//
+// Hoje a query recebe o modo (`conta_com_pedido`) e responde à pergunta certa:
+// "este saldo lido já desconta esta unidade?". Reserva nativa e carrinho com
+// pedido: já. Qualquer outro caso: não.
+//
+// A lição, para a próxima vez que alguém for mexer aqui: uma janela de tempo
+// parece conservadora e não é. Ela troca uma pergunta respondível — quem já
+// está no saldo — por um palpite sobre latência, e o palpite erra o tempo todo
+// justamente quando o sistema está sob carga.

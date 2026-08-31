@@ -100,8 +100,12 @@ func TestPromessaNaoRefletida(t *testing.T) {
 	// 1) Produto Bling, carrinho vivo SEM pedido no ERP: 3 unidades prometidas.
 	carrinhoPrometendo(t, eventoBling, prodBling, 3, "", nil)
 
+	// Os dois primeiros casos não dependem do modo: carrinho SEM pedido conta
+	// nos dois. Fixado em false (nativo) para deixar isso explícito.
+	const contaComPedido = false
+
 	t.Run("produto Bling é contado — a versão antiga devolvia zero", func(t *testing.T) {
-		nova, err := testRepo.SumPromisedNotYetReflected(ctx, lojaBling, "bling", mesmoID)
+		nova, err := testRepo.SumPromisedNotYetReflected(ctx, lojaBling, "bling", mesmoID, contaComPedido)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -124,7 +128,7 @@ func TestPromessaNaoRefletida(t *testing.T) {
 		// Mesmo external_id, outra loja, outro ERP: 7 unidades.
 		carrinhoPrometendo(t, eventoTiny, prodTiny, 7, "", nil)
 
-		nova, err := testRepo.SumPromisedNotYetReflected(ctx, lojaBling, "bling", mesmoID)
+		nova, err := testRepo.SumPromisedNotYetReflected(ctx, lojaBling, "bling", mesmoID, contaComPedido)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -133,31 +137,49 @@ func TestPromessaNaoRefletida(t *testing.T) {
 		}
 	})
 
-	t.Run("pedido RECÉM-criado ainda conta — a janela de atraso medida", func(t *testing.T) {
+	t.Run("reserva NATIVA: carrinho COM pedido não conta — o ERP já o descontou", func(t *testing.T) {
 		agora := time.Now()
 		carrinhoPrometendo(t, eventoBling, prodBling, 2, "PEDIDO-NOVO", &agora)
 
-		nova, err := testRepo.SumPromisedNotYetReflected(ctx, lojaBling, "bling", mesmoID)
+		// contaComPedido=false é o modo NATIVO: o pedido já tirou a peça do
+		// `disponivel` do ERP, e somá-la aqui tiraria duas vezes.
+		nova, err := testRepo.SumPromisedNotYetReflected(ctx, lojaBling, "bling", mesmoID, false)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if nova != 5 { // 3 sem pedido + 2 com pedido de agora
-			t.Errorf("soma = %d, queria 5 — o pedido criado agora ainda não foi refletido "+
-				"pelo ERP (medido: o evento demora de 9 a 22 segundos)", nova)
+		if nova != 3 { // só as 3 sem pedido
+			t.Errorf("soma = %d, queria 3 — as 2 unidades com pedido JÁ estão fora do "+
+				"disponível do ERP; contá-las de novo é o desconto em dobro que "+
+				"fez o LiveCart mostrar 1 enquanto o Bling mostrava 3", nova)
 		}
 	})
 
-	t.Run("pedido ANTIGO deixa de contar — o ERP já o desconta", func(t *testing.T) {
+	t.Run("reserva NATIVA: a idade do pedido é irrelevante", func(t *testing.T) {
+		// A versão anterior tinha uma janela de 45 s e contava pedido recente.
+		// Numa live TODO pedido é recente, então a janela errava SEMPRE.
 		velho := time.Now().Add(-10 * time.Minute)
 		carrinhoPrometendo(t, eventoBling, prodBling, 4, "PEDIDO-VELHO", &velho)
 
-		nova, err := testRepo.SumPromisedNotYetReflected(ctx, lojaBling, "bling", mesmoID)
+		nova, err := testRepo.SumPromisedNotYetReflected(ctx, lojaBling, "bling", mesmoID, false)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if nova != 5 {
-			t.Errorf("soma = %d, queria 5 — o pedido de 10 minutos atrás JÁ está no saldo "+
-				"do ERP, e contá-lo de novo subtrairia duas vezes", nova)
+		if nova != 3 {
+			t.Errorf("soma = %d, queria 3 — com reserva nativa nenhum carrinho COM "+
+				"pedido conta, tenha ele 2 segundos ou 10 minutos", nova)
+		}
+	})
+
+	t.Run("reserva LOCAL: tudo conta, porque o ERP não sabe de nada", func(t *testing.T) {
+		// Neste ponto a loja tem 3 sem pedido + 2 com pedido novo + 4 com
+		// pedido velho = 9 unidades vivas.
+		nova, err := testRepo.SumPromisedNotYetReflected(ctx, lojaBling, "bling", mesmoID, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if nova != 9 {
+			t.Errorf("soma = %d, queria 9 — no modo local o pedido no ERP não segura "+
+				"nada, então toda unidade viva precisa sair do saldo lido", nova)
 		}
 	})
 }

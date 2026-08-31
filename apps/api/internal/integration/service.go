@@ -3780,28 +3780,36 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		// Produto que o lojista nao importou. O ERP notifica sobre o catalogo
 		// inteiro dele; nos so espelhamos o que existe aqui.
 	default:
-		// O saldo disponível do ERP é verdadeiro para o ERP e INCOMPLETO para nós
-		// por alguns segundos: entre o comentário baixar o contador local e o
+		// O saldo disponível do ERP é verdadeiro para o ERP e pode ser
+		// INCOMPLETO para nós: entre o comentário baixar o contador local e o
 		// pedido de venda existir lá, aquela unidade não aparece em `disponivel`.
 		// Gravá-lo cru nesse intervalo reabastece o portão com estoque que já tem
 		// dono — foi assim que 25 admissões saíram de 20 unidades em 26/08, com o
 		// ERP terminando em −13.
 		//
-		// A conta desconta só o que o ERP ainda NÃO conhece: carrinho vivo e sem
-		// pedido. Assim que o pedido existe, o `disponivel` já o desconta, e
-		// somá-lo aqui seria descontar duas vezes.
+		// QUANTO descontar depende do modo de reserva, e não do relógio:
+		//
+		//	nativa → o pedido já tirou a peça do `disponivel` lá. Só carrinho
+		//	         SEM pedido é invisível para o ERP.
+		//	local  → o ERP não sabe de carrinho nenhum. Tudo conta.
+		//
+		// Confundir os dois desconta em dobro no modo nativo, e foi o que
+		// aconteceu: o Bling dizia 3 disponíveis e o LiveCart gravava 1.
+		modo := erp.ModoDeReservaDaIntegracao(integration.Provider, integration.Metadata)
 		saldoParaOPortao := detailed.Stock
 		if prometido, voErr := s.repo.SumPromisedNotYetReflected(
 			ctx, integration.StoreID, integration.Provider, externalProductID,
+			modo != erp.ReservaNativaDoERP,
 		); voErr != nil {
 			logger.From(ctx, s.logger).Warn("could not read promised-but-unsent units; mirroring the raw ERP balance",
 				zap.String("external_product_id", externalProductID), zap.Error(voErr))
 		} else if prometido > 0 {
 			saldoParaOPortao = erpwrite.Admissivel(detailed.Stock, prometido)
-			logger.From(ctx, s.logger).Info("stock mirror discounted units promised before the order existed",
+			logger.From(ctx, s.logger).Info("stock mirror discounted units the ERP balance does not reflect",
 				zap.String("external_product_id", externalProductID),
+				zap.String("modo_reserva", string(modo)),
 				zap.Int("erp_available", detailed.Stock),
-				zap.Int("promised_without_order", prometido),
+				zap.Int("promised_not_reflected", prometido),
 				zap.Int("admissible", saldoParaOPortao))
 		}
 

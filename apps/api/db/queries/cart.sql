@@ -1396,19 +1396,44 @@ WHERE p.external_id = sqlc.arg(external_product_id)
   AND ci.quantity > ci.waitlisted_quantity;
 
 -- name: SumPromisedNotYetReflected :one
--- Unidades que a live já prometeu e que o SALDO LIDO do ERP ainda não desconta.
+-- As unidades prometidas que o SALDO LIDO do ERP ainda NÃO desconta.
 --
--- Três diferenças em relação a SumPromisedWithoutERPOrder, e cada uma conserta
--- um defeito distinto:
+-- Quem decide isso é o MODO DE RESERVA, e não o relógio.
 --
--- 1. `external_source` VIRA PARÂMETRO. A versão anterior tem 'tiny' literal, e
---    para um produto Bling ela devolve ZERO — o portão recebe o disponível cru
---    e é reabastecido com estoque que já tem dono. É o −13 de 26/08 letra por
---    letra, num ERP novo.
+-- Havia aqui uma janela de 45 segundos: um carrinho com pedido criado há menos
+-- disso continuava sendo contado, na ideia de cobrir o atraso entre o pedido
+-- existir e o ERP refleti-lo. Ela estava errada, e o erro era garantido em vez
+-- de eventual — numa live TODO carrinho está dentro dos 45 s, então TODA
+-- reserva era descontada duas vezes: uma pelo ERP (que já a tirou do
+-- `disponivel`) e outra por esta soma.
 --
--- 2. `store_id` ENTRA no WHERE. A versão anterior casa só por `external_id`, sem
---    loja nenhuma: duas lojas com produtos de mesmo id somam as promessas uma da
---    outra. Hoje é inócuo porque só existe 'tiny' e o id do Tiny é global; com
+-- Medido em staging em 31/08/2026, com o Bling em reserva nativa:
+--
+--   erp_available 3 · promised_without_order 2 · admissible 1   ← devia ser 3
+--   erp_available 2 · promised_without_order 3 · admissible 0   ← devia ser 2
+--
+-- A regra certa é a que a mensagem de log já anunciava, "units promised BEFORE
+-- the order existed":
+--
+--   reserva NATIVA  → o `disponivel` já desconta o pedido; conta só carrinho
+--                     SEM pedido no ERP
+--   reserva LOCAL   → o ERP não sabe de nada nosso; conta tudo que está vivo
+--
+-- `conta_com_pedido` é esse interruptor. O chamador o deriva do modo efetivo.
+SELECT COALESCE(SUM(ci.quantity - ci.waitlisted_quantity), 0)::int
+FROM cart_items ci
+JOIN carts c ON c.id = ci.cart_id
+JOIN products p ON p.id = ci.product_id
+WHERE p.external_id = sqlc.arg(external_product_id)
+  AND p.external_source = sqlc.arg(external_source)
+  AND p.store_id = sqlc.arg(store_id)
+  AND (
+        c.external_order_id IS NULL OR c.external_order_id = ''
+     OR sqlc.arg(conta_com_pedido)::bool
+      )
+  AND c.status NOT IN ('expired', 'cancelled')
+  AND (c.payment_status IS NULL OR c.payment_status <> 'refunded')
+  AND ci.quantity > ci.waitlisted_quantity; com
 --    dois ERPs são dois espaços de numeração independentes com larguras que se
 --    sobrepõem, e o defeito passa a ser real.
 --

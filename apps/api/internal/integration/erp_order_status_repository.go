@@ -173,21 +173,24 @@ func (r *Repository) SumPromisedWithoutERPOrder(ctx context.Context, externalPro
 	return int(n), err
 }
 
-// JanelaDeAtrasoDoERP é quanto tempo, depois de o pedido existir, o saldo lido
-// do ERP ainda pode não descontá-lo.
-//
-// MEDIDO contra o Bling em 29/08/2026: o `virtual_stock.updated` chegou 9 s
-// depois do `order.created` numa reserva e 22 s depois numa liberação. 45 s é o
-// dobro do pior caso observado — margem deliberada, porque errar para mais aqui
-// custa oferecer menos por alguns segundos, e errar para menos custa vender a
-// mesma peça duas vezes.
-const JanelaDeAtrasoDoERP = 45 * time.Second
-
 // SumPromisedNotYetReflected devolve as unidades prometidas que o SALDO LIDO do
-// ERP ainda não desconta — por não haver pedido, ou por o pedido ser recente
-// demais para o ERP já ter refletido.
+// ERP ainda NÃO desconta.
+//
+// `contaComPedido` diz se um carrinho que JÁ tem pedido no ERP deve entrar na
+// conta, e sai do modo de reserva:
+//
+//	reserva LOCAL  → true.  O ERP não sabe de nada nosso; tudo que está vivo
+//	                        precisa ser descontado do saldo lido.
+//	reserva NATIVA → false. O pedido JÁ tirou a peça do `disponivel` lá;
+//	                        descontá-la aqui de novo tira duas vezes.
+//
+// Existiu aqui um JanelaDeAtrasoDoERP de 45 s que fazia esse papel pelo relógio
+// — carrinho com pedido recente continuava contando. Era errado, e errado
+// SEMPRE: numa live todo carrinho está dentro dos 45 s, então toda reserva era
+// descontada em dobro. Medido em staging em 31/08/2026, com o Bling em reserva
+// nativa: o ERP dizia 3 disponíveis e o LiveCart gravava 1.
 func (r *Repository) SumPromisedNotYetReflected(
-	ctx context.Context, storeID, externalSource, externalProductID string,
+	ctx context.Context, storeID, externalSource, externalProductID string, contaComPedido bool,
 ) (int, error) {
 	loja, err := parseUUID(storeID)
 	if err != nil {
@@ -197,7 +200,7 @@ func (r *Repository) SumPromisedNotYetReflected(
 		ExternalProductID: pgtype.Text{String: externalProductID, Valid: true},
 		ExternalSource:    externalSource,
 		StoreID:           loja,
-		JanelaSegundos:    JanelaDeAtrasoDoERP.Seconds(),
+		ContaComPedido:    contaComPedido,
 	})
 	return int(n), err
 }
