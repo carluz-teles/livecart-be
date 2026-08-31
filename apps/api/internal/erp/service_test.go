@@ -123,7 +123,7 @@ func TestNewService(t *testing.T) {
 	}
 }
 
-func (stubERPRepo) ListERPLinkedProductsSample(context.Context, string, int) ([]ERPLinkedProduct, error) {
+func (stubERPRepo) ListERPLinkedProductsSample(context.Context, string, string, int) ([]ERPLinkedProduct, error) {
 	return nil, nil
 }
 

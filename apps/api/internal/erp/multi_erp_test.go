@@ -224,3 +224,48 @@ func TestNenhumLiteralTinyDecidePorTodosOsERPs(t *testing.T) {
 		}
 	}
 }
+
+// A SONDA DE RESERVA TEM DE OLHAR OS PRODUTOS DO ERP CONECTADO.
+//
+// A query cravava `external_source = 'tiny'`. Numa loja Bling cujo catálogo
+// veio do Tiny, ela devolvia os produtos ANTIGOS — ids que no Bling respondem
+// 404 — e a sonda concluía "não consegui confirmar", mandando o lojista ligar
+// uma configuração que já estava ligada. Pior que vazio: parecia uma medição.
+//
+// Medido em staging: a loja 9b55284a tinha 7 produtos 'tiny' (resíduo) e 2
+// 'bling'. A sonda lia os 7 errados.
+func TestSondaDeReservaNaoPodeCravarAFonte(t *testing.T) {
+	proibido := `external_source = 'tiny'`
+	fonte, err := os.ReadFile("../../db/queries/product.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, linha := range strings.Split(string(fonte), "\n") {
+		if strings.Contains(linha, proibido) && !strings.HasPrefix(strings.TrimSpace(linha), "--") {
+			t.Errorf("db/queries/product.sql:%d crava a fonte do ERP: %s\n"+
+				"  uma loja Bling receberia os produtos do Tiny — ids que lá dão 404",
+				i+1, strings.TrimSpace(linha))
+		}
+	}
+}
+
+// E o nome do ERP nas mensagens que sobem pela API.
+func TestMensagensDaReservaNomeiamOERPCerto(t *testing.T) {
+	fonte, err := os.ReadFile("reserva.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, linha := range strings.Split(string(fonte), "\n") {
+		corte := strings.TrimSpace(linha)
+		if strings.HasPrefix(corte, "//") {
+			continue
+		}
+		// `rel.Motivo` é texto que sobe pela API e o lojista lê.
+		if strings.Contains(linha, "rel.Motivo") && strings.Contains(linha, "Tiny") {
+			t.Errorf("reserva.go:%d devolve uma mensagem com \"Tiny\" cravado: %s", i+1, corte)
+		}
+	}
+	if !strings.Contains(string(fonte), "nomeDeVitrineDoERP") {
+		t.Error("reserva.go deixou de nomear o ERP conectado")
+	}
+}

@@ -72,6 +72,10 @@ type Bling struct {
 	// veredito da tabela de situações.
 	mu                  sync.Mutex
 	formaPagamentoCache int64
+	// formasPorTipo mapeia o `tipoPagamento` (vocabulário global, a tabela tPag
+	// da NF-e) no id daquela conta. Preenchido na MESMA leitura que resolve o
+	// padrão — resolver por método não custa requisição a mais.
+	formasPorTipo map[int]int64
 	// formaPagamentoEmVoo colapsa as leituras concorrentes numa só.
 	//
 	// Medido no ensaio de live simulada: 15 compradoras chegando juntas erravam

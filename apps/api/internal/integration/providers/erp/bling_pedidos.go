@@ -11,7 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"livecart/apps/api/internal/integration/providers"
+	"livecart/apps/api/lib/logger"
 )
 
 // Pedidos de venda no Bling.
@@ -114,7 +117,14 @@ func (b *Bling) CreateOrder(ctx context.Context, order providers.ERPOrder) (*pro
 	// POR CONTA. Resolvido uma vez e cacheado; sem forma conhecida o pedido não
 	// nasce — e falhar aqui é melhor do que criar pedido com forma errada, que o
 	// lojista só descobre no fechamento do caixa.
-	formaPagamento, err := b.formaPagamentoPadrao(ctx)
+	// No nascimento o pagamento normalmente ainda não existe — o pedido nasce no
+	// comentário. Quando existir (carrinho que já chega pago), usa o método
+	// dele: é defesa para o caso de a gravação posterior das parcelas falhar.
+	metodoConhecido := ""
+	if order.Payment != nil {
+		metodoConhecido = order.Payment.Method
+	}
+	formaPagamento, err := b.formaPagamentoPara(ctx, metodoConhecido)
 	if err != nil {
 		return nil, err
 	}
@@ -956,37 +966,136 @@ func (b *Bling) formaPagamentoPadrao(ctx context.Context) (int64, error) {
 			Descricao string `json:"descricao"`
 			Situacao  int    `json:"situacao"`
 			Padrao    int    `json:"padrao"`
+			// tipoPagamento é o vocabulário GLOBAL (a tabela tPag da NF-e), ao
+			// contrário do `id`, que é da conta, e da `descricao`, que o
+			// lojista edita. Mesmo padrão de `situacao.valor`.
+			TipoPagamento int `json:"tipoPagamento"`
+			// finalidade: 1 Pagamentos, 2 Recebimentos, 3 ambos. Pedido de
+			// VENDA gera conta a RECEBER — uma forma de finalidade 1
+			// arquivaria o lançamento no lugar errado.
+			Finalidade int `json:"finalidade"`
 		} `json:"data"`
 	}
 	if err := b.get(ctx, "/formas-pagamentos", nil, &env); err != nil {
 		return 0, err
 	}
 
-	var primeiraAtiva int64
+	var primeiraAtiva, padrao int64
+	porTipo := map[int]int64{}
 	for _, f := range env.Data {
+		// A conferência em CÓDIGO fica mesmo que um dia se mande situacao=1 na
+		// query: servidor que ignora o parâmetro em silêncio devolve a lista
+		// inteira, e escolher uma forma inativa não daria erro nenhum. É a
+		// armadilha já registrada no adapter do Tiny.
 		if f.Situacao != 1 {
 			continue
 		}
+		// Finalidade 1 é só para PAGAR. Pedido de venda gera conta a receber.
+		if f.Finalidade != 0 && f.Finalidade != 2 && f.Finalidade != 3 {
+			continue
+		}
+		if f.TipoPagamento != 0 {
+			// Empate no mesmo tipo (esta conta tem duas formas de tipo 21):
+			// a padrão vence, senão o menor id — critério estável.
+			if atual, ja := porTipo[f.TipoPagamento]; !ja || f.Padrao == 1 || f.ID < atual {
+				porTipo[f.TipoPagamento] = f.ID
+			}
+		}
 		if f.Padrao == 1 {
-			b.guardarFormaPagamento(f.ID)
-			return f.ID, nil
+			padrao = f.ID
 		}
 		if primeiraAtiva == 0 {
 			primeiraAtiva = f.ID
 		}
 	}
-	if primeiraAtiva == 0 {
+	if padrao == 0 {
+		padrao = primeiraAtiva
+	}
+	if padrao == 0 {
 		return 0, fmt.Errorf("bling: a conta não tem forma de pagamento ativa — " +
 			"o pedido de venda exige parcelas[].formaPagamento.id")
 	}
-	b.guardarFormaPagamento(primeiraAtiva)
-	return primeiraAtiva, nil
+	b.guardarFormasDePagamento(padrao, porTipo)
+	return padrao, nil
 }
 
-func (b *Bling) guardarFormaPagamento(id int64) {
+// blingTipoDePagamento traduz o método que o gateway informou nos códigos
+// `tipoPagamento` do Bling, em ordem de preferência.
+//
+// Os números são a tabela tPag da NF-e, declarada como enum no spec
+// (FormasPagamentosDadosBaseDTO.tipoPagamento) — vocabulário global, igual em
+// qualquer conta. É o mesmo motivo pelo qual a situação é lida por `valor` e
+// não por `id`.
+//
+// Fora do mapa fica tudo que não é instrumento de pagamento conhecido:
+// "manual", "erp_manual", "other" e a string vazia das linhas DESCONTO e A
+// PAGAR. Para eles a resposta honesta é a forma padrão da conta, em silêncio.
+func blingTipoDePagamento(metodo string) []int {
+	switch strings.ToLower(strings.TrimSpace(metodo)) {
+	case "pix":
+		return []int{17, 20} // 17 PIX Dinâmico, 20 PIX Estático
+	case "credit_card":
+		return []int{3}
+	case "debit_card":
+		return []int{4}
+	case "boleto":
+		return []int{15}
+	}
+	return nil
+}
+
+// formaPagamentoPara resolve a forma de pagamento para UM método.
+//
+// Foi o defeito que o lojista viu primeiro: um PIX de R$ 7.975,41 gravado no
+// Bling como DINHEIRO. A causa não era um mapeamento errado — era um método
+// que nunca era passado. `formaPagamentoPadrao` escolhia a forma marcada como
+// padrão na conta, e nessa conta a padrão é Dinheiro.
+//
+// O campo estruturado é o que vai para o fechamento de caixa, para a DRE e para
+// o `tPag` do XML da NF-e. A observação da parcela dizia "pix" e o campo dizia
+// dinheiro.
+//
+// Três desfechos, e o terceiro é o que impede o alarme de morrer de ruído:
+//
+//	método conhecido e a conta tem a forma  → a forma certa
+//	método conhecido e a conta NÃO tem      → a padrão, com AVISO
+//	método vazio (DESCONTO, A PAGAR, …)     → a padrão, em silêncio
+func (b *Bling) formaPagamentoPara(ctx context.Context, metodo string) (int64, error) {
+	padrao, err := b.formaPagamentoPadrao(ctx)
+	if err != nil {
+		return 0, err
+	}
+	tipos := blingTipoDePagamento(metodo)
+	if len(tipos) == 0 {
+		return padrao, nil
+	}
+
 	b.mu.Lock()
-	b.formaPagamentoCache = id
+	porTipo := b.formasPorTipo
 	b.mu.Unlock()
+
+	for _, t := range tipos {
+		if id, ok := porTipo[t]; ok && id != 0 {
+			return id, nil
+		}
+	}
+
+	// Esta conta não tem forma daquele tipo — a do teste não tem cartão de
+	// crédito, por exemplo. Recusar o pedido seria pior: a venda existe.
+	logger.From(ctx, b.Logger).Warn("bling: a conta não tem forma de pagamento para o método; usando a padrão",
+		zap.String("metodo", metodo),
+		zap.Ints("tipos_procurados", tipos),
+		zap.Int64("forma_usada", padrao),
+	)
+	return padrao, nil
+}
+
+// guardarFormasDePagamento guarda o padrão e o mapa por tipo, de uma leitura só.
+func (b *Bling) guardarFormasDePagamento(padrao int64, porTipo map[int]int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.formaPagamentoCache = padrao
+	b.formasPorTipo = porTipo
 }
 
 // SetOrderInstallments grava as parcelas EXPLICITAMENTE — quanto já entrou e
@@ -1007,11 +1116,6 @@ func (b *Bling) SetOrderInstallments(ctx context.Context, orderID string, parcel
 		return fmt.Errorf("bling: parcelas[] é obrigatório no pedido de venda")
 	}
 
-	forma, err := b.formaPagamentoPadrao(ctx)
-	if err != nil {
-		return err
-	}
-
 	_, cru, err := b.pedido(ctx, orderID)
 	if err != nil {
 		return err
@@ -1021,6 +1125,17 @@ func (b *Bling) SetOrderInstallments(ctx context.Context, orderID string, parcel
 	novas := make([]any, 0, len(parcelas))
 	for _, p := range parcelas {
 		somaEnviada += p.AmountCents
+		// POR PARCELA, e não uma vez para a chamada: um carrinho pode ter dois
+		// pagamentos com instrumentos diferentes (PIX + cartão), e as linhas
+		// DESCONTO e A PAGAR não têm método nenhum. Resolver uma vez só
+		// carimbaria a forma da primeira parcela em todas.
+		//
+		// A leitura de /formas-pagamentos é cacheada, então isto não custa
+		// requisição a mais contra o teto de 3 req/s.
+		forma, err := b.formaPagamentoPara(ctx, p.Method)
+		if err != nil {
+			return err
+		}
 		novas = append(novas, map[string]any{
 			"dataVencimento": p.DueDate.In(blingLocation).Format("2006-01-02"),
 			"valor":          float64(p.AmountCents) / 100,
@@ -1072,5 +1187,9 @@ func (b *Bling) UpdateOrderPayment(ctx context.Context, orderID string, pagament
 		AmountCents: pagamento.Amount,
 		DueDate:     quando,
 		Note:        "PAGO — " + pagamento.Method + " " + pagamento.PaymentID,
+		// O método vai no campo ESTRUTURADO, e não só no texto da observação.
+		// Era exatamente aqui que a informação existia e era jogada fora: a
+		// observação dizia "pix" e a formaPagamento dizia Dinheiro.
+		Method: pagamento.Method,
 	}})
 }

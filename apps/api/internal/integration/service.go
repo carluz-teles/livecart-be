@@ -6842,7 +6842,7 @@ func (s *Service) sondarCapacidadeDeReserva(ctx context.Context, integracao *Int
 		return erp.ResultadoDaSonda{Explicacao: "este ERP não expõe saldo detalhado"}
 	}
 
-	amostra, err := s.repo.ListERPLinkedProductsSample(ctx, integracao.StoreID, 10)
+	amostra, err := s.repo.ListERPLinkedProductsSample(ctx, integracao.StoreID, integracao.Provider, 10)
 	if err != nil || len(amostra) == 0 {
 		return erp.ResultadoDaSonda{
 			Explicacao: "nenhum produto vinculado ao ERP para observar",

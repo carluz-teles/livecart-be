@@ -229,7 +229,7 @@ type fakeERPProvider struct {
 	providers.ERPProvider
 }
 
-func (m *mockRepo) ListERPLinkedProductsSample(context.Context, string, int) ([]ERPLinkedProduct, error) {
+func (m *mockRepo) ListERPLinkedProductsSample(context.Context, string, string, int) ([]ERPLinkedProduct, error) {
 	return nil, nil
 }
 

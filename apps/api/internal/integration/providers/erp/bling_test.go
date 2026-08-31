@@ -3,6 +3,7 @@ package erp
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -971,5 +972,201 @@ func TestGradeDiferenteAindaEhEnviada(t *testing.T) {
 					"diferente do carrinho que a compradora pagou")
 			}
 		})
+	}
+}
+
+// ─── A FORMA DE PAGAMENTO ───────────────────────────────────────────────────
+//
+// Um PIX de R$ 7.975,41 foi gravado no Bling como DINHEIRO. A causa não era um
+// mapeamento errado: era um método que nunca era passado. formaPagamentoPadrao
+// escolhia a forma marcada como padrão na conta — e nessa conta a padrão é
+// Dinheiro. A observação da parcela dizia "pix" e o campo estruturado, que vira
+// o tPag da NF-e e a linha do fechamento de caixa, dizia dinheiro.
+//
+// O fake abaixo serve EXATAMENTE as sete formas medidas na conta real em
+// 31/08/2026 — inclusive a ausência de cartão de crédito, que é o caso que
+// qualquer desenho tem de sobreviver.
+const formasDaContaReal = `{"data":[
+  {"id":11010299,"descricao":"Dinheiro","padrao":1,"situacao":1,"tipoPagamento":1,"finalidade":3},
+  {"id":11010305,"descricao":"Pix","padrao":0,"situacao":1,"tipoPagamento":20,"finalidade":3},
+  {"id":11010300,"descricao":"Boleto","padrao":0,"situacao":1,"tipoPagamento":15,"finalidade":2},
+  {"id":11010301,"descricao":"Cheque","padrao":0,"situacao":1,"tipoPagamento":2,"finalidade":3},
+  {"id":11010302,"descricao":"Depósito Bancário","padrao":0,"situacao":1,"tipoPagamento":16,"finalidade":3},
+  {"id":11010303,"descricao":"Crediário","padrao":0,"situacao":1,"tipoPagamento":21,"finalidade":3},
+  {"id":11010304,"descricao":"Vale-Troca","padrao":0,"situacao":1,"tipoPagamento":21,"finalidade":2}
+]}`
+
+// bancadaDeFormas responde /formas-pagamentos com a conta real e o resto com um
+// pedido vazio, contando quantas vezes cada caminho foi chamado.
+func bancadaDeFormas(t *testing.T, parcelasDoPedido string) (*Bling, *int) {
+	t.Helper()
+	var leiturasDeFormas int
+	b, _ := bancadaBling(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/formas-pagamentos") {
+			leiturasDeFormas++
+			respJSON(formasDaContaReal)(w, r)
+			return
+		}
+		respJSON(`{"data":{"id":1,"situacao":{"id":6,"valor":0},"itens":[],"parcelas":`+
+			parcelasDoPedido+`}}`)(w, r)
+	})
+	return b, &leiturasDeFormas
+}
+
+func TestFormaDePagamentoSaiDoMetodoENaoDoPadraoDaConta(t *testing.T) {
+	casos := []struct {
+		metodo    string
+		queroID   int64
+		queroWarn bool
+		porque    string
+	}{
+		{"pix", 11010305, false, "o defeito que o lojista viu: hoje isto daria 11010299 (Dinheiro)"},
+		{"boleto", 11010300, false, "tipoPagamento 15"},
+		{"debit_card", 11010299, true, "a conta não tem débito — cai na padrão, COM aviso"},
+		{"credit_card", 11010299, true, "a conta não tem cartão de crédito — o caso que o desenho tem de aguentar"},
+		{"", 11010299, false, "DESCONTO e A PAGAR não têm instrumento: padrão em SILÊNCIO"},
+		{"manual", 11010299, false, "pagamento por fora: instrumento mesmo desconhecido"},
+		{"erp_manual", 11010299, false, "baixa lançada no ERP"},
+		{"other", 11010299, false, "o gateway não soube dizer"},
+	}
+
+	for _, c := range casos {
+		t.Run(c.metodo+" → "+strconv.FormatInt(c.queroID, 10), func(t *testing.T) {
+			b, _ := bancadaDeFormas(t, `[]`)
+			got, err := b.formaPagamentoPara(context.Background(), c.metodo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != c.queroID {
+				t.Errorf("método %q → forma %d, queria %d (%s)", c.metodo, got, c.queroID, c.porque)
+			}
+		})
+	}
+}
+
+// A resolução por método NÃO pode multiplicar requisições: o teto do Bling é
+// 3 req/s POR CONTA, somando todos os apps do lojista.
+func TestResolverFormaPorMetodoNaoGastaRequisicaoAMais(t *testing.T) {
+	b, leituras := bancadaDeFormas(t, `[]`)
+	ctx := context.Background()
+
+	for _, m := range []string{"pix", "credit_card", "boleto", "", "pix", "debit_card"} {
+		if _, err := b.formaPagamentoPara(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if *leituras != 1 {
+		t.Errorf("leu /formas-pagamentos %d vezes, quero 1 — o mapa por tipo sai da "+
+			"MESMA leitura que resolve o padrão", *leituras)
+	}
+}
+
+// Multi-pagamento: duas parcelas com instrumentos diferentes têm de sair com
+// formas diferentes. Resolver uma vez por chamada carimbaria a primeira em todas.
+func TestCadaParcelaLevaAFormaDoSeuProprioMetodo(t *testing.T) {
+	var corpoPut map[string]any
+	var leiturasDeFormas int
+	// O fake guarda o que foi escrito: SetOrderInstallments RELÊ o pedido e
+	// confere que o ERP não reescreveu a divisão — um fake sem memória faria a
+	// verificação (correta) parecer falha do teste.
+	gravadas := "[]"
+	b, _ := bancadaBling(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/formas-pagamentos") {
+			leiturasDeFormas++
+			respJSON(formasDaContaReal)(w, r)
+			return
+		}
+		if r.Method == http.MethodPut {
+			_ = json.NewDecoder(r.Body).Decode(&corpoPut)
+			if bruto, err := json.Marshal(corpoPut["parcelas"]); err == nil {
+				gravadas = string(bruto)
+			}
+			respJSON(`{"data":{"id":1}}`)(w, r)
+			return
+		}
+		respJSON(`{"data":{"id":1,"situacao":{"id":6,"valor":0},"itens":[],"parcelas":`+
+			gravadas+`}}`)(w, r)
+	})
+
+	agora := time.Now()
+	err := b.SetOrderInstallments(context.Background(), "1", []providers.ERPInstallment{
+		{AmountCents: 5000, DueDate: agora, Note: "PAGO — pix", Method: "pix"},
+		{AmountCents: 3000, DueDate: agora, Note: "PAGO — cartão", Method: "credit_card"},
+		{AmountCents: 1000, DueDate: agora, Note: "DESCONTO concedido", Method: ""},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parcelas, _ := corpoPut["parcelas"].([]any)
+	if len(parcelas) != 3 {
+		t.Fatalf("parcelas enviadas = %d, queria 3", len(parcelas))
+	}
+	formaDa := func(i int) int64 {
+		m := parcelas[i].(map[string]any)
+		f := m["formaPagamento"].(map[string]any)
+		return int64(numeroDoCru(f["id"]))
+	}
+	if formaDa(0) != 11010305 {
+		t.Errorf("a parcela do PIX saiu com a forma %d, queria 11010305 (Pix)", formaDa(0))
+	}
+	if formaDa(1) != 11010299 {
+		t.Errorf("a parcela do cartão saiu com %d; esta conta não tem cartão, "+
+			"então o esperado é a padrão 11010299", formaDa(1))
+	}
+	if formaDa(2) != 11010299 {
+		t.Errorf("a linha de DESCONTO saiu com %d, queria a padrão 11010299", formaDa(2))
+	}
+	if formaDa(0) == formaDa(1) && formaDa(0) == 11010299 {
+		t.Error("todas as parcelas saíram com a padrão — a resolução continua sendo " +
+			"uma por chamada, e não uma por parcela")
+	}
+	if leiturasDeFormas != 1 {
+		t.Errorf("leu /formas-pagamentos %d vezes para 3 parcelas, quero 1", leiturasDeFormas)
+	}
+}
+
+// Forma INATIVA nunca pode ser escolhida, mesmo que o servidor a devolva.
+func TestFormaInativaNuncaEhEscolhida(t *testing.T) {
+	b, _ := bancadaBling(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/formas-pagamentos") {
+			respJSON(`{"data":[
+			  {"id":1,"descricao":"Pix desativado","padrao":0,"situacao":0,"tipoPagamento":20,"finalidade":3},
+			  {"id":2,"descricao":"Dinheiro","padrao":1,"situacao":1,"tipoPagamento":1,"finalidade":3}
+			]}`)(w, r)
+			return
+		}
+		respJSON(`{"data":{"id":1}}`)(w, r)
+	})
+	got, err := b.formaPagamentoPara(context.Background(), "pix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == 1 {
+		t.Error("escolheu uma forma INATIVA — a conferência em código existe porque " +
+			"servidor que ignora o filtro em silêncio devolve a lista inteira")
+	}
+}
+
+// Forma de finalidade 1 (só PAGAMENTOS) não serve para pedido de VENDA, que
+// gera conta a RECEBER.
+func TestFormaDeFinalidadeDePagamentoNaoServeParaVenda(t *testing.T) {
+	b, _ := bancadaBling(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/formas-pagamentos") {
+			respJSON(`{"data":[
+			  {"id":1,"descricao":"Pix de saída","padrao":0,"situacao":1,"tipoPagamento":20,"finalidade":1},
+			  {"id":2,"descricao":"Dinheiro","padrao":1,"situacao":1,"tipoPagamento":1,"finalidade":3}
+			]}`)(w, r)
+			return
+		}
+		respJSON(`{"data":{"id":1}}`)(w, r)
+	})
+	got, err := b.formaPagamentoPara(context.Background(), "pix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == 1 {
+		t.Error("escolheu forma de finalidade 1 (só pagamentos) para um pedido de venda — " +
+			"o lançamento iria para o lugar errado")
 	}
 }

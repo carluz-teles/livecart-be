@@ -26,7 +26,7 @@ type ERPRepository interface {
 	CartIsTerminated(ctx context.Context, cartID string) (bool, error)
 	// ListERPLinkedProductsSample devolve uma amostra de produtos ligados ao
 	// ERP e com estoque — a matéria-prima da checagem do módulo de Reserva.
-	ListERPLinkedProductsSample(ctx context.Context, storeID string, limite int) ([]ERPLinkedProduct, error)
+	ListERPLinkedProductsSample(ctx context.Context, storeID, externalSource string, limite int) ([]ERPLinkedProduct, error)
 	// GetActiveByProvider resolves the active ERP integration for a store.
 	// Signature mirrors integration.Repository.GetActiveByProvider, but returns
 	// the neutral erp.Integration instead of the integration-owned IntegrationRow

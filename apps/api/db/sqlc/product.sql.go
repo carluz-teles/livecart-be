@@ -438,12 +438,13 @@ WHERE store_id = $1::uuid
   AND external_id IS NOT NULL AND external_id <> ''
   AND stock > 0
 ORDER BY updated_at DESC NULLS LAST
-LIMIT $2::int
+LIMIT $3::int
 `
 
 type ListERPLinkedProductsSampleParams struct {
-	StoreID pgtype.UUID `json:"store_id"`
-	Limite  int32       `json:"limite"`
+	StoreID        pgtype.UUID `json:"store_id"`
+	ExternalSource string      `json:"external_source"`
+	Limite         int32       `json:"limite"`
 }
 
 type ListERPLinkedProductsSampleRow struct {
@@ -459,7 +460,7 @@ type ListERPLinkedProductsSampleRow struct {
 // propósito: as leituras dividem a cota da conta com a live, e provar um módulo
 // não vale atrasar uma venda.
 func (q *Queries) ListERPLinkedProductsSample(ctx context.Context, arg ListERPLinkedProductsSampleParams) ([]ListERPLinkedProductsSampleRow, error) {
-	rows, err := q.db.Query(ctx, listERPLinkedProductsSample, arg.StoreID, arg.Limite)
+	rows, err := q.db.Query(ctx, listERPLinkedProductsSample, arg.StoreID, arg.ExternalSource, arg.Limite)
 	if err != nil {
 		return nil, err
 	}

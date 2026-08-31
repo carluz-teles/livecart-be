@@ -1025,6 +1025,19 @@ type ERPInstallment struct {
 	// Note é o que o lojista lê no painel — é aqui que "PAGO" e "A PAGAR" ficam
 	// visíveis para ele.
 	Note string
+	// Method é COMO esta parcela foi paga: "pix", "credit_card", "debit_card",
+	// "boleto". Vazio significa "não sei" — e não "dinheiro".
+	//
+	// Vive na PARCELA, e não na chamada, porque um carrinho pode ter mais de um
+	// pagamento (PIX + cartão) e as linhas "DESCONTO concedido" e "A PAGAR" não
+	// têm método nenhum. Resolver um método por chamada carimbaria o da
+	// primeira parcela em todas.
+	//
+	// Campo ADITIVO de propósito: SetOrderInstallments não muda de assinatura.
+	// internal/erp/parcelas.go faz uma asserção estrutural ANÔNIMA com a
+	// assinatura exata — mudá-la compila, o `ok` vira false, e a recomposição
+	// das parcelas para de acontecer EM SILÊNCIO nos dois ERPs.
+	Method string
 }
 
 // LiveCartItemMarker abre a informação adicional de toda linha que o LiveCart

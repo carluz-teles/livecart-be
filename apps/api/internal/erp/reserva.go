@@ -80,19 +80,33 @@ const amostraDaReserva = 5
 func (s *Service) VerificarReserva(ctx context.Context, storeID string) (*ReservaCheck, error) {
 	rel := &ReservaCheck{Status: ReservaNaoVerificada}
 
-	produtos, err := s.repo.ListERPLinkedProductsSample(ctx, storeID, amostraDaReserva)
+	// A amostra tem de ser dos produtos DESTE ERP.
+	//
+	// A fonte era o literal 'tiny'. Numa loja Bling cujo catálogo veio do Tiny,
+	// a query devolvia os produtos ANTIGOS — ids que no Bling dão 404 — e a
+	// sonda concluía "não consegui confirmar", mandando o lojista ligar uma
+	// configuração que já estava ligada. Pior que vazio: parecia uma medição.
+	integracao, err := s.repo.GetActiveERP(ctx, storeID)
+	if err != nil {
+		rel.Motivo = "nenhuma integração de ERP ativa"
+		return rel, err
+	}
+	nomeDoERP := nomeDeVitrineDoERP(integracao.Provider)
+
+	produtos, err := s.repo.ListERPLinkedProductsSample(ctx, storeID, integracao.Provider, amostraDaReserva)
 	if err != nil {
 		rel.Motivo = "não foi possível listar os produtos ligados ao ERP"
 		return rel, err
 	}
 	if len(produtos) == 0 {
-		rel.Motivo = "nenhum produto ligado ao Tiny ainda — importe produtos para poder verificar"
+		rel.Motivo = "nenhum produto ligado ao " + nomeDoERP +
+			" ainda — importe produtos para poder verificar"
 		return rel, nil
 	}
 
 	erpProvider, err := s.providerFor(ctx, storeID)
 	if err != nil {
-		rel.Motivo = "integração com o Tiny indisponível"
+		rel.Motivo = "integração com o " + nomeDoERP + " indisponível"
 		return rel, err
 	}
 	leitor, ok := erpProvider.(interface {
@@ -121,7 +135,7 @@ func (s *Service) VerificarReserva(ctx context.Context, storeID string) (*Reserv
 
 	switch {
 	case lidos == 0:
-		rel.Motivo = "o Tiny não respondeu à leitura de estoque"
+		rel.Motivo = "o " + nomeDoERP + " não respondeu à leitura de estoque"
 	case rel.ComReserva > 0:
 		rel.Status = ReservaConfirmada
 	default:
@@ -133,4 +147,19 @@ func (s *Service) VerificarReserva(ctx context.Context, storeID string) (*Reserv
 // String é o que aparece no log.
 func (c *ReservaCheck) String() string {
 	return fmt.Sprintf("reserva=%s amostrados=%d com_reserva=%d", c.Status, c.Amostrados, c.ComReserva)
+}
+
+// nomeDeVitrineDoERP é o nome que o lojista reconhece.
+//
+// Vive aqui, e não no pacote de integração, porque este pacote não pode
+// importá-lo — e o nome do ERP é justamente o que estas mensagens erravam.
+func nomeDeVitrineDoERP(provider string) string {
+	switch provider {
+	case "tiny":
+		return "Tiny"
+	case "bling":
+		return "Bling"
+	default:
+		return "ERP"
+	}
 }

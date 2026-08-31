@@ -629,7 +629,7 @@ func (r *repoSimulado) esvaziarCarrinho(cartID string) {
 }
 
 // ListERPLinkedProductsSample: a amostra que a checagem do módulo de Reserva lê.
-func (r *repoSimulado) ListERPLinkedProductsSample(_ context.Context, _ string, limite int) ([]ERPLinkedProduct, error) {
+func (r *repoSimulado) ListERPLinkedProductsSample(_ context.Context, _ string, _ string, limite int) ([]ERPLinkedProduct, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]ERPLinkedProduct, 0, limite)

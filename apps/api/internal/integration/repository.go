@@ -4147,9 +4147,9 @@ func (r *Repository) ListCartPayments(ctx context.Context, cartID string) ([]erp
 	return out, nil
 }
 
-// ListERPLinkedProductsSample devolve uma amostra de produtos ligados ao Tiny e
+// ListERPLinkedProductsSample devolve uma amostra de produtos ligados ao ERP e
 // com estoque. Satisfaz erp.ERPRepository.
-func (r *Repository) ListERPLinkedProductsSample(ctx context.Context, storeID string, limite int) ([]erp.ERPLinkedProduct, error) {
+func (r *Repository) ListERPLinkedProductsSample(ctx context.Context, storeID, externalSource string, limite int) ([]erp.ERPLinkedProduct, error) {
 	sID, err := parseUUID(storeID)
 	if err != nil {
 		return nil, err
