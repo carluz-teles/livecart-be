@@ -81,7 +81,7 @@ func (h *Handler) UploadImage(c *fiber.Ctx) error {
 	}
 	defer src.Close()
 
-	key, err := h.s3Client.UploadFile(c.UserContext(), src, file.Filename, contentType, "products/"+storeID)
+	key, err := h.s3Client.UploadPublicFile(c.UserContext(), src, file.Filename, contentType, "products/"+storeID)
 	if err != nil {
 		return httpx.ErrInternal("failed to upload file")
 	}

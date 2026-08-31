@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/google/uuid"
 
 	appconfig "livecart/apps/api/lib/config"
@@ -111,6 +112,33 @@ func (c *S3Client) UploadFile(ctx context.Context, reader io.Reader, filename st
 	}
 
 	// Return just the key, not a URL
+	return key, nil
+}
+
+// UploadPublicFile uploads a file with a public-read ACL and returns the S3 key.
+// Used for assets served by their permanent public URL (GetPublicURL) instead of
+// a short-lived presigned one — e.g. product images, which are read as-is in the
+// admin, the buyer catalog and the checkout. The private-bucket default (plain
+// UploadFile) would 403 those reads.
+func (c *S3Client) UploadPublicFile(ctx context.Context, reader io.Reader, filename string, contentType string, folder string) (string, error) {
+	ext := filepath.Ext(filename)
+	if ext == "" {
+		ext = ".jpg"
+	}
+
+	key := fmt.Sprintf("%s/%s%s", folder, uuid.New().String(), ext)
+
+	_, err := c.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(c.bucket),
+		Key:         aws.String(key),
+		Body:        reader,
+		ContentType: aws.String(contentType),
+		ACL:         s3types.ObjectCannedACLPublicRead,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to upload public file: %w", err)
+	}
+
 	return key, nil
 }
 
