@@ -179,26 +179,56 @@ type Service struct {
 type filaDeEscrita struct {
 	mu      sync.Mutex
 	limites erpwrite.Limits
-	fila    *erpwrite.Queue
-	baldes  map[string]*erpwrite.Limiter
+	// sobreposto marca que SetWriteLimits mandou um teto explícito. Nesse caso
+	// ele vale para todo mundo — é o que os testes de fluxo usam para abrir os
+	// portões sem esperar a janela de 60 segundos.
+	sobreposto bool
+	fila       *erpwrite.Queue
+	baldes     map[string]*erpwrite.Limiter
+	// providerDoBalde lembra com que ERP cada balde foi semeado. Uma loja que
+	// troca de ERP precisa de balde novo: sem isto ela ficaria com o teto do
+	// ERP antigo até o próximo deploy.
+	providerDoBalde map[string]string
 }
 
 func novaFilaDeEscrita(limites erpwrite.Limits) *filaDeEscrita {
 	return &filaDeEscrita{
 		limites: limites,
-		fila:    erpwrite.NewQueue(limites.BurstN),
-		baldes:  map[string]*erpwrite.Limiter{},
+		// ⚠ NewQueue(BurstN) NÃO é balde de taxa: é o semáforo de concorrência
+		// do PROCESSO, compartilhado por todas as lojas e todos os providers.
+		// Ele fica com o número do padrão de propósito — mexer nele é outra
+		// decisão, sobre quantas escritas simultâneas o processo aguenta, e não
+		// sobre quanto cada ERP aceita por minuto.
+		fila:            erpwrite.NewQueue(limites.BurstN),
+		baldes:          map[string]*erpwrite.Limiter{},
+		providerDoBalde: map[string]string{},
 	}
 }
 
-func (f *filaDeEscrita) balde(storeID string) *erpwrite.Limiter {
+// balde devolve o limitador da loja, semeado com o teto do ERP DELA.
+func (f *filaDeEscrita) balde(storeID, provider string) *erpwrite.Limiter {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	lim, ok := f.baldes[storeID]
-	if !ok {
-		lim = erpwrite.NewLimiter(f.limites)
-		f.baldes[storeID] = lim
+
+	// Teto explícito (SetWriteLimits) vale para todo mundo — os testes contam
+	// com isso para abrir os portões.
+	if f.sobreposto {
+		lim, ok := f.baldes[storeID]
+		if !ok {
+			lim = erpwrite.NewLimiter(f.limites)
+			f.baldes[storeID] = lim
+		}
+		return lim
 	}
+
+	lim, ok := f.baldes[storeID]
+	if ok && f.providerDoBalde[storeID] == provider {
+		return lim
+	}
+	// Loja nova, ou loja que trocou de ERP: balde novo com o teto certo.
+	lim = erpwrite.NewLimiter(erpwrite.LimitesDoProvider(provider))
+	f.baldes[storeID] = lim
+	f.providerDoBalde[storeID] = provider
 	return lim
 }
 
@@ -211,6 +241,7 @@ func (f *filaDeEscrita) balde(storeID string) *erpwrite.Limiter {
 // seus próprios testes.
 func (s *Service) SetWriteLimits(limites erpwrite.Limits) {
 	s.escrita = novaFilaDeEscrita(limites)
+	s.escrita.sobreposto = true
 }
 
 // escreverNoERP roda fn com a vez do carrinho e dentro da cota da loja.
@@ -227,8 +258,16 @@ func (s *Service) escreverNoERP(ctx context.Context, storeID, chave string, fn f
 	if s.escrita == nil {
 		return fn(ctx)
 	}
+	// O teto é do ERP da loja, e por isso ele é resolvido aqui. É a mesma
+	// consulta indexada que o resto do caminho quente já faz; falhar nela cai no
+	// padrão mais APERTADO (Tiny), porque o desconhecido não pode ganhar folga.
+	provider := ""
+	if integracao, err := s.repo.GetActiveERP(ctx, storeID); err == nil && integracao != nil {
+		provider = integracao.Provider
+	}
+
 	return s.escrita.fila.Do(ctx, chave, func(ctx context.Context) error {
-		if err := s.escrita.balde(storeID).Wait(ctx); err != nil {
+		if err := s.escrita.balde(storeID, provider).Wait(ctx); err != nil {
 			return err
 		}
 		return fn(ctx)

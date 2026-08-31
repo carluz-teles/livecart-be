@@ -19,12 +19,44 @@ type Limits struct {
 	SustWindow  time.Duration
 }
 
-// DefaultLimits é o que foi medido. Deliberadamente conservador nos dois baldes:
-// errar para menos custa latência, errar para mais custa a venda.
+// DefaultLimits é o teto do TINY, e continua sendo o padrão de quem não é
+// reconhecido. Deliberadamente conservador nos dois baldes: errar para menos
+// custa latência, errar para mais custa a venda.
+//
+// O nome ficou por compatibilidade com os call sites; a função que se deve usar
+// para uma loja é LimitesDoProvider.
 func DefaultLimits() Limits {
 	return Limits{
 		BurstN: 4, BurstWindow: time.Second,
 		SustainedN: 30, SustWindow: time.Minute,
+	}
+}
+
+// LimitesDoProvider é o teto de escrita de cada ERP.
+//
+// Antes havia um só, medido no Tiny, valendo para TODA loja. Numa live de Bling
+// isso estrangulava sem motivo: a partir da 31ª OPERAÇÃO no minuto o
+// escreverNoERP recusava, e o carrinho da compradora seguinte virava "erro no
+// ERP" com o Bling tranquilo do outro lado.
+//
+// ⚠ A unidade aqui é OPERAÇÃO, não requisição. Uma operação do caminho quente
+// do Bling são 1-2 requisições (o GET do documento e o PUT), e a criação de
+// pedido são 3-5. Por isso o número do Bling é conservador: 60 operações por
+// minuto ficam em torno de 1-2 req/s, dentro do freio local de 2 req/s do
+// adapter e bem abaixo do teto de 3 req/s da conta. DOBRA a vazão da live em
+// vez de quadruplicá-la às cegas.
+//
+// Quem não é reconhecido cai no Tiny, que é o mais apertado — o desconhecido
+// não pode ganhar folga por omissão.
+func LimitesDoProvider(provider string) Limits {
+	switch provider {
+	case "bling":
+		return Limits{
+			BurstN: 2, BurstWindow: time.Second,
+			SustainedN: 60, SustWindow: time.Minute,
+		}
+	default:
+		return DefaultLimits()
 	}
 }
 

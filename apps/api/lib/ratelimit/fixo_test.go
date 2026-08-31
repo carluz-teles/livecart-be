@@ -173,3 +173,40 @@ func TestFixoIgnoraHeadersSemMudarDeComportamento(t *testing.T) {
 func TestFixoSatisfazAInterface(t *testing.T) {
 	var _ RateLimiter = NovoFixo(1)
 }
+
+// A RECUSA PRÉ-DESPACHO TEM DE SE IDENTIFICAR COMO TAL.
+//
+// Devolver context.DeadlineExceeded puro perdia a única informação que importa:
+// quem lê o erro não distinguia esta recusa — em que NENHUM byte saiu — de um
+// timeout de rede, em que o ERP pode ter processado e demorado a responder.
+//
+// A consequência é concreta e cara: timeout ambíguo vira `unconfirmed`, e
+// unconfirmed TRAVA carrinho pago. Recusa pré-despacho é segura de repetir.
+//
+// Enquanto o teto de escrita foi o do Tiny, esta porta quase nunca era a que
+// fechava. Ao afrouxá-lo para o Bling, ela passa a ser.
+func TestRecusaAntesDeEnviarSeIdentifica(t *testing.T) {
+	f := NovoFixo(1) // 1 req/s: a segunda vaga só chega em 1 segundo
+
+	ctx := context.Background()
+	if err := f.Wait(ctx); err != nil {
+		t.Fatalf("a primeira vaga tinha de passar: %v", err)
+	}
+
+	// Prazo curto demais para a próxima vaga.
+	curto, cancelar := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancelar()
+
+	err := f.Wait(curto)
+	if err == nil {
+		t.Fatal("queria recusa: a vaga não cabe no prazo")
+	}
+	if !errors.Is(err, ErrNaoDespachado) {
+		t.Errorf("erro = %v; tem de casar com ErrNaoDespachado, senão quem classifica "+
+			"o trata como timeout ambíguo e o carrinho pago fica preso", err)
+	}
+	// E continua sendo um DeadlineExceeded para quem só olha o prazo.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("erro = %v; tem de continuar casando com DeadlineExceeded", err)
+	}
+}

@@ -211,3 +211,42 @@ func TestLimiterSobConcorrencia(t *testing.T) {
 		}
 	}
 }
+
+// O TETO DE ESCRITA É DO ERP DA LOJA, e não um número só para todo mundo.
+//
+// Havia um: o medido no Tiny (4/s, 30/min). Numa live de Bling isso
+// estrangulava sem motivo — a partir da 31ª OPERAÇÃO no minuto o escreverNoERP
+// recusava e o carrinho da compradora seguinte virava "erro no ERP", com o
+// Bling tranquilo do outro lado.
+func TestTetoDeEscritaEhPorProvider(t *testing.T) {
+	tiny := LimitesDoProvider("tiny")
+	if tiny != DefaultLimits() {
+		t.Errorf("o Tiny mudou: %+v — ele fatura hoje e não pode mudar por omissão", tiny)
+	}
+
+	bling := LimitesDoProvider("bling")
+	if bling.SustainedN <= tiny.SustainedN {
+		t.Errorf("o Bling ficou com %d op/min contra %d do Tiny — a correção existe "+
+			"justamente porque o teto do Tiny estrangula uma live de Bling",
+			bling.SustainedN, tiny.SustainedN)
+	}
+
+	// ⚠ A unidade é OPERAÇÃO, não requisição: uma operação do caminho quente do
+	// Bling são 1-2 requisições, e a criação de pedido são 3-5. O teto da CONTA
+	// é 3 req/s. Com 60 op/min e 2 req por op, a média fica em 2 req/s — dentro
+	// do freio local do adapter (BlingRPSPadrao = 2.0) e abaixo do teto real.
+	const piorCasoReqPorOperacao = 2
+	reqPorSegundo := float64(bling.SustainedN*piorCasoReqPorOperacao) / bling.SustWindow.Seconds()
+	if reqPorSegundo > 2.0 {
+		t.Errorf("o teto do Bling dá %.1f req/s no pior caso, acima do freio local de "+
+			"2 req/s do adapter — afrouxar aqui só empurraria a fila para lá", reqPorSegundo)
+	}
+
+	// Provider desconhecido cai no MAIS APERTADO. O desconhecido não pode ganhar
+	// folga por omissão.
+	for _, p := range []string{"", "shopify", "erp-que-ainda-nao-existe"} {
+		if LimitesDoProvider(p) != DefaultLimits() {
+			t.Errorf("provider %q ganhou teto próprio sem ninguém ter medido nada", p)
+		}
+	}
+}

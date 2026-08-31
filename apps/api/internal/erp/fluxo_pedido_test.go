@@ -1095,3 +1095,45 @@ func TestFalhaDeVerdadeNaSituacaoAindaAbortaAConfirmacao(t *testing.T) {
 			"a tolerância vazou para além da recusa explícita")
 	}
 }
+
+// A loja recebe o balde do ERP DELA, e troca de balde se trocar de ERP.
+//
+// Sem lembrar com que provider o balde foi semeado, uma loja que migrou de ERP
+// ficaria com o teto do antigo até o próximo deploy.
+func TestBaldeDeEscritaSegueOERPDaLoja(t *testing.T) {
+	fila := novaFilaDeEscrita(erpwrite.DefaultLimits())
+
+	tiny := fila.balde("loja-1", "tiny")
+	if fila.balde("loja-1", "tiny") != tiny {
+		t.Error("a mesma loja com o mesmo ERP recebeu baldes diferentes — o teto " +
+			"reiniciaria a cada escrita e o freio deixaria de existir")
+	}
+
+	bling := fila.balde("loja-1", "bling")
+	if bling == tiny {
+		t.Error("a loja trocou de ERP e continuou no balde antigo — ela ficaria com " +
+			"o teto do Tiny numa live de Bling até o próximo deploy")
+	}
+
+	// Loja diferente é balde diferente: o teto é por conta no ERP.
+	if fila.balde("loja-2", "bling") == bling {
+		t.Error("duas lojas compartilharam o balde")
+	}
+}
+
+// SetWriteLimits continua sobrepondo TUDO — é o que os testes de fluxo usam
+// para não esperar a janela de 60 segundos só para provar uma regra de negócio.
+func TestSetWriteLimitsSobrepoeOTetoDoProvider(t *testing.T) {
+	svc, _, _, _ := montar(map[string]int{"ext-p1": 5})
+	svc.SetWriteLimits(limitesAbertos())
+
+	// Mesmo pedindo o balde de um provider com teto próprio, vale o sobreposto.
+	b := svc.escrita.balde("loja-1", "bling")
+	if b == nil {
+		t.Fatal("balde nulo")
+	}
+	if !svc.escrita.sobreposto {
+		t.Error("SetWriteLimits deixou de marcar a sobreposição — os testes de fluxo " +
+			"voltariam a esperar a janela real do limitador")
+	}
+}

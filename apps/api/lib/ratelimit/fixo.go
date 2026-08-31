@@ -2,9 +2,22 @@ package ratelimit
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
+
+// ErrNaoDespachado é a recusa que acontece ANTES de qualquer byte sair.
+//
+// É diferente de timeout, e a diferença é a que decide se um carrinho pago
+// destrava: um timeout não prova nada (o ERP pode ter aplicado e demorado a
+// responder), então ele vira "não sei" e o carrinho fica preso. Uma vaga que
+// não cabe no prazo prova que a requisição não saiu — e o que não saiu pode ser
+// repetido sem medo de duplicar.
+//
+// Embrulha DeadlineExceeded para quem só checa o prazo continuar funcionando.
+var ErrNaoDespachado = fmt.Errorf("limitador: vaga não cabe no prazo, nada foi enviado: %w",
+	context.DeadlineExceeded)
 
 // Fixo é um limitador PREDITIVO: espaça as requisições a uma taxa fixa sem
 // depender de header nenhum do provedor.
@@ -85,10 +98,21 @@ func (f *Fixo) Wait(ctx context.Context) error {
 
 	// A checagem que muda tudo: se a vaga não chega dentro do prazo, é melhor
 	// devolver agora, provadamente sem ter enviado.
+	//
+	// E o erro TEM DE DIZER ISSO. Devolver `context.DeadlineExceeded` puro
+	// perdia a única informação que importa: quem lê o erro não distingue esta
+	// recusa — em que nenhum byte saiu — de um timeout de rede, em que o ERP
+	// pode ter processado e demorado a responder. Timeout ambíguo vira
+	// `unconfirmed`, que TRAVA carrinho pago; recusa pré-despacho é segura de
+	// repetir.
+	//
+	// Enquanto o teto de escrita foi o do Tiny (mais apertado que o do Bling),
+	// esta porta quase nunca era a que fechava. Ao afrouxar aquele teto, ela
+	// passa a ser — e a ambiguidade sairia caro exatamente aí.
 	if prazo, ok := ctx.Deadline(); ok {
 		if restante := prazo.Sub(f.agora()); restante <= res.RetryAfter {
 			f.devolverVaga()
-			return context.DeadlineExceeded
+			return ErrNaoDespachado
 		}
 	}
 
