@@ -75,6 +75,13 @@ type CartPaymentGateway interface {
 	// ErrCartNotPayable skip). Also returns the cart's live_event_id on restore.
 	RestoreCancelledCartAsPaid(ctx context.Context, cartID, storeID, paymentStatus, paymentID string, paidAt *time.Time, paymentMethod string) (restored bool, liveEventID string, err error)
 
+	// MarkCartRefunded aplica a escrita guardada do estorno MANUAL: só um
+	// carrinho PAGO vira 'refunded', e o guard vive na query para duas abas
+	// clicando junto não emitirem dois fatos. Devolve ok=false quando o
+	// carrinho não estava pago, mais o live_event_id e o id do pagamento
+	// original — que continua sendo a chave de dedupe do fato.
+	MarkCartRefunded(ctx context.Context, cartID string) (liveEventID, paymentID string, ok bool, err error)
+
 	// CartGMVCents returns the pure item sum (excludes shipping and coupon) for
 	// the cart — the single source of truth. A malformed cart id yields (0, nil);
 	// a query failure yields (0, err) so the caller can warn and emit gmv=0.

@@ -4332,6 +4332,11 @@ func (s *Service) CartPaymentStatus(ctx context.Context, cartID string) (string,
 	return cart.PaymentStatus, nil
 }
 
+// MarkCartRefunded aplica a escrita guardada do estorno manual. Ver a query.
+func (s *Service) MarkCartRefunded(ctx context.Context, cartID string) (string, string, bool, error) {
+	return s.repo.MarkCartRefunded(ctx, cartID)
+}
+
 // UpdateCartPaymentStatus applies the guarded cart payment write. It returns
 // paymentdomain.ErrCartNotPayable (the sentinel the repo now returns) when the
 // cart expired/cancelled between the charge and the webhook, and the cart's

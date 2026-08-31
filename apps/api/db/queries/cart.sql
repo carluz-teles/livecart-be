@@ -1817,3 +1817,19 @@ WHERE e.store_id = sqlc.arg(store_id)
   AND EXISTS (SELECT 1 FROM cart_items ci WHERE ci.cart_id = c.id AND ci.quantity > ci.waitlisted_quantity)
 ORDER BY c.created_at DESC
 LIMIT 50;
+
+-- name: MarkCartRefunded :one
+-- Estorno MANUAL: o lojista está dizendo que devolveu o dinheiro.
+--
+-- Só um carrinho PAGO pode ser estornado — o guard vive aqui, e não no Go, para
+-- duas abas clicando junto não emitirem dois fatos. Zero linhas significa
+-- "não estava pago", e o chamador recusa em vez de fingir sucesso.
+--
+-- paid_at e checkout_id ficam INTACTOS de propósito: o pagamento aconteceu, e
+-- apagar a hora e o identificador dele apagaria a única trilha de quando o
+-- dinheiro entrou e por onde. Estorno não desfaz a história; acrescenta um
+-- capítulo.
+UPDATE carts
+SET payment_status = 'refunded', updated_at = now()
+WHERE id = sqlc.arg(id) AND payment_status = 'paid'
+RETURNING id, event_id, COALESCE(checkout_id, '') AS checkout_id;

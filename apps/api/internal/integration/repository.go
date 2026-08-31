@@ -4514,3 +4514,22 @@ func (r *Repository) CartIsPaid(ctx context.Context, cartID string) (bool, error
 	}
 	return r.queries.CartIsPaid(ctx, id)
 }
+
+// MarkCartRefunded marca o carrinho como estornado, e só se ele estava PAGO.
+//
+// Devolve ok=false — e não erro — quando o carrinho não estava pago: é a
+// resposta a uma segunda aba clicando no mesmo botão, e não uma falha.
+func (r *Repository) MarkCartRefunded(ctx context.Context, cartID string) (string, string, bool, error) {
+	id, err := parseUUID(cartID)
+	if err != nil {
+		return "", "", false, err
+	}
+	linha, err := r.queries.MarkCartRefunded(ctx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, fmt.Errorf("marcando o carrinho como estornado: %w", err)
+	}
+	return uuidToString(linha.EventID), linha.CheckoutID, true, nil
+}

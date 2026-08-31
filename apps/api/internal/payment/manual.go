@@ -156,3 +156,89 @@ func (s *Service) ConfirmManualPayment(ctx context.Context, cartID, storeID stri
 		Payload:     payload,
 	})
 }
+
+// ConfirmManualRefund é o "Marcar como reembolsado" do painel.
+//
+// ═══ O QUE ELE CONSERTA ═══
+//
+// O botão escrevia `carts.payment_status = 'refunded'` e parava aí — uma
+// escrita de coluna, sem fato nenhum. O resto do sistema nunca ficava sabendo:
+//
+//	o carrinho continuava 'active'      → fora de "Cancelados", preso em
+//	                                      "Precisam atenção" para sempre
+//	a Order continuava 'paid'           → relatório contava a venda estornada
+//	o pedido no ERP continuava vivo      → segurando peça que ninguém comprou
+//	o cupom continuava consumido         → a compradora perdia o uso
+//	o e-mail de estorno não saía
+//	o lançamento de comissão não voltava
+//
+// O lojista viu o primeiro item: pedido estornado aparecendo em "Precisam
+// atenção" em vez de "Cancelado". Os outros cinco estavam junto, calados.
+//
+// ═══ A CORREÇÃO ═══
+//
+// Estorno é FATO, não campo. Aqui ele passa a emitir `cart.refunded` — o MESMO
+// que o webhook do gateway emite — e todos os reatores rodam: OnCartRefunded
+// vira a Order, ReactCartRefunded cancela o carrinho, OnOrderRefunded cancela o
+// pedido no ERP, o cupom é devolvido, o e-mail sai, a comissão volta.
+//
+// Espelha ConfirmManualPayment de propósito: as duas ações são a mesma coisa em
+// direções opostas, e o que uma faz a outra tem de desfazer pelo mesmo caminho.
+func (s *Service) ConfirmManualRefund(ctx context.Context, cartID, storeID string) error {
+	if s.gateway == nil {
+		return fmt.Errorf("payment: cart payment gateway not wired")
+	}
+	log := logger.From(ctx, s.logger)
+
+	// A escrita é guardada e devolve o que aconteceu: só carrinho PAGO vira
+	// estornado. O guard vive na query para duas abas clicando junto não
+	// emitirem dois fatos.
+	liveEventID, paymentID, ok, err := s.gateway.MarkCartRefunded(ctx, cartID)
+	if err != nil {
+		return fmt.Errorf("marking cart refunded: %w", err)
+	}
+	if !ok {
+		// Não estava pago. Distinguir os motivos é o que evita o lojista ficar
+		// olhando um botão que "não faz nada".
+		atual, sErr := s.gateway.CartPaymentStatus(ctx, cartID)
+		if sErr != nil {
+			return fmt.Errorf("reading cart payment status: %w", sErr)
+		}
+		switch atual {
+		case "":
+			return httpx.ErrNotFound("pedido não encontrado")
+		case "refunded":
+			return httpx.DomainError(409, httpx.CodeOrderRefunded,
+				"este pedido já está estornado")
+		default:
+			return httpx.DomainError(409, httpx.CodeValidationFailed,
+				"só dá para estornar um pedido PAGO — este está como "+atual)
+		}
+	}
+
+	log.Info("manual refund confirmed",
+		zap.String("cart_id", cartID),
+		zap.String("store_id", storeID),
+	)
+
+	// O MESMO fato do estorno do gateway, com a MESMA chave de dedupe (o id do
+	// pagamento original). Se o webhook do provedor chegar depois confirmando o
+	// estorno, ele colapsa neste — e o fan-out não roda duas vezes.
+	dedup := paymentID
+	if dedup == "" {
+		dedup = "manual:" + cartID
+	}
+	payload, _ := json.Marshal(struct {
+		CartID    string `json:"cart_id"`
+		StoreID   string `json:"store_id"`
+		PaymentID string `json:"payment_id"`
+	}{cartID, storeID, paymentID})
+
+	return s.gateway.EmitEvent(ctx, events.Envelope{
+		Name:        events.CartRefunded,
+		Source:      events.Source("manual"),
+		DedupKey:    string(events.CartRefunded) + ":" + dedup,
+		LiveEventID: liveEventID,
+		Payload:     payload,
+	})
+}

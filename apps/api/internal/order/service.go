@@ -553,9 +553,18 @@ func (s *Service) Update(ctx context.Context, input UpdateOrderInput) (*OrderOut
 		}
 	}
 
-	// Update payment status if provided
+	// PAGAMENTO NÃO É CAMPO, É FATO.
+	//
+	// Este caminho escrevia a coluna e parava aí. Para 'refunded' o efeito era
+	// um estorno pela metade: o carrinho seguia vivo (preso em "Precisam
+	// atenção", fora de "Cancelados"), a Order seguia paga, o pedido no ERP
+	// seguia segurando peça, o cupom seguia consumido, e nem e-mail nem
+	// comissão sabiam de nada.
+	//
+	// Agora a transição de pagamento entra pelo caso de uso que emite o fato, e
+	// os reatores fazem o resto — os mesmos que o webhook do gateway aciona.
 	if input.PaymentStatus != nil {
-		if err := s.repo.UpdatePaymentStatus(ctx, input.ID, *input.PaymentStatus); err != nil {
+		if err := s.aplicarTransicaoDePagamento(ctx, input); err != nil {
 			return nil, err
 		}
 	}
@@ -686,4 +695,27 @@ func (s *Service) GetStats(ctx context.Context, storeID string, search string, f
 		return nil, err
 	}
 	return stats, nil
+}
+
+// aplicarTransicaoDePagamento roteia a mudança de status de pagamento para o
+// caso de uso certo.
+//
+// Só 'refunded' e 'paid' são transições de negócio; o resto continua sendo
+// escrita de campo (um carrinho voltando a 'pending' depois de uma falha, por
+// exemplo, não é fato nenhum — nada aconteceu com dinheiro).
+func (s *Service) aplicarTransicaoDePagamento(ctx context.Context, input UpdateOrderInput) error {
+	switch *input.PaymentStatus {
+	case "refunded":
+		if s.manualPayment == nil {
+			return httpx.ErrUnprocessable("serviço de pagamento não configurado")
+		}
+		return s.manualPayment.ConfirmManualRefund(ctx, input.ID, input.StoreID)
+	case "paid":
+		if s.manualPayment == nil {
+			return httpx.ErrUnprocessable("serviço de pagamento não configurado")
+		}
+		return s.manualPayment.ConfirmManualPayment(ctx, input.ID, input.StoreID)
+	default:
+		return s.repo.UpdatePaymentStatus(ctx, input.ID, *input.PaymentStatus)
+	}
 }

@@ -5709,3 +5709,23 @@ func (q *Queries) ListCartsParaSimuladorDePagamento(ctx context.Context, storeID
 	}
 	return items, rows.Err()
 }
+
+const markCartRefunded = `-- name: MarkCartRefunded :one
+UPDATE carts
+SET payment_status = 'refunded', updated_at = now()
+WHERE id = $1 AND payment_status = 'paid'
+RETURNING id, event_id, COALESCE(checkout_id, '') AS checkout_id
+`
+
+type MarkCartRefundedRow struct {
+	ID         pgtype.UUID `json:"id"`
+	EventID    pgtype.UUID `json:"event_id"`
+	CheckoutID string      `json:"checkout_id"`
+}
+
+func (q *Queries) MarkCartRefunded(ctx context.Context, id pgtype.UUID) (MarkCartRefundedRow, error) {
+	row := q.db.QueryRow(ctx, markCartRefunded, id)
+	var i MarkCartRefundedRow
+	err := row.Scan(&i.ID, &i.EventID, &i.CheckoutID)
+	return i, err
+}

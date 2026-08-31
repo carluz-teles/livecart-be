@@ -378,7 +378,14 @@ var baselineRawThrows = map[string]bool{
 	// ramificar em cima.
 	"integration.Service.getBlingOAuthURL#0":                                                true,
 	"integration.Service.getBlingOAuthURL:\"Aplicativo Bling não configurado no servidor\"": true,
-	"integration.Service.handleBlingCallback#0":                                             true,
+	// Estorno manual e a transição de pagamento: config ausente e not-found, as
+	// duas categorias que esta lista já admite cruas. As mensagens são para o
+	// LOJISTA ler na tela, não para código ramificar em cima — quem ramifica usa
+	// os httpx.Code* que as outras recusas do mesmo fluxo carregam.
+	"order.Service.aplicarTransicaoDePagamento:\"serviço de pagamento não configurado\"": true,
+	"payment.Service.ConfirmManualRefund:\"pedido não encontrado\"":                      true,
+
+	"integration.Service.handleBlingCallback#0": true,
 	// #1 é a regra de UM ERP por loja aplicada no callback. A mensagem é montada
 	// com o nome amigável do ERP já conectado, então a chave é posicional. O
 	// banco também a garante (uniq_integrations_store_one_erp, migration 000061);
