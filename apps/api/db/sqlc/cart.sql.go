@@ -4232,6 +4232,9 @@ WHERE p.external_id = $1
   AND p.store_id = $3
   AND (
         c.external_order_id IS NULL OR c.external_order_id = ''
+     OR c.erp_order_status IS NULL
+     OR c.erp_order_status = ''
+     OR c.erp_order_status = 'cancelado'
      OR $4::bool
       )
   AND c.status NOT IN ('expired', 'cancelled')
@@ -4347,7 +4350,7 @@ WITH atual AS (
 ), tomado AS (
     SELECT id, LEAST(GREATEST(stock, 0), $2::int) AS qtd FROM atual
 ), aplicado AS (
-    UPDATE products p SET stock = p.stock - t.qtd
+    UPDATE products p SET stock = p.stock - t.qtd, erp_seq = p.erp_seq + 1
     FROM tomado t WHERE p.id = t.id
     RETURNING 1
 )

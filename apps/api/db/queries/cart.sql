@@ -1429,6 +1429,18 @@ WHERE p.external_id = sqlc.arg(external_product_id)
   AND p.store_id = sqlc.arg(store_id)
   AND (
         c.external_order_id IS NULL OR c.external_order_id = ''
+     -- Pedido CANCELADO não segura nada. Olhar só a EXISTÊNCIA do id foi o
+     -- defeito: em 31/08/2026 o lojista cancelou dois pedidos no Bling, o ERP
+     -- devolveu as peças (saldo_virtual voltou de 3 para 5), os carrinhos
+     -- continuaram vivos — e esta soma devolveu ZERO porque o id ainda estava
+     -- lá. O saldo cru entrou no portão e o contador ficou 2 unidades acima do
+     -- que existe fisicamente.
+     --
+     -- Status desconhecido ou vazio conta como NÃO refletido de propósito: é o
+     -- lado que oferece de menos, e oferecer de menos é recuperável.
+     OR c.erp_order_status IS NULL
+     OR c.erp_order_status = ''
+     OR c.erp_order_status = 'cancelado'
      OR sqlc.arg(conta_com_pedido)::bool
       )
   AND c.status NOT IN ('expired', 'cancelled')
@@ -1561,7 +1573,12 @@ WITH atual AS (
 ), tomado AS (
     SELECT id, LEAST(GREATEST(stock, 0), sqlc.arg(desejado)::int) AS qtd FROM atual
 ), aplicado AS (
-    UPDATE products p SET stock = p.stock - t.qtd
+    -- `erp_seq` sobe porque este É um movimento nosso, e o espelho decide se a
+    -- leitura dele venceu comparando esse contador. Sem isto a retomada era
+    -- INVISÍVEL ao CAS: um saldo lido antes dela era aplicado depois, apagando
+    -- o débito e inflando o portão — a mesma família do 7 unidades medido em
+    -- 31/08/2026 num produto com 5 peças.
+    UPDATE products p SET stock = p.stock - t.qtd, erp_seq = p.erp_seq + 1
     FROM tomado t WHERE p.id = t.id
     RETURNING 1
 )

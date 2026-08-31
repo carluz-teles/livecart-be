@@ -64,6 +64,13 @@ func lojaComProduto(t *testing.T, fonte, externalID string) (string, string, str
 // `pedidoERP` vazio = ainda sem pedido no ERP. `iniciadoEm` carimba
 // erp_op_started_at, que é o que decide a janela de atraso.
 func carrinhoPrometendo(t *testing.T, eventID, productID string, qtd int, pedidoERP string, iniciadoEm *time.Time) {
+	carrinhoPrometendoComSituacao(t, eventID, productID, qtd, pedidoERP, iniciadoEm, "aberto")
+}
+
+func carrinhoPrometendoComSituacao(
+	t *testing.T, eventID, productID string, qtd int, pedidoERP string,
+	iniciadoEm *time.Time, situacao string,
+) string {
 	t.Helper()
 	ctx := context.Background()
 	seedSeq++
@@ -83,6 +90,13 @@ func carrinhoPrometendo(t *testing.T, eventID, productID string, qtd int, pedido
 		 VALUES ($1, $2, $3, 1000, 0)`, cartID, productID, qtd); err != nil {
 		t.Fatalf("seed cart_item: %v", err)
 	}
+	if pedidoERP != "" && situacao != "" {
+		if _, err := testPool.Exec(ctx,
+			`UPDATE carts SET erp_order_status=$2 WHERE id=$1::uuid`, cartID, situacao); err != nil {
+			t.Fatalf("seed erp_order_status: %v", err)
+		}
+	}
+	return cartID
 }
 
 func TestPromessaNaoRefletida(t *testing.T) {

@@ -3550,10 +3550,36 @@ func (s *Service) SyncProductManual(ctx context.Context, input SyncProductInput)
 	// only carries weight (or nothing).
 	s.applyStoreDefaultDimensions(ctx, input.StoreID, detailed)
 
-	// Update the local product. Manual sync always refreshes stock and pulls
-	// dimensions if the ERP returned them (detailed.Shipping non-nil).
-	if err := s.productSyncer.SyncProduct(ctx, input.StoreID, externalSource, *detailed, false); err != nil {
+	// O SALDO NÃO PASSA POR AQUI — `true` é "cuide de nome, preço e dimensões;
+	// do estoque cuido eu".
+	//
+	// Este caminho gravava o saldo do ERP CRU, sem compensar as unidades presas
+	// em carrinho e sem a trava otimista do erp_seq. Em 31/08/2026 ele repôs um
+	// saldo de 5 vinte e cinco segundos depois de o espelho ter feito a mesma
+	// coisa, e as duas escritas juntas apagaram três débitos que só existiam no
+	// razão relativo. O lojista clicou "Sincronizar" três vezes tentando
+	// consertar o número — e cada clique reinstalava o defeito.
+	if err := s.productSyncer.SyncProduct(ctx, input.StoreID, externalSource, *detailed, true); err != nil {
 		return nil, fmt.Errorf("syncing product: %w", err)
+	}
+
+	// E o saldo entra pela MESMA porta do espelho: compensado e sob a trava.
+	if detailed.StockKnown {
+		localID, seenSeq, seqErr := s.repo.ProductSeqByExternalID(ctx, input.StoreID, externalSource, externalID)
+		switch {
+		case seqErr != nil || localID == "":
+			logger.From(ctx, s.logger).Warn("manual sync could not read the product seq; stock left untouched",
+				zap.String("external_id", externalID), zap.Error(seqErr))
+		default:
+			portao := s.PortaoAPartirDoSaldoDoERP(ctx, integration, externalID, detailed.Stock)
+			if portao < 0 {
+				break
+			}
+			if _, err := s.repo.ApplyERPStockMirror(ctx, localID, portao, seenSeq); err != nil {
+				logger.From(ctx, s.logger).Warn("manual sync could not apply the stock gate",
+					zap.String("external_id", externalID), zap.Error(err))
+			}
+		}
 	}
 
 	logger.From(ctx, s.logger).Info("product synced manually",
@@ -3720,6 +3746,54 @@ func (s *Service) processProductWebhook(ctx context.Context, storeID, provider, 
 	return false, lastErr
 }
 
+// PortaoAPartirDoSaldoDoERP é a ÚNICA conta que transforma um saldo lido do ERP
+// no valor do portão de admissão. Devolve -1 quando não dá para compensar, e
+// nesse caso o chamador NÃO pode escrever.
+//
+// A invariante que ela existe para manter:
+//
+//	products.stock == saldo do ERP − unidades vivas que esse saldo ainda não desconta
+//
+// É única porque a pluralidade era o defeito. Havia TRÊS escritas absolutas
+// sobre products.stock com defesas diferentes — o espelho do webhook (com esta
+// compensação), o botão "Sincronizar" e a edição do produto (sem nenhuma) — e o
+// contador da live é um razão RELATIVO: cada comentário debita, cada
+// cancelamento credita. Uma escrita absoluta apaga em silêncio os débitos
+// pendentes, e o crédito que depois solta aquelas mesmas unidades soma sobre a
+// base nova assim mesmo. O portão ganha exatamente o número de unidades que
+// estavam presas em carrinho no instante da escrita.
+//
+// Medido em staging em 31/08/2026, produto 16698953100:
+//
+//	5 → −1 = 4 → +2 = 6 → −1 −1 = 4 → +3 = 7      com 5 peças no Bling
+//
+// e o 16698952209 chegou a OITO unidades ofertadas de cinco físicas.
+func (s *Service) PortaoAPartirDoSaldoDoERP(
+	ctx context.Context, integration *IntegrationRow, externalProductID string, saldoERP int,
+) int {
+	modo := erp.ModoDeReservaDaIntegracao(integration.Provider, integration.Metadata)
+
+	prometido, err := s.repo.SumPromisedNotYetReflected(
+		ctx, integration.StoreID, integration.Provider, externalProductID,
+		modo != erp.ReservaNativaDoERP,
+	)
+	if err != nil {
+		logger.From(ctx, s.logger).Warn("could not read promised units; the local counter stays untouched",
+			zap.String("external_product_id", externalProductID), zap.Error(err))
+		return -1
+	}
+	portao := erpwrite.Admissivel(saldoERP, prometido)
+	if prometido > 0 {
+		logger.From(ctx, s.logger).Info("stock mirror discounted units the ERP balance does not reflect",
+			zap.String("external_product_id", externalProductID),
+			zap.String("modo_reserva", string(modo)),
+			zap.Int("erp_available", saldoERP),
+			zap.Int("promised_not_reflected", prometido),
+			zap.Int("admissible", portao))
+	}
+	return portao
+}
+
 func (s *Service) processProductSync(ctx context.Context, integration *IntegrationRow, externalProductID string) (stockMirrorOutcome, error) {
 	provider, err := s.createProviderFromRow(ctx, integration)
 	if err != nil {
@@ -3807,22 +3881,11 @@ func (s *Service) processProductSync(ctx context.Context, integration *Integrati
 		//
 		// Confundir os dois desconta em dobro no modo nativo, e foi o que
 		// aconteceu: o Bling dizia 3 disponíveis e o LiveCart gravava 1.
-		modo := erp.ModoDeReservaDaIntegracao(integration.Provider, integration.Metadata)
-		saldoParaOPortao := detailed.Stock
-		if prometido, voErr := s.repo.SumPromisedNotYetReflected(
-			ctx, integration.StoreID, integration.Provider, externalProductID,
-			modo != erp.ReservaNativaDoERP,
-		); voErr != nil {
-			logger.From(ctx, s.logger).Warn("could not read promised-but-unsent units; mirroring the raw ERP balance",
-				zap.String("external_product_id", externalProductID), zap.Error(voErr))
-		} else if prometido > 0 {
-			saldoParaOPortao = erpwrite.Admissivel(detailed.Stock, prometido)
-			logger.From(ctx, s.logger).Info("stock mirror discounted units the ERP balance does not reflect",
-				zap.String("external_product_id", externalProductID),
-				zap.String("modo_reserva", string(modo)),
-				zap.Int("erp_available", detailed.Stock),
-				zap.Int("promised_not_reflected", prometido),
-				zap.Int("admissible", saldoParaOPortao))
+		saldoParaOPortao := s.PortaoAPartirDoSaldoDoERP(ctx, integration, externalProductID, detailed.Stock)
+		if saldoParaOPortao < 0 {
+			// Não deu para compensar. Preservar o contador é o lado seguro;
+			// escrever o saldo cru aqui é justamente o que inflou o portão.
+			return stockMirrorStale, nil
 		}
 
 		applied, applyErr := s.repo.ApplyERPStockMirror(ctx, localProductID, saldoParaOPortao, seenSeq)
