@@ -664,3 +664,130 @@ func TestAsDuasTabelasConcordam(t *testing.T) {
 		}
 	}
 }
+
+// ─── AS PARCELAS TÊM DE BATER COM O TOTAL ───────────────────────────────────
+//
+// O defeito que travava o pedido no PRIMEIRO item: o documento vem do GET com
+// as parcelas do total ANTIGO, trocar `itens` muda o total, e o Bling recusa a
+// venda inteira com code 22 — "O somatório do valor das parcelas difere do
+// total da venda". Todo segundo produto da compradora morria em HTTP 400.
+//
+// A conta foi MEDIDA contra a conta real em 31/08/2026, um componente por vez.
+
+func TestTotalDaVendaReproduzAContaDoBling(t *testing.T) {
+	itens := []blingItemPedido{
+		{Quantidade: 1, Valor: 10},
+		{Quantidade: 1, Valor: 20},
+	}
+	casos := []struct {
+		nome  string
+		cru   map[string]any
+		quero int64 // centavos
+	}{
+		{"só itens", map[string]any{}, 3000},
+		{"+ outrasDespesas", map[string]any{"outrasDespesas": 5.0}, 3500},
+		{"+ frete", map[string]any{"transporte": map[string]any{"frete": 7.0}}, 3700},
+		{"− desconto em REAL", map[string]any{
+			"desconto": map[string]any{"valor": 10.0, "unidade": "REAL"}}, 2000},
+		{
+			// MEDIDO: 10% sobre 30 = 3, e o frete NÃO entra na base.
+			// O Bling aceitou 34 (30−3+7) e recusou 33,30 (37−3,70).
+			nome: "− desconto PERCENTUAL não incide sobre o frete",
+			cru: map[string]any{
+				"desconto":   map[string]any{"valor": 10.0, "unidade": "PERCENTUAL"},
+				"transporte": map[string]any{"frete": 7.0},
+			},
+			quero: 3400,
+		},
+		{"desconto maior que tudo não fica negativo", map[string]any{
+			"desconto": map[string]any{"valor": 999.0, "unidade": "REAL"}}, 0},
+	}
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			if got := totalDaVenda(c.cru, itens); got != c.quero {
+				t.Errorf("total = %d centavos, queria %d", got, c.quero)
+			}
+		})
+	}
+}
+
+func TestRebasearParcelasPreservaAProporcaoEFechaOTotal(t *testing.T) {
+	casos := []struct {
+		nome   string
+		antes  []float64
+		total  int64
+		depois []float64
+	}{
+		{"parcela única vira o total", []float64{10}, 3000, []float64{30}},
+		{"duas parcelas mantêm a proporção", []float64{18, 12}, 6000, []float64{36, 24}},
+		{"a sobra do arredondamento vai na última", []float64{10, 10, 10}, 10000, []float64{33.33, 33.33, 33.34}},
+		{"soma zero joga tudo na primeira", []float64{0, 0}, 5000, []float64{50, 0}},
+	}
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			parcelas := make([]any, 0, len(c.antes))
+			for _, v := range c.antes {
+				parcelas = append(parcelas, map[string]any{"valor": v, "dataVencimento": "2026-09-07"})
+			}
+			cru := map[string]any{"parcelas": parcelas}
+			rebasearParcelas(cru, c.total)
+
+			var soma int64
+			for i, pa := range parcelas {
+				m := pa.(map[string]any)
+				got := m["valor"].(float64)
+				soma += centavos(got)
+				if centavos(got) != centavos(c.depois[i]) {
+					t.Errorf("parcela %d = %.2f, queria %.2f", i, got, c.depois[i])
+				}
+				// Os outros campos da parcela têm de sobreviver: o vencimento e
+				// a forma de pagamento são do lojista.
+				if m["dataVencimento"] != "2026-09-07" {
+					t.Errorf("parcela %d perdeu o vencimento", i)
+				}
+			}
+			if soma != c.total {
+				t.Errorf("a soma deu %d centavos e o total é %d — é exatamente a "+
+					"diferença que o Bling recusa com code 22", soma, c.total)
+			}
+		})
+	}
+}
+
+// O id da parcela apodrece como o do item: um PUT anterior pode ter trocado a
+// lista, e o id ecoado de um GET velho já não existe. Medido: HTTP 400,
+// "O id (19493753062) da parcela é inválido".
+func TestLimparReadOnlyTiraOIdDaParcela(t *testing.T) {
+	cru := map[string]any{
+		"parcelas": []any{
+			map[string]any{"id": 19493753062, "valor": 30.0, "dataVencimento": "2026-09-07"},
+		},
+		"itens": []any{map[string]any{"id": 123, "quantidade": 1.0}},
+	}
+	limparReadOnly(cru)
+
+	p := cru["parcelas"].([]any)[0].(map[string]any)
+	if _, tem := p["id"]; tem {
+		t.Error("o id da parcela sobreviveu — o Bling recusa o PUT quando ele está obsoleto")
+	}
+	if p["valor"] != 30.0 || p["dataVencimento"] != "2026-09-07" {
+		t.Error("limpar o id não pode levar o resto da parcela junto")
+	}
+}
+
+// O erro do Bling tem de dizer QUAL campo. Sem isso, um PUT recusado dizia só
+// "A venda não pode ser salva" — idêntico para uma dúzia de causas diferentes,
+// e foi preciso reproduzir na conta real com curl para descobrir a verdadeira.
+func TestErroDoBlingCarregaOCampoQueFalhou(t *testing.T) {
+	corpo := []byte(`{"error":{"type":"VALIDATION_ERROR",
+	  "description":"A venda não pode ser salva, pois ocorreram problemas em sua validação.",
+	  "fields":[{"code":22,"msg":"O somatório do valor das parcelas difere do total da venda",
+	             "element":"parcelas","namespace":"VENDAS"}]}}`)
+
+	msg := blingErro(corpo)
+	for _, querido := range []string{"parcelas", "somatório", "code 22"} {
+		if !strings.Contains(msg, querido) {
+			t.Errorf("a mensagem não traz %q: %s", querido, msg)
+		}
+	}
+}

@@ -700,18 +700,46 @@ func (b *Bling) get(ctx context.Context, caminho string, q url.Values, destino a
 
 // blingErro extrai a mensagem do envelope de erro do Bling, que é aninhado:
 // {"error":{"type":"...","message":"...","description":"..."}}
+// blingErro resume o corpo de erro do Bling.
+//
+// `fields[]` é o que importa e era JOGADO FORA. Sem ele, um PUT recusado dizia
+// apenas "A venda não pode ser salva, pois ocorreram problemas em sua
+// validação" — verdadeiro, inútil, e idêntico para uma dúzia de causas
+// diferentes. Foi preciso reproduzir o caso na conta real e ler o corpo cru com
+// curl para descobrir que o motivo era "O somatório do valor das parcelas
+// difere do total da venda". Esse diagnóstico agora sai no log.
 func blingErro(corpo []byte) string {
 	var e struct {
 		Error struct {
 			Type        string `json:"type"`
 			Description string `json:"description"`
+			Fields      []struct {
+				Msg     string `json:"msg"`
+				Element string `json:"element"`
+				Code    int    `json:"code"`
+			} `json:"fields"`
 		} `json:"error"`
 	}
 	if json.Unmarshal(corpo, &e) == nil && e.Error.Type != "" {
+		out := e.Error.Type
 		if e.Error.Description != "" && e.Error.Description != e.Error.Type {
-			return e.Error.Type + ": " + e.Error.Description
+			out += ": " + e.Error.Description
 		}
-		return e.Error.Type
+		if len(e.Error.Fields) > 0 {
+			detalhes := make([]string, 0, len(e.Error.Fields))
+			for _, f := range e.Error.Fields {
+				d := f.Msg
+				if f.Element != "" {
+					d = f.Element + ": " + d
+				}
+				if f.Code != 0 {
+					d = fmt.Sprintf("%s (code %d)", d, f.Code)
+				}
+				detalhes = append(detalhes, d)
+			}
+			out += " [" + strings.Join(detalhes, "; ") + "]"
+		}
+		return out
 	}
 	s := strings.TrimSpace(string(corpo))
 	if len(s) > 300 {

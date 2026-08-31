@@ -432,20 +432,24 @@ var baselineRawThrows = map[string]bool{
 	"integration.Service.GetSocialProvider:\"failed to cast to social provider\"":                                           true,
 	"integration.Service.GetSocialProvider:\"integration is not a social provider\"":                                        true,
 	"integration.Service.HandleOAuthCallback#0":                                                                             true,
-	"integration.Service.ImportERPProduct:\"nenhuma das variantIds informadas existe no produto Tiny\"":                     true,
 	"integration.Service.ImportERPProduct:\"product group syncer not configured\"":                                          true,
 	"integration.Service.ImportERPProduct:\"product syncer not configured\"":                                                true,
 	"integration.Service.ImportERPProduct:\"produto já importado neste catálogo\"":                                          true,
-	"integration.Service.ImportERPProduct:\"uma ou mais variantIds informadas não existem no produto Tiny\"":                true,
-	"integration.Service.ImportERPProduct:\"variantIds informado mas o produto não possui variações\"":                      true,
-	"integration.Service.RunPagarmeWebhookLiveTest#0":                                                                       true,
-	"integration.Service.RunPagarmeWebhookLiveTest:\"URL de webhook indisponível — verifique a configuração do servidor\"":  true,
-	"integration.Service.RunPagarmeWebhookLiveTest:\"integration is not Pagar.me\"":                                         true,
-	"integration.Service.SearchProducts:\"Produto encontrado, mas sem estoque disponível no momento\"":                      true,
-	"integration.Service.SearchProducts:\"Produto não encontrado no ERP\"":                                                  true,
-	"integration.Service.SendWhatsAppTemplate:\"nenhum template WhatsApp aprovado configurado para esta loja\"":             true,
-	"integration.Service.SyncProductManual:\"integração não corresponde à origem do produto\"":                              true,
-	"integration.Service.SyncProductManual:\"product syncer not configured\"":                                               true,
+	// #0 e #1 são as duas recusas de variantIds. Deixaram de ter chave por
+	// mensagem porque a mensagem passou a nomear o ERP CONECTADO — antes elas
+	// diziam "produto Tiny" numa loja Bling. Continuam sendo validação de
+	// entrada, a categoria que esta lista admite crua.
+	"integration.Service.ImportERPProduct#0": true,
+	"integration.Service.ImportERPProduct#1": true,
+	"integration.Service.ImportERPProduct:\"variantIds informado mas o produto não possui variações\"":                     true,
+	"integration.Service.RunPagarmeWebhookLiveTest#0":                                                                      true,
+	"integration.Service.RunPagarmeWebhookLiveTest:\"URL de webhook indisponível — verifique a configuração do servidor\"": true,
+	"integration.Service.RunPagarmeWebhookLiveTest:\"integration is not Pagar.me\"":                                        true,
+	"integration.Service.SearchProducts:\"Produto encontrado, mas sem estoque disponível no momento\"":                     true,
+	"integration.Service.SearchProducts:\"Produto não encontrado no ERP\"":                                                 true,
+	"integration.Service.SendWhatsAppTemplate:\"nenhum template WhatsApp aprovado configurado para esta loja\"":            true,
+	"integration.Service.SyncProductManual:\"integração não corresponde à origem do produto\"":                             true,
+	"integration.Service.SyncProductManual:\"product syncer not configured\"":                                              true,
 	// Guarda de configuração: o enfileirador da releitura em massa não foi
 	// injetado (Redis/eventos ausentes). Mesma natureza dos "not configured"
 	// vizinhos — o lojista não tem o que fazer com um código aqui.

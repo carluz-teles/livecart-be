@@ -3446,10 +3446,10 @@ func (s *Service) ImportERPProduct(ctx context.Context, input ImportERPProductIn
 			}
 		}
 		if len(filtered) == 0 {
-			return nil, httpx.ErrUnprocessable("nenhuma das variantIds informadas existe no produto Tiny")
+			return nil, httpx.ErrUnprocessable("nenhuma das variantIds informadas existe no produto do " + nomeAmigavelDoERP(integration.Provider))
 		}
 		if len(filtered) != len(input.VariantIDs) {
-			return nil, httpx.ErrUnprocessable("uma ou mais variantIds informadas não existem no produto Tiny")
+			return nil, httpx.ErrUnprocessable("uma ou mais variantIds informadas não existem no produto do " + nomeAmigavelDoERP(integration.Provider))
 		}
 		detailed.Variants = filtered
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -292,6 +293,11 @@ func (b *Bling) UpdateOrderItems(ctx context.Context, orderID string, itens []pr
 		novos = append(novos, m)
 	}
 	cru["itens"] = novos
+
+	// A grade nova muda o TOTAL, e o Bling valida que a soma das parcelas bate
+	// com ele. Sem isto o pedido trava com o primeiro item para sempre: todo
+	// PUT seguinte morre em 400 e nenhum segundo produto entra.
+	rebasearParcelas(cru, totalDaVenda(cru, blingItens(itens)))
 	limparReadOnly(cru)
 
 	return b.escrever(ctx, http.MethodPut, "/pedidos/vendas/"+url.PathEscape(orderID), cru, nil)
@@ -315,6 +321,127 @@ func limparReadOnly(cru map[string]any) {
 	}
 	if c, ok := cru["contato"].(map[string]any); ok {
 		delete(c, "nome")
+	}
+	// O id da parcela apodrece pelo mesmo motivo que o do item: um PUT anterior
+	// pode ter substituído a lista, e o id ecoado de um GET antigo já não
+	// existe. MEDIDO em 31/08/2026 — "O id (19493753062) da parcela é inválido",
+	// HTTP 400, com o pedido perfeitamente válido no resto.
+	if parcelas, ok := cru["parcelas"].([]any); ok {
+		for _, pa := range parcelas {
+			if m, ok := pa.(map[string]any); ok {
+				delete(m, "id")
+			}
+		}
+	}
+}
+
+// numeroDoCru lê um número do documento cru. O JSON do Bling traz dinheiro como
+// number, e o decode genérico entrega float64.
+func numeroDoCru(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case json.Number:
+		f, _ := n.Float64()
+		return f
+	}
+	return 0
+}
+
+func centavos(v float64) int64 { return int64(math.Round(v * 100)) }
+
+// totalDaVenda reproduz a conta que o Bling faz para validar as parcelas.
+//
+// MEDIDA contra a conta real em 31/08/2026, um componente por vez:
+//
+//	subtotal dos itens ....... Σ quantidade × valor
+//	− desconto ............... REAL: o valor; PERCENTUAL: % SÓ DO SUBTOTAL
+//	+ outrasDespesas
+//	+ transporte.frete
+//
+// O desconto percentual NÃO incide sobre o frete: com itens=30, frete=7 e 10%,
+// o Bling aceitou parcelas=34 (30−3+7) e recusou 33,30 (37−3,70).
+func totalDaVenda(cru map[string]any, itens []blingItemPedido) int64 {
+	var subtotal float64
+	for _, it := range itens {
+		subtotal += it.Quantidade * it.Valor
+	}
+	total := centavos(subtotal)
+
+	if d, ok := cru["desconto"].(map[string]any); ok {
+		v := numeroDoCru(d["valor"])
+		if unidade, _ := d["unidade"].(string); strings.EqualFold(unidade, "PERCENTUAL") {
+			total -= centavos(subtotal * v / 100)
+		} else {
+			total -= centavos(v)
+		}
+	}
+	total += centavos(numeroDoCru(cru["outrasDespesas"]))
+	if t, ok := cru["transporte"].(map[string]any); ok {
+		total += centavos(numeroDoCru(t["frete"]))
+	}
+	if total < 0 {
+		return 0
+	}
+	return total
+}
+
+// rebasearParcelas faz a soma das parcelas bater com o novo total.
+//
+// É a correção do defeito que impedia o SEGUNDO item de entrar no pedido: o
+// documento vem do GET com as parcelas do total ANTIGO, trocar `itens` muda o
+// total, e o Bling recusa a venda inteira com
+//
+//	code 22 · "O somatório do valor das parcelas difere do total da venda"
+//
+// Mantém a quantidade de parcelas e a proporção entre elas — o lojista pode ter
+// parcelado em três, e reduzir a uma seria decidir por ele. A sobra de
+// arredondamento vai na ÚLTIMA, que é como todo parcelamento fecha.
+func rebasearParcelas(cru map[string]any, totalCentavos int64) {
+	parcelas, _ := cru["parcelas"].([]any)
+
+	// Sem parcela nenhuma não há o que rebasear: o POST exige `parcelas[]`, mas
+	// um pedido criado fora do LiveCart pode não ter.
+	if len(parcelas) == 0 {
+		return
+	}
+
+	var somaAntiga int64
+	for _, pa := range parcelas {
+		if m, ok := pa.(map[string]any); ok {
+			somaAntiga += centavos(numeroDoCru(m["valor"]))
+		}
+	}
+
+	// Proporção indefinida (soma zero): tudo na primeira.
+	if somaAntiga <= 0 {
+		if m, ok := parcelas[0].(map[string]any); ok {
+			m["valor"] = float64(totalCentavos) / 100
+		}
+		for _, pa := range parcelas[1:] {
+			if m, ok := pa.(map[string]any); ok {
+				m["valor"] = 0.0
+			}
+		}
+		return
+	}
+
+	var distribuido int64
+	for i, pa := range parcelas {
+		m, ok := pa.(map[string]any)
+		if !ok {
+			continue
+		}
+		var v int64
+		if i == len(parcelas)-1 {
+			v = totalCentavos - distribuido // a última absorve a sobra
+		} else {
+			v = centavos(numeroDoCru(m["valor"])) * totalCentavos / somaAntiga
+			distribuido += v
+		}
+		m["valor"] = float64(v) / 100
 	}
 }
 
